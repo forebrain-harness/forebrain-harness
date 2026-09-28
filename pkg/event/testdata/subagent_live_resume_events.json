@@ -1,0 +1,98 @@
+[
+  {
+    "id": "fixture-spawn-1",
+    "sequence": 41,
+    "schema_version": 1,
+    "run_id": "child-run-1",
+    "session_id": "conversation-1",
+    "type": "subagent_spawned",
+    "created_at": "2026-09-06T08:00:00Z",
+    "payload": {
+      "agent_id": "agent-1",
+      "agent_type": "explore",
+      "task_id": "task-1",
+      "task": "inspect replay",
+      "worker_session_id": "worker-1",
+      "parent_run_id": "parent-run-1",
+      "parent_tool_call_id": "fanout-call-1",
+      "task_index": 2,
+      "execution_id": "execution-1",
+      "future_field": "ignored by older projectors"
+    }
+  },
+  {
+    "id": "fixture-tool-1",
+    "sequence": 42,
+    "schema_version": 1,
+    "run_id": "child-run-1",
+    "session_id": "conversation-1",
+    "type": "tool_call_completed",
+    "created_at": "2026-09-06T08:00:01Z",
+    "payload": {
+      "agent_id": "agent-1",
+      "step_id": "tool-call-1",
+      "tool_name": "read_file",
+      "display_body": "source body",
+      "duration_ms": 18,
+      "tool_meta": {
+        "agent_id": "agent-1",
+        "status": "completed",
+        "input": { "file_path": "/repo/main.go" }
+      }
+    }
+  },
+  {
+    "id": "fixture-approval-request-1",
+    "sequence": 43,
+    "schema_version": 1,
+    "run_id": "child-run-1",
+    "session_id": "conversation-1",
+    "type": "approval_requested",
+    "created_at": "2026-09-06T08:00:02Z",
+    "payload": {
+      "agent_id": "agent-1",
+      "subagent_type": "explore",
+      "action_id": "action-1",
+      "action_kind": "shell",
+      "message": "run tests"
+    }
+  },
+  {
+    "id": "fixture-approval-resolved-1",
+    "sequence": 44,
+    "schema_version": 1,
+    "run_id": "child-run-1",
+    "session_id": "conversation-1",
+    "type": "approval_resolved",
+    "created_at": "2026-09-06T08:00:03Z",
+    "payload": {
+      "agent_id": "agent-1",
+      "subagent_type": "explore",
+      "action_id": "action-1",
+      "action_kind": "shell",
+      "decision": "approved",
+      "reason": "approved for this run"
+    }
+  },
+  {
+    "id": "fixture-end-1",
+    "sequence": 45,
+    "schema_version": 1,
+    "run_id": "child-run-1",
+    "session_id": "conversation-1",
+    "type": "subagent_ended",
+    "created_at": "2026-09-06T08:00:04Z",
+    "payload": {
+      "agent_id": "agent-1",
+      "agent_type": "explore",
+      "task_id": "task-1",
+      "status": "ok",
+      "output": "all checks passed",
+      "worker_session_id": "worker-1",
+      "parent_run_id": "parent-run-1",
+      "parent_tool_call_id": "fanout-call-1",
+      "task_index": 2,
+      "execution_id": "execution-1"
+    }
+  }
+]

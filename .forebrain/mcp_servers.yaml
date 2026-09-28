@@ -1,0 +1,10 @@
+mcp_servers:
+- name: caveman-shrink
+  transport: stdio
+  command: npx
+  args:
+  - -y
+  - caveman-shrink
+  - codegraph
+  - serve
+  - --mcp

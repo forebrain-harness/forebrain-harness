@@ -1,0 +1,4 @@
+[filters.vale]
+description = "Drop vale summary-table box-drawing rows; keep violations and the summary count."
+version = "2"
+match_command = '^vale\b'

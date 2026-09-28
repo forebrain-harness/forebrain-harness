@@ -1,0 +1,201 @@
+[filters.unity]
+description = "Drop Unity Editor batch-mode startup and import profiling noise; keep diagnostics, tests, and results."
+version = "3"
+match_command = '^([Uu]nity(\.exe)?|unity-editor)\b'
+match_output_select = [
+  '(?m)^BatchMode: 1, IsHumanControllingUs: 0,',
+  "(?m)^Built from '.+' branch; Version is '.+'; Using compiler version ",
+  '(?m)^Initialize engine version: \d',
+  '(?m)^Exiting batchmode (successfully|due to failure)',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Using pre-set license$',
+  '^\[UnityMemory\] Configuration Parameters',
+  '^\s+"memorysetup-[^"]+"$',
+  '^=+$',
+  '^Received Import Request\.$',
+  '^  Time since last request: [\d.]+ seconds\.$',
+  '^Number of updated asset objects reloaded before import = \d+Number of asset objects unloaded after import = \d+$',
+  '^Refreshing native plugins compatible for Editor in [\d.]+ ms, found \d+ plugins\.$',
+  '^Preloading \d+ native plugins for Editor in [\d.]+ ms\.$',
+  '^Player connection \[\d+\]\s+Target information:$',
+  '^Player connection \[\d+\]\s+\* ".+"\s*$',
+  '^Player connection \[\d+\] Host joined (alternative )?multi-casting on \[.+\]\.\.\.$',
+  '^Unloading \d+ Unused Serialized files \(Serialized files now loaded: \d+\)$',
+  '^Unloading \d+ unused Assets / \([\d.]+ [KMGT]?B\)\. Loaded Objects now: \d+\.$',
+  '^Memory consumption went from [\d.]+ [KMGT]?B to [\d.]+ [KMGT]?B\.$',
+  '^Total: [\d.]+ ms \(FindLiveObjects: [\d.]+ ms CreateObjectMapping: [\d.]+ ms MarkObjects: [\d.]+ ms\s+DeleteObjects: [\d.]+ ms\)$',
+  '^- Loaded All Assemblies, in\s+[\d.]+ seconds$',
+  '^- Finished resetting the current domain, in\s+[\d.]+ seconds$',
+  '^\s+(BeginReloadAssembly|ExecutionOrderSort2?|DisableScriptedObjects|BackupInstance|ReleaseScriptingObjects|CreateAndSetChildDomain|RebuildCommonClasses|RebuildNativeTypeToScriptingClass|initialDomainReloadingComplete|LoadAllAssembliesAndSetupDomain|LoadAssemblies|RebuildTransferFunctionScriptingTraits|AnalyzeDomain|TypeCache\.Refresh|TypeCache\.ScanAssembly|BuildScriptInfoCaches|ResolveRequiredComponents|FinalizeReload|ReleaseScriptCaches|RebuildScriptCaches|SetupLoadedEditorAssemblies|LogAssemblyErrors|InitializePlatformSupportModulesInManaged|SetLoadedEditorAssemblies|BeforeProcessingInitializeOnLoad|ProcessInitializeOnLoadAttributes|ProcessInitializeOnLoadMethodAttributes|AfterProcessingInitializeOnLoad|EditorAssembliesLoaded|AwakeInstancesAfterBackupRestoration) \(\d+ms\)$',
+]
+
+[[tests.unity]]
+name = "drops startup and import metadata but keeps the operation and result"
+input = """
+Using pre-set license
+Built from '6000.0/staging' branch; Version is '6000.0.26f1 (ccb7c73d2c02) revision 13416391'; Using compiler version '193933523'; Build Type 'Release'
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+
+[UnityMemory] Configuration Parameters - Can be set up in boot.config
+    "memorysetup-main-allocator-block-size=16777216"
+    "memorysetup-temp-allocator-size-main=16777216"
+Refreshing native plugins compatible for Editor in 3.05 ms, found 4 plugins.
+Preloading 0 native plugins for Editor in 0.00 ms.
+Player connection [33336]  Target information:
+Player connection [33336]  * "[IP] 192.0.2.1 [Port] 0 [ProjectName] Editor"
+Player connection [33336] Host joined multi-casting on [225.0.0.222:54997]...
+Player connection [33336] Host joined alternative multi-casting on [225.0.0.222:34997]...
+Player connection [33336] Error: failed to connect to player
+Unloading 220 Unused Serialized files (Serialized files now loaded: 0)
+Unloading 6585 unused Assets / (4.8 MB). Loaded Objects now: 7383.
+Memory consumption went from 275.1 MB to 270.3 MB.
+Total: 9.494800 ms (FindLiveObjects: 1.003600 ms CreateObjectMapping: 0.891100 ms MarkObjects: 5.040000 ms  DeleteObjects: 2.559200 ms)
+========================================================================
+Received Import Request.
+  Time since last request: 0.000014 seconds.
+  path: Assets/Textures/Hero.png
+  artifactKey: Guid(2634b0c913a9a4431a8702825a79ca31) Importer(815301076,1909f56bfc062723c751e8b465ee728b)
+Start importing Assets/Textures/Hero.png using Guid(2634b0c913a9a4431a8702825a79ca31) -> (artifact id: '4fc93fe3858690dbc4d3a1a83b8b4453') in 0.0723426 seconds
+Number of updated asset objects reloaded before import = 0Number of asset objects unloaded after import = 3
+Exiting batchmode successfully now!"""
+expected = """
+Built from '6000.0/staging' branch; Version is '6000.0.26f1 (ccb7c73d2c02) revision 13416391'; Using compiler version '193933523'; Build Type 'Release'
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Player connection [33336] Error: failed to connect to player
+  path: Assets/Textures/Hero.png
+  artifactKey: Guid(2634b0c913a9a4431a8702825a79ca31) Importer(815301076,1909f56bfc062723c751e8b465ee728b)
+Start importing Assets/Textures/Hero.png using Guid(2634b0c913a9a4431a8702825a79ca31) -> (artifact id: '4fc93fe3858690dbc4d3a1a83b8b4453') in 0.0723426 seconds
+Exiting batchmode successfully now!"""
+
+[[tests.unity]]
+name = "drops domain reload detail but keeps the total and lifecycle"
+input = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Begin MonoManager ReloadAssembly
+- Loaded All Assemblies, in  0.358 seconds
+Mono: successfully reloaded assembly
+- Finished resetting the current domain, in  0.560 seconds
+Domain Reload Profiling: 914ms
+	BeginReloadAssembly (123ms)
+		ExecutionOrderSort (0ms)
+		LoadAssemblies (119ms)
+			TypeCache.Refresh (137ms)
+				TypeCache.ScanAssembly (126ms)
+	FinalizeReload (560ms)
+		SetupLoadedEditorAssemblies (519ms)
+			LogAssemblyErrors (0ms)
+			ProcessInitializeOnLoadMethodAttributes (52ms)
+		AwakeInstancesAfterBackupRestoration (0ms)
+Worker process is ready to serve import requests"""
+expected = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Begin MonoManager ReloadAssembly
+Mono: successfully reloaded assembly
+Domain Reload Profiling: 914ms
+Worker process is ready to serve import requests"""
+
+[[tests.unity]]
+name = "preserves import GUID artifact ID importer path and duration"
+input = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Received Import Request.
+  path: Packages/com.unity.2d/Editor/Icon.png
+  artifactKey: Guid(2634b0c913a9a4431a8702825a79ca31) Importer(815301076,1909f56bfc062723c751e8b465ee728b)
+Start importing Packages/com.unity.2d/Editor/Icon.png using Guid(2634b0c913a9a4431a8702825a79ca31) Importer(815301076,1909f56bfc062723c751e8b465ee728b) (PreviewImporter) -> (artifact id: '4fc93fe3858690dbc4d3a1a83b8b4453') in 0.0723426 seconds
+Number of updated asset objects reloaded before import = 0Number of asset objects unloaded after import = 3"""
+expected = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+  path: Packages/com.unity.2d/Editor/Icon.png
+  artifactKey: Guid(2634b0c913a9a4431a8702825a79ca31) Importer(815301076,1909f56bfc062723c751e8b465ee728b)
+Start importing Packages/com.unity.2d/Editor/Icon.png using Guid(2634b0c913a9a4431a8702825a79ca31) Importer(815301076,1909f56bfc062723c751e8b465ee728b) (PreviewImporter) -> (artifact id: '4fc93fe3858690dbc4d3a1a83b8b4453') in 0.0723426 seconds"""
+
+[[tests.unity]]
+name = "preserves compiler errors exceptions stack traces and failed exit"
+input = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Assets/Scripts/Player.cs(42,13): error CS0103: The name 'missing' does not exist in the current context
+NullReferenceException: Object reference not set to an instance of an object
+PlayerController.Start () (at Assets/Scripts/PlayerController.cs:18)
+UnityEngine.Debug:LogException(Exception)
+Exiting batchmode due to failure: Scripts have compiler errors."""
+expected = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Assets/Scripts/Player.cs(42,13): error CS0103: The name 'missing' does not exist in the current context
+NullReferenceException: Object reference not set to an instance of an object
+PlayerController.Start () (at Assets/Scripts/PlayerController.cs:18)
+UnityEngine.Debug:LogException(Exception)
+Exiting batchmode due to failure: Scripts have compiler errors."""
+
+[[tests.unity]]
+name = "preserves test failure and summary"
+input = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Starting test run for EditMode
+Test PlayerTests.Jump failed:
+  Expected: 2.0f
+  But was:  1.0f
+Test run finished. 9 tests passed, 1 failed, 0 skipped."""
+expected = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Starting test run for EditMode
+Test PlayerTests.Jump failed:
+  Expected: 2.0f
+  But was:  1.0f
+Test run finished. 9 tests passed, 1 failed, 0 skipped."""
+
+[[tests.unity]]
+name = "preserves warnings licensing and package manager failures"
+input = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+[Licensing::Module] Error: License is not active (com.unity.editor.headless).
+[Package Manager] Error: Failed to resolve packages: com.acme.missing@1.0.0
+Assets/Scripts/Legacy.cs(7,9): warning CS0618: 'OldApi' is obsolete
+Cancelling DisplayDialog: Failed to activate/update license
+Exiting batchmode due to failure: Package resolution failed."""
+expected = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+[Licensing::Module] Error: License is not active (com.unity.editor.headless).
+[Package Manager] Error: Failed to resolve packages: com.acme.missing@1.0.0
+Assets/Scripts/Legacy.cs(7,9): warning CS0618: 'OldApi' is obsolete
+Cancelling DisplayDialog: Failed to activate/update license
+Exiting batchmode due to failure: Package resolution failed."""
+
+[[tests.unity]]
+name = "preserves successful execute method build result"
+input = """
+Built from '2022.3/release' branch; Version is '2022.3.62f1 (hash)'; Using compiler version '192829333'; Build Type 'Release'
+Initialize engine version: 2022.3.62f1
+Executing method Build.Perform
+Build completed with a result of 'Succeeded' in 42 seconds
+Batchmode quit successfully invoked - shutting down!
+Exiting batchmode successfully now!"""
+expected = """
+Built from '2022.3/release' branch; Version is '2022.3.62f1 (hash)'; Using compiler version '192829333'; Build Type 'Release'
+Initialize engine version: 2022.3.62f1
+Executing method Build.Perform
+Build completed with a result of 'Succeeded' in 42 seconds
+Batchmode quit successfully invoked - shutting down!
+Exiting batchmode successfully now!"""
+
+[[tests.unity]]
+name = "preserves fatal native crash and Unity source context"
+input = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Assertion failed on expression: 'g_BackgroundThread == nullptr'
+Crash!!!
+SymInit: Symbol-SearchPath: '.;C:/Unity;C:/Windows'
+0x00007FF UnityPlayer.dll!RaiseException
+(Filename: C:/build/Editor/Platform/Windows/EditorUtility.cpp Line: 1120)
+Segmentation fault (core dumped)"""
+expected = """
+BatchMode: 1, IsHumanControllingUs: 0, StartBugReporterOnCrash: 0, Is64bit: 1, IsPro: 1
+Assertion failed on expression: 'g_BackgroundThread == nullptr'
+Crash!!!
+SymInit: Symbol-SearchPath: '.;C:/Unity;C:/Windows'
+0x00007FF UnityPlayer.dll!RaiseException
+(Filename: C:/build/Editor/Platform/Windows/EditorUtility.cpp Line: 1120)
+Segmentation fault (core dumped)"""
+

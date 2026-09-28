@@ -1,0 +1,404 @@
+package tui
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/mattn/go-runewidth"
+)
+
+// TestRendererMeasuresTextInOneWidthModel pins the display-width model the
+// whole terminal surface is laid out and addressed in. go-runewidth reads the
+// process locale when it initialises and counts every East Asian *Ambiguous*
+// rune as two cells under an East Asian LANG; lipgloss (x/ansi), which measures
+// the lines the renderer builds, always counts them as one and cannot be told
+// otherwise. Letting the locale decide put the two one column apart on every
+// row built from ◆ │ ─ ● ○ ↑ · …, which is how the picker filter came to repaint
+// the character before the caret and the overlay rules came out half width.
+func TestRendererMeasuresTextInOneWidthModel(t *testing.T) {
+	if runewidth.DefaultCondition.EastAsianWidth {
+		t.Fatal("the renderer's width model must not follow the process locale: East Asian Ambiguous runes are one cell")
+	}
+	// The glyphs the pickers, rules, status rows and markdown tables are drawn
+	// from, plus a few ambiguous runes that arrive in model and user text.
+	for _, glyph := range []rune{'◆', '│', '❯', '●', '○', '─', '↑', '↓', '·', '…', '☆', '♥', '°', '→', '“', '±'} {
+		if got, want := runewidth.RuneWidth(glyph), lipgloss.Width(string(glyph)); got != want {
+			t.Errorf("%q: go-runewidth says %d cells, lipgloss says %d", glyph, got, want)
+		}
+	}
+	// Genuinely wide runes stay two cells in both models; the declaration must
+	// not have flattened CJK text.
+	for _, glyph := range []rune{'我', '爱', '北', '京'} {
+		if got, want := runewidth.RuneWidth(glyph), lipgloss.Width(string(glyph)); got != 2 || want != 2 {
+			t.Errorf("%q: go-runewidth says %d cells, lipgloss says %d, want 2 from both", glyph, got, want)
+		}
+	}
+}
+
+// codexUsageLimitError reproduces what reaches the terminal when a ChatGPT
+// subscription's allowance is spent: an SDK error whose text is the raw HTTP
+// body, carrying the normalized quota detail alongside it.
+func codexUsageLimitError() error {
+	body := `{"eligible_promo":null,"message":"{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"plus\",\"resets_at\":1788543035,\"eligible_promo\":null,\"resets_in_seconds\":8899}}","plan_type":"plus","resets_at":1788543035,"resets_in_seconds":8899,"type":"usage_limit_reached"}`
+	return &llm.APIError{
+		StatusCode: http.StatusTooManyRequests,
+		Type:       "usage_limit_reached",
+		Message:    body,
+		Err:        errors.New(`POST "https://chatgpt.com/backend-api/codex/responses": 429 Too Many Requests ` + body),
+		RateLimit:  llm.ParseRateLimit(http.StatusTooManyRequests, body, "", time.Unix(1788543035-8899, 0)),
+	}
+}
+
+// TestPrintErrorExplainsProviderRefusal guards the terminal's last error
+// surface: a failed turn must read as a sentence about the account's limit,
+// never as the provider's HTTP body.
+func TestPrintErrorExplainsProviderRefusal(t *testing.T) {
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	renderer.PrintError(codexUsageLimitError())
+
+	var content string
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind == FrameError {
+			content = block.frame.Content
+		}
+	}
+	if content == "" {
+		t.Fatalf("no error frame was rendered: %#v", renderer.vm.blocks)
+	}
+	for _, want := range []string{"Usage limit reached on your plus plan", "available again in 2h 28m"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("error frame is missing %q:\n%s", want, content)
+		}
+	}
+	for _, unwanted := range []string{"usage_limit_reached", "resets_in_seconds", "chatgpt.com", "429"} {
+		if strings.Contains(content, unwanted) {
+			t.Errorf("error frame still shows raw transport data %q:\n%s", unwanted, content)
+		}
+	}
+}
+
+// A failure that is not a provider refusal keeps its own wording.
+func TestPrintErrorKeepsOrdinaryErrorText(t *testing.T) {
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	renderer.PrintError(errors.New("user prompt hook failed"))
+
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind == FrameError && block.frame.Content == "user prompt hook failed" {
+			return
+		}
+	}
+	t.Fatalf("ordinary error text was rewritten: %#v", renderer.vm.blocks)
+}
+
+// The helpers below were production functions that only the tests ever
+// called: each is a thin composition of live code. They live here so the
+// production files carry no unused code while the tests keep exercising
+// the live functions underneath.
+
+func renderAssistantMarkdown(raw string) string {
+	return renderAssistantMarkdownWithWidth(raw, 0, DiffThemeUnknown)
+}
+
+// formatToolContent transforms raw tool output into human-friendly display text
+// based on the tool type. Returns empty string when there is nothing to show.
+func formatToolContent(title, content, cwd string) string {
+	return formatToolContentWithInput(title, content, cwd, nil)
+}
+
+// mcpOutputSectionText extracts the fenced block following an "output:" heading
+// and unwraps a recognized MCP envelope. Unrecognized bodies remain verbatim so
+// callers can show tool output that does not use MCP content blocks.
+func mcpOutputSectionText(content string) string {
+	raw := mcpOutputSectionBody(content)
+	if raw == "" {
+		return ""
+	}
+	return extractMCPToolOutputText(raw)
+}
+
+// renderSkillInstallLines renders one install card the way the viewport does.
+func renderSkillInstallLines(f Frame) string {
+	return stripANSI(strings.Join(renderFrameLines(f, 100, DiffThemeDark, 0), "\n"))
+}
+
+// A running install says what it is doing and how long it has been doing it;
+// the elapsed time is what tells the user the fetch is still alive, since the
+// phase itself can stand still for the whole clone.
+func TestSkillInstallCardReportsPhaseAndElapsedWhileRunning(t *testing.T) {
+	text := renderSkillInstallLines(Frame{
+		Kind:     FrameSkillInstall,
+		StepID:   "skill-install:1",
+		Title:    "samber/cc-skills-golang",
+		Summary:  "installing",
+		Content:  "downloading the package",
+		Duration: 17 * time.Second,
+	})
+	for _, want := range []string{"installing", "samber/cc-skills-golang", "downloading the package", "17s"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("running install card %q missing %q", text, want)
+		}
+	}
+}
+
+// The finished card replaces the running one in place, so it has to carry the
+// whole result: what landed and how to reach it.
+func TestSkillInstallCardReportsResultWhenFinished(t *testing.T) {
+	text := renderSkillInstallLines(Frame{
+		Kind:    FrameSkillInstall,
+		StepID:  "skill-install:1",
+		Title:   "samber/cc-skills-golang",
+		Summary: "installed 2 skills",
+		Content: "names: golang-cli, golang-testing\nnote: applies to a new session",
+		Final:   true,
+	})
+	for _, want := range []string{"installed 2 skills", "names: golang-cli, golang-testing", "applies to a new session"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("finished install card %q missing %q", text, want)
+		}
+	}
+}
+
+// A failed install still closes its card: the running block is the same block,
+// and an unfinished one would animate forever.
+func TestSkillInstallCardReportsFailure(t *testing.T) {
+	text := renderSkillInstallLines(Frame{
+		Kind:    FrameSkillInstall,
+		StepID:  "skill-install:1",
+		Title:   "samber/cc-skills-golang",
+		Summary: skillInstallFailedSummary,
+		Content: skill.ErrGitMissing.Error(),
+		Final:   true,
+	})
+	if !strings.Contains(text, skillInstallFailedSummary) || !strings.Contains(text, skill.ErrGitMissing.Error()) {
+		t.Fatalf("failed install card %q does not report the failure", text)
+	}
+}
+
+// Every checkpoint of one install owns the same block: the transcript must end
+// up with a single card per install, not one line per checkpoint.
+func TestSkillInstallCheckpointsReplaceOneBlock(t *testing.T) {
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	for _, phase := range []string{"preparing", "downloading the package", "loading into the catalog"} {
+		renderer.RenderFrame(Frame{
+			Kind:    FrameSkillInstall,
+			StepID:  "skill-install:1",
+			Title:   "openai/skills",
+			Summary: "installing",
+			Content: phase,
+		})
+	}
+	renderer.RenderFrame(Frame{
+		Kind:    FrameSkillInstall,
+		StepID:  "skill-install:1",
+		Title:   "openai/skills",
+		Summary: "installed pptx",
+		Final:   true,
+	})
+	blocks := 0
+	var last Frame
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind == FrameSkillInstall {
+			blocks++
+			last = block.frame
+		}
+	}
+	if blocks != 1 {
+		t.Fatalf("expected one install card, got %d", blocks)
+	}
+	if !last.Final || last.Summary != "installed pptx" {
+		t.Fatalf("card did not settle on the install result: %+v", last)
+	}
+}
+
+// An install fails for reasons only the underlying tool can name, so the card
+// shows git's message exactly as it arrived — no headline, no advice, nothing
+// dropped.
+func TestSkillInstallCardShowsTheOriginalError(t *testing.T) {
+	raw := "git [clone --depth 1 https://example.invalid/x.git repo]: fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL"
+	text := renderSkillInstallLines(Frame{
+		Kind:    FrameSkillInstall,
+		StepID:  "skill-install:1",
+		Title:   "example/x",
+		Summary: skillInstallFailedSummary,
+		Content: raw,
+		Final:   true,
+	})
+	for _, want := range []string{"SSL_ERROR_SYSCALL", "clone --depth 1", "unable to access"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the card dropped part of the original error %q: %q", want, text)
+		}
+	}
+}
+
+// TestComposerStatusLineIsOneControlFreeRow pins the property the composer's
+// live status row lost once a model-written plan label reached it: a tab or a
+// newline in the text must not survive into the painted row, and the row must
+// stay one column short of the terminal width so it can never spill onto the
+// spacer row below it.
+func TestComposerStatusLineIsOneControlFreeRow(t *testing.T) {
+	r := &Renderer{}
+	const width = 60
+	out := r.renderComposerStatusLine("Tasks 0/5 · implement\tregistry\nfreeze · 177 tools", width)
+	if hasCursorMovingByte(out) {
+		t.Fatalf("status row carries a cursor-moving byte: %q", out)
+	}
+	if w := paintedRowDisplayWidth(out); w > width-1 {
+		t.Fatalf("status row paints %d columns, budget is %d: %q", w, width-1, out)
+	}
+	if !strings.Contains(out, "implement registry freeze") {
+		t.Fatalf("the fold must keep the label's words: %q", out)
+	}
+}
+
+// TestWorkedStatusLineTruncatesAnOverWideLabel guards the other producer that
+// used to return over-wide text verbatim: a label longer than the row is cut
+// at the row budget instead of spilling onto the row below.
+func TestWorkedStatusLineTruncatesAnOverWideLabel(t *testing.T) {
+	const width = 20
+	got := workedStatusLine("a very long working label that overflows", width)
+	if hasCursorMovingByte(got) {
+		t.Fatalf("worked row carries a cursor-moving byte: %q", got)
+	}
+	if w := paintedRowDisplayWidth(got); w > width {
+		t.Fatalf("worked row paints %d columns on a %d-column row: %q", w, width, got)
+	}
+	if !strings.HasPrefix(got, "─ ") {
+		t.Fatalf("a truncated worked row must keep its rule prefix: %q", got)
+	}
+	// The normal branch still draws the rule out to the full row width.
+	full := workedStatusLine("short", 30)
+	if w := paintedRowDisplayWidth(full); w != 30 {
+		t.Fatalf("a short label's worked row must fill the row, got %d columns: %q", w, full)
+	}
+}
+
+// selfContainedRows must hand back a table whose every row opens the style it
+// is drawn in and ends in the default state, without touching the caller's
+// slice, the row count, or the visible text.
+func TestSelfContainedRowsOpensCarriedStylesOnEachRow(t *testing.T) {
+	rows := []string{
+		"\x1b[1;38;5;214mlong coloured header that wraps onto",
+		"a second row\x1b[0m and plain text again",
+	}
+	got := selfContainedRows(rows)
+	if len(got) != len(rows) {
+		t.Fatalf("row count changed: %d -> %d", len(rows), len(got))
+	}
+	if want := "\x1b[1;38;5;214mlong coloured header that wraps onto\x1b[0m"; got[0] != want {
+		t.Fatalf("row 0 = %q, want %q", got[0], want)
+	}
+	// The carry sits at the very start of the row: continuation prefixes were
+	// drawn inside the open style when the transcript painted sequentially.
+	if want := "\x1b[1;38;5;214ma second row\x1b[0m and plain text again"; got[1] != want {
+		t.Fatalf("row 1 = %q, want %q", got[1], want)
+	}
+	// The caller's slice is untouched.
+	if rows[0] != "\x1b[1;38;5;214mlong coloured header that wraps onto" {
+		t.Fatalf("input row 0 was modified: %q", rows[0])
+	}
+	// Stacked openers replay in order; the visible text is byte-identical.
+	for i := range rows {
+		if stripANSI(got[i]) != stripANSI(rows[i]) {
+			t.Fatalf("row %d visible text changed: %q -> %q", i, stripANSI(rows[i]), stripANSI(got[i]))
+		}
+		if sgrStateAfter(got[i]) != "" {
+			t.Fatalf("row %d leaves SGR %q in effect", i, sgrStateAfter(got[i]))
+		}
+	}
+}
+
+func TestSelfContainedRowsLeavesCleanTablesAlone(t *testing.T) {
+	rows := []string{
+		"\x1b[38;5;214mred\x1b[0m plain tail",
+		"second row, no ANSI",
+		"",
+		"\x1b[2m dimmed \x1b[0m",
+	}
+	if got := selfContainedRows(rows); &got[0] != &rows[0] {
+		t.Fatalf("an already self-contained table must be returned unchanged, got %q", got)
+	}
+}
+
+func TestSelfContainedRowsStopsCarryingAfterAnInRowReset(t *testing.T) {
+	rows := []string{
+		"\x1b[38;5;214mred\x1b[0m plain",
+		"next row opens fresh",
+	}
+	got := selfContainedRows(rows)
+	if got[1] != rows[1] {
+		t.Fatalf("a row after an in-row reset must not reopen the old style: %q", got[1])
+	}
+}
+
+func TestSelfContainedRowsDecoratesNoBlankRows(t *testing.T) {
+	rows := []string{
+		"\x1b[38;5;214ma wrapped colour",
+		"",
+		"   ",
+		"tail\x1b[0m",
+	}
+	got := selfContainedRows(rows)
+	if got[1] != "" || got[2] != "   " {
+		t.Fatalf("blank rows must not carry sequences: %q / %q", got[1], got[2])
+	}
+	if want := "\x1b[38;5;214mtail\x1b[0m"; got[3] != want {
+		t.Fatalf("row 3 = %q, want %q", got[3], want)
+	}
+}
+
+func TestSelfContainedRowsIsIdempotentAndDedupsRepeats(t *testing.T) {
+	rows := []string{
+		"\x1b[38;5;214mA\x1b[38;5;214m B",
+		"C\x1b[0m",
+	}
+	got := selfContainedRows(rows)
+	// The repeated opener is applied once on replay, like the terminal would.
+	if want := "\x1b[38;5;214mC\x1b[0m"; got[1] != want {
+		t.Fatalf("row 1 = %q, want %q", got[1], want)
+	}
+	again := selfContainedRows(got)
+	if !slices.Equal(again, got) {
+		t.Fatalf("normalising self-contained rows must be idempotent: %q -> %q", got, again)
+	}
+}
+
+// A page answered before the TUI starts hands the terminal over the moment it
+// has an answer, so it must not read past it: a user who answers and starts
+// typing in one burst would otherwise lose what they typed to the page.
+func TestStandaloneReviewLeavesTypeAheadForTheTUI(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := w.Write([]byte("\x1b[B\rhello")); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	sel := newStandaloneRawSelector(r, io.Discard)
+	idx, ok, err := sel.Review("Trust this directory?", nil, []string{"Quit", "Trust and continue"}, 0)
+	if err != nil || !ok || idx != 1 {
+		t.Fatalf("Review = (%d, %v, %v), want the second action", idx, ok, err)
+	}
+	rest, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read the rest: %v", err)
+	}
+	if string(rest) != "hello" {
+		t.Fatalf("the page consumed the type-ahead: %q left, want %q", rest, "hello")
+	}
+}

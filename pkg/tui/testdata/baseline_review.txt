@@ -1,0 +1,56 @@
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[K
+› /review[K
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[K
+[2K
+● Bash
+  └ git log --oneline -5
+    565b114 fix(post_sampling): tighten timeout
+    782af1c feat(clifacade): promote matching LLM provider
+    c833c0c fix(skillhub): priority-ordered roots
+    323ce52 chore(systemskills): slim xlsx assets
+    38f248a Add validators for PPTX and redlining
+
+● Bash
+  └ git diff --stat
+     internal/clifacade/post_sampling.go | 2 +-
+     internal/gateway/post_sampling.go   | 2 +-
+     2 files changed, 2 insertions(+), 2 deletions(-)
+
+● Read
+
+● Grep
+  └ pattern: "renderCard" in internal/streamterm/
+    4 matches across 2 files
+
+● Read
+
+● Read
+
+● Edit
+  └ internal/streamterm/reducer.go
+    + StepID string
+    + Summary string
+
+● Edit
+  └ internal/uinotify/notify.go
+    + StepID string
+
+● Bash
+  └ go build ./...
+    ok
+
+● Bash
+  └ go test ./internal/streamterm/...
+    PASS
+    ok  github.com/forebrain-harness/forebrain-harness/internal/streamterm  0.342s
+
+● Reviewed the diff. Three observations:
+  
+  1. Skill plumbing additive — no breaking changes.
+  2. Reducer passthrough at 5 sites; coverage looks complete.
+  3. Renderer block state isolated to RenderFrame; safe rollback.
+  
+  Recommend merging after snapshot fixtures land.
+
+─ Worked for 12s ───────────────────────────────────────────────────────────────────────────────────────────────────────
+

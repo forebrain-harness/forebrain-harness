@@ -1,0 +1,169 @@
+[filters.dotnet-build]
+description = "Drop C# build banners and restore boilerplate; keep projects, diagnostics, counts, and final results."
+version = "2"
+match_command = '^(dotnet\s+(build|msbuild)\b|[Mm][Ss][Bb]uild(\.exe)?\b)'
+match_output_select = [
+  '(?m)^Microsoft \(R\) Build Engine version ',
+  '(?m)^MSBuild version \S+ for \.NET',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Microsoft \(R\) Build Engine version ',
+  '^MSBuild version \S+ for \.NET',
+  '^Copyright \([Cc]\) Microsoft Corporation\.',
+  '^\s*Determining projects to restore',
+  '^\s*All projects are up-to-date for restore\.$',
+  '^\s*Restored .+ \(in [\d.]+ (ms|sec)\)\.$',
+]
+
+[[tests.dotnet-build]]
+name = "successful build keeps project result counts and elapsed time"
+input = """
+Microsoft (R) Build Engine version 17.8.3+195e7f5a3
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  MyApp -> /home/user/MyApp/bin/Debug/net8.0/MyApp.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.34
+"""
+expected = """  MyApp -> /home/user/MyApp/bin/Debug/net8.0/MyApp.dll
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+Time Elapsed 00:00:02.34"""
+
+[[tests.dotnet-build]]
+name = "build with warnings not short-circuited"
+input = """
+Microsoft (R) Build Engine version 17.8.3+195e7f5a3
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+  Determining projects to restore...
+  MyApp -> /home/user/MyApp/bin/Debug/net8.0/MyApp.dll
+
+Build succeeded.
+    3 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.87
+"""
+expected = "  MyApp -> /home/user/MyApp/bin/Debug/net8.0/MyApp.dll\nBuild succeeded.\n    3 Warning(s)\n    0 Error(s)\nTime Elapsed 00:00:01.87"
+
+[[tests.dotnet-build]]
+name = "build errors pass through"
+input = """
+Microsoft (R) Build Engine version 17.8.3+195e7f5a3
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+  Determining projects to restore...
+src/Program.cs(10,5): error CS1002: ; expected [/home/user/MyApp/MyApp.csproj]
+
+Build FAILED.
+    0 Warning(s)
+    1 Error(s)
+"""
+expected = "src/Program.cs(10,5): error CS1002: ; expected [/home/user/MyApp/MyApp.csproj]\nBuild FAILED.\n    0 Warning(s)\n    1 Error(s)"
+
+[[tests.dotnet-build]]
+name = "modern dotnet build strips banner and restore but keeps multi-project outputs"
+input = """
+MSBuild version 17.11.4+37eb419ad for .NET
+  Determining projects to restore...
+  Restored /repo/Core/Core.csproj (in 117 ms).
+  Restored /repo/App/App.csproj (in 1.2 sec).
+  Core -> /repo/Core/bin/Debug/net8.0/Core.dll
+  App -> /repo/App/bin/Debug/net8.0/App.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:03.14"""
+expected = """  Core -> /repo/Core/bin/Debug/net8.0/Core.dll
+  App -> /repo/App/bin/Debug/net8.0/App.dll
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+Time Elapsed 00:00:03.14"""
+
+[[tests.dotnet-build]]
+name = "standalone MSBuild target failure and dependency context survive"
+input = """
+Microsoft (R) Build Engine version 17.8.3
+Copyright (C) Microsoft Corporation. All rights reserved.
+Project "/repo/App.sln" on node 1 (default targets).
+Project "/repo/App/App.csproj" (1) is building "/repo/Core/Core.csproj" (2).
+/repo/Core/Core.csproj(44,5): error MSB3073: The command "generate" exited with code 1.
+Done Building Project "/repo/Core/Core.csproj" -- FAILED.
+Done Building Project "/repo/App.sln" -- FAILED.
+Build FAILED.
+    0 Warning(s)
+    1 Error(s)
+Time Elapsed 00:00:01.02"""
+expected = """Project "/repo/App.sln" on node 1 (default targets).
+Project "/repo/App/App.csproj" (1) is building "/repo/Core/Core.csproj" (2).
+/repo/Core/Core.csproj(44,5): error MSB3073: The command "generate" exited with code 1.
+Done Building Project "/repo/Core/Core.csproj" -- FAILED.
+Done Building Project "/repo/App.sln" -- FAILED.
+Build FAILED.
+    0 Warning(s)
+    1 Error(s)
+Time Elapsed 00:00:01.02"""
+
+[[tests.dotnet-build]]
+name = "restore and NuGet failures are never stripped"
+input = """
+MSBuild version 17.11.4 for .NET
+  Determining projects to restore...
+/repo/App/App.csproj : error NU1101: Unable to find package Acme.Missing.
+  Failed to restore /repo/App/App.csproj (in 2.1 sec).
+Build FAILED.
+    0 Warning(s)
+    1 Error(s)"""
+expected = """/repo/App/App.csproj : error NU1101: Unable to find package Acme.Missing.
+  Failed to restore /repo/App/App.csproj (in 2.1 sec).
+Build FAILED.
+    0 Warning(s)
+    1 Error(s)"""
+
+[[tests.dotnet-build]]
+name = "analyzer warnings and source locations survive"
+input = """
+MSBuild version 17.11.4 for .NET
+  All projects are up-to-date for restore.
+/repo/App/Program.cs(18,17): warning CA2000: Dispose objects before losing scope [/repo/App/App.csproj]
+  App -> /repo/App/bin/Debug/net8.0/App.dll
+Build succeeded.
+    1 Warning(s)
+    0 Error(s)"""
+expected = """/repo/App/Program.cs(18,17): warning CA2000: Dispose objects before losing scope [/repo/App/App.csproj]
+  App -> /repo/App/bin/Debug/net8.0/App.dll
+Build succeeded.
+    1 Warning(s)
+    0 Error(s)"""
+
+[[tests.dotnet-build]]
+name = "mixed command output is not collapsed on green build"
+input = """
+MSBuild version 17.11.4 for .NET
+  Worker: generated 42 source files
+  App -> /repo/App/bin/Debug/net8.0/App.dll
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+Time Elapsed 00:00:01.00
+Deployment manifest written to /repo/out/manifest.json"""
+expected = """  Worker: generated 42 source files
+  App -> /repo/App/bin/Debug/net8.0/App.dll
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+Time Elapsed 00:00:01.00
+Deployment manifest written to /repo/out/manifest.json"""

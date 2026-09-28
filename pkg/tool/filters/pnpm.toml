@@ -1,0 +1,11 @@
+[filters.pnpm]
+description = "Drop pnpm progress ticker and box borders; keep dependency changes and results."
+version = "1"
+match_command = '^pnpm\s+(install|i|add|list|ls|outdated)\b'
+match_output_select = [
+  '(?i)^Progress: resolved',
+  '^dependencies:',
+  '^Packages: [+-]',
+  'Already up to date',
+]
+strip_ansi = true

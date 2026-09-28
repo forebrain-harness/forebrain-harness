@@ -1,0 +1,27 @@
+[filters.golangci-lint]
+description = "Strip golangci-lint log/blank lines; keep every diagnostic, ok when clean."
+version = "1"
+match_command = '^(\s*)golangci-lint\b'
+match_output_select = [
+  '\.go:\d+:\d+: ',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^level=',
+]
+on_empty = "golangci-lint: ok"
+
+[[tests.golangci-lint]]
+name = "keeps diagnostics, drops log lines"
+input = """level=info msg="[config_reader] Used configuration file .golangci.yml"
+internal/foo.go:10:2: `x` declared and not used (unused)
+
+internal/bar.go:5:6: Error return value is not checked (errcheck)"""
+expected = """internal/foo.go:10:2: `x` declared and not used (unused)
+internal/bar.go:5:6: Error return value is not checked (errcheck)"""
+
+[[tests.golangci-lint]]
+name = "clean run is ok"
+input = ""
+expected = "golangci-lint: ok"

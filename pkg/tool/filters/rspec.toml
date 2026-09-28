@@ -1,0 +1,56 @@
+[filters.rspec]
+description = "Drop rspec banners and progress dots; keep failures and the summary."
+version = "1"
+match_command = '\brspec\b'
+match_output_select = [
+  '\d+ examples?, \d+ failures?',
+  '^Failures:',
+  '^Failed examples:',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '(?i)^Running via spring',
+  '^Finished in ',
+  '^DEPRECATION WARNING:',
+  '^[.F*]+$',
+]
+
+[[tests.rspec]]
+name = "keeps failures and summary, drops banners and dots"
+input = """Running via Spring preloader in process 12345
+.....F
+
+Failures:
+
+  1) Calculator#add returns the sum
+     Failure/Error: expect(calc.add(1, 2)).to eq(4)
+
+       expected: 4
+            got: 3
+     # ./spec/calculator_spec.rb:8:in 'block (2 levels)'
+
+Finished in 0.02 seconds (files took 1.5 seconds to load)
+6 examples, 1 failure
+
+Failed examples:
+
+rspec ./spec/calculator_spec.rb:5 # Calculator#add returns the sum"""
+expected = """Failures:
+  1) Calculator#add returns the sum
+     Failure/Error: expect(calc.add(1, 2)).to eq(4)
+       expected: 4
+            got: 3
+     # ./spec/calculator_spec.rb:8:in 'block (2 levels)'
+6 examples, 1 failure
+Failed examples:
+rspec ./spec/calculator_spec.rb:5 # Calculator#add returns the sum"""
+
+[[tests.rspec]]
+name = "all green collapses to the summary"
+input = """Running via Spring preloader in process 12345
+......
+
+Finished in 0.01 seconds (files took 1.2 seconds to load)
+6 examples, 0 failures"""
+expected = "6 examples, 0 failures"

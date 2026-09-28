@@ -1,0 +1,13 @@
+[filters.gh-search]
+description = "Cap long gh search text result lists; keep section headers and repo rows."
+version = "2"
+match_command = "(^|[;&|]\\s*)gh\\s+search\\b"
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+max_lines = 50
+max_lines_keep_tail = 15
+
+[[tests.gh-search]]
+name = "short repo list passes through"

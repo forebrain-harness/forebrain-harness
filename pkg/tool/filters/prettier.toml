@@ -1,0 +1,60 @@
+[filters.prettier]
+description = "Compact prettier --write/--check output: strip unchanged and success-check chatter."
+version = "2"
+match_command = '(?:^|[;&|]\s*)(?:pnpx\s+|npx\s+|pnpm\s+(?:run\s+)?)?prettier\s+--(?:write|check)\b'
+match_output_select = [
+  '(?m)^\S\S+\s+\d+ms\s+\(unchanged\)$',
+  '(?m)^Checking formatting\.\.\.',
+  '(?m)^All matched files use Prettier code style!',
+]
+strip_lines_matching = [
+  '\(unchanged\)$',
+  '^Checking formatting\.\.\.',
+  '^All matched files use Prettier code style!',
+]
+
+[[tests.prettier]]
+name = "strips unchanged file lines, keeps changed files and M-prefixed summary"
+input = """
+> litt-app@ format /Volumes/code/monolitt/services/litt-app
+> prettier --write .
+
+.storybook/button.stories.tsx 8ms (unchanged)
+.storybook/input.stories.tsx 3ms (unchanged)
+.storybook/badge.stories.tsx 6ms (unchanged)
+src/components/CampaignScope.tsx 5ms
+src/components/ChangedCodeSection.tsx 5ms
+ M src/components/CampaignScope.tsx
+ M src/components/ChangedCodeSection.tsx
+
+"""
+expected = """
+> litt-app@ format /Volumes/code/monolitt/services/litt-app
+> prettier --write .
+
+src/components/CampaignScope.tsx 5ms
+src/components/ChangedCodeSection.tsx 5ms
+ M src/components/CampaignScope.tsx
+ M src/components/ChangedCodeSection.tsx
+
+"""
+
+[[tests.prettier]]
+name = "all unchanged: only header survives"
+input = """
+> app@ format /repo
+> prettier --write .
+
+src/index.ts 2ms (unchanged)
+src/utils.ts 1ms (unchanged)
+src/types.ts 1ms (unchanged)
+
+"""
+expected = """
+> app@ format /repo
+> prettier --write .
+
+
+"""
+
+[[tests.prettier]]

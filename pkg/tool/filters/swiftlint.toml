@@ -1,0 +1,28 @@
+[filters.swiftlint]
+description = "Drop per-file swiftlint progress lines; keep violations and the Done summary."
+version = "1"
+match_command = '^swiftlint\b'
+match_output_select = [
+  '(?m)^Linting Swift files',
+]
+strip_lines_matching = [
+  "^Linting '",
+]
+
+[[tests.swiftlint]]
+name = "strips per-file progress, keeps violations and summary"
+input = """
+Linting Swift files in current working directory
+Linting 'AppDelegate.swift' (1/42)
+Linting 'ViewController.swift' (2/42)
+Linting 'Model.swift' (3/42)
+AppDelegate.swift:10:5: warning: Line Length Violation (line_length)
+Done linting! Found 1 violation, 0 serious in 42 files.
+"""
+expected = """
+Linting Swift files in current working directory
+AppDelegate.swift:10:5: warning: Line Length Violation (line_length)
+Done linting! Found 1 violation, 0 serious in 42 files.
+"""
+
+[[tests.swiftlint]]

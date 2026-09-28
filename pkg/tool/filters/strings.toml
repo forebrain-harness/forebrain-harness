@@ -1,0 +1,49 @@
+[filters.strings]
+description = "Cap `strings` output to a useful head."
+version = "2"
+match_command = '(^|[;&|/ ])strings(\s|$)'
+match_output_select = [
+  '(?m)^/lib(?:64)?/',
+  '(?m)^GLIBC_',
+  '(?m)^libc\.so',
+  '(?m)^strings: ',
+]
+strip_ansi = true
+max_lines = 80
+
+[[tests.strings]]
+name = "short output passes through unchanged"
+input = """
+/lib/ld-linux.so.2
+libc.so.6
+GLIBC_2.0
+__libc_start_main
+printf
+"""
+expected = """
+/lib/ld-linux.so.2
+libc.so.6
+GLIBC_2.0
+__libc_start_main
+printf
+"""
+
+[[tests.strings]]
+name = "error line is preserved"
+input = "strings: '/app/missing': No such file"
+expected = "strings: '/app/missing': No such file"
+
+[[tests.strings]]
+name = "elf dump matches lib64 head"
+input = """
+/lib64/ld-linux-x86-64.so.2
+puts
+exit
+GLIBC_2.2.5
+"""
+expected = """
+/lib64/ld-linux-x86-64.so.2
+puts
+exit
+GLIBC_2.2.5
+"""

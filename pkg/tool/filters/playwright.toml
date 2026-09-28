@@ -1,0 +1,4 @@
+[filters.playwright]
+description = "Drop playwright passing specs and run header; keep failures and the summary."
+version = "2"
+match_command = '^(\s*)(npx\s+)?playwright\s+test\b'

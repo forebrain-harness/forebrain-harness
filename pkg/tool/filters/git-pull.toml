@@ -1,0 +1,124 @@
+[filters.git-pull]
+description = "Cap git pull/merge fast-forward diffstat file lists; keep header and summary line."
+version = "1"
+match_command = "(^|[;&|]\\s*)(?:sudo\\s+)?git(?:\\s+(?:-[A-Za-z]\\S*|--\\S+))*\\s+(pull|merge)\\b"
+match_output_select = [
+  "(?m)^Fast-forward\\s*$",
+  "(?m)^\\s*\\S.* \\|\\s+\\d+\\s+[+-]+\\s*$",
+  "(?m)^\\s*\\d+ files? changed",
+]
+strip_ansi = true
+max_lines = 40
+max_lines_keep_tail = 5
+
+[[tests.git-pull]]
+name = "short fast-forward diffstat passes through unchanged"
+input = """Updating 1234567..89abcde
+Fast-forward
+ app/client.go | 4 ++--
+ app/server.go | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)"""
+expected = """Updating 1234567..89abcde
+Fast-forward
+ app/client.go | 4 ++--
+ app/server.go | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)"""
+
+[[tests.git-pull]]
+name = "long diffstat capped with head+tail, keeps summary line"
+input = """Your branch is behind 'origin/develop' by 40 commits, can be fast-forwarded.
+Updating 7a575942d62..aefb838da1a
+Fast-forward
+ file01.cs | 5 +
+ file02.cs | 5 +
+ file03.cs | 5 +
+ file04.cs | 5 +
+ file05.cs | 5 +
+ file06.cs | 5 +
+ file07.cs | 5 +
+ file08.cs | 5 +
+ file09.cs | 5 +
+ file10.cs | 5 +
+ file11.cs | 5 +
+ file12.cs | 5 +
+ file13.cs | 5 +
+ file14.cs | 5 +
+ file15.cs | 5 +
+ file16.cs | 5 +
+ file17.cs | 5 +
+ file18.cs | 5 +
+ file19.cs | 5 +
+ file20.cs | 5 +
+ file21.cs | 5 +
+ file22.cs | 5 +
+ file23.cs | 5 +
+ file24.cs | 5 +
+ file25.cs | 5 +
+ file26.cs | 5 +
+ file27.cs | 5 +
+ file28.cs | 5 +
+ file29.cs | 5 +
+ file30.cs | 5 +
+ file31.cs | 5 +
+ file32.cs | 5 +
+ file33.cs | 5 +
+ file34.cs | 5 +
+ file35.cs | 5 +
+ file36.cs | 5 +
+ file37.cs | 5 +
+ file38.cs | 5 +
+ file39.cs | 5 +
+ file40.cs | 5 +
+ 40 files changed, 200 insertions(+)"""
+expected = """Your branch is behind 'origin/develop' by 40 commits, can be fast-forwarded.
+Updating 7a575942d62..aefb838da1a
+Fast-forward
+ file01.cs | 5 +
+ file02.cs | 5 +
+ file03.cs | 5 +
+ file04.cs | 5 +
+ file05.cs | 5 +
+ file06.cs | 5 +
+ file07.cs | 5 +
+ file08.cs | 5 +
+ file09.cs | 5 +
+ file10.cs | 5 +
+ file11.cs | 5 +
+ file12.cs | 5 +
+ file13.cs | 5 +
+ file14.cs | 5 +
+ file15.cs | 5 +
+ file16.cs | 5 +
+ file17.cs | 5 +
+ file18.cs | 5 +
+ file19.cs | 5 +
+ file20.cs | 5 +
+ file21.cs | 5 +
+ file22.cs | 5 +
+ file23.cs | 5 +
+ file24.cs | 5 +
+ file25.cs | 5 +
+ file26.cs | 5 +
+ file27.cs | 5 +
+ file28.cs | 5 +
+ file29.cs | 5 +
+ file30.cs | 5 +
+ file31.cs | 5 +
+ file32.cs | 5 +
+... +4 more lines
+ file37.cs | 5 +
+ file38.cs | 5 +
+ file39.cs | 5 +
+ file40.cs | 5 +
+ 40 files changed, 200 insertions(+)"""
+
+[[tests.git-pull]]
+name = "already-up-to-date output is not selected by this filter"
+expect_match_output = false
+input = "Already up to date."
+expected = "Already up to date."
+
+[[tests.git-pull]]
+name = "empty input passes through"
+input = ""
+expected = ""

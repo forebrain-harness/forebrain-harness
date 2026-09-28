@@ -1,0 +1,32 @@
+[filters.sdm]
+description = "Compact sdm status tables: truncate TAGS padding; cap long cluster lists."
+version = "2"
+match_command = "(^|[;&|]\\s*)sdm\\s+status\\b"
+match_output_select = [
+  '(?m)^\s+CLUSTER\s+STATUS\s+ADDRESS',
+  '(?m)connected \(auto\)\s+127\.0\.0\.1:',
+  '(?m)not connected\s+127\.0\.0\.1:',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+max_lines = 60
+max_lines_keep_tail = 20
+on_empty = "sdm: ok"
+
+[[tests.sdm]]
+name = "truncates TAGS padding on cluster row"
+input = "     AWS-devx-playground-euc1                                                                       connected (auto)     127.0.0.1:13536     amazoneksuserimpersonation     cloud=aws,env=dev,group=DEVF                                                                                                                 \n"
+expected = "     AWS-devx-playground-euc1                                                                       connected (auto)     127.0.0.1:13536     amazoneksuserimpersonation     cloud=aws,env=dev,group=DEVF                                                                                                                 \n"
+
+[[tests.sdm]]
+name = "not connected row preserved"
+input = "     AWS-aurora-dev-2-euc-1-boost-1-c1-s1-cluster-read                                              not connected        127.0.0.1:15798     postgres                       Group=STRATEGY,application=boost\n"
+expected = "     AWS-aurora-dev-2-euc-1-boost-1-c1-s1-cluster-read                                              not connected        127.0.0.1:15798     postgres                       Group=STRATEGY,application=boost\n"
+
+[[tests.sdm]]
+name = "on_empty when only blank lines"
+input = """
+"""
+expected = "sdm: ok"

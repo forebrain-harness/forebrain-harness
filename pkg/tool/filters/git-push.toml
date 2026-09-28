@@ -1,0 +1,16 @@
+[filters.git-push]
+description = "Drop git push progress and GitHub/GitLab PR/vuln chatter; keep destination, ref updates, and errors."
+version = "2"
+match_command = '(^|[;&|]\s*)(?:[A-Za-z0-9_]+=[^\s]+\s+)*(?:sudo\s+)?git(?:\s+(?:-[A-Za-z]\S*|--\S+))*\s+push(?:\s|$)'
+match_output_select = [
+  '^To \S+$',
+  '^\s*\* \[new branch\]',
+  '^\s*! \[rejected\]',
+  '^\s*[0-9a-f]+\.\.[0-9a-f]+\s+\S+ -> \S+',
+  '^Everything up-to-date',
+  "set up to track",
+]
+strip_ansi = true
+
+# Never-Block fallback: the kept signal lines (To/ref/tracking/errors) are never
+# stripped, so this should effectively never fire

@@ -1,0 +1,490 @@
+package turn
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/stretchr/testify/require"
+)
+
+type stubSessionStore struct {
+	summaries []state.SessionSummary
+	turns     []state.Message
+	created   []state.SessionSummary
+}
+
+func (s *stubSessionStore) Ensure(ctx context.Context, id string, title string) error {
+	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	return nil
+}
+
+func (s *stubSessionStore) SetTitle(ctx context.Context, id string, title string) error {
+	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	return nil
+}
+
+func (s stubSessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error) {
+	if limit <= 0 || limit >= len(s.summaries) {
+		return append([]state.SessionSummary(nil), s.summaries...), nil
+	}
+	return append([]state.SessionSummary(nil), s.summaries[:limit]...), nil
+}
+
+func (s stubSessionStore) ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error) {
+	if limit <= 0 || limit >= len(s.turns) {
+		return append([]state.Message(nil), s.turns...), nil
+	}
+	return append([]state.Message(nil), s.turns[:limit]...), nil
+}
+
+func TestListSessionsRecentUsesSessionStore(t *testing.T) {
+	svc := New(WithSessionStore(&stubSessionStore{
+		summaries: []state.SessionSummary{
+			{ID: "s2", Title: "Second", UpdatedAt: 20},
+			{ID: "s1", Title: "First", UpdatedAt: 10},
+		},
+	}))
+
+	got, err := svc.ListSessionsRecent(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "s2", got[0].ID)
+	require.Equal(t, "Second", got[0].Title)
+}
+
+func TestListSessionMessagesUsesSessionStore(t *testing.T) {
+	svc := New(WithSessionStore(&stubSessionStore{
+		turns: []state.Message{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "world"},
+		},
+	}))
+
+	got, err := svc.ListSessionMessages(context.Background(), "s1", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, "assistant", got[1].Role)
+	require.Equal(t, "world", got[1].Content)
+}
+
+func TestCreateAndRenameSessionUseSessionStore(t *testing.T) {
+	store := &stubSessionStore{}
+	svc := New(WithSessionStore(store))
+
+	created, err := svc.CreateSession(context.Background(), " Draft ")
+	require.NoError(t, err)
+	require.NotEmpty(t, created.ID)
+	require.Contains(t, created.ID, "web-")
+	require.Equal(t, "Draft", created.Title)
+	require.Len(t, store.created, 1)
+	require.Equal(t, "Draft", store.created[0].Title)
+
+	require.NoError(t, svc.RenameSession(context.Background(), created.ID, "Renamed"))
+	require.Equal(t, created.ID, store.created[1].ID)
+	require.Equal(t, "Renamed", store.created[1].Title)
+}
+
+// TestCreateSessionWithoutATitleIsUnnamed pins that a session nobody named is
+// stored titled with its own id — the store's "unnamed" — so its first user
+// message names it, instead of a placeholder that would outrank that message.
+func TestCreateSessionWithoutATitleIsUnnamed(t *testing.T) {
+	store := &stubSessionStore{}
+	svc := New(WithSessionStore(store))
+
+	created, err := svc.CreateSession(context.Background(), "  ")
+	require.NoError(t, err)
+	require.Empty(t, created.Title)
+	require.Len(t, store.created, 1)
+	require.Equal(t, created.ID, store.created[0].ID)
+	require.Equal(t, created.ID, store.created[0].Title)
+}
+
+// fakeCancelStore records what a cancelled turn wrote.
+type fakeCancelStore struct {
+	seqs      [][]llm.Message
+	model     string
+	started   string
+	finished  string
+	worked    int64
+	appends   [][2]string
+	repairs   int
+	repairErr error
+}
+
+func (f *fakeCancelStore) AppendMessageSequence(_ context.Context, _ string, msgs []llm.Message, model, _ string) error {
+	f.seqs = append(f.seqs, msgs)
+	f.model = model
+	return nil
+}
+
+func (f *fakeCancelStore) Append(_ context.Context, _, role, content string) (int64, error) {
+	f.appends = append(f.appends, [2]string{role, content})
+	return 0, nil
+}
+
+func (f *fakeCancelStore) RepairDanglingToolResults(context.Context, string) (int, error) {
+	f.repairs++
+	return 0, f.repairErr
+}
+
+func assistantMsg(text string) llm.Message {
+	return llm.AssistantMessage([]llm.ContentPart{llm.Text(text)})
+}
+
+// TestPersistCancelledTurnDropsADuplicateStreamBuffer pins the de-duplication
+// both surfaces now share: when the streaming buffer reproduces exactly the
+// assistant text the capture already holds, it adds nothing and is dropped.
+//
+// Without it, an execution chain that never signals a response boundary leaves
+// the buffer spanning the whole turn, and every assistant message the capture
+// carries would be stored twice.
+func TestPersistCancelledTurnDropsADuplicateStreamBuffer(t *testing.T) {
+	t.Parallel()
+
+	captured := []llm.Message{
+		llm.UserMessage(llm.Text("do it")),
+		assistantMsg("partial answer"),
+	}
+	store := &fakeCancelStore{}
+	PersistCancelledTurn(context.Background(), store, CancelledTurn{
+		SessionID:   "s1",
+		Captured:    captured,
+		PartialText: "partial answer",
+	})
+
+	if len(store.seqs) != 1 {
+		t.Fatalf("AppendMessageSequence calls = %d, want 1", len(store.seqs))
+	}
+	if got := len(store.seqs[0]); got != len(captured) {
+		t.Fatalf("persisted %d messages, want %d: the duplicate buffer must be dropped", got, len(captured))
+	}
+	if store.repairs != 1 {
+		t.Fatalf("RepairDanglingToolResults calls = %d, want 1", store.repairs)
+	}
+}
+
+// TestPersistCancelledTurnKeepsADistinctStreamBuffer covers the other side: a
+// genuinely unfinished fragment is content the user watched arrive, so it is
+// persisted. The comparison is equality, not containment.
+func TestPersistCancelledTurnKeepsADistinctStreamBuffer(t *testing.T) {
+	t.Parallel()
+
+	captured := []llm.Message{
+		llm.UserMessage(llm.Text("do it")),
+		assistantMsg("first part"),
+	}
+	store := &fakeCancelStore{}
+	PersistCancelledTurn(context.Background(), store, CancelledTurn{
+		SessionID:        "s1",
+		Captured:         captured,
+		PartialText:      "first part and then some more",
+		PartialReasoning: "thinking hard",
+		Model:            "gpt-main",
+		StartedAt:        time.Now().Add(-2 * time.Second),
+	})
+
+	if len(store.seqs) != 1 || len(store.seqs[0]) != len(captured)+1 {
+		t.Fatalf("persisted %v, want the fragment appended", store.seqs)
+	}
+	if store.model != "gpt-main" {
+		t.Fatalf("model = %q", store.model)
+	}
+	if len(store.appends) != 1 || store.appends[0][0] != "reasoning" {
+		t.Fatalf("reasoning append = %v", store.appends)
+	}
+}
+
+// TestPersistCancelledTurnRepairsEvenWithNothingToWrite pins that a cancel with
+// no captured content still repairs dangling tool_calls: the tool that was
+// interrupted may have left one behind regardless.
+func TestPersistCancelledTurnRepairsEvenWithNothingToWrite(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeCancelStore{}
+	PersistCancelledTurn(context.Background(), store, CancelledTurn{SessionID: "s1"})
+	if len(store.seqs) != 0 {
+		t.Fatalf("nothing to persist should write nothing, got %v", store.seqs)
+	}
+	if store.repairs != 1 {
+		t.Fatalf("RepairDanglingToolResults calls = %d, want 1", store.repairs)
+	}
+	// A nil store is a no-op rather than a panic.
+	PersistCancelledTurn(context.Background(), nil, CancelledTurn{SessionID: "s1"})
+}
+
+// TestPersistCancelledTurnReportsARepairFailure pins a real regression: the
+// TUI's cancel path used to log a RepairDanglingToolResults failure
+// (chat_session.go's cancel handler called s.chatLog.Debugf on error) before
+// this logic was shared into PersistCancelledTurn. The shared version dropped
+// the error on the floor with a bare `_, _ =`, so a repair failure on a
+// cancelled turn left no trace anywhere -- worse than before the sharing, not
+// neutral to it. OnRepairError restores the observability without hard-coding
+// either surface's logger.
+func TestPersistCancelledTurnReportsARepairFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeCancelStore{repairErr: errors.New("dangling repair boom")}
+	var reported error
+	PersistCancelledTurn(context.Background(), store, CancelledTurn{
+		SessionID:     "s1",
+		OnRepairError: func(err error) { reported = err },
+	})
+	if store.repairs != 1 {
+		t.Fatalf("RepairDanglingToolResults calls = %d, want 1", store.repairs)
+	}
+	if reported == nil || reported.Error() != "dangling repair boom" {
+		t.Fatalf("OnRepairError got %v, want the repair error surfaced", reported)
+	}
+
+	// A nil OnRepairError must not panic -- most callers in tests supply none.
+	PersistCancelledTurn(context.Background(), &fakeCancelStore{repairErr: errors.New("boom")}, CancelledTurn{SessionID: "s1"})
+}
+
+// fakeUserTurnStore records what a user turn wrote.
+type fakeUserTurnStore struct {
+	rowID     int64
+	err       error
+	ensureErr error
+	ensured   []string
+	content   string
+	parts     string
+	role      string
+	appended  int
+}
+
+func (f *fakeUserTurnStore) Ensure(_ context.Context, id, _ string) error {
+	f.ensured = append(f.ensured, id)
+	return f.ensureErr
+}
+
+func (f *fakeUserTurnStore) AppendStructuredMessage(_ context.Context, _, role, content, _, partsJSON, _ string, _, _, _ string, _ state.MessageExecTiming) (int64, error) {
+	f.role, f.content, f.parts = role, content, partsJSON
+	f.appended++
+	return f.rowID, f.err
+}
+
+func TestPersistUserTurnReturnsIdentityAndError(t *testing.T) {
+	boom := errors.New("write failed")
+	for _, tc := range []struct {
+		name    string
+		store   fakeUserTurnStore
+		wantID  int64
+		wantErr error
+	}{
+		{"identity", fakeUserTurnStore{rowID: 42}, 42, nil},
+		{"append failure", fakeUserTurnStore{err: boom}, 0, boom},
+		{"ensure failure", fakeUserTurnStore{ensureErr: boom}, 0, boom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := PersistUserTurn(context.Background(), &tc.store, UserTurn{SessionID: "s", ModelInput: "hi", EnsureSession: true})
+			if id != tc.wantID || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got (%d, %v), want (%d, %v)", id, err, tc.wantID, tc.wantErr)
+			}
+			if tc.store.ensureErr != nil && tc.store.appended != 0 {
+				t.Fatal("appended after ensure failed")
+			}
+		})
+	}
+}
+
+// TestPersistUserTurnStoresTheTypedCommandAsContent pins the display rule both
+// surfaces now share: the row's content is what the user typed, while PartsJSON
+// carries the prompt the model actually saw.
+//
+// The model context is rebuilt from PartsJSON, which is preferred over content,
+// so this is what lets a resume replay show the command the user entered rather
+// than the prompt it expanded into.
+func TestPersistUserTurnStoresTheTypedCommandAsContent(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), store, UserTurn{
+		SessionID:  "s1",
+		ModelInput: "the long expanded prompt",
+		RawInput:   "/init",
+	})
+	if store.content != "/init" {
+		t.Fatalf("content = %q, want the typed command", store.content)
+	}
+	if !strings.Contains(store.parts, "the long expanded prompt") {
+		t.Fatalf("partsJSON = %q, want the expanded prompt", store.parts)
+	}
+	if store.role != "user" {
+		t.Fatalf("role = %q", store.role)
+	}
+}
+
+func TestPersistUserTurnFallsBackAndSkipsEmpty(t *testing.T) {
+	t.Parallel()
+
+	// No RawInput: content is the model input itself.
+	plain := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), plain, UserTurn{SessionID: "s1", ModelInput: "hello"})
+	if plain.content != "hello" {
+		t.Fatalf("content = %q", plain.content)
+	}
+	if len(plain.ensured) != 0 {
+		t.Fatalf("Ensure called without EnsureSession: %v", plain.ensured)
+	}
+
+	// A surface-rendered PartsJSON wins: it is the one carrying attachments.
+	supplied := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), supplied, UserTurn{
+		SessionID: "s1", ModelInput: "hello", PartsJSON: `{"mine":true}`, EnsureSession: true,
+	})
+	if supplied.parts != `{"mine":true}` {
+		t.Fatalf("partsJSON = %q, want the supplied rendering", supplied.parts)
+	}
+	if len(supplied.ensured) != 1 {
+		t.Fatalf("EnsureSession must create the session row, got %v", supplied.ensured)
+	}
+
+	// Blank input writes nothing at all.
+	blank := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), blank, UserTurn{SessionID: "s1", ModelInput: "   "})
+	if blank.appended != 0 {
+		t.Fatalf("blank input appended %d rows, want 0", blank.appended)
+	}
+	PersistUserTurn(context.Background(), nil, UserTurn{SessionID: "s1", ModelInput: "hi"})
+}
+
+func newAbandonedCallStore(t *testing.T) (*state.SessionStore, string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	return store, "s1"
+}
+
+func gatedShellCall() llm.Message {
+	return llm.AssistantMessage([]llm.ContentPart{llm.Text("running it")}, llm.ToolCall{
+		ID: "call-1", Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: "shell", Arguments: `{"command":"rm -rf build"}`},
+	})
+}
+
+// The whole point of answering an abandoned call rather than deleting it: the
+// next turn's repair used to strip the call from the stored row, and that row is
+// the one a resume replays, so the canceled card the user watched lasted exactly
+// one more message.
+func TestAnsweredCancelledCallSurvivesTheNextTurnsRepair(t *testing.T) {
+	ctx := context.Background()
+	store, sid := newAbandonedCallStore(t)
+	if err := store.AppendNewMessages(ctx, sid, "", []llm.Message{
+		llm.UserMessage(llm.Text("clean up")),
+		gatedShellCall(),
+	}, "m", ""); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	if wrote := AnswerAbandonedToolCalls(ctx, store, sid, "m"); wrote != 1 {
+		t.Fatalf("answers written = %d, want one for the call the user canceled", wrote)
+	}
+	if _, err := store.RepairDanglingToolResults(ctx, sid); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+
+	rows, err := store.ListAllMessages(ctx, sid, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	calls, answered := 0, 0
+	for _, row := range rows {
+		_, toolCalls, toolCallID, _ := state.ParseMessageParts(row.PartsJSON, "")
+		calls += len(toolCalls)
+		if strings.TrimSpace(toolCallID) == "call-1" {
+			answered++
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("the display transcript kept %d tool calls, want the one the user saw", calls)
+	}
+	if answered != 1 {
+		t.Fatalf("the canceled call is answered %d times, want exactly once", answered)
+	}
+}
+
+// Answering twice must not stack results: the id is already answered the second
+// time round, so there is nothing left to write.
+func TestAnsweringAnAbandonedCallIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	store, sid := newAbandonedCallStore(t)
+	if err := store.AppendNewMessages(ctx, sid, "", []llm.Message{
+		llm.UserMessage(llm.Text("clean up")),
+		gatedShellCall(),
+	}, "m", ""); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if wrote := AnswerAbandonedToolCalls(ctx, store, sid, "m"); wrote != 1 {
+		t.Fatalf("first pass wrote %d, want 1", wrote)
+	}
+	if wrote := AnswerAbandonedToolCalls(ctx, store, sid, "m"); wrote != 0 {
+		t.Fatalf("second pass wrote %d, want none: the call is already answered", wrote)
+	}
+}
+
+// A call that ran is left alone, and so is a transcript that ends on ordinary
+// prose: neither is an abandoned call.
+func TestNothingIsAnsweredWhenNoCallWasAbandoned(t *testing.T) {
+	ctx := context.Background()
+	store, sid := newAbandonedCallStore(t)
+	result := llm.ToolResultMessage("call-1", llm.Text(`{"stdout":""}`))
+	if err := store.AppendNewMessages(ctx, sid, "", []llm.Message{
+		llm.UserMessage(llm.Text("clean up")),
+		gatedShellCall(),
+		result,
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("done")}),
+	}, "m", ""); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if wrote := AnswerAbandonedToolCalls(ctx, store, sid, "m"); wrote != 0 {
+		t.Fatalf("wrote %d answers for a transcript with nothing abandoned", wrote)
+	}
+}
+
+// A cancelled turn answers its own interrupted calls inside the sequence it
+// writes, ahead of any partial text: a tool result has to follow the assistant
+// message that opened it.
+func TestCancelledTurnAnswersItsInterruptedCallBeforeItsPartialText(t *testing.T) {
+	msgs := []llm.Message{llm.UserMessage(llm.Text("clean up")), gatedShellCall()}
+	answers := CancelledToolAnswers(msgs)
+	if len(answers) != 1 {
+		t.Fatalf("answers = %d, want one", len(answers))
+	}
+	if answers[0].ToolCallID != "call-1" || answers[0].TextContent() != CancelledToolCallNote {
+		t.Fatalf("answer = %+v", answers[0])
+	}
+	if answers[0].ToolDisplay == nil || strings.TrimSpace(answers[0].ToolDisplay.Body) != "" {
+		t.Fatalf("a canceled card claims output it never produced: %+v", answers[0].ToolDisplay)
+	}
+	if strings.HasPrefix(answers[0].ToolDisplay.Summary, "ran ") {
+		t.Fatalf("a canceled card claims the call ran: %q", answers[0].ToolDisplay.Summary)
+	}
+}
+
+// TestStreamPartialResponseCompleted pins the boundary semantics the
+// orchestration loop relies on: answer text is dropped, reasoning is not.
+func TestStreamPartialResponseCompleted(t *testing.T) {
+	partial := &StreamPartial{}
+	partial.AppendContent("completed response text")
+	partial.AppendReasoning("thinking from the completed response")
+	partial.ResponseCompleted()
+	require.Equal(t, "", partial.Content(), "captured assistant text must be dropped at the boundary")
+	require.Equal(t, "thinking from the completed response", partial.Reasoning(),
+		"reasoning only reaches the transcript via the cancel path and must survive")
+	partial.AppendContent("interrupted text")
+	require.Equal(t, "interrupted text", partial.Content())
+}

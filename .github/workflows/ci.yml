@@ -1,0 +1,88 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go mod vet build test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install CGO deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - run: go mod verify
+      - run: go vet ./...
+      - name: Verify package graph
+        run: |
+          scripts/package-graph.sh
+          git diff --exit-code -- pkg/architecture/testdata/graph.json
+      - name: Package manifest report
+        run: |
+          scripts/manifest-report.sh manifest-report.md
+          cat manifest-report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload package manifest report
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest-report
+          path: manifest-report.md
+      - name: go build (CGO required)
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags fts5 ./...
+      - name: go test
+        env:
+          CGO_ENABLED: "1"
+        run: go test -tags fts5 ./... -count=1 -timeout 20m
+
+  windows:
+    name: Windows build test (CGO)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # windows-latest ships mingw-w64 gcc; CGO is mandatory so the weixin silk
+      # voice decoder and other cgo features are compiled into the binary.
+      - run: go mod verify
+      - name: go build (CGO required)
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags fts5 ./...
+      - name: Verify silk decoder is compiled in (cgo build tag)
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: go list -tags fts5 -f '{{.GoFiles}}' ./pkg/channel | grep -q silk_cgo.go
+      - name: go test
+        env:
+          CGO_ENABLED: "1"
+        run: go test -tags fts5 ./... -count=1 -timeout 30m
+
+  frontend:
+    name: Frontend install build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.24.0
+      - name: pnpm install and build
+        working-directory: frontend
+        run: |
+          pnpm install
+          pnpm run build

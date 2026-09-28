@@ -1,0 +1,4 @@
+[filters.astro]
+description = "Collapse astro build/dev noise; keep the page summary, Complete, Local URL, deploy URL, and errors."
+version = "3"
+match_command = '\bastro\s+(build|dev|preview)\b'

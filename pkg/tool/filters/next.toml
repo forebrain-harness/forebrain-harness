@@ -1,0 +1,4 @@
+[filters.next]
+description = "Drop next build progress/info lines; keep the route table and compile errors."
+version = "2"
+match_command = '^(\s*)(npx\s+)?next\s+build\b'

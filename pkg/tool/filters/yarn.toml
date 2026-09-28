@@ -1,0 +1,4 @@
+[filters.yarn]
+description = "Drop yarn install/add step headers and per-package advisories; keep Done and errors."
+version = "1"
+match_command = '^yarn\s*(install|add|remove|upgrade|link)?\s'

@@ -1,0 +1,33 @@
+[filters.ruff]
+description = "Strip blank padding from ruff check/format output; keep all diagnostics."
+version = "1"
+match_command = '^(\s*)ruff\s+(check|format)\b'
+match_output_select = [
+  ':\d+:\d+: [A-Z]\d',
+  '^Found \d+ error',
+  'All checks passed',
+  'files? reformatted',
+  'left unchanged',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+on_empty = "ruff: ok"
+
+[[tests.ruff]]
+name = "check keeps diagnostics, drops blanks"
+input = """src/app.py:1:8: F401 [*] `os` imported but unused
+
+src/app.py:10:5: E711 Comparison to `None` should be `cond is None`
+Found 2 errors.
+[*] 1 fixable with the `--fix` option."""
+expected = """src/app.py:1:8: F401 [*] `os` imported but unused
+src/app.py:10:5: E711 Comparison to `None` should be `cond is None`
+Found 2 errors.
+[*] 1 fixable with the `--fix` option."""
+
+[[tests.ruff]]
+name = "format summary passes through"
+input = "2 files reformatted, 3 files left unchanged"
+expected = "2 files reformatted, 3 files left unchanged"

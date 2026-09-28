@@ -1,0 +1,203 @@
+[filters.kubectl-get]
+description = "Compact kubectl get/describe tables and YAML; cap long listings with head+tail."
+version = "2"
+match_command = '^kubectl\s+(get|describe|api-resources|api-versions)\b'
+match_output_select = [
+  '(?m)^NAME\s+READY\s+STATUS',
+  '(?m)^NAMESPACE\s+NAME\s+',
+  '(?m)^NAME\s+NAMESPACE\s+',
+  '(?m)^Name:\s+',
+  '(?m)^Kind:\s+',
+  '(?m)Unable to connect to the server',
+  '(?m)Error from server',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^\s+resourceVersion:\s',
+  '^\s+uid:\s',
+  '^\s+generation:\s',
+  '^\s+creationTimestamp:\s',
+]
+max_lines = 60
+max_lines_keep_tail = 20
+
+[[tests.kubectl-get]]
+name = "pod table: blanks stripped, rows kept"
+input = """
+NAME                     READY   STATUS    RESTARTS   AGE
+api-7d4f8b9c6d-abcde     1/1     Running   0          2d
+worker-5c9d7f8b6-xyz12   0/1     CrashLoopBackOff   5   10m
+"""
+expected = """NAME                     READY   STATUS    RESTARTS   AGE
+api-7d4f8b9c6d-abcde     1/1     Running   0          2d
+worker-5c9d7f8b6-xyz12   0/1     CrashLoopBackOff   5   10m"""
+
+[[tests.kubectl-get]]
+name = "describe: strips metadata noise, keeps identity and status"
+input = """
+Name:         api-7d4f8b9c6d-abcde
+Namespace:    production
+Labels:       app=api
+Annotations:  kubectl.kubernetes.io/restartedAt: 2026-07-14T09:00:00Z
+Status:       Running
+IP:           10.0.1.42
+  resourceVersion: "1234567"
+  uid: 8f3c2a1b-0000-0000-0000-abcdef123456
+  generation: 3
+  creationTimestamp: "2026-07-01T10:00:00Z"
+Containers:
+  api:
+    State:          Running
+"""
+expected = """Name:         api-7d4f8b9c6d-abcde
+Namespace:    production
+Labels:       app=api
+Annotations:  kubectl.kubernetes.io/restartedAt: 2026-07-14T09:00:00Z
+Status:       Running
+IP:           10.0.1.42
+Containers:
+  api:
+    State:          Running"""
+
+[[tests.kubectl-get]]
+name = "server error preserved verbatim"
+input = "Error from server (Forbidden): pods is forbidden: User cannot list resource"
+expected = "Error from server (Forbidden): pods is forbidden: User cannot list resource"
+
+[[tests.kubectl-get]]
+name = "long pod list head+tail truncated with marker"
+input = """NAME                     READY   STATUS    RESTARTS   AGE
+pod-001                  1/1     Running   0          1d
+pod-002                  1/1     Running   0          1d
+pod-003                  1/1     Running   0          1d
+pod-004                  1/1     Running   0          1d
+pod-005                  1/1     Running   0          1d
+pod-006                  1/1     Running   0          1d
+pod-007                  1/1     Running   0          1d
+pod-008                  1/1     Running   0          1d
+pod-009                  1/1     Running   0          1d
+pod-010                  1/1     Running   0          1d
+pod-011                  1/1     Running   0          1d
+pod-012                  1/1     Running   0          1d
+pod-013                  1/1     Running   0          1d
+pod-014                  1/1     Running   0          1d
+pod-015                  1/1     Running   0          1d
+pod-016                  1/1     Running   0          1d
+pod-017                  1/1     Running   0          1d
+pod-018                  1/1     Running   0          1d
+pod-019                  1/1     Running   0          1d
+pod-020                  1/1     Running   0          1d
+pod-021                  1/1     Running   0          1d
+pod-022                  1/1     Running   0          1d
+pod-023                  1/1     Running   0          1d
+pod-024                  1/1     Running   0          1d
+pod-025                  1/1     Running   0          1d
+pod-026                  1/1     Running   0          1d
+pod-027                  1/1     Running   0          1d
+pod-028                  1/1     Running   0          1d
+pod-029                  1/1     Running   0          1d
+pod-030                  1/1     Running   0          1d
+pod-031                  1/1     Running   0          1d
+pod-032                  1/1     Running   0          1d
+pod-033                  1/1     Running   0          1d
+pod-034                  1/1     Running   0          1d
+pod-035                  1/1     Running   0          1d
+pod-036                  1/1     Running   0          1d
+pod-037                  1/1     Running   0          1d
+pod-038                  1/1     Running   0          1d
+pod-039                  1/1     Running   0          1d
+pod-040                  1/1     Running   0          1d
+pod-041                  1/1     Running   0          1d
+pod-042                  1/1     Running   0          1d
+pod-043                  1/1     Running   0          1d
+pod-044                  1/1     Running   0          1d
+pod-045                  1/1     Running   0          1d
+pod-046                  1/1     Running   0          1d
+pod-047                  1/1     Running   0          1d
+pod-048                  1/1     Running   0          1d
+pod-049                  1/1     Running   0          1d
+pod-050                  1/1     Running   0          1d
+pod-051                  1/1     Running   0          1d
+pod-052                  1/1     Running   0          1d
+pod-053                  1/1     Running   0          1d
+pod-054                  1/1     Running   0          1d
+pod-055                  1/1     Running   0          1d
+pod-056                  1/1     Running   0          1d
+pod-057                  1/1     Running   0          1d
+pod-058                  1/1     Running   0          1d
+pod-059                  1/1     Running   0          1d
+pod-060                  1/1     Running   0          1d
+pod-061                  1/1     Running   0          1d
+pod-062                  1/1     Running   0          1d
+pod-063                  1/1     Running   0          1d
+pod-064                  1/1     Running   0          1d
+pod-065                  1/1     Running   0          1d
+pod-066                  1/1     Running   0          1d
+pod-067                  1/1     Running   0          1d
+pod-068                  1/1     Running   0          1d
+pod-069                  1/1     Running   0          1d
+pod-070                  1/1     Running   0          1d
+pod-LAST                 1/1     Running   0          1d
+"""
+expected = """NAME                     READY   STATUS    RESTARTS   AGE
+pod-001                  1/1     Running   0          1d
+pod-002                  1/1     Running   0          1d
+pod-003                  1/1     Running   0          1d
+pod-004                  1/1     Running   0          1d
+pod-005                  1/1     Running   0          1d
+pod-006                  1/1     Running   0          1d
+pod-007                  1/1     Running   0          1d
+pod-008                  1/1     Running   0          1d
+pod-009                  1/1     Running   0          1d
+pod-010                  1/1     Running   0          1d
+pod-011                  1/1     Running   0          1d
+pod-012                  1/1     Running   0          1d
+pod-013                  1/1     Running   0          1d
+pod-014                  1/1     Running   0          1d
+pod-015                  1/1     Running   0          1d
+pod-016                  1/1     Running   0          1d
+pod-017                  1/1     Running   0          1d
+pod-018                  1/1     Running   0          1d
+pod-019                  1/1     Running   0          1d
+pod-020                  1/1     Running   0          1d
+pod-021                  1/1     Running   0          1d
+pod-022                  1/1     Running   0          1d
+pod-023                  1/1     Running   0          1d
+pod-024                  1/1     Running   0          1d
+pod-025                  1/1     Running   0          1d
+pod-026                  1/1     Running   0          1d
+pod-027                  1/1     Running   0          1d
+pod-028                  1/1     Running   0          1d
+pod-029                  1/1     Running   0          1d
+pod-030                  1/1     Running   0          1d
+pod-031                  1/1     Running   0          1d
+pod-032                  1/1     Running   0          1d
+pod-033                  1/1     Running   0          1d
+pod-034                  1/1     Running   0          1d
+pod-035                  1/1     Running   0          1d
+pod-036                  1/1     Running   0          1d
+pod-037                  1/1     Running   0          1d
+pod-038                  1/1     Running   0          1d
+pod-039                  1/1     Running   0          1d
+... +12 more lines
+pod-052                  1/1     Running   0          1d
+pod-053                  1/1     Running   0          1d
+pod-054                  1/1     Running   0          1d
+pod-055                  1/1     Running   0          1d
+pod-056                  1/1     Running   0          1d
+pod-057                  1/1     Running   0          1d
+pod-058                  1/1     Running   0          1d
+pod-059                  1/1     Running   0          1d
+pod-060                  1/1     Running   0          1d
+pod-061                  1/1     Running   0          1d
+pod-062                  1/1     Running   0          1d
+pod-063                  1/1     Running   0          1d
+pod-064                  1/1     Running   0          1d
+pod-065                  1/1     Running   0          1d
+pod-066                  1/1     Running   0          1d
+pod-067                  1/1     Running   0          1d
+pod-068                  1/1     Running   0          1d
+pod-069                  1/1     Running   0          1d
+pod-070                  1/1     Running   0          1d
+pod-LAST                 1/1     Running   0          1d"""

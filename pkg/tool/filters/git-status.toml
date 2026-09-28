@@ -1,0 +1,27 @@
+[filters.git-status]
+description = "Compact `git status` file lines to `<LETTER> <path>`; keep branch/section/merge context; never touch concatenated diff/log."
+version = "5"
+match_command = '(^|[;&|]\s*)(?:[A-Za-z0-9_]+=[^\s]+\s+)*(?:sudo\s+)?git(?:\s+(?:-[A-Za-z]\S*|--\S+))*\s+status(?:\s|$)'
+match_output_select = [
+  '^On branch ',
+  '^HEAD detached',
+  '^Changes to be committed:',
+  '^Changes not staged for commit:',
+  '^Untracked files:',
+  '^\s*(?:both )?modified:',
+  '^\s*deleted:',
+  '^\s*new file:',
+  '^nothing to commit',
+  '^(?:[ MADRCU?!]{2})\s\S',
+]
+strip_ansi = true
+
+# Never-Block: if a filter ever empties non-empty input the pipe echoes the raw
+# bytes instead, but keep a concise fallback for the degenerate all-stripped
+# case. (Must precede the [[...replace]] array-of-tables below, like the other
+# bare keys.)
+on_empty = "working tree clean"
+
+# Strip ONLY the `(use "git ...")` hint lines. Anchored on `\(use "git ` so it
+# can never match a concatenated diff/log/code line (which do not begin with
+# that literal). Everything else

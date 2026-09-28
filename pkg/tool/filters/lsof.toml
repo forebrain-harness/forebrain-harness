@@ -1,0 +1,96 @@
+[filters.lsof]
+description = "Cap lsof connection tables; keep header, listeners, and errors."
+version = "2"
+match_command = '^lsof\b'
+match_output_select = [
+  '(?m)^COMMAND\s+PID\s+USER\s+FD\s+TYPE',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+max_lines = 30
+max_lines_keep_tail = 8
+on_empty = "lsof: ok"
+
+[[tests.lsof]]
+name = "short port check passes through"
+input = """COMMAND     PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+node      22453 shaharm   18u  IPv6 0x58d75045f1ff21d7      0t0  TCP localhost:5173 (LISTEN)
+backend:000
+backend:down
+frontend:200"""
+expected = """COMMAND     PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+node      22453 shaharm   18u  IPv6 0x58d75045f1ff21d7      0t0  TCP localhost:5173 (LISTEN)
+backend:000
+backend:down
+frontend:200"""
+
+[[tests.lsof]]
+name = "many connections capped with head and tail"
+input = """COMMAND     PID    USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+node      22453 shaharm   18u  IPv6 0xaaa      0t0  TCP localhost:5173 (LISTEN)
+Cursor    42647 shaharm   26u  IPv6 0x001      0t0  TCP localhost:53624->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   30u  IPv6 0x002      0t0  TCP localhost:53635->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   31u  IPv6 0x003      0t0  TCP localhost:53629->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   32u  IPv6 0x004      0t0  TCP localhost:53630->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   34u  IPv6 0x005      0t0  TCP localhost:53636->localhost:5173 (ESTABLISHED)
+Cursor    42647 shaharm   35u  IPv6 0x006      0t0  TCP localhost:53633->localhost:5173 (ESTABLISHED)
+Cursor    42647 shaharm   36u  IPv6 0x007      0t0  TCP localhost:53638->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   37u  IPv6 0x008      0t0  TCP localhost:53639->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   38u  IPv6 0x009      0t0  TCP localhost:53637->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   39u  IPv6 0x00a      0t0  TCP localhost:53640->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   40u  IPv6 0x00b      0t0  TCP localhost:53641->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   41u  IPv6 0x00c      0t0  TCP localhost:53642->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   42u  IPv6 0x00d      0t0  TCP localhost:53643->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   43u  IPv6 0x00e      0t0  TCP localhost:53644->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   44u  IPv6 0x00f      0t0  TCP localhost:53645->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   45u  IPv6 0x010      0t0  TCP localhost:53646->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   46u  IPv6 0x011      0t0  TCP localhost:53647->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   47u  IPv6 0x012      0t0  TCP localhost:53648->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   48u  IPv6 0x013      0t0  TCP localhost:53649->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   49u  IPv6 0x014      0t0  TCP localhost:53650->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   50u  IPv6 0x015      0t0  TCP localhost:53651->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   51u  IPv6 0x016      0t0  TCP localhost:53652->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   52u  IPv6 0x017      0t0  TCP localhost:53653->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   53u  IPv6 0x018      0t0  TCP localhost:53654->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   54u  IPv6 0x019      0t0  TCP localhost:53655->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   55u  IPv6 0x01a      0t0  TCP localhost:53656->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   56u  IPv6 0x01b      0t0  TCP localhost:53657->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   57u  IPv6 0x01c      0t0  TCP localhost:53658->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   58u  IPv6 0x01d      0t0  TCP localhost:53659->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   59u  IPv6 0x01e      0t0  TCP localhost:53660->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   60u  IPv6 0x01f      0t0  TCP localhost:53661->localhost:5173 (CLOSED)
+backend:200
+frontend:200"""
+expected = """COMMAND     PID    USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+node      22453 shaharm   18u  IPv6 0xaaa      0t0  TCP localhost:5173 (LISTEN)
+Cursor    42647 shaharm   26u  IPv6 0x001      0t0  TCP localhost:53624->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   30u  IPv6 0x002      0t0  TCP localhost:53635->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   31u  IPv6 0x003      0t0  TCP localhost:53629->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   32u  IPv6 0x004      0t0  TCP localhost:53630->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   34u  IPv6 0x005      0t0  TCP localhost:53636->localhost:5173 (ESTABLISHED)
+Cursor    42647 shaharm   35u  IPv6 0x006      0t0  TCP localhost:53633->localhost:5173 (ESTABLISHED)
+Cursor    42647 shaharm   36u  IPv6 0x007      0t0  TCP localhost:53638->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   37u  IPv6 0x008      0t0  TCP localhost:53639->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   38u  IPv6 0x009      0t0  TCP localhost:53637->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   39u  IPv6 0x00a      0t0  TCP localhost:53640->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   40u  IPv6 0x00b      0t0  TCP localhost:53641->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   41u  IPv6 0x00c      0t0  TCP localhost:53642->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   42u  IPv6 0x00d      0t0  TCP localhost:53643->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   43u  IPv6 0x00e      0t0  TCP localhost:53644->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   44u  IPv6 0x00f      0t0  TCP localhost:53645->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   45u  IPv6 0x010      0t0  TCP localhost:53646->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   46u  IPv6 0x011      0t0  TCP localhost:53647->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   47u  IPv6 0x012      0t0  TCP localhost:53648->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   48u  IPv6 0x013      0t0  TCP localhost:53649->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   49u  IPv6 0x014      0t0  TCP localhost:53650->localhost:5173 (CLOSED)
+... +5 more lines
+Cursor    42647 shaharm   55u  IPv6 0x01a      0t0  TCP localhost:53656->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   56u  IPv6 0x01b      0t0  TCP localhost:53657->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   57u  IPv6 0x01c      0t0  TCP localhost:53658->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   58u  IPv6 0x01d      0t0  TCP localhost:53659->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   59u  IPv6 0x01e      0t0  TCP localhost:53660->localhost:5173 (CLOSED)
+Cursor    42647 shaharm   60u  IPv6 0x01f      0t0  TCP localhost:53661->localhost:5173 (CLOSED)
+backend:200
+frontend:200"""

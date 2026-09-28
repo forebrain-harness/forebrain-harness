@@ -1,0 +1,4 @@
+[filters.cdk]
+description = "Drop CDK progress-bar lines and the decorative synthesis emoji; keep synthesis time, stack status, and ARN."
+version = "2"
+match_command = '^cdk\s+(deploy|destroy|diff|synth)\b'

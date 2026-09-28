@@ -1,0 +1,13 @@
+[filters.sf]
+description = "Compact Salesforce CLI deploy/retrieve, apex tests, and --json output."
+version = "5"
+match_command = "(^|[;&|]\\s*)sf\\s"
+match_output_select = [
+  '(?m)^\{"status":\d',
+  '(?m)^\{\s*"status":',
+  '(?m)^Total number of records retrieved:',
+  '(?m)Deploying Metadata',
+  '(?m)Retrieving Metadata',
+  '(?m)^Error \(',
+]
+strip_ansi = true

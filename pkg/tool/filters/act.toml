@@ -1,0 +1,4 @@
+[filters.act]
+description = "Drop act Docker-setup scaffolding lines and status emojis; keep step output and job results."
+version = "2"
+match_command = '^act\b'

@@ -1,0 +1,33 @@
+[filters.cargo]
+description = "Drop cargo build/check/test progress lines, keep warnings, errors, test failures, and the summary."
+version = "3"
+match_command = '^(\s*)cargo\s+(build|check|clippy|test|install)\b'
+match_output_select = [
+  '^\s*Compiling \S+ v',
+  '^\s*Checking \S+ v',
+  '^\s*Finished ',
+  '^error\[E\d',
+  '^error: could not compile',
+  '^test result: ',
+  '^running \d+ tests?',
+]
+strip_ansi = true
+# Drop per-test "... ok"/"... ignored" lines and other single-shot progress
+# noise. Errors, warnings, `... FAILED` lines, the `failures:` section, panics,
+# and the `test result:` summary are all left untouched so failures are
+# preserved. Per-crate `Compiling`/`Checking` lines are handled below via
+# collapse_lines_matching instead of a silent strip (see that rule's comment).
+strip_lines_matching = [
+  '^\s*$',
+  '^\s*Downloading ',
+  '^\s*Downloaded ',
+  '^\s*Updating ',
+  '^\s*Blocking ',
+  '^\s*Installing ',
+  '^\s*Running ',
+  '^running \d+ tests?$',
+  '^test .* \.\.\. ok$',
+  '^test .* \.\.\. ignored',
+]
+# A build touches one `Compiling <crate> v<ver>` (and, for `cargo check`/
+# `clippy`, `Checking <crate> v<ver>`) line per crate in the dependency graph

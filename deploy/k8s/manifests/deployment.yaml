@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forebrain
+  namespace: forebrain
+  labels:
+    app: forebrain
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: forebrain
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: forebrain
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: init-config
+          image: busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /data/forebrain
+              cp /config/forebrain.yaml /data/forebrain/forebrain.yaml
+              mkdir -p /data/forebrain/workspace /data/forebrain/agents /data/forebrain/state
+              cp /config/default.yaml /data/forebrain/agents/default.yaml
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi
+              cpu: 100m
+          volumeMounts:
+            - name: forebrain-home
+              mountPath: /data/forebrain
+            - name: config
+              mountPath: /config
+      containers:
+        - name: gateway
+          image: forebrain:latest
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "--static-dist=/app/static"]
+          ports:
+            - name: http
+              containerPort: 6060
+              protocol: TCP
+          env:
+            - name: HOME
+              value: /data
+            - name: FOREBRAIN_HOME
+              value: /data/forebrain
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: forebrain-secrets
+                  key: OPENAI_API_KEY
+                  optional: true
+          resources:
+            requests:
+              memory: 256Mi
+              cpu: 100m
+            limits:
+              memory: 2Gi
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: forebrain-home
+              mountPath: /data/forebrain
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: forebrain-home
+          persistentVolumeClaim:
+            claimName: forebrain-home-pvc
+        - name: config
+          configMap:
+            name: forebrain-config

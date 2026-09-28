@@ -1,0 +1,62 @@
+[filters.pod-install]
+description = "Drop CocoaPods per-pod download/install noise; keep analysis and the completion summary."
+version = "1"
+match_command = '^pod\s+(install|update)\b'
+match_output_select = [
+  '(?m)^Analyzing dependencies',
+]
+strip_lines_matching = [
+  '^(Fetching podspec for|Downloading dependencies|Generating Pods project|Integrating client project|Installing [A-Z][A-Za-z])',
+]
+
+[[tests.pod-install]]
+name = "strips install noise, keeps analysis and completion"
+input = """
+Analyzing dependencies
+Fetching podspec for `AFNetworking` from `../AFNetworking`
+Downloading dependencies
+Installing AFNetworking (4.0.1)
+Installing Alamofire (5.8.1)
+Generating Pods project
+Integrating client project
+Pod installation complete! There are 5 dependencies from the Podfile and 5 total pods installed.
+"""
+expected = """
+Analyzing dependencies
+Pod installation complete! There are 5 dependencies from the Podfile and 5 total pods installed.
+"""
+
+[[tests.pod-install]]
+name = "preserves warnings"
+input = """
+Analyzing dependencies
+Fetching podspec for `MyPod` from `../MyPod`
+Installing MyPod (1.0.0)
+[!] The `MyApp [Debug]` target overrides the `OTHER_LDFLAGS` build setting.
+Pod installation complete! There is 1 dependency from the Podfile and 1 total pod installed.
+"""
+expected = """
+Analyzing dependencies
+[!] The `MyApp [Debug]` target overrides the `OTHER_LDFLAGS` build setting.
+Pod installation complete! There is 1 dependency from the Podfile and 1 total pod installed.
+"""
+
+[[tests.pod-install]]
+name = "real install with fetch/download/install noise, keeps analysis and completion"
+input = """
+Analyzing dependencies
+Fetching podspec for `AFNetworking` from `https://cdn.cocoapods.org/`
+Fetching podspec for `Alamofire` from `https://cdn.cocoapods.org/`
+Fetching podspec for `SnapKit` from `https://cdn.cocoapods.org/`
+Downloading dependencies
+Installing AFNetworking (4.0.1)
+Installing Alamofire (5.8.1)
+Installing SnapKit (5.7.1)
+Generating Pods project
+Integrating client project
+Pod installation complete! There are 3 dependencies from the Podfile and 3 total pods installed.
+"""
+expected = """
+Analyzing dependencies
+Pod installation complete! There are 3 dependencies from the Podfile and 3 total pods installed.
+"""

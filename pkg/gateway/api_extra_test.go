@@ -1,0 +1,1709 @@
+package gateway
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	llmopenai "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
+	"github.com/stretchr/testify/require"
+)
+
+func TestHandleSlashCommands(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&q=pl", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSlashCommands(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var out struct {
+		Surface string `json:"surface"`
+		Query   string `json:"query"`
+		Records []struct {
+			Name         string   `json:"name"`
+			Category     string   `json:"category"`
+			ActionKind   string   `json:"action_kind"`
+			ArgumentHint string   `json:"argument_hint"`
+			AllowedModes []string `json:"allowed_modes"`
+		} `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Equal(t, "webchat", out.Surface)
+	require.Equal(t, "pl", out.Query)
+	require.Len(t, out.Records, 1)
+	require.Equal(t, "plan", out.Records[0].Name)
+	require.Equal(t, "agent", out.Records[0].Category)
+	require.Equal(t, "inject-prompt", out.Records[0].ActionKind)
+	require.NotEmpty(t, out.Records[0].ArgumentHint)
+	require.NotEmpty(t, out.Records[0].AllowedModes)
+}
+
+func TestHandleSlashCommandsSideConversationFilter(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&side=1", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSlashCommands(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var out struct {
+		Records []struct {
+			Name string `json:"name"`
+		} `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.NotEmpty(t, out.Records)
+	names := make(map[string]bool, len(out.Records))
+	for _, rec := range out.Records {
+		names[rec.Name] = true
+	}
+	require.True(t, names["diff"])
+	require.True(t, names["status"])
+	require.False(t, names["plan"])
+}
+
+func TestHandleSlashCommandsDuringRunFilter(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&during_run=1", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSlashCommands(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var out struct {
+		Records []struct {
+			Name string `json:"name"`
+		} `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.NotEmpty(t, out.Records)
+	names := make(map[string]bool, len(out.Records))
+	for _, rec := range out.Records {
+		names[rec.Name] = true
+	}
+	require.False(t, names["new"])
+	require.False(t, names["resume"])
+	require.False(t, names["fork"])
+	require.True(t, names["status"])
+}
+
+func TestHandleSlashCommandsReturnsCanonicalAndOptionFlags(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=webchat&q=pl&during_run=1&side=1", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSlashCommands(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var out struct {
+		Options struct {
+			DuringRun        bool `json:"during_run"`
+			SideConversation bool `json:"side_conversation"`
+		} `json:"options"`
+		Records []struct {
+			Name                    string `json:"name"`
+			CanonicalName           string `json:"canonical_name"`
+			AvailableDuringRun      bool   `json:"available_during_run"`
+			AvailableInConversation bool   `json:"available_in_side_conversation"`
+		} `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.True(t, out.Options.DuringRun)
+	require.True(t, out.Options.SideConversation)
+	require.Empty(t, out.Records)
+}
+
+func TestHandleSlashCommandsSlashDiscoverySurfaceRejectsUnsupportedChannel(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=cli", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSlashCommands(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), `slash discovery is not available for channel "cli"`)
+}
+
+func TestHandleSlashCommandsSlashDiscoverySurfaceRejectsUnsupportedChannelTrimmed(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/slash/commands?surface=+cli+", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleSlashCommands(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), `slash discovery is not available for channel "cli"`)
+}
+
+func TestParseSlashCommandWithOptionsSlashExecutionSurfaceRejectsUnsupportedChannel(t *testing.T) {
+	res := parseSlashCommandWithOptions(&Server{}, "s1", "cli", "/plan", turn.Context{}, nil)
+	require.True(t, res.Handled)
+	require.False(t, res.ShouldContinueRun)
+	require.Equal(t, `unsupported slash channel "cli"`, res.Reply)
+}
+
+func TestParseSlashCommandWithOptionsSlashExecutionSurfaceRejectsUnsupportedChannelTrimmed(t *testing.T) {
+	res := parseSlashCommandWithOptions(&Server{}, "s1", " cli ", "/plan", turn.Context{}, nil)
+	require.True(t, res.Handled)
+	require.False(t, res.ShouldContinueRun)
+	require.Equal(t, `unsupported slash channel "cli"`, res.Reply)
+}
+
+// The webchat surface must carry the /goal objective through the gateway's
+// slashCommandResult so the ws handler can enable goal-driven continuation.
+func TestParseSlashCommandWebchatGoalCarriesObjective(t *testing.T) {
+	res := parseSlashCommand(&Server{}, "s1", "webchat", "/goal ship the parser")
+	require.True(t, res.ShouldContinueRun)
+	require.Equal(t, "ship the parser", res.GoalObjective)
+	require.Contains(t, res.ContinueInput, "ship the parser")
+}
+
+func TestParseSlashCommandWebchatGoalWithoutObjectiveIsUsageHint(t *testing.T) {
+	res := parseSlashCommand(&Server{}, "s1", "webchat", "/goal")
+	require.False(t, res.ShouldContinueRun)
+	require.Empty(t, res.GoalObjective)
+	require.True(t, res.Handled)
+}
+
+// cronTestServer builds the least server the standing-work endpoints need: a
+// database for the jobs, and an active primary agent to own them.
+func cronTestServer(t *testing.T) *Server {
+	t.Helper()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := &config.Root{}
+	return &Server{
+		Home:  home,
+		RunRT: &state.RunStore{DB: db},
+		Env:   &process.Environment{Root: home, SQL: db, Deps: run.Deps{AppCfg: cfg}},
+	}
+}
+
+// seedRun creates the conversation and run rows an event's foreign keys
+// require, under the exact ids a fixture names.
+func seedRun(t *testing.T, runs *state.RunStore, sessionID, runID string) {
+	t.Helper()
+	if err := state.NewSessionStore(runs.DB, "main").Ensure(context.Background(), sessionID, sessionID); err != nil {
+		t.Fatalf("ensure session %s: %v", sessionID, err)
+	}
+	if _, err := runs.DB.ExecContext(context.Background(),
+		`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,'',?,0,0)`,
+		runID, sessionID, string(state.RunStatusRunning)); err != nil {
+		t.Fatalf("create run %s: %v", runID, err)
+	}
+}
+
+func cronRequest(t *testing.T, s *Server, method, target string, body any, handler http.HandlerFunc, params ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, target, reader)
+	if len(params) == 2 {
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: params[0], Value: params[1]}}))
+	}
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
+}
+
+// A job is created, listed, edited, fired-history-checked and removed through
+// the API a surface actually calls.
+func TestCronJobsRoundTripThroughTheAPI(t *testing.T) {
+	s := cronTestServer(t)
+
+	created := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+		"name": "morning brief", "schedule": "daily at 7am", "prompt": "summarise the inbox", "deliver": "telegram",
+	}, s.handleCronJobs)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", created.Code, created.Body.String())
+	}
+	var job state.CronJob
+	if err := json.Unmarshal(created.Body.Bytes(), &job); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	if job.ID == "" || job.NextRunAt == nil {
+		t.Fatalf("a created job must be scheduled: %#v", job)
+	}
+
+	listed := cronRequest(t, s, http.MethodGet, "/api/cron", nil, s.handleCronJobs)
+	var list struct {
+		AgentID string          `json:"agent_id"`
+		Records []state.CronJob `json:"records"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(list.Records) != 1 || list.Records[0].Name != "morning brief" {
+		t.Fatalf("list = %#v", list)
+	}
+
+	paused := cronRequest(t, s, http.MethodPut, "/api/cron/"+job.ID, map[string]any{
+		"schedule": "daily at 7am", "enabled": false,
+	}, s.handleCronJob, "id", job.ID)
+	if paused.Code != http.StatusOK {
+		t.Fatalf("pause = %d %s", paused.Code, paused.Body.String())
+	}
+	var pausedJob state.CronJob
+	_ = json.Unmarshal(paused.Body.Bytes(), &pausedJob)
+	if pausedJob.NextRunAt != nil {
+		t.Fatal("a paused job must have no next fire, or the scheduler would still pick it up")
+	}
+
+	resumed := cronRequest(t, s, http.MethodPut, "/api/cron/"+job.ID, map[string]any{"enabled": true}, s.handleCronJob, "id", job.ID)
+	var resumedJob state.CronJob
+	_ = json.Unmarshal(resumed.Body.Bytes(), &resumedJob)
+	if resumedJob.NextRunAt == nil {
+		t.Fatal("resuming a job must give it a next fire again")
+	}
+
+	removed := cronRequest(t, s, http.MethodDelete, "/api/cron/"+job.ID, nil, s.handleCronJob, "id", job.ID)
+	if removed.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", removed.Code, removed.Body.String())
+	}
+	after := cronRequest(t, s, http.MethodGet, "/api/cron", nil, s.handleCronJobs)
+	_ = json.Unmarshal(after.Body.Bytes(), &list)
+	if len(list.Records) != 0 {
+		t.Fatalf("job survived deletion: %#v", list.Records)
+	}
+}
+
+// A schedule nobody can read is refused when the job is created, not silently
+// stored as a job that never fires.
+func TestCronJobCreationRefusesAnUnreadableSchedule(t *testing.T) {
+	s := cronTestServer(t)
+	rec := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+		"schedule": "whenever", "prompt": "do the thing",
+	}, s.handleCronJobs)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create with a bad schedule = %d %s", rec.Code, rec.Body.String())
+	}
+
+	noPrompt := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{"schedule": "every 1h"}, s.handleCronJobs)
+	if noPrompt.Code != http.StatusBadRequest {
+		t.Fatalf("create with no prompt = %d", noPrompt.Code)
+	}
+}
+
+// A job belonging to another primary agent is not this tenant's to read.
+func TestCronJobFromAnotherTenantIsNotFound(t *testing.T) {
+	s := cronTestServer(t)
+	store := &state.CronStore{DB: s.RunRT.DB}
+	foreign := state.CronJob{ID: "job-foreign", Ag: "research", Sched: "every 1h", Prompt: "x", Enabled: true}
+	if err := store.InsertJob(context.Background(), foreign); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	rec := cronRequest(t, s, http.MethodGet, "/api/cron/job-foreign", nil, s.handleCronJob, "id", "job-foreign")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("another tenant's job = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A heartbeat is set on a session, read back, and cleared.
+func TestHeartbeatRoundTripsThroughTheAPI(t *testing.T) {
+	s := cronTestServer(t)
+	mustGatewaySession(t, s.RunRT.DB, "s-1")
+
+	type heartbeatView struct {
+		SessionID   string `json:"session_id"`
+		IntervalSec int    `json:"interval_seconds"`
+		Prompt      string `json:"prompt"`
+		Paused      bool   `json:"paused"`
+		NextRunAt   *int64 `json:"next_run_at"`
+		LastFiredAt *int64 `json:"last_fired_at"`
+	}
+	decode := func(rec *httptest.ResponseRecorder) *heartbeatView {
+		t.Helper()
+		var out heartbeatView
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode heartbeat: %v", err)
+		}
+		return &out
+	}
+
+	set := cronRequest(t, s, http.MethodPut, "/api/heartbeat", map[string]any{
+		"session_id": "s-1", "interval_seconds": 600, "prompt": "anything new?",
+	}, s.handleHeartbeat)
+	if set.Code != http.StatusOK {
+		t.Fatalf("set = %d %s", set.Code, set.Body.String())
+	}
+	if got := decode(set); got.Paused || got.NextRunAt == nil {
+		t.Fatalf("a set heartbeat must be scheduled: %#v", got)
+	}
+
+	got := cronRequest(t, s, http.MethodGet, "/api/heartbeat?session_id=s-1", nil, s.handleHeartbeat)
+	var read struct {
+		Heartbeat *heartbeatView `json:"heartbeat"`
+	}
+	if err := json.Unmarshal(got.Body.Bytes(), &read); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if read.Heartbeat == nil || read.Heartbeat.Prompt != "anything new?" || read.Heartbeat.NextRunAt == nil || read.Heartbeat.Paused {
+		t.Fatalf("heartbeat = %#v", read.Heartbeat)
+	}
+
+	paused := cronRequest(t, s, http.MethodPut, "/api/heartbeat", map[string]any{
+		"session_id": "s-1", "interval_seconds": 600, "prompt": "anything new?", "paused": true,
+	}, s.handleHeartbeat)
+	if paused.Code != http.StatusOK {
+		t.Fatalf("pause = %d %s", paused.Code, paused.Body.String())
+	}
+	if got := decode(paused); !got.Paused || got.NextRunAt != nil {
+		t.Fatalf("a paused heartbeat must have no next fire: %#v", got)
+	}
+
+	tooFast := cronRequest(t, s, http.MethodPut, "/api/heartbeat", map[string]any{
+		"session_id": "s-2", "interval_seconds": 5, "prompt": "spin",
+	}, s.handleHeartbeat)
+	if tooFast.Code != http.StatusBadRequest {
+		t.Fatalf("a sub-minute heartbeat must be refused, got %d", tooFast.Code)
+	}
+
+	cleared := cronRequest(t, s, http.MethodDelete, "/api/heartbeat?session_id=s-1", nil, s.handleHeartbeat)
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear = %d", cleared.Code)
+	}
+	after := cronRequest(t, s, http.MethodGet, "/api/heartbeat?session_id=s-1", nil, s.handleHeartbeat)
+	_ = json.Unmarshal(after.Body.Bytes(), &read)
+	if read.Heartbeat != nil {
+		t.Fatalf("heartbeat survived clearing: %#v", read.Heartbeat)
+	}
+}
+
+// The configuration editor must never hand a secret back to the browser, and
+// must refuse text that would not load as a config.
+func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	if err := os.WriteFile(path, []byte("agents:\n  definitions:\n    main:\n      primary: true\n      channels:\n        telegram:\n          enabled: true\n          bot_token: super-secret\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	s.Env.ConfigPath = path
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/config", nil, s.handleConfigFile)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Path string `json:"path"`
+		YAML string `json:"yaml"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Contains(got.YAML, "super-secret") {
+		t.Fatal("the editor must not be handed the secret it is not allowed to read")
+	}
+	if !strings.Contains(got.YAML, config.RedactedSecretPlaceholder) {
+		t.Fatalf("a set secret must still be visible as set:\n%s", got.YAML)
+	}
+	if got.Path != path {
+		t.Fatalf("path = %q", got.Path)
+	}
+
+	bad := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{"yaml": "agents: [unclosed"}, s.handleConfigFile)
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("unparsable config = %d %s", bad.Code, bad.Body.String())
+	}
+}
+
+// Hooks run commands, so a hook table that would not load is refused at the
+// moment it is submitted rather than at the moment a hook was due to fire.
+func TestHooksEndpointRefusesAnUnknownEvent(t *testing.T) {
+	s := cronTestServer(t)
+	s.Env.ConfigPath = filepath.Join(s.Home, "forebrain.yaml")
+	rec := cronRequest(t, s, http.MethodPut, "/api/hooks", map[string]any{
+		"hooks": map[string]any{
+			"WheneverIFeelLikeIt": []map[string]any{{"hooks": []map[string]any{{"type": "command", "command": "echo hi"}}}},
+		},
+	}, s.handleHooks)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown hook event = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The hooks endpoint tells a surface what it may offer, from the same list the
+// validator enforces.
+func TestHooksEndpointPublishesTheKnownEventsAndTypes(t *testing.T) {
+	s := cronTestServer(t)
+	s.Env.ConfigPath = filepath.Join(s.Home, "forebrain.yaml")
+	rec := cronRequest(t, s, http.MethodGet, "/api/hooks", nil, s.handleHooks)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Events     []string `json:"events"`
+		KnownTypes []string `json:"known_types"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Events) == 0 || len(got.KnownTypes) == 0 {
+		t.Fatalf("hooks metadata = %#v", got)
+	}
+	for _, name := range got.Events {
+		if !config.ValidHookEventName(name) {
+			t.Fatalf("offered event %q is not accepted by the validator", name)
+		}
+	}
+}
+
+func newProjectsTestServer(t *testing.T) (*Server, *state.ProjectStore, string) {
+	t.Helper()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: filepath.Join(home, "workspace")}}
+	s := &Server{
+		Home:     home,
+		Runner:   runner,
+		Projects: state.NewProjectStore(db, "main"),
+		Sessions: state.NewSessionStore(db, "main"),
+	}
+	return s, s.Projects, home
+}
+
+func doJSON(t *testing.T, s *Server, method, target string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader *strings.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = strings.NewReader(string(b))
+	} else {
+		reader = strings.NewReader("")
+	}
+	req := httptest.NewRequest(method, target, reader)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.ServeHTTPForTest(rec, req)
+	return rec
+}
+
+func TestProjectsCreateValidatesRoot(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+
+	// Missing root.
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "x"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing root: %d %s", rec.Code, rec.Body.String())
+	}
+	// Nonexistent directory.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "x", "root": "/nonexistent-project-dir"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("nonexistent root: %d", rec.Code)
+	}
+	// Filesystem root.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "x", "root": "/"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("fs root: %d", rec.Code)
+	}
+	// Inside the forebrain home.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "x", "root": filepath.Join(home, "nested")})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("inside home: %d", rec.Code)
+	}
+	// Not a directory.
+	filePath := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(filePath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "x", "root": filePath})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("file root: %d", rec.Code)
+	}
+}
+
+// A project is bound to one directory, under the one name forebrain gives it.
+//
+// The trust store, the launch context every project route resolves, and the
+// project key written into the row all spell a directory with its symlinks
+// resolved. A root kept as the caller typed it would leave the record holding
+// two names for one place: a client could not match the project against the
+// paths every other route reports, and the same checkout could be bound twice.
+func TestProjectsCreateStoresTheCanonicalRoot(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	target := projectTempRoot(t)
+	link := filepath.Join(t.TempDir(), "by-another-name")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "linked", "root": link})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var row map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := row["root"].(string); got != target {
+		t.Fatalf("root = %q, want the canonical %q", got, target)
+	}
+	if got, _ := row["project_key"].(string); got != memory.ProjectKey(target) {
+		t.Fatalf("project_key = %q, want the key of the canonical root", got)
+	}
+}
+
+func TestProjectsCreateTrustIsExplicitOperatorChoice(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+	root := t.TempDir()
+
+	// Without trust: project exists, no trust decision recorded.
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "untrusted", "root": root})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var row map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["trust_recorded"] != false {
+		t.Fatalf("trust must not be recorded by default: %v", row["trust_recorded"])
+	}
+	trusted, err := safety.IsTrusted(home, safety.Project{Root: root})
+	if err != nil || trusted {
+		t.Fatalf("no trust decision should exist yet: %v %v", trusted, err)
+	}
+
+	// With trust: the decision lands in the existing workspace trust store.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "trusted", "root": root, "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create trusted: %d %s", rec.Code, rec.Body.String())
+	}
+	row = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["trust_recorded"] != true {
+		t.Fatalf("trust should be recorded when explicitly chosen: %v", row["trust_recorded"])
+	}
+	trusted, err = safety.IsTrusted(home, safety.Project{Root: root})
+	if err != nil || !trusted {
+		t.Fatalf("trust decision missing: %v %v", trusted, err)
+	}
+}
+
+func TestProjectsCRUDPinArchiveDelete(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	root := t.TempDir()
+
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "orig", "root": root, "instructions": "one", "memory_scope": "project_only"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := created["id"].(string)
+	if id == "" {
+		t.Fatalf("no id: %v", created)
+	}
+	if created["memory_scope"] != "project_only" {
+		t.Fatalf("scope: %v", created["memory_scope"])
+	}
+
+	// List shows it.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects", nil)
+	var list struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Projects) != 1 || list.Projects[0]["id"] != id {
+		t.Fatalf("list: %+v", list)
+	}
+
+	// Patch edits editable fields only.
+	rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, map[string]any{"name": "renamed", "instructions": "two", "memory_scope": "shared"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body.String())
+	}
+	p, err := store.Get(context.Background(), id)
+	if err != nil || p.Name != "renamed" || p.Instructions != "two" || p.MemoryScope != "shared" {
+		t.Fatalf("patch not applied: %+v %v", p, err)
+	}
+
+	// Pin then archive then list filtering.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/pin", map[string]any{"pinned": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pin: %d", rec.Code)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/archive", map[string]any{"archived": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("archive: %d", rec.Code)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects", nil)
+	list = struct {
+		Projects []map[string]any `json:"projects"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Projects) != 0 {
+		t.Fatalf("archived project must be hidden: %+v", list)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?archived=true", nil)
+	list = struct {
+		Projects []map[string]any `json:"projects"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Projects) != 1 {
+		t.Fatalf("archived project must be listed with filter: %+v", list)
+	}
+
+	// Delete removes it.
+	rec = doJSON(t, s, http.MethodDelete, "/api/v1/projects/"+id, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d", rec.Code)
+	}
+	if _, err := store.Get(context.Background(), id); err == nil {
+		t.Fatalf("deleted project still present")
+	}
+}
+
+func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	root := t.TempDir()
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "withsessions", "root": root})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/sessions", map[string]any{"title": "in project"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session create: %d %s", rec.Code, rec.Body.String())
+	}
+	var session struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.ID == "" {
+		t.Fatalf("no session id")
+	}
+	project, ok, err := store.ProjectForSession(context.Background(), session.ID)
+	if err != nil || !ok || project.ID != id {
+		t.Fatalf("session not bound: %v %v %+v", err, ok, project)
+	}
+	// The session list for the project contains it.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/sessions", nil)
+	var list struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Sessions) != 1 || list.Sessions[0]["id"] != session.ID {
+		t.Fatalf("project sessions: %+v", list)
+	}
+}
+
+func TestProjectMCPPreviewAndConsentEndpoint(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	srvPath := filepath.Join(root, ".forebrain", "mcp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(srvPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srvPath, []byte("mcp_servers:\n  - name: webtool\n    transport: stdio\n    command: /bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "mcpproj", "root": root, "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	// Preview: the entry shows as pending consent, not loaded.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/mcp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body.String())
+	}
+	var preview struct {
+		Servers        []map[string]any    `json:"servers"`
+		PendingConsent []map[string]string `json:"pending_consent"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Servers) != 0 {
+		t.Fatalf("unconfirmed entry must not be in the server list: %+v", preview.Servers)
+	}
+	if len(preview.PendingConsent) != 1 || preview.PendingConsent[0]["name"] != "webtool" {
+		t.Fatalf("pending: %+v", preview.PendingConsent)
+	}
+
+	// Confirm through the endpoint.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/mcp/consent", map[string]any{"allow": []string{"webtool"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consent: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Now the preview loads it with project scope.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/mcp", nil)
+	preview = struct {
+		Servers        []map[string]any    `json:"servers"`
+		PendingConsent []map[string]string `json:"pending_consent"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Servers) != 1 || preview.Servers[0]["scope"] != "project" {
+		t.Fatalf("servers after consent: %+v", preview.Servers)
+	}
+	if len(preview.PendingConsent) != 0 {
+		t.Fatalf("nothing should be pending: %+v", preview.PendingConsent)
+	}
+}
+
+// ServeHTTPForTest dispatches one request through the projects routes without
+// standing up the whole REST server.
+func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
+	if s == nil {
+		http.Error(w, "nil server", http.StatusInternalServerError)
+		return
+	}
+	rest := NewRestServer("127.0.0.1:0")
+	projects := rest.Group("/api/v1/projects")
+	projects.Get("/", s.handleProjectsList)
+	projects.Post("/", s.handleProjectsCreate)
+	projects.Get("/:id", s.handleProjectOne)
+	projects.Patch("/:id", s.handleProjectOne)
+	projects.Delete("/:id", s.handleProjectDelete)
+	projects.Post("/:id/pin", s.handleProjectPin)
+	projects.Post("/:id/archive", s.handleProjectArchive)
+	projects.Get("/:id/sessions", s.handleProjectSessionsList)
+	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
+	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
+	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
+	// Project-scoped skill lifecycle, mirroring the production routes.
+	projects.Get("/:id/skills", s.handleProjectSkillsList)
+	projects.Post("/:id/skills", s.handleProjectSkillsCreate)
+	projects.Post("/:id/skills/install", s.handleProjectSkillsInstall)
+	projects.Get("/:id/skills/:name", s.handleProjectSkillGet)
+	projects.Put("/:id/skills/:name", s.handleProjectSkillsUpdate)
+	projects.Post("/:id/skills/toggle", s.handleProjectSkillsToggle)
+	rest.Handler.ServeHTTP(w, r)
+}
+
+// The project-scoped skill lifecycle exists because a gateway serves several
+// projects at once. Two projects each create a skill of the same name, and
+// each file lands in its own project — neither in the other project, and
+// neither beside the gateway process. Before this, both writes went to the
+// directory the process was started in, so one project's skill was visible to
+// the other and to nobody's project.
+// projectTempRoot is a temporary project directory spelled the way forebrain
+// spells it. A project root is stored, resolved and reported canonically, and
+// on macOS a temp directory is reached through a symlinked /var — a fixture
+// that kept the raw path would be comparing two spellings of one directory and
+// calling the difference a leak.
+func projectTempRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestProjectScopedSkillsWriteIntoTheirOwnProject(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+	rootA := projectTempRoot(t)
+	rootB := projectTempRoot(t)
+	if err := os.MkdirAll(filepath.Join(rootA, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rootB, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	create := func(name, root string) string {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": name, "root": root, "trust": true})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create project %s: %d %s", name, rec.Code, rec.Body.String())
+		}
+		var created map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		id, _ := created["id"].(string)
+		if id == "" {
+			t.Fatalf("project %s has no id: %s", name, rec.Body.String())
+		}
+		return id
+	}
+	idA := create("alpha", rootA)
+	idB := create("beta", rootB)
+
+	content := `---
+name: release-flow
+description: The steps that cut a release in this repository
+---
+
+1. run the checks
+`
+	for id, name := range map[string]string{idA: "alpha", idB: "beta"} {
+		rec := doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/skills", map[string]any{
+			"name":    "release-flow",
+			"content": content,
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create skill in %s: %d %s", name, rec.Code, rec.Body.String())
+		}
+	}
+
+	inA := filepath.Join(rootA, ".forebrain", "skills", "release-flow", "SKILL.md")
+	inB := filepath.Join(rootB, ".forebrain", "skills", "release-flow", "SKILL.md")
+	for _, path := range []string{inA, inB} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s: %v", path, err)
+		}
+	}
+
+	// Each project's listing shows its own skill, scoped to that project.
+	listFor := func(id string) []map[string]any {
+		t.Helper()
+		rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/skills", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list skills: %d %s", rec.Code, rec.Body.String())
+		}
+		var overview struct {
+			Installed []map[string]any `json:"installed"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &overview); err != nil {
+			t.Fatal(err)
+		}
+		return overview.Installed
+	}
+	for id, root := range map[string]string{idA: rootA, idB: rootB} {
+		rows := listFor(id)
+		found := false
+		for _, row := range rows {
+			path, _ := row["root_path"].(string)
+			if row["name"] != "release-flow" {
+				continue
+			}
+			if filepath.Clean(path) != filepath.Clean(filepath.Join(root, ".forebrain", "skills", "release-flow")) {
+				t.Fatalf("skill listed under the wrong project: %s", path)
+			}
+			if row["source"] != "project" {
+				t.Fatalf("skill source=%v want project", row["source"])
+			}
+			found = true
+		}
+		if !found {
+			t.Fatalf("project %s does not list its own skill: %+v", id, rows)
+		}
+	}
+
+	// The workspace and the gateway home stay clean: a project skill is the
+	// project's, not the agent's and not the process's.
+	for _, stray := range []string{
+		filepath.Join(home, "workspace", "skills", "release-flow"),
+		filepath.Join(home, "skills", "release-flow"),
+		filepath.Join(".forebrain", "skills", "release-flow"),
+	} {
+		if _, err := os.Stat(stray); err == nil {
+			t.Fatalf("project skill leaked outside its project: %s", stray)
+		}
+	}
+
+	// A project route still refuses an unknown project rather than falling
+	// back to anything.
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects/no-such-project/skills", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown project: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+type stubModelsSource struct {
+	models []llmopenai.ModelInfo
+	err    error
+	calls  int
+}
+
+func (s *stubModelsSource) ChatGPTModels(ctx context.Context) ([]llmopenai.ModelInfo, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.models, nil
+}
+
+// A chatgpt-scoped listing answers from live account discovery: backend
+// priority order, exact slugs, and per-provider status the frontend can show.
+func TestHandleModelsListChatGPTDiscoversAccountModels(t *testing.T) {
+	src := &stubModelsSource{models: []llmopenai.ModelInfo{
+		{Slug: "gpt-hidden", DisplayName: "Hidden", Visibility: "hide", Priority: 0},
+		{Slug: "gpt-future", DisplayName: "GPT Future", Visibility: "list", Priority: 1,
+			DefaultReasoningEffort: "low",
+			SupportedReasoningEfforts: []llmopenai.ReasoningEffortPreset{
+				{Effort: "low"}, {Effort: "max"},
+			}},
+		{Slug: "gpt-second", DisplayName: "GPT Second", Visibility: "list", Priority: 2},
+	}}
+	s := &Server{Core: turn.New(turn.WithChatGPTModels(src))}
+	req := httptest.NewRequest(http.MethodGet, "/api/models?provider=chatgpt", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleModelsList(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var out struct {
+		Records []turn.ModelRecord        `json:"records"`
+		Status  []turn.ModelCatalogStatus `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Len(t, out.Records, 2)
+	require.Equal(t, "gpt-future", out.Records[0].APIModel)
+	require.True(t, out.Records[0].IsDefault)
+	require.Equal(t, []string{"low", "max"}, out.Records[0].ReasoningEfforts)
+	require.Equal(t, "gpt-second", out.Records[1].APIModel)
+	require.Len(t, out.Status, 1)
+	require.Equal(t, "chatgpt", out.Status[0].Provider)
+	require.Equal(t, turn.ModelSourceChatGPTAccount, out.Status[0].Source)
+	require.NotNil(t, out.Status[0].FetchedAt)
+	require.False(t, out.Status[0].FetchedAt.IsZero())
+}
+
+// A discovery failure must not read as an empty catalog: the response says the
+// provider is logged-out/unavailable and keeps its shape.
+func TestHandleModelsListReportsDiscoveryFailure(t *testing.T) {
+	src := &stubModelsSource{err: errors.New("fetch ChatGPT models: http 401: token expired")}
+	s := &Server{Core: turn.New(turn.WithChatGPTModels(src))}
+	req := httptest.NewRequest(http.MethodGet, "/api/models?provider=chatgpt", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleModelsList(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var out struct {
+		Records []turn.ModelRecord        `json:"records"`
+		Status  []turn.ModelCatalogStatus `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Empty(t, out.Records)
+	require.Len(t, out.Status, 1)
+	require.NotEmpty(t, out.Status[0].Error)
+	require.Empty(t, out.Status[0].Source)
+	require.Nil(t, out.Status[0].FetchedAt, "an error status must not claim a fetch time")
+}
+
+// A cancelled request stops the discovery instead of holding the listing.
+func TestHandleModelsListHonorsRequestCancellation(t *testing.T) {
+	src := &stubModelsSource{err: context.Canceled}
+	s := &Server{Core: turn.New(turn.WithChatGPTModels(src))}
+	req := httptest.NewRequest(http.MethodGet, "/api/models", nil)
+	ctx, cancel := context.WithCancel(req.Context())
+	req = req.WithContext(ctx)
+	cancel()
+	rr := httptest.NewRecorder()
+
+	s.handleModelsList(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var out struct {
+		Status []turn.ModelCatalogStatus `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Len(t, out.Status, 1)
+	require.NotEmpty(t, out.Status[0].Error)
+}
+
+// The gateway wires discovery from its own home's credentials: a server
+// without a source still answers from the static catalog and reports ChatGPT
+// as unconfigured rather than guessing.
+func TestHandleModelsListWithoutSourceReportsUnconfigured(t *testing.T) {
+	s := &Server{Core: turn.New()}
+	req := httptest.NewRequest(http.MethodGet, "/api/models?provider=chatgpt", nil)
+	rr := httptest.NewRecorder()
+
+	s.handleModelsList(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var out struct {
+		Records []turn.ModelRecord        `json:"records"`
+		Status  []turn.ModelCatalogStatus `json:"status"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	require.Empty(t, out.Records)
+	require.Len(t, out.Status, 1)
+	require.NotEmpty(t, out.Status[0].Error)
+}
+
+// TestChatMessagesPlacesEachCompactionAsItsOwnRow pins the web history's
+// account of compactions: every finished one is a row of its own, where the
+// live conversation drew it — a manual one right after the checkpoint it
+// wrote, a pre-turn one after the message it made room for — and a failure
+// keeps its error.
+func TestChatMessagesPlacesEachCompactionAsItsOwnRow(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	_, _ = s.Sessions.Append(ctx, "s1", "user", "first question")
+	_, _ = s.Sessions.Append(ctx, "s1", "assistant", "first answer")
+	checkpoint := func(windowID string) {
+		t.Helper()
+		part := state.CompactBoundaryPart{Trigger: "manual", Strategy: "local", WindowID: windowID, WindowNumber: 1,
+			ReplacementHistory: []llm.Message{llm.UserMessage(llm.Text(state.CompactSummaryPrefix + "\nsummary"))}}
+		if err := s.Sessions.AppendCompactCheckpoint(ctx, "s1", "summary", part); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkpoint("w-manual")
+	checkpoint("w-preturn")
+	_, _ = s.Sessions.Append(ctx, "s1", "user", "second question")
+	_, _ = s.Sessions.Append(ctx, "s1", "assistant", "second answer")
+	for _, evt := range []event.RunEvent{
+		event.NewRunEvent("", "", "s1", event.RunEventContextCompacted, event.ContextCompactedPayload{CompactionID: "c1", Trigger: "manual", BoundaryID: "w-manual", TokensBefore: 900, TokensAfter: 100}, time.Now()),
+		event.NewRunEvent("", "", "s1", event.RunEventContextCompacted, event.ContextCompactedPayload{CompactionID: "c2", Trigger: "auto", BoundaryID: "w-preturn"}, time.Now()),
+		event.NewRunEvent("", "", "s1", event.RunEventContextCompactError, event.ContextCompactFailedPayload{CompactionID: "c3", Trigger: "manual", Error: "provider down"}, time.Now().Add(time.Hour)),
+	} {
+		if _, err := s.RunRT.AppendSessionEvent(ctx, sessionEventRecord(evt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Role       string `json:"role"`
+		Content    string `json:"content"`
+		Compaction *struct {
+			Status       string `json:"status"`
+			CompactionID string `json:"compaction_id"`
+			Error        string `json:"error"`
+			TokensBefore int    `json:"tokens_before"`
+		} `json:"compaction"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, row := range rows {
+		if row.Compaction != nil {
+			got = append(got, row.Role+":"+row.Compaction.Status+":"+row.Compaction.CompactionID+row.Compaction.Error)
+			continue
+		}
+		got = append(got, row.Role+":"+row.Content)
+	}
+	want := []string{
+		"user:first question", "assistant:first answer",
+		"compaction:done:c1",
+		"user:second question",
+		"compaction:done:c2",
+		"assistant:second answer",
+		"compaction:failed:c3provider down",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// TestChatMessagesPlacesAGoalsLinesWhereTheTerminalDrawsThem pins the web
+// history's account of a /goal to the terminal's: the goal opens right after
+// the message that asked for it, each round's line comes before that round's
+// answer, the runtime's continuation prompt is not shown, and the goal ends
+// after its last round and before the user's next message.
+func TestChatMessagesPlacesAGoalsLinesWhereTheTerminalDrawsThem(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	seedRun(t, s.RunRT, "s1", "r1")
+	base := time.Unix(1_700_000_000, 0)
+	appendRow := func(role string, msg llm.Message, at time.Duration) int64 {
+		t.Helper()
+		id, err := s.Sessions.AppendStructuredMessage(ctx, "s1", role, msg.TextContent(), "", state.MessagePartsJSON(msg, msg.TextContent()), "", "", "", "", state.MessageExecTiming{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Env.SQL.ExecContext(ctx, `UPDATE fb_messages SET created_at = ? WHERE id = ?`, base.Add(at).Unix(), id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	continuation := llm.UserMessage(llm.Text(run.ContinuationPrompt("ship", "two tests fail")))
+	continuation.IsMeta = true
+	asked := appendRow("user", llm.UserMessage(llm.Text("/goal ship")), 0)
+	roundOne := appendRow("assistant", llm.AssistantMessage([]llm.ContentPart{llm.Text("round one")}), 2*time.Second)
+	appendRow("user", continuation, 4*time.Second)
+	appendRow("assistant", llm.AssistantMessage([]llm.ContentPart{llm.Text("round two")}), 6*time.Second)
+	appendRow("user", llm.UserMessage(llm.Text("thanks")), 60*time.Second)
+	for _, evt := range []event.RunEvent{
+		event.NewRunEvent("goal-started:r1", "r1", "s1", event.RunEventGoalStarted, event.GoalStartedPayload{Objective: "ship", MaxRounds: run.MaxGoalRounds, AfterRowID: asked}, base),
+		event.NewRunEvent("goal-round:r1:2", "r1", "s1", event.RunEventGoalRoundStarted, event.GoalRoundStartedPayload{Round: 2, Why: "two tests fail", CheckAgentID: "check-1", AfterRowID: roundOne}, base.Add(3*time.Second)),
+		event.NewRunEvent("goal-completed:r1", "r1", "s1", event.RunEventGoalCompleted, event.GoalCompletedPayload{Objective: "ship", Status: event.GoalStatusDone, Rounds: 2, Why: "all pass", DurationMs: 8_000, CheckAgentID: "check-2"}, base.Add(8*time.Second)),
+	} {
+		if _, err := s.RunRT.AppendSessionEvent(ctx, sessionEventRecord(evt)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Role    string       `json:"role"`
+		Content string       `json:"content"`
+		Goal    *chatGoalRow `json:"goal"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, row := range rows {
+		if row.Goal != nil {
+			got = append(got, fmt.Sprintf("goal:%s:%d:%s:%s", row.Goal.Phase, max(row.Goal.Round, row.Goal.Rounds), row.Goal.Why+row.Goal.Objective, row.Goal.CheckAgentID))
+			continue
+		}
+		got = append(got, row.Role+":"+row.Content)
+	}
+	want := []string{
+		"user:/goal ship",
+		"goal:started:0:ship:",
+		"assistant:round one",
+		"goal:round:2:two tests fail:check-1",
+		"assistant:round two",
+		"goal:completed:2:all passship:check-2",
+		"user:thanks",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("rows =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// newTimingSnapshotServer builds the conversation T4's timing rules govern: a
+// completed run with assistant rows, a tool row carrying its own execution
+// timing, and a `!cmd` user row carrying the shell command's timing outside
+// any run.
+func newTimingSnapshotServer(t *testing.T) (*Server, *state.SessionStore) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	runs := &state.RunStore{DB: db}
+	run, err := runs.CreateRun(ctx, "s1", "review the diff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 27, 10, 0, 0, 0, time.UTC)
+	finish := start.Add(90 * time.Second)
+	if _, err := sessions.Append(ctx, "s1", "user", "review the diff"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendStructuredMessageForRun(ctx, "s1", run.ID, "assistant", "checked", "m-a", "[]", "model-x", "{}", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+	// The run's own clock is stamped with the rows that carry its run id.
+	if err := sessions.AppendMessageSequenceForRun(ctx, "s1", run.ID, []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("checked")})}, "model-x", "",
+		state.RunTiming{StartedAt: start, FinishedAt: finish, Worked: 90 * time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	// A tool row: its timing is the tool call's own execution window.
+	toolStart := start.Add(10 * time.Second)
+	toolFinish := toolStart.Add(5 * time.Second)
+	if _, err := sessions.AppendToolTurnWithMeta(ctx, "s1", "tool", "shell output", "call-1", `{"tool_name":"shell"}`,
+		state.MessageExecTiming{StartedAtMs: toolStart.UnixMilli(), FinishedAtMs: toolFinish.UnixMilli(), DurationMs: 5_000}); err != nil {
+		t.Fatal(err)
+	}
+	// A `!cmd` user row: timing of a command the user ran, outside any run.
+	if _, err := sessions.Append(ctx, "s1", "user", "next question"); err != nil {
+		t.Fatal(err)
+	}
+	cmdStart := finish.Add(30 * time.Second)
+	if _, err := sessions.AppendToolTurnWithMeta(ctx, "s1", "user", "$ git status\nok", "", `{"kind":"user_shell"}`,
+		state.MessageExecTiming{StartedAtMs: cmdStart.UnixMilli(), FinishedAtMs: cmdStart.Add(2 * time.Second).UnixMilli(), DurationMs: 2_000}); err != nil {
+		t.Fatal(err)
+	}
+	return &Server{Sessions: sessions, RunRT: runs}, sessions
+}
+
+// TestChatMessagesTimingFieldsStable pins the /messages response's timing
+// fields: the run window and worked duration on the assistant row that closed
+// a run, the execution window on tool rows, and the command window on `!cmd`
+// user rows — all as RFC3339 strings and millisecond counts. T4 reworks where
+// these are stored; this asserts they keep reaching the wire unchanged.
+func TestChatMessagesTimingFieldsStable(t *testing.T) {
+	s, _ := newTimingSnapshotServer(t)
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Role       string `json:"role"`
+		RunID      string `json:"run_id,omitempty"`
+		RunStarted string `json:"run_started_at,omitempty"`
+		RunFinish  string `json:"run_finished_at,omitempty"`
+		WorkedMs   int64  `json:"worked_duration_ms,omitempty"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	var assistant, tool, cmd *struct {
+		Role       string `json:"role"`
+		RunID      string `json:"run_id,omitempty"`
+		RunStarted string `json:"run_started_at,omitempty"`
+		RunFinish  string `json:"run_finished_at,omitempty"`
+		WorkedMs   int64  `json:"worked_duration_ms,omitempty"`
+	}
+	for i := range rows {
+		switch {
+		case rows[i].Role == "assistant" && assistant == nil:
+			assistant = &rows[i]
+		case rows[i].Role == "tool" && tool == nil:
+			tool = &rows[i]
+		case rows[i].Role == "user" && rows[i].WorkedMs != 0:
+			cmd = &rows[i]
+		}
+	}
+	if assistant == nil || tool == nil || cmd == nil {
+		t.Fatalf("rows = %+v, want an assistant, a tool and a timed user row", rows)
+	}
+	if assistant.RunStarted == "" || assistant.RunFinish == "" || assistant.WorkedMs != 90_000 || assistant.RunID == "" {
+		t.Fatalf("assistant timing = %q %q %d %q", assistant.RunStarted, assistant.RunFinish, assistant.WorkedMs, assistant.RunID)
+	}
+	if tool.RunStarted == "" || tool.RunFinish == "" || tool.WorkedMs != 5_000 {
+		t.Fatalf("tool timing = %q %q %d", tool.RunStarted, tool.RunFinish, tool.WorkedMs)
+	}
+	if cmd.RunStarted == "" || cmd.RunFinish == "" || cmd.WorkedMs != 2_000 {
+		t.Fatalf("!cmd timing = %q %q %d", cmd.RunStarted, cmd.RunFinish, cmd.WorkedMs)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/s1/messages", nil)
+	_ = req
+}
+
+// TestChatSurfacesRenderTheSessionFactSpread is T5's protection net: it builds
+// one conversation carrying every kind of fact the event merge touches — a
+// main-agent tool call, a main-agent plan update, a subagent's lifecycle and
+// its own tool call and plan, a goal, and an approval — then asserts what the
+// two web surfaces report for it. The storage behind those facts changes when
+// the run-step ledger and the tool-audit table merge into the session event
+// log; the facts a surface sees must not.
+func TestChatSurfacesRenderTheSessionFactSpread(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	runs := &state.RunStore{DB: db}
+	parent, err := runs.CreateRun(ctx, "s1", "review the diff")
+	require.NoError(t, err)
+	child, err := runs.CreateSubagentRun(ctx, parent.ID, "s1", "verification")
+	require.NoError(t, err)
+
+	// Transcript: the main agent's tool call and its result, plus the closing
+	// assistant text.
+	_, err = sessions.Append(ctx, "s1", "user", "review the diff")
+	require.NoError(t, err)
+	callParts := `[{"type":"tool_call","id":"call-1","name":"read_file","arguments":"{\"file_path\":\"/repo/a.go\"}"}]`
+	_, err = sessions.AppendStructuredMessageForRun(ctx, "s1", parent.ID, "assistant", "", "m-1", callParts, "model", "", "call-1", `{"tool_name":"read_file"}`, state.MessageExecTiming{})
+	require.NoError(t, err)
+	_, err = sessions.AppendToolTurnWithMeta(ctx, "s1", "tool", "file body", "call-1", `{"tool_name":"read_file"}`, state.MessageExecTiming{StartedAtMs: 1780000000000, FinishedAtMs: 1780000000500, DurationMs: 500})
+	require.NoError(t, err)
+	_, err = sessions.AppendStructuredMessageForRun(ctx, "s1", parent.ID, "assistant", "done", "m-3", `[]`, "model", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	// Main-agent tool events, its plan update, and the subagent's lifecycle:
+	// all of them live in the one canonical event log now.
+	appendEvent := func(id, runID, typ string, payload any) {
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{ID: id, SessionID: "s1", RunID: runID, Type: typ, Payload: raw, CreatedAt: time.Now()})
+		require.NoError(t, err)
+	}
+	appendEvent("evt-tool-start", parent.ID, event.RunEventToolStarted, event.ToolCallStartedPayload{Kind: event.RunEventToolStarted, StepID: "call-1", ToolName: "read_file"})
+	appendEvent("evt-tool-done", parent.ID, event.RunEventToolCompleted, event.ToolCallCompletedPayload{Kind: event.RunEventToolCompleted, StepID: "call-1", ToolName: "read_file", Output: map[string]any{"content": "file body"}, DurationSeconds: 0.5})
+	appendEvent("evt-plan", parent.ID, event.RunEventPlanUpdated, event.PlanUpdatedPayload{Title: "Updated Plan", Items: []event.PlanUpdateItem{{ID: "T1", Content: "step one", Status: "completed"}}})
+	appendEvent("evt-sub-spawn", child.ID, event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{AgentID: "task-7", AgentType: "verification", TaskID: "task-7", Task: "check it"})
+	appendEvent("evt-sub-end", child.ID, event.RunEventSubagentEnded, event.SubagentEndedPayload{AgentID: "task-7", AgentType: "verification", TaskID: "task-7", Status: "completed", Output: "looks good"})
+
+	// Canonical events already in the log: the turn's bounds and its goal.
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{ID: "evt-turn-start", SessionID: "s1", RunID: parent.ID, Type: event.RunEventTurnStarted, CreatedAt: time.Now()})
+	require.NoError(t, err)
+	goalPayload, err := json.Marshal(event.GoalStartedPayload{Objective: "ship it"})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{ID: "evt-goal-start", SessionID: "s1", RunID: parent.ID, Type: event.RunEventGoalStarted, Payload: goalPayload, CreatedAt: time.Now()})
+	require.NoError(t, err)
+
+	// An approval raised by the running turn.
+	approvalPayload, err := json.Marshal(event.ApprovalRequestedPayload{ActionID: "act-1", ActionKind: "shell", ToolStepID: "call-1"})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{ID: "evt-approval", SessionID: "s1", RunID: parent.ID, Type: event.RunEventApprovalReq, Payload: approvalPayload, CreatedAt: time.Now()})
+	require.NoError(t, err)
+
+	s := &Server{Sessions: sessions, RunRT: runs, Actions: &state.ActionService{DB: db}}
+	_ = child
+
+	// The transcript the web chat shows: the four rows, in order, with the run
+	// each belongs to.
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+		RunID   string `json:"run_id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	// The transcript rows, in order; the goal is a row of its own at the
+	// position the live conversation drew it.
+	var transcript []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+		RunID   string `json:"run_id"`
+	}
+	goalRows := 0
+	for _, row := range rows {
+		if row.Role == "goal" {
+			goalRows++
+			continue
+		}
+		transcript = append(transcript, row)
+	}
+	require.Len(t, transcript, 4)
+	require.Equal(t, []string{"user", "assistant", "tool", "assistant"},
+		[]string{transcript[0].Role, transcript[1].Role, transcript[2].Role, transcript[3].Role})
+	require.Equal(t, "review the diff", transcript[0].Content)
+	require.Equal(t, "file body", transcript[2].Content)
+	require.Equal(t, "done", transcript[3].Content)
+	require.Equal(t, parent.ID, transcript[1].RunID)
+	require.Equal(t, 1, goalRows, "the goal event must render as its own row")
+
+	// The event page the web stream replays from: every fact above is in it.
+	evRec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/events", nil, s.handleChatSessionEvents, "id", "s1")
+	require.Equal(t, http.StatusOK, evRec.Code, evRec.Body.String())
+	var page struct {
+		Events []struct {
+			Type    string `json:"type"`
+			EventID string `json:"id"`
+		} `json:"events"`
+	}
+	require.NoError(t, json.Unmarshal(evRec.Body.Bytes(), &page))
+	types := map[string]bool{}
+	for _, e := range page.Events {
+		types[e.Type] = true
+	}
+	for _, want := range []string{
+		event.RunEventTurnStarted, event.RunEventGoalStarted, event.RunEventApprovalReq,
+		event.RunEventToolStarted, event.RunEventToolCompleted, event.RunEventPlanUpdated,
+		event.RunEventSubagentSpawned, event.RunEventSubagentEnded,
+	} {
+		require.True(t, types[want], "event page missing %s; got %v", want, types)
+	}
+}
+
+// A file belongs to the conversation that uploaded it. The endpoints resolve a
+// file against the gateway's own tenant, so another agent's file reads as
+// missing rather than as data one tenant can fetch for another.
+func TestFileEndpointsHideAnotherAgentsFile(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s-mine")
+	require.NoError(t, state.NewSessionStore(db, "other").Ensure(ctx, "s-other", "s-other"))
+
+	files := &state.FileStore{DB: db, Home: t.TempDir(), Cfg: state.LoadConfigFromEnv()}
+	mine, err := files.CreateFromReader(ctx, "s-mine", "mine.txt", strings.NewReader("hi"), 2, "text/plain")
+	require.NoError(t, err)
+	theirs, err := files.CreateFromReader(ctx, "s-other", "theirs.txt", strings.NewReader("hi"), 2, "text/plain")
+	require.NoError(t, err)
+	// Extract the owner's text so the text endpoint has something to serve.
+	_, _, err = files.EnsureParsedText(ctx, "main", mine.ID)
+	require.NoError(t, err)
+
+	s := &Server{Files: files, Sessions: state.NewSessionStore(db, "main")}
+	withID := func(req *http.Request, id string) *http.Request {
+		return req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: id}}))
+	}
+
+	handlers := map[string]http.HandlerFunc{
+		"file-one":      s.handleFileOne,
+		"file-download": s.handleFileDownload,
+		"file-text":     s.handleFileText,
+	}
+	for name, h := range handlers {
+		rec := httptest.NewRecorder()
+		h(rec, withID(httptest.NewRequest(http.MethodGet, "/api/files/x", nil), mine.ID))
+		require.Equal(t, http.StatusOK, rec.Code, "%s: the owner's file must be served", name)
+
+		rec = httptest.NewRecorder()
+		h(rec, withID(httptest.NewRequest(http.MethodGet, "/api/files/x", nil), theirs.ID))
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s: another agent's file must read as missing", name)
+	}
+}
+
+// TestHeartbeatEndpointsAnswerOnlyForOwnedSessions pins that a heartbeat is
+// part of its conversation: another primary agent's session reads as missing
+// to every method, so its recurring instruction can be neither read, replaced
+// nor cleared from here.
+func TestHeartbeatEndpointsAnswerOnlyForOwnedSessions(t *testing.T) {
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.RunRT.DB, "main")
+	mustGatewaySession(t, s.RunRT.DB, "s-mine")
+	require.NoError(t, state.NewSessionStore(s.RunRT.DB, "other").Ensure(context.Background(), "s-theirs", "s-theirs"))
+	require.NoError(t, (&state.CronStore{DB: s.RunRT.DB}).SaveHeartbeat(context.Background(), state.Heartbeat{SessionID: "s-theirs", IntervalSec: 600, Prompt: "theirs"}))
+
+	put := cronRequest(t, s, http.MethodPut, "/api/heartbeat", map[string]any{
+		"session_id": "s-theirs", "interval_seconds": 600, "prompt": "hijack",
+	}, s.handleHeartbeat)
+	require.Equal(t, http.StatusNotFound, put.Code, put.Body.String())
+	get := cronRequest(t, s, http.MethodGet, "/api/heartbeat?session_id=s-theirs", nil, s.handleHeartbeat)
+	require.Equal(t, http.StatusNotFound, get.Code, get.Body.String())
+	del := cronRequest(t, s, http.MethodDelete, "/api/heartbeat?session_id=s-theirs", nil, s.handleHeartbeat)
+	require.Equal(t, http.StatusNotFound, del.Code, del.Body.String())
+	hb, err := (&state.CronStore{DB: s.RunRT.DB}).GetHeartbeat(context.Background(), "s-theirs")
+	require.NoError(t, err)
+	require.NotNil(t, hb)
+	require.Equal(t, "theirs", hb.Prompt)
+
+	mine := cronRequest(t, s, http.MethodPut, "/api/heartbeat", map[string]any{
+		"session_id": "s-mine", "interval_seconds": 600, "prompt": "mine",
+	}, s.handleHeartbeat)
+	require.Equal(t, http.StatusOK, mine.Code, mine.Body.String())
+}
+
+// TestFileUploadBelongsToAnOwnedSession pins that an upload lands in one of
+// this agent's conversations: without a session it is refused in one
+// sentence, and another agent's session reads as missing, instead of the file
+// being written under an invented "default" session the row's foreign key
+// rejects.
+func TestFileUploadBelongsToAnOwnedSession(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s-mine")
+	require.NoError(t, state.NewSessionStore(db, "other").Ensure(ctx, "s-other", "s-other"))
+	s := &Server{
+		Files:    &state.FileStore{DB: db, Home: t.TempDir(), Cfg: state.LoadConfigFromEnv()},
+		Sessions: state.NewSessionStore(db, "main"),
+	}
+	upload := func(sessionID string) *httptest.ResponseRecorder {
+		t.Helper()
+		var body bytes.Buffer
+		form := multipart.NewWriter(&body)
+		if sessionID != "" {
+			require.NoError(t, form.WriteField("session_id", sessionID))
+		}
+		part, err := form.CreateFormFile("file", "note.txt")
+		require.NoError(t, err)
+		_, err = part.Write([]byte("hello"))
+		require.NoError(t, err)
+		require.NoError(t, form.Close())
+		req := httptest.NewRequest(http.MethodPost, "/api/files", &body)
+		req.Header.Set("Content-Type", form.FormDataContentType())
+		rec := httptest.NewRecorder()
+		s.handleFiles(rec, req)
+		return rec
+	}
+	require.Equal(t, http.StatusBadRequest, upload("").Code)
+	require.Equal(t, http.StatusNotFound, upload("s-other").Code)
+	created := upload("s-mine")
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var out struct {
+		FileID string `json:"file_id"`
+	}
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &out))
+	f, err := s.Files.Get(ctx, "main", out.FileID)
+	require.NoError(t, err)
+	require.Equal(t, "s-mine", f.SessionID)
+}
+
+// TestAskActionBelongsToAnOwnedSession pins that an ask posted over HTTP is
+// raised in one of this agent's conversations only.
+func TestAskActionBelongsToAnOwnedSession(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s-mine")
+	require.NoError(t, state.NewSessionStore(db, "other").Ensure(ctx, "s-other", "s-other"))
+	s := &Server{Actions: &state.ActionService{DB: db}, Sessions: state.NewSessionStore(db, "main")}
+	ask := func(sessionID string) *httptest.ResponseRecorder {
+		t.Helper()
+		form := map[string]any{"questions": []map[string]any{{
+			"id": "q1", "prompt": "which?", "options": []map[string]any{{"id": "a", "label": "A"}, {"id": "b", "label": "B"}},
+		}}}
+		if sessionID != "" {
+			form["session_id"] = sessionID
+		}
+		raw, err := json.Marshal(form)
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		s.handleActionsAsk(rec, httptest.NewRequest(http.MethodPost, "/api/actions/ask", bytes.NewReader(raw)))
+		return rec
+	}
+	require.Equal(t, http.StatusBadRequest, ask("").Code)
+	require.Equal(t, http.StatusNotFound, ask("s-other").Code)
+	require.Equal(t, http.StatusCreated, ask("s-mine").Code)
+}
+
+// TestActionsRequesterFilterIsAppliedBeforeTheLimit pins D2's rule for the
+// actions list: narrowing to the subagent that raised an action happens in
+// the query, so a page limit applies to that subagent's actions rather than to
+// a page of everyone's truncated first.
+func TestActionsRequesterFilterIsAppliedBeforeTheLimit(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s-1")
+	_, err = db.ExecContext(ctx, `
+INSERT INTO fb_actions(id,session_id,kind,status,payload_json,answer_json,error,created_at,updated_at)
+VALUES('worker-action','s-1','shell','pending','{"agent_id":"task-7"}','','',1,1)`)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, `
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 50)
+INSERT INTO fb_actions(id,session_id,kind,status,payload_json,answer_json,error,created_at,updated_at)
+SELECT printf('main-%02d',i),'s-1','shell','pending','{}','','',i+10,i+10 FROM n`)
+	require.NoError(t, err)
+	s := &Server{Home: t.TempDir(), Actions: &state.ActionService{DB: db}, Sessions: state.NewSessionStore(db, "main")}
+	rr := httptest.NewRecorder()
+	s.handleActions(rr, httptest.NewRequest(http.MethodGet, "/api/actions?agent_id=task-7&limit=10", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var rows []actionListRow
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	require.Equal(t, "worker-action", rows[0].ID)
+	require.Equal(t, "task-7", rows[0].AgentID)
+}
+
+// TestNewWebChatIsNamedByItsFirstMessage pins that a chat the web opens with
+// "New chat" is born unnamed — the list shows no title, so the client draws
+// its own placeholder — and that its first user message then names it, the
+// way a terminal session is named, instead of a stored placeholder outranking
+// that message forever.
+func TestNewWebChatIsNamedByItsFirstMessage(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	sessions := state.NewSessionStore(db, "main")
+	s := &Server{Sessions: sessions}
+
+	rec := httptest.NewRecorder()
+	s.handleChatSessionCreate(rec, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(`{"title":""}`)))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.ID)
+
+	listTitle := func() string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
+		var list struct {
+			Records []struct {
+				ID    string `json:"id"`
+				Title string `json:"title"`
+			} `json:"records"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+		for _, row := range list.Records {
+			if row.ID == created.ID {
+				return row.Title
+			}
+		}
+		t.Fatalf("session %s missing from the list", created.ID)
+		return ""
+	}
+	require.Empty(t, listTitle())
+
+	_, err = sessions.Append(ctx, created.ID, "user", "Plan the release checklist")
+	require.NoError(t, err)
+	require.Equal(t, "Plan the release checklist", listTitle())
+}
+
+// TestCronJobBindsOnlyToThisAgentsProject pins that a job's project binding
+// is tenant data: another agent's project, or one that does not exist, is
+// refused as not found instead of binding the job across tenants or failing on
+// the raw foreign-key error.
+func TestCronJobBindsOnlyToThisAgentsProject(t *testing.T) {
+	s := cronTestServer(t)
+	ctx := context.Background()
+	active, err := s.activePrimarySummary()
+	require.NoError(t, err)
+	theirs, err := state.NewProjectStore(s.RunRT.DB, "someone-else").Create(ctx, state.CreateProjectInput{Name: "theirs", Root: t.TempDir()})
+	require.NoError(t, err)
+	mine, err := state.NewProjectStore(s.RunRT.DB, active.ID).Create(ctx, state.CreateProjectInput{Name: "mine", Root: t.TempDir()})
+	require.NoError(t, err)
+
+	for _, projectID := range []string{theirs.ID, "prj_missing"} {
+		rec := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+			"schedule": "every 1h", "prompt": "report", "project_id": projectID,
+		}, s.handleCronJobs)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "project not found")
+	}
+	rec := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+		"schedule": "every 1h", "prompt": "report", "project_id": mine.ID,
+	}, s.handleCronJobs)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}

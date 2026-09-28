@@ -1,0 +1,31 @@
+[filters.nm]
+description = "Truncate nm symbol listings to a useful head."
+version = "1"
+match_command = '(^|[;&|/ ])([a-z0-9_-]*-)?nm(\s|$)'
+match_output_select = [
+  '(?m)^[0-9a-fA-F]{8,16} [A-Za-z] \S',
+]
+strip_ansi = true
+max_lines = 50
+
+[[tests.nm]]
+name = "short symbol listing passes through unchanged"
+input = """
+000000000040b200 T _IO_default_doallocate
+000000000040c5e0 T _IO_default_write
+000000000043f0f0 T _IO_file_doallocate
+0000000000406880 T _IO_fwrite
+00000000004011d1 t _IO_fwrite.cold
+"""
+expected = """
+000000000040b200 T _IO_default_doallocate
+000000000040c5e0 T _IO_default_write
+000000000043f0f0 T _IO_file_doallocate
+0000000000406880 T _IO_fwrite
+00000000004011d1 t _IO_fwrite.cold
+"""
+
+[[tests.nm]]
+name = "error line is preserved"
+input = "nm: '/app/missing.o': No such file"
+expected = "nm: '/app/missing.o': No such file"

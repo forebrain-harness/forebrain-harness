@@ -1,0 +1,135 @@
+[filters.cx-logs]
+description = "Strip cx logs query noise and timestamp prefixes; cap long log streams."
+version = "2"
+match_command = "(^|[;&|]\\s*)(?:[A-Za-z0-9_]+=\\S+\\s+)*cx\\s+logs\\b"
+match_output_select = [
+  'Querying\.\.\.',
+  '(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+ \[(DEBUG|INFO|WARNING|ERROR|WARN|CRITICAL)\]',
+  '^\[prod\] tokens less than',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Querying\.\.\.$',
+  '^\[prod\] tokens less than',
+]
+replace = [
+  { pattern = '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+ \[(\w+)\] \[([^]]+)\]\s*', replacement = '[${1}] [${2}] ' },
+]
+max_lines = 40
+max_lines_keep_tail = 15
+
+[[tests.cx-logs]]
+name = "strips querying and token warnings, trims timestamp prefix"
+input = """Querying...
+[prod] tokens less than 4 bytes or more than 64 bytes in UTF-8 are not indexed and will be excluded from the query at [0:110-0:111]: 0
+2026-05-28T08:09:31.273000 [INFO] [release_handler.go:367] Decision record extraction complete for release 29db3a38: created=8, failed=0
+2026-06-23T12:34:40.808000 [INFO] [release_handler.go:393] Decision record extraction complete for release 255db71c: created=1, failed=0
+"""
+expected = """[INFO] [release_handler.go:367] Decision record extraction complete for release 29db3a38: created=8, failed=0
+[INFO] [release_handler.go:393] Decision record extraction complete for release 255db71c: created=1, failed=0
+"""
+
+[[tests.cx-logs]]
+name = "warnings and errors survive prefix trim"
+input = """Querying...
+2026-07-05T11:12:01.253000 [WARNING] [pubsub_router.go:102] Channel app_connected closed unexpectedly
+2026-07-05T11:12:01.256000 [WARNING] [fly.go:298] JFrog Fly Service stopped ungracefully
+2026-07-05T11:31:13.821000 [ERROR] [auth.go:44] token exchange failed: invalid_grant
+"""
+expected = """[WARNING] [pubsub_router.go:102] Channel app_connected closed unexpectedly
+[WARNING] [fly.go:298] JFrog Fly Service stopped ungracefully
+[ERROR] [auth.go:44] token exchange failed: invalid_grant
+"""
+
+[[tests.cx-logs]]
+name = "long INFO streams capped with keep_tail marker"
+input = """
+Querying...
+2026-05-28T08:09:31.273000 [INFO] [release_handler.go:367] line 1
+2026-05-28T08:09:32.273000 [INFO] [release_handler.go:367] line 2
+2026-05-28T08:09:33.273000 [INFO] [release_handler.go:367] line 3
+2026-05-28T08:09:34.273000 [INFO] [release_handler.go:367] line 4
+2026-05-28T08:09:35.273000 [INFO] [release_handler.go:367] line 5
+2026-05-28T08:09:36.273000 [INFO] [release_handler.go:367] line 6
+2026-05-28T08:09:37.273000 [INFO] [release_handler.go:367] line 7
+2026-05-28T08:09:38.273000 [INFO] [release_handler.go:367] line 8
+2026-05-28T08:09:39.273000 [INFO] [release_handler.go:367] line 9
+2026-05-28T08:09:40.273000 [INFO] [release_handler.go:367] line 10
+2026-05-28T08:09:41.273000 [INFO] [release_handler.go:367] line 11
+2026-05-28T08:09:42.273000 [INFO] [release_handler.go:367] line 12
+2026-05-28T08:09:43.273000 [INFO] [release_handler.go:367] line 13
+2026-05-28T08:09:44.273000 [INFO] [release_handler.go:367] line 14
+2026-05-28T08:09:45.273000 [INFO] [release_handler.go:367] line 15
+2026-05-28T08:09:46.273000 [INFO] [release_handler.go:367] line 16
+2026-05-28T08:09:47.273000 [INFO] [release_handler.go:367] line 17
+2026-05-28T08:09:48.273000 [INFO] [release_handler.go:367] line 18
+2026-05-28T08:09:49.273000 [INFO] [release_handler.go:367] line 19
+2026-05-28T08:09:50.273000 [INFO] [release_handler.go:367] line 20
+2026-05-28T08:09:51.273000 [INFO] [release_handler.go:367] line 21
+2026-05-28T08:09:52.273000 [INFO] [release_handler.go:367] line 22
+2026-05-28T08:09:53.273000 [INFO] [release_handler.go:367] line 23
+2026-05-28T08:09:54.273000 [INFO] [release_handler.go:367] line 24
+2026-05-28T08:09:55.273000 [INFO] [release_handler.go:367] line 25
+2026-05-28T08:09:56.273000 [INFO] [release_handler.go:367] line 26
+2026-05-28T08:09:57.273000 [INFO] [release_handler.go:367] line 27
+2026-05-28T08:09:58.273000 [INFO] [release_handler.go:367] line 28
+2026-05-28T08:09:59.273000 [INFO] [release_handler.go:367] line 29
+2026-05-28T08:10:00.273000 [INFO] [release_handler.go:367] line 30
+2026-05-28T08:10:01.273000 [INFO] [release_handler.go:367] line 31
+2026-05-28T08:10:02.273000 [INFO] [release_handler.go:367] line 32
+2026-05-28T08:10:03.273000 [INFO] [release_handler.go:367] line 33
+2026-05-28T08:10:04.273000 [INFO] [release_handler.go:367] line 34
+2026-05-28T08:10:05.273000 [INFO] [release_handler.go:367] line 35
+2026-05-28T08:10:06.273000 [INFO] [release_handler.go:367] line 36
+2026-05-28T08:10:07.273000 [INFO] [release_handler.go:367] line 37
+2026-05-28T08:10:08.273000 [INFO] [release_handler.go:367] line 38
+2026-05-28T08:10:09.273000 [INFO] [release_handler.go:367] line 39
+2026-05-28T08:10:10.273000 [INFO] [release_handler.go:367] line 40
+2026-05-28T08:10:11.273000 [INFO] [release_handler.go:367] line 41
+2026-05-28T08:10:12.273000 [INFO] [release_handler.go:367] line 42
+2026-05-28T08:10:13.273000 [WARNING] [fly.go:298] tail warning
+"""
+expected = """
+[INFO] [release_handler.go:367] line 1
+[INFO] [release_handler.go:367] line 2
+[INFO] [release_handler.go:367] line 3
+[INFO] [release_handler.go:367] line 4
+[INFO] [release_handler.go:367] line 5
+[INFO] [release_handler.go:367] line 6
+[INFO] [release_handler.go:367] line 7
+[INFO] [release_handler.go:367] line 8
+[INFO] [release_handler.go:367] line 9
+[INFO] [release_handler.go:367] line 10
+[INFO] [release_handler.go:367] line 11
+[INFO] [release_handler.go:367] line 12
+[INFO] [release_handler.go:367] line 13
+[INFO] [release_handler.go:367] line 14
+[INFO] [release_handler.go:367] line 15
+[INFO] [release_handler.go:367] line 16
+[INFO] [release_handler.go:367] line 17
+[INFO] [release_handler.go:367] line 18
+[INFO] [release_handler.go:367] line 19
+[INFO] [release_handler.go:367] line 20
+[INFO] [release_handler.go:367] line 21
+[INFO] [release_handler.go:367] line 22
+[INFO] [release_handler.go:367] line 23
+[INFO] [release_handler.go:367] line 24
+[INFO] [release_handler.go:367] line 25
+... +3 more lines
+[INFO] [release_handler.go:367] line 29
+[INFO] [release_handler.go:367] line 30
+[INFO] [release_handler.go:367] line 31
+[INFO] [release_handler.go:367] line 32
+[INFO] [release_handler.go:367] line 33
+[INFO] [release_handler.go:367] line 34
+[INFO] [release_handler.go:367] line 35
+[INFO] [release_handler.go:367] line 36
+[INFO] [release_handler.go:367] line 37
+[INFO] [release_handler.go:367] line 38
+[INFO] [release_handler.go:367] line 39
+[INFO] [release_handler.go:367] line 40
+[INFO] [release_handler.go:367] line 41
+[INFO] [release_handler.go:367] line 42
+[WARNING] [fly.go:298] tail warning
+"""

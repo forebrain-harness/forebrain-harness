@@ -1,0 +1,53 @@
+[filters.az]
+description = "Compact az CLI JSON: drop warnings/blanks, truncate and cap long output."
+version = "3"
+match_command = '^az\s'
+match_output_select = [
+  '(?m)"eventTimestamp"\s*:',
+  '(?m)"localizedValue"\s*:',
+  '(?m)"availabilityState"\s*:',
+  '(?m)"operationName"\s*:',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^WARNING:',
+  '^ERROR: Please run',
+]
+max_lines = 60
+max_lines_keep_tail = 20
+
+[[tests.az]]
+name = "activity log JSON lines truncated per line"
+expect_match_output = true
+input = """[{"eventTimestamp":"2026-07-13T12:00:00Z","operationName":{"localizedValue":"Microsoft.DBforPostgreSQL/flexibleServers/write"},"status":{"value":"Succeeded"},"caller":"user@example.com","properties":{"title":"Very long title padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"}}]
+"""
+expected = """[{"eventTimestamp":"2026-07-13T12:00:00Z","operationName":{"localizedValue":"Microsoft.DBforPostgreSQL/flexibleServers/write"},"status":{"value":"Succeeded"},"caller":"user@example.com","properties":{"title":"Very long title padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"}}]
+"""
+
+[[tests.az]]
+name = "generic JSON array does not select az"
+expect_match_output = false
+input = """[{"number":1905,"title":"fix: hook","statusCheckRollup":[{"name":"CI","conclusion":"FAILURE"}]}]
+"""
+expected = """[{"number":1905,"title":"fix: hook","statusCheckRollup":[{"name":"CI","conclusion":"FAILURE"}]}]"""
+
+[[tests.az]]
+name = "short az table output passes through"
+input = """Name    ResourceGroup    Location
+vm-1    prod-rg          westeurope
+"""
+expected = """Name    ResourceGroup    Location
+vm-1    prod-rg          westeurope"""
+
+[[tests.az]]
+name = "warnings stripped, JSON kept"
+input = """WARNING: This command is in preview
+[{"eventTimestamp":"2026-07-13T12:00:00Z","status":{"value":"Failed"}}]
+"""
+expected = """[{"eventTimestamp":"2026-07-13T12:00:00Z","status":{"value":"Failed"}}]"""
+
+[[tests.az]]
+name = "empty input passes through"
+input = ""
+expected = ""

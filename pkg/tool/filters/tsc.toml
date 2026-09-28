@@ -1,0 +1,32 @@
+[filters.tsc]
+description = "Strip blank lines from tsc output; keep every TSxxxx diagnostic, ok when clean."
+version = "1"
+match_command = '^(\s*)(npx\s+)?tsc\b'
+match_output_select = [
+  '\(\d+,\d+\): error TS\d',
+  '\(\d+,\d+\): warning TS\d',
+  '^Found \d+ error',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+on_empty = "tsc: ok"
+
+[[tests.tsc]]
+name = "keeps diagnostics, drops blank padding"
+input = """
+src/app.ts(10,5): error TS2304: Cannot find name 'foo'.
+
+src/util.ts(3,1): error TS1005: ';' expected.
+
+Found 2 errors in 2 files.
+"""
+expected = """src/app.ts(10,5): error TS2304: Cannot find name 'foo'.
+src/util.ts(3,1): error TS1005: ';' expected.
+Found 2 errors in 2 files."""
+
+[[tests.tsc]]
+name = "clean check is ok"
+input = ""
+expected = "tsc: ok"

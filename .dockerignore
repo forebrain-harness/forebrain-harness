@@ -1,0 +1,7 @@
+.git
+**/node_modules
+frontend/dist
+.DS_Store
+*.log
+frontend/.vite
+.codegraph

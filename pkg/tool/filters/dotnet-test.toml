@@ -1,0 +1,118 @@
+[filters.dotnet-test]
+description = "Drop C# test banners/restore noise; keep every test outcome, failure detail, attachment, and summary."
+version = "2"
+match_command = '^(dotnet\s+(test|vstest)\b|vstest\.console(\.exe)?\b)'
+match_output_select = [
+  'Starting test execution',
+  'Passed!\s+-\s+Failed:',
+  'Failed!\s+-\s+Failed:',
+  '^\s*Failed \S',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Microsoft \(R\)',
+  '^Copyright \(',
+  '^\s*Determining projects',
+  '^\s*Restored ',
+  '^Starting test execution',
+  '^A total of \d+ test files',
+]
+
+[[tests.dotnet-test]]
+name = "keeps failure and assert detail, drops banners"
+input = """  Determining projects to restore...
+  Restored /repo/App.csproj (in 1.2 sec).
+Microsoft (R) Test Execution Command Line Tool Version 17.8.0
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+  Failed AppTests.MathTests.Add [12 ms]
+  Error Message:
+   Assert.Equal() Failure
+   Expected: 3
+   Actual:   2
+
+Failed!  - Failed:     1, Passed:    9, Skipped:     0, Total:    10, Duration: 1 s"""
+expected = """Failed AppTests.MathTests.Add [12 ms]
+  Error Message:
+   Assert.Equal() Failure
+   Expected: 3
+   Actual:   2
+Failed!  - Failed:     1, Passed:    9, Skipped:     0, Total:    10, Duration: 1 s"""
+
+[[tests.dotnet-test]]
+name = "all green collapses to the summary"
+input = """  Determining projects to restore...
+  Restored /repo/App.csproj (in 0.5 sec).
+Microsoft (R) Test Execution Command Line Tool Version 17.8.0
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+
+Passed!  - Failed:     0, Passed:    10, Skipped:     0, Total:    10, Duration: 1 s"""
+expected = "Passed!  - Failed:     0, Passed:    10, Skipped:     0, Total:    10, Duration: 1 s"
+
+[[tests.dotnet-test]]
+name = "detailed logger keeps passed skipped and failed test names"
+input = """
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+  Passed AppTests.LoginTests.AcceptsValidUser [8 ms]
+  Skipped AppTests.LoginTests.RequiresWindows
+  Failed AppTests.LoginTests.RejectsExpiredToken [14 ms]
+  Error Message:
+   Expected: Unauthorized
+   Actual:   OK
+Failed!  - Failed: 1, Passed: 1, Skipped: 1, Total: 3, Duration: 22 ms"""
+expected = """  Passed AppTests.LoginTests.AcceptsValidUser [8 ms]
+  Skipped AppTests.LoginTests.RequiresWindows
+  Failed AppTests.LoginTests.RejectsExpiredToken [14 ms]
+  Error Message:
+   Expected: Unauthorized
+   Actual:   OK
+Failed!  - Failed: 1, Passed: 1, Skipped: 1, Total: 3, Duration: 22 ms"""
+
+[[tests.dotnet-test]]
+name = "test host crash and stack trace survive"
+input = """
+Microsoft (R) Test Execution Command Line Tool Version 17.8.0
+Starting test execution, please wait...
+The active test run was aborted. Reason: Test host process crashed
+Unhandled exception. System.AccessViolationException: Attempted to read protected memory.
+   at NativeInterop.Read()
+   at AppTests.NativeTests.Crash()
+Test Run Aborted."""
+expected = """The active test run was aborted. Reason: Test host process crashed
+Unhandled exception. System.AccessViolationException: Attempted to read protected memory.
+   at NativeInterop.Read()
+   at AppTests.NativeTests.Crash()
+Test Run Aborted."""
+
+[[tests.dotnet-test]]
+name = "attachments and trx result path survive"
+input = """
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+Passed!  - Failed: 0, Passed: 12, Skipped: 0, Total: 12, Duration: 2 s
+Results File: /repo/TestResults/results.trx
+Attachments:
+  /repo/TestResults/coverage.cobertura.xml"""
+expected = """Passed!  - Failed: 0, Passed: 12, Skipped: 0, Total: 12, Duration: 2 s
+Results File: /repo/TestResults/results.trx
+Attachments:
+  /repo/TestResults/coverage.cobertura.xml"""
+
+[[tests.dotnet-test]]
+name = "no tests warning survives"
+input = """
+Starting test execution, please wait...
+No test is available in /repo/App.Tests/bin/Debug/net8.0/App.Tests.dll.
+Make sure that test discoverer & executors are registered and platform & framework version settings are appropriate."""
+expected = """No test is available in /repo/App.Tests/bin/Debug/net8.0/App.Tests.dll.
+Make sure that test discoverer & executors are registered and platform & framework version settings are appropriate."""
+
+[[tests.dotnet-test]]
+name = "mixed Jest failure survives chained output filtering"

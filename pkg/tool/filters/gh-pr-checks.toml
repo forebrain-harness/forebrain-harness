@@ -1,0 +1,47 @@
+[filters.gh-pr-checks]
+description = "Compact gh pr checks tabular output; keep check name, status, duration, and URL."
+version = "2"
+match_command = "(^|[;&|]\\s*)gh\\s+pr\\s+checks\\b"
+match_output_select = [
+  "(?m)^[^\\t\\n]+\\t(pass|fail|pending|skipping)\\t",
+]
+strip_ansi = true
+replace = [
+  { pattern = "\\t+$", replacement = "" },
+]
+strip_lines_matching = [
+  "^\\s*$",
+  # gh sometimes prints a redundant FAILURE summary after the tab table.
+  "^FAILURE ",
+]
+[[tests.gh-pr-checks]]
+name = "bundle: tab check rows kept, trailing tab stripped"
+input = """test-backend\tfail\t41s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074812/job/5197480\t
+pr-gate\tpass\t4s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074179/job/5193519\t
+"""
+expected = """test-backend\tfail\t41s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074812/job/5197480
+pr-gate\tpass\t4s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074179/job/5193519"""
+
+[[tests.gh-pr-checks]]
+name = "bundle: skipping checks and CodeRabbit empty URL column kept"
+input = """AI Failure Analysis\tskipping\t0\thttps://github.jfrog.info/JFROG/llm-gateway/actions/runs/1049837/job/5043083\t
+CodeRabbit\tpass\t0\t\tReview completed
+test-backend\tpass\t39s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1058011/job/5097643\t
+"""
+expected = """AI Failure Analysis\tskipping\t0\thttps://github.jfrog.info/JFROG/llm-gateway/actions/runs/1049837/job/5043083
+CodeRabbit\tpass\t0\t\tReview completed
+test-backend\tpass\t39s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1058011/job/5097643"""
+
+[[tests.gh-pr-checks]]
+name = "strips redundant FAILURE summary line"
+input = """test-backend\tfail\t41s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074812/job/5197480\t
+FAILURE test-backend https://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074812/job/5197480
+"""
+expected = """test-backend\tfail\t41s\thttps://github.jfrog.info/JFROG/jfs-fantodev/actions/runs/1074812/job/5197480"""
+
+[[tests.gh-pr-checks]]
+name = "empty input passes through"
+input = ""
+expected = ""
+# bash completion V2 for %-36[1]s -*- shell-script -*-
+

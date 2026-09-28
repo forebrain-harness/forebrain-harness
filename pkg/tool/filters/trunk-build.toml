@@ -1,0 +1,72 @@
+[filters.trunk-build]
+description = "Compact trunk build output"
+match_command = "^trunk\\s+build"
+match_output_select = [
+  '(?m)^\s*(Compiling|Checking) \S+ v\d+',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Downloading\\s",
+  "^\\s*Fetching\\s",
+  "^\\s*Fresh\\s",
+]
+collapse_lines_matching = [
+  { pattern = '^\s*Compiling\s+\S+ v', template = "{count} crates compiled" },
+  { pattern = '^\s*Checking\s+\S+ v', template = "{count} crates checked" },
+]
+tail_lines = 10
+max_lines = 30
+on_empty = "trunk build: ok"
+
+[[tests.trunk-build]]
+name = "collapses per-crate compiling lines, keeps tail summary"
+input = """
+   Compiling tokio v1.35.0
+   Compiling hyper v0.14.28
+   Compiling my-crate v0.1.0
+   Downloading serde v1.0.195
+   Fresh regex v1.10.2
+
+   Finished release [optimized] target(s) in 45.23s
+   Binary: target/release/my-crate (5.2MB)
+"""
+expected = "3 crates compiled\n   Finished release [optimized] target(s) in 45.23s\n   Binary: target/release/my-crate (5.2MB)"
+
+[[tests.trunk-build]]
+name = "on_empty when only cached/fresh crates, nothing compiled or checked"
+input = """
+   Fresh serde v1.0
+   Fresh regex v1.10.2
+
+"""
+expected = "trunk build: ok"
+
+[[tests.trunk-build]]
+name = "real trunk/cargo build: Downloading/Compiling collapsed, Finished kept"
+input = """
+    Updating crates.io index
+  Downloading crates ...
+  Downloaded libc v0.2.152
+  Downloaded proc-macro2 v1.0.78
+  Downloaded quote v1.0.35
+  Downloaded syn v2.0.48
+   Compiling libc v0.2.152
+   Compiling proc-macro2 v1.0.78
+   Compiling quote v1.0.35
+   Compiling syn v2.0.48
+   Compiling serde v1.0.196
+   Compiling serde_derive v1.0.196
+   Compiling tokio v1.35.1
+   Compiling my-server v0.1.0 (/workspace/my-server)
+    Finished `release` profile [optimized] target(s) in 42.38s
+"""
+expected = """
+    Updating crates.io index
+  Downloaded libc v0.2.152
+  Downloaded proc-macro2 v1.0.78
+  Downloaded quote v1.0.35
+  Downloaded syn v2.0.48
+8 crates compiled
+    Finished `release` profile [optimized] target(s) in 42.38s
+"""

@@ -1,0 +1,4 @@
+[filters.k6]
+description = "Strip k6 progress/teardown/WARN request dumps; keep TOTAL RESULTS and failures."
+version = "1"
+match_command = "(^|[;&|]\\s*)k6\\s+run\\b"

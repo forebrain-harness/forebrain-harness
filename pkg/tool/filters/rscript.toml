@@ -1,0 +1,84 @@
+[filters.rscript]
+description = "Drop R/Rscript C++ template instantiation walls and startup chatter; keep errors, linker failures, summaries."
+version = "2"
+match_command = '(^|[;&| ])(Rscript|R)(\s|$)'
+# Selection keys off R-specific signatures only. Bare `^Error: ` / `^Error in `
+# were removed: they matched any program that prints an "Error:" line (e.g.
+# valgrind's "Error: 0.000835"), hijacking unrelated output. A real R failure is
+# reliably accompanied by `Execution halted` or an install/compilation marker.
+match_output_select = [
+  '(?m)^Execution halted',
+  '(?m)^ERROR: compilation failed for package',
+  '(?m)^\* installing \*source\* package',
+  'installation of package .* had non-zero exit status',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^In file included from ',
+  '^\s+from ',
+  'required from ',
+  'instantiation of ',
+  'skipping \d+ instantiation',
+  '^Loading required package:',
+  '^Attaching package:',
+]
+max_lines = 80
+on_empty = "Rscript: no errors"
+
+[[tests.rscript]]
+name = "RcppEigen build: drop template wall, keep linker + compilation errors"
+input = """
+* installing *source* package 'RcppEigen' ...
+** using staged installation
+** libs
+g++ -std=gnu++17 -I"/usr/include/R" -c fastLm.cpp -o fastLm.o
+In file included from ../inst/include/Eigen/Core:88:
+                 from ../inst/include/Eigen/Dense:1:
+../inst/include/Eigen/src/Core/PlainObjectBase.h:779:32:   required from 'Derived& Eigen::PlainObjectBase<Derived>::_set(const Eigen::DenseBase<OtherDerived>&)'
+../inst/include/Eigen/src/Core/Matrix.h:225:24:   required from 'Eigen::Matrix<...>& Eigen::Matrix<...>::operator=(const Eigen::DenseBase<OtherDerived>&)'
+fastLm.cpp:183:55:   required from here
+../inst/include/Eigen/src/Core/CoreEvaluators.h:1071:54: warning: ignoring attributes on template argument
+g++ -std=gnu++17 -shared -o RcppEigen.so RcppEigen.o fastLm.o -llapack -lblas -lgfortran -lm -lquadmath -lR
+/usr/bin/ld: cannot find -llapack: No such file or directory
+/usr/bin/ld: cannot find -lblas: No such file or directory
+/usr/bin/ld: cannot find -lgfortran: No such file or directory
+collect2: error: ld returned 1 exit status
+make: *** [/usr/share/R/share/make/shlib.mk:10: RcppEigen.so] Error 1
+ERROR: compilation failed for package 'RcppEigen'
+* removing '/usr/local/lib/R/site-library/RcppEigen'
+Warning message:
+In install.packages("RcppEigen", repos = "https://cloud.r-project.org") :
+  installation of package 'RcppEigen' had non-zero exit status
+"""
+expected = """
+* installing *source* package 'RcppEigen' ...
+** using staged installation
+** libs
+g++ -std=gnu++17 -I"/usr/include/R" -c fastLm.cpp -o fastLm.o
+../inst/include/Eigen/src/Core/CoreEvaluators.h:1071:54: warning: ignoring attributes on template argument
+g++ -std=gnu++17 -shared -o RcppEigen.so RcppEigen.o fastLm.o -llapack -lblas -lgfortran -lm -lquadmath -lR
+/usr/bin/ld: cannot find -llapack: No such file or directory
+/usr/bin/ld: cannot find -lblas: No such file or directory
+/usr/bin/ld: cannot find -lgfortran: No such file or directory
+collect2: error: ld returned 1 exit status
+make: *** [/usr/share/R/share/make/shlib.mk:10: RcppEigen.so] Error 1
+ERROR: compilation failed for package 'RcppEigen'
+* removing '/usr/local/lib/R/site-library/RcppEigen'
+Warning message:
+In install.packages("RcppEigen", repos = "https://cloud.r-project.org") :
+  installation of package 'RcppEigen' had non-zero exit status
+"""
+
+[[tests.rscript]]
+name = "runtime error: drop startup chatter, keep error and halt"
+input = """
+Loading required package: methods
+Attaching package: 'dplyr'
+Error: 'vec' must be sorted non-decreasingly and not contain NAs
+Execution halted
+"""
+expected = """
+Error: 'vec' must be sorted non-decreasingly and not contain NAs
+Execution halted
+"""

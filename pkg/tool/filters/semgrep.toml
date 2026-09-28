@@ -1,0 +1,9 @@
+[filters.semgrep]
+description = "Strip semgrep banner and scanning-progress header; keep findings and the rule/file summary."
+version = "2"
+match_command = '^semgrep\s'
+match_output_select = [
+  '(?m)^Scanning \d+ files',
+  '(?m)^Ran \d+ rules on \d+ files',
+]
+strip_ansi = true

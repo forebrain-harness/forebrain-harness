@@ -1,0 +1,4 @@
+[filters.gh-run-log]
+description = "Compact gh run view --log-failed output: strip the tab-separated job/step/timestamp prefix from each line, drop env-var dumps, package manager progress, and GitHub runner markers."
+version = "5"
+match_command = '^gh\s+run\s+view\b'

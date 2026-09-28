@@ -1,0 +1,68 @@
+[filters.sbt]
+description = "Drop sbt loading/welcome noise; keep compile, test, success, and error lines."
+version = "1"
+match_command = '^sbt\s'
+match_output_select = [
+  '(?m)^\[info\] welcome to sbt\s+\d',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\[info\] (welcome to sbt|loading global plugins|loading settings for project|loading project definition|set current project to|Resolving \S)',
+]
+
+[[tests.sbt]]
+name = "strips loading noise, keeps compile and success"
+input = """
+[info] welcome to sbt 1.9.9 (Temurin Java 17.0.9)
+[info] loading global plugins from /home/user/.sbt/1.0/plugins
+[info] loading settings for project root-build from plugins.sbt
+[info] loading project definition from /path/to/project
+[info] set current project to myproject (in build file:/path/)
+[info] Compiling 42 Scala sources to /path/target/scala-2.13/classes
+[info] Done compiling.
+[success] Total time: 45 s, completed Jan 1, 2024
+"""
+expected = """
+[info] Compiling 42 Scala sources to /path/target/scala-2.13/classes
+[info] Done compiling.
+[success] Total time: 45 s, completed Jan 1, 2024
+"""
+
+[[tests.sbt]]
+name = "preserves error lines"
+input = """
+[info] welcome to sbt 1.9.9 (Temurin Java 17.0.9)
+[info] loading global plugins from /home/user/.sbt/1.0/plugins
+[info] set current project to myproject (in build file:/path/)
+[error] /path/Main.scala:10:5: value foo is not a member of String
+[error]     val x = "hello".foo
+[error]                     ^
+[error] one error found
+"""
+expected = """
+[error] /path/Main.scala:10:5: value foo is not a member of String
+[error]     val x = "hello".foo
+[error]                     ^
+[error] one error found
+"""
+
+[[tests.sbt]]
+name = "real compile run with welcome/loading spam before success"
+input = """
+[info] welcome to sbt 1.9.9 (Temurin Java 17.0.9)
+[info] loading global plugins from /home/user/.sbt/1.0/plugins
+[info] loading settings for project root-build from plugins.sbt
+[info] loading project definition from /path/to/myproject/project
+[info] loading settings for project myproject from build.sbt
+[info] set current project to myproject (in build file:/path/to/myproject/)
+[info] Compiling 42 Scala sources to /path/to/myproject/target/scala-2.13/classes
+[info] Compiling 8 Java sources to /path/to/myproject/target/scala-2.13/classes
+[info] Done compiling.
+[success] Total time: 45 s, completed Jan 1, 2024, 10:00:00 AM
+"""
+expected = """
+[info] Compiling 42 Scala sources to /path/to/myproject/target/scala-2.13/classes
+[info] Compiling 8 Java sources to /path/to/myproject/target/scala-2.13/classes
+[info] Done compiling.
+[success] Total time: 45 s, completed Jan 1, 2024, 10:00:00 AM
+"""

@@ -1,0 +1,60 @@
+[filters.minitest]
+description = "Drop minitest run scaffolding and progress dots; keep failures and the summary."
+version = "1"
+match_command = '\b(rake|rails)\s+test\b'
+match_output_select = [
+  '\d+ runs?, \d+ assertions?',
+  '^# Running:',
+  '^\s*\d+\) (Failure|Error):',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Running \d+ tests?',
+  '^Run options:',
+  '^# Running:',
+  '^Finished in ',
+  '^[.FES]+$',
+]
+
+[[tests.minitest]]
+name = "keeps failures and errors, drops scaffolding"
+input = """Running 5 tests in a single process (parallelization threshold is 50)
+Run options: --seed 12345
+
+# Running:
+
+..F.E
+
+Finished in 0.012345s, 405.0 runs/s, 324.0 assertions/s.
+
+  1) Failure:
+TestMath#test_add [test/math_test.rb:8]:
+Expected 3 to equal 2.
+
+  2) Error:
+TestMath#test_div:
+ZeroDivisionError: divided by 0
+
+5 runs, 4 assertions, 1 failures, 1 errors, 0 skips"""
+expected = """1) Failure:
+TestMath#test_add [test/math_test.rb:8]:
+Expected 3 to equal 2.
+  2) Error:
+TestMath#test_div:
+ZeroDivisionError: divided by 0
+5 runs, 4 assertions, 1 failures, 1 errors, 0 skips"""
+
+[[tests.minitest]]
+name = "all green collapses to the summary"
+input = """Running 3 tests in a single process (parallelization threshold is 50)
+Run options: --seed 9999
+
+# Running:
+
+...
+
+Finished in 0.005s, 600.0 runs/s, 600.0 assertions/s.
+
+3 runs, 3 assertions, 0 failures, 0 errors, 0 skips"""
+expected = "3 runs, 3 assertions, 0 failures, 0 errors, 0 skips"

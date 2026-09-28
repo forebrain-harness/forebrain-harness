@@ -1,0 +1,34 @@
+// Copyright 2026 Simone Vellei
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package agent provides a small orchestration layer around an llm.LLM.
+//
+// An Agent is configured with a name and a system prompt (description). It can
+// optionally be given memory (previous messages) and a set of function tools.
+// When Run is called, the agent executes a chat loop: it calls the LLM, executes
+// any requested tool calls, appends tool results, and repeats until the model
+// produces a final message.
+//
+// The package also owns its own observability contract: a Tracer receives typed
+// Event values at each significant lifecycle point (agent start/end, per-iteration
+// boundaries, LLM request/response, tool call/result). NoopTracer is the zero-cost
+// default. The tracer is propagated through the context via WithTracer/FromContext,
+// so tool handlers can emit their own events without coupling to the Agent struct.
+// NewLLM wraps a bare llm.LLM with tracing, independent of any Agent. This model
+// lives here rather than in pkg/telemetry because it is agent semantics, not
+// operational infrastructure: pkg/telemetry supplies OTEL/logging backends that
+// may be wired into a Tracer implementation, but the contract itself is part of
+// the agent kernel and must not pull pkg/telemetry into Layer 0's dependency
+// closure.
+package agent
