@@ -15,7 +15,7 @@
 # installed into dict/ beside the binary, which is where forebrain looks for it.
 
 VERSION      := $(shell cat VERSION)
-LDFLAGS      := -s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home.Version=$(VERSION)
+LDFLAGS      := -s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home.Version=v$(VERSION)
 # fts5 compiles SQLite's full-text index into the driver. Memory search
 # declares an FTS5 table at schema time, so a binary built without this tag
 # fails to open the state database at all.
@@ -55,7 +55,7 @@ hooks:
 
 ## docker: build the container image (frontend built inside the image)
 docker:
-	docker build -t forebrain:$(VERSION) .
+	docker build --build-arg FOREBRAIN_VERSION=v$(VERSION) -t forebrain:$(VERSION) .
 
 ## release: build per-platform npm packages (frontend embedded in each binary)
 release:

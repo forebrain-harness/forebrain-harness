@@ -44,7 +44,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/home",
-      "loc": 1292,
+      "loc": 1317,
       "fan_in": 10,
       "fan_out": 0
     },
@@ -146,7 +146,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 41913,
+      "loc": 41915,
       "fan_in": 0,
       "fan_out": 20
     },

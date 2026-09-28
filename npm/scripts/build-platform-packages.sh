@@ -14,7 +14,7 @@
 # (provides x86_64-w64-mingw32-gcc) or override FOREBRAIN_CC_WINDOWS_AMD64.
 #
 # Env:
-#   FOREBRAIN_VERSION            — package version (default: 0.1.0)
+#   FOREBRAIN_VERSION            — package version (default: the VERSION file's content)
 #   FOREBRAIN_BUILD_TARGETS      — space-separated targets (e.g. "darwin/arm64 linux/amd64 windows/amd64"); default = host
 #   FOREBRAIN_CC_WINDOWS_AMD64   — C compiler for windows/amd64 cross-build (default: x86_64-w64-mingw32-gcc)
 #   FOREBRAIN_CC_LINUX_ARM64     — C compiler for linux/arm64 cross-build (default: aarch64-linux-gnu-gcc)
@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NPM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$NPM_DIR/.." && pwd)"
 
-FOREBRAIN_VERSION="${FOREBRAIN_VERSION:-0.1.0}"
+FOREBRAIN_VERSION="${FOREBRAIN_VERSION:-$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")}"
 
 DEFAULT_TARGET="$(go env GOOS)/$(go env GOARCH)"
 TARGETS="${FOREBRAIN_BUILD_TARGETS:-$DEFAULT_TARGET}"
@@ -124,7 +124,7 @@ build_target() {
       go build \
         -trimpath \
         -tags fts5 \
-        -ldflags "-s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home.Version=$FOREBRAIN_VERSION" \
+        -ldflags "-s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home.Version=v$FOREBRAIN_VERSION" \
         -o "$pkg_dir/vendor/$triple/bin/forebrain${bin_ext}" \
         ./cmd/forebrain
   )

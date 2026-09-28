@@ -256,7 +256,9 @@ got="$("$WORK/bin/forebrain" --version)"
 
 - `debug.ReadBuildInfo()` 在 go install 模拟里给出的 `Main.Version` 不是 `v0.0.0-installcheck`。
 - 有测试或代码依赖 `home.Version == "v0.0.1"` 这个具体值（先 `grep -rn "v0.0.1" --include='*_test.go' .`；
-  有命中就 STOP，汇报命中位置）。
+  有命中就 STOP，汇报命中位置）。**2026-09-28 裁决**：grep 命中的两处（`pkg/tui/chat_session_test.go:16590`
+  与 `pkg/tui/run_test.go:3773`）经评审确认是惰性字面量 fixture——前者把值传进 `StartupInfo{}` 并断言渲染为空，
+  后者是 /status golden 面板的固定输入；两个文件对 `home.Version` 的引用数均为 0，不构成依赖，放行继续。
 - D1 还没有答复，或者答复不是 0.x：这时步骤 1 的数值和 README 中的首发说明要按 owner 的答复改写，
   先汇报再执行。
 
