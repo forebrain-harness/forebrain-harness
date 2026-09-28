@@ -3,7 +3,7 @@ package silk
 import (
 	"io"
 
-	"github.com/youthlin/silk/internal"
+	"github.com/forebrain-harness/forebrain-harness/third_party/silk/internal"
 )
 
 // -------------------- Decode --------------------

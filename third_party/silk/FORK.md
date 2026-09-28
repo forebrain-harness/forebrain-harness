@@ -2,9 +2,10 @@
 
 Source: `github.com/youthlin/silk@v0.0.4`
 
-This is a minimal in-tree fork referenced from the root `go.mod` via:
+This is a minimal in-tree fork that lives as a normal package inside the main
+module. Import it as:
 
-    replace github.com/youthlin/silk v0.0.4 => ./third_party/silk
+    github.com/forebrain-harness/forebrain-harness/third_party/silk
 
 ## Why we fork
 
@@ -29,5 +30,7 @@ voice messages through this package), so Windows must build cleanly.
 
 ## Updating
 
-If upstream releases a version that fixes the Windows cgo issue, drop this fork
-and the `replace` directive, then bump the dependency in `go.mod`.
+If upstream releases a version that fixes the Windows cgo issue, delete
+`third_party/silk`, switch the `pkg/channel/silk_cgo.go` import back to the
+upstream path, and `go get` that upstream version. Do not reintroduce a
+`replace` directive: it makes `go install` of this module fail.

@@ -5,7 +5,7 @@ package channel
 import (
 	"bytes"
 
-	"github.com/youthlin/silk"
+	"github.com/forebrain-harness/forebrain-harness/third_party/silk"
 )
 
 func init() {
