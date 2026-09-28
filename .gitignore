@@ -14,11 +14,10 @@ build
 .DS_Store
 node_modules
 dist
-# Embedded frontend build output: ignore built assets but keep the placeholder
-# so `go:embed all:dist` and `go build` work on a clean checkout.
+# pkg/gateway/dist is committed: it is the built web UI that go:embed serves,
+# and `go install` builds from the tagged source, which must contain it. Only
+# the release workflow rewrites it (scripts/check-webui-dist.sh).
 !pkg/gateway/dist/
-pkg/gateway/dist/*
-!pkg/gateway/dist/.gitkeep
 *.exe
 *.test
 /forebrain

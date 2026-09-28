@@ -6,6 +6,9 @@
 #                                     beside the binary; see scripts/install-dictionary.sh)
 #   package.json (with os/cpu fields)
 #
+# The web UI is not built here: pkg/gateway/dist must already contain a build
+# (`make ui`, or the release workflow) because go:embed compiles it into every
+# platform binary.
 # Every platform (including windows/amd64) is built with CGO_ENABLED=1 so the
 # weixin silk voice decoder, sqlite, and other cgo features are always present.
 # Cross-compiling therefore needs the matching C toolchain; this script honors
@@ -37,11 +40,7 @@ DIST_DIR="$NPM_DIR/dist"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-# Build the frontend once and embed it into every platform binary (vite outputs
-# to pkg/gateway/dist, which pkg/gateway embeds via go:embed).
-echo "==> building frontend (embedded into all binaries)"
-find "$ROOT_DIR/pkg/gateway/dist" -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
-( cd "$ROOT_DIR/frontend" && CI=true corepack pnpm install --frozen-lockfile && corepack pnpm build )
+[ -f "$ROOT_DIR/pkg/gateway/dist/index.html" ] || { echo "pkg/gateway/dist has no web UI build; run make ui first" >&2; exit 1; }
 
 triple_for() {
   case "$1" in
