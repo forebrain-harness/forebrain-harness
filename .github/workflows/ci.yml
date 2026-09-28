@@ -44,6 +44,19 @@ jobs:
           CGO_ENABLED: "1"
         run: go test -tags fts5 ./... -count=1 -timeout 20m
 
+  go-install:
+    name: go install from a module proxy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install CGO deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - run: scripts/check-go-install.sh
+
   windows:
     name: Windows build test (CGO)
     runs-on: windows-latest
