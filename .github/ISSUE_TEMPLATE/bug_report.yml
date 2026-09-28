@@ -1,0 +1,59 @@
+name: Bug report
+description: Report something that works incorrectly.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `forebrain --version`
+      placeholder: forebrain version 0.1.0 (commit ...)
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: Install method
+      options:
+        - npm
+        - go install
+        - Built from source
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: For example macOS 15 (arm64), Ubuntu 24.04 (amd64), Windows 11
+    validations:
+      required: true
+  - type: input
+    id: provider-model
+    attributes:
+      label: Provider and model
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that triggers the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `~/.forebrain/logs/` — remove anything private before posting.

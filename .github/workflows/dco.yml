@@ -1,0 +1,22 @@
+name: DCO
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  sign-off:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      # The checker comes from the base branch, so a pull request cannot
+      # change the rule it is checked against.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .base
+      - name: Check sign-off
+        run: .base/scripts/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"

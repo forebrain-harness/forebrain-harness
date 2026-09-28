@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# commit-msg hook, installed by `make hooks` (git config core.hooksPath .githooks).
+# Enforces the two commit-message rules of this repository:
+#   1. the DCO sign-off is present,
+#   2. the title matches the Conventional Commits contract.
+set -u
+
+message_file="$1"
+
+if ! grep -q '^Signed-off-by: ' "$message_file"; then
+  echo "add a DCO sign-off: git commit -s" >&2
+  exit 1
+fi
+
+# Resolve the checker next to this hook rather than via the current
+# repository's root: the hooks may be installed via core.hooksPath from a
+# checkout whose scripts/ is elsewhere.
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$hook_dir/../scripts/check-commit-message.sh" "$message_file"

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# prepare-commit-msg hook, installed by `make hooks`
+# (git config core.hooksPath .githooks).
+#
+# Installing the hooks is the developer's own choice and equals agreeing to
+# the Developer Certificate of Origin (https://developercertificate.org/);
+# the automatic sign-off only saves typing `git commit -s` by hand.
+
+set -u
+
+# $2 is the commit source; git-generated messages (merge, squash, ...) are
+# left untouched.
+source="${2:-}"
+if [[ "$source" == "merge" || "$source" == "squash" ]]; then
+  exit 0
+fi
+
+git interpret-trailers --in-place --if-exists doNothing \
+  --trailer "Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"
