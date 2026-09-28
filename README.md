@@ -72,11 +72,24 @@ team's chat apps talk to.
 
 ## Quick start
 
-Install (Node.js 18+; macOS arm64/x64, Linux x64/arm64, Windows x64):
+Install with npm (Node.js 18+; macOS arm64/x64, Linux x64/arm64, Windows x64):
 
 ```bash
 npm install -g @forebrain-harness/forebrain
 ```
+
+Or with Go (Go 1.26+ and a C compiler):
+
+```bash
+CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest
+```
+
+A `go install` build downloads the tokenization dictionaries used for Chinese
+and Japanese memory search automatically on first use, and works offline
+afterwards.
+
+Prebuilt archives for every platform are attached to each
+[GitHub release](https://github.com/forebrain-harness/forebrain-harness/releases).
 
 Start it in your project:
 
