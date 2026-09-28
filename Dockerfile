@@ -11,7 +11,7 @@ RUN pnpm run build
 
 FROM golang:1.26-bookworm AS gobuild
 ARG TARGETARCH
-ARG FOREBRAIN_VERSION=v0.0.1
+ARG FOREBRAIN_VERSION=
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev libsqlite3-dev && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /out
 WORKDIR /src
