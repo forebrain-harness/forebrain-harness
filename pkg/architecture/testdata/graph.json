@@ -122,7 +122,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/state",
-      "loc": 9582,
+      "loc": 9619,
       "fan_in": 11,
       "fan_out": 2
     },

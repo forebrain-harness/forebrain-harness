@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	sqlite3 "github.com/mattn/go-sqlite3"
@@ -18,6 +20,9 @@ import (
 var schemaSQL string
 
 func Open(ctx context.Context, absSQLitePath string, opts *OpenOptions) (*sql.DB, error) {
+	if err := requireSQLiteBuild(ctx); err != nil {
+		return nil, err
+	}
 	abs, err := filepath.Abs(absSQLitePath)
 	if err != nil {
 		return nil, err
@@ -86,6 +91,35 @@ func sqliteDriverName() string {
 	return "forebrain_sqlite"
 }
 
+// errSQLiteBuild is what a forebrain built without cgo or without SQLite's
+// FTS5 module reports: memory search declares an FTS5 table, so such a build
+// cannot open its state at all, and the way out is to rebuild it.
+var errSQLiteBuild = errors.New("this forebrain was built without cgo or SQLite FTS5; reinstall it with: CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest")
+
+var (
+	sqliteBuildOnce sync.Once
+	sqliteBuildErr  error
+)
+
+// requireSQLiteBuild asks the linked SQLite engine itself whether it can
+// serve the state schema. A cgo-less build links go-sqlite3's stub, whose
+// every query fails; a build without the fts5 tag answers 0.
+func requireSQLiteBuild(ctx context.Context) error {
+	sqliteBuildOnce.Do(func() {
+		db, err := sql.Open(sqliteDriverName(), ":memory:")
+		if err != nil {
+			sqliteBuildErr = errSQLiteBuild
+			return
+		}
+		defer db.Close()
+		var fts5 int
+		if err := db.QueryRowContext(ctx, `SELECT sqlite_compileoption_used('ENABLE_FTS5')`).Scan(&fts5); err != nil || fts5 != 1 {
+			sqliteBuildErr = errSQLiteBuild
+		}
+	})
+	return sqliteBuildErr
+}
+
 func sqliteDataSourceForStateFile(abs string) string {
 	p := filepath.ToSlash(abs)
 	// A file URI path must be absolute (leading slash). Windows drive-letter
@@ -148,6 +182,9 @@ func sqliteDataSourceForStateFileReadOnly(abs string) string {
 // missing or unreadable file surfaces as an error instead of an empty
 // database silently standing in for one.
 func OpenReadOnly(absSQLitePath string) (*sql.DB, error) {
+	if err := requireSQLiteBuild(context.Background()); err != nil {
+		return nil, err
+	}
 	abs, err := filepath.Abs(absSQLitePath)
 	if err != nil {
 		return nil, err
