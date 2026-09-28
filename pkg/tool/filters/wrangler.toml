@@ -1,0 +1,4 @@
+[filters.wrangler]
+description = "Drop wrangler version banner, separator, and decorative error emoji; keep upload stats, published URL, and errors."
+version = "2"
+match_command = '^wrangler\s+(deploy|publish|dev|pages\s+deploy)\b'

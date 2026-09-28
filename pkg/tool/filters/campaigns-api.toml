@@ -1,0 +1,119 @@
+[filters.campaigns-api]
+description = "Strip HTTP headers and cap large campaigns API JSON responses."
+version = "4"
+match_command = "(curl|control_plane\\.sh).*(/api/v1/campaigns|campaigns\\b)"
+match_output_select = [
+  "(?m)^\\{\"campaigns\":\\[",
+  "(?m)^\\s*\"campaigns\"\\s*:\\s*\\[",
+  "(?m)^--- patch",
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^HTTP/\\d",
+  "^Vary:",
+  "^content-type:",
+  "^content-length:",
+  "^Date:",
+  "^Connection:",
+  "^Keep-Alive:",
+  "^\\s*$",
+]
+max_lines = 20
+max_lines_keep_tail = 5
+
+[[tests.campaigns-api]]
+name = "strips HTTP headers, truncates long JSON line"
+expect_match_output = true
+input = """HTTP/1.1 200 OK
+content-type: application/json; charset=utf-8
+content-length: 80565
+Date: Thu, 02 Jul 2026 10:22:37 GMT
+
+{"campaigns":[{"id":"7c2e54f1-9ae8-44e5-a000-6618dfefc11f","name":"timo-test","status":"discoveryPhase","config":{"allowedDomains":["example.com"],"authentication":{"skipDetectAuth":false}}},{"id":"f4609dbf-53fc-467f-a6bc-f48a6b7ad203","name":"noauth-problems","status":"waitForExecutionApproval","config":{"allowedDomains":["*.example.com"]}}]}
+"""
+expected = """{"campaigns":[{"id":"7c2e54f1-9ae8-44e5-a000-6618dfefc11f","name":"timo-test","status":"discoveryPhase","config":{"allowedDomains":["example.com"],"authentication":{"skipDetectAuth":false}}},{"id":"f4609dbf-53fc-467f-a6bc-f48a6b7ad203","name":"noauth-problems","status":"waitForExecutionApproval","config":{"allowedDomains":["*.example.com"]}}]}"""
+
+[[tests.campaigns-api]]
+name = "bare HTTP response does not select campaigns API"
+expect_match_output = false
+input = """HTTP/1.1 200 OK
+Server: nginx
+Content-Type: text/plain
+Content-Length: 2
+
+ok
+"""
+expected = """HTTP/1.1 200 OK
+Server: nginx
+Content-Type: text/plain
+Content-Length: 2
+
+ok"""
+
+[[tests.campaigns-api]]
+name = "small jq-sliced lead/campaign verify output passes through"
+input = """--- patch
+{
+  "leads": [
+    {
+      "id": "77211d20-30cb-47c4-a115-8a06a095bebc",
+      "status": "selected",
+      "error": null
+    }
+  ]
+}
+--- verify
+{
+  "count": 1,
+  "error": null
+}
+"""
+expected = """--- patch
+{
+  "leads": [
+    {
+      "id": "77211d20-30cb-47c4-a115-8a06a095bebc",
+      "status": "selected",
+      "error": null
+    }
+  ]
+}
+--- verify
+{
+  "count": 1,
+  "error": null
+}"""
+
+[[tests.campaigns-api]]
+name = "preserves API error message"
+input = """HTTP/1.1 400 Bad Request
+content-type: application/json
+
+{"message":"campaign not found","campaigns":[]}
+"""
+expected = """{"message":"campaign not found","campaigns":[]}"""
+
+[[tests.campaigns-api]]
+name = "pretty-printed control_plane.sh campaigns JSON matches"
+input = """
+{
+  "campaigns": [
+    {
+      "id": "c058c86e-cef3-4ae8-b1bc-c08cef3722fb",
+      "name": "CitiVelocity_SER_ECONFIRMS_05_11",
+      "status": "completed"
+    }
+  ]
+}
+"""
+expected = """
+{
+  "campaigns": [
+    {
+      "id": "c058c86e-cef3-4ae8-b1bc-c08cef3722fb",
+      "name": "CitiVelocity_SER_ECONFIRMS_05_11",
+      "status": "completed"
+    }
+  ]
+}
+"""

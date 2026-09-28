@@ -1,0 +1,87 @@
+[filters.gh-api]
+description = "Compact gh api/pr JSON: strip URL/node_id noise and bot review-comment badge footers; keep errors."
+version = "7"
+match_command = "(^|[;&|]\\s*)gh\\s+(api|pr\\s+view|repo\\s+view|search)\\b"
+match_output_select = [
+  '(?m)"total_count"\s*:\s*\d',
+  '(?m)"documentation_url"\s*:\s*"https://docs\.github\.com',
+  '(?m)"comments"\s*:\s*\[\s*\{',
+  '(?m)"commits"\s*:\s*\[\s*\{',
+  '(?m)"items"\s*:\s*\[\s*\{',
+  '(?m)"login"\s*:\s*"[^"]+"\s*,\s*"id"\s*:\s*\d',
+  '(?m)"slug"\s*:\s*"[^"]+"\s*,\s*"description"',
+  '(?m)"privacy"\s*:\s*"(secret|closed|public)"',
+  '(?m)"diff_hunk"\s*:\s*"',
+  '(?m)"in_reply_to_id"\s*:',
+  '(?m)gh: .+\(HTTP \d+\)',
+  '<div><a href=\\\\?"https://cursor\.com/open',
+]
+strip_ansi = true
+replace = [
+  { pattern = '"node_id"\s*:\s*"[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = '"id"\s*:\s*"MDQ[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = '"gravatar_id"\s*:\s*"[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = '"avatar_url"\s*:\s*"[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = '"(html_url|git_url|clone_url|ssh_url|svn_url|archive_url|labels_url|events_url|hooks_url|issue_events_url|keys_url|collaborators_url|teams_url|milestones_url|notifications_url|merges_url|downloads_url|compare_url|pulls_url|issues_url|statuses_url|languages_url|stargazers_url|contributors_url|subscribers_url|subscription_url|commits_url|git_commits_url|comments_url|issue_comment_url|contents_url|forks_url|releases_url|deployments_url|git_refs_url|git_tags_url|trees_url|blob_url|tags_url|assignees_url|branches_url|review_comments_url|review_comment_url|pull_request_url|repository_url|repos_url|members_url|url)"\s*:\s*"[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = '<div><a href=\\\\?"https://cursor\.com/open.*?</div>', replacement = "" },
+]
+
+[[tests.gh-api]]
+name = "preserves small API error JSON and gh stderr on same line"
+input = """{"message":"Not Found","documentation_url":"https://docs.github.com/rest/repos/repos#get-a-repository","status":"404"}gh: Not Found (HTTP 404)
+"""
+expected = """{"message":"Not Found","documentation_url":"https://docs.github.com/rest/repos/repos#get-a-repository","status":"404"}gh: Not Found (HTTP 404)
+"""
+
+[[tests.gh-api]]
+name = "strips node_id and repo URLs from search items"
+input = """{"total_count":2,"incomplete_results":false,"items":[{"id":1,"node_id":"MDEwOlJlcG9zaXRvcnkx","name":"cli","full_name":"jfrog/cli","html_url":"https://github.com/jfrog/cli","clone_url":"https://github.com/jfrog/cli.git","description":"JFrog CLI"},{"id":2,"node_id":"MDEwOlJlcG9zaXRvcnky","name":"other","full_name":"org/other","html_url":"https://github.com/org/other","clone_url":"https://github.com/org/other.git","description":"padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"}]}
+"""
+expected = """{"total_count":2,"incomplete_results":false,"items":[{"id":1,"name":"cli","full_name":"jfrog/cli","description":"JFrog CLI"},{"id":2,"name":"other","full_name":"org/other","description":"padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"}]}"""
+
+[[tests.gh-api]]
+name = "compound echo plus pr json keeps header and full comment body"
+input = """=== PR reviews ===
+{"comments":[{"author":{"login":"coderabbit"},"body":"<!-- review -->\n\nLong comment body that agents sometimes need in full on the first pass and keeps going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going"}]}
+"""
+expected = """=== PR reviews ===
+{"comments":[{"author":{"login":"coderabbit"},"body":"<!-- review -->
+
+Long comment body that agents sometimes need in full on the first pass and keeps going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going and going"}]}"""
+
+[[tests.gh-api]]
+name = "pr commits json strips author node id, keeps message"
+input = """{"commits":[{"authoredDate":"2026-07-04T15:23:03Z","authors":[{"email":"dev@example.com","id":"MDQ6VXNlcjEyMA==","login":"dev","name":"Dev User"}],"messageHeadline":"fix: handle blocked phase routing"}]}
+"""
+expected = """{"commits":[{"authoredDate":"2026-07-04T15:23:03Z","authors":[{"email":"dev@example.com","login":"dev","name":"Dev User"}],"messageHeadline":"fix: handle blocked phase routing"}]}"""
+
+[[tests.gh-api]]
+name = "org api json strips node_id and url fields"
+input = """{"login":"JFROG","id":12,"node_id":"MDEyOk9yZ2FuaXphdGlvbjEy","url":"https://github.jfrog.info/api/v3/orgs/JFROG","repos_url":"https://github.jfrog.info/api/v3/orgs/JFROG/repos","description":"JFrog"}
+"""
+expected = """{"login":"JFROG","id":12,"description":"JFrog"}
+"""
+
+[[tests.gh-api]]
+name = "team paginate json strips metadata, keeps slug and privacy"
+input = """[{"id":1,"node_id":"MDQ6VGVhbTE=","url":"https://api.github.com/teams/1","name":"SRE","slug":"sre-team","description":"Platform SRE","privacy":"closed","permission":"pull"}]
+"""
+expected = """[{"id":1,"name":"SRE","slug":"sre-team","description":"Platform SRE","privacy":"closed","permission":"pull"}]
+"""
+
+[[tests.gh-api]]
+name = "bundle: --jq reshaped PR review comments still match and strip url"
+input = """{"id":3615379785,"user":"ilyami_playtika","path":"Assets/Features/Mes/Scripts/Internal/Common/Data/MesDataJsonConverter.cs","line":17,"in_reply_to_id":null,"url":"https://api.github.com/repos/org/repo/pulls/comments/3615379785","body":"Here the key place of PR.","diff_hunk":"@@ -0,0 +1,49 @@\\n+using System;\\n+using Newtonsoft.Json;"}
+"""
+expected = """{"id":3615379785,"user":"ilyami_playtika","path":"Assets/Features/Mes/Scripts/Internal/Common/Data/MesDataJsonConverter.cs","line":17,"in_reply_to_id":null,"body":"Here the key place of PR.","diff_hunk":"@@ -0,0 +1,49 @@\\n+using System;\\n+using Newtonsoft.Json;"}"""
+
+[[tests.gh-api]]
+name = "graphql review-thread body strips Fix-in-Cursor badge footer, keeps finding text"
+input = """{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false,"path":"app/client.go","comments":{"nodes":[{"author":{"login":"cursor"},"body":"### Off-by-one in retry loop\\n\\nThe loop retries one time fewer than intended.\\n\\n<div><a href=\\"https://cursor.com/open?link=eyJ2ZXJzaW9uIjoxfQ\\" target=\\"_blank\\" rel=\\"noopener noreferrer\\"><picture><source media=\\"(prefers-color-scheme: dark)\\" srcset=\\"https://cursor.com/assets/images/fix-in-cursor-dark.png\\"><source media=\\"(prefers-color-scheme: light)\\" srcset=\\"https://cursor.com/assets/images/fix-in-cursor-light.png\\"><img alt=\\"Fix in Cursor\\" width=\\"115\\" height=\\"28\\" src=\\"https://cursor.com/assets/images/fix-in-cursor-dark.png\\"></picture></a>&nbsp;<a href=\\"https://cursor.com/agents?link=eyJ2ZXJzaW9uIjoxfQ\\" target=\\"_blank\\" rel=\\"noopener noreferrer\\">Open in Web</a></div>"}]}}]}}}}}
+"""
+expected = """{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false,"path":"app/client.go","comments":{"nodes":[{"author":{"login":"cursor"},"body":"### Off-by-one in retry loop\\n\\nThe loop retries one time fewer than intended.\\n\\n"}]}}]}}}}}"""
+
+[[tests.gh-api]]
+name = "empty input passes through"
+input = ""
+expected = ""

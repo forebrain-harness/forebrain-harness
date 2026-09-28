@@ -1,0 +1,96 @@
+[filters.helm]
+description = "Compact helm output"
+version = "4"
+match_command = "^helm\\b"
+# Keep output-only selection Helm-specific. Generic `Error:` and glog warning
+# prefixes occur in Terraform, podman, application logs, and many other tools;
+# Groundcover retrieve telemetry showed those selectors cross-matching and
+# capping unrelated output. Known `helm` commands still filter through
+# match_command, including failures that only print `Error:`.
+match_output_select = [
+  '(?m)^STATUS: (deployed|failed|pending-install|pending-upgrade|uninstalled)',
+  '(?m)^NAME\s+NAMESPACE\s+REVISION',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^W\\d{4}",
+]
+max_lines = 50
+max_lines_keep_tail = 15
+
+[[tests.helm]]
+name = "strips blank lines, preserves release info"
+expect_match_output = true
+input = """
+NAME: my-release
+LAST DEPLOYED: Mon Jan 15 10:30:00 2024
+NAMESPACE: default
+STATUS: deployed
+REVISION: 3
+
+NOTES:
+Application is running.
+"""
+expected = "NAME: my-release\nLAST DEPLOYED: Mon Jan 15 10:30:00 2024\nNAMESPACE: default\nSTATUS: deployed\nREVISION: 3\nNOTES:\nApplication is running."
+
+[[tests.helm]]
+name = "generic Terraform errors do not select helm"
+expect_match_output = false
+input = """Warning: Failed to decode resource from state
+Error: Invalid value for input variable
+  on eks.tf line 59, in module "eks":
+"""
+expected = """Warning: Failed to decode resource from state
+Error: Invalid value for input variable
+  on eks.tf line 59, in module "eks":"""
+
+[[tests.helm]]
+name = "generic glog warning does not select helm"
+expect_match_output = false
+input = "W0115: warning from an unrelated application"
+expected = "W0115: warning from an unrelated application"
+
+[[tests.helm]]
+name = "strips glog W-prefix warnings"
+input = "W0115 10:30:00 warning message from internal\nNAME: my-chart\nSTATUS: deployed"
+expected = "NAME: my-chart\nSTATUS: deployed"
+
+[[tests.helm]]
+name = "real helm upgrade output: deployed status with notes"
+input = """
+NAME: my-release
+LAST DEPLOYED: Mon Jan  1 12:00:00 2024
+NAMESPACE: production
+STATUS: deployed
+REVISION: 3
+NOTES:
+Get the application URL by running these commands:
+  export POD_NAME=$(kubectl get pods -n production -l app=my-app -o name)
+  echo "Visit http://127.0.0.1:8080"
+  kubectl port-forward $POD_NAME 8080:80
+"""
+expected = """
+NAME: my-release
+LAST DEPLOYED: Mon Jan  1 12:00:00 2024
+NAMESPACE: production
+STATUS: deployed
+REVISION: 3
+NOTES:
+Get the application URL by running these commands:
+  export POD_NAME=$(kubectl get pods -n production -l app=my-app -o name)
+  echo "Visit http://127.0.0.1:8080"
+  kubectl port-forward $POD_NAME 8080:80
+"""
+
+[[tests.helm]]
+name = "helm list table: keeps releases, strips blanks"
+input = """
+NAME            NAMESPACE       REVISION    UPDATED                                 STATUS          CHART
+api             production      7           Mon Jul 14 10:00:00 2026                deployed        api-1.2.3
+worker          production      3           Mon Jul 14 09:00:00 2026                failed          worker-0.9.0
+"""
+expected = """NAME            NAMESPACE       REVISION    UPDATED                                 STATUS          CHART
+api             production      7           Mon Jul 14 10:00:00 2026                deployed        api-1.2.3
+worker          production      3           Mon Jul 14 09:00:00 2026                failed          worker-0.9.0"""
+

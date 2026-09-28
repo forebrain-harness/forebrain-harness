@@ -1,0 +1,162 @@
+[filters.conda]
+description = "Drop conda download-table rows and transaction lifecycle lines; keep the Package Plan header and install summaries."
+version = "1"
+match_command = '^conda\s+(install|update|create|remove)\b'
+match_output_select = [
+  '(?m)^Collecting package metadata',
+]
+strip_lines_matching = [
+  '^\s{4,}\S.*\|\s',
+  '^\s{4,}[-|]{5,}\s*$',
+  '^(Preparing|Verifying|Executing) transaction:\s*done\s*$',
+]
+
+[[tests.conda]]
+name = "strips download table rows and transaction lines, keeps plan and summary"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    numpy-1.26.4               |   py311h..._0     4.3 MB
+
+The following NEW packages will be INSTALLED:
+
+  numpy              conda-forge/linux-64::numpy-1.26.4-py311_0
+
+Preparing transaction: done
+Verifying transaction: done
+Executing transaction: done
+"""
+expected = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+The following packages will be downloaded:
+
+
+The following NEW packages will be INSTALLED:
+
+  numpy              conda-forge/linux-64::numpy-1.26.4-py311_0
+
+"""
+
+[[tests.conda]]
+name = "preserves error output (solve failure)"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: failed
+
+PackagesNotFoundError: The following packages are not available from current channels:
+  - nonexistent-pkg
+"""
+expected = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: failed
+
+PackagesNotFoundError: The following packages are not available from current channels:
+  - nonexistent-pkg
+"""
+
+[[tests.conda]]
+name = "preserves transaction failure lines (never-block)"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+The following NEW packages will be INSTALLED:
+
+  numpy              conda-forge/linux-64::numpy-1.26.4-py311_0
+
+Preparing transaction: done
+Verifying transaction: done
+Executing transaction: failed
+
+EnvironmentCorruptError: The environment at '/opt/conda/envs/myenv' appears to be corrupted.
+"""
+expected = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+The following NEW packages will be INSTALLED:
+
+  numpy              conda-forge/linux-64::numpy-1.26.4-py311_0
+
+Executing transaction: failed
+
+EnvironmentCorruptError: The environment at '/opt/conda/envs/myenv' appears to be corrupted.
+"""
+
+[[tests.conda]]
+name = "download table rows and transaction lifecycle stripped, Package Plan and install list kept"
+input = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+  added / updated specs:
+    - numpy=1.26.4
+    - pandas
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    numpy-1.26.4               |   py311h_0     4.3 MB  conda-forge
+    pandas-2.1.4               |   py311h_0     9.1 MB  conda-forge
+                                           ----
+                                          13.4 MB Total
+
+The following NEW packages will be INSTALLED:
+
+  numpy              conda-forge/linux-64::numpy-1.26.4-py311_0
+  pandas             conda-forge/linux-64::pandas-2.1.4-py311_0
+
+Preparing transaction: done
+Verifying transaction: done
+Executing transaction: done
+"""
+expected = """
+Collecting package metadata (current_repodata.json): done
+Solving environment: done
+
+## Package Plan ##
+
+  environment location: /opt/conda/envs/myenv
+
+  added / updated specs:
+    - numpy=1.26.4
+    - pandas
+
+The following packages will be downloaded:
+
+                                           ----
+                                          13.4 MB Total
+
+The following NEW packages will be INSTALLED:
+
+  numpy              conda-forge/linux-64::numpy-1.26.4-py311_0
+  pandas             conda-forge/linux-64::pandas-2.1.4-py311_0
+"""

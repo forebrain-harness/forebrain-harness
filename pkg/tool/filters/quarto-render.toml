@@ -1,0 +1,70 @@
+[filters.quarto-render]
+description = "Compact quarto render output"
+match_command = "^quarto\\s+render"
+match_output_select = [
+  '(?m)^ {2}processing file: ',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*processing file:",
+  "^\\s*\\d+/\\d+\\s",
+  "^\\s*running",
+  "^\\s*Rendering",
+  "^pandoc ",
+  "^  Validating",
+  "^  Resolving",
+]
+match_output = [
+  { pattern = "Output created:", message = "ok (output created)" },
+]
+max_lines = 20
+
+[[tests.quarto-render]]
+name = "success short-circuits to ok"
+input = """
+processing file: index.qmd
+  Validating schema
+  Resolving resources
+pandoc to html5
+Output created: _site/index.html
+"""
+expected = "ok (output created)"
+
+[[tests.quarto-render]]
+name = "error passes through"
+input = """
+processing file: broken.qmd
+  Validating schema
+ERROR: Render failed
+
+caused by:
+  syntax error at line 10
+"""
+expected = "ERROR: Render failed\ncaused by:\n  syntax error at line 10"
+
+[[tests.quarto-render]]
+name = "real render: processing/step-N/pandoc/running stripped, Output created kept"
+input = """
+
+  processing file: report.qmd
+
+  1/4 Loading R packages
+  2/4 Executing R code
+  3/4 Rendering
+  4/4 Output
+
+  running: pandoc
+    to: html
+    output-file: report.html
+    standalone: true
+
+  Validating document...
+  Resolving includes...
+  pandoc --native-previewer --standalone
+
+Output created: report.html
+"""
+expected = """
+ok (output created)
+"""

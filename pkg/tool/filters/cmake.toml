@@ -1,0 +1,50 @@
+[filters.cmake]
+description = "Drop cmake probe/detection boilerplate; keep Found/NOT-found, warnings, errors, summary."
+version = "1"
+match_command = "^cmake\\b"
+match_output_select = [
+  '(?m)^-- (Detecting|Looking for|Performing Test|Check) ',
+  '(?m)^CMake (Warning|Error|Deprecation Warning)\b',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^-- Detecting ',
+  '^-- Looking for ',
+  '^-- Performing Test ',
+  '^-- Check(ing)? ',
+]
+
+[[tests.cmake]]
+name = "drops probe boilerplate, keeps compiler id and Found lines"
+input = """
+-- The C compiler identification is GNU 11.4.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Looking for pthread.h
+-- Looking for pthread.h - found
+-- Performing Test HAVE_FLAG
+-- Performing Test HAVE_FLAG - Success
+-- Found Boost: /usr/lib/cmake/Boost-1.83.0 (found version "1.83.0")
+"""
+expected = """-- The C compiler identification is GNU 11.4.0
+-- Found Boost: /usr/lib/cmake/Boost-1.83.0 (found version "1.83.0")"""
+
+[[tests.cmake]]
+name = "keeps NOT-found, errors and the incomplete summary"
+input = """
+-- Could NOT find GFlags (missing: GFLAGS_INCLUDE_DIR GFLAGS_LIBRARY)
+CMake Error at FindPackageHandleStandardArgs.cmake:230 (message):
+  Could NOT find LMDB (missing: LMDB_INCLUDE_DIR LMDB_LIBRARIES)
+-- Configuring incomplete, errors occurred!
+"""
+expected = """-- Could NOT find GFlags (missing: GFLAGS_INCLUDE_DIR GFLAGS_LIBRARY)
+CMake Error at FindPackageHandleStandardArgs.cmake:230 (message):
+  Could NOT find LMDB (missing: LMDB_INCLUDE_DIR LMDB_LIBRARIES)
+-- Configuring incomplete, errors occurred!"""
+
+[[tests.cmake]]
+name = "empty input passes through"
+input = ""
+expected = ""

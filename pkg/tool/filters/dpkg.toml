@@ -1,0 +1,73 @@
+[filters.dpkg]
+description = "Drop dpkg unpack/database noise and the -l separator rule; keep Setting up, package rows and errors."
+version = "1"
+match_command = '^(sudo\s+)?dpkg(-query)?(\s|$)'
+match_output_select = [
+  '^\|\|/ ',
+  '^Desired=Unknown',
+  '^\+\+\+-=',
+  '^dpkg: ',
+  '^dpkg-query: ',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^\(Reading database',
+  '^Preparing to unpack ',
+  '^Unpacking ',
+  '^Selecting previously unselected ',
+  '^Processing triggers ',
+  '^\+\+\+-',
+]
+max_lines = 60
+on_empty = "dpkg: ok"
+
+[[tests.dpkg]]
+name = "dpkg -l drops separator rule, keeps rows"
+input = """
+||/ Name           Version      Architecture Description
++++-==============-============-============-=================================
+ii  bash           5.2.21       amd64        GNU Bourne Again SHell
+ii  coreutils      9.4          amd64        GNU core utilities
+"""
+expected = """
+||/ Name           Version      Architecture Description
+ii  bash           5.2.21       amd64        GNU Bourne Again SHell
+ii  coreutils      9.4          amd64        GNU core utilities
+"""
+
+[[tests.dpkg]]
+name = "dpkg -i strips unpack noise, keeps Setting up"
+input = """
+Selecting previously unselected package foo.
+(Reading database ... 12345 files and directories currently installed.)
+Preparing to unpack foo.deb ...
+Unpacking foo (1.0-1) ...
+Setting up foo (1.0-1) ...
+Processing triggers for man-db (2.10.2-1) ...
+"""
+expected = "Setting up foo (1.0-1) ..."
+
+[[tests.dpkg]]
+name = "sudo dpkg -i strips noise same as dpkg"
+input = """
+Selecting previously unselected package bar.
+(Reading database ... 5000 files currently installed.)
+Preparing to unpack bar.deb ...
+Unpacking bar (2.0-1) ...
+Setting up bar (2.0-1) ...
+Processing triggers for man-db (2.10.2-1) ...
+"""
+expected = "Setting up bar (2.0-1) ..."
+
+[[tests.dpkg]]
+name = "keeps dpkg errors with indented detail"
+input = """
+(Reading database ... 12345 files and directories currently installed.)
+dpkg: error processing package foo (--install):
+ dependency problems - leaving unconfigured
+"""
+expected = """
+dpkg: error processing package foo (--install):
+ dependency problems - leaving unconfigured
+"""

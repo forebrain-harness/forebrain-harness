@@ -1,0 +1,723 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --forebrain-brand-1: #0d91b0;
+  --forebrain-brand-2: #19b7d2;
+  --forebrain-brand-3: #6ce6e8;
+  --forebrain-brand-soft: rgba(25, 183, 210, 0.18);
+  --forebrain-brand-hover: #0f7f9a;
+  --forebrain-brand-border: rgba(13, 145, 176, 0.18);
+  --forebrain-brand-border-strong: rgba(13, 145, 176, 0.34);
+  --forebrain-brand-outline-shadow: 0 0 0 1px rgba(13, 145, 176, 0.28);
+  --forebrain-brand-outline-shadow-soft: 0 0 0 1px rgba(13, 145, 176, 0.22);
+  --forebrain-brand-inset-shadow: inset 0 0 0 1px rgba(13, 145, 176, 0.22);
+  --forebrain-brand-button-shadow: 0 12px 28px rgba(9, 52, 74, 0.12);
+  --forebrain-brand-scrollbar: rgba(13, 145, 176, 0.42);
+  --forebrain-brand-scrollbar-thumb: rgba(13, 145, 176, 0.45);
+  --forebrain-on-brand: #f5ffff;
+  --forebrain-bg: #eaf4f5;
+  --forebrain-bg-alt: #dfeff2;
+  --forebrain-bg-alt-soft: rgba(223, 239, 242, 0.7);
+  --forebrain-bg-alt-glass: rgba(223, 239, 242, 0.62);
+  --forebrain-surface: #f7fcfc;
+  --forebrain-surface-soft: rgba(247, 252, 252, 0.72);
+  --forebrain-surface-glass: rgba(247, 252, 252, 0.78);
+  --forebrain-surface-control: rgba(247, 252, 252, 0.82);
+  --forebrain-surface-strong: rgba(247, 252, 252, 0.84);
+  --forebrain-composer-bg: rgba(247, 252, 252, 0.92);
+  --forebrain-popover-bg: rgba(247, 252, 252, 0.98);
+  --forebrain-input-bg: #ffffff;
+  --forebrain-input-bg-soft: rgba(255, 255, 255, 0.72);
+  --forebrain-input-hover-bg: #ffffff;
+  --forebrain-divider: rgba(20, 74, 94, 0.16);
+  --forebrain-divider-strong: rgba(20, 74, 94, 0.22);
+  --forebrain-badge-bg: rgba(20, 74, 94, 0.16);
+  --forebrain-button-alt-bg: rgba(10, 54, 74, 0.08);
+  --forebrain-button-alt-hover-bg: rgba(10, 54, 74, 0.14);
+  --forebrain-text: #102531;
+  --forebrain-text-2: #3d6170;
+  --forebrain-muted-text: #6f8f9b;
+  --forebrain-danger: #b53333;
+  --forebrain-code-bg: #04111b;
+  --forebrain-code-surface: #0a1f2d;
+  --forebrain-code-text: #ebfeff;
+  --forebrain-doc-shadow: 0 18px 40px rgba(9, 52, 74, 0.08);
+  --forebrain-sidebar-shadow: inset -1px 0 0 0 rgba(20, 74, 94, 0.08);
+  --forebrain-inset-highlight: rgba(247, 252, 252, 0.72);
+  --forebrain-inset-shadow: inset 0 1px 0 var(--forebrain-inset-highlight);
+  --forebrain-ring-soft: rgba(13, 145, 176, 0.2);
+  --forebrain-focus-border: rgba(13, 145, 176, 0.34);
+  --forebrain-rule-line: rgba(61, 97, 112, 0.34);
+  --forebrain-nav-bg: rgba(234, 244, 245, 0.78);
+  --forebrain-nav-shadow: 0 1px 0 0 rgba(20, 74, 94, 0.06);
+  --forebrain-content-gradient: linear-gradient(180deg, rgba(247, 252, 252, 0.46), rgba(223, 239, 242, 0.32));
+  --forebrain-card-gradient: linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(240, 249, 250, 0.54));
+  --forebrain-input-gradient: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(240, 249, 250, 0.88));
+  /* One flat ground. The page is a workspace, not a poster: colour is spent on
+     what the user is reading, not on the backdrop. */
+  --forebrain-page-bg: var(--forebrain-bg);
+  /* The rail sits a step below the reading area, so the light falls on what
+     the user is here to read. */
+  --forebrain-rail-bg: #e6f0f2;
+  /* Two roles, two families: the serif carries what a person reads, this one
+     carries what the app labels — navigation, chips, counts. */
+  --forebrain-ui-font: ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --forebrain-mono-font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --canvas: 185 35% 94%;
+  --ivory: 180 45% 98%;
+  --ink: 199 51% 13%;
+  --olive: 198 30% 34%;
+  --stone: 197 17% 52%;
+  --sand: 193 45% 91%;
+  --cream-border: 194 33% 84%;
+  --terracotta: 191 86% 37%;
+  --terracotta-fg: 180 100% 98%;
+  --charcoal: 199 51% 13%;
+  --ring-focus: 188 88% 46%;
+  --destructive: 0 72% 58%;
+  --destructive-fg: 210 40% 98%;
+  --background: var(--canvas);
+  --foreground: var(--ink);
+  --card: var(--ivory);
+  --card-foreground: var(--ink);
+  --popover: var(--ivory);
+  --popover-foreground: var(--ink);
+  --primary: var(--terracotta);
+  --primary-foreground: var(--terracotta-fg);
+  --secondary: var(--sand);
+  --secondary-foreground: 210 30% 92%;
+  --muted: 221 24% 15%;
+  --muted-foreground: var(--olive);
+  --accent: 220 28% 18%;
+  --accent-foreground: 210 40% 96%;
+  --destructive-foreground: var(--destructive-fg);
+  --border: var(--cream-border);
+  --input: var(--cream-border);
+  --ring: var(--ring-focus);
+  --radius: 0.75rem;
+}
+
+.dark {
+  --forebrain-brand-hover: #19b7d2;
+  --forebrain-brand-border: rgba(128, 236, 255, 0.18);
+  --forebrain-brand-border-strong: rgba(128, 236, 255, 0.34);
+  --forebrain-brand-outline-shadow: 0 0 0 1px rgba(128, 236, 255, 0.24);
+  --forebrain-brand-outline-shadow-soft: 0 0 0 1px rgba(128, 236, 255, 0.18);
+  --forebrain-brand-inset-shadow: inset 0 0 0 1px rgba(128, 236, 255, 0.18);
+  --forebrain-brand-button-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+  --forebrain-brand-scrollbar: rgba(128, 236, 255, 0.42);
+  --forebrain-brand-scrollbar-thumb: rgba(128, 236, 255, 0.45);
+  --forebrain-on-brand: #f5ffff;
+  --forebrain-bg: #04111b;
+  --forebrain-bg-alt: #081a26;
+  --forebrain-bg-alt-soft: rgba(8, 26, 38, 0.7);
+  --forebrain-bg-alt-glass: rgba(8, 26, 38, 0.72);
+  --forebrain-surface: #0a1f2d;
+  --forebrain-surface-soft: rgba(10, 31, 45, 0.72);
+  --forebrain-surface-glass: rgba(10, 31, 45, 0.78);
+  --forebrain-surface-control: rgba(10, 31, 45, 0.82);
+  --forebrain-surface-strong: rgba(10, 31, 45, 0.86);
+  --forebrain-composer-bg: rgba(10, 31, 45, 0.92);
+  --forebrain-popover-bg: rgba(10, 31, 45, 0.98);
+  --forebrain-input-bg: #081a26;
+  --forebrain-input-bg-soft: rgba(8, 26, 38, 0.78);
+  --forebrain-input-hover-bg: rgba(128, 236, 255, 0.08);
+  --forebrain-divider: rgba(195, 241, 255, 0.12);
+  --forebrain-divider-strong: rgba(195, 241, 255, 0.18);
+  --forebrain-badge-bg: rgba(128, 236, 255, 0.1);
+  --forebrain-button-alt-bg: rgba(128, 236, 255, 0.08);
+  --forebrain-button-alt-hover-bg: rgba(128, 236, 255, 0.14);
+  --forebrain-text: #ebfeff;
+  --forebrain-text-2: #9fc6d4;
+  --forebrain-muted-text: #6f98a8;
+  --forebrain-danger: #f87171;
+  --forebrain-code-bg: #020b12;
+  --forebrain-code-surface: #071724;
+  --forebrain-code-text: #ebfeff;
+  --forebrain-doc-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
+  --forebrain-sidebar-shadow: inset -1px 0 0 0 rgba(195, 241, 255, 0.08);
+  --forebrain-inset-highlight: rgba(195, 241, 255, 0.08);
+  --forebrain-inset-shadow: inset 0 1px 0 var(--forebrain-inset-highlight);
+  --forebrain-ring-soft: rgba(128, 236, 255, 0.22);
+  --forebrain-focus-border: rgba(128, 236, 255, 0.34);
+  --forebrain-rule-line: rgba(159, 198, 212, 0.34);
+  --forebrain-nav-bg: rgba(4, 17, 27, 0.78);
+  --forebrain-nav-shadow: 0 1px 0 0 rgba(195, 241, 255, 0.04);
+  --forebrain-content-gradient: linear-gradient(180deg, rgba(10, 31, 45, 0.46), rgba(8, 26, 38, 0.32));
+  --forebrain-card-gradient: linear-gradient(180deg, rgba(14, 41, 57, 0.78), rgba(10, 31, 45, 0.62));
+  --forebrain-input-gradient: linear-gradient(180deg, rgba(14, 41, 57, 0.78), rgba(10, 31, 45, 0.62));
+  --forebrain-page-bg: var(--forebrain-bg);
+  --forebrain-rail-bg: #071b28;
+  --canvas: 206 74% 6%;
+  --ivory: 202 64% 11%;
+  --ink: 183 100% 96%;
+  --olive: 196 39% 73%;
+  --stone: 194 24% 55%;
+  --sand: 203 65% 9%;
+  --cream-border: 192 88% 88%;
+  --terracotta: 191 86% 37%;
+  --terracotta-fg: 180 100% 98%;
+  --charcoal: 183 100% 96%;
+  --ring-focus: 188 88% 56%;
+  --destructive: 352 100% 75%;
+  --destructive-fg: 206 74% 6%;
+  --secondary-foreground: var(--ink);
+  --muted: 203 65% 9%;
+  --muted-foreground: var(--olive);
+  --accent: 202 64% 11%;
+  --accent-foreground: var(--ink);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    color: hsl(var(--foreground));
+    background: var(--forebrain-page-bg);
+    font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    font-size: 1rem;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* The shell is a fixed left rail plus a work area. The rail carries identity —
+   which primary agent (tenant) you are inside and what belongs to it — and the
+   work area carries the page. Colour is limited to one accent; everything else
+   is ground, ink and a hairline. */
+.forebrain-app-shell {
+  min-height: 100dvh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: row;
+  background: var(--forebrain-page-bg);
+  color: var(--forebrain-text);
+  position: relative;
+  overflow: hidden;
+}
+
+.forebrain-rail {
+  display: flex;
+  width: 248px;
+  flex: 0 0 248px;
+  flex-direction: column;
+  gap: 14px;
+  border-right: 1px solid var(--forebrain-divider);
+  background: var(--forebrain-rail-bg);
+  padding: 14px 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.forebrain-rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 2px 4px;
+  color: var(--forebrain-brand-1);
+  text-decoration: none;
+}
+
+.forebrain-rail-mark {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+/* The two-word name keeps to one line; the version sits under it rather than
+   beside it, where it would crowd the name. */
+.forebrain-rail-name {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.forebrain-rail-wordmark {
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  color: var(--forebrain-text);
+}
+
+.forebrain-rail-version {
+  font-size: 10px;
+  line-height: 1.3;
+  letter-spacing: 0.06em;
+  color: var(--forebrain-muted-text);
+}
+
+/* The tenant plate: the one place in the shell that raises its voice.
+   Everything the app shows below belongs to the agent named here, so the rail
+   states it before it states the navigation, and the accent edge marks it the
+   way a bookmark marks a place. */
+.forebrain-tenant {
+  position: relative;
+  border: 1px solid var(--forebrain-divider);
+  border-left: 2px solid var(--forebrain-brand-1);
+  border-radius: 10px;
+  background: var(--forebrain-surface);
+}
+
+.forebrain-tenant-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.forebrain-tenant-label {
+  display: block;
+  font-family: var(--forebrain-ui-font);
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+}
+
+.forebrain-tenant-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Source Serif 4", Georgia, serif;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--forebrain-text);
+}
+
+.forebrain-tenant-caret {
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--forebrain-muted-text);
+  transition: transform 160ms ease;
+}
+
+.forebrain-tenant-caret--open {
+  transform: rotate(180deg);
+}
+
+.forebrain-tenant-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 12px;
+  background: var(--forebrain-popover-bg);
+  box-shadow: var(--forebrain-doc-shadow);
+  padding: 4px;
+}
+
+.forebrain-tenant-option {
+  display: block;
+  width: 100%;
+  border-radius: 9px;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.forebrain-tenant-option:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+
+.forebrain-tenant-option--active {
+  background: var(--forebrain-button-alt-bg);
+}
+
+.forebrain-tenant-option-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--forebrain-text);
+}
+
+.forebrain-tenant-option-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+}
+
+.forebrain-tenant-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--forebrain-brand-1);
+}
+
+/* The workspace path is the tenant's boundary on disk — data, not prose, so it
+   is set in mono and truncated from the left, where the distinguishing part of
+   a path lives. */
+.forebrain-tenant-scope {
+  padding: 0 10px 9px;
+  font-family: var(--forebrain-mono-font);
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.forebrain-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Settings live at the foot of the rail: reachable, but out of the way of the
+   destinations someone actually moves between. */
+.forebrain-rail-group--foot {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--forebrain-divider);
+}
+
+.forebrain-rail-group-label {
+  padding: 12px 10px 4px;
+  font-family: var(--forebrain-ui-font);
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+}
+
+.forebrain-rail-link {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-family: var(--forebrain-ui-font);
+  font-size: 13px;
+  color: var(--forebrain-text-2);
+  text-decoration: none;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.forebrain-rail-link:hover {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
+}
+
+.forebrain-rail-link--active {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
+  font-weight: 500;
+}
+
+.forebrain-rail-ic {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--forebrain-muted-text);
+}
+
+.forebrain-rail-link--active .forebrain-rail-ic {
+  color: var(--forebrain-brand-1);
+}
+
+.forebrain-work {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.forebrain-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--forebrain-divider);
+  padding: 10px 16px;
+}
+
+.forebrain-topbar-title {
+  font-family: var(--forebrain-ui-font);
+  font-size: 13px;
+  color: var(--forebrain-text-2);
+}
+
+.forebrain-topbar-spacer {
+  flex: 1;
+}
+
+.forebrain-main {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+}
+
+.forebrain-language-menu {
+  position: relative;
+}
+
+.forebrain-language-trigger,
+.forebrain-theme-toggle {
+  display: inline-flex;
+  font-family: var(--forebrain-ui-font);
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 8px;
+  background: var(--forebrain-surface);
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+  transition: color 140ms ease, border-color 140ms ease;
+}
+
+.forebrain-language-trigger:hover,
+.forebrain-theme-toggle:hover {
+  color: var(--forebrain-text);
+  border-color: var(--forebrain-divider-strong);
+}
+
+.forebrain-language-ic,
+.forebrain-theme-toggle-ic {
+  width: 14px;
+  height: 14px;
+}
+
+.forebrain-language-caret {
+  width: 12px;
+  height: 12px;
+  color: var(--forebrain-muted-text);
+}
+
+.forebrain-language-popover {
+  position: absolute;
+  z-index: 40;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 132px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 10px;
+  background: var(--forebrain-popover-bg);
+  box-shadow: var(--forebrain-doc-shadow);
+  padding: 4px;
+}
+
+.forebrain-language-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-radius: 7px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+}
+
+.forebrain-language-option:hover,
+.forebrain-language-option--active {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
+}
+
+.forebrain-language-check {
+  width: 13px;
+  height: 13px;
+  color: var(--forebrain-brand-1);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 900px) {
+  .forebrain-rail {
+    width: 64px;
+    flex-basis: 64px;
+    padding: 12px 8px;
+  }
+
+  .forebrain-rail-name,
+  .forebrain-rail-wordmark,
+  .forebrain-rail-version,
+  .forebrain-rail-group-label,
+  .forebrain-rail-link span,
+  .forebrain-tenant-label,
+  .forebrain-tenant-name,
+  .forebrain-tenant-caret,
+  .forebrain-tenant-scope,
+  .forebrain-language-text {
+    display: none;
+  }
+
+  .forebrain-rail-link,
+  .forebrain-tenant-trigger {
+    justify-content: center;
+  }
+}
+@layer utilities {
+  .forebrain-parchment {
+    background-color: var(--forebrain-bg);
+  }
+  .forebrain-ivory {
+    background-color: var(--forebrain-surface);
+  }
+  .forebrain-sand {
+    background-color: var(--forebrain-bg-alt);
+  }
+  .forebrain-terracotta {
+    background: linear-gradient(120deg, var(--forebrain-brand-1), var(--forebrain-brand-2));
+  }
+  .forebrain-ink {
+    color: var(--forebrain-text);
+  }
+  .forebrain-charcoal {
+    color: var(--forebrain-text);
+  }
+  .forebrain-olive {
+    color: var(--forebrain-text-2);
+  }
+  .forebrain-stone {
+    color: var(--forebrain-muted-text);
+  }
+  .forebrain-border-cream {
+    border-color: var(--forebrain-divider);
+  }
+  .forebrain-border-warm {
+    border-color: var(--forebrain-divider);
+  }
+  .forebrain-ring {
+    --tw-ring-color: rgba(13, 145, 176, 0.32);
+  }
+  .forebrain-crimson {
+    color: #ff6d7d;
+  }
+  .forebrain-focus {
+    color: var(--forebrain-brand-1);
+  }
+  .font-serif {
+    font-family: "Source Serif 4", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    font-weight: 500;
+  }
+  .forebrain-doc-shadow {
+    box-shadow: var(--forebrain-doc-shadow);
+  }
+  .forebrain-whisper-shadow {
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
+  }
+  .forebrain-status-done {
+    background: var(--forebrain-brand-soft);
+    color: var(--forebrain-brand-1);
+  }
+  .forebrain-status-run {
+    background: rgba(108, 230, 232, 0.18);
+    color: #045c79;
+  }
+  .forebrain-status-fail {
+    background: rgba(255, 73, 101, 0.12);
+    color: #ff8293;
+  }
+  /* A button's label is one line: a row too narrow for its buttons wraps the
+     row, never the label. */
+  .forebrain-btn {
+    display: inline-flex;
+    flex-shrink: 0;
+    white-space: nowrap;
+    min-height: 2rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.75rem;
+    border: 1px solid var(--forebrain-divider);
+    padding: 0.375rem 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    line-height: 1.2;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease,
+      opacity 0.15s ease;
+  }
+  .forebrain-btn-primary {
+    border-color: var(--forebrain-brand-1);
+    background: var(--forebrain-brand-1);
+    color: #f5ffff;
+    box-shadow: 0 0 0 1px rgba(13, 145, 176, 0.18);
+  }
+  .forebrain-btn-primary:hover {
+    background: var(--forebrain-brand-hover);
+    border-color: var(--forebrain-brand-hover);
+  }
+  .forebrain-btn-ghost {
+    background: var(--forebrain-button-alt-bg);
+    color: var(--forebrain-text);
+  }
+  .forebrain-btn-ghost:hover {
+    background: var(--forebrain-button-alt-hover-bg);
+  }
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 1px solid rgba(13, 145, 176, 0.72);
+  outline-offset: 1px;
+}
+
+input:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
+select:focus:not(:focus-visible),
+button:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+/* One field style for the settings screens, so a form reads as one thing
+   rather than a collection of differently-shaped inputs. */
+.forebrain-field {
+  border-radius: 10px;
+  border: 1px solid var(--forebrain-divider);
+  background: var(--forebrain-input-bg);
+  padding: 8px 10px;
+  font-family: var(--forebrain-ui-font);
+  font-size: 13px;
+  color: var(--forebrain-text);
+  outline: none;
+}
+
+.forebrain-field:focus {
+  border-color: var(--forebrain-focus-border);
+}
+
+.forebrain-field.font-mono {
+  font-family: var(--forebrain-mono-font);
+  font-size: 12px;
+}

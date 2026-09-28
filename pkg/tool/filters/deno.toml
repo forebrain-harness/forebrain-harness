@@ -1,0 +1,47 @@
+[filters.deno]
+description = "Strip deno Download lines; keep Check, warnings, errors, and program output."
+version = "1"
+match_command = '^deno\s+(run|install|cache|check|task|test)\b'
+match_output_select = [
+  '(?m)^Download https://',
+]
+strip_lines_matching = [
+  '^Download https://',
+]
+
+[[tests.deno]]
+name = "strips Download lines, keeps Check"
+input = """
+Download https://deno.land/x/oak@v12.6.1/mod.ts
+Download https://deno.land/std@0.210.0/http/server.ts
+Download https://deno.land/std@0.210.0/http/util.ts
+Check file:///path/to/app.ts
+"""
+expected = """
+Check file:///path/to/app.ts
+"""
+
+[[tests.deno]]
+name = "preserves error lines"
+input = """
+Download https://deno.land/x/missing@v1.0.0/mod.ts
+error: Module not found "https://deno.land/x/missing@v1.0.0/mod.ts"
+"""
+expected = """
+error: Module not found "https://deno.land/x/missing@v1.0.0/mod.ts"
+"""
+
+[[tests.deno]]
+name = "Download lines stripped, Check line kept"
+input = """
+Download https://deno.land/x/oak@v12.6.1/mod.ts
+Download https://deno.land/x/oak@v12.6.1/application.ts
+Download https://deno.land/x/oak@v12.6.1/context.ts
+Download https://deno.land/x/oak@v12.6.1/router.ts
+Download https://deno.land/std@0.210.0/http/server.ts
+Download https://deno.land/std@0.210.0/io/read_all.ts
+Check file:///path/to/app.ts
+"""
+expected = """
+Check file:///path/to/app.ts
+"""

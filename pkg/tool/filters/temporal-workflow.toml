@@ -1,0 +1,222 @@
+[filters.temporal-workflow]
+description = "Compact Temporal workflow JSON/history: trim payload noise, cap long histories."
+version = "3"
+match_command = "(?:temporal(?:ctl)?|temporal\\.sh)\\s+workflow\\s+(show|describe|list)\\b"
+match_output_select = [
+  "(?m)\"(?:type|eventType)\": \"EVENT_TYPE_",
+  "(?m)\"eventId\":",
+  "(?m)\"signalName\":",
+  "(?m)\"status\": \"WORKFLOW_EXECUTION_STATUS_",
+  "(?m)^terminating \\S",
+  "(?m)^Workflow terminated$",
+  "(?m)^pass=\\d+ latest_run=",
+]
+strip_ansi = true
+replace = [
+  { pattern = "\"data\": \"ey[A-Za-z0-9+/=]{20,}[^\"]*\"", replacement = "\"data\": \"[base64]\"" },
+  { pattern = "\"data\": \"[A-Za-z0-9+/=]{24,}\"", replacement = "\"data\": \"[encoded]\"" },
+]
+strip_lines_matching = [
+  "^\\s*\"encoding\":",
+  "^\\s*\"sdkMetadata\": \\{\\s*\\},?\\s*$",
+  "^\\s*\"meteringMetadata\": \\{\\s*\\},?\\s*$",
+  "^\\s*\"workerVersion\":",
+  "^\\s*\"buildId\":",
+  "^\\s*\"namespaceId\":",
+  "^\\s*\"retryPolicy\":",
+  "^\\s*\"workflowRunTimeout\":",
+  "^\\s*\"workflowTaskTimeout\":",
+  "^\\s*\"inheritBuildId\":",
+  "^\\s*\"historySizeBytes\":",
+  "^\\s*\"attempt\": \\d+,?\\s*$",
+  "^terminating \\S",
+]
+collapse_lines_matching = [
+  { pattern = "^Workflow terminated$", template = "{count} workflows terminated" },
+]
+max_lines = 80
+max_lines_keep_tail = 25
+
+[[tests.temporal-workflow]]
+name = "describe summary passes through compact"
+input = """{
+  "status": "WORKFLOW_EXECUTION_STATUS_COMPLETED",
+  "closeTime": "2026-07-08T23:24:43.662962403Z",
+  "pendingChildrenCount": 0,
+  "pendingChildren": [],
+  "historyLength": "196"
+}
+"""
+expected = """{
+  "status": "WORKFLOW_EXECUTION_STATUS_COMPLETED",
+  "closeTime": "2026-07-08T23:24:43.662962403Z",
+  "pendingChildrenCount": 0,
+  "pendingChildren": [],
+  "historyLength": "196"
+}"""
+
+[[tests.temporal-workflow]]
+name = "strips metadata noise and truncates base64 payloads in event history"
+input = """[
+  {
+    "id": "204",
+    "time": "2026-07-08T18:35:28.786499192Z",
+    "type": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+    "attrs": {
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "202",
+        "identity": "7@worker",
+        "workerVersion": {
+          "buildId": "@temporalio/worker@1.14.1+abc"
+        },
+        "sdkMetadata": {},
+        "meteringMetadata": {}
+      }
+    }
+  },
+  {
+    "eventId": "2504",
+    "eventTime": "2026-07-07T13:51:01.099018091Z",
+    "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED",
+    "signalName": "childWorkflowPaused",
+    "input": {
+      "payloads": [
+        {
+          "metadata": {
+            "encoding": "anNvbi9wbGFpbg=="
+          },
+          "data": "ImxlYWQtZXhlY3V0aW9uLWZlYjdkNmYxLTc1ZmItNGQ2Mi05MTdhLWRmMjg0OTk2OWMyYi04OTAzNTE5OC1mNWVlLTRkMDUtOWE1MC1mZTRhOWFhMDdjZjYi"
+        }
+      ]
+    }
+  }
+]
+"""
+expected = """[
+  {
+    "id": "204",
+    "time": "2026-07-08T18:35:28.786499192Z",
+    "type": "EVENT_TYPE_WORKFLOW_TASK_COMPLETED",
+    "attrs": {
+      "workflowTaskCompletedEventAttributes": {
+        "scheduledEventId": "202",
+        "identity": "7@worker",
+        },
+      }
+    }
+  },
+  {
+    "eventId": "2504",
+    "eventTime": "2026-07-07T13:51:01.099018091Z",
+    "eventType": "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED",
+    "signalName": "childWorkflowPaused",
+    "input": {
+      "payloads": [
+        {
+          "metadata": {
+          },
+          "data": "[encoded]"
+        }
+      ]
+    }
+  }
+]"""
+
+[[tests.temporal-workflow]]
+name = "terminate loop: strip per-child lines, collapse Workflow terminated"
+input = """pass=1 latest_run=019f43e4-518b pending_children=31
+terminating LeadExecutionWorkflow lead-execution-abc 019f43e4-f484
+Workflow terminated
+terminating LeadExecutionWorkflow lead-execution-def 019f43e4-fa97
+Workflow terminated
+terminating LeadExecutionWorkflow lead-execution-ghi 019f43e4-ff54
+Workflow terminated
+pass=2 latest_run=019f43e4-518b status=WORKFLOW_EXECUTION_STATUS_COMPLETED pending_children=0
+"""
+expected = """pass=1 latest_run=019f43e4-518b pending_children=31
+3 workflows terminated
+pass=2 latest_run=019f43e4-518b status=WORKFLOW_EXECUTION_STATUS_COMPLETED pending_children=0"""
+
+[[tests.temporal-workflow]]
+name = "failed workflow status preserved"
+input = """--- bct
+{
+  "status": "WORKFLOW_EXECUTION_STATUS_FAILED",
+  "closeTime": "2026-07-08T22:38:48.879568362Z",
+  "pendingChildrenCount": 0,
+  "historyLength": "1670"
+}
+"""
+expected = """--- bct
+{
+  "status": "WORKFLOW_EXECUTION_STATUS_FAILED",
+  "closeTime": "2026-07-08T22:38:48.879568362Z",
+  "pendingChildrenCount": 0,
+  "historyLength": "1670"
+}"""
+
+[[tests.temporal-workflow]]
+name = "jq-sliced signal events from temporal.sh workflow show"
+input = """[
+  {
+    "eventId": "30",
+    "eventTime": "2026-06-24T21:42:09.487422079Z",
+    "signalName": "retryPausedChildWorkflowsForCategory",
+    "input": {
+      "payloads": [
+        {
+          "metadata": {
+            "encoding": "anNvbi9wbGFpbg=="
+          },
+          "data": "eyJjYXRlZ29yeSI6ImF1dGhfZmFpbHVyZSJ9"
+        }
+      ]
+    }
+  },
+  {
+    "eventId": "45",
+    "eventTime": "2026-06-24T21:42:11.246360512Z",
+    "signalName": "retryPausedChildWorkflowsForCategory",
+    "input": {
+      "payloads": [
+        {
+          "metadata": {
+            "encoding": "anNvbi9wbGFpbg=="
+          },
+          "data": "eyJjYXRlZ29yeSI6ImF1dGhfZmFpbHVyZSJ9"
+        }
+      ]
+    }
+  }
+]
+"""
+expected = """[
+  {
+    "eventId": "30",
+    "eventTime": "2026-06-24T21:42:09.487422079Z",
+    "signalName": "retryPausedChildWorkflowsForCategory",
+    "input": {
+      "payloads": [
+        {
+          "metadata": {
+          },
+          "data": "[base64]"
+        }
+      ]
+    }
+  },
+  {
+    "eventId": "45",
+    "eventTime": "2026-06-24T21:42:11.246360512Z",
+    "signalName": "retryPausedChildWorkflowsForCategory",
+    "input": {
+      "payloads": [
+        {
+          "metadata": {
+          },
+          "data": "[base64]"
+        }
+      ]
+    }
+  }
+]"""

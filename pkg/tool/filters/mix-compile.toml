@@ -1,0 +1,53 @@
+[filters.mix-compile]
+description = "Compact mix compile output"
+match_command = "^mix\\s+compile(\\s|$)"
+match_output_select = [
+  '(?m)^Compiling \d+ files? \(\.ex\)',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^Compiling \\d+ file",
+  "^\\s*$",
+  "^Generated\\s",
+]
+max_lines = 40
+on_empty = "mix compile: ok"
+
+[[tests.mix-compile]]
+name = "strips compile noise, preserves warnings"
+input = """
+Compiling 12 files (.ex)
+Generated my_app app
+
+warning: variable "conn" is unused
+  lib/router.ex:42
+"""
+expected = "warning: variable \"conn\" is unused\n  lib/router.ex:42"
+
+[[tests.mix-compile]]
+name = "on_empty when only noise"
+input = "Compiling 3 files (.ex)\nGenerated my_app app\n"
+expected = "mix compile: ok"
+
+[[tests.mix-compile]]
+name = "compile error preserved: Compiling lines dropped, error and hint kept"
+input = """
+Compiling 1 file (.ex)
+Compiling 3 files (.ex)
+Compiling 12 files (.ex)
+Compiling 1 file (.ex)
+
+== Compilation error in file lib/my_app/router.ex ==
+** (CompileError) lib/my_app/router.ex:42: undefined function handle_request/2
+    (elixir 1.16.0) expanding macro: Kernel.def/2
+    lib/my_app/router.ex:42: MyApp.Router (module)
+
+hint: if the error is related to a macro, you may skip it with --no-mix-exs-compilation
+"""
+expected = """
+== Compilation error in file lib/my_app/router.ex ==
+** (CompileError) lib/my_app/router.ex:42: undefined function handle_request/2
+    (elixir 1.16.0) expanding macro: Kernel.def/2
+    lib/my_app/router.ex:42: MyApp.Router (module)
+hint: if the error is related to a macro, you may skip it with --no-mix-exs-compilation
+"""

@@ -1,0 +1,4 @@
+{
+  "exclude": ["ai-elements-vue", "build", "deploy", "models.json",
+   "frontend", "npm", "packaging", "forebrain-harness.github.io"]
+}

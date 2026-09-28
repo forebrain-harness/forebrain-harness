@@ -1,0 +1,4 @@
+[filters.eslint]
+description = "Strip blank padding from ESLint stylish output; keep all diagnostics, ok when clean."
+version = "2"
+match_command = '^(\s*)(npx\s+)?eslint\b'

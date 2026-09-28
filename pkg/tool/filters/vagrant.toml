@@ -1,0 +1,67 @@
+[filters.vagrant]
+description = "Drop vagrant ==> state-machine lines; keep provisioner output and errors."
+version = "1"
+match_command = '^vagrant\s+(up|provision|reload|resume|ssh|halt)\b'
+match_output_select = [
+  '(?m)^==> \w+: ',
+]
+strip_lines_matching = [
+  '^==> \w+: (Importing base box|Booting VM|Waiting for machine|Waiting for SSH|Forwarding ports|Mounting shared|Setting hostname|Configuring and enabling|Running provisioner|Machine booted|Checking for guest additions|Preparing network|Clearing any previously|Attempting graceful|Forcing shutdown)',
+]
+
+[[tests.vagrant]]
+name = "strips boot noise, keeps provisioner output"
+input = """
+==> default: Importing base box 'ubuntu/focal64'...
+==> default: Booting VM...
+==> default: Waiting for machine to boot...
+==> default: Machine booted and ready!
+==> default: Forwarding ports...
+==> default: Running provisioner: shell...
+    default: Running: /tmp/vagrant-shell.sh
+    default: Installing nginx...
+    default: nginx installed successfully.
+==> default: Machine 'default' has a post `vagrant up` message as follows:
+"""
+expected = """
+    default: Running: /tmp/vagrant-shell.sh
+    default: Installing nginx...
+    default: nginx installed successfully.
+==> default: Machine 'default' has a post `vagrant up` message as follows:
+"""
+
+[[tests.vagrant]]
+name = "error output preserved"
+input = """
+==> default: Booting VM...
+==> default: Waiting for machine to boot...
+The guest machine entered an invalid state while waiting for it
+to boot. Valid states are 'starting, running'. The machine is in the
+'poweroff' state.
+"""
+expected = """
+The guest machine entered an invalid state while waiting for it
+to boot. Valid states are 'starting, running'. The machine is in the
+'poweroff' state.
+"""
+
+[[tests.vagrant]]
+name = "boot/mount scaffolding stripped, provisioner output kept"
+input = """
+==> default: Importing base box 'ubuntu/focal64'...
+==> default: Matching MAC address for NAT networking...
+==> default: Booting VM...
+==> default: Waiting for machine to boot. This may take a few minutes...
+==> default: Machine booted and ready!
+==> default: Mounting shared folders...
+==> default: Running provisioner: shell...
+    default: Updating apt cache...
+    default: Installing dependencies...
+    default: nginx installed successfully.
+"""
+expected = """
+==> default: Matching MAC address for NAT networking...
+    default: Updating apt cache...
+    default: Installing dependencies...
+    default: nginx installed successfully.
+"""

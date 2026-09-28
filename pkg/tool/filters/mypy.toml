@@ -1,0 +1,32 @@
+[filters.mypy]
+description = "Strip blank padding from mypy output; keep every error/note and the summary."
+version = "1"
+match_command = '^(\s*)mypy\b'
+# Selection on the stdin-pipe path keys off mypy's own summary lines only. The
+# generic `: error: ` / `: note: ` substrings were removed because gcc/clang/ld
+# (`collect2: error:`) and other compilers emit them too, so they hijacked
+# unrelated compile output. Every real mypy run ends with one of these.
+match_output_select = [
+  '(?m)^Found \d+ error',
+  '(?m)^Success: no issues',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+on_empty = "mypy: ok"
+
+[[tests.mypy]]
+name = "keeps errors and notes, drops blanks"
+input = """src/foo.py:10: error: Name "x" is not defined  [name-defined]
+
+src/foo.py:12: note: See https://mypy.rtfd.io/en/stable/
+Found 1 error in 1 file (checked 3 source files)"""
+expected = """src/foo.py:10: error: Name "x" is not defined  [name-defined]
+src/foo.py:12: note: See https://mypy.rtfd.io/en/stable/
+Found 1 error in 1 file (checked 3 source files)"""
+
+[[tests.mypy]]
+name = "clean run passes through success line"
+input = "Success: no issues found in 3 source files"
+expected = "Success: no issues found in 3 source files"

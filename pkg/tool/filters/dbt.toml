@@ -1,0 +1,99 @@
+[filters.dbt]
+description = "Compact dbt logs and --help; keep errors, warnings, and run results."
+version = "2"
+match_command = "(^|[;&|]\\s*)dbt\\s"
+match_output_select = [
+  '(?m)Running with dbt=',
+  '(?m)^Usage: dbt ',
+  '(?m)^\d{2}:\d{2}:\d{2}\s+\d+ of \d+ (START|OK|ERROR|FAIL|NO-OP|SKIP)',
+  '(?m)^Done\. PASS=',
+  '(?m)Completed successfully',
+  '(?m)^\d{2}:\d{2}:\d{2}\s+\[(ERROR|WARNING)\]:',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\d{2}:\d{2}:\d{2}\s+Registered adapter:',
+  '^\d{2}:\d{2}:\d{2}\s+Unable to do partial parsing',
+  '^\d{2}:\d{2}:\d{2}\s+$',
+  '^\s*$',
+  '^the snapshots section of$',
+  '^snapshots/.+\.yml\. To fix this$',
+  '^error, place the ',
+  '^models key instead\.$',
+  '^  -[a-zA-Z]',
+  '^      --',
+  '^          ',
+  '^Possible values:',
+  '^          - ',
+]
+max_lines = 80
+max_lines_keep_tail = 25
+on_empty = "dbt: ok"
+
+[[tests.dbt]]
+name = "run log keeps results, strips adapter noise and blank lines"
+input = """\u001b[0m10:43:41  Running with dbt=1.11.11
+\u001b[0m10:43:41  Registered adapter: redshift=1.10.1
+\u001b[0m10:43:42  Found 1 snapshot, 551 macros
+\u001b[0m10:43:42  
+\u001b[0m10:43:42  Concurrency: 1 threads (target='dev')
+\u001b[0m10:43:42  
+\u001b[0m10:43:49  1 of 1 START snapshot dbt_avieli_dev.dummy_scd ................................. [RUN]
+\u001b[0m10:44:01  1 of 1 OK snapshotted dbt_avieli_dev.dummy_scd ................................. [\u001b[32mSUCCESS\u001b[0m in 11.16s]
+\u001b[0m10:44:02  
+\u001b[0m10:44:02  Finished running 1 snapshot in 0 hours 0 minutes and 20.89 seconds (20.89s).
+\u001b[0m10:44:02  
+\u001b[0m10:44:02  \u001b[32mCompleted successfully\u001b[0m
+\u001b[0m10:44:02  
+\u001b[0m10:44:02  Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1
+"""
+expected = """10:43:41  Running with dbt=1.11.11
+10:43:42  Found 1 snapshot, 551 macros
+10:43:42  Concurrency: 1 threads (target='dev')
+10:43:49  1 of 1 START snapshot dbt_avieli_dev.dummy_scd ................................. [RUN]
+10:44:01  1 of 1 OK snapshotted dbt_avieli_dev.dummy_scd ................................. [SUCCESS in 11.16s]
+10:44:02  Finished running 1 snapshot in 0 hours 0 minutes and 20.89 seconds (20.89s).
+10:44:02  Completed successfully
+10:44:02  Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1"""
+
+[[tests.dbt]]
+name = "parse warning first line kept, boilerplate continuation stripped"
+input = """07:51:54  [WARNING]: 'int_fluid_topics_external_users_scd' is a model node, but it is specified in
+the snapshots section of
+snapshots/fluid_topics_silver/fluid_topics_silver_snapshots.yml. To fix this
+error, place the `int_fluid_topics_external_users_scd` specification under the
+models key instead.
+07:51:55  [ERROR]: Compilation Error in model foo (models/foo.sql)
+  expected token got 'bar'
+"""
+expected = """07:51:54  [WARNING]: 'int_fluid_topics_external_users_scd' is a model node, but it is specified in
+07:51:55  [ERROR]: Compilation Error in model foo (models/foo.sql)
+  expected token got 'bar'"""
+
+[[tests.dbt]]
+name = "clap help collapses to usage header"
+input = """List selected nodes
+
+Usage: dbt list [OPTIONS]
+
+Options:
+  -t, --target <TARGET>
+          The target to execute
+          
+          [env: DBT_TARGET=]
+
+      --project-dir <PROJECT_DIR>
+          The directory to load the dbt project from
+          
+          [env: DBT_PROJECT_DIR=/tmp/dbt]
+"""
+expected = """List selected nodes
+Usage: dbt list [OPTIONS]
+Options:"""
+
+[[tests.dbt]]
+name = "on_empty when only stripped noise"
+input = """10:43:41  Registered adapter: redshift=1.10.1
+10:43:41  Unable to do partial parsing because saved manifest not found. Starting full parse.
+"""
+expected = "dbt: ok"

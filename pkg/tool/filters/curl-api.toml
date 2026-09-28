@@ -1,0 +1,110 @@
+[filters.curl-api]
+description = "Compact curl REST JSON: strip HTTP headers and URL noise; truncate long lines."
+version = "4"
+match_command = '(?m)(^|[;&|]\s*)(?:[A-Za-z0-9_]+=\S+\s+)*curl\s'
+match_output_select = [
+  '(?m)"downloadUri"\s*:',
+  '(?m)"repo"\s*:\s*"[^"]+"\s*,\s*"path"\s*:',
+  '(?m)"violations"\s*:',
+  '(?m)"checksums"\s*:',
+  '(?m)"errors"\s*:\s*\[',
+  '(?m)"sha256"\s*:\s*"[0-9a-f]{64}"',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^HTTP/\d',
+  '^[A-Za-z][A-Za-z0-9-]*:\s',
+  '^\s*$',
+]
+replace = [
+  { pattern = '"(downloadUri|self|uri)"\s*:\s*"[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = '"(html_url|web_ui_url|api_url)"\s*:\s*"[^"]*"\s*,?\s*', replacement = "" },
+  { pattern = ',\s*}', replacement = '}' },
+  { pattern = ',\s*]', replacement = ']' },
+]
+[[tests.curl-api]]
+name = "strips HTTP headers and truncates long artifactory JSON line"
+expect_match_output = true
+input = """HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 12000
+
+{"repo":"libs-release-local","path":"com/acme/foo.jar","downloadUri":"https://artifactory.example.com/artifactory/libs-release-local/com/acme/foo.jar","checksums":{"sha1":"abc123","md5":"def456"},"size":999999,"created":"2026-07-01T00:00:00.000Z","modified":"2026-07-01T00:00:00.000Z","uri":"https://artifactory.example.com/artifactory/api/storage/libs-release-local/com/acme/foo.jar"}
+"""
+expected = """{"repo":"libs-release-local","path":"com/acme/foo.jar","checksums":{"sha1":"abc123","md5":"def456"},"size":999999,"created":"2026-07-01T00:00:00.000Z","modified":"2026-07-01T00:00:00.000Z"}"""
+
+[[tests.curl-api]]
+name = "bare HTTP response does not select curl API"
+expect_match_output = false
+input = """HTTP/1.1 200 OK
+Server: nginx
+Content-Type: text/plain
+Content-Length: 2
+
+ok
+"""
+expected = """HTTP/1.1 200 OK
+Server: nginx
+Content-Type: text/plain
+Content-Length: 2
+
+ok"""
+
+[[tests.curl-api]]
+name = "xray violations JSON passes through compacted"
+input = """{"violations":[{"severity":"High","type":"security","summary":"CVE-2024-1234","cves":[{"cve":"CVE-2024-1234"}],"watcherName":"watcher"}],"summary":{"totalViolations":1}}
+"""
+expected = """{"violations":[{"severity":"High","type":"security","summary":"CVE-2024-1234","cves":[{"cve":"CVE-2024-1234"}],"watcherName":"watcher"}],"summary":{"totalViolations":1}}"""
+
+[[tests.curl-api]]
+name = "API error array preserved"
+input = """{"errors":[{"status":404,"message":"Repository not found"}]}
+"""
+expected = """{"errors":[{"status":404,"message":"Repository not found"}]}"""
+
+[[tests.curl-api]]
+name = "artifactory storage listing truncates wide props line"
+input = """[
+    {
+        "path": "dev-master-docker-local/jfrog/access/sha256:abc/sha256__def",
+        "type": "file",
+        "size": 3965,
+        "sha256": "59a7f1fdb1dc29e5c0e7e39d9d1f19dc9f69a76771fbcb31e925a64eac091357",
+        "props": {
+            "build.name": ["access-multi-arch-docker-dev"],
+            "build.number": ["90"],
+            "vcs.branch": ["master"],
+            "vcs.org": ["JFROG"],
+            "vcs.provider": ["github"],
+            "vcs.repo": ["access"],
+            "vcs.revision": ["abc123def456789012345678901234567890abcd"],
+            "docker.manifest": ["jfrog/access/sha256:abc/sha256__def"],
+            "docker.repoName": ["dev-master-docker-local"]
+        }
+    }
+]
+"""
+expected = """[
+    {
+        "path": "dev-master-docker-local/jfrog/access/sha256:abc/sha256__def",
+        "type": "file",
+        "size": 3965,
+        "sha256": "59a7f1fdb1dc29e5c0e7e39d9d1f19dc9f69a76771fbcb31e925a64eac091357",
+        "props": {
+            "build.name": ["access-multi-arch-docker-dev"],
+            "build.number": ["90"],
+            "vcs.branch": ["master"],
+            "vcs.org": ["JFROG"],
+            "vcs.provider": ["github"],
+            "vcs.repo": ["access"],
+            "vcs.revision": ["abc123def456789012345678901234567890abcd"],
+            "docker.manifest": ["jfrog/access/sha256:abc/sha256__def"],
+            "docker.repoName": ["dev-master-docker-local"]
+        }
+    }
+]"""
+
+[[tests.curl-api]]
+name = "empty input passes through"
+input = ""
+expected = ""

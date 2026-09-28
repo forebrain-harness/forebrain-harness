@@ -1,0 +1,62 @@
+[filters.bun]
+description = "Drop bun per-package install lines; keep the summary and errors."
+version = "1"
+match_command = '^bun\s+(install|add|remove|update)\b'
+match_output_select = [
+  '(?m)^bun (install|add) v\d',
+]
+strip_lines_matching = [
+  '^\+ \S+@',
+]
+
+[[tests.bun]]
+name = "strips per-package lines, keeps summary"
+input = """
+bun install v1.1.21 (b6cb9dbd)
+
++ react@18.2.0
++ react-dom@18.2.0
++ typescript@5.3.3
+
+3 packages installed [1.23s]
+"""
+expected = """
+bun install v1.1.21 (b6cb9dbd)
+
+
+3 packages installed [1.23s]
+"""
+
+[[tests.bun]]
+name = "error output passes through"
+input = """
+bun add v1.1.21 (b6cb9dbd)
+
+error: package "nonexistent-pkg" not found
+"""
+expected = """
+bun add v1.1.21 (b6cb9dbd)
+
+error: package "nonexistent-pkg" not found
+"""
+
+[[tests.bun]]
+name = "per-package install lines stripped, summary kept"
+input = """
+bun install v1.0.25 (fcc490d6)
+
++ react@18.2.0
++ react-dom@18.2.0
++ @types/react@18.2.48
++ @types/react-dom@18.2.18
++ typescript@5.3.3
++ vite@5.0.12
+
+ 6 packages installed [2.34s]
+"""
+expected = """
+bun install v1.0.25 (fcc490d6)
+
+
+ 6 packages installed [2.34s]
+"""

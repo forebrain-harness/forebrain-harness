@@ -1,0 +1,82 @@
+[filters.ansible-playbook]
+description = "Compact ansible-playbook output"
+version = "2"
+match_command = "^ansible-playbook\\b"
+match_output_select = [
+  '(?m)^PLAY \[.+\] \*{5}',
+  '(?m)^PLAY RECAP',
+  '(?m)^TASK \[',
+  '(?m)FAILED! =>',
+  '(?m)fatal: \[',
+  '(?m)unreachable: \[',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^ok: \\[",
+  "^skipping: \\[",
+]
+max_lines = 80
+max_lines_keep_tail = 25
+
+[[tests.ansible-playbook]]
+name = "strips ok and skipping lines, keeps changed and failures"
+input = """
+PLAY [all] *********************************************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [web01]
+ok: [web02]
+
+TASK [Install nginx] ***********************************************************
+changed: [web01]
+skipping: [web02]
+
+PLAY RECAP *********************************************************************
+web01                      : ok=2    changed=1    unreachable=0    failed=0
+web02                      : ok=1    changed=0    unreachable=0    failed=0
+"""
+expected = "PLAY [all] *********************************************************************\nTASK [Gathering Facts] *********************************************************\nTASK [Install nginx] ***********************************************************\nchanged: [web01]\nPLAY RECAP *********************************************************************\nweb01                      : ok=2    changed=1    unreachable=0    failed=0\nweb02                      : ok=1    changed=0    unreachable=0    failed=0"
+
+[[tests.ansible-playbook]]
+name = "failed task preserved"
+input = "TASK [Start service] ***\nfailed: [web01] => {\"msg\": \"Service not found\"}\nPLAY RECAP ***\nweb01 : ok=1 failed=1"
+expected = "TASK [Start service] ***\nfailed: [web01] => {\"msg\": \"Service not found\"}\nPLAY RECAP ***\nweb01 : ok=1 failed=1"
+
+[[tests.ansible-playbook]]
+name = "real 3-host playbook: ok/skipping stripped, changed and recap kept"
+input = """
+PLAY [webservers] **************************************************************
+
+TASK [Gathering Facts] *********************************************************
+ok: [web01]
+ok: [web02]
+ok: [web03]
+
+TASK [Install nginx] ***********************************************************
+ok: [web01]
+changed: [web02]
+skipping: [web03]
+
+TASK [Copy config] *************************************************************
+changed: [web01]
+ok: [web02]
+skipping: [web03]
+
+PLAY RECAP *********************************************************************
+web01: ok=3   changed=1   unreachable=0   failed=0
+web02: ok=3   changed=1   unreachable=0   failed=0
+web03: ok=2   changed=0   unreachable=0   failed=0   skipped=2
+"""
+expected = """
+PLAY [webservers] **************************************************************
+TASK [Gathering Facts] *********************************************************
+TASK [Install nginx] ***********************************************************
+changed: [web02]
+TASK [Copy config] *************************************************************
+changed: [web01]
+PLAY RECAP *********************************************************************
+web01: ok=3   changed=1   unreachable=0   failed=0
+web02: ok=3   changed=1   unreachable=0   failed=0
+web03: ok=2   changed=0   unreachable=0   failed=0   skipped=2
+"""

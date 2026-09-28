@@ -1,0 +1,6 @@
+[filters.sqlite3]
+description = "Drop sqlite3 box/column separator rules; keep headers, rows, and errors."
+version = "1"
+match_command = '^sqlite3\b'
+# stdin `(cmd) | boost` path: select on the distinctive box-drawing corners so a
+# piped `.mode box`/`.mode table` dump is still compacted.

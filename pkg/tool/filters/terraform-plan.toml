@@ -1,0 +1,45 @@
+[filters.terraform-plan]
+description = "Compact Terraform plan output; keep the Plan summary tail."
+version = "2"
+match_command = "^terraform\\s+(plan|apply|destroy)\\b"
+match_output_select = [
+  '(?m)^Terraform will perform the following actions',
+  '(?m)^\s+#\s+\S+\s+will be (created|destroyed|updated|replaced)',
+  '(?m)^Plan:\s+\d+\s+to\s+(add|change|destroy)',
+  'Refreshing state\.\.\.',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*#.*unchanged",
+  "^\\s*$",
+  "^Acquiring state lock",
+  "^Releasing state lock",
+]
+collapse_lines_matching = [
+  { pattern = 'Refreshing state\.\.\.', template = "{count} resources refreshed" },
+]
+max_lines = 80
+max_lines_keep_tail = 40
+on_empty = "terraform plan: no changes detected"
+
+[[tests.terraform-plan]]
+name = "collapses per-resource refresh lines to a count"
+input = """
+Acquiring state lock. This may take a few moments...
+aws_vpc.main: Refreshing state... [id=vpc-abc]
+aws_security_group.web: Refreshing state... [id=sg-123]
+Releasing state lock. This may take a few moments...
+
+Terraform will perform the following actions:
+
+  # aws_instance.web will be created
+  + resource "aws_instance" "web" {}
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+"""
+expected = "2 resources refreshed\nTerraform will perform the following actions:\n  # aws_instance.web will be created\n  + resource \"aws_instance\" \"web\" {}\nPlan: 1 to add, 0 to change, 0 to destroy."
+
+[[tests.terraform-plan]]
+name = "collapses refresh lines, preserves non-blank content"
+input = "aws_vpc.main: Refreshing state... [id=vpc-abc]\nNo changes. Your infrastructure matches the configuration."
+expected = "1 resources refreshed\nNo changes. Your infrastructure matches the configuration."

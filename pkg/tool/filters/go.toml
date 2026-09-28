@@ -1,0 +1,15 @@
+[filters.go]
+description = "Drop go test run scaffolding, keep per-test pass/fail lines, per-package summary, panics, and build/vet errors."
+version = "5"
+match_command = '^(\s*)go\s+(build|vet|test)\b'
+match_output_select = [
+  '(?m)^=== RUN ',
+  '(?m)^--- FAIL: ',
+  '(?m)^--- PASS: ',
+  '(?m)^ok \s*\S',
+  '(?m)^FAIL\b',
+  '(?m)^\?\s+\S+\s+\[no test files\]',
+]
+strip_ansi = true
+# NOTE: per-package `ok  pkg  0.5s` and per-test `--- PASS:` lines are
+# intentionally NOT stripped

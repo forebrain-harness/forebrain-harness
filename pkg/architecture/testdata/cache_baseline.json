@@ -1,0 +1,214 @@
+{
+  "providers": {
+    "alibaba": {
+      "model": "alibaba/qwen3.8-max",
+      "cases": {
+        "agent_switch": {
+          "cache_read_input_tokens": 400,
+          "cache_creation_input_tokens": 200,
+          "input_tokens": 400
+        },
+        "approval_resume": {
+          "cache_read_input_tokens": 640,
+          "cache_creation_input_tokens": 120,
+          "input_tokens": 240
+        },
+        "compaction": {
+          "cache_read_input_tokens": 560,
+          "cache_creation_input_tokens": 160,
+          "input_tokens": 280
+        },
+        "fast_mode": {
+          "cache_read_input_tokens": 480,
+          "cache_creation_input_tokens": 120,
+          "input_tokens": 400
+        },
+        "long_tool_turn": {
+          "cache_read_input_tokens": 720,
+          "cache_creation_input_tokens": 80,
+          "input_tokens": 200
+        },
+        "subagent": {
+          "cache_read_input_tokens": 360,
+          "cache_creation_input_tokens": 160,
+          "input_tokens": 480
+        }
+      }
+    },
+    "anthropic": {
+      "model": "anthropic/claude-opus-4-6",
+      "cases": {
+        "agent_switch": {
+          "cache_read_input_tokens": 480,
+          "cache_creation_input_tokens": 160,
+          "input_tokens": 360
+        },
+        "approval_resume": {
+          "cache_read_input_tokens": 720,
+          "cache_creation_input_tokens": 100,
+          "input_tokens": 180
+        },
+        "compaction": {
+          "cache_read_input_tokens": 640,
+          "cache_creation_input_tokens": 120,
+          "input_tokens": 240
+        },
+        "fast_mode": {
+          "cache_read_input_tokens": 560,
+          "cache_creation_input_tokens": 120,
+          "input_tokens": 320
+        },
+        "long_tool_turn": {
+          "cache_read_input_tokens": 800,
+          "cache_creation_input_tokens": 80,
+          "input_tokens": 120
+        },
+        "subagent": {
+          "cache_read_input_tokens": 400,
+          "cache_creation_input_tokens": 160,
+          "input_tokens": 440
+        }
+      }
+    },
+    "deepseek": {
+      "model": "deepseek/deepseek-v4-pro",
+      "cases": {
+        "agent_switch": {
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 1233
+        },
+        "approval_resume": {
+          "cache_read_input_tokens": 1280,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 87
+        },
+        "compaction": {
+          "cache_read_input_tokens": 1536,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 115
+        },
+        "fast_mode": {
+          "cache_read_input_tokens": 1408,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 112
+        },
+        "long_tool_turn": {
+          "cache_read_input_tokens": 1536,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 148
+        },
+        "subagent": {
+          "cache_read_input_tokens": 1408,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 420
+        }
+      }
+    },
+    "kimi": {
+      "model": "moonshotai/kimi-k3",
+      "cases": {
+        "agent_switch": {
+          "cache_read_input_tokens": 340,
+          "cache_creation_input_tokens": 180,
+          "input_tokens": 480
+        },
+        "approval_resume": {
+          "cache_read_input_tokens": 580,
+          "cache_creation_input_tokens": 140,
+          "input_tokens": 280
+        },
+        "compaction": {
+          "cache_read_input_tokens": 480,
+          "cache_creation_input_tokens": 160,
+          "input_tokens": 360
+        },
+        "fast_mode": {
+          "cache_read_input_tokens": 420,
+          "cache_creation_input_tokens": 140,
+          "input_tokens": 440
+        },
+        "long_tool_turn": {
+          "cache_read_input_tokens": 680,
+          "cache_creation_input_tokens": 100,
+          "input_tokens": 220
+        },
+        "subagent": {
+          "cache_read_input_tokens": 300,
+          "cache_creation_input_tokens": 180,
+          "input_tokens": 520
+        }
+      }
+    },
+    "openai": {
+      "model": "openai/gpt-5",
+      "cases": {
+        "agent_switch": {
+          "cache_read_input_tokens": 500,
+          "cache_creation_input_tokens": 120,
+          "input_tokens": 380
+        },
+        "approval_resume": {
+          "cache_read_input_tokens": 740,
+          "cache_creation_input_tokens": 80,
+          "input_tokens": 180
+        },
+        "compaction": {
+          "cache_read_input_tokens": 660,
+          "cache_creation_input_tokens": 100,
+          "input_tokens": 240
+        },
+        "fast_mode": {
+          "cache_read_input_tokens": 580,
+          "cache_creation_input_tokens": 100,
+          "input_tokens": 320
+        },
+        "long_tool_turn": {
+          "cache_read_input_tokens": 820,
+          "cache_creation_input_tokens": 60,
+          "input_tokens": 120
+        },
+        "subagent": {
+          "cache_read_input_tokens": 420,
+          "cache_creation_input_tokens": 120,
+          "input_tokens": 460
+        }
+      }
+    },
+    "zhipuai": {
+      "model": "zhipuai/glm-5.3-flash",
+      "cases": {
+        "agent_switch": {
+          "cache_read_input_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 1023
+        },
+        "approval_resume": {
+          "cache_read_input_tokens": 960,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 158
+        },
+        "compaction": {
+          "cache_read_input_tokens": 1216,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 272
+        },
+        "fast_mode": {
+          "cache_read_input_tokens": 960,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 247
+        },
+        "long_tool_turn": {
+          "cache_read_input_tokens": 960,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 483
+        },
+        "subagent": {
+          "cache_read_input_tokens": 192,
+          "cache_creation_input_tokens": 0,
+          "input_tokens": 1922
+        }
+      }
+    }
+  }
+}

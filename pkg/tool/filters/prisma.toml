@@ -1,0 +1,21 @@
+[filters.prisma]
+description = "Drop prisma env/schema preamble; keep generate/migrate results and errors."
+version = "1"
+match_command = '(^|\s)(npx\s+)?prisma\s+(generate|migrate|db)\b'
+match_output_select = [
+  'Prisma schema loaded from',
+  'Generated Prisma Client',
+  'Applying migration',
+  'migration.* have been applied',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Environment variables loaded from',
+  '^Prisma schema loaded from',
+  '^Datasource ',
+]
+on_empty = "prisma: ok"
+
+[[tests.prisma]]
+name = "generate keeps the client result, drops preamble"

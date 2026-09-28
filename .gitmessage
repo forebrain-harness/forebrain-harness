@@ -1,0 +1,47 @@
+
+# <type>(<scope>): <subject>
+#
+# ── 标题行（写在上面的空行里）──────────────────────────────────
+# type   feat | fix | refactor | perf | test | docs | build | ci | chore | revert
+# scope  主要改动所在的包或区域：state, tui, gateway, run, turn, memory,
+#        migrate, tool, process, assembly, llm, mcp, config, session,
+#        skill, channel, frontend, npm, docs；跨区域时取最主要的一个
+# subject 英文祈使句，整行 <= 72 字符，小写开头，结尾不加句号
+#   例：fix(state): keep the exec timing triple whole for sub-ms tools
+#
+# ── 正文：与标题空一行，每行 <= 72 字符 ────────────────────────
+# 下面四节必填；用不到的可选节保持注释即可。
+
+Why:
+# 问题是什么、为什么会发生。修 bug 要写到根因，不要只描述症状，
+# 也不要把"加判空 / 兜底 / 重试"当作原因。
+
+What:
+# 按要点列出改动：行为变化、接口变化、删除的死代码、改名。
+# -
+
+Prompt cache:
+# 输入 token 缓存命中率只能升不能降，这一节必填。
+# 不影响时写 "unchanged: <理由>"，例如 "unchanged: storage only".
+# 影响 prompt 组装时写明：
+# - 会话之前的内容（tools / system / 注入指令）是否变化、多久变一次
+# - 命中率前后对比：CacheRead / (CacheRead + CacheCreation + Input)
+
+Verification:
+# 实际跑过的命令和结果，没跑的不要写。
+# - CGO_ENABLED=1 go test -tags fts5 ./... -count=1
+# - go vet ./...（改平台相关代码时加 GOOS=linux / GOOS=windows）
+# - deadcode ./...；scripts/package-graph.sh 后 graph.json 无变化
+# - cd frontend && pnpm build（改前端时）
+# - 实机：TUI / web 场景 + 观察到的结果（改用户可见行为时必填）
+
+# ── 可选节：需要时去掉行首 # ──────────────────────────────────
+#
+# Schema:
+# - stateSchemaVersion N -> N+1, migration <func name>
+# - 旧库数据如何搬迁；丢弃了哪些行、为什么
+# - 迁移后 sqlite_master 与新建库一致（<test name>）
+#
+# Refs: docs/plan/<PLAN_FILE>.md (<task id>)
+#
+# BREAKING CHANGE: <影响谁 + 如何迁移>

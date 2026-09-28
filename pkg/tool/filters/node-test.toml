@@ -1,0 +1,4 @@
+[filters.node-test]
+description = "Strip passing node --test / TAP lines; keep failures and summaries."
+version = "2"
+match_command = '(?:^|[;&|]\s*)node\s+--test\b'

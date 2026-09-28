@@ -1,0 +1,48 @@
+[filters.du]
+description = "Compact du output"
+version = "3"
+match_command = "^du\\b"
+match_output_select = [
+  '(?m)^[\d.]+[KMGTP]\t',
+]
+strip_lines_matching = ["^\\s*$"]
+max_lines = 40
+
+[[tests.du]]
+name = "preserves sizes, strips blank lines"
+input = "4.0K\t./src\n\n8.0K\t./tests\n16K\t."
+expected = "4.0K\t./src\n8.0K\t./tests\n16K\t."
+
+[[tests.du]]
+name = "single line passthrough"
+input = "128K\t."
+expected = "128K\t."
+
+[[tests.du]]
+name = "top-level node_modules disk usage, blank lines stripped, truncated"
+input = """
+12K	./node_modules/.bin
+1.2G	./node_modules/typescript
+456M	./node_modules/webpack
+234M	./node_modules/babel-loader
+89M	./node_modules/react
+56M	./node_modules/react-dom
+34M	./node_modules/lodash
+23M	./node_modules/moment
+12M	./node_modules/axios
+8.5M	./node_modules/express
+2.1G	./node_modules
+"""
+expected = """
+12K	./node_modules/.bin
+1.2G	./node_modules/typescript
+456M	./node_modules/webpack
+234M	./node_modules/babel-loader
+89M	./node_modules/react
+56M	./node_modules/react-dom
+34M	./node_modules/lodash
+23M	./node_modules/moment
+12M	./node_modules/axios
+8.5M	./node_modules/express
+2.1G	./node_modules
+"""

@@ -1,0 +1,4 @@
+[filters.vitest]
+description = "Drop vitest passing lines and run header; keep failures and the summary."
+version = "3"
+match_command = "(^|[;&|]\\s*)(?:(?:pnpm|pnpx|npx)\\s+)?vitest\\b"

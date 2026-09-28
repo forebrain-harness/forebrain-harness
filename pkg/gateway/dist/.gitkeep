@@ -1,0 +1,3 @@
+# Placeholder so `//go:embed all:dist` always matches a file and `go build`
+# works before the frontend is built. Real assets land here from `pnpm build`
+# (vite outDir, emptyOutDir=false) and are gitignored.

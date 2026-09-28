@@ -1,0 +1,32 @@
+[filters.objdump]
+description = "Truncate objdump disassembly/section dumps to a useful head."
+version = "1"
+match_command = '(^|[;&|/ ])([a-z0-9_-]*-)?objdump(\s|$)'
+match_output_select = [
+  'file format elf',
+  '(?m)^Disassembly of section ',
+]
+strip_ansi = true
+max_lines = 50
+
+[[tests.objdump]]
+name = "short disassembly head passes through unchanged"
+input = """
+/app/mystery:     file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000401740 <main>:
+"""
+expected = """
+/app/mystery:     file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000401740 <main>:
+"""
+
+[[tests.objdump]]
+name = "error line is preserved"
+input = "objdump: '/app/missing.o': No such file"
+expected = "objdump: '/app/missing.o': No such file"

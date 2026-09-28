@@ -1,0 +1,32 @@
+[filters.langsmith-api]
+description = "Truncate long LangSmith runs/query JSON lines; keep run content."
+version = "2"
+match_command = '(?m)(^|[;&|]\s*)(?:[A-Za-z0-9_]+=\S+\s+)*curl\s+.*langsmith'
+match_output_select = [
+  '(?m)"run_type"\s*:',
+  '(?m)"dotted_order"\s*:',
+  '(?m)"trace_id"\s*:',
+  '(?m)"tenant_id"\s*:',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+
+[[tests.langsmith-api]]
+name = "truncates long run line, keeps structure prefix"
+input = """{"runs":[{"id":"abc","run_type":"chain","dotted_order":"1.2.3","name":"agent","inputs":{"question":"why"},"outputs":{"answer":"because it repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats"}}]}
+"""
+expected = """{"runs":[{"id":"abc","run_type":"chain","dotted_order":"1.2.3","name":"agent","inputs":{"question":"why"},"outputs":{"answer":"because it repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats and repeats"}}]}
+"""
+
+[[tests.langsmith-api]]
+name = "short langsmith response untouched"
+input = """{"runs":[{"id":"abc","run_type":"llm","name":"test","error":null}]}
+"""
+expected = """{"runs":[{"id":"abc","run_type":"llm","name":"test","error":null}]}"""
+
+[[tests.langsmith-api]]
+name = "empty input passes through"
+input = ""
+expected = ""

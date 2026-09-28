@@ -1,0 +1,30 @@
+[filters.pytest]
+description = "Drop pytest session preamble and progress dots; keep failures, tracebacks, summary."
+version = "1"
+match_command = '^(\s*)(python3?\s+-m\s+)?pytest\b'
+# Bare ` passed` / ` failed` substrings were too broad (they matched e.g.
+# "compilation failed for package" from R/native builds). Use pytest's distinctive
+# session header, the anchored per-test FAILED/ERROR lines, and the `==== N passed
+# / N failed ... ====` summary banner instead.
+match_output_select = [
+  'test session starts',
+  '(?m)^FAILED ',
+  '(?m)^ERROR ',
+  '(?m)^=+ .*\b\d+ (passed|failed|error|skipped|xfailed|xpassed)\b.*=+$',
+  '(?m)^=+ no tests ran',
+]
+strip_ansi = true
+strip_lines_matching = [
+  'test session starts',
+  '^platform ',
+  '^rootdir:',
+  '^plugins:',
+  '^cachedir:',
+  '^configfile:',
+  '^collected \d+ item',
+  '\[\s*\d+%\]$',
+]
+# Verbose / -rA runs list every passed test on its own PASSED line (in the
+# PASSES section and/or the short test summary). One-off passes are already
+# implied by the final "N passed" banner, so a long run of them is pure
+# repetition

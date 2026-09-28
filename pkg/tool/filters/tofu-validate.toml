@@ -1,0 +1,40 @@
+[filters.tofu-validate]
+description = "Compact OpenTofu validate output"
+version = "2"
+match_command = "^tofu\\s+validate(\\s|$)"
+# Command-only: Terraform prints the same success sentence as OpenTofu.
+# Output-only selection therefore cannot identify the tool and can collapse
+# unrelated output that follows `terraform validate` in a compound command.
+strip_ansi = true
+match_output = [
+  { pattern = "Success! The configuration is valid", message = "ok (valid)" },
+]
+
+[[tests.tofu-validate]]
+name = "success short-circuits to ok"
+input = "Success! The configuration is valid."
+expected = "ok (valid)"
+
+[[tests.tofu-validate]]
+name = "shared Terraform success text does not select tofu"
+expect_match_output = false
+input = """Success! The configuration is valid.
+enableEnhancedValidation=true
+"""
+expected = """Success! The configuration is valid.
+enableEnhancedValidation=true"""
+
+[[tests.tofu-validate]]
+name = "error passes through unchanged"
+input = "Error: Invalid resource type\n  on main.tf line 3: resource \"aws_instancee\" \"web\""
+expected = "Error: Invalid resource type\n  on main.tf line 3: resource \"aws_instancee\" \"web\""
+
+[[tests.tofu-validate]]
+name = "real validate: short-circuits to ok via match_output"
+input = """
+Success! The configuration is valid.
+"""
+expected = """
+ok (valid)
+"""
+

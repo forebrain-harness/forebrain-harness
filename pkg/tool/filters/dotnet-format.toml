@@ -1,0 +1,68 @@
+[filters.dotnet-format]
+description = "Collapse dotnet format's per-project analyzer-run progress lines and repeated workspace-warning advisory to a count; keep the final summary."
+version = "1"
+match_command = '(^|[;&|]\s*)(?:sudo\s+)?dotnet\s+format\b'
+match_output_select = [
+  '(?m)^Running \d+ analyzers? on ',
+  '(?m)^Warnings were encountered while loading the workspace\.',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^Running \d+ analyzers? on \S',
+  '^Warnings were encountered while loading the workspace\. Set the verbosity option to the .diagnostic. level to log warnings\.\s*$',
+]
+
+[[tests.dotnet-format]]
+name = "collapses per-project analyzer progress lines, keeps summary"
+input = """Running 1 analyzers on BB.Framework.
+Running 1 analyzers on BB.Framework.Tests.
+Running 1 analyzers on BB.Slots.
+Formatted 3 of 3 files.
+Format complete in 8231ms."""
+expected = """Formatted 3 of 3 files.
+Format complete in 8231ms."""
+
+[[tests.dotnet-format]]
+name = "collapses repeated workspace-warning advisory, keeps report path and result"
+input = """Formatting code files in workspace '/repo/App.sln'.
+Warnings were encountered while loading the workspace. Set the verbosity option to the 'diagnostic' level to log warnings.
+Writing formatting report to: '/tmp/report.json'.
+Format complete in 14293ms.
+Warnings were encountered while loading the workspace. Set the verbosity option to the 'diagnostic' level to log warnings."""
+expected = """Formatting code files in workspace '/repo/App.sln'.
+Writing formatting report to: '/tmp/report.json'.
+Format complete in 14293ms."""
+
+[[tests.dotnet-format]]
+name = "diagnostics report body and CA rule lines survive untouched"
+input = """Running 1 analyzers on BB.Utilities.BCL.
+============================================================
+Diagnostics report
+============================================================
+  No formatting changes recorded in report.
+============================================================
+Summary
+============================================================
+formatting: 53.31s
+Total time: 53.31s"""
+expected = """============================================================
+Diagnostics report
+============================================================
+  No formatting changes recorded in report.
+============================================================
+Summary
+============================================================
+formatting: 53.31s
+Total time: 53.31s"""
+
+[[tests.dotnet-format]]
+name = "no analyzer/workspace-warning lines is not selected by this filter"
+expect_match_output = false
+input = "Formatted 0 of 3 files in 100ms."
+expected = "Formatted 0 of 3 files in 100ms."
+
+[[tests.dotnet-format]]
+name = "empty input passes through"
+input = ""
+expected = ""
+

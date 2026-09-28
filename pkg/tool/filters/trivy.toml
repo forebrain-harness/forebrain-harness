@@ -1,0 +1,50 @@
+[filters.trivy]
+description = "Strip trivy INFO log lines; keep scan targets, vulnerability tables, and WARN/FATAL."
+version = "1"
+match_command = '^trivy\s+(image|fs|repo|config|k8s|rootfs|vm)\b'
+match_output_select = [
+  '(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+INFO\s',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+INFO\s',
+]
+
+[[tests.trivy]]
+name = "strips INFO lines, keeps scan target and totals"
+input = """
+2024-01-01T00:00:00.000Z	INFO	Vulnerability scanning is enabled
+2024-01-01T00:00:00.000Z	INFO	Secret scanning is enabled
+2024-01-01T00:00:00.000Z	INFO	If your scanning is slow, please try '--scanners vuln'
+alpine:3.18 (alpine 3.18.6)
+========================
+Total: 0 (UNKNOWN: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
+
+No Vulnerabilities found
+"""
+expected = """
+alpine:3.18 (alpine 3.18.6)
+========================
+Total: 0 (UNKNOWN: 0, LOW: 0, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
+
+No Vulnerabilities found
+"""
+
+[[tests.trivy]]
+name = "preserves WARN lines"
+input = """
+2024-01-01T00:00:00.000Z	INFO	Vulnerability scanning is enabled
+2024-01-01T00:00:00.000Z	WARN	This OS version is no longer supported by the vendor
+myimage:latest (ubuntu 18.04)
+========================
+Total: 12 (HIGH: 3, CRITICAL: 1)
+"""
+expected = """
+2024-01-01T00:00:00.000Z	WARN	This OS version is no longer supported by the vendor
+myimage:latest (ubuntu 18.04)
+========================
+Total: 12 (HIGH: 3, CRITICAL: 1)
+"""
+
+[[tests.trivy]]
+name = "alpine scan with INFO noise before vuln table"

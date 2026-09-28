@@ -1,0 +1,162 @@
+[filters.mvn-build]
+description = "Compact Maven build output; keep errors, test counts, and the BUILD result tail."
+version = "4"
+match_command = "(^|[;&|]\\s*)(?:mvn\\s+(?:-[^\\s]+(?:\\s+[^-\\s][^\\s]*)?\\s+)*(?:compile|package|clean|install|test|verify|dependency:(?:go-offline|resolve|resolve-plugins|tree|get|list|purge-local-repository))|(?:\\./)?mvnw\\b)"
+match_output_select = [
+  '(?m)^\[INFO\] Building\s',
+  '(?m)^(?:\[INFO\] )?Progress \(1\):',
+  '(?m)^(?:\[INFO\] )?Downloading from ',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\[INFO\\] ---",
+  "^\\[INFO\\] Building\\s",
+  "^\\[INFO\\] Downloading\\s",
+  "^\\[INFO\\] Downloaded\\s",
+  "^\\[INFO\\]\\s*$",
+  "^\\s*$",
+  "^(?:\\[INFO\\] )?Downloading:",
+  "^(?:\\[INFO\\] )?Downloaded:",
+  "^(?:\\[INFO\\] )?Downloading from ",
+  "^(?:\\[INFO\\] )?Downloaded from ",
+  "^(?:\\[INFO\\] )?Progress",
+  "^(?:\\./)?mvnw\\s",
+]
+replace = [
+  { pattern = 'Progress \\(1\\):[^\\r\\n]*\\r?', replacement = "" },
+]
+max_lines = 60
+max_lines_keep_tail = 40
+on_empty = "mvn: ok"
+
+[[tests.mvn-build]]
+name = "strips INFO noise, preserves errors and summary"
+input = """
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO] Downloading org.apache.maven.plugins:maven-compiler-plugin:3.11.0
+[INFO] Downloaded org.apache.maven.plugins:maven-compiler-plugin:3.11.0
+[INFO]
+[ERROR] /src/main/java/Main.java:[10,5] cannot find symbol
+  symbol: method foo()
+[INFO] BUILD FAILURE
+[INFO] Total time: 2.543 s
+"""
+expected = "[ERROR] /src/main/java/Main.java:[10,5] cannot find symbol\n  symbol: method foo()\n[INFO] BUILD FAILURE\n[INFO] Total time: 2.543 s"
+
+[[tests.mvn-build]]
+name = "successful build keeps BUILD SUCCESS line"
+input = """
+[INFO] ---
+[INFO] Building myapp 1.0-SNAPSHOT
+[INFO]
+[INFO] BUILD SUCCESS
+[INFO] Total time: 4.123 s
+[INFO] Finished at: 2024-01-15T10:30:00Z
+"""
+expected = "[INFO] BUILD SUCCESS\n[INFO] Total time: 4.123 s\n[INFO] Finished at: 2024-01-15T10:30:00Z"
+
+[[tests.mvn-build]]
+name = "real maven build: [INFO] --- and blank [INFO] stripped, test count and result kept"
+input = """
+[INFO] Scanning for projects...
+[INFO]
+[INFO] ----------------------< com.example:my-service >----------------------
+[INFO] Building my-service 1.0.0
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO]
+[INFO] --- maven-resources-plugin:3.3.0:resources (default-resources) ---
+[INFO] Copying 5 resource files to target/classes
+[INFO] --- maven-compiler-plugin:3.11.0:compile (default-compile) ---
+[INFO] Nothing to compile - all classes are up to date
+[INFO] --- maven-resources-plugin:3.3.0:testResources ---
+[INFO] Copying 2 resource files to target/test-classes
+[INFO] --- maven-surefire-plugin:3.1.2:test (default-test) ---
+[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0
+[INFO]
+[INFO] --- maven-jar-plugin:3.3.0:jar (default-jar) ---
+[INFO] Building jar: target/my-service-1.0.0.jar
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] Total time:  4.321 s
+[INFO] Finished at: 2024-01-01T12:00:00Z
+[INFO] ------------------------------------------------------------------------
+"""
+expected = """
+[INFO] Scanning for projects...
+[INFO] Copying 5 resource files to target/classes
+[INFO] Nothing to compile - all classes are up to date
+[INFO] Copying 2 resource files to target/test-classes
+[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0
+[INFO] BUILD SUCCESS
+[INFO] Total time:  4.321 s
+[INFO] Finished at: 2024-01-01T12:00:00Z
+"""
+
+[[tests.mvn-build]]
+name = "mvnw wrapper Progress spam stripped, Downloaded kept"
+input = """mvnw install -Pdev
+Downloading from central: https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.pom
+Progress (1): 1.1 kB\rProgress (1): 1.4 kB\r                    
+Downloaded from central: https://repo.maven.apache.org/maven2/com/example/foo/1.0/foo-1.0.pom (1.4 kB at 19 kB/s)
+[INFO] Scanning for projects...
+[INFO] BUILD SUCCESS
+"""
+expected = """[INFO] Scanning for projects...
+[INFO] BUILD SUCCESS"""
+
+# v4 regression tests for the dependency:* goals. These reproduce the exact
+# shape seen in the SkillsBench run that motivated the change: bulk
+# "Downloading from" / "Progress (1):" chatter surrounding a short useful tail.
+[[tests.mvn-build]]
+name = "dependency:go-offline download chatter stripped, result tail kept"
+input = """[INFO] Scanning for projects...
+Downloading from central: https://repo.maven.apache.org/maven2/org/x/a/1.0/a-1.0.jar
+Progress (1): 4.1/12 kB
+Progress (1): 12 kB
+Downloaded from central: https://repo.maven.apache.org/maven2/org/x/a/1.0/a-1.0.jar (12 kB at 1.2 MB/s)
+Downloading from central: https://repo.maven.apache.org/maven2/org/x/b/2.0/b-2.0.jar
+Downloaded from central: https://repo.maven.apache.org/maven2/org/x/b/2.0/b-2.0.jar (8 kB at 900 kB/s)
+[INFO] BUILD SUCCESS
+[INFO] Total time:  9.187 s
+"""
+expected = """[INFO] Scanning for projects...
+[INFO] BUILD SUCCESS
+[INFO] Total time:  9.187 s"""
+
+# The safety case. A dependency goal that FAILS must keep its [ERROR] recap:
+# max_lines_keep_tail plus the never-strip-[ERROR] behaviour must hold for the
+# newly matched goals exactly as it does for compile/package.
+[[tests.mvn-build]]
+name = "dependency:resolve failure keeps [ERROR] recap"
+input = """[INFO] Scanning for projects...
+Downloading from central: https://repo.maven.apache.org/maven2/org/x/missing/9.9/missing-9.9.jar
+Progress (1): 1.0 kB
+[ERROR] Failed to execute goal on project demo: Could not resolve dependencies
+[ERROR] dependency: org.x:missing:jar:9.9 was not found
+[ERROR] -> [Help 1]
+"""
+expected = """[INFO] Scanning for projects...
+[ERROR] Failed to execute goal on project demo: Could not resolve dependencies
+[ERROR] dependency: org.x:missing:jar:9.9 was not found
+[ERROR] -> [Help 1]"""
+
+# THE v4 CASE. Batch mode (`-B`) prefixes progress lines with `[INFO] `, which
+# every download pattern used to miss because they anchored at `^Downloading`.
+# Taken from real captured output (mvn dependency:resolve -B) that measured
+# 51,727 -> 51,727 bytes, 0 saved, before this fix.
+[[tests.mvn-build]]
+name = "batch mode (-B): [INFO]-prefixed download chatter is stripped"
+input = """[INFO] Scanning for projects...
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/org/assertj/assertj-core/3.24/assertj-core-3.24.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/org/assertj/assertj-core/3.24/assertj-core-3.24.jar (1.2 MB at 8.1 MB/s)
+[INFO] Downloading from central: https://repo.maven.apache.org/maven2/io/zipkin/brave/brave/5.16/brave-5.16.jar
+[INFO] Downloaded from central: https://repo.maven.apache.org/maven2/io/zipkin/brave/brave/5.16/brave-5.16.jar (0.6 MB at 4.0 MB/s)
+[INFO] BUILD SUCCESS
+[INFO] Total time:  6.004 s
+"""
+expected = """[INFO] Scanning for projects...
+[INFO] BUILD SUCCESS
+[INFO] Total time:  6.004 s"""
+# powershell completion for %-36[1]s -*- shell-script -*-
+

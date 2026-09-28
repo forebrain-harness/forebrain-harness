@@ -1,0 +1,46 @@
+[filters.wget]
+description = "Drop wget connect/progress chatter; keep length, target, final status, and errors."
+version = "1"
+match_command = '^wget\b'
+match_output_select = [
+  '^Saving to:',
+  '^Length: ',
+  '^Resolving ',
+  ' saved \[',
+  '^--\d{4}-\d{2}-\d{2}',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^--\d{4}-\d{2}-\d{2} ',
+  '^Resolving ',
+  '^Connecting to ',
+  '^HTTP request sent',
+  '%\[',
+  '^\s*\d+K[ .]',
+]
+
+[[tests.wget]]
+name = "success keeps length, target, and saved line"
+input = """--2024-01-01 10:00:00--  http://example.com/file.tar.gz
+Resolving example.com (example.com)... 1.2.3.4
+Connecting to example.com (example.com)|1.2.3.4|:80... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 1048576 (1.0M) [application/gzip]
+Saving to: 'file.tar.gz'
+
+file.tar.gz   100%[===================>]   1.00M  5.00MB/s    in 0.2s
+
+2024-01-01 10:00:01 (5.00 MB/s) - 'file.tar.gz' saved [1048576/1048576]"""
+expected = """Length: 1048576 (1.0M) [application/gzip]
+Saving to: 'file.tar.gz'
+2024-01-01 10:00:01 (5.00 MB/s) - 'file.tar.gz' saved [1048576/1048576]"""
+
+[[tests.wget]]
+name = "error is preserved"
+input = """--2024-01-01 10:00:00--  http://example.com/missing
+Resolving example.com (example.com)... 1.2.3.4
+Connecting to example.com (example.com)|1.2.3.4|:80... connected.
+HTTP request sent, awaiting response... 404 Not Found
+2024-01-01 10:00:00 ERROR 404: Not Found."""
+expected = "2024-01-01 10:00:00 ERROR 404: Not Found."

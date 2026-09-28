@@ -1,0 +1,41 @@
+[filters.rubocop]
+description = "Drop rubocop progress dots and inspect banner; keep offenses and the summary."
+version = "1"
+match_command = '\brubocop\b'
+match_output_select = [
+  '\d+ files? inspected',
+  '^Offenses:',
+  'offenses? detected',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Inspecting \d+ file',
+  '^[.CWEF]+$',
+]
+
+[[tests.rubocop]]
+name = "keeps offenses and summary, drops progress dots"
+input = """Inspecting 10 files
+..C..W....
+
+Offenses:
+
+app/models/user.rb:10:5: C: Style/StringLiterals: Prefer single-quoted strings.
+  x = "foo"
+      ^^^^^
+
+10 files inspected, 2 offenses detected, 1 offense autocorrectable"""
+expected = """Offenses:
+app/models/user.rb:10:5: C: Style/StringLiterals: Prefer single-quoted strings.
+  x = "foo"
+      ^^^^^
+10 files inspected, 2 offenses detected, 1 offense autocorrectable"""
+
+[[tests.rubocop]]
+name = "clean run collapses to the summary"
+input = """Inspecting 5 files
+.....
+
+5 files inspected, no offenses detected"""
+expected = "5 files inspected, no offenses detected"

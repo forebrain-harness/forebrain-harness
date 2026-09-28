@@ -1,0 +1,14 @@
+[filters.gh-run-view]
+description = "Strip gh run view summary footer boilerplate; keep run header and JOBS status."
+version = "2"
+match_command = '^gh\s+run\s+view\b'
+match_output_select = [
+  '(?m)^JOBS',
+]
+strip_lines_matching = [
+  '^View this run on GitHub:.*',
+  '^For more information about a job,.*',
+]
+
+[[tests.gh-run-view]]
+name = "keeps job status lines, strips footer help"

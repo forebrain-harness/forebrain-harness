@@ -1,0 +1,145 @@
+[filters.ffmpeg]
+description = "Collapse ffmpeg encoding output: strip build config, per-frame progress spam, and codec stats; keep input/output stream info and final encoding result."
+version = "1"
+match_command = '^ffmpeg\b'
+match_output_select = [
+  '(?m)^ffmpeg version \d',
+]
+strip_ansi = true
+strip_lines_matching = [
+  # Build header noise
+  '^  built with ',
+  '^  configuration:',
+  '^  lib\w',
+  # 4+ space indent: nested stream Metadata, Side data, CPB properties
+  '^    ',
+  # Input/Output Metadata: label line (content is at 4-space indent, already stripped)
+  '^  Metadata:',
+  # Stream mapping block (keep stream info lines; strip only the -> mapping lines)
+  '^Stream mapping:',
+  '^  Stream #\d.*->',
+  # Runtime markers
+  '^Press \[q\]',
+  # All codec/muxer logger lines
+  '^\[libx264 @',
+  '^\[aac @',
+  '^\[mp4 @',
+  '^\[out#',
+]
+replace = [
+  # The entire progress blob is one giant line (frame= updates overwrite via \r when captured).
+  # When encoding completes, the line contains Lsize=. Extract the final summary.
+  { pattern = '^frame=.*Lsize=\s*(\S+)\s+time=(\S+)\s+bitrate=\s*(\S+)\s+speed=\s*(\S+).*$', replacement = 'Encoded: Lsize=$1 time=$2 bitrate=$3 speed=$4' },
+  # ponytail: if encoding was interrupted (no Lsize= line), collapse the in-progress blob
+  { pattern = '^frame=\s*\d+\s+fps=\S+\s+q=\S+\s+size=\s*(\S+)\s+time=(\S+).*$', replacement = '[encoding in progress: size=$1 time=$2]' },
+]
+max_lines = 20
+
+[[tests.ffmpeg]]
+name = "strips build config and progress blob, keeps stream info and final result"
+input = """
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+  built with Apple clang version 21.0.0 (clang-2100.0.123.102)
+  configuration: --prefix=/opt/homebrew/Cellar/ffmpeg/8.1.2 --enable-shared --enable-pthreads
+  libavutil      60. 26.102 / 60. 26.102
+  libavcodec     62. 28.102 / 62. 28.102
+  libavformat    62. 12.102 / 62. 12.102
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'input.mp4':
+  Duration: 00:01:06.07, start: 0.000000, bitrate: 422 kb/s
+  Stream #0:0: Video: h264, yuv420p, 1920x1160, 343 kb/s, 25 fps
+  Stream #0:1: Audio: aac, 16000 Hz, mono, 73 kb/s
+Stream mapping:
+  Stream #0:0 -> #0:0 (h264 -> h264)
+  Stream #0:1 -> #0:1 (aac -> aac)
+Press [q] to stop, [?] for help
+[libx264 @ 0xbe1425180] using cpu capabilities: ARMv8 NEON
+[libx264 @ 0xbe1425180] profile High, level 5.0
+[libx264 @ 0xbe1425180] 264 - core 165 r3222 - H.264/MPEG-4 AVC codec
+Output #0, mp4, to 'output.mp4':
+  Stream #0:0: Video: h264, yuv420p, 1920x1160, 25 fps
+frame=   60 fps=0.0 q=31.0 size=       0KiB time=00:00:02.32 bitrate=   0.2kbits/s speed=4.62x    frame=  116 fps=115 q=31.0 size=     256KiB time=00:00:04.56 bitrate= 460.0kbits/s speed=4.54x    frame=99194 fps=374 q=-1.0 Lsize=  151030KiB time=01:06:07.68 bitrate= 311.8kbits/s speed=14.9x
+[mp4 @ 0xbe1013700] Starting second pass: moving the moov atom to the beginning of the file
+[out#0/mp4 @ 0xbe1428300] video:116298KiB audio:32264KiB subtitle:0KiB muxing overhead: 1.661426%
+[libx264 @ 0xbe1425180] frame I:441   Avg QP:15.74  size: 64593
+[libx264 @ 0xbe1425180] kb/s:240.11
+[aac @ 0xbe1045180] Qavg: 65514.977
+GONG_COMPRESSION_DONE
+"""
+expected = """
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'input.mp4':
+  Duration: 00:01:06.07, start: 0.000000, bitrate: 422 kb/s
+  Stream #0:0: Video: h264, yuv420p, 1920x1160, 343 kb/s, 25 fps
+  Stream #0:1: Audio: aac, 16000 Hz, mono, 73 kb/s
+Output #0, mp4, to 'output.mp4':
+  Stream #0:0: Video: h264, yuv420p, 1920x1160, 25 fps
+Encoded: Lsize=151030KiB time=01:06:07.68 bitrate=311.8kbits/s speed=14.9x
+GONG_COMPRESSION_DONE
+"""
+
+[[tests.ffmpeg]]
+name = "error line survives (never-block)"
+input = """
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+  built with Apple clang version 21.0.0
+  libavutil 60. 26.102
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'missing.mp4':
+missing.mp4: No such file or directory
+"""
+expected = """
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'missing.mp4':
+missing.mp4: No such file or directory
+"""
+
+[[tests.ffmpeg]]
+name = "real-world: full encode with metadata sections, progress blob, and sentinel"
+input = """
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+  built with Apple clang version 21.0.0 (clang-2100.0.123.102)
+  configuration: --prefix=/opt/homebrew/Cellar/ffmpeg/8.1.2 --enable-gpl --enable-libx264
+  libavutil      60. 26.102 / 60. 26.102
+  libavcodec     62. 28.102 / 62. 28.102
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '1168445909783701999.playback.mp4':
+  Metadata:
+    major_brand     : isom
+    encoder         : Lavf58.12.100
+  Duration: 01:06:07.76, start: 0.000000, bitrate: 422 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1920x1160, 343 kb/s, 25 fps
+  Stream #0:1[0x2](und): Audio: aac (LC), 16000 Hz, mono, 73 kb/s
+Stream mapping:
+  Stream #0:0 -> #0:0 (h264 -> h264 (libx264))
+  Stream #0:1 -> #0:1 (aac -> aac)
+Press [q] to stop, [?] for help
+[libx264 @ 0xbe1425180] using cpu capabilities: ARMv8 NEON DotProd I8MM
+[libx264 @ 0xbe1425180] profile High, level 5.0, 4:2:0, 8-bit
+Output #0, mp4, to 'gong_jas_compressed.mp4':
+  Metadata:
+    major_brand     : isom
+    encoder         : Lavf62.12.102
+  Stream #0:0(und): Video: h264 (avc1), yuv420p, 1920x1160, q=2-31, 25 fps
+    Metadata:
+      encoder         : Lavc62.28.102 libx264
+    Side data:
+      CPB properties: bitrate max/min/avg: 0/0/0 buffer size: 0 vbv_delay: N/A
+  Stream #0:1(und): Audio: aac (LC), 16000 Hz, mono, 96 kb/s
+frame=   60 fps=0.0 q=31.0 size=       0KiB time=00:00:02.32 bitrate=   0.2kbits/s speed=4.62x    frame=99194 fps=374 q=-1.0 Lsize=  151030KiB time=01:06:07.68 bitrate= 311.8kbits/s speed=14.9x
+[mp4 @ 0xbe1013700] Starting second pass: moving the moov atom to the beginning of the file
+[out#0/mp4 @ 0xbe1428300] video:116298KiB audio:32264KiB subtitle:0KiB muxing overhead: 1.661426%
+[libx264 @ 0xbe1425180] frame I:441   Avg QP:15.74  size: 64593
+[libx264 @ 0xbe1425180] kb/s:240.11
+[aac @ 0xbe1045180] Qavg: 65514.977
+GONG_COMPRESSION_DONE
+"""
+expected = """
+ffmpeg version 8.1.2 Copyright (c) 2000-2026 the FFmpeg developers
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from '1168445909783701999.playback.mp4':
+  Duration: 01:06:07.76, start: 0.000000, bitrate: 422 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1920x1160, 343 kb/s, 25 fps
+  Stream #0:1[0x2](und): Audio: aac (LC), 16000 Hz, mono, 73 kb/s
+Output #0, mp4, to 'gong_jas_compressed.mp4':
+  Stream #0:0(und): Video: h264 (avc1), yuv420p, 1920x1160, q=2-31, 25 fps
+  Stream #0:1(und): Audio: aac (LC), 16000 Hz, mono, 96 kb/s
+Encoded: Lsize=151030KiB time=01:06:07.68 bitrate=311.8kbits/s speed=14.9x
+GONG_COMPRESSION_DONE
+"""

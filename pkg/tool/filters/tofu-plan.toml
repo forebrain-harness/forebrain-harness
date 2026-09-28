@@ -1,0 +1,79 @@
+[filters.tofu-plan]
+description = "Compact OpenTofu/Terraform plan & apply output; keep the Plan/Apply summary tail."
+version = "3"
+match_command = "(^|[;&|]\\s*)(tofu\\s+(plan|apply)|terraform\\s+(plan|apply))\\b"
+match_output_select = [
+  '(?m): Refreshing state\.\.\.',
+  '(?m)^(OpenTofu|Terraform) will perform the following actions',
+  '(?m)^Plan: \d+ to add,',
+  '(?m)^Apply complete!',
+  '(?m)^No changes\.',
+]
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*#.*unchanged",
+  "^\\s*$",
+  "^Acquiring state lock",
+  "^Releasing state lock",
+]
+collapse_lines_matching = [
+  { pattern = 'Refreshing state\.\.\.', template = "{count} resources refreshed" },
+]
+max_lines = 80
+max_lines_keep_tail = 40
+on_empty = "tofu plan: no changes detected"
+
+[[tests.tofu-plan]]
+name = "collapses per-resource refresh lines to a count"
+input = """
+Acquiring state lock. This may take a few moments...
+aws_vpc.main: Refreshing state... [id=vpc-abc123]
+aws_security_group.web: Refreshing state... [id=sg-def456]
+Releasing state lock. This may take a few moments...
+
+OpenTofu will perform the following actions:
+
+  # aws_instance.web will be created
+  + resource "aws_instance" "web" {}
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+"""
+expected = "2 resources refreshed\nOpenTofu will perform the following actions:\n  # aws_instance.web will be created\n  + resource \"aws_instance\" \"web\" {}\nPlan: 1 to add, 0 to change, 0 to destroy."
+
+[[tests.tofu-plan]]
+name = "refresh count survives when only lock/refresh noise otherwise present"
+input = "aws_vpc.main: Refreshing state... [id=vpc-abc]\nAcquiring state lock. This may take a few moments...\nReleasing state lock. This may take a few moments..."
+expected = "1 resources refreshed"
+
+[[tests.tofu-plan]]
+name = "pipe path: apply output collapses refresh lines, keeps the plan"
+input = """
+module.eks.aws_vpc.main: Refreshing state... [id=vpc-abc123]
+module.eks.aws_security_group.web: Refreshing state... [id=sg-def456]
+module.eks.aws_iam_role.node: Refreshing state... [id=node-role]
+
+OpenTofu will perform the following actions:
+
+  # aws_instance.web will be created
+  + resource "aws_instance" "web" {}
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+"""
+expected = "3 resources refreshed\nOpenTofu will perform the following actions:\n  # aws_instance.web will be created\n  + resource \"aws_instance\" \"web\" {}\nPlan: 1 to add, 0 to change, 0 to destroy.\nApply complete! Resources: 1 added, 0 changed, 0 destroyed."
+
+[[tests.tofu-plan]]
+name = "terraform apply pipe path: refresh collapse and summary kept"
+input = """
+aws_s3_bucket.logs: Refreshing state... [id=logs-bucket]
+aws_iam_role.lambda: Refreshing state... [id=lambda-role]
+
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration
+and found no differences, so no changes are needed.
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+"""
+expected = "2 resources refreshed\nNo changes. Your infrastructure matches the configuration.\nTerraform has compared your real infrastructure against your configuration\nand found no differences, so no changes are needed.\nApply complete! Resources: 0 added, 0 changed, 0 destroyed."

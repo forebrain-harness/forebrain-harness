@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forebrain-config
+  namespace: forebrain
+  labels:
+    app: forebrain
+data:
+  forebrain.yaml: |
+    gateway:
+      http_addr: "0.0.0.0:6060"
+    agents:
+      definitions:
+        # Channels belong to a primary agent: these are the main agent's, and
+        # another primary agent declares its own accounts under its own
+        # definition. Secrets go in ~/.forebrain/.env and are referenced here as
+        # ${FOREBRAIN_MAIN_...} so each agent has its own variables.
+        main:
+          channels:
+            wecom:
+              enabled: false
+              token: ""
+              encoding_aes_key: ""
+              corp_id: ""
+              corp_secret: ""
+              agent_id: 0
+              callback_path: "/wecom/callback"
+            wecom_callback:
+              enabled: false
+              token: ""
+              encoding_aes_key: ""
+              corp_id: ""
+              corp_secret: ""
+              agent_id: 0
+              callback_path: "/wecom_callback/callback"
+            telegram:
+              enabled: false
+              bot_token: ""
+            discord:
+              enabled: false
+              bot_token: ""
+            slack:
+              enabled: false
+              inbound_path: "/channels/slack/inbound"
+              outbound_url: ""
+              bot_token: ""
+              secret: ""
+            whatsapp:
+              enabled: false
+              inbound_path: "/channels/whatsapp/inbound"
+              outbound_url: ""
+              token: ""
+              secret: ""
+            signal:
+              enabled: false
+              outbound_url: ""
+              token: ""
+            mattermost:
+              enabled: false
+              outbound_url: ""
+              token: ""
+            matrix:
+              enabled: false
+              outbound_url: ""
+              token: ""
+            homeassistant:
+              enabled: false
+              outbound_url: ""
+              token: ""
+            email:
+              enabled: false
+              inbound_path: "/channels/email/inbound"
+              outbound_url: ""
+              token: ""
+              secret: ""
+            sms:
+              enabled: false
+              inbound_path: "/channels/sms/inbound"
+              outbound_url: ""
+              token: ""
+              secret: ""
+            webhook:
+              enabled: false
+              inbound_path: "/channels/webhook/inbound"
+              outbound_url: ""
+              token: ""
+              secret: ""
+            bluebubbles:
+              enabled: false
+              inbound_path: "/channels/bluebubbles/inbound"
+              outbound_url: ""
+              token: ""
+              secret: ""
+    approval_policy: "on-request"
+    approvals_reviewer: "user"
+    sandbox_mode: "read-only"
+    features:
+      exec_permission_approvals: false
+      request_permissions_tool: false
+      network_proxy: false
+  default.yaml: |
+    main:
+      role: Forebrain Harness assistant
+      goal: Help the user using workspace context and skills
+      backstory: You are a careful, tool-using agent.
+      llm_providers:
+        - provider: openai
+          model: gpt-4o-mini
+          config:
+            api_key: "${OPENAI_API_KEY}"
+      sub_agents:
+        helper:
+          role: Sub-task helper
+          goal: Handle focused subtasks when invoked via tool
+          backstory: Concise specialist; inherit parent model when no llm_providers.

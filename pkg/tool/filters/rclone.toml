@@ -1,0 +1,81 @@
+[filters.rclone]
+description = "Strip rclone per-file transfer INFO lines; keep the statistics summary and errors."
+version = "1"
+match_command = '^rclone\s+(copy|sync|move|check|bisync)\b'
+match_output_select = [
+  '(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO\s+: ',
+]
+strip_lines_matching = [
+  '^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO\s+: .+: (Copied|Moved|Deleted|Skipped|Server side copied|Checking|Already exists)',
+  '^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO\s+: (Waiting for|There was nothing to transfer)',
+]
+
+[[tests.rclone]]
+name = "strips per-file lines, keeps stats summary"
+input = """
+2024/01/01 00:00:00 INFO  : file1.txt: Copied (new)
+2024/01/01 00:00:00 INFO  : file2.txt: Copied (new)
+2024/01/01 00:00:00 INFO  : Waiting for checks to finish
+2024/01/01 00:00:00 INFO  : Waiting for transfers to finish
+
+Transferred:          1.23 GiB / 1.23 GiB, 100%, 50.0 MiB/s, ETA 0s
+Checks:                 100 / 100, 100%
+Transferred:              10 / 10, 100%
+Elapsed time:          25s
+"""
+expected = """
+
+Transferred:          1.23 GiB / 1.23 GiB, 100%, 50.0 MiB/s, ETA 0s
+Checks:                 100 / 100, 100%
+Transferred:              10 / 10, 100%
+Elapsed time:          25s
+"""
+
+[[tests.rclone]]
+name = "preserves ERROR lines"
+input = """
+2024/01/01 00:00:00 INFO  : file1.txt: Copied (new)
+2024/01/01 00:00:00 ERROR : file2.txt: Failed to copy: permission denied
+2024/01/01 00:00:00 INFO  : file3.txt: Copied (new)
+
+Errors:                    1
+Elapsed time:          5s
+"""
+expected = """
+2024/01/01 00:00:00 ERROR : file2.txt: Failed to copy: permission denied
+
+Errors:                    1
+Elapsed time:          5s
+"""
+
+[[tests.rclone]]
+name = "6-file sync: per-file INFO lines dropped, stats block kept"
+input = """
+2024/01/01 00:00:00 INFO  : photo001.jpg: Copied (new)
+2024/01/01 00:00:01 INFO  : photo002.jpg: Copied (new)
+2024/01/01 00:00:02 INFO  : photo003.jpg: Copied (new)
+2024/01/01 00:00:03 INFO  : document1.pdf: Copied (new)
+2024/01/01 00:00:04 INFO  : document2.pdf: Copied (new)
+2024/01/01 00:00:05 INFO  : backup.tar.gz: Copied (new)
+2024/01/01 00:00:06 INFO  : Waiting for checks to finish
+
+Transferred:        123.45 MiB / 123.45 MiB, 100%, 20.0 MiB/s, ETA 0s
+Checks:                   0 / 0, -
+Transferred:             6 / 6, 100%
+Elapsed time:          6.2s
+"""
+expected = """
+Transferred:        123.45 MiB / 123.45 MiB, 100%, 20.0 MiB/s, ETA 0s
+Checks:                   0 / 0, -
+Transferred:             6 / 6, 100%
+Elapsed time:          6.2s
+"""
+
+# Internet (IP) protocols
+#
+# Updated from http://www.iana.org/assignments/protocol-numbers and other
+# sources.
+# New protocols will be added on request if they have been officially
+# assigned by IANA and are not historical.
+# If you need a huge list of used numbers please install the nmap package.
+

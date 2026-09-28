@@ -1,0 +1,87 @@
+[filters.psql]
+description = "Drop psql/pgcli separator rules and banner noise; keep header, rows, and row count."
+version = "5"
+match_command = '(?m)(^|[;&|]\s*)(?:[A-Za-z0-9_]+=\S+\s+)*(?:psql|pgcli)\b'
+match_output_select = [
+  '(?m)^\(\d+ rows?\)$',
+  '(?m)^SELECT \d+$',
+  '(?m)^-+\+-',
+  '(?m)^\+-+\+-',
+  '(?m)^\|[-+| ]+\|',
+  '(?m)^-\[ RECORD ',
+  '(?m)^\| id ',
+  '(?m)^\|[- ]+id ',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^[-+ ]+$',
+  '^[+|][-|+| ]+[+|]$',
+  '^\|[-+| ]+\|$',
+  '^Using local time zone ',
+  '^Use `set time zone ',
+  '^Warning: Input is not a terminal ',
+  '^Server: PostgreSQL ',
+  '^Version: ',
+  '^Home: https://pgcli.com',
+  '^Goodbye!$',
+  '^Time: \d',
+  '^\S+>\s*(Time:|Server:|Version:|Home:)?',
+]
+[[tests.psql]]
+name = "drops the separator rule, keeps header and rows"
+input = """ id |  name  | active
+----+--------+--------
+  1 | alice  | t
+  2 | bob    | f
+(2 rows)"""
+expected = """id |  name  | active
+  1 | alice  | t
+  2 | bob    | f
+(2 rows)"""
+
+[[tests.psql]]
+name = "pgcli table: drops border rules and banner, keeps rows and SELECT count"
+input = """Using local time zone Asia/Jerusalem (server uses UTC)
+Warning: Input is not a terminal (fd=0).
+mt_fly_cell_1> Server: PostgreSQL 16.13
++------+--------+
+| id   | name   |
+|------+--------|
+| d00d | alice  |
+| bae8 | bob    |
++------+--------+
+SELECT 2
+mt_fly_cell_1> Time: 0.454s
+
+Goodbye!
+"""
+expected = """| id   | name   |
+| d00d | alice  |
+| bae8 | bob    |
+SELECT 2
+"""
+
+[[tests.psql]]
+name = "pgcli syntax error survives banner stripping"
+input = """Warning: Input is not a terminal (fd=0).
+syntax error at or near "==="
+LINE 1: === bad input ===
+        ^
+SELECT 0
+"""
+expected = """syntax error at or near "==="
+LINE 1: === bad input ===
+        ^
+SELECT 0
+"""
+
+[[tests.psql]]
+name = "jsonb_pretty wide line truncated at 400 chars"
+input = """| rel | jsonb_pretty |
+| rel1 | {"artifacts":[{"name":"fly-service","payload":"padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"}]} |
+SELECT 1
+"""
+expected = """| rel | jsonb_pretty |
+| rel1 | {"artifacts":[{"name":"fly-service","payload":"padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding-padding"}]} |
+SELECT 1"""

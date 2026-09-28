@@ -1,0 +1,1206 @@
+# Forebrain Harness full example config.
+# This file is intentionally verbose and documents the current settings in internal/config.
+# Secret-like fields must use ${ENV_NAME} placeholders or stay empty, otherwise config.Load will reject the file.
+
+# Default: empty, which means "no explicit personality override"; runtime falls back to friendly.
+# Currently applies only to OpenAI models marked with SupportsPersonality in the model catalog:
+# gpt-5.5, gpt-5.4, gpt-5.4-mini, and gpt-5.3-codex. Other models ignore this setting.
+# Valid values in current code: friendly, pragmatic, none.
+personality: "pragmatic"
+
+# Default: none.
+# Example: local gateway HTTP and auth settings.
+approval_policy: "on-request"
+approvals_reviewer: "user"
+gateway:
+  # Default: 127.0.0.1:6060.
+  # Example: local HTTP listen address for the Forebrain Harness gateway.
+  http_addr: "127.0.0.1:6060"
+  # Default: [http://127.0.0.1:5173, http://localhost:5173, http://127.0.0.1:3000, http://localhost:3000].
+  # Example: browser origins allowed by CORS.
+  cors_origins:
+    - "http://127.0.0.1:5173"
+    - "http://localhost:5173"
+    - "http://127.0.0.1:3000"
+    - "http://localhost:3000"
+  # Default: none.
+  # Example: gateway auth settings.
+  auth:
+    # Default: token.
+    # Example: token auth for the control plane.
+    mode: "token"
+    # Default: empty.
+    # Example: token read from env.
+    token: "${FOREBRAIN_GATEWAY_TOKEN}"
+  # Default: none.
+  # Example: show gateway server banner logs.
+  banner: true
+  # Default: empty.
+  # Example: gateway banner text.
+  banner_text: "Forebrain Harness Gateway"
+  # Default: none.
+  # Example: enable gateway management endpoints.
+  manage_enable: true
+  # Default: none.
+  # Example: enable response gzip.
+  enable_response_gzip: true
+  # Default: none.
+  # Example: log inbound gateway requests.
+  log_req_enable: true
+  # Default: empty.
+  # Example: root path prefix.
+  route_root_path: "/"
+  # Default: empty.
+  # Example: write timeout duration.
+  write_timeout: "30s"
+  # Default: empty.
+  # Example: read timeout duration.
+  read_timeout: "30s"
+  # Default: empty.
+  # Example: idle timeout duration.
+  idle_timeout: "120s"
+  # Default: empty.
+  # Example: graceful shutdown timeout.
+  grace_timeout: "10s"
+  # Default: empty.
+  # Example: service name.
+  service_name: "forebrain"
+  # Default: empty.
+  # Example: service group.
+  service_group: "ai-platform"
+  # Default: empty.
+  # Example: service version.
+  service_version: "0.1.0"
+  # Default: empty.
+  # Example: log level.
+  log_level: "info"
+  # Default: empty.
+  # Example: log directory.
+  log_path: "./logs"
+  # Default: none.
+  # Example: include caller info in logs.
+  log_caller: false
+  # Default: none.
+  # Example: discard gateway logs.
+  log_discard: false
+
+# Default when omitted: workspace-write for a trusted Git project; read-only
+# for untrusted, unknown, or non-Git directories.
+# Example: explicit sandbox mode override for model-generated commands.
+sandbox_mode: "workspace-write"
+
+# Defaults: empty writable_roots, network disabled, and both temporary roots included.
+sandbox_workspace_write:
+  writable_roots: []
+  network_access: false
+  exclude_tmpdir_env_var: false
+  exclude_slash_tmp: false
+  # isolated (default) uses per-project Forebrain Harness caches and the host download
+  # cache as a read-only GOPROXY; shared directly exposes host Go caches;
+  # disabled leaves Go's environment unchanged.
+  go_cache_mode: "isolated"
+
+# Named permission profiles are optional. When used, default_permissions selects
+# one profile and sandbox_mode is not used. Built-ins are :read-only, :workspace,
+# and :danger-full-access. User profile names cannot start with a colon.
+#
+# default_permissions: "development"
+# permissions:
+#   development:
+#     description: "Workspace plus a shared cache"
+#     extends: ":workspace"
+#     workspace_roots:
+#       "../shared": true
+#     filesystem:
+#       # Default: unset. Set a positive depth to bound deny-glob expansion.
+#       glob_scan_max_depth: 4
+#       ":workspace_roots":
+#         ".": write
+#         "**/.env": deny
+#       "~/.cache/build/**": write
+#     network:
+#       # Default: false.
+#       enabled: false
+#       # Managed-proxy defaults: http://127.0.0.1:3128, SOCKS5 enabled at
+#       # http://127.0.0.1:8081, SOCKS5 UDP enabled, upstream proxy allowed,
+#       # full mode, local binding disabled, and dangerous allowances disabled.
+#       proxy_url: "http://127.0.0.1:3128"
+#       enable_socks5: true
+#       socks_url: "http://127.0.0.1:8081"
+#       enable_socks5_udp: true
+#       allow_upstream_proxy: true
+#       dangerously_allow_non_loopback_proxy: false
+#       dangerously_allow_all_unix_sockets: false
+#       mode: "full"
+#       domains:
+#         "example.com": allow
+#         "blocked.example": deny
+#       unix_sockets:
+#         "/var/run/example.sock": allow
+#       allow_local_binding: false
+
+# Permission-expansion and managed-network features default to false.
+features:
+  exec_permission_approvals: false
+  request_permissions_tool: false
+  # A boolean enables the managed proxy with profile/default settings. The
+  # object form accepts enabled plus the proxy_url, SOCKS5, mode, domains,
+  # unix_sockets, local-binding, upstream-proxy, and dangerous-listener fields
+  # shown under a permission profile above.
+  network_proxy: false
+  # Default: false. Enables memory use, generation, tools, and /memories.
+  memories: false
+
+# Windows sandbox selection defaults to disabled. When enabled, private desktop defaults to true.
+windows:
+  sandbox_private_desktop: true
+
+# Default: automatic and manual replacement-history compaction.
+compact:
+  # Default: empty (the model's automatic-compaction limit, at most 90% of its context window).
+  # Add model_auto_compact_token_limit with a smaller positive threshold when earlier compaction is desired.
+  # Default: total. Also accepts body_after_prefix.
+  model_auto_compact_token_limit_scope: "total"
+  # Default: false. Local summarization builds a checkpoint out of plain messages,
+  # so a session can keep switching provider and model across rounds.
+  # Provider-native compaction instead stores an opaque item only the issuing
+  # provider can replay: after switching provider that checkpoint is unusable and
+  # the session falls back to re-reading its whole history every round.
+  # Enable this only when the session stays on a single provider.
+  remote_compaction: false
+  # Default: true. Only consulted when remote_compaction is enabled.
+  # OpenAI Responses uses the normal /responses endpoint with a compaction trigger.
+  # Set false only when the provider requires the legacy /responses/compact protocol.
+  remote_compaction_v2: true
+
+# Default: none.
+# Example: agent defaults and named definitions.
+agents:
+  # Default: none.
+  # Example: defaults inherited by agent definitions.
+  defaults:
+    # Default: none.
+    # Example: context injection and bootstrap settings.
+    context_inject:
+      # Workspace rules are always injected via the pre-hook and always chain
+      # up the directory tree (git-root → CWD); rule injection is no longer
+      # configurable.
+      # Default: none; helper callers provide their own fallback.
+      # Example: cap rendered rule chars before pre-hook injection.
+      max_pre_hook_rules_chars: 8000
+      # Default: none.
+      # Example: explicit model context window in tokens.
+      model_context_tokens: 128000
+      # Default: 8000.
+      # Example: warning threshold for remaining tokens.
+      warn_remaining_tokens: 8000
+    # Default: none.
+    # Example: declarative MCP server registry used by agents.
+    mcp_servers:
+      - # Default: empty.
+        # Example: logical server name.
+        name: "demo_stdio"
+        # Default: empty.
+        # Example: transport kind such as stdio or sse.
+        transport: "stdio"
+        # Default: empty.
+        # Example: URL for non-stdio transports; kept here as a reference even for stdio.
+        url: "http://127.0.0.1:8787/sse"
+        # Default: none.
+        # Example: HTTP headers for network transports.
+        headers:
+          Authorization: "Bearer ${MCP_DEMO_HTTP_TOKEN}"
+          X-Workspace: "forebrain"
+        # Default: none.
+        # Example: OAuth token source settings for this MCP server.
+        oauth:
+          # Default: empty; runtime infers from access_token / refresh_token / client_id+token_url when omitted.
+          # Example: current accepted modes are none, static, bearer, refresh, client_credentials.
+          mode: "refresh"
+          # Default: empty.
+          # Example: cached access token from env.
+          access_token: "${MCP_DEMO_ACCESS_TOKEN}"
+          # Default: empty.
+          # Example: oauth token type.
+          token_type: "Bearer"
+          # Default: empty.
+          # Example: oauth client id.
+          client_id: "demo-client-id"
+          # Default: empty.
+          # Example: oauth client secret from env.
+          client_secret: "${MCP_DEMO_CLIENT_SECRET}"
+          # Default: empty.
+          # Example: token endpoint.
+          token_url: "https://auth.example.com/oauth/token"
+          # Default: empty.
+          # Example: authorization endpoint.
+          authorization_url: "https://auth.example.com/oauth/authorize"
+          # Default: empty.
+          # Example: redirect URL.
+          redirect_url: "http://127.0.0.1:8787/callback"
+          # Default: empty.
+          # Example: refresh token from env.
+          refresh_token: "${MCP_DEMO_REFRESH_TOKEN}"
+          # Default: none.
+          # Example: oauth scopes.
+          scopes:
+            - "read"
+            - "write"
+        # Default: false when omitted.
+        # Example: disable standalone SSE fallback.
+        disable_standalone_sse: false
+        # Default: empty.
+        # Example: stdio command for local MCP launch; use an absolute path when expected_command_sha256 is set.
+        command: "/absolute/path/to/npx"
+        # Default: none.
+        # Example: stdio args.
+        args:
+          - "-y"
+          - "@modelcontextprotocol/server-everything"
+        # Default: none.
+        # Example: environment variables passed to the MCP child process.
+        env:
+          MCP_TOKEN: "${MCP_TOKEN}"
+          LOG_LEVEL: "info"
+        # Default: false when omitted.
+        # Example: inherit parent env into the MCP child process.
+        inherit_parent_env: true
+        # Default: empty.
+        # Example: pinned command binary hash; when set, command must be an absolute path.
+        expected_command_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      - # Default: empty.
+        # Example: second server demonstrating SSE transport.
+        name: "demo_sse"
+        # Default: empty.
+        # Example: SSE transport.
+        transport: "sse"
+        # Default: empty.
+        # Example: SSE endpoint.
+        url: "https://mcp.example.com/events"
+        # Default: none.
+        # Example: auth headers.
+        headers:
+          Authorization: "Bearer ${MCP_SSE_TOKEN}"
+        # Default: none.
+        # Example: OAuth token source settings for this MCP server.
+        oauth:
+          # Default: empty; runtime infers from access_token / refresh_token / client_id+token_url when omitted.
+          # Example: explicitly disable OAuth for this server.
+          mode: "none"
+          # Default: empty.
+          # Example: unused placeholder.
+          access_token: "${MCP_SSE_ACCESS_TOKEN}"
+          # Default: empty.
+          # Example: token type placeholder.
+          token_type: "Bearer"
+          # Default: empty.
+          # Example: unused placeholder.
+          client_id: "mcp-sse-client"
+          # Default: empty.
+          # Example: unused placeholder.
+          client_secret: "${MCP_SSE_CLIENT_SECRET}"
+          # Default: empty.
+          # Example: unused placeholder.
+          token_url: "https://mcp.example.com/oauth/token"
+          # Default: empty.
+          # Example: unused placeholder.
+          authorization_url: "https://mcp.example.com/oauth/authorize"
+          # Default: empty.
+          # Example: unused placeholder.
+          redirect_url: "http://127.0.0.1:9999/callback"
+          # Default: empty.
+          # Example: unused placeholder.
+          refresh_token: "${MCP_SSE_REFRESH_TOKEN}"
+          # Default: none.
+          # Example: unused placeholder.
+          scopes:
+            - "events"
+        # Default: false when omitted.
+        # Example: disable standalone SSE bootstrap.
+        disable_standalone_sse: true
+        # Default: empty.
+        # Example: unused placeholder for non-stdio transport.
+        command: "unused-for-sse"
+        # Default: none.
+        # Example: unused placeholder args.
+        args:
+          - "unused"
+        # Default: none.
+        # Example: unused placeholder env map.
+        env:
+          UNUSED_ENV: "1"
+        # Default: false when omitted.
+        # Example: unused placeholder for sse transport.
+        inherit_parent_env: false
+        # Default: empty.
+        # Example: unused placeholder hash.
+        expected_command_sha256: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    # Default: none.
+    # Example: optional tool-classifier settings.
+    tool_classifier:
+      # Default: none/off unless set by caller.
+      # Example: enable allow/soft-deny classification lists.
+      enabled: true
+      # Default: none.
+      # Example: explicitly allowed tool ids.
+      allow:
+        - "read_file"
+        - "shell"
+      # Default: none.
+      # Example: tools that should trigger soft-deny guidance.
+      soft_deny:
+        - "rm"
+        - "curl"
+      # Default: none.
+      # Example: env vars exposed to the classifier.
+      environment:
+        - "HOME"
+        - "PATH"
+    # Default: none.
+    # Example: input/output/retrieval guardrails.
+    guardrails:
+      # Default: none.
+      # Example: input filtering guardrails.
+      input:
+        # Default: 200000.
+        # Example: max input runes before truncation or rejection logic.
+        max_runes: 200000
+        # Default: none.
+        # Example: hard-block substrings.
+        block_substrings:
+          - "DROP TABLE"
+          - "rm -rf /"
+      # The input, output, and retrieval rails are always on and cannot be
+      # disabled; only the tunables below are configurable.
+      # Default: none.
+      # Example: retrieval guardrails.
+      retrieval:
+        # Default: 120000.
+        # Example: max retrieval chunk size in runes.
+        max_chunk_runes: 120000
+    # Default: none.
+    # Example: token estimation settings.
+    token_estimate:
+      # Default: empty; runtime falls back to first active model or cl100k_base.
+      # Example: explicit tokenizer encoding.
+      encoding: "cl100k_base"
+      # Default: empty; runtime infers from active agent provider when possible.
+      # Example: model used for token counting heuristics.
+      model: "gpt-4.1"
+    # Default: none.
+    # Example: web search provider settings.
+    web_search:
+      # Default: empty behaves like auto in current code.
+      # Example: auto, tavily, brave, or baidu.
+      provider: "auto"
+      # Default: none.
+      # Example: Tavily-specific settings.
+      tavily:
+        # Default: empty.
+        # Example: Tavily API key from env.
+        api_key: "${TAVILY_API_KEY}"
+        # Default: basic unless explicitly set to advanced.
+        # Example: Tavily search depth.
+        search_depth: "advanced"
+      # Default: none.
+      # Example: Brave-specific settings.
+      brave:
+        # Default: empty.
+        # Example: Brave Search API key from env.
+        api_key: "${BRAVE_SEARCH_API_KEY}"
+      # Default: none.
+      # Example: Baidu-specific settings.
+      baidu:
+        # Default: empty.
+        # Example: Baidu web search API key from env.
+        api_key: "${BAIDU_WEB_SEARCH_API_KEY}"
+    # Default: none.
+    # Example: web_fetch tool settings.
+    web_fetch:
+      # Default: false, so web_fetch reaches public hosts only.
+      # Example: true lets it reach loopback and RFC1918 hosts, for fetching a
+      # local dev server. This is an operator setting and is not exposed to the
+      # model, because fetched pages can carry instructions. Link-local and
+      # cloud metadata addresses (169.254.169.254, metadata.google.internal)
+      # stay blocked either way, and every private fetch still asks for
+      # approval.
+      allow_private_ip: false
+  # Default: none.
+  # Example: named agent definitions.
+  definitions:
+    # Default: auto-created when omitted.
+    # Example: primary coding agent definition.
+    main:
+      # Default: Forebrain Harness assistant when the main definition is auto-created.
+      # Example: primary agent role.
+      role: "Forebrain Harness assistant"
+      # Default: Help the user using workspace context and skills when auto-created.
+      # Example: primary agent goal.
+      goal: "Help the user using workspace context and skills"
+      # Default: You are a careful, tool-using agent. when auto-created.
+      # Example: backstory injected into prompts.
+      backstory: "You are a careful, tool-using agent."
+      # Default: none.
+      # Example: primary LLM provider chain.
+      llm_providers:
+        - # Default: empty.
+          # Example: provider name.
+          provider: "openai"
+          # Default: empty.
+          # Example: model name.
+          model: "gpt-4.1"
+          # Default: empty; env overrides also apply.
+          # Example: provider API key from env.
+          api_key: "${OPENAI_API_KEY}"
+          # Default: empty; env overrides also apply.
+          # Example: OpenAI-compatible base URL.
+          base_url: "https://api.openai.com"
+          # Default: empty.
+          # Example: API path.
+          api_path: "/v1/chat/completions"
+          # Default: none.
+          # Example: provider-native JSON object merged into the request body.
+          params:
+            temperature: 0.2
+            max_output_tokens: 4096
+            top_p: 1
+            reasoning:
+              effort: xhigh
+      # Default: none.
+      # Example: this primary agent's delivery channels. Channels are per
+      # primary agent: an inbound message from one of these bots starts a
+      # session that belongs to this agent, and another primary agent
+      # configures its own, separate accounts under its own definition.
+      # Secrets are referenced through agent-scoped env names so two agents
+      # running the same kind of channel cannot share one variable.
+      channels:
+        # Default: none.
+        # Example: WeCom primary callback integration.
+        wecom:
+          # Default: false.
+          # Example: enable enterprise WeCom callback handling.
+          enabled: false
+          # Default: empty.
+          # Example: channel callback token from env.
+          token: "${FOREBRAIN_MAIN_WECOM_TOKEN}"
+          # Default: empty.
+          # Example: WeCom encoding AES key from env.
+          encoding_aes_key: "${FOREBRAIN_MAIN_WECOM_ENCODING_AES_KEY}"
+          # Default: empty.
+          # Example: enterprise corp id.
+          corp_id: "ww1234567890abcdef"
+          # Default: empty.
+          # Example: enterprise corp secret from env.
+          corp_secret: "${FOREBRAIN_MAIN_WECOM_CORP_SECRET}"
+          # Default: 0.
+          # Example: enterprise application id.
+          agent_id: 1000002
+          # Default: /wecom/callback.
+          # Example: inbound callback path exposed by Forebrain Harness.
+          callback_path: "/wecom/callback"
+
+        # Default: none.
+        # Example: alternate WeCom callback integration.
+        wecom_callback:
+          # Default: false.
+          # Example: enable the alternate WeCom callback surface.
+          enabled: false
+          # Default: empty.
+          # Example: callback token from env.
+          token: "${FOREBRAIN_MAIN_WECOM_CALLBACK_TOKEN}"
+          # Default: empty.
+          # Example: callback AES key from env.
+          encoding_aes_key: "${FOREBRAIN_MAIN_WECOM_CALLBACK_ENCODING_AES_KEY}"
+          # Default: empty.
+          # Example: callback corp id.
+          corp_id: "wwfedcba0987654321"
+          # Default: empty.
+          # Example: callback corp secret from env.
+          corp_secret: "${FOREBRAIN_MAIN_WECOM_CALLBACK_CORP_SECRET}"
+          # Default: 0.
+          # Example: callback agent id.
+          agent_id: 1000003
+          # Default: /wecom_callback/callback.
+          # Example: alternate callback path.
+          callback_path: "/wecom_callback/callback"
+
+        # Default: none.
+        # Example: Telegram integration.
+        telegram:
+          # Default: false.
+          # Example: enable Telegram bot ingress.
+          enabled: false
+          # Default: empty.
+          # Example: Telegram bot token from env.
+          bot_token: "${FOREBRAIN_MAIN_TELEGRAM_BOT_TOKEN}"
+
+        # Default: none.
+        # Example: Discord integration.
+        discord:
+          # Default: false.
+          # Example: enable Discord bot ingress.
+          enabled: false
+          # Default: empty.
+          # Example: Discord bot token from env.
+          bot_token: "${FOREBRAIN_MAIN_DISCORD_BOT_TOKEN}"
+
+        # Default: none.
+        # Example: Slack integration.
+        slack:
+          # Default: false.
+          # Example: enable Slack channel integration.
+          enabled: false
+          # Default: /channels/slack/inbound.
+          # Example: inbound webhook route.
+          inbound_path: "/channels/slack/inbound"
+          # Default: empty.
+          # Example: outbound bridge URL.
+          outbound_url: "https://slack-bridge.example.com/outbound"
+          # Default: empty.
+          # Example: Slack bot token from env.
+          bot_token: "${FOREBRAIN_MAIN_SLACK_BOT_TOKEN}"
+          # Default: empty.
+          # Example: Slack signing secret from env.
+          secret: "${FOREBRAIN_MAIN_SLACK_SECRET}"
+
+        # Default: none.
+        # Example: WhatsApp integration.
+        whatsapp:
+          # Default: false.
+          # Example: enable WhatsApp bridge integration.
+          enabled: false
+          # Default: /channels/whatsapp/inbound.
+          # Example: inbound webhook route.
+          inbound_path: "/channels/whatsapp/inbound"
+          # Default: http://127.0.0.1:3000.
+          # Example: outbound bridge URL.
+          outbound_url: "http://127.0.0.1:3000"
+          # Default: empty.
+          # Example: WhatsApp token from env.
+          token: "${FOREBRAIN_MAIN_WHATSAPP_TOKEN}"
+          # Default: empty.
+          # Example: WhatsApp secret from env.
+          secret: "${FOREBRAIN_MAIN_WHATSAPP_SECRET}"
+
+        # Default: none.
+        # Example: Signal integration.
+        signal:
+          # Default: false.
+          # Example: enable Signal bridge integration.
+          enabled: false
+          # Default: empty.
+          # Example: outbound bridge URL.
+          outbound_url: "https://signal-bridge.example.com/outbound"
+          # Default: empty.
+          # Example: Signal token from env.
+          token: "${FOREBRAIN_MAIN_SIGNAL_TOKEN}"
+
+        # Default: none.
+        # Example: Mattermost integration.
+        mattermost:
+          # Default: false.
+          # Example: enable Mattermost bridge integration.
+          enabled: false
+          # Default: empty.
+          # Example: outbound bridge URL.
+          outbound_url: "https://mattermost.example.com/hooks/outbound"
+          # Default: empty.
+          # Example: Mattermost token from env.
+          token: "${FOREBRAIN_MAIN_MATTERMOST_TOKEN}"
+
+        # Default: none.
+        # Example: Matrix integration.
+        matrix:
+          # Default: false.
+          # Example: enable Matrix bridge integration.
+          enabled: false
+          # Default: empty.
+          # Example: outbound bridge URL.
+          outbound_url: "https://matrix.example.com/outbound"
+          # Default: empty.
+          # Example: Matrix token from env.
+          token: "${FOREBRAIN_MAIN_MATRIX_TOKEN}"
+
+        # Default: none.
+        # Example: Home Assistant integration.
+        homeassistant:
+          # Default: false.
+          # Example: enable Home Assistant bridge integration.
+          enabled: false
+          # Default: http://homeassistant.local:8123.
+          # Example: Home Assistant base URL.
+          outbound_url: "http://homeassistant.local:8123"
+          # Default: empty.
+          # Example: Home Assistant access token from env.
+          token: "${FOREBRAIN_MAIN_HOMEASSISTANT_TOKEN}"
+
+        # Default: none.
+        # Example: Email integration.
+        email:
+          # Default: false.
+          # Example: enable email ingress/egress.
+          enabled: false
+          # Default: /channels/email/inbound.
+          # Example: inbound route.
+          inbound_path: "/channels/email/inbound"
+          # Default: empty.
+          # Example: outbound gateway URL.
+          outbound_url: "https://mail-bridge.example.com/outbound"
+          # Default: empty.
+          # Example: email channel token from env.
+          token: "${FOREBRAIN_MAIN_EMAIL_CHANNEL_TOKEN}"
+          # Default: empty.
+          # Example: email channel secret from env.
+          secret: "${FOREBRAIN_MAIN_EMAIL_CHANNEL_SECRET}"
+
+        # Default: none.
+        # Example: SMS integration.
+        sms:
+          # Default: false.
+          # Example: enable SMS ingress/egress.
+          enabled: false
+          # Default: /channels/sms/inbound.
+          # Example: inbound route.
+          inbound_path: "/channels/sms/inbound"
+          # Default: empty.
+          # Example: outbound SMS bridge URL.
+          outbound_url: "https://sms-bridge.example.com/outbound"
+          # Default: empty.
+          # Example: SMS channel token from env.
+          token: "${FOREBRAIN_MAIN_SMS_CHANNEL_TOKEN}"
+          # Default: empty.
+          # Example: SMS channel secret from env.
+          secret: "${FOREBRAIN_MAIN_SMS_CHANNEL_SECRET}"
+
+        # Default: none.
+        # Example: generic webhook integration.
+        webhook:
+          # Default: false.
+          # Example: enable generic webhook ingestion.
+          enabled: false
+          # Default: /channels/webhook/inbound.
+          # Example: inbound route.
+          inbound_path: "/channels/webhook/inbound"
+          # Default: empty.
+          # Example: outbound callback URL.
+          outbound_url: "https://hooks.example.com/forebrain/outbound"
+          # Default: empty.
+          # Example: webhook token from env.
+          token: "${FOREBRAIN_MAIN_WEBHOOK_TOKEN}"
+          # Default: empty.
+          # Example: webhook secret from env.
+          secret: "${FOREBRAIN_MAIN_WEBHOOK_SECRET}"
+
+        # Default: none.
+        # Example: BlueBubbles integration.
+        bluebubbles:
+          # Default: false.
+          # Example: enable BlueBubbles bridge integration.
+          enabled: false
+          # Default: /channels/bluebubbles/inbound.
+          # Example: inbound route.
+          inbound_path: "/channels/bluebubbles/inbound"
+          # Default: empty.
+          # Example: outbound bridge URL.
+          outbound_url: "https://bluebubbles.example.com/outbound"
+          # Default: empty.
+          # Example: BlueBubbles token from env.
+          token: "${FOREBRAIN_MAIN_BLUEBUBBLES_TOKEN}"
+          # Default: empty.
+          # Example: BlueBubbles secret from env.
+          secret: "${FOREBRAIN_MAIN_BLUEBUBBLES_SECRET}"
+
+        # Default: none.
+        # Example: Weixin integration.
+        weixin:
+          # Default: false.
+          # Example: enable Weixin bridge integration.
+          enabled: false
+          # Default: https://ilinkai.weixin.qq.com.
+          # Example: Weixin service base URL.
+          base_url: "https://ilinkai.weixin.qq.com"
+          # Default: empty.
+          # Example: CDN base URL for media assets.
+          cdn_base_url: "https://cdn.example.com/weixin"
+          # Default: empty.
+          # Example: Weixin token from env.
+          token: "${FOREBRAIN_MAIN_WEIXIN_TOKEN}"
+          # Default: empty.
+          # Example: Weixin account id.
+          account_id: "wx_account_demo"
+          # Default: empty.
+          # Example: bot flavor string.
+          bot_type: "assistant"
+          # Default: empty.
+          # Example: bridge version tag.
+          channel_version: "v1"
+          # Default: empty.
+          # Example: internal route tag for multiplexing.
+          route_tag: "default"
+          # Default: false.
+          # Example: decode silk voice payloads.
+          silk_voice_decode: true
+          # Default: open.
+          # Example: direct-message access policy.
+          dm_policy: "open"
+          # Default: none.
+          # Example: allowlist of sender ids or suffixes.
+          allow_from:
+            - "@example.com"
+
+        # Default: none.
+        # Example: Feishu integration.
+        feishu:
+          # Default: false.
+          # Example: enable Feishu integration.
+          enabled: false
+          # Default: empty.
+          # Example: Feishu app id.
+          app_id: "cli_a1b2c3d4e5"
+          # Default: empty.
+          # Example: Feishu app secret from env.
+          app_secret: "${FOREBRAIN_MAIN_FEISHU_APP_SECRET}"
+          # Default: feishu.
+          # Example: domain selector.
+          domain: "feishu"
+          # Default: websocket.
+          # Example: connection mode.
+          connection_mode: "websocket"
+          # Default: allowlist.
+          # Example: group policy.
+          group_policy: "allowlist"
+          # Default: none.
+          # Example: permitted Feishu group identifiers.
+          group_allow_from:
+            - "ops-room"
+
+        # Default: none.
+        # Example: DingTalk integration.
+        dingtalk:
+          # Default: false.
+          # Example: enable DingTalk integration.
+          enabled: false
+          # Default: empty.
+          # Example: DingTalk client id.
+          client_id: "ding-client-id"
+          # Default: empty.
+          # Example: DingTalk client secret from env.
+          client_secret: "${FOREBRAIN_MAIN_DINGTALK_CLIENT_SECRET}"
+          # Default: open.
+          # Example: direct-message access policy.
+          dm_policy: "open"
+          # Default: open.
+          # Example: group access policy.
+          group_policy: "open"
+          # Default: none.
+          # Example: sender allowlist.
+          allow_from:
+            - "alice"
+          # Default: none.
+          # Example: group allowlist.
+          group_allow_from:
+            - "eng-alerts"
+
+        # Default: none.
+        # Example: QQ integration.
+        qq:
+          # Default: false.
+          # Example: enable QQ integration.
+          enabled: false
+          # Default: empty.
+          # Example: QQ app id.
+          app_id: "qq-app-id"
+          # Default: empty.
+          # Example: QQ client secret from env.
+          client_secret: "${FOREBRAIN_MAIN_QQ_CLIENT_SECRET}"
+          # Default: none.
+          # Example: sender allowlist.
+          allow_from:
+            - "qq-user-10001"
+    # Default: falls back to the "main" agent's providers when omitted.
+    # Example: every built-in typed subagent — general-purpose, explore, plan,
+    # and verification, the four names agent.PublicTypeNames() returns — can run
+    # on its own provider, model and request params, configured here under its
+    # own type name. A type with no llm_providers entry transparently uses the
+    # main agent's LLM, so you only configure the ones you want to move.
+    #
+    # The provider chain and params are read exactly like the main agent's: the
+    # first entry is the model the type runs on, and params is the same
+    # provider-native JSON object, so reasoning effort is per type as well. The
+    # subagent's own alt-screen view names the model and effort it resolved to,
+    # which is how you confirm a type actually moved.
+    #
+    # Typical split: read-only exploration on a cheap, fast model; planning and
+    # verification on a stronger one; the main agent untouched.
+    explore:
+      llm_providers:
+        - provider: "openai"
+          model: "gpt-4.1-mini"
+          api_key: "${OPENAI_API_KEY}"
+          base_url: "https://api.openai.com"
+          api_path: "/v1/chat/completions"
+          # Default: none.
+          # Example: exploration is broad and shallow, so it reads cheaply.
+          params:
+            temperature: 0
+            reasoning:
+              effort: low
+    # Default: falls back to the "main" agent's providers when omitted.
+    # Example: plan subagent with a dedicated provider.
+    plan:
+      llm_providers:
+        - provider: "openai"
+          model: "gpt-4.1"
+          api_key: "${OPENAI_API_KEY}"
+          base_url: "https://api.openai.com"
+          api_path: "/v1/chat/completions"
+          # Default: none.
+          # Example: planning is where reasoning effort pays for itself.
+          params:
+            temperature: 0.2
+            reasoning:
+              effort: high
+    # Default: falls back to the "main" agent's providers when omitted.
+    # Example: verification subagent with a dedicated provider.
+    verification:
+      llm_providers:
+        - provider: "openai"
+          model: "gpt-4.1"
+          api_key: "${OPENAI_API_KEY}"
+          base_url: "https://api.openai.com"
+          api_path: "/v1/chat/completions"
+          # Default: none.
+          # Example: verification judges finished work, so it reasons but does
+          # not need to be creative.
+          params:
+            temperature: 0
+            reasoning:
+              effort: high
+    # Default: falls back to the "main" agent's providers when omitted.
+    # Example: general-purpose subagent with a dedicated provider. This is the
+    # type an unnamed subagent falls back to, so keep it close to the main
+    # agent's model rather than a cheap one.
+    general-purpose:
+      llm_providers:
+        - provider: "openai"
+          model: "gpt-4.1"
+          api_key: "${OPENAI_API_KEY}"
+          base_url: "https://api.openai.com"
+          api_path: "/v1/chat/completions"
+          # Default: none.
+          # Example: same shape as the main agent's params.
+          params:
+            temperature: 0.2
+            reasoning:
+              effort: medium
+    # Default: none.
+    # Example: secondary review-focused agent definition.
+    reviewer:
+      # Default: none.
+      # Example: secondary agent role.
+      role: "Reviewer"
+      # Default: none.
+      # Example: secondary agent goal.
+      goal: "Review changes for bugs, regressions, and missing tests"
+      # Default: none.
+      # Example: secondary agent backstory.
+      backstory: "You prioritize findings over summaries."
+      # Default: none.
+      # Example: reviewer LLM provider chain.
+      llm_providers:
+        - # Default: empty.
+          # Example: provider name.
+          provider: "openai"
+          # Default: empty.
+          # Example: model name.
+          model: "gpt-4.1-mini"
+          # Default: empty; env overrides also apply.
+          # Example: provider API key from env.
+          api_key: "${OPENAI_API_KEY}"
+          # Default: empty; env overrides also apply.
+          # Example: OpenAI-compatible base URL.
+          base_url: "https://api.openai.com"
+          # Default: empty.
+          # Example: API path.
+          api_path: "/v1/chat/completions"
+          # Default: none.
+          # Example: top-level params alias accepted by current unmarshal code; merged into config.params when config.params is empty.
+          params:
+            temperature: 0
+            max_tokens: 2048
+# Default: none.
+# Example: persistent host hooks by lifecycle event.
+hooks:
+  # Default: no matchers.
+  # Example: hook chain before tool execution.
+  PreToolUse:
+    - # Default: empty.
+      # Example: sample matcher that is unlikely to fire accidentally.
+      matcher: "sample_tool(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - # Default: empty.
+          # Example: command hook.
+          type: "command"
+          # Default: empty.
+          # Example: benign command to run.
+          command: "printf pretool"
+          # Default: empty.
+          # Example: permission-rule style condition.
+          if: "sample_tool(*)"
+          # Default: empty.
+          # Example: shell interpreter.
+          shell: "bash"
+          # Default: 0.
+          # Example: timeout in seconds.
+          timeout: 3
+          # Default: empty.
+          # Example: short status text.
+          status_message: "pre tool sample"
+          # Default: false.
+          # Example: run only once.
+          once: false
+          # Default: false.
+          # Example: async toggle.
+          async: false
+          # Default: false.
+          # Example: async rewake toggle.
+          async_rewake: false
+          # Default: empty.
+          # Example: model id used by prompt/agent hook hosts that honor it.
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "pretool"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+            - "PATH"
+  # Default: no matchers.
+  # Example: hook chain after successful tool execution.
+  PostToolUse:
+    - matcher: "sample_tool(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "prompt"
+          # Default: empty.
+          # Example: prompt sent to the host prompt-hook engine.
+          prompt: "Summarize the sample tool result."
+          if: "sample_tool(*)"
+          timeout: 3
+          status_message: "post tool sample"
+          once: false
+          async: false
+          async_rewake: false
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "posttool"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+  # Default: no matchers.
+  # Example: hook chain after failed tool execution.
+  PostToolUseFailure:
+    - matcher: "sample_tool(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "agent"
+          prompt: "Review the failed sample tool call and suggest the next action."
+          if: "sample_tool(*)"
+          timeout: 5
+          status_message: "post failure sample"
+          once: false
+          async: false
+          async_rewake: false
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "postfailure"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+  # Default: no matchers.
+  # Example: hook chain for general notifications.
+  Notification:
+    - matcher: "notify(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "http"
+          # Default: empty.
+          # Example: webhook target.
+          url: "http://127.0.0.1:9999/hooks/sample"
+          if: "notify(*)"
+          timeout: 3
+          status_message: "notification sample"
+          once: false
+          async: true
+          async_rewake: true
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for the HTTP hook call.
+          headers:
+            Authorization: "Bearer ${HOOK_NOTIFICATION_TOKEN}"
+            X-Sample: "notification"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+  # Default: no matchers.
+  # Example: hook chain when the user submits input.
+  UserPromptSubmit:
+    - matcher: "user_prompt(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "command"
+          command: "printf userprompt"
+          if: "user_prompt(*)"
+          shell: "bash"
+          timeout: 3
+          status_message: "user prompt sample"
+          once: false
+          async: false
+          async_rewake: false
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "userprompt"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+    # caveman-stats 钩子。
+    # 作用：
+    #   1) /caveman-stats          —— 拦截命令，运行 caveman-stats.py 读取
+    #      $FOREBRAIN_HOME/state/forebrain.state.sqlite 中 fb_runs 表的真实 token
+    #      用量与本会话 transcript JSONL 的轮数，返回 {decision:"block"} 把统计
+    #      横幅直接渲染给用户，不消耗模型调用。
+    #   2) /caveman <mode>          —— 写 $FOREBRAIN_HOME/state/.caveman-active 标记
+    #      文件（lite|full|ultra|wenyan*），切换 caveman 模式。
+    #      自然语言短语 "activate caveman" / "stop caveman" / "normal mode" 也识别。
+    #   3) 当标记文件存在时         —— 每个用户回合通过 hookSpecificOutput.additionalContext
+    #      重注 caveman 风格规则，避免模型多轮后丢失约束。
+    # 实现脚本由 systemskills 在启动时解包到 $FOREBRAIN_HOME/skills/.system/caveman/caveman-stats/scripts/。
+    # 依赖 python3（macOS/Linux 自带）和 sqlite3 标准库；不需要额外安装。
+    - matcher: "*"
+      hooks:
+        - type: "command"
+          command: "python3 $FOREBRAIN_HOME/skills/.system/caveman/caveman-stats/scripts/caveman-mode-tracker.py"
+          shell: "bash"
+          # 钩子需快速返回避免阻塞用户输入；5 秒足够本地 sqlite + 文件读写。
+          timeout: 5
+          status_message: "caveman mode tracker"
+          once: false
+          async: false
+          async_rewake: false
+          # 允许脚本读取 FOREBRAIN_HOME 解析 sqlite 与状态文件路径；HOME/PATH 用于子进程定位 python3。
+          allowed_env_vars:
+            - "FOREBRAIN_HOME"
+            - "HOME"
+            - "PATH"
+  # Default: no matchers.
+  # Example: hook chain on session start.
+  SessionStart:
+    - matcher: "session(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "prompt"
+          prompt: "Welcome the user and summarize the workspace state."
+          if: "session(*)"
+          timeout: 5
+          status_message: "session start sample"
+          once: true
+          async: false
+          async_rewake: false
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "sessionstart"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+  # Default: no matchers.
+  # Example: hook chain when a run stops.
+  Stop:
+    - matcher: "stop(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "agent"
+          prompt: "Summarize the final state and next action."
+          if: "stop(*)"
+          timeout: 5
+          status_message: "stop sample"
+          once: true
+          async: false
+          async_rewake: false
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "stop"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+  # Default: no matchers.
+  # Example: hook chain when a subagent stops.
+  SubagentStop:
+    - matcher: "subagent(*)"
+      # Default: none.
+      # Example: hooks executed for the matcher.
+      hooks:
+        - type: "prompt"
+          prompt: "Summarize the subagent outcome."
+          if: "subagent(*)"
+          timeout: 5
+          status_message: "subagent stop sample"
+          once: false
+          async: false
+          async_rewake: false
+          model: "gpt-4.1-mini"
+          # Default: none.
+          # Example: outbound headers for HTTP-capable hook runners.
+          headers:
+            X-Sample: "subagentstop"
+          # Default: none.
+          # Example: env allowlist forwarded to the hook process.
+          allowed_env_vars:
+            - "HOME"
+
+# Memory data is stored under <forebrain_home>/memories.
+memories:
+  # Default: true. Surface saved memories to following threads.
+  use_memories: true
+  # Default: true. Extract and consolidate memories from eligible threads.
+  generate_memories: true
+  # Default: false. Register memories_add_ad_hoc_note, memories_list,
+  # memories_read, and memories_search.
+  dedicated_tools: false
+  # Default: false. Exclude a thread from generation after external context use.
+  disable_on_external_context: false
+  # Defaults and accepted ranges are enforced when the config is loaded.
+  max_raw_memories_for_consolidation: 256
+  max_unused_days: 30
+  max_rollout_age_days: 10
+  max_rollouts_per_startup: 2
+  min_rollout_idle_hours: 6
+  min_rate_limit_remaining_percent: 25
+  # Empty uses the active provider's default model.
+  extract_model: ""
+  consolidation_model: ""

@@ -1,0 +1,27 @@
+[filters.od]
+description = "Truncate od hex dumps to a useful head."
+version = "1"
+match_command = '(^|[;&|/ ])od(\s|$)'
+match_output_select = [
+  '(?m)^[0-9a-f]{6,7} ([0-9a-f]{2} )+',
+]
+strip_ansi = true
+max_lines = 40
+
+[[tests.od]]
+name = "short hex dump passes through unchanged"
+input = """
+000000 7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00  >.ELF............<
+000010 02 00 3e 00 01 00 00 00 d0 10 40 00 00 00 00 00  >..>.......@.....<
+000020 40 00 00 00 00 00 00 00 b8 31 00 00 00 00 00 00  >@........1......<
+"""
+expected = """
+000000 7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00  >.ELF............<
+000010 02 00 3e 00 01 00 00 00 d0 10 40 00 00 00 00 00  >..>.......@.....<
+000020 40 00 00 00 00 00 00 00 b8 31 00 00 00 00 00 00  >@........1......<
+"""
+
+[[tests.od]]
+name = "error line is preserved"
+input = "od: /app/missing: No such file or directory"
+expected = "od: /app/missing: No such file or directory"

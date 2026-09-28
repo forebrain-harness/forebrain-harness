@@ -1,0 +1,58 @@
+[filters.go-test-json]
+description = "Compress go test -json (test2json) NDJSON: drop pass/run scaffolding, keep failures, panics, races, and package summaries."
+version = "1"
+match_command = '^(\s*)go\s+test\b.*-json\b'
+match_output_select = [
+  '(?m)^\{"Time":"[^"]+","Action":"(start|run|output|pass|fail|skip)","Package":"',
+]
+strip_lines_matching = [
+  '"Action":"(run|start|pause|cont)"',
+  '"Output":"=== (RUN|PAUSE|CONT|NAME) ',
+  '"Output":" *--- (PASS|SKIP): ',
+  '"Output":"PASS\\n"',
+]
+collapse_lines_matching = [
+  { pattern = '"Action":"pass"[^}]*"Test":', template = "{count} passed" },
+  { pattern = '"Action":"skip"[^}]*"Test":', template = "{count} skipped" },
+]
+# Bound a pathological failing run (a test logging megabytes) while preserving
+# the trailing package FAIL summary via keep_tail (Never-Block).
+max_lines = 400
+max_lines_keep_tail = 100
+
+[[tests.go-test-json]]
+name = "mixed run: collapse passes, keep failure output and package summary"
+input = '''{"Time":"t","Action":"start","Package":"x"}
+{"Time":"t","Action":"run","Package":"x","Test":"TestA"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestA","Output":"=== RUN   TestA\n"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestA","Output":"--- PASS: TestA (0.00s)\n"}
+{"Time":"t","Action":"pass","Package":"x","Test":"TestA","Elapsed":0}
+{"Time":"t","Action":"run","Package":"x","Test":"TestB"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestB","Output":"=== RUN   TestB\n"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestB","Output":"    foo_test.go:12: got 1, want 2\n"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestB","Output":"--- FAIL: TestB (0.01s)\n"}
+{"Time":"t","Action":"fail","Package":"x","Test":"TestB","Elapsed":0.01}
+{"Time":"t","Action":"output","Package":"x","Output":"FAIL\n"}
+{"Time":"t","Action":"output","Package":"x","Output":"FAIL\tx\t0.350s\n"}
+{"Time":"t","Action":"fail","Package":"x","Elapsed":0.35}'''
+expected = '''1 passed
+{"Time":"t","Action":"output","Package":"x","Test":"TestB","Output":"    foo_test.go:12: got 1, want 2\n"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestB","Output":"--- FAIL: TestB (0.01s)\n"}
+{"Time":"t","Action":"fail","Package":"x","Test":"TestB","Elapsed":0.01}
+{"Time":"t","Action":"output","Package":"x","Output":"FAIL\n"}
+{"Time":"t","Action":"output","Package":"x","Output":"FAIL\tx\t0.350s\n"}
+{"Time":"t","Action":"fail","Package":"x","Elapsed":0.35}'''
+
+[[tests.go-test-json]]
+name = "all green: collapse to a count and keep the ok package summary"
+input = '''{"Time":"t","Action":"start","Package":"x"}
+{"Time":"t","Action":"run","Package":"x","Test":"TestA"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestA","Output":"=== RUN   TestA\n"}
+{"Time":"t","Action":"output","Package":"x","Test":"TestA","Output":"--- PASS: TestA (0.00s)\n"}
+{"Time":"t","Action":"pass","Package":"x","Test":"TestA","Elapsed":0}
+{"Time":"t","Action":"output","Package":"x","Output":"PASS\n"}
+{"Time":"t","Action":"output","Package":"x","Output":"ok  \tx\t0.12s\n"}
+{"Time":"t","Action":"pass","Package":"x","Elapsed":0.12}'''
+expected = '''1 passed
+{"Time":"t","Action":"output","Package":"x","Output":"ok  \tx\t0.12s\n"}
+{"Time":"t","Action":"pass","Package":"x","Elapsed":0.12}'''

@@ -1,0 +1,118 @@
+[filters.terraform-apply]
+description = "Drop terraform apply plan preamble and confirmation prompt; keep apply progress and the Apply-complete summary."
+version = "2"
+match_command = '^(terraform|tofu)\s+apply\b'
+match_output_select = [
+  '(?m)^Apply complete! Resources:',
+  '(?m)^Apply cancelled\.',
+]
+strip_lines_matching = [
+  '^Terraform (used the selected providers|will perform the following|has made some changes)',
+  '^Resource actions are indicated',
+  '^  [+~\-<] (create|update|destroy|replace)',
+  '^Do you want to perform these actions',
+  '^  Terraform will perform the actions described',
+  "^  Only 'yes' will be accepted",
+  '^\s+Enter a value:\s*$',
+]
+
+[[tests.terraform-apply]]
+name = "strips plan preamble, keeps progress and apply-complete"
+input = """
+Terraform used the selected providers to generate the following execution plan.
+Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # aws_s3_bucket.example will be created
+  + resource "aws_s3_bucket" "example" {
+      + bucket = "my-bucket"
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: 
+
+aws_s3_bucket.example: Creating...
+aws_s3_bucket.example: Creation complete after 2s [id=my-bucket]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+"""
+expected = """
+
+  # aws_s3_bucket.example will be created
+  + resource "aws_s3_bucket" "example" {
+      + bucket = "my-bucket"
+    }
+
+Plan: 1 to add, 0 to change, 0 to destroy.
+
+
+
+aws_s3_bucket.example: Creating...
+aws_s3_bucket.example: Creation complete after 2s [id=my-bucket]
+
+Apply complete! Resources: 1 added, 0 changed, 0 destroyed.
+"""
+
+[[tests.terraform-apply]]
+name = "error output preserved"
+input = """
+Terraform used the selected providers to generate the following execution plan.
+
+Error: Invalid provider configuration
+
+Provider "hashicorp/aws" requires explicit configuration.
+"""
+expected = """
+
+Error: Invalid provider configuration
+
+Provider "hashicorp/aws" requires explicit configuration.
+"""
+
+[[tests.terraform-apply]]
+name = "real two-resource apply: preamble+prompt stripped, progress and apply-complete kept"
+input = """
+Terraform used the selected providers to generate the following execution plan.
+Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # aws_s3_bucket.artifacts will be created
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: 
+
+aws_s3_bucket.artifacts: Creating...
+aws_s3_bucket.artifacts: Creation complete after 3s [id=my-company-artifacts-prod]
+aws_s3_bucket_versioning.artifacts: Creating...
+aws_s3_bucket_versioning.artifacts: Creation complete after 1s
+
+Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+"""
+expected = """
+# aws_s3_bucket.artifacts will be created
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+
+
+aws_s3_bucket.artifacts: Creating...
+aws_s3_bucket.artifacts: Creation complete after 3s [id=my-company-artifacts-prod]
+aws_s3_bucket_versioning.artifacts: Creating...
+aws_s3_bucket_versioning.artifacts: Creation complete after 1s
+
+Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+"""

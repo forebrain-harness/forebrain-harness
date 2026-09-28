@@ -1,0 +1,4 @@
+[filters.jest]
+description = "Strip jest passing lines and run scaffolding; keep failures, the coverage table, the summary, and any interleaved runner output."
+version = "4"
+match_command = '^(\s*)(npx\s+)?jest\b'

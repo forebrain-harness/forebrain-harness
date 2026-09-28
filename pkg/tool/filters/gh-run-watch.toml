@@ -1,0 +1,9 @@
+[filters.gh-run-watch]
+description = "Compact gh run watch polling UI: drop refresh spam and per-step echoes, keep latest job tree."
+version = "2"
+match_command = "(^|[;&|]\\s*)gh\\s+run\\s+watch\\b"
+match_output_select = [
+  "(?m)^Refreshing run status every",
+  "(?m)^JOBS\\s*$",
+]
+strip_ansi = true

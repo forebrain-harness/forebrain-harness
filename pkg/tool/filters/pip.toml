@@ -1,0 +1,5 @@
+[filters.pip]
+description = "Compact pip: drop download/progress/already-satisfied/notice/root-user noise, collapse PEP 668, keep results and errors."
+version = "7"
+match_command = '^pip3?\b'
+strip_ansi = true

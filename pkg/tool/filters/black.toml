@@ -1,0 +1,23 @@
+[filters.black]
+description = "Drop black's emoji banners; keep 'would reformat' files and the summary."
+version = "2"
+match_command = '^(\s*)black\b'
+match_output_select = [
+  '^would reformat ',
+  'would be reformatted',
+  'file(s)? reformatted',
+  'left unchanged',
+  '^Oh no!',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^All done! ',
+  '^Oh no! ',
+]
+max_lines = 30
+max_lines_keep_tail = 8
+on_empty = "black: ok"
+
+[[tests.black]]
+name = "check lists files to reformat, drops banner"

@@ -1,0 +1,116 @@
+[filters.apt]
+description = "Drop apt/apt-get fetch, dependency-list and unpack/setup noise; keep package headers, counts and errors."
+version = "4"
+match_command = '^(sudo\s+)?(apt-get|apt)(\s|$)'
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+  '^Hit:\d',
+  '^Get:\d',
+  '^Ign:\d',
+  '^Reading package lists',
+  '^Reading state information',
+  '^Building dependency tree',
+  '^Fetched ',
+  '^Need to get ',
+  '^After this operation',
+  '^\(Reading database',
+  '^Preparing to unpack ',
+  '^Unpacking ',
+  '^Selecting previously unselected ',
+  '^Setting up ',
+  '^Processing triggers ',
+  '^Created symlink ',
+  "^Adding 'diversion",
+  '^Removing ',
+  '^debconf:',
+  '^\s+[a-z0-9]',
+]
+on_empty = "apt: ok"
+
+[[tests.apt]]
+name = "install strips noise, keeps NEW header and counts"
+input = """
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  git git-man liberror-perl
+0 upgraded, 3 newly installed, 0 to remove and 0 not upgraded.
+Need to get 5000 kB of archives.
+After this operation, 25.0 MB of additional disk space will be used.
+Get:1 http://archive.ubuntu.com/ubuntu noble/main amd64 git amd64 1:2.43.0 [3680 kB]
+Fetched 5000 kB in 1s (5000 kB/s)
+Selecting previously unselected package liberror-perl.
+Preparing to unpack .../liberror-perl_0.17029-2_all.deb ...
+Unpacking liberror-perl (0.17029-2) ...
+Setting up git-man (1:2.43.0) ...
+Setting up git (1:2.43.0) ...
+Processing triggers for libc-bin (2.39-0ubuntu8.6) ...
+"""
+expected = """
+The following NEW packages will be installed:
+0 upgraded, 3 newly installed, 0 to remove and 0 not upgraded.
+"""
+
+[[tests.apt]]
+name = "update-only collapses to ok"
+input = """
+Hit:1 http://archive.ubuntu.com/ubuntu noble InRelease
+Get:2 http://archive.ubuntu.com/ubuntu noble-updates InRelease [126 kB]
+Reading package lists...
+Building dependency tree...
+Reading state information...
+"""
+expected = "apt: ok"
+
+[[tests.apt]]
+name = "keeps errors at column zero"
+input = """
+Reading package lists...
+E: Unable to locate package foobarbaz
+"""
+expected = "E: Unable to locate package foobarbaz"
+
+# Regression: if the apt filter were to fire on `docker run ... bash -lc
+# '...apt-get...'` output that also contains a JSON block, the JSON must
+# survive intact.  `^\s+[a-z0-9]` strips package-name lines (start with
+# spaces + lowercase/digit) but leaves JSON delimiters (`"`, `{`, `}`) alone.
+[[tests.apt]]
+name = "JSON block in output is preserved when filter fires (regression)"
+input = """
+Reading package lists...
+Setting up curl (8.5.0) ...
+=== settings.json ===
+{
+  "enabledPlugins": {
+    "ecc@ecc": true
+  }
+}
+"""
+expected = """
+=== settings.json ===
+{
+  "enabledPlugins": {
+    "ecc@ecc": true
+  }
+}
+"""
+
+[[tests.apt]]
+name = "sudo apt-get install behaves the same as apt-get"
+input = """
+Reading package lists...
+Building dependency tree...
+The following NEW packages will be installed:
+  curl
+0 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.
+Selecting previously unselected package curl.
+Preparing to unpack .../curl_8.5.0-2ubuntu10_amd64.deb ...
+Unpacking curl (8.5.0-2ubuntu10) ...
+Setting up curl (8.5.0-2ubuntu10) ...
+"""
+expected = """
+The following NEW packages will be installed:
+0 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.
+"""

@@ -1,0 +1,19 @@
+[filters.docker-ps]
+description = "Keep docker ps columns intact; drop blanks and cap very long lists."
+match_command = '^docker\s+ps\b'
+match_output_select = [
+  '^CONTAINER ID\s+IMAGE',
+]
+strip_ansi = true
+max_lines = 40
+strip_lines_matching = [
+  '^\s*$',
+]
+
+[[tests.docker-ps]]
+name = "keeps columns, drops blank padding"
+input = """CONTAINER ID   IMAGE          STATUS
+
+abc123def456   nginx:latest   Up 2 hours"""
+expected = """CONTAINER ID   IMAGE          STATUS
+abc123def456   nginx:latest   Up 2 hours"""

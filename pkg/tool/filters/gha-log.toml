@@ -1,0 +1,4 @@
+[filters.gha-log]
+description = "Strip the per-line ISO timestamp and group markers from GitHub Actions logs (gh api + run view --log)."
+version = "2"
+match_command = "^gh\\s+(run|api)\\b"

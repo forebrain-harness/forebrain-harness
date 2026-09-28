@@ -1,0 +1,79 @@
+[filters.packer]
+description = "Drop packer ==> state-machine info lines; keep build output, artifacts, and errors."
+version = "1"
+match_command = '^packer\s+(build|validate|init)\b'
+match_output_select = [
+  '(?m)^==> \S+: ',
+]
+strip_lines_matching = [
+  '^==> \S+: (Provisioning with|Executing|Starting|Pausing|Stopping|Waiting|Uploading|Downloading|Detaching|Creating|Deleting|Registering|Cleaning up after)',
+]
+
+[[tests.packer]]
+name = "strips provisioner state lines, keeps build output and artifact"
+input = """
+==> build.ubuntu.null: Provisioning with shell script: /tmp/script.sh
+==> build.ubuntu.null: Executing: /tmp/script.sh
+    build.ubuntu.null: Installing packages...
+    build.ubuntu.null: Done.
+==> build.ubuntu.null: Waiting for cleanup
+==> build.ubuntu.null: Cleaning up after build...
+Build 'build.ubuntu.null' finished after 30 seconds.
+
+==> Wait completed after 30 seconds
+
+==> Builds finished. The artifacts of successful builds are:
+--> build.ubuntu.null: Did not export anything. This is the null builder.
+"""
+expected = """
+    build.ubuntu.null: Installing packages...
+    build.ubuntu.null: Done.
+Build 'build.ubuntu.null' finished after 30 seconds.
+
+==> Wait completed after 30 seconds
+
+==> Builds finished. The artifacts of successful builds are:
+--> build.ubuntu.null: Did not export anything. This is the null builder.
+"""
+
+[[tests.packer]]
+name = "preserves error output"
+input = """
+==> build.myimage.amazon-ebs: Starting SSM session
+==> build.myimage.amazon-ebs: Provisioning with shell script: /tmp/setup.sh
+    build.myimage.amazon-ebs: ./setup.sh: line 10: command not found: nonexistent
+==> build.myimage.amazon-ebs: Stopping SSM session
+Build 'build.myimage.amazon-ebs' errored after 5 seconds: Non-zero exit code
+"""
+expected = """
+    build.myimage.amazon-ebs: ./setup.sh: line 10: command not found: nonexistent
+Build 'build.myimage.amazon-ebs' errored after 5 seconds: Non-zero exit code
+"""
+
+[[tests.packer]]
+name = "provisioning lifecycle lines stripped, script output, artifact kept"
+input = """
+==> build.ubuntu.amazon-ebs: Prevalidating any provided VPC information
+==> build.ubuntu.amazon-ebs: Starting SSM Session
+==> build.ubuntu.amazon-ebs: Provisioning with shell script: /tmp/packer-shell123.sh
+==> build.ubuntu.amazon-ebs: Executing: /tmp/packer-shell123.sh
+    build.ubuntu.amazon-ebs: Setting up nginx (1.18.0-6ubuntu14.4) ...
+    build.ubuntu.amazon-ebs: nginx is installed and running.
+==> build.ubuntu.amazon-ebs: Waiting for AMI to become ready...
+==> build.ubuntu.amazon-ebs: Cleaning up after build...
+Build 'build.ubuntu.amazon-ebs' finished after 3 minutes 12 seconds.
+
+==> Builds finished. The artifacts of successful builds are:
+--> build.ubuntu.amazon-ebs: AMIs were created:
+us-east-1: ami-0123456789abcdef0
+"""
+expected = """
+==> build.ubuntu.amazon-ebs: Prevalidating any provided VPC information
+    build.ubuntu.amazon-ebs: Setting up nginx (1.18.0-6ubuntu14.4) ...
+    build.ubuntu.amazon-ebs: nginx is installed and running.
+Build 'build.ubuntu.amazon-ebs' finished after 3 minutes 12 seconds.
+
+==> Builds finished. The artifacts of successful builds are:
+--> build.ubuntu.amazon-ebs: AMIs were created:
+us-east-1: ami-0123456789abcdef0
+"""

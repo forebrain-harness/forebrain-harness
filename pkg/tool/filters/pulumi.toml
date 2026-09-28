@@ -1,0 +1,38 @@
+[filters.pulumi]
+description = "Drop pulumi resource-table column header rows; keep resource changes, outputs, and duration."
+version = "1"
+match_command = '^pulumi\s+(up|preview|destroy|refresh)\b'
+match_output_select = [
+  '(?m)^(Previewing (update|destroy|refresh)|Updating \()',
+]
+strip_lines_matching = [
+  '^\s+Type\s+Name\s+(Plan|Status|Info)\s*$',
+]
+
+[[tests.pulumi]]
+name = "strips column header, keeps resource rows and summary"
+input = """
+Previewing update (dev):
+
+     Type                 Name        Plan       
+ +   pulumi:pulumi:Stack  dev         create     
+ +   aws:s3:Bucket        my-bucket   create     
+
+Resources:
+    + 2 to create
+
+Duration: 5s
+"""
+expected = """
+Previewing update (dev):
+
+ +   pulumi:pulumi:Stack  dev         create     
+ +   aws:s3:Bucket        my-bucket   create     
+
+Resources:
+    + 2 to create
+
+Duration: 5s
+"""
+
+[[tests.pulumi]]

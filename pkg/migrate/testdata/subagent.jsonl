@@ -1,0 +1,2 @@
+{"type":"user","uuid":"su-1","timestamp":"2026-09-01T10:05:00Z","cwd":"/tmp/source-proj","gitBranch":"main","sessionId":"s-fix","message":{"role":"user","content":"investigate please"}}
+{"type":"assistant","uuid":"su-2","timestamp":"2026-09-01T10:05:30Z","cwd":"/tmp/source-proj","gitBranch":"main","sessionId":"s-fix","message":{"role":"assistant","model":"claude-haiku-4-5","content":[{"type":"text","text":"subagent found it"}]}}

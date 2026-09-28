@@ -1,0 +1,37 @@
+[filters.nginx]
+description = "Strip blank lines from nginx diagnostics; cap runaway output with a recoverable hint."
+version = "1"
+match_command = '^(sudo\s+)?(/usr/sbin/|/usr/local/nginx/sbin/)?nginx\b'
+# stdin `(cmd) | boost` path: nginx prefixes its diagnostics with `nginx:`.
+match_output_select = [
+  '(?m)^nginx: ',
+]
+strip_ansi = true
+strip_lines_matching = [
+  '^\s*$',
+]
+max_lines = 40
+
+[[tests.nginx]]
+name = "config test success passes through unchanged"
+input = """
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+"""
+expected = """nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful"""
+
+[[tests.nginx]]
+name = "blank padding between diagnostics is removed, errors kept"
+input = """
+nginx: [emerg] unknown log format "benchkmark" in /etc/nginx/nginx.conf:46
+
+nginx: configuration file /etc/nginx/nginx.conf test failed
+"""
+expected = """nginx: [emerg] unknown log format "benchkmark" in /etc/nginx/nginx.conf:46
+nginx: configuration file /etc/nginx/nginx.conf test failed"""
+
+[[tests.nginx]]
+name = "empty input passes through"
+input = ""
+expected = ""

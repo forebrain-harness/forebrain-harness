@@ -1,0 +1,29 @@
+model = "gpt-5.6-sol"
+
+[projects."/tmp/codex-proj"]
+trust_level = "trusted"
+
+[plugins."sample@openai-bundled"]
+enabled = true
+
+[plugins."off-plugin@openai-bundled"]
+enabled = false
+
+[mcp_servers.node_repl]
+command = "/bin/node_repl"
+args = ["--x"]
+startup_timeout_sec = 120
+
+[mcp_servers.node_repl.env]
+NODE_PATH = "/usr/lib/node"
+
+[mcp_servers.computer-use]
+command = "/bin/cua"
+args = ["mcp"]
+enabled = false
+
+[mcp_servers.graph_api]
+url = "https://mcp.example/graph"
+
+[mcp_servers.graph_api.tools.query]
+approval_mode = "approve"

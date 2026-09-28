@@ -1,0 +1,718 @@
+{
+  "packages": [
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/agent",
+      "loc": 2072,
+      "fan_in": 6,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/architecture",
+      "loc": 144,
+      "fan_in": 0,
+      "fan_out": 0
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "loc": 2903,
+      "fan_in": 5,
+      "fan_out": 9
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/channel",
+      "loc": 5087,
+      "fan_in": 2,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/config",
+      "loc": 5212,
+      "fan_in": 14,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/event",
+      "loc": 1428,
+      "fan_in": 8,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "loc": 10775,
+      "fan_in": 0,
+      "fan_out": 18
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/home",
+      "loc": 1292,
+      "fan_in": 10,
+      "fan_out": 0
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/hook",
+      "loc": 1420,
+      "fan_in": 5,
+      "fan_out": 3
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm",
+      "loc": 9801,
+      "fan_in": 17,
+      "fan_out": 0
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic",
+      "loc": 600,
+      "fan_in": 1,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai",
+      "loc": 3863,
+      "fan_in": 4,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
+      "loc": 3874,
+      "fan_in": 6,
+      "fan_out": 4
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
+      "loc": 5869,
+      "fan_in": 6,
+      "fan_out": 3
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "loc": 6369,
+      "fan_in": 1,
+      "fan_out": 8
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "loc": 3725,
+      "fan_in": 2,
+      "fan_out": 19
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "loc": 15794,
+      "fan_in": 3,
+      "fan_out": 16
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
+      "loc": 16472,
+      "fan_in": 11,
+      "fan_out": 3
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/session",
+      "loc": 67,
+      "fan_in": 3,
+      "fan_out": 1
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/skill",
+      "loc": 3341,
+      "fan_in": 8,
+      "fan_out": 3
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/state",
+      "loc": 9582,
+      "fan_in": 11,
+      "fan_out": 2
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry",
+      "loc": 1651,
+      "fan_in": 5,
+      "fan_out": 2
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/testutil",
+      "loc": 139,
+      "fan_in": 0,
+      "fan_out": 3
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "loc": 19321,
+      "fan_in": 8,
+      "fan_out": 8
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "loc": 41913,
+      "fan_in": 0,
+      "fan_out": 20
+    },
+    {
+      "path": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "loc": 8648,
+      "fan_in": 3,
+      "fan_out": 11
+    }
+  ],
+  "edges": [
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/agent",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/hook"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/assembly",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/channel",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/config",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/event",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/agent"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/channel"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/hook"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/memory"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/process"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/run"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/session"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/turn"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/hook",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/hook",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/hook",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/memory"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/migrate",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/agent"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/channel"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/hook"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/memory"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/run"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/session"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/process",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/turn"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/agent"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/hook"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/memory"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/run",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/session",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/skill",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/agent"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/skill",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/skill",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/state",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/state",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/testutil",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/testutil",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/testutil",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/memory"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/agent"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/home"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/hook"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/memory"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/migrate"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/process"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/run"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/session"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/turn"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/agent"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/config"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/event"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/safety"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/skill"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/state"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/turn",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/tool"
+    }
+  ]
+}
