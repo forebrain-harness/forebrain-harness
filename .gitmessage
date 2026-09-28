@@ -1,47 +1,60 @@
 
 # <type>(<scope>): <subject>
 #
-# ── 标题行（写在上面的空行里）──────────────────────────────────
-# type   feat | fix | refactor | perf | test | docs | build | ci | chore | revert
-# scope  主要改动所在的包或区域：state, tui, gateway, run, turn, memory,
-#        migrate, tool, process, assembly, llm, mcp, config, session,
-#        skill, channel, frontend, npm, docs；跨区域时取最主要的一个
-# subject 英文祈使句，整行 <= 72 字符，小写开头，结尾不加句号
-#   例：fix(state): keep the exec timing triple whole for sub-ms tools
+# ── Title line (write it in the blank line above) ──────────────────────────
+# type    feat | fix | perf | refactor | test | docs | build | ci | chore | revert
+# scope   package or area of the main change: state, tui, gateway, run, turn,
+#         memory, migrate, tool, process, assembly, llm, mcp, config, session,
+#         skill, channel, frontend, npm, docs; for cross-area changes pick the
+#         single most relevant one
+# subject English imperative, whole line <= 100 characters, starts lowercase,
+#         no trailing period
+#   e.g.: fix(state): keep the exec timing triple whole for sub-ms tools
 #
-# ── 正文：与标题空一行，每行 <= 72 字符 ────────────────────────
-# 下面四节必填；用不到的可选节保持注释即可。
+# Enable this template: git config commit.template .gitmessage
+#
+# DCO sign-off: `git commit -s` appends "Signed-off-by: <user.name> <user.email>".
+# With the repository hooks installed (`make hooks`), prepare-commit-msg adds
+# the sign-off automatically and commit-msg checks the title.
+#
+# ── Body: one blank line after the title, wrap at <= 72 characters ─────────
+# The four sections below are required; keep unused optional sections
+# commented out.
 
 Why:
-# 问题是什么、为什么会发生。修 bug 要写到根因，不要只描述症状，
-# 也不要把"加判空 / 兜底 / 重试"当作原因。
+# What the problem is and why it happens. For a bug fix, name the root cause,
+# not the symptom, and never present "add a nil check / fallback / retry"
+# as the cause.
 
 What:
-# 按要点列出改动：行为变化、接口变化、删除的死代码、改名。
+# List the changes as bullets: behavior changes, interface changes, dead code
+# removed, renames.
 # -
 
 Prompt cache:
-# 输入 token 缓存命中率只能升不能降，这一节必填。
-# 不影响时写 "unchanged: <理由>"，例如 "unchanged: storage only".
-# 影响 prompt 组装时写明：
-# - 会话之前的内容（tools / system / 注入指令）是否变化、多久变一次
-# - 命中率前后对比：CacheRead / (CacheRead + CacheCreation + Input)
+# The input-token cache hit rate must never drop; this section is required.
+# Write "unchanged: <reason>" when the change cannot affect it, e.g.
+# "unchanged: storage only". When it affects prompt assembly, state:
+# - whether the session prefix (tools / system / injected instructions)
+#   changed, and how often it changes
+# - the hit rate before vs after: CacheRead / (CacheRead + CacheCreation + Input)
 
 Verification:
-# 实际跑过的命令和结果，没跑的不要写。
+# The commands actually run and their results; list nothing you did not run.
 # - CGO_ENABLED=1 go test -tags fts5 ./... -count=1
-# - go vet ./...（改平台相关代码时加 GOOS=linux / GOOS=windows）
-# - deadcode ./...；scripts/package-graph.sh 后 graph.json 无变化
-# - cd frontend && pnpm build（改前端时）
-# - 实机：TUI / web 场景 + 观察到的结果（改用户可见行为时必填）
+# - go vet ./... (add GOOS=linux / GOOS=windows for platform-specific code)
+# - deadcode ./...; no graph.json change after scripts/package-graph.sh
+# - cd frontend && pnpm build (when touching the frontend)
+# - On a real machine: TUI / web scenario + the observed result (required for
+#   user-visible behavior changes)
 
-# ── 可选节：需要时去掉行首 # ──────────────────────────────────
+# ── Optional sections: remove the leading # when needed ────────────────────
 #
 # Schema:
 # - stateSchemaVersion N -> N+1, migration <func name>
-# - 旧库数据如何搬迁；丢弃了哪些行、为什么
-# - 迁移后 sqlite_master 与新建库一致（<test name>）
+# - how existing rows are migrated; which rows are dropped and why
+# - sqlite_master matches a freshly created database after migration (<test name>)
 #
 # Refs: docs/plan/<PLAN_FILE>.md (<task id>)
 #
-# BREAKING CHANGE: <影响谁 + 如何迁移>
+# BREAKING CHANGE: <who is affected + how to migrate>

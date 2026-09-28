@@ -3,6 +3,7 @@
 #   make ui       build the Vue frontend into the Go embed package
 #   make build    build the forebrain binary (UI embedded) and install its dictionary beside it
 #   make test     run the Go test suite
+#   make hooks    install the repository git hooks (commit title + DCO sign-off)
 #   make docker   build the container image
 #   make release  build per-platform npm packages (UI embedded in each)
 #   make clean    remove build artifacts and generated frontend assets
@@ -22,7 +23,7 @@ GOFLAGS      := -trimpath -tags fts5
 BIN          := build/bin/forebrain
 WEBUI_DIST   := pkg/gateway/dist
 
-.PHONY: all ui build test docker release clean
+.PHONY: all ui build test hooks docker release clean
 
 all: build
 
@@ -42,9 +43,15 @@ build: ui
 	scripts/install-dictionary.sh $(dir $(BIN))
 	@echo "built $(BIN) ($(VERSION)) with embedded UI and its dictionary"
 
-## test: run the Go test suite (CGO on so silk_cgo.go is exercised)
+## test: run the Go test suite (CGO on so silk_cgo.go is exercised; fts5 so
+## the memory-search FTS5 tables exist)
 test:
-	CGO_ENABLED=1 go test ./...
+	CGO_ENABLED=1 go test -tags fts5 ./... -count=1
+
+## hooks: point git at this repository's hooks (commit title check + DCO
+## sign-off). A developer choice: installing them equals agreeing to the DCO.
+hooks:
+	git config core.hooksPath .githooks
 
 ## docker: build the container image (frontend built inside the image)
 docker:

@@ -231,59 +231,17 @@ the next roadmap item starts.
 
 ## Contributing
 
-Forebrain Harness grows through its community. Bug reports, feature ideas, docs fixes,
-translations, new channel adapters, provider updates and code are all welcome —
-a first-time contribution as much as a large one.
-
-### Report a bug or suggest a feature
-
-[Open an issue](https://github.com/forebrain-harness/forebrain-harness/issues/new). For a bug,
-include:
-
-- `forebrain --version`, your OS, and the provider and model you were using;
-- what you did, what you expected, and what happened instead;
-- the relevant lines from `~/.forebrain/logs/` (remove anything private first).
-
-For a larger change, open an issue to talk about the approach before you write
-the code — it saves everyone a rewrite.
-
-### Send a pull request
-
-1. Fork the repository and create a branch from `main`.
-2. Make your change, with tests.
-3. Run the checks CI runs:
-
-   ```bash
-   go vet ./...
-   CGO_ENABLED=1 go test -tags fts5 ./... -count=1
-   cd frontend && pnpm install && pnpm test && pnpm build   # when you touch the web UI
-   ```
-
-4. Open the pull request, describe what changed and why, and link the issue it
-   addresses.
-
-A few ground rules keep the codebase healthy:
-
-- **Fix the root cause.** Trace a bug to the invariant that broke and repair
-  that, rather than guarding the place where it shows.
-- **Protect the prompt cache.** A change that lowers the prompt-cache hit rate
-  will not be merged; `FOREBRAIN.md` explains what that means in practice.
-- **One engine, two surfaces.** Behavior shared by the terminal and the web
-  belongs in the shared engine (`pkg/turn`, `pkg/run`), not in one surface.
-- **Respect the architecture tests.** `pkg/architecture` enforces the package
-  layering, at most 20 production files per package, a `doc.go` in every
-  package, and test files named after the file they cover. If you change
-  imports between packages, regenerate the graph with `scripts/package-graph.sh`.
-- **CGO is required** on every platform, and tests run with `-tags fts5`.
-
-`FOREBRAIN.md` at the repository root describes the architecture and conventions in
-more detail.
+Contributions are welcome — bug reports, feature ideas, docs fixes, translations and code
+alike, a first-time contribution as much as a large one. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks CI runs, and the
+commit and pull request conventions (Conventional Commits titles and a DCO sign-off). By
+participating in this project you agree to uphold the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ### Security
 
-If you find a security vulnerability, please do not open a public issue. Report
-it privately through
-[GitHub security advisories](https://github.com/forebrain-harness/forebrain-harness/security/advisories/new).
+If you find a security vulnerability, please do not open a public issue — see
+[SECURITY.md](SECURITY.md) for how to report it privately.
 
 ## Support the project
 

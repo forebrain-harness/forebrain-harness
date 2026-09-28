@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/forebrain-harness/forebrain-harness/security/advisories/new
+    about: Security issues are handled privately via GitHub security advisories, never in public issues.
+  - name: Documentation
+    url: https://forebrain-harness.github.io
+    about: The Forebrain Harness documentation site.

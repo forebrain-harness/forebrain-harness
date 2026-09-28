@@ -6,7 +6,7 @@ Local AI coding agent. Single Go module (`github.com/forebrain-harness/forebrain
 
 ```bash
 make build        # build binary with embedded UI -> build/bin/forebrain (runs make ui first)
-make test         # CGO_ENABLED=1 go test ./...
+make test         # CGO_ENABLED=1 go test -tags fts5 ./... -count=1
 make ui           # build Vue frontend into the Go embed package (pkg/gateway/dist)
 make docker       # container image
 make release      # per-platform npm packages (npm/scripts/build-platform-packages.sh)
