@@ -5,8 +5,9 @@
 #   make test     run the Go test suite
 #   make hooks    install the repository git hooks (commit title + DCO sign-off)
 #   make docker   build the container image
-#   make release  build per-platform npm packages (UI embedded in each)
-#   make clean    remove build artifacts and generated frontend assets
+#   make release  build per-platform npm packages (runs make ui first; the UI
+#                 is embedded in each binary)
+#   make clean    remove build artifacts
 #
 # The frontend is embedded via go:embed (pkg/gateway). `make build` always
 # rebuilds the UI first so the binary serves the current frontend.
@@ -57,11 +58,12 @@ hooks:
 docker:
 	docker build --build-arg FOREBRAIN_VERSION=v$(VERSION) -t forebrain:$(VERSION) .
 
-## release: build per-platform npm packages (frontend embedded in each binary)
-release:
+## release: build per-platform npm packages. Depends on ui: the script embeds
+## whatever web UI build is in pkg/gateway/dist.
+release: ui
 	FOREBRAIN_VERSION=$(VERSION) npm/scripts/build-platform-packages.sh
 
-## clean: drop build outputs and generated frontend assets (keep .gitkeep)
+## clean: drop build outputs. pkg/gateway/dist is committed source now; `make
+## ui` rebuilds it, so clean must not delete it.
 clean:
 	rm -rf build/bin
-	find $(WEBUI_DIST) -mindepth 1 ! -name .gitkeep -exec rm -rf {} +

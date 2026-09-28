@@ -1,0 +1,227 @@
+# Release pipeline: release-please maintains the release PR (version, CHANGELOG,
+# npm/package.json bumps), the web UI is rebuilt onto that PR so the tagged
+# source embeds it for go:embed, and merging the PR tags, builds five
+# platforms, uploads Release assets (binaries + dictionary bundle) and publishes
+# npm packages. Releasing happens only here: never npm publish or
+# gh release create by hand.
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+      pr: ${{ steps.rp.outputs.pr }}
+    steps:
+      # A GitHub App token (not GITHUB_TOKEN) so the release PR and the UI
+      # commit pushed by this workflow trigger the other workflows' CI runs.
+      # Requires the repo variable FOREBRAIN_APP_ID and the secret
+      # FOREBRAIN_APP_PRIVATE_KEY (owner decision D2).
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.FOREBRAIN_APP_ID }}
+          private-key: ${{ secrets.FOREBRAIN_APP_PRIVATE_KEY }}
+      - id: rp
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ steps.app.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Every push to main can reshape the release PR; rebuild the web UI on its
+  # branch so the commit that gets tagged carries the UI go:embed serves.
+  webui-into-release-pr:
+    needs: release-please
+    if: needs.release-please.outputs.pr != '' && needs.release-please.outputs.release_created != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.FOREBRAIN_APP_ID }}
+          private-key: ${{ secrets.FOREBRAIN_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          token: ${{ steps.app.outputs.token }}
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with: { version: 10.24.0 }
+      - run: make ui
+      - name: Commit the rebuilt UI when it changed
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          if [ -z "$(git status --porcelain -- pkg/gateway/dist)" ]; then exit 0; fi
+          uid="$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${uid}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git add -A pkg/gateway/dist
+          git commit -m "chore(release): build the web UI"
+          git push
+
+  build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: darwin/arm64,  os: macos-14,         native: true }
+          - { target: darwin/amd64,  os: macos-14,         native: false, darwin_amd64_cc: 'clang -arch x86_64' }
+          - { target: linux/amd64,   os: ubuntu-22.04,     native: true }
+          - { target: linux/arm64,   os: ubuntu-22.04-arm, native: true }
+          - { target: windows/amd64, os: windows-latest,   native: true }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults: { run: { shell: bash } }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache-dependency-path: go.sum }
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - run: test -f pkg/gateway/dist/index.html
+      - run: scripts/check-release-versions.sh
+      - name: Build the platform package
+        env:
+          FOREBRAIN_BUILD_TARGETS: ${{ matrix.target }}
+          FOREBRAIN_VERSION: ${{ needs.release-please.outputs.version }}
+          # Read by the script only when it cross-compiles darwin/amd64 on the
+          # arm64 runner; empty everywhere else.
+          FOREBRAIN_CC_DARWIN_AMD64: ${{ matrix.darwin_amd64_cc }}
+        run: npm/scripts/build-platform-packages.sh
+      - if: matrix.native
+        name: Smoke test
+        run: |
+          bin="$(find npm/dist -type f \( -name forebrain -o -name forebrain.exe \) | head -1)"
+          got="$("$bin" --version)"
+          [ "$got" = "${{ needs.release-please.outputs.tag_name }}" ] || { echo "binary reports $got"; exit 1; }
+      - run: scripts/package-release-archive.sh "${{ matrix.target }}" "${{ needs.release-please.outputs.version }}" out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: build-${{ strategy.job-index }}
+          path: |
+            out/*
+            npm/dist/@forebrain-harness/*
+
+  dict:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache-dependency-path: go.sum }
+      - run: scripts/build-dict-bundle.sh out
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dict
+          path: out/forebrain-dict.tar.gz
+
+  github-assets:
+    needs: [release-please, build, dict]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { path: artifacts }
+      - name: Upload binaries, dictionary bundle and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          mkdir upload
+          find artifacts -maxdepth 3 -type f \( -name 'forebrain_*' -o -name 'forebrain-dict.tar.gz' \) -exec cp {} upload/ \;
+          (cd upload && sha256sum * > SHA256SUMS)
+          gh release upload "$TAG" upload/* --clobber
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod, cache-dependency-path: go.sum }
+      - name: The published dictionary bundle is what this version reads
+        env:
+          CGO_ENABLED: "1"
+          FOREBRAIN_RELEASE_DICT_CHECK: ${{ needs.release-please.outputs.tag_name }}
+        run: go test -tags fts5 ./pkg/memory -run TestReleasedDictionaryBundleMatchesDictionaryFiles -count=1
+
+  # Platform packages first, then the launcher: the launcher's
+  # optionalDependencies must resolve the moment it is published.
+  npm:
+    needs: [release-please, build]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", registry-url: "https://registry.npmjs.org" }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { path: artifacts }
+      # upload-artifact does not keep file modes; the binary must be executable
+      # inside the package npm packs, or the launcher's spawn fails with EACCES.
+      - run: chmod +x artifacts/build-*/npm/dist/@forebrain-harness/*/vendor/*/bin/forebrain*
+      - name: Publish the platform packages, then the launcher
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          publish() {
+            local dir="$1" name
+            name="$(jq -r .name "$dir/package.json")"
+            # npm does not allow republishing a version; skip what a previous
+            # (partially failed) run of this job already published.
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already published"; return 0
+            fi
+            (cd "$dir" && npm publish --access public --provenance)
+          }
+          for dir in artifacts/build-*/npm/dist/@forebrain-harness/*/; do publish "$dir"; done
+          publish npm
+
+  # Installing the release exactly the way a user does also makes
+  # proxy.golang.org and sum.golang.org record this version.
+  go-install:
+    needs: [release-please, github-assets]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: Install the release the way a user does
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          cd "$RUNNER_TEMP"
+          env -u GOFLAGS GOWORK=off CGO_ENABLED=1 GOBIN="$RUNNER_TEMP/bin" \
+            go install -tags fts5 "github.com/forebrain-harness/forebrain-harness/cmd/forebrain@$TAG"
+          got="$("$RUNNER_TEMP/bin/forebrain" --version)"
+          [ "$got" = "$TAG" ] || { echo "go-installed forebrain reports $got, want $TAG"; exit 1; }

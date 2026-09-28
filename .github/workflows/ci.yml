@@ -127,3 +127,26 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm test
           pnpm run build
+
+  webui-dist:
+    name: Web UI build is release-managed
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Third-party actions are pinned to a full commit SHA; Dependabot
+      # updates the pin together with the trailing version comment.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.24.0
+      # GITHUB_HEAD_REF tells the script whether this is a release-please
+      # branch (rebuild-and-compare) or an ordinary PR (must not touch dist).
+      - env:
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+        run: scripts/check-webui-dist.sh "${{ github.event.pull_request.base.sha }}"
