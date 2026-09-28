@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -258,5 +259,30 @@ func TestSessionUsageSumsTheRunTreeOnceAndLastTurnIsTopLevel(t *testing.T) {
 	}
 	if last.PromptTokens != 10 || last.CacheReadTokens != 100 {
 		t.Fatalf("last turn = %+v, want the parent run", last)
+	}
+}
+
+// TestSQLiteBuildServesTheStateSchema pins that the test build (cgo on, fts5
+// tag on) satisfies the probe guarding every state open: under the documented
+// build the linked SQLite engine reports FTS5 and requireSQLiteBuild passes.
+func TestSQLiteBuildServesTheStateSchema(t *testing.T) {
+	if err := requireSQLiteBuild(context.Background()); err != nil {
+		t.Fatalf("requireSQLiteBuild = %v, want nil for a cgo build with -tags fts5", err)
+	}
+}
+
+// TestSQLiteBuildErrorIsOneSentenceWithTheInstallCommand pins the user-facing
+// contract of a build that cannot open its state: one sentence that names the
+// cause and the exact reinstall command. The dots inside the module path are
+// part of the path, not sentence ends.
+func TestSQLiteBuildErrorIsOneSentenceWithTheInstallCommand(t *testing.T) {
+	msg := errSQLiteBuild.Error()
+	const install = "CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest"
+	if !strings.Contains(msg, install) {
+		t.Fatalf("error %q does not carry the reinstall command %q", msg, install)
+	}
+	prose := strings.TrimRight(strings.Replace(msg, install, "", 1), " .!?")
+	if strings.ContainsAny(prose, "\n") || strings.ContainsAny(prose, ".!?") {
+		t.Fatalf("error %q is more than one sentence", msg)
 	}
 }
