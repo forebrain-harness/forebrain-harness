@@ -8,13 +8,13 @@ jobs:
     name: DCO sign-off
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       # The checker comes from the base branch, so a pull request cannot
       # change the rule it is checked against.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .base
