@@ -45,3 +45,9 @@ manifest-report.md
 # (github.com/forebrain-harness/forebrain-harness.github.io); a clone kept here
 # must not be added as a submodule-less gitlink.
 /forebrain-harness.github.io/
+
+# Migrate fixtures reproduce other agents' homes (.claude, .codex); a
+# developer's global ignore (for example **/.claude/settings.local.json) must
+# never hide repository content from a commit.
+!pkg/migrate/testdata/**
+pkg/migrate/testdata/**/.DS_Store
