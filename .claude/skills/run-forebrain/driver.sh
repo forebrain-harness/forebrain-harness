@@ -38,7 +38,7 @@ cmd_build() {
   echo "built $BIN"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit] [answer-text] [drip-delay]
   local mode="${1:-hang}" text="${2:-FAKE_ANSWER}" delay="${3:-0.6}"
   cmd_stop >/dev/null 2>&1 || true
   [ -x "$BIN" ] || cmd_build
@@ -139,7 +139,7 @@ case "${1:-}" in
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders

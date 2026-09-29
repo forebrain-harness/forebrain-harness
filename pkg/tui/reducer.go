@@ -3002,6 +3002,11 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	cursorRow += layout.cursorRowFromTop
 	lines = append(lines, strings.TrimRight(renderSharedBlockBorderLine(termWidth), "\r\n"))
 	if len(overlayRows) == 0 {
+		// A pending auto-continue sits between the card and the footer, where
+		// the reader's eye already is when the turn that hit the limit ends.
+		if notice := r.autoContinueNoticeLineLocked(termWidth); notice != "" {
+			lines = append(lines, notice)
+		}
 		// The footer is laid out to exactly the terminal width, so its last
 		// painted cell sits in the deferred-wrap column; a trailing \x1b[K
 		// would erase that cell on terminals that keep the wrap pending
