@@ -1243,9 +1243,10 @@ func shortestActiveTaskTitle(items []event.PlanUpdateItem, fallback string) stri
 			continue
 		}
 		// The label the plan card itself shows under its header is the item's
-		// active form ("实现 P1 订阅模型发现客户端"); the content is the checklist
-		// row ("P1 pkg/llm/openai …"). The working line says what is being done,
-		// so it uses the active form and only falls back to the content.
+		// in-progress label — session_todo's title, carried here as Active
+		// ("实现 P1 订阅模型发现客户端"); the content is the checklist row
+		// ("P1 pkg/llm/openai …"). The working line says what is being done, so
+		// it uses that label and only falls back to the content.
 		title := strings.TrimSpace(item.Active)
 		if title == "" {
 			title = strings.TrimSpace(item.Content)

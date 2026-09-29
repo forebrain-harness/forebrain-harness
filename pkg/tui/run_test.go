@@ -3167,7 +3167,7 @@ func TestShortestActiveTaskTitle(t *testing.T) {
 			want:     "writing tests",
 		},
 		{
-			name: "the active form wins over the checklist content",
+			name: "the in-progress label wins over the checklist content",
 			items: []event.PlanUpdateItem{
 				{Content: "P1 pkg/llm/openai 发现客户端 + 契约测试", Active: "实现P1订阅模型发现客户端", Status: "in_progress"},
 				{Content: "P2 pkg/turn", Active: "实现P2", Status: "pending"},
