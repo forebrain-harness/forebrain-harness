@@ -102,24 +102,28 @@ build_target() {
   # CGO is required on every platform (weixin silk voice decoding, sqlite, etc.).
   # When cross-compiling to a foreign OS we must point cgo at the matching C
   # toolchain; the host toolchain only works for native builds.
-  local cc_env=()
+  # The cross C compiler is exported through a shell variable assignment, not
+  # spliced into the command line: a CC value with spaces ("clang -arch
+  # x86_64") must stay one assignment or the shell looks for a command named
+  # "CC=clang -arch x86_64".
+  local cc=
   local host_goos host_goarch
   host_goos="$(go env GOHOSTOS)"
   host_goarch="$(go env GOHOSTARCH)"
   if [ "$goos" != "$host_goos" ] || [ "$goarch" != "$host_goarch" ]; then
     case "$target" in
-      windows/amd64) cc_env=(CC="${FOREBRAIN_CC_WINDOWS_AMD64:-x86_64-w64-mingw32-gcc}") ;;
-      linux/amd64)   [ -n "${FOREBRAIN_CC_LINUX_AMD64:-}" ]   && cc_env=(CC="$FOREBRAIN_CC_LINUX_AMD64") ;;
-      linux/arm64)   cc_env=(CC="${FOREBRAIN_CC_LINUX_ARM64:-aarch64-linux-gnu-gcc}") ;;
-      darwin/arm64)  [ -n "${FOREBRAIN_CC_DARWIN_ARM64:-}" ]  && cc_env=(CC="$FOREBRAIN_CC_DARWIN_ARM64") ;;
-      darwin/amd64)  [ -n "${FOREBRAIN_CC_DARWIN_AMD64:-}" ]  && cc_env=(CC="$FOREBRAIN_CC_DARWIN_AMD64") ;;
+      windows/amd64) cc="${FOREBRAIN_CC_WINDOWS_AMD64:-x86_64-w64-mingw32-gcc}" ;;
+      linux/amd64)   cc="${FOREBRAIN_CC_LINUX_AMD64:-}" ;;
+      linux/arm64)   cc="${FOREBRAIN_CC_LINUX_ARM64:-aarch64-linux-gnu-gcc}" ;;
+      darwin/arm64)  cc="${FOREBRAIN_CC_DARWIN_ARM64:-}" ;;
+      darwin/amd64)  cc="${FOREBRAIN_CC_DARWIN_AMD64:-}" ;;
     esac
   fi
 
   echo "==> building $target ($triple)"
   (
     cd "$ROOT_DIR"
-    CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" ${cc_env[@]+"${cc_env[@]}"} \
+    CC="$cc" CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
       go build \
         -trimpath \
         -tags fts5 \
