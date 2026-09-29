@@ -545,6 +545,15 @@ func Run(ctx context.Context, opts Options) error {
 		// otherwise show the hardware caret for a frame.
 		renderer.EnableSoftwareCursor()
 		renderer.EnableViewportMode()
+		clipProbe, _ := opts.Clipboard.(ClipboardImageProbe)
+		if opts.Clipboard == nil {
+			clipProbe = systemClipboardImageReader{}
+		}
+		if clipProbe != nil {
+			watchCtx, stopWatch := context.WithCancel(ctx)
+			defer stopWatch()
+			go watchClipboardImage(watchCtx, clipProbe, renderer)
+		}
 		// Print resume hint AFTER DisableViewportMode exits the alt-screen
 		// buffer; writing into the alt-screen is discarded when it closes.
 		defer func() {

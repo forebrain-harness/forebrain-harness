@@ -488,6 +488,56 @@ func (systemClipboardImageReader) ReadClipboardImage(ctx context.Context) (Input
 	return InputAttachment{Path: path, MIMEType: "image/png"}, nil
 }
 
+// ClipboardImageProbe is implemented by clipboard readers that can cheaply say
+// whether the clipboard holds an image without extracting it.
+type ClipboardImageProbe interface {
+	ClipboardHasImage(ctx context.Context) bool
+}
+
+func (systemClipboardImageReader) ClipboardHasImage(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		if _, err := exec.LookPath("osascript"); err != nil {
+			return false
+		}
+		cmd = exec.CommandContext(ctx, "osascript", "-e", "clipboard info")
+	case "linux":
+		if _, err := exec.LookPath("wl-paste"); err == nil {
+			cmd = exec.CommandContext(ctx, "wl-paste", "--list-types")
+		} else if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
+		} else {
+			return false
+		}
+	default:
+		return false
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	text := string(out)
+	return strings.Contains(text, "image/png") || strings.Contains(text, "PNGf") || strings.Contains(text, "TIFF")
+}
+
+// watchClipboardImage polls the clipboard and keeps the renderer's paste hint
+// in step with it until ctx ends.
+func watchClipboardImage(ctx context.Context, probe ClipboardImageProbe, renderer *Renderer) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		renderer.SetClipboardImageAvailable(probe.ClipboardHasImage(ctx))
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
 func writeClipboardPNG(ctx context.Context, path string) error {
 	switch runtime.GOOS {
 	case "darwin":
