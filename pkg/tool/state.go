@@ -156,18 +156,23 @@ const (
 )
 
 type StepEvent struct {
-	Kind            string                    `json:"kind"`
-	StepID          string                    `json:"step_id,omitempty"`
-	ToolName        string                    `json:"tool_name,omitempty"`
-	ToolDescription string                    `json:"tool_description,omitempty"`
-	Input           map[string]any            `json:"input,omitempty"`
-	Output          map[string]any            `json:"output,omitempty"`
-	Error           string                    `json:"error,omitempty"`
-	ActionID        string                    `json:"action_id,omitempty"`
-	ActionKind      string                    `json:"action_kind,omitempty"`
-	Duration        time.Duration             `json:"duration,omitempty"`
-	PlanUpdate      *event.PlanUpdatedPayload `json:"plan_update,omitempty"`
-	SuppressUI      bool                      `json:"suppress_ui,omitempty"`
+	Kind            string         `json:"kind"`
+	StepID          string         `json:"step_id,omitempty"`
+	ToolName        string         `json:"tool_name,omitempty"`
+	ToolDescription string         `json:"tool_description,omitempty"`
+	Input           map[string]any `json:"input,omitempty"`
+	Output          map[string]any `json:"output,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	ActionID        string         `json:"action_id,omitempty"`
+	ActionKind      string         `json:"action_kind,omitempty"`
+	Duration        time.Duration  `json:"duration,omitempty"`
+	// StartedAt is when the call began executing. The engine stamps it on
+	// every lifecycle event of a call (see stampStepStart), so a surface that
+	// only sees a later event — an output delta, a replay — can still say how
+	// long the call has been running.
+	StartedAt  time.Time                 `json:"started_at,omitempty"`
+	PlanUpdate *event.PlanUpdatedPayload `json:"plan_update,omitempty"`
+	SuppressUI bool                      `json:"suppress_ui,omitempty"`
 	// RetainAsHistory marks a completed execution attempt that must remain in
 	// the transcript when another lifecycle event reuses the same StepID. Shell
 	// commands use this when a sandboxed attempt finishes before an approval-gated
@@ -1746,6 +1751,40 @@ func NetworkApprovalPromptHookFromContext(ctx context.Context, fallback *State) 
 	return fallback.NetworkApprovalPromptHook()
 }
 
+// stepStarts remembers when each in-flight call started, keyed by StepID.
+var stepStarts sync.Map
+
+// stampStepStart fills evt.StartedAt for the events of a call that is
+// executing: the first start/delta event of a StepID fixes the time and later
+// events of the same call reuse it; the completion reuses and then forgets it.
+func stampStepStart(evt *StepEvent) {
+	id := strings.TrimSpace(evt.StepID)
+	if id == "" || !evt.StartedAt.IsZero() {
+		return
+	}
+	switch strings.TrimSpace(evt.Kind) {
+	case StepKindToolStarted, StepKindToolParallelStarted, StepKindToolOutputDelta:
+		v, _ := stepStarts.LoadOrStore(id, time.Now())
+		evt.StartedAt, _ = v.(time.Time)
+	case StepKindToolCompleted, StepKindToolParallelCompleted:
+		if v, ok := stepStarts.LoadAndDelete(id); ok {
+			evt.StartedAt, _ = v.(time.Time)
+		}
+	}
+}
+
+// withStepClock makes every event that goes through hook carry its call's
+// StartedAt, whichever tool emitted it.
+func withStepClock(hook StepHook) StepHook {
+	if hook == nil {
+		return nil
+	}
+	return func(ctx context.Context, evt StepEvent) {
+		stampStepStart(&evt)
+		hook(ctx, evt)
+	}
+}
+
 func WithStepHook(ctx context.Context, hook StepHook) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1756,13 +1795,13 @@ func WithStepHook(ctx context.Context, hook StepHook) context.Context {
 func StepHookFromContext(ctx context.Context, fallback *State) StepHook {
 	if ctx != nil {
 		if hook, _ := ctx.Value(ctxKeyStepHook).(StepHook); hook != nil {
-			return hook
+			return withStepClock(hook)
 		}
 	}
 	if fallback == nil {
 		return nil
 	}
-	return fallback.StepHook()
+	return withStepClock(fallback.StepHook())
 }
 
 func (s *State) SetSubagentApprovalHook(h SubagentApprovalHook) {
