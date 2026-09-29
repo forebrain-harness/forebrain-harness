@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22-bookworm AS frontend
+FROM node:26-bookworm AS frontend
 WORKDIR /repo
 COPY ai-elements-vue ./ai-elements-vue
 COPY frontend ./frontend
