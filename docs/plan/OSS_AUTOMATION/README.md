@@ -106,22 +106,22 @@
 
 | 计划 | 标题 | 优先级 | 工作量 | 依赖 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| [001](001-go-installable-module.md) | 并入 silk fork、去掉 replace，让模块可被 go install | P1 | S | — | AWAITING PUSH|
-| [002](002-release-version-identity.md) | VERSION 改三段 semver，二进制在任何安装方式下报告正确版本 | P1 | S | 001 | AWAITING PUSH|
+| [001](001-go-installable-module.md) | 并入 silk fork、去掉 replace，让模块可被 go install | P1 | S | — | DONE|
+| [002](002-release-version-identity.md) | VERSION 改三段 semver，二进制在任何安装方式下报告正确版本 | P1 | S | 001 | DONE|
 | [003](003-forebrain-exec.md) | ~~新增 `forebrain exec`~~ | — | — | — | DEFERRED（gateway 批次） |
-| [004](004-sqlite-build-requirement.md) | 缺 cgo/FTS5 时一句话报错并给出安装命令 | P2 | S | — | AWAITING PUSH|
-| [005](005-dictionary-download.md) | 首次需要时下载分词词典（校验值编进二进制） | P1 | M | 002 | AWAITING PUSH（代码已入库，实测待 G3）|
-| [006](006-contribution-conventions.md) | 贡献规范与社区文件：Conventional Commits、squash、DCO、模板、检查 | P1 | M | — | AWAITING PUSH|
-| [007](007-dependency-and-workflow-hygiene.md) | Dependabot、自动合并、actionlint、CI 补强 | P2 | S | 006 | AWAITING PUSH（自动合并待 G2）|
-| [008](008-release-automation.md) | release-please、UI 随 release PR 入库、五平台构建、Release 与 npm 发布、go install 验收 | P1 | L | 001, 002, 005, 006, 007 | AWAITING PUSH|
+| [004](004-sqlite-build-requirement.md) | 缺 cgo/FTS5 时一句话报错并给出安装命令 | P2 | S | — | DONE|
+| [005](005-dictionary-download.md) | 首次需要时下载分词词典（校验值编进二进制） | P1 | M | 002 | DONE（下载路径 CI+资产往返验证；本机链路不稳时错误为一句话且不重试风暴，词典就位后真实模型中文检索通过）|
+| [006](006-contribution-conventions.md) | 贡献规范与社区文件：Conventional Commits、squash、DCO、模板、检查 | P1 | M | — | DONE|
+| [007](007-dependency-and-workflow-hygiene.md) | Dependabot、自动合并、actionlint、CI 补强 | P2 | S | 006 | DONE（auto-merge 队列待下一个 Dependabot PR 观察）|
+| [008](008-release-automation.md) | release-please、UI 随 release PR 入库、五平台构建、Release 与 npm 发布、go install 验收 | P1 | L | 001, 002, 005, 006, 007 | DONE（v0.1.1 发布全绿；v0.1.0 为空快照，资产在 v0.1.1）|
 | [009](009-agent-ci-foundation-and-command.md) | ~~CI 自维护地基与 `/forebrain` 评论指令~~ | — | — | — | DEFERRED（已否决 CI 跑 agent；gateway 批次） |
 | [010](010-agent-pr-review.md) | ~~PR 自动审阅（CI agent）~~ | — | — | — | DEFERRED（gateway 批次） |
 | [011](011-agent-ci-fix-and-maintenance.md) | ~~main CI 失败自动修复；每周巡检（CI agent）~~ | — | — | — | DEFERRED（gateway 批次） |
-| [012](012-install-docs-and-maintainer-setup.md) | 安装文档、维护者文档、仓库配置脚本、首次上线清单 | P1 | M | 001, 002, 004–008 | TODO|
-| [013](013-docs-site-repository.md) | 文档站源码入库并推送到 `forebrain-harness.github.io`，Pages 自动部署，补上安装说明 | P1 | S | S0/S1 无；S2 依赖 004 与 008 首发 | IN PROGRESS（S0/S1 已提交推送且 G1 实测通过，S2 待 G3）|
+| [012](012-install-docs-and-maintainer-setup.md) | 安装文档、维护者文档、仓库配置脚本、首次上线清单 | P1 | M | 001, 002, 004–008 | DONE|
+| [013](013-docs-site-repository.md) | 文档站源码入库并推送到 `forebrain-harness.github.io`，Pages 自动部署，补上安装说明 | P1 | S | S0/S1 无；S2 依赖 004 与 008 首发 | DONE（S2 已合并部署，线上安装文档核对通过）|
 
 状态取值：TODO | IN PROGRESS | AWAITING PUSH（本地完成，等推送后实测）| DONE（真实仓库实测通过）|
-（G1 推送当前被 GitHub push protection 拦截——基线里一处测试假值命中 Slack token 模式，待 owner 在推送报错给出的网页链接里标记 false positive 后重推。）
+（已收官：v0.1.1 全自动发布成功。）
 DEFERRED（推迟到 gateway 批次）| BLOCKED（附一句原因）| REJECTED（附一句理由）
 
 ## 依赖说明
