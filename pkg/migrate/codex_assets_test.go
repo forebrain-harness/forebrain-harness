@@ -91,6 +91,14 @@ func TestGuangfaSampleClaudeProjectConfig(t *testing.T) {
 
 	safetyBody, err := os.ReadFile(filepath.Join(project, ".forebrain", "safety.json"))
 	if err != nil {
+		// The write path reports what it did (and why it did not) through the
+		// project notes; a missing file without them is undebuggable on a
+		// machine that is not the developer's.
+		for _, p := range report.Projects {
+			if p.Path == project {
+				t.Logf("project notes: %v", p.Notes)
+			}
+		}
 		t.Fatal(err)
 	}
 	if got := strings.Count(string(safetyBody), `"shell"`); got < 5 {

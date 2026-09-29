@@ -26,7 +26,13 @@ jobs:
       - name: Install CGO and sandbox deps
         # bubblewrap is the Linux sandbox backend; without it the safety
         # manager fails closed at startup and the whole suite cannot run.
-        run: sudo apt-get update && sudo apt-get install -y build-essential bubblewrap
+        # Ubuntu 24.04 confines unprivileged user namespaces behind AppArmor,
+        # which stops bwrap from setting up its uid map, so the restriction is
+        # lifted for this runner. ripgrep is what the shell tool's read-only
+        # code search invokes.
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential bubblewrap ripgrep
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
       - run: go mod verify
       - run: scripts/check-release-versions.sh
       - run: go vet ./...
