@@ -402,3 +402,17 @@ func TestStandaloneReviewLeavesTypeAheadForTheTUI(t *testing.T) {
 		t.Fatalf("the page consumed the type-ahead: %q left, want %q", rest, "hello")
 	}
 }
+
+func TestToolOutputBlockKeepsOneForegroundDespiteCommandColours(t *testing.T) {
+	out := formatToolOutputBlock("plain \x1b[0mafter reset\n\x1b[97mbright white\x1b[39m tail")
+	for _, seq := range []string{"\x1b[0mafter", "\x1b[97m", "\x1b[39m"} {
+		if strings.Contains(out, seq) {
+			t.Fatalf("command colour %q survived into the output block: %q", seq, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, thinkingColor) {
+			t.Fatalf("row not painted in the output colour: %q", line)
+		}
+	}
+}
