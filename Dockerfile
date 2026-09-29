@@ -9,7 +9,7 @@ RUN corepack enable && corepack prepare pnpm@10.24.0 --activate
 RUN pnpm install --frozen-lockfile
 RUN pnpm run build
 
-FROM golang:1.26-bookworm AS gobuild
+FROM golang:1.27-bookworm AS gobuild
 ARG TARGETARCH
 ARG FOREBRAIN_VERSION=
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev libsqlite3-dev && rm -rf /var/lib/apt/lists/* \
