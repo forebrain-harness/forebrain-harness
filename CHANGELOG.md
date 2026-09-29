@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/forebrain-harness/forebrain-harness/compare/v0.1.0...v0.1.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **release:** pass the cross C compiler as one assignment ([#21](https://github.com/forebrain-harness/forebrain-harness/issues/21)) ([2f4e623](https://github.com/forebrain-harness/forebrain-harness/commit/2f4e623e9940bdf39df034d1d28c8548a0438d89))
+
 ## 0.1.0 (2026-09-29)
 
 
