@@ -106,10 +106,27 @@ func sessionKey(ctx context.Context) (string, error) {
 }
 
 type sessionTodoItem struct {
-	ID         string `json:"id"`
-	Content    string `json:"content"`
-	Status     string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed,enum=cancelled"`
-	ActiveForm string `json:"active_form,omitempty"`
+	ID      string `json:"id"`
+	Content string `json:"content"`
+	Status  string `json:"status" jsonschema:"enum=pending,enum=in_progress,enum=completed,enum=cancelled"`
+	Title   string `json:"title,omitempty" jsonschema_description:"Short present-tense label shown while this row is in progress, e.g. 'Writing tests'. Defaults to content."`
+}
+
+// UnmarshalJSON accepts the title under its former name, active_form, so a
+// model that still sends it is understood.
+func (it *sessionTodoItem) UnmarshalJSON(b []byte) error {
+	type plain sessionTodoItem
+	aux := struct {
+		*plain
+		LegacyActiveForm string `json:"active_form"`
+	}{plain: (*plain)(it)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	if it.Title == "" {
+		it.Title = aux.LegacyActiveForm
+	}
+	return nil
 }
 
 // Both fields are optional on the wire: the handler reads the checklist back
@@ -134,10 +151,10 @@ func normalizeSessionTodoItems(in sessionTodoInput) []sessionTodoItem {
 			status = string(state.StatusPending)
 		}
 		out = append(out, sessionTodoItem{
-			ID:         id,
-			Content:    it.Content,
-			Status:     status,
-			ActiveForm: strings.TrimSpace(it.ActiveForm),
+			ID:      id,
+			Content: it.Content,
+			Status:  status,
+			Title:   strings.TrimSpace(it.Title),
 		})
 	}
 	return out
@@ -194,10 +211,10 @@ func newSessionTodoTool(st *State, stateRoot string) (*llm.Tool, error) {
 						st = state.StatusPending
 					}
 					items = append(items, state.Item{
-						ID:         it.ID,
-						Content:    it.Content,
-						Status:     st,
-						ActiveForm: it.ActiveForm,
+						ID:      it.ID,
+						Content: it.Content,
+						Status:  st,
+						Title:   it.Title,
 					})
 				}
 				l, err := state.Replace(stateRoot, sid, items)
@@ -216,7 +233,7 @@ func newSessionTodoTool(st *State, stateRoot string) (*llm.Tool, error) {
 
 // singleLineText normalizes a model-written label to the single line its field
 // semantically is: runs of any whitespace (spaces, tabs, newlines) collapse to
-// one space. An active_form like "step\tone" or a content carrying a literal
+// one space. A title like "step\tone" or a content carrying a literal
 // newline is not two rows of a plan — it is one label written carelessly — and
 // letting the raw bytes reach the terminal breaks every row painted below it.
 func singleLineText(s string) string {
@@ -246,7 +263,7 @@ func emitPlanUpdateStep(ctx context.Context, st *State, l state.List) {
 		if content == "" {
 			continue
 		}
-		active := singleLineText(item.ActiveForm)
+		active := singleLineText(item.Title)
 		if active == "" && item.Status == state.StatusInProgress {
 			active = content
 		}
