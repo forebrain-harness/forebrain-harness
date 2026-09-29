@@ -61,6 +61,10 @@ type RunState struct {
 	stop   func(error)
 	locked bool
 	input  *InputQueue
+	// child marks a subagent's run. It shares the controller with the
+	// foreground run so it can be cancelled by ID, but it is never "the current
+	// run" of a session: Current and Find skip it.
+	child bool
 }
 
 // Phase returns the current lifecycle phase.
@@ -135,22 +139,30 @@ func (c *Controller) Begin(ctx context.Context, runID, sessionID string) (*RunSt
 // Track registers an adapter-owned execution for cancellation. It does not
 // acquire a session slot because the adapter already owns that lifecycle.
 func (c *Controller) Track(runID, sessionID string, cancel context.CancelFunc) bool {
-	return c.track(runID, sessionID, cancel, nil)
+	return c.track(runID, sessionID, cancel, nil, false)
+}
+
+// TrackChild registers a subagent's run. It is cancellable by ID like any
+// tracked run, but Current and Find never return it, so a surface asking for
+// the session's active run always gets the foreground run rather than one of
+// its subagents (map order would otherwise pick between them at random).
+func (c *Controller) TrackChild(runID, sessionID string, cancel context.CancelFunc) bool {
+	return c.track(runID, sessionID, cancel, nil, true)
 }
 
 // TrackRuntime registers an adapter-owned execution and its input runtime.
 func (c *Controller) TrackRuntime(runID, sessionID string, cancel context.CancelFunc, rt *TurnInputRuntime) bool {
-	return c.track(runID, sessionID, cancel, rt)
+	return c.track(runID, sessionID, cancel, rt, false)
 }
 
-func (c *Controller) track(runID, sessionID string, cancel context.CancelFunc, rt *TurnInputRuntime) bool {
+func (c *Controller) track(runID, sessionID string, cancel context.CancelFunc, rt *TurnInputRuntime, child bool) bool {
 	if c == nil || runID == "" || cancel == nil {
 		return false
 	}
 	c.mu.Lock()
 	state := c.runs[runID]
 	if state == nil {
-		state = &RunState{ID: runID, SessionID: sessionID, ctx: context.Background(), phase: Running, input: NewInputQueueWithRuntime(rt)}
+		state = &RunState{ID: runID, SessionID: sessionID, ctx: context.Background(), phase: Running, input: NewInputQueueWithRuntime(rt), child: child}
 		c.runs[runID] = state
 	}
 	c.mu.Unlock()
@@ -267,8 +279,11 @@ func (c *Controller) Current() (runID, sessionID string, phase Phase, ok bool) {
 	defer c.mu.Unlock()
 	for id, state := range c.runs {
 		state.mu.Lock()
-		sid, p := state.SessionID, state.phase
+		sid, p, child := state.SessionID, state.phase, state.child
 		state.mu.Unlock()
+		if child {
+			continue
+		}
 		return id, sid, p, true
 	}
 	return "", "", Finished, false
@@ -284,9 +299,9 @@ func (c *Controller) Find(sessionID string) (runID string, phase Phase, ok bool)
 	defer c.mu.Unlock()
 	for id, state := range c.runs {
 		state.mu.Lock()
-		sid, p := state.SessionID, state.phase
+		sid, p, child := state.SessionID, state.phase, state.child
 		state.mu.Unlock()
-		if sid == sessionID {
+		if !child && sid == sessionID {
 			return id, p, true
 		}
 	}

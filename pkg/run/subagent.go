@@ -821,7 +821,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	}
 	detach := func() {}
 	if childRunID != "" && own.Control != nil {
-		own.Control.Track(childRunID, sid, cancel)
+		own.Control.TrackChild(childRunID, sid, cancel)
 		detach = func() { own.Control.Finish(childRunID) }
 	}
 	now := time.Now().Unix()

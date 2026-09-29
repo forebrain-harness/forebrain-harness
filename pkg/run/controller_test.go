@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -313,5 +314,33 @@ func TestControllerTracksAdapterCancelOnce(t *testing.T) {
 	}
 	if !c.Untrack("run-1") || c.Active() != 0 {
 		t.Fatal("untrack")
+	}
+}
+
+func TestCurrentAndFindNeverReturnSubagentRuns(t *testing.T) {
+	c := NewController()
+	if !c.Track("parent", "s1", func() {}) {
+		t.Fatal("track parent")
+	}
+	for i := 0; i < 8; i++ {
+		if !c.TrackChild(fmt.Sprintf("child-%d", i), "s1", func() {}) {
+			t.Fatal("track child")
+		}
+	}
+	// Map iteration order is random, so repeat to make a regression flaky-loud.
+	for i := 0; i < 200; i++ {
+		if id, _, _, ok := c.Current(); !ok || id != "parent" {
+			t.Fatalf("Current() = %q, %v; want the foreground run", id, ok)
+		}
+		if id, _, ok := c.Find("s1"); !ok || id != "parent" {
+			t.Fatalf("Find() = %q, %v; want the foreground run", id, ok)
+		}
+	}
+	if !c.Cancel("child-3", context.Canceled) {
+		t.Fatal("a subagent run must stay cancellable by ID")
+	}
+	c.Finish("parent")
+	if _, _, _, ok := c.Current(); ok {
+		t.Fatal("subagent runs alone must not count as the current run")
 	}
 }
