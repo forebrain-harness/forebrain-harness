@@ -66,3 +66,26 @@ Projects (web UI) and the project-level MCP files (`<root>/.forebrain/mcp_server
 - **LLM-facing prompt text must be provider-neutral and byte-stable**: system-prompt constants (see `pkg/agent/scope_discipline.go`) contain no model/tool/vendor names and are compile-time constants so the cached prompt prefix never shifts.
 - Every package carries a `doc.go`; keep it accurate when you change a package's role.
 - Keep package boundaries intact: entrypoints in `cmd/forebrain`, serving in `pkg/gateway`, run lifecycle in `pkg/run`, turn execution in `pkg/turn`, agent loop in `pkg/agent`, context assembly in `pkg/assembly`, tools in `pkg/tool`.
+
+## Development workflow (branch, commit, pull request)
+
+`main` is protected: every change lands through a pull request that passes all eight required checks. Direct pushes to `main` are rejected.
+
+1. Branch from latest `main` with a short slug: `fix/<what>`, `feat/<what>`, `docs/<what>`.
+2. Commit with the Conventional Commits header this repo enforces —
+   `<type>(<scope>): <subject>` (type: feat fix perf refactor test docs build ci chore revert; subject lowercase, no trailing period, ≤100 chars) —
+   and a body following the `.gitmessage` template: `Why:` / `What:` / `Prompt cache:` (required; write `unchanged: <reason>` when it does not affect model context) / `Verification:` (only commands actually run). Sign with `git commit -s -F <file>`; the DCO check requires a `Signed-off-by:` matching the author. `make hooks` installs the local hooks that check and auto-sign.
+3. Open the PR against `main`. The PR title must pass the same Conventional Commits check (the squash commit inherits title and body from the PR, so the PR description doubles as the commit body). The release automation reads these titles, so a wrong type silently changes what a release would include.
+4. All required checks must pass. The full Windows test suite runs as a non-blocking job (`continue-on-error`) until it is Windows-ready; everything else gates.
+
+Community rules, setup, and the DCO text live in `CONTRIBUTING.md`; issue and PR templates in `.github/`.
+
+## Release rules (what an agent may and may not do)
+
+Releases are fully automated; there is no manual publishing step, and hand-running `npm publish` or `gh release create/upload` is forbidden.
+
+- **Versions are derived from commit titles on `main`**, by release-please: `feat:` bumps the minor, `fix:`/`perf:`/`revert:` bump the patch, and a `!` in the title or a `BREAKING CHANGE:` footer marks breaking (still minor-only while on 0.x, to keep the module path un-versioned). `docs:`, `test:`, `ci:`, `chore:`, `build:`, and `refactor:` never trigger a release. Dependabot's `build(deps):` titles do not trigger one either — dependency upgrades ship with the next feat/fix.
+- **When `main` gains a releasable commit, the Release workflow runs release-please**, which opens or updates one pull request titled `chore(main): release X.Y.Z` containing the CHANGELOG, the version bumps (`VERSION` plus the six npm version fields), and a rebuilt web UI (`pkg/gateway/dist`) so `go install` builds carry a current frontend. It keeps the PR updated on every later push to `main`.
+- **Merging that release PR is the release itself.** The merge creates the `vX.Y.Z` tag and GitHub Release, then the pipeline builds five platforms (darwin/arm64, darwin/amd64 cross-compiled, linux/amd64, linux/arm64, windows/amd64 — all CGO), uploads the archives, the dictionary bundle and SHA256SUMS, publishes the six npm packages with provenance (platform packages before the launcher; an already-published version is skipped), and finally performs a real `go install -tags fts5 …@vX.Y.Z` as acceptance.
+- **Only the owner merges the release PR** — that click is the approval gate. An agent must prepare and verify it (checks green, CHANGELOG sane) but never merge, never push to `main` directly, never re-tag or delete a published tag (the Go checksum database already records it), and never publish by hand. If a release job fails, rerun that job; the pipeline is safe to re-enter (npm skips published versions, assets upload with `--clobber`).
+- To pin a specific version, add a `Release-As: X.Y.Z` footer to a commit body.
