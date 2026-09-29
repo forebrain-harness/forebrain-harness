@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/mattn/go-runewidth"
+	"github.com/muesli/termenv"
 )
 
 // TestRendererMeasuresTextInOneWidthModel pins the display-width model the
@@ -414,5 +415,31 @@ func TestToolOutputBlockKeepsOneForegroundDespiteCommandColours(t *testing.T) {
 		if !strings.HasPrefix(line, thinkingColor) {
 			t.Fatalf("row not painted in the output colour: %q", line)
 		}
+	}
+}
+
+// TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint pins that stripping the
+// command's colours does not also strip the renderer's own styling: the
+// "(no output)" placeholder its callers render faint stays faint.
+func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	placeholder := lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
+	if !strings.Contains(placeholder, "\x1b[2m") {
+		t.Fatalf("test setup: faint placeholder carries no faint code: %q", placeholder)
+	}
+	out := formatToolOutputBlock(placeholder)
+	if !strings.Contains(out, placeholder) {
+		t.Fatalf("placeholder lost its faint style: %q", out)
+	}
+	if !strings.HasPrefix(out, thinkingColor) || !strings.Contains(stripANSI(out), "└ "+toolNoOutputText) {
+		t.Fatalf("placeholder not drawn as an output row: %q", out)
+	}
+	// Command output that merely contains the words keeps the one-colour rule.
+	cmd := formatToolOutputBlock("\x1b[31mfailed\x1b[0m (no output)")
+	if strings.Contains(cmd, "\x1b[31m") || strings.Contains(cmd, "\x1b[2m") {
+		t.Fatalf("command output kept or gained styling: %q", cmd)
 	}
 }

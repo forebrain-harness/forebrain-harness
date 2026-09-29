@@ -1940,7 +1940,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if f.Kind == FrameTool {
 			if !toolStatusPending(f) {
 				if strings.EqualFold(title, "exit_plan_mode") && toolStatusDenied(f) {
-					content = lipgloss.NewStyle().Faint(true).Render("(no output)")
+					content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 					content = wrapCardContent(content, maxCardContentWidth()-2)
 					_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
 					_, _ = fmt.Fprintln(r.out)
@@ -1962,7 +1962,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
-				content = lipgloss.NewStyle().Faint(true).Render("(no output)")
+				content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 				content = wrapCardContent(content, maxCardContentWidth()-2)
 				_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
 			}
@@ -1976,7 +1976,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 			// Render it verbatim and never append the plan-file success affordance.
 			content = strings.TrimSpace(f.Content)
 			if content == "" {
-				content = lipgloss.NewStyle().Faint(true).Render("(no output)")
+				content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 			}
 			content = wrapCardContent(content, maxCardContentWidth()-2)
 			_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
@@ -2034,7 +2034,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		// Format tool output for display — parse JSON, extract sections, etc.
 		content = formatToolContentWithInput(title, content, r.cwd, f.ToolMeta.Input)
 		if content == "" {
-			content = lipgloss.NewStyle().Faint(true).Render("(no output)")
+			content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 		}
 		if toolStatusFailed(f) {
 			_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
@@ -3524,9 +3524,13 @@ func extractAnyFencedBody(content string) string {
 	return ""
 }
 
+// toolNoOutputText is the placeholder a tool card shows in place of an empty
+// body. Callers pass it styled faint; formatToolOutputBlock keeps that style.
+const toolNoOutputText = "(no output)"
+
 // formatToolOutputBlock wraps tool output lines with the tree-drawing prefix
-// ("  └ " for the first line, "    " for continuation). When content is empty
-// it returns a dimmed "(no output)" placeholder.
+// ("  └ " for the first line, "    " for continuation). Empty content renders
+// as nothing.
 func formatToolOutputBlock(content string) string {
 	content = strings.TrimRight(content, "\n")
 	if content == "" {
@@ -3541,6 +3545,12 @@ func formatToolOutputBlock(content string) string {
 	// override that paint mid-line and leave the rest of the block in the
 	// terminal's own foreground, so the output is drawn without them.
 	content = sgrPattern.ReplaceAllString(content, "")
+	if content == toolNoOutputText {
+		// The placeholder is the renderer's own text, not command output: it
+		// stays faint, as its callers styled it, instead of losing that style
+		// with the command's colours.
+		return thinkingColor + toolOutputLinePrefix(lipgloss.NewStyle().Faint(true).Render(toolNoOutputText), true, true) + sharedBlockReset
+	}
 	lines := strings.Split(content, "\n")
 	out := make([]string, 0, len(lines))
 	for i, line := range lines {
