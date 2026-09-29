@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk -F'/' '{$1=\"\"; NF-=2; print}')",
+      "Bash(grep -v '^\\\\s*$')",
+      "Bash(awk -F/ '{for\\(i=1;i<NF;i++\\) printf \"%s/\", $i; print \"\"}')",
+      "Bash(pip3 install *)",
+      "Bash(python3 *)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "code-review-graph"
+  ]
+}
