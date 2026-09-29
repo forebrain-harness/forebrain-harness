@@ -1115,6 +1115,7 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 			SkillPath:    strings.TrimSpace(meta.SkillPath),
 			ResultLines:  meta.ResultLines,
 			ResultOffset: meta.ResultOffset,
+			StartedAtMs:  meta.StartedAtMs,
 		},
 		ToolPhase: phase,
 		AgentID:   strings.TrimSpace(meta.AgentID),

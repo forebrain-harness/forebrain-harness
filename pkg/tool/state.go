@@ -141,6 +141,7 @@ const (
 	ctxKeyProjectKey           ctxKey = "forebrain_project_key"
 	ctxKeyToolUseID            ctxKey = "forebrain_tool_use_id"
 	ctxKeyToolStepID           ctxKey = "forebrain_tool_step_id"
+	ctxKeyToolStepStartedAt    ctxKey = "forebrain_tool_step_started_at"
 	ctxKeyPolicyApproved       ctxKey = "forebrain_policy_approved"
 	ctxKeySandboxBypass        ctxKey = "forebrain_sandbox_bypass_approved"
 	ctxKeyNetworkAccess        ctxKey = "forebrain_network_access_approved"
@@ -166,11 +167,12 @@ type StepEvent struct {
 	ActionID        string         `json:"action_id,omitempty"`
 	ActionKind      string         `json:"action_kind,omitempty"`
 	Duration        time.Duration  `json:"duration,omitempty"`
-	// StartedAt is when the call began executing. The engine stamps it on
-	// every lifecycle event of a call (see stampStepStart), so a surface that
-	// only sees a later event — an output delta, a replay — can still say how
-	// long the call has been running.
-	StartedAt  time.Time                 `json:"started_at,omitempty"`
+	// StartedAt is when the call began executing. The code that dispatches a
+	// call stamps it on the call's lifecycle events and hands it to the handler
+	// through WithToolStepStartedAt, so a surface that only sees a later event
+	// — an output delta, a replay — can still say how long the call has been
+	// running.
+	StartedAt  time.Time                 `json:"started_at,omitzero"`
 	PlanUpdate *event.PlanUpdatedPayload `json:"plan_update,omitempty"`
 	SuppressUI bool                      `json:"suppress_ui,omitempty"`
 	// RetainAsHistory marks a completed execution attempt that must remain in
@@ -534,6 +536,28 @@ func ToolStepIDFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(ctxKeyToolStepID).(string)
 	return strings.TrimSpace(v)
+}
+
+// WithToolStepStartedAt records when the call running under ctx began
+// executing, so the events its handler emits while it runs (output deltas)
+// carry the same StartedAt as the call's started event. The time belongs to
+// the call, not to its StepID: step ids are provider-issued and are not unique
+// across sessions sharing one process.
+func WithToolStepStartedAt(ctx context.Context, startedAt time.Time) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyToolStepStartedAt, startedAt)
+}
+
+// ToolStepStartedAtFromContext returns the start recorded by
+// WithToolStepStartedAt, or the zero time when the call has none.
+func ToolStepStartedAtFromContext(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	v, _ := ctx.Value(ctxKeyToolStepStartedAt).(time.Time)
+	return v
 }
 
 // WithToolCompletionCapture opens the slot one tool call reports its own
@@ -1751,40 +1775,6 @@ func NetworkApprovalPromptHookFromContext(ctx context.Context, fallback *State) 
 	return fallback.NetworkApprovalPromptHook()
 }
 
-// stepStarts remembers when each in-flight call started, keyed by StepID.
-var stepStarts sync.Map
-
-// stampStepStart fills evt.StartedAt for the events of a call that is
-// executing: the first start/delta event of a StepID fixes the time and later
-// events of the same call reuse it; the completion reuses and then forgets it.
-func stampStepStart(evt *StepEvent) {
-	id := strings.TrimSpace(evt.StepID)
-	if id == "" || !evt.StartedAt.IsZero() {
-		return
-	}
-	switch strings.TrimSpace(evt.Kind) {
-	case StepKindToolStarted, StepKindToolParallelStarted, StepKindToolOutputDelta:
-		v, _ := stepStarts.LoadOrStore(id, time.Now())
-		evt.StartedAt, _ = v.(time.Time)
-	case StepKindToolCompleted, StepKindToolParallelCompleted:
-		if v, ok := stepStarts.LoadAndDelete(id); ok {
-			evt.StartedAt, _ = v.(time.Time)
-		}
-	}
-}
-
-// withStepClock makes every event that goes through hook carry its call's
-// StartedAt, whichever tool emitted it.
-func withStepClock(hook StepHook) StepHook {
-	if hook == nil {
-		return nil
-	}
-	return func(ctx context.Context, evt StepEvent) {
-		stampStepStart(&evt)
-		hook(ctx, evt)
-	}
-}
-
 func WithStepHook(ctx context.Context, hook StepHook) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1795,13 +1785,13 @@ func WithStepHook(ctx context.Context, hook StepHook) context.Context {
 func StepHookFromContext(ctx context.Context, fallback *State) StepHook {
 	if ctx != nil {
 		if hook, _ := ctx.Value(ctxKeyStepHook).(StepHook); hook != nil {
-			return withStepClock(hook)
+			return hook
 		}
 	}
 	if fallback == nil {
 		return nil
 	}
-	return withStepClock(fallback.StepHook())
+	return fallback.StepHook()
 }
 
 func (s *State) SetSubagentApprovalHook(h SubagentApprovalHook) {

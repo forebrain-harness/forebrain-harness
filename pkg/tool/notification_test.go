@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 )
@@ -264,5 +265,39 @@ func TestOutputDeltaEventReportsTheCallStillRunning(t *testing.T) {
 	}
 	if payload.Summary != "running node scripts/build-all.mjs" {
 		t.Fatalf("delta summary = %q", payload.Summary)
+	}
+}
+
+func TestBuildToolMetaCarriesStartOnlyWhileRunning(t *testing.T) {
+	start := time.Now().Add(-90 * time.Second)
+	run := BuildToolMeta(StepEvent{Kind: StepKindToolOutputDelta, StepID: "s2", ToolName: "shell", StartedAt: start})
+	d, ok := run.RunningFor(time.Now())
+	if !ok || d < 89*time.Second {
+		t.Fatalf("running meta lacks elapsed: %v %v", d, ok)
+	}
+	done := BuildToolMeta(StepEvent{Kind: StepKindToolCompleted, StepID: "s2", ToolName: "shell", StartedAt: start})
+	if done.StartedAtMs != 0 {
+		t.Fatalf("settled meta still carries a start: %d", done.StartedAtMs)
+	}
+}
+
+// TestRunEventFromStepCarriesTheRunningStart pins that the canonical event —
+// what the web, a subagent's view and a reload read — carries the start as
+// well, not only the TUI's direct step hook.
+func TestRunEventFromStepCarriesTheRunningStart(t *testing.T) {
+	start := time.Now().Add(-30 * time.Second)
+	evt, ok := RunEventFromStep(context.Background(), "sess", "run", "tui", StepEvent{
+		Kind: StepKindToolStarted, StepID: "s3", ToolName: "shell",
+		Input: map[string]any{"command": "sleep 60"}, StartedAt: start,
+	})
+	if !ok {
+		t.Fatal("started step produced no run event")
+	}
+	var payload event.ToolCallStartedPayload
+	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		t.Fatalf("decode started payload: %v", err)
+	}
+	if payload.ToolMeta.StartedAtMs != start.UnixMilli() {
+		t.Fatalf("canonical started_at_ms = %d, want %d", payload.ToolMeta.StartedAtMs, start.UnixMilli())
 	}
 }

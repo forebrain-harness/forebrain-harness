@@ -315,3 +315,9 @@ func TestTrimStaleReadStatesKeepsFreshBaselines(t *testing.T) {
 		t.Fatal("the stale baseline survived")
 	}
 }
+
+func TestToolStepStartedAtIsAbsentWithoutADispatcher(t *testing.T) {
+	if got := ToolStepStartedAtFromContext(context.Background()); !got.IsZero() {
+		t.Fatalf("start without WithToolStepStartedAt = %v, want zero", got)
+	}
+}

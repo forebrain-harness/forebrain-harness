@@ -1097,3 +1097,35 @@ func TestRemoveGoCacheDirHandlesReadOnlyQuotaCandidate(t *testing.T) {
 		t.Fatalf("read-only quota candidate still exists: %v", err)
 	}
 }
+
+// TestShellOutputDeltasCarryTheCallsStart pins that a call's start travels
+// with the call's context: the deltas a handler emits while it runs carry the
+// start the dispatcher recorded, not one derived from the step id.
+func TestShellOutputDeltasCarryTheCallsStart(t *testing.T) {
+	st := NewState(t.TempDir())
+	var deltas []StepEvent
+	st.SetStepHook(func(_ context.Context, evt StepEvent) {
+		if evt.Kind == StepKindToolOutputDelta {
+			deltas = append(deltas, evt)
+		}
+	})
+	shell, err := NewShellTool(st, &AgentToolRuntime{
+		Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	start := time.Now().Add(-42 * time.Second).Round(time.Millisecond)
+	ctx := WithToolStepStartedAt(WithToolStepID(context.Background(), "shell-step-clock"), start)
+	if _, err := shell.Handle(ctx, `{"command":"printf live-output"}`); err != nil {
+		t.Fatalf("shell Handle: %v", err)
+	}
+	if len(deltas) == 0 {
+		t.Fatal("expected at least one shell output delta")
+	}
+	for _, evt := range deltas {
+		if !evt.StartedAt.Equal(start) {
+			t.Fatalf("delta StartedAt = %v, want the call's start %v", evt.StartedAt, start)
+		}
+	}
+}

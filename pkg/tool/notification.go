@@ -34,6 +34,7 @@ func RunEventFromStep(ctx context.Context, sessionID, runID, channel string, evt
 		AgentType: meta.AgentType, AgentKind: meta.AgentKind, Category: meta.Category,
 		SkillName: meta.SkillName, SkillPath: meta.SkillPath,
 		ResultLines: meta.ResultLines, ResultOffset: meta.ResultOffset,
+		StartedAtMs: meta.StartedAtMs,
 		// Origin is audit metadata; it rides on the canonical payload but never
 		// on ToolMeta, so no renderer can branch on it.
 		Origin: strings.TrimSpace(evt.Origin),
