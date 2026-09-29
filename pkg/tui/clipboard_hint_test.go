@@ -70,3 +70,27 @@ func TestToolOutputBlockKeepsOneForegroundDespiteCommandColours(t *testing.T) {
 		}
 	}
 }
+
+func TestSlashComposerSoftWrapsLongArgument(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	const width = 60
+	text := "/improve plan forebrain有一个问题需要解决：通过slash命令/model或者/connect命令修改当前生效的primary agent的模型后，FOREBRAIN_HOME/forebrain.yaml配置文件里的llm"
+	cursor := len([]rune(text))
+	block := r.buildComposerBlock(ComposerRenderState{Text: text, Cursor: &cursor}, width)
+	rows := 0
+	for _, line := range block.lines {
+		if w := runewidth.StringWidth(stripANSIForTest(line)); w >= width {
+			t.Fatalf("row is %d cells wide on a %d-cell terminal, the terminal would autowrap it: %q", w, width, line)
+		}
+		if strings.Contains(line, "improve") || strings.Contains(line, "llm") {
+			rows++
+		}
+	}
+	if rows < 2 {
+		t.Fatalf("long slash text was not wrapped across rows: %q", block.lines)
+	}
+	last := block.lines[block.cursorRow]
+	if !strings.Contains(last, "llm") {
+		t.Fatalf("caret row %d is not the last text row: %q", block.cursorRow, last)
+	}
+}
