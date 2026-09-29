@@ -454,6 +454,10 @@ type Renderer struct {
 	// Clipboard notification shown in the footer right side.
 	clipNotification string
 	clipNotifyTimer  *time.Timer
+
+	// clipboardImage is true while the system clipboard holds an image, which
+	// the composer advertises with a right-aligned hint above its top rule.
+	clipboardImage bool
 }
 
 type viewportBrowseState struct {

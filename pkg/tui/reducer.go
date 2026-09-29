@@ -2971,7 +2971,9 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 		// Without a queue preview, retain the usual single spacer before the
 		// composer card. A visible preview already provides that boundary and
 		// should sit directly against the card instead of leaving an empty row.
-		lines = append(lines, "")
+		// While the clipboard holds an image, that same row carries the paste
+		// hint, right-aligned over the card's top rule.
+		lines = append(lines, r.clipboardImageHintLine(termWidth))
 	}
 	cursorRow := len(lines) + 1 // +1 for the leading border line below
 	cursorCol := layout.cursorCol
@@ -5835,6 +5837,43 @@ func (r *Renderer) setClipNotification(text string) {
 		r.clipNotification = ""
 		r.paintViewportLocked()
 	})
+}
+
+// clipboardImageHintText is the composer hint shown while the clipboard holds
+// an image.
+const clipboardImageHintText = "Image in clipboard · ctrl+v to paste"
+
+// SetClipboardImageAvailable records whether the clipboard currently holds an
+// image and repaints when that changes.
+func (r *Renderer) SetClipboardImageAvailable(on bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.clipboardImage == on {
+		return
+	}
+	r.clipboardImage = on
+	if r.viewportMode {
+		r.paintViewportLocked()
+	}
+}
+
+// clipboardImageHintLine is the row above the composer's top rule: empty, or
+// the paste hint right-aligned when the clipboard holds an image. Caller holds
+// r.mu.
+func (r *Renderer) clipboardImageHintLine(termWidth int) string {
+	if !r.clipboardImage {
+		return ""
+	}
+	maxWidth := termWidth - sharedBlockFooterTruncateExtraRoom
+	hint := runewidth.Truncate(clipboardImageHintText, maxWidth, "…")
+	pad := maxWidth - runewidth.StringWidth(hint)
+	if maxWidth <= 0 || pad < 0 {
+		return ""
+	}
+	return strings.Repeat(" ", pad) + sharedBlockFooterStyle + hint + sharedBlockReset
 }
 
 func (r *Renderer) clipNotificationText() string {
