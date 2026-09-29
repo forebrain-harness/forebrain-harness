@@ -2271,7 +2271,7 @@ func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt 
 	body := toolBodyLines(full)
 	// Build the collapsed header from the Style A display parts.
 	// e.g. "○ Read types.go" or "○ Ran echo".
-	headerSummary := ToolDisplayHeader(b.frame, cwd)
+	headerSummary := ToolDisplayHeader(b.displayFrame(), cwd)
 	if headerSummary == "" && b.frame.Kind != FrameMemoryCompact {
 		if b.frame.Kind == FrameTool {
 			title := strings.TrimSpace(b.frame.Title)
@@ -2484,7 +2484,7 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 			return c.lines
 		}
 	}
-	lines, lineAgents := renderFrameLinesWithAgents(b.frame, width, theme, spinnerPhase, cwd)
+	lines, lineAgents := renderFrameLinesWithAgents(b.displayFrame(), width, theme, spinnerPhase, cwd)
 	c.valid = true
 	c.width = width
 	c.cwd = cwd
