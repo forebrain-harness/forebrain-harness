@@ -4,10 +4,6 @@
 ## What
 <!-- What changed: behavior, interfaces, dead code removed, renames. -->
 
-## Prompt cache
-<!-- Required. Write "unchanged: <reason>" if the change cannot affect the prompt-cache hit rate;
-     otherwise describe the effect on the cached prompt prefix and the hit rate before vs after. -->
-
 ## Verification
 <!-- The commands you actually ran and their results. List nothing you did not run. -->
 

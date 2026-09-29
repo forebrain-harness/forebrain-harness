@@ -18,7 +18,7 @@
 # the sign-off automatically and commit-msg checks the title.
 #
 # ── Body: one blank line after the title, wrap at <= 72 characters ─────────
-# The four sections below are required; keep unused optional sections
+# The three sections below are required; keep unused optional sections
 # commented out.
 
 Why:
@@ -30,14 +30,6 @@ What:
 # List the changes as bullets: behavior changes, interface changes, dead code
 # removed, renames.
 # -
-
-Prompt cache:
-# The input-token cache hit rate must never drop; this section is required.
-# Write "unchanged: <reason>" when the change cannot affect it, e.g.
-# "unchanged: storage only". When it affects prompt assembly, state:
-# - whether the session prefix (tools / system / injected instructions)
-#   changed, and how often it changes
-# - the hit rate before vs after: CacheRead / (CacheRead + CacheCreation + Input)
 
 Verification:
 # The commands actually run and their results; list nothing you did not run.
