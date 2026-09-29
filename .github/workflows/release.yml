@@ -156,7 +156,7 @@ jobs:
         run: |
           mkdir upload
           find artifacts -maxdepth 3 -type f \( -name 'forebrain_*' -o -name 'forebrain-dict.tar.gz' \) -exec cp {} upload/ \;
-          (cd upload && sha256sum * > SHA256SUMS)
+          (cd upload && sha256sum -- * > SHA256SUMS)
           gh release upload "$TAG" upload/* --clobber
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod, cache-dependency-path: go.sum }
