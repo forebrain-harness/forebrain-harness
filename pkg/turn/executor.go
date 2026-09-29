@@ -966,10 +966,10 @@ func copySlashSessionState(ctx Context, sourceSessionID, targetSessionID string)
 		items := make([]state.Item, 0, len(todos.Items))
 		for _, item := range todos.Items {
 			items = append(items, state.Item{
-				ID:         item.ID,
-				Content:    item.Content,
-				Status:     item.Status,
-				ActiveForm: item.ActiveForm,
+				ID:      item.ID,
+				Content: item.Content,
+				Status:  item.Status,
+				Title:   item.Title,
 			})
 		}
 		if _, err := state.Replace(stateRoot, targetSessionID, items); err != nil {

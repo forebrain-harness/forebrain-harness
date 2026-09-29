@@ -18,11 +18,30 @@ const (
 )
 
 type Item struct {
-	ID         string     `json:"id"`
-	Content    string     `json:"content"`
-	Status     TodoStatus `json:"status"`
-	ActiveForm string     `json:"active_form,omitempty"`
-	UpdatedAt  int64      `json:"updated_at"`
+	ID      string     `json:"id"`
+	Content string     `json:"content"`
+	Status  TodoStatus `json:"status"`
+	// Title is the present-tense label shown while the item is in progress
+	// ("Writing tests"), as opposed to Content, the checklist row.
+	Title     string `json:"title,omitempty"`
+	UpdatedAt int64  `json:"updated_at"`
+}
+
+// UnmarshalJSON reads the title under its former name, active_form, so a
+// checklist stored before the rename keeps its labels.
+func (it *Item) UnmarshalJSON(b []byte) error {
+	type plain Item
+	aux := struct {
+		*plain
+		LegacyActiveForm string `json:"active_form"`
+	}{plain: (*plain)(it)}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	if it.Title == "" {
+		it.Title = aux.LegacyActiveForm
+	}
+	return nil
 }
 
 type List struct {

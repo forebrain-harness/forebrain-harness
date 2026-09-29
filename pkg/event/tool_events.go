@@ -78,6 +78,9 @@ type ToolCallMeta struct {
 	// rendered rows. Absent on non-paging tools.
 	ResultLines  int `json:"result_lines,omitempty"`
 	ResultOffset int `json:"result_offset,omitempty"`
+	// StartedAtMs is when a still-executing call began (Unix milliseconds);
+	// surfaces show "running for N s" from it. Absent once the call settles.
+	StartedAtMs int64 `json:"started_at_ms,omitempty"`
 	// Origin distinguishes an explicit skill invocation from an LLM-initiated
 	// skill read for audit only. Surfaces must not branch on it.
 	Origin string `json:"origin,omitempty"`

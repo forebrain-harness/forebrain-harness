@@ -137,6 +137,9 @@ func BuildToolMeta(evt StepEvent) ToolMeta {
 		meta.ResultLines = n
 		meta.ResultOffset = intFromAny(evt.Output["offset"])
 	}
+	if meta.Status == "running" && !evt.StartedAt.IsZero() {
+		meta.StartedAtMs = evt.StartedAt.UnixMilli()
+	}
 	if name, path, ok := skillStepMetadata(evt); ok {
 		meta.Category = "skill"
 		meta.SkillName = name

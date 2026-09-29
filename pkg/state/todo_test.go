@@ -1,6 +1,7 @@
 package state
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -451,5 +452,22 @@ func TestTodoSave_InvalidatesCorrectly(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"items"`) {
 		t.Error("expected saved file to contain items key")
+	}
+}
+
+func TestItemReadsLegacyActiveForm(t *testing.T) {
+	var old, cur Item
+	if err := json.Unmarshal([]byte(`{"id":"1","content":"c","status":"in_progress","active_form":"Writing"}`), &old); err != nil || old.Title != "Writing" {
+		t.Fatalf("legacy name not read: %+v %v", old, err)
+	}
+	if err := json.Unmarshal([]byte(`{"id":"1","content":"c","status":"in_progress","title":"Writing","active_form":"stale"}`), &cur); err != nil || cur.Title != "Writing" {
+		t.Fatalf("title must win over the legacy name: %+v %v", cur, err)
+	}
+	b, err := json.Marshal(cur)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if stored := string(b); !strings.Contains(stored, `"title":"Writing"`) || strings.Contains(stored, "active_form") {
+		t.Fatalf("stored form is not title: %s", stored)
 	}
 }

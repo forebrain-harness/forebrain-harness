@@ -2910,3 +2910,40 @@ func TestPaintedCursorScrollsWithTheShadow(t *testing.T) {
 		t.Fatalf("a caret below the region moved: %+v", got)
 	}
 }
+
+func TestRunningToolHeaderShowsElapsed(t *testing.T) {
+	f := Frame{Kind: FrameTool, Title: "shell", Summary: "node x.mjs", ToolMeta: tool.ToolMeta{Status: "running"}}
+	f.ToolMeta.StartedAtMs = time.Now().Add(-75 * time.Second).UnixMilli()
+	b := &viewBlock{frame: f}
+	if got := ToolDisplayHeader(b.displayFrame(), ""); !strings.Contains(got, "1m 15s") {
+		t.Fatalf("running header lacks elapsed time: %q", got)
+	}
+	b.frame.ToolMeta.StartedAtMs = time.Now().UnixMilli()
+	if got := ToolDisplayHeader(b.displayFrame(), ""); strings.Contains(got, "0s") {
+		t.Fatalf("sub-second run shows elapsed: %q", got)
+	}
+}
+
+func TestSlashComposerSoftWrapsLongArgument(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	const width = 60
+	text := "/improve plan forebrain有一个问题需要解决：通过slash命令/model或者/connect命令修改当前生效的primary agent的模型后，FOREBRAIN_HOME/forebrain.yaml配置文件里的llm"
+	cursor := len([]rune(text))
+	block := r.buildComposerBlock(ComposerRenderState{Text: text, Cursor: &cursor}, width)
+	rows := 0
+	for _, line := range block.lines {
+		if w := runewidth.StringWidth(stripANSI(line)); w >= width {
+			t.Fatalf("row is %d cells wide on a %d-cell terminal, the terminal would autowrap it: %q", w, width, line)
+		}
+		if strings.Contains(line, "improve") || strings.Contains(line, "llm") {
+			rows++
+		}
+	}
+	if rows < 2 {
+		t.Fatalf("long slash text was not wrapped across rows: %q", block.lines)
+	}
+	last := block.lines[block.cursorRow]
+	if !strings.Contains(last, "llm") {
+		t.Fatalf("caret row %d is not the last text row: %q", block.cursorRow, last)
+	}
+}

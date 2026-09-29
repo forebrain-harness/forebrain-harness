@@ -515,6 +515,7 @@ func toolCallMetaFromWS(top map[string]any, nested map[string]any) event.ToolCal
 		meta.AgentKind = strings.TrimSpace(stringOr(metaMap["agent_kind"]))
 		meta.ResultLines = int(float64OrZero(metaMap["result_lines"]))
 		meta.ResultOffset = int(float64OrZero(metaMap["result_offset"]))
+		meta.StartedAtMs = int64(float64OrZero(metaMap["started_at_ms"]))
 	}
 	if meta.ToolName == "" {
 		meta.ToolName = strings.TrimSpace(stringOr(top["tool_name"]))

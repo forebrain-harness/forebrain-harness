@@ -32,13 +32,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/event",
-      "loc": 1428,
+      "loc": 1431,
       "fan_in": 8,
       "fan_out": 1
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 10775,
+      "loc": 10779,
       "fan_in": 0,
       "fan_out": 18
     },
@@ -98,7 +98,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/run",
-      "loc": 15794,
+      "loc": 15807,
       "fan_in": 3,
       "fan_out": 16
     },
@@ -122,7 +122,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/state",
-      "loc": 9619,
+      "loc": 9638,
       "fan_in": 11,
       "fan_out": 2
     },
@@ -140,13 +140,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
-      "loc": 19321,
+      "loc": 19390,
       "fan_in": 8,
       "fan_out": 8
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 41915,
+      "loc": 42154,
       "fan_in": 0,
       "fan_out": 20
     },

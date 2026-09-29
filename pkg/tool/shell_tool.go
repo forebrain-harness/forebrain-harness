@@ -418,6 +418,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	var outputEmitter *shellOutputEmitter
 	if step := StepHookFromContext(ctx, st); step != nil {
 		stepID := ToolStepIDFromContext(ctx)
+		startedAt := ToolStepStartedAtFromContext(ctx)
 		outputEmitter = newShellOutputEmitter(func(stream safety.OutputStream, chunk []byte) {
 			if len(chunk) == 0 {
 				return
@@ -427,6 +428,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 				StepID:          stepID,
 				ToolName:        req.toolName,
 				ToolDescription: req.toolDescription,
+				StartedAt:       startedAt,
 				Input: map[string]any{
 					"command": req.command,
 				},

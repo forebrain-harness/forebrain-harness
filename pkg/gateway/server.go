@@ -231,6 +231,9 @@ func gatewayToolMetaPayload(meta tool.ToolMeta) map[string]any {
 	if v := strings.TrimSpace(meta.SkillPath); v != "" {
 		out["skill_path"] = v
 	}
+	if meta.StartedAtMs > 0 {
+		out["started_at_ms"] = meta.StartedAtMs
+	}
 	if len(out) == 0 {
 		return nil
 	}
