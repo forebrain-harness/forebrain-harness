@@ -78,20 +78,18 @@ rules below.
 - **Breaking changes** are marked with `!` after the type/scope in the title,
   or with a `BREAKING CHANGE: <who is affected + how to migrate>` footer in the
   body.
-- The commit body uses the four sections `Why`, `What`, `Prompt cache`,
-  `Verification` (see `.gitmessage`, the repository commit template — enable it
+- The commit body uses the three sections `Why`, `What`, `Verification`
+  (see `.gitmessage`, the repository commit template — enable it
   with `git config commit.template .gitmessage`):
 
   ```
   Why:
   What:
-  Prompt cache:
   Verification:
   ```
 
-  `Prompt cache` is required even when the change cannot affect it — write
-  `unchanged: <reason>`. `Verification` lists only the commands you actually
-  ran. Optional sections: `Schema`, `Refs`, `BREAKING CHANGE`.
+  `Verification` lists only the commands you actually ran. Optional sections:
+  `Schema`, `Refs`, `BREAKING CHANGE`.
 
 The exact rules are enforced by `scripts/check-commit-message.sh`; when in
 doubt, run it on your message file.

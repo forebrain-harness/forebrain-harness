@@ -74,7 +74,7 @@ Projects (web UI) and the project-level MCP files (`<root>/.forebrain/mcp_server
 1. Branch from latest `main` with a short slug: `fix/<what>`, `feat/<what>`, `docs/<what>`.
 2. Commit with the Conventional Commits header this repo enforces —
    `<type>(<scope>): <subject>` (type: feat fix perf refactor test docs build ci chore revert; subject lowercase, no trailing period, ≤100 chars) —
-   and a body following the `.gitmessage` template: `Why:` / `What:` / `Prompt cache:` (required; write `unchanged: <reason>` when it does not affect model context) / `Verification:` (only commands actually run). Sign with `git commit -s -F <file>`; the DCO check requires a `Signed-off-by:` matching the author. `make hooks` installs the local hooks that check and auto-sign.
+   and a body following the `.gitmessage` template: `Why:` / `What:` / `Verification:` (only commands actually run). Sign with `git commit -s -F <file>`; the DCO check requires a `Signed-off-by:` matching the author. `make hooks` installs the local hooks that check and auto-sign.
 3. Open the PR against `main`. The PR title must pass the same Conventional Commits check (the squash commit inherits title and body from the PR, so the PR description doubles as the commit body). The release automation reads these titles, so a wrong type silently changes what a release would include.
 4. All required checks must pass. The full Windows test suite runs as a non-blocking job (`continue-on-error`) until it is Windows-ready; everything else gates.
 
