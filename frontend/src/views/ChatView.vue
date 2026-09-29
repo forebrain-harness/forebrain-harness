@@ -502,6 +502,7 @@
               <AlertTitle>{{ composerNotice.title }}</AlertTitle>
               <AlertDescription class="whitespace-pre-line">{{ composerNotice.detail }}</AlertDescription>
             </Alert>
+            <AutoContinueBanner :state="autoContinue" @cancel="cancelAutoContinue" />
             <div class="relative">
               <PendingInputQueuePopover
                 :preview="pendingInputPreview"
@@ -518,7 +519,9 @@
                     :bots-fetch-done="botsFetchDone" :during-run="isStreaming"
                     @queue-follow-up="markNextSubmissionAsQueued"
                     @edit-last-queued="restoreLastQueuedMessage"
-                    @interrupt-run="interruptAndSendPendingSteers" />
+                    @interrupt-run="interruptAndSendPendingSteers"
+                    @typed="cancelAutoContinue"
+                    @escape="cancelAutoContinue" />
                 </PromptInputBody>
                 <PromptInputFooter>
                   <div class="relative flex min-w-0 flex-1 items-center gap-1" ref="modeMenuRef">
@@ -660,6 +663,7 @@ import {
 import ForebrainPromptTextarea, { type BotOption } from '@/components/ForebrainPromptTextarea.vue'
 import AgentRosterPanel from '@/components/AgentRosterPanel.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
+import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import DiffView from '@/components/DiffView.vue'
 import ContextDebugPanel from '@/components/ContextDebugPanel.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
@@ -1007,6 +1011,8 @@ const {
   subagents,
   runtimeStatus,
   mcpStatus,
+  autoContinue,
+  cancelAutoContinue,
   contextSignals,
   pendingActionsVersion,
   pendingInputPreview,

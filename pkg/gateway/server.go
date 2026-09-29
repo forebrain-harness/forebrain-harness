@@ -875,7 +875,11 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		runEventBinding.Add(1)
 		if s.RunRT == nil {
 			runEvtSub.Bind(sid)
-			writeMsg(wsServerMsg{Op: "session_bound", RequestID: requestID, SessionID: sid, Message: "subscribed"})
+			bound := wsServerMsg{Op: "session_bound", RequestID: requestID, SessionID: sid, Message: "subscribed"}
+			if autoContinue, autoContinuePending := s.autoContinueSnapshot(sid); autoContinuePending {
+				bound.Data = map[string]any{"auto_continue": autoContinue}
+			}
+			writeMsg(bound)
 			return true, false
 		}
 		runEvtSub.BindBuffered(sid)
@@ -884,16 +888,19 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			runEvtSub.Unbind()
 			return false, false
 		}
+		// A continuation waiting on a usage limit is live state, not history:
+		// the page is told whether one is pending now, and the auto-continue
+		// events it replays up to highWater only draw what already happened.
+		// It is read after highWater, and the engine records a change before
+		// it publishes the event, so the snapshot is at least as new as every
+		// event the replay holds; anything later arrives live after it.
+		autoContinue, autoContinuePending := s.autoContinueSnapshot(sid)
 		writeMsg(wsServerMsg{
 			Op:        "session_bound",
 			RequestID: requestID,
 			SessionID: sid,
 			Message:   "subscribed",
-			Data: map[string]any{
-				"cursor":         cursor,
-				"high_water":     highWater,
-				"schema_version": event.RunEventSchemaVersion,
-			},
+			Data:      sessionBoundData(cursor, highWater, autoContinue, autoContinuePending),
 		})
 		next := cursor
 		for next < highWater {
@@ -1047,6 +1054,14 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				if stop != nil {
 					stop()
 				}
+				continue
+			}
+			if message.Op == wsOpCancelAutoContinue {
+				if validationErr := validateWSClientMessage(message); validationErr != nil {
+					writeMsg(wsServerMsg{Op: wsOpAutoContinueCancelAck, RequestID: message.RequestID, SessionID: message.SessionID, Error: validationErr.Error()})
+					continue
+				}
+				writeMsg(s.handleCancelAutoContinueMessage(r.Context(), message))
 				continue
 			}
 			if message.Op == "approve_action" || message.Op == "deny_action" {

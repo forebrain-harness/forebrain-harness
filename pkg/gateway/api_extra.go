@@ -155,6 +155,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Put("/heartbeat", s.handleHeartbeat)
 	api.Delete("/heartbeat", s.handleHeartbeat)
 
+	api.Get("/auto-continue", s.handleAutoContinue)
+	api.Delete("/auto-continue", s.handleAutoContinue)
+
 	api.Get("/config", s.handleConfigFile)
 	api.Put("/config", s.handleConfigFile)
 	api.Get("/channels", s.handleChannels)

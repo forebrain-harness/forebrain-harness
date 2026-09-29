@@ -35,6 +35,9 @@ var wsInboundOps = map[string]struct{}{
 	"mcp_resources":   {},
 	"mcp_tool_search": {},
 	"task_status":     {},
+	// cancel_auto_continue stops the continuation a session is waiting to
+	// run once a usage limit resets.
+	wsOpCancelAutoContinue: {},
 }
 
 // wsOutboundOps are ops the server sends that are NOT canonical run events:
@@ -50,6 +53,9 @@ var wsOutboundOps = map[string]struct{}{
 	// the same information, and the two would then be indistinguishable to a
 	// client that has to match a reply to its request.
 	"mcp_status_event": {},
+	// The answer to cancel_auto_continue. What the cancel changed reaches the
+	// session log as its own auto_continue_cancelled event.
+	wsOpAutoContinueCancelAck: {},
 }
 
 var wsOpsRequireRequestID = map[string]struct{}{
@@ -117,6 +123,10 @@ func validateWSClientMessage(m wsClientMsg) error {
 	case "approve_action", "deny_action", "submit_answer":
 		if strings.TrimSpace(m.ActionID) == "" {
 			return fmt.Errorf("action_id required for op: %s", op)
+		}
+	case wsOpCancelAutoContinue:
+		if strings.TrimSpace(m.SessionID) == "" {
+			return fmt.Errorf("session_id required for op: %s", op)
 		}
 	case "cancel_run":
 		if strings.TrimSpace(m.RunID) == "" {

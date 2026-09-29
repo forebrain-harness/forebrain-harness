@@ -46,6 +46,11 @@ const emit = defineEmits<{
   (e: 'queue-follow-up'): void
   (e: 'edit-last-queued'): void
   (e: 'interrupt-run'): void
+  // The reader typed, pasted or deleted in the composer (never a programmatic
+  // restore), and Escape with no run to interrupt: both stop a continuation
+  // waiting on a usage limit, as they do in the terminal.
+  (e: 'typed'): void
+  (e: 'escape'): void
 }>()
 
 const { textInput, setTextInput, submitForm, addFiles, clearFiles, files, removeFile } = usePromptInput()
@@ -584,6 +589,11 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
+  if (e.key === 'Escape') {
+    emit('escape')
+    return
+  }
+
   if (props.duringRun && ((e.altKey && e.key === 'ArrowUp') || (e.shiftKey && e.key === 'ArrowLeft'))) {
     e.preventDefault()
     emit('edit-last-queued')
@@ -628,6 +638,7 @@ function handlePaste(e: ClipboardEvent) {
 }
 
 function onInput() {
+  emit('typed')
   syncMentionState()
 }
 

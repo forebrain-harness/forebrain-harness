@@ -228,10 +228,13 @@ type Renderer struct {
 	footer         ComposerFooter
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
-	planMode       bool
-	composerTokens ComposerTokenStats
-	fullBodyMode   bool
-	cwd            string
+	planMode bool
+	// autoContinueNotice is the warning line under the composer while a
+	// conversation stopped by a usage limit waits to continue by itself.
+	autoContinueNotice string
+	composerTokens     ComposerTokenStats
+	fullBodyMode       bool
+	cwd                string
 	// spinnerPhase is the animation frame for in-flight tools' Braille spinner
 	// and for the indeterminate compact progress bar. It is derived from the
 	// time since spinnerEpoch rather than counted per paint, so the animation
@@ -4259,6 +4262,31 @@ func (r *Renderer) SetPlanMode(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.planMode = on
+}
+
+// SetAutoContinueNotice sets the warning line drawn under the composer while a
+// conversation stopped by a usage limit waits to continue by itself; "" removes
+// it. The caller repaints the composer.
+func (r *Renderer) SetAutoContinueNotice(text string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.autoContinueNotice = strings.TrimSpace(text)
+}
+
+// autoContinueNoticeLineLocked renders the auto-continue notice for a
+// termWidth-wide row, or "" when there is none. Caller holds r.mu.
+func (r *Renderer) autoContinueNoticeLineLocked(termWidth int) string {
+	if r.autoContinueNotice == "" || r.activeView != "" {
+		return ""
+	}
+	width := termWidth - sharedBlockFooterTruncateExtraRoom
+	if width <= 0 {
+		return ""
+	}
+	return autoContinueNoticeStyle + runewidth.Truncate(autoContinueNoticeGlyph+r.autoContinueNotice, width, "…") + sharedBlockReset
 }
 
 // planModeFooterLabel is the footer's Plan-mode segment, which also says how

@@ -124,6 +124,11 @@ func RunServeBlocking(ctx context.Context) error {
 		// intervene in would be worse than saying what is wrong.
 		FailOnRequiredMCP: true,
 	}))
+	// A web turn stopped by a spent usage allowance continues by itself once
+	// the allowance returns; the engine keeps the wait, and every page watching
+	// the session shows it and can cancel it.
+	core.SetAutoContinue(gw.autoContinueConfig())
+	defer core.StopAutoContinue()
 	svc := skill.NewServiceForWorkspace(root, runner.WorkspaceRoot)
 	svc.ProjectRoot = runner.LaunchProject.Project.Root
 	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), runner.LaunchProject) }

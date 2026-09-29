@@ -143,4 +143,21 @@ describe('ForebrainPromptTextarea', () => {
       Element.prototype.scrollIntoView = scrollIntoView
     }
   })
+  // Typing, and Escape with no run to interrupt, are how the reader stops a
+  // continuation waiting on a usage limit; a message restored into the
+  // composer is not the reader typing and must not stop it.
+  it('reports the reader typing and an idle Escape', async () => {
+    const { composer } = mountComposer()
+    composer.vm.restoreSubmission({ text: 'restored', attachments: [], mentionImages: [] }, [])
+    await nextTick()
+    expect(composer.emitted('typed')).toBeUndefined()
+
+    const textarea = composer.find('textarea')
+    await textarea.setValue('a')
+    expect(composer.emitted('typed')).toHaveLength(1)
+
+    await textarea.trigger('keydown', { key: 'Escape' })
+    expect(composer.emitted('escape')).toHaveLength(1)
+    expect(composer.emitted('interrupt-run')).toBeUndefined()
+  })
 })

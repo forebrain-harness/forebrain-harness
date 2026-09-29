@@ -1416,6 +1416,11 @@ export const forebrainApi = {
     return api.delete<{ cleared: string }>('/heartbeat', { params: { session_id: sessionId } }).then((res) => res.data)
   },
 
+  /** Stops the continuation a session is waiting to run once a usage limit resets. */
+  cancelAutoContinue(sessionId: string) {
+    return api.delete<{ cancelled: boolean }>('/auto-continue', { params: { session_id: sessionId } }).then((res) => res.data)
+  },
+
   permissionsExplain(params: { toolName: string; input?: string; sessionId?: string }) {
     return api
       .get<PermissionExplainResponse>('/permissions/explain', {

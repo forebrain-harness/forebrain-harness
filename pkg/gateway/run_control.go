@@ -4,6 +4,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,9 +16,11 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
@@ -525,4 +528,293 @@ func (s *Server) compactExplicitLimit() int {
 		return 0
 	}
 	return s.Runner.AppCfg.Compact.ModelAutoCompactTokenLimit
+}
+
+// Auto-continue on the web: the engine's continuation of a conversation stopped
+// by a usage limit runs here as a detached webchat turn, and a page cancels a
+// waiting one over the socket.
+
+// autoContinueTrigger names a continuation turn to hooks and telemetry, next
+// to "user" and "resume".
+const autoContinueTrigger = "auto_continue"
+
+// wsOpCancelAutoContinue is the client op that stops a session's pending
+// continuation, and wsOpAutoContinueCancelAck its reply.
+const (
+	wsOpCancelAutoContinue    = "cancel_auto_continue"
+	wsOpAutoContinueCancelAck = "auto_continue_cancel_ack"
+)
+
+// autoContinueConfig installs auto-continue on the gateway's Core. Only web
+// chat turns are continued: a channel user has no way to see the wait or
+// cancel it, so a channel conversation is never resumed behind their back.
+// The lifecycle is published on the run-event bus, which persists it to the
+// session's log and delivers it to every page observing the session.
+func (s *Server) autoContinueConfig() turn.AutoContinueConfig {
+	return turn.AutoContinueConfig{
+		Continue: s.continueAfterUsageLimit,
+		Events:   s.RunEvents(),
+		Surfaces: []turn.Surface{turn.SurfaceWebChat},
+	}
+}
+
+// continueAfterUsageLimit starts the continuation as a detached run. It is
+// detached for the same reason an approval resume is: the page that sent the
+// stopped turn may have been closed hours ago, and whichever pages are open
+// now observe the session through the event bus rather than own the run.
+//
+// The run is created before returning so a failure to start is reported to
+// the engine, which tells the pages; the turn itself runs on after it.
+func (s *Server) continueAfterUsageLimit(_ context.Context, plan turn.AutoContinuePlan, prompt string) error {
+	if s == nil || s.Core == nil {
+		return turn.ErrAutoContinueUnavailable
+	}
+	sid := strings.TrimSpace(plan.SessionID)
+	if sid == "" {
+		return turn.ErrAutoContinueUnavailable
+	}
+	// A run already in the session means it moved on without the
+	// continuation; starting a second run beside it would race the first.
+	if _, _, busy := s.runController().Find(sid); busy {
+		return turn.ErrAutoContinueUnavailable
+	}
+	ctx := context.Background()
+	startedAt := time.Now()
+	runID := "ws-" + fmt.Sprint(startedAt.UnixNano())
+	if s.RunRT != nil {
+		rr, err := s.RunRT.CreateRun(ctx, sid, prompt)
+		if err != nil {
+			return err
+		}
+		runID = rr.ID
+	}
+	runCtx, cancelCause := context.WithCancelCause(context.Background())
+	s.runStartedAt.Store(runID, startedAt)
+	// Tracked like any web run, so the page's stop control and the steer and
+	// queue inputs reach it by its run id.
+	s.runController().Track(runID, sid, func() { cancelCause(context.Canceled) })
+	var inputRT *run.TurnInputRuntime
+	if q, _, ok := s.runController().Queue(runID); ok {
+		q.SetChangeHook(func() {
+			s.appendPendingInputUpdated(context.Background(), runID, sid, toPendingInputPreview(q.Preview()))
+		})
+		inputRT = q.Runtime()
+	}
+	go s.runAutoContinuation(runCtx, sid, runID, prompt, startedAt, inputRT)
+	return nil
+}
+
+// runAutoContinuation runs the continuation turn and reports every way it can
+// end on the session's event log, the way the detached approval resume does.
+func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt string, startedAt time.Time, inputRT *run.TurnInputRuntime) {
+	ctx := context.Background()
+	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnStarted, event.TurnStartedPayload{})
+	if s.Sessions != nil {
+		turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: sid, ModelInput: prompt, RawInput: prompt})
+	}
+	agCtx := llm.WithAgentSessionID(runCtx, sid)
+	agCtx = tool.WithConversationSessionID(agCtx, sid)
+	agCtx = tool.WithRunID(agCtx, runID)
+	capture := run.NewPartialSessionCapture()
+	agCtx = run.WithPartialSessionCapture(agCtx, capture)
+	var streamed bool
+	partial := &turn.StreamPartial{}
+	agCtx = s.withAnswerStream(agCtx, runID, sid, &streamed, partial)
+	if inputRT != nil {
+		agCtx = run.WithTurnInputRuntime(agCtx, inputRT)
+	}
+	agCtx = process.AgentContextForProject(agCtx, s.stateRoot(), sid, s.projectKey())
+	agCtx = s.withDetachedGatewayApprovalHooks(agCtx, sid, runID)
+
+	outcome, err := s.Core.Submit(agCtx, turn.TurnRequest{
+		SessionID:                sid,
+		Origin:                   turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "webchat"},
+		Trigger:                  autoContinueTrigger,
+		UserText:                 prompt,
+		RawInput:                 prompt,
+		ExistingRunID:            runID,
+		AgentContextIsRunContext: true,
+	}, nil)
+	if outcome.Status == turn.TurnWaitingApproval && outcome.Resume != nil {
+		err = &tool.RequiresActionError{
+			RunID:           outcome.RunID,
+			ActionID:        outcome.Resume.ActionID,
+			ToolName:        outcome.Resume.ToolName,
+			SessionSnapshot: outcome.Resume.SessionSnapshot,
+		}
+	}
+	finishedAt := time.Now()
+	elapsed := finishedAt.Sub(startedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+
+	var gate *tool.RequiresActionError
+	switch {
+	case errors.As(err, &gate):
+		s.parkDetachedRunOnApproval(ctx, sid, runID, gate)
+		return
+	case errors.Is(err, context.Canceled):
+		s.persistCancelledGatewayTurn(sid, capture, partial)
+		if s.RunRT != nil {
+			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusCancelled)
+			_ = s.RunRT.CancelRunningDescendants(ctx, runID)
+		}
+		s.finishRun(ctx, sid, runID)
+		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"})
+		return
+	case err != nil:
+		// What the turn did before it failed stays in the transcript, so a
+		// further continuation — the engine arms one if this was the limit
+		// again — picks up after it rather than before it.
+		s.persistCancelledGatewayTurn(sid, capture, partial)
+		slog.Error("auto-continue turn failed", "run_id", runID, "session_id", sid, "err", err)
+		errText := llm.ExplainError(err)
+		s.finishRun(ctx, sid, runID)
+		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(err)})
+		if s.RunRT != nil {
+			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
+			_ = s.RunRT.FailRunningDescendants(ctx, runID)
+		}
+		return
+	}
+
+	answer := ""
+	if outcome.Result != nil {
+		answer = outcome.Result.TextContent()
+	}
+	if lc := s.liveCfg(); lc != nil {
+		answer = safety.SanitizeOutbound(lc, answer)
+	}
+	if strings.TrimSpace(answer) != "" && !streamed {
+		// Not streamed — sent whole by the provider, or held for the output
+		// guardrail — so it reaches the page once, as its stream would have.
+		_ = s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, sid, event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: answer}, time.Now()))
+	}
+	s.finishSuccessfulTurn(ctx, gatewayPostTurnOptions{
+		SessionID:       sid,
+		ChannelID:       "webchat",
+		RunID:           runID,
+		AssistantText:   answer,
+		RunStartedAt:    startedAt,
+		RunFinishedAt:   finishedAt,
+		WorkedMs:        elapsed.Milliseconds(),
+		AssistantResult: outcome.Result,
+		AppendAssistant: true,
+	})
+	s.finishRun(ctx, sid, runID)
+	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
+		Text:      answer,
+		ElapsedMS: elapsed.Milliseconds(),
+	})
+}
+
+// parkDetachedRunOnApproval leaves a detached run waiting on an approval
+// exactly as the web turn loop leaves one it owns: the pre-gate history and
+// the resumable wait are recorded, the gate is published for every page, and
+// the run is marked waiting so a decision from any page resumes it.
+func (s *Server) parkDetachedRunOnApproval(ctx context.Context, sid, runID string, gate *tool.RequiresActionError) {
+	if s.RunRT != nil {
+		if s.Sessions != nil && len(gate.SessionSnapshot) > 0 {
+			_ = s.Sessions.AppendMessageSequence(ctx, sid, gate.SessionSnapshot, "", "")
+		}
+		input, _ := json.Marshal(gate.ToolInput)
+		_ = s.RunRT.SetWaitingAction(ctx, runID, state.Wait{
+			RunID:           runID,
+			ActionID:        gate.ActionID,
+			ToolName:        gate.ToolName,
+			ToolInputJSON:   string(input),
+			SessionSnapshot: append([]llm.Message(nil), gate.SessionSnapshot...),
+			AgentID:         gate.AgentID,
+			SubagentType:    gate.SubagentType,
+			SubagentRunID:   strings.TrimSpace(gate.RunID),
+		})
+	}
+	if strings.TrimSpace(gate.RunID) == "" {
+		gate.RunID = runID
+	}
+	s.publishDetachedGatewayApprovalRequest(ctx, sid, gate)
+	s.runController().WaitApproval(runID)
+}
+
+// handleCancelAutoContinueMessage answers a page's cancel. It is answered by
+// the socket's reader, like an approval, so it takes effect even while the
+// connection's loop is busy.
+func (s *Server) handleCancelAutoContinueMessage(ctx context.Context, m wsClientMsg) wsServerMsg {
+	sid := strings.TrimSpace(m.SessionID)
+	reply := wsServerMsg{Op: wsOpAutoContinueCancelAck, RequestID: m.RequestID, SessionID: sid}
+	if sid == "" {
+		reply.Error = "session_id required for op: " + wsOpCancelAutoContinue
+		return reply
+	}
+	if owned, err := s.sessionOwned(ctx, sid); err != nil || !owned {
+		reply.Error = "unknown session"
+		return reply
+	}
+	cancelled := s.Core != nil && s.Core.CancelAutoContinue(ctx, sid, turn.AutoContinueCancelledByUser)
+	reply.Data = map[string]any{"cancelled": cancelled}
+	return reply
+}
+
+// autoContinueSnapshot is the pending continuation a page binding to sid is
+// told about. The event log alone cannot say it: a scheduled event from before
+// a restart describes a wait that no longer exists.
+func (s *Server) autoContinueSnapshot(sid string) (event.AutoContinueScheduledPayload, bool) {
+	if s == nil || s.Core == nil {
+		return event.AutoContinueScheduledPayload{}, false
+	}
+	plan, ok := s.Core.PendingAutoContinue(sid)
+	if !ok {
+		return event.AutoContinueScheduledPayload{}, false
+	}
+	return plan.Payload(), true
+}
+
+// sessionBoundData is the session_bound reply's data: where the replay starts
+// and ends, and the continuation pending right now, when there is one.
+func sessionBoundData(cursor, highWater int64, autoContinue event.AutoContinueScheduledPayload, pending bool) map[string]any {
+	data := map[string]any{
+		"cursor":         cursor,
+		"high_water":     highWater,
+		"schema_version": event.RunEventSchemaVersion,
+	}
+	if pending {
+		data["auto_continue"] = autoContinue
+	}
+	return data
+}
+
+// handleAutoContinue is the REST face of a session's pending continuation:
+// GET says whether one is waiting and when it runs, DELETE cancels it. The
+// page cancels over this rather than its observer socket, which may be
+// reconnecting at the moment the reader clicks.
+func (s *Server) handleAutoContinue(w http.ResponseWriter, r *http.Request) {
+	sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sid == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out := map[string]any{"session_id": sid, "pending": false}
+		if snapshot, ok := s.autoContinueSnapshot(sid); ok {
+			out["pending"] = true
+			out["auto_continue"] = snapshot
+		}
+		writeAgentsJSON(w, out)
+	case http.MethodDelete:
+		cancelled := s.Core != nil && s.Core.CancelAutoContinue(r.Context(), sid, turn.AutoContinueCancelledByUser)
+		writeAgentsJSON(w, map[string]any{"session_id": sid, "cancelled": cancelled})
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
 }

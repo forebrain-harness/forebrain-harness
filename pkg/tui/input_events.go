@@ -40,6 +40,10 @@ const (
 	inputEventFocusGained
 	inputEventFocusLost
 	inputEventDone
+	// inputEventWake is not input: the idle loop's wait returns it when a
+	// notification left the loop work of its own (a continuation whose wait
+	// just ended), so the loop runs it without waiting for a key.
+	inputEventWake
 )
 
 type inputHotkey string

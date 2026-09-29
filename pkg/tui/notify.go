@@ -832,6 +832,12 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	// transcript only after a resume.
 	case event.RunEventTurnError:
 		s.notifyTurnError(evt)
+	// The engine's auto-continue lifecycle: the wait is drawn from these, so a
+	// continuation armed, cancelled or fired by any path reads the same.
+	case event.RunEventAutoContinueScheduled, event.RunEventAutoContinueCancelled:
+		if msg, ok := autoContinueUIMessage(evt); ok {
+			s.notifyUI(msg)
+		}
 	}
 	return nil
 }
@@ -1168,6 +1174,15 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 		// semaphore, not a reentrant mutex, so configuring one here too would
 		// deadlock the second acquisition against the first.
 		turn.WithSessionSource(memory.SessionSourceTUI),
+		// A turn stopped by a spent usage allowance continues by itself once
+		// the allowance returns. The engine keeps the wait and the terminal
+		// shows it: the lifecycle arrives through the same event path as every
+		// other run event, and the continuation is handed to the event loop.
+		turn.WithAutoContinue(turn.AutoContinueConfig{
+			Continue: s.continueAfterUsageLimit,
+			Events:   event.SinkFunc(s.publishRunEvent),
+			Surfaces: []turn.Surface{turn.SurfaceTUI},
+		}),
 		turn.WithRunExecutor(env.NewRunExecutor(memory.SessionSourceTUI, process.RunExecutorOptions{
 			PreviewMax: 4096,
 			Finish:     s.tuiFinish,
@@ -1535,4 +1550,291 @@ type MCPResourcesMsg struct {
 	Server string
 	Items  []mcp.ResourceInfo
 	Err    string
+}
+
+// Auto-continue in the terminal: the notice while a conversation stopped by a
+// usage limit waits, Esc or typing to cancel it, and the continuation turn when
+// the wait ends. The waiting itself is the turn engine's; this section only
+// shows it and hands the engine's continuation to the event loop.
+
+// autoContinueNoticeStyle and autoContinueNoticeGlyph draw the notice under
+// the composer as a warning: it announces something that will happen without
+// the reader doing anything, which is exactly what they must be able to notice.
+const (
+	autoContinueNoticeStyle = "\x1b[38;5;214m"
+	autoContinueNoticeGlyph = "⚠ "
+)
+
+// AutoContinueScheduledMsg reports a continuation armed by the engine: the
+// conversation will resume by itself at ContinueAt.
+type AutoContinueScheduledMsg struct {
+	SessionID  string
+	RunID      string
+	ContinueAt time.Time
+	Code       string
+	Attempt    int
+}
+
+// AutoContinueCancelledMsg reports a continuation that ended without firing.
+type AutoContinueCancelledMsg struct {
+	SessionID string
+	Reason    string
+	Error     string
+}
+
+// AutoContinueDueMsg carries the engine's continuation to the event loop,
+// which submits Prompt as the conversation's next turn.
+type AutoContinueDueMsg struct {
+	SessionID string
+	Prompt    string
+}
+
+// autoContinueView is what the event loop knows about a pending continuation.
+type autoContinueView struct {
+	sessionID  string
+	continueAt time.Time
+	code       string
+	// announced is whether the transcript line has been drawn. A limit that
+	// ends a turn is announced after that turn's own error, so the line reads
+	// as the answer to it rather than appearing above it.
+	announced bool
+}
+
+// autoContinueCanceller is the optional half of Session that can stop a
+// pending continuation. It is optional so surfaces without an engine behind
+// them (tests, replay) need not grow a method they would stub.
+type autoContinueCanceller interface {
+	CancelAutoContinue(sessionID string) bool
+}
+
+// CancelAutoContinue stops the session's pending continuation on the reader's
+// behalf, and reports whether there was one.
+func (s *ChatSession) CancelAutoContinue(sessionID string) bool {
+	if s == nil || s.Core == nil {
+		return false
+	}
+	return s.Core.CancelAutoContinue(context.Background(), sessionID, turn.AutoContinueCancelledByUser)
+}
+
+// continueAfterUsageLimit is the engine's port into this surface. The turn is
+// not run here: it is handed to the event loop, which owns the composer, the
+// transcript and cancellation, and runs it the way it runs anything the reader
+// submits.
+func (s *ChatSession) continueAfterUsageLimit(_ context.Context, plan turn.AutoContinuePlan, prompt string) error {
+	if s == nil {
+		return turn.ErrAutoContinueUnavailable
+	}
+	s.tuiMu.Lock()
+	attached := s.uiNotify != nil
+	s.tuiMu.Unlock()
+	if !attached {
+		return turn.ErrAutoContinueUnavailable
+	}
+	s.notifyUI(AutoContinueDueMsg{SessionID: plan.SessionID, Prompt: prompt})
+	return nil
+}
+
+// autoContinueUIMessage turns an auto-continue lifecycle event into the
+// message the event loop acts on. started has no message of its own: the due
+// message that follows it is what the loop acts on.
+func autoContinueUIMessage(evt event.RunEvent) (any, bool) {
+	switch evt.Type {
+	case event.RunEventAutoContinueScheduled:
+		var p event.AutoContinueScheduledPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return nil, false
+		}
+		at, err := time.Parse(time.RFC3339, strings.TrimSpace(p.ContinueAt))
+		if err != nil {
+			return nil, false
+		}
+		return AutoContinueScheduledMsg{SessionID: evt.SessionID, RunID: evt.RunID, ContinueAt: at, Code: p.Code, Attempt: p.Attempt}, true
+	case event.RunEventAutoContinueCancelled:
+		var p event.AutoContinueCancelledPayload
+		_ = json.Unmarshal(evt.Payload, &p)
+		return AutoContinueCancelledMsg{SessionID: evt.SessionID, Reason: p.Reason, Error: p.Error}, true
+	}
+	return nil, false
+}
+
+// handleAutoContinueNotification applies one auto-continue message to the
+// event loop's state, reporting false for any other message.
+func handleAutoContinueNotification(renderer *Renderer, state *streamState, m any) bool {
+	switch msg := m.(type) {
+	case AutoContinueScheduledMsg:
+		if state == nil || !sameSessionID(msg.SessionID, state.sessionID) {
+			return true
+		}
+		state.autoContinue = &autoContinueView{sessionID: msg.SessionID, continueAt: msg.ContinueAt, code: msg.Code}
+		renderer.SetAutoContinueNotice(autoContinueFooterText(msg.Code, msg.ContinueAt, time.Now()))
+		if state.activeForeground == nil {
+			state.announceAutoContinue(renderer)
+		}
+		renderComposerWithState(renderer, state)
+		return true
+	case AutoContinueCancelledMsg:
+		if state == nil || state.autoContinue == nil || !sameSessionID(msg.SessionID, state.autoContinue.sessionID) {
+			return true
+		}
+		view := state.autoContinue
+		state.clearAutoContinue(renderer)
+		// A turn the reader sent is its own explanation; anything else ending
+		// the wait is said, so the notice already in scrollback is not left
+		// promising a continuation that will never come.
+		switch {
+		case msg.Reason == turn.AutoContinueSuperseded:
+		case msg.Reason == turn.AutoContinueUnavailable && view.announced:
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: autoContinueUnavailableText(msg.Error), Final: true})
+		case view.announced:
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", Final: true})
+		}
+		renderComposerWithState(renderer, state)
+		return true
+	case AutoContinueDueMsg:
+		// Only a wait this loop is still showing is continued. A reader who
+		// pressed Esc as the timer fired has cleared it, and the continuation
+		// that raced the key is dropped rather than run against their wish.
+		if state == nil || state.autoContinue == nil || !sameSessionID(msg.SessionID, state.autoContinue.sessionID) {
+			return true
+		}
+		state.clearAutoContinue(renderer)
+		prompt := strings.TrimSpace(msg.Prompt)
+		if prompt == "" {
+			return true
+		}
+		state.autoContinueDue = &ComposerSubmission{
+			Text:        prompt,
+			Parts:       []llm.ContentPart{llm.Text(prompt)},
+			DisplayText: prompt,
+		}
+		renderComposerWithState(renderer, state)
+		return true
+	}
+	return false
+}
+
+// announceAutoContinue draws the transcript line for a pending continuation,
+// once.
+func (s *streamState) announceAutoContinue(renderer *Renderer) {
+	if s == nil || s.autoContinue == nil || s.autoContinue.announced {
+		return
+	}
+	s.autoContinue.announced = true
+	renderer.RenderFrame(Frame{
+		Kind:  FrameStatus,
+		Title: autoContinueTranscriptText(s.autoContinue.code, s.autoContinue.continueAt, time.Now()),
+		Final: true,
+	})
+}
+
+// cancelAutoContinue is Esc or typing while a continuation waits. It reports
+// whether there was one, so Esc is consumed only when it did something.
+func (s *streamState) cancelAutoContinue(renderer *Renderer) bool {
+	if s == nil || s.autoContinue == nil {
+		return false
+	}
+	sessionID := s.autoContinue.sessionID
+	if canceller, ok := s.session.(autoContinueCanceller); ok && canceller.CancelAutoContinue(sessionID) {
+		// The engine's cancellation event clears the notice and says so in
+		// the transcript, the same way a cancel from any other surface does.
+		return true
+	}
+	// Nothing left to cancel in the engine: the timer fired as the key was
+	// pressed. Clearing here is what makes the racing continuation drop.
+	announced := s.autoContinue.announced
+	s.clearAutoContinue(renderer)
+	if announced {
+		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", Final: true})
+	}
+	return true
+}
+
+// leaveAutoContinue drops the pending or due continuation of the conversation
+// being switched away from.
+func (s *streamState) leaveAutoContinue(renderer *Renderer) {
+	if s == nil {
+		return
+	}
+	s.autoContinueDue = nil
+	if s.autoContinue == nil {
+		return
+	}
+	if canceller, ok := s.session.(autoContinueCanceller); ok {
+		canceller.CancelAutoContinue(s.autoContinue.sessionID)
+	}
+	s.clearAutoContinue(renderer)
+}
+
+func (s *streamState) clearAutoContinue(renderer *Renderer) {
+	if s == nil {
+		return
+	}
+	s.autoContinue = nil
+	renderer.SetAutoContinueNotice("")
+}
+
+// takeAutoContinueDue hands the loop a continuation that is due, once.
+func (s *streamState) takeAutoContinueDue() (ComposerSubmission, bool) {
+	if s == nil || s.autoContinueDue == nil {
+		return ComposerSubmission{}, false
+	}
+	sub := *s.autoContinueDue
+	s.autoContinueDue = nil
+	return sub, true
+}
+
+// autoContinueWake tells the idle loop's wait to return so it can run a due
+// continuation.
+func (s *streamState) autoContinueWake() bool {
+	return s != nil && s.autoContinueDue != nil
+}
+
+func sameSessionID(a, b string) bool {
+	return strings.TrimSpace(a) == strings.TrimSpace(b)
+}
+
+// autoContinueHeadline names what stopped the conversation.
+func autoContinueHeadline(code string) string {
+	if code == string(llm.ExplainRateLimitThrottle) {
+		return "Rate limited"
+	}
+	return "Usage limit reached"
+}
+
+// autoContinueTranscriptText is the line the transcript keeps.
+func autoContinueTranscriptText(code string, at, now time.Time) string {
+	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + " · esc or type to cancel"
+}
+
+// autoContinueFooterText is the live notice under the composer.
+func autoContinueFooterText(code string, at, now time.Time) string {
+	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + " · esc to cancel"
+}
+
+func autoContinueUnavailableText(detail string) string {
+	text := "Auto-continue could not start"
+	if detail = strings.TrimSpace(detail); detail != "" {
+		text += ": " + detail
+	}
+	return text
+}
+
+// autoContinueClock renders the continuation time on the reader's clock, as
+// coarsely as it can while staying unambiguous: the time alone today, the
+// weekday within the week, the date beyond it.
+func autoContinueClock(at, now time.Time) string {
+	at = at.In(now.Location())
+	clock := at.Format("3:04pm")
+	ay, am, ad := at.Date()
+	ny, nm, nd := now.Date()
+	switch {
+	case ay == ny && am == nm && ad == nd:
+		return clock
+	case at.After(now) && at.Sub(now) < 6*24*time.Hour:
+		return at.Format("Mon") + " " + clock
+	case ay == ny:
+		return at.Format("Jan 2") + ", " + clock
+	default:
+		return at.Format("Jan 2 2006") + ", " + clock
+	}
 }

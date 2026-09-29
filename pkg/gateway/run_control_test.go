@@ -8,15 +8,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 )
 
@@ -731,4 +735,259 @@ func TestWebAnswerStreamsAsItIsWritten(t *testing.T) {
 	s.Env.Deps.AppCfg.Agents.Defaults.Guardrails.Output.Enabled = &enabled
 	require.Nil(t, llm.StreamSinkFrom(s.withAnswerStream(ctx, "r2", "s1", &streamed, &turn.StreamPartial{})),
 		"an answer the output guardrail must judge whole is not streamed")
+}
+
+// recordingRunExecutor answers every turn with a fixed outcome and remembers
+// what it was asked to run.
+type recordingRunExecutor struct {
+	mu       sync.Mutex
+	requests []turn.TurnRequest
+	err      error
+	answer   string
+}
+
+func (x *recordingRunExecutor) Run(_ context.Context, req turn.TurnRequest, started func(string)) (*agent.Result, error) {
+	if started != nil {
+		started(req.ExistingRunID)
+	}
+	x.mu.Lock()
+	x.requests = append(x.requests, req)
+	err, answer := x.err, x.answer
+	x.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return &agent.Result{Parts: []llm.ContentPart{llm.Text(answer)}}, nil
+}
+
+func (x *recordingRunExecutor) last() turn.TurnRequest {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if len(x.requests) == 0 {
+		return turn.TurnRequest{}
+	}
+	return x.requests[len(x.requests)-1]
+}
+
+func usageLimitResettingAt(resetAt time.Time) error {
+	return &llm.APIError{
+		StatusCode: http.StatusTooManyRequests,
+		Type:       "usage_limit_reached",
+		RateLimit:  &llm.RateLimit{Quota: true, Plan: "plus", Reason: "usage_limit_reached", ResetAt: resetAt},
+	}
+}
+
+type autoContinueGateway struct {
+	server   *Server
+	sessions *state.SessionStore
+	executor *recordingRunExecutor
+	url      string
+}
+
+func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	runStore := &state.RunStore{DB: db}
+	executor := &recordingRunExecutor{answer: "picked up where it left off"}
+	// The web turn path resolves attachments through the session's runner.
+	cfg := &appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
+		Primary:      true,
+		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
+	}}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	require.NoError(t, runner.Load())
+	s := &Server{
+		Home: home, Sessions: sessions, RunRT: runStore, Runner: runner,
+		Core: turn.New(turn.WithRunEventStore(runStore), turn.WithSessionStore(sessions), turn.WithRunExecutor(executor)),
+	}
+	runner.Events = s.RunEvents()
+	s.Core.SetAutoContinue(s.autoContinueConfig())
+	t.Cleanup(s.Core.StopAutoContinue)
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	t.Cleanup(server.Close)
+	return &autoContinueGateway{server: s, sessions: sessions, executor: executor, url: "ws" + strings.TrimPrefix(server.URL, "http")}
+}
+
+// bind opens a page on the session and returns it with its session_bound reply.
+func (g *autoContinueGateway) bind(t *testing.T) (*websocket.Conn, wsServerMsg) {
+	t.Helper()
+	conn, _, err := websocket.DefaultDialer.Dial(g.url, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.NoError(t, conn.WriteJSON(wsClientMsg{Op: "bind_session", RequestID: "bind", SessionID: "session-ws"}))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		if msg.Op == "session_bound" {
+			return conn, msg
+		}
+	}
+}
+
+func readOp(t *testing.T, conn *websocket.Conn, op string) wsServerMsg {
+	t.Helper()
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		if msg.Op == op {
+			return msg
+		}
+	}
+}
+
+func boundAutoContinue(t *testing.T, bound wsServerMsg) (event.AutoContinueScheduledPayload, bool) {
+	t.Helper()
+	data, _ := bound.Data.(map[string]any)
+	raw, ok := data["auto_continue"]
+	if !ok {
+		return event.AutoContinueScheduledPayload{}, false
+	}
+	b, err := json.Marshal(raw)
+	require.NoError(t, err)
+	var payload event.AutoContinueScheduledPayload
+	require.NoError(t, json.Unmarshal(b, &payload))
+	return payload, true
+}
+
+// A web turn stopped by a usage limit schedules its continuation below the
+// surface: every page on the session hears it, a page opened later is told on
+// binding, and any page can cancel it.
+func TestWebTurnStoppedByUsageLimitSchedulesAContinuationEveryPageCanCancel(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	resetAt := time.Now().Add(3 * time.Hour).Truncate(time.Second)
+	g.executor.err = usageLimitResettingAt(resetAt)
+
+	conn, bound := g.bind(t)
+	_, pending := boundAutoContinue(t, bound)
+	require.False(t, pending, "nothing is waiting before any turn failed")
+
+	var send wsClientMsg
+	send.RequestID = "req-turn"
+	send.SessionID = "session-ws"
+	send.Message.Content = "summarize the repo"
+	require.NoError(t, conn.WriteJSON(send))
+
+	scheduled := readRunEventOfType(t, conn, event.RunEventAutoContinueScheduled)
+	var payload event.AutoContinueScheduledPayload
+	require.NoError(t, json.Unmarshal(scheduled.Payload, &payload))
+	require.Equal(t, resetAt.Add(5*time.Second).UTC().Format(time.RFC3339), payload.ContinueAt)
+	require.Equal(t, resetAt.UTC().Format(time.RFC3339), payload.ResetAt)
+	require.Equal(t, string(llm.ExplainRateLimitQuota), payload.Code)
+	require.Equal(t, "plus", payload.Plan)
+	require.Equal(t, 1, payload.Attempt)
+	readOp(t, conn, "run_error")
+
+	// A page opened mid-wait learns of it from the binding itself.
+	other, otherBound := g.bind(t)
+	snapshot, pending := boundAutoContinue(t, otherBound)
+	require.True(t, pending, "a page opened during the wait must be told about it")
+	require.Equal(t, payload.ContinueAt, snapshot.ContinueAt)
+
+	require.NoError(t, other.WriteJSON(wsClientMsg{Op: wsOpCancelAutoContinue, RequestID: "cancel-1", SessionID: "session-ws"}))
+	ack := readOp(t, other, wsOpAutoContinueCancelAck)
+	require.Empty(t, ack.Error)
+	require.Equal(t, map[string]any{"cancelled": true}, ack.Data)
+
+	// The first page hears the cancellation it did not send.
+	cancelled := readRunEventOfType(t, conn, event.RunEventAutoContinueCancelled)
+	var reason event.AutoContinueCancelledPayload
+	require.NoError(t, json.Unmarshal(cancelled.Payload, &reason))
+	require.Equal(t, turn.AutoContinueCancelledByUser, reason.Reason)
+	_, stillPending := g.server.Core.PendingAutoContinue("session-ws")
+	require.False(t, stillPending)
+
+	_, laterBound := g.bind(t)
+	_, pending = boundAutoContinue(t, laterBound)
+	require.False(t, pending, "a cancelled wait must not be offered to a page that binds afterwards")
+}
+
+func TestCancelAutoContinueNeedsASession(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	conn, _ := g.bind(t)
+	require.NoError(t, conn.WriteJSON(wsClientMsg{Op: wsOpCancelAutoContinue, RequestID: "cancel-1"}))
+	ack := readOp(t, conn, wsOpAutoContinueCancelAck)
+	require.Contains(t, ack.Error, "session_id required")
+}
+
+// The continuation itself runs as a detached web turn: pages that did not
+// send the stopped turn — or were opened long after it — watch it through the
+// session's event log, and the transcript records it like any other turn.
+func TestAutoContinuationRunsAsADetachedWebTurn(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	conn, _ := g.bind(t)
+
+	plan := turn.AutoContinuePlan{SessionID: "session-ws", RunID: "stopped-run", Origin: turn.Origin{Surface: turn.SurfaceWebChat}, Attempt: 1}
+	require.NoError(t, g.server.continueAfterUsageLimit(context.Background(), plan, turn.AutoContinuePrompt))
+
+	started := readRunEventOfType(t, conn, event.RunEventTurnStarted)
+	completed := readRunEventOfType(t, conn, event.RunEventTurnCompleted)
+	require.Equal(t, started.RunID, completed.RunID)
+	var done event.TurnCompletedPayload
+	require.NoError(t, json.Unmarshal(completed.Payload, &done))
+	require.Equal(t, "picked up where it left off", done.Text)
+
+	req := g.executor.last()
+	require.Equal(t, turn.AutoContinuePrompt, req.UserText)
+	require.Equal(t, autoContinueTrigger, req.Trigger)
+	require.Equal(t, turn.SurfaceWebChat, req.Origin.Surface)
+	require.Equal(t, started.RunID, req.ExistingRunID)
+	require.True(t, req.AgentContextIsRunContext)
+
+	messages, err := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
+	require.NoError(t, err)
+	var roles, contents []string
+	for _, m := range messages {
+		roles = append(roles, m.Role)
+		contents = append(contents, m.Content)
+	}
+	require.Equal(t, []string{"user", "assistant"}, roles)
+	require.Equal(t, turn.AutoContinuePrompt, contents[0])
+	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestAutoContinuationStandsDownWhenTheSessionIsBusy(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	require.True(t, g.server.runController().Track("run-in-flight", "session-ws", func() {}))
+	err := g.server.continueAfterUsageLimit(context.Background(), turn.AutoContinuePlan{SessionID: "session-ws"}, turn.AutoContinuePrompt)
+	require.ErrorIs(t, err, turn.ErrAutoContinueUnavailable)
+	require.Empty(t, g.executor.requests, "a second run must not start beside the one in flight")
+}
+
+func TestAutoContinueRESTReportsAndCancelsTheWait(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	g.executor.err = usageLimitResettingAt(time.Now().Add(time.Hour))
+	_, _ = g.server.Core.Submit(context.Background(), turn.TurnRequest{SessionID: "session-ws", Origin: turn.Origin{Surface: turn.SurfaceWebChat}}, nil)
+
+	call := func(method string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(method, "/api/auto-continue?session_id=session-ws", nil)
+		rec := httptest.NewRecorder()
+		g.server.handleAutoContinue(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+	got := call(http.MethodGet)
+	require.Equal(t, true, got["pending"])
+	require.NotEmpty(t, got["auto_continue"].(map[string]any)["continue_at"])
+
+	require.Equal(t, true, call(http.MethodDelete)["cancelled"])
+	require.Equal(t, false, call(http.MethodGet)["pending"])
+	require.Equal(t, false, call(http.MethodDelete)["cancelled"])
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auto-continue?session_id=someone-else", nil)
+	rec := httptest.NewRecorder()
+	g.server.handleAutoContinue(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code, "another agent's session is not this page's to inspect")
 }

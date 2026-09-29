@@ -25,4 +25,12 @@
 // Path resolution is surface-specific and supplied by the caller through
 // Resolver: local composers resolve against a working directory, while
 // server-backed surfaces resolve strictly inside a workspace root.
+//
+// The package also owns auto-continue (in submit.go): a turn stopped by a
+// spent usage allowance whose reset the provider stated is continued by the
+// runtime once the allowance returns. Submit arms the wait on such a failure
+// and any later turn in the session supersedes it, so the terminal and the web
+// show, cancel and fire the same continuation; a surface supplies only the
+// port that runs the continuation turn and a sink for the auto_continue_*
+// lifecycle events.
 package turn
