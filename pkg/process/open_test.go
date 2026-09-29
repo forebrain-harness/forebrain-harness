@@ -152,6 +152,10 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The raw config below references ${OPENAI_API_KEY}; the test must set it
+	// itself rather than lean on the developer's shell having it exported
+	// (CI has not), or Open fails before the assertion is reached.
+	t.Setenv("OPENAI_API_KEY", "test-key")
 	cfg := activeAgentTestConfig()
 	cfgPath := filepath.Join(home, "forebrain.yaml")
 	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
