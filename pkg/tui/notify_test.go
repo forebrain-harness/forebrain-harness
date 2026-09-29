@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -434,4 +436,251 @@ func waitForQueuedNotifications(t *testing.T, session *ChatSession) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("notification queue never drained")
+}
+
+// cancellingSession is a fakeSession with an engine behind it that can stop a
+// pending continuation.
+type cancellingSession struct {
+	*fakeSession
+	pending   bool
+	cancelled []string
+}
+
+func (s *cancellingSession) CancelAutoContinue(sessionID string) bool {
+	s.cancelled = append(s.cancelled, sessionID)
+	was := s.pending
+	s.pending = false
+	return was
+}
+
+func scheduledMsg(at time.Time) AutoContinueScheduledMsg {
+	return AutoContinueScheduledMsg{SessionID: "s1", RunID: "run-1", ContinueAt: at, Code: string(llm.ExplainRateLimitQuota), Attempt: 1}
+}
+
+// statusLines is the transcript's status frames, in order.
+func statusLines(r *Renderer) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lines := []string{}
+	for _, block := range r.vm.blocks {
+		if block.frame.Kind == FrameStatus {
+			lines = append(lines, block.frame.Title)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func composerText(r *Renderer) string {
+	cursor := 0
+	return stripANSI(strings.Join(r.buildComposerBlock(ComposerRenderState{Cursor: &cursor}, 120).lines, "\n"))
+}
+
+func TestAutoContinueNoticeAndTranscriptLine(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "s1", session: &cancellingSession{fakeSession: &fakeSession{}}}
+	at := time.Now().Add(3 * time.Hour)
+
+	if !handleAutoContinueNotification(renderer, state, scheduledMsg(at)) {
+		t.Fatal("scheduled message not handled")
+	}
+	if state.autoContinue == nil || !state.autoContinue.announced {
+		t.Fatalf("an idle loop announces at once: %+v", state.autoContinue)
+	}
+	clock := autoContinueClock(at, time.Now())
+	transcript := statusLines(renderer)
+	if want := "Usage limit reached · continuing automatically at " + clock + " · esc or type to cancel"; !strings.Contains(transcript, want) {
+		t.Fatalf("transcript = %q, want %q", transcript, want)
+	}
+	if want := "⚠ Usage limit reached · continuing automatically at " + clock + " · esc to cancel"; !strings.Contains(composerText(renderer), want) {
+		t.Fatalf("composer = %q, want the notice %q", composerText(renderer), want)
+	}
+}
+
+func TestAutoContinueWaitsForTheTurnToEndBeforeAnnouncing(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "s1", activeForeground: &foregroundTurn{}}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+	if strings.Contains(statusLines(renderer), "continuing automatically") {
+		t.Fatal("announced above the error of the turn still ending")
+	}
+	state.activeForeground = nil
+	state.announceAutoContinue(renderer)
+	state.announceAutoContinue(renderer)
+	if n := strings.Count(statusLines(renderer), "continuing automatically"); n != 1 {
+		t.Fatalf("announced %d times, want once", n)
+	}
+}
+
+func TestAutoContinueIgnoresAnotherSession(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "other"}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+	if state.autoContinue != nil {
+		t.Fatal("took on another session's continuation")
+	}
+}
+
+func TestAutoContinueEscapeCancelsThroughTheEngine(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &cancellingSession{fakeSession: &fakeSession{}, pending: true}
+	state := &streamState{sessionID: "s1", session: session}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+
+	if !state.cancelAutoContinue(renderer) {
+		t.Fatal("cancel reported nothing to cancel")
+	}
+	if len(session.cancelled) != 1 || session.cancelled[0] != "s1" {
+		t.Fatalf("engine cancels = %v", session.cancelled)
+	}
+	// The engine's own cancellation event is what clears the notice.
+	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", Reason: turn.AutoContinueCancelledByUser})
+	if state.autoContinue != nil {
+		t.Fatal("still pending after the cancellation event")
+	}
+	if strings.Contains(composerText(renderer), "continuing automatically") {
+		t.Fatal("notice still under the composer")
+	}
+	if !strings.Contains(statusLines(renderer), "Auto-continue cancelled") {
+		t.Fatalf("transcript does not say the continuation was cancelled: %q", statusLines(renderer))
+	}
+	if state.cancelAutoContinue(renderer) {
+		t.Fatal("a second Escape found something to cancel")
+	}
+}
+
+func TestAutoContinueSupersededQuietly(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "s1"}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+	before := statusLines(renderer)
+	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", Reason: turn.AutoContinueSuperseded})
+	if state.autoContinue != nil {
+		t.Fatal("still pending after being superseded")
+	}
+	if statusLines(renderer) != before {
+		t.Fatalf("a turn the reader sent is its own explanation: %q", statusLines(renderer))
+	}
+}
+
+func TestAutoContinueDueBecomesTheNextSubmission(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	state := &streamState{sessionID: "s1"}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+	handleAutoContinueNotification(renderer, state, AutoContinueDueMsg{SessionID: "s1", Prompt: turn.AutoContinuePrompt})
+	if !state.autoContinueWake() {
+		t.Fatal("a due continuation must wake the idle loop")
+	}
+	sub, ok := state.takeAutoContinueDue()
+	if !ok || llm.TextContent(sub.Parts...) != turn.AutoContinuePrompt || sub.DisplayText != turn.AutoContinuePrompt {
+		t.Fatalf("submission = %+v, ok %v", sub, ok)
+	}
+	if _, again := state.takeAutoContinueDue(); again {
+		t.Fatal("the continuation was handed out twice")
+	}
+	if state.autoContinue != nil || strings.Contains(composerText(renderer), "continuing automatically") {
+		t.Fatal("notice outlived the continuation")
+	}
+}
+
+// A reader who pressed Escape as the timer fired has cleared the wait; the
+// continuation that raced the key is dropped rather than run.
+func TestAutoContinueDueAfterALocalCancelIsDropped(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &cancellingSession{fakeSession: &fakeSession{}, pending: false}
+	state := &streamState{sessionID: "s1", session: session}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+	if !state.cancelAutoContinue(renderer) {
+		t.Fatal("Escape must be consumed while the notice is up")
+	}
+	handleAutoContinueNotification(renderer, state, AutoContinueDueMsg{SessionID: "s1", Prompt: turn.AutoContinuePrompt})
+	if state.autoContinueWake() {
+		t.Fatal("ran a continuation the reader cancelled")
+	}
+}
+
+func TestAutoContinueLeftBehindOnSessionSwitch(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	session := &cancellingSession{fakeSession: &fakeSession{}, pending: true}
+	state := &streamState{sessionID: "s1", session: session}
+	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
+	state.leaveAutoContinue(renderer)
+	if len(session.cancelled) != 1 || state.autoContinue != nil || state.autoContinueWake() {
+		t.Fatalf("cancels %v, pending %+v", session.cancelled, state.autoContinue)
+	}
+}
+
+func TestAutoContinueUIMessageFromEvents(t *testing.T) {
+	at := time.Date(2026, 9, 30, 2, 10, 5, 0, time.UTC)
+	evt := event.NewRunEvent("e1", "run-1", "s1", event.RunEventAutoContinueScheduled,
+		turn.AutoContinuePlan{ContinueAt: at, Code: "rate_limit_throttle", Attempt: 2}.Payload(), time.Now())
+	msg, ok := autoContinueUIMessage(evt)
+	scheduled, isScheduled := msg.(AutoContinueScheduledMsg)
+	if !ok || !isScheduled || !scheduled.ContinueAt.Equal(at) || scheduled.Code != "rate_limit_throttle" || scheduled.SessionID != "s1" {
+		t.Fatalf("message = %#v", msg)
+	}
+	evt = event.NewRunEvent("e2", "run-1", "s1", event.RunEventAutoContinueCancelled,
+		event.AutoContinueCancelledPayload{Reason: turn.AutoContinueUnavailable, Error: "closed"}, time.Now())
+	msg, _ = autoContinueUIMessage(evt)
+	if cancelled, ok := msg.(AutoContinueCancelledMsg); !ok || cancelled.Reason != turn.AutoContinueUnavailable || cancelled.Error != "closed" {
+		t.Fatalf("message = %#v", msg)
+	}
+	if _, ok := autoContinueUIMessage(event.NewRunEvent("e3", "run-1", "s1", event.RunEventAutoContinueStarted, nil, time.Now())); ok {
+		t.Fatal("started is acted on through the due message, not on its own")
+	}
+}
+
+func TestAutoContinueHeadlineNamesAThrottle(t *testing.T) {
+	now := time.Date(2026, 9, 29, 23, 0, 0, 0, time.UTC)
+	got := autoContinueFooterText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now)
+	if got != "Rate limited · continuing automatically at 11:02pm · esc to cancel" {
+		t.Fatalf("footer = %q", got)
+	}
+}
+
+func TestAutoContinueClock(t *testing.T) {
+	loc := time.FixedZone("test", 8*3600)
+	now := time.Date(2026, 9, 29, 23, 0, 0, 0, loc)
+	for _, tc := range []struct {
+		at   time.Time
+		want string
+	}{
+		{time.Date(2026, 9, 29, 23, 40, 0, 0, loc), "11:40pm"},
+		{time.Date(2026, 9, 30, 2, 10, 0, 0, loc), "Wed 2:10am"},
+		{time.Date(2026, 10, 9, 9, 0, 0, 0, loc), "Oct 9, 9:00am"},
+		{time.Date(2027, 1, 2, 9, 0, 0, 0, loc), "Jan 2 2027, 9:00am"},
+		// A time given in another zone is read on the reader's clock.
+		{time.Date(2026, 9, 29, 18, 10, 0, 0, time.UTC), "Wed 2:10am"},
+	} {
+		if got := autoContinueClock(tc.at, now); got != tc.want {
+			t.Errorf("autoContinueClock(%v) = %q, want %q", tc.at, got, tc.want)
+		}
+	}
+}
+
+func TestContinueAfterUsageLimitNeedsAnAttachedSurface(t *testing.T) {
+	s := &ChatSession{}
+	plan := turn.AutoContinuePlan{SessionID: "s1"}
+	if err := s.continueAfterUsageLimit(context.Background(), plan, turn.AutoContinuePrompt); err != turn.ErrAutoContinueUnavailable {
+		t.Fatalf("detached surface: err = %v, want ErrAutoContinueUnavailable", err)
+	}
+	got := make(chan any, 1)
+	s.PrependUINotify(func(m any) {
+		select {
+		case got <- m:
+		default:
+		}
+	})
+	defer s.stopUINotificationDispatcher()
+	if err := s.continueAfterUsageLimit(context.Background(), plan, turn.AutoContinuePrompt); err != nil {
+		t.Fatalf("attached surface: %v", err)
+	}
+	select {
+	case m := <-got:
+		due, ok := m.(AutoContinueDueMsg)
+		if !ok || due.SessionID != "s1" || due.Prompt != turn.AutoContinuePrompt {
+			t.Fatalf("notification = %#v", m)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the continuation never reached the event loop")
+	}
 }

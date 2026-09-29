@@ -47,6 +47,7 @@ type Service struct {
 	approval           ApprovalGate
 	commands           CommandService
 	chatgptModels      ChatGPTModelsSource
+	autoContinue       *autoContinuer
 }
 
 type Option func(*Service)

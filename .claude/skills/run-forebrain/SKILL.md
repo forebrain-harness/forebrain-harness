@@ -48,6 +48,7 @@ $D stop
 | `drip` | sends the answer word by word, then finishes | that streamed output actually renders as it arrives |
 | `toolcall` | `enter_plan_mode`, then `exit_plan_mode` | a real approval overlay and the action row it leaves |
 | `ask` | one two-question `user_interaction` call | the real question form: tab bar, options, and the Other text field |
+| `limit` | 429 "usage limit reached" (with `resets_in_seconds`) until `FAKE_LIMIT_SECONDS` (default 20) after the first request, then like `reply` | auto-continue: the notice under the composer, Esc or typing to cancel it, and the continuation turn once the limit resets |
 
 ```bash
 $D start drip 'the answer arrives one word at a time as it streams' 0.6

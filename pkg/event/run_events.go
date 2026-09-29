@@ -38,6 +38,14 @@ const (
 	RunEventSessionSwitched        = "session_switched"
 	RunEventSubagentSpawned        = "subagent_spawned"
 	RunEventSubagentEnded          = "subagent_ended"
+	// The auto-continue lifecycle: a turn stopped by a spent usage allowance is
+	// resumed by the runtime itself once the allowance returns. Scheduled when
+	// the wait starts, then exactly one of started (the wait ran out and the
+	// continuation turn is being submitted) or cancelled (someone stopped it, a
+	// new turn took its place, or the surface could not start one).
+	RunEventAutoContinueScheduled = "auto_continue_scheduled"
+	RunEventAutoContinueStarted   = "auto_continue_started"
+	RunEventAutoContinueCancelled = "auto_continue_cancelled"
 )
 
 type RunEvent struct {
@@ -156,6 +164,43 @@ type TurnErrorDetail struct {
 	ResetAt string `json:"reset_at,omitempty"`
 	// RetryAfterSeconds is how long that wait was when the response arrived.
 	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+}
+
+// AutoContinueScheduledPayload says when a session stopped by a usage limit will
+// continue by itself. The times are absolute RFC 3339 stamps so every surface
+// renders them on its viewer's own clock, and a surface that draws the notice
+// long after the event recomputes the remaining wait instead of repeating it.
+type AutoContinueScheduledPayload struct {
+	// ContinueAt is when the continuation turn is submitted.
+	ContinueAt string `json:"continue_at"`
+	// ResetAt is when the provider said the allowance returns; ContinueAt is a
+	// moment after it, so a clock slightly ahead of the provider's does not
+	// spend the continuation on a request that is refused again.
+	ResetAt string `json:"reset_at,omitempty"`
+	// Code is the classified failure that stopped the turn: "rate_limit_quota"
+	// for a spent plan allowance, "rate_limit_throttle" for a request-rate
+	// limit that named its own wait.
+	Code string `json:"code,omitempty"`
+	// Plan names the subscription tier the allowance belongs to, when known.
+	Plan string `json:"plan,omitempty"`
+	// Attempt counts the continuations in a row this one would be, from 1.
+	Attempt int `json:"attempt,omitempty"`
+}
+
+// AutoContinueStartedPayload marks the wait running out: the continuation turn
+// is being submitted to the session. Prompt is the user turn it submits, so a
+// surface watching a run it did not start can show the message that began it.
+type AutoContinueStartedPayload struct {
+	Attempt int    `json:"attempt,omitempty"`
+	Prompt  string `json:"prompt,omitempty"`
+}
+
+// AutoContinueCancelledPayload ends a wait that never fired. Reason is one of
+// the turn package's AutoContinue* reasons; Error carries the surface's own
+// failure text when it could not start the turn.
+type AutoContinueCancelledPayload struct {
+	Reason string `json:"reason,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // TurnFailedPayload distinguishes a terminal failure from a streamed error.

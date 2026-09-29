@@ -1,4 +1,5 @@
 import { toCamelCase } from './case'
+import { parseAutoContinue, type AutoContinueState } from './autoContinue'
 
 const DEFAULT_BOT_MENTIONS = ['@forebrain', '@Forebrain']
 
@@ -41,6 +42,9 @@ export type ForebrainRunEventType =
   | 'goal_started'
   | 'goal_round_started'
   | 'goal_completed'
+  | 'auto_continue_scheduled'
+  | 'auto_continue_started'
+  | 'auto_continue_cancelled'
 
 export type ForebrainRunEvent = {
   id?: string
@@ -79,6 +83,14 @@ export type ForebrainSessionBoundMessage = {
   sessionId?: string
   message?: string
   sessionSwitched?: boolean
+  /**
+   * The last sequence the binding's replay covers. Events at or below it
+   * happened before the page bound; what they said about live state (a
+   * continuation waiting on a usage limit) is superseded by the snapshot below.
+   */
+  highWater?: number
+  /** The continuation this session is waiting to run, when there is one. */
+  autoContinue?: AutoContinueState
 }
 
 export type ForebrainTaskNotificationTask = {
@@ -426,11 +438,15 @@ export function parseForebrainSessionBoundMessage(raw: unknown): ForebrainSessio
   if (op !== 'session_bound') return null
   const data = asRecord(msg.data)
   const sessionSwitched = data?.session_switched === true || data?.sessionSwitched === true
+  const highWater = asNumber(data?.high_water)
+  const autoContinue = parseAutoContinue(data?.auto_continue)
   return {
     requestId: asTrimmedString(msg.request_id),
     sessionId: asTrimmedString(msg.session_id),
     message: asTrimmedString(msg.message),
     ...(sessionSwitched ? { sessionSwitched } : {}),
+    ...(highWater !== undefined ? { highWater } : {}),
+    ...(autoContinue ? { autoContinue } : {}),
   }
 }
 

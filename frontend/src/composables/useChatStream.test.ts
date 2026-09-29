@@ -2096,3 +2096,131 @@ describe('approval anchoring on the conversation timeline', () => {
     }
   })
 })
+
+/**
+ * A conversation stopped by a usage limit waits for the runtime to continue it.
+ * The wait is live state: the observer's binding says what is pending, events
+ * after the binding change it, and the replay that overlaps the history rows
+ * changes nothing — it may describe a wait a restarted gateway no longer has.
+ */
+describe('auto-continue after a usage limit', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  function observerEvent(socket: FakeChatWebSocket, id: string, sequence: number, type: string, payload: Record<string, unknown>) {
+    socket.message({
+      op: 'run_event',
+      data: { id, sequence, type, run_id: 'stopped-run', session_id: 's1', created_at: '2026-09-29T23:00:00Z', payload },
+    })
+  }
+
+  it('shows the wait the binding reports, follows live events, and lets the page cancel it', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+    ]
+    const cancelSpy = vi.spyOn(forebrainApi, 'cancelAutoContinue').mockResolvedValue({ cancelled: true })
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances[0]!
+      observer.open()
+      expect(JSON.parse(observer.sent[0] ?? '{}')).toMatchObject({ op: 'bind_session', session_id: 's1' })
+
+      observer.message({
+        op: 'session_bound',
+        session_id: 's1',
+        data: { cursor: 0, high_water: 5, auto_continue: { continue_at: '2026-09-30T02:10:05Z', code: 'rate_limit_quota', attempt: 1 } },
+      })
+      expect(stream.autoContinue.value).toMatchObject({ continueAt: '2026-09-30T02:10:05Z', attempt: 1 })
+
+      // The replay up to the binding's high water is already accounted for.
+      observerEvent(observer, 'evt-replayed-cancel', 4, 'auto_continue_cancelled', { reason: 'user' })
+      observerEvent(observer, 'evt-replayed-start', 5, 'auto_continue_started', { prompt: 'old continuation' })
+      expect(stream.autoContinue.value).not.toBeNull()
+      expect(stream.messages.value).toEqual([])
+
+      // A new turn superseded it, then the runtime armed the next attempt.
+      observerEvent(observer, 'evt-superseded', 6, 'auto_continue_cancelled', { reason: 'superseded' })
+      expect(stream.autoContinue.value).toBeNull()
+      observerEvent(observer, 'evt-scheduled', 7, 'auto_continue_scheduled', { continue_at: '2026-09-30T07:10:05Z', code: 'rate_limit_quota', attempt: 2 })
+      expect(stream.autoContinue.value).toMatchObject({ continueAt: '2026-09-30T07:10:05Z', attempt: 2 })
+      // Events are filed under the stopped run; they must not reopen its turn.
+      expect(stream.messages.value).toEqual([])
+
+      expect(stream.cancelAutoContinue()).toBe(true)
+      expect(stream.autoContinue.value).toBeNull()
+      expect(cancelSpy).toHaveBeenCalledWith('s1')
+      expect(stream.cancelAutoContinue()).toBe(false)
+
+      // The wait ran out on another page's watch: the continuation's message
+      // appears here too, as the user row a reload will show.
+      observerEvent(observer, 'evt-scheduled-2', 8, 'auto_continue_scheduled', { continue_at: '2026-09-30T08:10:05Z', code: 'rate_limit_quota', attempt: 1 })
+      observerEvent(observer, 'evt-started', 9, 'auto_continue_started', { attempt: 1, prompt: 'Continue from where you left off.' })
+      expect(stream.autoContinue.value).toBeNull()
+      expect(stream.messages.value.map((m) => [m.role, m.content])).toEqual([['user', 'Continue from where you left off.']])
+      // The same event arriving again draws nothing more.
+      observerEvent(observer, 'evt-started', 9, 'auto_continue_started', { attempt: 1, prompt: 'Continue from where you left off.' })
+      expect(stream.messages.value).toHaveLength(1)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      cancelSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  // The send that hit the limit hears the scheduled event on its own socket,
+  // which can beat the observer's binding to the page. The binding's snapshot
+  // is older than that event and must not take the notice down again.
+  it('keeps a wait the send socket reported before the observer bound', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's1'
+      const pendingSend = stream.send('summarize the repo')
+      const sendSocket = FakeChatWebSocket.instances[0]!
+      sendSocket.open()
+      sendSocket.message({ op: 'session_bound', request_id: 'r', session_id: 's1' })
+      sendSocket.message({ op: 'run_started', request_id: 'r', run_id: 'stopped-run', session_id: 's1' })
+      observerEvent(sendSocket, 'evt-scheduled', 12, 'auto_continue_scheduled', { continue_at: '2026-09-30T02:10:05Z', code: 'rate_limit_quota', attempt: 1 })
+      sendSocket.message({ op: 'run_error', request_id: 'r', run_id: 'stopped-run', session_id: 's1', error: 'Usage limit reached' })
+      await pendingSend
+      expect(stream.autoContinue.value).toMatchObject({ continueAt: '2026-09-30T02:10:05Z' })
+
+      const observer = FakeChatWebSocket.instances.find((socket) => socket !== sendSocket)!
+      observer.open()
+      observer.message({ op: 'session_bound', session_id: 's1', data: { cursor: 0, high_water: 11 } })
+      expect(stream.autoContinue.value).toMatchObject({ continueAt: '2026-09-30T02:10:05Z' })
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('cancels the wait when the page sends a message', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const cancelSpy = vi.spyOn(forebrainApi, 'cancelAutoContinue').mockResolvedValue({ cancelled: true })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's1'
+      stream.autoContinue.value = { continueAt: '2026-09-30T02:10:05Z', code: 'rate_limit_quota' }
+      void stream.send('actually, do this instead')
+      expect(stream.autoContinue.value).toBeNull()
+      expect(cancelSpy).toHaveBeenCalledWith('s1')
+    } finally {
+      cancelSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+})

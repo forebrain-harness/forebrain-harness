@@ -38,6 +38,11 @@ Modes:
           '["continue","continue","done"]', default exactly that - and every
           other request drips a short "round N" answer, so each continuation
           round is visible on screen.
+  limit   refuse every request with a 429 "usage limit reached" until the
+          window closes (FAKE_LIMIT_SECONDS after the first request, default
+          20), then reply normally. The body carries resets_in_seconds and no
+          Retry-After header, so the SDK's own short retry cannot sit out the
+          wait: this is the mode that drives auto-continue for real.
   tool    answer the first request with whatever tool call the answer text
           names: a JSON object {"name": ..., "arguments": {...}}, or an array of
           them to script one call per turn. Use it to put a card that only one
@@ -124,6 +129,9 @@ TOOL_SCRIPT = TOOL_SCRIPTS.get(MODE, [])
 REQUESTS = itertools.count()
 DUMPS = itertools.count(1)
 
+LIMIT_SECONDS = float(os.environ.get("FAKE_LIMIT_SECONDS") or 20)
+LIMIT_RESETS_AT = []
+
 GOAL_VERDICTS = json.loads(TEXT) if MODE == "goal" and TEXT.strip().startswith("[") else ["continue", "continue", "done"]
 GOAL_JUDGED = itertools.count()
 GOAL_ROUNDS = itertools.count(1)
@@ -181,6 +189,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.serve_goal(body)
             return
 
+        if MODE == "limit" and self.serve_limit():
+            return
+
         if MODE == "hang":
             # Never answer. The socket stays open, so forebrain keeps the turn in
             # flight and the withdrawal window stays open until Esc closes it.
@@ -229,6 +240,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.write_event(final)
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")  # terminating zero-length chunk
+
+    def serve_limit(self):
+        """Refuse the request while the usage window is closed.
+
+        Returns False once the window has reopened, so the request is answered
+        like reply mode.
+        """
+        now = time.time()
+        if not LIMIT_RESETS_AT:
+            LIMIT_RESETS_AT.append(now + LIMIT_SECONDS)
+        remaining = LIMIT_RESETS_AT[0] - now
+        if remaining <= 0:
+            return False
+        sys.stderr.write("LIMIT refused, resets in %.1fs\n" % remaining)
+        sys.stderr.flush()
+        payload = json.dumps({"error": {
+            "type": "usage_limit_reached",
+            "message": "The usage limit has been reached",
+            "plan_type": "plus",
+            "resets_in_seconds": int(remaining + 0.999),
+        }}).encode()
+        self.send_response(429)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        self.wfile.flush()
+        return True
 
     def serve_goal(self, body):
         """Answer the evaluator with the next verdict, a round with text."""

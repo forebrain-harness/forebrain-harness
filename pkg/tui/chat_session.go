@@ -509,6 +509,11 @@ func (s *ChatSession) Close() error {
 	if s == nil {
 		return nil
 	}
+	// A continuation still waiting on a usage limit dies with the terminal:
+	// nothing would be left to show it or to run it into.
+	if s.Core != nil {
+		s.Core.StopAutoContinue()
+	}
 	s.ClearUINotify()
 	s.stopUINotificationDispatcher()
 	var errs []error

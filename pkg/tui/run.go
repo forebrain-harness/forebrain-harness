@@ -267,6 +267,9 @@ func Run(ctx context.Context, opts Options) error {
 			}
 			return
 		}
+		if handleAutoContinueNotification(renderer, &state, m) {
+			return
+		}
 		ev := reducer.Reduce(m)
 		shouldRefreshWorking := false
 		rosterChanged := false
@@ -599,11 +602,39 @@ func Run(ctx context.Context, opts Options) error {
 		// the previous iteration (e.g. while rendering or executing a slash
 		// command). This prevents notification buildup between idle iterations.
 		drainNotifications(notifyCh, processUINotification)
+		// A usage limit that ended the last turn is announced now, below that
+		// turn's own error, rather than above it while the turn was ending.
+		state.announceAutoContinue(renderer)
 		if state.panel != nil {
 			state.panel.refreshInventory()
 			drawUIPanel(renderer, &state)
 		} else {
 			renderComposerWithState(renderer, &state)
+		}
+		// The limit has reset: the continuation runs as the next turn, the
+		// way a message the reader sent would. It waits while a panel is open,
+		// since the panel owns the keys a running turn would listen for.
+		if state.panel == nil {
+			if continuation, due := state.takeAutoContinueDue(); due {
+				sessionTouched = true
+				disposition, err := executeComposerSubmission(ctx, sigCh, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, continuation, opts.Clipboard, cmds, true, &turnWorkedStatus)
+				if err != nil {
+					return err
+				}
+				for {
+					next, ok := nextAutomaticSubmission(&state, disposition)
+					if !ok {
+						break
+					}
+					disposition, err = executeComposerSubmission(ctx, sigCh, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, next, opts.Clipboard, cmds, true, &turnWorkedStatus)
+					if err != nil {
+						return err
+					}
+					continuation = next
+				}
+				postTurnCompletionNotification(outSync, disposition, state.terminalFocused, continuation)
+				continue
+			}
 		}
 		line := state.composer.Text
 		if state.holdComposer {
@@ -621,7 +652,7 @@ func Run(ctx context.Context, opts Options) error {
 				ok = true
 			} else {
 				var err error
-				ev, ok, err = awaitInputOrSignal(ctx, sigCh, events, notifyCh, processUINotification)
+				ev, ok, err = awaitInputOrSignal(ctx, sigCh, events, notifyCh, processUINotification, state.autoContinueWake)
 				if err != nil {
 					return err
 				}
@@ -630,6 +661,9 @@ func Run(ctx context.Context, opts Options) error {
 					exitSessionID = state.sessionID
 					return nil
 				}
+			}
+			if ev.kind == inputEventWake {
+				continue
 			}
 			if state.updateTerminalFocus(ev) {
 				continue
@@ -714,6 +748,10 @@ func Run(ctx context.Context, opts Options) error {
 					renderComposerWithState(renderer, &state)
 					continue
 				}
+				if ev.hotkey == hotkeyEscapeInterrupt && renderer.ActiveView() == "" && state.cancelAutoContinue(renderer) {
+					renderComposerWithState(renderer, &state)
+					continue
+				}
 				if ev.hotkey == hotkeyOverlayAccept {
 					if newDraft, ok := state.composer.AcceptSlashSelection(); ok {
 						state.composer.DraftText = newDraft
@@ -742,6 +780,11 @@ func Run(ctx context.Context, opts Options) error {
 			} else {
 				if ev.kind == inputEventDraft {
 					draft, cursor := sanitizeTerminalDraft(ev.draft, ev.cursor)
+					// Typing is the other way to cancel a pending continuation:
+					// the reader is taking the conversation somewhere themselves.
+					if strings.TrimSpace(draft) != "" {
+						state.cancelAutoContinue(renderer)
+					}
 					state.prepareHistoryDraft(ev, draft)
 					state.syncPendingPastesWithDraft(draft)
 					state.syncAttachmentsWithDraft(draft)
@@ -771,6 +814,7 @@ func Run(ctx context.Context, opts Options) error {
 				}
 			}
 			if ev.kind == inputEventPaste {
+				state.cancelAutoContinue(renderer)
 				state.appendPaste(ev.paste)
 				continue
 			}
@@ -1387,6 +1431,11 @@ type streamState struct {
 	sessionID        string
 	session          Session
 	composer         ComposerState
+	// autoContinue is the continuation the engine armed after a usage limit,
+	// while it waits; autoContinueDue is that continuation once its wait ended,
+	// until the idle loop submits it.
+	autoContinue    *autoContinueView
+	autoContinueDue *ComposerSubmission
 	// panel is the interactive slash panel (/status, /mcp) owned by this
 	// loop. It is composer state, not a modal: keys arrive through the same
 	// event stream, notifications keep flowing, and the transcript keeps
@@ -1524,6 +1573,10 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	// appearing in the transcript — then report what was dropped, because
 	// silently discarding queued messages is indistinguishable from losing them.
 	dropped := state.discardQueuedInput()
+	// A continuation waiting on a usage limit belongs to the conversation
+	// being left. It is cancelled rather than carried along: it would resume a
+	// conversation the reader is no longer looking at.
+	state.leaveAutoContinue(renderer)
 	state.sessionID = next
 	syncPlanModeIndicator(renderer, state)
 	// The MCP watch follows the conversation: its failures belong to the session
@@ -2877,7 +2930,11 @@ func (s *streamState) appendImageAttachment(att InputAttachment) string {
 	return placeholder
 }
 
-func awaitInputOrSignal(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any)) (inputEvent, bool, error) {
+// awaitInputOrSignal blocks until the reader does something, processing
+// notifications while it waits. wake, when non-nil, is asked after each
+// notification whether the loop has work of its own now — a continuation whose
+// wait just ended — and a true answer returns an inputEventWake.
+func awaitInputOrSignal(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), wake func() bool) (inputEvent, bool, error) {
 	for {
 		// Drain any pending event before checking notifications so that user
 		// input is never starved by a burst of streaming-token notifications.
@@ -2914,6 +2971,9 @@ func awaitInputOrSignal(ctx context.Context, sigCh <-chan os.Signal, events <-ch
 		case m := <-notifyCh:
 			if processNotify != nil {
 				processNotify(m)
+			}
+			if wake != nil && wake() {
+				return inputEvent{kind: inputEventWake}, true, nil
 			}
 			continue
 		}

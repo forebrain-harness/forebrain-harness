@@ -946,6 +946,7 @@ import { getErrorMessage, getToken, forebrainApi, type ChatAttachmentRecord, typ
 import { persistLastSessionId } from '@/composables/useAuth'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { t as translate, type I18nKey } from '@/locales'
+import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueState } from '@/lib/autoContinue'
 import {
   buildBrowserForebrainGatewayChatWsUrl,
   isSupportedForebrainRunEventSchema,
@@ -1303,6 +1304,10 @@ export function useChatStream() {
   // never enters the event log, so a reconnect re-asks for it rather than
   // replaying it.
   const mcpStatus = ref<ForebrainMcpStatus | null>(null)
+  // The continuation the runtime is waiting to run once a usage limit resets.
+  // Live state like mcpStatus: the observer's binding says what is pending
+  // now, and only events after that binding change it.
+  const autoContinue = ref<AutoContinueState | null>(null)
   const errorDetail = ref<ProviderErrorDetail | null>(null)
   // A failed turn arrives as both a rendered English sentence and the
   // classified facts behind it. Rendering from the facts here is what makes the
@@ -1359,6 +1364,13 @@ export function useChatStream() {
   let activeRunId: string | null = null
   let sessionObserver: WebSocket | null = null
   let observerSessionId = ''
+  // The last sequence the observer's binding replayed: an auto-continue event
+  // at or below it is history the binding's own snapshot already accounts for.
+  let observerHighWater = 0
+  // The sequence of the auto-continue event autoContinue was last set from. A
+  // send's own socket can deliver an event before the observer's binding
+  // arrives; a snapshot older than that event must not undo it.
+  let autoContinueSequence = 0
   let historyGeneration = 0
   let sessionEventCursor = 0
   let historyLoadingSession = ''
@@ -1535,9 +1547,52 @@ export function useChatStream() {
     return true
   }
 
+  /**
+   * applyAutoContinueEvent applies the auto-continue lifecycle, which belongs
+   * to the conversation rather than to any run's timeline: its events are filed
+   * under the run the limit stopped, and projecting them there would reopen a
+   * finished turn.
+   *
+   * Only events after the observer bound say anything: the binding's snapshot
+   * already states what is pending, and a scheduled event replayed from before
+   * a gateway restart describes a wait that no longer exists. The replay also
+   * overlaps the history rows, which already hold the continuation's message
+   * as the user row the runtime wrote, so it is drawn only when it is new.
+   */
+  function applyAutoContinueEvent(evt: ForebrainRunEvent, historical: boolean) {
+    const sequence = Number(evt.sequence ?? 0)
+    if (historical || (sequence > 0 && sequence <= observerHighWater)) return
+    const payload = (evt.payload ?? {}) as Record<string, unknown>
+    autoContinueSequence = Math.max(autoContinueSequence, sequence)
+    switch (evt.type) {
+      case 'auto_continue_scheduled':
+        autoContinue.value = parseAutoContinue(payload)
+        return
+      case 'auto_continue_cancelled':
+        autoContinue.value = null
+        return
+      case 'auto_continue_started': {
+        autoContinue.value = null
+        const prompt = String(payload.prompt ?? '').trim()
+        if (prompt) {
+          messages.value = [...messages.value, {
+            id: `auto-continue-${String(evt.id ?? '').trim() || Date.now()}`,
+            role: 'user',
+            content: prompt,
+          }]
+        }
+        return
+      }
+    }
+  }
+
   function applyObservedEvent(evt: ForebrainRunEvent, historical = false) {
     const sid = String(evt.sessionId ?? '').trim()
     if (sid && sid !== String(sessionId.value ?? '').trim()) return
+    if (AUTO_CONTINUE_EVENT_TYPES.has(String(evt.type))) {
+      if (rememberObservedEvent(evt)) applyAutoContinueEvent(evt, historical)
+      return
+    }
     // The request websocket still carries legacy primary-turn operations for
     // compatibility, and their canonical mirror is observed here too. Record
     // that mirror's cursor/id rather than projecting it twice - but only for the
@@ -1619,7 +1674,10 @@ export function useChatStream() {
 			ready()
 			return
 		  }
-          if (parseForebrainSessionBoundMessage(raw)) {
+          const bound = parseForebrainSessionBoundMessage(raw)
+          if (bound) {
+            observerHighWater = bound.highWater ?? 0
+            if (autoContinueSequence <= observerHighWater) autoContinue.value = bound.autoContinue ?? null
             ready()
             return
           }
@@ -1673,6 +1731,9 @@ export function useChatStream() {
 	    sessionObserver = null
 	  }
 	  observerSessionId = ''
+	  observerHighWater = 0
+	  autoContinueSequence = 0
+	  autoContinue.value = null
     const generation = historyGeneration
     persistLastSessionId(sid || null)
     messages.value = []
@@ -2536,8 +2597,25 @@ export function useChatStream() {
     await send(`/${choice.command}`, { choice })
   }
 
+  /**
+   * cancelAutoContinue stops the continuation the conversation is waiting to
+   * run. The notice goes at once; the runtime's own cancellation event follows
+   * on every page watching the session.
+   */
+  function cancelAutoContinue(): boolean {
+    if (!autoContinue.value) return false
+    autoContinue.value = null
+    const sid = String(sessionId.value ?? '').trim()
+    if (sid) void forebrainApi.cancelAutoContinue(sid).catch(() => { /* the wait may already have ended */ })
+    return true
+  }
+
   async function send(userMessage: string, options?: SendOptions): Promise<void> {
     setError(null)
+    // Sending moves the conversation on without the continuation. The runtime
+    // supersedes it when the turn starts anyway; cancelling here also covers a
+    // send that never becomes a turn, such as a slash command.
+    cancelAutoContinue()
     if (isStreaming.value && activeRunId) {
       const disposition = options?.activeInputDisposition === 'queue' ? 'queue' : 'steer'
       if (!await queueActiveRunInput(activeRunId, userMessage, disposition, options?.attached)) {
@@ -2840,6 +2918,10 @@ export function useChatStream() {
 				reject(new Error(`Unsupported session event schema ${runEvent.schemaVersion}; this client supports ${FOREBRAIN_RUN_EVENT_SCHEMA_VERSION}`))
 				return
 			  }
+              if (AUTO_CONTINUE_EVENT_TYPES.has(String(runEvent.type))) {
+                if (rememberObservedEvent(runEvent)) applyAutoContinueEvent(runEvent, false)
+                return
+              }
               // Primary canonical events mirror the legacy operations on this
               // same request socket. Project only child events here; retaining
               // the canonical id/cursor prevents the observer from replaying
@@ -3190,6 +3272,8 @@ export function useChatStream() {
     takeReturnedNotice,
     runtimeStatus,
     mcpStatus,
+    autoContinue,
+    cancelAutoContinue,
     contextSignals,
     pendingActionsVersion,
     send,

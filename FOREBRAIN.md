@@ -39,7 +39,7 @@ Two runtime surfaces share one core:
 Core runtime (surface-agnostic):
 
 - `pkg/run` — lifecycle and interactive control of one agent run: controller, compaction, subagents, permissions, skills.
-- `pkg/turn` — one turn: executor, scheduler, session state, slash commands, approvals, and the `@` file-mention engine shared by both the terminal and web composers.
+- `pkg/turn` — one turn: executor, scheduler, session state, slash commands, approvals, the `@` file-mention engine shared by both the terminal and web composers, and auto-continue (a turn stopped by a usage limit resumes by itself once the limit resets; the terminal and the web only show, cancel and run the engine's continuation).
 - `pkg/agent` — the agent chat loop around an `llm.LLM` (call LLM → run tool calls → repeat), plus the tracer contract (typed events via context) and subagent registries.
 - `pkg/assembly` — context assembly: canonical payload, planner, rules, git sources.
 - `pkg/tool` — tool registry and built-ins (file, shell, web, MCP, session tools) with request permissions.
