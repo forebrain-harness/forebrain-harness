@@ -1,6 +1,6 @@
 {
   "name": "@forebrain-harness/forebrain",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local AI coding agent — Go core delivered via npm with platform-specific binaries and external skill packages.",
   "license": "Apache-2.0",
   "type": "module",
@@ -15,11 +15,11 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@forebrain-harness/forebrain-darwin-arm64": "0.1.0",
-    "@forebrain-harness/forebrain-darwin-x64": "0.1.0",
-    "@forebrain-harness/forebrain-linux-x64": "0.1.0",
-    "@forebrain-harness/forebrain-linux-arm64": "0.1.0",
-    "@forebrain-harness/forebrain-win32-x64": "0.1.0"
+    "@forebrain-harness/forebrain-darwin-arm64": "0.1.1",
+    "@forebrain-harness/forebrain-darwin-x64": "0.1.1",
+    "@forebrain-harness/forebrain-linux-x64": "0.1.1",
+    "@forebrain-harness/forebrain-linux-arm64": "0.1.1",
+    "@forebrain-harness/forebrain-win32-x64": "0.1.1"
   },
   "repository": {
     "type": "git",
