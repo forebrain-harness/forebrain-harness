@@ -3019,13 +3019,14 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	if cs.ArgumentHint != "" {
 		displayText = composerText + "\x1b[38;5;245m " + cs.ArgumentHint + sharedBlockReset
 	}
-	cursorDisplayText := composerText
-	if cs.Cursor != nil {
-		cursorDisplayText = composerTextRunesPrefix(composerText, *cs.Cursor)
-	}
-	displayWidth := lipgloss.Width(composerPromptMarker + cursorDisplayText)
+	// Slash mode draws the typed command without the card borders, but the
+	// text still soft-wraps to the terminal width exactly as in the normal
+	// composer: a long argument after "/command" used to be emitted as one
+	// unwrapped row, so the terminal autowrapped it under the pinned layout,
+	// shifted every row below it and put the caret in the wrong cell.
+	layout := layoutNormalComposer(displayText, cs.Cursor, termWidth)
 
-	lines := make([]string, 0, len(previewLines)+len(overlayRows)+4)
+	lines := make([]string, 0, len(previewLines)+len(overlayRows)+len(layout.lines)+4)
 	if statusText != "" {
 		// Match the normal composer: the live status starts one row below the
 		// transcript rather than touching its final retained row.
@@ -3044,18 +3045,21 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 		// height every slash panel takes.
 		lines = append(lines, overlaySeparatorLine(termWidth-viewportRightPadding))
 	}
-	cursorRow := len(lines)
+	firstLine := len(lines)
 	textArea := composerTextArea{
 		runes:     []rune(composerText),
 		trimmed:   utf8.RuneCountInString(normalizeComposerText(cs.Text)) - utf8.RuneCountInString(composerText),
-		firstLine: cursorRow,
-		rows: []composerTextRow{{
-			prefixWidth: lipgloss.Width(composerPromptMarker),
-			startRune:   0,
-			endRune:     utf8.RuneCountInString(composerText),
-		}},
+		firstLine: firstLine,
+		rows:      composerTextRowsFromSpans(composerText, layout.spans),
 	}
-	lines = append(lines, "\x1b[38;5;33m"+composerPromptMarker+sharedBlockReset+displayText)
+	for i, line := range layout.lines {
+		if i == 0 {
+			lines = append(lines, "\x1b[38;5;33m"+composerPromptMarker+sharedBlockReset+line)
+			continue
+		}
+		lines = append(lines, "  "+line)
+	}
+	cursorRow := firstLine + layout.cursorRowFromTop
 	if cs.SlashMenu != nil {
 		layout := cs.SlashMenu.layout(termWidth-viewportRightPadding, slashPanelHeight(termHeightOrDefault())-2, r.slashMenuTop, true)
 		r.slashMenuTop = layout.top
@@ -3070,7 +3074,7 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	for i := range lines {
 		lines[i] = stripTerminalBells(lines[i])
 	}
-	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: displayWidth, text: textArea}
+	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: layout.cursorCol, text: textArea}
 }
 
 // EnableViewportMode switches the renderer into the alt-screen virtual viewport.
