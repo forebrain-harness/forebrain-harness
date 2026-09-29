@@ -545,6 +545,16 @@ func Run(ctx context.Context, opts Options) error {
 		// otherwise show the hardware caret for a frame.
 		renderer.EnableSoftwareCursor()
 		renderer.EnableViewportMode()
+		clipProbe, _ := opts.Clipboard.(ClipboardImageProbe)
+		if opts.Clipboard == nil {
+			clipProbe = systemClipboardImageReader{}
+		}
+		if clipProbe != nil {
+			watchCtx, stopWatch := context.WithCancel(ctx)
+			defer stopWatch()
+			state.clipboardWatch = newClipboardImageWatcher(clipProbe, renderer)
+			go state.clipboardWatch.run(watchCtx)
+		}
 		// Print resume hint AFTER DisableViewportMode exits the alt-screen
 		// buffer; writing into the alt-screen is discarded when it closes.
 		defer func() {
@@ -1394,7 +1404,11 @@ type streamState struct {
 	queueSeq int
 	// terminalFocused follows CSI I / CSI O focus reports. It starts true so
 	// terminals without focus-reporting support do not produce noisy bells.
-	terminalFocused                bool
+	terminalFocused bool
+	// clipboardWatch follows the same focus reports: it probes the clipboard
+	// for the paste hint only while the terminal has focus. Nil when no
+	// watcher runs (non-TTY sessions, tests).
+	clipboardWatch                 *clipboardImageWatcher
 	restoredQueuedSubmission       ComposerSubmission
 	restoredQueuedSubmissionActive bool
 	inputHistoryStore              rawInputHistoryStore
@@ -3368,9 +3382,11 @@ func (s *streamState) updateTerminalFocus(ev inputEvent) bool {
 	switch ev.kind {
 	case inputEventFocusGained:
 		s.terminalFocused = true
+		s.clipboardWatch.SetFocused(true)
 		return true
 	case inputEventFocusLost:
 		s.terminalFocused = false
+		s.clipboardWatch.SetFocused(false)
 		return true
 	default:
 		return false

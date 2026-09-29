@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/mattn/go-runewidth"
+	"github.com/muesli/termenv"
 )
 
 // TestRendererMeasuresTextInOneWidthModel pins the display-width model the
@@ -400,5 +401,45 @@ func TestStandaloneReviewLeavesTypeAheadForTheTUI(t *testing.T) {
 	}
 	if string(rest) != "hello" {
 		t.Fatalf("the page consumed the type-ahead: %q left, want %q", rest, "hello")
+	}
+}
+
+func TestToolOutputBlockKeepsOneForegroundDespiteCommandColours(t *testing.T) {
+	out := formatToolOutputBlock("plain \x1b[0mafter reset\n\x1b[97mbright white\x1b[39m tail")
+	for _, seq := range []string{"\x1b[0mafter", "\x1b[97m", "\x1b[39m"} {
+		if strings.Contains(out, seq) {
+			t.Fatalf("command colour %q survived into the output block: %q", seq, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, thinkingColor) {
+			t.Fatalf("row not painted in the output colour: %q", line)
+		}
+	}
+}
+
+// TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint pins that stripping the
+// command's colours does not also strip the renderer's own styling: the
+// "(no output)" placeholder its callers render faint stays faint.
+func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	placeholder := lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
+	if !strings.Contains(placeholder, "\x1b[2m") {
+		t.Fatalf("test setup: faint placeholder carries no faint code: %q", placeholder)
+	}
+	out := formatToolOutputBlock(placeholder)
+	if !strings.Contains(out, placeholder) {
+		t.Fatalf("placeholder lost its faint style: %q", out)
+	}
+	if !strings.HasPrefix(out, thinkingColor) || !strings.Contains(stripANSI(out), "└ "+toolNoOutputText) {
+		t.Fatalf("placeholder not drawn as an output row: %q", out)
+	}
+	// Command output that merely contains the words keeps the one-colour rule.
+	cmd := formatToolOutputBlock("\x1b[31mfailed\x1b[0m (no output)")
+	if strings.Contains(cmd, "\x1b[31m") || strings.Contains(cmd, "\x1b[2m") {
+		t.Fatalf("command output kept or gained styling: %q", cmd)
 	}
 }

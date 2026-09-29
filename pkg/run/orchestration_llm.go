@@ -732,6 +732,11 @@ func (w *toolOrchestrationLLM) emitParallelBatchSummary(ctx context.Context, gro
 	if step == nil {
 		return
 	}
+	// A group's summary card runs from the moment its batch is dispatched.
+	var startedAt time.Time
+	if kind == tool.StepKindToolParallelStarted {
+		startedAt = time.Now()
+	}
 	for _, group := range groups {
 		if len(group.labels) < 2 {
 			continue
@@ -769,6 +774,7 @@ func (w *toolOrchestrationLLM) emitParallelBatchSummary(ctx context.Context, gro
 			Output:          output,
 			Error:           errText,
 			Duration:        timing.Duration,
+			StartedAt:       startedAt,
 		})
 	}
 }
@@ -1003,6 +1009,10 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 	if tool := toolMap[name]; tool != nil {
 		toolDescription = strings.TrimSpace(tool.Description())
 	}
+	// The call's start is stamped here, where it is dispatched, and travels
+	// with the call's context: every event of this call — the start, the
+	// handler's output deltas, the completion — carries the same StartedAt.
+	startedAt := time.Now()
 	if step := tool.StepHookFromContext(ctx, w.state); step != nil {
 		step(ctx, tool.StepEvent{
 			Kind:            tool.StepKindToolStarted,
@@ -1010,6 +1020,7 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 			ToolName:        name,
 			ToolDescription: toolDescription,
 			Input:           stepInput,
+			StartedAt:       startedAt,
 			SuppressUI:      suppress.started,
 			SkillName:       skillName,
 			SkillPath:       skillPath,
@@ -1018,6 +1029,7 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 		})
 	}
 	toolCtx := withToolStepCapture(tool.WithToolUseID(ctx, strings.TrimSpace(call.ID)), stepID)
+	toolCtx = tool.WithToolStepStartedAt(toolCtx, startedAt)
 	rawResult, parts, timing, err := executeToolHandler(toolCtx, toolMap, call)
 	governedDetails := governToolResultDetails(w.state, call, parts)
 	recordToolResultSpills(ctx, w.state, name, call, governedDetails)
@@ -1033,6 +1045,7 @@ func (w *toolOrchestrationLLM) executeOneToolCall(
 		ActionID:        actionID,
 		ActionKind:      actionKind,
 		Duration:        timing.Duration,
+		StartedAt:       startedAt,
 		SuppressUI:      suppress.completed,
 		ExternalContext: err == nil && toolMap[name] != nil && toolMap[name].ContainsExternalContext(),
 		SkillName:       skillName,

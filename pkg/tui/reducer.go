@@ -1242,7 +1242,15 @@ func shortestActiveTaskTitle(items []event.PlanUpdateItem, fallback string) stri
 		if strings.TrimSpace(item.Status) != "in_progress" {
 			continue
 		}
-		title := strings.TrimSpace(item.Content)
+		// The label the plan card itself shows under its header is the item's
+		// in-progress label — session_todo's title, carried here as Active
+		// ("实现 P1 订阅模型发现客户端"); the content is the checklist row
+		// ("P1 pkg/llm/openai …"). The working line says what is being done, so
+		// it uses that label and only falls back to the content.
+		title := strings.TrimSpace(item.Active)
+		if title == "" {
+			title = strings.TrimSpace(item.Content)
+		}
 		if title == "" {
 			continue
 		}
@@ -2271,7 +2279,7 @@ func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt 
 	body := toolBodyLines(full)
 	// Build the collapsed header from the Style A display parts.
 	// e.g. "○ Read types.go" or "○ Ran echo".
-	headerSummary := ToolDisplayHeader(b.frame, cwd)
+	headerSummary := ToolDisplayHeader(b.displayFrame(), cwd)
 	if headerSummary == "" && b.frame.Kind != FrameMemoryCompact {
 		if b.frame.Kind == FrameTool {
 			title := strings.TrimSpace(b.frame.Title)
@@ -2484,7 +2492,7 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 			return c.lines
 		}
 	}
-	lines, lineAgents := renderFrameLinesWithAgents(b.frame, width, theme, spinnerPhase, cwd)
+	lines, lineAgents := renderFrameLinesWithAgents(b.displayFrame(), width, theme, spinnerPhase, cwd)
 	c.valid = true
 	c.width = width
 	c.cwd = cwd
@@ -2971,7 +2979,9 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 		// Without a queue preview, retain the usual single spacer before the
 		// composer card. A visible preview already provides that boundary and
 		// should sit directly against the card instead of leaving an empty row.
-		lines = append(lines, "")
+		// While the clipboard holds an image, that same row carries the paste
+		// hint, right-aligned over the card's top rule.
+		lines = append(lines, r.clipboardImageHintLine(termWidth))
 	}
 	cursorRow := len(lines) + 1 // +1 for the leading border line below
 	cursorCol := layout.cursorCol
@@ -3017,13 +3027,14 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	if cs.ArgumentHint != "" {
 		displayText = composerText + "\x1b[38;5;245m " + cs.ArgumentHint + sharedBlockReset
 	}
-	cursorDisplayText := composerText
-	if cs.Cursor != nil {
-		cursorDisplayText = composerTextRunesPrefix(composerText, *cs.Cursor)
-	}
-	displayWidth := lipgloss.Width(composerPromptMarker + cursorDisplayText)
+	// Slash mode draws the typed command without the card borders, but the
+	// text still soft-wraps to the terminal width exactly as in the normal
+	// composer: a long argument after "/command" used to be emitted as one
+	// unwrapped row, so the terminal autowrapped it under the pinned layout,
+	// shifted every row below it and put the caret in the wrong cell.
+	layout := layoutNormalComposer(displayText, cs.Cursor, termWidth)
 
-	lines := make([]string, 0, len(previewLines)+len(overlayRows)+4)
+	lines := make([]string, 0, len(previewLines)+len(overlayRows)+len(layout.lines)+4)
 	if statusText != "" {
 		// Match the normal composer: the live status starts one row below the
 		// transcript rather than touching its final retained row.
@@ -3042,18 +3053,21 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 		// height every slash panel takes.
 		lines = append(lines, overlaySeparatorLine(termWidth-viewportRightPadding))
 	}
-	cursorRow := len(lines)
+	firstLine := len(lines)
 	textArea := composerTextArea{
 		runes:     []rune(composerText),
 		trimmed:   utf8.RuneCountInString(normalizeComposerText(cs.Text)) - utf8.RuneCountInString(composerText),
-		firstLine: cursorRow,
-		rows: []composerTextRow{{
-			prefixWidth: lipgloss.Width(composerPromptMarker),
-			startRune:   0,
-			endRune:     utf8.RuneCountInString(composerText),
-		}},
+		firstLine: firstLine,
+		rows:      composerTextRowsFromSpans(composerText, layout.spans),
 	}
-	lines = append(lines, "\x1b[38;5;33m"+composerPromptMarker+sharedBlockReset+displayText)
+	for i, line := range layout.lines {
+		if i == 0 {
+			lines = append(lines, "\x1b[38;5;33m"+composerPromptMarker+sharedBlockReset+line)
+			continue
+		}
+		lines = append(lines, "  "+line)
+	}
+	cursorRow := firstLine + layout.cursorRowFromTop
 	if cs.SlashMenu != nil {
 		layout := cs.SlashMenu.layout(termWidth-viewportRightPadding, slashPanelHeight(termHeightOrDefault())-2, r.slashMenuTop, true)
 		r.slashMenuTop = layout.top
@@ -3068,7 +3082,7 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	for i := range lines {
 		lines[i] = stripTerminalBells(lines[i])
 	}
-	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: displayWidth, text: textArea}
+	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: layout.cursorCol, text: textArea}
 }
 
 // EnableViewportMode switches the renderer into the alt-screen virtual viewport.
@@ -5835,6 +5849,43 @@ func (r *Renderer) setClipNotification(text string) {
 		r.clipNotification = ""
 		r.paintViewportLocked()
 	})
+}
+
+// clipboardImageHintText is the composer hint shown while the clipboard holds
+// an image.
+const clipboardImageHintText = "Image in clipboard · ctrl+v to paste"
+
+// SetClipboardImageAvailable records whether the clipboard currently holds an
+// image and repaints when that changes.
+func (r *Renderer) SetClipboardImageAvailable(on bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.clipboardImage == on {
+		return
+	}
+	r.clipboardImage = on
+	if r.viewportMode {
+		r.paintViewportLocked()
+	}
+}
+
+// clipboardImageHintLine is the row above the composer's top rule: empty, or
+// the paste hint right-aligned when the clipboard holds an image. Caller holds
+// r.mu.
+func (r *Renderer) clipboardImageHintLine(termWidth int) string {
+	if !r.clipboardImage {
+		return ""
+	}
+	maxWidth := termWidth - sharedBlockFooterTruncateExtraRoom
+	hint := runewidth.Truncate(clipboardImageHintText, maxWidth, "…")
+	pad := maxWidth - runewidth.StringWidth(hint)
+	if maxWidth <= 0 || pad < 0 {
+		return ""
+	}
+	return strings.Repeat(" ", pad) + sharedBlockFooterStyle + hint + sharedBlockReset
 }
 
 func (r *Renderer) clipNotificationText() string {
