@@ -5049,11 +5049,53 @@ func applyHoverHighlight(line string, width int, hoverBgSeq string) string {
 	return hoverBgSeq + highlighted + pad + "\x1b[0m"
 }
 
+// sgrBackground reports what one SGR sequence does to the background: set is
+// the background it selects (which is "" when it selects none), and clears is
+// true when it drops back to the terminal default (0 or 49 with no later
+// background in the same sequence).
+func sgrBackground(code string) (set string, clears bool) {
+	if !strings.HasPrefix(code, "\x1b[") || !strings.HasSuffix(code, "m") {
+		return "", false
+	}
+	params := strings.Split(strings.TrimSuffix(code[2:], "m"), ";")
+	for i := 0; i < len(params); i++ {
+		switch p := params[i]; {
+		case p == "" || p == "0" || p == "49":
+			set, clears = "", true
+		case p == "38" || p == "58":
+			// Skip the colour operands so a foreground index is not read as an
+			// attribute.
+			if i+1 < len(params) && params[i+1] == "5" {
+				i += 2
+			} else if i+1 < len(params) && params[i+1] == "2" {
+				i += 4
+			}
+		case p == "48":
+			if i+1 < len(params) && params[i+1] == "5" && i+2 < len(params) {
+				set, clears = "\x1b[48;5;"+params[i+2]+"m", false
+				i += 2
+			} else if i+1 < len(params) && params[i+1] == "2" && i+4 < len(params) {
+				set, clears = "\x1b[48;2;"+strings.Join(params[i+2:i+5], ";")+"m", false
+				i += 4
+			}
+		case len(p) == 2 && p[0] == '4' && p[1] >= '0' && p[1] <= '7':
+			set, clears = "\x1b["+p+"m", false
+		}
+	}
+	return set, clears
+}
+
+// applySelectionHighlight paints [startCol, endCol) of line in selectBgSeq.
+// Where the selection ends, the row goes back to the background it had there
+// rather than to the terminal default: a card row (the composer, its rules) is
+// painted on its own background out to the right edge, and a bare \x1b[49m
+// would leave every cell after the selection unpainted.
 func applySelectionHighlight(line, selectBgSeq string, startCol, endCol int) string {
 	if startCol < 0 {
 		startCol = 0
 	}
 	var result strings.Builder
+	baseBg := ""
 	visualCol := 0
 	inSelection := false
 	i := 0
@@ -5077,6 +5119,11 @@ func applySelectionHighlight(line, selectBgSeq string, startCol, endCol int) str
 			}
 			code := line[i:j]
 			result.WriteString(code)
+			if set, clears := sgrBackground(code); set != "" {
+				baseBg = set
+			} else if clears {
+				baseBg = ""
+			}
 			if code == "\x1b[0m" && inSelection {
 				result.WriteString(selectBgSeq)
 			}
@@ -5100,7 +5147,7 @@ func applySelectionHighlight(line, selectBgSeq string, startCol, endCol int) str
 			result.WriteString(selectBgSeq)
 			inSelection = true
 		} else if !wantSel && inSelection {
-			result.WriteString("\x1b[49m")
+			result.WriteString("\x1b[49m" + baseBg)
 			inSelection = false
 		}
 		result.WriteRune(r)

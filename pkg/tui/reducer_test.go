@@ -2910,3 +2910,20 @@ func TestPaintedCursorScrollsWithTheShadow(t *testing.T) {
 		t.Fatalf("a caret below the region moved: %+v", got)
 	}
 }
+
+// TestApplySelectionHighlightRestoresRowBackgroundAfterSelection pins the hole
+// a drag selection used to leave in a card row: where the selection ended the
+// row fell back to the terminal default background, so the composer's rule (and
+// any card row) lost its background from that column to the right edge.
+func TestApplySelectionHighlightRestoresRowBackgroundAfterSelection(t *testing.T) {
+	line := renderSharedBlockBorderLine(20)
+	out := applySelectionHighlight(strings.TrimRight(line, "\r\n"), "\x1b[48;5;24m", 0, 5)
+	if !strings.Contains(out, "\x1b[49m"+sharedBlockInputStyle) {
+		t.Fatalf("selection end must restore the card background, got %q", out)
+	}
+	// A row with no background of its own still returns to the default.
+	plain := applySelectionHighlight("abcdef", "\x1b[48;5;24m", 0, 2)
+	if strings.Contains(plain, "48;5;238") || !strings.Contains(plain, "\x1b[49mcdef") {
+		t.Fatalf("plain row must fall back to default background, got %q", plain)
+	}
+}
