@@ -2956,6 +2956,16 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		}
 	}
 
+	// A tool that is still executing shows how long it has been running; the
+	// viewport supplies the elapsed time, and sub-second runs show nothing.
+	if isRunning && f.Duration >= time.Second && !toolStatusAwaitingApproval(f) {
+		if suffix == "" {
+			suffix = formatWorkingElapsed(f.Duration)
+		} else {
+			suffix = suffix + " · " + formatWorkingElapsed(f.Duration)
+		}
+	}
+
 	return strings.TrimSpace(action), strings.TrimSpace(target), strings.TrimSpace(suffix)
 }
 

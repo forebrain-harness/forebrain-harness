@@ -938,6 +938,23 @@ type viewBlock struct {
 	// block on every repaint (which, for thousands of blocks, re-runs a
 	// per-line ANSI-strip regex and rebuilds every header each frame).
 	foldCache foldLineCache
+	// runStart is when the block was first drawn as an executing tool. Frames
+	// are replaced wholesale on every update, so the running clock lives here.
+	runStart time.Time
+}
+
+// displayFrame is the frame as it is drawn: an executing tool carries the
+// time it has been running so far, which the header shows next to the command.
+func (b *viewBlock) displayFrame() Frame {
+	f := b.frame
+	if f.Kind != FrameTool || !toolStatusRunning(f) || toolStatusAwaitingApproval(f) {
+		return f
+	}
+	if b.runStart.IsZero() {
+		b.runStart = time.Now()
+	}
+	f.Duration = time.Since(b.runStart)
+	return f
 }
 
 // blockLineCache memoizes a block's full rendered body. The cache is
