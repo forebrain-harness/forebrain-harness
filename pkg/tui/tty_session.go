@@ -950,6 +950,12 @@ func (b *viewBlock) displayFrame() Frame {
 	if f.Kind != FrameTool || !toolStatusRunning(f) || toolStatusAwaitingApproval(f) {
 		return f
 	}
+	if d, ok := f.ToolMeta.RunningFor(time.Now()); ok {
+		f.Duration = d
+		return f
+	}
+	// Legacy or replayed events carry no engine start time; fall back to when
+	// this viewport first drew the block.
 	if b.runStart.IsZero() {
 		b.runStart = time.Now()
 	}

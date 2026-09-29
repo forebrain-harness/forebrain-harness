@@ -46,11 +46,12 @@ func stripANSIForTest(s string) string {
 
 func TestRunningToolHeaderShowsElapsed(t *testing.T) {
 	f := Frame{Kind: FrameTool, Title: "shell", Summary: "node x.mjs", ToolMeta: tool.ToolMeta{Status: "running"}}
-	b := &viewBlock{frame: f, runStart: time.Now().Add(-75 * time.Second)}
+	f.ToolMeta.StartedAtMs = time.Now().Add(-75 * time.Second).UnixMilli()
+	b := &viewBlock{frame: f}
 	if got := ToolDisplayHeader(b.displayFrame(), ""); !strings.Contains(got, "1m 15s") {
 		t.Fatalf("running header lacks elapsed time: %q", got)
 	}
-	b.runStart = time.Now()
+	b.frame.ToolMeta.StartedAtMs = time.Now().UnixMilli()
 	if got := ToolDisplayHeader(b.displayFrame(), ""); strings.Contains(got, "0s") {
 		t.Fatalf("sub-second run shows elapsed: %q", got)
 	}

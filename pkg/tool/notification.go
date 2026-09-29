@@ -297,6 +297,23 @@ type ToolMeta struct {
 	// inflate them.
 	ResultLines  int `json:"result_lines,omitempty"`
 	ResultOffset int `json:"result_offset,omitempty"`
+	// StartedAtMs is when a still-executing call began, in Unix milliseconds;
+	// zero once the call has settled or when the engine did not observe the
+	// start. Every surface derives "running for N seconds" from it.
+	StartedAtMs int64 `json:"started_at_ms,omitempty"`
+}
+
+// RunningFor reports how long an executing call has been running as of now,
+// and false when the meta carries no start time.
+func (m ToolMeta) RunningFor(now time.Time) (time.Duration, bool) {
+	if m.Status != "running" || m.StartedAtMs <= 0 {
+		return 0, false
+	}
+	d := now.Sub(time.UnixMilli(m.StartedAtMs))
+	if d < 0 {
+		d = 0
+	}
+	return d, true
 }
 
 type NotificationHookInput struct {
