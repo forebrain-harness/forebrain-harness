@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -519,21 +520,89 @@ func (systemClipboardImageReader) ClipboardHasImage(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	text := string(out)
-	return strings.Contains(text, "image/png") || strings.Contains(text, "PNGf") || strings.Contains(text, "TIFF")
+	return clipboardTypesHoldPastableImage(runtime.GOOS, string(out), pngpasteAvailable())
 }
 
-// watchClipboardImage polls the clipboard and keeps the renderer's paste hint
-// in step with it until ctx ends.
-func watchClipboardImage(ctx context.Context, probe ClipboardImageProbe, renderer *Renderer) {
-	tick := time.NewTicker(time.Second)
+// clipboardTypesHoldPastableImage reads a clipboard type listing and reports
+// whether ctrl+v could attach an image from it — the hint promises no more
+// than writeClipboardPNG delivers. On macOS the osascript fallback extracts
+// only «class PNGf»; a TIFF-only clipboard (an image copied from some apps)
+// pastes only through pngpaste. On Linux the reader asks for image/png.
+func clipboardTypesHoldPastableImage(goos, types string, havePngpaste bool) bool {
+	switch goos {
+	case "darwin":
+		if strings.Contains(types, "PNGf") {
+			return true
+		}
+		return havePngpaste && strings.Contains(types, "TIFF")
+	case "linux":
+		return strings.Contains(types, "image/png")
+	default:
+		return false
+	}
+}
+
+func pngpasteAvailable() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	_, err := exec.LookPath("pngpaste")
+	return err == nil
+}
+
+// clipboardImageWatcher keeps the composer's paste hint in step with the
+// system clipboard. Every probe spawns a helper process (osascript, wl-paste
+// or xclip), so it probes only while the terminal has focus: the clipboard
+// changes while the user is in another window, and regaining focus probes at
+// once, so the hint is current whenever it can be seen and acted on.
+// Terminals that never report focus are treated as always focused.
+type clipboardImageWatcher struct {
+	probe    ClipboardImageProbe
+	renderer *Renderer
+	interval time.Duration
+	focused  atomic.Bool
+	wake     chan struct{}
+}
+
+func newClipboardImageWatcher(probe ClipboardImageProbe, renderer *Renderer) *clipboardImageWatcher {
+	w := &clipboardImageWatcher{probe: probe, renderer: renderer, interval: time.Second, wake: make(chan struct{}, 1)}
+	w.focused.Store(true)
+	return w
+}
+
+// SetFocused follows the terminal's focus reports; gaining focus probes now.
+func (w *clipboardImageWatcher) SetFocused(focused bool) {
+	if w == nil {
+		return
+	}
+	w.focused.Store(focused)
+	if focused {
+		select {
+		case w.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// run polls the clipboard until ctx ends.
+func (w *clipboardImageWatcher) run(ctx context.Context) {
+	tick := time.NewTicker(w.interval)
 	defer tick.Stop()
 	for {
-		renderer.SetClipboardImageAvailable(probe.ClipboardHasImage(ctx))
+		if w.focused.Load() {
+			has := w.probe.ClipboardHasImage(ctx)
+			// A probe cut short by shutdown reads as "no image"; it is not a
+			// fact about the clipboard and must not repaint a closing screen.
+			if ctx.Err() != nil {
+				return
+			}
+			w.renderer.SetClipboardImageAvailable(has)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-w.wake:
 		}
 	}
 }
