@@ -3536,6 +3536,11 @@ func formatToolOutputBlock(content string) string {
 	if width < 20 {
 		width = 80
 	}
+	// Tool output is painted in one foreground below. Colour codes the command
+	// itself printed (a reset, a default-foreground or a bright-white code) would
+	// override that paint mid-line and leave the rest of the block in the
+	// terminal's own foreground, so the output is drawn without them.
+	content = sgrPattern.ReplaceAllString(content, "")
 	lines := strings.Split(content, "\n")
 	out := make([]string, 0, len(lines))
 	for i, line := range lines {
