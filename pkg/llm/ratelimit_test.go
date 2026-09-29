@@ -65,7 +65,12 @@ func TestParseRateLimitReadsAResetStatedOnlyInProse(t *testing.T) {
 }
 
 func TestResetAtFromProse(t *testing.T) {
-	received := time.Date(2026, 9, 10, 17, 44, 0, 0, time.Local)
+	// A fixed zone, not time.Local: the runner's clock (UTC on CI, +08 on the
+	// developer's machine) must not decide whether an explicit-zone stamp falls
+	// before or after the message arrived. The +08 offset keeps the prose cases
+	// in the relations they were written for.
+	local := time.FixedZone("+08", 8*60*60)
+	received := time.Date(2026, 9, 10, 17, 44, 0, 0, local)
 	cases := []struct {
 		name string
 		text string
@@ -74,12 +79,12 @@ func TestResetAtFromProse(t *testing.T) {
 		{
 			name: "space separated local stamp",
 			text: "您的限额将在 2026-09-10 19:16:37 重置。",
-			want: time.Date(2026, 9, 10, 19, 16, 37, 0, time.Local),
+			want: time.Date(2026, 9, 10, 19, 16, 37, 0, local),
 		},
 		{
 			name: "slash separated without seconds",
 			text: "Quota resets at 2026/09/10 19:16",
-			want: time.Date(2026, 9, 10, 19, 16, 0, 0, time.Local),
+			want: time.Date(2026, 9, 10, 19, 16, 0, 0, local),
 		},
 		{
 			name: "explicit zone is honoured over the local clock",
