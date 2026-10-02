@@ -835,8 +835,7 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	path := filepath.Join(dir, "normalize.yaml")
 	body := strings.Join([]string{
 		"gateway:",
-		"  grpc:",
-		"    port: \"8081\"",
+		"  http_addr: 127.0.0.1:8081",
 		"agents:",
 		"  definitions:",
 		"    main:",
@@ -853,15 +852,14 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load normalize config: %v", err)
 	}
-	if cfg.Gateway.Grpc.Port != "8081" || len(cfg.Agents.Definitions["main"].LLMProviders) != 1 || len(cfg.Agents.Definitions["worker"].LLMProviders) != 1 {
+	if cfg.Gateway.HTTPAddr != "127.0.0.1:8081" || len(cfg.Agents.Definitions["main"].LLMProviders) != 1 || len(cfg.Agents.Definitions["worker"].LLMProviders) != 1 {
 		t.Fatalf("normalize branches not applied: %+v", cfg)
 	}
 
 	unknownConfigPath := filepath.Join(dir, "unknown-top-level.yaml")
 	unknownConfigBody := strings.Join([]string{
 		"unknown_gateway_legacy:",
-		"  grpc:",
-		"    port: \"9099\"",
+		"  http_addr: \"127.0.0.1:9099\"",
 	}, "\n")
 	if err := os.WriteFile(unknownConfigPath, []byte(unknownConfigBody), 0o600); err != nil {
 		t.Fatalf("write unknown top-level config: %v", err)
@@ -870,8 +868,10 @@ func TestLoadNormalizeAndErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load unknown top-level config: %v", err)
 	}
-	if unknownConfig.Gateway.Grpc.Port != "" {
-		t.Fatalf("unknown top-level config should be ignored, got gateway grpc port %q", unknownConfig.Gateway.Grpc.Port)
+	// gateway.http_addr falls back to its default when unset; the check is
+	// that the unknown key did not reach it.
+	if unknownConfig.Gateway.HTTPAddr != "127.0.0.1:6060" {
+		t.Fatalf("unknown top-level config should be ignored, got gateway http_addr %q", unknownConfig.Gateway.HTTPAddr)
 	}
 
 	if err := Save(dir, Root{}); err == nil {

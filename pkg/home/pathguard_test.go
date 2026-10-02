@@ -39,7 +39,7 @@ func TestContainsTraversalRejectsDangerousForms(t *testing.T) {
 }
 
 func TestValidateArchiveRelPathRejectsTraversal(t *testing.T) {
-	for _, tc := range []string{"../evil", "/abs", `C:\evil`, "//unc/path"} {
+	for _, tc := range []string{"../evil", "../../etc", "a/../../b", "/abs", `C:\evil`, "//unc/path"} {
 		if err := ValidateArchiveRelPath(tc); err == nil {
 			t.Fatalf("expected archive path rejection for %q", tc)
 		}

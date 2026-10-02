@@ -12,7 +12,8 @@
     "dev": "vite",
     "test": "vitest run",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {
     "@repo/elements": "workspace:*",
@@ -30,6 +31,7 @@
     "vue-stream-markdown": "^0.3.4"
   },
   "devDependencies": {
+    "@playwright/test": "1.59.1",
     "@vitejs/plugin-vue": "^5.2.0",
     "@vue/test-utils": "catalog:",
     "autoprefixer": "^10.4.20",

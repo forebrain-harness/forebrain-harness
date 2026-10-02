@@ -1,0 +1,549 @@
+<title>Forebrain Harness 品牌方案</title>
+<style>
+  /* ---------- Page chrome (follows the viewer's theme) ---------- */
+  :root {
+    --pg-bg: #f4f5f7;
+    --pg-card: #ffffff;
+    --pg-text: #101828;
+    --pg-text-2: #475467;
+    --pg-muted: #667085;
+    --pg-line: #e4e7ec;
+    --pg-chip: #eef0f3;
+    --pg-chip-on: #101828;
+    --pg-chip-on-text: #ffffff;
+    --pg-ui: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --pg-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --pg-bg: #0f1115;
+      --pg-card: #171a20;
+      --pg-text: #eceef2;
+      --pg-text-2: #b4bac5;
+      --pg-muted: #8a91a0;
+      --pg-line: #2a2f38;
+      --pg-chip: #232830;
+      --pg-chip-on: #eceef2;
+      --pg-chip-on-text: #0f1115;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --pg-bg: #0f1115;
+    --pg-card: #171a20;
+    --pg-text: #eceef2;
+    --pg-text-2: #b4bac5;
+    --pg-muted: #8a91a0;
+    --pg-line: #2a2f38;
+    --pg-chip: #232830;
+    --pg-chip-on: #eceef2;
+    --pg-chip-on-text: #0f1115;
+  }
+  body {
+    background: var(--pg-bg);
+    color: var(--pg-text);
+    font-family: var(--pg-ui);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding-inline: 16px; padding-block: 28px 64px; display: grid; gap: 36px; }
+  h1 { font-size: 26px; line-height: 1.25; margin: 0; font-weight: 650; letter-spacing: 0.01em; text-wrap: balance; }
+  h2 { font-size: 18px; margin: 0; font-weight: 650; text-wrap: balance; }
+  h3 { font-size: 15px; margin: 0; font-weight: 600; }
+  p { margin: 0; }
+  .lede { color: var(--pg-text-2); max-width: 68ch; margin-top: 8px; }
+  .section-head { display: grid; gap: 4px; margin-bottom: 14px; }
+  .section-head p { color: var(--pg-text-2); max-width: 72ch; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; margin-bottom: 14px; }
+  .ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ctl-label { font-size: 12px; color: var(--pg-muted); letter-spacing: 0.04em; }
+  .seg { display: inline-flex; background: var(--pg-chip); border-radius: 8px; padding: 3px; gap: 2px; }
+  .seg button {
+    font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--pg-text-2);
+    padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--pg-chip-on); color: var(--pg-chip-on-text); }
+  .seg button:focus-visible { outline: 2px solid var(--pg-text); outline-offset: 1px; }
+
+  .stage { overflow-x: auto; border-radius: 12px; border: 1px solid var(--pg-line); background: var(--pg-card); }
+  .stage-note { margin-top: 8px; font-size: 12px; color: var(--pg-muted); }
+
+  .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+  @media (max-width: 980px) { .grid3 { grid-template-columns: 1fr; } }
+  .card { background: var(--pg-card); border: 1px solid var(--pg-line); border-radius: 12px; padding: 18px; display: grid; gap: 14px; align-content: start; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .tag { font-size: 12px; color: var(--pg-muted); font-family: var(--pg-mono); }
+  .rec { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--pg-chip-on); color: var(--pg-chip-on-text); white-space: nowrap; }
+  .desc { color: var(--pg-text-2); font-size: 13px; }
+
+  .swatches { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+  .sw { display: grid; gap: 4px; min-width: 0; }
+  .sw i { display: block; height: 36px; border-radius: 6px; border: 1px solid rgba(16, 24, 40, 0.08); }
+  .sw span { font-size: 11px; color: var(--pg-muted); overflow-wrap: anywhere; line-height: 1.3; }
+  .sw code { font-family: var(--pg-mono); font-size: 11px; color: var(--pg-text-2); }
+
+  .rails { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .minirail { border-radius: 8px; padding: 10px; display: grid; gap: 6px; font-size: 12px; }
+  .minirail .mr-btn { border-radius: 6px; padding: 5px 8px; text-align: center; font-weight: 500; }
+  .minirail .mr-row { border-radius: 6px; padding: 4px 8px; }
+  .minirail .mr-cap { font-size: 10px; letter-spacing: 0.06em; }
+  .onwhite { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px; border-radius: 8px; background: #ffffff; border: 1px solid #e4e7ec; }
+  .onwhite .b { color: #fff; border-radius: 6px; padding: 5px 12px; font-size: 12px; font-weight: 500; }
+  .onwhite .l { font-size: 12px; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
+  .onwhite .s { font-size: 12px; border-radius: 6px; padding: 5px 10px; }
+
+  .logo-hero { display: grid; place-items: center; background: #ffffff; border: 1px solid #e4e7ec; border-radius: 10px; padding: 22px 12px; gap: 14px; }
+  .logo-sizes { display: flex; align-items: end; gap: 16px; justify-content: center; }
+  .logo-sizes span { font-size: 10px; color: #667085; font-family: var(--pg-mono); text-align: center; display: block; }
+  .lockups { display: grid; gap: 8px; }
+  .lockup { display: flex; align-items: center; gap: 10px; border-radius: 8px; padding: 10px 12px; }
+  .lockup .wm { font-size: 15px; line-height: 1.2; letter-spacing: 0.005em; }
+  .lockup .wm b { font-weight: 650; }
+  .lockup .wm span { font-weight: 400; }
+
+  .note { background: var(--pg-card); border: 1px solid var(--pg-line); border-radius: 12px; padding: 18px; display: grid; gap: 8px; }
+  .note ul { margin: 0; padding-left: 18px; color: var(--pg-text-2); display: grid; gap: 4px; }
+  .note strong { color: var(--pg-text); }
+
+  /* ---------- Logo glyphs: colours come from --lg-* on the nearest ground ---------- */
+  .lg { display: block; flex: none; }
+  .lg .lg-fill { fill: var(--lg-fill); }
+  .lg .lg-glyph { fill: var(--lg-glyph); }
+  .lg .lg-back { fill: var(--lg-back); }
+  .lg .lg-front { fill: var(--lg-front); }
+
+  /* ---------- Schemes: brand + rail tokens ---------- */
+  [data-scheme="a"] {
+    --brand: #1f4a9e; --brand-hover: #173b80; --brand-soft: #ebf0f9;
+    --rd-bg: #0f1d38; --rd-fg: #e7ecf5; --rd-fg2: #9fb0cc; --rd-line: #1e3055; --rd-hover: #172a4d; --rd-active: #1d3563; --rd-mark: #7ea2ea; --rd-btn: #3a67c6; --rd-btn-fg: #ffffff; --rd-field: #152646;
+    --rl-bg: #f3f5f9; --rl-fg: #101828; --rl-fg2: #475467; --rl-line: #e1e5ec; --rl-hover: #e8ecf3; --rl-active: #e1e8f5; --rl-active-fg: #1f4a9e; --rl-field: #ffffff;
+    --logo-back-light: #101828;
+  }
+  [data-scheme="b"] {
+    --brand: #0e6e7e; --brand-hover: #0a5a67; --brand-soft: #e7f3f4;
+    --rd-bg: #0d2429; --rd-fg: #e4f0f1; --rd-fg2: #97b7bb; --rd-line: #1b393f; --rd-hover: #143238; --rd-active: #1a3f46; --rd-mark: #6cc7d3; --rd-btn: #16808f; --rd-btn-fg: #ffffff; --rd-field: #122e34;
+    --rl-bg: #f1f6f6; --rl-fg: #101828; --rl-fg2: #475467; --rl-line: #dfe7e8; --rl-hover: #e6eeef; --rl-active: #dcebed; --rl-active-fg: #0e6e7e; --rl-field: #ffffff;
+    --logo-back-light: #101828;
+  }
+  [data-scheme="c"] {
+    --brand: #1c1c1f; --brand-hover: #3a3a40; --brand-soft: #f1f1f2;
+    --rd-bg: #141416; --rd-fg: #ededef; --rd-fg2: #a1a1a8; --rd-line: #26262a; --rd-hover: #1e1e21; --rd-active: #2a2a2e; --rd-mark: #a1a1a8; --rd-btn: #ffffff; --rd-btn-fg: #141416; --rd-field: #1c1c1f;
+    --rl-bg: #f6f6f7; --rl-fg: #18181b; --rl-fg2: #52525b; --rl-line: #e4e4e7; --rl-hover: #ececee; --rl-active: #e6e6e8; --rl-active-fg: #18181b; --rl-field: #ffffff;
+    --logo-back-light: #a1a1aa;
+  }
+  /* Light ground: brand fill, white glyph. Dark ground: white fill, glyph in the ground colour. */
+  .ground-light { --lg-fill: var(--brand); --lg-glyph: #ffffff; --lg-back: var(--logo-back-light); --lg-front: var(--brand); }
+  .ground-dark { --lg-fill: #ffffff; --lg-glyph: var(--rd-bg); --lg-back: var(--rd-mark); --lg-front: #ffffff; }
+
+  /* ---------- The product mock (always the product's own look) ---------- */
+  .mock {
+    --c-bg: #ffffff; --c-subtle: #f7f8fa; --c-line: #e4e7ec; --c-line2: #d0d5dd;
+    --c-text: #101828; --c-text2: #475467; --c-muted: #667085; --c-code: #fafafa;
+    --ui: var(--pg-ui); --mono: var(--pg-mono);
+    display: grid; grid-template-columns: 264px minmax(0, 1fr) 300px;
+    width: 1240px; height: 700px; background: var(--c-bg); color: var(--c-text);
+    font-family: var(--ui); font-size: 13px; line-height: 1.55; overflow: hidden;
+  }
+  .mock[data-rail="dark"] .m-rail { --r-bg: var(--rd-bg); --r-fg: var(--rd-fg); --r-fg2: var(--rd-fg2); --r-line: var(--rd-line); --r-hover: var(--rd-hover); --r-active: var(--rd-active); --r-active-fg: #ffffff; --r-btn: var(--rd-btn); --r-btn-fg: var(--rd-btn-fg); --r-field: var(--rd-field); --r-mark: var(--rd-mark); }
+  .mock[data-rail="light"] .m-rail { --r-bg: var(--rl-bg); --r-fg: var(--rl-fg); --r-fg2: var(--rl-fg2); --r-line: var(--rl-line); --r-hover: var(--rl-hover); --r-active: var(--rl-active); --r-active-fg: var(--rl-active-fg); --r-btn: var(--brand); --r-btn-fg: #ffffff; --r-field: var(--rl-field); --r-mark: var(--brand); }
+  .mock[data-rail="dark"] .m-rail { --lg-fill: #ffffff; --lg-glyph: var(--rd-bg); --lg-back: var(--rd-mark); --lg-front: #ffffff; }
+  .mock[data-rail="light"] .m-rail { --lg-fill: var(--brand); --lg-glyph: #ffffff; --lg-back: var(--logo-back-light); --lg-front: var(--brand); }
+  .mock .lg-opt { display: none; }
+  .mock[data-logo="1"] .lg-opt-1, .mock[data-logo="2"] .lg-opt-2, .mock[data-logo="3"] .lg-opt-3 { display: block; }
+
+  .m-rail { background: var(--r-bg); color: var(--r-fg); border-right: 1px solid var(--r-line); display: flex; flex-direction: column; padding: 14px 12px 10px; gap: 10px; min-height: 0; }
+  .m-brand { display: flex; align-items: center; gap: 10px; padding: 2px 4px 4px; }
+  .m-brand .wm { font-size: 15px; line-height: 1.2; }
+  .m-brand .wm b { font-weight: 650; }
+  .m-brand small { display: block; font-size: 10px; color: var(--r-fg2); letter-spacing: 0.06em; margin-top: 2px; }
+  .m-tenant { border: 1px solid var(--r-line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 1px; position: relative; }
+  .m-tenant span { font-size: 11px; color: var(--r-fg2); }
+  .m-tenant strong { font-size: 14px; font-weight: 600; }
+  .m-tenant code { font-family: var(--mono); font-size: 11px; color: var(--r-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .m-tenant .caret { position: absolute; right: 8px; top: 12px; width: 14px; height: 14px; color: var(--r-fg2); }
+  .m-new { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 8px; padding: 8px 10px; font: inherit; font-size: 13px; font-weight: 600; background: var(--r-btn); color: var(--r-btn-fg); }
+  .m-new svg { width: 15px; height: 15px; }
+  .m-search { display: flex; align-items: center; gap: 7px; border: 1px solid var(--r-line); background: var(--r-field); border-radius: 8px; padding: 6px 9px; color: var(--r-fg2); font-size: 12.5px; }
+  .m-search svg { width: 14px; height: 14px; }
+  .m-cap { font-size: 11px; color: var(--r-fg2); letter-spacing: 0.06em; padding: 2px 8px 0; }
+  .m-sessions { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; flex: 1; min-height: 0; overflow: hidden; align-content: start; }
+  .m-sessions li { border-radius: 6px; padding: 6px 8px; color: var(--r-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; }
+  .m-sessions li.on { background: var(--r-active); color: var(--r-active-fg); font-weight: 500; }
+  .m-sessions li.on::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--r-mark); }
+  .m-sessions li.hov { background: var(--r-hover); color: var(--r-fg); }
+  .m-sessions li .hb { position: absolute; right: 8px; top: 8px; width: 13px; height: 13px; color: var(--r-mark); }
+  .m-sessions li.on { padding-right: 28px; }
+  .m-groups { border-top: 1px solid var(--r-line); padding-top: 6px; display: grid; gap: 1px; }
+  .m-group { display: flex; align-items: center; gap: 8px; border-radius: 6px; padding: 6px 8px; color: var(--r-fg); }
+  .m-group svg { width: 15px; height: 15px; color: var(--r-fg2); }
+  .m-group .chev { margin-left: auto; width: 14px; height: 14px; }
+  .m-group .cnt { font-size: 11px; color: var(--r-fg2); }
+  .m-foot { display: flex; align-items: center; gap: 4px; border-top: 1px solid var(--r-line); padding-top: 8px; }
+  .m-foot .fl { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; color: var(--r-fg2); font-size: 12.5px; }
+  .m-foot .fl svg { width: 14px; height: 14px; }
+  .m-foot .theme { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--r-line); color: var(--r-fg2); }
+  .m-foot .theme svg { width: 14px; height: 14px; }
+
+  .m-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--c-bg); }
+  .m-top { display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 20px; border-bottom: 1px solid var(--c-line); flex: none; }
+  .m-top .t { font-size: 13.5px; font-weight: 600; }
+  .m-top .meta { font-size: 12px; color: var(--c-muted); }
+  .m-top .lang { margin-left: auto; display: flex; align-items: center; gap: 5px; border: 1px solid var(--c-line); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--c-text2); }
+  .m-top .lang svg { width: 13px; height: 13px; }
+  .m-thread { flex: 1; min-height: 0; overflow: hidden; padding: 22px 0 8px; }
+  .m-col { width: min(720px, 100% - 48px); margin: 0 auto; display: grid; gap: 16px; }
+  .m-user { justify-self: end; max-width: 80%; background: var(--brand-soft); border-radius: 10px; padding: 9px 13px; }
+  .m-asst { display: grid; gap: 10px; }
+  .m-asst p { color: var(--c-text); }
+  .m-asst code.inl { font-family: var(--mono); font-size: 12px; background: var(--c-subtle); border: 1px solid var(--c-line); border-radius: 4px; padding: 0 4px; }
+  .m-tool { border: 1px solid var(--c-line); border-radius: 8px; overflow: hidden; }
+  .m-tool-h { display: flex; align-items: center; gap: 8px; padding: 7px 11px; background: var(--c-subtle); border-bottom: 1px solid var(--c-line); font-size: 12px; }
+  .m-tool-h svg { width: 14px; height: 14px; color: var(--c-muted); }
+  .m-tool-h b { font-weight: 600; }
+  .m-tool-h code { font-family: var(--mono); color: var(--c-text2); }
+  .m-tool-h .ok { margin-left: auto; color: #067647; font-size: 11.5px; }
+  .m-code { margin: 0; background: var(--c-code); padding: 9px 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; overflow: hidden; }
+  .m-code div { display: grid; grid-template-columns: 38px 1fr; white-space: pre; }
+  .m-code .ln { color: #9ca3af; text-align: right; padding-right: 12px; user-select: none; }
+  .k { color: #d11f5e; } .s { color: #a0770a; } .f { color: #5a8f00; } .c { color: #75715e; } .t { color: #0e7c9e; }
+  .m-worked { font-size: 12px; color: var(--c-muted); display: flex; align-items: center; gap: 6px; }
+  .m-worked::before { content: ""; width: 14px; height: 1px; background: var(--c-line2); }
+  .m-composer { flex: none; width: min(720px, 100% - 48px); margin: 0 auto 16px; border: 1px solid var(--c-line2); border-radius: 12px; background: var(--c-bg); }
+  .m-composer .ph { padding: 12px 14px 4px; color: var(--c-muted); min-height: 44px; }
+  .m-composer .bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 8px 10px; }
+  .m-composer .chip { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--c-text2); border: 1px solid var(--c-line); border-radius: 6px; padding: 2px 8px; }
+  .m-composer .chip svg { width: 13px; height: 13px; }
+  .m-composer .send { margin-left: auto; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--brand); color: #fff; }
+  .m-composer .send svg { width: 15px; height: 15px; }
+
+  .m-bench { border-left: 1px solid var(--c-line); background: var(--c-bg); padding: 14px 14px; display: grid; gap: 12px; align-content: start; min-height: 0; overflow: hidden; }
+  .m-bench h4 { margin: 0; font-size: 13px; font-weight: 600; }
+  .m-box { border: 1px solid var(--c-line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
+  .m-box-h { display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; }
+  .m-box-h svg { width: 14px; height: 14px; color: var(--brand); }
+  .m-box-h .pill { margin-left: auto; font-size: 11px; font-weight: 500; border-radius: 999px; padding: 0 7px; background: var(--brand-soft); color: var(--brand); }
+  .m-box p { font-size: 12px; color: var(--c-text2); }
+  .m-agent { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .m-agent .dot { width: 6px; height: 6px; border-radius: 50%; background: #067647; flex: none; }
+  .m-agent .dur { margin-left: auto; color: var(--c-muted); font-family: var(--mono); font-size: 11px; }
+  .m-files { display: grid; gap: 2px; font-family: var(--mono); font-size: 11.5px; color: var(--c-text2); }
+  .m-files span { padding: 2px 6px; border-radius: 4px; }
+  .m-files .dir { color: var(--c-muted); }
+  .m-files .hov { background: var(--c-subtle); color: var(--c-text); }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .seg button { transition: background-color 120ms ease, color 120ms ease; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Forebrain Harness 品牌与界面方案</h1>
+    <p class="lede">三套主题色 × 三套 logo，全部纯色、无渐变。内容区始终白底，深色与浅色只作用于左侧菜单栏。对话页改为三栏：菜单栏（含新聊天与会话列表）、对话窗口、工作台。先在下方组合预览里切换，再看各方案的细节。</p>
+  </header>
+
+  <section aria-labelledby="preview-h">
+    <div class="section-head">
+      <h2 id="preview-h">组合预览</h2>
+      <p>切换主题色、logo 和菜单栏深浅，看新的三栏对话页在真实内容下的样子。</p>
+    </div>
+    <div class="controls" role="group" aria-label="预览选项">
+      <div class="ctl"><span class="ctl-label">主题色</span>
+        <div class="seg" data-key="scheme">
+          <button type="button" id="sch-a" data-val="a" aria-pressed="true">A 海军蓝</button>
+          <button type="button" id="sch-b" data-val="b" aria-pressed="false">B 松石青</button>
+          <button type="button" id="sch-c" data-val="c" aria-pressed="false">C 石墨黑</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="ctl-label">Logo</span>
+        <div class="seg" data-key="logo">
+          <button type="button" id="logo-1" data-val="1" aria-pressed="true">1 方印</button>
+          <button type="button" id="logo-2" data-val="2" aria-pressed="false">2 前脑</button>
+          <button type="button" id="logo-3" data-val="3" aria-pressed="false">3 枢纽</button>
+        </div>
+      </div>
+      <div class="ctl"><span class="ctl-label">菜单栏</span>
+        <div class="seg" data-key="rail">
+          <button type="button" id="rail-dark" data-val="dark" aria-pressed="true">深色</button>
+          <button type="button" id="rail-light" data-val="light" aria-pressed="false">浅色</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="stage">
+      <div class="mock" id="mock" data-scheme="a" data-logo="1" data-rail="dark">
+        <aside class="m-rail" aria-label="菜单栏示意">
+          <div class="m-brand">
+            <svg class="lg lg-opt lg-opt-1" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg>
+            <svg class="lg lg-opt lg-opt-2" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg>
+            <svg class="lg lg-opt lg-opt-3" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg>
+            <div class="wm"><b>Forebrain</b> Harness<small>v0.3.0</small></div>
+          </div>
+          <div class="m-tenant">
+            <span>当前主代理</span>
+            <strong>main</strong>
+            <code>~/workspace/forebrain-harness</code>
+            <i data-lucide="chevrons-up-down" class="caret"></i>
+          </div>
+          <button type="button" class="m-new" tabindex="-1"><i data-lucide="plus"></i>新聊天</button>
+          <div class="m-search"><i data-lucide="search"></i>搜索会话</div>
+          <div class="m-cap">会话</div>
+          <ul class="m-sessions">
+            <li class="on">重构 gateway 鉴权中间件<i data-lucide="activity" class="hb" aria-label="心跳每 30 分钟"></i></li>
+            <li class="hov">排查 MCP 启动超时</li>
+            <li>发布 v0.3.0 的 release notes</li>
+            <li>记忆检索补充日文分词</li>
+            <li>审阅 PR #42：调度器重试</li>
+            <li>把定时任务迁到新调度器</li>
+            <li>整理 permissions 的三档预设</li>
+            <li>未命名对话</li>
+          </ul>
+          <div class="m-groups">
+            <div class="m-group"><i data-lucide="sliders-horizontal"></i>管控<span class="cnt">5</span><i data-lucide="chevron-right" class="chev"></i></div>
+            <div class="m-group"><i data-lucide="layout-grid"></i>工作区<span class="cnt">5</span><i data-lucide="chevron-right" class="chev"></i></div>
+          </div>
+          <div class="m-foot">
+            <span class="fl"><i data-lucide="activity"></i>心跳</span>
+            <span class="fl"><i data-lucide="settings"></i>设置</span>
+            <span class="fl"><i data-lucide="file-cog"></i>配置</span>
+            <span class="theme" title="菜单栏深浅"><i data-lucide="sun-moon"></i></span>
+          </div>
+        </aside>
+
+        <section class="m-chat" aria-label="对话窗口示意">
+          <header class="m-top">
+            <span class="t">重构 gateway 鉴权中间件</span>
+            <span class="meta">deepseek-v4 · 计划模式关闭</span>
+            <span class="lang"><i data-lucide="languages"></i>中文</span>
+          </header>
+          <div class="m-thread">
+            <div class="m-col">
+              <div class="m-user">浏览器访问 /api 全部 401，帮我看一下 gateway 的鉴权链路。</div>
+              <div class="m-asst">
+                <p>先读控制面鉴权中间件，确认浏览器请求缺的是哪一种凭据。</p>
+                <div class="m-tool">
+                  <div class="m-tool-h"><i data-lucide="file-text"></i><b>read_file</b><code>pkg/gateway/controlplane.go</code><span class="ok">完成</span></div>
+                  <pre class="m-code"><div><span class="ln">15</span><span><span class="k">func</span> <span class="f">ControlPlaneTokenFromRequest</span>(r *http.<span class="t">Request</span>, q <span class="t">string</span>) <span class="t">string</span> {</span></div><div><span class="ln">19</span><span>  auth := strings.<span class="f">TrimSpace</span>(r.Header.<span class="f">Get</span>(<span class="s">"Authorization"</span>))</span></div><div><span class="ln">20</span><span>  <span class="c">// 浏览器页面从未拿到 token，这里永远是空串</span></span></div></pre>
+                </div>
+                <p>根因是网页端没有任何途径取得 gateway token：请求头里的 <code class="inl">Authorization</code> 始终为空。修复方向是用一次性登录换取 HttpOnly 会话 Cookie。</p>
+                <div class="m-worked">已工作 1 分 12 秒</div>
+              </div>
+            </div>
+          </div>
+          <div class="m-composer">
+            <div class="ph">输入消息，/ 调出命令，@ 引用文件</div>
+            <div class="bar">
+              <span class="chip"><i data-lucide="paperclip"></i>附件</span>
+              <span class="chip"><i data-lucide="cpu"></i>deepseek-v4</span>
+              <span class="send"><i data-lucide="arrow-up"></i></span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="m-bench" aria-label="工作台示意">
+          <h4>工作台</h4>
+          <div class="m-box">
+            <div class="m-box-h"><i data-lucide="users"></i>运行中的代理<span class="pill">2</span></div>
+            <div class="m-agent"><span class="dot"></span>explore · 扫描鉴权调用点<span class="dur">00:41</span></div>
+            <div class="m-agent"><span class="dot"></span>review · 审阅中间件改动<span class="dur">00:12</span></div>
+          </div>
+          <div class="m-box">
+            <div class="m-box-h"><i data-lucide="folder-tree"></i>工作区文件</div>
+            <div class="m-files">
+              <span class="dir">cmd/forebrain/</span>
+              <span class="dir">pkg/gateway/</span>
+              <span class="hov">pkg/gateway/controlplane.go</span>
+              <span>pkg/gateway/serve_run.go</span>
+              <span>frontend/src/lib/api.ts</span>
+            </div>
+            <p>点击文件可插入引用：@path</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <p class="stage-note">本页只用于比较主题色与 logo；页面布局已更新，以全站预览为准（工作台默认收起、设置与配置合并为一个入口）。示意按 1240 × 700 绘制，窄屏可横向滚动查看。菜单栏的“管控 / 工作区”两组默认收起，进入其中某页时自动展开所在分组。心跳入口在菜单栏底部，作用于当前打开的对话；设置了心跳的对话在列表里带一个脉搏图标。工作台里“运行中的代理”没有代理时整张卡片不显示。</p>
+  </section>
+
+  <section aria-labelledby="scheme-h">
+    <div class="section-head">
+      <h2 id="scheme-h">主题色方案</h2>
+      <p>每套只定义一个品牌色和菜单栏的深、浅两套配色；内容区的白底、灰阶和语义色（成功、警告、错误）三套共用。</p>
+    </div>
+    <div class="grid3">
+      <article class="card" data-scheme="a">
+        <div class="card-head"><h3>A · 海军蓝</h3><span class="rec">推荐</span></div>
+        <p class="desc">最接近“官方、正式”的气质：稳重的深蓝，像公文与金融类产品。深色菜单栏是一块沉稳的藏青底，白色内容区对比清晰。</p>
+        <div class="swatches">
+          <div class="sw"><i style="background:#1f4a9e"></i><span>品牌</span><code>#1F4A9E</code></div>
+          <div class="sw"><i style="background:#173b80"></i><span>悬停</span><code>#173B80</code></div>
+          <div class="sw"><i style="background:#ebf0f9"></i><span>浅底</span><code>#EBF0F9</code></div>
+          <div class="sw"><i style="background:#0f1d38"></i><span>深菜单栏</span><code>#0F1D38</code></div>
+          <div class="sw"><i style="background:#f3f5f9"></i><span>浅菜单栏</span><code>#F3F5F9</code></div>
+        </div>
+        <div class="rails">
+          <div class="minirail" style="background:#0f1d38;color:#e7ecf5">
+            <div class="mr-btn" style="background:#3a67c6;color:#fff">+ 新聊天</div>
+            <div class="mr-cap" style="color:#9fb0cc">会话</div>
+            <div class="mr-row" style="background:#1d3563;color:#fff">重构鉴权中间件</div>
+            <div class="mr-row" style="color:#9fb0cc">排查 MCP 超时</div>
+          </div>
+          <div class="minirail" style="background:#f3f5f9;color:#101828;border:1px solid #e1e5ec">
+            <div class="mr-btn" style="background:#1f4a9e;color:#fff">+ 新聊天</div>
+            <div class="mr-cap" style="color:#475467">会话</div>
+            <div class="mr-row" style="background:#e1e8f5;color:#1f4a9e">重构鉴权中间件</div>
+            <div class="mr-row" style="color:#475467">排查 MCP 超时</div>
+          </div>
+        </div>
+        <div class="onwhite"><span class="b" style="background:#1f4a9e">保存</span><span class="l" style="color:#1f4a9e">查看详情</span><span class="s" style="background:#ebf0f9;color:#1f4a9e">已启用</span></div>
+      </article>
+
+      <article class="card" data-scheme="b">
+        <div class="card-head"><h3>B · 松石青</h3><span class="tag">延续现有色相</span></div>
+        <p class="desc">保留现在的青色家族，但压低明度、去掉荧光感，与终端界面里的青色语义色同一色相，品牌延续性最好。</p>
+        <div class="swatches">
+          <div class="sw"><i style="background:#0e6e7e"></i><span>品牌</span><code>#0E6E7E</code></div>
+          <div class="sw"><i style="background:#0a5a67"></i><span>悬停</span><code>#0A5A67</code></div>
+          <div class="sw"><i style="background:#e7f3f4"></i><span>浅底</span><code>#E7F3F4</code></div>
+          <div class="sw"><i style="background:#0d2429"></i><span>深菜单栏</span><code>#0D2429</code></div>
+          <div class="sw"><i style="background:#f1f6f6"></i><span>浅菜单栏</span><code>#F1F6F6</code></div>
+        </div>
+        <div class="rails">
+          <div class="minirail" style="background:#0d2429;color:#e4f0f1">
+            <div class="mr-btn" style="background:#16808f;color:#fff">+ 新聊天</div>
+            <div class="mr-cap" style="color:#97b7bb">会话</div>
+            <div class="mr-row" style="background:#1a3f46;color:#fff">重构鉴权中间件</div>
+            <div class="mr-row" style="color:#97b7bb">排查 MCP 超时</div>
+          </div>
+          <div class="minirail" style="background:#f1f6f6;color:#101828;border:1px solid #dfe7e8">
+            <div class="mr-btn" style="background:#0e6e7e;color:#fff">+ 新聊天</div>
+            <div class="mr-cap" style="color:#475467">会话</div>
+            <div class="mr-row" style="background:#dcebed;color:#0e6e7e">重构鉴权中间件</div>
+            <div class="mr-row" style="color:#475467">排查 MCP 超时</div>
+          </div>
+        </div>
+        <div class="onwhite"><span class="b" style="background:#0e6e7e">保存</span><span class="l" style="color:#0e6e7e">查看详情</span><span class="s" style="background:#e7f3f4;color:#0e6e7e">已启用</span></div>
+      </article>
+
+      <article class="card" data-scheme="c">
+        <div class="card-head"><h3>C · 石墨黑</h3><span class="tag">黑白极简</span></div>
+        <p class="desc">只用黑、白、灰，品牌色即墨色。最克制也最“大气”，信息层级完全靠字重和留白；代价是品牌辨识度主要落在 logo 上。</p>
+        <div class="swatches">
+          <div class="sw"><i style="background:#1c1c1f"></i><span>品牌</span><code>#1C1C1F</code></div>
+          <div class="sw"><i style="background:#3a3a40"></i><span>悬停</span><code>#3A3A40</code></div>
+          <div class="sw"><i style="background:#f1f1f2"></i><span>浅底</span><code>#F1F1F2</code></div>
+          <div class="sw"><i style="background:#141416"></i><span>深菜单栏</span><code>#141416</code></div>
+          <div class="sw"><i style="background:#f6f6f7"></i><span>浅菜单栏</span><code>#F6F6F7</code></div>
+        </div>
+        <div class="rails">
+          <div class="minirail" style="background:#141416;color:#ededef">
+            <div class="mr-btn" style="background:#ffffff;color:#141416">+ 新聊天</div>
+            <div class="mr-cap" style="color:#a1a1a8">会话</div>
+            <div class="mr-row" style="background:#2a2a2e;color:#fff">重构鉴权中间件</div>
+            <div class="mr-row" style="color:#a1a1a8">排查 MCP 超时</div>
+          </div>
+          <div class="minirail" style="background:#f6f6f7;color:#18181b;border:1px solid #e4e4e7">
+            <div class="mr-btn" style="background:#1c1c1f;color:#fff">+ 新聊天</div>
+            <div class="mr-cap" style="color:#52525b">会话</div>
+            <div class="mr-row" style="background:#e6e6e8;color:#18181b">重构鉴权中间件</div>
+            <div class="mr-row" style="color:#52525b">排查 MCP 超时</div>
+          </div>
+        </div>
+        <div class="onwhite"><span class="b" style="background:#1c1c1f">保存</span><span class="l" style="color:#1c1c1f">查看详情</span><span class="s" style="background:#f1f1f2;color:#1c1c1f">已启用</span></div>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="logo-h">
+    <div class="section-head">
+      <h2 id="logo-h">Logo 方案</h2>
+      <p>三款都是单色实心几何图形，16px 下仍可辨认；浅色底用品牌色填充，深色底反白。下面按方案 A 的品牌色展示，切换主题色后 logo 随之变色。</p>
+    </div>
+    <div class="grid3" data-scheme="a" id="logo-grid">
+      <article class="card">
+        <div class="card-head"><h3>1 · 方印</h3><span class="rec">推荐</span></div>
+        <p class="desc">字母 F 刻在方印里，右下角一枚小方块像落款。最正式，适合作为官方标识；favicon 和终端 banner 都容易延续。</p>
+        <div class="logo-hero ground-light">
+          <svg class="lg" width="88" height="88" viewBox="0 0 32 32" aria-label="方印 logo"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg>
+          <div class="logo-sizes">
+            <div><svg class="lg" width="48" height="48" viewBox="0 0 32 32" aria-hidden="true"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg><span>48</span></div>
+            <div><svg class="lg" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg><span>32</span></div>
+            <div><svg class="lg" width="16" height="16" viewBox="0 0 32 32" aria-hidden="true"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg><span>16</span></div>
+          </div>
+        </div>
+        <div class="lockups">
+          <div class="lockup ground-dark" style="background:var(--rd-bg);color:var(--rd-fg)"><svg class="lg" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg><span class="wm"><b>Forebrain</b> <span>Harness</span></span></div>
+          <div class="lockup ground-light" style="background:var(--rl-bg);color:var(--rl-fg);border:1px solid var(--rl-line)"><svg class="lg" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect class="lg-fill" width="32" height="32" rx="7"/><path class="lg-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="lg-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg><span class="wm"><b>Forebrain</b> <span>Harness</span></span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h3>2 · 前脑</h3><span class="tag">寓意最直接</span></div>
+        <p class="desc">一个完整的圆被一道窄缝分成前后两部分，前部着品牌色——“前脑”即负责决策的那一侧。抽象、安静，不依赖字母。</p>
+        <div class="logo-hero ground-light">
+          <svg class="lg" width="88" height="88" viewBox="0 0 32 32" aria-label="前脑 logo"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg>
+          <div class="logo-sizes">
+            <div><svg class="lg" width="48" height="48" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg><span>48</span></div>
+            <div><svg class="lg" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg><span>32</span></div>
+            <div><svg class="lg" width="16" height="16" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg><span>16</span></div>
+          </div>
+        </div>
+        <div class="lockups">
+          <div class="lockup ground-dark" style="background:var(--rd-bg);color:var(--rd-fg)"><svg class="lg" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg><span class="wm"><b>Forebrain</b> <span>Harness</span></span></div>
+          <div class="lockup ground-light" style="background:var(--rl-bg);color:var(--rl-fg);border:1px solid var(--rl-line)"><svg class="lg" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-back" d="M17 3.04A13 13 0 1 0 17 28.96Z"/><path class="lg-front" d="M19 3.35A13 13 0 0 1 19 28.65Z"/></svg><span class="wm"><b>Forebrain</b> <span>Harness</span></span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h3>3 · 枢纽</h3><span class="tag">强调 Harness</span></div>
+        <p class="desc">六边形里一个 H，横梁中央是一个节点：两根立柱被同一个中枢连接，表达“把多个代理约束、连接在一起”。技术感最强。</p>
+        <div class="logo-hero ground-light">
+          <svg class="lg" width="88" height="88" viewBox="0 0 32 32" aria-label="枢纽 logo"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg>
+          <div class="logo-sizes">
+            <div><svg class="lg" width="48" height="48" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg><span>48</span></div>
+            <div><svg class="lg" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg><span>32</span></div>
+            <div><svg class="lg" width="16" height="16" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg><span>16</span></div>
+          </div>
+        </div>
+        <div class="lockups">
+          <div class="lockup ground-dark" style="background:var(--rd-bg);color:var(--rd-fg)"><svg class="lg" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg><span class="wm"><b>Forebrain</b> <span>Harness</span></span></div>
+          <div class="lockup ground-light" style="background:var(--rl-bg);color:var(--rl-fg);border:1px solid var(--rl-line)"><svg class="lg" width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><path class="lg-fill" d="M16 2.2 28 9.1v13.8L16 29.8 4 22.9V9.1z"/><rect class="lg-glyph" x="9.4" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="19" y="9" width="3.6" height="14" rx="0.6"/><rect class="lg-glyph" x="12" y="15" width="8" height="2"/><circle class="lg-glyph" cx="16" cy="16" r="3"/></svg><span class="wm"><b>Forebrain</b> <span>Harness</span></span></div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="note" aria-labelledby="rules-h">
+    <h2 id="rules-h">三套方案共同遵守的规则</h2>
+    <ul>
+      <li><strong>纯色</strong>：全站禁止渐变、毛玻璃（backdrop-blur）和半透明叠色，只用实色；阴影只保留给浮层（下拉、弹窗）一档。</li>
+      <li><strong>白底</strong>：内容区、对话窗口、工作台一律 #FFFFFF；卡片用 1px 细线分隔而不是底色。</li>
+      <li><strong>深浅只在菜单栏</strong>：切换按钮移到菜单栏底部，只改菜单栏；代码块始终用浅色的 monokailight。</li>
+      <li><strong>字体</strong>：界面与正文统一为系统无衬线（苹方 / 微软雅黑 / Segoe UI），等宽字体只用于代码与路径，替换现在的衬线体。</li>
+      <li><strong>三栏</strong>：删除原来独立的会话栏，“新聊天”、搜索和会话列表并入菜单栏；心跳从工作台移出，入口放在菜单栏底部；工作台的“运行中的代理”为空时不显示。</li>
+    </ul>
+  </section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+  (function () {
+    var mock = document.getElementById('mock');
+    var logoGrid = document.getElementById('logo-grid');
+    document.querySelectorAll('.seg').forEach(function (seg) {
+      var key = seg.getAttribute('data-key');
+      seg.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('button');
+        if (!btn) return;
+        var val = btn.getAttribute('data-val');
+        seg.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b === btn)); });
+        mock.setAttribute('data-' + key, val);
+        if (key === 'scheme') logoGrid.setAttribute('data-scheme', val);
+      });
+    });
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons({ attrs: { 'stroke-width': 1.75 } });
+    }
+  })();
+</script>

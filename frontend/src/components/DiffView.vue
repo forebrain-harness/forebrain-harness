@@ -16,7 +16,7 @@
       <!-- file header -->
       <button
         type="button"
-        class="flex w-full items-center gap-2 bg-[var(--forebrain-bg-alt)] px-3 py-1.5 text-left text-[11px] font-semibold hover:bg-[var(--forebrain-bg-alt-soft)] focus:outline-none"
+        class="flex w-full items-center gap-2 bg-[var(--forebrain-bg-alt)] px-3 py-1.5 text-left text-[11px] font-semibold hover:bg-[var(--forebrain-bg-alt)] focus:outline-none"
         :aria-expanded="expandedFiles.has(fileIdx)"
         @click="toggleFile(fileIdx)"
       >
@@ -273,36 +273,19 @@ function lineMarker(kind: string): string {
   -webkit-user-select: none;
 }
 
-/* Light theme row tints */
+/* Row tints: added lines sit on the success tint, removed lines stay on the
+   neutral alt ground with danger text (no pink-family fill). */
 .diff-row-add {
-  background-color: #dcfce7; /* green-100 */
+  background-color: var(--forebrain-success-soft);
 }
 .diff-row-del {
-  background-color: #fee2e2; /* red-100 */
+  background-color: var(--forebrain-bg-alt);
 }
 .diff-row-ctx {
   background-color: transparent;
 }
-.diff-marker-add { color: #16a34a; } /* green-600 */
-.diff-marker-del { color: #dc2626; } /* red-600 */
-.diff-add-label { color: #16a34a; }
-.diff-del-label { color: #dc2626; }
-
-/* Shiki emits each token's light colour plus a --shiki-dark custom property,
-   so the dark palette is one variable swap rather than a second render. */
-:global(.dark) .diff-code span {
-  color: var(--shiki-dark);
-}
-
-/* Dark theme row tints */
-:global(.dark) .diff-row-add {
-  background-color: #14532d; /* green-900 */
-}
-:global(.dark) .diff-row-del {
-  background-color: #7f1d1d; /* red-900 */
-}
-:global(.dark) .diff-marker-add { color: #86efac; } /* green-300 */
-:global(.dark) .diff-marker-del { color: #fca5a5; } /* red-300 */
-:global(.dark) .diff-add-label { color: #86efac; }
-:global(.dark) .diff-del-label { color: #fca5a5; }
+.diff-marker-add { color: var(--forebrain-success); }
+.diff-marker-del { color: var(--forebrain-danger); }
+.diff-add-label { color: var(--forebrain-success); }
+.diff-del-label { color: var(--forebrain-danger); }
 </style>

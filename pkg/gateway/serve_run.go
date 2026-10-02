@@ -2,8 +2,11 @@ package gateway
 
 import (
 	"context"
-	"log/slog"
+	"fmt"
+	"io"
+	"net"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
@@ -13,7 +16,19 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
-func RunServeBlocking(ctx context.Context) error {
+// ServeOptions is what the command line hands the gateway when it starts.
+type ServeOptions struct {
+	// Out receives the startup banner and the route table.
+	Out io.Writer
+	// Version is this build's version, printed under the banner.
+	Version string
+	// SignInLink prints a sign-in URL that carries the gateway token. The
+	// command sets it only when stdout is a terminal, so the token never lands
+	// in a log file that captures a service's output.
+	SignInLink bool
+}
+
+func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	h, err := process.Open(ctx, process.OpenOptions{
@@ -142,7 +157,101 @@ func RunServeBlocking(ctx context.Context) error {
 	gw.AttachREST(httpSrv)
 	gddHandler := httpSrv.Handler
 	httpSrv.Handler = ServeHTTPChain(h, gw, gddHandler)
-	slog.Info("gateway auth configured", "mode", strings.TrimSpace(h.Deps.AppCfg.Gateway.Auth.Mode))
-	httpSrv.Run()
-	return nil
+
+	authMode := gatewayAuthMode(h.Deps.AppCfg)
+	signInToken := ""
+	if opts.SignInLink && authMode == "token" {
+		signInToken = strings.TrimSpace(h.Deps.AppCfg.Gateway.Auth.Token)
+	}
+	banner := startupBanner{
+		Version:       opts.Version,
+		Routes:        httpSrv.Routes(),
+		ChannelAgent:  chReg.AgentID(),
+		ChannelRoutes: chReg.RouteKeys(),
+		AuthMode:      authMode,
+		SignInToken:   signInToken,
+		WebUI:         gw.resolveStaticFS() != nil,
+	}
+	return httpSrv.Run(func(a net.Addr) {
+		banner.Addr = a
+		if opts.Out != nil {
+			writeStartupBanner(opts.Out, banner)
+		}
+	})
+}
+
+// bannerArt is the wordmark printed when the gateway starts.
+const bannerArt = " _____              _               _\n" +
+	"|  ___|__  _ __ ___| |__  _ __ __ _(_)_ __\n" +
+	"| |_ / _ \\| '__/ _ \\ '_ \\| '__/ _` | | '_ \\\n" +
+	"|  _| (_) | | |  __/ |_) | | | (_| | | | | |\n" +
+	"|_|  \\___/|_|  \\___|_.__/|_|  \\__,_|_|_| |_|\n"
+
+type startupBanner struct {
+	Version       string      // this build's version, "" prints no version line suffix
+	Routes        []RouteInfo // the router's table, web UI routes included
+	ChannelAgent  string      // the primary agent whose channels are mounted
+	ChannelRoutes []string    // "METHOD /path", from channel.Registry.RouteKeys
+	Addr          net.Addr    // the address actually bound
+	AuthMode      string
+	SignInToken   string // set only when a sign-in link is to be printed
+	WebUI         bool   // true when the web UI is being served
+}
+
+// displayHost maps an unspecified bind address to loopback for the clickable
+// URLs: a browser cannot connect to "0.0.0.0" as a destination.
+func displayHost(addr net.Addr) string {
+	host, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func writeStartupBanner(w io.Writer, b startupBanner) {
+	var out strings.Builder
+	out.WriteString(bannerArt)
+	if strings.TrimSpace(b.Version) != "" {
+		fmt.Fprintf(&out, "Forebrain Harness Gateway %s\n", b.Version)
+	} else {
+		out.WriteString("Forebrain Harness Gateway\n")
+	}
+
+	routes := make([]RouteInfo, 0, len(b.Routes)+1)
+	routes = append(routes, b.Routes...)
+	// /ws/chat is served by the middleware chain before the router ever sees
+	// it, so it is not in the router's table; the listing must still show it.
+	routes = append(routes, RouteInfo{Method: "WS", Path: "/ws/chat"})
+	sort.Slice(routes, func(i, j int) bool {
+		if routes[i].Path != routes[j].Path {
+			return routes[i].Path < routes[j].Path
+		}
+		return routes[i].Method < routes[j].Method
+	})
+	fmt.Fprintf(&out, "\nRoutes (%d)\n", len(routes))
+	for _, r := range routes {
+		fmt.Fprintf(&out, "  %-8s%s\n", r.Method, r.Path)
+	}
+
+	if len(b.ChannelRoutes) > 0 {
+		fmt.Fprintf(&out, "Channel routes · %s (%d)\n", strings.TrimSpace(b.ChannelAgent), len(b.ChannelRoutes))
+		for _, key := range b.ChannelRoutes {
+			method, path, _ := strings.Cut(key, " ")
+			fmt.Fprintf(&out, "  %-8s%s\n", method, path)
+		}
+	}
+
+	base := "http://" + displayHost(b.Addr)
+	if b.WebUI {
+		fmt.Fprintf(&out, "Web UI       %s/\n", base)
+	}
+	if b.SignInToken != "" {
+		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, b.SignInToken)
+	}
+	fmt.Fprintf(&out, "Auth         %s\n", strings.TrimSpace(b.AuthMode))
+	fmt.Fprintf(&out, "Listening on http://%s\n", b.Addr.String())
+	_, _ = io.WriteString(w, out.String())
 }

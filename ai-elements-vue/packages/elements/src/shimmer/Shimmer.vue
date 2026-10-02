@@ -2,7 +2,7 @@
 import type { CSSProperties, HTMLAttributes } from 'vue'
 import { cn } from '@repo/shadcn-vue/lib/utils'
 import { motion } from 'motion-v'
-import { computed, useSlots } from 'vue'
+import { computed } from 'vue'
 
 export interface TextShimmerProps {
   as?: keyof HTMLElementTagNameMap
@@ -17,34 +17,12 @@ const props = withDefaults(defineProps<TextShimmerProps>(), {
   spread: 2,
 })
 
-const slots = useSlots()
 
-const textContent = computed(() => {
-  const defaultSlot = slots.default?.()
-  if (!defaultSlot || defaultSlot.length === 0)
-    return ''
+// The animation is a breathing opacity on the text itself — no gradient
+// sweep, so it survives a flat, solid-colour design.
+const componentClasses = computed(() => cn('relative inline-block text-current', props.class))
 
-  return defaultSlot
-    .map((vnode) => {
-      if (typeof vnode.children === 'string') {
-        return vnode.children
-      }
-      return ''
-    })
-    .join('')
-})
-
-const dynamicSpread = computed(() => {
-  return (textContent.value?.length ?? 0) * props.spread
-})
-
-const componentClasses = computed(() => cn('relative inline-block bg-[length:250%_100%,auto] bg-clip-text text-transparent', '[--bg:linear-gradient(90deg,#0000_calc(50%-var(--spread)),var(--color-background),#0000_calc(50%+var(--spread)))] [background-repeat:no-repeat,padding-box]', props.class))
-
-const componentStyle = computed((): CSSProperties => ({
-  '--spread': `${dynamicSpread.value}px`,
-  'backgroundImage':
-    'var(--bg), linear-gradient(var(--color-muted-foreground), var(--color-muted-foreground))',
-}))
+const componentStyle = computed((): CSSProperties => ({}))
 
 const MotionComponent = computed(() => {
   return motion[props.as as keyof typeof motion] || motion.p
@@ -56,12 +34,12 @@ const MotionComponent = computed(() => {
     :is="MotionComponent"
     :class="componentClasses"
     :style="componentStyle"
-    :initial="{ backgroundPosition: '100% center' }"
-    :animate="{ backgroundPosition: '0% center' }"
+    :initial="{ opacity: 1 }"
+    :animate="{ opacity: [1, 0.45, 1] }"
     :transition="{
       repeat: Number.POSITIVE_INFINITY,
       duration,
-      ease: 'linear',
+      ease: 'easeInOut',
     }"
   >
     <slot />

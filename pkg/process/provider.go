@@ -9,9 +9,12 @@ import (
 
 // ProviderKeyEnvMap returns the environment variable mapping for a provider's
 // API key. The variable name follows the uniform scheme
-// UPPERCASE(provider)_API_KEY.
+// UPPERCASE(provider)_API_KEY, with "-" mapped to "_": a hyphenated provider
+// id ("e2e-svc") would otherwise name a variable no env parser accepts, and
+// the .env holding it would fail to load at all — the same normalization the
+// channel secret names already apply.
 func ProviderKeyEnvMap(provider string, key string) map[string]string {
-	envName := strings.ToUpper(strings.TrimSpace(provider)) + "_API_KEY"
+	envName := strings.ReplaceAll(strings.ToUpper(strings.TrimSpace(provider)), "-", "_") + "_API_KEY"
 	return map[string]string{envName: key}
 }
 

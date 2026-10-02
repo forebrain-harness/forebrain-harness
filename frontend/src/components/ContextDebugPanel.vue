@@ -264,7 +264,7 @@
         <details class="context-debug-details" :open="evictedItems.length > 0">
           <summary class="context-debug-summary">
             <span class="inline-flex items-center gap-2">
-              <ArchiveX class="size-4 text-[rgb(216,160,70)]" aria-hidden="true" />
+              <ArchiveX class="size-4 text-[var(--forebrain-warning)]" aria-hidden="true" />
               {{ t('chat.contextEvictionDetails') }}
             </span>
             <span class="context-debug-count">{{ evictedItems.length }}</span>
@@ -427,9 +427,7 @@ const MetricCell = defineComponent({
   overflow: hidden;
   border: 1px solid var(--forebrain-divider);
   border-radius: 8px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--forebrain-surface) 88%, transparent), color-mix(in srgb, var(--forebrain-bg-alt) 54%, transparent));
-  box-shadow: var(--forebrain-inset-shadow);
+  background: var(--forebrain-bg-alt);
 }
 
 .context-debug-header {
@@ -439,9 +437,7 @@ const MetricCell = defineComponent({
   gap: 12px;
   border-bottom: 1px solid var(--forebrain-divider);
   padding: 12px;
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--forebrain-brand-1) 8%, transparent), transparent 48%),
-    var(--forebrain-card-gradient);
+  background: var(--forebrain-brand-soft);
 }
 
 .context-debug-eyebrow,
@@ -470,20 +466,20 @@ const MetricCell = defineComponent({
 }
 
 .context-debug-signal-ok {
-  border-color: rgba(70, 150, 110, 0.3);
-  background: rgba(70, 150, 110, 0.12);
-  color: rgb(70, 150, 110);
+  border-color: var(--forebrain-success);
+  background: var(--forebrain-success-soft);
+  color: var(--forebrain-success);
 }
 
 .context-debug-signal-warn {
-  border-color: rgba(216, 160, 70, 0.38);
-  background: rgba(216, 160, 70, 0.14);
-  color: rgb(216, 160, 70);
+  border-color: var(--forebrain-warning);
+  background: var(--forebrain-warning-soft);
+  color: var(--forebrain-warning);
 }
 
 .context-debug-signal-danger {
-  border-color: rgba(160, 70, 70, 0.42);
-  background: rgba(160, 70, 70, 0.12);
+  border-color: var(--forebrain-danger);
+  background: var(--forebrain-bg-alt);
   color: var(--forebrain-danger);
 }
 
@@ -522,9 +518,9 @@ const MetricCell = defineComponent({
 
 .context-debug-error {
   align-items: flex-start;
-  border: 1px solid rgba(160, 70, 70, 0.32);
+  border: 1px solid var(--forebrain-danger);
   border-radius: 8px;
-  background: rgba(160, 70, 70, 0.08);
+  background: var(--forebrain-bg-alt);
   padding: 10px;
   color: var(--forebrain-danger);
 }
@@ -567,7 +563,7 @@ const MetricCell = defineComponent({
 
 .context-debug-metric-neutral {
   border-color: var(--forebrain-divider);
-  background: color-mix(in srgb, var(--forebrain-bg-alt) 56%, transparent);
+  background: var(--forebrain-bg-alt);
 }
 
 .context-debug-metric-accent {
@@ -576,8 +572,8 @@ const MetricCell = defineComponent({
 }
 
 .context-debug-metric-warn {
-  border-color: rgba(216, 160, 70, 0.32);
-  background: rgba(216, 160, 70, 0.09);
+  border-color: var(--forebrain-warning);
+  background: var(--forebrain-warning-soft);
 }
 
 .context-debug-metric-label {
@@ -611,8 +607,8 @@ const MetricCell = defineComponent({
   height: 10px;
   overflow: hidden;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--forebrain-surface-control) 80%, var(--forebrain-code-bg) 20%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--forebrain-divider) 70%, transparent);
+  background: var(--forebrain-code-bg);
+  border: 1px solid var(--forebrain-divider);
 }
 
 .context-debug-track-fill {
@@ -623,15 +619,15 @@ const MetricCell = defineComponent({
 }
 
 .context-debug-track-fill-ok {
-  background: linear-gradient(90deg, rgb(70, 150, 110), var(--forebrain-brand-1));
+  background: var(--forebrain-success);
 }
 
 .context-debug-track-fill-warn {
-  background: linear-gradient(90deg, rgb(70, 150, 110), rgb(216, 160, 70));
+  background: var(--forebrain-warning);
 }
 
 .context-debug-track-fill-danger {
-  background: linear-gradient(90deg, rgb(216, 160, 70), rgb(160, 70, 70));
+  background: var(--forebrain-danger);
 }
 
 .context-debug-threshold {
@@ -642,11 +638,11 @@ const MetricCell = defineComponent({
 }
 
 .context-debug-threshold-warn {
-  background: rgba(216, 160, 70, 0.85);
+  background: var(--forebrain-warning);
 }
 
 .context-debug-threshold-block {
-  background: rgba(160, 70, 70, 0.9);
+  background: var(--forebrain-danger);
 }
 
 .context-debug-track-labels {
@@ -716,7 +712,7 @@ const MetricCell = defineComponent({
   gap: 6px;
   border: 1px solid var(--forebrain-divider);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--forebrain-bg-alt) 64%, transparent);
+  background: var(--forebrain-bg-alt);
   padding: 6px 8px;
   color: var(--forebrain-text-2);
   font-size: 11px;
@@ -736,9 +732,7 @@ const MetricCell = defineComponent({
   min-width: 0;
   border: 1px solid var(--forebrain-divider);
   border-radius: 8px;
-  background:
-    linear-gradient(90deg, color-mix(in srgb, var(--forebrain-brand-1) 6%, transparent), transparent 56%),
-    color-mix(in srgb, var(--forebrain-bg-alt) 58%, transparent);
+  background: var(--forebrain-bg-alt);
   padding: 9px;
 }
 
@@ -804,15 +798,15 @@ const MetricCell = defineComponent({
   margin-top: 5px;
   flex-shrink: 0;
   border-radius: 999px;
-  box-shadow: 0 0 0 3px rgba(128, 128, 128, 0.12);
+  box-shadow: 0 0 0 3px var(--forebrain-bg-alt);
 }
 
 .context-debug-dot-ok {
-  background: rgb(70, 150, 110);
+  background: var(--forebrain-success);
 }
 
 .context-debug-dot-warn {
-  background: rgb(216, 160, 70);
+  background: var(--forebrain-warning);
 }
 
 .context-debug-dot-danger {
@@ -824,7 +818,7 @@ const MetricCell = defineComponent({
 .context-debug-token {
   border: 1px solid var(--forebrain-divider);
   border-radius: 6px;
-  background: color-mix(in srgb, var(--forebrain-code-surface) 8%, var(--forebrain-bg-alt));
+  background: var(--forebrain-bg-alt);
   color: var(--forebrain-muted-text);
 }
 
@@ -858,7 +852,7 @@ const MetricCell = defineComponent({
   min-width: 0;
   border: 1px solid var(--forebrain-divider);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--forebrain-bg-alt) 58%, transparent);
+  background: var(--forebrain-bg-alt);
   padding: 9px;
 }
 

@@ -1,20 +1,45 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { onGatewayUnauthorized, probeGatewaySession } from '@/lib/gatewaySession'
 import { t } from '@/locales'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/LoginView.vue'),
+      meta: { bare: true, title: () => t('routes.loginTitle') },
+    },
+    {
+      path: '/workshop',
+      name: 'workshop',
+      component: () => import('@/views/WorkshopView.vue'),
+      meta: { title: () => t('workshop.title') },
+    },
+    {
+      path: '/skills',
+      name: 'skills',
+      component: () => import('@/views/SkillsView.vue'),
+      meta: { title: () => t('skills.title') },
+    },
+    {
+      path: '/rules',
+      name: 'rules',
+      component: () => import('@/views/RulesView.vue'),
+      meta: { title: () => t('routes.rulesTitle') },
+    },
+    {
+      path: '/subagents',
+      name: 'subagents',
+      component: () => import('@/views/SubagentsView.vue'),
+      meta: { title: () => t('routes.subagentsTitle') },
+    },
+    {
       path: '/',
       name: 'chat',
       component: () => import('@/views/ChatView.vue'),
       meta: { title: () => t('routes.chatTitle') },
-    },
-    {
-      path: '/agents',
-      name: 'agents',
-      component: () => import('@/views/AgentsView.vue'),
-      meta: { title: () => t('routes.agentsTitle') },
     },
     {
       path: '/permissions',
@@ -29,12 +54,6 @@ const router = createRouter({
       meta: { title: () => t('routes.toolsTitle') },
     },
     {
-      path: '/mcp',
-      name: 'mcp',
-      component: () => import('@/views/McpView.vue'),
-      meta: { title: () => t('routes.mcpTitle') },
-    },
-    {
       path: '/projects',
       name: 'projects',
       component: () => import('@/views/ProjectsView.vue'),
@@ -42,9 +61,18 @@ const router = createRouter({
     },
     {
       path: '/projects/:id',
-      name: 'project-detail',
       component: () => import('@/views/ProjectDetailView.vue'),
-      meta: { title: () => t('routes.projectsTitle') },
+      children: [
+        { path: '', redirect: (to) => `/projects/${to.params.id}/overview` },
+        { path: 'overview', name: 'project-overview', component: () => import('@/components/project/ProjectOverview.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'rules', name: 'project-rules', component: () => import('@/components/project/ProjectRules.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'sessions', name: 'project-sessions', component: () => import('@/components/project/ProjectSessions.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'memory', name: 'project-memory', component: () => import('@/components/project/ProjectMemory.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'perm', name: 'project-perm', component: () => import('@/components/project/ProjectPerm.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'mcp', name: 'project-mcp', component: () => import('@/components/project/ProjectMcp.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'skills', name: 'project-skills', component: () => import('@/components/project/ProjectSkills.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'cron', name: 'project-cron', component: () => import('@/components/project/ProjectCron.vue'), meta: { title: () => t('routes.projectsTitle') } },
+      ],
     },
     {
       path: '/cron',
@@ -65,18 +93,6 @@ const router = createRouter({
       meta: { title: () => t('routes.providersTitle') },
     },
     {
-      path: '/hooks',
-      name: 'hooks',
-      component: () => import('@/views/HooksView.vue'),
-      meta: { title: () => t('routes.hooksTitle') },
-    },
-    {
-      path: '/config',
-      name: 'config',
-      component: () => import('@/views/ConfigView.vue'),
-      meta: { title: () => t('routes.configTitle') },
-    },
-    {
       path: '/memories',
       name: 'memories',
       component: () => import('@/views/MemoriesView.vue'),
@@ -89,6 +105,24 @@ const router = createRouter({
       meta: { title: () => t('routes.settingsTitle') },
     },
   ],
+})
+
+// The gateway session decides what a navigation may reach: without it a page
+// would mount its shell and then watch every request fail with 401.
+router.beforeEach(async (to) => {
+  if (to.name === 'login') return true
+  if ((await probeGatewaySession()) === 'required') {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  return true
+})
+
+// api.ts reports 401s here (it cannot import the router without a cycle).
+onGatewayUnauthorized(() => {
+  const current = router.currentRoute.value
+  if (current.name !== 'login') {
+    void router.replace({ name: 'login', query: { redirect: current.fullPath } })
+  }
 })
 
 router.afterEach((to) => {

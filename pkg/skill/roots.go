@@ -102,46 +102,43 @@ func UserSkillRoots() []string {
 }
 
 // TrustedProjectSkillRoots returns the project skill roots that may reach the
-// model: empty unless projectRoot sits in a project the user has trusted. The
-// launch trust prompt is the whole gate — it runs for every directory, version
+// model: empty unless projectRoot sits in a project the user has trusted.
+// The launch trust prompt is the whole gate — it runs for every directory, version
 // controlled or not — so a plain directory the user created themselves gets
 // the same project skills a trusted checkout gets, and a directory nobody has
-// judged gets none. The project root is explicit — the caller's frozen launch
-// project — because which project a session's skills belong to is session
-// state, not something this package may re-derive from the process working
-// directory.
+// judged gets none. The project root is treated as the exact boundary: callers
+// pass an already-resolved root (a launch project's git root, or a root the
+// user registered as a project), and resolving a registered subdirectory up
+// to an enclosing checkout would relocate the project onto the checkout.
 func TrustedProjectSkillRoots(home string, projectRoot string) []string {
 	projectRoot = strings.TrimSpace(projectRoot)
 	if projectRoot == "" {
 		return nil
 	}
-	project, err := safety.Resolve(projectRoot)
-	if err != nil {
-		return nil
+	root := CanonicalSkillPath(projectRoot)
+	if root == "" {
+		root = projectRoot
 	}
-	trusted, err := safety.IsTrusted(strings.TrimSpace(home), project)
+	trusted, err := safety.IsTrusted(strings.TrimSpace(home), safety.Project{Root: root})
 	if err != nil || !trusted {
 		return nil
 	}
-	return projectSkillRootsForRoot(project.Root)
+	return projectSkillRootsForRoot(root)
 }
 
-// ProjectSkillRootsForDir returns the project skill roots by location alone,
-// with no trust check. It answers "which project would this path belong to",
-// which is what naming and classification need; anything that decides what the
-// model may load must use TrustedProjectSkillRoots instead. The directory is
-// required: a skill root that depends on where the process happens to run is
-// the bug this package exists to avoid.
+// ProjectSkillRootsForDir returns the project skill roots for a project root
+// treated as the exact boundary, with no trust check. It answers "which
+// directories does this project hold", which is what naming and
+// classification need; anything that decides what the model may load must use
+// TrustedProjectSkillRoots instead. The directory is required: a skill root
+// that depends on where the process happens to run is the bug this package
+// exists to avoid.
 func ProjectSkillRootsForDir(dir string) []string {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return nil
 	}
-	root := dir
-	if project, err := safety.Resolve(dir); err == nil && strings.TrimSpace(project.Root) != "" {
-		root = project.Root
-	}
-	return projectSkillRootsForRoot(root)
+	return projectSkillRootsForRoot(CanonicalSkillPath(dir))
 }
 
 func projectSkillRootsForRoot(projectRoot string) []string {

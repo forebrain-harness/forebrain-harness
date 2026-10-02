@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +171,23 @@ func (r *Registry) AgentID() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.agentID
+}
+
+// RouteKeys lists the inbound routes the bound agent's channels mounted, as
+// sorted "METHOD /path" keys. The gateway prints them at startup so an
+// operator can see which inbound endpoints this instance answers for.
+func (r *Registry) RouteKeys() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	keys := make([]string, 0, len(r.routes))
+	for k := range r.routes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Route returns the handler mounted at method+path by the bound agent's

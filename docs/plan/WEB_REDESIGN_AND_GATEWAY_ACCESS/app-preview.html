@@ -1,0 +1,1001 @@
+<title>Forebrain Harness 全站预览</title>
+<style>
+  /* ---------- Page chrome (follows the viewer's theme) ---------- */
+  :root {
+    --pg-bg: #f4f5f7; --pg-card: #ffffff; --pg-text: #101828; --pg-text-2: #475467; --pg-muted: #667085; --pg-line: #e4e7ec;
+    --pg-chip: #eef0f3; --pg-chip-on: #101828; --pg-chip-on-text: #ffffff;
+    --ui: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { color-scheme: dark; --pg-bg: #0f1115; --pg-card: #171a20; --pg-text: #eceef2; --pg-text-2: #b4bac5; --pg-muted: #8a91a0; --pg-line: #2a2f38; --pg-chip: #232830; --pg-chip-on: #eceef2; --pg-chip-on-text: #0f1115; }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; --pg-bg: #0f1115; --pg-card: #171a20; --pg-text: #eceef2; --pg-text-2: #b4bac5; --pg-muted: #8a91a0; --pg-line: #2a2f38; --pg-chip: #232830; --pg-chip-on: #eceef2; --pg-chip-on-text: #0f1115; }
+  body { background: var(--pg-bg); color: var(--pg-text); font-family: var(--ui); font-size: 14px; line-height: 1.6; }
+  .wrap { max-width: 1360px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 56px; display: grid; gap: 16px; }
+  .wrap > header h1 { margin: 0; font-size: 24px; line-height: 1.3; font-weight: 650; }
+  .wrap > header p { margin: 6px 0 0; color: var(--pg-text-2); max-width: 78ch; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; }
+  .ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ctl-label { font-size: 12px; color: var(--pg-muted); letter-spacing: 0.04em; }
+  .seg { display: inline-flex; flex-wrap: wrap; background: var(--pg-chip); border-radius: 8px; padding: 3px; gap: 2px; }
+  .seg button { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--pg-text-2); padding: 5px 11px; border-radius: 6px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--pg-chip-on); color: var(--pg-chip-on-text); }
+  .seg button:focus-visible { outline: 2px solid var(--pg-text); outline-offset: 1px; }
+  .stage { overflow-x: auto; border: 1px solid var(--pg-line); border-radius: 12px; background: var(--pg-card); }
+  .caption { background: var(--pg-card); border: 1px solid var(--pg-line); border-radius: 12px; padding: 14px 18px; display: grid; gap: 6px; }
+  .caption h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .caption ul { margin: 0; padding-left: 18px; color: var(--pg-text-2); display: grid; gap: 3px; }
+  .caption code { font-family: var(--mono); font-size: 12.5px; }
+
+  /* ---------- The app (product tokens; content always white) ---------- */
+  .app {
+    --page: #ffffff; --subtle: #f7f8fa; --soft: #f2f4f7; --soft-2: #eaecf0; --line: #e4e7ec; --line-2: #d0d5dd;
+    --text: #101828; --text-2: #475467; --muted: #667085; --on-brand: #ffffff;
+    --danger: #b42318; --success: #067647; --success-soft: #ecfdf3; --warning: #b54708; --warning-soft: #fffaeb; --code: #fafafa;
+    --pop: 0 8px 24px rgba(16, 24, 40, 0.08);
+    width: 1320px; height: 800px; display: flex; background: var(--page); color: var(--text);
+    font-family: var(--ui); font-size: 13px; line-height: 1.55; position: relative; overflow: hidden;
+  }
+  .app[data-brand="navy"] { --brand: #1f4a9e; --brand-hover: #173b80; --brand-soft: #ebf0f9; --brand-border: #c3d2ec; }
+  .app[data-brand="teal"] { --brand: #0e6e7e; --brand-hover: #0a5a67; --brand-soft: #e7f3f4; --brand-border: #b7dde2; }
+  .app[data-brand="graphite"] { --brand: #1c1c1f; --brand-hover: #3a3a40; --brand-soft: #f1f1f2; --brand-border: #d4d4d8; }
+  .app[data-brand="navy"][data-rail="dark"] :is(.rail, .t-menu) { --r-pop:#132447; --r-bg:#0f1d38; --r-fg:#e7ecf5; --r-fg2:#9fb0cc; --r-line:#1e3055; --r-hover:#172a4d; --r-active:#1d3563; --r-active-fg:#ffffff; --r-mark:#7ea2ea; --r-btn:#3a67c6; --r-btn-hover:#4a75d0; --r-btn-fg:#ffffff; --r-field:#152646; }
+  .app[data-brand="navy"][data-rail="light"] :is(.rail, .t-menu) { --r-pop:#ffffff; --r-bg:#f3f5f9; --r-fg:#101828; --r-fg2:#475467; --r-line:#e1e5ec; --r-hover:#e8ecf3; --r-active:#e1e8f5; --r-active-fg:#1f4a9e; --r-mark:#1f4a9e; --r-btn:#1f4a9e; --r-btn-hover:#173b80; --r-btn-fg:#ffffff; --r-field:#ffffff; }
+  .app[data-brand="teal"][data-rail="dark"] :is(.rail, .t-menu) { --r-pop:#112c31; --r-bg:#0d2429; --r-fg:#e4f0f1; --r-fg2:#97b7bb; --r-line:#1b393f; --r-hover:#143238; --r-active:#1a3f46; --r-active-fg:#ffffff; --r-mark:#6cc7d3; --r-btn:#16808f; --r-btn-hover:#1b90a0; --r-btn-fg:#ffffff; --r-field:#122e34; }
+  .app[data-brand="teal"][data-rail="light"] :is(.rail, .t-menu) { --r-pop:#ffffff; --r-bg:#f1f6f6; --r-fg:#101828; --r-fg2:#475467; --r-line:#dfe7e8; --r-hover:#e6eeef; --r-active:#dcebed; --r-active-fg:#0e6e7e; --r-mark:#0e6e7e; --r-btn:#0e6e7e; --r-btn-hover:#0a5a67; --r-btn-fg:#ffffff; --r-field:#ffffff; }
+  .app[data-brand="graphite"][data-rail="dark"] :is(.rail, .t-menu) { --r-pop:#1c1c1f; --r-bg:#141416; --r-fg:#ededef; --r-fg2:#a1a1a8; --r-line:#26262a; --r-hover:#1e1e21; --r-active:#2a2a2e; --r-active-fg:#ffffff; --r-mark:#ffffff; --r-btn:#ffffff; --r-btn-hover:#e4e4e7; --r-btn-fg:#141416; --r-field:#1c1c1f; }
+  .app[data-brand="graphite"][data-rail="light"] :is(.rail, .t-menu) { --r-pop:#ffffff; --r-bg:#f6f6f7; --r-fg:#18181b; --r-fg2:#52525b; --r-line:#e4e4e7; --r-hover:#ececee; --r-active:#e6e6e8; --r-active-fg:#18181b; --r-mark:#18181b; --r-btn:#1c1c1f; --r-btn-hover:#3a3a40; --r-btn-fg:#ffffff; --r-field:#ffffff; }
+  .app[data-rail="dark"] .rail { --mk-fill: #ffffff; --mk-glyph: var(--r-bg); }
+  .app[data-rail="light"] .rail { --mk-fill: var(--brand); --mk-glyph: #ffffff; }
+  .app svg.lucide { width: 15px; height: 15px; stroke-width: 1.75; flex: none; }
+  .app button { font: inherit; color: inherit; }
+  .app code, .app .mono { font-family: var(--mono); font-size: 12px; }
+
+  /* rail */
+  .rail { width: 264px; flex: none; background: var(--r-bg); color: var(--r-fg); border-right: 1px solid var(--r-line); display: flex; flex-direction: column; padding: 14px 12px 10px; gap: 10px; min-height: 0; position: relative; }
+  .r-brand { display: flex; align-items: center; gap: 10px; padding: 2px 4px 4px; cursor: pointer; }
+  .r-brand .mk-fill { fill: var(--mk-fill); } .r-brand .mk-glyph { fill: var(--mk-glyph); }
+  .r-brand .wm { font-size: 15px; line-height: 1.2; } .r-brand .wm b { font-weight: 650; }
+  .r-brand small { display: block; font-size: 10px; color: var(--r-fg2); letter-spacing: 0.06em; margin-top: 2px; }
+  .r-tenant { border: 1px solid var(--r-line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 1px; position: relative; }
+  .r-tenant span { font-size: 11px; color: var(--r-fg2); } .r-tenant strong { font-size: 14px; font-weight: 600; }
+  .r-tenant code { color: var(--r-fg2); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .r-tenant svg.lucide { position: absolute; right: 8px; top: 12px; color: var(--r-fg2); width: 14px; height: 14px; }
+  .r-new { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 8px; padding: 8px 10px; font-size: 13px; font-weight: 600; background: var(--r-btn); color: var(--r-btn-fg) !important; cursor: pointer; }
+  .r-new:hover { background: var(--r-btn-hover); }
+  .r-search { display: flex; align-items: center; gap: 7px; border: 1px solid var(--r-line); background: var(--r-field); border-radius: 8px; padding: 6px 9px; color: var(--r-fg2); font-size: 12.5px; }
+  .r-cap { font-size: 11px; color: var(--r-fg2); letter-spacing: 0.06em; padding: 2px 8px 0; }
+  .r-sessions { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; flex: 1; min-height: 0; overflow: auto; align-content: start; }
+  .r-sessions li button { width: 100%; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 6px 8px; color: var(--r-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; cursor: pointer; display: block; }
+  .r-sessions li button:hover { background: var(--r-hover); color: var(--r-fg); }
+  .r-sessions li button.on { background: var(--r-active); color: var(--r-active-fg); font-weight: 500; padding-right: 28px; }
+  .r-sessions li button.on::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--r-mark); }
+  .r-sessions .hb { position: absolute; right: 8px; top: 8px; width: 13px; height: 13px; color: var(--r-mark); }
+  .r-groups { border-top: 1px solid var(--r-line); padding-top: 6px; display: grid; gap: 1px; }
+  .r-group-h { display: flex; align-items: center; gap: 8px; border: 0; background: transparent; border-radius: 6px; padding: 6px 8px; color: var(--r-fg); cursor: pointer; width: 100%; text-align: left; }
+  .r-group-h:hover { background: var(--r-hover); }
+  .r-group-h svg.lucide { color: var(--r-fg2); }
+  .r-group-h .cnt { font-size: 11px; color: var(--r-fg2); }
+  .r-group-h .chev { margin-left: auto; transition: transform 140ms ease; width: 14px; height: 14px; }
+  .r-group-h[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .r-items { display: grid; gap: 1px; padding: 1px 0 4px; }
+  .r-item { display: flex; align-items: center; gap: 9px; border: 0; background: transparent; border-radius: 6px; padding: 5px 8px 5px 30px; color: var(--r-fg2); cursor: pointer; width: 100%; text-align: left; position: relative; }
+  .r-item:hover { background: var(--r-hover); color: var(--r-fg); }
+  .r-item.on { background: var(--r-active); color: var(--r-active-fg); font-weight: 500; }
+  .r-item.on::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--r-mark); }
+  .r-item svg.lucide { width: 14px; height: 14px; }
+  .r-foot { display: flex; align-items: center; gap: 4px; border-top: 1px solid var(--r-line); padding-top: 8px; }
+  .r-foot .fl { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; color: var(--r-fg2); font-size: 12.5px; border: 0; background: transparent; cursor: pointer; }
+  .r-foot .fl:hover { background: var(--r-hover); color: var(--r-fg); }
+  .r-foot .fl.on { background: var(--r-active); color: var(--r-active-fg); }
+  .r-foot .theme { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--r-line); color: var(--r-fg2); background: transparent; cursor: pointer; }
+  .hb-pop { position: absolute; left: 12px; bottom: 50px; width: 300px; background: var(--page); color: var(--text); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--pop); padding: 14px; display: grid; gap: 10px; z-index: 5; }
+  .hb-pop h4 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .hb-pop p { margin: 0; font-size: 12px; color: var(--text-2); }
+
+  /* work area */
+  .work { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .top { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); flex: none; }
+  .top .t { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top .meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .top .sp { flex: 1; }
+  .chip-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; font-size: 12px; color: var(--text-2); background: var(--page); cursor: pointer; position: relative; }
+  .chip-btn:hover { border-color: var(--line-2); color: var(--text); }
+  .chip-btn[aria-pressed="true"] { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+  .chip-btn .badge-n { min-width: 16px; height: 16px; border-radius: 999px; background: var(--brand); color: var(--on-brand); font-size: 10.5px; line-height: 16px; text-align: center; padding: 0 4px; font-weight: 600; }
+  .body { flex: 1; min-height: 0; display: flex; }
+  .content { flex: 1; min-width: 0; overflow: auto; }
+
+  /* shared content components */
+  .pg { max-width: 1000px; margin: 0 auto; padding: 24px 28px 40px; display: grid; gap: 16px; align-content: start; }
+  .ph { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .ph h1 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 650; }
+  .ph p { margin: 4px 0 0; color: var(--text-2); max-width: 64ch; }
+  .ph .acts { display: flex; gap: 8px; flex: none; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 12px; align-content: start; background: var(--page); }
+  .card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .card-h h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card-h .sub { font-size: 12px; color: var(--muted); }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid-side { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); gap: 16px; align-items: start; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--page); color: var(--text); font-size: 12.5px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+  .btn:hover { background: var(--soft); }
+  .btn.pri { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+  .btn.pri:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+  .btn.dgr { color: var(--danger); border-color: var(--danger); }
+  .btn.sm { height: 26px; padding: 0 9px; font-size: 12px; }
+  .btn.link { border: 0; height: auto; padding: 0; color: var(--brand); background: transparent; }
+  .field { height: 34px; border: 1px solid var(--line-2); border-radius: 6px; padding: 0 10px; font: inherit; font-size: 13px; color: var(--text); background: var(--page); width: 100%; box-sizing: border-box; }
+  textarea.field { height: auto; padding: 8px 10px; line-height: 1.55; resize: vertical; }
+  .field.mono { font-family: var(--mono); font-size: 12px; }
+  select.field { appearance: none; background-image: none; }
+  label.lb { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); font-weight: 500; }
+  .hint { font-size: 12px; color: var(--muted); }
+  .badge { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--brand-soft); color: var(--brand); white-space: nowrap; }
+  .badge.gray { background: var(--soft); color: var(--text-2); }
+  .badge.ok { background: var(--success-soft); color: var(--success); }
+  .badge.warn { background: var(--warning-soft); color: var(--warning); }
+  .badge.err { background: var(--page); color: var(--danger); border: 1px solid var(--danger); }
+  .sw { width: 32px; height: 18px; border-radius: 999px; background: var(--line-2); position: relative; flex: none; border: 0; cursor: pointer; padding: 0; }
+  .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #ffffff; transition: left 120ms ease; }
+  .sw[aria-checked="true"] { background: var(--brand); }
+  .sw[aria-checked="true"]::after { left: 16px; }
+  .list { display: grid; }
+  .list > .it { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+  .list > .it:first-child { border-top: 0; padding-top: 0; }
+  .it .main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+  .it .main b { font-weight: 600; }
+  .it .main .s { color: var(--text-2); font-size: 12px; }
+  .it .main .p { color: var(--muted); font-family: var(--mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  table.tb { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .tb th { text-align: left; font-weight: 600; color: var(--text-2); background: var(--subtle); padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .tb td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .tb tr:last-child td { border-bottom: 0; }
+  .tb-wrap { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; font-size: 12.5px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 0; background: transparent; padding: 8px 12px; font-size: 13px; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button[aria-selected="true"] { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+  .code { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-family: var(--mono); font-size: 12px; line-height: 1.65; white-space: pre; overflow: auto; color: #111111; }
+  .code .k { color: #b4196a; } .code .v { color: #a0770a; } .code .c { color: #75715e; }
+  .note { border: 1px solid var(--line); border-left: 3px solid var(--warning); background: var(--warning-soft); border-radius: 6px; padding: 8px 12px; font-size: 12.5px; color: var(--text); }
+  .radio-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .rc { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: flex; align-items: center; gap: 10px; cursor: pointer; background: var(--page); text-align: left; }
+  .rc[aria-checked="true"] { border: 2px solid var(--brand); padding: 11px; }
+  .rc i.swc { width: 28px; height: 28px; border-radius: 6px; flex: none; display: block; }
+  .rc b { font-weight: 600; display: block; } .rc span { font-size: 12px; color: var(--muted); }
+
+  /* chat */
+  .chat { display: flex; flex-direction: column; height: 100%; }
+  .thread { flex: 1; min-height: 0; overflow: auto; padding: 24px 0 8px; }
+  .col { width: min(760px, 100% - 48px); margin: 0 auto; display: grid; gap: 16px; }
+  .u { justify-self: end; max-width: 80%; background: var(--brand-soft); border-radius: 10px; padding: 9px 13px; }
+  .a { display: grid; gap: 10px; } .a p { margin: 0; }
+  .a code.inl { background: var(--subtle); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .tool { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .tool-h { display: flex; align-items: center; gap: 8px; padding: 7px 11px; background: var(--subtle); border-bottom: 1px solid var(--line); font-size: 12px; }
+  .tool-h b { font-weight: 600; } .tool-h code { color: var(--text-2); } .tool-h .ok { margin-left: auto; color: var(--success); font-size: 11.5px; }
+  .tool pre { margin: 0; background: var(--code); padding: 9px 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; }
+  .tool pre div { display: grid; grid-template-columns: 38px 1fr; white-space: pre; }
+  .tool pre .ln { color: #9ca3af; text-align: right; padding-right: 12px; }
+  .worked { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .worked::before { content: ""; width: 12px; height: 1px; background: var(--line-2); flex: none; }
+  .worked::after { content: ""; flex: 1; height: 1px; background: var(--line-2); }
+  .worked span { font-family: var(--mono); font-size: 11.5px; white-space: nowrap; }
+  .worked .plan-prog { white-space: nowrap; }
+  .app .worked svg.pc { display: inline-block; width: 1em; height: 1em; margin-right: 0.2em; vertical-align: -0.14em; stroke-width: 2.25; color: var(--success); }
+  .composer { flex: none; width: min(760px, 100% - 48px); margin: 0 auto 16px; border: 1px solid var(--line-2); border-radius: 12px; }
+  .composer .ph-t { padding: 12px 14px 4px; color: var(--muted); min-height: 44px; }
+  .composer .ph-t .ref { display: inline-flex; align-items: center; height: 22px; padding: 0 7px; border-radius: 5px; background: var(--brand-soft); color: var(--brand); font-family: var(--mono); font-size: 12px; margin-right: 4px; }
+  .composer .bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 8px 10px; }
+  .composer .send { margin-left: auto; width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--brand); color: var(--on-brand); border: 0; }
+  .empty-chat { flex: 1; display: grid; place-items: center; text-align: center; color: var(--text-2); }
+  .empty-chat h2 { margin: 0 0 6px; font-size: 18px; font-weight: 650; color: var(--text); }
+
+  /* workbench */
+  .bench { width: 300px; flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .bench-h { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--line); }
+  .bench-h b { font-size: 13px; font-weight: 600; }
+  .icon-btn { width: 28px; height: 28px; display: grid; place-items: center; border: 0; background: transparent; border-radius: 6px; color: var(--muted); cursor: pointer; }
+  .icon-btn:hover { background: var(--soft); color: var(--text); }
+  .bench-b { flex: 1; overflow: auto; padding: 12px; display: grid; gap: 12px; align-content: start; }
+  .agent-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .agent-row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex: none; }
+  .agent-row .d { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .tree { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+  .tree ul { list-style: none; margin: 0; padding: 0; }
+  .tn { display: flex; align-items: center; gap: 5px; width: 100%; border: 0; background: transparent; text-align: left; padding: 3px 6px; border-radius: 5px; cursor: pointer; color: var(--text); white-space: nowrap; }
+  .tn:hover { background: var(--subtle); }
+  .tn .ch { width: 13px; height: 13px; color: var(--muted); transition: transform 120ms ease; }
+  .tn[aria-expanded="true"] .ch { transform: rotate(90deg); }
+  .tn .sp13 { width: 13px; flex: none; }
+  .tn svg.ico { width: 14px; height: 14px; color: var(--text-2); }
+  .tn.dir svg.ico { color: var(--brand); }
+  .tn.muted { color: var(--muted); cursor: default; font-size: 12px; }
+  .tn.muted:hover { background: transparent; }
+</style>
+
+<style>
+  /* ---------- additions for the scoped IA ---------- */
+  .r-tenant { cursor: pointer; text-align: left; background: transparent; color: inherit; width: 100%; }
+  .rail { box-sizing: border-box; overflow: hidden; }
+  .r-tenant { box-sizing: border-box; grid-template-columns: minmax(0, 1fr); }
+  .drawer { box-sizing: border-box; }
+  .rail { transition: width 160ms ease, padding 160ms ease; }
+  .r-brand { position: relative; }
+  .r-collapse { margin-left: auto; width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--r-fg2); cursor: pointer; flex: none; }
+  .r-collapse:hover { background: var(--r-hover); color: var(--r-fg); }
+  .r-expand { margin: 0 auto; width: 40px; }
+  .r-tenant-mini { width: 40px; height: 40px; margin: 0 auto; border-radius: 8px; border: 1px solid var(--r-line); background: transparent; color: var(--r-fg); font-weight: 650; font-size: 15px; cursor: pointer; }
+  .r-tenant-mini:hover { background: var(--r-hover); }
+  .app[data-rc="1"] .rail { width: 64px; padding: 14px 10px 10px; }
+  .app[data-rc="1"] .rail .lbl, .app[data-rc="1"] .rail .wm, .app[data-rc="1"] .rail .chev { display: none; }
+  .app[data-rc="1"] .r-brand { justify-content: center; padding: 2px 0 4px; }
+  .app[data-rc="1"] .r-link { justify-content: center; padding: 9px 0; }
+  .app[data-rc="1"] .r-foot { flex-direction: column; align-items: center; gap: 4px; }
+  .app[data-rc="1"] .r-foot .fl { width: 40px; justify-content: center; padding: 7px 0; }
+  .app[data-rc="1"] .r-foot .theme { margin-left: 0; }
+  @media (prefers-reduced-motion: reduce) { .rail { transition: none; } }
+  .drop { display: grid; justify-items: center; gap: 4px; text-align: center; border: 1px dashed var(--line-2); border-radius: 8px; padding: 18px 12px; cursor: pointer; background: var(--subtle); }
+  .drop:hover { border-color: var(--brand); }
+  .drop b { font-weight: 600; } .drop span { font-size: 12px; color: var(--muted); }
+  .app .drop svg.lucide { width: 20px; height: 20px; color: var(--brand); }
+  .note svg.lucide { width: 14px; height: 14px; vertical-align: -2px; color: var(--brand); }
+  .tb svg.lk { width: 13px; height: 13px; color: var(--muted); }
+  .tb input[type="checkbox"], .list input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--brand); }
+  .btn[disabled] { opacity: 0.45; cursor: default; }
+  .tagbox { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border: 1px solid var(--line-2); border-radius: 6px; padding: 5px 8px; min-height: 34px; box-sizing: border-box; }
+  .tag-in { border: 0; outline: none; flex: 1; min-width: 180px; font-size: 12px; background: transparent; color: var(--text); }
+  .chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 5px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-family: var(--mono); border: 0; }
+  .chip button { border: 0; background: transparent; color: inherit; padding: 0; display: grid; cursor: pointer; }
+  .app .chip svg.lucide { width: 12px; height: 12px; }
+  .chip.add { background: var(--page); color: var(--text-2); border: 1px solid var(--line); cursor: pointer; }
+  .chip.on { background: var(--brand); color: var(--on-brand); }
+  .builder { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 10px; background: var(--subtle); }
+  .builder .seg { background: var(--soft); border-radius: 8px; padding: 3px; display: inline-flex; flex-wrap: wrap; gap: 2px; justify-self: start; }
+  .builder .seg button { border: 0; background: transparent; padding: 5px 10px; border-radius: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .builder .seg button[aria-pressed="true"] { background: var(--page); color: var(--brand); font-weight: 600; }
+  .daychip { height: 30px; min-width: 44px; border: 1px solid var(--line-2); background: var(--page); border-radius: 6px; font-size: 12.5px; cursor: pointer; color: var(--text-2); }
+  .daychip.on { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+  .pager { border-top: 1px solid var(--line); padding-top: 10px; }
+  .wstask { display: grid; gap: 1px; text-align: left; border: 1px solid var(--line); background: var(--page); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  .wstask span { font-size: 11.5px; color: var(--muted); }
+  .wstask.on { border-color: var(--brand); background: var(--brand-soft); }
+  .ws-grid { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
+  .ws-chat { display: flex; flex-direction: column; gap: 10px; }
+  .ws-thread { display: grid; gap: 12px; max-height: 380px; overflow: auto; }
+  .publish { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 12px; }
+  .rail-tip { position: absolute; z-index: 20; background: #101828; color: #ffffff; font-size: 12px; font-weight: 500; line-height: 1.4; padding: 5px 9px; border-radius: 6px; white-space: nowrap; pointer-events: none; box-shadow: var(--pop); }
+  .rail-tip::before { content: ""; position: absolute; left: -4px; top: 50%; margin-top: -4px; width: 8px; height: 8px; background: #101828; transform: rotate(45deg); }
+  .r-tenant:hover { background: var(--r-hover); }
+  .t-menu { position: absolute; left: 12px; right: 12px; top: 128px; background: var(--r-pop); color: var(--r-fg); border: 1px solid var(--r-line); border-radius: 8px; box-shadow: var(--pop); padding: 4px; z-index: 6; display: grid; gap: 2px; }
+  .t-opt { display: grid; gap: 1px; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 7px 9px; cursor: pointer; color: var(--r-fg); }
+  .t-opt:hover, .t-opt.on { background: var(--r-hover); }
+  .t-opt span { font-size: 11px; color: var(--r-fg2); font-family: var(--mono); }
+  .t-opt b { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .t-opt b i.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--r-mark); display: inline-block; }
+  .r-nav { display: grid; gap: 1px; flex: 1; min-height: 0; overflow: auto; align-content: start; }
+  .r-link { display: flex; align-items: center; gap: 9px; border: 0; background: transparent; border-radius: 6px; padding: 7px 9px; color: var(--r-fg2); cursor: pointer; width: 100%; text-align: left; position: relative; font-size: 13px; }
+  .r-link:hover { background: var(--r-hover); color: var(--r-fg); }
+  .r-link.on { background: var(--r-active); color: var(--r-active-fg); font-weight: 500; }
+  .r-link.on::before { content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px; border-radius: 2px; background: var(--r-mark); }
+  .r-link .chev { margin-left: auto; width: 14px; height: 14px; }
+  .r-link.open { background: var(--r-hover); color: var(--r-fg); }
+  .drawer { position: absolute; left: 264px; top: 0; bottom: 0; width: 300px; background: var(--page); border-right: 1px solid var(--line); box-shadow: var(--pop); z-index: 4; display: flex; flex-direction: column; }
+  .drawer-h { display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 8px 16px; }
+  .drawer-h b { font-size: 14px; font-weight: 600; }
+  .drawer-h span { font-size: 12px; color: var(--muted); margin-left: 6px; font-weight: 400; }
+  .drawer-b { padding: 0 12px 12px; display: grid; gap: 10px; min-height: 0; flex: 1; grid-template-rows: auto auto auto 1fr auto; }
+  .d-new { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 8px; padding: 8px 10px; font-size: 13px; font-weight: 600; background: var(--brand); color: var(--on-brand); cursor: pointer; }
+  .d-new:hover { background: var(--brand-hover); }
+  .d-search { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 9px; color: var(--muted); font-size: 12.5px; }
+  .d-cap { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; padding: 0 4px; }
+  .d-list { list-style: none; margin: 0; padding: 0; overflow: auto; display: grid; gap: 1px; align-content: start; }
+  .d-list button { width: 100%; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 7px 9px; color: var(--text-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; display: block; }
+  .d-list button:hover { background: var(--subtle); color: var(--text); }
+  .d-list button.on { background: var(--brand-soft); color: var(--brand); font-weight: 500; padding-right: 28px; }
+  .d-list .hb { position: absolute; right: 8px; top: 9px; width: 13px; height: 13px; color: var(--brand); }
+  .d-foot { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+  .subnav-wrap { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .subnav { display: grid; gap: 1px; position: sticky; top: 0; }
+  .subnav button { text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 7px 10px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+  .subnav button:hover { background: var(--subtle); color: var(--text); }
+  .subnav button[aria-selected="true"] { background: var(--brand-soft); color: var(--brand); font-weight: 600; }
+  .subnav .grp { font-size: 11px; color: var(--muted); padding: 10px 10px 4px; letter-spacing: 0.04em; }
+  .scope { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 5px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em; }
+  .scope.agent { background: var(--brand-soft); color: var(--brand); }
+  .scope.global { background: var(--soft); color: var(--text-2); }
+  .scope.project { background: var(--text); color: #ffffff; }
+  .scope svg.lucide { width: 12px; height: 12px; }
+  .proj-head { border-bottom: 1px solid var(--line); padding: 18px 28px 0; display: grid; gap: 8px; }
+  .proj-head .crumb { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .proj-head .crumb button { border: 0; background: transparent; color: var(--brand); cursor: pointer; padding: 0; font-size: 12px; }
+  .proj-head h1 { margin: 0; font-size: 20px; font-weight: 650; display: flex; align-items: center; gap: 10px; }
+  .proj-head .meta { font-size: 12px; color: var(--text-2); display: flex; gap: 12px; flex-wrap: wrap; }
+  .proj-head .tabs { border-bottom: 0; margin-top: 4px; }
+  .preset-menu { position: absolute; bottom: 52px; left: 190px; width: 360px; background: var(--page); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--pop); padding: 6px; z-index: 5; display: grid; gap: 2px; }
+  .preset-opt { display: grid; gap: 2px; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+  .preset-opt:hover { background: var(--subtle); }
+  .preset-opt b { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .preset-opt span { font-size: 12px; color: var(--text-2); }
+  .preset-opt.on b { color: var(--brand); }
+  .preset-cap { font-size: 11px; color: var(--muted); padding: 4px 10px 2px; }
+  .composer { position: relative; }
+  .rc.col { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .rc.col span { font-size: 12px; color: var(--text-2); line-height: 1.5; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Forebrain Harness 全站预览</h1>
+    <p>菜单栏只放当前主代理（租户）的页面，全局配置只在“设置”，项目的配置在独立的“项目空间”。每个页面顶部的标签标明它属于哪一层：<b>主代理</b>、<b>全局</b> 或 <b>项目</b>。菜单栏每一项都能点击；顶部下拉可以切换主代理，下方说明随当前页面变化。示意按 1320 × 800 绘制，窄屏可横向滚动。</p>
+  </header>
+
+  <div class="controls" role="group" aria-label="预览选项">
+    <div class="ctl"><span class="ctl-label">主题色</span>
+      <div class="seg" data-ctl="brand">
+        <button type="button" id="c-navy" data-val="navy" aria-pressed="true">A 海军蓝</button>
+        <button type="button" id="c-teal" data-val="teal" aria-pressed="false">B 松石青</button>
+        <button type="button" id="c-graphite" data-val="graphite" aria-pressed="false">C 石墨黑</button>
+      </div>
+    </div>
+    <div class="ctl"><span class="ctl-label">菜单栏</span>
+      <div class="seg" data-ctl="rail">
+        <button type="button" id="c-dark" data-val="dark" aria-pressed="true">深色</button>
+        <button type="button" id="c-light" data-val="light" aria-pressed="false">浅色</button>
+      </div>
+    </div>
+    <div class="ctl"><span class="ctl-label">直接跳到</span>
+      <div class="seg" data-ctl="page" id="page-jump"></div>
+    </div>
+  </div>
+
+  <div class="stage"><div class="app" id="app" data-brand="navy" data-rail="dark"></div></div>
+  <section class="caption" id="caption" aria-live="polite"></section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script>
+(function () {
+  var tenants = {
+    main: { path: '~/workspace/forebrain-harness', sessions: ['重构 gateway 鉴权中间件', '排查 MCP 启动超时', '发布 v0.3.0 的 release notes', '记忆检索补充日文分词', '整理 permissions 的三档预设', '未命名对话'], provider: ['deepseek', 'deepseek-v4'] },
+    review: { path: '~/.forebrain/workspaces/review', sessions: ['审阅 PR #42：调度器重试', '审阅 PR #45：目录树懒加载', '未命名对话'], provider: ['openai', 'gpt-5.5'] },
+    ops: { path: '~/workspace/infra', sessions: ['排查 gateway 集群 502', '整理告警阈值', '未命名对话'], provider: ['deepseek', 'deepseek-v4'] }
+  };
+  var S = {
+    tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', drawer: false, tmenu: false,
+    bench: false, hb: false, preset: 'default', presetMenu: false, settingsTab: 'appearance', projTab: 'overview',
+    tree: {}, treeLoading: {}, ref: '', toolOpen: 'shell', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', ruleSel: { agent: 'AGENTS.md', project: 'FOREBRAIN.md' }, models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTab: 'files', wsTask: 0, keyEdit: false
+  };
+  var nav = [
+    ['chat', '对话', 'message-square'], ['projects', '项目', 'folder-git-2'], ['rules', '规则指令', 'scroll-text'], ['skills', '技能', 'sparkles'],
+    ['workshop', '技能工坊', 'hammer'], ['subagents', '子代理', 'users'], ['cron', '定时任务', 'clock'], ['channels', '通道', 'radio'],
+    ['providers', '模型服务', 'boxes'], ['tools', '工具', 'wrench'], ['permissions', '权限', 'shield-check'], ['memories', '记忆', 'brain']
+  ];
+  var titles = { chat: '对话', projects: '项目', project: '项目空间', rules: '规则指令', skills: '技能', workshop: '技能工坊', subagents: '子代理', cron: '定时任务', channels: '通道', providers: '模型服务', tools: '工具', permissions: '权限', memories: '记忆', settings: '设置' };
+  var jump = [['chat', '对话'], ['projects', '项目'], ['project', '项目空间'], ['rules', '规则指令'], ['skills', '技能'], ['workshop', '技能工坊'], ['subagents', '子代理'], ['cron', '定时任务'], ['channels', '通道'], ['providers', '模型服务'], ['tools', '工具'], ['permissions', '权限'], ['memories', '记忆'], ['settings', '设置']];
+  var presets = [
+    ['readonly', 'Read Only', '只读', '可以读取当前工作区的文件；编辑文件前需要你审批。沙箱中的命令不能访问网络。'],
+    ['default', 'Default', '默认', '可以读写当前工作区的文件并运行命令；编辑工作区以外的文件前需要你审批。沙箱中的命令不能访问网络。'],
+    ['full', 'Full Access', '完全访问', '无需审批即可编辑工作区以外的文件、访问网络，命令在沙箱外运行。请谨慎使用。']
+  ];
+  var toolNames = ['shell', 'read_file', 'write_file', 'edit_file', 'apply_patch', 'grep', 'web_search', 'web_fetch', 'memories_search', 'mcp__github__create_pull_request'];
+  var fsTree = {
+    '': [['.forebrain', 1], ['cmd', 1], ['docs', 1], ['frontend', 1], ['pkg', 1], ['scripts', 1], ['FOREBRAIN.md', 0], ['go.mod', 0], ['Makefile', 0], ['README.md', 0]],
+    '.forebrain': [['skills', 1], ['mcp_servers.yaml', 0], ['safety.json', 0]], 'cmd': [['forebrain', 1]], 'cmd/forebrain': [['gateway.go', 0], ['main.go', 0], ['serve.go', 0]],
+    'docs': [['plan', 1]], 'frontend': [['e2e', 1], ['src', 1], ['package.json', 0]], 'pkg': [['agent', 1], ['gateway', 1], ['tool', 1], ['turn', 1]],
+    'pkg/gateway': [['controlplane.go', 0], ['http_server.go', 0], ['serve_run.go', 0], ['server.go', 0]], 'scripts': [['acceptance', 1], ['package-graph.sh', 0]]
+  };
+  var captions = {
+    chat: ['对话 · 主代理', ['点菜单栏“对话”向右弹出对话抽屉：新聊天、搜索会话、会话列表都在抽屉里，选中会话后抽屉收起。抽屉只列本主代理的会话，项目会话在各自的项目空间里。', '默认只有菜单栏和内容区；顶栏“工作台”打开第三栏（运行中的代理、懒加载目录树），数字徽标是运行中的代理数。', '输入框旁的“审批模式”选择框只对本会话生效（与终端 /permissions 一致）：Read Only / Default / Full Access，每项有说明；全局默认在“设置 → 审批默认”。', '每轮回答末尾的结束行与终端一致：“已工作 时长 · [勾选方框图标]完成/总数（有任务清单时） · 完成时间”，网页端用与数字同字号（1em）的图标代替终端里的 ☑ 字符，灰色整宽分隔线。', '菜单栏底部“心跳”作用于当前会话。', '菜单栏品牌区右侧的按钮可以把菜单栏折叠成只显示图标（64px），默认展开；折叠后鼠标移到图标上（或用键盘聚焦）立即在右侧显示菜单名称，主代理选择器缩成首字母方块，对话抽屉从折叠后的菜单栏右缘弹出。']],
+    projects: ['项目 · 主代理', ['本主代理的项目列表。点“进入项目空间”进入该项目的独立页面，项目的规则指令、会话、记忆、权限、MCP、技能、定时任务都在那里读写。', '列表页只做项目层面的管理：新建、置顶、归档、删除。']],
+    project: ['项目空间 · 项目', ['独立的项目页面，顶部黑底“项目”标签与面包屑标明当前在项目层，和主代理页面区分开。', '标签页：概览、规则指令、会话、记忆、权限、MCP、技能、定时任务。', '规则指令：项目指令 + 项目的 FOREBRAIN.md（根目录与子目录），与菜单栏“规则指令”页同一套布局，可新建和编辑。记忆：与菜单栏“记忆”页同一套文件列表，只列本项目的。', '技能：列出本项目能加载的全部技能（项目、主代理、共享、内置），主代理与共享的只读；其余标签只展示本项目自己的配置和数据。', '点顶部面包屑“项目”回到列表。']],
+    rules: ['规则指令 · 主代理', ['本主代理的规则文件：AGENTS.md（行为准则）、SOUL.md（性格与做事方式）、USER.md（关于你），位于主代理工作区根目录。', '左边列出已有文件，右边编辑；“新建规则文件”下拉只列出 Forebrain Harness 支持、且还没创建的文件。与项目空间的“规则指令”页同一套布局。', '保存后从新会话开始生效，不打断正在进行的会话。']],
+    workshop: ['技能工坊 · 主代理', ['技能的创建与编辑都在这里做，是内置技能 skill-workshop 的网页界面：发现并安装、从零创建、改进已有技能、评测对比、优化触发描述。', '左边是工坊对话，模型会先问清触发场景、所需权限、完成标准；右边是技能本身：文件、测试用例、评测（使用技能 vs 不用技能，逐条写反馈）、触发描述。', '完成后选择发布到本主代理、某个项目或共享技能库，也可以下载 zip。工坊任务不出现在对话抽屉里。']],
+    skills: ['技能 · 主代理', ['本主代理能使用的全部技能：本主代理的 + 共享 + 内置，来源一列标明出处。本主代理的技能可启停、删除；共享与内置技能在这里只读（锁形图标），启停在“设置 → 共享技能”。', '每行都能下载 zip，也可以勾选多个批量下载。', '在线安装需要访问公网；内网用离线安装，上传 .zip、.tar.gz、.tar、.rar 压缩包。创建和编辑技能在“技能工坊”。']],
+    subagents: ['子代理 · 主代理', ['本主代理所有会话里正在运行的子代理；可以跳到所在会话、停止单个或全部停止。']],
+    cron: ['定时任务 · 主代理', ['本主代理的常驻任务（不绑定项目的）；绑定项目的任务在项目空间里。', '计划选“自定义…”展开计划编辑器：一次、按间隔、每天、工作日、每周（可多选星期）、每月、Cron 表达式七种方式，下方实时显示“将保存为”的计划表达式和接下来的执行时间，由服务端按实际调度规则计算。', '投递通道只列出本主代理已启用的通道。']],
+    channels: ['通道 · 主代理', ['本主代理的消息通道；每个通道一张卡片，开关启用，展开后填写凭据（密钥脱敏显示）。']],
+    providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。']],
+    tools: ['工具 · 主代理', ['本主代理运行时实际暴露给模型的工具表；可筛选，标出只读/有副作用，展开看入参说明（表格）。']],
+    permissions: ['权限 · 主代理', ['本主代理已记住的授权规则（保存在主代理工作区），以及对一次调用的判定验证。', '动作、工具都是选择框；只有规则内容需要输入。', '全局默认审批模式在“设置 → 审批默认”，项目规则在项目空间，会话内的临时切换在对话输入框旁。']],
+    memories: ['记忆 · 主代理', ['本主代理的记忆文件分页列表：按内容关键词搜索，按创建或更新时间升/降序，分页。', '每个文件可以查看和编辑（点“查看/编辑”），单个删除或多选批量删除，也可以重置全部。核心文件 MEMORY.md、memory_summary.md 只能编辑或清空，不能删除。', '项目空间的“记忆”标签是同一套界面，只列本项目的记忆文件。']],
+    settings: ['设置 · 全局', ['只放全局、不属于某个主代理的配置：外观、主代理管理（增删改）、审批默认、MCP、钩子、记忆开关、共享技能、配置文件、运行状态。', '切换当前主代理只能用菜单栏顶部的下拉选择器；“主代理”标签页只做新建、编辑、删除，没有切换按钮。']]
+  };
+
+  function ic(name, cls) { return '<i data-lucide="' + name + '"' + (cls ? ' class="' + cls + '"' : '') + '></i>'; }
+  function mark(size) { return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 32 32" aria-hidden="true"><rect class="mk-fill" width="32" height="32" rx="7"/><path class="mk-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="mk-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg>'; }
+  function scope(kind) { return kind === 'agent' ? '<span class="scope agent">' + ic('user-round') + '主代理 · ' + S.tenant + '</span>' : kind === 'project' ? '<span class="scope project">' + ic('folder-git-2') + '项目</span>' : '<span class="scope global">' + ic('globe') + '全局</span>'; }
+  function sel(opts, val, style) { return '<select class="field"' + (style ? ' style="' + style + '"' : '') + '>' + opts.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>'; }
+  function sessionsOf() { return tenants[S.tenant].sessions; }
+
+  function railW() { return S.rc ? 64 : 264; }
+  function rail() {
+    var rc = S.rc;
+    var h = '<aside class="rail" aria-label="菜单栏">' +
+      '<div class="r-brand">' + mark(28) + '<div class="wm"><b>Forebrain</b> Harness<small>v0.3.0</small></div>' +
+      (rc ? '' : '<button type="button" class="r-collapse" data-act="rc" title="折叠菜单栏" aria-label="折叠菜单栏" aria-expanded="true">' + ic('panel-left-close') + '</button>') + '</div>' +
+      (rc ? '<button type="button" class="r-collapse r-expand" data-act="rc" data-tip="展开菜单栏" aria-label="展开菜单栏" aria-expanded="false">' + ic('panel-left-open') + '</button>' : '');
+    if (rc) {
+      h += '<button type="button" class="r-tenant-mini" data-act="tmenu" aria-haspopup="listbox" aria-expanded="' + S.tmenu + '" data-tip="当前主代理：' + S.tenant + '" aria-label="当前主代理：' + S.tenant + '">' + S.tenant.charAt(0).toUpperCase() + '</button>';
+    } else {
+      h += '<button type="button" class="r-tenant" data-act="tmenu" aria-haspopup="listbox" aria-expanded="' + S.tmenu + '"><span>当前主代理</span><strong>' + S.tenant + '</strong><code>' + tenants[S.tenant].path + '</code>' + ic('chevrons-up-down') + '</button>';
+    }
+    h += '<nav class="r-nav" aria-label="主代理页面">';
+    nav.forEach(function (n) {
+      var on = n[0] === 'chat' ? (S.page === 'chat') : (S.page === n[0] || (n[0] === 'projects' && S.page === 'project'));
+      h += '<button type="button" class="r-link' + (on ? ' on' : '') + (n[0] === 'chat' && S.drawer ? ' open' : '') + '" data-nav="' + n[0] + '"' + (rc ? ' data-tip="' + n[1] + '" aria-label="' + n[1] + '"' : '') + '>' + ic(n[2]) + '<span class="lbl">' + n[1] + '</span>' + (n[0] === 'chat' ? ic('chevron-right', 'chev') : '') + '</button>';
+    });
+    h += '</nav><div class="r-foot">' +
+      '<button type="button" class="fl' + (S.hb ? ' on' : '') + '" data-act="hb"' + (rc ? ' data-tip="心跳" aria-label="心跳"' : '') + '>' + ic('activity') + '<span class="lbl">心跳</span></button>' +
+      '<button type="button" class="fl' + (S.page === 'settings' ? ' on' : '') + '" data-go="settings"' + (rc ? ' data-tip="设置" aria-label="设置"' : '') + '>' + ic('settings') + '<span class="lbl">设置</span></button>' +
+      '<button type="button" class="theme" data-act="railtheme"' + (rc ? ' data-tip="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '"' : ' title="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '"') + ' aria-label="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '">' + ic(S.rail === 'dark' ? 'sun' : 'moon') + '</button></div>';
+    return h + '</aside>';
+  }
+
+  function pops() {
+    var h = '', x = S.rc ? 72 : 12;
+    if (S.tmenu) {
+      h += '<div class="t-menu" role="listbox" style="left:' + x + 'px;top:' + (S.rc ? 92 : 128) + 'px;width:' + (S.rc ? 260 : 240) + 'px">';
+      Object.keys(tenants).forEach(function (k) { h += '<button type="button" class="t-opt' + (k === S.tenant ? ' on' : '') + '" data-tenant="' + k + '"><b>' + (k === S.tenant ? '<i class="dot"></i>' : '') + k + '</b><span>' + tenants[k].path + '</span></button>'; });
+      h += '</div>';
+    }
+    if (S.hb) {
+      var cur = S.projectSession || sessionsOf()[S.session];
+      h += '<div class="hb-pop" role="dialog" aria-label="心跳" style="left:' + x + 'px;bottom:' + (S.rc ? 12 : 50) + 'px"><h4>' + ic('activity') + '心跳</h4><p>作用于当前会话：<b>' + cur + '</b></p>' +
+        '<p>会话空闲到间隔时间后，把这句话作为一次普通提问发回本对话；正在执行时不会打断。</p>' +
+        '<div class="row"><select class="field" style="width:120px"><option>每 10 分钟</option><option selected>每 30 分钟</option><option>每 1 小时</option><option>每 4 小时</option><option>自定义…</option></select><span class="badge ok" style="margin-left:auto">已启用</span></div>' +
+        '<textarea class="field" rows="2">有新变化吗？没有就简单回一句。</textarea>' +
+        '<div class="row"><button type="button" class="btn pri sm">更新</button><button type="button" class="btn sm">暂停</button><button type="button" class="btn sm dgr">清除</button><button type="button" class="btn sm" data-act="hb" style="margin-left:auto">关闭</button></div></div>';
+    }
+    return h;
+  }
+
+  function drawer() {
+    var h = '<aside class="drawer" aria-label="对话抽屉" style="left:' + railW() + 'px"><div class="drawer-h"><b>对话<span>主代理 ' + S.tenant + '</span></b><button type="button" class="icon-btn" data-act="drawer" aria-label="收起">' + ic('x') + '</button></div>' +
+      '<div class="drawer-b"><button type="button" class="d-new" data-act="newchat">' + ic('plus') + '新聊天</button>' +
+      '<div class="d-search">' + ic('search') + '搜索会话</div><div class="d-cap">会话</div><ul class="d-list">';
+    sessionsOf().forEach(function (s, i) {
+      var on = S.page === 'chat' && !S.projectSession && S.session === i;
+      h += '<li><button type="button" class="' + (on ? 'on' : '') + '" data-session="' + i + '">' + s + (i === 0 && S.tenant === 'main' ? ic('activity', 'hb') : '') + '</button></li>';
+    });
+    return h + '</ul><div class="d-foot">项目里的会话在各自的项目空间中。</div></div></aside>';
+  }
+
+  function topbar() {
+    var t = S.page === 'chat' ? (S.projectSession || sessionsOf()[S.session]) : titles[S.page];
+    var h = '<header class="top"><span class="t">' + t + '</span>';
+    if (S.page === 'chat' && S.projectSession) h += '<button type="button" class="scope project" data-go="project" style="border:0;cursor:pointer">' + ic('folder-git-2') + '项目 · forebrain-harness</button>';
+    else if (S.page === 'chat') h += '<span class="meta">' + tenants[S.tenant].provider[1] + '</span>';
+    h += '<span class="sp"></span>';
+    if (S.page === 'chat') h += '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台<span class="badge-n">2</span></button>';
+    return h + '<span class="chip-btn">' + ic('languages') + '中文</span></header>';
+  }
+
+  function treeHtml(path, depth) {
+    var kids = fsTree[path] || [];
+    if (!kids.length) return '<li><div class="tn muted" style="padding-left:' + (24 + depth * 14) + 'px">空目录</div></li>';
+    return kids.map(function (k) {
+      var p = path ? path + '/' + k[0] : k[0], pad = 'padding-left:' + (6 + depth * 14) + 'px';
+      if (!k[1]) return '<li role="treeitem"><button type="button" class="tn" style="' + pad + '" data-file="' + p + '"><span class="sp13"></span>' + ic('file', 'ico') + k[0] + '</button></li>';
+      var ex = !!S.tree[p];
+      return '<li role="treeitem" aria-expanded="' + ex + '"><button type="button" class="tn dir" style="' + pad + '" data-dir="' + p + '" aria-expanded="' + ex + '">' + ic('chevron-right', 'ch') + ic(ex ? 'folder-open' : 'folder', 'ico') + k[0] + '</button>' +
+        (ex ? '<ul role="group">' + (S.treeLoading[p] ? '<li><div class="tn muted" style="padding-left:' + (24 + (depth + 1) * 14) + 'px">加载中…</div></li>' : treeHtml(p, depth + 1)) + '</ul>' : '') + '</li>';
+    }).join('');
+  }
+
+  function chat() {
+    var title = S.projectSession || sessionsOf()[S.session];
+    var body;
+    if (title === '未命名对话') {
+      body = '<div class="empty-chat"><div><h2>有什么可以帮你？</h2><p>输入消息开始对话；/ 调出命令，@ 引用工作区文件。</p></div></div>';
+    } else {
+      body = '<div class="thread"><div class="col"><div class="u">浏览器访问 /api 全部 401，帮我看一下 gateway 的鉴权链路。</div>' +
+        '<div class="a"><p>先读控制面鉴权中间件，确认浏览器请求缺的是哪一种凭据。</p>' +
+        '<div class="tool"><div class="tool-h">' + ic('file-text') + '<b>read_file</b><code>pkg/gateway/controlplane.go</code><span class="ok">完成</span></div>' +
+        '<pre><div><span class="ln">15</span><span>func ControlPlaneTokenFromRequest(r *http.Request, q string) string {</span></div><div><span class="ln">19</span><span>  auth := strings.TrimSpace(r.Header.Get("Authorization"))</span></div><div><span class="ln">20</span><span>  // 浏览器页面从未拿到 token，这里永远是空串</span></div></pre></div>' +
+        '<p>根因是网页端没有任何途径取得 gateway token：请求头里的 <code class="inl">Authorization</code> 始终为空。修复方向是用一次性登录换取 HttpOnly 会话 Cookie。</p><div class="worked"><span>已工作 1m 12s · <span class="plan-prog" aria-label="任务清单完成 3/3">' + ic('square-check', 'pc') + '3/3</span> · 09:41</span></div></div></div></div>';
+    }
+    var p = presets.filter(function (x) { return x[0] === S.preset; })[0];
+    var h = '<div class="chat">' + body + '<div class="composer"><div class="ph-t">' + (S.ref ? '<span class="ref">@' + S.ref + '</span>' : '') + '输入消息，/ 调出命令，@ 引用文件</div>' +
+      '<div class="bar"><span class="chip-btn">' + ic('paperclip') + '附件</span><span class="chip-btn">' + ic('cpu') + tenants[S.tenant].provider[1] + ic('chevron-down') + '</span>' +
+      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '">' + ic('shield') + '审批：' + p[2] + ic('chevron-down') + '</button>' +
+      '<button type="button" class="send" aria-label="发送">' + ic('arrow-up') + '</button></div>';
+    if (S.presetMenu) {
+      h += '<div class="preset-menu" role="listbox"><div class="preset-cap">本会话的审批模式（不影响其他会话）</div>';
+      presets.forEach(function (x) { h += '<button type="button" class="preset-opt' + (x[0] === S.preset ? ' on' : '') + '" data-preset="' + x[0] + '"><b>' + (x[0] === S.preset ? ic('check') : '') + x[2] + ' · ' + x[1] + '</b><span>' + x[3] + '</span></button>'; });
+      h += '</div>';
+    }
+    return h + '</div></div>';
+  }
+
+  function bench() {
+    return '<aside class="bench" aria-label="工作台"><div class="bench-h"><b>工作台</b><button type="button" class="icon-btn" data-act="bench" aria-label="收起工作台">' + ic('x') + '</button></div><div class="bench-b">' +
+      '<div class="card" style="padding:12px;gap:8px"><div class="card-h"><h3 style="font-size:13px">' + ic('users') + '运行中的代理</h3><button type="button" class="btn sm">全部停止</button></div>' +
+      '<div class="agent-row"><span class="dot"></span>explore · 扫描鉴权调用点<span class="d">00:41</span></div><div class="agent-row"><span class="dot"></span>review · 审阅中间件改动<span class="d">00:12</span></div></div>' +
+      '<div class="card" style="padding:12px 8px 10px;gap:6px"><div class="card-h" style="padding:0 4px"><h3 style="font-size:13px">' + ic('folder-tree') + '工作区文件</h3><button type="button" class="icon-btn" aria-label="刷新">' + ic('rotate-cw') + '</button></div>' +
+      '<ul class="tree" role="tree">' + treeHtml('', 0) + '</ul><div class="hint" style="padding:0 6px">点击文件插入 @ 引用</div></div></div></aside>';
+  }
+
+  function ph(title, desc, kind, acts) {
+    return '<div class="ph"><div><div class="row" style="margin-bottom:4px">' + scope(kind) + '</div><h1>' + title + '</h1><p>' + desc + '</p></div><div class="acts">' + (acts === undefined ? '<button type="button" class="btn">' + ic('rotate-cw') + '刷新</button>' : acts) + '</div></div>';
+  }
+  function kvList(rows) { return '<dl class="kv">' + rows.map(function (r) { return '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>'; }).join('') + '</dl>'; }
+  function ruleTable(rows) {
+    return '<div class="tb-wrap"><table class="tb"><thead><tr><th>动作</th><th>工具</th><th>规则内容</th><th></th></tr></thead><tbody>' + rows.map(function (r) {
+      var cls = r[0] === '允许' ? 'ok' : r[0] === '询问' ? 'warn' : 'err';
+      return '<tr><td><span class="badge ' + cls + '">' + r[0] + '</span></td><td class="mono">' + r[1] + '</td><td class="mono">' + r[2] + '</td><td style="text-align:right"><button type="button" class="btn sm dgr">删除</button></td></tr>';
+    }).join('') + '</tbody></table></div>';
+  }
+  function addRule() { return '<div class="row">' + sel(['允许', '询问', '拒绝'], '允许', 'width:100px') + sel(toolNames, 'shell', 'width:230px') + '<input class="field mono" style="flex:1" placeholder="规则内容，如 git status 或 go test:*"><button type="button" class="btn pri">添加</button></div>'; }
+  function verify(ctx, projectOnly) {
+    return '<div class="card"><div class="card-h"><h3>' + (projectOnly ? '规则匹配测试' : '判定验证') + '</h3><span class="sub">' + ctx + '</span></div>' + (projectOnly ? '<span class="hint">只按本项目的规则匹配，看输入会命中哪一条。</span>' : '') + '<div class="row">' + sel(toolNames, 'shell', 'width:230px') + '<input class="field mono" style="flex:1" value="git push origin main"><button type="button" class="btn">验证</button></div>' +
+      kvList([['判定', '<span class="badge warn">需要审批</span>'], ['命中规则', '<span class="mono">shell · git push:*（询问）</span>'], ['命中位置', ctx]]) + '</div>';
+  }
+  function projSkill(name, desc, dir, on) { return '<tr><td><b class="mono">' + name + '</b><div class="hint">' + desc + '</div></td><td class="mono hint">' + dir + '</td><td style="text-align:right"><button type="button" class="btn sm">编辑</button> <button type="button" class="btn sm dgr">删除</button></td><td style="text-align:right"><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></td></tr>'; }
+  function skillRow(name, desc, src, on) { return '<tr><td><b class="mono">' + name + '</b><div class="hint">' + desc + '</div></td><td><span class="badge gray">' + src + '</span></td><td style="text-align:right"><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></td></tr>'; }
+
+
+  var agentSkills = [
+    { n: 'gateway-ops', d: '本主代理的网关运维手册', src: 'agent', on: true },
+    { n: 'incident-review', d: '事故复盘模板与步骤', src: 'agent', on: false },
+    { n: 'golang-testing', d: 'Go 测试规范与最佳实践', src: 'shared', on: true },
+    { n: 'pdf', d: '读取与生成 PDF', src: 'shared', on: false },
+    { n: 'skill-workshop', d: '创建、改进、评测技能的完整流程', src: 'builtin', on: true },
+    { n: 'skill-generator', d: '把刚跑通的一套步骤固化成技能', src: 'builtin', on: true }
+  ];
+  var projectSkills = [
+    { n: 'improve', d: '写出可交给执行者的实施计划', src: 'project', on: true, dir: '.claude/skills' },
+    { n: 'run-forebrain', d: '在隔离环境里驱动 TUI 做真机验证', src: 'project', on: true, dir: '.claude/skills' },
+    { n: 'release-check', d: '发版前检查清单', src: 'project', on: false, dir: '.forebrain/skills' }
+  ].concat(agentSkills);
+  var sharedSkills = [
+    { n: 'golang-testing', d: 'Go 测试规范与最佳实践', src: 'sharedown', on: true, dir: '~/.forebrain/skills' },
+    { n: 'pdf', d: '读取与生成 PDF', src: 'sharedown', on: false, dir: '~/.forebrain/skills' },
+    { n: 'skill-workshop', d: '创建、改进、评测技能的完整流程', src: 'builtin', on: true },
+    { n: 'skill-generator', d: '把刚跑通的一套步骤固化成技能', src: 'builtin', on: true }
+  ];
+  function srcBadge(src) {
+    if (src === 'project') return '<span class="scope project">项目</span>';
+    if (src === 'agent') return '<span class="scope agent">主代理 ' + S.tenant + '</span>';
+    if (src === 'shared' || src === 'sharedown') return '<span class="scope global">共享</span>';
+    return '<span class="scope global">内置</span>';
+  }
+  // own: which sources this page owns (editable); everything else is read-only here.
+  function skillsBlock(scope, title, rows, own, where) {
+    var count = 0;
+    rows.forEach(function (r, i) { if (S.sel[scope + ':' + i]) count++; });
+    var h = '<div class="card"><div class="card-h"><h3>' + title + '</h3><div class="row">' +
+      (count ? '<span class="hint">已选 ' + count + ' 个</span>' : '') +
+      '<button type="button" class="btn sm"' + (count ? '' : ' disabled') + '>' + ic('download') + '下载所选（zip）</button>' +
+      sel(['全部来源', '项目', '主代理', '共享', '内置'], '全部来源', 'width:110px') + '</div></div>' +
+      '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:30px"><input type="checkbox" aria-label="全选" data-selall="' + scope + '" data-n="' + rows.length + '"' + (count === rows.length ? ' checked' : '') + '></th><th>技能</th><th>来源</th><th style="text-align:right">状态</th><th style="text-align:right;width:120px">操作</th></tr></thead><tbody>';
+    rows.forEach(function (r, i) {
+      var mine = own.indexOf(r.src) >= 0;
+      var status = mine ? '<button type="button" class="sw" role="switch" aria-checked="' + r.on + '" aria-label="启用"></button>'
+        : '<span class="row" style="justify-content:flex-end;gap:6px"><span class="badge ' + (r.on ? 'ok' : 'gray') + '">' + (r.on ? '已启用' : '未启用') + '</span>' + ic('lock', 'lk') + '</span>';
+      h += '<tr><td><input type="checkbox" aria-label="选择 ' + r.n + '" data-sel="' + scope + ':' + i + '"' + (S.sel[scope + ':' + i] ? ' checked' : '') + '></td>' +
+        '<td><b class="mono">' + r.n + '</b><div class="hint">' + r.d + (r.dir ? ' · <span class="mono">' + r.dir + '</span>' : '') + '</div></td><td>' + srcBadge(r.src) + '</td><td style="text-align:right">' + status + '</td>' +
+        '<td style="text-align:right"><button type="button" class="icon-btn" style="display:inline-grid" aria-label="下载 ' + r.n + '" title="下载 zip">' + ic('download') + '</button>' +
+        (mine && r.src !== 'builtin' ? '<button type="button" class="icon-btn" style="display:inline-grid;color:var(--danger)" aria-label="删除 ' + r.n + '" title="删除">' + ic('trash-2') + '</button>' : '') + '</td></tr>';
+    });
+    h += '</tbody></table></div><span class="hint">' + where + '</span></div>';
+    return h;
+  }
+  function installBlock(target) {
+    return '<div class="grid2"><div class="card"><div class="card-h"><h3>在线安装</h3><span class="sub">安装到' + target + '</span></div>' +
+      '<div class="note" style="border-left-color:var(--brand);background:var(--brand-soft)">' + ic('globe') + ' 需要访问公网（GitHub、skills.sh）。内网环境请使用右侧的离线安装。</div>' +
+      '<input class="field mono" placeholder="来源，如 samber/cc-skills-golang 或 GitHub 地址"><div class="grid2"><input class="field mono" placeholder="技能名，留空安装全部"><input class="field mono" placeholder="分支或版本，可选"></div><div><button type="button" class="btn pri">安装</button></div></div>' +
+      '<div class="card"><div class="card-h"><h3>离线安装</h3><span class="sub">安装到' + target + '</span></div>' +
+      '<label class="drop"><input type="file" accept=".zip,.tar.gz,.tgz,.tar,.rar" multiple hidden>' + ic('upload') + '<b>拖入压缩包，或点击选择文件</b><span>支持 .zip、.tar.gz / .tgz、.tar、.rar；可一次选多个</span><span>压缩包内每个技能目录都要有 SKILL.md（名称与描述必填），可包含多个技能</span></label>' +
+      '<div class="row"><button type="button" class="btn pri">安装</button><span class="hint">同名技能会提示是否覆盖</span></div></div></div>' +
+      '<div class="hint">创建或编辑技能请到 <button type="button" class="btn link" data-nav="workshop">技能工坊</button>。技能的增删与启停在新会话生效。</div>';
+  }
+  var memFiles = {
+    agent: [
+      ['MEMORY.md', '# Global Memory · User Profile · 用中文交流，偏好根因修复…', '2026-08-02 10:11', '2026-09-29 09:40', 1],
+      ['memory_summary.md', '通用记忆摘要：沟通偏好、构建习惯、常用命令…', '2026-08-02 10:11', '2026-09-29 09:40', 1],
+      ['promotion_candidates.md', '待提升为技能的做法：tmux 驱动 TUI 真机验证…', '2026-09-10 21:03', '2026-09-28 18:22', 0],
+      ['extensions/ad_hoc/reply-in-chinese.md', '回复必须使用中文', '2026-09-03 13:57', '2026-09-03 13:57', 0],
+      ['extensions/ad_hoc/no-pink.md', '界面禁用粉色与品红', '2026-09-19 15:04', '2026-09-19 15:04', 0],
+      ['rollout_summaries/2026-09-28-oss-automation.md', '开源规范与自动发版会话摘要…', '2026-09-28 23:10', '2026-09-28 23:10', 0]
+    ],
+    project: [
+      ['MEMORY.md', '# Project Memory · forebrain-harness · 构建需要 CGO 与 fts5…', '2026-08-05 09:00', '2026-09-29 09:12', 1],
+      ['memory_summary.md', '项目记忆摘要：包结构、提示缓存约束…', '2026-08-05 09:00', '2026-09-29 09:12', 1],
+      ['extensions/ad_hoc/gateway-dist.md', 'pkg/gateway/dist 由发版流程管理，PR 不得改动', '2026-09-28 16:40', '2026-09-28 16:40', 0],
+      ['rollout_summaries/2026-09-29-web-redesign.md', 'Web 端重设计会话摘要…', '2026-09-29 09:12', '2026-09-29 09:12', 0]
+    ]
+  };
+  function memBlock(scope) {
+    var files = memFiles[scope], count = 0;
+    files.forEach(function (f, i) { if (S.sel['mem' + scope + ':' + i]) count++; });
+    var h = '<div class="card"><div class="row"><input class="field" style="max-width:280px" placeholder="搜索记忆内容关键词">' +
+      sel(['更新时间 · 新→旧', '更新时间 · 旧→新', '创建时间 · 新→旧', '创建时间 · 旧→新'], '更新时间 · 新→旧', 'width:160px') +
+      '<span class="sp" style="flex:1"></span>' + (count ? '<span class="hint">已选 ' + count + ' 个</span>' : '') +
+      '<button type="button" class="btn sm dgr"' + (count ? '' : ' disabled') + '>' + ic('trash-2') + '删除所选</button><button type="button" class="btn sm dgr">重置全部</button></div>' +
+      '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:30px"><input type="checkbox" aria-label="全选" data-selall="mem' + scope + '" data-n="' + files.length + '"' + (count === files.length ? ' checked' : '') + '></th><th>记忆文件</th><th>内容</th><th>创建时间</th><th>更新时间</th><th style="text-align:right;width:140px">操作</th></tr></thead><tbody>';
+    files.forEach(function (f, i) {
+      h += '<tr><td><input type="checkbox" aria-label="选择 ' + f[0] + '" data-sel="mem' + scope + ':' + i + '"' + (S.sel['mem' + scope + ':' + i] ? ' checked' : '') + '></td><td class="mono">' + f[0] + (f[4] ? ' <span class="badge gray">核心</span>' : '') + '</td><td class="hint" style="max-width:260px">' + f[1] + '</td><td class="mono hint">' + f[2] + '</td><td class="mono hint">' + f[3] + '</td>' +
+        '<td style="text-align:right"><button type="button" class="btn sm" data-memedit="' + scope + ':' + i + '">查看/编辑</button> ' + (f[4] ? '' : '<button type="button" class="icon-btn" style="display:inline-grid;color:var(--danger)" aria-label="删除 ' + f[0] + '">' + ic('trash-2') + '</button>') + '</td></tr>';
+    });
+    h += '</tbody></table></div><div class="row pager"><span class="hint">共 ' + (scope === 'agent' ? 28 : 11) + ' 个文件 · 第 1 / ' + (scope === 'agent' ? 5 : 2) + ' 页</span><span style="flex:1"></span>' + sel(['每页 6 个', '每页 20 个', '每页 50 个'], '每页 6 个', 'width:110px') + '<button type="button" class="btn sm" disabled>' + ic('chevron-left') + '上一页</button><button type="button" class="btn sm">下一页' + ic('chevron-right') + '</button></div>' +
+      '<span class="hint">核心文件（MEMORY.md、memory_summary.md）可以编辑、清空内容，但不能删除；每次保存或删除都会在记忆目录里留下一个版本。</span></div>';
+    if (S.memEdit && S.memEdit.indexOf(scope + ':') === 0) {
+      var f = files[Number(S.memEdit.split(':')[1])];
+      h += '<div class="card"><div class="card-h"><h3 class="mono">' + f[0] + '</h3><div class="row"><span class="hint">更新于 ' + f[3] + '</span><button type="button" class="btn sm" data-memclose="1">关闭</button></div></div>' +
+        '<textarea class="field mono" rows="9"># ' + f[0].replace(/^.*\//, '').replace('.md', '') + '\n\n- ' + f[1] + '\n- 过时或错误的条目可以直接删改，保存后新会话生效。</textarea>' +
+        '<div class="row"><button type="button" class="btn pri">保存</button><button type="button" class="btn" data-memclose="1">取消</button>' + (f[4] ? '<button type="button" class="btn dgr" style="margin-left:auto">清空内容</button>' : '<button type="button" class="btn dgr" style="margin-left:auto">删除此文件</button>') + '</div></div>';
+    }
+    return h;
+  }
+  var ruleDefs = {
+    agent: { files: [['AGENTS.md', '行为准则：工作方式、红线、会话开始时的约定', 1], ['SOUL.md', '性格与做事方式：语气、判断力、边界', 1], ['USER.md', '关于你：称呼、时区、沟通偏好、背景', 0]], where: '主代理工作区根目录' },
+    project: { files: [['FOREBRAIN.md', '项目根目录 · 每个项目会话开头注入', 1], ['pkg/gateway/FOREBRAIN.md', '子目录规则 · 会话工作目录位于该目录下时加载', 1], ['docs/FOREBRAIN.md', '子目录规则', 0]], where: '项目目录' }
+  };
+  function rulesBlock(scope) {
+    var d = ruleDefs[scope], cur = S.ruleSel[scope];
+    var h = '<div class="grid-side" style="grid-template-columns:minmax(0,0.8fr) minmax(0,1.2fr)"><div style="display:grid;gap:16px"><div class="card"><div class="card-h"><h3>规则文件</h3><span class="sub">' + d.where + '</span></div><div class="list">';
+    d.files.forEach(function (f) {
+      if (!f[2]) return;
+      h += '<div class="it"><div class="main"><b class="mono">' + f[0] + '</b><span class="s">' + f[1] + '</span></div>' + (cur === f[0] ? '<span class="badge">编辑中</span>' : '<button type="button" class="btn sm" data-rulefile="' + scope + ':' + f[0] + '">编辑</button>') + '</div>';
+    });
+    h += '</div></div><div class="card"><div class="card-h"><h3>新建规则文件</h3></div><span class="hint">只能新建 Forebrain Harness 会读取的规则文件。</span>';
+    if (scope === 'agent') {
+      h += '<div class="row">' + sel(['USER.md — 关于你：称呼、时区、沟通偏好'], 'USER.md — 关于你：称呼、时区、沟通偏好', 'flex:1') + '<button type="button" class="btn pri">新建</button></div><span class="hint">AGENTS.md、SOUL.md 已存在，不在可选列表中。</span>';
+    } else {
+      h += '<div class="row">' + sel(['FOREBRAIN.md — 子目录规则'], 'FOREBRAIN.md — 子目录规则', 'flex:1') + '</div><div class="row">' + sel(['docs', 'frontend', 'pkg/tool', 'scripts'], 'docs', 'flex:1') + '<button type="button" class="btn pri">新建</button></div><span class="hint">项目根目录的 FOREBRAIN.md 已存在；子目录从项目目录中选择。</span>';
+    }
+    h += '</div></div><div class="card"><div class="card-h"><h3 class="mono">' + cur + '</h3><div class="row"><button type="button" class="btn sm">放弃修改</button><button type="button" class="btn sm pri">保存</button></div></div>' +
+      '<textarea class="field mono" rows="16">' + (scope === 'agent' ? '# AGENTS\n\n- 先遵守系统与开发者指令。\n- 改代码前先写计划并等审批。\n- 不要把密钥写进工作区的 markdown。\n- 修 bug 必须修根因，禁止防御性补丁。' : '# FOREBRAIN.md\n\nLocal AI coding agent. Single Go module, Go 1.26, CGO mandatory.\n\n## Commands\n\nmake build\nmake test') + '</textarea>' +
+      '<span class="hint">规则文件在每个会话开头注入；为了不打断正在进行的会话、保持提示缓存命中，保存后从新会话开始生效。</span></div></div>';
+    return h;
+  }
+  function modelsField(idx, catalog) {
+    var chips = S.models[idx].map(function (m, j) { return '<span class="chip">' + m + '<button type="button" aria-label="移除 ' + m + '" data-rmmodel="' + idx + ':' + j + '">' + ic('x') + '</button></span>'; }).join('');
+    var sugg = catalog.filter(function (m) { return S.models[idx].indexOf(m) < 0; }).map(function (m) { return '<button type="button" class="chip add" data-addmodel="' + idx + ':' + m + '">+ ' + m + '</button>'; }).join('');
+    return '<label class="lb">模型<div class="tagbox">' + chips + '<input class="tag-in mono" data-models="' + idx + '" placeholder="输入模型 ID，多个用英文逗号分隔"></div></label>' + (sugg ? '<div class="row" style="gap:6px"><span class="hint">该服务商的模型：</span>' + sugg + '</div>' : '');
+  }
+  function scheduleBuilder() {
+    var modes = [['once', '一次'], ['every', '按间隔'], ['daily', '每天'], ['weekdays', '工作日'], ['weekly', '每周'], ['monthly', '每月'], ['cron', 'Cron 表达式']];
+    var m = S.cronMode, body = '', expr = '', next = '';
+    var days = ['一', '二', '三', '四', '五', '六', '日'], names = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+    if (m === 'once') { body = '<div class="row">' + sel(['在指定时间', '多久之后'], '在指定时间', 'width:130px') + '<input class="field" type="datetime-local" value="2026-10-01T09:00" style="width:220px"></div>'; expr = '2026-10-01T09:00:00'; next = '10月1日 周三 09:00（执行一次后结束）'; }
+    else if (m === 'every') { body = '<div class="row">每 <input class="field" type="number" min="1" value="2" style="width:80px">' + sel(['分钟', '小时', '天'], '小时', 'width:90px') + '<span class="hint">最短 1 分钟</span></div>'; expr = 'every 2h'; next = '11:40、13:40、15:40'; }
+    else if (m === 'daily') { body = '<div class="row">每天 <input class="field" type="time" value="07:00" style="width:120px"></div>'; expr = 'daily at 07:00'; next = '明天 07:00、10月1日 07:00、10月2日 07:00'; }
+    else if (m === 'weekdays') { body = '<div class="row">周一到周五 <input class="field" type="time" value="09:00" style="width:120px"></div>'; expr = 'weekdays at 09:00'; next = '明天 周二 09:00、周三 09:00、周四 09:00'; }
+    else if (m === 'weekly') {
+      var picked = [];
+      body = '<div class="row">' + days.map(function (d, i) { var on = !!S.wdays[i + 1]; if (on) picked.push(i + 1); return '<button type="button" class="daychip' + (on ? ' on' : '') + '" aria-pressed="' + on + '" data-wday="' + (i + 1) + '">周' + d + '</button>'; }).join('') + '<input class="field" type="time" value="09:30" style="width:120px"></div>';
+      expr = picked.length === 1 ? 'every ' + names[picked[0] - 1] + ' 09:30' : (picked.length ? '30 9 * * ' + picked.map(function (x) { return x % 7; }).join(',') : '（至少选一天）');
+      next = picked.length ? picked.slice(0, 3).map(function (x, k) { return '周' + days[x - 1] + ' ' + (k === 0 ? '10月1日' : k === 1 ? '10月6日' : '10月8日') + ' 09:30'; }).join('、') : '—';
+    }
+    else if (m === 'monthly') { body = '<div class="row">每月 ' + sel(['1 日', '15 日', '28 日'], '15 日', 'width:90px') + '<input class="field" type="time" value="09:00" style="width:120px"></div>'; expr = '0 9 15 * *'; next = '10月15日 09:00、11月15日 09:00、12月15日 09:00'; }
+    else { body = '<div class="row"><input class="field mono" value="*/30 9-18 * * 1-5" style="width:220px"><span class="hint">五段：分 时 日 月 周</span></div>'; expr = '*/30 9-18 * * 1-5'; next = '今天 10:00、10:30、11:00'; }
+    return '<div class="builder"><div class="seg">' + modes.map(function (x) { return '<button type="button" aria-pressed="' + (m === x[0]) + '" data-cmode="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>' + body +
+      '<dl class="kv"><dt>将保存为</dt><dd><code>' + expr + '</code></dd><dt>接下来执行</dt><dd>' + next + '</dd></dl><span class="hint">“将保存为”和执行时间由服务端按实际调度规则算出，保存前就能核对。</span></div>';
+  }
+  var wsTasks = [['gateway-ops', '改进已有技能', '进行中'], ['release-check', '从零创建', '草稿'], ['pdf', '优化触发描述', '已发布']];
+
+  var pages = {
+    projects: function () {
+      function proj(name, path, desc, meta, pinned) {
+        return '<div class="it"><div class="main"><div class="row"><b>' + name + '</b>' + (pinned ? '<span class="badge">置顶</span>' : '') + '</div><span class="s">' + desc + '</span><span class="p">' + path + ' · ' + meta + '</span></div>' +
+          '<div class="row"><button type="button" class="btn sm pri" data-go="project">进入项目空间</button><button type="button" class="btn sm">' + (pinned ? '取消置顶' : '置顶') + '</button><button type="button" class="btn sm">归档</button><button type="button" class="btn sm dgr">删除</button></div></div>';
+      }
+      var form = S.projectForm ? '<div class="card"><div class="card-h"><h3>新建项目</h3></div><div class="grid2"><label class="lb">项目名<input class="field" value="docs-site"></label><label class="lb">绑定的工作目录<input class="field mono" value="/Users/doudou/workspace/forebrain-harness.github.io"></label></div>' +
+        '<span class="hint">项目的规则指令、记忆、权限、MCP 与技能都以这个目录为键；目录必须已存在。创建后进入项目空间继续设置。</span><div class="row"><button type="button" class="btn pri">创建并进入项目空间</button><button type="button" class="btn" data-act="projform">取消</button></div></div>' : '';
+      return '<div class="pg">' + ph('项目', '本主代理的项目。每个项目有独立的项目空间，项目的配置和数据都在那里查看和修改。', 'agent', '<button type="button" class="btn">' + ic('rotate-cw') + '刷新</button><button type="button" class="btn pri" data-act="projform">' + ic('plus') + '新建项目</button>') + form +
+        '<div class="row"><input class="field" style="max-width:320px" placeholder="搜索名称或路径">' + sel(['按修改时间', '按名称'], '按修改时间', 'width:140px') + '<label class="row hint"><input type="checkbox"> 显示已归档</label></div>' +
+        '<div class="card"><div class="list">' + proj('forebrain-harness', '~/workspace/forebrain-harness', 'Forebrain Harness 主仓库', '更新于 10 分钟前', true) + proj('docs-site', '~/workspace/forebrain-harness.github.io', '文档站', '更新于 昨天', false) + proj('infra', '~/workspace/infra', '部署与运维脚本', '更新于 3 天前', false) + '</div></div></div>';
+    },
+    project: function () {
+      var tabs = [['overview', '概览'], ['rules', '规则指令'], ['sessions', '会话'], ['memory', '记忆'], ['perm', '权限'], ['mcp', 'MCP'], ['skills', '技能'], ['cron', '定时任务']];
+      var h = '<div class="proj-head"><div class="crumb"><button type="button" data-nav="projects">项目</button>' + ic('chevron-right') + 'forebrain-harness</div>' +
+        '<h1>' + scope('project') + 'forebrain-harness</h1><div class="meta"><span class="mono">~/workspace/forebrain-harness</span><span>属于主代理 ' + S.tenant + '</span><span class="badge ok">已信任</span></div>' +
+        '<div class="tabs" role="tablist">' + tabs.map(function (t) { return '<button type="button" role="tab" aria-selected="' + (S.projTab === t[0]) + '" data-ptab="' + t[0] + '">' + t[1] + '</button>'; }).join('') + '</div></div><div class="pg" style="max-width:1040px">';
+      var t = S.projTab;
+      if (t === 'overview') {
+        h += '<div class="card"><div class="card-h"><h3>项目设置</h3></div><div class="grid2"><label class="lb">项目名<input class="field" value="forebrain-harness"></label><label class="lb">绑定的工作目录<input class="field mono" value="/Users/doudou/workspace/forebrain-harness" readonly></label></div>' +
+          '<label class="lb">说明<input class="field" value="Forebrain Harness 主仓库"></label>' +
+          '<div class="list"><div class="it"><div class="main"><b>信任此目录</b><span class="s">信任后才会加载项目里的技能、MCP 与权限规则。</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div>' +
+          '<div class="it"><div class="main"><b>允许读取项目目录之外的资料</b><span class="s">关闭后，本项目会话不能读取文件库与跨项目记忆。</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div></div><div><button type="button" class="btn pri">保存</button></div></div>' +
+          '<div class="grid2"><div class="card">' + kvList([['会话', '12 个'], ['项目记忆', '38 条'], ['项目规则', '4 条'], ['项目 MCP', '2 个（1 个待确认）'], ['项目技能', '3 个'], ['定时任务', '1 个']]) + '</div>' +
+          '<div class="card"><div class="card-h"><h3>危险操作</h3></div><div class="row"><button type="button" class="btn">归档项目</button><button type="button" class="btn dgr">删除项目</button></div><span class="hint">删除项目不会删除目录里的文件。</span></div></div>';
+      } else if (t === 'rules') {
+        h += '<div class="card"><div class="card-h"><h3>项目指令</h3><button type="button" class="btn sm pri">保存</button></div><textarea class="field" rows="3">改代码前先写计划并等 owner 审批；不要提交代码。\n修 bug 必须修根因，禁止防御性补丁。</textarea><span class="hint">保存在项目设置里，注入本项目每个会话的开头；新会话生效。</span></div>' + rulesBlock('project');
+      } else if (t === 'sessions') {
+        h += '<div class="card"><div class="card-h"><h3>项目会话</h3><button type="button" class="btn pri sm" data-psession="新的项目会话">' + ic('plus') + '新建项目会话</button></div><div class="list">' +
+          ['修复目录树懒加载', '补 FOREBRAIN.md 的测试章节', '排查 fts5 构建失败'].map(function (s, i) { return '<div class="it"><div class="main"><b>' + s + '</b><span class="s">' + ['10 分钟前', '2 小时前', '昨天'][i] + '</span></div><button type="button" class="btn sm" data-psession="' + s + '">打开</button></div>'; }).join('') + '</div></div>';
+      } else if (t === 'memory') {
+        h += '<div class="card"><div class="card-h"><h3>记忆作用域</h3></div><div class="radio-cards" style="grid-template-columns:1fr 1fr">' +
+          '<button type="button" class="rc col" role="radio" aria-checked="true"><b>共享（可跨项目召回）</b><span>本项目的会话也能召回其他记忆。</span></button>' +
+          '<button type="button" class="rc col" role="radio" aria-checked="false"><b>仅本项目</b><span>只召回本项目自己的记忆。</span></button></div><span class="hint">修改只在新会话生效。</span></div>' + memBlock('project');
+      } else if (t === 'perm') {
+        h += '<div class="card"><div class="card-h"><h3>项目权限规则</h3><span class="sub mono">.forebrain/safety.json</span></div><span class="hint">随仓库一起保存，对在这个项目里工作的所有人生效；仅在已信任的版本库中生效。</span>' +
+          ruleTable([['允许', 'shell', 'go test:*'], ['允许', 'shell', 'make build'], ['询问', 'shell', 'git push:*'], ['拒绝', 'read_file', '**/.env']]) + addRule() + '</div>' + verify('本项目规则', true);
+      } else if (t === 'mcp') {
+        h += '<div class="note">待确认：<b>playwright</b>（npx @playwright/mcp@latest）<div class="row" style="margin-top:6px"><button type="button" class="btn sm pri">允许</button><button type="button" class="btn sm">拒绝</button></div></div>' +
+          '<div class="card"><div class="card-h"><h3>项目 MCP 服务</h3><span class="sub mono">.forebrain/mcp_servers.yaml</span></div><div class="list">' +
+          '<div class="it"><div class="main"><b>github</b><span class="p">https://api.githubcopilot.com/mcp/ · OAuth · 38 个工具</span></div><span class="badge ok">已允许</span><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm dgr">删除</button></div>' +
+          '<div class="it"><div class="main"><b>playwright</b><span class="p">npx @playwright/mcp@latest · 本地凭据</span></div><span class="badge warn">待确认</span><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm dgr">删除</button></div></div></div>' +
+          '<div class="card"><div class="card-h"><h3>添加项目 MCP 服务</h3></div><div class="row"><input class="field" style="width:160px" placeholder="名称">' + sel(['stdio（本地命令）', 'http（远程地址）'], 'stdio（本地命令）', 'width:170px') + '<input class="field mono" style="flex:1" placeholder="命令或地址"></div>' +
+          '<div class="row"><button type="button" class="sw" role="switch" aria-checked="false"></button>必需（连接失败时本项目会话不启动）</div><div><button type="button" class="btn pri">添加</button></div><span class="hint">写入 .forebrain/mcp_servers.yaml，新会话生效。</span></div>';
+      } else if (t === 'skills') {
+        h += skillsBlock('project', '本项目可加载的技能', projectSkills, ['project'], '按优先级从高到低：项目 → 主代理 → 共享 → 内置，同名时高优先级覆盖。项目技能可以启停、删除；主代理、共享与内置技能在项目空间里只读，都可以下载。') + installBlock('本项目（.forebrain/skills）');
+      } else {
+        h += '<div class="card"><div class="card-h"><h3>绑定本项目的定时任务</h3><button type="button" class="btn pri sm">' + ic('plus') + '新建</button></div><div class="list">' +
+          '<div class="it"><div class="main"><div class="row"><b>每晚跑一遍全量测试</b><span class="badge gray mono">daily at 11pm</span></div><span class="s">在本项目的新会话中执行 · 投递至 telegram:main · 已执行 6 次</span></div><button type="button" class="btn sm">立即执行</button><button type="button" class="btn sm">暂停</button><button type="button" class="btn sm dgr">删除</button></div></div></div>';
+      }
+      return h + '</div>';
+    },
+    skills: function () {
+      return '<div class="pg" style="max-width:1080px">' + ph('技能', '本主代理能使用的全部技能：本主代理自己的，加上共享与内置技能。', 'agent') +
+        skillsBlock('agent', '技能', agentSkills, ['agent'], '本主代理的技能可以启停、删除；共享与内置技能在这里只读（启停在“设置 → 共享技能”），都可以下载。') +
+        installBlock('本主代理') + '</div>';
+    },
+    rules: function () {
+      return '<div class="pg" style="max-width:1080px">' + ph('规则指令', '本主代理的规则文件，每个会话开头注入。', 'agent', '') + rulesBlock('agent') + '</div>';
+    },
+    workshop: function () {
+      var t = wsTasks[S.wsTask];
+      var tabs = [['files', '文件'], ['cases', '测试用例'], ['evals', '评测'], ['trigger', '触发描述']];
+      var h = '<div class="pg" style="max-width:1100px;gap:12px">' + ph('技能工坊', '用对话创建、改进、评测技能，并优化它的触发描述；完成后发布到项目、本主代理或共享技能库。', 'agent',
+        sel(['发现并安装技能', '从零创建技能', '改进已有技能', '评测对比', '优化触发描述'], '从零创建技能', 'width:150px') + '<button type="button" class="btn pri">' + ic('plus') + '新建工坊任务</button>') +
+        '<div class="row" role="tablist">' + wsTasks.map(function (x, i) { return '<button type="button" class="wstask' + (S.wsTask === i ? ' on' : '') + '" data-wstask="' + i + '"><b class="mono">' + x[0] + '</b><span>' + x[1] + ' · ' + x[2] + '</span></button>'; }).join('') + '</div>' +
+        '<div class="ws-grid"><div class="card ws-chat"><div class="card-h"><h3>' + ic('message-square') + '工坊对话</h3><span class="sub">由内置技能 skill-workshop 引导</span></div>' +
+        '<div class="ws-thread"><div class="u">把我们网关 502 的排障步骤做成技能，给 ops 主代理用。</div>' +
+        '<div class="a"><p>好的。先确认三件事：</p><p>1. 触发场景：只在网关返回 502 时用，还是所有网关报错都用？<br>2. 需要哪些命令权限（kubectl、curl、查看日志）？<br>3. 成功的判定标准是什么？</p></div>' +
+        '<div class="u">所有 5xx 都用；需要 kubectl 和 curl；恢复健康检查即成功。</div>' +
+        '<div class="a"><p>已写出 SKILL.md 初稿和 3 个测试用例，右侧可以直接改。接下来我会分别在“使用技能”和“不用技能”两种条件下跑一遍用例做对比。</p></div></div>' +
+        '<div class="composer" style="width:auto;margin:0"><div class="ph-t">回复工坊，/ 调出命令</div><div class="bar"><button type="button" class="send" aria-label="发送">' + ic('arrow-up') + '</button></div></div></div>' +
+        '<div class="card"><div class="tabs" role="tablist">' + tabs.map(function (x) { return '<button type="button" role="tab" aria-selected="' + (S.wsTab === x[0]) + '" data-wstab="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>';
+      if (S.wsTab === 'files') {
+        h += '<div class="row" style="gap:6px"><span class="chip on mono">SKILL.md</span><span class="chip mono">references/runbook.md</span><span class="chip mono">scripts/check-health.sh</span></div>' +
+          '<div class="grid2"><label class="lb">名称<input class="field mono" value="' + t[0] + '"></label><label class="lb">描述（决定何时触发）<input class="field" value="网关返回 5xx 时的排障与恢复步骤"></label></div>' +
+          '<textarea class="field mono" rows="10"># ' + t[0] + '\n\n## 何时使用\n网关任一接口返回 5xx。\n\n## 步骤\n1. kubectl get pods -n gateway\n2. curl -fsS $GW/healthz\n3. 按 references/runbook.md 定位根因\n\n## 完成标准\n健康检查恢复 200。</textarea>' +
+          '<div class="row"><button type="button" class="btn pri">保存草稿</button><span class="hint">技能必须有名称与描述，否则不会被加载。</span></div>';
+      } else if (S.wsTab === 'cases') {
+        h += '<div class="list">' + [['网关连续返回 502，pods 正常', '找到上游超时配置并恢复健康检查'], ['只有 /api/models 报 503', '识别为模型目录限流，不重启网关'], ['用户问“如何重启网关”', '不应触发本技能']].map(function (c, i) { return '<div class="it"><div class="main"><b>用例 ' + (i + 1) + '</b><span class="s">' + c[0] + '</span><span class="p">期望：' + c[1] + '</span></div><button type="button" class="btn sm">编辑</button></div>'; }).join('') + '</div><div><button type="button" class="btn">' + ic('plus') + '添加用例</button></div>';
+      } else if (S.wsTab === 'evals') {
+        h += '<div class="row"><span class="badge ok">使用技能 3/3 通过</span><span class="badge gray">不用技能 1/3 通过</span><span class="hint">第 2 轮 · 用时 2m 40s</span></div>' +
+          '<div class="tb-wrap"><table class="tb"><thead><tr><th>用例</th><th>使用技能</th><th>不用技能</th><th>你的反馈</th></tr></thead><tbody>' +
+          '<tr><td>1</td><td><span class="badge ok">通过</span></td><td><span class="badge err">未通过</span></td><td><input class="field" placeholder="写下意见，自动保存"></td></tr>' +
+          '<tr><td>2</td><td><span class="badge ok">通过</span></td><td><span class="badge ok">通过</span></td><td><input class="field" placeholder="写下意见，自动保存"></td></tr>' +
+          '<tr><td>3</td><td><span class="badge ok">通过</span></td><td><span class="badge err">未通过</span></td><td><input class="field" value="不该触发时它确实没触发，好"></td></tr></tbody></table></div>' +
+          '<div class="row"><button type="button" class="btn pri">按反馈再改一轮</button><button type="button" class="btn">重跑评测</button></div>';
+      } else {
+        h += '<label class="lb">当前描述<input class="field" value="网关返回 5xx 时的排障与恢复步骤"></label>' +
+          '<dl class="kv"><dt>触发准确率</dt><dd>当前 70% → 优化后 92%（20 条应触发 / 不应触发的提问）</dd><dt>建议描述</dt><dd>排查并恢复网关 5xx：定位上游超时、限流与 pod 异常，直到健康检查返回 200。不用于日常重启或配置变更。</dd></dl>' +
+          '<div class="row"><button type="button" class="btn pri">应用建议描述</button><button type="button" class="btn">重新生成</button></div>';
+      }
+      h += '<div class="publish"><span class="hint">完成后：</span>' + sel(['发布到 本主代理 ' + S.tenant, '发布到 项目 forebrain-harness', '发布到 共享技能库'], '发布到 本主代理 ' + S.tenant, 'width:210px') + '<button type="button" class="btn pri">发布</button><button type="button" class="btn">' + ic('download') + '下载 zip</button></div></div></div></div>';
+      return h;
+    },
+    subagents: function () {
+      return '<div class="pg">' + ph('子代理', '本主代理所有会话里正在运行的子代理。', 'agent', '<button type="button" class="btn">' + ic('rotate-cw') + '刷新</button><button type="button" class="btn dgr">全部停止</button>') +
+        '<div class="tb-wrap"><table class="tb"><thead><tr><th>子代理</th><th>任务</th><th>所在会话</th><th>已运行</th><th></th></tr></thead><tbody>' +
+        '<tr><td class="mono">explore</td><td>扫描鉴权调用点</td><td><button type="button" class="btn link" data-session="0">重构 gateway 鉴权中间件</button></td><td class="mono">00:41</td><td style="text-align:right"><button type="button" class="btn sm">停止</button></td></tr>' +
+        '<tr><td class="mono">review</td><td>审阅中间件改动</td><td><button type="button" class="btn link" data-session="0">重构 gateway 鉴权中间件</button></td><td class="mono">00:12</td><td style="text-align:right"><button type="button" class="btn sm">停止</button></td></tr>' +
+        '</tbody></table></div></div>';
+    },
+    cron: function () {
+      function task(name, sched, target, count, paused) {
+        return '<div class="it"><div class="main"><div class="row"><b>' + name + '</b><span class="badge gray mono">' + sched + '</span>' + (paused ? '<span class="badge warn">已暂停</span>' : '') + '</div><span class="s">投递至 ' + target + ' · 已执行 ' + count + ' 次</span></div>' +
+          '<div class="row"><button type="button" class="btn sm">立即执行</button><button type="button" class="btn sm">' + (paused ? '恢复' : '暂停') + '</button><button type="button" class="btn sm">执行记录</button><button type="button" class="btn sm dgr">删除</button></div></div>';
+      }
+      var opts = ['每天 7:00（daily at 7am）', '工作日 9:00（weekdays at 9am）', '每周一 9:00（every monday 9am）', '每 2 小时（every 2h）', '自定义…'];
+      return '<div class="pg">' + ph('定时任务', '本主代理的常驻任务：按计划在全新会话里执行提示词，并把回答投递出去。绑定项目的任务在对应项目空间。', 'agent') +
+        '<div class="card"><div class="card-h"><h3>新建任务</h3></div><div class="grid2"><label class="lb">名称<input class="field" placeholder="例如 每日简报"></label>' +
+        '<label class="lb">计划<select class="field" data-cronsel="1">' + opts.map(function (o) { return '<option' + ((S.cronCustom ? o === '自定义…' : o === opts[0]) ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select></label></div>' +
+        (S.cronCustom ? scheduleBuilder() : '') +
+        '<label class="lb">任务描述<textarea class="field" rows="3" placeholder="交给代理的任务描述，需要能独立执行"></textarea></label>' +
+        '<label class="lb">投递通道' + sel(['只记录，不投递', 'telegram:main', '飞书：研发群'], 'telegram:main') + '</label><div><button type="button" class="btn pri">创建</button></div></div>' +
+        '<div class="card"><div class="card-h"><h3>任务</h3><span class="sub">3 个</span></div><div class="list">' + task('每日简报', 'daily at 7am', 'telegram:main', 12, false) + task('依赖漏洞巡检', 'weekdays at 9am', '飞书：研发群', 30, false) + task('清理临时分支', 'every monday 9am', '只记录', 4, true) + '</div></div></div>';
+    },
+    channels: function () {
+      function ch(name, on, fields) { return '<div class="card"><div class="card-h"><h3>' + name + '</h3><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></div>' + (on ? '<div class="grid2">' + fields + '</div>' : '') + '</div>'; }
+      return '<div class="pg">' + ph('通道', '本主代理的消息通道：把外部账号绑定到这个主代理的会话上。', 'agent', '<button type="button" class="btn">' + ic('rotate-cw') + '刷新</button><button type="button" class="btn pri">保存</button>') +
+        '<div class="hint">密钥已脱敏显示；不修改即保留磁盘上的原值。</div>' +
+        ch('Telegram', true, '<label class="lb">Bot Token<input class="field mono" value="••••••••••••3f9a"></label><label class="lb">允许的 Chat ID<input class="field mono" value="10293847, 55667788"></label>') +
+        ch('飞书', true, '<label class="lb">App ID<input class="field mono" value="cli_a1b2c3d4"></label><label class="lb">App Secret<input class="field mono" value="••••••••••••8c21"></label>') +
+        ch('Slack', false, '') + ch('企业微信', false, '') + ch('钉钉', false, '') + '</div>';
+    },
+    providers: function () {
+      function pv(idx, label, prov, url, keyState, first, catalog) {
+        var key = keyState ? (S.keyEdit ? '<input class="field mono" type="password" autocomplete="new-password" placeholder="输入或粘贴新的 API Key">' : '<div class="row"><span class="badge ok">已保存 ••••3f9a</span><button type="button" class="btn sm" data-act="keyedit">更换</button></div>')
+          : '<input class="field mono" type="password" autocomplete="new-password" placeholder="输入或粘贴 API Key">';
+        return '<div class="card"><div class="card-h"><h3><span class="badge' + (first ? '' : ' gray') + '">' + label + '</span></h3><div class="row">' + (first ? '' : '<button type="button" class="btn sm">上移</button>') + '<button type="button" class="btn sm dgr">删除</button></div></div>' +
+          '<div class="grid2"><label class="lb">服务商' + sel(['deepseek', 'openai', 'anthropic', 'zhipu', 'moonshot', 'dashscope'], prov) + '</label><label class="lb">Base URL<input class="field mono" value="' + url + '"></label></div>' +
+          modelsField(idx, catalog) + '<label class="lb">API Key' + key + '</label>' +
+          '<span class="hint">API Key 输入后立即以圆点显示；保存到 ~/.forebrain/.env，配置文件里只写 ${…} 引用，之后不再明文显示。</span></div>';
+      }
+      var p = tenants[S.tenant].provider;
+      return '<div class="pg">' + ph('模型服务', '本主代理使用的模型服务，按顺序尝试：第一条主用，其余回退。一条服务可以填多个模型。', 'agent', '<button type="button" class="btn">' + ic('rotate-cw') + '刷新</button><button type="button" class="btn pri">保存</button>') +
+        pv(0, '主用', p[0], p[0] === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1', true, true, ['deepseek-v4', 'deepseek-v4-flash', 'deepseek-reasoner']) +
+        pv(1, '回退 1', 'openai', 'https://api.openai.com/v1', false, false, ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']) + '<div><button type="button" class="btn">' + ic('plus') + '添加一条</button></div></div>';
+    },
+    tools: function () {
+      var tools = [['read_file', '读取工作区内文件，返回带行号的内容', 1], ['write_file', '写入或新建文件', 0], ['edit_file', '按精确匹配替换文件片段', 0], ['shell', '在沙箱中执行命令', 0], ['grep', '按正则搜索文件内容', 1], ['web_search', '联网搜索', 1], ['web_fetch', '抓取网页正文', 1], ['memories_search', '检索已生成的记忆', 1], ['session_todo', '维护本会话的待办清单', 0], ['mcp__github__create_pull_request', '创建 GitHub PR（MCP：github）', 0]];
+      var h = '<div class="pg">' + ph('工具', '本主代理运行时实际暴露给模型的工具表。', 'agent') + '<div class="row"><input class="field" style="max-width:320px" placeholder="按名称或描述筛选"><span class="hint">显示 10 / 共 10</span></div><div class="card"><div class="list">';
+      tools.forEach(function (t) {
+        var open = S.toolOpen === t[0];
+        h += '<div class="it" style="flex-wrap:wrap"><div class="main"><b class="mono" style="font-size:12.5px">' + t[0] + '</b><span class="s">' + t[1] + '</span></div><span class="badge ' + (t[2] ? 'ok' : 'warn') + '">' + (t[2] ? '只读' : '有副作用') + '</span><button type="button" class="btn sm" data-tool="' + t[0] + '">' + (open ? '收起' : '查看入参') + '</button>';
+        if (open) h += '<div class="tb-wrap" style="flex-basis:100%"><table class="tb"><thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody><tr><td class="mono">command</td><td>string</td><td>是</td><td>要执行的命令</td></tr><tr><td class="mono">workdir</td><td>string</td><td>否</td><td>工作目录，默认工作区根</td></tr><tr><td class="mono">timeout_ms</td><td>integer</td><td>否</td><td>超时毫秒数</td></tr></tbody></table></div>';
+        h += '</div>';
+      });
+      return h + '</div></div></div>';
+    },
+    permissions: function () {
+      return '<div class="pg">' + ph('权限', '本主代理已记住的授权规则（保存在主代理工作区），以及对一次调用的判定验证。', 'agent') +
+        '<div class="card"><div class="card-h"><h3>已记住的规则</h3><span class="sub mono">' + tenants[S.tenant].path + '/state/permissions/local_settings.json</span></div>' +
+        ruleTable([['允许', 'shell', 'git status'], ['允许', 'shell', 'npm run build'], ['询问', 'web_fetch', 'domain:internal.example.com']]) + addRule() + '</div>' +
+        verify('主代理 ' + S.tenant) +
+        '<div class="hint">默认审批模式在“设置 → 审批默认”；项目规则在各项目空间；单个会话可以在对话输入框旁临时切换审批模式。</div></div>';
+    },
+    memories: function () {
+      return '<div class="pg" style="max-width:1080px">' + ph('记忆', '本主代理的通用记忆文件（不属于任何项目的部分）：可以查看、编辑、删除过时或错误的记忆。', 'agent', '') +
+        memBlock('agent') + '<div class="hint">记忆功能的开关是全局的，在“设置 → 记忆”；项目记忆在各项目空间。</div></div>';
+    },
+    settings: function () {
+      var groups = [['常规', [['appearance', '外观'], ['agents', '主代理'], ['approval', '审批默认']]], ['全局服务', [['mcp', 'MCP'], ['hooks', '钩子'], ['memory', '记忆'], ['sharedskills', '共享技能']]], ['高级', [['config', '配置文件'], ['status', '运行状态']]]];
+      var h = '<div class="pg" style="max-width:1100px">' + ph('设置', '全局设置：不属于某一个主代理、对所有主代理生效的配置。', 'global', '') + '<div class="subnav-wrap"><nav class="subnav" role="tablist">';
+      groups.forEach(function (g) { h += '<div class="grp">' + g[0] + '</div>' + g[1].map(function (t) { return '<button type="button" role="tab" aria-selected="' + (S.settingsTab === t[0]) + '" data-stab="' + t[0] + '">' + t[1] + '</button>'; }).join(''); });
+      h += '</nav><div style="display:grid;gap:16px;min-width:0">';
+      var t = S.settingsTab;
+      if (t === 'appearance') {
+        h += '<div class="card"><div class="card-h"><h3>主题色</h3><span class="sub">只保存在当前浏览器</span></div><div class="radio-cards">' +
+          [['navy', '海军蓝', '#1f4a9e', '默认'], ['teal', '松石青', '#0e6e7e', ''], ['graphite', '石墨黑', '#1c1c1f', '']].map(function (x) { return '<button type="button" class="rc" role="radio" aria-checked="' + (S.brand === x[0]) + '" data-brand="' + x[0] + '"><i class="swc" style="background:' + x[2] + '"></i><div><b>' + x[1] + '</b><span>' + (x[3] || '&nbsp;') + '</span></div></button>'; }).join('') + '</div></div>' +
+          '<div class="grid2"><div class="card"><div class="card-h"><h3>菜单栏</h3></div><div class="row"><button type="button" class="btn' + (S.rail === 'dark' ? ' pri' : '') + '" data-rail="dark">深色</button><button type="button" class="btn' + (S.rail === 'light' ? ' pri' : '') + '" data-rail="light">浅色</button></div><span class="hint">内容区始终白底，深浅只作用于菜单栏。</span></div>' +
+          '<div class="card"><div class="card-h"><h3>语言</h3></div>' + sel(['中文', 'English'], '中文', 'width:160px') + '</div></div>';
+      } else if (t === 'agents') {
+        h += '<div class="card"><div class="card-h"><h3>主代理</h3><button type="button" class="btn pri sm">' + ic('plus') + '新建主代理</button></div><div class="hint">每个主代理是一个租户：各自的工作区、会话、项目、模型服务与通道互不相通。切换当前主代理请用菜单栏顶部的选择器。</div>' +
+          '<div class="tb-wrap"><table class="tb"><thead><tr><th>主代理</th><th>工作区</th><th>模型服务</th><th>通道</th><th></th></tr></thead><tbody>' +
+          '<tr><td><b>main</b></td><td class="mono">~/workspace/forebrain-harness</td><td>deepseek-v4 +1</td><td>Telegram、飞书</td><td style="text-align:right"><button type="button" class="btn sm">编辑</button> <button type="button" class="btn sm dgr">删除</button></td></tr>' +
+          '<tr><td><b>review</b></td><td class="mono">~/.forebrain/workspaces/review</td><td>gpt-5.5</td><td>—</td><td style="text-align:right"><button type="button" class="btn sm">编辑</button> <button type="button" class="btn sm dgr">删除</button></td></tr>' +
+          '<tr><td><b>ops</b></td><td class="mono">~/workspace/infra</td><td>deepseek-v4</td><td>Slack</td><td style="text-align:right"><button type="button" class="btn sm">编辑</button> <button type="button" class="btn sm dgr">删除</button></td></tr></tbody></table></div></div>' +
+          '<div class="card"><div class="card-h"><h3>新建主代理</h3></div><div class="grid2"><label class="lb">名称<input class="field mono" placeholder="小写字母、数字与短横线，如 docs"></label><label class="lb">工作区目录<input class="field mono" placeholder="留空则使用 ~/.forebrain/workspaces/<名称>"></label>' +
+          '<label class="lb">模型服务商' + sel(['deepseek', 'openai', 'anthropic', 'zhipu'], 'deepseek') + '</label><label class="lb">模型' + sel(['deepseek-v4', 'deepseek-v4-flash'], 'deepseek-v4') + '</label></div><div><button type="button" class="btn pri">创建</button></div><span class="hint">通道与更多模型服务在切换到该主代理后，于“通道”“模型服务”页配置。</span></div>' +
+          '<div class="card"><div class="card-h"><h3>所有主代理共享的目录</h3></div><div class="list"><div class="it"><div class="main"><span class="p">~/.forebrain/skills</span><span class="s">共享技能库</span></div></div><div class="it"><div class="main"><span class="p">~/.forebrain/workspace/shared</span><span class="s">共享文件库</span></div></div></div></div>';
+      } else if (t === 'approval') {
+        h += '<div class="card"><div class="card-h"><h3>默认审批模式</h3><span class="sub mono">forebrain.yaml · approval_policy + sandbox_mode</span></div><div class="radio-cards" style="grid-template-columns:1fr">' +
+          presets.map(function (x) { return '<button type="button" class="rc col" role="radio" aria-checked="' + (x[0] === 'default') + '"><b>' + x[2] + ' · ' + x[1] + '</b><span>' + x[3] + '</span></button>'; }).join('') +
+          '</div><span class="hint">对所有主代理的新会话生效；单个会话可以在对话输入框旁临时切换，只影响那个会话。</span><div><button type="button" class="btn pri">保存</button></div></div>';
+      } else if (t === 'mcp') {
+        h += '<div class="card"><div class="card-h"><h3>全局 MCP 服务</h3><span class="sub mono">forebrain.yaml · agents.defaults.mcp_servers</span></div><div class="list">' +
+          '<div class="it"><div class="main"><b>codegraph</b><span class="p">codegraph mcp · 必需 · 1 个工具</span></div><span class="badge ok">已连接</span><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm">禁用</button></div>' +
+          '<div class="it"><div class="main"><b>context7</b><span class="p">https://mcp.context7.com/mcp · 2 个工具</span></div><span class="badge gray">已禁用</span><button type="button" class="btn sm">编辑</button><button type="button" class="btn sm">启用</button></div></div><span class="hint">对所有主代理生效，新会话起作用。项目 MCP 在各项目空间。</span></div>' +
+          '<div class="card"><div class="card-h"><h3>添加全局 MCP 服务</h3></div><div class="row"><input class="field" style="width:160px" placeholder="名称">' + sel(['stdio（本地命令）', 'http（远程地址）'], 'stdio（本地命令）', 'width:170px') + '<input class="field mono" style="flex:1" placeholder="命令或地址"></div><div class="row"><button type="button" class="sw" role="switch" aria-checked="false"></button>必需</div><div><button type="button" class="btn pri">添加</button></div></div>';
+      } else if (t === 'hooks') {
+        h += '<div class="card"><div class="card-h"><h3>新增钩子</h3></div><div class="row">' + sel(['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStop', 'PreCompact', 'PostCompact'], 'PreToolUse', 'width:170px') + sel(['匹配全部工具'].concat(toolNames), 'shell', 'width:230px') + '<input class="field mono" style="flex:1" placeholder="要执行的命令"><button type="button" class="btn pri">添加</button></div></div>' +
+          '<div class="card"><div class="card-h"><h3>钩子</h3><span class="sub">对所有主代理生效</span></div><div class="tb-wrap"><table class="tb"><thead><tr><th>事件</th><th>匹配</th><th>命令</th><th></th></tr></thead><tbody>' +
+          '<tr><td class="mono">PreToolUse</td><td class="mono">shell</td><td class="mono">scripts/guard-shell.sh</td><td style="text-align:right"><button type="button" class="btn sm dgr">删除</button></td></tr>' +
+          '<tr><td class="mono">PostToolUse</td><td>匹配全部工具</td><td class="mono">gofmt -l ./pkg</td><td style="text-align:right"><button type="button" class="btn sm dgr">删除</button></td></tr></tbody></table></div></div>';
+      } else if (t === 'memory') {
+        h += '<div class="card"><div class="card-h"><h3>记忆功能</h3><span class="sub">对所有主代理生效</span></div><div class="list">' +
+          [['启用记忆功能', '开启记忆基础能力。启用后，新对话才能使用记忆。'], ['使用记忆', '允许新对话读取已生成的记忆。'], ['生成记忆', '允许对话参与记忆生成。']].map(function (x) { return '<div class="it"><div class="main"><b>' + x[0] + '</b><span class="s">' + x[1] + '</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div>'; }).join('') +
+          '</div><div><button type="button" class="btn pri">保存</button></div><span class="hint">各主代理的记忆数据在菜单栏“记忆”，项目记忆在项目空间。</span></div>';
+      } else if (t === 'sharedskills') {
+        h += skillsBlock('shared', '共享技能库', sharedSkills, ['sharedown'], '共享技能对所有主代理生效，启停也在这里统一管理；内置技能只读。') + installBlock('共享技能库（~/.forebrain/skills）');
+      } else if (t === 'config') {
+        h += '<div class="card"><div class="card-h"><h3>forebrain.yaml</h3><div class="row"><button type="button" class="btn">' + ic('rotate-cw') + '刷新</button><button type="button" class="btn pri">保存并生效</button></div></div><span class="hint mono">~/.forebrain/forebrain.yaml</span><span class="hint">保存前会按运行时的规则校验；通过后立即生效。密钥已脱敏，保持原样即保留原值。</span>' +
+          '<div class="code"><span class="k">gateway</span>:\n  <span class="k">http_addr</span>: <span class="v">127.0.0.1:6060</span>\n  <span class="k">auth</span>:\n    <span class="k">mode</span>: <span class="v">token</span>\n    <span class="k">token</span>: <span class="v">${FOREBRAIN_GATEWAY_TOKEN}</span>\n<span class="k">approval_policy</span>: <span class="v">on-request</span>\n<span class="k">sandbox_mode</span>: <span class="v">workspace-write</span>\n<span class="k">agents</span>:\n  <span class="k">definitions</span>:\n    <span class="k">main</span>:\n      <span class="k">primary</span>: <span class="v">true</span>\n      <span class="k">llm_providers</span>:\n        - <span class="k">provider</span>: <span class="v">deepseek</span>\n          <span class="k">model</span>: <span class="v">deepseek-v4</span>\n          <span class="k">api_key</span>: <span class="v">${DEEPSEEK_API_KEY}</span></div></div>';
+      } else {
+        h += '<div class="grid2"><div class="card"><div class="card-h"><h3>运行状态</h3><span class="badge ok">正常</span></div>' + kvList([['版本', 'v0.3.0'], ['监听地址', '<span class="mono">127.0.0.1:6060</span>'], ['鉴权', 'token'], ['主代理', '3 个']]) + '</div>' +
+          '<div class="card"><div class="card-h"><h3>数据目录</h3></div>' + kvList([['主目录', '<span class="mono">~/.forebrain</span>'], ['日志', '<span class="mono">~/.forebrain/logs</span>'], ['状态库', '<span class="mono">~/.forebrain/state</span>']]) + '</div></div>';
+      }
+      return h + '</div></div></div>';
+    }
+  };
+
+  function render() {
+    var app = document.getElementById('app');
+    app.setAttribute('data-brand', S.brand); app.setAttribute('data-rail', S.rail); app.setAttribute('data-rc', S.rc ? '1' : '0');
+    var content = S.page === 'chat' ? chat() : pages[S.page]();
+    app.innerHTML = rail() + pops() + (S.drawer ? drawer() : '') + '<div class="work">' + topbar() + '<div class="body"><div class="content">' + content + '</div>' + (S.page === 'chat' && S.bench ? bench() : '') + '</div></div>';
+    var cap = captions[S.page];
+    document.getElementById('caption').innerHTML = '<h2>当前页面：' + cap[0] + '</h2><ul>' + cap[1].map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ul>';
+    document.querySelectorAll('.seg[data-ctl]').forEach(function (seg) {
+      var key = seg.getAttribute('data-ctl');
+      seg.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-val') === S[key])); });
+    });
+    if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+    var tip = document.createElement('div');
+    tip.className = 'rail-tip'; tip.id = 'rail-tip'; tip.setAttribute('role', 'tooltip'); tip.hidden = true;
+    app.appendChild(tip);
+  }
+
+  function showTip(el) {
+    var app = document.getElementById('app'), tip = document.getElementById('rail-tip');
+    if (!tip || !el) return;
+    tip.textContent = el.getAttribute('data-tip');
+    tip.hidden = false;
+    var a = app.getBoundingClientRect(), r = el.getBoundingClientRect();
+    tip.style.left = (r.right - a.left + 10) + 'px';
+    tip.style.top = (r.top - a.top + r.height / 2 - tip.offsetHeight / 2) + 'px';
+    el.setAttribute('aria-describedby', 'rail-tip');
+  }
+  function hideTip() { var tip = document.getElementById('rail-tip'); if (tip) tip.hidden = true; }
+  var appEl = document.getElementById('app');
+  appEl.addEventListener('mouseover', function (ev) { var el = ev.target.closest('[data-tip]'); if (el) showTip(el); else hideTip(); });
+  appEl.addEventListener('mouseleave', hideTip);
+  appEl.addEventListener('focusin', function (ev) { var el = ev.target.closest('[data-tip]'); if (el) showTip(el); });
+  appEl.addEventListener('focusout', hideTip);
+
+  document.getElementById('page-jump').innerHTML = jump.map(function (j) { return '<button type="button" id="j-' + j[0] + '" data-val="' + j[0] + '" aria-pressed="false">' + j[1] + '</button>'; }).join('');
+  document.querySelectorAll('.seg[data-ctl]').forEach(function (seg) {
+    seg.addEventListener('click', function (ev) {
+      var b = ev.target.closest('button'); if (!b) return;
+      var key = seg.getAttribute('data-ctl');
+      S[key] = b.getAttribute('data-val');
+      if (key === 'page') { S.hb = false; S.drawer = false; S.tmenu = false; S.presetMenu = false; }
+      render();
+    });
+  });
+
+  function closePops() { S.hb = false; S.tmenu = false; S.presetMenu = false; }
+  document.getElementById('app').addEventListener('change', function (ev) {
+    var el = ev.target;
+    if (el.dataset.cronsel) { S.cronCustom = el.value === '自定义…'; render(); }
+    else if (el.dataset.sel) { S.sel[el.dataset.sel] = el.checked; render(); }
+    else if (el.dataset.selall) { for (var i = 0; i < Number(el.dataset.n); i++) S.sel[el.dataset.selall + ':' + i] = el.checked; render(); }
+  });
+  document.getElementById('app').addEventListener('input', function (ev) {
+    var el = ev.target;
+    if (el.dataset.models !== undefined && el.value.indexOf(',') >= 0) {
+      var idx = Number(el.dataset.models);
+      el.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).forEach(function (m) { if (S.models[idx].indexOf(m) < 0) S.models[idx].push(m); });
+      render();
+      var again = document.querySelector('[data-models="' + idx + '"]'); if (again) again.focus();
+    }
+  });
+  document.getElementById('app').addEventListener('click', function (ev) {
+    if (ev.target.matches('input[type="checkbox"], select, input, textarea, label.drop, label.drop *')) return;
+    var t = ev.target.closest('button, [data-go]');
+    if (!t) { if (S.drawer || S.tmenu || S.presetMenu) { S.drawer = false; S.tmenu = false; S.presetMenu = false; render(); } return; }
+    var d = t.dataset;
+    if (d.nav === 'chat') { closePops(); S.drawer = !S.drawer; }
+    else if (d.nav) { closePops(); S.drawer = false; S.page = d.nav; }
+    else if (d.go) { closePops(); S.drawer = false; S.page = d.go; }
+    else if (d.session !== undefined) { closePops(); S.page = 'chat'; S.projectSession = ''; S.session = Number(d.session); S.drawer = false; S.ref = ''; }
+    else if (d.psession) { closePops(); S.page = 'chat'; S.projectSession = d.psession; S.ref = ''; }
+    else if (d.tenant) { S.tenant = d.tenant; S.tmenu = false; S.session = 0; S.projectSession = ''; }
+    else if (d.act === 'tmenu') { var o = !S.tmenu; closePops(); S.tmenu = o; }
+    else if (d.act === 'drawer') { S.drawer = false; }
+    else if (d.act === 'rc') { closePops(); S.rc = !S.rc; }
+    else if (d.act === 'keyedit') { S.keyEdit = true; }
+    else if (d.cmode) { S.cronMode = d.cmode; }
+    else if (d.wday) { S.wdays[d.wday] = !S.wdays[d.wday]; }
+    else if (d.memedit) { S.memEdit = d.memedit; }
+    else if (d.memclose) { S.memEdit = ''; }
+    else if (d.rulefile) { var rp = d.rulefile.split(':'); S.ruleSel[rp[0]] = rp[1]; }
+    else if (d.rmmodel) { var mm = d.rmmodel.split(':'); S.models[+mm[0]].splice(+mm[1], 1); }
+    else if (d.addmodel) { var am = d.addmodel.split(':'); S.models[+am[0]].push(am[1]); }
+    else if (d.wstab) { S.wsTab = d.wstab; }
+    else if (d.wstask !== undefined) { S.wsTask = Number(d.wstask); }
+    else if (d.act === 'bench') { S.bench = !S.bench; }
+    else if (d.act === 'hb') { var hb = !S.hb; closePops(); S.hb = hb; }
+    else if (d.act === 'preset') { var pm = !S.presetMenu; closePops(); S.presetMenu = pm; }
+    else if (d.preset) { S.preset = d.preset; S.presetMenu = false; }
+    else if (d.act === 'railtheme') { S.rail = S.rail === 'dark' ? 'light' : 'dark'; }
+    else if (d.act === 'newchat') { var list = sessionsOf(); S.page = 'chat'; S.projectSession = ''; S.session = list.length - 1; S.drawer = false; S.ref = ''; }
+    else if (d.act === 'projform') { S.projectForm = !S.projectForm; }
+    else if (d.stab) { S.settingsTab = d.stab; }
+    else if (d.ptab) { S.projTab = d.ptab; }
+    else if (d.brand) { S.brand = d.brand; }
+    else if (d.rail) { S.rail = d.rail; }
+    else if (d.tool) { S.toolOpen = S.toolOpen === d.tool ? '' : d.tool; }
+    else if (d.file) { S.ref = d.file; }
+    else if (d.dir) {
+      var p = d.dir;
+      if (S.tree[p]) { S.tree[p] = false; }
+      else { S.tree[p] = true; if (!S.tree['_l_' + p]) { S.tree['_l_' + p] = true; S.treeLoading[p] = true; setTimeout(function () { S.treeLoading[p] = false; render(); }, 450); } }
+    } else { return; }
+    render();
+  });
+  render();
+})();
+</script>

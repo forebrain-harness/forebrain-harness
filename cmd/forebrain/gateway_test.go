@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/gateway"
+	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tui"
 	"github.com/spf13/cobra"
 )
@@ -35,7 +37,7 @@ func TestRunGatewayEAutoRunsOnboardWhenNeeded(t *testing.T) {
 	}
 	gatewayStartupConfigError = func() error { return nil }
 	runCalled := false
-	gatewayRunBlocking = func(ctx context.Context) error {
+	gatewayRunBlocking = func(ctx context.Context, opts gateway.ServeOptions) error {
 		runCalled = true
 		return nil
 	}
@@ -77,7 +79,7 @@ func TestRunGatewayEReturnsStartupConfigErrorWhenTTYUnavailable(t *testing.T) {
 	gatewayStartupConfigError = func() error {
 		return fmt.Errorf("no forebrain config found in /tmp/home; run `forebrain gateway start` in a TTY to create one")
 	}
-	gatewayRunBlocking = func(context.Context) error {
+	gatewayRunBlocking = func(context.Context, gateway.ServeOptions) error {
 		t.Fatal("gateway serve should not start when setup is still missing")
 		return nil
 	}
@@ -111,7 +113,7 @@ func TestRunGatewayEUsesStartupConfigErrorForIncompleteConfig(t *testing.T) {
 		return nil
 	}
 	gatewayStartupConfigError = func() error { return fmt.Errorf("missing env file: /tmp/home/.env") }
-	gatewayRunBlocking = func(context.Context) error {
+	gatewayRunBlocking = func(context.Context, gateway.ServeOptions) error {
 		t.Fatal("gateway serve should not start when config is incomplete")
 		return nil
 	}
@@ -146,7 +148,7 @@ func TestRunGatewayEStopsWhenOnboardCancelled(t *testing.T) {
 		t.Fatal("startup config check should not run after onboard cancellation")
 		return nil
 	}
-	gatewayRunBlocking = func(context.Context) error {
+	gatewayRunBlocking = func(context.Context, gateway.ServeOptions) error {
 		t.Fatal("gateway serve should not start after onboard cancellation")
 		return nil
 	}
@@ -157,5 +159,47 @@ func TestRunGatewayEStopsWhenOnboardCancelled(t *testing.T) {
 	err := runGatewayE(cmd, nil)
 	if err == nil || err != tui.ErrCancelled {
 		t.Fatalf("expected ErrCancelled, got %v", err)
+	}
+}
+
+func TestRunGatewayPassesStdoutAndVersion(t *testing.T) {
+	prevNeeds := gatewayNeedsFirstSetup
+	prevStartupError := gatewayStartupConfigError
+	prevTTY := gatewayIsTerminal
+	prevRun := gatewayRunBlocking
+	t.Cleanup(func() {
+		gatewayNeedsFirstSetup = prevNeeds
+		gatewayStartupConfigError = prevStartupError
+		gatewayIsTerminal = prevTTY
+		gatewayRunBlocking = prevRun
+	})
+
+	gatewayNeedsFirstSetup = func() (bool, error) { return false, nil }
+	gatewayStartupConfigError = func() error { return nil }
+	gatewayIsTerminal = func(*os.File) bool { return false }
+
+	var got gateway.ServeOptions
+	var gotOutIsCmdOut bool
+	gatewayRunBlocking = func(_ context.Context, opts gateway.ServeOptions) error {
+		got = opts
+		return nil
+	}
+
+	cmd := &cobra.Command{Use: "start"}
+	cmdOut := &strings.Builder{}
+	cmd.SetOut(cmdOut)
+	if err := runGatewayE(cmd, nil); err != nil {
+		t.Fatalf("runGatewayE error: %v", err)
+	}
+	gotOutIsCmdOut = got.Out == io.Writer(cmdOut)
+
+	if !gotOutIsCmdOut {
+		t.Fatal("opts.Out must be the command's stdout writer")
+	}
+	if got.Version != home.Version {
+		t.Fatalf("opts.Version = %q, want %q", got.Version, home.Version)
+	}
+	if got.SignInLink {
+		t.Fatal("opts.SignInLink must be false when stdout is not a terminal")
 	}
 }

@@ -117,10 +117,10 @@ function onToggle(event: Event) {
 
 <style scoped>
 .compaction-card {
-  --compaction-accent: #0ea5e9;
+  --compaction-accent: var(--forebrain-brand-1);
   border: 1px solid var(--forebrain-divider);
   border-radius: 12px;
-  background: var(--forebrain-surface-soft);
+  background: var(--forebrain-surface);
   padding: 10px 14px;
   animation: compaction-in 0.24s ease-out;
 }
@@ -133,7 +133,7 @@ function onToggle(event: Event) {
 }
 
 .compaction-card.is-failed {
-  --compaction-accent: #e5484d;
+  --compaction-accent: var(--forebrain-danger);
   border-color: color-mix(in srgb, var(--compaction-accent) 40%, var(--forebrain-divider));
 }
 
@@ -196,7 +196,7 @@ function onToggle(event: Event) {
 }
 
 .is-done .compaction-icon {
-  color: #16a34a;
+  color: var(--forebrain-success);
 }
 
 .is-failed .compaction-icon {
@@ -249,17 +249,17 @@ details[open] .compaction-chevron {
   height: 8px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--compaction-accent) 13%, var(--forebrain-surface));
-  box-shadow: inset 0 1px 2px rgba(9, 52, 74, 0.12);
+  box-shadow: inset 0 1px 2px var(--forebrain-shadow-pop);
   overflow: hidden;
 }
 
-/* The fill is the whole gradient, revealed from the left as the compaction
-   advances, so each colour stays where it sits on the bar. */
+/* The fill is a flat brand bar, revealed from the left as the compaction
+   advances. */
 .compaction-fill {
   position: absolute;
   inset: 0;
   border-radius: 999px;
-  background: linear-gradient(90deg, #1d4ed8 0%, #2563eb 22%, #0ea5e9 58%, #22d3ee 100%);
+  background: var(--forebrain-brand-1);
   transition: clip-path 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -269,7 +269,7 @@ details[open] .compaction-chevron {
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.55) 50%, transparent 80%);
+  background: transparent;
   transform: translateX(-100%);
   animation: compaction-sweep 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
@@ -309,7 +309,7 @@ details[open] .compaction-chevron {
   margin-top: 10px;
   font-size: 12px;
   line-height: 1.5;
-  color: #b7791f;
+  color: var(--forebrain-warning);
 }
 
 .compaction-error {

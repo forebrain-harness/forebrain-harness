@@ -374,7 +374,7 @@ describe('forebrain gateway runtime', () => {
     })
   })
 
-  it('builds browser chat websocket urls with token when present', () => {
+  it('builds browser chat websocket urls without credentials in the url', () => {
     const originalWindow = globalThis.window
     Object.defineProperty(globalThis, 'window', {
       value: {
@@ -386,8 +386,7 @@ describe('forebrain gateway runtime', () => {
       configurable: true,
     })
     try {
-      expect(buildBrowserForebrainGatewayChatWsUrl('abc')).toBe('wss://example.com/ws/chat?token=abc')
-      expect(buildBrowserForebrainGatewayChatWsUrl('')).toBe('wss://example.com/ws/chat')
+      expect(buildBrowserForebrainGatewayChatWsUrl()).toBe('wss://example.com/ws/chat')
     } finally {
       Object.defineProperty(globalThis, 'window', {
         value: originalWindow,

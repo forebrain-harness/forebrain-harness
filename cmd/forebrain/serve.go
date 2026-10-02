@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/gateway"
+	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tui"
 	"github.com/spf13/cobra"
@@ -25,7 +26,13 @@ func runGatewayE(cmd *cobra.Command, _ []string) error {
 	if err := ensureGatewayStartSetup(ctx, cmd); err != nil {
 		return err
 	}
-	return gatewayRunBlocking(ctx)
+	// The sign-in link carries the gateway token, so it is printed only when
+	// stdout is a terminal a human is reading — never into captured logs.
+	return gatewayRunBlocking(ctx, gateway.ServeOptions{
+		Out:        cmd.OutOrStdout(),
+		Version:    home.Version,
+		SignInLink: gatewayIsTerminal(os.Stdout),
+	})
 }
 
 func ensureGatewayStartSetup(ctx context.Context, cmd *cobra.Command) error {
