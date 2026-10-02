@@ -35,7 +35,7 @@ func TestPlanProgressOf(t *testing.T) {
 				{ID: "3", Content: "done thing", Status: "completed"},
 			},
 			fallback: "summary line",
-			want:      PlanProgress{Active: "short"},
+			want:     PlanProgress{Active: "short"},
 		},
 		{
 			name: "no in-progress item falls back to the payload summary",
@@ -43,13 +43,13 @@ func TestPlanProgressOf(t *testing.T) {
 				{ID: "1", Content: "done thing", Status: "completed"},
 			},
 			fallback: "  summary line  ",
-			want:      PlanProgress{Active: "summary line"},
+			want:     PlanProgress{Active: "summary line"},
 		},
 		{
-			name:      "blank items and blank fallback yield empty active",
-			items:     []PlanUpdateItem{{ID: "1", Status: "completed"}},
-			fallback:  "   ",
-			want:      PlanProgress{},
+			name:     "blank items and blank fallback yield empty active",
+			items:    []PlanUpdateItem{{ID: "1", Status: "completed"}},
+			fallback: "   ",
+			want:     PlanProgress{},
 		},
 		{
 			name:      "negative counters clamp to zero",
