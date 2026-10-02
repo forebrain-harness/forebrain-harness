@@ -1,0 +1,1 @@
+import{_ as o}from"./CronView.vue_vue_type_script_setup_true_lang-CrrBcVVY.js";import{d as t,e as c,C as r,s}from"./index-BV8ZBu7F.js";const a={class:"mx-auto max-w-4xl"},d=t({__name:"ProjectCron",props:{project:{},projectId:{}},setup(e){return(p,n)=>(s(),c("div",a,[r(o,{"project-id":e.projectId,scope:"project"},null,8,["project-id"])]))}});export{d as default};

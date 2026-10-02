@@ -1,0 +1,1 @@
+import{s as o,e as _}from"./index-BV8ZBu7F.js";var s=(e,r)=>{const t=e.__vccOpts||e;for(const[a,n]of r)t[a]=n;return t};const c={},d={"aria-hidden":"true","data-stream-markdown":"spin"};function i(e,r){return o(),_("div",d)}var l=s(c,[["render",i]]);export{l as s};
