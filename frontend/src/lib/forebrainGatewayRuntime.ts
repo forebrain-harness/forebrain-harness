@@ -1,8 +1,6 @@
 import { toCamelCase } from './case'
 import { parseAutoContinue, type AutoContinueState } from './autoContinue'
 
-const DEFAULT_BOT_MENTIONS = ['@forebrain', '@Forebrain']
-
 // Must match pkg/gateway/ws_protocol.go. New clients declare this on every
 // mutating/subscription operation; servers still accept an omitted version as
 // the legacy rollout path.
@@ -601,57 +599,13 @@ export function parseTokenBudgetPayload(
   return Object.values(budget).some((v) => v !== undefined) ? budget : undefined
 }
 
-export function parseBotMentionsFromEnv(raw: string | undefined): string[] {
-  if (!raw?.trim()) return [...DEFAULT_BOT_MENTIONS]
-  const parts = raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-  return parts.length > 0 ? parts : [...DEFAULT_BOT_MENTIONS]
-}
-
-export function getForebrainGatewayRuntimeConfig() {
-  const wsBase = (import.meta.env.VITE_FOREBRAIN_GATEWAY_WS as string | undefined)?.trim()
-  const token = (import.meta.env.VITE_FOREBRAIN_GATEWAY_TOKEN as string | undefined)?.trim()
-  const botMentions = parseBotMentionsFromEnv(
-    import.meta.env.VITE_FOREBRAIN_BOT_MENTIONS as string | undefined,
-  )
-  const timeoutRaw = (import.meta.env.VITE_FOREBRAIN_GATEWAY_TIMEOUT_MS as string | undefined)?.trim()
-  const timeoutMs =
-    timeoutRaw && /^[0-9]+$/.test(timeoutRaw)
-      ? Math.min(Math.max(Number.parseInt(timeoutRaw, 10), 10_000), 3_600_000)
-      : 600_000
-  return { wsBase, token, botMentions, timeoutMs }
-}
-
-export function buildForebrainGatewayWsUrl(wsBase: string, token: string, clientId: string): string {
-  const qs = new URLSearchParams({ token, clientId })
-  return `${wsBase}?${qs.toString()}`
-}
-
-export function buildBrowserForebrainGatewayChatWsUrl(token?: string): string {
+/**
+ * The chat WebSocket lives on the same host the page was served from and
+ * authenticates with the session cookie, which the browser sends on the
+ * handshake — no credentials belong in the URL.
+ */
+export function buildBrowserForebrainGatewayChatWsUrl(): string {
   if (typeof window === 'undefined') return 'ws://127.0.0.1:8080/ws/chat'
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = new URL(`${protocol}//${window.location.host}/ws/chat`)
-  const normalizedToken = token?.trim()
-  if (normalizedToken) {
-    url.searchParams.set('token', normalizedToken)
-  }
-  return url.toString()
-}
-
-export function textTriggersBotMention(text: string, mentions: string[]): boolean {
-  const h = text.toLowerCase()
-  return mentions.some((m) => m.trim() && h.includes(m.trim().toLowerCase()))
-}
-
-export function primaryBotMentionHint(mentions: string[]): string {
-  const first = mentions.map((m) => m.trim()).find(Boolean)
-  return first ?? '@forebrain'
-}
-
-export function getForebrainAdminBaseUrl(): string {
-  const raw = (import.meta.env.VITE_FOREBRAIN_ADMIN_URL as string | undefined)?.trim()
-  if (raw) return raw.replace(/\/+$/, '')
-  return 'http://127.0.0.1:18789'
+  return new URL(`${protocol}//${window.location.host}/ws/chat`).toString()
 }

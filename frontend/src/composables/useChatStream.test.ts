@@ -13,6 +13,7 @@ import {
   computeWorkedDurationMs,
   formatRuntimeStatusLabel,
   formatWorkedDurationLabel,
+  workedLineText,
   skillCardTitle,
   toolStepFromPayload,
   toolStepFromRow,
@@ -208,15 +209,24 @@ describe('useChatStream helpers', () => {
   })
 
   it('closes every run with its worked line, however short', () => {
-    expect(formatWorkedDurationLabel(549000)).toBe('Worked for 9m 09s')
-    expect(formatWorkedDurationLabel(42000)).toBe('Worked for 42s')
-    expect(formatWorkedDurationLabel(300)).toBe('Worked for 1s')
-    expect(formatWorkedDurationLabel(0)).toBe('Worked for 0s')
-    expect(formatWorkedDurationLabel(61999)).toBe('Worked for 1m 01s')
-    expect(formatWorkedDurationLabel(3723000)).toBe('Worked for 1h 02m 03s')
-    expect(formatWorkedDurationLabel(undefined)).toBe('')
+    expect(workedLineText(formatWorkedDurationLabel(549000))).toBe('Worked for 9m 09s')
+    expect(workedLineText(formatWorkedDurationLabel(42000))).toBe('Worked for 42s')
+    expect(workedLineText(formatWorkedDurationLabel(300))).toBe('Worked for 1s')
+    expect(workedLineText(formatWorkedDurationLabel(0))).toBe('Worked for 0s')
+    expect(workedLineText(formatWorkedDurationLabel(61999))).toBe('Worked for 1m 01s')
+    expect(workedLineText(formatWorkedDurationLabel(3723000))).toBe('Worked for 1h 02m 03s')
+    expect(workedLineText(formatWorkedDurationLabel(undefined))).toBe('')
     const finished = new Date(2026, 8, 25, 15, 4, 0)
-    expect(formatWorkedDurationLabel(1200, undefined, finished.toISOString())).toBe('Worked for 1s · 15:04')
+    expect(workedLineText(formatWorkedDurationLabel(1200, undefined, finished.toISOString()))).toBe('Worked for 1s · 15:04')
+  })
+
+  it('carries the checklist progress the engine reported, and drops empty checklists', () => {
+    const finished = new Date(2026, 8, 25, 15, 4, 0)
+    const withPlan = formatWorkedDurationLabel(72_000, undefined, finished.toISOString(), { done: 3, total: 5, active: 'short task' })
+    expect(withPlan).toEqual({ label: 'Worked for 1m 12s', plan: { done: 3, total: 5, active: 'short task' }, time: '15:04' })
+    expect(workedLineText(withPlan)).toBe('Worked for 1m 12s · 3/5 · short task · 15:04')
+    // A checklist of zero total is no checklist at all.
+    expect(formatWorkedDurationLabel(1000, undefined, undefined, { done: 0, total: 0 }).plan).toBeUndefined()
   })
 
   it('formats active runtime labels with interrupt hints', () => {

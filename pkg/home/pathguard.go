@@ -42,7 +42,10 @@ func ValidateArchiveRelPath(p string) error {
 	if strings.HasPrefix(raw, "/") {
 		return ErrPathNotAllowed
 	}
-	if ContainsTraversal(p) {
+	// The raw entry name carries the traversal evidence: normalization
+	// resolves ".." segments against each other ("../.." cleans to ""),
+	// so a cleaned path would hide exactly the escape being checked for.
+	if ContainsTraversal(raw) {
 		return ErrPathNotAllowed
 	}
 	return nil

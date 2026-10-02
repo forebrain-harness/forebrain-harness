@@ -3,7 +3,7 @@
     <div class="mx-auto w-full max-w-3xl">
       <header class="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 class="font-serif text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('channels.title') }}</h1>
+          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('channels.title') }}</h1>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('channels.description') }}</p>
         </div>
         <div class="flex gap-2">
@@ -12,7 +12,7 @@
         </div>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[rgba(160,70,70,0.36)] bg-[rgba(160,70,70,0.08)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
       <p v-if="notice" class="mb-4 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
       <p class="mb-3 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('channels.secretNotice') }}</p>
 

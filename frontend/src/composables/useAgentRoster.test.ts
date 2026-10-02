@@ -74,7 +74,7 @@ describe('useAgentRoster', () => {
       label: 'review',
       status: 'running',
       sessionId: 'session-1',
-    })).toEqual({ path: '/', query: { session: 'session-1', live: '1' } })
+    })).toEqual({ path: '/', query: { session: 'session-1' } })
 
     expect(agentRosterViewTarget({
       id: 'child-1',

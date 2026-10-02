@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forebrain-harness/forebrain-harness/pkg/config"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	llmopenai "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
@@ -24,7 +24,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
-	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
@@ -194,7 +194,7 @@ func cronTestServer(t *testing.T) *Server {
 		t.Fatalf("OpenStateForTest: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	cfg := &config.Root{}
+	cfg := &appcfg.Root{}
 	return &Server{
 		Home:  home,
 		RunRT: &state.RunStore{DB: db},
@@ -399,7 +399,7 @@ func TestHeartbeatRoundTripsThroughTheAPI(t *testing.T) {
 }
 
 // The configuration editor must never hand a secret back to the browser, and
-// must refuse text that would not load as a config.
+// must refuse text that would not load as a appcfg.
 func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
 	s := cronTestServer(t)
 	path := filepath.Join(s.Home, "forebrain.yaml")
@@ -422,7 +422,7 @@ func TestConfigEndpointRedactsSecretsAndRefusesInvalidText(t *testing.T) {
 	if strings.Contains(got.YAML, "super-secret") {
 		t.Fatal("the editor must not be handed the secret it is not allowed to read")
 	}
-	if !strings.Contains(got.YAML, config.RedactedSecretPlaceholder) {
+	if !strings.Contains(got.YAML, appcfg.RedactedSecretPlaceholder) {
 		t.Fatalf("a set secret must still be visible as set:\n%s", got.YAML)
 	}
 	if got.Path != path {
@@ -470,7 +470,7 @@ func TestHooksEndpointPublishesTheKnownEventsAndTypes(t *testing.T) {
 		t.Fatalf("hooks metadata = %#v", got)
 	}
 	for _, name := range got.Events {
-		if !config.ValidHookEventName(name) {
+		if !appcfg.ValidHookEventName(name) {
 			t.Fatalf("offered event %q is not accepted by the validator", name)
 		}
 	}
@@ -1706,4 +1706,609 @@ func TestCronJobBindsOnlyToThisAgentsProject(t *testing.T) {
 		"schedule": "every 1h", "prompt": "report", "project_id": mine.ID,
 	}, s.handleCronJobs)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func rulesServer(t *testing.T) (*Server, string, string) {
+	t.Helper()
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600))
+	cfg := &appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {Primary: true}}
+	env := &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}}
+	env.ConfigPath = cfgPath
+	return &Server{Home: home, Env: env}, home, workspace
+}
+
+func TestAgentRuleFilesListAndWhitelist(t *testing.T) {
+	s, _, workspace := rulesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("hello"), 0o644))
+
+	rr := httptest.NewRecorder()
+	s.handleAgentRuleFiles(rr, httptest.NewRequest(http.MethodGet, "/api/rules/agent", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	require.Contains(t, body, `"name":"AGENTS.md","exists":true`)
+	require.Contains(t, body, `"name":"USER.md","exists":false`)
+
+	rr = httptest.NewRecorder()
+	req := withParamName(httptest.NewRequest(http.MethodGet, "/api/rules/agent/x", nil), "../../etc/passwd")
+	s.handleAgentRuleFile(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "unsupported rule file")
+}
+
+func TestAgentRuleFilePutGetRoundTrip(t *testing.T) {
+	s, _, workspace := rulesServer(t)
+
+	rr := httptest.NewRecorder()
+	req := withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/USER.md", strings.NewReader("be kind")), "USER.md")
+	s.handleAgentRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	req = withParamName(httptest.NewRequest(http.MethodGet, "/api/rules/agent/USER.md", nil), "USER.md")
+	s.handleAgentRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Equal(t, "be kind", rr.Body.String())
+
+	raw, err := os.ReadFile(filepath.Join(workspace, "USER.md"))
+	require.NoError(t, err)
+	require.Equal(t, "be kind", string(raw))
+}
+
+func TestAgentRuleFileBudgetWarning(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	big := bytes.Repeat([]byte("x"), assemblyBudgetBytes+1)
+	rr := httptest.NewRecorder()
+	req := withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/SOUL.md", bytes.NewReader(big)), "SOUL.md")
+	s.handleAgentRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "exceeds_assembly_budget")
+
+	rr = httptest.NewRecorder()
+	req = withParamName(httptest.NewRequest(http.MethodPut, "/api/rules/agent/SOUL.md", strings.NewReader("short")), "SOUL.md")
+	s.handleAgentRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NotContains(t, rr.Body.String(), "warning")
+}
+
+func TestProjectRuleDirValidationOnly(t *testing.T) {
+	// Direct path validation without a project store: the dir gate is the
+	// security boundary under test.
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0o755))
+	for _, dir := range []string{"../", "docs/nested", "missing"} {
+		_, ok := projectRulePath(root, dir)
+		require.False(t, ok, "dir=%s should be rejected", dir)
+	}
+	full, ok := projectRulePath(root, "docs")
+	require.True(t, ok)
+	require.Equal(t, filepath.Join(root, "docs", "FOREBRAIN.md"), full)
+	full, ok = projectRulePath(root, "")
+	require.True(t, ok)
+	require.Equal(t, filepath.Join(root, "FOREBRAIN.md"), full)
+}
+
+func TestApprovalDefaultGetPut(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	// The Default preset is on-request + workspace-write; a config carrying
+	// exactly that pair matches it, anything else (including a blank config)
+	// reads as custom.
+	s.Env.Deps.AppCfg.ApprovalPolicy = appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)
+	s.Env.Deps.AppCfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
+
+	rr := httptest.NewRecorder()
+	s.handleApprovalDefaultGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/approval-default", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"current":"auto"`)
+
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"full-access"}`))
+	s.handleApprovalDefaultPut(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"current":"full-access"`)
+
+	persisted, err := s.persistedConfig()
+	require.NoError(t, err)
+	require.Equal(t, appcfg.ApprovalPolicyNever, persisted.ApprovalPolicy.Mode)
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, persisted.SandboxMode)
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/api/permissions/approval-default", strings.NewReader(`{"preset":"yolo"}`))
+	s.handleApprovalDefaultPut(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestSessionPresetValidates(t *testing.T) {
+	s, _, _ := rulesServer(t)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"preset":"read-only"}`))
+	s.handleSessionPreset(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "session_id required")
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"nope"}`))
+	s.handleSessionPreset(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Without a mounted runner the endpoint reports unavailability rather
+	// than pretending to have applied anything.
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"read-only"}`))
+	s.handleSessionPreset(rr, req)
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+}
+
+func withParamName(r *http.Request, value string) *http.Request {
+	return withNamedParam(r, "name", value)
+}
+
+// providersDTOServer builds a server whose active agent owns an empty
+// provider table, with a config file to persist into.
+func providersDTOServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	s, home, _ := rulesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(home, "workspace", "skills"), nil, 0o644|os.ModeDir))
+	return s, home
+}
+
+func providersGet(t *testing.T, s *Server) []map[string]any {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	s.handleProviders(rr, httptest.NewRequest(http.MethodGet, "/api/providers", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var out struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	return out.Providers
+}
+
+func providersPut(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/providers", strings.NewReader(body))
+	s.handleProviders(rr, req)
+	return rr
+}
+
+func TestProvidersDTORoundTripStoresKeyAsEnvReference(t *testing.T) {
+	s, home := providersDTOServer(t)
+
+	created := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4","deepseek-v4-flash"],"base_url":"https://api.deepseek.com","api_key_plain":"sk-live-plain-9876"}
+	]}`)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+
+	// The yaml keeps only the reference; the plaintext lives in .env with
+	// owner-only permissions.
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(cfgRaw), "${DEEPSEEK_API_KEY}")
+	require.NotContains(t, string(cfgRaw), "sk-live-plain-9876")
+	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
+	require.NoError(t, err)
+	require.Contains(t, string(envRaw), "DEEPSEEK_API_KEY=")
+	require.Contains(t, string(envRaw), "sk-live-plain-9876")
+	info, err := os.Stat(filepath.Join(home, ".env"))
+	require.NoError(t, err)
+	require.Zero(t, info.Mode().Perm()&0o077, ".env must be 0600: %v", info.Mode())
+
+	// The GET answers set+hint and no key material of any kind.
+	rows := providersGet(t, s)
+	require.Len(t, rows, 1)
+	require.Equal(t, "deepseek", rows[0]["provider"])
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "9876", rows[0]["api_key_hint"])
+	models := rows[0]["models"].([]any)
+	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, models)
+	raw, _ := json.Marshal(rows)
+	require.NotContains(t, string(raw), "sk-live-plain-9876")
+	require.NotContains(t, string(raw), "[REDACTED]")
+}
+
+// The config file holds one entry per model (the engine's expanded form);
+// adjacent same-signature entries fold back into one editable row.
+func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
+	s, home := providersDTOServer(t)
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	seed := `agents:
+  definitions:
+    main:
+      primary: true
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-v4
+        api_key: ${DEEPSEEK_API_KEY}
+      - provider: deepseek
+        model: deepseek-v4-flash
+        api_key: ${DEEPSEEK_API_KEY}
+      - provider: openai
+        model: gpt-test
+`
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 2)
+	require.Equal(t, "deepseek", rows[0]["provider"])
+	require.Equal(t, []any{"deepseek-v4", "deepseek-v4-flash"}, rows[0]["models"].([]any))
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "openai", rows[1]["provider"])
+
+	// An interleaved order is a fallback order, not one service: it stays
+	// three rows.
+	interleaved := `agents:
+  definitions:
+    main:
+      primary: true
+      llm_providers:
+      - provider: deepseek
+        model: deepseek-v4
+      - provider: openai
+        model: gpt-test
+      - provider: deepseek
+        model: deepseek-v4-flash
+`
+	require.NoError(t, os.WriteFile(cfgPath, []byte(interleaved), 0o600))
+	require.Len(t, providersGet(t, s), 3)
+}
+
+func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
+	s, home := providersDTOServer(t)
+	created := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4"],"api_key_plain":"sk-live-keep-4321"}
+	]}`)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+
+	envBefore, err := os.ReadFile(filepath.Join(home, ".env"))
+	require.NoError(t, err)
+
+	// A PUT that touches only the model list carries no key fields: the
+	// stored key and the .env entry are exactly what they were.
+	updated := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["deepseek-v4","deepseek-r2"]}
+	]}`)
+	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
+	rows := providersGet(t, s)
+	require.Len(t, rows, 1)
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "4321", rows[0]["api_key_hint"])
+	require.Equal(t, []any{"deepseek-v4", "deepseek-r2"}, rows[0]["models"].([]any))
+
+	envAfter, err := os.ReadFile(filepath.Join(home, ".env"))
+	require.NoError(t, err)
+	require.Equal(t, string(envBefore), string(envAfter))
+}
+
+func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
+	s, home := providersDTOServer(t)
+	require.Equal(t, http.StatusOK, providersPut(t, s,
+		`{"providers":[{"provider":"deepseek","models":["m"],"api_key_plain":"sk-old-aaaa"}]}`).Code)
+
+	rotated := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["m"],"api_key_plain":"sk-new-bbbb"}
+	]}`)
+	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
+	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
+	require.NoError(t, err)
+	require.Contains(t, string(envRaw), "sk-new-bbbb")
+	require.NotContains(t, string(envRaw), "sk-old-aaaa")
+	rows := providersGet(t, s)
+	require.Equal(t, "bbbb", rows[0]["api_key_hint"])
+}
+
+// A short key hides entirely: the hint must not be the whole key.
+func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
+	s, _ := providersDTOServer(t)
+	require.Equal(t, http.StatusOK, providersPut(t, s,
+		`{"providers":[{"provider":"deepseek","models":["m"],"api_key_plain":"ab"}]}`).Code)
+	rows := providersGet(t, s)
+	require.Equal(t, true, rows[0]["api_key_set"])
+	require.Equal(t, "••••", rows[0]["api_key_hint"])
+}
+
+// An explicit api_key value (a pasted ${ENV} reference) passes through as-is.
+func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
+	s, home := providersDTOServer(t)
+	require.Equal(t, http.StatusOK, providersPut(t, s,
+		`{"providers":[{"provider":"custom","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.Contains(t, string(cfgRaw), "${MY_CUSTOM_KEY}")
+	require.NoFileExists(t, filepath.Join(home, ".env"))
+}
+
+// The expanded per-model entries the DTO writes are what the engine itself
+// expands — no yaml model list, so nothing is lost on the next save.
+func TestProvidersDTOPersistedShapeIsEngineExpanded(t *testing.T) {
+	s, home := providersDTOServer(t)
+	require.Equal(t, http.StatusOK, providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","models":["a","b"],"api_key_plain":"sk-x-1234"}
+	]}`).Code)
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	body := string(cfgRaw)
+	require.Contains(t, body, "model: a")
+	require.Contains(t, body, "model: b")
+	require.NotContains(t, body, "- a")
+}
+
+// workspaceTreeServer builds a Server whose active workspace is one temp dir.
+func workspaceTreeServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	home := t.TempDir()
+	ws := filepath.Join(home, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	cfg := &appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
+		"main": {Primary: true},
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"main"}`+"\n"), 0o600))
+	return &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}, ws
+}
+
+func getWorkspaceTree(t *testing.T, s *Server, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/tree"+query, nil)
+	s.handleWorkspaceTree(rr, req)
+	return rr
+}
+
+func TestWorkspaceTreeListsOneLevelDirectoriesFirst(t *testing.T) {
+	s, ws := workspaceTreeServer(t)
+	for _, name := range []string{"b.txt", "A.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte("x"), 0o644))
+	}
+	for _, name := range []string{"zdir", "adir", ".git"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(ws, name), 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "adir", "nested.txt"), []byte("x"), 0o644))
+
+	rr := getWorkspaceTree(t, s, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	body := rr.Body.String()
+	// Directories first, case-insensitive name order, .git hidden, one level.
+	require.Contains(t, body, `"name":"adir"`)
+	require.Contains(t, body, `"name":"zdir"`)
+	require.Contains(t, body, `"name":"A.txt"`)
+	require.Contains(t, body, `"name":"b.txt"`)
+	require.NotContains(t, body, ".git")
+	require.NotContains(t, body, "nested.txt")
+	adirAt := indexOf(t, body, `"name":"adir"`)
+	zdirAt := indexOf(t, body, `"name":"zdir"`)
+	aTxtAt := indexOf(t, body, `"name":"A.txt"`)
+	bTxtAt := indexOf(t, body, `"name":"b.txt"`)
+	require.Less(t, adirAt, zdirAt)
+	require.Less(t, zdirAt, aTxtAt)
+	require.Less(t, aTxtAt, bTxtAt)
+}
+
+func TestWorkspaceTreeRejectsPathsOutsideWorkspace(t *testing.T) {
+	s, _ := workspaceTreeServer(t)
+	rr := getWorkspaceTree(t, s, "?path=../")
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "path is outside the workspace")
+}
+
+func TestWorkspaceTreeHidesSymlinksLeavingWorkspace(t *testing.T) {
+
+	s, ws := workspaceTreeServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "real.txt"), []byte("x"), 0o644))
+	outside := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "sub"), 0o755))
+	require.NoError(t, os.Symlink(outside, filepath.Join(ws, "out")))
+	// A link whose target is inside the workspace stays listed, following the
+	// target's type.
+	require.NoError(t, os.Symlink(filepath.Join(ws, "real.txt"), filepath.Join(ws, "in")))
+
+	rr := getWorkspaceTree(t, s, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NotContains(t, rr.Body.String(), `"name":"out"`)
+	require.Contains(t, rr.Body.String(), `"name":"in"`)
+
+	rr = getWorkspaceTree(t, s, "?path=out")
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	s2, ws2 := workspaceTreeServer(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(ws2, "target"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(ws2, "target"), filepath.Join(ws2, "in")))
+	rr = getWorkspaceTree(t, s2, "")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"name":"in"`)
+	require.Contains(t, rr.Body.String(), `"is_dir":true`)
+}
+
+func TestWorkspaceTreeMissingAndFilePaths(t *testing.T) {
+	s, ws := workspaceTreeServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "A.txt"), []byte("x"), 0o644))
+
+	rr := getWorkspaceTree(t, s, "?path=missing")
+	require.Equal(t, http.StatusNotFound, rr.Code)
+
+	rr = getWorkspaceTree(t, s, "?path=A.txt")
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+	require.Contains(t, rr.Body.String(), "not a directory")
+}
+
+func TestWorkspaceTreeEmptyDirectory(t *testing.T) {
+	s, ws := workspaceTreeServer(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, "empty"), 0o755))
+	rr := getWorkspaceTree(t, s, "?path=empty")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"records":[]`)
+}
+
+func TestWorkspaceSnippetRejectsSymlinkEscape(t *testing.T) {
+
+	s, ws := workspaceTreeServer(t)
+	secret := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(secret, "secret.txt"), []byte("secret"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join(secret, "secret.txt"), filepath.Join(ws, "leak.txt")))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "..notes.md"), []byte("dots are a legal name"), 0o644))
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?path=leak.txt", nil)
+	s.handleWorkspaceSnippet(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "path is outside the workspace")
+	require.NotContains(t, rr.Body.String(), "secret")
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?path=..notes.md", nil)
+	s.handleWorkspaceSnippet(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "dots are a legal name")
+}
+
+func indexOf(t *testing.T, haystack, needle string) int {
+	t.Helper()
+	idx := strings.Index(haystack, needle)
+	require.GreaterOrEqual(t, idx, 0, "expected %q in %q", needle, haystack)
+	return idx
+}
+
+func cronPreviewRequest(t *testing.T, s *Server, schedule string) map[string]any {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/cron/preview", strings.NewReader(`{"schedule":`+quoteJSON(schedule)+`}`))
+	s.handleCronPreview(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	return out
+}
+
+func quoteJSON(v string) string {
+	raw, _ := json.Marshal(v)
+	return string(raw)
+}
+
+func TestCronPreviewEveryInterval(t *testing.T) {
+	s := cronTestServer(t)
+	out := cronPreviewRequest(t, s, "every 30m")
+	require.Equal(t, true, out["valid"])
+	require.Equal(t, "every", out["kind"])
+	require.Equal(t, "every 30m", out["raw"])
+	next, ok := out["next"].([]any)
+	require.True(t, ok)
+	require.Len(t, next, 3)
+	t1, err1 := time.Parse(time.RFC3339, next[0].(string))
+	t2, err2 := time.Parse(time.RFC3339, next[1].(string))
+	t3, err3 := time.Parse(time.RFC3339, next[2].(string))
+	require.NoError(t, err1)
+	require.NoError(t, err2)
+	require.NoError(t, err3)
+	require.True(t, t2.Sub(t1) == 30*time.Minute && t3.Sub(t2) == 30*time.Minute, "interval times must step by the schedule: %v", next)
+	require.True(t, t1.After(time.Now().Add(29*time.Minute)), "first fire must be ahead: %v", next)
+}
+
+func TestCronPreviewOnceRelativeHasOneFire(t *testing.T) {
+	s := cronTestServer(t)
+	out := cronPreviewRequest(t, s, "in 30m")
+	require.Equal(t, true, out["valid"])
+	require.Equal(t, "once", out["kind"])
+	next := out["next"].([]any)
+	require.Len(t, next, 1)
+	at, err := time.Parse(time.RFC3339, next[0].(string))
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(30*time.Minute), at, 2*time.Minute)
+}
+
+func TestCronPreviewCalendarKeepsRawAndKindCron(t *testing.T) {
+	s := cronTestServer(t)
+	out := cronPreviewRequest(t, s, "daily at 7am")
+	require.Equal(t, true, out["valid"])
+	// The plain-language forms compile to a cron evaluation; the stored text
+	// stays exactly what the user wrote.
+	require.Equal(t, "cron", out["kind"])
+	require.Equal(t, "daily at 7am", out["raw"])
+	next := out["next"].([]any)
+	require.Len(t, next, 3)
+	at, err := time.Parse(time.RFC3339, next[0].(string))
+	require.NoError(t, err)
+	require.Equal(t, 7, at.Hour())
+	require.Equal(t, 0, at.Minute())
+}
+
+func TestCronPreviewCronExpressionAndMultiDayCron(t *testing.T) {
+	s := cronTestServer(t)
+	out := cronPreviewRequest(t, s, "0 9 * * 1,3,5")
+	require.Equal(t, true, out["valid"])
+	require.Equal(t, "cron", out["kind"])
+	next := out["next"].([]any)
+	require.Len(t, next, 3)
+	// Monday, Wednesday, Friday only.
+	for _, raw := range next {
+		at, err := time.Parse(time.RFC3339, raw.(string))
+		require.NoError(t, err)
+		weekday := at.Weekday()
+		require.Contains(t, []time.Weekday{time.Monday, time.Wednesday, time.Friday}, weekday, "fire day %v", at)
+	}
+}
+
+func TestCronPreviewInvalidScheduleAnswersEngineMessage(t *testing.T) {
+	s := cronTestServer(t)
+	out := cronPreviewRequest(t, s, "whenever")
+	require.Equal(t, false, out["valid"])
+	require.NotEmpty(t, out["error"], "the engine's own message is what the builder shows")
+
+	// Below the engine's one-minute floor the preview says so too.
+	out = cronPreviewRequest(t, s, "every 30s")
+	require.Equal(t, false, out["valid"])
+	require.Contains(t, out["error"], "minimum")
+
+	// An empty schedule is an invalid preview, not a transport error.
+	out = cronPreviewRequest(t, s, "  ")
+	require.Equal(t, false, out["valid"])
+}
+
+// The agent page lists agent-wide jobs only; a project tab lists its own. The
+// two listings must never mix.
+func TestCronJobsListSplitsByProject(t *testing.T) {
+	s := cronTestServer(t)
+	db := s.RunRT.DB
+	s.Projects = state.NewProjectStore(db, "main")
+	project, err := s.Projects.Create(context.Background(), state.CreateProjectInput{Name: "cron-e2e", Root: t.TempDir()})
+	require.NoError(t, err)
+
+	created := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+		"name": "agent-wide", "schedule": "every 2h", "prompt": "agent work",
+	}, s.handleCronJobs)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+
+	projectJob := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+		"name": "bound", "schedule": "every 3h", "prompt": "project work", "project_id": project.ID,
+	}, s.handleCronJobs)
+	require.Equal(t, http.StatusOK, projectJob.Code, projectJob.Body.String())
+
+	decode := func(rr *httptest.ResponseRecorder) []state.CronJob {
+		var list struct {
+			Records []state.CronJob `json:"records"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
+		return list.Records
+	}
+
+	agentRows := decode(cronRequest(t, s, http.MethodGet, "/api/cron", nil, s.handleCronJobs))
+	require.Len(t, agentRows, 1)
+	require.Equal(t, "agent-wide", agentRows[0].Name)
+	require.Empty(t, agentRows[0].ProjectID)
+
+	projectRows := decode(cronRequest(t, s, http.MethodGet, "/api/cron?project_id="+project.ID, nil, s.handleCronJobs))
+	require.Len(t, projectRows, 1)
+	require.Equal(t, "bound", projectRows[0].Name)
+	require.Equal(t, project.ID, projectRows[0].ProjectID)
+
+	// Someone else's project is not addressable from this agent.
+	other, err := state.NewProjectStore(db, "someone-else").Create(context.Background(), state.CreateProjectInput{Name: "theirs", Root: t.TempDir()})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id="+other.ID, nil, s.handleCronJobs).Code)
+	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id=missing", nil, s.handleCronJobs).Code)
 }

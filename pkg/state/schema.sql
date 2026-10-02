@@ -35,6 +35,10 @@ CREATE TABLE fb_sessions (
   parent_session_id TEXT REFERENCES fb_sessions(id) ON DELETE SET NULL,
   project_id TEXT REFERENCES fb_projects(id) ON DELETE SET NULL,
   origin TEXT NOT NULL DEFAULT 'native' CHECK (origin IN ('native', 'migrated')),
+  -- source marks what a session is FOR ('' = an ordinary conversation,
+  -- 'workshop' = a skill-workshop task): the chat drawer filters on it so a
+  -- workshop task stays out of the conversation list.
+  source TEXT NOT NULL DEFAULT '',
   cwd TEXT NOT NULL DEFAULT '',
   git_branch TEXT NOT NULL DEFAULT '',
   memory_mode TEXT NOT NULL DEFAULT 'disabled',

@@ -122,6 +122,9 @@ export interface ChatMessage {
   memoryCitation?: import('@/lib/api').MemoryCitation
   tokenBudget?: TokenBudgetData
   planUpdates?: PlanUpdateData[]
+  workedPlanDone?: number
+  workedPlanTotal?: number
+  workedPlanActive?: string
   /** A choice a slash command asked for, on its notice. */
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
@@ -556,6 +559,15 @@ function applyTranscriptRowMetadata(
   if (row.runStartedAt) message.runStartedAt = String(row.runStartedAt)
   if (row.runFinishedAt) message.runFinishedAt = String(row.runFinishedAt)
   if (row.workedDurationMs != null) message.workedDurationMs = Number(row.workedDurationMs)
+  // The worked line's checklist facts ride the history row the same way the
+  // live event carried them.
+  const planTotal = Number(row.planTotal)
+  if (Number.isFinite(planTotal) && planTotal > 0) {
+    const planDone = Number(row.planDone)
+    message.workedPlanTotal = planTotal
+    message.workedPlanDone = Number.isFinite(planDone) ? planDone : 0
+    if (typeof row.planActive === 'string' && row.planActive.trim()) message.workedPlanActive = row.planActive
+  }
   if (row.memoryCitation) message.memoryCitation = row.memoryCitation
   if (!row.planJson) return
   try {
@@ -942,8 +954,8 @@ export function emptyContextRuntimeSignals(): ContextRuntimeSignals {
   return { compactVersion: 0, budgetVersion: 0, activeRunId: undefined }
 }
 
-import { getErrorMessage, getToken, forebrainApi, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse } from '@/lib/api'
-import { persistLastSessionId } from '@/composables/useAuth'
+import { getErrorMessage, forebrainApi, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse } from '@/lib/api'
+import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { t as translate, type I18nKey } from '@/locales'
 import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueState } from '@/lib/autoContinue'
@@ -993,6 +1005,13 @@ export interface SendOptions {
    * what was chosen.
    */
   choice?: SlashChoice
+  /**
+   * The skill this turn activates — the workshop's equivalent of the
+   * terminal's slash handoff. Sent on the first message of a task and
+   * validated by the server against the live skill set.
+   */
+  skillName?: string
+  skillPath?: string
 }
 
 /** A message a run handed back as it ended, as the gateway reports it. */
@@ -1215,13 +1234,27 @@ export function computeWorkedDurationMs(startedAt?: string, finishedAt?: string)
   return end - start
 }
 
+/** The checklist facts of a run's worked line, as the engine reported them. */
+export interface WorkedPlanProgress {
+  done: number
+  total: number
+  active?: string
+}
+
 /**
  * The line that closes every run, however long and however it ended — the
- * terminal's "Worked for" line: the duration, a sub-second run counted as 1s,
- * then the minute it finished when that is known.
+ * terminal's "Worked for" line, as segments the template joins with " · ":
+ * the duration (a sub-second run counts as 1s), the checklist progress when
+ * the turn had one, then the minute it finished when that is known.
  */
-export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn = translate, finishedAt?: string): string {
-  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return ''
+export interface WorkedLine {
+  label: string
+  plan?: WorkedPlanProgress
+  time?: string
+}
+
+export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn = translate, finishedAt?: string, plan?: WorkedPlanProgress): WorkedLine {
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return { label: '' }
   let totalSeconds = Math.floor(durationMs / 1000)
   if (totalSeconds === 0 && durationMs > 0) totalSeconds = 1
   const hours = Math.floor(totalSeconds / 3600)
@@ -1232,17 +1265,34 @@ export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn =
     : minutes > 0
       ? `${minutes}m ${String(seconds).padStart(2, '0')}s`
       : `${seconds}s`
-  const label = tr('chat.workedFor', { duration })
   const finished = finishedAt ? new Date(finishedAt) : null
-  if (!finished || Number.isNaN(finished.getTime())) return label
-  return `${label} · ${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`
+  const time = finished && !Number.isNaN(finished.getTime())
+    ? `${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`
+    : undefined
+  return {
+    label: tr('chat.workedFor', { duration }),
+    plan: plan && plan.total > 0 ? plan : undefined,
+    time,
+  }
+}
+
+/** Join a WorkedLine's segments with the worked line's separator. */
+export function workedLineText(line: WorkedLine): string {
+  return [
+    line.label,
+    line.plan ? `${line.plan.done}/${line.plan.total}` : '',
+    line.plan?.active ?? '',
+    line.time ?? '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 /**
  * What a run's end records on its answer, whatever ended it — finished, failed
  * or stopped: when it finished and how long it worked.
  */
-function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStartedAt: string | undefined): Partial<ChatMessage> {
+function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStartedAt: string | undefined, plan?: WorkedPlanProgress): Partial<ChatMessage> {
   const elapsed = Number(elapsedMs)
   const workedDurationMs = elapsedMs != null && Number.isFinite(elapsed) && elapsed >= 0
     ? elapsed
@@ -1250,7 +1300,17 @@ function runEndPatch(finishedAt: string | undefined, elapsedMs: unknown, runStar
   return {
     ...(finishedAt ? { runFinishedAt: finishedAt } : {}),
     ...(workedDurationMs != null ? { workedDurationMs } : {}),
+    ...(plan && plan.total > 0 ? { workedPlanDone: plan.done, workedPlanTotal: plan.total, workedPlanActive: plan.active } : {}),
   }
+}
+
+/** The engine's checklist facts off a run-end payload, unverified shapes dropped. */
+function planProgressOfPayload(payload: Record<string, unknown>): WorkedPlanProgress | undefined {
+  const done = Number(payload.planDone)
+  const total = Number(payload.planTotal)
+  if (!Number.isFinite(total) || total <= 0) return undefined
+  const active = typeof payload.planActive === 'string' && payload.planActive.trim() ? payload.planActive : undefined
+  return { done: Number.isFinite(done) ? done : 0, total, active }
 }
 
 export function formatRuntimeDuration(durationMs: number): string {
@@ -1644,7 +1704,7 @@ export function useChatStream() {
       try { sessionObserver.close() } catch { /* noop */ }
     }
     observerSessionId = target
-    const ws = new WebSocket(buildBrowserForebrainGatewayChatWsUrl(getToken() ?? undefined))
+    const ws = new WebSocket(buildBrowserForebrainGatewayChatWsUrl())
     sessionObserver = ws
     observerReady = new Promise<void>((resolve) => {
       let settled = false
@@ -2509,7 +2569,7 @@ export function useChatStream() {
         }
         updateMessageById(assistantMessageId, (message) => ({
           ...withSettledTurnText(message, finalText, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
         isStreaming.value = false
@@ -2520,7 +2580,7 @@ export function useChatStream() {
         const msg = String(payload.error ?? payload.message ?? 'Request failed')
         updateMessageById(assistantMessageId, (message) => ({
           ...message,
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
         setError(msg, parseProviderErrorDetail(payload.detail))
@@ -2568,7 +2628,7 @@ export function useChatStream() {
         state.completedRunId = String(evt.runId ?? activeRunId ?? '').trim() || state.completedRunId || null
         updateMessageById(assistantMessageId, (message) => ({
           ...withCancelledTurn(message, evt.createdAt),
-          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt),
+          ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
         isStreaming.value = false
@@ -2610,12 +2670,19 @@ export function useChatStream() {
     return true
   }
 
+  // A history snapshot that began before a local send into the same session
+  // must not apply after it, or its pre-send (empty) view erases the turn.
+  const sendEpochs: { epoch: number; session: string | null }[] = []
+  let sendEpoch = 0
+
   async function send(userMessage: string, options?: SendOptions): Promise<void> {
     setError(null)
     // Sending moves the conversation on without the continuation. The runtime
     // supersedes it when the turn starts anyway; cancelling here also covers a
     // send that never becomes a turn, such as a slash command.
     cancelAutoContinue()
+    sendEpoch++
+    sendEpochs.push({ epoch: sendEpoch, session: options?.sessionId ?? sessionId.value ?? null })
     if (isStreaming.value && activeRunId) {
       const disposition = options?.activeInputDisposition === 'queue' ? 'queue' : 'steer'
       if (!await queueActiveRunInput(activeRunId, userMessage, disposition, options?.attached)) {
@@ -2663,7 +2730,7 @@ export function useChatStream() {
       const currentSessionId = options?.sessionId ?? sessionId.value ?? undefined
       const attachmentIds = (options?.attached?.attachments ?? []).map((attachment) => attachment.fileId)
       const mentionImagePaths = options?.attached?.mentionImages ?? []
-      const wsUrl = buildBrowserForebrainGatewayChatWsUrl(getToken() ?? undefined)
+      const wsUrl = buildBrowserForebrainGatewayChatWsUrl()
       const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const handleOp = (op: string, payload: Record<string, unknown>) => {
         if (!op) return
@@ -2862,6 +2929,8 @@ export function useChatStream() {
               attachments: attachmentIds,
               mention_images: mentionImagePaths,
               ...(options?.choice ? { choice: options.choice } : {}),
+              ...(options?.skillName ? { skill_name: options.skillName } : {}),
+              ...(options?.skillPath ? { skill_path: options.skillPath } : {}),
             },
           }))
         }
@@ -3126,6 +3195,7 @@ export function useChatStream() {
 	const target = sid.trim()
 	if (!target) return
     const generation = historyGeneration
+    const snapshotEpoch = sendEpoch
     historyLoadingSession = target
 	if (generation === historyGeneration && sessionId.value === target) {
 	  historyLoading.value = true
@@ -3180,7 +3250,26 @@ export function useChatStream() {
 		throw legacySubagents.error
 	  }
 	  if (generation !== historyGeneration || (sessionId.value != null && sessionId.value !== target)) return
-      messages.value = conversationFromTranscript(Array.isArray(list) ? list : [], shouldRenderPlan)
+      const transcript = conversationFromTranscript(Array.isArray(list) ? list : [], shouldRenderPlan)
+      const streamedIntoTarget = sendEpochs.some((entry) => entry.epoch >= snapshotEpoch && entry.session === target)
+      if (streamedIntoTarget) {
+        // A send into this same session started after the snapshot was
+        // requested: the local view is newer than the snapshot, which
+        // predates the turn's persistence. Drop it; the observer's durable
+        // events already painted the same facts, and the next snapshot (with
+        // the persisted rows) reconciles.
+        return
+      }
+      if (isStreaming.value) {
+        // A send that started before this snapshot resolved owns the live
+        // tail; replacing the list under it would erase the turn the user is
+        // watching. The observer's durable events already carry the same
+        // facts, so the local turn bubbles ride below the transcript until
+        // the stream closes and the next snapshot reconciles.
+        messages.value = [...transcript, ...messages.value.filter((m) => m.role === 'user' || m.role === 'assistant')]
+      } else {
+        messages.value = transcript
+      }
 	  subagents.value = []
 	  eventProjectionByRun.clear()
 	  appliedEventIDs.clear()

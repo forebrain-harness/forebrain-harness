@@ -1,7 +1,7 @@
 <template>
   <button
     type="button"
-    class="forebrain-subagent-card flex w-full items-start gap-2 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-3 py-2 text-left"
+    class="forebrain-subagent-card flex w-full items-start gap-2 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 text-left"
     @click="$emit('open', card.agentId)"
   >
 	<span class="mt-[3px] shrink-0" :class="card.phase === 'ended' && card.status !== 'failed' && card.status !== 'cancelled' ? 'text-[var(--forebrain-brand-1)]' : 'text-[var(--forebrain-muted-text)]'">
@@ -57,6 +57,6 @@ const detail = computed(() => {
 
 .forebrain-subagent-card:hover {
   border-color: var(--forebrain-brand-border, var(--forebrain-divider));
-  background: var(--forebrain-card-gradient, var(--forebrain-surface-glass));
+  background: var(--forebrain-surface);
 }
 </style>

@@ -1,6 +1,6 @@
 <template>
   <div
-    class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-card-gradient)] px-4 py-3 text-sm text-[var(--forebrain-text)] shadow-[var(--forebrain-inset-shadow)]"
+    class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]"
   >
     <div class="mb-2 flex items-center gap-2 font-semibold text-[var(--forebrain-brand-1)]">
       <span class="text-lg leading-none">•</span>
@@ -36,7 +36,7 @@
           :class="item.status === 'completed'
             ? 'text-[var(--forebrain-brand-1)]'
             : item.status === 'in_progress'
-              ? 'font-medium text-[var(--forebrain-brand-2)]'
+              ? 'font-medium text-[var(--forebrain-brand-1)]'
               : 'text-[var(--forebrain-brand-1)]'"
         >
           {{ item.content }}
@@ -73,7 +73,7 @@ function planStatusGlyph(status: string): string {
 
 function planStatusClass(status: string): string {
   const s = String(status ?? '').trim().toLowerCase()
-  if (s === 'in_progress' || s === 'in-progress' || s === 'active') return 'text-[var(--forebrain-brand-2)]'
+  if (s === 'in_progress' || s === 'in-progress' || s === 'active') return 'text-[var(--forebrain-brand-1)]'
   if (s === 'cancelled' || s === 'canceled') return 'text-[var(--forebrain-danger)]'
   return 'text-[var(--forebrain-brand-1)]'
 }

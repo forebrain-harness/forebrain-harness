@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { forebrainApi, __apiClient } from './api'
+import { forebrainApi, __apiClient, getErrorMessage } from './api'
 
 describe('forebrain api primary agents', () => {
   afterEach(() => {
@@ -195,5 +195,17 @@ describe('forebrain api mentions', () => {
     respondWith({ query: 'sh', records: [{ path: 'shots/', is_dir: true }, { path: 'shell.go', is_dir: false }] })
     const res = await forebrainApi.mentionSearch('sh')
     expect(res.records.map((record) => record.isDir)).toEqual([true, false])
+  })
+})
+
+describe('getErrorMessage', () => {
+  it('surfaces the gateway error body verbatim', () => {
+    const error = { response: { data: { error: 'invalid gateway token' } } }
+    expect(getErrorMessage(error)).toBe('invalid gateway token')
+  })
+
+  it('still reads the message field other backends use', () => {
+    const error = { response: { data: { message: 'quota exceeded' } } }
+    expect(getErrorMessage(error)).toBe('quota exceeded')
   })
 })

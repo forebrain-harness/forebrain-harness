@@ -3,30 +3,8 @@ package config
 import "strings"
 
 type Gateway struct {
-	HTTPAddr           string      `yaml:"http_addr,omitempty" json:"http_addr,omitempty"`
-	Auth               GatewayAuth `yaml:"auth,omitempty" json:"auth,omitempty"`
-	Grpc               GatewayGRPC `yaml:"grpc,omitempty" json:"grpc,omitempty"`
-	Banner             *bool       `yaml:"banner,omitempty" json:"banner,omitempty"`
-	BannerText         string      `yaml:"banner_text,omitempty" json:"banner_text,omitempty"`
-	ManageEnable       *bool       `yaml:"manage_enable,omitempty" json:"manage_enable,omitempty"`
-	EnableResponseGzip *bool       `yaml:"enable_response_gzip,omitempty" json:"enable_response_gzip,omitempty"`
-	LogReqEnable       *bool       `yaml:"log_req_enable,omitempty" json:"log_req_enable,omitempty"`
-	RouteRootPath      string      `yaml:"route_root_path,omitempty" json:"route_root_path,omitempty"`
-	WriteTimeout       string      `yaml:"write_timeout,omitempty" json:"write_timeout,omitempty"`
-	ReadTimeout        string      `yaml:"read_timeout,omitempty" json:"read_timeout,omitempty"`
-	IdleTimeout        string      `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
-	GraceTimeout       string      `yaml:"grace_timeout,omitempty" json:"grace_timeout,omitempty"`
-	ServiceName        string      `yaml:"service_name,omitempty" json:"service_name,omitempty"`
-	ServiceGroup       string      `yaml:"service_group,omitempty" json:"service_group,omitempty"`
-	ServiceVersion     string      `yaml:"service_version,omitempty" json:"service_version,omitempty"`
-	LogLevel           string      `yaml:"log_level,omitempty" json:"log_level,omitempty"`
-	LogPath            string      `yaml:"log_path,omitempty" json:"log_path,omitempty"`
-	LogCaller          *bool       `yaml:"log_caller,omitempty" json:"log_caller,omitempty"`
-	LogDiscard         *bool       `yaml:"log_discard,omitempty" json:"log_discard,omitempty"`
-}
-
-type GatewayGRPC struct {
-	Port string `yaml:"port,omitempty" json:"port,omitempty"`
+	HTTPAddr string      `yaml:"http_addr,omitempty" json:"http_addr,omitempty"`
+	Auth     GatewayAuth `yaml:"auth,omitempty" json:"auth,omitempty"`
 }
 
 type GatewayAuth struct {

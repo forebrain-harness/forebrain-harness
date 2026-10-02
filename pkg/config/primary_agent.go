@@ -14,6 +14,8 @@ import (
 
 type Summary struct {
 	ID                string   `json:"id"`
+	Name              string   `json:"name,omitempty"`
+	Description       string   `json:"description,omitempty"`
 	WorkspaceRoot     string   `json:"workspace_root"`
 	PrivateSkillsRoot string   `json:"private_skills_root"`
 	SharedSkillsRoots []string `json:"shared_skills_roots"`
@@ -179,7 +181,7 @@ func (r *Resolver) Switch(query string) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	if err := ensurePrimaryAgentDirs(match); err != nil {
+	if err := EnsurePrimaryAgentDirs(match); err != nil {
 		return Summary{}, err
 	}
 	if err := writeActiveState(r.home, match.ID); err != nil {
@@ -246,6 +248,8 @@ func (r *Resolver) summaryFor(id string, def AgentDefinition) (Summary, error) {
 	}
 	return Summary{
 		ID:                id,
+		Name:              strings.TrimSpace(def.DisplayName),
+		Description:       strings.TrimSpace(def.Description),
 		WorkspaceRoot:     root,
 		PrivateSkillsRoot: filepath.Join(root, "skills"),
 		SharedSkillsRoots: []string{
@@ -316,7 +320,10 @@ func workspaceRootFor(home, id string) (string, error) {
 	return filepath.Clean(absRoot), nil
 }
 
-func ensurePrimaryAgentDirs(sum Summary) error {
+// EnsurePrimaryAgentDirs materialises a primary agent's workspace
+// subdirectories. Exported for the gateway's create path so a tenant created
+// over the web gets the same directories a switch would.
+func EnsurePrimaryAgentDirs(sum Summary) error {
 	dirs := []string{
 		sum.WorkspaceRoot,
 		sum.PrivateSkillsRoot,
