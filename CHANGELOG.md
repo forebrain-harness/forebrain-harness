@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/forebrain-harness/forebrain-harness/compare/v0.1.1...v0.2.0) (2026-10-02)
+
+
+### Features
+
+* **gateway:** web ui redesign with tenant and project surfaces ([#33](https://github.com/forebrain-harness/forebrain-harness/issues/33)) ([a4fe61c](https://github.com/forebrain-harness/forebrain-harness/commit/a4fe61c8fa76f0dbe65035e083bc57a042218b1c))
+* **tui:** show running tools' elapsed time and hint when the clipboard holds an image ([#29](https://github.com/forebrain-harness/forebrain-harness/issues/29)) ([33e439a](https://github.com/forebrain-harness/forebrain-harness/commit/33e439ade3f1329a186e79b652458b7d2be855f9))
+* **turn:** continue a conversation by itself once its usage limit resets ([#31](https://github.com/forebrain-harness/forebrain-harness/issues/31)) ([6305ea9](https://github.com/forebrain-harness/forebrain-harness/commit/6305ea98bb7bcd933b861daae5a5a716f429251b))
+
 ## [0.1.1](https://github.com/forebrain-harness/forebrain-harness/compare/v0.1.0...v0.1.1) (2026-09-29)
 
 
