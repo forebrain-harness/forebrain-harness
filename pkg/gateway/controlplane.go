@@ -2,7 +2,13 @@
 package gateway
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -12,7 +18,23 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
-func ControlPlaneTokenFromRequest(r *http.Request, queryToken string) string {
+// Sentinel failures of authorizeControlPlane; each maps to the 401 body the
+// control plane has always answered with.
+var (
+	errGatewayAuthModeUnsupported = errors.New("unsupported gateway auth mode")
+	errGatewayTokenMissing        = errors.New("gateway token missing")
+	errGatewayUnauthorized        = errors.New("unauthorized")
+)
+
+func gatewayAuthMode(cfg *appcfg.Root) string {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Gateway.Auth.Mode))
+	if mode == "" {
+		mode = "token"
+	}
+	return mode
+}
+
+func ControlPlaneTokenFromRequest(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
@@ -24,22 +46,65 @@ func ControlPlaneTokenFromRequest(r *http.Request, queryToken string) string {
 	if token == "" {
 		token = strings.TrimSpace(r.Header.Get("X-API-Key"))
 	}
-	if token == "" && queryToken != "" {
-		token = strings.TrimSpace(queryToken)
-	}
 	return token
 }
 
-func ControlPlaneAuthorized(r *http.Request, expected string, queryToken string) bool {
+func ControlPlaneAuthorized(r *http.Request, expected string) bool {
 	exp := strings.TrimSpace(expected)
 	if exp == "" {
 		return true
 	}
-	got := ControlPlaneTokenFromRequest(r, queryToken)
+	got := ControlPlaneTokenFromRequest(r)
 	if len(got) != len(exp) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(exp)) == 1
+}
+
+// authorizeControlPlane is the single decision point for control-plane
+// access: the HTTP middleware and the chat WebSocket handshake both call it.
+// A request passes when its header credentials (Authorization: Bearer,
+// X-API-Key) or its web session cookie match the configured token. Query
+// strings never carry credentials — they end up in access logs and browser
+// history.
+func authorizeControlPlane(r *http.Request, cfg *appcfg.Root) error {
+	switch mode := gatewayAuthMode(cfg); mode {
+	case "none":
+		return nil
+	case "token":
+	default:
+		return errGatewayAuthModeUnsupported
+	}
+	expected := strings.TrimSpace(cfg.Gateway.Auth.Token)
+	if expected == "" {
+		return errGatewayTokenMissing
+	}
+	if ControlPlaneAuthorized(r, expected) {
+		return nil
+	}
+	if webSessionCookieValid(r, expected) {
+		return nil
+	}
+	return errGatewayUnauthorized
+}
+
+func writeControlPlaneUnauthorized(w http.ResponseWriter, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = w.Write([]byte(body))
+}
+
+func writeControlPlaneAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, errGatewayAuthModeUnsupported):
+		writeControlPlaneUnauthorized(w, `{"error":"unsupported gateway auth mode"}`)
+	case errors.Is(err, errGatewayTokenMissing):
+		slog.Error("gateway control plane token missing", "path", r.URL.Path)
+		writeControlPlaneUnauthorized(w, `{"error":"gateway token missing"}`)
+	default:
+		slog.Error("gateway control plane auth failed", "path", r.URL.Path, "auth", telemetry.RedactLogLine(r.Header.Get("Authorization")))
+		writeControlPlaneUnauthorized(w, `{"error":"unauthorized"}`)
+	}
 }
 
 func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) http.Handler {
@@ -56,6 +121,12 @@ func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) ht
 			inner.ServeHTTP(w, r)
 			return
 		}
+		// The sign-in exchange itself is the one request that legitimately
+		// arrives without credentials: it is how a browser obtains them.
+		if r.Method == http.MethodPost && path == "/api/auth/session" {
+			inner.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodOptions {
 			inner.ServeHTTP(w, r)
 			return
@@ -64,34 +135,8 @@ func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) ht
 			inner.ServeHTTP(w, r)
 			return
 		}
-		authMode := strings.ToLower(strings.TrimSpace(cfg.Gateway.Auth.Mode))
-		if authMode == "" {
-			authMode = "token"
-		}
-		if authMode == "none" {
-			inner.ServeHTTP(w, r)
-			return
-		}
-		tok := strings.TrimSpace(cfg.Gateway.Auth.Token)
-		if authMode != "token" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"unsupported gateway auth mode"}`))
-			return
-		}
-		q := r.URL.Query().Get("token")
-		if tok == "" {
-			slog.Error("gateway control plane token missing", "path", r.URL.Path)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"gateway token missing"}`))
-			return
-		}
-		if !ControlPlaneAuthorized(r, tok, q) {
-			slog.Error("gateway control plane auth failed", "path", r.URL.Path, "auth", telemetry.RedactLogLine(r.Header.Get("Authorization")))
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		if err := authorizeControlPlane(r, cfg); err != nil {
+			writeControlPlaneAuthError(w, r, err)
 			return
 		}
 		inner.ServeHTTP(w, r)
@@ -127,4 +172,113 @@ func envAgentID(env *process.Environment) string {
 		return ""
 	}
 	return strings.TrimSpace(env.Runner.AgentName)
+}
+
+const webSessionMessage = "forebrain-harness web session v1"
+
+// webSessionCookieName derives the cookie name from the token: two gateways
+// on one machine (different homes, different tokens) never overwrite each
+// other's cookie, while replicas sharing a token agree on the name.
+func webSessionCookieName(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return "forebrain_session_" + hex.EncodeToString(sum[:4])
+}
+
+// webSessionValue derives the cookie value from the token with no stored
+// state: any replica that knows the token can verify it, rotating the token
+// invalidates every cookie at once, and a leaked cookie does not reveal the
+// token it was derived from.
+func webSessionValue(token string) string {
+	mac := hmac.New(sha256.New, []byte(strings.TrimSpace(token)))
+	_, _ = mac.Write([]byte(webSessionMessage))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// webSessionCookieValid reports whether the request carries the session
+// cookie this token issues. The comparison is constant-time on a fixed-length
+// digest, so timing does not leak how much of the value matched.
+func webSessionCookieValid(r *http.Request, token string) bool {
+	cookie, err := r.Cookie(webSessionCookieName(token))
+	if err != nil {
+		return false
+	}
+	got := strings.TrimSpace(cookie.Value)
+	want := webSessionValue(token)
+	return len(got) == len(want) && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+func webSessionCookie(token string, secure bool) *http.Cookie {
+	return &http.Cookie{
+		Name:     webSessionCookieName(token),
+		Value:    webSessionValue(token),
+		Path:     "/",
+		MaxAge:   2592000,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   secure,
+	}
+}
+
+// requestIsHTTPS reports whether the connection the browser actually used is
+// TLS, either directly or behind a proxy that forwards the protocol.
+func requestIsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
+type webSessionRequest struct {
+	Token string `json:"token"`
+}
+
+// handleWebSessionCreate exchanges the gateway token for the session cookie.
+// It is the one control-plane endpoint reachable without credentials: the
+// browser has nothing else to present yet. The token itself never becomes a
+// browser-readable value.
+func (s *Server) handleWebSessionCreate(w http.ResponseWriter, r *http.Request) {
+	cfg := s.liveCfg()
+	mode := gatewayAuthMode(cfg)
+	if mode == "none" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if mode != "token" {
+		writeControlPlaneUnauthorized(w, `{"error":"unsupported gateway auth mode"}`)
+		return
+	}
+	var req webSessionRequest
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		http.Error(w, "trailing JSON content", http.StatusBadRequest)
+		return
+	}
+	expected := strings.TrimSpace(cfg.Gateway.Auth.Token)
+	if expected == "" {
+		slog.Error("gateway control plane token missing", "path", r.URL.Path)
+		writeControlPlaneUnauthorized(w, `{"error":"gateway token missing"}`)
+		return
+	}
+	got := strings.TrimSpace(req.Token)
+	if len(got) != len(expected) || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+		slog.Warn("gateway web sign-in rejected", "remote", clientIP(r))
+		writeControlPlaneUnauthorized(w, `{"error":"invalid gateway token"}`)
+		return
+	}
+	http.SetCookie(w, webSessionCookie(expected, requestIsHTTPS(r)))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleWebSessionProbe answers whether the caller already holds a valid
+// session: reaching it at all means the control-plane middleware let the
+// request through, so the body only reports the configured auth mode.
+func (s *Server) handleWebSessionProbe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"auth_mode":"` + gatewayAuthMode(s.liveCfg()) + `"}`))
 }

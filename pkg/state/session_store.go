@@ -115,6 +115,30 @@ func (s *SessionStore) Ensure(ctx context.Context, id string, title string) erro
 	return s.ensureSession(ctx, s.db, id, title)
 }
 
+// SetSessionSource marks what a session is for. The value set is a gateway
+// whitelist decision; the store only writes it for a session this agent owns.
+func (s *SessionStore) SetSessionSource(ctx context.Context, sessionID, source string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return fmt.Errorf("session id required")
+	}
+	if err := s.requireOwned(ctx, s.db, sessionID); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE fb_sessions SET source=?, updated_at=updated_at WHERE id=? AND agent_id=?`,
+		strings.TrimSpace(source), sessionID, s.AgentID())
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return fmt.Errorf("%w: %s", ErrSessionNotOwned, sessionID)
+	}
+	return nil
+}
+
 // ensureSession is the one session upsert: it creates the row (owner recorded
 // at birth) or, on conflict, updates updated_at for this owner only. Sharing
 // it is what lets every append path run it inside its own transaction.
@@ -361,6 +385,9 @@ type SessionSummary struct {
 	Title     string
 	UpdatedAt int64
 	ProjectID string
+	// Source is what the session is for: "" an ordinary conversation,
+	// "workshop" a skill-workshop task. The chat drawer filters on it.
+	Source string
 }
 
 func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessionID string, limit int) ([]SessionSummary, error) {
@@ -378,7 +405,7 @@ func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessio
 		limit = 500
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at
+		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
 		 WHERE parent_session_id = ? AND agent_id = ?
 		 ORDER BY updated_at DESC
@@ -391,7 +418,7 @@ func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessio
 	out := make([]SessionSummary, 0, limit)
 	for rows.Next() {
 		var r SessionSummary
-		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -410,7 +437,7 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 		limit = 500
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at
+		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
 		 WHERE agent_id = ?
 		 ORDER BY updated_at DESC
@@ -423,7 +450,7 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	var out []SessionSummary
 	for rows.Next() {
 		var r SessionSummary
-		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -493,7 +520,7 @@ func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offse
 		offset = 0
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at
+		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
 		 WHERE agent_id = ?
 		 ORDER BY updated_at DESC, id ASC
@@ -506,7 +533,7 @@ func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offse
 	out := make([]SessionSummary, 0, limit)
 	for rows.Next() {
 		var r SessionSummary
-		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

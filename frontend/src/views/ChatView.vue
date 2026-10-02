@@ -2,9 +2,7 @@
   <!-- The shell owns the viewport height; the thread just fills what is left
        of it, so the composer stays pinned without guessing the chrome's size. -->
   <div class="chat-shell flex h-full min-h-0 w-full flex-1 overflow-hidden">
-    <ChatSidebar :sessions="sessions" :loading="sessionsLoading" :active-id="sessionId" :error="sessionsError"
-      @new-chat="handleNewChat" @select="handleSelectSession" />
-    <div class="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden bg-[var(--forebrain-content-gradient)]">
+    <div class="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden bg-[var(--forebrain-surface)]">
       <main class="mx-auto flex h-full min-h-0 w-full max-w-[880px] flex-1 flex-col overflow-hidden px-3 sm:px-5">
         <AgentViewTabs
           :records="agentTabRecords"
@@ -12,6 +10,24 @@
           :seen="seenAgentActivity"
           @select="openAgentView"
         />
+        <div class="flex items-center justify-between gap-3 px-3 pt-3 sm:px-5">
+          <span class="truncate text-sm font-medium text-[var(--forebrain-text)]">{{ sessionTitle }}</span>
+          <button
+            type="button"
+            class="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--forebrain-divider)] px-2.5 text-xs text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-button-alt-bg)]"
+            :aria-pressed="workbench.open.value"
+            data-testid="workbench-toggle"
+            @click="workbench.toggle()"
+          >
+            <PanelRight class="size-3.5" aria-hidden="true" />
+            {{ t('chat.workbench') }}
+            <span
+              v-if="runningRoster.length"
+              class="inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-4 text-[var(--forebrain-on-brand)]"
+              style="background: var(--forebrain-brand-1)"
+            >{{ rosterRecords.length }}</span>
+          </button>
+        </div>
         <div class="min-h-0 flex-1 overflow-hidden">
           <Conversation
             ref="conversationRef"
@@ -198,7 +214,7 @@
                       </div>
                       <div
                         v-if="msg.role === 'assistant' && msg.turnDiffs?.length"
-                        class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-3 py-3"
+                        class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-3"
                       >
                         <DiffView
                           :files="msg.turnDiffs"
@@ -207,13 +223,22 @@
                         />
                       </div>
                       <div
-                        v-if="msg.role === 'assistant' && workedLabel(msg)"
-                        class="mt-3 flex items-center gap-3 text-[11px] uppercase tracking-[0.28em] text-[var(--forebrain-muted-text)]"
+                        v-if="msg.role === 'assistant' && workedLine(msg).label"
+                        class="mt-3 flex items-center gap-3 text-[11px] text-[var(--forebrain-muted-text)]"
                         aria-label="run duration"
                       >
-                        <span class="h-px flex-1 bg-[linear-gradient(90deg,transparent,var(--forebrain-rule-line))]" />
-                        <span class="whitespace-nowrap font-mono">{{ workedLabel(msg) }}</span>
-                        <span class="h-px flex-1 bg-[linear-gradient(90deg,var(--forebrain-rule-line),transparent)]" />
+                        <span class="h-px w-3 bg-[var(--forebrain-divider-strong)]" />
+                        <span class="whitespace-nowrap font-mono">{{ workedLine(msg).label }}</span>
+                        <span
+                          v-if="workedLine(msg).plan"
+                          class="inline-flex items-center whitespace-nowrap font-mono"
+                          :aria-label="t('chat.checklistProgress', { done: workedLine(msg).plan!.done, total: workedLine(msg).plan!.total })"
+                        >
+                          <SquareCheck class="worked-check" aria-hidden="true" />{{ workedLine(msg).plan!.done }}/{{ workedLine(msg).plan!.total }}
+                        </span>
+                        <span v-if="workedLine(msg).plan?.active" class="whitespace-nowrap">{{ workedLine(msg).plan!.active }}</span>
+                        <span v-if="workedLine(msg).time" class="whitespace-nowrap font-mono">{{ workedLine(msg).time }}</span>
+                        <span class="h-px flex-1 bg-[var(--forebrain-divider-strong)]" />
                       </div>
                       <ul v-if="msg.role === 'user' && msg.attachments?.length" class="mt-2 flex flex-wrap gap-2"
                         :aria-label="t('chat.messageAttachments')">
@@ -252,7 +277,7 @@
 
         <details
           v-if="sessionId"
-          class="mx-auto mb-2 w-full max-w-[880px] shrink-0 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-strong)] px-3 py-2 text-sm text-[var(--forebrain-text-2)] shadow-[var(--forebrain-inset-shadow)] sm:px-5"
+          class="mx-auto mb-2 w-full max-w-[880px] shrink-0 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 text-sm text-[var(--forebrain-text-2)] sm:px-5"
         >
           <summary class="cursor-pointer select-none font-medium text-[var(--forebrain-text)]">
             <span class="inline-flex w-full flex-wrap items-center gap-2 pr-2">
@@ -287,16 +312,16 @@
             />
             <div>
               <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.planMarkdown') }}</div>
-              <pre v-if="sessionPlanText.trim()" class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] p-2 font-mono text-[12px] text-[var(--forebrain-text-2)]">{{ sessionPlanText }}</pre>
+              <pre v-if="sessionPlanText.trim()" class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-2 font-mono text-[12px] text-[var(--forebrain-text-2)]">{{ sessionPlanText }}</pre>
               <p v-else class="text-[var(--forebrain-muted-text)]">{{ t('chat.noPlan') }}</p>
             </div>
             <div>
               <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.toolAuditRecent') }}</div>
               <ul v-if="toolAuditRows.length" class="space-y-2">
-                <li v-for="row in toolAuditRows" :key="row.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] p-2">
+                <li v-for="row in toolAuditRows" :key="row.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-2">
                   <div class="font-medium text-[var(--forebrain-text)]">{{ row.toolName }}</div>
                   <div class="mt-1 break-all font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ row.detailJson }}</div>
-                  <div v-if="extractDiffPreview(row.detailJson)" class="mt-2 rounded border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt-soft)] p-2">
+                  <div v-if="extractDiffPreview(row.detailJson)" class="mt-2 rounded border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2">
                     <div class="mb-1 text-[11px] font-medium text-[var(--forebrain-muted-text)]">{{ t('chat.diffPreview') }}</div>
                     <pre class="max-h-40 overflow-auto whitespace-pre-wrap text-[11px]">{{ extractDiffPreview(row.detailJson) }}</pre>
                     <div class="mt-2 flex items-center gap-2">
@@ -321,7 +346,7 @@
             </div>
             <div>
               <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.costSummary') }}</div>
-              <pre v-if="sessionCostSummaryText.trim()" class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] p-2 font-mono text-[12px] text-[var(--forebrain-text-2)]">{{ sessionCostSummaryText }}</pre>
+              <pre v-if="sessionCostSummaryText.trim()" class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-2 font-mono text-[12px] text-[var(--forebrain-text-2)]">{{ sessionCostSummaryText }}</pre>
               <p v-else class="text-[var(--forebrain-muted-text)]">{{ t('chat.noCostSummary') }}</p>
             </div>
             <div>
@@ -330,7 +355,7 @@
                 <li
                   v-for="record in subagentHistoryRecords"
                   :key="`${record.taskId || record.runId || record.updatedAt}`"
-                  class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] p-2"
+                  class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-2"
 				  :class="(record.agentId || record.taskId || record.runId) ? 'cursor-pointer hover:border-[var(--forebrain-brand-border)]' : ''"
 				  @click="openSubagentHistory(record)"
                 >
@@ -343,13 +368,13 @@
                         {{ formatSubagentMeta(record) }}
                       </div>
                     </div>
-                    <span class="rounded-full border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--forebrain-text-2)]">
+                    <span class="rounded-full border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--forebrain-text-2)]">
                       {{ record.status || 'unknown' }}
                     </span>
                   </div>
                   <div
                     v-if="subagentPreview(record)"
-                    class="mt-2 whitespace-pre-wrap rounded border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt-soft)] p-2 font-mono text-[11px] text-[var(--forebrain-text-2)]"
+                    class="mt-2 whitespace-pre-wrap rounded border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 font-mono text-[11px] text-[var(--forebrain-text-2)]"
                   >
                     {{ subagentPreview(record) }}
                   </div>
@@ -360,7 +385,7 @@
           </div>
         </details>
 
-        <div class="z-10 shrink-0 border-t border-[var(--forebrain-divider)] bg-[var(--forebrain-composer-bg)] px-3 py-4 backdrop-blur-md sm:px-5">
+        <div class="z-10 shrink-0 border-t border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-4 sm:px-5">
           <!--
             The MCP startup, while it is happening. It is live state pushed on its
             own socket op, and it is the answer to "why is the first turn waiting":
@@ -373,9 +398,9 @@
             aria-live="polite"
             data-field="mcp-startup"
           >
-            <span class="h-px flex-1 bg-[linear-gradient(90deg,transparent,var(--forebrain-rule-line))]" />
+            <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
             <span class="min-w-0 text-center font-mono leading-relaxed">{{ mcpStartupLabel }}</span>
-            <span class="h-px flex-1 bg-[linear-gradient(90deg,var(--forebrain-rule-line),transparent)]" />
+            <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
           </div>
           <Alert v-if="mcpFailures.length" variant="destructive" class="mb-3" data-field="mcp-failures">
             <CircleAlert class="size-4" />
@@ -391,9 +416,9 @@
             class="mb-3 flex items-center gap-3 text-[11px] uppercase tracking-[0.28em] text-[var(--forebrain-muted-text)]"
             aria-live="polite"
           >
-            <span class="h-px flex-1 bg-[linear-gradient(90deg,transparent,var(--forebrain-rule-line))]" />
+            <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
             <span class="min-w-0 text-center font-mono leading-relaxed">{{ runtimeStatusLabel }}</span>
-            <span class="h-px flex-1 bg-[linear-gradient(90deg,var(--forebrain-rule-line),transparent)]" />
+            <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
           </div>
           <div v-if="pendingActionsError || pendingAsk.length || pendingApprovals.length" class="mb-3 space-y-2">
             <Alert v-if="pendingActionsError" variant="destructive">
@@ -411,7 +436,7 @@
             </Alert>
             <div v-if="pendingApprovals.length" class="space-y-2">
               <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.pendingApprovals') }}</div>
-              <div v-for="a in pendingApprovals" :key="a.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-3 py-2">
+              <div v-for="a in pendingApprovals" :key="a.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
                 <div class="flex items-center justify-between gap-3">
                   <div class="min-w-0">
                     <div class="text-sm font-medium text-[var(--forebrain-text)] truncate">{{ approvalKindLabel(a.kind) }}</div>
@@ -432,11 +457,11 @@
                 <input
                   v-if="!approvalSuggestion(a)"
                   v-model="denyFeedback[a.id]"
-                  class="mt-2 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
+                  class="mt-2 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
                   :disabled="actionSubmitting[a.id]"
                   :placeholder="t('chat.otherOptional')"
                 />
-                <div v-if="approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt-soft)] p-2 text-xs text-[var(--forebrain-text-2)]">
+                <div v-if="approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
                   <div class="flex flex-wrap items-center gap-2">
                     <span class="font-medium text-[var(--forebrain-text)]">{{ t('chat.permissionMemory') }}</span>
                     <span class="font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ approvalSuggestionLabel(a) }}</span>
@@ -459,7 +484,7 @@
             </div>
             <div v-if="pendingAsk.length" class="space-y-2">
               <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.pendingQuestions') }}</div>
-              <div v-for="qa in pendingAsk" :key="qa.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-3 py-2 space-y-2">
+              <div v-for="qa in pendingAsk" :key="qa.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 space-y-2">
                 <button
                   v-if="approvalRequesterLabel(qa)"
                   type="button"
@@ -483,7 +508,7 @@
                   </div>
                   <div v-if="q.allowOther" class="mt-1">
                     <input
-                      class="w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
+                      class="w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
                       :placeholder="t('chat.otherOptional')"
                       v-model="otherModel[qa.id][q.id]"
                     />
@@ -512,7 +537,7 @@
               <PromptInput
                 multiple
                 global-drop
-                class="w-full [&_[data-slot=input-group]]:border-[var(--forebrain-divider)] [&_[data-slot=input-group]]:bg-[var(--forebrain-input-gradient)] [&_[data-slot=input-group]]:shadow-[var(--forebrain-doc-shadow)] [&_[data-slot=input-group]]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:border-[var(--forebrain-focus-border)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:border-[var(--forebrain-focus-border)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:ring-0"
+                class="w-full [&_[data-slot=input-group]]:border-[var(--forebrain-divider)] [&_[data-slot=input-group]]:bg-[var(--forebrain-surface)] [&_[data-slot=input-group]]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:border-[var(--forebrain-focus-border)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:border-[var(--forebrain-focus-border)] [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus]:ring-0 [&_[data-slot=input-group]]:has-[[data-slot=input-group-control]:focus-visible]:ring-0"
               >
                 <PromptInputBody>
                   <ForebrainPromptTextarea ref="promptRef" :placeholder="inputPlaceholder" :bots="availableBots"
@@ -525,19 +550,20 @@
                 </PromptInputBody>
                 <PromptInputFooter>
                   <div class="relative flex min-w-0 flex-1 items-center gap-1" ref="modeMenuRef">
+                    <ApprovalPresetPicker :session-id="sessionId" />
                     <button
                       type="button"
-                      class="inline-flex h-8 items-center gap-2 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] shadow-[var(--forebrain-inset-shadow)] transition hover:bg-[var(--forebrain-button-alt-bg)] disabled:cursor-not-allowed disabled:opacity-60"
+                      class="inline-flex h-8 items-center gap-2 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)] disabled:cursor-not-allowed disabled:opacity-60"
                       :disabled="isStreaming"
                       @click="toggleModeMenu"
                     >
-                      <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] text-[9px] leading-none text-[var(--forebrain-brand-1)]">∞</span>
+                      <span class="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] text-[9px] leading-none text-[var(--forebrain-brand-1)]">∞</span>
                       <span>{{ modeLabel }}</span>
                       <span class="text-[var(--forebrain-muted-text)]">▾</span>
                     </button>
                     <div
                       v-if="modeMenuOpen"
-                      class="absolute bottom-full left-0 z-20 mb-2 min-w-[168px] rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-popover-bg)] p-0.5 shadow-[var(--forebrain-doc-shadow)]"
+                      class="absolute bottom-full left-0 z-20 mb-2 min-w-[168px] rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-0.5 "
                     >
                       <button
                         v-for="item in modeOptions"
@@ -572,40 +598,18 @@
           </PromptInputProvider>
         </div>
       </main>
-      <aside class="hidden min-h-0 w-[320px] flex-col border-l border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-glass)] lg:flex">
-        <div class="px-3 py-3 text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.workbench') }}</div>
-        <div class="min-h-0 flex-1 space-y-3 overflow-auto px-3 pb-3">
-          <SessionHeartbeat :session-id="sessionId" />
-          <AgentRosterPanel
-            :title="t('agents.liveTitle')"
-            :records="rosterRecords"
-            :loading="rosterLoading"
-            :error="rosterError"
-            @view="viewRoster"
-            @cancel="cancelRoster"
-            @cancel-all="cancelAll"
-          />
-          <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.workspaceFiles') }}</div>
-          <div v-if="workspaceTreeLoading" class="text-xs text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-          <div v-else-if="!workspaceTree.length" class="text-xs text-[var(--forebrain-muted-text)]">{{ t('common.empty') }}</div>
-          <ul v-else class="space-y-1">
-            <li v-for="n in workspaceTree" :key="n.path">
-              <button
-                v-if="!n.isDir"
-                type="button"
-                class="w-full truncate rounded-md px-2 py-1 text-left text-xs text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-button-alt-bg)]"
-                @click="insertWorkspaceRef(n.path)"
-              >
-                {{ n.path }}
-              </button>
-              <div v-else class="w-full truncate px-2 py-1 text-[11px] text-[var(--forebrain-muted-text)]">
-                {{ n.path }}/
-              </div>
-            </li>
-          </ul>
-          <div class="mt-3 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('chat.insertRefTip') }} <span class="font-mono">@path</span></div>
-        </div>
-      </aside>
+      <ChatWorkbench
+        v-if="workbench.open.value"
+        :records="runningRoster"
+        :loading="rosterLoading"
+        :error="rosterError"
+        :overlay="workbenchOverlay"
+        @close="workbench.close()"
+        @view="viewRoster"
+        @cancel="cancelRoster"
+        @cancel-all="cancelAll"
+        @insert-ref="insertWorkspaceRef"
+      />
     </div>
   </div>
 </template>
@@ -613,12 +617,10 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, Paperclip } from 'lucide-vue-next'
+import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, Paperclip, SquareCheck, PanelRight } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
-import ChatSidebar from '@/components/ChatSidebar.vue'
 import AgentViewTabs from '@/components/chat/AgentViewTabs.vue'
-import SessionHeartbeat from '@/components/chat/SessionHeartbeat.vue'
 import SubagentCard from '@/components/chat/SubagentCard.vue'
 import SubagentConversation from '@/components/chat/SubagentConversation.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
@@ -661,7 +663,8 @@ import {
   PromptInputSubmit,
 } from '@repo/elements/prompt-input'
 import ForebrainPromptTextarea, { type BotOption } from '@/components/ForebrainPromptTextarea.vue'
-import AgentRosterPanel from '@/components/AgentRosterPanel.vue'
+import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
+import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import DiffView from '@/components/DiffView.vue'
@@ -670,8 +673,11 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterViewTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, type ChatMessage, type PlanBlock } from '@/composables/useChatStream'
-import { useAuth } from '@/composables/useAuth'
+import { useChatStream, type ChatMessage, type PlanBlock, type WorkedLine } from '@/composables/useChatStream'
+import { useLastSession } from '@/composables/useLastSession'
+import { useWorkbench } from '@/composables/useWorkbench'
+import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
+const { refresh: workspaceTreeRefresh } = useWorkspaceTree()
 import { useChatSessions } from '@/composables/useChatSessions'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { parseJsonCamelCase } from '@/lib/case'
@@ -687,30 +693,36 @@ import {
   type CommandApprovalScope,
   type PermissionSuggestionRecord,
 } from '@/lib/approvalSuggestions'
-const { lastSessionId } = useAuth()
+const { lastSessionId } = useLastSession()
+const workbench = useWorkbench()
+
+/** Only agents actually running reach the workbench card and the toggle's
+ *  badge: an idle primary in the roster is not a live agent. */
+const runningRoster = computed(() =>
+  rosterRecords.value.filter((row) => String(row.status ?? '').trim().toLowerCase() === 'running'))
+
+// Below lg the workbench overlays the conversation instead of narrowing it.
+const workbenchOverlay = ref(false)
+let workbenchMq: MediaQueryList | null = null
+function syncWorkbenchOverlay() {
+  workbenchOverlay.value = workbenchMq?.matches ?? false
+}
+
+/** The conversation's name, from the shared list the drawer shows. */
+const sessionTitle = computed(() => {
+  const sid = sessionId.value
+  if (!sid) return t('nav.chat')
+  const row = sessions.value.find((item) => item.id === sid)
+  return row?.title || t('nav.chat')
+})
 const { t } = useI18n()
 const router = useRouter()
 
-type WorkspaceNode = { path: string; isDir: boolean }
-const workspaceTree = ref<WorkspaceNode[]>([])
-const workspaceTreeLoading = ref(false)
 const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
 // How many files the composer takes for one message.
 const composerMaxFiles = 5
 const availableBots = ref<BotOption[]>([])
 const botsFetchDone = ref(true)
-
-async function loadWorkspaceTree() {
-  workspaceTreeLoading.value = true
-  try {
-    const res = await forebrainApi.workspaceTree()
-    workspaceTree.value = res.records ?? []
-  } catch {
-    workspaceTree.value = []
-  } finally {
-    workspaceTreeLoading.value = false
-  }
-}
 
 function insertWorkspaceRef(path: string) {
   // Routed through the shared engine so a clicked image is attached rather
@@ -976,7 +988,7 @@ const inputPlaceholder = computed(() => {
   return t('chat.placeholder')
 })
 
-const { sessions, loading: sessionsLoading, error: sessionsError, fetchSessions } = useChatSessions()
+const { sessions, fetchSessions } = useChatSessions()
 
 const route = useRoute()
 const { refreshToken, adoptActivePrimaryAgent } = usePrimaryAgents()
@@ -1025,7 +1037,6 @@ const {
   sendPendingSteersAfterInterrupt,
   loadMessages,
   switchToSession,
-  resetForNewChat,
   formatWorkedDurationLabel,
   formatRuntimeStatusLabel,
 } = useChatStream()
@@ -1288,10 +1299,10 @@ const sessionContextSummary = computed(() => {
       ? t('chat.contextSignalBlock')
       : t('chat.contextSignalOk')
   const signalClass = model.tone === 'warning'
-    ? 'border-[rgba(216,160,70,0.36)] bg-[rgba(216,160,70,0.12)] text-[rgb(216,160,70)]'
+    ? 'border-[var(--forebrain-warning)] bg-[var(--forebrain-warning-soft)] text-[var(--forebrain-warning)]'
     : model.tone === 'danger'
-      ? 'border-[rgba(160,70,70,0.36)] bg-[rgba(160,70,70,0.12)] text-[var(--forebrain-danger)]'
-      : 'border-[rgba(70,150,110,0.28)] bg-[rgba(70,150,110,0.12)] text-[rgb(70,150,110)]'
+      ? 'border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] text-[var(--forebrain-danger)]'
+      : 'border-[var(--forebrain-success)] bg-[var(--forebrain-success-soft)] text-[var(--forebrain-success)]'
   const line = sessionContextDebug.value
     ? `${t('chat.contextEstimate')} ${compactTokenCount(model.estimate)} · ${t('chat.contextRemaining')} ${compactTokenCount(model.remaining)} · ${t('chat.contextEvictions')} ${model.evictionCount}`
     : t('chat.noContextDebug')
@@ -1481,31 +1492,9 @@ watch(
 
 const submitStatus = computed(() => (isStreaming.value ? 'streaming' : 'ready'))
 
-async function handleNewChat() {
-  try {
-    // Created unnamed: its first message names it, and until then the sidebar
-    // draws the untitled placeholder.
-    const created = await forebrainApi.chatSessionCreate()
-    await fetchSessions()
-    if (created?.id) {
-      switchToSession(created.id)
-      return
-    }
-  } catch {
-    // Fall back to local draft reset if the gateway has no session mutation API.
-  }
-  resetForNewChat()
-  fetchSessions()
-}
-
-function handleSelectSession(id: string) {
-  switchToSession(id)
-}
-
 function viewRoster(row: AgentRosterRow) {
   const target = agentRosterViewTarget(row)
   if (!target) return
-  if (row.sessionId) switchToSession(row.sessionId)
   void router.replace(target)
 }
 
@@ -1615,7 +1604,7 @@ function messageHasBubble(msg: ChatMessage): boolean {
     msg.planBlocks?.length ||
     msg.subagentCards?.length ||
     msg.turnDiffs?.length ||
-    workedLabel(msg),
+    workedLine(msg).label,
   )
 }
 
@@ -1635,10 +1624,21 @@ function reasoningDisplayText(content: string): string {
   return lines.map((line, idx) => `${idx === 0 ? '▸ ' : '  '}${line}`).join('\n')
 }
 
-/** Every run closes with its line, as in the terminal. */
-function workedLabel(msg: { workedDurationMs?: number; runFinishedAt?: string; role?: string }): string {
-  if (msg.role !== 'assistant') return ''
-  return formatWorkedDurationLabel(msg.workedDurationMs, t, msg.runFinishedAt)
+/** Every run closes with its line, as in the terminal: duration, checklist
+ * progress when the turn had one, then the finish time. */
+function workedLine(msg: {
+  workedDurationMs?: number
+  runFinishedAt?: string
+  role?: string
+  workedPlanDone?: number
+  workedPlanTotal?: number
+  workedPlanActive?: string
+}): WorkedLine {
+  if (msg.role !== 'assistant') return { label: '' }
+  const plan = msg.workedPlanTotal && msg.workedPlanTotal > 0
+    ? { done: msg.workedPlanDone ?? 0, total: msg.workedPlanTotal, active: msg.workedPlanActive }
+    : undefined
+  return formatWorkedDurationLabel(msg.workedDurationMs, t, msg.runFinishedAt, plan)
 }
 
 /** An attachment the model was shown as an image: an image upload, or an image picked from the workspace. */
@@ -1695,7 +1695,11 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
     return
   }
   await send(text, {
-    sessionId: uploadSession ? await uploadSession : sessionId.value ?? undefined,
+    // The address bar is the one source of which session is open. The
+    // composer's submit can land before the route watcher has applied a
+    // just-pushed session switch, so read the target here rather than
+    // trusting the (possibly one-tick-stale) sessionId ref.
+    sessionId: uploadSession ? await uploadSession : (String(route.query.session ?? '').trim() || sessionId.value || undefined),
     attached: submission,
     activeInputDisposition,
   })
@@ -1731,6 +1735,9 @@ function handleComposerError(err: { code: string; message: string }) {
 watch(isStreaming, (streaming, wasStreaming) => {
   if (wasStreaming && !streaming) {
     fetchSessions()
+    // A finished turn may have changed the workspace; refresh the tree only
+    // when it has been loaded at all (the workbench was opened once).
+    void workspaceTreeRefresh()
     void loadSessionWorkspace()
     void loadRoster()
   }
@@ -1748,24 +1755,46 @@ watch(pendingActionsVersion, (version, prevVersion) => {
 
 onMounted(async () => {
   window.addEventListener('pointerdown', handleWindowPointerDown)
-  await fetchSessions()
-  await loadWorkspaceTree()
-  await loadRoster()
+  workbenchMq = window.matchMedia('(max-width: 1023px)')
+  syncWorkbenchOverlay()
+  workbenchMq.addEventListener('change', syncWorkbenchOverlay)
+  void fetchSessions()
+  void loadRoster()
   await loadSessionWorkspace()
-  await loadPendingActions()
+  void loadPendingActions()
   const qSid = String(route.query.session ?? '').trim()
-  if (qSid) {
-    switchToSession(qSid)
-  } else {
+  if (!qSid) {
     const lid = lastSessionId.value
     if (lid && lid.trim()) {
-      switchToSession(lid)
+      void router.replace({ query: { ...route.query, session: lid } })
+      return
     }
   }
 })
 
+// The address bar is the one source of which session is open: every entry
+// point navigates, and this watch applies the result.
+watch(() => route.query.session, (value) => {
+  const sid = String(value ?? '').trim()
+  if (sid && sid !== sessionId.value) switchToSession(sid)
+}, { immediate: true })
+
+// Keep the address bar honest when the session changes from inside the view
+// (a slash command switching sessions, a roster jump).
+watch(sessionId, (sid) => {
+  // While a send is streaming, the address bar leads: a send into the
+  // session the drawer just opened would otherwise be dragged back to the
+  // previous session's URL here.
+  if (sid && !isStreaming.value && route.query.session !== sid) {
+    void router.replace({ query: { ...route.query, session: sid } })
+  }
+})
+
+
+
 onUnmounted(() => {
   window.removeEventListener('pointerdown', handleWindowPointerDown)
+  workbenchMq?.removeEventListener('change', syncWorkbenchOverlay)
 })
 </script>
 
@@ -1800,10 +1829,10 @@ onUnmounted(() => {
   width: 6px;
   height: 6px;
   border-radius: 9999px;
-  background: #19b7d2;
+  background: var(--forebrain-brand-1);
   opacity: 0.35;
   animation: typing-bounce 1.1s infinite ease-in-out;
-  box-shadow: 0 0 12px rgba(25, 183, 210, 0.2);
+  
 }
 
 .typing-dot:nth-child(2) {
@@ -1850,5 +1879,18 @@ onUnmounted(() => {
 
 :deep(.chat-scrollbar > div > div::-webkit-scrollbar-track) {
   background: transparent;
+}
+
+/* The checklist mark on the worked line: sized to the digits it counts and
+   optically centred on them (a middle/middle alignment sits too low against
+   digits, whose visual centre sits above the baseline). */
+.worked-check {
+  width: 1em;
+  height: 1em;
+  display: inline-block;
+  vertical-align: -0.14em;
+  stroke-width: 2.25;
+  color: var(--forebrain-success);
+  margin-right: 0.2em;
 }
 </style>

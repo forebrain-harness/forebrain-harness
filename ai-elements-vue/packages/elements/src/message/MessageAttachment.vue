@@ -47,7 +47,7 @@ const attachmentLabel = computed(() =>
       >
       <Button
         aria-label="Remove attachment"
-        class="absolute top-2 right-2 size-6 rounded-full bg-background/80 p-0 opacity-0 backdrop-blur-sm transition-opacity hover:bg-background group-hover:opacity-100 [&>svg]:size-3"
+        class="absolute top-2 right-2 size-6 rounded-full bg-background p-0 opacity-0 transition-opacity hover:bg-background group-hover:opacity-100 [&>svg]:size-3"
         type="button"
         variant="ghost"
         @click.stop="emits('remove')"

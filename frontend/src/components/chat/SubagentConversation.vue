@@ -1,6 +1,6 @@
 <template>
   <section class="space-y-4" :aria-label="t('chat.subagentViewAria')">
-    <header class="flex items-start justify-between gap-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-3 py-2">
+    <header class="flex items-start justify-between gap-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
       <div class="min-w-0">
         <div class="flex min-w-0 items-center gap-2">
           <button
@@ -82,7 +82,7 @@
 
 		<div
 		  v-else-if="block.kind === 'error'"
-		  class="whitespace-pre-wrap rounded-xl border border-[rgba(160,70,70,0.36)] bg-[var(--forebrain-surface-soft)] px-3 py-2 text-xs text-[var(--forebrain-danger)]"
+		  class="whitespace-pre-wrap rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-3 py-2 text-xs text-[var(--forebrain-danger)]"
 		>
 		  {{ block.text }}
 		</div>
@@ -206,7 +206,7 @@ const statusClass = computed(() => {
     case 'failed':
 	case 'cancelled':
 	case 'interrupted':
-      return 'border-[rgba(160,70,70,0.36)] text-[var(--forebrain-danger)]'
+      return 'border-[var(--forebrain-danger)] text-[var(--forebrain-danger)]'
     default:
       return 'border-[var(--forebrain-divider)] text-[var(--forebrain-muted-text)]'
   }
@@ -218,7 +218,7 @@ const statusClass = computed(() => {
   height: 0.4rem;
   width: 0.4rem;
   border-radius: 9999px;
-  background: var(--forebrain-brand-2, var(--forebrain-brand-1));
+  background: var(--forebrain-brand-1);
   animation: forebrain-working-pulse 1.6s ease-in-out infinite;
 }
 

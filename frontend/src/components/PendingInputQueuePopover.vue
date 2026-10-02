@@ -41,7 +41,7 @@ const sections = computed<QueueSection[]>(() => [
     id: 'rejected',
     title: 'Messages to be submitted at end of turn',
     items: props.preview.rejectedSteers,
-    accent: 'bg-amber-500',
+    accent: 'bg-[var(--forebrain-warning)]',
   },
   {
     id: 'queued',
@@ -67,7 +67,7 @@ const sections = computed<QueueSection[]>(() => [
       class="pointer-events-none absolute inset-x-0 bottom-full z-30 mb-3 px-1"
     >
       <div
-        class="pointer-events-auto mx-auto max-h-[42vh] w-full max-w-[780px] overflow-hidden rounded-lg border border-[var(--forebrain-divider-strong)] bg-[var(--forebrain-popover-bg)] shadow-[0_24px_70px_rgba(9,52,74,0.18)] backdrop-blur-xl dark:shadow-[0_24px_70px_rgba(0,0,0,0.34)]"
+        class="pointer-events-auto mx-auto max-h-[42vh] w-full max-w-[780px] overflow-hidden rounded-lg border border-[var(--forebrain-divider-strong)] bg-[var(--forebrain-surface)] shadow-[var(--forebrain-shadow-pop)]"
       >
         <div class="flex items-center justify-between gap-3 border-b border-[var(--forebrain-divider)] px-3 py-2">
           <div class="flex min-w-0 items-center gap-2">
@@ -92,7 +92,7 @@ const sections = computed<QueueSection[]>(() => [
             <button
               v-if="preview.queuedMessages.length || preview.rejectedSteers.length || preview.pendingSteers.length"
               type="button"
-              class="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2 text-[11px] font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)] hover:text-[var(--forebrain-text)]"
+              class="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 text-[11px] font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)] hover:text-[var(--forebrain-text)]"
               @click="emit('edit-last-queued')"
             >
               <PencilLine class="h-3.5 w-3.5" />

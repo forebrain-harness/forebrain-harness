@@ -1285,3 +1285,60 @@ func TestHandleChatWSEstablishesANamedSessionBeforeItsSlashCommand(t *testing.T)
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_session_events WHERE session_id='theirs'`).Scan(&written))
 	require.Zero(t, written, "another agent's session log was written")
 }
+
+type stubPlanEventStore struct {
+	events []state.SessionEvent
+	err    error
+}
+
+func (s *stubPlanEventStore) ListRunEventsOfTypes(_ context.Context, runID string, types ...string) ([]state.SessionEvent, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []state.SessionEvent
+	for _, evt := range s.events {
+		if evt.RunID != runID {
+			continue
+		}
+		for _, want := range types {
+			if evt.Type == want {
+				out = append(out, evt)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func planEvent(t *testing.T, runID string, payload event.PlanUpdatedPayload) state.SessionEvent {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return state.SessionEvent{ID: "evt-" + runID, RunID: runID, Type: event.RunEventPlanUpdated, Payload: raw, CreatedAt: time.Now()}
+}
+
+func TestLastPlanProgressOfRun(t *testing.T) {
+	t.Parallel()
+	store := &stubPlanEventStore{events: []state.SessionEvent{
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 1, Total: 3, Explanation: "first"}),
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 2, Total: 3, Items: []event.PlanUpdateItem{
+			{ID: "1", Content: "done", Status: "completed"},
+			{ID: "2", Content: "short", Status: "in_progress"},
+		}}),
+		planEvent(t, "run-2", event.PlanUpdatedPayload{Completed: 9, Total: 9}),
+	}}
+	got := lastPlanProgressOfRun(context.Background(), store, "run-1")
+	if got.Done != 2 || got.Total != 3 || got.Active != "short" {
+		t.Fatalf("progress = %+v, want {2 3 short}", got)
+	}
+	// A run with no checklist reports zeros, not a stale other-run value.
+	empty := lastPlanProgressOfRun(context.Background(), store, "run-3")
+	if empty != (event.PlanProgress{}) {
+		t.Fatalf("empty run progress = %+v", empty)
+	}
+	if none := lastPlanProgressOfRun(context.Background(), nil, "run-1"); none != (event.PlanProgress{}) {
+		t.Fatalf("nil store progress = %+v", none)
+	}
+}

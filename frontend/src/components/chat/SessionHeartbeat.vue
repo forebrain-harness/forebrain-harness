@@ -1,5 +1,5 @@
 <template>
-  <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-glass)] p-3">
+  <section :class="bare ? 'heartbeat-bare' : 'rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-3'">
     <div class="mb-2 flex items-center justify-between gap-2">
       <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('heartbeat.title') }}</div>
       <span v-if="current" class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[11px] text-[var(--forebrain-muted-text)]">
@@ -41,31 +41,25 @@
  * the interval, so it sees everything the conversation has built up.
  */
 import { ref, watch } from 'vue'
-import { getErrorMessage, forebrainApi, type HeartbeatRecord } from '@/lib/api'
+import { useSessionHeartbeat } from '@/composables/useSessionHeartbeat'
 import { useI18n } from '@/locales'
 
-const props = defineProps<{ sessionId: string | null }>()
+const props = defineProps<{ sessionId: string | null; bare?: boolean }>()
 
 const { t } = useI18n()
-const current = ref<HeartbeatRecord | null>(null)
+// One shared heartbeat per session: the rail popover edits it, the drawer
+// reads whether one is on.
+const { current, load, save: saveShared, clear: clearShared, errorMessage } = useSessionHeartbeat()
 const minutes = ref(10)
 const prompt = ref('')
 const busy = ref(false)
 const error = ref('')
 
-async function load() {
-  const sid = String(props.sessionId ?? '').trim()
-  current.value = null
-  if (!sid) return
-  try {
-    const hb = await forebrainApi.heartbeat(sid)
-    current.value = hb
-    if (hb) {
-      minutes.value = Math.max(1, Math.round(hb.intervalSeconds / 60))
-      prompt.value = hb.prompt
-    }
-  } catch (e) {
-    error.value = getErrorMessage(e)
+async function loadForm() {
+  await load(String(props.sessionId ?? '').trim())
+  if (current.value) {
+    minutes.value = Math.max(1, Math.round(current.value.intervalSeconds / 60))
+    prompt.value = current.value.prompt
   }
 }
 
@@ -75,14 +69,14 @@ async function save(paused: boolean) {
   busy.value = true
   error.value = ''
   try {
-    current.value = await forebrainApi.saveHeartbeat({
+    await saveShared({
       sessionId: sid,
       intervalSeconds: Math.max(1, Number(minutes.value) || 1) * 60,
       prompt: prompt.value.trim(),
       paused,
     })
   } catch (e) {
-    error.value = getErrorMessage(e)
+    error.value = errorMessage(e)
   } finally {
     busy.value = false
   }
@@ -94,15 +88,20 @@ async function clear() {
   busy.value = true
   error.value = ''
   try {
-    await forebrainApi.clearHeartbeat(sid)
-    current.value = null
+    await clearShared(sid)
     prompt.value = ''
   } catch (e) {
-    error.value = getErrorMessage(e)
+    error.value = errorMessage(e)
   } finally {
     busy.value = false
   }
 }
 
-watch(() => props.sessionId, load, { immediate: true })
+watch(() => props.sessionId, loadForm, { immediate: true })
 </script>
+
+<style scoped>
+.heartbeat-bare {
+  /* Bare form for the rail popover: the popover is the card. */
+}
+</style>

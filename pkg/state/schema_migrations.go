@@ -13,7 +13,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 3
+const stateSchemaVersion = 4
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -37,6 +37,27 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 1, apply: migrateStateV0ToV1},
 	{version: 2, apply: migrateStateV1ToV2},
 	{version: 3, apply: migrateStateV2ToV3},
+	{version: 4, apply: migrateStateV3ToV4},
+}
+
+// migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
+// COLUMN with a non-NULL default, so it is a single statement in the
+// migration's own transaction; every existing row reads as an ordinary
+// conversation. A database whose table already carries the column (a fixture
+// built from the current schema.sql with a lowered user_version) skips the
+// statement instead of failing on a duplicate.
+func migrateStateV3ToV4(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_sessions') WHERE name='source'`).Scan(&present); err != nil {
+		return err
+	}
+	if present > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add fb_sessions.source: %w", err)
+	}
+	return nil
 }
 
 // migrateStateSchema brings the database behind db to stateSchemaVersion. The

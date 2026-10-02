@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { persistLastSessionId } from '@/composables/useAuth'
+import { persistLastSessionId } from '@/composables/useLastSession'
 import { forebrainApi, type PrimaryAgentRecord } from '@/lib/api'
 
 const records = ref<PrimaryAgentRecord[]>([])

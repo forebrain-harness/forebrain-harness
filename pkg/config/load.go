@@ -540,7 +540,6 @@ func applyPersistedDefaults(r *Root) {
 	f := false
 
 	r.Gateway.HTTPAddr = strings.TrimSpace(r.Gateway.HTTPAddr)
-	r.Gateway.Grpc.Port = strings.TrimSpace(r.Gateway.Grpc.Port)
 	r.Gateway.Auth.Mode = strings.TrimSpace(r.Gateway.Auth.Mode)
 
 	if r.Agents.Defaults.ContextInject.WarnRemainingTokens <= 0 {
@@ -651,4 +650,16 @@ func ParseRootYAML(b []byte) (Root, error) {
 		return Root{}, err
 	}
 	return r, nil
+}
+
+// ValidPrimaryAgentID reports whether id is a legal tenant key: the same
+// pattern the loader enforces on agents.definitions keys.
+func ValidPrimaryAgentID(id string) bool {
+	return primaryAgentIDPattern.MatchString(id)
+}
+
+// ValidateAgentRoot runs the loader's validation on a root that is about to
+// be written, so a configuration the CLI would reject never reaches disk.
+func ValidateAgentRoot(r *Root) error {
+	return validateLoadedRoot(r)
 }

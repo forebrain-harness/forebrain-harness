@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -29,26 +28,31 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
+	"github.com/joho/godotenv"
 )
-
-type workspaceTreeCache struct {
-	mu      sync.Mutex
-	expires time.Time
-	root    string
-	records []map[string]any
-}
-
-var wsTreeCache workspaceTreeCache
 
 func (s *Server) AttachExtraRoutes(routes Routes) {
 	if s != nil {
 		s.approvalRecovery.Do(func() { go s.recoverResolvedApprovalWaits() })
 	}
 	api := routes.Group("/api")
+	api.Post("/auth/session", s.handleWebSessionCreate)
+
+	rules := api.Group("/rules")
+	rules.Get("/agent", s.handleAgentRuleFiles)
+	rules.Get("/agent/:name", s.handleAgentRuleFile)
+	rules.Put("/agent/:name", s.handleAgentRuleFile)
+	rules.Get("/project/:projectId", s.handleProjectRuleFiles)
+	rules.Get("/project/:projectId/file", s.handleProjectRuleFile)
+	rules.Put("/project/:projectId/file", s.handleProjectRuleFile)
+	api.Get("/auth/session", s.handleWebSessionProbe)
 	api.Get("/tools", s.handleToolsList)
 	api.Get("/models", s.handleModelsList)
 
 	permissions := api.Group("/permissions")
+	permissions.Get("/approval-default", s.handleApprovalDefaultGet)
+	permissions.Put("/approval-default", s.handleApprovalDefaultPut)
+	permissions.Post("/session-preset", s.handleSessionPreset)
 	permissions.Get("/rules", s.handlePermissionRules)
 	permissions.Post("/evaluate", s.handlePermissionEvaluate)
 	permissions.Get("/explain", s.handlePermissionExplain)
@@ -58,9 +62,16 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Get("/memories/settings", s.handleMemoriesSettings)
 	api.Post("/memories/settings", s.handleMemoriesSettings)
 	api.Post("/memories/reset", s.handleMemoriesReset)
+	api.Get("/memories/files", s.handleMemoriesFilesList)
+	api.Get("/memories/file", s.handleMemoriesFileRead)
+	api.Put("/memories/file", s.handleMemoriesFileWrite)
+	api.Post("/memories/files/delete", s.handleMemoriesFilesDelete)
 
 	agents := api.Group("/agents")
 	agents.Get("/primary", s.handlePrimaryAgents)
+	agents.Post("/primary", s.handlePrimaryAgentCreate)
+	agents.Put("/primary/:id", s.handlePrimaryAgentUpdate)
+	agents.Delete("/primary/:id", s.handlePrimaryAgentDelete)
 	agents.Post("/primary/switch", s.handlePrimaryAgentSwitch)
 	agents.Get("/roster", s.handleAgentRoster)
 	agents.Post("/cancel-all", s.handleAgentCancelAll)
@@ -71,9 +82,16 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	skills.Get("/", s.handleSkillsList)
 	skills.Post("/", s.handleSkillsCreate)
 	skills.Post("/install", s.handleSkillsInstall)
+	skills.Post("/install/upload", s.handleSkillsInstallUpload)
 	skills.Get("/:name", s.handleSkillGet)
 	skills.Put("/:name", s.handleSkillsUpdate)
 	skills.Post("/toggle", s.handleSkillsToggle)
+	skills.Get("/:name/download", s.handleSkillDownload)
+	skills.Get("/:name/files", s.handleSkillFilesList)
+	skills.Get("/:name/file", s.handleSkillFileRead)
+	skills.Put("/:name/file", s.handleSkillFileWrite)
+	skills.Post("/download", s.handleSkillsDownloadBatch)
+	skills.Delete("/:name", s.handleSkillDelete)
 
 	workspace := api.Group("/workspace")
 	workspace.Get("/tree", s.handleWorkspaceTree)
@@ -124,9 +142,13 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Get("/:id/skills", s.handleProjectSkillsList)
 	projects.Post("/:id/skills", s.handleProjectSkillsCreate)
 	projects.Post("/:id/skills/install", s.handleProjectSkillsInstall)
+	projects.Post("/:id/skills/install/upload", s.handleProjectSkillsInstallUpload)
 	projects.Get("/:id/skills/:name", s.handleProjectSkillGet)
 	projects.Put("/:id/skills/:name", s.handleProjectSkillsUpdate)
 	projects.Post("/:id/skills/toggle", s.handleProjectSkillsToggle)
+	projects.Get("/:id/skills/:name/download", s.handleProjectSkillsDownload)
+	projects.Post("/:id/skills/download", s.handleProjectSkillsDownloadBatch)
+	projects.Delete("/:id/skills/:name", s.handleProjectSkillsDelete)
 
 	mcp := api.Group("/v1/mcp")
 	mcp.Get("/servers", s.handleMCPServersV1)
@@ -144,6 +166,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	cron := api.Group("/cron")
 	cron.Get("/", s.handleCronJobs)
+	cron.Post("/preview", s.handleCronPreview)
 	cron.Post("/", s.handleCronJobs)
 	cron.Get("/:id", s.handleCronJob)
 	cron.Put("/:id", s.handleCronJob)
@@ -242,58 +265,95 @@ func (s *Server) interruptUncertainGatewayApproval(wait state.Wait) {
 	}
 }
 
+// resolveWorkspacePath pins one workspace-relative path to the active
+// primary agent's workspace, resolving symlinks, and rejects anything that
+// lands outside it. The gateway's workspace endpoints are one workspace's
+// own file view; a link pointing elsewhere is not part of that view.
+func (s *Server) resolveWorkspacePath(rel string) (root, full string, err error) {
+	root = s.activeWorkspaceRoot()
+	joined := filepath.Join(root, filepath.FromSlash(rel))
+	resolved, resolveErr := tool.ResolveWithinRoots(joined, []string{root})
+	if resolveErr != nil {
+		if errors.Is(resolveErr, tool.ErrPathNotAllowed) {
+			return root, "", tool.ErrPathNotAllowed
+		}
+		return root, "", resolveErr
+	}
+	return root, resolved, nil
+}
+
 func (s *Server) handleWorkspaceTree(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	root := s.activeWorkspaceRoot()
-	wsTreeCache.mu.Lock()
-	if wsTreeCache.root == root && time.Now().Before(wsTreeCache.expires) && len(wsTreeCache.records) > 0 {
-		rec := wsTreeCache.records
-		wsTreeCache.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"records": rec})
+	root, full, err := s.resolveWorkspacePath(strings.TrimSpace(r.URL.Query().Get("path")))
+	if err != nil {
+		http.Error(w, "path is outside the workspace", http.StatusBadRequest)
 		return
 	}
-	wsTreeCache.mu.Unlock()
+	st, statErr := os.Stat(full)
+	if statErr != nil {
+		http.Error(w, statErr.Error(), http.StatusNotFound)
+		return
+	}
+	if !st.IsDir() {
+		http.Error(w, "not a directory", http.StatusBadRequest)
+		return
+	}
+	entries, readErr := os.ReadDir(full)
+	if readErr != nil {
+		http.Error(w, readErr.Error(), http.StatusInternalServerError)
+		return
+	}
 	type row struct {
+		Name  string `json:"name"`
 		Path  string `json:"path"`
 		IsDir bool   `json:"is_dir"`
 	}
-	var out []row
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	out := make([]row, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == ".git" {
+			continue
 		}
-		if path == root {
-			return nil
+		entryPath := filepath.Join(full, name)
+		info, infoErr := os.Stat(entryPath)
+		if infoErr != nil {
+			// Broken link or unreadable entry: not something the tree can
+			// open, so it is not listed.
+			continue
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
+		resolved, resolveErr := tool.ResolveWithinRoots(entryPath, []string{root})
+		if resolveErr != nil {
+			continue
 		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, ".git/") || strings.Contains(rel, "/.git/") {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+		rel, relErr := filepath.Rel(root, resolved)
+		if relErr != nil {
+			continue
 		}
-		out = append(out, row{Path: rel, IsDir: d.IsDir()})
-		return nil
-	})
-	cacheRows := make([]map[string]any, 0, len(out))
-	for _, r := range out {
-		cacheRows = append(cacheRows, map[string]any{"path": r.Path, "is_dir": r.IsDir})
+		out = append(out, row{Name: name, Path: filepath.ToSlash(rel), IsDir: info.IsDir()})
 	}
-	wsTreeCache.mu.Lock()
-	wsTreeCache.root = root
-	wsTreeCache.records = cacheRows
-	wsTreeCache.expires = time.Now().Add(2 * time.Second)
-	wsTreeCache.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		li, lj := strings.ToLower(out[i].Name), strings.ToLower(out[j].Name)
+		if li != lj {
+			return li < lj
+		}
+		return out[i].Name < out[j].Name
+	})
+	relRoot, relErr := filepath.Rel(root, full)
+	if relErr != nil {
+		http.Error(w, relErr.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"path":    filepath.ToSlash(relRoot),
+		"records": out,
+	})
 }
 
 // modelsDiscoveryTimeout bounds one ChatGPT model discovery inside a /models
@@ -382,10 +442,9 @@ func (s *Server) handleWorkspaceSnippet(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
-	root := s.activeWorkspaceRoot()
-	full := filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
-	if rr, err := filepath.Rel(root, full); err != nil || strings.HasPrefix(rr, "..") {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+	_, full, resolveErr := s.resolveWorkspacePath(rel)
+	if resolveErr != nil {
+		http.Error(w, "path is outside the workspace", http.StatusBadRequest)
 		return
 	}
 	raw, err := os.ReadFile(full)
@@ -785,14 +844,33 @@ func (s *Server) handleChatSessionCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
-		Title string `json:"title"`
+		Title  string `json:"title"`
+		Source string `json:"source"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+	// The session-purpose whitelist stays here, at the API edge; the store
+	// writes whatever it is handed.
+	switch strings.TrimSpace(body.Source) {
+	case "", "workshop":
+	default:
+		http.Error(w, "source must be empty or workshop", http.StatusBadRequest)
+		return
+	}
 	if s.Core != nil {
 		res, err := s.Core.CreateSession(r.Context(), body.Title)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if src := strings.TrimSpace(body.Source); src != "" {
+			if s.Sessions == nil {
+				http.Error(w, "session source unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if err := s.Sessions.SetSessionSource(r.Context(), res.ID, src); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
@@ -807,6 +885,12 @@ func (s *Server) handleChatSessionCreate(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if src := strings.TrimSpace(body.Source); src != "" {
+		if err := s.Sessions.SetSessionSource(r.Context(), res.ID, src); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -862,6 +946,7 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		Title      string `json:"title"`
 		CreateTime string `json:"create_time"`
 		UpdateTime string `json:"update_time"`
+		Source     string `json:"source,omitempty"`
 	}
 	var (
 		summaries []turn.SessionSummary
@@ -879,7 +964,7 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	var out []row
 	for _, sum := range summaries {
 		t := time.Unix(sum.UpdatedAt, 0).UTC().Format(time.RFC3339)
-		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t})
+		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
@@ -978,6 +1063,9 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		RunStartedAt   string              `json:"run_started_at,omitempty"`
 		RunFinishedAt  string              `json:"run_finished_at,omitempty"`
 		WorkedMs       int64               `json:"worked_duration_ms,omitempty"`
+		PlanDone       int                 `json:"plan_done,omitempty"`
+		PlanTotal      int                 `json:"plan_total,omitempty"`
+		PlanActive     string              `json:"plan_active,omitempty"`
 		Compaction     *chatCompactionRow  `json:"compaction,omitempty"`
 		Goal           *chatGoalRow        `json:"goal,omitempty"`
 		PartsJSON      string              `json:"parts_json,omitempty"`
@@ -1050,6 +1138,14 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			runFinishedAt = time.UnixMilli(t.RunFinishedAtMs).UTC().Format(time.RFC3339Nano)
 			workedMs = t.RunWorkedMs
 		}
+		// The worked line's checklist facts ride the assistant row of the
+		// run that earned them, read from that run's plan events so replay
+		// and live agree by construction.
+		planDone, planTotal, planActive := 0, 0, ""
+		if t.Role == llm.RoleAssistant && runID != "" && s.RunRT != nil {
+			progress := lastPlanProgressOfRun(r.Context(), s.RunRT, runID)
+			planDone, planTotal, planActive = progress.Done, progress.Total, progress.Active
+		}
 		m := msg{
 			ID:            t.MessageID,
 			RowID:         t.RowID,
@@ -1058,6 +1154,9 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			RunStartedAt:  runStartedAt,
 			RunFinishedAt: runFinishedAt,
 			WorkedMs:      workedMs,
+			PlanDone:      planDone,
+			PlanTotal:     planTotal,
+			PlanActive:    planActive,
 			PartsJSON:     t.PartsJSON,
 			ToolStepID:    t.ToolStepID,
 			ToolMetaJSON:  t.ToolMetaJSON,
@@ -2219,17 +2318,25 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	// the same way the webchat turn loop closes out a run it owns.
 	_ = s.RunRT.ClearWait(ctx, runID)
 	s.finishRun(ctx, sid, runID)
+	planProgress := lastPlanProgressOfRun(ctx, s.RunRT, runID)
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, "turn_completed", event.TurnCompletedPayload{
-		Text:      ans,
-		ElapsedMS: elapsed.Milliseconds(),
+		Text:       ans,
+		ElapsedMS:  elapsed.Milliseconds(),
+		PlanDone:   planProgress.Done,
+		PlanTotal:  planProgress.Total,
+		PlanActive: planProgress.Active,
 	})
 }
 
 func (s *Server) handleSkillsList(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsListWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsListWith(s.gatewayLaunchProject(), "", w, r)
 }
 
-func (s *Server) handleSkillsListWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
+// handleSkillsListWith serves the skill listing both the global and the
+// project routes use. projectID is empty for the global route and names the
+// route project otherwise; it only decides which download URLs the rows
+// carry.
+func (s *Server) handleSkillsListWith(launch safety.ProjectContext, projectID string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
@@ -2245,9 +2352,11 @@ func (s *Server) handleSkillsListWith(launch safety.ProjectContext, w http.Respo
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(overview)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"installed": s.decorateSkillList(launch, projectID, svc, overview.Installed),
+		"actions":   overview.Actions,
+	})
 }
-
 func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
 	s.handleSkillsCreateWith(s.gatewayLaunchProject(), w, r)
 }
@@ -2362,10 +2471,12 @@ func (s *Server) handleSkillGetWith(launch safety.ProjectContext, w http.Respons
 }
 
 func (s *Server) handleSkillsToggle(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsToggleWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsToggleWith(s.gatewayLaunchProject(), "", w, r)
 }
 
-func (s *Server) handleSkillsToggleWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
+// handleSkillsToggleWith takes the listing's project context so the refreshed
+// rows it answers with carry the same origin/download fields the page loaded.
+func (s *Server) handleSkillsToggleWith(launch safety.ProjectContext, projectID string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
@@ -2386,7 +2497,7 @@ func (s *Server) handleSkillsToggleWith(launch safety.ProjectContext, w http.Res
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	updated, err := svc.List()
+	updated, err := s.decoratedSkillList(launch, projectID, svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2585,7 +2696,10 @@ func (s *Server) projectSkillLaunch(w http.ResponseWriter, r *http.Request) (saf
 		http.Error(w, "project not found", http.StatusNotFound)
 		return safety.ProjectContext{}, false
 	}
-	launch, err := safety.ResolveProjectContext(s.Home, p.Root)
+	// A registered project's boundary is the path the user drew; resolving it
+	// as a launch directory would walk up to an enclosing .git and relocate
+	// this project's space onto the whole checkout.
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
 	if err != nil {
 		http.Error(w, "project could not be resolved", http.StatusBadRequest)
 		return safety.ProjectContext{}, false
@@ -2601,7 +2715,7 @@ func (s *Server) handleProjectSkillsList(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	s.handleSkillsListWith(launch, w, r)
+	s.handleSkillsListWith(launch, strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")), w, r)
 }
 
 func (s *Server) handleProjectSkillsCreate(w http.ResponseWriter, r *http.Request) {
@@ -2633,7 +2747,7 @@ func (s *Server) handleProjectSkillsToggle(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	s.handleSkillsToggleWith(launch, w, r)
+	s.handleSkillsToggleWith(launch, strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")), w, r)
 }
 
 func (s *Server) handleProjectSkillsInstall(w http.ResponseWriter, r *http.Request) {
@@ -2642,6 +2756,38 @@ func (s *Server) handleProjectSkillsInstall(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.handleSkillsInstallWith(launch, w, r)
+}
+
+func (s *Server) handleProjectSkillsInstallUpload(w http.ResponseWriter, r *http.Request) {
+	launch, ok := s.projectSkillLaunch(w, r)
+	if !ok {
+		return
+	}
+	s.handleSkillsInstallUploadWith(launch, strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")), w, r)
+}
+
+func (s *Server) handleProjectSkillsDownload(w http.ResponseWriter, r *http.Request) {
+	launch, ok := s.projectSkillLaunch(w, r)
+	if !ok {
+		return
+	}
+	s.handleSkillDownloadWith(launch, w, r)
+}
+
+func (s *Server) handleProjectSkillsDownloadBatch(w http.ResponseWriter, r *http.Request) {
+	launch, ok := s.projectSkillLaunch(w, r)
+	if !ok {
+		return
+	}
+	s.handleSkillsDownloadBatchWith(launch, w, r)
+}
+
+func (s *Server) handleProjectSkillsDelete(w http.ResponseWriter, r *http.Request) {
+	launch, ok := s.projectSkillLaunch(w, r)
+	if !ok {
+		return
+	}
+	s.handleSkillDeleteWith(launch, strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")), w, r)
 }
 
 func (s *Server) publishSkillLifecycleNotify(sessionID, action, name string, detail map[string]any) {
@@ -2946,6 +3092,103 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 // is ordered: the first entry is the agent's primary provider, so replacing the
 // whole list is the only honest write — patching one entry would leave the
 // order, and therefore the choice of primary, ambiguous.
+// The providers DTO: the web surface's shape for one model service row. The
+// engine stores one entry per model (yaml model is a scalar after expansion);
+// adjacent entries sharing a signature fold into one row with a models list,
+// which is the shape the user edits. api_key never travels: the GET carries
+// only whether it is set and its last four characters, and a PUT with no key
+// fields at all means "leave the stored key alone".
+type providerRowDTO struct {
+	Provider   string          `json:"provider"`
+	BaseURL    string          `json:"base_url,omitempty"`
+	APIPath    string          `json:"api_path,omitempty"`
+	Params     json.RawMessage `json:"params,omitempty"`
+	Models     []string        `json:"models"`
+	APIKeySet  bool            `json:"api_key_set"`
+	APIKeyHint string          `json:"api_key_hint,omitempty"`
+}
+
+type providerPutRow struct {
+	Provider    string          `json:"provider"`
+	BaseURL     string          `json:"base_url,omitempty"`
+	APIPath     string          `json:"api_path,omitempty"`
+	Params      json.RawMessage `json:"params,omitempty"`
+	Model       string          `json:"model,omitempty"`
+	Models      []string        `json:"models,omitempty"`
+	APIKey      string          `json:"api_key,omitempty"`
+	APIKeyPlain string          `json:"api_key_plain,omitempty"`
+}
+
+// providerSignature is what two adjacent entries must share to fold into one
+// row: same service pointed at the same endpoint, same tuning. The key is
+// part of it too — two rows of one provider hold the same key by construction
+// (the env name is provider-scoped), so including it changes nothing but
+// keeps the fold honest.
+func providerSignature(item config.AgentLLMProviderConfig) string {
+	return strings.Join([]string{
+		strings.TrimSpace(item.Provider),
+		strings.TrimSpace(item.BaseURL),
+		strings.TrimSpace(item.APIPath),
+		strings.TrimSpace(string(item.Params)),
+		strings.TrimSpace(item.APIKey),
+	}, "\x00")
+}
+
+func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []providerRowDTO {
+	rows := make([]providerRowDTO, 0, len(entries))
+	prevSig := ""
+	for _, item := range entries {
+		models := []string{}
+		if len(item.Models) > 0 {
+			models = append(models, item.Models...)
+		} else if strings.TrimSpace(item.Model) != "" {
+			models = append(models, item.Model)
+		}
+		key := strings.TrimSpace(item.APIKey)
+		row := providerRowDTO{
+			Provider:  strings.TrimSpace(item.Provider),
+			BaseURL:   strings.TrimSpace(item.BaseURL),
+			APIPath:   strings.TrimSpace(item.APIPath),
+			Params:    json.RawMessage(item.Params),
+			Models:    models,
+			APIKeySet: key != "",
+		}
+		if key != "" {
+			row.APIKeyHint = providerKeyHint(home, key)
+		}
+		// Fold only adjacent rows: an interleaved order (deepseek, openai,
+		// deepseek) is a deliberate fallback order, not one service.
+		if sig := providerSignature(item); len(rows) > 0 && sig == prevSig && rows[len(rows)-1].Provider == row.Provider {
+			rows[len(rows)-1].Models = append(rows[len(rows)-1].Models, models...)
+			continue
+		} else {
+			prevSig = providerSignature(item)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// providerKeyHint is the last four characters of the key the config refers
+// to. A stored ${ENV} reference is resolved through the home's .env — the
+// hint is meant for the user who typed the key, and "KEY}" would be noise. A
+// reference with no stored value, and any key four characters or shorter, is
+// masked whole.
+func providerKeyHint(home string, key string) string {
+	if name := strings.TrimSpace(key); strings.HasPrefix(name, "${") && strings.HasSuffix(name, "}") {
+		envName := strings.TrimSuffix(strings.TrimPrefix(name, "${"), "}")
+		if env, err := godotenv.Read(filepath.Join(strings.TrimSpace(home), ".env")); err == nil {
+			key = strings.TrimSpace(env[envName])
+		} else {
+			return "\u2022\u2022\u2022\u2022"
+		}
+	}
+	if key == "" || len(key) <= 4 {
+		return "\u2022\u2022\u2022\u2022"
+	}
+	return key[len(key)-4:]
+}
+
 func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	active, err := s.activePrimarySummary()
 	if err != nil {
@@ -2959,18 +3202,19 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		providers := append([]config.AgentLLMProviderConfig(nil), cfg.Agents.Definitions[active.ID].LLMProviders...)
-		config.RedactSecrets(&providers)
-		writeAgentsJSON(w, map[string]any{"agent_id": active.ID, "providers": providers})
+		def := cfg.Agents.Definitions[active.ID]
+		writeAgentsJSON(w, map[string]any{
+			"agent_id":  active.ID,
+			"providers": providerRowsFor(strings.TrimSpace(s.Home), def.LLMProviders),
+		})
 	case http.MethodPut:
 		var req struct {
-			Providers []config.AgentLLMProviderConfig `json:"providers"`
+			Providers []providerPutRow `json:"providers"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		config.ClearRedactedSecrets(&req.Providers)
 		cfg, err := s.persistedConfig()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2980,7 +3224,50 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
 		}
 		def := cfg.Agents.Definitions[active.ID]
-		def.LLMProviders = req.Providers
+		// A key the request leaves empty is a key the user did not touch:
+		// carry the stored one for that provider forward instead of clearing
+		// it — the DTO never held the old value to send back.
+		oldKeyByProvider := map[string]string{}
+		for _, item := range def.LLMProviders {
+			if key := strings.TrimSpace(item.APIKey); key != "" {
+				if _, seen := oldKeyByProvider[strings.TrimSpace(item.Provider)]; !seen {
+					oldKeyByProvider[strings.TrimSpace(item.Provider)] = key
+				}
+			}
+		}
+		entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
+		for _, row := range req.Providers {
+			models := row.Models
+			if len(models) == 0 && strings.TrimSpace(row.Model) != "" {
+				models = []string{row.Model}
+			}
+			if len(models) == 0 {
+				models = []string{""}
+			}
+			apiKey := strings.TrimSpace(row.APIKey)
+			if plain := strings.TrimSpace(row.APIKeyPlain); plain != "" {
+				// A plaintext key never enters the config: it is stored in the
+				// home's .env and the yaml keeps only the ${ENV} reference.
+				apiKey, err = process.ProviderAPIKeyConfigReference(strings.TrimSpace(s.Home), strings.TrimSpace(row.Provider), plain)
+				if err != nil {
+					http.Error(w, "could not store the api key: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			} else if apiKey == "" {
+				apiKey = oldKeyByProvider[strings.TrimSpace(row.Provider)]
+			}
+			for _, model := range models {
+				entries = append(entries, config.AgentLLMProviderConfig{
+					Provider: strings.TrimSpace(row.Provider),
+					Model:    strings.TrimSpace(model),
+					APIKey:   apiKey,
+					BaseURL:  strings.TrimSpace(row.BaseURL),
+					APIPath:  strings.TrimSpace(row.APIPath),
+					Params:   config.LLMRequestParams(row.Params),
+				})
+			}
+		}
+		def.LLMProviders = entries
 		cfg.Agents.Definitions[active.ID] = def
 		if err := s.saveAndReload(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -3095,7 +3382,29 @@ func (s *Server) handleCronJobs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeAgentsJSON(w, map[string]any{"agent_id": agentID, "records": jobs})
+		// The layer split the two cron surfaces ask for: the agent page lists
+		// only agent-wide jobs, a project tab only its own. Either way the
+		// filter is in memory — the standing-job count per agent is small and
+		// the storage interface stays untouched.
+		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		if projectID != "" {
+			store := s.projectStore()
+			if store == nil {
+				http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if _, err := store.Get(r.Context(), projectID); err != nil {
+				http.Error(w, "project not found", http.StatusNotFound)
+				return
+			}
+		}
+		filtered := jobs[:0]
+		for _, job := range jobs {
+			if strings.TrimSpace(job.ProjectID) == projectID {
+				filtered = append(filtered, job)
+			}
+		}
+		writeAgentsJSON(w, map[string]any{"agent_id": agentID, "records": filtered})
 	case http.MethodPost:
 		var req cronJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3317,6 +3626,22 @@ type projectPayload struct {
 	Archived       *bool  `json:"archived"`
 }
 
+// projectIsTrusted reads the persisted trust decision for one project root —
+// the same record the launch prompt writes and the skill/MCP gates read.
+func projectIsTrusted(home string, root string) bool {
+	home = strings.TrimSpace(home)
+	root = strings.TrimSpace(root)
+	if home == "" || root == "" {
+		return false
+	}
+	project, err := safety.ResolveRegisteredProject(root)
+	if err != nil {
+		return false
+	}
+	trusted, err := safety.IsTrusted(home, project)
+	return err == nil && trusted
+}
+
 func projectRow(p state.Project) map[string]any {
 	return map[string]any{
 		"id":              p.ID,
@@ -3495,8 +3820,12 @@ func (s *Server) handleProjectOne(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		row := projectRow(p)
+		// The detail page's trust gate reads this: without it, a project the
+		// user already trusted shows the gate again on every reload.
+		row["trusted"] = projectIsTrusted(s.Home, p.Root)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(projectRow(p))
+		_ = json.NewEncoder(w).Encode(row)
 	case http.MethodPatch:
 		var body projectPayload
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
@@ -3703,4 +4032,417 @@ func (s *Server) handleProjectSessionsList(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": rows})
+}
+
+// The cron schedule preview: a pure function over the engine's own parser, so
+// the builder a web user fills in and the scheduler that later fires the job
+// can never disagree about what an expression means.
+
+// cronPreviewNext is how many upcoming fire times a preview shows. Three is
+// enough to see the shape of a schedule without paging.
+const cronPreviewNext = 3
+
+func (s *Server) handleCronPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Schedule string `json:"schedule"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	raw := strings.TrimSpace(body.Schedule)
+	response := map[string]any{"raw": raw, "valid": false}
+	if raw != "" {
+		schedule, err := turn.ParseSchedule(raw, time.Now())
+		if err != nil {
+			// A preview of a not-yet-valid expression is the endpoint's
+			// normal job, not an error condition: the builder shows the
+			// engine's own message while the user is still typing.
+			response["error"] = err.Error()
+		} else {
+			response["valid"] = true
+			response["kind"] = string(schedule.ScheduleKind)
+			next := make([]string, 0, cronPreviewNext)
+			after := time.Now()
+			for len(next) < cronPreviewNext {
+				at, ok := schedule.Next(after)
+				if !ok {
+					break
+				}
+				next = append(next, at.Format(time.RFC3339))
+				after = at
+			}
+			response["next"] = next
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+// agentRuleFiles is the primary agent's instruction-file whitelist. It
+// mirrors pkg/home's orderedBootstrapFiles (AGENTS.md/SOUL.md/USER.md): the
+// files the workspace bootstrap seeds are the files this surface may create
+// and edit. A change in what the assembler reads must be made there first,
+// then mirrored here.
+var agentRuleFiles = []string{"AGENTS.md", "SOUL.md", "USER.md"}
+
+// projectRuleFile is the only instruction file a project layer carries.
+const projectRuleFile = "FOREBRAIN.md"
+
+// assemblyBudgetBytes mirrors pkg/home's per-file markdown budget: files
+// larger than this still save, but the assembler truncates them, and the
+// write answer says so.
+const assemblyBudgetBytes = 12_000
+
+const rulesBodyLimit = 64 << 10
+
+func isAgentRuleFile(name string) bool {
+	for _, candidate := range agentRuleFiles {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
+type ruleFileRow struct {
+	Name      string `json:"name"`
+	Exists    bool   `json:"exists"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+	UpdatedAt int64  `json:"updated_at,omitempty"`
+}
+
+func (s *Server) handleAgentRuleFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	root := s.activeWorkspaceRoot()
+	rows := make([]ruleFileRow, 0, len(agentRuleFiles))
+	for _, name := range agentRuleFiles {
+		row := ruleFileRow{Name: name}
+		if info, err := os.Stat(filepath.Join(root, name)); err == nil {
+			row.Exists = true
+			row.SizeBytes = info.Size()
+			row.UpdatedAt = info.ModTime().Unix()
+		}
+		rows = append(rows, row)
+	}
+	writeJSON(w, map[string]any{"files": rows})
+}
+
+func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(pathParam(r, "name"))
+	if !isAgentRuleFile(name) {
+		http.Error(w, "unsupported rule file", http.StatusBadRequest)
+		return
+	}
+	root := s.activeWorkspaceRoot()
+	full := filepath.Join(root, name)
+	switch r.Method {
+	case http.MethodGet:
+		body, err := os.ReadFile(full)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeJSON(w, map[string]any{"name": name, "exists": false, "content": ""})
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(body)
+	case http.MethodPut:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, rulesBodyLimit))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := os.WriteFile(full, body, 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		answer := map[string]any{"name": name, "bytes": len(body)}
+		if len(body) > assemblyBudgetBytes {
+			answer["warning"] = "exceeds_assembly_budget"
+		}
+		writeJSON(w, answer)
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// projectRuleDirs lists the root plus its first-level subdirectories — the
+// only layers a FOREBRAIN.md may be created in. Fifty is the cap: a listing
+// that large says the project should be curated from the file system, not a
+// dropdown.
+func projectRuleDirs(projectRoot string) []string {
+	dirs := []string{""}
+	entries, err := os.ReadDir(projectRoot)
+	if err != nil {
+		return dirs
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == ".git" {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if len(dirs) >= 50 {
+			break
+		}
+		dirs = append(dirs, entry.Name())
+	}
+	sort.Strings(dirs[1:])
+	return dirs
+}
+
+func (s *Server) projectForRules(w http.ResponseWriter, r *http.Request) (root string, ok bool) {
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return "", false
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "projectId"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return "", false
+	}
+	return p.Root, true
+}
+
+// projectRulePath validates the ?dir= layer and returns the FOREBRAIN.md path
+// inside it.
+func projectRulePath(projectRoot, dir string) (string, bool) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return filepath.Join(projectRoot, projectRuleFile), true
+	}
+	if strings.ContainsAny(dir, "/\\") || dir == "." || dir == ".." {
+		return "", false
+	}
+	info, err := os.Stat(filepath.Join(projectRoot, dir))
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return filepath.Join(projectRoot, dir, projectRuleFile), true
+}
+
+func (s *Server) handleProjectRuleFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	projectRoot, ok := s.projectForRules(w, r)
+	if !ok {
+		return
+	}
+	type row struct {
+		Dir       string `json:"dir"`
+		Exists    bool   `json:"exists"`
+		SizeBytes int64  `json:"size_bytes,omitempty"`
+		UpdatedAt int64  `json:"updated_at,omitempty"`
+	}
+	dirs := projectRuleDirs(projectRoot)
+	rows := make([]row, 0, len(dirs))
+	for _, dir := range dirs {
+		full := filepath.Join(projectRoot, dir, projectRuleFile)
+		item := row{Dir: dir}
+		if info, err := os.Stat(full); err == nil {
+			item.Exists = true
+			item.SizeBytes = info.Size()
+			item.UpdatedAt = info.ModTime().Unix()
+		}
+		rows = append(rows, item)
+	}
+	// The create dropdown offers every layer without a file yet, so the
+	// listing stays honest about what "new" means here.
+	creatable := make([]string, 0, len(dirs))
+	for _, item := range rows {
+		if !item.Exists {
+			creatable = append(creatable, item.Dir)
+		}
+	}
+	writeJSON(w, map[string]any{"files": rows, "create": creatable})
+}
+
+func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
+	projectRoot, ok := s.projectForRules(w, r)
+	if !ok {
+		return
+	}
+	full, valid := projectRulePath(projectRoot, r.URL.Query().Get("dir"))
+	if !valid {
+		http.Error(w, "unsupported directory", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		body, err := os.ReadFile(full)
+		if err != nil {
+			if os.IsNotExist(err) {
+				writeJSON(w, map[string]any{"exists": false, "content": ""})
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write(body)
+	case http.MethodPut:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, rulesBodyLimit))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(full, body, 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		answer := map[string]any{"bytes": len(body)}
+		if len(body) > assemblyBudgetBytes {
+			answer["warning"] = "exceeds_assembly_budget"
+		}
+		writeJSON(w, answer)
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// --- Approval presets --------------------------------------------------------
+
+type approvalDefaultAnswer struct {
+	Current     *string `json:"current"`
+	Description string  `json:"description,omitempty"`
+}
+
+func (s *Server) handleApprovalDefaultGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := s.liveCfg()
+	mode := s.permissionRuntimeMode()
+	preset, ok := safety.MatchApprovalPreset(mode, cfg)
+	if !ok {
+		writeJSON(w, approvalDefaultAnswer{Current: nil})
+		return
+	}
+	id := preset.ID
+	writeJSON(w, approvalDefaultAnswer{Current: &id, Description: preset.Description})
+}
+
+func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Preset string `json:"preset"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	preset, ok := safety.ApprovalPresetByID(req.Preset)
+	if !ok {
+		http.Error(w, "unknown approval preset", http.StatusBadRequest)
+		return
+	}
+	cfg, err := s.persistedConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// ApplyToConfig is the same pairing the terminal preset uses: the named
+	// profile must go for the sandbox half to take effect, and the approval
+	// half persists through the policy mode.
+	preset.ApplyToConfig(&cfg)
+	cfg.ApprovalPolicy = config.NewApprovalPolicy(config.ApprovalPolicyMode(preset.Approval))
+	if err := s.saveAndReload(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	id := preset.ID
+	writeJSON(w, approvalDefaultAnswer{Current: &id, Description: preset.Description})
+}
+
+// handleSessionPreset switches one conversation to a built-in preset for its
+// remaining lifetime. Nothing is written to disk — the same rule the
+// terminal's /permissions follows: a preset picked to get through one task
+// must not govern the next session.
+func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Preset    string `json:"preset"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sid := strings.TrimSpace(req.SessionID)
+	if sid == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	preset, ok := safety.ApprovalPresetByID(req.Preset)
+	if !ok {
+		http.Error(w, "unknown approval preset", http.StatusBadRequest)
+		return
+	}
+	runner := s.runnerFor(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	// The sandbox half moves the live config; the approval half is a session
+	// destination in the permission store. Both are memory-only here.
+	if runner.AppCfg != nil {
+		preset.ApplyToConfig(runner.AppCfg)
+	}
+	runner.ApplyPermissionUpdate(safety.PermissionUpdate{
+		Type:        safety.UpdateSetMode,
+		Destination: safety.DestinationSession,
+		SessionID:   sid,
+		Mode:        preset.Approval,
+	})
+	if s.Env != nil {
+		s.Env.RefreshSandboxRuntime()
+	}
+	writeJSON(w, map[string]any{"ok": true, "description": preset.Description})
+}
+
+// permissionRuntimeMode reads the live permission mode the way the running
+// process enforces it, falling back to the configured policy when no runtime
+// is mounted yet.
+func (s *Server) permissionRuntimeMode() safety.PermissionMode {
+	if s.Runner != nil && s.Runner.AppCfg != nil && strings.TrimSpace(string(s.Runner.AppCfg.ApprovalPolicy.Mode)) != "" {
+		return safety.PermissionMode(s.Runner.AppCfg.ApprovalPolicy.Mode)
+	}
+	if cfg := s.liveCfg(); cfg != nil {
+		return safety.PermissionMode(cfg.ApprovalPolicy.Mode)
+	}
+	return safety.ApprovalOnRequest
+}
+
+func pathParam(r *http.Request, name string) string {
+	return strings.TrimSpace(ParamsFromContext(r.Context()).ByName(name))
+}
+
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
 }

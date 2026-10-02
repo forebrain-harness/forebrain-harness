@@ -5,7 +5,7 @@ import { forebrainApi, type AgentRosterRow } from '@/lib/api'
 export function agentRosterViewTarget(row: AgentRosterRow): RouteLocationRaw | null {
   const sessionId = String(row.sessionId ?? '').trim()
   if (!sessionId) return null
-  return { path: '/', query: { session: sessionId, live: '1' } }
+  return { path: '/', query: { session: sessionId } }
 }
 
 export function useAgentRoster() {

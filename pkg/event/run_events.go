@@ -110,6 +110,12 @@ type TurnStartedPayload struct{}
 type TurnCompletedPayload struct {
 	Text      string `json:"text,omitempty"`
 	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	// PlanDone/PlanTotal/PlanActive carry the turn's final checklist state so
+	// every surface's worked line reports the same facts the terminal does.
+	// Empty when the turn had no checklist.
+	PlanDone   int    `json:"plan_done,omitempty"`
+	PlanTotal  int    `json:"plan_total,omitempty"`
+	PlanActive string `json:"plan_active,omitempty"`
 }
 
 type TurnCancelledPayload struct {

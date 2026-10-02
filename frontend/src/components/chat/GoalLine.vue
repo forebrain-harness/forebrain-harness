@@ -102,19 +102,19 @@ function formatGoalDuration(ms: number): string {
 
 <style scoped>
 .goal-line {
-  --goal-accent: #d97706;
+  --goal-accent: var(--forebrain-warning);
   border-left: 3px solid var(--goal-accent);
   border-radius: 0 10px 10px 0;
-  background: color-mix(in srgb, var(--goal-accent) 6%, var(--forebrain-surface-soft));
+  background: color-mix(in srgb, var(--goal-accent) 6%, var(--forebrain-surface));
   padding: 8px 12px;
 }
 
 .goal-line.is-done {
-  --goal-accent: #16a34a;
+  --goal-accent: var(--forebrain-success);
 }
 
 .goal-line.is-failed {
-  --goal-accent: #e5484d;
+  --goal-accent: var(--forebrain-danger);
 }
 
 .goal-line.is-muted {

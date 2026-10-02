@@ -3,8 +3,10 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -132,16 +134,13 @@ func (s *Server) handleAgentCancelAll(w http.ResponseWriter, r *http.Request) {
 
 // applyPrimaryAgent rebinds the gateway to a primary agent. The isolation
 // boundary itself is rebuilt by the shared routine, so the terminal and the web
-// cannot drift; only gateway-owned state (upload root, tree cache, subscriber
-// notification) is handled here.
+// cannot drift; only gateway-owned state (upload root, subscriber
+// notification) is handled here. The workspace tree holds no cache to drop:
+// every request lists one directory of the active agent's workspace.
 func (s *Server) applyPrimaryAgent(active config.Summary) error {
 	if s == nil {
 		return nil
 	}
-	wsTreeCache.mu.Lock()
-	wsTreeCache.records = nil
-	wsTreeCache.expires = time.Time{}
-	wsTreeCache.mu.Unlock()
 
 	if s.Runner != nil && s.MemoryStore != nil {
 		s.Runner.MemoryStore = s.MemoryStore
@@ -450,4 +449,194 @@ func elapsedSeconds(start, updated int64) int {
 		return 0
 	}
 	return int(updated - start)
+}
+
+// --- Primary agent CRUD -----------------------------------------------------
+//
+// The primary agent is the tenant: its ID keys the state database rows, the
+// workspace directory and the skill state paths. The ID is therefore
+// immutable after creation — "edit" changes a display name and a description
+// only — and deletion removes the definition from forebrain.yaml without
+// touching the directories or history it owns on disk.
+
+type primaryAgentWriteRequest struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	WorkspaceRoot string `json:"workspace_root"`
+}
+
+func decodePrimaryAgentBody(w http.ResponseWriter, r *http.Request, req *primaryAgentWriteRequest) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		http.Error(w, "trailing JSON content", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var req primaryAgentWriteRequest
+	if !decodePrimaryAgentBody(w, r, &req) {
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if !config.ValidPrimaryAgentID(id) {
+		http.Error(w, "invalid agent id", http.StatusBadRequest)
+		return
+	}
+	cfg, err := s.persistedConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if cfg.Agents.Definitions == nil {
+		cfg.Agents.Definitions = map[string]config.AgentDefinition{}
+	}
+	if _, exists := cfg.Agents.Definitions[id]; exists {
+		http.Error(w, "agent id already exists", http.StatusConflict)
+		return
+	}
+	// The workspace root is derived from the tenant key (<home>/workspaces/
+	// <id>, or <home>/workspace for main); the config schema has no override
+	// for it. A caller may pass the expected root to have it validated —
+	// anything else is a mismatch, not a relocation.
+	root := strings.TrimSpace(req.WorkspaceRoot)
+	if root != "" {
+		absRoot, absErr := filepath.Abs(root)
+		if absErr != nil {
+			http.Error(w, absErr.Error(), http.StatusBadRequest)
+			return
+		}
+		info, statErr := os.Stat(absRoot)
+		if statErr != nil || !info.IsDir() {
+			http.Error(w, "workspace_root must be an existing directory", http.StatusBadRequest)
+			return
+		}
+	}
+	cfg.Agents.Definitions[id] = config.AgentDefinition{
+		Primary:     true,
+		DisplayName: strings.TrimSpace(req.Name),
+		Description: strings.TrimSpace(req.Description),
+	}
+	if err := validateLoadedRootForAgents(&cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.saveAndReload(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resolver, err := s.primaryAgentResolver()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The workspace subdirectories (skills, shared roots) are materialised on
+	// demand exactly as a switch would.
+	for _, sum := range resolver.All() {
+		if sum.ID == id {
+			_ = config.EnsurePrimaryAgentDirs(sum)
+			break
+		}
+	}
+	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: "", Records: resolver.All()})
+}
+
+// validateLoadedRootForAgents applies the loader's own validation to the
+// about-to-be-written root, so a config the CLI would reject never lands.
+func validateLoadedRootForAgents(cfg *config.Root) error {
+	return config.ValidateAgentRoot(cfg)
+}
+
+func (s *Server) handlePrimaryAgentUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	var req primaryAgentWriteRequest
+	if !decodePrimaryAgentBody(w, r, &req) {
+		return
+	}
+	cfg, err := s.persistedConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	def, exists := cfg.Agents.Definitions[id]
+	if !exists {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+	// The ID is the tenant key and never moves; only the presentation fields
+	// are editable.
+	def.DisplayName = strings.TrimSpace(req.Name)
+	def.Description = strings.TrimSpace(req.Description)
+	cfg.Agents.Definitions[id] = def
+	if err := validateLoadedRootForAgents(&cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := s.saveAndReload(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resolver, err := s.primaryAgentResolver()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: "", Records: resolver.All()})
+}
+
+func (s *Server) handlePrimaryAgentDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	cfg, err := s.persistedConfig()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, exists := cfg.Agents.Definitions[id]; !exists {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+	active, err := s.activePrimarySummary()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if id == active.ID {
+		http.Error(w, "cannot delete the active primary agent", http.StatusConflict)
+		return
+	}
+	if id == "main" {
+		http.Error(w, "cannot delete the default primary agent", http.StatusConflict)
+		return
+	}
+	delete(cfg.Agents.Definitions, id)
+	if err := s.saveAndReload(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resolver, err := s.primaryAgentResolver()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: active.ID, Records: resolver.All()})
 }

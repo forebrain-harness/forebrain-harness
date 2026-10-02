@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { configDefaults, defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
@@ -21,6 +21,9 @@ export default defineConfig({
     // are not put through Vite, so the CSS import reaches Node as an unknown
     // file extension; inlining it lets the same pipeline the app uses handle it.
     server: { deps: { inline: ['vue-stream-markdown'] } },
+    // e2e/ holds Playwright specs that drive a real browser and a real
+    // gateway; vitest must not try to run them in jsdom.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
   },
   define: {
     __FOREBRAIN_VERSION__: JSON.stringify(forebrainVersion),
@@ -50,17 +53,6 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/forebrain/api/v1': {
-        target: 'http://localhost:8216',
-        changeOrigin: true,
-        rewrite(path) {
-          let p = path.replace(/^\/forebrain\/api\/v1/, '/superagent/api/v1')
-          const legacySeg = String.fromCharCode(111, 112, 101, 110, 99, 108, 97, 119)
-          p = p.replace('/deploy/gateway', `/deploy/${legacySeg}`)
-          p = p.replace('/superagent/api/v1/relay/', `/superagent/api/v1/${legacySeg}/relay/`)
-          return p
-        },
-      },
       '/api': {
         target: 'http://127.0.0.1:6060',
         changeOrigin: true,
@@ -68,6 +60,12 @@ export default defineConfig({
       '/ws': {
         target: 'ws://127.0.0.1:6060',
         ws: true,
+        // The gateway's default origin check compares Origin against Host;
+        // rewrite both to the target so the proxied handshake passes it.
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyReqWs', (proxyReq) => proxyReq.setHeader('origin', 'http://127.0.0.1:6060'))
+        },
       },
     },
   },

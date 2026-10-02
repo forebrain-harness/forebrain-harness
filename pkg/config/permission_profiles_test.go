@@ -802,7 +802,7 @@ func TestLoadExpandsOnlyBracedYAMLEnvReference(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "forebrain.yaml")
 	body := strings.Join([]string{
 		"gateway:",
-		"  banner_text: token ${BRACED_TOKEN} $UNBRACED_TOKEN",
+		"  http_addr: token ${BRACED_TOKEN} $UNBRACED_TOKEN",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -815,8 +815,8 @@ func TestLoadExpandsOnlyBracedYAMLEnvReference(t *testing.T) {
 		t.Fatalf("Load error: %v", err)
 	}
 	want := "token expanded $UNBRACED_TOKEN"
-	if got := cfg.Gateway.BannerText; got != want {
-		t.Fatalf("banner_text = %q, want %q", got, want)
+	if got := cfg.Gateway.HTTPAddr; got != want {
+		t.Fatalf("gateway.http_addr = %q, want %q", got, want)
 	}
 }
 

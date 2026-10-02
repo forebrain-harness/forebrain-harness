@@ -74,8 +74,11 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 	case "run_completed":
 		typeName = event.RunEventTurnCompleted
 		payload = event.TurnCompletedPayload{
-			Text:      m.Text,
-			ElapsedMS: int64Field(m.Data, "elapsed_ms"),
+			Text:       m.Text,
+			ElapsedMS:  int64Field(m.Data, "elapsed_ms"),
+			PlanDone:   int(int64Field(m.Data, "plan_done")),
+			PlanTotal:  int(int64Field(m.Data, "plan_total")),
+			PlanActive: planActiveField(m.Data),
 		}
 	case "run_cancelled":
 		typeName = event.RunEventTurnCancelled
@@ -755,4 +758,48 @@ func (sub *runEventSubscription) Close() {
 	sub.bus.mu.Lock()
 	delete(sub.bus.subs, sub.id)
 	sub.bus.mu.Unlock()
+}
+
+// planActiveField reads the worked line's active-task title from a legacy
+// run_completed data map. Absent keys mean the turn had no checklist in
+// flight; the payload then stays silent rather than naming an empty task.
+func planActiveField(v any) string {
+	asMap, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := asMap["plan_active"].(string)
+	return strings.TrimSpace(s)
+}
+
+// runPlanEventLister is the slice of the run store the plan lookup needs.
+type runPlanEventLister interface {
+	ListRunEventsOfTypes(ctx context.Context, runID string, types ...string) ([]state.SessionEvent, error)
+}
+
+// lastPlanProgressOfRun folds the run's final checklist update into the
+// worked line's three facts. A run without a checklist reports zeros — the
+// same silence the terminal's formatWorkingCounters produces.
+func lastPlanProgressOfRun(ctx context.Context, runs runPlanEventLister, runID string) event.PlanProgress {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || runs == nil {
+		return event.PlanProgress{}
+	}
+	events, err := runs.ListRunEventsOfTypes(ctx, runID, event.RunEventPlanUpdated)
+	if err != nil {
+		return event.PlanProgress{}
+	}
+	var last *event.PlanUpdatedPayload
+	for i := len(events) - 1; i >= 0; i-- {
+		var payload event.PlanUpdatedPayload
+		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
+			continue
+		}
+		last = &payload
+		break
+	}
+	if last == nil {
+		return event.PlanProgress{}
+	}
+	return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
 }

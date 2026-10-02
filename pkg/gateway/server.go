@@ -586,9 +586,9 @@ func (s *Server) AttachREST(srv *RestServer) {
 	s.attachStaticUI(srv)
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+// The default origin check applies: a browser handshake must come from the
+// same host it shares the session cookie with.
+var upgrader = websocket.Upgrader{}
 
 type wsClientMsg struct {
 	Op                     string                             `json:"op"`
@@ -626,6 +626,12 @@ type wsClientMessage struct {
 	// of the text: a path in a prompt is just a path, on every surface, and the
 	// server re-validates these before attaching them.
 	MentionImages []string `json:"mention_images"`
+	// SkillName/SkillPath activate one skill for this turn — the web workshop's
+	// way of doing what the terminal's slash handoff does. The path is
+	// validated against the live skill set before the turn starts; a slash
+	// command naming a skill still wins.
+	SkillName string `json:"skill_name,omitempty"`
+	SkillPath string `json:"skill_path,omitempty"`
 }
 
 type wsServerMsg struct {
@@ -651,17 +657,9 @@ func runEventToWSMessage(requestID, traceID string, evt event.RunEvent) wsServer
 	}
 }
 
-func (s *Server) controlPlaneToken() string {
-	if s == nil || s.Env == nil || s.Env.Deps.AppCfg == nil {
-		return ""
-	}
-	return strings.TrimSpace(s.Env.Deps.AppCfg.Gateway.Auth.Token)
-}
-
 func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
-	if tok := s.controlPlaneToken(); tok != "" {
-		q := r.URL.Query().Get("token")
-		if !ControlPlaneAuthorized(r, tok, q) {
+	if s != nil && s.Env != nil && s.Env.Deps.AppCfg != nil {
+		if err := authorizeControlPlane(r, s.Env.Deps.AppCfg); err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -1466,6 +1464,18 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		goalObjective := strings.TrimSpace(sc.GoalObjective)
 		skillName := strings.TrimSpace(sc.SkillName)
 		skillPath := strings.TrimSpace(sc.SkillPath)
+		if skillName == "" && skillPath == "" {
+			// A client may name the skill for this turn directly (the workshop
+			// does); a slash handoff above still takes precedence.
+			skillName = strings.TrimSpace(m.Message.SkillName)
+			skillPath = strings.TrimSpace(m.Message.SkillPath)
+			if skillPath != "" || skillName != "" {
+				if err := s.validateExplicitSkillSelection(skillName, skillPath); err != nil {
+					writeMsg(wsServerMsg{Op: "run_error", RequestID: m.RequestID, SessionID: sid, Error: err.Error()})
+					return
+				}
+			}
+		}
 		if sc.ShouldContinueRun {
 			rawContentForRetrieval = originalContent
 			content = sc.ContinueInput
@@ -2051,6 +2061,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			_ = s.RunEvents().Publish(context.Background(), event.NewRunEvent("", runID, sid, event.RunEventAssistantDelta,
 				event.AssistantDeltaPayload{Text: out, FirstDeltaMS: time.Since(runStart).Milliseconds()}, time.Now()))
 		}
+		planProgress := lastPlanProgressOfRun(agCtx, s.RunRT, runID)
 		msg := wsServerMsg{
 			Op:        "run_completed",
 			RequestID: m.RequestID,
@@ -2058,7 +2069,10 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			SessionID: sid,
 			Text:      out,
 			Data: map[string]any{
-				"elapsed_ms": runElapsed.Milliseconds(),
+				"elapsed_ms":  runElapsed.Milliseconds(),
+				"plan_done":   planProgress.Done,
+				"plan_total":  planProgress.Total,
+				"plan_active": planProgress.Active,
 			},
 		}
 		// What the run never took goes back before anything reports its end.

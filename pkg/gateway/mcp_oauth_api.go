@@ -368,7 +368,7 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
-	launch, err := safety.ResolveProjectContext(s.Home, p.Root)
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
 	if err != nil {
 		http.Error(w, "project could not be resolved", http.StatusBadRequest)
 		return
@@ -437,7 +437,7 @@ func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	launch, err := safety.ResolveProjectContext(s.Home, p.Root)
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
 	if err != nil {
 		http.Error(w, "project could not be resolved", http.StatusBadRequest)
 		return

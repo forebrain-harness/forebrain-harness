@@ -26,7 +26,6 @@ export interface GatewaySessionSocketLike {
 export interface GatewaySessionSocketOptions {
   getSessionId: () => string
   setSessionId?: (sessionId: string) => void
-  getToken?: () => string | null | undefined
   createSocket?: (url: string) => GatewaySessionSocketLike
   reconnectDelayMs?: number
   onMessage?: (raw: unknown) => void
@@ -84,7 +83,7 @@ export function createForebrainGatewaySessionSocket(
     if (stopped) return
     if (socket && socket.readyState <= WS_OPEN) return
     clearReconnectTimer()
-    const ws = createSocket(buildBrowserForebrainGatewayChatWsUrl(options.getToken?.() ?? undefined))
+    const ws = createSocket(buildBrowserForebrainGatewayChatWsUrl())
     socket = ws
     ws.onopen = () => {
       options.onOpen?.()

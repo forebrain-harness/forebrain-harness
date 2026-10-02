@@ -2508,6 +2508,13 @@ func ResolveWithinRoots(p string, roots []string) (string, error) {
 	return home.ResolveWithinRoots(p, roots)
 }
 
+// ValidateArchiveRelPath forwards the archive-entry name check so surfaces
+// that already reach the path guard through this package need no direct
+// dependency on pkg/home for it.
+func ValidateArchiveRelPath(p string) error {
+	return home.ValidateArchiveRelPath(p)
+}
+
 // getenv is a var so tests can override environment lookups.
 var getenv = os.Getenv
 

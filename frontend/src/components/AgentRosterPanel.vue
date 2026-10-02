@@ -1,5 +1,5 @@
 <template>
-  <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-glass)] p-3 shadow-[var(--forebrain-doc-shadow)]">
+  <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-3 ">
     <div class="mb-3 flex items-center justify-between gap-3">
       <div class="min-w-0">
         <div class="truncate text-sm font-semibold text-[var(--forebrain-text)]">{{ title }}</div>
@@ -17,7 +17,7 @@
     <div v-if="loading" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
       {{ t('common.loading') }}
     </div>
-    <div v-else-if="error" class="rounded-xl border border-[rgba(160,70,70,0.36)] bg-[rgba(160,70,70,0.08)] px-3 py-3 text-xs text-[var(--forebrain-danger)]">
+    <div v-else-if="error" class="rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-3 py-3 text-xs text-[var(--forebrain-danger)]">
       {{ error }}
     </div>
     <div v-else-if="!records.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
@@ -27,7 +27,7 @@
       <li
         v-for="row in records"
         :key="`${row.kind}-${row.id}-${row.sessionId || row.runId || ''}`"
-        class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] px-3 py-2"
+        class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2"
       >
         <button
           class="w-full text-left disabled:cursor-default"
@@ -134,9 +134,9 @@ function metricsLabel(row: AgentRosterRow): string {
 
 function statusClass(status: string): string {
   const normalized = String(status ?? '').toLowerCase()
-  if (normalized === 'running') return 'border-[rgba(13,145,176,0.35)] bg-[rgba(13,145,176,0.10)] text-[var(--forebrain-brand-1)]'
-  if (normalized === 'failed') return 'border-[rgba(160,70,70,0.36)] bg-[rgba(160,70,70,0.08)] text-[var(--forebrain-danger)]'
+  if (normalized === 'running') return 'border-[var(--forebrain-brand-border-strong)] bg-[var(--forebrain-brand-soft)] text-[var(--forebrain-brand-1)]'
+  if (normalized === 'failed') return 'border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] text-[var(--forebrain-danger)]'
   if (normalized === 'cancelled' || normalized === 'canceled') return 'border-[var(--forebrain-divider)] bg-[var(--forebrain-button-alt-bg)] text-[var(--forebrain-muted-text)]'
-  return 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] text-[var(--forebrain-text-2)]'
+  return 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] text-[var(--forebrain-text-2)]'
 }
 </script>

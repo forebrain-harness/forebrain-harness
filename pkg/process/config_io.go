@@ -32,6 +32,15 @@ func apiKeyConfigReference(home, provider, apiKey string) (string, error) {
 	return writeEnvReference(home, envName, key)
 }
 
+// ProviderAPIKeyConfigReference stores a provider API key in the home's .env
+// and returns the ${ENV} reference the config file keeps instead of the
+// plaintext. Every surface that takes a provider key from a user — the setup
+// flow and the web settings page alike — goes through this one path, so a key
+// never lands in the yaml and the env naming stays single-sourced.
+func ProviderAPIKeyConfigReference(home, provider, apiKey string) (string, error) {
+	return apiKeyConfigReference(home, provider, apiKey)
+}
+
 func writeEnvReference(home string, envName string, value string) (string, error) {
 	key := strings.TrimSpace(value)
 	if key == "" || isEnvReference(key) {

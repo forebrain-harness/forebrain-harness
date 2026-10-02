@@ -115,3 +115,14 @@ func TestSavePreservesLLMProviderSecretsAfterReorder(t *testing.T) {
 		t.Errorf("reloaded provider[1] api_key: got %q, want ${OPENAI_API_KEY}", reloadedMain.LLMProviders[1].APIKey)
 	}
 }
+
+// TestExampleConfigLoads is a smoke test for the repository's example
+// forebrain.yaml: if it stops loading cleanly, every fresh install inherits
+// the break.
+func TestExampleConfigLoads(t *testing.T) {
+	// Isolate from the real home so only the file under test contributes.
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
+	if _, err := Load("../../forebrain.yaml"); err != nil {
+		t.Fatalf("example forebrain.yaml failed to load: %v", err)
+	}
+}

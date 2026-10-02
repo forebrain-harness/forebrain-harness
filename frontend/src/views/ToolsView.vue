@@ -3,7 +3,7 @@
     <div class="mx-auto w-full max-w-3xl">
       <header class="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 class="font-serif text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('tools.title') }}</h1>
+          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('tools.title') }}</h1>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('tools.description') }}</p>
         </div>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
@@ -11,7 +11,7 @@
         </button>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[rgba(160,70,70,0.36)] bg-[rgba(160,70,70,0.08)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <input
         v-model="query"
@@ -41,7 +41,7 @@
                 <span v-if="record.readOnly" class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[11px] text-[var(--forebrain-brand-1)]">
                   {{ t('tools.readOnly') }}
                 </span>
-                <span v-if="record.destructive" class="rounded-full border border-[rgba(160,70,70,0.36)] px-2 py-0.5 text-[11px] text-[var(--forebrain-danger)]">
+                <span v-if="record.destructive" class="rounded-full border border-[var(--forebrain-danger)] px-2 py-0.5 text-[11px] text-[var(--forebrain-danger)]">
                   {{ t('tools.destructive') }}
                 </span>
               </div>

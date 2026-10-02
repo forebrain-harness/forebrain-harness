@@ -15,6 +15,8 @@ type AgentsSection struct {
 
 type AgentDefinition struct {
 	Primary      bool                     `yaml:"primary" json:"primary"`
+	DisplayName  string                   `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	Description  string                   `yaml:"description,omitempty" json:"description,omitempty"`
 	LLMProviders []AgentLLMProviderConfig `yaml:"llm_providers,omitempty" json:"llm_providers,omitempty"`
 	// Channels are the delivery channels this primary agent owns. Only
 	// primary agents may declare them (validatePrimaryAgents rejects the rest),

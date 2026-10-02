@@ -3,20 +3,25 @@
     <div class="mx-auto w-full max-w-3xl">
       <header class="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 class="font-serif text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('projects.title') }}</h1>
+          <div class="flex items-center gap-2">
+            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('projects.title') }}</h1>
+            <span class="scope-badge scope-badge--agent">{{ t('projects.scopeAgent', { name: agentName }) }}</span>
+          </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('projects.description') }}</p>
         </div>
         <div class="flex items-center gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-            {{ t('common.refresh') }}
-          </button>
+          <select v-model="filter" class="forebrain-field h-9 w-28 text-[12px]" @change="load">
+            <option value="all">{{ t('projects.filterAll') }}</option>
+            <option value="pinned">{{ t('projects.filterPinned') }}</option>
+            <option value="archived">{{ t('projects.filterArchived') }}</option>
+          </select>
           <button type="button" class="forebrain-btn forebrain-btn-primary h-9 px-4 text-[12px]" @click="openCreate">
             {{ t('projects.newProject') }}
           </button>
         </div>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[rgba(160,70,70,0.36)] bg-[rgba(160,70,70,0.08)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div class="mb-4 flex flex-wrap items-center gap-2">
         <input
@@ -29,10 +34,7 @@
           <option value="updated">{{ t('projects.sortUpdated') }}</option>
           <option value="name">{{ t('projects.sortName') }}</option>
         </select>
-        <label class="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--forebrain-text-2)]">
-          <input v-model="showArchived" type="checkbox" class="accent-[var(--forebrain-brand-1)]" @change="load" />
-          {{ t('projects.showArchived') }}
-        </label>
+
       </div>
 
       <div v-if="creating" class="mb-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
@@ -75,12 +77,12 @@
       </div>
 
       <div v-if="loading && !projects.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <ul v-else-if="projects.length" class="space-y-2">
+      <ul v-else-if="projects.length" class="grid gap-3 sm:grid-cols-2">
         <li
           v-for="project in projects"
           :key="project.id"
           class="rounded-xl border px-4 py-3"
-          :class="project.archivedAt ? 'border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-soft)] opacity-70' : 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]'"
+          :class="project.archivedAt ? 'border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] opacity-70' : 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]'"
         >
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0 flex-1">
@@ -96,10 +98,7 @@
               <p class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.updatedAt', { time: formatTime(project.updatedAt) }) }}</p>
             </div>
             <div class="flex shrink-0 flex-col items-end gap-1">
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="openDetail(project.id)">{{ t('projects.open') }}</button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="newSession(project)">
-                {{ t('projects.newSession') }}
-              </button>
+              <button type="button" class="forebrain-btn forebrain-btn-primary h-7 px-2 text-[11px]" @click="openDetail(project.id)">{{ t('projects.open') }}</button>
               <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="togglePin(project)">
                 {{ project.pinned ? t('projects.unpin') : t('projects.pin') }}
               </button>
@@ -124,13 +123,16 @@
  * The list is the surface for managing them; each entry opens the detail
  * view where its sessions and MCP servers live.
  */
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
+import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 
 const { t } = useI18n()
 const router = useRouter()
+const { active: activeAgent } = usePrimaryAgents()
+const agentName = computed(() => activeAgent.value?.name || activeAgent.value?.id || '')
 const projects = ref<ProjectRecord[]>([])
 const loading = ref(false)
 const creating = ref(false)
@@ -138,7 +140,7 @@ const submitting = ref(false)
 const error = ref('')
 const search = ref('')
 const sort = ref('updated')
-const showArchived = ref(false)
+const filter = ref<'all' | 'pinned' | 'archived'>('all')
 const draft = reactive({ name: '', icon: '', root: '', description: '', instructions: '', trust: false, memoryScope: 'shared', resourceAccess: true })
 
 async function load() {
@@ -148,8 +150,11 @@ async function load() {
     projects.value = await forebrainApi.projectsList({
       search: search.value.trim() || undefined,
       sort: sort.value,
-      archived: showArchived.value || undefined,
+      archived: filter.value === 'archived' || undefined,
     })
+    if (filter.value === 'pinned') {
+      projects.value = projects.value.filter((project) => project.pinned)
+    }
   } catch (e) {
     error.value = getErrorMessage(e)
   } finally {
@@ -197,16 +202,6 @@ function openDetail(id: string) {
   void router.push(`/projects/${encodeURIComponent(id)}`)
 }
 
-async function newSession(project: ProjectRecord) {
-  error.value = ''
-  try {
-    const created = await forebrainApi.projectSessionCreate(project.id, project.name)
-    await router.push({ path: '/', query: { session: created.id } })
-  } catch (e) {
-    error.value = getErrorMessage(e)
-  }
-}
-
 async function togglePin(project: ProjectRecord) {
   error.value = ''
   try {
@@ -245,3 +240,18 @@ function formatTime(unixSeconds: number): string {
 
 onMounted(load)
 </script>
+
+<style scoped>
+.scope-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.scope-badge--agent {
+  background: var(--forebrain-brand-1);
+  color: var(--forebrain-on-brand);
+}
+</style>

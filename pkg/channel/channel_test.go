@@ -138,3 +138,26 @@ func TestChannelTypeAlias(t *testing.T) {
 	var _ Handler = &stubHandler{id: "x"}
 	var _ RouteAdder = func(string, string, http.HandlerFunc) {}
 }
+
+func TestRegistryRouteKeysSorted(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	if keys := r.RouteKeys(); len(keys) != 0 {
+		t.Fatalf("empty registry keys = %v", keys)
+	}
+	a := &stubHandler{id: "a", route: "/channels/b/inbound"}
+	b := &stubHandler{id: "b", route: "/channels/a/inbound"}
+	if err := r.Bind(context.Background(), "main", []Handler{a, b}, nil); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	keys := r.RouteKeys()
+	want := []string{"POST /channels/a/inbound", "POST /channels/b/inbound"}
+	if len(keys) != len(want) {
+		t.Fatalf("keys = %v, want %v", keys, want)
+	}
+	for i := range want {
+		if keys[i] != want[i] {
+			t.Fatalf("keys[%d] = %q, want %q", i, keys[i], want[i])
+		}
+	}
+}

@@ -90,7 +90,7 @@ function dotClass(entry: SubagentTranscript): string {
   gap: 0.375rem;
   border-radius: 9999px;
   border: 1px solid var(--forebrain-divider);
-  background: var(--forebrain-surface-soft);
+  background: var(--forebrain-surface);
   padding: 0.25rem 0.75rem;
   font-size: 12px;
   line-height: 1.25rem;
@@ -106,7 +106,7 @@ function dotClass(entry: SubagentTranscript): string {
 .forebrain-agent-tab.is-active {
   color: var(--forebrain-text);
   border-color: var(--forebrain-brand-border, var(--forebrain-divider));
-  background: var(--forebrain-card-gradient, var(--forebrain-surface-glass));
+  background: var(--forebrain-surface);
   font-weight: 500;
 }
 
@@ -119,7 +119,7 @@ function dotClass(entry: SubagentTranscript): string {
 }
 
 .forebrain-agent-dot.is-running {
-  background: var(--forebrain-brand-2, var(--forebrain-brand-1));
+  background: var(--forebrain-brand-1);
   animation: forebrain-agent-pulse 1.6s ease-in-out infinite;
 }
 
@@ -136,7 +136,7 @@ function dotClass(entry: SubagentTranscript): string {
   width: 0.375rem;
   flex: none;
   border-radius: 9999px;
-  background: var(--forebrain-brand-2, var(--forebrain-brand-1));
+  background: var(--forebrain-brand-1);
 }
 
 @keyframes forebrain-agent-pulse {

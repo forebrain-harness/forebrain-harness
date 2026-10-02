@@ -16,13 +16,6 @@ gateway:
   # Default: 127.0.0.1:6060.
   # Example: local HTTP listen address for the Forebrain Harness gateway.
   http_addr: "127.0.0.1:6060"
-  # Default: [http://127.0.0.1:5173, http://localhost:5173, http://127.0.0.1:3000, http://localhost:3000].
-  # Example: browser origins allowed by CORS.
-  cors_origins:
-    - "http://127.0.0.1:5173"
-    - "http://localhost:5173"
-    - "http://127.0.0.1:3000"
-    - "http://localhost:3000"
   # Default: none.
   # Example: gateway auth settings.
   auth:
@@ -32,58 +25,6 @@ gateway:
     # Default: empty.
     # Example: token read from env.
     token: "${FOREBRAIN_GATEWAY_TOKEN}"
-  # Default: none.
-  # Example: show gateway server banner logs.
-  banner: true
-  # Default: empty.
-  # Example: gateway banner text.
-  banner_text: "Forebrain Harness Gateway"
-  # Default: none.
-  # Example: enable gateway management endpoints.
-  manage_enable: true
-  # Default: none.
-  # Example: enable response gzip.
-  enable_response_gzip: true
-  # Default: none.
-  # Example: log inbound gateway requests.
-  log_req_enable: true
-  # Default: empty.
-  # Example: root path prefix.
-  route_root_path: "/"
-  # Default: empty.
-  # Example: write timeout duration.
-  write_timeout: "30s"
-  # Default: empty.
-  # Example: read timeout duration.
-  read_timeout: "30s"
-  # Default: empty.
-  # Example: idle timeout duration.
-  idle_timeout: "120s"
-  # Default: empty.
-  # Example: graceful shutdown timeout.
-  grace_timeout: "10s"
-  # Default: empty.
-  # Example: service name.
-  service_name: "forebrain"
-  # Default: empty.
-  # Example: service group.
-  service_group: "ai-platform"
-  # Default: empty.
-  # Example: service version.
-  service_version: "0.1.0"
-  # Default: empty.
-  # Example: log level.
-  log_level: "info"
-  # Default: empty.
-  # Example: log directory.
-  log_path: "./logs"
-  # Default: none.
-  # Example: include caller info in logs.
-  log_caller: false
-  # Default: none.
-  # Example: discard gateway logs.
-  log_discard: false
-
 # Default when omitted: workspace-write for a trusted Git project; read-only
 # for untrusted, unknown, or non-Git directories.
 # Example: explicit sandbox mode override for model-generated commands.

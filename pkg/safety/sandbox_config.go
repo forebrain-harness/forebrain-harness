@@ -498,6 +498,39 @@ func ResolveProjectContext(home, cwd string) (ProjectContext, error) {
 	return ProjectContext{Project: project, TrustLevel: level}, nil
 }
 
+// ResolveRegisteredProject returns the project identity for a root the user
+// registered explicitly — the projects API's rows. Unlike Resolve it never
+// walks up to a .git marker: a registered path is the boundary the user drew,
+// and a project inside a larger checkout is that subdirectory's project, not
+// the checkout's. Resolving it as a launch directory would silently relocate
+// the whole project space onto the enclosing repository.
+func ResolveRegisteredProject(root string) (Project, error) {
+	canonical, err := CanonicalPath(strings.TrimSpace(root))
+	if err != nil {
+		return Project{}, err
+	}
+	versionControlled := false
+	if info, statErr := os.Lstat(filepath.Join(canonical, ".git")); statErr == nil && (info.IsDir() || info.Mode().IsRegular()) {
+		versionControlled = true
+	}
+	return Project{Root: canonical, VersionControlled: versionControlled}, nil
+}
+
+// ResolveRegisteredContext is ResolveRegisteredProject plus the persisted
+// trust decision, in the shape the gateway's project-scoped routes hand their
+// services.
+func ResolveRegisteredContext(home, root string) (ProjectContext, error) {
+	project, err := ResolveRegisteredProject(root)
+	if err != nil {
+		return ProjectContext{}, err
+	}
+	level, err := TrustLevel(home, project)
+	if err != nil {
+		return ProjectContext{Project: project}, err
+	}
+	return ProjectContext{Project: project, TrustLevel: level}, nil
+}
+
 // EffectiveConfig derives the settings a launch project leaves unspecified and
 // returns them in a copy of cfg. Configured values always win; only omitted
 // settings are derived. The two derivations are independent: an explicit

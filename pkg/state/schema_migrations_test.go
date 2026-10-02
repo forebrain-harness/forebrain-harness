@@ -1295,3 +1295,59 @@ func TestIntermediateV1FileRebuildKeepsConvertedTables(t *testing.T) {
 		t.Fatal("rebuilt intermediate v1 schema differs from fresh")
 	}
 }
+
+// TestStateV3UpgradesToV4WithSessionsIntact builds a database that is really
+// at v3 — the sessions table has no source column — with live session rows,
+// and pins that opening it adds the column with every row preserved.
+func TestStateV3UpgradesToV4WithSessionsIntact(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	// Drop back to the v3 shape: no source column, version 3.
+	if _, err := db.Exec(`ALTER TABLE fb_sessions DROP COLUMN source`); err != nil {
+		t.Fatalf("drop source: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "s-v3"
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
+		sid, "main", sid, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open v3 database: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	var source string
+	if err := migrated.QueryRowContext(ctx, `SELECT source FROM fb_sessions WHERE id=?`, sid).Scan(&source); err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if source != "" {
+		t.Fatalf("migrated session source = %q, want the ordinary-conversation default", source)
+	}
+	// The column reads as writable through the store's own setter.
+	store := NewSessionStore(migrated, "main")
+	if err := store.SetSessionSource(ctx, sid, "workshop"); err != nil {
+		t.Fatalf("set source: %v", err)
+	}
+	summaries, err := store.ListSessionsRecent(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].Source != "workshop" {
+		t.Fatalf("summaries after set = %#v", summaries)
+	}
+}

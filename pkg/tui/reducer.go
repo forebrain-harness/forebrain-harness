@@ -1235,33 +1235,12 @@ func workedCompletionTime(t time.Time) string {
 // checklist with tasks in flight. Several items can be in progress at once,
 // but the line has room for one title, not a list, and the shortest is the
 // most legible stand-in; ties keep the first. A checklist with no in-progress
-// item falls back to the payload's own summary line.
+// item falls back to the payload's own summary line. The rule itself —
+// including an item's in-progress label taking precedence over its checklist
+// text — lives in pkg/event, so the web surface's worked line reports the
+// same title; this is the terminal's forwarding to it.
 func shortestActiveTaskTitle(items []event.PlanUpdateItem, fallback string) string {
-	best := ""
-	for _, item := range items {
-		if strings.TrimSpace(item.Status) != "in_progress" {
-			continue
-		}
-		// The label the plan card itself shows under its header is the item's
-		// in-progress label — session_todo's title, carried here as Active
-		// ("实现 P1 订阅模型发现客户端"); the content is the checklist row
-		// ("P1 pkg/llm/openai …"). The working line says what is being done, so
-		// it uses that label and only falls back to the content.
-		title := strings.TrimSpace(item.Active)
-		if title == "" {
-			title = strings.TrimSpace(item.Content)
-		}
-		if title == "" {
-			continue
-		}
-		if best == "" || len(title) < len(best) {
-			best = title
-		}
-	}
-	if best == "" {
-		return strings.TrimSpace(fallback)
-	}
-	return best
+	return event.PlanProgressOf(items, 0, 0, fallback).Active
 }
 
 // workedForLabel renders a finished run's duration. The renderer paints a

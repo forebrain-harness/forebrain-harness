@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"context"
+	"embed"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -46,12 +48,19 @@ type Routes interface {
 	RouteAdder() func(method, path string, hf http.HandlerFunc)
 }
 
+// RouteInfo is one row of the route table the gateway prints at startup.
+type RouteInfo struct {
+	Method string
+	Path   string
+}
+
 // RestServer wraps an Router and the standard *http.Server. The
 // embedded *http.Server exposes the Handler field that the gateway swaps out
 // to install its own middleware chain.
 type RestServer struct {
 	router      *Router
 	middlewares []func(http.Handler) http.Handler
+	routes      []RouteInfo
 	*http.Server
 }
 
@@ -141,7 +150,22 @@ func (srv *RestServer) AddRoute(routes ...Route) {
 			h = srv.middlewares[i](h)
 		}
 		srv.router.Handle(rt.Method, rt.Pattern, h)
+		srv.routes = append(srv.routes, RouteInfo{Method: rt.Method, Path: rt.Pattern})
 	}
+}
+
+// Routes returns the registered route table sorted by path then method, so
+// the startup listing is stable regardless of registration order.
+func (srv *RestServer) Routes() []RouteInfo {
+	out := make([]RouteInfo, len(srv.routes))
+	copy(out, srv.routes)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Method < out[j].Method
+	})
+	return out
 }
 
 // RouteGroup registers routes under a shared path prefix.
@@ -224,30 +248,43 @@ func joinRoutePath(prefix, path string) string {
 	return prefix + path
 }
 
-// Run starts the HTTP server and blocks until an interrupt or terminate signal
-// is received, then shuts down gracefully.
-func (srv *RestServer) Run() {
+// Run listens on srv.Addr, calls ready with the bound address once the socket
+// is open, serves until SIGINT/SIGTERM, then shuts down gracefully. Failures
+// return as errors — a busy port is a sentence, not a stack trace.
+func (srv *RestServer) Run(ready func(net.Addr)) error {
 	addr := srv.Addr
 	if addr == "" {
 		addr = "127.0.0.1:6060"
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("gateway listen on %s: %w", addr, err)
 	}
+	serveErr := make(chan error, 1)
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			panic(err)
+			serveErr <- err
+			return
 		}
+		serveErr <- nil
 	}()
+	if ready != nil {
+		ready(ln.Addr())
+	}
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
+	select {
+	case <-c:
+	case err := <-serveErr:
+		if err != nil {
+			return fmt.Errorf("gateway serve: %w", err)
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx)
+	return srv.Shutdown(ctx)
 }
 
 // Param is a single URL parameter, consisting of a key and a value.
@@ -642,4 +679,21 @@ func (s *Server) runtimeDangerWarning() (string, map[string]any, bool) {
 		"sandbox_mode":              "danger-full-access",
 		"approval_bypassed_by_yolo": true,
 	}, true
+}
+
+//go:embed all:dist
+var distFS embed.FS
+
+// FS returns the embedded dist subtree. ok is false when the frontend has not
+// been built (only the .gitkeep placeholder is present), in which case callers
+// should fall back to serving nothing.
+func FS() (fs.FS, bool) {
+	sub, err := fs.Sub(distFS, "dist")
+	if err != nil {
+		return nil, false
+	}
+	if _, err := fs.Stat(sub, "index.html"); err != nil {
+		return sub, false
+	}
+	return sub, true
 }

@@ -1,28 +1,36 @@
 package gateway
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/require"
 )
 
 func TestControlPlaneTokenFromRequest(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer abc")
-	if got := ControlPlaneTokenFromRequest(r, ""); got != "abc" {
+	if got := ControlPlaneTokenFromRequest(r); got != "abc" {
 		t.Fatalf("got %q", got)
 	}
 	r.Header.Del("Authorization")
 	r.Header.Set("X-API-Key", "def")
-	if got := ControlPlaneTokenFromRequest(r, ""); got != "def" {
+	if got := ControlPlaneTokenFromRequest(r); got != "def" {
 		t.Fatalf("got %q", got)
 	}
-	if got := ControlPlaneTokenFromRequest(nil, "ghi"); got != "" {
+	if got := ControlPlaneTokenFromRequest(nil); got != "" {
 		t.Fatalf("nil request should return empty, got %q", got)
 	}
 }
@@ -30,32 +38,19 @@ func TestControlPlaneTokenFromRequest(t *testing.T) {
 func TestControlPlaneTokenFromRequestFallbacks(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		auth       string
-		apiKey     string
-		queryToken string
-		want       string
+		name   string
+		auth   string
+		apiKey string
+		want   string
 	}{
 		{
-			name:       "query token when headers empty",
-			queryToken: " query-secret ",
-			want:       "query-secret",
+			name: "non bearer auth falls through to api key",
+			auth: "Basic abc",
+			want: "",
 		},
 		{
-			name:       "non bearer auth falls through to api key",
-			auth:       "Basic abc",
-			apiKey:     " key-secret ",
-			queryToken: "query-secret",
-			want:       "key-secret",
-		},
-		{
-			name:       "blank bearer falls through to query",
-			auth:       "Bearer   ",
-			queryToken: "query-secret",
-			want:       "query-secret",
-		},
-		{
-			name: "empty query remains empty",
+			name: "blank bearer falls through to api key",
+			auth: "Bearer   ",
 			want: "",
 		},
 	}
@@ -70,7 +65,7 @@ func TestControlPlaneTokenFromRequestFallbacks(t *testing.T) {
 			if tt.apiKey != "" {
 				r.Header.Set("X-API-Key", tt.apiKey)
 			}
-			if got := ControlPlaneTokenFromRequest(r, tt.queryToken); got != tt.want {
+			if got := ControlPlaneTokenFromRequest(r); got != tt.want {
 				t.Fatalf("ControlPlaneTokenFromRequest = %q, want %q", got, tt.want)
 			}
 		})
@@ -81,26 +76,30 @@ func TestControlPlaneAuthorized(t *testing.T) {
 	t.Parallel()
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Authorization", "Bearer secret")
-	if !ControlPlaneAuthorized(r, "secret", "") {
+	if !ControlPlaneAuthorized(r, "secret") {
 		t.Fatal("expected authorized")
 	}
-	if ControlPlaneAuthorized(r, "other", "") {
+	if ControlPlaneAuthorized(r, "other") {
 		t.Fatal("expected unauthorized")
 	}
-	if !ControlPlaneAuthorized(nil, "", "") {
+	if !ControlPlaneAuthorized(nil, "") {
 		t.Fatal("empty expected should authorize")
 	}
 }
 
-func TestControlPlaneHTTPMiddlewareUsesGatewayAuthToken(t *testing.T) {
-	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{
+func tokenAuthEnv(mode, token string) *process.Environment {
+	return &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{
 		Gateway: appcfg.Gateway{
 			Auth: appcfg.GatewayAuth{
-				Mode:  "token",
-				Token: "gw-secret",
+				Mode:  mode,
+				Token: token,
 			},
 		},
 	}}}
+}
+
+func TestControlPlaneHTTPMiddlewareUsesGatewayAuthToken(t *testing.T) {
+	env := tokenAuthEnv("token", "gw-secret")
 	called := false
 	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -121,14 +120,7 @@ func TestControlPlaneHTTPMiddlewareUsesGatewayAuthToken(t *testing.T) {
 }
 
 func TestControlPlaneHTTPMiddlewareRejectsWrongGatewayToken(t *testing.T) {
-	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{
-		Gateway: appcfg.Gateway{
-			Auth: appcfg.GatewayAuth{
-				Mode:  "token",
-				Token: "gw-secret",
-			},
-		},
-	}}}
+	env := tokenAuthEnv("token", "gw-secret")
 	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -144,13 +136,7 @@ func TestControlPlaneHTTPMiddlewareRejectsWrongGatewayToken(t *testing.T) {
 }
 
 func TestControlPlaneHTTPMiddlewareRejectsMissingGatewayToken(t *testing.T) {
-	env := &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{
-		Gateway: appcfg.Gateway{
-			Auth: appcfg.GatewayAuth{
-				Mode: "token",
-			},
-		},
-	}}}
+	env := tokenAuthEnv("token", "")
 	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -161,5 +147,272 @@ func TestControlPlaneHTTPMiddlewareRejectsMissingGatewayToken(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestControlPlaneHTTPMiddlewareAcceptsWebSessionCookie(t *testing.T) {
+	env := tokenAuthEnv("token", "gw-secret")
+	called := false
+	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/resources", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+	if !called {
+		t.Fatal("expected wrapped handler to be called")
+	}
+}
+
+func TestControlPlaneHTTPMiddlewareRejectsForgedWebSessionCookie(t *testing.T) {
+	env := tokenAuthEnv("token", "gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/resources", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: "forged"})
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestControlPlaneHTTPMiddlewareIgnoresQueryToken(t *testing.T) {
+	env := tokenAuthEnv("token", "gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/resources?token=gw-secret", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: credentials must not travel in the query string", rr.Code)
+	}
+}
+
+// TestHandleChatWSFollowsAuthModeNone pins that the WebSocket handshake and
+// the HTTP middleware apply the same auth rules: with mode none the socket is
+// reachable even though a token is configured.
+func TestHandleChatWSFollowsAuthModeNone(t *testing.T) {
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := &Server{
+		Home:     home,
+		Sessions: state.NewSessionStore(db, "main"),
+		Env:      tokenAuthEnv("none", "gw-secret"),
+	}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+		t.Fatalf("status = 401: mode none must not gate the websocket")
+	}
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.Equal(t, "connected", connected.Op)
+}
+
+// TestHandleChatWSRejectsCrossOriginHandshake pins the default origin check:
+// a valid session cookie does not authorize a page on another origin to open
+// the socket.
+func TestHandleChatWSRejectsCrossOriginHandshake(t *testing.T) {
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	s := &Server{
+		Home:     home,
+		Sessions: state.NewSessionStore(db, "main"),
+		Env:      tokenAuthEnv("token", "gw-secret"),
+	}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	header := http.Header{}
+	header.Set("Origin", "http://evil.example")
+	header.Set("Cookie", webSessionCookieName("gw-secret")+"="+webSessionValue("gw-secret"))
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err == nil {
+		conn.Close()
+		t.Fatal("cross-origin handshake must be refused")
+	}
+	require.NotNil(t, resp)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func webSessionTestServer(mode, token string) (*Server, http.HandlerFunc) {
+	s := &Server{Env: tokenAuthEnv(mode, token)}
+	return s, s.handleWebSessionCreate
+}
+
+func TestWebSessionCreateSetsCookieForValidToken(t *testing.T) {
+	_, handler := webSessionTestServer("token", "gw-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"gw-secret"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("Set-Cookie count = %d, want 1", len(cookies))
+	}
+	cookie := cookies[0]
+	if cookie.Name != webSessionCookieName("gw-secret") {
+		t.Fatalf("cookie name = %q", cookie.Name)
+	}
+	if cookie.Value != webSessionValue("gw-secret") {
+		t.Fatalf("cookie value = %q", cookie.Value)
+	}
+	for _, check := range []struct{ attr, want string }{
+		{"Path", "/"},
+		{"Max-Age", "2592000"},
+	} {
+		if got := cookie.String(); !strings.Contains(got, check.attr+"="+check.want) {
+			t.Fatalf("cookie %q missing %s=%s", got, check.attr, check.want)
+		}
+	}
+	raw := cookie.String()
+	if !strings.Contains(raw, "HttpOnly") {
+		t.Fatalf("cookie %q must be HttpOnly", raw)
+	}
+	if !strings.Contains(raw, "SameSite=Strict") {
+		t.Fatalf("cookie %q must be SameSite=Strict", raw)
+	}
+	if strings.Contains(raw, "Secure") {
+		t.Fatalf("plain-HTTP sign-in cookie %q must not be Secure", raw)
+	}
+}
+
+func TestWebSessionCreateMarksCookieSecureBehindHTTPS(t *testing.T) {
+	_, handler := webSessionTestServer("token", "gw-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"gw-secret"}`))
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("cookie behind https must be Secure, got %#v", cookies)
+	}
+}
+
+func TestWebSessionCreateRejectsWrongToken(t *testing.T) {
+	_, handler := webSessionTestServer("token", "gw-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"not-the-token"}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+	if body := rr.Body.String(); body != `{"error":"invalid gateway token"}` {
+		t.Fatalf("body = %q", body)
+	}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Fatal("rejected sign-in must not set a cookie")
+	}
+}
+
+func TestWebSessionCreateModeNoneSetsNoCookie(t *testing.T) {
+	_, handler := webSessionTestServer("none", "gw-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"anything"}`))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rr.Code)
+	}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Fatal("mode none must not set a cookie")
+	}
+}
+
+func TestWebSessionCreateRejectsOversizedBody(t *testing.T) {
+	_, handler := webSessionTestServer("token", "gw-secret")
+
+	big := fmt.Sprintf(`{"token":"%s"}`, strings.Repeat("a", 8192))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(big))
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
+// TestWebSessionRoutesThroughFullChain walks ServeHTTPChain: the sign-in POST
+// itself must pass the middleware without credentials, the probe GET must
+// still require them, and a session cookie must satisfy them.
+func TestWebSessionRoutesThroughFullChain(t *testing.T) {
+	s := &Server{Env: tokenAuthEnv("token", "gw-secret")}
+	chain := ServeHTTPChain(s.Env, s, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/auth/session":
+			s.handleWebSessionCreate(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/auth/session":
+			s.handleWebSessionProbe(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	// Sign-in without credentials reaches the handler.
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/session", strings.NewReader(`{"token":"gw-secret"}`))
+	rr := httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("sign-in status = %d, want 204", rr.Code)
+	}
+
+	// The probe without credentials is rejected.
+	req = httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
+	rr = httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("probe status = %d, want 401", rr.Code)
+	}
+
+	// With the cookie the probe answers the auth mode.
+	req = httptest.NewRequest(http.MethodGet, "/api/auth/session", nil)
+	req.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")})
+	rr = httptest.NewRecorder()
+	chain.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("probe status = %d, want 200", rr.Code)
+	}
+	if body := rr.Body.String(); body != `{"auth_mode":"token"}` {
+		t.Fatalf("probe body = %q", body)
 	}
 }

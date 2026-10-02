@@ -1,35 +1,22 @@
 import axios, { type AxiosError } from 'axios'
 
 import { toCamelCase, toSnakeCase } from './case'
-
-export type AuthUser = { clientId: string; lastSessionId?: string | null }
-
-let authUser: AuthUser | null = null
-let authToken: string | null = null
-
-export function getUser(): AuthUser | null {
-  return authUser
-}
-
-export function setUser(u: AuthUser | null) {
-  authUser = u
-}
-
-export function getToken(): string | null {
-  return authToken
-}
-
-export function setToken(t: string | null) {
-  authToken = t
-}
+import { reportGatewayUnauthorized } from './gatewaySession'
 
 export function getErrorMessage(error: unknown): string {
   const err = error as AxiosError
   if (err?.response?.data != null) {
     const data = err.response.data
     if (typeof data === 'string') return data
-    if (typeof data === 'object' && data !== null && 'message' in data) {
-      return String((data as { message?: unknown }).message) || 'Request failed'
+    if (typeof data === 'object' && data !== null) {
+      // The gateway answers with {"error": "..."}; other backends use
+      // {"message": "..."}.
+      for (const key of ['error', 'message'] as const) {
+        if (key in data) {
+          const text = String((data as Record<string, unknown>)[key])
+          if (text) return text
+        }
+      }
     }
   }
   return err?.message ? String(err.message) : 'Request failed'
@@ -72,6 +59,10 @@ export interface ChatMessageRecord {
   runStartedAt?: string
   runFinishedAt?: string
   workedDurationMs?: number
+  /** The run's final checklist state, for the worked line. */
+  planDone?: number
+  planTotal?: number
+  planActive?: string
   /** A finished compaction the server placed in the history; its row role is "compaction". */
   compaction?: Record<string, unknown> | null
   /** A line of a /goal the server placed in the history; its row role is "goal". */
@@ -504,6 +495,7 @@ export interface CronJobRecord {
   deliver?: string
   enabled: boolean
   repeatLimit?: number
+  projectId?: string
   runCount?: number
   nextRunAt?: number
   lastRunAt?: number
@@ -535,6 +527,15 @@ export interface CronJobBody {
   deliver?: string
   enabled?: boolean
   repeat_limit?: number
+  projectId?: string
+}
+
+export interface CronPreviewResponse {
+  raw: string
+  valid: boolean
+  kind?: string
+  next?: string[]
+  error?: string
 }
 
 export interface HeartbeatRecord {
@@ -564,12 +565,26 @@ export interface HookMatcherRecord {
 
 export type HooksSettingsRecord = Record<string, HookMatcherRecord[]>
 
+/** One model-service row as the web surface edits it. The key never travels
+ * back: apiKeySet says whether one is stored and apiKeyHint is its masked
+ * tail; a save carries a key only when the user typed one. */
 export interface ProviderRecord {
-  provider?: string
-  model?: string
-  apiKey?: string
+  provider: string
+  models: string[]
   baseUrl?: string
   apiPath?: string
+  params?: unknown
+  apiKeySet?: boolean
+  apiKeyHint?: string
+}
+
+/** The PUT shape: apiKeyPlain is a freshly typed key (stored as an ${ENV}
+ * reference server-side); apiKey carries an explicit reference for advanced
+ * use; both empty means "keep the stored key". */
+export interface ProviderSaveRecord extends ProviderRecord {
+  model?: string
+  apiKey?: string
+  apiKeyPlain?: string
 }
 
 export interface PermissionUpdateBody {
@@ -613,7 +628,7 @@ export interface ActionApprovalBody {
 }
 
 export interface ChatSessionsResponse {
-  records: { id: string; title: string | null; createTime: string; updateTime: string }[]
+  records: { id: string; title: string | null; createTime: string; updateTime: string; source?: string }[]
 }
 
 export interface SessionTodosResponse {
@@ -705,11 +720,13 @@ export interface ActionAnswerBody {
 }
 
 export interface WorkspaceTreeNode {
+  name: string
   path: string
   isDir: boolean
 }
 
 export interface WorkspaceTreeResponse {
+  path: string
   records: WorkspaceTreeNode[]
 }
 
@@ -724,6 +741,8 @@ export interface FileInfo {
   mediaType: string
 }
 
+export type SkillOrigin = 'project' | 'agent' | 'shared' | 'builtin' | 'cross-tool'
+
 export interface SkillRecord {
   name: string
   description: string
@@ -732,6 +751,14 @@ export interface SkillRecord {
   source?: string
   trust?: string
   enabled: boolean
+  /** Which layer owns this row: project, agent, shared, builtin, cross-tool. */
+  origin?: SkillOrigin
+  /** True when the row belongs to the layer the listing page manages. */
+  editable?: boolean
+  downloadUrl?: string
+  /** Directories offering the same name that this row takes precedence over. */
+  shadows?: string[]
+  shadowedBy?: string[]
 }
 
 export interface SkillInspectResponse {
@@ -779,6 +806,66 @@ export interface SkillInstallResponse {
   installed: SkillInstallResult
 }
 
+export interface SkillUploadResponse {
+  status: string
+  installed: string[]
+  skills: SkillRecord[]
+}
+
+/** A downloaded archive: the bytes plus the file name the server attached. */
+export interface SkillDownloadBlob {
+  blob: Blob
+  filename: string
+}
+
+/** One row of the memory file listing. */
+export interface MemoryFileRecord {
+  path: string
+  sizeBytes: number
+  createdAt: number
+  updatedAt: number
+  core: boolean
+}
+
+export interface MemoryFilesResponse {
+  total: number
+  page: number
+  pageSize: number
+  files: MemoryFileRecord[]
+}
+
+export interface MemoryFileContent {
+  path: string
+  content: string
+  core: boolean
+}
+
+export interface SkillFileRecord {
+  path: string
+  sizeBytes: number
+  modTime: number
+  isDir: boolean
+}
+
+export interface SkillFilesResponse {
+  name: string
+  readOnly?: boolean
+  files: SkillFileRecord[]
+}
+
+export interface SkillFileContent {
+  name: string
+  path: string
+  content: string
+  readOnly?: boolean
+}
+
+export interface MemoryFilesDeleteResponse {
+  ok: boolean
+  deleted: number
+  results: Array<{ path: string; ok: boolean; error?: string }>
+}
+
 export interface SkillMutationResponse {
   status: string
   skill: {
@@ -793,6 +880,8 @@ export interface SkillMutationResponse {
 
 export type PrimaryAgentRecord = {
   id: string
+  name?: string
+  description?: string
   agentDefinition?: string
   workspaceRoot: string
   privateSkillsRoot: string
@@ -836,19 +925,49 @@ const api = axios.create({
 
 export const __apiClient = api
 
-api.interceptors.request.use((config) => {
-  const t = getToken()
-  if (t) {
-    config.headers = config.headers ?? {}
-    config.headers.Authorization = `Bearer ${t}`
-  }
-  return config
-})
+// The browser's gateway session is a cookie, so axios requests carry their
+// credentials without any per-request work. A 401 means the session is gone:
+// report it so the router can offer the sign-in page again.
+api.interceptors.response.use(
+  (response) => {
+    response.data = toCamelCase(response.data)
+    return response
+  },
+  (error) => {
+    if ((error as AxiosError)?.response?.status === 401) reportGatewayUnauthorized()
+    return Promise.reject(error)
+  },
+)
 
-api.interceptors.response.use((response) => {
-  response.data = toCamelCase(response.data)
-  return response
-})
+/**
+ * Native fetch with the session handling axios has: same-origin requests
+ * carry the session cookie automatically, and a 401 is reported to the
+ * router. Used where axios does not fit (streams, uploads).
+ */
+async function gatewayFetch(input: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init)
+  if (res.status === 401) reportGatewayUnauthorized()
+  return res
+}
+
+/** The file name an attachment header carried, unquoted; empty when absent. */
+function filenameFromContentDisposition(header: string | null): string {
+  if (!header) return ''
+  const match = header.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
+  return match ? decodeURIComponent(match[1]) : ''
+}
+
+/** Hand a downloaded archive to the browser's own save flow. */
+export function saveSkillDownload(download: SkillDownloadBlob) {
+  const url = URL.createObjectURL(download.blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = download.filename
+  document.body.append(anchor)
+  anchor.click()
+  anchor.remove()
+  URL.revokeObjectURL(url)
+}
 
 function postJson<TResponse, TBody>(url: string, body: TBody) {
   return api.post<TResponse>(url, toSnakeCase(body)).then((res) => res.data)
@@ -866,6 +985,18 @@ export const forebrainApi = {
 
   primaryAgentSwitch(agentId: string) {
     return postJson<PrimaryAgentsResponse, { agentId: string }>('/agents/primary/switch', { agentId })
+  },
+
+  createPrimaryAgent(body: { id: string; name?: string; description?: string; workspaceRoot?: string }) {
+    return postJson<PrimaryAgentsResponse, { id: string; name?: string; description?: string; workspaceRoot?: string }>('/agents/primary', body)
+  },
+
+  updatePrimaryAgent(id: string, body: { name?: string; description?: string }) {
+    return putRaw<PrimaryAgentsResponse>(`/agents/primary/${encodeURIComponent(id)}`, body)
+  },
+
+  deletePrimaryAgent(id: string) {
+    return api.delete<PrimaryAgentsResponse>(`/agents/primary/${encodeURIComponent(id)}`).then((res) => res.data)
   },
 
   agentRoster() {
@@ -919,8 +1050,11 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
-  chatSessionCreate(title?: string) {
-    return postJson<{ id: string; title: string }, { title: string }>('/chat/sessions', { title: title ?? '' })
+  chatSessionCreate(title?: string, source?: '' | 'workshop') {
+    return postJson<{ id: string; title: string }, { title: string; source?: string }>('/chat/sessions', {
+      title: title ?? '',
+      ...(source ? { source } : {}),
+    })
   },
 
   chatSessionTitle(sessionId: string, title: string) {
@@ -1144,8 +1278,72 @@ export const forebrainApi = {
     }>('/skills/install', body)
   },
 
+  // Offline install: an uploaded .zip/.tar.gz/.tgz/.tar package. dest must be
+  // explicit — the three skill pages each own one destination.
+  skillInstallUpload(file: File, dest: 'project' | 'workspace' | 'global', projectId?: string) {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('dest_scope', dest)
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return api.post<SkillUploadResponse>(`${base}/install/upload`, form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }).then((res) => res.data)
+  },
+
+  // Downloads stream as archives, so they go through fetch (same cookie
+  // handling as axios) and come back as a blob plus the server's file name.
+  skillDownload(url: string): Promise<SkillDownloadBlob> {
+    return gatewayFetch(url).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return {
+        blob: await res.blob(),
+        filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) || 'skill.zip',
+      }
+    })
+  },
+
+  skillDownloadBatch(names: string[], projectId?: string): Promise<SkillDownloadBlob> {
+    const base = projectId ? `/api/v1/projects/${encodeURIComponent(projectId)}/skills` : '/api/skills'
+    return gatewayFetch(`${base}/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names }),
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(await res.text())
+      return {
+        blob: await res.blob(),
+        filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) || 'skills.zip',
+      }
+    })
+  },
+
+  skillFilesList(name: string) {
+    return api.get<SkillFilesResponse>(`/skills/${encodeURIComponent(name)}/files`).then((res) => res.data)
+  },
+
+  skillFileRead(name: string, path: string) {
+    const query = new URLSearchParams({ path })
+    return api
+      .get<SkillFileContent>(`/skills/${encodeURIComponent(name)}/file?${query.toString()}`)
+      .then((res) => res.data)
+  },
+
+  skillFileWrite(name: string, path: string, content: string) {
+    const query = new URLSearchParams({ path })
+    return api
+      .put<{ ok: boolean; path: string }>(`/skills/${encodeURIComponent(name)}/file?${query.toString()}`, { content })
+      .then((res) => res.data)
+  },
+
+  skillDelete(name: string, scope: 'agent' | 'shared' | 'project', projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return api
+      .delete<SkillsToggleResponse>(`${base}/${encodeURIComponent(name)}?scope=${scope}`)
+      .then((res) => res.data)
+  },
+
   sessionRewindLast(sessionId: string) {
-    return fetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind-last`, {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind-last`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }).then(async (r) => {
@@ -1181,8 +1379,51 @@ export const forebrainApi = {
     return postJson<{ settings: MemorySettings }, typeof body>('/memories/settings', body).then((res) => res.settings)
   },
 
-  resetMemories() {
-    return postJson<{ ok: boolean }, Record<string, never>>('/memories/reset', {})
+  resetMemories(body?: { scope?: 'session' | 'all' | 'global' | 'project'; projectId?: string }) {
+    // An absent body keeps the endpoint's default (the calling session's
+    // project); the memory pages name their scope explicitly.
+    return postJson<{ ok: boolean; scope?: string }, { scope?: string; project_id?: string } | Record<string, never>>(
+      '/memories/reset',
+      body && body.projectId ? { scope: body.scope, project_id: body.projectId } : body?.scope ? { scope: body.scope } : {},
+    )
+  },
+
+  memoryFilesList(query: {
+    scope: 'global' | 'project'
+    projectId?: string
+    page?: number
+    pageSize?: number
+    sort?: 'created' | 'updated'
+    order?: 'asc' | 'desc'
+    q?: string
+  }) {
+    const params = new URLSearchParams()
+    params.set('scope', query.scope)
+    if (query.projectId) params.set('project_id', query.projectId)
+    if (query.page) params.set('page', String(query.page))
+    if (query.pageSize) params.set('page_size', String(query.pageSize))
+    if (query.sort) params.set('sort', query.sort)
+    if (query.order) params.set('order', query.order)
+    if (query.q) params.set('q', query.q)
+    return api.get<MemoryFilesResponse>(`/memories/files?${params.toString()}`).then((res) => res.data)
+  },
+
+  memoryFileRead(scope: 'global' | 'project', path: string, projectId?: string) {
+    const params = new URLSearchParams({ scope, path })
+    if (projectId) params.set('project_id', projectId)
+    return api.get<MemoryFileContent>(`/memories/file?${params.toString()}`).then((res) => res.data)
+  },
+
+  memoryFileWrite(scope: 'global' | 'project', path: string, content: string, projectId?: string) {
+    const params = new URLSearchParams({ scope, path })
+    if (projectId) params.set('project_id', projectId)
+    return api.put<{ ok: boolean; path: string }>(`/memories/file?${params.toString()}`, { content }).then((res) => res.data)
+  },
+
+  memoryFilesDelete(scope: 'global' | 'project', paths: string[], projectId?: string) {
+    const params = new URLSearchParams({ scope })
+    if (projectId) params.set('project_id', projectId)
+    return postJson<MemoryFilesDeleteResponse, { paths: string[] }>(`/memories/files/delete?${params.toString()}`, { paths })
   },
 
   actionsList(status?: string, sessionId?: string, agentId?: string) {
@@ -1191,7 +1432,7 @@ export const forebrainApi = {
     if (sessionId) params.set('session_id', sessionId)
     if (agentId) params.set('agent_id', agentId)
     const query = params.toString()
-    return fetch(`/api/actions${query ? `?${query}` : ''}`, {
+    return gatewayFetch(`/api/actions${query ? `?${query}` : ''}`, {
       method: 'GET',
     }).then(async (r) => {
       if (!r.ok) throw new GatewayHttpError(r.status, (await r.text()).trim())
@@ -1200,7 +1441,7 @@ export const forebrainApi = {
   },
 
   actionsAnswer(id: string, body: ActionAnswerBody) {
-    return fetch(`/api/actions/${encodeURIComponent(id)}/answer`, {
+    return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/answer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1213,7 +1454,7 @@ export const forebrainApi = {
   },
 
   actionsApprove(id: string, body?: ActionApprovalBody) {
-    return fetch(`/api/actions/${encodeURIComponent(id)}/approve`, {
+    return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/approve`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1234,7 +1475,7 @@ export const forebrainApi = {
   },
 
   actionsDeny(id: string, body?: { reason?: string }) {
-    return fetch(`/api/actions/${encodeURIComponent(id)}/deny`, {
+    return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/deny`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1246,9 +1487,9 @@ export const forebrainApi = {
     })
   },
 
-  workspaceTree() {
+  workspaceTree(path = '') {
     return api
-      .get<WorkspaceTreeResponse>('/workspace/tree')
+      .get<WorkspaceTreeResponse>('/workspace/tree', { params: path ? { path } : undefined })
       .then((res) => res.data)
   },
 
@@ -1338,6 +1579,64 @@ export const forebrainApi = {
     return postJson<{ ok: boolean }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/mcp/consent`, { allow })
   },
 
+  agentRuleFiles() {
+    return api.get<{ files: Array<{ name: string; exists: boolean; sizeBytes?: number; updatedAt?: number }> }>('/rules/agent').then((res) => res.data)
+  },
+
+  agentRuleFile(name: string) {
+    return fetch(`/api/rules/agent/${encodeURIComponent(name)}`).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return r.text()
+    })
+  },
+
+  saveAgentRuleFile(name: string, content: string) {
+    return fetch(`/api/rules/agent/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/plain' },
+      body: content,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return toCamelCase(await r.json()) as { bytes: number; warning?: string }
+    })
+  },
+
+  projectRuleFiles(projectId: string) {
+    return api.get<{ files: Array<{ dir: string; exists: boolean; sizeBytes?: number; updatedAt?: number }>; create: string[] }>(`/rules/project/${encodeURIComponent(projectId)}`).then((res) => res.data)
+  },
+
+  projectRuleFile(projectId: string, dir: string) {
+    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
+    return fetch(`/api/rules/project/${encodeURIComponent(projectId)}/file${query}`).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return r.text()
+    })
+  },
+
+  saveProjectRuleFile(projectId: string, dir: string, content: string) {
+    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
+    return fetch(`/api/rules/project/${encodeURIComponent(projectId)}/file${query}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/plain' },
+      body: content,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return toCamelCase(await r.json()) as { bytes: number; warning?: string }
+    })
+  },
+
+  approvalDefault() {
+    return api.get<{ current: string | null; description?: string }>('/permissions/approval-default').then((res) => res.data)
+  },
+
+  saveApprovalDefault(preset: string) {
+    return putRaw<{ current: string; description?: string }>('/permissions/approval-default', { preset })
+  },
+
+  sessionPreset(sessionId: string, preset: string) {
+    return postJson<{ ok: boolean; description?: string }, { sessionId: string; preset: string }>('/permissions/session-preset', { sessionId, preset })
+  },
+
   configFile() {
     return api.get<{ path: string; agentId?: string; yaml: string }>('/config').then((res) => res.data)
   },
@@ -1359,8 +1658,8 @@ export const forebrainApi = {
       .then((res) => (Array.isArray(res.data?.providers) ? res.data.providers : []))
   },
 
-  saveProviders(providers: ProviderRecord[]) {
-    return api.put<{ applied: boolean }>('/providers', toSnakeCase({ providers })).then((res) => res.data)
+  saveProviders(providers: Array<Record<string, unknown>>) {
+    return putRaw<{ applied: boolean }>('/providers', { providers })
   },
 
   hooks() {
@@ -1372,9 +1671,16 @@ export const forebrainApi = {
     return api.put<{ applied: boolean }>('/hooks', toSnakeCase({ hooks })).then((res) => res.data)
   },
 
-  cronJobs() {
-    return api.get<{ agentId?: string; records: CronJobRecord[] }>('/cron')
+  cronJobs(projectId?: string) {
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''
+    return api.get<{ agentId?: string; records: CronJobRecord[] }>(`/cron${query}`)
       .then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
+  },
+
+  // The schedule preview is the engine's own parse, so what the builder shows
+  // is exactly what the scheduler will later fire.
+  cronPreview(schedule: string) {
+    return postJson<CronPreviewResponse, { schedule: string }>('/cron/preview', { schedule })
   },
 
   cronCreate(body: CronJobBody) {
@@ -1433,28 +1739,6 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
-  authLogin(username: string, _password: string): Promise<string> {
-    const id = (username ?? '').trim() || 'user'
-    const tok = `local-${id}`
-    setToken(tok)
-    setUser({ clientId: id })
-    return Promise.resolve(tok)
-  },
-
-  authRegister(username: string, password: string): Promise<string> {
-    return forebrainApi.authLogin(username, password)
-  },
-
-  authCurrent(): Promise<AuthUser | null> {
-    return Promise.resolve(getUser())
-  },
-
-  authLogout(): Promise<void> {
-    setToken(null)
-    setUser(null)
-    return Promise.resolve()
-  },
-
   fileInfo(fileId: string) {
     return api.get<FileInfo>(`/files/${encodeURIComponent(fileId)}`).then((res) => res.data)
   },
@@ -1463,14 +1747,8 @@ export const forebrainApi = {
     const form = new FormData()
     form.append('file', file)
     if (sessionId) form.append('session_id', sessionId)
-    const headers: Record<string, string> = {}
-    const t = getToken()
-    if (t) {
-      headers.Authorization = `Bearer ${t}`
-    }
-    return fetch(`${API_BASE}/files`, {
+    return gatewayFetch(`${API_BASE}/files`, {
       method: 'POST',
-      headers,
       body: form,
     }).then(async (r) => {
       if (!r.ok) throw new Error(await r.text())
