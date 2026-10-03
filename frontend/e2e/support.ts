@@ -44,15 +44,18 @@ export function watch401(page: Page): () => Response[] {
  */
 export async function expectAssistantReply(page: Page): Promise<void> {
   if (process.env.E2E_REAL_LLM === '1') {
+    // A real reply's words are unknown; what is known is how a turn ends.
+    // The streaming placeholder ("...") is not a reply, and every run closes
+    // with its worked line — so wait for words and for that line.
     await page.waitForFunction(
       () => {
-        for (const node of Array.from(document.querySelectorAll('.is-assistant'))) {
-          if ((node.textContent ?? '').trim().length > 0) return true
-        }
-        return false
+        const replied = Array.from(document.querySelectorAll('.is-assistant'))
+          .some((node) => (node.textContent ?? '').replace(/[.…\s]/g, '').length > 0)
+        const closed = /已工作 \d|Worked for \d/.test(document.querySelector('.chat-shell main')?.textContent ?? '')
+        return replied && closed
       },
       undefined,
-      { timeout: 120_000 },
+      { timeout: 150_000 },
     )
     return
   }

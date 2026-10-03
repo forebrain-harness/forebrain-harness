@@ -892,6 +892,17 @@ func (s *ChatSession) publishTUIRunEvent(ctx context.Context, sessionID, runID, 
 	return s.publishRunEvent(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
 }
 
+// persistRunTurnError keeps a failed run's error in the conversation's log.
+// The error block was the last thing the run said before its "Worked for"
+// line; this record is what lets a resume draw it there again.
+func (s *ChatSession) persistRunTurnError(sessionID, runID, text string) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, sessionID, event.RunEventTurnError,
+		event.TurnErrorPayload{Error: text, Message: text}, time.Now()))
+}
+
 // persistRunEvent stores one canonical event in the conversation's log without
 // drawing it: the surface already painted the card from the step hook that
 // observed the call, and this row is what a later resume replays.
@@ -1194,9 +1205,6 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 			},
 		})),
 	)
-	// A hot reload has to honour the /permissions preset the same way the
-	// slash-command reload path does; the environment cannot see it otherwise.
-	env.OnConfigLoaded = s.reapplyPermissionPreset
 	env.OnConfigReload = func(next *config.Root) {
 		if next == nil {
 			return

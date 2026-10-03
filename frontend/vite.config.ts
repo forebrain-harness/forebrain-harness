@@ -55,7 +55,15 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:6060',
+        // Cookie-authenticated writes must name the gateway's own origin (the
+        // same Origin-vs-Host check the socket handshake applies); the dev
+        // server stands in for that origin, so it says so.
         changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            if (proxyReq.getHeader('origin')) proxyReq.setHeader('origin', 'http://127.0.0.1:6060')
+          })
+        },
       },
       '/ws': {
         target: 'ws://127.0.0.1:6060',

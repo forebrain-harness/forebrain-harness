@@ -126,7 +126,10 @@ const modes = computed(() => [
   { key: 'cron' as ModeKey, label: t('cron.modeCron') },
 ])
 
-const mode = ref<ModeKey>('every')
+// A stored schedule opens in the cron mode, which shows the expression as-is:
+// any other starting mode would rebuild it from that mode's defaults and
+// replace the job's schedule before the user touched anything.
+const mode = ref<ModeKey>(props.modelValue?.trim() ? 'cron' : 'every')
 const onceAt = ref('')
 const inCount = ref(30)
 const inUnit = ref<'m' | 'h'>('m')
@@ -219,13 +222,17 @@ watch(expression, (value) => {
     previewing.value = true
     try {
       const out = await forebrainApi.cronPreview(value)
+      // An answer for an expression the user has since changed says nothing
+      // about the one on screen; the newer request's answer will.
+      if (expression.value !== value) return
       preview.value = out
       emit('validated', out.valid)
     } catch (e: unknown) {
+      if (expression.value !== value) return
       preview.value = { raw: value, valid: false, error: getErrorMessage(e) }
       emit('validated', false)
     } finally {
-      previewing.value = false
+      if (expression.value === value) previewing.value = false
     }
   }, 400)
 }, { immediate: true })

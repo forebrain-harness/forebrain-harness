@@ -502,8 +502,22 @@ func (s *Server) handleMemoriesFileRead(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"path":    filepath.ToSlash(rel),
 		"content": string(data),
-		"core":    memoryCoreFiles[filepath.ToSlash(rel)],
+		"core":    isCoreMemoryFile(target.Root, info),
 	})
+}
+
+// isCoreMemoryFile reports whether a file is one of its scope's core files.
+// The answer is by file identity, not by how the request spelled the path:
+// "./MEMORY.md", a case-folded name on a case-insensitive volume and a hard
+// link all reach the very file consolidation owns.
+func isCoreMemoryFile(root memory.Root, info os.FileInfo) bool {
+	for name := range memoryCoreFiles {
+		core, err := os.Lstat(filepath.Join(root.MemoryRoot, name))
+		if err == nil && os.SameFile(info, core) {
+			return true
+		}
+	}
+	return false
 }
 
 // memoryEditableExtensions is the new-file whitelist: the memory root holds
@@ -600,21 +614,20 @@ func (s *Server) handleMemoriesFilesDelete(w http.ResponseWriter, r *http.Reques
 	for _, raw := range body.Paths {
 		rel := strings.TrimSpace(raw)
 		result := deleteResult{Path: rel, OK: false}
-		switch {
-		case memoryCoreFiles[rel]:
+		abs, err := resolveMemoryFilePath(target.Root, rel)
+		if err != nil {
+			result.Error = "path must stay inside the memory root"
+		} else if info, statErr := os.Lstat(abs); statErr != nil {
+			result.Error = "file not found"
+		} else if !info.Mode().IsRegular() {
+			result.Error = "not a regular file"
+		} else if isCoreMemoryFile(target.Root, info) {
 			result.Error = "core memory files can be edited or cleared, not deleted"
-		default:
-			abs, err := resolveMemoryFilePath(target.Root, rel)
-			if err != nil {
-				result.Error = "path must stay inside the memory root"
-			} else if _, statErr := os.Lstat(abs); statErr != nil {
-				result.Error = "file not found"
-			} else if err := os.Remove(abs); err != nil {
-				result.Error = err.Error()
-			} else {
-				result.OK = true
-				deleted++
-			}
+		} else if err := os.Remove(abs); err != nil {
+			result.Error = err.Error()
+		} else {
+			result.OK = true
+			deleted++
 		}
 		results = append(results, result)
 	}

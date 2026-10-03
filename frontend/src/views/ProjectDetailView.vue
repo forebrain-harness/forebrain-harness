@@ -4,7 +4,7 @@
        own configuration surfaces. -->
   <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
     <header class="project-band">
-      <div class="flex min-w-0 items-center gap-3">
+      <div class="flex min-w-0 max-w-[50%] shrink-0 items-center gap-3">
         <span class="project-band-badge">{{ t('scope.project') }}</span>
         <nav class="flex min-w-0 items-center gap-2 text-[13px]" :aria-label="t('projects.breadcrumb')">
           <RouterLink to="/projects" class="project-breadcrumb-link">{{ t('projects.title') }}</RouterLink>
@@ -12,7 +12,9 @@
           <span class="truncate font-medium text-white">{{ project?.name || project?.id }}</span>
         </nav>
       </div>
-      <span class="hidden shrink-0 font-mono text-[11px] text-white/60 md:block" :title="project?.root">{{ project?.root }}</span>
+      <!-- The root is shown whole: a long path wraps inside its half of the
+           band instead of pushing over the breadcrumb. -->
+      <span class="hidden min-w-0 break-all text-right font-mono text-[11px] text-white/60 md:block" :title="project?.root">{{ project?.root }}</span>
     </header>
 
     <nav class="project-tabs" :aria-label="t('projects.title')">
@@ -39,7 +41,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { RouterLink, RouterView } from 'vue-router'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
-import { setActiveProject, resetTenantScope } from '@/composables/useTenantScope'
+import { setActiveProject } from '@/composables/useTenantScope'
 import { useI18n } from '@/locales'
 
 const route = useRoute()
@@ -77,9 +79,10 @@ onMounted(() => {
   void load()
 })
 
-// Leaving the project space entirely returns the shell to the tenant scope.
+// Leaving the project space entirely closes the project boundary; the tenant
+// is the same one, so nothing tenant-wide is dropped.
 watch(() => route.path, (path) => {
-  if (!path.startsWith('/projects/')) resetTenantScope()
+  if (!path.startsWith('/projects/')) setActiveProject('')
 })
 watch(projectId, () => {
   if (projectId.value) void load()

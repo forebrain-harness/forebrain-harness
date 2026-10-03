@@ -503,6 +503,15 @@ export function conversationFromTranscript(
       if (ownTurn) closeTurn()
       return
     }
+    if (role === 'worked') {
+      // The line that closed a run, after the last row it wrote, whatever
+      // ended it. A run that said nothing - one that failed at once - has no
+      // turn of its own yet, and its line is that turn.
+      const current = openTurn(row, index)
+      applyRunWorkedLine(current, row)
+      closeTurn()
+      return
+    }
     if (role === 'tool') {
       // Answered in call order beside the row that issued it. One that no
       // assistant row claims - a misattributed or repaired row - keeps its own
@@ -556,18 +565,6 @@ function applyTranscriptRowMetadata(
   renderPlan: (plan: ExecutionPlan) => boolean,
 ) {
   if (String(row.runId ?? '').trim()) message.runId = String(row.runId).trim()
-  if (row.runStartedAt) message.runStartedAt = String(row.runStartedAt)
-  if (row.runFinishedAt) message.runFinishedAt = String(row.runFinishedAt)
-  if (row.workedDurationMs != null) message.workedDurationMs = Number(row.workedDurationMs)
-  // The worked line's checklist facts ride the history row the same way the
-  // live event carried them.
-  const planTotal = Number(row.planTotal)
-  if (Number.isFinite(planTotal) && planTotal > 0) {
-    const planDone = Number(row.planDone)
-    message.workedPlanTotal = planTotal
-    message.workedPlanDone = Number.isFinite(planDone) ? planDone : 0
-    if (typeof row.planActive === 'string' && row.planActive.trim()) message.workedPlanActive = row.planActive
-  }
   if (row.memoryCitation) message.memoryCitation = row.memoryCitation
   if (!row.planJson) return
   try {
@@ -577,6 +574,25 @@ function applyTranscriptRowMetadata(
     message.planBlocks = [{ plan: planVal }]
   } catch {
     //
+  }
+}
+
+/**
+ * applyRunWorkedLine closes a turn with the run's worked line from its history
+ * row: the run's clock, and its checklist facts the same way the live run end
+ * carried them.
+ */
+function applyRunWorkedLine(message: ChatMessage, row: ChatMessageRecord) {
+  if (String(row.runId ?? '').trim()) message.runId = String(row.runId).trim()
+  if (row.runStartedAt) message.runStartedAt = String(row.runStartedAt)
+  if (row.runFinishedAt) message.runFinishedAt = String(row.runFinishedAt)
+  if (row.workedDurationMs != null) message.workedDurationMs = Number(row.workedDurationMs)
+  const planTotal = Number(row.planTotal)
+  if (Number.isFinite(planTotal) && planTotal > 0) {
+    const planDone = Number(row.planDone)
+    message.workedPlanTotal = planTotal
+    message.workedPlanDone = Number.isFinite(planDone) ? planDone : 0
+    if (typeof row.planActive === 'string' && row.planActive.trim()) message.workedPlanActive = row.planActive
   }
 }
 
@@ -603,7 +619,7 @@ export function withSpokenDelta(message: ChatMessage, text: string, eventId?: st
     eventId,
     occurredAt,
   )
-  return { ...message, blocks, content: spokenText(blocks) || '...' }
+  return { ...message, blocks, content: spokenText(blocks) || NOTHING_SAID_YET }
 }
 
 /**
@@ -647,6 +663,29 @@ export function cancelPendingToolBlocks(blocks: TimelineBlock[]): TimelineBlock[
  * nothing before it was stopped still needs a bubble saying so, which is the one
  * sentence the surface has for it.
  */
+/**
+ * NOTHING_SAID_YET is what a turn shows while its run has produced no text.
+ * It is a placeholder, never the turn's text: a run that ends without saying
+ * anything has no content, not three dots.
+ */
+const NOTHING_SAID_YET = '...'
+
+/**
+ * withRunError ends a turn on its failure: what streamed is closed, and the
+ * error is the turn's last block — drawn in the conversation, above the worked
+ * line, the way the terminal draws it. A run reports its failure once on the
+ * page however many channels carry it, so the block is keyed by the run.
+ */
+export function withRunError(message: ChatMessage, runId: string | null | undefined, text: string, detail: ProviderErrorDetail | null, occurredAt?: unknown): ChatMessage {
+  const id = String(runId ?? '').trim() ? `error:${String(runId).trim()}` : undefined
+  const closed = closeStreamedBlocks(message.blocks ?? [], ['assistant', 'thinking'], occurredAt)
+  if (id && closed.some((block) => block.kind === 'error' && block.id === id)) {
+    return { ...message, blocks: closed }
+  }
+  const block: TimelineBlock = { kind: 'error', ...(id ? { id } : {}), text, ...(detail ? { detail } : {}) }
+  return { ...message, blocks: [...closed, block] }
+}
+
 export function withCancelledTurn(message: ChatMessage, occurredAt?: unknown): ChatMessage {
   const blocks = cancelPendingToolBlocks(
     closeStreamedBlocks(message.blocks ?? [], ['assistant', 'thinking'], occurredAt),
@@ -755,7 +794,12 @@ export type TimelineBlock =
       /** The call this gate held, when the record names one. */
       toolStepId?: string
     }
-  | { kind: 'error'; id?: string; text: string }
+  /**
+   * What ended a run in failure, as the last thing its turn says before the
+   * worked line. detail carries the classified provider facts, rendered in the
+   * viewer's language; text is the runtime's sentence for the rest.
+   */
+  | { kind: 'error'; id?: string; text: string; detail?: ProviderErrorDetail }
   /** A compaction of this history, drawn as one card from start to end. */
   | { kind: 'compaction'; id: string; compaction: ForebrainCompaction }
   /** A line of a /goal: how it opened, a continuation round, or how it ended. */
@@ -1274,6 +1318,22 @@ export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn =
     plan: plan && plan.total > 0 ? plan : undefined,
     time,
   }
+}
+
+/**
+ * The worked line that closes an assistant turn: duration, checklist progress
+ * when the run had one, then the finish time. Every surface that shows a
+ * conversation draws it from this, so a run reads the same wherever it ran.
+ */
+export function workedLineOf(
+  msg: Pick<ChatMessage, 'role' | 'workedDurationMs' | 'runFinishedAt' | 'workedPlanDone' | 'workedPlanTotal' | 'workedPlanActive'>,
+  tr: TranslateFn = translate,
+): WorkedLine {
+  if (msg.role !== 'assistant') return { label: '' }
+  const plan = msg.workedPlanTotal && msg.workedPlanTotal > 0
+    ? { done: msg.workedPlanDone ?? 0, total: msg.workedPlanTotal, active: msg.workedPlanActive }
+    : undefined
+  return formatWorkedDurationLabel(msg.workedDurationMs, tr, msg.runFinishedAt, plan)
 }
 
 /** Join a WorkedLine's segments with the worked line's separator. */
@@ -2579,11 +2639,10 @@ export function useChatStream() {
         state.completedNormally = false
         const msg = String(payload.error ?? payload.message ?? 'Request failed')
         updateMessageById(assistantMessageId, (message) => ({
-          ...message,
+          ...withRunError(message, evt.runId, msg, parseProviderErrorDetail(payload.detail), evt.createdAt),
           ...runEndPatch(evt.createdAt, payload.elapsedMs, state.runStartedAt, planProgressOfPayload(payload)),
         }))
         runtimeStatus.value = { ...runtimeStatus.value, toolName: undefined }
-        setError(msg, parseProviderErrorDetail(payload.detail))
         isStreaming.value = false
         return
       }
@@ -2672,7 +2731,10 @@ export function useChatStream() {
 
   // A history snapshot that began before a local send into the same session
   // must not apply after it, or its pre-send (empty) view erases the turn.
-  const sendEpochs: { epoch: number; session: string | null }[] = []
+  // Each session remembers the epoch of its latest send; a snapshot taken at
+  // epoch N is stale for that session only when a send came after it (> N) —
+  // a send before the snapshot is already in what the snapshot reads.
+  const lastSendEpochBySession = new Map<string, number>()
   let sendEpoch = 0
 
   async function send(userMessage: string, options?: SendOptions): Promise<void> {
@@ -2682,7 +2744,8 @@ export function useChatStream() {
     // send that never becomes a turn, such as a slash command.
     cancelAutoContinue()
     sendEpoch++
-    sendEpochs.push({ epoch: sendEpoch, session: options?.sessionId ?? sessionId.value ?? null })
+    const sendSession = String(options?.sessionId ?? sessionId.value ?? '').trim()
+    if (sendSession) lastSendEpochBySession.set(sendSession, sendEpoch)
     if (isStreaming.value && activeRunId) {
       const disposition = options?.activeInputDisposition === 'queue' ? 'queue' : 'steer'
       if (!await queueActiveRunInput(activeRunId, userMessage, disposition, options?.attached)) {
@@ -2719,7 +2782,7 @@ export function useChatStream() {
         content: userMessage.trim() ? userMessage : attachedOnlyText(userAttachments),
         attachments: userAttachments.length ? userAttachments : undefined,
       }]),
-      { id: assistantMessageId, role: 'assistant', content: '...' },
+      { id: assistantMessageId, role: 'assistant', content: NOTHING_SAID_YET },
     ]
 
     // This send's view of its run. It hears the messages its run hands back
@@ -2814,7 +2877,7 @@ export function useChatStream() {
             : payload
           updateMessageById(assistantMessageId, (message) => ({
             ...withSettledTurnText(message, finalText, finishedAt),
-            ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt),
+            ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
           isStreaming.value = false
           return
@@ -2828,10 +2891,9 @@ export function useChatStream() {
           const msg = String(payload.error ?? payload.message ?? 'Request failed')
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
           updateMessageById(assistantMessageId, (message) => ({
-            ...message,
-            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt),
+            ...withRunError(message, String(payload.runId ?? activeRunId ?? '').trim(), msg, parseProviderErrorDetail(payload.data), finishedAt),
+            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
-          setError(msg, parseProviderErrorDetail(payload.data))
           isStreaming.value = false
           return
         }
@@ -2862,7 +2924,7 @@ export function useChatStream() {
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
           updateMessageById(assistantMessageId, (message) => ({
             ...withCancelledTurn(message, finishedAt),
-            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt),
+            ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
           isStreaming.value = false
           return
@@ -3066,15 +3128,19 @@ export function useChatStream() {
         planBlocksAccumulator.length > 0 ||
 		Boolean(currentAssistant?.planUpdates?.length) ||
 		Boolean(currentAssistant?.subagentCards?.length)
-      if (!hasAssistantData) {
+      // A run that ended — finished, failed or stopped — closes with its
+      // worked line even when it said nothing, the way the terminal closes
+      // every run; the turn stays to carry that line.
+      const runEnded = currentAssistant?.workedDurationMs != null
+      if (!hasAssistantData && !runEnded) {
         messages.value = messages.value.filter((message) => message.id !== assistantMessageId)
       } else {
         updateMessageById(assistantMessageId, (message) => ({
           ...message,
           // The timeline is what the turn said, in the order it said it; the raw
           // delta stream is only a fallback for a turn that produced no blocks
-          // at all.
-          content: spokenText(message.blocks ?? []) || eventState.fullAnswer || (message.planUpdates?.length ? '' : message.content),
+          // at all. A turn that said nothing has no text, not a placeholder.
+          content: spokenText(message.blocks ?? []) || eventState.fullAnswer || (message.planUpdates?.length || message.content === NOTHING_SAID_YET ? '' : message.content),
           plan: planBlocksAccumulator.length > 0 ? planBlocksAccumulator[planBlocksAccumulator.length - 1].plan : plan.value ?? null,
           planBlocks: planBlocksAccumulator.length > 0 ? planBlocksAccumulator.map((b) => ({ plan: b.plan })) : undefined,
         }))
@@ -3251,7 +3317,7 @@ export function useChatStream() {
 	  }
 	  if (generation !== historyGeneration || (sessionId.value != null && sessionId.value !== target)) return
       const transcript = conversationFromTranscript(Array.isArray(list) ? list : [], shouldRenderPlan)
-      const streamedIntoTarget = sendEpochs.some((entry) => entry.epoch >= snapshotEpoch && entry.session === target)
+      const streamedIntoTarget = (lastSendEpochBySession.get(target) ?? 0) > snapshotEpoch
       if (streamedIntoTarget) {
         // A send into this same session started after the snapshot was
         // requested: the local view is newer than the snapshot, which

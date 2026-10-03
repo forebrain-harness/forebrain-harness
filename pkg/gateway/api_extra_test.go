@@ -739,6 +739,30 @@ func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
 	if len(list.Sessions) != 1 || list.Sessions[0]["id"] != session.ID {
 		t.Fatalf("project sessions: %+v", list)
 	}
+	// ...and the agent's own conversation list does not: a project's
+	// sessions live in its project space only.
+	rec = httptest.NewRecorder()
+	s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat sessions: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), session.ID) {
+		t.Fatalf("project session %s leaked into the conversation list: %s", session.ID, rec.Body.String())
+	}
+	// The chat page can still name the project an opened session belongs to.
+	sessionProject := func(sid string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleChatSessionProject(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sid+"/project", nil), sid))
+		return rec
+	}
+	rec = sessionProject(session.ID)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name":"withsessions"`) || !strings.Contains(rec.Body.String(), `"id":"`+id+`"`) {
+		t.Fatalf("session project: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = sessionProject("not-a-project-session")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"project":null}` {
+		t.Fatalf("plain session project: %d %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestProjectMCPPreviewAndConsentEndpoint(t *testing.T) {
@@ -1257,9 +1281,11 @@ func newTimingSnapshotServer(t *testing.T) (*Server, *state.SessionStore) {
 	if _, err := sessions.AppendStructuredMessageForRun(ctx, "s1", run.ID, "assistant", "checked", "m-a", "[]", "model-x", "{}", "", "", state.MessageExecTiming{}); err != nil {
 		t.Fatal(err)
 	}
-	// The run's own clock is stamped with the rows that carry its run id.
-	if err := sessions.AppendMessageSequenceForRun(ctx, "s1", run.ID, []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("checked")})}, "model-x", "",
-		state.RunTiming{StartedAt: start, FinishedAt: finish, Worked: 90 * time.Second}); err != nil {
+	// The run's own clock is stamped when the run ends.
+	if err := sessions.AppendMessageSequenceForRun(ctx, "s1", run.ID, []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("checked")})}, "model-x", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.StampRunTiming(ctx, run.ID, state.RunTiming{StartedAt: start, FinishedAt: finish, Worked: 90 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	// A tool row: its timing is the tool call's own execution window.
@@ -1281,11 +1307,50 @@ func newTimingSnapshotServer(t *testing.T) (*Server, *state.SessionStore) {
 	return &Server{Sessions: sessions, RunRT: runs}, sessions
 }
 
+// A run that failed before it said anything still ended, and the page closed
+// it with its "Worked for" line; the history closes it the same way, after
+// the user's message that is the run's only row.
+func TestChatMessagesCloseASilentFailedRunAfterItsMessage(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	runs := &state.RunStore{DB: db}
+	failed, err := runs.CreateRun(ctx, "s1", "hello")
+	require.NoError(t, err)
+	_, err = turn.PersistUserTurn(ctx, sessions, turn.UserTurn{SessionID: "s1", RunID: failed.ID, ModelInput: "hello"})
+	require.NoError(t, err)
+	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	turn.PersistCancelledTurn(ctx, sessions, turn.CancelledTurn{SessionID: "s1", RunID: failed.ID, End: turn.RunEnd{StartedAt: start, FinishedAt: start.Add(2 * time.Second), Worked: 2 * time.Second}})
+	_, err = turn.PersistUserTurn(ctx, sessions, turn.UserTurn{SessionID: "s1", ModelInput: "again"})
+	require.NoError(t, err)
+
+	s := &Server{Sessions: sessions, RunRT: runs}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		Role     string `json:"role"`
+		Content  string `json:"content"`
+		RunID    string `json:"run_id"`
+		WorkedMs int64  `json:"worked_duration_ms"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.Role+":"+row.Content)
+	}
+	require.Equal(t, []string{"user:hello", "worked:", "user:again"}, got)
+	require.Equal(t, failed.ID, rows[1].RunID)
+	require.Equal(t, int64(2_000), rows[1].WorkedMs)
+}
+
 // TestChatMessagesTimingFieldsStable pins the /messages response's timing
-// fields: the run window and worked duration on the assistant row that closed
-// a run, the execution window on tool rows, and the command window on `!cmd`
-// user rows — all as RFC3339 strings and millisecond counts. T4 reworks where
-// these are stored; this asserts they keep reaching the wire unchanged.
+// fields: the run window and worked duration on the worked row that closes a
+// run after the last row it wrote, the execution window on tool rows, and the
+// command window on `!cmd` user rows — all as RFC3339 strings and millisecond
+// counts.
 func TestChatMessagesTimingFieldsStable(t *testing.T) {
 	s, _ := newTimingSnapshotServer(t)
 	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
@@ -1302,28 +1367,35 @@ func TestChatMessagesTimingFieldsStable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatal(err)
 	}
-	var assistant, tool, cmd *struct {
+	var worked, tool, cmd *struct {
 		Role       string `json:"role"`
 		RunID      string `json:"run_id,omitempty"`
 		RunStarted string `json:"run_started_at,omitempty"`
 		RunFinish  string `json:"run_finished_at,omitempty"`
 		WorkedMs   int64  `json:"worked_duration_ms,omitempty"`
 	}
+	workedAt := -1
 	for i := range rows {
 		switch {
-		case rows[i].Role == "assistant" && assistant == nil:
-			assistant = &rows[i]
+		case rows[i].Role == "assistant" && rows[i].WorkedMs != 0:
+			t.Fatalf("assistant row %d carries the run's clock; the worked row does", i)
+		case rows[i].Role == "worked" && worked == nil:
+			worked, workedAt = &rows[i], i
 		case rows[i].Role == "tool" && tool == nil:
 			tool = &rows[i]
 		case rows[i].Role == "user" && rows[i].WorkedMs != 0:
 			cmd = &rows[i]
 		}
 	}
-	if assistant == nil || tool == nil || cmd == nil {
-		t.Fatalf("rows = %+v, want an assistant, a tool and a timed user row", rows)
+	if worked == nil || tool == nil || cmd == nil {
+		t.Fatalf("rows = %+v, want a worked, a tool and a timed user row", rows)
 	}
-	if assistant.RunStarted == "" || assistant.RunFinish == "" || assistant.WorkedMs != 90_000 || assistant.RunID == "" {
-		t.Fatalf("assistant timing = %q %q %d %q", assistant.RunStarted, assistant.RunFinish, assistant.WorkedMs, assistant.RunID)
+	if worked.RunStarted == "" || worked.RunFinish == "" || worked.WorkedMs != 90_000 || worked.RunID == "" {
+		t.Fatalf("worked timing = %q %q %d %q", worked.RunStarted, worked.RunFinish, worked.WorkedMs, worked.RunID)
+	}
+	// The run's last row is its assistant answer; the line follows it.
+	if workedAt == 0 || rows[workedAt-1].Role != "assistant" {
+		t.Fatalf("worked row at %d follows %+v, want the run's last row", workedAt, rows[workedAt-1])
 	}
 	if tool.RunStarted == "" || tool.RunFinish == "" || tool.WorkedMs != 5_000 {
 		t.Fatalf("tool timing = %q %q %d", tool.RunStarted, tool.RunFinish, tool.WorkedMs)
@@ -1752,11 +1824,44 @@ func TestAgentRuleFilePutGetRoundTrip(t *testing.T) {
 	req = withParamName(httptest.NewRequest(http.MethodGet, "/api/rules/agent/USER.md", nil), "USER.md")
 	s.handleAgentRuleFile(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.Equal(t, "be kind", rr.Body.String())
+	var got struct {
+		Name    string `json:"name"`
+		Exists  bool   `json:"exists"`
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	require.Equal(t, "USER.md", got.Name)
+	require.True(t, got.Exists)
+	require.Equal(t, "be kind", got.Content)
 
 	raw, err := os.ReadFile(filepath.Join(workspace, "USER.md"))
 	require.NoError(t, err)
 	require.Equal(t, "be kind", string(raw))
+}
+
+// A file that does not exist yet answers in the same shape as one that does,
+// so no reply can be mistaken for file content — even a file whose text
+// happens to look like a status reply.
+func TestAgentRuleFileReadAnswersOneShape(t *testing.T) {
+	s, _, workspace := rulesServer(t)
+	read := func(name string) map[string]any {
+		rr := httptest.NewRecorder()
+		s.handleAgentRuleFile(rr, withParamName(httptest.NewRequest(http.MethodGet, "/api/rules/agent/"+name, nil), name))
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+	missing := read("SOUL.md")
+	require.Equal(t, false, missing["exists"])
+	require.Equal(t, "", missing["content"])
+
+	lookalike := `{"exists":false,"content":""}`
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte(lookalike), 0o644))
+	present := read("SOUL.md")
+	require.Equal(t, true, present["exists"])
+	require.Equal(t, lookalike, present["content"])
 }
 
 func TestAgentRuleFileBudgetWarning(t *testing.T) {
@@ -1790,6 +1895,58 @@ func TestProjectRuleDirValidationOnly(t *testing.T) {
 	full, ok = projectRulePath(root, "")
 	require.True(t, ok)
 	require.Equal(t, filepath.Join(root, "FOREBRAIN.md"), full)
+
+	// .git is the repository's machinery and a symlinked directory may lead
+	// anywhere: neither is a layer of the project's chain.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "linked")))
+	for _, dir := range []string{".git", "linked", "."} {
+		_, ok := projectRulePath(root, dir)
+		require.False(t, ok, "dir=%s should be rejected", dir)
+	}
+}
+
+// The project listing is the chain as it stands — the root plus every layer
+// holding a FOREBRAIN.md — and the create list is every subdirectory layer
+// without one.
+func TestProjectRuleFilesListsTheChainAndCreatableLayers(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s.Projects = state.NewProjectStore(db, "main")
+	root := t.TempDir()
+	for _, dir := range []string{"api", "docs", "web"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "FOREBRAIN.md"), []byte("docs rules"), 0o644))
+	p, err := s.Projects.Create(context.Background(), state.CreateProjectInput{Name: "p", Root: root})
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	s.handleProjectRuleFiles(rr, withNamedParam(httptest.NewRequest(http.MethodGet, "/api/rules/project/"+p.ID, nil), "projectId", p.ID))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var listing struct {
+		Files []struct {
+			Dir    string `json:"dir"`
+			Exists bool   `json:"exists"`
+		} `json:"files"`
+		Create []string `json:"create"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &listing))
+	require.Len(t, listing.Files, 2)
+	require.Equal(t, "", listing.Files[0].Dir)
+	require.False(t, listing.Files[0].Exists)
+	require.Equal(t, "docs", listing.Files[1].Dir)
+	require.True(t, listing.Files[1].Exists)
+	require.Equal(t, []string{"api", "web"}, listing.Create)
+
+	rr = httptest.NewRecorder()
+	req := withNamedParam(httptest.NewRequest(http.MethodGet, "/api/rules/project/"+p.ID+"/file?dir=docs", nil), "projectId", p.ID)
+	s.handleProjectRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.JSONEq(t, `{"dir":"docs","exists":true,"content":"docs rules"}`, rr.Body.String())
 }
 
 func TestApprovalDefaultGetPut(t *testing.T) {
@@ -1836,12 +1993,49 @@ func TestSessionPresetValidates(t *testing.T) {
 	s.handleSessionPreset(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
+	// The session read needs a session too.
+	rr = httptest.NewRecorder()
+	s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset", nil))
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
 	// Without a mounted runner the endpoint reports unavailability rather
 	// than pretending to have applied anything.
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"read-only"}`))
 	s.handleSessionPreset(rr, req)
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+}
+
+// A preset picked for one conversation is that conversation's alone: the
+// live config every other conversation, channel and scheduled job of the
+// gateway runs under keeps its sandbox and approval policy.
+func TestSessionPresetBelongsToItsConversation(t *testing.T) {
+	home := t.TempDir()
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full-access"}`)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, cfg.SandboxMode)
+	require.Equal(t, appcfg.ApprovalPolicyOnRequest, cfg.ApprovalPolicy.Mode)
+
+	current := func(sessionID string) string {
+		rr := httptest.NewRecorder()
+		s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id="+sessionID, nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		return rr.Body.String()
+	}
+	require.Contains(t, current("s1"), `"current":"full-access"`)
+	require.Contains(t, current("s2"), `"current":"auto"`)
+
+	owning := runner.EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
+	require.Equal(t, "danger_full_access", owning.Reason)
+	other := runner.EvaluatePermissionForSession("s2", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", other.Reason)
+	require.False(t, other.BypassSandbox)
 }
 
 func withParamName(r *http.Request, value string) *http.Request {
@@ -1912,6 +2106,63 @@ func TestProvidersDTORoundTripStoresKeyAsEnvReference(t *testing.T) {
 	require.NotContains(t, string(raw), "[REDACTED]")
 }
 
+// params keys are the provider's own request fields: the GET hands them back
+// as JSON text so no client-side key normalization can rename them, and the
+// PUT refuses anything but an object.
+func TestProvidersDTOParamsRoundTripKeepsProviderFieldNames(t *testing.T) {
+	s, _ := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-params-1111","params":{"max_tokens":512,"reasoning_effort":"high"}}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 1)
+	text, ok := rows[0]["params"].(string)
+	require.True(t, ok, "params must travel as JSON text, got %T", rows[0]["params"])
+	require.JSONEq(t, `{"max_tokens":512,"reasoning_effort":"high"}`, text)
+
+	rr = providersPut(t, s, `{"providers":[{"provider":"deepseek","models":["deepseek-v4"],"params":["not","an","object"]}]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// The first row is the agent's primary model, which startup requires to be
+// complete; a table that would leave it incomplete is refused instead of
+// saved into a config the gateway could not start with again.
+func TestProvidersDTORefusesAnIncompletePrimary(t *testing.T) {
+	s, home := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[{"provider":"moonshotai","models":[],"api_key_plain":"sk-e2e-7788"}]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "model")
+	require.Contains(t, rr.Body.String(), "base_url")
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(cfgRaw), "moonshotai")
+
+	// An incomplete row is fine as a fallback behind a complete primary.
+	rr = providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-primary-1234"},
+		{"provider":"moonshotai","models":[],"api_key_plain":"sk-e2e-7788"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+// A provider the engine's model catalog does not know has no client: the
+// row is refused at save time, the way setup refuses it, rather than written
+// into a config whose next runner load (a switch, a restart) would fail.
+func TestProvidersDTORefusesAProviderTheEngineCannotBuild(t *testing.T) {
+	s, home := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-primary-1234"},
+		{"provider":"made-up-svc","base_url":"https://llm.example.test/v1","models":["m"],"api_key_plain":"sk-x-9999"}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "unsupported provider: made-up-svc")
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(cfgRaw), "made-up-svc")
+}
+
 // The config file holds one entry per model (the engine's expanded form);
 // adjacent same-signature entries fold back into one editable row.
 func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
@@ -1961,7 +2212,7 @@ func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
 func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 	s, home := providersDTOServer(t)
 	created := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"api_key_plain":"sk-live-keep-4321"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-live-keep-4321"}
 	]}`)
 	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
 
@@ -1971,7 +2222,7 @@ func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 	// A PUT that touches only the model list carries no key fields: the
 	// stored key and the .env entry are exactly what they were.
 	updated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4","deepseek-r2"]}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-r2"]}
 	]}`)
 	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
 	rows := providersGet(t, s)
@@ -1988,10 +2239,10 @@ func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","models":["m"],"api_key_plain":"sk-old-aaaa"}]}`).Code)
+		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"sk-old-aaaa"}]}`).Code)
 
 	rotated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["m"],"api_key_plain":"sk-new-bbbb"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"sk-new-bbbb"}
 	]}`)
 	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
 	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
@@ -2006,7 +2257,7 @@ func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
 func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
 	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","models":["m"],"api_key_plain":"ab"}]}`).Code)
+		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"ab"}]}`).Code)
 	rows := providersGet(t, s)
 	require.Equal(t, true, rows[0]["api_key_set"])
 	require.Equal(t, "••••", rows[0]["api_key_hint"])
@@ -2016,7 +2267,7 @@ func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
 func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"custom","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
+		`{"providers":[{"provider":"openai","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
 	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(cfgRaw), "${MY_CUSTOM_KEY}")
@@ -2028,7 +2279,7 @@ func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
 func TestProvidersDTOPersistedShapeIsEngineExpanded(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["a","b"],"api_key_plain":"sk-x-1234"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["a","b"],"api_key_plain":"sk-x-1234"}
 	]}`).Code)
 	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
@@ -2311,4 +2562,80 @@ func TestCronJobsListSplitsByProject(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id="+other.ID, nil, s.handleCronJobs).Code)
 	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id=missing", nil, s.handleCronJobs).Code)
+}
+
+// A project space's permission tab manages that project's own rules: the
+// write lands in the route project's .forebrain/safety.json — never in the
+// project the gateway itself was launched in — and is refused for a project
+// whose rules the engine would not honor.
+func TestProjectPermissionRulesBelongToTheRouteProject(t *testing.T) {
+	s, home, _ := rulesServer(t)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s.Projects = state.NewProjectStore(db, "main")
+
+	launchRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(launchRoot, ".git"), 0o755))
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: launchRoot}))
+	s.Env.LaunchProject = safety.ProjectContext{Project: safety.Project{Root: launchRoot, VersionControlled: true}, TrustLevel: safety.LevelTrusted}
+
+	projectRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755))
+	p, err := s.Projects.Create(context.Background(), state.CreateProjectInput{Name: "p", Root: projectRoot})
+	require.NoError(t, err)
+
+	update := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		body := `{"type":"addRules","behavior":"deny","rules":[{"tool_name":"Bash","rule_content":"rm -rf:*"}]}`
+		req := withID(httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+p.ID+"/permissions/updates", strings.NewReader(body)), p.ID)
+		s.handleProjectPermissionUpdate(rr, req)
+		return rr
+	}
+	list := func() map[string]any {
+		rr := httptest.NewRecorder()
+		s.handleProjectPermissionRules(rr, withID(httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+p.ID+"/permissions/rules", nil), p.ID))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	// Untrusted: the engine would drop the rule, so the write is refused.
+	require.Equal(t, false, list()["applies"])
+	rr := update()
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.NoFileExists(t, filepath.Join(projectRoot, ".forebrain", "safety.json"))
+
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: projectRoot}))
+	rr = update()
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	raw, err := os.ReadFile(filepath.Join(projectRoot, ".forebrain", "safety.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "rm -rf")
+	require.NoFileExists(t, filepath.Join(launchRoot, ".forebrain", "safety.json"))
+
+	listing := list()
+	require.Equal(t, true, listing["applies"])
+	require.Contains(t, fmt.Sprint(listing["rules"]), "rm -rf")
+}
+
+// The session's cost is what its requests spent, in the figures /status
+// reports — not a placeholder saying token cost is unavailable.
+func TestSessionCostSummaryReportsWhatTheSessionSpent(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	seedRun(t, s.RunRT, "s1", "r1")
+	require.NoError(t, s.RunRT.SetRunUsage(ctx, "r1", state.LastRunUsage{PromptTokens: 200, CompletionTokens: 50, CacheReadTokens: 600, CacheWriteTokens: 200, LLMCalls: 2}))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/cost-summary", nil, s.handleSessionCostSummary, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, float64(1000), got["input_tokens"])
+	require.Equal(t, float64(50), got["output_tokens"])
+	require.Equal(t, float64(2), got["requests"])
+	require.Equal(t, float64(60), got["cache_hit_percent"])
+	require.NotContains(t, rec.Body.String(), "note")
 }

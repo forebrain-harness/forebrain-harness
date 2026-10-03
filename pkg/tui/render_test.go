@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 )
@@ -441,5 +442,21 @@ func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
 	cmd := formatToolOutputBlock("\x1b[31mfailed\x1b[0m (no output)")
 	if strings.Contains(cmd, "\x1b[31m") || strings.Contains(cmd, "\x1b[2m") {
 		t.Fatalf("command output kept or gained styling: %q", cmd)
+	}
+}
+
+// A user_interaction card names every question it asks, in full — the same
+// words the web's card header uses — rather than nothing at all.
+func TestUserInteractionCardHeaderNamesItsQuestions(t *testing.T) {
+	meta := tool.ToolMeta{Status: "completed", Input: map[string]any{"questions": []any{
+		map[string]any{"header": "Triggers"},
+		map[string]any{"question": "What should the greeting look like when the user says hi first thing in the morning?"},
+	}}}
+	action, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "user_interaction", ToolMeta: meta, Final: true}, "", "")
+	if action != "Asked user" {
+		t.Fatalf("action = %q", action)
+	}
+	if target != "Triggers · What should the greeting look like when the user says hi first thing in the morning?" {
+		t.Fatalf("target = %q, want every question named in full", target)
 	}
 }

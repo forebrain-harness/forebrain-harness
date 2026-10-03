@@ -25,7 +25,8 @@
           <div class="truncate font-medium">{{ task.title || task.id }}</div>
           <div class="mt-0.5 text-[11px] text-[var(--forebrain-muted-text)]">{{ formatTaskTime(task.updateTime) }}</div>
         </button>
-        <p v-if="!tasks.length" class="px-2 py-6 text-center text-[12px] text-[var(--forebrain-muted-text)]">{{ t('workshop.noTasks') }}</p>
+        <p v-if="listError" class="px-2 py-2 text-[12px] text-[var(--forebrain-danger)]">{{ listError }}</p>
+        <p v-else-if="!tasks.length" class="px-2 py-6 text-center text-[12px] text-[var(--forebrain-muted-text)]">{{ t('workshop.noTasks') }}</p>
       </aside>
 
       <!-- Conversation -->
@@ -33,14 +34,38 @@
         <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           <p v-if="!stream.messages.value.length" class="py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">{{ t('workshop.emptyConversation') }}</p>
           <div v-for="message in stream.messages.value" :key="message.id" class="mb-3" :data-workshop-message="message.role">
+            <!-- A turn reads as the chat page reads it, live: what was said,
+                 what was thought, the calls made and the gates passed, in
+                 the order they happened — not just the final words. -->
             <div
+              v-if="message.role === 'assistant' && message.blocks?.length"
+              class="max-w-[85%] rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
+            >
+              <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
+                <div
+                  v-if="block.kind === 'thinking'"
+                  class="mb-2 whitespace-pre-wrap break-words text-[12px] text-[var(--forebrain-muted-text)]"
+                >{{ block.text }}</div>
+                <MessageResponse v-else-if="block.kind === 'assistant'" :content="block.text" />
+                <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :default-open="false" />
+                <ApprovalCard v-else-if="block.kind === 'approval'" class="my-2" :block="block" />
+                <RunErrorBlock v-else-if="block.kind === 'error'" class="my-2" :text="block.text" :detail="block.detail" />
+              </template>
+            </div>
+            <div
+              v-else-if="message.role !== 'assistant' || String(message.content ?? '').trim()"
               class="inline-block max-w-[85%] rounded-2xl px-4 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap"
               :class="message.role === 'user'
                 ? 'bg-[var(--forebrain-brand-1)] text-[var(--forebrain-on-brand)]'
                 : 'border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] text-[var(--forebrain-text)]'"
             >{{ message.content }}</div>
+            <!-- Every run closes with its line, a run that said nothing too. -->
+            <RunWorkedLine class="max-w-[85%]" :message="message" />
           </div>
-          <p v-if="stream.error" class="text-[12px] text-[var(--forebrain-danger)]">{{ stream.error }}</p>
+          <!-- A gate the task's turn is parked on is decided here, with the
+               same controls the chat page has. -->
+          <PendingActionsPanel :session-id="activeTaskId || null" :version="stream.pendingActionsVersion.value" />
+          <p v-if="stream.error.value" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-error">{{ stream.error.value }}</p>
         </div>
         <form class="flex items-end gap-2 border-t border-[var(--forebrain-divider)] px-4 py-3" @submit.prevent="submit">
           <textarea
@@ -123,6 +148,12 @@
  * tooling, not a conversation.
  */
 import { computed, onMounted, ref } from 'vue'
+import { MessageResponse } from '@repo/elements/message'
+import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import PendingActionsPanel from '@/components/chat/PendingActionsPanel.vue'
+import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
+import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import WorkshopSkillPanel from '@/components/workshop/WorkshopSkillPanel.vue'
 import forebrainApi, { getErrorMessage, type SkillRecord } from '@/lib/api'
 import { useChatStream } from '@/composables/useChatStream'
@@ -144,6 +175,7 @@ const purpose = ref('')
 const target = ref<'agent' | 'shared'>('agent')
 const creating = ref(false)
 const dialogError = ref('')
+const listError = ref('')
 const editableSkills = ref<SkillRecord[]>([])
 
 // The skill the panel shows: the one the active task was started for. A
@@ -163,17 +195,23 @@ async function loadTasks() {
   try {
     const data = await forebrainApi.chatSessions()
     tasks.value = data.records.filter((row) => row.source === 'workshop')
-  } catch {
+    listError.value = ''
+  } catch (e: unknown) {
     tasks.value = []
+    listError.value = getErrorMessage(e)
   }
 }
 
+// What a task may improve: the agent's own skills, which are edited in
+// place, and the built-ins, which the workshop copies to a layer the user
+// owns first. Inherited rows belong to the layer that manages them.
 async function loadEditableSkills() {
   try {
     const data = await forebrainApi.skillsOverview()
-    editableSkills.value = data.installed
-  } catch {
+    editableSkills.value = data.installed.filter((row) => row.origin === 'agent' || row.origin === 'builtin')
+  } catch (e: unknown) {
     editableSkills.value = []
+    listError.value = getErrorMessage(e)
   }
 }
 
@@ -207,6 +245,15 @@ async function createTask() {
   }
   creating.value = true
   try {
+    // The task is a conversation with the skill-workshop skill; without it
+    // in this agent's set there is nothing to start, and a task that silently
+    // ran without it would be an ordinary chat in a workshop's clothes.
+    const overview = await forebrainApi.skillsOverview()
+    const workshop = overview.installed.find((item) => item.name === 'skill-workshop' && item.enabled)
+    if (!workshop?.rootPath) {
+      dialogError.value = t('workshop.skillUnavailable')
+      return
+    }
     const created = await forebrainApi.chatSessionCreate(
       taskKind.value === 'new' ? t('workshop.taskTitle', { name }) : t('workshop.taskTitleImprove', { name }),
       'workshop',
@@ -217,12 +264,10 @@ async function createTask() {
     panelByName.value = name
     // The workshop skill is activated for the first message — the same
     // handoff the terminal performs.
-    const overview = await forebrainApi.skillsOverview()
-    const workshop = overview.installed.find((item) => item.name === 'skill-workshop')
     await stream.send(firstMessage(taskKind.value, name, purpose.value.trim(), target.value), {
       sessionId: created.id,
-      skillName: workshop?.name,
-      skillPath: workshop?.rootPath,
+      skillName: workshop.name,
+      skillPath: workshop.rootPath,
     })
     newName.value = ''
     improveName.value = ''

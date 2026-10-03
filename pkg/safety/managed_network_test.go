@@ -586,6 +586,18 @@ func TestSessionApprovalCannotOverrideLocalAddressGuard(t *testing.T) {
 	}
 }
 
+// A name the resolver could not answer for is not known to be local: it is
+// an unlisted host like any other, so the user is asked about it rather than
+// refused outright. The dial still refuses any non-public address it resolves
+// to then.
+func TestUnresolvedHostIsAskedAboutNotDeniedAsLocal(t *testing.T) {
+	policy := networkCommandPolicy{config: appcfg.EffectiveNetworkProxyConfig{Enabled: true, Mode: "full"}, canAsk: true}
+	denial := policy.evaluate("no-such-host.invalid", 443, NetworkApprovalHTTPS, "GET")
+	if denial == nil || denial.Reason != "not_allowed" || denial.Decision != "ask" {
+		t.Fatalf("denial = %+v, want an approval question about an unlisted host", denial)
+	}
+}
+
 func TestDisabledManagedProxyFailsClosed(t *testing.T) {
 	policy := networkCommandPolicy{config: appcfg.EffectiveNetworkProxyConfig{Enabled: false, Mode: "full"}, canAsk: true}
 	if denial := policy.evaluate("example.com", 80, NetworkApprovalHTTP, "GET"); denial == nil || denial.Reason != "proxy_disabled" || denial.Decision != "deny" {

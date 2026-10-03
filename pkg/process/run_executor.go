@@ -198,7 +198,7 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// capture is persisting from it too, and doing both would write the same
 	// partial turn to the transcript twice.
 	if err != nil && ownsCapture {
-		x.env.persistPartialTurn(sid, capture)
+		x.env.persistPartialTurn(sid, runID, capture)
 	}
 	// run and turn describe an approval gate with different types, and the
 	// adapter is the seam that owns the translation: run raises
@@ -267,7 +267,7 @@ func (env *Environment) projectScope() string {
 // the assistant produced this turn: the session store holds only the user
 // message, and the next turn rebuilds context from scratch, losing work the
 // user watched happen.
-func (env *Environment) persistPartialTurn(sessionID string, capture *run.PartialSessionCapture) {
+func (env *Environment) persistPartialTurn(sessionID, runID string, capture *run.PartialSessionCapture) {
 	if env == nil || env.Deps.SessionStore == nil || capture == nil {
 		return
 	}
@@ -275,8 +275,9 @@ func (env *Environment) persistPartialTurn(sessionID string, capture *run.Partia
 	if len(pending) == 0 {
 		return
 	}
-	// The model is unknown at cancel time; AppendMessageSequence tolerates it.
-	_ = env.Deps.SessionStore.AppendMessageSequence(context.Background(), sessionID, pending, "", "")
+	// What the stopped run wrote is the run's. The model is unknown at cancel
+	// time; the store tolerates it.
+	_ = env.Deps.SessionStore.AppendMessageSequenceForRun(context.Background(), sessionID, runID, pending, "", "")
 }
 
 // Tools is the active primary agent's tool state.

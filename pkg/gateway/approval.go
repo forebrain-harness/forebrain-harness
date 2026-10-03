@@ -76,6 +76,19 @@ func (s *Server) publishGatewayRunEvent(ctx context.Context, sessionID, runID, e
 	if runID == "" {
 		return fmt.Errorf("publish gateway run event: run id is required")
 	}
+	// Every way a run ends carries its checklist facts: the worked line
+	// closes every run, and it names the checklist however the run ended.
+	switch ending := payload.(type) {
+	case event.TurnCompletedPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	case event.TurnCancelledPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	case event.TurnErrorPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	}
 	return s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
 }
 
@@ -83,7 +96,7 @@ func (s *Server) publishDetachedGatewayApprovalRequest(ctx context.Context, sess
 	if s == nil || gate == nil {
 		return
 	}
-	data := approvalWSData(s.permissionFacade(), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
+	data := approvalWSData(s.sessionPermissions(ctx, sessionID), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
 	data["action_id"] = gate.ActionID
 	data["action_kind"] = gate.ActionKind
 	data["agent_id"] = gate.AgentID
@@ -190,7 +203,7 @@ func (s *Server) promptGatewayNetworkApproval(ctx context.Context, actionID stri
 	if s == nil || s.Actions == nil {
 		return safety.NetworkApprovalDeny, fmt.Errorf("network approval service is unavailable")
 	}
-	data := approvalWSData(s.permissionFacade(), request.EnvironmentID, actionID, "shell", "shell", payload)
+	data := approvalWSData(s.sessionPermissions(ctx, request.EnvironmentID), request.EnvironmentID, actionID, "shell", "shell", payload)
 	resolved := false
 	defer func() {
 		if !resolved {
@@ -259,7 +272,7 @@ func (s *Server) promptGatewaySubagentApproval(
 			_, _ = s.Actions.Cancel(context.Background(), gate.ActionID, "the subagent approval was abandoned before a decision was returned")
 		}
 	}()
-	data := approvalWSData(s.permissionFacade(), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
+	data := approvalWSData(s.sessionPermissions(ctx, sessionID), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
 	data["action_id"] = gate.ActionID
 	data["action_kind"] = gate.ActionKind
 	data["agent_id"] = gate.AgentID
@@ -441,15 +454,15 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 	}
 }
 
-func (s *Server) permissionFacade() turn.PermissionFacade {
-	if s == nil {
+// sessionPermissions judges calls for one conversation the way the runner it
+// runs on does — for a project session, that project's pooled runner. The
+// process facade is bound to the gateway's own runner and answers for the
+// gateway's launch project, so an approval card built from it would offer a
+// project session choices its own rules never produced.
+func (s *Server) sessionPermissions(ctx context.Context, sessionID string) turn.ApprovalEvaluator {
+	runner := s.runnerFor(ctx, sessionID)
+	if runner == nil {
 		return nil
 	}
-	if s.Core != nil {
-		return s.Core
-	}
-	if s.Runner != nil {
-		return s.Runner
-	}
-	return nil
+	return runner
 }

@@ -806,3 +806,31 @@ func TestRunnerPoolPropagateConfigSkipsClosedRunners(t *testing.T) {
 		t.Fatalf("empty pool propagation = %v, want nil", err)
 	}
 }
+
+// A project registered inside a larger checkout is that subdirectory's
+// project: its sessions run with the registered root as their launch project
+// — the root its trust record, skills and project space name — never the
+// enclosing checkout found by walking up to its .git.
+func TestRunnerPoolRunsARegisteredSubdirectoryAtItsOwnRoot(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	checkout := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(checkout, ".git"), 0o755))
+	inner := filepath.Join(checkout, "services", "api")
+	require.NoError(t, os.MkdirAll(inner, 0o755))
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "api", Root: inner, ProjectKey: "-api"})
+	require.NoError(t, err)
+	ensurePoolSessions(t, env, "sess-api")
+	require.NoError(t, projects.BindSession(ctx, "sess-api", proj.ID))
+
+	runner := pool.RunnerForSession(ctx, "sess-api")
+	require.NotNil(t, runner)
+	require.NotSame(t, env.Runner, runner)
+	canonicalInner, err := filepath.EvalSymlinks(inner)
+	require.NoError(t, err)
+	require.Equal(t, canonicalInner, runner.LaunchProject.Project.Root)
+	require.False(t, runner.LaunchProject.Project.VersionControlled, "the subdirectory has no .git of its own")
+}

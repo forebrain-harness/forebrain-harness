@@ -89,10 +89,10 @@ async function loadContent() {
   notice.value = ''
   warning.value = ''
   try {
-    const content = await forebrainApi.agentRuleFile(activeName.value)
-    // A missing file answers JSON; only a 200 with text is real content.
-    draft.value = content.startsWith('{"exists":false') ? '' : content
-    savedContent.value = draft.value
+    const file = await forebrainApi.agentRuleFile(activeName.value)
+    // A file not created yet reads as empty; saving it creates it.
+    draft.value = file.content
+    savedContent.value = file.content
   } catch (cause) {
     error.value = getErrorMessage(cause)
   }

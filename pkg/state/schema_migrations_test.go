@@ -831,7 +831,7 @@ func TestConcurrentSequenceAppendsDoNotDuplicateRows(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := store.AppendMessageSequenceForRun(ctx, "s", run.ID, sequence, "m", "", RunTiming{}); err != nil {
+			if err := store.AppendMessageSequenceForRun(ctx, "s", run.ID, sequence, "m", ""); err != nil {
 				t.Errorf("concurrent append: %v", err)
 			}
 		}()

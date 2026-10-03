@@ -393,7 +393,9 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	// and by the scope they pick: a turn grant binds to the child's own run ID,
 	// which is why nothing here has to narrow it after the fact.
 	forceToolApproval := exitPlanMode || payloadForcesToolApproval(pay)
-	approvalPolicy := r.permRuntimeGet().ApprovalPolicy(r.AppCfg)
+	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
+	approvalPolicy := snapshot.ApprovalPolicy
+	sessionCfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
 	if isApplyPatch {
 		if approved, err := r.applyPatchSessionApproval(ctx, pay); err != nil {
 			return "", false, err
@@ -401,8 +403,8 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 			return "", false, nil
 		}
 		constrained := r.sandboxAllowsFileMutation(ctx, "edit_file", pay, safety.Decision{Behavior: safety.BehaviorAsk, Reason: "default_ask"})
-		sandboxAvailable := r.AppCfg != nil && safety.NewManager().Decide(r.AppCfg, safety.ToolKindShell).UseSandbox
-		if r.AppCfg != nil && r.AppCfg.DangerFullAccessEnabled() {
+		sandboxAvailable := sessionCfg != nil && safety.NewManager().Decide(sessionCfg, safety.ToolKindShell).UseSandbox
+		if sessionCfg != nil && sessionCfg.DangerFullAccessEnabled() {
 			return "", false, nil
 		}
 		if constrained && sandboxAvailable && approvalPolicy.Mode != safety.ApprovalUnlessTrusted {
@@ -411,7 +413,7 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		rejectsSandboxApproval := approvalPolicy.Mode == safety.ApprovalNever ||
 			(approvalPolicy.Mode == safety.ApprovalGranular && !approvalPolicy.Granular.SandboxApproval)
 		if rejectsSandboxApproval {
-			if r.AppCfg != nil && r.AppCfg.SandboxMode == appcfg.SandboxModeReadOnly {
+			if sessionCfg != nil && sessionCfg.SandboxMode == appcfg.SandboxModeReadOnly {
 				return "", false, fmt.Errorf("patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings")
 			}
 			return "", false, fmt.Errorf("patch rejected: writing outside of the project; rejected by user approval settings")
@@ -615,7 +617,7 @@ func (r *Runner) runPermissionRequestHook(ctx context.Context, kind string, payl
 	if cwd == "" {
 		cwd = r.workspaceRoot()
 	}
-	permissionMode := string(r.permRuntimeGet().ApprovalPolicy(r.AppCfg).Mode)
+	permissionMode := string(r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx)).ApprovalPolicy.Mode)
 	toolName, toolInput, aliases := permissionRequestHookPayload(kind, payload)
 	outcome, err := hookRT.ExecutePermissionRequest(ctx, hook.PermissionRequestInput{
 		BaseInput: hook.BaseInput{

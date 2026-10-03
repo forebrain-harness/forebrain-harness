@@ -9,7 +9,7 @@ import (
 )
 
 func (s *SessionStore) AppendMessageSequence(ctx context.Context, sessionID string, messages []llm.Message, model string, usageJSON string) error {
-	return s.AppendMessageSequenceForRun(ctx, sessionID, "", messages, model, usageJSON, RunTiming{})
+	return s.AppendMessageSequenceForRun(ctx, sessionID, "", messages, model, usageJSON)
 }
 
 // AppendMessageSequenceForRun writes the part of a run's message list the
@@ -31,7 +31,7 @@ func (s *SessionStore) AppendMessageSequence(ctx context.Context, sessionID stri
 // in the stored transcript forever, every later turn re-appended the tail again
 // - which is how a session ends up with the same user message and the same
 // answer replayed several times over.
-func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionID, runID string, messages []llm.Message, model string, usageJSON string, timing RunTiming) error {
+func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionID, runID string, messages []llm.Message, model string, usageJSON string) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -61,14 +61,6 @@ func (s *SessionStore) AppendMessageSequenceForRun(ctx context.Context, sessionI
 	}
 	for i := plan.start; i < len(canonical); i++ {
 		if err := s.appendMessage(ctx, tx, sessionID, runID, canonical[i], model, usageJSON); err != nil {
-			return err
-		}
-	}
-	if timing.valid() {
-		// The run's clock is stamped by the surface that measured it, once,
-		// with the rows that carry the run id.
-		if _, err := tx.ExecContext(ctx, `UPDATE fb_runs SET started_at_ms=?, finished_at_ms=?, worked_ms=?, updated_at=? WHERE id=?`,
-			timing.StartedAt.UnixMilli(), timing.FinishedAt.UnixMilli(), timing.Worked.Milliseconds(), time.Now().Unix(), strings.TrimSpace(runID)); err != nil {
 			return err
 		}
 	}

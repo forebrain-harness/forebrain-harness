@@ -52,6 +52,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	permissions := api.Group("/permissions")
 	permissions.Get("/approval-default", s.handleApprovalDefaultGet)
 	permissions.Put("/approval-default", s.handleApprovalDefaultPut)
+	permissions.Get("/session-preset", s.handleSessionPresetGet)
 	permissions.Post("/session-preset", s.handleSessionPreset)
 	permissions.Get("/rules", s.handlePermissionRules)
 	permissions.Post("/evaluate", s.handlePermissionEvaluate)
@@ -112,6 +113,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/todos", s.handleSessionTodos)
 	chatSessions.Get("/:id/plan-md", s.handleSessionPlanMarkdown)
 	chatSessions.Get("/:id/mode", s.handleSessionMode)
+	chatSessions.Get("/:id/project", s.handleChatSessionProject)
 	chatSessions.Post("/:id/compact", s.handleSessionCompact)
 	chatSessions.Post("/:id/rewind-last", s.handleSessionRewindLast)
 
@@ -149,6 +151,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Get("/:id/skills/:name/download", s.handleProjectSkillsDownload)
 	projects.Post("/:id/skills/download", s.handleProjectSkillsDownloadBatch)
 	projects.Delete("/:id/skills/:name", s.handleProjectSkillsDelete)
+	projects.Get("/:id/permissions/rules", s.handleProjectPermissionRules)
+	projects.Post("/:id/permissions/updates", s.handleProjectPermissionUpdate)
+	projects.Get("/:id/permissions/explain", s.handleProjectPermissionExplain)
 
 	mcp := api.Group("/v1/mcp")
 	mcp.Get("/servers", s.handleMCPServersV1)
@@ -504,26 +509,22 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.Env.Tools().ToolMetas())
 }
 
-func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	srcFilter := strings.TrimSpace(r.URL.Query().Get("source"))
-	behaviorFilter := strings.TrimSpace(r.URL.Query().Get("behavior"))
-	snap := perm.PermissionSnapshotForSession(strings.TrimSpace(r.URL.Query().Get("session_id")))
-	type row struct {
-		Source      safety.PermissionSource   `json:"source"`
-		Behavior    safety.PermissionBehavior `json:"behavior"`
-		ToolName    string                    `json:"tool_name"`
-		RuleContent string                    `json:"rule_content,omitempty"`
-	}
-	rules := make([]row, 0, 64)
+// permissionRuleRow is one rule as the permission pages list it.
+type permissionRuleRow struct {
+	Source      safety.PermissionSource   `json:"source"`
+	Behavior    safety.PermissionBehavior `json:"behavior"`
+	ToolName    string                    `json:"tool_name"`
+	RuleContent string                    `json:"rule_content,omitempty"`
+	// Rule is the rule exactly as stored. RuleContent is its display text,
+	// which for a command prefix or a literal command is not a field of the
+	// rule at all, so removing a listed rule sends this back, never the text.
+	Rule safety.PermissionRuleValue `json:"rule"`
+}
+
+// permissionRuleRows flattens a snapshot's rules into listing rows, filtered
+// by source and behavior (empty matches all) and in one stable order.
+func permissionRuleRows(snap safety.Snapshot, srcFilter, behaviorFilter string) []permissionRuleRow {
+	rules := make([]permissionRuleRow, 0, 64)
 	for src, byBehavior := range snap.Rules {
 		if srcFilter != "" && !strings.EqualFold(string(src), srcFilter) {
 			continue
@@ -533,7 +534,7 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			for _, it := range list {
-				rules = append(rules, row{
+				rules = append(rules, permissionRuleRow{
 					Source:   src,
 					Behavior: behavior,
 					ToolName: it.ToolName,
@@ -541,6 +542,7 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 					// owns which one names it, so a prefix or a literal command
 					// is not shown as a bare tool name here.
 					RuleContent: safety.RuleContentDisplay(it),
+					Rule:        it,
 				})
 			}
 		}
@@ -557,6 +559,33 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 		}
 		return rules[i].RuleContent < rules[j].RuleContent
 	})
+	return rules
+}
+
+func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	srcFilter := strings.TrimSpace(r.URL.Query().Get("source"))
+	behaviorFilter := strings.TrimSpace(r.URL.Query().Get("behavior"))
+	var snap safety.Snapshot
+	if sid := strings.TrimSpace(r.URL.Query().Get("session_id")); sid != "" {
+		runner := s.runnerFor(r.Context(), sid)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snap = runner.PermissionSnapshotForSession(sid)
+	} else {
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snap = scope.rt.Snapshot(scope.cfg)
+	}
+	rules := permissionRuleRows(snap, srcFilter, behaviorFilter)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"mode":  snap.Mode,
@@ -567,11 +596,6 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	var body struct {
@@ -587,7 +611,22 @@ func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "tool_name required", http.StatusBadRequest)
 		return
 	}
-	d := perm.EvaluatePermissionForSession(body.SessionID, body.ToolName, body.Input)
+	var d safety.Decision
+	if sid := strings.TrimSpace(body.SessionID); sid != "" {
+		runner := s.runnerFor(r.Context(), sid)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		d = runner.EvaluatePermissionForSession(sid, body.ToolName, body.Input)
+	} else {
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		d = scope.rt.Evaluate("", body.ToolName, body.Input, scope.cfg, safety.RuntimeYOLOEnabled())
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(d)
 }
@@ -597,11 +636,6 @@ func (s *Server) handlePermissionExplain(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	toolName := strings.TrimSpace(r.URL.Query().Get("tool_name"))
 	input := strings.TrimSpace(r.URL.Query().Get("input"))
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
@@ -609,19 +643,35 @@ func (s *Server) handlePermissionExplain(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "tool_name required", http.StatusBadRequest)
 		return
 	}
-	ex := perm.ExplainPermissionForSession(sessionID, toolName, input)
+	var ex safety.ExplainResult
+	if sessionID != "" {
+		runner := s.runnerFor(r.Context(), sessionID)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ex = runner.ExplainPermissionForSession(sessionID, toolName, input)
+	} else {
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ex = scope.rt.Explain("", toolName, input, scope.cfg, safety.RuntimeYOLOEnabled())
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ex)
 }
 
+// handlePermissionUpdate changes either one conversation's own permissions —
+// in the runner that conversation runs on — or the active primary agent's
+// local rules, which every live runner of the agent then holds too. A
+// project's rules are the project space's to change
+// (handleProjectPermissionUpdate); this endpoint is not bound to any project,
+// least of all the one the gateway process was launched in.
 func (s *Server) handlePermissionUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	var u safety.PermissionUpdate
@@ -636,32 +686,96 @@ func (s *Server) handlePermissionUpdate(w http.ResponseWriter, r *http.Request) 
 	if u.Destination == "" {
 		u.Destination = safety.DestinationSession
 	}
-	if u.Destination == safety.DestinationSession && strings.TrimSpace(u.SessionID) == "" {
-		http.Error(w, "session_id required for session destination", http.StatusBadRequest)
-		return
-	}
-	switch u.Destination {
-	case safety.DestinationSession, safety.DestinationLocalSettings, safety.DestinationProjectSettings:
-	default:
-		http.Error(w, "unsupported destination", http.StatusBadRequest)
-		return
-	}
-	if refusal := safety.ExplainRefusedUpdate(u.Destination, u.Behavior); refusal != "" {
-		http.Error(w, refusal, http.StatusBadRequest)
-		return
-	}
 	// Refuse an update that would never take effect instead of reporting
 	// success for a rule the store will drop.
 	if refusal := safety.ExplainRefusedUpdate(u.Destination, u.Behavior); refusal != "" {
 		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
-	perm.ApplyPermissionUpdate(u)
+	switch u.Destination {
+	case safety.DestinationSession:
+		sid := strings.TrimSpace(u.SessionID)
+		if sid == "" {
+			http.Error(w, "session_id required for session destination", http.StatusBadRequest)
+			return
+		}
+		runner := s.runnerFor(r.Context(), sid)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		runner.ApplyPermissionUpdate(u)
+	case safety.DestinationLocalSettings:
+		switch u.Type {
+		case safety.UpdateAddRules, safety.UpdateReplaceRules, safety.UpdateRemoveRules:
+		default:
+			http.Error(w, "type must be addRules, replaceRules or removeRules", http.StatusBadRequest)
+			return
+		}
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		scope.rt.ApplyUpdate(u, scope.cfg, scope.paths)
+		for _, runner := range s.liveRunners() {
+			runner.ApplyPermissionUpdate(u)
+		}
+	case safety.DestinationProjectSettings:
+		http.Error(w, "project rules are changed in the project's own space", http.StatusBadRequest)
+		return
+	default:
+		http.Error(w, "unsupported destination", http.StatusBadRequest)
+		return
+	}
 	if s.Env != nil {
 		s.Env.RefreshSandboxRuntime()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// permissionScope is a permission runtime loaded from exactly the files one
+// scope's sessions read: the active primary agent's local settings, plus a
+// project's own settings when the scope is a project.
+type permissionScope struct {
+	paths safety.Paths
+	cfg   *config.Root
+	rt    *safety.Runtime
+}
+
+func (s *Server) loadPermissionScope(projectRoot string) (permissionScope, bool) {
+	cfg := s.liveCfg()
+	if cfg == nil {
+		return permissionScope{}, false
+	}
+	paths := safety.Paths{Home: strings.TrimSpace(s.Home), WorkspaceRoot: s.activeWorkspaceRoot(), ProjectRoot: projectRoot}
+	rt := safety.NewRuntime()
+	rt.LoadFromDisk(cfg, paths)
+	return permissionScope{paths: paths, cfg: cfg, rt: rt}, true
+}
+
+// agentPermissionScope is the active primary agent's own permission state:
+// its local rules and the configuration, with no project in it. An
+// agent-level answer never comes from the runner of whichever project the
+// gateway process happened to be launched in.
+func (s *Server) agentPermissionScope() (permissionScope, bool) {
+	return s.loadPermissionScope("")
+}
+
+// liveRunners is every runner the agent's conversations run on: the gateway's
+// own and each project runner in the pool.
+func (s *Server) liveRunners() []*run.Runner {
+	var runners []*run.Runner
+	if s.Runner != nil {
+		runners = append(runners, s.Runner)
+	}
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			runners = append(runners, pool.Runners()...)
+		}
+	}
+	return runners
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
@@ -963,11 +1077,42 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	var out []row
 	for _, sum := range summaries {
+		// This is the agent's own conversation list (the chat drawer); a
+		// project's sessions are listed in that project's space only.
+		if strings.TrimSpace(sum.ProjectID) != "" {
+			continue
+		}
 		t := time.Unix(sum.UpdatedAt, 0).UTC().Format(time.RFC3339)
 		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
+}
+
+// handleChatSessionProject names the project a conversation belongs to, so
+// the chat page can say so and lead back to that project's space; the
+// agent's own conversations answer null. The lookup is the agent's project
+// store, so another tenant's session reads as belonging to no project.
+func (s *Server) handleChatSessionProject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, ok, err := store.ProjectForSession(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		writeJSON(w, map[string]any{"project": nil})
+		return
+	}
+	writeJSON(w, map[string]any{"project": map[string]any{"id": p.ID, "name": p.Name}})
 }
 
 // sessionDisplayTitle is the title a web list shows. An unnamed session is
@@ -1118,58 +1263,60 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			out = append(out, msg{Role: "goal", Goal: &row})
 		}
 	}
+	// Every run closes with its "Worked for" line after the last row it wrote
+	// — finished, failed or stopped, whether or not it said anything — by the
+	// rule the terminal's replay closes it with. The line is a row of its own,
+	// carrying the run's clock and its checklist facts, read from that run's
+	// plan events so replay and live agree by construction.
+	workedLines := turn.RunWorkedLines(turns)
 	for i, t := range turns {
 		emitCompactions(i)
-		if _, ok := visible[i]; !ok {
-			continue
+		if _, ok := visible[i]; ok {
+			// A row's own execution window — a tool call, a `!cmd` — is its
+			// timing; the run's clock belongs to the worked row below.
+			runStartedAt, runFinishedAt, workedMs := "", "", int64(0)
+			if t.ExecStartedAtMs != 0 {
+				runStartedAt = time.UnixMilli(t.ExecStartedAtMs).UTC().Format(time.RFC3339Nano)
+				runFinishedAt = time.UnixMilli(t.ExecFinishedAtMs).UTC().Format(time.RFC3339Nano)
+				workedMs = t.ExecDurationMs
+			}
+			m := msg{
+				ID:            t.MessageID,
+				RowID:         t.RowID,
+				Role:          t.Role,
+				Content:       t.Content,
+				RunStartedAt:  runStartedAt,
+				RunFinishedAt: runFinishedAt,
+				WorkedMs:      workedMs,
+				PartsJSON:     t.PartsJSON,
+				ToolStepID:    t.ToolStepID,
+				ToolMetaJSON:  t.ToolMetaJSON,
+				CreatedAt:     t.CreatedAt,
+				RunID:         strings.TrimSpace(t.RunID),
+			}
+			for _, ref := range state.MessageAttachments(t.PartsJSON) {
+				m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
+			}
+			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
+				m.MemoryCitation = citation
+			}
+			out = append(out, m)
 		}
-		runID := strings.TrimSpace(t.RunID)
-		// Timing at the boundary: a row's own execution window (a tool
-		// call, a `!cmd`), or — for the assistant row of a timed run — the
-		// run's window and worked time, read from fb_runs through the row.
-		runStartedAt, runFinishedAt, workedMs := "", "", int64(0)
-		switch {
-		case t.ExecStartedAtMs != 0:
-			runStartedAt = time.UnixMilli(t.ExecStartedAtMs).UTC().Format(time.RFC3339Nano)
-			runFinishedAt = time.UnixMilli(t.ExecFinishedAtMs).UTC().Format(time.RFC3339Nano)
-			workedMs = t.ExecDurationMs
-		case t.Role == llm.RoleAssistant && t.RunWorkedMs != 0:
-			runStartedAt = time.UnixMilli(t.RunStartedAtMs).UTC().Format(time.RFC3339Nano)
-			runFinishedAt = time.UnixMilli(t.RunFinishedAtMs).UTC().Format(time.RFC3339Nano)
-			workedMs = t.RunWorkedMs
+		if line, ok := workedLines[i]; ok && i >= firstVisible {
+			worked := msg{
+				ID:            "worked-" + line.RunID,
+				Role:          "worked",
+				RunID:         line.RunID,
+				RunStartedAt:  line.StartedAt.UTC().Format(time.RFC3339Nano),
+				RunFinishedAt: line.FinishedAt.UTC().Format(time.RFC3339Nano),
+				WorkedMs:      line.Worked.Milliseconds(),
+			}
+			if s.RunRT != nil {
+				progress := lastPlanProgressOfRun(r.Context(), s.RunRT, line.RunID)
+				worked.PlanDone, worked.PlanTotal, worked.PlanActive = progress.Done, progress.Total, progress.Active
+			}
+			out = append(out, worked)
 		}
-		// The worked line's checklist facts ride the assistant row of the
-		// run that earned them, read from that run's plan events so replay
-		// and live agree by construction.
-		planDone, planTotal, planActive := 0, 0, ""
-		if t.Role == llm.RoleAssistant && runID != "" && s.RunRT != nil {
-			progress := lastPlanProgressOfRun(r.Context(), s.RunRT, runID)
-			planDone, planTotal, planActive = progress.Done, progress.Total, progress.Active
-		}
-		m := msg{
-			ID:            t.MessageID,
-			RowID:         t.RowID,
-			Role:          t.Role,
-			Content:       t.Content,
-			RunStartedAt:  runStartedAt,
-			RunFinishedAt: runFinishedAt,
-			WorkedMs:      workedMs,
-			PlanDone:      planDone,
-			PlanTotal:     planTotal,
-			PlanActive:    planActive,
-			PartsJSON:     t.PartsJSON,
-			ToolStepID:    t.ToolStepID,
-			ToolMetaJSON:  t.ToolMetaJSON,
-			CreatedAt:     t.CreatedAt,
-			RunID:         runID,
-		}
-		for _, ref := range state.MessageAttachments(t.PartsJSON) {
-			m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
-		}
-		if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
-			m.MemoryCitation = citation
-		}
-		out = append(out, m)
 	}
 	emitCompactions(len(turns))
 	w.Header().Set("Content-Type", "application/json")
@@ -1554,12 +1701,26 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"session_id": sid,
-		"tool_calls": total,
-		"by_tool":    byTool,
-		"note":       "model token cost is not natively available yet; this summary tracks tool-call cost surface",
+	usage, err := s.RunRT.SessionUsageForSession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// What the session spent, in the same figures /status reports: the
+	// requests' input and output, the cache split and its hit rate, and the
+	// tool calls made.
+	totals := turn.SessionUsageTotalsOf(usage)
+	writeJSON(w, map[string]any{
+		"session_id":        sid,
+		"input_tokens":      totals.InputTokens,
+		"output_tokens":     totals.OutputTokens,
+		"cache_read":        totals.CacheRead,
+		"cache_written":     totals.CacheWritten,
+		"uncached":          totals.Uncached,
+		"requests":          totals.Requests,
+		"cache_hit_percent": totals.CacheHitPercent,
+		"tool_calls":        total,
+		"by_tool":           byTool,
 	})
 }
 
@@ -1794,7 +1955,7 @@ func (s *Server) handleActions(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]actionListRow, 0, len(list))
 	for i := range list {
-		rows = append(rows, s.actionListRow(list[i]))
+		rows = append(rows, s.actionListRow(r.Context(), list[i]))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(rows)
@@ -1811,21 +1972,21 @@ type actionListRow struct {
 	SubagentType string `json:"subagent_type,omitempty"`
 }
 
-func (s *Server) actionListRow(a state.Action) actionListRow {
+func (s *Server) actionListRow(ctx context.Context, a state.Action) actionListRow {
 	row := actionListRow{Action: a}
-	if sugg := s.actionPermissionSuggestion(a); len(sugg) > 0 {
+	if sugg := s.actionPermissionSuggestion(ctx, a); len(sugg) > 0 {
 		row.PermissionSuggestion = sugg
 	}
 	row.AgentID, row.SubagentType = turn.ActionSubagent(&a)
 	return row
 }
 
-func (s *Server) actionPermissionSuggestion(a state.Action) map[string]any {
+func (s *Server) actionPermissionSuggestion(ctx context.Context, a state.Action) map[string]any {
 	kind := strings.TrimSpace(a.Kind)
 	if kind == "" {
 		return nil
 	}
-	base := approvalWSData(s.permissionFacade(), a.SessionID, a.ID, kind, kind, a.PayloadJSON)
+	base := approvalWSData(s.sessionPermissions(ctx, a.SessionID), a.SessionID, a.ID, kind, kind, a.PayloadJSON)
 	raw, _ := base["permission_suggestion"].(map[string]any)
 	return raw
 }
@@ -2318,18 +2479,14 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	// the same way the webchat turn loop closes out a run it owns.
 	_ = s.RunRT.ClearWait(ctx, runID)
 	s.finishRun(ctx, sid, runID)
-	planProgress := lastPlanProgressOfRun(ctx, s.RunRT, runID)
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, "turn_completed", event.TurnCompletedPayload{
-		Text:       ans,
-		ElapsedMS:  elapsed.Milliseconds(),
-		PlanDone:   planProgress.Done,
-		PlanTotal:  planProgress.Total,
-		PlanActive: planProgress.Active,
+		Text:      ans,
+		ElapsedMS: elapsed.Milliseconds(),
 	})
 }
 
 func (s *Server) handleSkillsList(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsListWith(s.gatewayLaunchProject(), "", w, r)
+	s.handleSkillsListWith(agentSkillScope(), "", w, r)
 }
 
 // handleSkillsListWith serves the skill listing both the global and the
@@ -2358,7 +2515,7 @@ func (s *Server) handleSkillsListWith(launch safety.ProjectContext, projectID st
 	})
 }
 func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsCreateWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsCreateWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsCreateWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2393,7 +2550,7 @@ func (s *Server) handleSkillsCreateWith(launch safety.ProjectContext, w http.Res
 }
 
 func (s *Server) handleSkillsUpdate(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsUpdateWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsUpdateWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsUpdateWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2432,7 +2589,7 @@ func (s *Server) handleSkillsUpdateWith(launch safety.ProjectContext, w http.Res
 }
 
 func (s *Server) handleSkillGet(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillGetWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillGetWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillGetWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2471,7 +2628,7 @@ func (s *Server) handleSkillGetWith(launch safety.ProjectContext, w http.Respons
 }
 
 func (s *Server) handleSkillsToggle(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsToggleWith(s.gatewayLaunchProject(), "", w, r)
+	s.handleSkillsToggleWith(agentSkillScope(), "", w, r)
 }
 
 // handleSkillsToggleWith takes the listing's project context so the refreshed
@@ -2514,7 +2671,7 @@ func (s *Server) handleSkillsToggleWith(launch safety.ProjectContext, projectID 
 }
 
 func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsInstallWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsInstallWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsInstallWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2660,16 +2817,32 @@ func (s *Server) skillLifecycleService(launch safety.ProjectContext) (*skill.Ser
 	// one from the process.
 	svc := skill.NewServiceForWorkspace(s.Home, active.WorkspaceRoot)
 	svc.ProjectRoot = strings.TrimSpace(launch.Project.Root)
-	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), launch) }
+	// What a page lists and what the running gateway loads are separate
+	// facts. The skill commands the runtime answers are one registry for this
+	// process, built for the gateway's own launch project; a page working in
+	// another context (the agent's own layers, a project space) changes files,
+	// and the registry is rebuilt for the runtime it serves, never replaced by
+	// that page's listing.
+	runtimeLaunch := s.gatewayLaunchProject()
+	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), runtimeLaunch) }
 	svc.IsBuiltin = turn.IsBuiltinName
 	return svc, nil
 }
 
+// agentSkillScope is the project context the primary agent's own skill
+// routes work in: none. The agent's page manages its own layer and shows the
+// shared, built-in and cross-tool layers it inherits; a project's skills are
+// listed and managed in that project's space. The gateway's launch project is
+// a project too, and listing it here would put a project's skills on the
+// agent's page and make the agent's toggles answer for them.
+func agentSkillScope() safety.ProjectContext {
+	return safety.ProjectContext{}
+}
+
 // gatewayLaunchProject is the launch project this gateway process was started
-// in, frozen with its runtime. It is the project the global (non-project-
-// scoped) skill routes act on: a gateway serving one checkout — the common
-// case — resolves it here exactly as its runner does, and a gateway serving
-// several projects reaches each one through /projects/:id/skills instead.
+// in, frozen with its runtime: the context the base runner loads skills for,
+// and so the one its skill command registry and a web conversation's explicit
+// skill selection answer for.
 func (s *Server) gatewayLaunchProject() safety.ProjectContext {
 	if s == nil {
 		return safety.ProjectContext{}
@@ -3097,26 +3270,32 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 // adjacent entries sharing a signature fold into one row with a models list,
 // which is the shape the user edits. api_key never travels: the GET carries
 // only whether it is set and its last four characters, and a PUT with no key
-// fields at all means "leave the stored key alone".
+// fields at all means "leave the stored key alone". params travels as its
+// JSON text: its keys are the provider's request fields, verbatim, and an
+// object would have them re-cased by a client that normalizes response keys —
+// then saved back under names the provider does not know.
 type providerRowDTO struct {
-	Provider   string          `json:"provider"`
-	BaseURL    string          `json:"base_url,omitempty"`
-	APIPath    string          `json:"api_path,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
-	Models     []string        `json:"models"`
-	APIKeySet  bool            `json:"api_key_set"`
-	APIKeyHint string          `json:"api_key_hint,omitempty"`
+	Provider   string   `json:"provider"`
+	BaseURL    string   `json:"base_url,omitempty"`
+	APIPath    string   `json:"api_path,omitempty"`
+	Params     string   `json:"params,omitempty"`
+	Models     []string `json:"models"`
+	APIKeySet  bool     `json:"api_key_set"`
+	APIKeyHint string   `json:"api_key_hint,omitempty"`
 }
 
+// providerPutRow is one row of the PUT. params decodes through the engine's
+// own type, so anything but a JSON object is refused here rather than
+// written into a config the loader would then reject.
 type providerPutRow struct {
-	Provider    string          `json:"provider"`
-	BaseURL     string          `json:"base_url,omitempty"`
-	APIPath     string          `json:"api_path,omitempty"`
-	Params      json.RawMessage `json:"params,omitempty"`
-	Model       string          `json:"model,omitempty"`
-	Models      []string        `json:"models,omitempty"`
-	APIKey      string          `json:"api_key,omitempty"`
-	APIKeyPlain string          `json:"api_key_plain,omitempty"`
+	Provider    string                  `json:"provider"`
+	BaseURL     string                  `json:"base_url,omitempty"`
+	APIPath     string                  `json:"api_path,omitempty"`
+	Params      config.LLMRequestParams `json:"params,omitempty"`
+	Model       string                  `json:"model,omitempty"`
+	Models      []string                `json:"models,omitempty"`
+	APIKey      string                  `json:"api_key,omitempty"`
+	APIKeyPlain string                  `json:"api_key_plain,omitempty"`
 }
 
 // providerSignature is what two adjacent entries must share to fold into one
@@ -3149,7 +3328,7 @@ func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []pro
 			Provider:  strings.TrimSpace(item.Provider),
 			BaseURL:   strings.TrimSpace(item.BaseURL),
 			APIPath:   strings.TrimSpace(item.APIPath),
-			Params:    json.RawMessage(item.Params),
+			Params:    strings.TrimSpace(string(item.Params)),
 			Models:    models,
 			APIKeySet: key != "",
 		}
@@ -3237,6 +3416,13 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
 		for _, row := range req.Providers {
+			// The engine builds a client only for a provider its model catalog
+			// knows; any other name would save and then fail the next runner
+			// load (an agent switch, a restart). Setup refuses it the same way.
+			if err := process.VerifyProvider(row.Provider); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			models := row.Models
 			if len(models) == 0 && strings.TrimSpace(row.Model) != "" {
 				models = []string{row.Model}
@@ -3263,12 +3449,19 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 					APIKey:   apiKey,
 					BaseURL:  strings.TrimSpace(row.BaseURL),
 					APIPath:  strings.TrimSpace(row.APIPath),
-					Params:   config.LLMRequestParams(row.Params),
+					Params:   row.Params,
 				})
 			}
 		}
 		def.LLMProviders = entries
 		cfg.Agents.Definitions[active.ID] = def
+		// The first row is the agent's primary model. Startup refuses a
+		// primary missing any of these, so a table that leaves one out would
+		// save fine and then keep the gateway from starting again.
+		if missing := config.ValidateAgentLLMConfigured(&cfg, active.ID).MissingFields(); len(missing) > 0 {
+			http.Error(w, "the first model service is the primary and needs "+strings.Join(missing, ", "), http.StatusBadRequest)
+			return
+		}
 		if err := s.saveAndReload(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -4145,17 +4338,12 @@ func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
 	full := filepath.Join(root, name)
 	switch r.Method {
 	case http.MethodGet:
-		body, err := os.ReadFile(full)
+		content, exists, err := readRuleFile(full)
 		if err != nil {
-			if os.IsNotExist(err) {
-				writeJSON(w, map[string]any{"name": name, "exists": false, "content": ""})
-				return
-			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write(body)
+		writeJSON(w, map[string]any{"name": name, "exists": exists, "content": content})
 	case http.MethodPut:
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, rulesBodyLimit))
 		if err != nil {
@@ -4176,31 +4364,45 @@ func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// projectRuleDirs lists the root plus its first-level subdirectories — the
-// only layers a FOREBRAIN.md may be created in. Fifty is the cap: a listing
-// that large says the project should be curated from the file system, not a
-// dropdown.
-func projectRuleDirs(projectRoot string) []string {
-	dirs := []string{""}
+// readRuleFile reads one instruction file for the editor. A file that does
+// not exist yet is an empty, not-yet-created file — the same answer shape as
+// one that does, so the editor never has to tell content from a status reply.
+func readRuleFile(full string) (content string, exists bool, err error) {
+	body, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return string(body), true, nil
+}
+
+// projectRuleLayers lists the directories a project's FOREBRAIN.md chain is
+// kept in: the root ("") and its first-level subdirectories, sorted. A
+// symlinked directory is not a layer of this project — it may lead anywhere —
+// and .git is the repository's own machinery. ReadDir reports a link as a
+// link rather than as what it points to, so IsDir leaves links out.
+func projectRuleLayers(projectRoot string) []string {
+	layers := []string{""}
 	entries, err := os.ReadDir(projectRoot)
 	if err != nil {
-		return dirs
+		return layers
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() || entry.Name() == ".git" {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		if len(dirs) >= 50 {
-			break
-		}
-		dirs = append(dirs, entry.Name())
+		layers = append(layers, entry.Name())
 	}
-	sort.Strings(dirs[1:])
-	return dirs
+	sort.Strings(layers[1:])
+	return layers
 }
+
+// projectRuleCreateLimit caps the create dropdown: a project with more
+// first-level directories than this is curated from the file system, not a
+// dropdown. Existing files are listed and editable whatever the count.
+const projectRuleCreateLimit = 50
 
 func (s *Server) projectForRules(w http.ResponseWriter, r *http.Request) (root string, ok bool) {
 	store := s.projectStore()
@@ -4216,21 +4418,17 @@ func (s *Server) projectForRules(w http.ResponseWriter, r *http.Request) (root s
 	return p.Root, true
 }
 
-// projectRulePath validates the ?dir= layer and returns the FOREBRAIN.md path
-// inside it.
+// projectRulePath maps the ?dir= layer onto its FOREBRAIN.md. Only a layer
+// projectRuleLayers lists is accepted, so the editor can neither reach past
+// the first level, nor into .git, nor through a symlinked directory.
 func projectRulePath(projectRoot, dir string) (string, bool) {
 	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return filepath.Join(projectRoot, projectRuleFile), true
+	for _, layer := range projectRuleLayers(projectRoot) {
+		if layer == dir {
+			return filepath.Join(projectRoot, dir, projectRuleFile), true
+		}
 	}
-	if strings.ContainsAny(dir, "/\\") || dir == "." || dir == ".." {
-		return "", false
-	}
-	info, err := os.Stat(filepath.Join(projectRoot, dir))
-	if err != nil || !info.IsDir() {
-		return "", false
-	}
-	return filepath.Join(projectRoot, dir, projectRuleFile), true
+	return "", false
 }
 
 func (s *Server) handleProjectRuleFiles(w http.ResponseWriter, r *http.Request) {
@@ -4248,24 +4446,24 @@ func (s *Server) handleProjectRuleFiles(w http.ResponseWriter, r *http.Request) 
 		SizeBytes int64  `json:"size_bytes,omitempty"`
 		UpdatedAt int64  `json:"updated_at,omitempty"`
 	}
-	dirs := projectRuleDirs(projectRoot)
-	rows := make([]row, 0, len(dirs))
-	for _, dir := range dirs {
-		full := filepath.Join(projectRoot, dir, projectRuleFile)
+	// The file list is the chain as it stands — the root, always, and every
+	// layer that holds a FOREBRAIN.md; the create dropdown offers the
+	// subdirectory layers that do not yet (the root row is already listed,
+	// so opening it is how its file is created).
+	rows := []row{}
+	creatable := []string{}
+	for _, dir := range projectRuleLayers(projectRoot) {
 		item := row{Dir: dir}
-		if info, err := os.Stat(full); err == nil {
+		if info, err := os.Stat(filepath.Join(projectRoot, dir, projectRuleFile)); err == nil {
 			item.Exists = true
 			item.SizeBytes = info.Size()
 			item.UpdatedAt = info.ModTime().Unix()
 		}
-		rows = append(rows, item)
-	}
-	// The create dropdown offers every layer without a file yet, so the
-	// listing stays honest about what "new" means here.
-	creatable := make([]string, 0, len(dirs))
-	for _, item := range rows {
-		if !item.Exists {
-			creatable = append(creatable, item.Dir)
+		if item.Exists || dir == "" {
+			rows = append(rows, item)
+		}
+		if !item.Exists && dir != "" && len(creatable) < projectRuleCreateLimit {
+			creatable = append(creatable, dir)
 		}
 	}
 	writeJSON(w, map[string]any{"files": rows, "create": creatable})
@@ -4283,17 +4481,12 @@ func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		body, err := os.ReadFile(full)
+		content, exists, err := readRuleFile(full)
 		if err != nil {
-			if os.IsNotExist(err) {
-				writeJSON(w, map[string]any{"exists": false, "content": ""})
-				return
-			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write(body)
+		writeJSON(w, map[string]any{"dir": strings.TrimSpace(r.URL.Query().Get("dir")), "exists": exists, "content": content})
 	case http.MethodPut:
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, rulesBodyLimit))
 		if err != nil {
@@ -4377,9 +4570,11 @@ func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request
 }
 
 // handleSessionPreset switches one conversation to a built-in preset for its
-// remaining lifetime. Nothing is written to disk — the same rule the
-// terminal's /permissions follows: a preset picked to get through one task
-// must not govern the next session.
+// remaining lifetime. Both halves are scoped to that conversation in the
+// permission store and nothing is written to disk or to the live config — the
+// same rule the terminal's /permissions follows: a preset picked to get
+// through one task governs neither the other conversations, channels and
+// scheduled jobs of this gateway nor the next session.
 func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -4408,21 +4603,38 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	// The sandbox half moves the live config; the approval half is a session
-	// destination in the permission store. Both are memory-only here.
-	if runner.AppCfg != nil {
-		preset.ApplyToConfig(runner.AppCfg)
-	}
-	runner.ApplyPermissionUpdate(safety.PermissionUpdate{
-		Type:        safety.UpdateSetMode,
-		Destination: safety.DestinationSession,
-		SessionID:   sid,
-		Mode:        preset.Approval,
-	})
-	if s.Env != nil {
-		s.Env.RefreshSandboxRuntime()
+	for _, update := range preset.SessionUpdates(sid) {
+		runner.ApplyPermissionUpdate(update)
 	}
 	writeJSON(w, map[string]any{"ok": true, "description": preset.Description})
+}
+
+// handleSessionPresetGet names the preset one conversation is running under,
+// or null when its approval mode and sandbox add up to none of them — the
+// same reading the terminal's /permissions picker opens on.
+func (s *Server) handleSessionPresetGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sid == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	runner := s.runnerFor(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	snap := runner.PermissionSnapshotForSession(sid)
+	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(runner.AppCfg, snap))
+	if !ok {
+		writeJSON(w, approvalDefaultAnswer{Current: nil})
+		return
+	}
+	id := preset.ID
+	writeJSON(w, approvalDefaultAnswer{Current: &id, Description: preset.Description})
 }
 
 // permissionRuntimeMode reads the live permission mode the way the running
@@ -4436,6 +4648,145 @@ func (s *Server) permissionRuntimeMode() safety.PermissionMode {
 		return safety.PermissionMode(cfg.ApprovalPolicy.Mode)
 	}
 	return safety.ApprovalOnRequest
+}
+
+// --- Project permission rules ------------------------------------------------
+//
+// A project space manages that project's own rules (its .forebrain/safety.json),
+// whichever project the gateway process itself was launched in. Each request
+// loads a permission runtime from exactly the files a session of that project
+// reads — the agent's local settings plus the project's settings — so the
+// listing, the write and the explanation all answer for that project.
+
+type projectPermissionScope struct {
+	permissionScope
+	project state.Project
+}
+
+func (s *Server) loadProjectPermissionScope(w http.ResponseWriter, r *http.Request) (projectPermissionScope, bool) {
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return projectPermissionScope{}, false
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return projectPermissionScope{}, false
+	}
+	scope, ok := s.loadPermissionScope(p.Root)
+	if !ok {
+		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+		return projectPermissionScope{}, false
+	}
+	return projectPermissionScope{permissionScope: scope, project: p}, true
+}
+
+// handleProjectPermissionRules lists the project's own rules. applies says
+// whether the engine honors project rules for it at all — only a trusted,
+// version-controlled project has any — so the page can say why it is empty
+// rather than offer a form whose writes would be dropped.
+func (s *Server) handleProjectPermissionRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	scope, ok := s.loadProjectPermissionScope(w, r)
+	if !ok {
+		return
+	}
+	_, applies := safety.ProjectSettingsPath(scope.paths)
+	writeJSON(w, map[string]any{
+		"applies": applies,
+		"rules":   permissionRuleRows(scope.rt.Snapshot(scope.cfg), string(safety.SourceProjectSettings), ""),
+	})
+}
+
+// handleProjectPermissionUpdate adds, replaces or removes rules in the
+// project's own settings file, then has every running session of that project
+// read the file again.
+func (s *Server) handleProjectPermissionUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	scope, ok := s.loadProjectPermissionScope(w, r)
+	if !ok {
+		return
+	}
+	var u safety.PermissionUpdate
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&u); err != nil {
+		http.Error(w, "json", http.StatusBadRequest)
+		return
+	}
+	switch u.Type {
+	case safety.UpdateAddRules, safety.UpdateReplaceRules, safety.UpdateRemoveRules:
+	default:
+		http.Error(w, "type must be addRules, replaceRules or removeRules", http.StatusBadRequest)
+		return
+	}
+	u.Destination = safety.DestinationProjectSettings
+	if refusal := safety.ExplainRefusedUpdate(u.Destination, u.Behavior); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
+		return
+	}
+	if _, applies := safety.ProjectSettingsPath(scope.paths); !applies {
+		http.Error(w, "project rules apply only to a trusted, version-controlled project", http.StatusConflict)
+		return
+	}
+	scope.rt.ApplyUpdate(u, scope.cfg, scope.paths)
+	s.propagateProjectPermissionUpdate(scope, u)
+	writeJSON(w, map[string]any{
+		"ok":    true,
+		"rules": permissionRuleRows(scope.rt.Snapshot(scope.cfg), string(safety.SourceProjectSettings), ""),
+	})
+}
+
+// handleProjectPermissionExplain answers how a call would be judged inside
+// the project: by the agent's local rules and the project's own.
+func (s *Server) handleProjectPermissionExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	scope, ok := s.loadProjectPermissionScope(w, r)
+	if !ok {
+		return
+	}
+	toolName := strings.TrimSpace(r.URL.Query().Get("tool_name"))
+	if toolName == "" {
+		http.Error(w, "tool_name required", http.StatusBadRequest)
+		return
+	}
+	input := strings.TrimSpace(r.URL.Query().Get("input"))
+	writeJSON(w, scope.rt.Explain("", toolName, input, scope.cfg, safety.RuntimeYOLOEnabled()))
+}
+
+// propagateProjectPermissionUpdate hands a project-settings update to every
+// live runner that reads that very file — the project's pooled runners and,
+// when its launch project is the same one, the gateway's own — so sessions
+// already running judge by the rules just written. Each applies it to its
+// in-memory store; the file it re-persists already holds the same rules.
+func (s *Server) propagateProjectPermissionUpdate(scope projectPermissionScope, u safety.PermissionUpdate) {
+	target, _ := safety.ProjectSettingsPath(scope.paths)
+	var runners []*run.Runner
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			runners = append(runners, pool.RunnersForProject(scope.project.ID)...)
+		}
+	}
+	if s.Runner != nil {
+		own := safety.Paths{Home: scope.paths.Home, WorkspaceRoot: scope.paths.WorkspaceRoot, ProjectRoot: s.Runner.ProjectRoot}
+		if path, ok := safety.ProjectSettingsPath(own); ok && path == target {
+			runners = append(runners, s.Runner)
+		}
+	}
+	for _, runner := range runners {
+		runner.ApplyPermissionUpdate(u)
+	}
+	if len(runners) > 0 && s.Env != nil {
+		s.Env.RefreshSandboxRuntime()
+	}
 }
 
 func pathParam(r *http.Request, name string) string {

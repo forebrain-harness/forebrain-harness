@@ -208,3 +208,37 @@ func TestGoalPositionPlacesEachLineWhereItWasDrawn(t *testing.T) {
 		t.Fatal("GoalPosition placed an event that is not a goal's")
 	}
 }
+
+func timedRow(runID, role string, workedMs int64) state.Message {
+	return state.Message{RunID: runID, Role: role, RunStartedAtMs: 1_000, RunFinishedAtMs: 1_000 + workedMs, RunWorkedMs: workedMs}
+}
+
+// Each run closes after the last row it wrote, whatever that row's role and
+// whatever unbound rows sit between its own; a run that never ended closes
+// nothing.
+func TestRunWorkedLinesCloseEachRunAfterItsLastRow(t *testing.T) {
+	turns := []state.Message{
+		timedRow("r1", "user", 3_000),
+		{Role: "assistant"}, // written at an approval gate, before rows were bound
+		timedRow("r1", "assistant", 3_000),
+		timedRow("r1", "tool", 3_000),
+		// A run that failed before it wrote anything: only its message.
+		timedRow("r2", "user", 1_500),
+		// A run still going.
+		{RunID: "r3", Role: "user"},
+		{Role: "user"},
+	}
+	lines := RunWorkedLines(turns)
+	if len(lines) != 2 {
+		t.Fatalf("lines = %+v, want one per ended run", lines)
+	}
+	if got := lines[3]; got.RunID != "r1" || got.Worked != 3*time.Second || got.FinishedAt != time.UnixMilli(4_000) {
+		t.Fatalf("r1 line = %+v", got)
+	}
+	if got, ok := lines[4]; !ok || got.RunID != "r2" || got.Worked != 1500*time.Millisecond {
+		t.Fatalf("r2 line = %+v %v, want it after the run's only row", got, ok)
+	}
+	if _, ok := lines[0]; ok {
+		t.Fatal("a run closes after its last row, not its first")
+	}
+}

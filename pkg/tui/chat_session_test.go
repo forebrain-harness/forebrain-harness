@@ -1463,8 +1463,13 @@ func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Full Access for this session: "+mustPreset(t, safety.PresetFullAccess).Description, reply)
 
-	require.Equal(t, appcfg.SandboxModeDangerFullAccess, s.cfg().SandboxMode)
-	require.Equal(t, safety.ModeNever, s.runner().PermissionSnapshotForSession("s1").Mode)
+	// Both halves belong to s1 alone: the live config every other
+	// conversation runs under keeps the configured sandbox.
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	snap := s.runner().PermissionSnapshotForSession("s1")
+	require.Equal(t, safety.ModeNever, snap.Mode)
+	require.Equal(t, safety.ModeNever, snap.ApprovalPolicy.Mode)
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, safety.ConfigForSnapshot(s.cfg(), snap).SandboxMode)
 	_, current := s.PermissionPresets("s1")
 	require.Equal(t, safety.PresetFullAccess, current)
 	for _, call := range []struct {
@@ -1480,9 +1485,16 @@ func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 		require.True(t, decision.BypassSandbox, call)
 	}
 
-	// Another session keeps asking: the approval half is scoped the way a
-	// mid-turn approval is, not applied process-wide.
-	require.Equal(t, safety.ModeOnRequest, s.runner().PermissionSnapshotForSession("s2").Mode)
+	// Another session keeps asking and keeps its sandbox: neither half is
+	// applied process-wide.
+	other := s.runner().PermissionSnapshotForSession("s2")
+	require.Equal(t, safety.ModeOnRequest, other.Mode)
+	require.Empty(t, other.SandboxMode)
+	_, otherCurrent := s.PermissionPresets("s2")
+	require.Equal(t, safety.PresetDefault, otherCurrent)
+	decision := s.runner().EvaluatePermissionForSession("s2", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", decision.Reason)
+	require.False(t, decision.BypassSandbox)
 
 	// Nothing was written to forebrain.yaml.
 	_, statErr := os.Stat(filepath.Join(home, "forebrain.yaml"))
@@ -1497,7 +1509,8 @@ func TestApplyPermissionPresetRejectsUnknownID(t *testing.T) {
 }
 
 // A preset is never written to forebrain.yaml, so a reload of that file must not
-// be able to hand the sandbox back to whatever the file still says.
+// be able to hand the session's sandbox back to whatever the file still says —
+// nor may the preset leak into the config the file is reloaded as.
 func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
@@ -1516,10 +1529,14 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 		Runner:  &run.Runner{Deps: &run.Deps{Home: home}},
 	}.session()
 
+	sessionSandbox := func() appcfg.SandboxMode {
+		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("s1")).SandboxMode
+	}
 	_, err := s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
 	require.NoError(t, err)
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
 	// The file changing under the session does not undo the choice either: an
 	// edit made elsewhere reaches the session through the same reload.
@@ -1530,14 +1547,17 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
 	), 0o600))
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
+	decision := s.runner().EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", decision.Reason, "the session's read-only choice outranks the file's full access")
 
 	// Picking another preset is how the choice moves, and it moves both halves.
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetDefault)
 	require.NoError(t, err)
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
 	_, current := s.PermissionPresets("s1")
 	require.Equal(t, safety.PresetDefault, current)
 }
@@ -1589,14 +1609,18 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
 	require.NoError(t, err)
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	sessionSandbox := func() appcfg.SandboxMode {
+		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("s1")).SandboxMode
+	}
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
 	reply := chooseInSession(t, s, "model", "openai / gpt-new").Reply
 	require.Equal(t, "Switched to openai / gpt-new.", reply)
 
 	// The model change landed as this session's own persisted selection and
-	// the preset is still the active sandbox.
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	// the preset is still the session's sandbox.
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
 	require.Equal(t, "gpt-new", appcfg.PrimaryLLM(s.cfg().Agents.Definitions["main"]).Model)
 	require.Same(t, s.cfg(), s.runner().AppCfg)
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
@@ -5653,10 +5677,8 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 			},
 		})),
 	)
-	// Mirrors openProcessChatSession: the environment owns the reload, folds
-	// in the session's own choices before applying it, and re-points the
-	// pointers the session handed out afterwards.
-	env.OnConfigLoaded = s.reapplyPermissionPreset
+	// Mirrors openProcessChatSession: the environment owns the reload and
+	// re-points the pointers the session handed out afterwards.
 	env.OnConfigReload = func(next *appcfg.Root) {
 		if next == nil {
 			return
@@ -7222,6 +7244,41 @@ func TestCharacterizationTransientErrorPartialPersistence(t *testing.T) {
 	}
 	if got.Messages[1].Role != "assistant" || got.Messages[1].Content != "here is what I found before the" {
 		t.Fatalf("Messages[1] = %+v, want the partial streamed text persisted (trailing whitespace trimmed)", got.Messages[1])
+	}
+}
+
+// A run that fails before saying anything closed live with its error and its
+// "Worked for" line. Everything a resume needs to draw both again is kept: the
+// user's message is bound to the run, the run has its clock, and the error is
+// in the conversation's log under the run.
+func TestCharacterizationSilentFailedRunKeepsWhatReplayCloses(t *testing.T) {
+	s := newCharacterizationSession(t, erroringStreamingLLM{err: errors.New("connection reset by peer")})
+	sessionID := "char-silent-failure"
+	if err := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{SessionID: sessionID, UserText: "hello"}); err == nil {
+		t.Fatal("DispatchSurfaceTurn = nil, want the provider error surfaced")
+	}
+	got := awaitResumedRun(t, s, sessionID)
+	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusFailed {
+		t.Fatalf("Runs = %+v, want one failed run", got.Runs)
+	}
+	runID := got.Runs[0].ID
+
+	rows, err := s.sessStore().ListAllMessages(context.Background(), sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Role != "user" || rows[0].RunID != runID || rows[0].RunWorkedMs <= 0 {
+		t.Fatalf("rows = %+v, want the user's message bound to the timed run %s", rows, runID)
+	}
+	if lines := turn.RunWorkedLines(rows); lines[0].RunID != runID {
+		t.Fatalf("worked lines = %+v, want the run closed after its only row", lines)
+	}
+	events, err := s.runSvc().ListSessionEventsOfType(context.Background(), sessionID, event.RunEventTurnError, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].RunID != runID || !strings.Contains(string(events[0].Payload), "connection reset") {
+		t.Fatalf("turn errors = %+v, want the run's own error kept for replay", events)
 	}
 }
 
@@ -18868,10 +18925,16 @@ func TestRendererUserInteractionShowsFriendlyAnswers(t *testing.T) {
 	}, "tool", "214")
 
 	plain := stripANSI(out.String())
+	// The header names what was asked; the body pairs each question with its
+	// answer, in the order asked.
+	header, body, _ := strings.Cut(plain, "\n")
+	if !strings.Contains(header, "Asked user") || !strings.Contains(header, "交付方式 · 修改范围 · 补充说明") {
+		t.Fatalf("header = %q, want every question named", header)
+	}
 	wantOrder := []string{"交付方式", "→ 设计方案并开发实施", "修改范围", "→ TUI", "→ 回放兼容", "补充说明", "→ 保留旧会话展示能力"}
 	previous := -1
 	for _, needle := range wantOrder {
-		idx := strings.Index(plain, needle)
+		idx := strings.Index(body, needle)
 		if idx < 0 {
 			t.Fatalf("expected rendered card to contain %q, got %q", needle, plain)
 		}
@@ -26752,13 +26815,11 @@ func TestCharacterizationSlashReloadKeepsEnvironmentConfigLive(t *testing.T) {
 // TestCharacterizationHotReloadKeepsTheSessionPermissionPreset pins that a
 // preset chosen with /permissions survives a hot reload of forebrain.yaml.
 //
-// permissionPreset's own doc comment names this case: the choice is never
-// written to forebrain.yaml, so "without it, the next reload of that file -- a hot
-// reload, or /sandbox rewriting it -- would silently restore the sandbox the
-// user just moved away from". The slash-command reload path honours that by
-// calling reapplyPermissionPreset. The hot-reload path runs in the environment,
-// which cannot see session state, and so did not -- meaning editing the config
-// file for any unrelated reason silently reverted the user's sandbox choice.
+// The choice is never written to forebrain.yaml; it lives in the permission
+// store, scoped to the session, so the environment's hot reload — which
+// cannot see session state — has nothing to undo. Editing the config file for
+// any unrelated reason must not silently revert the user's sandbox choice,
+// and the choice must not leak into the reloaded config either.
 func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
@@ -26776,18 +26837,25 @@ func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) 
 	if _, err := s.ApplyPermissionPreset("char-preset", string(safety.PresetReadOnly)); err != nil {
 		t.Fatalf("ApplyPermissionPreset: %v", err)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeReadOnly {
-		t.Fatalf("SandboxMode after preset = %q, want %q", got, appcfg.SandboxModeReadOnly)
+	sessionSandbox := func() appcfg.SandboxMode {
+		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("char-preset")).SandboxMode
+	}
+	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("session sandbox after preset = %q, want %q", got, appcfg.SandboxModeReadOnly)
 	}
 
 	// A hot reload of the same unchanged file must not undo that.
 	if err := s.Env.ReloadConfig(); err != nil {
 		t.Fatalf("ReloadConfig: %v", err)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeReadOnly {
-		t.Fatalf("SandboxMode after hot reload = %q, want the session preset %q to survive: "+
+	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("session sandbox after hot reload = %q, want the session preset %q to survive: "+
 			"reloading forebrain.yaml must not silently restore the sandbox the user moved away from",
 			got, appcfg.SandboxModeReadOnly)
+	}
+	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("live config sandbox = %q, want the file's %q: a session preset must not move the config other conversations run under",
+			got, appcfg.SandboxModeWorkspaceWrite)
 	}
 }
 
@@ -26795,8 +26863,7 @@ func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) 
 // half of the rule above: a session-scoped preset may not walk back YOLO.
 //
 // YOLO comes from the environment, not from anything the user picked in this
-// session, so the hot-reload path folds in the surface's choices only when
-// YOLO is off -- the same rule the slash-command reload path applies.
+// session, so the session's own sandbox choice gives way to it.
 func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
@@ -26815,8 +26882,9 @@ func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) 
 	if err := s.Env.ReloadConfig(); err != nil {
 		t.Fatalf("ReloadConfig: %v", err)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeDangerFullAccess {
-		t.Fatalf("SandboxMode under YOLO = %q, want %q: a session preset must not walk YOLO back",
+	snap := s.runner().PermissionSnapshotForSession("char-preset-yolo")
+	if got := safety.ConfigForSnapshot(s.cfg(), snap).SandboxMode; got != appcfg.SandboxModeDangerFullAccess {
+		t.Fatalf("session sandbox under YOLO = %q, want %q: a session preset must not walk YOLO back",
 			got, appcfg.SandboxModeDangerFullAccess)
 	}
 }
@@ -28455,4 +28523,41 @@ func TestSelectModelConcurrentWithConfigReload(t *testing.T) {
 	require.Equal(t, "openai", sel.Provider)
 	require.Contains(t, []string{"gpt-a", "gpt-b"}, sel.Model)
 	require.NotNil(t, s.runner().Agent())
+}
+
+// A recovered approval that cannot continue fails its run with one error
+// block: publishing the turn error is what draws it, so nothing draws it a
+// second time beside it.
+func TestFailedRecoveredApprovalDrawsItsErrorOnce(t *testing.T) {
+	ctx := context.Background()
+	s := newCharacterizationSession(t, nil)
+	sessionID := "char-recovered-failure"
+	if err := s.sessStore().Ensure(ctx, sessionID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	rn, err := s.runSvc().CreateRun(ctx, sessionID, "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, err := s.actionSvc().CreatePending(ctx, sessionID, "shell", map[string]any{"session_id": sessionID, "command": "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runSvc().SetWaitingAction(ctx, rn.ID, state.Wait{RunID: rn.ID, ActionID: act.ID, ToolName: "shell"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &notifiedRecorder{}
+	s.PrependUINotify(rec.record)
+
+	s.failRecoveredApproval(sessionID, act.ID, "approval action failed")
+
+	errorsDrawn := 0
+	for _, msg := range rec.awaitStable(t) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindError {
+			errorsDrawn++
+		}
+	}
+	if errorsDrawn != 1 {
+		t.Fatalf("error blocks drawn = %d, want exactly one", errorsDrawn)
+	}
 }

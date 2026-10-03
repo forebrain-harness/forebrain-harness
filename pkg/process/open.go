@@ -66,30 +66,20 @@ type Environment struct {
 	Control       *run.Controller
 	sessionSource string
 
-	ConfigPath     string
-	reloadMu       sync.Mutex
-	managerMu      sync.RWMutex
-	reload         *ConfigManager
-	poolOnce       sync.Once
-	pool           *RunnerPool
-	watchMu        sync.Mutex
-	watchStop      func()
-	watchID        uint64
-	cronOnce       sync.Once
-	cron           *CronService
-	rulesHook      *assembly.PreHook
-	ctxHook        *assembly.Hook
-	OnConfigReload func(*appcfg.Root)
-	// OnConfigLoaded lets the surface fold session-scoped choices into a
-	// freshly loaded config before it becomes live. Only the surface knows
-	// them: the TUI's /permissions preset is never written to forebrain.yaml, so
-	// without this a hot reload would restore the sandbox the user just moved
-	// away from -- which is exactly the case that preset exists to prevent.
-	//
-	// Not called when YOLO is on. YOLO comes from the environment and is not
-	// something a session-scoped choice may walk back, which is the same rule
-	// the slash-command reload path applies.
-	OnConfigLoaded    func(*appcfg.Root)
+	ConfigPath        string
+	reloadMu          sync.Mutex
+	managerMu         sync.RWMutex
+	reload            *ConfigManager
+	poolOnce          sync.Once
+	pool              *RunnerPool
+	watchMu           sync.Mutex
+	watchStop         func()
+	watchID           uint64
+	cronOnce          sync.Once
+	cron              *CronService
+	rulesHook         *assembly.PreHook
+	ctxHook           *assembly.Hook
+	OnConfigReload    func(*appcfg.Root)
 	telShutdown       func(context.Context) error
 	approvalSweepStop func()
 }

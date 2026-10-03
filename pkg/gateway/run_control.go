@@ -157,8 +157,40 @@ func (s *Server) finishRun(ctx context.Context, sessionID, runID string) {
 			slog.Error("release queued input", "run_id", runID, "session_id", sessionID, "err", err)
 		}
 	}
+	s.stampRunEnd(ctx, runID)
 	s.runController().Finish(runID)
 	s.runStartedAt.Delete(runID)
+}
+
+// stampRunEnd gives a run that ends here its clock, so replay closes it with
+// the "Worked for" line the page closed it with. An ending that persisted its
+// own output already stamped the window it measured, and that stamp stands (a
+// run ends once); this covers the endings that write nothing — an approval
+// that expired or was cancelled, a continuation that could not proceed.
+func (s *Server) stampRunEnd(ctx context.Context, runID string) {
+	if s == nil || s.Sessions == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	var startedAt time.Time
+	if stored, ok := s.runStartedAt.Load(runID); ok {
+		startedAt, _ = stored.(time.Time)
+	}
+	if startedAt.IsZero() && s.RunRT != nil {
+		if rn, err := s.RunRT.GetRun(ctx, runID); err == nil && rn != nil {
+			startedAt = time.Unix(rn.CreatedAt, 0)
+		}
+	}
+	if startedAt.IsZero() {
+		return
+	}
+	finishedAt := time.Now()
+	worked := finishedAt.Sub(startedAt)
+	if worked < 0 {
+		worked = 0
+	}
+	if err := s.Sessions.StampRunTiming(ctx, runID, state.RunTiming{StartedAt: startedAt, FinishedAt: finishedAt, Worked: worked}); err != nil {
+		slog.Error("stamp run end", "run_id", runID, "err", err)
+	}
 }
 
 // cancelRun stops a run. One in flight is ended by whatever drives it, which
@@ -254,22 +286,15 @@ func (s *Server) handleRunCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 type gatewayPostTurnOptions struct {
-	SessionID string
-	ChannelID string
-	RunID     string
-	UserText  string
-	// RawInput is what the user actually typed when it differs from UserText
-	// (a slash command that expanded into a longer prompt). It becomes the
-	// transcript row's display content, so a resume replay shows the command
-	// rather than its expansion -- the same rule the terminal applies.
-	RawInput        string
+	SessionID       string
+	ChannelID       string
+	RunID           string
 	AssistantText   string
 	RunStartedAt    time.Time
 	RunFinishedAt   time.Time
 	WorkedMs        int64
 	AssistantResult *agent.Result
 
-	AppendUser      bool
 	AppendAssistant bool
 	BareMode        bool
 }
@@ -287,7 +312,7 @@ func (s *Server) finishSuccessfulTurn(ctx context.Context, opt gatewayPostTurnOp
 		return
 	}
 	sid := normalizedGatewaySessionID(opt.SessionID)
-	if opt.AppendUser || opt.AppendAssistant {
+	if opt.AppendAssistant {
 		s.appendTranscriptTurns(ctx, sid, opt)
 	}
 }
@@ -298,13 +323,6 @@ func (s *Server) appendTranscriptTurns(ctx context.Context, sessionID string, op
 	}
 	sid := normalizedGatewaySessionID(sessionID)
 	_ = s.Sessions.Ensure(ctx, sid, sid)
-	if opt.AppendUser {
-		turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
-			SessionID:  sid,
-			ModelInput: opt.UserText,
-			RawInput:   opt.RawInput,
-		})
-	}
 	if opt.AppendAssistant {
 		model := ""
 		// The transcript records the model this conversation actually ran
@@ -321,11 +339,9 @@ func (s *Server) appendTranscriptTurns(ctx context.Context, sessionID string, op
 			Result:    opt.AssistantResult,
 			// The caller's text has already been sanitised for outbound
 			// delivery, so it is the copy of record for the transcript.
-			Text:       opt.AssistantText,
-			Model:      model,
-			StartedAt:  opt.RunStartedAt,
-			FinishedAt: opt.RunFinishedAt,
-			WorkedMs:   opt.WorkedMs,
+			Text:  opt.AssistantText,
+			Model: model,
+			End:   turn.RunEnd{StartedAt: opt.RunStartedAt, FinishedAt: opt.RunFinishedAt, Worked: time.Duration(opt.WorkedMs) * time.Millisecond},
 		})
 	}
 }
@@ -360,7 +376,7 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 // reasoning the page was already streamed, the same way the terminal keeps
 // them. Dangling tool_calls left by a tool execution interrupted at cancel
 // time are repaired.
-func (s *Server) persistCancelledGatewayTurn(sessionID string, capture *run.PartialSessionCapture, partial *turn.StreamPartial) {
+func (s *Server) persistCancelledGatewayTurn(sessionID, runID string, end turn.RunEnd, capture *run.PartialSessionCapture, partial *turn.StreamPartial) {
 	if s == nil || s.Sessions == nil {
 		return
 	}
@@ -370,6 +386,8 @@ func (s *Server) persistCancelledGatewayTurn(sessionID string, capture *run.Part
 	}
 	turn.PersistCancelledTurn(context.Background(), s.Sessions, turn.CancelledTurn{
 		SessionID:        sessionID,
+		RunID:            runID,
+		End:              end,
 		Captured:         captured,
 		PartialText:      partial.Content(),
 		PartialReasoning: partial.Reasoning(),
@@ -610,7 +628,7 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 	ctx := context.Background()
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnStarted, event.TurnStartedPayload{})
 	if s.Sessions != nil {
-		turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: sid, ModelInput: prompt, RawInput: prompt})
+		turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: sid, RunID: runID, ModelInput: prompt, RawInput: prompt})
 	}
 	agCtx := llm.WithAgentSessionID(runCtx, sid)
 	agCtx = tool.WithConversationSessionID(agCtx, sid)
@@ -655,7 +673,7 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 		s.parkDetachedRunOnApproval(ctx, sid, runID, gate)
 		return
 	case errors.Is(err, context.Canceled):
-		s.persistCancelledGatewayTurn(sid, capture, partial)
+		s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: startedAt, FinishedAt: finishedAt, Worked: elapsed}, capture, partial)
 		if s.RunRT != nil {
 			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusCancelled)
 			_ = s.RunRT.CancelRunningDescendants(ctx, runID)
@@ -667,7 +685,7 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 		// What the turn did before it failed stays in the transcript, so a
 		// further continuation — the engine arms one if this was the limit
 		// again — picks up after it rather than before it.
-		s.persistCancelledGatewayTurn(sid, capture, partial)
+		s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: startedAt, FinishedAt: finishedAt, Worked: elapsed}, capture, partial)
 		slog.Error("auto-continue turn failed", "run_id", runID, "session_id", sid, "err", err)
 		errText := llm.ExplainError(err)
 		s.finishRun(ctx, sid, runID)

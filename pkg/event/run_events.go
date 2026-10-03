@@ -107,24 +107,31 @@ func EncodePayload(v any) json.RawMessage {
 
 type TurnStartedPayload struct{}
 
-type TurnCompletedPayload struct {
-	Text      string `json:"text,omitempty"`
-	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
-	// PlanDone/PlanTotal/PlanActive carry the turn's final checklist state so
-	// every surface's worked line reports the same facts the terminal does.
-	// Empty when the turn had no checklist.
+// RunPlanFacts is a run's final checklist state, carried by every way a run
+// ends — completed, cancelled or failed — because every run closes with its
+// worked line and the terminal's names the checklist whichever way it ended.
+// Empty when the run had no checklist.
+type RunPlanFacts struct {
 	PlanDone   int    `json:"plan_done,omitempty"`
 	PlanTotal  int    `json:"plan_total,omitempty"`
 	PlanActive string `json:"plan_active,omitempty"`
 }
 
+type TurnCompletedPayload struct {
+	Text      string `json:"text,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	RunPlanFacts
+}
+
 type TurnCancelledPayload struct {
 	Message string `json:"message,omitempty"`
+	RunPlanFacts
 }
 
 type TurnErrorPayload struct {
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
+	RunPlanFacts
 	// Title is the heading a surface shows above the error. A turn error that
 	// belongs to a named subsystem — an MCP server that did not start, say —
 	// says so here rather than in prose, so the surface can render the heading

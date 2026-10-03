@@ -1261,7 +1261,7 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 		payload["approval_bypassed_by_yolo"] = true
 	}
 	CaptureToolCompletion(ctx, ToolCompletionPayload{
-		Output: appendToolExecutionMetadata(map[string]any{
+		Output: appendToolExecutionMetadata(ctx, st, map[string]any{
 			"stdout":       stdout,
 			"stderr":       "",
 			"exit_code":    0,

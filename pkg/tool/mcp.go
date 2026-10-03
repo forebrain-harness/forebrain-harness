@@ -2,6 +2,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
@@ -152,8 +153,8 @@ func ActionAllowsApprovalUpdate(kind, payloadJSON string) bool {
 	}
 }
 
-func toolExecutionMetadata(rt *AgentToolRuntime, kind safety.ToolKind) map[string]any {
-	decision := safety.NewManager().Decide(rtConfig(rt), kind)
+func toolExecutionMetadata(ctx context.Context, st *State, rt *AgentToolRuntime, kind safety.ToolKind) map[string]any {
+	decision := safety.NewManager().Decide(sessionConfig(ctx, st, rt), kind)
 	out := map[string]any{
 		"sandbox_mode":               decision.ModeString(),
 		"sandbox_backend":            string(decision.Backend),
@@ -172,11 +173,11 @@ func toolExecutionMetadata(rt *AgentToolRuntime, kind safety.ToolKind) map[strin
 // caller already set from the decision the command actually ran with wins: the
 // generic default reports "sandboxed" even for a call that was explicitly
 // escalated, which makes the audit trail disagree with what happened.
-func appendToolExecutionMetadata(dst map[string]any, rt *AgentToolRuntime, kind safety.ToolKind) map[string]any {
+func appendToolExecutionMetadata(ctx context.Context, st *State, dst map[string]any, rt *AgentToolRuntime, kind safety.ToolKind) map[string]any {
 	if dst == nil {
 		dst = map[string]any{}
 	}
-	for k, v := range toolExecutionMetadata(rt, kind) {
+	for k, v := range toolExecutionMetadata(ctx, st, rt, kind) {
 		if _, ok := dst[k]; ok {
 			continue
 		}
@@ -185,9 +186,12 @@ func appendToolExecutionMetadata(dst map[string]any, rt *AgentToolRuntime, kind 
 	return dst
 }
 
-func rtConfig(rt *AgentToolRuntime) *appcfg.Root {
+// sessionConfig is the configuration the calling conversation's sandbox
+// decisions are made under: the runtime's, with the conversation's own
+// sandbox mode in force when it picked one for itself.
+func sessionConfig(ctx context.Context, st *State, rt *AgentToolRuntime) *appcfg.Root {
 	if rt == nil {
 		return nil
 	}
-	return rt.Cfg
+	return safety.ConfigForSnapshot(rt.Cfg, permissionSnapshotForContext(ctx, st, rt))
 }

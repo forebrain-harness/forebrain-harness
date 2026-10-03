@@ -55,7 +55,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { getErrorMessage, forebrainApi, type ProjectMcpRecord, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -74,20 +74,12 @@ const loading = ref(false)
 const trusting = ref(false)
 const error = ref('')
 
-// Trust state is local after the first read: the GET row does not carry it
-// (the create response does), and the gate is the only writer here.
+// The gate follows the project row the shell loaded (its trust decision is
+// part of the detail read); the trust action here moves it forward.
 const trusted = ref(false)
-
-async function loadTrust() {
-  try {
-    const root = props.project?.root ?? ''
-    if (!root) return
-    const res = await forebrainApi.projectMcp(props.projectId)
-    trusted.value = Boolean((res as unknown as { trusted?: boolean }).trusted)
-  } catch {
-    trusted.value = false
-  }
-}
+watch(() => props.project?.trusted, (value) => {
+  trusted.value = Boolean(value)
+}, { immediate: true })
 
 async function load() {
   loading.value = true
@@ -118,7 +110,6 @@ async function trust() {
 
 onMounted(() => {
   void load()
-  void loadTrust()
 })
 </script>
 
