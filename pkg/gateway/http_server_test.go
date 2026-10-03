@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,22 @@ func TestWriteStartupBannerGolden(t *testing.T) {
 		"Listening on http://127.0.0.1:6060\n"
 	if buf.String() != want {
 		t.Fatalf("banner mismatch:\n--- got ---\n%s\n--- want ---\n%s", buf.String(), want)
+	}
+}
+
+// A configured token is free text; the link must carry it so the sign-in
+// page's decodeURIComponent (which, like PathUnescape, decodes only %XX)
+// reads back exactly the token, with nothing cutting the fragment short.
+func TestSignInFragmentValueRoundTripsFreeTextTokens(t *testing.T) {
+	for _, token := range []string{"tok", "a&b#c", "100% sure", "x+y=z", "日本"} {
+		encoded := signInFragmentValue(token)
+		if strings.ContainsAny(encoded, "&# +") {
+			t.Fatalf("encoded %q = %q still carries a fragment delimiter", token, encoded)
+		}
+		decoded, err := url.PathUnescape(encoded)
+		if err != nil || decoded != token {
+			t.Fatalf("round trip %q -> %q -> %q (%v)", token, encoded, decoded, err)
+		}
 	}
 }
 

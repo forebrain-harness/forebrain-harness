@@ -76,12 +76,13 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { ref, watch } from 'vue'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
 import forebrainApi, {
   getErrorMessage,
   saveSkillDownload,
+  type ProjectRecord,
   type SkillRecord,
 } from '@/lib/api'
 import { useI18n } from '@/locales'
@@ -93,7 +94,7 @@ import { useI18n } from '@/locales'
  * and managed where they belong (decision D9).
  */
 // The route passes the whole project record; only its id reaches the API.
-const props = defineProps<{ project: unknown; projectId: string }>()
+const props = defineProps<{ project: ProjectRecord | null; projectId: string }>()
 
 const { t } = useI18n()
 
@@ -106,19 +107,10 @@ const onlineOpen = ref(false)
 const offlineOpen = ref(false)
 const confirmDelete = ref<SkillRecord | null>(null)
 
-// Trust state is local after the first read: the GET row does not carry it
-// (only the trust action does), and this tab is its only writer here.
+// The gate follows the project row the shell loaded (its trust decision is
+// part of the detail read); the trust action here moves it forward.
 const trusted = ref(false)
 const trusting = ref(false)
-
-async function loadTrust() {
-  try {
-    const res = await forebrainApi.projectGet(props.projectId)
-    trusted.value = Boolean((res as unknown as { trusted?: boolean }).trusted)
-  } catch {
-    trusted.value = false
-  }
-}
 
 async function trust() {
   if (trusting.value) return
@@ -212,8 +204,8 @@ async function doDelete() {
   }
 }
 
-onMounted(async () => {
-  await loadTrust()
-  await load()
-})
+watch(() => props.project?.trusted, (value) => {
+  trusted.value = Boolean(value)
+  void load()
+}, { immediate: true })
 </script>

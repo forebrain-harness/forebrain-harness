@@ -137,7 +137,7 @@ describe('ForebrainPromptTextarea', () => {
       const items = composer.findAll('[role="menuitem"]')
       expect(items.map((item) => item.attributes('data-highlighted'))).toEqual([undefined, undefined, 'true'])
       expect(scrolled).toHaveBeenCalledWith({ block: 'nearest' })
-      expect(scrolled.mock.contexts.at(-1)).toBe(items[2].element)
+      expect(scrolled.mock.contexts[scrolled.mock.contexts.length - 1]).toBe(items[2].element)
     } finally {
       list.mockRestore()
       Element.prototype.scrollIntoView = scrollIntoView

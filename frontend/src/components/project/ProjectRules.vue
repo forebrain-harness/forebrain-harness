@@ -57,7 +57,9 @@ const error = ref('')
 const notice = ref('')
 const warning = ref('')
 
-const creatable = computed(() => files.value.filter((file) => !file.exists).map((file) => file.dir))
+// The layers without a file yet, as the server lists them: the file list
+// holds only the chain as it stands.
+const creatable = ref<string[]>([])
 const dirty = computed(() => draft.value !== savedContent.value)
 const activeLabel = computed(() => (activeDir.value ? `${activeDir.value}/FOREBRAIN.md` : 'FOREBRAIN.md'))
 
@@ -66,6 +68,7 @@ async function loadList() {
   try {
     const res = await forebrainApi.projectRuleFiles(props.projectId)
     files.value = res.files ?? []
+    creatable.value = res.create ?? []
   } catch (cause) {
     error.value = getErrorMessage(cause)
   }
@@ -89,9 +92,10 @@ async function loadContent() {
   notice.value = ''
   warning.value = ''
   try {
-    const content = await forebrainApi.projectRuleFile(props.projectId, activeDir.value)
-    draft.value = content.startsWith('{"exists":false') ? '' : content
-    savedContent.value = draft.value
+    const file = await forebrainApi.projectRuleFile(props.projectId, activeDir.value)
+    // A layer without a file yet reads as empty; saving it creates it.
+    draft.value = file.content
+    savedContent.value = file.content
   } catch (cause) {
     error.value = getErrorMessage(cause)
   }

@@ -1270,6 +1270,115 @@ func TestApprovalPresetApplyToConfigClearsNamedProfile(t *testing.T) {
 	preset.ApplyToConfig(nil) // must not panic
 }
 
+// A preset picked for one conversation scopes both halves to it: the
+// configuration is left alone, the conversation's snapshot carries its own
+// approval policy and sandbox, and every other conversation keeps the
+// configured ones.
+func TestApprovalPresetSessionUpdatesScopeBothHalvesToTheConversation(t *testing.T) {
+	t.Setenv(EnvYOLO, "")
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
+	rt := NewRuntime()
+	preset, ok := ApprovalPresetByID(PresetFullAccess)
+	if !ok {
+		t.Fatal("full-access preset missing")
+	}
+	for _, update := range preset.SessionUpdates("s1") {
+		rt.ApplyUpdate(update, cfg, Paths{})
+	}
+
+	if cfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite || cfg.ApprovalPolicy.Mode != appcfg.ApprovalPolicyOnRequest {
+		t.Fatalf("config moved: sandbox=%q approval=%q", cfg.SandboxMode, cfg.ApprovalPolicy.Mode)
+	}
+	owning := rt.SnapshotForSession("s1", cfg)
+	if owning.Mode != ModeNever || owning.ApprovalPolicy.Mode != ApprovalNever || owning.SandboxMode != appcfg.SandboxModeDangerFullAccess {
+		t.Fatalf("owning snapshot = mode %q, policy %q, sandbox %q", owning.Mode, owning.ApprovalPolicy.Mode, owning.SandboxMode)
+	}
+	if got := ConfigForSnapshot(cfg, owning); got.SandboxMode != appcfg.SandboxModeDangerFullAccess || got == cfg {
+		t.Fatalf("owning config = %+v", got)
+	}
+	other := rt.SnapshotForSession("s2", cfg)
+	if other.Mode != ModeOnRequest || other.ApprovalPolicy.Mode != ApprovalOnRequest || other.SandboxMode != "" {
+		t.Fatalf("other snapshot = mode %q, policy %q, sandbox %q", other.Mode, other.ApprovalPolicy.Mode, other.SandboxMode)
+	}
+	if got := ConfigForSnapshot(cfg, other); got != cfg {
+		t.Fatal("a conversation without its own sandbox must run under the configuration itself")
+	}
+
+	if d := rt.Evaluate("s1", "shell", "rm -rf /tmp/build-output", cfg, false); d.Reason != "danger_full_access" {
+		t.Fatalf("owning decision = %+v", d)
+	}
+	if d := rt.Evaluate("s2", "shell", "rm -rf /tmp/build-output", cfg, false); d.Reason == "danger_full_access" || d.BypassSandbox {
+		t.Fatalf("other decision = %+v", d)
+	}
+	if rt.Store(cfg).sandboxAvailableForSession("s2") != rt.Store(cfg).SandboxAvailable() {
+		t.Fatal("another conversation's containment must be the configured one")
+	}
+	if rt.Store(cfg).sandboxAvailableForSession("s1") {
+		t.Fatal("a full-access conversation has no sandbox containing its commands")
+	}
+}
+
+// Containment for a conversation's own sandbox is derived the same way the
+// configured mode's is, and re-derived when the configuration reloads.
+func TestSessionSandboxAvailabilityFollowsTheSessionsMode(t *testing.T) {
+	t.Setenv(EnvYOLO, "")
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}
+	rt := NewRuntime()
+	rt.LoadFromDisk(cfg, Paths{})
+	if rt.Store(cfg).SandboxAvailable() {
+		t.Fatal("full access is never contained")
+	}
+	rt.ApplyUpdate(PermissionUpdate{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: "s1", SandboxMode: appcfg.SandboxModeReadOnly}, cfg, Paths{})
+	want := shellSandboxAvailable(&appcfg.Root{SandboxMode: appcfg.SandboxModeReadOnly})
+	if got := rt.Store(cfg).sandboxAvailableForSession("s1"); got != want {
+		t.Fatalf("read-only conversation contained = %v, want %v", got, want)
+	}
+	rt.LoadFromDisk(cfg, Paths{})
+	if got := rt.Store(cfg).sandboxAvailableForSession("s1"); got != want {
+		t.Fatalf("after reload contained = %v, want %v", got, want)
+	}
+	if rt.Store(cfg).sandboxAvailableForSession("s2") {
+		t.Fatal("another conversation keeps the configured full access")
+	}
+}
+
+// A sandbox mode is a conversation's own choice or nothing: the configured
+// mode lives in the configuration, so any other destination, a missing
+// conversation or a mode no preset picks changes nothing.
+func TestSessionSandboxModeAcceptsOnlyAConversationsPresetMode(t *testing.T) {
+	store := NewStore()
+	for _, update := range []PermissionUpdate{
+		{Type: UpdateSetSandboxMode, Destination: DestinationLocalSettings, SessionID: "s1", SandboxMode: appcfg.SandboxModeDangerFullAccess},
+		{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: " ", SandboxMode: appcfg.SandboxModeDangerFullAccess},
+		{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: "s1", SandboxMode: "external-sandbox"},
+	} {
+		ApplyUpdate(store, update)
+	}
+	if got := store.SnapshotForSession("s1").SandboxMode; got != "" {
+		t.Fatalf("sandbox mode = %q, want none", got)
+	}
+
+	ApplyUpdate(store, PermissionUpdate{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: "s1", SandboxMode: appcfg.SandboxModeReadOnly})
+	if got := store.SnapshotForSession("s1").SandboxMode; got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("sandbox mode = %q", got)
+	}
+	// Switching the primary agent drops it with every other runtime grant.
+	store.ClearRuntimeGrants()
+	if got := store.SnapshotForSession("s1").SandboxMode; got != "" {
+		t.Fatalf("sandbox mode after clear = %q", got)
+	}
+}
+
+// YOLO comes from the environment; a conversation's own sandbox never walks
+// it back.
+func TestConfigForSnapshotLeavesYOLOInCharge(t *testing.T) {
+	t.Setenv(EnvYOLO, "1")
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}
+	if got := ConfigForSnapshot(cfg, Snapshot{SandboxMode: appcfg.SandboxModeReadOnly}); got != cfg {
+		t.Fatalf("config under YOLO = %+v, want the configuration itself", got)
+	}
+}
+
 func TestResolveFindsGitDirectoryAndWorktreeFile(t *testing.T) {
 	t.Run("directory", func(t *testing.T) {
 		repo := t.TempDir()

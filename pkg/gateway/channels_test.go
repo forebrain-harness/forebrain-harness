@@ -598,8 +598,9 @@ func TestPermissionUpdateEndpointRefreshesSandboxRuntime(t *testing.T) {
 
 func TestPermissionUpdateEndpointSessionOnly(t *testing.T) {
 	const sessionID = "session-1"
-	runner := &run.Runner{Deps: &run.Deps{}}
-	s := &Server{Runner: runner}
+	home := t.TempDir()
+	runner := &run.Runner{Deps: &run.Deps{Home: home}}
+	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{Home: home, AppCfg: &appcfg.Root{}}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
 	body := safety.PermissionUpdate{
 		Type:        safety.UpdateAddRules,
 		Destination: safety.DestinationSession,
@@ -633,7 +634,24 @@ func TestPermissionUpdateEndpointSessionOnly(t *testing.T) {
 	rrPersistent := httptest.NewRecorder()
 	s.handlePermissionUpdate(rrPersistent, reqPersistent)
 	if rrPersistent.Code != http.StatusOK {
-		t.Fatalf("expected 200 for localSettings destination, got %d", rrPersistent.Code)
+		t.Fatalf("expected 200 for localSettings destination, got %d: %s", rrPersistent.Code, rrPersistent.Body.String())
+	}
+	// The agent's rule is on disk and in the runner that is already running.
+	if _, err := os.Stat(filepath.Join(home, "workspace", "state", "permissions", "local_settings.json")); err != nil {
+		t.Fatalf("local rule not persisted: %v", err)
+	}
+	if d := runner.EvaluatePermissionForSession("session-3", "Bash", "git status"); d.Matched == nil || d.Matched.Source != safety.SourceLocalSettings {
+		t.Fatalf("live runner did not take the agent's rule: %+v", d)
+	}
+
+	// A project's rules belong to the project space, never to whichever
+	// project this process was launched in.
+	project := safety.PermissionUpdate{Type: safety.UpdateAddRules, Destination: safety.DestinationProjectSettings, Behavior: safety.BehaviorDeny, Rules: []safety.PermissionRuleValue{{ToolName: "Bash", RuleContent: "rm:*"}}}
+	rawProject, _ := json.Marshal(project)
+	rrProject := httptest.NewRecorder()
+	s.handlePermissionUpdate(rrProject, httptest.NewRequest(http.MethodPost, "/api/permissions/updates", bytes.NewReader(rawProject)))
+	if rrProject.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for projectSettings destination, got %d", rrProject.Code)
 	}
 
 	invalid := map[string]any{"type": "addRules", "destination": "cliArg", "behavior": "allow", "rules": []map[string]any{{"tool_name": "Bash", "rule_content": "x"}}}
@@ -646,45 +664,83 @@ func TestPermissionUpdateEndpointSessionOnly(t *testing.T) {
 	}
 }
 
-func TestPermissionEndpointsPreferAppCoreFacade(t *testing.T) {
+// A conversation's permissions are answered and changed in the runner that
+// conversation runs on — a project session's pooled runner — never in the
+// process facade, which is bound to the gateway's own runner.
+func TestPermissionEndpointsAnswerFromTheSessionsOwnRunner(t *testing.T) {
 	const sessionID = "session-1"
-	runner := &run.Runner{Deps: &run.Deps{}}
-	core := turn.New(turn.WithPermissionFacade(runner))
-	s := &Server{Core: core, Runner: nil}
+	facade := &run.Runner{Deps: &run.Deps{}}
+	sessionRunner := &run.Runner{Deps: &run.Deps{}}
+	s := &Server{Core: turn.New(turn.WithPermissionFacade(facade)), Env: &process.Environment{Runner: sessionRunner}}
 
-	runner.ApplyPermissionUpdate(safety.PermissionUpdate{
+	body := safety.PermissionUpdate{
 		Type:        safety.UpdateAddRules,
 		Destination: safety.DestinationSession,
 		SessionID:   sessionID,
 		Behavior:    safety.BehaviorAllow,
-		Rules: []safety.PermissionRuleValue{{
-			ToolName:    "Bash",
-			RuleContent: "npm run:*",
-		}},
-	})
+		Rules:       []safety.PermissionRuleValue{{ToolName: "Bash", RuleContent: "npm run:*"}},
+	}
+	raw, _ := json.Marshal(body)
+	rrUpdate := httptest.NewRecorder()
+	s.handlePermissionUpdate(rrUpdate, httptest.NewRequest(http.MethodPost, "/api/permissions/updates", bytes.NewReader(raw)))
+	if rrUpdate.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", rrUpdate.Code, rrUpdate.Body.String())
+	}
+	if d := facade.EvaluatePermissionForSession(sessionID, "Bash", "npm run build"); d.Matched != nil {
+		t.Fatalf("session rule landed in the process facade: %+v", d)
+	}
 
 	reqList := httptest.NewRequest(http.MethodGet, "/api/permissions/rules?session_id="+sessionID, nil)
 	rrList := httptest.NewRecorder()
 	s.handlePermissionRules(rrList, reqList)
-	if rrList.Code != http.StatusOK {
-		t.Fatalf("rules via core status=%d body=%s", rrList.Code, rrList.Body.String())
+	if rrList.Code != http.StatusOK || !strings.Contains(rrList.Body.String(), "npm run:*") {
+		t.Fatalf("rules status=%d body=%s", rrList.Code, rrList.Body.String())
 	}
 
-	body := map[string]string{"tool_name": "Bash", "input": "npm run build", "session_id": sessionID}
-	raw, _ := json.Marshal(body)
-	reqEval := httptest.NewRequest(http.MethodPost, "/api/permissions/evaluate", bytes.NewReader(raw))
+	evalBody, _ := json.Marshal(map[string]string{"tool_name": "Bash", "input": "npm run build", "session_id": sessionID})
 	rrEval := httptest.NewRecorder()
-	s.handlePermissionEvaluate(rrEval, reqEval)
+	s.handlePermissionEvaluate(rrEval, httptest.NewRequest(http.MethodPost, "/api/permissions/evaluate", bytes.NewReader(evalBody)))
 	if rrEval.Code != http.StatusOK {
-		t.Fatalf("evaluate via core status=%d body=%s", rrEval.Code, rrEval.Body.String())
+		t.Fatalf("evaluate status=%d body=%s", rrEval.Code, rrEval.Body.String())
 	}
 	var dec safety.Decision
 	if err := json.Unmarshal(rrEval.Body.Bytes(), &dec); err != nil {
-		t.Fatalf("evaluate decode via core: %v", err)
+		t.Fatalf("evaluate decode: %v", err)
 	}
 	if dec.Behavior != safety.BehaviorAllow {
-		t.Fatalf("expected allow via core, got %s (%s)", dec.Behavior, dec.Reason)
+		t.Fatalf("expected allow from the session's runner, got %s (%s)", dec.Behavior, dec.Reason)
 	}
+}
+
+// The agent's permission page answers for the agent alone: the rules of the
+// project the gateway was launched in are neither listed nor consulted.
+func TestAgentPermissionEndpointsLeaveTheLaunchProjectOut(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".forebrain"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".forebrain", "safety.json"),
+		[]byte(`{"rules":{"deny":[{"tool_name":"Bash","rule_content":"git push:*"}]}}`), 0o600))
+	launched := &run.Runner{Deps: &run.Deps{Home: home, ProjectRoot: project}}
+	launched.ApplyPermissionUpdate(safety.PermissionUpdate{
+		Type: safety.UpdateAddRules, Destination: safety.DestinationProjectSettings, Behavior: safety.BehaviorDeny,
+		Rules: []safety.PermissionRuleValue{{ToolName: "Bash", RuleContent: "git push:*"}},
+	})
+	require.Equal(t, safety.BehaviorDeny, launched.EvaluatePermissionForSession("", "Bash", "git push").Behavior,
+		"the launched runner holds the project's rule")
+	s := &Server{Home: home, Runner: launched, Env: &process.Environment{Deps: run.Deps{Home: home, AppCfg: &appcfg.Root{}}, Root: home, Runner: launched}}
+
+	rr := httptest.NewRecorder()
+	s.handlePermissionRules(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/rules", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NotContains(t, rr.Body.String(), "git push")
+
+	rr = httptest.NewRecorder()
+	s.handlePermissionExplain(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/explain?tool_name=Bash&input=git%20push", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var ex safety.ExplainResult
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &ex))
+	require.NotEqual(t, safety.BehaviorDeny, ex.Decision.Behavior, rr.Body.String())
 }
 
 // Plan files live in <stateRoot>/plans/<projectKey>, and the plan-mode

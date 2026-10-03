@@ -16,6 +16,10 @@ describe('tokenFromLocationHash', () => {
     expect(tokenFromLocationHash('#token=abc&other=1')).toBe('abc')
   })
 
+  it('takes a malformed escape as typed instead of throwing', () => {
+    expect(tokenFromLocationHash('#token=100%')).toBe('100%')
+  })
+
   it('returns empty when the hash carries no token', () => {
     expect(tokenFromLocationHash('')).toBe('')
     expect(tokenFromLocationHash('#other=1')).toBe('')

@@ -445,18 +445,17 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 				if lc := b.s.liveCfg(); lc != nil {
 					out = safety.SanitizeOutbound(lc, out)
 				}
+				finishedAt := time.Now()
 				b.s.finishSuccessfulTurn(ctxBg, gatewayPostTurnOptions{
-					SessionID: sid,
-					ChannelID: ch,
-					RunID:     runID,
-					UserText:  input,
-					// The slash command expanded into UserText; the transcript
-					// row shows what the user actually sent.
-					RawInput:        m.Text,
+					SessionID:       sid,
+					ChannelID:       ch,
+					RunID:           runID,
 					AssistantText:   out,
 					AssistantResult: res,
-					AppendUser:      true,
 					AppendAssistant: true,
+					RunStartedAt:    finishedAt.Add(-outcome.Duration),
+					RunFinishedAt:   finishedAt,
+					WorkedMs:        outcome.Duration.Milliseconds(),
 				})
 				b.deliverOutboundPresanitized(context.Background(), ch, sid, out)
 			}
@@ -544,17 +543,17 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 			if lc := b.s.liveCfg(); lc != nil {
 				out = safety.SanitizeOutbound(lc, out)
 			}
+			finishedAt := time.Now()
 			b.s.finishSuccessfulTurn(ctxBg, gatewayPostTurnOptions{
-				SessionID: sid,
-				ChannelID: ch,
-				RunID:     runID,
-				// No slash expansion on this path, so UserText already is what
-				// the user sent and needs no separate raw form.
-				UserText:        input,
+				SessionID:       sid,
+				ChannelID:       ch,
+				RunID:           runID,
 				AssistantText:   out,
 				AssistantResult: res,
-				AppendUser:      true,
 				AppendAssistant: true,
+				RunStartedAt:    finishedAt.Add(-outcome.Duration),
+				RunFinishedAt:   finishedAt,
+				WorkedMs:        outcome.Duration.Milliseconds(),
 			})
 			b.deliverOutboundPresanitized(context.Background(), ch, m.SessionID, out)
 		}
@@ -644,6 +643,9 @@ type wsServerMsg struct {
 	Message   string `json:"message,omitempty"`
 	Data      any    `json:"data,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// The run's checklist facts, on the three operations that end a run.
+	// writeMsg fills them, so no ending can leave them out.
+	event.RunPlanFacts
 }
 
 func runEventToWSMessage(requestID, traceID string, evt event.RunEvent) wsServerMsg {
@@ -822,6 +824,9 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 	writeMsg := func(m wsServerMsg) {
 		if traceID := loadCurrentTraceID(); m.TraceID == "" && traceID != "" {
 			m.TraceID = traceID
+		}
+		if wsRunEndOps[m.Op] && strings.TrimSpace(m.RunID) != "" {
+			m.RunPlanFacts = s.runPlanFacts(context.Background(), m.RunID)
 		}
 		canonical := canonicalRunEventsFromWS(m)
 		writeMu.Lock()
@@ -1467,13 +1472,13 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if skillName == "" && skillPath == "" {
 			// A client may name the skill for this turn directly (the workshop
 			// does); a slash handoff above still takes precedence.
-			skillName = strings.TrimSpace(m.Message.SkillName)
-			skillPath = strings.TrimSpace(m.Message.SkillPath)
-			if skillPath != "" || skillName != "" {
-				if err := s.validateExplicitSkillSelection(skillName, skillPath); err != nil {
+			if requestedName, requestedPath := strings.TrimSpace(m.Message.SkillName), strings.TrimSpace(m.Message.SkillPath); requestedName != "" || requestedPath != "" {
+				resolvedName, resolvedPath, err := s.resolveExplicitSkillSelection(requestedName, requestedPath)
+				if err != nil {
 					writeMsg(wsServerMsg{Op: "run_error", RequestID: m.RequestID, SessionID: sid, Error: err.Error()})
 					return
 				}
+				skillName, skillPath = resolvedName, resolvedPath
 			}
 		}
 		if sc.ShouldContinueRun {
@@ -1700,6 +1705,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if s.Sessions != nil {
 			turn.PersistUserTurn(r.Context(), s.Sessions, turn.UserTurn{
 				SessionID:  sid,
+				RunID:      runID,
 				ModelInput: input,
 				RawInput:   firstNonBlank(rawContentForRetrieval, turnInput.display),
 				PartsJSON:  turnInput.partsJSON,
@@ -1891,7 +1897,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 					ActionID:   rae.ActionID,
 					ActionKind: rae.ActionKind,
 				})
-				approvalData := approvalWSData(s.permissionFacade(), sid, rae.ActionID, rae.ActionKind, rae.ToolName, rae.ToolInput)
+				approvalData := approvalWSData(s.sessionPermissions(r.Context(), sid), sid, rae.ActionID, rae.ActionKind, rae.ToolName, rae.ToolInput)
 				writeMsg(wsServerMsg{
 					Op:        "step",
 					RequestID: m.RequestID,
@@ -1916,9 +1922,10 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				})
 				if s.RunRT != nil {
 					if s.Sessions != nil && len(rae.SessionSnapshot) > 0 {
-						_ = s.Sessions.AppendMessageSequence(
+						_ = s.Sessions.AppendMessageSequenceForRun(
 							agCtx,
 							sid,
+							runID,
 							rae.SessionSnapshot,
 							"",
 							"",
@@ -1963,7 +1970,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				// transcript DB stays consistent with what the webchat user
 				// saw during the run. Without this, the next round and
 				// /resume replay lose all messages from the cancelled turn.
-				s.persistCancelledGatewayTurn(sid, gatewayPartialCapture, streamPartial)
+				s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: runStart, FinishedAt: runFinishedAt, Worked: runElapsed}, gatewayPartialCapture, streamPartial)
 				if s.RunRT != nil {
 					_ = s.RunRT.SetStatus(agCtx, runID, state.RunStatusCancelled)
 					_ = s.RunRT.CancelRunningDescendants(agCtx, runID)
@@ -1983,7 +1990,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			// DB stays consistent with what the webchat user saw during the
 			// run. Without this, a transient LLM error (429, network, etc.)
 			// drops every message the assistant produced in this turn.
-			s.persistCancelledGatewayTurn(sid, gatewayPartialCapture, streamPartial)
+			s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: runStart, FinishedAt: runFinishedAt, Worked: runElapsed}, gatewayPartialCapture, streamPartial)
 			// An explicit skill load that failed already delivered its Skill
 			// failure card through the step hook; a run_error bubble would repeat
 			// the same news twice.
@@ -2061,7 +2068,6 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			_ = s.RunEvents().Publish(context.Background(), event.NewRunEvent("", runID, sid, event.RunEventAssistantDelta,
 				event.AssistantDeltaPayload{Text: out, FirstDeltaMS: time.Since(runStart).Milliseconds()}, time.Now()))
 		}
-		planProgress := lastPlanProgressOfRun(agCtx, s.RunRT, runID)
 		msg := wsServerMsg{
 			Op:        "run_completed",
 			RequestID: m.RequestID,
@@ -2069,10 +2075,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			SessionID: sid,
 			Text:      out,
 			Data: map[string]any{
-				"elapsed_ms":  runElapsed.Milliseconds(),
-				"plan_done":   planProgress.Done,
-				"plan_total":  planProgress.Total,
-				"plan_active": planProgress.Active,
+				"elapsed_ms": runElapsed.Milliseconds(),
 			},
 		}
 		// What the run never took goes back before anything reports its end.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -211,6 +212,14 @@ func displayHost(addr net.Addr) string {
 	return net.JoinHostPort(host, port)
 }
 
+// signInFragmentValue encodes the token for the link's #token= fragment the
+// way the sign-in page decodes it (decodeURIComponent): a configured token is
+// free text, and an unescaped "&", "#" or "%" in it would cut or corrupt the
+// value the page reads back.
+func signInFragmentValue(token string) string {
+	return strings.ReplaceAll(url.QueryEscape(token), "+", "%20")
+}
+
 func writeStartupBanner(w io.Writer, b startupBanner) {
 	var out strings.Builder
 	out.WriteString(bannerArt)
@@ -249,7 +258,7 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 		fmt.Fprintf(&out, "Web UI       %s/\n", base)
 	}
 	if b.SignInToken != "" {
-		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, b.SignInToken)
+		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, signInFragmentValue(b.SignInToken))
 	}
 	fmt.Fprintf(&out, "Auth         %s\n", strings.TrimSpace(b.AuthMode))
 	fmt.Fprintf(&out, "Listening on http://%s\n", b.Addr.String())

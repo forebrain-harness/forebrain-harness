@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -722,12 +723,16 @@ func TestWebAnswerStreamsAsItIsWritten(t *testing.T) {
 	require.Equal(t, "Hello", partial.Content())
 	require.Equal(t, "thinking", partial.Reasoning())
 
-	s.persistCancelledGatewayTurn("s1", nil, partial)
+	started := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	s.persistCancelledGatewayTurn("s1", "r1", turn.RunEnd{StartedAt: started, FinishedAt: started.Add(4 * time.Second), Worked: 4 * time.Second}, nil, partial)
 	turns, err := s.Sessions.ListAllMessages(ctx, "s1", 0)
 	require.NoError(t, err)
 	var kept []string
 	for _, row := range turns {
 		kept = append(kept, row.Role+":"+row.Content)
+		// What the stopped run wrote is the run's, and carries its clock.
+		require.Equal(t, "r1", row.RunID, row.Role)
+		require.Equal(t, int64(4_000), row.RunWorkedMs, row.Role)
 	}
 	require.Contains(t, strings.Join(kept, "|"), "assistant:Hello", "a cancelled turn keeps the answer the page was shown")
 
@@ -990,4 +995,48 @@ func TestAutoContinueRESTReportsAndCancelsTheWait(t *testing.T) {
 	rec := httptest.NewRecorder()
 	g.server.handleAutoContinue(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code, "another agent's session is not this page's to inspect")
+}
+
+// failingChannelExecutor creates a real run, takes a moment, and fails — a
+// channel turn the provider refused.
+type failingChannelExecutor struct {
+	runs  *state.RunStore
+	runID string
+	err   error
+}
+
+func (x *failingChannelExecutor) Run(ctx context.Context, req turn.TurnRequest, started func(string)) (*agent.Result, error) {
+	run, err := x.runs.CreateRun(ctx, req.SessionID, req.UserText)
+	if err != nil {
+		return nil, err
+	}
+	x.runID = run.ID
+	if started != nil {
+		started(run.ID)
+	}
+	time.Sleep(5 * time.Millisecond)
+	return nil, x.err
+}
+
+// A channel turn that fails keeps what every surface keeps: the user's message,
+// bound to the run it started, and the run's clock — so the conversation can
+// be read back with its failed turn in it rather than without the message.
+func TestFailedChannelTurnKeepsTheMessageBoundToItsTimedRun(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	executor := &failingChannelExecutor{runs: s.RunRT, err: errors.New("connection reset by peer")}
+	s.Core = turn.New(turn.WithSessionStore(s.Sessions), turn.WithRunExecutor(executor))
+
+	_, ok := s.submitChannelTurn(ctx, "wecom", "wecom:u1", "the expanded prompt", "/plan ship it", "", "")
+	require.False(t, ok)
+
+	rows, err := s.Sessions.ListAllMessages(ctx, "wecom:u1", 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, "user", rows[0].Role)
+	require.Equal(t, "/plan ship it", rows[0].Content, "the row shows what the user sent")
+	require.Equal(t, executor.runID, rows[0].RunID)
+	require.Greater(t, rows[0].RunWorkedMs, int64(0))
+	require.Contains(t, turn.RunWorkedLines(rows), 0)
 }

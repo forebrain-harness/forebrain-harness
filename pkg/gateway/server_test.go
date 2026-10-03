@@ -73,14 +73,25 @@ body`), 0o600))
 	launch, err := safety.ResolveProjectContext(home, home)
 	require.NoError(t, err)
 
-	// The launch project is what the global skill routes act on, so the test
-	// states it explicitly instead of relying on the process working
+	// The launch project is the context the runtime loads skills for, so the
+	// test states it explicitly instead of relying on the process working
 	// directory.
 	s := &Server{Home: home, LaunchProject: launch}
+
+	// The agent's own skill routes work in no project: a project
+	// destination belongs to that project's space.
 	reqBody := strings.NewReader(`{"source_ref":"file://` + src + `","dest":"project","skill":"pptx","name":"pptx-installed"}`)
 	req, err := http.NewRequest(http.MethodPost, "/api/skills/install", reqBody)
 	require.NoError(t, err)
 	rr := httptest.NewRecorder()
+	s.handleSkillsInstall(rr, req)
+	require.NotEqual(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "no project root")
+
+	reqBody = strings.NewReader(`{"source_ref":"file://` + src + `","dest":"workspace","skill":"pptx","name":"pptx-installed"}`)
+	req, err = http.NewRequest(http.MethodPost, "/api/skills/install", reqBody)
+	require.NoError(t, err)
+	rr = httptest.NewRecorder()
 	s.handleSkillsInstall(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"installed"`)

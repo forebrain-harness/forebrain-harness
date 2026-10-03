@@ -436,8 +436,10 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	if limit > 500 {
 		limit = 500
 	}
+	// project_id rides along so a surface can tell a project's sessions from
+	// the agent's own conversations without a second lookup per row.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, title, updated_at, source
+		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
 		 FROM fb_sessions
 		 WHERE agent_id = ?
 		 ORDER BY updated_at DESC
@@ -450,7 +452,7 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	var out []SessionSummary
 	for rows.Next() {
 		var r SessionSummary
-		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source); err != nil {
+		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source, &r.ProjectID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -1122,6 +1124,44 @@ type RunTiming struct {
 
 func (t RunTiming) valid() bool {
 	return !t.StartedAt.IsZero() && !t.FinishedAt.IsZero()
+}
+
+// StampRunTiming records a run's clock when the run ends — however it ends:
+// finished, failed or stopped. Every run closes with a "Worked for" line live,
+// and this is what gives a replay that same line back, whether or not the run
+// wrote a single row of its own. The surface that measured the run stamps it.
+//
+// A run ends once, so the first stamp is its clock and a later one changes
+// nothing: the stamp written where the surface measured the run precisely
+// stands, and a surface's catch-all at the very end of a run only fills in
+// for an ending that wrote none. An untimed window (the zero value) changes
+// nothing either.
+func (s *SessionStore) StampRunTiming(ctx context.Context, runID string, timing RunTiming) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" || !timing.valid() {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE fb_runs SET started_at_ms=?, finished_at_ms=?, worked_ms=?, updated_at=? WHERE id=? AND finished_at_ms IS NULL`,
+		timing.StartedAt.UnixMilli(), timing.FinishedAt.UnixMilli(), timing.Worked.Milliseconds(), time.Now().Unix(), runID)
+	return err
+}
+
+// BindMessageToRun records that a row written before its run existed belongs
+// to that run: the user message the terminal stores before the engine creates
+// the run it starts. A row already bound to a run keeps it.
+func (s *SessionStore) BindMessageToRun(ctx context.Context, sessionID string, rowID int64, runID string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sessionID, runID = strings.TrimSpace(sessionID), strings.TrimSpace(runID)
+	if sessionID == "" || runID == "" || rowID <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE fb_messages SET run_id=? WHERE id=? AND session_id=? AND run_id IS NULL`, runID, rowID, sessionID)
+	return err
 }
 
 // messageExecTiming is the row's own execution window: a tool call, or a

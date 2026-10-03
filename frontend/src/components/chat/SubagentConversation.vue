@@ -80,12 +80,11 @@
 		  :goal="block.goal"
 		/>
 
-		<div
+		<RunErrorBlock
 		  v-else-if="block.kind === 'error'"
-		  class="whitespace-pre-wrap rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-3 py-2 text-xs text-[var(--forebrain-danger)]"
-		>
-		  {{ block.text }}
-		</div>
+		  :text="block.text"
+		  :detail="block.detail"
+		/>
 
         <Message v-else from="assistant">
           <Avatar class="size-8 shrink-0 ring-1 ring-border">
@@ -140,6 +139,7 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import { t } from '@/locales'
 import type { TimelineBlock, SubagentTranscript } from '@/composables/useChatStream'
 

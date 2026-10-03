@@ -90,6 +90,30 @@ test('switching the tenant re-fetches the session list', async ({ page }) => {
   expect(sessionRequests.length).toBeGreaterThanOrEqual(before)
 })
 
+test('switching the tenant leaves the previous agent\'s conversation behind', async ({ page }) => {
+  await signIn(page)
+  const created = await page.request.post('/api/agents/primary', { data: { id: 'e2e-switch' } })
+  expect(created.ok(), await created.text()).toBeTruthy()
+  try {
+    await page.goto('/', { waitUntil: 'networkidle' })
+    await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
+    await page.click('[data-testid="drawer-new-chat"]')
+    await page.waitForURL(/session=/)
+
+    await page.locator('.forebrain-tenant-trigger').click()
+    await page.locator('.forebrain-tenant-option', { hasText: 'e2e-switch' }).click()
+    // The conversation belonged to the agent just left: it leaves the
+    // address bar instead of being reopened under the new tenant.
+    await expect(page).not.toHaveURL(/session=/, { timeout: 10_000 })
+    await expect(page.locator('.forebrain-tenant-trigger')).toContainText('e2e-switch')
+  } finally {
+    await page.locator('.forebrain-tenant-trigger').click()
+    await page.locator('.forebrain-tenant-option', { hasText: 'main' }).click()
+    await expect(page.locator('.forebrain-tenant-trigger')).toContainText('main', { timeout: 10_000 })
+    await page.request.delete('/api/agents/primary/e2e-switch')
+  }
+})
+
 test('subagents page shows its empty state', async ({ page }) => {
   await signIn(page)
   await page.goto('/subagents', { waitUntil: 'networkidle' })

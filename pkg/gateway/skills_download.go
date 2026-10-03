@@ -92,8 +92,11 @@ type skillListEntry struct {
 // primary-agent listing agent — every other row is inherited and read-only
 // (decision D9).
 func (s *Server) decorateSkillList(launch safety.ProjectContext, projectID string, svc *skill.Service, list []skill.SkillDTO) []skillListEntry {
+	// The route decides the owning layer, not the launch context: the
+	// primary-agent routes run with the gateway's own launch project, which
+	// is a project too, yet the page asking is the agent's.
 	owner := "agent"
-	if strings.TrimSpace(launch.Project.Root) != "" {
+	if strings.TrimSpace(projectID) != "" {
 		owner = "project"
 	}
 	base := skillDownloadBase(projectID)
@@ -247,7 +250,7 @@ func writeSkillDirZip(zw *zip.Writer, dir string, prefix string) error {
 }
 
 func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillDownloadWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillDownloadWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillDownloadWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -287,7 +290,7 @@ func (s *Server) handleSkillDownloadWith(launch safety.ProjectContext, w http.Re
 const skillsDownloadMaxNames = 50
 
 func (s *Server) handleSkillsDownloadBatch(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsDownloadBatchWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsDownloadBatchWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsDownloadBatchWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -366,7 +369,7 @@ func (s *Server) handleSkillsDownloadBatchWith(launch safety.ProjectContext, w h
 }
 
 func (s *Server) handleSkillDelete(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillDeleteWith(s.gatewayLaunchProject(), "", w, r)
+	s.handleSkillDeleteWith(agentSkillScope(), "", w, r)
 }
 
 // handleSkillDeleteWith removes one skill directory from the layer that owns
@@ -473,7 +476,7 @@ func skillDeleteRoots(scope string, svc *skill.Service) []string {
 }
 
 func (s *Server) handleSkillsInstallUpload(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsInstallUploadWith(s.gatewayLaunchProject(), "", w, r)
+	s.handleSkillsInstallUploadWith(agentSkillScope(), "", w, r)
 }
 
 // handleSkillsInstallUploadWith installs skills from an uploaded archive —
@@ -558,41 +561,54 @@ func (s *Server) handleSkillsInstallUploadWith(launch safety.ProjectContext, pro
 const workshopFileMaxBytes = 1 << 20
 const workshopFilesMaxEntries = 2000
 
-// validateExplicitSkillSelection pins a client-named skill to the live
-// effective set: the path must be a discovered skill directory and the name
-// must be the one discovery lists for it. Anything else is refused rather
-// than passed through — an arbitrary path here would be an arbitrary
-// instruction source for the model.
-func (s *Server) validateExplicitSkillSelection(name, path string) error {
-	if strings.TrimSpace(path) == "" {
-		return nil
+// resolveExplicitSkillSelection pins a client-named skill to the live
+// effective set: the path must name a discovered, enabled skill — its
+// directory, as the skill listings carry it, or that directory's SKILL.md —
+// and the name must be the one discovery lists for it. Anything else is
+// refused rather than passed through: an arbitrary path here would be an
+// arbitrary instruction source for the model. A selection is a name and a
+// path together; the run activates nothing from either alone, so a half
+// selection is refused instead of starting a turn that silently ignores it.
+// The answer is what the run's explicit load reads — the discovered name and
+// that skill's SKILL.md, the same pair the terminal's slash handoff submits.
+func (s *Server) resolveExplicitSkillSelection(name, path string) (string, string, error) {
+	name = strings.TrimSpace(name)
+	path = strings.TrimSpace(path)
+	if name == "" || path == "" {
+		return "", "", errSkillSelectionIncomplete
 	}
 	svc, err := s.skillLifecycleService(s.gatewayLaunchProject())
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	entries, err := skill.DiscoverForWorkspace(svc.Home, svc.Workspace(), svc.ProjectRoot)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	// Discovery keys directories by their canonical form; the caller's copy
-	// of the path may be any spelling of the same directory.
-	canonicalPath := skill.CanonicalSkillPath(strings.TrimSpace(path))
+	// of the path may be any spelling of the same directory or file.
+	canonicalPath := skill.CanonicalSkillPath(path)
 	for _, entry := range entries {
-		if entry.Path != canonicalPath {
+		skillFile := filepath.Join(entry.Path, "SKILL.md")
+		if entry.Path != canonicalPath && skill.CanonicalSkillPath(skillFile) != canonicalPath {
 			continue
 		}
-		if strings.TrimSpace(name) != "" && !strings.EqualFold(entry.Name, strings.TrimSpace(name)) {
-			return errSkillNameMismatch
+		if !strings.EqualFold(entry.Name, name) {
+			return "", "", errSkillNameMismatch
 		}
-		return nil
+		if !entry.Enabled {
+			return "", "", errSkillDisabled
+		}
+		return entry.Name, skillFile, nil
 	}
-	return errSkillPathNotInSet
+	return "", "", errSkillPathNotInSet
 }
 
 var (
-	errSkillPathNotInSet = &wsSkillError{"skill_path does not name a skill in the current set"}
-	errSkillNameMismatch = &wsSkillError{"skill_name does not match the skill at skill_path"}
+	errSkillSelectionIncomplete = &wsSkillError{"skill_name and skill_path must be given together"}
+	errSkillPathNotInSet        = &wsSkillError{"skill_path does not name a skill in the current set"}
+	errSkillNameMismatch        = &wsSkillError{"skill_name does not match the skill at skill_path"}
+	errSkillDisabled            = &wsSkillError{"the skill at skill_path is disabled"}
 )
 
 type wsSkillError struct{ msg string }
@@ -621,7 +637,7 @@ type workshopFileRow struct {
 }
 
 func (s *Server) handleSkillFilesList(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillFilesListWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillFilesListWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillFilesListWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -690,7 +706,7 @@ func (s *Server) skillDirIsBuiltin(dir string) bool {
 }
 
 func (s *Server) handleSkillFileRead(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillFileReadWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillFileReadWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillFileReadWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -747,7 +763,7 @@ func (s *Server) handleSkillFileReadWith(launch safety.ProjectContext, w http.Re
 }
 
 func (s *Server) handleSkillFileWrite(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillFileWriteWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillFileWriteWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillFileWriteWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {

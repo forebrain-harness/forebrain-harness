@@ -14,6 +14,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -369,6 +370,26 @@ func TestApprovalWSDataSuppressesExecAmendmentAfterPolicyMatch(t *testing.T) {
 	if !ok || len(decisions) != 2 || decisions[0] != "accept" || decisions[1] != "cancel" {
 		t.Fatalf("available_decisions=%#v", raw["available_decisions"])
 	}
+}
+
+// An approval card is judged by the runner the conversation runs on: a rule
+// that session holds shapes its card, whatever the gateway's own runner holds.
+func TestApprovalCardsAreJudgedByTheSessionsOwnRunner(t *testing.T) {
+	facade := &run.Runner{Deps: &run.Deps{}}
+	sessionRunner := &run.Runner{Deps: &run.Deps{}}
+	sessionRunner.ApplyPermissionUpdate(safety.PermissionUpdate{
+		Type: safety.UpdateAddRules, Destination: safety.DestinationSession, SessionID: "session-1", Behavior: safety.BehaviorAsk,
+		Rules: []safety.PermissionRuleValue{{ToolName: "Bash", CommandPrefix: []string{"npm", "run", "build"}}},
+	})
+	s := &Server{Core: turn.New(turn.WithPermissionFacade(facade)), Runner: facade, Env: &process.Environment{Runner: sessionRunner}}
+	action := state.Action{ID: "a-session", Kind: "shell", SessionID: "session-1", PayloadJSON: `{"command":"npm run build"}`}
+
+	raw := s.actionPermissionSuggestion(context.Background(), action)
+	require.NotNil(t, raw)
+	_, proposed := raw["proposed_execpolicy_amendment"]
+	require.False(t, proposed, "the session's own ask rule decided this card: %#v", raw)
+	options, _ := raw["destination_options"].([]safety.PermissionDestination)
+	require.Empty(t, options)
 }
 
 func TestApprovalWSDataIncludesMCPSuggestion(t *testing.T) {
@@ -829,4 +850,42 @@ func TestGatewayApprovalExpiryIsDurableVisibleAndTerminal(t *testing.T) {
 	var resolved event.ApprovalResolvedPayload
 	require.NoError(t, json.Unmarshal(page.Events[0].Payload, &resolved))
 	require.Equal(t, "expired", resolved.Decision)
+}
+
+// Every way a run ends carries its checklist facts — a cancelled or failed
+// run closes with the same worked line a completed one does — and a
+// subagent's checklist recorded under the run is never what it reports.
+func TestRunEndingsCarryTheRunsChecklistFacts(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	runs := &state.RunStore{DB: db}
+	s := &Server{RunRT: runs}
+
+	mustGatewaySession(t, db, "session-plan")
+	rn, err := runs.CreateRun(ctx, "session-plan", "work through a checklist")
+	require.NoError(t, err)
+	require.NoError(t, s.RunEvents().Publish(ctx, event.NewRunEvent("plan-1", rn.ID, "session-plan", event.RunEventPlanUpdated,
+		event.PlanUpdatedPayload{Completed: 2, Total: 5, Items: []event.PlanUpdateItem{{ID: "3", Content: "wire the API", Status: "in_progress"}}}, time.Now())))
+	require.NoError(t, s.RunEvents().Publish(ctx, event.NewRunEvent("plan-sub", rn.ID, "session-plan", event.RunEventPlanUpdated,
+		event.PlanUpdatedPayload{Completed: 9, Total: 9, AgentID: "worker-1"}, time.Now())))
+
+	require.NoError(t, s.publishGatewayRunEvent(ctx, "session-plan", rn.ID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"}))
+	require.NoError(t, s.publishGatewayRunEvent(ctx, "session-plan", rn.ID, event.RunEventTurnError, event.TurnErrorPayload{Error: "boom", Message: "boom"}))
+
+	want := event.RunPlanFacts{PlanDone: 2, PlanTotal: 5, PlanActive: "wire the API"}
+	cancelled, err := runs.ListRunEventsOfTypes(ctx, rn.ID, event.RunEventTurnCancelled)
+	require.NoError(t, err)
+	require.Len(t, cancelled, 1)
+	var cancelledPayload event.TurnCancelledPayload
+	require.NoError(t, json.Unmarshal(cancelled[0].Payload, &cancelledPayload))
+	require.Equal(t, want, cancelledPayload.RunPlanFacts)
+
+	failed, err := runs.ListRunEventsOfTypes(ctx, rn.ID, event.RunEventTurnError)
+	require.NoError(t, err)
+	require.Len(t, failed, 1)
+	var failedPayload event.TurnErrorPayload
+	require.NoError(t, json.Unmarshal(failed[0].Payload, &failedPayload))
+	require.Equal(t, want, failedPayload.RunPlanFacts)
 }

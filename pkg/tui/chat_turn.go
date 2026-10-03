@@ -490,13 +490,11 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	// reasoningText is still needed below for the TUI-only rendering.
 	outText, reasoningText := turn.AssistantOutcomeText(res)
 	turn.PersistAssistantTurn(context.Background(), s.sessStore(), turn.AssistantTurn{
-		SessionID:  sessionID,
-		RunID:      runID,
-		Result:     res,
-		Model:      cliResultModel(s),
-		StartedAt:  completion.StartedAt,
-		FinishedAt: completion.FinishedAt,
-		WorkedMs:   completion.Duration.Milliseconds(),
+		SessionID: sessionID,
+		RunID:     runID,
+		Result:    res,
+		Model:     cliResultModel(s),
+		End:       completion.runEnd(),
 		OnSequenceError: func(err error) {
 			if s.chatLog != nil {
 				s.chatLog.Errorf("forebrain chat append_assistant_outcome session=%s run=%s failed: %v", sessionID, runID, err)
@@ -775,6 +773,19 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		if !emitRunEnded {
 			return
 		}
+		// The run ends here, so its clock is owed to the transcript too. An
+		// ending that wrote its own output stamped it already, with the same
+		// window; one that wrote nothing — the approval's effect failed — is
+		// stamped here, so replay closes it the way this line closes it live.
+		end := completion
+		if end.StartedAt.IsZero() {
+			end = completeTurn(t0)
+		}
+		runID := strings.TrimSpace(runUsage.runID)
+		if runID == "" {
+			runID = strings.TrimSpace(p.RunID)
+		}
+		_ = s.sessStore().StampRunTiming(context.Background(), runID, state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Duration})
 		s.notifyUI(RunEndedMsg{
 			RunID:          runUsage.runID,
 			WorkedDuration: completion.Duration,
@@ -792,14 +803,18 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 				service.Network = s.Env.Tools()
 			}
 			if effectErr := service.ApplyResolvedEffect(act, p.RunID); effectErr != nil {
+				explained := llm.ExplainError(effectErr)
 				if s.runSvc() != nil {
 					bg := context.Background()
 					_ = s.runSvc().ClearWait(bg, p.RunID)
 					_ = s.runSvc().SetStatus(bg, p.RunID, state.RunStatusFailed)
-					_ = s.publishTUIRunEvent(bg, p.SessionID, p.RunID, "turn_error", event.TurnErrorPayload{Error: effectErr.Error(), Message: effectErr.Error()})
+					// Publishing the turn error is what draws it, live as on
+					// replay, in the words the error block always uses.
+					_ = s.publishTUIRunEvent(bg, p.SessionID, p.RunID, "turn_error", event.TurnErrorPayload{Error: explained, Message: explained})
+				} else {
+					s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: explained, RunID: p.RunID, Timestamp: time.Now()}})
 				}
 				s.tuiFinish(p.RunID)
-				s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: llm.ExplainError(effectErr), RunID: p.RunID, Timestamp: time.Now()}})
 				return
 			}
 			s.refreshSandboxRuntime()
@@ -868,7 +883,7 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 				rid = strings.TrimSpace(rae.RunID)
 			}
 			if rid != "" {
-				s.persistRequiresActionSnapshot(p.SessionID, t0, rae.SessionSnapshot)
+				s.persistRequiresActionSnapshot(p.SessionID, rid, rae.SessionSnapshot)
 				s.attachRunWaitForRequiresAction(rid, p.SessionID, p.Channel, p.Input, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
@@ -888,10 +903,10 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			// RepairDanglingToolResults strips the row and the LLM loses the
 			// knowledge that the tool was called and approved - so it re-invokes
 			// exit_plan_mode even though the mode already transitioned to agent.
-			s.persistReplayResults(p.SessionID, t0, replayCapture)
+			s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
 			// Also persist any additional partial content produced after the
 			// replay (completed tool calls/results + streamed partial text).
-			s.persistCancelledTurnOutcome(p.SessionID, t0)
+			s.persistCancelledTurnOutcome(p.SessionID, runUsage.runID, completion)
 			s.notifyUI(StreamResetMsg{})
 			return
 		}
@@ -899,19 +914,21 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// error, so a transient LLM error (429, network, etc.) does not
 		// lose the work already completed (approved tool replay + any
 		// additional tool calls/results produced after the replay).
-		s.persistReplayResults(p.SessionID, t0, replayCapture)
-		s.persistCancelledTurnOutcome(p.SessionID, t0)
+		s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
+		s.persistCancelledTurnOutcome(p.SessionID, runUsage.runID, completion)
 		if s.chatLog != nil {
 			s.chatLog.Errorf("forebrain chat %s error session=%s elapsed=%s err=%v", v.logLabel, p.SessionID, time.Since(t0), err)
 		}
+		explained := llm.ExplainError(err)
 		s.notifyUI(NewMessageMsg{Msg: Message{
 			Kind:      MsgKindError,
-			Content:   llm.ExplainError(err),
+			Content:   explained,
 			Timestamp: time.Now(),
 		}})
+		s.persistRunTurnError(p.SessionID, runUsage.runID, explained)
 		return
 	}
-	s.persistReplayResults(p.SessionID, t0, replayCapture)
+	s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
 	s.appendAssistantOutcome(p.SessionID, p.RunID, p.Channel, p.Input, completion, res, streamAssistantViaTUI, io.Discard)
 }
 
@@ -1107,7 +1124,10 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 			// never ran.
 			var worked time.Duration
 			if p != nil && !p.TurnStartedAt.IsZero() {
-				worked = completeTurn(p.TurnStartedAt).Duration
+				end := completeTurn(p.TurnStartedAt)
+				worked = end.Duration
+				// The run ends here; replay closes it with this same line.
+				_ = s.sessStore().StampRunTiming(context.Background(), runID, state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Duration})
 			}
 			s.notifyUI(RunEndedMsg{
 				RunID:          runID,
@@ -1286,4 +1306,9 @@ func completeTurn(startedAt time.Time) turnCompletion {
 		FinishedAt: finishedAt,
 		Duration:   duration,
 	}
+}
+
+// runEnd is the completion as the run's clock the transcript stamps.
+func (c turnCompletion) runEnd() turn.RunEnd {
+	return turn.RunEnd{StartedAt: c.StartedAt, FinishedAt: c.FinishedAt, Worked: c.Duration}
 }

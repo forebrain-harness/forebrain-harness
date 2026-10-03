@@ -176,6 +176,50 @@ func GoalPosition(turns []state.Message, evt event.RunEvent) (int, bool) {
 	return len(turns), true
 }
 
+// RunWorkedLine is the line that closed one run: how long it worked and when
+// it finished, read from the run's own clock.
+type RunWorkedLine struct {
+	RunID      string
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Worked     time.Duration
+}
+
+// RunWorkedLines places every run's "Worked for" line in a stored transcript,
+// keyed by the index of the row it follows: the last row the run wrote,
+// whatever its role. Every run closed with that line live — finished, failed
+// or stopped, and whether or not it said anything — so every run the
+// transcript holds gets it back, after everything that run wrote and before
+// whatever came next.
+//
+// The terminal's replay and the web's history both close runs with this one
+// rule, so the two never disagree about where a run ended.
+func RunWorkedLines(turns []state.Message) map[int]RunWorkedLine {
+	last := make(map[string]int)
+	for i := range turns {
+		if runID := strings.TrimSpace(turns[i].RunID); runID != "" {
+			last[runID] = i
+		}
+	}
+	lines := make(map[int]RunWorkedLine, len(last))
+	for runID, i := range last {
+		row := turns[i]
+		// Untimed reads as zero: a run still going, one parked on an approval,
+		// or one stored before runs kept a clock. Any run that ended worked
+		// for longer than nothing.
+		if row.RunWorkedMs <= 0 {
+			continue
+		}
+		lines[i] = RunWorkedLine{
+			RunID:      runID,
+			StartedAt:  time.UnixMilli(row.RunStartedAtMs),
+			FinishedAt: time.UnixMilli(row.RunFinishedAtMs),
+			Worked:     time.Duration(row.RunWorkedMs) * time.Millisecond,
+		}
+	}
+	return lines
+}
+
 // This file holds the composer-side half of the engine: locating the "@" token
 // under a cursor and turning an accepted candidate back into draft text. Both
 // are pure functions over (draft, cursor) so every surface — terminal composer,

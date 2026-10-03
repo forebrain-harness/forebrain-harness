@@ -205,12 +205,7 @@ func (env *Environment) reloadConfig() error {
 	loaded = safety.EffectiveConfig(loaded, env.LaunchProject)
 	next := new(appcfg.Root)
 	*next = loaded
-	if !safety.ApplyYOLO(next) && env.OnConfigLoaded != nil {
-		// The surface folds in whatever it holds that the file does not, e.g.
-		// a permission preset picked this session. YOLO outranks it, hence the
-		// guard rather than an unconditional call.
-		env.OnConfigLoaded(next)
-	}
+	safety.ApplyYOLO(next)
 	if err := safety.NewManager().StartupCheck(next); err != nil {
 		return err
 	}

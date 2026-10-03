@@ -56,10 +56,14 @@ export interface ChatMessageRecord {
   planJson?: string | null
   /** What a user message attached, in the order it was attached. */
   attachments?: ChatAttachmentRecord[] | null
+  /**
+   * A tool row's or a `!cmd` row's own execution window; on a "worked" row —
+   * the line that closes a run, after the last row it wrote — the run's clock.
+   */
   runStartedAt?: string
   runFinishedAt?: string
   workedDurationMs?: number
-  /** The run's final checklist state, for the worked line. */
+  /** The run's final checklist state, on its "worked" row. */
   planDone?: number
   planTotal?: number
   planActive?: string
@@ -300,11 +304,21 @@ export interface SlashCommandRecord {
   visibility: string
 }
 
+export interface PermissionRuleValue {
+  toolName: string
+  ruleContent?: string
+  commandPrefix?: string[]
+  command?: string
+  bypassSandbox?: boolean
+}
+
 export interface PermissionRuleRecord {
   source: string
   behavior: string
   toolName: string
   ruleContent?: string
+  /** The rule exactly as stored; removing a listed rule sends this back. */
+  rule: PermissionRuleValue
 }
 
 export interface PermissionRulesResponse {
@@ -456,6 +470,8 @@ export interface ProjectRecord {
   createdAt: number
   updatedAt: number
   trustRecorded?: boolean
+  /** The persisted trust decision for this project's root (the detail read carries it). */
+  trusted?: boolean
 }
 
 export interface ProjectSessionRecord {
@@ -573,7 +589,8 @@ export interface ProviderRecord {
   models: string[]
   baseUrl?: string
   apiPath?: string
-  params?: unknown
+  /** The provider request params as JSON text, keys verbatim. */
+  params?: string
   apiKeySet?: boolean
   apiKeyHint?: string
 }
@@ -591,7 +608,7 @@ export interface PermissionUpdateBody {
   type: 'addRules' | 'replaceRules' | 'removeRules' | 'setMode'
   destination: string
   behavior?: string
-  rules?: { toolName: string; ruleContent?: string; commandPrefix?: string[]; bypassSandbox?: boolean }[]
+  rules?: PermissionRuleValue[]
   mode?: string
 }
 
@@ -684,11 +701,19 @@ export interface ToolAuditRow {
 }
 
 
+/** What a session spent, in the figures /status reports. */
 export interface SessionCostSummary {
   sessionId: string
+  /** Everything the requests sent: uncached input plus cache reads and writes. */
+  inputTokens: number
+  outputTokens: number
+  cacheRead: number
+  cacheWritten: number
+  uncached: number
+  requests: number
+  cacheHitPercent: number
   toolCalls: number
   byTool: Record<string, number>
-  note?: string
 }
 
 export interface SessionSubagentHistoryResponse {
@@ -804,6 +829,19 @@ export interface SkillInstallResponse {
   taskId: string
   sessionId: string
   installed: SkillInstallResult
+}
+
+/** One instruction file as the rules editor reads it. */
+export interface RuleFileContent {
+  name?: string
+  dir?: string
+  exists: boolean
+  content: string
+}
+
+export interface RuleFileSaveResponse {
+  bytes: number
+  warning?: string
 }
 
 export interface SkillUploadResponse {
@@ -950,6 +988,27 @@ async function gatewayFetch(input: string, init?: RequestInit): Promise<Response
   return res
 }
 
+/**
+ * The words a failed fetch answered with: the gateway's {"error": …} reply
+ * (with the names a batch could not find, when it lists them), or the plain
+ * text http.Error writes. Never the raw JSON body.
+ */
+async function gatewayErrorText(res: Response): Promise<string> {
+  const body = await res.text()
+  try {
+    const data: unknown = JSON.parse(body)
+    if (data !== null && typeof data === 'object' && 'error' in data) {
+      const { error, missing } = data as { error?: unknown; missing?: unknown }
+      const names = Array.isArray(missing) ? missing.map(String).filter(Boolean) : []
+      const message = String(error ?? '').trim() || `HTTP ${res.status}`
+      return names.length ? `${message}: ${names.join(', ')}` : message
+    }
+  } catch {
+    // Not JSON: the plain-text reply is already the message.
+  }
+  return body.trim() || `HTTP ${res.status}`
+}
+
 /** The file name an attachment header carried, unquoted; empty when absent. */
 function filenameFromContentDisposition(header: string | null): string {
   if (!header) return ''
@@ -1055,6 +1114,13 @@ export const forebrainApi = {
       title: title ?? '',
       ...(source ? { source } : {}),
     })
+  },
+
+  /** The project a conversation belongs to, or null for the agent's own. */
+  chatSessionProject(sessionId: string) {
+    return api
+      .get<{ project: { id: string; name: string } | null }>(`/chat/sessions/${encodeURIComponent(sessionId)}/project`)
+      .then((res) => res.data)
   },
 
   chatSessionTitle(sessionId: string, title: string) {
@@ -1294,7 +1360,7 @@ export const forebrainApi = {
   // handling as axios) and come back as a blob plus the server's file name.
   skillDownload(url: string): Promise<SkillDownloadBlob> {
     return gatewayFetch(url).then(async (res) => {
-      if (!res.ok) throw new Error(await res.text())
+      if (!res.ok) throw new Error(await gatewayErrorText(res))
       return {
         blob: await res.blob(),
         filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) || 'skill.zip',
@@ -1309,7 +1375,7 @@ export const forebrainApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ names }),
     }).then(async (res) => {
-      if (!res.ok) throw new Error(await res.text())
+      if (!res.ok) throw new Error(await gatewayErrorText(res))
       return {
         blob: await res.blob(),
         filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) || 'skills.zip',
@@ -1583,22 +1649,17 @@ export const forebrainApi = {
     return api.get<{ files: Array<{ name: string; exists: boolean; sizeBytes?: number; updatedAt?: number }> }>('/rules/agent').then((res) => res.data)
   },
 
+  // Rule files travel as their raw text on save; a read always answers one
+  // JSON shape, so a file that does not exist yet is never mistaken for one
+  // whose text happens to look like a status reply.
   agentRuleFile(name: string) {
-    return fetch(`/api/rules/agent/${encodeURIComponent(name)}`).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return r.text()
-    })
+    return api.get<RuleFileContent>(`/rules/agent/${encodeURIComponent(name)}`).then((res) => res.data)
   },
 
   saveAgentRuleFile(name: string, content: string) {
-    return fetch(`/api/rules/agent/${encodeURIComponent(name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/plain' },
-      body: content,
-    }).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return toCamelCase(await r.json()) as { bytes: number; warning?: string }
-    })
+    return api
+      .put<RuleFileSaveResponse>(`/rules/agent/${encodeURIComponent(name)}`, content, { headers: { 'Content-Type': 'text/plain' } })
+      .then((res) => res.data)
   },
 
   projectRuleFiles(projectId: string) {
@@ -1606,23 +1667,47 @@ export const forebrainApi = {
   },
 
   projectRuleFile(projectId: string, dir: string) {
-    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
-    return fetch(`/api/rules/project/${encodeURIComponent(projectId)}/file${query}`).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return r.text()
-    })
+    return api
+      .get<RuleFileContent>(`/rules/project/${encodeURIComponent(projectId)}/file`, { params: dir ? { dir } : undefined })
+      .then((res) => res.data)
   },
 
   saveProjectRuleFile(projectId: string, dir: string, content: string) {
-    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
-    return fetch(`/api/rules/project/${encodeURIComponent(projectId)}/file${query}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/plain' },
-      body: content,
-    }).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return toCamelCase(await r.json()) as { bytes: number; warning?: string }
-    })
+    return api
+      .put<RuleFileSaveResponse>(`/rules/project/${encodeURIComponent(projectId)}/file`, content, {
+        params: dir ? { dir } : undefined,
+        headers: { 'Content-Type': 'text/plain' },
+      })
+      .then((res) => res.data)
+  },
+
+  // A project space's own permission rules: read, changed and probed against
+  // that project's settings, whichever project the gateway was launched in.
+  projectPermissionRules(projectId: string) {
+    return api
+      .get<{ applies: boolean; rules: PermissionRuleRecord[] }>(`/v1/projects/${encodeURIComponent(projectId)}/permissions/rules`)
+      .then((res) => ({ applies: Boolean(res.data?.applies), rules: Array.isArray(res.data?.rules) ? res.data.rules : [] }))
+  },
+
+  projectPermissionUpdate(projectId: string, body: Omit<PermissionUpdateBody, 'destination'>) {
+    return postJson<{ ok: boolean; rules: PermissionRuleRecord[] }, Omit<PermissionUpdateBody, 'destination'>>(
+      `/v1/projects/${encodeURIComponent(projectId)}/permissions/updates`,
+      body,
+    )
+  },
+
+  projectPermissionExplain(projectId: string, params: { toolName: string; input?: string }) {
+    return api
+      .get<PermissionExplainResponse>(`/v1/projects/${encodeURIComponent(projectId)}/permissions/explain`, {
+        params: { tool_name: params.toolName, input: params.input ?? '' },
+      })
+      .then((res) => res.data)
+  },
+
+  sessionPresetCurrent(sessionId: string) {
+    return api
+      .get<{ current: string | null; description?: string }>('/permissions/session-preset', { params: { session_id: sessionId } })
+      .then((res) => res.data)
   },
 
   approvalDefault() {

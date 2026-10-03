@@ -274,6 +274,9 @@ func (srv *RestServer) Run(ready func(net.Addr)) error {
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	// Run returns on a serve error too; the process keeps going after it, and
+	// a signal must then reach its default handling, not this dead channel.
+	defer signal.Stop(c)
 	select {
 	case <-c:
 	case err := <-serveErr:

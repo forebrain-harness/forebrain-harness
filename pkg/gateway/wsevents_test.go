@@ -1342,3 +1342,39 @@ func TestLastPlanProgressOfRun(t *testing.T) {
 		t.Fatalf("nil store progress = %+v", none)
 	}
 }
+
+// A subagent's checklist lands in its parent's run but never stands in for
+// the conversation's own plan on the worked line.
+func TestLastPlanProgressOfRunIgnoresSubagentChecklists(t *testing.T) {
+	t.Parallel()
+	store := &stubPlanEventStore{events: []state.SessionEvent{
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 1, Total: 2}),
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 4, Total: 5, AgentID: "worker-1"}),
+	}}
+	if got := lastPlanProgressOfRun(context.Background(), store, "run-1"); got.Done != 1 || got.Total != 2 {
+		t.Fatalf("progress = %+v, want the conversation's {1 2}", got)
+	}
+	only := &stubPlanEventStore{events: []state.SessionEvent{
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 4, Total: 5, AgentID: "worker-1"}),
+	}}
+	if got := lastPlanProgressOfRun(context.Background(), only, "run-1"); got != (event.PlanProgress{}) {
+		t.Fatalf("subagent-only progress = %+v, want none", got)
+	}
+}
+
+// The socket's three run endings hand their checklist facts to the canonical
+// event they mirror, so a replayed session reads the same line the live one
+// showed.
+func TestCanonicalRunEndingsCarryPlanFacts(t *testing.T) {
+	t.Parallel()
+	facts := event.RunPlanFacts{PlanDone: 1, PlanTotal: 3, PlanActive: "short"}
+	for _, op := range []string{"run_completed", "run_cancelled", "run_error"} {
+		events := canonicalRunEventsFromWS(wsServerMsg{Op: op, RunID: "run-1", SessionID: "s1", RunPlanFacts: facts})
+		require.NotEmpty(t, events, op)
+		raw, err := json.Marshal(events[0].Payload)
+		require.NoError(t, err)
+		var got event.RunPlanFacts
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.Equal(t, facts, got, op)
+	}
+}

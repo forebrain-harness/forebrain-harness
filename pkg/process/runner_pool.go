@@ -648,7 +648,12 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	if baseDeps.AppCfg == nil {
 		return nil, fmt.Errorf("runner pool: environment has no config")
 	}
-	launch, err := safety.ResolveProjectContext(env.Root, project.Root)
+	// A registered project's boundary is the path the user registered: the
+	// project space, its trust record and its skills all name that exact
+	// root, so the sessions run inside it too. Resolving it as a launch
+	// directory would walk up to an enclosing checkout and run a subdirectory
+	// project under the checkout's skills, MCP servers and trust decision.
+	launch, err := safety.ResolveRegisteredContext(env.Root, project.Root)
 	if err != nil {
 		return nil, fmt.Errorf("runner pool: resolve project %s: %w", project.Root, err)
 	}
@@ -781,6 +786,46 @@ func (p *RunnerPool) PropagateConfig(ctx context.Context, next *appcfg.Root) err
 		failed = append(failed, fmt.Errorf("project %s: %w", strings.TrimSpace(entry.project.Name), err))
 	}
 	return errors.Join(failed...)
+}
+
+// Runners returns every live runner in the pool, every generation still in
+// it included, so a surface that changed the agent's own settings on disk can
+// have every running session read them again.
+func (p *RunnerPool) Runners() []*run.Runner {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []*run.Runner
+	for _, entry := range p.entries {
+		if entry != nil && entry.runner != nil {
+			out = append(out, entry.runner)
+		}
+	}
+	return out
+}
+
+// RunnersForProject returns the live runners built for one project, every
+// generation still in the pool included, so a surface that changed that
+// project's settings on disk can have its running sessions read them again.
+func (p *RunnerPool) RunnersForProject(projectID string) []*run.Runner {
+	if p == nil {
+		return nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []*run.Runner
+	for _, entry := range p.entries {
+		if entry != nil && entry.runner != nil && strings.TrimSpace(entry.project.ID) == projectID {
+			out = append(out, entry.runner)
+		}
+	}
+	return out
 }
 
 // BindSession records which project a new session belongs to, so the next

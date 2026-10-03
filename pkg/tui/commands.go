@@ -244,9 +244,26 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 	callIndex, callRow := buildToolCallIndex(turns)
 	resultRow := toolResultRows(turns)
 	pending := make(map[int][]replayEventItem)
+	// Every run that ended closes with its "Worked for" line after the last
+	// row it wrote. A failed run's error was the last thing it said before
+	// that line live, so the error is drawn there too rather than wherever its
+	// clock happens to fall among the rows.
+	workedLines := turn.RunWorkedLines(turns)
+	closingRuns := make(map[string]struct{}, len(workedLines))
+	for _, line := range workedLines {
+		closingRuns[line.RunID] = struct{}{}
+	}
+	runEndFrames := make(map[string][]Frame)
 	eventCount := 0
 	for i := range events {
 		evt := events[i]
+		if turnErrorFrames := replayTurnErrorEventFrames(evt); len(turnErrorFrames) > 0 {
+			if _, closes := closingRuns[strings.TrimSpace(evt.RunID)]; closes {
+				runEndFrames[strings.TrimSpace(evt.RunID)] = append(runEndFrames[strings.TrimSpace(evt.RunID)], turnErrorFrames...)
+				eventCount++
+				continue
+			}
+		}
 		msg, ok := replaySubagentRunEventMessage(evt)
 		if compacted, isCompaction := replayCompactionMessage(evt); isCompaction {
 			msg, ok = compacted, true
@@ -344,37 +361,25 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 	for i := range turns {
 		flush(i)
 		replayTurnWithReducer(renderer, reducer, turns[i], callIndex, &planUpdates)
-		if worked, ok := replayWorkedLine(turns, i); ok {
-			// The run's own text is out first; its line closes it, as live.
+		if line, ok := workedLines[i]; ok {
+			// The run's own text is out first, then its error if it failed;
+			// its line closes it, as live.
 			flushReplayReducer(renderer, reducer)
-			renderer.RenderFrame(worked)
+			for _, frame := range runEndFrames[line.RunID] {
+				renderer.RenderFrame(frame)
+			}
+			renderer.RenderFrame(replayWorkedFrame(line))
 		}
 	}
 	flush(len(turns))
 	return eventCount
 }
 
-// replayWorkedLine is the "Worked for" line that closed the run whose last
-// stored row is turns[i]: how long it took, from the duration stored on its
-// rows, and the minute it finished. Every run a transcript holds gets its line
-// back, the way it had one live.
-func replayWorkedLine(turns []state.Message, i int) (Frame, bool) {
-	row := turns[i]
-	runID := strings.TrimSpace(row.RunID)
-	// The run's worked time lives on the run row now, read through this
-	// message's run id; a tool row of the run closes it exactly like the
-	// assistant row does.
-	if runID == "" || row.RunWorkedMs <= 0 {
-		return Frame{}, false
-	}
-	if i+1 < len(turns) && strings.TrimSpace(turns[i+1].RunID) == runID {
-		return Frame{}, false
-	}
-	title := workedForLabel(time.Duration(row.RunWorkedMs) * time.Millisecond)
-	if row.RunFinishedAtMs > 0 {
-		title += " · " + workedCompletionTime(time.UnixMilli(row.RunFinishedAtMs).Local())
-	}
-	return Frame{Kind: FrameStatus, Title: title, RunID: runID, Final: true}, true
+// replayWorkedFrame is the "Worked for" line that closed a run: how long it
+// took and the minute it finished, read from the run's own clock.
+func replayWorkedFrame(line turn.RunWorkedLine) Frame {
+	title := workedForLabel(line.Worked) + " · " + workedCompletionTime(line.FinishedAt.Local())
+	return Frame{Kind: FrameStatus, Title: title, RunID: line.RunID, Final: true}
 }
 
 // replayCompactionMessage rebuilds a compaction's final card from the event

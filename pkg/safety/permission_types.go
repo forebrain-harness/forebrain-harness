@@ -631,6 +631,10 @@ const (
 	UpdateRemoveRules         PermissionUpdateType = "removeRules"
 	UpdateSetMode             PermissionUpdateType = "setMode"
 	UpdateAddPermissionGrants PermissionUpdateType = "addPermissionGrants"
+
+	// UpdateSetSandboxMode sets one conversation's own sandbox mode; it is
+	// accepted only with the session destination.
+	UpdateSetSandboxMode PermissionUpdateType = "setSandboxMode"
 )
 
 type PermissionUpdate struct {
@@ -641,6 +645,7 @@ type PermissionUpdate struct {
 	Behavior              PermissionBehavior          `json:"behavior,omitempty"`
 	Rules                 []PermissionRuleValue       `json:"rules,omitempty"`
 	Mode                  PermissionMode              `json:"mode,omitempty"`
+	SandboxMode           appcfg.SandboxMode          `json:"sandbox_mode,omitempty"`
 	FileSystemGrants      []FileSystemPermissionGrant `json:"file_system_grants,omitempty"`
 	NetworkGrants         []NetworkPermissionGrant    `json:"network_grants,omitempty"`
 	StrictAutoReviewRunID string                      `json:"strict_auto_review_run_id,omitempty"`
@@ -910,11 +915,10 @@ func MatchApprovalPreset(mode PermissionMode, cfg *appcfg.Root) (ApprovalPreset,
 	return ApprovalPreset{}, false
 }
 
-// ApplyToConfig writes the preset's sandbox half into cfg, in memory only.
-//
-// The approval half is a runtime mode and is applied through the permission
-// store instead, so this is deliberately not the whole preset. Callers that
-// want both must do both — see (*tui.ChatSession).ApplyPermissionPreset.
+// ApplyToConfig writes the preset's sandbox half into cfg — the configuration
+// being saved as everyone's default. A preset picked for one conversation is
+// SessionUpdates instead: it must not move the configuration every other
+// conversation runs under.
 func (p ApprovalPreset) ApplyToConfig(cfg *appcfg.Root) {
 	if cfg == nil {
 		return
@@ -924,6 +928,42 @@ func (p ApprovalPreset) ApplyToConfig(cfg *appcfg.Root) {
 	// which drops it for the same reason.
 	cfg.DefaultPermissions = ""
 	cfg.SandboxMode = p.SandboxMode
+}
+
+// SessionUpdates is the preset picked for one conversation alone: its
+// approval mode and its sandbox mode, both scoped to that conversation in
+// the permission store. Nothing is written to the configuration, so the
+// choice neither reaches other conversations nor survives into the next
+// session, and a configuration reload does not undo it.
+func (p ApprovalPreset) SessionUpdates(sessionID string) []PermissionUpdate {
+	return []PermissionUpdate{
+		{Type: UpdateSetMode, Destination: DestinationSession, SessionID: sessionID, Mode: p.Approval},
+		{Type: UpdateSetSandboxMode, Destination: DestinationSession, SessionID: sessionID, SandboxMode: p.SandboxMode},
+	}
+}
+
+// ConfigForSnapshot is the configuration one conversation's calls run under:
+// cfg itself, or — when the conversation chose its own sandbox mode — a copy
+// with that mode in force. Every sandbox decision taken for a call reads it,
+// never the runtime's cfg directly, so a choice made for one conversation is
+// exactly as wide as that conversation.
+func ConfigForSnapshot(cfg *appcfg.Root, snap Snapshot) *appcfg.Root {
+	return configForSandboxMode(cfg, snap.SandboxMode)
+}
+
+// configForSandboxMode is cfg with mode in force, or cfg itself when mode is
+// empty. YOLO outranks a conversation's own choice the same way it outranks
+// the rule engine's answer: it comes from the environment, and nothing picked
+// inside a session walks it back.
+func configForSandboxMode(cfg *appcfg.Root, mode appcfg.SandboxMode) *appcfg.Root {
+	if cfg == nil || mode == "" || RuntimeYOLOEnabled() {
+		return cfg
+	}
+	scoped := *cfg
+	// Same reason as ApplyToConfig: a named profile would outrank the mode.
+	scoped.DefaultPermissions = ""
+	scoped.SandboxMode = mode
+	return &scoped
 }
 
 type ApprovalDecisionName string

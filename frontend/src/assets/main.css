@@ -132,6 +132,7 @@
   --rail-btn-fg: #FFFFFF;
   --rail-field-bg: #152646;
   --rail-pop-bg: #132447;
+  --rail-danger: #F04438;
 }
 :root .forebrain-app-shell[data-rail-theme="light"],
 :root[data-brand="navy"][data-rail-theme="light"] {
@@ -148,6 +149,7 @@
   --rail-btn-fg: #FFFFFF;
   --rail-field-bg: #FFFFFF;
   --rail-pop-bg: #FFFFFF;
+  --rail-danger: #B42318;
 }
 :root[data-brand="teal"][data-rail-theme="dark"] {
   --rail-bg: #0D2429;
@@ -163,6 +165,7 @@
   --rail-btn-fg: #FFFFFF;
   --rail-field-bg: #122E34;
   --rail-pop-bg: #112C31;
+  --rail-danger: #F04438;
 }
 :root[data-brand="teal"][data-rail-theme="light"] {
   --rail-bg: #F1F6F6;
@@ -178,6 +181,7 @@
   --rail-btn-fg: #FFFFFF;
   --rail-field-bg: #FFFFFF;
   --rail-pop-bg: #FFFFFF;
+  --rail-danger: #B42318;
 }
 :root[data-brand="graphite"][data-rail-theme="dark"] {
   --rail-bg: #141416;
@@ -193,6 +197,7 @@
   --rail-btn-fg: #141416;
   --rail-field-bg: #1C1C1F;
   --rail-pop-bg: #1C1C1F;
+  --rail-danger: #F04438;
 }
 :root[data-brand="graphite"][data-rail-theme="light"] {
   --rail-bg: #F6F6F7;
@@ -208,6 +213,7 @@
   --rail-btn-fg: #FFFFFF;
   --rail-field-bg: #FFFFFF;
   --rail-pop-bg: #FFFFFF;
+  --rail-danger: #B42318;
 }
 
 @layer base {
@@ -350,12 +356,14 @@
   transform: rotate(180deg);
 }
 
+/* The tenant dropdown is teleported to <body> (the rail clips its own
+   overflow), so it floats above its own backdrop by itself: no rule scoped
+   to the shell can reach it there. Its position comes from the rail's
+   geometry, inline; its palette from the --rail-* variables on :root. */
 .forebrain-tenant-menu {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
+  position: fixed;
+  z-index: 46;
+  width: 264px;
   max-height: 300px;
   overflow-y: auto;
   border: 1px solid var(--rail-line);
@@ -363,6 +371,14 @@
   background: var(--rail-pop-bg);
   box-shadow: var(--forebrain-shadow-pop);
   padding: 4px;
+}
+
+.forebrain-tenant-error {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--rail-danger);
+  word-break: break-word;
 }
 
 .forebrain-tenant-option {
@@ -856,11 +872,3 @@ button:focus:not(:focus-visible) {
   }
 }
 
-/* The tenant dropdown renders outside the rail; it keeps the rail's palette
-   via the shell-scoped --rail-* variables. */
-.forebrain-app-shell .forebrain-tenant-menu {
-  position: fixed;
-  z-index: 46;
-  top: auto;
-  width: 264px;
-}

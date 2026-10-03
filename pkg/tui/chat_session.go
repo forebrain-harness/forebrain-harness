@@ -164,20 +164,8 @@ type ChatSession struct {
 	// the only one, and the session merely tells it whether a run is in
 	// flight. What remains here is the explicit reload seam: /connect and the
 	// config-writing slash commands call ReloadConfig / reloadConfigFromDisk
-	// directly.
-	configMu sync.Mutex
-	// configApplyMu serializes reloadConfigFromDisk. It is separate from
-	// configMu because the reload calls reapplyPermissionPreset, which takes
-	// configMu itself.
+	// directly. configApplyMu serializes reloadConfigFromDisk.
 	configApplyMu sync.Mutex
-
-	// permissionPreset is the approval preset picked with /permissions this
-	// session, or nil when none was. It exists because the choice is never
-	// written to forebrain.yaml: without it, the next reload of that file — a hot
-	// reload, or /sandbox rewriting it — would silently restore the sandbox the
-	// user just moved away from. Guarded by configMu, which already serializes
-	// the reload path that reads it.
-	permissionPreset *safety.ApprovalPreset
 }
 
 func (s *ChatSession) approvalResumeOwner() string {
@@ -681,7 +669,12 @@ func (s *ChatSession) interruptUncertainTUIApproval(sessionID string, wait state
 	}
 	s.tuiController().Cancel(wait.RunID, errors.New(reason))
 	s.tuiController().Finish(wait.RunID)
-	s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, AgentID: wait.AgentID, RunID: wait.RunID, Timestamp: time.Now()}})
+	// Publishing the turn error drew it in the conversation already. A
+	// subagent's own view is a separate screen the event does not reach, so
+	// that view is told here; the conversation is not told twice.
+	if strings.TrimSpace(wait.AgentID) != "" {
+		s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, AgentID: wait.AgentID, RunID: wait.RunID, Timestamp: time.Now()}})
+	}
 }
 
 func (s *ChatSession) failRecoveredApproval(sessionID, actionID, reason string) {
@@ -699,11 +692,11 @@ func (s *ChatSession) failRecoveredApproval(sessionID, actionID, reason string) 
 	bg := context.Background()
 	_ = s.runSvc().ClearWait(bg, runID)
 	_ = s.runSvc().SetStatus(bg, runID, state.RunStatusFailed)
+	// Publishing the turn error is what draws it, live as on replay.
 	_ = s.publishTUIRunEvent(bg, sessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
 	s.tuiController().Cancel(runID, errors.New(reason))
 	s.tuiController().Finish(runID)
 	s.clearPendingApproval()
-	s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, RunID: runID, Timestamp: time.Now()}})
 }
 
 func (s *ChatSession) ClearUINotify() {
@@ -1445,13 +1438,14 @@ func originatingApprovalToolStepID(rae *tool.RequiresActionError) string {
 	return turn.PendingApprovalToolStepID(rae.SessionSnapshot, rae.ToolName)
 }
 
-func (s *ChatSession) persistRequiresActionSnapshot(sessionID string, startedAt time.Time, snapshot []llm.Message) {
+func (s *ChatSession) persistRequiresActionSnapshot(sessionID, runID string, snapshot []llm.Message) {
 	if s == nil || s.sessStore() == nil || len(snapshot) == 0 {
 		return
 	}
-	_ = s.sessStore().AppendMessageSequence(
+	_ = s.sessStore().AppendMessageSequenceForRun(
 		context.Background(),
 		sessionID,
+		runID,
 		snapshot,
 		cliResultModel(s),
 		"",
@@ -1467,7 +1461,7 @@ func (s *ChatSession) persistRequiresActionSnapshot(sessionID string, startedAt 
 // with a dangling tool_calls row that RepairDanglingToolResults strips on the
 // next turn - causing the LLM to lose knowledge that the tool was called and
 // approved (e.g. exit_plan_mode).
-func (s *ChatSession) persistReplayResults(sessionID string, startedAt time.Time, capture *tool.ReplayResultCapture) {
+func (s *ChatSession) persistReplayResults(sessionID, runID string, capture *tool.ReplayResultCapture) {
 	if s == nil || s.sessStore() == nil || capture == nil {
 		return
 	}
@@ -1493,7 +1487,7 @@ func (s *ChatSession) persistReplayResults(sessionID string, startedAt time.Time
 	_ = s.sessStore().AppendNewMessages(
 		context.Background(),
 		sessionID,
-		"",
+		runID,
 		msgs,
 		cliResultModel(s),
 		"",
@@ -1519,7 +1513,7 @@ func (s *ChatSession) persistReplayResults(sessionID string, startedAt time.Time
 // RepairDanglingToolResults then strips any assistant tool_calls row whose
 // results did not arrive (e.g. the tool was mid-execution at cancel time),
 // keeping the transcript valid for the next round.
-func (s *ChatSession) persistCancelledTurnOutcome(sessionID string, startedAt time.Time) {
+func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, completion turnCompletion) {
 	if s == nil || s.sessStore() == nil {
 		return
 	}
@@ -1534,11 +1528,12 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID string, startedAt ti
 	}
 	turn.PersistCancelledTurn(context.Background(), s.sessStore(), turn.CancelledTurn{
 		SessionID:        sessionID,
+		RunID:            runID,
 		Captured:         captured,
 		PartialText:      partialText,
 		PartialReasoning: partialReasoning,
 		Model:            cliResultModel(s),
-		StartedAt:        startedAt,
+		End:              completion.runEnd(),
 		OnRepairError: func(err error) {
 			if s.chatLog != nil {
 				s.chatLog.Debugf("forebrain chat dangling tool_calls repair failed session=%s err=%v", sessionID, err)
@@ -1710,6 +1705,12 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		if err := agentCtx.Err(); err != nil {
 			return err
 		}
+		// The message was stored before the engine created the run it starts.
+		// It is that run's first row all the same: a run that ends before
+		// writing anything of its own closes after it on replay.
+		if err := s.sessStore().BindMessageToRun(durable, sessionID, userRowID, runID); err != nil && s.chatLog != nil {
+			s.chatLog.Errorf("forebrain chat bind user row session=%s row_id=%d run=%s failed: %v", sessionID, userRowID, runID, err)
+		}
 		s.notifyUI(RunStartedMsg{RunID: runID, turn: foreground})
 		return nil
 	}
@@ -1775,7 +1776,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				rid = strings.TrimSpace(rae.RunID)
 			}
 			if rid != "" {
-				s.persistRequiresActionSnapshot(sessionID, t0, rae.SessionSnapshot)
+				s.persistRequiresActionSnapshot(sessionID, rid, rae.SessionSnapshot)
 				s.attachRunWaitForRequiresAction(rid, sessionID, channel, input, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
@@ -1795,7 +1796,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			// assistant text/reasoning. Without this a cancelled run loses every
 			// message it produced - the next round and /resume only see the
 			// pre-run user message.
-			s.persistCancelledTurnOutcome(sessionID, t0)
+			s.persistCancelledTurnOutcome(sessionID, runUsage.runID, completion)
 			s.notifyUI(StreamResetMsg{turn: foreground})
 			return nil
 		}
@@ -1806,7 +1807,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// turn — the session store only has the user message, and the LLM
 		// rebuilds context from scratch on the next attempt, losing the
 		// work already done (tool calls executed, files read, etc.).
-		s.persistCancelledTurnOutcome(sessionID, t0)
+		s.persistCancelledTurnOutcome(sessionID, runUsage.runID, completion)
 		// An explicit skill load that failed already showed its own Skill
 		// failure card before the first LLM request; a generic error card
 		// would repeat the same news twice.
@@ -1821,13 +1822,15 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			s.chatLog.Errorf("forebrain chat turn error session=%s elapsed=%s err=%v", sessionID, time.Since(t0), err)
 			s.chatLog.Debugf("forebrain chat turn error session=%s elapsed=%s err=%v", sessionID, time.Since(t0), err)
 		}
+		explained := llm.ExplainError(err)
 		if !callerRendersReturnedError {
 			s.notifyUI(NewMessageMsg{Msg: Message{
 				Kind:      MsgKindError,
-				Content:   llm.ExplainError(err),
+				Content:   explained,
 				Timestamp: time.Now(),
 			}})
 		}
+		s.persistRunTurnError(sessionID, runUsage.runID, explained)
 		return err
 	}
 	s.clearPendingApproval()
@@ -1959,11 +1962,7 @@ func (s *ChatSession) applyConfigFromDisk() error {
 	if err != nil {
 		return fmt.Errorf("load %s: %w", cfgPath, err)
 	}
-	// YOLO comes from the environment and is not something a preset picked in
-	// the session may walk back, so the preset only applies when YOLO is off.
-	if !safety.ApplyYOLO(&loaded) {
-		s.reapplyPermissionPreset(&loaded)
-	}
+	safety.ApplyYOLO(&loaded)
 	loaded = safety.EffectiveConfig(loaded, s.LaunchProject)
 	if err := safety.NewManager().StartupCheck(&loaded); err != nil {
 		return fmt.Errorf("sandbox startup check: %w", err)
@@ -2034,8 +2033,8 @@ func (s *ChatSession) PermissionPresets(sessionID string) ([]safety.ApprovalPres
 	for i := range presets {
 		presets[i].Description = presets[i].DescriptionFor(s.cfg())
 	}
-	mode := s.runner().PermissionSnapshotForSession(sessionID).Mode
-	preset, ok := safety.MatchApprovalPreset(mode, s.cfg())
+	snap := s.runner().PermissionSnapshotForSession(sessionID)
+	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(s.cfg(), snap))
 	if !ok {
 		return presets, ""
 	}
@@ -2045,10 +2044,12 @@ func (s *ChatSession) PermissionPresets(sessionID string) ([]safety.ApprovalPres
 // ApplyPermissionPreset switches the session to one of the built-in approval
 // presets and reports the resulting state.
 //
-// Nothing is written to forebrain.yaml. The choice is scoped to the running
-// process the way an approval granted mid-turn is: a preset picked to get
-// through one task should not silently govern the next session started from
-// the same config. Editing forebrain.yaml is what persisting a choice is for.
+// Both halves of the preset are scoped to this session in the permission
+// store; nothing is written to forebrain.yaml or to the live config. A preset
+// picked to get through one task therefore governs neither the other
+// conversations of this process nor the next session, and a reload of the
+// config cannot undo it. Editing forebrain.yaml is what persisting a choice is
+// for.
 func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string, error) {
 	if s == nil || s.runner() == nil {
 		return "", fmt.Errorf("permissions: unavailable")
@@ -2057,43 +2058,11 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 	if !ok {
 		return "", fmt.Errorf("permissions: unknown preset %q", strings.TrimSpace(presetID))
 	}
-
-	// The sandbox half lives in the config and the approval half in the
-	// permission store. Both are in-memory, but only the config is reloadable
-	// from disk, so only that half needs remembering for reapplyPermissionPreset.
-	preset.ApplyToConfig(s.cfg())
-	s.configMu.Lock()
-	saved := preset
-	s.permissionPreset = &saved
-	s.configMu.Unlock()
-
-	s.runner().ApplyPermissionUpdate(safety.PermissionUpdate{
-		Type:        safety.UpdateSetMode,
-		Destination: safety.DestinationSession,
-		SessionID:   sessionID,
-		Mode:        preset.Approval,
-	})
-	s.refreshSandboxRuntime()
-
-	return preset.Label + " for this session: " + preset.DescriptionFor(s.cfg()), nil
-}
-
-// reapplyPermissionPreset restores the session's preset over a config just read
-// from disk, so a file that never recorded the choice cannot quietly undo it.
-//
-// It is a no-op when no preset was picked, so the reload paths can call it
-// unconditionally.
-func (s *ChatSession) reapplyPermissionPreset(cfg *appcfg.Root) {
-	if s == nil || cfg == nil {
-		return
+	for _, update := range preset.SessionUpdates(sessionID) {
+		s.runner().ApplyPermissionUpdate(update)
 	}
-	s.configMu.Lock()
-	preset := s.permissionPreset
-	s.configMu.Unlock()
-	if preset == nil {
-		return
-	}
-	preset.ApplyToConfig(cfg)
+	cfg := safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession(sessionID))
+	return preset.Label + " for this session: " + preset.DescriptionFor(cfg), nil
 }
 
 type userShellExecution struct {

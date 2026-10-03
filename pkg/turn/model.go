@@ -756,15 +756,7 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 	rep.Context = ContextGaugeOf(src.Provider, src.Model, estimated, explicitLimit)
 	if src.RunStore != nil {
 		if totals, err := src.RunStore.SessionUsageForSession(ctx, sid); err == nil {
-			rep.Session = StatusUsageTotals{
-				InputTokens:     totals.PromptTokens + totals.CacheReadTokens + totals.CacheWriteTokens,
-				OutputTokens:    totals.CompletionTokens,
-				CacheRead:       totals.CacheReadTokens,
-				CacheWritten:    totals.CacheWriteTokens,
-				Uncached:        totals.PromptTokens,
-				Requests:        totals.LLMCalls,
-				CacheHitPercent: CacheHitPercent(totals.CacheReadTokens, totals.CacheWriteTokens, totals.PromptTokens),
-			}
+			rep.Session = SessionUsageTotalsOf(totals)
 		}
 		if last, err := src.RunStore.LastRunUsageForSession(ctx, sid); err == nil {
 			rep.LastTurn = StatusLastTurn{
@@ -775,6 +767,21 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		}
 	}
 	return rep
+}
+
+// SessionUsageTotalsOf reads a session's stored usage the way every surface
+// reports it: input is everything the requests sent, and the cache split beside
+// it is what the hit rate is computed from.
+func SessionUsageTotalsOf(totals state.SessionUsage) StatusUsageTotals {
+	return StatusUsageTotals{
+		InputTokens:     totals.PromptTokens + totals.CacheReadTokens + totals.CacheWriteTokens,
+		OutputTokens:    totals.CompletionTokens,
+		CacheRead:       totals.CacheReadTokens,
+		CacheWritten:    totals.CacheWriteTokens,
+		Uncached:        totals.PromptTokens,
+		Requests:        totals.LLMCalls,
+		CacheHitPercent: CacheHitPercent(totals.CacheReadTokens, totals.CacheWriteTokens, totals.PromptTokens),
+	}
 }
 
 // CacheHitPercent is the provider-level cache-hit rate: read / (read + written

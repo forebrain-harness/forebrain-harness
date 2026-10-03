@@ -225,8 +225,19 @@ func SummarizeToolStep(evt StepEvent) string {
 	}
 	switch strings.TrimSpace(evt.Kind) {
 	case StepKindToolStarted, StepKindToolParallelStarted, StepKindToolOutputDelta:
+		if toolName == "user_interaction" {
+			return userInteractionLabel("asking user", evt)
+		}
 		return "running " + invocation
 	case StepKindToolCompleted, StepKindToolParallelCompleted:
+		if toolName == "user_interaction" {
+			// The question is the call: while it waits it is being asked, and
+			// once answered it was asked — never "ran", never an approval.
+			if stepRequiresApproval(evt) {
+				return userInteractionLabel("asking user", evt)
+			}
+			return userInteractionLabel("asked user", evt)
+		}
 		if stepRequiresApproval(evt) {
 			return "awaiting approval · " + invocation
 		}
@@ -1642,6 +1653,47 @@ func userInteractionAnswersFromValue(value any, depth int) (map[string]userInter
 	return nil, false
 }
 
+// userInteractionLabel is a user_interaction call's header: the verb for its
+// state, then what it asks.
+func userInteractionLabel(verb string, evt StepEvent) string {
+	if questions := UserInteractionQuestionsLabel(evt.Input); questions != "" {
+		return verb + " · " + questions
+	}
+	return verb
+}
+
+// UserInteractionQuestionsLabel names what a user_interaction call asks, in
+// the order it asks it: each question's short header, or the question itself
+// when it has none. It is the call's parameters in words — the card header both
+// surfaces show — and every question is named in full.
+func UserInteractionQuestionsLabel(input map[string]any) string {
+	if len(input) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(input["questions"])
+	if err != nil {
+		return ""
+	}
+	var questions []struct {
+		Header   string `json:"header"`
+		Question string `json:"question"`
+	}
+	if err := json.Unmarshal(encoded, &questions); err != nil {
+		return ""
+	}
+	names := make([]string, 0, len(questions))
+	for _, question := range questions {
+		name := strings.TrimSpace(question.Header)
+		if name == "" {
+			name = strings.Join(strings.Fields(question.Question), " ")
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, " · ")
+}
+
 func userInteractionQuestionHeaders(input map[string]any) []string {
 	if len(input) == 0 {
 		return nil
@@ -2080,6 +2132,8 @@ func toolInvocationNamedLabel(evt StepEvent) (string, bool) {
 		return "edit " + firstString(evt.Input, "file_path", "path"), true
 	case "request_permissions":
 		return "request permissions", true
+	case "user_interaction":
+		return userInteractionLabel("ask user", evt), true
 
 	case "web_fetch":
 		return "fetch " + firstString(evt.Input, "url", "uri"), true

@@ -2279,10 +2279,12 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 			RunFinishedAtMs: 1790503290000},
 		{RowID: 4, Role: "user", Content: "next"},
 	}
-	frame, ok := replayWorkedLine(turns, 2)
+	lines := turn.RunWorkedLines(turns)
+	line, ok := lines[2]
 	if !ok {
 		t.Fatal("the tool row closing run-1 must produce its Worked-for line")
 	}
+	frame := replayWorkedFrame(line)
 	if frame.Kind != FrameStatus || frame.RunID != "run-1" || !frame.Final {
 		t.Fatalf("worked frame = %+v", frame)
 	}
@@ -2293,14 +2295,52 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 		t.Fatalf("worked title = %q, want the finish minute (local tz)", frame.Title)
 	}
 	// The assistant row inside the same run must not add a second line.
-	if _, ok := replayWorkedLine(turns, 1); ok {
+	if _, ok := lines[1]; ok {
 		t.Fatal("a mid-run row must not close the run twice")
 	}
 	// A row with no run id has no line (rows before run binding existed get
 	// their run id backfilled by the migration; the unbackfilled ones never
 	// had one to show).
-	if _, ok := replayWorkedLine([]state.Message{{RowID: 9, Role: "assistant", RunWorkedMs: 1000}}, 0); ok {
+	if len(turn.RunWorkedLines([]state.Message{{RowID: 9, Role: "assistant", RunWorkedMs: 1000}})) != 0 {
 		t.Fatal("a row outside any run has no Worked-for line")
+	}
+}
+
+// A run that failed before it said anything still closed live: its error, then
+// its "Worked for" line. The user's message is the run's only row, and replay
+// closes the run after it in that same order.
+func TestReplayClosesASilentFailedRunAfterItsError(t *testing.T) {
+	finished := time.Date(2026, 9, 25, 7, 27, 28, 0, time.UTC)
+	turns := []state.Message{
+		{RowID: 1, RunID: "r1", Role: "user", Content: "hello", CreatedAt: 100, RunWorkedMs: 2_000, RunFinishedAtMs: finished.UnixMilli()},
+		{RowID: 2, Role: "user", Content: "again", CreatedAt: 200},
+	}
+	payload, err := json.Marshal(event.TurnErrorPayload{Error: "the provider refused the request", Message: "the provider refused the request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []event.RunEvent{{RunID: "r1", Type: event.RunEventTurnError, Payload: payload, CreatedAt: time.Unix(150, 0), Sequence: 1}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	reducer := &Reducer{}
+	replayTimelineWithReducer(renderer, turns, events, reducer, nil)
+	flushReplayReducer(renderer, reducer)
+
+	var got []string
+	for _, block := range renderer.vm.blocks {
+		switch block.frame.Kind {
+		case FrameUser:
+			got = append(got, "user:"+block.frame.Content)
+		case FrameError:
+			got = append(got, "error")
+		case FrameStatus:
+			got = append(got, block.frame.Title)
+		}
+	}
+	want := []string{"user:hello", "error", "Worked for 2s · " + finished.Local().Format("15:04"), "user:again"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("replay = %q\nwant   %q", got, want)
 	}
 }
 

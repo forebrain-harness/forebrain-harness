@@ -8,7 +8,8 @@
 
     <!-- A project with no project key shares no memory directory of its own;
          there is nothing to manage here. -->
-    <div v-if="!hasScope" class="rounded-2xl border border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-6 py-10 text-center">
+    <div v-if="!project" class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+    <div v-else-if="!hasScope" class="rounded-2xl border border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-6 py-10 text-center">
       <p class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('memories.noProjectScope') }}</p>
     </div>
     <MemoryFilesPanel v-else scope="project" :project-id="projectId" />
@@ -16,28 +17,21 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed } from 'vue'
 import MemoryFilesPanel from '@/components/memory/MemoryFilesPanel.vue'
-import forebrainApi from '@/lib/api'
+import type { ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
 /**
  * The project's own memory scope: exactly the files this project's sessions
  * recall, never another project's. Projects without their own key have no
- * separate scope and say so instead of listing a neighbour's.
+ * separate scope and say so instead of listing a neighbour's. The key comes
+ * from the project row the shell already loaded (and whose load errors the
+ * shell reports).
  */
-const props = defineProps<{ project: unknown; projectId: string }>()
+const props = defineProps<{ project: ProjectRecord | null; projectId: string }>()
 
 const { t } = useI18n()
 
-const hasScope = ref(false)
-
-onMounted(async () => {
-  try {
-    const record = (await forebrainApi.projectGet(props.projectId)) as unknown as { projectKey?: string }
-    hasScope.value = Boolean(record?.projectKey)
-  } catch {
-    hasScope.value = false
-  }
-})
+const hasScope = computed(() => Boolean(props.project?.projectKey))
 </script>

@@ -118,9 +118,10 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if err := validateShellAdditionalPermissions(ctx, in, rt); err != nil {
 				return "", err
 			}
+			cfg := sessionConfig(ctx, st, rt)
 			profile, profileElevation := shellSandboxProfile(ctx)
-			if profile == safety.ProfileWorkspaceWrite && !profileElevation && rt != nil && rt.Cfg != nil {
-				profile = safety.ProfileForConfig(rt.Cfg)
+			if profile == safety.ProfileWorkspaceWrite && !profileElevation && cfg != nil {
+				profile = safety.ProfileForConfig(cfg)
 			}
 			if sandboxBypassApproved {
 				in.SandboxPermissions = safety.SandboxPermissionsRequireEscalated
@@ -164,7 +165,7 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			assessment := safety.AssessShellCommand(cmd)
 			mutation := safety.ClassifyShellCommand(cmd, shellAllowedRoots(ctx, st, rt), wdAbs)
 			readOnlyCommand := mutation == safety.ShellMutationReadOnly
-			planGate := planModeShellGate(ctx, rt != nil && rt.Cfg != nil && rt.Cfg.DangerFullAccessEnabled(), mutation)
+			planGate := planModeShellGate(ctx, cfg != nil && cfg.DangerFullAccessEnabled(), mutation)
 			if planGate == PlanModeShellRefuse {
 				err := fmt.Errorf("plan mode: %q modifies files; call exit_plan_mode first", strings.TrimSpace(cmd))
 				CaptureToolError(ctx, err)
@@ -206,7 +207,7 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 						return "", err
 					}
 					if ok && id != "" {
-						CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(map[string]any{
+						CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(ctx, st, map[string]any{
 							"requires_action":   true,
 							"sandbox_profile":   string(profile),
 							"profile_elevation": profileElevation,
@@ -268,9 +269,10 @@ type sandboxedShellRequest struct {
 func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRuntime, req sandboxedShellRequest) (string, error) {
 	var snap safety.Snapshot
 	snap = permissionSnapshotForRun(permissionSnapshotForContext(ctx, st, rt), RunIDFromContext(ctx))
+	cfg := sessionConfig(ctx, st, rt)
 	manager := safety.NewManager()
 	defer manager.Close()
-	runtimeCfg := manager.UpdateConfig(rtConfig(rt), shellToolSettingsSources(rt), snap, req.cwd, req.cwd, os.TempDir(), st.AllowedRoots())
+	runtimeCfg := manager.UpdateConfig(cfg, shellToolSettingsSources(rt, cfg), snap, req.cwd, req.cwd, os.TempDir(), st.AllowedRoots())
 	// contained reports whether a sandbox holds this command, which is the
 	// manager's decision to make and never the profile's: a full-access session
 	// and a user-approved escalation both run the command on the host while the
@@ -285,7 +287,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	// it. The profile is read at call time, so an attempt question sees the
 	// profile the attempt will carry.
 	contained := func(sandboxPermissions safety.SandboxPermissions) bool {
-		return manager.DecideShellCommand(rtConfig(rt), req.command, sandboxPermissions, req.profile, false).UseSandbox
+		return manager.DecideShellCommand(cfg, req.command, sandboxPermissions, req.profile, false).UseSandbox
 	}
 	loadedSkillRoots := st.LoadedSkillRoots()
 	var goCache goCacheAccess
@@ -465,7 +467,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			OnOutput:            onOutput, OutputSpoolDir: spoolDir,
 		}
 	}
-	res, decision, runErr := manager.RunCommand(ctx, rtConfig(rt), commandRequest(effectiveSandboxPermissions, approvedNetworkAccessForSandbox(ctx)))
+	res, decision, runErr := manager.RunCommand(ctx, cfg, commandRequest(effectiveSandboxPermissions, approvedNetworkAccessForSandbox(ctx)))
 	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 		return "", runErr
 	}
@@ -495,7 +497,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			retry = authorized
 		}
 		if retry {
-			res, decision, runErr = manager.RunCommand(ctx, rtConfig(rt), commandRequest(safety.SandboxPermissionsRequireEscalated, nil))
+			res, decision, runErr = manager.RunCommand(ctx, cfg, commandRequest(safety.SandboxPermissionsRequireEscalated, nil))
 			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				return "", runErr
 			}
@@ -519,7 +521,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 				return "", approvalErr
 			}
 			if pending && id != "" {
-				CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(map[string]any{
+				CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(ctx, st, map[string]any{
 					"requires_action": true, "network_retry": true,
 				}, rt, safety.ToolKindShell))
 				return "", &RequiresActionError{
@@ -528,7 +530,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 				}
 			}
 			approved := &safety.ApprovedNetworkAccess{Context: networkContext, Port: res.NetworkDenial.Port}
-			res, decision, runErr = manager.RunCommand(ctx, rtConfig(rt), commandRequest(effectiveSandboxPermissions, approved))
+			res, decision, runErr = manager.RunCommand(ctx, cfg, commandRequest(effectiveSandboxPermissions, approved))
 			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				return "", runErr
 			}
@@ -610,7 +612,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	}
 	captureCompletion := func() {
 		CaptureToolCompletion(ctx, ToolCompletionPayload{
-			Output: appendToolExecutionMetadata(completionOutput, rt, safety.ToolKindShell),
+			Output: appendToolExecutionMetadata(ctx, st, completionOutput, rt, safety.ToolKindShell),
 			Error: func() string {
 				if runErr == nil {
 					return ""
@@ -796,10 +798,10 @@ func requestSandboxRetryApproval(ctx context.Context, st *State, rt *AgentToolRu
 	// a historical attempt before the logical tool call moves into its
 	// approval-waiting state and is replayed on the host.
 	CaptureToolAttempt(ctx, ToolCompletionPayload{
-		Output:   appendToolExecutionMetadata(sandboxAttemptCompletionOutput(res, decision, req, denialReason, runErr), rt, safety.ToolKindShell),
+		Output:   appendToolExecutionMetadata(ctx, st, sandboxAttemptCompletionOutput(res, decision, req, denialReason, runErr), rt, safety.ToolKindShell),
 		Duration: res.ExecutionTiming.Duration,
 	})
-	CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(map[string]any{
+	CaptureToolRequiresAction(ctx, id, "shell", appendToolExecutionMetadata(ctx, st, map[string]any{
 		"requires_action": true,
 		"sandbox_retry":   true,
 	}, rt, safety.ToolKindShell))
@@ -926,11 +928,11 @@ func sandboxDenialReason(res safety.CommandResult, runErr error) string {
 	return reason
 }
 
-func shellToolSettingsSources(rt *AgentToolRuntime) []safety.SourceSettings {
-	if rt == nil || rt.Cfg == nil {
+func shellToolSettingsSources(rt *AgentToolRuntime, cfg *appcfg.Root) []safety.SourceSettings {
+	if rt == nil || cfg == nil {
 		return nil
 	}
-	return safety.LocalConfigSources(strings.TrimSpace(rt.Home), rt.Cfg)
+	return safety.LocalConfigSources(strings.TrimSpace(rt.Home), cfg)
 }
 
 // ApplyFilesystemPolicy installs the active filesystem capabilities and

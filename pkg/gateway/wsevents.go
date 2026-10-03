@@ -74,21 +74,20 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 	case "run_completed":
 		typeName = event.RunEventTurnCompleted
 		payload = event.TurnCompletedPayload{
-			Text:       m.Text,
-			ElapsedMS:  int64Field(m.Data, "elapsed_ms"),
-			PlanDone:   int(int64Field(m.Data, "plan_done")),
-			PlanTotal:  int(int64Field(m.Data, "plan_total")),
-			PlanActive: planActiveField(m.Data),
+			Text:         m.Text,
+			ElapsedMS:    int64Field(m.Data, "elapsed_ms"),
+			RunPlanFacts: m.RunPlanFacts,
 		}
 	case "run_cancelled":
 		typeName = event.RunEventTurnCancelled
-		payload = event.TurnCancelledPayload{Message: strings.TrimSpace(m.Message)}
+		payload = event.TurnCancelledPayload{Message: strings.TrimSpace(m.Message), RunPlanFacts: m.RunPlanFacts}
 	case "run_error":
 		typeName = event.RunEventTurnError
 		payload = event.TurnErrorPayload{
-			Error:   strings.TrimSpace(m.Error),
-			Message: strings.TrimSpace(m.Message),
-			Detail:  turnErrorDetail(m.Data),
+			Error:        strings.TrimSpace(m.Error),
+			Message:      strings.TrimSpace(m.Message),
+			Detail:       turnErrorDetail(m.Data),
+			RunPlanFacts: m.RunPlanFacts,
 		}
 	case "requires_action":
 		typeName = event.RunEventApprovalReq
@@ -760,16 +759,17 @@ func (sub *runEventSubscription) Close() {
 	sub.bus.mu.Unlock()
 }
 
-// planActiveField reads the worked line's active-task title from a legacy
-// run_completed data map. Absent keys mean the turn had no checklist in
-// flight; the payload then stays silent rather than naming an empty task.
-func planActiveField(v any) string {
-	asMap, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	s, _ := asMap["plan_active"].(string)
-	return strings.TrimSpace(s)
+// wsRunEndOps are the operations that end a run; each carries the run's
+// checklist facts.
+var wsRunEndOps = map[string]bool{
+	"run_completed": true,
+	"run_cancelled": true,
+	"run_error":     true,
+}
+
+// runPlanFacts is a run's final checklist state as its end carries it.
+func (s *Server) runPlanFacts(ctx context.Context, runID string) event.RunPlanFacts {
+	return lastPlanProgressOfRun(ctx, s.RunRT, runID).Facts()
 }
 
 // runPlanEventLister is the slice of the run store the plan lookup needs.
@@ -793,6 +793,12 @@ func lastPlanProgressOfRun(ctx context.Context, runs runPlanEventLister, runID s
 	for i := len(events) - 1; i >= 0; i-- {
 		var payload event.PlanUpdatedPayload
 		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
+			continue
+		}
+		// A subagent's checklist is recorded under its parent's run but is
+		// that subagent's own; the conversation's worked line reports the
+		// conversation's plan, exactly as the terminal's tracker does.
+		if strings.TrimSpace(payload.AgentID) != "" {
 			continue
 		}
 		last = &payload

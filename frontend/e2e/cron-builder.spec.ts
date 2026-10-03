@@ -84,9 +84,14 @@ test('edit switches delivery to record-only', async ({ page }) => {
   await page.locator('[data-cron-job="delivery brief"]').getByRole('button', { name: /编辑|Edit/ }).click()
   await expect(page.locator('[data-testid="cron-editor"]')).toBeVisible()
   await page.selectOption('[data-testid="cron-deliver"]', '')
+  // The editor opens on the stored schedule as it is; saving a change to
+  // another field must not rebuild the schedule from the builder's defaults.
+  await expect(page.locator('[data-testid="schedule-mode"]')).toHaveValue('cron')
+  await expect(page.locator('[data-testid="schedule-cron"]')).toHaveValue('in 30m')
   await page.click('[data-testid="cron-save"]')
   await expect(page.locator('[data-testid="cron-editor"]')).toHaveCount(0, { timeout: 15_000 })
   await expect(page.locator('[data-cron-job="delivery brief"]')).toContainText(/只记录，不投递|Record only/, { timeout: 10_000 })
+  await expect(page.locator('[data-cron-job="delivery brief"] .font-mono')).toHaveText('in 30m')
 })
 
 test('run now shows up in the run history', async ({ page }) => {

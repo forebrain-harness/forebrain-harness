@@ -16,11 +16,15 @@
         </button>
       </div>
 
+      <p v-else-if="!applies" class="mt-4 rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-3 text-[12px] text-[var(--forebrain-muted-text)]" data-testid="perm-not-applied">
+        {{ t('permissions.projectRulesNotApplied') }}
+      </p>
+
       <template v-else>
-        <!-- Add rule: every fixed choice is a dropdown; only the content is typed. -->
+        <!-- Add rule: every fixed choice is a dropdown; only the content is typed.
+             A project's rules may deny or ask; allowing is the user's own call. -->
         <div class="mt-4 grid gap-2 md:grid-cols-[130px_minmax(0,1fr)_minmax(0,1fr)_auto]">
-          <select v-model="form.behavior" class="forebrain-field text-[13px]" :aria-label="t('permissions.behavior')">
-            <option value="allow">{{ t('permissions.allow') }}</option>
+          <select v-model="form.behavior" class="forebrain-field text-[13px]" :aria-label="t('permissions.behavior')" :title="t('permissions.projectRulesNoAllow')">
             <option value="deny">{{ t('permissions.deny') }}</option>
             <option value="ask">{{ t('permissions.ask') }}</option>
           </select>
@@ -64,26 +68,30 @@
           {{ explaining ? t('common.loading') : t('permissions.explain') }}
         </button>
       </div>
-      <pre v-if="explainResult" class="mt-3 max-h-64 overflow-auto rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] p-3 text-[12px] leading-relaxed text-[var(--forebrain-code-text)]">{{ explainResult }}</pre>
+      <PermissionExplainResult v-if="explainResult" :explain="explainResult" />
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { getErrorMessage, forebrainApi, type PermissionRuleRecord } from '@/lib/api'
+import { reactive, ref, watch } from 'vue'
+import PermissionExplainResult from '@/components/permissions/PermissionExplainResult.vue'
+import { getErrorMessage, forebrainApi, type PermissionExplainResponse, type PermissionRuleRecord, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
 /**
- * This project's own permission rules (destination: projectSettings). The
- * page is disabled until the project is trusted — the engine refuses those
- * writes for an untrusted root, so the honest UI refuses them too.
+ * This project's own permission rules (its .forebrain/safety.json), read and
+ * written through the project's own endpoints — never the rules of whatever
+ * project the gateway happens to run in. The form waits for the trust gate,
+ * and a project the engine would not take rules from (not under version
+ * control) says so instead of offering writes that would be dropped.
  */
-const props = defineProps<{ project: { root?: string; trustRecorded?: boolean } | null; projectId: string }>()
+const props = defineProps<{ project: ProjectRecord | null; projectId: string }>()
 
 const { t } = useI18n()
 
 const rules = ref<PermissionRuleRecord[]>([])
+const applies = ref(false)
 const tools = ref<string[]>([])
 const loading = ref(false)
 const saving = ref(false)
@@ -91,8 +99,8 @@ const error = ref('')
 const trusted = ref(false)
 const trusting = ref(false)
 const explaining = ref(false)
-const explainResult = ref('')
-const form = reactive({ behavior: 'allow', toolName: '', ruleContent: '' })
+const explainResult = ref<PermissionExplainResponse | null>(null)
+const form = reactive({ behavior: 'deny', toolName: '', ruleContent: '' })
 const explainForm = reactive({ toolName: '', input: '' })
 
 function behaviorLabel(behavior: string): string {
@@ -116,8 +124,9 @@ async function loadRules() {
   loading.value = true
   error.value = ''
   try {
-    const res = await forebrainApi.permissionsRules({ source: 'projectSettings' })
-    rules.value = (res.rules ?? []).filter((rule) => rule.source === 'projectSettings')
+    const res = await forebrainApi.projectPermissionRules(props.projectId)
+    applies.value = res.applies
+    rules.value = res.rules
   } catch (cause) {
     error.value = getErrorMessage(cause)
   } finally {
@@ -131,8 +140,8 @@ async function loadTools() {
     tools.value = res.map((tool) => tool.name).filter(Boolean)
     if (tools.value.length && !form.toolName) form.toolName = tools.value[0]
     if (tools.value.length && !explainForm.toolName) explainForm.toolName = tools.value[0]
-  } catch {
-    tools.value = []
+  } catch (cause) {
+    error.value = getErrorMessage(cause)
   }
 }
 
@@ -156,14 +165,13 @@ async function addRule() {
   saving.value = true
   error.value = ''
   try {
-    await forebrainApi.permissionsUpdate({
+    const res = await forebrainApi.projectPermissionUpdate(props.projectId, {
       type: 'addRules',
-      destination: 'projectSettings',
       behavior: form.behavior,
       rules: [{ toolName: form.toolName, ruleContent: form.ruleContent.trim() }],
     })
     form.ruleContent = ''
-    await loadRules()
+    rules.value = res.rules ?? []
   } catch (cause) {
     error.value = getErrorMessage(cause)
   } finally {
@@ -174,29 +182,27 @@ async function addRule() {
 async function removeRule(rule: PermissionRuleRecord) {
   error.value = ''
   try {
-    await forebrainApi.permissionsUpdate({
+    const res = await forebrainApi.projectPermissionUpdate(props.projectId, {
       type: 'removeRules',
-      destination: 'projectSettings',
       behavior: rule.behavior,
-      rules: [{ toolName: rule.toolName, ruleContent: rule.ruleContent }],
+      rules: [rule.rule],
     })
-    await loadRules()
+    rules.value = res.rules ?? []
   } catch (cause) {
     error.value = getErrorMessage(cause)
   }
 }
 
 async function explain() {
-  if (explaining.value) return
+  if (explaining.value || !explainForm.toolName) return
   explaining.value = true
   error.value = ''
-  explainResult.value = ''
+  explainResult.value = null
   try {
-    const res = await forebrainApi.permissionsExplain({
+    explainResult.value = await forebrainApi.projectPermissionExplain(props.projectId, {
       toolName: explainForm.toolName,
       input: explainForm.input,
     })
-    explainResult.value = JSON.stringify(res, null, 2)
   } catch (cause) {
     error.value = getErrorMessage(cause)
   } finally {
@@ -204,10 +210,15 @@ async function explain() {
   }
 }
 
-onMounted(async () => {
-  trusted.value = Boolean(props.project?.trustRecorded)
-  await Promise.all([loadTools(), loadRules()])
-})
+// The shell loads the project row (its trust decision included) and hands it
+// down; the gate follows it rather than guessing from a field only the create
+// response carries.
+watch(() => props.project?.trusted, (value) => {
+  trusted.value = Boolean(value)
+}, { immediate: true })
+
+void loadTools()
+void loadRules()
 </script>
 
 <style scoped>

@@ -58,6 +58,12 @@ func (s *Service) InstallOfflineArchive(fileName string, data []byte, destScope 
 		return nil, err
 	}
 	defer os.RemoveAll(tmpRoot)
+	// A package with SKILL.md at its root is moved in as this very
+	// directory, so it carries a skill directory's mode, not MkdirTemp's
+	// owner-only one.
+	if err := os.Chmod(tmpRoot, 0o755); err != nil {
+		return nil, err
+	}
 	if err := extractArchiveTo(fileName, data, tmpRoot); err != nil {
 		return nil, err
 	}
@@ -77,26 +83,43 @@ func (s *Service) InstallOfflineArchive(fileName string, data []byte, destScope 
 	if len(conflicts) > 0 {
 		return nil, fmt.Errorf("%w: %s", ErrSkillAlreadyExists, strings.Join(conflicts, ", "))
 	}
-	workspace := s.workspaceRoot()
-	lock := LockEntry{
-		SourceType:  "archive_upload",
-		SourceRef:   filepath.Base(strings.TrimSpace(fileName)),
-		InstalledAt: time.Now().Unix(),
+	// Each skill directory moves in with one rename — the unpack directory
+	// sits beside the destination, on the same volume — so no skill is ever
+	// visible half-written, and a failure part-way takes back the ones
+	// already moved: the destination ends as it began or holds the whole
+	// package. A rename onto a name that appeared since the check fails
+	// rather than replacing it.
+	var moved []string
+	rollback := func() {
+		for _, dir := range moved {
+			_ = os.RemoveAll(dir)
+		}
 	}
 	names := make([]string, 0, len(items))
 	for _, item := range items {
-		if err := InstallFromDir(item.Path, destDir, item.Name); err != nil {
+		target := filepath.Join(destDir, item.Name)
+		if err := os.Rename(item.Path, target); err != nil {
+			rollback()
 			return nil, err
 		}
-		if strings.TrimSpace(workspace) != "" {
+		moved = append(moved, target)
+		names = append(names, item.Name)
+	}
+	if workspace := s.workspaceRoot(); strings.TrimSpace(workspace) != "" {
+		lock := LockEntry{
+			SourceType:  "archive_upload",
+			SourceRef:   filepath.Base(strings.TrimSpace(fileName)),
+			InstalledAt: time.Now().Unix(),
+		}
+		for _, item := range items {
 			itemLock := lock
 			itemLock.Path = filepath.Join(destDir, item.Name)
 			itemLock.SkillSubpath = item.Subpath
 			if err := MergeLockEntryV2(workspace, item.Name, itemLock); err != nil {
+				rollback()
 				return nil, err
 			}
 		}
-		names = append(names, item.Name)
 	}
 	if err := s.Refresh(); err != nil {
 		return nil, err
@@ -374,8 +397,10 @@ func offlineSkillNameForRoot(root string, fallbackName string) string {
 func offlineFallbackName(fileName string) string {
 	base := filepath.Base(strings.TrimSpace(fileName))
 	for _, ext := range []string{".tar.gz", ".tgz", ".tar", ".zip"} {
+		// The extension matches in any case ("Skill.ZIP"); what is cut is
+		// that many bytes of the name as given.
 		if strings.HasSuffix(strings.ToLower(base), ext) {
-			return strings.TrimSuffix(base, ext)
+			return base[:len(base)-len(ext)]
 		}
 	}
 	return strings.TrimSuffix(base, filepath.Ext(base))

@@ -34,10 +34,25 @@ type Store struct {
 	// sandboxAvailable reports whether a sandbox backend will contain shell
 	// commands that run without approval.
 	sandboxAvailable bool
+	// sessionSandbox holds the conversations that chose their own sandbox
+	// mode — the sandbox half of an approval preset picked for that
+	// conversation alone. Everything else runs under the configured mode.
+	sessionSandbox map[string]sessionSandboxChoice
+}
+
+// sessionSandboxChoice is one conversation's own sandbox mode and whether a
+// sandbox actually contains its shell commands under it.
+type sessionSandboxChoice struct {
+	mode      appcfg.SandboxMode
+	available bool
 }
 
 type Snapshot struct {
-	Mode                   PermissionMode                                                    `json:"mode"`
+	Mode PermissionMode `json:"mode"`
+	// SandboxMode is the conversation's own sandbox mode when it chose one
+	// (see ConfigForSnapshot), and empty when it runs under the configured
+	// mode.
+	SandboxMode            appcfg.SandboxMode                                                `json:"sandbox_mode,omitempty"`
 	ApprovalPolicy         ApprovalPolicy                                                    `json:"approval_policy"`
 	Rules                  map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue `json:"rules"`
 	FileSystemGrants       []FileSystemPermissionGrant                                       `json:"file_system_grants,omitempty"`
@@ -49,6 +64,7 @@ func NewStore() *Store {
 	return &Store{
 		mode:                   ModeOnRequest,
 		sessionModes:           make(map[string]PermissionMode),
+		sessionSandbox:         make(map[string]sessionSandboxChoice),
 		approvalPolicy:         ApprovalPolicy{Mode: ApprovalOnRequest},
 		rules:                  make(map[PermissionSource]map[PermissionBehavior][]PermissionRuleValue),
 		strictAutoReviewRunIDs: make(map[string]string),
@@ -79,7 +95,15 @@ func (s *Store) SnapshotForSession(sessionID string) Snapshot {
 	}
 	if sessionID != "" {
 		if mode := s.sessionModes[sessionID]; mode != "" {
+			// The conversation's own mode is its approval policy too: every
+			// caller that reads the policy rather than the mode — escalation
+			// refusals, sandbox-retry prompts, MCP auto-approval — must see
+			// the same answer the rule engine does.
 			out.Mode = mode
+			out.ApprovalPolicy.Mode = mode
+		}
+		if choice, ok := s.sessionSandbox[sessionID]; ok {
+			out.SandboxMode = choice.mode
 		}
 	}
 	for runID, ownerSessionID := range s.strictAutoReviewRunIDs {
@@ -247,6 +271,78 @@ func (s *Store) SandboxAvailable() bool {
 	return s.sandboxAvailable
 }
 
+// sandboxAvailableForSession reports whether a sandbox contains the shell
+// commands of one conversation: under its own sandbox mode when it chose
+// one, and under the configured mode otherwise.
+func (s *Store) sandboxAvailableForSession(sessionID string) bool {
+	if s == nil {
+		return false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if choice, ok := s.sessionSandbox[sessionID]; ok && sessionID != "" {
+		return choice.available
+	}
+	return s.sandboxAvailable
+}
+
+// sessionSandboxMode is the sandbox mode one conversation picked for itself,
+// or empty when it runs under the configured mode.
+func (s *Store) sessionSandboxMode(sessionID string) appcfg.SandboxMode {
+	if s == nil {
+		return ""
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sessionSandbox[sessionID].mode
+}
+
+// setSessionSandboxMode records one conversation's own sandbox mode. Only the
+// three modes a preset can pick are accepted; containment for it is unknown —
+// and so fails closed — until the runtime refreshes availability, which it
+// does as part of applying the update.
+func (s *Store) setSessionSandboxMode(sessionID string, mode appcfg.SandboxMode) {
+	if s == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	switch mode {
+	case appcfg.SandboxModeReadOnly, appcfg.SandboxModeWorkspaceWrite, appcfg.SandboxModeDangerFullAccess:
+	default:
+		return
+	}
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.sessionSandbox == nil {
+		s.sessionSandbox = make(map[string]sessionSandboxChoice)
+	}
+	s.sessionSandbox[sessionID] = sessionSandboxChoice{mode: mode}
+	s.mu.Unlock()
+}
+
+// refreshSessionSandboxAvailability re-derives containment for every
+// conversation that chose its own sandbox mode, the same way the configured
+// mode's is derived: availability depends on the platform and the sandbox
+// settings as well as the mode, and those can change on a config reload.
+func (s *Store) refreshSessionSandboxAvailability(available func(appcfg.SandboxMode) bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for sessionID, choice := range s.sessionSandbox {
+		choice.available = available(choice.mode)
+		s.sessionSandbox[sessionID] = choice
+	}
+}
+
 func (s *Store) HasRuntimeMode() bool {
 	if s == nil {
 		return false
@@ -351,6 +447,7 @@ func (s *Store) ClearRuntimeGrants() {
 	s.networkGrants = nil
 	s.strictAutoReviewRunIDs = make(map[string]string)
 	s.sessionModes = make(map[string]PermissionMode)
+	s.sessionSandbox = make(map[string]sessionSandboxChoice)
 }
 
 func (s *Store) RemoveRules(source PermissionSource, behavior PermissionBehavior, rules []PermissionRuleValue) {
@@ -843,6 +940,12 @@ func ApplyUpdate(store *Store, u PermissionUpdate) {
 			store.SetSessionRuntimeMode(u.SessionID, u.Mode)
 		} else {
 			store.SetRuntimeMode(u.Mode)
+		}
+	case UpdateSetSandboxMode:
+		// The configured sandbox mode lives in the configuration; only a
+		// conversation's own choice is runtime state.
+		if u.Destination == DestinationSession {
+			store.setSessionSandboxMode(u.SessionID, u.SandboxMode)
 		}
 	case UpdateAddRules:
 		src := sourceFromDestination(u.Destination)

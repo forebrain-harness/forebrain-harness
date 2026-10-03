@@ -2795,9 +2795,9 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		} else {
 			action = "Asked user"
 		}
-		if q := inputString(meta, "question"); q != "" {
-			target = truncateForDisplay(q, 60)
-		}
+		// What the call asks, named in full: the same words the web's card
+		// header names it with.
+		target = tool.UserInteractionQuestionsLabel(meta.Input)
 
 	// --- Context ---
 	case lower == "working_set_show":

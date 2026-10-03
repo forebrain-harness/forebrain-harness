@@ -97,6 +97,23 @@ describe('useChatStream helpers', () => {
     expect(conversation[4].blocks?.[1]).toMatchObject({ kind: 'assistant', text: 'second answer' })
   })
 
+  it('closes each run with its worked row, a run that said nothing included', () => {
+    const rows = [
+      { role: 'user', content: 'first', runId: 'r1' },
+      { role: 'assistant', content: 'answer', runId: 'r1' },
+      { role: 'worked', content: '', runId: 'r1', runStartedAt: '2026-10-03T09:00:00Z', runFinishedAt: '2026-10-03T09:00:05Z', workedDurationMs: 5000, planDone: 1, planTotal: 2, planActive: 'tests' },
+      // A run that failed before it said anything: its message, then its line.
+      { role: 'user', content: 'second', runId: 'r2' },
+      { role: 'worked', content: '', runId: 'r2', runStartedAt: '2026-10-03T09:01:00Z', runFinishedAt: '2026-10-03T09:01:02Z', workedDurationMs: 2000 },
+      { role: 'user', content: 'third' },
+    ]
+    const conversation = conversationFromTranscript(rows)
+    expect(conversation.map((m) => `${m.role}:${m.content}`)).toEqual(['user:first', 'assistant:answer', 'user:second', 'assistant:', 'user:third'])
+    expect(conversation[1]).toMatchObject({ runId: 'r1', workedDurationMs: 5000, workedPlanDone: 1, workedPlanTotal: 2, workedPlanActive: 'tests', runFinishedAt: '2026-10-03T09:00:05Z' })
+    expect(conversation[3]).toMatchObject({ runId: 'r2', workedDurationMs: 2000 })
+    expect(conversation[3].blocks).toBeUndefined()
+  })
+
   it('closes what a round streamed before the goal line that follows it', () => {
     let blocks: TimelineBlock[] = [{ kind: 'assistant', text: 'round one', open: true }]
     blocks = appendGoalLine(blocks, { phase: 'round', round: 2, why: 'two tests fail', checkAgentId: 'check-1' })
@@ -412,6 +429,49 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  // The guard against a stale snapshot is about sends that came after the
+  // snapshot was requested. A send that finished before it is already in the
+  // history the snapshot reads, so returning to that session must load it.
+  it('loads the history of a session the last send went into', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'user-1', role: 'user', content: '/status' },
+      { id: 'assistant-1', role: 'assistant', content: 'persisted answer' },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'sent-session', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'sent-session', records: [] })
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('/status', { sessionId: 'sent-session' })
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'sent-session' })
+      socket.message({ op: 'slash_reply', request_id: sent.request_id, session_id: 'sent-session', text: 'Session Status' })
+      await pendingSend
+
+      // Leave and come back: the switch clears the view, and the snapshot
+      // must fill it again.
+      stream.switchToSession('other-session')
+      stream.sessionId.value = 'sent-session'
+      stream.messages.value = []
+      await stream.loadMessages('sent-session')
+
+      expect(stream.messages.value.map((message) => message.content)).toContain('persisted answer')
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
   it('shows the picker a slash command offers and sends a pick back without a user bubble', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
@@ -663,6 +723,134 @@ describe('useChatStream helpers', () => {
         writable: true,
         value: originalWebSocket,
       })
+    }
+  })
+
+  // The worked line names the checklist however a run ends, live as on a
+  // reload: the request socket's own ending carries the facts.
+  for (const ending of ['run_completed', 'run_cancelled', 'run_error'] as const) {
+    it(`a live ${ending} closes the turn with its checklist facts`, async () => {
+      FakeChatWebSocket.instances = []
+      const originalWebSocket = globalThis.WebSocket
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+      const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+      const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+      try {
+        const stream = useChatStream()
+        const pendingSend = stream.send('hello')
+        const socket = FakeChatWebSocket.instances[0]
+        socket.open()
+        const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+        socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'web-plan' })
+        socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-plan', session_id: 'web-plan' })
+        socket.message({
+          op: 'run_event',
+          request_id: sent.request_id,
+          data: {
+            id: 'evt-plan-said', sequence: 2, type: 'assistant_delta', run_id: 'run-plan', session_id: 'web-plan',
+            created_at: '2026-06-11T00:00:00.500Z', payload: { text: 'working' },
+          },
+        })
+        socket.message({
+          op: ending,
+          request_id: sent.request_id,
+          run_id: 'run-plan',
+          session_id: 'web-plan',
+          text: 'done',
+          error: ending === 'run_error' ? 'boom' : undefined,
+          finished_at: '2026-06-11T00:00:01.000Z',
+          plan_done: 2,
+          plan_total: 5,
+          plan_active: 'wire the API',
+        })
+        await pendingSend.catch(() => {})
+
+        expect(stream.messages.value[1]).toMatchObject({
+          role: 'assistant',
+          workedPlanDone: 2,
+          workedPlanTotal: 5,
+          workedPlanActive: 'wire the API',
+        })
+      } finally {
+        chatMessagesSpy.mockRestore()
+        sessionModeSpy.mockRestore()
+        Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+      }
+    })
+  }
+
+  // A run that said nothing still ran: however it ended, its turn stays to
+  // carry the worked line that closes it, with no placeholder text.
+  for (const ending of ['run_completed', 'run_cancelled', 'run_error'] as const) {
+    it(`a live ${ending} with no output keeps its worked line`, async () => {
+      FakeChatWebSocket.instances = []
+      const originalWebSocket = globalThis.WebSocket
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+      const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+      const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+      try {
+        const stream = useChatStream()
+        const pendingSend = stream.send('hello')
+        const socket = FakeChatWebSocket.instances[0]
+        socket.open()
+        const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+        socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'web-silent' })
+        socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-silent', session_id: 'web-silent', started_at: '2026-06-11T00:00:00.000Z' })
+        socket.message({
+          op: ending,
+          request_id: sent.request_id,
+          run_id: 'run-silent',
+          session_id: 'web-silent',
+          error: ending === 'run_error' ? 'the provider refused the request' : undefined,
+          finished_at: '2026-06-11T00:00:01.000Z',
+          data: { elapsed_ms: 1200 },
+        })
+        await pendingSend.catch(() => {})
+
+        const turn = stream.messages.value[1]
+        expect(turn).toMatchObject({ role: 'assistant', workedDurationMs: expect.any(Number) })
+        expect(String(turn?.content ?? '').trim()).not.toBe('...')
+        if (ending === 'run_error') {
+          // The failure is the turn's last word, above its worked line — not
+          // a page-level alert detached from the run that failed.
+          expect(turn?.blocks).toEqual([{ kind: 'error', id: 'error:run-silent', text: 'the provider refused the request' }])
+          expect(stream.error.value).toBeNull()
+          expect(turn?.content).toBe('')
+        }
+      } finally {
+        chatMessagesSpy.mockRestore()
+        sessionModeSpy.mockRestore()
+        Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+      }
+    })
+  }
+
+  it('reloads a failed run with its error inside the turn, not as a fresh alert', async () => {
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', role: 'user', content: 'hello', runId: 'r-failed' },
+      { id: 'worked-r-failed', role: 'worked', content: '', runId: 'r-failed', runStartedAt: '2026-10-03T09:00:00Z', runFinishedAt: '2026-10-03T09:00:02Z', workedDurationMs: 2000 },
+    ])
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's-failed', nextCursor: 2, highWater: 2, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'e1', sequence: 1, schemaVersion: 1, sessionId: 's-failed', runId: 'r-failed', type: 'turn_started', createdAt: '2026-10-03T09:00:00Z', payload: {} },
+        { id: 'e2', sequence: 2, schemaVersion: 1, sessionId: 's-failed', runId: 'r-failed', type: 'turn_error', createdAt: '2026-10-03T09:00:02Z', payload: { error: 'the provider refused the request' } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's-failed', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's-failed'
+      await stream.loadMessages('s-failed')
+
+      expect(stream.messages.value.map((m) => m.role)).toEqual(['user', 'assistant'])
+      expect(stream.messages.value[1]).toMatchObject({ runId: 'r-failed', workedDurationMs: expect.any(Number) })
+      expect(stream.messages.value[1]?.blocks).toEqual([{ kind: 'error', id: 'error:r-failed', text: 'the provider refused the request' }])
+      expect(stream.error.value).toBeNull()
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
     }
   })
 
@@ -1660,7 +1848,7 @@ describe('conversation tool and approval timeline', () => {
     socket.message({ op: 'run_cancelled', run_id: 'run-parity', message: 'cancelled' })
     await pendingSend
     // A stopped run closes with its worked line as surely as a finished one.
-    expect(live.messages.value.at(-1)).toMatchObject({ role: 'assistant', workedDurationMs: expect.any(Number) })
+    expect(live.messages.value[live.messages.value.length - 1]).toMatchObject({ role: 'assistant', workedDurationMs: expect.any(Number) })
 
     // The same turn as the runtime persisted it: what it thought, what it said,
     // the call it answered, and the call the cancel stopped.

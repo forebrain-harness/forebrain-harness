@@ -1159,6 +1159,38 @@ func TestFormatToolStepResult_exitPlanModeFallsBackOnBadPayload(t *testing.T) {
 	}
 }
 
+// A user_interaction card is named by what it asks — every question, in
+// order — never by its argument JSON, and reads as a question being asked.
+func TestUserInteractionCardNamesItsQuestions(t *testing.T) {
+	t.Parallel()
+	input := map[string]any{"questions": []any{
+		map[string]any{"header": "Triggers", "question": "When should it fire?", "options": []any{map[string]any{"label": "Just hi"}}},
+		map[string]any{"question": "  What should the\ngreeting look like?  "},
+	}}
+	if got := UserInteractionQuestionsLabel(input); got != "Triggers · What should the greeting look like?" {
+		t.Fatalf("label = %q", got)
+	}
+	meta := BuildToolMeta(StepEvent{Kind: StepKindToolStarted, ToolName: "user_interaction", Input: input})
+	if meta.Invocation != "ask user · Triggers · What should the greeting look like?" {
+		t.Fatalf("invocation = %q", meta.Invocation)
+	}
+	for kind, want := range map[string]string{
+		StepKindToolStarted:   "asking user · Triggers · What should the greeting look like?",
+		StepKindToolCompleted: "asked user · Triggers · What should the greeting look like?",
+	} {
+		got := SummarizeToolStep(StepEvent{Kind: kind, ToolName: "user_interaction", Input: input, Output: map[string]any{"answers": map[string]any{}}})
+		if got != want {
+			t.Fatalf("%s summary = %q, want %q", kind, got, want)
+		}
+		if strings.Contains(got, "{") || strings.Contains(got, `"`) {
+			t.Fatalf("summary exposes JSON: %q", got)
+		}
+	}
+	if got := SummarizeToolStep(StepEvent{Kind: StepKindToolStarted, ToolName: "user_interaction"}); got != "asking user" {
+		t.Fatalf("summary without questions = %q", got)
+	}
+}
+
 func TestFormatToolStepResult_userInteractionRendersAnswersInQuestionOrder(t *testing.T) {
 	t.Parallel()
 	payload := `{"answers":{"补充说明":{"other":"保留旧会话展示能力\n并维持缩进"},"修改范围":{"selections":["TUI","回放兼容"]},"交付方式":{"selections":["设计方案并开发实施"]}}}`

@@ -149,7 +149,7 @@ func (e *Engine) EvaluateForSession(store *Store, sessionID, toolName, input str
 		// contains it. When it is flagged dangerous, or no sandbox will back it,
 		// that justification is gone: prompt instead, and when the operator has
 		// turned prompting off, refuse rather than run it unattended.
-		if shellNeedsApprovalDespiteDefault(store, in) {
+		if shellNeedsApprovalDespiteDefault(store, sessionID, in) {
 			if policy == ApprovalNever || mode == ModeNever {
 				return Decision{Behavior: BehaviorDeny, Mode: mode, Reason: "shell_unsafe_without_prompt_deny"}
 			}
@@ -529,9 +529,10 @@ func (e *Engine) evaluateShellCompoundAllow(store *Store, sessionID, toolName, i
 
 // shellNeedsApprovalDespiteDefault reports whether a shell command must not
 // take the unattended default: either it matches a dangerous pattern, or no
-// sandbox will contain it.
-func shellNeedsApprovalDespiteDefault(store *Store, command string) bool {
-	if store == nil || !store.SandboxAvailable() {
+// sandbox will contain it — under the conversation's own sandbox mode when it
+// chose one.
+func shellNeedsApprovalDespiteDefault(store *Store, sessionID, command string) bool {
+	if store == nil || !store.sandboxAvailableForSession(sessionID) {
 		return true
 	}
 	return AssessShellCommand(command).Dangerous != nil
