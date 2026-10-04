@@ -35,6 +35,7 @@
           <SettingsApprovalTab v-else-if="activeTab === 'approval'" />
           <PrimaryAgentsTab v-else-if="activeTab === 'agents'" />
           <McpTab v-else-if="activeTab === 'mcp'" />
+          <LspTab v-else-if="activeTab === 'lsp'" />
           <HooksTab v-else-if="activeTab === 'hooks'" />
           <MemorySwitchesTab v-else-if="activeTab === 'memory'" />
           <ConfigTab v-else-if="activeTab === 'config'" />
@@ -54,6 +55,7 @@ import SettingsApprovalTab from '@/components/settings/SettingsApprovalTab.vue'
 import ConfigTab from '@/components/settings/ConfigTab.vue'
 import HooksTab from '@/components/settings/HooksTab.vue'
 import McpTab from '@/components/settings/McpTab.vue'
+import LspTab from '@/components/settings/LspTab.vue'
 import MemorySwitchesTab from '@/components/settings/MemorySwitchesTab.vue'
 import PrimaryAgentsTab from '@/components/settings/PrimaryAgentsTab.vue'
 import RuntimeStatusTab from '@/components/settings/RuntimeStatusTab.vue'
@@ -77,6 +79,7 @@ const tabs = computed(() => [
   { key: 'approval', label: t('settings.tabApproval') },
   { key: 'agents', label: t('settings.tabAgents') },
   { key: 'mcp', label: t('settings.tabMcp') },
+  { key: 'lsp', label: t('settings.tabLsp') },
   { key: 'hooks', label: t('settings.tabHooks') },
   { key: 'memory', label: t('settings.tabMemory') },
   { key: 'config', label: t('settings.tabConfig') },

@@ -231,13 +231,20 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 					return "", fmt.Errorf("shell command requires approval: %q", cmd)
 				}
 			}
-			return runSandboxedShellCommand(ctx, st, rt, sandboxedShellRequest{
+			out, err := runSandboxedShellCommand(ctx, st, rt, sandboxedShellRequest{
 				command: cmd, timeoutMs: in.TimeoutMs, sandboxPermissions: in.SandboxPermissions,
 				additionalPermissions: in.AdditionalPermissions,
 				prefixRule:            append([]string(nil), in.PrefixRule...),
 				profile:               profile, profileElevation: profileElevation,
 				cwd: wdAbs, toolName: "shell", toolDescription: shellToolDescription,
 			})
+			// The command finished either way; files it changed outside the
+			// edit tools still have to be re-synced. DidRunShell returns
+			// immediately, so it adds nothing to the shell's own latency.
+			if ci := codeIntelOf(rt); ci != nil {
+				ci.DidRunShell(ctx)
+			}
+			return out, err
 		},
 	)
 	if err != nil {

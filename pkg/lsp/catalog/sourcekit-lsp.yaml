@@ -1,0 +1,16 @@
+id: sourcekit-lsp
+display_name: SourceKit-LSP
+languages: [Swift]
+priority: 100
+command: sourcekit-lsp
+command_darwin: xcrun
+args_darwin: [sourcekit-lsp]
+extension_to_language: {.swift: swift}
+root_markers: [Package.swift, buildServer.json, compile_commands.json]
+env_passthrough: [DEVELOPER_DIR, SDKROOT, TOOLCHAINS]
+detect:
+  xcrun: sourcekit-lsp
+startup_timeout: 60
+readiness: none
+project_writes: [.build]
+notes: "Ships with Xcode on macOS and with the Swift toolchain from swift.org elsewhere."

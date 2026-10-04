@@ -14,6 +14,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
@@ -505,4 +506,31 @@ func TestSelectionApplyOutcomeClassification(t *testing.T) {
 	var carrier modelSelectionOutcome = &ModelSelectionError{Outcome: ModelAppliedNotDurable, Err: errors.New("x")}
 	require.Equal(t, ModelAppliedNotDurable, carrier.ModelApplyOutcome())
 	require.Nil(t, NewModelSelectionError(ModelNotApplied, nil))
+}
+
+// The /status Language servers row appears only when a server is enabled,
+// with the /status counts line, right after MCP servers.
+func TestStatusFactsLSPRow(t *testing.T) {
+	withoutLSP := BuildStatusReport(context.Background(), StatusSource{})
+	for _, f := range StatusFacts(withoutLSP) {
+		require.NotEqual(t, "Language servers", f.Label, "a report without LSP data must not carry the row")
+	}
+
+	snap := event.LSPSnapshot{Servers: []event.LSPServerStatus{
+		{ID: "gopls", Enabled: true, State: event.LSPStateReady},
+		{ID: "gopls2", Enabled: true, State: event.LSPStateReady},
+		{ID: "pyright", Enabled: true, State: event.LSPStateFailed},
+	}}
+	rep := BuildStatusReport(context.Background(), StatusSource{LSP: &snap})
+	require.Equal(t, "2 running, 1 failed", rep.LSP)
+	rep.MCP = MCPCountLine{Connected: 1}
+
+	labels := make([]string, 0)
+	values := map[string]string{}
+	for _, f := range StatusFacts(rep) {
+		labels = append(labels, f.Label)
+		values[f.Label] = f.Value
+	}
+	require.Equal(t, "2 running, 1 failed · /lsp", values["Language servers"])
+	require.Greater(t, slices.Index(labels, "Language servers"), slices.Index(labels, "MCP servers"), "the LSP row must follow MCP servers:\n%v", labels)
 }

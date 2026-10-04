@@ -120,7 +120,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		return err
 	}
 	registerMeta(t2, "Use when creating a new file or fully replacing one's contents (requires prior read to overwrite)", "filesystem", event.ToolMeta{Destructive: true})
-	t3, err := NewFileEditTool(st)
+	t3, err := NewFileEditToolWithOptions(st, FileEditOptions{CodeIntel: codeIntelOf(rt)})
 	if err != nil {
 		return err
 	}
@@ -155,6 +155,17 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		}
 		registerMeta(t21, "Use when additional filesystem or network permissions are required for later file or shell operations", "permissions", event.ToolMeta{ReadOnly: true})
 	}
+	// The lsp tool sits in the prompt prefix, so its registration follows the
+	// frozen CodeIntelTool decision rather than anything a reload could change
+	// mid-session (spec §8.5).
+	var tLSP *llm.Tool
+	if rt != nil && rt.CodeIntel != nil && rt.CodeIntelTool {
+		tLSP, err = NewLSPTool(st, rt)
+		if err != nil {
+			return err
+		}
+		registerMeta(tLSP, lspToolDescription, "code", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
+	}
 	for _, t := range []*llm.Tool{t1, t2, t3} {
 		_ = st.Register(a, t)
 	}
@@ -164,6 +175,9 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 	_ = st.Register(a, t17)
 	if t21 != nil {
 		_ = st.Register(a, t21)
+	}
+	if tLSP != nil {
+		_ = st.Register(a, tLSP)
 	}
 	return registerSessionAndMemoryTools(a, st, rt)
 }
@@ -275,6 +289,12 @@ type AgentToolRuntime struct {
 	PermissionSnapshot           func() safety.Snapshot
 	PermissionSnapshotForSession func(string) safety.Snapshot
 	ApplyPermissionUpdate        func(safety.PermissionUpdate)
+	// CodeIntel is the language-server runtime for this runner; nil when the
+	// runner has none. CodeIntelTool is the frozen decision whether the lsp
+	// tool is registered (spec §8.5): the lsp tool reads both, and the edit
+	// tools' diagnostics (task 11) read CodeIntel too.
+	CodeIntel     CodeIntelligence
+	CodeIntelTool bool
 }
 
 // StateRoot returns the per-agent state root onto which the mode/plan/todo/

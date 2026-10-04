@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -488,6 +489,7 @@ type fakeSession struct {
 	switchedPrimaryQuery     string
 	statusReply              string
 	mcpReply                 string
+	lspReply                 string
 	diffReply                string
 	streamSlashReply         map[string]SlashOutcome
 	streamSlashFn            func(context.Context, string, string) (SlashOutcome, bool)
@@ -885,6 +887,14 @@ func (f *fakeSession) HandleMCPSlash(sessionID, channel string) (string, bool) {
 		return "", false
 	}
 	return f.mcpReply, true
+}
+
+func (f *fakeSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
+	_, _ = sessionID, channel
+	if strings.TrimSpace(f.lspReply) == "" {
+		return "", false
+	}
+	return f.lspReply, true
 }
 
 func (f *fakeSession) HandleDiffSlash(sessionID, channel string, args []string) (string, bool) {
@@ -4086,6 +4096,242 @@ func (f *fakePanelSession) PanelSetMCPDisabled(name string, disable bool) (strin
 	return name + ": " + verb + "d from next session", nil
 }
 
+// fakeLSPPanelSession records the /lsp panel's actions and can serve a
+// different snapshot on every read, the way a live install does.
+type fakeLSPPanelSession struct {
+	mu         sync.Mutex
+	snapshot   event.LSPSnapshot
+	actions    []string
+	replies    map[string]string
+	subscribed int
+}
+
+func (f *fakeLSPPanelSession) PanelLSPSnapshot() (event.LSPSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	snap := f.snapshot
+	return snap, nil
+}
+
+func (f *fakeLSPPanelSession) PanelSetLSPEnabled(serverID string, enabled bool) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, fmt.Sprintf("enabled=%v %s", enabled, serverID))
+	return f.replies["set"], nil
+}
+
+func (f *fakeLSPPanelSession) PanelRestartLSP(serverID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, "restart "+serverID)
+	return f.replies["restart"], nil
+}
+
+func (f *fakeLSPPanelSession) PanelInstallLSP(serverID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, "install "+serverID)
+	return f.replies["install"], nil
+}
+
+func (f *fakeLSPPanelSession) PanelResetLSPRecommendations() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, "reset-recommendations")
+	return f.replies["reset"], nil
+}
+
+func (f *fakeLSPPanelSession) SubscribeLSPStatus() (func(), bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribed++
+	return func() {}, true
+}
+
+func lspSnapshotForPanel() event.LSPSnapshot {
+	return event.LSPSnapshot{
+		ProjectRoot:    "/Users/tester/proj",
+		Trusted:        true,
+		FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{
+			{
+				ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"},
+				Command: "gopls", BinaryPath: "/usr/local/bin/gopls", Version: "v0.20.0",
+				Roots: []string{"/Users/tester/proj"}, PIDs: []int{4242}, OpenDocuments: 3,
+				Errors: 2, LogPath: "/state/lsp/gopls-ab12cd34.log", ProjectWrites: []string{".gopls"},
+			},
+			{ID: "pyright", Enabled: false, State: event.LSPStateNotInstalled, Languages: []string{"Python"}, InstallCommand: "npm install -g pyright"},
+		},
+	}
+}
+
+// TestLSPPanelListLayout pins the /lsp list at three widths: the project
+// subtitle, the Enabled and Available groups with each state's glyph, the
+// sandbox note, and the selected row as the focus.
+func TestLSPPanelListLayout(t *testing.T) {
+	snap := lspSnapshotForPanel()
+	snap.RecommendationsDisabled = true
+	snap.RecommendationsDisabledReason = "dismissed 5 times"
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, cursor: 1, notice: map[string]string{}}
+	for _, width := range []int{120, 80, 50} {
+		lines, focus := panelTestLines(panel, width, "⠋")
+		assertRowsFit(t, lines, width)
+		joined := stripANSI(strings.Join(lines, "\n"))
+		for _, want := range []string{
+			"Language servers",
+			"/Users/tester/proj · 1 enabled",
+			"Enabled",
+			"gopls · ✓ ready · 2 errors",
+			"Available",
+			"pyright · – not installed",
+			"Servers run on this machine outside the sandbox, only in trusted projects.",
+			"Recommendations are off (dismissed 5 times).",
+			"Turn recommendations back on",
+		} {
+			if !strings.Contains(strings.Join(strings.Fields(joined), " "), want) {
+				t.Fatalf("width %d: lsp panel missing %q:\n%s", width, want, joined)
+			}
+		}
+		if focus < 0 || !strings.Contains(stripANSI(lines[focus]), "❯ pyright") {
+			t.Fatalf("width %d: focus row %d is not the selected server:\n%s", width, focus, joined)
+		}
+	}
+
+	off := lspSnapshotForPanel()
+	off.FeatureEnabled = false
+	panel = &uiPanel{kind: "lsp", page: "list", lsp: &off, notice: map[string]string{}}
+	if _, focus := panelTestLines(panel, 80, "⠋"); focus < 0 || true {
+		lines, _ := panelTestLines(panel, 80, "⠋")
+		if !strings.Contains(stripANSI(strings.Join(lines, "\n")), "Turned off by features.lsp") {
+			t.Fatalf("feature off subtitle:\n%s", stripANSI(strings.Join(lines, "\n")))
+		}
+	}
+}
+
+// TestLSPPanelDetailAndActions pins the drill-down: the detail facts, the
+// action rows per state, the Disable action's reply as the notice, install
+// output while an install runs, and Esc returning to the row it opened.
+func TestLSPPanelDetailAndActions(t *testing.T) {
+	session := &fakeLSPPanelSession{snapshot: lspSnapshotForPanel(), replies: map[string]string{
+		"set":     "Disabled. Its instances in this project have stopped.",
+		"restart": "Restarting…",
+		"install": "Installing: npm install -g pyright",
+		"reset":   "Recommendations are back on.",
+	}}
+	snap := session.snapshot
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, lspSession: session, notice: map[string]string{}}
+
+	panelAccept(panel) // gopls
+	if panel.page != "detail" || panel.server != "gopls" {
+		t.Fatalf("accept on list = %q/%q", panel.page, panel.server)
+	}
+	lines, _ := panelTestLines(panel, 100, "⠋")
+	detail := stripANSI(strings.Join(lines, "\n"))
+	folded := strings.Join(strings.Fields(detail), " ")
+	for _, want := range []string{
+		"gopls language server",
+		"State: ✓ ready · 2 errors",
+		"Languages: Go",
+		"Binary: /usr/local/bin/gopls · v0.20.0",
+		"Processes: 4242",
+		"Open files: 3",
+		"Log: /state/lsp/gopls-ab12cd34.log",
+		"Writes into project: .gopls",
+		"Disable",
+		"Restart",
+	} {
+		if !strings.Contains(folded, want) {
+			t.Fatalf("detail missing %q:\n%s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "Install:") {
+		t.Fatalf("a ready server offers no install:\n%s", detail)
+	}
+
+	rows := panelSelectableRows(panel)
+	if len(rows) != 2 || rows[0].action != panelLSPDisable || rows[1].action != panelLSPRestart {
+		t.Fatalf("ready server rows = %+v", rows)
+	}
+	panelAccept(panel) // Disable
+	if len(session.actions) != 1 || session.actions[0] != "enabled=false gopls" {
+		t.Fatalf("actions = %v", session.actions)
+	}
+	if panel.notice["gopls"] != "Disabled. Its instances in this project have stopped." {
+		t.Fatalf("notice = %q", panel.notice["gopls"])
+	}
+
+	if !panel.back() || panel.page != "list" || panel.cursor != 0 {
+		t.Fatalf("back from detail = %q cursor %d", panel.page, panel.cursor)
+	}
+	if panel.back() {
+		t.Fatal("back at the list must close the panel")
+	}
+
+	// A not-installed server offers Enable and the install, with the command
+	// in the install row.
+	panel.cursor = 1
+	panelAccept(panel) // pyright
+	rows = panelSelectableRows(panel)
+	if len(rows) != 2 || rows[0].action != panelLSPEnable || rows[1].action != panelLSPInstall || rows[1].label != "Install: npm install -g pyright" {
+		t.Fatalf("not-installed rows = %+v", rows)
+	}
+	snap.Servers[1].Installing = true
+	snap.Servers[1].InstallLog = []string{"npm warn deprecated"}
+	snap.Servers[1].InstallError = "npm ERR! code E404\nnpm ERR! 404 Not Found"
+	lines, _ = panelTestLines(panel, 100, "⠋")
+	installing := stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{"⠋ installing…", "Install output", "npm ERR! code E404", "npm warn deprecated"} {
+		if !strings.Contains(installing, want) {
+			t.Fatalf("installing detail missing %q:\n%s", want, installing)
+		}
+	}
+	rows = panelSelectableRows(panel) // installing: the install row is gone, Enable stays
+	if len(rows) != 1 || rows[0].action != panelLSPEnable {
+		t.Fatalf("an installing server offers no install: %+v", rows)
+	}
+}
+
+// The reset-recommendations row on the list runs the reset and shows its
+// reply at the list level.
+func TestLSPPanelResetRecommendationsRow(t *testing.T) {
+	session := &fakeLSPPanelSession{snapshot: lspSnapshotForPanel(), replies: map[string]string{"reset": "Recommendations are back on."}}
+	snap := session.snapshot
+	snap.RecommendationsDisabled = true
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, lspSession: session, notice: map[string]string{}, cursor: 2}
+	rows := panelSelectableRows(panel)
+	if len(rows) != 3 || rows[2].action != panelLSPResetRecs {
+		t.Fatalf("rows = %+v", rows)
+	}
+	panelAccept(panel)
+	if len(session.actions) != 1 || session.actions[0] != "reset-recommendations" {
+		t.Fatalf("actions = %v", session.actions)
+	}
+	lines, _ := panelTestLines(panel, 100, "⠋")
+	if !strings.Contains(stripANSI(strings.Join(lines, "\n")), "Recommendations are back on.") {
+		t.Fatalf("list must show the reset reply:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
+// A status tick re-reads the snapshot, so a server that changed state
+// repaints without a key.
+func TestLSPPanelRefreshOnTick(t *testing.T) {
+	session := &fakeLSPPanelSession{snapshot: lspSnapshotForPanel()}
+	snap := session.snapshot
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, lspSession: session, notice: map[string]string{}}
+	session.mu.Lock()
+	session.snapshot.Servers[0].State = event.LSPStateIndexing
+	session.snapshot.Servers[0].IndexingPercent = 17
+	session.mu.Unlock()
+	panel.refreshLSP()
+	if panel.lsp.Servers[0].State != event.LSPStateIndexing || panel.lsp.Servers[0].IndexingPercent != 17 {
+		t.Fatalf("snapshot was not refreshed: %+v", panel.lsp.Servers[0])
+	}
+	lines, _ := panelTestLines(panel, 100, "⠋")
+	if !strings.Contains(stripANSI(strings.Join(lines, "\n")), "indexing… 17%") {
+		t.Fatalf("refreshed list:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
 func mcpToolsForPanel(server string) []*llm.Tool {
 	tool, err := llm.NewRawTool("mcp__"+server+"__search", "Search the code graph",
 		map[string]any{
@@ -4182,5 +4428,174 @@ func TestResumeLeavesOutTheConversationOnScreen(t *testing.T) {
 	}
 	if _, listed := promptRecentSession(context.Background(), &fakeSession{recent: []SessionSummary{{ID: "on-screen"}}}, sel, func(context.Context) (string, error) { return "", nil }, "on-screen"); listed {
 		t.Fatal("a picker was offered with nothing else to resume")
+	}
+}
+
+// lspReviewSelector answers one Review with a scripted outcome and records
+// what the recommendation modal asked.
+type lspReviewSelector struct {
+	label      string
+	facts      []turn.StatusFact
+	actions    []string
+	defaultIdx int
+	answer     int
+	confirmed  bool
+	err        error
+}
+
+func (s *lspReviewSelector) Select(string, []string, string) (string, bool, error) {
+	return "", false, fmt.Errorf("unexpected select")
+}
+
+func (s *lspReviewSelector) MultiSelect(string, []string, []string) ([]string, bool, error) {
+	return nil, false, fmt.Errorf("unexpected multiselect")
+}
+
+func (s *lspReviewSelector) Input(string, string) (string, bool, error) {
+	return "", false, fmt.Errorf("unexpected input")
+}
+
+func (s *lspReviewSelector) Secret(string, string) (string, bool, error) {
+	return "", false, fmt.Errorf("unexpected secret")
+}
+
+func (s *lspReviewSelector) Confirm(string, bool) (bool, bool, error) {
+	return false, false, fmt.Errorf("unexpected confirm")
+}
+
+func (s *lspReviewSelector) SelectRich(string, []SelectItem, int) (int, bool, error) {
+	return -1, false, fmt.Errorf("unexpected selectrich")
+}
+
+func (s *lspReviewSelector) Review(label string, facts []turn.StatusFact, actions []string, defaultIdx int) (int, bool, error) {
+	s.label, s.facts, s.actions, s.defaultIdx = label, facts, actions, defaultIdx
+	return s.answer, s.confirmed, s.err
+}
+
+// lspDeciderStub records the answer the modal applied.
+type lspDeciderStub struct {
+	rec    event.LSPRecommendation
+	choice event.LSPRecommendationChoice
+	text   string
+	err    error
+}
+
+func (d *lspDeciderStub) DecideLSPRecommendation(rec event.LSPRecommendation, choice event.LSPRecommendationChoice) (string, error) {
+	d.rec, d.choice = rec, choice
+	return d.text, d.err
+}
+
+// The recommendation modal maps its four actions — and Escape, and a
+// selector failure — onto the five answers, opens on the safe choice in
+// install mode, and shows the facts the spec spells out.
+func TestLSPRecommendationModalChoices(t *testing.T) {
+	enableRec := event.LSPRecommendation{
+		ID: "lsprec-1", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"},
+		TriggerExtension: ".go", Mode: "enable", BinaryPath: "/usr/local/bin/gopls", Version: "v0.23.0",
+	}
+	cases := []struct {
+		name       string
+		rec        event.LSPRecommendation
+		answer     int
+		confirmed  bool
+		selectorEr error
+		want       event.LSPRecommendationChoice
+	}{
+		{name: "action zero enables", rec: enableRec, answer: 0, confirmed: true, want: event.LSPChoiceEnable},
+		{name: "action one is not now", rec: enableRec, answer: 1, confirmed: true, want: event.LSPChoiceNotNow},
+		{name: "action two is never", rec: enableRec, answer: 2, confirmed: true, want: event.LSPChoiceNever},
+		{name: "action three disables all", rec: enableRec, answer: 3, confirmed: true, want: event.LSPChoiceDisableAll},
+		{name: "escape is not now", rec: enableRec, confirmed: false, want: event.LSPChoiceNotNow},
+		{name: "a selector error still answers not now", rec: enableRec, confirmed: true, selectorEr: errors.New("no tty"), want: event.LSPChoiceNotNow},
+		{name: "install mode action zero installs", rec: event.LSPRecommendation{
+			ID: "lsprec-2", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"},
+			TriggerExtension: ".go", Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest",
+		}, answer: 0, confirmed: true, want: event.LSPChoiceInstall},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forcedTermWidth = 80
+			forcedTermHeight = 24
+			t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+			var out bytes.Buffer
+			renderer := NewRenderer(&out, &out)
+			renderer.EnableViewportMode()
+			t.Cleanup(renderer.DisableViewportMode)
+			sel := &lspReviewSelector{answer: tc.answer, confirmed: tc.confirmed, err: tc.selectorEr}
+			decider := &lspDeciderStub{text: "the transcript line"}
+			state := &streamState{}
+			handleLSPRecommendation(renderer, sel, state, decider, tc.rec)
+
+			if decider.rec.ID != tc.rec.ID || decider.choice != tc.want {
+				t.Fatalf("decided %q for %q, want choice %q", decider.choice, decider.rec.ID, tc.want)
+			}
+			wantDefault := 0
+			if tc.rec.Mode == "install" {
+				wantDefault = 1 // the install command must not sit under Enter
+			}
+			if sel.defaultIdx != wantDefault {
+				t.Fatalf("modal opened on %d, want %d", sel.defaultIdx, wantDefault)
+			}
+			if state.suppressQueueAutosend {
+				t.Fatal("queue autosend is still suppressed after the answer was applied")
+			}
+			if !strings.Contains(out.String(), "the transcript line") {
+				t.Fatalf("the result line never rendered:\n%s", out.String())
+			}
+		})
+	}
+
+	t.Run("the question is the spec's", func(t *testing.T) {
+		var out bytes.Buffer
+		sel := &lspReviewSelector{answer: 1, confirmed: true}
+		handleLSPRecommendation(NewRenderer(&out, &out), sel, &streamState{}, &lspDeciderStub{}, enableRec)
+		if sel.label != "LSP recommendation\nA language server gives the agent diagnostics after its edits and lets it find definitions and references by symbol. Enable this language server?" {
+			t.Fatalf("label = %q", sel.label)
+		}
+		wantFacts := []turn.StatusFact{
+			{Label: "Server", Value: "gopls (Go)"},
+			{Label: "Found", Value: "/usr/local/bin/gopls (v0.23.0)"},
+			{Label: "Triggered by", Value: ".go files"},
+			{Label: "Runs", Value: "in this trusted project, outside the sandbox"},
+		}
+		if !reflect.DeepEqual(sel.facts, wantFacts) {
+			t.Fatalf("facts = %+v", sel.facts)
+		}
+		wantActions := []string{"Yes, enable", "No, not now", "Never for gopls", "Disable all LSP recommendations"}
+		if !reflect.DeepEqual(sel.actions, wantActions) {
+			t.Fatalf("actions = %v", sel.actions)
+		}
+	})
+}
+
+// An install-mode recommendation says what it would run instead of where
+// the binary is.
+func TestLSPRecommendationInstallFacts(t *testing.T) {
+	var out bytes.Buffer
+	sel := &lspReviewSelector{answer: 1, confirmed: true}
+	rec := event.LSPRecommendation{
+		ID: "lsprec-3", ServerID: "pyright", DisplayName: "pyright", Languages: []string{"Python"},
+		TriggerExtension: ".py", Mode: "install", InstallCommand: "npm install -g pyright",
+	}
+	handleLSPRecommendation(NewRenderer(&out, &out), sel, &streamState{}, &lspDeciderStub{}, rec)
+	for _, fact := range sel.facts {
+		if fact.Label == "Found" && fact.Value == "Not installed. Install with: npm install -g pyright" {
+			return
+		}
+	}
+	t.Fatalf("Found fact = %+v, want the install command", sel.facts)
+}
+
+// A binary path under the user's home is shown the way a prompt shows it.
+func TestTildePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	if got := tildePath(filepath.Join(home, "go", "bin", "gopls")); got != "~/go/bin/gopls" {
+		t.Fatalf("tildePath = %q", got)
+	}
+	if got := tildePath("/usr/local/bin/gopls"); got != "/usr/local/bin/gopls" {
+		t.Fatalf("tildePath outside home = %q", got)
 	}
 }

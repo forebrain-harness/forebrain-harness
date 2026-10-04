@@ -669,6 +669,22 @@ func permissionToolName(kind string) string {
 	return k
 }
 
+// permissionToolNameFor maps a tool kind onto the policy name its rules are
+// written against, taking the payload into account where one kind answers to
+// two policies. The lsp tool is that case: a call that names a file reads that
+// file, so the Read rules govern it, while the file-less workspace symbol
+// search is the read-only LSP policy itself.
+func permissionToolNameFor(kind string, payload map[string]any) string {
+	k := strings.TrimSpace(kind)
+	if strings.EqualFold(k, "lsp") {
+		if p, ok := payload["file_path"].(string); ok && strings.TrimSpace(p) != "" {
+			return "Read"
+		}
+		return "LSP"
+	}
+	return permissionToolName(k)
+}
+
 func permissionInput(kind string, payload map[string]any) string {
 	k := strings.TrimSpace(kind)
 	switch {
@@ -681,7 +697,8 @@ func permissionInput(kind string, payload map[string]any) string {
 	case strings.EqualFold(k, "read_file"),
 		strings.EqualFold(k, "write_file"),
 		strings.EqualFold(k, "edit_file"),
-		strings.EqualFold(k, "multi_edit"):
+		strings.EqualFold(k, "multi_edit"),
+		strings.EqualFold(k, "lsp"):
 		if p, ok := payload["file_path"].(string); ok {
 			return strings.TrimSpace(p)
 		}
@@ -721,7 +738,7 @@ func permissionInput(kind string, payload map[string]any) string {
 // sandbox denies it, and the same rule reappears one escalation later — the
 // grant applying only after a failed attempt instead of on the first one.
 func (r *Runner) evaluateToolPermission(sessionID, kind string, payload map[string]any) safety.Decision {
-	toolName := permissionToolName(kind)
+	toolName := permissionToolNameFor(kind, payload)
 	input := permissionInput(kind, payload)
 	decision := r.EvaluatePermissionForSession(sessionID, toolName, input)
 	if decision.Matched != nil {

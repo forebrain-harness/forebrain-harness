@@ -1129,3 +1129,43 @@ func TestShellOutputDeltasCarryTheCallsStart(t *testing.T) {
 		}
 	}
 }
+
+func TestShellNotifiesCodeIntel(t *testing.T) {
+	// A finished command may have changed files the edit tools never saw, so
+	// the runtime is told once per command — after the result is in hand, and
+	// even when the command failed (its files may still have changed).
+	st := NewState(t.TempDir())
+	stub := &editDiagStub{}
+	shell, err := NewShellTool(st, &AgentToolRuntime{
+		Cfg:       &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+		CodeIntel: stub,
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	if _, err := shell.Handle(context.Background(), `{"command":"printf hi"}`); err != nil {
+		t.Fatalf("shell Handle: %v", err)
+	}
+	if stub.runShells != 1 {
+		t.Fatalf("DidRunShell calls=%d want 1", stub.runShells)
+	}
+	if _, err := shell.Handle(context.Background(), `{"command":"false"}`); err != nil {
+		t.Fatalf("failing command must not fail the tool: %v", err)
+	}
+	if stub.runShells != 2 {
+		t.Fatalf("DidRunShell calls after failure=%d want 2", stub.runShells)
+	}
+	// No runtime wired: nothing to notify, and nothing may panic.
+	plain, err := NewShellTool(st, &AgentToolRuntime{
+		Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	if _, err := plain.Handle(context.Background(), `{"command":"printf hi"}`); err != nil {
+		t.Fatalf("shell Handle without code intel: %v", err)
+	}
+	if stub.runShells != 2 {
+		t.Fatalf("stub must stay untouched, calls=%d", stub.runShells)
+	}
+}

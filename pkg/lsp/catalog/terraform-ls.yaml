@@ -1,0 +1,17 @@
+id: terraform-ls
+display_name: Terraform Language Server
+languages: [Terraform]
+priority: 100
+command: terraform-ls
+args: [serve]
+extension_to_language: {.tf: terraform, .tfvars: terraform-vars}
+root_markers: [.terraform.lock.hcl, .terraform]
+env_passthrough: [TF_CLI_CONFIG_FILE, TF_PLUGIN_CACHE_DIR, TF_DATA_DIR]
+detect:
+  version_args: [version]
+install:
+  - requires: brew
+    platforms: [darwin, linux]
+    argv: [brew, install, hashicorp/tap/terraform-ls]
+readiness: progress
+notes: "Install with brew from the hashicorp tap, or download terraform-ls from releases.hashicorp.com."

@@ -205,6 +205,8 @@ func Run(ctx context.Context, opts Options) error {
 			opened = openStatusPanel(&state)
 		case "mcp":
 			opened = openMCPPanel(&state)
+		case "lsp":
+			opened = openLSPPanel(&state)
 		}
 		// Painted at once: a panel opened during a run has no idle-loop
 		// iteration coming to draw it.
@@ -251,6 +253,12 @@ func Run(ctx context.Context, opts Options) error {
 		case MCPStatusTickMsg:
 			if state.panel != nil && state.panel.kind == "mcp" {
 				state.panel.refreshInventory()
+				drawUIPanel(renderer, &state)
+			}
+			return
+		case LSPStatusTickMsg:
+			if state.panel != nil && state.panel.kind == "lsp" {
+				state.panel.refreshLSP()
 				drawUIPanel(renderer, &state)
 			}
 			return
@@ -475,6 +483,27 @@ func Run(ctx context.Context, opts Options) error {
 				return
 			}
 			renderer.RenderFrame(migrationReportFrame(title, migration.Report))
+		}
+		// A language-server recommendation is a modal like the migration
+		// preview: it can open mid-turn, the agent keeps working, and queued
+		// input waits until the answer is applied. The install it can start
+		// owns the transient line for as long as it runs.
+		switch lspMsg := m.(type) {
+		case LSPRecommendationMsg:
+			if decider, ok := state.session.(lspRecommendationDecider); ok {
+				handleLSPRecommendation(renderer, selector, &state, decider, lspMsg.Rec)
+			}
+		case LSPInstallProgressMsg:
+			renderer.RenderTransientStatus(transientSourceLSP, "lsp: installing "+lspMsg.ServerID+" · "+lspMsg.Line)
+		case LSPInstallDoneMsg:
+			renderer.FinishTransientStatus(transientSourceLSP)
+			if lspMsg.Err != "" {
+				renderer.RenderFrame(Frame{Kind: FrameError, Title: lspMsg.ServerID + " install failed", Content: lspMsg.Err, Final: true})
+				return
+			}
+			if lspMsg.Text != "" {
+				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: lspMsg.Text, Final: true})
+			}
 		}
 		// A skill install runs in the background and owns one card in the
 		// transcript: every checkpoint replaces it, and the finished install
@@ -1142,6 +1171,9 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	case "mcp":
 		_ = cmds.handleMCP(state.sessionID)
 		return true, false, ComposerSubmission{}, false
+	case "lsp":
+		_ = cmds.handleLSP(state.sessionID)
+		return true, false, ComposerSubmission{}, false
 	case "migrate":
 		_ = cmds.handleMigrate(ctx, state.sessionID)
 		return true, false, ComposerSubmission{}, false
@@ -1412,6 +1444,86 @@ func (t *foregroundTurn) isWithdrawn() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.withdrawn
+}
+
+// lspRecommendationDecider is the session slice of the recommendation
+// modal: the answer goes back through the control plane, and the line it
+// returns is the transcript's record of what was decided.
+type lspRecommendationDecider interface {
+	DecideLSPRecommendation(event.LSPRecommendation, event.LSPRecommendationChoice) (string, error)
+}
+
+// handleLSPRecommendation asks the recommendation's modal question and
+// applies the answer. Like the migration preview, the modal can open while
+// a turn runs: the agent keeps working, and queued input waits until the
+// answer is applied. The result line goes to the transcript only — it never
+// reaches the model's context.
+func handleLSPRecommendation(renderer *Renderer, selector Selector, state *streamState, decider lspRecommendationDecider, rec event.LSPRecommendation) {
+	state.deferQueueAutosendUntilSelectionApplied()
+	defer state.resumeQueueAutosend()
+	label := "LSP recommendation\nA language server gives the agent diagnostics after its edits and lets it find definitions and references by symbol. Enable this language server?"
+	found := ""
+	if rec.Mode == "install" {
+		found = "Not installed. Install with: " + rec.InstallCommand
+	} else {
+		found = tildePath(rec.BinaryPath)
+		if rec.Version != "" {
+			found += " (" + rec.Version + ")"
+		}
+	}
+	facts := []turn.StatusFact{
+		{Label: "Server", Value: rec.DisplayName + " (" + strings.Join(rec.Languages, ", ") + ")"},
+		{Label: "Found", Value: found},
+		{Label: "Triggered by", Value: rec.TriggerExtension + " files"},
+		{Label: "Runs", Value: "in this trusted project, outside the sandbox"},
+	}
+	primaryAction, primaryChoice := "Yes, enable", event.LSPChoiceEnable
+	defaultIdx := 0
+	if rec.Mode == "install" {
+		// Running an install command must not be one keypress away.
+		primaryAction, primaryChoice = "Yes, install and enable", event.LSPChoiceInstall
+		defaultIdx = 1
+	}
+	actions := []string{primaryAction, "No, not now", "Never for " + rec.ServerID, "Disable all LSP recommendations"}
+	idx, confirmed, err := selector.Review(label, facts, actions, defaultIdx)
+	choice := event.LSPChoiceNotNow
+	switch {
+	case err != nil:
+		renderer.PrintError(err)
+	case confirmed:
+		switch idx {
+		case 0:
+			choice = primaryChoice
+		case 2:
+			choice = event.LSPChoiceNever
+		case 3:
+			choice = event.LSPChoiceDisableAll
+		}
+	}
+	text, decideErr := decider.DecideLSPRecommendation(rec, choice)
+	if decideErr != nil {
+		renderer.PrintError(decideErr)
+		return
+	}
+	if text != "" {
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: text, Final: true})
+	}
+}
+
+// tildePath shortens the user's own home-directory prefix to ~, the way a
+// prompt shows a path that lives there.
+func tildePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || p == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~" + p[len(home):]
+	}
+	return p
 }
 
 // finish closes the withdrawal window before ordinary outcome persistence. If
@@ -4424,10 +4536,11 @@ const uiPanelPageRows = 10
 // notifications keep flowing (so the transcript above keeps streaming), and
 // the panel yields the moment an approval or question needs the composer area.
 type uiPanel struct {
-	kind string // "status" | "mcp"
+	kind string // "status" | "mcp" | "lsp"
 	tab  int    // status: 0 = Status, 1 = Usage
 	// mcp navigation: page is "list", "detail", "tools", "tool" or
-	// "resources"; cursor indexes the page's selectable rows.
+	// "resources"; lsp: "list" or "detail"; cursor indexes the page's
+	// selectable rows. server is the open server's id on both panels.
 	page   string
 	cursor int
 	server string
@@ -4444,8 +4557,13 @@ type uiPanel struct {
 	status    *turn.StatusReport
 	inv       *turn.MCPInventory
 	cancelMCP func() // stops the MCP status subscription
-	session   panelSession
-	sessionID string
+	// lsp is the open /lsp panel's snapshot; lspSession runs its actions,
+	// cancelLSP stops the snapshot subscription.
+	lsp        *event.LSPSnapshot
+	lspSession lspPanelSession
+	cancelLSP  func()
+	session    panelSession
+	sessionID  string
 }
 
 // panelAuthFlow is one OAuth flow started from the panel.
@@ -4471,6 +4589,19 @@ type panelSession interface {
 	PanelSetMCPDisabled(serverName string, disable bool) (string, error)
 	PanelListMCPResources(serverName string)
 	SubscribeMCPStatusTick() (cancel func(), ok bool)
+}
+
+// lspPanelSession is what a session must expose for the /lsp panel. It is a
+// separate interface so the status and mcp test doubles do not have to grow
+// LSP methods; every call returns at once — an install runs in the background
+// and reports through the snapshot.
+type lspPanelSession interface {
+	PanelLSPSnapshot() (event.LSPSnapshot, error)
+	PanelSetLSPEnabled(serverID string, enabled bool) (string, error)
+	PanelRestartLSP(serverID string) (string, error)
+	PanelInstallLSP(serverID string) (string, error)
+	PanelResetLSPRecommendations() (string, error)
+	SubscribeLSPStatus() (cancel func(), ok bool)
 }
 
 // openStatusPanel builds the /status panel. Called from the slash dispatch on
@@ -4512,13 +4643,41 @@ func openMCPPanel(state *streamState) bool {
 	return true
 }
 
+// openLSPPanel builds the /lsp panel and subscribes to snapshot changes so a
+// starting, indexing or installing server repaints in place.
+func openLSPPanel(state *streamState) bool {
+	ls, ok := state.session.(lspPanelSession)
+	if !ok || interactiveInputPauseDepth.Load() > 0 {
+		return false
+	}
+	snap, err := ls.PanelLSPSnapshot()
+	if err != nil {
+		return false
+	}
+	setUIPanelActive(true)
+	panel := &uiPanel{
+		kind: "lsp", page: "list", lsp: &snap, lspSession: ls, sessionID: state.sessionID, top: true,
+		notice: map[string]string{},
+	}
+	if cancel, subscribed := ls.SubscribeLSPStatus(); subscribed {
+		panel.cancelLSP = cancel
+	}
+	state.panel = panel
+	return true
+}
+
 // closeUIPanel tears the panel down and hands the composer block back:
 // EndOverlay is what erases the panel's taller block before the composer
 // repaints underneath it.
 func closeUIPanel(renderer *Renderer, state *streamState) {
 	setUIPanelActive(false)
-	if state.panel != nil && state.panel.cancelMCP != nil {
-		state.panel.cancelMCP()
+	if state.panel != nil {
+		if state.panel.cancelMCP != nil {
+			state.panel.cancelMCP()
+		}
+		if state.panel.cancelLSP != nil {
+			state.panel.cancelLSP()
+		}
 	}
 	state.panel = nil
 	if renderer != nil {
@@ -4534,6 +4693,17 @@ func (panel *uiPanel) refreshInventory() {
 	}
 	if inv, err := panel.session.PanelMCPInventory(); err == nil {
 		panel.inv = inv
+	}
+}
+
+// refreshLSP re-reads the /lsp panel's snapshot. It never blocks: an install
+// or a probe still in flight reports through the next LSPStatusTickMsg.
+func (panel *uiPanel) refreshLSP() {
+	if panel == nil || panel.kind != "lsp" || panel.lspSession == nil {
+		return
+	}
+	if snap, err := panel.lspSession.PanelLSPSnapshot(); err == nil {
+		panel.lsp = &snap
 	}
 }
 
@@ -4592,9 +4762,25 @@ func handleUIPanelKey(renderer *Renderer, state *streamState, ev inputEvent) boo
 	return true
 }
 
-// back returns to the previous mcp page; at the top it reports false, which
-// closes the panel.
+// back returns to the previous mcp or lsp page; at the top it reports false,
+// which closes the panel.
 func (panel *uiPanel) back() bool {
+	if panel.kind == "lsp" {
+		if panel.page != "detail" {
+			return false
+		}
+		panel.page = "list"
+		panel.cursor = 0
+		// The cursor lands back on the row that was opened.
+		for i, row := range panelSelectableRows(panel) {
+			if row.action == panelOpenDetail && row.value == panel.server {
+				panel.cursor = i
+				break
+			}
+		}
+		panel.top = true
+		return true
+	}
 	if panel.kind != "mcp" {
 		return false
 	}
@@ -4646,8 +4832,12 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// panelAccept runs the highlighted row's action on the mcp panel.
+// panelAccept runs the highlighted row's action on the mcp or lsp panel.
 func panelAccept(panel *uiPanel) {
+	if panel.kind == "lsp" {
+		panelAcceptLSP(panel)
+		return
+	}
 	if panel.kind != "mcp" {
 		return
 	}
@@ -4723,7 +4913,50 @@ const (
 	panelAuth          panelRowAction = "auth"
 	panelDisable       panelRowAction = "disable"
 	panelEnable        panelRowAction = "enable"
+
+	panelLSPEnable    panelRowAction = "lsp-enable"
+	panelLSPDisable   panelRowAction = "lsp-disable"
+	panelLSPRestart   panelRowAction = "lsp-restart"
+	panelLSPInstall   panelRowAction = "lsp-install"
+	panelLSPResetRecs panelRowAction = "lsp-reset-recommendations"
 )
+
+// panelAcceptLSP runs the highlighted /lsp row: navigation moves pages, every
+// action goes through the session and lands its reply (or its error text) in
+// the notice the page shows in place.
+func panelAcceptLSP(panel *uiPanel) {
+	rows := panelSelectableRows(panel)
+	if panel.cursor < 0 || panel.cursor >= len(rows) {
+		return
+	}
+	row := rows[panel.cursor]
+	run := func(key string, reply string, err error) {
+		if err != nil {
+			reply = err.Error()
+		}
+		panel.notice[key] = reply
+		panel.refreshLSP()
+	}
+	switch row.action {
+	case panelOpenDetail:
+		panel.server = row.value
+		panel.page = "detail"
+		panel.cursor = 0
+		panel.top = true
+	case panelLSPEnable, panelLSPDisable:
+		reply, err := panel.lspSession.PanelSetLSPEnabled(row.value, row.action == panelLSPEnable)
+		run(row.value, reply, err)
+	case panelLSPRestart:
+		reply, err := panel.lspSession.PanelRestartLSP(row.value)
+		run(row.value, reply, err)
+	case panelLSPInstall:
+		reply, err := panel.lspSession.PanelInstallLSP(row.value)
+		run(row.value, reply, err)
+	case panelLSPResetRecs:
+		reply, err := panel.lspSession.PanelResetLSPRecommendations()
+		run("", reply, err)
+	}
+}
 
 // panelRow is one selectable row of an mcp page.
 type panelRow struct {
@@ -4732,11 +4965,17 @@ type panelRow struct {
 	value  string
 }
 
-// panelSelectableRows returns the mcp page's cursor-addressable rows, and
-// only those: text a row cannot act on (a group title, "Required by config")
-// is drawn around them, never selected.
+// panelSelectableRows returns the page's cursor-addressable rows, and only
+// those: text a row cannot act on (a group title, "Required by config") is
+// drawn around them, never selected.
 func panelSelectableRows(panel *uiPanel) []panelRow {
-	if panel == nil || panel.inv == nil {
+	if panel == nil {
+		return nil
+	}
+	if panel.kind == "lsp" {
+		return lspPanelRows(panel)
+	}
+	if panel.inv == nil {
 		return nil
 	}
 	switch panel.page {
@@ -4781,6 +5020,63 @@ func panelSelectableRows(panel *uiPanel) []panelRow {
 			rows = append(rows, panelRow{label: t.Name, action: panelOpenTool, value: t.Name})
 		}
 		return rows
+	}
+	return nil
+}
+
+// lspPanelRows returns the /lsp panel's rows: the list offers one row per
+// server (snapshot order, enabled first) plus the recommendations switch-back
+// when they are off; the detail page offers only the actions its state makes
+// sense of.
+func lspPanelRows(panel *uiPanel) []panelRow {
+	if panel.lsp == nil {
+		return nil
+	}
+	switch panel.page {
+	case "list":
+		rows := make([]panelRow, 0, len(panel.lsp.Servers)+1)
+		for _, s := range panel.lsp.Servers {
+			rows = append(rows, panelRow{label: s.ID, action: panelOpenDetail, value: s.ID})
+		}
+		if panel.lsp.RecommendationsDisabled {
+			rows = append(rows, panelRow{label: "Turn recommendations back on", action: panelLSPResetRecs})
+		}
+		return rows
+	case "detail":
+		s := lspPanelServer(panel)
+		if s == nil {
+			return nil
+		}
+		var rows []panelRow
+		if !s.Enabled && s.State != event.LSPStateBlocked {
+			rows = append(rows, panelRow{label: "Enable", action: panelLSPEnable, value: s.ID})
+		}
+		if s.Enabled {
+			rows = append(rows, panelRow{label: "Disable", action: panelLSPDisable, value: s.ID})
+		}
+		if s.Enabled {
+			switch s.State {
+			case event.LSPStateReady, event.LSPStateIndexing, event.LSPStateStarting, event.LSPStateFailed:
+				rows = append(rows, panelRow{label: "Restart", action: panelLSPRestart, value: s.ID})
+			}
+		}
+		if s.State == event.LSPStateNotInstalled && s.InstallCommand != "" && !s.Installing {
+			rows = append(rows, panelRow{label: "Install: " + s.InstallCommand, action: panelLSPInstall, value: s.ID})
+		}
+		return rows
+	}
+	return nil
+}
+
+// lspPanelServer finds the detail page's server in the current snapshot.
+func lspPanelServer(panel *uiPanel) *event.LSPServerStatus {
+	if panel == nil || panel.lsp == nil {
+		return nil
+	}
+	for i := range panel.lsp.Servers {
+		if panel.lsp.Servers[i].ID == panel.server {
+			return &panel.lsp.Servers[i]
+		}
 	}
 	return nil
 }

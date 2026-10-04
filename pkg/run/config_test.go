@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -465,4 +466,148 @@ func toolTableWithoutSkills(t *testing.T) string {
 		t.Fatalf("load skill-free runtime: %v", err)
 	}
 	return renderedToolTable(t, bare)
+}
+
+// lspLateStub is the CodeIntelligence port with only the late-diagnostics
+// half live: PeekLate answers from fields, AckLate records what the wrapper
+// acknowledged. The rest of the port stays inert.
+type lspLateStub struct {
+	text  string
+	token uint64
+	peeks int
+	acks  []struct {
+		sid   string
+		token uint64
+	}
+}
+
+func (s *lspLateStub) Handles(absPath string) bool { return false }
+
+func (s *lspLateStub) Query(ctx context.Context, q tool.CodeIntelQuery) (tool.CodeIntelResult, error) {
+	return tool.CodeIntelResult{}, nil
+}
+
+func (s *lspLateStub) DidWrite(ctx context.Context, agentSessionID string, changes []tool.FileChange) tool.DiagnosticsDelta {
+	return tool.DiagnosticsDelta{}
+}
+
+func (s *lspLateStub) DidRead(ctx context.Context, absPath string, content []byte) {}
+
+func (s *lspLateStub) DidRunShell(ctx context.Context) {}
+
+func (s *lspLateStub) PeekLate(agentSessionID string) (string, uint64) {
+	s.peeks++
+	return s.text, s.token
+}
+
+func (s *lspLateStub) AckLate(agentSessionID string, token uint64) {
+	s.acks = append(s.acks, struct {
+		sid   string
+		token uint64
+	}{agentSessionID, token})
+}
+
+// lspRecordingLLM captures what the wrapper handed the inner client, and can
+// be scripted to fail so the caller's acknowledgement path is observable.
+type lspRecordingLLM struct {
+	err     error
+	gotMsgs []llm.Message
+	calls   int
+}
+
+func (m *lspRecordingLLM) Execute(_ context.Context, msgs []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	m.gotMsgs = append([]llm.Message(nil), msgs...)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &llm.Result{Message: &llm.Message{Role: llm.RoleAssistant}}, nil
+}
+
+func TestLSPReminderAppendedAndAcked(t *testing.T) {
+	late := "Language server diagnostics changed for files you edited earlier in this session:"
+	stub := &lspLateStub{text: late, token: 7}
+	inner := &lspRecordingLLM{}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	sink := &reminderAdoptionSink{}
+	ctx := withReminderAdoptionSink(llm.WithAgentSessionID(context.Background(), "sess-late"), sink)
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(ctx, base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls=%d want 1", inner.calls)
+	}
+	if len(inner.gotMsgs) != 2 {
+		t.Fatalf("messages=%d want 2 (request plus reminder)", len(inner.gotMsgs))
+	}
+	last := inner.gotMsgs[len(inner.gotMsgs)-1]
+	if last.Role != llm.RoleUser || !last.IsMeta {
+		t.Fatalf("reminder must be an IsMeta user message, got %+v", last)
+	}
+	if got := llm.TextContent(last.Parts...); got != "<system-reminder>\n"+late+"\n</system-reminder>" {
+		t.Fatalf("reminder body=%q", got)
+	}
+	// The incoming request is appended to, never mutated in place.
+	if len(base) != 1 {
+		t.Fatalf("caller's slice mutated: %d", len(base))
+	}
+	// The reminder is published to the orchestration loop at the request's end.
+	adopted := sink.take()
+	if len(adopted) != 1 || adopted[0].insertAt != 1 {
+		t.Fatalf("reminder adoptions=%+v want one at the end of the request", adopted)
+	}
+	// Delivered once: the token is acknowledged only after the call succeeded.
+	if len(stub.acks) != 1 || stub.acks[0].sid != "sess-late" || stub.acks[0].token != 7 {
+		t.Fatalf("acks=%+v want AckLate(sess-late, 7)", stub.acks)
+	}
+}
+
+func TestLSPReminderNotAckedOnError(t *testing.T) {
+	stub := &lspLateStub{text: "late text", token: 3}
+	inner := &lspRecordingLLM{err: errors.New("provider down")}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	ctx := llm.WithAgentSessionID(context.Background(), "sess-late-err")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("continue"))}, nil); err == nil {
+		t.Fatal("inner error must propagate")
+	}
+	if stub.peeks != 1 {
+		t.Fatalf("PeekLate calls=%d want 1", stub.peeks)
+	}
+	if len(stub.acks) != 0 {
+		t.Fatalf("a failed call must not acknowledge, acks=%+v", stub.acks)
+	}
+}
+
+func TestLSPReminderNoTextNoMessage(t *testing.T) {
+	stub := &lspLateStub{token: 5}
+	inner := &lspRecordingLLM{}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	ctx := llm.WithAgentSessionID(context.Background(), "sess-late-empty")
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(ctx, base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(inner.gotMsgs) != 1 {
+		t.Fatalf("messages=%d want the request unchanged", len(inner.gotMsgs))
+	}
+	if len(stub.acks) != 0 {
+		t.Fatalf("nothing delivered, nothing acknowledged, acks=%+v", stub.acks)
+	}
+}
+
+func TestLSPReminderNeedsSession(t *testing.T) {
+	stub := &lspLateStub{text: "late text", token: 9}
+	inner := &lspRecordingLLM{}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(context.Background(), base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if stub.peeks != 0 {
+		t.Fatalf("PeekLate calls=%d want 0 without an agent session", stub.peeks)
+	}
+	if len(inner.gotMsgs) != 1 {
+		t.Fatalf("messages=%d want the request unchanged", len(inner.gotMsgs))
+	}
 }

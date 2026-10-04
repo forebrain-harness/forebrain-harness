@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	mcpkg "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 )
@@ -228,5 +229,131 @@ func TestStatusConfigFilesListsTheProjectMCPFile(t *testing.T) {
 	got := StatusConfigFiles(cfg, proj)
 	if len(got) != 2 || got[1] != filepath.Join(proj, ".forebrain", "mcp_servers.yaml") {
 		t.Fatalf("config files = %v", got)
+	}
+}
+
+// TestLSPServerStateLabel covers every state's wording, the install override,
+// the indexing percentage's omission at zero, and the problem counts'
+// singular/plural with each zero side omitted.
+func TestLSPServerStateLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		s    event.LSPServerStatus
+		want string
+	}{
+		{"ready", event.LSPServerStatus{State: event.LSPStateReady}, "✓ ready"},
+		{"indexing without percent", event.LSPServerStatus{State: event.LSPStateIndexing}, "indexing…"},
+		{"indexing with percent", event.LSPServerStatus{State: event.LSPStateIndexing, IndexingPercent: 42}, "indexing… 42%"},
+		{"starting", event.LSPServerStatus{State: event.LSPStateStarting}, "starting…"},
+		{"failed", event.LSPServerStatus{State: event.LSPStateFailed}, "✗ failed"},
+		{"stopped", event.LSPServerStatus{State: event.LSPStateStopped}, "○ enabled, not running"},
+		{"available", event.LSPServerStatus{State: event.LSPStateAvailable}, "○ available"},
+		{"not installed", event.LSPServerStatus{State: event.LSPStateNotInstalled}, "– not installed"},
+		{"blocked", event.LSPServerStatus{State: event.LSPStateBlocked}, "△ blocked"},
+		{"installing hides the state", event.LSPServerStatus{State: event.LSPStateReady, Installing: true}, "installing…"},
+		{
+			"enabled with both problems",
+			event.LSPServerStatus{State: event.LSPStateReady, Enabled: true, Errors: 2, Warnings: 1},
+			"✓ ready · 2 errors, 1 warning",
+		},
+		{
+			"enabled with errors only",
+			event.LSPServerStatus{State: event.LSPStateReady, Enabled: true, Errors: 1},
+			"✓ ready · 1 error",
+		},
+		{
+			"enabled with warnings only",
+			event.LSPServerStatus{State: event.LSPStateReady, Enabled: true, Warnings: 3},
+			"✓ ready · 3 warnings",
+		},
+		{
+			"disabled servers carry no problem counts",
+			event.LSPServerStatus{State: event.LSPStateAvailable, Errors: 4, Warnings: 5},
+			"○ available",
+		},
+	}
+	for _, tc := range cases {
+		if got := LSPServerStateLabel(tc.s); got != tc.want {
+			t.Errorf("%s: label = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLSPStatusLine covers the /status row: only enabled servers count, the
+// fixed category order, and the empty answer when none is enabled.
+func TestLSPStatusLine(t *testing.T) {
+	snap := event.LSPSnapshot{Servers: []event.LSPServerStatus{
+		{ID: "a", Enabled: true, State: event.LSPStateReady},
+		{ID: "b", Enabled: true, State: event.LSPStateReady},
+		{ID: "c", Enabled: true, State: event.LSPStateIndexing},
+		{ID: "d", Enabled: true, State: event.LSPStateFailed},
+		{ID: "e", Enabled: false, State: event.LSPStateReady}, // disabled: never counted
+	}}
+	if got := LSPStatusLine(snap); got != "2 running, 1 indexing, 1 failed" {
+		t.Fatalf("line = %q", got)
+	}
+	if got := LSPStatusLine(event.LSPSnapshot{}); got != "" {
+		t.Fatalf("no enabled server must render empty, got %q", got)
+	}
+}
+
+// TestRenderLSPInventoryMarkdown pins the /lsp text reply's five shapes.
+func TestRenderLSPInventoryMarkdown(t *testing.T) {
+	base := event.LSPSnapshot{
+		ProjectRoot:    "/Users/tester/proj",
+		Trusted:        true,
+		FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{
+			{ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"}, Errors: 1},
+			{ID: "pyright", Enabled: false, State: event.LSPStateAvailable, Languages: []string{"Python"}},
+		},
+	}
+
+	got := RenderLSPInventoryMarkdown(base)
+	want := strings.Join([]string{
+		"Language servers · 2 configured, 1 enabled",
+		"Project: /Users/tester/proj",
+		"",
+		"Enabled",
+		"- gopls · ✓ ready · 1 error · Go",
+		"",
+		"Available",
+		"- pyright · ○ available · Python",
+	}, "\n")
+	if got != want {
+		t.Fatalf("trusted project:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+
+	untrusted := base
+	untrusted.Trusted = false
+	if got := RenderLSPInventoryMarkdown(untrusted); !strings.Contains(got, "Project: /Users/tester/proj (not trusted: language servers do not start here)") {
+		t.Fatalf("untrusted project:\n%s", got)
+	}
+
+	noProject := base
+	noProject.ProjectRoot = ""
+	if got := RenderLSPInventoryMarkdown(noProject); !strings.Contains(got, "No project: language servers start only in trusted projects") {
+		t.Fatalf("no project:\n%s", got)
+	}
+
+	off := base
+	off.FeatureEnabled = false
+	if got := RenderLSPInventoryMarkdown(off); !strings.Contains(got, "Turned off by features.lsp") {
+		t.Fatalf("feature off:\n%s", got)
+	}
+
+	recs := base
+	recs.RecommendationsDisabled = true
+	recs.RecommendationsDisabledReason = "dismissed 5 times"
+	recs.Servers[0].LastError = "gopls exited"
+	got = RenderLSPInventoryMarkdown(recs)
+	for _, want := range []string{"  Error: gopls exited", "Recommendations are off (dismissed 5 times); /lsp can turn them back on"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("recommendations off:\n%s\nmissing %q", got, want)
+		}
+	}
+
+	if got := RenderLSPInventoryMarkdown(event.LSPSnapshot{Servers: []event.LSPServerStatus{}}); got != "No language servers configured" {
+		t.Fatalf("empty = %q", got)
 	}
 }

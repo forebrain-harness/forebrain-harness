@@ -1,0 +1,14 @@
+id: vue-language-server
+display_name: Vue Language Tools
+languages: [Vue]
+priority: 100
+command: vue-language-server
+args: [--stdio]
+extension_to_language: {.vue: vue}
+root_markers: [package.json]
+env_passthrough: [NODE_PATH, NODE_OPTIONS]
+install:
+  - requires: npm
+    argv: [npm, install, -g, "@vue/language-server", typescript]
+readiness: progress
+notes: "Serves .vue files. TypeScript inside .vue files also needs @vue/typescript-plugin in the TypeScript server's plugins."

@@ -89,6 +89,7 @@ var commands = []Command{
 	{Name: "diff", Description: "show git diff (including untracked files)", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[path]", AvailableInSideConversation: true, Visibility: VisibilityPublic},
 	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic},
 	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
+	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
 	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
 	{Name: "exit", Description: "exit Forebrain Harness", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
 	{Name: "help", Description: "list every command and skill", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
@@ -229,7 +230,7 @@ func defaultCategory(name string) string {
 		return "agent"
 	case "permissions":
 		return "permissions"
-	case "skills", "mcp", "sandbox":
+	case "skills", "mcp", "lsp", "sandbox":
 		return "tools"
 	case "status":
 		return "ui"
@@ -240,7 +241,7 @@ func defaultCategory(name string) string {
 
 func defaultActionKind(name string) string {
 	switch name {
-	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp":
+	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp", "lsp":
 		return "open-panel"
 	case "plan", "init", "goal":
 		return "inject-prompt"

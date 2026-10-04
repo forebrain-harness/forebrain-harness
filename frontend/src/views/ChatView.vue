@@ -450,6 +450,14 @@
               <AlertDescription class="whitespace-pre-line">{{ composerNotice.detail }}</AlertDescription>
             </Alert>
             <AutoContinueBanner :state="autoContinue" @cancel="cancelAutoContinue" />
+            <!-- The recommendation card owns its own goodbye: the answer's
+                 result line stays up briefly, then the card closes itself. -->
+            <LspRecommendationCard
+              v-if="lspRecommendation"
+              :recommendation="lspRecommendation"
+              :session-id="sessionId ?? undefined"
+              @close="lspRecommendation = null"
+            />
             <div class="relative">
               <PendingInputQueuePopover
                 :preview="pendingInputPreview"
@@ -592,6 +600,7 @@ import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
+import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'
 import DiffView from '@/components/DiffView.vue'
 import ContextDebugPanel from '@/components/ContextDebugPanel.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
@@ -727,6 +736,7 @@ const {
   mcpStatus,
   autoContinue,
   cancelAutoContinue,
+  lspRecommendation,
   contextSignals,
   pendingActionsVersion,
   pendingInputPreview,

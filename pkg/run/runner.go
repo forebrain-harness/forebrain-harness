@@ -105,10 +105,19 @@ type Deps struct {
 	// system bytes ahead of it are unaffected by it. Nil means no project
 	// instructions apply.
 	ProjectInstructionsFor func(sessionID string) string
-	MemoryStore            *memory.Store
-	AppCfg                 *appcfg.Root
-	SessionStore           *state.SessionStore
-	RunRT                  *state.RunStore
+	// CodeIntel and CodeIntelControl are this runtime's language-server
+	// runtime (the tools' and the surfaces' ports onto one pkg/lsp Manager),
+	// installed by the composition root; nil when the runtime has none.
+	// CodeIntelTool is the frozen decision whether the lsp tool is registered:
+	// it sits in the prompt prefix, so it is computed once per runtime and
+	// never recomputed on a config reload. Subagents inherit all three.
+	CodeIntel        tool.CodeIntelligence
+	CodeIntelControl tool.CodeIntelControl
+	CodeIntelTool    bool
+	MemoryStore      *memory.Store
+	AppCfg           *appcfg.Root
+	SessionStore     *state.SessionStore
+	RunRT            *state.RunStore
 }
 
 type Runner struct {
@@ -982,6 +991,11 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	// The tool state is read through a getter because it is built later in
 	// this same Load than the chain being wrapped here.
 	llmClient = wrapSkillOfferLLM(llmClient, r.AppCfg, func() *tool.State { return r.tools }, r.workspaceRoot(), r.LaunchProject)
+	// The late-diagnostics reminder joins here for the same reason the
+	// plan-mode and skill-offer reminders sit outside summaryChain: it belongs
+	// to the conversation's next request, and a compaction's summary request
+	// must neither consume nor acknowledge it.
+	llmClient = wrapLSPDiagnosticsReminderLLM(llmClient, r.CodeIntel)
 	// Build compactDeps for the checkpoint path. SessionID is
 	// extracted from context at LLM call time.
 	compactSvc := assembly.Service{
@@ -1161,6 +1175,17 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 		PermissionSnapshot:           r.PermissionSnapshot,
 		PermissionSnapshotForSession: r.PermissionSnapshotForSession,
 		ApplyPermissionUpdate:        r.ApplyPermissionUpdate,
+		CodeIntel:                    r.CodeIntel,
+		CodeIntelTool:                r.CodeIntelTool,
+	}
+	// Reads feed the language servers that are already running (a baseline
+	// for the next edit's diagnostics); they never start one.
+	if ci := r.CodeIntel; ci != nil {
+		r.tools.SetNamedReadObserver("lsp", func(ctx context.Context, abs string, content []byte) {
+			ci.DidRead(ctx, abs, content)
+		})
+	} else {
+		r.tools.SetNamedReadObserver("lsp", nil)
 	}
 	te := llm.TokenEstimateOptions{}
 	if r.AppCfg != nil {

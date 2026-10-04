@@ -1301,6 +1301,7 @@ func (s *ChatSession) slashContext(ctx context.Context, sessionID, channel strin
 		Status:         s,
 		Permissions:    s,
 		MCP:            s,
+		LSP:            s,
 		Sandbox:        s,
 		Diff:           s,
 		Model:          s,
@@ -2478,3 +2479,176 @@ func (s *ChatSession) SubscribeMCPStatusTick() (func(), bool) {
 }
 
 var errPanelUnavailable = errors.New("panel unavailable")
+
+// lspControl is the /lsp panel's slice of the session's runner: nil when this
+// runtime has no language servers.
+func (s *ChatSession) lspControl() tool.CodeIntelControl {
+	r := s.runner()
+	if r == nil {
+		return nil
+	}
+	return r.CodeIntelControl
+}
+
+// PanelLSPSnapshot answers what /lsp shows. The snapshot never blocks on a
+// probe or an install: both report through SubscribeLSPStatus.
+func (s *ChatSession) PanelLSPSnapshot() (event.LSPSnapshot, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return event.LSPSnapshot{}, errPanelUnavailable
+	}
+	return ctl.Snapshot(), nil
+}
+
+// PanelSetLSPEnabled enables or disables one server. The reply is the sentence
+// the panel shows; the control plane owns what the change does.
+func (s *ChatSession) PanelSetLSPEnabled(serverID string, enabled bool) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if err := ctl.SetEnabled(serverID, enabled); err != nil {
+		return "", err
+	}
+	if enabled {
+		return "Enabled. Diagnostics start with the next edit; the lsp tool appears in new sessions.", nil
+	}
+	return "Disabled. Its instances in this project have stopped.", nil
+}
+
+// PanelRestartLSP restarts one server's instances in this project.
+func (s *ChatSession) PanelRestartLSP(serverID string) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if err := ctl.Restart(serverID); err != nil {
+		return "", err
+	}
+	return "Restarting…", nil
+}
+
+// PanelInstallLSP starts the server's install recipe off the main loop. Every
+// call returns at once; output and outcome arrive through the snapshot.
+func (s *ChatSession) PanelInstallLSP(serverID string) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	command := ""
+	for _, srv := range ctl.Snapshot().Servers {
+		if srv.ID == serverID {
+			command = srv.InstallCommand
+			break
+		}
+	}
+	go func() { _ = ctl.Install(context.Background(), serverID, nil) }()
+	return "Installing: " + command, nil
+}
+
+// PanelResetLSPRecommendations turns recommendations back on.
+func (s *ChatSession) PanelResetLSPRecommendations() (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if err := ctl.ResetRecommendations(); err != nil {
+		return "", err
+	}
+	return "Recommendations are back on.", nil
+}
+
+// SubscribeLSPStatus forwards language-server snapshot changes to the UI loop
+// so an open /lsp panel repaints in place. The callback only posts a message.
+func (s *ChatSession) SubscribeLSPStatus() (func(), bool) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return nil, false
+	}
+	return ctl.Subscribe(func(event.LSPSnapshot) { s.notifyUI(LSPStatusTickMsg{}) }), true
+}
+
+// DecideLSPRecommendation applies the user's answer and returns the line
+// the transcript shows for it ("" when there is nothing to say).
+func (s *ChatSession) DecideLSPRecommendation(rec event.LSPRecommendation, choice event.LSPRecommendationChoice) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if choice == event.LSPChoiceInstall {
+		stopWatch := s.watchLSPInstall(ctl, rec)
+		if err := ctl.DecideRecommendation(rec.ID, choice); err != nil {
+			stopWatch()
+			return "", err
+		}
+		return "Installing " + rec.DisplayName + ": " + rec.InstallCommand, nil
+	}
+	if err := ctl.DecideRecommendation(rec.ID, choice); err != nil {
+		return "", err
+	}
+	switch choice {
+	case event.LSPChoiceEnable:
+		return rec.DisplayName + " enabled for " + strings.Join(rec.Languages, ", ") + ". Diagnostics start with the next edit.", nil
+	case event.LSPChoiceNotNow:
+		if ctl.Snapshot().RecommendationsDisabled {
+			return "Language server recommendations are now off (dismissed 5 times in a row). Turn them back on in /lsp.", nil
+		}
+		return "Not now. No language server will be suggested again in this session.", nil
+	case event.LSPChoiceNever:
+		return rec.ServerID + " will not be suggested again. /lsp can still enable it.", nil
+	case event.LSPChoiceDisableAll:
+		return "Language server recommendations are off. Turn them back on in /lsp.", nil
+	}
+	return "", nil
+}
+
+// watchLSPInstall follows the install a recommendation started: every new
+// output line becomes the transient status line, and the outcome — the
+// enabled line or the failure tail — becomes one transcript frame. The
+// snapshot is the same one every surface reads, so the /lsp panel shows the
+// same install this reports. The returned stop ends the watch early.
+func (s *ChatSession) watchLSPInstall(ctl tool.CodeIntelControl, rec event.LSPRecommendation) (stop func()) {
+	var (
+		lastLine   string
+		wasRunning bool
+		done       bool
+		mu         sync.Mutex
+	)
+	var cancel func()
+	cancel = ctl.Subscribe(func(snap event.LSPSnapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+		if done {
+			return
+		}
+		for _, srv := range snap.Servers {
+			if srv.ID != rec.ServerID {
+				continue
+			}
+			if srv.Installing {
+				wasRunning = true
+				if n := len(srv.InstallLog); n > 0 && srv.InstallLog[n-1] != lastLine {
+					lastLine = srv.InstallLog[n-1]
+					s.notifyUI(LSPInstallProgressMsg{ServerID: srv.ID, Line: lastLine})
+				}
+				return
+			}
+			if wasRunning {
+				done = true
+				cancel()
+				if srv.InstallError != "" {
+					s.notifyUI(LSPInstallDoneMsg{ServerID: srv.ID, Err: srv.InstallError})
+				} else {
+					s.notifyUI(LSPInstallDoneMsg{ServerID: srv.ID, Text: rec.DisplayName + " installed and enabled for " + strings.Join(rec.Languages, ", ") + ". Diagnostics start with the next edit."})
+				}
+			}
+			return
+		}
+	})
+	return func() {
+		mu.Lock()
+		done = true
+		mu.Unlock()
+		cancel()
+	}
+}

@@ -1,0 +1,19 @@
+id: deno
+display_name: Deno language server
+languages: [TypeScript, JavaScript]
+priority: 50
+command: deno
+args: [lsp]
+extension_to_language: {.ts: typescript, .mts: typescript, .tsx: typescriptreact, .js: javascript, .mjs: javascript, .jsx: javascriptreact}
+root_markers: [deno.json, deno.jsonc]
+env_passthrough: [DENO_DIR, DENO_INSTALL_ROOT]
+detect:
+  version_args: [--version]
+readiness: none
+initialization_options: {enable: true, lint: true}
+conflicts:
+  - with: typescript-language-server
+    when_root_marker: [deno.json, deno.jsonc]
+  - with: vtsls
+    when_root_marker: [deno.json, deno.jsonc]
+notes: "Chosen over the TypeScript servers in projects with deno.json."

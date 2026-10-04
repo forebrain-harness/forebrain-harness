@@ -770,16 +770,20 @@ func (r *Renderer) finalizePendingToolsVM(vm *viewModel) bool {
 // Transient status sources, highest priority first. A readiness wait is the
 // most urgent thing on screen because it is what the reader is waiting on; a
 // migration outranks the ordinary working line because it is a foreground
-// operation the user started and cannot see otherwise.
+// operation the user started and cannot see otherwise; an install the user
+// confirmed from a language-server recommendation sits with it for the same
+// reason.
 const (
 	transientSourceMCP     = "mcp"
 	transientSourceMigrate = "migrate"
+	transientSourceLSP     = "lsp"
 	transientSourceWorking = "working"
 )
 
 var transientSourcePriority = []string{
 	transientSourceMCP,
 	transientSourceMigrate,
+	transientSourceLSP,
 	transientSourceWorking,
 }
 
@@ -2264,6 +2268,8 @@ func failedActionPhrase(toolName string) string {
 		return "fetch"
 	case "web_search", "websearch":
 		return "search"
+	case "lsp":
+		return "look up"
 	case "subagent_run":
 		return "run agent"
 	case "subagent_send":
@@ -2637,6 +2643,33 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		}
 		if q := inputString(meta, "query"); q != "" {
 			target = q
+		}
+
+	case lower == "lsp":
+		if isFailed {
+			action = "Failed to " + failedActionPhrase(lower)
+		} else if isRunning || isPending {
+			action = "Looking up"
+		} else {
+			action = "Looked up"
+		}
+		target = inputString(meta, "operation")
+		qualifier := ""
+		if symbol := inputString(meta, "symbol"); symbol != "" {
+			qualifier = symbol
+		} else if query := inputString(meta, "query"); query != "" {
+			qualifier = query
+		} else if p := inputString(meta, "file_path"); p != "" {
+			qualifier = displayPath(p, cwd)
+			if line, ok := inputInt(meta, "line"); ok && line > 0 {
+				qualifier = fmt.Sprintf("%s:%d", qualifier, line)
+			}
+		}
+		switch {
+		case target != "" && qualifier != "":
+			target = target + " · " + qualifier
+		case qualifier != "":
+			target = qualifier
 		}
 
 	case lower == "retrieve_output":
@@ -6702,7 +6735,65 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 			}
 		}
 	}
+	out = append(out, lspDiagnosticsCardRows(content)...)
 	return strings.Join(out, "\n"), true
+}
+
+// lspDiagnosticsCardRows parses the "lsp diagnostics:" section a tool body
+// carries after its turn diff (tool.lspDiagnosticsSection) into the card rows
+// that follow the diff: one summary line, then the section's problem lines.
+// Long cards are folded by the existing foldBlock, so no folding happens here.
+func lspDiagnosticsCardRows(content string) []string {
+	lines := strings.Split(content, "\n")
+	headerIdx := -1
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "lsp diagnostics:") {
+			headerIdx = i
+			break
+		}
+	}
+	if headerIdx < 0 {
+		return nil
+	}
+	// "lsp diagnostics: 2 new in 1 file" → fields are
+	// [lsp diagnostics: <new> new in <files> file]; anything else (the
+	// pending-only header) keeps the pending summary.
+	summary := "Diagnostics pending"
+	if fields := strings.Fields(strings.TrimSpace(lines[headerIdx])); len(fields) >= 6 && fields[3] == "new" && fields[4] == "in" {
+		if n, errN := strconv.Atoi(fields[2]); errN == nil {
+			if m, errM := strconv.Atoi(fields[5]); errM == nil {
+				summary = lspDiagnosticsSummaryLine(n, m)
+			}
+		}
+	}
+	rows := []string{"  └ " + summary}
+	// The section's body is the ```text fence that follows the header.
+	for i := headerIdx + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```text") {
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "```" {
+					return rows
+				}
+				if strings.TrimSpace(lines[j]) == "" {
+					continue
+				}
+				rows = append(rows, "    "+lines[j])
+			}
+			return rows
+		}
+	}
+	return rows
+}
+
+func lspDiagnosticsSummaryLine(new, files int) string {
+	noun, fileWord := "diagnostic issues", "files"
+	if new == 1 {
+		noun = "diagnostic issue"
+	}
+	if files == 1 {
+		fileWord = "file"
+	}
+	return fmt.Sprintf("Found %d new %s in %d %s", new, noun, files, fileWord)
 }
 
 func turnDiffSummaryLine(added, deleted int) string {
@@ -7377,6 +7468,8 @@ func buildUIPanel(panel *uiPanel, spinner string) slashPanel {
 		buildStatusPanel(b, panel)
 	case "mcp":
 		buildMCPPanel(b, panel, spinner)
+	case "lsp":
+		buildLSPPanel(b, panel, spinner)
 	}
 	return b.panel()
 }
@@ -7826,4 +7919,190 @@ func turnCountNoun(n int, noun string) string {
 		return "1 " + noun
 	}
 	return strconv.Itoa(n) + " " + noun + "s"
+}
+
+func buildLSPPanel(b *panelBuilder, panel *uiPanel, spinner string) {
+	switch panel.page {
+	case "detail":
+		buildLSPDetail(b, panel, spinner)
+	default:
+		buildLSPList(b, panel, spinner)
+	}
+}
+
+// lspStateText is one server's state with its glyph coloured by meaning, the
+// same writing mcpStatusText uses for MCP servers.
+func lspStateText(s event.LSPServerStatus, spinner string) string {
+	label := turn.LSPServerStateLabel(s)
+	switch {
+	case s.Installing, s.State == event.LSPStateStarting, s.State == event.LSPStateIndexing:
+		return panelGlyphStyle.Render(spinner) + " " + label
+	}
+	glyph, rest, found := strings.Cut(label, " ")
+	if !found {
+		return label
+	}
+	switch glyph {
+	case "✓":
+		return panelOKStyle.Render(glyph) + " " + rest
+	case "✗":
+		return panelFailStyle.Render(glyph) + " " + rest
+	case "△":
+		return panelWarnStyle.Render(glyph) + " " + rest
+	default:
+		return panelGlyphStyle.Render(glyph) + " " + rest
+	}
+}
+
+// lspProjectSubtitle is the /lsp list's one-line answer to "where am I":
+// nothing starts without a project, an untrusted project, the feature switch,
+// or the project and its enabled count.
+func lspProjectSubtitle(snap event.LSPSnapshot) string {
+	switch {
+	case snap.ProjectRoot == "":
+		return "No project: language servers start only in trusted projects"
+	case !snap.Trusted:
+		return snap.ProjectRoot + " · not trusted, servers do not start here"
+	case !snap.FeatureEnabled:
+		return "Turned off by features.lsp"
+	default:
+		enabled := 0
+		for _, s := range snap.Servers {
+			if s.Enabled {
+				enabled++
+			}
+		}
+		// "enabled" is an adjective here (spec: "{n} enabled"), so unlike
+		// turnCountNoun's real nouns it never takes a plural s.
+		return snap.ProjectRoot + " · " + strconv.Itoa(enabled) + " enabled"
+	}
+}
+
+func buildLSPList(b *panelBuilder, panel *uiPanel, spinner string) {
+	snap := panel.lsp
+	b.title("Language servers")
+	b.subtitle(lspProjectSubtitle(*snap))
+	row := 0
+	group := func(heading string, wantEnabled bool) {
+		first := true
+		for _, s := range snap.Servers {
+			if s.Enabled != wantEnabled {
+				continue
+			}
+			if first {
+				b.group(heading)
+				first = false
+			}
+			b.selectable(row == panel.cursor, "", s.ID+" · "+lspStateText(s, spinner))
+			row++
+		}
+	}
+	group("Enabled", true)
+	group("Available", false)
+	if snap.RecommendationsDisabled {
+		b.group("Recommendations")
+		b.selectable(row == panel.cursor, "", "Turn recommendations back on")
+		row++
+	}
+	if len(b.body) > 0 {
+		b.blank()
+	}
+	b.text(panelIndent, "Servers run on this machine outside the sandbox, only in trusted projects.", nil)
+	for _, note := range snap.ProjectNotes {
+		b.text(panelIndent, "Project file: "+note, nil)
+	}
+	if snap.RecommendationsDisabled {
+		b.text(panelIndent, "Recommendations are off ("+snap.RecommendationsDisabledReason+").", nil)
+	}
+	if notice := panel.notice[""]; notice != "" {
+		b.blank()
+		b.text(panelIndent, notice, nil)
+	}
+	rows := panelSelectableRows(panel)
+	if len(rows) == 0 {
+		b.hint("Esc to close")
+		return
+	}
+	b.hint("↑/↓ to navigate · Enter to open · Esc to close")
+}
+
+func buildLSPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
+	s := lspPanelServer(panel)
+	if s == nil {
+		b.text(panelIndent, panel.server+" is no longer in this project's language server list", nil)
+		b.hint("Esc to go back")
+		return
+	}
+	b.title(s.ID + " language server")
+	var facts []turn.StatusFact
+	add := func(label, value string) {
+		if strings.TrimSpace(value) != "" {
+			facts = append(facts, turn.StatusFact{Label: label, Value: value})
+		}
+	}
+	add("State", turn.LSPServerStateLabel(*s))
+	add("Languages", strings.Join(s.Languages, ", "))
+	add("Scope", s.Scope)
+	add("Command", s.Command)
+	if s.BinaryPath != "" {
+		add("Binary", strings.TrimSuffix(s.BinaryPath+" · "+s.Version, " · "))
+	}
+	add("Roots", strings.Join(s.Roots, ", "))
+	if len(s.PIDs) > 0 {
+		pids := make([]string, 0, len(s.PIDs))
+		for _, pid := range s.PIDs {
+			pids = append(pids, strconv.Itoa(pid))
+		}
+		add("Processes", strings.Join(pids, ", "))
+	}
+	if s.OpenDocuments > 0 {
+		add("Open files", strconv.Itoa(s.OpenDocuments))
+	}
+	if s.Errors > 0 || s.Warnings > 0 {
+		var problems []string
+		if s.Errors > 0 {
+			problems = append(problems, turnCountNoun(s.Errors, "error"))
+		}
+		if s.Warnings > 0 {
+			problems = append(problems, turnCountNoun(s.Warnings, "warning"))
+		}
+		add("Problems", strings.Join(problems, ", "))
+	}
+	add("Last error", s.LastError)
+	add("Log", s.LogPath)
+	add("Writes into project", strings.Join(s.ProjectWrites, ", "))
+	add("Note", s.Note)
+	b.facts(facts, map[string]string{"State": lspStateText(*s, spinner)})
+	if notice := panel.notice[s.ID]; notice != "" {
+		b.blank()
+		b.text(panelIndent, notice, nil)
+	}
+	if s.Installing || s.InstallError != "" {
+		b.blank()
+		b.text(panelIndent, "Install output", &panelAccentStyle)
+		if s.InstallError != "" {
+			b.text(panelIndent, firstLine(s.InstallError), nil)
+		}
+		for _, line := range s.InstallLog {
+			b.text(panelIndent, line, nil)
+		}
+	}
+	rows := panelSelectableRows(panel)
+	if len(rows) > 0 {
+		b.blank()
+		for i, row := range rows {
+			b.selectable(i == panel.cursor, "", row.label)
+		}
+		b.hint("↑/↓ to navigate · Enter to run · Esc to go back")
+		return
+	}
+	b.hint("Esc to go back")
+}
+
+// firstLine is a multi-line error's first line, the one a reader scans first.
+func firstLine(text string) string {
+	if line, _, found := strings.Cut(text, "\n"); found {
+		return line
+	}
+	return text
 }

@@ -1,0 +1,23 @@
+id: jdtls
+display_name: Eclipse JDT Language Server
+languages: [Java]
+priority: 100
+command: jdtls
+args: [-data, "${LSP_CACHE_DIR}"]
+extension_to_language: {.java: java}
+root_markers: [pom.xml, build.gradle, build.gradle.kts, settings.gradle, settings.gradle.kts, mvnw, gradlew, .project]
+env_passthrough: [JAVA_HOME, MAVEN_OPTS, M2_HOME, GRADLE_USER_HOME, GRADLE_OPTS, HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
+install:
+  - requires: brew
+    platforms: [darwin]
+    argv: [brew, install, jdtls]
+startup_timeout: 180
+readiness: jdtls-status
+initialization_options:
+  settings:
+    java:
+      import: {generatesMetadataFilesAtProjectRoot: false}
+settings:
+  java:
+    import: {generatesMetadataFilesAtProjectRoot: false}
+notes: "Needs JDK 21 or newer and python3. On macOS: brew install jdtls. Elsewhere, download Eclipse JDT LS and put its bin/jdtls on the PATH."

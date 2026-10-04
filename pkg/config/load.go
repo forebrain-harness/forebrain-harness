@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v2"
 )
@@ -132,6 +133,9 @@ func validateLoadedRoot(r *Root) error {
 		return err
 	}
 	if err := validateMCPToolApprovalModes(r); err != nil {
+		return err
+	}
+	if err := validateLSPSection(r); err != nil {
 		return err
 	}
 	if err := ValidateHooksSettings(r.Hooks); err != nil {
@@ -487,6 +491,7 @@ func normalize(r *Root) {
 	}
 	NormalizeMCPServers(r.Agents.Defaults.MCPServers)
 	normalizeSandboxConfig(r)
+	normalizeLSPSection(&r.LSP)
 }
 
 func validateMCPToolApprovalModes(r *Root) error {
@@ -578,6 +583,14 @@ func materializeOptionalDefaults(r *Root) {
 	r.Features.ExecPermissionApprovals = BoolPtr(features.ExecPermissionApprovals)
 	r.Features.RequestPermissionsTool = BoolPtr(features.RequestPermissionsTool)
 	r.Features.Memories = BoolPtr(features.Memories)
+	r.Features.LSP = BoolPtr(features.LSP)
+
+	lsp := r.EffectiveLSP()
+	r.LSP.Recommendations = BoolPtr(lsp.Recommendations)
+	r.LSP.Diagnostics.AfterEdit = BoolPtr(lsp.AfterEdit)
+	r.LSP.Diagnostics.LateDelivery = BoolPtr(lsp.LateDelivery)
+	waitMS := int(lsp.Wait / time.Millisecond)
+	r.LSP.Diagnostics.WaitMS = &waitMS
 
 	memories := r.EffectiveMemories()
 	r.Memories.DisableOnExternalContext = BoolPtr(memories.DisableOnExternalContext)

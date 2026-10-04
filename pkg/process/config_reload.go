@@ -235,6 +235,13 @@ func (env *Environment) reloadConfig() error {
 	if env.Runner == nil || &env.Deps != env.Runner.Deps {
 		env.Deps.AppCfg = next
 	}
+	// The language-server pool adopts the reloaded configuration the same
+	// way the rest of the environment does. The frozen per-runner decisions
+	// (the lsp tool's registration) deliberately do not move: they sit in
+	// each session's prompt prefix.
+	if env.LSP != nil {
+		env.LSP.Reconcile(next)
+	}
 	if p := env.pool; p != nil {
 		if err := p.PropagateConfig(context.Background(), next); err != nil {
 			// The base runner and the environment already adopted next; the
@@ -300,6 +307,9 @@ func (env *Environment) AdoptConfig(next *appcfg.Root) {
 	env.reloadMu.Lock()
 	defer env.reloadMu.Unlock()
 	env.Deps.AppCfg = next
+	if env.LSP != nil {
+		env.LSP.Reconcile(next)
+	}
 	if env.rulesHook != nil {
 		env.rulesHook.Cfg = next
 	}

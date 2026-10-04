@@ -1,0 +1,15 @@
+id: yaml-language-server
+display_name: YAML Language Server
+languages: [YAML]
+priority: 100
+command: yaml-language-server
+args: [--stdio]
+extension_to_language: {.yaml: yaml, .yml: yaml}
+root_markers: []
+install:
+  - requires: npm
+    argv: [npm, install, -g, yaml-language-server]
+readiness: none
+settings:
+  yaml: {validate: true, schemaStore: {enable: false}}
+notes: "Schema downloads from schemastore.org are off by default; set lsp.servers.yaml-language-server.settings.yaml.schemaStore.enable to true to allow them."

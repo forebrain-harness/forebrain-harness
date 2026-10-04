@@ -1,0 +1,24 @@
+id: rust-analyzer
+display_name: rust-analyzer
+languages: [Rust]
+priority: 100
+command: rust-analyzer
+extension_to_language: {.rs: rust}
+root_markers: [Cargo.toml, rust-project.json]
+root_strategy: cargo-workspace
+env_passthrough: [CARGO_HOME, RUSTUP_HOME, RUSTUP_TOOLCHAIN, RUSTFLAGS, HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
+detect:
+  extra_dirs: ["$CARGO_HOME/bin", "~/.cargo/bin"]
+  version_args: [--version]
+install:
+  - requires: rustup
+    argv: [rustup, component, add, rust-analyzer]
+startup_timeout: 120
+readiness: rust-analyzer-status
+initialization_options:
+  cargo: {targetDir: true}
+settings:
+  rust-analyzer:
+    cargo: {targetDir: true}
+project_writes: [target/rust-analyzer]
+notes: "Install with: rustup component add rust-analyzer"

@@ -1,0 +1,14 @@
+id: ocamllsp
+display_name: OCaml LSP
+languages: [OCaml]
+priority: 100
+command: ocamllsp
+extension_to_language: {.ml: ocaml, .mli: ocaml.interface}
+root_markers: [dune-project, dune-workspace, "*.opam", esy.json]
+env_passthrough: [OPAMROOT, OPAM_SWITCH_PREFIX, CAML_LD_LIBRARY_PATH, OCAML_TOPLEVEL_PATH]
+install:
+  - requires: opam
+    argv: [opam, install, --yes, ocaml-lsp-server]
+readiness: progress
+project_writes: [_build]
+notes: "Install into the project's opam switch: opam install ocaml-lsp-server"

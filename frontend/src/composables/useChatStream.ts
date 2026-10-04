@@ -1003,6 +1003,7 @@ import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { t as translate, type I18nKey } from '@/locales'
 import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueState } from '@/lib/autoContinue'
+import { LSP_RECOMMENDATION_EVENT_TYPE, parseLspRecommendation, type LspRecommendation } from '@/lib/lspRecommendation'
 import {
   buildBrowserForebrainGatewayChatWsUrl,
   isSupportedForebrainRunEventSchema,
@@ -1428,6 +1429,11 @@ export function useChatStream() {
   // Live state like mcpStatus: the observer's binding says what is pending
   // now, and only events after that binding change it.
   const autoContinue = ref<AutoContinueState | null>(null)
+  // The language-server recommendation waiting for the user's answer. Like
+  // autoContinue it belongs to the conversation, not to any run's timeline,
+  // and only a live event sets it: history replays the answer's transcript
+  // line, never a second offer.
+  const lspRecommendation = ref<LspRecommendation | null>(null)
   const errorDetail = ref<ProviderErrorDetail | null>(null)
   // A failed turn arrives as both a rendered English sentence and the
   // classified facts behind it. Rendering from the facts here is what makes the
@@ -1713,6 +1719,16 @@ export function useChatStream() {
       if (rememberObservedEvent(evt)) applyAutoContinueEvent(evt, historical)
       return
     }
+    // A language-server recommendation is asked once, live: history replays
+    // the answer's transcript line, and an event the observer already
+    // accounted for is a reconnect, not a second offer.
+    if (String(evt.type) === LSP_RECOMMENDATION_EVENT_TYPE) {
+      const sequence = Number(evt.sequence ?? 0)
+      if (rememberObservedEvent(evt) && !historical && !(sequence > 0 && sequence <= observerHighWater)) {
+        lspRecommendation.value = parseLspRecommendation(evt.payload)
+      }
+      return
+    }
     // The request websocket still carries legacy primary-turn operations for
     // compatibility, and their canonical mirror is observed here too. Record
     // that mirror's cursor/id rather than projecting it twice - but only for the
@@ -1854,6 +1870,7 @@ export function useChatStream() {
 	  observerHighWater = 0
 	  autoContinueSequence = 0
 	  autoContinue.value = null
+	  lspRecommendation.value = null
     const generation = historyGeneration
     persistLastSessionId(sid || null)
     messages.value = []
@@ -3053,6 +3070,15 @@ export function useChatStream() {
                 if (rememberObservedEvent(runEvent)) applyAutoContinueEvent(runEvent, false)
                 return
               }
+              if (String(runEvent.type) === LSP_RECOMMENDATION_EVENT_TYPE) {
+                if (rememberObservedEvent(runEvent)) {
+                  const sequence = Number(runEvent.sequence ?? 0)
+                  if (!(sequence > 0 && sequence <= observerHighWater)) {
+                    lspRecommendation.value = parseLspRecommendation(runEvent.payload)
+                  }
+                }
+                return
+              }
               // Primary canonical events mirror the legacy operations on this
               // same request socket. Project only child events here; retaining
               // the canonical id/cursor prevents the observer from replaying
@@ -3429,6 +3455,7 @@ export function useChatStream() {
     mcpStatus,
     autoContinue,
     cancelAutoContinue,
+    lspRecommendation,
     contextSignals,
     pendingActionsVersion,
     send,

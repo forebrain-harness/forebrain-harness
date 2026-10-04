@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -458,5 +459,118 @@ func TestUserInteractionCardHeaderNamesItsQuestions(t *testing.T) {
 	}
 	if target != "Triggers · What should the greeting look like when the user says hi first thing in the morning?" {
 		t.Fatalf("target = %q, want every question named in full", target)
+	}
+}
+
+// The lsp card's title names the operation and what it was pointed at: the
+// symbol when one was given, the query for workspace searches, otherwise the
+// file (shortened like a read_file path) with its line.
+func TestToolDisplayPartsLSP(t *testing.T) {
+	input := func(extra map[string]any) tool.ToolMeta {
+		in := map[string]any{"operation": "definition"}
+		for k, v := range extra {
+			in[k] = v
+		}
+		return tool.ToolMeta{Input: in}
+	}
+
+	running, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", ToolMeta: tool.ToolMeta{Status: "running", Input: map[string]any{"operation": "definition", "symbol": "Query"}}}, "", "")
+	if running != "Looking up" || target != "definition · Query" {
+		t.Fatalf("running = (%q, %q), want Looking up / definition · Query", running, target)
+	}
+
+	completed, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", Final: true, ToolMeta: input(map[string]any{"query": "auth.Loop"})}, "", "")
+	if completed != "Looked up" || target != "definition · auth.Loop" {
+		t.Fatalf("query target = (%q, %q), want Looked up / definition · auth.Loop", completed, target)
+	}
+
+	failed, _, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", ToolMeta: tool.ToolMeta{Status: "failed", Input: map[string]any{"operation": "hover", "file_path": "/repo/main.go", "line": 12}}}, "", "")
+	if failed != "Failed to look up" {
+		t.Fatalf("failed action = %q, want Failed to look up", failed)
+	}
+
+	cwd := t.TempDir()
+	p := filepath.Join(cwd, "main.go")
+	_, target, _ = toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", Final: true, ToolMeta: tool.ToolMeta{Input: map[string]any{"operation": "hover", "file_path": p, "line": 12}}}, "", cwd)
+	if target != "hover · main.go:12" {
+		t.Fatalf("file target = %q, want hover · main.go:12 (shortened like read_file)", target)
+	}
+
+	if phrase := failedActionPhrase("lsp"); phrase != "look up" {
+		t.Fatalf("failedActionPhrase(lsp) = %q, want look up", phrase)
+	}
+}
+
+// An edit card carries its diagnostics section after the turn diff: the card
+// then shows one summary line under the diff and the section's problem lines
+// indented like diff rows. Long cards fold through the existing foldBlock, so
+// nothing here is cut to a row budget on purpose.
+func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	withDiag := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: 2 new in 1 file\n\n" +
+		"```text\n" +
+		"internal/foo/bar.go\n" +
+		"  error 12:6 missing return [gopls syntax]\n" +
+		"  warning 30:1 unused variable\n" +
+		"```"
+	block, ok := renderTurnDiffCard(withDiag, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected render to succeed")
+	}
+	plain := stripANSI(block)
+	if !strings.Contains(plain, "  └ Found 2 new diagnostic issues in 1 file") {
+		t.Fatalf("diagnostics summary line missing:\n%s", plain)
+	}
+	for _, want := range []string{
+		"    internal/foo/bar.go",
+		"      error 12:6 missing return [gopls syntax]",
+		"      warning 30:1 unused variable",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("problem row %q missing:\n%s", want, plain)
+		}
+	}
+	// The diff's own summary stays first.
+	if !strings.HasPrefix(block, "  └ Added 2 lines, removed 1 line") {
+		t.Fatalf("turn-diff summary must stay the card's first line:\n%s", plain)
+	}
+
+	// Singular counts keep their singular nouns.
+	singular := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: 1 new in 1 file\n\n" +
+		"```text\n" +
+		"internal/foo/bar.go\n" +
+		"  error 12:6 missing return [gopls syntax]\n" +
+		"```"
+	block, ok = renderTurnDiffCard(singular, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected singular render to succeed")
+	}
+	if plain := stripANSI(block); !strings.Contains(plain, "  └ Found 1 new diagnostic issue in 1 file") {
+		t.Fatalf("singular summary line missing:\n%s", plain)
+	}
+
+	// A pending-only section names itself instead of a count.
+	pending := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: pending\n\n" +
+		"```text\n" +
+		"diagnostics for internal/foo/bar.go are still being computed and will follow\n" +
+		"```"
+	block, ok = renderTurnDiffCard(pending, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected pending render to succeed")
+	}
+	if plain := stripANSI(block); !strings.Contains(plain, "  └ Diagnostics pending") {
+		t.Fatalf("pending summary line missing:\n%s", plain)
+	}
+
+	// Without a section the card keeps its diff-only shape.
+	block, ok = renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected diff-only render to succeed")
+	}
+	if plain := stripANSI(block); strings.Contains(plain, "diagnostic") {
+		t.Fatalf("no diagnostics section, no diagnostics rows:\n%s", plain)
 	}
 }

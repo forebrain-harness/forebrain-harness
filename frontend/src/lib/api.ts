@@ -1,6 +1,7 @@
 import axios, { type AxiosError } from 'axios'
 
 import { toCamelCase, toSnakeCase } from './case'
+import type { LspRecommendationChoice } from './lspRecommendation'
 import { reportGatewayUnauthorized } from './gatewaySession'
 
 export function getErrorMessage(error: unknown): string {
@@ -422,6 +423,96 @@ export async function mcpSetServerDisabled(name: string, disabled: boolean, sess
   return postJson<{ ok: boolean; reply: string }, Record<string, string>>(path, payload)
 }
 
+/**
+ * One language server as the runtime reports it. `state` stays an open
+ * vocabulary for the same reason MCP's connection status does: a state this
+ * client does not know renders as itself, not as whichever state happens to
+ * be the fallback.
+ */
+export interface LspServerStatus {
+  id: string
+  displayName?: string
+  languages?: string[]
+  role: string
+  scope: string
+  enabled: boolean
+  state: string
+  command?: string
+  binaryPath?: string
+  version?: string
+  installCommand?: string
+  roots?: string[]
+  pids?: number[]
+  openDocuments?: number
+  errors?: number
+  warnings?: number
+  indexingPercent?: number
+  lastError?: string
+  logPath?: string
+  note?: string
+  projectWrites?: string[]
+  installing?: boolean
+  installLog?: string[]
+  installError?: string
+}
+
+/** Everything /lsp shows for one runner: the project, the servers, the switches. */
+export interface LspSnapshot {
+  projectRoot?: string
+  trusted: boolean
+  featureEnabled: boolean
+  toolRegistered: boolean
+  recommendationsDisabled: boolean
+  recommendationsDisabledReason?: string
+  projectNotes?: string[]
+  servers: LspServerStatus[]
+}
+
+/** The language-server snapshot the /lsp surfaces render. */
+export async function lspSnapshot(sessionId?: string): Promise<LspSnapshot> {
+  const params = sessionId ? { sessionId } : undefined
+  const data = await api.get<Record<string, unknown>>('/v1/lsp', { params: toSnakeCase(params ?? {}) })
+  const snap = toCamelCase(data.data) as unknown as LspSnapshot
+  if (!Array.isArray(snap.servers)) snap.servers = []
+  return snap
+}
+
+/** Enable or disable one server; its instances in this project follow. */
+export async function lspSetEnabled(id: string, enabled: boolean, sessionId?: string) {
+  const payload = toSnakeCase({ id, sessionId: sessionId ?? '' })
+  const path = enabled ? '/v1/lsp/servers/enable' : '/v1/lsp/servers/disable'
+  return postJson<{ ok: boolean }, Record<string, string>>(path, payload)
+}
+
+/** Restart one server's instances in this project. */
+export async function lspRestart(id: string, sessionId?: string) {
+  return postJson<{ ok: boolean }, Record<string, string>>('/v1/lsp/servers/restart', toSnakeCase({ id, sessionId: sessionId ?? '' }))
+}
+
+/**
+ * Start the server's install recipe. The gateway answers 202 at once; the
+ * command only runs after the user saw it whole and confirmed.
+ */
+export async function lspInstall(id: string, sessionId?: string) {
+  return postJson<{ ok: boolean; started: boolean }, Record<string, string>>('/v1/lsp/servers/install', toSnakeCase({ id, sessionId: sessionId ?? '' }))
+}
+
+/** Turn language-server recommendations back on for this agent. */
+export async function lspResetRecommendations(sessionId?: string) {
+  return postJson<{ ok: boolean }, Record<string, string>>('/v1/lsp/recommendations/reset', toSnakeCase({ sessionId: sessionId ?? '' }))
+}
+
+/**
+ * Apply the user's answer to one recommendation. The card's buttons and the
+ * terminal modal's actions run the same decision.
+ */
+export async function decideLspRecommendation(id: string, choice: LspRecommendationChoice, sessionId?: string) {
+  return postJson<{ ok: boolean }, Record<string, string>>(
+    `/v1/lsp/recommendations/${encodeURIComponent(id)}/decision`,
+    toSnakeCase({ choice, sessionId: sessionId ?? '' }),
+  )
+}
+
 /** McpServersResponse is the envelope, including which Runner answered. */
 export interface McpServersResponse {
   servers: McpServerRecord[]
@@ -485,6 +576,15 @@ export interface ProjectMcpRecord {
   overriddenGlobal: string[]
   notApplied: Array<{ name: string; reason: string }>
   pendingConsent: Array<{ name: string; summary: string }>
+}
+
+/** The project-level language-server view: what <root>/.forebrain/lsp_servers.yaml declares and its per-entry decisions. */
+export interface ProjectLspRecord {
+  trusted: boolean
+  pending: Array<{ id: string; summary: string }>
+  allowed: string[]
+  denied: string[]
+  notes: string[]
 }
 
 
@@ -1643,6 +1743,14 @@ export const forebrainApi = {
 
   projectMcpConsent(id: string, allow: string[]) {
     return postJson<{ ok: boolean }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/mcp/consent`, { allow })
+  },
+
+  projectLsp(id: string) {
+    return api.get<ProjectLspRecord>(`/v1/projects/${encodeURIComponent(id)}/lsp`).then((res) => res.data)
+  },
+
+  projectLspConsent(id: string, allow: string[]) {
+    return postJson<{ ok: boolean; allowed: string[] }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/lsp/consent`, { allow })
   },
 
   agentRuleFiles() {

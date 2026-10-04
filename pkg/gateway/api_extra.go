@@ -138,6 +138,8 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
+	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
+	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
 
 	// Project-scoped skill lifecycle: /projects/:id/skills mirrors /skills
 	// operation for operation, scoped to the route's project.
@@ -161,6 +163,15 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	mcp.Post("/servers/enable", s.handleMCPServerEnableV1)
 	mcp.Post("/oauth/pkce/start", s.handleMCPOAuthPKCEStart)
 	mcp.Post("/oauth/pkce/finish", s.handleMCPOAuthPKCEFinish)
+
+	lsp := api.Group("/v1/lsp")
+	lsp.Get("/", s.handleLSPSnapshot)
+	lsp.Post("/servers/enable", s.handleLSPServerEnable)
+	lsp.Post("/servers/disable", s.handleLSPServerDisable)
+	lsp.Post("/servers/restart", s.handleLSPServerRestart)
+	lsp.Post("/servers/install", s.handleLSPServerInstall)
+	lsp.Post("/recommendations/reset", s.handleLSPRecommendationsReset)
+	lsp.Post("/recommendations/:id/decision", s.handleLSPRecommendationDecision)
 
 	files := api.Group("/files")
 	files.Post("/", s.handleFiles)
@@ -4796,4 +4807,272 @@ func pathParam(r *http.Request, name string) string {
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// lspControlFor resolves the session's Runner the way the MCP endpoints do
+// and answers its language-server control plane. A gateway or session without
+// one answers false; the caller writes the 503.
+func (s *Server) lspControlFor(r *http.Request, sessionID string) (tool.CodeIntelControl, bool) {
+	runner := s.Runner
+	if id := strings.TrimSpace(sessionID); id != "" {
+		if resolved := s.runnerFor(r.Context(), id); resolved != nil {
+			runner = resolved
+		}
+	}
+	if runner == nil || runner.CodeIntelControl == nil {
+		return nil, false
+	}
+	return runner.CodeIntelControl, true
+}
+
+// handleLSPSnapshot answers GET /api/v1/lsp?session_id=… with the same
+// snapshot the terminal's /lsp panel and the web chat's text fallback render.
+func (s *Server) handleLSPSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	ctl, ok := s.lspControlFor(r, r.URL.Query().Get("session_id"))
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, ctl.Snapshot())
+}
+
+// handleLSPServerEnable clears the server's disabled mark.
+// POST /api/v1/lsp/servers/enable with {"id": "gopls", "session_id": "…"}.
+func (s *Server) handleLSPServerEnable(w http.ResponseWriter, r *http.Request) {
+	s.handleLSPServerAction(w, r, true)
+}
+
+// handleLSPServerDisable records the server as disabled; its instances in
+// this project stop, the same action the terminal panel runs.
+func (s *Server) handleLSPServerDisable(w http.ResponseWriter, r *http.Request) {
+	s.handleLSPServerAction(w, r, false)
+}
+
+// handleLSPServerAction runs Enable/Disable through the control plane; a
+// refusal (an unknown server, a store that cannot be written) answers 409
+// with its own text.
+func (s *Server) handleLSPServerAction(w http.ResponseWriter, r *http.Request, enable bool) {
+	id, ctl, ok := s.lspServerActionInput(w, r)
+	if !ok {
+		return
+	}
+	if err := ctl.SetEnabled(id, enable); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleLSPServerRestart restarts the server's instances in this project.
+func (s *Server) handleLSPServerRestart(w http.ResponseWriter, r *http.Request) {
+	id, ctl, ok := s.lspServerActionInput(w, r)
+	if !ok {
+		return
+	}
+	if err := ctl.Restart(id); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleLSPServerInstall starts the server's install recipe and answers 202
+// at once: progress and outcome are read from the snapshot. The install must
+// survive the request that started it (§6.5: the user's explicit action, not
+// a connection's lifetime), hence WithoutCancel.
+func (s *Server) handleLSPServerInstall(w http.ResponseWriter, r *http.Request) {
+	id, ctl, ok := s.lspServerActionInput(w, r)
+	if !ok {
+		return
+	}
+	go func() { _ = ctl.Install(context.WithoutCancel(r.Context()), id, nil) }()
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{"ok": true, "started": true})
+}
+
+// handleLSPRecommendationsReset turns language-server recommendations back
+// on for this agent.
+func (s *Server) handleLSPRecommendationsReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	ctl, ok := s.lspControlFor(r, in.SessionID)
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := ctl.ResetRecommendations(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleLSPRecommendationDecision applies the user's answer to one
+// recommendation. POST /api/v1/lsp/recommendations/:id/decision with
+// {"choice": "enable", "session_id": "…"}. The web card's answer and the
+// terminal modal's run the same control plane.
+func (s *Server) handleLSPRecommendationDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Choice    string `json:"choice"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "invalid choice", http.StatusBadRequest)
+		return
+	}
+	choice := event.LSPRecommendationChoice(strings.TrimSpace(in.Choice))
+	if !choice.Valid() {
+		http.Error(w, "invalid choice", http.StatusBadRequest)
+		return
+	}
+	ctl, ok := s.lspControlFor(r, in.SessionID)
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := ctl.DecideRecommendation(pathParam(r, "id"), choice); err != nil {
+		if errors.Is(err, tool.ErrUnknownLSPRecommendation) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// lspServerActionInput decodes the shared {"id", "session_id"} body and
+// resolves the control plane, answering the request itself on refusal.
+func (s *Server) lspServerActionInput(w http.ResponseWriter, r *http.Request) (string, tool.CodeIntelControl, bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return "", nil, false
+	}
+	var in struct {
+		ID        string `json:"id"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return "", nil, false
+	}
+	id := strings.TrimSpace(in.ID)
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return "", nil, false
+	}
+	ctl, ok := s.lspControlFor(r, in.SessionID)
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return "", nil, false
+	}
+	return id, ctl, true
+}
+
+// handleProjectLSPPreview resolves the project-level language-server view for
+// a project without a session: which entries the project file declares, which
+// await confirmation, which were allowed or denied, and why anything was
+// ignored. The web project page uses it so the confirmation entry can stand
+// on its own; the data comes from pkg/process because the gateway does not
+// import the lsp runtime.
+func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	trusted, pending, allowed, denied, notes := process.InspectProjectLSP(workspace, launch)
+	rows := make([]map[string]string, 0, len(pending))
+	for _, item := range pending {
+		rows = append(rows, map[string]string{"id": item.ID, "summary": item.Summary})
+	}
+	writeJSON(w, map[string]any{
+		"trusted": trusted,
+		"pending": rows,
+		"allowed": allowed,
+		"denied":  denied,
+		"notes":   notes,
+	})
+}
+
+// handleProjectLSPConsent is the web confirmation entry for project-level
+// language servers: the same decision the terminal's startup prompt records.
+func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		Allow []string `json:"allow"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	if err := process.DecideProjectLSPConsents(workspace, launch, body.Allow); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// A consent changes what a project's sessions would load, so the pooled
+	// runners for it are rebuilt rather than reused.
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			pool.RebindAgent(s.Runner.AgentName)
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "allowed": body.Allow})
 }

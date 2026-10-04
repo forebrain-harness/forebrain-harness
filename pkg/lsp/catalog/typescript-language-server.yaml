@@ -1,0 +1,17 @@
+id: typescript-language-server
+display_name: typescript-language-server
+languages: [TypeScript, JavaScript]
+priority: 100
+command: typescript-language-server
+args: [--stdio]
+extension_to_language: {.ts: typescript, .mts: typescript, .cts: typescript, .tsx: typescriptreact, .js: javascript, .mjs: javascript, .cjs: javascript, .jsx: javascriptreact}
+root_markers: [tsconfig.json, jsconfig.json, package.json]
+env_passthrough: [NODE_PATH, NODE_OPTIONS, NPM_CONFIG_PREFIX]
+detect:
+  version_args: [--version]
+install:
+  - requires: npm
+    argv: [npm, install, -g, typescript-language-server, typescript]
+startup_timeout: 60
+readiness: none
+notes: "Install with: npm install -g typescript-language-server typescript"

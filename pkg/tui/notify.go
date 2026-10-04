@@ -229,6 +229,27 @@ type MigrationDoneMsg struct {
 	Err    error
 }
 
+// LSPRecommendationMsg asks the user whether to enable (or install and
+// enable) a language server. It is shown as a modal; the answer goes back
+// through ChatSession.DecideLSPRecommendation.
+type LSPRecommendationMsg struct {
+	Rec event.LSPRecommendation
+}
+
+// LSPInstallProgressMsg is one output line of an install the user started
+// from a recommendation. It renders as the transient status line.
+type LSPInstallProgressMsg struct {
+	ServerID string
+	Line     string
+}
+
+// LSPInstallDoneMsg ends that install.
+type LSPInstallDoneMsg struct {
+	ServerID string
+	Text     string // the transcript line on success
+	Err      string // the failure text, including the output tail
+}
+
 // SkillInstallProgressMsg is one checkpoint of a background skill install.
 // It renders as a live card in the transcript, replaced in place by the next
 // checkpoint and finally by SkillInstallDoneMsg carrying the same ID.
@@ -838,6 +859,15 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		if msg, ok := autoContinueUIMessage(evt); ok {
 			s.notifyUI(msg)
 		}
+	// A language-server recommendation is the user's to answer, not the
+	// model's: the event is persisted above (so a reconnect does not ask
+	// twice) and only the live surface opens the modal. Replay reads the
+	// answer's transcript line, never this.
+	case event.RunEventLSPRecommendation:
+		var p event.LSPRecommendation
+		if json.Unmarshal(evt.Payload, &p) == nil && p.ID != "" {
+			s.notifyUI(LSPRecommendationMsg{Rec: p})
+		}
 	}
 	return nil
 }
@@ -1328,6 +1358,8 @@ type Session interface {
 	PermissionPresets(sessionID string) (presets []safety.ApprovalPreset, current string)
 	ApplyPermissionPreset(sessionID, presetID string) (string, error)
 	HandleMCPSlash(sessionID, channel string) (string, bool)
+	// HandleLSPSlash answers /lsp for the text fallback (non-viewport mode).
+	HandleLSPSlash(sessionID, channel string) (string, bool)
 	// HandleSandboxSlash returns the sandbox report. It reports only — the
 	// sandbox is chosen with /permissions, which moves it together with the
 	// approval policy.
@@ -1543,6 +1575,10 @@ type PanelCloseMsg struct {
 // MCPStatusTickMsg tells the main loop an MCP server changed state while the
 // /mcp panel is open, so the panel repaints in place.
 type MCPStatusTickMsg struct{}
+
+// LSPStatusTickMsg tells the main loop a language server's snapshot changed
+// while the /lsp panel is open, so the panel repaints in place.
+type LSPStatusTickMsg struct{}
 
 // MCPAuthMsg reports a panel-started OAuth flow to the main loop: first the
 // URL to open, then the outcome sentence once the flow ends.

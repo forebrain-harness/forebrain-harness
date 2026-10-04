@@ -1610,6 +1610,20 @@ func (c *commandController) handleMCP(sessionID string) bool {
 	return true
 }
 
+// handleLSP opens the /lsp panel in viewport mode and falls back to the text
+// inventory everywhere else, the same two-step shape /mcp uses.
+func (c *commandController) handleLSP(sessionID string) bool {
+	if c.openPanel != nil && c.openPanel("lsp") {
+		return true
+	}
+	reply, handled := c.session.HandleLSPSlash(strings.TrimSpace(sessionID), "tui")
+	if !handled || strings.TrimSpace(reply) == "" {
+		return false
+	}
+	c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: strings.TrimSpace(reply), Final: true})
+	return true
+}
+
 // migrateSession is the slice of ChatSession the /migrate flow drives: the
 // option builder wired to this environment, the async dry run whose plan the
 // confirm dialog shows, and the async real run.

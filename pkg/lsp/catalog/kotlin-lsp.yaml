@@ -1,0 +1,16 @@
+id: kotlin-lsp
+display_name: Kotlin LSP
+languages: [Kotlin]
+priority: 100
+command: kotlin-lsp
+args: [--stdio]
+extension_to_language: {.kt: kotlin, .kts: kotlin}
+root_markers: [settings.gradle.kts, settings.gradle, build.gradle.kts, build.gradle, pom.xml]
+env_passthrough: [JAVA_HOME, GRADLE_USER_HOME, GRADLE_OPTS]
+install:
+  - requires: brew
+    platforms: [darwin]
+    argv: [brew, install, JetBrains/utils/kotlin-lsp]
+startup_timeout: 180
+readiness: progress
+notes: "Needs a JDK. On macOS: brew install JetBrains/utils/kotlin-lsp. Elsewhere, unpack JetBrains' kotlin-lsp release and put kotlin-lsp on the PATH."

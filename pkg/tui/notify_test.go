@@ -684,3 +684,47 @@ func TestContinueAfterUsageLimitNeedsAnAttachedSurface(t *testing.T) {
 		t.Fatal("the continuation never reached the event loop")
 	}
 }
+
+// One language-server recommendation reaches the UI once: the session log's
+// identity is what makes a resubscribing surface quiet, not the surface's
+// own memory (spec §10.1).
+func TestPublishRunEventLSPRecommendationNotifies(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	runs := &state.RunStore{DB: db}
+	session := sessionEnv{Home: home, RunSvc: runs}.session()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "s1", "s1"))
+
+	var shown []LSPRecommendationMsg
+	session.PrependUINotify(func(m any) {
+		if msg, ok := m.(LSPRecommendationMsg); ok {
+			shown = append(shown, msg)
+		}
+	})
+
+	rec := event.LSPRecommendation{
+		ID: "lsprec-9f1c2a7b", ServerID: "gopls", DisplayName: "gopls",
+		Languages: []string{"Go"}, TriggerExtension: ".go", Mode: "enable",
+		BinaryPath: "/usr/local/bin/gopls", Version: "v0.23.0",
+	}
+	// No run id: the event belongs to the conversation, not to one turn.
+	evt := event.NewRunEvent(rec.ID, "", "s1", event.RunEventLSPRecommendation, rec, time.Now())
+	require.NoError(t, session.publishRunEvent(ctx, evt))
+	waitForQueuedNotifications(t, session)
+	if len(shown) != 1 || shown[0].Rec.ID != rec.ID {
+		t.Fatalf("shown = %+v, want the one recommendation", shown)
+	}
+
+	// The same event id a second time — a surface that resubscribed — is
+	// already in the log and must not open a second modal.
+	require.NoError(t, session.publishRunEvent(ctx, evt))
+	waitForQueuedNotifications(t, session)
+	if len(shown) != 1 {
+		t.Fatalf("a repeat of %s was shown again: %+v", rec.ID, shown)
+	}
+}

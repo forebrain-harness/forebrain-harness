@@ -97,6 +97,8 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 		body, truncated = formatRequestPermissionsStep(evt, maxBytes)
 	case "retrieve_output":
 		body, truncated = formatRetrieveOutputStep(evt, maxBytes)
+	case "lsp":
+		body, truncated = formatLSPStep(evt, maxBytes)
 	case "memories_list", "memories_read", "memories_search", "memories_add_ad_hoc_note":
 		body, truncated = formatMemoryToolStep(evt, toolName, maxBytes)
 	default:
@@ -243,6 +245,11 @@ func SummarizeToolStep(evt StepEvent) string {
 		}
 		if toolName == "request_permissions" {
 			return requestPermissionsCompletionSummary(evt, invocation)
+		}
+		if toolName == "lsp" {
+			if summary := lspStepSummary(evt); summary != "" {
+				return summary
+			}
 		}
 		if toolName == "intermediate_tool" {
 			action := strings.ToLower(strings.TrimSpace(firstString(evt.Input, "action")))
@@ -453,6 +460,10 @@ func formatShellStep(evt StepEvent, maxBytes int) (string, bool) {
 				sb.WriteString("\n```")
 			}
 		}
+	}
+	if diagSection := lspDiagnosticsSection(evt.Output); diagSection != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(diagSection)
 	}
 	return clampBody(sb.String(), maxBytes)
 }
@@ -1061,6 +1072,10 @@ func formatGenericToolStep(evt StepEvent, tool string, maxBytes int) (string, bo
 			sb.WriteString(diffSection)
 			sb.WriteString("\n\n")
 		}
+		if diagSection := lspDiagnosticsSection(evt.Output); diagSection != "" {
+			sb.WriteString(diagSection)
+			sb.WriteString("\n\n")
+		}
 		if preview := strings.TrimSpace(stringFromAny(evt.Output["stdout_preview"])); preview != "" {
 			sb.WriteString("stdout preview:\n\n```text\n")
 			sb.WriteString(preview)
@@ -1081,7 +1096,7 @@ func formatGenericToolStep(evt StepEvent, tool string, maxBytes int) (string, bo
 			sb.WriteString(note)
 			sb.WriteString("\n\n")
 		}
-		renderOutput := compactExplainableOutput(evt.Output)
+		renderOutput := compactExplainableOutput(outputWithout(evt.Output, "lsp_diagnostics"))
 		if len(renderOutput) > 0 {
 			if b, err := json.MarshalIndent(renderOutput, "", "  "); err == nil {
 				sb.WriteString("output:\n\n```json\n")
@@ -1100,6 +1115,35 @@ func formatGenericToolStep(evt StepEvent, tool string, maxBytes int) (string, bo
 func formatRetrieveOutputStep(evt StepEvent, maxBytes int) (string, bool) {
 	body := strings.TrimSpace(stringFromAny(evt.Output["output"]))
 	return clampBody(body, maxBytes)
+}
+
+// formatLSPStep wraps the text the lsp tool returned — the same text the
+// model received — in a plain code block. The structured Display fields ride
+// on the step for the title and the summary, not the body.
+func formatLSPStep(evt StepEvent, maxBytes int) (string, bool) {
+	body := strings.TrimSpace(stringFromAny(evt.Output["output"]))
+	if body == "" {
+		return "", false
+	}
+	return clampBody("```text\n"+body+"\n```", maxBytes)
+}
+
+// lspStepSummary is the completed lsp summary line: the operation that ran
+// and how many results it found. The operation is read from the captured
+// output (already normalized) and falls back to the call's argument, so a
+// step replayed from input alone still names what was looked up.
+func lspStepSummary(evt StepEvent) string {
+	operation := strings.TrimSpace(stringFromAny(evt.Output["operation"]))
+	if operation == "" {
+		operation = strings.ToLower(strings.TrimSpace(stringFromAny(evt.Input["operation"])))
+	}
+	if operation == "" {
+		return ""
+	}
+	if n, ok := firstInt(evt.Output, "result_count"); ok {
+		return "looked up " + operation + " · " + formatCountLabel(n, "result", "results")
+	}
+	return "looked up " + operation
 }
 
 type webSearchDisplayResult struct {
@@ -2649,6 +2693,84 @@ func turnDiffSection(output map[string]any) string {
 	return sb.String()
 }
 
+// lspDiagnosticsSection renders the "lsp_diagnostics" summary an edit tool
+// recorded (spec §8.3.5): a header line plus a ```text block whose problem
+// lines follow appendix B.3's shape. The summary arrives as
+// event.LSPDiagnosticsSummary from a live capture and as the equivalent map
+// after a replay; both normalize here so live and replayed cards agree.
+func lspDiagnosticsSection(output map[string]any) string {
+	if len(output) == 0 {
+		return ""
+	}
+	summary, ok := extractLSPDiagnosticsSummary(output["lsp_diagnostics"])
+	if !ok || (summary.New == 0 && len(summary.PendingFiles) == 0) {
+		return ""
+	}
+	sb := strings.Builder{}
+	if summary.New == 0 {
+		sb.WriteString("lsp diagnostics: pending")
+	} else {
+		fileWord := "files"
+		if summary.Files == 1 {
+			fileWord = "file"
+		}
+		fmt.Fprintf(&sb, "lsp diagnostics: %d new in %d %s", summary.New, summary.Files, fileWord)
+	}
+	sb.WriteString("\n\n```text\n")
+	lastPath := ""
+	for _, item := range summary.Items {
+		if item.Path != lastPath {
+			sb.WriteString(item.Path)
+			sb.WriteString("\n")
+			lastPath = item.Path
+		}
+		sb.WriteString(lspDiagnosticItemLine(item))
+		sb.WriteString("\n")
+	}
+	for _, path := range summary.PendingFiles {
+		fmt.Fprintf(&sb, "diagnostics for %s are still being computed and will follow\n", path)
+	}
+	sb.WriteString("```")
+	return sb.String()
+}
+
+// lspDiagnosticItemLine renders one problem the way appendix B.3 prints it.
+func lspDiagnosticItemLine(item event.LSPDiagnostic) string {
+	message := strings.ReplaceAll(strings.ReplaceAll(item.Message, "\r\n", " / "), "\n", " / ")
+	text := fmt.Sprintf("  %s %d:%d %s", strings.TrimSpace(item.Severity), item.Line, item.Column, message)
+	switch {
+	case item.Source != "" && item.Code != "":
+		text += fmt.Sprintf(" [%s %s]", item.Source, item.Code)
+	case item.Source != "":
+		text += fmt.Sprintf(" [%s]", item.Source)
+	case item.Code != "":
+		text += fmt.Sprintf(" [%s]", item.Code)
+	}
+	return text
+}
+
+// extractLSPDiagnosticsSummary normalizes the "lsp_diagnostics" output value:
+// a live capture carries event.LSPDiagnosticsSummary, a replayed step carries
+// its JSON equivalent as a map.
+func extractLSPDiagnosticsSummary(v any) (event.LSPDiagnosticsSummary, bool) {
+	switch x := v.(type) {
+	case nil:
+		return event.LSPDiagnosticsSummary{}, false
+	case event.LSPDiagnosticsSummary:
+		return x, true
+	default:
+		b, err := json.Marshal(x)
+		if err != nil {
+			return event.LSPDiagnosticsSummary{}, false
+		}
+		var summary event.LSPDiagnosticsSummary
+		if err := json.Unmarshal(b, &summary); err != nil {
+			return event.LSPDiagnosticsSummary{}, false
+		}
+		return summary, true
+	}
+}
+
 func outputWithoutTurnDiff(output map[string]any) map[string]any {
 	if len(output) == 0 {
 		return output
@@ -2656,9 +2778,32 @@ func outputWithoutTurnDiff(output map[string]any) map[string]any {
 	if _, ok := extractTurnDiff(output["turn_diff"]); !ok {
 		return output
 	}
-	dup := make(map[string]any, len(output)-1)
+	return outputWithout(output, "turn_diff")
+}
+
+// outputWithout returns a copy of output without the given keys — the original
+// map when none of them are present, so an untouched output is never copied.
+func outputWithout(output map[string]any, keys ...string) map[string]any {
+	if len(output) == 0 {
+		return output
+	}
+	present := false
+	for _, k := range keys {
+		if _, ok := output[k]; ok {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return output
+	}
+	skip := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		skip[k] = struct{}{}
+	}
+	dup := make(map[string]any, len(output))
 	for k, v := range output {
-		if k == "turn_diff" {
+		if _, ok := skip[k]; ok {
 			continue
 		}
 		dup[k] = v
@@ -2677,7 +2822,7 @@ func shellOutputMetadataOnly(output map[string]any) map[string]any {
 		}
 		dup[k] = v
 	}
-	return outputWithoutTurnDiff(dup)
+	return outputWithout(dup, "turn_diff", "lsp_diagnostics")
 }
 
 func extractTurnDiff(v any) (event.Summary, bool) {

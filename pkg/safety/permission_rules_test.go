@@ -2724,6 +2724,7 @@ func TestCanonicalToolName(t *testing.T) {
 		"WebFetch":       "WebFetch",
 		"web_search":     "WebSearch",
 		"list_directory": "LS",
+		"lsp":            "LSP",
 		"unknown_tool":   "unknown_tool",
 		"":               "",
 	}

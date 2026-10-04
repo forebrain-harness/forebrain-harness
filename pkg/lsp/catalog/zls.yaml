@@ -1,0 +1,15 @@
+id: zls
+display_name: ZLS
+languages: [Zig]
+priority: 100
+command: zls
+extension_to_language: {.zig: zig, .zon: zig}
+root_markers: [build.zig, build.zig.zon]
+detect:
+  version_args: [--version]
+install:
+  - requires: brew
+    platforms: [darwin, linux]
+    argv: [brew, install, zls]
+readiness: none
+notes: "Use the ZLS release that matches your Zig version."
