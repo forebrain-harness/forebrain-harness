@@ -1,7 +1,11 @@
-// Text search and ranking used by the semantic tools.
+// Code search: text search and ranking used by the semantic tools, and the
+// code intelligence ports the language-server runtime implements (the lsp
+// tool and the edit tools' diagnostics go through them).
 package tool
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -10,7 +14,9 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
 
 // bm25.go — BM25 ranking over cached original outputs, a port of Boost's
@@ -747,3 +753,210 @@ func sortedKeys(m map[string]string) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// Operations of the lsp tool, in the order its schema lists them.
+const (
+	LSPOpDefinition       = "definition"
+	LSPOpDeclaration      = "declaration"
+	LSPOpTypeDefinition   = "type_definition"
+	LSPOpImplementation   = "implementation"
+	LSPOpReferences       = "references"
+	LSPOpHover            = "hover"
+	LSPOpDocumentSymbols  = "document_symbols"
+	LSPOpWorkspaceSymbols = "workspace_symbols"
+	LSPOpIncomingCalls    = "incoming_calls"
+	LSPOpOutgoingCalls    = "outgoing_calls"
+	LSPOpSupertypes       = "supertypes"
+	LSPOpSubtypes         = "subtypes"
+	LSPOpDiagnostics      = "diagnostics"
+)
+
+// LSPOperations lists every operation in schema order.
+var LSPOperations = []string{
+	LSPOpDefinition, LSPOpDeclaration, LSPOpTypeDefinition, LSPOpImplementation,
+	LSPOpReferences, LSPOpHover, LSPOpDocumentSymbols, LSPOpWorkspaceSymbols,
+	LSPOpIncomingCalls, LSPOpOutgoingCalls, LSPOpSupertypes, LSPOpSubtypes,
+	LSPOpDiagnostics,
+}
+
+// lspToolDescription is appendix B.1 verbatim. It is part of the prompt
+// prefix: never interpolate anything into it.
+const lspToolDescription = "Look up code through the project's language servers: definitions, declarations, type definitions, implementations, references, hover type information, document and workspace symbols, call and type hierarchies, and current diagnostics. Read-only. Lines are 1-based and numbered the way file reads show them. Pass symbol (a name on that line) instead of column when you are not sure of the exact column. Prefer this over text search when you need where a symbol is defined or used."
+
+type LSPInput struct {
+	Operation          string `json:"operation" jsonschema:"enum=definition,enum=declaration,enum=type_definition,enum=implementation,enum=references,enum=hover,enum=document_symbols,enum=workspace_symbols,enum=incoming_calls,enum=outgoing_calls,enum=supertypes,enum=subtypes,enum=diagnostics" jsonschema_description:"What to look up."`
+	FilePath           string `json:"file_path,omitempty" jsonschema_description:"Absolute or workspace-relative file path. Required for every operation except workspace_symbols."`
+	Line               int    `json:"line,omitempty" jsonschema:"minimum=1" jsonschema_description:"1-based line number, as shown by file reads."`
+	Column             int    `json:"column,omitempty" jsonschema:"minimum=1" jsonschema_description:"1-based column in characters. Omit when symbol is given."`
+	Symbol             string `json:"symbol,omitempty" jsonschema_description:"A name on the given line to position on, used instead of column."`
+	Query              string `json:"query,omitempty" jsonschema_description:"Symbol name or prefix to search for. Required for workspace_symbols."`
+	IncludeDeclaration bool   `json:"include_declaration,omitempty" jsonschema_description:"For references: also return the declaration itself."`
+	MaxResults         int    `json:"max_results,omitempty" jsonschema:"minimum=1,maximum=200" jsonschema_description:"Maximum locations to return (default 50, at most 200)."`
+}
+
+// NewLSPTool builds the lsp tool over rt.CodeIntel.
+func NewLSPTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
+	return llm.NewTool(
+		"lsp",
+		lspToolDescription,
+		func(ctx context.Context, in *LSPInput) (string, error) {
+			if rt == nil || rt.CodeIntel == nil {
+				return "", fmt.Errorf("language servers are not available in this session")
+			}
+			if in == nil {
+				in = &LSPInput{}
+			}
+			operation := strings.ToLower(strings.TrimSpace(in.Operation))
+			abs := ""
+			if strings.TrimSpace(in.FilePath) != "" {
+				resolution, err := authorizeRead(ctx, st, "lsp", in.FilePath)
+				if err != nil {
+					return "", err
+				}
+				abs = resolution.Abs
+			}
+			maxResults := in.MaxResults
+			if maxResults <= 0 {
+				maxResults = 50
+			}
+			if maxResults > 200 {
+				maxResults = 200
+			}
+			// A result location outside the readable roots carries only its
+			// path and position, never a source preview (spec §9.4): previews
+			// are for files this session may read without asking.
+			readRoots := MergeAllowedRootPaths(st.AllowedRoots(), st.PermissionRoots(safety.FileSystemAccessRead))
+			previewAllowed := func(p string) bool {
+				if _, err := ResolveWithinRoots(p, readRoots); err != nil {
+					return false
+				}
+				return !st.ReadPathDenied(p) && st.ProtectedReadReason(p) == ""
+			}
+			res, err := rt.CodeIntel.Query(ctx, CodeIntelQuery{
+				Operation:          operation,
+				AbsPath:            abs,
+				DisplayPath:        in.FilePath,
+				Line:               in.Line,
+				Column:             in.Column,
+				Symbol:             strings.TrimSpace(in.Symbol),
+				Query:              strings.TrimSpace(in.Query),
+				IncludeDeclaration: in.IncludeDeclaration,
+				MaxResults:         maxResults,
+				PreviewAllowed:     previewAllowed,
+			})
+			if err != nil {
+				CaptureToolError(ctx, err)
+				return "", err
+			}
+			display := res.Display
+			if display == nil {
+				display = map[string]any{}
+			}
+			display["operation"] = operation
+			display["file_path"] = in.FilePath
+			if in.Line > 0 {
+				display["line"] = in.Line
+			}
+			if symbol := strings.TrimSpace(in.Symbol); symbol != "" {
+				display["symbol"] = symbol
+			}
+			// The card body is the text the model receives; a captured map
+			// replaces the transport fallback that would otherwise carry it.
+			display["output"] = res.Text
+			CaptureToolOutput(ctx, display)
+			return res.Text, nil
+		},
+	)
+}
+
+// CodeIntelQuery is one lsp tool call after the tool validated and authorized it.
+type CodeIntelQuery struct {
+	Operation          string
+	AbsPath            string // resolved and read-authorized; empty when the operation allows it
+	DisplayPath        string // what the model passed, for messages
+	Line               int    // 1-based; 0 when not applicable
+	Column             int    // 1-based characters; 0 when Symbol is used or not applicable
+	Symbol             string
+	Query              string
+	IncludeDeclaration bool
+	MaxResults         int // already defaulted (50) and capped (200) by the tool
+	// PreviewAllowed reports whether a result location may carry a source
+	// preview: true only for paths the session may read without asking.
+	PreviewAllowed func(absPath string) bool
+}
+
+// CodeIntelResult is the text the model receives plus the fields the
+// surfaces render.
+type CodeIntelResult struct {
+	Text    string
+	Display map[string]any
+}
+
+// FileChange is one file an edit tool wrote. Before is nil for a new file;
+// After is nil for a deleted file.
+type FileChange struct {
+	AbsPath string
+	Before  []byte
+	After   []byte
+}
+
+// DiagnosticsDelta is what an edit reports: Text is the <diagnostics> block
+// appended to the tool result ("" when there is nothing to say).
+type DiagnosticsDelta struct {
+	Text    string
+	Summary event.LSPDiagnosticsSummary
+}
+
+// Empty reports whether the edit has nothing to report.
+func (d DiagnosticsDelta) Empty() bool { return d.Text == "" }
+
+// CodeIntelligence is what the tools use. Every method must be safe for
+// concurrent use and must never start a server on the Runner.Load path.
+type CodeIntelligence interface {
+	// Handles reports, without starting anything, whether an enabled server
+	// covers absPath in this project.
+	Handles(absPath string) bool
+	// Query runs one lsp tool operation, starting the server if needed.
+	Query(ctx context.Context, q CodeIntelQuery) (CodeIntelResult, error)
+	// DidWrite syncs files an edit tool just wrote and waits, at most the
+	// diagnostics wait window, for the problems the edit introduced. It never
+	// fails the edit: problems are logged and reported as an empty delta.
+	// agentSessionID (llm.AgentSessionIDFromContext at the call site) keys the
+	// late-diagnostics queue that PeekLate reads.
+	DidWrite(ctx context.Context, agentSessionID string, changes []FileChange) DiagnosticsDelta
+	// DidRead opens absPath on a server that is already running, as a
+	// diagnostics baseline. It never starts a server.
+	DidRead(ctx context.Context, absPath string, content []byte)
+	// DidRunShell tells the runtime a shell command finished, so files changed
+	// outside the edit tools are re-synced. It returns immediately.
+	DidRunShell(ctx context.Context)
+	// PeekLate returns the late-diagnostics reminder text pending for one agent
+	// session ("" when none) and a token for AckLate.
+	PeekLate(agentSessionID string) (text string, token uint64)
+	// AckLate marks everything up to token as delivered.
+	AckLate(agentSessionID string, token uint64)
+}
+
+// CodeIntelControl is what the surfaces use (/lsp, recommendations, web API).
+type CodeIntelControl interface {
+	Snapshot() event.LSPSnapshot
+	// Subscribe calls fn whenever the snapshot changes; cancel stops it.
+	Subscribe(fn func(event.LSPSnapshot)) (cancel func())
+	SetEnabled(serverID string, enabled bool) error
+	Restart(serverID string) error
+	// Install runs the server's install recipe; progress receives output lines.
+	Install(ctx context.Context, serverID string, progress func(line string)) error
+	// SetRecommendationListener installs the callback that publishes a
+	// recommendation to the session named by ctx. Nil removes it.
+	SetRecommendationListener(fn func(ctx context.Context, rec event.LSPRecommendation))
+	// DecideRecommendation applies the user's answer. A recommendation the
+	// runtime did not make, or one already answered, returns
+	// ErrUnknownLSPRecommendation.
+	DecideRecommendation(recommendationID string, choice event.LSPRecommendationChoice) error
+	ResetRecommendations() error
+}
+
+// ErrUnknownLSPRecommendation is DecideRecommendation's answer for an id it
+// does not know. It lives beside the port so surfaces can test for it without
+// importing the runtime.
+var ErrUnknownLSPRecommendation = errors.New("unknown or already answered language server recommendation")

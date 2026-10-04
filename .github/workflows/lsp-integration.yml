@@ -1,0 +1,119 @@
+name: LSP integration
+
+# Real language servers against the spec §1.4 acceptance cases. Every job is
+# non-blocking: the core job answers pull requests, the extended ones run on
+# the nightly schedule and by hand.
+on:
+  pull_request:
+    branches: [main]
+    paths: ['pkg/lsp/**', '.github/workflows/lsp-integration.yml']
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core language servers (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install language servers
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential clangd
+          go install golang.org/x/tools/gopls@latest
+          npm install -g pyright typescript-language-server typescript
+          rustup component add rust-analyzer
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Integration tests
+        env:
+          CGO_ENABLED: "1"
+          FOREBRAIN_LSP_INTEGRATION: gopls,pyright,typescript-language-server,rust-analyzer,clangd
+          FOREBRAIN_LSP_INTEGRATION_REQUIRE: "1"
+        run: go test -tags fts5 ./pkg/lsp -run TestIntegrationRealServers -count=1 -v -timeout 30m
+
+  extended-linux:
+    name: Extended language servers, Linux (nightly, non-blocking)
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    continue-on-error: true
+    env:
+      # Pinned on purpose: no "latest" links, so a nightly failure always
+      # points at one known version of each distribution.
+      JDTLS_URL: https://download.eclipse.org/jdtls/milestones/1.58.0/jdt-language-server-1.58.0-202604151538.tar.gz
+      KOTLIN_LSP_URL: https://download.jetbrains.com/language-server/kotlin-server/263.6379.0/kotlin-server-263.6379.0.tar.gz
+      METALS_VERSION: "1.6.9"
+      COURSIER_URL: https://github.com/coursier/coursier/releases/download/v2.1.26/cs-x86_64-pc-linux.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install language servers
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y python3
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # jdtls: the archive unpacks bin/jdtls (a python launcher).
+          curl -fsSL "$JDTLS_URL" | tar -xz -C "$HOME"
+          ln -s "$HOME/bin/jdtls" "$HOME/.local/bin/jdtls"
+          # kotlin-lsp: the archive unpacks kotlin-lsp.sh with its own runtime.
+          mkdir -p "$HOME/kotlin-lsp"
+          curl -fsSL "$KOTLIN_LSP_URL" | tar -xz -C "$HOME/kotlin-lsp"
+          chmod +x "$HOME/kotlin-lsp/kotlin-lsp.sh"
+          ln -s "$HOME/kotlin-lsp/kotlin-lsp.sh" "$HOME/.local/bin/kotlin-lsp"
+          # metals through coursier, at a pinned version.
+          curl -fsSL "$COURSIER_URL" | gunzip > /tmp/cs
+          chmod +x /tmp/cs
+          /tmp/cs install --bin-dir "$HOME/.local/bin" "metals:$METALS_VERSION"
+          npm install -g intelephense
+          dotnet tool install --global csharp-ls
+      - name: Integration tests
+        env:
+          CGO_ENABLED: "1"
+          FOREBRAIN_LSP_INTEGRATION: jdtls,kotlin-lsp,metals,csharp-ls,intelephense
+          FOREBRAIN_LSP_INTEGRATION_REQUIRE: "1"
+        run: go test -tags fts5 ./pkg/lsp -run TestIntegrationRealServers -count=1 -v -timeout 30m
+
+  extended-macos:
+    name: sourcekit-lsp on macOS (nightly, non-blocking)
+    runs-on: macos-14
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Integration tests
+        env:
+          CGO_ENABLED: "1"
+          FOREBRAIN_LSP_INTEGRATION: sourcekit-lsp
+          FOREBRAIN_LSP_INTEGRATION_REQUIRE: "1"
+        run: go test -tags fts5 ./pkg/lsp -run TestIntegrationRealServers -count=1 -v -timeout 30m

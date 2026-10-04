@@ -103,7 +103,7 @@ func TestOnlyFilterRestrictsCategories(t *testing.T) {
 	if len(report.Memories) != 0 || len(report.Skills) != 0 || len(report.Plans) != 0 || len(report.MCP) != 0 {
 		t.Fatal("an excluded category ran")
 	}
-	if strings.Join(report.SkippedCategories, ",") != "memories,skills,plans,mcp,history" {
+	if strings.Join(report.SkippedCategories, ",") != "memories,skills,plans,mcp,lsp,history" {
 		t.Fatalf("skipped categories = %v", report.SkippedCategories)
 	}
 	var memories int
@@ -166,5 +166,47 @@ func TestPlanWithNothingToImportGrowsNothing(t *testing.T) {
 	plan := &Plan{Source: KindClaude, AlreadyHere: 3}
 	if text := plan.Text(); !strings.Contains(text, "Database: no new conversations to store") {
 		t.Fatalf("plan text =\n%s", text)
+	}
+}
+
+// TestPlanAndReportTextCarryLanguageServers checks the language-server counts
+// in the preview and the detail section in the report when an import brings
+// language servers along.
+func TestPlanAndReportTextCarryLanguageServers(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	official := lspPluginVersionDir(t, fixture.root, "gopls-lsp@claude-plugins-official", "1.0.0")
+	writePluginFile(t, official, ".lsp.json", `{"go": {"command": "gopls", "extensionToLanguage": {".go": "go"}}}`)
+	custom := lspPluginVersionDir(t, fixture.root, "mylang@acme", "1.0.0")
+	writePluginFile(t, custom, ".lsp.json", `{"mylang": {"command": "mylang-ls", "extensionToLanguage": {".ml2": "mylang"}}}`)
+	enableClaudePluginsInHome(t, fixture.root, "gopls-lsp@claude-plugins-official", "mylang@acme")
+	stubClaudeRoot(t, fixture)
+	plan, report, err := PlanClaude(ctx, fixture.options(t, true), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.Text(), "Language servers: 1 enabled · 1 added") {
+		t.Fatalf("plan text =\n%s", plan.Text())
+	}
+	if !strings.Contains(report.Text(), "Language servers: 1 enabled · 1 added · 0 skipped") {
+		t.Fatalf("report text =\n%s", report.Text())
+	}
+	if !strings.Contains(report.Text(), "\nLanguage servers\n") {
+		t.Fatalf("report text =\n%s", report.Text())
+	}
+}
+
+// TestPlanAndReportTextOmitLanguageServersWithoutPlugins checks neither text
+// mentions language servers when no enabled plugin declares any.
+func TestPlanAndReportTextOmitLanguageServersWithoutPlugins(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	plan, report, err := PlanClaude(ctx, fixture.options(t, true), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plan.Text(), "Language servers") || strings.Contains(report.Text(), "Language servers") {
+		t.Fatalf("plan text =\n%s\nreport text =\n%s", plan.Text(), report.Text())
 	}
 }

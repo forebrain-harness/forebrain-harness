@@ -1,0 +1,32 @@
+id: eslint
+display_name: ESLint
+languages: [JavaScript, TypeScript]
+role: diagnostics
+priority: 100
+command: vscode-eslint-language-server
+args: [--stdio]
+extension_to_language: {.js: javascript, .mjs: javascript, .cjs: javascript, .jsx: javascriptreact, .ts: typescript, .mts: typescript, .cts: typescript, .tsx: typescriptreact}
+root_markers: [eslint.config.js, eslint.config.mjs, eslint.config.cjs, eslint.config.ts, eslint.config.mts, eslint.config.cts, .eslintrc, .eslintrc.js, .eslintrc.cjs, .eslintrc.json, .eslintrc.yml, .eslintrc.yaml]
+require_root_marker: true
+env_passthrough: [NODE_PATH, NODE_OPTIONS]
+install:
+  - requires: npm
+    argv: [npm, install, -g, vscode-langservers-extracted]
+readiness: none
+settings:
+  validate: "on"
+  run: onType
+  quiet: false
+  onIgnoredFiles: "off"
+  useESLintClass: false
+  nodePath: null
+  workingDirectory: {mode: auto}
+  problems: {shortenToSingleLine: false}
+  rulesCustomizations: []
+  codeAction:
+    disableRuleComment: {enable: false, location: separateLine}
+    showDocumentation: {enable: false}
+  codeActionOnSave: {enable: false, mode: all}
+  format: false
+  experimental: {}
+notes: "Uses the project's own eslint package; run npm install in the project first."

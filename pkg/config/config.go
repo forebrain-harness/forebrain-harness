@@ -107,6 +107,7 @@ type Root struct {
 	Memories              MemorySection         `yaml:"memories,omitempty" json:"memories,omitempty"`
 	Tools                 ToolsSection          `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Features              FeaturesSection       `yaml:"features,omitempty" json:"features,omitempty"`
+	LSP                   LSPSection            `yaml:"lsp,omitempty" json:"lsp,omitempty"`
 	Windows               WindowsSection        `yaml:"windows,omitempty" json:"windows,omitempty"`
 	Credentials           CredentialsSection    `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
@@ -128,6 +129,7 @@ type FeaturesSection struct {
 	RequestPermissionsTool  *bool                     `yaml:"request_permissions_tool,omitempty" json:"request_permissions_tool,omitempty"`
 	Memories                *bool                     `yaml:"memories,omitempty" json:"memories,omitempty"`
 	SkillOffer              *bool                     `yaml:"skill_offer,omitempty" json:"skill_offer,omitempty"`
+	LSP                     *bool                     `yaml:"lsp,omitempty" json:"lsp,omitempty"`
 	NetworkProxy            NetworkProxyFeatureConfig `yaml:"network_proxy,omitempty" json:"network_proxy,omitempty"`
 }
 
@@ -143,6 +145,7 @@ func (r *Root) EffectiveFeatures() EffectiveFeaturesConfig {
 		RequestPermissionsTool:  boolValue(f.RequestPermissionsTool, false),
 		Memories:                boolValue(f.Memories, true),
 		SkillOffer:              boolValue(f.SkillOffer, true),
+		LSP:                     boolValue(f.LSP, true),
 	}
 }
 
@@ -152,6 +155,7 @@ type EffectiveFeaturesConfig struct {
 	RequestPermissionsTool  bool
 	Memories                bool
 	SkillOffer              bool
+	LSP                     bool
 }
 
 type WindowsSandboxMode string

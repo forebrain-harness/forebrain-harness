@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,9 +26,13 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
+
+// The endpoint double must keep satisfying the control-plane port.
+var _ tool.CodeIntelControl = (*lspControlDouble)(nil)
 
 func TestHandleSlashCommands(t *testing.T) {
 	s := &Server{}
@@ -854,6 +859,8 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
+	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
+	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
 	// Project-scoped skill lifecycle, mirroring the production routes.
 	projects.Get("/:id/skills", s.handleProjectSkillsList)
 	projects.Post("/:id/skills", s.handleProjectSkillsCreate)
@@ -2638,4 +2645,304 @@ func TestSessionCostSummaryReportsWhatTheSessionSpent(t *testing.T) {
 	require.Equal(t, float64(2), got["requests"])
 	require.Equal(t, float64(60), got["cache_hit_percent"])
 	require.NotContains(t, rec.Body.String(), "note")
+}
+
+// lspControlDouble records the actions the /v1/lsp endpoints run and answers
+// a fixed snapshot.
+type lspControlDouble struct {
+	mu        sync.Mutex
+	snapshot  event.LSPSnapshot
+	enabled   []string
+	restarts  []string
+	installs  []string
+	decisions []string
+	decideErr error
+	recResets int
+	err       error
+}
+
+func (c *lspControlDouble) Snapshot() event.LSPSnapshot { return c.snapshot }
+func (c *lspControlDouble) Subscribe(func(event.LSPSnapshot)) func() {
+	return func() {}
+}
+func (c *lspControlDouble) SetEnabled(serverID string, enabled bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enabled = append(c.enabled, fmt.Sprintf("%v:%s", enabled, serverID))
+	return c.err
+}
+func (c *lspControlDouble) Restart(serverID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.restarts = append(c.restarts, serverID)
+	return c.err
+}
+func (c *lspControlDouble) Install(ctx context.Context, serverID string, progress func(string)) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.installs = append(c.installs, serverID)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.err
+}
+func (c *lspControlDouble) SetRecommendationListener(func(context.Context, event.LSPRecommendation)) {
+}
+func (c *lspControlDouble) DecideRecommendation(recommendationID string, choice event.LSPRecommendationChoice) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.decisions = append(c.decisions, fmt.Sprintf("%s:%s", recommendationID, choice))
+	if c.decideErr != nil {
+		return c.decideErr
+	}
+	return nil
+}
+func (c *lspControlDouble) ResetRecommendations() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recResets++
+	return c.err
+}
+
+// GET /api/v1/lsp answers the same JSON the panel renders, and a gateway
+// without a control plane answers 503 rather than an empty snapshot.
+func TestLSPSnapshotEndpoint(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady}},
+	}}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	rec := httptest.NewRecorder()
+	s.handleLSPSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/v1/lsp", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var snap event.LSPSnapshot
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &snap))
+	require.Equal(t, "/proj", snap.ProjectRoot)
+	require.Len(t, snap.Servers, 1)
+	require.Equal(t, "gopls", snap.Servers[0].ID)
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	rec = httptest.NewRecorder()
+	bare.handleLSPSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/v1/lsp", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Contains(t, rec.Body.String(), "language servers are not available")
+}
+
+// The /v1/lsp server actions share the terminal panel's control plane:
+// enable/disable/restart answer 200, install answers 202 and really starts,
+// a missing id answers 400, a control-plane refusal answers 409, and no
+// control plane answers 503.
+func TestLSPServerActions(t *testing.T) {
+	ctl := &lspControlDouble{}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	post := func(handler func(http.ResponseWriter, *http.Request), body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		handler(rec, httptest.NewRequest(http.MethodPost, "/api/v1/lsp/servers/x", strings.NewReader(body)))
+		return rec
+	}
+
+	rec := post(s.handleLSPServerEnable, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = post(s.handleLSPServerDisable, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = post(s.handleLSPServerRestart, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, []string{"true:gopls", "false:gopls"}, ctl.enabled)
+	require.Equal(t, []string{"gopls"}, ctl.restarts)
+
+	rec = post(s.handleLSPServerInstall, `{"id":"pyright"}`)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"started":true`)
+	require.Eventually(t, func() bool {
+		ctl.mu.Lock()
+		defer ctl.mu.Unlock()
+		return len(ctl.installs) == 1 && ctl.installs[0] == "pyright"
+	}, time.Second, 5*time.Millisecond)
+
+	rec = post(s.handleLSPServerEnable, `{"id":""}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "id required")
+
+	rec = post(s.handleLSPServerEnable, `not json`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	refusing := &lspControlDouble{err: errors.New("unknown language server \"nope\"")}
+	refuser := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: refusing}}}
+	rec = post(refuser.handleLSPServerEnable, `{"id":"nope"}`)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "unknown language server")
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	rec = post(bare.handleLSPServerRestart, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// POST /v1/lsp/recommendations/reset runs the control plane's reset and
+// reports its refusal with its own text.
+func TestLSPRecommendationsResetEndpoint(t *testing.T) {
+	ctl := &lspControlDouble{}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	rec := httptest.NewRecorder()
+	s.handleLSPRecommendationsReset(rec, httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/reset", strings.NewReader(`{"session_id":"s1"}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, ctl.recResets)
+
+	notYet := &lspControlDouble{err: errors.New("language servers are not available in this build yet")}
+	unbuilt := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: notYet}}}
+	rec = httptest.NewRecorder()
+	unbuilt.handleLSPRecommendationsReset(rec, httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/reset", strings.NewReader(`{}`)))
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "not available in this build yet")
+}
+
+// POST /v1/lsp/recommendations/:id/decision applies the web card's answer:
+// 200 with the choice on record, 400 for a choice the runtime does not
+// know, 404 for a recommendation that was never made or already answered,
+// and 503 without a control plane.
+func TestLSPRecommendationDecisionEndpoint(t *testing.T) {
+	ctl := &lspControlDouble{}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	post := func(id, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/"+id+"/decision", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: id}}))
+		s.handleLSPRecommendationDecision(rec, req)
+		return rec
+	}
+
+	rec := post("lsprec-1", `{"choice":"enable","session_id":"s1"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, []string{"lsprec-1:enable"}, ctl.decisions)
+
+	rec = post("lsprec-1", `{"choice":"bogus"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid choice")
+
+	rec = post("lsprec-1", `not json`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid choice")
+
+	unknown := &lspControlDouble{decideErr: tool.ErrUnknownLSPRecommendation}
+	refuser := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: unknown}}}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/lsprec-2/decision", strings.NewReader(`{"choice":"not_now"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: "lsprec-2"}}))
+	refuser.handleLSPRecommendationDecision(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	refusal := &lspControlDouble{decideErr: errors.New("unknown language server \"nope\"")}
+	conflicted := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: refusal}}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/lsprec-3/decision", strings.NewReader(`{"choice":"enable"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: "lsprec-3"}}))
+	conflicted.handleLSPRecommendationDecision(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code)
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/lsprec-4/decision", strings.NewReader(`{"choice":"enable"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: "lsprec-4"}}))
+	bare.handleLSPRecommendationDecision(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestProjectLSPPreviewAndConsentEndpoint(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	srvPath := filepath.Join(root, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(srvPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "servers:\n  projectls: {command: /bin/projectls, extension_to_language: {\".pl\": projectls}}\n"
+	if err := os.WriteFile(srvPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "lspproj", "root": root, "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	// An unknown project answers 404.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/not-a-project/lsp", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown project: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Preview: the entry awaits confirmation.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/lsp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body.String())
+	}
+	var preview struct {
+		Trusted bool                `json:"trusted"`
+		Pending []map[string]string `json:"pending"`
+		Allowed []string            `json:"allowed"`
+		Denied  []string            `json:"denied"`
+		Notes   []string            `json:"notes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Trusted {
+		t.Fatal("a trusted, version-controlled project must preview as trusted")
+	}
+	if len(preview.Pending) != 1 || preview.Pending[0]["id"] != "projectls" {
+		t.Fatalf("pending: %+v", preview.Pending)
+	}
+	if want := "projectls: runs `/bin/projectls`"; preview.Pending[0]["summary"] != want {
+		t.Fatalf("summary = %q, want %q", preview.Pending[0]["summary"], want)
+	}
+	if len(preview.Allowed) != 0 || len(preview.Denied) != 0 {
+		t.Fatalf("allowed=%v denied=%v", preview.Allowed, preview.Denied)
+	}
+
+	// Confirm through the endpoint.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/lsp/consent", map[string]any{"allow": []string{"projectls"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consent: %d %s", rec.Code, rec.Body.String())
+	}
+	var decided struct {
+		OK      bool     `json:"ok"`
+		Allowed []string `json:"allowed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &decided); err != nil {
+		t.Fatal(err)
+	}
+	if !decided.OK || len(decided.Allowed) != 1 || decided.Allowed[0] != "projectls" {
+		t.Fatalf("consent reply: %+v", decided)
+	}
+
+	// Now the preview lists it as allowed and nothing pending.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/lsp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview after consent: %d %s", rec.Code, rec.Body.String())
+	}
+	preview = struct {
+		Trusted bool                `json:"trusted"`
+		Pending []map[string]string `json:"pending"`
+		Allowed []string            `json:"allowed"`
+		Denied  []string            `json:"denied"`
+		Notes   []string            `json:"notes"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Allowed) != 1 || preview.Allowed[0] != "projectls" {
+		t.Fatalf("allowed after consent: %v", preview.Allowed)
+	}
+	if len(preview.Pending) != 0 {
+		t.Fatalf("nothing should be pending: %+v", preview.Pending)
+	}
 }

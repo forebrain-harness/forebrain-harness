@@ -1,0 +1,15 @@
+id: lua-language-server
+display_name: Lua Language Server
+languages: [Lua]
+priority: 100
+command: lua-language-server
+extension_to_language: {.lua: lua}
+root_markers: [.luarc.json, .luarc.jsonc, .luacheckrc, .stylua.toml, stylua.toml, selene.toml]
+detect:
+  version_args: [--version]
+install:
+  - requires: brew
+    platforms: [darwin, linux]
+    argv: [brew, install, lua-language-server]
+readiness: progress
+notes: "Install from your package manager or the LuaLS releases page."

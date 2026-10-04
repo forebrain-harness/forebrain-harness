@@ -1,0 +1,12 @@
+id: phpactor
+display_name: Phpactor
+languages: [PHP]
+priority: 50
+command: phpactor
+args: [language-server]
+extension_to_language: {.php: php, .phtml: php}
+root_markers: [composer.json, .phpactor.json, .phpactor.yml]
+detect:
+  version_args: [--version]
+readiness: progress
+notes: "Alternative to intelephense; chosen only when intelephense is disabled."

@@ -437,6 +437,12 @@ var safeReadOnlyTools = map[string]struct{}{
 	// Canonical policy names for Forebrain Harness's read-only tool implementations.
 	"Read": {},
 	"LS":   {},
+
+	// The lsp tool asks the project's language servers about code the
+	// session can already read. A call that names a file is evaluated as
+	// Read (the permission layer maps it), so Read rules govern it; what
+	// reaches this entry is only the file-less workspace symbol search.
+	"LSP": {},
 }
 
 var safeInternalTools = map[string]struct{}{

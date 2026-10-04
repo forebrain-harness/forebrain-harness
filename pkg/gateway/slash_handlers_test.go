@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -727,4 +728,43 @@ func TestGatewaySurfaceNamesEachSessionsOwnModel(t *testing.T) {
 		require.True(t, handled)
 		require.Contains(t, reply, tc.want, "session %s status model", tc.sid)
 	}
+}
+
+// /lsp on the web renders the same markdown the terminal's text fallback
+// renders, and a gateway without a control plane says unavailable.
+func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"}}},
+	}}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	reply, handled := s.HandleLSPSlash("s1", "webchat")
+	require.True(t, handled)
+	require.Contains(t, reply, "Language servers · 1 configured, 1 enabled")
+	require.Contains(t, reply, "gopls")
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	reply, handled = bare.HandleLSPSlash("s1", "webchat")
+	require.True(t, handled)
+	require.Equal(t, "lsp: unavailable", reply)
+}
+
+// /status carries the Language servers row when a server is enabled, exactly
+// as the terminal panel does.
+func TestHandleStatusSlashIncludesLSPRow(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{
+			{ID: "gopls", Enabled: true, State: event.LSPStateReady},
+			{ID: "pyright", Enabled: true, State: event.LSPStateIndexing},
+		},
+	}}
+	s := &Server{
+		Home:   t.TempDir(),
+		Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}},
+		Env:    &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}},
+	}
+	reply, handled := s.HandleStatusSlash("s1", "webchat", false)
+	require.True(t, handled)
+	require.Contains(t, reply, "Language servers: 1 running, 1 indexing · /lsp")
 }

@@ -1,0 +1,21 @@
+id: clangd
+display_name: clangd
+languages: [C, C++, Objective-C, CUDA]
+priority: 100
+command: clangd
+args: [--background-index, --header-insertion=never, --log=error]
+extension_to_language: {.c: c, .h: c, .cc: cpp, .cpp: cpp, .cxx: cpp, .c++: cpp, .hpp: cpp, .hh: cpp, .hxx: cpp, .ipp: cpp, .m: objective-c, .mm: objective-cpp, .cu: cuda-cpp, .cuh: cuda-cpp}
+root_markers: [compile_commands.json, compile_flags.txt, .clangd, CMakeLists.txt, meson.build, Makefile]
+env_passthrough: [CPATH, C_INCLUDE_PATH, CPLUS_INCLUDE_PATH, SDKROOT, DEVELOPER_DIR]
+detect:
+  xcrun: clangd
+  extra_dirs: ["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"]
+  version_args: [--version]
+install:
+  - requires: brew
+    platforms: [darwin]
+    argv: [brew, install, llvm]
+startup_timeout: 60
+readiness: none
+project_writes: [.cache/clangd]
+notes: "Install clangd with your system package manager (for example apt install clangd), or the LLVM installer on Windows. Generate compile_commands.json for accurate diagnostics: cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, or bear -- make."

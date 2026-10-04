@@ -1,0 +1,12 @@
+id: gleam
+display_name: Gleam language server
+languages: [Gleam]
+priority: 100
+command: gleam
+args: [lsp]
+extension_to_language: {.gleam: gleam}
+root_markers: [gleam.toml]
+detect:
+  version_args: [--version]
+readiness: none
+notes: "Comes with the gleam binary."

@@ -51,9 +51,9 @@ const projectId = computed(() => String(route.params.id ?? ''))
 const project = ref<ProjectRecord | null>(null)
 const error = ref('')
 
-// The eight tabs are fixed by the approved preview. rules (009), memory
-// (012), perm (009), skills (010) and cron (013) land as their plans
-// deliver; the shell itself never changes.
+// The tabs are fixed by the approved preview; each feature's plan adds its
+// own tab as it lands (rules 009, memory 012, perm 009, skills 010, cron
+// 013, lsp 015). The shell itself never changes.
 const tabs = computed(() => [
   { key: 'overview', routeName: 'project-overview', label: t('projects.tabOverview') },
   { key: 'rules', routeName: 'project-rules', label: t('projects.tabRules') },
@@ -61,6 +61,7 @@ const tabs = computed(() => [
   { key: 'memory', routeName: 'project-memory', label: t('projects.tabMemory') },
   { key: 'perm', routeName: 'project-perm', label: t('projects.tabPerm') },
   { key: 'mcp', routeName: 'project-mcp', label: t('projects.tabMcp') },
+  { key: 'lsp', routeName: 'project-lsp', label: t('projects.tabLsp') },
   { key: 'skills', routeName: 'project-skills', label: t('projects.tabSkills') },
   { key: 'cron', routeName: 'project-cron', label: t('projects.tabCron') },
 ])

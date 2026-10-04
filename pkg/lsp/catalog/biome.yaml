@@ -1,0 +1,18 @@
+id: biome
+display_name: Biome
+languages: [JavaScript, TypeScript, JSON, CSS]
+role: diagnostics
+priority: 90
+command: biome
+args: [lsp-proxy]
+extension_to_language: {.js: javascript, .mjs: javascript, .cjs: javascript, .jsx: javascriptreact, .ts: typescript, .mts: typescript, .cts: typescript, .tsx: typescriptreact, .json: json, .jsonc: jsonc, .css: css}
+root_markers: [biome.json, biome.jsonc]
+require_root_marker: true
+env_passthrough: [NODE_PATH]
+detect:
+  version_args: [--version]
+install:
+  - requires: npm
+    argv: [npm, install, -g, "@biomejs/biome"]
+readiness: none
+notes: "Adds Biome's lint findings in projects with biome.json."

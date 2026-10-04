@@ -82,6 +82,8 @@ func Execute(ctx Context, content string) Result {
 		return execSubagents(ctx)
 	case "mcp":
 		return execMCP(ctx)
+	case "lsp":
+		return execLSP(ctx)
 	case "sandbox":
 		return execSandbox(ctx, toks)
 	case "diff":
@@ -676,6 +678,14 @@ func execMCP(ctx Context) Result {
 		return Result{Handled: true, Reply: "mcp: unavailable"}
 	}
 	reply, handled := ctx.MCP.HandleMCPSlash(ctx.SessionID, ctx.Channel)
+	return Result{Handled: handled, Reply: reply}
+}
+
+func execLSP(ctx Context) Result {
+	if ctx.LSP == nil {
+		return Result{Handled: true, Reply: "lsp: unavailable"}
+	}
+	reply, handled := ctx.LSP.HandleLSPSlash(ctx.SessionID, ctx.Channel)
 	return Result{Handled: handled, Reply: reply}
 }
 

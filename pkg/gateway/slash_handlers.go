@@ -89,7 +89,7 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 	if s.Sessions != nil {
 		sessionName, _ = s.Sessions.SessionTitle(ctx, sessionID)
 	}
-	rep := turn.BuildStatusReport(ctx, turn.StatusSource{
+	src := turn.StatusSource{
 		Version:     process.AppVersion(),
 		SessionName: sessionName,
 		SessionID:   sessionID,
@@ -111,7 +111,12 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 			used, _ := s.contextOccupancy(ctx, sessionID)
 			return used, s.compactExplicitLimit()
 		},
-	})
+	}
+	if r.CodeIntelControl != nil {
+		snap := r.CodeIntelControl.Snapshot()
+		src.LSP = &snap
+	}
+	rep := turn.BuildStatusReport(ctx, src)
 	return turn.RenderStatusMarkdown(rep), true
 }
 
@@ -150,6 +155,18 @@ func (s *Server) HandleMCPSlash(sessionID, channel string) (string, bool) {
 		return "mcp: unavailable", true
 	}
 	return turn.RenderMCPInventoryMarkdown(turn.BuildMCPInventory(s.mcpInventorySource(r, cfg))), true
+}
+
+func (s *Server) HandleLSPSlash(sessionID, channel string) (string, bool) {
+	_ = channel
+	r := s.runnerFor(context.Background(), sessionID)
+	if r == nil {
+		r = s.Runner
+	}
+	if r == nil || r.CodeIntelControl == nil {
+		return "lsp: unavailable", true
+	}
+	return turn.RenderLSPInventoryMarkdown(r.CodeIntelControl.Snapshot()), true
 }
 
 // mcpInventorySource gathers a session runner's MCP facts exactly as the

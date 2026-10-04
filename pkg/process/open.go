@@ -14,10 +14,12 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -66,12 +68,17 @@ type Environment struct {
 	Control       *run.Controller
 	sessionSource string
 
-	ConfigPath        string
-	reloadMu          sync.Mutex
-	managerMu         sync.RWMutex
-	reload            *ConfigManager
-	poolOnce          sync.Once
-	pool              *RunnerPool
+	ConfigPath string
+	reloadMu   sync.Mutex
+	managerMu  sync.RWMutex
+	reload     *ConfigManager
+	poolOnce   sync.Once
+	pool       *RunnerPool
+	// LSP is the process-wide language-server pool; lspManager is the
+	// primary runner's view of it. Project runners get their own managers
+	// from the same pool (see RunnerPool).
+	LSP               *lsp.Pool
+	lspManager        *lsp.Manager
 	watchMu           sync.Mutex
 	watchStop         func()
 	watchID           uint64
@@ -101,6 +108,11 @@ func (env *Environment) Close() {
 		_ = env.Runner.Close()
 	}
 	env.CloseRunnerPool()
+	// Language servers are children of this process too; they go after
+	// every runner that could still ask them for something.
+	if env.LSP != nil {
+		_ = env.LSP.Close()
+	}
 	if env.telShutdown != nil && env.SQL != nil {
 		_ = env.telShutdown(context.Background())
 	}
@@ -265,6 +277,19 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// sessions they record before the first one is written.
 	sessStore := state.NewSessionStore(sqlDB, activeAgent.ID)
 	memStore := memory.NewStore(sqlDB, activeAgent.ID)
+	env.LSP = lsp.NewPool(cfgRoot)
+	lspOpts := lsp.ManagerOptions{
+		Home:              root,
+		AgentWorkspace:    activeAgent.WorkspaceRoot,
+		ProjectRoot:       launchProject.Project.Root,
+		Trusted:           safety.TrustedRoot(launchProject) != "",
+		VersionControlled: launchProject.Project.VersionControlled,
+	}
+	if lspOpts.ProjectRoot != "" {
+		lspOpts.ProjectKey = memory.ProjectKey(lspOpts.ProjectRoot)
+	}
+	lspOpts.ToolRegistered = lsp.ToolEnabled(cfgRoot, lspOpts)
+	env.lspManager = env.LSP.NewManager(lspOpts)
 	env.Deps = run.Deps{
 		Home:        root,
 		Actions:     actionSvc,
@@ -281,10 +306,16 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			summary.OverriddenGlobal = frozenOverridden
 			return summary
 		},
-		MemoryStore:  memStore,
-		AppCfg:       cfgRoot,
-		SessionStore: sessStore,
-		RunRT:        runSvc,
+		// The language-server runtime is the same frozen shape: the pool is
+		// process-wide, this manager is the primary runner's view of it, and
+		// the tool decision is computed once and never recomputed on reload.
+		CodeIntel:        env.lspManager,
+		CodeIntelControl: env.lspManager,
+		CodeIntelTool:    lspOpts.ToolRegistered,
+		MemoryStore:      memStore,
+		AppCfg:           cfgRoot,
+		SessionStore:     sessStore,
+		RunRT:            runSvc,
 	}
 	runner := &run.Runner{Deps: &env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
 		Refresh:   turn.RefreshSkills,
@@ -295,6 +326,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// primary agent on main's model.
 	runner.AgentName = activeAgent.ID
 	runner.WorkspaceRoot = activeAgent.WorkspaceRoot
+	publishLSPRecommendations(env.lspManager, runner)
 	if launchProject.Project.Root != "" {
 		runner.ProjectRoot = launchProject.Project.Root
 		runner.ProjectKey = memory.ProjectKey(launchProject.Project.Root)
@@ -314,6 +346,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// every later symptom (no tools, no skills, an empty model) pointed at the
 	// surface instead of at the load that actually failed.
 	if err := runner.Load(); err != nil {
+		_ = env.LSP.Close()
 		return nil, fmt.Errorf("process agent load: %w", err)
 	}
 	safety.UpdateManagerWithLocalConfig(env.Sandbox, root, cfgRoot, runner.PermissionSnapshot(), nil)
@@ -410,6 +443,27 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	runner.FileResolver = fileReferenceResolver(fileSvc, runner.AgentName)
 	runner.SubagentExecutor = env
 	return env, nil
+}
+
+// publishLSPRecommendations hands recommendations from mgr to whichever
+// surface is attached to runner when one is made. The sink is read at
+// publish time: surfaces attach it after the runner is built, and a
+// subagent or fork sharing the parent's manager still reaches the parent
+// runner's surface — the reason this is wired here rather than in pkg/run,
+// whose sub-runner Load would overwrite the parent's listener.
+func publishLSPRecommendations(mgr *lsp.Manager, runner *run.Runner) {
+	if mgr == nil || runner == nil {
+		return
+	}
+	mgr.SetRecommendationListener(func(ctx context.Context, rec event.LSPRecommendation) {
+		sink := runner.Events
+		if sink == nil {
+			return
+		}
+		_ = sink.Publish(context.WithoutCancel(ctx), event.NewRunEvent(
+			rec.ID, tool.RunIDFromContext(ctx), tool.ConversationSessionIDFromContext(ctx),
+			event.RunEventLSPRecommendation, rec, time.Now()))
+	})
 }
 
 // fileReferenceResolver resolves the file_id of a persisted file_reference

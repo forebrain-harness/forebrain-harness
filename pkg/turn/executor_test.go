@@ -282,3 +282,23 @@ func TestAgentPickerSwitchesPrimaryAgents(t *testing.T) {
 	require.Equal(t, "Switched to primary agent ops, working in /w/ops.", Choose(ctx, SlashChoice{Command: "agent", Value: "ops"}).Reply)
 	require.Contains(t, h.calls, "switch(ops,)")
 }
+
+type lspSlashStub struct {
+	reply   string
+	handled bool
+}
+
+func (s lspSlashStub) HandleLSPSlash(_, _ string) (string, bool) {
+	return s.reply, s.handled
+}
+
+// /lsp without a handler answers unavailable; with one it returns its text.
+func TestExecLSPSlash(t *testing.T) {
+	res := Execute(Context{Surface: SurfaceTUI}, "/lsp")
+	require.True(t, res.Handled)
+	require.Equal(t, "lsp: unavailable", res.Reply)
+
+	res = Execute(Context{Surface: SurfaceWebChat, LSP: lspSlashStub{reply: "Language servers · 1 configured", handled: true}}, "/lsp")
+	require.True(t, res.Handled)
+	require.Equal(t, "Language servers · 1 configured", res.Reply)
+}

@@ -44,6 +44,9 @@
 //   - assets.go        — memories (four-level project path resolution), skills,
 //     user-level and project-level MCP writes (both sources), permission
 //     rules → safety.json, plan files, input history merge.
+//   - lsp.go           — imports the language servers of enabled Claude Code
+//     plugins into forebrain.yaml: official plugins enable their built-in
+//     catalog server, everything else becomes a custom lsp.servers entry.
 //   - codex_assets.go  — Codex memories, global instructions, user MCP,
 //     plugin skills, project configuration, and plan-mode extraction.
 //   - plan.go          — dry-run plan, the run orchestration for both

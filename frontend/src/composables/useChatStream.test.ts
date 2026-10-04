@@ -2422,3 +2422,76 @@ describe('auto-continue after a usage limit', () => {
     }
   })
 })
+
+/**
+ * A language-server recommendation is a live question to the user: the
+ * offer shows once, history never reopens it, and a duplicate delivery —
+ * the reconnect the observer's identity check exists for — does not reset
+ * what is already on screen.
+ */
+describe('language-server recommendations', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  function observerEvent(socket: FakeChatWebSocket, id: string, sequence: number, type: string, payload: Record<string, unknown>) {
+    socket.message({
+      op: 'run_event',
+      data: { id, sequence, type, run_id: '', session_id: 's1', created_at: '2026-09-29T23:00:00Z', payload },
+    })
+  }
+
+  const recommendationPayload = {
+    id: 'lsprec-9f1c2a7b',
+    server_id: 'gopls',
+    display_name: 'gopls',
+    languages: ['Go'],
+    trigger_extension: '.go',
+    mode: 'enable',
+    binary_path: '/usr/local/bin/gopls',
+    version: 'v0.23.0',
+  }
+
+  it('shows the live offer, skips the replay below the binding, and ignores a duplicate', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: 5, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+    ]
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances[0]!
+      observer.open()
+      observer.message({
+        op: 'session_bound',
+        session_id: 's1',
+        data: { cursor: 0, high_water: 5 },
+      })
+
+      // The replay up to the binding's high water is history: no offer.
+      observerEvent(observer, 'evt-replayed', 4, 'lsp_recommendation', recommendationPayload)
+      expect(stream.lspRecommendation.value).toBeNull()
+
+      // The event after the binding is the live offer.
+      observerEvent(observer, 'evt-live', 6, 'lsp_recommendation', recommendationPayload)
+      expect(stream.lspRecommendation.value).toMatchObject({
+        id: 'lsprec-9f1c2a7b', serverId: 'gopls', mode: 'enable', triggerExtension: '.go',
+      })
+
+      // The same event id again — a reconnect — changes nothing.
+      stream.lspRecommendation.value = null
+      observerEvent(observer, 'evt-live', 7, 'lsp_recommendation', recommendationPayload)
+      expect(stream.lspRecommendation.value).toBeNull()
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+})

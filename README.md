@@ -118,32 +118,33 @@ Coming from Claude Code or Codex? Run `/migrate`.
 
 ### In the terminal
 
-| Command        | What it does                                                           |
-| -------------- | ---------------------------------------------------------------------- |
-| `/model`       | Choose the model and reasoning effort                                  |
-| `/connect`     | Configure or switch LLM provider                                       |
-| `/permissions` | Choose what Forebrain Harness is allowed to do                                    |
-| `/plan`        | Plan mode: investigate and propose before changing anything            |
-| `/goal`        | Keep working toward an objective until it is done                      |
-| `/subagents`   | Open one of this chat's subagent sessions                              |
-| `/skills`      | Run, add, create, improve and toggle skills                            |
-| `/mcp`         | MCP servers: status, tools, authentication                             |
-| `/memories`    | Configure memory use and generation                                    |
-| `/init`        | Analyze the repo and write `FOREBRAIN.md` guidance                        |
-| `/diff`        | Show the git diff, untracked files included                            |
-| `/context`     | Inspect the context window and compaction state                        |
-| `/compact`     | Summarize the conversation before it hits the context limit            |
-| `/resume`      | Resume a saved chat · `/fork` fork it · `/new` start fresh             |
-| `/migrate`     | Import sessions, memories, skills and MCP servers from another agent   |
-| `/help`        | List every command and skill                                           |
+| Command        | What it does                                                                           |
+| -------------- | -------------------------------------------------------------------------------------- |
+| `/model`       | Choose the model and reasoning effort                                                  |
+| `/connect`     | Configure or switch LLM provider                                                       |
+| `/permissions` | Choose what Forebrain Harness is allowed to do                                         |
+| `/plan`        | Plan mode: investigate and propose before changing anything                            |
+| `/goal`        | Keep working toward an objective until it is done                                      |
+| `/subagents`   | Open one of this chat's subagent sessions                                              |
+| `/skills`      | Run, add, create, improve and toggle skills                                            |
+| `/mcp`         | MCP servers: status, tools, authentication                                             |
+| `/lsp`         | Language servers: status, enable, install, restart                                     |
+| `/memories`    | Configure memory use and generation                                                    |
+| `/init`        | Analyze the repo and write `FOREBRAIN.md` guidance                                     |
+| `/diff`        | Show the git diff, untracked files included                                            |
+| `/context`     | Inspect the context window and compaction state                                        |
+| `/compact`     | Summarize the conversation before it hits the context limit                            |
+| `/resume`      | Resume a saved chat · `/fork` fork it · `/new` start fresh                             |
+| `/migrate`     | Import sessions, memories, skills, MCP servers and language servers from another agent |
+| `/help`        | List every command and skill                                                           |
 
 ### In the browser
 
 `forebrain gateway start` serves a web UI in English and Chinese with the same chat
 and slash commands as the terminal, plus pages for agents, projects, providers,
-permissions, MCP servers, tools, hooks, memories, channels, scheduled tasks and
-configuration. Every primary agent is a separate tenant with its own workspace,
-sessions and settings. The gateway requires a token by default.
+permissions, MCP servers, language servers, tools, hooks, memories, channels,
+scheduled tasks and configuration. Every primary agent is a separate tenant with
+its own workspace, sessions and settings. The gateway requires a token by default.
 
 ### In your chat apps
 
@@ -152,6 +153,28 @@ Feishu/Lark, DingTalk, WeCom, WeChat, QQ, Matrix, Mattermost, iMessage (via
 BlueBubbles) and Home Assistant, or to anything else through the HTTP and
 WebSocket bridges. A channel message starts or continues a real agent session.
 See [Runtime, gateway and channels](https://forebrain-harness.github.io/config/runtime-gateway-and-channels).
+
+### Code intelligence
+
+Language servers give the agent compiler-grade feedback: after an edit, the
+tool result lists the errors and warnings the edit introduced, and the `lsp`
+tool finds definitions, references, types and symbols without text search.
+The built-in catalog covers Java, Go, Rust, C, C++, Kotlin, Swift, Scala, C#,
+TypeScript, PHP and Python, plus Ruby, Lua, Dart, Elixir, Zig, Haskell,
+OCaml, Bash, Vue, Svelte, Terraform, Clojure, Erlang, Nix, Gleam, YAML and
+Dockerfile; any other server can be added under `lsp.servers` in
+`forebrain.yaml`.
+
+Servers run on your machine, outside the sandbox, and only in trusted
+projects — opening a project with a language server is like building it.
+None is enabled until you say so: the first time the agent edits a file of a
+language with an available server, Forebrain Harness asks. `/lsp` (or
+`forebrain lsp list`) shows every server; `forebrain lsp doctor` checks one
+end to end.
+
+An edit waits at most `lsp.diagnostics.wait_ms` (2.5 s by default) for the
+server's answer and returns as soon as it arrives; diagnostics that come
+later reach the agent with its next request.
 
 ### Safety
 

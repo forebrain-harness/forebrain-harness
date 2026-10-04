@@ -1089,6 +1089,40 @@ func planReminderMessage(reminder string) llm.Message {
 	}
 }
 
+// lspDiagnosticsReminderLLM appends the language-server diagnostics that
+// arrived after an edit's wait window (spec §8.4). The text is appended at
+// the end of the request, so the cached prefix is untouched; it is delivered
+// once, acknowledged only after the model call succeeds.
+type lspDiagnosticsReminderLLM struct {
+	inner llm.LLM
+	ci    tool.CodeIntelligence
+}
+
+func wrapLSPDiagnosticsReminderLLM(inner llm.LLM, ci tool.CodeIntelligence) llm.LLM {
+	if inner == nil || ci == nil {
+		return inner
+	}
+	return lspDiagnosticsReminderLLM{inner: inner, ci: ci}
+}
+
+func (w lspDiagnosticsReminderLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
+	if sid == "" {
+		return w.inner.Execute(ctx, msgs, tools)
+	}
+	text, token := w.ci.PeekLate(sid)
+	if text == "" {
+		return w.inner.Execute(ctx, msgs, tools)
+	}
+	message := planReminderMessage(text)
+	recordReminderAdoption(ctx, message, len(msgs))
+	res, err := w.inner.Execute(ctx, append(append([]llm.Message(nil), msgs...), message), tools)
+	if err == nil {
+		w.ci.AckLate(sid, token)
+	}
+	return res, err
+}
+
 // clampPlanReminderIndex resolves where a reminder goes in msgs. An
 // out-of-range anchor means the history it was anchored to is gone, so the
 // reminder appends at the end.

@@ -1,7 +1,7 @@
 # LSP 代码智能接入规范：给 forebrain 加上语言服务器的语义与功能
 
 > 日期：2026-09-29（定稿）
-> 状态：**已定稿，可实施**。§15 的全部决策已定，实施按 [`docs/plan/lsp/`](lsp/README.md) 的 18 个任务计划分批交付
+> 状态：**已实施**（任务 01–18，见 [`docs/plan/lsp/README.md`](lsp/README.md)）。后续改动先改本规范再改代码
 > 基线：`main` / `6305ea9`
 > 范围：新增 `pkg/lsp`；改动 `pkg/config`、`pkg/event`、`pkg/tool`、`pkg/safety`、`pkg/run`、`pkg/turn`、`pkg/process`、`pkg/tui`、`pkg/gateway`、`frontend`、`pkg/migrate`、`cmd/forebrain`、`pkg/architecture`、`.github/workflows/lsp-integration.yml`（新）
 > 对标：Claude Code 的 code intelligence 插件（`gopls-lsp`、`jdtls-lsp`、`rust-analyzer-lsp` 等）、`LSP` 工具、编辑后诊断、**LSP plugin recommendation** 对话框

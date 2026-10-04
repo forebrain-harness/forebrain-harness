@@ -1769,3 +1769,114 @@ func TestBuildToolMetaCarriesReadFileResultLines(t *testing.T) {
 		t.Fatalf("non-paging meta carries line facts: %+v", plain)
 	}
 }
+
+func TestFormatLSPStep(t *testing.T) {
+	t.Parallel()
+	resultText := "definition of `Run`: 2 results in 2 files\nmain.go\n  12:6  func Run()"
+	evt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "lsp",
+		Input:    map[string]any{"operation": "definition", "file_path": "main.go", "line": 12, "symbol": "Run"},
+		Output: map[string]any{
+			"output":       resultText,
+			"operation":    "definition",
+			"result_count": 2,
+		},
+	}
+	body, truncated := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if truncated {
+		t.Fatalf("body truncated: %q", body)
+	}
+	want := "```text\n" + resultText + "\n```"
+	if body != want {
+		t.Fatalf("body = %q, want fenced result text %q", body, want)
+	}
+	if summary := SummarizeToolStep(evt); summary != "looked up definition · 2 results" {
+		t.Fatalf("summary = %q, want %q", summary, "looked up definition · 2 results")
+	}
+
+	single := evt
+	single.Output = map[string]any{"output": "symbols in main.go: 1", "operation": "document_symbols", "result_count": 1}
+	if summary := SummarizeToolStep(single); summary != "looked up document_symbols · 1 result" {
+		t.Fatalf("singular summary = %q, want %q", summary, "looked up document_symbols · 1 result")
+	}
+
+	// A step with no captured text renders no body rather than an empty fence.
+	empty := evt
+	empty.Output = map[string]any{"operation": "hover", "result_count": 0}
+	if body, _ := FormatToolStepResult(empty, DefaultMaxFormattedBody); body != "" {
+		t.Fatalf("empty-output body = %q, want empty", body)
+	}
+	if summary := SummarizeToolStep(empty); summary != "looked up hover · 0 results" {
+		t.Fatalf("empty summary = %q, want %q", summary, "looked up hover · 0 results")
+	}
+}
+
+func TestLSPDiagnosticsSection(t *testing.T) {
+	t.Parallel()
+	live := event.LSPDiagnosticsSummary{
+		New:   2,
+		Files: 1,
+		Items: []event.LSPDiagnostic{{
+			Path: "internal/foo.go", Line: 12, Column: 6, Severity: "error",
+			Source: "gopls", Code: "syntax", Message: "missing return",
+		}, {
+			Path: "internal/foo.go", Line: 30, Column: 1, Severity: "warning",
+			Message: "unused variable",
+		}},
+	}
+	liveOut := map[string]any{"status": "ok", "lsp_diagnostics": live}
+	// A replayed step carries the same summary as its JSON equivalent.
+	b, err := json.Marshal(live)
+	if err != nil {
+		t.Fatalf("marshal summary: %v", err)
+	}
+	var asMap map[string]any
+	if err := json.Unmarshal(b, &asMap); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
+	}
+	replayedOut := map[string]any{"status": "ok", "lsp_diagnostics": asMap}
+
+	liveEvt := StepEvent{Kind: event.RunEventToolCompleted, ToolName: "edit_file", Output: liveOut}
+	replayedEvt := StepEvent{Kind: event.RunEventToolCompleted, ToolName: "edit_file", Output: replayedOut}
+	liveBody, trunc := FormatToolStepResult(liveEvt, DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation")
+	}
+	replayedBody, trunc := FormatToolStepResult(replayedEvt, DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation")
+	}
+	if liveBody != replayedBody {
+		t.Fatalf("live body %q must equal replayed body %q", liveBody, replayedBody)
+	}
+	for _, want := range []string{
+		"lsp diagnostics: 2 new in 1 file",
+		"internal/foo.go",
+		"  error 12:6 missing return [gopls syntax]",
+		"  warning 30:1 unused variable",
+	} {
+		if !strings.Contains(liveBody, want) {
+			t.Fatalf("body missing %q: %q", want, liveBody)
+		}
+	}
+	if strings.Contains(liveBody, "lsp_diagnostics") {
+		t.Fatalf("body must not leak the lsp_diagnostics key into the JSON dump: %q", liveBody)
+	}
+
+	// Only pending: the header says so and every pending file gets its line.
+	pending := event.LSPDiagnosticsSummary{PendingFiles: []string{"slow.go"}}
+	pendingBody := lspDiagnosticsSection(map[string]any{"lsp_diagnostics": pending})
+	want := "lsp diagnostics: pending\n\n```text\ndiagnostics for slow.go are still being computed and will follow\n```"
+	if pendingBody != want {
+		t.Fatalf("pending-only section = %q, want %q", pendingBody, want)
+	}
+
+	// Nothing to report renders no section at all.
+	if got := lspDiagnosticsSection(map[string]any{"lsp_diagnostics": event.LSPDiagnosticsSummary{}}); got != "" {
+		t.Fatalf("empty summary section = %q, want empty", got)
+	}
+	if got := lspDiagnosticsSection(map[string]any{}); got != "" {
+		t.Fatalf("absent summary section = %q, want empty", got)
+	}
+}

@@ -1,0 +1,16 @@
+id: elixir-ls
+display_name: ElixirLS
+languages: [Elixir]
+priority: 100
+command: elixir-ls
+extension_to_language: {.ex: elixir, .exs: elixir}
+root_markers: [mix.exs]
+env_passthrough: [MIX_ENV, MIX_HOME, HEX_HOME, ERL_LIBS, ASDF_DATA_DIR, MISE_DATA_DIR]
+install:
+  - requires: brew
+    platforms: [darwin, linux]
+    argv: [brew, install, elixir-ls]
+startup_timeout: 180
+readiness: progress
+project_writes: [.elixir_ls]
+notes: "Install with brew, or download a release and put its language_server.sh on the PATH as elixir-ls."

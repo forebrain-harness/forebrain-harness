@@ -1,0 +1,19 @@
+id: gopls
+display_name: gopls
+languages: [Go]
+priority: 100
+command: gopls
+args: [serve]
+extension_to_language: {.go: go}
+filenames: {go.mod: go.mod, go.work: go.work}
+root_markers: [go.work, go.mod]
+env_passthrough: [GOPATH, GOROOT, GOBIN, GOFLAGS, GOPROXY, GOPRIVATE, GONOPROXY, GONOSUMDB, GOTOOLCHAIN, GOWORK, CGO_ENABLED, CC, CXX, PKG_CONFIG_PATH, HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
+detect:
+  extra_dirs: ["$GOBIN", "$GOPATH/bin", "~/go/bin"]
+  version_args: [version]
+install:
+  - requires: go
+    argv: [go, install, golang.org/x/tools/gopls@latest]
+startup_timeout: 60
+readiness: progress
+notes: "Install with: go install golang.org/x/tools/gopls@latest"

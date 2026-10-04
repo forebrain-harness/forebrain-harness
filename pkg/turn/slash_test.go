@@ -399,3 +399,19 @@ func TestModelChoicesAreTheAgentsConfiguredModels(t *testing.T) {
 	require.Equal(t, "claude-sonnet-4-5", writer[0].Model)
 	require.Equal(t, ModelChoices(&cfg, "main"), ModelChoices(&cfg, "no-such-agent"), "an unknown agent runs on main's models")
 }
+
+// /lsp is a tools-category panel command on both surfaces, next to /mcp.
+func TestLSPCommandTables(t *testing.T) {
+	cmd, ok := Find("lsp")
+	require.True(t, ok, "/lsp must be a builtin command")
+	require.Equal(t, []Surface{SurfaceWebChat, SurfaceTUI}, cmd.AllowedSurfaces)
+	require.Equal(t, "tools", cmd.Category)
+	require.Equal(t, "open-panel", cmd.ActionKind)
+	for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
+		names := make([]string, 0)
+		for _, c := range VisibleWithOptions(surface, DiscoveryOptions{}) {
+			names = append(names, c.Name)
+		}
+		require.Contains(t, names, "lsp", "surface %s: %v", surface, names)
+	}
+}

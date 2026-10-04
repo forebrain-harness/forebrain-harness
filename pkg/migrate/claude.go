@@ -30,6 +30,10 @@ type claudeData struct {
 	// user never decided.
 	EnableAllProjectMCP map[string]bool
 	PluginSkills        []claudePluginSkill
+	// LSPPlugins are the enabled plugins that declare language servers
+	// (.lsp.json or plugin.json lspServers); they become lsp.servers entries
+	// in forebrain.yaml at import time (lsp.go).
+	LSPPlugins []claudeLSPPlugin
 	// HistoryLines counts every non-empty line of history.jsonl, so the
 	// merge report can state added + skipped == source lines even when some
 	// lines carried no parsable display text.
@@ -187,6 +191,7 @@ func discoverClaude(root string) (*claudeData, error) {
 	readClaudeJSON(filepath.Join(root, ".claude.json"), data)
 	readClaudeJSON(filepath.Join(root, "..", ".claude.json"), data)
 	data.PluginSkills = discoverPluginSkills(root)
+	data.LSPPlugins = discoverLSPPlugins(root)
 	data.Plans = discoverPlans(root)
 	return data, nil
 }
@@ -349,10 +354,10 @@ func readClaudeJSON(path string, data *claudeData) {
 	sort.Strings(data.JSONProjectPaths)
 }
 
-// discoverPluginSkills lists the skills of plugins the user enabled in
-// settings.json. Marketplace plugins that were never enabled are excluded:
-// importing them would flood /skills with entries the source never loaded.
-func discoverPluginSkills(root string) []claudePluginSkill {
+// enabledClaudePlugins reads settings.json's enabledPlugins: keys are
+// "<name>@<marketplace>" and only a true value counts as enabled. Shared by
+// the skill and language-server discovery so both see the same plugins.
+func enabledClaudePlugins(root string) map[string]bool {
 	settings := struct {
 		EnabledPlugins map[string]bool `json:"enabledPlugins"`
 	}{}
@@ -365,6 +370,14 @@ func discoverPluginSkills(root string) []claudePluginSkill {
 			enabled[key] = true
 		}
 	}
+	return enabled
+}
+
+// discoverPluginSkills lists the skills of plugins the user enabled in
+// settings.json. Marketplace plugins that were never enabled are excluded:
+// importing them would flood /skills with entries the source never loaded.
+func discoverPluginSkills(root string) []claudePluginSkill {
+	enabled := enabledClaudePlugins(root)
 	if len(enabled) == 0 {
 		return nil
 	}
@@ -389,12 +402,13 @@ func pluginSkillsUnder(cacheDir string, enabled map[string]bool) []claudePluginS
 	return out
 }
 
-// pluginSkillsFor lists one plugin's skills from its highest version dir.
-func pluginSkillsFor(cacheDir, marketplace, name string) []claudePluginSkill {
-	pluginBase := filepath.Join(cacheDir, marketplace, name)
-	versions, err := os.ReadDir(pluginBase)
+// highestPluginVersionDir returns a plugin's lexicographically highest version
+// directory under its cache base (both sources version their cache the same
+// way), or "" when the plugin has no cached version.
+func highestPluginVersionDir(base string) string {
+	versions, err := os.ReadDir(base)
 	if err != nil {
-		return nil
+		return ""
 	}
 	names := make([]string, 0, len(versions))
 	for _, version := range versions {
@@ -404,10 +418,19 @@ func pluginSkillsFor(cacheDir, marketplace, name string) []claudePluginSkill {
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
+		return ""
+	}
+	return filepath.Join(base, names[len(names)-1])
+}
+
+// pluginSkillsFor lists one plugin's skills from its highest version dir.
+func pluginSkillsFor(cacheDir, marketplace, name string) []claudePluginSkill {
+	dir := highestPluginVersionDir(filepath.Join(cacheDir, marketplace, name))
+	if dir == "" {
 		return nil
 	}
 	var out []claudePluginSkill
-	skillsDir := filepath.Join(pluginBase, names[len(names)-1], "skills")
+	skillsDir := filepath.Join(dir, "skills")
 	skills, err := os.ReadDir(skillsDir)
 	if err != nil {
 		return nil

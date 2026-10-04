@@ -1,0 +1,18 @@
+id: pyright
+display_name: Pyright
+languages: [Python]
+priority: 100
+command: pyright-langserver
+args: [--stdio]
+extension_to_language: {.py: python, .pyi: python}
+root_markers: [pyproject.toml, pyrightconfig.json, setup.py, setup.cfg, requirements.txt, Pipfile]
+env_passthrough: [VIRTUAL_ENV, CONDA_PREFIX, PYTHONPATH]
+install:
+  - requires: npm
+    argv: [npm, install, -g, pyright]
+startup_timeout: 60
+readiness: none
+settings:
+  python:
+    analysis: {diagnosticMode: openFilesOnly}
+notes: "Install with: npm install -g pyright (or pipx install pyright)"

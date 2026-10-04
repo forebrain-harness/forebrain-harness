@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
@@ -322,5 +323,42 @@ func TestResolveSessionMCPLeavesDisabledServersOutOfANewSession(t *testing.T) {
 	all := append(append([]appcfg.MCPServerConfig(nil), before.Servers...), before.Disabled...)
 	if summary := InspectProjectMCP(ws, all, launch); summary.PendingReload {
 		t.Fatal("a disable toggle must not read as on-disk drift")
+	}
+}
+
+// An untrusted launch never reads the project's lsp_servers.yaml: nothing is
+// pending, and a decide is a no-op rather than a recorded decision.
+func TestProjectLSPConsentsNeedTrust(t *testing.T) {
+	ws := t.TempDir()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("servers:\n  s:\n    command: /bin/s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}}
+
+	if pending := PendingProjectLSPConsents(ws, launch); len(pending) != 0 {
+		t.Fatalf("untrusted launch must have no pending entries: %+v", pending)
+	}
+	if trusted, pending, _, _, _ := InspectProjectLSP(ws, launch); trusted || len(pending) != 0 {
+		t.Fatalf("untrusted inspect = (%v, %+v)", trusted, pending)
+	}
+	if err := DecideProjectLSPConsents(ws, launch, []string{"s"}); err != nil {
+		t.Fatalf("decide on an untrusted launch: %v", err)
+	}
+	if _, err := os.Stat(lsp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("an untrusted decide must not write a consent store: %v", err)
+	}
+
+	// Trusted, the same file has exactly the one entry pending.
+	launch.TrustLevel = safety.LevelTrusted
+	if pending := PendingProjectLSPConsents(ws, launch); len(pending) != 1 || pending[0].ID != "s" {
+		t.Fatalf("pending = %+v", pending)
 	}
 }

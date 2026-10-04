@@ -195,6 +195,11 @@ type MCPSlashHandler interface {
 	HandleMCPSlash(sessionID, channel string) (reply string, handled bool)
 }
 
+// LSPSlashHandler answers /lsp, which takes no arguments.
+type LSPSlashHandler interface {
+	HandleLSPSlash(sessionID, channel string) (reply string, handled bool)
+}
+
 type SandboxSlashHandler interface {
 	HandleSandboxSlash(sessionID, channel string, args []string) (reply string, handled bool)
 }
@@ -409,6 +414,7 @@ type Context struct {
 	Status           StatusSlashHandler
 	Permissions      PermissionsSlashHandler
 	MCP              MCPSlashHandler
+	LSP              LSPSlashHandler
 	Sandbox          SandboxSlashHandler
 	Diff             DiffSlashHandler
 	Model            ModelSlashHandler
@@ -638,6 +644,7 @@ type StatusReport struct {
 	Permissions  StatusPermissions
 	Sandbox      string
 	MCP          MCPCountLine
+	LSP          string
 	Instructions []StatusInstruction
 	ConfigFiles  []string
 	// SkillOfferOff, when non-empty, is the rendered "off (setting)" line; the
@@ -685,6 +692,9 @@ type StatusSource struct {
 	// MCP is exactly what /mcp is built from: the MCP row counts the entries
 	// of that inventory, so /status and /mcp agree by construction.
 	MCP MCPInventorySource
+	// LSP is the language-server snapshot; nil when the runtime has no
+	// language servers, which leaves the /status row out.
+	LSP *event.LSPSnapshot
 	// Instructions is the rules-cache source list from the assembly PreHook.
 	Instructions []StatusInstruction
 	// ConfigFiles lists the config files the session's configuration was
@@ -735,6 +745,9 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		}
 	}
 	rep.MCP = BuildMCPInventory(src.MCP).Counts()
+	if src.LSP != nil {
+		rep.LSP = LSPStatusLine(*src.LSP)
+	}
 	// Work: plan existence and todo progress.
 	if planText, err := state.GetPlanForProject(src.StateRoot, src.ProjectKey); err == nil {
 		rep.Work.PlanSet = strings.TrimSpace(planText) != ""
@@ -903,6 +916,9 @@ func StatusFacts(rep StatusReport) []StatusFact {
 	add("Sandbox", rep.Sandbox)
 	if counts := rep.MCP.Render(); counts != "" {
 		add("MCP servers", counts+" · /mcp")
+	}
+	if rep.LSP != "" {
+		add("Language servers", rep.LSP+" · /lsp")
 	}
 	add("Instructions", RenderInstructionsLine(rep.Instructions))
 	add("Config files", strings.Join(rep.ConfigFiles, ", "))

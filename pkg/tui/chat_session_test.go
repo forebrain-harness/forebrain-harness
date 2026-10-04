@@ -28561,3 +28561,238 @@ func TestFailedRecoveredApprovalDrawsItsErrorOnce(t *testing.T) {
 		t.Fatalf("error blocks drawn = %d, want exactly one", errorsDrawn)
 	}
 }
+
+// panelLSPControlStub is the control plane the /lsp panel tests drive: it
+// records the actions and answers a fixed snapshot.
+type panelLSPControlStub struct {
+	snapshot  event.LSPSnapshot
+	enabled   []string
+	restarts  []string
+	installs  []string
+	recResets int
+	err       error
+}
+
+func (c *panelLSPControlStub) Snapshot() event.LSPSnapshot { return c.snapshot }
+func (c *panelLSPControlStub) Subscribe(func(event.LSPSnapshot)) func() {
+	return func() {}
+}
+func (c *panelLSPControlStub) SetEnabled(serverID string, enabled bool) error {
+	c.enabled = append(c.enabled, fmt.Sprintf("%v %s", enabled, serverID))
+	return c.err
+}
+func (c *panelLSPControlStub) Restart(serverID string) error {
+	c.restarts = append(c.restarts, serverID)
+	return c.err
+}
+func (c *panelLSPControlStub) Install(context.Context, string, func(string)) error {
+	c.installs = append(c.installs, "")
+	return c.err
+}
+func (c *panelLSPControlStub) SetRecommendationListener(func(context.Context, event.LSPRecommendation)) {
+}
+func (c *panelLSPControlStub) DecideRecommendation(string, event.LSPRecommendationChoice) error {
+	return nil
+}
+func (c *panelLSPControlStub) ResetRecommendations() error {
+	c.recResets++
+	return c.err
+}
+
+// Every /lsp panel action goes through the runner's control plane: without
+// one the panel is unavailable, with one the reply is the sentence the panel
+// shows, verbatim.
+func TestPanelLSPSessionMethods(t *testing.T) {
+	home := t.TempDir()
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	if _, err := s.PanelLSPSnapshot(); err != errPanelUnavailable {
+		t.Fatalf("snapshot without control = %v, want errPanelUnavailable", err)
+	}
+	if _, err := s.PanelSetLSPEnabled("gopls", true); err != errPanelUnavailable {
+		t.Fatalf("enable without control = %v", err)
+	}
+	if _, err := s.PanelRestartLSP("gopls"); err != errPanelUnavailable {
+		t.Fatalf("restart without control = %v", err)
+	}
+	if _, err := s.PanelInstallLSP("gopls"); err != errPanelUnavailable {
+		t.Fatalf("install without control = %v", err)
+	}
+	if _, err := s.PanelResetLSPRecommendations(); err != errPanelUnavailable {
+		t.Fatalf("reset without control = %v", err)
+	}
+	if _, ok := s.SubscribeLSPStatus(); ok {
+		t.Fatal("subscribe without control must report false")
+	}
+
+	ctl := &panelLSPControlStub{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady, InstallCommand: "go install gopls"}},
+	}}
+	s = sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+
+	snap, err := s.PanelLSPSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, "/proj", snap.ProjectRoot)
+
+	reply, err := s.PanelSetLSPEnabled("gopls", true)
+	require.NoError(t, err)
+	require.Equal(t, "Enabled. Diagnostics start with the next edit; the lsp tool appears in new sessions.", reply)
+	reply, err = s.PanelSetLSPEnabled("gopls", false)
+	require.NoError(t, err)
+	require.Equal(t, "Disabled. Its instances in this project have stopped.", reply)
+	reply, err = s.PanelRestartLSP("gopls")
+	require.NoError(t, err)
+	require.Equal(t, "Restarting…", reply)
+	reply, err = s.PanelInstallLSP("gopls")
+	require.NoError(t, err)
+	require.Equal(t, "Installing: go install gopls", reply)
+	reply, err = s.PanelResetLSPRecommendations()
+	require.NoError(t, err)
+	require.Equal(t, "Recommendations are back on.", reply)
+	require.Equal(t, []string{"true gopls", "false gopls"}, ctl.enabled)
+	require.Equal(t, []string{"gopls"}, ctl.restarts)
+	require.Equal(t, 1, ctl.recResets)
+
+	cancel, ok := s.SubscribeLSPStatus()
+	require.True(t, ok)
+	cancel()
+}
+
+// The text fallback of /lsp renders the control plane's snapshot; without a
+// control plane it says so.
+func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
+	home := t.TempDir()
+	empty := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	reply, handled := empty.HandleLSPSlash("s1", "cli")
+	require.True(t, handled)
+	require.Equal(t, "lsp: unavailable", reply)
+
+	ctl := &panelLSPControlStub{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"}}},
+	}}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	reply, handled = s.HandleLSPSlash("s1", "cli")
+	require.True(t, handled)
+	require.Contains(t, reply, "Language servers · 1 configured, 1 enabled")
+	require.Contains(t, reply, "gopls")
+}
+
+// lspInstallWatchStub is the control plane the install watch drives: it
+// hands the subscriber to the test, which feeds it the snapshots an
+// install's lifecycle produces.
+type lspInstallWatchStub struct {
+	panelLSPControlStub
+	subscribed func(event.LSPSnapshot)
+}
+
+func (c *lspInstallWatchStub) Subscribe(fn func(event.LSPSnapshot)) func() {
+	c.subscribed = fn
+	return func() {}
+}
+
+// Every answer returns the transcript line the spec spells out, and the
+// not-now line says when five dismissals turned recommendations off.
+func TestDecideLSPRecommendationTexts(t *testing.T) {
+	home := t.TempDir()
+	rec := event.LSPRecommendation{
+		ID: "lsprec-1", ServerID: "gopls", DisplayName: "gopls",
+		Languages: []string{"Go", "Go Workspaces"}, TriggerExtension: ".go",
+		Mode: "enable", InstallCommand: "go install golang.org/x/tools/gopls@latest",
+	}
+	newSession := func(snap event.LSPSnapshot) *ChatSession {
+		ctl := &lspInstallWatchStub{}
+		ctl.snapshot = snap
+		return sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	}
+
+	text, err := newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceEnable)
+	require.NoError(t, err)
+	require.Equal(t, "gopls enabled for Go, Go Workspaces. Diagnostics start with the next edit.", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	require.Equal(t, "Installing gopls: go install golang.org/x/tools/gopls@latest", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceNotNow)
+	require.NoError(t, err)
+	require.Equal(t, "Not now. No language server will be suggested again in this session.", text)
+
+	disabled := event.LSPSnapshot{RecommendationsDisabled: true}
+	text, err = newSession(disabled).DecideLSPRecommendation(rec, event.LSPChoiceNotNow)
+	require.NoError(t, err)
+	require.Equal(t, "Language server recommendations are now off (dismissed 5 times in a row). Turn them back on in /lsp.", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceNever)
+	require.NoError(t, err)
+	require.Equal(t, "gopls will not be suggested again. /lsp can still enable it.", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceDisableAll)
+	require.NoError(t, err)
+	require.Equal(t, "Language server recommendations are off. Turn them back on in /lsp.", text)
+
+	// Without a control plane there is no line and no decision.
+	bare := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	_, err = bare.DecideLSPRecommendation(rec, event.LSPChoiceEnable)
+	require.ErrorIs(t, err, errPanelUnavailable)
+}
+
+// The install answer subscribes before deciding, so every line the install
+// prints and its outcome reach the UI: progress as the transient line, the
+// result as one frame.
+func TestDecideLSPRecommendationInstallReportsDone(t *testing.T) {
+	home := t.TempDir()
+	ctl := &lspInstallWatchStub{}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	var mu sync.Mutex
+	var got []any
+	s.PrependUINotify(func(m any) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, m)
+	})
+
+	rec := event.LSPRecommendation{
+		ID: "lsprec-2", ServerID: "gopls", DisplayName: "gopls",
+		Languages: []string{"Go"}, TriggerExtension: ".go", Mode: "install",
+		InstallCommand: "go install golang.org/x/tools/gopls@latest",
+	}
+	text, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	require.Equal(t, "Installing gopls: go install golang.org/x/tools/gopls@latest", text)
+	require.NotNil(t, ctl.subscribed, "the install watch never subscribed")
+
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"downloading"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"downloading", "linking"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls"}}})
+	waitForQueuedNotifications(t, s)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Contains(t, got, LSPInstallProgressMsg{ServerID: "gopls", Line: "downloading"})
+	require.Contains(t, got, LSPInstallProgressMsg{ServerID: "gopls", Line: "linking"})
+	require.Contains(t, got, LSPInstallDoneMsg{ServerID: "gopls", Text: "gopls installed and enabled for Go. Diagnostics start with the next edit."})
+}
+
+// A failed install reports the failure text the snapshot carries.
+func TestDecideLSPRecommendationInstallReportsFailure(t *testing.T) {
+	home := t.TempDir()
+	ctl := &lspInstallWatchStub{}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	var mu sync.Mutex
+	var got []any
+	s.PrependUINotify(func(m any) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, m)
+	})
+	rec := event.LSPRecommendation{ID: "lsprec-3", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"}, Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest"}
+	_, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"fetching"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", InstallError: "exit status 1: no network"}}})
+	waitForQueuedNotifications(t, s)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Contains(t, got, LSPInstallDoneMsg{ServerID: "gopls", Err: "exit status 1: no network"})
+}

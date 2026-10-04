@@ -107,7 +107,7 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 	if hook := s.Env.RulesHook(); hook != nil {
 		instructions = hook.InstructionSources()
 	}
-	return turn.StatusSource{
+	src := turn.StatusSource{
 		Version:      home.Version,
 		SessionName:  sessionName,
 		SessionID:    sid,
@@ -132,6 +132,11 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 			return used, s.compactExplicitLimit()
 		},
 	}
+	if ctl := r.CodeIntelControl; ctl != nil {
+		snap := ctl.Snapshot()
+		src.LSP = &snap
+	}
+	return src
 }
 
 // mcpInventorySource gathers this session's MCP facts: the frozen list, the
@@ -1174,6 +1179,15 @@ func (s *ChatSession) HandleMCPSlash(sessionID, channel string) (string, bool) {
 		return "mcp: unavailable", true
 	}
 	return turn.RenderMCPInventoryMarkdown(turn.BuildMCPInventory(s.mcpInventorySource())), true
+}
+
+func (s *ChatSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
+	_, _ = sessionID, channel
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "lsp: unavailable", true
+	}
+	return turn.RenderLSPInventoryMarkdown(ctl.Snapshot()), true
 }
 
 // startMCPLocalOAuth begins the local OAuth flow for one server: it listens
