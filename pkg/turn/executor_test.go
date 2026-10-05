@@ -308,6 +308,40 @@ func TestResumeAndSubagentsOfferConversations(t *testing.T) {
 	require.Equal(t, "child-1", moved.SessionID)
 }
 
+// notOwnedSessions is a session store holding one conversation that belongs
+// to another primary agent: Ensure refuses it exactly the way the sqlite
+// store's ownership conflict does, while this agent's own conversations
+// pass.
+type notOwnedSessions struct {
+	fakeNewSessionStore
+	foreign string
+}
+
+func (n *notOwnedSessions) Ensure(ctx context.Context, id string, title string) error {
+	if id == n.foreign {
+		return fmt.Errorf("%w: %s", state.ErrSessionNotOwned, id)
+	}
+	return n.fakeNewSessionStore.Ensure(ctx, id, title)
+}
+
+// A conversation that belongs to another primary agent is not opened: the
+// engine itself refuses the switch, so a surface that forgot the check at
+// its own boundary still cannot move into it.
+func TestChooseSessionRefusesAnotherAgentsConversation(t *testing.T) {
+	ctx := Context{Surface: SurfaceWebChat, SessionID: "here", Sessions: &notOwnedSessions{foreign: "theirs"}}
+
+	res := Choose(ctx, SlashChoice{Command: "resume", Value: "theirs"})
+	require.True(t, res.Handled)
+	require.False(t, res.SessionSwitched)
+	require.False(t, res.SessionChanged)
+	require.Empty(t, res.SessionID)
+	require.Equal(t, "That conversation belongs to another primary agent.", res.Reply)
+
+	own := Choose(ctx, SlashChoice{Command: "resume", Value: "mine"})
+	require.True(t, own.SessionSwitched)
+	require.Equal(t, "mine", own.SessionID)
+}
+
 // /agent offers the primary agents with the one in force marked; picking it
 // again changes nothing, picking another switches.
 func TestAgentPickerSwitchesPrimaryAgents(t *testing.T) {

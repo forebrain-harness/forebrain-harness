@@ -1432,7 +1432,24 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		commandMu.Unlock()
 		stopCommand()
 		if sc.SessionSwitched && strings.TrimSpace(sc.SessionID) != "" {
-			sid = strings.TrimSpace(sc.SessionID)
+			// The move a command names meets the boundary the message it ran
+			// under already met: it happens only into a session this primary
+			// agent owns. A refused move never switched, so the turn is
+			// withdrawn in the conversation it was submitted to and the socket
+			// stays bound where it was — never to a conversation it must not
+			// see the events of.
+			newSid := strings.TrimSpace(sc.SessionID)
+			if s.Sessions != nil {
+				if err := s.Sessions.Ensure(r.Context(), newSid, newSid); err != nil {
+					reason := err.Error()
+					if errors.Is(err, state.ErrSessionNotOwned) {
+						reason = "Session belongs to another primary agent"
+					}
+					writeMsg(wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: reason})
+					continue
+				}
+			}
+			sid = newSid
 		}
 		sessionBoundMsg := wsServerMsg{
 			Op:        "session_bound",

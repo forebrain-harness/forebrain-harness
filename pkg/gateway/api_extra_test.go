@@ -2236,6 +2236,67 @@ func TestSessionPresetBelongsToItsConversation(t *testing.T) {
 	require.False(t, other.BypassSandbox)
 }
 
+// Permission writes scoped to one conversation check its ownership first: a
+// preset or a rule aimed at another primary agent's session is answered as
+// missing and never reaches the permission store, while this agent's own
+// sessions keep the behavior the endpoints exist for.
+func TestSessionScopedPermissionWritesRefuseAnotherAgentsSession(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "other-agent").Ensure(ctx, "their-session", "their-session"))
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	s := &Server{
+		Home:     home,
+		Runner:   runner,
+		Sessions: state.NewSessionStore(db, "main"),
+		Env:      &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner},
+	}
+	require.NoError(t, s.Sessions.Ensure(ctx, "my-session", "my-session"))
+	require.NoError(t, s.Sessions.Ensure(ctx, "rule-session", "rule-session"))
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"their-session","preset":"full-access"}`)))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	foreign := runner.EvaluatePermissionForSession("their-session", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", foreign.Reason, "another agent's session gained a preset")
+	require.False(t, foreign.BypassSandbox)
+
+	update := safety.PermissionUpdate{
+		Type:        safety.UpdateAddRules,
+		Destination: safety.DestinationSession,
+		SessionID:   "their-session",
+		Behavior:    safety.BehaviorAllow,
+		Rules:       []safety.PermissionRuleValue{{ToolName: "Bash", RuleContent: "git status"}},
+	}
+	raw, err := json.Marshal(update)
+	require.NoError(t, err)
+	rr = httptest.NewRecorder()
+	s.handlePermissionUpdate(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/updates", bytes.NewReader(raw)))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	if d := runner.EvaluatePermissionForSession("their-session", "Bash", "git status"); d.Matched != nil {
+		t.Fatalf("a rule reached another agent's session: %+v", d)
+	}
+
+	rr = httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"my-session","preset":"full-access"}`)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "danger_full_access", runner.EvaluatePermissionForSession("my-session", "shell", "rm -rf /tmp/build-output").Reason)
+
+	update.SessionID = "rule-session"
+	raw, err = json.Marshal(update)
+	require.NoError(t, err)
+	rr = httptest.NewRecorder()
+	s.handlePermissionUpdate(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/updates", bytes.NewReader(raw)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	if d := runner.EvaluatePermissionForSession("rule-session", "Bash", "git status"); d.Behavior != safety.BehaviorAllow {
+		t.Fatalf("own session did not take the rule: %+v", d)
+	}
+}
+
 func withParamName(r *http.Request, value string) *http.Request {
 	return withNamedParam(r, "name", value)
 }
@@ -3210,6 +3271,34 @@ func TestCronSettingsRoundTrip(t *testing.T) {
 	}
 	if got.RetentionDays != 30 || got.Configured {
 		t.Fatalf("settings after the reset = %+v, want the 30-day default, not configured", got)
+	}
+}
+
+// The structured write carries one integer, so its body is bounded like every
+// other small write: a payload past the limit is refused before it is parsed
+// and never reaches the config file.
+func TestCronSettingsPutBoundsRequestBody(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	s.Env.ConfigPath = path
+
+	rec := cronRequest(t, s, http.MethodPut, "/api/cron-settings", strings.Repeat("x", 8192), s.handleCronSettings)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized body = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "too large") {
+		t.Fatalf("refusal should name the body limit: %s", rec.Body.String())
+	}
+	if raw, _ := os.ReadFile(path); strings.Contains(string(raw), "retention_days") {
+		t.Fatalf("a refused write changed the file:\n%s", raw)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 7}, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("small body = %d %s", rec.Code, rec.Body.String())
+	}
+	if raw, err := os.ReadFile(path); err != nil || !strings.Contains(string(raw), "retention_days: 7") {
+		t.Fatalf("the small write did not land:\n%s (%v)", raw, err)
 	}
 }
 

@@ -847,6 +847,13 @@ func TestManagerInstallFastFailureNotifiesRunning(t *testing.T) {
 	heard := make(chan event.LSPSnapshot, 8)
 	cancel := m.Subscribe(func(snap event.LSPSnapshot) { heard <- snap })
 	defer cancel()
+	// The subscription's first message is the seed: the current snapshot
+	// before the install exists. The install's own notifications follow it.
+	select {
+	case <-heard:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the subscription never delivered its seed snapshot")
+	}
 
 	if err := m.Install(context.Background(), "fake", nil); err == nil || !strings.Contains(err.Error(), "failed:") {
 		t.Fatalf("Install error = %v", err)
@@ -870,6 +877,90 @@ func TestManagerInstallFastFailureNotifiesRunning(t *testing.T) {
 			t.Fatal("the install failure never reached the subscriber")
 		}
 	}
+}
+
+// A subscription's first message is the current snapshot: a watcher that
+// subscribes after a change already happened (here: an install that already
+// failed) must not wait for the next change to learn about it.
+func TestSubscribeDeliversCurrentSnapshotFirst(t *testing.T) {
+	m, _ := installManager(t, "echo it broke\nexit 3")
+	if err := m.Install(context.Background(), "fake", nil); err == nil || !strings.Contains(err.Error(), "failed:") {
+		t.Fatalf("Install error = %v, want the failure", err)
+	}
+	heard := make(chan event.LSPSnapshot, 4)
+	cancel := m.Subscribe(func(snap event.LSPSnapshot) { heard <- snap })
+	defer cancel()
+	select {
+	case snap := <-heard:
+		st := fakeInstallStatus(t, snap)
+		if st.Installing || st.InstallError == "" {
+			t.Fatalf("first snapshot: installing=%v error=%q, want the already-failed install", st.Installing, st.InstallError)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Subscribe did not deliver the current snapshot as the first message")
+	}
+	waitForBackgroundWriters(t, m)
+}
+
+// detectInfo cannot start a background writer once Close has drained the
+// manager's background writers: the bg.Add shares the closed flag's critical
+// section, so a late detection cannot resurrect files under a torn-down
+// agent workspace.
+func TestDetectInfoAfterCloseDoesNotSpawn(t *testing.T) {
+	m, _ := installManager(t, "echo done")
+	m.Close()
+	m.drainBackground()
+	m.detectInfo(ServerConfig{ID: "fake"})
+	if _, running := m.detecting["fake"]; running {
+		t.Fatal("detectInfo started a background detection after Close drained the writers")
+	}
+}
+
+// The Add-after-Wait shape of the race: concurrent detections and Close
+// must not misuse the wait group (a panic here) and must leave no writer
+// running after Close returned. Run under -race this is the plan's stress.
+func TestDetectInfoConcurrentWithClose(t *testing.T) {
+	m, _ := installManager(t, "echo done")
+	srv := ServerConfig{ID: "fake"}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					m.detectInfo(srv)
+				}
+			}
+		}()
+	}
+	m.Close()
+	m.drainBackground()
+	close(done)
+	wg.Wait()
+}
+
+// The install answer marks the install running before it returns, so a
+// watcher subscribing right after the answer sees Installing=true in its
+// first snapshot, never a previous attempt's terminal state.
+func TestDecideInstallMarksRunningBeforeReturning(t *testing.T) {
+	m, targetDir := installManager(t, installGateBody)
+	project := t.TempDir()
+	plantRec(m, "rec-sync", project)
+	if err := m.DecideRecommendation("rec-sync", event.LSPChoiceInstall); err != nil {
+		t.Fatalf("DecideRecommendation(install): %v", err)
+	}
+	if st := installStatus(t, m); !st.Installing {
+		t.Fatal("the install is not marked running when the answer returns")
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "gate"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForBackgroundWriters(t, m)
 }
 
 func TestSnapshotSurvivesConcurrentUse(t *testing.T) {

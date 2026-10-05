@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -561,6 +562,84 @@ func ActiveAgentWorkspace() (string, error) {
 		}
 	}
 	return strings.TrimSpace(activePrimaryAgent(root, &ctx.Config).WorkspaceRoot), nil
+}
+
+// ResolveConsentProjectContext resolves the project the startup consent
+// prompts speak about: a registered project wins whenever cwd sits inside
+// its root (deepest match), because that is the boundary the runtime gives
+// the project's sessions — the runner pool resolves registered roots through
+// ResolveRegisteredContext, and a launch-style walk to the enclosing .git
+// would record the answer under a checkout the sessions never run as.
+// Anything outside every registered project keeps the launch resolution.
+func ResolveConsentProjectContext(root, cwd string) (safety.ProjectContext, error) {
+	root = strings.TrimSpace(root)
+	launch, launchErr := safety.ResolveProjectContext(root, strings.TrimSpace(cwd))
+	registered := consentRegisteredRoot(root, cwd)
+	if registered == "" {
+		return launch, launchErr
+	}
+	if registeredCtx, err := safety.ResolveRegisteredContext(root, registered); err == nil {
+		return registeredCtx, nil
+	}
+	return launch, launchErr
+}
+
+// consentRegisteredRoot answers the registered project root containing cwd,
+// deepest first, or "" when cwd sits outside every registered project. The
+// registry is the one the runner pool resolves session→project through: the
+// state database's project rows for the active primary agent.
+func consentRegisteredRoot(root, cwd string) string {
+	dir := strings.TrimSpace(cwd)
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if dir == "" {
+		return ""
+	}
+	dir, err := safety.CanonicalPath(dir)
+	if err != nil {
+		return ""
+	}
+	rt, err := Resolve()
+	if err != nil {
+		return ""
+	}
+	agent := activePrimaryAgent(rt.Home, &rt.Config)
+	if strings.TrimSpace(agent.ID) == "" {
+		return ""
+	}
+	ctx := context.Background()
+	db, err := state.OpenStateFromHome(ctx, root, &rt.Config)
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	projects := state.NewProjectStore(db, agent.ID)
+	var best string
+	for offset := 0; ; offset += 500 {
+		page, err := projects.ListProjects(ctx, state.ListProjectsOptions{}, 500, offset)
+		if err != nil {
+			return best
+		}
+		for _, p := range page {
+			candidate, err := safety.CanonicalPath(strings.TrimSpace(p.Root))
+			if err != nil {
+				continue
+			}
+			rel, err := filepath.Rel(candidate, dir)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			if best == "" || len(candidate) > len(best) {
+				best = candidate
+			}
+		}
+		if len(page) < 500 {
+			return best
+		}
+	}
 }
 
 func mergeAgentClawbotSession(cfg *appcfg.Root, active appcfg.Summary) {

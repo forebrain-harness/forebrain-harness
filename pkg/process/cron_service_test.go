@@ -70,6 +70,173 @@ func TestBindHandsTheSchedulerTheSurfacesHeartbeatStarter(t *testing.T) {
 	}
 }
 
+// TestBindAndStopWaitForTheOldSchedulerOutsideTheLock pins the deadlock
+// shape: a pass of the bound scheduler sits in Maintain, which takes c.mu,
+// while Bind (or Stop) swaps the scheduler out. Waiting for the old pass
+// while holding c.mu leaves the two waiting on each other forever; the wait
+// belongs after the lock is released.
+func TestBindAndStopWaitForTheOldSchedulerOutsideTheLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		swap func(c *CronService)
+		want string
+	}{
+		{name: "bind", swap: func(c *CronService) {
+			c.Bind(context.Background(), "other", ScheduledTurns{})
+		}, want: "other"},
+		{name: "stop", swap: func(c *CronService) {
+			c.Stop()
+		}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, _ := envWithMCPServers(t, "")
+			ctx := context.Background()
+			c := env.Cron()
+
+			// The stub replicates the real Maintain's critical section —
+			// reading and writing the sweep clock under c.mu — but a pass
+			// that has begun contends for the lock only once the test lets
+			// it, which is the moment the swap below is already waiting from.
+			var (
+				entered = make(chan struct{})
+				proceed = make(chan struct{})
+				once    sync.Once
+			)
+			stub := func(_ context.Context, now time.Time) {
+				once.Do(func() {
+					close(entered)
+					<-proceed
+					c.mu.Lock()
+					c.lastSweep = now
+					c.mu.Unlock()
+				})
+			}
+			// The scheduler is installed exactly as Bind installs one, with
+			// the tick shortened so the loop reaches the stub during the test.
+			first := &turn.Scheduler{
+				Store:   c.store(),
+				AgentID: "main",
+				Deps: turn.SchedulerDeps{
+					FireRunState: c.fireRunState,
+					DeliverText:  c.deliver,
+					Maintain:     stub,
+				},
+				Tick: 5 * time.Millisecond,
+			}
+			c.mu.Lock()
+			c.sched = first
+			c.agentID = "main"
+			c.lastSweep = time.Time{}
+			c.stop = first.Start(ctx)
+			c.mu.Unlock()
+
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("no scheduler pass entered the maintenance stub")
+			}
+			swapped := make(chan struct{})
+			go func() {
+				defer close(swapped)
+				tc.swap(c)
+			}()
+			// The swap has taken the position it waits from: under c.mu
+			// before the fix, released from it after.
+			time.Sleep(100 * time.Millisecond)
+			close(proceed)
+
+			select {
+			case <-swapped:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the swap waited for the old scheduler's pass while holding c.mu")
+			}
+			if got := c.AgentID(); got != tc.want {
+				t.Fatalf("agent id = %q, want %q", got, tc.want)
+			}
+			c.Stop()
+		})
+	}
+}
+
+// TestRetentionSweepSparesAFireWhoseConversationCameBackToLife pins the
+// sweep against its own race: a fire expired and its conversation went
+// quiet, then a person resumed the conversation before the sweep's delete
+// landed. The delete spares the session inside its transaction, so the fire
+// record stays too — the next sweep, which finds the conversation ended,
+// takes both.
+func TestRetentionSweepSparesAFireWhoseConversationCameBackToLife(t *testing.T) {
+	env, _ := envWithMCPServers(t, "")
+	ctx := context.Background()
+	c := env.Cron()
+	sid := "cron-sweep-resumed-1"
+	sessions := state.NewSessionStore(env.SQL, "main")
+	if err := sessions.EnsureAt(ctx, sid, "an expired fire's conversation", state.SessionBirth{Source: state.SessionSourceCron}); err != nil {
+		t.Fatal(err)
+	}
+	quiet := time.Now().Add(-45 * 24 * time.Hour).Unix()
+	if _, err := env.SQL.Exec(`UPDATE fb_sessions SET updated_at=? WHERE id=?`, quiet, sid); err != nil {
+		t.Fatal(err)
+	}
+	store := &state.CronStore{DB: env.SQL}
+	recID, err := store.StartRun(ctx, state.CronRun{
+		JobID: "job-sweep-resumed", AgentID: "main", SessionID: sid,
+		Trigger: "schedule", StartedAt: quiet,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRun(ctx, recID, state.CronStatusOK, "done", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// The conversation came back to life: a driver holds a live run in it.
+	driver := &state.RunStore{DB: env.SQL, Owner: "sweep-resumed-driver"}
+	stopDriver, err := driver.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.CreateRun(ctx, sid, "a person resumed it"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.pruneExpiredFires(ctx, time.Now()); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	var n int
+	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("the sweep deleted a conversation a live run holds")
+	}
+	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_cron_runs WHERE id=?`, recID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("the sweep dropped the fire record of a conversation it spared")
+	}
+
+	// The conversation ends; the next sweep takes both.
+	stopDriver()
+	if _, err := env.Deps.RunRT.ReapAbandonedRuns(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.pruneExpiredFires(ctx, time.Now()); err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("the ended conversation was not swept on the second pass")
+	}
+	if err := env.SQL.QueryRow(`SELECT COUNT(*) FROM fb_cron_runs WHERE id=?`, recID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("the fire record was not dropped on the second pass")
+	}
+}
+
 // fakeOutboundChannel is a delivery target that records what it is told to
 // send, so a test can see the answer a fire delivered.
 type fakeOutboundChannel struct {

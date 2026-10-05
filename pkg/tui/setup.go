@@ -1616,36 +1616,35 @@ func MainAgentLLMMissingFieldsWithConfig(cfg appcfg.Root) []string {
 // terminal resize reflows it rather than leaving it clipped or ragged.
 
 // forebrainMascot is the brand mascot — a small brain wearing its harness
-// node — as a pixel grid drawn two pixel rows per terminal row with half
-// blocks. Each letter names a forebrainMascotPalette entry; '.' is clear.
+// node — as one solid-colour silhouette, drawn two pixel rows per terminal
+// row with half blocks. Each letter names a forebrainMascotPalette entry;
+// '.' is clear. The grid has an even number of pixel rows and ink in its
+// first and last one, so the silhouette's top and bottom edges both land on
+// terminal row boundaries, and it never has a cell whose upper pixel is
+// clear while the lower one is inked.
 var forebrainMascot = [...]string{
-	"...OOO.OO..OO.OOO...",
-	".OOLLLOLLOOLLOLLLOO.",
-	".OLFDDFFDOODFFDDFLO.",
-	"OLFFFFDDFAAFDDFFFFLO",
-	"OFDDFFFFDOODFFFFDDFO",
-	"OFFFDDFFFFFFFFDDFFFO",
-	"OFDFFWPFFFFFFWPFFDFO",
-	"OFDFFPPFFFFFFPPFFDFO",
-	"OFFDFFFFPFFPFFFFDFFO",
-	".OFDDFFFFPPFFFFDDFO.",
-	".OFFFDDFFFFFFDDFFFO.",
-	"..OOFFFFFOOFFFFFOO..",
-	"....OOOOO..OOOOO....",
-	"....................",
+	"..FFFFFFF..FFFFFFF..",
+	"..FFFFFFF..FFFFFFF..",
+	".FFFFFFFFAAFFFFFFFF.",
+	".FFFFFFFFFFFFFFFFFF.",
+	"FFFFFFFFFFFFFFFFFFFF",
+	"FFFFFWPFFFFFFWPFFFFF",
+	"FFFFFPPFFFFFFPPFFFFF",
+	"FFFFFFFFPFFPFFFFFFFF",
+	".FFFFFFFFPPFFFFFFFF.",
+	".FFFFFFFFFFFFFFFFFF.",
+	"..FFFFFFFFFFFFFFFF..",
+	"....FFFFF..FFFFF....",
 }
 
-// forebrainMascotPalette colours the mascot. The body sits in the brand blue
-// and reads on dark and light terminals alike; the amber node is the one
-// warm accent.
+// forebrainMascotPalette colours the mascot. Every colour is an exact
+// xterm-256 entry, so a 256-colour terminal shows the same colour a
+// true-colour one does instead of a nearest-match quantisation.
 var forebrainMascotPalette = map[byte]lipgloss.Color{
-	'O': "#1f5f93", // outline
-	'F': "#5fb0ea", // body
-	'L': "#a8dcfb", // highlight
-	'D': "#3d8ccc", // folds
-	'W': "#f6fbff", // eye shine
-	'P': "#0e2236", // pupils, mouth
-	'A': "#f5b041", // harness node
+	'F': "#5fafd7", // body (xterm 74)
+	'P': "#080808", // pupils, mouth (xterm 232)
+	'W': "#ffffff", // eye shine (xterm 231)
+	'A': "#ffaf5f", // harness node (xterm 215)
 }
 
 // forebrainMascotWidth is the mascot's width in terminal columns.

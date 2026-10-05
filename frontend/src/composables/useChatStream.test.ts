@@ -2125,6 +2125,173 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
+  /** Reads for the conversation a switch lands on: nothing to draw, nothing to ask. */
+  function mockEmptySessionFetches(sessionId: string) {
+    vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([] as never)
+    vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId, nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId, records: [] })
+  }
+
+  it('sends what a new conversation\'s first run hands back into that conversation', withFakeWebSocket(async () => {
+    const queued = vi.spyOn(forebrainApi, 'runQueuedInput').mockResolvedValue({ accepted: true, preview: { ...emptyPreview, queuedMessages: ['and this'] } })
+    const info = vi.spyOn(forebrainApi, 'fileInfo').mockResolvedValue({ id: 'file-1', originalName: 'spec.pdf', mediaType: 'application/pdf' })
+    try {
+      FakeChatWebSocket.instances = []
+      const stream = useChatStream()
+      const pendingSend = stream.send('first question')
+      const socket = FakeChatWebSocket.instances[0]!
+      socket.open()
+      socket.message({ op: 'session_bound', request_id: 'req-probe', session_id: 'bound-conversation' })
+      runEvent(socket, 'evt-turn', 1, 'run-bound', 'bound-conversation', 'turn_started', {})
+      await stream.send('and this', {
+        attached: { attachments: [{ fileId: 'file-1', filename: 'spec.pdf', mediaType: 'application/pdf' }], mentionImages: [] },
+        activeInputDisposition: 'steer',
+      })
+      expect(queued).toHaveBeenCalledWith('run-bound', { message: 'and this', attachments: ['file-1'], mentionImages: undefined })
+
+      runEvent(socket, 'evt-released', 2, 'run-bound', 'bound-conversation', 'queued_input_released', {
+        inputs: [{ text: 'and this', attachments: ['file-1'], mention_images: [] }],
+      })
+      endTurn(socket, 'evt-done', 3, 'run-bound', 'bound-conversation')
+
+      // The conversation the socket bound while the user stayed in it is the
+      // one the follow-up runs in: the entry send had no session of its own.
+      await vi.waitFor(() => expect(FakeChatWebSocket.instances).toHaveLength(3))
+      const next = FakeChatWebSocket.instances[2]!
+      next.open()
+      expect(JSON.parse(next.sent[0] ?? '{}')).toMatchObject({
+        op: 'start_run',
+        session_id: 'bound-conversation',
+        message: { content: 'and this', attachments: ['file-1'] },
+      })
+      runEvent(next, 'evt-next', 4, 'run-next', 'bound-conversation', 'turn_started', {})
+      endTurn(next, 'evt-next-done', 5, 'run-next', 'bound-conversation')
+      await pendingSend
+      expect(stream.takeReturnedDraft()).toBeNull()
+    } finally {
+      queued.mockRestore()
+      info.mockRestore()
+    }
+  }))
+
+  it('returns what a run hands back to the composer when its conversation was left, instead of sending it into the one on screen', withFakeWebSocket(async () => {
+    const queued = vi.spyOn(forebrainApi, 'runQueuedInput').mockResolvedValue({ accepted: true, preview: { ...emptyPreview, queuedMessages: ['look at this'] } })
+    const info = vi.spyOn(forebrainApi, 'fileInfo').mockResolvedValue({ id: 'file-1', originalName: 'spec.pdf', mediaType: 'application/pdf' })
+    try {
+      const { stream, socket, pendingSend } = await startLiveStream('left-queue', 'run-left')
+      await stream.send('look at this', {
+        attached: { attachments: [{ fileId: 'file-1', filename: 'spec.pdf', mediaType: 'application/pdf' }], mentionImages: ['shots/a.png'] },
+        activeInputDisposition: 'steer',
+      })
+      expect(queued).toHaveBeenCalledWith('run-left', { message: 'look at this', attachments: ['file-1'], mentionImages: ['shots/a.png'] })
+
+      // The user opens another conversation before the run ends and hands
+      // back what it never took.
+      mockEmptySessionFetches('left-elsewhere')
+      stream.switchToSession('left-elsewhere')
+
+      runEvent(socket, 'evt-released', 1, 'run-left', 'left-queue', 'queued_input_released', {
+        inputs: [{ text: 'look at this', attachments: ['file-1'], mention_images: ['shots/a.png'] }],
+      })
+      endTurn(socket, 'evt-done', 2, 'run-left', 'left-queue')
+      await pendingSend
+
+      // Back to the composer whole, and no second run started anywhere: the
+      // messages belong to the conversation that was left, not the one on
+      // screen.
+      expect(stream.takeReturnedDraft()).toEqual({ text: 'look at this', attachments: [{ fileId: 'file-1', filename: 'spec.pdf', mediaType: 'application/pdf' }], mentionImages: ['shots/a.png'] })
+      expect(FakeChatWebSocket.instances.filter((s) => s.sent.some((m) => m.includes('"op":"start_run"')))).toHaveLength(1)
+    } finally {
+      queued.mockRestore()
+      info.mockRestore()
+      vi.restoreAllMocks()
+    }
+  }))
+
+  it('keeps a later send\'s stream intact when a send left running in another conversation ends', withFakeWebSocket(async () => {
+    try {
+      FakeChatWebSocket.instances = []
+      const stream = useChatStream()
+      stream.sessionId.value = 'race-a'
+      const firstSend = stream.send('a question')
+      const socketA = FakeChatWebSocket.instances[0]!
+      socketA.open()
+
+      // The user opens another conversation and starts a run there while the
+      // first send's socket is still out.
+      mockEmptySessionFetches('race-b')
+      stream.switchToSession('race-b')
+      const secondSend = stream.send('b question')
+      const socketB = FakeChatWebSocket.instances[2]!
+      socketB.open()
+
+      // The left send's socket drops: its cleanup must not end the run on
+      // screen — not the working line, not the composer's lock.
+      socketA.close()
+      await firstSend
+      expect(stream.isStreaming.value).toBe(true)
+      expect(stream.runtimeStatus.value.kind).toBe('working')
+
+      socketB.message({ op: 'run_started', request_id: 'req-probe', run_id: 'run-b', session_id: 'race-b' })
+      expect(stream.contextSignals.value.activeRunId).toBe('run-b')
+      const runCancel = vi.spyOn(forebrainApi, 'runCancel').mockResolvedValue({} as never)
+      stream.cancel()
+      expect(runCancel).toHaveBeenCalledWith('run-b')
+      expect(socketB.readyState).toBe(FakeChatWebSocket.OPEN)
+
+      socketB.message({ op: 'run_completed', request_id: 'req-probe', run_id: 'run-b', data: { text: 'done' } })
+      await secondSend
+      expect(stream.isStreaming.value).toBe(false)
+      runCancel.mockRestore()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  }))
+
+  it('keeps a later send\'s stream intact when the send left in another conversation ends by its own terminal op', withFakeWebSocket(async () => {
+    try {
+      FakeChatWebSocket.instances = []
+      const stream = useChatStream()
+      stream.sessionId.value = 'race-a'
+      const firstSend = stream.send('a question')
+      const socketA = FakeChatWebSocket.instances[0]!
+      socketA.open()
+
+      // The user opens another conversation and starts a run there while the
+      // first send's socket is still out.
+      mockEmptySessionFetches('race-b')
+      stream.switchToSession('race-b')
+      const secondSend = stream.send('b question')
+      const socketB = FakeChatWebSocket.instances[2]!
+      socketB.open()
+
+      // The left send's run ends the legacy way: its own socket's terminal
+      // operation, not a disconnect. It must not unlock the run on screen —
+      // that stream belongs to the send holding the controller now.
+      socketA.message({ op: 'run_completed', request_id: 'req-probe', run_id: 'run-a', data: { text: 'a done' } })
+      await firstSend
+      expect(stream.isStreaming.value).toBe(true)
+      expect(stream.runtimeStatus.value.kind).toBe('working')
+
+      // The run on screen can still be stopped, and still ends on its own.
+      socketB.message({ op: 'run_started', request_id: 'req-probe', run_id: 'run-b', session_id: 'race-b' })
+      expect(stream.contextSignals.value.activeRunId).toBe('run-b')
+      const runCancel = vi.spyOn(forebrainApi, 'runCancel').mockResolvedValue({} as never)
+      stream.cancel()
+      expect(runCancel).toHaveBeenCalledWith('run-b')
+      expect(socketB.readyState).toBe(FakeChatWebSocket.OPEN)
+
+      socketB.message({ op: 'run_completed', request_id: 'req-probe', run_id: 'run-b', data: { text: 'done' } })
+      await secondSend
+      expect(stream.isStreaming.value).toBe(false)
+      runCancel.mockRestore()
+    } finally {
+      vi.restoreAllMocks()
+    }
+  }))
+
   /** A send whose conversation is being compacted for it, before its run exists. */
   function startWaitingSend(sessionId: string) {
     FakeChatWebSocket.instances = []

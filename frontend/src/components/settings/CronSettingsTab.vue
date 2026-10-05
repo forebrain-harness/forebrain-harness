@@ -53,7 +53,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import forebrainApi, { type CronSettings } from '@/lib/api'
+import forebrainApi, { type CronSettings, GatewayHttpError, getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 
 /**
@@ -97,7 +97,9 @@ async function loadSettings() {
     settings.value = await forebrainApi.cronSettings()
     draft.value = settings.value.retentionDays
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
+    error.value = cause instanceof GatewayHttpError
+      ? t('cronSettings.failedStatus', { status: cause.status })
+      : getErrorMessage(cause)
   } finally {
     loading.value = false
   }
@@ -116,7 +118,9 @@ async function save() {
     draft.value = settings.value.retentionDays
     notice.value = t('cronSettings.saved')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
+    error.value = cause instanceof GatewayHttpError
+      ? t('cronSettings.failedStatus', { status: cause.status })
+      : getErrorMessage(cause)
   } finally {
     saving.value = false
   }
@@ -132,7 +136,9 @@ async function restoreDefault() {
     draft.value = settings.value.retentionDays
     notice.value = t('cronSettings.saved')
   } catch (cause) {
-    error.value = cause instanceof Error ? cause.message : String(cause)
+    error.value = cause instanceof GatewayHttpError
+      ? t('cronSettings.failedStatus', { status: cause.status })
+      : getErrorMessage(cause)
   } finally {
     resetting.value = false
   }

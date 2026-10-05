@@ -233,6 +233,25 @@ function reset() {
   loadError.value = null
 }
 
+/**
+ * An ask's form as the questions the panel draws, or null when the payload is
+ * not that shape. The panel reads each question through these fields alone,
+ * the way the lsp recommendation parser reads its own whitelist.
+ */
+function parseAskForm(raw: unknown): AskAction['form'] | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const form = raw as Record<string, unknown>
+  if (!Array.isArray(form.questions)) return null
+  const questions: AskAction['form']['questions'] = []
+  for (const q of form.questions) {
+    if (!q || typeof q !== 'object') return null
+    const question = q as Record<string, unknown>
+    if (typeof question.id !== 'string' || typeof question.prompt !== 'string' || !Array.isArray(question.options)) return null
+    questions.push(question as AskAction['form']['questions'][number])
+  }
+  return { questions }
+}
+
 async function load() {
   const sid = currentSession()
   const current = ++generation
@@ -254,17 +273,19 @@ async function load() {
     for (const a of list) {
       if (a.kind === 'user_interaction') {
         try {
-          const form = JSON.parse(a.payloadJson) as AskAction['form']
-          asks.push({
-            id: a.id,
-            kind: a.kind,
-            status: a.status,
-            form,
-            agentId: a.agentId,
-            subagentType: a.subagentType,
-            sessionId: a.sessionId,
-          })
-          ensureModels(a.id, form)
+          const form = parseAskForm(JSON.parse(a.payloadJson))
+          if (form) {
+            asks.push({
+              id: a.id,
+              kind: a.kind,
+              status: a.status,
+              form,
+              agentId: a.agentId,
+              subagentType: a.subagentType,
+              sessionId: a.sessionId,
+            })
+            ensureModels(a.id, form)
+          }
         } catch {
           //
         }

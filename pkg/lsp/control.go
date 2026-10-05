@@ -253,12 +253,17 @@ func (m *Manager) detectInfo(sc ServerConfig) *DetectResult {
 	entry, ok := m.detected[sc.ID]
 	fresh := ok && time.Since(entry.at) <= detectTTL
 	detecting := m.detecting[sc.ID]
-	if !fresh && !detecting {
+	refresh := !fresh && !detecting && !m.closed
+	if refresh {
 		m.detecting[sc.ID] = true
+		// Registered in the same critical section that observes closed:
+		// Close sets closed under this lock before drainBackground waits on
+		// bg, so no detection can start after the wait returned and write
+		// into an agent workspace the composition root already tore down.
+		m.bg.Add(1)
 	}
 	m.mu.Unlock()
-	if !fresh && !detecting {
-		m.bg.Add(1)
+	if refresh {
 		go func() {
 			defer m.bg.Done()
 			env, _ := BuildEnv(EnvSpec{Passthrough: sc.EnvPassthrough, Env: sc.Env, FromProject: sc.EnvFromProject, Home: m.opts.Home})
@@ -328,8 +333,8 @@ func (m *Manager) Subscribe(fn func(event.LSPSnapshot)) (cancel func()) {
 		return func() {}
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.closed {
+		m.mu.Unlock()
 		return func() {}
 	}
 	if m.subs == nil {
@@ -338,6 +343,13 @@ func (m *Manager) Subscribe(fn func(event.LSPSnapshot)) (cancel func()) {
 	id := m.nextSub
 	m.nextSub++
 	m.subs[id] = fn
+	m.mu.Unlock()
+	// The current snapshot is the subscription's first message: a change
+	// that already happened (an install that finished between two of a
+	// watcher's frames) must not wait for the next change to be seen. The
+	// push bypasses notifySoon's debounce entirely, so it cannot coalesce
+	// or double-fire with it.
+	fn(m.Snapshot())
 	return func() {
 		m.mu.Lock()
 		delete(m.subs, id)
@@ -411,8 +423,20 @@ type installState struct {
 }
 
 func (m *Manager) Install(ctx context.Context, serverID string, progress func(line string)) error {
+	st, srv, err := m.beginInstall(serverID)
+	if err != nil {
+		return err
+	}
+	return m.runInstall(ctx, srv, st, progress)
+}
+
+// beginInstall resolves the server and marks its install running, notifying
+// without the debounce. Callers that hand the install to a background
+// goroutine still leave Installing=true in the snapshot the moment the call
+// returns: watchers edge-detect Installing, and a subscriber's first
+// snapshot must show the new attempt, never the previous one's outcome.
+func (m *Manager) beginInstall(serverID string) (st *installState, srv *ServerConfig, err error) {
 	resolved := m.servers()
-	var srv *ServerConfig
 	for i := range resolved {
 		if resolved[i].ID == serverID {
 			srv = &resolved[i]
@@ -420,19 +444,19 @@ func (m *Manager) Install(ctx context.Context, serverID string, progress func(li
 		}
 	}
 	if srv == nil {
-		return fmt.Errorf("unknown language server %q", serverID)
+		return nil, nil, fmt.Errorf("unknown language server %q", serverID)
 	}
 	m.mu.Lock()
 	if m.installs == nil {
 		m.installs = map[string]*installState{}
 	}
-	if st := m.installs[serverID]; st != nil && st.running {
+	if cur := m.installs[serverID]; cur != nil && cur.running {
 		m.mu.Unlock()
-		return fmt.Errorf("%s is already being installed", serverID)
+		return nil, nil, fmt.Errorf("%s is already being installed", serverID)
 	}
 	// The install state lives on the manager so every surface sees it, no
 	// matter which of them started the install.
-	st := &installState{running: true}
+	st = &installState{running: true}
 	m.installs[serverID] = st
 	m.mu.Unlock()
 	// The start of an install must not coalesce with what follows: an
@@ -440,7 +464,12 @@ func (m *Manager) Install(ctx context.Context, serverID string, progress func(li
 	// edge-detect Installing, so a merged first snapshot (already
 	// finished) would leave them waiting for an end that never comes.
 	m.notifyNow()
+	return st, srv, nil
+}
 
+// runInstall executes one already-marked-running install to its terminal
+// state: the outcome lands in the install state every surface reads.
+func (m *Manager) runInstall(ctx context.Context, srv *ServerConfig, st *installState, progress func(line string)) error {
 	err := Install(ctx, *srv, runtime.GOOS, filepath.Join(StateDir(m.opts.AgentWorkspace), "detect.json"), func(line string) {
 		m.mu.Lock()
 		st.log = append(st.log, line)
@@ -461,7 +490,7 @@ func (m *Manager) Install(ctx context.Context, serverID string, progress func(li
 	m.mu.Unlock()
 	if err == nil {
 		m.mu.Lock()
-		delete(m.detected, serverID) // the next Snapshot probes again
+		delete(m.detected, srv.ID) // the next Snapshot probes again
 		m.mu.Unlock()
 	}
 	m.notifySoon()
@@ -503,8 +532,16 @@ func (m *Manager) DecideRecommendation(recommendationID string, choice event.LSP
 		// The install outlives the answer: it runs in the background and,
 		// when it succeeds, applies the same switch an "enable" did. Its
 		// progress and outcome are in the snapshot every surface reads.
+		// Marking it running is synchronous: this answer returns before the
+		// install goroutine starts, and a watcher that subscribes right
+		// after must see Installing=true, not the previous attempt's
+		// terminal state.
+		st, srv, err := m.beginInstall(pend.rec.ServerID)
+		if err != nil {
+			return err
+		}
 		go func() {
-			if err := m.Install(context.Background(), pend.rec.ServerID, nil); err != nil {
+			if err := m.runInstall(context.Background(), srv, st, nil); err != nil {
 				slog.Debug("lsp: recommendation install failed", "server", pend.rec.ServerID, "err", err)
 				return
 			}

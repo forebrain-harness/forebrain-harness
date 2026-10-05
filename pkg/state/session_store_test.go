@@ -207,6 +207,9 @@ func TestWithdrawUserTurnKeepsPromptPrefixStable(t *testing.T) {
 		}
 		surviving = append(surviving, fmt.Sprintf("%d:%s", rowID, content))
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"1:first question", "2:first answer", "3:second question", "4:second answer"}
 	if !reflect.DeepEqual(surviving, want) {
 		t.Fatalf("surviving rows = %v, want %v", surviving, want)
@@ -1061,5 +1064,90 @@ func TestDeleteSessionsCascadesAndReportsLeftovers(t *testing.T) {
 	// Idempotent on a second pass: everything is already gone.
 	if left2, err := mine.DeleteSessions(ctx, []string{"cron-job-9-old"}); err != nil || len(left2.Files) != 0 || len(left2.SpillPaths) != 0 {
 		t.Fatalf("second delete = %+v, %v, want no error and no leftovers", left2, err)
+	}
+}
+
+// TestDeleteSessionsSparesASessionALiveRunHolds pins the re-check inside
+// the delete's own transaction: the sweep that listed a session as expired
+// may have raced a conversation coming back to life. A session a live
+// primary run holds stays whole — rows and leftovers alike — and is
+// reported in Survived, while one whose run has ended, or that never had
+// one, goes exactly as before.
+func TestDeleteSessionsSparesASessionALiveRunHolds(t *testing.T) {
+	db := openStateDB(t)
+	ctx := context.Background()
+	mine := NewSessionStore(db, "main")
+	for _, sid := range []string{"cron-live-1", "cron-ended-1", "cron-bare-1"} {
+		if err := mine.Ensure(ctx, sid, sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	living := &RunStore{DB: db, Owner: "owner-delete-live"}
+	stopLive, err := living.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopLive()
+	if _, err := living.CreateRun(ctx, "cron-live-1", "a person resumed it"); err != nil {
+		t.Fatal(err)
+	}
+	ended := &RunStore{DB: db, Owner: "owner-delete-ended"}
+	endedRun, err := ended.CreateRun(ctx, "cron-ended-1", "already over")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ended.SetStatus(ctx, endedRun.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_files(id, session_id, original_name, media_type, size_bytes, sha256,
+		storage_backend, storage_bucket, storage_key, parse_status, parsed_text_path, parse_error, created_at, updated_at)
+		VALUES('file-live', 'cron-live-1', 'report.pdf', 'application/pdf', 3, 'abc', 'local', '', 'ab/file-live.pdf', 'done', 'file-live.txt', '', 1700000000, 1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := mine.DeleteSessions(ctx, []string{"cron-live-1", "cron-ended-1", "cron-bare-1"})
+	if err != nil {
+		t.Fatalf("DeleteSessions: %v", err)
+	}
+	if len(left.Survived) != 1 || left.Survived[0] != "cron-live-1" {
+		t.Fatalf("survived = %v, want exactly cron-live-1", left.Survived)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id='cron-live-1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("a session a live run holds was deleted")
+	}
+	for _, sid := range []string{"cron-ended-1", "cron-bare-1"} {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("session %s, with no live run, was spared", sid)
+		}
+	}
+	for _, f := range left.Files {
+		if f.SessionID == "cron-live-1" {
+			t.Fatalf("the spared session's file came back as a leftover: %+v", f)
+		}
+	}
+
+	// The next sweep, once the run is over, takes the session whole.
+	if _, err := db.Exec(`UPDATE fb_runs SET status=? WHERE session_id='cron-live-1'`, string(RunStatusDone)); err != nil {
+		t.Fatal(err)
+	}
+	again, err := mine.DeleteSessions(ctx, []string{"cron-live-1"})
+	if err != nil {
+		t.Fatalf("second DeleteSessions: %v", err)
+	}
+	if len(again.Survived) != 0 {
+		t.Fatalf("a session with no live run survived: %v", again.Survived)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id='cron-live-1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("the ended session was not deleted on the second pass")
 	}
 }

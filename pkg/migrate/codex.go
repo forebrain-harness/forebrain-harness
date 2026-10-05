@@ -305,6 +305,10 @@ func (data *codexData) loadCodexState(path string) {
 		entry.Archived = archived != 0
 		data.ThreadIndex[strings.TrimSpace(id)] = entry
 	}
+	if err := rows.Err(); err != nil {
+		data.Degraded = append(data.Degraded, "threads table read failed partway: "+err.Error())
+		return
+	}
 	edges, err := db.Query(`SELECT parent_thread_id, child_thread_id, IFNULL(status,'') FROM thread_spawn_edges`)
 	if err == nil {
 		for edges.Next() {
@@ -312,6 +316,10 @@ func (data *codexData) loadCodexState(path string) {
 			if err := edges.Scan(&edge.ParentThreadID, &edge.ChildThreadID, &edge.Status); err == nil {
 				data.SpawnEdges = append(data.SpawnEdges, edge)
 			}
+		}
+		if err := edges.Err(); err != nil {
+			data.SpawnEdges = nil
+			data.Degraded = append(data.Degraded, "thread_spawn_edges read failed partway: "+err.Error())
 		}
 		edges.Close()
 	}
@@ -375,6 +383,10 @@ func readCodexMemories(path string, data *codexData) []codexMemory {
 		if err := rows.Scan(&mem.ThreadID, &mem.RawMemory, &mem.RolloutSummary, &mem.RolloutSlug, &mem.GeneratedAt, &mem.SourceUpdatedAt); err == nil {
 			out = append(out, mem)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		data.Degraded = append(data.Degraded, "stage1_outputs read failed partway: "+err.Error())
+		return nil
 	}
 	return out
 }

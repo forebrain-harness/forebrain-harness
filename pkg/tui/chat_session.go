@@ -2593,11 +2593,13 @@ func (s *ChatSession) DecideLSPRecommendation(rec event.LSPRecommendation, choic
 		return "", errPanelUnavailable
 	}
 	if choice == event.LSPChoiceInstall {
-		stopWatch := s.watchLSPInstall(ctl, rec)
+		// Decide first, watch after: the decision is what starts the
+		// install, and the watcher's subscription must never observe the
+		// pre-start snapshot of a retry (a previous attempt's failure).
 		if err := ctl.DecideRecommendation(rec.ID, choice); err != nil {
-			stopWatch()
 			return "", err
 		}
+		s.watchLSPInstall(ctl, rec)
 		return "Installing " + rec.DisplayName + ": " + rec.InstallCommand, nil
 	}
 	if err := ctl.DecideRecommendation(rec.ID, choice); err != nil {
@@ -2648,6 +2650,16 @@ func (s *ChatSession) watchLSPInstall(ctl tool.CodeIntelControl, rec event.LSPRe
 					lastLine = srv.InstallLog[n-1]
 					s.notifyUI(LSPInstallProgressMsg{ServerID: srv.ID, Line: lastLine})
 				}
+				return
+			}
+			if srv.InstallError != "" && !wasRunning {
+				// The install finished (or never truly started) between two
+				// snapshots: the failure it carries is already terminal. Report
+				// it without having seen Installing — otherwise the watch would
+				// wait for an end that already happened.
+				done = true
+				cancel()
+				s.notifyUI(LSPInstallDoneMsg{ServerID: srv.ID, Err: srv.InstallError})
 				return
 			}
 			if wasRunning {

@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -641,6 +642,16 @@ func chooseSession(ctx Context, id string) Result {
 	id = strings.TrimSpace(id)
 	if id == "" || ctx.Sessions == nil {
 		return Result{Handled: true, Reply: "That conversation cannot be opened here."}
+	}
+	// The picker offers this agent's conversations, but the chosen id is
+	// client input all the same: a conversation another primary agent owns
+	// is refused here, in the engine, so no surface can complete the
+	// switch its own boundary check missed.
+	if err := ctx.Sessions.Ensure(ctx.commandContext(), id, id); err != nil {
+		if errors.Is(err, state.ErrSessionNotOwned) {
+			return Result{Handled: true, Reply: "That conversation belongs to another primary agent."}
+		}
+		return Result{Handled: true, Reply: "Could not open that conversation: " + err.Error()}
 	}
 	title := currentSessionTitle(ctx, id)
 	if title == "" {

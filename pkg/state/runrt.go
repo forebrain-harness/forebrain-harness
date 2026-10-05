@@ -1164,8 +1164,13 @@ ORDER BY created_at ASC, id ASC`,
 	// The clock's end is the owner's last heartbeat — when its process was
 	// last seen — falling back to the row's own last write when no owner row
 	// exists at all. Every expression below reads the pre-update row, so the
-	// updated_at this reap writes cannot feed its own arithmetic. RETURNING
-	// yields the stamped end only for the row this compare-and-swap won.
+	// updated_at this reap writes cannot feed its own arithmetic; COALESCE
+	// keeps a clock a surface already stamped, because a stamp is written
+	// only once a run has ended, which makes it a better end than the lease
+	// fallback. A row like that — clock stamped, status still running — is
+	// exactly the process dying between the two writes, and it is reaped
+	// like any other dead one. RETURNING yields the stamped end only for
+	// the row this compare-and-swap won.
 	const clockExpr = `MAX(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
 	out := make([]AbandonedRun, 0, len(candidates))
 	for _, r := range candidates {
@@ -1173,10 +1178,10 @@ ORDER BY created_at ASC, id ASC`,
 		err := tx.QueryRowContext(ctx, `
 UPDATE fb_runs
 SET status=?, updated_at=?,
-    started_at_ms=created_at*1000,
-    finished_at_ms=`+clockExpr+`,
-    worked_ms=`+clockExpr+`-created_at*1000
-WHERE id=? AND status=? AND owner=? AND finished_at_ms IS NULL
+    started_at_ms=COALESCE(started_at_ms, created_at*1000),
+    finished_at_ms=COALESCE(finished_at_ms, `+clockExpr+`),
+    worked_ms=COALESCE(worked_ms, `+clockExpr+`-created_at*1000)
+WHERE id=? AND status=? AND owner=?
 RETURNING finished_at_ms`,
 			string(RunStatusFailed), now.Unix(), r.ID, string(RunStatusRunning), r.Owner).Scan(&finished)
 		if err == sql.ErrNoRows {
@@ -1187,6 +1192,11 @@ RETURNING finished_at_ms`,
 		}
 		r.FinishedAtMs = finished
 		out = append(out, r)
+	}
+	// A lapsed lease reads as dead already; removing its rows keeps the
+	// table from collecting one per process that ever crashed mid-run.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_run_owners WHERE heartbeat_at_ms < ?`, staleBefore); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

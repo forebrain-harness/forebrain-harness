@@ -67,6 +67,11 @@ type ScheduledTurns struct {
 // Standing work is tenant data. Rebinding on a switch is what keeps a
 // switched-away agent's jobs from firing against a runtime that now belongs to
 // a different agent — the same rule the channel registry follows.
+//
+// While holding c.mu, never wait on a goroutine that may itself take c.mu —
+// the tick goroutine takes it in Maintain. All waiting happens outside the
+// lock: this is the rule SettleFire and FireParked follow by copying under
+// the lock and calling after it.
 func (c *CronService) Bind(ctx context.Context, agentID string, turns ScheduledTurns) {
 	if c == nil || c.store() == nil {
 		return
@@ -76,11 +81,8 @@ func (c *CronService) Bind(ctx context.Context, agentID string, turns ScheduledT
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.stop != nil {
-		c.stop()
-		c.stop = nil
-	}
+	old := c.stop
+	c.stop = nil
 	next := &turn.Scheduler{
 		Store:   c.store(),
 		AgentID: id,
@@ -98,6 +100,12 @@ func (c *CronService) Bind(ctx context.Context, agentID string, turns ScheduledT
 	// exactly when the install last had nobody watching the retention.
 	c.lastSweep = time.Time{}
 	c.stop = next.Start(ctx)
+	c.mu.Unlock()
+	if old != nil {
+		// The old tick goroutine may be waiting on c.mu right now; waiting
+		// for it to exit never happens under the lock.
+		old()
+	}
 }
 
 // Stop ends the scheduler loop. The jobs stay on disk; nothing fires until
@@ -107,13 +115,14 @@ func (c *CronService) Stop() {
 		return
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.stop != nil {
-		c.stop()
-		c.stop = nil
-	}
+	old := c.stop
+	c.stop = nil
 	c.sched = nil
 	c.agentID = ""
+	c.mu.Unlock()
+	if old != nil {
+		old()
+	}
 }
 
 // AgentID is the tenant whose standing work is currently running.
@@ -266,10 +275,17 @@ func (c *CronService) pruneExpiredFires(ctx context.Context, now time.Time) erro
 			byAgent[f.AgentID] = append(byAgent[f.AgentID], f.SessionID)
 		}
 	}
+	// A session the delete spared because a live run holds it keeps its
+	// whole life this round: its files on disk and its fire record wait for
+	// the sweep that finds it quiet and ended.
+	survived := map[string]bool{}
 	for agentID, ids := range byAgent {
 		left, derr := state.NewSessionStore(c.env.SQL, agentID).DeleteSessions(ctx, ids)
 		if derr != nil {
 			return derr
+		}
+		for _, id := range left.Survived {
+			survived[id] = true
 		}
 		root, known := roots[agentID]
 		if !known {
@@ -277,6 +293,9 @@ func (c *CronService) pruneExpiredFires(ctx context.Context, now time.Time) erro
 			continue
 		}
 		for _, id := range ids {
+			if survived[id] {
+				continue
+			}
 			if err := state.RemoveSessionStateFiles(root, id); err != nil {
 				slog.Warn("cron: retention remove session state files", "session", id, "err", err)
 			}
@@ -305,7 +324,14 @@ func (c *CronService) pruneExpiredFires(ctx context.Context, now time.Time) erro
 			}
 		}
 	}
-	return c.store().DeleteFireRecords(ctx, recordIDs)
+	dropped := make([]int64, 0, len(recordIDs))
+	for _, f := range fires {
+		if survived[f.SessionID] {
+			continue
+		}
+		dropped = append(dropped, f.RecordID)
+	}
+	return c.store().DeleteFireRecords(ctx, dropped)
 }
 
 // CronJobInput is what a surface supplies to create or edit a job. The pointer

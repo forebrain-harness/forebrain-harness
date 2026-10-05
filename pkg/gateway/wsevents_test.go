@@ -556,6 +556,65 @@ func TestHandleChatWSRejectsSessionOwnedByAnotherPrimaryAgent(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A resume choice names a session id the client sent, so the switch it asks
+// for is refused when the conversation belongs to another primary agent: the
+// socket never binds to it, that conversation's run events stay unseen, and
+// this agent's own conversation keeps arriving.
+func TestHandleChatWSResumeChoiceOfAnotherAgentsSessionIsRefused(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "other-agent").Ensure(ctx, "their-session", "their-session"))
+	s := &Server{Home: home, Sessions: state.NewSessionStore(db, "main")}
+	require.NoError(t, s.Sessions.Ensure(ctx, "my-session", "my-session"))
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+
+	choice := turn.SlashChoice{Command: "resume", Value: "their-session"}
+	require.NoError(t, conn.WriteJSON(wsClientMsg{
+		RequestID: "req-resume-theirs",
+		SessionID: "my-session",
+		Message:   wsClientMessage{Content: "/resume", Choice: &choice},
+	}))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg), "a message may stop arriving, never carry another agent's session: %+v", msg)
+		require.NotEqual(t, "their-session", msg.SessionID, "the socket adopted another agent's session: %+v", msg)
+		if msg.Op == "slash_reply" && msg.RequestID == "req-resume-theirs" {
+			require.Contains(t, msg.Text, "another primary agent")
+			break
+		}
+	}
+
+	// The refused switch left the socket on its own conversation: events
+	// published for the other agent's session never arrive, its own still do.
+	require.NoError(t, s.RunEvents().Publish(ctx, event.NewRunEvent("", "their-run", "their-session", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "secret"}, time.Now())))
+	require.NoError(t, s.RunEvents().Publish(ctx, event.NewRunEvent("", "my-run", "my-session", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "still mine"}, time.Now())))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		if msg.Op != "run_event" {
+			continue
+		}
+		require.NotEqual(t, "their-session", msg.SessionID, "another agent's run event reached this socket: %+v", msg)
+		if msg.SessionID == "my-session" {
+			break
+		}
+	}
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(150*time.Millisecond)))
+	var leaked wsServerMsg
+	require.Error(t, conn.ReadJSON(&leaked), "nothing more may arrive, least of all another agent's event")
+}
+
 func readRunEventOfType(t *testing.T, conn *websocket.Conn, eventType string) event.RunEvent {
 	t.Helper()
 	for {
