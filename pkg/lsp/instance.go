@@ -305,14 +305,14 @@ func (i *Instance) launchAndInitialize(ctx context.Context) error {
 		// instance is already terminal.
 		err := i.stoppedErrorLocked()
 		i.mu.Unlock()
-		i.stopGeneration(gen)
+		i.stopGeneration(gen, ctx)
 		return err
 	}
 	i.gen = gen
 	i.pid = gen.cmd.Process.Pid
 	i.mu.Unlock()
 	if err := i.initialize(ctx, gen); err != nil {
-		i.stopGeneration(gen)
+		i.stopGeneration(gen, ctx)
 		i.mu.Lock()
 		if i.gen == gen {
 			i.gen = nil
@@ -331,7 +331,7 @@ func (i *Instance) launchAndInitialize(ctx context.Context) error {
 
 // launch starts the server process and its connection (spec §7.8).
 func (i *Instance) launch() (*generation, error) {
-	resolved, err := resolveCommand(i.spec.Command, i.spec.Env)
+	resolved, err := resolveCommand(i.spec.Command, i.spec.Env, runtime.GOOS)
 	if err != nil {
 		return nil, err
 	}
@@ -720,31 +720,31 @@ func (i *Instance) fillPythonPath(value any) any {
 func (i *Instance) probePython() string {
 	if runtime.GOOS == "windows" {
 		if venv := envValue(i.spec.Env, "VIRTUAL_ENV"); venv != "" {
-			if p := executableFile(filepath.Join(venv, "Scripts", "python.exe")); p != "" {
+			if p := executableFile(filepath.Join(venv, "Scripts", "python.exe"), runtime.GOOS); p != "" {
 				return p
 			}
 		}
 		for _, rel := range []string{`.venv\Scripts\python.exe`, `venv\Scripts\python.exe`} {
-			if p := executableFile(filepath.Join(i.spec.Root, rel)); p != "" {
+			if p := executableFile(filepath.Join(i.spec.Root, rel), runtime.GOOS); p != "" {
 				return p
 			}
 		}
-		if p, err := resolveCommand("python.exe", i.spec.Env); err == nil {
+		if p, err := resolveCommand("python.exe", i.spec.Env, runtime.GOOS); err == nil {
 			return p
 		}
 		return ""
 	}
 	if venv := envValue(i.spec.Env, "VIRTUAL_ENV"); venv != "" {
-		if p := executableFile(filepath.Join(venv, "bin", "python")); p != "" {
+		if p := executableFile(filepath.Join(venv, "bin", "python"), runtime.GOOS); p != "" {
 			return p
 		}
 	}
 	for _, rel := range []string{".venv/bin/python", "venv/bin/python"} {
-		if p := executableFile(filepath.Join(i.spec.Root, rel)); p != "" {
+		if p := executableFile(filepath.Join(i.spec.Root, rel), runtime.GOOS); p != "" {
 			return p
 		}
 	}
-	if p, err := resolveCommand("python3", i.spec.Env); err == nil {
+	if p, err := resolveCommand("python3", i.spec.Env, runtime.GOOS); err == nil {
 		return p
 	}
 	return ""
@@ -1010,12 +1010,12 @@ func (i *Instance) handleCrash() {
 	if terminal {
 		// A deliberate stop owns the instance from here; this goroutine only
 		// sweeps whatever the crash left in the old process group.
-		i.stopGeneration(gen)
+		i.stopGeneration(gen, context.Background())
 		return
 	}
 
 	i.setState(StateStarting)
-	i.stopGeneration(gen)
+	i.stopGeneration(gen, context.Background())
 
 	if !restartable {
 		i.setLastError(fmt.Sprintf("crashed %d times in 10 minutes", n))
@@ -1068,44 +1068,67 @@ func (i *Instance) pruneCrashesLocked(now time.Time) {
 // Restart closes the current process deliberately (not a crash), clears the
 // crash window, and starts a fresh one (spec §7.8).
 func (i *Instance) Restart(ctx context.Context) error {
-	i.mu.Lock()
-	if i.stopping || i.doneClosed || i.gen == nil {
-		err := i.stoppedErrorLocked()
+	for {
+		i.mu.Lock()
+		if i.stopping || i.doneClosed {
+			err := i.stoppedErrorLocked()
+			i.mu.Unlock()
+			return err
+		}
+		if i.gen == nil {
+			if i.state != StateStarting {
+				err := i.stoppedErrorLocked()
+				i.mu.Unlock()
+				return err
+			}
+			// A crash restart is between generations (handleCrash cleared
+			// gen and is relaunching): the instance is not stopped, and
+			// answering as if it were would be a lie Shutdown never tells
+			// in the same window. Wait for the restart to land, bounded by
+			// ctx, then restart whatever generation came out of it.
+			ch := i.stateCh
+			i.mu.Unlock()
+			select {
+			case <-ch:
+			case <-i.done:
+			case <-ctx.Done():
+				return fmt.Errorf("language server %s is crash-restarting", i.spec.ServerID)
+			}
+			continue
+		}
+		i.stopping = true
+		i.initialized = false
+		i.open = false
+		i.crashes = nil
+		i.restartSeq = 0
+		gen := i.gen
+		i.gen = nil
 		i.mu.Unlock()
-		return err
-	}
-	i.stopping = true
-	i.initialized = false
-	i.open = false
-	i.crashes = nil
-	i.restartSeq = 0
-	gen := i.gen
-	i.gen = nil
-	i.mu.Unlock()
 
-	i.setState(StateStarting)
-	i.stopGeneration(gen)
-	i.mu.Lock()
-	i.stopping = false
-	// stopping gates callers (a concurrent Shutdown waits for it to clear),
-	// so clearing it must wake them.
-	i.signalLocked()
-	i.mu.Unlock()
+		i.setState(StateStarting)
+		i.stopGeneration(gen, ctx)
+		i.mu.Lock()
+		i.stopping = false
+		// stopping gates callers (a concurrent Shutdown waits for it to clear),
+		// so clearing it must wake them.
+		i.signalLocked()
+		i.mu.Unlock()
 
-	if err := i.launchAndInitialize(ctx); err != nil {
-		i.setLastError(err.Error())
-		i.setState(StateFailed)
-		i.finishTerminal()
-		return err
+		if err := i.launchAndInitialize(ctx); err != nil {
+			i.setLastError(err.Error())
+			i.setState(StateFailed)
+			i.finishTerminal()
+			return err
+		}
+		if cb := i.spec.OnRestart; cb != nil {
+			cb(ctx)
+		}
+		i.mu.Lock()
+		i.open = true
+		i.signalLocked()
+		i.mu.Unlock()
+		return nil
 	}
-	if cb := i.spec.OnRestart; cb != nil {
-		cb(ctx)
-	}
-	i.mu.Lock()
-	i.open = true
-	i.signalLocked()
-	i.mu.Unlock()
-	return nil
 }
 
 // Shutdown stops the server: gracefully if it answers, the whole process
@@ -1140,12 +1163,19 @@ func (i *Instance) Shutdown(ctx context.Context) error {
 		i.mu.Unlock()
 		i.fireOnStateChange()
 
-		i.stopGeneration(gen)
+		// A ctx that is already spent skips every wait in stopGeneration but
+		// none of its teardown: the tree is killed, the connection closed and
+		// the pid file cleaned up all the same, so returning early on
+		// ctx.Err() would leave more behind than waiting out the skips costs.
+		i.stopGeneration(gen, ctx)
 		if i.stderrW != nil {
 			i.stderrW.flush()
 		}
 		i.log.close()
 		i.finishTerminal()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return nil
 	}
 }
@@ -1153,7 +1183,13 @@ func (i *Instance) Shutdown(ctx context.Context) error {
 // stopGeneration runs the close sequence for one generation: shutdown
 // request, exit notification, then SIGTERM and SIGKILL to the whole tree
 // (spec §7.8). Every step is best effort — the goal is that nothing is left.
-func (i *Instance) stopGeneration(gen *generation) {
+// ctx is the hard ceiling over the whole sequence: each wait also gives up
+// when it expires (a spent ctx skips straight through), while the staged
+// timeouts keep the escalation schedule — a second of grace before SIGTERM,
+// two more before SIGKILL. The teardown that follows (kill, release, close,
+// forgetPID) runs unconditionally, so an abandoned wait leaves no more
+// behind than the sequence already could.
+func (i *Instance) stopGeneration(gen *generation, ctx context.Context) {
 	if gen == nil {
 		return
 	}
@@ -1161,6 +1197,8 @@ func (i *Instance) stopGeneration(gen *generation) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	go func() {
 		shCtx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -1169,15 +1207,20 @@ func (i *Instance) stopGeneration(gen *generation) {
 	}()
 	select {
 	case <-gen.waitDone:
+	case <-waitCtx.Done():
 	case <-time.After(time.Second):
 	}
 	_ = gen.tree.terminate()
 	select {
 	case <-gen.waitDone:
+	case <-waitCtx.Done():
 	case <-time.After(2 * time.Second):
 	}
 	_ = gen.tree.kill()
-	<-gen.waitDone
+	select {
+	case <-gen.waitDone:
+	case <-waitCtx.Done():
+	}
 	gen.tree.release()
 	_ = gen.conn.Close()
 	forgetPID(i.spec.PIDFile, gen.cmd.Process.Pid)
@@ -1356,18 +1399,14 @@ func (i *Instance) finishTerminal() {
 }
 
 // resolveCommand resolves spec.Command against the PATH in env (falling
-// back to this process's), like the server itself will see it.
-func resolveCommand(command string, env []string) (string, error) {
+// back to this process's), like the server itself will see it. The PATH walk
+// goes through lookPathIn so windows resolves bare command names through
+// PATHEXT exactly like os/exec's LookPath.
+func resolveCommand(command string, env []string, goos string) (string, error) {
 	path := envValue(env, "PATH")
 	if path != "" && !strings.ContainsRune(command, os.PathSeparator) {
-		for _, dir := range filepath.SplitList(path) {
-			if dir == "" {
-				continue
-			}
-			candidate := filepath.Join(dir, command)
-			if executableFile(candidate) != "" {
-				return candidate, nil
-			}
+		if found := lookPathIn(command, path, goos, env); found != "" {
+			return found, nil
 		}
 		return "", fmt.Errorf("command %q not found", command)
 	}
@@ -1390,13 +1429,19 @@ func envValue(env []string, name string) string {
 	return value
 }
 
-// executableFile returns path when it is an executable regular file.
-func executableFile(path string) string {
+// executableFile returns path when it is an executable regular file. On
+// windows the mode carries no permission bits, so any existing non-directory
+// file answers — extension legality belongs to the PATHEXT logic at the
+// call sites, exactly os/exec's chkStat.
+func executableFile(path, goos string) string {
 	st, err := os.Stat(path)
-	if err != nil || st.IsDir() || st.Mode()&0o111 == 0 {
+	if err != nil || st.IsDir() {
 		return ""
 	}
-	return path
+	if goos == "windows" || st.Mode()&0o111 != 0 {
+		return path
+	}
+	return ""
 }
 
 // serverLog is the instance's append-only log: every line is timestamped,

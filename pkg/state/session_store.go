@@ -341,16 +341,23 @@ func (s *SessionStore) LastActiveByIDs(ctx context.Context, ids []string) (map[s
 // SessionLeftovers is what deleting sessions leaves outside the database:
 // the uploaded files' stored bytes and the spilled tool outputs their
 // transcripts point at. The caller removes them once the rows are gone.
+// Survived lists the sessions the delete left in place because a live
+// primary run still holds them; the caller leaves those entirely alone and
+// a later pass settles them.
 type SessionLeftovers struct {
 	Files      []File
 	SpillPaths []string
+	Survived   []string
 }
 
 // DeleteSessions deletes this agent's sessions with the given ids and every
 // row that hangs off them (the foreign keys cascade), in one transaction,
 // and returns what they leave on disk. A session another agent owns is not
-// touched. A conversation forked from one of them keeps its own life: its
-// parent link is cleared, not followed.
+// touched, and one a live primary run still holds is not touched either:
+// the sweep that read it as expired may have raced a conversation coming
+// back to life, so the delete re-checks liveness inside the transaction and
+// reports what it spared in Survived. A conversation forked from one of
+// them keeps its own life: its parent link is cleared, not followed.
 func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (SessionLeftovers, error) {
 	if s == nil || s.db == nil {
 		return SessionLeftovers{}, fmt.Errorf("session store unavailable")
@@ -371,12 +378,37 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 	defer func() { _ = tx.Rollback() }()
 	out := SessionLeftovers{}
 	agentID := s.AgentID()
+	// One clock for the whole transaction: the liveness the spare reads and
+	// the liveness the delete vetoes are the same facts, so what was spared
+	// here cannot be deleted three statements later.
+	liveArgs := liveRunArgs(time.Now())
 	for start := 0; start < len(cleaned); start += sessionLastActiveChunk {
 		end := start + sessionLastActiveChunk
 		if end > len(cleaned) {
 			end = len(cleaned)
 		}
 		chunk := cleaned[start:end]
+		survivors, err := deleteSessionsSurvivors(ctx, tx, chunk, agentID, liveArgs)
+		if err != nil {
+			return SessionLeftovers{}, err
+		}
+		if len(survivors) > 0 {
+			out.Survived = append(out.Survived, survivors...)
+			if len(survivors) == len(chunk) {
+				continue
+			}
+			surviving := make(map[string]bool, len(survivors))
+			for _, id := range survivors {
+				surviving[id] = true
+			}
+			deletable := make([]string, 0, len(chunk)-len(survivors))
+			for _, id := range chunk {
+				if !surviving[id] {
+					deletable = append(deletable, id)
+				}
+			}
+			chunk = deletable
+		}
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
 		args := make([]any, 0, len(chunk)+1)
 		args = append(args, agentID)
@@ -393,8 +425,15 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 			return SessionLeftovers{}, err
 		}
 		out.SpillPaths = append(out.SpillPaths, paths...)
+		deleteArgs := make([]any, 0, len(args)+len(liveArgs))
+		deleteArgs = append(deleteArgs, args...)
+		deleteArgs = append(deleteArgs, liveArgs...)
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM fb_sessions WHERE agent_id = ? AND id IN (`+placeholders+`)`, args...); err != nil {
+			`DELETE FROM fb_sessions WHERE agent_id = ? AND id IN (`+placeholders+`)
+  AND NOT EXISTS (
+    SELECT 1 FROM fb_runs rr
+    WHERE rr.session_id = fb_sessions.id AND rr.parent_run_id IS NULL
+      AND `+fmt.Sprintf(livePrimaryRunCondition, "rr")+`)`, deleteArgs...); err != nil {
 			return SessionLeftovers{}, err
 		}
 	}
@@ -402,6 +441,39 @@ func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (Sessio
 		return SessionLeftovers{}, err
 	}
 	return out, nil
+}
+
+// deleteSessionsSurvivors returns which of the agent's sessions in ids a
+// live primary run still holds. DeleteSessions asks it inside the delete's
+// own transaction and with the delete's own clock, so the two never disagree.
+func deleteSessionsSurvivors(ctx context.Context, q dbtx, ids []string, agentID string, liveArgs []any) ([]string, error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+1+len(liveArgs))
+	args = append(args, agentID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, liveArgs...)
+	rows, err := q.QueryContext(ctx, `
+SELECT id FROM fb_sessions
+WHERE agent_id = ? AND id IN (`+placeholders+`)
+  AND EXISTS (
+    SELECT 1 FROM fb_runs rr
+    WHERE rr.session_id = fb_sessions.id AND rr.parent_run_id IS NULL
+      AND `+fmt.Sprintf(livePrimaryRunCondition, "rr")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func deleteSessionsFiles(ctx context.Context, q dbtx, placeholders string, args []any) ([]File, error) {
@@ -2046,6 +2118,10 @@ func (s *SessionStore) ForkInto(ctx context.Context, sourceID, targetID string) 
 		item.row.SessionID = targetID
 		item.row.Exec = execTimingFromColumns(execStart, execFinish, execDuration)
 		copied = append(copied, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err

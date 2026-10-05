@@ -972,6 +972,7 @@ func TestAutoContinuationRunsAsADetachedWebTurn(t *testing.T) {
 	require.Equal(t, turn.SurfaceWebChat, req.Origin.Surface)
 	require.Equal(t, started.RunID, req.ExistingRunID)
 	require.True(t, req.AgentContextIsRunContext)
+	require.False(t, req.Unattended, "a continued web turn must be able to continue again")
 
 	messages, err := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
 	require.NoError(t, err)
@@ -1272,6 +1273,19 @@ func TestHeartbeatStandsDownWhenTheSessionIsParked(t *testing.T) {
 	rows, rerr := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
 	require.NoError(t, rerr)
 	require.Empty(t, rows, "a beat beside a parked approval must leave no row behind")
+}
+
+// A heartbeat's turn is unattended: nobody is watching the conversation
+// when it fires, so a usage limit it hits ends it for good rather than
+// being continued by a timer nobody can see.
+func TestHeartbeatTurnsAreUnattended(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	require.NoError(t, g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?"))
+	require.Eventually(t, func() bool {
+		req := g.executor.last()
+		return req.Trigger == heartbeatTrigger && req.Unattended
+	}, 5*time.Second, 10*time.Millisecond, "the heartbeat's turn never carried the unattended flag")
+	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
 // A detached run parked on an approval writes its pre-gate snapshot under its

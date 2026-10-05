@@ -17,6 +17,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -410,5 +411,119 @@ func TestOpenRegistersTheRunOwner(t *testing.T) {
 	}
 	if left != 0 {
 		t.Fatalf("owner lease rows after Close = %d, want 0", left)
+	}
+}
+
+// TestResolveConsentProjectContextRegisteredWins pins the startup prompts'
+// project boundary: a registered gitless subdirectory of a larger checkout
+// resolves through its registration — the same context the runner pool
+// builds that project's runner with — while a directory no project claims
+// keeps the launch resolution unchanged.
+func TestResolveConsentProjectContextRegisteredWins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	ResetResolve()
+	t.Cleanup(ResetResolve)
+
+	checkout := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(checkout, "pkg", "inner")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err) // a gitless checkout subdirectory
+	}
+
+	ctx := context.Background()
+	// Resolve ensures the home layout (the state directory included) the
+	// same way the first call inside ResolveConsentProjectContext would.
+	if _, err := Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	db, err := state.Open(ctx, state.StateDBPath(home), nil)
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	projects := state.NewProjectStore(db, "main")
+	registered, err := projects.Create(ctx, state.CreateProjectInput{Name: "inner", Root: sub})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: sub}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolveConsentProjectContext(home, sub)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext: %v", err)
+	}
+	want, err := safety.ResolveRegisteredContext(home, registered.Root)
+	if err != nil {
+		t.Fatalf("ResolveRegisteredContext: %v", err)
+	}
+	if got != want {
+		t.Fatalf("consent context = %+v, want the runner pool's registered context %+v", got, want)
+	}
+	// The gitless registration is not version controlled, so the prompt
+	// resolves the same fail-closed answer the runner gets — no project
+	// boundary at all — instead of asking about (and deciding for) the
+	// enclosing checkout.
+	if root := safety.TrustedRoot(got); root != "" {
+		t.Fatalf("TrustedRoot = %q, want empty for a gitless registration", root)
+	}
+	// The launch resolution would have answered the enclosing checkout.
+	checkoutCanonical, err := safety.CanonicalPath(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch, err := safety.ResolveProjectContext(home, sub); err != nil || launch.Project.Root != checkoutCanonical {
+		t.Fatalf("launch resolution = %+v, %v; want the checkout root %s", launch, err, checkoutCanonical)
+	}
+
+	// A registered project with its own .git resolves through its
+	// registration too, trusted at the registered root — the boundary whose
+	// project key the runner's frozen consent decisions use.
+	owned := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(owned, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(owned, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projects.Create(ctx, state.CreateProjectInput{Name: "owned", Root: owned}); err != nil {
+		t.Fatalf("create owned project: %v", err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: owned}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ResolveConsentProjectContext(home, nested)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext(owned): %v", err)
+	}
+	wantOwned, err := safety.ResolveRegisteredContext(home, owned)
+	if err != nil {
+		t.Fatalf("ResolveRegisteredContext(owned): %v", err)
+	}
+	if got != wantOwned {
+		t.Fatalf("owned consent context = %+v, want %+v", got, wantOwned)
+	}
+	if root := safety.TrustedRoot(got); root != wantOwned.Project.Root {
+		t.Fatalf("TrustedRoot = %q, want the registered root %q", root, wantOwned.Project.Root)
+	}
+
+	// A directory no registered project contains keeps the launch resolution.
+	elsewhere := t.TempDir()
+	got, err = ResolveConsentProjectContext(home, elsewhere)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext(unregistered): %v", err)
+	}
+	wantLaunch, err := safety.ResolveProjectContext(home, elsewhere)
+	if err != nil {
+		t.Fatalf("ResolveProjectContext: %v", err)
+	}
+	if got != wantLaunch {
+		t.Fatalf("unregistered consent context = %+v, want the launch resolution %+v", got, wantLaunch)
 	}
 }

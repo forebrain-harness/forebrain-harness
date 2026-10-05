@@ -28691,12 +28691,13 @@ func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
 // install's lifecycle produces.
 type lspInstallWatchStub struct {
 	panelLSPControlStub
-	subscribed func(event.LSPSnapshot)
+	subscribed   func(event.LSPSnapshot)
+	unsubscribed bool
 }
 
 func (c *lspInstallWatchStub) Subscribe(fn func(event.LSPSnapshot)) func() {
 	c.subscribed = fn
-	return func() {}
+	return func() { c.unsubscribed = true }
 }
 
 // Every answer returns the transcript line the spec spells out, and the
@@ -28745,9 +28746,10 @@ func TestDecideLSPRecommendationTexts(t *testing.T) {
 	require.ErrorIs(t, err, errPanelUnavailable)
 }
 
-// The install answer subscribes before deciding, so every line the install
-// prints and its outcome reach the UI: progress as the transient line, the
-// result as one frame.
+// The install answer decides first and subscribes after, so the watch never
+// observes a pre-start snapshot, and every line the install prints and its
+// outcome reach the UI: progress as the transient line, the result as one
+// frame.
 func TestDecideLSPRecommendationInstallReportsDone(t *testing.T) {
 	home := t.TempDir()
 	ctl := &lspInstallWatchStub{}
@@ -28803,4 +28805,64 @@ func TestDecideLSPRecommendationInstallReportsFailure(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Contains(t, got, LSPInstallDoneMsg{ServerID: "gopls", Err: "exit status 1: no network"})
+}
+
+// installWatchEnv wires a session to a stub control that records delivery
+// and unsubscription, with the notify collector attached.
+func installWatchEnv(t *testing.T) (*ChatSession, *lspInstallWatchStub, *[]any) {
+	t.Helper()
+	home := t.TempDir()
+	ctl := &lspInstallWatchStub{}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	var mu sync.Mutex
+	got := &[]any{}
+	s.PrependUINotify(func(m any) {
+		mu.Lock()
+		defer mu.Unlock()
+		*got = append(*got, m)
+	})
+	return s, ctl, got
+}
+
+// An install that already carries its failure in the first frame the watcher
+// sees — it finished between two snapshots, or never truly started — reports
+// the failure and unsubscribes without having observed Installing.
+func TestInstallWatchFailureWithoutRunningFrame(t *testing.T) {
+	s, ctl, got := installWatchEnv(t)
+	rec := event.LSPRecommendation{ID: "lsprec-4", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"}, Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest"}
+	_, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	require.NotNil(t, ctl.subscribed, "the install watch never subscribed")
+
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", InstallError: "exit status 1: no network"}}})
+	waitForQueuedNotifications(t, s)
+	require.Contains(t, *got, LSPInstallDoneMsg{ServerID: "gopls", Err: "exit status 1: no network"})
+	require.True(t, ctl.unsubscribed, "the failure terminal must unsubscribe")
+
+	// The watch is over: later frames change nothing.
+	*got = nil
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true}}})
+	waitForQueuedNotifications(t, s)
+	require.Empty(t, *got)
+}
+
+// A first frame that is neither running nor failed keeps the watch waiting:
+// the install may simply not have started yet.
+func TestInstallWatchQuietFirstFrameKeepsWaiting(t *testing.T) {
+	s, ctl, got := installWatchEnv(t)
+	rec := event.LSPRecommendation{ID: "lsprec-5", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"}, Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest"}
+	_, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls"}}})
+	waitForQueuedNotifications(t, s)
+	require.Empty(t, *got, "a quiet first frame must not report anything")
+	require.False(t, ctl.unsubscribed)
+
+	// The lifecycle that follows still reports normally.
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"linking"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls"}}})
+	waitForQueuedNotifications(t, s)
+	require.Contains(t, *got, LSPInstallProgressMsg{ServerID: "gopls", Line: "linking"})
+	require.Contains(t, *got, LSPInstallDoneMsg{ServerID: "gopls", Text: "gopls installed and enabled for Go. Diagnostics start with the next edit."})
 }

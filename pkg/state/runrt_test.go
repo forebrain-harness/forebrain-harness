@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 )
 
 // --- Wait-resume lease semantics -------------------------------------------
@@ -404,7 +406,10 @@ func TestCreateRunIsAtomicAcrossStores(t *testing.T) {
 	countLive := func() int {
 		var n int
 		if err := a.DB.QueryRow(`SELECT COUNT(*) FROM fb_runs WHERE session_id='race' AND parent_run_id IS NULL AND status='running'`).Scan(&n); err != nil {
-			t.Fatal(err)
+			// Runs on the worker goroutines: fail the test without the
+			// goroutine-unsafe runtime.Goexit of t.Fatal.
+			t.Errorf("count live runs: %v", err)
+			return 0
 		}
 		return n
 	}
@@ -422,6 +427,9 @@ func TestCreateRunIsAtomicAcrossStores(t *testing.T) {
 					if !errors.Is(err, ErrSessionBusy) {
 						t.Errorf("unexpected create error: %v", err)
 					}
+					// A tight retry can starve the holder's SetStatus out of
+					// the sqlite write lock; yield so it can finish.
+					time.Sleep(time.Millisecond)
 					continue
 				}
 				mu.Lock()
@@ -433,6 +441,10 @@ func TestCreateRunIsAtomicAcrossStores(t *testing.T) {
 				if err := store.SetStatus(ctx, r.ID, RunStatusDone); err != nil {
 					t.Errorf("set done: %v", err)
 				}
+				// The fairness premise ("both owners must win sometimes")
+				// needs the winner to leave a window for the other owner's
+				// next CreateRun instead of re-taking the slot immediately.
+				time.Sleep(time.Millisecond)
 			}
 		}(name, store)
 	}
@@ -535,6 +547,149 @@ func TestReapAbandonedRunsEndsOnlyTheDead(t *testing.T) {
 	// The reap is a compare-and-swap: a second pass finds nothing.
 	if again, err := b.ReapAbandonedRuns(ctx, time.Now()); err != nil || len(again) != 0 {
 		t.Fatalf("second reap = %+v, %v; want nothing", again, err)
+	}
+}
+
+// TestReapAbandonedRunsTakesARunWhoseClockWasStampedBeforeTheStatus pins
+// the crash window between StampRunTiming and the terminal status write: a
+// running row whose clock a surface already stamped is reaped like any
+// other dead one, keeping the clock it measured, while an unstamped row
+// keeps the lease-fallback clock exactly as before. Both endings flow out
+// the one branch the reaper's event publication reads.
+func TestReapAbandonedRunsTakesARunWhoseClockWasStampedBeforeTheStatus(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s-stamped", "s-unstamped")
+	stamped, err := a.CreateRun(ctx, "s-stamped", "clock stamped, then the process died")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unstamped, err := a.CreateRun(ctx, "s-unstamped", "no clock at all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The stamp is written when the run ends; the process died between it
+	// and the status write, so the row sits there running and timed.
+	startedAt := time.Now().Add(-2 * time.Minute).Round(time.Millisecond)
+	finishedAt := time.Now().Add(-1 * time.Minute).Round(time.Millisecond)
+	if err := NewSessionStore(db, "main").StampRunTiming(ctx, stamped.ID, RunTiming{
+		StartedAt: startedAt, FinishedAt: finishedAt, Worked: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, db, "owner-a")
+
+	reaped, err := b.ReapAbandonedRuns(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reapedIDs := map[string]bool{}
+	for _, r := range reaped {
+		reapedIDs[r.ID] = true
+	}
+	if !reapedIDs[stamped.ID] || !reapedIDs[unstamped.ID] {
+		t.Fatalf("reaped = %+v, want both the stamped and the unstamped run", reaped)
+	}
+
+	var status string
+	var started, finished, worked int64
+	if err := db.QueryRow(`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`, stamped.ID).
+		Scan(&status, &started, &finished, &worked); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(RunStatusFailed) {
+		t.Fatalf("stamped run status = %q, want failed", status)
+	}
+	if started != startedAt.UnixMilli() || finished != finishedAt.UnixMilli() || worked != int64(time.Minute/time.Millisecond) {
+		t.Fatalf("stamped run clock = started %d finished %d worked %d, want the surface's own %d %d %d",
+			started, finished, worked, startedAt.UnixMilli(), finishedAt.UnixMilli(), int64(time.Minute/time.Millisecond))
+	}
+
+	if err := db.QueryRow(`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`, unstamped.ID).
+		Scan(&status, &started, &finished, &worked); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(RunStatusFailed) {
+		t.Fatalf("unstamped run status = %q, want failed", status)
+	}
+	if started != unstamped.CreatedAt*1000 || finished < started || worked != finished-started {
+		t.Fatalf("unstamped run clock = started %d finished %d worked %d, want the lease fallback from created_at %d",
+			started, finished, worked, unstamped.CreatedAt*1000)
+	}
+
+	// The ending the reaper publishes for the reaped run reads back through
+	// the same listing a fire's settlement reads.
+	if _, err := b.AppendSessionEvent(ctx, SessionEvent{
+		ID: "evt-reap-stamped", RunID: stamped.ID, SessionID: "s-stamped",
+		Type: event.RunEventTurnError,
+		Payload: event.EncodePayload(event.TurnErrorPayload{
+			Error: "stopped", Message: "stopped", Detail: &event.TurnErrorDetail{Code: "run_abandoned"},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	evts, err := b.ListRunEventsOfTypes(ctx, stamped.ID, event.RunEventTurnError, event.RunEventTurnCancelled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("ending events of the reaped run = %d, want the one published ending", len(evts))
+	}
+}
+
+// TestReapAbandonedRunsCleansLapsedLeaseRows pins the reap's second duty:
+// a lease that reads as dead is removed for real, so the table collects no
+// one row per process that ever crashed mid-run. A fresh lease — the
+// reaper's own — stays, and a voluntarily deregistered lease stays gone.
+func TestReapAbandonedRunsCleansLapsedLeaseRows(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s-lease")
+
+	// Voluntary deregistration keeps removing its row on the spot.
+	ghost := &RunStore{DB: db, Owner: "owner-ghost"}
+	stopGhost, err := ghost.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopGhost()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner='owner-ghost'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("a voluntarily deregistered lease left its row behind")
+	}
+
+	// A lapsed lease no run points at any more: the leftover this reaping is
+	// for. Written without a renewal loop so it stays lapsed.
+	if _, err := db.Exec(`INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES('owner-lapsed', ?)`,
+		time.Now().UnixMilli()-RunOwnerLease.Milliseconds()-5000); err != nil {
+		t.Fatal(err)
+	}
+	run, err := a.CreateRun(ctx, "s-lease", "died mid-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, db, "owner-a")
+	stopFresh, err := b.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopFresh()
+
+	reaped, err := b.ReapAbandonedRuns(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reaped) != 1 || reaped[0].ID != run.ID {
+		t.Fatalf("reaped = %+v, want exactly the lapsed owner's run", reaped)
+	}
+	for owner, want := range map[string]int{"owner-a": 0, "owner-lapsed": 0, "owner-b": 1} {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != want {
+			t.Fatalf("lease rows of %s = %d, want %d", owner, n, want)
+		}
 	}
 }
 

@@ -115,7 +115,7 @@ func runVersionCommand(ctx context.Context, path string, args, env []string) (in
 // on the PATH the server will see, then in the detect extra dirs.
 func findServerBinary(srv ServerConfig, env []string, goos string) string {
 	if filepath.IsAbs(srv.Command) || strings.ContainsRune(srv.Command, os.PathSeparator) {
-		if executableFile(srv.Command) != "" {
+		if executableFile(srv.Command, goos) != "" {
 			return srv.Command
 		}
 		return ""
@@ -148,7 +148,7 @@ func findViaXcrun(ctx context.Context, tool, goos string) string {
 		return ""
 	}
 	path := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
-	if executableFile(path) != "" {
+	if executableFile(path, goos) != "" {
 		return path
 	}
 	return ""
@@ -302,23 +302,20 @@ func lookPathIn(command, path, goos string, env []string) string {
 	return ""
 }
 
-// tryExecutable answers candidate when it is executable, trying the windows
-// PATHEXT extensions when the name does not already carry one.
+// tryExecutable answers candidate when it is executable. Windows mirrors
+// os/exec's findExecutable: a name without an extension never runs bare —
+// only the PATHEXT suffixes are tried — while a name that already carries an
+// extension is tried as itself first and still falls through to the suffixes
+// ("foo.bat.exe" resolves). POSIX keeps the plain executable-bit check.
 func tryExecutable(candidate, goos string, env []string) string {
-	if executableFile(candidate) != "" {
+	if goos != "windows" {
+		return executableFile(candidate, goos)
+	}
+	if filepath.Ext(candidate) != "" && executableFile(candidate, goos) != "" {
 		return candidate
 	}
-	if goos != "windows" {
-		return ""
-	}
-	ext := strings.ToLower(filepath.Ext(candidate))
 	for _, pathExt := range pathExtensions(env) {
-		if ext == strings.ToLower(pathExt) {
-			return ""
-		}
-	}
-	for _, pathExt := range pathExtensions(env) {
-		if found := executableFile(candidate + pathExt); found != "" {
+		if found := executableFile(candidate+pathExt, goos); found != "" {
 			return found
 		}
 	}

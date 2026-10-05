@@ -596,6 +596,11 @@ type detachedTurn struct {
 	// Origin is where the turn comes from. Its surface decides whether a
 	// usage limit hit by this turn is continued by itself later.
 	Origin turn.Origin
+	// Unattended marks a turn nobody is watching: a usage limit ends it for
+	// good — the next trigger comes on schedule or by a person, never by a
+	// continuation timer. A heartbeat sets it; a continued web turn does
+	// not, because the continuation itself must be able to continue again.
+	Unattended bool
 	// PromptOrigin marks the prompt row as written on the person's behalf
 	// (state.MessageOrigin*); empty when the prompt is the runtime's own text.
 	PromptOrigin string
@@ -703,6 +708,7 @@ func (s *Server) runDetachedTurn(runCtx context.Context, t detachedTurn, runID s
 		UserText:                 t.Prompt,
 		RawInput:                 t.Prompt,
 		ExistingRunID:            runID,
+		Unattended:               t.Unattended,
 		AgentContextIsRunContext: true,
 	}, nil)
 	if outcome.Status == turn.TurnWaitingApproval && outcome.Resume != nil {
@@ -796,6 +802,7 @@ func (s *Server) startHeartbeatTurn(_ context.Context, sessionID, prompt string)
 		Prompt:       prompt,
 		Trigger:      heartbeatTrigger,
 		Origin:       turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "heartbeat"},
+		Unattended:   true,
 		PromptOrigin: state.MessageOriginHeartbeat,
 		Announce: func(ctx context.Context, runID string) {
 			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventHeartbeatFired, event.HeartbeatFiredPayload{Prompt: prompt})

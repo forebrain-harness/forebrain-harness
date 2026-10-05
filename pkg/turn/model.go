@@ -55,6 +55,10 @@ type TurnRequest struct {
 	// "resume". Empty means "user".
 	Trigger       string `json:"trigger,omitempty"`
 	ExistingRunID string `json:"existing_run_id,omitempty"`
+	// Unattended marks a turn nobody is watching. An unattended turn has
+	// nobody watching it: a usage limit ends it for good — the next trigger
+	// comes on schedule or by a person, never by a continuation timer.
+	Unattended bool `json:"-"`
 	// AgentContextIsRunContext says the caller already built the run context --
 	// it holds the cancel function the controller tracks and has seeded the
 	// session and run ids. The executor then passes the context through

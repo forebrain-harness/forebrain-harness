@@ -711,6 +711,18 @@ func (s *Server) handlePermissionUpdate(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "session_id required for session destination", http.StatusBadRequest)
 			return
 		}
+		// The rule lands in the permission store of the conversation it
+		// names, so that conversation must be this agent's own: another
+		// agent's is answered as missing and its store is never written.
+		owned, err := s.sessionOwned(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
 		runner := s.runnerFor(r.Context(), sid)
 		if runner == nil {
 			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
@@ -3567,7 +3579,7 @@ func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RetentionDays *int `json:"retention_days"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -4673,6 +4685,19 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	sid := strings.TrimSpace(req.SessionID)
 	if sid == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	// A preset is part of the conversation it is set on, so the endpoint
+	// answers only for a session this agent owns: another agent's is
+	// indistinguishable from missing, and its permission store is never
+	// written.
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
 		return
 	}
 	preset, ok := safety.ApprovalPresetByID(req.Preset)

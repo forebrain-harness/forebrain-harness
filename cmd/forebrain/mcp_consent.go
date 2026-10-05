@@ -24,7 +24,7 @@ func ensureProjectMCPConsent(in io.Reader, out io.Writer, home, cwd string) erro
 	if out == nil {
 		out = os.Stdout
 	}
-	launch, err := safety.ResolveProjectContext(strings.TrimSpace(home), strings.TrimSpace(cwd))
+	launch, err := process.ResolveConsentProjectContext(strings.TrimSpace(home), strings.TrimSpace(cwd))
 	if err != nil {
 		// A trust-lookup failure must not become a license to load project
 		// entries: ResolveSessionMCP fails closed on the same context, so
@@ -80,7 +80,7 @@ func ensureProjectLSPConsent(in io.Reader, out io.Writer, home, cwd string) erro
 	if out == nil {
 		out = os.Stdout
 	}
-	launch, err := safety.ResolveProjectContext(strings.TrimSpace(home), strings.TrimSpace(cwd))
+	launch, err := process.ResolveConsentProjectContext(strings.TrimSpace(home), strings.TrimSpace(cwd))
 	if err != nil {
 		// A trust-lookup failure must not become a license to apply
 		// project entries: the runtime fails closed on the same context,

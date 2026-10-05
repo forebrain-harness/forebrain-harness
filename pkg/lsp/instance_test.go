@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -764,7 +765,130 @@ func TestShutdownDuringCrashRestartStaysStopped(t *testing.T) {
 	}
 }
 
-// TestLaunchRefusesToInstallGenerationDuringStop covers the revival race:
+// TestResolveCommandWindowsShape pins the windows PATH walk against
+// os/exec's semantics: a bare command name hits only through PATHEXT (the
+// .exe), never the extensionless file, while the posix walk keeps answering
+// the executable itself. os.Stat on an .exe-named file behaves the same on
+// posix hosts, so the windows branch needs no injection to run here.
+func TestResolveCommandWindowsShape(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gopls"), []byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "gopls.exe")
+	if err := os.WriteFile(exe, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"PATH=" + dir, "PATHEXT=.exe"}
+
+	resolved, err := resolveCommand("gopls", env, "windows")
+	if err != nil || resolved != exe {
+		t.Fatalf("windows resolve = %q, %v; want %q", resolved, err, exe)
+	}
+	resolved, err = resolveCommand("gopls", env, "linux")
+	if err != nil || resolved != filepath.Join(dir, "gopls") {
+		t.Fatalf("posix resolve = %q, %v; want the bare executable", resolved, err)
+	}
+
+	only := t.TempDir()
+	if err := os.WriteFile(filepath.Join(only, "gopls"), []byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveCommand("gopls", []string{"PATH=" + only, "PATHEXT=.exe"}, "windows"); err == nil {
+		t.Fatal("an extensionless name must not resolve on windows even when the file carries the exec bit")
+	}
+}
+
+// A Shutdown called with an already-spent ctx must answer with ctx's error
+// without skipping the teardown: the pid file is still cleaned, so the
+// abandoned instance leaves no record behind.
+func TestShutdownWithSpentContextStillCleansUp(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pids.json")
+	inst, _ := startFake(t, map[string]any{}, func(s *InstanceSpec) {
+		s.PIDFile = pidFile
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := inst.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown error = %v, want context.Canceled", err)
+	}
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read pids.json: %v", err)
+	}
+	var recsAfter []pidRecord
+	if err := json.Unmarshal(b, &recsAfter); err != nil {
+		t.Fatalf("pids.json = %s: %v", b, err)
+	}
+	if len(recsAfter) != 0 {
+		t.Errorf("pids.json still records %d processes", len(recsAfter))
+	}
+	select {
+	case <-inst.Done():
+	default:
+		t.Error("Done is not closed")
+	}
+}
+
+// Restart inside the crash-restart window reports the truth instead of a
+// bogus "stopped": it waits for the relaunch to land and restarts the new
+// generation; a ctx that expires inside the window says the server is
+// crash-restarting.
+func TestRestartDuringCrashWindowWaitsForRelaunch(t *testing.T) {
+	previous := restartBackoff
+	restartBackoff = []time.Duration{1500 * time.Millisecond}
+	t.Cleanup(func() { restartBackoff = previous })
+
+	inst, _ := startFake(t, map[string]any{
+		"crash_after_requests": 1,
+		"state_dir":            t.TempDir(),
+	}, func(s *InstanceSpec) {
+		s.RestartOnCrash = true
+		s.MaxRestarts = 3
+	})
+	callErr := make(chan error, 1)
+	go func() {
+		var out map[string]any
+		callErr <- inst.Call(context.Background(), "fake/env", nil, &out)
+	}()
+	// The crash window is the backoff between generations: gen is nil and
+	// the state is starting. Catch it while the triggering call is still
+	// waiting for the relaunch.
+	deadline := time.Now().Add(5 * time.Second)
+	for inst.State() != StateStarting {
+		if time.Now().After(deadline) {
+			t.Fatal("the crash restart never opened its window")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	spent, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := inst.Restart(spent); err == nil || !strings.Contains(err.Error(), "crash-restarting") {
+		t.Fatalf("Restart with a spent ctx = %v, want the crash-restarting error", err)
+	}
+
+	ctx, cancelLive := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelLive()
+	if err := inst.Restart(ctx); err != nil {
+		t.Fatalf("Restart inside the crash window: %v", err)
+	}
+	if err := inst.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady after Restart: %v", err)
+	}
+	if inst.State() != StateReady {
+		t.Errorf("state = %s, want ready", inst.State())
+	}
+	select {
+	case err := <-callErr:
+		if err == nil || !strings.Contains(err.Error(), "restarted") {
+			t.Fatalf("crash-triggering call error = %v, want it to mention restarted", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the crash-triggering call never resolved")
+	}
+}
+
 // when a Shutdown wins while a launch is between its abort check and the
 // generation hand-off, the launch must stop its own process instead of
 // installing a generation nothing will ever clean up.

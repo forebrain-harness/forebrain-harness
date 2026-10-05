@@ -434,7 +434,10 @@ func (a *autoContinuer) turnEnded(ctx context.Context, req TurnRequest, runID st
 // planFor decides whether a failed turn gets a continuation, and when.
 func (a *autoContinuer) planFor(req TurnRequest, runID string, err error) (AutoContinuePlan, bool) {
 	sessionID := strings.TrimSpace(req.SessionID)
-	if err == nil || sessionID == "" || strings.TrimSpace(req.ParentRunID) != "" || !a.accepts(req.Origin) {
+	// An unattended turn's usage limit ends it for good: nobody is watching
+	// to want it resumed, and the next trigger comes on schedule or by a
+	// person. The ending falls through to the ordinary close below.
+	if err == nil || sessionID == "" || strings.TrimSpace(req.ParentRunID) != "" || req.Unattended || !a.accepts(req.Origin) {
 		return AutoContinuePlan{}, false
 	}
 	explanation, ok := llm.Explain(err)

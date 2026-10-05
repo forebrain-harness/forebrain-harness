@@ -690,6 +690,9 @@ INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	if strings.Join(ids, ",") != "child,top" {
 		t.Fatalf("runs after migration = %v, want the orphaned subtree gone", ids)
@@ -761,6 +764,9 @@ INSERT INTO fb_run_steps(run_id, seq, event_type, payload_json, created_at) VALU
 			t.Fatal(err)
 		}
 		counts[sid] = n
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	rows.Close()
 	if counts["a"] != 1 || counts["b"] != 1 {
@@ -925,6 +931,9 @@ func TestStateMigrationPreservesModelContextBytes(t *testing.T) {
 		}
 		before[sid] += fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00", id, role, content, parts)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	promptRows, err := raw.QueryContext(ctx, `SELECT session_id, key, value FROM fb_session_prompt_state ORDER BY session_id, key`)
 	if err != nil {
@@ -936,6 +945,9 @@ func TestStateMigrationPreservesModelContextBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		before["prompt:"+sid] += key + "\x00" + value + "\x00"
+	}
+	if err := promptRows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	promptRows.Close()
 	if err := raw.Close(); err != nil {
@@ -970,6 +982,9 @@ func TestStateMigrationPreservesModelContextBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		after[sid] += fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00", id, role, content, parts)
+	}
+	if err := afterRows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	afterRows.Close()
 	sessionsBefore := 0

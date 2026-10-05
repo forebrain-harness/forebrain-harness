@@ -571,3 +571,57 @@ func TestAutoContinueDisabledWithoutAPort(t *testing.T) {
 		t.Fatal("cancel reported a continuation that cannot exist")
 	}
 }
+
+// TestAutoContinueSkipsUnattendedTurns pins the heartbeat's rule: a turn
+// nobody is watching ends for good on a usage limit. The same surface, with
+// a person behind it, arms exactly as before.
+func TestAutoContinueSkipsUnattendedTurns(t *testing.T) {
+	h := newAutoContinueHarness(t, SurfaceWebChat)
+	h.mu.Lock()
+	h.runErr = quotaError(h.clock.Now().Add(time.Hour), "")
+	h.mu.Unlock()
+	_, _ = h.svc.Submit(context.Background(), TurnRequest{
+		SessionID: "s1", Origin: Origin{Surface: SurfaceWebChat}, Unattended: true,
+	}, nil)
+	if _, ok := h.svc.PendingAutoContinue("s1"); ok {
+		t.Fatal("an unattended turn armed a continuation")
+	}
+	for _, typ := range h.sink.types() {
+		if typ == event.RunEventAutoContinueScheduled {
+			t.Fatal("an unattended turn published a continuation schedule")
+		}
+	}
+	h.clock.Advance(2 * time.Hour)
+	if got := h.continuations(); len(got) != 0 {
+		t.Fatalf("an unattended turn's continuation fired: %+v", got)
+	}
+
+	// The same surface, attended, arms as before.
+	h.submit(t, quotaError(h.clock.Now().Add(time.Hour), ""), SurfaceWebChat)
+	if plan, ok := h.svc.PendingAutoContinue("s1"); !ok || plan.Attempt != 1 {
+		t.Fatalf("attended plan = %+v, pending %v; want a first attempt", plan, ok)
+	}
+}
+
+// TestAutoContinueUnattendedEndingsWithoutAUsageLimitKeepTheirBookkeeping
+// pins the guard to the usage-limit arming alone: an unattended turn that
+// ends any other way closes the session's run of continuations exactly as
+// an attended one does, so the next refusal is a fresh first attempt.
+func TestAutoContinueUnattendedEndingsWithoutAUsageLimitKeepTheirBookkeeping(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	h.submit(t, quotaError(h.clock.Now().Add(time.Hour), ""), SurfaceWebChat)
+	h.clock.Advance(time.Hour + defaultAutoContinueGrace)
+	if got := h.continuations(); len(got) != 1 {
+		t.Fatalf("continuations = %d, want the first one", len(got))
+	}
+	h.mu.Lock()
+	h.runErr = nil
+	h.mu.Unlock()
+	_, _ = h.svc.Submit(context.Background(), TurnRequest{
+		SessionID: "s1", Origin: Origin{Surface: SurfaceWebChat}, Unattended: true,
+	}, nil)
+	h.submit(t, quotaError(h.clock.Now().Add(time.Hour), ""), SurfaceWebChat)
+	if plan, ok := h.svc.PendingAutoContinue("s1"); !ok || plan.Attempt != 1 {
+		t.Fatalf("plan = %+v, pending %v; want a fresh first attempt after an unattended ending", plan, ok)
+	}
+}

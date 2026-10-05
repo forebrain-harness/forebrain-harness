@@ -71,6 +71,27 @@ describe('PendingActionsPanel', () => {
     wrapper.unmount()
   })
 
+  it('offers only asks whose payload is the questions the panel draws', async () => {
+    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
+      action('bad-1', 'user_interaction', {}),
+      action('bad-2', 'user_interaction', { questions: 'not a list' }),
+      action('bad-3', 'user_interaction', { questions: [{ id: 'scope', prompt: 'Which layer?', options: 'not a list' }] }),
+      action('bad-4', 'user_interaction', { questions: [{ id: 'scope', prompt: 'Which layer?' }] }),
+      action('good-1', 'user_interaction', {
+        questions: [{ id: 'scope', prompt: 'Which layer?', options: [{ id: 'agent', label: 'Agent' }] }],
+      }),
+    ])
+    const wrapper = mount(PendingActionsPanel, { props: { sessionId: 's1', version: 0 } })
+    await flushPromises()
+
+    const asks = wrapper.findAll('[data-testid="pending-question"]')
+    expect(asks).toHaveLength(1)
+    expect(asks[0]?.attributes('data-action-id')).toBe('good-1')
+    expect(asks[0]?.text()).toContain('Which layer?')
+    expect(asks[0]?.text()).toContain('Agent')
+    wrapper.unmount()
+  })
+
   it('names a subagent requester as text where its view cannot be opened', async () => {
     vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
       action('a3', 'shell', { justification: 'probe' }, { agentId: 'child-1', subagentType: 'explorer' }),

@@ -24,22 +24,51 @@ func writeExecutableScript(t *testing.T, dir, name, body string) string {
 }
 
 func TestDetectOnPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell scripts are not executable on windows")
-	}
-	dir := t.TempDir()
-	script := writeExecutableScript(t, dir, "fakels", "echo fakels 1.2.3")
-	srv := ServerConfig{Command: "fakels", Detect: DetectSpec{VersionArgs: []string{"--version"}}}
-	res := Detect(context.Background(), srv, []string{"PATH=" + dir}, runtime.GOOS, "")
-	if !res.Installed {
-		t.Fatalf("the binary is on PATH: %+v", res)
-	}
-	if res.Path != script {
-		t.Errorf("path is %q, want %q", res.Path, script)
-	}
-	if res.Version != "fakels 1.2.3" {
-		t.Errorf("version is %q", res.Version)
-	}
+	t.Run("posix", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("shell scripts are not executable on windows")
+		}
+		dir := t.TempDir()
+		script := writeExecutableScript(t, dir, "fakels", "echo fakels 1.2.3")
+		srv := ServerConfig{Command: "fakels", Detect: DetectSpec{VersionArgs: []string{"--version"}}}
+		res := Detect(context.Background(), srv, []string{"PATH=" + dir}, runtime.GOOS, "")
+		if !res.Installed {
+			t.Fatalf("the binary is on PATH: %+v", res)
+		}
+		if res.Path != script {
+			t.Errorf("path is %q, want %q", res.Path, script)
+		}
+		if res.Version != "fakels 1.2.3" {
+			t.Errorf("version is %q", res.Version)
+		}
+	})
+	// The windows walk mirrors os/exec: an extensionless command name never
+	// matches the bare file, only its PATHEXT suffixes do. The same
+	// assertion runs on posix hosts with goos pinned to windows.
+	t.Run("windows", func(t *testing.T) {
+		dir := t.TempDir()
+		exe := filepath.Join(dir, "fakels.exe")
+		if err := os.WriteFile(exe, []byte("#!/bin/sh\ntrue\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "fakels"), []byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		env := []string{"PATH=" + dir, "PATHEXT=.exe"}
+		res := Detect(context.Background(), ServerConfig{Command: "fakels"}, env, "windows", "")
+		if !res.Installed || res.Path != exe {
+			t.Fatalf("windows detect = %+v, want the .exe on PATH", res)
+		}
+
+		only := t.TempDir()
+		if err := os.WriteFile(filepath.Join(only, "fakels"), []byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		res = Detect(context.Background(), ServerConfig{Command: "fakels"}, []string{"PATH=" + only, "PATHEXT=.exe"}, "windows", "")
+		if res.Path != "" || res.Installed {
+			t.Fatalf("an extensionless name never runs bare on windows: %+v", res)
+		}
+	})
 }
 
 func TestDetectVersionFailureMeansNotInstalled(t *testing.T) {

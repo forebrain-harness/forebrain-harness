@@ -3300,6 +3300,9 @@ func TestStoreMigrationMatchesFreshSchemaAndKeepsStats(t *testing.T) {
 			}
 			out = append(out, typ+" "+name+" "+tbl+" "+ddl)
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
 		return out
 	}
 	got, want := schema(store), schema(fresh)

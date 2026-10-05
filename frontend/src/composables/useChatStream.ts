@@ -2827,6 +2827,11 @@ export function useChatStream() {
     let withdrawnError = ''
     let withdrawnCode = ''
     let sendFollowing = false
+    // The conversation this send belongs to: the one it entered with, or the
+    // one its socket bound when it started a new conversation. What waits on
+    // this send follows that conversation, never the one on screen when it
+    // ends.
+    let runSession = sendSession
     plan.value = null
     answer.value = ''
     serverPendingInput.value = emptyPendingInputPreview()
@@ -2852,7 +2857,11 @@ export function useChatStream() {
     // This send's view of its run. It hears the messages its run hands back
     // until it acts on them at its end; later, they go back to the composer.
     const eventState: RunProjectionState = { fullAnswer: '', sentHere: true, awaitingRelease: true, released: [] }
-    streamAbortController = new AbortController()
+    // The controller this send owns. A later send, or a session reset,
+    // replaces the global one before this send ends; the cleanup at the end
+    // answers to whoever owns the slot then, not to every send that passed
+    // through it.
+    const myController = streamAbortController = new AbortController()
     try {
       const currentSessionId = options?.sessionId ?? sessionId.value ?? undefined
       const attachmentIds = (options?.attached?.attachments ?? []).map((attachment) => attachment.fileId)
@@ -2863,6 +2872,7 @@ export function useChatStream() {
         if (!op) return
         if (op === 'session_bound') {
           const sid = String(payload.sessionId ?? '').trim()
+          if (sid) runSession = sid
           const sessionSwitched = payload.sessionSwitched === true
           if (sessionSwitched) {
             applySessionReset({ sid, loadMessages: true, loadMode: true })
@@ -2897,7 +2907,9 @@ export function useChatStream() {
           // notice to add: the turn keeps what it drew, and one that drew
           // nothing is dropped by the send-path cleanup.
           eventState.completedNormally = true
-          isStreaming.value = false
+          if (streamAbortController === myController) {
+            isStreaming.value = false
+          }
           return { terminal: true }
         }
         if (op === 'run_started') {
@@ -2943,7 +2955,9 @@ export function useChatStream() {
             ...withSettledTurnText(message, finalText, finishedAt),
             ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
-          isStreaming.value = false
+          if (streamAbortController === myController) {
+            isStreaming.value = false
+          }
           return
         }
         if (op === 'pending_input_updated') {
@@ -2958,7 +2972,9 @@ export function useChatStream() {
             ...withRunError(message, String(payload.runId ?? activeRunId ?? '').trim(), msg, parseProviderErrorDetail(payload.data), finishedAt),
             ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
-          isStreaming.value = false
+          if (streamAbortController === myController) {
+            isStreaming.value = false
+          }
           return
         }
         if (op === 'requires_action') {
@@ -2984,7 +3000,9 @@ export function useChatStream() {
           // sentence.
           withdrawnCode = parseProviderErrorDetail(payload.data)?.code ?? ''
           messages.value = messages.value.filter((message) => message.id !== userMessageId)
-          isStreaming.value = false
+          if (streamAbortController === myController) {
+            isStreaming.value = false
+          }
           return { terminal: true }
         }
         if (op === 'run_cancelled') {
@@ -2995,7 +3013,9 @@ export function useChatStream() {
             ...withCancelledTurn(message, finishedAt),
             ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
-          isStreaming.value = false
+          if (streamAbortController === myController) {
+            isStreaming.value = false
+          }
           return
         }
       }
@@ -3247,11 +3267,17 @@ export function useChatStream() {
     } finally {
       sendFollowing = Boolean(eventState.completedNormally) || submitPendingSteersAfterInterrupt
       submitPendingSteersAfterInterrupt = false
-      isStreaming.value = false
-      clearRuntimeStatus()
-      streamAbortController = null
-      activeRunId = null
-      contextSignals.value = { ...contextSignals.value, activeRunId: undefined }
+      // Only the send that still owns the global stream state clears it. A
+      // later send, or a session reset, has replaced the controller, and
+      // clearing the state here would end that run's status line, unlock the
+      // composer early, and leave cancel() nothing to act on.
+      if (streamAbortController === myController) {
+        isStreaming.value = false
+        clearRuntimeStatus()
+        streamAbortController = null
+        activeRunId = null
+        contextSignals.value = { ...contextSignals.value, activeRunId: undefined }
+      }
 	  flushBufferedSessionEvents()
     }
     // This send's end decides what becomes of the messages waiting on it:
@@ -3265,14 +3291,18 @@ export function useChatStream() {
     const following: HeldSend[] = [
       ...released.map((submission) => ({
         text: submission.text,
-        options: { sessionId: sessionId.value ?? undefined, modelId: options?.modelId, createBy: options?.createBy, attached: submission },
+        options: { sessionId: runSession || undefined, modelId: options?.modelId, createBy: options?.createBy, attached: submission },
         settle: () => {},
       })),
       ...heldBeforeRun.value,
     ]
     heldBeforeRun.value = []
     if (withdrawn) giveBack(submissionOf(userMessage, options), withdrawnError, withdrawnCode)
-    if (withdrawn || !sendFollowing) {
+    // What waited on this send belongs to the conversation it ran in. A
+    // composer now viewing another one takes the messages back — the same
+    // rule a session reset applies to what it holds — instead of running
+    // them as a turn of the conversation on screen.
+    if (withdrawn || !sendFollowing || sessionId.value !== runSession) {
       giveBackHeld(following)
       return
     }
