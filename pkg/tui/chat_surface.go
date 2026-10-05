@@ -241,6 +241,15 @@ func (s *ChatSession) ListSessionsRecent(ctx context.Context, limit int) ([]stat
 	return s.sessStore().ListSessionsRecent(ctx, limit)
 }
 
+// SessionTitle names one session by id — "" when it has none — the same
+// store contract the /resume picker and the terminal title read.
+func (s *ChatSession) SessionTitle(ctx context.Context, id string) (string, error) {
+	if s == nil || s.sessStore() == nil {
+		return "", nil
+	}
+	return s.sessStore().SessionTitle(ctx, id)
+}
+
 // ListSessionsRecentPaged backs the /resume picker's lazy browsing: it reads
 // one LIMIT/OFFSET page per call so an arbitrarily long session history can be
 // scrolled without ever loading it whole.

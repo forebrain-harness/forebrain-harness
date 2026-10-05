@@ -737,7 +737,9 @@ func TestGatewaySubagentApprovalReleasesTheParkBeforeAsking(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	ctx := context.Background()
 	actions := &state.ActionService{DB: db}
-	runs := &state.RunStore{DB: db}
+	// The resume claim is taken under the process owner; a test server's
+	// store carries one the way process.Open gives the real one.
+	runs := &state.RunStore{DB: db, Owner: "gateway-test"}
 	s := &Server{Actions: actions, RunRT: runs, Runner: &run.Runner{Deps: &run.Deps{Home: t.TempDir()}}}
 
 	mustGatewaySession(t, db, "session-1")

@@ -2,9 +2,12 @@ package state
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -265,5 +268,91 @@ func TestExtractFileRefInfos_MalformedJSON(t *testing.T) {
 	refs := ExtractFileRefInfos("{not json")
 	if refs != nil {
 		t.Fatalf("expected nil for malformed JSON, got %v", refs)
+	}
+}
+
+// TestRemoveStoredDeletesLocalOriginalAndParsedText pins the local half of
+// removing an upload's stored bytes: both the original under files/ and the
+// extracted text under files-text/ go, and a record whose bytes are already
+// gone is not an error.
+func TestRemoveStoredDeletesLocalOriginalAndParsedText(t *testing.T) {
+	ws := t.TempDir()
+	svc := &FileStore{
+		Home:          ws,
+		WorkspaceRoot: ws,
+		Cfg:           Config{FilesDirRel: "files", FilesTextDirRel: "files-text", TmpDirRel: "tmp"},
+	}
+	f := File{
+		ID:             "file-1",
+		StorageBackend: string(StorageBackendLocal),
+		StorageKey:     "ab/file-1.pdf",
+		ParsedTextPath: "file-1.txt",
+	}
+	original := filepath.Join(ws, "files", "ab", "file-1.pdf")
+	text := filepath.Join(ws, "state", "files-text", "file-1.txt")
+	for _, p := range []string{original, text} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := svc.RemoveStored(context.Background(), f); err != nil {
+		t.Fatalf("RemoveStored: %v", err)
+	}
+	for _, p := range []string{original, text} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s survived RemoveStored", p)
+		}
+	}
+	if err := svc.RemoveStored(context.Background(), f); err != nil {
+		t.Fatalf("removing already-gone bytes = %v, want nil", err)
+	}
+}
+
+// TestRemoveStoredDeletesTheS3Object pins the remote half: an S3-backed
+// record deletes its stored object, addressed by the bucket and key the row
+// recorded, against the endpoint the configuration points at.
+func TestRemoveStoredDeletesTheS3Object(t *testing.T) {
+	var mu sync.Mutex
+	var deletions []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		mu.Lock()
+		deletions = append(deletions, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	svc := &FileStore{
+		Home:          t.TempDir(),
+		WorkspaceRoot: t.TempDir(),
+		Cfg: Config{
+			FilesDirRel: "files", FilesTextDirRel: "files-text", TmpDirRel: "tmp",
+			OSS: OSSConfig{
+				Enabled: true, Endpoint: srv.URL, Region: "oss-default",
+				Bucket: "uploads", AccessKey: "ak", SecretKey: "sk", ForcePathStyle: true,
+			},
+		},
+	}
+	if err := svc.RemoveStored(context.Background(), File{
+		ID:             "file-2",
+		StorageBackend: string(StorageBackendS3),
+		StorageBucket:  "uploads",
+		StorageKey:     "ab/file-2.pdf",
+	}); err != nil {
+		t.Fatalf("RemoveStored: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deletions) != 1 || deletions[0] != "DELETE /uploads/ab/file-2.pdf" {
+		t.Fatalf("deletions = %v, want exactly DELETE /uploads/ab/file-2.pdf", deletions)
 	}
 }

@@ -113,17 +113,25 @@ func (s *Server) stampChannelRunEnd(ctx context.Context, out turn.TurnOutcome) {
 	_ = s.Sessions.StampRunTiming(ctx, out.RunID, state.RunTiming{StartedAt: finishedAt.Add(-out.Duration), FinishedAt: finishedAt, Worked: out.Duration})
 }
 
+// approvalNoticeText tells a channel user, in one line they can act on, that
+// a conversation is waiting for an approval, without exposing action IDs or
+// internal error text. An unnamed tool is "a tool".
+func approvalNoticeText(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		name = "a tool"
+	}
+	return "Waiting for approval to run " + name + ". Approve it in the Forebrain Harness app to continue."
+}
+
 // channelApprovalNotice describes a pending approval in one line a channel
 // user can act on, without exposing action IDs or internal error text.
 func channelApprovalNotice(out turn.TurnOutcome) string {
 	name := ""
 	if out.Approval != nil {
-		name = strings.TrimSpace(out.Approval.PermissionToolName)
+		name = out.Approval.PermissionToolName
 	}
-	if name == "" {
-		name = "a tool"
-	}
-	return "Waiting for approval to run " + name + ". Approve it in the Forebrain Harness app to continue."
+	return approvalNoticeText(name)
 }
 
 type callback struct {

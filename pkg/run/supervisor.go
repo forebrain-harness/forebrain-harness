@@ -198,6 +198,11 @@ func Run(o Options) (*agent.Result, hook.PreHookResult, error) {
 		rr, err = o.RunRT.CreateRun(crCtx, sid, preview)
 	}
 	if err != nil {
+		if errors.Is(err, state.ErrSessionBusy) {
+			// The sentence is for the person who asked, and the code the
+			// surface localises it by; wrapping would only bury both.
+			return nil, zeroPre, err
+		}
 		return nil, zeroPre, fmt.Errorf("create run: %w", err)
 	}
 	if rr == nil {

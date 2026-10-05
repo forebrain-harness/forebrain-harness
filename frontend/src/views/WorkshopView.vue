@@ -144,8 +144,8 @@
 /**
  * The skill workshop: a conversation with the skill-workshop skill on the
  * left, the skill's own files on the right. Tasks are sessions marked
- * source=workshop, which the chat drawer filters out — a workshop task is
- * tooling, not a conversation.
+ * source=workshop, which the chat drawer's list never includes — a workshop
+ * task is tooling, not a conversation.
  */
 import { computed, onMounted, ref } from 'vue'
 import { MessageResponse } from '@repo/elements/message'
@@ -193,8 +193,8 @@ const panelSkill = computed(() => {
 
 async function loadTasks() {
   try {
-    const data = await forebrainApi.chatSessions()
-    tasks.value = data.records.filter((row) => row.source === 'workshop')
+    const data = await forebrainApi.chatSessions('workshop')
+    tasks.value = data.records
     listError.value = ''
   } catch (e: unknown) {
     tasks.value = []

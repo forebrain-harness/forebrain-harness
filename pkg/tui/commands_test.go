@@ -750,6 +750,73 @@ func TestReplayTurnsToRendererUsesPersistedToolTimingAndStructuredMetadata(t *te
 	}
 }
 
+// A heartbeat's prompt is not the person's words: replay draws it as what it
+// is — a system card titled with its origin — while the person's own rows
+// keep replaying as theirs.
+func TestReplayDrawsAHeartbeatPromptAsItsOriginCard(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	beats := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text("anything new?")), "anything new?"), state.MessageOriginHeartbeat)
+	typed := state.MessagePartsJSON(llm.UserMessage(llm.Text("typed by hand")), "typed by hand")
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: "anything new?", PartsJSON: beats},
+		{Role: "user", Content: "typed by hand", PartsJSON: typed},
+	})
+
+	if len(renderer.vm.blocks) != 2 {
+		t.Fatalf("blocks=%d want 2", len(renderer.vm.blocks))
+	}
+	beat := renderer.vm.blocks[0].frame
+	if beat.Kind != FrameSystem {
+		t.Fatalf("heartbeat frame kind=%s want system", beat.Kind)
+	}
+	if beat.Title != "heartbeat" {
+		t.Fatalf("heartbeat frame title=%q want heartbeat", beat.Title)
+	}
+	if beat.Content != "anything new?" {
+		t.Fatalf("heartbeat frame content=%q", beat.Content)
+	}
+	own := renderer.vm.blocks[1].frame
+	if own.Kind != FrameUser {
+		t.Fatalf("the person's own row kind=%s want user", own.Kind)
+	}
+	if own.Content != "typed by hand" {
+		t.Fatalf("the person's own row content=%q", own.Content)
+	}
+}
+
+// A scheduled task's prompt is the heartbeat's case again with its own
+// origin: replay draws it as a system card titled cron, so a fire's
+// conversation reads as what it is — the task talking, not the person.
+func TestReplayDrawsACronPromptAsItsOriginCard(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	fired := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text("nightly summary")), "nightly summary"), state.MessageOriginCron)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: "nightly summary", PartsJSON: fired},
+	})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Kind != FrameSystem {
+		t.Fatalf("cron frame kind=%s want system", card.Kind)
+	}
+	if card.Title != "cron" {
+		t.Fatalf("cron frame title=%q want cron", card.Title)
+	}
+	if card.Content != "nightly summary" {
+		t.Fatalf("cron frame content=%q", card.Content)
+	}
+}
+
 // A subagent's read_file card is rebuilt from the durable event stream, so
 // the engine's paging facts must ride the canonical ToolMeta. The call below
 // passed no offset/limit — without the facts there is nothing to derive a

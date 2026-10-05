@@ -43,6 +43,7 @@ export type ForebrainRunEventType =
   | 'auto_continue_scheduled'
   | 'auto_continue_started'
   | 'auto_continue_cancelled'
+  | 'heartbeat_fired'
 
 export type ForebrainRunEvent = {
   id?: string

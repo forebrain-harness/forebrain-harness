@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -180,7 +181,7 @@ func TestHandleRunCancelLeavesARunningRunToItsDriver(t *testing.T) {
 	require.Empty(t, releasedInputSteps(t, s, rr.ID))
 
 	// The driver ends the run.
-	s.finishRun(context.Background(), "sid", rr.ID)
+	s.finishRun(context.Background(), "sid", rr.ID, state.RunStatusCancelled)
 	require.Zero(t, s.runController().Active())
 	require.Equal(t, []event.QueuedInputReleasedPayload{{Inputs: []event.ReleasedInput{{Text: "next", MentionImages: []string{"shots/a.png"}}}}}, releasedInputSteps(t, s, rr.ID))
 
@@ -749,6 +750,10 @@ type recordingRunExecutor struct {
 	requests []turn.TurnRequest
 	err      error
 	answer   string
+	waiting  *turn.WaitingError
+	// delay holds the turn open long enough for its worked clock to reach a
+	// whole millisecond, which is the precision runs keep.
+	delay time.Duration
 }
 
 func (x *recordingRunExecutor) Run(_ context.Context, req turn.TurnRequest, started func(string)) (*agent.Result, error) {
@@ -757,8 +762,14 @@ func (x *recordingRunExecutor) Run(_ context.Context, req turn.TurnRequest, star
 	}
 	x.mu.Lock()
 	x.requests = append(x.requests, req)
-	err, answer := x.err, x.answer
+	err, answer, delay := x.err, x.answer, x.delay
+	if x.waiting != nil {
+		err = x.waiting
+	}
 	x.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -783,10 +794,11 @@ func usageLimitResettingAt(resetAt time.Time) error {
 }
 
 type autoContinueGateway struct {
-	server   *Server
-	sessions *state.SessionStore
-	executor *recordingRunExecutor
-	url      string
+	server    *Server
+	sessions  *state.SessionStore
+	executor  *recordingRunExecutor
+	cronStore *state.CronStore
+	url       string
 }
 
 func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
@@ -798,26 +810,39 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 	t.Cleanup(func() { _ = db.Close() })
 	sessions := state.NewSessionStore(db, "main")
 	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
-	runStore := &state.RunStore{DB: db}
+	// The gateway's run store owns its runs: a process identity plus the
+	// lease that vouches for it, the way the served gateway is composed.
+	runStore := &state.RunStore{DB: db, Owner: "gateway-fixture"}
+	stopLease, err := runStore.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	t.Cleanup(stopLease)
 	executor := &recordingRunExecutor{answer: "picked up where it left off"}
 	// The web turn path resolves attachments through the session's runner.
 	cfg := &appcfg.Root{}
+	// An Env turns the control plane's auth on; the fixture's pages are local
+	// test clients, so it runs the mode a local no-auth deployment runs.
+	cfg.Gateway.Auth.Mode = "none"
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
 		Primary:      true,
 		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}},
 	}}
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
 	require.NoError(t, runner.Load())
+	env := &process.Environment{Root: home, SQL: db, Runner: runner,
+		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, RunRT: runStore}}
 	s := &Server{
 		Home: home, Sessions: sessions, RunRT: runStore, Runner: runner,
 		Core: turn.New(turn.WithRunEventStore(runStore), turn.WithSessionStore(sessions), turn.WithRunExecutor(executor)),
+		Env:  env,
 	}
 	runner.Events = s.RunEvents()
 	s.Core.SetAutoContinue(s.autoContinueConfig())
 	t.Cleanup(s.Core.StopAutoContinue)
+	env.Cron().Bind(ctx, "main", process.ScheduledTurns{StartHeartbeat: s.startHeartbeatTurn, StartFire: s.startCronFire})
+	t.Cleanup(env.Cron().Stop)
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	t.Cleanup(server.Close)
-	return &autoContinueGateway{server: s, sessions: sessions, executor: executor, url: "ws" + strings.TrimPrefix(server.URL, "http")}
+	return &autoContinueGateway{server: s, sessions: sessions, executor: executor, cronStore: &state.CronStore{DB: db}, url: "ws" + strings.TrimPrefix(server.URL, "http")}
 }
 
 // bind opens a page on the session and returns it with its session_bound reply.
@@ -960,12 +985,316 @@ func TestAutoContinuationRunsAsADetachedWebTurn(t *testing.T) {
 	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
+// occupySessionWithAnotherOwner leaves, on the fixture's own database, the
+// state another live forebrain process leaves behind: a run store with its
+// own owner and a lease it keeps renewing, holding the session's primary run
+// in the given state. The gateway's CreateRun must refuse beside it — that is
+// the cross-process rule, not an in-memory precheck.
+func (g *autoContinueGateway) occupySessionWithAnotherOwner(t *testing.T, status state.RunStatus) {
+	t.Helper()
+	other := &state.RunStore{DB: g.server.RunRT.DB, Owner: "other-process"}
+	stop, err := other.HoldOwnerLease(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(stop)
+	rr, err := other.CreateRun(context.Background(), "session-ws", "in flight")
+	require.NoError(t, err)
+	if status != state.RunStatusRunning {
+		require.NoError(t, other.SetStatus(context.Background(), rr.ID, status))
+	}
+}
+
 func TestAutoContinuationStandsDownWhenTheSessionIsBusy(t *testing.T) {
 	g := newAutoContinueGateway(t)
-	require.True(t, g.server.runController().Track("run-in-flight", "session-ws", func() {}))
+	g.occupySessionWithAnotherOwner(t, state.RunStatusRunning)
 	err := g.server.continueAfterUsageLimit(context.Background(), turn.AutoContinuePlan{SessionID: "session-ws"}, turn.AutoContinuePrompt)
 	require.ErrorIs(t, err, turn.ErrAutoContinueUnavailable)
 	require.Empty(t, g.executor.requests, "a second run must not start beside the one in flight")
+}
+
+// An executor that fails before run.Run ever started (a required MCP server
+// that never came up, say) leaves the ending to the gateway's own funnel. The
+// funnel sets the run's status before it reports the end, so the moment a
+// page reads the failure the database already agrees the run is over — and
+// the person's very next message is not refused by the run that just told
+// them it ended.
+func TestADetachedTurnThatFailsBeforeTheExecutorRanIsFailedBeforeItsEndIsReported(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	g.executor.err = errors.New("a required MCP server did not come up")
+	conn, _ := g.bind(t)
+
+	require.NoError(t, g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?"))
+	failed := readRunEventOfType(t, conn, event.RunEventTurnError)
+	rr, err := g.server.RunRT.GetRun(context.Background(), failed.RunID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusFailed, rr.Status, "the run is terminal in the store before its end reaches the page")
+
+	// The next unattended turn in the same session starts: the failed run no
+	// longer holds the session.
+	g.executor.err = nil
+	g.executor.answer = "after the failure"
+	require.NoError(t, g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?"))
+	completed := readRunEventOfType(t, conn, event.RunEventTurnCompleted)
+	require.NotEqual(t, failed.RunID, completed.RunID)
+	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+// startGatewayReaper wires the fixture exactly the way RunServeBlocking
+// does, so these tests observe the production composition.
+func (g *autoContinueGateway) startGatewayReaper() func() {
+	return turn.AbandonedRunReaper{
+		Runs:    g.server.RunRT,
+		Publish: g.server.publishGatewayRunEvent,
+		Recover: func(context.Context) { g.server.recoverResolvedApprovalWaitsOnce() },
+	}.Start(context.Background())
+}
+
+// ageIntoAbandonment moves a run and its owner's last heartbeat into the
+// past, the state a process leaves behind when it dies while driving a run:
+// it started the run, kept renewing for a while, then stopped, and its lease
+// has since lapsed.
+func (g *autoContinueGateway) ageIntoAbandonment(t *testing.T, runID, owner string) {
+	t.Helper()
+	now := time.Now().Unix()
+	_, err := g.server.RunRT.DB.ExecContext(context.Background(),
+		`UPDATE fb_runs SET created_at=?, updated_at=? WHERE id=?`, now-120, now-70, runID)
+	require.NoError(t, err)
+	_, err = g.server.RunRT.DB.ExecContext(context.Background(),
+		`UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`, (now-70)*1000, owner)
+	require.NoError(t, err)
+}
+
+// A run whose owner stopped renewing is ended by whichever process reaps it,
+// and its ending reaches the bound page the way every ending does — through
+// the session's own event funnel — with the run's clock stamped so history
+// closes it with its worked line.
+func TestTheGatewayReaperReportsAnAbandonedRunToItsBoundPage(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	conn, _ := g.bind(t)
+	ctx := context.Background()
+
+	other := &state.RunStore{DB: g.server.RunRT.DB, Owner: "dead-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	rr, err := other.CreateRun(ctx, "session-ws", "write me a long report")
+	require.NoError(t, err)
+	_, err = turn.PersistUserTurn(ctx, g.sessions, turn.UserTurn{SessionID: "session-ws", RunID: rr.ID, ModelInput: "write me a long report"})
+	require.NoError(t, err)
+	g.ageIntoAbandonment(t, rr.ID, "dead-process")
+	stop()
+
+	stopReaper := g.startGatewayReaper()
+	defer stopReaper()
+
+	failed := readRunEventOfType(t, conn, event.RunEventTurnError)
+	require.Equal(t, rr.ID, failed.RunID)
+	var payload event.TurnErrorPayload
+	require.NoError(t, json.Unmarshal(failed.Payload, &payload))
+	require.Equal(t, turn.AbandonedRunReason, payload.Message)
+	require.NotNil(t, payload.Detail)
+	require.Equal(t, "run_abandoned", payload.Detail.Code)
+
+	got, err := g.server.RunRT.GetRun(ctx, rr.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusFailed, got.Status)
+
+	// The history API closes the reaped run with its worked line, the way it
+	// closes every run that ended.
+	rec := cronRequest(t, g.server, http.MethodGet, "/api/chat/sessions/session-ws/messages", nil, g.server.handleChatMessages, "id", "session-ws")
+	var rows []struct {
+		Role     string `json:"role"`
+		RunID    string `json:"run_id"`
+		WorkedMs int64  `json:"worked_duration_ms"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	var worked *struct {
+		Role     string `json:"role"`
+		RunID    string `json:"run_id"`
+		WorkedMs int64  `json:"worked_duration_ms"`
+	}
+	for i := range rows {
+		if rows[i].Role == "worked" && rows[i].RunID == rr.ID {
+			worked = &rows[i]
+		}
+	}
+	require.NotNil(t, worked, "the reaped run has no worked line in history")
+	require.Greater(t, worked.WorkedMs, int64(0))
+}
+
+// A run that died in the middle of an approval continuation keeps its wait
+// row, so the reaper leaves it alone: the continuation recovery owns it and
+// knows whether its tool ran. Both run in the same cycle, and the ending is
+// reported once, in the recovery's own words.
+func TestTheReaperLeavesAnUncertainContinuationToItsRecovery(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	actions := &state.ActionService{DB: g.server.RunRT.DB}
+	g.server.Actions = actions
+	ctx := context.Background()
+	act, err := actions.CreatePending(ctx, "session-ws", "tool", nil)
+	require.NoError(t, err)
+	_, err = actions.Approve(ctx, act.ID, "test")
+	require.NoError(t, err)
+
+	other := &state.RunStore{DB: g.server.RunRT.DB, Owner: "dead-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	rr, err := other.CreateRun(ctx, "session-ws", "resume me")
+	require.NoError(t, err)
+	require.NoError(t, other.SetWaitingAction(ctx, rr.ID, state.Wait{ActionID: act.ID, ToolName: "shell"}))
+	require.NoError(t, other.SetStatus(ctx, rr.ID, state.RunStatusRunning))
+	won, err := other.ClaimWaitResume(ctx, rr.ID, act.ID, "dead-process")
+	require.NoError(t, err)
+	require.True(t, won)
+	require.NoError(t, other.BeginWaitResumeExecution(ctx, rr.ID, act.ID, "dead-process"))
+	// Both leases lapse: the continuation's and the owner's.
+	_, err = g.server.RunRT.DB.ExecContext(ctx, `UPDATE fb_run_waits SET resume_claimed_at_ms=?`, (time.Now().Unix()-30)*1000)
+	require.NoError(t, err)
+	g.ageIntoAbandonment(t, rr.ID, "dead-process")
+
+	stopReaper := g.startGatewayReaper()
+	defer stopReaper()
+
+	got, err := g.server.RunRT.GetRun(ctx, rr.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusFailed, got.Status)
+	wait, err := g.server.RunRT.GetWaitForRun(ctx, rr.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.WaitResumePhaseUncertain, wait.ResumePhase, "the recovery classified the continuation, not the reaper")
+
+	// Exactly one ending was reported, and it is the recovery's sentence.
+	events, err := g.server.RunRT.ListRunEventsOfTypes(ctx, rr.ID, event.RunEventTurnError)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	var payload event.TurnErrorPayload
+	require.NoError(t, json.Unmarshal(events[0].Payload, &payload))
+	require.Contains(t, payload.Message, "uncertain")
+	require.NotEqual(t, turn.AbandonedRunReason, payload.Message)
+}
+
+// A continuation held by a fresh lease belongs to a live process: the
+// periodic recovery pass must not take it over, and the run stays running.
+func TestTheRecoveryDoesNotTakeOverAFreshlyLeasedContinuation(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	actions := &state.ActionService{DB: g.server.RunRT.DB}
+	g.server.Actions = actions
+	ctx := context.Background()
+	act, err := actions.CreatePending(ctx, "session-ws", "tool", nil)
+	require.NoError(t, err)
+
+	other := &state.RunStore{DB: g.server.RunRT.DB, Owner: "live-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	rr, err := other.CreateRun(ctx, "session-ws", "resume me")
+	require.NoError(t, err)
+	require.NoError(t, other.SetWaitingAction(ctx, rr.ID, state.Wait{ActionID: act.ID, ToolName: "shell"}))
+	require.NoError(t, other.SetStatus(ctx, rr.ID, state.RunStatusRunning))
+	won, err := other.ClaimWaitResume(ctx, rr.ID, act.ID, "live-process")
+	require.NoError(t, err)
+	require.True(t, won)
+	// The fence is crossed and the lease is fresh: the process is executing
+	// the tool right now.
+	require.NoError(t, other.BeginWaitResumeExecution(ctx, rr.ID, act.ID, "live-process"))
+
+	stopReaper := g.startGatewayReaper()
+	defer stopReaper()
+
+	got, err := g.server.RunRT.GetRun(ctx, rr.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.RunStatusRunning, got.Status, "a live process's continuation was taken over")
+	wait, err := g.server.RunRT.GetWaitForRun(ctx, rr.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.WaitResumePhaseExecutionStarted, wait.ResumePhase)
+	events, err := g.server.RunRT.ListRunEventsOfTypes(ctx, rr.ID, event.RunEventTurnError)
+	require.NoError(t, err)
+	require.Empty(t, events, "a live continuation was reported as ended")
+}
+
+// A heartbeat is a real turn of its conversation: every page watching the
+// session sees what began it and the answer it got, the transcript keeps both
+// rows under the run that ran them, and the run closes with its clock.
+func TestHeartbeatRunsAsATurnOfItsConversation(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	g.executor.delay = 5 * time.Millisecond
+	conn, _ := g.bind(t)
+
+	require.NoError(t, g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?"))
+
+	fired := readRunEventOfType(t, conn, event.RunEventHeartbeatFired)
+	var hb event.HeartbeatFiredPayload
+	require.NoError(t, json.Unmarshal(fired.Payload, &hb))
+	require.Equal(t, "anything new?", hb.Prompt)
+	started := readRunEventOfType(t, conn, event.RunEventTurnStarted)
+	completed := readRunEventOfType(t, conn, event.RunEventTurnCompleted)
+	require.Equal(t, fired.RunID, started.RunID)
+	require.Equal(t, started.RunID, completed.RunID)
+
+	req := g.executor.last()
+	require.Equal(t, heartbeatTrigger, req.Trigger)
+	require.Equal(t, "heartbeat", req.Origin.ChannelID)
+	require.Equal(t, turn.SurfaceWebChat, req.Origin.Surface)
+	require.Equal(t, "anything new?", req.UserText)
+
+	rows, err := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
+	require.NoError(t, err)
+	var roles []string
+	for _, m := range rows {
+		roles = append(roles, m.Role)
+	}
+	require.Equal(t, []string{"user", "assistant"}, roles)
+	require.Equal(t, "heartbeat", state.MessageOrigin(rows[0].PartsJSON))
+	require.Equal(t, "anything new?", rows[0].Content)
+	require.Equal(t, started.RunID, rows[0].RunID)
+	require.Equal(t, started.RunID, rows[1].RunID)
+	require.Greater(t, rows[1].RunWorkedMs, int64(0), "the run closes with its worked clock")
+
+	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestHeartbeatStandsDownWhenTheSessionIsBusy(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	g.occupySessionWithAnotherOwner(t, state.RunStatusRunning)
+	err := g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?")
+	require.ErrorIs(t, err, state.ErrSessionBusy)
+	require.Empty(t, g.executor.requests, "a heartbeat must not interrupt the run in flight")
+	rows, rerr := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
+	require.NoError(t, rerr)
+	require.Empty(t, rows, "a beat that did not fire must leave no row behind")
+}
+
+func TestHeartbeatStandsDownWhenTheSessionIsParked(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	g.occupySessionWithAnotherOwner(t, state.RunStatusWaitingAction)
+	err := g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?")
+	require.ErrorIs(t, err, state.ErrSessionBusy)
+	require.ErrorIs(t, err, state.ErrSessionAwaitingApproval)
+	require.Empty(t, g.executor.requests)
+	rows, rerr := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
+	require.NoError(t, rerr)
+	require.Empty(t, rows, "a beat beside a parked approval must leave no row behind")
+}
+
+// A detached run parked on an approval writes its pre-gate snapshot under its
+// own run id, so a replay attributes those rows to the run that wrote them.
+func TestDetachedRunParkedOnApprovalBindsItsSnapshotRows(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	conn, _ := g.bind(t)
+	g.executor.waiting = &turn.WaitingError{
+		Request: &turn.ToolApprovalRequest{ActionID: "a1", ToolName: "shell"},
+		Resume:  &turn.ApprovalResumeState{ActionID: "a1", ToolName: "shell", SessionSnapshot: []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("running it")})}},
+	}
+
+	require.NoError(t, g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?"))
+	readRunEventOfType(t, conn, event.RunEventApprovalReq)
+
+	rows, err := g.sessions.ListAllMessages(context.Background(), "session-ws", 0)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(rows), 2, "the prompt row and the snapshot row are both there")
+	runID := rows[0].RunID
+	require.NotEmpty(t, runID)
+	for _, row := range rows {
+		require.Equal(t, runID, row.RunID, row.Role)
+	}
 }
 
 func TestAutoContinueRESTReportsAndCancelsTheWait(t *testing.T) {
@@ -1039,4 +1368,416 @@ func TestFailedChannelTurnKeepsTheMessageBoundToItsTimedRun(t *testing.T) {
 	require.Equal(t, executor.runID, rows[0].RunID)
 	require.Greater(t, rows[0].RunWorkedMs, int64(0))
 	require.Contains(t, turn.RunWorkedLines(rows), 0)
+}
+
+// outboundRecorderChannel is a channel handler that records what the gateway
+// delivered, so a test can read what a channel user was told.
+type outboundRecorderChannel struct {
+	mu    sync.Mutex
+	texts []string
+}
+
+func (c *outboundRecorderChannel) ID() string { return "wecom" }
+
+func (c *outboundRecorderChannel) Start(context.Context, channel.RouteAdder, channel.Bus) error {
+	return nil
+}
+
+func (c *outboundRecorderChannel) Stop(context.Context) error { return nil }
+
+func (c *outboundRecorderChannel) DeliverOutbound(_ context.Context, out channel.Outbound) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.texts = append(c.texts, out.Text)
+	return nil
+}
+
+func (c *outboundRecorderChannel) delivered() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.texts...)
+}
+
+// A channel user whose session another live process holds a turn in is told
+// the refusal's own sentence: ExplainError has no code for it and passes the
+// store's wording through, and no run is created beside the live one.
+func TestChannelTurnRefusedByABusySessionTellsTheUserTheSentence(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	require.NoError(t, s.Sessions.Ensure(ctx, "wecom:u1", "wecom:u1"))
+	rec := &outboundRecorderChannel{}
+	reg := channel.NewRegistry()
+	require.NoError(t, reg.Bind(ctx, "main", []channel.Handler{rec}, channelBus{s: s}))
+	t.Cleanup(func() { _ = reg.Stop(ctx) })
+	s.Channels = reg
+	// Another live process holds the session's turn.
+	other := &state.RunStore{DB: s.Env.SQL, Owner: "other-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	_, err = other.CreateRun(ctx, "wecom:u1", "in flight")
+	require.NoError(t, err)
+
+	blocked := &failingChannelExecutor{runs: s.RunRT}
+	s.Core = turn.New(turn.WithSessionStore(s.Sessions), turn.WithRunExecutor(blocked))
+
+	_, ok := s.submitChannelTurn(ctx, "wecom", "wecom:u1", "hello", "hello", "", "")
+	require.False(t, ok)
+	require.Empty(t, blocked.runID, "no run was created beside the live one")
+	require.Equal(t, []string{"This conversation is already running a turn; send again when it finishes."}, rec.delivered())
+}
+
+// fireGatewayChannel records what a fire delivers, the way a real channel
+// handler would.
+type fireGatewayChannel struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (f *fireGatewayChannel) ID() string { return "firetest" }
+
+func (f *fireGatewayChannel) Start(context.Context, channel.RouteAdder, channel.Bus) error {
+	return nil
+}
+
+func (f *fireGatewayChannel) Stop(context.Context) error { return nil }
+
+func (f *fireGatewayChannel) DeliverOutbound(_ context.Context, o channel.Outbound) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, o.Text)
+	return nil
+}
+
+func (f *fireGatewayChannel) delivered() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sent...)
+}
+
+// fireAJobNow creates a job through the service and fires it now, then waits
+// for its record: the session a fire runs in is named by the fire itself.
+func fireAJobNow(t *testing.T, g *autoContinueGateway, in process.CronJobInput) (state.CronJob, state.CronRun) {
+	t.Helper()
+	ctx := context.Background()
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", in)
+	require.NoError(t, err)
+	require.NoError(t, g.server.Env.Cron().RunJobNow(ctx, "main", job.ID))
+	var fire state.CronRun
+	require.Eventually(t, func() bool {
+		runs, err := g.cronStore.ListRuns(ctx, job.ID, 5)
+		if err != nil || len(runs) != 1 {
+			return false
+		}
+		fire = runs[0]
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+	return job, fire
+}
+
+// fireRunRecord reads the job's single fire record.
+func fireRunRecord(t *testing.T, g *autoContinueGateway, jobID string) state.CronRun {
+	t.Helper()
+	runs, err := g.cronStore.ListRuns(context.Background(), jobID, 5)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	return runs[0]
+}
+
+func fireSessionEventOfType(t *testing.T, g *autoContinueGateway, sessionID, eventType string) state.SessionEvent {
+	t.Helper()
+	evts, err := g.server.RunRT.ListSessionEventsOfType(context.Background(), sessionID, eventType, 5)
+	require.NoError(t, err)
+	require.NotEmpty(t, evts, "no %s event on %s", eventType, sessionID)
+	return evts[0]
+}
+
+// fireWaitsForStatus waits until the job's record reaches the status and
+// returns it.
+func fireWaitsForStatus(t *testing.T, g *autoContinueGateway, jobID, status string) state.CronRun {
+	t.Helper()
+	var rec state.CronRun
+	require.Eventually(t, func() bool {
+		runs, err := g.cronStore.ListRuns(context.Background(), jobID, 5)
+		if err != nil || len(runs) != 1 {
+			return false
+		}
+		rec = runs[0]
+		return rec.Status == status
+	}, 5*time.Second, 10*time.Millisecond)
+	return rec
+}
+
+// TestCronFireRunsAsItsOwnConversation pins the shape the whole change is
+// for: a fire is a full conversation — a session born a cron session, named
+// for the job and the moment, whose prompt row is the task's, whose turn
+// runs exactly as a web turn does, and whose record closes with the answer
+// once the run really ended.
+func TestCronFireRunsAsItsOwnConversation(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	enabled := true
+	job, fire := fireAJobNow(t, g, process.CronJobInput{
+		Name: "nightly brief", Schedule: "every 1h", Prompt: "summarise the inbox", Enabled: &enabled,
+	})
+	require.True(t, strings.HasPrefix(fire.SessionID, "cron-"+job.ID+"-"), "fire session %q", fire.SessionID)
+
+	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusOK)
+	require.Equal(t, "picked up where it left off", rec.Output)
+	require.Equal(t, state.CronStatusOK, rec.Status)
+	saved, err := g.server.Env.Cron().Job(ctx, "main", job.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.CronStatusOK, saved.LastStatus)
+
+	// The session is born a cron session, named for the job.
+	var source, title string
+	require.NoError(t, g.server.Env.SQL.QueryRowContext(ctx,
+		`SELECT source, title FROM fb_sessions WHERE id=?`, fire.SessionID).Scan(&source, &title))
+	require.Equal(t, state.SessionSourceCron, source)
+	require.True(t, strings.HasPrefix(title, "nightly brief"), "fire session title %q", title)
+
+	// The turn runs exactly as a web turn does, from a channel-like origin.
+	req := g.executor.last()
+	require.Equal(t, "summarise the inbox", req.UserText)
+	require.Equal(t, cronTrigger, req.Trigger)
+	require.Equal(t, turn.SurfaceChannel, req.Origin.Surface)
+	require.Equal(t, cronTrigger, req.Origin.ChannelID)
+
+	// The conversation holds the task's prompt and the answer.
+	rows, err := g.sessions.ListRecentMessages(ctx, fire.SessionID, 10)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(rows), 2, "the fire's conversation holds both rows")
+	require.Equal(t, "user", rows[0].Role)
+	require.Equal(t, "summarise the inbox", rows[0].Content)
+	require.Equal(t, state.MessageOriginCron, state.MessageOrigin(rows[0].PartsJSON))
+	var roles []string
+	for _, r := range rows {
+		roles = append(roles, r.Role)
+	}
+	require.Contains(t, roles, "assistant")
+
+	// The turn began and ended as events, in that order.
+	started := fireSessionEventOfType(t, g, fire.SessionID, event.RunEventTurnStarted)
+	completed := fireSessionEventOfType(t, g, fire.SessionID, event.RunEventTurnCompleted)
+	require.Less(t, started.Sequence, completed.Sequence)
+}
+
+// TestProjectCronFireRunsInItsProject pins that a job bound to a project
+// fires a conversation of that project: born in the project's root and bound
+// to it, so the pool serves the fire's turns with the project's runner.
+func TestProjectCronFireRunsInItsProject(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	p, err := state.NewProjectStore(g.server.Env.SQL, "main").Create(ctx, state.CreateProjectInput{Name: "api", Root: root})
+	require.NoError(t, err)
+	enabled := true
+	job, fire := fireAJobNow(t, g, process.CronJobInput{
+		Name: "project brief", Schedule: "every 1h", Prompt: "summarise the project", ProjectID: p.ID, Enabled: &enabled,
+	})
+	fireWaitsForStatus(t, g, job.ID, state.CronStatusOK)
+
+	var projectID, cwd string
+	require.NoError(t, g.server.Env.SQL.QueryRowContext(ctx,
+		`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, fire.SessionID).Scan(&projectID, &cwd))
+	require.Equal(t, p.ID, projectID)
+	require.Equal(t, root, cwd)
+}
+
+// TestCronFireParkedOnApprovalSettlesWhenItsRunEnds pins the D4 rule: a fire
+// parked on an approval keeps its record open, refuses a second "run now",
+// and warns the job's delivery target; when the approval is answered and the
+// run ends, the fire settles and the answer is delivered — once.
+func TestCronFireParkedOnApprovalSettlesWhenItsRunEnds(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	out := &fireGatewayChannel{}
+	g.server.Env.Channels = channel.NewRegistry()
+	require.NoError(t, g.server.Env.Channels.Bind(ctx, "main", []channel.Handler{out}, nil))
+	g.executor.waiting = &turn.WaitingError{
+		Request: &turn.ToolApprovalRequest{ActionID: "a-fire", ToolName: "write_file"},
+		Resume: &turn.ApprovalResumeState{ActionID: "a-fire", ToolName: "write_file",
+			SessionSnapshot: []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("about to write")})}},
+	}
+	enabled := true
+	job, fire := fireAJobNow(t, g, process.CronJobInput{
+		Name: "writes a report", Schedule: "every 1h", Prompt: "write the report", Deliver: "firetest", Enabled: &enabled,
+	})
+
+	// The fire parks: its record stays open and "run it now" is refused.
+	require.Eventually(t, func() bool { return len(g.executor.requests) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Equal(t, state.CronStatusRunning, fireRunRecord(t, g, job.ID).Status)
+	err := g.server.Env.Cron().RunJobNow(ctx, "main", job.ID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already running")
+
+	// The job's delivery target was told the fire is waiting on a person.
+	require.Eventually(t, func() bool { return len(out.delivered()) == 1 }, 5*time.Second, 10*time.Millisecond)
+	require.Contains(t, out.delivered()[0], "Waiting for approval to run write_file")
+
+	// The approval is answered; the run finishes, and the fire settles with
+	// the answer and delivers it.
+	runID, err := g.server.RunRT.FirstPrimaryRunID(ctx, fire.SessionID)
+	require.NoError(t, err)
+	require.NotEmpty(t, runID)
+	require.NoError(t, g.server.RunRT.SetStatus(ctx, runID, state.RunStatusDone))
+	_ = g.server.publishGatewayRunEvent(ctx, fire.SessionID, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{Text: "done"})
+
+	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusOK)
+	require.Equal(t, "done", rec.Output)
+	require.Equal(t, "firetest", rec.DeliveredTo)
+	require.Equal(t, []string{out.delivered()[0], "done"}, out.delivered())
+}
+
+// TestCronFireFailureIsRecordedExplained pins the unattended-run contract at
+// the fire's own level: a run that stops before the model — here, a required
+// MCP server that never came up — fails the fire, and the record carries the
+// failure where the person will read it. This is the invariant the deleted
+// one-shot-entry tests held before fires became conversations.
+func TestCronFireFailureIsRecordedExplained(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	g.executor.err = errors.New(`required MCP server "required-docs" did not come up`)
+	enabled := true
+	job, _ := fireAJobNow(t, g, process.CronJobInput{
+		Name: "needs its tools", Schedule: "every 1h", Prompt: "read the docs", Enabled: &enabled,
+	})
+
+	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusFailed)
+	require.Contains(t, rec.Error, "required-docs")
+	require.Equal(t, "run_failed", rec.ErrorCode)
+	saved, err := g.server.Env.Cron().Job(context.Background(), "main", job.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.CronStatusFailed, saved.LastStatus)
+}
+
+// A crash mid-fire leaves an open record and a run nobody vouches for. The
+// two tests below cover both ways it is settled: the gateway's own reaper
+// reporting through the bus, and another process's reap that the bus never
+// saw, settled from the persisted ending alone.
+func TestCronFireAbandonedByACrashIsSettled(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	enabled := true
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+		Name: "long report", Schedule: "every 1h", Prompt: "write a long report", Enabled: &enabled,
+	})
+	require.NoError(t, err)
+
+	// A fire of this job started under a process that then died mid-run.
+	sid := "cron-" + job.ID + "-1790000000"
+	require.NoError(t, g.sessions.Ensure(ctx, sid, sid))
+	dead := &state.RunStore{DB: g.server.Env.SQL, Owner: "dead-fire-process"}
+	stop, err := dead.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	rr, err := dead.CreateRun(ctx, sid, "write a long report")
+	require.NoError(t, err)
+	_, err = g.cronStore.StartRun(ctx, state.CronRun{JobID: job.ID, AgentID: "main", SessionID: sid, Trigger: "schedule"})
+	require.NoError(t, err)
+	g.ageIntoAbandonment(t, rr.ID, "dead-fire-process")
+	stop()
+
+	stopReaper := g.startGatewayReaper()
+	defer stopReaper()
+
+	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusFailed)
+	require.Equal(t, turn.AbandonedRunReason, rec.Error)
+	require.Equal(t, "run_abandoned", rec.ErrorCode)
+}
+
+func TestCronFireReapedElsewhereIsSettledByTheTick(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	enabled := true
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+		Name: "long report elsewhere", Schedule: "every 1h", Prompt: "write a long report", Enabled: &enabled,
+	})
+	require.NoError(t, err)
+
+	sid := "cron-" + job.ID + "-1790000001"
+	require.NoError(t, g.sessions.Ensure(ctx, sid, sid))
+	dead := &state.RunStore{DB: g.server.Env.SQL, Owner: "dead-fire-process"}
+	stop, err := dead.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	rr, err := dead.CreateRun(ctx, sid, "write a long report")
+	require.NoError(t, err)
+	_, err = g.cronStore.StartRun(ctx, state.CronRun{JobID: job.ID, AgentID: "main", SessionID: sid, Trigger: "schedule"})
+	require.NoError(t, err)
+	g.ageIntoAbandonment(t, rr.ID, "dead-fire-process")
+	stop()
+
+	// Another process — the TUI, say — reaps the run and records the ending
+	// itself. The gateway's bus never sees it; the ending is on the store.
+	tui := &state.RunStore{DB: g.server.Env.SQL, Owner: "tui-process"}
+	require.NoError(t, tui.SetStatus(ctx, rr.ID, state.RunStatusFailed))
+	_, err = tui.AppendSessionEvent(ctx, state.SessionEvent{
+		ID: "evt-tui-reap", RunID: rr.ID, SessionID: sid,
+		Type: event.RunEventTurnError,
+		Payload: event.EncodePayload(event.TurnErrorPayload{
+			Error: turn.AbandonedRunReason, Message: turn.AbandonedRunReason,
+			Detail: &event.TurnErrorDetail{Code: "run_abandoned"},
+		}),
+	})
+	require.NoError(t, err)
+
+	// The next settle pass reads the persisted ending and closes the fire —
+	// the same pass the scheduler's tick runs.
+	g.server.Env.Cron().SettleFire(ctx, sid)
+	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusFailed)
+	require.Equal(t, turn.AbandonedRunReason, rec.Error)
+	require.Equal(t, "run_abandoned", rec.ErrorCode)
+}
+
+// TestRunEndingOfAnOrdinarySessionTouchesNoFire pins the boundary: a run's
+// end settles only the fire that ran in that session, and an ordinary
+// conversation's turn ending leaves every fire alone.
+func TestRunEndingOfAnOrdinarySessionTouchesNoFire(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	enabled := true
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+		Name: "quiet job", Schedule: "every 1h", Prompt: "x", Enabled: &enabled,
+	})
+	require.NoError(t, err)
+	sid := "cron-" + job.ID + "-1790000002"
+	require.NoError(t, g.sessions.Ensure(ctx, sid, sid))
+	_, err = g.cronStore.StartRun(ctx, state.CronRun{JobID: job.ID, AgentID: "main", SessionID: sid, Trigger: "schedule"})
+	require.NoError(t, err)
+
+	seedRun(t, g.server.RunRT, "session-ws", "r-ordinary")
+	require.NoError(t, g.server.publishGatewayRunEvent(ctx, "session-ws", "r-ordinary",
+		event.RunEventTurnCompleted, event.TurnCompletedPayload{Text: "an ordinary answer"}))
+	fireSessionEventOfType(t, g, "session-ws", event.RunEventTurnCompleted)
+
+	require.Never(t, func() bool {
+		return fireRunRecord(t, g, job.ID).Status != state.CronStatusRunning
+	}, 300*time.Millisecond, 20*time.Millisecond, "an ordinary session's ending must not settle a fire")
+}
+
+// TestSubagentEndingDoesNotSettleAFire pins that only a primary run's end
+// settles anything: a subagent's run ending in the fire's session is part of
+// the conversation's turn, not the turn's end.
+func TestSubagentEndingDoesNotSettleAFire(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	ctx := context.Background()
+	enabled := true
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+		Name: "dispatches work", Schedule: "every 1h", Prompt: "x", Enabled: &enabled,
+	})
+	require.NoError(t, err)
+	sid := "cron-" + job.ID + "-1790000003"
+	require.NoError(t, g.sessions.Ensure(ctx, sid, sid))
+	_, err = g.cronStore.StartRun(ctx, state.CronRun{JobID: job.ID, AgentID: "main", SessionID: sid, Trigger: "schedule"})
+	require.NoError(t, err)
+
+	seedRun(t, g.server.RunRT, sid, "r-fire-parent")
+	child, err := g.server.RunRT.CreateSubagentRun(ctx, "r-fire-parent", sid, "a child's task")
+	require.NoError(t, err)
+	require.NoError(t, g.server.publishGatewayRunEvent(ctx, sid, child.ID,
+		event.RunEventTurnError, event.TurnErrorPayload{Error: "child failed", Message: "child failed"}))
+	fireSessionEventOfType(t, g, sid, event.RunEventTurnError)
+
+	require.Never(t, func() bool {
+		return fireRunRecord(t, g, job.ID).Status != state.CronStatusRunning
+	}, 300*time.Millisecond, 20*time.Millisecond, "a subagent's end must not settle a fire")
 }

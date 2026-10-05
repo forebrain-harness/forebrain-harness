@@ -754,19 +754,119 @@ func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
 	if strings.Contains(rec.Body.String(), session.ID) {
 		t.Fatalf("project session %s leaked into the conversation list: %s", session.ID, rec.Body.String())
 	}
-	// The chat page can still name the project an opened session belongs to.
-	sessionProject := func(sid string) *httptest.ResponseRecorder {
+	// The chat page still names the opened session — its title and its
+	// project — by reading the session itself rather than by looking it up
+	// in the drawer's list, which never holds a project's sessions.
+	rec = httptest.NewRecorder()
+	s.handleChatSession(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+session.ID, nil), session.ID))
+	if rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"title":"in project"`) ||
+		!strings.Contains(rec.Body.String(), `"name":"withsessions"`) ||
+		!strings.Contains(rec.Body.String(), `"id":"`+id+`"`) {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatSessionsAreFilteredByPurpose pins that the drawer and the workshop
+// each get their own list from the query itself: the source parameter picks
+// the purpose, anything else is refused, and no amount of scheduled-task
+// fires can crowd the agent's own conversations out of the drawer.
+func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	ensure := func(id, title string) {
+		t.Helper()
+		if err := s.Sessions.Ensure(ctx, id, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ensure("talk", "a conversation")
+	ensure("task", "a workshop task")
+	if err := s.Sessions.SetSessionSource(ctx, "task", state.SessionSourceWorkshop); err != nil {
+		t.Fatal(err)
+	}
+	// 250 scheduled-task fires, all newer than the conversation.
+	for i := 0; i < 250; i++ {
+		id := fmt.Sprintf("fire-%03d", i)
+		ensure(id, id)
+		if err := s.Sessions.SetSessionSource(ctx, id, state.SessionSourceCron); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(10_000+i), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := func(query string) *httptest.ResponseRecorder {
+		t.Helper()
 		rec := httptest.NewRecorder()
-		s.handleChatSessionProject(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sid+"/project", nil), sid))
+		s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions"+query, nil))
 		return rec
 	}
-	rec = sessionProject(session.ID)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name":"withsessions"`) || !strings.Contains(rec.Body.String(), `"id":"`+id+`"`) {
-		t.Fatalf("session project: %d %s", rec.Code, rec.Body.String())
+	rec := list("")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"talk"`) || strings.Contains(rec.Body.String(), `"id":"task"`) {
+		t.Fatalf("default list: %d %s", rec.Code, rec.Body.String())
 	}
-	rec = sessionProject("not-a-project-session")
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"project":null}` {
-		t.Fatalf("plain session project: %d %s", rec.Code, rec.Body.String())
+	rec = list("?source=workshop")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"task"`) || strings.Contains(rec.Body.String(), `"id":"talk"`) {
+		t.Fatalf("workshop list: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := list("?source=cron"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("source=cron: %d %s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatSessionNamesOneConversation pins the page's own lookup: an opened
+// session's title and project come from the session itself — an unnamed one
+// answers "" so the client draws its placeholder — and another tenant's
+// session is not ours to name.
+func TestChatSessionNamesOneConversation(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+
+	// A named conversation outside any project, and an unnamed one — stored
+	// titled with its own id, which reads as none.
+	if err := s.Sessions.Ensure(ctx, "plain", "Just talking"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sessions.Ensure(ctx, "fresh", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	// One bound to a project.
+	p, err := store.Create(ctx, state.CreateProjectInput{Name: "named", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sessions.Ensure(ctx, "bound", "In the project"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindSession(ctx, "bound", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Another tenant's session, in the same database.
+	if err := state.NewSessionStore(s.Sessions.DB(), "other").Ensure(ctx, "theirs", "Not ours"); err != nil {
+		t.Fatal(err)
+	}
+
+	one := func(sid string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleChatSession(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sid, nil), sid))
+		return rec
+	}
+	rec := one("plain")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":"Just talking"`) || !strings.Contains(rec.Body.String(), `"project":null`) {
+		t.Fatalf("plain session: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := one("fresh"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":""`) {
+		t.Fatalf("unnamed session: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = one("bound")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":"In the project"`) || !strings.Contains(rec.Body.String(), `"name":"named"`) || !strings.Contains(rec.Body.String(), p.ID) {
+		t.Fatalf("project session: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := one("theirs"); rec.Code != http.StatusNotFound {
+		t.Fatalf("another tenant's session: %d %s, want 404", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1115,6 +1215,35 @@ func TestHandleModelsListWithoutSourceReportsUnconfigured(t *testing.T) {
 	require.Empty(t, out.Records)
 	require.Len(t, out.Status, 1)
 	require.NotEmpty(t, out.Status[0].Error)
+}
+
+// TestChatMessagesReportsWhoWroteEachUserRow pins the history contract for
+// origin markers: a row written on the person's behalf says so, and the
+// person's own row carries no origin key at all.
+func TestChatMessagesReportsWhoWroteEachUserRow(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: "s1", ModelInput: "typed by hand", EnsureSession: true})
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: "s1", ModelInput: "anything new?", Origin: state.MessageOriginHeartbeat})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("rows = %s", rec.Body.String())
+	}
+	if _, ok := raw[0]["origin"]; ok {
+		t.Fatalf("the person's own row must carry no origin key: %s", rec.Body.String())
+	}
+	if raw[1]["role"] != "user" || raw[1]["content"] != "anything new?" || raw[1]["origin"] != "heartbeat" {
+		t.Fatalf("heartbeat row = %#v", raw[1])
+	}
 }
 
 // TestChatMessagesPlacesEachCompactionAsItsOwnRow pins the web history's
@@ -1709,6 +1838,68 @@ SELECT printf('main-%02d',i),'s-1','shell','pending','{}','','',i+10,i+10 FROM n
 	require.Len(t, rows, 1)
 	require.Equal(t, "worker-action", rows[0].ID)
 	require.Equal(t, "task-7", rows[0].AgentID)
+}
+
+// TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone pins the fix for
+// the store-wide default rewrite: a session opened inside a project is born
+// with the project root as its cwd, and the next ordinary chat is still born
+// in the process's launch directory instead of inheriting the project's.
+func TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	s.Sessions.ConfigureMemoryDefaults("disabled", "webchat", "/launch", "main")
+
+	root := projectTempRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "alpha", "root": root, "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", rec.Code, rec.Body.String())
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &project); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+project.ID+"/sessions", map[string]any{"title": "In project"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project session: %d %s", rec.Code, rec.Body.String())
+	}
+	var born struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &born); err != nil {
+		t.Fatal(err)
+	}
+
+	srec := httptest.NewRecorder()
+	s.handleChatSessionCreate(srec, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(`{"title":"Ordinary"}`)))
+	if srec.Code != http.StatusCreated {
+		t.Fatalf("create ordinary session: %d %s", srec.Code, srec.Body.String())
+	}
+	var ordinary struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(srec.Body.Bytes(), &ordinary); err != nil {
+		t.Fatal(err)
+	}
+
+	cwdOf := func(id string) string {
+		t.Helper()
+		var cwd string
+		if err := s.Sessions.DB().QueryRow("SELECT cwd FROM fb_sessions WHERE id=?", id).Scan(&cwd); err != nil {
+			t.Fatal(err)
+		}
+		return cwd
+	}
+	if got := cwdOf(born.ID); got != root {
+		t.Fatalf("project session born at %q, want the project root %q", got, root)
+	}
+	if got := cwdOf(ordinary.ID); got != "/launch" {
+		t.Fatalf("ordinary session born at %q, want the launch directory the fixture set", got)
+	}
 }
 
 // TestNewWebChatIsNamedByItsFirstMessage pins that a chat the web opens with
@@ -2944,5 +3135,100 @@ func TestProjectLSPPreviewAndConsentEndpoint(t *testing.T) {
 	}
 	if len(preview.Pending) != 0 {
 		t.Fatalf("nothing should be pending: %+v", preview.Pending)
+	}
+}
+
+// The cron settings endpoint is the structured surface of
+// cron.retention_days: it reads the effective value with its bounds, writes
+// through the same validation every other write path uses, and a null write
+// returns the key to unset.
+func TestCronSettingsRoundTrip(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	s.Env.ConfigPath = path
+
+	type cronSettings struct {
+		RetentionDays int  `json:"retention_days"`
+		Configured    bool `json:"configured"`
+		DefaultDays   int  `json:"default_days"`
+		MinDays       int  `json:"min_days"`
+		MaxDays       int  `json:"max_days"`
+	}
+	var got cronSettings
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RetentionDays != 30 || got.Configured || got.DefaultDays != 30 || got.MinDays != 1 || got.MaxDays != 3650 {
+		t.Fatalf("unset settings = %+v, want the 30-day default reported as not configured", got)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 7}, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put 7 = %d %s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "cron:") || !strings.Contains(string(raw), "retention_days: 7") {
+		t.Fatalf("saved config lacks the cron section:\n%s", raw)
+	}
+	if eff := s.liveCfg().CronRetentionDays(); eff != 7 {
+		t.Fatalf("live retention after the write = %d, want 7", eff)
+	}
+	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RetentionDays != 7 || !got.Configured {
+		t.Fatalf("settings after the write = %+v, want 7 configured", got)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 0}, s.handleCronSettings)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("put 0 = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if raw, _ = os.ReadFile(path); !strings.Contains(string(raw), "retention_days: 7") {
+		t.Fatalf("a rejected write changed the file:\n%s", raw)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": nil}, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put null = %d %s", rec.Code, rec.Body.String())
+	}
+	if raw, _ = os.ReadFile(path); strings.Contains(string(raw), "retention_days") {
+		t.Fatalf("null did not unset the key:\n%s", raw)
+	}
+	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RetentionDays != 30 || got.Configured {
+		t.Fatalf("settings after the reset = %+v, want the 30-day default, not configured", got)
+	}
+}
+
+// The YAML editor and the structured endpoint share one validation: what the
+// editor submits is parsed exactly the way the loader reads a file, so a
+// retention the loader would refuse never reaches disk from there either.
+func TestCronSettingsSharedValidationWithTheYAMLEditor(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	s.Env.ConfigPath = path
+
+	rec := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{
+		"yaml": "cron:\n  retention_days: 0\n",
+	}, s.handleConfigFile)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("yaml editor with retention 0 = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		raw, _ := os.ReadFile(path)
+		t.Fatalf("a rejected editor write reached the file:\n%s", raw)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -352,4 +353,62 @@ func TestLSPRecommendationPublishedToSurface(t *testing.T) {
 	publishLSPRecommendations(bareMgr, bareRunner)
 	_ = bareMgr.DidWrite(ctx, "sess-bare", []tool.FileChange{{AbsPath: file, After: []byte("package main\n")}})
 	time.Sleep(200 * time.Millisecond)
+}
+
+// TestOpenRegistersTheRunOwner pins the process-identity contract of the
+// abandoned-run plan: Open stamps the one production RunStore with an owner
+// and registers its lease, so every run this process starts is vouched for
+// while it lives; Close deregisters it, so any run it failed to settle is
+// immediately readable as abandoned.
+func TestOpenRegistersTheRunOwner(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	cfg := activeAgentTestConfig()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
+		"        - provider: openai\n          model: gpt-main\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := Open(ctx, OpenOptions{Home: home, ConfigPath: cfgPath, LaunchDir: project, Config: &cfg, SessionSource: memory.SessionSourceTUI})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	owner := env.Deps.RunRT.Owner
+	if owner == "" {
+		t.Fatal("the production RunStore must carry the process owner")
+	}
+	if !strings.HasPrefix(owner, memory.SessionSourceTUI+"-") {
+		t.Fatalf("owner %q must name the session source it was opened for", owner)
+	}
+	ownerRows := func() int {
+		var n int
+		if err := env.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&n); err != nil {
+			t.Fatalf("read owner lease row: %v", err)
+		}
+		return n
+	}
+	if n := ownerRows(); n != 1 {
+		t.Fatalf("owner lease rows after Open = %d, want 1", n)
+	}
+	env.Close()
+	// The environment owned the handle; read the file back through a fresh
+	// one to see what Close left behind.
+	after, err := state.Open(ctx, state.StateDBPath(home), nil)
+	if err != nil {
+		t.Fatalf("reopen state database: %v", err)
+	}
+	defer after.Close()
+	var left int
+	if err := after.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&left); err != nil {
+		t.Fatalf("read owner lease row after Close: %v", err)
+	}
+	if left != 0 {
+		t.Fatalf("owner lease rows after Close = %d, want 0", left)
+	}
 }

@@ -1235,6 +1235,17 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 			},
 		})),
 	)
+	// This process reaps the runs whose owners stopped renewing — a gateway
+	// that crashed, another terminal that was killed mid-turn — and reports
+	// each ending through this session's own run-event funnel, so replay and
+	// every page see it the way they see any other ending. The reap itself is
+	// a compare-and-swap, so whichever process gets there first settles the
+	// run and reports it exactly once.
+	s.stopAbandonedRunReaper = turn.AbandonedRunReaper{
+		Runs:    env.Deps.RunRT,
+		Publish: s.publishTUIRunEvent,
+		Recover: func(context.Context) { s.recoverResolvedApprovalWaitsOnce(s.preferredSessionIDForFast()) },
+	}.Start(ctx)
 	env.OnConfigReload = func(next *config.Root) {
 		if next == nil {
 			return
@@ -1316,6 +1327,10 @@ type Session interface {
 	PreferredSurfaceTranscriptSessionID(ctx context.Context) string
 	NewSessionID(prefix string) string
 	ListSessionsRecent(ctx context.Context, limit int) ([]SessionSummary, error)
+	// SessionTitle returns the session's own title, "" when it has none. It
+	// reads by id, so a conversation older than any recent list still has
+	// its name.
+	SessionTitle(ctx context.Context, id string) (string, error)
 	ModelSummaryString() string
 	SkillListString() string
 	AvailableSkillToggleOptions() []skill.Entry

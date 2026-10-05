@@ -12,7 +12,10 @@
         />
         <div class="flex items-center justify-between gap-3 px-3 pt-3 sm:px-5">
           <div class="flex min-w-0 items-center gap-2">
-            <span class="truncate text-sm font-medium text-[var(--forebrain-text)]">{{ sessionTitle }}</span>
+            <span
+              class="truncate text-sm font-medium text-[var(--forebrain-text)]"
+              data-testid="chat-session-title"
+            >{{ sessionTitle }}</span>
             <!-- A project's conversation says whose it is and leads back to
                  that project's space, where its sessions are listed. -->
             <RouterLink
@@ -210,9 +213,14 @@
                         </template>
                       </template>
                       <!-- What the user sent reads exactly as they wrote it, the way
-                           the terminal shows it: never reinterpreted as Markdown. -->
-                      <div v-else-if="msg.role === 'user' && String(msg.content ?? '').trim()"
-                        class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
+                           the terminal shows it: never reinterpreted as Markdown.
+                           A message the runtime sent on their behalf says who
+                           sent it, above the words. -->
+                      <div v-else-if="msg.role === 'user' && String(msg.content ?? '').trim()">
+                        <p v-if="originLabel(msg.origin)" data-testid="message-origin"
+                          class="mb-1 text-[11px] font-medium text-[var(--forebrain-muted-text)]">{{ originLabel(msg.origin) }}</p>
+                        <div class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
+                      </div>
                       <MessageResponse v-else-if="String(msg.content ?? '').trim()" :key="`msg-content-${msg.id ?? idx}`" :content="msg.content" />
                       <!-- A subagent's work is not part of this conversation,
                            but the fact that one ran is: the card says so, and
@@ -447,7 +455,7 @@
             <Alert v-if="composerNotice" variant="destructive" class="mb-2">
               <CircleAlert class="size-4" />
               <AlertTitle>{{ composerNotice.title }}</AlertTitle>
-              <AlertDescription class="whitespace-pre-line">{{ composerNotice.detail }}</AlertDescription>
+              <AlertDescription class="whitespace-pre-line">{{ composerNoticeDetail }}</AlertDescription>
             </Alert>
             <AutoContinueBanner :state="autoContinue" @cancel="cancelAutoContinue" />
             <!-- The recommendation card owns its own goodbye: the answer's
@@ -613,9 +621,11 @@ import { useWorkbench } from '@/composables/useWorkbench'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
 const { refresh: workspaceTreeRefresh } = useWorkspaceTree()
 import { useChatSessions } from '@/composables/useChatSessions'
+import { useSessionInfo, sessionHeaderTitle } from '@/composables/useSessionInfo'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { parseJsonCamelCase } from '@/lib/case'
 import { getErrorMessage, forebrainApi, type AgentRosterRow, type ChatAttachmentRecord, type SessionContextDebug, type SessionCostSummary, type SubagentHistoryRecord, type ToolAuditRow } from '@/lib/api'
+import { formatProviderError } from '@/lib/providerError'
 import { uploadSubmission, type PickedFile } from '@/lib/composerSubmission'
 import { buildContextDebugModel, compactTokenCount } from '@/lib/contextDebug'
 import { useI18n } from '@/locales'
@@ -634,31 +644,16 @@ function syncWorkbenchOverlay() {
   workbenchOverlay.value = workbenchMq?.matches ?? false
 }
 
+/** The open conversation's own facts — title and project — read from the
+ * session itself by id, not from the drawer's list. */
+const { sessionInfo, loadSessionInfo } = useSessionInfo()
+
 /** The project the open conversation belongs to, when it belongs to one. */
-const sessionProject = ref<{ id: string; name: string } | null>(null)
-let sessionProjectRequest = 0
+const sessionProject = computed(() => sessionInfo.value?.project ?? null)
 
-async function loadSessionProject(sid: string | null) {
-  const request = ++sessionProjectRequest
-  sessionProject.value = null
-  if (!sid) return
-  try {
-    const res = await forebrainApi.chatSessionProject(sid)
-    if (request === sessionProjectRequest) sessionProject.value = res.project
-  } catch {
-    // The tag is a pointer, not content: without it the conversation reads
-    // exactly as it does, and the page's own loads report the failure.
-  }
-}
-
-/** The conversation's name, from the shared list the drawer shows. */
-const sessionTitle = computed(() => {
-  const sid = sessionId.value
-  if (!sid) return t('nav.chat')
-  const row = sessions.value.find((item) => item.id === sid)
-  return row?.title || t('nav.chat')
-})
-const { t } = useI18n()
+/** The conversation's name, read from the session itself. */
+const sessionTitle = computed(() => sessionHeaderTitle(sessionInfo.value, t('nav.chat')))
+const { t, locale } = useI18n()
 const router = useRouter()
 
 const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
@@ -666,6 +661,14 @@ const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
 const composerMaxFiles = 5
 const availableBots = ref<BotOption[]>([])
 const botsFetchDone = ref(true)
+
+// A message the runtime sent on the person's behalf says who sent it, above
+// the words; an origin this build does not know says nothing at all.
+function originLabel(origin?: string): string {
+  if (origin === 'heartbeat') return t('chat.originHeartbeat')
+  if (origin === 'cron') return t('chat.originCron')
+  return ''
+}
 
 function insertWorkspaceRef(path: string) {
   // Routed through the shared engine so a clicked image is attached rather
@@ -743,6 +746,7 @@ const {
   returnedDraft,
   takeReturnedDraft,
   takeReturnedNotice,
+  takeReturnedNoticeCode,
   send,
   choose,
   editLastQueuedMessage,
@@ -1413,11 +1417,23 @@ watch(returnedDraft, () => {
   const draft = takeReturnedDraft()
   if (draft) promptRef.value?.restoreSubmission(draft)
   const notice = takeReturnedNotice()
-  if (notice) composerNotice.value = { title: t('chat.messageNotSent'), detail: notice }
+  const noticeCode = takeReturnedNoticeCode()
+  if (notice) composerNotice.value = { title: t('chat.messageNotSent'), detail: notice, ...(noticeCode ? { detailCode: noticeCode } : {}) }
 })
 
 /** What the composer has to tell the user about a message or file it kept. */
-const composerNotice = ref<{ title: string; detail: string } | null>(null)
+const composerNotice = ref<{ title: string; detail: string; detailCode?: string } | null>(null)
+// A refusal the runtime classified carries its code: its sentence is written
+// when the notice is drawn, in the language the viewer is reading then —
+// including a switch made while the notice is on screen — the way a run's
+// error block does. The runtime's own sentence shows only when the code is
+// not one this build knows.
+const composerNoticeDetail = computed(() => {
+  const notice = composerNotice.value
+  if (!notice) return ''
+  const code = notice.detailCode?.trim()
+  return (code ? formatProviderError({ code }, locale.value) : null) ?? notice.detail
+})
 
 /**
  * The composer turned files away as they were added — past the file limit, or
@@ -1474,8 +1490,15 @@ watch(() => route.query.session, (value) => {
 }, { immediate: true })
 
 watch(sessionId, (sid) => {
-  void loadSessionProject(sid)
+  void loadSessionInfo(sid)
 }, { immediate: true })
+
+// Every refresh of the shared list (a turn's end, the drawer opening, a
+// rename) re-reads the open conversation's own facts, so a title the
+// gateway just wrote shows up without leaving the page.
+watch(sessions, () => {
+  void loadSessionInfo(sessionId.value)
+})
 
 // Keep the address bar honest when the session changes from inside the view
 // (a slash command switching sessions, a roster jump).

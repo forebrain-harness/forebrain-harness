@@ -16,6 +16,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -143,11 +144,19 @@ func (s *Server) handleRunQueuedInput(w http.ResponseWriter, r *http.Request) {
 }
 
 // finishRun ends a run, and every way a gateway run ends goes through it.
-// What the user steered or queued that the run never took is handed back as a
-// durable event on the conversation, published before whatever the caller
-// then reports about the run's end, so the client that sent those messages
-// sends them next or takes them back: none is dropped with the run.
-func (s *Server) finishRun(ctx context.Context, sessionID, runID string) {
+// The run's status is terminal before anything reports its end, so the next
+// turn the person sends is never refused by the run that just told them it
+// ended. What the user steered or queued that the run never took is handed
+// back as a durable event on the conversation, published before whatever the
+// caller then reports about the run's end, so the client that sent those
+// messages sends them next or takes them back: none is dropped with the run.
+func (s *Server) finishRun(ctx context.Context, sessionID, runID string, status state.RunStatus) {
+	if s.RunRT != nil {
+		// A run the executor already settled is refused by the status rule
+		// (a run ends once); that refusal is the mechanism working, not an
+		// error to report.
+		_ = s.RunRT.SetStatus(ctx, runID, status)
+	}
 	if released := s.runController().Release(runID); len(released) > 0 {
 		inputs := make([]event.ReleasedInput, 0, len(released))
 		for _, in := range released {
@@ -213,7 +222,7 @@ func (s *Server) cancelRun(ctx context.Context, sessionID, runID string) (invoke
 		turn.FinalizeCancel(ctx, s.RunRT, runID)
 	}
 	if parked {
-		s.finishRun(ctx, sessionID, runID)
+		s.finishRun(ctx, sessionID, runID, state.RunStatusCancelled)
 	}
 	return invoked, parked
 }
@@ -576,33 +585,49 @@ func (s *Server) autoContinueConfig() turn.AutoContinueConfig {
 	}
 }
 
-// continueAfterUsageLimit starts the continuation as a detached run. It is
-// detached for the same reason an approval resume is: the page that sent the
-// stopped turn may have been closed hours ago, and whichever pages are open
-// now observe the session through the event bus rather than own the run.
+// detachedTurn is a turn the runtime starts with no page behind it: a
+// continuation after a usage limit, a heartbeat. Every page observing the
+// session watches it through the event log; nothing owns it but the run.
+type detachedTurn struct {
+	SessionID string
+	Prompt    string
+	// Trigger names the turn to hooks and telemetry.
+	Trigger string
+	// Origin is where the turn comes from. Its surface decides whether a
+	// usage limit hit by this turn is continued by itself later.
+	Origin turn.Origin
+	// PromptOrigin marks the prompt row as written on the person's behalf
+	// (state.MessageOrigin*); empty when the prompt is the runtime's own text.
+	PromptOrigin string
+	// Announce publishes, under the new run and before turn_started, what
+	// began it. Nil when the engine has announced it already.
+	Announce func(ctx context.Context, runID string)
+	// OnParked is told when the turn stops on an approval, after the run is
+	// parked for any page to resume. Nil when nobody needs telling: a fire
+	// uses it to warn its job's delivery target that the answer is waiting.
+	OnParked func(ctx context.Context, gate *tool.RequiresActionError)
+}
+
+// startDetachedTurn starts t's turn as a detached run. It is detached for the
+// same reason an approval resume is: the page — if there ever was one — that
+// began what this turn continues may have been closed hours ago, and whichever
+// pages are open now observe the session through the event bus rather than own
+// the run.
 //
 // The run is created before returning so a failure to start is reported to
-// the engine, which tells the pages; the turn itself runs on after it.
-func (s *Server) continueAfterUsageLimit(_ context.Context, plan turn.AutoContinuePlan, prompt string) error {
-	if s == nil || s.Core == nil {
-		return turn.ErrAutoContinueUnavailable
-	}
-	sid := strings.TrimSpace(plan.SessionID)
-	if sid == "" {
-		return turn.ErrAutoContinueUnavailable
-	}
-	// A run already in the session means it moved on without the
-	// continuation; starting a second run beside it would race the first.
-	if _, _, busy := s.runController().Find(sid); busy {
-		return turn.ErrAutoContinueUnavailable
-	}
+// the caller rather than swallowed into a run nobody watches; the turn itself
+// runs on after it. Whether the session may start one is CreateRun's one
+// atomic answer — every process and every entry point is held to it — so a
+// turn that cannot start leaves no run and no row behind.
+func (s *Server) startDetachedTurn(t detachedTurn) (string, error) {
+	sid := strings.TrimSpace(t.SessionID)
 	ctx := context.Background()
 	startedAt := time.Now()
 	runID := "ws-" + fmt.Sprint(startedAt.UnixNano())
 	if s.RunRT != nil {
-		rr, err := s.RunRT.CreateRun(ctx, sid, prompt)
+		rr, err := s.RunRT.CreateRun(ctx, sid, t.Prompt)
 		if err != nil {
-			return err
+			return "", err
 		}
 		runID = rr.ID
 	}
@@ -618,17 +643,44 @@ func (s *Server) continueAfterUsageLimit(_ context.Context, plan turn.AutoContin
 		})
 		inputRT = q.Runtime()
 	}
-	go s.runAutoContinuation(runCtx, sid, runID, prompt, startedAt, inputRT)
-	return nil
+	go s.runDetachedTurn(runCtx, t, runID, startedAt, inputRT)
+	return runID, nil
 }
 
-// runAutoContinuation runs the continuation turn and reports every way it can
-// end on the session's event log, the way the detached approval resume does.
-func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt string, startedAt time.Time, inputRT *run.TurnInputRuntime) {
+// continueAfterUsageLimit starts the continuation as a detached run. It is
+// detached for the same reason an approval resume is: the page that sent the
+// stopped turn may have been closed hours ago, and whichever pages are open
+// now observe the session through the event bus rather than own the run.
+func (s *Server) continueAfterUsageLimit(_ context.Context, plan turn.AutoContinuePlan, prompt string) error {
+	if s == nil || s.Core == nil {
+		return turn.ErrAutoContinueUnavailable
+	}
+	if strings.TrimSpace(plan.SessionID) == "" {
+		return turn.ErrAutoContinueUnavailable
+	}
+	_, err := s.startDetachedTurn(detachedTurn{
+		SessionID: plan.SessionID,
+		Prompt:    prompt,
+		Trigger:   autoContinueTrigger,
+		Origin:    turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "webchat"},
+	})
+	if errors.Is(err, state.ErrSessionBusy) {
+		return turn.ErrAutoContinueUnavailable
+	}
+	return err
+}
+
+// runDetachedTurn runs the turn and reports every way it can end on the
+// session's event log, the way the detached approval resume does.
+func (s *Server) runDetachedTurn(runCtx context.Context, t detachedTurn, runID string, startedAt time.Time, inputRT *run.TurnInputRuntime) {
+	sid := t.SessionID
 	ctx := context.Background()
+	if t.Announce != nil {
+		t.Announce(ctx, runID)
+	}
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnStarted, event.TurnStartedPayload{})
 	if s.Sessions != nil {
-		turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: sid, RunID: runID, ModelInput: prompt, RawInput: prompt})
+		turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: sid, RunID: runID, ModelInput: t.Prompt, RawInput: t.Prompt, Origin: t.PromptOrigin})
 	}
 	agCtx := llm.WithAgentSessionID(runCtx, sid)
 	agCtx = tool.WithConversationSessionID(agCtx, sid)
@@ -646,10 +698,10 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 
 	outcome, err := s.Core.Submit(agCtx, turn.TurnRequest{
 		SessionID:                sid,
-		Origin:                   turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "webchat"},
-		Trigger:                  autoContinueTrigger,
-		UserText:                 prompt,
-		RawInput:                 prompt,
+		Origin:                   t.Origin,
+		Trigger:                  t.Trigger,
+		UserText:                 t.Prompt,
+		RawInput:                 t.Prompt,
 		ExistingRunID:            runID,
 		AgentContextIsRunContext: true,
 	}, nil)
@@ -671,14 +723,16 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 	switch {
 	case errors.As(err, &gate):
 		s.parkDetachedRunOnApproval(ctx, sid, runID, gate)
+		if t.OnParked != nil {
+			t.OnParked(ctx, gate)
+		}
 		return
 	case errors.Is(err, context.Canceled):
 		s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: startedAt, FinishedAt: finishedAt, Worked: elapsed}, capture, partial)
 		if s.RunRT != nil {
-			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusCancelled)
 			_ = s.RunRT.CancelRunningDescendants(ctx, runID)
 		}
-		s.finishRun(ctx, sid, runID)
+		s.finishRun(ctx, sid, runID, state.RunStatusCancelled)
 		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"})
 		return
 	case err != nil:
@@ -686,14 +740,13 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 		// further continuation — the engine arms one if this was the limit
 		// again — picks up after it rather than before it.
 		s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: startedAt, FinishedAt: finishedAt, Worked: elapsed}, capture, partial)
-		slog.Error("auto-continue turn failed", "run_id", runID, "session_id", sid, "err", err)
+		slog.Error("detached turn failed", "trigger", t.Trigger, "run_id", runID, "session_id", sid, "err", err)
 		errText := llm.ExplainError(err)
-		s.finishRun(ctx, sid, runID)
-		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(err)})
 		if s.RunRT != nil {
-			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
 			_ = s.RunRT.FailRunningDescendants(ctx, runID)
 		}
+		s.finishRun(ctx, sid, runID, state.RunStatusFailed)
+		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(err)})
 		return
 	}
 
@@ -720,11 +773,98 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 		AssistantResult: outcome.Result,
 		AppendAssistant: true,
 	})
-	s.finishRun(ctx, sid, runID)
+	s.finishRun(ctx, sid, runID, state.RunStatusDone)
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
 		Text:      answer,
 		ElapsedMS: elapsed.Milliseconds(),
 	})
+}
+
+// heartbeatTrigger names a heartbeat's turn to hooks and telemetry.
+const heartbeatTrigger = "heartbeat"
+
+// startHeartbeatTurn starts a session's heartbeat as a turn of that
+// conversation, exactly as if a page had sent the prompt: the prompt row is
+// marked as the heartbeat's, the answer streams to every page watching, and
+// the run ends with its worked line. It returns once the run has started.
+func (s *Server) startHeartbeatTurn(_ context.Context, sessionID, prompt string) error {
+	if s == nil || s.Core == nil {
+		return fmt.Errorf("heartbeat: no turn runtime")
+	}
+	_, err := s.startDetachedTurn(detachedTurn{
+		SessionID:    sessionID,
+		Prompt:       prompt,
+		Trigger:      heartbeatTrigger,
+		Origin:       turn.Origin{Surface: turn.SurfaceWebChat, ChannelID: "heartbeat"},
+		PromptOrigin: state.MessageOriginHeartbeat,
+		Announce: func(ctx context.Context, runID string) {
+			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventHeartbeatFired, event.HeartbeatFiredPayload{Prompt: prompt})
+		},
+	})
+	return err
+}
+
+// cronTrigger names a fire's turn to hooks and telemetry.
+const cronTrigger = "cron"
+
+// startCronFire opens one fire of a scheduled task as a conversation of its
+// own: the session is born a cron session — in the job's project when it is
+// bound to one — the prompt row is marked as the task's, and the turn runs
+// exactly as a web turn does. A fire is a channel-like turn: nobody is
+// watching it, so a usage limit is not continued behind the person's back;
+// the next fire comes on schedule.
+func (s *Server) startCronFire(ctx context.Context, fire turn.CronFire) error {
+	if s == nil || s.Core == nil {
+		return fmt.Errorf("cron: no turn runtime")
+	}
+	birth := state.SessionBirth{Source: state.SessionSourceCron}
+	var project state.Project
+	if pid := strings.TrimSpace(fire.Job.ProjectID); pid != "" {
+		p, err := s.projectStore().Get(ctx, pid)
+		if err != nil {
+			return err
+		}
+		project = p
+		birth.Cwd, birth.GitBranch = p.Root, memory.GitBranch(p.Root)
+	}
+	if err := s.Sessions.EnsureAt(ctx, fire.SessionID, fire.Title, birth); err != nil {
+		return err
+	}
+	if strings.TrimSpace(fire.Job.ProjectID) != "" {
+		if err := s.bindSessionToProject(ctx, fire.SessionID, project); err != nil {
+			return err
+		}
+	}
+	_, err := s.startDetachedTurn(detachedTurn{
+		SessionID:    fire.SessionID,
+		Prompt:       fire.Job.Prompt,
+		Trigger:      cronTrigger,
+		Origin:       turn.Origin{Surface: turn.SurfaceChannel, ChannelID: cronTrigger},
+		PromptOrigin: state.MessageOriginCron,
+		OnParked: func(ctx context.Context, gate *tool.RequiresActionError) {
+			s.cron().FireParked(ctx, fire.SessionID, approvalNoticeText(gate.ToolName))
+		},
+	})
+	return err
+}
+
+// settleScheduledFire asks the scheduler to look at a fire the moment its
+// run reports an end, instead of on the next tick. It carries nothing but
+// the session: the scheduler reads the ending back from the store, the
+// same way its tick does.
+func (s *Server) settleScheduledFire(evt event.RunEvent) {
+	switch evt.Type {
+	case event.RunEventTurnCompleted, event.RunEventTurnError, event.RunEventTurnCancelled:
+	default:
+		return
+	}
+	// Only a primary run's end settles anything: a subagent's end belongs to
+	// its parent's turn, which has not ended yet.
+	run, err := s.RunRT.GetRun(context.Background(), evt.RunID)
+	if err != nil || run == nil || run.ParentRunID != "" {
+		return
+	}
+	go s.cron().SettleFire(context.Background(), evt.SessionID)
 }
 
 // parkDetachedRunOnApproval leaves a detached run waiting on an approval
@@ -734,7 +874,7 @@ func (s *Server) runAutoContinuation(runCtx context.Context, sid, runID, prompt 
 func (s *Server) parkDetachedRunOnApproval(ctx context.Context, sid, runID string, gate *tool.RequiresActionError) {
 	if s.RunRT != nil {
 		if s.Sessions != nil && len(gate.SessionSnapshot) > 0 {
-			_ = s.Sessions.AppendMessageSequence(ctx, sid, gate.SessionSnapshot, "", "")
+			_ = s.Sessions.AppendMessageSequenceForRun(ctx, sid, runID, gate.SessionSnapshot, "", "")
 		}
 		input, _ := json.Marshal(gate.ToolInput)
 		_ = s.RunRT.SetWaitingAction(ctx, runID, state.Wait{

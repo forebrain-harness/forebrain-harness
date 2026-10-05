@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -1349,5 +1350,176 @@ func TestStateV3UpgradesToV4WithSessionsIntact(t *testing.T) {
 	}
 	if len(summaries) != 1 || summaries[0].Source != "workshop" {
 		t.Fatalf("summaries after set = %#v", summaries)
+	}
+}
+
+// TestStateV4UpgradesToV5WithRunsIntact builds a database that is really at
+// v4 — fb_runs has no owner column, the owner lease table and the
+// session-live index do not exist — with a running row in it, and pins that
+// opening it adds all three with the row preserved: the legacy running row
+// reads owner = ” (nobody vouches for it) and the first reap ends it as
+// abandoned.
+func TestStateV4UpgradesToV5WithRunsIntact(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	// Drop back to the v4 shape: no owner column, no lease table, no live
+	// index, version 4.
+	for _, stmt := range []string{
+		`DROP INDEX idx_fb_runs_session_live`,
+		`DROP TABLE fb_run_owners`,
+		`ALTER TABLE fb_runs DROP COLUMN owner`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "s-v4"
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
+		sid, "main", sid, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
+		"r-v4", sid, "orphaned running turn", "running", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open v4 database: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	var owner string
+	if err := migrated.QueryRowContext(ctx, `SELECT owner FROM fb_runs WHERE id='r-v4'`).Scan(&owner); err != nil {
+		t.Fatalf("read migrated run: %v", err)
+	}
+	if owner != "" {
+		t.Fatalf("migrated run owner = %q, want the no-owner default", owner)
+	}
+	// The store's own reap immediately settles the legacy row: no live
+	// process vouches for it.
+	rt := &RunStore{DB: migrated}
+	reaped, err := rt.ReapAbandonedRuns(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reaped) != 1 || reaped[0].ID != "r-v4" {
+		t.Fatalf("reap after migration = %+v, want the legacy running row", reaped)
+	}
+	var status string
+	var started, finished, worked int64
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id='r-v4'`).
+		Scan(&status, &started, &finished, &worked); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(RunStatusFailed) || started != 1000 || finished < started || worked != finished-started {
+		t.Fatalf("reaped legacy row: status=%q clock=%d/%d/%d", status, started, finished, worked)
+	}
+}
+
+// TestStateV5UpgradesToV6MarksFireSessions builds a database that is really at
+// v5 — fb_cron_runs carries no error_code, fb_cron_jobs no last_error_code,
+// the session index is gone — with an ordinary conversation and a session a
+// fire recorded, and pins that opening it marks the fire's session as what it
+// is while the ordinary one stays an ordinary conversation, and brings the
+// three objects v6 declares.
+func TestStateV5UpgradesToV6MarksFireSessions(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	// Drop back to the v5 shape: no error-code columns, no session index,
+	// version 5.
+	for _, stmt := range []string{
+		`DROP INDEX idx_fb_cron_runs_session`,
+		`ALTER TABLE fb_cron_runs DROP COLUMN error_code`,
+		`ALTER TABLE fb_cron_jobs DROP COLUMN last_error_code`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 5`); err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{"s-plain", "cron-job-1-1790000000"} {
+		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
+			sid, "main", sid, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_at)
+VALUES('job-1', 'main', 'cron-job-1-1790000000', 'schedule', 'running', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open v5 database: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	var fireSource, plainSource string
+	if err := migrated.QueryRowContext(ctx, `SELECT source FROM fb_sessions WHERE id='cron-job-1-1790000000'`).Scan(&fireSource); err != nil {
+		t.Fatal(err)
+	}
+	if fireSource != SessionSourceCron {
+		t.Fatalf("fire session source = %q, want %q", fireSource, SessionSourceCron)
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT source FROM fb_sessions WHERE id='s-plain'`).Scan(&plainSource); err != nil {
+		t.Fatal(err)
+	}
+	if plainSource != "" {
+		t.Fatalf("an ordinary conversation's source = %q, want the default", plainSource)
+	}
+	var idx int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_fb_cron_runs_session'`).Scan(&idx); err != nil {
+		t.Fatal(err)
+	}
+	if idx != 1 {
+		t.Fatal("idx_fb_cron_runs_session must exist after the migration")
+	}
+	// The two error-code columns are writable through the store's own setters.
+	store := &CronStore{DB: migrated}
+	var id int64
+	if err := migrated.QueryRowContext(ctx, `SELECT id FROM fb_cron_runs WHERE session_id='cron-job-1-1790000000'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if won, err := store.FinishRun(ctx, id, CronStatusOK, "the answer", "", ""); err != nil || !won {
+		t.Fatalf("close the migrated fire = %v (%v)", won, err)
+	}
+	if err := store.MarkFireDeliveryFailed(ctx, id, "delivery_failed", "channel unreachable"); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := store.ListRuns(ctx, "job-1", 10)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %v (%v)", runs, err)
+	}
+	if runs[0].ErrorCode != "delivery_failed" {
+		t.Fatalf("error_code after the migration = %q", runs[0].ErrorCode)
 	}
 }

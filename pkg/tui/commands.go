@@ -209,6 +209,14 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 	if content == "" {
 		return
 	}
+	// A message the person did not type — a heartbeat's prompt — replays as
+	// what it is rather than as a card that says they sent it.
+	if kind == MsgKindUser {
+		if origin := state.MessageOrigin(turn.PartsJSON); origin != "" {
+			renderReplayFrames(renderer, reducer, Message{Kind: MsgKindSystem, Title: origin, Content: content, Timestamp: timestamp}, "", meta, timing)
+			return
+		}
+	}
 	msg := Message{
 		Kind: kind, Content: content, ToolMeta: meta,
 		AgentID: strings.TrimSpace(meta.AgentID), Timestamp: timestamp,

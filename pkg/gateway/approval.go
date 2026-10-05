@@ -371,8 +371,8 @@ func (s *Server) abortGatewayRunForAction(action *state.Action) {
 		sessionID = runRecord.SessionID
 	}
 	// The run was parked on this approval, so nothing else will end it.
-	s.finishRun(ctx, sessionID, runID)
-	_ = s.publishGatewayRunEvent(ctx, sessionID, runID, "turn_cancelled", event.TurnCancelledPayload{Message: "cancelled"})
+	s.finishRun(ctx, sessionID, runID, state.RunStatusCancelled)
+	_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"})
 }
 
 // expireGatewayApproval turns TTL expiry into a first-class, replayable
@@ -434,9 +434,8 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 		}
 	}
 	_ = s.RunRT.ClearWait(ctx, runID)
-	_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
 	s.runController().Cancel(runID, fmt.Errorf("%s", reason))
-	s.finishRun(ctx, sessionID, runID)
+	s.finishRun(ctx, sessionID, runID, state.RunStatusFailed)
 	if agentID != "" {
 		parentRunID := ""
 		if runRecord != nil {
@@ -450,7 +449,7 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 			}, time.Now(),
 		))
 	} else {
-		_ = s.publishGatewayRunEvent(ctx, sessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
+		_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 	}
 }
 

@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +194,10 @@ func (f *fakeNewSessionStore) ListSessionsRecent(ctx context.Context, limit int)
 	return nil, nil
 }
 
+func (f *fakeNewSessionStore) SessionTitle(ctx context.Context, id string) (string, error) {
+	return "", nil
+}
+
 func (f *fakeNewSessionStore) ForkInto(ctx context.Context, sourceID, targetID string) error {
 	return nil
 }
@@ -235,6 +240,39 @@ func TestExecNewPersistsSessionIDAsTitleSentinel(t *testing.T) {
 	if store.ensuredTitle != store.ensuredID {
 		t.Fatalf("expected stored title to equal the session id sentinel, got id=%q title=%q", store.ensuredID, store.ensuredTitle)
 	}
+}
+
+// titledSessions answers the by-id title lookup the way the store does,
+// while its recent list stays bounded and never reaches the older session.
+type titledSessions struct {
+	fakeNewSessionStore
+	titles map[string]string
+}
+
+func (t titledSessions) ListSessionsRecent(context.Context, int) ([]state.SessionSummary, error) {
+	list := make([]state.SessionSummary, 300)
+	for i := range list {
+		list[i] = state.SessionSummary{ID: fmt.Sprintf("newer-%03d", i), Title: "newer", UpdatedAt: int64(1000 - i)}
+	}
+	return list, nil
+}
+
+func (t titledSessions) SessionTitle(_ context.Context, id string) (string, error) {
+	return t.titles[id], nil
+}
+
+// TestCurrentSessionTitleReadsTheSessionByID pins that a conversation's title
+// is looked up by its id rather than found by scanning a recent list: a
+// session older than the list still has its name, and an unnamed one still
+// reads as "New conversation".
+func TestCurrentSessionTitleReadsTheSessionByID(t *testing.T) {
+	store := &titledSessions{titles: map[string]string{
+		"older":   "An older conversation",
+		"unnamed": "",
+	}}
+
+	require.Equal(t, "An older conversation", currentSessionTitle(Context{Sessions: store}, "older"))
+	require.Equal(t, "New conversation", currentSessionTitle(Context{Sessions: store}, "unnamed"))
 }
 
 // pickerSessions is a session store with a few conversations and one child.

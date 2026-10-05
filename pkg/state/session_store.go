@@ -16,6 +16,7 @@ import (
 
 type SessionStore struct {
 	db           *sql.DB
+	defaultsMu   sync.RWMutex
 	memoryMode   string
 	memorySource string
 	cwd          string
@@ -69,22 +70,40 @@ func (s *SessionStore) DB() *sql.DB {
 	return s.db
 }
 
-// ConfigureMemoryDefaults stamps the values a new session row is created with.
+// SessionBirth is what a session is born with and keeps: the directory it
+// is about. The memory pipeline files the session's memories under that
+// directory's project, so it is decided by whoever creates the session —
+// a project's session is born in the project root — and never by a
+// default some other request changed. A zero Cwd is the process's launch
+// directory, the default every ordinary session is born in.
+type SessionBirth struct {
+	Cwd       string
+	GitBranch string
+	// Source is what the session is for (SessionSource*); born with it,
+	// never changed by later writes.
+	Source string
+}
+
+// ConfigureMemoryDefaults stamps the process-wide values a session row is
+// created with when its creator gave it no directory of its own.
 //
 // cwd is the session's project identity: the memory pipeline resolves a
 // thread's project scope from it (memory.ProjectScopeForCwd), so it must be the
-// directory the conversation is about — the launch directory, or the project
-// root for a surface that opens a session against a named project. It is never
-// the agent's workspace root: that is Forebrain Harness's own state directory, not a
-// project, and filing a session under it writes every memory the session
-// produces into a scope no session ever reads back.
+// directory the conversation is about. It is never the agent's workspace root:
+// that is Forebrain Harness's own state directory, not a project, and filing a
+// session under it writes every memory the session produces into a scope no
+// session ever reads back.
 //
-// Only a caller that owns that identity decision may call this. A caller that
-// merely reacts to a configuration change uses SetMemoryMode instead.
+// It is called once at process startup by the composition root and names the
+// launch directory. A session that is about some other directory is born with
+// that directory through EnsureAt, not by rewriting this default; a caller
+// that merely reacts to a configuration change uses SetMemoryMode instead.
 func (s *SessionStore) ConfigureMemoryDefaults(memoryMode, memorySource, cwd, gitBranch string) {
 	if s == nil {
 		return
 	}
+	s.defaultsMu.Lock()
+	defer s.defaultsMu.Unlock()
 	s.memoryMode = strings.TrimSpace(memoryMode)
 	s.memorySource = strings.TrimSpace(memorySource)
 	s.cwd = strings.TrimSpace(cwd)
@@ -101,6 +120,8 @@ func (s *SessionStore) SetMemoryMode(memoryMode string) {
 	if s == nil {
 		return
 	}
+	s.defaultsMu.Lock()
+	defer s.defaultsMu.Unlock()
 	s.memoryMode = strings.TrimSpace(memoryMode)
 }
 
@@ -112,7 +133,21 @@ func (s *SessionStore) Ensure(ctx context.Context, id string, title string) erro
 	if id == "" {
 		return nil
 	}
-	return s.ensureSession(ctx, s.db, id, title)
+	return s.ensureSession(ctx, s.db, id, title, SessionBirth{})
+}
+
+// EnsureAt opens a session born with the identity its creator chose: the row's
+// cwd and git_branch come from birth and are written only at creation, exactly
+// as in Ensure.
+func (s *SessionStore) EnsureAt(ctx context.Context, id, title string, birth SessionBirth) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	return s.ensureSession(ctx, s.db, id, title, birth)
 }
 
 // SetSessionSource marks what a session is for. The value set is a gateway
@@ -142,23 +177,40 @@ func (s *SessionStore) SetSessionSource(ctx context.Context, sessionID, source s
 // ensureSession is the one session upsert: it creates the row (owner recorded
 // at birth) or, on conflict, updates updated_at for this owner only. Sharing
 // it is what lets every append path run it inside its own transaction.
-func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, title string) error {
+func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, title string, birth SessionBirth) error {
 	now := time.Now().Unix()
+	// The defaults are read as one snapshot under the lock: an HTTP request
+	// creating a project session races a configuration reload, so neither
+	// read may see a half-updated set.
+	s.defaultsMu.RLock()
 	mode := strings.TrimSpace(s.memoryMode)
+	source := strings.TrimSpace(s.memorySource)
+	cwd := strings.TrimSpace(s.cwd)
+	branch := strings.TrimSpace(s.gitBranch)
+	s.defaultsMu.RUnlock()
 	if mode == "" {
 		mode = "disabled"
+	}
+	// Cwd and GitBranch are a pair. A session born with a directory carries
+	// that directory's branch too; a session born without one takes both
+	// process defaults — never the given directory with another request's
+	// branch, nor the reverse.
+	if strings.TrimSpace(birth.Cwd) != "" {
+		cwd = strings.TrimSpace(birth.Cwd)
+		branch = strings.TrimSpace(birth.GitBranch)
 	}
 	// agent_id is written when the row is created and never afterwards: a
 	// session's owning primary agent is fixed at birth. The conflict clause
 	// updates only rows this agent owns, so touching another agent's
 	// conversation fails here instead of quietly writing into it — every append
 	// path runs this first, which is what keeps writes inside the boundary.
+	// Source is the same kind of fact, so it too is written at birth only.
 	res, err := q.ExecContext(ctx,
-		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id)
-		VALUES(?,?,?,?,?,?,?,?,?)
+		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
 		WHERE fb_sessions.agent_id=excluded.agent_id`,
-		id, title, now, now, mode, strings.TrimSpace(s.memorySource), strings.TrimSpace(s.cwd), strings.TrimSpace(s.gitBranch), s.AgentID())
+		id, title, now, now, mode, source, cwd, branch, s.AgentID(), strings.TrimSpace(birth.Source))
 	if err != nil {
 		return err
 	}
@@ -286,6 +338,125 @@ func (s *SessionStore) LastActiveByIDs(ctx context.Context, ids []string) (map[s
 	return out, nil
 }
 
+// SessionLeftovers is what deleting sessions leaves outside the database:
+// the uploaded files' stored bytes and the spilled tool outputs their
+// transcripts point at. The caller removes them once the rows are gone.
+type SessionLeftovers struct {
+	Files      []File
+	SpillPaths []string
+}
+
+// DeleteSessions deletes this agent's sessions with the given ids and every
+// row that hangs off them (the foreign keys cascade), in one transaction,
+// and returns what they leave on disk. A session another agent owns is not
+// touched. A conversation forked from one of them keeps its own life: its
+// parent link is cleared, not followed.
+func (s *SessionStore) DeleteSessions(ctx context.Context, ids []string) (SessionLeftovers, error) {
+	if s == nil || s.db == nil {
+		return SessionLeftovers{}, fmt.Errorf("session store unavailable")
+	}
+	cleaned := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			cleaned = append(cleaned, id)
+		}
+	}
+	if len(cleaned) == 0 {
+		return SessionLeftovers{}, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SessionLeftovers{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	out := SessionLeftovers{}
+	agentID := s.AgentID()
+	for start := 0; start < len(cleaned); start += sessionLastActiveChunk {
+		end := start + sessionLastActiveChunk
+		if end > len(cleaned) {
+			end = len(cleaned)
+		}
+		chunk := cleaned[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, agentID)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		files, err := deleteSessionsFiles(ctx, tx, placeholders, args)
+		if err != nil {
+			return SessionLeftovers{}, err
+		}
+		out.Files = append(out.Files, files...)
+		paths, err := deleteSessionsSpillPaths(ctx, tx, placeholders, args)
+		if err != nil {
+			return SessionLeftovers{}, err
+		}
+		out.SpillPaths = append(out.SpillPaths, paths...)
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM fb_sessions WHERE agent_id = ? AND id IN (`+placeholders+`)`, args...); err != nil {
+			return SessionLeftovers{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return SessionLeftovers{}, err
+	}
+	return out, nil
+}
+
+func deleteSessionsFiles(ctx context.Context, q dbtx, placeholders string, args []any) ([]File, error) {
+	rows, err := q.QueryContext(ctx, `
+SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
+       f.storage_backend, f.storage_bucket, f.storage_key,
+       f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
+FROM fb_files f
+JOIN fb_sessions s ON s.id = f.session_id AND s.agent_id = ?
+WHERE f.session_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.SessionID, &f.OriginalName, &f.MediaType, &f.SizeBytes, &f.SHA256,
+			&f.StorageBackend, &f.StorageBucket, &f.StorageKey,
+			&f.ParseStatus, &f.ParsedTextPath, &f.ParseError, &f.CreatedAt, &f.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// deleteSessionsSpillPaths reads the paths a session's transcripts point at
+// for spilled tool output: the governor records where it stored the full bytes
+// in the tool row's metadata, so the files can be found again from the
+// database alone once the rows are about to go.
+func deleteSessionsSpillPaths(ctx context.Context, q dbtx, placeholders string, args []any) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `
+SELECT DISTINCT json_extract(m.tool_meta_json, '$.full_path')
+FROM fb_messages m
+JOIN fb_sessions s ON s.id = m.session_id AND s.agent_id = ?
+WHERE m.session_id IN (`+placeholders+`)
+  AND json_valid(m.tool_meta_json)
+  AND json_extract(m.tool_meta_json, '$.full_path') IS NOT NULL
+  AND TRIM(json_extract(m.tool_meta_json, '$.full_path')) <> ''`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *SessionStore) SetTitle(ctx context.Context, id string, title string) error {
 	if s == nil || s.db == nil {
 		return nil
@@ -380,13 +551,23 @@ type MessageHit struct {
 	Score     float64 `json:"score,omitempty"`
 }
 
+// What a session is for, stored in fb_sessions.source. It is a different
+// fact from memory.SessionSource* (which surface wrote the session, in
+// fb_sessions.memory_source).
+const (
+	SessionSourceConversation = ""         // an ordinary conversation
+	SessionSourceWorkshop     = "workshop" // a skill-workshop task
+	SessionSourceCron         = "cron"     // one fire of a scheduled task
+)
+
 type SessionSummary struct {
 	ID        string
 	Title     string
 	UpdatedAt int64
 	ProjectID string
-	// Source is what the session is for: "" an ordinary conversation,
-	// "workshop" a skill-workshop task. The chat drawer filters on it.
+	// Source is what the session is for: SessionSourceConversation,
+	// SessionSourceWorkshop, or SessionSourceCron. The chat drawer filters
+	// on it.
 	Source string
 }
 
@@ -426,6 +607,9 @@ func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessio
 	return out, rows.Err()
 }
 
+// ListSessionsRecent is what a person may want back, newest first: every
+// purpose but a scheduled task's fire, which is reached from its task's run
+// record instead (decision D3).
 func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -441,10 +625,10 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
 		 FROM fb_sessions
-		 WHERE agent_id = ?
+		 WHERE agent_id = ? AND source <> ?
 		 ORDER BY updated_at DESC
 		 LIMIT ?`,
-		s.AgentID(), limit)
+		s.AgentID(), SessionSourceCron, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -460,9 +644,47 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	return out, rows.Err()
 }
 
-// ListSessionsForProject returns one page of the sessions bound to one
+// ListSessionsOfSource returns the agent's own sessions — not bound to a
+// project — that are for one purpose, newest first. The filter is in the
+// query, so sessions of another purpose never take a row of the limit.
+func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, limit int) ([]SessionSummary, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	source = strings.TrimSpace(source)
+	if limit <= 0 {
+		limit = 80
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, title, updated_at, source
+		 FROM fb_sessions
+		 WHERE agent_id = ? AND project_id IS NULL AND source = ?
+		 ORDER BY updated_at DESC, id ASC
+		 LIMIT ?`,
+		s.AgentID(), source, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SessionSummary, 0, limit)
+	for rows.Next() {
+		var r SessionSummary
+		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListSessionsForProject returns one page of the conversations bound to one
 // project, newest first. Paged for the same reason every session list is: a
-// long history must not be loaded whole.
+// long history must not be loaded whole. Only conversations are listed: a
+// project's scheduled-task fires are reached from the project's
+// scheduled-tasks tab.
 func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID string, limit, offset int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -483,10 +705,10 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, title, updated_at, project_id
 		 FROM fb_sessions
-		 WHERE agent_id = ? AND project_id = ?
+		 WHERE agent_id = ? AND project_id = ? AND source = ?
 		 ORDER BY updated_at DESC, id
 		 LIMIT ? OFFSET ?`,
-		s.AgentID(), projectID, limit, offset)
+		s.AgentID(), projectID, SessionSourceConversation, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +729,9 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 // with limit/offset instead of requesting the whole list: the picker keeps
 // only the pages the user actually visited in memory. Ordering adds id as a
 // deterministic tie-breaker so equal updated_at values cannot shuffle rows
-// between pages.
+// between pages. The list is what a person may want back, like
+// ListSessionsRecent: a scheduled task's fire is reached from its task's run
+// record instead (decision D3).
 func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offset int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -524,10 +748,10 @@ func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offse
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
-		 WHERE agent_id = ?
+		 WHERE agent_id = ? AND source <> ?
 		 ORDER BY updated_at DESC, id ASC
 		 LIMIT ? OFFSET ?`,
-		s.AgentID(), limit, offset)
+		s.AgentID(), SessionSourceCron, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1352,7 +1576,7 @@ func (s *SessionStore) appendRow(ctx context.Context, row messageRow) (int64, er
 // appendRowInTx is appendRow for a caller that owns the transaction (the
 // message-sync reconciler batches its rows into one).
 func (s *SessionStore) appendRowInTx(ctx context.Context, q dbtx, row messageRow) (int64, error) {
-	if err := s.ensureSession(ctx, q, row.SessionID, row.SessionID); err != nil {
+	if err := s.ensureSession(ctx, q, row.SessionID, row.SessionID, SessionBirth{}); err != nil {
 		return 0, err
 	}
 	rowID, err := insertMessage(ctx, q, row)
@@ -1748,7 +1972,7 @@ func (s *SessionStore) AppendCompactCheckpoint(ctx context.Context, sessionID st
 	defer func() { _ = tx.Rollback() }()
 	// The upsert is also the ownership check: it refuses a session another
 	// primary agent owns before anything is written.
-	if err := s.ensureSession(ctx, tx, sessionID, sessionID); err != nil {
+	if err := s.ensureSession(ctx, tx, sessionID, sessionID, SessionBirth{}); err != nil {
 		return err
 	}
 	rowID, err := insertMessage(ctx, tx, messageRow{

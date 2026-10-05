@@ -57,6 +57,8 @@ export interface ChatMessageRecord {
   planJson?: string | null
   /** What a user message attached, in the order it was attached. */
   attachments?: ChatAttachmentRecord[] | null
+  /** Who wrote a user message on the person's behalf ('heartbeat'). */
+  origin?: string
   /**
    * A tool row's or a `!cmd` row's own execution window; on a "worked" row —
    * the line that closes a run, after the last row it wrote — the run's clock.
@@ -617,6 +619,8 @@ export interface CronJobRecord {
   lastRunAt?: number
   lastStatus?: string
   lastError?: string
+  /** Stable classifier of the last error, for wording in the viewer's language. */
+  lastErrorCode?: string
   lastOutput?: string
   failureStreak?: number
   createdAt?: number
@@ -627,10 +631,14 @@ export interface CronRunRecord {
   id: number
   jobId: string
   sessionId?: string
+  /** The fire's session holds a transcript; fires recorded before fires became conversations have none. */
+  hasConversation?: boolean
   trigger?: string
   status: string
   output?: string
   error?: string
+  /** Stable classifier of the error, for wording in the viewer's language. */
+  errorCode?: string
   deliveredTo?: string
   startedAt: number
   finishedAt?: number
@@ -652,6 +660,19 @@ export interface CronPreviewResponse {
   kind?: string
   next?: string[]
   error?: string
+}
+
+/**
+ * The install's scheduled-task settings. RetentionDays is the value in force
+ * (the default when the file carries no key), and minDays/maxDays bound what
+ * a save may carry — the form checks them before any request.
+ */
+export interface CronSettings {
+  retentionDays: number
+  configured: boolean
+  defaultDays: number
+  minDays: number
+  maxDays: number
 }
 
 export interface HeartbeatRecord {
@@ -746,6 +767,14 @@ export interface ActionApprovalBody {
 
 export interface ChatSessionsResponse {
   records: { id: string; title: string | null; createTime: string; updateTime: string; source?: string }[]
+}
+
+/** One conversation's own facts: its title, and the project it belongs to
+ * when it belongs to one. */
+export interface ChatSessionInfo {
+  id: string
+  title: string
+  project: { id: string; name: string } | null
 }
 
 export interface SessionTodosResponse {
@@ -1183,9 +1212,11 @@ export const forebrainApi = {
     )
   },
 
-  chatSessions(current = 1, size = 100) {
+  /** The agent's conversations of one purpose: '' the drawer lists,
+   * 'workshop' the skill workshop lists. The filter is the server's. */
+  chatSessions(source: '' | 'workshop' = '') {
     return api.get<ChatSessionsResponse>('/chat/sessions', {
-      params: { current, size },
+      params: { source },
     }).then((res) => res.data)
   },
 
@@ -1216,10 +1247,12 @@ export const forebrainApi = {
     })
   },
 
-  /** The project a conversation belongs to, or null for the agent's own. */
-  chatSessionProject(sessionId: string) {
+  /** One conversation by id, named for the page that has it open: the
+   * drawer's list never carries a project's session, so the page reads its
+   * title and project straight from the session. */
+  chatSession(sessionId: string) {
     return api
-      .get<{ project: { id: string; name: string } | null }>(`/chat/sessions/${encodeURIComponent(sessionId)}/project`)
+      .get<ChatSessionInfo>(`/chat/sessions/${encodeURIComponent(sessionId)}`)
       .then((res) => res.data)
   },
 
@@ -1862,6 +1895,18 @@ export const forebrainApi = {
 
   saveHooks(hooks: HooksSettingsRecord) {
     return api.put<{ applied: boolean }>('/hooks', toSnakeCase({ hooks })).then((res) => res.data)
+  },
+
+  // Retention is the install's configuration, so these live apart from the
+  // agent-scoped /cron routes. null removes the key: the default applies.
+  cronSettings() {
+    return api.get<CronSettings>('/cron-settings').then((res) => res.data)
+  },
+
+  saveCronSettings(retentionDays: number | null) {
+    return api
+      .put<{ applied: boolean; path: string }>('/cron-settings', { retention_days: retentionDays })
+      .then((res) => res.data)
   },
 
   cronJobs(projectId?: string) {

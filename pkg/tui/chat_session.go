@@ -31,7 +31,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-	"github.com/google/uuid"
 )
 
 func runnerProjectKey(r *run.Runner) string {
@@ -90,15 +89,18 @@ type ChatSession struct {
 	mcpWatchSession string
 	mcpWatchCancel  func()
 
-	approvalMu        sync.Mutex
-	approvalPending   *chatApprovalResume
-	approvalOwnerOnce sync.Once
-	approvalOwner     string
+	approvalMu      sync.Mutex
+	approvalPending *chatApprovalResume
 	// approvalRecovered names the sessions whose durable approval outbox this
 	// process has already drained, keyed by session id because the drain is
 	// scoped to the conversation the surface has open.
 	approvalRecoveryMu sync.Mutex
 	approvalRecovered  map[string]bool
+	// stopAbandonedRunReaper ends this process's share of abandoned-run
+	// reaping (and its approval-continuation recovery pass). Close stops it
+	// before the environment: the owner lease must outlive the reaper that
+	// may still report on this process's behalf.
+	stopAbandonedRunReaper func()
 
 	// planReviews holds the second-opinion reviews collected for a pending
 	// exit-plan approval, keyed by action id. They live here rather than in the
@@ -168,12 +170,15 @@ type ChatSession struct {
 	configApplyMu sync.Mutex
 }
 
+// approvalResumeOwner is the process identity the approval-continuation
+// lease is claimed under. It is the same owner that vouches for this
+// process's runs: one process has one answer to "is it still alive", so the
+// continuation fence and the run lease can never disagree about it.
 func (s *ChatSession) approvalResumeOwner() string {
-	if s == nil {
+	if s == nil || s.runSvc() == nil {
 		return ""
 	}
-	s.approvalOwnerOnce.Do(func() { s.approvalOwner = "tui:" + uuid.NewString() })
-	return s.approvalOwner
+	return s.runSvc().Owner
 }
 
 // OpenChatSessionWithConfigForProject opens a session using a fixed launch cwd,
@@ -275,15 +280,8 @@ func (s *ChatSession) ResumeSession(ctx context.Context, sessionID string) (stri
 		return "", "", "", fmt.Errorf("resume: no session matches %q", sid)
 	}
 	title := sid
-	if rows, err := s.sessStore().ListSessionsRecent(ctx, 500); err == nil {
-		for _, row := range rows {
-			if strings.TrimSpace(row.ID) == sid {
-				if t := strings.TrimSpace(row.Title); t != "" {
-					title = t
-				}
-				break
-			}
-		}
+	if t, err := s.sessStore().SessionTitle(ctx, sid); err == nil && t != "" {
+		title = t
 	}
 	if err := s.sessStore().Ensure(ctx, sid, title); err != nil {
 		return "", "", "", err
@@ -504,6 +502,12 @@ func (s *ChatSession) Close() error {
 	}
 	s.ClearUINotify()
 	s.stopUINotificationDispatcher()
+	// The reaper speaks through this session's publishers; stop it before the
+	// environment it reads from and writes to goes away.
+	if s.stopAbandonedRunReaper != nil {
+		s.stopAbandonedRunReaper()
+		s.stopAbandonedRunReaper = nil
+	}
 	var errs []error
 	if s.chatLog != nil {
 		if err := s.chatLog.Close(); err != nil {
@@ -1786,6 +1790,19 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				}
 				return nil
 			}
+		}
+		if errors.Is(err, state.ErrSessionBusy) {
+			// The session was refused: another live process owns its turn, so
+			// no run of this message exists and none may be recorded for it.
+			// The user row written on the way in comes back out the same way
+			// Esc takes a message out of the conversation, and the caller
+			// takes the submission back rather than reporting a failed run.
+			if userRowID > 0 {
+				if werr := s.sessStore().WithdrawUserTurn(durable, sessionID, userRowID); werr != nil && s.chatLog != nil {
+					s.chatLog.Errorf("forebrain chat withdraw refused-turn row session=%s row_id=%d err=%v", sessionID, userRowID, werr)
+				}
+			}
+			return err
 		}
 		s.clearPendingApproval()
 		if errors.Is(err, context.Canceled) {

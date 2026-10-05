@@ -39,6 +39,13 @@ type SessionCreateResult struct {
 // such as "New chat" is the surface's to draw for an unnamed session, never a
 // name to store: a stored one would outrank the first message forever.
 func (s *Service) CreateSession(ctx context.Context, title string) (SessionCreateResult, error) {
+	return s.CreateSessionAt(ctx, title, state.SessionBirth{})
+}
+
+// CreateSessionAt opens a conversation born in a directory its creator chose:
+// birth is the session's project identity, fixed at creation exactly like the
+// title default above.
+func (s *Service) CreateSessionAt(ctx context.Context, title string, birth state.SessionBirth) (SessionCreateResult, error) {
 	title = strings.TrimSpace(title)
 	if s == nil || s.sessionStore == nil {
 		return SessionCreateResult{Title: title}, nil
@@ -55,7 +62,7 @@ func (s *Service) CreateSession(ctx context.Context, title string) (SessionCreat
 	if stored == "" {
 		stored = id
 	}
-	if err := s.sessionStore.Ensure(ctx, id, stored); err != nil {
+	if err := s.sessionStore.EnsureAt(ctx, id, stored, birth); err != nil {
 		return SessionCreateResult{}, err
 	}
 	return SessionCreateResult{ID: id, Title: title}, nil
@@ -74,13 +81,6 @@ func (s *Service) RenameSession(ctx context.Context, sessionID, title string) er
 		return nil
 	}
 	return s.sessionStore.SetTitle(ctx, sessionID, title)
-}
-
-func (s *Service) ListSessionsRecent(ctx context.Context, limit int) ([]SessionSummary, error) {
-	if s == nil || s.sessionStore == nil {
-		return []SessionSummary{}, nil
-	}
-	return s.sessionStore.ListSessionsRecent(ctx, limit)
 }
 
 func (s *Service) ListSessionMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error) {
@@ -256,6 +256,9 @@ type UserTurn struct {
 	// PartsJSON is the surface's own rendering, which wins when set: it is the
 	// one that carries attachment references.
 	PartsJSON string
+	// Origin is who wrote this message on the person's behalf; empty when
+	// the person did.
+	Origin string
 	// EnsureSession creates the session row first. A surface that has already
 	// ensured it can leave this false.
 	EnsureSession bool
@@ -297,6 +300,9 @@ func PersistUserTurn(ctx context.Context, store UserTurnStore, in UserTurn) (int
 			msg = llm.UserMessage(in.Parts...)
 		}
 		partsJSON = state.MessagePartsJSON(msg, modelInput)
+	}
+	if in.Origin != "" {
+		partsJSON = state.WithMessageOrigin(partsJSON, in.Origin)
 	}
 	return store.AppendStructuredMessageForRun(
 		ctx, sid, strings.TrimSpace(in.RunID), "user", displayContent, "", partsJSON, "", "", "", "", state.MessageExecTiming{},

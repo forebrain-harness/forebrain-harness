@@ -116,6 +116,17 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	// into a surface sink. The gateway's sink is a bus because it serves more
 	// than one connection.
 	runner.Events = gw.RunEvents()
+	// Every process reaps the runs whose owners stopped renewing: a crashed
+	// gateway replica, a terminal that was killed mid-turn. The reap is a
+	// compare-and-swap, so whichever process gets there first settles the run,
+	// and its ending is reported exactly once, through the session's own event
+	// funnel — the same way every other ending is.
+	stopReaper := turn.AbandonedRunReaper{
+		Runs:    runSvc,
+		Publish: gw.publishGatewayRunEvent,
+		Recover: func(context.Context) { gw.recoverResolvedApprovalWaitsOnce() },
+	}.Start(ctx)
+	defer stopReaper()
 	stopApprovalExpiry := state.StartExpireSweeper(ctx, actionSvc, state.ExpireSweeperConfig{
 		TTL:    process.ApprovalTTLFromEnv(),
 		Reason: "approval_ttl_expired",

@@ -122,6 +122,69 @@ describe('provider error wording', () => {
     )
   })
 
+  it('says a refused turn is waiting on an approval, in both languages', () => {
+    // The runtime refused this turn before any provider was asked; the code
+    // carries no status and quotes no provider, and the sentence says what
+    // the reader does next.
+    const detail = parseProviderErrorDetail({ code: 'session_awaiting_approval' })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('这个对话正在等待审批，请先处理审批再发送。')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      'This conversation is waiting for an approval; answer it before sending another message.',
+    )
+  })
+
+  it('says a refused turn is busy with a running one, in both languages', () => {
+    // Another live run is driving the conversation — the sentence says what
+    // happened and when the reader can try again, and nothing else.
+    const detail = parseProviderErrorDetail({ code: 'session_running' })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('这个对话正在运行一个回合，等它结束后再发送。')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      'This conversation is already running a turn; send again when it finishes.',
+    )
+  })
+
+  it('words a scheduled run\'s ending in one sentence, in both languages', () => {
+    // A fire's record carries the runtime's English sentence as its fallback;
+    // the code says which sentence the viewer reads, and the stored words are
+    // not quoted for these — the sentence is the whole explanation.
+    const cases = [
+      ['run_failed', '这次运行失败了。', 'This run failed.'],
+      ['run_stopped', '这次运行在完成前被停止了。', 'The run was stopped before it finished.'],
+      ['run_abandoned', '运行这个回合的进程在它完成前停止了。', 'The process running this turn stopped before it finished.'],
+      ['no_runtime', '调度器没有可用的运行环境。', 'No runtime is bound to the scheduler.'],
+      ['no_delivery_channel', '没有可用于投递的渠道。', 'No delivery channel is bound.'],
+    ] as const
+    for (const [code, zh, en] of cases) {
+      const detail = parseProviderErrorDetail({ code, providerMessage: 'the runtime sentence' })!
+      expect(formatProviderError(detail, 'zh', arrivedAt)).toBe(zh)
+      expect(formatProviderError(detail, 'en', arrivedAt)).toBe(en)
+    }
+  })
+
+  it('quotes the channel\'s words under a failed delivery, in both languages', () => {
+    const detail = parseProviderErrorDetail({
+      code: 'delivery_failed',
+      providerMessage: 'channel: no bound handler for channel id',
+    })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe(
+      '答复没能投递到渠道。\nchannel: no bound handler for channel id',
+    )
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      'The answer could not be delivered to the channel.\nchannel: no bound handler for channel id',
+    )
+    // Without words of its own, the sentence stands alone.
+    const bare = parseProviderErrorDetail({ code: 'delivery_failed' })!
+    expect(formatProviderError(bare, 'zh', arrivedAt)).toBe('答复没能投递到渠道。')
+  })
+
+  it('quotes the reason a scheduled run never started, in both languages', () => {
+    const detail = parseProviderErrorDetail({ code: 'fire_start_failed', providerMessage: 'session store unavailable' })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('这次定时任务没能开始运行。\nsession store unavailable')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe('This scheduled run could not start.\nsession store unavailable')
+    const bare = parseProviderErrorDetail({ code: 'fire_start_failed' })!
+    expect(formatProviderError(bare, 'en', arrivedAt)).toBe('This scheduled run could not start.')
+  })
+
   it('returns null for a code this build does not know, so the caller keeps the runtime sentence', () => {
     const detail = parseProviderErrorDetail({ code: 'something_new', status: 418 })!
     expect(formatProviderError(detail, 'en', arrivedAt)).toBeNull()

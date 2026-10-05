@@ -530,6 +530,50 @@ func (s *FileStore) GetOriginalObject(ctx context.Context, bucket, key string) (
 	return out.Body, ct, aws.ToInt64(out.ContentLength), strings.Trim(strings.TrimSpace(aws.ToString(out.ETag)), `"`), nil
 }
 
+// RemoveStored deletes a file's stored bytes: the original and the extracted
+// text for a local-backed file, the stored object for an S3-backed one. A
+// record whose bytes are already gone is not an error — deletion must be
+// repeatable over a file whose row outlived its storage.
+func (s *FileStore) RemoveStored(ctx context.Context, f File) error {
+	if s == nil {
+		return fmt.Errorf("nil service")
+	}
+	if p, ok := s.ParsedTextLocalPath(&f); ok {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	switch {
+	case strings.EqualFold(f.StorageBackend, string(StorageBackendLocal)):
+		if p, ok := s.LocalPath(&f); ok {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	case strings.EqualFold(f.StorageBackend, string(StorageBackendS3)):
+		key := strings.TrimSpace(f.StorageKey)
+		if key == "" {
+			return nil
+		}
+		bucket := strings.TrimSpace(f.StorageBucket)
+		if bucket == "" {
+			bucket = s.Cfg.OSS.Bucket
+		}
+		cli, err := s.s3Client(ctx)
+		if err != nil {
+			return err
+		}
+		cctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		_, err = cli.DeleteObject(cctx, &s3.DeleteObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+		})
+		return err
+	}
+	return nil
+}
+
 // FileRefInfo holds the file reference metadata from a file_reference part.
 type FileRefInfo struct {
 	FileID   string
