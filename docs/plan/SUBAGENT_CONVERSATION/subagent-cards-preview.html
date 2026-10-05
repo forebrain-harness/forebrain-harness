@@ -1,0 +1,712 @@
+<title>subagent 卡片预览</title>
+<style>
+  :root {
+    --bg: #F6F7F9;
+    --panel: #FFFFFF;
+    --line: #E4E7EC;
+    --line-strong: #D0D5DD;
+    --ink: #101828;
+    --ink-2: #475467;
+    --muted: #667085;
+    --accent: #1F4A9E;
+    --accent-soft: #EBF0F9;
+    --chip: #F2F4F7;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151B;
+      --panel: #1A1E26;
+      --line: #2A303B;
+      --line-strong: #3A4150;
+      --ink: #E7EAF0;
+      --ink-2: #B4BCC9;
+      --muted: #8A93A3;
+      --accent: #8FA9DA;
+      --accent-soft: #1F2A40;
+      --chip: #232935;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151B;
+    --panel: #1A1E26;
+    --line: #2A303B;
+    --line-strong: #3A4150;
+    --ink: #E7EAF0;
+    --ink-2: #B4BCC9;
+    --muted: #8A93A3;
+    --accent: #8FA9DA;
+    --accent-soft: #1F2A40;
+    --chip: #232935;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 64px; }
+  header.top { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 22px; line-height: 1.3; margin: 0; text-wrap: balance; letter-spacing: 0.01em; }
+  .lede { color: var(--ink-2); margin: 6px 0 0; max-width: 68ch; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  .seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; background: var(--panel); }
+  .seg button { appearance: none; border: 0; background: transparent; color: var(--ink-2); padding: 6px 12px; font: inherit; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .seg button:focus-visible, .state button:focus-visible, .wrow:focus-visible, .trow:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 0 0 24px; }
+  .legend div { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; color: var(--ink-2); }
+  .legend b { color: var(--ink); display: block; margin-bottom: 2px; }
+
+  section.scn { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 18px; }
+  .scn-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+  .scn-head h2 { font-size: 16px; margin: 0; }
+  .scn-head code { font: 12.5px/1 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; background: var(--chip); padding: 3px 6px; border-radius: 5px; color: var(--ink-2); }
+  .scn-note { color: var(--muted); margin: 2px 0 0; font-size: 13px; max-width: 80ch; }
+  .state { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+  .state button { appearance: none; border: 1px solid var(--line-strong); background: var(--panel); color: var(--ink-2); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12.5px; cursor: pointer; }
+  .state button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+  .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+  @media (max-width: 860px) { .pair { grid-template-columns: minmax(0, 1fr); } }
+  .surface-label { font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+
+  /* ---- Terminal (TUI) ---- */
+  .term { background: #262A33; color: #D7DAE0; border-radius: 10px; padding: 14px 16px; overflow-x: auto; font: 13px/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, "PingFang SC", monospace; min-height: 120px; }
+  .term pre { margin: 0; font: inherit; white-space: pre; }
+  .t-hdr { color: #FFAF00; font-weight: 700; }
+  .t-ok { color: #5FD75F; }
+  .t-bad { color: #FF5F5F; }
+  .t-warn { color: #FFD75F; }
+  .t-err { color: #D7DAE0; }
+  .trow { cursor: pointer; display: inline-block; border-radius: 3px; }
+  .trow:hover { background: #3A3F4B; }
+  .t-old { color: #D7DAE0; }
+
+  /* ---- Web ---- */
+  .webpane { background: #FFFFFF; border: 1px solid #E4E7EC; border-radius: 10px; padding: 14px; color: #101828; min-height: 120px; }
+  .wcard { border: 1px solid #E4E7EC; border-radius: 12px; background: #FFFFFF; overflow: hidden; }
+  .whead { display: flex; gap: 10px; align-items: center; padding: 10px 12px; }
+  .whead .wtitle { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; color: #101828; }
+  .whead .wdur { font-size: 12px; color: #667085; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .wcallerr { padding: 0 12px 10px 36px; font-size: 12.5px; color: #B42318; white-space: pre-wrap; }
+  .wrows { border-top: 1px solid #E4E7EC; }
+  .wrow { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; background: #FFFFFF; border: 0; border-top: 1px solid #F2F4F7; padding: 9px 12px; font: inherit; color: inherit; }
+  .wrow:first-child { border-top: 0; }
+  button.wrow { cursor: pointer; }
+  button.wrow:hover { background: #F7F8FA; }
+  .wrow .wmain { flex: 1; min-width: 0; }
+  .wrow .wname { display: flex; gap: 6px; align-items: baseline; min-width: 0; font-size: 13px; color: #101828; }
+  .wrow .wname .wt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wrow .wname .wclock { flex: none; color: #667085; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .wrow .wsub { display: block; font-size: 12px; color: #667085; margin-top: 1px; }
+  .wrow .wwhy { display: block; font-size: 12px; color: #B42318; margin-top: 2px; white-space: pre-wrap; }
+  .wrow .wwhy.skip { color: #B54708; }
+  .wrow .wopen { font-size: 12px; color: #1F4A9E; align-self: center; white-space: nowrap; }
+  .wempty { padding: 10px 12px; font-size: 12.5px; color: #667085; border-top: 1px solid #E4E7EC; }
+  .ico { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+  .whead .ico { margin-top: 0; }
+  .spin { animation: spin 1s linear infinite; transform-origin: 50% 50%; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  .nest { border: 1px dashed #D0D5DD; border-radius: 10px; padding: 10px; }
+  .nest-label { font-size: 11.5px; color: #667085; margin-bottom: 8px; }
+  .term .nest-label { color: #9AA3B2; }
+
+  .toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--ink); color: var(--panel); padding: 8px 14px; border-radius: 8px; font-size: 13px; box-shadow: 0 8px 24px rgba(16,24,40,.18); }
+  footer.end { color: var(--muted); font-size: 12.5px; margin-top: 28px; max-width: 90ch; }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>subagent_* 工具卡片：终端与网页预览</h1>
+      <p class="lede">计划 012–016 的确认稿。左边是 TUI 的样子（文字与计划 013 第二、三节逐字相同），右边是网页的样子（计划 014）。后面还有 plan-reviewer 视图（计划 015）和网页的退出计划模式审批（计划 016）。两边由同一份数据画出，点任务行会进入该 subagent 的视图。运行中的任务名后面的计时每秒走一次；结束的任务（成功、失败、取消）后面是最终耗时。</p>
+    </div>
+    <div class="controls">
+      <div class="seg" role="group" aria-label="网页语言">
+        <button type="button" id="lang-zh" aria-pressed="true">网页：中文</button>
+        <button type="button" id="lang-en" aria-pressed="false">网页：English</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="legend">
+    <div><b>一种卡片</b>八个 subagent_* 工具与 plan-reviewer 这类没有派发调用的执行，全都用 fanout 那种卡片：一行头部，下面每个任务一行。</div>
+    <div><b>不再出现</b>原始 JSON、原始 task id、派发 prompt、<code>status=ok</code>、"subagent … spawned / ended" 文字行、<code>· 66 tool uses</code> 统计行。</div>
+    <div><b>每个任务都有自己的时钟</b>运行中：任务名后面是走动的计时；结束（成功、失败、取消）：最终耗时；没开始过的（等待、跳过）不写。只有一个任务的卡片，头部不再重复写时长。</div>
+    <div><b>plan-reviewer 也是同一套头部</b>请另一个模型评审计划时，卡片与其它 subagent_* 卡片一样写 Starting / Running / Ran / Failed to start，不加主语；不再是主语错误的 "subagent plan-reviewer spawned plan-reviewer"。</div>
+    <div><b>查询类是快照</b>status、wait、close、list 显示调用那一刻的状态，不随后续事件变化。</div>
+  </div>
+
+  <div id="scenarios"></div>
+
+  <footer class="end">
+    终端颜色：头部 214（橙），✓ 绿、✗ / × 红、! 黄，正文与 assistant 正文同亮度（不再半亮）。网页只用现有的 --forebrain-* 纯色变量，不用渐变。类型名（general-purpose 等）和最近工具的标签不翻译，与终端相同。
+  </footer>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- shared view model (one model, two renderers) ----------
+  // run: seconds the task has been running when the page opened (live clock);
+  // took: final elapsed in ms (ended task). Neither: never started.
+  var REASON = 'The process running this turn stopped before it finished.';
+  var SCENARIOS = [
+    {
+      id: 'before', title: '现状对照：截图里的两张卡片', tool: 'subagent_send · subagent_status',
+      note: '左侧"现状"是今天的终端输出（取自 owner 截图与状态库），右侧是改后的同一次调用。',
+      states: { '现状': 'before', '改后': 'after' }, defaultState: '现状',
+      special: true
+    },
+    {
+      id: 'send', title: '后台派发', tool: 'subagent_send',
+      note: '派发调用本身只要 20ms，卡片跟着 subagent 走：开始前、运行中、结束。截图里那条 "subagent general-purpose spawned …" 文字行不再出现。只有一个任务，所以头部不写时长，时长在任务名后面。',
+      defaultState: '运行中',
+      states: {
+        '开始前': { verb: 'send', phase: 'starting', type: 'general-purpose', rows: [{ kind: 'dispatch', title: '计划001 Go车道实施', status: 'waiting' }] },
+        '运行中': { verb: 'send', phase: 'running', type: 'general-purpose', rows: [{ kind: 'dispatch', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 192, latest: 'edit /Users/doudou/workspace/unionj-cloud/forebrain-harness/pkg/turn/submit.go', toolUses: 18 }] },
+        '已结束': { verb: 'send', phase: 'done', type: 'general-purpose', rows: [{ kind: 'dispatch', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'done', took: 843000, latest: 'shell gofmt -l pkg cmd', toolUses: 31 }] },
+        '启动失败': { verb: 'send', phase: 'failed', type: 'general-purpose', callError: 'unknown public subagent_type "genral-purpose"; available: explore, general-purpose, plan, verification', rows: [{ kind: 'dispatch', title: '计划001 Go车道实施', status: 'failed' }] },
+        '进程退出后恢复': { verb: 'send', phase: 'done', type: 'general-purpose', rows: [{ kind: 'dispatch', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'failed', took: 411000, latest: 'shell go test ./pkg/turn/ -count=1', toolUses: 22, error: REASON }] }
+      }
+    },
+    {
+      id: 'status', title: '查看状态', tool: 'subagent_status',
+      note: '截图二的那次调用。头部不再是原始 task id，正文不再是整条记录的 JSON；任务名后面是它的计时或最终耗时。',
+      defaultState: '运行中',
+      states: {
+        '调用中': { verb: 'status', phase: 'running', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 192 }] },
+        '运行中': { verb: 'status', phase: 'done', type: 'general-purpose', duration: '<0.1s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 192 }] },
+        '已完成': { verb: 'status', phase: 'done', type: 'general-purpose', duration: '<0.1s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'done', took: 843000 }] },
+        '已失败': { verb: 'status', phase: 'done', type: 'general-purpose', duration: '<0.1s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'failed', took: 128000, error: '上游连接中断（EOF），重试 3 次后放弃。' }] }
+      }
+    },
+    {
+      id: 'wait', title: '等待结束', tool: 'subagent_wait',
+      note: '超时返回时不再写 "Agent done"，而是说清楚它还在运行；头部的时长是等了多久，任务名后面是任务本身跑了多久。',
+      defaultState: '超时',
+      states: {
+        '等待中': { verb: 'wait', phase: 'running', type: 'general-purpose', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 200 }] },
+        '已完成': { verb: 'wait', phase: 'done', type: 'general-purpose', duration: '4m12s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'done', took: 843000 }] },
+        '超时': { verb: 'wait', phase: 'done', type: 'general-purpose', duration: '1m0s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 252, phrase: 'waitEnded' }] },
+        '回合被中断': { verb: 'wait', phase: 'canceled', label: 'wait for 计划001 Go车道实施', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 260 }] }
+      }
+    },
+    {
+      id: 'continue', title: '继续一个 subagent', tool: 'subagent_continue',
+      note: 'continue 有自己的卡片，计时从这次继续开始；原来派发它的那张卡片保持当时的结果和耗时，不会被"复活"。追加的指令只出现在 subagent 自己的视图里。',
+      defaultState: '运行中',
+      states: {
+        '运行中': { verb: 'continue', phase: 'running', type: 'general-purpose', rows: [{ kind: 'dispatch', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 41, latest: 'read docs/plan/SCHEDULED_RUNS_TRANSCRIPT/README.md', toolUses: 4 }] },
+        '已结束': { verb: 'continue', phase: 'done', type: 'general-purpose', rows: [{ kind: 'dispatch', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'done', took: 160000, latest: 'shell go test ./pkg/turn/ -count=1', toolUses: 9 }] }
+      }
+    },
+    {
+      id: 'close', title: '停止', tool: 'subagent_close',
+      note: '调用那一刻 subagent 往往还没真正停下，所以写"已请求停止"；它真正停下时，这一行和派发它的那张卡片都变成 × 加最终耗时。',
+      defaultState: '已停止',
+      states: {
+        '已停止': { verb: 'close', phase: 'done', type: 'general-purpose', duration: '<0.1s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 300, phrase: 'stopRequested' }] },
+        '随后真正停下': { verb: 'close', phase: 'done', type: 'general-purpose', duration: '<0.1s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'cancelled', took: 302000, phrase: 'stopRequested' }] },
+        '找不到': { verb: 'close', phase: 'failed', duration: '<0.1s', callError: 'running subagent not found', rows: [], countOverride: 1 }
+      }
+    },
+    {
+      id: 'list', title: '列出任务', tool: 'subagent_list',
+      note: '每条记录一行，带类型；运行中的任务名后面在计时，结束的是最终耗时。不再把每条记录的 prompt 和输出整段倒出来。没有任务时与其它工具一样显示"无输出"。',
+      defaultState: '三条',
+      states: {
+        '三条': { verb: 'list', phase: 'done', duration: '<0.1s', rows: [
+          { kind: 'query', listType: 'general-purpose', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'done', took: 843000 },
+          { kind: 'query', listType: 'general-purpose', agent: 'subagent-8c5c', title: '计划002 Web车道实施', status: 'running', run: 192 },
+          { kind: 'query', listType: 'verification', agent: 'subagent-37aa', title: '核对迁移', status: 'failed', took: 128000, error: '上游连接中断（EOF），重试 3 次后放弃。' }
+        ] },
+        '空': { verb: 'list', phase: 'done', duration: '<0.1s', rows: [], empty: true }
+      }
+    },
+    {
+      id: 'run', title: '阻塞运行一个任务', tool: 'subagent_run',
+      note: '单数写对了（今天是 "Ran 1 tasks"）。只有一个任务，头部不再写时长。',
+      defaultState: '已结束',
+      states: {
+        '运行中': { verb: 'run', phase: 'running', type: 'explore', rows: [{ kind: 'dispatch', agent: 'subagent-1a2b', title: '追踪模型选择器的数据来源', status: 'running', run: 95, latest: 'read pkg/tui/model_picker.go', toolUses: 6 }] },
+        '已结束': { verb: 'run', phase: 'done', type: 'explore', rows: [{ kind: 'dispatch', agent: 'subagent-1a2b', title: '追踪模型选择器的数据来源', status: 'done', took: 182000, latest: 'read pkg/run/config.go', toolUses: 22 }] }
+      }
+    },
+    {
+      id: 'fanout', title: '并行派发多个任务', tool: 'subagent_fanout',
+      note: '每个任务名后面是它自己的计时或最终耗时；头部的时长是整批的墙钟时间。跳过的任务不再显示成 ✓；取消的任务计入头部统计；调用本身失败时原因写在头部下面。',
+      defaultState: '混合结果',
+      states: {
+        '运行中': { verb: 'run', phase: 'running', type: 'general-purpose', rows: [
+          { kind: 'dispatch', agent: 'subagent-8c5c', title: '任务16 migrate 导入', status: 'running', run: 133, latest: 'read pkg/migrate/import.go', toolUses: 13 },
+          { kind: 'dispatch', agent: 'subagent-37aa', title: '任务17 扩展目录', status: 'done', took: 402000, latest: 'edit pkg/catalog/dir.go', toolUses: 30 },
+          { kind: 'dispatch', title: '任务18 文档', status: 'waiting' }
+        ] },
+        '混合结果': { verb: 'run', phase: 'done', type: 'general-purpose', duration: '6m41s', rows: [
+          { kind: 'dispatch', agent: 'subagent-8c5c', title: '任务16 migrate 导入', status: 'done', took: 401000, latest: 'shell go test ./pkg/migrate/ -count=1', toolUses: 48 },
+          { kind: 'dispatch', agent: 'subagent-37aa', title: '任务17 扩展目录', status: 'failed', took: 248000, latest: 'edit pkg/catalog/dir.go', toolUses: 30, error: '上游连接中断（EOF），重试 3 次后放弃。' },
+          { kind: 'dispatch', agent: 'subagent-90de', title: '任务18 文档', status: 'cancelled', took: 20000, latest: 'read README.md', toolUses: 2 },
+          { kind: 'dispatch', title: '', status: 'skipped', error: 'skipped: empty prompt' }
+        ] },
+        '调用失败': { verb: 'run', phase: 'failed', type: 'general-purpose', duration: '<0.1s', callError: 'subagent capacity is 0; main agent must execute this fanout directly', rows: [
+          { kind: 'dispatch', title: '任务16 migrate 导入', status: 'failed' },
+          { kind: 'dispatch', title: '任务17 扩展目录', status: 'failed' }
+        ] }
+      }
+    },
+    {
+      id: 'standalone', title: 'plan-reviewer（审批浮层里请另一个模型评审）', tool: 'plan review',
+      note: '今天是一行灰色的 "subagent plan-reviewer spawned plan-reviewer [subagent-…]"，主语错了，也看不到任务名。改后与其它 subagent_* 卡片同一套头部、不加主语（D13）：请求评审时就出现 Starting，reviewer 开始后 Running，结束后 Ran；还没开始就失败（例如模型没配置）是 Failed to start，原因写在头部下面。',
+      defaultState: '运行中',
+      states: {
+        '启动中': { verb: 'review', phase: 'starting', type: 'plan-reviewer', rows: [{ kind: 'dispatch', title: 'Plan review', status: 'waiting' }] },
+        '运行中': { verb: 'review', phase: 'running', type: 'plan-reviewer', rows: [{ kind: 'dispatch', agent: 'plan-review-4f1a', title: 'Plan review', status: 'running', run: 51, latest: 'read docs/plan/SUBAGENT_CONVERSATION/README.md', toolUses: 5 }] },
+        '已结束': { verb: 'review', phase: 'done', type: 'plan-reviewer', rows: [{ kind: 'dispatch', agent: 'plan-review-4f1a', title: 'Plan review', status: 'done', took: 125000, latest: 'read pkg/tui/reducer.go', toolUses: 14 }] },
+        '评审失败': { verb: 'review', phase: 'done', type: 'plan-reviewer', rows: [{ kind: 'dispatch', agent: 'plan-review-4f1a', title: 'Plan review', status: 'failed', took: 38000, latest: 'read pkg/lsp/recommend.go', toolUses: 3, error: '上游连接中断（EOF），重试 3 次后放弃。' }] },
+        '未能启动': { verb: 'review', phase: 'failed', type: 'plan-reviewer', callError: 'model zhipuai/glm-5.3-flash is not configured for this session', rows: [{ kind: 'dispatch', title: 'Plan review', status: 'failed' }] }
+      }
+    },
+    {
+      id: 'reviewer', title: 'plan-reviewer 的视图（计划 015）', tool: '审批浮层 → 请另一个模型评审',
+      note: '左边是今天截图里的样子：每条回答都包含前面所有回答（全量而非增量），没有一张工具卡片，footer 写的是主 agent 的模型。改后与其它 subagent 的视图完全一样：运行中有带它自己时长的 Working 行（每秒走），每次执行结束以 Worked for 行收尾；它调用过 session_todo 时两行都带勾选图标和清单进度（示例 2/4、4/4）（TUI 今天就有；网页今天两样都没有，计划 015 的 R7 补上）；工具卡片齐全、每条回答只有这一步的话、footer 左侧是你选的评审模型和它配置里的推理强度、右侧是它自己的上下文窗口统计（窗口按评审模型算；数值为示例）。网页的 subagent 视图同样显示模型和上下文统计。评审的回答只在这里和审批浮层里，不再印进主视图。',
+      states: { '现状': 'before', '改后 · 运行中': 'running', '改后 · 已结束': 'ended' }, defaultState: '现状', custom: 'reviewer'
+    },
+    {
+      id: 'exitplan', title: '退出计划模式审批（网页，计划 016）', tool: 'exit_plan_mode',
+      note: '网页今天只有一行标题为 "exit_plan_mode" 的通用审批，看不到计划，没有"批准并清空上下文"，也不能请另一个模型评审。改后与 TUI 的审批浮层一一对应（左边是 TUI 浮层作参照）。评审结果存在会话里，TUI 和网页看到的是同一份。',
+      states: { '现状': 'before', '待决定': 'idle', '选择评审模型': 'pick', '评审进行中': 'running', '已有评审': 'reviewed' }, defaultState: '待决定', custom: 'exitplan'
+    },
+    {
+      id: 'nested', title: 'subagent 自己派发 subagent', tool: '嵌套 subagent_run',
+      note: '这张卡片只出现在派发它的 subagent 的视图里（今天会漏进主视图）。点任务行进入孙 agent 的视图。',
+      defaultState: '运行中', nested: true,
+      states: {
+        '运行中': { verb: 'run', phase: 'running', type: 'explore', rows: [{ kind: 'dispatch', agent: 'subagent-77c0', title: '查找所有调用点', status: 'running', run: 37, latest: 'shell rg -n "subagentDisplayTitle" pkg', toolUses: 3 }] }
+      }
+    }
+  ];
+
+  // ---------- clocks: the same two formats the terminal already uses ----------
+  // formatWorkingElapsed (pkg/tui/run.go) for a running clock, formatDuration
+  // (pkg/tui/render.go) for a final one.
+  function workingElapsed(ms) {
+    var t = Math.max(0, Math.floor(ms / 1000));
+    if (t < 60) return t + 's';
+    var s = t % 60, m = Math.floor(t / 60);
+    if (m < 60) return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+    var h = Math.floor(m / 60); m = m % 60;
+    return h + 'h ' + (m < 10 ? '0' : '') + m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+  }
+  function finalDuration(ms) {
+    if (ms <= 0) return '';
+    if (ms < 100) return '<0.1s';
+    var sec = ms / 1000;
+    if (sec >= 60) return Math.floor(sec / 60) + 'm' + (Math.floor(sec) % 60) + 's';
+    if (sec >= 10) return Math.floor(sec) + 's';
+    return sec.toFixed(1) + 's';
+  }
+  var opened = Date.now();
+  function clockHTML(row, cls) {
+    if (row.took) return '<span class="' + cls + '">' + ' · ' + finalDuration(row.took) + '</span>';
+    if (row.run != null) {
+      if (!row._start) row._start = opened - row.run * 1000;
+      return '<span class="' + cls + '" data-start="' + row._start + '"> · ' + workingElapsed(Date.now() - row._start) + '</span>';
+    }
+    return '';
+  }
+
+  // ---------- wording (terminal is English only; web follows the viewer) ----------
+  function tasks(n, type, lang, withType) {
+    var t = (withType && type) ? type + ' ' : '';
+    if (lang === 'zh') return n + ' 个 ' + t + '任务';
+    return n + ' ' + t + (n === 1 ? 'task' : 'tasks');
+  }
+  var HEAD = {
+    en: {
+      run: { running: function (n, t) { return 'Running ' + tasks(n, t, 'en', true) + '…'; }, done: function (n, t) { return 'Ran ' + tasks(n, t, 'en', true); }, failed: function (n, t) { return 'Failed to run ' + tasks(n, t, 'en', true); } },
+      send: { starting: function (n, t) { return 'Starting ' + tasks(n, t, 'en', true) + ' in background…'; }, running: function (n, t) { return 'Running ' + tasks(n, t, 'en', true) + ' in background…'; }, done: function (n, t) { return 'Ran ' + tasks(n, t, 'en', true) + ' in background'; }, failed: function (n, t) { return 'Failed to start ' + tasks(n, t, 'en', true) + ' in background'; } },
+      'continue': { running: function (n, t) { return 'Continuing ' + tasks(n, t, 'en', true) + '…'; }, done: function (n, t) { return 'Continued ' + tasks(n, t, 'en', true); }, failed: function (n, t) { return 'Failed to continue ' + tasks(n, t, 'en', true); } },
+      status: { running: function (n) { return 'Checking ' + tasks(n, '', 'en', false) + '…'; }, done: function (n, t) { return 'Checked ' + tasks(n, t, 'en', true); }, failed: function (n) { return 'Failed to check ' + tasks(n, '', 'en', false); } },
+      wait: { running: function (n, t) { return 'Waiting for ' + tasks(n, t, 'en', true) + '…'; }, done: function (n, t) { return 'Waited for ' + tasks(n, t, 'en', true); }, failed: function (n) { return 'Failed to wait for ' + tasks(n, '', 'en', false); } },
+      close: { running: function (n) { return 'Stopping ' + tasks(n, '', 'en', false) + '…'; }, done: function (n, t) { return 'Stopped ' + tasks(n, t, 'en', true); }, failed: function (n) { return 'Failed to stop ' + tasks(n, '', 'en', false); } },
+      list: { running: function () { return 'Listing tasks…'; }, done: function (n) { return 'Listed ' + tasks(n, '', 'en', false); }, failed: function () { return 'Failed to list tasks'; } },
+      review: { starting: function (n, t) { return 'Starting ' + tasks(n, t, 'en', true) + '…'; }, running: function (n, t) { return 'Running ' + tasks(n, t, 'en', true) + '…'; }, done: function (n, t) { return 'Ran ' + tasks(n, t, 'en', true); }, failed: function (n, t) { return 'Failed to start ' + tasks(n, t, 'en', true); } }
+    },
+    zh: {
+      run: { running: function (n, t) { return '正在运行 ' + tasks(n, t, 'zh', true) + '…'; }, done: function (n, t) { return '已运行 ' + tasks(n, t, 'zh', true); }, failed: function (n, t) { return '未能运行 ' + tasks(n, t, 'zh', true); } },
+      send: { starting: function (n, t) { return '正在后台启动 ' + tasks(n, t, 'zh', true) + '…'; }, running: function (n, t) { return '正在后台运行 ' + tasks(n, t, 'zh', true) + '…'; }, done: function (n, t) { return '已在后台运行 ' + tasks(n, t, 'zh', true); }, failed: function (n, t) { return '未能在后台启动 ' + tasks(n, t, 'zh', true); } },
+      'continue': { running: function (n, t) { return '正在继续 ' + tasks(n, t, 'zh', true) + '…'; }, done: function (n, t) { return '已继续 ' + tasks(n, t, 'zh', true); }, failed: function (n, t) { return '未能继续 ' + tasks(n, t, 'zh', true); } },
+      status: { running: function (n) { return '正在查看 ' + tasks(n, '', 'zh', false) + '…'; }, done: function (n, t) { return '已查看 ' + tasks(n, t, 'zh', true); }, failed: function (n) { return '未能查看 ' + tasks(n, '', 'zh', false); } },
+      wait: { running: function (n, t) { return '正在等待 ' + tasks(n, t, 'zh', true) + '…'; }, done: function (n, t) { return '已等待 ' + tasks(n, t, 'zh', true); }, failed: function (n) { return '未能等待 ' + tasks(n, '', 'zh', false); } },
+      close: { running: function (n) { return '正在停止 ' + tasks(n, '', 'zh', false) + '…'; }, done: function (n, t) { return '已停止 ' + tasks(n, t, 'zh', true); }, failed: function (n) { return '未能停止 ' + tasks(n, '', 'zh', false); } },
+      list: { running: function () { return '正在列出任务…'; }, done: function (n) { return '已列出 ' + tasks(n, '', 'zh', false); }, failed: function () { return '未能列出任务'; } },
+      review: { starting: function (n, t) { return '正在启动 ' + tasks(n, t, 'zh', true) + '…'; }, running: function (n, t) { return '正在运行 ' + tasks(n, t, 'zh', true) + '…'; }, done: function (n, t) { return '已运行 ' + tasks(n, t, 'zh', true); }, failed: function (n, t) { return '未能启动 ' + tasks(n, t, 'zh', true); } }
+    }
+  };
+  var PHRASE = {
+    en: { waitEnded: 'still running when the wait ended', stopRequested: 'stop requested' },
+    zh: { waitEnded: '等待结束时仍在运行', stopRequested: '已请求停止' }
+  };
+  var WORDS = {
+    en: { latest: 'latest: ', moreTerm: function (n) { return '… +' + n + ' tool uses'; }, more: function (n) { return '+' + n + (n === 1 ? ' tool use' : ' tool uses'); }, emptyTask: '(empty task)', noOutput: '(no output)', canceled: 'Canceled', open: 'Open', done: 'done', failed: 'failed', cancelled: 'cancelled', skipped: 'skipped', waiting: 'waiting' },
+    zh: { latest: '最近：', more: function (n) { return '另 ' + n + ' 次工具调用'; }, emptyTask: '（空任务）', noOutput: '（无输出）', canceled: '已取消', open: '查看', done: '个完成', failed: '个失败', cancelled: '个取消', skipped: '个跳过', waiting: '等待开始' }
+  };
+
+  function queryPhrase(row, lang) {
+    var parts = [];
+    if (row.listType) parts.push(row.listType);
+    if (row.phrase) parts.push(PHRASE[lang][row.phrase]);
+    return parts.join(' · ');
+  }
+  function breakdown(state, lang) {
+    if (state.phase !== 'done') return '';
+    var dispatch = state.rows.length && state.rows[0].kind === 'dispatch';
+    if (!dispatch) return '';
+    var c = { done: 0, failed: 0, cancelled: 0, skipped: 0 };
+    state.rows.forEach(function (r) { if (c.hasOwnProperty(r.status)) c[r.status]++; });
+    if (c.failed + c.cancelled + c.skipped === 0) return '';
+    var parts = [];
+    ['done', 'failed', 'cancelled', 'skipped'].forEach(function (k) {
+      if (c[k] > 0 || k === 'done') parts.push(lang === 'zh' ? c[k] + ' ' + WORDS.zh[k] : c[k] + ' ' + k);
+    });
+    return lang === 'zh' ? parts.join('、') : parts.join(', ');
+  }
+  // The header names a duration only when the rows do not already: a query
+  // card's call took that long; a multi-task fanout took that long as a batch.
+  function headerDuration(state) {
+    if (!state.duration) return '';
+    var dispatch = !state.rows.length || state.rows[0].kind === 'dispatch';
+    if (dispatch && state.rows.length <= 1 && !state.countOverride) return '';
+    return state.duration;
+  }
+  function headText(state, lang) {
+    if (state.phase === 'canceled') {
+      return lang === 'zh' ? WORDS.zh.canceled + ' · ' + state.label : 'Canceled ' + state.label;
+    }
+    var n = state.countOverride || state.rows.length;
+    return HEAD[lang][state.verb][state.phase](n, state.type || '');
+  }
+
+  // ---------- terminal renderer ----------
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function tIcon(status) {
+    if (status === 'done') return '<span class="t-ok">✓</span> ';
+    if (status === 'failed') return '<span class="t-bad">✗</span> ';
+    if (status === 'cancelled') return '<span class="t-bad">×</span> ';
+    if (status === 'skipped') return '<span class="t-warn">!</span> ';
+    return '';
+  }
+  function renderTerm(state) {
+    var final = state.phase !== 'running' && state.phase !== 'starting';
+    var head = headText(state, 'en');
+    var extra = breakdown(state, 'en');
+    if (extra) head += ' · ' + extra;
+    var dur = headerDuration(state);
+    if (final && dur) head += ' · ' + dur;
+    var out = '<span class="t-hdr">' + (final ? '●' : '○') + ' ' + esc(head) + '</span>\n';
+    if (state.callError) out += '    ' + esc(state.callError) + '\n';
+    if (state.empty) out += '    (no output)\n';
+    state.rows.forEach(function (r) {
+      var lines = [];
+      var title = r.title || WORDS.en.emptyTask;
+      lines.push('  └ ' + tIcon(r.status) + esc(title) + clockHTML(r, 't-clock'));
+      if (r.kind === 'dispatch') {
+        if (r.error) lines.push('      ' + esc(r.error));
+        if (r.latest) {
+          lines.push('      └ ' + esc(r.latest));
+          if (r.toolUses > 1) lines.push('        ' + WORDS.en.moreTerm(r.toolUses - 1));
+        }
+      } else {
+        var p = queryPhrase(r, 'en');
+        if (p) lines.push('      · ' + esc(p));
+        if (r.error) lines.push('      ' + esc(r.error));
+      }
+      var block = lines.join('\n');
+      out += r.agent ? '<span class="trow" role="button" tabindex="0" data-agent="' + esc(r.agent) + '">' + block + '</span>\n' : block + '\n';
+    });
+    return '<pre>' + out + '</pre>';
+  }
+
+  // ---------- web renderer ----------
+  var SVG = {
+    ok: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#067647" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>',
+    bad: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6M15 9l-6 6"/></svg>',
+    cancel: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#667085" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m6 18 12-12"/></svg>',
+    skip: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#B54708" stroke-width="2" aria-hidden="true"><path d="M12 4 21 20H3z"/><path d="M12 10v4M12 17h.01"/></svg>',
+    run: '<svg class="ico spin" viewBox="0 0 24 24" fill="none" stroke="#1F4A9E" stroke-width="2" aria-hidden="true"><path d="M21 12a9 9 0 1 1-9-9"/></svg>',
+    wait: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#98A2B3" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-dasharray="3 3"/></svg>',
+    bot: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#475467" stroke-width="2" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>',
+    botDone: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#1F4A9E" stroke-width="2" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>',
+    botBad: '<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="#B42318" stroke-width="2" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01"/></svg>'
+  };
+  function wIcon(status) {
+    if (status === 'done') return SVG.ok;
+    if (status === 'failed') return SVG.bad;
+    if (status === 'cancelled') return SVG.cancel;
+    if (status === 'skipped') return SVG.skip;
+    if (status === 'waiting') return SVG.wait;
+    return SVG.run;
+  }
+  function renderWeb(state, lang) {
+    var final = state.phase !== 'running' && state.phase !== 'starting';
+    var head = headText(state, lang);
+    var extra = breakdown(state, lang);
+    if (extra) head += ' · ' + extra;
+    var dur = headerDuration(state);
+    var headIcon = !final ? SVG.run : (state.phase === 'failed' ? SVG.botBad : SVG.botDone);
+    var html = '<div class="wcard"><div class="whead">' + headIcon + '<span class="wtitle">' + esc(head) + '</span>' +
+      (final && dur ? '<span class="wdur">' + esc(dur) + '</span>' : '') + '</div>';
+    if (state.callError) html += '<div class="wcallerr">' + esc(state.callError) + '</div>';
+    if (state.empty) {
+      html += '<div class="wempty">' + WORDS[lang].noOutput + '</div>';
+    } else if (state.rows.length) {
+      html += '<div class="wrows">';
+      state.rows.forEach(function (r) {
+        var title = r.title || WORDS[lang].emptyTask;
+        var sub = '';
+        if (r.kind === 'dispatch') {
+          if (r.latest) sub = WORDS[lang].latest + r.latest + (r.toolUses > 1 ? ' · ' + WORDS[lang].more(r.toolUses - 1) : '');
+          else if (r.status === 'waiting') sub = WORDS[lang].waiting;
+        } else {
+          sub = queryPhrase(r, lang);
+        }
+        var why = r.error ? '<span class="wwhy' + (r.status === 'skipped' ? ' skip' : '') + '">' + esc(r.error) + '</span>' : '';
+        var inner = wIcon(r.status) + '<span class="wmain"><span class="wname" title="' + esc(title) + '"><span class="wt">' + esc(title) + '</span>' + clockHTML(r, 'wclock') + '</span>' +
+          (sub ? '<span class="wsub">' + esc(sub) + '</span>' : '') + why + '</span>';
+        html += r.agent
+          ? '<button type="button" class="wrow" data-agent="' + esc(r.agent) + '">' + inner + '<span class="wopen">' + WORDS[lang].open + '</span></button>'
+          : '<div class="wrow">' + inner + '</div>';
+      });
+      html += '</div>';
+    }
+    return html + '</div>';
+  }
+
+  // ---------- the "before / after" pair from the screenshots ----------
+  var BEFORE_TERM =
+    '<span class="t-hdr">● Sent agent 计划001 Go车道实施 general-purpose · &lt;0.1s</span>\n' +
+    '  └ output:\n\n' +
+    '    ```json\n    {\n      "output": "{\\"agent_id\\":\\"3485e6ea-acfe-4f7f-b14b-8e9f2e5082ed\\",\\"agent_kind\\":\\"typed\\",\\"agent_type\\":\\"general-purpose\\",\\"parent_run_id\\":\\"b50b0d92-…\\",…}"\n    }\n    ```\n\n' +
+    '<span class="t-old">subagent general-purpose spawned general-purpose [subagent-6e5c042d-1960-4188-a3b9-b06df91f066b]</span>\n\n' +
+    '<span class="t-hdr">● Agent status subagent-6e5c042d-1960-4188-a3b9-b06df91f066b &lt;0.1s</span>\n' +
+    '  └ output:\n\n' +
+    '    ```json\n    {\n      "output": "{\\"agent_id\\":…,\\"task\\":\\"你在 /Users/doudou/workspace/… 仓库执行 docs/plan/SCHEDULED_RUNS_TRANSCRIPT/001-heartbeat-turns.md 的 Go 部分。先完整阅读…（整段 prompt）\\",\\"status\\":\\"running\\",…}"\n    }\n    ```';
+  var AFTER_SEND = { verb: 'send', phase: 'running', type: 'general-purpose', rows: [{ kind: 'dispatch', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 64, latest: 'read docs/plan/SCHEDULED_RUNS_TRANSCRIPT/001-heartbeat-turns.md', toolUses: 2 }] };
+  var AFTER_STATUS = { verb: 'status', phase: 'done', type: 'general-purpose', duration: '<0.1s', rows: [{ kind: 'query', agent: 'subagent-6e5c', title: '计划001 Go车道实施', status: 'running', run: 64 }] };
+  var BEFORE_WEB =
+    '<div class="wcard"><div class="whead">' + SVG.botDone + '<span class="wtitle" style="font-family:ui-monospace,Menlo,monospace;font-weight:500;font-size:12px;word-break:break-all">ran subagent_send {"subagent_type":"general-purpose","task":"你在 /Users/doudou/workspace/unionj-cloud/forebrain-harness 仓库执行 docs/plan/SCHEDULED_RUNS_TRANSCRIPT/001-heartbeat-turns.md 的 Go 部分。先完整阅读该计划文件与同目录 README.md 的全局规则…"}</span></div>' +
+    '<div class="wempty" style="font-family:ui-monospace,Menlo,monospace;color:#344054;white-space:pre-wrap;word-break:break-all">output:\n```json\n{ "output": "{\\"agent_id\\":\\"3485e6ea-…\\",…}" }\n```</div></div>' +
+    '<div style="height:10px"></div>' +
+    '<div class="wcard"><div class="whead">' + SVG.bot + '<span class="wtitle" style="font-weight:500">已派发子代理 general-purpose<br><span style="color:#667085;font-size:11px">[subagent-6e5c042d-1960-4188-a3b9-b06df91f066b] 计划001 Go车道实施</span></span><span class="wdur" style="color:#1F4A9E">查看</span></div></div>';
+
+  // ---------- assembly ----------
+  var lang = 'zh';
+  var current = {};
+  var root = document.getElementById('scenarios');
+
+  function stateButtons(scn) {
+    var names = Object.keys(scn.states);
+    if (names.length < 2) return '';
+    return '<div class="state" role="group" aria-label="状态">' + names.map(function (n) {
+      return '<button type="button" data-scn="' + scn.id + '" data-state="' + esc(n) + '" aria-pressed="' + (current[scn.id] === n) + '">' + esc(n) + '</button>';
+    }).join('') + '</div>';
+  }
+
+  // ---------- plan-reviewer view (plan 015) ----------
+  var REVIEW_TEXTS = [
+    '我将独立核查这份计划的每一处代码引用。先并行探查 LSP 推荐链路与 TUI 上下文构造的关键代码。',
+    '关键发现：ConversationSessionIDFromContext（pkg/tool/state.go:249-256）在未显式注入时有回退到 AgentSessionIDFromContext 的逻辑——这直接影响计划"断点二"是否成立。我需要核对工作区状态和其余引用点。',
+    '工作区三个核心文件都是干净的、已提交状态——所以 state.go 里的回退逻辑就是 LSP 提交本身的一部分。这与计划"断点二"的描述矛盾。让我系统核对全部行号引用。'
+  ];
+  var REVIEW_FINAL = '核查完毕，证据链闭合。结论：批准（需修改）——核心修复证据确凿、根因正确；但"断点二"是对代码的误读：回退逻辑自 2026-09-28 起就存在。建议删除第 2 步，并补一条 fork 子进程的测试。';
+  var reviewerStart = 0;
+  function reviewerTerm(mode) {
+    var after = mode !== 'before';
+    var out = '';
+    var thoughts = ['Thought for 41s', 'Thought for 25s'];
+    var tools = [
+      ['Read pkg/tool/state.go · lines 240-260', 'Ran rg -n "ConversationSessionIDFromContext" pkg'],
+      ['Ran git status --short pkg/tool pkg/lsp pkg/tui', 'Read pkg/tui/chat_session.go · lines 1680-1720']
+    ];
+    var acc = '';
+    for (var i = 0; i < REVIEW_TEXTS.length; i++) {
+      acc = after ? REVIEW_TEXTS[i] : (acc + REVIEW_TEXTS[i]);
+      out += '<span style="color:#5FD7FF">●</span> ' + esc(acc) + '\n\n';
+      if (i < thoughts.length) {
+        if (after) {
+          for (var j = 0; j < tools[i].length; j++) out += '<span class="t-hdr">●</span> <span style="color:#FFAF00">' + esc(tools[i][j]) + '</span>\n';
+          out += '\n';
+        }
+        out += '<span style="color:#AFAFFF">▲ ' + thoughts[i] + '</span>\n  …\n\n';
+      }
+    }
+    if (!reviewerStart) reviewerStart = Date.now() - 49000;
+    if (mode === 'ended') {
+      out += '<span style="color:#5FD7FF">●</span> ' + esc(REVIEW_FINAL) + '\n\n';
+      out += '<span style="color:#9AA3B2">─ Worked for 2m 05s · <span style="color:#5FD75F">☑</span>4/4 · 16:42 ' + '─'.repeat(24) + '</span>\n\n';
+    } else {
+      out += '<span style="color:#9AA3B2">/ Working (<span data-start="' + reviewerStart + '" data-fmt="bare">' + workingElapsed(Date.now() - reviewerStart) + '</span>)' + (after ? ' · <span style="color:#5FD75F">☑</span>2/4 · 核对全部行号引用' : '') + '</span>\n\n';
+    }
+    var gauge = mode === 'ended' ? '31%/200K' : '9%/200K';
+    var footer = after
+      ? 'viewing plan-reviewer · e358 · esc to return · zhipuai/glm-5.3-flash · high' + '                    ' + gauge
+      : 'viewing plan-reviewer · e358 · esc to return · <span style="color:#FF5F5F;text-decoration:underline">zhipuai/glm-5.3 · xhigh</span>' + '                    ' + '<span style="color:#FF5F5F">（右侧没有上下文统计）</span>';
+    return '<pre>' + out + '<span style="color:#9AA3B2">─────────────────────────────────────────</span>\n› \n<span style="color:#9AA3B2">─────────────────────────────────────────</span>\n<span style="color:#B4BCC9">' + footer + '</span></pre>';
+  }
+  function reviewerWeb(mode, lang) {
+    var after = mode !== 'before';
+    var zh = lang === 'zh';
+    var gauge = mode === 'ended' ? '31%/200K' : '9%/200K';
+    var status = mode === 'ended' ? (zh ? '已完成' : 'done') : (zh ? '运行中' : 'running');
+    var head = '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;padding-bottom:8px;border-bottom:1px solid #E4E7EC;margin-bottom:10px">' +
+      '<span style="font-weight:600">plan-reviewer · Plan review</span>' +
+      '<span style="font-size:12px;color:#1F4A9E">' + status + '</span>' +
+      (after ? '<span style="font-size:12px;color:#667085">zhipuai/glm-5.3-flash · high</span><span style="flex:1"></span><span style="font-size:12px;color:#101828;font-variant-numeric:tabular-nums">' + gauge + '</span>'
+             : '<span style="font-size:12px;color:#B42318">' + (zh ? '（今天不显示模型和上下文统计）' : '(no model or context gauge today)') + '</span><span style="font-size:12px;color:#667085">↑ 18.2k ↓ 1.1k</span>') + '</div>';
+    var body = '';
+    for (var i = 0; i < REVIEW_TEXTS.length; i++) {
+      body += '<p style="margin:0 0 8px;font-size:13px">' + esc(REVIEW_TEXTS[i]) + '</p>';
+      if (i < 2) body += '<div style="font-size:12px;color:#667085;margin:0 0 8px">▸ ' + (zh ? '思考' : 'Thought') + (after ? ' · ' + (zh ? '2 次工具调用卡片' : '2 tool call cards') : '') + '</div>';
+    }
+    if (!reviewerStart) reviewerStart = Date.now() - 49000;
+    if (mode === 'ended') {
+      body += '<p style="margin:0 0 8px;font-size:13px">' + esc(REVIEW_FINAL) + '</p>';
+      body += '<div style="margin-top:10px;display:flex;align-items:center;gap:10px;font-size:11px;color:#667085"><span style="height:1px;width:12px;background:#D0D5DD"></span><span style="font-family:ui-monospace,Menlo,monospace">' + (zh ? '已工作 2m 05s' : 'Worked for 2m 05s') + '</span><span style="font-family:ui-monospace,Menlo,monospace">' + '<svg viewBox="0 0 24 24" fill="none" stroke="#067647" stroke-width="2.25" style="width:1em;height:1em;vertical-align:-0.14em;margin-right:0.2em" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></svg>' + '4/4</span><span style="font-family:ui-monospace,Menlo,monospace">16:42</span><span style="height:1px;flex:1;background:#D0D5DD"></span></div>';
+    } else {
+      var dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#1F4A9E"></span>';
+      body += after
+        ? '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#667085">' + dot + (zh ? '正在工作（' : 'Working (') + '<span data-start="' + reviewerStart + '" data-fmt="bare">' + workingElapsed(Date.now() - reviewerStart) + '</span>' + (zh ? '）' : ')') + '<span style="font-family:ui-monospace,Menlo,monospace">' + '<svg viewBox="0 0 24 24" fill="none" stroke="#067647" stroke-width="2.25" style="width:1em;height:1em;vertical-align:-0.14em;margin-right:0.2em" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></svg>' + '2/4</span><span>' + (zh ? '核对全部行号引用' : 'Check every line reference') + '</span></div>'
+        : '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#667085">' + dot + (zh ? '正在工作…' : 'Working…') + ' <span style="color:#B42318">' + (zh ? '（今天没有时长，结束后也没有"已工作"行）' : '(no elapsed time today, and no "Worked for" line when it ends)') + '</span></div>';
+    }
+    return head + body;
+  }
+
+  // ---------- exit-plan approval (plan 016) ----------
+  var PLAN_MD = '## 计划：删除 LSP 推荐的 subagent 排除门\n\n1. 删除 pkg/lsp/recommend.go 里对 subagent/fork 会话的排除判断\n2. 推荐事件按会话 id 投递到父界面\n3. 补测试：TestRecommendFiresForSubagentEdits\n\n验证：CGO_ENABLED=1 go test -tags fts5 ./pkg/lsp ./pkg/tui -count=1';
+  var REVIEW_MD = '**结论：批准（需修改）**——核心修复证据确凿、根因正确；但"断点二"是对代码的误读：回退逻辑自 2026-09-28 起就存在。建议删除第 2 步，并补一条 fork 子进程的测试。';
+  function exitPlanTerm() {
+    return '<pre><span class="t-hdr">Exit plan mode</span>\n\n' + esc(PLAN_MD) + '\n\n❯ 1. Yes, clear context (42% used) and proceed\n  2. Yes, proceed\n  3. No, keep planning\n  4. Ask another model to review this plan</pre>';
+  }
+  function btn(label, primary) {
+    return '<button type="button" style="font:inherit;font-size:12.5px;padding:6px 10px;border-radius:8px;border:1px solid ' + (primary ? '#1F4A9E' : '#D0D5DD') + ';background:' + (primary ? '#1F4A9E' : '#FFFFFF') + ';color:' + (primary ? '#FFFFFF' : '#344054') + ';cursor:pointer">' + label + '</button>';
+  }
+  function exitPlanWeb(stateName, lang) {
+    var zh = lang === 'zh';
+    if (stateName === 'before') {
+      return '<div class="wcard" style="padding:10px 12px"><div style="font-size:13px;font-weight:600">exit_plan_mode</div><div style="font-size:12px;color:#667085">a3f9c2e1-77d0-4c1b-9a51-2f0e6c1d8b44</div>' +
+        '<div style="display:flex;gap:8px;margin-top:8px">' + btn(zh ? '拒绝' : 'Deny') + btn(zh ? '批准一次' : 'Approve once', true) + '</div>' +
+        '<input disabled placeholder="' + (zh ? '其他（可选）' : 'Other (optional)') + '" style="margin-top:8px;width:100%;font:inherit;font-size:12px;padding:5px 8px;border:1px solid #E4E7EC;border-radius:6px"></div>';
+    }
+    var html = '<div class="wcard"><div class="whead"><span class="wtitle">' + (zh ? '退出计划模式' : 'Exit plan mode') + '</span><span class="wdur">' + (zh ? '等待你的决定' : 'Waiting for your decision') + '</span></div>' +
+      '<div style="border-top:1px solid #E4E7EC;padding:10px 12px;max-height:220px;overflow:auto;font-size:13px;white-space:pre-wrap;background:#FAFAFA">' + esc(PLAN_MD) + '</div>';
+    if (stateName === 'reviewed') {
+      html += '<div style="border-top:1px solid #E4E7EC;padding:10px 12px"><div style="font-size:12px;color:#667085;margin-bottom:4px">' + (zh ? '评审 · zhipuai/glm-5.3-flash · 2m5s' : 'Review · zhipuai/glm-5.3-flash · 2m5s') + '</div><div style="font-size:13px">' + esc(REVIEW_MD).replace(/\*\*(.+?)\*\*/, '<strong>$1</strong>') + '</div></div>';
+    }
+    html += '<div style="border-top:1px solid #E4E7EC;padding:10px 12px">';
+    if (stateName === 'running') {
+      html += '<div style="display:flex;align-items:center;gap:8px;font-size:13px">' + SVG.run + '<span>' + (zh ? 'zhipuai/glm-5.3-flash 正在评审这份计划…' : 'zhipuai/glm-5.3-flash is reviewing this plan…') + '</span><span style="flex:1"></span>' + btn(zh ? '停止' : 'Stop') + '</div>' +
+        '<div style="font-size:12px;color:#667085;margin-top:6px">' + (zh ? '时间线里的"正在运行 1 个 plan-reviewer 任务…"卡片可以点进去看它在做什么。' : 'Open the "Running 1 plan-reviewer task…" card in the timeline to watch it work.') + '</div>';
+    } else {
+      html += '<div style="display:flex;flex-wrap:wrap;gap:8px">' + btn(zh ? '批准并清空上下文（已用 42%）' : 'Approve and clear context (42% used)', true) + btn(zh ? '批准' : 'Approve') + btn(zh ? '继续规划' : 'Keep planning') + btn(zh ? '请其他模型评审' : 'Ask another model to review') + '</div>' +
+        '<input placeholder="' + (zh ? '继续规划时告诉规划模型要改什么（可选）' : 'What should the plan change? (optional, sent when you keep planning)') + '" style="margin-top:8px;width:100%;font:inherit;font-size:12px;padding:5px 8px;border:1px solid #E4E7EC;border-radius:6px">';
+      if (stateName === 'pick') {
+        var models = [['zhipuai/glm-5.3', true], ['zhipuai/glm-5.3-flash', false], ['deepseek/deepseek-chat', false]];
+        html += '<div style="margin-top:8px;border:1px solid #E4E7EC;border-radius:8px;overflow:hidden">' + models.map(function (m) {
+          return '<div style="display:flex;justify-content:space-between;padding:7px 10px;font-size:13px;border-top:1px solid #F2F4F7"><span>' + m[0] + '</span>' + (m[1] ? '<span style="font-size:12px;color:#667085">' + (zh ? '当前' : 'current') + '</span>' : '') + '</div>';
+        }).join('') + '</div>';
+      }
+    }
+    return html + '</div></div>';
+  }
+
+  function body(scn) {
+    var name = current[scn.id];
+    if (scn.custom === 'reviewer') {
+      var mode = scn.states[name];
+      return '<div><p class="surface-label">终端 · subagent 视图</p><div class="term">' + reviewerTerm(mode) + '</div></div>' +
+             '<div><p class="surface-label">网页 · subagent 视图</p><div class="webpane">' + reviewerWeb(mode, lang) + '</div></div>';
+    }
+    if (scn.custom === 'exitplan') {
+      var key = scn.states[name];
+      return '<div><p class="surface-label">终端 · 审批浮层（参照，不改）</p><div class="term">' + exitPlanTerm() + '</div></div>' +
+             '<div><p class="surface-label">网页 · ' + (key === 'before' ? '现状' : '改后') + '</p><div class="webpane">' + exitPlanWeb(key, lang) + '</div></div>';
+    }
+    if (scn.special) {
+      if (name === '现状') {
+        return '<div><p class="surface-label">终端 · 现状</p><div class="term"><pre>' + BEFORE_TERM + '</pre></div></div>' +
+               '<div><p class="surface-label">网页 · 现状</p><div class="webpane">' + BEFORE_WEB + '</div></div>';
+      }
+      return '<div><p class="surface-label">终端 · 改后</p><div class="term">' + renderTerm(AFTER_SEND) + '<pre>\n</pre>' + renderTerm(AFTER_STATUS) + '</div></div>' +
+             '<div><p class="surface-label">网页 · 改后</p><div class="webpane">' + renderWeb(AFTER_SEND, lang) + '<div style="height:10px"></div>' + renderWeb(AFTER_STATUS, lang) + '</div></div>';
+    }
+    var st = scn.states[name];
+    var term = renderTerm(st);
+    var web = renderWeb(st, lang);
+    if (scn.nested) {
+      term = '<div class="nest-label">— 在 general-purpose · 8c5c 的视图里 —</div>' + term;
+      web = '<div class="nest"><div class="nest-label">' + (lang === 'zh' ? '在 general-purpose · 8c5c 的视图里' : 'Inside the view of general-purpose · 8c5c') + '</div>' + web + '</div>';
+    }
+    return '<div><p class="surface-label">终端</p><div class="term">' + term + '</div></div>' +
+           '<div><p class="surface-label">网页</p><div class="webpane">' + web + '</div></div>';
+  }
+
+  function render() {
+    root.innerHTML = SCENARIOS.map(function (scn) {
+      if (!current[scn.id]) current[scn.id] = scn.defaultState;
+      return '<section class="scn" id="' + scn.id + '">' +
+        '<div class="scn-head"><div><h2>' + esc(scn.title) + ' <code>' + esc(scn.tool) + '</code></h2><p class="scn-note">' + esc(scn.note) + '</p></div>' + stateButtons(scn) + '</div>' +
+        '<div class="pair">' + body(scn) + '</div></section>';
+    }).join('');
+  }
+
+  // Running clocks advance once a second, in place, like the real surfaces.
+  setInterval(function () {
+    var now = Date.now();
+    var clocks = root.querySelectorAll('[data-start]');
+    for (var i = 0; i < clocks.length; i++) {
+      var bare = clocks[i].getAttribute('data-fmt') === 'bare';
+      clocks[i].textContent = (bare ? '' : ' · ') + workingElapsed(now - Number(clocks[i].getAttribute('data-start')));
+    }
+  }, 1000);
+
+  var toastTimer = 0;
+  function toast(msg) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.hidden = true; }, 1800);
+  }
+
+  root.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-scn]');
+    if (b) { current[b.getAttribute('data-scn')] = b.getAttribute('data-state'); render(); return; }
+    var row = e.target.closest('[data-agent]');
+    if (row) toast('进入 ' + row.getAttribute('data-agent') + ' 的视图');
+  });
+  root.addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('trow')) {
+      e.preventDefault();
+      toast('进入 ' + e.target.getAttribute('data-agent') + ' 的视图');
+    }
+  });
+  function setLang(next) {
+    lang = next;
+    document.getElementById('lang-zh').setAttribute('aria-pressed', String(next === 'zh'));
+    document.getElementById('lang-en').setAttribute('aria-pressed', String(next === 'en'));
+    render();
+  }
+  document.getElementById('lang-zh').addEventListener('click', function () { setLang('zh'); });
+  document.getElementById('lang-en').addEventListener('click', function () { setLang('en'); });
+
+  render();
+})();
+</script>

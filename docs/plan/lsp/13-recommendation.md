@@ -93,7 +93,7 @@ type pendingRec struct {
 
 在任务 08 `DidWrite` 步骤 1 的 `gated()` 判断**之后**、`eff.AfterEdit` 判断**之前**加一行 `m.considerRecommendation(ctx, changes)`（推荐与「编辑后诊断」开关无关）。`considerRecommendation` 必须**立即返回**，判断全部在内存里完成，任何需要 I/O 的部分放进 goroutine：
 
-1. 条件（规范 §10.1，逐条）：`EffectiveLSP().Recommendations`；`!loadRecState(ws).Disabled`（这一步读文件，所以整个 `considerRecommendation` 的剩余部分放进 `go func()`，传入 `context.WithoutCancel(ctx)`）；`m.opts.Trusted`；`!tool.IsForkChildFromContext(ctx)`；`tool.SubagentTypeFromContext(ctx) == ""`；`sid := tool.ConversationSessionIDFromContext(ctx)` 非空且 `!m.recommended[sid]`；`m.listener != nil`。
+1. 条件（规范 §10.1，逐条）：`EffectiveLSP().Recommendations`；`!loadRecState(ws).Disabled`（这一步读文件，所以整个 `considerRecommendation` 的剩余部分放进 `go func()`，传入 `context.WithoutCancel(ctx)`）；`m.opts.Trusted`；`sid := tool.ConversationSessionIDFromContext(ctx)` 非空且 `!m.recommended[sid]`；`m.listener != nil`。编辑即触发：主代理、类型化子代理、fork 子会话相同（2026-10-05 修订，owner 裁决；子代理/fork 的 ctx 携带父会话 id，推荐按 conversation session 去重）。
 2. 候选：对每个 `After != nil` 的 change（按传入顺序），`primary, diags := ServersForFile(servers, abs, root)`；`primary == nil && len(diags) == 0` 时，`cands := MatchFile(servers, abs)` 过滤出 `InCatalog && !Enabled && Invalid == "" && Role == "primary"` 且 id 不在 `Never` 中的条目；在候选中按 `priority` 大、id 字典序小选一个（与规范 §6.3 的后两条相同；前两条对未启用的目录条目不适用）。第一个有候选的文件即为触发文件。
 3. 探测：取 `m.detected[id]`；没有或超过 10 分钟 → 启动一次后台探测（与 `Snapshot` 用的同一个刷新函数），**本次不推荐**，直接返回（规范 §10.1：探测未完成时本次不推荐）。
 4. 模式：`Installed` → `"enable"`，`BinaryPath`、`Version` 取探测结果；否则 `UsableInstallRecipe(srv, os.Environ(), runtime.GOOS) != nil` → `"install"`，`InstallCommand` 为 argv 用空格连接；都不满足 → 返回。
@@ -139,7 +139,7 @@ func publishLSPRecommendations(mgr *lsp.Manager, runner *run.Runner) {
 }
 ```
 
-子代理与 fork 不再调用它（它们共用父 Runner 的 Manager，推荐发往父 Runner 的界面）。
+监听器只对主 Runner 与项目 Runner 各装一次；子代理与 fork 共用父 Runner 的 Manager，它们的编辑触发的推荐同样发往父 Runner 的界面（2026-10-05 修订：subagent/fork 的写操作也触发推荐，与主代理编辑等价）。
 
 **验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/process -count=1` → `ok`。
 

@@ -473,12 +473,10 @@ func (m *Manager) considerRecommendation(ctx context.Context, changes []tool.Fil
 	if !m.opts.Trusted {
 		return
 	}
-	// Subagents and fork children share the parent conversation's surface;
-	// the recommendation is the user's to answer, and the parent edit that
-	// spawned them is the one that triggers it.
-	if tool.IsForkChildFromContext(ctx) || tool.SubagentTypeFromContext(ctx) != "" {
-		return
-	}
+	// Any edit in the conversation counts — the main agent's, a typed
+	// subagent's, a fork child's alike: they share one surface, the
+	// recommendation is the user's to answer, and it deduplicates per
+	// conversation session below.
 	sid := tool.ConversationSessionIDFromContext(ctx)
 	if sid == "" {
 		return

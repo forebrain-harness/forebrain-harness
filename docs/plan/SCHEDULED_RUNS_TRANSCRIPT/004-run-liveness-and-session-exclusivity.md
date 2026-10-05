@@ -212,7 +212,7 @@ func (r AbandonedRunReaper) Start(ctx context.Context) (stop func())
 `ReapOnce` 对每个被回收的运行：
 
 - 主运行（`ParentRunID == ""`）：`Publish(ctx, sid, id, event.RunEventTurnError, event.TurnErrorPayload{Error: AbandonedRunReason, Message: AbandonedRunReason, Detail: &event.TurnErrorDetail{Code: "run_abandoned"}})`。网页的 `formatProviderError` 新认识 `run_abandoned`（新键 `runError.runAbandoned`：中文 `运行这个回合的进程在它完成前停止了。`，英文 `The process running this turn stopped before it finished.`），错误块在绘制时按查看者的语言显示。
-- 子运行：用 `Runs.ListRunEventsOfTypes(ctx, id, event.RunEventSubagentSpawned)` 找它的 spawned 事件，按其 payload 发 `event.RunEventSubagentEnded`：`AgentID`、`AgentType`、`TaskID`、`WorkerSessionID`、`ParentRunID`、`ParentToolCallID`、`TaskIndex`、`ExecutionID` 照抄，`Status: "failed"`，`Error: AbandonedRunReason`。找不到 spawned 事件就不发（没有卡片需要收尾）。
+- 子运行：用 `Runs.ListRunEventsOfTypes(ctx, id, event.RunEventSubagentSpawned)` 找它的 spawned 事件，按其 payload 发 `event.RunEventSubagentEnded`：`AgentID`、`AgentType`、`TaskID`、`WorkerSessionID`、`ParentRunID`、`ParentToolCallID`、`TaskIndex`、`ExecutionID` 照抄，`Status: "failed"`，`Error: AbandonedRunReason`。找不到 spawned 事件就不发（没有卡片需要收尾）。`FinishedAtMs` 填这个运行被盖章的 `finished_at_ms`（即属主最后一次被看见的时间）：界面用它算任务的最终耗时，用回收发生的时间会把耗时算成几小时甚至几天（2026-10-05 由 `docs/plan/SUBAGENT_CONVERSATION/012-subagent-call-facts.md` 加入这个字段并补这一句；若本计划先实施，就在本计划里给 `SubagentEndedPayload` 加 `FinishedAtMs int64 \`json:"finished_at_ms,omitempty"\``，012 实施时复用）。
 
 处理完所有被回收的运行后，`Recover != nil` 时调用它。
 
@@ -300,7 +300,7 @@ func (r AbandonedRunReaper) Start(ctx context.Context) (stop func())
 
 ### 第 2 步：引擎回收器
 
-按设计 §2 改 `pkg/turn/events.go`。测试写进 `pkg/turn/events_test.go`：一个过期主运行和它的一个过期子运行（子运行先存一条 `subagent_spawned` 事件），`ReapOnce` 后替身 `Publish` 恰好收到：主运行的 `turn_error`（消息为 `AbandonedRunReason`），以及子运行的 `subagent_ended`（字段与 spawned 一致，`Status == "failed"`）。再 `ReapOnce` 一次什么都不发。
+按设计 §2 改 `pkg/turn/events.go`。测试写进 `pkg/turn/events_test.go`：一个过期主运行和它的一个过期子运行（子运行先存一条 `subagent_spawned` 事件），`ReapOnce` 后替身 `Publish` 恰好收到：主运行的 `turn_error`（消息为 `AbandonedRunReason`），以及子运行的 `subagent_ended`（字段与 spawned 一致，`Status == "failed"`，`FinishedAtMs` 等于该子运行被盖章的 `finished_at_ms`）。再 `ReapOnce` 一次什么都不发。
 
 **验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/turn/ -count=1` → `ok`。
 
@@ -400,3 +400,19 @@ func (r AbandonedRunReaper) Start(ctx context.Context) (stop func())
 ## 执行记录
 
 （执行者在此记录：`CreateRun` 调用点逐处核对结果、`finishRun` 调用点核对结果、崩溃恢复与跨进程互斥的截屏要点、e2e 结果。）
+
+## 执行记录
+
+- 执行于 2026-10-05（Go 步骤 1–6 + 前端车道并行）。两处与计划文本的偏差，均按根因处理并记录：
+  1. 计划说 TUI 的用户行"还没写入（它在 BeforeAgent 里才写）"——实际 TUI 在 `Submit` 之前就持久化用户行（`chat_session.go` 的 `PersistUserTurn`）。忙拒绝分支因此补了与 Esc 撤回相同的 `WithdrawUserTurn`，把刚写的行撤出、跳过 `persistRunTurnError`。
+  2. `TestAutoContinuationStandsDownWhenTheSessionIsBusy` 原靠进程内 `Track` 挡（即被本计划删除的预检），按第 4 步对心跳测试的同一要求改为"另一属主在库里造活运行"，保留测试名与断言意图。
+- 存储：v5 迁移（`fb_runs.owner`、`fb_run_owners`、`idx_fb_runs_session_live`）幂等可重跑；`TestStateV4UpgradesToV5WithRunsIntact` 通过（基线 running 行迁移后 `owner=''`，首次回收即收尾）。`CreateRun` 原子独占、`SetStatus` 只结束一次、`ReapAbandonedRuns` 跳过带 `fb_run_waits` 行的运行，全部有测试；`-race`（`RunOwner|SessionBusy|Reap` 及原子性/回收/状态机/属主登记组合）无报告。
+- 入口：`.CreateRun(` 生产代码恰 3 处（supervisor.go、server.go WS 路径、run_control.go startDetachedTurn），会话忙时分别透传 / `turn_withdrawn`+`Data.code` / 原样返回，各有测试。`ParkedOnApproval` 与 `turn.ErrSessionBusy` 已删（grep 符号级 0 命中）；审批续跑属主并入进程属主（`"gateway:"/`"tui:"+uuid` 0 命中）。`finishRun(..., status)` 先设终态再报告（gateway 生产代码 `SetStatus(终态)` 0 处游离）；两个新测试证明"页面看到 turn_error 时库已 failed"且随后同会话可再开回合。
+- 全量：Go 29 包 ok；前端 257 用例过、vue-tsc 0；deadcode 与基线仅 2 处同符号行号平移。
+- e2e（假模型）：**78 passed，`web e2e: PASS`**（含 `session-busy.spec.ts`：中文句→切英文句→属主心跳改旧→重发成功）。
+- 崩溃恢复（智谱真机）：长文回合流式中 `kill -9` gateway → 运行停 `running`（owner=webchat-uuid）→ 70s 后重启，**启动瞬间回收**：`failed`，`started/finished/worked` 三列齐全（worked 17.2s，取属主最后心跳）；`fb_session_events` 落了 `turn_error`（`code=run_abandoned`，"The process running this turn stopped before it finished."）；tmux `forebrain resume` 重放显示 `● error` 卡片 + 该句 + `Worked for 17s` 行。
+- 跨进程互斥（智谱真机，gateway + tmux TUI 同一 FOREBRAIN_HOME 同一会话）：
+  - web 回合运行中 TUI 提交 → `● session busy` 系统卡片 + "This conversation is already running a turn; send again when it finishes." + `Worked for 1s`，输入框文字完整保留，**无新运行、无用户行**，无错误块。
+  - TUI 侧回合期间网页 WS 发送 → `turn_withdrawn`，`error` 为同一句、`Data.code=session_running`，无用户行写入。
+  - web 运行停在审批上时 TUI 提交 → 不开新运行、不写用户行，待审批面板在 TUI 呈现（可在任一面批准/拒绝；本测在 TUI 拒绝后 web 运行以 cancelled 收尾）。
+- 心跳让路：会话被占用期间到点的心跳被跳过（`last_fired_at` 未更新、无 origin 行、`next_run_at` 重锚 +60s），会话空闲后下一次心跳正常触发并完成（两次 `done` 的心跳运行为证）。

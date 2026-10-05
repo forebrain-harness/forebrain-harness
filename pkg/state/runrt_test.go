@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -261,5 +262,401 @@ func ensureSessionsForRuns(t *testing.T, db *sql.DB, sessionIDs ...string) {
 		if err := store.Ensure(context.Background(), sid, sid); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// --- Session exclusivity, owner leases, and abandonment ---------------------
+//
+// Two RunStores on one database file are two processes: the exclusivity rule
+// must hold across them, not just inside one store.
+
+// newTwoOwnerStores opens one database with two owned stores, the sessions
+// named in sids already created.
+func newTwoOwnerStores(t *testing.T, sids ...string) (*RunStore, *RunStore, *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ensureSessionsForRuns(t, db, sids...)
+	return &RunStore{DB: db, Owner: "owner-a"}, &RunStore{DB: db, Owner: "owner-b"}, db
+}
+
+// ageOwnerLease moves an owner's heartbeat far enough back that its runs read
+// as abandoned.
+func ageOwnerLease(t *testing.T, db *sql.DB, owner string) {
+	t.Helper()
+	_, err := db.Exec(`UPDATE fb_run_owners SET heartbeat_at_ms=? WHERE owner=?`,
+		time.Now().UnixMilli()-RunOwnerLease.Milliseconds()-5000, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateRunRefusesASessionWithALiveRun(t *testing.T) {
+	ctx := context.Background()
+	a, b, _ := newTwoOwnerStores(t, "s1", "s2")
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	if _, err := a.CreateRun(ctx, "s1", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.CreateRun(ctx, "s1", "again")
+	if !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("second owner's run refused with %v, want the session-busy family", err)
+	}
+	if !errors.Is(err, ErrSessionRunning) {
+		t.Fatalf("refusal = %v, want ErrSessionRunning", err)
+	}
+	const want = "This conversation is already running a turn; send again when it finishes."
+	if err.Error() != want {
+		t.Fatalf("refusal text = %q, want %q", err.Error(), want)
+	}
+	if code := SessionBusyCode(err); code != "session_running" {
+		t.Fatalf("SessionBusyCode = %q, want session_running", code)
+	}
+	// Another session is untouched: the rule is per conversation.
+	if _, err := b.CreateRun(ctx, "s2", "fresh conversation"); err != nil {
+		t.Fatalf("run in another session: %v", err)
+	}
+	live, err := b.SessionHasLiveRun(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live {
+		t.Fatal("SessionHasLiveRun must see the run that blocks s1")
+	}
+}
+
+func TestCreateRunRefusesASessionParkedOnApproval(t *testing.T) {
+	ctx := context.Background()
+	a, b, _ := newTwoOwnerStores(t, "s1")
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	run, err := a.CreateRun(ctx, "s1", "parked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWaitAction(t, a.DB, "s1", "act-park")
+	if err := a.SetWaitingAction(ctx, run.ID, Wait{ActionID: "act-park", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.CreateRun(ctx, "s1", "while parked")
+	if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, ErrSessionAwaitingApproval) {
+		t.Fatalf("refusal = %v, want ErrSessionAwaitingApproval", err)
+	}
+	const want = "This conversation is waiting for an approval; answer it before sending another message."
+	if err.Error() != want {
+		t.Fatalf("refusal text = %q, want %q", err.Error(), want)
+	}
+	if code := SessionBusyCode(err); code != "session_awaiting_approval" {
+		t.Fatalf("SessionBusyCode = %q, want session_awaiting_approval", code)
+	}
+}
+
+func TestCreateRunIgnoresARunWhoseOwnerIsGone(t *testing.T) {
+	ctx := context.Background()
+	a, b, _ := newTwoOwnerStores(t, "s1")
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	stale, err := a.CreateRun(ctx, "s1", "from a process that died")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, a.DB, "owner-a")
+	if _, err := b.CreateRun(ctx, "s1", "after the crash"); err != nil {
+		t.Fatalf("a run whose owner's lease lapsed must not block: %v", err)
+	}
+	// The dead run stays running until a reaper ends it.
+	r, err := b.GetRun(ctx, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != RunStatusRunning {
+		t.Fatalf("stale run status = %q, want running until reaped", r.Status)
+	}
+}
+
+func TestCreateRunIsAtomicAcrossStores(t *testing.T) {
+	ctx := context.Background()
+	const attempts = 50
+	a, b, _ := newTwoOwnerStores(t, "race")
+	for _, s := range []*RunStore{a, b} {
+		stop, err := s.HoldOwnerLease(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stop()
+	}
+	var mu sync.Mutex
+	maxLive := 0
+	countLive := func() int {
+		var n int
+		if err := a.DB.QueryRow(`SELECT COUNT(*) FROM fb_runs WHERE session_id='race' AND parent_run_id IS NULL AND status='running'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	successes := map[string]int{}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for name, store := range map[string]*RunStore{"a": a, "b": b} {
+		wg.Add(1)
+		go func(name string, store *RunStore) {
+			defer wg.Done()
+			<-start
+			for range attempts {
+				r, err := store.CreateRun(ctx, "race", "concurrent turn")
+				if err != nil {
+					if !errors.Is(err, ErrSessionBusy) {
+						t.Errorf("unexpected create error: %v", err)
+					}
+					continue
+				}
+				mu.Lock()
+				if n := countLive(); n > maxLive {
+					maxLive = n
+				}
+				successes[name]++
+				mu.Unlock()
+				if err := store.SetStatus(ctx, r.ID, RunStatusDone); err != nil {
+					t.Errorf("set done: %v", err)
+				}
+			}
+		}(name, store)
+	}
+	close(start)
+	wg.Wait()
+	if maxLive != 1 {
+		t.Fatalf("session held %d live primary runs at once, want 1", maxLive)
+	}
+	if successes["a"] == 0 || successes["b"] == 0 {
+		t.Fatalf("both owners must win sometimes, got %v", successes)
+	}
+}
+
+func TestReapAbandonedRunsEndsOnlyTheDead(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s-alive", "s-stale", "s-stopped", "s-fenced")
+	// A third owner keeps the "alive" run's lease independent of owner-a's,
+	// which the test ages on purpose.
+	c := &RunStore{DB: db, Owner: "owner-c"}
+	aliveStop, err := c.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliveStop()
+	if _, err := c.CreateRun(ctx, "s-alive", "still driving"); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := a.CreateRun(ctx, "s-stale", "owner vanished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, db, "owner-a")
+	stoppedStop, err := b.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := b.CreateRun(ctx, "s-stopped", "owner deregistered")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stoppedStop()
+	fenced, err := a.CreateRun(ctx, "s-fenced", "mid continuation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWaitAction(t, db, "s-fenced", "act-fence")
+	if err := a.SetWaitingAction(ctx, fenced.ID, Wait{ActionID: "act-fence", ToolName: "shell", ToolInputJSON: "{}", ResumeOwner: "owner-a", ResumeClaimedAt: time.Now().UnixMilli(), ResumePhase: WaitResumePhaseExecutionStarted}); err != nil {
+		t.Fatal(err)
+	}
+	// The continuation crossed its fence and the driver died: the run reads
+	// running again while its wait row survives.
+	if _, err := db.Exec(`UPDATE fb_runs SET status='running' WHERE id=?`, fenced.ID); err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, db, "owner-a")
+
+	reaped, err := b.ReapAbandonedRuns(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reaped) != 2 {
+		t.Fatalf("reaped %d runs, want exactly the stale and the deregistered one: %+v", len(reaped), reaped)
+	}
+	got := map[string]bool{}
+	for _, r := range reaped {
+		got[r.ID] = true
+	}
+	if !got[stale.ID] || !got[stopped.ID] || got[fenced.ID] {
+		t.Fatalf("reaped the wrong runs: %+v", reaped)
+	}
+	for _, id := range []string{stale.ID, stopped.ID} {
+		var status string
+		var started, finished, worked int64
+		if err := db.QueryRow(`SELECT status, started_at_ms, finished_at_ms, worked_ms FROM fb_runs WHERE id=?`, id).
+			Scan(&status, &started, &finished, &worked); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(RunStatusFailed) {
+			t.Fatalf("reaped run %s status = %q, want failed", id, status)
+		}
+		if started <= 0 || finished < started || worked != finished-started {
+			t.Fatalf("reaped run %s clock = started %d finished %d worked %d", id, started, finished, worked)
+		}
+	}
+	for _, id := range []string{fenced.ID} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM fb_runs WHERE id=?`, id).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != string(RunStatusRunning) {
+			t.Fatalf("fenced run %s was reaped; the continuation recovery owns it", id)
+		}
+	}
+	// The fenced run itself is untouched, but it no longer vouches for the
+	// session either: its owner's lease lapsed, so a fresh turn may start
+	// while the continuation recovery decides the fence's outcome.
+	if live, err := b.SessionHasLiveRun(ctx, "s-fenced"); err != nil || live {
+		t.Fatalf("fenced session with a lapsed owner must not read live: %v %v", live, err)
+	}
+	// The reap is a compare-and-swap: a second pass finds nothing.
+	if again, err := b.ReapAbandonedRuns(ctx, time.Now()); err != nil || len(again) != 0 {
+		t.Fatalf("second reap = %+v, %v; want nothing", again, err)
+	}
+}
+
+func TestRunStatusEndsOnce(t *testing.T) {
+	ctx := context.Background()
+	a, b, _ := newTwoOwnerStores(t, "s1")
+	done, err := a.CreateRun(ctx, "s1", "finished")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetStatus(ctx, done.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetStatus(ctx, done.ID, RunStatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetStatus(ctx, done.ID, RunStatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := a.GetRun(ctx, done.ID); r.Status != RunStatusDone {
+		t.Fatalf("done run moved to %q", r.Status)
+	}
+	failed, err := a.CreateRun(ctx, "s1", "failed turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetStatus(ctx, failed.ID, RunStatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetStatus(ctx, failed.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := a.GetRun(ctx, failed.ID); r.Status != RunStatusFailed {
+		t.Fatalf("failed run moved to %q", r.Status)
+	}
+	parked, err := a.CreateRun(ctx, "s1", "parked turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWaitAction(t, a.DB, "s1", "act-once")
+	if err := a.SetWaitingAction(ctx, parked.ID, Wait{ActionID: "act-once", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetStatus(ctx, parked.ID, RunStatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	var owner string
+	if err := a.DB.QueryRow(`SELECT owner FROM fb_runs WHERE id=?`, parked.ID).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "owner-b" {
+		t.Fatalf("resumed run owner = %q, want the resumer's", owner)
+	}
+}
+
+func TestOwnerLeaseRegistersAndLeaves(t *testing.T) {
+	ctx := context.Background()
+	a, _, db := newTwoOwnerStores(t)
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, "owner-a").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("owner rows after HoldOwnerLease = %d, want 1", n)
+	}
+	stop()
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, "owner-a").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("owner rows after stop = %d, want 0", n)
+	}
+	stop() // idempotent
+	bare := &RunStore{DB: db}
+	if _, err := bare.HoldOwnerLease(ctx); err == nil {
+		t.Fatal("a store without an owner must refuse to hold a lease")
+	}
+}
+
+// TestFirstPrimaryRunIDReturnsTheEarliestPrimaryRun pins the read settling a
+// fire rests on: the first primary run of a fire's session is the fire's run,
+// however many runs the conversation later holds and however many subagent
+// runs branched off it.
+func TestFirstPrimaryRunIDReturnsTheEarliestPrimaryRun(t *testing.T) {
+	ctx := context.Background()
+	rt, _, _ := newTwoOwnerStores(t, "s-fire")
+	stop, err := rt.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	first, err := rt.CreateRun(ctx, "s-fire", "the fire's prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.CreateSubagentRun(ctx, first.ID, "s-fire", "a child's task"); err != nil {
+		t.Fatalf("CreateSubagentRun: %v", err)
+	}
+	if err := rt.SetStatus(ctx, first.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+	second, err := rt.CreateRun(ctx, "s-fire", "the person keeps chatting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID == first.ID {
+		t.Fatal("the second run must be a different run")
+	}
+
+	got, err := rt.FirstPrimaryRunID(ctx, "s-fire")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != first.ID {
+		t.Fatalf("first primary run = %q, want the fire's run %q", got, first.ID)
+	}
+	if got, err := rt.FirstPrimaryRunID(ctx, "s-no-runs"); err != nil || got != "" {
+		t.Fatalf("a session with no primary run = %q (%v), want empty", got, err)
 	}
 }

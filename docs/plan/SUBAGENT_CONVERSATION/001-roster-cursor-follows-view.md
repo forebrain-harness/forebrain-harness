@@ -4,8 +4,8 @@
 > 完成后更新 `docs/plan/SUBAGENT_CONVERSATION/README.md` 里本计划的状态行。**不要提交代码。** 先读 README 的"全局规则"。
 >
 > **漂移检查（先运行）**：
-> `git diff --stat 1a6d708 -- pkg/tui/run.go pkg/tui/render.go pkg/tui/reducer.go pkg/tui/run_test.go pkg/tui/chat_session_test.go .claude/skills/run-forebrain/driver.sh`
-> 工作区里这几个文件本来就有不属于本计划的改动（见 README"与并行工作的关系"）。按函数名和注释原文核对下面"现状"里的摘录；对不上就 STOP。
+> `git diff --stat bda9505 -- pkg/tui/run.go pkg/tui/render.go pkg/tui/reducer.go pkg/tui/run_test.go pkg/tui/chat_session_test.go .claude/skills/run-forebrain/driver.sh`
+> 基线 `bda9505` 对应干净树（见 README"与并行工作的关系"）：diff 列出文件即有新改动，按函数名和注释原文核对下面"现状"里的摘录；对不上就 STOP。
 
 ## 状态
 
@@ -14,7 +14,7 @@
 - **风险**：LOW（只动 TUI 的 roster 光标与视图切换）
 - **依赖**：无
 - **类别**：bug
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -68,7 +68,7 @@ owner 报告：在主视图点击 subagent 的消息卡片进入它的视图后�
   	return cursor
   ```
 
-- `pkg/tui/reducer.go:2928` `buildNormalComposerBlock(..., roster AgentRosterSnapshot, rosterSelected int, ...)` 调 `agentRosterMarkedIndex(roster, cs.RosterFocused, rosterSelected, r.activeView)`。
+- `pkg/tui/reducer.go:2926` `buildNormalComposerBlock(..., roster AgentRosterSnapshot, rosterSelected int, ...)`，在 `:2940` 调 `agentRosterMarkedIndex(roster, cs.RosterFocused, rosterSelected, r.activeView)`。
 
 ### 改变视图的地方（`pkg/tui/reducer.go`）
 
@@ -158,7 +158,7 @@ owner 报告：在主视图点击 subagent 的消息卡片进入它的视图后�
 
 ### 第 5 步：真机验证（tmux）
 
-1. 给 `.claude/skills/run-forebrain/driver.sh` 加命令 `click <col> <row>`（1 基坐标）：用 `tmux send-keys -t "$SESSION" -l` 发送 SGR 鼠标按下和抬起两段序列 `ESC[<0;col;rowM`、`ESC[<0;col;rowm`。在用法说明和 `SKILL.md` 的命令表里各加一行。TUI 启动时已经开启了鼠标上报（`pkg/tui/run.go` 的 `enableMouseSeq`），所以 tmux 原样转发的这两段字节会被读成一次点击。
+1. 给 `.claude/skills/run-forebrain/driver.sh` 加命令 `click <col> <row>`（1 基坐标）：用 `tmux send-keys -t "$SESSION" -l` 发送 SGR 鼠标按下和抬起两段序列 `ESC[<0;col;rowM`、`ESC[<0;col;rowm`。在 `driver.sh` 的 usage 块（约 `:140-165`）加一行；`SKILL.md` 没有命令表，在它的 Gotchas 一节加一句 `click` 的说明。TUI 启动时已经开启了鼠标上报（`pkg/tui/run.go` 的 `enableMouseSeq`），所以 tmux 原样转发的这两段字节会被读成一次点击。
 2. 用 `tool` 模式让主 agent 派发一个会跑一段时间的 subagent（假模型按请求顺序发放脚本里的工具调用，第二个请求就是 subagent 的第一个请求）：
 
    ```bash
@@ -179,7 +179,7 @@ owner 报告：在主视图点击 subagent 的消息卡片进入它的视图后�
 
 ## 测试计划
 
-新增 6 条测试（第 1 步 2 条、第 4 步 3 条，以及第 1 步那条在第 3 步之后转绿）：
+新增 5 条测试（第 1 步 2 条、第 4 步 3 条）：
 
 - `TestRosterCursorFollowsAClickedCardWhileTheRosterHasFocus`（本缺陷的回归）
 - `TestRosterCursorStaysOnItsAgentWhenAnotherRowLeaves`（相邻缺陷的回归）

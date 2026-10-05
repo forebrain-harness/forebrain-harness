@@ -19,12 +19,12 @@
 
 | 计划 | 标题 | 优先级 | 工作量 | 依赖 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| 001 | [心跳成为它所在对话里的真实回合](001-heartbeat-turns.md) | P1 | M | — | TODO |
-| 002 | [会话的目录身份在出生时由创建者给定，不再改写全局默认值](002-session-birth-identity.md) | P1 | S | — | TODO |
-| 003 | [会话列表按用途在 SQL 里过滤，标题直接按 id 读取](003-conversation-lists-by-purpose.md) | P1 | M | — | TODO |
-| 004 | [运行的存活由进程租约证明，一个会话同一时刻只有一个活着的主运行](004-run-liveness-and-session-exclusivity.md)（D8） | P1 | L | 001 | TODO |
-| 005 | [定时任务的每次触发都是一段完整的对话](005-cron-fire-conversations.md) | P1 | L | 001、002、003、004 | TODO |
-| 006 | [定时任务对话的保留期——默认 30 天，forebrain.yaml 与网页都能配置](006-cron-conversation-retention.md)（D9） | P1 | L | 004、005 | TODO |
+| 001 | [心跳成为它所在对话里的真实回合](001-heartbeat-turns.md) | P1 | M | — | DONE |
+| 002 | [会话的目录身份在出生时由创建者给定，不再改写全局默认值](002-session-birth-identity.md) | P1 | S | — | DONE |
+| 003 | [会话列表按用途在 SQL 里过滤，标题直接按 id 读取](003-conversation-lists-by-purpose.md) | P1 | M | — | DONE |
+| 004 | [运行的存活由进程租约证明，一个会话同一时刻只有一个活着的主运行](004-run-liveness-and-session-exclusivity.md)（D8） | P1 | L | 001 | DONE |
+| 005 | [定时任务的每次触发都是一段完整的对话](005-cron-fire-conversations.md) | P1 | L | 001、002、003、004 | DONE |
+| 006 | [定时任务对话的保留期——默认 30 天，forebrain.yaml 与网页都能配置](006-cron-conversation-retention.md)（D9） | P1 | L | 004、005 | DONE |
 
 状态取值：TODO | IN PROGRESS | DONE | BLOCKED（附一句原因）| REJECTED（附一句理由）
 

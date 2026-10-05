@@ -4,8 +4,8 @@
 > 完成后更新 `docs/plan/SUBAGENT_CONVERSATION/README.md` 里本计划的状态行。**不要提交代码。** 先读 README 的"全局规则"。
 >
 > **漂移检查（先运行）**：
-> `git diff --stat 1a6d708 -- pkg/run/turn_input.go pkg/run/controller.go pkg/tui/run.go pkg/tui/chat_session.go pkg/gateway/run_control.go pkg/gateway/server.go frontend/src/composables/useChatStream.ts frontend/src/lib/composerSubmission.ts`
-> 这些文件有不属于本计划的既有改动。按函数名和注释原文核对"现状"摘录；对不上就 STOP。
+> `git diff --stat bda9505 -- pkg/run/turn_input.go pkg/run/controller.go pkg/tui/run.go pkg/tui/chat_session.go pkg/gateway/run_control.go pkg/gateway/server.go frontend/src/composables/useChatStream.ts frontend/src/lib/composerSubmission.ts`
+> 基线 `bda9505` 对应干净树：diff 列出文件即有新改动，按函数名和注释原文核对"现状"摘录；对不上就 STOP。
 
 ## 状态
 
@@ -14,7 +14,7 @@
 - **风险**：HIGH（改的是主视图每天都在用的排队、召回、中断后恢复）
 - **依赖**：无
 - **类别**：tech-debt / bug
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -157,7 +157,7 @@ owner 的第 2 点要求每个 subagent 有"独享的、完整的 message queue 
 
 TUI（`.claude/skills/run-forebrain/driver.sh`，`stream` 模式让回合停在已输出、未结束的状态）：
 
-1. 运行中连发三条消息 `a`、`b`、`c`；`$D screen` 看预览；按召回键（见 `SKILL.md` 或 `pkg/tui/input_events.go` 里召回的按键）应召回 `c`。
+1. 运行中连发三条消息 `a`、`b`、`c`；`$D screen` 看预览；按召回键 **Shift+Left**（`hotkeyEditLastQueued`，`pkg/tui/input_events.go:57`，绑定在约 `:1100`）应召回 `c`。
 2. 再发 `d`，按 Esc：`d` 作为新回合立即发出（Q6）。
 3. 另起一轮：运行中发 `x`，`$D key C-c` 取消：`x` 回到 composer（Q7）。
 

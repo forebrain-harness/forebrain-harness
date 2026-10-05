@@ -6,7 +6,7 @@
 > **前置检查**：README 里计划 002 的状态必须是 `DONE`，否则 STOP。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/run/runner.go pkg/run/config.go pkg/run/compaction.go pkg/run/llm_middleware.go pkg/run/subagent.go pkg/process/worker_cli.go pkg/assembly/service.go pkg/turn/compaction.go`
+> `git diff --stat bda9505 -- pkg/run/runner.go pkg/run/config.go pkg/run/compaction.go pkg/run/llm_middleware.go pkg/run/subagent.go pkg/process/worker_cli.go pkg/assembly/service.go pkg/turn/compaction.go`
 > 计划 002 会改其中几个文件，这是预期的；按函数名和注释原文核对下面的摘录。
 
 ## 状态
@@ -16,7 +16,7 @@
 - **风险**：MED（压缩请求必须继续命中 subagent 自己的缓存前缀）
 - **依赖**：002
 - **类别**：bug
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -26,7 +26,7 @@ owner 的第 3 点：subagent 必须支持自动压缩和 `/compact` 手动压�
 
 - **运行中途的自动压缩已经对 subagent 生效**，因为 typed 和 fork subagent 的 LLM 链都经过 `recoverableLLM`（`pkg/run/llm_middleware.go:220`），而它们的上下文里带着 `AgentSessionID = workerSessionID`。压缩的生命周期事件也已经带上 subagent 的 roster key（`pkg/assembly/compact_lifecycle.go:59` `agentID: tool.HookAgentIDFromContext(ctx)`），卡片会画进 subagent 的视图。
 - **但阈值算错了模型（顺带发现的既有缺陷）。** 压缩用的"这个请求跑在哪个模型上"来自 `r.effectiveModelFor(ctx)`（`pkg/run/config.go:1676`），它只看会话的模型选择和主 agent 的模型。typed subagent 的请求却被 `typedSubagentProviderLLM`（`pkg/run/typedsubagent_llm.go`）路由到 `agents.definitions[<type>].llm_providers`，plan reviewer 被 `subagentModelOverrideLLM` 路由到审批时选的模型。窗口比主模型小的 subagent，会在阈值触发之前就被服务商以"上下文超长"拒绝；窗口更大的，又会过早压缩。
-- **没有回合前的自动压缩。** 主会话在写入用户消息之前先检查要不要压缩（`pkg/tui/chat_turn.go:1149` `maybeAutoCompactBeforeAppend` → `assembly.RunPreflight` → `svc.AutoCompactSession`；gateway 同样，`pkg/gateway/run_control.go:514`）。subagent 的继续（模型的 `subagent_continue`，以及计划 005 之后用户在视图里发的消息）没有这一步。
+- **没有回合前的自动压缩。** 主会话在写入用户消息之前先检查要不要压缩（`pkg/tui/chat_turn.go:1149` `maybeAutoCompactBeforeAppend` → `assembly.RunPreflight` → `svc.AutoCompactSession`；gateway 同样，`pkg/gateway/run_control.go:527`）。subagent 的继续（模型的 `subagent_continue`，以及计划 005 之后用户在视图里发的消息）没有这一步。
 - **没有手动压缩。** `/compact` 只能压缩主会话（`pkg/tui/chat_slash.go:37` `HandleCompactSlash` → `turn.ExecuteCompact(ctx, sessionID, run.CompactionService(...))`）。计划 002 之后 worker 会话里有了历史，才有东西可压。
 
 ## 现状（2026-10-04 工作区的事实）
@@ -90,7 +90,7 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string)
 替换：
 - `Load` 里 `compactSvc.PrimaryModel` 和 `compactDeps.ActiveModel` 改为 `r.agentModelFor(ctx)`。
 - 压缩用的客户端（`compactSvc.CompactLLM`，只在没有"按对话原样发送"的摘要函数时使用：被服务商以超长拒绝后的反应式压缩、远端压缩）改为 `Runner` 的私有方法 `agentCompactClientFor(ctx) llm.LLM`：主线程或没有 subagent 路由时 `r.sessionClientFor(ctx)`；否则用 `agentModelFor(ctx)` 得到的 provider/model 调 `ConfiguredModelClient(r.AppCfg, tool.SubagentTypeFromContext(ctx), provider, model)`（`pkg/run/subagent.go` 约 `:2010`，plan reviewer 的覆盖客户端就是这样构造的）。**不要**复用 `Load` 里的局部变量 `typeLLMs`（`pkg/run/runner.go` 约 `:934`）：`Runner` 现在正好 25 个字段，到了上限，不能为了存它加字段。
-- `Load` 里的 `compactSvc` 和 `CompactionService(r, sessions)` 的 `PrimaryModel`、`CompactLLM` 都改用 `agentModelFor` / `agentCompactClientFor`，两处不再各写一份。
+- `Load` 里的 `compactSvc` 和 `CompactionService(r, sessions)` 的 `PrimaryModel`、`CompactLLM` 都改用 `agentModelFor` / `agentCompactClientFor`，两处不再各写一份。`CompactLLMForModel`（`compaction.go:271` 设的 `r.ContextCompactLLMForModel(model)`）**不在其列**：它按显式传入的 model（会话换模型前的上一个模型，"旧模型总结自己的历史"用，`assembly/service.go:158-159`）建客户端，不是"当前 agent 跑在哪个模型"的解析，保持不动。
 - 一致性测试：对计划 002 `TestAgentModelResolvesEachKindOfAgent` 的每一种 agent，按它真实执行时的方式构造上下文，断言 `agentModelFor(ctx) == AgentModel(r, sid, entry)`。
 
 ### 2. 摘要请求认得 fork 的冻结 system
@@ -145,8 +145,8 @@ func SubagentCompactTarget(ctx context.Context, r *Runner, conversationSessionID
 
 ## 缓存影响（必须留下证据）
 
-- **手动 / 回合前压缩的摘要请求必须命中 subagent 自己的前缀。** 测试计划第 3、4 条用捕获请求的测试 LLM 断言：typed subagent 的摘要请求 = 它最后一次请求的 system、工具、消息 + 摘要指令；fork subagent 的摘要请求以它冻结的 system 开头，消息与它最后一次请求相同。
-- **阈值改按真实模型算**：对"有自有模型"的 typed subagent，压缩触发点变了（这是修正，不是回退）；对其它 agent（主 agent、fork、无自有模型的 typed），`agentModelFor` 与 `effectiveModelFor` 结果相同，行为不变——测试计划第 1 条覆盖。
+- **手动 / 回合前压缩的摘要请求必须命中 subagent 自己的前缀。** 第 5 步的两条手动压缩测试用捕获请求的测试 LLM 断言：typed subagent 的摘要请求 = 它最后一次请求的 system、工具、消息 + 摘要指令；fork subagent 的摘要请求以它冻结的 system 开头，消息与它最后一次请求相同。
+- **阈值改按真实模型算**：对"有自有模型"的 typed subagent，压缩触发点变了（这是修正，不是回退）；对其它 agent（主 agent、fork、无自有模型的 typed），`agentModelFor` 与 `effectiveModelFor` 结果相同，行为不变——第 2 步的一致性测试覆盖。
 - 压缩本身会开启新的缓存代（与主会话相同的既有语义），不在本计划改变。
 
 ## 范围
@@ -159,9 +159,9 @@ func SubagentCompactTarget(ctx context.Context, r *Runner, conversationSessionID
 
 ### 第 1 步：先写失败的测试
 
-`pkg/run` 加 `TestCompactionSizesATypedSubagentByItsOwnModel`：配置主模型窗口 200k、`agents.definitions.explore.llm_providers` 指向一个窗口 32k 的模型；构造 explore subagent 的执行上下文，断言 `compactDeps.ActiveModel(ctx)`（通过 `Load` 之后取到的依赖，或者把 `agentModelFor` 暴露给同包测试）返回 32k 的那个模型。
+`pkg/run` 加 `TestCompactionSizesATypedSubagentByItsOwnModel`：配置主模型窗口 200k、`agents.definitions.explore.llm_providers` 指向一个窗口 32k 的模型；构造 explore subagent 的执行上下文，断言 `r.agentModelFor(ctx)` 返回 32k 的那个模型（同包测试直接调私有方法；第 1 步它尚不存在，测试以编译失败的形式失败，同样算失败）。
 
-**验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/run -run TestCompactionSizesATypedSubagentByItsOwnModel -count=1` → 失败（返回主模型）。不失败就 STOP。
+**验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/run -run TestCompactionSizesATypedSubagentByItsOwnModel -count=1` → 失败（此刻是编译失败：`agentModelFor` 还不存在；第 2 步加上方法后若返回的是主模型，同样算失败）。不失败就 STOP。
 
 ### 第 2 步：agent 感知的模型与压缩客户端
 

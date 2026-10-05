@@ -6,8 +6,8 @@
 > **前置检查**：README 里计划 003、005、006、007 必须都是 `DONE`，否则 STOP。TUI（计划 007）定下的交互就是本计划的规格。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/gateway/ frontend/src/ frontend/e2e/ scripts/acceptance/`
-> 这些路径有大量不属于本计划的既有改动；按函数名和组件名核对"现状"。
+> `git diff --stat bda9505 -- pkg/gateway/ frontend/src/ frontend/e2e/ scripts/acceptance/`
+> 基线 `bda9505` 对应干净树；diff 列出文件即有新改动（前置计划会改其中一部分），按函数名和组件名核对"现状"。
 
 ## 状态
 
@@ -16,7 +16,7 @@
 - **风险**：MED
 - **依赖**：003、005、006、007
 - **类别**：direction（与 TUI 对齐）
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -29,8 +29,8 @@
 - `frontend/src/views/ChatView.vue`：`activeAgentView`（`''` 为主对话）、`openAgentView(agentId)`、`handleAgentViewKeydown`（Esc 且在 subagent 视图 → `openAgentView('')`，约 `:932-937`）、`handleSubmit`（约 `:1360`，上传附件后调 `useChatStream` 的 `send`；运行中按 `nextSubmissionDisposition` 决定 steer 或排队）。
 - `frontend/src/components/chat/SubagentConversation.vue`：只渲染 `record.blocks`（prompt、thinking、tool、plan、approval、compaction、goal…），头部有返回按钮、标题、状态、`record.inputTokens/outputTokens`。
 - `frontend/src/components/chat/AgentViewTabs.vue`、`SubagentCard.vue`（计划 010 已改标题）。
-- `frontend/src/composables/useChatStream.ts`：`send`（约 `:2757`）、`queueActiveRunInput`（约 `:2140`）、事件处理（`queued_input_released` 约 `:2565`、`token_budget_updated` 约 `:2597`、`pending_input_updated`）。
-- `frontend/src/lib/api.ts`：`runInput(runId, …)`（`/runs/:id/input`）、`/runs/:id/queued-input`、`subagentCancel`、`chatSessionSubagentHistory`。
+- `frontend/src/composables/useChatStream.ts`：`send`（约 `:2757`）、`queueActiveRunInput`（约 `:2140`）、事件处理（`queued_input_released` 约 `:2565`、`token_budget_updated` 约 `:1137`、`pending_input_updated`）。
+- `frontend/src/lib/api.ts`：`runInput(runId, …)`（`/runs/:id/input`）、`/runs/:id/queued-input`、`subagentCancel`、`sessionSubagentHistory`（GET `/chat/sessions/:id/subagent-history`）。
 - `pkg/gateway/api_extra.go`：路由表（`chatSessions` 组、`runs` 组、`/subagents/:id/cancel`、`/slash/commands`、`chatSessions.Post("/:id/compact", s.handleSessionCompact)`）；`handleSessionCompact`（`:1558`）直接 `run.CompactionService(...).ManualCompactSession`。
 - `pkg/gateway/run_control.go`：`continueAfterUsageLimit` 是 gateway 已有的"分离运行"（没有任何 websocket 拥有它，事件经事件总线到达所有打开的页面）的构造方式——它是 subagent 用户执行的框架范本。`pkg/gateway/server.go:1748` 一带是 WS 回合给工具步骤装钩子的写法：带 `HookAgentIDFromContext` 的步骤直接 `tool.RunEventFromStep` 后 `s.RunEvents().Publish`。
 - 网页真机：`scripts/acceptance/web_e2e.sh`（构建二进制和前端到临时目录，`forebrain gateway start`，Playwright 驱动真实 Chrome，用例在 `frontend/e2e/*.spec.ts`），假模型 `scripts/acceptance/fake_provider.py`（以 `reply` 模式启动）。
@@ -95,14 +95,14 @@
 
 ### 第 2 步：网页逻辑
 
-按"设计"第 2、3 条。`useChatStream.test.ts` 加：发给 subagent 的消息不进入主对话的发送路径；`subagent_input_delivered` 和 `origin=user` 的 spawned 渲染成 `user` 块且刷新后重建一致；`queued_input_released(agent_id)` 的 `next`/`inputs` 分别被发送/退回到该视图；预算按 `agent_id` 分开。`ChatView` 的组件测试覆盖 Esc 的三种情况和草稿按视图保存。
+按"设计"第 2、3 条。`useChatStream.test.ts` 加：发给 subagent 的消息不进入主对话的发送路径；`subagent_input_delivered` 和 `origin=user` 的 spawned 渲染成 `user` 块且刷新后重建一致；plan-reviewer 的 subagent 视图与其它 subagent 视图用同一个组件、同一套头部和预算显示（喂一个 `agent_type: 'plan-reviewer'` 的 spawned 和带它 `agent_id` 的 `token_budget_updated`，断言视图显示 `N%/窗口`，窗口来自事件，不来自主对话；owner 2026-10-05 的要求见 README）；`queued_input_released(agent_id)` 的 `next`/`inputs` 分别被发送/退回到该视图；预算按 `agent_id` 分开。`ChatView` 的组件测试覆盖 Esc 的三种情况和草稿按视图保存。
 
 **验证**：`cd frontend && corepack pnpm test` → 全部通过；`cd frontend && corepack pnpm exec vue-tsc --noEmit -p tsconfig.json` → 退出码 0。
 
 ### 第 3 步：网页真机（Playwright）
 
 - `scripts/acceptance/fake_provider.py`：在 `reply` 模式里加一条按内容分辨的分支——主 agent 的最后一条用户消息含标记 `[[e2e:subagent-net]]` 时，按计划 007 第 8 条 `subagent-net` 的规则回答（subagent 的请求按 system 提示识别，未收到 `continue` 前断开连接）。这样一个假模型进程能同时服务所有用例。
-- 新建 `frontend/e2e/subagent-conversation.spec.ts`：发送 `delegate the probe [[e2e:subagent-net]]` → 等 subagent 卡片 → 打开它的视图 → 断言预算显示为 `N%/窗口` 格式 → 在视图里发 `continue` → 断言回答出现在 subagent 视图、不出现在主对话 → 在视图里输入 `/new` 只显示一句提示 → `/compact` 出现压缩卡片 → 按 Esc 回到主对话；每一步截图。
+- 新建 `frontend/e2e/subagent-conversation.spec.ts`：发送 `delegate the probe [[e2e:subagent-net]]` → 等 subagent 卡片 → 打开它的视图 → 断言预算显示为 `N%/窗口` 格式 → 在视图里发 `continue` → 断言回答出现在 subagent 视图、不出现在主对话 → 在视图里输入 `/new` 只显示一句提示 → `/compact` 出现压缩卡片 → 按 Esc 回到主对话；每一步截图。再加一段：用计划 016 的网页审批卡片请另一个模型评审计划，打开时间线里的 plan-reviewer 卡片进入它的视图，断言预算显示为 `N%/窗口` 格式、头部有评审模型。
 - `scripts/acceptance/web_e2e.sh` 把这个用例纳入（若它按目录自动收集 `frontend/e2e/*.spec.ts`，就不用改）。
 
 **验证**：`scripts/acceptance/web_e2e.sh` → 最后一行 `web e2e: PASS`；截图路径写进报告。

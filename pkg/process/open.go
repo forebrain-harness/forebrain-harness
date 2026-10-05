@@ -30,6 +30,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
+	"github.com/google/uuid"
 )
 
 // OpenOptions controls process-wide runtime composition.
@@ -89,6 +90,11 @@ type Environment struct {
 	OnConfigReload    func(*appcfg.Root)
 	telShutdown       func(context.Context) error
 	approvalSweepStop func()
+	// ownerLeaseStop deregisters this process's run-owner lease. It runs
+	// after the runners are closed and before the SQL handle is: while any
+	// runner lives it may still settle runs under this owner, and the DELETE
+	// needs the database.
+	ownerLeaseStop func()
 }
 
 func (env *Environment) Close() {
@@ -108,6 +114,13 @@ func (env *Environment) Close() {
 		_ = env.Runner.Close()
 	}
 	env.CloseRunnerPool()
+	// This process's runs are nobody's now: deregistering the lease makes
+	// any run it failed to settle immediately readable as abandoned. It must
+	// precede the SQL close below, which the DELETE and the renewal loop
+	// both need.
+	if env.ownerLeaseStop != nil {
+		env.ownerLeaseStop()
+	}
 	// Language servers are children of this process too; they go after
 	// every runner that could still ask them for something.
 	if env.LSP != nil {
@@ -266,7 +279,10 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	frozenOverridden := mcpRes.Summary.OverriddenGlobal
 
 	actionSvc := &state.ActionService{DB: sqlDB}
-	runSvc := &state.RunStore{DB: sqlDB}
+	// The owner names this process to the shared database: the runs it creates
+	// and resumes are stamped with it, and the lease it holds below is what
+	// tells every other process on this machine that those runs are alive.
+	runSvc := &state.RunStore{DB: sqlDB, Owner: source + "-" + uuid.NewString()}
 	fileSvc := &state.FileStore{DB: sqlDB, Home: root, Cfg: state.LoadConfigFromEnv()}
 	if v := strings.TrimSpace(os.Getenv("FOREBRAIN_WORK_ITEM_LEASE_SEC")); v != "" {
 		if _, err := strconv.Atoi(v); err == nil {
@@ -442,6 +458,17 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	}
 	runner.FileResolver = fileReferenceResolver(fileSvc, runner.AgentName)
 	runner.SubagentExecutor = env
+	// The lease is registered only once every failure path is behind us: the
+	// renewal goroutine must not outlive an Open that is about to return an
+	// error. From here the process is live — its runs are vouched for until
+	// Close deregisters it.
+	ownerStop, err := runSvc.HoldOwnerLease(ctx)
+	if err != nil {
+		_ = env.LSP.Close()
+		_ = env.Runner.Close()
+		return nil, fmt.Errorf("register run owner lease: %w", err)
+	}
+	env.ownerLeaseStop = ownerStop
 	return env, nil
 }
 

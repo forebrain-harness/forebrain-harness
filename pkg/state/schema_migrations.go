@@ -13,7 +13,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 4
+const stateSchemaVersion = 6
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -38,6 +38,8 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 2, apply: migrateStateV1ToV2},
 	{version: 3, apply: migrateStateV2ToV3},
 	{version: 4, apply: migrateStateV3ToV4},
+	{version: 5, apply: migrateStateV4ToV5},
+	{version: 6, apply: migrateStateV5ToV6},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -56,6 +58,89 @@ func migrateStateV3ToV4(ctx context.Context, conn *sql.Conn) error {
 	}
 	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add fb_sessions.source: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV4ToV5 adds run ownership: the owner column on fb_runs, the
+// fb_run_owners lease table, and the index behind the session-exclusivity
+// check. Every statement tolerates the object already existing — a fixture
+// built from the current schema.sql with a lowered user_version skips it
+// instead of failing on a duplicate. Existing running rows migrate with
+// owner = ” (two ASCII apostrophes): the process that drove them is long
+// gone, so the first reaper to run ends them as abandoned.
+func migrateStateV4ToV5(ctx context.Context, conn *sql.Conn) error {
+	var ownerCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_runs') WHERE name='owner'`).Scan(&ownerCol); err != nil {
+		return err
+	}
+	if ownerCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_runs ADD COLUMN owner TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_runs.owner: %w", err)
+		}
+	}
+	var ownersTable int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fb_run_owners'`).Scan(&ownersTable); err != nil {
+		return err
+	}
+	if ownersTable == 0 {
+		// The same text schema.sql declares, so an upgraded file and a fresh
+		// one hold the same object byte for byte.
+		if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_run_owners (
+  owner TEXT PRIMARY KEY CHECK (TRIM(owner) <> ''),
+  heartbeat_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+			return fmt.Errorf("create fb_run_owners: %w", err)
+		}
+	}
+	var liveIdx int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_fb_runs_session_live'`).Scan(&liveIdx); err != nil {
+		return err
+	}
+	if liveIdx == 0 {
+		if _, err := conn.ExecContext(ctx, `
+CREATE INDEX idx_fb_runs_session_live ON fb_runs(session_id)
+  WHERE parent_run_id IS NULL AND status IN ('running', 'waiting_action')`); err != nil {
+			return fmt.Errorf("create idx_fb_runs_session_live: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV5ToV6 indexes fire records by the session they ran in — a
+// run's end finds its fire by that session — and marks the sessions of
+// fires recorded before this version as what they are, so they leave the
+// conversation lists the way every later fire's session is born out of them.
+// The two new columns are added the way v4 added its column: a fixture built
+// from the current schema.sql with a lowered user_version already carries
+// them and skips the ALTER instead of failing on a duplicate.
+func migrateStateV5ToV6(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_fb_cron_runs_session ON fb_cron_runs(session_id)`); err != nil {
+		return fmt.Errorf("create idx_fb_cron_runs_session: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE fb_sessions SET source = 'cron' WHERE source = '' AND id IN (SELECT session_id FROM fb_cron_runs)`); err != nil {
+		return fmt.Errorf("mark the sessions of recorded fires: %w", err)
+	}
+	var runCodeCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_cron_runs') WHERE name='error_code'`).Scan(&runCodeCol); err != nil {
+		return err
+	}
+	if runCodeCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_cron_runs ADD COLUMN error_code TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_cron_runs.error_code: %w", err)
+		}
+	}
+	var jobCodeCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_cron_jobs') WHERE name='last_error_code'`).Scan(&jobCodeCol); err != nil {
+		return err
+	}
+	if jobCodeCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_cron_jobs ADD COLUMN last_error_code TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_cron_jobs.last_error_code: %w", err)
+		}
 	}
 	return nil
 }

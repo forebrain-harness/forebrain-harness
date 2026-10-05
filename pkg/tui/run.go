@@ -2522,6 +2522,26 @@ func (s *streamState) restoreDraftSubmission(submission ComposerSubmission) {
 	}
 }
 
+// withdrawSubmittedMessage takes a submitted message out of the conversation:
+// the user card leaves the transcript, the working status stops, and the text
+// — with anything queued behind it — returns to the composer as one editable
+// draft. Esc reaches it through the withdrawal window, before the model has
+// produced anything; a session the database refused because another live run
+// owns it reaches it with the refusal, because that turn never started and
+// has nothing to show for itself either.
+func withdrawSubmittedMessage(session Session, renderer *Renderer, state *streamState, foreground *foregroundTurn) {
+	if foreground == nil || foreground.restored {
+		return
+	}
+	if foreground.stopStatus != nil {
+		foreground.stopStatus()
+	}
+	renderer.FinishTransientStatus(transientSourceWorking)
+	renderer.withdrawSubmission(foreground)
+	state.restoreWithdrawnWork(session)
+	renderComposerWithState(renderer, state)
+}
+
 // restoreWithdrawnWork recovers the withdrawn input, queued work in arrival
 // order, and the newer draft as ONE editable draft. It is called immediately on
 // Esc so the composer comes back without waiting for the run to drain, then
@@ -3292,6 +3312,16 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 			processNotify(m)
 		case err := <-errCh:
 			events = drainActiveRunEvents(ctx, events, notifyCh, processNotify, session, renderer, tracker, state, clipboard, cmds)
+			if errors.Is(err, statepkg.ErrSessionBusy) {
+				// The database refused the session: another live process owns
+				// its turn. This turn never started — there is no run to
+				// report the end of — so the message is taken back the way Esc
+				// takes one back, and the person is told the sentence instead
+				// of an error block.
+				withdrawSubmittedMessage(session, renderer, state, foreground)
+				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "session busy", Content: err.Error(), Final: true})
+				return runTurnWithdrawn, nil
+			}
 			if foreground.isWithdrawn() {
 				state.restoreWithdrawnWork(session)
 				if err != nil && !errors.Is(err, context.Canceled) {
@@ -3956,19 +3986,11 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// edit. A repeated press while cleanup drains is a no-op rather
 			// than a second recovery or a noisy cancel.
 			if foreground := state.activeForeground; foreground.withdraw() {
-				if !foreground.restored {
-					if foreground.stopStatus != nil {
-						foreground.stopStatus()
-					}
-					renderer.FinishTransientStatus(transientSourceWorking)
-					renderer.withdrawSubmission(foreground)
-					state.restoreWithdrawnWork(session)
-					renderComposerWithState(renderer, state)
-					// withdraw() already cancelled this turn's own context, which
-					// is what stops a run that is not registered yet; this stops
-					// one that is. Neither is enough on its own.
-					session.CancelActiveRun()
-				}
+				withdrawSubmittedMessage(session, renderer, state, foreground)
+				// withdraw() already cancelled this turn's own context, which
+				// is what stops a run that is not registered yet; this stops
+				// one that is. Neither is enough on its own.
+				session.CancelActiveRun()
 				return
 			}
 			// Esc cancels the in-flight run. Discard only the committed

@@ -36,6 +36,31 @@ const HEADLINE_KEYS: Record<string, I18nKey> = {
 }
 
 /**
+ * Failures of a scheduled run — a run that went wrong, or standing work that
+ * never got one — whose whole explanation is one sentence.
+ */
+const RUN_ERROR_KEYS: Record<string, I18nKey> = {
+  run_failed: 'runError.runFailed',
+  run_stopped: 'runError.runStopped',
+  run_abandoned: 'runError.runAbandoned',
+  no_runtime: 'runError.noRuntime',
+  no_delivery_channel: 'runError.noDeliveryChannel',
+}
+
+/**
+ * Failures that carry words of their own: the reason a scheduled run never
+ * started, or a channel's refusal to take the answer. The sentence says what
+ * happened; those words are quoted on the line below it, unlabeled — they are
+ * the channel's own sentence, not the model service's and not one forebrain
+ * writes, so the quotation prefix the provider's words get would misattribute
+ * them.
+ */
+const RUN_ERROR_QUOTED_KEYS: Record<string, I18nKey> = {
+  fire_start_failed: 'runError.fireStartFailed',
+  delivery_failed: 'runError.deliveryFailed',
+}
+
+/**
  * parseProviderErrorDetail reads the detail off an event payload. It returns
  * null for anything without a code, including the older events that carry only
  * a rendered sentence.
@@ -59,7 +84,11 @@ export function parseProviderErrorDetail(raw: unknown): ProviderErrorDetail | nu
 }
 
 /**
- * formatProviderError writes the failure in the viewer's language.
+ * formatProviderError writes a coded turn failure in the viewer's language.
+ * Most codes describe a provider's refusal, but not every failed turn reached
+ * a provider — the runtime also refuses a turn outright, a session parked on
+ * an approval being the one this build codes — and those codes are written
+ * here the same way, so every failed turn says its one sentence.
  *
  * Every code renders as exactly one sentence. A failed turn interrupts what the
  * reader was doing, so the wording says what happened and how it recovers in a
@@ -82,6 +111,21 @@ export function formatProviderError(
   }
   if (detail.code === 'context_window') {
     return tr('providerError.contextWindow')
+  }
+  if (detail.code === 'session_awaiting_approval') {
+    return tr('runError.sessionAwaitingApproval')
+  }
+  if (detail.code === 'session_running') {
+    return tr('runError.sessionRunning')
+  }
+  const runKey = RUN_ERROR_KEYS[detail.code]
+  if (runKey) {
+    return tr(runKey)
+  }
+  const runQuotedKey = RUN_ERROR_QUOTED_KEYS[detail.code]
+  if (runQuotedKey) {
+    const sentence = tr(runQuotedKey)
+    return detail.providerMessage ? `${sentence}\n${detail.providerMessage}` : sentence
   }
   const headline = HEADLINE_KEYS[detail.code]
   if (headline) {

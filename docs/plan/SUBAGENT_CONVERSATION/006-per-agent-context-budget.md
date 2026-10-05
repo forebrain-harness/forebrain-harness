@@ -6,7 +6,7 @@
 > **前置检查**：README 里计划 002、003 必须都是 `DONE`，否则 STOP。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/run/config.go pkg/run/subagent.go pkg/event/compact_events.go pkg/tui/chat_turn.go pkg/tui/chat_slash.go pkg/tui/chat_surface.go pkg/tui/run.go pkg/gateway/wsevents.go pkg/gateway/api_extra.go`
+> `git diff --stat bda9505 -- pkg/run/config.go pkg/run/subagent.go pkg/event/compact_events.go pkg/tui/chat_turn.go pkg/tui/chat_slash.go pkg/tui/chat_surface.go pkg/tui/run.go pkg/gateway/wsevents.go pkg/gateway/api_extra.go`
 > 前置计划会改其中几个文件；按函数名核对"现状"。
 
 ## 状态
@@ -16,7 +16,7 @@
 - **风险**：LOW-MED（主视图 footer 的数字必须一字不变）
 - **依赖**：002、003
 - **类别**：bug / tech-debt
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -149,7 +149,7 @@ func SubagentContextGauge(ctx context.Context, r *Runner, conversationSessionID,
 ### 第 4 步：subagent 的实时用量与入口
 
 按"设计"第 3、4 条。`pkg/run` 加：
-- `TestSubagentUsageSnapshotIsPublishedForItsOwnView`：子运行的测试 LLM 报一次用量 → 发布一条 `token_budget_updated`，`agent_id` 是 roster key，数字按该 subagent 的模型算；主会话没有收到 `OnUsageSnapshot`。
+- `TestSubagentUsageSnapshotIsPublishedForItsOwnView`：子运行的测试 LLM 报一次用量 → 发布一条 `token_budget_updated`，`agent_id` 是 roster key，数字按该 subagent 的模型算；主会话没有收到 `OnUsageSnapshot`。再加一个子用例（owner 2026-10-05：plan-reviewer 的视图必须与其它 subagent 一致，并显示它自己的 `N%/窗口`）：用 `RunPlanReviewSubagent` 带模型覆盖派发，覆盖模型的窗口与主模型不同，断言 `token_budget_updated` 的窗口是覆盖模型的（依赖计划 015 记录在 `HistoryEntry` 里的覆盖）；`SubagentContextBudget` 对这个 plan-reviewer 返回同样的窗口。
 - `TestSubagentContextBudgetReadsItsWorkerSession`。
 
 **验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/run -count=1` → `ok`。

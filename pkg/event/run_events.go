@@ -46,6 +46,9 @@ const (
 	RunEventAutoContinueScheduled = "auto_continue_scheduled"
 	RunEventAutoContinueStarted   = "auto_continue_started"
 	RunEventAutoContinueCancelled = "auto_continue_cancelled"
+	// RunEventHeartbeatFired announces a heartbeat starting a turn in its
+	// own conversation, so a page watching the run can draw its prompt.
+	RunEventHeartbeatFired = "heartbeat_fired"
 )
 
 type RunEvent struct {
@@ -216,6 +219,13 @@ type AutoContinueCancelledPayload struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// HeartbeatFiredPayload marks a heartbeat starting a turn in its
+// conversation. Prompt is the message it sent, so a page watching a run it
+// did not start can draw that message as the turn's first row.
+type HeartbeatFiredPayload struct {
+	Prompt string `json:"prompt,omitempty"`
+}
+
 // TurnFailedPayload distinguishes a terminal failure from a streamed error.
 type TurnFailedPayload struct {
 	Error   string `json:"error,omitempty"`
@@ -320,6 +330,12 @@ type SubagentEndedPayload struct {
 	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
 	TaskIndex        int    `json:"task_index"`
 	ExecutionID      string `json:"execution_id,omitempty"`
+	// FinishedAtMs is the run's stamped end, the moment the interface should
+	// stop counting the task's elapsed time from. Empty for an ordinary end,
+	// where the event's own arrival is the end; set by the abandonment reaper,
+	// whose end is the dead process's last heartbeat, potentially hours
+	// before the event is published.
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
 }
 
 type ModeChangedPayload struct {

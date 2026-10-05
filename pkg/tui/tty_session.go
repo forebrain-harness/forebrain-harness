@@ -420,21 +420,11 @@ func lookupSessionTitle(ctx context.Context, session Session, sessionID string) 
 	if sessionID == "" {
 		return ""
 	}
-	rows, err := session.ListSessionsRecent(ctx, 100)
+	title, err := session.SessionTitle(ctx, sessionID)
 	if err != nil {
 		return ""
 	}
-	for _, row := range rows {
-		if strings.TrimSpace(row.ID) != sessionID {
-			continue
-		}
-		title := strings.TrimSpace(row.Title)
-		if title == "" || title == sessionID {
-			return ""
-		}
-		return title
-	}
-	return ""
+	return title
 }
 
 // sessionTitleForTurn resolves the body the animated terminal title should

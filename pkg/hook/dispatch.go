@@ -590,7 +590,7 @@ func WriteSessionTranscriptArtifact(workspaceRoot string, sess *state.SessionSto
 	if sessionID == "" {
 		sessionID = "default"
 	}
-	path := filepath.Join(workspaceRoot, "state", "hook-transcripts", sanitizePathSegment(sessionID)+".jsonl")
+	path := SessionTranscriptPath(workspaceRoot, sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
@@ -623,6 +623,36 @@ func WriteSessionTranscriptArtifact(workspaceRoot string, sess *state.SessionSto
 	return path, nil
 }
 
+// SessionSidechainDir is the one definition of the directory a session's
+// sidechain records live in — the subagent transcripts the hooks read and the
+// fork logs run writes beside them. There must be only one: a second spelling
+// of the same directory would leave files behind when it is deleted.
+// workspaceRoot must be the owning agent's workspace directory
+// (Runtime.StateRoot), never the shared FOREBRAIN_HOME.
+func SessionSidechainDir(workspaceRoot, sessionID string) string {
+	return filepath.Join(strings.TrimSpace(workspaceRoot), "state", "fork-sidechain", sanitizePathSegment(sessionID))
+}
+
+// SessionTranscriptPath is where a session's hook transcript lives.
+// workspaceRoot carries the same tenancy requirement as
+// SessionSidechainDir.
+func SessionTranscriptPath(workspaceRoot, sessionID string) string {
+	return filepath.Join(strings.TrimSpace(workspaceRoot), "state", "hook-transcripts", sanitizePathSegment(sessionID)+".jsonl")
+}
+
+// RemoveSessionArtifacts deletes a session's hook transcript file and its
+// sidechain directory under the owning agent's workspace root. Neither has to
+// exist: deletion must be repeatable over a session that never wrote them.
+func RemoveSessionArtifacts(workspaceRoot, sessionID string) error {
+	if err := os.RemoveAll(SessionSidechainDir(workspaceRoot, sessionID)); err != nil {
+		return err
+	}
+	if err := os.Remove(SessionTranscriptPath(workspaceRoot, sessionID)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // SidechainTranscriptPath points a SubagentStop hook at the subagent's message
 // log. workspaceRoot carries the same tenancy requirement as
 // WriteSessionTranscriptArtifact, and must be the SAME root the subagent's fork
@@ -634,7 +664,7 @@ func SidechainTranscriptPath(workspaceRoot string, sessionID, agentID string) st
 	if workspaceRoot == "" || sessionID == "" || agentID == "" {
 		return ""
 	}
-	return filepath.Join(workspaceRoot, "state", "fork-sidechain", sanitizePathSegment(sessionID), "subagent-"+sanitizePathSegment(agentID)+".jsonl")
+	return filepath.Join(SessionSidechainDir(workspaceRoot, sessionID), "subagent-"+sanitizePathSegment(agentID)+".jsonl")
 }
 
 func sanitizePathSegment(s string) string {

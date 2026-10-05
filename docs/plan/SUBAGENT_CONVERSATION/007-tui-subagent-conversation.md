@@ -6,7 +6,7 @@
 > **前置检查**：README 里计划 001、003、004、005、006 必须都是 `DONE`，否则 STOP。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/tui/ pkg/turn/slash.go pkg/turn/executor.go .claude/skills/run-forebrain/`
+> `git diff --stat bda9505 -- pkg/tui/ pkg/turn/slash.go pkg/turn/executor.go .claude/skills/run-forebrain/`
 > 前置计划会改 `pkg/tui` 的许多文件，这是预期的；按函数名核对"现状"。
 
 ## 状态
@@ -16,7 +16,7 @@
 - **风险**：MED-HIGH（输入路由与按键优先级；主视图的行为必须一字不变）
 - **依赖**：001、003、004、005、006
 - **类别**：bug / direction
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -208,7 +208,7 @@ if view := renderer.ActiveView(); view != "" {
 
 ### 第 6 步：事件呈现与 footer
 
-按"设计"第 6、7 条。新增 `TestSubagentFooterShowsItsOwnContextBudget`（主视图 `75%/1M`、subagent 视图 `40%/128k` 互不影响；切换视图时各自正确）、`TestDeliveredSteerIsDrawnInTheSubagentsView`、`TestRestoredInputGoesBackToItsOwnViewsComposer`。
+按"设计"第 6、7 条。新增 `TestSubagentFooterShowsItsOwnContextBudget`（主视图 `75%/1M`、subagent 视图 `40%/128k` 互不影响；切换视图时各自正确）、`TestPlanReviewerFooterShowsItsOwnContextBudget`（plan-reviewer 视图与其它 subagent 视图同样有右侧的 `N%/窗口`，窗口是用户选的评审模型的，不是主模型的；owner 2026-10-05 的要求见 README）、`TestDeliveredSteerIsDrawnInTheSubagentsView`、`TestRestoredInputGoesBackToItsOwnViewsComposer`。
 
 **验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/tui -count=1` → `ok`。
 
@@ -232,6 +232,7 @@ $D db "SELECT session_id, role, substr(content,1,40) FROM fb_messages ORDER BY i
 
 **验证**：
 - 进入视图后 footer 右侧显示 `N%/<窗口>`（与主视图同一格式）。
+- plan-reviewer 视图同样如此：用智谱真机（隔离环境，两条模型）在计划模式里请另一个模型评审，进入 reviewer 视图，footer 左侧是评审模型、右侧是它自己的 `N%/<评审模型的窗口>`，评审进行中数字会变。
 - 发出 `continue` 后，它出现在 subagent 视图里，回答 `subagent finished after continue` 也在 subagent 视图里；主视图里没有这两条。
 - 数据库里这两条在 worker 会话（`main:<对话id>:…`）下，主会话没有新增行。
 - 在 subagent 运行中再发一条、按 Esc：它作为下一次执行立即发出（D1）。

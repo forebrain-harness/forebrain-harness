@@ -542,4 +542,9 @@ type detachedTurn struct {
 
 ## 执行记录
 
-（执行者在此记录：基线与改后的缓存命中率数字、所用提供方或"凭据缺失，已跳过"、tmux 截屏要点、e2e 结果。）
+- 执行于 2026-10-05，HEAD `bda9505`（README"与并行工作"的 LSP 改动已由 owner 提交，工作区无干扰）。Go 车道 19 文件 + 前端车道 9 文件全部按设计落地；`./pkg/state/ ./pkg/turn/ ./pkg/event/ ./pkg/process/ ./pkg/gateway/ ./pkg/tui/` 全 `ok`；全量 Go 29 包 `ok`；前端 250 用例过、`vue-tsc` 0；`deadcode` 与基线逐行一致；`gofmt`/`go vet` 干净。自动继续既有测试未改一行、原样通过。
+- 完成标准 grep：`runAutoContinuation`、`heartbeatChannelID` 零命中；`SessionBusy` 仅剩设计 §2 要求新增的 `turn.ErrSessionBusy` 自身（计划 004 按维护说明删除）——计划完成标准的 grep 子句与设计 §2 字面矛盾，按设计意图判定通过。`AppendMessageSequence(ctx, sid, gate` 无输出。
+- e2e（假模型）：第一轮 74 过 2 败，两个失败为**既有缺陷**（LSP 提交 `bda9505` 给设置页加了第 10 个标签 `lsp`、项目空间加了第 9 个标签，`frontend/e2e/tenant-shell.spec.ts` 与 `project-space.spec.ts` 的数量断言未同步）。按"发现既有 bug 必须根因修掉"已修正断言（10 个 + `Language servers`/`语言服务器`；9 个）。第二轮 **76 passed，`web e2e: PASS`**（含本计划 `heartbeat.spec.ts`，假模型 1.2m）。
+- e2e（智谱真模型 `FOREBRAIN_E2E_REAL_LLM=1`）：**77 passed，`web e2e: PASS`**。
+- 终端重放（智谱，隔离 FOREBRAIN_HOME）：心跳 60s 连续多跳后停 gateway，`forebrain resume <id>`（tmux 截屏）：每跳呈现为 `● heartbeat` 卡片 + 提示原文 `heartbeat cache probe: 一句话汇报当前时间` + `Ran date …` 工具卡 + 回答 + `─ Worked for 6s/8s ─` 收尾行；`fb_messages` 中 user 行 `parts` 带 `{"kind":"heartbeat","type":"origin"}`，`run_id` 归属该跳运行。
+- 缓存命中率（同一提示、智谱 `glm-5.3-flash`、各 4 次心跳运行）：基线（`1a6d708` 独立工作树二进制）**62.09%** → 改后 **86.87%**，不低于基线 ✓（心跳请求现在命中会话已建缓存；基线侧 `fb_messages` 为空也印证了改动前的旁路行为）。DeepSeek/OpenAI：凭据缺失，已跳过。

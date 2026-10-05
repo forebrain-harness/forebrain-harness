@@ -29,7 +29,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -63,12 +62,10 @@ type Server struct {
 	StaticDist string
 	StaticFS   fs.FS
 
-	runControlMu      sync.Mutex
-	runControl        *run.Controller
-	runStartedAt      sync.Map
-	approvalRecovery  sync.Once
-	approvalOwnerOnce sync.Once
-	approvalOwner     string
+	runControlMu     sync.Mutex
+	runControl       *run.Controller
+	runStartedAt     sync.Map
+	approvalRecovery sync.Once
 
 	mcpOAuthPKCEMu sync.Mutex
 	mcpOAuthPKCE   map[string]gatewayMcpPKCE
@@ -107,12 +104,17 @@ func (s *Server) projectStore() *state.ProjectStore {
 	return s.Projects
 }
 
+// approvalResumeOwner is the process identity the approval-continuation
+// lease is claimed under. It is the same owner that vouches for this
+// process's runs: one process has one answer to "is it still alive", so the
+// continuation fence and the run lease can never disagree about it. RunRT is
+// that very store in every composition (serve_run wires both from one
+// process.Open).
 func (s *Server) approvalResumeOwner() string {
-	if s == nil {
+	if s == nil || s.RunRT == nil {
 		return ""
 	}
-	s.approvalOwnerOnce.Do(func() { s.approvalOwner = "gateway:" + uuid.NewString() })
-	return s.approvalOwner
+	return s.RunRT.Owner
 }
 
 // bindSchedulerTo points the runtime's standing work at one primary agent.
@@ -123,7 +125,10 @@ func (s *Server) bindSchedulerTo(ctx context.Context, active config.Summary) {
 	if s == nil || s.Env == nil {
 		return
 	}
-	s.Env.Cron().Bind(ctx, strings.TrimSpace(active.ID))
+	s.Env.Cron().Bind(ctx, strings.TrimSpace(active.ID), process.ScheduledTurns{
+		StartHeartbeat: s.startHeartbeatTurn,
+		StartFire:      s.startCronFire,
+	})
 }
 
 // cron is the shared standing-work service. The surfaces do not own it: it
@@ -144,7 +149,14 @@ func (s *Server) RunEvents() *runEventBus {
 	if s == nil {
 		return nil
 	}
-	s.runEventsOnce.Do(func() { s.runEvents = newRunEventBus(s.RunRT) })
+	s.runEventsOnce.Do(func() {
+		s.runEvents = newRunEventBus(s.RunRT)
+		if s.Env != nil {
+			// No Env, no cron service: without one there is nothing a run's
+			// end settles, so the hook is not installed.
+			s.runEvents.onRunEnded = s.settleScheduledFire
+		}
+	})
 	return s.runEvents
 }
 
@@ -1643,7 +1655,14 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if s.RunRT != nil {
 			rr, err := s.RunRT.CreateRun(r.Context(), sid, content)
 			if err != nil {
-				writeMsg(wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: err.Error()})
+				// A session-busy refusal carries its stable code beside the
+				// sentence, so the page can say it in the viewer's own language
+				// instead of the store's English.
+				withdrawn := wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: err.Error()}
+				if code := state.SessionBusyCode(err); code != "" {
+					withdrawn.Data = map[string]any{"code": code}
+				}
+				writeMsg(withdrawn)
 				continue
 			}
 			runID = rr.ID
@@ -1972,10 +1991,9 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				// /resume replay lose all messages from the cancelled turn.
 				s.persistCancelledGatewayTurn(sid, runID, turn.RunEnd{StartedAt: runStart, FinishedAt: runFinishedAt, Worked: runElapsed}, gatewayPartialCapture, streamPartial)
 				if s.RunRT != nil {
-					_ = s.RunRT.SetStatus(agCtx, runID, state.RunStatusCancelled)
 					_ = s.RunRT.CancelRunningDescendants(agCtx, runID)
 				}
-				s.finishRun(context.Background(), sid, runID)
+				s.finishRun(context.Background(), sid, runID, state.RunStatusCancelled)
 				flushRunEvents()
 				writeMsg(wsServerMsg{
 					Op:        "run_cancelled",
@@ -1998,10 +2016,9 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			if errors.As(agentErr, &skillLoadErr) {
 				slog.Error("gateway skill load failed", "run_id", runID, "session_id", sid, "skill", skillLoadErr.SkillName, "err", agentErr)
 				if s.RunRT != nil {
-					_ = s.RunRT.SetStatus(agCtx, runID, state.RunStatusFailed)
 					_ = s.RunRT.FailRunningDescendants(agCtx, runID)
 				}
-				s.finishRun(context.Background(), sid, runID)
+				s.finishRun(context.Background(), sid, runID, state.RunStatusFailed)
 				continue
 			}
 			// The webchat shows what the gateway sends, live and on replay, so
@@ -2016,7 +2033,10 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			if agentErrDetail != nil {
 				agentErrData = agentErrDetail
 			}
-			s.finishRun(context.Background(), sid, runID)
+			if s.RunRT != nil {
+				_ = s.RunRT.FailRunningDescendants(agCtx, runID)
+			}
+			s.finishRun(context.Background(), sid, runID, state.RunStatusFailed)
 			flushRunEvents()
 			writeMsg(wsServerMsg{
 				Op:        "run_error",
@@ -2034,10 +2054,6 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				Error:     agentErrText,
 				Data:      agentErrData,
 			}, 2*time.Minute, time.Now())
-			if s.RunRT != nil {
-				_ = s.RunRT.SetStatus(agCtx, runID, state.RunStatusFailed)
-				_ = s.RunRT.FailRunningDescendants(agCtx, runID)
-			}
 			continue
 		}
 		out := ""
@@ -2079,7 +2095,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		// What the run never took goes back before anything reports its end.
-		s.finishRun(context.Background(), sid, runID)
+		s.finishRun(context.Background(), sid, runID, state.RunStatusDone)
 		if s.RunRT != nil {
 			if events, err := s.RunRT.ListRunEventsOfTypes(agCtx, runID, event.RunEventToolCompleted); err == nil && requiresLintFollowup(events) {
 				meta := tool.ToolMeta{

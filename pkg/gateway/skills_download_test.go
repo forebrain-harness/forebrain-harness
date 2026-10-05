@@ -424,9 +424,10 @@ func TestChatSessionSourceWhitelistAndEcho(t *testing.T) {
 	rr = create(`{"source":"secret"}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
-	// The listing carries the source so the drawer can filter it out.
+	// The workshop listing is the one that carries the source; the drawer
+	// asks for ordinary conversations only, both filtered in the query.
 	listRR := httptest.NewRecorder()
-	s.handleChatSessions(listRR, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
+	s.handleChatSessions(listRR, httptest.NewRequest(http.MethodGet, "/api/chat/sessions?source=workshop", nil))
 	require.Equal(t, http.StatusOK, listRR.Code)
 	require.Contains(t, listRR.Body.String(), `"source":"workshop"`)
 }

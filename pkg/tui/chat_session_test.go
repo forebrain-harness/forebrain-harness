@@ -5591,7 +5591,9 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sessStore := state.NewSessionStore(db, "main")
-	runStore := &state.RunStore{DB: db}
+	// The owner is the process identity resume claims are fenced under;
+	// production stores carry one from process.Open.
+	runStore := &state.RunStore{DB: db, Owner: "tui-test"}
 	actions := newTestActions(t, db)
 
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
@@ -26988,6 +26990,12 @@ func (e sessionEnv) session() *ChatSession {
 		env.Deps.Actions = e.ActionSvc
 	}
 	if e.RunSvc != nil {
+		// Every production store carries the process owner process.Open
+		// stamped on it; the resume claims these tests drive are refused
+		// without one.
+		if strings.TrimSpace(e.RunSvc.Owner) == "" {
+			e.RunSvc.Owner = "tui-test"
+		}
 		env.Deps.RunRT = e.RunSvc
 	}
 	if e.Runner != nil {

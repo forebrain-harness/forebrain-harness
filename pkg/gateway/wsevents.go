@@ -579,6 +579,12 @@ type runEventBus struct {
 	next  int64
 	subs  map[int64]*runEventSubscription
 	store *state.RunStore
+	// onRunEnded is told about a run's ending the moment it is persisted and
+	// before any page is delivered it. The scheduler uses it to settle a
+	// fire's record now rather than on its next tick; the hook carries
+	// nothing but the event, and the scheduler reads the ending back from
+	// the store, so removing the hook changes only how soon settling runs.
+	onRunEnded func(event.RunEvent)
 }
 
 func newRunEventBus(stores ...*state.RunStore) *runEventBus {
@@ -613,6 +619,9 @@ func (b *runEventBus) Publish(ctx context.Context, evt event.RunEvent) error {
 		default:
 			evt = turn.RunEventFromRecord(persisted)
 		}
+	}
+	if b.onRunEnded != nil {
+		b.onRunEnded(evt)
 	}
 	b.mu.RLock()
 	subs := make([]*runEventSubscription, 0, len(b.subs))

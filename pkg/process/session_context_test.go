@@ -588,14 +588,8 @@ func TestNilAndLightweightWorkerhostPaths(t *testing.T) {
 	if _, _, err := RunSubagentSupervised(context.Background(), nil, "task", "", "", "", "", ""); err == nil {
 		t.Fatal("expected nil environment subagent error")
 	}
-	if _, _, err := RunAgentOnceSupervised(context.Background(), nil, AgentOnceInput{}); err == nil {
-		t.Fatal("expected nil environment once error")
-	}
 	if _, err := (*Environment)(nil).RunSubagentExec(context.Background(), "task", "", "", "", "", ""); err == nil {
 		t.Fatal("expected nil environment exec error")
-	}
-	if out, errText := (*Environment)(nil).RunAgentOnceExec(context.Background(), "", "", "", "input"); out != "" || errText == "" {
-		t.Fatalf("agent once nil out=%q err=%q", out, errText)
 	}
 }
 

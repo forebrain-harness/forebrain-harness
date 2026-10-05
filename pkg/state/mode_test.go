@@ -456,3 +456,39 @@ func TestPathLayout(t *testing.T) {
 		t.Fatalf("path = %q, want %q", got, want)
 	}
 }
+
+// TestRemoveSessionStateFiles pins the whole on-disk footprint a session
+// keeps under one agent's state root: all four files go, and a session that
+// never wrote some of them still deletes cleanly — removal must be
+// repeatable, not a mirror of how the session happened to be used.
+func TestRemoveSessionStateFiles(t *testing.T) {
+	root := t.TempDir()
+	sid := "sid-remove"
+
+	if err := Set(root, sid, State{Mode: ModePlan}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetFast(root, sid, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(root, sid, List{Items: []Item{{ID: "1", Content: "step"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(root, sid, "a note"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveSessionStateFiles(root, sid); err != nil {
+		t.Fatalf("RemoveSessionStateFiles: %v", err)
+	}
+	for _, p := range []string{modePath(root, sid), fastPath(root, sid), todoPath(root, sid), intermediatePath(root, sid)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists after removal", p)
+		}
+	}
+
+	// A session that never wrote any of the files is not an error.
+	if err := RemoveSessionStateFiles(root, "never-existed"); err != nil {
+		t.Fatalf("removing a file-less session = %v, want nil", err)
+	}
+}

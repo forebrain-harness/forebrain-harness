@@ -371,6 +371,10 @@ type MemoriesSlashHandler interface {
 type SessionStore interface {
 	Ensure(ctx context.Context, id string, title string) error
 	ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error)
+	// SessionTitle returns the session's own title, "" when it has none. It
+	// reads by id, so a conversation older than any recent list still has
+	// its name.
+	SessionTitle(ctx context.Context, id string) (string, error)
 	// ForkInto makes target the same conversation as source, as stored.
 	ForkInto(ctx context.Context, sourceID, targetID string) error
 	SetTitle(ctx context.Context, id string, title string) error

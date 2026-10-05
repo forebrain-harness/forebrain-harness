@@ -155,32 +155,6 @@ func TestRunExecutorRunsWhenOnlyAnOptionalServerFailed(t *testing.T) {
 	}
 }
 
-// TestRunAgentOnceSupervisedFailsWhenARequiredServerDidNotStart pins the same
-// contract for the unattended entries a schedule or a one-shot prompt uses.
-func TestRunAgentOnceSupervisedFailsWhenARequiredServerDidNotStart(t *testing.T) {
-	env, counter := envWithMCPServers(t, mcpServerEntry("required-docs", true))
-
-	_, _, err := RunAgentOnceSupervised(context.Background(), env, AgentOnceInput{
-		SessionID: "cron-session",
-		Input:     "nightly summary",
-	})
-	if err == nil {
-		t.Fatal("an unattended one-shot run must fail when a required server did not start")
-	}
-	if !strings.Contains(err.Error(), "required-docs") {
-		t.Fatalf("error %q does not name the required server", err)
-	}
-	// RunAgentOnceExec is the path a schedule reaches, and it reports the same
-	// failure as a message rather than an error.
-	_, errMsg := env.RunAgentOnceExec(context.Background(), "cron-session", "cron", "", "nightly summary")
-	if !strings.Contains(errMsg, "required-docs") {
-		t.Fatalf("RunAgentOnceExec error %q does not name the required server", errMsg)
-	}
-	if counter.count() != 0 {
-		t.Fatalf("the provider was called %d times for unattended runs that had to stop", counter.count())
-	}
-}
-
 // TestSubagentFailsWhenThePrimaryRunnersRequiredServerDidNotStart pins that a
 // child cannot quietly outlive a required-server failure: a subagent reuses the
 // primary Runner's generation, so it meets the same barrier.
@@ -196,27 +170,5 @@ func TestSubagentFailsWhenThePrimaryRunnersRequiredServerDidNotStart(t *testing.
 	}
 	if counter.count() != 0 {
 		t.Fatalf("the provider was called %d times for a child that had to stop", counter.count())
-	}
-}
-
-// TestScheduledPromptRunsInTheFreshSessionItNames pins that an unattended run
-// in a session nobody has opened yet — every cron fire gets a fresh one —
-// creates that session for the bound primary agent before the run row that
-// belongs to it, instead of failing the run row's reference to it.
-func TestScheduledPromptRunsInTheFreshSessionItNames(t *testing.T) {
-	env, counter := envWithMCPServers(t, "")
-	out, errMsg := env.RunAgentOnceExec(context.Background(), "cron-job-1-1790000000", "cron", "", "nightly summary")
-	if errMsg != "" {
-		t.Fatalf("scheduled prompt failed: %s", errMsg)
-	}
-	if out != "the model answered" || counter.count() == 0 {
-		t.Fatalf("scheduled prompt output = %q after %d model calls", out, counter.count())
-	}
-	var owner string
-	if err := env.SQL.QueryRowContext(context.Background(), `SELECT agent_id FROM fb_sessions WHERE id=?`, "cron-job-1-1790000000").Scan(&owner); err != nil {
-		t.Fatalf("the fire's session was not recorded: %v", err)
-	}
-	if owner != env.Deps.SessionStore.AgentID() {
-		t.Fatalf("fire session owner = %q, want the bound primary agent %q", owner, env.Deps.SessionStore.AgentID())
 	}
 }

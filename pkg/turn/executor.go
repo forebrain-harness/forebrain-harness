@@ -949,16 +949,15 @@ func currentSessionTitle(ctx Context, sessionID string) string {
 	if ctx.Sessions == nil {
 		return strings.TrimSpace(sessionID)
 	}
-	summaries, err := ctx.Sessions.ListSessionsRecent(context.Background(), 200)
-	if err != nil {
+	title, err := ctx.Sessions.SessionTitle(context.Background(), sessionID)
+	switch {
+	case err != nil:
 		return strings.TrimSpace(sessionID)
+	case title == "":
+		return "New conversation"
+	default:
+		return title
 	}
-	for _, sum := range summaries {
-		if strings.TrimSpace(sum.ID) == strings.TrimSpace(sessionID) {
-			return sessionSummaryTitle(sum)
-		}
-	}
-	return strings.TrimSpace(sessionID)
 }
 
 func copySlashSessionState(ctx Context, sourceSessionID, targetSessionID string) error {

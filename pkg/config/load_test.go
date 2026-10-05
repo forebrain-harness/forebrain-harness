@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSavePreservesLLMProviderSecretsAfterReorder guards the regression where
@@ -124,5 +125,70 @@ func TestExampleConfigLoads(t *testing.T) {
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	if _, err := Load("../../forebrain.yaml"); err != nil {
 		t.Fatalf("example forebrain.yaml failed to load: %v", err)
+	}
+}
+
+// TestParseRootYAMLCronRetentionRange pins the one validation behind every
+// write path: the YAML editor's verdict is the loader's verdict, so a
+// retention outside 1..3650 is rejected before anything reaches disk.
+func TestParseRootYAMLCronRetentionRange(t *testing.T) {
+	for _, bad := range []string{"0", "3651", "-3"} {
+		_, err := ParseRootYAML([]byte("cron:\n  retention_days: " + bad + "\n"))
+		if err == nil || !strings.Contains(err.Error(), "cron.retention_days") {
+			t.Fatalf("retention_days %s = %v, want a cron.retention_days error", bad, err)
+		}
+	}
+	for _, ok := range []string{"1", "3650"} {
+		r, err := ParseRootYAML([]byte("cron:\n  retention_days: " + ok + "\n"))
+		if err != nil {
+			t.Fatalf("retention_days %s rejected: %v", ok, err)
+		}
+		if r.Cron.RetentionDays == nil {
+			t.Fatalf("retention_days %s parsed to nil", ok)
+		}
+	}
+}
+
+// TestForebrainYamlExampleStaysValid keeps the repo-root example loadable: it
+// documents current settings, so it must pass the same validation as a real
+// config, including the lsp and cron sections it demonstrates.
+func TestForebrainYamlExampleStaysValid(t *testing.T) {
+	data, err := os.ReadFile("../../forebrain.yaml")
+	if err != nil {
+		t.Skip("example not found")
+	}
+	r, err := ParseRootYAML(data)
+	if err != nil {
+		t.Fatalf("forebrain.yaml example rejected: %v", err)
+	}
+	if got := r.CronRetentionDays(); got != 30 {
+		t.Fatalf("cron.retention_days example = %d, want 30", got)
+	}
+	if eff := r.EffectiveLSP(); eff.MaxServers != 6 || eff.IdleTimeout != 600*time.Second || eff.RequestTimeout != 30*time.Second {
+		t.Fatalf("lsp example resolved unexpectedly: %+v", eff)
+	}
+	if len(r.LSP.Servers) != 2 || r.LSP.Servers["gopls"].Command != "gopls" || r.LSP.Servers["pyright-diagnostics"].Role != "diagnostics" {
+		t.Fatalf("lsp.servers example wrong: %+v", r.LSP.Servers)
+	}
+	if r.AutoReview.Policy != "" || r.Credentials.ChatGPT != "" {
+		t.Fatalf("auto_review/credentials example wrong: %+v %+v", r.AutoReview, r.Credentials)
+	}
+	if !r.Tools.CommandRewrite.UseRewrite() {
+		t.Fatal("tools.command_rewrite example should resolve to enabled")
+	}
+	f := r.EffectiveFeatures()
+	if !f.Memories && r.Features.Memories == nil || !f.SkillOffer || !f.LSP {
+		t.Fatalf("features example resolved unexpectedly: %+v", f)
+	}
+	if srv := r.Agents.Defaults.MCPServers; len(srv) > 0 {
+		if string(srv[0].DefaultToolsApprovalMode) != "auto" || srv[0].StartupTimeout != 30 || srv[0].Required {
+			t.Fatalf("mcp demo_stdio example wrong: mode=%q startup=%v required=%v", srv[0].DefaultToolsApprovalMode, srv[0].StartupTimeout, srv[0].Required)
+		}
+	}
+	if r.Agents.Defaults.EnableSubagent != nil && *r.Agents.Defaults.EnableSubagent {
+		t.Fatal("agents.defaults.enable_subagent example should stay off")
+	}
+	if w := r.Compact.ModelAutoCompactTokenLimitScope; w != "total" || r.Compact.ModelAutoCompactTokenLimit != 0 {
+		t.Fatalf("compact example wrong: %+v", r.Compact)
 	}
 }

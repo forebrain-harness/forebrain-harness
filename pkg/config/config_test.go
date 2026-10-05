@@ -1187,3 +1187,50 @@ func TestLoadRecordsTheFilesTheConfigurationCameFrom(t *testing.T) {
 		t.Fatalf("SourceFiles = %v, want the config file then the applied .env", r.SourceFiles)
 	}
 }
+
+// TestCronRetentionDaysAndSaveRoundTrip covers the install's scheduled-task
+// retention: the default applies when nothing is set, a configured value
+// survives a save-and-reload cycle unchanged, and an unset section never
+// materialises into forebrain.yaml — an unset value must stay unset, or every
+// future default change would be frozen into existing files.
+func TestCronRetentionDaysAndSaveRoundTrip(t *testing.T) {
+	if got := (&Root{}).CronRetentionDays(); got != DefaultCronRetentionDays {
+		t.Fatalf("unset retention = %d, want the default %d", got, DefaultCronRetentionDays)
+	}
+	dir := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", dir)
+	path := filepath.Join(dir, "forebrain.yaml")
+
+	if err := Save(path, Root{}); err != nil {
+		t.Fatalf("save unset: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if strings.Contains(string(raw), "cron:") {
+		t.Fatalf("an unset retention materialised into the file:\n%s", raw)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reload unset: %v", err)
+	}
+	if got := reloaded.CronRetentionDays(); got != DefaultCronRetentionDays {
+		t.Fatalf("retention after an unset round trip = %d, want the default %d", got, DefaultCronRetentionDays)
+	}
+
+	seven := 7
+	if err := Save(path, Root{Cron: CronSection{RetentionDays: &seven}}); err != nil {
+		t.Fatalf("save 7: %v", err)
+	}
+	reloaded, err = Load(path)
+	if err != nil {
+		t.Fatalf("reload 7: %v", err)
+	}
+	if got := reloaded.CronRetentionDays(); got != 7 {
+		t.Fatalf("retention after the round trip = %d, want 7", got)
+	}
+	if reloaded.Cron.RetentionDays == nil || *reloaded.Cron.RetentionDays != 7 {
+		t.Fatalf("reloaded pointer = %v, want 7", reloaded.Cron.RetentionDays)
+	}
+}

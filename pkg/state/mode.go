@@ -179,3 +179,28 @@ func SetFast(home, sessionID string, enabled bool) error {
 	}
 	return os.Rename(tmp, p)
 }
+
+// RemoveSessionStateFiles deletes the files a session keeps under one agent's
+// state root, all named for the session id:
+//
+//	state/modes/<sid>.json          the session's mode and plan-mode bookkeeping
+//	state/fast/<sid>.json           the session's /fast toggle
+//	state/todos/<sid>.json          the session's checklist
+//	state/intermediate/<sid>.md     the session's intermediate notes
+//
+// A file that does not exist is not an error: deletion must be repeatable
+// over a session that never wrote some of them. Anything new that lands here
+// must be added to this list or deleting a session leaves it orphaned.
+func RemoveSessionStateFiles(stateRoot, sessionID string) error {
+	for _, p := range []string{
+		modePath(stateRoot, sessionID),
+		fastPath(stateRoot, sessionID),
+		todoPath(stateRoot, sessionID),
+		intermediatePath(stateRoot, sessionID),
+	} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}

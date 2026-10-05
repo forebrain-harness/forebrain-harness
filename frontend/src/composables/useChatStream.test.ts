@@ -616,10 +616,42 @@ describe('useChatStream helpers', () => {
       await pendingSend
       expect(stream.takeReturnedDraft()).toEqual(attached)
       expect(stream.takeReturnedNotice()).toBe('ImageFile: read "shots/diagram.png": no such file or directory')
+      expect(stream.takeReturnedNoticeCode()).toBeNull()
       expect(stream.messages.value.some((message) => message.role === 'user')).toBe(false)
       expect(stream.isStreaming.value).toBe(false)
     } finally {
       Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('hands a withdrawn message back with the code behind the refusal sentence', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('another turn is busy in here')
+      const socket = FakeChatWebSocket.instances[0]!
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as { request_id: string }
+      // The session already has one live run, so the runtime refuses to start
+      // this one: the message never became a turn and comes back whole, with
+      // both the sentence the runtime rendered and the stable code behind it.
+      socket.message({
+        op: 'turn_withdrawn',
+        request_id: sent.request_id,
+        session_id: 's-busy',
+        error: 'This conversation is already running a turn; send again when it finishes.',
+        data: { code: 'session_running' },
+      })
+      await pendingSend
+      expect(stream.takeReturnedDraft()).toEqual({ text: 'another turn is busy in here', attachments: [], mentionImages: [] })
+      expect(stream.takeReturnedNotice()).toBe('This conversation is already running a turn; send again when it finishes.')
+      expect(stream.takeReturnedNoticeCode()).toBe('session_running')
+      expect(stream.messages.value.some((message) => message.role === 'user')).toBe(false)
+      expect(stream.isStreaming.value).toBe(false)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: originalWebSocket })
     }
   })
 
@@ -2420,6 +2452,83 @@ describe('auto-continue after a usage limit', () => {
       cancelSpy.mockRestore()
       Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
     }
+  })
+})
+
+/**
+ * A heartbeat starts a turn nobody on this page asked for: its prompt reaches
+ * every page watching the conversation as that turn's first row, marked as the
+ * heartbeat's the way a reload shows it. The replay that overlaps the history
+ * rows draws nothing — those rows already hold the prompt as the user row the
+ * runtime wrote.
+ */
+describe('a heartbeat turn in its conversation', () => {
+  beforeAll(() => setLocale('en'))
+  afterAll(() => setLocale('en'))
+
+  function observerEvent(socket: FakeChatWebSocket, id: string, sequence: number, type: string, payload: Record<string, unknown>) {
+    socket.message({
+      op: 'run_event',
+      data: { id, sequence, type, run_id: 'beat-run', session_id: 's1', created_at: '2026-10-03T23:00:00Z', payload },
+    })
+  }
+
+  it('draws the heartbeat prompt only when the event is new', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const spies = [
+      vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([]),
+      vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' }),
+      vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+        sessionId: 's1', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+      } as never),
+      vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] }),
+    ]
+    try {
+      const stream = useChatStream()
+      stream.switchToSession('s1')
+      await vi.waitFor(() => expect(stream.historyLoading.value).toBe(false))
+      const observer = FakeChatWebSocket.instances[0]!
+      observer.open()
+      expect(JSON.parse(observer.sent[0] ?? '{}')).toMatchObject({ op: 'bind_session', session_id: 's1' })
+
+      observer.message({
+        op: 'session_bound',
+        session_id: 's1',
+        data: { cursor: 0, high_water: 5 },
+      })
+
+      // The replay up to the binding's high water is already in the history
+      // rows the page loaded; drawing it again would show the prompt twice.
+      observerEvent(observer, 'evt-replayed', 4, 'heartbeat_fired', { prompt: 'anything new?' })
+      expect(stream.messages.value).toEqual([])
+
+      // A beat fires while this page watches: its prompt becomes the turn's
+      // first row, marked as the heartbeat's.
+      observerEvent(observer, 'evt-fired', 6, 'heartbeat_fired', { prompt: 'anything new?' })
+      expect(stream.messages.value).toEqual([
+        { id: 'heartbeat-evt-fired', role: 'user', content: 'anything new?', origin: 'heartbeat' },
+      ])
+
+      // The same event arriving again — the reconnect the observer's identity
+      // check exists for — draws nothing more.
+      observerEvent(observer, 'evt-fired', 6, 'heartbeat_fired', { prompt: 'anything new?' })
+      expect(stream.messages.value).toHaveLength(1)
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
+  it('reads the origin back off a stored user row', () => {
+    const conversation = conversationFromTranscript([
+      { role: 'user', content: 'anything new?', origin: 'heartbeat' },
+      { role: 'assistant', content: 'nothing yet' },
+      { role: 'user', content: 'thanks' },
+    ])
+    expect(conversation[0]).toMatchObject({ role: 'user', content: 'anything new?', origin: 'heartbeat' })
+    expect(conversation[2].origin).toBeUndefined()
   })
 })
 

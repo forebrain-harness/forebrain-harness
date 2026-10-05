@@ -6,7 +6,7 @@
 > **前置检查**：README 里计划 002、003、004 必须都是 `DONE`，否则 STOP。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/run/subagent.go pkg/run/turn_input.go pkg/run/controller.go pkg/process/worker_cli.go pkg/process/one_shot.go pkg/event/run_events.go`
+> `git diff --stat bda9505 -- pkg/run/subagent.go pkg/run/turn_input.go pkg/run/controller.go pkg/process/worker_cli.go pkg/process/one_shot.go pkg/event/run_events.go`
 > 计划 002–004 会改这些文件，这是预期的；按函数名核对"现状"。
 
 ## 状态
@@ -16,7 +16,7 @@
 - **风险**：MED-HIGH（并发：同一个 subagent 可能同时被模型和用户驱动）
 - **依赖**：002、003、004
 - **类别**：bug / direction
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -33,7 +33,7 @@ owner 的第 1 点：subagent 失败后，用户必须能在它的视图里发�
 ## owner 已定的语义（README 决策表）
 
 - **D1 Esc**：在 subagent 视图里，撤回窗口内（用户刚发、它还没开始回答）Esc 撤回发给它的消息；有发给它的待投递 steer 时，Esc 中断它并立即发送；其余情况 Esc 返回主视图；Esc 永不直接取消 subagent。本计划提供前两种的引擎入口。
-- **D2**：所有类型都能被用户直接对话，包括一次性类型（explore、plan、cavecrew-investigator、cavecrew-reviewer）和内部保留类型（plan-reviewer、goal-evaluator）。`OneShot`/`Continuable` 只约束模型的 `subagent_continue`。
+- **D2**：所有类型都能被用户直接对话，包括一次性类型（explore、plan、cavecrew-investigator、cavecrew-reviewer）和内部保留类型（plan-reviewer、goal-evaluator、guardian——`subagent_defs.go` 里 `OneShot: true` 的三种审批/评估类）。`OneShot`/`Continuable` 只约束模型的 `subagent_continue`。
 - **D3**：用户驱动的执行结束后，**不**往主会话注入任何东西；结果写进注册表和账本，主 agent 用 `subagent_status`/`subagent_wait`/`subagent_list` 能读到。
 
 ## 现状（计划 002–004 完成之后应有的样子）
@@ -189,7 +189,7 @@ func startUserSubagentExecution(ctx context.Context, fac Factory, ch *subagentCh
 
 - 用户发起的执行：worker 会话的历史 + 新用户消息追加在尾部，前缀与这个 subagent 上一次请求相同（计划 002 已保证），命中率与模型的 `subagent_continue` 相同。
 - steer：在工具边界追加到尾部，与主会话 steer 相同。
-- 测试计划第 6 条用捕获请求的测试 LLM 断言：用户发起的第一次请求 = 该 subagent 上一次请求的全部消息 + 上一次的回答 + 用户消息。
+- 第 4 步的第 6 条测试（`TestUserMessageReusesTheSubagentsPrefix`）用捕获请求的测试 LLM 断言：用户发起的第一次请求 = 该 subagent 上一次请求的全部消息 + 上一次的回答 + 用户消息。
 
 ## 范围
 

@@ -6,7 +6,7 @@
 > **前置检查**：README 里计划 005、007、008 必须都是 `DONE`，否则 STOP（本计划用 005 的用户输入通道启动继续，用 007/008 建好的 subagent 视图 composer 显示提示和接收 Esc）。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/turn/submit.go pkg/turn/service.go pkg/run/subagent.go pkg/process/one_shot.go pkg/process/open.go pkg/event/run_events.go pkg/tui/notify.go pkg/tui/run.go pkg/tui/render.go pkg/tui/chat_session.go pkg/gateway/run_control.go pkg/gateway/api_extra.go frontend/src/components/chat/AutoContinueBanner.vue frontend/src/composables/useChatStream.ts frontend/src/views/ChatView.vue`
+> `git diff --stat bda9505 -- pkg/turn/submit.go pkg/turn/service.go pkg/run/subagent.go pkg/process/one_shot.go pkg/process/open.go pkg/event/run_events.go pkg/tui/notify.go pkg/tui/run.go pkg/tui/render.go pkg/tui/chat_session.go pkg/gateway/run_control.go pkg/gateway/api_extra.go frontend/src/components/chat/AutoContinueBanner.vue frontend/src/composables/useChatStream.ts frontend/src/views/ChatView.vue`
 > 前置计划会改其中多数文件，这是预期的；按函数名核对"现状"。
 
 ## 状态
@@ -16,7 +16,7 @@
 - **风险**：MED（定时器、并发：主 agent 和 subagent 可能同时撞上同一个用量上限）
 - **依赖**：005、007、008
 - **类别**：direction（与主 agent 对齐）
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## owner 的要求（逐字）
 
@@ -55,7 +55,7 @@ D3 照旧：自动继续的结果不注入主会话。
 - `AutoContinueConfig{Continue, Events, Surfaces}`。TUI：`pkg/tui/notify.go` 里 `turn.WithAutoContinue(turn.AutoContinueConfig{Continue: s.continueAfterUsageLimit, Events: event.SinkFunc(s.publishRunEvent), Surfaces: []turn.Surface{turn.SurfaceTUI}})`；gateway：`pkg/gateway/run_control.go:571` `autoContinueConfig()`，`continueAfterUsageLimit` 以分离运行启动继续。
 - TUI 的显示与取消：`pkg/tui/notify.go:1706` `handleAutoContinueNotification`（`AutoContinueScheduledMsg` / `CancelledMsg` / `DueMsg`，都按 `state.sessionID` 过滤）；`streamState.autoContinue`、`cancelAutoContinue`、`takeAutoContinueDue`；`Renderer.SetAutoContinueNotice`、`autoContinueNoticeLineLocked`。
 - 事件：`pkg/event/run_events.go:186-217` 三个载荷，没有 agent 字段。
-- 网页：`frontend/src/components/chat/AutoContinueBanner.vue`（含测试）；取消走 WS op `cancel_auto_continue`（`pkg/gateway/run_control.go:559-563`、`handleCancelAutoContinueMessage`）或 `api.Delete("/auto-continue", ...)`（`pkg/gateway/api_extra.go:198`）。
+- 网页：`frontend/src/components/chat/AutoContinueBanner.vue`（含测试）；取消走 WS op `cancel_auto_continue`（wsOp 常量在 `pkg/gateway/run_control.go:562`，处理函数 `handleCancelAutoContinueMessage` 在 `:758-761`）或 `api.Delete("/auto-continue", ...)`（`pkg/gateway/api_extra.go:198`）。
 - 计划 005 之后：`run.SendToSubagent`、`run.SubagentSurface`、所有 subagent 执行都经过 `runSubagentExecution`。
 
 ## 设计
@@ -139,13 +139,14 @@ D3 照旧：自动继续的结果不注入主会话。
 
 ### 第 1 步：钉住主会话的现行行为
 
-`pkg/turn` 里已有的自动继续测试全部保留；补一条 `TestPrimaryAutoContinueIsUnchangedBySubagentPlans`：主会话和它的一个 subagent 同时有待继续计划时，主会话的计划、取消、到点行为与只有主会话时完全相同。
+`pkg/turn` 里已有的自动继续测试全部保留，先跑绿钉住现行行为。`TestPrimaryAutoContinueIsUnchangedBySubagentPlans`（主会话和它的一个 subagent 同时有待继续计划时，主会话的计划、取消、到点行为与只有主会话时完全相同）**放到第 2 步调度器落地后再写**——现在写它编译不过，整包没法"只跑已有的"。
 
-**验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/turn -run 'AutoContinue' -count=1` → `ok`（新测试此时编译不过，先只跑已有的；第 2 步后全部通过）。
+**验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/turn -run 'AutoContinue' -count=1` → `ok`（只含已有测试）。
 
 ### 第 2 步：调度器
 
 按"设计"第 1、4 条。新增测试（`pkg/turn`）：
+- `TestPrimaryAutoContinueIsUnchangedBySubagentPlans`（第 1 步说明的那条，调度器落地后补上）。
 - `TestSubagentUsageLimitArmsItsOwnContinuation`：`SubagentExecutionEnded` 带额度错误 → 有按 worker 会话 id 键的计划，`SessionID` 是对话 id，事件载荷带 `agent_id`；主会话没有计划。
 - `TestSubagentContinuationIsSupersededByItsNextExecution`：`SubagentExecutionStarting(worker)` → 计划取消，原因 `superseded`。
 - `TestSubagentContinuationsStopAfterFiveInARow`。

@@ -6,8 +6,8 @@
 > **前置检查（先运行）**：`grep -n "| 002 \|| 003 \|| 005 " docs/plan/SCHEDULED_RUNS_TRANSCRIPT/README.md`。SRT-002 和 SRT-003 必须是 `DONE`，否则 STOP（本计划要用它们引入的 `SessionBirth`/`EnsureAt` 和"列表在 SQL 里按用途过滤"）。SRT-005 是否 DONE 决定第 1 步的做法。
 >
 > **漂移检查**：
-> `git diff --stat 1a6d708 -- pkg/run/subagent.go pkg/run/run.go pkg/run/fork.go pkg/run/controller.go pkg/run/config.go pkg/process/worker_cli.go pkg/process/one_shot.go pkg/state/session_store.go pkg/state/message_sync.go pkg/memory/jobs.go pkg/turn/session.go pkg/tui/chat_slash.go`
-> 这些文件有些本来就有不属于本计划的改动，SRT-002/003/005 也会改 `pkg/state/session_store.go`、`pkg/memory/jobs.go`。按函数名和注释原文核对"现状"摘录；对不上就 STOP。
+> `git diff --stat bda9505 -- pkg/run/subagent.go pkg/run/run.go pkg/run/fork.go pkg/run/controller.go pkg/run/config.go pkg/process/worker_cli.go pkg/process/one_shot.go pkg/state/session_store.go pkg/state/message_sync.go pkg/memory/jobs.go pkg/turn/session.go pkg/tui/chat_slash.go`
+> 这些文件在基线之后可能被 SRT-002/003/005 改（`pkg/state/session_store.go`、`pkg/memory/jobs.go`，若它们先开工）。按函数名和注释原文核对"现状"摘录；对不上就 STOP。
 
 ## 状态
 
@@ -16,7 +16,7 @@
 - **风险**：MED-HIGH（改变 subagent 的持久化和 `subagent_continue` 的上下文；必须证明首次请求逐字节不变）
 - **依赖**：SRT-002、SRT-003（见前置检查）
 - **类别**：bug
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## 为什么要做
 
@@ -31,7 +31,7 @@ owner 的第 1 点：subagent 因为网络原因失败后，用户必须能在�
 
 ## 现状（2026-10-04 工作区的事实）
 
-### typed subagent 的执行（`pkg/process/worker_cli.go:16-75`）
+### typed subagent 的执行（`pkg/process/worker_cli.go:16-77`）
 
 ```go
 func RunSubagentSupervised(ctx context.Context, env *Environment, task string, childRunID string, parentRunID string, sessionID string, workerSessionID string, subagentType string) (*agent.Result, hook.PreHookResult, error) {
@@ -79,7 +79,7 @@ type SubagentExecutor interface {
 - 三个函数都在 `pkg/turn/session.go`（`PersistUserTurn`、`PersistAssistantTurn`、`PersistCancelledTurn`）。`pkg/run` 不能 import `pkg/turn`（`TestLayer3PackagesDoNotImportEachOther`），`pkg/process` 可以。
 - `pkg/state/message_sync.go` `AppendMessageSequenceForRun`：从尾部找"存储里最后一条、本次列表仍然带着的行"，只追加它之后的消息；`system` 行和 `Ephemeral` 消息不入库；压缩摘要不作为独立行入库。这正是让"已经写过的前缀不会重复写"的机制。
 
-### fork subagent（`pkg/run/subagent.go:614` `runForkSubagent`，`pkg/run/run.go:41` `RunFork`）
+### fork subagent（`pkg/run/subagent.go:614` `runForkSubagent`，`pkg/run/run.go:43` `RunFork`）
 
 - system：`cacheSafe.RenderedSystemPrompt`（父请求的 system，来自 `forkCaptureLLM` 捕获）加上 `"\n\n" + agent.FileAccessScopeSystemPrompt(projectRoot, wsRoot)`。
 - 初始消息：`CreateSubagentContext`（`pkg/run/controller.go:495`）把父请求去掉 system 后的消息（`ParentMessages`）加上 `BuildForkedMessages(prep.task, last)` 产生的指令消息，再 `stripOrphanedToolCalls`。
@@ -186,6 +186,8 @@ fork subagent 的继续也走 `executeSubagent`（typed 路径、只加了 fork-
 
 ### 5. 每个 agent 用的模型：一个解析函数
 
+> **2026-10-05 修订**：本节的 `HistoryEntry` 模型字段、派发时记录覆盖、`run.AgentModel` 由计划 015 先实现（为修 plan-reviewer footer 显示错模型），`AgentModel` 的签名多一个 `effort` 返回值。执行本计划时若 015 已 `DONE`，核对后复用，不要再写一份；本节第 6 条（继续时把覆盖装回上下文）仍由本计划做。
+
 plan reviewer 的模型是用户在审批浮层里当场选的（`WithSubagentModelOverride`，`pkg/run/subagent.go` 约 `:1906-1935`），今天这个选择没有记进 subagent 记录。owner 要求所有类型（含 plan-reviewer）都能被用户继续（README 决策 D2），继续时必须用它原来的模型，所以要把这个选择记下来：
 
 - `agent.HistoryEntry` 加 `ModelProvider string \`json:"model_provider,omitempty"\``、`Model string \`json:"model,omitempty"\``，注释："the model a dispatch-time override put this agent on; empty when it runs on its definition's or the conversation's model"。账本是 JSONL，加字段不需要迁移。
@@ -230,12 +232,13 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 ## 缓存影响（必须留下证据）
 
 1. **首次执行的请求逐字节不变。** typed：以前 worker 会话为空，构建器产出 `head + [用户消息]`；现在先写了一条用户消息，构建器读到它并用加工版替换，产出必须完全相同。fork：首次请求由 `RunFork` 在内存里构建，落库只是旁观者，请求不变。两者都写金样测试（见测试计划第 1、2 条）。
-2. **继续时命中率上升。** 以前 `subagent_continue` 发出的是"空历史 + 一段新拼的提示"，除了工具和 system 以外整段都是新的；现在发出的是"上次的完整请求 + 一条新用户消息"，在 1 小时 TTL 内整段前缀都能命中。fork 的继续用冻结的 system 和原样的消息，前缀与它上次请求逐字节相同（测试计划第 3 条）。
+2. **继续时命中率上升。** 以前 `subagent_continue` 发出的是"空历史 + 一段新拼的提示"，除了工具和 system 以外整段都是新的；现在发出的是"上次的完整请求 + 一条新用户消息"，在 1 小时 TTL 内整段前缀都能命中。fork 的继续用冻结的 system 和原样的消息，前缀与它上次请求逐字节相同（第 6 步的 `TestForkContinuationReplaysItsOwnPrefixByteForByte`）。
 3. 用 `.claude/skills/run-forebrain` 的 `usage` 模式无法区分前缀，所以真机数字在计划 009 里用真实模型测量。本计划只交金样测试。
 
 ## 范围
 
 **只改这些文件：**
+- `docs/plan/SCHEDULED_RUNS_TRANSCRIPT/README.md`（仅当 SRT-005 未 DONE 时按第 1 步给 005 行加备注）
 - `pkg/state/session_store.go`（常量、`SessionBirth.ParentSessionID`、列表过滤）及其测试
 - `pkg/memory/jobs.go` 及其测试
 - `pkg/agent/subagent_history.go`（`HistoryEntry` 的两个模型字段）及其测试
@@ -276,7 +279,7 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 
 按"设计"第 3 条改 `RunSubagentSupervised`。
 
-**验证**：在 `pkg/process` 的测试（`worker_cli` 对应的测试文件；若不存在，用覆盖 `worker_cli.go` 的 `pkg/process/worker_cli_test.go`）加：
+**验证**：在 `pkg/process/worker_cli_test.go`（不存在则新建；测试文件必须以生产文件命名，见 README 全局规则 4）加：
 - `TestTypedSubagentWritesItsConversationToTheWorkerSession`：用测试 LLM 让 subagent 调一次工具再回答；结束后 worker 会话的行依次是 user（任务原文）、assistant（tool_calls）、tool、assistant（答案），没有重复。
 - `TestFailedTypedSubagentKeepsWhatItDid`：第二次模型调用返回网络错误；worker 会话里有 user、assistant（tool_calls）、tool 三行（`PersistCancelledTurn` 写入的部分），没有悬空的 tool_calls。
 - `TestApprovalResumeDoesNotRewriteTheSubagentPrompt`：第一次尝试在工具审批处返回 `RequiresActionError`，带审批续跑上下文再跑一次并成功；用户消息只有一行。

@@ -154,6 +154,34 @@ func TestClaimStage1FiltersThreadsAndHonorsOwnership(t *testing.T) {
 	}
 }
 
+// TestClaimStage1SkipsCronConversations pins D6: a scheduled task's
+// conversations never become extraction candidates. Each fire is a fresh,
+// report-shaped transcript, so extracting one would pay a stage-1 model call
+// to relearn what the last fire already wrote. The exclusion reads the
+// session-purpose column through this package's own constant, which must
+// stay the same value the session store births fires with.
+func TestClaimStage1SkipsCronConversations(t *testing.T) {
+	if sessionSourceCron != state.SessionSourceCron {
+		t.Fatalf("memory's sessionSourceCron = %q, want state.SessionSourceCron %q", sessionSourceCron, state.SessionSourceCron)
+	}
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	insertMemoryThread(t, store, "fire-conversation", ThreadMemoryEnabled, SessionSourceWebchat, now-7*3600)
+	if _, err := store.DB.ExecContext(ctx, `UPDATE fb_sessions SET source=? WHERE id='fire-conversation'`, sessionSourceCron); err != nil {
+		t.Fatal(err)
+	}
+	insertMemoryThread(t, store, "ordinary", ThreadMemoryEnabled, SessionSourceWebchat, now-8*3600)
+
+	claims, err := store.ClaimStage1JobsForStartup(ctx, "current", 10, 6, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Thread.ThreadID != "ordinary" {
+		t.Fatalf("claims = %#v, want only the ordinary conversation", claims)
+	}
+}
+
 func TestNoOutputDeletesPriorOutputAndEnqueuesConsolidation(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

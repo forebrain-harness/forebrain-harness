@@ -118,6 +118,8 @@ export interface ChatMessage {
   planBlocks?: PlanBlock[]
   /** What a user message attached, in the order it was attached. */
   attachments?: ChatAttachmentRecord[]
+  /** Who wrote a user message on the person's behalf: 'heartbeat'. */
+  origin?: string
   turnDiffs?: TurnDiffData[]
   memoryCitation?: import('@/lib/api').MemoryCitation
   tokenBudget?: TokenBudgetData
@@ -476,6 +478,7 @@ export function conversationFromTranscript(
         runId: String(row.runId ?? '').trim() || undefined,
         ...(attachments.length ? { attachments } : {}),
         ...(row.memoryCitation ? { memoryCitation: row.memoryCitation } : {}),
+        ...(row.origin ? { origin: row.origin } : {}),
       })
       return
     }
@@ -1476,6 +1479,7 @@ export function useChatStream() {
   // Messages on their way back to the composer, which takes them as one draft.
   const returnedDraft = ref<ComposerSubmission | null>(null)
   const returnedNotice = ref<string | null>(null)
+  const returnedNoticeCode = ref<string | null>(null)
   const pendingInputPreview = computed<PendingInputPreview>(() => (heldBeforeRun.value.length
     ? { ...serverPendingInput.value, queuedMessages: [...serverPendingInput.value.queuedMessages, ...heldBeforeRun.value.map(heldPreviewText)] }
     : serverPendingInput.value))
@@ -1712,11 +1716,40 @@ export function useChatStream() {
     }
   }
 
+  /**
+   * applyHeartbeatFiredEvent draws the message a heartbeat sent as the first
+   * row of the turn it started, the way a reload will show it once the history
+   * rows hold it. The event is filed under the run the heartbeat began, so
+   * projecting it there would draw a user turn inside the timeline of a run
+   * that has not answered yet.
+   *
+   * Only events after the observer bound say anything: the replay overlaps the
+   * history rows, which already carry the prompt as the user row the runtime
+   * wrote, so it is drawn only when it is new.
+   */
+  function applyHeartbeatFiredEvent(evt: ForebrainRunEvent, historical: boolean) {
+    const sequence = Number(evt.sequence ?? 0)
+    if (historical || (sequence > 0 && sequence <= observerHighWater)) return
+    const payload = (evt.payload ?? {}) as Record<string, unknown>
+    const prompt = String(payload.prompt ?? '').trim()
+    if (!prompt) return
+    messages.value = [...messages.value, {
+      id: `heartbeat-${String(evt.id ?? '').trim() || Date.now()}`,
+      role: 'user',
+      content: prompt,
+      origin: 'heartbeat',
+    }]
+  }
+
   function applyObservedEvent(evt: ForebrainRunEvent, historical = false) {
     const sid = String(evt.sessionId ?? '').trim()
     if (sid && sid !== String(sessionId.value ?? '').trim()) return
     if (AUTO_CONTINUE_EVENT_TYPES.has(String(evt.type))) {
       if (rememberObservedEvent(evt)) applyAutoContinueEvent(evt, historical)
+      return
+    }
+    if (String(evt.type) === 'heartbeat_fired') {
+      if (rememberObservedEvent(evt)) applyHeartbeatFiredEvent(evt, historical)
       return
     }
     // A language-server recommendation is asked once, live: history replays
@@ -2191,10 +2224,16 @@ export function useChatStream() {
 
   /**
    * Gives a message back to the composer. Everything given back before the
-   * composer takes it is one draft, in the order it was written.
+   * composer takes it is one draft, in the order it was written. A refusal
+   * travels as the runtime's sentence plus, when it sent one, the stable code
+   * behind it — the code is what lets the notice say the sentence in the
+   * viewer's language when it is drawn, the way a run's error block does.
    */
-  function giveBack(submission: ComposerSubmission, notSentBecause = '') {
-    if (notSentBecause) returnedNotice.value = notSentBecause
+  function giveBack(submission: ComposerSubmission, notSentBecause = '', notSentBecauseCode = '') {
+    if (notSentBecause) {
+      returnedNotice.value = notSentBecause
+      returnedNoticeCode.value = notSentBecauseCode.trim() || null
+    }
     returnedDraft.value = returnedDraft.value ? mergeSubmissions(returnedDraft.value, submission) : submission
   }
 
@@ -2210,6 +2249,13 @@ export function useChatStream() {
     const notice = returnedNotice.value
     returnedNotice.value = null
     return notice
+  }
+
+  /** The stable code behind that reason, when the runtime sent one. */
+  function takeReturnedNoticeCode(): string | null {
+    const code = returnedNoticeCode.value
+    returnedNoticeCode.value = null
+    return code
   }
 
   /** A handed-back message whole, its attachments described by upload name. */
@@ -2779,6 +2825,7 @@ export function useChatStream() {
     }
     let withdrawn = false
     let withdrawnError = ''
+    let withdrawnCode = ''
     let sendFollowing = false
     plan.value = null
     answer.value = ''
@@ -2931,6 +2978,11 @@ export function useChatStream() {
           // composer whole.
           withdrawn = true
           withdrawnError = String(payload.error ?? '').trim()
+          // A refusal the runtime could classify carries its code alongside
+          // the sentence it rendered, so the notice can say it in the
+          // viewer's language instead; an unclassified one keeps only the
+          // sentence.
+          withdrawnCode = parseProviderErrorDetail(payload.data)?.code ?? ''
           messages.value = messages.value.filter((message) => message.id !== userMessageId)
           isStreaming.value = false
           return { terminal: true }
@@ -3068,6 +3120,10 @@ export function useChatStream() {
 			  }
               if (AUTO_CONTINUE_EVENT_TYPES.has(String(runEvent.type))) {
                 if (rememberObservedEvent(runEvent)) applyAutoContinueEvent(runEvent, false)
+                return
+              }
+              if (String(runEvent.type) === 'heartbeat_fired') {
+                if (rememberObservedEvent(runEvent)) applyHeartbeatFiredEvent(runEvent, false)
                 return
               }
               if (String(runEvent.type) === LSP_RECOMMENDATION_EVENT_TYPE) {
@@ -3215,7 +3271,7 @@ export function useChatStream() {
       ...heldBeforeRun.value,
     ]
     heldBeforeRun.value = []
-    if (withdrawn) giveBack(submissionOf(userMessage, options), withdrawnError)
+    if (withdrawn) giveBack(submissionOf(userMessage, options), withdrawnError, withdrawnCode)
     if (withdrawn || !sendFollowing) {
       giveBackHeld(following)
       return
@@ -3451,6 +3507,7 @@ export function useChatStream() {
     returnedDraft,
     takeReturnedDraft,
     takeReturnedNotice,
+    takeReturnedNoticeCode,
     runtimeStatus,
     mcpStatus,
     autoContinue,

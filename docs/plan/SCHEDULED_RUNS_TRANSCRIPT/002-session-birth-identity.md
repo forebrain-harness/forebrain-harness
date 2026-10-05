@@ -187,3 +187,9 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 
 - 以后任何"在某个目录/项目里"新建会话的入口，都必须用 `EnsureAt` / `CreateSessionAt` 传入 `SessionBirth`，不得再修改存储的默认值。计划 005 的定时任务会话就是第一个新用户。
 - `SessionBirth` 将来如果要加"出生时的用途"（`source`），由计划 005 加；加的时候同样遵守"只在出生那一刻写入"。
+
+## 执行记录
+
+- 执行于 2026-10-05，紧随计划 001。8 个文件按设计落地（含编译器指出的 `pkg/gateway/session_context_test.go` 替身补 `EnsureAt`）。
+- `go test ./pkg/state/` ok；`-race`（`SessionBirth|SessionDefaults`）ok、无 `DATA RACE`；`./pkg/turn/`、`./pkg/gateway/` ok；全量 29 包 ok；架构测试 ok；`deadcode` 与基线逐行一致。
+- `grep -rn "ConfigureMemoryDefaults(" pkg --include='*.go' | grep -v _test`：仅剩 `pkg/process/open.go:340`（启动设启动目录，保持原样）。

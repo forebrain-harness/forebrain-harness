@@ -37,6 +37,7 @@
           <McpTab v-else-if="activeTab === 'mcp'" />
           <LspTab v-else-if="activeTab === 'lsp'" />
           <HooksTab v-else-if="activeTab === 'hooks'" />
+          <CronSettingsTab v-else-if="activeTab === 'cron'" />
           <MemorySwitchesTab v-else-if="activeTab === 'memory'" />
           <ConfigTab v-else-if="activeTab === 'config'" />
           <RuntimeStatusTab v-else-if="activeTab === 'runtime'" />
@@ -48,11 +49,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { RouterLink } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import AppearanceTab from '@/components/settings/AppearanceTab.vue'
 import SettingsApprovalTab from '@/components/settings/SettingsApprovalTab.vue'
 import ConfigTab from '@/components/settings/ConfigTab.vue'
+import CronSettingsTab from '@/components/settings/CronSettingsTab.vue'
 import HooksTab from '@/components/settings/HooksTab.vue'
 import McpTab from '@/components/settings/McpTab.vue'
 import LspTab from '@/components/settings/LspTab.vue'
@@ -69,10 +71,8 @@ import { useI18n } from '@/locales'
  * skills tab was the temporary surface; 010 replaced it with shared-skills.
  */
 const { t } = useI18n()
-
-// The appearance tab is the default: it is the one thing every visitor can
-// act on, and the visual spec's entry point.
-const activeTab = ref('appearance')
+const route = useRoute()
+const router = useRouter()
 
 const tabs = computed(() => [
   { key: 'appearance', label: t('settings.tabAppearance') },
@@ -81,11 +81,36 @@ const tabs = computed(() => [
   { key: 'mcp', label: t('settings.tabMcp') },
   { key: 'lsp', label: t('settings.tabLsp') },
   { key: 'hooks', label: t('settings.tabHooks') },
+  { key: 'cron', label: t('settings.tabCron') },
   { key: 'memory', label: t('settings.tabMemory') },
   { key: 'config', label: t('settings.tabConfig') },
   { key: 'runtime', label: t('settings.tabRuntime') },
   { key: 'shared-skills', label: t('settings.tabSharedSkills') },
 ])
+
+// The tab lives in ?tab=<key> so other pages can link straight to one. The
+// appearance tab is the default: it is the one thing every visitor can act
+// on, and the visual spec's entry point.
+function tabFromRoute(): string {
+  const tab = route.query.tab
+  const key = Array.isArray(tab) ? tab[0] : tab
+  return typeof key === 'string' && tabs.value.some((entry) => entry.key === key) ? key : 'appearance'
+}
+
+const activeTab = ref(tabFromRoute())
+
+watch(
+  () => route.query.tab,
+  () => {
+    const tab = tabFromRoute()
+    if (tab !== activeTab.value) activeTab.value = tab
+  },
+)
+
+// replace, not push: switching tabs is not a page in the history.
+watch(activeTab, (tab) => {
+  if (route.query.tab !== tab) void router.replace({ query: { ...route.query, tab } })
+})
 </script>
 
 <style scoped>

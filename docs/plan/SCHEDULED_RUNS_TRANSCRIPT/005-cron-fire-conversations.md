@@ -529,3 +529,15 @@ release(claim)                                                     │
 ## 执行记录
 
 （执行者在此记录：基线与改后的缓存命中率、所用提供方或"凭据缺失，已跳过"、终端截屏要点、审批路径与崩溃路径结果、e2e 结果。）
+
+## 执行记录
+
+- 执行于 2026-10-05（Go 步骤 1–7 与前端车道并行）。`stateSchemaVersion = 6`，`TestStateV5UpgradesToV6MarksFireSessions` 通过，迁移库与新建库逐字节一致（`TestStateMigrationMatchesFreshSchema`）。
+- 一次性旁路删除：`RunAgentOnceExec`/`RunAgentOnceSupervised`/`runPrompt`/`cronChannelID` grep 全空。被删旧测试的不变式去向：必需 MCP 未启动→`TestCronFireFailureIsRecordedExplained` + 既有 `TestRunExecutorFailsBeforeTheModelWhenARequiredServerDidNotStart`；新会话先建后跑→`TestCronFireRunsAsItsOwnConversation`。`pkg/turn` 调度器测试按 StartFire/FireRunState 替身重写（7 例），不变式全保留。
+- 一处与计划字面的偏差：`TestCronFireReapedElsewhereIsSettledByTheTick` 用导出的 `Env.Cron().SettleFire(sid)` 驱动（gateway 测试无法驱动 process 内部调度器 tick）；无参全租户扫描语义由 `pkg/turn` 的 `SettleFires()` 用例钉住。另一处：gateway 夹具加 `Env` 后走默认 token 鉴权致 401，夹具设 `Gateway.Auth.Mode="none"` 恢复，未改生产代码。
+- 全量：Go 29 包 ok；前端 260 用例过、vue-tsc 0；deadcode 与基线仅 2 处同符号行号平移；gofmt/vet 干净。
+- e2e（假模型）：第一轮 1 败（cron-fire 用例对历史面板行的 10s 定位窗太短——DOM 快照显示行与按钮均已在）→ 修正定位（以 `cron-run-open` 按钮为锚、30s 等待，符合计划"30 秒内等到"本意）后 **80 passed，`web e2e: PASS`**。e2e（智谱）：第一轮 2 败为主线并行压测同一 API key 挤占限速的时序失败（skill-workshop 差 0.8s 到限）；停止压测后干净重跑 **81 passed，`web e2e: PASS`**。
+- 终端重放（智谱）：取一次触发的会话 id，停 gateway 后 tmux `forebrain resume`：`● cron` 卡片 + 提示原文 + 回答 + `Worked for 3s` 行；`/resume` 选择器不列任何触发会话（该环境仅有 cron 会话，列表为空即排除生效）。
+- 审批路径（D4，智谱）：read-only 预设下建写文件任务并"立即执行"→ 执行记录保持 `running`，再点"立即执行"返回 `already running`；`GET /api/actions` 见 `write_file` 待审批；`POST /api/actions/:id/approve` 批准后对话继续、文件 `approval-note.txt` 落盘、执行记录 `ok`。
+- 崩溃路径（智谱）：长文触发流式中 `kill -9` gateway → 70s 后重启，执行记录在启动后收尾为 `failed`，错误原文为 004 那句，`error_code = run_abandoned`。
+- 缓存命中率（同一任务、同一提示、智谱）：新路径逐次 0% → 68.75% → 99.91% → 99.91% → 99.91%（每次触发即新会话，第一跳冷启动是固有成本；稳态 99.91%）。基线（`1a6d708` 二进制，3 次触发）聚合 91.41%，但其首跳即命中 9600 read——是踩中了新路径几分钟前用同一 key 写热的提供商侧缓存；其稳态（36/12800）为 99.72%。**稳态对比 99.91% ≥ 99.72%，不低于基线**。DeepSeek/OpenAI：凭据缺失，已跳过。

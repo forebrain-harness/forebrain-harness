@@ -14,13 +14,20 @@ import (
 )
 
 type stubSessionStore struct {
-	summaries []state.SessionSummary
-	turns     []state.Message
-	created   []state.SessionSummary
+	turns   []state.Message
+	created []state.SessionSummary
+	births  []state.SessionBirth
 }
 
 func (s *stubSessionStore) Ensure(ctx context.Context, id string, title string) error {
 	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	s.births = append(s.births, state.SessionBirth{})
+	return nil
+}
+
+func (s *stubSessionStore) EnsureAt(ctx context.Context, id, title string, birth state.SessionBirth) error {
+	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	s.births = append(s.births, birth)
 	return nil
 }
 
@@ -29,33 +36,11 @@ func (s *stubSessionStore) SetTitle(ctx context.Context, id string, title string
 	return nil
 }
 
-func (s stubSessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error) {
-	if limit <= 0 || limit >= len(s.summaries) {
-		return append([]state.SessionSummary(nil), s.summaries...), nil
-	}
-	return append([]state.SessionSummary(nil), s.summaries[:limit]...), nil
-}
-
 func (s stubSessionStore) ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error) {
 	if limit <= 0 || limit >= len(s.turns) {
 		return append([]state.Message(nil), s.turns...), nil
 	}
 	return append([]state.Message(nil), s.turns[:limit]...), nil
-}
-
-func TestListSessionsRecentUsesSessionStore(t *testing.T) {
-	svc := New(WithSessionStore(&stubSessionStore{
-		summaries: []state.SessionSummary{
-			{ID: "s2", Title: "Second", UpdatedAt: 20},
-			{ID: "s1", Title: "First", UpdatedAt: 10},
-		},
-	}))
-
-	got, err := svc.ListSessionsRecent(context.Background(), 10)
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	require.Equal(t, "s2", got[0].ID)
-	require.Equal(t, "Second", got[0].Title)
 }
 
 func TestListSessionMessagesUsesSessionStore(t *testing.T) {
@@ -103,6 +88,27 @@ func TestCreateSessionWithoutATitleIsUnnamed(t *testing.T) {
 	require.Len(t, store.created, 1)
 	require.Equal(t, created.ID, store.created[0].ID)
 	require.Equal(t, created.ID, store.created[0].Title)
+}
+
+// TestCreateSessionCarriesItsBirthToTheStore pins that a session's directory
+// identity travels with its creation: CreateSessionAt hands the store exactly
+// the birth its caller chose, and CreateSession — the ordinary path — hands
+// over the zero birth, the process default.
+func TestCreateSessionCarriesItsBirthToTheStore(t *testing.T) {
+	store := &stubSessionStore{}
+	svc := New(WithSessionStore(store))
+
+	birth := state.SessionBirth{Cwd: "/proj", GitBranch: "feat"}
+	if _, err := svc.CreateSessionAt(context.Background(), "In project", birth); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateSession(context.Background(), "Ordinary"); err != nil {
+		t.Fatal(err)
+	}
+
+	require.Len(t, store.births, 2)
+	require.Equal(t, birth, store.births[0])
+	require.Equal(t, state.SessionBirth{}, store.births[1])
 }
 
 // fakeCancelStore records what a cancelled turn wrote.
@@ -406,6 +412,33 @@ func TestPersistUserTurnFallsBackAndSkipsEmpty(t *testing.T) {
 		t.Fatalf("blank input appended %d rows, want 0", blank.appended)
 	}
 	PersistUserTurn(context.Background(), nil, UserTurn{SessionID: "s1", ModelInput: "hi"})
+}
+
+// TestPersistUserTurnMarksWhoWroteThePrompt pins the origin rule: a turn
+// someone other than the person started — a heartbeat — stores its row with
+// the origin part, while the content stays the prompt text itself.
+func TestPersistUserTurnMarksWhoWroteThePrompt(t *testing.T) {
+	t.Parallel()
+
+	beat := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), beat, UserTurn{
+		SessionID:  "s1",
+		RunID:      "run-9",
+		ModelInput: "anything new?",
+		Origin:     state.MessageOriginHeartbeat,
+	})
+	if got := state.MessageOrigin(beat.parts); got != "heartbeat" {
+		t.Fatalf("origin = %q, want heartbeat; parts = %s", got, beat.parts)
+	}
+	if beat.content != "anything new?" {
+		t.Fatalf("content = %q, want the prompt itself", beat.content)
+	}
+
+	plain := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), plain, UserTurn{SessionID: "s1", ModelInput: "hello"})
+	if got := state.MessageOrigin(plain.parts); got != "" {
+		t.Fatalf("origin = %q, want empty for the person's own message", got)
+	}
 }
 
 func newAbandonedCallStore(t *testing.T) (*state.SessionStore, string) {

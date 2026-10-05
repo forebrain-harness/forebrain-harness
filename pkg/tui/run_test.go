@@ -461,6 +461,7 @@ type fakeSession struct {
 	activeContextTurns       []statepkg.Message
 	transcriptTurnsErr       error
 	recent                   []SessionSummary
+	titles                   map[string]string
 	permissions              string
 	model                    string
 	fastEnabled              bool
@@ -745,6 +746,10 @@ func (f *fakeSession) ListSessionsRecent(_ context.Context, limit int) ([]Sessio
 		return append([]SessionSummary(nil), f.recent[:limit]...), nil
 	}
 	return append([]SessionSummary(nil), f.recent...), nil
+}
+
+func (f *fakeSession) SessionTitle(_ context.Context, id string) (string, error) {
+	return f.titles[id], nil
 }
 
 func (f *fakeSession) ModelSummaryString() string {
@@ -2685,6 +2690,59 @@ func TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation
 	session.mu.Unlock()
 	if cancelCalls != 0 {
 		t.Fatalf("expected no new cancel call: exit was already armed from the prior chained turn, so one ctrl+c should quit directly, got %d cancel call(s)", cancelCalls)
+	}
+}
+
+// A session the database refuses because another live process owns its turn
+// never started one here, so the TUI takes the message back the way Esc does
+// — the user card leaves, the text returns to the composer — and says the
+// refusal as a system line, never as a failed-run block: there is no run to
+// report the end of.
+func TestSessionBusyRefusalIsTakenBackAsAWithdrawal(t *testing.T) {
+	session := &fakeSession{dispatchErr: statepkg.ErrSessionRunning}
+	state := &streamState{sessionID: "s1"}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	events := make(chan inputEvent, 1)
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan runTurnDisposition, 1)
+	submission := ComposerSubmission{
+		Text:        "hello again",
+		Parts:       []llm.ContentPart{llm.Text("hello again")},
+		DisplayText: "hello again",
+	}
+
+	go func() {
+		disposition, _ := executeComposerSubmission(context.Background(), sigCh, events, nil, nil, session, renderer, nil, state, submission, nil, nil, false, nil)
+		done <- disposition
+	}()
+	if got := <-done; got != runTurnWithdrawn {
+		t.Fatalf("disposition = %q, want the refusal treated as a withdrawal", got)
+	}
+	if got := strings.TrimSpace(state.composer.DraftText); got != "hello again" {
+		t.Fatalf("composer draft = %q, want the message back for editing", got)
+	}
+	var userBlocks, errorBlocks, refusals int
+	for _, block := range renderer.vm.blocks {
+		switch block.frame.Kind {
+		case FrameUser:
+			userBlocks++
+		case FrameError:
+			errorBlocks++
+		case FrameSystem:
+			if block.frame.Content == statepkg.ErrSessionRunning.Error() {
+				refusals++
+			}
+		}
+	}
+	if userBlocks != 0 {
+		t.Fatalf("the user card survived the refusal: %d user block(s) remain", userBlocks)
+	}
+	if errorBlocks != 0 {
+		t.Fatalf("the refusal was drawn as an error block: %d error block(s)", errorBlocks)
+	}
+	if refusals != 1 {
+		t.Fatalf("refusal system lines = %d, want exactly the store's own sentence", refusals)
 	}
 }
 

@@ -1224,6 +1224,61 @@ func TestHandleChatWSTurnThatCannotRecordItsRunIsWithdrawn(t *testing.T) {
 	require.Zero(t, modelCalls.Load(), "the withdrawn turn reached the model")
 }
 
+// TestHandleChatWSSessionBusyWithdrawsTheMessage pins the cross-process rule
+// at the web's own entry: a session another live process holds a turn in
+// refuses the message before anything of it is written, and the withdrawal
+// carries the refusal's stable code beside its sentence, so the page can say
+// it in the viewer's language.
+func TestHandleChatWSSessionBusyWithdrawsTheMessage(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	// Another live process holds the session's turn: a lease it renews and a
+	// run it left in flight.
+	other := &state.RunStore{DB: db, Owner: "other-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	_, err = other.CreateRun(ctx, "session-ws", "in flight")
+	require.NoError(t, err)
+
+	s := &Server{Home: home, Sessions: sessions, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	var send wsClientMsg
+	send.RequestID = "req-turn"
+	send.SessionID = "session-ws"
+	send.Message.Content = "hello"
+	require.NoError(t, conn.WriteJSON(send))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	var withdrawn *wsServerMsg
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		require.NotContains(t, []string{"run_started", "run_error", "run_completed"}, msg.Op, "a refused turn must not start: %+v", msg)
+		if msg.Op == "turn_withdrawn" {
+			withdrawn = &msg
+			break
+		}
+	}
+	require.Equal(t, "req-turn", withdrawn.RequestID)
+	require.Equal(t, "This conversation is already running a turn; send again when it finishes.", withdrawn.Error)
+	require.Equal(t, map[string]any{"code": "session_running"}, withdrawn.Data)
+	rows, err := sessions.ListAllMessages(ctx, "session-ws", 0)
+	require.NoError(t, err)
+	require.Empty(t, rows, "no user row may be written for a turn that never started")
+}
+
 // TestHandleChatWSEstablishesANamedSessionBeforeItsSlashCommand pins that a
 // session the client names is established when its message arrives, before
 // any slash command writes into it: /plan records its mode change in the

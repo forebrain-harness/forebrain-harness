@@ -258,3 +258,11 @@ const (
 
 - 以后加新的会话用途，就在 `SessionSource*` 常量组里加一个，并逐个决定每个列表要不要它：抽屉和工坊用 `ListSessionsOfSource`，`/resume` 用 `ListSessionsRecent*`，项目用 `ListSessionsForProject`。
 - 任何"给 id 找会话某个属性"的需求都按 id 直接查，不要再扫列表。
+
+## 执行记录
+
+- 执行于 2026-10-05，紧随计划 002。Go 第 1–3 步 + 前端第 4 步全部落地；前端按计划第 4 步的"抽出纯函数"路径新建了 `frontend/src/composables/useSessionInfo.ts`（前端无 20 文件限制）。
+- `./pkg/state/ ./pkg/turn/ ./pkg/tui/ ./pkg/gateway/` ok；全量 29 包 ok；前端 255 用例过、`vue-tsc` 0；`deadcode` 与基线仅一处行号漂移（同一符号 `pkg/tui/notify.go`，无新增死代码）。
+- 三个 grep 检查全部无输出（`filter((r) => (r.source`、`chatSessionProject|handleChatSessionProject|Core.ListSessionsRecent`、`ListSessionsRecent` 仅剩 `execResume` 一处）。
+- 终端真机：隔离库插入 `source='cron'` 会话与普通会话各一，TUI `/resume` 选择器列出普通会话与心跳会话、**不列 cron 会话**（tmux 截屏存证）。
+- e2e：见计划 001 执行记录——断言修复后两轮假模型与智谱真模型全绿；本计划新增的项目会话标题用例（project-space.spec.ts）包含在内。

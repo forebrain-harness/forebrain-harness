@@ -14,6 +14,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -201,16 +202,30 @@ func putRecBinaryOnPath(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// recListener records everything the recommendation listener received.
+// recListener records everything the recommendation listener received,
+// including the run and conversation identities the context carried — the
+// values the RunEvent publisher forwards.
 type recListener struct {
-	mu   sync.Mutex
-	recs []event.LSPRecommendation
+	mu         sync.Mutex
+	recs       []event.LSPRecommendation
+	runIDs     []string
+	sessionIDs []string
 }
 
-func (l *recListener) on(_ context.Context, rec event.LSPRecommendation) {
+func (l *recListener) on(ctx context.Context, rec event.LSPRecommendation) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.recs = append(l.recs, rec)
+	l.runIDs = append(l.runIDs, tool.RunIDFromContext(ctx))
+	l.sessionIDs = append(l.sessionIDs, tool.ConversationSessionIDFromContext(ctx))
+}
+
+// identities returns the run and conversation ids the listener's contexts
+// carried, in publish order.
+func (l *recListener) identities() (runIDs, sessionIDs []string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.runIDs...), append([]string(nil), l.sessionIDs...)
 }
 
 func (l *recListener) all() []event.LSPRecommendation {
@@ -378,24 +393,16 @@ func TestRecommendWaitsForDetection(t *testing.T) {
 	waitForBackgroundWriters(t, m)
 }
 
-// Every gate of spec §10.1 stays shut: an untrusted project, a fork child,
-// a typed subagent, the config switch, a disabled state file, a "never"
-// entry, and a server that is already enabled.
+// Every gate of spec §10.1 stays shut: an untrusted project, the config
+// switch, a disabled state file, a "never" entry, and a server that is
+// already enabled. Fork children and typed subagents are deliberately not
+// gates anymore — their edits trigger like the main agent's (owner ruling;
+// see TestRecommendTriggersForSubagentEdits).
 func TestRecommendSkips(t *testing.T) {
 	cases := map[string]func(t *testing.T, m *Manager, project string){
 		"untrusted": func(t *testing.T, m *Manager, project string) {
 			m.opts.Trusted = false
 			recEdit(t, m, project, "a.fk", "s1")
-		},
-		"fork child": func(t *testing.T, m *Manager, project string) {
-			recEdit(t, m, project, "a.fk", "s1", func(ctx context.Context) context.Context {
-				return tool.WithForkChild(ctx, true)
-			})
-		},
-		"typed subagent": func(t *testing.T, m *Manager, project string) {
-			recEdit(t, m, project, "a.fk", "s1", func(ctx context.Context) context.Context {
-				return tool.WithSubagentType(ctx, "explore")
-			})
 		},
 		"recommendations off": func(t *testing.T, m *Manager, project string) {
 			m.pool.cfg.Store(&appcfg.Root{LSP: appcfg.LSPSection{Recommendations: boolPtr(false)}})
@@ -434,6 +441,92 @@ func TestRecommendSkips(t *testing.T) {
 			waitForBackgroundWriters(t, m)
 		})
 	}
+}
+
+// Subagent and fork edits trigger the recommendation on the conversation
+// session they belong to (owner ruling: subagent writes must trigger the LSP
+// recommendation too). The listener's context keeps the child run id and the
+// parent conversation session — the identity the RunEvent publisher forwards
+// — and one conversation gets one recommendation however many agents edit
+// in it.
+func TestRecommendTriggersForSubagentEdits(t *testing.T) {
+	m, l, project := newRecManager(t, appcfg.LSPSection{}, nil)
+	putRecBinaryOnPath(t)
+	sub := func(runID string) func(context.Context) context.Context {
+		return func(ctx context.Context) context.Context {
+			return tool.WithSubagentType(tool.WithRunID(ctx, runID), "general-purpose")
+		}
+	}
+	fork := func(runID string) func(context.Context) context.Context {
+		return func(ctx context.Context) context.Context {
+			return tool.WithForkChild(tool.WithRunID(ctx, runID), true)
+		}
+	}
+
+	recEdit(t, m, project, "a.fk", "s1", sub("run-sub-1")) // first edit only probes
+	waitRecDetected(t, m)
+
+	// A typed subagent's next edit publishes, and so does a fork child's
+	// edit in another conversation.
+	recEdit(t, m, project, "b.fk", "s1", sub("run-sub-2"))
+	recEdit(t, m, project, "c.fk", "s2", fork("run-fork-1"))
+	waitForPoll(t, "the subagent and fork recommendations", func() bool { return len(l.all()) == 2 })
+
+	// Another subagent and a parent edit of the first conversation stay
+	// quiet: that session was recommended for already.
+	recEdit(t, m, project, "d.fk", "s1", sub("run-sub-3"))
+	recEdit(t, m, project, "e.fk", "s1")
+	time.Sleep(150 * time.Millisecond) // let any wrongful third publish land
+	if got := l.all(); len(got) != 2 {
+		t.Fatalf("recommendations = %d, want exactly 2", len(got))
+	}
+
+	runs, sessions := l.identities()
+	bySession := map[string]string{} // conversation id -> the run id it published under
+	for i := range sessions {
+		bySession[sessions[i]] = runs[i]
+	}
+	if len(bySession) != 2 || bySession["s1"] != "run-sub-2" || bySession["s2"] != "run-fork-1" {
+		t.Fatalf("listener identities = %v, want s1→run-sub-2 and s2→run-fork-1 (the child runs that edited)", bySession)
+	}
+	waitForBackgroundWriters(t, m)
+}
+
+// A context with only llm.WithAgentSessionID — no explicit conversation
+// session id — still identifies the conversation (ConversationSessionIDFrom
+// Context falls back), so the TUI main agent's edits recommend too. This is
+// the real main-path contract; recEdit always sets the explicit id, so
+// without this pin a regression of the fallback would look like "the TUI
+// never recommends" again.
+func TestRecommendFallsBackToAgentSessionID(t *testing.T) {
+	m, l, project := newRecManager(t, appcfg.LSPSection{}, nil)
+	putRecBinaryOnPath(t)
+	agentOnlyEdit := func(name string) {
+		file := filepath.Join(project, name)
+		mustWrite(t, file, "content\n")
+		ctx := llm.WithAgentSessionID(context.Background(), "s1")
+		_ = m.DidWrite(ctx, "s1", []tool.FileChange{{AbsPath: file, After: []byte("content\n")}})
+	}
+
+	agentOnlyEdit("a.fk")
+	waitRecDetected(t, m) // the first edit only probes
+	agentOnlyEdit("b.fk")
+	waitForPoll(t, "the recommendation on the agent-session fallback", func() bool { return len(l.all()) == 1 })
+	if rec := l.all()[0]; rec.ServerID != "fake" || rec.Mode != "enable" {
+		t.Fatalf("recommendation = %+v", rec)
+	}
+	_, sessions := l.identities()
+	if len(sessions) != 1 || sessions[0] != "s1" {
+		t.Fatalf("conversation ids = %v, want [s1] via the fallback", sessions)
+	}
+
+	// The dedup key is the same fallback identity: a second edit stays quiet.
+	agentOnlyEdit("c.fk")
+	time.Sleep(150 * time.Millisecond)
+	if got := l.all(); len(got) != 1 {
+		t.Fatalf("recommendations = %d, want the one the fallback earned", len(got))
+	}
+	waitForBackgroundWriters(t, m)
 }
 
 // The recommendation path never blocks the edit that triggered it, not even

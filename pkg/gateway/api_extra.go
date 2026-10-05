@@ -113,7 +113,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/todos", s.handleSessionTodos)
 	chatSessions.Get("/:id/plan-md", s.handleSessionPlanMarkdown)
 	chatSessions.Get("/:id/mode", s.handleSessionMode)
-	chatSessions.Get("/:id/project", s.handleChatSessionProject)
+	chatSessions.Get("/:id", s.handleChatSession)
 	chatSessions.Post("/:id/compact", s.handleSessionCompact)
 	chatSessions.Post("/:id/rewind-last", s.handleSessionRewindLast)
 
@@ -205,6 +205,8 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Put("/providers", s.handleProviders)
 	api.Get("/hooks", s.handleHooks)
 	api.Put("/hooks", s.handleHooks)
+	api.Get("/cron-settings", s.handleCronSettings)
+	api.Put("/cron-settings", s.handleCronSettings)
 
 	runs := api.Group("/runs")
 	runs.Post("/:id/cancel", s.handleRunCancel)
@@ -260,15 +262,14 @@ func (s *Server) interruptUncertainGatewayApproval(wait state.Wait) {
 	if err := s.RunRT.MarkWaitResumeUncertain(ctx, wait.RunID, wait.ActionID); err != nil {
 		return
 	}
-	_ = s.RunRT.SetStatus(ctx, wait.RunID, state.RunStatusFailed)
 	runRecord, _ := s.RunRT.GetRun(ctx, wait.RunID)
 	sessionID := ""
 	if runRecord != nil {
 		sessionID = runRecord.SessionID
 	}
 	s.runController().Cancel(wait.RunID, errors.New(reason))
-	s.finishRun(ctx, sessionID, wait.RunID)
-	_ = s.publishGatewayRunEvent(ctx, sessionID, wait.RunID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
+	s.finishRun(ctx, sessionID, wait.RunID, state.RunStatusFailed)
+	_ = s.publishGatewayRunEvent(ctx, sessionID, wait.RunID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 	if strings.TrimSpace(wait.AgentID) != "" {
 		parentRunID := ""
 		if runRecord != nil {
@@ -976,7 +977,7 @@ func (s *Server) handleChatSessionCreate(w http.ResponseWriter, r *http.Request)
 	// The session-purpose whitelist stays here, at the API edge; the store
 	// writes whatever it is handed.
 	switch strings.TrimSpace(body.Source) {
-	case "", "workshop":
+	case state.SessionSourceConversation, state.SessionSourceWorkshop:
 	default:
 		http.Error(w, "source must be empty or workshop", http.StatusBadRequest)
 		return
@@ -1062,8 +1063,22 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.Core == nil && (s.Sessions == nil || s.Sessions.DB() == nil) {
+	// The session-purpose whitelist stays here, at the API edge, the same
+	// one the create endpoint applies.
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	switch source {
+	case state.SessionSourceConversation, state.SessionSourceWorkshop:
+	default:
+		http.Error(w, "source must be empty or workshop", http.StatusBadRequest)
+		return
+	}
+	if s.Sessions == nil || s.Sessions.DB() == nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
+		return
+	}
+	summaries, err := s.Sessions.ListSessionsOfSource(r.Context(), source, 200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	type row struct {
@@ -1073,26 +1088,8 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		UpdateTime string `json:"update_time"`
 		Source     string `json:"source,omitempty"`
 	}
-	var (
-		summaries []turn.SessionSummary
-		err       error
-	)
-	if s.Core != nil {
-		summaries, err = s.Core.ListSessionsRecent(r.Context(), 200)
-	} else {
-		summaries, err = s.Sessions.ListSessionsRecent(r.Context(), 200)
-	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var out []row
+	out := make([]row, 0, len(summaries))
 	for _, sum := range summaries {
-		// This is the agent's own conversation list (the chat drawer); a
-		// project's sessions are listed in that project's space only.
-		if strings.TrimSpace(sum.ProjectID) != "" {
-			continue
-		}
 		t := time.Unix(sum.UpdatedAt, 0).UTC().Format(time.RFC3339)
 		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source})
 	}
@@ -1100,30 +1097,49 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
 }
 
-// handleChatSessionProject names the project a conversation belongs to, so
-// the chat page can say so and lead back to that project's space; the
-// agent's own conversations answer null. The lookup is the agent's project
-// store, so another tenant's session reads as belonging to no project.
-func (s *Server) handleChatSessionProject(w http.ResponseWriter, r *http.Request) {
+// handleChatSession names one conversation for the page that has it open:
+// its title and the project it belongs to. The page reads this rather than
+// looking itself up in the drawer's list, which lists only the agent's own
+// conversations — a project's session, or a scheduled task's fire, is never
+// in it.
+func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	store := s.projectStore()
-	if store == nil {
-		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
 		return
 	}
-	p, ok, err := store.ProjectForSession(r.Context(), pathParam(r, "id"))
+	owned, err := s.sessionOwned(r.Context(), sid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if !ok {
-		writeJSON(w, map[string]any{"project": nil})
+	if !owned {
+		http.NotFound(w, r)
 		return
 	}
-	writeJSON(w, map[string]any{"project": map[string]any{"id": p.ID, "name": p.Name}})
+	title, err := s.Sessions.SessionTitle(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The lookup is the agent's project store, so another tenant's session
+	// reads as belonging to no project.
+	var project map[string]any
+	if store := s.projectStore(); store != nil {
+		p, ok, err := store.ProjectForSession(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if ok {
+			project = map[string]any{"id": p.ID, "name": p.Name}
+		}
+	}
+	writeJSON(w, map[string]any{"id": sid, "title": title, "project": project})
 }
 
 // sessionDisplayTitle is the title a web list shows. An unnamed session is
@@ -1229,6 +1245,7 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		ToolMetaJSON   string              `json:"tool_meta_json,omitempty"`
 		CreatedAt      int64               `json:"created_at,omitempty"`
 		RunID          string              `json:"run_id,omitempty"`
+		Origin         string              `json:"origin,omitempty"`
 		Attachments    []chatAttachment    `json:"attachments,omitempty"`
 	}
 	visibleIndexes := make([]int, 0, len(turns))
@@ -1308,6 +1325,7 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			for _, ref := range state.MessageAttachments(t.PartsJSON) {
 				m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
 			}
+			m.Origin = state.MessageOrigin(t.PartsJSON)
 			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
 				m.MemoryCitation = citation
 			}
@@ -2322,9 +2340,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	case state.ActionError:
 		_ = s.RunRT.ClearWait(ctx, runID)
 		reason := firstNonEmptyString(action.Error, "approval action failed")
-		_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
-		s.finishRun(ctx, rn.SessionID, runID)
-		_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
+		s.finishRun(ctx, rn.SessionID, runID, state.RunStatusFailed)
+		_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 		return
 	case state.ActionApproved, state.ActionAnswered, state.ActionDenied:
 		// These are the only decisions with continuation semantics.
@@ -2338,9 +2355,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	if action != nil && action.Status == state.ActionApproved {
 		if effectErr := s.approvalService().ApplyResolvedEffect(action, runID); effectErr != nil {
 			_ = s.RunRT.ClearWait(ctx, runID)
-			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
-			s.finishRun(ctx, rn.SessionID, runID)
-			_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, "turn_error", event.TurnErrorPayload{Error: effectErr.Error(), Message: effectErr.Error()})
+			s.finishRun(ctx, rn.SessionID, runID, state.RunStatusFailed)
+			_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: effectErr.Error(), Message: effectErr.Error()})
 			slog.Error("restore approval policy effect", "run_id", runID, "action_id", actionID, "err", effectErr)
 			return
 		}
@@ -2455,8 +2471,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 		}
 		_ = s.RunRT.ClearWait(ctx, runID)
 		errText := llm.ExplainError(runErr)
-		s.finishRun(ctx, sid, runID)
-		_ = s.publishGatewayRunEvent(ctx, sid, runID, "turn_error", event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(runErr)})
+		s.finishRun(ctx, sid, runID, state.RunStatusFailed)
+		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(runErr)})
 		slog.Error("resume run after action", "run_id", runID, "action_id", actionID, "err", runErr)
 		return
 	}
@@ -2489,8 +2505,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	// What the resumed run never took goes back before its end is reported,
 	// the same way the webchat turn loop closes out a run it owns.
 	_ = s.RunRT.ClearWait(ctx, runID)
-	s.finishRun(ctx, sid, runID)
-	_ = s.publishGatewayRunEvent(ctx, sid, runID, "turn_completed", event.TurnCompletedPayload{
+	s.finishRun(ctx, sid, runID, state.RunStatusDone)
+	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
 		Text:      ans,
 		ElapsedMS: elapsed.Milliseconds(),
 	})
@@ -3527,6 +3543,54 @@ func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleCronSettings reads and writes the install's scheduled-task settings —
+// today the conversation retention. It is global configuration, so it is
+// served apart from the agent-scoped /cron routes. The write is validated by
+// the same function the loader uses, so a value the YAML editor would reject
+// never reaches the file from here either.
+func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err := s.persistedConfig()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeAgentsJSON(w, map[string]any{
+			"retention_days": cfg.CronRetentionDays(),
+			"configured":     cfg.Cron.RetentionDays != nil,
+			"default_days":   config.DefaultCronRetentionDays,
+			"min_days":       config.MinCronRetentionDays,
+			"max_days":       config.MaxCronRetentionDays,
+		})
+	case http.MethodPut:
+		var req struct {
+			RetentionDays *int `json:"retention_days"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.ValidateCronSection(config.CronSection{RetentionDays: req.RetentionDays}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg, err := s.persistedConfig()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cfg.Cron = config.CronSection{RetentionDays: req.RetentionDays}
+		if err := s.saveAndReload(cfg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeAgentsJSON(w, configWriteResult{Path: s.configPath(), Applied: true})
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
 // --- Cron jobs and heartbeats ---------------------------------------------
 //
 // A cron job is a standing instruction for the active primary agent: it fires
@@ -4137,7 +4201,8 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 
 // handleProjectSessionsCreate opens a new session inside one project: the
 // session's cwd is the project root and its project binding decides which
-// pooled runner serves it.
+// pooled runner serves it. That identity is given to the session at birth;
+// it never goes through the store's process-wide defaults.
 func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -4159,17 +4224,13 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
 	// No title leaves the session unnamed, so its first message names it.
 	title := strings.TrimSpace(body.Title)
-	if s.Sessions != nil {
-		// The session row records the project root as its cwd so history and
-		// memory scopes read the directory the conversation is about.
-		s.Sessions.ConfigureMemoryDefaults(memory.SessionModeForConfig(s.liveCfg()), memory.SessionSourceWebchat, p.Root, memory.GitBranch(p.Root))
-	}
+	birth := state.SessionBirth{Cwd: p.Root, GitBranch: memory.GitBranch(p.Root)}
 	var res struct {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 	}
 	if s.Core != nil {
-		out, err := s.Core.CreateSession(r.Context(), title)
+		out, err := s.Core.CreateSessionAt(r.Context(), title, birth)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -4182,7 +4243,7 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 		if stored == "" {
 			stored = res.ID
 		}
-		if err := s.Sessions.Ensure(r.Context(), res.ID, stored); err != nil {
+		if err := s.Sessions.EnsureAt(r.Context(), res.ID, stored, birth); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -4190,24 +4251,34 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "sessions disabled", http.StatusServiceUnavailable)
 		return
 	}
-	if err := store.BindSession(r.Context(), res.ID, p.ID); err != nil {
+	if err := s.bindSessionToProject(r.Context(), res.ID, p); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if s.Env != nil {
-		s.Env.EnsureRunnerPool()
-		if pool := s.Env.RunnerPool(); pool != nil {
-			if err := pool.BindSession(r.Context(), res.ID, p.ID); err == nil {
-				// Pre-building the runner here means the first message in the
-				// new session does not pay for it. A failure is not fatal:
-				// the first turn resolves lazily instead.
-				_ = err
-			}
-		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(res)
+}
+
+// bindSessionToProject ties a session to one project: the project store's
+// binding, which lists the session under the project, and the runner pool's,
+// which decides which pooled runner serves it. A project session a page opens
+// and a fire of a project's job take the same path, so the fire's conversation
+// runs with the project's tools and instructions from its first turn.
+func (s *Server) bindSessionToProject(ctx context.Context, sessionID string, p state.Project) error {
+	if err := s.projectStore().BindSession(ctx, sessionID, p.ID); err != nil {
+		return err
+	}
+	if s.Env != nil {
+		s.Env.EnsureRunnerPool()
+		if pool := s.Env.RunnerPool(); pool != nil {
+			// Pre-building the runner here means the first message in the
+			// session does not pay for it. A failure is not fatal:
+			// the first turn resolves lazily instead.
+			_ = pool.BindSession(ctx, sessionID, p.ID)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleProjectSessionsList(w http.ResponseWriter, r *http.Request) {

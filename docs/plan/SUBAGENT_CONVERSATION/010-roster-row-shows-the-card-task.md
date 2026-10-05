@@ -4,7 +4,7 @@
 > 完成后更新 `docs/plan/SUBAGENT_CONVERSATION/README.md` 里本计划的状态行。**不要提交代码。** 先读 README 的"全局规则"。
 >
 > **漂移检查（先运行）**：
-> `git diff --stat 1a6d708 -- pkg/agent/subagent_history.go pkg/run/subagent.go pkg/tui/render.go pkg/tui/reducer.go pkg/tui/notify.go pkg/tui/chat_slash.go frontend/src/components/chat/AgentViewTabs.vue`
+> `git diff --stat bda9505 -- pkg/tool/format.go pkg/run/subagent.go pkg/tui/render.go pkg/tui/reducer.go pkg/tui/notify.go pkg/tui/chat_slash.go frontend/src/components/chat/AgentViewTabs.vue`
 > 有不属于本计划的既有改动时，按函数名和注释原文核对"现状"摘录；对不上就 STOP。如果计划 001 已经做完，`render.go`/`reducer.go` 的 roster 光标部分会不同，那是预期的，本计划不碰光标。
 
 ## 状态
@@ -14,7 +14,7 @@
 - **风险**：LOW
 - **依赖**：无（与 001 同属 roster，建议紧接 001 执行）
 - **类别**：bug
-- **基线**：提交 `1a6d708`，2026-10-04
+- **基线**：提交 `bda9505`，2026-10-04
 
 ## owner 的要求（逐字）
 
@@ -32,7 +32,7 @@
    - roster：行的 `Title` 来自 `SubagentSpawnedMsg.Title`，即引擎的 `entry.Title = subagentDisplayTitle(d.title, taskText)`（`pkg/run/subagent.go` 约 `:1745`）：取 title，为空时取 prompt，**只留第一行**，截到 160 字节。
    - 两条规则在"派发时没给 title"或"title 有多行"时给出不同的文字。网页的卡片（`SubagentCard.vue` 用 `card.title || card.task`）和标签页（`AgentViewTabs.vue` 只显示类型，悬停提示用 `entry.task` 即整段 prompt）又是另外的说法。
 
-修复：任务名只有一个推导函数，放在 `pkg/agent`（引擎、TUI、gateway 都 import 它）；引擎写进记录的标题、TUI 卡片上的任务、roster 行、网页卡片和标签页全部用这一个结果。roster 行只显示它。
+修复：任务名只有一个推导函数，放在 `pkg/tool`（引擎、TUI、gateway 都 import 它；计划 012 的卡片事实推导也在 `pkg/tool`，而 `pkg/tool` 不能 import `pkg/agent`——见下方 2026-10-05 修订说明）；引擎写进记录的标题、TUI 卡片上的任务、roster 行、网页卡片和标签页全部用这一个结果。roster 行只显示它。
 
 ## 现状（2026-10-04 工作区的事实）
 
@@ -63,36 +63,36 @@
 
 ## 设计
 
-1. **一个推导函数。** 在 `pkg/agent/subagent_history.go`（`RosterKey` 旁边）新增：
+1. **一个推导函数。** 在 `pkg/tool/format.go`（`SubagentTask` 类型旁边）新增：
 
    ```go
-   // TaskTitle is the one name a dispatched task goes by everywhere it is
+   // SubagentTaskTitle is the one name a dispatched task goes by everywhere it is
    // shown — its card, its roster row, its tab: the title the dispatching
    // agent gave it, or the first line of its prompt when it gave none, kept
-   // to TaskTitleMaxBytes. Every surface derives the name here, so no two
+   // to SubagentTaskTitleMaxBytes. Every surface derives the name here, so no two
    // places can call one task by two names.
-   func TaskTitle(title, prompt string) string
+   func SubagentTaskTitle(title, prompt string) string
    ```
 
-   规则沿用引擎今天的 `subagentDisplayTitle`（它是落库、重放的那一份）：title 去首尾空白，为空用 prompt；只取第一行；按 rune 边界截到 `TaskTitleMaxBytes = 160` 字节（与今天的截断函数行为一致，执行者把 `truncatePreviewText` 的实现读一遍，确认不会截断在 rune 中间；如果会，按 rune 截，这是顺带修正，在报告里说明）。
-2. **引擎用它。** 删除 `pkg/run/subagent.go` 的 `subagentDisplayTitle` 和 `subagentTitleMaxBytes`，调用点改为 `agent.TaskTitle(...)`。
-3. **TUI 卡片用它。** `parseFanoutTasksFromMeta` 两个分支都改为 `Title: agent.TaskTitle(title, prompt)`。`renderFanoutContent` 里 `title` 为空的回退分支随之删除（`TaskTitle` 只在 title 和 prompt 都为空时返回空，那时卡片本来也没有可显示的任务）。`singleDisplayLine(t.Title)` 保留与否：`TaskTitle` 已是单行，保留它无害但多余，删掉。
+   规则沿用引擎今天的 `subagentDisplayTitle`（它是落库、重放的那一份）：title 去首尾空白，为空用 prompt；只取第一行；按 rune 边界截到 `SubagentTaskTitleMaxBytes = 160` 字节（与今天的截断函数行为一致，执行者把 `truncatePreviewText` 的实现读一遍，确认不会截断在 rune 中间；如果会，按 rune 截，这是顺带修正，在报告里说明）。
+2. **引擎用它。** 删除 `pkg/run/subagent.go` 的 `subagentDisplayTitle` 和 `subagentTitleMaxBytes`，调用点改为 `tool.SubagentTaskTitle(...)`。
+3. **TUI 卡片用它。** `parseFanoutTasksFromMeta` 两个分支都改为 `Title: tool.SubagentTaskTitle(title, prompt)`。`renderFanoutContent` 里 `title` 为空的回退分支随之删除（`SubagentTaskTitle` 只在 title 和 prompt 都为空时返回空，那时卡片本来也没有可显示的任务）。`singleDisplayLine(t.Title)` 保留与否：`SubagentTaskTitle` 已是单行，保留它无害但多余，删掉。
 4. **roster 行只显示标题。** `agentRosterRowDetail` 改为只取 `row.Title`（为空返回 `""`），截到 `agentRosterDetailMaxWidth`；更新函数注释为"the task this agent was dispatched to do, by the same name its card shows"，删掉关于"正在跑的工具"的说法。删除 `AgentRosterRow.Activity`、`Reducer.updateSubagentActivity` 及其两个调用点和 `upsertSubagentRoster` 里清它的那行。`ActivityStatusUpdatedMsg` 的处理里保留"更新卡片任务的 activity 并重画卡片"的部分。
-5. **网页。** 网页卡片读 `card.title`（引擎已用 `TaskTitle` 生成），删掉 `|| props.card.task` 回退（它会让没有标题时卡片显示整段 prompt，和终端不同）。标签页与 TUI 的 roster 行对应：文字改为 `类型 · 标题`（标题用 CSS 截断），`:title` 悬停提示改为完整标题；两个都只读 `entry.title`。需要的文案键已存在则复用，不存在则中英文同时加。
+5. **网页。** 网页卡片读 `card.title`（引擎已用 `SubagentTaskTitle` 生成），删掉 `|| props.card.task` 回退（它会让没有标题时卡片显示整段 prompt，和终端不同）。标签页与 TUI 的 roster 行对应：文字改为 `类型 · 标题`（标题用 CSS 截断），`:title` 悬停提示改为完整标题；两个都只读 `entry.title`。需要的文案键已存在则复用，不存在则中英文同时加。
 
 ## 缓存影响
 
-无。`TaskTitle` 只影响显示用的标题和记录里的 `title` 字段，不进入任何模型请求（派发给 subagent 的是 prompt 原文，不是标题）。执行者在第 2 步用 `grep -rn "subagentDisplayTitle\|entry.Title" pkg/run` 确认标题没有被拼进任何提示词；如果有，STOP。
+无。`SubagentTaskTitle` 只影响显示用的标题和记录里的 `title` 字段，不进入任何模型请求（派发给 subagent 的是 prompt 原文，不是标题）。执行者在第 2 步用 `grep -rn "subagentDisplayTitle\|entry.Title" pkg/run` 确认标题没有被拼进任何提示词；如果有，STOP。
 
 ## 范围
 
 **只改这些文件：**
-- `pkg/agent/subagent_history.go` 及其测试 `pkg/agent/subagent_history_test.go`
+- `pkg/tool/format.go` 及其测试 `pkg/tool/format_test.go`
 - `pkg/run/subagent.go` 及其测试
 - `pkg/tui/render.go`、`pkg/tui/reducer.go`、`pkg/tui/notify.go` 及对应测试
 - `frontend/src/components/chat/SubagentCard.vue`、`frontend/src/components/chat/AgentViewTabs.vue`，必要时 `frontend/src/locales/index.ts`，以及它们的测试
 
-**不要动：** 卡片第三层的工具进度（`RecentTools`、`… +N tool uses`、`⎿ activity` 行）；roster 的光标逻辑（计划 001）；`pkg/agent` 的其它函数。
+**不要动：** 卡片第三层的工具进度（`RecentTools`、`… +N tool uses`、`⎿ activity` 行）；roster 的光标逻辑（计划 001）；`pkg/agent`（不在这里放 `SubagentTaskTitle`）。
 
 ## 步骤
 
@@ -104,11 +104,11 @@
 
 **验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/tui -run 'TestRosterRowShowsTheCardTaskWhileItsAgentRunsTools|TestUntitledTaskHasOneNameOnCardAndRoster' -count=1` → 两条都失败（第一条 roster 行含 `read /`；第二条卡片是两行合并或截断后的 prompt）。不失败就 STOP。
 
-### 第 2 步：`agent.TaskTitle`，引擎改用它
+### 第 2 步：`tool.SubagentTaskTitle`，引擎改用它
 
-按"设计"第 1、2 条。`pkg/agent/subagent_history_test.go` 加表驱动测试 `TestTaskTitle`：有 title、title 前后空白、无 title 用 prompt 第一行、超长按字节截断且不截断 rune、两者皆空返回空。
+按"设计"第 1、2 条。`pkg/tool/format_test.go` 加表驱动测试 `TestSubagentTaskTitle`：有 title、title 前后空白、无 title 用 prompt 第一行、超长按字节截断且不截断 rune、两者皆空返回空。
 
-**验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/agent ./pkg/run -count=1` → `ok`；`grep -rn "subagentDisplayTitle\|subagentTitleMaxBytes" pkg` → 无输出。
+**验证**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/tool ./pkg/run -count=1` → `ok`；`grep -rn "subagentDisplayTitle\|subagentTitleMaxBytes" pkg` → 无输出。
 
 ### 第 3 步：TUI 卡片和 roster 行
 
@@ -149,5 +149,10 @@ TUI：用计划 001 第 5 步的 `tool` 模式脚本，但改成 `subagent_fanou
 
 ## 维护说明
 
-- 以后任何地方要显示"这个 subagent 在做什么任务"，都调用 `agent.TaskTitle` 或读由它生成的 `title` 字段，不要再写一条自己的回退规则。评审时 grep `truncateForDisplay(.*[Pp]rompt` 之类的写法。
+- 以后任何地方要显示"这个 subagent 在做什么任务"，都调用 `tool.SubagentTaskTitle` 或读由它生成的 `title` 字段，不要再写一条自己的回退规则。评审时 grep `truncateForDisplay(.*[Pp]rompt` 之类的写法。
 - roster 不再显示实时工具进度。如果以后有人想让 roster 显示进度，先回来问 owner：这次的要求是"roster 行的任务必须使用卡片的任务"。
+
+## 修订说明（2026-10-05，写计划 012–014 时）
+
+- **推导函数的位置从 `pkg/agent` 改到 `pkg/tool`，名字从 `TaskTitle` 改为 `SubagentTaskTitle`。** 原因：计划 012 要在 `pkg/tool` 里由同一个函数推导每个 `subagent_*` 调用的卡片事实（含没被派发的任务的标题），而 `pkg/tool` 不 import `pkg/agent`，新增这条依赖违反"包扇出只能减少"（`pkg/architecture/cache_test.go` `TestFanOutOnlyShrinks`）。引擎（`pkg/run`）、TUI、gateway 都已 import `pkg/tool`，所以对本计划的其它部分没有影响。规则本身（title，否则 prompt 第一行，按 rune 截到 160 字节）不变。
+- 设计第 4 条保留的 `ActivityStatusUpdatedMsg` 处理：审计发现这个消息全仓库没有生产者（死代码），由计划 013 整体删除；本计划照原文保留即可，不要提前删。

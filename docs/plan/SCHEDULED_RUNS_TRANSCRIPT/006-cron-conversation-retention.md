@@ -398,3 +398,12 @@ func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request)
 ## 执行记录
 
 （执行者在此记录：真机清理前后的查询结果、热生效的验证结果、e2e 结果。）
+
+## 执行记录
+
+- 执行于 2026-10-05。Go 五步（配置/删除会话与遗留物/到期判断/清理器/gateway 接口）与前端车道（设置页 cron 标签 + CronSettingsTab + CronView 保留期行 + e2e 用例）全部落地。删除安全边界全部按设计：只删 `source='cron'` 会话、溢出文件仅当路径位于 `tool-outputs/` 下才删、`"fork-sidechain"` 字面量只剩 `pkg/hook/dispatch.go` 一处、`SidechainFilePath` 改基于 `hook.SessionSidechainDir` 后对非空 id 逐字节不变（对比用例钉住）。
+- 验证：`./pkg/config/ ./pkg/state/ ./pkg/hook/ ./pkg/run/ ./pkg/process/ ./pkg/turn/ ./pkg/gateway/` 全 `ok`；全量 Go 29 包 `ok`；前端 264 用例过、`vue-tsc` 0；`deadcode` 与基线仅既有 2 处同符号行号平移；`gofmt`/`vet` 干净。四条写入路径同一校验（启动/热加载/YAML 编辑器/结构化接口）由 `TestCronSettingsRoundTrip`（GET 默认 30 → PUT 7 → PUT 0 拒 → PUT null 回默认）与 `ParseRootYAML` 用例钉住。
+- e2e（假模型）：第一轮 1 败——006 给设置页加了第 11 个标签（`cron`），`tenant-shell.spec.ts` 的 tab 数量断言（001 时修为 10）需同步为 11 并把 `Scheduled tasks/定时任务` 加入期望清单（新配置必须有网页表单的配套断言）。修正后 **81 passed，`web e2e: PASS`**（含 `cron-retention.spec.ts`：默认 30 → 改 7 刷新仍在 → `$E2E_HOME/forebrain.yaml` 含 `retention_days: 7` → `/cron` 页"保留 7 天"+链接直达 → 恢复默认后文件无该键）。
+- 清理真机（智谱）：同一任务"立即执行"两次均 `ok` 后，把第一次触发的会话 `updated_at` 与执行记录 `started_at/finished_at` 改到 40 天前，并在其状态根放 `state/modes/<id>.json`；重启 gateway（第一跳清理）30 秒后：第一次的会话/消息/运行/执行记录 **0 行**、modes 文件已删；第二次的会话与执行记录完好；`GET /api/cron/:id/runs` 只返回第二次。
+- 配置热生效（真机）：`GET /api/cron-settings` 默认 `retention_days: 30, configured: false`；`PUT 1` 后立即 `retention_days: 1, configured: true`，`forebrain.yaml` 出现 `cron: retention_days: 1`，**不重启**；`PUT null` 后文件中该键消失、GET 回 30。
+- 终态回归（六份计划全部落地后的最终源码）：假模型 e2e 81 passed PASS；智谱真模型 e2e **82 passed，`web e2e: PASS`**（含 heartbeat/session-busy/cron-fire/cron-retention 四个新 spec）。终态智谱轮的前两次失败已定位并根因处理：一次为本机 DNS 故障窗口（gateway 日志 9 处 `lookup open.bigmodel.cn: no such host`，故障时段与失败用例吻合，恢复后重跑通过）；一次为真模型对模糊提示选择 `write_file` 而停在审批——产品行为正是 D4 的设计（记录保持 running 等人批准），`cron-fire.spec.ts` 的等待循环据此加固：真模型模式下发现挂起动作即按用户行为批准（假模型模式不受影响）。

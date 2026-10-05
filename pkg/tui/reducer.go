@@ -1431,7 +1431,7 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		return r.withFlushedBuffers(buf, r.buildFrame(FramePlan, "plan", msg), msg.Timestamp)
 	default:
 		buf := r.agentBuf("")
-		return r.withFlushedBuffers(buf, r.buildFrame(FrameSystem, "system", msg), msg.Timestamp)
+		return r.withFlushedBuffers(buf, r.buildFrame(FrameSystem, firstNonEmpty(msg.Title, "system"), msg), msg.Timestamp)
 	}
 }
 
