@@ -260,12 +260,21 @@ func (s *DiagStore) Snapshot(serverID string) map[string][]Problem {
 	return out
 }
 
+// supportsPullDiagnostics answers whether the server offers
+// textDocument/diagnostic — declared statically at initialize or through a
+// live registration (pyright registers the provider dynamically after seeing
+// the client's pull capability, and then never pushes publishDiagnostics).
+func supportsPullDiagnostics(inst *Instance) bool {
+	return inst.Capabilities().Supports("diagnosticProvider") ||
+		len(inst.Registrations("textDocument/diagnostic")) > 0
+}
+
 // PullDiagnostics asks the server for one document's diagnostics
 // (textDocument/diagnostic) and publishes the full report and any related
 // documents into the store. It reports false when the server lacks the
 // capability.
 func PullDiagnostics(ctx context.Context, inst *Instance, store *DiagStore, serverID, absPath string) (bool, error) {
-	if !inst.Capabilities().Supports("diagnosticProvider") {
+	if !supportsPullDiagnostics(inst) {
 		return false, nil
 	}
 	path := filepath.Clean(absPath)
