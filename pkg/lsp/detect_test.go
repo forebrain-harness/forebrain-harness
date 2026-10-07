@@ -446,6 +446,19 @@ func absentCheckFingerprint(t *testing.T, id string) string {
 }
 
 func TestDoctorHints(t *testing.T) {
+	// The project hints are catalog metadata, not binary behavior. Copy the
+	// real clangd entry with a stub command and no version probe, so the
+	// checks run wherever clangd is not installed — the required CI job
+	// installs no language servers.
+	entry, ok := LookupCatalog("clangd")
+	if !ok {
+		t.Fatal("clangd missing from the catalog")
+	}
+	entry.Command = buildFakeServer(t)
+	entry.Detect.VersionArgs = nil
+	orig := catalogOverride
+	catalogOverride = []CatalogEntry{entry}
+	t.Cleanup(func() { catalogOverride = orig })
 	ws := t.TempDir()
 	if err := SaveEnabled(ws, "clangd", true); err != nil {
 		t.Fatal(err)
