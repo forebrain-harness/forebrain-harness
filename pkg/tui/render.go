@@ -3626,7 +3626,7 @@ func summaryToolBody(f Frame, title string) string {
 	// before the call completes, so suppress it explicitly here rather than
 	// relying on empty Content.
 	if f.StreamingOutput {
-		return strings.TrimSpace(f.Content)
+		return trimBlankFenceEdges(strings.Split(f.Content, "\n"))
 	}
 	if toolStatusPending(f) && !f.StreamingOutput {
 		return ""
@@ -3635,7 +3635,7 @@ func summaryToolBody(f Frame, title string) string {
 	if toolStatusCanceled(f) {
 		return ""
 	}
-	content := strings.TrimSpace(f.Content)
+	content := trimBlankFenceEdges(strings.Split(f.Content, "\n"))
 	if content == "" {
 		return ""
 	}
