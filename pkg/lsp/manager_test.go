@@ -584,11 +584,17 @@ var integrationCases = []integrationCase{
 		server: "typescript-language-server",
 		files: map[string]string{
 			"tsconfig.json": "{\"compilerOptions\":{\"strict\":true}}\n",
+			"package.json":  "{\"name\":\"fixture\",\"private\":true}\n",
 			"calc.ts":       "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
 			"main.ts":       "import { add } from \"./calc\";\n\nconsole.log(add(1, 2));\n",
 		},
 		file: "main.ts", line: 3, symbol: "add", defFile: "calc.ts",
 		broken: "import { add } from \"./calc\";\n\nconsole.log(add(1, \"x\"));\n",
+		// tsserver resolves only from the workspace's node_modules, so the
+		// fixture installs its own typescript (dotnet restore pattern).
+		// Pinned to 5.x: 7.x ships no lib/tsserver.js, which is the only
+		// layout typescript-language-server 5.3.0 resolves.
+		prepare: []string{"npm", "install", "--no-save", "typescript@5"},
 	},
 	{
 		server: "rust-analyzer",
@@ -908,11 +914,18 @@ func integrationWaitDiagCount(t *testing.T, ctx context.Context, m *Manager, fil
 			last = "error: " + err.Error()
 		} else {
 			last = res.Text
-			first := strings.SplitN(res.Text, "\n", 2)[0]
-			if i := strings.LastIndex(first, ": "); i >= 0 {
-				if n, perr := strconv.Atoi(strings.TrimSpace(first[i+2:])); perr == nil {
-					if (want > 0 && n >= want) || (want == 0 && n == 0) {
-						return
+			// The count sits on the "diagnostics for <file>: N" line; note
+			// lines (e.g. "still indexing") are prepended to the answer, so
+			// scan for that line instead of trusting the first one.
+			for _, line := range strings.Split(res.Text, "\n") {
+				if !strings.HasPrefix(line, "diagnostics for ") {
+					continue
+				}
+				if i := strings.LastIndex(line, ": "); i >= 0 {
+					if n, perr := strconv.Atoi(strings.TrimSpace(line[i+2:])); perr == nil {
+						if (want > 0 && n >= want) || (want == 0 && n == 0) {
+							return
+						}
 					}
 				}
 			}

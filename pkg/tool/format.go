@@ -545,6 +545,35 @@ func RepairedReadPath(evt StepEvent) string {
 	return strings.TrimSpace(abs)
 }
 
+// trimBlankEdgeLines drops the blank lines that pad a multi-line tool payload
+// at either edge, plus the trailing whitespace of its last content line, and
+// leaves every content line otherwise byte-for-byte intact.
+//
+// strings.TrimSpace is the wrong tool for a payload that is drawn line by line,
+// and was the bug: it treats the payload as one string, so it strips the leading
+// whitespace of the FIRST content line only — every later line keeps its own,
+// and the card's first row lands N columns left of the rest (the gateway's
+// startup route table, "  %-8s%s" in pkg/gateway/serve_run.go, is the case that
+// surfaced it). A blank line at either edge still has to go: a fenced block must
+// not open on an empty row, and an all-blank payload is still empty.
+func trimBlankEdgeLines(s string) string {
+	lines := strings.Split(s, "\n")
+	start := 0
+	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	end := len(lines)
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	if start >= end {
+		return ""
+	}
+	out := lines[start:end]
+	out[len(out)-1] = strings.TrimRight(out[len(out)-1], " \t")
+	return strings.Join(out, "\n")
+}
+
 func formatShellStep(evt StepEvent, maxBytes int) (string, bool) {
 	sb := strings.Builder{}
 	sb.WriteString("**shell**\n\n")
@@ -556,8 +585,8 @@ func formatShellStep(evt StepEvent, maxBytes int) (string, bool) {
 		}
 	}
 	if len(evt.Output) > 0 {
-		stdout := strings.TrimSpace(stringFromAny(evt.Output["stdout"]))
-		stderr := strings.TrimSpace(stringFromAny(evt.Output["stderr"]))
+		stdout := trimBlankEdgeLines(stringFromAny(evt.Output["stdout"]))
+		stderr := trimBlankEdgeLines(stringFromAny(evt.Output["stderr"]))
 		if stdout != "" {
 			sb.WriteString("stdout:\n\n```")
 			sb.WriteString(shellOutputLang(evt, stdout))
@@ -1198,7 +1227,7 @@ func formatGenericToolStep(evt StepEvent, tool string, maxBytes int) (string, bo
 			sb.WriteString(diagSection)
 			sb.WriteString("\n\n")
 		}
-		if preview := strings.TrimSpace(stringFromAny(evt.Output["stdout_preview"])); preview != "" {
+		if preview := trimBlankEdgeLines(stringFromAny(evt.Output["stdout_preview"])); preview != "" {
 			sb.WriteString("stdout preview:\n\n```text\n")
 			sb.WriteString(preview)
 			if !strings.HasSuffix(preview, "\n") {
@@ -1206,7 +1235,7 @@ func formatGenericToolStep(evt StepEvent, tool string, maxBytes int) (string, bo
 			}
 			sb.WriteString("```\n\n")
 		}
-		if body := strings.TrimSpace(stringFromAny(evt.Output["preview_text"])); body != "" {
+		if body := trimBlankEdgeLines(stringFromAny(evt.Output["preview_text"])); body != "" {
 			sb.WriteString("result preview:\n\n```text\n")
 			sb.WriteString(body)
 			if !strings.HasSuffix(body, "\n") {
@@ -1235,7 +1264,7 @@ func formatGenericToolStep(evt StepEvent, tool string, maxBytes int) (string, bo
 // the heading and matched line groups returned by a query), so callers must
 // receive it verbatim rather than an `output: {"output": ...}` JSON block.
 func formatRetrieveOutputStep(evt StepEvent, maxBytes int) (string, bool) {
-	body := strings.TrimSpace(stringFromAny(evt.Output["output"]))
+	body := trimBlankEdgeLines(stringFromAny(evt.Output["output"]))
 	return clampBody(body, maxBytes)
 }
 
@@ -1243,7 +1272,7 @@ func formatRetrieveOutputStep(evt StepEvent, maxBytes int) (string, bool) {
 // model received — in a plain code block. The structured Display fields ride
 // on the step for the title and the summary, not the body.
 func formatLSPStep(evt StepEvent, maxBytes int) (string, bool) {
-	body := strings.TrimSpace(stringFromAny(evt.Output["output"]))
+	body := trimBlankEdgeLines(stringFromAny(evt.Output["output"]))
 	if body == "" {
 		return "", false
 	}
@@ -1620,15 +1649,18 @@ func formatIntermediateToolStep(evt StepEvent, maxBytes int) (string, bool) {
 		// Prefer the input payload; fall back to the echoed output content.
 		// intermediate_tool notes are the model's own saved findings, read back
 		// before finishing - never byte-clamp them, show the full body.
-		if txt := strings.TrimSpace(firstString(evt.Input, "content")); txt != "" {
+		// firstString would TrimSpace the value itself, dropping the first
+		// line's indent again; read the raw payload and let trimBlankEdgeLines
+		// do the only boundary trim.
+		if txt := trimBlankEdgeLines(stringFromAny(evt.Input["content"])); txt != "" {
 			return txt, false
 		}
-		if txt := strings.TrimSpace(stringFromAny(evt.Output["content"])); txt != "" {
+		if txt := trimBlankEdgeLines(stringFromAny(evt.Output["content"])); txt != "" {
 			return txt, false
 		}
 		return "", false
 	case "read":
-		content := strings.TrimSpace(stringFromAny(evt.Output["content"]))
+		content := trimBlankEdgeLines(stringFromAny(evt.Output["content"]))
 		if content == "" {
 			return "No saved notes available.", false
 		}
