@@ -650,3 +650,72 @@ func TestSubagentCardBodyIsFullBrightness(t *testing.T) {
 		}
 	}
 }
+
+// The reported bug, end to end: the engine formatter dropped the first line's
+// leading spaces, so the shell card's first output row sat two columns left of
+// every later row. This walks the real engine formatter and the real card
+// renderer and requires every body row to align on the same column.
+func TestToolOutputCardAlignsFirstRowWithRest(t *testing.T) {
+	stdout := "  GET     /api/chat/sessions\n" +
+		"  POST    /api/chat/sessions\n" +
+		"  GET     /api/chat/sessions/:id\n"
+	body, _ := tool.FormatToolStepResult(tool.StepEvent{
+		ToolName: "shell",
+		Kind:     "tool_completed",
+		Input:    map[string]any{"command": `grep -E '/api/chat' "$TMPDIR/forebrain-run/gw.log"`},
+		Output:   map[string]any{"stdout": stdout, "exit_code": 0},
+	}, 0)
+	f := Frame{
+		Kind:    FrameTool,
+		Title:   "shell",
+		Final:   true,
+		Content: body,
+		Summary: "shell",
+		ToolMeta: tool.ToolMeta{
+			Status: "completed",
+			Input:  map[string]any{"command": `grep -E '/api/chat' "$TMPDIR/forebrain-run/gw.log"`},
+		},
+	}
+	lines := renderFrameLines(f, 120, DiffThemeDark, 0)
+	plain := make([]string, len(lines))
+	for i, l := range lines {
+		plain[i] = stripANSI(l)
+	}
+
+	// The card header is row 0; the first output row carries the four-column
+	// gutter plus the payload's own two-space indent.
+	if len(plain) < 2 || plain[1] != "  └   GET     /api/chat/sessions" {
+		t.Fatalf("first output row not aligned:\n%s", strings.Join(plain, "\n"))
+	}
+
+	const marker = "/api/chat/sessions"
+	cols := []int{}
+	for _, l := range plain {
+		// Count columns in runes: the "└" gutter glyph is three bytes.
+		if i := strings.Index(l, marker); i >= 0 {
+			cols = append(cols, len([]rune(l[:i])))
+		}
+	}
+	if len(cols) != 3 {
+		t.Fatalf("expected 3 route rows, got %d:\n%s", len(cols), strings.Join(plain, "\n"))
+	}
+	for _, c := range cols[1:] {
+		if c != cols[0] {
+			t.Fatalf("route rows not column-aligned: %v\n%s", cols, strings.Join(plain, "\n"))
+		}
+	}
+	t.Logf("route columns: %v", cols)
+}
+
+// summaryToolBody is the live card-body pipeline (renderCompactFrame calls it
+// when not in full-body test mode), and it used to strings.TrimSpace the whole
+// body — dropping the indent of a first line that is itself payload, as the
+// intermediate_tool notes and retrieve_output bodies are. renderFrameLines
+// forces full-body mode and so never exercises this; assert it directly.
+func TestSummaryToolBodyKeepsFirstLineIndent(t *testing.T) {
+	f := Frame{Kind: FrameTool, Title: "intermediate_tool", Content: "  alpha\n  beta", Final: true}
+	got := summaryToolBody(f, f.Title)
+	if !strings.Contains(got, "  alpha") {
+		t.Fatalf("summaryToolBody dropped the first line's indent: %q", got)
+	}
+}

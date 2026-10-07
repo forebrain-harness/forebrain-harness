@@ -393,14 +393,14 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		// Acts on the subagent whose view it is typed in.
 		"compact": SubagentViewActs,
 		"context": SubagentViewActs,
-	// Runs exactly as it does in the conversation's view.
-	"status":      SubagentViewGlobal,
-	"mcp":         SubagentViewGlobal,
-	"lsp":         SubagentViewGlobal,
-	"permissions": SubagentViewGlobal,
-	"sandbox":     SubagentViewGlobal,
-	"exit":        SubagentViewGlobal,
-	"subagents":   SubagentViewGlobal,
+		// Runs exactly as it does in the conversation's view.
+		"status":      SubagentViewGlobal,
+		"mcp":         SubagentViewGlobal,
+		"lsp":         SubagentViewGlobal,
+		"permissions": SubagentViewGlobal,
+		"sandbox":     SubagentViewGlobal,
+		"exit":        SubagentViewGlobal,
+		"subagents":   SubagentViewGlobal,
 		"skills":      SubagentViewGlobal,
 		"connect":     SubagentViewGlobal,
 		"memories":    SubagentViewGlobal,

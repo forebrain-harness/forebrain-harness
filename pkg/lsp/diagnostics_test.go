@@ -260,6 +260,99 @@ func TestPullDiagnosticsWithFake(t *testing.T) {
 	})
 }
 
+// A server that registers textDocument/diagnostic dynamically (pyright's
+// pattern: it sees the client's pull capability, registers the provider and
+// then never pushes publishDiagnostics) is pulled from the moment the
+// registration goes live, and stops being pulled once it unregisters.
+func TestPullDiagnosticsRegistration(t *testing.T) {
+	diag := map[string]any{
+		"range": map[string]any{
+			"start": map[string]any{"line": 2, "character": 4},
+			"end":   map[string]any{"line": 2, "character": 8},
+		},
+		"severity": 1,
+		"code":     42,
+		"source":   "fake",
+		"message":  "bad thing",
+	}
+	inst, record := startFake(t, map[string]any{
+		"capabilities": map[string]any{"definitionProvider": true},
+		"after_initialized": []map[string]any{
+			{"request": "client/registerCapability", "delay_ms": 500, "params": map[string]any{
+				"registrations": []map[string]any{{
+					"id":              "d1",
+					"method":          "textDocument/diagnostic",
+					"registerOptions": map[string]any{"interFileDependencies": true, "identifier": "fake"},
+				}},
+			}},
+			{"request": "client/unregisterCapability", "delay_ms": 500, "params": map[string]any{
+				"unregistrations": []map[string]any{{"id": "d1", "method": "textDocument/diagnostic"}},
+			}},
+		},
+		"pull_diagnostics": true,
+		"diagnostics":      map[string]any{"rules": map[string]any{"bad": []any{diag}}},
+	}, nil)
+	path := filepath.Join(t.TempDir(), "p.go")
+	docs := NewDocSync(inst, goLanguage, 0)
+	if _, err := docs.OpenWith(context.Background(), path, []byte("contains bad here\n")); err != nil {
+		t.Fatalf("OpenWith: %v", err)
+	}
+	waitForRecord(t, record, "textDocument/didOpen", 1)
+	store := NewDiagStore()
+
+	// Static capabilities say nothing; the registration has not landed yet.
+	if supportsPullDiagnostics(inst) {
+		t.Fatal("supportsPullDiagnostics true before the registration landed")
+	}
+	supported, err := PullDiagnostics(context.Background(), inst, store, "fake", path)
+	if err != nil {
+		t.Fatalf("PullDiagnostics before the registration: %v", err)
+	}
+	if supported {
+		t.Error("PullDiagnostics pulled before the registration landed")
+	}
+	if findRecv(readRecord(t, record), "textDocument/diagnostic") != nil {
+		t.Error("a diagnostic request was sent before the registration landed")
+	}
+
+	// The registration opens the gate and the pull really fetches.
+	deadline := time.Now().Add(5 * time.Second)
+	for !supportsPullDiagnostics(inst) {
+		if time.Now().After(deadline) {
+			t.Fatal("registration never became live")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if supported, err = PullDiagnostics(context.Background(), inst, store, "fake", path); err != nil {
+		t.Fatalf("PullDiagnostics after the registration: %v", err)
+	}
+	if !supported {
+		t.Fatal("PullDiagnostics reported no capability although the server registered the provider")
+	}
+	problems, _, _, ok := store.Get("fake", path)
+	if !ok || len(problems) != 1 || problems[0].Message != "bad thing" {
+		t.Fatalf("Get after the pull = %v, %v", problems, ok)
+	}
+
+	// Unregistration closes the gate again.
+	deadline = time.Now().Add(5 * time.Second)
+	for supportsPullDiagnostics(inst) {
+		if time.Now().After(deadline) {
+			t.Fatal("registration never went away")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if supported, err = PullDiagnostics(context.Background(), inst, store, "fake", path); err != nil {
+		t.Fatalf("PullDiagnostics after the unregistration: %v", err)
+	}
+	if supported {
+		t.Error("PullDiagnostics pulled after the unregistration")
+	}
+	if n := countRecv(readRecord(t, record), "textDocument/diagnostic"); n != 1 {
+		t.Errorf("%d diagnostic requests recorded after the unregistration, want 1", n)
+	}
+}
+
 func TestNewProblemsIgnoresLineShift(t *testing.T) {
 	at := func(line int, msg string) Problem { return Problem{Severity: 1, Line: line, Message: msg} }
 	cases := []struct {
