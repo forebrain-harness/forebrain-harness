@@ -229,12 +229,17 @@ type Renderer struct {
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
 	planMode bool
-	// autoContinueNotice is the warning line under the composer while a
-	// conversation stopped by a usage limit waits to continue by itself.
-	autoContinueNotice string
-	composerTokens     ComposerTokenStats
-	fullBodyMode       bool
-	cwd                string
+	// autoContinueNotices are the warning lines under the composer while a view
+	// waits to continue itself after a usage limit, keyed by the view they
+	// belong to ("" is the conversation's own, a roster key is that subagent's).
+	autoContinueNotices map[string]string
+	// composerTokens is the footer's token budget, keyed by the view it
+	// belongs to: "" is the conversation's own, a roster key is that
+	// subagent's (each subagent's view answers "how much context is left for
+	// this subagent", decision D4 point 4).
+	composerTokens ComposerTokenStatsByView
+	fullBodyMode   bool
+	cwd            string
 	// spinnerPhase is the animation frame for in-flight tools' Braille spinner
 	// and for the indeterminate compact progress bar. It is derived from the
 	// time since spinnerEpoch rather than counted per paint, so the animation
@@ -304,11 +309,10 @@ type Renderer struct {
 	// open and readable long after the roster row that described it is gone,
 	// which is precisely when the footer is the only thing still naming it.
 	subagentTypes map[string]string
-	// subagentModels holds the types that run on a model of their own, as
-	// agents.definitions[<type>].llm_providers configures them. A type absent
-	// from the map runs on the primary agent's model, exactly as the runtime's
-	// typed-provider wrapper falls through, so the footer shows this renderer's
-	// own ComposerFooter for it.
+	// subagentModels holds the model each spawned execution runs on, as its
+	// spawn announced it — resolved once by the engine, keyed by the agent.
+	// A spawn that named none leaves no entry, and the footer then names no
+	// model for that view rather than borrowing the conversation's.
 	subagentModels map[string]ComposerFooter
 	// fanoutLineOwners maps each visual line the last renderFanout wrote to the
 	// index of the fanout content line it came from (-1 for header and spacing).
@@ -317,7 +321,14 @@ type Renderer struct {
 	fanoutLineOwners []int
 	// activeView is the AgentID of the currently-displayed view. Empty string
 	// means the primary (main agent) view.
-	activeView      string
+	activeView string
+	// rosterCursor is the agent the roster's keyboard cursor points at, keyed
+	// the same way activeView is (primary view "", subagent by roster key).
+	// Every view change carries the cursor onto the new view — assignActiveView
+	// is the only writer of activeView and it moves the cursor with it — so
+	// while the user is not moving through the roster with Up/Down the cursor
+	// names the agent whose transcript is on screen.
+	rosterCursor    string
 	viewBrowseState map[string]viewportBrowseState
 	// vpScrollOffset is the absolute row at the top of the visible window;
 	// vpFollow keeps it pinned to the bottom as new frames arrive until the user
@@ -507,6 +518,20 @@ type ComposerTokenStats struct {
 	OutputTokens  int
 	PercentLeft   int
 	ContextWindow int
+}
+
+// ComposerTokenStatsByView is the footer's token budget kept per view, keyed by
+// the view it belongs to ("" for the conversation's own, a roster key for a
+// subagent's). A subagent's view answers the "how much context is left"
+// question about that subagent, from that subagent's own window.
+type ComposerTokenStatsByView map[string]ComposerTokenStats
+
+func (m ComposerTokenStatsByView) get(view string) ComposerTokenStats {
+	return m[strings.TrimSpace(view)]
+}
+
+func (m ComposerTokenStatsByView) set(view string, stats ComposerTokenStats) {
+	m[strings.TrimSpace(view)] = stats
 }
 
 func NewRenderer(out io.Writer, err io.Writer) *Renderer {
@@ -1882,11 +1907,11 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if suffix != "" {
 			line += " " + suffixStyle.Render(suffix)
 		}
-		if toolStatusPending(f) {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "   "))
-		} else {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
-		}
+		// A wrapped header continues under "  │ " in every state. The folded
+		// header foldBlock rebuilds always wraps under that gutter, so a running
+		// card that continued under bare spaces instead lost its rule, or grew
+		// one mid-run, depending on which of the two paths painted it.
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
 	} else {
 		line := bulletStyle.Render(markerGlyph)
 		if title != "" {
@@ -1895,11 +1920,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if summary != "" {
 			line += " " + summaryStyle.Render(summary)
 		}
-		if toolStatusPending(f) {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "   "))
-		} else {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
-		}
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
 	}
 
 	if f.Kind == FrameTool && isMCPToolTitle(title) && toolStatusPending(f) {
@@ -2270,20 +2291,6 @@ func failedActionPhrase(toolName string) string {
 		return "search"
 	case "lsp":
 		return "look up"
-	case "subagent_run":
-		return "run agent"
-	case "subagent_send":
-		return "send agent"
-	case "subagent_status":
-		return "check agent"
-	case "subagent_wait":
-		return "wait for agent"
-	case "subagent_continue":
-		return "continue agent"
-	case "subagent_close":
-		return "close agent"
-	case "subagent_list":
-		return "list agents"
 	case "enter_plan_mode":
 		return "enter plan mode"
 	case "exit_plan_mode":
@@ -2861,103 +2868,6 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 			action = "Dropped"
 		}
 		target = displayP
-
-	// --- Subagent ---
-	case lower == "subagent_run":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Running agent"
-		} else {
-			action = "Agent"
-		}
-		if t := inputString(meta, "title"); t != "" {
-			target = t
-		} else if d := inputString(meta, "description"); d != "" {
-			target = truncateForDisplay(d, 60)
-		}
-		if at := strings.TrimSpace(meta.AgentType); at != "" {
-			suffix = at
-		}
-
-	case lower == "subagent_fanout":
-		return "", "", ""
-
-	case lower == "subagent_send":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Sending agent"
-		} else {
-			action = "Sent agent"
-		}
-		if t := inputString(meta, "title"); t != "" {
-			target = t
-		} else if d := inputString(meta, "description"); d != "" {
-			target = truncateForDisplay(d, 60)
-		}
-		if at := inputString(meta, "subagent_type"); at != "" {
-			suffix = at
-		} else if at := strings.TrimSpace(meta.AgentType); at != "" {
-			suffix = at
-		}
-
-	case lower == "subagent_status":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Checking agent"
-		} else {
-			action = "Agent status"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_wait":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Waiting for agent"
-		} else {
-			action = "Agent done"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_continue":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Continuing agent"
-		} else {
-			action = "Continued agent"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_close":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Closing agent"
-		} else {
-			action = "Closed agent"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_list":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Listing agents"
-		} else {
-			action = "Agent list"
-		}
 
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
@@ -4247,10 +4157,11 @@ func (r *Renderer) renderUserMessage(content string) {
 }
 
 // NoteSubagentSpawned records what kind of agent a subagent is, so its own view
-// can be titled. The surface calls it from the same spawn notification that adds
+// can be titled, and the model that one execution runs on, so the view's footer
+// can name it. The surface calls it from the same spawn notification that adds
 // the roster row, because the row is dropped the moment the subagent finishes
-// while the view it opened stays readable.
-func (r *Renderer) NoteSubagentSpawned(agentID, agentType string) {
+// while the view it opened stays readable. Entries are never removed.
+func (r *Renderer) NoteSubagentSpawned(agentID, agentType string, model ComposerFooter) {
 	agentID = strings.TrimSpace(agentID)
 	agentType = strings.TrimSpace(agentType)
 	if r == nil || agentID == "" || agentType == "" {
@@ -4262,19 +4173,13 @@ func (r *Renderer) NoteSubagentSpawned(agentID, agentType string) {
 		r.subagentTypes = make(map[string]string)
 	}
 	r.subagentTypes[agentID] = agentType
-}
-
-// SetSubagentModels declares which subagent types run on a model of their own.
-// The map mirrors the runtime's per-type client map: a type is present only
-// when agents.definitions[<type>].llm_providers gives it a chain, and an absent
-// type runs on the primary agent's model.
-func (r *Renderer) SetSubagentModels(models map[string]ComposerFooter) {
-	if r == nil {
+	if strings.TrimSpace(model.Model) == "" && strings.TrimSpace(model.ReasoningEffort) == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.subagentModels = models
+	if r.subagentModels == nil {
+		r.subagentModels = make(map[string]ComposerFooter)
+	}
+	r.subagentModels[agentID] = model
 }
 
 func (r *Renderer) SetComposerFooter(footer ComposerFooter) {
@@ -4297,29 +4202,39 @@ func (r *Renderer) SetPlanMode(on bool) {
 	r.planMode = on
 }
 
-// SetAutoContinueNotice sets the warning line drawn under the composer while a
-// conversation stopped by a usage limit waits to continue by itself; "" removes
-// it. The caller repaints the composer.
-func (r *Renderer) SetAutoContinueNotice(text string) {
+// SetAutoContinueNotice sets the warning line drawn under the composer for one
+// view ("" for the conversation's own, a roster key for a subagent's) while it
+// waits to continue by itself; "" removes it. The caller repaints the composer.
+func (r *Renderer) SetAutoContinueNotice(view, text string) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.autoContinueNotice = strings.TrimSpace(text)
+	view = strings.TrimSpace(view)
+	text = strings.TrimSpace(text)
+	if text == "" {
+		delete(r.autoContinueNotices, view)
+		return
+	}
+	if r.autoContinueNotices == nil {
+		r.autoContinueNotices = map[string]string{}
+	}
+	r.autoContinueNotices[view] = text
 }
 
-// autoContinueNoticeLineLocked renders the auto-continue notice for a
-// termWidth-wide row, or "" when there is none. Caller holds r.mu.
+// autoContinueNoticeLineLocked renders the auto-continue notice of the view on
+// screen for a termWidth-wide row, or "" when there is none. Caller holds r.mu.
 func (r *Renderer) autoContinueNoticeLineLocked(termWidth int) string {
-	if r.autoContinueNotice == "" || r.activeView != "" {
+	notice := r.autoContinueNotices[strings.TrimSpace(r.activeView)]
+	if notice == "" {
 		return ""
 	}
 	width := termWidth - sharedBlockFooterTruncateExtraRoom
 	if width <= 0 {
 		return ""
 	}
-	return autoContinueNoticeStyle + runewidth.Truncate(autoContinueNoticeGlyph+r.autoContinueNotice, width, "…") + sharedBlockReset
+	return autoContinueNoticeStyle + runewidth.Truncate(autoContinueNoticeGlyph+notice, width, "…") + sharedBlockReset
 }
 
 // planModeFooterLabel is the footer's Plan-mode segment, which also says how
@@ -4327,44 +4242,53 @@ func (r *Renderer) autoContinueNoticeLineLocked(termWidth int) string {
 const planModeFooterLabel = "plan mode (shift+tab to exit)"
 
 // SetComposerTokenStats updates the live token figures shown on the right side
-// of the composer footer and re-renders the composer if it is active.
-func (r *Renderer) SetComposerTokenStats(stats ComposerTokenStats) {
+// of the composer footer for one view ("" for the conversation's own, a roster
+// key for a subagent's) and re-renders the composer if it is active.
+func (r *Renderer) SetComposerTokenStats(view string, stats ComposerTokenStats) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	r.composerTokens = stats
+	if r.composerTokens == nil {
+		r.composerTokens = ComposerTokenStatsByView{}
+	}
+	r.composerTokens.set(view, stats)
 	r.mu.Unlock()
 }
 
-// ComposerTokenStats returns a snapshot of the current composer token stats.
-func (r *Renderer) ComposerTokenStats() ComposerTokenStats {
+// ComposerTokenStats returns a snapshot of one view's composer token stats.
+func (r *Renderer) ComposerTokenStats(view string) ComposerTokenStats {
 	if r == nil {
 		return ComposerTokenStats{}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.composerTokens
+	return r.composerTokens.get(view)
 }
 
-// RefreshComposerTokenUsage updates only the in/out figures of the composer
-// footer, preserving the Active flag and PercentLeft captured from the last
-// budget update. The footer's in/out must stay in lockstep with the live
+// RefreshComposerTokenUsage updates only the in/out figures of one view's
+// composer footer, preserving the Active flag and PercentLeft captured from the
+// last budget update. The footer's in/out must stay in lockstep with the live
 // "Working"/"Worked for" line, which refreshes on every token-usage delta; the
 // budget message that carries PercentLeft fires less often, so refreshing in/out
 // only when it arrives left the footer trailing the working line by many deltas.
 // No-op when the footer is not active, so it never lights up a blank footer.
-func (r *Renderer) RefreshComposerTokenUsage(inputTokens, outputTokens int) {
+func (r *Renderer) RefreshComposerTokenUsage(view string, inputTokens, outputTokens int) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	if !r.composerTokens.Active {
+	stats := r.composerTokens.get(view)
+	if !stats.Active {
 		r.mu.Unlock()
 		return
 	}
-	r.composerTokens.InputTokens = inputTokens
-	r.composerTokens.OutputTokens = outputTokens
+	stats.InputTokens = inputTokens
+	stats.OutputTokens = outputTokens
+	if r.composerTokens == nil {
+		r.composerTokens = ComposerTokenStatsByView{}
+	}
+	r.composerTokens.set(view, stats)
 	r.mu.Unlock()
 }
 
@@ -4412,11 +4336,10 @@ func layoutComposerFooter(left, right string, maxWidth int) string {
 // ComposerRenderState bundles all data the renderer needs to paint the
 // composer area including the non-modal slash overlay rows below it.
 type ComposerRenderState struct {
-	Text           string
-	Cursor         *int
-	PendingInput   ComposerPendingInputPreview
-	AgentRoster    AgentRosterSnapshot
-	RosterSelected int
+	Text         string
+	Cursor       *int
+	PendingInput ComposerPendingInputPreview
+	AgentRoster  AgentRosterSnapshot
 	// RosterFocused is true once the user has moved keyboard focus onto the
 	// roster panel via Down. Only the focused row gets the per-kind hint text.
 	RosterFocused bool
@@ -5356,6 +5279,11 @@ func composerCursorVisualPos(text string, cursorRunes int, spans []visualLineSpa
 
 // renderFanout renders a FrameFanout as a non-collapsible block with header
 // and full body always visible. Used for subagent_fanout and subagent_run display.
+// fanoutClockNow is the clock a running task row's live elapsed time is read
+// from at paint time. It exists as a variable so a test can pin "now" and
+// assert the exact text a row shows.
+var fanoutClockNow = time.Now
+
 func (r *Renderer) renderFanout(f Frame) {
 	summary := strings.TrimSpace(f.Summary)
 	content := strings.TrimSpace(f.Content)
@@ -5370,7 +5298,7 @@ func (r *Renderer) renderFanout(f Frame) {
 			r.fanoutLineOwners = append(r.fanoutLineOwners, contentLine)
 		}
 	}
-	if summary == "" && content == "" {
+	if summary == "" && content == "" && f.FanoutCallError == "" {
 		return
 	}
 	// Header: bullet + summary
@@ -5390,42 +5318,85 @@ func (r *Renderer) renderFanout(f Frame) {
 		_, _ = fmt.Fprintln(r.out, headerLine)
 		owner(-1, strings.Count(headerLine, "\n")+1)
 	}
+	// The call's own failure sits under the header, above every task row: it
+	// belongs to no task, and a copy on each row would say it N times.
+	callErr := strings.TrimSpace(f.FanoutCallError)
+	if callErr != "" {
+		for _, line := range strings.Split(callErr, "\n") {
+			_, _ = fmt.Fprintln(r.out, "    "+strings.TrimRight(line, "\r"))
+			owner(-1, 1)
+		}
+	}
+	if content == "" {
+		// A settled call about no tasks (an empty list) says so; a call still
+		// running with nothing to show yet draws its header alone. A failed
+		// call's error line already says everything — "(no output)" under it
+		// would be noise.
+		if f.Final && summary != "" && callErr == "" {
+			_, _ = fmt.Fprintln(r.out, "    "+toolNoOutputText)
+			owner(-1, 1)
+		}
+		_, _ = fmt.Fprintln(r.out)
+		owner(-1, 1)
+		return
+	}
 	// Body: tree hierarchy with └ symbols showing parent-child relationship.
 	// Task lines (starting with ✓/✗/○) are first-level children prefixed
 	// with "  └ "; stat and activity lines are continuations indented with
-	// "    " to align under the task title text.
-	if content != "" {
-		bodyWidth := termWidthOrDefault() - contentRightMargin
-		if bodyWidth < 20 {
-			bodyWidth = 20
+	// "    " to align under the task title text. The body is content text, so
+	// it carries the assistant body's brightness — never dimmed.
+	bodyWidth := termWidthOrDefault() - contentRightMargin
+	if bodyWidth < 20 {
+		bodyWidth = 20
+	}
+	for contentLine, line := range strings.Split(content, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			_, _ = fmt.Fprintln(r.out)
+			owner(-1, 1)
+			continue
 		}
-		for contentLine, line := range strings.Split(content, "\n") {
-			line = strings.TrimRight(line, "\r")
-			if strings.TrimSpace(line) == "" {
-				_, _ = fmt.Fprintln(r.out)
-				owner(-1, 1)
-				continue
-			}
-			lead, leadWidth, text := fanoutRowLead(line)
-			wrapWidth := bodyWidth - leadWidth
-			if wrapWidth < 20 {
-				wrapWidth = 20
-			}
-			wrapped := wrapCardLine(text, wrapWidth)
-			continuation := strings.Repeat(" ", leadWidth)
-			for i, wl := range wrapped {
-				p := lead
-				if i > 0 {
-					p = continuation
-				}
-				styled := lipgloss.NewStyle().Faint(true).Render(p + wl)
-				_, _ = fmt.Fprintln(r.out, styled)
-			}
-			owner(contentLine, len(wrapped))
+		if suffix := fanoutClockSuffix(f, contentLine); suffix != "" {
+			line += suffix
 		}
+		lead, leadWidth, text := fanoutRowLead(line)
+		wrapWidth := bodyWidth - leadWidth
+		if wrapWidth < 20 {
+			wrapWidth = 20
+		}
+		wrapped := wrapCardLine(text, wrapWidth)
+		continuation := strings.Repeat(" ", leadWidth)
+		for i, wl := range wrapped {
+			p := lead
+			if i > 0 {
+				p = continuation
+			}
+			_, _ = fmt.Fprintln(r.out, p+wl)
+		}
+		owner(contentLine, len(wrapped))
 	}
 	_, _ = fmt.Fprintln(r.out)
 	owner(-1, 1)
+}
+
+// fanoutClockSuffix is the elapsed time a task row's title carries: the final
+// elapsed of an ended execution, or a running clock read at paint time. Rows
+// that never started show nothing.
+func fanoutClockSuffix(f Frame, contentLine int) string {
+	if contentLine < 0 || contentLine >= len(f.FanoutLineClocks) {
+		return ""
+	}
+	clock := f.FanoutLineClocks[contentLine]
+	if clock.Start.IsZero() {
+		return ""
+	}
+	if clock.End.IsZero() {
+		return " · " + formatWorkingElapsed(fanoutClockNow().Sub(clock.Start))
+	}
+	if d := clock.End.Sub(clock.Start); d > 0 {
+		return " · " + formatDuration(d)
+	}
+	return ""
 }
 
 // fanoutPrefixWidth is how many columns every fanout row is drawn past the
@@ -5564,28 +5535,14 @@ func shortAgentID(id string) string {
 }
 
 // agentRosterRowDetail is what the row's agent is working on, shown to the
-// right of its name: the tool it is running right now when one is in flight,
-// and otherwise the short title its dispatcher named the task with. A subagent
-// that shows only its type tells the reader nothing about which of several it
-// is.
-//
-// The dispatch prompt is the last resort, not the default. It is a whole
-// instruction — several sentences, often a path — and a row of a roster cannot
-// say anything with the first 56 columns of one; the prompt has a place of its
-// own as the first message of the agent's view.
+// right of its name: the task this agent was dispatched to do, by the same
+// name its card shows. The tool it is running right now already has its place
+// on the card's third layer; a row that switched to it would lose the name of
+// the job.
 func agentRosterRowDetail(row AgentRosterRow) string {
-	detail := strings.TrimSpace(row.Activity)
-	if detail == "" {
-		detail = strings.TrimSpace(row.Title)
-	}
-	if detail == "" {
-		detail = strings.TrimSpace(row.Task)
-	}
+	detail := strings.TrimSpace(row.Title)
 	if detail == "" {
 		return ""
-	}
-	if idx := strings.IndexAny(detail, "\r\n"); idx >= 0 {
-		detail = strings.TrimSpace(detail[:idx])
 	}
 	return truncateForDisplay(detail, agentRosterDetailMaxWidth)
 }
@@ -5618,25 +5575,84 @@ func agentRosterIndexForView(snapshot AgentRosterSnapshot, activeView string) in
 // moving through the roster that is the row they are on — the one Enter would
 // open — and otherwise it is the agent whose transcript is on screen.
 //
-// Deriving it from the view is what keeps the two in step. The roster used to
-// carry its own selection, written only by Up/Down, so every other way of
-// changing the view — clicking a subagent's card, escaping back to the
-// conversation — left the cursor pointing at whatever row was last navigated
-// to, naming an agent the user was not looking at.
-func agentRosterMarkedIndex(snapshot AgentRosterSnapshot, focused bool, cursor int, activeView string) int {
+// The cursor and the view are both the renderer's — keyed the same way — and
+// every change of the view carries the cursor onto it, so under focus the two
+// differ only while the user is actually walking the roster with Up/Down.
+// cursorIndex is where the renderer's cursor resolves in these rows; the view
+// is only consulted when the roster does not hold the keyboard focus.
+func agentRosterMarkedIndex(snapshot AgentRosterSnapshot, focused bool, cursorIndex int, activeView string) int {
 	if len(snapshot.Rows) == 0 {
 		return -1
 	}
 	if !focused {
 		return agentRosterIndexForView(snapshot, activeView)
 	}
-	if cursor < 0 {
+	if cursorIndex < 0 {
 		return 0
 	}
-	if cursor >= len(snapshot.Rows) {
+	if cursorIndex >= len(snapshot.Rows) {
 		return len(snapshot.Rows) - 1
 	}
-	return cursor
+	return cursorIndex
+}
+
+// agentRosterRowViewKey is the view a roster row keys on: the primary row owns
+// the conversation view (""), a subagent row its roster key. The same
+// translation the roster line input applies when Enter opens a row.
+func agentRosterRowViewKey(row AgentRosterRow) string {
+	if strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") {
+		return strings.TrimSpace(row.ID)
+	}
+	return ""
+}
+
+// rosterCursorIndex is where the roster cursor resolves in these rows. The
+// cursor is an agent key, so another row leaving the roster cannot move it
+// onto a different agent; when its own row is gone the cursor follows the view
+// on screen, and when that has no row either it lands on the first row.
+// Caller holds r.mu.
+func (r *Renderer) rosterCursorIndex(snapshot AgentRosterSnapshot) int {
+	for i, row := range snapshot.Rows {
+		if agentRosterRowViewKey(row) == r.rosterCursor {
+			return i
+		}
+	}
+	if idx := agentRosterIndexForView(snapshot, r.activeView); idx >= 0 {
+		return idx
+	}
+	return 0
+}
+
+// MoveRosterCursor moves the roster's keyboard cursor over the snapshot's rows
+// by delta, following the roster's navigation rules: a forward move wraps from
+// the last row back to the first, a backward move stops at the first row —
+// the caller unfocuses the roster there rather than wrapping. The cursor
+// lands on the target row's agent, so the move is by agent key, not by row
+// position.
+func (r *Renderer) MoveRosterCursor(snapshot AgentRosterSnapshot, delta int) {
+	if r == nil || len(snapshot.Rows) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.rosterCursorIndex(snapshot) + delta
+	if idx >= len(snapshot.Rows) {
+		idx = 0
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	r.rosterCursor = agentRosterRowViewKey(snapshot.Rows[idx])
+}
+
+// RosterCursorRow is the roster row the keyboard cursor points at.
+func (r *Renderer) RosterCursorRow(snapshot AgentRosterSnapshot) (AgentRosterRow, bool) {
+	if r == nil || len(snapshot.Rows) == 0 {
+		return AgentRosterRow{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return snapshot.Rows[r.rosterCursorIndex(snapshot)], true
 }
 
 // formatAgentRosterLines paints the roster. marked is the row the cursor points

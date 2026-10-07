@@ -154,7 +154,7 @@ func rememberCommandLabel(scope safety.CommandApprovalScope) string {
 func newApprovalOverlay(ctx context.Context, out io.Writer, rs *rawSelector, req turn.ToolApprovalRequest, confirmFn func(turn.ToolApprovalRequest, turn.ToolApprovalDecision)) *approvalOverlay {
 	percentUsed := 0
 	if rs != nil && rs.renderer != nil {
-		stats := rs.renderer.ComposerTokenStats()
+		stats := rs.renderer.ComposerTokenStats("")
 		if stats.PercentLeft > 0 {
 			percentUsed = 100 - stats.PercentLeft
 		}

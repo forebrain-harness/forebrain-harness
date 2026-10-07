@@ -11,10 +11,13 @@ import (
 	"strings"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
+	"github.com/google/uuid"
 )
 
 var ErrApprovalConflict = errors.New("approval decision conflicts with resolved action")
@@ -87,7 +90,14 @@ type ApprovalResume struct {
 	Session  []llm.Message
 	Approved bool
 	Denied   bool
-	Reason   string
+	// Reason is what the model is told. For a denied exit-plan approval it is
+	// the composed guidance — the reviews the user asked for, then the user's
+	// own words — which BuildApprovalResumeWithPlanReviews derives; for every
+	// other denial it is the user's words alone.
+	Reason string
+	// Feedback is the user's own words, unwrapped: the denial card and every
+	// display of the stored action print these, never the composed guidance.
+	Feedback string
 	Cleared  bool
 }
 
@@ -100,11 +110,34 @@ func BuildApprovalResume(action *state.Action, snapshot []llm.Message, toolName 
 		out.Approved = action.Status == state.ActionApproved || action.Status == state.ActionAnswered
 		out.Denied = action.Status == state.ActionDenied
 		out.Reason = strings.TrimSpace(action.Error)
+		out.Feedback = out.Reason
 		out.Cleared = out.Cleared || ActionClearedContext(action)
 	}
 	if out.Cleared && !out.Denied {
 		out.Session = MinimalClearedResumeSnapshot(out.Session, toolName)
 	}
+	return out
+}
+
+// BuildApprovalResumeWithPlanReviews is BuildApprovalResume for a gate a
+// pending exit-plan approval may have collected reviews for: a denial's
+// Reason composes those reviews onto the user's words — they are what the
+// user asked for, and the words have the final say — while Feedback stays
+// the user's own words for everything that displays them. Every surface
+// resumes a denied exit-plan approval through here, so the planning model
+// hears the same guidance whichever surface the user answered on.
+func BuildApprovalResumeWithPlanReviews(
+	ctx context.Context, log PlanReviewLog, action *state.Action, snapshot []llm.Message, toolName string, cleared bool,
+) ApprovalResume {
+	out := BuildApprovalResume(action, snapshot, toolName, cleared)
+	if !out.Denied || !strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode") || action == nil {
+		return out
+	}
+	results, err := PlanReviewsForAction(ctx, log, strings.TrimSpace(action.SessionID), strings.TrimSpace(action.ID))
+	if err != nil {
+		return out
+	}
+	out.Reason = ComposeDenyFeedback(results, out.Feedback)
 	return out
 }
 
@@ -1044,12 +1077,382 @@ func Truncate(s string, max int) string {
 	return strings.TrimSpace(string(runes[:max])) + "\n[truncated]"
 }
 
+// PlanReviewModelOptions lists the models the user may hand the plan to. They
+// come from the active agent's configured provider chain — the same list
+// /model offers — because a reviewer must run on credentials the session
+// already has.
+//
+// Plan review is the user's own request for a second opinion, not a subagent
+// the model spawns, so agents.defaults.enable_subagent does not govern it.
+// Returning no models — which removes the review row from the approval —
+// happens only when there is no configured model to ask.
+func PlanReviewModelOptions(cfg *appcfg.Root, agentName, currentProvider, currentModel string) []PlanReviewModelOption {
+	entries := ModelChoices(cfg, agentName)
+	if len(entries) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	out := make([]PlanReviewModelOption, 0, len(entries))
+	for _, entry := range entries {
+		provider := strings.TrimSpace(entry.Provider)
+		model := strings.TrimSpace(entry.Model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(provider + "/" + model)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, PlanReviewModelOption{
+			Provider: provider,
+			Model:    model,
+			Label:    strings.TrimSpace(entry.Name),
+			Current: strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
+				strings.EqualFold(model, strings.TrimSpace(currentModel)),
+		})
+	}
+	return out
+}
+
+// PlanReviewLog is where a conversation's plan-review records are read from:
+// its event log, which every surface and every process writes through. A
+// second reader over the same store — another surface, a restarted process —
+// sees the same reviews, which is what makes the review results shared state
+// rather than one surface's memory.
+type PlanReviewLog interface {
+	ListSessionEventsOfType(ctx context.Context, sessionID, eventType string, limit int) ([]state.SessionEvent, error)
+}
+
+// planReviewMaxReviews bounds how many completed reviews one approval offers
+// back: enough for a second and a third opinion, not enough for a wall of
+// them to displace the conversation the decision belongs to.
+const planReviewMaxReviews = 4
+
+// PlanReviewsForAction returns the completed reviews one pending approval
+// collected, oldest first, from the conversation's plan_reviewed events. A
+// review that failed, was stopped or timed out is a report on its own card,
+// not a review, so only Outcome "done" counts.
+func PlanReviewsForAction(ctx context.Context, log PlanReviewLog, sessionID, actionID string) ([]PlanReviewResult, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	actionID = strings.TrimSpace(actionID)
+	if log == nil || sessionID == "" || actionID == "" {
+		return nil, nil
+	}
+	records, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventPlanReviewed, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []PlanReviewResult
+	for _, record := range records {
+		var payload event.PlanReviewedPayload
+		if json.Unmarshal(record.Payload, &payload) != nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(payload.ActionID), actionID) ||
+			strings.TrimSpace(payload.Outcome) != planReviewOutcomeDone {
+			continue
+		}
+		if strings.TrimSpace(payload.Text) == "" {
+			continue
+		}
+		out = append(out, PlanReviewResult{
+			Model: Model{
+				Provider: strings.TrimSpace(payload.Provider),
+				Model:    strings.TrimSpace(payload.Model),
+				Label:    strings.TrimSpace(payload.Label),
+			},
+			Text:     payload.Text,
+			Duration: time.Duration(payload.DurationMs) * time.Millisecond,
+		})
+	}
+	if len(out) > planReviewMaxReviews {
+		out = out[len(out)-planReviewMaxReviews:]
+	}
+	return out, nil
+}
+
+// planReviewNotesFrom projects stored reviews into the notes a re-prompted
+// approval shows above its choices.
+func planReviewNotesFrom(results []PlanReviewResult) []PlanReviewNote {
+	if len(results) == 0 {
+		return nil
+	}
+	notes := make([]PlanReviewNote, 0, len(results))
+	for _, result := range results {
+		notes = append(notes, PlanReviewNote{
+			Provider: result.Model.Provider,
+			Model:    result.Model.Model,
+			Text:     result.Text,
+			Duration: result.Duration,
+		})
+	}
+	return notes
+}
+
+// PlanReviewInFlight names the review a pending exit-plan approval is waiting
+// on, with the reviewer subagent's roster key once it spawned. It is derived
+// from the conversation's events alone — a plan_review_started whose closing
+// plan_reviewed has not arrived — so every surface, in every process, agrees
+// on whether a review is running without sharing any memory.
+type PlanReviewInFlight struct {
+	ReviewID string
+	Provider string
+	Model    string
+	Label    string
+	// AgentID is the reviewer's roster key, from the subagent_spawned event
+	// whose parent tool call is the review. It is what a surface cancels to
+	// stop the review, the same way it stops any other subagent.
+	AgentID string
+}
+
+// ActivePlanReview reports the newest review of one action that started but
+// has not closed, or false when none is open. Reviews close from every ending
+// they can take, so an open one means one is genuinely expected to be running
+// or its process died mid-review — either way the answer is the same and the
+// user may stop it.
+func ActivePlanReview(ctx context.Context, log PlanReviewLog, sessionID, actionID string) (PlanReviewInFlight, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	actionID = strings.TrimSpace(actionID)
+	if log == nil || sessionID == "" || actionID == "" {
+		return PlanReviewInFlight{}, false
+	}
+	started, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventPlanReviewStarted, 0)
+	if err != nil {
+		return PlanReviewInFlight{}, false
+	}
+	closed, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventPlanReviewed, 0)
+	if err != nil {
+		return PlanReviewInFlight{}, false
+	}
+	done := make(map[string]bool, len(closed))
+	for _, record := range closed {
+		var payload event.PlanReviewedPayload
+		if json.Unmarshal(record.Payload, &payload) == nil && payload.ReviewID != "" {
+			done[payload.ReviewID] = true
+		}
+	}
+	// Newest started first: a stale open review from a dead process must not
+	// hide the review a later request actually started.
+	for i := len(started) - 1; i >= 0; i-- {
+		var payload event.PlanReviewStartedPayload
+		if json.Unmarshal(started[i].Payload, &payload) != nil {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(payload.ActionID), actionID) || done[payload.ReviewID] {
+			continue
+		}
+		open := PlanReviewInFlight{
+			ReviewID: payload.ReviewID,
+			Provider: strings.TrimSpace(payload.Provider),
+			Model:    strings.TrimSpace(payload.Model),
+			Label:    strings.TrimSpace(payload.Label),
+			AgentID:  planReviewerAgentID(ctx, log, sessionID, payload.ReviewID),
+		}
+		return open, true
+	}
+	return PlanReviewInFlight{}, false
+}
+
+// planReviewerAgentID finds the roster key of the subagent one review
+// dispatched: its spawned event names the review as its parent tool call.
+func planReviewerAgentID(ctx context.Context, log PlanReviewLog, sessionID, reviewID string) string {
+	spawns, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventSubagentSpawned, 0)
+	if err != nil {
+		return ""
+	}
+	for i := len(spawns) - 1; i >= 0; i-- {
+		var payload event.SubagentSpawnedPayload
+		if json.Unmarshal(spawns[i].Payload, &payload) != nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(payload.ParentToolCallID), reviewID) {
+			return strings.TrimSpace(payload.AgentID)
+		}
+	}
+	return ""
+}
+
+// PlanReviewTranscripts is the transcript half of the reviewer's task
+// context: what the user asked for, read from the conversation itself.
+type PlanReviewTranscripts interface {
+	ListTranscriptMessages(ctx context.Context, sessionID string, limit int) ([]llm.Message, error)
+}
+
+// planReviewTaskMessages bounds how far back the reviewer's task context
+// reaches. Only user turns are kept, so this is a window over the request the
+// plan is meant to serve, not over the agent's own work.
+const planReviewTaskMessages = 6
+
+// planReviewTaskContext condenses what the user asked for out of the
+// conversation's last user turns, so the reviewer judges the plan against the
+// actual request rather than in the abstract.
+func planReviewTaskContext(ctx context.Context, transcripts PlanReviewTranscripts, sessionID string) string {
+	if transcripts == nil {
+		return ""
+	}
+	messages, err := transcripts.ListTranscriptMessages(ctx, strings.TrimSpace(sessionID), 200)
+	if err != nil {
+		return ""
+	}
+	userTurns := make([]string, 0, planReviewTaskMessages)
+	for i := len(messages) - 1; i >= 0 && len(userTurns) < planReviewTaskMessages; i-- {
+		if messages[i].Role != llm.RoleUser {
+			continue
+		}
+		text := strings.TrimSpace(messages[i].TextContent())
+		if text == "" {
+			continue
+		}
+		userTurns = append(userTurns, text)
+	}
+	if len(userTurns) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i := len(userTurns) - 1; i >= 0; i-- {
+		b.WriteString(userTurns[i])
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+	}
+	return Truncate(b.String(), MaxTaskChars)
+}
+
+const (
+	planReviewOutcomeDone     = "done"
+	planReviewOutcomeStopped  = "stopped"
+	planReviewOutcomeTimedOut = "timed_out"
+	planReviewOutcomeFailed   = "failed"
+)
+
+// planReviewOutcomeOf names how a review ended in the one vocabulary
+// plan_reviewed carries: "stopped", "timed_out" and "failed".
+func planReviewOutcomeOf(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return planReviewOutcomeStopped
+	case errors.Is(err, context.DeadlineExceeded):
+		return planReviewOutcomeTimedOut
+	default:
+		return planReviewOutcomeFailed
+	}
+}
+
+// PlanReviewRun is one second-opinion request through the shared review flow.
+// Every surface fills it the same way, which is what keeps the TUI's review
+// and the web's review the same procedure rather than two.
+type PlanReviewRun struct {
+	// ActionID is the pending exit-plan approval the review is asked for.
+	ActionID string
+	// Model is the reviewer the user picked.
+	Model Model
+	// SessionID and RunID name the conversation the review belongs to and the
+	// gated run it answers: the review's events land in the former and its
+	// run row is a child of the latter.
+	SessionID string
+	RunID     string
+	// StateRoot and ProjectKey resolve the plan file the approval is holding.
+	StateRoot  string
+	ProjectKey string
+	// Transcripts supplies the reviewer's task context.
+	Transcripts PlanReviewTranscripts
+	// Reviewer runs the review; the LLM-backed implementation lives in
+	// pkg/process, tests stub it.
+	Reviewer Reviewer
+	// Publish puts one review event on the conversation's event log, the way
+	// every canonical event travels.
+	Publish func(ctx context.Context, evt event.RunEvent) error
+}
+
+// RunPlanReview asks the selected model to review the pending plan and
+// records the result on the conversation, which keeps the approval pending:
+// the review is material for the user's decision, not a decision of its own.
+//
+// The review announces itself before it starts and closes itself on every
+// path out of here: those two events are the review's dispatch record — the
+// id ties them, and the reviewer's own spawned event points back at it — so
+// a surface can draw the same Starting/Running/Ran card it draws for any
+// other subagent, and a review that fails before its run opens still has a
+// trace. The events are also the result's only storage: a process that reads
+// them back later — this one after a restart, another surface entirely —
+// serves the same review.
+//
+// The returned error is the review's own failure, for callers that want it;
+// the approval is never taken down by it, and every outcome is already
+// reported through the closing event.
+func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
+	model := Model{
+		Provider: strings.TrimSpace(in.Model.Provider),
+		Model:    strings.TrimSpace(in.Model.Model),
+		Label:    strings.TrimSpace(in.Model.Label),
+	}
+	actionID := strings.TrimSpace(in.ActionID)
+	sessionID := strings.TrimSpace(in.SessionID)
+	runID := strings.TrimSpace(in.RunID)
+	reviewID := "plan-review:" + uuid.NewString()
+	publish := func(evt event.RunEvent) {
+		if in.Publish == nil {
+			return
+		}
+		_ = in.Publish(ctx, evt)
+	}
+	publish(event.NewRunEvent("plan-review:"+reviewID+":started", runID, sessionID,
+		event.RunEventPlanReviewStarted, event.PlanReviewStartedPayload{
+			ActionID: actionID, ReviewID: reviewID,
+			Provider: model.Provider, Model: model.Model, Label: model.Label,
+		}, time.Now()))
+	finish := func(outcome string, err error, text string, duration time.Duration) {
+		reviewed := event.PlanReviewedPayload{
+			ActionID: actionID, ReviewID: reviewID,
+			Provider: model.Provider, Model: model.Model, Label: model.Label,
+			Text: text, DurationMs: duration.Milliseconds(), Outcome: outcome,
+		}
+		if err != nil && outcome == planReviewOutcomeFailed {
+			reviewed.Error = strings.TrimSpace(err.Error())
+		}
+		publish(event.NewRunEvent("plan-review:"+reviewID+":reviewed", runID, sessionID,
+			event.RunEventPlanReviewed, reviewed, time.Now()))
+	}
+	plan, err := state.GetPlanForProject(strings.TrimSpace(in.StateRoot), strings.TrimSpace(in.ProjectKey))
+	if err != nil {
+		finish(planReviewOutcomeOf(err), err, "", 0)
+		return err
+	}
+	if strings.TrimSpace(plan) == "" {
+		finish(planReviewOutcomeOf(ErrNoPlan), ErrNoPlan, "", 0)
+		return ErrNoPlan
+	}
+	// The review's dispatch coordinates travel on the context the reviewer
+	// runs under: the conversation for its worker session and prompt-cache
+	// bucket, the gated run as its parent, the review id as its dispatching
+	// call — exactly what a surface's own subagent dispatch carries.
+	reviewCtx := llm.WithAgentSessionID(ctx, sessionID)
+	if runID != "" {
+		reviewCtx = tool.WithRunID(reviewCtx, runID)
+	}
+	reviewCtx = tool.WithToolUseID(reviewCtx, reviewID)
+	result, err := in.Reviewer.Review(reviewCtx, Request{
+		Plan:  plan,
+		Task:  planReviewTaskContext(ctx, in.Transcripts, sessionID),
+		Model: model,
+	})
+	if err != nil {
+		finish(planReviewOutcomeOf(err), err, "", 0)
+		return err
+	}
+	finish(planReviewOutcomeDone, nil, result.Text, result.Duration)
+	return nil
+}
+
 // PendingApprovalRuns is the slice of the run store the gate reads: which run
-// in a session is parked on an approval, and what that run is waiting for.
+// in a session is parked on an approval, what that run is waiting for, and
+// the conversation's event log the approval's plan reviews live on.
 type PendingApprovalRuns interface {
 	SessionHasRunWaitingOnToolApproval(ctx context.Context, sessionID string) (bool, error)
 	FirstWaitingRunIDForSession(ctx context.Context, sessionID string) (string, error)
 	GetWaitForRun(ctx context.Context, runID string) (*state.Wait, error)
+	ListSessionEventsOfType(ctx context.Context, sessionID, eventType string, limit int) ([]state.SessionEvent, error)
 }
 
 // PendingApprovalActions is the slice of the action service the gate reads.
@@ -1066,9 +1469,10 @@ type PendingApprovalActions interface {
 // had the only implementation; the gateway needed the same answer to stop
 // accepting a channel message while a gate was open, and reimplementing it
 // there would have produced a second set of rules for the same question. The
-// TUI keeps only the parts that are genuinely surface state -- the plan review
-// notes it holds in memory, and the plan file path it resolves from its own
-// agent state root.
+// plan-review facts a parked exit-plan approval carries — the plan file's
+// path, the models a review may be handed to, the reviews already collected —
+// are injected through PlanScope and ReviewModels, so they come from the same
+// shared derivation whatever surface is asking.
 //
 // Zero value is unusable: Runs is required. A nil gate reports nothing
 // pending, which is what a surface with no run store should see.
@@ -1080,6 +1484,14 @@ type PendingApprovalGate struct {
 	// instead of searching, which is how the TUI uses the approval it is
 	// holding in memory. Nil, or returning "", falls back to the store.
 	RunIDHint func() string
+	// PlanScope resolves the state root and project key the session's plan
+	// file lives under. Nil leaves PlanFilePath unset, which is what a surface
+	// without a plan scope wants.
+	PlanScope func(ctx context.Context, sessionID string) (stateRoot, projectKey string)
+	// ReviewModels lists the models a pending exit-plan approval may be handed
+	// to. Nil, or returning nothing, leaves the request without the review
+	// row — a surface with no configured model to ask has no choice to offer.
+	ReviewModels func() []PlanReviewModelOption
 }
 
 // Waiting reports whether the session is parked on a tool approval.
@@ -1158,6 +1570,27 @@ func (g *PendingApprovalGate) Pending(ctx context.Context, sessionID string) (*T
 	// the tool step, and the wait row's snapshot is the only durable source
 	// for it after a restart.
 	req.ToolStepID = PendingApprovalToolStepID(wait.SessionSnapshot, toolName)
+	// What a parked plan gate is asking about is shared fact, not surface
+	// state: the plan file under the session's own scope, and — for the
+	// exit-plan decision — the models a review may be handed to and the
+	// reviews the conversation already collected. Every surface renders them
+	// from this same request.
+	if strings.EqualFold(toolName, "enter_plan_mode") || strings.EqualFold(toolName, "exit_plan_mode") {
+		if g.PlanScope != nil {
+			if stateRoot, projectKey := g.PlanScope(ctx, sessionID); strings.TrimSpace(stateRoot) != "" {
+				req.PlanFilePath = state.PlanPathForProject(stateRoot, projectKey)
+			}
+		}
+	}
+	if strings.EqualFold(toolName, "exit_plan_mode") {
+		if g.ReviewModels != nil {
+			req.PlanReviewModels = g.ReviewModels()
+		}
+		results, err := PlanReviewsForAction(ctx, g.Runs, sessionID, actionID)
+		if err == nil {
+			req.PlanReviews = planReviewNotesFrom(results)
+		}
+	}
 	return &req, nil
 }
 

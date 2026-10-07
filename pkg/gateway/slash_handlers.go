@@ -64,7 +64,7 @@ func (s *Server) HandleContextSlash(ctx context.Context, sessionID, channel stri
 		r = s.Runner
 	}
 	provider, model := run.PrimaryModelForSession(r, s.Sessions, sessionID)
-	used, _ := s.contextOccupancy(ctx, sessionID)
+	used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
 	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactExplicitLimit())
 	return turn.ContextReport(ctx, src, sessionID), true
 }
@@ -108,7 +108,7 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 		ConfigFiles: turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
 		SkillOffer:  cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, int) {
-			used, _ := s.contextOccupancy(ctx, sessionID)
+			used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
 			return used, s.compactExplicitLimit()
 		},
 	}

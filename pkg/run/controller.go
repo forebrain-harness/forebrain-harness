@@ -40,6 +40,23 @@ type Input struct {
 	// the surface resolves them into image parts when it sends the message.
 	MentionImages []string
 	Rejected      bool
+	// Seq orders this message against everything else queued in the same
+	// conversation. The queue stamps it from its shared enqueue clock; the
+	// lanes are separate FIFOs, so without it "newest queued" is only a
+	// guess. Meaningless (zero) for a message that never sat in a queue.
+	Seq int
+	// Payload is the surface's own record of the message — what it shows and
+	// what it hands back to the composer. The queue never reads it; it
+	// travels with the message so a recalled, released or restored message
+	// comes back whole.
+	Payload any
+	// SkillName and SkillPath carry a trusted explicit skill selection when
+	// the message is a skill command the user typed in a subagent's view: the
+	// execution that consumes it activates that skill. Empty for an ordinary
+	// message. They are the subagent counterpart of the skill fields on a
+	// dispatched turn.
+	SkillName string
+	SkillPath string
 }
 
 // Preview is the input state visible to adapters.
@@ -86,11 +103,30 @@ type Controller struct {
 	mu       sync.Mutex
 	runs     map[string]*RunState
 	sessions map[string]chan struct{}
+	inputs   map[string]*InputQueue
 }
 
 // NewController creates an empty controller.
 func NewController() *Controller {
-	return &Controller{runs: make(map[string]*RunState), sessions: make(map[string]chan struct{})}
+	return &Controller{runs: make(map[string]*RunState), sessions: make(map[string]chan struct{}), inputs: make(map[string]*InputQueue)}
+}
+
+// sessionQueue returns the conversation's input queue, creating it on first
+// use. The queue outlives any one run: it is what the conversation's user
+// queued while turns come and go, so a run only ever references it.
+func (c *Controller) sessionQueue(sessionID string) *InputQueue {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionQueueLocked(sessionID)
+}
+
+func (c *Controller) sessionQueueLocked(sessionID string) *InputQueue {
+	q := c.inputs[sessionID]
+	if q == nil {
+		q = NewInputQueue()
+		c.inputs[sessionID] = q
+	}
+	return q
 }
 
 // Begin acquires the session foreground slot and creates a running state.
@@ -120,7 +156,8 @@ func (c *Controller) Begin(ctx context.Context, runID, sessionID string) (*RunSt
 	case <-lock:
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
-	state := &RunState{ID: runID, SessionID: sessionID, ctx: ctx, phase: Running, cancel: cancel, stop: func(err error) { cancel(err) }, locked: true, input: NewInputQueue()}
+	state := &RunState{ID: runID, SessionID: sessionID, ctx: ctx, phase: Running, cancel: cancel, stop: func(err error) { cancel(err) }, locked: true, input: c.sessionQueue(sessionID)}
+	state.input.Attach(NewTurnInputRuntime())
 	c.mu.Lock()
 	if _, ok := c.runs[runID]; ok {
 		c.mu.Unlock()
@@ -150,7 +187,7 @@ func (c *Controller) track(runID, sessionID string, cancel context.CancelFunc, r
 	c.mu.Lock()
 	state := c.runs[runID]
 	if state == nil {
-		state = &RunState{ID: runID, SessionID: sessionID, ctx: context.Background(), phase: Running, input: NewInputQueueWithRuntime(rt)}
+		state = &RunState{ID: runID, SessionID: sessionID, ctx: context.Background(), phase: Running}
 		c.runs[runID] = state
 	}
 	c.mu.Unlock()
@@ -164,9 +201,13 @@ func (c *Controller) track(runID, sessionID string, cancel context.CancelFunc, r
 	}
 	state.phase = Running
 	state.stop = func(error) { cancel() }
-	if rt != nil && state.input == nil {
-		state.input = NewInputQueueWithRuntime(rt)
+	if state.input == nil {
+		state.input = c.sessionQueue(state.SessionID)
 	}
+	if rt == nil {
+		rt = NewTurnInputRuntime()
+	}
+	state.input.Attach(rt)
 	state.mu.Unlock()
 	return true
 }
@@ -227,24 +268,36 @@ func (c *Controller) Queue(runID string) (*InputQueue, string, bool) {
 	return state.input, state.SessionID, true
 }
 
-// Release closes a finishing run's input and hands back what is still in it:
-// undelivered steers merged into one message first, then queued messages in
-// the order they were sent. The input is closed in the same step, so nothing
-// can arrive after the hand-back and be dropped with the run — a late steer or
-// queued message is refused, and its sender keeps it.
-func (c *Controller) Release(runID string) []Input {
+// SessionQueue returns the conversation's input queue, creating it on first
+// use. Surfaces operate the conversation's queue semantics through it.
+func (c *Controller) SessionQueue(sessionID string) *InputQueue {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionQueueLocked(sessionID)
+}
+
+// Release closes a finishing run's input and decides what follows it: the
+// run's turn runtime is detached, then the boundary b is applied to the
+// conversation's queue. The run stops owning the queue in the same step, so
+// nothing can arrive for the run after the decision and be dropped with it —
+// a late steer or queued message is refused, and its sender keeps it.
+func (c *Controller) Release(runID string, b Boundary) (send, restore []Input) {
 	state, ok := c.Get(runID)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.input == nil {
-		return nil
-	}
-	released := state.input.Drain()
+	q := state.input
 	state.input = nil
-	return released
+	state.mu.Unlock()
+	if q == nil {
+		return nil, nil
+	}
+	q.Detach()
+	return q.Next(b)
 }
 
 // Active returns the number of foreground runs.
@@ -305,10 +358,13 @@ func (c *Controller) ClaimResume(runID, sessionID string) bool {
 	if c == nil || strings.TrimSpace(runID) == "" {
 		return false
 	}
+	sid := strings.TrimSpace(sessionID)
 	c.mu.Lock()
 	state := c.runs[runID]
 	if state == nil {
-		c.runs[runID] = &RunState{ID: runID, SessionID: strings.TrimSpace(sessionID), ctx: context.Background(), phase: Running, input: NewInputQueue()}
+		state = &RunState{ID: runID, SessionID: sid, ctx: context.Background(), phase: Running, input: c.sessionQueueLocked(sid)}
+		state.input.Attach(NewTurnInputRuntime())
+		c.runs[runID] = state
 		c.mu.Unlock()
 		return true
 	}
@@ -418,57 +474,6 @@ func (c *Controller) FollowUp(runID string, in Input) bool {
 		return false
 	}
 	return state.input != nil && state.input.FollowUp(in)
-}
-
-// Retract removes the latest steer that has not been drained.
-func (c *Controller) Retract(runID string) (Input, bool) {
-	state, ok := c.Get(runID)
-	if !ok {
-		return Input{}, false
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.input == nil {
-		return Input{}, false
-	}
-	return state.input.RetractSteer()
-}
-
-// DrainSteers returns pending steers in FIFO order.
-func (c *Controller) DrainSteers(runID string) []Input {
-	state, ok := c.Get(runID)
-	if !ok {
-		return nil
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.input == nil {
-		return nil
-	}
-	return state.input.DrainSteers()
-}
-
-// Preview returns a copy of queued input.
-func (c *Controller) Preview(runID string) (Preview, bool) {
-	state, ok := c.Get(runID)
-	if !ok {
-		return Preview{}, false
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.input == nil {
-		return Preview{}, true
-	}
-	queued := state.input.Preview()
-	return Preview{Steers: inputsFromText(queued.Steers), Rejected: inputsFromText(queued.Rejected), FollowUp: inputsFromText(queued.FollowUp)}, true
-}
-
-func inputsFromText(texts []string) []Input {
-	out := make([]Input, 0, len(texts))
-	for _, text := range texts {
-		out = append(out, Input{Text: text})
-	}
-	return out
 }
 
 type RunOverrides struct {

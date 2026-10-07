@@ -182,6 +182,35 @@ func TestClaimStage1SkipsCronConversations(t *testing.T) {
 	}
 }
 
+// TestClaimStage1SkipsSubagentConversations pins the same exclusion for a
+// subagent's private conversation (README decision D5): everything a
+// subagent did already stands in the conversation that dispatched it, so
+// extracting its worker session would pay a stage-1 model call to relearn
+// what the main session already holds. The exclusion reads the
+// session-purpose column through this package's own constant, which must
+// stay the same value the state store births worker sessions with.
+func TestClaimStage1SkipsSubagentConversations(t *testing.T) {
+	if sessionSourceSubagent != state.SessionSourceSubagent {
+		t.Fatalf("memory's sessionSourceSubagent = %q, want state.SessionSourceSubagent %q", sessionSourceSubagent, state.SessionSourceSubagent)
+	}
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	insertMemoryThread(t, store, "worker-conversation", ThreadMemoryEnabled, SessionSourceTUI, now-7*3600)
+	if _, err := store.DB.ExecContext(ctx, `UPDATE fb_sessions SET source=? WHERE id='worker-conversation'`, sessionSourceSubagent); err != nil {
+		t.Fatal(err)
+	}
+	insertMemoryThread(t, store, "ordinary", ThreadMemoryEnabled, SessionSourceWebchat, now-8*3600)
+
+	claims, err := store.ClaimStage1JobsForStartup(ctx, "current", 10, 6, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Thread.ThreadID != "ordinary" {
+		t.Fatalf("claims = %#v, want only the ordinary conversation", claims)
+	}
+}
+
 func TestNoOutputDeletesPriorOutputAndEnqueuesConsolidation(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

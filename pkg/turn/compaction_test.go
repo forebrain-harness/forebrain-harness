@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 func checkpointRow(windowID string, createdAt int64) state.Message {
@@ -240,5 +242,113 @@ func TestRunWorkedLinesCloseEachRunAfterItsLastRow(t *testing.T) {
 	}
 	if _, ok := lines[0]; ok {
 		t.Fatal("a run closes after its last row, not its first")
+	}
+}
+
+// assistantCallRow stores one assistant turn that asked for a tool call.
+func assistantCallRow(callID, name, argsJSON string) state.Message {
+	msg := llm.AssistantMessage(nil, llm.ToolCall{
+		ID:       callID,
+		Type:     llm.ToolTypeFunction,
+		Function: llm.FunctionCall{Name: name, Arguments: argsJSON},
+	})
+	return state.Message{RowID: 1, Role: "assistant", PartsJSON: state.MessagePartsJSON(msg, "")}
+}
+
+// toolAnswerRow stores the tool result that answered a call, with the
+// tool_display part a settled row carries.
+func toolAnswerRow(callID, content, metaStatus string) state.Message {
+	msg := llm.ToolResultMessage(callID, llm.Text(content))
+	if metaStatus != "" {
+		meta, _ := json.Marshal(map[string]any{"tool_name": "subagent_call_test", "status": metaStatus})
+		msg.ToolDisplay = &llm.ToolDisplayState{Body: "card body", Summary: "summary", ToolMetaJSON: string(meta)}
+	}
+	return state.Message{RowID: 2, Role: "tool", Content: content, PartsJSON: state.MessagePartsJSON(msg, content)}
+}
+
+// A reloaded card must say what the live one said: the derivation over stored
+// rows matches the live path's derivation on the same call, and a row that
+// recorded a failed call fails its tasks the same way.
+func TestSubagentCallsInTranscriptMatchesTheLivePath(t *testing.T) {
+	sendResult, err := json.Marshal(map[string]any{
+		"agent_id": "agent-8", "task_id": "task-8", "run_id": "run-8", "parent_run_id": "parent-1",
+		"session_id": "session-1", "worker_session_id": "worker-8", "query_source": "q",
+		"status": "running", "started_at": 1700000000, "agent_kind": "typed",
+		"agent_type": "general-purpose", "runtime_kind": "typed_subagent",
+	})
+	if err != nil {
+		t.Fatalf("marshal send result: %v", err)
+	}
+	sendArgs, err := json.Marshal(map[string]any{
+		"title": "Async fix", "task": "the whole prompt", "subagent_type": "general-purpose",
+	})
+	if err != nil {
+		t.Fatalf("marshal send args: %v", err)
+	}
+	fanoutArgs, err := json.Marshal(map[string]any{
+		"max_parallel": 2,
+		"tasks": []any{
+			map[string]any{"title": "First", "prompt": "brief one", "subagent_type": "explore"},
+			map[string]any{"title": "Second", "prompt": "brief two", "subagent_type": "explore"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal fanout args: %v", err)
+	}
+	fanoutResult, err := json.Marshal(map[string]any{
+		"summary": map[string]any{"total": 2, "succeed": 2, "failed": 0, "finished": 1700000060},
+		"results": []any{
+			map[string]any{"index": 0, "task": "brief one", "subagent_type": "explore", "output": "done", "ok": true},
+			map[string]any{"index": 1, "task": "brief two", "subagent_type": "explore", "output": "done", "ok": true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal fanout result: %v", err)
+	}
+	runArgs, err := json.Marshal(map[string]any{"title": "One task", "task": "the whole prompt", "subagent_type": "explore"})
+	if err != nil {
+		t.Fatalf("marshal run args: %v", err)
+	}
+	turns := []state.Message{
+		{Role: "user", Content: "go"},
+		assistantCallRow("call-send-1", "subagent_send", string(sendArgs)),
+		toolAnswerRow("call-send-1", string(sendResult), "completed"),
+		assistantCallRow("call-fanout-1", "subagent_fanout", string(fanoutArgs)),
+		toolAnswerRow("call-fanout-1", string(fanoutResult), "completed"),
+		// A failed call: the row's display meta says failed, and its content
+		// is the error the model received.
+		assistantCallRow("call-run-1", "subagent_run", string(runArgs)),
+		toolAnswerRow("call-run-1", "unknown tool \"subagent_run\"", "failed"),
+		// A call no tool row answered yet: no facts for it.
+		assistantCallRow("call-run-2", "subagent_run", string(runArgs)),
+		// And a non-subagent call, which never gets facts.
+		assistantCallRow("call-read-1", "read_file", `{"file_path":"/tmp/x"}`),
+		toolAnswerRow("call-read-1", "1|package x", "completed"),
+	}
+	live := func(name, argsJSON, content, errText string) event.SubagentCall {
+		t.Helper()
+		var input map[string]any
+		_ = json.Unmarshal([]byte(argsJSON), &input)
+		evt := tool.StepEvent{
+			Kind:     tool.StepKindToolCompleted,
+			ToolName: name,
+			Input:    input,
+			Output:   map[string]any{"output": content},
+			Error:    errText,
+		}
+		facts, ok := tool.SubagentCallFromStep(evt)
+		if !ok {
+			t.Fatalf("live path said no for %s", name)
+		}
+		return *facts
+	}
+	got := SubagentCallsInTranscript(turns)
+	want := map[string]event.SubagentCall{
+		"call-send-1":   live("subagent_send", string(sendArgs), string(sendResult), ""),
+		"call-fanout-1": live("subagent_fanout", string(fanoutArgs), string(fanoutResult), ""),
+		"call-run-1":    live("subagent_run", string(runArgs), "unknown tool \"subagent_run\"", "unknown tool \"subagent_run\""),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("transcript facts =\n%+v\nwant the live path's\n%+v", got, want)
 	}
 }

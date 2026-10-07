@@ -574,3 +574,33 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 		t.Fatalf("no diagnostics section, no diagnostics rows:\n%s", plain)
 	}
 }
+
+// A subagent card's body is content text, and content text is never dimmed:
+// the card used to paint every row Faint, which the surface's own rules forbid.
+func TestSubagentCardBodyIsFullBrightness(t *testing.T) {
+	// Styles only render under a color profile; the test writer is not a TTY,
+	// so pin one for the duration of the assertion.
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, &buf)
+	r.renderFanout(Frame{
+		Kind:    FrameFanout,
+		StepID:  "fanout-bright",
+		Final:   true,
+		Summary: "Ran 2 general-purpose tasks · 1 done, 1 failed",
+		Content: "\x1b[32m✓\x1b[0m 任务16 migrate 导入\n  └ shell gofmt -l pkg cmd\n    … +30 tool uses\n" +
+			"\x1b[31m✗\x1b[0m 任务17 扩展目录\n  上游连接中断（EOF）\n",
+		FanoutLineAgents: []string{"subagent-8c5c", "subagent-8c5c", "subagent-8c5c", "subagent-37aa", "subagent-37aa"},
+	})
+	out := buf.String()
+	if strings.Contains(out, "\x1b[2m") {
+		t.Fatalf("card body is dimmed:\n%q", out)
+	}
+	plain := stripANSI(out)
+	for _, want := range []string{"任务16 migrate 导入", "✗ 任务17 扩展目录", "… +30 tool uses"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("card lost the row %q:\n%s", want, plain)
+		}
+	}
+}

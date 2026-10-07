@@ -323,3 +323,35 @@ func TestConversationSummaryRequestStartsLikeTheConversation(t *testing.T) {
 		t.Fatalf("summary tools %v differ from the turn's %v", toolNames(summaryTools), toolNames(turnTools))
 	}
 }
+
+// TestCompactionSizesATypedSubagentByItsOwnModel pins the fix for the
+// mis-sized threshold: a compaction must size itself by the model the call in
+// context is actually routed to. An explore subagent whose definition carries
+// its own 32k chain would otherwise have its threshold computed from the main
+// agent's 200k window and hit the provider's "context too long" before any
+// compaction ran.
+func TestCompactionSizesATypedSubagentByItsOwnModel(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
+		}},
+		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
+		}},
+	}}}
+	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+
+	// The context an explore subagent's own calls run under: its subtype, a
+	// query source that is not the main thread's.
+	typedCtx := tool.WithSubagentType(WithQuerySource(context.Background(), "agent:builtin:explore"), "explore")
+	provider, model := r.agentModelFor(typedCtx)
+	if provider != "deepseek" || model != "deepseek-v4-flash" {
+		t.Fatalf("agentModelFor = %s/%s, want the explore subagent's own 32k model deepseek/deepseek-v4-flash", provider, model)
+	}
+
+	// The main thread stays on the conversation's model.
+	mainProvider, mainModel := r.agentModelFor(WithQuerySource(context.Background(), "repl_main_thread"))
+	if mainProvider != "zhipuai" || mainModel != "glm-5.3" {
+		t.Fatalf("agentModelFor on the main thread = %s/%s, want the conversation's model zhipuai/glm-5.3", mainProvider, mainModel)
+	}
+}

@@ -415,3 +415,75 @@ func TestLSPCommandTables(t *testing.T) {
 		require.Contains(t, names, "lsp", "surface %s: %v", surface, names)
 	}
 }
+
+// Every built-in command declares how it behaves in a subagent's own view
+// (decision D4). A new command that forgets is caught here, before it silently
+// runs against the wrong conversation in a subagent's view.
+func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
+	want := map[string]SubagentViewScope{
+		// Acts on the subagent whose view it is typed in.
+		"compact": SubagentViewActs,
+		"context": SubagentViewActs,
+		// Runs exactly as it does in the conversation's view.
+		"help":        SubagentViewGlobal,
+		"status":      SubagentViewGlobal,
+		"mcp":         SubagentViewGlobal,
+		"lsp":         SubagentViewGlobal,
+		"permissions": SubagentViewGlobal,
+		"sandbox":     SubagentViewGlobal,
+		"exit":        SubagentViewGlobal,
+		"diff":        SubagentViewGlobal,
+		"subagents":   SubagentViewGlobal,
+		"skills":      SubagentViewGlobal,
+		"connect":     SubagentViewGlobal,
+		"memories":    SubagentViewGlobal,
+		"migrate":     SubagentViewGlobal,
+		// Hidden, and answered with one sentence pointing back to the conversation.
+		"new":    SubagentViewHidden,
+		"resume": SubagentViewHidden,
+		"fork":   SubagentViewHidden,
+		"rename": SubagentViewHidden,
+		"init":   SubagentViewHidden,
+		"clear":  SubagentViewHidden,
+		"plan":   SubagentViewHidden,
+		"agent":  SubagentViewHidden,
+		"model":  SubagentViewHidden,
+		"fast":   SubagentViewHidden,
+		"goal":   SubagentViewHidden,
+	}
+	for _, cmd := range commands {
+		got, ok := want[cmd.Name]
+		if !ok {
+			t.Fatalf("builtin /%s has no expected subagent-view scope in this test", cmd.Name)
+		}
+		if cmd.SubagentView == SubagentViewUnset {
+			t.Fatalf("builtin /%s must declare a subagent-view scope", cmd.Name)
+		}
+		if cmd.SubagentView != got {
+			t.Fatalf("/%s subagent-view scope = %q, want %q", cmd.Name, cmd.SubagentView, got)
+		}
+		delete(want, cmd.Name)
+	}
+	if len(want) > 0 {
+		t.Fatalf("commands in the test table are missing from the registry: %v", want)
+	}
+}
+
+// A subagent's own view lists every command that runs there, and hides the ones
+// that would change the conversation (D4).
+func TestSubagentViewHidesConversationCommands(t *testing.T) {
+	listed := map[string]bool{}
+	for _, cmd := range VisibleWithOptions(SurfaceTUI, DiscoveryOptions{SubagentView: true}) {
+		listed[cmd.Name] = true
+	}
+	for _, hidden := range []string{"new", "resume", "fork", "rename", "init", "clear", "plan", "agent", "model", "fast", "goal"} {
+		if listed[hidden] {
+			t.Fatalf("the subagent view must hide /%s", hidden)
+		}
+	}
+	for _, shown := range []string{"compact", "context", "help", "status", "mcp", "lsp", "permissions", "sandbox", "exit", "diff", "subagents", "skills", "connect", "memories", "migrate"} {
+		if !listed[shown] {
+			t.Fatalf("the subagent view must keep /%s", shown)
+		}
+	}
+}

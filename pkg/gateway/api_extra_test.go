@@ -12,11 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -3320,4 +3323,439 @@ func TestCronSettingsSharedValidationWithTheYAMLEditor(t *testing.T) {
 		raw, _ := os.ReadFile(path)
 		t.Fatalf("a rejected editor write reached the file:\n%s", raw)
 	}
+}
+
+// TestChatMessagesCarriesSubagentCallFacts pins the one transport change the
+// web's subagent cards need: a tool row that answered a subagent_* call
+// carries the call's card facts, derived by the same engine rule the live
+// path used, so a reloaded card says what the live one said.
+func TestChatMessagesCarriesSubagentCallFacts(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.RunRT.DB, "main")
+	if err := s.Sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	statusArgs, err := json.Marshal(map[string]any{"agent_id": "subagent-6e5c"})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+	statusResult, err := json.Marshal(map[string]any{
+		"agent_id": "subagent-6e5c", "agent_kind": "typed", "agent_type": "general-purpose",
+		"task_id": "task-16", "status": "running", "started_at": 1_700_000_000,
+		"execution_id": "exec-1", "title": "计划001 Go车道实施", "run_id": "exec-1",
+	})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	callRow := llm.AssistantMessage(nil, llm.ToolCall{
+		ID:   "call-status-1",
+		Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{
+			Name:      "subagent_status",
+			Arguments: string(statusArgs),
+		},
+	})
+	if _, err := s.Sessions.AppendStructuredMessage(ctx, "s1", "assistant", "", "", state.MessagePartsJSON(callRow, ""), "", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("append call row: %v", err)
+	}
+	answer := llm.ToolResultMessage("call-status-1", llm.Text(string(statusResult)))
+	answer.ToolDisplay = &llm.ToolDisplayState{Body: "card body", Summary: "check 计划001 Go车道实施"}
+	if _, err := s.Sessions.AppendStructuredMessage(ctx, "s1", "tool", string(statusResult), "", state.MessagePartsJSON(answer, string(statusResult)), "", "", "call-status-1", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("append answer row: %v", err)
+	}
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Role         string              `json:"role"`
+		ToolStepID   string              `json:"tool_step_id"`
+		SubagentCall *event.SubagentCall `json:"subagent_call"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	var toolRow *struct {
+		Role         string              `json:"role"`
+		ToolStepID   string              `json:"tool_step_id"`
+		SubagentCall *event.SubagentCall `json:"subagent_call"`
+	}
+	for i := range rows {
+		if rows[i].Role == "tool" {
+			toolRow = &rows[i]
+		}
+	}
+	if toolRow == nil {
+		t.Fatalf("no tool row in %s", rec.Body.String())
+	}
+	if toolRow.ToolStepID != "call-status-1" {
+		t.Fatalf("tool row step id = %q", toolRow.ToolStepID)
+	}
+
+	// The facts on the row are the engine's own derivation over the stored
+	// transcript — exactly what turn.SubagentCallsInTranscript says.
+	stored, err := s.Sessions.ListAllMessages(ctx, "s1", 0)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	want := turn.SubagentCallsInTranscript(stored)["call-status-1"]
+	if want.Verb != "status" || len(want.Tasks) != 1 {
+		t.Fatalf("engine facts = %+v", want)
+	}
+	if toolRow.SubagentCall == nil {
+		t.Fatalf("tool row carries no subagent_call: %s", rec.Body.String())
+	}
+	if !reflect.DeepEqual(*toolRow.SubagentCall, want) {
+		t.Fatalf("row facts = %+v, want the engine's %+v", *toolRow.SubagentCall, want)
+	}
+	// A call the transcript never answered keeps its row free of facts.
+	for _, row := range rows {
+		if row.Role == "assistant" && row.SubagentCall != nil {
+			t.Fatalf("assistant row carries facts: %+v", row.SubagentCall)
+		}
+	}
+}
+
+// exitPlanServer is one gateway with a session parked on an exit-plan
+// approval: the run waits, the action is pending, and the plan file the
+// approval is asking about exists under the server's own state root.
+func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *state.ActionService, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.Open(ctx, filepath.Join(home, "state.sqlite"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s1")
+	runs := &state.RunStore{DB: db}
+	actions := &state.ActionService{DB: db}
+	parkedRun, err := runs.CreateRun(ctx, "s1", "plan the work")
+	require.NoError(t, err)
+	action, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"session_id": "s1"})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, parkedRun.ID, state.Wait{
+		RunID: parkedRun.ID, ActionID: action.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+	s := &Server{
+		Home: home, RunRT: runs, Actions: actions,
+		Sessions: state.NewSessionStore(db, "main"),
+		Runner:   &run.Runner{Deps: &run.Deps{ProjectKey: "proj", AppCfg: cfg}},
+	}
+	require.NoError(t, state.SetPlanForProject(s.stateRoot(), s.projectKey(), "# Plan\n\n1. Ship it."))
+	return s, runs, actions, action.ID, "s1"
+}
+
+// The approval-request endpoint is the web's copy of the TUI's approval
+// overlay: for a parked exit-plan gate it carries the plan itself, the models
+// a review may be handed to, and nothing when no gate is open.
+func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}}},
+	}}}
+	s, runs, _, actionID, _ := exitPlanServer(t, cfg)
+	// One completed review on the conversation: the card shows it above the
+	// choices, in the wire's own units and field names.
+	reviewPayload, err := json.Marshal(event.PlanReviewedPayload{
+		ActionID: actionID, ReviewID: "plan-review:e2e",
+		Provider: "openai", Model: "gpt-5.1",
+		Text: "Verdict: rework.", DurationMs: 125000, Outcome: "done",
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: "plan-review:e2e:reviewed", SessionID: "s1",
+		Type: event.RunEventPlanReviewed, Payload: reviewPayload,
+	})
+	require.NoError(t, err)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, s.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out struct {
+		ActionID         string `json:"action_id"`
+		Kind             string `json:"kind"`
+		PlanText         string `json:"plan_text"`
+		PlanReviewModels []struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Current  bool   `json:"current"`
+		} `json:"plan_review_models"`
+		PlanReviews []struct {
+			Provider   string `json:"provider"`
+			Model      string `json:"model"`
+			Text       string `json:"text"`
+			DurationMs int64  `json:"duration_ms"`
+		} `json:"plan_reviews"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Equal(t, "exit_plan_mode", out.Kind)
+	require.NotEmpty(t, out.ActionID)
+	require.Contains(t, out.PlanText, "1. Ship it.")
+	require.Len(t, out.PlanReviewModels, 1)
+	require.Equal(t, "gpt-5.1", out.PlanReviewModels[0].Model)
+	require.True(t, out.PlanReviewModels[0].Current, "the model in force is the one marked current")
+	require.Len(t, out.PlanReviews, 1)
+	require.Equal(t, "gpt-5.1", out.PlanReviews[0].Model)
+	require.Contains(t, out.PlanReviews[0].Text, "rework")
+	require.Equal(t, int64(125000), out.PlanReviews[0].DurationMs, "durations cross the wire in milliseconds")
+
+	// No gate, no card: the endpoint reports the absence rather than an error.
+	require.NoError(t, state.NewSessionStore(s.RunRT.DB, "main").Ensure(context.Background(), "s-idle", "s-idle"))
+	idleRec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s-idle/approval-request", nil, s.handleSessionApprovalRequest, "id", "s-idle")
+	require.Equal(t, http.StatusNoContent, idleRec.Code)
+}
+
+// The plan-review endpoint validates before it starts anything: the action
+// must be a parked exit-plan approval, and the model must be one the session
+// is configured with. A valid request is accepted for background work and
+// leaves the review's own dispatch record on the conversation.
+func TestActionPlanReviewValidatesBeforeStarting(t *testing.T) {
+	ctx := context.Background()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}}},
+	}}}
+	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
+
+	shellAction, err := actions.CreatePending(ctx, "s1", "shell", map[string]any{"session_id": "s1"})
+	require.NoError(t, err)
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+shellAction.ID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1"}, s.handleActionPlanReview, "id", shellAction.ID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-4o"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	// The review ran to its own ending (this server has no subagent executor,
+	// so it fails) and recorded that ending on the conversation, the way every
+	// review outcome travels.
+	var reviewed []state.SessionEvent
+	require.Eventually(t, func() bool {
+		reviewed, err = runs.ListSessionEventsOfType(ctx, "s1", event.RunEventPlanReviewed, 0)
+		return err == nil && len(reviewed) == 1
+	}, 5*time.Second, 50*time.Millisecond, "the review must close itself on the conversation")
+	require.Contains(t, string(reviewed[0].Payload), actionID)
+}
+
+// newSubagentViewTestServer builds a server whose conversation "sid" exists
+// and whose runner resolves a subagent ledger under the same workspace root,
+// so the subagent-view routes can be exercised end to end.
+func newSubagentViewTestServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(context.Background(), "sid", "sid"))
+	cfg := &appcfg.Root{}
+	cfg.Compact.ModelAutoCompactTokenLimit = 200_000
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main"}}
+	s := &Server{Home: home, RunRT: &state.RunStore{DB: db}, Sessions: sessions, Runner: runner}
+	return s, filepath.Join(home, "workspace")
+}
+
+// seedSubagentRecord writes one subagent record into the runner's ledger, the
+// shape a dispatch leaves behind.
+func seedSubagentRecord(t *testing.T, workspaceRoot, sid, agentKey string) {
+	t.Helper()
+	now := time.Now().Unix()
+	require.NoError(t, agent.AppendHistory(workspaceRoot, agent.HistoryEntry{
+		AgentID:         agentKey,
+		TaskID:          agentKey,
+		SessionID:       sid,
+		RunID:           "run-1",
+		WorkerSessionID: "worker-1",
+		AgentKind:       "typed",
+		AgentType:       "general-purpose",
+		Title:           "network probe",
+		Task:            "answer briefly",
+		Status:          agent.StatusOK,
+		StartedAt:       now,
+		UpdatedAt:       now,
+		FinishedAt:      now,
+	}))
+}
+
+// subagentViewRequest builds a request carrying the router's id/agent params,
+// the way the router's context does.
+func subagentViewRequest(method, sid, agentKey, body string) *http.Request {
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, "/api/chat/sessions/"+sid+"/subagents/"+agentKey, reader)
+	ctx := context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: sid}, {Key: "agent", Value: agentKey}})
+	return req.WithContext(ctx)
+}
+
+// subagentViewRoutes pairs each route's handler with a method and body, so one
+// table drives the foreign/unknown-agent assertions.
+func subagentViewRequests(sid, agentKey string) map[string]*http.Request {
+	return map[string]*http.Request{
+		"input":        subagentViewRequest(http.MethodPost, sid, agentKey, `{"message":"continue"}`),
+		"queued-input": subagentViewRequest(http.MethodPost, sid, agentKey, `{"action":"edit_last"}`),
+		"interrupt":    subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"withdraw":     subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"compact":      subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"context":      subagentViewRequest(http.MethodGet, sid, agentKey, ""),
+		"budget":       subagentViewRequest(http.MethodGet, sid, agentKey, ""),
+	}
+}
+
+func (s *Server) dispatchSubagentViewRoute(name string, w http.ResponseWriter, r *http.Request) {
+	switch name {
+	case "input":
+		s.handleSubagentInput(w, r)
+	case "queued-input":
+		s.handleSubagentQueuedInput(w, r)
+	case "interrupt":
+		s.handleSubagentInterruptSend(w, r)
+	case "withdraw":
+		s.handleSubagentWithdraw(w, r)
+	case "compact":
+		s.handleSubagentCompact(w, r)
+	case "context":
+		s.handleSubagentContext(w, r)
+	case "budget":
+		s.handleSubagentBudget(w, r)
+	}
+}
+
+func TestSubagentViewEndpointsRefuseAForeignConversation(t *testing.T) {
+	s, _ := newSubagentViewTestServer(t)
+	for name, req := range subagentViewRequests("other", "agent-1") {
+		w := httptest.NewRecorder()
+		s.dispatchSubagentViewRoute(name, w, req)
+		require.Equal(t, http.StatusNotFound, w.Code, "%s: %s", name, w.Body.String())
+	}
+}
+
+func TestSubagentViewEndpointsRefuseAnUnknownAgent(t *testing.T) {
+	s, _ := newSubagentViewTestServer(t)
+	for name, req := range subagentViewRequests("sid", "ghost") {
+		w := httptest.NewRecorder()
+		s.dispatchSubagentViewRoute(name, w, req)
+		require.Equal(t, http.StatusNotFound, w.Code, "%s: %s", name, w.Body.String())
+	}
+}
+
+func TestSubagentInputRefusesConversationCommands(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	for _, tc := range []struct {
+		message string
+		code    string
+	}{
+		{"/new", subagentViewCommandCode},
+		{"/rename x", subagentViewCommandCode},
+		{"/compact", useDedicatedEndpointCode},
+		{"/context", useDedicatedEndpointCode},
+	} {
+		req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":`+strconv.Quote(tc.message)+`}`)
+		w := httptest.NewRecorder()
+		s.handleSubagentInput(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, tc.message)
+		var out struct {
+			Code string `json:"code"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		require.Equal(t, tc.code, out.Code, tc.message)
+	}
+}
+
+func TestSubagentInputStartsAnIdleSubagent(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"continue"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Delivery string `json:"delivery"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.Equal(t, string(run.SubagentDeliveryStarted), out.Delivery)
+}
+
+func TestSubagentQueuedInputRecallWithAnEmptyQueue(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"action":"edit_last"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentQueuedInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Accepted bool `json:"accepted"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.False(t, out.Accepted)
+}
+
+func TestSubagentBudgetIsItsOwnWindow(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	req := subagentViewRequest(http.MethodGet, "sid", "agent-1", "")
+	w := httptest.NewRecorder()
+	s.handleSubagentBudget(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out event.TokenBudgetUpdatedPayload
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.Equal(t, agent.RosterKey("agent-1", "general-purpose"), out.AgentID)
+}
+
+// blockingSubagentExecutor holds one execution open until its context is
+// cancelled, so a test can observe a subagent mid-run.
+type blockingSubagentExecutor struct{ entered chan struct{} }
+
+func (b *blockingSubagentExecutor) RunSubagentExec(ctx context.Context, _ run.SubagentExecRequest) (string, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (b *blockingSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+func (b *blockingSubagentExecutor) SubagentExecutionStarting(context.Context, string)     {}
+func (b *blockingSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {
+}
+
+func TestSubagentCompactRefusesWhileRunning(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+	blocking := &blockingSubagentExecutor{entered: make(chan struct{}, 1)}
+	s.Runner.SubagentExecutor = blocking
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"go"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	require.Eventually(t, func() bool {
+		return run.SubagentRunning(s.Runner, "sid", "agent-1")
+	}, 5*time.Second, 20*time.Millisecond, "the user-driven execution must be running")
+
+	compactReq := subagentViewRequest(http.MethodPost, "sid", "agent-1", "")
+	cw := httptest.NewRecorder()
+	s.handleSubagentCompact(cw, compactReq)
+	require.Equal(t, http.StatusConflict, cw.Code, cw.Body.String())
+	var out struct {
+		Code string `json:"code"`
+	}
+	require.NoError(t, json.Unmarshal(cw.Body.Bytes(), &out))
+	require.Equal(t, subagentRunningCode, out.Code)
+
+	// Let the execution finish so the goroutine does not outlive the test.
+	run.InterruptSubagentToSend(s.Runner, "sid", "agent-1")
+	<-time.After(50 * time.Millisecond)
 }

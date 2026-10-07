@@ -141,8 +141,9 @@ func SubagentApprovalResumeContext(
 	}
 	out := tool.WithApprovedActionID(ctx, gate.ActionID)
 	return tool.WithToolApprovalResume(out, &tool.ToolApprovalResumeState{
-		Session:    session,
-		Denied:     resume.Denied,
-		DenyReason: resume.Reason,
+		Session:      session,
+		Denied:       resume.Denied,
+		DenyReason:   resume.Reason,
+		DenyFeedback: resume.Reason,
 	}), nil
 }

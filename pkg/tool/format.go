@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
@@ -19,6 +20,25 @@ import (
 )
 
 const DefaultMaxFormattedBody = 120_000
+
+// DeniedToolDisplayBody is the one sentence a refused tool call shows as its
+// card body — live when the refusal lands, and on every replay of the tool
+// result row that recorded it. feedback is the user's own words from the
+// refusal. It is display only: the model still receives the instruction text
+// the denial result's content carries.
+func DeniedToolDisplayBody(toolName, feedback string) string {
+	switch {
+	case strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode"):
+		if feedback = strings.TrimSpace(feedback); feedback != "" {
+			return feedback
+		}
+		return "(no output)"
+	case strings.EqualFold(strings.TrimSpace(toolName), "request_permissions"):
+		return "The user did not approve the requested permissions"
+	default:
+		return ""
+	}
+}
 
 func NormalizeToolStepForDisplay(evt StepEvent) StepEvent {
 	return evt
@@ -81,10 +101,9 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 		body, truncated = formatWebFetchStep(evt, maxBytes)
 	case "web_search":
 		body, truncated = formatWebSearchStep(evt, maxBytes)
-	case "subagent_fanout":
-		body, truncated = formatFanoutStep(evt, maxBytes)
-	case "subagent_run":
-		body, truncated = formatSubagentRunStep(evt, maxBytes)
+	case "subagent_run", "subagent_fanout", "subagent_send", "subagent_status",
+		"subagent_wait", "subagent_continue", "subagent_close", "subagent_list":
+		body, truncated = formatSubagentCallStep(evt, maxBytes)
 	case "intermediate_tool":
 		body, truncated = formatIntermediateToolStep(evt, maxBytes)
 	case "exit_plan_mode":
@@ -146,6 +165,9 @@ func BuildToolMeta(evt StepEvent) ToolMeta {
 		meta.Category = "skill"
 		meta.SkillName = name
 		meta.SkillPath = path
+	}
+	if call, ok := SubagentCallFromStep(evt); ok {
+		meta.SubagentCall = call
 	}
 	return meta
 }
@@ -224,6 +246,9 @@ func SummarizeToolStep(evt StepEvent) string {
 	invocation := toolInvocationLabel(evt)
 	if invocation == "" {
 		invocation = toolName
+	}
+	if summary, ok := subagentStepSummary(evt, toolName); ok {
+		return summary
 	}
 	switch strings.TrimSpace(evt.Kind) {
 	case StepKindToolStarted, StepKindToolParallelStarted, StepKindToolOutputDelta:
@@ -325,6 +350,103 @@ func SummarizeToolStep(evt StepEvent) string {
 		}
 	}
 	return invocation
+}
+
+// subagentTaskCountLabel is the "<N> [<type>] task(s)" every subagent card
+// header is built from: the type appears when every task runs as the same
+// known type. The summary and the terminal's card header say the same words.
+func subagentTaskCountLabel(call *event.SubagentCall, withType bool) string {
+	n := len(call.Tasks)
+	noun := "tasks"
+	if n == 1 {
+		noun = "task"
+	}
+	if !withType || n == 0 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	first := ""
+	same := true
+	for i, task := range call.Tasks {
+		t := strings.TrimSpace(task.AgentType)
+		if t == "" {
+			same = false
+			break
+		}
+		if i == 0 {
+			first = t
+		} else if t != first {
+			same = false
+			break
+		}
+	}
+	if !same {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %s %s", n, first, noun)
+}
+
+// subagentStepSummary is a subagent_* call's transcript summary: the
+// lowercase form of the card header (plan 013's header table), so the summary
+// line and the card can never disagree about what the call did.
+func subagentStepSummary(evt StepEvent, toolName string) (string, bool) {
+	if !subagentCallTool(toolName) {
+		return "", false
+	}
+	call, _ := SubagentCallFromStep(evt)
+	running := false
+	switch strings.TrimSpace(evt.Kind) {
+	case StepKindToolStarted, StepKindToolParallelStarted, StepKindToolOutputDelta:
+		running = true
+	}
+	// The only case where the running wording differs within one verb: a
+	// send that has not started its agent yet is starting one in the
+	// background; once the facts show the agent running, so does the line.
+	backgroundStarting := false
+	if running && toolName == "subagent_send" && len(call.Tasks) == 1 && call.Tasks[0].Status != "running" {
+		backgroundStarting = true
+	}
+	switch toolName {
+	case "subagent_run", "subagent_fanout":
+		if running {
+			return "running " + subagentTaskCountLabel(call, true), true
+		}
+		return "ran " + subagentTaskCountLabel(call, true), true
+	case "subagent_send":
+		label := subagentTaskCountLabel(call, true)
+		switch {
+		case backgroundStarting:
+			return "starting " + label + " in background", true
+		case running:
+			return "running " + label + " in background", true
+		default:
+			return "ran " + label + " in background", true
+		}
+	case "subagent_continue":
+		if running {
+			return "continuing " + subagentTaskCountLabel(call, true), true
+		}
+		return "continued " + subagentTaskCountLabel(call, true), true
+	case "subagent_status":
+		if running {
+			return "checking " + subagentTaskCountLabel(call, false), true
+		}
+		return "checked " + subagentTaskCountLabel(call, true), true
+	case "subagent_wait":
+		if running {
+			return "waiting for " + subagentTaskCountLabel(call, true), true
+		}
+		return "waited for " + subagentTaskCountLabel(call, true), true
+	case "subagent_close":
+		if running {
+			return "stopping " + subagentTaskCountLabel(call, false), true
+		}
+		return "stopped " + subagentTaskCountLabel(call, true), true
+	default: // subagent_list
+		if running {
+			return "listing tasks", true
+		}
+		return "listed " + subagentTaskCountLabel(call, false), true
+	}
 }
 
 // requestPermissionsCompletionSummary builds the one-line transcript summary
@@ -1987,66 +2109,116 @@ func requestPermissionProfileFromAny(raw any) (safety.RequestPermissionProfile, 
 	return profile, true
 }
 
-// formatFanoutStep formats the subagent_fanout task list as the expanded body.
-// Each task is rendered as a line item with its title and a snippet of the prompt.
-func formatFanoutStep(evt StepEvent, maxBytes int) (string, bool) {
-	tasks := tasksFromInput(evt.Input)
-	if len(tasks) == 0 {
-		return clampBody("_(no tasks)_", maxBytes)
+// formatSubagentCallStep renders a subagent_* call's body from its card facts
+// only: one line per task — icon, name, type, status phrase, and the elapsed
+// time of an ended execution — with a failed or skipped task's reason
+// indented on its own line below. No prompt, no subagent answer and no JSON
+// ever appears. A call about no tasks (an empty list) renders nothing; every
+// surface shows its own "(No output)" placeholder for that.
+func formatSubagentCallStep(evt StepEvent, maxBytes int) (string, bool) {
+	call, ok := SubagentCallFromStep(evt)
+	if !ok || len(call.Tasks) == 0 {
+		return "", false
 	}
-	typeLabel := ""
-	firstType := strings.TrimSpace(tasks[0].SubagentType)
-	allSame := true
-	for _, t := range tasks {
-		if strings.TrimSpace(t.SubagentType) != firstType {
-			allSame = false
-			break
-		}
-	}
-	if allSame && firstType != "" {
-		typeLabel = " (" + firstType + ")"
-	}
-
 	sb := strings.Builder{}
-	sb.WriteString(fmt.Sprintf("%d tasks%s:\n", len(tasks), typeLabel))
-	for i, t := range tasks {
-		title := strings.TrimSpace(t.Title)
-		if title == "" {
-			title = truncateSummary(strings.TrimSpace(t.Prompt))
+	for _, task := range call.Tasks {
+		var line strings.Builder
+		if icon := subagentTaskIcon(task.Status); icon != "" {
+			line.WriteString(icon)
+			line.WriteString(" ")
 		}
-		promptSnippet := strings.TrimSpace(t.Prompt)
-		if len(promptSnippet) > 100 {
-			promptSnippet = llm.TruncateBytes(promptSnippet, 97, "...")
+		name := strings.TrimSpace(task.Title)
+		if name == "" {
+			// A query call names its task by the id it was given until the
+			// record it reads back supplies the title.
+			name = strings.TrimSpace(task.Key)
 		}
-		sb.WriteString(fmt.Sprintf("%d.", i+1))
-		if title != "" {
-			sb.WriteString(" ")
-			sb.WriteString(title)
+		line.WriteString(name)
+		if t := strings.TrimSpace(task.AgentType); t != "" {
+			line.WriteString(" · ")
+			line.WriteString(t)
 		}
-		if promptSnippet != "" && promptSnippet != title {
-			sb.WriteString(" — ")
-			sb.WriteString(promptSnippet)
+		if phrase := subagentTaskStatusPhrase(task); phrase != "" {
+			line.WriteString(" · ")
+			line.WriteString(phrase)
 		}
+		if elapsed := subagentElapsedLabel(task.StartedAt, task.FinishedAt); elapsed != "" {
+			line.WriteString(" · ")
+			line.WriteString(elapsed)
+		}
+		sb.WriteString(strings.TrimSpace(line.String()))
 		sb.WriteString("\n")
+		if task.Error != "" && (task.Status == "failed" || task.Status == "skipped") {
+			sb.WriteString("  ")
+			sb.WriteString(task.Error)
+			sb.WriteString("\n")
+		}
 	}
 	return clampBody(sb.String(), maxBytes)
 }
 
-// formatSubagentRunStep formats the subagent_run expanded body.
-func formatSubagentRunStep(evt StepEvent, maxBytes int) (string, bool) {
-	task := strings.TrimSpace(stringFromAny(evt.Input["task"]))
-	subType := strings.TrimSpace(stringFromAny(evt.Input["subagent_type"]))
-	sb := strings.Builder{}
-	if subType != "" {
-		sb.WriteString(fmt.Sprintf("subagent type: %s\n\n", subType))
+// subagentTaskIcon is the glyph a task's status shows on its line.
+func subagentTaskIcon(status string) string {
+	switch status {
+	case "done":
+		return "✓"
+	case "failed":
+		return "✗"
+	case "cancelled":
+		return "×"
+	case "skipped":
+		return "!"
+	default:
+		return ""
 	}
-	if task != "" {
-		sb.WriteString(task)
+}
+
+// subagentTaskStatusPhrase is the one phrase a task's status becomes on its
+// line. A status the call has not said yet has no phrase.
+func subagentTaskStatusPhrase(task event.SubagentCallTask) string {
+	if task.StopRequested {
+		return "stop requested"
 	}
-	if sb.Len() == 0 {
-		return clampBody("_(no task details)_", maxBytes)
+	if task.TimedOut {
+		return "still running when the wait ended"
 	}
-	return clampBody(sb.String(), maxBytes)
+	switch task.Status {
+	case "waiting":
+		return "waiting"
+	case "running":
+		return "running"
+	case "done":
+		return "done"
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	case "skipped":
+		return "skipped"
+	default:
+		return ""
+	}
+}
+
+// subagentElapsedLabel formats an ended execution's elapsed time the way the
+// terminal's settled tool cards do (pkg/tui render.go's formatDuration);
+// anything without both clocks, or a non-positive span, has none.
+func subagentElapsedLabel(startedAt, finishedAt int64) string {
+	d := time.Duration(finishedAt-startedAt) * time.Second
+	if startedAt <= 0 || finishedAt <= 0 || d <= 0 {
+		return ""
+	}
+	if d < 100*time.Millisecond {
+		return "<0.1s"
+	}
+	sec := d.Seconds()
+	if sec >= 60 {
+		return fmt.Sprintf("%dm%ds", int(sec)/60, int(sec)%60)
+	}
+	if sec >= 10 {
+		return fmt.Sprintf("%ds", int(sec))
+	}
+	return fmt.Sprintf("%.1fs", sec)
 }
 
 func stepStatusLabel(evt StepEvent) string {
@@ -2217,10 +2389,22 @@ func toolInvocationNamedLabel(evt StepEvent) (string, bool) {
 		default:
 			return "intermediate_tool " + action, true
 		}
-	case "subagent_fanout":
-		return fanoutInvocationLabel(evt), true
 	case "subagent_run":
-		return subagentRunLabel(evt), true
+		return "run " + subagentCallName(evt), true
+	case "subagent_fanout":
+		return subagentFanoutLabel(evt), true
+	case "subagent_send":
+		return "send " + subagentCallName(evt), true
+	case "subagent_continue":
+		return "continue " + subagentCallName(evt), true
+	case "subagent_status":
+		return "check " + subagentCallName(evt), true
+	case "subagent_wait":
+		return "wait for " + subagentCallName(evt), true
+	case "subagent_close":
+		return "stop " + subagentCallName(evt), true
+	case "subagent_list":
+		return "list tasks", true
 	case "session_todo", "enter_plan_mode", "exit_plan_mode", "working_set_show", "working_set_pin", "working_set_drop":
 		return tool + " " + compactFields(evt.Input, "action", "id", "path", "reason"), true
 	}
@@ -2244,49 +2428,53 @@ func retrieveOutputInvocationLabel(input map[string]any) string {
 	return label
 }
 
-// fanoutInvocationLabel builds a compact display label for subagent_fanout.
-// Detailed task list goes in the expanded body (formatFanoutStep).
-// Example: "fanout 4 explore tasks"
-func fanoutInvocationLabel(evt StepEvent) string {
-	tasks := tasksFromInput(evt.Input)
-	n := len(tasks)
-	if n == 0 {
-		return "fanout 0 tasks"
+// subagentCallName is what a call's single task goes by in its invocation
+// label: the task's title, or the task id it was given before any record
+// supplied one. It is never truncated — a title is bounded by
+// SubagentTaskTitleMaxBytes already.
+func subagentCallName(evt StepEvent) string {
+	call, ok := SubagentCallFromStep(evt)
+	if !ok || len(call.Tasks) == 0 {
+		return ""
 	}
-	typeLabel := ""
-	firstType := strings.TrimSpace(tasks[0].SubagentType)
-	allSame := true
-	for _, t := range tasks {
-		if strings.TrimSpace(t.SubagentType) != firstType {
-			allSame = false
+	if name := strings.TrimSpace(call.Tasks[0].Title); name != "" {
+		return name
+	}
+	return strings.TrimSpace(call.Tasks[0].Key)
+}
+
+// subagentFanoutLabel names a fanout by its size and, when every task runs
+// as the same known type, that type.
+func subagentFanoutLabel(evt StepEvent) string {
+	call, ok := SubagentCallFromStep(evt)
+	if !ok {
+		return "run 0 tasks"
+	}
+	n := len(call.Tasks)
+	noun := "tasks"
+	if n == 1 {
+		noun = "task"
+	}
+	label := fmt.Sprintf("run %d %s", n, noun)
+	first := ""
+	same := n > 0
+	for i, task := range call.Tasks {
+		t := strings.TrimSpace(task.AgentType)
+		if t == "" {
+			same = false
+			break
+		}
+		if i == 0 {
+			first = t
+		} else if t != first {
+			same = false
 			break
 		}
 	}
-	if allSame && firstType != "" {
-		typeLabel = " " + firstType
+	if same {
+		label = fmt.Sprintf("run %d %s %s", n, first, noun)
 	}
-	return fmt.Sprintf("fanout %d%s tasks", n, typeLabel)
-}
-
-// subagentRunLabel builds a compact display label for subagent_run.
-// Example: "subagent (explore) \"Read project files\""
-func subagentRunLabel(evt StepEvent) string {
-	title := strings.TrimSpace(stringFromAny(evt.Input["title"]))
-	if title == "" {
-		title = strings.TrimSpace(stringFromAny(evt.Input["task"]))
-	}
-	title = truncateSummary(title)
-	subType := strings.TrimSpace(stringFromAny(evt.Input["subagent_type"]))
-	if subType != "" {
-		if title != "" {
-			return fmt.Sprintf("subagent (%s) %s", subType, strconv.Quote(title))
-		}
-		return fmt.Sprintf("subagent (%s)", subType)
-	}
-	if title != "" {
-		return "subagent " + strconv.Quote(title)
-	}
-	return "subagent"
+	return label
 }
 
 // tasksFromInput extracts SubagentTask items from the "tasks" key of a tool input map.
@@ -2323,6 +2511,303 @@ type SubagentTask struct {
 	Title        string `json:"title,omitempty"`
 	Prompt       string `json:"prompt"`
 	SubagentType string `json:"subagent_type,omitempty"`
+}
+
+// SubagentTaskTitleMaxBytes bounds a stored task title. A surface truncates
+// again to whatever its own row is worth; this only keeps a model that answers
+// the title field with a paragraph from putting one into the record.
+const SubagentTaskTitleMaxBytes = 160
+
+// SubagentTaskTitle is the one name a dispatched task goes by everywhere it is
+// shown — its card, its roster row, its tab: the title the dispatching
+// agent gave it, or the first line of its prompt when it gave none, kept
+// to SubagentTaskTitleMaxBytes. Every surface derives the name here, so no two
+// places can call one task by two names.
+func SubagentTaskTitle(title, prompt string) string {
+	name := strings.TrimSpace(title)
+	if name == "" {
+		name = strings.TrimSpace(prompt)
+	}
+	if idx := strings.IndexAny(name, "\r\n"); idx >= 0 {
+		name = strings.TrimSpace(name[:idx])
+	}
+	return llm.TruncateBytes(name, SubagentTaskTitleMaxBytes, "…")
+}
+
+// subagentCallTools are the eight subagent_* tools a card's facts exist for.
+// Any other tool has no SubagentCall.
+func subagentCallTool(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "subagent_run", "subagent_fanout", "subagent_send", "subagent_status",
+		"subagent_wait", "subagent_continue", "subagent_close", "subagent_list":
+		return true
+	default:
+		return false
+	}
+}
+
+// subagentAgentType is the type a task's facts name: the dispatching input's
+// subagent_type, or "fork" when it named none.
+func subagentAgentType(subagentType string) string {
+	if t := strings.TrimSpace(subagentType); t != "" {
+		return t
+	}
+	return "fork"
+}
+
+// subagentRosterKeyOf is agent.RosterKey restated here — the task id, falling
+// back to the agent type — because pkg/tool must not import pkg/agent. Keep
+// the two rules in step.
+func subagentRosterKeyOf(taskID, agentType string) string {
+	if key := strings.TrimSpace(taskID); key != "" {
+		return key
+	}
+	return strings.TrimSpace(agentType)
+}
+
+// subagentTaskStatus maps a status the tools report onto the card's task
+// status. The record values are pkg/agent's HistoryEntry statuses
+// (pkg/agent/subagent_history.go: running/ok/failed/cancelled) and the
+// dispatch tools' "skipped"; pkg/tool spells them as literals because it must
+// not import pkg/agent.
+func subagentTaskStatus(status string) string {
+	switch strings.TrimSpace(status) {
+	case "running":
+		return "running"
+	case "ok":
+		return "done"
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	case "skipped":
+		return "skipped"
+	default:
+		return ""
+	}
+}
+
+// SubagentCallFromStep derives the card facts of a subagent_* call from its
+// input and, once it has settled, from the result the model received. ok is
+// false for any other tool. The facts never carry a prompt or a subagent's
+// answer: those belong in the subagent's own view.
+func SubagentCallFromStep(evt StepEvent) (*event.SubagentCall, bool) {
+	if !subagentCallTool(evt.ToolName) {
+		return nil, false
+	}
+	call := subagentCallFromInput(evt)
+	if strings.TrimSpace(evt.Error) != "" {
+		// The call itself failed before any task could answer. Each task
+		// failed without a reason of its own: the call's error is shown once
+		// on the card header, not copied onto every row.
+		for i := range call.Tasks {
+			call.Tasks[i].Status = "failed"
+			call.Tasks[i].Error = ""
+		}
+		return call, true
+	}
+	if resultText := strings.TrimSpace(stringFromAny(evt.Output["output"])); resultText != "" {
+		var result map[string]any
+		recognized := json.Unmarshal([]byte(resultText), &result) == nil && result != nil &&
+			subagentCallApplyResult(call, strings.TrimSpace(evt.ToolName), result)
+		if !recognized {
+			// The result text is external input — what the model saw, in a
+			// shape this derivation does not know. Keep the input-side tasks
+			// and leave their status unsaid rather than guess. This is the
+			// one fallback here.
+			for i := range call.Tasks {
+				call.Tasks[i].Status = ""
+			}
+		}
+	}
+	return call, true
+}
+
+// subagentCallFromInput states what a call is about while only its input is
+// known: which tasks, named how, waiting on the dispatching tools; keyed by
+// the input's task_id on the query tools.
+func subagentCallFromInput(evt StepEvent) *event.SubagentCall {
+	queryTask := event.SubagentCallTask{Index: 0, Key: firstString(evt.Input, "task_id")}
+	switch strings.TrimSpace(evt.ToolName) {
+	case "subagent_run":
+		return &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{subagentDispatchTask(evt.Input)}}
+	case "subagent_fanout":
+		tasks := tasksFromInput(evt.Input)
+		out := make([]event.SubagentCallTask, 0, len(tasks))
+		for i, t := range tasks {
+			out = append(out, event.SubagentCallTask{
+				Index:     i,
+				Title:     SubagentTaskTitle(t.Title, t.Prompt),
+				AgentType: subagentAgentType(t.SubagentType),
+				Status:    "waiting",
+			})
+		}
+		return &event.SubagentCall{Verb: "run", Tasks: out}
+	case "subagent_send":
+		return &event.SubagentCall{Verb: "send", Tasks: []event.SubagentCallTask{subagentDispatchTask(evt.Input)}}
+	case "subagent_continue":
+		return &event.SubagentCall{Verb: "continue", Tasks: []event.SubagentCallTask{queryTask}}
+	case "subagent_status":
+		return &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{queryTask}}
+	case "subagent_wait":
+		return &event.SubagentCall{Verb: "wait", Tasks: []event.SubagentCallTask{queryTask}}
+	case "subagent_close":
+		return &event.SubagentCall{Verb: "close", Tasks: []event.SubagentCallTask{queryTask}}
+	default: // subagent_list
+		return &event.SubagentCall{Verb: "list"}
+	}
+}
+
+// subagentDispatchTask is the one task a subagent_run or subagent_send input
+// describes, named the way every surface names a dispatched task.
+func subagentDispatchTask(input map[string]any) event.SubagentCallTask {
+	return event.SubagentCallTask{
+		Index:     0,
+		Title:     SubagentTaskTitle(firstString(input, "title"), firstString(input, "task")),
+		AgentType: subagentAgentType(firstString(input, "subagent_type")),
+		Status:    "waiting",
+	}
+}
+
+// subagentCallApplyResult settles a call's tasks from the decoded result —
+// the JSON string the tool returned to the model, which the engine hands to
+// the surfaces as StepEvent.Output["output"]. It reports whether the result
+// was the shape this tool returns; a task the result does not mention keeps
+// what the input said.
+func subagentCallApplyResult(call *event.SubagentCall, tool string, result map[string]any) bool {
+	switch tool {
+	case "subagent_run", "subagent_send":
+		if len(call.Tasks) != 1 {
+			return false
+		}
+		status := strings.TrimSpace(stringFromAny(result["status"]))
+		if status == "" {
+			return false
+		}
+		task := &call.Tasks[0]
+		task.Status = subagentTaskStatus(status)
+		task.Error = strings.TrimSpace(stringFromAny(result["error"]))
+		if key := subagentRosterKeyOf(stringFromAny(result["task_id"]), stringFromAny(result["agent_type"])); key != "" {
+			task.Key = key
+		}
+		if agentType := strings.TrimSpace(stringFromAny(result["agent_type"])); agentType != "" {
+			task.AgentType = agentType
+		}
+		// run_id names the first execution of the dispatch. subagent_run's
+		// result has no start time (its card clock comes from the lifecycle
+		// events); subagent_send's has one and no finish.
+		task.ExecutionID = strings.TrimSpace(stringFromAny(result["run_id"]))
+		if tool == "subagent_send" {
+			task.StartedAt = int64(intFromAny(result["started_at"]))
+		} else {
+			task.FinishedAt = int64(intFromAny(result["finished_at"]))
+		}
+		return true
+	case "subagent_fanout":
+		rawResults, ok := result["results"].([]any)
+		if !ok {
+			return false
+		}
+		// The results carry no task ids; each task's key stays empty and the
+		// dispatch's lifecycle events bind it to its agent.
+		byIndex := make(map[int]map[string]any, len(rawResults))
+		for _, raw := range rawResults {
+			m, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			byIndex[intFromAny(m["index"])] = m
+		}
+		for i := range call.Tasks {
+			m, ok := byIndex[i]
+			if !ok {
+				continue
+			}
+			if boolFromAny(m["ok"]) {
+				call.Tasks[i].Status = "done"
+			} else if errText := strings.TrimSpace(stringFromAny(m["error"])); strings.HasPrefix(errText, "skipped") {
+				call.Tasks[i].Status = "skipped"
+			} else {
+				call.Tasks[i].Status = "failed"
+			}
+			call.Tasks[i].Error = strings.TrimSpace(stringFromAny(m["error"]))
+		}
+		return true
+	case "subagent_status":
+		if len(call.Tasks) != 1 {
+			return false
+		}
+		subagentApplyRecordTask(&call.Tasks[0], result)
+		return true
+	case "subagent_wait", "subagent_continue":
+		if len(call.Tasks) != 1 {
+			return false
+		}
+		record, ok := result["record"].(map[string]any)
+		if !ok {
+			return false
+		}
+		subagentApplyRecordTask(&call.Tasks[0], record)
+		if tool == "subagent_wait" {
+			call.Tasks[0].TimedOut = boolFromAny(result["timed_out"])
+		}
+		return true
+	case "subagent_close":
+		if len(call.Tasks) != 1 {
+			return false
+		}
+		call.Tasks[0].StopRequested = true
+		if record, ok := result["record"].(map[string]any); ok {
+			subagentApplyRecordTask(&call.Tasks[0], record)
+		}
+		return true
+	default: // subagent_list
+		rawRecords, ok := result["records"].([]any)
+		if !ok {
+			return false
+		}
+		tasks := make([]event.SubagentCallTask, 0, len(rawRecords))
+		for i, raw := range rawRecords {
+			record, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			task := event.SubagentCallTask{Index: i}
+			subagentApplyRecordTask(&task, record)
+			tasks = append(tasks, task)
+		}
+		call.Tasks = tasks
+		return true
+	}
+}
+
+// subagentApplyRecordTask fills a task's facts from a HistoryEntry the result
+// carried. The record's fields are read by name; the entry itself is
+// pkg/agent's, spelled out here because pkg/tool must not import pkg/agent.
+// A field the record leaves empty keeps what the input said.
+func subagentApplyRecordTask(task *event.SubagentCallTask, record map[string]any) {
+	taskID := strings.TrimSpace(stringFromAny(record["task_id"]))
+	agentType := strings.TrimSpace(stringFromAny(record["agent_type"]))
+	title := strings.TrimSpace(stringFromAny(record["title"]))
+	taskText := strings.TrimSpace(stringFromAny(record["task"]))
+	if key := subagentRosterKeyOf(taskID, agentType); key != "" {
+		task.Key = key
+	}
+	// The engine stores the title already computed by SubagentTaskTitle;
+	// applying the same rule names a record that predates the field.
+	if name := SubagentTaskTitle(title, taskText); name != "" {
+		task.Title = name
+	}
+	if agentType != "" {
+		task.AgentType = agentType
+	}
+	if status := subagentTaskStatus(stringFromAny(record["status"])); status != "" {
+		task.Status = status
+	}
+	task.Error = strings.TrimSpace(stringFromAny(record["error"]))
+	task.ExecutionID = strings.TrimSpace(stringFromAny(record["execution_id"]))
+	task.StartedAt = int64(intFromAny(record["started_at"]))
+	task.FinishedAt = int64(intFromAny(record["finished_at"]))
 }
 
 func compactExplainableOutput(output map[string]any) map[string]any {

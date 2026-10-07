@@ -1032,8 +1032,12 @@ type blockLineCache struct {
 	width        int
 	cwd          string
 	spinnerPhase int
-	gen          int
-	lines        []string
+	// clockSec is the second a fanout card with a running task clock was last
+	// rendered at: the clock walks once a second, so the same second's render
+	// is reusable and the next one is not.
+	clockSec int
+	gen      int
+	lines    []string
 	// lineAgents attributes each cached line to a subagent, for blocks that
 	// show several at once (fanout). Empty for every other kind, whose
 	// ownership is the frame's own AgentID.

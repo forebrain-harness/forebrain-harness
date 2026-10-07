@@ -116,10 +116,24 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					session = append(session, msg)
 					continue
 				}
-				msg := llm.ToolResultMessage(tc.ID, llm.Text(
+				denial := llm.ToolResultMessage(tc.ID, llm.Text(
 					buildDenialMessage(tc.Function.Name, resumeAssistant.denyReason),
 				))
-				session = append(session, msg)
+				// The refusal has two halves: the instruction text above is
+				// what the model reads, and this display body is what the
+				// card says — live, and on every replay of the row this
+				// result persists to. Without it a replay printed the
+				// model-facing text (and, for a denied plan, the reviews it
+				// carried) as if it were the user's words.
+				denialMeta, _ := json.Marshal(map[string]string{
+					"tool_name": strings.TrimSpace(tc.Function.Name),
+					"status":    "denied",
+				})
+				denial.ToolDisplay = &llm.ToolDisplayState{
+					Body:         tool.DeniedToolDisplayBody(tc.Function.Name, resumeAssistant.denyFeedback),
+					ToolMetaJSON: string(denialMeta),
+				}
+				session = append(session, denial)
 			}
 		} else if rerr := w.replayPendingToolCalls(ctx, &session, resumeAssistant.pendingMsg, resumeAssistant.completedResults, toolMap); rerr != nil {
 			return nil, rerr
@@ -406,6 +420,9 @@ type resumeSnapshot struct {
 	completedResults map[string]llm.Message
 	denied           bool
 	denyReason       string
+	// denyFeedback is the user's own words, the display half of the denial
+	// while denyReason is the model-facing half.
+	denyFeedback string
 }
 
 // consumeResumeSnapshot extracts and clears the resume state, so subsequent
@@ -450,8 +467,9 @@ func (w *toolOrchestrationLLM) consumeResumeSnapshot(ctx context.Context, curren
 	completed := completedToolResultsAfterAssistant(state.Session[pendingIdx+1:], pending)
 	denied := state.Denied
 	denyReason := state.DenyReason
+	denyFeedback := state.DenyFeedback
 	state.Session = nil
-	return resumeSnapshot{session: session, pendingMsg: pending, completedResults: completed, denied: denied, denyReason: denyReason}, true
+	return resumeSnapshot{session: session, pendingMsg: pending, completedResults: completed, denied: denied, denyReason: denyReason, denyFeedback: denyFeedback}, true
 }
 
 // buildDenialMessage constructs the tool result message injected when the user

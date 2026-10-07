@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -317,6 +318,10 @@ func (f *fakeApprovalRuns) GetWaitForRun(_ context.Context, runID string) (*stat
 	return f.wait, nil
 }
 
+func (f *fakeApprovalRuns) ListSessionEventsOfType(context.Context, string, string, int) ([]state.SessionEvent, error) {
+	return nil, nil
+}
+
 type fakeApprovalActions struct{ action *state.Action }
 
 func (f *fakeApprovalActions) Get(context.Context, string) (*state.Action, error) {
@@ -574,4 +579,102 @@ func TestShellApprovalNarrativeCarriesThePlanModeJustification(t *testing.T) {
 	if req.ToolInputJSON == "" {
 		t.Fatal("the overlay needs the payload to render the approval")
 	}
+}
+
+// planReviewEventDB opens one state database with a session row, for the
+// plan-review record tests: the conversation's event log is where a review's
+// result lives, so the tests read it back exactly as another process would.
+func planReviewEventDB(t *testing.T) (*sql.DB, *state.RunStore, string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	runs := &state.RunStore{DB: db}
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "session-1", "session-1"))
+	return db, runs, "session-1"
+}
+
+// appendPlanReviewed stores one plan_reviewed event the way RunPlanReview's
+// publisher does.
+func appendPlanReviewed(t *testing.T, runs *state.RunStore, sessionID, actionID, reviewID, outcome, text string) {
+	t.Helper()
+	payload, err := json.Marshal(event.PlanReviewedPayload{
+		ActionID: actionID, ReviewID: reviewID,
+		Provider: "openai", Model: "gpt-5.1",
+		Text: text, DurationMs: 125000, Outcome: outcome,
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: "plan-review:" + reviewID + ":reviewed", SessionID: sessionID,
+		Type: event.RunEventPlanReviewed, Payload: payload,
+	})
+	require.NoError(t, err)
+}
+
+// The reviews a pending approval collected live on the conversation, not in
+// the process that asked for them: only the completed ones are reviews, and a
+// second reader over the same database — another surface, a restarted
+// process — sees the same list in the same order.
+func TestPlanReviewsLiveOnTheConversation(t *testing.T) {
+	t.Parallel()
+
+	db, runs, sessionID := planReviewEventDB(t)
+	appendPlanReviewed(t, runs, sessionID, "act-1", "rev-failed", "failed", "")
+	appendPlanReviewed(t, runs, sessionID, "act-1", "rev-done", "done", "Verdict: rework.")
+	appendPlanReviewed(t, runs, sessionID, "act-2", "rev-other", "done", "Another action's review.")
+
+	results, err := PlanReviewsForAction(context.Background(), runs, sessionID, "act-1")
+	require.NoError(t, err)
+	require.Len(t, results, 1, "a failed review is a report, not a review")
+	require.Equal(t, Model{Provider: "openai", Model: "gpt-5.1"}, results[0].Model)
+	require.Equal(t, "Verdict: rework.", results[0].Text)
+	require.Equal(t, 125000*time.Millisecond, results[0].Duration)
+
+	// A fresh store over the same database is what another process reads.
+	other := &state.RunStore{DB: db}
+	again, err := PlanReviewsForAction(context.Background(), other, sessionID, "act-1")
+	require.NoError(t, err)
+	require.Equal(t, results, again)
+}
+
+// A pending exit-plan request carries everything its card needs from the
+// shared layer: the plan file under the session's own scope, the models a
+// review may be handed to, and the reviews the conversation already holds.
+func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	run, err := runs.CreateRun(ctx, sessionID, "plan the work")
+	require.NoError(t, err)
+	action, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, run.ID, state.Wait{
+		RunID: run.ID, ActionID: action.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+	appendPlanReviewed(t, runs, sessionID, action.ID, "rev-done", "done", "Verdict: rework.")
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForProject(stateRoot, "proj", "# Plan\n\n1. Ship it."))
+
+	gate := &PendingApprovalGate{
+		Runs: runs, Actions: actions,
+		PlanScope: func(context.Context, string) (string, string) { return stateRoot, "proj" },
+		ReviewModels: func() []PlanReviewModelOption {
+			return []PlanReviewModelOption{
+				{Provider: "openai", Model: "gpt-5.1", Current: true},
+				{Provider: "zhipuai", Model: "glm-5.3-flash"},
+			}
+		},
+	}
+	req, err := gate.Pending(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.Equal(t, state.PlanPathForProject(stateRoot, "proj"), req.PlanFilePath)
+	require.Len(t, req.PlanReviewModels, 2)
+	require.True(t, req.PlanReviewModels[0].Current)
+	require.Len(t, req.PlanReviews, 1)
+	require.Equal(t, "gpt-5.1", req.PlanReviews[0].Model)
+	require.Contains(t, req.PlanReviews[0].Text, "rework")
 }

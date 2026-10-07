@@ -367,6 +367,53 @@ func TestCanonicalRunEventsFromWSEmitsTurnDiffEvent(t *testing.T) {
 	}
 }
 
+// TestCanonicalRunEventsKeepTheSubagentCallFacts pins the conversion hop a
+// live web request's tool step takes: the ws "step" op becomes the canonical
+// run event the page's cards are built from, and the subagent_* card facts
+// (plan 012) ride its tool_meta. A rebuild that drops them leaves the web
+// rendering a failed subagent_run as a generic tool card instead of the
+// subagent card the terminal shows from the same event.
+func TestCanonicalRunEventsKeepTheSubagentCallFacts(t *testing.T) {
+	events := canonicalRunEventsFromWS(wsServerMsg{
+		Op: "step",
+		Data: map[string]any{
+			"kind":        event.RunEventToolCompleted,
+			"step_id":     "call-1",
+			"description": "tool subagent_run",
+			"tool_name":   "subagent_run",
+			"error":       "unexpected EOF",
+			"tool_meta": map[string]any{
+				"tool_name":  "subagent_run",
+				"status":     "failed",
+				"invocation": "run Summarize README.md",
+				"subagent_call": map[string]any{
+					"verb": "run",
+					"tasks": []any{map[string]any{
+						"index":      0,
+						"title":      "Summarize README.md",
+						"agent_type": "general-purpose",
+						"status":     "failed",
+					}},
+				},
+			},
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	var completed event.ToolCallCompletedPayload
+	if err := json.Unmarshal(events[0].Payload, &completed); err != nil {
+		t.Fatalf("decode completed payload: %v", err)
+	}
+	call := completed.ToolMeta.SubagentCall
+	if call == nil {
+		t.Fatalf("canonical tool event lost the subagent_call facts: %+v", completed.ToolMeta)
+	}
+	if call.Verb != "run" || len(call.Tasks) != 1 || call.Tasks[0].AgentType != "general-purpose" || call.Tasks[0].Status != "failed" {
+		t.Fatalf("subagent_call facts came back wrong: %+v", call)
+	}
+}
+
 func TestRunEventBusDeliversOnlyToTheBoundSession(t *testing.T) {
 	bus := newRunEventBus()
 	mine := make(chan event.RunEvent, 4)
@@ -1214,7 +1261,18 @@ func TestHandleChatWSHandsQueuedMessagesBackBeforeTheTurnEnds(t *testing.T) {
 				require.NoError(t, json.Unmarshal(evt.Payload, released))
 			}
 			require.NotNil(t, released, "the turn ended without handing back the message queued for it")
-			require.Equal(t, []event.ReleasedInput{{Text: "and then this", Attachments: []string{"file-1"}, MentionImages: []string{"shots/a.png"}}}, released.Inputs)
+			want := []event.ReleasedInput{{Text: "and then this", Attachments: []string{"file-1"}, MentionImages: []string{"shots/a.png"}}}
+			if tc.fail {
+				// A failed turn is interrupted: the message returns to the
+				// composer instead of running as the next turn.
+				require.Equal(t, want, released.Inputs)
+				require.Empty(t, released.Next)
+			} else {
+				// A completed turn runs the message next: the engine's boundary
+				// decision says so, and the client only obeys.
+				require.Equal(t, want, released.Next)
+				require.Empty(t, released.Inputs)
+			}
 			require.Zero(t, s.runController().Active())
 		})
 	}
@@ -1490,5 +1548,60 @@ func TestCanonicalRunEndingsCarryPlanFacts(t *testing.T) {
 		var got event.RunPlanFacts
 		require.NoError(t, json.Unmarshal(raw, &got))
 		require.Equal(t, facts, got, op)
+	}
+}
+
+// TestPrimaryFooterBudgetIsUnchangedByTheEngineMove pins the web's budget
+// numbers across the same engine move the terminal's footer went through: the
+// payload the socket pushes after a turn must keep these exact values for a
+// session whose last assistant response measured a known usage on a known
+// model. A change here is a change to what the page's gauge says, not just to
+// where the computation lives.
+func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	defer db.Close()
+	sess := state.NewSessionStore(db, "main")
+	_, _ = sess.Append(ctx, "session-1", "user", "first")
+	_, _ = sess.AppendStructuredMessage(
+		ctx,
+		"session-1",
+		"assistant",
+		"answer",
+		"msg-1",
+		state.ContentPartsJSON(nil, "answer"),
+		"glm-5.3",
+		`{"input_tokens":150000,"output_tokens":2500}`,
+		"",
+		"",
+		state.MessageExecTiming{},
+	)
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
+		}},
+	}}}
+	srv := &Server{Sessions: sess, Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}
+	msg, ok := srv.tokenBudgetWSMessageFromSession(ctx, "req-1", "run-1", "session-1")
+	if !ok {
+		t.Fatalf("expected a budget ws message")
+	}
+	payload, ok := msg.Data.(event.TokenBudgetUpdatedPayload)
+	if !ok {
+		t.Fatalf("expected typed payload, got %T", msg.Data)
+	}
+	want := event.TokenBudgetUpdatedPayload{
+		Model:                "glm-5.3",
+		TokenUsage:           152500,
+		PercentLeft:          83,
+		ContextWindow:        1000000,
+		EffectiveWindow:      1000000,
+		AutoCompactThreshold: 900000,
+	}
+	if payload != want {
+		t.Fatalf("budget payload = %+v, want %+v", payload, want)
 	}
 }

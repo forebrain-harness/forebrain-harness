@@ -52,14 +52,26 @@
                  it: its work belongs to that agent, not to the conversation the
                  user is having. -->
             <Transition name="forebrain-agent-view">
-              <SubagentConversation
-                v-if="activeSubagent"
-                :key="activeSubagent.agentId"
-                :record="activeSubagent"
-                :fold-state="browseStateFor(activeSubagent.agentId).folds"
-                @back="openAgentView('')"
-                @fold-change="updateAgentFold(activeSubagent.agentId, $event)"
-              />
+              <div v-if="activeSubagent" :key="activeSubagent.agentId" class="space-y-4">
+                <!-- /context in this view, drawn with the conversation's own
+                     panel so the two reports are read the same way. -->
+                <ContextDebugPanel
+                  v-if="subagentContextTarget === activeSubagent.agentId"
+                  :data="subagentContextDebug"
+                  :loading="subagentContextLoading"
+                  :error="null"
+                  @refresh="openSubagentContext(activeSubagent.agentId)"
+                />
+                <SubagentConversation
+                  :record="activeSubagent"
+                  :fold-state="browseStateFor(activeSubagent.agentId).folds"
+                  :call-tasks="subagentCallTasks"
+                  :now="subagentNow"
+                  @back="openAgentView('')"
+                  @open-agent="openAgentView"
+                  @fold-change="updateAgentFold(activeSubagent.agentId, $event)"
+                />
+              </div>
             </Transition>
               <!-- Keep the primary DOM mounted while an agent view is open.
                    Its collapsibles therefore return exactly as the user left
@@ -183,10 +195,33 @@
                             :content="block.text"
                           />
                           <ToolCallCard
-                            v-else-if="block.kind === 'tool'"
+                            v-else-if="block.kind === 'tool' && !block.step.subagentCall"
                             class="my-2"
                             :step="block.step"
                             :default-open="false"
+                          />
+                          <!-- A subagent_* call is one card: the call's own
+                               facts and the tasks it dispatched, checked,
+                               waited for or stopped — its prompt and its
+                               result JSON stay out of the conversation. -->
+                          <SubagentCallCard
+                            v-else-if="block.kind === 'tool'"
+                            class="my-2"
+                            :step="block.step"
+                            :live="subagentCallTasks.get(block.step.stepId)"
+                            :now="subagentNow"
+                            @open="openAgentView"
+                          />
+                          <!-- An execution dispatched with no call of its own
+                               — a plan review, a runtime dispatch — is the
+                               same card, keyed by its execution. -->
+                          <SubagentCallCard
+                            v-else-if="block.kind === 'subagent'"
+                            class="my-2"
+                            :step="block.step"
+                            :live="subagentCallTasks.get(block.stepId)"
+                            :now="subagentNow"
+                            @open="openAgentView"
                           />
                           <ApprovalCard
                             v-else-if="block.kind === 'approval'"
@@ -222,20 +257,6 @@
                         <div class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
                       </div>
                       <MessageResponse v-else-if="String(msg.content ?? '').trim()" :key="`msg-content-${msg.id ?? idx}`" :content="msg.content" />
-                      <!-- A subagent's work is not part of this conversation,
-                           but the fact that one ran is: the card says so, and
-                           opens its view. -->
-                      <div
-                        v-if="msg.role === 'assistant' && msg.subagentCards?.length"
-                        class="mt-3 space-y-1.5"
-                      >
-                        <SubagentCard
-                          v-for="(card, cardIdx) in msg.subagentCards"
-                          :key="`${msg.id ?? idx}-subagent-${cardIdx}`"
-                          :card="card"
-                          @open="openAgentView"
-                        />
-                      </div>
                       <div
                         v-if="msg.role === 'assistant' && msg.turnDiffs?.length"
                         class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-3"
@@ -246,7 +267,7 @@
                           :total-lines="msg.turnDiffs.reduce((s, d) => s + (d.added ?? 0) + (d.deleted ?? 0), 0)"
                         />
                       </div>
-                      <RunWorkedLine :message="msg" />
+                      <RunWorkedLine :line="workedLineOf(msg, t)" />
                       <ul v-if="msg.role === 'user' && msg.attachments?.length" class="mt-2 flex flex-wrap gap-2"
                         :aria-label="t('chat.messageAttachments')">
                         <li v-for="(attachment, index) in msg.attachments" :key="attachment.fileId ?? attachment.path ?? index">
@@ -437,17 +458,21 @@
             </AlertDescription>
           </Alert>
           <div
-            v-if="runtimeStatusLabel"
+            v-if="runtimeStatusLabel.label"
             class="mb-3 flex items-center gap-3 text-[11px] uppercase tracking-[0.28em] text-[var(--forebrain-muted-text)]"
             aria-live="polite"
           >
             <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
-            <span class="min-w-0 text-center font-mono leading-relaxed">{{ runtimeStatusLabel }}</span>
+            <span class="flex min-w-0 items-center gap-3 font-mono leading-relaxed tracking-normal normal-case">
+              {{ runtimeStatusLabel.label }}
+              <PlanProgressSegments :plan="runtimeStatusLabel.plan" />
+            </span>
             <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
           </div>
           <PendingActionsPanel
             :session-id="sessionId"
             :version="pendingActionsVersion"
+            :context-used-percent="contextUsedPercent"
             can-open-agent
             @open-agent="openAgentView"
           />
@@ -457,7 +482,7 @@
               <AlertTitle>{{ composerNotice.title }}</AlertTitle>
               <AlertDescription class="whitespace-pre-line">{{ composerNoticeDetail }}</AlertDescription>
             </Alert>
-            <AutoContinueBanner :state="autoContinue" @cancel="cancelAutoContinue" />
+            <AutoContinueBanner :state="activeAutoContinue" @cancel="cancelAutoContinue(activeAgentView)" />
             <!-- The recommendation card owns its own goodbye: the answer's
                  result line stays up briefly, then the card closes itself. -->
             <LspRecommendationCard
@@ -468,7 +493,7 @@
             />
             <div class="relative">
               <PendingInputQueuePopover
-                :preview="pendingInputPreview"
+                :preview="composerPendingInput"
                 @edit-last-queued="restoreLastQueuedMessage"
                 @interrupt-run="interruptAndSendPendingSteers"
               />
@@ -483,8 +508,8 @@
                     @queue-follow-up="markNextSubmissionAsQueued"
                     @edit-last-queued="restoreLastQueuedMessage"
                     @interrupt-run="interruptAndSendPendingSteers"
-                    @typed="cancelAutoContinue"
-                    @escape="cancelAutoContinue" />
+                    @typed="cancelAutoContinue(activeAgentView)"
+                    @escape="cancelAutoContinue(activeAgentView)" />
                 </PromptInputBody>
                 <PromptInputFooter>
                   <div class="relative flex min-w-0 flex-1 items-center gap-1" ref="modeMenuRef">
@@ -559,7 +584,7 @@ import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon,
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import AgentViewTabs from '@/components/chat/AgentViewTabs.vue'
-import SubagentCard from '@/components/chat/SubagentCard.vue'
+import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import SubagentConversation from '@/components/chat/SubagentConversation.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
@@ -604,6 +629,7 @@ import ForebrainPromptTextarea, { type BotOption } from '@/components/ForebrainP
 import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
 import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
 import PendingActionsPanel from '@/components/chat/PendingActionsPanel.vue'
+import PlanProgressSegments from '@/components/chat/PlanProgressSegments.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
@@ -615,7 +641,7 @@ import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterViewTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, workedLineOf, type ChatMessage, type PlanBlock } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, type ChatMessage, type PlanBlock } from '@/composables/useChatStream'
 import { useLastSession } from '@/composables/useLastSession'
 import { useWorkbench } from '@/composables/useWorkbench'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
@@ -624,9 +650,9 @@ import { useChatSessions } from '@/composables/useChatSessions'
 import { useSessionInfo, sessionHeaderTitle } from '@/composables/useSessionInfo'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { parseJsonCamelCase } from '@/lib/case'
-import { getErrorMessage, forebrainApi, type AgentRosterRow, type ChatAttachmentRecord, type SessionContextDebug, type SessionCostSummary, type SubagentHistoryRecord, type ToolAuditRow } from '@/lib/api'
+import { getErrorMessage, forebrainApi, type AgentRosterRow, type ChatAttachmentRecord, type SessionContextDebug, type SessionCostSummary, type SlashCommandRecord, type SubagentHistoryRecord, type ToolAuditRow } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'
-import { uploadSubmission, type PickedFile } from '@/lib/composerSubmission'
+import { uploadSubmission, type ComposerSubmission, type PickedFile } from '@/lib/composerSubmission'
 import { buildContextDebugModel, compactTokenCount } from '@/lib/contextDebug'
 import { useI18n } from '@/locales'
 const { lastSessionId } = useLastSession()
@@ -681,17 +707,25 @@ function markNextSubmissionAsQueued() {
 }
 
 async function restoreLastQueuedMessage() {
-  const submission = await editLastQueuedMessage()
+  const agentId = activeAgentView.value
+  const submission = agentId ? await recallSubagentInput(agentId) : await editLastQueuedMessage()
   if (!submission) return
   promptRef.value?.restoreSubmission(submission)
 }
 
-function interruptAndSendPendingSteers() {
+async function interruptAndSendPendingSteers() {
+  if (activeAgentView.value) {
+    // A subagent's own queue: interrupt it precisely to send what waits.
+    await interruptSubagentToSend(activeAgentView.value)
+    return
+  }
   sendPendingSteersAfterInterrupt()
 }
 
 const inputPlaceholder = computed(() => {
-  return t('chat.placeholder')
+  // A subagent's view has its own composer, so its placeholder says who the
+  // message is for.
+  return activeAgentView.value ? t('chat.subagentComposerPlaceholder') : t('chat.placeholder')
 })
 
 const { sessions, fetchSessions } = useChatSessions()
@@ -735,14 +769,26 @@ const {
   historyLoading,
   historyError,
   subagents,
+  subagentCallTasks,
+  subagentNow,
   runtimeStatus,
   mcpStatus,
-  autoContinue,
+  autoContinueForView,
   cancelAutoContinue,
   lspRecommendation,
   contextSignals,
   pendingActionsVersion,
   pendingInputPreview,
+  subagentPendingInput,
+  subagentReturnedDraft,
+  takeSubagentReturnedDraft,
+  sendToSubagent,
+  recallSubagentInput,
+  interruptSubagentToSend,
+  withdrawSubagentInput,
+  compactSubagent,
+  loadSubagentContext,
+  loadSubagentBudget,
   returnedDraft,
   takeReturnedDraft,
   takeReturnedNotice,
@@ -887,18 +933,109 @@ const activeSubagent = computed(() =>
   subagents.value.find((entry) => entry.agentId === activeAgentView.value) ?? null,
 )
 
+// The continuation the composer's own view waits on: a subagent's while its
+// view is open, the conversation's otherwise. One composer, two owners.
+const activeAutoContinue = computed(() => autoContinueForView(activeAgentView.value))
+
+// The queue preview the composer shows: a subagent's own while its view is
+// open, the conversation's otherwise. One composer, two owners.
+const composerPendingInput = computed(() => (
+  activeAgentView.value
+    ? (subagentPendingInput.value[activeAgentView.value] ?? emptyPendingInputPreview())
+    : pendingInputPreview.value
+))
+
+// Composer drafts belong to the view they were typed in: switching between the
+// conversation and a subagent's own view saves one and restores the other
+// (plan 007's rule, kept here the same way).
+const viewDrafts = ref<Record<string, ComposerSubmission>>({})
+
+// The commands a subagent's own view may run, by name and class, from the
+// server's own classification (plan 007's D4). Skill commands act on the
+// subagent; the rest belong to or are hidden from its view.
+const subagentSlashRecords = ref<SlashCommandRecord[]>([])
+
+// /context for a subagent's view, drawn with the conversation's own panel.
+const subagentContextTarget = ref('')
+const subagentContextDebug = ref<SessionContextDebug | null>(null)
+const subagentContextLoading = ref(false)
+
+/** The command name a slash line begins with, lowercase; '' when it is not one. */
+function slashCommandName(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('/')) return ''
+  return (trimmed.slice(1).split(/\s+/, 1)[0] ?? '').toLowerCase()
+}
+
 function markAgentSeen(agentId: string) {
   const entry = subagents.value.find((row) => row.agentId === agentId)
   if (!entry) return
   seenAgentActivity.value = { ...seenAgentActivity.value, [agentId]: entry.updatedSeq }
 }
 
+/**
+ * The composer's own draft, whole: its text and everything it attached. The
+ * composer keeps its state inside itself, so the draft is read back through
+ * the textarea it renders — the alternative, an accessor on that component, is
+ * outside this plan's file scope.
+ */
+function takeComposerDraft(): ComposerSubmission {
+  const root = (promptRef.value as unknown as { $el?: HTMLElement } | null)?.$el
+  const text = root?.querySelector('textarea')?.value ?? ''
+  const attached = promptRef.value?.takeAttached() ?? { attachments: [], mentionImages: [] }
+  return { text, attachments: attached.attachments, mentionImages: attached.mentionImages }
+}
+
+/** Puts a view's draft back into the composer, text and attachments alike. */
+function applyComposerDraft(draft: ComposerSubmission) {
+  const root = (promptRef.value as unknown as { $el?: HTMLElement } | null)?.$el
+  const el = root?.querySelector('textarea')
+  if (el) {
+    el.value = draft.text
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  if (draft.attachments.length || draft.mentionImages.length) {
+    promptRef.value?.restoreSubmission({ text: '', attachments: draft.attachments, mentionImages: draft.mentionImages })
+  }
+}
+
+/** A message the boundary gave back to this view's composer, if any is waiting. */
+function applySubagentReturnedDraft(agentId: string) {
+  const draft = takeSubagentReturnedDraft(agentId)
+  if (draft) promptRef.value?.restoreSubmission(draft)
+}
+
+/** The commands a subagent's own view may run, from the server's classification. */
+async function refreshSubagentSlashCommands() {
+  try {
+    const res = await forebrainApi.slashCommands('webchat', '', { subagentView: true })
+    subagentSlashRecords.value = Array.isArray(res.records) ? res.records : []
+  } catch {
+    subagentSlashRecords.value = []
+  }
+}
+
 function openAgentView(agentId: string) {
+  const from = activeAgentView.value
+  if (from !== agentId) {
+    // The draft belongs to the view it was typed in; the composer carries the
+    // new view's own draft, text and attachments alike.
+    viewDrafts.value = { ...viewDrafts.value, [from]: takeComposerDraft() }
+    applyComposerDraft(viewDrafts.value[agentId] ?? { text: '', attachments: [], mentionImages: [] })
+  }
   recordCurrentBrowseState()
   activeAgentView.value = agentId
   if (agentId) markAgentSeen(agentId)
   scheduleBrowsePersist()
   void restoreCurrentBrowseState()
+  if (agentId) {
+    void loadSubagentBudget(agentId)
+    void refreshSubagentSlashCommands()
+    applySubagentReturnedDraft(agentId)
+  } else {
+    subagentContextTarget.value = ''
+    subagentContextDebug.value = null
+  }
 }
 
 function openSubagentHistory(record: SubagentHistoryRecord) {
@@ -933,11 +1070,27 @@ watch(activeSubagent, () => {
   void restoreCurrentBrowseState()
 })
 
+/**
+ * Esc in a subagent's own view (D1): take a just-sent message back before it
+ * answered; otherwise interrupt it to send what is queued behind it;
+ * otherwise leave for the conversation. The same three meanings, in the same
+ * order, as the terminal.
+ */
+async function handleAgentViewEscape() {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  const withdrawn = await withdrawSubagentInput(agentId)
+  if (withdrawn.length) {
+    for (const submission of withdrawn) promptRef.value?.restoreSubmission(submission)
+    return
+  }
+  if (await interruptSubagentToSend(agentId)) return
+  openAgentView('')
+}
+
 function handleAgentViewKeydown(evt: KeyboardEvent) {
-  // Escape returns to the conversation, the way it leaves a subagent's screen
-  // in the terminal.
   if (evt.key === 'Escape' && activeAgentView.value) {
-    openAgentView('')
+    void handleAgentViewEscape()
   }
 }
 
@@ -954,7 +1107,6 @@ const modeLabel = computed(() => {
   return t('chat.modeAgent')
 })
 const runtimeStatusLabel = computed(() => formatRuntimeStatusLabel(runtimeStatus.value, t))
-
 // A goal's checks are reached from the goal's own lines, one per round; they
 // take no tab of their own, except the one being read.
 const agentTabRecords = computed(() => subagents.value.filter((record) => (
@@ -1025,6 +1177,22 @@ const sessionContextSummary = computed(() => {
     ? `${t('chat.contextEstimate')} ${compactTokenCount(model.estimate)} · ${t('chat.contextRemaining')} ${compactTokenCount(model.remaining)} · ${t('chat.contextEvictions')} ${model.evictionCount}`
     : t('chat.noContextDebug')
   return { signalLabel, signalClass, line }
+})
+
+/**
+ * How full the context window is, from the newest usage number the
+ * conversation holds — the same figure the footer's gauge is drawn from, and
+ * what the exit-plan card's clear-context choice says it would free. Null
+ * before the first turn reports a budget.
+ */
+const contextUsedPercent = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const left = messages.value[i]?.tokenBudget?.percentLeft
+    if (typeof left === 'number' && Number.isFinite(left)) {
+      return Math.max(0, Math.min(100, 100 - left))
+    }
+  }
+  return null
 })
 
 async function loadSessionContext() {
@@ -1324,7 +1492,6 @@ function messageHasBubble(msg: ChatMessage): boolean {
     msg.blocks?.length ||
     msg.planUpdates?.length ||
     msg.planBlocks?.length ||
-    msg.subagentCards?.length ||
     msg.turnDiffs?.length ||
     workedLineOf(msg, t).label,
   )
@@ -1361,7 +1528,108 @@ function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
   return t.startsWith('image/') || t === 'application/pdf' || /\.(png|jpe?g|gif|webp|pdf)$/i.test(name)
 }
 
+/**
+ * Sends what the composer submitted in a subagent's own view to that subagent.
+ * Everything typed there belongs to the subagent: ordinary text runs its next
+ * execution, a skill command is sent to it, /compact and /context act on it,
+ * a command that acts on the conversation runs there, and the ones hidden
+ * answer with one sentence — plan 007's D4, in this surface.
+ */
+async function handleSubagentSubmit(message: { text: string; files?: { url?: string; filename?: string; mediaType?: string; file?: File }[] }) {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  const text = (message.text ?? '').trim()
+  const files = message.files ?? []
+  const attachedByComposer = promptRef.value?.hasAttached() ?? false
+  if (!text && files.length === 0 && !attachedByComposer) return
+  // A shell line is the conversation's, never the subagent's.
+  if (text.startsWith('!')) {
+    composerNotice.value = { title: t('chat.messageNotSent'), detail: t('chat.subagentViewCommand') }
+    return
+  }
+  if (text.startsWith('/')) {
+    const name = slashCommandName(text)
+    if (name === 'compact') {
+      await compactActiveSubagent()
+      return
+    }
+    if (name === 'context') {
+      await openSubagentContext(agentId)
+      return
+    }
+    const record = subagentSlashRecords.value.find((row) => String(row.name ?? '').toLowerCase() === name)
+    if (record && record.category !== 'skill') {
+      // Runs exactly as it does in the conversation's view: the reply lands
+      // there, where the command acted.
+      nextSubmissionDisposition.value = 'steer'
+      await send(text, { sessionId: sessionId.value ?? undefined, activeInputDisposition: undefined })
+      return
+    }
+    if (!record) {
+      composerNotice.value = { title: t('chat.messageNotSent'), detail: t('chat.subagentViewCommand') }
+      return
+    }
+    // A skill command: sent raw; the gateway expands it for this subagent.
+  }
+  const attached = promptRef.value?.takeAttached() ?? { attachments: [], mentionImages: [] }
+  composerNotice.value = null
+  const queued = nextSubmissionDisposition.value === 'queue'
+  nextSubmissionDisposition.value = 'steer'
+  const picked: PickedFile[] = files
+    .filter((f) => isAllowedAttachmentType(f.mediaType ?? '', f.filename ?? ''))
+    .flatMap((f) => (f.file ? [{ file: f.file, filename: f.filename || f.file.name, mediaType: f.mediaType || f.file.type }] : []))
+  let uploadSession: Promise<string> | null = null
+  const sessionForUpload = () => {
+    uploadSession ??= sessionId.value
+      ? Promise.resolve(sessionId.value)
+      : forebrainApi.chatSessionCreate().then((created) => created.id)
+    return uploadSession
+  }
+  const { submission, unsent, failure } = await uploadSubmission(text, attached, picked,
+    async (file) => forebrainApi.filesUpload(file, await sessionForUpload()))
+  if (failure) {
+    composerNotice.value = {
+      title: t('chat.messageNotSent'),
+      detail: `${t('chat.uploadFailed', { name: failure.filename })}\n${getErrorMessage(failure.error)}`,
+    }
+    promptRef.value?.restoreSubmission(submission, unsent)
+    return
+  }
+  await sendToSubagent(agentId, submission, queued)
+}
+
+/** /compact in a subagent's view: its own context, refused while it runs. */
+async function compactActiveSubagent() {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  const outcome = await compactSubagent(agentId)
+  if (outcome === 'running') {
+    composerNotice.value = { title: t('chat.messageNotSent'), detail: t('chat.subagentCompactRunning') }
+  }
+}
+
+/** /context in a subagent's view, drawn with the conversation's own panel. */
+async function openSubagentContext(agentId: string) {
+  const id = String(agentId ?? '').trim()
+  if (!id) return
+  subagentContextTarget.value = id
+  subagentContextLoading.value = true
+  subagentContextDebug.value = null
+  try {
+    const data = await loadSubagentContext(id)
+    if (subagentContextTarget.value === id) subagentContextDebug.value = data
+  } finally {
+    if (subagentContextTarget.value === id) subagentContextLoading.value = false
+  }
+}
+
 async function handleSubmit(message: { text: string; files?: { url?: string; filename?: string; mediaType?: string; file?: File }[] }) {
+  // The composer belongs to whichever view is on screen: a subagent's own view
+  // sends to that subagent, never to the conversation (rule 9).
+  if (activeAgentView.value) {
+    await handleSubagentSubmit(message)
+    return
+  }
   const text = (message.text ?? '').trim()
   const files = message.files ?? []
   const attachedByComposer = promptRef.value?.hasAttached() ?? false
@@ -1409,6 +1677,15 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
     activeInputDisposition,
   })
 }
+
+// A message the boundary handed back to a subagent's composer while that view
+// is open goes straight back into it; when the view is elsewhere it waits under
+// its id until the view opens (openAgentView restores it).
+watch(subagentReturnedDraft, () => {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  applySubagentReturnedDraft(agentId)
+}, { deep: true })
 
 // A message that never became a turn — withdrawn before it began, handed back
 // by a run that ended before taking it, or not taken by a run that had just

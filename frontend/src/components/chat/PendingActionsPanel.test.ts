@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
-import { forebrainApi, type ActionRecord } from '@/lib/api'
+import { forebrainApi, type ActionRecord, type SessionApprovalRequest } from '@/lib/api'
+import { MessageResponse } from '@repo/elements/message'
 import { setLocale } from '@/locales'
 import PendingActionsPanel from './PendingActionsPanel.vue'
 
@@ -107,6 +108,56 @@ describe('PendingActionsPanel', () => {
     expect(requester).toBeDefined()
     await requester!.trigger('click')
     expect(wrapper.emitted('open-agent')).toEqual([['child-1']])
+    wrapper.unmount()
+  })
+
+  it('draws the exit-plan card with the plan, the four choices, and the review path', async () => {
+    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([
+      action('a-exit', 'exit_plan_mode', { session_id: 's1' }),
+    ])
+    vi.spyOn(forebrainApi, 'sessionApprovalRequest').mockResolvedValue({
+      actionId: 'a-exit',
+      kind: 'exit_plan_mode',
+      planText: '# Plan\n\n1. Ship it.',
+      planReviewModels: [
+        { provider: 'openai', model: 'gpt-5.1', current: true },
+        { provider: 'zhipuai', model: 'glm-5.3-flash' },
+      ],
+      planReviews: [],
+      planReviewActive: null,
+    } as SessionApprovalRequest)
+    const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
+    const review = vi.spyOn(forebrainApi, 'actionPlanReview').mockResolvedValue(undefined as never)
+    const wrapper = mount(PendingActionsPanel, { props: { sessionId: 's1', version: 0 } })
+    await flushPromises()
+
+    const card = wrapper.find('[data-testid="exit-plan-approval"]')
+    expect(card.exists()).toBe(true)
+    expect(card.text()).toContain('Exit plan mode')
+    expect(card.text()).not.toContain('a-exit')
+    // The plan body travels through the same markdown component the
+    // conversation renders with; its on-screen text is proven by the e2e.
+    const planBox = card.find('[data-testid="exit-plan-text"]')
+    expect(planBox.exists()).toBe(true)
+    expect(planBox.findComponent(MessageResponse).props('content')).toContain('1. Ship it.')
+    // The four choices, in the overlay's order.
+    const choice = (label: string) => card.findAll('button').find((b) => b.text().includes(label))
+    expect(choice('Approve and clear context')).toBeDefined()
+    expect(choice('Keep planning')).toBeDefined()
+
+    await choice('Approve and clear context')!.trigger('click')
+    await flushPromises()
+    expect(approve).toHaveBeenCalledWith('a-exit', { clearContext: true })
+
+    // The review path opens the model list; the current model is marked.
+    await choice('Ask another model to review')!.trigger('click')
+    await flushPromises()
+    const modelRow = card.findAll('[data-testid="plan-review-model"]').find((b) => b.text().includes('gpt-5.1'))
+    expect(modelRow).toBeDefined()
+    expect(modelRow!.text()).toContain('current')
+    await modelRow!.trigger('click')
+    await flushPromises()
+    expect(review).toHaveBeenCalledWith('a-exit', { provider: 'openai', model: 'gpt-5.1' })
     wrapper.unmount()
   })
 })

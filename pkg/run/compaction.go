@@ -266,10 +266,10 @@ func CompactionService(r *Runner, sessions *state.SessionStore) assembly.Service
 	if r == nil {
 		return out
 	}
-	out.CompactLLM = r.ContextCompactLLM
+	out.CompactLLM = r.agentCompactClientFor
 	out.ModelProvider = r.ContextCompactModelProvider
 	out.CompactLLMForModel = r.ContextCompactLLMForModel
-	out.PrimaryModel = func(ctx context.Context) (string, string) { return r.effectiveModelFor(ctx) }
+	out.PrimaryModel = func(ctx context.Context) (string, string) { return r.agentModelFor(ctx) }
 	if r.AppCfg != nil {
 		out.Prompt = r.AppCfg.Compact.Prompt
 		out.RemoteCompaction = r.AppCfg.Compact.UseRemoteCompaction()
@@ -304,11 +304,23 @@ func (r *Runner) conversationSummarizer(sessionID string) assembly.ConversationS
 	tools := main.Tools()
 	return func(ctx context.Context, instruction llm.Message) (*llm.Result, error) {
 		ctx = llm.WithAgentSessionID(ctx, sessionID)
-		history, err := transcript.history(ctx, sessionID)
+		// A fork runs on the system frozen at its birth (decision D6), so its
+		// head is that system and its tools are the fork runtime's — the same
+		// prefix its continuation replays. Everything else starts at the
+		// conversation's own head, whose system the typed wrappers substitute
+		// per request.
+		session := transcript
+		headTools := tools
+		head := transcript.head(ctx)
+		if frozen, ok, ferr := transcript.store.SessionPromptState(ctx, sessionID, forkSystemPromptKey); ferr == nil && ok && strings.TrimSpace(frozen) != "" {
+			session = transcriptSession{store: transcript.store, systemPrompt: frozen, resolver: r.FileResolver}
+			head = []llm.Message{llm.SystemMessage(frozen)}
+			headTools = r.LoadedTools()
+		}
+		history, err := session.history(ctx, sessionID)
 		if err != nil {
 			return nil, err
 		}
-		messages := append(transcript.head(ctx), history...)
-		return chain.Execute(ctx, append(messages, instruction), tools)
+		return chain.Execute(ctx, append(append(head, history...), instruction), headTools)
 	}
 }

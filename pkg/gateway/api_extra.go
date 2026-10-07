@@ -112,10 +112,22 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/subagent-history", s.handleSessionSubagentHistory)
 	chatSessions.Get("/:id/todos", s.handleSessionTodos)
 	chatSessions.Get("/:id/plan-md", s.handleSessionPlanMarkdown)
+	chatSessions.Get("/:id/approval-request", s.handleSessionApprovalRequest)
 	chatSessions.Get("/:id/mode", s.handleSessionMode)
 	chatSessions.Get("/:id", s.handleChatSession)
 	chatSessions.Post("/:id/compact", s.handleSessionCompact)
 	chatSessions.Post("/:id/rewind-last", s.handleSessionRewindLast)
+	// A subagent's own view talks to that subagent through these — the same
+	// semantics the terminal's subagent view has (plan 007), decided in the
+	// engine (plan 005): send, recall, Esc's two meanings, compact, context,
+	// and the budget it opens with.
+	chatSessions.Post("/:id/subagents/:agent/input", s.handleSubagentInput)
+	chatSessions.Post("/:id/subagents/:agent/queued-input", s.handleSubagentQueuedInput)
+	chatSessions.Post("/:id/subagents/:agent/interrupt-send", s.handleSubagentInterruptSend)
+	chatSessions.Post("/:id/subagents/:agent/withdraw", s.handleSubagentWithdraw)
+	chatSessions.Post("/:id/subagents/:agent/compact", s.handleSubagentCompact)
+	chatSessions.Get("/:id/subagents/:agent/context", s.handleSubagentContext)
+	chatSessions.Get("/:id/subagents/:agent/budget", s.handleSubagentBudget)
 
 	api.Post("/internal/worker-event", s.handleWorkerInternalEvent)
 
@@ -125,6 +137,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	actions.Post("/:id/answer", s.handleActionsAnswer)
 	actions.Post("/:id/approve", s.handleActionsApprove)
 	actions.Post("/:id/deny", s.handleActionsDeny)
+	actions.Post("/:id/plan-review", s.handleActionPlanReview)
 
 	projects := api.Group("/v1/projects")
 	projects.Get("/", s.handleProjectsList)
@@ -426,6 +439,9 @@ func (s *Server) handleSlashCommands(w http.ResponseWriter, r *http.Request) {
 	opts := turn.DiscoveryOptions{
 		DuringRun:        parseBoolQuery(r, "during_run"),
 		SideConversation: parseBoolQuery(r, "side"),
+		// The list a subagent's own view offers: the commands that act on the
+		// conversation are dropped (plan 007's D4 classification).
+		SubagentView: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "subagent"),
 	}
 	type slashOptionsPayload struct {
 		DuringRun        bool `json:"during_run"`
@@ -1259,7 +1275,15 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		RunID          string              `json:"run_id,omitempty"`
 		Origin         string              `json:"origin,omitempty"`
 		Attachments    []chatAttachment    `json:"attachments,omitempty"`
+		// SubagentCall is a tool row's card facts: what the subagent_* call
+		// it answered was about, derived once by the engine so the reloaded
+		// card says what the live one said. Transport only; the derivation
+		// lives in pkg/turn.
+		SubagentCall *event.SubagentCall `json:"subagent_call,omitempty"`
 	}
+	// The card facts of every subagent_* call the transcript answered, keyed
+	// by tool call id, from the same derivation the live path applied.
+	subagentCalls := turn.SubagentCallsInTranscript(turns)
 	visibleIndexes := make([]int, 0, len(turns))
 	for i, turn := range turns {
 		if strings.EqualFold(strings.TrimSpace(turn.Role), "system") {
@@ -1340,6 +1364,9 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			m.Origin = state.MessageOrigin(t.PartsJSON)
 			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
 				m.MemoryCitation = citation
+			}
+			if call, answered := subagentCalls[strings.TrimSpace(t.ToolStepID)]; answered {
+				m.SubagentCall = &call
 			}
 			out = append(out, m)
 		}
@@ -1605,8 +1632,15 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	payload := assembly.CompactResultPayload(res)
 	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(compactResultBody(res))
+}
+
+// compactResultBody is the JSON a finished manual compaction answers with,
+// shared by the conversation's /compact and a subagent's, so both read the
+// same.
+func compactResultBody(res assembly.Result) map[string]any {
+	payload := assembly.CompactResultPayload(res)
 	body := map[string]any{
 		"session_id": res.SessionID, "trigger": payload.Trigger, "strategy": payload.Strategy,
 		"reason": payload.Reason, "summary_source": payload.SummarySource, "summary": payload.Summary,
@@ -1618,7 +1652,444 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 	if res.Strategy == "local" {
 		body["warning"] = assembly.WarningMessage
 	}
-	_ = json.NewEncoder(w).Encode(body)
+	return body
+}
+
+// The stable codes a subagent-view request is refused with. The page turns
+// each into one sentence in the viewer's language; the gateway never writes a
+// sentence for the page.
+const (
+	subagentRunningCode      = "subagent_running"
+	subagentViewCommandCode  = "subagent_view_command"
+	useDedicatedEndpointCode = "use_dedicated_endpoint"
+)
+
+// writeSubagentViewError answers a refused subagent-view request with its
+// stable code, so the page can say the sentence in the viewer's language.
+func writeSubagentViewError(w http.ResponseWriter, code, message string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": message, "code": code})
+}
+
+// subagentRoute resolves the conversation and the agent key a subagent-view
+// route names. A conversation this primary agent does not own is not found
+// here (the tenancy the conversation's own routes enforce).
+func (s *Server) subagentRoute(w http.ResponseWriter, r *http.Request) (sid, agentKey string, ok bool) {
+	params := ParamsFromContext(r.Context())
+	sid = strings.TrimSpace(params.ByName("id"))
+	agentKey = strings.TrimSpace(params.ByName("agent"))
+	if sid == "" || agentKey == "" {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return "", "", false
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	return sid, agentKey, true
+}
+
+// subagentRunner resolves the engine runner for the conversation a
+// subagent-view route names; nil when none is available.
+func (s *Server) subagentRunner(ctx context.Context, sid string) *run.Runner {
+	if s == nil {
+		return nil
+	}
+	return s.runnerFor(ctx, sid)
+}
+
+// subagentNamed reports whether this conversation names the agent key. The
+// recall, withdraw and interrupt engine calls answer false for a key that is
+// not there, so their routes check tenancy here — the same lookup the engine's
+// channel resolution does, another conversation's subagent being not found.
+func (s *Server) subagentNamed(sid, agentKey string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok, err := agent.GetMerged(s.stateRoot(), agent.Query{SessionID: strings.TrimSpace(sid), TaskID: strings.TrimSpace(agentKey)})
+	return err == nil && ok
+}
+
+// subagentConversationSurface is how a message the user sends a subagent from
+// the web is framed: the same approval and tool-step seams a detached turn
+// installs (subagent steps carry their roster key on the context, so the step
+// hook publishes them as canonical events itself), and the queue's boundary
+// decision travels back as the conversation's queued_input_released event.
+func (s *Server) subagentConversationSurface(sid string) run.SubagentSurface {
+	sid = strings.TrimSpace(sid)
+	return run.SubagentSurface{
+		Frame: func(ctx context.Context) context.Context {
+			return s.withDetachedGatewayApprovalHooks(ctx, sid, "")
+		},
+		OnBoundary: func(agentKey string, send, restore []run.Input) {
+			s.publishSubagentQueuedInputReleased(sid, agentKey, send, restore)
+		},
+	}
+}
+
+// publishSubagentQueuedInputReleased hands a subagent's queue boundary decision
+// to every open page of the conversation: what runs next is sent, the rest go
+// back to that subagent's composer.
+func (s *Server) publishSubagentQueuedInputReleased(sid, agentKey string, send, restore []run.Input) {
+	if s == nil || s.RunEvents() == nil || (len(send) == 0 && len(restore) == 0) {
+		return
+	}
+	payload := event.QueuedInputReleasedPayload{AgentID: strings.TrimSpace(agentKey)}
+	for _, in := range restore {
+		payload.Inputs = append(payload.Inputs, releasedInput(in))
+	}
+	for _, in := range send {
+		payload.Next = append(payload.Next, releasedInput(in))
+	}
+	if err := s.RunEvents().Publish(context.Background(), event.NewRunEvent("", "", strings.TrimSpace(sid), event.RunEventQueuedInputReleased, payload, time.Now())); err != nil {
+		slog.Error("publish subagent queued input release", "session_id", sid, "agent_id", agentKey, "err", err)
+	}
+}
+
+// publishSubagentPendingInputUpdated reports a subagent's queue as its own view
+// shows it, tagged with its roster key so it lands there and nowhere else.
+func (s *Server) publishSubagentPendingInputUpdated(ctx context.Context, sid, agentKey string, runner *run.Runner) {
+	if s == nil || s.RunEvents() == nil || runner == nil {
+		return
+	}
+	preview := subagentInputPreview(runner, sid, agentKey)
+	payload := event.PendingInputUpdatedPayload{
+		AgentID:        strings.TrimSpace(agentKey),
+		PendingSteers:  preview.PendingSteers,
+		RejectedSteers: preview.RejectedSteers,
+		QueuedMessages: preview.QueuedMessages,
+	}
+	if err := s.RunEvents().Publish(ctx, event.NewRunEvent("", "", strings.TrimSpace(sid), event.RunEventPendingInputUpdated, payload, time.Now())); err != nil {
+		slog.Error("publish subagent pending input", "session_id", sid, "agent_id", agentKey, "err", err)
+	}
+}
+
+// subagentInputPreview is a subagent's queued input as its own view shows it.
+func subagentInputPreview(r *run.Runner, sid, agentKey string) turn.PendingInputPreview {
+	p := run.SubagentInputPreview(r, sid, agentKey)
+	return turn.PendingInputPreview{PendingSteers: p.Steers, RejectedSteers: p.Rejected, QueuedMessages: p.FollowUp}
+}
+
+// subagentInputRequest is the body of POST .../subagents/:agent/input.
+type subagentInputRequest struct {
+	Message       string   `json:"message"`
+	Attachments   []string `json:"attachments"`
+	MentionImages []string `json:"mention_images"`
+	// Mode is "steer" (the default) or "follow_up": where the message goes when
+	// the subagent is already running.
+	Mode string `json:"mode"`
+}
+
+func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req subagentInputRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	in := run.Input{Text: strings.TrimSpace(req.Message), Attachments: req.Attachments, MentionImages: req.MentionImages}
+	if strings.HasPrefix(in.Text, "/") {
+		if code, ok := s.subagentCommandInput(&in); !ok {
+			writeSubagentViewError(w, code, "this command belongs to the conversation", http.StatusBadRequest)
+			return
+		}
+	}
+	if in.Text == "" && len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
+		http.Error(w, "empty message", http.StatusBadRequest)
+		return
+	}
+	mode := run.TurnInputModeSteer
+	if reqMode := strings.ToLower(strings.TrimSpace(req.Mode)); reqMode == "follow_up" || reqMode == "queue" {
+		mode = run.TurnInputModeFollowUp
+	}
+	delivery, err := run.SendToSubagent(r.Context(), runner, s.subagentConversationSurface(sid), sid, agentKey, in, mode)
+	if err != nil {
+		if errors.Is(err, run.ErrSubagentNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
+	writeJSON(w, map[string]any{"delivery": string(delivery), "preview": subagentInputPreview(runner, sid, agentKey)})
+}
+
+// subagentCommandInput turns a slash line the user typed in a subagent's view
+// into what is sent. A skill command is expanded through the shared slash path
+// and its trusted selection rides along; a command that belongs to the
+// conversation is refused with its stable code (the caller writes it).
+func (s *Server) subagentCommandInput(in *run.Input) (code string, ok bool) {
+	fields := strings.Fields(strings.TrimSpace(in.Text))
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	switch name {
+	case "compact", "context":
+		return useDedicatedEndpointCode, false
+	}
+	if _, isBuiltin := turn.Find(name); isBuiltin {
+		// A built-in that acts on the conversation (hidden, or global) is not
+		// sent here; the page runs it in the main view instead.
+		return subagentViewCommandCode, false
+	}
+	outcome := parseSlashCommandWithOptions(s, "", "webchat", in.Text, turn.Context{}, nil)
+	if strings.TrimSpace(outcome.SkillName) == "" && strings.TrimSpace(outcome.SkillPath) == "" {
+		return subagentViewCommandCode, false
+	}
+	in.SkillName = strings.TrimSpace(outcome.SkillName)
+	in.SkillPath = strings.TrimSpace(outcome.SkillPath)
+	if expanded := strings.TrimSpace(outcome.ContinueInput); expanded != "" {
+		in.Text = expanded
+	}
+	return "", true
+}
+
+func (s *Server) handleSubagentQueuedInput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	var req runInputRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.Action), "edit_last") {
+		http.Error(w, "unsupported action", http.StatusBadRequest)
+		return
+	}
+	item, accepted := run.RecallSubagentInput(runner, sid, agentKey)
+	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
+	if !accepted {
+		writeJSON(w, map[string]any{"accepted": false, "preview": subagentInputPreview(runner, sid, agentKey)})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"accepted":       true,
+		"message":        item.Text,
+		"attachments":    item.Attachments,
+		"mention_images": item.MentionImages,
+		"preview":        subagentInputPreview(runner, sid, agentKey),
+	})
+}
+
+func (s *Server) handleSubagentInterruptSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	interrupted := run.InterruptSubagentToSend(runner, sid, agentKey)
+	writeJSON(w, map[string]any{"interrupted": interrupted})
+}
+
+func (s *Server) handleSubagentWithdraw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	inputs, withdrawn := run.WithdrawSubagentInput(runner, sid, agentKey)
+	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
+	msgs := make([]map[string]any, 0, len(inputs))
+	for _, in := range inputs {
+		msgs = append(msgs, map[string]any{"message": in.Text, "attachments": in.Attachments, "mention_images": in.MentionImages})
+	}
+	writeJSON(w, map[string]any{"withdrawn": msgs, "any": withdrawn, "preview": subagentInputPreview(runner, sid, agentKey)})
+}
+
+func (s *Server) handleSubagentCompact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if s == nil || s.Sessions == nil {
+		http.Error(w, "session store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent compact unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	subCtx, workerSessionID, err := run.SubagentCompactTarget(r.Context(), runner, sid, agentKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, run.ErrSubagentRunning):
+			writeSubagentViewError(w, subagentRunningCode, "the subagent is running", http.StatusConflict)
+		case errors.Is(err, run.ErrSubagentNotFound):
+			http.NotFound(w, r)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+	svc := run.CompactionService(runner, s.Sessions)
+	res, err := svc.ManualCompactSession(subCtx, workerSessionID, "manual")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, compactResultBody(res))
+}
+
+func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	workerSessionID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if s.Env.Tools() == nil {
+		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.subagentContextBody(r.Context(), workerSessionID, provider, model, used, explicitLimit))
+}
+
+// subagentContextBody is /context for a subagent: the same report the
+// conversation's own /context returns, fed the subagent's worker session, its
+// model and its own occupancy, so the page draws it with the same component.
+func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provider, model string, used, explicitLimit int) map[string]any {
+	workerSessionID = strings.TrimSpace(workerSessionID)
+	body := map[string]any{}
+	var compactions []event.ContextCompactedPayload
+	if s.RunRT != nil {
+		read, err := turn.ConversationCompactions(ctx, s.RunRT, workerSessionID)
+		if err == nil {
+			compactions = read
+		}
+	}
+	if st := s.Env.Tools(); st != nil {
+		snapshot, ok := st.GetContextSnapshotForRun(workerSessionID, tool.RunIDFromContext(ctx), compactions)
+		if ok && len(snapshot) > 0 {
+			_ = json.Unmarshal(snapshot, &body)
+			if body == nil {
+				body = map[string]any{}
+			}
+		}
+	}
+	gauge := turn.ContextGaugeOf(provider, model, used, explicitLimit)
+	body["model_context_tokens"] = gauge.WindowTokens
+	body["available_window_tokens"] = gauge.WindowTokens
+	body["remaining_context_tokens"] = gauge.UsedTokens
+	body["percent_left"] = gauge.PercentLeft
+	if s.Sessions != nil {
+		if boundaryID, part, err := s.Sessions.LatestCompactBoundary(ctx, workerSessionID); err == nil && boundaryID > 0 {
+			body["window_number"] = part.WindowNumber
+			body["active_boundary_id"] = strings.TrimSpace(formatOptionalBoundaryRowID(boundaryID))
+			body["active_window_id"] = strings.TrimSpace(part.WindowID)
+		}
+	}
+	if timeline, ok := body["context_timeline"].([]any); ok && len(timeline) > 0 {
+		body["compact_audit"] = map[string]any{
+			"session_id": workerSessionID,
+			"run_id":     tool.RunIDFromContext(ctx),
+			"timeline":   timeline,
+		}
+		body["compact_diff"] = buildCompactDiff(timeline)
+	}
+	if spills, ok := body["tool_result_spills"].([]any); ok {
+		body["tool_result_spill_count"] = len(spills)
+	}
+	return body
+}
+
+func (s *Server) handleSubagentBudget(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "budget unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	payload, ok := run.SubagentContextBudget(r.Context(), runner, sid, agentKey)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, payload)
 }
 
 func (s *Server) handleSessionRewindLast(w http.ResponseWriter, r *http.Request) {
@@ -2184,6 +2655,212 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(a)
 }
 
+// handleSessionApprovalRequest answers "what is this session parked on" with
+// the typed approval request the web's exit-plan card is drawn from — the
+// same request the TUI's overlay is prompted with, plan text, review models
+// and collected reviews included. Nothing parked is not an error: 204.
+func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
+		return
+	}
+	owned, ownershipErr := s.sessionOwned(r.Context(), sid)
+	if ownershipErr != nil {
+		http.Error(w, ownershipErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	req, err := s.approvalGate().Pending(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if req == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// The plan the gate is asking about, read from the path the shared gate
+	// resolved: the card has to show the document itself, not a pointer to it.
+	planText := ""
+	if path := strings.TrimSpace(req.PlanFilePath); path != "" {
+		if raw, readErr := os.ReadFile(path); readErr == nil {
+			planText = string(raw)
+		}
+	}
+	models := make([]planReviewModelWire, 0, len(req.PlanReviewModels))
+	for _, option := range req.PlanReviewModels {
+		models = append(models, planReviewModelWire{
+			Provider: option.Provider, Model: option.Model, Label: option.Label, Current: option.Current,
+		})
+	}
+	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
+	for _, note := range req.PlanReviews {
+		reviews = append(reviews, planReviewNoteWire{
+			Provider: note.Provider, Model: note.Model, Text: note.Text, DurationMs: note.Duration.Milliseconds(),
+		})
+	}
+	out := sessionApprovalRequestWire{
+		ActionID: req.ActionID, Kind: req.ActionKind, ToolName: req.ToolName,
+		PlanText: planText, PlanReviewModels: models, PlanReviews: reviews,
+	}
+	// A review in flight is a fact of the conversation's events, the only
+	// source every surface and every replica can agree on without sharing
+	// memory: a started review whose closing event has not arrived.
+	if active, open := turn.ActivePlanReview(r.Context(), s.RunRT, sid, req.ActionID); open {
+		out.PlanReviewActive = &planReviewInFlightWire{
+			ReviewID: active.ReviewID, Provider: active.Provider, Model: active.Model,
+			Label: active.Label, AgentID: active.AgentID,
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// The approval-request wire shapes: the card reads these fields alone, in the
+// snake_case the gateway's API speaks, with durations in milliseconds.
+type sessionApprovalRequestWire struct {
+	ActionID         string                  `json:"action_id"`
+	Kind             string                  `json:"kind"`
+	ToolName         string                  `json:"tool_name"`
+	PlanText         string                  `json:"plan_text"`
+	PlanReviewModels []planReviewModelWire   `json:"plan_review_models"`
+	PlanReviews      []planReviewNoteWire    `json:"plan_reviews"`
+	PlanReviewActive *planReviewInFlightWire `json:"plan_review_active"`
+}
+
+type planReviewModelWire struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Label    string `json:"label,omitempty"`
+	Current  bool   `json:"current,omitempty"`
+}
+
+type planReviewNoteWire struct {
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Text       string `json:"text"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+}
+
+type planReviewInFlightWire struct {
+	ReviewID string `json:"review_id"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+	Label    string `json:"label,omitempty"`
+	AgentID  string `json:"agent_id,omitempty"`
+}
+
+// handleActionPlanReview starts one second-opinion review of a parked
+// exit-plan approval, in the background, through the same shared flow the
+// TUI's overlay uses. The request is accepted before the review runs: the
+// review's own events are its progress and its result, on the conversation.
+func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Actions == nil {
+		http.Error(w, "actions disabled", http.StatusServiceUnavailable)
+		return
+	}
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	act, err := s.Actions.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, state.ErrActionNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if act == nil || act.Status != state.ActionPending || !strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") {
+		http.Error(w, "plan review requires a pending exit_plan_mode approval", http.StatusBadRequest)
+		return
+	}
+	sid := strings.TrimSpace(act.SessionID)
+	if sid != "" {
+		owned, ownershipErr := s.sessionOwned(r.Context(), sid)
+		if ownershipErr != nil {
+			http.Error(w, ownershipErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	// The model must be one the session is configured with: a reviewer has to
+	// run on credentials the session already has.
+	model := turn.Model{Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
+	allowed := false
+	for _, option := range s.approvalGate().ReviewModels() {
+		if option.MatchesSelection(model.Provider, model.Model) {
+			allowed = true
+			model.Label = option.Label
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "the model is not configured for this session", http.StatusBadRequest)
+		return
+	}
+	runID := ""
+	if s.RunRT != nil {
+		runID, _, _ = s.RunRT.FindRunByAction(r.Context(), id)
+	}
+	// The review's tool steps and its own tool approvals flow through the same
+	// detached seams a resumed gateway run uses, so the reviewer's cards and
+	// gates reach every page watching the conversation.
+	detached := s.withDetachedGatewayApprovalHooks(
+		process.AgentContextForProject(context.Background(), s.stateRoot(), sid, s.projectKey()), sid, runID,
+	)
+	// A session without a transcript store reviews without a task context
+	// rather than handing the flow a typed-nil store.
+	var transcripts turn.PlanReviewTranscripts
+	if sessions := s.Sessions; sessions != nil {
+		transcripts = sessions
+	}
+	review := turn.PlanReviewRun{
+		ActionID: id, Model: model, SessionID: sid, RunID: runID,
+		StateRoot: s.stateRoot(), ProjectKey: s.projectKey(),
+		Transcripts: transcripts,
+		Reviewer: &process.PlanReviewer{
+			Runner: s.Runner, Model: model, Config: s.modelConfig(),
+			StepHook: tool.StepHookFromContext(detached, nil),
+			Approve:  tool.SubagentApprovalHookFromContext(detached, nil),
+		},
+		Publish: func(ctx context.Context, evt event.RunEvent) error {
+			bus := s.RunEvents()
+			if bus == nil {
+				return nil
+			}
+			return bus.Publish(ctx, evt)
+		},
+	}
+	go func() { _ = turn.RunPlanReview(detached, review) }()
+	w.WriteHeader(http.StatusAccepted)
+}
+
 func (s *Server) clearContextForAction(ctx context.Context, actionID string) {
 	if s.Actions == nil {
 		return
@@ -2408,7 +3085,11 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	if q, _, ok := s.runController().Queue(runID); ok && q.Runtime() != nil {
 		ctx2 = run.WithTurnInputRuntime(ctx2, q.Runtime())
 	}
-	resume := turn.BuildApprovalResume(action, w.SessionSnapshot, w.ToolName, clearedContext)
+	// Same wiring as every other surface: a denied exit-plan approval carries
+	// the reviews it collected, composed here from the conversation's events
+	// — the same guidance the TUI's resume composes — while the user's own
+	// words stay what everything displays.
+	resume := turn.BuildApprovalResumeWithPlanReviews(ctx, s.RunRT, action, w.SessionSnapshot, w.ToolName, clearedContext)
 	if resume.Approved {
 		ctx2 = tool.WithApprovedActionID(ctx2, actionID)
 	}
@@ -2424,9 +3105,10 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 			}
 		}
 		resumeState := &tool.ToolApprovalResumeState{
-			Session:    resume.Session,
-			Denied:     resume.Denied,
-			DenyReason: resume.Reason,
+			Session:      resume.Session,
+			Denied:       resume.Denied,
+			DenyReason:   resume.Reason,
+			DenyFeedback: resume.Feedback,
 		}
 		// The durable fence is crossed by the replay itself, not here: this
 		// path still has prompt assembly, pre-hooks and possibly a compaction
