@@ -1188,6 +1188,22 @@ func (m *viewModel) insertBeforeLast(match func(Frame) bool, f Frame) *viewBlock
 	}
 	return m.append(f)
 }
+
+// endsOnError reports whether the transcript's last message is an error
+// saying content. Statuses after it ("Worked for …", an auto-continue notice)
+// annotate that ending rather than move past it, so they are looked through.
+func (m *viewModel) endsOnError(content string) bool {
+	content = strings.TrimSpace(content)
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		f := m.blocks[i].frame
+		if f.Kind == FrameStatus {
+			continue
+		}
+		return f.Kind == FrameError && content != "" && strings.TrimSpace(f.Content) == content
+	}
+	return false
+}
+
 func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 	if f.StepID != "" {
 		switch f.Kind {
