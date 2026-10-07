@@ -367,6 +367,53 @@ func TestCanonicalRunEventsFromWSEmitsTurnDiffEvent(t *testing.T) {
 	}
 }
 
+// TestCanonicalRunEventsKeepTheSubagentCallFacts pins the conversion hop a
+// live web request's tool step takes: the ws "step" op becomes the canonical
+// run event the page's cards are built from, and the subagent_* card facts
+// (plan 012) ride its tool_meta. A rebuild that drops them leaves the web
+// rendering a failed subagent_run as a generic tool card instead of the
+// subagent card the terminal shows from the same event.
+func TestCanonicalRunEventsKeepTheSubagentCallFacts(t *testing.T) {
+	events := canonicalRunEventsFromWS(wsServerMsg{
+		Op: "step",
+		Data: map[string]any{
+			"kind":        event.RunEventToolCompleted,
+			"step_id":     "call-1",
+			"description": "tool subagent_run",
+			"tool_name":   "subagent_run",
+			"error":       "unexpected EOF",
+			"tool_meta": map[string]any{
+				"tool_name":  "subagent_run",
+				"status":     "failed",
+				"invocation": "run Summarize README.md",
+				"subagent_call": map[string]any{
+					"verb": "run",
+					"tasks": []any{map[string]any{
+						"index":      0,
+						"title":      "Summarize README.md",
+						"agent_type": "general-purpose",
+						"status":     "failed",
+					}},
+				},
+			},
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	var completed event.ToolCallCompletedPayload
+	if err := json.Unmarshal(events[0].Payload, &completed); err != nil {
+		t.Fatalf("decode completed payload: %v", err)
+	}
+	call := completed.ToolMeta.SubagentCall
+	if call == nil {
+		t.Fatalf("canonical tool event lost the subagent_call facts: %+v", completed.ToolMeta)
+	}
+	if call.Verb != "run" || len(call.Tasks) != 1 || call.Tasks[0].AgentType != "general-purpose" || call.Tasks[0].Status != "failed" {
+		t.Fatalf("subagent_call facts came back wrong: %+v", call)
+	}
+}
+
 func TestRunEventBusDeliversOnlyToTheBoundSession(t *testing.T) {
 	bus := newRunEventBus()
 	mine := make(chan event.RunEvent, 4)
@@ -554,6 +601,65 @@ func TestHandleChatWSRejectsSessionOwnedByAnotherPrimaryAgent(t *testing.T) {
 	var leaked wsServerMsg
 	err = conn.ReadJSON(&leaked)
 	require.Error(t, err)
+}
+
+// A resume choice names a session id the client sent, so the switch it asks
+// for is refused when the conversation belongs to another primary agent: the
+// socket never binds to it, that conversation's run events stay unseen, and
+// this agent's own conversation keeps arriving.
+func TestHandleChatWSResumeChoiceOfAnotherAgentsSessionIsRefused(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "other-agent").Ensure(ctx, "their-session", "their-session"))
+	s := &Server{Home: home, Sessions: state.NewSessionStore(db, "main")}
+	require.NoError(t, s.Sessions.Ensure(ctx, "my-session", "my-session"))
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+
+	choice := turn.SlashChoice{Command: "resume", Value: "their-session"}
+	require.NoError(t, conn.WriteJSON(wsClientMsg{
+		RequestID: "req-resume-theirs",
+		SessionID: "my-session",
+		Message:   wsClientMessage{Content: "/resume", Choice: &choice},
+	}))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg), "a message may stop arriving, never carry another agent's session: %+v", msg)
+		require.NotEqual(t, "their-session", msg.SessionID, "the socket adopted another agent's session: %+v", msg)
+		if msg.Op == "slash_reply" && msg.RequestID == "req-resume-theirs" {
+			require.Contains(t, msg.Text, "another primary agent")
+			break
+		}
+	}
+
+	// The refused switch left the socket on its own conversation: events
+	// published for the other agent's session never arrive, its own still do.
+	require.NoError(t, s.RunEvents().Publish(ctx, event.NewRunEvent("", "their-run", "their-session", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "secret"}, time.Now())))
+	require.NoError(t, s.RunEvents().Publish(ctx, event.NewRunEvent("", "my-run", "my-session", event.RunEventAssistantDelta, event.AssistantDeltaPayload{Text: "still mine"}, time.Now())))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		if msg.Op != "run_event" {
+			continue
+		}
+		require.NotEqual(t, "their-session", msg.SessionID, "another agent's run event reached this socket: %+v", msg)
+		if msg.SessionID == "my-session" {
+			break
+		}
+	}
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(150*time.Millisecond)))
+	var leaked wsServerMsg
+	require.Error(t, conn.ReadJSON(&leaked), "nothing more may arrive, least of all another agent's event")
 }
 
 func readRunEventOfType(t *testing.T, conn *websocket.Conn, eventType string) event.RunEvent {
@@ -1155,7 +1261,18 @@ func TestHandleChatWSHandsQueuedMessagesBackBeforeTheTurnEnds(t *testing.T) {
 				require.NoError(t, json.Unmarshal(evt.Payload, released))
 			}
 			require.NotNil(t, released, "the turn ended without handing back the message queued for it")
-			require.Equal(t, []event.ReleasedInput{{Text: "and then this", Attachments: []string{"file-1"}, MentionImages: []string{"shots/a.png"}}}, released.Inputs)
+			want := []event.ReleasedInput{{Text: "and then this", Attachments: []string{"file-1"}, MentionImages: []string{"shots/a.png"}}}
+			if tc.fail {
+				// A failed turn is interrupted: the message returns to the
+				// composer instead of running as the next turn.
+				require.Equal(t, want, released.Inputs)
+				require.Empty(t, released.Next)
+			} else {
+				// A completed turn runs the message next: the engine's boundary
+				// decision says so, and the client only obeys.
+				require.Equal(t, want, released.Next)
+				require.Empty(t, released.Inputs)
+			}
 			require.Zero(t, s.runController().Active())
 		})
 	}
@@ -1222,6 +1339,61 @@ func TestHandleChatWSTurnThatCannotRecordItsRunIsWithdrawn(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rows, "the withdrawn message was recorded")
 	require.Zero(t, modelCalls.Load(), "the withdrawn turn reached the model")
+}
+
+// TestHandleChatWSSessionBusyWithdrawsTheMessage pins the cross-process rule
+// at the web's own entry: a session another live process holds a turn in
+// refuses the message before anything of it is written, and the withdrawal
+// carries the refusal's stable code beside its sentence, so the page can say
+// it in the viewer's language.
+func TestHandleChatWSSessionBusyWithdrawsTheMessage(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	// Another live process holds the session's turn: a lease it renews and a
+	// run it left in flight.
+	other := &state.RunStore{DB: db, Owner: "other-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	_, err = other.CreateRun(ctx, "session-ws", "in flight")
+	require.NoError(t, err)
+
+	s := &Server{Home: home, Sessions: sessions, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+	var send wsClientMsg
+	send.RequestID = "req-turn"
+	send.SessionID = "session-ws"
+	send.Message.Content = "hello"
+	require.NoError(t, conn.WriteJSON(send))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	var withdrawn *wsServerMsg
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		require.NotContains(t, []string{"run_started", "run_error", "run_completed"}, msg.Op, "a refused turn must not start: %+v", msg)
+		if msg.Op == "turn_withdrawn" {
+			withdrawn = &msg
+			break
+		}
+	}
+	require.Equal(t, "req-turn", withdrawn.RequestID)
+	require.Equal(t, "This conversation is already running a turn; send again when it finishes.", withdrawn.Error)
+	require.Equal(t, map[string]any{"code": "session_running"}, withdrawn.Data)
+	rows, err := sessions.ListAllMessages(ctx, "session-ws", 0)
+	require.NoError(t, err)
+	require.Empty(t, rows, "no user row may be written for a turn that never started")
 }
 
 // TestHandleChatWSEstablishesANamedSessionBeforeItsSlashCommand pins that a
@@ -1340,5 +1512,96 @@ func TestLastPlanProgressOfRun(t *testing.T) {
 	}
 	if none := lastPlanProgressOfRun(context.Background(), nil, "run-1"); none != (event.PlanProgress{}) {
 		t.Fatalf("nil store progress = %+v", none)
+	}
+}
+
+// A subagent's checklist lands in its parent's run but never stands in for
+// the conversation's own plan on the worked line.
+func TestLastPlanProgressOfRunIgnoresSubagentChecklists(t *testing.T) {
+	t.Parallel()
+	store := &stubPlanEventStore{events: []state.SessionEvent{
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 1, Total: 2}),
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 4, Total: 5, AgentID: "worker-1"}),
+	}}
+	if got := lastPlanProgressOfRun(context.Background(), store, "run-1"); got.Done != 1 || got.Total != 2 {
+		t.Fatalf("progress = %+v, want the conversation's {1 2}", got)
+	}
+	only := &stubPlanEventStore{events: []state.SessionEvent{
+		planEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 4, Total: 5, AgentID: "worker-1"}),
+	}}
+	if got := lastPlanProgressOfRun(context.Background(), only, "run-1"); got != (event.PlanProgress{}) {
+		t.Fatalf("subagent-only progress = %+v, want none", got)
+	}
+}
+
+// The socket's three run endings hand their checklist facts to the canonical
+// event they mirror, so a replayed session reads the same line the live one
+// showed.
+func TestCanonicalRunEndingsCarryPlanFacts(t *testing.T) {
+	t.Parallel()
+	facts := event.RunPlanFacts{PlanDone: 1, PlanTotal: 3, PlanActive: "short"}
+	for _, op := range []string{"run_completed", "run_cancelled", "run_error"} {
+		events := canonicalRunEventsFromWS(wsServerMsg{Op: op, RunID: "run-1", SessionID: "s1", RunPlanFacts: facts})
+		require.NotEmpty(t, events, op)
+		raw, err := json.Marshal(events[0].Payload)
+		require.NoError(t, err)
+		var got event.RunPlanFacts
+		require.NoError(t, json.Unmarshal(raw, &got))
+		require.Equal(t, facts, got, op)
+	}
+}
+
+// TestPrimaryFooterBudgetIsUnchangedByTheEngineMove pins the web's budget
+// numbers across the same engine move the terminal's footer went through: the
+// payload the socket pushes after a turn must keep these exact values for a
+// session whose last assistant response measured a known usage on a known
+// model. A change here is a change to what the page's gauge says, not just to
+// where the computation lives.
+func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	defer db.Close()
+	sess := state.NewSessionStore(db, "main")
+	_, _ = sess.Append(ctx, "session-1", "user", "first")
+	_, _ = sess.AppendStructuredMessage(
+		ctx,
+		"session-1",
+		"assistant",
+		"answer",
+		"msg-1",
+		state.ContentPartsJSON(nil, "answer"),
+		"glm-5.3",
+		`{"input_tokens":150000,"output_tokens":2500}`,
+		"",
+		"",
+		state.MessageExecTiming{},
+	)
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"},
+		}},
+	}}}
+	srv := &Server{Sessions: sess, Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}
+	msg, ok := srv.tokenBudgetWSMessageFromSession(ctx, "req-1", "run-1", "session-1")
+	if !ok {
+		t.Fatalf("expected a budget ws message")
+	}
+	payload, ok := msg.Data.(event.TokenBudgetUpdatedPayload)
+	if !ok {
+		t.Fatalf("expected typed payload, got %T", msg.Data)
+	}
+	want := event.TokenBudgetUpdatedPayload{
+		Model:                "glm-5.3",
+		TokenUsage:           152500,
+		PercentLeft:          83,
+		ContextWindow:        1000000,
+		EffectiveWindow:      1000000,
+		AutoCompactThreshold: 900000,
+	}
+	if payload != want {
+		t.Fatalf("budget payload = %+v, want %+v", payload, want)
 	}
 }

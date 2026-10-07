@@ -18,6 +18,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
@@ -73,14 +74,25 @@ body`), 0o600))
 	launch, err := safety.ResolveProjectContext(home, home)
 	require.NoError(t, err)
 
-	// The launch project is what the global skill routes act on, so the test
-	// states it explicitly instead of relying on the process working
+	// The launch project is the context the runtime loads skills for, so the
+	// test states it explicitly instead of relying on the process working
 	// directory.
 	s := &Server{Home: home, LaunchProject: launch}
+
+	// The agent's own skill routes work in no project: a project
+	// destination belongs to that project's space.
 	reqBody := strings.NewReader(`{"source_ref":"file://` + src + `","dest":"project","skill":"pptx","name":"pptx-installed"}`)
 	req, err := http.NewRequest(http.MethodPost, "/api/skills/install", reqBody)
 	require.NoError(t, err)
 	rr := httptest.NewRecorder()
+	s.handleSkillsInstall(rr, req)
+	require.NotEqual(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "no project root")
+
+	reqBody = strings.NewReader(`{"source_ref":"file://` + src + `","dest":"workspace","skill":"pptx","name":"pptx-installed"}`)
+	req, err = http.NewRequest(http.MethodPost, "/api/skills/install", reqBody)
+	require.NoError(t, err)
+	rr = httptest.NewRecorder()
 	s.handleSkillsInstall(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"installed"`)
@@ -438,6 +450,39 @@ func TestHandleChatWSSlashReplyIsUIOnly(t *testing.T) {
 	turns, err := sessions.ListRecentMessages(context.Background(), "s1", 20)
 	require.NoError(t, err)
 	require.Len(t, turns, 0, "slash replies must not enter the transcript: %s", mustJSON(t, turns))
+}
+
+// TestGatewayToolMetaPayloadCarriesTheSubagentCall pins the live web path's
+// last hop: the card facts of a subagent_* call (plan 012) ride the tool meta
+// the websocket payloads carry, so a call the model sees fail renders as the
+// subagent card ("Failed to run …" header with its reason) on the web exactly
+// as the terminal draws it — not as a generic tool card. The history-row path
+// carries the same facts through handleChatMessages; both must stay in step.
+func TestGatewayToolMetaPayloadCarriesTheSubagentCall(t *testing.T) {
+	call := &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{{
+		Index: 0, Title: "Summarize README.md", AgentType: "general-purpose", Status: "failed",
+	}}}
+	meta := tool.ToolMeta{ToolName: "subagent_run", Status: "failed", Invocation: "run Summarize README.md", SubagentCall: call}
+
+	started := gatewayToolStartedStepData("call-1", "tool subagent_run", "subagent_run", map[string]any{"task": "read"}, meta)
+	raw, err := json.Marshal(started["tool_meta"])
+	require.NoError(t, err)
+	var carried struct {
+		SubagentCall *event.SubagentCall `json:"subagent_call"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &carried))
+	require.NotNil(t, carried.SubagentCall, "live tool_meta must carry subagent_call: %s", raw)
+	require.Equal(t, "run", carried.SubagentCall.Verb)
+	require.Equal(t, "failed", carried.SubagentCall.Tasks[0].Status)
+
+	completed := gatewayToolCompletedStepData("call-1", "tool subagent_run", "subagent_run", nil, "unexpected EOF", "", "", "", meta)
+	raw, err = json.Marshal(completed["tool_meta"])
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &carried))
+	require.NotNil(t, carried.SubagentCall, "a failed call keeps its card facts: %s", raw)
+
+	// A meta that carries nothing at all still collapses to no payload.
+	require.Nil(t, gatewayToolMetaPayload(tool.ToolMeta{}))
 }
 
 func TestParseSlashCommandBlocksLifecycleSlashDuringRun(t *testing.T) {

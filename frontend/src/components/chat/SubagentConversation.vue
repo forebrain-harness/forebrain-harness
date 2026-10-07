@@ -23,8 +23,14 @@
         </div>
         <div class="mt-1 truncate text-[11px] text-[var(--forebrain-muted-text)]">{{ record.agentId }}</div>
       </div>
-      <div v-if="record.inputTokens || record.outputTokens" class="shrink-0 text-[11px] text-[var(--forebrain-muted-text)]">
-        {{ t('chat.subagentTokens', { input: record.inputTokens, output: record.outputTokens }) }}
+      <div class="flex shrink-0 items-center gap-3 text-[11px] text-[var(--forebrain-muted-text)]">
+        <span v-if="modelLabel">{{ modelLabel }}</span>
+        <!-- This subagent's own context window, the terminal's footer gauge for
+             its view: how much of the window it runs on is used. -->
+        <span v-if="budgetLabel" data-testid="subagent-budget">{{ budgetLabel }}</span>
+        <span v-if="record.inputTokens || record.outputTokens">
+          {{ t('chat.subagentTokens', { input: record.inputTokens, output: record.outputTokens }) }}
+        </span>
       </div>
     </header>
 
@@ -37,6 +43,17 @@
           <Avatar class="size-8 shrink-0 ring-1 ring-border">
             <AvatarFallback class="bg-muted">
               <Bot class="size-4 text-muted-foreground" />
+            </AvatarFallback>
+          </Avatar>
+        </Message>
+
+        <!-- A message the user sent this subagent from its own view: the user's
+             own message, not the dispatching agent's instruction. -->
+        <Message v-else-if="block.kind === 'user'" from="user" data-testid="subagent-user-message">
+          <MessageContent class="whitespace-pre-wrap">{{ block.text }}</MessageContent>
+          <Avatar class="size-8 shrink-0 ring-1 ring-border">
+            <AvatarFallback class="bg-muted">
+              <User class="size-4 text-muted-foreground" />
             </AvatarFallback>
           </Avatar>
         </Message>
@@ -54,10 +71,29 @@
         </details>
 
         <ToolCallCard
-          v-else-if="block.kind === 'tool'"
+          v-else-if="block.kind === 'tool' && !block.step.subagentCall"
           :step="block.step"
           :open="foldOpen(blockFoldId(block, idx), false)"
           @update:open="updateFold(blockFoldId(block, idx), $event)"
+        />
+
+        <!-- A subagent_* call this agent made is the same card the
+             conversation draws — here is where a nested dispatch belongs,
+             never in the main conversation. -->
+        <SubagentCallCard
+          v-else-if="block.kind === 'tool'"
+          :step="block.step"
+          :live="callTasks?.get(block.step.stepId)"
+          :now="now"
+          @open="emit('open-agent', $event)"
+        />
+
+        <SubagentCallCard
+          v-else-if="block.kind === 'subagent'"
+          :step="block.step"
+          :live="callTasks?.get(block.stepId)"
+          :now="now"
+          @open="emit('open-agent', $event)"
         />
 
         <PlanUpdateCard
@@ -80,14 +116,18 @@
 		  :goal="block.goal"
 		/>
 
-		<div
-		  v-else-if="block.kind === 'error'"
-		  class="whitespace-pre-wrap rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-3 py-2 text-xs text-[var(--forebrain-danger)]"
-		>
-		  {{ block.text }}
-		</div>
+		<RunWorkedLine
+		  v-else-if="block.kind === 'worked'"
+		  :line="formatWorkedDurationLabel(block.durationMs, t, block.finishedAt, block.plan)"
+		/>
 
-        <Message v-else from="assistant">
+		<RunErrorBlock
+		  v-else-if="block.kind === 'error'"
+		  :text="block.text"
+		  :detail="block.detail"
+		/>
+
+        <Message v-else-if="block.kind === 'assistant'" from="assistant">
           <Avatar class="size-8 shrink-0 ring-1 ring-border">
             <AvatarFallback class="bg-muted">
               <Bot class="size-4 text-muted-foreground" />
@@ -100,11 +140,12 @@
       </template>
 
       <div
-		v-if="record.status === 'running' || record.status === 'waiting_approval' || record.status === 'waiting_input'"
+		v-if="isRunning"
         class="flex items-center gap-2 px-1 text-[12px] text-[var(--forebrain-muted-text)]"
       >
         <span class="forebrain-working-dot" />
-        {{ t('chat.subagentWorking') }}
+        {{ t('chat.subagentWorking', { duration: workingDuration }) }}
+        <PlanProgressSegments :plan="record.plan" />
       </div>
       <p
         v-else-if="!hasAnswer"
@@ -130,31 +171,94 @@
  * them — its thinking, its text, and the calls it made, interleaved — which is
  * the same record the terminal keeps on that subagent's own screen.
  */
-import { computed } from 'vue'
-import { ArrowLeft, Bot, CircleAlert } from 'lucide-vue-next'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { ArrowLeft, Bot, CircleAlert, User } from 'lucide-vue-next'
 import { Message, MessageContent, MessageResponse } from '@repo/elements/message'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
+import PlanProgressSegments from '@/components/chat/PlanProgressSegments.vue'
+import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
+import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import { formatRuntimeDuration, formatWorkedDurationLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
 import { t } from '@/locales'
-import type { TimelineBlock, SubagentTranscript } from '@/composables/useChatStream'
 
 const props = withDefaults(defineProps<{
   record: SubagentTranscript
   foldState?: Record<string, boolean>
+  /** The live bindings of the subagent_* cards this transcript draws. */
+  callTasks?: ReadonlyMap<string, ReadonlyMap<number, SubagentCallTaskLive>>
+  /** The stream's shared clock, so the cards' walking rows tick with it. */
+  now?: number
 }>(), {
   foldState: () => ({}),
+  callTasks: undefined,
+  now: undefined,
 })
 const emit = defineEmits<{
   (e: 'back'): void
   (e: 'fold-change', value: { id: string; open: boolean }): void
+  (e: 'open-agent', agentId: string): void
 }>()
 
 const hasAnswer = computed(() => props.record.blocks.some((block) => block.kind === 'assistant'))
+
+const isRunning = computed(() =>
+  props.record.status === 'running' || props.record.status === 'waiting_approval' || props.record.status === 'waiting_input')
+
+// The model this execution's spawn announced — never derived from the agent's
+// type, and absent means the spawn named none, which names none here too.
+const modelLabel = computed(() => {
+  const model = [props.record.modelProvider, props.record.model]
+    .map((part) => String(part ?? '').trim())
+    .filter(Boolean)
+    .join('/')
+  const effort = String(props.record.reasoningEffort ?? '').trim()
+  return [model, effort].filter(Boolean).join(' · ')
+})
+
+// The subagent's own context gauge, the terminal's footer reading for its view:
+// the used percentage and the window it is measured against.
+const budgetLabel = computed(() => {
+  const budget = props.record.tokenBudget
+  const percentLeft = budget?.percentLeft
+  if (typeof percentLeft !== 'number' || !Number.isFinite(percentLeft)) return ''
+  const window = formatTokenCount(budget?.contextWindow)
+  return `${Math.round(100 - percentLeft)}%${window ? `/${window}` : ''}`
+})
+
+// The working line's clock is this execution's own: it counts from the spawn
+// the engine recorded, a second at a time, and stops the moment the run ends.
+const nowMs = ref(Date.now())
+let workingTimer: ReturnType<typeof setInterval> | null = null
+watch(isRunning, (running) => {
+  if (running && workingTimer == null) {
+    workingTimer = setInterval(() => {
+      nowMs.value = Date.now()
+    }, 1_000)
+  } else if (!running && workingTimer != null) {
+    clearInterval(workingTimer)
+    workingTimer = null
+  }
+}, { immediate: true })
+onBeforeUnmount(() => {
+  if (workingTimer != null) {
+    clearInterval(workingTimer)
+    workingTimer = null
+  }
+})
+
+const workingDuration = computed(() => {
+  const start = props.record.startedAt ? Date.parse(props.record.startedAt) : NaN
+  if (!Number.isFinite(start)) return ''
+  return formatRuntimeDuration(Math.max(0, nowMs.value - start))
+})
 
 function thinkingLabel(block: Extract<TimelineBlock, { kind: 'thinking' }>): string {
   if (block.durationMs && block.durationMs >= 1000) {

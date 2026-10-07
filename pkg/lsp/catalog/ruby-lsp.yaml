@@ -1,0 +1,15 @@
+id: ruby-lsp
+display_name: Ruby LSP
+languages: [Ruby]
+priority: 100
+command: ruby-lsp
+extension_to_language: {.rb: ruby, .rake: ruby, .gemspec: ruby, .ru: ruby}
+filenames: {Gemfile: ruby, Rakefile: ruby}
+root_markers: [Gemfile, .ruby-version, Rakefile]
+env_passthrough: [GEM_HOME, GEM_PATH, BUNDLE_GEMFILE, RUBYOPT, RBENV_ROOT, RBENV_VERSION, RUBY_VERSION, ASDF_DATA_DIR, MISE_DATA_DIR]
+install:
+  - requires: gem
+    argv: [gem, install, ruby-lsp]
+readiness: progress
+project_writes: [.ruby-lsp]
+notes: "Install with: gem install ruby-lsp"

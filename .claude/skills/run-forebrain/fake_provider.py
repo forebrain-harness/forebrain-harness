@@ -48,6 +48,26 @@ Modes:
           them to script one call per turn. Use it to put a card that only one
           tool produces on screen - a memories_search result, say - without
           teaching the harness about that tool.
+  subagent-net
+          drive the "subagent dies on the network, then the user continues it
+          from its own view" scenario, told apart by request content rather
+          than request order. The conversation's first request is answered with
+          a subagent_run dispatch of a general-purpose probe; the subagent's own
+          request (recognised by its system prompt) is dropped by closing the
+          connection with no bytes until its last user message is "continue",
+          when it is answered with the answer text. A subagent request whose
+          last user message is          "hold" is left hanging instead, so the subagent
+          stays running and the surface's Esc "interrupt to send" window can be
+          driven. The conversation's later requests answer with a fixed line.
+  subagent-limit
+          drive the "a subagent hits the usage limit, then continues itself"
+          scenario, told apart by request content. The conversation's first
+          request is answered with a subagent_run dispatch of a general-purpose
+          probe; the subagent's own request (recognised by its system prompt) is
+          refused with the "limit" 429 for FAKE_LIMIT_SECONDS (default 20)
+          seconds after its first request and then answers with the answer text,
+          which is the automatic continuation running. The conversation's later
+          requests answer with a fixed line.
 
 Every request is logged to stderr, which is the only reliable way to know the
 request actually went out: forebrain buffers assistant deltas in the reducer and
@@ -59,6 +79,7 @@ import http.server
 import itertools
 import json
 import os
+import socket
 import socketserver
 import sys
 import time
@@ -152,6 +173,49 @@ def _is_goal_evaluation(body):
     return False
 
 
+def _system_and_last_user(body):
+    """The first system message and the last user message, as plain text.
+
+    subagent-net distinguishes the main agent from a subagent by what the
+    request says, not by when it arrives: an LLM client retries a dropped
+    connection, and issuing answers by request order would put the retry's
+    answer on the wrong conversation.
+    """
+    try:
+        messages = json.loads(body).get("messages") or []
+    except Exception:
+        return "", ""
+    system = ""
+    last_user = ""
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if not isinstance(content, str):
+            continue
+        role = message.get("role")
+        if role == "system" and system == "":
+            system = content
+        elif role == "user":
+            last_user = content
+    return system, last_user
+
+
+# The general-purpose subagent's system prompt leads with this line (see
+# pkg/agent/subagent_defs.go); a request carrying it is the subagent's, not the
+# conversation's.
+SUBAGENT_SYSTEM_MARK = "You are a general-purpose subagent"
+# The main agent's first request dispatches exactly this probe.
+SUBAGENT_NET_PROBE_ARGS = json.dumps({
+    "title": "network probe",
+    "task": "answer briefly",
+    "subagent_type": "general-purpose",
+})
+SUBAGENT_NET_MAIN = itertools.count()
+SUBAGENT_LIMIT_RESETS_AT = []
+SUBAGENT_LIMIT_MAIN = itertools.count()
+
+
 def chunk(delta=None, finish=None):
     return {
         "id": "fake-1",
@@ -187,6 +251,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         if MODE == "goal":
             self.serve_goal(body)
+            return
+
+        if MODE == "subagent-net":
+            self.serve_subagent_net(body)
+            return
+
+        if MODE == "subagent-limit":
+            self.serve_subagent_limit(body)
             return
 
         if MODE == "limit" and self.serve_limit():
@@ -253,6 +325,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         remaining = LIMIT_RESETS_AT[0] - now
         if remaining <= 0:
             return False
+        self.refuse_usage_limit(remaining)
+        return True
+
+    def refuse_usage_limit(self, remaining):
+        """Answer with the 429 body that drives auto-continue, carrying
+        resets_in_seconds so the runtime schedules the continuation itself."""
         sys.stderr.write("LIMIT refused, resets in %.1fs\n" % remaining)
         sys.stderr.flush()
         payload = json.dumps({"error": {
@@ -267,7 +345,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
         self.wfile.flush()
-        return True
+
+    def answer_text(self, text):
+        """Answer one request with the answer text, in one delta and a finish."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.write_event(chunk(delta={"role": "assistant", "content": text}))
+        self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_subagent_limit(self, body):
+        """Drive the "a subagent hits the usage limit, then continues itself"
+        scenario, told apart by request content rather than request order.
+
+        A request whose system prompt carries the general-purpose subagent's
+        mark is the subagent's: for FAKE_LIMIT_SECONDS (default 20) after its
+        first request it is refused with the same 429 the "limit" mode returns,
+        and afterwards it answers with the answer text - which is the automatic
+        continuation running. Every other request is the conversation's: the
+        first dispatches exactly the network probe, the rest answer with a
+        fixed line so the primary turn can end after the failure.
+        """
+        system, _ = _system_and_last_user(body)
+        if SUBAGENT_SYSTEM_MARK in system:
+            now = time.time()
+            if not SUBAGENT_LIMIT_RESETS_AT:
+                SUBAGENT_LIMIT_RESETS_AT.append(now + LIMIT_SECONDS)
+            remaining = SUBAGENT_LIMIT_RESETS_AT[0] - now
+            if remaining > 0:
+                self.refuse_usage_limit(remaining)
+                return
+            sys.stderr.write("SUBAGENT-LIMIT answered after the reset\n")
+            sys.stderr.flush()
+            self.answer_text(TEXT)
+            return
+
+        nth = next(SUBAGENT_LIMIT_MAIN)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if nth == 0:
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "delegating the probe",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_limit_0",
+                    "type": "function",
+                    "function": {"name": "subagent_run", "arguments": SUBAGENT_NET_PROBE_ARGS},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": "primary noted the failure"}))
+            self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
 
     def serve_goal(self, body):
         """Answer the evaluator with the next verdict, a round with text."""
@@ -293,6 +430,78 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.write_event(chunk(delta=delta))
                 time.sleep(DRIP_DELAY)
         self.write_event(chunk(finish="stop"))
+        self.write_raw(b"data: [DONE]\n\n")
+        self.write_raw(b"")
+
+    def serve_subagent_net(self, body):
+        """Drive the "subagent fails on the network, then the user continues it"
+        scenario, told apart by request content rather than request order.
+
+        A request whose system prompt carries the general-purpose subagent's
+        mark is the subagent's: its last user message is "continue" once the
+        user has driven it from its own view, and is answered with the answer
+        text; any other subagent request is dropped by closing the connection
+        with no bytes, the way a network interruption looks to the client — a
+        retry is dropped the same way until it gives up. Every other request is
+        the conversation's: the first dispatches exactly the network probe, the
+        rest answer with a fixed line so the primary turn can end after the
+        subagent's failure.
+        """
+        system, last_user = _system_and_last_user(body)
+        if SUBAGENT_SYSTEM_MARK in system:
+            if last_user.strip().lower() == "hold":
+                # Keep the subagent running: the execution stays in flight so
+                # the surface can be driven into Esc's "interrupt to send"
+                # window, where a queued steer is what Esc flushes.
+                sys.stderr.write("SUBAGENT-NET hold subagent request\n")
+                sys.stderr.flush()
+                while True:
+                    time.sleep(3600)
+            if last_user.strip().lower() == "continue":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.write_event(chunk(delta={"role": "assistant", "content": TEXT}))
+                self.write_event(chunk(finish="stop"))
+                self.write_raw(b"data: [DONE]\n\n")
+                self.write_raw(b"")
+                return
+            # No bytes at all: the subagent's request dies on the wire, so the
+            # run fails with a transport error and the turn ends.
+            sys.stderr.write("SUBAGENT-NET drop subagent request\n")
+            sys.stderr.flush()
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                self.connection.close()
+            except OSError:
+                pass
+            return
+
+        nth = next(SUBAGENT_NET_MAIN)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if nth == 0:
+            self.write_event(chunk(delta={
+                "role": "assistant",
+                "content": "delegating the probe",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call_net_0",
+                    "type": "function",
+                    "function": {"name": "subagent_run", "arguments": SUBAGENT_NET_PROBE_ARGS},
+                }],
+            }))
+            self.write_event(chunk(finish="tool_calls"))
+        else:
+            self.write_event(chunk(delta={"role": "assistant", "content": "primary noted the failure"}))
+            self.write_event(chunk(finish="stop"))
         self.write_raw(b"data: [DONE]\n\n")
         self.write_raw(b"")
 

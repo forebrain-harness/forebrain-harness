@@ -25,7 +25,26 @@
       </div>
 
       <template v-else>
-        <div v-if="!records.servers.length && !records.notApplied.length" class="mt-6 rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center">
+        <!-- Entries awaiting the per-entry confirmation: allow loads the
+             server from now on, decline records it so it asks again only
+             when the file changes. -->
+        <div v-if="records.pendingConsent.length" class="mt-4 rounded-xl border border-[rgba(180,140,60,0.4)] bg-[rgba(180,140,60,0.07)] p-3" data-testid="project-mcp-pending">
+          <p class="text-[12px] font-medium text-[var(--forebrain-text)]">{{ t('projects.mcpPendingTitle') }}</p>
+          <ul class="mt-2 space-y-1">
+            <li v-for="row in records.pendingConsent" :key="row.name" class="flex flex-wrap items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-[12px] odd:bg-[var(--forebrain-surface-soft)]">
+              <div class="min-w-0">
+                <span class="font-mono text-[var(--forebrain-text)]">{{ row.name }}</span>
+                <span class="ml-2 text-[var(--forebrain-muted-text)]">{{ row.summary }}</span>
+              </div>
+              <div class="flex shrink-0 gap-1">
+                <button type="button" class="forebrain-btn forebrain-btn-primary h-7 px-2 text-[11px]" :disabled="consenting" :data-testid="`mcp-allow-${row.name}`" @click="consent(row.name, true)">{{ t('projects.mcpAllow') }}</button>
+                <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :disabled="consenting" :data-testid="`mcp-decline-${row.name}`" @click="consent(row.name, false)">{{ t('projects.mcpDecline') }}</button>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="!records.pendingConsent.length && !records.servers.length && !records.notApplied.length" class="mt-6 rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center">
           <p class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpEmpty') }}</p>
           <p class="mt-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpAddHint') }}</p>
         </div>
@@ -55,7 +74,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { getErrorMessage, forebrainApi, type ProjectMcpRecord, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -72,22 +91,15 @@ const emptyRecords = (): ProjectMcpRecord => ({ servers: [], overriddenGlobal: [
 const records = ref<ProjectMcpRecord>(emptyRecords())
 const loading = ref(false)
 const trusting = ref(false)
+const consenting = ref(false)
 const error = ref('')
 
-// Trust state is local after the first read: the GET row does not carry it
-// (the create response does), and the gate is the only writer here.
+// The gate follows the project row the shell loaded (its trust decision is
+// part of the detail read); the trust action here moves it forward.
 const trusted = ref(false)
-
-async function loadTrust() {
-  try {
-    const root = props.project?.root ?? ''
-    if (!root) return
-    const res = await forebrainApi.projectMcp(props.projectId)
-    trusted.value = Boolean((res as unknown as { trusted?: boolean }).trusted)
-  } catch {
-    trusted.value = false
-  }
-}
+watch(() => props.project?.trusted, (value) => {
+  trusted.value = Boolean(value)
+}, { immediate: true })
 
 async function load() {
   loading.value = true
@@ -116,9 +128,25 @@ async function trust() {
   }
 }
 
+// One decision per click: allowing (or declining) one entry records a
+// decision for every other pending entry as declined — the same semantics
+// the terminal's startup prompt applies — so the list always reloads.
+async function consent(name: string, allow: boolean) {
+  if (consenting.value) return
+  consenting.value = true
+  error.value = ''
+  try {
+    await forebrainApi.projectMcpConsent(props.projectId, allow ? [name] : [])
+    await load()
+  } catch (cause) {
+    error.value = getErrorMessage(cause)
+  } finally {
+    consenting.value = false
+  }
+}
+
 onMounted(() => {
   void load()
-  void loadTrust()
 })
 </script>
 

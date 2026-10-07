@@ -212,13 +212,29 @@ func TestPrimaryAgentCreateRejectsDuplicateID(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rr.Code)
 }
 
-func TestPrimaryAgentCreateRejectsMissingWorkspace(t *testing.T) {
-	s, _ := crudServer(t)
+// The workspace root is derived from the agent id. A caller's expected root
+// is checked against it — not merely for existing somewhere — and a mismatch
+// is refused before anything is written.
+func TestPrimaryAgentCreateChecksExpectedWorkspaceRoot(t *testing.T) {
+	s, cfgPath := crudServer(t)
+	elsewhere := t.TempDir()
 	rr := postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{
-		"id": "ghost", "workspace_root": filepath.Join(t.TempDir(), "nope"),
+		"id": "ghost", "workspace_root": elsewhere,
 	})
 	require.Equal(t, http.StatusBadRequest, rr.Code)
-	require.Contains(t, rr.Body.String(), "existing directory")
+	require.Contains(t, rr.Body.String(), "derived from the agent id")
+	raw, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "ghost:")
+
+	// The derived root is accepted even though it does not exist yet; the
+	// create is what materialises it.
+	rr = postJSON(t, s, http.MethodPost, "/api/agents/primary", map[string]string{
+		"id": "ghost", "workspace_root": filepath.Join(home(), "workspaces", "ghost"),
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	// Every write answers with the listing, active agent included.
+	require.Contains(t, rr.Body.String(), `"active_id":"main"`)
 }
 
 func TestPrimaryAgentUpdateChangesOnlyPresentation(t *testing.T) {

@@ -119,7 +119,7 @@ func (r *Runner) newToolPermissionMiddleware() llm.ToolMiddleware {
 			// it; the refusal and the read-only pass-through come from there
 			// too.
 			if strings.EqualFold(name, "shell") &&
-				tool.PlanModeShellGateForCommand(ctx, r.AppCfg.DangerFullAccessEnabled(), permissionInput(name, payload)) != tool.PlanModeShellAllow {
+				tool.PlanModeShellGateForCommand(ctx, r.sessionConfig(ctx).DangerFullAccessEnabled(), permissionInput(name, payload)) != tool.PlanModeShellAllow {
 				return next(ctx, arguments)
 			}
 
@@ -141,6 +141,13 @@ func (r *Runner) newToolPermissionMiddleware() llm.ToolMiddleware {
 	}
 }
 
+// sessionConfig is the configuration the calling conversation's sandbox
+// decisions are made under: AppCfg, with the conversation's own sandbox mode
+// in force when it picked one for itself.
+func (r *Runner) sessionConfig(ctx context.Context) *appcfg.Root {
+	return safety.ConfigForSnapshot(r.AppCfg, r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx)))
+}
+
 func (r *Runner) sandboxAllowsFileMutation(ctx context.Context, kind string, payload map[string]any, decision safety.Decision) bool {
 	if r == nil || r.AppCfg == nil || decision.Behavior != safety.BehaviorAsk || decision.Reason != "default_ask" {
 		return false
@@ -150,10 +157,12 @@ func (r *Runner) sandboxAllowsFileMutation(ctx context.Context, kind string, pay
 	default:
 		return false
 	}
-	if r.AppCfg.DangerFullAccessEnabled() {
+	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
+	cfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
+	if cfg.DangerFullAccessEnabled() {
 		return true
 	}
-	if r.AppCfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite {
+	if cfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite {
 		return false
 	}
 
@@ -181,9 +190,8 @@ func (r *Runner) sandboxAllowsFileMutation(ctx context.Context, kind string, pay
 	if r.tools != nil {
 		additionalDirs = r.tools.AllowedRoots()
 	}
-	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
 	runtimeConfig := safety.ConvertToRuntimeConfig(
-		safety.LocalConfigSources(strings.TrimSpace(r.Home), r.AppCfg),
+		safety.LocalConfigSources(strings.TrimSpace(r.Home), cfg),
 		snapshot, cwd, cwd, os.TempDir(), additionalDirs,
 	)
 	for _, target := range targets {
@@ -303,7 +311,7 @@ func (r *Runner) mcpPermissionPromptAutoApproved(ctx context.Context) bool {
 	if snapshot.ApprovalPolicy.Mode != safety.ApprovalNever || r.AppCfg == nil {
 		return false
 	}
-	if r.AppCfg.DangerFullAccessEnabled() {
+	if safety.ConfigForSnapshot(r.AppCfg, snapshot).DangerFullAccessEnabled() {
 		return true
 	}
 	return r.restrictedProfileHasFullDiskWrite(ctx, snapshot)
@@ -313,6 +321,7 @@ func (r *Runner) restrictedProfileHasFullDiskWrite(ctx context.Context, snapshot
 	if r == nil || r.AppCfg == nil {
 		return false
 	}
+	cfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
 	cwd, err := os.Getwd()
 	if err != nil {
 		return false
@@ -330,7 +339,7 @@ func (r *Runner) restrictedProfileHasFullDiskWrite(ctx context.Context, snapshot
 		},
 		Access: safety.FileSystemAccessRead,
 	}}
-	if r.AppCfg.SandboxMode == appcfg.SandboxModeWorkspaceWrite {
+	if cfg.SandboxMode == appcfg.SandboxModeWorkspaceWrite {
 		entries = append(entries, safety.FileSystemPermissionEntry{
 			Path: safety.FileSystemPermissionPath{
 				Type:  safety.FileSystemPermissionPathTypeSpecial,
@@ -339,7 +348,7 @@ func (r *Runner) restrictedProfileHasFullDiskWrite(ctx context.Context, snapshot
 			Access: safety.FileSystemAccessWrite,
 		})
 		runtimeConfig := safety.ConvertToRuntimeConfig(
-			safety.LocalConfigSources(strings.TrimSpace(r.Home), r.AppCfg),
+			safety.LocalConfigSources(strings.TrimSpace(r.Home), cfg),
 			safety.Snapshot{}, cwd, cwd, os.TempDir(), nil,
 		)
 		for _, path := range runtimeConfig.Filesystem.AllowWrite {
@@ -660,6 +669,22 @@ func permissionToolName(kind string) string {
 	return k
 }
 
+// permissionToolNameFor maps a tool kind onto the policy name its rules are
+// written against, taking the payload into account where one kind answers to
+// two policies. The lsp tool is that case: a call that names a file reads that
+// file, so the Read rules govern it, while the file-less workspace symbol
+// search is the read-only LSP policy itself.
+func permissionToolNameFor(kind string, payload map[string]any) string {
+	k := strings.TrimSpace(kind)
+	if strings.EqualFold(k, "lsp") {
+		if p, ok := payload["file_path"].(string); ok && strings.TrimSpace(p) != "" {
+			return "Read"
+		}
+		return "LSP"
+	}
+	return permissionToolName(k)
+}
+
 func permissionInput(kind string, payload map[string]any) string {
 	k := strings.TrimSpace(kind)
 	switch {
@@ -672,7 +697,8 @@ func permissionInput(kind string, payload map[string]any) string {
 	case strings.EqualFold(k, "read_file"),
 		strings.EqualFold(k, "write_file"),
 		strings.EqualFold(k, "edit_file"),
-		strings.EqualFold(k, "multi_edit"):
+		strings.EqualFold(k, "multi_edit"),
+		strings.EqualFold(k, "lsp"):
 		if p, ok := payload["file_path"].(string); ok {
 			return strings.TrimSpace(p)
 		}
@@ -712,7 +738,7 @@ func permissionInput(kind string, payload map[string]any) string {
 // sandbox denies it, and the same rule reappears one escalation later — the
 // grant applying only after a failed attempt instead of on the first one.
 func (r *Runner) evaluateToolPermission(sessionID, kind string, payload map[string]any) safety.Decision {
-	toolName := permissionToolName(kind)
+	toolName := permissionToolNameFor(kind, payload)
 	input := permissionInput(kind, payload)
 	decision := r.EvaluatePermissionForSession(sessionID, toolName, input)
 	if decision.Matched != nil {

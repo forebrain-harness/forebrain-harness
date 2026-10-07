@@ -1,5 +1,5 @@
 import { toCamelCase } from './case'
-import { parseAutoContinue, type AutoContinueState } from './autoContinue'
+import { parseAutoContinue, parseAutoContinueEntries, type AutoContinueEntry, type AutoContinueState } from './autoContinue'
 
 // Must match pkg/gateway/ws_protocol.go. New clients declare this on every
 // mutating/subscription operation; servers still accept an omitted version as
@@ -22,6 +22,7 @@ export type ForebrainRunEventType =
   | 'usage_delta'
   | 'subagent_spawned'
   | 'subagent_ended'
+  | 'subagent_input_delivered'
   | 'tool_call_started'
   | 'tool_output_delta'
   | 'tool_call_completed'
@@ -43,6 +44,7 @@ export type ForebrainRunEventType =
   | 'auto_continue_scheduled'
   | 'auto_continue_started'
   | 'auto_continue_cancelled'
+  | 'heartbeat_fired'
 
 export type ForebrainRunEvent = {
   id?: string
@@ -89,6 +91,11 @@ export type ForebrainSessionBoundMessage = {
   highWater?: number
   /** The continuation this session is waiting to run, when there is one. */
   autoContinue?: AutoContinueState
+  /**
+   * Every continuation waiting in the session: the conversation's own and each
+   * of its subagents', so a page opened mid-wait shows each in its own view.
+   */
+  autoContinues?: AutoContinueEntry[]
 }
 
 export type ForebrainTaskNotificationTask = {
@@ -342,6 +349,8 @@ export function formatTokenCount(n: number | undefined): string {
 }
 
 export type ForebrainTokenBudget = {
+  /** Roster key of the agent whose context this budget measures; unset is the primary agent's. */
+  agentId?: string
   model?: string
   tokenUsage?: number
   percentLeft?: number
@@ -438,6 +447,7 @@ export function parseForebrainSessionBoundMessage(raw: unknown): ForebrainSessio
   const sessionSwitched = data?.session_switched === true || data?.sessionSwitched === true
   const highWater = asNumber(data?.high_water)
   const autoContinue = parseAutoContinue(data?.auto_continue)
+  const autoContinues = parseAutoContinueEntries(data?.auto_continues)
   return {
     requestId: asTrimmedString(msg.request_id),
     sessionId: asTrimmedString(msg.session_id),
@@ -445,6 +455,7 @@ export function parseForebrainSessionBoundMessage(raw: unknown): ForebrainSessio
     ...(sessionSwitched ? { sessionSwitched } : {}),
     ...(highWater !== undefined ? { highWater } : {}),
     ...(autoContinue ? { autoContinue } : {}),
+    ...(autoContinues.length ? { autoContinues } : {}),
   }
 }
 
@@ -589,6 +600,7 @@ export function parseTokenBudgetPayload(
 ): ForebrainTokenBudget | undefined {
   if (!payload) return undefined
   const budget = {
+    agentId: asTrimmedString(payload.agentId ?? payload.agent_id),
     model: typeof payload.model === 'string' ? payload.model : undefined,
     tokenUsage: asNumber(payload.tokenUsage ?? payload.token_usage),
     percentLeft: asNumber(payload.percentLeft ?? payload.percent_left),

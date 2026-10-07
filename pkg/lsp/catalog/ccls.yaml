@@ -1,0 +1,13 @@
+id: ccls
+display_name: ccls
+languages: [C, C++, Objective-C]
+priority: 50
+command: ccls
+extension_to_language: {.c: c, .h: c, .cc: cpp, .cpp: cpp, .cxx: cpp, .hpp: cpp, .hh: cpp, .hxx: cpp, .m: objective-c, .mm: objective-cpp}
+root_markers: [compile_commands.json, .ccls, .ccls-root]
+initialization_options:
+  cache: {directory: "${LSP_CACHE_DIR}"}
+detect:
+  version_args: [--version]
+readiness: progress
+notes: "Alternative to clangd; chosen only when clangd is disabled. Needs compile_commands.json."

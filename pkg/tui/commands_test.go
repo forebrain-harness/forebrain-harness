@@ -89,27 +89,32 @@ func (s *stubSelector) Review(string, []turn.StatusFact, []string, int) (int, bo
 // scriptedSelector plays back a scripted answer per selector primitive, so a
 // test can walk the /skills picker the way a user does.
 type scriptedSelector struct {
-	richSteps  []richStep
-	richIdx    int
-	inputs     []selectorInput
-	inputIdx   int
-	multi      []string
-	multiOK    bool
-	richLabels []string
-	richItems  [][]SelectItem
+	richSteps    []richStep
+	richIdx      int
+	inputs       []selectorInput
+	inputIdx     int
+	multi        []string
+	multiOK      bool
+	multiOptions []string
+	richLabels   []string
+	richItems    [][]SelectItem
 }
 
+// A step answers by label when set — the row a user meant, wherever the menu
+// puts it — and by idx otherwise.
 type richStep struct {
-	idx int
-	ok  bool
-	err error
+	idx   int
+	ok    bool
+	err   error
+	label string
 }
 
 func (s *scriptedSelector) Select(string, []string, string) (string, bool, error) {
 	return "", false, nil
 }
 
-func (s *scriptedSelector) MultiSelect(string, []string, []string) ([]string, bool, error) {
+func (s *scriptedSelector) MultiSelect(_ string, options []string, _ []string) ([]string, bool, error) {
+	s.multiOptions = append(s.multiOptions, options...)
 	return s.multi, s.multiOK, nil
 }
 
@@ -132,6 +137,14 @@ func (s *scriptedSelector) SelectRich(label string, items []SelectItem, _ int) (
 	}
 	step := s.richSteps[s.richIdx]
 	s.richIdx++
+	if step.label != "" {
+		for i, item := range items {
+			if item.Label == step.label {
+				return i, step.ok, step.err
+			}
+		}
+		return -1, false, nil
+	}
 	return step.idx, step.ok, step.err
 }
 
@@ -146,8 +159,8 @@ func (s *scriptedSelector) Review(string, []turn.StatusFact, []string, int) (int
 func skillsTestSession() *fakeSession {
 	return &fakeSession{
 		skillToggleOpts: []skill.Entry{
-			{Name: "repo", Description: "inspect repo", Source: "project", Path: "/skills/repo", Enabled: true},
-			{Name: "skill-workshop", Description: "work on skills", Source: "system", Path: "/skills/.system/skill-workshop", Enabled: true},
+			{Name: "repo", Description: "inspect repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true},
+			{Name: "skill-workshop", Description: "work on skills", Origin: skill.OriginBuiltin, Path: "/skills/.system/skill-workshop", Enabled: true},
 		},
 	}
 }
@@ -179,14 +192,40 @@ func TestSkillsMenuOffersManageActionsAndInstalledSkills(t *testing.T) {
 	if strings.Contains(out.String(), "inspect repo") {
 		t.Fatalf("expected no fallback rendering on cancel, got %q", out.String())
 	}
+	// Skills sit in their layer's tab, actions in the Manage tab at the end,
+	// so the labels are exactly the names and no skill row trails a Manage row.
+	firstManage := -1
+	skills := map[string]string{}
+	for i, item := range selector.richItems[0] {
+		if item.Category == "Manage" {
+			if firstManage < 0 {
+				firstManage = i
+			}
+			continue
+		}
+		skills[item.Label] = item.Category
+	}
+	if skills["repo"] != "Project" {
+		t.Fatalf("repo tab = %q, want Project", skills["repo"])
+	}
+	if skills["skill-workshop"] != "Built-in" {
+		t.Fatalf("skill-workshop tab = %q, want Built-in", skills["skill-workshop"])
+	}
+	manageCount := 0
+	for _, item := range selector.richItems[0] {
+		if item.Category == "Manage" {
+			manageCount++
+		}
+	}
+	if manageCount != 4 || firstManage != len(selector.richItems[0])-manageCount {
+		t.Fatalf("manage rows = %d, first at %d of %d", manageCount, firstManage, len(selector.richItems[0]))
+	}
 }
 
 func TestSkillsRunNowSubmitsSkillSelection(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
-		// Row 4 is the first installed skill (four manage rows precede it),
-		// then "Run it now".
-		richSteps: []richStep{{idx: 4, ok: true}, {idx: 0, ok: true}},
+		richSteps: []richStep{{label: "repo", ok: true}, {idx: 0, ok: true}},
 		inputs:    []selectorInput{{value: "summarize the repo", ok: true}},
 	}
 	var out bytes.Buffer
@@ -211,7 +250,7 @@ func TestSkillsRunNowSubmitsSkillSelection(t *testing.T) {
 func TestSkillsCreateHandsOffToWorkshop(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
-		richSteps: []richStep{{idx: 1, ok: true}},
+		richSteps: []richStep{{label: "Create a skill", ok: true}},
 		inputs:    []selectorInput{{value: "write release notes", ok: true}},
 	}
 	var out bytes.Buffer
@@ -235,7 +274,7 @@ func TestSkillsInstallFromSourceAsksOnlyForSourceAndScope(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
 		richSteps: []richStep{
-			{idx: 0, ok: true}, // Add a skill
+			{label: "Add a skill", ok: true},
 			{idx: 2, ok: true}, // From a GitHub repo or URL
 			{idx: 0, ok: true}, // global
 		},
@@ -261,9 +300,9 @@ func TestSkillsSubmenuCancelReturnsToTopLevel(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
 		richSteps: []richStep{
-			{idx: 0, ok: true},   // Add a skill
-			{idx: -1, ok: false}, // cancel the source picker
-			{idx: 1, ok: true},   // back on the top menu: Create a skill
+			{label: "Add a skill", ok: true},    // into the source picker
+			{idx: -1, ok: false},                // cancel the source picker
+			{label: "Create a skill", ok: true}, // back on the top menu
 		},
 		inputs: []selectorInput{{value: "write release notes", ok: true}},
 	}
@@ -272,6 +311,216 @@ func TestSkillsSubmenuCancelReturnsToTopLevel(t *testing.T) {
 	if _, submitted := ctrl.handleSkills(context.Background()); !submitted {
 		t.Fatal("expected the top-level menu to stay active after a submenu cancel")
 	}
+}
+
+// tabbedRecordingSelector records every tabbed picker call so a test can
+// assert the shape the /skills lists were opened with. The tabbed steps
+// answer by label when set (the row the user meant, wherever the menu puts
+// it) and by idx otherwise; an exhausted queue cancels, as scriptedSelector
+// does for SelectRich. Sub-flows keep going through the embedded
+// scriptedSelector.
+type tabbedRecordingSelector struct {
+	*scriptedSelector
+	tabbedSteps []richStep
+
+	selectCalls int
+	selectItems [][]SelectItem
+	selectOpts  []TabbedSelectOptions
+
+	multiCalls int
+	multiItems [][]SelectItem
+	multiOpts  []TabbedSelectOptions
+	multiIdx   []int
+	multiOK    bool
+}
+
+func (s *tabbedRecordingSelector) SelectRichTabbed(_ string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
+	s.selectCalls++
+	s.selectItems = append(s.selectItems, items)
+	s.selectOpts = append(s.selectOpts, opts)
+	if len(s.tabbedSteps) == 0 {
+		return -1, false, nil
+	}
+	step := s.tabbedSteps[0]
+	s.tabbedSteps = s.tabbedSteps[1:]
+	if step.label != "" {
+		for i, item := range items {
+			if item.Label == step.label {
+				return i, step.ok, step.err
+			}
+		}
+		return -1, false, nil
+	}
+	return step.idx, step.ok, step.err
+}
+
+func (s *tabbedRecordingSelector) MultiSelectRichTabbed(_ string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
+	s.multiCalls++
+	s.multiItems = append(s.multiItems, items)
+	s.multiOpts = append(s.multiOpts, opts)
+	return s.multiIdx, s.multiOK, nil
+}
+
+// The menu opens as a tabbed picker: skills in their layers' tabs, the
+// actions in an uncounted Manage tab, and every skill row's label exactly the
+// skill's name.
+func TestSkillsMenuUsesTabsWithManageLast(t *testing.T) {
+	session := skillsTestSession()
+	selector := &tabbedRecordingSelector{scriptedSelector: &scriptedSelector{}}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	if _, submitted := ctrl.handleSkills(context.Background()); submitted {
+		t.Fatalf("cancelling the picker must not submit a turn")
+	}
+	if selector.selectCalls != 1 {
+		t.Fatalf("expected one tabbed open, got %d", selector.selectCalls)
+	}
+	opts := selector.selectOpts[0]
+	if len(opts.Uncounted) != 1 || opts.Uncounted[0] != "Manage" {
+		t.Fatalf("uncounted tabs = %v, want [Manage]", opts.Uncounted)
+	}
+	if opts.DefaultIdx != 0 {
+		t.Fatalf("default row = %d, want the first", opts.DefaultIdx)
+	}
+	items := selector.selectItems[0]
+	if items[0].Label != "repo" {
+		t.Fatalf("first row = %q, want repo", items[0].Label)
+	}
+	skills := map[string]bool{"repo": false, "skill-workshop": false}
+	for _, item := range items {
+		if _, isSkill := skills[item.Label]; isSkill {
+			skills[item.Label] = true
+		}
+	}
+	for name, found := range skills {
+		if !found {
+			t.Fatalf("skill %q absent or its label carries more than the name: %v", name, items)
+		}
+	}
+}
+
+// A cancelled sub-flow returns to the menu on the row the user left, so
+// browsing skills never resets to the first tab's first row.
+func TestSkillsMenuReopensOnTheRowItLeft(t *testing.T) {
+	session := skillsTestSession()
+	selector := &tabbedRecordingSelector{
+		scriptedSelector: &scriptedSelector{},
+		tabbedSteps: []richStep{
+			{idx: 0, ok: true}, // repo's detail page
+			{label: "Add a skill", ok: true},
+		},
+	}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	if _, submitted := ctrl.handleSkills(context.Background()); submitted {
+		t.Fatalf("walking out of the menu must not submit a turn")
+	}
+	if selector.selectCalls != 3 {
+		t.Fatalf("expected three tabbed opens, got %d", selector.selectCalls)
+	}
+	if got := selector.selectOpts[1].DefaultIdx; got != 0 {
+		t.Fatalf("reopen after repo defaulted to %d, want 0", got)
+	}
+	addIdx := -1
+	for i, item := range selector.selectItems[0] {
+		if item.Label == "Add a skill" {
+			addIdx = i
+			break
+		}
+	}
+	if addIdx < 0 {
+		t.Fatalf("no Add a skill row: %v", selector.selectItems[0])
+	}
+	if got := selector.selectOpts[2].DefaultIdx; got != addIdx {
+		t.Fatalf("reopen after Add a skill defaulted to %d, want %d", got, addIdx)
+	}
+}
+
+// The toggle is a tabbed multi-select whose checks are item indices, and the
+// confirmed set goes to the store as paths.
+func TestSkillsToggleUsesTabbedMultiSelect(t *testing.T) {
+	session := skillsTestSession()
+	selector := &tabbedRecordingSelector{
+		scriptedSelector: &scriptedSelector{},
+		tabbedSteps:      []richStep{{label: "Enable / disable skills", ok: true}},
+		multiIdx:         []int{0},
+		multiOK:          true,
+	}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	ctrl.handleSkills(context.Background())
+
+	if selector.multiCalls != 1 {
+		t.Fatalf("expected one tabbed multi-select, got %d", selector.multiCalls)
+	}
+	require.Equal(t, []int{0, 1}, selector.multiOpts[0].Checked, "checked rows must be every enabled skill")
+	require.Equal(t, []string{"/skills/repo"}, session.appliedEnabledPaths)
+}
+
+// Without the tabbed capability the toggle falls back to a plain MultiSelect
+// whose options name each row's tab, so no two rows share an option.
+func TestSkillsToggleFallbackShowsUniqueLabels(t *testing.T) {
+	session := skillsTestSession()
+	selector := &scriptedSelector{
+		richSteps: []richStep{{label: "Enable / disable skills", ok: true}},
+		multiOK:   false,
+	}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	ctrl.handleSkills(context.Background())
+	require.Equal(t, []string{"repo (Project)", "skill-workshop (Built-in)"}, selector.multiOptions)
+}
+
+// The shadowing note names the winning layer, so a row says which copy the
+// user is really looking at.
+func TestSkillRowDescriptionNamesTheShadowingLayer(t *testing.T) {
+	project := skill.Entry{
+		Name:        "improve",
+		Description: "Work on skills",
+		Enabled:     true,
+		Origin:      skill.OriginProject,
+		Path:        "/proj/.forebrain/skills/improve",
+		Shadows:     []string{"/home/u/.claude/skills/improve"},
+	}
+	cross := skill.Entry{
+		Name:       "improve",
+		Enabled:    false,
+		Origin:     skill.OriginCrossTool,
+		Path:       "/home/u/.claude/skills/improve",
+		ShadowedBy: []string{"/proj/.forebrain/skills/improve"},
+	}
+	origins := skillOriginsByPath([]skill.Entry{project, cross})
+	if got := skillRowDescription(project, origins, true); !strings.HasSuffix(got, "· shadows the Cross-tool copy") {
+		t.Fatalf("winning copy description = %q", got)
+	}
+	got := skillRowDescription(cross, origins, true)
+	if !strings.HasPrefix(got, "(off) ") || !strings.HasSuffix(got, "· shadowed by the Project copy") {
+		t.Fatalf("shadowed copy description = %q", got)
+	}
+	if plain := skillRowDescription(cross, origins, false); strings.Contains(plain, "(off)") {
+		t.Fatalf("toggle row carries the state twice: %q", plain)
+	}
+}
+
+// The import picker's rows split the decision across two columns: the name,
+// and everything else in the description; blocked proposals are explained,
+// not offered.
+func TestMemoryImportRowsUseTwoColumns(t *testing.T) {
+	rows, names, blocked := memoryImportRows([]MemorySkillOption{
+		{Name: "release-check", Description: "Verify a release", Status: "new", SlashCommand: "/release-check"},
+		{Name: "compact", Description: "Squeeze things", Blocked: "name collides with the built-in /compact command"},
+	})
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Label != "release-check" || rows[0].Category != "Memory" {
+		t.Fatalf("row = %+v", rows[0])
+	}
+	if rows[0].Description != "Verify a release · new · adds /release-check" {
+		t.Fatalf("description = %q", rows[0].Description)
+	}
+	require.Equal(t, []string{"release-check"}, names)
+	require.Equal(t, []string{"compact (name collides with the built-in /compact command)"}, blocked)
 }
 
 // A slash command's picker is shown in the terminal and a pick goes back to
@@ -574,8 +823,11 @@ func TestPrintSessionResumeContextReplaysEventOnlySession(t *testing.T) {
 	if renderer.perAgentVM["agent-only"] == nil {
 		t.Fatal("event-only resume did not restore the child VM")
 	}
-	if len(renderer.vm.blocks) == 0 || !strings.Contains(renderer.vm.blocks[0].frame.Title, "subagent") {
+	if len(renderer.vm.blocks) == 0 || renderer.vm.blocks[0].frame.Kind != FrameFanout {
 		t.Fatalf("event-only resume did not restore its primary card: %#v", renderer.vm.blocks)
+	}
+	if got := renderer.vm.blocks[0].frame.FanoutLineAgents[0]; got != "agent-only" {
+		t.Fatalf("event-only card row opens %q, want agent-only", got)
 	}
 }
 
@@ -635,7 +887,7 @@ func TestPrintSessionResumeContextInterleavesPrimaryAndSubagentHistory(t *testin
 		switch {
 		case block.frame.Kind == FrameUser && block.frame.Content == "parent prompt":
 			userIndex = i
-		case block.frame.Kind == FrameStatus && strings.Contains(block.frame.Title, "subagent"):
+		case block.frame.Kind == FrameFanout:
 			cardIndex = i
 		case block.frame.Kind == FrameAssistant && block.frame.Content == "parent answer":
 			answerIndex = i
@@ -666,7 +918,7 @@ func TestPrintSessionResumeContextUsesActiveContextForFooterWhileReplayingFullHi
 	// Full visual replay is independently covered by replayTurnsToRenderer tests;
 	// here the fake's full transcript (non-empty) exercises that path while the
 	// footer assertion proves it is NOT used for budget accounting.
-	stats := renderer.ComposerTokenStats()
+	stats := renderer.ComposerTokenStats("")
 	if !stats.Active || stats.PercentLeft != 100 || stats.ContextWindow <= 0 {
 		t.Fatalf("resume footer used full history instead of cleared active context: %+v", stats)
 	}
@@ -747,6 +999,121 @@ func TestReplayTurnsToRendererUsesPersistedToolTimingAndStructuredMetadata(t *te
 	painted := stripANSI(strings.Join(renderViewport(&renderer.vm, 120, 20, 0, DiffThemeDark).lines, "\n"))
 	if !strings.Contains(painted, "TODO") || strings.Contains(painted, `{"stdout"`) {
 		t.Fatalf("replayed shell viewport did not match live UX:\n%s", painted)
+	}
+}
+
+// A denied approval's stored row carries the display half of its refusal: the
+// model-facing instruction text stays in the row's content, and the replayed
+// card shows the sentence the live card showed — never the instruction text,
+// and never a review the refusal once carried.
+func TestReplayDeniedToolRowShowsItsDisplayHalf(t *testing.T) {
+	assistantParts := state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+		ID:   "call-exit-1",
+		Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{
+			Name:      "exit_plan_mode",
+			Arguments: `{}`,
+		},
+	}), "")
+	denialText := "Tool approval denied by user: the user rejected this exit_plan_mode tool call. Try a different approach or ask the user for guidance.\n\nUser feedback: 改成先写测试"
+	denial := llm.ToolResultMessage("call-exit-1", llm.Text(denialText))
+	denial.ToolDisplay = &llm.ToolDisplayState{
+		Body:         "改成先写测试",
+		ToolMetaJSON: `{"tool_name":"exit_plan_mode","status":"denied"}`,
+	}
+	toolParts := state.MessagePartsJSON(denial, denialText)
+
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "assistant", PartsJSON: assistantParts},
+		{Role: "tool", Content: denialText, PartsJSON: toolParts},
+	})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	frame := renderer.vm.blocks[0].frame
+	if frame.Kind != FrameTool {
+		t.Fatalf("frame kind=%s want tool", frame.Kind)
+	}
+	if frame.Content != "改成先写测试" {
+		t.Fatalf("replayed denial body = %q, want the user's words", frame.Content)
+	}
+	if strings.Contains(frame.Content, "Tool approval denied by user") || strings.Contains(frame.Content, "<review") {
+		t.Fatalf("replayed denial body leaked model-facing text: %q", frame.Content)
+	}
+	if got := frame.ToolMeta.Status; got != "denied" {
+		t.Fatalf("replayed denial status = %q, want denied", got)
+	}
+}
+
+// A heartbeat's prompt is not the person's words: replay draws it as what it
+// is — a system card titled with its origin — while the person's own rows
+// keep replaying as theirs.
+func TestReplayDrawsAHeartbeatPromptAsItsOriginCard(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	beats := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text("anything new?")), "anything new?"), state.MessageOriginHeartbeat)
+	typed := state.MessagePartsJSON(llm.UserMessage(llm.Text("typed by hand")), "typed by hand")
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: "anything new?", PartsJSON: beats},
+		{Role: "user", Content: "typed by hand", PartsJSON: typed},
+	})
+
+	if len(renderer.vm.blocks) != 2 {
+		t.Fatalf("blocks=%d want 2", len(renderer.vm.blocks))
+	}
+	beat := renderer.vm.blocks[0].frame
+	if beat.Kind != FrameSystem {
+		t.Fatalf("heartbeat frame kind=%s want system", beat.Kind)
+	}
+	if beat.Title != "heartbeat" {
+		t.Fatalf("heartbeat frame title=%q want heartbeat", beat.Title)
+	}
+	if beat.Content != "anything new?" {
+		t.Fatalf("heartbeat frame content=%q", beat.Content)
+	}
+	own := renderer.vm.blocks[1].frame
+	if own.Kind != FrameUser {
+		t.Fatalf("the person's own row kind=%s want user", own.Kind)
+	}
+	if own.Content != "typed by hand" {
+		t.Fatalf("the person's own row content=%q", own.Content)
+	}
+}
+
+// A scheduled task's prompt is the heartbeat's case again with its own
+// origin: replay draws it as a system card titled cron, so a fire's
+// conversation reads as what it is — the task talking, not the person.
+func TestReplayDrawsACronPromptAsItsOriginCard(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	fired := state.WithMessageOrigin(state.MessagePartsJSON(llm.UserMessage(llm.Text("nightly summary")), "nightly summary"), state.MessageOriginCron)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "user", Content: "nightly summary", PartsJSON: fired},
+	})
+
+	if len(renderer.vm.blocks) != 1 {
+		t.Fatalf("blocks=%d want 1", len(renderer.vm.blocks))
+	}
+	card := renderer.vm.blocks[0].frame
+	if card.Kind != FrameSystem {
+		t.Fatalf("cron frame kind=%s want system", card.Kind)
+	}
+	if card.Title != "cron" {
+		t.Fatalf("cron frame title=%q want cron", card.Title)
+	}
+	if card.Content != "nightly summary" {
+		t.Fatalf("cron frame content=%q", card.Content)
 	}
 }
 
@@ -865,9 +1232,10 @@ func TestReplaySubagentEventsRestoreClickableCompleteAgentView(t *testing.T) {
 	renderer.vpBodyHeight = 30
 	renderer.vpHeight = 30
 	renderer.vpLastRender = renderViewport(&renderer.vm, 100, 30, 0, DiffThemeDark)
-	row := rowOfPrimaryText(t, renderer, "subagent explore ended")
+	// The card's task row is the way back into the agent's view.
+	row := rowOfPrimaryText(t, renderer, "inspect approval history")
 	if !renderer.ViewportClickToggle(0, row) || renderer.ActiveView() != agentID {
-		t.Fatalf("replayed lifecycle card did not open %q; active=%q", agentID, renderer.ActiveView())
+		t.Fatalf("replayed card row did not open %q; active=%q", agentID, renderer.ActiveView())
 	}
 }
 
@@ -1495,8 +1863,9 @@ func replayTurnsWithReducer(renderer *Renderer, turns []state.Message, reducer *
 		return
 	}
 	callIndex, _ := buildToolCallIndex(turns)
+	subagentCalls := turn.SubagentCallsInTranscript(turns)
 	for _, turn := range turns {
-		replayTurnWithReducer(renderer, reducer, turn, callIndex, nil)
+		replayTurnWithReducer(renderer, reducer, turn, callIndex, subagentCalls, nil)
 	}
 }
 
@@ -1584,8 +1953,13 @@ func replayedTimelineOrder(t *testing.T, turns []state.Message, events []event.R
 	flushReplayReducer(renderer, reducer)
 	out := make([]string, 0, len(renderer.vm.blocks))
 	for _, block := range renderer.vm.blocks {
-		line := strings.TrimSpace(block.frame.Title + " " + block.frame.Content)
-		out = append(out, strings.TrimSpace(line))
+		parts := make([]string, 0, 3)
+		for _, part := range []string{block.frame.Title, block.frame.Summary, block.frame.Content} {
+			if part = strings.TrimSpace(stripANSI(part)); part != "" {
+				parts = append(parts, part)
+			}
+		}
+		out = append(out, strings.Join(parts, " "))
 	}
 	return out
 }
@@ -1649,9 +2023,10 @@ func TestReplayTimelineAnchorsSubagentCardsToTheCallThatSpawnedThem(t *testing.T
 	got := replayedTimelineOrder(t, turns, events)
 	want := []string{
 		"you run the fanout",
-		`spawn_subagent {"agent_id":"child"}`,
-		"subagent explore spawned explore [agent-1]",
-		"subagent explore ended explore [agent-1] status=ok",
+		`spawn_subagent ran spawn_subagent {"agent_type":"explore"} {"agent_id":"child"}`,
+		// One card for the one execution: opened by the spawn, closed by the
+		// end, both anchored after the call that dispatched it.
+		"Ran 1 explore task ✓ look around",
 		"all done",
 	}
 	if len(got) != len(want) {
@@ -1661,6 +2036,88 @@ func TestReplayTimelineAnchorsSubagentCardsToTheCallThatSpawnedThem(t *testing.T
 		if got[i] != want[i] {
 			t.Fatalf("replay order=%v want %v", got, want)
 		}
+	}
+}
+
+// A plan review's own events carry the approval action they answer but no tool
+// step of their own, so without an anchor they fall back to the clock and land
+// wherever their timestamp happens to sort — after the approval that produced
+// them. The card belongs to that approval's exchange, so replay anchors it to
+// the call the action names and its sequence puts it between the two lines.
+func TestReplayTimelinePutsThePlanReviewCardBetweenTheApprovalLines(t *testing.T) {
+	callArgs := `{"plan":"do the thing"}`
+	body := `{"plan":"do the thing"}`
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 100},
+		{RowID: 2, Role: "assistant", CreatedAt: 300,
+			PartsJSON: state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+				ID: "call-exit", Type: llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: callArgs},
+			}), "")},
+		{RowID: 3, Role: "tool", Content: body, ToolStepID: "call-exit", CreatedAt: 300,
+			PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage("call-exit", llm.Text(body)), body)},
+		{RowID: 4, Role: "assistant", Content: "all done", CreatedAt: 300},
+	}
+	at := time.Unix(400, 0).UTC()
+	events := []event.RunEvent{
+		event.NewRunEvent("approval-requested:act-1", "run-1", "s1", event.RunEventApprovalReq,
+			event.ApprovalRequestedPayload{ActionID: "act-1", ActionKind: "exit_plan_mode", ToolStepID: "call-exit"}, at),
+		event.NewRunEvent("approval-resolved:act-1:review_requested", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-1", ActionKind: "exit_plan_mode", Decision: "review_requested", ToolStepID: "call-exit",
+				Confirmation: "✔ You asked zhipuai/glm-5.3-flash to review the plan",
+			}, at),
+		event.NewRunEvent("plan-review-started", "run-1", "s1", event.RunEventPlanReviewStarted,
+			event.PlanReviewStartedPayload{
+				ActionID: "act-1", ReviewID: "plan-review:rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+			}, at),
+		event.NewRunEvent("plan-reviewed", "run-1", "s1", event.RunEventPlanReviewed,
+			event.PlanReviewedPayload{
+				ActionID: "act-1", ReviewID: "plan-review:rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+				Outcome: "done",
+			}, at),
+		event.NewRunEvent("approval-resolved:act-1:approved", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-1", ActionKind: "exit_plan_mode", Decision: "approved", ToolStepID: "call-exit",
+				Confirmation: "✔ You approved forebrain to exit plan mode",
+			}, at),
+	}
+	for i := range events {
+		events[i].Sequence = int64(i + 1)
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, events, &Reducer{}, nil)
+
+	asked, card, approved, tool := -1, -1, -1, -1
+	seq := make([]string, 0, len(renderer.vm.blocks))
+	for i, block := range renderer.vm.blocks {
+		f := block.frame
+		switch {
+		case f.Kind == FrameFanout:
+			card = i
+			seq = append(seq, "card:"+f.StepID)
+			if f.Summary != "Ran 1 plan-reviewer task" {
+				t.Fatalf("card summary = %q, want Ran 1 plan-reviewer task", f.Summary)
+			}
+		case f.Kind == FrameTool && f.Title == "exit_plan_mode":
+			tool = i
+			seq = append(seq, "exit plan mode")
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You asked"):
+			asked = i
+			seq = append(seq, "asked")
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You approved"):
+			approved = i
+			seq = append(seq, "approved")
+		}
+	}
+	if asked < 0 || card < 0 || approved < 0 || tool < 0 {
+		t.Fatalf("replay lost a record: asked=%d card=%d approved=%d tool=%d %v", asked, card, approved, tool, seq)
+	}
+	if !(asked < card && card < approved && approved < tool) {
+		t.Fatalf("the card must replay between the approval's two confirmation lines, above the call it names: %v", seq)
 	}
 }
 
@@ -2193,28 +2650,6 @@ func TestReplayTimelineDrawsAGoalWhereItHappened(t *testing.T) {
 	require.Equal([]string{"/goal ship", goalTitleStarted, "round one answer", "Round 2", "round two answer", goalTitleDone, "thanks"}, order)
 }
 
-// /diff draws a diff under a title that says how much changed, and a sentence
-// explaining why there is no diff as just that sentence.
-func TestHandleDiffDrawsADiffOrItsReason(t *testing.T) {
-	require := require.New(t)
-	render := func(reply string) Frame {
-		renderer := NewRenderer(nil, nil)
-		renderer.EnableViewportMode()
-		t.Cleanup(renderer.DisableViewportMode)
-		cmds := &commandController{session: &fakeSession{diffReply: reply}, renderer: renderer}
-		require.True(cmds.handleDiff("s1", nil))
-		require.NotEmpty(renderer.vm.blocks)
-		return renderer.vm.blocks[len(renderer.vm.blocks)-1].frame
-	}
-	msg := render("No uncommitted changes.")
-	require.Equal("diff", msg.Title)
-	require.Equal("No uncommitted changes.", msg.Content)
-
-	diff := render("diff --git a/a.txt b/a.txt\nnew file mode 100644\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n")
-	require.Equal("1 file changed · +2 −0", diff.Title)
-	require.Contains(stripAllANSI(diff.Content), "hello")
-}
-
 // A finished import's report is a frame in the conversation, the same frame
 // /resume replays from the recorded event.
 func TestMigrationReportIsTheFrameReplayDraws(t *testing.T) {
@@ -2279,10 +2714,12 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 			RunFinishedAtMs: 1790503290000},
 		{RowID: 4, Role: "user", Content: "next"},
 	}
-	frame, ok := replayWorkedLine(turns, 2)
+	lines := turn.RunWorkedLines(turns)
+	line, ok := lines[2]
 	if !ok {
 		t.Fatal("the tool row closing run-1 must produce its Worked-for line")
 	}
+	frame := replayWorkedFrame(line)
 	if frame.Kind != FrameStatus || frame.RunID != "run-1" || !frame.Final {
 		t.Fatalf("worked frame = %+v", frame)
 	}
@@ -2293,14 +2730,52 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 		t.Fatalf("worked title = %q, want the finish minute (local tz)", frame.Title)
 	}
 	// The assistant row inside the same run must not add a second line.
-	if _, ok := replayWorkedLine(turns, 1); ok {
+	if _, ok := lines[1]; ok {
 		t.Fatal("a mid-run row must not close the run twice")
 	}
 	// A row with no run id has no line (rows before run binding existed get
 	// their run id backfilled by the migration; the unbackfilled ones never
 	// had one to show).
-	if _, ok := replayWorkedLine([]state.Message{{RowID: 9, Role: "assistant", RunWorkedMs: 1000}}, 0); ok {
+	if len(turn.RunWorkedLines([]state.Message{{RowID: 9, Role: "assistant", RunWorkedMs: 1000}})) != 0 {
 		t.Fatal("a row outside any run has no Worked-for line")
+	}
+}
+
+// A run that failed before it said anything still closed live: its error, then
+// its "Worked for" line. The user's message is the run's only row, and replay
+// closes the run after it in that same order.
+func TestReplayClosesASilentFailedRunAfterItsError(t *testing.T) {
+	finished := time.Date(2026, 9, 25, 7, 27, 28, 0, time.UTC)
+	turns := []state.Message{
+		{RowID: 1, RunID: "r1", Role: "user", Content: "hello", CreatedAt: 100, RunWorkedMs: 2_000, RunFinishedAtMs: finished.UnixMilli()},
+		{RowID: 2, Role: "user", Content: "again", CreatedAt: 200},
+	}
+	payload, err := json.Marshal(event.TurnErrorPayload{Error: "the provider refused the request", Message: "the provider refused the request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []event.RunEvent{{RunID: "r1", Type: event.RunEventTurnError, Payload: payload, CreatedAt: time.Unix(150, 0), Sequence: 1}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	reducer := &Reducer{}
+	replayTimelineWithReducer(renderer, turns, events, reducer, nil)
+	flushReplayReducer(renderer, reducer)
+
+	var got []string
+	for _, block := range renderer.vm.blocks {
+		switch block.frame.Kind {
+		case FrameUser:
+			got = append(got, "user:"+block.frame.Content)
+		case FrameError:
+			got = append(got, "error")
+		case FrameStatus:
+			got = append(got, block.frame.Title)
+		}
+	}
+	want := []string{"user:hello", "error", "Worked for 2s · " + finished.Local().Format("15:04"), "user:again"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("replay = %q\nwant   %q", got, want)
 	}
 }
 
@@ -2366,9 +2841,286 @@ func TestReplayRendersTheSessionFactSpread(t *testing.T) {
 		"user|you|review the diff",
 		"tool|read_file|file body",
 		"assistant||done",
-		"status|subagent verification spawned|verification",
-		"status|subagent verification ended|verification status=completed",
+		// One card for the one execution, opened by the spawn and closed by
+		// the end — the two lifecycle text lines it used to paint.
+		"fanout||\x1b[32m✓\x1b[0m check it\n",
 		"goal|Goal|ship it",
 	}, "\n")
 	require.Equal(t, want, strings.TrimSpace(blob.String()), "replayed frames changed; kinds=%v", kinds)
+}
+
+// A stored subagent_send row replays as the card its facts describe, not as
+// the JSON body the row recorded: rows written before the card existed carry
+// the old "output:\n```json" display, and replaying that verbatim would put the
+// raw record back on screen.
+func TestReplayedSubagentSendCardIsBuiltFromFacts(t *testing.T) {
+	sendArgs := `{"title":"读 README","task":"阅读 README.md 并用三句话总结","subagent_type":"general-purpose"}`
+	resultJSON := `{"task_id":"subagent-6e5c","run_id":"exec-1","parent_run_id":"run-9",` +
+		`"status":"ok","started_at":1790000000,"agent_type":"general-purpose","agent_kind":"typed"}`
+	toolRow := state.Message{
+		RowID: 3, Role: "tool", Content: resultJSON,
+		PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage("call-send", llm.Text(resultJSON)), ""),
+		CreatedAt: 101,
+	}
+	// The display part is the pre-card shape: the JSON envelope verbatim.
+	parts := []map[string]any{
+		{
+			"type":           "tool_display",
+			"body":           "output:\n\n```json\n{" + `\"output\":` + "\"\\\"" + strings.ReplaceAll(resultJSON, `"`, `\"`) + "\\\"}" + "}\n```",
+			"summary":        "ran subagent_send",
+			"tool_meta_json": `{"tool_name":"subagent_send","status":"completed"}`,
+		},
+	}
+	raw, err := json.Marshal(parts)
+	require.NoError(t, err)
+	toolRow.PartsJSON = strings.TrimSuffix(toolRow.PartsJSON, "]") + "," + strings.TrimPrefix(string(raw), "[")
+
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "summarize the readme", CreatedAt: 99},
+		assistantToolCallRow("dispatching", "call-send", "subagent_send", sendArgs),
+		toolRow,
+	}
+	events := []event.RunEvent{
+		event.NewRunEvent("spawn-1", "run-9", "s1", event.RunEventSubagentSpawned,
+			event.SubagentSpawnedPayload{
+				AgentID: "subagent-6e5c", AgentType: "general-purpose", TaskID: "subagent-6e5c",
+				Title: "读 README", Task: "阅读 README.md 并用三句话总结",
+				ParentToolCallID: "call-send", TaskIndex: 0, ExecutionID: "exec-1",
+			}, time.Unix(100, 500).UTC()),
+		event.NewRunEvent("end-1", "run-9", "s1", event.RunEventSubagentEnded,
+			event.SubagentEndedPayload{
+				AgentID: "subagent-6e5c", AgentType: "general-purpose", TaskID: "subagent-6e5c",
+				Status: "ok", ParentToolCallID: "call-send", TaskIndex: 0, ExecutionID: "exec-1",
+				FinishedAtMs: 1790000042000,
+			}, time.Unix(102, 0).UTC()),
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, events, &Reducer{}, nil)
+
+	var card *Frame
+	for i := range renderer.vm.blocks {
+		if renderer.vm.blocks[i].frame.Kind == FrameFanout {
+			f := renderer.vm.blocks[i].frame
+			card = &f
+		}
+	}
+	if card == nil {
+		t.Fatalf("the send call replayed without its card: %#v", renderer.vm.blocks)
+	}
+	if card.Summary != "Ran 1 general-purpose task in background" {
+		t.Fatalf("summary = %q, want Ran 1 general-purpose task in background", card.Summary)
+	}
+	body := card.Content + card.FanoutCallError
+	if strings.Contains(body, "agent_id") || strings.Contains(body, "{") {
+		t.Fatalf("replayed card shows the stored JSON:\n%s", body)
+	}
+	if !strings.Contains(stripANSI(body), "读 README") {
+		t.Fatalf("replayed card lacks the task name:\n%s", body)
+	}
+}
+
+// TestReapedExecutionSettlesItsOwnCardOnLiveResume reproduces the order a
+// killed process leaves behind: the resume's replay rebuilds the dispatch card
+// from the stored rows and the spawned event, and only afterwards — once the
+// dead owner's lease expires — does this process's reaper publish the
+// execution's ended on the live event path. The live reducer must settle the
+// replayed card the way the full replay would, not open an orphan titled by
+// the agent type while the dispatch card ticks forever.
+func TestReapedExecutionSettlesItsOwnCardOnLiveResume(t *testing.T) {
+	sendArgs := `{"title":"慢读文件","task":"慢读多个文件逐步总结","subagent_type":"general-purpose"}`
+	resultJSON := `{"task_id":"subagent-d09e","run_id":"child-1","parent_run_id":"run-1",` +
+		`"status":"running","started_at":1791330674,"agent_type":"general-purpose"}`
+	toolRow := state.Message{
+		RowID: 3, Role: "tool", Content: resultJSON,
+		PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage("call-send", llm.Text(resultJSON)), ""),
+		CreatedAt: 101,
+	}
+	display, err := json.Marshal([]map[string]any{{
+		"type":           "tool_display",
+		"body":           "已派发慢读文件",
+		"summary":        "ran subagent_send",
+		"tool_meta_json": `{"tool_name":"subagent_send","status":"completed"}`,
+	}})
+	require.NoError(t, err)
+	toolRow.PartsJSON = strings.TrimSuffix(toolRow.PartsJSON, "]") + "," + strings.TrimPrefix(string(display), "[")
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "派发一个慢读任务，不用等它", CreatedAt: 99},
+		assistantToolCallRow("派发这个慢速任务", "call-send", "subagent_send", sendArgs),
+		toolRow,
+	}
+	spawnedAt := time.UnixMilli(1791330674000).UTC()
+	reapedAt := spawnedAt.Add(9800 * time.Millisecond)
+	// The first resume replays the transcript and the spawned event only: the
+	// subagent was still running when its process died, so its ended event is
+	// still in the future.
+	events := []event.RunEvent{
+		event.NewRunEvent("spawn-1", "child-1", "s1", event.RunEventSubagentSpawned,
+			event.SubagentSpawnedPayload{
+				AgentID: "subagent-d09e", AgentType: "general-purpose", TaskID: "subagent-d09e",
+				Title: "慢读文件", Task: "慢读多个文件逐步总结",
+				ParentToolCallID: "call-send", TaskIndex: 0, ExecutionID: "exec-1",
+			}, spawnedAt),
+	}
+	session := &fakeSession{transcriptTurns: turns, sessionEvents: events}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	ctrl := newCommandController(session, renderer, &stubSelector{}, nil, "")
+	live := &Reducer{}
+	ctrl.replayCardsTo = live
+	ctrl.printSessionResumeContext("s1")
+
+	// The reaper's ended arrives on the live path after the resume, carrying
+	// the spawned event's identity and the run's stamped stop time. The live
+	// loop renders what the reducer returns, so the test does too.
+	liveResult := live.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-d09e", AgentType: "general-purpose", TaskID: "subagent-d09e",
+		Status: "failed", Error: "The process running this turn stopped before it finished.",
+		ParentToolCallID: "call-send", TaskIndex: 0, ExecutionID: "exec-1",
+		FinishedAt: reapedAt, Timestamp: time.UnixMilli(1791330900000).UTC(),
+	})
+	for _, frame := range liveResult.Frames {
+		renderer.RenderFrame(frame)
+	}
+
+	// The ended settles the dispatch's own card; an orphan keyed by the
+	// execution is the mis-binding this test pins down.
+	if orphan := live.findFanoutByStepID(standaloneExecStepID("exec-1", "subagent-d09e")); orphan != nil {
+		t.Fatalf("the reaped end opened an orphan card: %#v", orphan.Tasks)
+	}
+	fs := live.findFanoutByStepID("call-send")
+	if fs == nil {
+		t.Fatal("the dispatch card is gone from the live reducer")
+	}
+	task := fs.Tasks[0]
+	if task.Status != "failed" || task.Error != "The process running this turn stopped before it finished." {
+		t.Fatalf("the dispatch task settled as status=%q error=%q", task.Status, task.Error)
+	}
+	if !task.StartedAt.Equal(spawnedAt) || !task.EndedAt.Equal(reapedAt) {
+		t.Fatalf("task clock = %s..%s, want %s..%s (the stamped runtime, not the reap)",
+			task.StartedAt, task.EndedAt, spawnedAt, reapedAt)
+	}
+	var cards []Frame
+	for i := range renderer.vm.blocks {
+		if renderer.vm.blocks[i].frame.Kind == FrameFanout {
+			cards = append(cards, renderer.vm.blocks[i].frame)
+		}
+	}
+	if len(cards) != 1 || cards[0].StepID != "call-send" {
+		t.Fatalf("fanout cards on screen = %d (step ids %v), want exactly the dispatch card", len(cards), fanoutStepIDs(cards))
+	}
+	if body := stripANSI(cards[0].Content + cards[0].FanoutCallError); !strings.Contains(body, "✗ 慢读文件") ||
+		!strings.Contains(body, "The process running this turn stopped before it finished.") {
+		t.Fatalf("settled card lacks its outcome:\n%s", body)
+	}
+
+	// The same facts through the full replay — the second resume's path —
+	// draw the very same card.
+	fullEvents := append(append([]event.RunEvent(nil), events...),
+		event.NewRunEvent("end-1", "child-1", "s1", event.RunEventSubagentEnded,
+			event.SubagentEndedPayload{
+				AgentID: "subagent-d09e", AgentType: "general-purpose", TaskID: "subagent-d09e",
+				Status: "failed", Error: "The process running this turn stopped before it finished.",
+				ParentToolCallID: "call-send", TaskIndex: 0, ExecutionID: "exec-1",
+				FinishedAtMs: reapedAt.UnixMilli(),
+			}, time.UnixMilli(1791330900000).UTC()))
+	replayRenderer := NewRenderer(nil, nil)
+	replayRenderer.viewportMode = true
+	replayRenderer.composerSuppressed = true
+	replayTimelineWithReducer(replayRenderer, turns, fullEvents, &Reducer{}, nil)
+	var replayCard Frame
+	replayCards := 0
+	for i := range replayRenderer.vm.blocks {
+		if replayRenderer.vm.blocks[i].frame.Kind == FrameFanout {
+			replayCard = replayRenderer.vm.blocks[i].frame
+			replayCards++
+		}
+	}
+	if replayCards != 1 {
+		t.Fatalf("full replay drew %d fanout cards, want 1", replayCards)
+	}
+	if cards[0].Summary != replayCard.Summary || cards[0].Content != replayCard.Content ||
+		cards[0].Final != replayCard.Final || !equalFanoutClocks(cards[0].FanoutLineClocks, replayCard.FanoutLineClocks) {
+		t.Fatalf("live-settled card drifted from the replayed one:\nlive:    %q / %q\nreplay:  %q / %q",
+			cards[0].Summary, cards[0].Content, replayCard.Summary, replayCard.Content)
+	}
+}
+
+func fanoutStepIDs(cards []Frame) []string {
+	ids := make([]string, 0, len(cards))
+	for i := range cards {
+		ids = append(ids, cards[i].StepID)
+	}
+	return ids
+}
+
+func equalFanoutClocks(a, b []fanoutLineClock) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].Start.Equal(b[i].Start) || !a[i].End.Equal(b[i].End) {
+			return false
+		}
+	}
+	return true
+}
+
+// A replayed run flushes its transcript rows together, after the subagent
+// events of that turn — so a query row whose snapshot said "running" replays
+// after the execution's end already did. The row must settle from that end and
+// the header must still carry the call's own duration, byte-identical to the
+// live card.
+func TestReplayedQueryRowSettlesWhenItsEndCameFirst(t *testing.T) {
+	statusArgs := `{"task_id":"subagent-6e5c"}`
+	record := `{"task_id":"subagent-6e5c","agent_type":"general-purpose","title":"读 README",` +
+		`"status":"running","execution_id":"exec-1","started_at":1790000000}`
+	statusRow := state.Message{
+		RowID: 3, Role: "tool", Content: record, ExecDurationMs: 16,
+		PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage("call-status", llm.Text(record)), ""),
+		CreatedAt: 101,
+	}
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "check on it", CreatedAt: 99},
+		assistantToolCallRow("checking", "call-status", "subagent_status", statusArgs),
+		statusRow,
+	}
+	events := []event.RunEvent{
+		event.NewRunEvent("end-1", "exec-1", "s1", event.RunEventSubagentEnded,
+			event.SubagentEndedPayload{
+				AgentID: "subagent-6e5c", AgentType: "general-purpose", TaskID: "subagent-6e5c",
+				Status: "ok", ExecutionID: "exec-1", FinishedAtMs: 1790000042000,
+			}, time.Unix(102, 0).UTC()),
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, events, &Reducer{}, nil)
+
+	var card *Frame
+	for i := range renderer.vm.blocks {
+		if f := renderer.vm.blocks[i].frame; f.Kind == FrameFanout && f.StepID == "call-status" {
+			card = &renderer.vm.blocks[i].frame
+		}
+	}
+	if card == nil {
+		t.Fatalf("the status call replayed without its card: %#v", renderer.vm.blocks)
+	}
+	if card.Summary != "Checked 1 general-purpose task" {
+		t.Fatalf("summary = %q, want Checked 1 general-purpose task", card.Summary)
+	}
+	if card.Duration != 16*time.Millisecond {
+		t.Fatalf("replayed call duration = %v, want the row's 16ms", card.Duration)
+	}
+	rendered := strings.Join(renderFanoutForTest(*card), "\n")
+	if !strings.Contains(rendered, "Checked 1 general-purpose task · <0.1s") {
+		t.Fatalf("replayed header lost the call duration:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "✓ 读 README · 42s") {
+		t.Fatalf("replayed query row did not settle with its execution's end:\n%s", rendered)
+	}
 }

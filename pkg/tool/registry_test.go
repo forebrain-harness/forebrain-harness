@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -124,5 +125,95 @@ func TestStateToolMiddlewaresApplyItsOwnMiddlewareAndTelemetry(t *testing.T) {
 	}
 	if !extraCalled {
 		t.Fatal("registered middleware was not called")
+	}
+}
+
+func TestLSPToolRegisteredOnlyWhenFrozenOn(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		rt             *AgentToolRuntime
+		wantRegistered bool
+	}{
+		{name: "no runtime code intel", rt: &AgentToolRuntime{}, wantRegistered: false},
+		{name: "code intel but tool frozen off", rt: &AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: false}, wantRegistered: false},
+		{name: "frozen decision on", rt: &AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true}, wantRegistered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewState(t.TempDir())
+			a, err := agent.New(registryNoopLLM{}, "main", "test")
+			if err != nil {
+				t.Fatalf("agent.New: %v", err)
+			}
+			if err := RegisterDefaultTools(a, st, tc.rt); err != nil {
+				t.Fatalf("RegisterDefaultTools: %v", err)
+			}
+			registered := false
+			for _, tool := range a.Tools() {
+				if tool.Name() == "lsp" {
+					registered = true
+				}
+			}
+			if registered != tc.wantRegistered {
+				t.Fatalf("lsp registered = %v, want %v", registered, tc.wantRegistered)
+			}
+			meta, ok := st.ToolMetaByName("lsp")
+			if tc.wantRegistered {
+				if !ok {
+					t.Fatal("missing ToolMeta for lsp")
+				}
+				if !meta.ReadOnly || !meta.ConcurrencySafe {
+					t.Fatalf("lsp meta flags = %+v, want ReadOnly and ConcurrencySafe", meta)
+				}
+				if meta.Category != "code" {
+					t.Fatalf("lsp meta category = %q, want %q", meta.Category, "code")
+				}
+				if meta.Description != lspToolDescription {
+					t.Fatalf("lsp meta description drifted from appendix B.1")
+				}
+				return
+			}
+			if ok {
+				t.Fatalf("unexpected ToolMeta for unregistered lsp: %+v", meta)
+			}
+		})
+	}
+}
+
+func TestLSPToolRegistrationOrder(t *testing.T) {
+	toolNames := func(rt *AgentToolRuntime) []string {
+		st := NewState(t.TempDir())
+		a, err := agent.New(registryNoopLLM{}, "main", "test")
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		if err := RegisterDefaultTools(a, st, rt); err != nil {
+			t.Fatalf("RegisterDefaultTools: %v", err)
+		}
+		names := make([]string, 0, len(a.Tools()))
+		for _, tool := range a.Tools() {
+			names = append(names, tool.Name())
+		}
+		return names
+	}
+	position := func(names []string, name string) int {
+		for i, n := range names {
+			if n == name {
+				return i
+			}
+		}
+		return -1
+	}
+
+	// Without request_permissions the lsp tool follows web_search.
+	names := toolNames(&AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true})
+	if got := position(names, "lsp"); got != position(names, "web_search")+1 {
+		t.Fatalf("lsp position = %d in %v, want directly after web_search", got, names)
+	}
+
+	// With request_permissions enabled it follows that tool instead.
+	cfg := &appcfg.Root{Features: appcfg.FeaturesSection{RequestPermissionsTool: appcfg.BoolPtr(true)}}
+	names = toolNames(&AgentToolRuntime{CodeIntel: nopCodeIntel{}, CodeIntelTool: true, Cfg: cfg})
+	if got := position(names, "lsp"); got != position(names, "request_permissions")+1 {
+		t.Fatalf("lsp position = %d in %v, want directly after request_permissions", got, names)
 	}
 }

@@ -44,6 +44,7 @@ import (
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -117,6 +118,8 @@ type poolEntry struct {
 	key     string
 	runner  *run.Runner
 	project state.Project
+	// lsp is this project's view of the environment's language-server pool.
+	lsp *lsp.Manager
 	// instructions freezes per-session project instructions.
 	insMu        sync.Mutex
 	instructions map[string]string
@@ -288,9 +291,11 @@ func (p *RunnerPool) sweepIdleEntries(now time.Time) {
 	for _, entry := range idle {
 		if release != nil {
 			_ = release(entry.runner)
-			continue
+		} else {
+			entry.runner.MCPStartup().ReleaseIdleConnections(runnerPoolForegroundSettle)
 		}
-		entry.runner.MCPStartup().ReleaseIdleConnections(runnerPoolForegroundSettle)
+		// Nil-safe: ReleaseIdle on a nil *Manager does not dereference it.
+		entry.lsp.ReleaseIdle()
 	}
 }
 
@@ -604,14 +609,20 @@ func (p *RunnerPool) entryBoundLocked(key string) bool {
 
 // closePoolEntries closes evicted runners in parallel and outside the pool
 // lock, with a total deadline: each close waits on that runner's MCP children,
-// and one that ignores its cancellation must not hold up the pool.
+// and one that ignores its cancellation must not hold up the pool. Each
+// entry's language-server view is released after its runner: the manager
+// itself does not block.
 func closePoolEntries(entries []*poolEntry) {
 	var closing []*run.Runner
+	var managers []*lsp.Manager
 	for _, entry := range entries {
 		if entry == nil || entry.runner == nil {
 			continue
 		}
 		closing = append(closing, entry.runner)
+		if entry.lsp != nil {
+			managers = append(managers, entry.lsp)
+		}
 	}
 	if len(closing) == 0 {
 		return
@@ -634,6 +645,9 @@ func closePoolEntries(entries []*poolEntry) {
 	case <-time.After(runnerPoolCloseDeadline):
 		slog.Warn("runner pool close timed out", "runners", len(closing))
 	}
+	for _, m := range managers {
+		m.Close()
+	}
 }
 
 // runnerPoolCloseDeadline bounds how long the pool waits for its runners to
@@ -648,7 +662,12 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	if baseDeps.AppCfg == nil {
 		return nil, fmt.Errorf("runner pool: environment has no config")
 	}
-	launch, err := safety.ResolveProjectContext(env.Root, project.Root)
+	// A registered project's boundary is the path the user registered: the
+	// project space, its trust record and its skills all name that exact
+	// root, so the sessions run inside it too. Resolving it as a launch
+	// directory would walk up to an enclosing checkout and run a subdirectory
+	// project under the checkout's skills, MCP servers and trust decision.
+	launch, err := safety.ResolveRegisteredContext(env.Root, project.Root)
 	if err != nil {
 		return nil, fmt.Errorf("runner pool: resolve project %s: %w", project.Root, err)
 	}
@@ -667,6 +686,20 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	entry := &poolEntry{
 		project:      frozenProject,
 		instructions: make(map[string]string),
+	}
+	// The language-server view freezes with the entry, like the MCP list:
+	// a manager from the environment's pool, decided once for this project.
+	lspOpts := lsp.ManagerOptions{
+		Home:              env.Root,
+		AgentWorkspace:    agentWorkspace,
+		ProjectRoot:       project.Root,
+		ProjectKey:        project.ProjectKey,
+		Trusted:           safety.TrustedRoot(launch) != "",
+		VersionControlled: launch.Project.VersionControlled,
+	}
+	lspOpts.ToolRegistered = lsp.ToolEnabled(baseDeps.AppCfg, lspOpts)
+	if env.LSP != nil {
+		entry.lsp = env.LSP.NewManager(lspOpts)
 	}
 	deps := run.Deps{
 		Home:          baseDeps.Home,
@@ -689,6 +722,14 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		AppCfg:        baseDeps.AppCfg,
 		SessionStore:  baseDeps.SessionStore,
 		RunRT:         baseDeps.RunRT,
+		// The frozen lsp-tool decision; the manager itself is attached below
+		// only when one exists, so a nil *lsp.Manager never lands in the
+		// interface fields as a non-nil interface.
+		CodeIntelTool: lspOpts.ToolRegistered,
+	}
+	if entry.lsp != nil {
+		deps.CodeIntel = entry.lsp
+		deps.CodeIntelControl = entry.lsp
 	}
 	deps.ProjectMemoryOnly = state.NormalizeProjectMemoryScope(project.MemoryScope) == state.ProjectMemoryProjectOnly
 	deps.ProjectInstructionsFor = func(sessionID string) string {
@@ -701,7 +742,9 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		Refresh:   turn.RefreshSkills,
 		IsBuiltin: turn.IsBuiltinName,
 	}}
+	publishLSPRecommendations(entry.lsp, runner)
 	if err := runner.Load(); err != nil {
+		entry.lsp.Close()
 		return nil, fmt.Errorf("runner pool: load project runner: %w", err)
 	}
 	entry.runner = runner
@@ -781,6 +824,46 @@ func (p *RunnerPool) PropagateConfig(ctx context.Context, next *appcfg.Root) err
 		failed = append(failed, fmt.Errorf("project %s: %w", strings.TrimSpace(entry.project.Name), err))
 	}
 	return errors.Join(failed...)
+}
+
+// Runners returns every live runner in the pool, every generation still in
+// it included, so a surface that changed the agent's own settings on disk can
+// have every running session read them again.
+func (p *RunnerPool) Runners() []*run.Runner {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []*run.Runner
+	for _, entry := range p.entries {
+		if entry != nil && entry.runner != nil {
+			out = append(out, entry.runner)
+		}
+	}
+	return out
+}
+
+// RunnersForProject returns the live runners built for one project, every
+// generation still in the pool included, so a surface that changed that
+// project's settings on disk can have its running sessions read them again.
+func (p *RunnerPool) RunnersForProject(projectID string) []*run.Runner {
+	if p == nil {
+		return nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []*run.Runner
+	for _, entry := range p.entries {
+		if entry != nil && entry.runner != nil && strings.TrimSpace(entry.project.ID) == projectID {
+			out = append(out, entry.runner)
+		}
+	}
+	return out
 }
 
 // BindSession records which project a new session belongs to, so the next

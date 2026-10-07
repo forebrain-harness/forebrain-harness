@@ -134,8 +134,8 @@ func TestDiscoverIncludesEveryTrustedProjectSkillDir(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if entry.Source != "project" {
-			t.Fatalf("%s: source = %q, want project", name, entry.Source)
+		if entry.Origin != OriginProject {
+			t.Fatalf("%s: origin = %q, want project", name, entry.Origin)
 		}
 		delete(want, entry.Path)
 	}
@@ -170,8 +170,8 @@ func TestDiscoverIncludesSkillsFromTrustedPlainDirectory(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if entry.Source != "project" {
-			t.Fatalf("%s: source = %q, want project", name, entry.Source)
+		if entry.Origin != OriginProject {
+			t.Fatalf("%s: origin = %q, want project", name, entry.Origin)
 		}
 		if !entry.Enabled {
 			t.Fatalf("%s: discovered project skill must default to enabled", name)

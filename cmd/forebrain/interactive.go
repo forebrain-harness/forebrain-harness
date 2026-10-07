@@ -28,6 +28,7 @@ var interactiveIsTerminal = func(f *os.File) bool {
 }
 var interactiveEnsureWorkspaceTrusted = ensureWorkspaceTrusted
 var interactiveEnsureProjectMCPConsent = ensureProjectMCPConsent
+var interactiveEnsureProjectLSPConsent = ensureProjectLSPConsent
 var interactiveNeedsFirstSetup = tui.NeedsFirstSetup
 var onboardRunner = tui.RunOnboarding
 var interactiveRunOnboard = onboardRunner
@@ -75,6 +76,12 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	// the list is frozen for the session, so startup is the only moment to
 	// ask. Anything left unconfirmed stays out of the session.
 	if err := interactiveEnsureProjectMCPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, ""); err != nil {
+		return err
+	}
+	// The project's language-server entries follow the same rule, asked
+	// right after the MCP ones (spec §5.2): an unconfirmed entry does not
+	// apply, not even as an override of a built-in server.
+	if err := interactiveEnsureProjectLSPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, ""); err != nil {
 		return err
 	}
 	restoreLog := tui.RedirectProcessLoggingForTUI(root)

@@ -19,6 +19,17 @@
         </div>
       </header>
 
+      <p
+        v-if="retentionDays !== null"
+        class="mb-4 text-[12px] text-[var(--forebrain-muted-text)]"
+        data-testid="cron-retention-note"
+      >
+        {{ t('cron.retentionNote', { days: retentionDays }) }}
+        <RouterLink to="/settings?tab=cron" class="ml-1 text-[var(--forebrain-brand-1)] hover:underline" data-testid="cron-retention-edit">
+          {{ t('cron.retentionEdit') }}
+        </RouterLink>
+      </p>
+
       <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div v-if="loading && !jobs.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
@@ -37,7 +48,7 @@
                 <span> · {{ job.deliver ? t('cron.deliversTo', { target: job.deliver }) : t('cron.recordOnly') }}</span>
                 <span v-if="job.runCount"> · {{ t('cron.runCount', { count: job.runCount }) }}</span>
               </p>
-              <p v-if="job.lastError" class="mt-1 text-[11px] text-[var(--forebrain-danger)]">{{ job.lastError }}</p>
+              <p v-if="job.lastError" class="mt-1 text-[11px] text-[var(--forebrain-danger)]">{{ jobErrorText(job) }}</p>
             </div>
             <div class="flex shrink-0 flex-col items-end gap-1">
               <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="runNow(job)">{{ t('cron.runNow') }}</button>
@@ -58,9 +69,16 @@
                   <span class="text-[var(--forebrain-muted-text)]">{{ formatTime(row.startedAt) }}</span>
                   <span v-if="row.trigger" class="text-[var(--forebrain-muted-text)]">· {{ row.trigger }}</span>
                   <span v-if="row.deliveredTo" class="text-[var(--forebrain-muted-text)]">· {{ row.deliveredTo }}</span>
+                  <button
+                    v-if="row.sessionId && row.hasConversation"
+                    type="button"
+                    class="forebrain-btn forebrain-btn-ghost h-6 px-2 text-[11px]"
+                    data-testid="cron-run-open"
+                    @click="openConversation(row)"
+                  >{{ t('cron.openConversation') }}</button>
                 </div>
                 <p v-if="row.output" class="mt-1 whitespace-pre-wrap text-[12px] text-[var(--forebrain-text-2)]">{{ row.output }}</p>
-                <p v-if="row.error" class="mt-1 whitespace-pre-wrap text-[11px] text-[var(--forebrain-danger)]">{{ row.error }}</p>
+                <p v-if="row.error" data-testid="cron-run-error" class="mt-1 whitespace-pre-wrap text-[11px] text-[var(--forebrain-danger)]">{{ runErrorText(row) }}</p>
               </li>
             </ul>
           </div>
@@ -137,8 +155,10 @@
  * under them is the engine's own parse of what will be saved.
  */
 import { computed, onMounted, ref } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
 import { getErrorMessage, forebrainApi, type CronJobRecord, type CronRunRecord } from '@/lib/api'
+import { formatProviderError } from '@/lib/providerError'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{
@@ -148,6 +168,7 @@ const props = defineProps<{
 }>()
 
 const { t, locale } = useI18n()
+const router = useRouter()
 
 const jobs = ref<CronJobRecord[]>([])
 const runs = ref<CronRunRecord[]>([])
@@ -170,7 +191,19 @@ const editorError = ref('')
 // delivery" stays an explicit first option rather than a blank input.
 const enabledChannels = ref<string[]>([])
 
+// Retention is the install's, not this agent's, so the note under the header
+// reads the global settings once and links to their tab in the settings page.
+const retentionDays = ref<number | null>(null)
+
 const scope = computed(() => props.scope ?? 'agent')
+
+async function loadRetentionDays() {
+  try {
+    retentionDays.value = (await forebrainApi.cronSettings()).retentionDays
+  } catch {
+    retentionDays.value = null
+  }
+}
 
 async function loadChannels() {
   try {
@@ -285,6 +318,31 @@ async function openRuns(job: CronJobRecord) {
   }
 }
 
+// A fire is a conversation of its own; its record is the door to it. Only a
+// record whose session holds a transcript has one to open.
+function openConversation(row: CronRunRecord) {
+  if (!row.sessionId) return
+  void router.push({ path: '/', query: { session: row.sessionId } })
+}
+
+// The runtime stores an error code beside the English sentence it kept; the
+// sentence is written here in the viewer's language — following a switch made
+// while the record is on screen — and the stored one shows only when the code
+// is not one this build knows.
+function runErrorText(row: CronRunRecord): string {
+  const shown = row.error
+    ? formatProviderError({ code: row.errorCode ?? '', providerMessage: row.error }, locale.value)
+    : null
+  return shown ?? row.error ?? ''
+}
+
+function jobErrorText(job: CronJobRecord): string {
+  const shown = job.lastError
+    ? formatProviderError({ code: job.lastErrorCode ?? '', providerMessage: job.lastError }, locale.value)
+    : null
+  return shown ?? job.lastError ?? ''
+}
+
 function statusLabel(status: string): string {
   switch (status) {
     case 'ok':
@@ -325,5 +383,6 @@ function formatTime(unix?: number): string {
 onMounted(() => {
   void load()
   void loadChannels()
+  void loadRetentionDays()
 })
 </script>

@@ -91,15 +91,50 @@ test('an owned skill is editable from the panel and downloadable', async ({ page
 
 test('a from-scratch task gets a model answer (real LLM)', async ({ page }) => {
   test.skip(!realLLM, 'needs E2E_REAL_LLM=1 with real provider credentials')
+  // A real workshop turn reads files and may call tools before it answers.
+  test.setTimeout(480_000)
   await signIn(page)
   await page.goto('/workshop', { waitUntil: 'networkidle' })
   await page.click('[data-testid="workshop-new-task"]')
   await page.fill('[data-testid="workshop-new-name"]', 'e2e-demo-skill')
   await page.fill('[data-testid="workshop-purpose"]', 'greet the user warmly when they say hi')
   await page.click('[data-testid="workshop-create-task"]')
-  await expect(
-    page.locator('[data-workshop-message="assistant"]').first(),
-  ).toContainText(/\S+/, { timeout: 120_000 })
+  // The turn ran to its end with the workshop skill active: the model
+  // answered in words (not a placeholder), and no error surfaced — a skill
+  // that failed to load would end the turn with one.
+  await expect(page.locator('[data-workshop-message="assistant"]').last()).toContainText(/[^.…\s]{2,}/, { timeout: 150_000 })
+  // The turn may park on gates — a tool approval or a question. Each is
+  // decided right here, with the chat page's own controls, and deciding one
+  // has to set the run going again: it reaches its end, or the next gate.
+  const decided = new Set<string>()
+  const deadline = Date.now() + 420_000
+  for (;;) {
+    expect(Date.now(), 'the workshop turn neither finished nor resumed after a decision').toBeLessThan(deadline)
+    const gates = page.locator('[data-testid="pending-approval"], [data-testid="pending-question"]')
+    const ids = await gates.evaluateAll((rows) => rows.map((row) => row.getAttribute('data-action-id') ?? ''))
+    if (decided.size && ids.some((id) => !decided.has(id))) break
+    const open = ids.find((id) => !decided.has(id))
+    if (open) {
+      const gate = page.locator(`[data-action-id="${open}"]`)
+      if (await gate.getAttribute('data-testid') === 'pending-question') {
+        for (const group of await gate.locator('.space-y-1').all()) {
+          await group.locator('input[type="radio"], input[type="checkbox"]').first().check({ timeout: 5_000 }).catch(() => undefined)
+        }
+        await gate.getByRole('button', { name: /提交|Submit/ }).click({ timeout: 5_000 })
+      } else {
+        await gate.locator('[data-testid="pending-approve"], [data-testid="pending-decision-accept"]').first().click({ timeout: 5_000 })
+      }
+      decided.add(open)
+      continue
+    }
+    const sending = /加载中|Loading/.test(await page.locator('[data-testid="workshop-send"]').textContent() ?? '')
+    if (!sending && !ids.length) break
+    await page.waitForTimeout(1000)
+  }
+  // Neither a page-level failure nor a run that ended in one.
+  await expect(page.locator('[data-testid="workshop-error"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="run-error"]')).toHaveCount(0)
+  await shot(page, 'workshop-real-llm')
 })
 
 test('the skills page links into the workshop', async ({ page }) => {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -19,11 +20,13 @@ import (
 )
 
 // Sentinel failures of authorizeControlPlane; each maps to the 401 body the
-// control plane has always answered with.
+// control plane has always answered with, except a cross-origin cookie write,
+// which is authenticated but not allowed (403).
 var (
 	errGatewayAuthModeUnsupported = errors.New("unsupported gateway auth mode")
 	errGatewayTokenMissing        = errors.New("gateway token missing")
 	errGatewayUnauthorized        = errors.New("unauthorized")
+	errGatewayCrossOrigin         = errors.New("cross-origin request refused")
 )
 
 func gatewayAuthMode(cfg *appcfg.Root) string {
@@ -67,6 +70,15 @@ func ControlPlaneAuthorized(r *http.Request, expected string) bool {
 // X-API-Key) or its web session cookie match the configured token. Query
 // strings never carry credentials — they end up in access logs and browser
 // history.
+//
+// The cookie is the one credential a browser attaches on its own, so it only
+// authorizes a state-changing request issued by this gateway's own pages.
+// SameSite=Strict keeps it away from other sites, but a site is a host, not
+// an origin: a page served from any other port of the same host still gets
+// the cookie attached, and a form-encoded or text/plain POST reaches the
+// handler without a CORS preflight. The Origin a browser stamps on such a
+// request is what tells the two apart — the same comparison the WebSocket
+// upgrade applies to its handshake.
 func authorizeControlPlane(r *http.Request, cfg *appcfg.Root) error {
 	switch mode := gatewayAuthMode(cfg); mode {
 	case "none":
@@ -83,9 +95,34 @@ func authorizeControlPlane(r *http.Request, cfg *appcfg.Root) error {
 		return nil
 	}
 	if webSessionCookieValid(r, expected) {
+		if !requestOriginMatchesHost(r) {
+			return errGatewayCrossOrigin
+		}
 		return nil
 	}
 	return errGatewayUnauthorized
+}
+
+// requestOriginMatchesHost reports whether a cookie-carrying request may act.
+// Safe methods change nothing and a browser keeps their cross-origin answers
+// from the calling page, so only the others are checked; for those, an Origin
+// header — which browsers set on every cross-origin write and scripts cannot
+// forge — must name the host the request was sent to. A request without one
+// did not come from a page of another origin.
+func requestOriginMatchesHost(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host != "" && strings.EqualFold(u.Host, r.Host)
 }
 
 func writeControlPlaneUnauthorized(w http.ResponseWriter, body string) {
@@ -101,6 +138,11 @@ func writeControlPlaneAuthError(w http.ResponseWriter, r *http.Request, err erro
 	case errors.Is(err, errGatewayTokenMissing):
 		slog.Error("gateway control plane token missing", "path", r.URL.Path)
 		writeControlPlaneUnauthorized(w, `{"error":"gateway token missing"}`)
+	case errors.Is(err, errGatewayCrossOrigin):
+		slog.Warn("gateway control plane refused a cross-origin request", "path", r.URL.Path, "origin", r.Header.Get("Origin"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"cross-origin request refused"}`))
 	default:
 		slog.Error("gateway control plane auth failed", "path", r.URL.Path, "auth", telemetry.RedactLogLine(r.Header.Get("Authorization")))
 		writeControlPlaneUnauthorized(w, `{"error":"unauthorized"}`)
@@ -149,7 +191,13 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 	// request, so it always reflects the currently bound agent.
 	withChannels := ControlPlaneHTTPMiddleware(env, gw.channelHandler(inner))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !rl.allow(clientIP(r)) {
+		// The limiter bounds what can be sent without the gateway's
+		// credentials: guesses at the token, the sign-in exchange, the login
+		// page. A request that carries them is the owner's own page at work —
+		// one load of it fans out into more asset and API requests than any
+		// burst sized for strangers, and throttling the holder of the token
+		// protects nothing the token does not already grant.
+		if !requestAuthorized(env, r) && !rl.allow(clientIP(r)) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
@@ -163,6 +211,15 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 		}
 		withChannels.ServeHTTP(w, r)
 	})
+}
+
+// requestAuthorized reports whether r carries the gateway's credentials under
+// the live configuration.
+func requestAuthorized(env *process.Environment, r *http.Request) bool {
+	if env == nil || env.Deps.AppCfg == nil {
+		return false
+	}
+	return authorizeControlPlane(r, env.Deps.AppCfg) == nil
 }
 
 // envAgentID names the primary agent this process is serving. The runner is

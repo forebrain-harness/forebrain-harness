@@ -442,8 +442,11 @@ func waitForQueuedNotifications(t *testing.T, session *ChatSession) {
 // pending continuation.
 type cancellingSession struct {
 	*fakeSession
-	pending   bool
-	cancelled []string
+	pending           bool
+	pendingSubagent   bool
+	cancelled         []string
+	cancelledSubagent []string
+	continuedSubagent []string
 }
 
 func (s *cancellingSession) CancelAutoContinue(sessionID string) bool {
@@ -451,6 +454,18 @@ func (s *cancellingSession) CancelAutoContinue(sessionID string) bool {
 	was := s.pending
 	s.pending = false
 	return was
+}
+
+func (s *cancellingSession) CancelSubagentAutoContinue(sessionID, agentKey string) bool {
+	s.cancelledSubagent = append(s.cancelledSubagent, sessionID+"|"+agentKey)
+	was := s.pendingSubagent
+	s.pendingSubagent = false
+	return was
+}
+
+func (s *cancellingSession) ContinueSubagentAuto(plan turn.AutoContinuePlan, prompt string) error {
+	s.continuedSubagent = append(s.continuedSubagent, plan.AgentKey+"|"+prompt)
+	return nil
 }
 
 func scheduledMsg(at time.Time) AutoContinueScheduledMsg {
@@ -483,8 +498,8 @@ func TestAutoContinueNoticeAndTranscriptLine(t *testing.T) {
 	if !handleAutoContinueNotification(renderer, state, scheduledMsg(at)) {
 		t.Fatal("scheduled message not handled")
 	}
-	if state.autoContinue == nil || !state.autoContinue.announced {
-		t.Fatalf("an idle loop announces at once: %+v", state.autoContinue)
+	if entry := state.autoContinueFor(""); entry == nil || !entry.announced {
+		t.Fatalf("an idle loop announces at once: %+v", entry)
 	}
 	clock := autoContinueClock(at, time.Now())
 	transcript := statusLines(renderer)
@@ -515,7 +530,7 @@ func TestAutoContinueIgnoresAnotherSession(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
 	state := &streamState{sessionID: "other"}
 	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
-	if state.autoContinue != nil {
+	if state.autoContinueFor("") != nil {
 		t.Fatal("took on another session's continuation")
 	}
 }
@@ -534,7 +549,7 @@ func TestAutoContinueEscapeCancelsThroughTheEngine(t *testing.T) {
 	}
 	// The engine's own cancellation event is what clears the notice.
 	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", Reason: turn.AutoContinueCancelledByUser})
-	if state.autoContinue != nil {
+	if state.autoContinueFor("") != nil {
 		t.Fatal("still pending after the cancellation event")
 	}
 	if strings.Contains(composerText(renderer), "continuing automatically") {
@@ -554,7 +569,7 @@ func TestAutoContinueSupersededQuietly(t *testing.T) {
 	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
 	before := statusLines(renderer)
 	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", Reason: turn.AutoContinueSuperseded})
-	if state.autoContinue != nil {
+	if state.autoContinueFor("") != nil {
 		t.Fatal("still pending after being superseded")
 	}
 	if statusLines(renderer) != before {
@@ -577,7 +592,7 @@ func TestAutoContinueDueBecomesTheNextSubmission(t *testing.T) {
 	if _, again := state.takeAutoContinueDue(); again {
 		t.Fatal("the continuation was handed out twice")
 	}
-	if state.autoContinue != nil || strings.Contains(composerText(renderer), "continuing automatically") {
+	if state.autoContinueFor("") != nil || strings.Contains(composerText(renderer), "continuing automatically") {
 		t.Fatal("notice outlived the continuation")
 	}
 }
@@ -604,8 +619,86 @@ func TestAutoContinueLeftBehindOnSessionSwitch(t *testing.T) {
 	state := &streamState{sessionID: "s1", session: session}
 	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
 	state.leaveAutoContinue(renderer)
-	if len(session.cancelled) != 1 || state.autoContinue != nil || state.autoContinueWake() {
-		t.Fatalf("cancels %v, pending %+v", session.cancelled, state.autoContinue)
+	if len(session.cancelled) != 1 || state.autoContinueFor("") != nil || state.autoContinueWake() {
+		t.Fatalf("cancels %v, pending %+v", session.cancelled, state.autoContinueFor(""))
+	}
+}
+
+// A subagent's continuation belongs to that subagent's view: its notice shows
+// there and nowhere else, typing or Esc in that view cancels only it, and the
+// conversation's own wait is never touched (README rule 9).
+func TestAutoContinueNoticeBelongsToTheViewOfItsAgent(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	session := &cancellingSession{fakeSession: &fakeSession{}, pending: true, pendingSubagent: true}
+	state := &streamState{sessionID: "s1", session: session}
+	at := time.Now().Add(time.Hour)
+
+	handleAutoContinueNotification(renderer, state, scheduledMsg(at))
+	handleAutoContinueNotification(renderer, state, AutoContinueScheduledMsg{SessionID: "s1", AgentID: "task-a", ContinueAt: at, Code: string(llm.ExplainRateLimitQuota), Attempt: 1})
+
+	if state.autoContinueFor("") == nil || state.autoContinueFor("task-a") == nil {
+		t.Fatalf("both waits must be held: %+v", state.autoContinue)
+	}
+	if !strings.Contains(composerText(renderer), "continuing automatically") {
+		t.Fatalf("the conversation's notice is missing: %q", composerText(renderer))
+	}
+	renderer.SetActiveView("task-a")
+	if !strings.Contains(composerText(renderer), "continuing automatically") {
+		t.Fatalf("the subagent's notice is missing: %q", composerText(renderer))
+	}
+	// Esc in the subagent's view cancels only its wait.
+	if !state.cancelAutoContinue(renderer) {
+		t.Fatal("Esc in the subagent's view found nothing to cancel")
+	}
+	if len(session.cancelledSubagent) != 1 || session.cancelledSubagent[0] != "s1|task-a" {
+		t.Fatalf("subagent cancels = %v", session.cancelledSubagent)
+	}
+	if len(session.cancelled) != 0 {
+		t.Fatalf("the conversation's wait was cancelled too: %v", session.cancelled)
+	}
+	// The engine's own cancellation clears that view's notice only.
+	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", AgentID: "task-a", Reason: turn.AutoContinueCancelledByUser})
+	if state.autoContinueFor("task-a") != nil {
+		t.Fatal("the subagent's wait survived its cancellation event")
+	}
+	if state.autoContinueFor("") == nil {
+		t.Fatal("the conversation's wait was dropped by the subagent's cancel")
+	}
+	renderer.SetActiveView("")
+	if !strings.Contains(composerText(renderer), "continuing automatically") {
+		t.Fatalf("the conversation's notice was lost: %q", composerText(renderer))
+	}
+}
+
+// A subagent's due continuation is delivered to that subagent, and only while
+// its wait is still shown: a reader who pressed Esc as the timer fired has
+// cleared it, and the racing continuation is dropped.
+func TestTUIContinuesASubagentOnlyWhileItsNoticeIsShown(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+	session := &cancellingSession{fakeSession: &fakeSession{}}
+	state := &streamState{sessionID: "s1", session: session}
+	renderer.SetActiveView("task-a")
+
+	handleAutoContinueNotification(renderer, state, AutoContinueScheduledMsg{SessionID: "s1", AgentID: "task-a", ContinueAt: time.Now().Add(time.Hour), Code: string(llm.ExplainRateLimitQuota), Attempt: 1})
+	if !state.cancelAutoContinue(renderer) {
+		t.Fatal("Esc must be consumed while the notice is up")
+	}
+	handleAutoContinueNotification(renderer, state, AutoContinueDueMsg{SessionID: "s1", AgentKey: "task-a", Prompt: turn.AutoContinuePrompt})
+	if len(session.continuedSubagent) != 0 {
+		t.Fatalf("ran a continuation the reader cancelled: %v", session.continuedSubagent)
+	}
+
+	handleAutoContinueNotification(renderer, state, AutoContinueScheduledMsg{SessionID: "s1", AgentID: "task-a", ContinueAt: time.Now().Add(time.Hour), Code: string(llm.ExplainRateLimitQuota), Attempt: 1})
+	handleAutoContinueNotification(renderer, state, AutoContinueDueMsg{SessionID: "s1", AgentKey: "task-a", Prompt: turn.AutoContinuePrompt})
+	if len(session.continuedSubagent) != 1 || session.continuedSubagent[0] != "task-a|"+turn.AutoContinuePrompt {
+		t.Fatalf("continued = %v", session.continuedSubagent)
+	}
+	if state.autoContinueFor("task-a") != nil {
+		t.Fatal("the notice outlived the continuation")
 	}
 }
 
@@ -682,5 +775,49 @@ func TestContinueAfterUsageLimitNeedsAnAttachedSurface(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the continuation never reached the event loop")
+	}
+}
+
+// One language-server recommendation reaches the UI once: the session log's
+// identity is what makes a resubscribing surface quiet, not the surface's
+// own memory (spec §10.1).
+func TestPublishRunEventLSPRecommendationNotifies(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+	runs := &state.RunStore{DB: db}
+	session := sessionEnv{Home: home, RunSvc: runs}.session()
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "s1", "s1"))
+
+	var shown []LSPRecommendationMsg
+	session.PrependUINotify(func(m any) {
+		if msg, ok := m.(LSPRecommendationMsg); ok {
+			shown = append(shown, msg)
+		}
+	})
+
+	rec := event.LSPRecommendation{
+		ID: "lsprec-9f1c2a7b", ServerID: "gopls", DisplayName: "gopls",
+		Languages: []string{"Go"}, TriggerExtension: ".go", Mode: "enable",
+		BinaryPath: "/usr/local/bin/gopls", Version: "v0.23.0",
+	}
+	// No run id: the event belongs to the conversation, not to one turn.
+	evt := event.NewRunEvent(rec.ID, "", "s1", event.RunEventLSPRecommendation, rec, time.Now())
+	require.NoError(t, session.publishRunEvent(ctx, evt))
+	waitForQueuedNotifications(t, session)
+	if len(shown) != 1 || shown[0].Rec.ID != rec.ID {
+		t.Fatalf("shown = %+v, want the one recommendation", shown)
+	}
+
+	// The same event id a second time — a surface that resubscribed — is
+	// already in the log and must not open a second modal.
+	require.NoError(t, session.publishRunEvent(ctx, evt))
+	waitForQueuedNotifications(t, session)
+	if len(shown) != 1 {
+		t.Fatalf("a repeat of %s was shown again: %+v", rec.ID, shown)
 	}
 }

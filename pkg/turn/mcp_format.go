@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 )
@@ -651,4 +652,140 @@ func foreignProjectMCPConfig(root string) string {
 		}
 	}
 	return ""
+}
+
+// LSPServerStateLabel is one language server's state for the panels and the
+// text reply, glyph first like MCPServerStatusLabel. An install in flight
+// hides the state ("installing…"); an enabled server with problems appends
+// them.
+func LSPServerStateLabel(s event.LSPServerStatus) string {
+	var label string
+	switch {
+	case s.Installing:
+		label = "installing…"
+	case s.State == event.LSPStateReady:
+		label = "✓ ready"
+	case s.State == event.LSPStateIndexing:
+		label = "indexing…"
+		if s.IndexingPercent > 0 {
+			label += fmt.Sprintf(" %d%%", s.IndexingPercent)
+		}
+	case s.State == event.LSPStateStarting:
+		label = "starting…"
+	case s.State == event.LSPStateFailed:
+		label = "✗ failed"
+	case s.State == event.LSPStateStopped:
+		label = "○ enabled, not running"
+	case s.State == event.LSPStateAvailable:
+		label = "○ available"
+	case s.State == event.LSPStateNotInstalled:
+		label = "– not installed"
+	case s.State == event.LSPStateBlocked:
+		label = "△ blocked"
+	default:
+		label = string(s.State)
+	}
+	if s.Enabled && s.Errors+s.Warnings > 0 {
+		var problems []string
+		if s.Errors > 0 {
+			problems = append(problems, countNoun(s.Errors, "error"))
+		}
+		if s.Warnings > 0 {
+			problems = append(problems, countNoun(s.Warnings, "warning"))
+		}
+		label += " · " + strings.Join(problems, ", ")
+	}
+	return label
+}
+
+// LSPStatusLine is the /status row: counts of enabled servers by state, ""
+// when no server is enabled (the row is then omitted).
+func LSPStatusLine(snap event.LSPSnapshot) string {
+	counts := map[string]int{}
+	var order []string
+	classify := func(label string) {
+		if label != "" {
+			counts[label]++
+		}
+	}
+	for _, s := range snap.Servers {
+		if !s.Enabled {
+			continue
+		}
+		switch s.State {
+		case event.LSPStateReady:
+			classify("running")
+		case event.LSPStateStarting, event.LSPStateIndexing:
+			classify("indexing")
+		case event.LSPStateFailed:
+			classify("failed")
+		case event.LSPStateStopped:
+			classify("idle")
+		case event.LSPStateNotInstalled:
+			classify("not installed")
+		case event.LSPStateBlocked:
+			classify("blocked")
+		}
+	}
+	// Fixed output order, whatever states the servers happen to be in.
+	order = []string{"running", "indexing", "failed", "idle", "not installed", "blocked"}
+	parts := make([]string, 0, len(order))
+	for _, label := range order {
+		if counts[label] > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", counts[label], label))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// RenderLSPInventoryMarkdown renders /lsp for the web chat and non-TTY
+// replies: the project line with its trust, the enabled and available groups,
+// the notes, and the recommendation switch-back line.
+func RenderLSPInventoryMarkdown(snap event.LSPSnapshot) string {
+	if len(snap.Servers) == 0 {
+		return "No language servers configured"
+	}
+	enabled := 0
+	for _, s := range snap.Servers {
+		if s.Enabled {
+			enabled++
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Language servers · %d configured, %d enabled\n", len(snap.Servers), enabled)
+	if snap.ProjectRoot == "" {
+		b.WriteString("No project: language servers start only in trusted projects\n")
+	} else if snap.Trusted {
+		b.WriteString("Project: " + snap.ProjectRoot + "\n")
+	} else {
+		b.WriteString("Project: " + snap.ProjectRoot + " (not trusted: language servers do not start here)\n")
+	}
+	if !snap.FeatureEnabled {
+		b.WriteString("Turned off by features.lsp\n")
+	}
+	group := func(heading string, wantEnabled bool) {
+		entries := 0
+		for _, s := range snap.Servers {
+			if s.Enabled != wantEnabled {
+				continue
+			}
+			if entries == 0 {
+				b.WriteString("\n" + heading + "\n")
+			}
+			entries++
+			b.WriteString("- " + s.ID + " · " + LSPServerStateLabel(s) + " · " + strings.Join(s.Languages, ", ") + "\n")
+			if s.Enabled && s.LastError != "" {
+				b.WriteString("  Error: " + s.LastError + "\n")
+			}
+		}
+	}
+	group("Enabled", true)
+	group("Available", false)
+	for _, note := range snap.ProjectNotes {
+		b.WriteString("Project file: " + note + "\n")
+	}
+	if snap.RecommendationsDisabled {
+		b.WriteString("\nRecommendations are off (" + snap.RecommendationsDisabledReason + "); /lsp can turn them back on\n")
+	}
+	return strings.TrimSpace(b.String())
 }

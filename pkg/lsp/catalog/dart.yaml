@@ -1,0 +1,14 @@
+id: dart
+display_name: Dart analysis server
+languages: [Dart]
+priority: 100
+command: dart
+args: [language-server, --protocol=lsp]
+extension_to_language: {.dart: dart}
+root_markers: [pubspec.yaml]
+env_passthrough: [FLUTTER_ROOT, PUB_CACHE]
+detect:
+  version_args: [--version]
+startup_timeout: 120
+readiness: progress
+notes: "Comes with the Dart or Flutter SDK."

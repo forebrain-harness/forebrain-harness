@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v2"
 )
@@ -134,11 +135,31 @@ func validateLoadedRoot(r *Root) error {
 	if err := validateMCPToolApprovalModes(r); err != nil {
 		return err
 	}
+	if err := validateLSPSection(r); err != nil {
+		return err
+	}
 	if err := ValidateHooksSettings(r.Hooks); err != nil {
+		return err
+	}
+	if err := ValidateCronSection(r.Cron); err != nil {
 		return err
 	}
 	if err := validatePrimaryAgents(r); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateCronSection checks the install's scheduled-task settings. It is the
+// one verdict behind every write path — startup, hot reload, the YAML editor,
+// and the structured settings endpoint — so an out-of-range retention is
+// rejected wherever it comes from.
+func ValidateCronSection(c CronSection) error {
+	if c.RetentionDays == nil {
+		return nil
+	}
+	if *c.RetentionDays < MinCronRetentionDays || *c.RetentionDays > MaxCronRetentionDays {
+		return fmt.Errorf("cron.retention_days must be between %d and %d", MinCronRetentionDays, MaxCronRetentionDays)
 	}
 	return nil
 }
@@ -487,6 +508,7 @@ func normalize(r *Root) {
 	}
 	NormalizeMCPServers(r.Agents.Defaults.MCPServers)
 	normalizeSandboxConfig(r)
+	normalizeLSPSection(&r.LSP)
 }
 
 func validateMCPToolApprovalModes(r *Root) error {
@@ -578,6 +600,14 @@ func materializeOptionalDefaults(r *Root) {
 	r.Features.ExecPermissionApprovals = BoolPtr(features.ExecPermissionApprovals)
 	r.Features.RequestPermissionsTool = BoolPtr(features.RequestPermissionsTool)
 	r.Features.Memories = BoolPtr(features.Memories)
+	r.Features.LSP = BoolPtr(features.LSP)
+
+	lsp := r.EffectiveLSP()
+	r.LSP.Recommendations = BoolPtr(lsp.Recommendations)
+	r.LSP.Diagnostics.AfterEdit = BoolPtr(lsp.AfterEdit)
+	r.LSP.Diagnostics.LateDelivery = BoolPtr(lsp.LateDelivery)
+	waitMS := int(lsp.Wait / time.Millisecond)
+	r.LSP.Diagnostics.WaitMS = &waitMS
 
 	memories := r.EffectiveMemories()
 	r.Memories.DisableOnExternalContext = BoolPtr(memories.DisableOnExternalContext)

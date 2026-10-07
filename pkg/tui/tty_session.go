@@ -420,21 +420,11 @@ func lookupSessionTitle(ctx context.Context, session Session, sessionID string) 
 	if sessionID == "" {
 		return ""
 	}
-	rows, err := session.ListSessionsRecent(ctx, 100)
+	title, err := session.SessionTitle(ctx, sessionID)
 	if err != nil {
 		return ""
 	}
-	for _, row := range rows {
-		if strings.TrimSpace(row.ID) != sessionID {
-			continue
-		}
-		title := strings.TrimSpace(row.Title)
-		if title == "" || title == sessionID {
-			return ""
-		}
-		return title
-	}
-	return ""
+	return title
 }
 
 // sessionTitleForTurn resolves the body the animated terminal title should
@@ -1042,8 +1032,12 @@ type blockLineCache struct {
 	width        int
 	cwd          string
 	spinnerPhase int
-	gen          int
-	lines        []string
+	// clockSec is the second a fanout card with a running task clock was last
+	// rendered at: the clock walks once a second, so the same second's render
+	// is reusable and the next one is not.
+	clockSec int
+	gen      int
+	lines    []string
 	// lineAgents attributes each cached line to a subagent, for blocks that
 	// show several at once (fanout). Empty for every other kind, whose
 	// ownership is the frame's own AgentID.
@@ -1194,6 +1188,22 @@ func (m *viewModel) insertBeforeLast(match func(Frame) bool, f Frame) *viewBlock
 	}
 	return m.append(f)
 }
+
+// endsOnError reports whether the transcript's last message is an error
+// saying content. Statuses after it ("Worked for …", an auto-continue notice)
+// annotate that ending rather than move past it, so they are looked through.
+func (m *viewModel) endsOnError(content string) bool {
+	content = strings.TrimSpace(content)
+	for i := len(m.blocks) - 1; i >= 0; i-- {
+		f := m.blocks[i].frame
+		if f.Kind == FrameStatus {
+			continue
+		}
+		return f.Kind == FrameError && content != "" && strings.TrimSpace(f.Content) == content
+	}
+	return false
+}
+
 func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 	if f.StepID != "" {
 		switch f.Kind {
@@ -1208,6 +1218,24 @@ func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 		}
 	}
 	return m.append(f)
+}
+
+// replaceOrInsertBeforeLastTool is replaceOrAppendBlock for a frame that
+// belongs to an approval exchange: a block already carrying this StepID is
+// updated in place, and a new one lands immediately before the last tool
+// block — beside the approval's own confirmation lines — instead of at the
+// tail, where the parked call the approval is holding already sits.
+func (m *viewModel) replaceOrInsertBeforeLastTool(f Frame) *viewBlock {
+	if f.StepID != "" {
+		for _, b := range m.blocks {
+			if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
+				b.frame = f
+				b.cache.valid = false
+				return b
+			}
+		}
+	}
+	return m.insertBeforeLast(func(prev Frame) bool { return prev.Kind == FrameTool }, f)
 }
 
 // collapsibleKind reports whether a frame kind participates in click-to-expand.

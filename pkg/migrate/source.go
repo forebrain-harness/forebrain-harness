@@ -256,7 +256,7 @@ type Options struct {
 	// DryRun plans the import and writes nothing.
 	DryRun bool
 	// Only restricts the import to these categories (any of "sessions",
-	// "memories", "skills", "plans", "mcp", "history"). Empty means all.
+	// "memories", "skills", "plans", "mcp", "lsp", "history"). Empty means all.
 	Only []string
 	// CurrentProjectRoot, when non-empty together with OnlyProject, limits
 	// session and memory import to that project directory.
@@ -329,7 +329,7 @@ func (o *Options) wants(category string) bool {
 // Progress is one checkpoint of a running import.
 type Progress struct {
 	// Stage names the phase: "discovering", "sessions", "memories",
-	// "skills", "mcp", "history", "consolidating".
+	// "skills", "mcp", "lsp", "history", "consolidating".
 	Stage string
 	// Done and Total count the stage's units when the stage is countable.
 	Done, Total int

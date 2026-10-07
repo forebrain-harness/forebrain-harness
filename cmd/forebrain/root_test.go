@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func TestRootCommandOnlyExposesGatewayAndResume(t *testing.T) {
+func TestRootCommandExposesItsSubcommands(t *testing.T) {
 	var names []string
 	for _, command := range rootCmd.Commands() {
 		if !command.Hidden {
@@ -17,7 +17,7 @@ func TestRootCommandOnlyExposesGatewayAndResume(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	if want := []string{"gateway", "resume"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"gateway", "lsp", "resume"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("visible commands=%v want=%v", names, want)
 	}
 	var gatewayNames []string

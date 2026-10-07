@@ -1,0 +1,18 @@
+id: ruff
+display_name: Ruff
+languages: [Python]
+role: diagnostics
+priority: 100
+command: ruff
+args: [server]
+extension_to_language: {.py: python, .pyi: python}
+root_markers: [ruff.toml, .ruff.toml, pyproject.toml]
+require_root_marker: true
+env_passthrough: [VIRTUAL_ENV]
+detect:
+  version_args: [--version]
+install:
+  - requires: pipx
+    argv: [pipx, install, ruff]
+readiness: none
+notes: "Adds Ruff's lint findings next to the Python server's diagnostics."

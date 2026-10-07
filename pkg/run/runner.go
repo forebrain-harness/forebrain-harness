@@ -105,10 +105,19 @@ type Deps struct {
 	// system bytes ahead of it are unaffected by it. Nil means no project
 	// instructions apply.
 	ProjectInstructionsFor func(sessionID string) string
-	MemoryStore            *memory.Store
-	AppCfg                 *appcfg.Root
-	SessionStore           *state.SessionStore
-	RunRT                  *state.RunStore
+	// CodeIntel and CodeIntelControl are this runtime's language-server
+	// runtime (the tools' and the surfaces' ports onto one pkg/lsp Manager),
+	// installed by the composition root; nil when the runtime has none.
+	// CodeIntelTool is the frozen decision whether the lsp tool is registered:
+	// it sits in the prompt prefix, so it is computed once per runtime and
+	// never recomputed on a config reload. Subagents inherit all three.
+	CodeIntel        tool.CodeIntelligence
+	CodeIntelControl tool.CodeIntelControl
+	CodeIntelTool    bool
+	MemoryStore      *memory.Store
+	AppCfg           *appcfg.Root
+	SessionStore     *state.SessionStore
+	RunRT            *state.RunStore
 }
 
 type Runner struct {
@@ -393,7 +402,9 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 	// and by the scope they pick: a turn grant binds to the child's own run ID,
 	// which is why nothing here has to narrow it after the fact.
 	forceToolApproval := exitPlanMode || payloadForcesToolApproval(pay)
-	approvalPolicy := r.permRuntimeGet().ApprovalPolicy(r.AppCfg)
+	snapshot := r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx))
+	approvalPolicy := snapshot.ApprovalPolicy
+	sessionCfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
 	if isApplyPatch {
 		if approved, err := r.applyPatchSessionApproval(ctx, pay); err != nil {
 			return "", false, err
@@ -401,8 +412,8 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 			return "", false, nil
 		}
 		constrained := r.sandboxAllowsFileMutation(ctx, "edit_file", pay, safety.Decision{Behavior: safety.BehaviorAsk, Reason: "default_ask"})
-		sandboxAvailable := r.AppCfg != nil && safety.NewManager().Decide(r.AppCfg, safety.ToolKindShell).UseSandbox
-		if r.AppCfg != nil && r.AppCfg.DangerFullAccessEnabled() {
+		sandboxAvailable := sessionCfg != nil && safety.NewManager().Decide(sessionCfg, safety.ToolKindShell).UseSandbox
+		if sessionCfg != nil && sessionCfg.DangerFullAccessEnabled() {
 			return "", false, nil
 		}
 		if constrained && sandboxAvailable && approvalPolicy.Mode != safety.ApprovalUnlessTrusted {
@@ -411,7 +422,7 @@ func (r *Runner) actionHook(ctx context.Context, kind string, payload any) (stri
 		rejectsSandboxApproval := approvalPolicy.Mode == safety.ApprovalNever ||
 			(approvalPolicy.Mode == safety.ApprovalGranular && !approvalPolicy.Granular.SandboxApproval)
 		if rejectsSandboxApproval {
-			if r.AppCfg != nil && r.AppCfg.SandboxMode == appcfg.SandboxModeReadOnly {
+			if sessionCfg != nil && sessionCfg.SandboxMode == appcfg.SandboxModeReadOnly {
 				return "", false, fmt.Errorf("patch rejected: writing is blocked by read-only sandbox; rejected by user approval settings")
 			}
 			return "", false, fmt.Errorf("patch rejected: writing outside of the project; rejected by user approval settings")
@@ -615,7 +626,7 @@ func (r *Runner) runPermissionRequestHook(ctx context.Context, kind string, payl
 	if cwd == "" {
 		cwd = r.workspaceRoot()
 	}
-	permissionMode := string(r.permRuntimeGet().ApprovalPolicy(r.AppCfg).Mode)
+	permissionMode := string(r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx)).ApprovalPolicy.Mode)
 	toolName, toolInput, aliases := permissionRequestHookPayload(kind, payload)
 	outcome, err := hookRT.ExecutePermissionRequest(ctx, hook.PermissionRequestInput{
 		BaseInput: hook.BaseInput{
@@ -980,14 +991,19 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	// The tool state is read through a getter because it is built later in
 	// this same Load than the chain being wrapped here.
 	llmClient = wrapSkillOfferLLM(llmClient, r.AppCfg, func() *tool.State { return r.tools }, r.workspaceRoot(), r.LaunchProject)
+	// The late-diagnostics reminder joins here for the same reason the
+	// plan-mode and skill-offer reminders sit outside summaryChain: it belongs
+	// to the conversation's next request, and a compaction's summary request
+	// must neither consume nor acknowledge it.
+	llmClient = wrapLSPDiagnosticsReminderLLM(llmClient, r.CodeIntel)
 	// Build compactDeps for the checkpoint path. SessionID is
 	// extracted from context at LLM call time.
 	compactSvc := assembly.Service{
 		Sessions: r.SessionStore,
 		PrimaryModel: func(ctx context.Context) (string, string) {
-			return r.effectiveModelFor(ctx)
+			return r.agentModelFor(ctx)
 		},
-		CompactLLM: r.sessionClientFor,
+		CompactLLM: r.agentCompactClientFor,
 		ModelProvider: func(model string) string {
 			return ProviderForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
 		},
@@ -1011,10 +1027,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	compactDeps := &CompactChainDeps{
 		ExplicitLimit: r.AppCfg.Compact.ModelAutoCompactTokenLimit,
 		LimitScope:    strings.TrimSpace(r.AppCfg.Compact.ModelAutoCompactTokenLimitScope),
-		// Observed window behaviour is per-model, so the checkpoint path needs the
-		// same identity the compact service resolves.
+		// Observed window behaviour is per-model, so the checkpoint path needs
+		// the same identity the compact service resolves.
 		ActiveModel: func(ctx context.Context) (string, string) {
-			return r.effectiveModelFor(ctx)
+			return r.agentModelFor(ctx)
 		},
 		TryCompact: func(ctx context.Context, msgs []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error) {
 			// Compaction owns model history, so it remains scoped to the worker
@@ -1159,6 +1175,17 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 		PermissionSnapshot:           r.PermissionSnapshot,
 		PermissionSnapshotForSession: r.PermissionSnapshotForSession,
 		ApplyPermissionUpdate:        r.ApplyPermissionUpdate,
+		CodeIntel:                    r.CodeIntel,
+		CodeIntelTool:                r.CodeIntelTool,
+	}
+	// Reads feed the language servers that are already running (a baseline
+	// for the next edit's diagnostics); they never start one.
+	if ci := r.CodeIntel; ci != nil {
+		r.tools.SetNamedReadObserver("lsp", func(ctx context.Context, abs string, content []byte) {
+			ci.DidRead(ctx, abs, content)
+		})
+	} else {
+		r.tools.SetNamedReadObserver("lsp", nil)
 	}
 	te := llm.TokenEstimateOptions{}
 	if r.AppCfg != nil {

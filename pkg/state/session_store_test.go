@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -206,6 +207,9 @@ func TestWithdrawUserTurnKeepsPromptPrefixStable(t *testing.T) {
 		}
 		surviving = append(surviving, fmt.Sprintf("%d:%s", rowID, content))
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"1:first question", "2:first answer", "3:second question", "4:second answer"}
 	if !reflect.DeepEqual(surviving, want) {
 		t.Fatalf("surviving rows = %v, want %v", surviving, want)
@@ -283,6 +287,174 @@ func TestListSessionsRecentPaged(t *testing.T) {
 	}
 	if len(leaked) != 0 {
 		t.Fatalf("globex paged listing returned %d of acme's sessions", len(leaked))
+	}
+}
+
+// TestConversationListsAreFilteredInTheQuery pins that the purpose filter is
+// part of the query itself: however many scheduled-task fires or project
+// sessions pile on top of the agent's own conversation, none of them can
+// crowd it out of a list.
+func TestConversationListsAreFilteredInTheQuery(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+
+	if err := store.Ensure(ctx, "ordinary", "the conversation"); err != nil {
+		t.Fatal(err)
+	}
+	// The ordinary conversation is the oldest row of all.
+	if _, err := db.Exec("UPDATE fb_sessions SET updated_at = 1 WHERE id = 'ordinary'"); err != nil {
+		t.Fatal(err)
+	}
+	projects := NewProjectStore(db, "main")
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "proj", Root: "/tmp/proj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 250; i++ {
+		cronID := fmt.Sprintf("cron-%03d", i)
+		projID := fmt.Sprintf("inproj-%03d", i)
+		if err := store.Ensure(ctx, cronID, cronID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SetSessionSource(ctx, cronID, SessionSourceCron); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Ensure(ctx, projID, projID); err != nil {
+			t.Fatal(err)
+		}
+		if err := projects.BindSession(ctx, projID, p.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id IN (?, ?)", int64(100+i), cronID, projID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	own, err := store.ListSessionsOfSource(ctx, SessionSourceConversation, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 1 || own[0].ID != "ordinary" {
+		t.Fatalf("purpose-filtered list = %+v, want only the ordinary conversation", own)
+	}
+
+	recent, err := store.ListSessionsRecent(ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paged, err := store.ListSessionsRecentPaged(ctx, 500, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, list := range map[string][]SessionSummary{
+		"ListSessionsRecent":      recent,
+		"ListSessionsRecentPaged": paged,
+	} {
+		var saw bool
+		for _, row := range list {
+			if row.Source == SessionSourceCron {
+				t.Fatalf("%s returned a scheduled-task fire: %+v", name, row)
+			}
+			if row.ID == "ordinary" {
+				saw = true
+			}
+		}
+		if !saw {
+			t.Fatalf("%s lost the ordinary conversation under newer rows", name)
+		}
+	}
+}
+
+// TestSubagentSessionsAreBornHiddenFromEveryList pins what a subagent's
+// worker session is at birth: a private conversation of one subagent, whose
+// row carries its conversation's id in parent_session_id and source
+// 'subagent' — and is therefore invisible to every conversation list, every
+// child listing, while still being a real session the subagent's own view
+// reads back. A later plain Ensure must not rewrite either birth column.
+func TestSubagentSessionsAreBornHiddenFromEveryList(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+
+	if err := store.Ensure(ctx, "c1", "the conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureAt(ctx, "w1", "the subagent's own conversation", SessionBirth{
+		Source:          SessionSourceSubagent,
+		ParentSessionID: "c1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, list := range map[string]func() ([]SessionSummary, error){
+		"ListSessionsRecent":      func() ([]SessionSummary, error) { return store.ListSessionsRecent(ctx, 100) },
+		"ListSessionsRecentPaged": func() ([]SessionSummary, error) { return store.ListSessionsRecentPaged(ctx, 100, 0) },
+		"ListChildSessionsRecent": func() ([]SessionSummary, error) { return store.ListChildSessionsRecent(ctx, "c1", 100) },
+	} {
+		rows, err := list()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.ID == "w1" {
+				t.Fatalf("%s returned a subagent's worker session: %+v", name, row)
+			}
+		}
+	}
+
+	var parent, source string
+	if err := db.QueryRow(`SELECT parent_session_id, source FROM fb_sessions WHERE id='w1'`).Scan(&parent, &source); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "c1" || source != SessionSourceSubagent {
+		t.Fatalf("worker session birth = parent %q source %q, want c1/%q", parent, source, SessionSourceSubagent)
+	}
+
+	// A later write that merely touches the session (every append path runs
+	// the upsert first) must not rewrite what it was born with.
+	if err := store.Ensure(ctx, "w1", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT parent_session_id, source FROM fb_sessions WHERE id='w1'`).Scan(&parent, &source); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "c1" || source != SessionSourceSubagent {
+		t.Fatalf("after re-ensure = parent %q source %q, want the birth values", parent, source)
+	}
+}
+
+// TestProjectSessionListListsOnlyConversations pins the project list to
+// conversations: a scheduled task's fire bound to the project is reached
+// from the project's scheduled-tasks tab, not from its conversation list.
+func TestProjectSessionListListsOnlyConversations(t *testing.T) {
+	ctx := context.Background()
+	projects, sessions := newProjectStoreForTest(t, "main")
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "proj", Root: "/tmp/proj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Ensure(ctx, "talk", "a conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Ensure(ctx, "fire", "one fire"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetSessionSource(ctx, "fire", SessionSourceCron); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"talk", "fire"} {
+		if err := projects.BindSession(ctx, id, p.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := sessions.ListSessionsForProject(ctx, p.ID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "talk" {
+		t.Fatalf("project session list = %+v, want only the conversation", got)
 	}
 }
 
@@ -719,4 +891,321 @@ func saveModelSelectionWithSession(t *testing.T, store *SessionStore, session st
 		t.Fatalf("SaveSessionModelSelection(%s): %v", session, err)
 	}
 	return stored
+}
+
+// TestSessionBirthIsTheCreatorsAndNeverMovesTheDefault pins the fix for the
+// defect where opening a project session rewrote the store-wide default cwd:
+// the project's session is born in the project root, and the next ordinary
+// session is still born in the process's launch directory.
+func TestSessionBirthIsTheCreatorsAndNeverMovesTheDefault(t *testing.T) {
+	db := openStateDB(t)
+	store := NewSessionStore(db, "owner")
+	ctx := context.Background()
+	store.ConfigureMemoryDefaults("disabled", "webchat", "/launch", "main")
+
+	if err := store.EnsureAt(ctx, "p1", "p1", SessionBirth{Cwd: "/proj", GitBranch: "feat"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure(ctx, "a1", "a1"); err != nil {
+		t.Fatal(err)
+	}
+
+	birthOf := func(id string) (cwd, branch string) {
+		t.Helper()
+		if err := db.QueryRow("SELECT cwd, git_branch FROM fb_sessions WHERE id=?", id).Scan(&cwd, &branch); err != nil {
+			t.Fatal(err)
+		}
+		return cwd, branch
+	}
+	if cwd, branch := birthOf("p1"); cwd != "/proj" || branch != "feat" {
+		t.Fatalf("project session born at %q on %q, want /proj on feat", cwd, branch)
+	}
+	if cwd, branch := birthOf("a1"); cwd != "/launch" || branch != "main" {
+		t.Fatalf("later session born at %q on %q, want the untouched default /launch on main", cwd, branch)
+	}
+}
+
+// TestSessionBirthKeepsCwdAndBranchTogether pins that Cwd and GitBranch are
+// decided as a pair: a session born without a directory takes both process
+// defaults, never a default directory paired with a caller-supplied branch.
+func TestSessionBirthKeepsCwdAndBranchTogether(t *testing.T) {
+	db := openStateDB(t)
+	store := NewSessionStore(db, "owner")
+	ctx := context.Background()
+	store.ConfigureMemoryDefaults("disabled", "webchat", "/launch", "main")
+
+	if err := store.EnsureAt(ctx, "p1", "p1", SessionBirth{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureAt(ctx, "p2", "p2", SessionBirth{GitBranch: "feat"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"p1", "p2"} {
+		var cwd, branch string
+		if err := db.QueryRow("SELECT cwd, git_branch FROM fb_sessions WHERE id=?", id).Scan(&cwd, &branch); err != nil {
+			t.Fatal(err)
+		}
+		if cwd != "/launch" || branch != "main" {
+			t.Fatalf("session %s born at %q on %q, want the pair /launch on main", id, cwd, branch)
+		}
+	}
+}
+
+// TestSessionBirthNamesWhatTheSessionIsFor pins that Source is a birth fact
+// like the owning agent: a session born a cron session is one for good — a
+// later write that re-ensures the row does not turn it back into an ordinary
+// conversation.
+func TestSessionBirthNamesWhatTheSessionIsFor(t *testing.T) {
+	db := openStateDB(t)
+	store := NewSessionStore(db, "owner")
+	ctx := context.Background()
+
+	if err := store.EnsureAt(ctx, "cron-job-1-1", "cron-job-1-1", SessionBirth{Source: SessionSourceCron}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureAt(ctx, "plain", "plain", SessionBirth{}); err != nil {
+		t.Fatal(err)
+	}
+	// Whatever re-ensures the row later, the session stays what it was born as.
+	if err := store.Ensure(ctx, "cron-job-1-1", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceOf := func(id string) string {
+		t.Helper()
+		var source string
+		if err := db.QueryRow("SELECT source FROM fb_sessions WHERE id=?", id).Scan(&source); err != nil {
+			t.Fatal(err)
+		}
+		return source
+	}
+	if got := sourceOf("cron-job-1-1"); got != SessionSourceCron {
+		t.Fatalf("fire session source = %q, want %q", got, SessionSourceCron)
+	}
+	if got := sourceOf("plain"); got != "" {
+		t.Fatalf("an ordinary session born without a source = %q, want the default", got)
+	}
+}
+
+// TestSessionDefaultsAreSafeToChangeWhileSessionsAreBorn runs a configuration
+// reload against concurrent session creation. The defaults were plain fields
+// written from one goroutine and read from another; the lock makes the race
+// impossible (verified under -race).
+func TestSessionDefaultsAreSafeToChangeWhileSessionsAreBorn(t *testing.T) {
+	store := NewSessionStore(openStateDB(t), "owner")
+	ctx := context.Background()
+	store.ConfigureMemoryDefaults("disabled", "webchat", "/launch", "main")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			if i%2 == 0 {
+				store.SetMemoryMode("off")
+			} else {
+				store.SetMemoryMode("enabled")
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			if err := store.Ensure(ctx, fmt.Sprintf("born-%d", i), "born"); err != nil {
+				t.Errorf("Ensure: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+// TestDeleteSessionsCascadesAndReportsLeftovers pins deletion as one whole
+// event: the rows go by cascade in one transaction, a conversation forked
+// from the deleted session keeps its own life with its parent link cleared,
+// another agent's session is untouched even when named in the same call, and
+// everything the conversations left on disk — the uploaded files and the
+// spilled tool outputs their transcripts point at — comes back to the caller
+// so it can be removed once the rows are gone.
+func TestDeleteSessionsCascadesAndReportsLeftovers(t *testing.T) {
+	db := openStateDB(t)
+	ctx := context.Background()
+	mine := NewSessionStore(db, "main")
+	if err := mine.Ensure(ctx, "cron-job-9-old", "old fire"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mine.Ensure(ctx, "cron-job-9-fresh", "fresh fire"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mine.Ensure(ctx, "forked-1", "a conversation forked away"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE fb_sessions SET parent_session_id='cron-job-9-old' WHERE id='forked-1'`); err != nil {
+		t.Fatal(err)
+	}
+	other := NewSessionStore(db, "second")
+	if err := other.Ensure(ctx, "second-own-1", "another tenant's conversation"); err != nil {
+		t.Fatal(err)
+	}
+
+	spill := "/ws/state/tmp/tool-outputs/shell-call-1-1700000000000.txt"
+	if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, content, tool_meta_json, created_at)
+		VALUES('cron-job-9-old', 'tool', 'done', '{"full_path":"/ws/state/tmp/tool-outputs/shell-call-1-1700000000000.txt"}', 1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, content, created_at)
+		VALUES('cron-job-9-old', 'user', 'the prompt', 1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at)
+		VALUES('run-1', 'cron-job-9-old', '', 'done', 1700000000, 1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms)
+		VALUES('cron-job-9-old', 'run-1', 'evt-1', 'turn.completed', '{}', 1700000000000)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&CronStore{DB: db}).SaveHeartbeat(ctx, Heartbeat{SessionID: "cron-job-9-old", IntervalSec: 600, Prompt: "beat"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_files(id, session_id, original_name, media_type, size_bytes, sha256,
+		storage_backend, storage_bucket, storage_key, parse_status, parsed_text_path, parse_error, created_at, updated_at)
+		VALUES('file-1', 'cron-job-9-old', 'report.pdf', 'application/pdf', 3, 'abc', 'local', '', 'ab/file-1.pdf', 'done', 'file-1.txt', '', 1700000000, 1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := mine.DeleteSessions(ctx, []string{"cron-job-9-old", "second-own-1"})
+	if err != nil {
+		t.Fatalf("DeleteSessions: %v", err)
+	}
+
+	for _, table := range []string{"fb_messages", "fb_runs", "fb_session_events", "fb_heartbeats", "fb_files"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE session_id='cron-job-9-old'`).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if n != 0 {
+			t.Fatalf("%s still holds %d rows of the deleted session", table, n)
+		}
+	}
+	var gone int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id='cron-job-9-old'`).Scan(&gone); err != nil {
+		t.Fatal(err)
+	}
+	if gone != 0 {
+		t.Fatal("the deleted session's row is still there")
+	}
+
+	var parent sql.NullString
+	if err := db.QueryRow(`SELECT parent_session_id FROM fb_sessions WHERE id='forked-1'`).Scan(&parent); err != nil {
+		t.Fatalf("forked session: %v", err)
+	}
+	if parent.Valid && parent.String != "" {
+		t.Fatalf("fork's parent link = %q, want cleared", parent.String)
+	}
+	var alive int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id IN ('second-own-1', 'cron-job-9-fresh')`).Scan(&alive); err != nil {
+		t.Fatal(err)
+	}
+	if alive != 2 {
+		t.Fatalf("sessions the call had no business deleting: %d left, want 2", alive)
+	}
+
+	if len(left.Files) != 1 || left.Files[0].ID != "file-1" {
+		t.Fatalf("leftover files = %+v, want exactly file-1", left.Files)
+	}
+	if len(left.SpillPaths) != 1 || left.SpillPaths[0] != spill {
+		t.Fatalf("leftover spill paths = %v, want exactly %s", left.SpillPaths, spill)
+	}
+
+	// Idempotent on a second pass: everything is already gone.
+	if left2, err := mine.DeleteSessions(ctx, []string{"cron-job-9-old"}); err != nil || len(left2.Files) != 0 || len(left2.SpillPaths) != 0 {
+		t.Fatalf("second delete = %+v, %v, want no error and no leftovers", left2, err)
+	}
+}
+
+// TestDeleteSessionsSparesASessionALiveRunHolds pins the re-check inside
+// the delete's own transaction: the sweep that listed a session as expired
+// may have raced a conversation coming back to life. A session a live
+// primary run holds stays whole — rows and leftovers alike — and is
+// reported in Survived, while one whose run has ended, or that never had
+// one, goes exactly as before.
+func TestDeleteSessionsSparesASessionALiveRunHolds(t *testing.T) {
+	db := openStateDB(t)
+	ctx := context.Background()
+	mine := NewSessionStore(db, "main")
+	for _, sid := range []string{"cron-live-1", "cron-ended-1", "cron-bare-1"} {
+		if err := mine.Ensure(ctx, sid, sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	living := &RunStore{DB: db, Owner: "owner-delete-live"}
+	stopLive, err := living.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stopLive()
+	if _, err := living.CreateRun(ctx, "cron-live-1", "a person resumed it"); err != nil {
+		t.Fatal(err)
+	}
+	ended := &RunStore{DB: db, Owner: "owner-delete-ended"}
+	endedRun, err := ended.CreateRun(ctx, "cron-ended-1", "already over")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ended.SetStatus(ctx, endedRun.ID, RunStatusDone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_files(id, session_id, original_name, media_type, size_bytes, sha256,
+		storage_backend, storage_bucket, storage_key, parse_status, parsed_text_path, parse_error, created_at, updated_at)
+		VALUES('file-live', 'cron-live-1', 'report.pdf', 'application/pdf', 3, 'abc', 'local', '', 'ab/file-live.pdf', 'done', 'file-live.txt', '', 1700000000, 1700000000)`); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := mine.DeleteSessions(ctx, []string{"cron-live-1", "cron-ended-1", "cron-bare-1"})
+	if err != nil {
+		t.Fatalf("DeleteSessions: %v", err)
+	}
+	if len(left.Survived) != 1 || left.Survived[0] != "cron-live-1" {
+		t.Fatalf("survived = %v, want exactly cron-live-1", left.Survived)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id='cron-live-1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("a session a live run holds was deleted")
+	}
+	for _, sid := range []string{"cron-ended-1", "cron-bare-1"} {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id=?`, sid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("session %s, with no live run, was spared", sid)
+		}
+	}
+	for _, f := range left.Files {
+		if f.SessionID == "cron-live-1" {
+			t.Fatalf("the spared session's file came back as a leftover: %+v", f)
+		}
+	}
+
+	// The next sweep, once the run is over, takes the session whole.
+	if _, err := db.Exec(`UPDATE fb_runs SET status=? WHERE session_id='cron-live-1'`, string(RunStatusDone)); err != nil {
+		t.Fatal(err)
+	}
+	again, err := mine.DeleteSessions(ctx, []string{"cron-live-1"})
+	if err != nil {
+		t.Fatalf("second DeleteSessions: %v", err)
+	}
+	if len(again.Survived) != 0 {
+		t.Fatalf("a session with no live run survived: %v", again.Survived)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM fb_sessions WHERE id='cron-live-1'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("the ended session was not deleted on the second pass")
+	}
 }

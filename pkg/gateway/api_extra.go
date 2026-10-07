@@ -52,6 +52,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	permissions := api.Group("/permissions")
 	permissions.Get("/approval-default", s.handleApprovalDefaultGet)
 	permissions.Put("/approval-default", s.handleApprovalDefaultPut)
+	permissions.Get("/session-preset", s.handleSessionPresetGet)
 	permissions.Post("/session-preset", s.handleSessionPreset)
 	permissions.Get("/rules", s.handlePermissionRules)
 	permissions.Post("/evaluate", s.handlePermissionEvaluate)
@@ -111,9 +112,22 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/subagent-history", s.handleSessionSubagentHistory)
 	chatSessions.Get("/:id/todos", s.handleSessionTodos)
 	chatSessions.Get("/:id/plan-md", s.handleSessionPlanMarkdown)
+	chatSessions.Get("/:id/approval-request", s.handleSessionApprovalRequest)
 	chatSessions.Get("/:id/mode", s.handleSessionMode)
+	chatSessions.Get("/:id", s.handleChatSession)
 	chatSessions.Post("/:id/compact", s.handleSessionCompact)
 	chatSessions.Post("/:id/rewind-last", s.handleSessionRewindLast)
+	// A subagent's own view talks to that subagent through these — the same
+	// semantics the terminal's subagent view has (plan 007), decided in the
+	// engine (plan 005): send, recall, Esc's two meanings, compact, context,
+	// and the budget it opens with.
+	chatSessions.Post("/:id/subagents/:agent/input", s.handleSubagentInput)
+	chatSessions.Post("/:id/subagents/:agent/queued-input", s.handleSubagentQueuedInput)
+	chatSessions.Post("/:id/subagents/:agent/interrupt-send", s.handleSubagentInterruptSend)
+	chatSessions.Post("/:id/subagents/:agent/withdraw", s.handleSubagentWithdraw)
+	chatSessions.Post("/:id/subagents/:agent/compact", s.handleSubagentCompact)
+	chatSessions.Get("/:id/subagents/:agent/context", s.handleSubagentContext)
+	chatSessions.Get("/:id/subagents/:agent/budget", s.handleSubagentBudget)
 
 	api.Post("/internal/worker-event", s.handleWorkerInternalEvent)
 
@@ -123,6 +137,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	actions.Post("/:id/answer", s.handleActionsAnswer)
 	actions.Post("/:id/approve", s.handleActionsApprove)
 	actions.Post("/:id/deny", s.handleActionsDeny)
+	actions.Post("/:id/plan-review", s.handleActionPlanReview)
 
 	projects := api.Group("/v1/projects")
 	projects.Get("/", s.handleProjectsList)
@@ -136,6 +151,8 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
+	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
+	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
 
 	// Project-scoped skill lifecycle: /projects/:id/skills mirrors /skills
 	// operation for operation, scoped to the route's project.
@@ -149,6 +166,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Get("/:id/skills/:name/download", s.handleProjectSkillsDownload)
 	projects.Post("/:id/skills/download", s.handleProjectSkillsDownloadBatch)
 	projects.Delete("/:id/skills/:name", s.handleProjectSkillsDelete)
+	projects.Get("/:id/permissions/rules", s.handleProjectPermissionRules)
+	projects.Post("/:id/permissions/updates", s.handleProjectPermissionUpdate)
+	projects.Get("/:id/permissions/explain", s.handleProjectPermissionExplain)
 
 	mcp := api.Group("/v1/mcp")
 	mcp.Get("/servers", s.handleMCPServersV1)
@@ -156,6 +176,15 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	mcp.Post("/servers/enable", s.handleMCPServerEnableV1)
 	mcp.Post("/oauth/pkce/start", s.handleMCPOAuthPKCEStart)
 	mcp.Post("/oauth/pkce/finish", s.handleMCPOAuthPKCEFinish)
+
+	lsp := api.Group("/v1/lsp")
+	lsp.Get("/", s.handleLSPSnapshot)
+	lsp.Post("/servers/enable", s.handleLSPServerEnable)
+	lsp.Post("/servers/disable", s.handleLSPServerDisable)
+	lsp.Post("/servers/restart", s.handleLSPServerRestart)
+	lsp.Post("/servers/install", s.handleLSPServerInstall)
+	lsp.Post("/recommendations/reset", s.handleLSPRecommendationsReset)
+	lsp.Post("/recommendations/:id/decision", s.handleLSPRecommendationDecision)
 
 	files := api.Group("/files")
 	files.Post("/", s.handleFiles)
@@ -189,6 +218,8 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Put("/providers", s.handleProviders)
 	api.Get("/hooks", s.handleHooks)
 	api.Put("/hooks", s.handleHooks)
+	api.Get("/cron-settings", s.handleCronSettings)
+	api.Put("/cron-settings", s.handleCronSettings)
 
 	runs := api.Group("/runs")
 	runs.Post("/:id/cancel", s.handleRunCancel)
@@ -244,15 +275,14 @@ func (s *Server) interruptUncertainGatewayApproval(wait state.Wait) {
 	if err := s.RunRT.MarkWaitResumeUncertain(ctx, wait.RunID, wait.ActionID); err != nil {
 		return
 	}
-	_ = s.RunRT.SetStatus(ctx, wait.RunID, state.RunStatusFailed)
 	runRecord, _ := s.RunRT.GetRun(ctx, wait.RunID)
 	sessionID := ""
 	if runRecord != nil {
 		sessionID = runRecord.SessionID
 	}
 	s.runController().Cancel(wait.RunID, errors.New(reason))
-	s.finishRun(ctx, sessionID, wait.RunID)
-	_ = s.publishGatewayRunEvent(ctx, sessionID, wait.RunID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
+	s.finishRun(ctx, sessionID, wait.RunID, state.RunStatusFailed)
+	_ = s.publishGatewayRunEvent(ctx, sessionID, wait.RunID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 	if strings.TrimSpace(wait.AgentID) != "" {
 		parentRunID := ""
 		if runRecord != nil {
@@ -409,6 +439,9 @@ func (s *Server) handleSlashCommands(w http.ResponseWriter, r *http.Request) {
 	opts := turn.DiscoveryOptions{
 		DuringRun:        parseBoolQuery(r, "during_run"),
 		SideConversation: parseBoolQuery(r, "side"),
+		// The list a subagent's own view offers: the commands that act on the
+		// conversation are dropped (plan 007's D4 classification).
+		SubagentView: strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "subagent"),
 	}
 	type slashOptionsPayload struct {
 		DuringRun        bool `json:"during_run"`
@@ -504,26 +537,22 @@ func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.Env.Tools().ToolMetas())
 }
 
-func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	srcFilter := strings.TrimSpace(r.URL.Query().Get("source"))
-	behaviorFilter := strings.TrimSpace(r.URL.Query().Get("behavior"))
-	snap := perm.PermissionSnapshotForSession(strings.TrimSpace(r.URL.Query().Get("session_id")))
-	type row struct {
-		Source      safety.PermissionSource   `json:"source"`
-		Behavior    safety.PermissionBehavior `json:"behavior"`
-		ToolName    string                    `json:"tool_name"`
-		RuleContent string                    `json:"rule_content,omitempty"`
-	}
-	rules := make([]row, 0, 64)
+// permissionRuleRow is one rule as the permission pages list it.
+type permissionRuleRow struct {
+	Source      safety.PermissionSource   `json:"source"`
+	Behavior    safety.PermissionBehavior `json:"behavior"`
+	ToolName    string                    `json:"tool_name"`
+	RuleContent string                    `json:"rule_content,omitempty"`
+	// Rule is the rule exactly as stored. RuleContent is its display text,
+	// which for a command prefix or a literal command is not a field of the
+	// rule at all, so removing a listed rule sends this back, never the text.
+	Rule safety.PermissionRuleValue `json:"rule"`
+}
+
+// permissionRuleRows flattens a snapshot's rules into listing rows, filtered
+// by source and behavior (empty matches all) and in one stable order.
+func permissionRuleRows(snap safety.Snapshot, srcFilter, behaviorFilter string) []permissionRuleRow {
+	rules := make([]permissionRuleRow, 0, 64)
 	for src, byBehavior := range snap.Rules {
 		if srcFilter != "" && !strings.EqualFold(string(src), srcFilter) {
 			continue
@@ -533,7 +562,7 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			for _, it := range list {
-				rules = append(rules, row{
+				rules = append(rules, permissionRuleRow{
 					Source:   src,
 					Behavior: behavior,
 					ToolName: it.ToolName,
@@ -541,6 +570,7 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 					// owns which one names it, so a prefix or a literal command
 					// is not shown as a bare tool name here.
 					RuleContent: safety.RuleContentDisplay(it),
+					Rule:        it,
 				})
 			}
 		}
@@ -557,6 +587,33 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 		}
 		return rules[i].RuleContent < rules[j].RuleContent
 	})
+	return rules
+}
+
+func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	srcFilter := strings.TrimSpace(r.URL.Query().Get("source"))
+	behaviorFilter := strings.TrimSpace(r.URL.Query().Get("behavior"))
+	var snap safety.Snapshot
+	if sid := strings.TrimSpace(r.URL.Query().Get("session_id")); sid != "" {
+		runner := s.runnerFor(r.Context(), sid)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snap = runner.PermissionSnapshotForSession(sid)
+	} else {
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snap = scope.rt.Snapshot(scope.cfg)
+	}
+	rules := permissionRuleRows(snap, srcFilter, behaviorFilter)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"mode":  snap.Mode,
@@ -567,11 +624,6 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	var body struct {
@@ -587,7 +639,22 @@ func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "tool_name required", http.StatusBadRequest)
 		return
 	}
-	d := perm.EvaluatePermissionForSession(body.SessionID, body.ToolName, body.Input)
+	var d safety.Decision
+	if sid := strings.TrimSpace(body.SessionID); sid != "" {
+		runner := s.runnerFor(r.Context(), sid)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		d = runner.EvaluatePermissionForSession(sid, body.ToolName, body.Input)
+	} else {
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		d = scope.rt.Evaluate("", body.ToolName, body.Input, scope.cfg, safety.RuntimeYOLOEnabled())
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(d)
 }
@@ -597,11 +664,6 @@ func (s *Server) handlePermissionExplain(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
-		return
-	}
 	toolName := strings.TrimSpace(r.URL.Query().Get("tool_name"))
 	input := strings.TrimSpace(r.URL.Query().Get("input"))
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
@@ -609,19 +671,35 @@ func (s *Server) handlePermissionExplain(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "tool_name required", http.StatusBadRequest)
 		return
 	}
-	ex := perm.ExplainPermissionForSession(sessionID, toolName, input)
+	var ex safety.ExplainResult
+	if sessionID != "" {
+		runner := s.runnerFor(r.Context(), sessionID)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ex = runner.ExplainPermissionForSession(sessionID, toolName, input)
+	} else {
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ex = scope.rt.Explain("", toolName, input, scope.cfg, safety.RuntimeYOLOEnabled())
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ex)
 }
 
+// handlePermissionUpdate changes either one conversation's own permissions —
+// in the runner that conversation runs on — or the active primary agent's
+// local rules, which every live runner of the agent then holds too. A
+// project's rules are the project space's to change
+// (handleProjectPermissionUpdate); this endpoint is not bound to any project,
+// least of all the one the gateway process was launched in.
 func (s *Server) handlePermissionUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
-		return
-	}
-	perm := s.permissionFacade()
-	if perm == nil {
-		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	var u safety.PermissionUpdate
@@ -636,32 +714,108 @@ func (s *Server) handlePermissionUpdate(w http.ResponseWriter, r *http.Request) 
 	if u.Destination == "" {
 		u.Destination = safety.DestinationSession
 	}
-	if u.Destination == safety.DestinationSession && strings.TrimSpace(u.SessionID) == "" {
-		http.Error(w, "session_id required for session destination", http.StatusBadRequest)
-		return
-	}
-	switch u.Destination {
-	case safety.DestinationSession, safety.DestinationLocalSettings, safety.DestinationProjectSettings:
-	default:
-		http.Error(w, "unsupported destination", http.StatusBadRequest)
-		return
-	}
-	if refusal := safety.ExplainRefusedUpdate(u.Destination, u.Behavior); refusal != "" {
-		http.Error(w, refusal, http.StatusBadRequest)
-		return
-	}
 	// Refuse an update that would never take effect instead of reporting
 	// success for a rule the store will drop.
 	if refusal := safety.ExplainRefusedUpdate(u.Destination, u.Behavior); refusal != "" {
 		http.Error(w, refusal, http.StatusBadRequest)
 		return
 	}
-	perm.ApplyPermissionUpdate(u)
+	switch u.Destination {
+	case safety.DestinationSession:
+		sid := strings.TrimSpace(u.SessionID)
+		if sid == "" {
+			http.Error(w, "session_id required for session destination", http.StatusBadRequest)
+			return
+		}
+		// The rule lands in the permission store of the conversation it
+		// names, so that conversation must be this agent's own: another
+		// agent's is answered as missing and its store is never written.
+		owned, err := s.sessionOwned(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
+		runner := s.runnerFor(r.Context(), sid)
+		if runner == nil {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		runner.ApplyPermissionUpdate(u)
+	case safety.DestinationLocalSettings:
+		switch u.Type {
+		case safety.UpdateAddRules, safety.UpdateReplaceRules, safety.UpdateRemoveRules:
+		default:
+			http.Error(w, "type must be addRules, replaceRules or removeRules", http.StatusBadRequest)
+			return
+		}
+		scope, ok := s.agentPermissionScope()
+		if !ok {
+			http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		scope.rt.ApplyUpdate(u, scope.cfg, scope.paths)
+		for _, runner := range s.liveRunners() {
+			runner.ApplyPermissionUpdate(u)
+		}
+	case safety.DestinationProjectSettings:
+		http.Error(w, "project rules are changed in the project's own space", http.StatusBadRequest)
+		return
+	default:
+		http.Error(w, "unsupported destination", http.StatusBadRequest)
+		return
+	}
 	if s.Env != nil {
 		s.Env.RefreshSandboxRuntime()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// permissionScope is a permission runtime loaded from exactly the files one
+// scope's sessions read: the active primary agent's local settings, plus a
+// project's own settings when the scope is a project.
+type permissionScope struct {
+	paths safety.Paths
+	cfg   *config.Root
+	rt    *safety.Runtime
+}
+
+func (s *Server) loadPermissionScope(projectRoot string) (permissionScope, bool) {
+	cfg := s.liveCfg()
+	if cfg == nil {
+		return permissionScope{}, false
+	}
+	paths := safety.Paths{Home: strings.TrimSpace(s.Home), WorkspaceRoot: s.activeWorkspaceRoot(), ProjectRoot: projectRoot}
+	rt := safety.NewRuntime()
+	rt.LoadFromDisk(cfg, paths)
+	return permissionScope{paths: paths, cfg: cfg, rt: rt}, true
+}
+
+// agentPermissionScope is the active primary agent's own permission state:
+// its local rules and the configuration, with no project in it. An
+// agent-level answer never comes from the runner of whichever project the
+// gateway process happened to be launched in.
+func (s *Server) agentPermissionScope() (permissionScope, bool) {
+	return s.loadPermissionScope("")
+}
+
+// liveRunners is every runner the agent's conversations run on: the gateway's
+// own and each project runner in the pool.
+func (s *Server) liveRunners() []*run.Runner {
+	var runners []*run.Runner
+	if s.Runner != nil {
+		runners = append(runners, s.Runner)
+	}
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			runners = append(runners, pool.Runners()...)
+		}
+	}
+	return runners
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
@@ -851,7 +1005,7 @@ func (s *Server) handleChatSessionCreate(w http.ResponseWriter, r *http.Request)
 	// The session-purpose whitelist stays here, at the API edge; the store
 	// writes whatever it is handed.
 	switch strings.TrimSpace(body.Source) {
-	case "", "workshop":
+	case state.SessionSourceConversation, state.SessionSourceWorkshop:
 	default:
 		http.Error(w, "source must be empty or workshop", http.StatusBadRequest)
 		return
@@ -937,8 +1091,22 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.Core == nil && (s.Sessions == nil || s.Sessions.DB() == nil) {
+	// The session-purpose whitelist stays here, at the API edge, the same
+	// one the create endpoint applies.
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	switch source {
+	case state.SessionSourceConversation, state.SessionSourceWorkshop:
+	default:
+		http.Error(w, "source must be empty or workshop", http.StatusBadRequest)
+		return
+	}
+	if s.Sessions == nil || s.Sessions.DB() == nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
+		return
+	}
+	summaries, err := s.Sessions.ListSessionsOfSource(r.Context(), source, 200)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	type row struct {
@@ -948,26 +1116,58 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		UpdateTime string `json:"update_time"`
 		Source     string `json:"source,omitempty"`
 	}
-	var (
-		summaries []turn.SessionSummary
-		err       error
-	)
-	if s.Core != nil {
-		summaries, err = s.Core.ListSessionsRecent(r.Context(), 200)
-	} else {
-		summaries, err = s.Sessions.ListSessionsRecent(r.Context(), 200)
-	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	var out []row
+	out := make([]row, 0, len(summaries))
 	for _, sum := range summaries {
 		t := time.Unix(sum.UpdatedAt, 0).UTC().Format(time.RFC3339)
 		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
+}
+
+// handleChatSession names one conversation for the page that has it open:
+// its title and the project it belongs to. The page reads this rather than
+// looking itself up in the drawer's list, which lists only the agent's own
+// conversations — a project's session, or a scheduled task's fire, is never
+// in it.
+func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
+		return
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	title, err := s.Sessions.SessionTitle(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The lookup is the agent's project store, so another tenant's session
+	// reads as belonging to no project.
+	var project map[string]any
+	if store := s.projectStore(); store != nil {
+		p, ok, err := store.ProjectForSession(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if ok {
+			project = map[string]any{"id": p.ID, "name": p.Name}
+		}
+	}
+	writeJSON(w, map[string]any{"id": sid, "title": title, "project": project})
 }
 
 // sessionDisplayTitle is the title a web list shows. An unnamed session is
@@ -1073,8 +1273,17 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		ToolMetaJSON   string              `json:"tool_meta_json,omitempty"`
 		CreatedAt      int64               `json:"created_at,omitempty"`
 		RunID          string              `json:"run_id,omitempty"`
+		Origin         string              `json:"origin,omitempty"`
 		Attachments    []chatAttachment    `json:"attachments,omitempty"`
+		// SubagentCall is a tool row's card facts: what the subagent_* call
+		// it answered was about, derived once by the engine so the reloaded
+		// card says what the live one said. Transport only; the derivation
+		// lives in pkg/turn.
+		SubagentCall *event.SubagentCall `json:"subagent_call,omitempty"`
 	}
+	// The card facts of every subagent_* call the transcript answered, keyed
+	// by tool call id, from the same derivation the live path applied.
+	subagentCalls := turn.SubagentCallsInTranscript(turns)
 	visibleIndexes := make([]int, 0, len(turns))
 	for i, turn := range turns {
 		if strings.EqualFold(strings.TrimSpace(turn.Role), "system") {
@@ -1118,58 +1327,64 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 			out = append(out, msg{Role: "goal", Goal: &row})
 		}
 	}
+	// Every run closes with its "Worked for" line after the last row it wrote
+	// — finished, failed or stopped, whether or not it said anything — by the
+	// rule the terminal's replay closes it with. The line is a row of its own,
+	// carrying the run's clock and its checklist facts, read from that run's
+	// plan events so replay and live agree by construction.
+	workedLines := turn.RunWorkedLines(turns)
 	for i, t := range turns {
 		emitCompactions(i)
-		if _, ok := visible[i]; !ok {
-			continue
+		if _, ok := visible[i]; ok {
+			// A row's own execution window — a tool call, a `!cmd` — is its
+			// timing; the run's clock belongs to the worked row below.
+			runStartedAt, runFinishedAt, workedMs := "", "", int64(0)
+			if t.ExecStartedAtMs != 0 {
+				runStartedAt = time.UnixMilli(t.ExecStartedAtMs).UTC().Format(time.RFC3339Nano)
+				runFinishedAt = time.UnixMilli(t.ExecFinishedAtMs).UTC().Format(time.RFC3339Nano)
+				workedMs = t.ExecDurationMs
+			}
+			m := msg{
+				ID:            t.MessageID,
+				RowID:         t.RowID,
+				Role:          t.Role,
+				Content:       t.Content,
+				RunStartedAt:  runStartedAt,
+				RunFinishedAt: runFinishedAt,
+				WorkedMs:      workedMs,
+				PartsJSON:     t.PartsJSON,
+				ToolStepID:    t.ToolStepID,
+				ToolMetaJSON:  t.ToolMetaJSON,
+				CreatedAt:     t.CreatedAt,
+				RunID:         strings.TrimSpace(t.RunID),
+			}
+			for _, ref := range state.MessageAttachments(t.PartsJSON) {
+				m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
+			}
+			m.Origin = state.MessageOrigin(t.PartsJSON)
+			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
+				m.MemoryCitation = citation
+			}
+			if call, answered := subagentCalls[strings.TrimSpace(t.ToolStepID)]; answered {
+				m.SubagentCall = &call
+			}
+			out = append(out, m)
 		}
-		runID := strings.TrimSpace(t.RunID)
-		// Timing at the boundary: a row's own execution window (a tool
-		// call, a `!cmd`), or — for the assistant row of a timed run — the
-		// run's window and worked time, read from fb_runs through the row.
-		runStartedAt, runFinishedAt, workedMs := "", "", int64(0)
-		switch {
-		case t.ExecStartedAtMs != 0:
-			runStartedAt = time.UnixMilli(t.ExecStartedAtMs).UTC().Format(time.RFC3339Nano)
-			runFinishedAt = time.UnixMilli(t.ExecFinishedAtMs).UTC().Format(time.RFC3339Nano)
-			workedMs = t.ExecDurationMs
-		case t.Role == llm.RoleAssistant && t.RunWorkedMs != 0:
-			runStartedAt = time.UnixMilli(t.RunStartedAtMs).UTC().Format(time.RFC3339Nano)
-			runFinishedAt = time.UnixMilli(t.RunFinishedAtMs).UTC().Format(time.RFC3339Nano)
-			workedMs = t.RunWorkedMs
+		if line, ok := workedLines[i]; ok && i >= firstVisible {
+			worked := msg{
+				ID:            "worked-" + line.RunID,
+				Role:          "worked",
+				RunID:         line.RunID,
+				RunStartedAt:  line.StartedAt.UTC().Format(time.RFC3339Nano),
+				RunFinishedAt: line.FinishedAt.UTC().Format(time.RFC3339Nano),
+				WorkedMs:      line.Worked.Milliseconds(),
+			}
+			if s.RunRT != nil {
+				progress := lastPlanProgressOfRun(r.Context(), s.RunRT, line.RunID)
+				worked.PlanDone, worked.PlanTotal, worked.PlanActive = progress.Done, progress.Total, progress.Active
+			}
+			out = append(out, worked)
 		}
-		// The worked line's checklist facts ride the assistant row of the
-		// run that earned them, read from that run's plan events so replay
-		// and live agree by construction.
-		planDone, planTotal, planActive := 0, 0, ""
-		if t.Role == llm.RoleAssistant && runID != "" && s.RunRT != nil {
-			progress := lastPlanProgressOfRun(r.Context(), s.RunRT, runID)
-			planDone, planTotal, planActive = progress.Done, progress.Total, progress.Active
-		}
-		m := msg{
-			ID:            t.MessageID,
-			RowID:         t.RowID,
-			Role:          t.Role,
-			Content:       t.Content,
-			RunStartedAt:  runStartedAt,
-			RunFinishedAt: runFinishedAt,
-			WorkedMs:      workedMs,
-			PlanDone:      planDone,
-			PlanTotal:     planTotal,
-			PlanActive:    planActive,
-			PartsJSON:     t.PartsJSON,
-			ToolStepID:    t.ToolStepID,
-			ToolMetaJSON:  t.ToolMetaJSON,
-			CreatedAt:     t.CreatedAt,
-			RunID:         runID,
-		}
-		for _, ref := range state.MessageAttachments(t.PartsJSON) {
-			m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
-		}
-		if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {
-			m.MemoryCitation = citation
-		}
-		out = append(out, m)
 	}
 	emitCompactions(len(turns))
 	w.Header().Set("Content-Type", "application/json")
@@ -1417,8 +1632,15 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	payload := assembly.CompactResultPayload(res)
 	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(compactResultBody(res))
+}
+
+// compactResultBody is the JSON a finished manual compaction answers with,
+// shared by the conversation's /compact and a subagent's, so both read the
+// same.
+func compactResultBody(res assembly.Result) map[string]any {
+	payload := assembly.CompactResultPayload(res)
 	body := map[string]any{
 		"session_id": res.SessionID, "trigger": payload.Trigger, "strategy": payload.Strategy,
 		"reason": payload.Reason, "summary_source": payload.SummarySource, "summary": payload.Summary,
@@ -1430,7 +1652,444 @@ func (s *Server) handleSessionCompact(w http.ResponseWriter, r *http.Request) {
 	if res.Strategy == "local" {
 		body["warning"] = assembly.WarningMessage
 	}
-	_ = json.NewEncoder(w).Encode(body)
+	return body
+}
+
+// The stable codes a subagent-view request is refused with. The page turns
+// each into one sentence in the viewer's language; the gateway never writes a
+// sentence for the page.
+const (
+	subagentRunningCode      = "subagent_running"
+	subagentViewCommandCode  = "subagent_view_command"
+	useDedicatedEndpointCode = "use_dedicated_endpoint"
+)
+
+// writeSubagentViewError answers a refused subagent-view request with its
+// stable code, so the page can say the sentence in the viewer's language.
+func writeSubagentViewError(w http.ResponseWriter, code, message string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": message, "code": code})
+}
+
+// subagentRoute resolves the conversation and the agent key a subagent-view
+// route names. A conversation this primary agent does not own is not found
+// here (the tenancy the conversation's own routes enforce).
+func (s *Server) subagentRoute(w http.ResponseWriter, r *http.Request) (sid, agentKey string, ok bool) {
+	params := ParamsFromContext(r.Context())
+	sid = strings.TrimSpace(params.ByName("id"))
+	agentKey = strings.TrimSpace(params.ByName("agent"))
+	if sid == "" || agentKey == "" {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return "", "", false
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return "", "", false
+	}
+	return sid, agentKey, true
+}
+
+// subagentRunner resolves the engine runner for the conversation a
+// subagent-view route names; nil when none is available.
+func (s *Server) subagentRunner(ctx context.Context, sid string) *run.Runner {
+	if s == nil {
+		return nil
+	}
+	return s.runnerFor(ctx, sid)
+}
+
+// subagentNamed reports whether this conversation names the agent key. The
+// recall, withdraw and interrupt engine calls answer false for a key that is
+// not there, so their routes check tenancy here — the same lookup the engine's
+// channel resolution does, another conversation's subagent being not found.
+func (s *Server) subagentNamed(sid, agentKey string) bool {
+	if s == nil {
+		return false
+	}
+	_, ok, err := agent.GetMerged(s.stateRoot(), agent.Query{SessionID: strings.TrimSpace(sid), TaskID: strings.TrimSpace(agentKey)})
+	return err == nil && ok
+}
+
+// subagentConversationSurface is how a message the user sends a subagent from
+// the web is framed: the same approval and tool-step seams a detached turn
+// installs (subagent steps carry their roster key on the context, so the step
+// hook publishes them as canonical events itself), and the queue's boundary
+// decision travels back as the conversation's queued_input_released event.
+func (s *Server) subagentConversationSurface(sid string) run.SubagentSurface {
+	sid = strings.TrimSpace(sid)
+	return run.SubagentSurface{
+		Frame: func(ctx context.Context) context.Context {
+			return s.withDetachedGatewayApprovalHooks(ctx, sid, "")
+		},
+		OnBoundary: func(agentKey string, send, restore []run.Input) {
+			s.publishSubagentQueuedInputReleased(sid, agentKey, send, restore)
+		},
+	}
+}
+
+// publishSubagentQueuedInputReleased hands a subagent's queue boundary decision
+// to every open page of the conversation: what runs next is sent, the rest go
+// back to that subagent's composer.
+func (s *Server) publishSubagentQueuedInputReleased(sid, agentKey string, send, restore []run.Input) {
+	if s == nil || s.RunEvents() == nil || (len(send) == 0 && len(restore) == 0) {
+		return
+	}
+	payload := event.QueuedInputReleasedPayload{AgentID: strings.TrimSpace(agentKey)}
+	for _, in := range restore {
+		payload.Inputs = append(payload.Inputs, releasedInput(in))
+	}
+	for _, in := range send {
+		payload.Next = append(payload.Next, releasedInput(in))
+	}
+	if err := s.RunEvents().Publish(context.Background(), event.NewRunEvent("", "", strings.TrimSpace(sid), event.RunEventQueuedInputReleased, payload, time.Now())); err != nil {
+		slog.Error("publish subagent queued input release", "session_id", sid, "agent_id", agentKey, "err", err)
+	}
+}
+
+// publishSubagentPendingInputUpdated reports a subagent's queue as its own view
+// shows it, tagged with its roster key so it lands there and nowhere else.
+func (s *Server) publishSubagentPendingInputUpdated(ctx context.Context, sid, agentKey string, runner *run.Runner) {
+	if s == nil || s.RunEvents() == nil || runner == nil {
+		return
+	}
+	preview := subagentInputPreview(runner, sid, agentKey)
+	payload := event.PendingInputUpdatedPayload{
+		AgentID:        strings.TrimSpace(agentKey),
+		PendingSteers:  preview.PendingSteers,
+		RejectedSteers: preview.RejectedSteers,
+		QueuedMessages: preview.QueuedMessages,
+	}
+	if err := s.RunEvents().Publish(ctx, event.NewRunEvent("", "", strings.TrimSpace(sid), event.RunEventPendingInputUpdated, payload, time.Now())); err != nil {
+		slog.Error("publish subagent pending input", "session_id", sid, "agent_id", agentKey, "err", err)
+	}
+}
+
+// subagentInputPreview is a subagent's queued input as its own view shows it.
+func subagentInputPreview(r *run.Runner, sid, agentKey string) turn.PendingInputPreview {
+	p := run.SubagentInputPreview(r, sid, agentKey)
+	return turn.PendingInputPreview{PendingSteers: p.Steers, RejectedSteers: p.Rejected, QueuedMessages: p.FollowUp}
+}
+
+// subagentInputRequest is the body of POST .../subagents/:agent/input.
+type subagentInputRequest struct {
+	Message       string   `json:"message"`
+	Attachments   []string `json:"attachments"`
+	MentionImages []string `json:"mention_images"`
+	// Mode is "steer" (the default) or "follow_up": where the message goes when
+	// the subagent is already running.
+	Mode string `json:"mode"`
+}
+
+func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req subagentInputRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	in := run.Input{Text: strings.TrimSpace(req.Message), Attachments: req.Attachments, MentionImages: req.MentionImages}
+	if strings.HasPrefix(in.Text, "/") {
+		if code, ok := s.subagentCommandInput(&in); !ok {
+			writeSubagentViewError(w, code, "this command belongs to the conversation", http.StatusBadRequest)
+			return
+		}
+	}
+	if in.Text == "" && len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
+		http.Error(w, "empty message", http.StatusBadRequest)
+		return
+	}
+	mode := run.TurnInputModeSteer
+	if reqMode := strings.ToLower(strings.TrimSpace(req.Mode)); reqMode == "follow_up" || reqMode == "queue" {
+		mode = run.TurnInputModeFollowUp
+	}
+	delivery, err := run.SendToSubagent(r.Context(), runner, s.subagentConversationSurface(sid), sid, agentKey, in, mode)
+	if err != nil {
+		if errors.Is(err, run.ErrSubagentNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
+	writeJSON(w, map[string]any{"delivery": string(delivery), "preview": subagentInputPreview(runner, sid, agentKey)})
+}
+
+// subagentCommandInput turns a slash line the user typed in a subagent's view
+// into what is sent. A skill command is expanded through the shared slash path
+// and its trusted selection rides along; a command that belongs to the
+// conversation is refused with its stable code (the caller writes it).
+func (s *Server) subagentCommandInput(in *run.Input) (code string, ok bool) {
+	fields := strings.Fields(strings.TrimSpace(in.Text))
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	switch name {
+	case "compact", "context":
+		return useDedicatedEndpointCode, false
+	}
+	if _, isBuiltin := turn.Find(name); isBuiltin {
+		// A built-in that acts on the conversation (hidden, or global) is not
+		// sent here; the page runs it in the main view instead.
+		return subagentViewCommandCode, false
+	}
+	outcome := parseSlashCommandWithOptions(s, "", "webchat", in.Text, turn.Context{}, nil)
+	if strings.TrimSpace(outcome.SkillName) == "" && strings.TrimSpace(outcome.SkillPath) == "" {
+		return subagentViewCommandCode, false
+	}
+	in.SkillName = strings.TrimSpace(outcome.SkillName)
+	in.SkillPath = strings.TrimSpace(outcome.SkillPath)
+	if expanded := strings.TrimSpace(outcome.ContinueInput); expanded != "" {
+		in.Text = expanded
+	}
+	return "", true
+}
+
+func (s *Server) handleSubagentQueuedInput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	var req runInputRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.Action), "edit_last") {
+		http.Error(w, "unsupported action", http.StatusBadRequest)
+		return
+	}
+	item, accepted := run.RecallSubagentInput(runner, sid, agentKey)
+	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
+	if !accepted {
+		writeJSON(w, map[string]any{"accepted": false, "preview": subagentInputPreview(runner, sid, agentKey)})
+		return
+	}
+	writeJSON(w, map[string]any{
+		"accepted":       true,
+		"message":        item.Text,
+		"attachments":    item.Attachments,
+		"mention_images": item.MentionImages,
+		"preview":        subagentInputPreview(runner, sid, agentKey),
+	})
+}
+
+func (s *Server) handleSubagentInterruptSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	interrupted := run.InterruptSubagentToSend(runner, sid, agentKey)
+	writeJSON(w, map[string]any{"interrupted": interrupted})
+}
+
+func (s *Server) handleSubagentWithdraw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent input unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.subagentNamed(sid, agentKey) {
+		http.NotFound(w, r)
+		return
+	}
+	inputs, withdrawn := run.WithdrawSubagentInput(runner, sid, agentKey)
+	s.publishSubagentPendingInputUpdated(r.Context(), sid, agentKey, runner)
+	msgs := make([]map[string]any, 0, len(inputs))
+	for _, in := range inputs {
+		msgs = append(msgs, map[string]any{"message": in.Text, "attachments": in.Attachments, "mention_images": in.MentionImages})
+	}
+	writeJSON(w, map[string]any{"withdrawn": msgs, "any": withdrawn, "preview": subagentInputPreview(runner, sid, agentKey)})
+}
+
+func (s *Server) handleSubagentCompact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if s == nil || s.Sessions == nil {
+		http.Error(w, "session store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "subagent compact unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	subCtx, workerSessionID, err := run.SubagentCompactTarget(r.Context(), runner, sid, agentKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, run.ErrSubagentRunning):
+			writeSubagentViewError(w, subagentRunningCode, "the subagent is running", http.StatusConflict)
+		case errors.Is(err, run.ErrSubagentNotFound):
+			http.NotFound(w, r)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+	svc := run.CompactionService(runner, s.Sessions)
+	res, err := svc.ManualCompactSession(subCtx, workerSessionID, "manual")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, compactResultBody(res))
+}
+
+func (s *Server) handleSubagentContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	workerSessionID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(r.Context(), runner, sid, agentKey)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if s.Env.Tools() == nil {
+		http.Error(w, "context unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.subagentContextBody(r.Context(), workerSessionID, provider, model, used, explicitLimit))
+}
+
+// subagentContextBody is /context for a subagent: the same report the
+// conversation's own /context returns, fed the subagent's worker session, its
+// model and its own occupancy, so the page draws it with the same component.
+func (s *Server) subagentContextBody(ctx context.Context, workerSessionID, provider, model string, used, explicitLimit int) map[string]any {
+	workerSessionID = strings.TrimSpace(workerSessionID)
+	body := map[string]any{}
+	var compactions []event.ContextCompactedPayload
+	if s.RunRT != nil {
+		read, err := turn.ConversationCompactions(ctx, s.RunRT, workerSessionID)
+		if err == nil {
+			compactions = read
+		}
+	}
+	if st := s.Env.Tools(); st != nil {
+		snapshot, ok := st.GetContextSnapshotForRun(workerSessionID, tool.RunIDFromContext(ctx), compactions)
+		if ok && len(snapshot) > 0 {
+			_ = json.Unmarshal(snapshot, &body)
+			if body == nil {
+				body = map[string]any{}
+			}
+		}
+	}
+	gauge := turn.ContextGaugeOf(provider, model, used, explicitLimit)
+	body["model_context_tokens"] = gauge.WindowTokens
+	body["available_window_tokens"] = gauge.WindowTokens
+	body["remaining_context_tokens"] = gauge.UsedTokens
+	body["percent_left"] = gauge.PercentLeft
+	if s.Sessions != nil {
+		if boundaryID, part, err := s.Sessions.LatestCompactBoundary(ctx, workerSessionID); err == nil && boundaryID > 0 {
+			body["window_number"] = part.WindowNumber
+			body["active_boundary_id"] = strings.TrimSpace(formatOptionalBoundaryRowID(boundaryID))
+			body["active_window_id"] = strings.TrimSpace(part.WindowID)
+		}
+	}
+	if timeline, ok := body["context_timeline"].([]any); ok && len(timeline) > 0 {
+		body["compact_audit"] = map[string]any{
+			"session_id": workerSessionID,
+			"run_id":     tool.RunIDFromContext(ctx),
+			"timeline":   timeline,
+		}
+		body["compact_diff"] = buildCompactDiff(timeline)
+	}
+	if spills, ok := body["tool_result_spills"].([]any); ok {
+		body["tool_result_spill_count"] = len(spills)
+	}
+	return body
+}
+
+func (s *Server) handleSubagentBudget(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid, agentKey, ok := s.subagentRoute(w, r)
+	if !ok {
+		return
+	}
+	runner := s.subagentRunner(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "budget unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	payload, ok := run.SubagentContextBudget(r.Context(), runner, sid, agentKey)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, payload)
 }
 
 func (s *Server) handleSessionRewindLast(w http.ResponseWriter, r *http.Request) {
@@ -1554,12 +2213,26 @@ func (s *Server) handleSessionCostSummary(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"session_id": sid,
-		"tool_calls": total,
-		"by_tool":    byTool,
-		"note":       "model token cost is not natively available yet; this summary tracks tool-call cost surface",
+	usage, err := s.RunRT.SessionUsageForSession(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// What the session spent, in the same figures /status reports: the
+	// requests' input and output, the cache split and its hit rate, and the
+	// tool calls made.
+	totals := turn.SessionUsageTotalsOf(usage)
+	writeJSON(w, map[string]any{
+		"session_id":        sid,
+		"input_tokens":      totals.InputTokens,
+		"output_tokens":     totals.OutputTokens,
+		"cache_read":        totals.CacheRead,
+		"cache_written":     totals.CacheWritten,
+		"uncached":          totals.Uncached,
+		"requests":          totals.Requests,
+		"cache_hit_percent": totals.CacheHitPercent,
+		"tool_calls":        total,
+		"by_tool":           byTool,
 	})
 }
 
@@ -1794,7 +2467,7 @@ func (s *Server) handleActions(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]actionListRow, 0, len(list))
 	for i := range list {
-		rows = append(rows, s.actionListRow(list[i]))
+		rows = append(rows, s.actionListRow(r.Context(), list[i]))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(rows)
@@ -1811,21 +2484,21 @@ type actionListRow struct {
 	SubagentType string `json:"subagent_type,omitempty"`
 }
 
-func (s *Server) actionListRow(a state.Action) actionListRow {
+func (s *Server) actionListRow(ctx context.Context, a state.Action) actionListRow {
 	row := actionListRow{Action: a}
-	if sugg := s.actionPermissionSuggestion(a); len(sugg) > 0 {
+	if sugg := s.actionPermissionSuggestion(ctx, a); len(sugg) > 0 {
 		row.PermissionSuggestion = sugg
 	}
 	row.AgentID, row.SubagentType = turn.ActionSubagent(&a)
 	return row
 }
 
-func (s *Server) actionPermissionSuggestion(a state.Action) map[string]any {
+func (s *Server) actionPermissionSuggestion(ctx context.Context, a state.Action) map[string]any {
 	kind := strings.TrimSpace(a.Kind)
 	if kind == "" {
 		return nil
 	}
-	base := approvalWSData(s.permissionFacade(), a.SessionID, a.ID, kind, kind, a.PayloadJSON)
+	base := approvalWSData(s.sessionPermissions(ctx, a.SessionID), a.SessionID, a.ID, kind, kind, a.PayloadJSON)
 	raw, _ := base["permission_suggestion"].(map[string]any)
 	return raw
 }
@@ -1980,6 +2653,212 @@ func (s *Server) handleActionsApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(a)
+}
+
+// handleSessionApprovalRequest answers "what is this session parked on" with
+// the typed approval request the web's exit-plan card is drawn from — the
+// same request the TUI's overlay is prompted with, plan text, review models
+// and collected reviews included. Nothing parked is not an error: 204.
+func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
+		return
+	}
+	owned, ownershipErr := s.sessionOwned(r.Context(), sid)
+	if ownershipErr != nil {
+		http.Error(w, ownershipErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
+	req, err := s.approvalGate().Pending(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if req == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// The plan the gate is asking about, read from the path the shared gate
+	// resolved: the card has to show the document itself, not a pointer to it.
+	planText := ""
+	if path := strings.TrimSpace(req.PlanFilePath); path != "" {
+		if raw, readErr := os.ReadFile(path); readErr == nil {
+			planText = string(raw)
+		}
+	}
+	models := make([]planReviewModelWire, 0, len(req.PlanReviewModels))
+	for _, option := range req.PlanReviewModels {
+		models = append(models, planReviewModelWire{
+			Provider: option.Provider, Model: option.Model, Label: option.Label, Current: option.Current,
+		})
+	}
+	reviews := make([]planReviewNoteWire, 0, len(req.PlanReviews))
+	for _, note := range req.PlanReviews {
+		reviews = append(reviews, planReviewNoteWire{
+			Provider: note.Provider, Model: note.Model, Text: note.Text, DurationMs: note.Duration.Milliseconds(),
+		})
+	}
+	out := sessionApprovalRequestWire{
+		ActionID: req.ActionID, Kind: req.ActionKind, ToolName: req.ToolName,
+		PlanText: planText, PlanReviewModels: models, PlanReviews: reviews,
+	}
+	// A review in flight is a fact of the conversation's events, the only
+	// source every surface and every replica can agree on without sharing
+	// memory: a started review whose closing event has not arrived.
+	if active, open := turn.ActivePlanReview(r.Context(), s.RunRT, sid, req.ActionID); open {
+		out.PlanReviewActive = &planReviewInFlightWire{
+			ReviewID: active.ReviewID, Provider: active.Provider, Model: active.Model,
+			Label: active.Label, AgentID: active.AgentID,
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// The approval-request wire shapes: the card reads these fields alone, in the
+// snake_case the gateway's API speaks, with durations in milliseconds.
+type sessionApprovalRequestWire struct {
+	ActionID         string                  `json:"action_id"`
+	Kind             string                  `json:"kind"`
+	ToolName         string                  `json:"tool_name"`
+	PlanText         string                  `json:"plan_text"`
+	PlanReviewModels []planReviewModelWire   `json:"plan_review_models"`
+	PlanReviews      []planReviewNoteWire    `json:"plan_reviews"`
+	PlanReviewActive *planReviewInFlightWire `json:"plan_review_active"`
+}
+
+type planReviewModelWire struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Label    string `json:"label,omitempty"`
+	Current  bool   `json:"current,omitempty"`
+}
+
+type planReviewNoteWire struct {
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	Text       string `json:"text"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+}
+
+type planReviewInFlightWire struct {
+	ReviewID string `json:"review_id"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+	Label    string `json:"label,omitempty"`
+	AgentID  string `json:"agent_id,omitempty"`
+}
+
+// handleActionPlanReview starts one second-opinion review of a parked
+// exit-plan approval, in the background, through the same shared flow the
+// TUI's overlay uses. The request is accepted before the review runs: the
+// review's own events are its progress and its result, on the conversation.
+func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.Actions == nil {
+		http.Error(w, "actions disabled", http.StatusServiceUnavailable)
+		return
+	}
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	act, err := s.Actions.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, state.ErrActionNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if act == nil || act.Status != state.ActionPending || !strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") {
+		http.Error(w, "plan review requires a pending exit_plan_mode approval", http.StatusBadRequest)
+		return
+	}
+	sid := strings.TrimSpace(act.SessionID)
+	if sid != "" {
+		owned, ownershipErr := s.sessionOwned(r.Context(), sid)
+		if ownershipErr != nil {
+			http.Error(w, ownershipErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	// The model must be one the session is configured with: a reviewer has to
+	// run on credentials the session already has.
+	model := turn.Model{Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
+	allowed := false
+	for _, option := range s.approvalGate().ReviewModels() {
+		if option.MatchesSelection(model.Provider, model.Model) {
+			allowed = true
+			model.Label = option.Label
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "the model is not configured for this session", http.StatusBadRequest)
+		return
+	}
+	runID := ""
+	if s.RunRT != nil {
+		runID, _, _ = s.RunRT.FindRunByAction(r.Context(), id)
+	}
+	// The review's tool steps and its own tool approvals flow through the same
+	// detached seams a resumed gateway run uses, so the reviewer's cards and
+	// gates reach every page watching the conversation.
+	detached := s.withDetachedGatewayApprovalHooks(
+		process.AgentContextForProject(context.Background(), s.stateRoot(), sid, s.projectKey()), sid, runID,
+	)
+	// A session without a transcript store reviews without a task context
+	// rather than handing the flow a typed-nil store.
+	var transcripts turn.PlanReviewTranscripts
+	if sessions := s.Sessions; sessions != nil {
+		transcripts = sessions
+	}
+	review := turn.PlanReviewRun{
+		ActionID: id, Model: model, SessionID: sid, RunID: runID,
+		StateRoot: s.stateRoot(), ProjectKey: s.projectKey(),
+		Transcripts: transcripts,
+		Reviewer: &process.PlanReviewer{
+			Runner: s.Runner, Model: model, Config: s.modelConfig(),
+			StepHook: tool.StepHookFromContext(detached, nil),
+			Approve:  tool.SubagentApprovalHookFromContext(detached, nil),
+		},
+		Publish: func(ctx context.Context, evt event.RunEvent) error {
+			bus := s.RunEvents()
+			if bus == nil {
+				return nil
+			}
+			return bus.Publish(ctx, evt)
+		},
+	}
+	go func() { _ = turn.RunPlanReview(detached, review) }()
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) clearContextForAction(ctx context.Context, actionID string) {
@@ -2150,9 +3029,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	case state.ActionError:
 		_ = s.RunRT.ClearWait(ctx, runID)
 		reason := firstNonEmptyString(action.Error, "approval action failed")
-		_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
-		s.finishRun(ctx, rn.SessionID, runID)
-		_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
+		s.finishRun(ctx, rn.SessionID, runID, state.RunStatusFailed)
+		_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 		return
 	case state.ActionApproved, state.ActionAnswered, state.ActionDenied:
 		// These are the only decisions with continuation semantics.
@@ -2166,9 +3044,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	if action != nil && action.Status == state.ActionApproved {
 		if effectErr := s.approvalService().ApplyResolvedEffect(action, runID); effectErr != nil {
 			_ = s.RunRT.ClearWait(ctx, runID)
-			_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
-			s.finishRun(ctx, rn.SessionID, runID)
-			_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, "turn_error", event.TurnErrorPayload{Error: effectErr.Error(), Message: effectErr.Error()})
+			s.finishRun(ctx, rn.SessionID, runID, state.RunStatusFailed)
+			_ = s.publishGatewayRunEvent(ctx, rn.SessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: effectErr.Error(), Message: effectErr.Error()})
 			slog.Error("restore approval policy effect", "run_id", runID, "action_id", actionID, "err", effectErr)
 			return
 		}
@@ -2208,7 +3085,11 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	if q, _, ok := s.runController().Queue(runID); ok && q.Runtime() != nil {
 		ctx2 = run.WithTurnInputRuntime(ctx2, q.Runtime())
 	}
-	resume := turn.BuildApprovalResume(action, w.SessionSnapshot, w.ToolName, clearedContext)
+	// Same wiring as every other surface: a denied exit-plan approval carries
+	// the reviews it collected, composed here from the conversation's events
+	// — the same guidance the TUI's resume composes — while the user's own
+	// words stay what everything displays.
+	resume := turn.BuildApprovalResumeWithPlanReviews(ctx, s.RunRT, action, w.SessionSnapshot, w.ToolName, clearedContext)
 	if resume.Approved {
 		ctx2 = tool.WithApprovedActionID(ctx2, actionID)
 	}
@@ -2224,9 +3105,10 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 			}
 		}
 		resumeState := &tool.ToolApprovalResumeState{
-			Session:    resume.Session,
-			Denied:     resume.Denied,
-			DenyReason: resume.Reason,
+			Session:      resume.Session,
+			Denied:       resume.Denied,
+			DenyReason:   resume.Reason,
+			DenyFeedback: resume.Feedback,
 		}
 		// The durable fence is crossed by the replay itself, not here: this
 		// path still has prompt assembly, pre-hooks and possibly a compaction
@@ -2283,8 +3165,8 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 		}
 		_ = s.RunRT.ClearWait(ctx, runID)
 		errText := llm.ExplainError(runErr)
-		s.finishRun(ctx, sid, runID)
-		_ = s.publishGatewayRunEvent(ctx, sid, runID, "turn_error", event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(runErr)})
+		s.finishRun(ctx, sid, runID, state.RunStatusFailed)
+		_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: errText, Message: errText, Detail: newTurnErrorDetail(runErr)})
 		slog.Error("resume run after action", "run_id", runID, "action_id", actionID, "err", runErr)
 		return
 	}
@@ -2317,19 +3199,15 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	// What the resumed run never took goes back before its end is reported,
 	// the same way the webchat turn loop closes out a run it owns.
 	_ = s.RunRT.ClearWait(ctx, runID)
-	s.finishRun(ctx, sid, runID)
-	planProgress := lastPlanProgressOfRun(ctx, s.RunRT, runID)
-	_ = s.publishGatewayRunEvent(ctx, sid, runID, "turn_completed", event.TurnCompletedPayload{
-		Text:       ans,
-		ElapsedMS:  elapsed.Milliseconds(),
-		PlanDone:   planProgress.Done,
-		PlanTotal:  planProgress.Total,
-		PlanActive: planProgress.Active,
+	s.finishRun(ctx, sid, runID, state.RunStatusDone)
+	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
+		Text:      ans,
+		ElapsedMS: elapsed.Milliseconds(),
 	})
 }
 
 func (s *Server) handleSkillsList(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsListWith(s.gatewayLaunchProject(), "", w, r)
+	s.handleSkillsListWith(agentSkillScope(), "", w, r)
 }
 
 // handleSkillsListWith serves the skill listing both the global and the
@@ -2358,7 +3236,7 @@ func (s *Server) handleSkillsListWith(launch safety.ProjectContext, projectID st
 	})
 }
 func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsCreateWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsCreateWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsCreateWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2393,7 +3271,7 @@ func (s *Server) handleSkillsCreateWith(launch safety.ProjectContext, w http.Res
 }
 
 func (s *Server) handleSkillsUpdate(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsUpdateWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsUpdateWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsUpdateWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2432,7 +3310,7 @@ func (s *Server) handleSkillsUpdateWith(launch safety.ProjectContext, w http.Res
 }
 
 func (s *Server) handleSkillGet(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillGetWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillGetWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillGetWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2471,7 +3349,7 @@ func (s *Server) handleSkillGetWith(launch safety.ProjectContext, w http.Respons
 }
 
 func (s *Server) handleSkillsToggle(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsToggleWith(s.gatewayLaunchProject(), "", w, r)
+	s.handleSkillsToggleWith(agentSkillScope(), "", w, r)
 }
 
 // handleSkillsToggleWith takes the listing's project context so the refreshed
@@ -2514,7 +3392,7 @@ func (s *Server) handleSkillsToggleWith(launch safety.ProjectContext, projectID 
 }
 
 func (s *Server) handleSkillsInstall(w http.ResponseWriter, r *http.Request) {
-	s.handleSkillsInstallWith(s.gatewayLaunchProject(), w, r)
+	s.handleSkillsInstallWith(agentSkillScope(), w, r)
 }
 
 func (s *Server) handleSkillsInstallWith(launch safety.ProjectContext, w http.ResponseWriter, r *http.Request) {
@@ -2660,16 +3538,32 @@ func (s *Server) skillLifecycleService(launch safety.ProjectContext) (*skill.Ser
 	// one from the process.
 	svc := skill.NewServiceForWorkspace(s.Home, active.WorkspaceRoot)
 	svc.ProjectRoot = strings.TrimSpace(launch.Project.Root)
-	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), launch) }
+	// What a page lists and what the running gateway loads are separate
+	// facts. The skill commands the runtime answers are one registry for this
+	// process, built for the gateway's own launch project; a page working in
+	// another context (the agent's own layers, a project space) changes files,
+	// and the registry is rebuilt for the runtime it serves, never replaced by
+	// that page's listing.
+	runtimeLaunch := s.gatewayLaunchProject()
+	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), runtimeLaunch) }
 	svc.IsBuiltin = turn.IsBuiltinName
 	return svc, nil
 }
 
+// agentSkillScope is the project context the primary agent's own skill
+// routes work in: none. The agent's page manages its own layer and shows the
+// shared, built-in and cross-tool layers it inherits; a project's skills are
+// listed and managed in that project's space. The gateway's launch project is
+// a project too, and listing it here would put a project's skills on the
+// agent's page and make the agent's toggles answer for them.
+func agentSkillScope() safety.ProjectContext {
+	return safety.ProjectContext{}
+}
+
 // gatewayLaunchProject is the launch project this gateway process was started
-// in, frozen with its runtime. It is the project the global (non-project-
-// scoped) skill routes act on: a gateway serving one checkout — the common
-// case — resolves it here exactly as its runner does, and a gateway serving
-// several projects reaches each one through /projects/:id/skills instead.
+// in, frozen with its runtime: the context the base runner loads skills for,
+// and so the one its skill command registry and a web conversation's explicit
+// skill selection answer for.
 func (s *Server) gatewayLaunchProject() safety.ProjectContext {
 	if s == nil {
 		return safety.ProjectContext{}
@@ -3097,26 +3991,32 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 // adjacent entries sharing a signature fold into one row with a models list,
 // which is the shape the user edits. api_key never travels: the GET carries
 // only whether it is set and its last four characters, and a PUT with no key
-// fields at all means "leave the stored key alone".
+// fields at all means "leave the stored key alone". params travels as its
+// JSON text: its keys are the provider's request fields, verbatim, and an
+// object would have them re-cased by a client that normalizes response keys —
+// then saved back under names the provider does not know.
 type providerRowDTO struct {
-	Provider   string          `json:"provider"`
-	BaseURL    string          `json:"base_url,omitempty"`
-	APIPath    string          `json:"api_path,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
-	Models     []string        `json:"models"`
-	APIKeySet  bool            `json:"api_key_set"`
-	APIKeyHint string          `json:"api_key_hint,omitempty"`
+	Provider   string   `json:"provider"`
+	BaseURL    string   `json:"base_url,omitempty"`
+	APIPath    string   `json:"api_path,omitempty"`
+	Params     string   `json:"params,omitempty"`
+	Models     []string `json:"models"`
+	APIKeySet  bool     `json:"api_key_set"`
+	APIKeyHint string   `json:"api_key_hint,omitempty"`
 }
 
+// providerPutRow is one row of the PUT. params decodes through the engine's
+// own type, so anything but a JSON object is refused here rather than
+// written into a config the loader would then reject.
 type providerPutRow struct {
-	Provider    string          `json:"provider"`
-	BaseURL     string          `json:"base_url,omitempty"`
-	APIPath     string          `json:"api_path,omitempty"`
-	Params      json.RawMessage `json:"params,omitempty"`
-	Model       string          `json:"model,omitempty"`
-	Models      []string        `json:"models,omitempty"`
-	APIKey      string          `json:"api_key,omitempty"`
-	APIKeyPlain string          `json:"api_key_plain,omitempty"`
+	Provider    string                  `json:"provider"`
+	BaseURL     string                  `json:"base_url,omitempty"`
+	APIPath     string                  `json:"api_path,omitempty"`
+	Params      config.LLMRequestParams `json:"params,omitempty"`
+	Model       string                  `json:"model,omitempty"`
+	Models      []string                `json:"models,omitempty"`
+	APIKey      string                  `json:"api_key,omitempty"`
+	APIKeyPlain string                  `json:"api_key_plain,omitempty"`
 }
 
 // providerSignature is what two adjacent entries must share to fold into one
@@ -3149,7 +4049,7 @@ func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []pro
 			Provider:  strings.TrimSpace(item.Provider),
 			BaseURL:   strings.TrimSpace(item.BaseURL),
 			APIPath:   strings.TrimSpace(item.APIPath),
-			Params:    json.RawMessage(item.Params),
+			Params:    strings.TrimSpace(string(item.Params)),
 			Models:    models,
 			APIKeySet: key != "",
 		}
@@ -3237,6 +4137,13 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		entries := make([]config.AgentLLMProviderConfig, 0, len(req.Providers))
 		for _, row := range req.Providers {
+			// The engine builds a client only for a provider its model catalog
+			// knows; any other name would save and then fail the next runner
+			// load (an agent switch, a restart). Setup refuses it the same way.
+			if err := process.VerifyProvider(row.Provider); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			models := row.Models
 			if len(models) == 0 && strings.TrimSpace(row.Model) != "" {
 				models = []string{row.Model}
@@ -3263,12 +4170,19 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 					APIKey:   apiKey,
 					BaseURL:  strings.TrimSpace(row.BaseURL),
 					APIPath:  strings.TrimSpace(row.APIPath),
-					Params:   config.LLMRequestParams(row.Params),
+					Params:   row.Params,
 				})
 			}
 		}
 		def.LLMProviders = entries
 		cfg.Agents.Definitions[active.ID] = def
+		// The first row is the agent's primary model. Startup refuses a
+		// primary missing any of these, so a table that leaves one out would
+		// save fine and then keep the gateway from starting again.
+		if missing := config.ValidateAgentLLMConfigured(&cfg, active.ID).MissingFields(); len(missing) > 0 {
+			http.Error(w, "the first model service is the primary and needs "+strings.Join(missing, ", "), http.StatusBadRequest)
+			return
+		}
 		if err := s.saveAndReload(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -3313,6 +4227,54 @@ func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.Hooks = req.Hooks
+		if err := s.saveAndReload(cfg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeAgentsJSON(w, configWriteResult{Path: s.configPath(), Applied: true})
+	default:
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleCronSettings reads and writes the install's scheduled-task settings —
+// today the conversation retention. It is global configuration, so it is
+// served apart from the agent-scoped /cron routes. The write is validated by
+// the same function the loader uses, so a value the YAML editor would reject
+// never reaches the file from here either.
+func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err := s.persistedConfig()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeAgentsJSON(w, map[string]any{
+			"retention_days": cfg.CronRetentionDays(),
+			"configured":     cfg.Cron.RetentionDays != nil,
+			"default_days":   config.DefaultCronRetentionDays,
+			"min_days":       config.MinCronRetentionDays,
+			"max_days":       config.MaxCronRetentionDays,
+		})
+	case http.MethodPut:
+		var req struct {
+			RetentionDays *int `json:"retention_days"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := config.ValidateCronSection(config.CronSection{RetentionDays: req.RetentionDays}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg, err := s.persistedConfig()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		cfg.Cron = config.CronSection{RetentionDays: req.RetentionDays}
 		if err := s.saveAndReload(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -3933,7 +4895,8 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 
 // handleProjectSessionsCreate opens a new session inside one project: the
 // session's cwd is the project root and its project binding decides which
-// pooled runner serves it.
+// pooled runner serves it. That identity is given to the session at birth;
+// it never goes through the store's process-wide defaults.
 func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -3955,17 +4918,13 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
 	// No title leaves the session unnamed, so its first message names it.
 	title := strings.TrimSpace(body.Title)
-	if s.Sessions != nil {
-		// The session row records the project root as its cwd so history and
-		// memory scopes read the directory the conversation is about.
-		s.Sessions.ConfigureMemoryDefaults(memory.SessionModeForConfig(s.liveCfg()), memory.SessionSourceWebchat, p.Root, memory.GitBranch(p.Root))
-	}
+	birth := state.SessionBirth{Cwd: p.Root, GitBranch: memory.GitBranch(p.Root)}
 	var res struct {
 		ID    string `json:"id"`
 		Title string `json:"title"`
 	}
 	if s.Core != nil {
-		out, err := s.Core.CreateSession(r.Context(), title)
+		out, err := s.Core.CreateSessionAt(r.Context(), title, birth)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -3978,7 +4937,7 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 		if stored == "" {
 			stored = res.ID
 		}
-		if err := s.Sessions.Ensure(r.Context(), res.ID, stored); err != nil {
+		if err := s.Sessions.EnsureAt(r.Context(), res.ID, stored, birth); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -3986,24 +4945,34 @@ func (s *Server) handleProjectSessionsCreate(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "sessions disabled", http.StatusServiceUnavailable)
 		return
 	}
-	if err := store.BindSession(r.Context(), res.ID, p.ID); err != nil {
+	if err := s.bindSessionToProject(r.Context(), res.ID, p); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if s.Env != nil {
-		s.Env.EnsureRunnerPool()
-		if pool := s.Env.RunnerPool(); pool != nil {
-			if err := pool.BindSession(r.Context(), res.ID, p.ID); err == nil {
-				// Pre-building the runner here means the first message in the
-				// new session does not pay for it. A failure is not fatal:
-				// the first turn resolves lazily instead.
-				_ = err
-			}
-		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(res)
+}
+
+// bindSessionToProject ties a session to one project: the project store's
+// binding, which lists the session under the project, and the runner pool's,
+// which decides which pooled runner serves it. A project session a page opens
+// and a fire of a project's job take the same path, so the fire's conversation
+// runs with the project's tools and instructions from its first turn.
+func (s *Server) bindSessionToProject(ctx context.Context, sessionID string, p state.Project) error {
+	if err := s.projectStore().BindSession(ctx, sessionID, p.ID); err != nil {
+		return err
+	}
+	if s.Env != nil {
+		s.Env.EnsureRunnerPool()
+		if pool := s.Env.RunnerPool(); pool != nil {
+			// Pre-building the runner here means the first message in the
+			// session does not pay for it. A failure is not fatal:
+			// the first turn resolves lazily instead.
+			_ = pool.BindSession(ctx, sessionID, p.ID)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleProjectSessionsList(w http.ResponseWriter, r *http.Request) {
@@ -4145,17 +5114,12 @@ func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
 	full := filepath.Join(root, name)
 	switch r.Method {
 	case http.MethodGet:
-		body, err := os.ReadFile(full)
+		content, exists, err := readRuleFile(full)
 		if err != nil {
-			if os.IsNotExist(err) {
-				writeJSON(w, map[string]any{"name": name, "exists": false, "content": ""})
-				return
-			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write(body)
+		writeJSON(w, map[string]any{"name": name, "exists": exists, "content": content})
 	case http.MethodPut:
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, rulesBodyLimit))
 		if err != nil {
@@ -4176,31 +5140,45 @@ func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// projectRuleDirs lists the root plus its first-level subdirectories — the
-// only layers a FOREBRAIN.md may be created in. Fifty is the cap: a listing
-// that large says the project should be curated from the file system, not a
-// dropdown.
-func projectRuleDirs(projectRoot string) []string {
-	dirs := []string{""}
+// readRuleFile reads one instruction file for the editor. A file that does
+// not exist yet is an empty, not-yet-created file — the same answer shape as
+// one that does, so the editor never has to tell content from a status reply.
+func readRuleFile(full string) (content string, exists bool, err error) {
+	body, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return string(body), true, nil
+}
+
+// projectRuleLayers lists the directories a project's FOREBRAIN.md chain is
+// kept in: the root ("") and its first-level subdirectories, sorted. A
+// symlinked directory is not a layer of this project — it may lead anywhere —
+// and .git is the repository's own machinery. ReadDir reports a link as a
+// link rather than as what it points to, so IsDir leaves links out.
+func projectRuleLayers(projectRoot string) []string {
+	layers := []string{""}
 	entries, err := os.ReadDir(projectRoot)
 	if err != nil {
-		return dirs
+		return layers
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() || entry.Name() == ".git" {
 			continue
 		}
-		if info, err := entry.Info(); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		if len(dirs) >= 50 {
-			break
-		}
-		dirs = append(dirs, entry.Name())
+		layers = append(layers, entry.Name())
 	}
-	sort.Strings(dirs[1:])
-	return dirs
+	sort.Strings(layers[1:])
+	return layers
 }
+
+// projectRuleCreateLimit caps the create dropdown: a project with more
+// first-level directories than this is curated from the file system, not a
+// dropdown. Existing files are listed and editable whatever the count.
+const projectRuleCreateLimit = 50
 
 func (s *Server) projectForRules(w http.ResponseWriter, r *http.Request) (root string, ok bool) {
 	store := s.projectStore()
@@ -4216,21 +5194,17 @@ func (s *Server) projectForRules(w http.ResponseWriter, r *http.Request) (root s
 	return p.Root, true
 }
 
-// projectRulePath validates the ?dir= layer and returns the FOREBRAIN.md path
-// inside it.
+// projectRulePath maps the ?dir= layer onto its FOREBRAIN.md. Only a layer
+// projectRuleLayers lists is accepted, so the editor can neither reach past
+// the first level, nor into .git, nor through a symlinked directory.
 func projectRulePath(projectRoot, dir string) (string, bool) {
 	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return filepath.Join(projectRoot, projectRuleFile), true
+	for _, layer := range projectRuleLayers(projectRoot) {
+		if layer == dir {
+			return filepath.Join(projectRoot, dir, projectRuleFile), true
+		}
 	}
-	if strings.ContainsAny(dir, "/\\") || dir == "." || dir == ".." {
-		return "", false
-	}
-	info, err := os.Stat(filepath.Join(projectRoot, dir))
-	if err != nil || !info.IsDir() {
-		return "", false
-	}
-	return filepath.Join(projectRoot, dir, projectRuleFile), true
+	return "", false
 }
 
 func (s *Server) handleProjectRuleFiles(w http.ResponseWriter, r *http.Request) {
@@ -4248,24 +5222,24 @@ func (s *Server) handleProjectRuleFiles(w http.ResponseWriter, r *http.Request) 
 		SizeBytes int64  `json:"size_bytes,omitempty"`
 		UpdatedAt int64  `json:"updated_at,omitempty"`
 	}
-	dirs := projectRuleDirs(projectRoot)
-	rows := make([]row, 0, len(dirs))
-	for _, dir := range dirs {
-		full := filepath.Join(projectRoot, dir, projectRuleFile)
+	// The file list is the chain as it stands — the root, always, and every
+	// layer that holds a FOREBRAIN.md; the create dropdown offers the
+	// subdirectory layers that do not yet (the root row is already listed,
+	// so opening it is how its file is created).
+	rows := []row{}
+	creatable := []string{}
+	for _, dir := range projectRuleLayers(projectRoot) {
 		item := row{Dir: dir}
-		if info, err := os.Stat(full); err == nil {
+		if info, err := os.Stat(filepath.Join(projectRoot, dir, projectRuleFile)); err == nil {
 			item.Exists = true
 			item.SizeBytes = info.Size()
 			item.UpdatedAt = info.ModTime().Unix()
 		}
-		rows = append(rows, item)
-	}
-	// The create dropdown offers every layer without a file yet, so the
-	// listing stays honest about what "new" means here.
-	creatable := make([]string, 0, len(dirs))
-	for _, item := range rows {
-		if !item.Exists {
-			creatable = append(creatable, item.Dir)
+		if item.Exists || dir == "" {
+			rows = append(rows, item)
+		}
+		if !item.Exists && dir != "" && len(creatable) < projectRuleCreateLimit {
+			creatable = append(creatable, dir)
 		}
 	}
 	writeJSON(w, map[string]any{"files": rows, "create": creatable})
@@ -4283,17 +5257,12 @@ func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		body, err := os.ReadFile(full)
+		content, exists, err := readRuleFile(full)
 		if err != nil {
-			if os.IsNotExist(err) {
-				writeJSON(w, map[string]any{"exists": false, "content": ""})
-				return
-			}
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write(body)
+		writeJSON(w, map[string]any{"dir": strings.TrimSpace(r.URL.Query().Get("dir")), "exists": exists, "content": content})
 	case http.MethodPut:
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, rulesBodyLimit))
 		if err != nil {
@@ -4377,9 +5346,11 @@ func (s *Server) handleApprovalDefaultPut(w http.ResponseWriter, r *http.Request
 }
 
 // handleSessionPreset switches one conversation to a built-in preset for its
-// remaining lifetime. Nothing is written to disk — the same rule the
-// terminal's /permissions follows: a preset picked to get through one task
-// must not govern the next session.
+// remaining lifetime. Both halves are scoped to that conversation in the
+// permission store and nothing is written to disk or to the live config — the
+// same rule the terminal's /permissions follows: a preset picked to get
+// through one task governs neither the other conversations, channels and
+// scheduled jobs of this gateway nor the next session.
 func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -4398,6 +5369,19 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
 	}
+	// A preset is part of the conversation it is set on, so the endpoint
+	// answers only for a session this agent owns: another agent's is
+	// indistinguishable from missing, and its permission store is never
+	// written.
+	owned, err := s.sessionOwned(r.Context(), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.NotFound(w, r)
+		return
+	}
 	preset, ok := safety.ApprovalPresetByID(req.Preset)
 	if !ok {
 		http.Error(w, "unknown approval preset", http.StatusBadRequest)
@@ -4408,21 +5392,38 @@ func (s *Server) handleSessionPreset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	// The sandbox half moves the live config; the approval half is a session
-	// destination in the permission store. Both are memory-only here.
-	if runner.AppCfg != nil {
-		preset.ApplyToConfig(runner.AppCfg)
-	}
-	runner.ApplyPermissionUpdate(safety.PermissionUpdate{
-		Type:        safety.UpdateSetMode,
-		Destination: safety.DestinationSession,
-		SessionID:   sid,
-		Mode:        preset.Approval,
-	})
-	if s.Env != nil {
-		s.Env.RefreshSandboxRuntime()
+	for _, update := range preset.SessionUpdates(sid) {
+		runner.ApplyPermissionUpdate(update)
 	}
 	writeJSON(w, map[string]any{"ok": true, "description": preset.Description})
+}
+
+// handleSessionPresetGet names the preset one conversation is running under,
+// or null when its approval mode and sandbox add up to none of them — the
+// same reading the terminal's /permissions picker opens on.
+func (s *Server) handleSessionPresetGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sid == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	runner := s.runnerFor(r.Context(), sid)
+	if runner == nil {
+		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	snap := runner.PermissionSnapshotForSession(sid)
+	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(runner.AppCfg, snap))
+	if !ok {
+		writeJSON(w, approvalDefaultAnswer{Current: nil})
+		return
+	}
+	id := preset.ID
+	writeJSON(w, approvalDefaultAnswer{Current: &id, Description: preset.Description})
 }
 
 // permissionRuntimeMode reads the live permission mode the way the running
@@ -4438,6 +5439,145 @@ func (s *Server) permissionRuntimeMode() safety.PermissionMode {
 	return safety.ApprovalOnRequest
 }
 
+// --- Project permission rules ------------------------------------------------
+//
+// A project space manages that project's own rules (its .forebrain/safety.json),
+// whichever project the gateway process itself was launched in. Each request
+// loads a permission runtime from exactly the files a session of that project
+// reads — the agent's local settings plus the project's settings — so the
+// listing, the write and the explanation all answer for that project.
+
+type projectPermissionScope struct {
+	permissionScope
+	project state.Project
+}
+
+func (s *Server) loadProjectPermissionScope(w http.ResponseWriter, r *http.Request) (projectPermissionScope, bool) {
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return projectPermissionScope{}, false
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return projectPermissionScope{}, false
+	}
+	scope, ok := s.loadPermissionScope(p.Root)
+	if !ok {
+		http.Error(w, "permissions unavailable", http.StatusServiceUnavailable)
+		return projectPermissionScope{}, false
+	}
+	return projectPermissionScope{permissionScope: scope, project: p}, true
+}
+
+// handleProjectPermissionRules lists the project's own rules. applies says
+// whether the engine honors project rules for it at all — only a trusted,
+// version-controlled project has any — so the page can say why it is empty
+// rather than offer a form whose writes would be dropped.
+func (s *Server) handleProjectPermissionRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	scope, ok := s.loadProjectPermissionScope(w, r)
+	if !ok {
+		return
+	}
+	_, applies := safety.ProjectSettingsPath(scope.paths)
+	writeJSON(w, map[string]any{
+		"applies": applies,
+		"rules":   permissionRuleRows(scope.rt.Snapshot(scope.cfg), string(safety.SourceProjectSettings), ""),
+	})
+}
+
+// handleProjectPermissionUpdate adds, replaces or removes rules in the
+// project's own settings file, then has every running session of that project
+// read the file again.
+func (s *Server) handleProjectPermissionUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	scope, ok := s.loadProjectPermissionScope(w, r)
+	if !ok {
+		return
+	}
+	var u safety.PermissionUpdate
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&u); err != nil {
+		http.Error(w, "json", http.StatusBadRequest)
+		return
+	}
+	switch u.Type {
+	case safety.UpdateAddRules, safety.UpdateReplaceRules, safety.UpdateRemoveRules:
+	default:
+		http.Error(w, "type must be addRules, replaceRules or removeRules", http.StatusBadRequest)
+		return
+	}
+	u.Destination = safety.DestinationProjectSettings
+	if refusal := safety.ExplainRefusedUpdate(u.Destination, u.Behavior); refusal != "" {
+		http.Error(w, refusal, http.StatusBadRequest)
+		return
+	}
+	if _, applies := safety.ProjectSettingsPath(scope.paths); !applies {
+		http.Error(w, "project rules apply only to a trusted, version-controlled project", http.StatusConflict)
+		return
+	}
+	scope.rt.ApplyUpdate(u, scope.cfg, scope.paths)
+	s.propagateProjectPermissionUpdate(scope, u)
+	writeJSON(w, map[string]any{
+		"ok":    true,
+		"rules": permissionRuleRows(scope.rt.Snapshot(scope.cfg), string(safety.SourceProjectSettings), ""),
+	})
+}
+
+// handleProjectPermissionExplain answers how a call would be judged inside
+// the project: by the agent's local rules and the project's own.
+func (s *Server) handleProjectPermissionExplain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	scope, ok := s.loadProjectPermissionScope(w, r)
+	if !ok {
+		return
+	}
+	toolName := strings.TrimSpace(r.URL.Query().Get("tool_name"))
+	if toolName == "" {
+		http.Error(w, "tool_name required", http.StatusBadRequest)
+		return
+	}
+	input := strings.TrimSpace(r.URL.Query().Get("input"))
+	writeJSON(w, scope.rt.Explain("", toolName, input, scope.cfg, safety.RuntimeYOLOEnabled()))
+}
+
+// propagateProjectPermissionUpdate hands a project-settings update to every
+// live runner that reads that very file — the project's pooled runners and,
+// when its launch project is the same one, the gateway's own — so sessions
+// already running judge by the rules just written. Each applies it to its
+// in-memory store; the file it re-persists already holds the same rules.
+func (s *Server) propagateProjectPermissionUpdate(scope projectPermissionScope, u safety.PermissionUpdate) {
+	target, _ := safety.ProjectSettingsPath(scope.paths)
+	var runners []*run.Runner
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			runners = append(runners, pool.RunnersForProject(scope.project.ID)...)
+		}
+	}
+	if s.Runner != nil {
+		own := safety.Paths{Home: scope.paths.Home, WorkspaceRoot: scope.paths.WorkspaceRoot, ProjectRoot: s.Runner.ProjectRoot}
+		if path, ok := safety.ProjectSettingsPath(own); ok && path == target {
+			runners = append(runners, s.Runner)
+		}
+	}
+	for _, runner := range runners {
+		runner.ApplyPermissionUpdate(u)
+	}
+	if len(runners) > 0 && s.Env != nil {
+		s.Env.RefreshSandboxRuntime()
+	}
+}
+
 func pathParam(r *http.Request, name string) string {
 	return strings.TrimSpace(ParamsFromContext(r.Context()).ByName(name))
 }
@@ -4445,4 +5585,272 @@ func pathParam(r *http.Request, name string) string {
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+// lspControlFor resolves the session's Runner the way the MCP endpoints do
+// and answers its language-server control plane. A gateway or session without
+// one answers false; the caller writes the 503.
+func (s *Server) lspControlFor(r *http.Request, sessionID string) (tool.CodeIntelControl, bool) {
+	runner := s.Runner
+	if id := strings.TrimSpace(sessionID); id != "" {
+		if resolved := s.runnerFor(r.Context(), id); resolved != nil {
+			runner = resolved
+		}
+	}
+	if runner == nil || runner.CodeIntelControl == nil {
+		return nil, false
+	}
+	return runner.CodeIntelControl, true
+}
+
+// handleLSPSnapshot answers GET /api/v1/lsp?session_id=… with the same
+// snapshot the terminal's /lsp panel and the web chat's text fallback render.
+func (s *Server) handleLSPSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	ctl, ok := s.lspControlFor(r, r.URL.Query().Get("session_id"))
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, ctl.Snapshot())
+}
+
+// handleLSPServerEnable clears the server's disabled mark.
+// POST /api/v1/lsp/servers/enable with {"id": "gopls", "session_id": "…"}.
+func (s *Server) handleLSPServerEnable(w http.ResponseWriter, r *http.Request) {
+	s.handleLSPServerAction(w, r, true)
+}
+
+// handleLSPServerDisable records the server as disabled; its instances in
+// this project stop, the same action the terminal panel runs.
+func (s *Server) handleLSPServerDisable(w http.ResponseWriter, r *http.Request) {
+	s.handleLSPServerAction(w, r, false)
+}
+
+// handleLSPServerAction runs Enable/Disable through the control plane; a
+// refusal (an unknown server, a store that cannot be written) answers 409
+// with its own text.
+func (s *Server) handleLSPServerAction(w http.ResponseWriter, r *http.Request, enable bool) {
+	id, ctl, ok := s.lspServerActionInput(w, r)
+	if !ok {
+		return
+	}
+	if err := ctl.SetEnabled(id, enable); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleLSPServerRestart restarts the server's instances in this project.
+func (s *Server) handleLSPServerRestart(w http.ResponseWriter, r *http.Request) {
+	id, ctl, ok := s.lspServerActionInput(w, r)
+	if !ok {
+		return
+	}
+	if err := ctl.Restart(id); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleLSPServerInstall starts the server's install recipe and answers 202
+// at once: progress and outcome are read from the snapshot. The install must
+// survive the request that started it (§6.5: the user's explicit action, not
+// a connection's lifetime), hence WithoutCancel.
+func (s *Server) handleLSPServerInstall(w http.ResponseWriter, r *http.Request) {
+	id, ctl, ok := s.lspServerActionInput(w, r)
+	if !ok {
+		return
+	}
+	go func() { _ = ctl.Install(context.WithoutCancel(r.Context()), id, nil) }()
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{"ok": true, "started": true})
+}
+
+// handleLSPRecommendationsReset turns language-server recommendations back
+// on for this agent.
+func (s *Server) handleLSPRecommendationsReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	ctl, ok := s.lspControlFor(r, in.SessionID)
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := ctl.ResetRecommendations(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// handleLSPRecommendationDecision applies the user's answer to one
+// recommendation. POST /api/v1/lsp/recommendations/:id/decision with
+// {"choice": "enable", "session_id": "…"}. The web card's answer and the
+// terminal modal's run the same control plane.
+func (s *Server) handleLSPRecommendationDecision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Choice    string `json:"choice"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "invalid choice", http.StatusBadRequest)
+		return
+	}
+	choice := event.LSPRecommendationChoice(strings.TrimSpace(in.Choice))
+	if !choice.Valid() {
+		http.Error(w, "invalid choice", http.StatusBadRequest)
+		return
+	}
+	ctl, ok := s.lspControlFor(r, in.SessionID)
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := ctl.DecideRecommendation(pathParam(r, "id"), choice); err != nil {
+		if errors.Is(err, tool.ErrUnknownLSPRecommendation) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+// lspServerActionInput decodes the shared {"id", "session_id"} body and
+// resolves the control plane, answering the request itself on refusal.
+func (s *Server) lspServerActionInput(w http.ResponseWriter, r *http.Request) (string, tool.CodeIntelControl, bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return "", nil, false
+	}
+	var in struct {
+		ID        string `json:"id"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return "", nil, false
+	}
+	id := strings.TrimSpace(in.ID)
+	if id == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return "", nil, false
+	}
+	ctl, ok := s.lspControlFor(r, in.SessionID)
+	if !ok {
+		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
+		return "", nil, false
+	}
+	return id, ctl, true
+}
+
+// handleProjectLSPPreview resolves the project-level language-server view for
+// a project without a session: which entries the project file declares, which
+// await confirmation, which were allowed or denied, and why anything was
+// ignored. The web project page uses it so the confirmation entry can stand
+// on its own; the data comes from pkg/process because the gateway does not
+// import the lsp runtime.
+func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	trusted, pending, allowed, denied, notes := process.InspectProjectLSP(workspace, launch)
+	rows := make([]map[string]string, 0, len(pending))
+	for _, item := range pending {
+		rows = append(rows, map[string]string{"id": item.ID, "summary": item.Summary})
+	}
+	writeJSON(w, map[string]any{
+		"trusted": trusted,
+		"pending": rows,
+		"allowed": allowed,
+		"denied":  denied,
+		"notes":   notes,
+	})
+}
+
+// handleProjectLSPConsent is the web confirmation entry for project-level
+// language servers: the same decision the terminal's startup prompt records.
+func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	store := s.projectStore()
+	if store == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	p, err := store.Get(r.Context(), pathParam(r, "id"))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	var body struct {
+		Allow []string `json:"allow"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	launch, err := safety.ResolveRegisteredContext(s.Home, p.Root)
+	if err != nil {
+		http.Error(w, "project could not be resolved", http.StatusBadRequest)
+		return
+	}
+	workspace := ""
+	if s.Runner != nil {
+		workspace = s.Runner.WorkspaceRoot
+	}
+	if err := process.DecideProjectLSPConsents(workspace, launch, body.Allow); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// A consent changes what a project's sessions would load, so the pooled
+	// runners for it are rebuilt rather than reused.
+	if s.Env != nil {
+		if pool := s.Env.RunnerPool(); pool != nil {
+			pool.RebindAgent(s.Runner.AgentName)
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true, "allowed": body.Allow})
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -15,6 +16,58 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
+
+// approvalGateOn builds the gateway's pending-approval gate over explicit
+// dependencies, so the submit-time gate (RunServeBlocking) and the
+// request-time gate (the approval-request read) are one construction. The
+// plan scope and review models are injected because they carry facts the
+// TUI's overlay derives for itself: which plan file the gate is asking about
+// and which models a review may be handed to.
+func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *state.RunStore, actions *state.ActionService) *turn.PendingApprovalGate {
+	gate := &turn.PendingApprovalGate{Runs: runs}
+	if actions != nil {
+		gate.Actions = actions
+	}
+	if runner != nil {
+		gate.Evaluator = runner
+	}
+	gate.PlanScope = func(context.Context, string) (string, string) {
+		projectKey := ""
+		if runner != nil {
+			projectKey = strings.TrimSpace(runner.ProjectKey)
+		}
+		return config.ActiveStateRoot(home, cfg), projectKey
+	}
+	gate.ReviewModels = func() []turn.PlanReviewModelOption {
+		if runner == nil {
+			return nil
+		}
+		provider, model := run.PrimaryModel(runner)
+		agentName := strings.TrimSpace(runner.AgentName)
+		if agentName == "" {
+			agentName = "main"
+		}
+		return turn.PlanReviewModelOptions(cfg, agentName, provider, model)
+	}
+	return gate
+}
+
+// approvalGate is the gate the gateway's own handlers read through.
+func (s *Server) approvalGate() *turn.PendingApprovalGate {
+	if s == nil {
+		return nil
+	}
+	return approvalGateOn(s.Home, s.modelConfig(), s.Runner, s.RunRT, s.Actions)
+}
+
+// modelConfig is the configuration the active agent's models resolve against:
+// the runner's own when it holds one, the environment's otherwise.
+func (s *Server) modelConfig() *config.Root {
+	if s != nil && s.Runner != nil && s.Runner.AppCfg != nil {
+		return s.Runner.AppCfg
+	}
+	return s.liveCfg()
+}
 
 // withDetachedGatewayApprovalHooks restores the per-run surface seams for a
 // continuation that no longer belongs to the request websocket which started
@@ -76,6 +129,19 @@ func (s *Server) publishGatewayRunEvent(ctx context.Context, sessionID, runID, e
 	if runID == "" {
 		return fmt.Errorf("publish gateway run event: run id is required")
 	}
+	// Every way a run ends carries its checklist facts: the worked line
+	// closes every run, and it names the checklist however the run ended.
+	switch ending := payload.(type) {
+	case event.TurnCompletedPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	case event.TurnCancelledPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	case event.TurnErrorPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	}
 	return s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
 }
 
@@ -83,7 +149,7 @@ func (s *Server) publishDetachedGatewayApprovalRequest(ctx context.Context, sess
 	if s == nil || gate == nil {
 		return
 	}
-	data := approvalWSData(s.permissionFacade(), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
+	data := approvalWSData(s.sessionPermissions(ctx, sessionID), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
 	data["action_id"] = gate.ActionID
 	data["action_kind"] = gate.ActionKind
 	data["agent_id"] = gate.AgentID
@@ -190,7 +256,7 @@ func (s *Server) promptGatewayNetworkApproval(ctx context.Context, actionID stri
 	if s == nil || s.Actions == nil {
 		return safety.NetworkApprovalDeny, fmt.Errorf("network approval service is unavailable")
 	}
-	data := approvalWSData(s.permissionFacade(), request.EnvironmentID, actionID, "shell", "shell", payload)
+	data := approvalWSData(s.sessionPermissions(ctx, request.EnvironmentID), request.EnvironmentID, actionID, "shell", "shell", payload)
 	resolved := false
 	defer func() {
 		if !resolved {
@@ -259,7 +325,7 @@ func (s *Server) promptGatewaySubagentApproval(
 			_, _ = s.Actions.Cancel(context.Background(), gate.ActionID, "the subagent approval was abandoned before a decision was returned")
 		}
 	}()
-	data := approvalWSData(s.permissionFacade(), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
+	data := approvalWSData(s.sessionPermissions(ctx, sessionID), sessionID, gate.ActionID, gate.ActionKind, gate.ToolName, gate.ToolInput)
 	data["action_id"] = gate.ActionID
 	data["action_kind"] = gate.ActionKind
 	data["agent_id"] = gate.AgentID
@@ -358,8 +424,8 @@ func (s *Server) abortGatewayRunForAction(action *state.Action) {
 		sessionID = runRecord.SessionID
 	}
 	// The run was parked on this approval, so nothing else will end it.
-	s.finishRun(ctx, sessionID, runID)
-	_ = s.publishGatewayRunEvent(ctx, sessionID, runID, "turn_cancelled", event.TurnCancelledPayload{Message: "cancelled"})
+	s.finishRun(ctx, sessionID, runID, state.RunStatusCancelled)
+	_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnCancelled, event.TurnCancelledPayload{Message: "cancelled"})
 }
 
 // expireGatewayApproval turns TTL expiry into a first-class, replayable
@@ -421,9 +487,8 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 		}
 	}
 	_ = s.RunRT.ClearWait(ctx, runID)
-	_ = s.RunRT.SetStatus(ctx, runID, state.RunStatusFailed)
 	s.runController().Cancel(runID, fmt.Errorf("%s", reason))
-	s.finishRun(ctx, sessionID, runID)
+	s.finishRun(ctx, sessionID, runID, state.RunStatusFailed)
 	if agentID != "" {
 		parentRunID := ""
 		if runRecord != nil {
@@ -437,19 +502,19 @@ func (s *Server) expireGatewayApproval(ctx context.Context, actionID string) {
 			}, time.Now(),
 		))
 	} else {
-		_ = s.publishGatewayRunEvent(ctx, sessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
+		_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventTurnError, event.TurnErrorPayload{Error: reason, Message: reason})
 	}
 }
 
-func (s *Server) permissionFacade() turn.PermissionFacade {
-	if s == nil {
+// sessionPermissions judges calls for one conversation the way the runner it
+// runs on does — for a project session, that project's pooled runner. The
+// process facade is bound to the gateway's own runner and answers for the
+// gateway's launch project, so an approval card built from it would offer a
+// project session choices its own rules never produced.
+func (s *Server) sessionPermissions(ctx context.Context, sessionID string) turn.ApprovalEvaluator {
+	runner := s.runnerFor(ctx, sessionID)
+	if runner == nil {
 		return nil
 	}
-	if s.Core != nil {
-		return s.Core
-	}
-	if s.Runner != nil {
-		return s.Runner
-	}
-	return nil
+	return runner
 }

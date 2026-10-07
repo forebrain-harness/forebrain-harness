@@ -27,6 +27,14 @@ type commandController struct {
 	// openPanel, when wired by the main loop, opens an interactive slash
 	// panel (composer state, §3.1) and reports whether it opened.
 	openPanel func(kind string) bool
+	// replayCardsTo, when wired by the main loop, is the reducer the live
+	// event loop reduces every notification through. A resume's replay
+	// rebuilds the conversation's cards in its own reducer; without this
+	// handover, a lifecycle event arriving after the resume — the reaper
+	// ending a background subagent the previous process left running —
+	// finds no card to settle and opens an orphan while the replayed one
+	// ticks forever.
+	replayCardsTo *Reducer
 }
 
 func newCommandController(session Session, renderer *Renderer, selector Selector, readLine func(context.Context) (string, error), home string) *commandController {
@@ -117,6 +125,12 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	reducer := &Reducer{}
 	replayTimelineWithReducer(c.renderer, turns, events, reducer, planUpdates)
 	flushReplayReducer(c.renderer, reducer)
+	// The cards the replay built are the ones on screen now; the live reducer
+	// takes them over so the events that still arrive for them settle them in
+	// place.
+	if c.replayCardsTo != nil {
+		c.replayCardsTo.adoptReplayedCards(reducer)
+	}
 	c.renderer.EndBatch()
 	// Refresh the footer budget from the ACTIVE model-context projection, not
 	// the full visual replay. After a context clear the full transcript is still
@@ -125,8 +139,8 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	activeTurns, activeErr := c.session.SurfaceActiveContextMessages(context.Background(), sid)
 	if activeErr != nil {
 		c.renderer.PrintError(fmt.Errorf("failed to load active session context: %w", activeErr))
-	} else if stats := c.session.SurfaceComposerTokenStats(state.TokenCountFromLastAPIResponse(activeTurns)); stats.Active {
-		c.renderer.SetComposerTokenStats(stats)
+	} else if stats := c.session.SurfaceComposerTokenStats(sid, state.TokenCountFromLastAPIResponse(activeTurns)); stats.Active {
+		c.renderer.SetComposerTokenStats("", stats)
 	}
 	if frame := note(len(turns)); frame != nil {
 		c.renderer.RenderFrame(*frame)
@@ -153,7 +167,7 @@ func primaryTranscriptTurns(turns []state.Message) []state.Message {
 	return out
 }
 
-func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Message, callIndex map[string]replayToolCall, planUpdates *[]event.PlanUpdatedPayload) {
+func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Message, callIndex map[string]replayToolCall, subagentCalls map[string]event.SubagentCall, planUpdates *[]event.PlanUpdatedPayload) {
 	if renderer == nil || reducer == nil || strings.EqualFold(strings.TrimSpace(turn.Role), "system") {
 		return
 	}
@@ -180,7 +194,7 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 	}
 	kind := msgKindFromRole(turn.Role)
 	if kind == MsgKindTool {
-		msg, toolName, ok := replayToolMessage(turn, meta, callIndex)
+		msg, toolName, ok := replayToolMessage(turn, meta, callIndex, subagentCalls)
 		if !ok {
 			return
 		}
@@ -208,6 +222,14 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 	// (their tool call renders from the correlated tool row), so skip them.
 	if content == "" {
 		return
+	}
+	// A message the person did not type — a heartbeat's prompt — replays as
+	// what it is rather than as a card that says they sent it.
+	if kind == MsgKindUser {
+		if origin := state.MessageOrigin(turn.PartsJSON); origin != "" {
+			renderReplayFrames(renderer, reducer, Message{Kind: MsgKindSystem, Title: origin, Content: content, Timestamp: timestamp}, "", meta, timing)
+			return
+		}
 	}
 	msg := Message{
 		Kind: kind, Content: content, ToolMeta: meta,
@@ -241,12 +263,37 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 		return 0
 	}
 	anchors := subagentEventAnchors(turns, events)
+	// The card facts of every subagent_* call the transcript answered, derived
+	// the way the live path derived them, so a row recorded before the card
+	// existed replays as the card and not as the JSON it stored.
+	subagentCalls := turn.SubagentCallsInTranscript(turns)
 	callIndex, callRow := buildToolCallIndex(turns)
 	resultRow := toolResultRows(turns)
 	pending := make(map[int][]replayEventItem)
+	// A plan review's events carry the approval action they answer but no
+	// tool step of their own, so they are anchored to the call that action
+	// names — the same position its confirmation lines replay at.
+	reviewAnchors := planReviewAnchorByAction(events, callRow, resultRow)
+	// Every run that ended closes with its "Worked for" line after the last
+	// row it wrote. A failed run's error was the last thing it said before
+	// that line live, so the error is drawn there too rather than wherever its
+	// clock happens to fall among the rows.
+	workedLines := turn.RunWorkedLines(turns)
+	closingRuns := make(map[string]struct{}, len(workedLines))
+	for _, line := range workedLines {
+		closingRuns[line.RunID] = struct{}{}
+	}
+	runEndFrames := make(map[string][]Frame)
 	eventCount := 0
 	for i := range events {
 		evt := events[i]
+		if turnErrorFrames := replayTurnErrorEventFrames(evt); len(turnErrorFrames) > 0 {
+			if _, closes := closingRuns[strings.TrimSpace(evt.RunID)]; closes {
+				runEndFrames[strings.TrimSpace(evt.RunID)] = append(runEndFrames[strings.TrimSpace(evt.RunID)], turnErrorFrames...)
+				eventCount++
+				continue
+			}
+		}
 		msg, ok := replaySubagentRunEventMessage(evt)
 		if compacted, isCompaction := replayCompactionMessage(evt); isCompaction {
 			msg, ok = compacted, true
@@ -271,6 +318,13 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 		}
 		eventCount++
 		pos := approvalEventAnchorPosition(evt, callRow, resultRow)
+		if pos < 0 {
+			if id, ok := planReviewEventActionID(evt); ok {
+				if reviewPos, found := reviewAnchors[id]; found {
+					pos = reviewPos
+				}
+			}
+		}
 		if placed, ok := turn.CompactionPosition(turns, evt); ok {
 			pos = placed
 		}
@@ -343,38 +397,26 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 	}
 	for i := range turns {
 		flush(i)
-		replayTurnWithReducer(renderer, reducer, turns[i], callIndex, &planUpdates)
-		if worked, ok := replayWorkedLine(turns, i); ok {
-			// The run's own text is out first; its line closes it, as live.
+		replayTurnWithReducer(renderer, reducer, turns[i], callIndex, subagentCalls, &planUpdates)
+		if line, ok := workedLines[i]; ok {
+			// The run's own text is out first, then its error if it failed;
+			// its line closes it, as live.
 			flushReplayReducer(renderer, reducer)
-			renderer.RenderFrame(worked)
+			for _, frame := range runEndFrames[line.RunID] {
+				renderer.RenderFrame(frame)
+			}
+			renderer.RenderFrame(replayWorkedFrame(line))
 		}
 	}
 	flush(len(turns))
 	return eventCount
 }
 
-// replayWorkedLine is the "Worked for" line that closed the run whose last
-// stored row is turns[i]: how long it took, from the duration stored on its
-// rows, and the minute it finished. Every run a transcript holds gets its line
-// back, the way it had one live.
-func replayWorkedLine(turns []state.Message, i int) (Frame, bool) {
-	row := turns[i]
-	runID := strings.TrimSpace(row.RunID)
-	// The run's worked time lives on the run row now, read through this
-	// message's run id; a tool row of the run closes it exactly like the
-	// assistant row does.
-	if runID == "" || row.RunWorkedMs <= 0 {
-		return Frame{}, false
-	}
-	if i+1 < len(turns) && strings.TrimSpace(turns[i+1].RunID) == runID {
-		return Frame{}, false
-	}
-	title := workedForLabel(time.Duration(row.RunWorkedMs) * time.Millisecond)
-	if row.RunFinishedAtMs > 0 {
-		title += " · " + workedCompletionTime(time.UnixMilli(row.RunFinishedAtMs).Local())
-	}
-	return Frame{Kind: FrameStatus, Title: title, RunID: runID, Final: true}, true
+// replayWorkedFrame is the "Worked for" line that closed a run: how long it
+// took and the minute it finished, read from the run's own clock.
+func replayWorkedFrame(line turn.RunWorkedLine) Frame {
+	title := workedForLabel(line.Worked) + " · " + workedCompletionTime(line.FinishedAt.Local())
+	return Frame{Kind: FrameStatus, Title: title, RunID: line.RunID, Final: true}
 }
 
 // replayCompactionMessage rebuilds a compaction's final card from the event
@@ -517,6 +559,55 @@ func approvalEventToolStepID(evt event.RunEvent) string {
 	}
 }
 
+// planReviewAnchorByAction maps each approval action to the transcript position
+// its records replay at: the tool call the action names. A plan review's card
+// then shares one position with the confirmation lines of the approval it
+// answers, and the group's own sequence order puts the card between them.
+func planReviewAnchorByAction(events []event.RunEvent, callRow, resultRow map[string]int) map[string]int {
+	out := make(map[string]int)
+	for i := range events {
+		switch events[i].Type {
+		case event.RunEventApprovalReq, event.RunEventApprovalResolved:
+		default:
+			continue
+		}
+		var p struct {
+			ActionID string `json:"action_id"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) != nil || strings.TrimSpace(p.ActionID) == "" {
+			continue
+		}
+		id := strings.TrimSpace(p.ActionID)
+		if _, seen := out[id]; seen {
+			continue
+		}
+		if pos := approvalEventAnchorPosition(events[i], callRow, resultRow); pos >= 0 {
+			out[id] = pos
+		}
+	}
+	return out
+}
+
+// planReviewEventActionID is the approval action a plan-review event answers.
+func planReviewEventActionID(evt event.RunEvent) (string, bool) {
+	switch evt.Type {
+	case event.RunEventPlanReviewStarted:
+		var p event.PlanReviewStartedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return "", false
+		}
+		return strings.TrimSpace(p.ActionID), true
+	case event.RunEventPlanReviewed:
+		var p event.PlanReviewedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return "", false
+		}
+		return strings.TrimSpace(p.ActionID), true
+	default:
+		return "", false
+	}
+}
+
 // replayApprovalEventFrames rebuilds the frames an approval record carries that
 // have no message form. Only the confirmation line does: the gate's own card is
 // the tool call the record names, and replay rebuilds it as a canceled card
@@ -585,10 +676,11 @@ type orphanToolCall struct {
 // turn), and subtracting per row would turn each duplicate into another card.
 // Each call id therefore appears at most once, on its last issuing row.
 //
-// A dispatch call is excluded. Its card is a fanout block the subagent event log
+// A dispatch call is excluded. Its card is a subagent card the event log
 // builds, not a tool block, and live never stamps one canceled
 // (Renderer.FinalizePendingTools only touches tool blocks) - rebuilding it here
-// would invent per-task outcomes for work the run never reached.
+// would invent per-task outcomes for work the run never reached. A query call
+// (status/wait/close/list) is rebuilt as the canceled card it became live.
 func orphanToolCalls(callIndex map[string]replayToolCall, callRow, resultRow map[string]int) []orphanToolCall {
 	orphans := make([]orphanToolCall, 0, len(callRow))
 	for callID, row := range callRow {
@@ -596,7 +688,7 @@ func orphanToolCalls(callIndex map[string]replayToolCall, callRow, resultRow map
 			continue
 		}
 		call, ok := callIndex[callID]
-		if !ok || isFanoutToolName(call.name) {
+		if !ok || isSubagentDispatchTool(call.name) {
 			continue
 		}
 		orphans = append(orphans, orphanToolCall{callID: callID, row: row, call: call})
@@ -604,9 +696,12 @@ func orphanToolCalls(callIndex map[string]replayToolCall, callRow, resultRow map
 	return orphans
 }
 
-func isFanoutToolName(name string) bool {
+// isSubagentDispatchTool names the verbs whose card is owned by the
+// subagent event log rather than by the call's own row: their agents outlive
+// the call, so a call the run never reached has no outcomes to invent.
+func isSubagentDispatchTool(name string) bool {
 	switch strings.TrimSpace(name) {
-	case "subagent_fanout", "subagent_run":
+	case "subagent_fanout", "subagent_run", "subagent_send", "subagent_continue":
 		return true
 	default:
 		return false
@@ -779,13 +874,13 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" {
 			return nil, false
 		}
-		return SubagentSpawnedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Title: p.Title, Task: p.Task, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, Timestamp: evt.CreatedAt}, true
+		return SubagentSpawnedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Title: p.Title, Task: p.Task, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, ModelProvider: p.ModelProvider, Model: p.Model, ReasoningEffort: p.ReasoningEffort, Timestamp: evt.CreatedAt}, true
 	case event.RunEventSubagentEnded:
 		var p event.SubagentEndedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" {
 			return nil, false
 		}
-		return SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, Timestamp: evt.CreatedAt}, true
+		return SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt}, true
 	case event.RunEventAssistantDelta:
 		var p event.AssistantDeltaPayload
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" || p.Text == "" {
@@ -849,6 +944,18 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 			return nil, false
 		}
 		return PlanUpdatedMsg{Payload: p}, true
+	case event.RunEventPlanReviewStarted:
+		var p event.PlanReviewStartedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return nil, false
+		}
+		return PlanReviewStartedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label}, true
+	case event.RunEventPlanReviewed:
+		var p event.PlanReviewedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return nil, false
+		}
+		return PlanReviewReviewedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label, Outcome: p.Outcome, Error: p.Error}, true
 	case event.RunEventApprovalReq:
 		var p event.ApprovalRequestedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" {
@@ -867,6 +974,20 @@ func replaySubagentRunEventMessage(evt event.RunEvent) (any, bool) {
 			return nil, false
 		}
 		return replayApprovalMessage(evt, p.AgentID, p.ActionID, p.ActionKind, firstNonEmpty(p.Decision, "resolved"), p.Reason), true
+	case event.RunEventSubagentInputDelivered:
+		// A message the user sent this subagent, replayed as the user message it
+		// was in that subagent's own view.
+		var p event.SubagentInputDeliveredPayload
+		if json.Unmarshal(evt.Payload, &p) != nil || strings.TrimSpace(p.AgentID) == "" || strings.TrimSpace(p.Text) == "" {
+			return nil, false
+		}
+		return SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)}, true
+	case event.CompactEventBudgetUpdated:
+		var p event.TokenBudgetUpdatedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return nil, false
+		}
+		return tokenBudgetMsgFromPayload(p), true
 	default:
 		return nil, false
 	}
@@ -965,7 +1086,7 @@ func buildToolCallIndex(turns []state.Message) (map[string]replayToolCall, map[s
 // agentnotify helpers the live tool-step path uses, so a replayed tool card
 // reads identically to how it first appeared. ok is false when the row carries
 // no output to show.
-func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[string]replayToolCall) (Message, string, bool) {
+func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[string]replayToolCall, subagentCalls map[string]event.SubagentCall) (Message, string, bool) {
 	_, _, toolCallID, _ := state.ParseMessageParts(turn.PartsJSON, "")
 	toolCallID = strings.TrimSpace(toolCallID)
 	call := callIndex[toolCallID]
@@ -1002,6 +1123,16 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 	if !hasStoredDisplay || strings.TrimSpace(meta.ToolName) == "" {
 		meta = replayToolMeta(toolName, call.args, meta)
 	}
+	// A subagent_* call's card is its facts. The stored display body is what
+	// the row's own day drew — JSON for rows older than the card — and a
+	// replay that showed it would put the raw record back on screen. The call's
+	// error is the one thing the body still carries for a failed call.
+	if facts, ok := subagentCalls[toolCallID]; ok {
+		meta.SubagentCall = &facts
+		if !strings.EqualFold(strings.TrimSpace(meta.Status), "failed") {
+			displayBody = ""
+		}
+	}
 	return Message{
 		Kind:      MsgKindTool,
 		Content:   displayBody,
@@ -1011,7 +1142,10 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 		Summary:   summary,
 		AgentID:   strings.TrimSpace(meta.AgentID),
 		ToolPhase: tool.StepKindToolCompleted,
-		FilePath:  replayToolFilePath(toolName, meta.Input, body),
+		// The row's own execution clock, the same source the shell replay
+		// path reads: a settled card names how long its call took.
+		Duration: time.Duration(turn.ExecDurationMs) * time.Millisecond,
+		FilePath: replayToolFilePath(toolName, meta.Input, body),
 	}, toolName, true
 }
 
@@ -1605,6 +1739,20 @@ func (c *commandController) handleMCP(sessionID string) bool {
 	return true
 }
 
+// handleLSP opens the /lsp panel in viewport mode and falls back to the text
+// inventory everywhere else, the same two-step shape /mcp uses.
+func (c *commandController) handleLSP(sessionID string) bool {
+	if c.openPanel != nil && c.openPanel("lsp") {
+		return true
+	}
+	reply, handled := c.session.HandleLSPSlash(strings.TrimSpace(sessionID), "tui")
+	if !handled || strings.TrimSpace(reply) == "" {
+		return false
+	}
+	c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: strings.TrimSpace(reply), Final: true})
+	return true
+}
+
 // migrateSession is the slice of ChatSession the /migrate flow drives: the
 // option builder wired to this environment, the async dry run whose plan the
 // confirm dialog shows, and the async real run.
@@ -1712,43 +1860,6 @@ func (c *commandController) handleMigrate(ctx context.Context, sessionID string)
 	return true
 }
 
-func (c *commandController) handleDiff(sessionID string, args []string) bool {
-	reply, handled := c.session.HandleDiffSlash(strings.TrimSpace(sessionID), "tui", args)
-	if !handled || strings.TrimSpace(reply) == "" {
-		return false
-	}
-	doc := event.Parse(reply)
-	if len(doc.Files) == 0 {
-		// Not a diff: the one sentence saying why there is none to show.
-		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "diff", Content: strings.TrimSpace(reply), Final: true})
-		return true
-	}
-	// Use the theme resolved in run.go before raw mode (cached on the renderer);
-	// re-probing here would run an OSC 11 query inside raw mode.
-	c.renderer.RenderFrame(Frame{
-		Kind:    FrameSystem,
-		Title:   diffFrameTitle(doc),
-		Content: RenderDiff(doc, c.renderer.DiffTheme()),
-		Final:   true,
-	})
-	return true
-}
-
-// diffFrameTitle says what /diff found: how many files changed and how many
-// lines were added and removed.
-func diffFrameTitle(doc event.DiffDoc) string {
-	added, removed := 0, 0
-	for _, f := range doc.Files {
-		added += f.Added
-		removed += f.Deleted
-	}
-	files := "1 file changed"
-	if len(doc.Files) != 1 {
-		files = fmt.Sprintf("%d files changed", len(doc.Files))
-	}
-	return fmt.Sprintf("%s · +%d −%d", files, added, removed)
-}
-
 // sessionFastAvailable reports whether the active session supports the /fast
 // command. Gated to Anthropic Opus (the only family with the priority
 // service tier surfaced by Forebrain Harness's Anthropic agent LLM). Non-Opus models
@@ -1816,6 +1927,11 @@ type SlashOverlay struct {
 	// recognized command. The dim ArgumentHint renders inline in the composer
 	// while HintCommand is set and the text has no args yet.
 	HintCommand *turn.Command
+
+	// SubagentView is true when the composer belongs to a subagent's own view,
+	// so the list drops the commands hidden there (D4). It is copied from the
+	// composer when the overlay opens.
+	SubagentView bool
 }
 
 // newSlashOverlay returns a fresh overlay seeded with the full visible
@@ -1839,6 +1955,9 @@ func (o *SlashOverlay) rebuildFiltered(session Session) {
 	}
 	opts := turn.DiscoveryOptions{
 		FastAvailable: sessionFastAvailable(session),
+		// In a subagent's own view the commands that would change the
+		// conversation are hidden (D4).
+		SubagentView: o.SubagentView,
 	}
 	// The engine's filter and order, the same the web menu lists: exact,
 	// prefix and substring matches, the built-in commands and the skills as

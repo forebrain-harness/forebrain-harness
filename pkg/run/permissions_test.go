@@ -326,6 +326,59 @@ func TestPermissionInputUsesRequestPermissionsMarker(t *testing.T) {
 	}
 }
 
+// The lsp tool answers to the Read rules whenever it names a file — it is a
+// read of that file in every way the permission layer can see (spec §9.4).
+// Only the file-less workspace symbol search runs as the read-only LSP
+// policy itself.
+func TestLSPEvaluatedAsRead(t *testing.T) {
+	const sessionID = "session-lsp"
+	deniedDir := t.TempDir()
+	target := filepath.Join(deniedDir, "main.go")
+	if err := os.WriteFile(target, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	if got := permissionToolNameFor("lsp", map[string]any{"file_path": target}); got != "Read" {
+		t.Fatalf("permissionToolNameFor(lsp with file_path) = %q, want Read", got)
+	}
+	if got := permissionToolNameFor("lsp", map[string]any{"operation": "workspace_symbols", "query": "Run"}); got != "LSP" {
+		t.Fatalf("permissionToolNameFor(file-less lsp) = %q, want LSP", got)
+	}
+	if got := permissionToolNameFor("shell", nil); got != "Bash" {
+		t.Fatalf("permissionToolNameFor(shell) = %q, want Bash", got)
+	}
+	if got := permissionInput("lsp", map[string]any{"file_path": target}); got != target {
+		t.Fatalf("permissionInput(lsp) = %q, want %q", got, target)
+	}
+
+	cfg := &appcfg.Root{}
+	r := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}}
+	rt := r.permRuntimeGet()
+	rt.LoadFromDisk(r.AppCfg, r.permPaths())
+	rt.Store(r.AppCfg).AddRule(safety.SourceSession, safety.BehaviorDeny, safety.PermissionRuleValue{
+		ToolName: "Read", RuleContent: filepath.ToSlash(deniedDir) + "/**", SessionID: sessionID,
+	})
+
+	decision := r.evaluateToolPermission(sessionID, "lsp", map[string]any{"operation": "definition", "file_path": target, "line": 3, "column": 1})
+	if decision.Behavior != safety.BehaviorDeny || decision.Reason != "matched_deny_rule" {
+		t.Fatalf("lsp with file_path decision = %+v, want deny by the Read rule", decision)
+	}
+
+	// read_file of the same path hits the same rule: the mapping exists to
+	// make the two tools indistinguishable to Read rules.
+	same := r.evaluateToolPermission(sessionID, "read_file", map[string]any{"file_path": target})
+	if same.Behavior != safety.BehaviorDeny {
+		t.Fatalf("read_file decision = %+v, want the same deny", same)
+	}
+
+	// Without a file_path the call is the file-less workspace symbol search,
+	// which the safe-read-only default lets run unprompted.
+	free := r.evaluateToolPermission(sessionID, "lsp", map[string]any{"operation": "workspace_symbols", "query": "Run"})
+	if free.Behavior != safety.BehaviorAllow || free.Reason != "safe_readonly_default_allow" {
+		t.Fatalf("file-less lsp decision = %+v, want safe read-only allow", free)
+	}
+}
+
 func TestPermissionInputExtractsFilePathForFileTools(t *testing.T) {
 	cases := []struct {
 		kind     string

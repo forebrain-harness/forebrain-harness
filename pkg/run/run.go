@@ -38,6 +38,17 @@ type RunParams struct {
 	ForkLabel     string
 	QuerySource   string
 	RegisterTools func(*ToolRegistry) error
+	// OnInitialMessages is called once the fork's initial message list is
+	// built and before the first request goes out. It is how a dispatch
+	// persists the fork's inherited prefix into the fork's own worker
+	// session: by the time a mid-run failure reports, the full prefix is
+	// already on disk.
+	OnInitialMessages func([]llm.Message)
+	// SidechainFrom is how many of the initial messages the sidechain log
+	// already carries. A first run starts at 0 and logs the list whole; a
+	// continuation rebuilds the list from the history it inherited, and
+	// logging it whole would write every message a second time.
+	SidechainFrom int
 }
 
 func RunFork(ctx context.Context, p RunParams) (*RunOutcome, error) {
@@ -73,10 +84,13 @@ func RunFork(ctx context.Context, p RunParams) (*RunOutcome, error) {
 		sidechainKey = agentID
 	}
 	path := SidechainFilePath(p.WorkspaceRoot, p.SessionID, p.ForkLabel, sidechainKey)
-	if len(subctx.InitialMessages) > 0 {
-		if err := appendSidechainMessages(path, p.ForkLabel, p.QuerySource, p.SessionID, subctx.InitialMessages); err != nil {
+	if tail := subctx.InitialMessages[p.SidechainFrom:]; len(tail) > 0 {
+		if err := appendSidechainMessages(path, p.ForkLabel, p.QuerySource, p.SessionID, tail); err != nil {
 			return nil, err
 		}
+	}
+	if p.OnInitialMessages != nil {
+		p.OnInitialMessages(subctx.InitialMessages)
 	}
 	name := forkAgentName(p.AgentBaseName, p.ForkLabel)
 	a, err := agent.New(p.LLM, name, subctx.SystemPrompt)

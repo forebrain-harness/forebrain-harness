@@ -1,0 +1,13 @@
+id: pylsp
+display_name: python-lsp-server
+languages: [Python]
+priority: 40
+command: pylsp
+extension_to_language: {.py: python}
+root_markers: [pyproject.toml, setup.py, setup.cfg, requirements.txt, Pipfile]
+env_passthrough: [VIRTUAL_ENV, CONDA_PREFIX, PYTHONPATH]
+install:
+  - requires: pipx
+    argv: [pipx, install, python-lsp-server]
+readiness: none
+notes: "Alternative Python server; chosen only when pyright and basedpyright are disabled."

@@ -23,8 +23,10 @@ func PermissionRuleCount(snapshot safety.Snapshot) int {
 
 // PermissionsOf resolves what a session's permission state adds up to, the way
 // /status and /permissions both name it: the preset its approval mode and
-// sandbox match, or — between presets — the two halves it is made of.
+// sandbox match, or — between presets — the two halves it is made of. The
+// sandbox is the session's own when it picked one.
 func PermissionsOf(snapshot safety.Snapshot, cfg *appcfg.Root) StatusPermissions {
+	cfg = safety.ConfigForSnapshot(cfg, snapshot)
 	perm := StatusPermissions{Rules: PermissionRuleCount(snapshot)}
 	if preset, ok := safety.MatchApprovalPreset(snapshot.Mode, cfg); ok {
 		perm.Matched, perm.Preset, perm.Description = true, preset.Label, preset.DescriptionFor(cfg)

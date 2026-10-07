@@ -99,6 +99,8 @@
             </button>
           </div>
         </Teleport>
+        <!-- A switch or a load that failed says so, in the server's words. -->
+        <p v-if="primaryError && !railCollapsed" class="forebrain-tenant-error" role="alert" data-testid="tenant-error">{{ primaryError }}</p>
       </div>
 
       <nav class="forebrain-rail-group" :aria-label="navAria">
@@ -266,8 +268,8 @@ import {
   ShieldCheck,
   Sun,
   Wrench,
-  FlaskConical,
   Hammer,
+  Sparkles,
 } from 'lucide-vue-next'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -295,6 +297,7 @@ const {
   activeId: activePrimaryId,
   active: activePrimary,
   loading: primaryLoading,
+  error: primaryError,
   loadPrimaryAgents,
   switchPrimaryAgent,
 } = usePrimaryAgents()
@@ -361,9 +364,9 @@ const navItems = computed(() => {
   const L = navLabels()
   return [
     { to: '/projects', label: L.projects, icon: FolderGit2, scope: 'project' as const },
-      { to: '/rules', label: L.rules, icon: ScrollText, scope: 'agent' as const },
-    { to: '/skills', label: L.skills, icon: Hammer, scope: 'agent' as const },
-    { to: '/workshop', label: L.workshop, icon: FlaskConical, scope: 'agent' as const },
+    { to: '/rules', label: L.rules, icon: ScrollText, scope: 'agent' as const },
+    { to: '/skills', label: L.skills, icon: Sparkles, scope: 'agent' as const },
+    { to: '/workshop', label: L.workshop, icon: Hammer, scope: 'agent' as const },
     { to: '/subagents', label: L.subagents, icon: Users, scope: 'agent' as const },
     { to: '/cron', label: L.cron, icon: Clock, scope: 'agent' as const },
     { to: '/channels', label: L.channels, icon: Radio, scope: 'agent' as const },
@@ -398,21 +401,36 @@ async function selectPrimaryAgent(id: string) {
   tenantMenuOpen.value = false
   if (!id || id === activePrimaryId.value) return
   try {
-    await switchPrimaryAgent(id)
-    // The switch redrawn the tenant boundary on the server; drop everything
-    // the frontend loaded under the old one.
-    resetTenantScope()
+    // The open conversation belongs to the agent being left. The address bar
+    // is what the chat page opens, and the page is rebuilt for the new
+    // tenant the moment the switch lands — so the session leaves the
+    // address first, or the new tenant's page would reopen it.
+    if (route.query.session) {
+      await router.replace({ query: { ...route.query, session: undefined } })
+    }
+    const before = activePrimaryId.value
+    try {
+      await switchPrimaryAgent(id)
+    } finally {
+      // The tenant the gateway is on now — the one picked, or the one a
+      // failed switch recorded before its rebuild failed — owns everything
+      // the frontend shows; what was loaded under the old one is dropped.
+      if (activePrimaryId.value !== before) resetTenantScope()
+    }
   } catch {
-    // switchPrimaryAgent records the failure on the shared store; the rail keeps
-    // showing the agent that is actually bound rather than the one just picked.
+    // switchPrimaryAgent records the failure on the shared store and reloads
+    // the list, so the rail shows the agent the gateway is actually bound to.
   }
 }
 
+// The tenant menu is teleported out of the rail, so "outside the rail's
+// selector" says nothing about it — every press on one of its options would
+// count as outside and close it before the click lands. Its own backdrop is
+// what catches presses outside it.
 function handleDocumentPointerDown(event: PointerEvent) {
   const target = event.target
   if (!(target instanceof Node)) return
   if (!languageMenuRef.value?.contains(target)) languageMenuOpen.value = false
-  if (!tenantMenuRef.value?.contains(target)) tenantMenuOpen.value = false
 }
 
 function isActive(path: string) {

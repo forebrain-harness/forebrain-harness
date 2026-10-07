@@ -1,0 +1,18 @@
+id: haskell-language-server
+display_name: Haskell Language Server
+languages: [Haskell]
+priority: 100
+command: haskell-language-server-wrapper
+args: [--lsp]
+extension_to_language: {.hs: haskell, .lhs: literate haskell}
+root_markers: [hie.yaml, stack.yaml, cabal.project, package.yaml, "*.cabal"]
+env_passthrough: [GHCUP_INSTALL_BASE_PREFIX, STACK_ROOT, CABAL_DIR]
+detect:
+  extra_dirs: ["~/.ghcup/bin"]
+  version_args: [--version]
+install:
+  - requires: ghcup
+    argv: [ghcup, install, hls]
+startup_timeout: 300
+readiness: progress
+notes: "Install with: ghcup install hls"

@@ -3,7 +3,9 @@ package process
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -198,7 +200,7 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// capture is persisting from it too, and doing both would write the same
 	// partial turn to the transcript twice.
 	if err != nil && ownsCapture {
-		x.env.persistPartialTurn(sid, capture)
+		x.env.persistPartialTurn(sid, runID, capture)
 	}
 	// run and turn describe an approval gate with different types, and the
 	// adapter is the seam that owns the translation: run raises
@@ -267,7 +269,7 @@ func (env *Environment) projectScope() string {
 // the assistant produced this turn: the session store holds only the user
 // message, and the next turn rebuilds context from scratch, losing work the
 // user watched happen.
-func (env *Environment) persistPartialTurn(sessionID string, capture *run.PartialSessionCapture) {
+func (env *Environment) persistPartialTurn(sessionID, runID string, capture *run.PartialSessionCapture) {
 	if env == nil || env.Deps.SessionStore == nil || capture == nil {
 		return
 	}
@@ -275,8 +277,9 @@ func (env *Environment) persistPartialTurn(sessionID string, capture *run.Partia
 	if len(pending) == 0 {
 		return
 	}
-	// The model is unknown at cancel time; AppendMessageSequence tolerates it.
-	_ = env.Deps.SessionStore.AppendMessageSequence(context.Background(), sessionID, pending, "", "")
+	// What the stopped run wrote is the run's. The model is unknown at cancel
+	// time; the store tolerates it.
+	_ = env.Deps.SessionStore.AppendMessageSequenceForRun(context.Background(), sessionID, runID, pending, "", "")
 }
 
 // Tools is the active primary agent's tool state.
@@ -297,4 +300,62 @@ func (env *Environment) Tools() *tool.State {
 		return nil
 	}
 	return env.Runner.Tools()
+}
+
+// PlanReviewer runs the plan review as a first-class subagent: dispatched
+// through the same path subagent_run uses, so it appears in the agent roster,
+// owns a per-agent view the user can open from that roster, streams its
+// assistant text, reasoning and tool calls into that view, and can be stopped
+// from the roster row like any other subagent. The only differences are who
+// asks for it (the exit-plan approval) and which model answers (the one the
+// user picked).
+//
+// It implements turn.Reviewer for turn.RunPlanReview, the shared review flow
+// both surfaces call. Everything review-specific that is genuinely a surface
+// concern arrives as a field — the step hook that publishes the reviewer's
+// tool steps, the approval func that answers its own tool gates — because a
+// surface that passes neither would replay plan 015's bugs: a reviewer whose
+// work is invisible and whose tools cannot be approved.
+//
+// The dispatch coordinates (conversation session, gated parent run, review
+// id as the dispatching tool call) already travel on the context RunPlanReview
+// hands Review; what this adds on top is only its own step hook.
+type PlanReviewer struct {
+	Runner    *run.Runner
+	Model     turn.Model
+	Config    *appcfg.Root
+	AgentName string
+	StepHook  tool.StepHook
+	Approve   run.PlanReviewApprovalFunc
+}
+
+// Review runs one review to its verdict.
+func (r *PlanReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanReviewResult, error) {
+	if r == nil || r.Runner == nil {
+		return turn.PlanReviewResult{}, fmt.Errorf("plan review requires a runner")
+	}
+	if strings.TrimSpace(req.Plan) == "" {
+		return turn.PlanReviewResult{}, turn.ErrNoPlan
+	}
+	// Fail before the run starts when the chosen model cannot be built, rather
+	// than opening a roster row for a run that dies on its first LLM call.
+	if _, err := run.ConfiguredModelClient(r.Config, r.AgentName, r.Model.Provider, r.Model.Model); err != nil {
+		return turn.PlanReviewResult{}, err
+	}
+	runCtx := tool.WithStepHook(ctx, r.StepHook)
+	started := time.Now()
+	text, err := r.Runner.RunPlanReviewSubagent(
+		runCtx,
+		turn.BuildPrompt(req),
+		run.SubagentModelOverride{Provider: r.Model.Provider, Model: r.Model.Model},
+		r.Approve,
+	)
+	if err != nil {
+		return turn.PlanReviewResult{}, err
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return turn.PlanReviewResult{}, fmt.Errorf("%s returned an empty review", r.Model.Display())
+	}
+	return turn.PlanReviewResult{Model: r.Model, Text: text, Duration: time.Since(started)}, nil
 }

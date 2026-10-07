@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -115,6 +116,29 @@ func TestClipboardWatcherProbesOnlyWhileFocused(t *testing.T) {
 	time.Sleep(60 * time.Millisecond)
 	if after := probe.calls.Load(); after != before {
 		t.Fatalf("watcher probed %d times while unfocused", after-before)
+	}
+}
+
+// TestLookupSessionTitleReadsByID pins that the terminal title reads a
+// session's name by its id rather than by scanning a recent list: a
+// conversation older than any recent list still has its name, and an unnamed
+// one still reads as none.
+func TestLookupSessionTitleReadsByID(t *testing.T) {
+	session := &fakeSession{
+		recent: make([]SessionSummary, 100),
+		titles: map[string]string{"old": "An old conversation"},
+	}
+	for i := range session.recent {
+		session.recent[i] = SessionSummary{ID: fmt.Sprintf("newer-%03d", i), Title: "newer", UpdatedAt: int64(1000 - i)}
+	}
+
+	if got := lookupSessionTitle(context.Background(), session, "old"); got != "An old conversation" {
+		t.Fatalf("title = %q, want the older conversation's own title", got)
+	}
+	// An id the store has no title for — unnamed or unknown alike — reads
+	// as no title at all, the same contract SessionTitle has.
+	if got := lookupSessionTitle(context.Background(), session, "absent"); got != "" {
+		t.Fatalf("title = %q, want empty", got)
 	}
 }
 

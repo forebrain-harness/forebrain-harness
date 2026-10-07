@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
 )
@@ -121,8 +122,38 @@ func TestSkillListCarriesOriginEditableAndDownloadURL(t *testing.T) {
 	require.Contains(t, body, `"download_url":"/api/skills/agent-skill/download"`)
 	// The global listing belongs to the primary agent: its rows are the
 	// editable ones, everything else is inherited and read-only.
-	require.Contains(t, body, `"name":"agent-skill","description":"agent-skill skill","root_path":"`+filepath.Join(workspace, "skills", "agent-skill")+`","source":"workspace","trust":"workspace","enabled":true,"origin":"agent","editable":true`)
-	require.Contains(t, body, `"origin":"builtin","editable":false`)
+	require.Contains(t, body, `"name":"agent-skill","description":"agent-skill skill","root_path":"`+filepath.Join(workspace, "skills", "agent-skill")+`","origin":"agent","enabled":true,"editable":true`)
+	require.NotContains(t, body, `"source":`)
+	require.NotContains(t, body, `"trust":`)
+	require.Contains(t, body, `"origin":"builtin","enabled":true,"editable":false`)
+}
+
+// Two roots offering the same name are one row in the listing — the unshadowed
+// one — so that is the copy downloads, edits and deletes must act on.
+func TestLocateSkillPicksTheLoadedCopy(t *testing.T) {
+	_, home, workspace := rulesServer(t)
+	sharedDir := writeGatewaySkill(t, filepath.Join(home, "skills"), "demo")
+	writeGatewaySkill(t, filepath.Join(home, "skills", ".system"), "demo")
+
+	svc := skill.NewServiceForWorkspace(home, workspace)
+	entry, ok := locateSkill(svc, "demo")
+	require.True(t, ok)
+	require.Equal(t, skill.CanonicalSkillPath(sharedDir), skill.CanonicalSkillPath(entry.Path))
+	require.Equal(t, skill.OriginShared, entry.Origin)
+}
+
+// A gateway started inside a checkout carries that checkout as its launch
+// project; the primary-agent listing it serves is still the agent's page, so
+// agent rows stay the editable ones.
+func TestSkillListOwnerFollowsTheRouteNotTheLaunchProject(t *testing.T) {
+	s, _, workspace := rulesServer(t)
+	writeGatewaySkill(t, filepath.Join(workspace, "skills"), "agent-skill")
+	s.Env.LaunchProject = safety.ProjectContext{Project: safety.Project{Root: t.TempDir(), VersionControlled: true}}
+
+	rr := httptest.NewRecorder()
+	s.handleSkillsList(rr, httptest.NewRequest(http.MethodGet, "/api/skills/", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"origin":"agent","enabled":true,"editable":true`)
 }
 
 func TestSkillDeleteOnlyInTheOwningLayer(t *testing.T) {
@@ -287,9 +318,9 @@ func TestProjectSkillListScopesRowsToTheProjectLayer(t *testing.T) {
 	s.handleSkillsListWith(launch, "proj-1", rr, httptest.NewRequest(http.MethodGet, "/api/v1/projects/proj-1/skills", nil))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	body := rr.Body.String()
-	require.Contains(t, body, `"origin":"project","editable":true`)
+	require.Contains(t, body, `"origin":"project","enabled":true,"editable":true`)
 	require.Contains(t, body, `"download_url":"/api/v1/projects/proj-1/skills/project-skill/download"`)
-	require.Contains(t, body, `"origin":"agent","editable":false`)
+	require.Contains(t, body, `"origin":"agent","enabled":true,"editable":false`)
 }
 
 // workshopServer builds a server with one agent-scope skill (writable) and
@@ -361,16 +392,37 @@ func TestWorkshopSkillFileGuards(t *testing.T) {
 func TestWorkshopExplicitSkillSelectionValidation(t *testing.T) {
 	s, agentSkill, builtin := workshopServer(t)
 
-	// A live skill directory with its discovered name passes.
-	require.NoError(t, s.validateExplicitSkillSelection("workshop-skill", agentSkill))
+	// A live skill directory with its discovered name resolves to what the
+	// run's explicit load reads: that skill's SKILL.md, which must parse as
+	// the very skill named.
+	name, path, err := s.resolveExplicitSkillSelection("WORKSHOP-SKILL", agentSkill+string(filepath.Separator))
+	require.NoError(t, err)
+	require.Equal(t, "workshop-skill", name)
+	require.Equal(t, filepath.Join(skill.CanonicalSkillPath(agentSkill), "SKILL.md"), path)
+	activation, err := skill.LoadActivation(path)
+	require.NoError(t, err)
+	require.Equal(t, "workshop-skill", activation.Name)
+	// Naming the SKILL.md itself — the slash handoff's spelling — is the
+	// same selection.
+	_, samePath, err := s.resolveExplicitSkillSelection("workshop-skill", filepath.Join(agentSkill, "SKILL.md"))
+	require.NoError(t, err)
+	require.Equal(t, path, samePath)
 	// The built-in skill is part of the set too.
-	require.NoError(t, s.validateExplicitSkillSelection("builtin-skill", builtin))
+	_, _, err = s.resolveExplicitSkillSelection("builtin-skill", builtin)
+	require.NoError(t, err)
 
 	// An arbitrary path — or a name that disagrees with the path — is
 	// refused: the model's instruction source is not client-chosen.
-	require.Error(t, s.validateExplicitSkillSelection("", t.TempDir()))
-	require.Error(t, s.validateExplicitSkillSelection("not-the-name", agentSkill))
-	require.Error(t, s.validateExplicitSkillSelection("workshop-skill", "/tmp"))
+	_, _, err = s.resolveExplicitSkillSelection("not-the-name", agentSkill)
+	require.Error(t, err)
+	_, _, err = s.resolveExplicitSkillSelection("workshop-skill", "/tmp")
+	require.Error(t, err)
+	// Half a selection activates nothing in the run, so it is refused rather
+	// than starting a turn that silently ignores it.
+	_, _, err = s.resolveExplicitSkillSelection("", agentSkill)
+	require.ErrorIs(t, err, errSkillSelectionIncomplete)
+	_, _, err = s.resolveExplicitSkillSelection("workshop-skill", "")
+	require.ErrorIs(t, err, errSkillSelectionIncomplete)
 }
 
 func TestChatSessionSourceWhitelistAndEcho(t *testing.T) {
@@ -388,9 +440,45 @@ func TestChatSessionSourceWhitelistAndEcho(t *testing.T) {
 	rr = create(`{"source":"secret"}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
-	// The listing carries the source so the drawer can filter it out.
+	// The workshop listing is the one that carries the source; the drawer
+	// asks for ordinary conversations only, both filtered in the query.
 	listRR := httptest.NewRecorder()
-	s.handleChatSessions(listRR, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
+	s.handleChatSessions(listRR, httptest.NewRequest(http.MethodGet, "/api/chat/sessions?source=workshop", nil))
 	require.Equal(t, http.StatusOK, listRR.Code)
 	require.Contains(t, listRR.Body.String(), `"source":"workshop"`)
+}
+
+// The primary agent's skill routes work in no project: a gateway launched in
+// a trusted checkout neither lists that checkout's skills on the agent's page
+// nor lets the agent's toggles answer for them.
+func TestAgentSkillRoutesLeaveTheLaunchProjectOut(t *testing.T) {
+	s, home, workspace := rulesServer(t)
+	writeGatewaySkill(t, filepath.Join(workspace, "skills"), "agent-skill")
+	launchRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(launchRoot, ".git"), 0o755))
+	writeGatewaySkill(t, filepath.Join(launchRoot, ".forebrain", "skills"), "launch-skill")
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: launchRoot}))
+	launch, err := safety.ResolveProjectContext(home, launchRoot)
+	require.NoError(t, err)
+	s.Env.LaunchProject = launch
+
+	rr := httptest.NewRecorder()
+	s.handleSkillsList(rr, httptest.NewRequest(http.MethodGet, "/api/skills/", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"name":"agent-skill"`)
+	require.NotContains(t, rr.Body.String(), "launch-skill")
+
+	// Turning every agent-page row off leaves the launch project's skill on.
+	rr = httptest.NewRecorder()
+	s.handleSkillsToggle(rr, httptest.NewRequest(http.MethodPost, "/api/skills/toggle", strings.NewReader(`{"enabled_paths":[]}`)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	entries, err := skill.DiscoverForWorkspace(home, workspace, launchRoot)
+	require.NoError(t, err)
+	states := map[string]bool{}
+	for _, entry := range entries {
+		states[entry.Name] = entry.Enabled
+	}
+	require.Contains(t, states, "launch-skill")
+	require.True(t, states["launch-skill"], "the agent page must not switch off a project's skill")
+	require.False(t, states["agent-skill"])
 }

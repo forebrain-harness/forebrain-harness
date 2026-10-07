@@ -157,6 +157,11 @@ CREATE TABLE fb_runs (
   worked_ms INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  -- owner is the process driving the run, meaningful only while it is
+  -- running: a run whose owner stops renewing its lease is abandoned and is
+  -- reaped by whichever process notices first. '' means no live process
+  -- vouches for it (pre-owner rows, or an owner that deregistered).
+  owner TEXT NOT NULL DEFAULT '',
   -- The surface that ran the turn owns its clock and records all three when
   -- the run completes; a run that never completed has none.
   CHECK ((started_at_ms IS NULL) = (finished_at_ms IS NULL)
@@ -165,6 +170,19 @@ CREATE TABLE fb_runs (
 CREATE INDEX idx_fb_runs_session ON fb_runs(session_id, updated_at DESC);
 CREATE INDEX idx_fb_runs_parent ON fb_runs(parent_run_id) WHERE parent_run_id IS NOT NULL;
 CREATE INDEX idx_fb_runs_active ON fb_runs(status, updated_at DESC) WHERE status IN ('running', 'waiting_action');
+-- The session-exclusivity check CreateRun runs before inserting a primary
+-- run: one live primary run per session, where live means parked on an
+-- approval or running under an owner with a fresh lease.
+CREATE INDEX idx_fb_runs_session_live ON fb_runs(session_id)
+  WHERE parent_run_id IS NULL AND status IN ('running', 'waiting_action');
+
+-- One row per living forebrain process, renewed on a lease interval. Its
+-- absence (or a stale heartbeat) is what marks that process's running runs
+-- as abandoned.
+CREATE TABLE fb_run_owners (
+  owner TEXT PRIMARY KEY CHECK (TRIM(owner) <> ''),
+  heartbeat_at_ms INTEGER NOT NULL
+) STRICT;
 
 -- The single, ordered record of everything a conversation and its runs did.
 -- sequence is the conversation cursor surfaces page by; run_id scopes a row to
@@ -294,6 +312,7 @@ CREATE TABLE fb_cron_jobs (
   last_run_at INTEGER,
   last_status TEXT NOT NULL DEFAULT '' CHECK (last_status IN ('', 'ok', 'failed', 'running', 'delivery_failed')),
   last_error TEXT NOT NULL DEFAULT '',
+  last_error_code TEXT NOT NULL DEFAULT '',
   last_output TEXT NOT NULL DEFAULT '',
   failure_streak INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
@@ -316,11 +335,14 @@ CREATE TABLE fb_cron_runs (
   status TEXT NOT NULL CHECK (status IN ('running', 'ok', 'failed', 'delivery_failed')),
   output TEXT NOT NULL DEFAULT '',
   error TEXT NOT NULL DEFAULT '',
+  error_code TEXT NOT NULL DEFAULT '',
   delivered_to TEXT NOT NULL DEFAULT '',
   started_at INTEGER NOT NULL,
   finished_at INTEGER
 ) STRICT;
 CREATE INDEX idx_fb_cron_runs_job ON fb_cron_runs(job_id, started_at DESC);
+-- A run's end finds its fire by the session it ran in.
+CREATE INDEX idx_fb_cron_runs_session ON fb_cron_runs(session_id);
 
 -- A heartbeat belongs to one session, not to the fleet: it is a recurring
 -- instruction inside that conversation, so the session id is the key.

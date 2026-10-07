@@ -1,0 +1,14 @@
+id: vtsls
+display_name: vtsls
+languages: [TypeScript, JavaScript]
+priority: 50
+command: vtsls
+args: [--stdio]
+extension_to_language: {.ts: typescript, .mts: typescript, .cts: typescript, .tsx: typescriptreact, .js: javascript, .mjs: javascript, .cjs: javascript, .jsx: javascriptreact}
+root_markers: [tsconfig.json, jsconfig.json, package.json]
+env_passthrough: [NODE_PATH, NODE_OPTIONS]
+install:
+  - requires: npm
+    argv: [npm, install, -g, "@vtsls/language-server"]
+readiness: progress
+notes: "Alternative to typescript-language-server; chosen only when that server is disabled."

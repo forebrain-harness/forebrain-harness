@@ -285,6 +285,9 @@ func emitPlanUpdateStep(ctx context.Context, st *State, l state.List) {
 	default:
 		payload.Explanation = strings.Join(activeLabels, " · ")
 	}
+	// The working line's task is derived once, here, by the one rule every
+	// surface shares — not re-derived by each reader of the payload.
+	payload.Active = event.PlanProgressOf(payload.Items, payload.Completed, payload.Total, payload.Explanation).Active
 	step(ctx, StepEvent{
 		Kind:       event.RunEventPlanUpdated,
 		StepID:     "plan-update-" + strconv.FormatInt(time.Now().UnixNano(), 10),

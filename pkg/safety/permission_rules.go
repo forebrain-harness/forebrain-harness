@@ -354,6 +354,9 @@ var canonicalToolAliases = map[string]string{
 	"list_files":     "LS",
 	"ls":             "LS",
 
+	// Code intelligence
+	"lsp": "LSP",
+
 	// Web
 	"web_fetch":  "WebFetch",
 	"webfetch":   "WebFetch",

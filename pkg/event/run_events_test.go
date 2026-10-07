@@ -70,8 +70,8 @@ func TestSharedSubagentLiveResumeFixtureDecodesWithStableIdentity(t *testing.T) 
 	if err := json.Unmarshal(raw, &events); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 5 {
-		t.Fatalf("events=%d want 5", len(events))
+	if len(events) != 7 {
+		t.Fatalf("events=%d want 7", len(events))
 	}
 	for index, evt := range events {
 		if evt.Sequence != int64(41+index) || evt.SchemaVersion != RunEventSchemaVersion {
@@ -94,6 +94,13 @@ func TestSharedSubagentLiveResumeFixtureDecodesWithStableIdentity(t *testing.T) 
 	}
 	if resolved.ActionID != "action-1" || resolved.AgentID != "agent-1" || resolved.Decision != "approved" {
 		t.Fatalf("approval identity = %+v", resolved)
+	}
+	var scheduled AutoContinueScheduledPayload
+	if err := json.Unmarshal(events[6].Payload, &scheduled); err != nil {
+		t.Fatal(err)
+	}
+	if scheduled.AgentID != "agent-1" || scheduled.ContinueAt != "2026-09-06T08:05:05Z" || scheduled.Code != "rate_limit_quota" || scheduled.Attempt != 1 {
+		t.Fatalf("auto-continue identity = %+v", scheduled)
 	}
 }
 

@@ -11,7 +11,20 @@
           @select="openAgentView"
         />
         <div class="flex items-center justify-between gap-3 px-3 pt-3 sm:px-5">
-          <span class="truncate text-sm font-medium text-[var(--forebrain-text)]">{{ sessionTitle }}</span>
+          <div class="flex min-w-0 items-center gap-2">
+            <span
+              class="truncate text-sm font-medium text-[var(--forebrain-text)]"
+              data-testid="chat-session-title"
+            >{{ sessionTitle }}</span>
+            <!-- A project's conversation says whose it is and leads back to
+                 that project's space, where its sessions are listed. -->
+            <RouterLink
+              v-if="sessionProject"
+              :to="`/projects/${encodeURIComponent(sessionProject.id)}/overview`"
+              class="chat-project-tag"
+              data-testid="chat-project-tag"
+            >{{ t('chat.projectTag', { name: sessionProject.name }) }}</RouterLink>
+          </div>
           <button
             type="button"
             class="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--forebrain-divider)] px-2.5 text-xs text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-button-alt-bg)]"
@@ -25,7 +38,7 @@
               v-if="runningRoster.length"
               class="inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-4 text-[var(--forebrain-on-brand)]"
               style="background: var(--forebrain-brand-1)"
-            >{{ rosterRecords.length }}</span>
+            >{{ runningRoster.length }}</span>
           </button>
         </div>
         <div class="min-h-0 flex-1 overflow-hidden">
@@ -39,14 +52,26 @@
                  it: its work belongs to that agent, not to the conversation the
                  user is having. -->
             <Transition name="forebrain-agent-view">
-              <SubagentConversation
-                v-if="activeSubagent"
-                :key="activeSubagent.agentId"
-                :record="activeSubagent"
-                :fold-state="browseStateFor(activeSubagent.agentId).folds"
-                @back="openAgentView('')"
-                @fold-change="updateAgentFold(activeSubagent.agentId, $event)"
-              />
+              <div v-if="activeSubagent" :key="activeSubagent.agentId" class="space-y-4">
+                <!-- /context in this view, drawn with the conversation's own
+                     panel so the two reports are read the same way. -->
+                <ContextDebugPanel
+                  v-if="subagentContextTarget === activeSubagent.agentId"
+                  :data="subagentContextDebug"
+                  :loading="subagentContextLoading"
+                  :error="null"
+                  @refresh="openSubagentContext(activeSubagent.agentId)"
+                />
+                <SubagentConversation
+                  :record="activeSubagent"
+                  :fold-state="browseStateFor(activeSubagent.agentId).folds"
+                  :call-tasks="subagentCallTasks"
+                  :now="subagentNow"
+                  @back="openAgentView('')"
+                  @open-agent="openAgentView"
+                  @fold-change="updateAgentFold(activeSubagent.agentId, $event)"
+                />
+              </div>
             </Transition>
               <!-- Keep the primary DOM mounted while an agent view is open.
                    Its collapsibles therefore return exactly as the user left
@@ -170,10 +195,33 @@
                             :content="block.text"
                           />
                           <ToolCallCard
-                            v-else-if="block.kind === 'tool'"
+                            v-else-if="block.kind === 'tool' && !block.step.subagentCall"
                             class="my-2"
                             :step="block.step"
                             :default-open="false"
+                          />
+                          <!-- A subagent_* call is one card: the call's own
+                               facts and the tasks it dispatched, checked,
+                               waited for or stopped — its prompt and its
+                               result JSON stay out of the conversation. -->
+                          <SubagentCallCard
+                            v-else-if="block.kind === 'tool'"
+                            class="my-2"
+                            :step="block.step"
+                            :live="subagentCallTasks.get(block.step.stepId)"
+                            :now="subagentNow"
+                            @open="openAgentView"
+                          />
+                          <!-- An execution dispatched with no call of its own
+                               — a plan review, a runtime dispatch — is the
+                               same card, keyed by its execution. -->
+                          <SubagentCallCard
+                            v-else-if="block.kind === 'subagent'"
+                            class="my-2"
+                            :step="block.step"
+                            :live="subagentCallTasks.get(block.stepId)"
+                            :now="subagentNow"
+                            @open="openAgentView"
                           />
                           <ApprovalCard
                             v-else-if="block.kind === 'approval'"
@@ -191,27 +239,24 @@
                             :goal="block.goal"
                             @open-check="openAgentView"
                           />
+                          <RunErrorBlock
+                            v-else-if="block.kind === 'error'"
+                            class="my-2"
+                            :text="block.text"
+                            :detail="block.detail"
+                          />
                         </template>
                       </template>
                       <!-- What the user sent reads exactly as they wrote it, the way
-                           the terminal shows it: never reinterpreted as Markdown. -->
-                      <div v-else-if="msg.role === 'user' && String(msg.content ?? '').trim()"
-                        class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
-                      <MessageResponse v-else-if="String(msg.content ?? '').trim()" :key="`msg-content-${msg.id ?? idx}`" :content="msg.content" />
-                      <!-- A subagent's work is not part of this conversation,
-                           but the fact that one ran is: the card says so, and
-                           opens its view. -->
-                      <div
-                        v-if="msg.role === 'assistant' && msg.subagentCards?.length"
-                        class="mt-3 space-y-1.5"
-                      >
-                        <SubagentCard
-                          v-for="(card, cardIdx) in msg.subagentCards"
-                          :key="`${msg.id ?? idx}-subagent-${cardIdx}`"
-                          :card="card"
-                          @open="openAgentView"
-                        />
+                           the terminal shows it: never reinterpreted as Markdown.
+                           A message the runtime sent on their behalf says who
+                           sent it, above the words. -->
+                      <div v-else-if="msg.role === 'user' && String(msg.content ?? '').trim()">
+                        <p v-if="originLabel(msg.origin)" data-testid="message-origin"
+                          class="mb-1 text-[11px] font-medium text-[var(--forebrain-muted-text)]">{{ originLabel(msg.origin) }}</p>
+                        <div class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
                       </div>
+                      <MessageResponse v-else-if="String(msg.content ?? '').trim()" :key="`msg-content-${msg.id ?? idx}`" :content="msg.content" />
                       <div
                         v-if="msg.role === 'assistant' && msg.turnDiffs?.length"
                         class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-3"
@@ -222,24 +267,7 @@
                           :total-lines="msg.turnDiffs.reduce((s, d) => s + (d.added ?? 0) + (d.deleted ?? 0), 0)"
                         />
                       </div>
-                      <div
-                        v-if="msg.role === 'assistant' && workedLine(msg).label"
-                        class="mt-3 flex items-center gap-3 text-[11px] text-[var(--forebrain-muted-text)]"
-                        aria-label="run duration"
-                      >
-                        <span class="h-px w-3 bg-[var(--forebrain-divider-strong)]" />
-                        <span class="whitespace-nowrap font-mono">{{ workedLine(msg).label }}</span>
-                        <span
-                          v-if="workedLine(msg).plan"
-                          class="inline-flex items-center whitespace-nowrap font-mono"
-                          :aria-label="t('chat.checklistProgress', { done: workedLine(msg).plan!.done, total: workedLine(msg).plan!.total })"
-                        >
-                          <SquareCheck class="worked-check" aria-hidden="true" />{{ workedLine(msg).plan!.done }}/{{ workedLine(msg).plan!.total }}
-                        </span>
-                        <span v-if="workedLine(msg).plan?.active" class="whitespace-nowrap">{{ workedLine(msg).plan!.active }}</span>
-                        <span v-if="workedLine(msg).time" class="whitespace-nowrap font-mono">{{ workedLine(msg).time }}</span>
-                        <span class="h-px flex-1 bg-[var(--forebrain-divider-strong)]" />
-                      </div>
+                      <RunWorkedLine :line="workedLineOf(msg, t)" />
                       <ul v-if="msg.role === 'user' && msg.attachments?.length" class="mt-2 flex flex-wrap gap-2"
                         :aria-label="t('chat.messageAttachments')">
                         <li v-for="(attachment, index) in msg.attachments" :key="attachment.fileId ?? attachment.path ?? index">
@@ -277,6 +305,7 @@
 
         <details
           v-if="sessionId"
+          data-testid="session-workspace"
           class="mx-auto mb-2 w-full max-w-[880px] shrink-0 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 text-sm text-[var(--forebrain-text-2)] sm:px-5"
         >
           <summary class="cursor-pointer select-none font-medium text-[var(--forebrain-text)]">
@@ -316,18 +345,28 @@
               <p v-else class="text-[var(--forebrain-muted-text)]">{{ t('chat.noPlan') }}</p>
             </div>
             <div>
-              <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.toolAuditRecent') }}</div>
-              <ul v-if="toolAuditRows.length" class="space-y-2">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.toolAuditRecent') }}</div>
+                <!-- The one change the session can take back is its most recent
+                     file edit, so that is what the action says it does. -->
+                <button
+                  v-if="toolAuditRows.some((row) => extractDiffPreview(row.detailJson))"
+                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                  type="button"
+                  :disabled="undoingFileChange"
+                  data-testid="undo-last-file-change"
+                  @click="undoLastFileChange"
+                >{{ t('chat.undoLastFileChange') }}</button>
+              </div>
+              <p v-if="undoFileChangeResult" class="mt-1 text-[12px]" :class="undoFileChangeFailed ? 'text-[var(--forebrain-danger)]' : 'text-[var(--forebrain-text-2)]'" role="status">{{ undoFileChangeResult }}</p>
+              <ul v-if="toolAuditRows.length" class="mt-1 space-y-2">
                 <li v-for="row in toolAuditRows" :key="row.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-2">
                   <div class="font-medium text-[var(--forebrain-text)]">{{ row.toolName }}</div>
-                  <div class="mt-1 break-all font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ row.detailJson }}</div>
+                  <div v-if="toolAuditSummary(row.detailJson)" class="mt-1 break-all text-[12px] text-[var(--forebrain-text-2)]">{{ toolAuditSummary(row.detailJson) }}</div>
+                  <div v-if="toolAuditError(row.detailJson)" class="mt-1 whitespace-pre-wrap break-words text-[12px] text-[var(--forebrain-danger)]">{{ toolAuditError(row.detailJson) }}</div>
                   <div v-if="extractDiffPreview(row.detailJson)" class="mt-2 rounded border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2">
                     <div class="mb-1 text-[11px] font-medium text-[var(--forebrain-muted-text)]">{{ t('chat.diffPreview') }}</div>
                     <pre class="max-h-40 overflow-auto whitespace-pre-wrap text-[11px]">{{ extractDiffPreview(row.detailJson) }}</pre>
-                    <div class="mt-2 flex items-center gap-2">
-                      <button class="forebrain-btn forebrain-btn-primary text-xs" type="button" @click="acceptDiff(row.id)">{{ t('chat.accept') }}</button>
-                      <button class="forebrain-btn forebrain-btn-ghost text-xs" type="button" @click="rejectDiff()">{{ t('chat.rejectRollback') }}</button>
-                    </div>
                   </div>
                   <div class="mt-2 flex flex-wrap gap-2">
                     <button
@@ -346,7 +385,14 @@
             </div>
             <div>
               <div class="text-xs font-medium uppercase tracking-wide text-[var(--forebrain-muted-text)]">{{ t('chat.costSummary') }}</div>
-              <pre v-if="sessionCostSummaryText.trim()" class="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-2 font-mono text-[12px] text-[var(--forebrain-text-2)]">{{ sessionCostSummaryText }}</pre>
+              <div v-if="sessionCost && (sessionCost.requests > 0 || sessionCost.toolCalls > 0)" class="mt-1 space-y-1 text-[12px] text-[var(--forebrain-text-2)]" data-testid="session-cost">
+                <div v-if="sessionCost.requests > 0">{{ t(sessionCost.requests === 1 ? 'chat.costRequestsOne' : 'chat.costRequests', { input: compactTokenCount(sessionCost.inputTokens), output: compactTokenCount(sessionCost.outputTokens), requests: sessionCost.requests }) }}</div>
+                <div v-if="sessionCost.cacheRead > 0 || sessionCost.cacheWritten > 0">{{ t('chat.costCache', { percent: sessionCost.cacheHitPercent, read: compactTokenCount(sessionCost.cacheRead), written: compactTokenCount(sessionCost.cacheWritten), uncached: compactTokenCount(sessionCost.uncached) }) }}</div>
+                <div v-if="sessionCost.toolCalls > 0">
+                  {{ t(sessionCost.toolCalls === 1 ? 'chat.costToolCallsOne' : 'chat.costToolCalls', { count: sessionCost.toolCalls }) }}
+                  <span class="text-[var(--forebrain-muted-text)]">· {{ costByToolText(sessionCost.byTool) }}</span>
+                </div>
+              </div>
               <p v-else class="text-[var(--forebrain-muted-text)]">{{ t('chat.noCostSummary') }}</p>
             </div>
             <div>
@@ -412,125 +458,42 @@
             </AlertDescription>
           </Alert>
           <div
-            v-if="runtimeStatusLabel"
+            v-if="runtimeStatusLabel.label"
             class="mb-3 flex items-center gap-3 text-[11px] uppercase tracking-[0.28em] text-[var(--forebrain-muted-text)]"
             aria-live="polite"
           >
             <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
-            <span class="min-w-0 text-center font-mono leading-relaxed">{{ runtimeStatusLabel }}</span>
+            <span class="flex min-w-0 items-center gap-3 font-mono leading-relaxed tracking-normal normal-case">
+              {{ runtimeStatusLabel.label }}
+              <PlanProgressSegments :plan="runtimeStatusLabel.plan" />
+            </span>
             <span class="h-px flex-1 bg-[var(--forebrain-rule-line)]" />
           </div>
-          <div v-if="pendingActionsError || pendingAsk.length || pendingApprovals.length" class="mb-3 space-y-2">
-            <Alert v-if="pendingActionsError" variant="destructive">
-              <CircleAlert class="size-4" />
-              <AlertTitle>{{ t('chat.approvalsLoadFailed') }}</AlertTitle>
-              <AlertDescription class="space-y-2">
-                <div class="whitespace-pre-line">{{ pendingActionsError }}</div>
-                <button
-                  type="button"
-                  class="forebrain-btn forebrain-btn-ghost text-xs"
-                  :disabled="pendingActionsLoading || !sessionId"
-                  @click="loadPendingActions"
-                >{{ t('chat.retry') }}</button>
-              </AlertDescription>
-            </Alert>
-            <div v-if="pendingApprovals.length" class="space-y-2">
-              <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.pendingApprovals') }}</div>
-              <div v-for="a in pendingApprovals" :key="a.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-sm font-medium text-[var(--forebrain-text)] truncate">{{ approvalKindLabel(a.kind) }}</div>
-                    <button
-                      v-if="approvalRequesterLabel(a)"
-                      type="button"
-                      class="block max-w-full truncate text-left text-xs text-[var(--forebrain-text-2)] hover:text-[var(--forebrain-brand-1)] disabled:pointer-events-none"
-                      :disabled="!a.agentId"
-                      @click="a.agentId && openAgentView(a.agentId)"
-                    >{{ approvalRequesterLabel(a) }}</button>
-                    <div class="text-xs text-muted-foreground truncate">{{ approvalHint(a) }}</div>
-                  </div>
-                  <div v-if="!approvalSuggestion(a)" class="flex shrink-0 items-center gap-2">
-                    <button class="forebrain-btn forebrain-btn-ghost" type="button" :disabled="actionSubmitting[a.id]" @click="denyAction(a.id)">{{ t('chat.deny') }}</button>
-                    <button class="forebrain-btn forebrain-btn-primary" type="button" :disabled="actionSubmitting[a.id]" @click="approveAction(a.id)">{{ t('chat.approveOnce') }}</button>
-                  </div>
-                </div>
-                <input
-                  v-if="!approvalSuggestion(a)"
-                  v-model="denyFeedback[a.id]"
-                  class="mt-2 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
-                  :disabled="actionSubmitting[a.id]"
-                  :placeholder="t('chat.otherOptional')"
-                />
-                <div v-if="approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="font-medium text-[var(--forebrain-text)]">{{ t('chat.permissionMemory') }}</span>
-                    <span class="font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ approvalSuggestionLabel(a) }}</span>
-                  </div>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <button
-                      v-for="(option, index) in approvalDecisionOptions(a)"
-                      :key="`${a.id}-${option.decision}-${index}`"
-                      :class="option.decision === 'accept' ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
-                      type="button"
-                      :disabled="actionSubmitting[a.id]"
-                      @click="submitApprovalDecision(a, option)"
-                    >
-                      {{ approvalDecisionLabel(option) }}
-                    </button>
-                  </div>
-                </div>
-                <div v-if="actionErrors[a.id]" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ actionErrors[a.id] }}</div>
-              </div>
-            </div>
-            <div v-if="pendingAsk.length" class="space-y-2">
-              <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.pendingQuestions') }}</div>
-              <div v-for="qa in pendingAsk" :key="qa.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 space-y-2">
-                <button
-                  v-if="approvalRequesterLabel(qa)"
-                  type="button"
-                  class="block max-w-full truncate text-left text-xs text-[var(--forebrain-text-2)] hover:text-[var(--forebrain-brand-1)] disabled:pointer-events-none"
-                  :disabled="!qa.agentId"
-                  @click="qa.agentId && openAgentView(qa.agentId)"
-                >{{ approvalRequesterLabel(qa) }}</button>
-                <div v-else class="text-xs text-muted-foreground">{{ qa.id }}</div>
-                <div v-for="q in qa.form.questions" :key="q.id" class="space-y-1">
-                  <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ q.prompt }}</div>
-                  <div class="flex flex-wrap gap-2">
-                    <label v-for="opt in q.options" :key="opt.id" class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs">
-                      <input
-                        :type="q.allowMultiple ? 'checkbox' : 'radio'"
-                        :name="`ask-${qa.id}-${q.id}`"
-                        :value="opt.id"
-                        v-model="answersModel[qa.id][q.id]"
-                      />
-                      <span>{{ opt.label }}</span>
-                    </label>
-                  </div>
-                  <div v-if="q.allowOther" class="mt-1">
-                    <input
-                      class="w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
-                      :placeholder="t('chat.otherOptional')"
-                      v-model="otherModel[qa.id][q.id]"
-                    />
-                  </div>
-                </div>
-                <div class="flex justify-end">
-                  <button class="forebrain-btn forebrain-btn-primary" type="button" :disabled="actionSubmitting[qa.id]" @click="submitAskInline(qa.id)">{{ t('common.submit') }}</button>
-                </div>
-                <div v-if="actionErrors[qa.id]" class="text-xs text-[var(--forebrain-danger)]" role="alert">{{ actionErrors[qa.id] }}</div>
-              </div>
-            </div>
-          </div>
+          <PendingActionsPanel
+            :session-id="sessionId"
+            :version="pendingActionsVersion"
+            :context-used-percent="contextUsedPercent"
+            can-open-agent
+            @open-agent="openAgentView"
+          />
           <PromptInputProvider :max-files="composerMaxFiles" accept="image/*,application/pdf" @submit="handleSubmit" @error="handleComposerError">
             <Alert v-if="composerNotice" variant="destructive" class="mb-2">
               <CircleAlert class="size-4" />
               <AlertTitle>{{ composerNotice.title }}</AlertTitle>
-              <AlertDescription class="whitespace-pre-line">{{ composerNotice.detail }}</AlertDescription>
+              <AlertDescription class="whitespace-pre-line">{{ composerNoticeDetail }}</AlertDescription>
             </Alert>
-            <AutoContinueBanner :state="autoContinue" @cancel="cancelAutoContinue" />
+            <AutoContinueBanner :state="activeAutoContinue" @cancel="cancelAutoContinue(activeAgentView)" />
+            <!-- The recommendation card owns its own goodbye: the answer's
+                 result line stays up briefly, then the card closes itself. -->
+            <LspRecommendationCard
+              v-if="lspRecommendation"
+              :recommendation="lspRecommendation"
+              :session-id="sessionId ?? undefined"
+              @close="lspRecommendation = null"
+            />
             <div class="relative">
               <PendingInputQueuePopover
-                :preview="pendingInputPreview"
+                :preview="composerPendingInput"
                 @edit-last-queued="restoreLastQueuedMessage"
                 @interrupt-run="interruptAndSendPendingSteers"
               />
@@ -545,8 +508,8 @@
                     @queue-follow-up="markNextSubmissionAsQueued"
                     @edit-last-queued="restoreLastQueuedMessage"
                     @interrupt-run="interruptAndSendPendingSteers"
-                    @typed="cancelAutoContinue"
-                    @escape="cancelAutoContinue" />
+                    @typed="cancelAutoContinue(activeAgentView)"
+                    @escape="cancelAutoContinue(activeAgentView)" />
                 </PromptInputBody>
                 <PromptInputFooter>
                   <div class="relative flex min-w-0 flex-1 items-center gap-1" ref="modeMenuRef">
@@ -616,12 +579,12 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, Paperclip, SquareCheck, PanelRight } from 'lucide-vue-next'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, Paperclip, PanelRight } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import AgentViewTabs from '@/components/chat/AgentViewTabs.vue'
-import SubagentCard from '@/components/chat/SubagentCard.vue'
+import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import SubagentConversation from '@/components/chat/SubagentConversation.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
@@ -665,34 +628,33 @@ import {
 import ForebrainPromptTextarea, { type BotOption } from '@/components/ForebrainPromptTextarea.vue'
 import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
 import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
+import PendingActionsPanel from '@/components/chat/PendingActionsPanel.vue'
+import PlanProgressSegments from '@/components/chat/PlanProgressSegments.vue'
+import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
+import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
 import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
+import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'
 import DiffView from '@/components/DiffView.vue'
 import ContextDebugPanel from '@/components/ContextDebugPanel.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
 import GoalLine from '@/components/chat/GoalLine.vue'
 import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterViewTarget, useAgentRoster } from '@/composables/useAgentRoster'
-import { useChatStream, type ChatMessage, type PlanBlock, type WorkedLine } from '@/composables/useChatStream'
+import { useChatStream, workedLineOf, emptyPendingInputPreview, type ChatMessage, type PlanBlock } from '@/composables/useChatStream'
 import { useLastSession } from '@/composables/useLastSession'
 import { useWorkbench } from '@/composables/useWorkbench'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
 const { refresh: workspaceTreeRefresh } = useWorkspaceTree()
 import { useChatSessions } from '@/composables/useChatSessions'
+import { useSessionInfo, sessionHeaderTitle } from '@/composables/useSessionInfo'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { parseJsonCamelCase } from '@/lib/case'
-import { GatewayHttpError, getErrorMessage, forebrainApi, type ActionRecord, type AgentRosterRow, type ChatAttachmentRecord, type SessionContextDebug, type SubagentHistoryRecord, type ToolAuditRow } from '@/lib/api'
-import { uploadSubmission, type PickedFile } from '@/lib/composerSubmission'
+import { getErrorMessage, forebrainApi, type AgentRosterRow, type ChatAttachmentRecord, type SessionContextDebug, type SessionCostSummary, type SlashCommandRecord, type SubagentHistoryRecord, type ToolAuditRow } from '@/lib/api'
+import { formatProviderError } from '@/lib/providerError'
+import { uploadSubmission, type ComposerSubmission, type PickedFile } from '@/lib/composerSubmission'
 import { buildContextDebugModel, compactTokenCount } from '@/lib/contextDebug'
-import { useI18n, type I18nKey } from '@/locales'
-import {
-  approvalDecisions,
-  approvalJustification,
-  permissionSuggestionFromAction,
-  type ApprovalDecisionOption,
-  type CommandApprovalScope,
-  type PermissionSuggestionRecord,
-} from '@/lib/approvalSuggestions'
+import { useI18n } from '@/locales'
 const { lastSessionId } = useLastSession()
 const workbench = useWorkbench()
 
@@ -708,14 +670,16 @@ function syncWorkbenchOverlay() {
   workbenchOverlay.value = workbenchMq?.matches ?? false
 }
 
-/** The conversation's name, from the shared list the drawer shows. */
-const sessionTitle = computed(() => {
-  const sid = sessionId.value
-  if (!sid) return t('nav.chat')
-  const row = sessions.value.find((item) => item.id === sid)
-  return row?.title || t('nav.chat')
-})
-const { t } = useI18n()
+/** The open conversation's own facts — title and project — read from the
+ * session itself by id, not from the drawer's list. */
+const { sessionInfo, loadSessionInfo } = useSessionInfo()
+
+/** The project the open conversation belongs to, when it belongs to one. */
+const sessionProject = computed(() => sessionInfo.value?.project ?? null)
+
+/** The conversation's name, read from the session itself. */
+const sessionTitle = computed(() => sessionHeaderTitle(sessionInfo.value, t('nav.chat')))
+const { t, locale } = useI18n()
 const router = useRouter()
 
 const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
@@ -724,250 +688,18 @@ const composerMaxFiles = 5
 const availableBots = ref<BotOption[]>([])
 const botsFetchDone = ref(true)
 
+// A message the runtime sent on the person's behalf says who sent it, above
+// the words; an origin this build does not know says nothing at all.
+function originLabel(origin?: string): string {
+  if (origin === 'heartbeat') return t('chat.originHeartbeat')
+  if (origin === 'cron') return t('chat.originCron')
+  return ''
+}
+
 function insertWorkspaceRef(path: string) {
   // Routed through the shared engine so a clicked image is attached rather
   // than named, exactly as picking it from the @ menu would be.
   void promptRef.value?.insertWorkspacePath?.(path)
-}
-
-type ActionRow = {
-  id: string
-  kind: string
-  status: string
-  payloadJson: string
-  answerJson?: string
-  createdAt: number
-  updatedAt: number
-  permissionSuggestion?: PermissionSuggestionRecord | null
-  agentId?: string
-  subagentType?: string
-}
-
-type AskAction = {
-  id: string
-  kind: string
-  status: string
-  agentId?: string
-  subagentType?: string
-  sessionId?: string
-  form: {
-    title?: string
-    questions: {
-      id: string
-      prompt: string
-      options: { id: string; label: string; description?: string; preview?: string; recommended?: boolean }[]
-      allowMultiple?: boolean
-      allowOther?: boolean
-    }[]
-  }
-}
-
-const pendingApprovals = ref<ActionRow[]>([])
-const pendingAsk = ref<AskAction[]>([])
-const answersModel = ref<Record<string, Record<string, string[] | string>>>({})
-const otherModel = ref<Record<string, Record<string, string>>>({})
-const actionSubmitting = ref<Record<string, boolean>>({})
-const actionErrors = ref<Record<string, string>>({})
-const denyFeedback = ref<Record<string, string>>({})
-const pendingActionsLoading = ref(false)
-const pendingActionsError = ref<string | null>(null)
-let pendingActionsGeneration = 0
-let pendingActionsSession = ''
-
-async function submitAction(actionId: string, request: () => Promise<unknown>) {
-  if (actionSubmitting.value[actionId]) return
-  const submittingSession = String(sessionId.value ?? '').trim()
-  actionSubmitting.value = { ...actionSubmitting.value, [actionId]: true }
-  const nextErrors = { ...actionErrors.value }
-  delete nextErrors[actionId]
-  actionErrors.value = nextErrors
-  try {
-    await request()
-    if (String(sessionId.value ?? '').trim() === submittingSession) await loadPendingActions()
-  } catch (err) {
-    if (String(sessionId.value ?? '').trim() !== submittingSession) return
-    actionErrors.value = { ...actionErrors.value, [actionId]: getErrorMessage(err) }
-    // A competing tab may have resolved the action. Refresh without erasing
-    // the visible error if the action is still pending.
-    await loadPendingActions()
-  } finally {
-    if (String(sessionId.value ?? '').trim() !== submittingSession) return
-    const next = { ...actionSubmitting.value }
-    delete next[actionId]
-    actionSubmitting.value = next
-  }
-}
-
-function ensureModels(actionId: string, form: AskAction['form']) {
-  if (!answersModel.value[actionId]) answersModel.value[actionId] = {}
-  if (!otherModel.value[actionId]) otherModel.value[actionId] = {}
-  for (const q of form.questions) {
-    if (answersModel.value[actionId][q.id] == null) {
-      answersModel.value[actionId][q.id] = q.allowMultiple ? [] : ''
-    }
-    if (otherModel.value[actionId][q.id] == null) {
-      otherModel.value[actionId][q.id] = ''
-    }
-  }
-}
-
-async function loadPendingActions() {
-	const sid = String(sessionId.value ?? '').trim()
-	const generation = ++pendingActionsGeneration
-	if (!sid) {
-	  pendingActionsSession = ''
-	  pendingAsk.value = []
-	  pendingApprovals.value = []
-	  actionSubmitting.value = {}
-	  actionErrors.value = {}
-	  denyFeedback.value = {}
-	  pendingActionsLoading.value = false
-	  pendingActionsError.value = null
-	  return
-	}
-  if (pendingActionsSession !== sid) {
-	pendingActionsSession = sid
-	pendingAsk.value = []
-	pendingApprovals.value = []
-	actionSubmitting.value = {}
-	actionErrors.value = {}
-	denyFeedback.value = {}
-	pendingActionsError.value = null
-  }
-  pendingActionsLoading.value = true
-  try {
-	const list = await forebrainApi.actionsList('pending', sid)
-    const asks: AskAction[] = []
-    const approvals: ActionRow[] = []
-    for (const a of list) {
-      if (a.kind === 'user_interaction') {
-        try {
-          const form = JSON.parse(a.payloadJson) as AskAction['form']
-          asks.push({
-            id: a.id,
-            kind: a.kind,
-            status: a.status,
-            form,
-            agentId: a.agentId,
-            subagentType: a.subagentType,
-            sessionId: a.sessionId,
-          })
-          ensureModels(a.id, form)
-        } catch {
-          //
-        }
-      } else {
-        const row = a as ActionRow | ActionRecord
-        approvals.push(row)
-      }
-    }
-	if (generation !== pendingActionsGeneration || sessionId.value !== sid) return
-	pendingAsk.value = asks
-    pendingApprovals.value = approvals
-	pendingActionsError.value = null
-  } catch (loadError) {
-	if (generation !== pendingActionsGeneration || sessionId.value !== sid) return
-	// Keep this session's already-rendered requests. A transient refresh failure
-	// must not make a still-pending approval disappear or leave the user without
-	// a way to retry.
-	// What failed is a request, not an action: the user is told that, and
-	// that retrying is how it recovers, never handed the transport's text.
-	pendingActionsError.value = loadError instanceof GatewayHttpError
-	  ? t('chat.approvalsLoadFailedStatus', { status: loadError.status })
-	  : t('chat.approvalsLoadFailedOffline')
-  } finally {
-	if (generation === pendingActionsGeneration && sessionId.value === sid) {
-	  pendingActionsLoading.value = false
-	}
-  }
-}
-
-async function submitAskInline(actionId: string) {
-  const a = pendingAsk.value.find((x) => x.id === actionId)
-  if (!a) return
-  const answers = a.form.questions.map((q) => {
-    const raw = answersModel.value?.[actionId]?.[q.id]
-    const optionIds = Array.isArray(raw) ? raw : (raw ? [String(raw)] : [])
-    const otherText = otherModel.value?.[actionId]?.[q.id] ?? ''
-    return {
-      questionId: q.id,
-      optionIds,
-      ...(String(otherText).trim() ? { otherText: String(otherText).trim() } : {}),
-    }
-  })
-  await submitAction(actionId, () => forebrainApi.actionsAnswer(actionId, { answers }))
-}
-
-async function approveAction(id: string) {
-  await submitAction(id, () => forebrainApi.actionsApprove(id, {}))
-}
-
-async function submitApprovalDecision(action: ActionRow, option: ApprovalDecisionOption) {
-  await submitAction(action.id, () => forebrainApi.actionsApprove(action.id, {
-    reason: `web:${option.decision}`,
-    decision: option.decision,
-    ...(option.execpolicyAmendment ? { execpolicyAmendment: option.execpolicyAmendment } : {}),
-    ...(option.networkPolicyAmendment ? { networkPolicyAmendment: option.networkPolicyAmendment } : {}),
-  }))
-}
-
-function approvalSuggestion(action: ActionRow): PermissionSuggestionRecord | null {
-  return permissionSuggestionFromAction(action)
-}
-
-function approvalDecisionOptions(action: ActionRow): ApprovalDecisionOption[] {
-  return approvalDecisions(permissionSuggestionFromAction(action))
-}
-
-// commandScopeLabel says what remembering a shell command covers. The server
-// decides the scope; this only puts it into the reader's language, so the web
-// and the terminal never disagree about what a row grants.
-function commandScopeLabel(scope: CommandApprovalScope | undefined, fallback: I18nKey): string {
-  if (!scope) return t(fallback)
-  const prefixes = scope.prefixes ?? []
-  switch (scope.kind) {
-    case 'prefix':
-      return prefixes.length ? t('chat.approveCommandPrefix', { prefix: prefixes[0] }) : t(fallback)
-    case 'command_with_variants':
-      // Past a few prefixes the list outgrows the row, and naming some of them
-      // would describe less than what is granted.
-      if (!prefixes.length || prefixes.length > 3) return t('chat.approveCommandAnyVariant')
-      return t('chat.approveCommandVariants', { prefixes: prefixes.join('、') })
-    default:
-      // The command is shown in full above the choices and the rules
-      // authorize it alone, so the button says that once.
-      return t('chat.approveCommandOnly')
-  }
-}
-
-function approvalDecisionLabel(option: ApprovalDecisionOption): string {
-  switch (option.decision) {
-    case 'accept': return t('chat.approveOnce')
-    case 'accept_for_session': return t('chat.approveSession')
-    case 'accept_and_remember': return commandScopeLabel(option.commandScope, 'chat.approveRemember')
-    case 'accept_with_execpolicy_amendment': return commandScopeLabel(option.commandScope, 'chat.approveCommandRule')
-    case 'apply_network_policy_amendment': return option.networkPolicyAmendment?.action === 'deny'
-      ? t('chat.denyHostRemember')
-      : t('chat.allowHostRemember')
-    case 'grant_for_turn': return t('chat.grantTurn')
-    case 'grant_for_turn_with_strict_auto_review': return t('chat.grantTurnStrict')
-    case 'grant_for_session': return t('chat.grantSession')
-    case 'decline': return t('chat.deny')
-    case 'cancel': return t('chat.cancelRun')
-  }
-}
-
-function approvalSuggestionLabel(action: ActionRow): string {
-  const suggestion = permissionSuggestionFromAction(action)
-  if (!suggestion) return ''
-  const input = suggestion.permissionInput ? ` · ${suggestion.permissionInput}` : ''
-  const reason = suggestion.permissionReason ? ` · ${suggestion.permissionReason}` : ''
-  return `${suggestion.permissionToolName ?? ''}${input}${reason}`
-}
-
-async function denyAction(id: string) {
-  const reason = String(denyFeedback.value[id] ?? '').trim()
-  await submitAction(id, () => forebrainApi.actionsDeny(id, reason ? { reason } : {}))
 }
 
 function markNextSubmissionAsQueued() {
@@ -975,23 +707,31 @@ function markNextSubmissionAsQueued() {
 }
 
 async function restoreLastQueuedMessage() {
-  const submission = await editLastQueuedMessage()
+  const agentId = activeAgentView.value
+  const submission = agentId ? await recallSubagentInput(agentId) : await editLastQueuedMessage()
   if (!submission) return
   promptRef.value?.restoreSubmission(submission)
 }
 
-function interruptAndSendPendingSteers() {
+async function interruptAndSendPendingSteers() {
+  if (activeAgentView.value) {
+    // A subagent's own queue: interrupt it precisely to send what waits.
+    await interruptSubagentToSend(activeAgentView.value)
+    return
+  }
   sendPendingSteersAfterInterrupt()
 }
 
 const inputPlaceholder = computed(() => {
-  return t('chat.placeholder')
+  // A subagent's view has its own composer, so its placeholder says who the
+  // message is for.
+  return activeAgentView.value ? t('chat.subagentComposerPlaceholder') : t('chat.placeholder')
 })
 
 const { sessions, fetchSessions } = useChatSessions()
 
 const route = useRoute()
-const { refreshToken, adoptActivePrimaryAgent } = usePrimaryAgents()
+const { refreshToken, adoptActivePrimaryAgent, activeId: activePrimaryId } = usePrimaryAgents()
 
 /**
  * Answers the picker a slash command put on a notice. A primary agent picked
@@ -1001,7 +741,15 @@ const { refreshToken, adoptActivePrimaryAgent } = usePrimaryAgents()
 async function pickFromNotice(msg: ChatMessage, value: string) {
   if (!msg.id || !msg.picker || msg.picked !== undefined) return
   await choose(msg.id, { command: msg.picker.command, value })
-  if (msg.picker.command === 'agent') await adoptActivePrimaryAgent()
+  if (msg.picker.command === 'agent') {
+    // This conversation belongs to the agent being left; it leaves the
+    // address bar before the page is rebuilt for the new tenant, the same
+    // order the rail's switcher follows.
+    if (value !== activePrimaryId.value && route.query.session) {
+      await router.replace({ query: { ...route.query, session: undefined } })
+    }
+    await adoptActivePrimaryAgent()
+  }
 }
 const {
   records: rosterRecords,
@@ -1021,23 +769,36 @@ const {
   historyLoading,
   historyError,
   subagents,
+  subagentCallTasks,
+  subagentNow,
   runtimeStatus,
   mcpStatus,
-  autoContinue,
+  autoContinueForView,
   cancelAutoContinue,
+  lspRecommendation,
   contextSignals,
   pendingActionsVersion,
   pendingInputPreview,
+  subagentPendingInput,
+  subagentReturnedDraft,
+  takeSubagentReturnedDraft,
+  sendToSubagent,
+  recallSubagentInput,
+  interruptSubagentToSend,
+  withdrawSubagentInput,
+  compactSubagent,
+  loadSubagentContext,
+  loadSubagentBudget,
   returnedDraft,
   takeReturnedDraft,
   takeReturnedNotice,
+  takeReturnedNoticeCode,
   send,
   choose,
   editLastQueuedMessage,
   sendPendingSteersAfterInterrupt,
   loadMessages,
   switchToSession,
-  formatWorkedDurationLabel,
   formatRuntimeStatusLabel,
 } = useChatStream()
 
@@ -1172,18 +933,109 @@ const activeSubagent = computed(() =>
   subagents.value.find((entry) => entry.agentId === activeAgentView.value) ?? null,
 )
 
+// The continuation the composer's own view waits on: a subagent's while its
+// view is open, the conversation's otherwise. One composer, two owners.
+const activeAutoContinue = computed(() => autoContinueForView(activeAgentView.value))
+
+// The queue preview the composer shows: a subagent's own while its view is
+// open, the conversation's otherwise. One composer, two owners.
+const composerPendingInput = computed(() => (
+  activeAgentView.value
+    ? (subagentPendingInput.value[activeAgentView.value] ?? emptyPendingInputPreview())
+    : pendingInputPreview.value
+))
+
+// Composer drafts belong to the view they were typed in: switching between the
+// conversation and a subagent's own view saves one and restores the other
+// (plan 007's rule, kept here the same way).
+const viewDrafts = ref<Record<string, ComposerSubmission>>({})
+
+// The commands a subagent's own view may run, by name and class, from the
+// server's own classification (plan 007's D4). Skill commands act on the
+// subagent; the rest belong to or are hidden from its view.
+const subagentSlashRecords = ref<SlashCommandRecord[]>([])
+
+// /context for a subagent's view, drawn with the conversation's own panel.
+const subagentContextTarget = ref('')
+const subagentContextDebug = ref<SessionContextDebug | null>(null)
+const subagentContextLoading = ref(false)
+
+/** The command name a slash line begins with, lowercase; '' when it is not one. */
+function slashCommandName(text: string): string {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('/')) return ''
+  return (trimmed.slice(1).split(/\s+/, 1)[0] ?? '').toLowerCase()
+}
+
 function markAgentSeen(agentId: string) {
   const entry = subagents.value.find((row) => row.agentId === agentId)
   if (!entry) return
   seenAgentActivity.value = { ...seenAgentActivity.value, [agentId]: entry.updatedSeq }
 }
 
+/**
+ * The composer's own draft, whole: its text and everything it attached. The
+ * composer keeps its state inside itself, so the draft is read back through
+ * the textarea it renders — the alternative, an accessor on that component, is
+ * outside this plan's file scope.
+ */
+function takeComposerDraft(): ComposerSubmission {
+  const root = (promptRef.value as unknown as { $el?: HTMLElement } | null)?.$el
+  const text = root?.querySelector('textarea')?.value ?? ''
+  const attached = promptRef.value?.takeAttached() ?? { attachments: [], mentionImages: [] }
+  return { text, attachments: attached.attachments, mentionImages: attached.mentionImages }
+}
+
+/** Puts a view's draft back into the composer, text and attachments alike. */
+function applyComposerDraft(draft: ComposerSubmission) {
+  const root = (promptRef.value as unknown as { $el?: HTMLElement } | null)?.$el
+  const el = root?.querySelector('textarea')
+  if (el) {
+    el.value = draft.text
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  if (draft.attachments.length || draft.mentionImages.length) {
+    promptRef.value?.restoreSubmission({ text: '', attachments: draft.attachments, mentionImages: draft.mentionImages })
+  }
+}
+
+/** A message the boundary gave back to this view's composer, if any is waiting. */
+function applySubagentReturnedDraft(agentId: string) {
+  const draft = takeSubagentReturnedDraft(agentId)
+  if (draft) promptRef.value?.restoreSubmission(draft)
+}
+
+/** The commands a subagent's own view may run, from the server's classification. */
+async function refreshSubagentSlashCommands() {
+  try {
+    const res = await forebrainApi.slashCommands('webchat', '', { subagentView: true })
+    subagentSlashRecords.value = Array.isArray(res.records) ? res.records : []
+  } catch {
+    subagentSlashRecords.value = []
+  }
+}
+
 function openAgentView(agentId: string) {
+  const from = activeAgentView.value
+  if (from !== agentId) {
+    // The draft belongs to the view it was typed in; the composer carries the
+    // new view's own draft, text and attachments alike.
+    viewDrafts.value = { ...viewDrafts.value, [from]: takeComposerDraft() }
+    applyComposerDraft(viewDrafts.value[agentId] ?? { text: '', attachments: [], mentionImages: [] })
+  }
   recordCurrentBrowseState()
   activeAgentView.value = agentId
   if (agentId) markAgentSeen(agentId)
   scheduleBrowsePersist()
   void restoreCurrentBrowseState()
+  if (agentId) {
+    void loadSubagentBudget(agentId)
+    void refreshSubagentSlashCommands()
+    applySubagentReturnedDraft(agentId)
+  } else {
+    subagentContextTarget.value = ''
+    subagentContextDebug.value = null
+  }
 }
 
 function openSubagentHistory(record: SubagentHistoryRecord) {
@@ -1218,11 +1070,27 @@ watch(activeSubagent, () => {
   void restoreCurrentBrowseState()
 })
 
+/**
+ * Esc in a subagent's own view (D1): take a just-sent message back before it
+ * answered; otherwise interrupt it to send what is queued behind it;
+ * otherwise leave for the conversation. The same three meanings, in the same
+ * order, as the terminal.
+ */
+async function handleAgentViewEscape() {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  const withdrawn = await withdrawSubagentInput(agentId)
+  if (withdrawn.length) {
+    for (const submission of withdrawn) promptRef.value?.restoreSubmission(submission)
+    return
+  }
+  if (await interruptSubagentToSend(agentId)) return
+  openAgentView('')
+}
+
 function handleAgentViewKeydown(evt: KeyboardEvent) {
-  // Escape returns to the conversation, the way it leaves a subagent's screen
-  // in the terminal.
   if (evt.key === 'Escape' && activeAgentView.value) {
-    openAgentView('')
+    void handleAgentViewEscape()
   }
 }
 
@@ -1239,7 +1107,6 @@ const modeLabel = computed(() => {
   return t('chat.modeAgent')
 })
 const runtimeStatusLabel = computed(() => formatRuntimeStatusLabel(runtimeStatus.value, t))
-
 // A goal's checks are reached from the goal's own lines, one per round; they
 // take no tab of their own, except the one being read.
 const agentTabRecords = computed(() => subagents.value.filter((record) => (
@@ -1284,7 +1151,10 @@ const modeOptions = [
 const sessionTodosList = ref<{ id: string; content: string; status: string; updatedAt: number }[]>([])
 const sessionPlanText = ref('')
 const toolAuditRows = ref<ToolAuditRow[]>([])
-const sessionCostSummaryText = ref('')
+const sessionCost = ref<SessionCostSummary | null>(null)
+const undoingFileChange = ref(false)
+const undoFileChangeResult = ref('')
+const undoFileChangeFailed = ref(false)
 const subagentHistoryRecords = ref<SubagentHistoryRecord[]>([])
 const sessionContextDebug = ref<SessionContextDebug | null>(null)
 const sessionContextLoading = ref(false)
@@ -1307,6 +1177,22 @@ const sessionContextSummary = computed(() => {
     ? `${t('chat.contextEstimate')} ${compactTokenCount(model.estimate)} · ${t('chat.contextRemaining')} ${compactTokenCount(model.remaining)} · ${t('chat.contextEvictions')} ${model.evictionCount}`
     : t('chat.noContextDebug')
   return { signalLabel, signalClass, line }
+})
+
+/**
+ * How full the context window is, from the newest usage number the
+ * conversation holds — the same figure the footer's gauge is drawn from, and
+ * what the exit-plan card's clear-context choice says it would free. Null
+ * before the first turn reports a budget.
+ */
+const contextUsedPercent = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const left = messages.value[i]?.tokenBudget?.percentLeft
+    if (typeof left === 'number' && Number.isFinite(left)) {
+      return Math.max(0, Math.min(100, 100 - left))
+    }
+  }
+  return null
 })
 
 async function loadSessionContext() {
@@ -1342,7 +1228,7 @@ async function loadSessionWorkspace() {
     sessionTodosList.value = []
     sessionPlanText.value = ''
     toolAuditRows.value = []
-    sessionCostSummaryText.value = ''
+    sessionCost.value = null
     subagentHistoryRecords.value = []
     sessionContextDebug.value = null
     sessionContextError.value = null
@@ -1377,10 +1263,10 @@ async function loadSessionWorkspace() {
   try {
     const c = await forebrainApi.sessionCostSummary(sid)
 	if (generation !== sessionWorkspaceGeneration || sessionId.value !== sid) return
-    sessionCostSummaryText.value = JSON.stringify(c, null, 2)
+    sessionCost.value = c
   } catch {
 	if (generation !== sessionWorkspaceGeneration || sessionId.value !== sid) return
-    sessionCostSummaryText.value = ''
+    sessionCost.value = null
   }
   try {
     const sh = await forebrainApi.sessionSubagentHistory(sid)
@@ -1420,13 +1306,14 @@ function extractDiffPreview(detailJson: string): string {
     const obj = parseJsonCamelCase<Record<string, unknown>>(detailJson)
     const output = (obj.output ?? {}) as Record<string, unknown>
     const turnDiff = (output.turnDiff ?? {}) as Record<string, unknown>
+    // Shown whole: the preview scrolls rather than cutting a change short.
     const unified = typeof turnDiff.unifiedDiff === 'string' ? turnDiff.unifiedDiff : ''
-    if (unified) return unified.slice(0, 4000)
+    if (unified) return unified
     const input = toolCallInput(obj)
     const oldStr = typeof input.oldString === 'string' ? input.oldString : ''
     const newStr = typeof input.newString === 'string' ? input.newString : ''
     if (oldStr || newStr) {
-      return `--- old\n${oldStr.slice(0, 1500)}\n+++ new\n${newStr.slice(0, 1500)}`
+      return `--- old\n${oldStr}\n+++ new\n${newStr}`
     }
     return ''
   } catch {
@@ -1460,24 +1347,62 @@ function extractReferencedPaths(detailJson: string): string[] {
   }
 }
 
-function acceptDiff(_id: string) {
+// toolAuditSummary is what a recorded call did, in the words its card uses —
+// never the payload it was recorded as.
+function toolAuditSummary(detailJson: string): string {
+  try {
+    const obj = parseJsonCamelCase<Record<string, unknown>>(detailJson)
+    const summary = typeof obj.summary === 'string' ? obj.summary.trim() : ''
+    if (summary) return summary
+    const description = typeof obj.description === 'string' ? obj.description.trim() : ''
+    if (description) return description
+    const meta = (obj.toolMeta ?? {}) as Record<string, unknown>
+    return typeof meta.invocation === 'string' ? meta.invocation.trim() : ''
+  } catch {
+    return ''
+  }
 }
 
-async function rejectDiff() {
-  const sid = sessionId.value
-  if (!sid) return
+function toolAuditError(detailJson: string): string {
   try {
-    await forebrainApi.sessionRewindLast(sid)
-    await loadSessionWorkspace()
+    const obj = parseJsonCamelCase<Record<string, unknown>>(detailJson)
+    return typeof obj.error === 'string' ? obj.error.trim() : ''
   } catch {
-    //
+    return ''
+  }
+}
+
+function costByToolText(byTool: Record<string, number>): string {
+  return Object.entries(byTool ?? {})
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, count]) => `${name} × ${count}`)
+    .join(' · ')
+}
+
+// undoLastFileChange restores the file the session changed most recently to
+// what it held before that change, and says which file it restored — or, in
+// the gateway's own words, why it could not.
+async function undoLastFileChange() {
+  const sid = sessionId.value
+  if (!sid || undoingFileChange.value) return
+  undoingFileChange.value = true
+  undoFileChangeResult.value = ''
+  undoFileChangeFailed.value = false
+  try {
+    const res = await forebrainApi.sessionRewindLast(sid)
+    undoFileChangeResult.value = t('chat.undoneFileChange', { path: String(res.absPath ?? '') })
+    await loadSessionWorkspace()
+  } catch (cause) {
+    undoFileChangeFailed.value = true
+    undoFileChangeResult.value = getErrorMessage(cause)
+  } finally {
+    undoingFileChange.value = false
   }
 }
 
 watch(sessionId, () => {
   void loadSessionWorkspace()
   void loadRoster()
-	void loadPendingActions()
 })
 
 watch(
@@ -1496,41 +1421,6 @@ function viewRoster(row: AgentRosterRow) {
   const target = agentRosterViewTarget(row)
   if (!target) return
   void router.replace(target)
-}
-
-function approvalKindLabel(kind: string): string {
-  const k = String(kind ?? '').trim().toLowerCase()
-  if (k === 'enter_plan_mode') return t('chat.enterPlanMode')
-  return kind
-}
-
-// A subagent's request names the worker that is blocked. The primary agent's
-// own requests carry no such line: it is the agent the conversation is with.
-function approvalRequesterLabel(a: Pick<ActionRow, 'agentId' | 'subagentType'>): string {
-  const type = String(a.subagentType ?? '').trim()
-  if (type) return t('chat.approvalRequestedBy', { type })
-  if (String(a.agentId ?? '').trim()) return t('chat.approvalRequestedBySubagent')
-  return ''
-}
-
-function approvalHint(a: ActionRow): string {
-  const k = String(a.kind).trim().toLowerCase()
-  let payload: Record<string, unknown> | null = null
-  try {
-    payload = parseJsonCamelCase<Record<string, unknown>>(a.payloadJson)
-  } catch {
-    payload = null
-  }
-  if (k === 'enter_plan_mode') {
-    const action = String(payload?.action ?? 'enter').trim().toLowerCase()
-    if (action === 'exit') return t('chat.exitPlanAfterApproval')
-    return t('chat.enterPlanAfterApproval')
-  }
-  // The reason the runtime raised this approval is what the row has to say -
-  // an action id tells the user nothing they can act on.
-  const reason = approvalJustification(payload)
-  if (reason) return reason
-  return a.id
 }
 
 function submitPlanCommand(cmd: string) {
@@ -1602,9 +1492,8 @@ function messageHasBubble(msg: ChatMessage): boolean {
     msg.blocks?.length ||
     msg.planUpdates?.length ||
     msg.planBlocks?.length ||
-    msg.subagentCards?.length ||
     msg.turnDiffs?.length ||
-    workedLine(msg).label,
+    workedLineOf(msg, t).label,
   )
 }
 
@@ -1624,23 +1513,6 @@ function reasoningDisplayText(content: string): string {
   return lines.map((line, idx) => `${idx === 0 ? '▸ ' : '  '}${line}`).join('\n')
 }
 
-/** Every run closes with its line, as in the terminal: duration, checklist
- * progress when the turn had one, then the finish time. */
-function workedLine(msg: {
-  workedDurationMs?: number
-  runFinishedAt?: string
-  role?: string
-  workedPlanDone?: number
-  workedPlanTotal?: number
-  workedPlanActive?: string
-}): WorkedLine {
-  if (msg.role !== 'assistant') return { label: '' }
-  const plan = msg.workedPlanTotal && msg.workedPlanTotal > 0
-    ? { done: msg.workedPlanDone ?? 0, total: msg.workedPlanTotal, active: msg.workedPlanActive }
-    : undefined
-  return formatWorkedDurationLabel(msg.workedDurationMs, t, msg.runFinishedAt, plan)
-}
-
 /** An attachment the model was shown as an image: an image upload, or an image picked from the workspace. */
 function isImageAttachment(attachment: ChatAttachmentRecord): boolean {
   return Boolean(attachment.path) || String(attachment.mediaType ?? '').startsWith('image/')
@@ -1656,7 +1528,108 @@ function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
   return t.startsWith('image/') || t === 'application/pdf' || /\.(png|jpe?g|gif|webp|pdf)$/i.test(name)
 }
 
+/**
+ * Sends what the composer submitted in a subagent's own view to that subagent.
+ * Everything typed there belongs to the subagent: ordinary text runs its next
+ * execution, a skill command is sent to it, /compact and /context act on it,
+ * a command that acts on the conversation runs there, and the ones hidden
+ * answer with one sentence — plan 007's D4, in this surface.
+ */
+async function handleSubagentSubmit(message: { text: string; files?: { url?: string; filename?: string; mediaType?: string; file?: File }[] }) {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  const text = (message.text ?? '').trim()
+  const files = message.files ?? []
+  const attachedByComposer = promptRef.value?.hasAttached() ?? false
+  if (!text && files.length === 0 && !attachedByComposer) return
+  // A shell line is the conversation's, never the subagent's.
+  if (text.startsWith('!')) {
+    composerNotice.value = { title: t('chat.messageNotSent'), detail: t('chat.subagentViewCommand') }
+    return
+  }
+  if (text.startsWith('/')) {
+    const name = slashCommandName(text)
+    if (name === 'compact') {
+      await compactActiveSubagent()
+      return
+    }
+    if (name === 'context') {
+      await openSubagentContext(agentId)
+      return
+    }
+    const record = subagentSlashRecords.value.find((row) => String(row.name ?? '').toLowerCase() === name)
+    if (record && record.category !== 'skill') {
+      // Runs exactly as it does in the conversation's view: the reply lands
+      // there, where the command acted.
+      nextSubmissionDisposition.value = 'steer'
+      await send(text, { sessionId: sessionId.value ?? undefined, activeInputDisposition: undefined })
+      return
+    }
+    if (!record) {
+      composerNotice.value = { title: t('chat.messageNotSent'), detail: t('chat.subagentViewCommand') }
+      return
+    }
+    // A skill command: sent raw; the gateway expands it for this subagent.
+  }
+  const attached = promptRef.value?.takeAttached() ?? { attachments: [], mentionImages: [] }
+  composerNotice.value = null
+  const queued = nextSubmissionDisposition.value === 'queue'
+  nextSubmissionDisposition.value = 'steer'
+  const picked: PickedFile[] = files
+    .filter((f) => isAllowedAttachmentType(f.mediaType ?? '', f.filename ?? ''))
+    .flatMap((f) => (f.file ? [{ file: f.file, filename: f.filename || f.file.name, mediaType: f.mediaType || f.file.type }] : []))
+  let uploadSession: Promise<string> | null = null
+  const sessionForUpload = () => {
+    uploadSession ??= sessionId.value
+      ? Promise.resolve(sessionId.value)
+      : forebrainApi.chatSessionCreate().then((created) => created.id)
+    return uploadSession
+  }
+  const { submission, unsent, failure } = await uploadSubmission(text, attached, picked,
+    async (file) => forebrainApi.filesUpload(file, await sessionForUpload()))
+  if (failure) {
+    composerNotice.value = {
+      title: t('chat.messageNotSent'),
+      detail: `${t('chat.uploadFailed', { name: failure.filename })}\n${getErrorMessage(failure.error)}`,
+    }
+    promptRef.value?.restoreSubmission(submission, unsent)
+    return
+  }
+  await sendToSubagent(agentId, submission, queued)
+}
+
+/** /compact in a subagent's view: its own context, refused while it runs. */
+async function compactActiveSubagent() {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  const outcome = await compactSubagent(agentId)
+  if (outcome === 'running') {
+    composerNotice.value = { title: t('chat.messageNotSent'), detail: t('chat.subagentCompactRunning') }
+  }
+}
+
+/** /context in a subagent's view, drawn with the conversation's own panel. */
+async function openSubagentContext(agentId: string) {
+  const id = String(agentId ?? '').trim()
+  if (!id) return
+  subagentContextTarget.value = id
+  subagentContextLoading.value = true
+  subagentContextDebug.value = null
+  try {
+    const data = await loadSubagentContext(id)
+    if (subagentContextTarget.value === id) subagentContextDebug.value = data
+  } finally {
+    if (subagentContextTarget.value === id) subagentContextLoading.value = false
+  }
+}
+
 async function handleSubmit(message: { text: string; files?: { url?: string; filename?: string; mediaType?: string; file?: File }[] }) {
+  // The composer belongs to whichever view is on screen: a subagent's own view
+  // sends to that subagent, never to the conversation (rule 9).
+  if (activeAgentView.value) {
+    await handleSubagentSubmit(message)
+    return
+  }
   const text = (message.text ?? '').trim()
   const files = message.files ?? []
   const attachedByComposer = promptRef.value?.hasAttached() ?? false
@@ -1705,6 +1678,15 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
   })
 }
 
+// A message the boundary handed back to a subagent's composer while that view
+// is open goes straight back into it; when the view is elsewhere it waits under
+// its id until the view opens (openAgentView restores it).
+watch(subagentReturnedDraft, () => {
+  const agentId = activeAgentView.value
+  if (!agentId) return
+  applySubagentReturnedDraft(agentId)
+}, { deep: true })
+
 // A message that never became a turn — withdrawn before it began, handed back
 // by a run that ended before taking it, or not taken by a run that had just
 // ended — is the user's draft again, with everything it attached.
@@ -1712,11 +1694,23 @@ watch(returnedDraft, () => {
   const draft = takeReturnedDraft()
   if (draft) promptRef.value?.restoreSubmission(draft)
   const notice = takeReturnedNotice()
-  if (notice) composerNotice.value = { title: t('chat.messageNotSent'), detail: notice }
+  const noticeCode = takeReturnedNoticeCode()
+  if (notice) composerNotice.value = { title: t('chat.messageNotSent'), detail: notice, ...(noticeCode ? { detailCode: noticeCode } : {}) }
 })
 
 /** What the composer has to tell the user about a message or file it kept. */
-const composerNotice = ref<{ title: string; detail: string } | null>(null)
+const composerNotice = ref<{ title: string; detail: string; detailCode?: string } | null>(null)
+// A refusal the runtime classified carries its code: its sentence is written
+// when the notice is drawn, in the language the viewer is reading then —
+// including a switch made while the notice is on screen — the way a run's
+// error block does. The runtime's own sentence shows only when the code is
+// not one this build knows.
+const composerNoticeDetail = computed(() => {
+  const notice = composerNotice.value
+  if (!notice) return ''
+  const code = notice.detailCode?.trim()
+  return (code ? formatProviderError({ code }, locale.value) : null) ?? notice.detail
+})
 
 /**
  * The composer turned files away as they were added — past the file limit, or
@@ -1747,12 +1741,6 @@ watch(refreshToken, () => {
   void loadRoster()
 })
 
-watch(pendingActionsVersion, (version, prevVersion) => {
-  if (version !== prevVersion) {
-    void loadPendingActions()
-  }
-})
-
 onMounted(async () => {
   window.addEventListener('pointerdown', handleWindowPointerDown)
   workbenchMq = window.matchMedia('(max-width: 1023px)')
@@ -1761,7 +1749,6 @@ onMounted(async () => {
   void fetchSessions()
   void loadRoster()
   await loadSessionWorkspace()
-  void loadPendingActions()
   const qSid = String(route.query.session ?? '').trim()
   if (!qSid) {
     const lid = lastSessionId.value
@@ -1778,6 +1765,17 @@ watch(() => route.query.session, (value) => {
   const sid = String(value ?? '').trim()
   if (sid && sid !== sessionId.value) switchToSession(sid)
 }, { immediate: true })
+
+watch(sessionId, (sid) => {
+  void loadSessionInfo(sid)
+}, { immediate: true })
+
+// Every refresh of the shared list (a turn's end, the drawer opening, a
+// rename) re-reads the open conversation's own facts, so a title the
+// gateway just wrote shows up without leaving the page.
+watch(sessions, () => {
+  void loadSessionInfo(sessionId.value)
+})
 
 // Keep the address bar honest when the session changes from inside the view
 // (a slash command switching sessions, a roster jump).
@@ -1881,16 +1879,19 @@ onUnmounted(() => {
   background: transparent;
 }
 
-/* The checklist mark on the worked line: sized to the digits it counts and
-   optically centred on them (a middle/middle alignment sits too low against
-   digits, whose visual centre sits above the baseline). */
-.worked-check {
-  width: 1em;
-  height: 1em;
-  display: inline-block;
-  vertical-align: -0.14em;
-  stroke-width: 2.25;
-  color: var(--forebrain-success);
-  margin-right: 0.2em;
+/* A project conversation's tag: the project band's dark ground, as a chip. */
+.chat-project-tag {
+  flex-shrink: 0;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 16px;
+  background: #0f1d38;
+  color: #ffffff;
 }
+
+.chat-project-tag:hover {
+  text-decoration: underline;
+}
+
 </style>

@@ -608,6 +608,30 @@ func TestShellIsNotSafeReadOnly(t *testing.T) {
 	}
 }
 
+// The LSP entry covers only the file-less workspace symbol search: a call
+// that names a file is mapped to Read by the permission layer, so Read rules
+// govern it before this default ever applies.
+func TestLSPWorkspaceSearchIsSafeReadOnly(t *testing.T) {
+	if !IsSafeReadOnlyTool("LSP") {
+		t.Fatal("file-less lsp workspace symbol search should run unprompted")
+	}
+	engine := NewEngine()
+	d := engine.EvaluateForSession(NewStore(), "s1", "lsp", `{"operation":"workspace_symbols","query":"Run"}`)
+	if d.Behavior != BehaviorAllow || d.Reason != "safe_readonly_default_allow" {
+		t.Fatalf("lsp workspace search should run unprompted, got %s (%s)", d.Behavior, d.Reason)
+	}
+	s := NewStore()
+	ApplyUpdate(s, PermissionUpdate{
+		Type:        UpdateAddRules,
+		Destination: DestinationLocalSettings,
+		Behavior:    BehaviorAsk,
+		Rules:       []PermissionRuleValue{{ToolName: "LSP"}},
+	})
+	if d := engine.EvaluateForSession(s, "s1", "lsp", `{"operation":"workspace_symbols","query":"Run"}`); d.Behavior != BehaviorAsk {
+		t.Fatalf("configured LSP ask rule must outrank the default allow, got %s (%s)", d.Behavior, d.Reason)
+	}
+}
+
 // Deny is checked across every source before ask, and ask before allow, so the
 // source order never lets a weaker layer's allow survive a stronger layer's
 // deny — nor the reverse. This is the property that actually bounds what a

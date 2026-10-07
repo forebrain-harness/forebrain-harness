@@ -107,19 +107,42 @@ test('sending a message and switching sessions', async ({ page }) => {
   // In suite order the second turn can trail the first by a wide margin on
   // the shared gateway; wait on the full pair, not just any reply text
   // (the first turn's reply still matches the same constant).
+  // The second conversation is new, so its own reply — and, with a real
+  // model whose words are unknown, its closing worked line — is the turn.
   await page.waitForFunction(
-    () => document.body.innerText.includes('second-e2e')
-      && Array.from(document.querySelectorAll('[role=log] .is-assistant'))
-        .some((n) => (n.textContent ?? '').includes('E2E_REPLY_OK')),
-    undefined,
+    (realModel) => document.body.innerText.includes('second-e2e')
+      && (realModel
+        ? /已工作 \d|Worked for \d/.test(document.querySelector('.chat-shell main')?.textContent ?? '')
+        : Array.from(document.querySelectorAll('[role=log] .is-assistant'))
+          .some((n) => (n.textContent ?? '').includes('E2E_REPLY_OK'))),
+    process.env.E2E_REAL_LLM === '1',
     { timeout: 150_000, polling: 500 },
   )
   await openDrawer(page)
   await page.locator('.chat-drawer-row', { hasText: 'first' }).first().click()
   await expect(page).toHaveURL(new RegExp(`session=${firstId}`))
-  await expect(page.locator('.chat-shell main')).toContainText('first-e2e')
-  const body = await page.evaluate(() => document.body.innerText)
-  expect(body).not.toContain('second-e2e')
+  // What the user sent in each conversation is the check: a real model's
+  // reply may quote anything, including the other conversation's word.
+  await expect(page.locator('[role=log] .is-user', { hasText: 'first-e2e' })).toHaveCount(1)
+  await expect(page.locator('[role=log] .is-user', { hasText: 'second-e2e' })).toHaveCount(0)
+
+  // Back to the conversation the last message went into: its history loads
+  // again (a send that finished before the reload is part of what it reads).
+  await openDrawer(page)
+  await page.locator('.chat-drawer-row', { hasText: 'second' }).first().click()
+  await expect(page).toHaveURL(new RegExp(`session=${secondId}`))
+  await expect(page.locator('[role=log] .is-user', { hasText: 'second-e2e' })).toHaveCount(1, { timeout: 15_000 })
+  await expect(page.locator('[role=log] .is-user', { hasText: 'first-e2e' })).toHaveCount(0)
+})
+
+test('the drawer lists conversations when opened away from the chat page', async ({ page }) => {
+  await signIn(page)
+  const created = await page.request.post('/api/chat/sessions', { data: { title: 'drawer-elsewhere-e2e' } })
+  expect(created.ok()).toBeTruthy()
+  // A fresh load on another page: the chat page never mounted to fetch.
+  await page.goto('/skills', { waitUntil: 'networkidle' })
+  await openDrawer(page)
+  await expect(page.locator('.chat-drawer-row', { hasText: 'drawer-elsewhere-e2e' }).first()).toBeVisible({ timeout: 10_000 })
 })
 
 test('heartbeat is in the rail, not the workbench', async ({ page }) => {
@@ -183,5 +206,23 @@ test('run closes with the terminal worked line', async ({ page }) => {
   await page.press('textarea', 'Enter')
   await expectAssistantReply(page)
   const line = await page.locator('.chat-shell main').innerText()
-  expect(line).toMatch(/已工作 \d+s[\s\S]*?\d{2}:\d{2}|Worked for \d+s[\s\S]*?\d{2}:\d{2}/)
+  // The terminal's duration spelling: 12s, 1m 12s or 1h 02m 03s.
+  expect(line).toMatch(/(已工作|Worked for) (\d+h )?(\d+m )?\d+s[\s\S]*?\d{2}:\d{2}/)
+  // A reload rebuilds the conversation from history, and every run closes
+  // with its one line there too: as many lines as were drawn live.
+  const lines = page.locator('[data-testid="run-worked-line"]')
+  const live = await lines.count()
+  expect(live).toBeGreaterThan(0)
+  // The page reopens the conversation it was on.
+  await page.reload({ waitUntil: 'networkidle' })
+  await expect(page.locator('.chat-shell main')).toContainText('worked-line-e2e', { timeout: 10_000 })
+  await expect(lines).toHaveCount(live, { timeout: 10_000 })
+  await expect(lines.last()).toContainText(/(已工作|Worked for) (\d+h )?(\d+m )?\d+s/)
+  // The session's workspace panel reads as words: no payload printed raw.
+  // Only the panel's own summary toggles it — nested context-debug details
+  // carry summaries of their own.
+  const workspace = page.locator('[data-testid="session-workspace"]')
+  await workspace.locator('> summary').click()
+  await expect(workspace).toContainText(/(成本摘要|Cost summary)/)
+  await expect(workspace).not.toContainText('{"')
 })

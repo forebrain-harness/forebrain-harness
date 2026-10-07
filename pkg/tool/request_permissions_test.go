@@ -2727,12 +2727,38 @@ func TestToolExecutionMetadataIncludesYOLOFields(t *testing.T) {
 		Cfg:  &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
 		YOLO: true,
 	}
-	meta := toolExecutionMetadata(rt, safety.ToolKindShell)
+	meta := toolExecutionMetadata(context.Background(), nil, rt, safety.ToolKindShell)
 	if meta["sandbox_mode"] != string(safety.ModeDangerFullAccess) {
 		t.Fatalf("unexpected sandbox mode metadata: %#v", meta)
 	}
 	if meta["yolo"] != true || meta["approval_bypassed_by_yolo"] != true {
 		t.Fatalf("expected yolo metadata flags, got %#v", meta)
+	}
+}
+
+// A conversation that picked its own sandbox runs its calls under it, while
+// every other conversation of the same runtime keeps the configured one.
+func TestToolExecutionMetadataFollowsTheConversationsOwnSandbox(t *testing.T) {
+	t.Setenv(safety.EnvYOLO, "")
+	rt := &AgentToolRuntime{
+		Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite},
+		PermissionSnapshotForSession: func(sessionID string) safety.Snapshot {
+			if sessionID == "s1" {
+				return safety.Snapshot{SandboxMode: appcfg.SandboxModeDangerFullAccess}
+			}
+			return safety.Snapshot{}
+		},
+	}
+	owning := toolExecutionMetadata(WithConversationSessionID(context.Background(), "s1"), nil, rt, safety.ToolKindShell)
+	if owning["sandbox_mode"] != string(safety.ModeDangerFullAccess) {
+		t.Fatalf("owning conversation sandbox = %#v", owning["sandbox_mode"])
+	}
+	other := toolExecutionMetadata(WithConversationSessionID(context.Background(), "s2"), nil, rt, safety.ToolKindShell)
+	if other["sandbox_mode"] == string(safety.ModeDangerFullAccess) {
+		t.Fatalf("another conversation inherited full access: %#v", other)
+	}
+	if rt.Cfg.SandboxMode != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("runtime config moved to %q", rt.Cfg.SandboxMode)
 	}
 }
 
@@ -3273,6 +3299,9 @@ func TestStoreMigrationMatchesFreshSchemaAndKeepsStats(t *testing.T) {
 				t.Fatal(err)
 			}
 			out = append(out, typ+" "+name+" "+tbl+" "+ddl)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
 		}
 		return out
 	}

@@ -221,25 +221,32 @@ func (s *ChatSession) ResetTUIPendingState() {
 	s.clearPendingApproval()
 }
 
-func (s *ChatSession) installRunAuditStepHook(sessionID string) func() {
+// runAuditStepHook builds the hook that publishes one session's tool steps as
+// canonical events and UI messages. prev — resolved after the load below, the
+// hook already installed where this one will run — runs first, so a
+// process-level observer keeps seeing every step. The same hook serves two
+// mounts: installed process-wide for a foreground turn by
+// installRunAuditStepHook, and carried on the run context of a plan review,
+// which executes outside any turn. It returns nil when the session cannot
+// publish (no runner, no run store, a failed load), and a nil hook means
+// "nothing to add" to every consumer.
+func (s *ChatSession) runAuditStepHook(sessionID string, prev func() tool.StepHook) tool.StepHook {
 	if s == nil || s.runSvc() == nil || s.runner() == nil {
-		return func() {}
+		return nil
 	}
 	if err := s.runner().Load(); err != nil {
-		return func() {}
-	}
-	tools := s.Env.Tools()
-	if tools == nil {
-		return func() {}
+		return nil
 	}
 	sid := strings.TrimSpace(sessionID)
 	if sid == "" {
 		sid = "default"
 	}
-	prev := tools.StepHook()
-	tools.SetStepHook(func(stepCtx context.Context, evt tool.StepEvent) {
-		if prev != nil {
-			prev(stepCtx, evt)
+	// The tool registry exists only after a load, which is why prev arrives
+	// as a resolver rather than a value.
+	chained := prev()
+	return func(stepCtx context.Context, evt tool.StepEvent) {
+		if chained != nil {
+			chained(stepCtx, evt)
 		}
 		rid := strings.TrimSpace(tool.RunIDFromContext(stepCtx))
 		if rid == "" {
@@ -266,7 +273,7 @@ func (s *ChatSession) installRunAuditStepHook(sessionID string) func() {
 				if canonical, ok := tool.RunEventFromStep(stepCtx, sid, rid, "tui", evt); ok {
 					s.persistRunEvent(stepCtx, canonical)
 				}
-				s.notifyUI(PlanUpdatedMsg{Payload: *evt.PlanUpdate})
+				s.notifyUIForSession(sid, PlanUpdatedMsg{Payload: *evt.PlanUpdate})
 			case event.RunEventToolStarted, event.RunEventToolOutputDelta, event.RunEventToolCompleted:
 				if strings.TrimSpace(evt.ToolName) == "" || !shouldNotifyToolStep(evt) || tool.ToolStepRendersAsPlan(evt) {
 					break
@@ -304,7 +311,7 @@ func (s *ChatSession) installRunAuditStepHook(sessionID string) func() {
 				if strings.TrimSpace(plan.AgentID) == "" {
 					plan.AgentID = agentID
 				}
-				s.notifyUI(PlanUpdatedMsg{Payload: plan})
+				s.notifyUIForSession(sid, PlanUpdatedMsg{Payload: plan})
 				return
 			case event.RunEventToolStarted, event.RunEventToolOutputDelta, event.RunEventToolCompleted:
 				if !shouldNotifyToolStep(evt) || tool.ToolStepRendersAsPlan(evt) {
@@ -325,7 +332,7 @@ func (s *ChatSession) installRunAuditStepHook(sessionID string) func() {
 					body = strings.TrimSpace(formatted)
 				}
 				meta := tool.BuildToolMeta(evt)
-				s.notifyUI(NewMessageMsg{Msg: Message{
+				s.notifyUIForSession(sid, NewMessageMsg{Msg: Message{
 					Kind:            MsgKindTool,
 					StepID:          evt.StepID,
 					ToolName:        evt.ToolName,
@@ -342,8 +349,42 @@ func (s *ChatSession) installRunAuditStepHook(sessionID string) func() {
 				}})
 			}
 		}
-	})
+	}
+}
+
+// installRunAuditStepHook installs the session's tool step hook as the
+// process-wide hook for the duration of one turn, restoring whatever was
+// installed before. Runs dispatched inside that turn inherit it through the
+// context prepareTUIAgentBase freezes; anything running outside a turn must
+// carry the hook itself (the plan reviewer's does, as a field on the shared
+// reviewer pkg/process builds this surface's wiring into).
+func (s *ChatSession) installRunAuditStepHook(sessionID string) func() {
+	if s == nil || s.runSvc() == nil || s.runner() == nil {
+		return func() {}
+	}
+	hook := s.runAuditStepHook(sessionID, s.currentStepHook)
+	if hook == nil {
+		return func() {}
+	}
+	tools := s.Env.Tools()
+	if tools == nil {
+		return func() {}
+	}
+	prev := tools.StepHook()
+	tools.SetStepHook(hook)
 	return func() { tools.SetStepHook(prev) }
+}
+
+// currentStepHook reads the process-wide step hook, wherever it is installed
+// at the moment. Nil when there is no tool registry yet.
+func (s *ChatSession) currentStepHook() tool.StepHook {
+	if s == nil || s.Env == nil {
+		return nil
+	}
+	if tools := s.Env.Tools(); tools != nil {
+		return tools.StepHook()
+	}
+	return nil
 }
 
 func shouldNotifyToolStep(evt tool.StepEvent) bool {
@@ -402,7 +443,7 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 				return
 			}
 			accum.AppendContent(text)
-			s.notifyUI(NewMessageMsg{turn: foreground, Msg: Message{
+			s.notifyUIForSession(sessionID, NewMessageMsg{turn: foreground, Msg: Message{
 				Kind:      MsgKindAssistant,
 				Content:   text,
 				Timestamp: time.Now(),
@@ -413,14 +454,14 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 				return
 			}
 			accum.AppendReasoning(text)
-			s.notifyUI(NewMessageMsg{turn: foreground, Msg: Message{
+			s.notifyUIForSession(sessionID, NewMessageMsg{turn: foreground, Msg: Message{
 				Kind:      MsgKindReasoning,
 				Content:   text,
 				Timestamp: time.Now(),
 			}})
 		},
 		OnReasoningDone: func() {
-			s.notifyUI(ReasoningDoneMsg{turn: foreground})
+			s.notifyUIForSession(sessionID, ReasoningDoneMsg{turn: foreground})
 		},
 		OnResponseCompleted: func() {
 			foreground.acknowledgeResponse()
@@ -436,7 +477,7 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			}
 			// Same step id, wording and meta a subagent's search is published
 			// with, so the two read identically wherever they are shown.
-			s.notifyUI(NewMessageMsg{turn: foreground, Msg: Message{
+			s.notifyUIForSession(sessionID, NewMessageMsg{turn: foreground, Msg: Message{
 				Kind:      MsgKindTool,
 				StepID:    tool.ProviderWebSearchStepID(id),
 				ToolName:  tool.ProviderWebSearchToolName,
@@ -450,7 +491,7 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			if inputTokens <= 0 && outputTokens <= 0 {
 				return
 			}
-			s.notifyUI(TokenUsageDeltaMsg{
+			s.notifyUIForSession(sessionID, TokenUsageDeltaMsg{
 				RunID:        strings.TrimSpace(tool.RunIDFromContext(agBase)),
 				InputTokens:  inputTokens,
 				OutputTokens: outputTokens,
@@ -466,8 +507,8 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			// callback is an absolute snapshot: usage deltas are unsuitable
 			// here because Anthropic emits input at message_start and the
 			// remaining output at message_delta.
-			if msg, ok := s.tokenBudgetMessageFromUsage(inputTokens + outputTokens); ok {
-				s.notifyUI(msg)
+			if msg, ok := s.tokenBudgetMessageFromUsage(sessionID, inputTokens+outputTokens); ok {
+				s.notifyUIForSession(sessionID, msg)
 			}
 		},
 	})
@@ -490,13 +531,11 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	// reasoningText is still needed below for the TUI-only rendering.
 	outText, reasoningText := turn.AssistantOutcomeText(res)
 	turn.PersistAssistantTurn(context.Background(), s.sessStore(), turn.AssistantTurn{
-		SessionID:  sessionID,
-		RunID:      runID,
-		Result:     res,
-		Model:      cliResultModel(s),
-		StartedAt:  completion.StartedAt,
-		FinishedAt: completion.FinishedAt,
-		WorkedMs:   completion.Duration.Milliseconds(),
+		SessionID: sessionID,
+		RunID:     runID,
+		Result:    res,
+		Model:     cliResultModel(s),
+		End:       completion.runEnd(),
 		OnSequenceError: func(err error) {
 			if s.chatLog != nil {
 				s.chatLog.Errorf("forebrain chat append_assistant_outcome session=%s run=%s failed: %v", sessionID, runID, err)
@@ -513,25 +552,25 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	}
 	if strings.TrimSpace(outText) != "" && !streamAssistantViaTUI && !hideFromForeground {
 		if reasoningText != "" {
-			s.notifyUI(NewMessageMsg{Msg: Message{
+			s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 				Kind:      MsgKindReasoning,
 				Content:   reasoningText,
 				Timestamp: time.Now(),
 			}})
-			s.notifyUI(ReasoningDoneMsg{})
+			s.notifyUIForSession(sessionID, ReasoningDoneMsg{})
 		}
-		s.notifyUI(NewMessageMsg{Msg: Message{
+		s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 			Kind:      MsgKindAssistant,
 			Content:   outText,
 			Timestamp: time.Now(),
 		}})
 	} else if reasoningText != "" && !streamAssistantViaTUI {
-		s.notifyUI(NewMessageMsg{Msg: Message{
+		s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 			Kind:      MsgKindReasoning,
 			Content:   reasoningText,
 			Timestamp: time.Now(),
 		}})
-		s.notifyUI(ReasoningDoneMsg{})
+		s.notifyUIForSession(sessionID, ReasoningDoneMsg{})
 	}
 	if out != nil && strings.TrimSpace(outText) != "" && !hideFromForeground {
 		_, _ = fmt.Fprintln(out, outText)
@@ -704,10 +743,15 @@ func (s *ChatSession) resumeAgentContext(
 	if s.actionSvc() != nil {
 		action, _ = s.actionSvc().Get(context.Background(), actionID)
 	}
-	resume := turn.BuildApprovalResume(action, p.SessionSnapshot, p.ToolName, p.ClearedContext)
+	resume := turn.BuildApprovalResumeWithPlanReviews(context.Background(), s.runSvc(), action, p.SessionSnapshot, p.ToolName, p.ClearedContext)
 	if v.denied {
 		// The user's feedback lives in the action's Error field, where
-		// ActionSvc.Deny stores it.
+		// ActionSvc.Deny stores it. For a denied plan the reviews the
+		// approval collected are composed onto it at the resume — read from
+		// the conversation's plan_reviewed events, where every surface and a
+		// restart read them from — so the stored row and every card printed
+		// from it say only what the user said, while the model still gets
+		// the full guidance.
 		denyReason = resume.Reason
 	} else if resume.Cleared {
 		// The user cleared context: do not replay the pre-clear history back
@@ -733,9 +777,10 @@ func (s *ChatSession) resumeAgentContext(
 	}
 	if len(resumeSnapshot) > 0 {
 		resumeState := &tool.ToolApprovalResumeState{
-			Session:    resumeSnapshot,
-			Denied:     v.denied,
-			DenyReason: denyReason,
+			Session:      resumeSnapshot,
+			Denied:       v.denied,
+			DenyReason:   denyReason,
+			DenyFeedback: resume.Feedback,
 		}
 		// The fence travels with the resume state rather than being crossed
 		// here, so it opens when the replay starts and closes when the replay
@@ -775,6 +820,19 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		if !emitRunEnded {
 			return
 		}
+		// The run ends here, so its clock is owed to the transcript too. An
+		// ending that wrote its own output stamped it already, with the same
+		// window; one that wrote nothing — the approval's effect failed — is
+		// stamped here, so replay closes it the way this line closes it live.
+		end := completion
+		if end.StartedAt.IsZero() {
+			end = completeTurn(t0)
+		}
+		runID := strings.TrimSpace(runUsage.runID)
+		if runID == "" {
+			runID = strings.TrimSpace(p.RunID)
+		}
+		_ = s.sessStore().StampRunTiming(context.Background(), runID, state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Duration})
 		s.notifyUI(RunEndedMsg{
 			RunID:          runUsage.runID,
 			WorkedDuration: completion.Duration,
@@ -792,14 +850,18 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 				service.Network = s.Env.Tools()
 			}
 			if effectErr := service.ApplyResolvedEffect(act, p.RunID); effectErr != nil {
+				explained := llm.ExplainError(effectErr)
 				if s.runSvc() != nil {
 					bg := context.Background()
 					_ = s.runSvc().ClearWait(bg, p.RunID)
 					_ = s.runSvc().SetStatus(bg, p.RunID, state.RunStatusFailed)
-					_ = s.publishTUIRunEvent(bg, p.SessionID, p.RunID, "turn_error", event.TurnErrorPayload{Error: effectErr.Error(), Message: effectErr.Error()})
+					// Publishing the turn error is what draws it, live as on
+					// replay, in the words the error block always uses.
+					_ = s.publishTUIRunEvent(bg, p.SessionID, p.RunID, "turn_error", event.TurnErrorPayload{Error: explained, Message: explained})
+				} else {
+					s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: explained, RunID: p.RunID, Timestamp: time.Now()}})
 				}
 				s.tuiFinish(p.RunID)
-				s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: llm.ExplainError(effectErr), RunID: p.RunID, Timestamp: time.Now()}})
 				return
 			}
 			s.refreshSandboxRuntime()
@@ -868,7 +930,7 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 				rid = strings.TrimSpace(rae.RunID)
 			}
 			if rid != "" {
-				s.persistRequiresActionSnapshot(p.SessionID, t0, rae.SessionSnapshot)
+				s.persistRequiresActionSnapshot(p.SessionID, rid, rae.SessionSnapshot)
 				s.attachRunWaitForRequiresAction(rid, p.SessionID, p.Channel, p.Input, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
@@ -888,10 +950,10 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			// RepairDanglingToolResults strips the row and the LLM loses the
 			// knowledge that the tool was called and approved - so it re-invokes
 			// exit_plan_mode even though the mode already transitioned to agent.
-			s.persistReplayResults(p.SessionID, t0, replayCapture)
+			s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
 			// Also persist any additional partial content produced after the
 			// replay (completed tool calls/results + streamed partial text).
-			s.persistCancelledTurnOutcome(p.SessionID, t0)
+			s.persistCancelledTurnOutcome(p.SessionID, runUsage.runID, completion)
 			s.notifyUI(StreamResetMsg{})
 			return
 		}
@@ -899,19 +961,21 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// error, so a transient LLM error (429, network, etc.) does not
 		// lose the work already completed (approved tool replay + any
 		// additional tool calls/results produced after the replay).
-		s.persistReplayResults(p.SessionID, t0, replayCapture)
-		s.persistCancelledTurnOutcome(p.SessionID, t0)
+		s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
+		s.persistCancelledTurnOutcome(p.SessionID, runUsage.runID, completion)
 		if s.chatLog != nil {
 			s.chatLog.Errorf("forebrain chat %s error session=%s elapsed=%s err=%v", v.logLabel, p.SessionID, time.Since(t0), err)
 		}
+		explained := llm.ExplainError(err)
 		s.notifyUI(NewMessageMsg{Msg: Message{
 			Kind:      MsgKindError,
-			Content:   llm.ExplainError(err),
+			Content:   explained,
 			Timestamp: time.Now(),
 		}})
+		s.persistRunTurnError(p.SessionID, runUsage.runID, explained)
 		return
 	}
-	s.persistReplayResults(p.SessionID, t0, replayCapture)
+	s.persistReplayResults(p.SessionID, runUsage.runID, replayCapture)
 	s.appendAssistantOutcome(p.SessionID, p.RunID, p.Channel, p.Input, completion, res, streamAssistantViaTUI, io.Discard)
 }
 
@@ -993,19 +1057,16 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 	if !strings.EqualFold(strings.TrimSpace(p.ToolName), toolName) {
 		status = "canceled"
 	}
-	content := ""
-	if strings.EqualFold(strings.TrimSpace(p.ToolName), "exit_plan_mode") {
-		if s.actionSvc() != nil {
-			if act, err := s.actionSvc().Get(context.Background(), actionID); err == nil && act != nil {
-				content = act.Error
-			}
+	// The card says what the user said — the one sentence the denial's
+	// display half carries, from the same place the persisted tool result's
+	// tool_display body comes — never the guidance composed for the model.
+	feedback := ""
+	if status == "denied" && s.actionSvc() != nil {
+		if act, err := s.actionSvc().Get(context.Background(), actionID); err == nil && act != nil {
+			feedback = act.Error
 		}
-		if strings.TrimSpace(content) == "" {
-			content = "(no output)"
-		}
-	} else if strings.EqualFold(toolName, "request_permissions") {
-		content = "The user did not approve the requested permissions"
 	}
+	content := tool.DeniedToolDisplayBody(toolName, feedback)
 	meta.Status = status
 	s.notifyUI(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,
@@ -1107,7 +1168,10 @@ func (s *ChatSession) abortPendingApproval(sessionID, actionID string) bool {
 			// never ran.
 			var worked time.Duration
 			if p != nil && !p.TurnStartedAt.IsZero() {
-				worked = completeTurn(p.TurnStartedAt).Duration
+				end := completeTurn(p.TurnStartedAt)
+				worked = end.Duration
+				// The run ends here; replay closes it with this same line.
+				_ = s.sessStore().StampRunTiming(context.Background(), runID, state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Duration})
 			}
 			s.notifyUI(RunEndedMsg{
 				RunID:          runID,
@@ -1166,52 +1230,28 @@ func (s *ChatSession) notifyTokenBudget(ctx context.Context, sessionID string) {
 }
 
 func (s *ChatSession) tokenBudgetMessage(ctx context.Context, sessionID string) (TokenBudgetUpdatedMsg, bool) {
-	usage, ok := s.contextOccupancy(ctx, sessionID)
+	usage, ok := run.ContextOccupancy(ctx, s.sessStore(), sessionID)
 	if !ok {
 		return TokenBudgetUpdatedMsg{}, false
 	}
-	return s.tokenBudgetMessageFromUsage(usage)
-}
-
-// contextOccupancy is how much of the context window the conversation fills
-// right now: the last API response's whole prompt. The composer footer's gauge
-// and /status both read it, so the two can never disagree.
-func (s *ChatSession) contextOccupancy(ctx context.Context, sessionID string) (int, bool) {
-	if s == nil || s.sessStore() == nil {
-		return 0, false
-	}
-	turns, err := s.sessStore().ListRecentMessages(ctx, sessionID, 400)
-	if err != nil {
-		return 0, false
-	}
-	return state.TokenCountFromLastAPIResponse(turns), true
+	return s.tokenBudgetMessageFromUsage(sessionID, usage)
 }
 
 // tokenBudgetMessageFromUsage builds the composer-footer budget message from a
-// raw context-occupancy token count. Splitting it out lets the live streaming
-// path (OnUsage, fired per LLM response mid-turn) surface the budget without
-// waiting for the turn to finish and persist its usage to the session state.
-func (s *ChatSession) tokenBudgetMessageFromUsage(usage int) (TokenBudgetUpdatedMsg, bool) {
+// raw context-occupancy token count of sessionID's conversation. Splitting it
+// out lets the live streaming path (OnUsage, fired per LLM response mid-turn)
+// surface the budget without waiting for the turn to finish and persist its
+// usage to the session state. The computation itself is the engine's one copy,
+// which sizes it by the model the conversation's session runs on.
+func (s *ChatSession) tokenBudgetMessageFromUsage(sessionID string, usage int) (TokenBudgetUpdatedMsg, bool) {
 	if s == nil || usage <= 0 {
 		return TokenBudgetUpdatedMsg{}, false
 	}
-	provider, model := "", ""
-	if s.runner() != nil {
-		provider, model = run.PrimaryModel(s.runner())
-	}
-	limits, _ := llm.Lookup(provider, model)
-	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: s.compactExplicitLimit()})
-	if budget.PercentLeft <= 0 && budget.TokenUsage <= 0 {
+	payload, ok := run.ContextBudget(s.runner(), sessionID, nil, usage)
+	if !ok {
 		return TokenBudgetUpdatedMsg{}, false
 	}
-	return TokenBudgetUpdatedMsg{
-		Model:                budget.Model,
-		TokenUsage:           budget.TokenUsage,
-		PercentLeft:          budget.PercentLeft,
-		ContextWindow:        budget.ContextWindow,
-		EffectiveWindow:      budget.EffectiveContextWindow,
-		AutoCompactThreshold: budget.AutoCompactThreshold,
-	}, true
+	return tokenBudgetMsgFromPayload(payload), true
 }
 
 // tokenBudgetResetMessage builds the composer-footer budget message for a freshly
@@ -1219,36 +1259,40 @@ func (s *ChatSession) tokenBudgetMessageFromUsage(usage int) (TokenBudgetUpdated
 // tokenBudgetMessageFromUsage, it does not early-return on usage 0: a clear must
 // actively push the footer back to full. It returns false only when the model is
 // unknown to the catalog (no context window to render).
-func (s *ChatSession) tokenBudgetResetMessage() (TokenBudgetUpdatedMsg, bool) {
+func (s *ChatSession) tokenBudgetResetMessage(sessionID string) (TokenBudgetUpdatedMsg, bool) {
 	if s == nil {
 		return TokenBudgetUpdatedMsg{}, false
 	}
-	provider, model := "", ""
-	if s.runner() != nil {
-		provider, model = run.PrimaryModel(s.runner())
-	}
-	limits, _ := llm.Lookup(provider, model)
-	budget := state.CalculateTokenBudgetWithOptions(0, model, limits, state.TokenBudgetOptions{ExplicitLimit: s.compactExplicitLimit()})
-	if budget.ContextWindow <= 0 {
+	payload, ok := run.ContextBudget(s.runner(), sessionID, nil, 0)
+	if !ok {
 		return TokenBudgetUpdatedMsg{}, false
 	}
+	return tokenBudgetMsgFromPayload(payload), true
+}
+
+// tokenBudgetMsgFromPayload is the terminal's message form of the engine's
+// budget payload — the same numbers, tagged with the agent whose context they
+// measure so the reducer never confuses a subagent's gauge with the primary
+// agent's.
+func tokenBudgetMsgFromPayload(payload event.TokenBudgetUpdatedPayload) TokenBudgetUpdatedMsg {
 	return TokenBudgetUpdatedMsg{
-		Model:                budget.Model,
-		TokenUsage:           0,
-		PercentLeft:          budget.PercentLeft,
-		ContextWindow:        budget.ContextWindow,
-		EffectiveWindow:      budget.EffectiveContextWindow,
-		AutoCompactThreshold: budget.AutoCompactThreshold,
-	}, true
+		AgentID:              payload.AgentID,
+		Model:                payload.Model,
+		TokenUsage:           payload.TokenUsage,
+		PercentLeft:          payload.PercentLeft,
+		ContextWindow:        payload.ContextWindow,
+		EffectiveWindow:      payload.EffectiveWindow,
+		AutoCompactThreshold: payload.AutoCompactThreshold,
+	}
 }
 
 // SurfaceComposerTokenStats is the footer's budget for a context holding
 // usage tokens — the configured auto-compact limit included — so the footer
 // reads the same at startup, on resume and after every response.
-func (s *ChatSession) SurfaceComposerTokenStats(usage int) ComposerTokenStats {
-	msg, ok := s.tokenBudgetResetMessage()
+func (s *ChatSession) SurfaceComposerTokenStats(sessionID string, usage int) ComposerTokenStats {
+	msg, ok := s.tokenBudgetResetMessage(sessionID)
 	if usage > 0 {
-		msg, ok = s.tokenBudgetMessageFromUsage(usage)
+		msg, ok = s.tokenBudgetMessageFromUsage(sessionID, usage)
 	}
 	if !ok {
 		return ComposerTokenStats{}
@@ -1286,4 +1330,9 @@ func completeTurn(startedAt time.Time) turnCompletion {
 		FinishedAt: finishedAt,
 		Duration:   duration,
 	}
+}
+
+// runEnd is the completion as the run's clock the transcript stamps.
+func (c turnCompletion) runEnd() turn.RunEnd {
+	return turn.RunEnd{StartedAt: c.StartedAt, FinishedAt: c.FinishedAt, Worked: c.Duration}
 }

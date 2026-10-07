@@ -3,6 +3,7 @@ package run
 
 import (
 	"context"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,9 @@ const (
 type TurnInputEntry struct {
 	Mode  TurnInputMode
 	Parts []llm.ContentPart
+	// Seq is the queue's shared enqueue clock, carried into the runtime so the
+	// queue can reconcile its own lanes when the runtime reports a delivery.
+	Seq int
 }
 
 type TurnInputRuntime struct {
@@ -33,12 +37,18 @@ func NewTurnInputRuntime() *TurnInputRuntime {
 }
 
 func (r *TurnInputRuntime) Enqueue(mode TurnInputMode, parts []llm.ContentPart) {
-	if r == nil || len(parts) == 0 {
+	r.enqueueEntry(TurnInputEntry{Mode: mode, Parts: parts})
+}
+
+// enqueueEntry stamps the entry with the shared clock before it joins the
+// runtime's pending list.
+func (r *TurnInputRuntime) enqueueEntry(entry TurnInputEntry) {
+	if r == nil || len(entry.Parts) == 0 {
 		return
 	}
-	cloned := append([]llm.ContentPart(nil), parts...)
+	cloned := append([]llm.ContentPart(nil), entry.Parts...)
 	r.mu.Lock()
-	r.pending = append(r.pending, TurnInputEntry{Mode: mode, Parts: cloned})
+	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq})
 	r.mu.Unlock()
 }
 
@@ -69,6 +79,7 @@ func (r *TurnInputRuntime) takeSteers(ctx context.Context) []TurnInputEntry {
 			out = append(out, TurnInputEntry{
 				Mode:  entry.Mode,
 				Parts: append([]llm.ContentPart(nil), entry.Parts...),
+				Seq:   entry.Seq,
 			})
 			continue
 		}
@@ -232,6 +243,7 @@ func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {
 		out = append(out, TurnInputEntry{
 			Mode:  entry.Mode,
 			Parts: append([]llm.ContentPart(nil), entry.Parts...),
+			Seq:   entry.Seq,
 		})
 	}
 	r.pending = nil
@@ -282,6 +294,7 @@ func (r *TurnInputRuntime) Snapshot() []TurnInputEntry {
 		out = append(out, TurnInputEntry{
 			Mode:  entry.Mode,
 			Parts: append([]llm.ContentPart(nil), entry.Parts...),
+			Seq:   entry.Seq,
 		})
 	}
 	return out
@@ -332,20 +345,6 @@ func TurnInputRuntimeFromContext(ctx context.Context) *TurnInputRuntime {
 	return rt
 }
 
-// WithoutTurnInputRuntime returns a context whose TurnInputRuntime slot is
-// cleared. Subagents inherit the primary agent's context (and therefore its
-// TurnInputRuntime), but steers enqueued by the user target the primary
-// agent's loop — a subagent that drains them would both steal messages meant
-// for the parent and render them prematurely in the transcript (the change
-// hook fires on drain). Strip the runtime at every subagent entry point so
-// the subagent's toolOrchestrationLLM never drains the parent's queue.
-func WithoutTurnInputRuntime(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return context.WithValue(ctx, turnInputRuntimeCtxKey{}, (*TurnInputRuntime)(nil))
-}
-
 // QueuePreview is the transport-neutral view of queued turn input.
 type QueuePreview struct {
 	Steers   []string
@@ -358,46 +357,132 @@ func (p QueuePreview) Visible() bool {
 	return len(p.Steers) > 0 || len(p.Rejected) > 0 || len(p.FollowUp) > 0
 }
 
-// InputQueue owns one turn's steer and follow-up queues.
+// InputQueue is the queue semantics one conversation's user input follows:
+// what steers the active turn, what was refused and waits as a rejected
+// steer, what waits as an ordinary follow-up, and what comes back when a
+// turn ends. The TUI's behavior is the spec (plan 004): one shared enqueue
+// clock orders every message across the three lanes, recall picks the newest
+// by that clock, and the boundary a turn ended on decides what is sent next
+// versus restored to the composer. Surfaces render the preview and merge
+// their own Payload; they never pick among queued messages themselves.
+//
+// The queue belongs to the conversation; the steer runtime belongs to the
+// turn. Attach connects this turn's runtime at the turn's start and Detach
+// retires it at the turn's end, so input queued for one turn can never be
+// delivered into the next: the next turn attaches a fresh runtime, and a
+// steer that arrives while no runtime is attached is refused into the
+// rejected lane.
 type InputQueue struct {
-	mu       sync.Mutex
-	rt       *TurnInputRuntime
-	followUp []Input
-	quiet    bool
-	hook     func()
+	mu        sync.Mutex
+	rt        *TurnInputRuntime
+	steers    []Input // undelivered steers in enqueue order; mirrors the attached runtime while one is attached
+	rejected  []Input // steers the run refused or that outlived their turn
+	followUp  []Input // ordinary follow-ups
+	delivered []Input // steers the model received, waiting for the surface to render them
+	seq       int
+	hook      func()
 }
 
-// NewInputQueue creates an empty turn input queue.
+// NewInputQueue creates an empty, detached conversation queue.
 func NewInputQueue() *InputQueue {
-	return NewInputQueueWithRuntime(nil)
+	return &InputQueue{}
 }
 
-// NewInputQueueWithRuntime creates a queue around rt. Nil creates a new runtime.
-func NewInputQueueWithRuntime(rt *TurnInputRuntime) *InputQueue {
-	if rt == nil {
-		rt = NewTurnInputRuntime()
+// Attach connects the queue to this turn's steer runtime: steers enqueued
+// while it is attached reach the model at that turn's tool boundaries.
+// Attach also retires a runtime still connected by a turn that ended without
+// Detach, the same way Detach does.
+func (q *InputQueue) Attach(rt *TurnInputRuntime) {
+	if q == nil || rt == nil {
+		return
 	}
-	q := &InputQueue{rt: rt}
-	q.rt.AddChangeHook(func([]TurnInputEntry) {
-		q.mu.Lock()
-		quiet, hook := q.quiet, q.hook
-		q.mu.Unlock()
-		if !quiet && hook != nil {
-			hook()
-		}
-	})
-	return q
+	q.mu.Lock()
+	q.rt = rt
+	hook := q.hook
+	q.mu.Unlock()
+	rt.AddChangeHook(q.steersDelivered)
+	if hook != nil {
+		hook()
+	}
 }
 
-// Runtime returns the model-facing steer runtime.
+// Detach retires the attached turn's runtime. Undelivered steers stay in the
+// queue — the turn's boundary decides what follows them — but without a
+// runtime they can no longer reach any model: the next turn attaches a fresh
+// runtime, so a steer queued for the ended turn is never delivered into the
+// next one.
+func (q *InputQueue) Detach() {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	q.rt = nil
+	hook := q.hook
+	q.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+// steersDelivered reconciles the steer lane with what the attached runtime
+// just handed to the model, moving those steers onto the delivered list so
+// the surface can render them as the messages they are, whole (Payload
+// included).
+func (q *InputQueue) steersDelivered(entries []TurnInputEntry) {
+	if q == nil || len(entries) == 0 {
+		return
+	}
+	q.mu.Lock()
+	var delivered []Input
+	for _, entry := range entries {
+		if entry.Mode != TurnInputModeSteer {
+			continue
+		}
+		for i, in := range q.steers {
+			if in.Seq != entry.Seq {
+				continue
+			}
+			q.steers = append(q.steers[:i], q.steers[i+1:]...)
+			delivered = append(delivered, in)
+			break
+		}
+	}
+	q.delivered = append(q.delivered, delivered...)
+	hook := q.hook
+	q.mu.Unlock()
+	if len(delivered) > 0 && hook != nil {
+		hook()
+	}
+}
+
+// TakeDelivered hands the surface the steers the model has received, in
+// delivery order, so it can render them into the transcript instead of
+// letting them silently leave the queue preview.
+func (q *InputQueue) TakeDelivered() []Input {
+	if q == nil {
+		return nil
+	}
+	q.mu.Lock()
+	out := q.delivered
+	q.delivered = nil
+	q.mu.Unlock()
+	return out
+}
+
+// Runtime returns the steer runtime attached to the current turn, or nil
+// between turns.
 func (q *InputQueue) Runtime() *TurnInputRuntime {
 	if q == nil {
 		return nil
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	return q.rt
 }
 
-// SetChangeHook runs after a steer is delivered to the model.
+// SetChangeHook runs after the queue changes: a steer enqueued, refused,
+// recalled or delivered, a follow-up queued, or a boundary consuming
+// entries. Adapters use it to republish the queue preview.
 func (q *InputQueue) SetChangeHook(hook func()) {
 	if q == nil {
 		return
@@ -407,175 +492,298 @@ func (q *InputQueue) SetChangeHook(hook func()) {
 	q.mu.Unlock()
 }
 
-// Steer queues a text-only message for the next model boundary. A message
-// that attaches files or workspace images waits for the next turn instead: a
-// steer reaches the model as bare parts, and could not be handed back to its
-// composer with what it attached.
+// Steer queues a message to reach the model at the attached turn's next tool
+// boundary. Any message with parts steers — what it attaches travels in
+// Payload, so it can still be handed back whole; the old refusal of attached
+// messages existed only because a steer could not carry them back, and the
+// TUI (the spec) has always steered them. A queue with no attached runtime
+// has no turn to deliver into: the message is kept as a rejected steer
+// rather than waiting for a turn it was never queued for.
 func (q *InputQueue) Steer(in Input) bool {
-	if q == nil || q.rt == nil {
+	if q == nil {
 		return false
 	}
-	text := cleanInputText(in)
-	if text == "" {
-		text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
+	in = cloneInput(in)
+	in.Text = cleanInputText(in)
+	if in.Text == "" {
+		in.Text = strings.Join(strings.Fields(llm.TextContent(in.Parts...)), " ")
 	}
-	if (text == "" && len(in.Parts) == 0) || len(cleanAttachments(in.Attachments)) > 0 || len(cleanAttachments(in.MentionImages)) > 0 {
+	in.Attachments = cleanAttachments(in.Attachments)
+	in.MentionImages = cleanAttachments(in.MentionImages)
+	if in.Text == "" && len(in.Parts) == 0 && len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
+		return false
+	}
+	q.mu.Lock()
+	q.seq++
+	in.Seq = q.seq
+	if q.rt == nil {
+		in.Rejected = true
+		q.rejected = append(q.rejected, in)
+		hook := q.hook
+		q.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		return false
 	}
 	parts := append([]llm.ContentPart(nil), in.Parts...)
 	if len(parts) == 0 {
-		parts = []llm.ContentPart{llm.Text(text)}
+		parts = []llm.ContentPart{llm.Text(in.Text)}
 	}
-	q.rt.Enqueue(TurnInputModeSteer, parts)
+	q.steers = append(q.steers, in)
+	q.rt.enqueueEntry(TurnInputEntry{Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq})
+	hook := q.hook
+	q.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return true
 }
 
-// FollowUp queues an input for the next turn.
+// FollowUp queues an input for after the current turn. An input marked
+// Rejected is a steer the active run refused — an earlier failed delivery —
+// and is kept in its own lane so the boundary sends it first.
 func (q *InputQueue) FollowUp(in Input) bool {
 	if q == nil {
 		return false
 	}
+	in = cloneInput(in)
 	in.Text = cleanInputText(in)
 	in.Attachments = cleanAttachments(in.Attachments)
 	in.MentionImages = cleanAttachments(in.MentionImages)
-	if in.Text == "" && len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
+	if in.Text == "" && len(in.Attachments) == 0 && len(in.MentionImages) == 0 && len(in.Parts) == 0 {
 		return false
 	}
 	q.mu.Lock()
-	q.followUp = append(q.followUp, cloneInput(in))
+	q.seq++
+	in.Seq = q.seq
+	if in.Rejected {
+		q.rejected = append(q.rejected, in)
+	} else {
+		q.followUp = append(q.followUp, in)
+	}
+	hook := q.hook
 	q.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return true
 }
 
-// RejectSteers moves undelivered steers behind the current turn.
-func (q *InputQueue) RejectSteers() QueuePreview {
-	if q == nil || q.rt == nil {
-		return QueuePreview{}
-	}
-	q.mu.Lock()
-	q.quiet = true
-	q.mu.Unlock()
-	entries := q.rt.DrainSteers()
-	q.mu.Lock()
-	q.quiet = false
-	for _, entry := range entries {
-		text := strings.Join(strings.Fields(llm.TextContent(entry.Parts...)), " ")
-		if text != "" {
-			q.followUp = append(q.followUp, Input{Text: text, Rejected: true})
+type queueLane int
+
+const (
+	laneSteer queueLane = iota
+	laneRejected
+	laneFollowUp
+)
+
+// newestLocked returns the lane and index of the highest-sequence message.
+// Each lane is append-only in sequence order, so only its tail has to be
+// considered.
+func (q *InputQueue) newestLocked(skipSteers bool) (queueLane, int) {
+	best := queueLane(-1)
+	bestIdx, bestSeq := -1, 0
+	consider := func(lane queueLane, idx, seq int) {
+		if best < 0 || seq > bestSeq {
+			best, bestIdx, bestSeq = lane, idx, seq
 		}
 	}
-	out := q.previewLocked()
-	q.mu.Unlock()
-	return out
+	if !skipSteers && len(q.steers) > 0 {
+		consider(laneSteer, len(q.steers)-1, q.steers[len(q.steers)-1].Seq)
+	}
+	if len(q.rejected) > 0 {
+		consider(laneRejected, len(q.rejected)-1, q.rejected[len(q.rejected)-1].Seq)
+	}
+	if len(q.followUp) > 0 {
+		consider(laneFollowUp, len(q.followUp)-1, q.followUp[len(q.followUp)-1].Seq)
+	}
+	return best, bestIdx
 }
 
-// PopLatest returns the newest editable input. Pending steers take priority.
-func (q *InputQueue) PopLatest() (Input, QueuePreview, bool) {
+// Recall pulls the most recently queued message back out for editing.
+// "Most recently queued" is decided by the shared enqueue clock, not by lane
+// precedence: the lanes are separate FIFOs, so picking one of them first
+// would recall an older message whenever the newest happened to land in
+// another lane. A pending steer also lives in the attached runtime, so that
+// copy is retracted first; a retraction that fails means the run already
+// delivered it to the model — and since the runtime drains FIFO, every older
+// steer is gone too — so the whole steer lane is skipped rather than handing
+// back an editable copy of a message that is being answered.
+func (q *InputQueue) Recall() (Input, bool) {
 	if q == nil {
-		return Input{}, QueuePreview{}, false
-	}
-	if q.rt != nil {
-		if parts, ok := q.rt.RetractLastSteer(); ok {
-			return Input{Text: strings.Join(strings.Fields(llm.TextContent(parts...)), " "), Parts: parts}, q.Preview(), true
-		}
+		return Input{}, false
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	for _, rejected := range []bool{false, true} {
-		for i := len(q.followUp) - 1; i >= 0; i-- {
-			if q.followUp[i].Rejected != rejected {
+	skipSteers := false
+	for {
+		lane, idx := q.newestLocked(skipSteers)
+		if lane < 0 {
+			q.mu.Unlock()
+			return Input{}, false
+		}
+		var laneEntries *[]Input
+		switch lane {
+		case laneSteer:
+			if q.rt == nil {
+				skipSteers = true
 				continue
 			}
-			in := q.followUp[i]
-			q.followUp = append(q.followUp[:i], q.followUp[i+1:]...)
-			return cloneInput(in), q.previewLocked(), true
+			if _, ok := q.rt.RetractLastSteer(); !ok {
+				skipSteers = true
+				continue
+			}
+			laneEntries = &q.steers
+		case laneRejected:
+			laneEntries = &q.rejected
+		default:
+			laneEntries = &q.followUp
 		}
+		in := (*laneEntries)[idx]
+		*laneEntries = append((*laneEntries)[:idx], (*laneEntries)[idx+1:]...)
+		hook := q.hook
+		q.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		return in, true
 	}
-	return Input{}, q.previewLocked(), false
 }
 
-// RetractSteer removes the latest steer that has not reached the model.
-func (q *InputQueue) RetractSteer() (Input, bool) {
-	if q == nil || q.rt == nil {
-		return Input{}, false
-	}
-	parts, ok := q.rt.RetractLastSteer()
-	if !ok {
-		return Input{}, false
-	}
-	return Input{Text: strings.Join(strings.Fields(llm.TextContent(parts...)), " "), Parts: parts}, true
-}
+// Boundary is how one turn of a conversation ended, as far as its queue is
+// concerned.
+type Boundary int
 
-// DrainSteers removes queued steers in FIFO order.
-func (q *InputQueue) DrainSteers() []Input {
-	if q == nil || q.rt == nil {
-		return nil
-	}
-	entries := q.rt.DrainSteers()
-	out := make([]Input, 0, len(entries))
-	for _, entry := range entries {
-		out = append(out, Input{
-			Text:  strings.Join(strings.Fields(llm.TextContent(entry.Parts...)), " "),
-			Parts: append([]llm.ContentPart(nil), entry.Parts...),
-		})
-	}
-	return out
-}
+const (
+	// BoundaryCompleted means the turn ran to its end.
+	BoundaryCompleted Boundary = iota
+	// BoundaryInterruptToSend is an interrupt issued precisely to flush the
+	// steers queued behind it: they are sent now, as one fresh turn.
+	BoundaryInterruptToSend
+	// BoundaryInterrupted is any other interruption or cancellation.
+	BoundaryInterrupted
+)
 
-// PopNext returns rejected steers as one input before ordinary follow-ups.
-func (q *InputQueue) PopNext() (Input, bool) {
+// Next decides what follows a turn that ended at b. Send is the input to run
+// as the next turn, listed in engine order for the surface to merge into one
+// message; Restore is every entry that goes back to the composer instead, in
+// the order they were written. At most one of the two is non-empty.
+func (q *InputQueue) Next(b Boundary) (send, restore []Input) {
 	if q == nil {
-		return Input{}, false
+		return nil, nil
 	}
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.followUp) == 0 {
-		return Input{}, false
-	}
-	// Rejected steers merge into one message, and everything each one
-	// attached travels with it.
-	var texts []string
-	merged := Input{Rejected: true}
-	rest := make([]Input, 0, len(q.followUp))
-	for _, in := range q.followUp {
-		if !in.Rejected {
-			rest = append(rest, in)
-			continue
+	changed := false
+	switch b {
+	case BoundaryCompleted:
+		// Rejected steers are an earlier failed delivery, so they go first;
+		// then the steers the ended turn never delivered; then the first
+		// queued follow-up. The caller returns at the next boundary until
+		// both are empty, which is what drains the queue one turn at a time.
+		if len(q.rejected) > 0 {
+			send, q.rejected, changed = q.rejected, nil, true
+			break
 		}
-		if in.Text != "" {
-			texts = append(texts, in.Text)
+		if len(q.steers) > 0 {
+			q.consumeSteersLocked()
+			send, q.steers, changed = q.steers, nil, true
+			break
 		}
-		merged.Attachments = append(merged.Attachments, in.Attachments...)
-		merged.MentionImages = append(merged.MentionImages, in.MentionImages...)
+		if len(q.followUp) > 0 {
+			send = q.followUp[:1]
+			q.followUp = q.followUp[1:]
+			changed = true
+		}
+	case BoundaryInterruptToSend:
+		if len(q.steers) > 0 {
+			q.consumeSteersLocked()
+			send, q.steers, changed = q.steers, nil, true
+		}
+	case BoundaryInterrupted:
+		// Everything goes back to the composer; the surface appends its own
+		// live draft after these, in write order.
+		restore = append(restore, q.rejected...)
+		restore = append(restore, q.steers...)
+		q.consumeSteersLocked()
+		restore = append(restore, q.followUp...)
+		q.rejected, q.steers, q.followUp = nil, nil, nil
+		changed = len(restore) > 0
 	}
-	if len(rest) < len(q.followUp) {
-		q.followUp = rest
-		merged.Text = strings.Join(texts, "\n\n")
-		return merged, true
+	hook := q.hook
+	q.mu.Unlock()
+	if changed && hook != nil {
+		hook()
 	}
-	in := q.followUp[0]
-	q.followUp = q.followUp[1:]
-	return cloneInput(in), true
+	return send, restore
 }
 
-// Drain empties the queue: undelivered steers merged into one message first,
-// then queued messages in the order they were sent.
-func (q *InputQueue) Drain() []Input {
+// consumeSteersLocked removes the undelivered steers from the attached
+// runtime without reporting them as delivered: a boundary is consuming them,
+// so they must not also reach the model through the runtime they were queued
+// for.
+func (q *InputQueue) consumeSteersLocked() {
+	if q.rt != nil {
+		q.rt.takeSteers(context.Background())
+	}
+}
+
+// Discard empties every lane and returns how many messages were dropped.
+// Pending steers are retracted from the attached runtime first: clearing
+// only the queue would leave the runtime free to hand them to the model.
+// Steers already delivered cannot be retracted and are not counted — the
+// model has them, so they are not lost.
+func (q *InputQueue) Discard() int {
+	if q == nil {
+		return 0
+	}
+	q.mu.Lock()
+	dropped := 0
+	for len(q.steers) > 0 && q.rt != nil {
+		if _, ok := q.rt.RetractLastSteer(); !ok {
+			break
+		}
+		q.steers = q.steers[:len(q.steers)-1]
+		dropped++
+	}
+	dropped += len(q.rejected) + len(q.followUp)
+	q.steers, q.rejected, q.followUp, q.delivered = nil, nil, nil, nil
+	hook := q.hook
+	q.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return dropped
+}
+
+// TakeAll removes every queued entry and returns them ordered by the shared
+// enqueue clock — the order the user wrote them. Steers are retracted from
+// the attached runtime first, so nothing that left the queue can still reach
+// the model. The withdrawal path merges them with the withdrawn message and
+// the live draft into one editable composer payload.
+func (q *InputQueue) TakeAll() []Input {
 	if q == nil {
 		return nil
 	}
-	q.RejectSteers()
-	var drained []Input
-	for {
-		in, ok := q.PopNext()
-		if !ok {
-			return drained
-		}
-		drained = append(drained, in)
+	q.mu.Lock()
+	q.consumeSteersLocked()
+	all := make([]Input, 0, len(q.steers)+len(q.rejected)+len(q.followUp))
+	all = append(all, q.steers...)
+	all = append(all, q.rejected...)
+	all = append(all, q.followUp...)
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	q.steers, q.rejected, q.followUp, q.delivered = nil, nil, nil, nil
+	hook := q.hook
+	q.mu.Unlock()
+	if len(all) > 0 && hook != nil {
+		hook()
 	}
+	return all
 }
 
-// Preview returns a snapshot of queued input.
+// Preview returns a snapshot of queued input. Each entry's text is its
+// surface's preview form: the TUI sets Text to its composer display text
+// (keeping "[Image #1]"-style placeholders); the model-facing content is in
+// Parts.
 func (q *InputQueue) Preview() QueuePreview {
 	if q == nil {
 		return QueuePreview{}
@@ -587,22 +795,18 @@ func (q *InputQueue) Preview() QueuePreview {
 
 func (q *InputQueue) previewLocked() QueuePreview {
 	out := QueuePreview{Steers: []string{}, Rejected: []string{}, FollowUp: []string{}}
-	if q.rt != nil {
-		for _, entry := range q.rt.Snapshot() {
-			text := strings.Join(strings.Fields(llm.TextContent(entry.Parts...)), " ")
-			if entry.Mode == TurnInputModeSteer && text != "" {
-				out.Steers = append(out.Steers, text)
-			}
+	for _, in := range q.steers {
+		if text := previewInput(in); text != "" {
+			out.Steers = append(out.Steers, text)
+		}
+	}
+	for _, in := range q.rejected {
+		if text := previewInput(in); text != "" {
+			out.Rejected = append(out.Rejected, text)
 		}
 	}
 	for _, in := range q.followUp {
-		text := previewInput(in)
-		if text == "" {
-			continue
-		}
-		if in.Rejected {
-			out.Rejected = append(out.Rejected, text)
-		} else {
+		if text := previewInput(in); text != "" {
 			out.FollowUp = append(out.FollowUp, text)
 		}
 	}

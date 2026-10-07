@@ -1,0 +1,14 @@
+id: nil
+display_name: nil
+languages: [Nix]
+priority: 100
+command: nil
+extension_to_language: {.nix: nix}
+root_markers: [flake.nix, default.nix, shell.nix]
+detect:
+  version_args: [--version]
+install:
+  - requires: nix
+    argv: [nix, profile, install, "nixpkgs#nil"]
+readiness: none
+notes: "Install with nix, or build it from the oxalica/nil repository."

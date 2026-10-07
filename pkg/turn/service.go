@@ -19,8 +19,8 @@ type ChildRunStore interface {
 
 type SessionRepository interface {
 	Ensure(ctx context.Context, id string, title string) error
+	EnsureAt(ctx context.Context, id, title string, birth state.SessionBirth) error
 	SetTitle(ctx context.Context, id string, title string) error
-	ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error)
 	ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error)
 }
 

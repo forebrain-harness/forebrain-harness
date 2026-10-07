@@ -6,12 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -165,41 +165,6 @@ func TestHandleMCPServersV1MarksOfficialRegistryURLs(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Servers, 1)
 	require.Equal(t, true, body.Servers[0]["official_url"])
-}
-
-// /diff shows the diff of the project the session works in, the directory
-// /status names — not the agent's home workspace.
-func TestHandleDiffSlashShowsGitDiff(t *testing.T) {
-	home := t.TempDir()
-	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(home, "workspace"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(ws, "docs"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "docs", "plan.md"), []byte("old\n"), 0o600))
-	runInDirGateway(t, ws, "git", "init")
-	runInDirGateway(t, ws, "git", "config", "user.name", "Test")
-	runInDirGateway(t, ws, "git", "config", "user.email", "test@example.com")
-	runInDirGateway(t, ws, "git", "add", ".")
-	runInDirGateway(t, ws, "git", "commit", "-m", "init")
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "docs", "plan.md"), []byte("slash diff\n"), 0o600))
-
-	s := &Server{
-		Home:   home,
-		Runner: &run.Runner{Deps: &run.Deps{Home: home, ProjectRoot: ws}},
-	}
-	reply, handled := s.HandleDiffSlash("s1", "webchat", nil)
-	require.True(t, handled)
-	require.Contains(t, reply, "diff --git")
-	require.Contains(t, reply, "docs/plan.md")
-	require.Contains(t, reply, "+slash diff")
-	require.Contains(t, reply, "-old")
-}
-
-func runInDirGateway(t *testing.T, dir string, name string, args ...string) {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
 }
 
 // /model on the web offers the agent's configured models as a picker, the one
@@ -727,4 +692,43 @@ func TestGatewaySurfaceNamesEachSessionsOwnModel(t *testing.T) {
 		require.True(t, handled)
 		require.Contains(t, reply, tc.want, "session %s status model", tc.sid)
 	}
+}
+
+// /lsp on the web renders the same markdown the terminal's text fallback
+// renders, and a gateway without a control plane says unavailable.
+func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"}}},
+	}}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	reply, handled := s.HandleLSPSlash("s1", "webchat")
+	require.True(t, handled)
+	require.Contains(t, reply, "Language servers · 1 configured, 1 enabled")
+	require.Contains(t, reply, "gopls")
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	reply, handled = bare.HandleLSPSlash("s1", "webchat")
+	require.True(t, handled)
+	require.Equal(t, "lsp: unavailable", reply)
+}
+
+// /status carries the Language servers row when a server is enabled, exactly
+// as the terminal panel does.
+func TestHandleStatusSlashIncludesLSPRow(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{
+			{ID: "gopls", Enabled: true, State: event.LSPStateReady},
+			{ID: "pyright", Enabled: true, State: event.LSPStateIndexing},
+		},
+	}}
+	s := &Server{
+		Home:   t.TempDir(),
+		Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}},
+		Env:    &process.Environment{Deps: run.Deps{AppCfg: &appcfg.Root{}}},
+	}
+	reply, handled := s.HandleStatusSlash("s1", "webchat", false)
+	require.True(t, handled)
+	require.Contains(t, reply, "Language servers: 1 running, 1 indexing · /lsp")
 }

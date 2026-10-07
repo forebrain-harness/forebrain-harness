@@ -361,12 +361,16 @@ func TestHandleChatSessionContextRejectsSlashTextResponse(t *testing.T) {
 }
 
 type stubGatewaySessionStore struct {
-	summaries []state.SessionSummary
-	turns     []state.Message
-	created   []state.SessionSummary
+	turns   []state.Message
+	created []state.SessionSummary
 }
 
 func (s *stubGatewaySessionStore) Ensure(ctx context.Context, id string, title string) error {
+	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	return nil
+}
+
+func (s *stubGatewaySessionStore) EnsureAt(ctx context.Context, id, title string, birth state.SessionBirth) error {
 	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
 	return nil
 }
@@ -376,13 +380,6 @@ func (s *stubGatewaySessionStore) SetTitle(ctx context.Context, id string, title
 	return nil
 }
 
-func (s stubGatewaySessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error) {
-	if limit <= 0 || limit >= len(s.summaries) {
-		return append([]state.SessionSummary(nil), s.summaries...), nil
-	}
-	return append([]state.SessionSummary(nil), s.summaries[:limit]...), nil
-}
-
 func (s stubGatewaySessionStore) ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error) {
 	if limit <= 0 || limit >= len(s.turns) {
 		return append([]state.Message(nil), s.turns...), nil
@@ -390,13 +387,11 @@ func (s stubGatewaySessionStore) ListRecentMessages(ctx context.Context, session
 	return append([]state.Message(nil), s.turns[:limit]...), nil
 }
 
-func TestHandleChatSessionsUsesAppCore(t *testing.T) {
-	core := turn.New(turn.WithSessionStore(&stubGatewaySessionStore{
-		summaries: []state.SessionSummary{
-			{ID: "s2", Title: "Second", UpdatedAt: 1710000000},
-			{ID: "s1", Title: "First", UpdatedAt: 1700000000},
-		},
-	}))
+// The chat-session list reads the session store itself, not the app core's
+// in-memory view: a server without a store — even one with a core — lists
+// empty, the same answer the drawer gets when sessions are disabled.
+func TestHandleChatSessionsWithoutAStoreListsEmpty(t *testing.T) {
+	core := turn.New(turn.WithSessionStore(&stubGatewaySessionStore{}))
 	s := &Server{Core: core}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil)
@@ -405,18 +400,10 @@ func TestHandleChatSessionsUsesAppCore(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	var resp struct {
-		Records []struct {
-			ID         string `json:"id"`
-			Title      string `json:"title"`
-			CreateTime string `json:"create_time"`
-			UpdateTime string `json:"update_time"`
-		} `json:"records"`
+		Records []map[string]any `json:"records"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	require.Len(t, resp.Records, 2)
-	require.Equal(t, "s2", resp.Records[0].ID)
-	require.Equal(t, "Second", resp.Records[0].Title)
-	require.Equal(t, time.Unix(1710000000, 0).UTC().Format(time.RFC3339), resp.Records[0].UpdateTime)
+	require.Empty(t, resp.Records)
 }
 
 func TestHandleChatMessagesUsesAppCore(t *testing.T) {
@@ -424,7 +411,7 @@ func TestHandleChatMessagesUsesAppCore(t *testing.T) {
 		turns: []state.Message{
 			{Role: "user", Content: "hello"},
 			{Role: "system", Content: "hidden foreground system"},
-			{Role: "assistant", Content: "world", RunStartedAtMs: 1778493600000, RunFinishedAtMs: 1778494149000, RunWorkedMs: 549000},
+			{RunID: "r1", Role: "assistant", Content: "world", RunStartedAtMs: 1778493600000, RunFinishedAtMs: 1778494149000, RunWorkedMs: 549000},
 		},
 	}))
 	s := &Server{Core: core}
@@ -443,12 +430,14 @@ func TestHandleChatMessagesUsesAppCore(t *testing.T) {
 		WorkedDurationMs int64  `json:"worked_duration_ms"`
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	require.Len(t, resp, 2)
+	require.Len(t, resp, 3)
 	require.Equal(t, "assistant", resp[1].Role)
 	require.Equal(t, "world", resp[1].Content)
-	require.Equal(t, "2026-05-11T10:00:00Z", resp[1].RunStartedAt)
-	require.Equal(t, "2026-05-11T10:09:09Z", resp[1].RunFinishedAt)
-	require.Equal(t, int64(549000), resp[1].WorkedDurationMs)
+	// The run closes with its own worked row, carrying the run's clock.
+	require.Equal(t, "worked", resp[2].Role)
+	require.Equal(t, "2026-05-11T10:00:00Z", resp[2].RunStartedAt)
+	require.Equal(t, "2026-05-11T10:09:09Z", resp[2].RunFinishedAt)
+	require.Equal(t, int64(549000), resp[2].WorkedDurationMs)
 }
 
 // The runtime writes user-role rows nobody typed - the environment context

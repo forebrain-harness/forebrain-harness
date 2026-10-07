@@ -90,3 +90,35 @@ func TestResolveRegisteredContextTrustsItsOwnRoot(t *testing.T) {
 		t.Fatalf("expected IsTrusted after MarkTrusted on the registered root")
 	}
 }
+
+// A project's permission rules live at the root its runtime was given —
+// exactly that root — so a project registered inside a trusted checkout
+// neither reads nor writes the checkout's rules file.
+func TestProjectSettingsPathTakesTheProjectRootAsGiven(t *testing.T) {
+	home := t.TempDir()
+	checkout := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkTrusted(home, Project{Root: checkout}); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(checkout, "services", "api")
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if path, ok := ProjectSettingsPath(Paths{Home: home, ProjectRoot: inner}); ok {
+		t.Fatalf("a subdirectory without its own repository has no project rules, got %q", path)
+	}
+	path, ok := ProjectSettingsPath(Paths{Home: home, ProjectRoot: checkout})
+	if !ok {
+		t.Fatal("the trusted checkout itself keeps its rules")
+	}
+	canonical, err := CanonicalPath(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != filepath.Join(canonical, ".forebrain", "safety.json") {
+		t.Fatalf("rules path = %q", path)
+	}
+}

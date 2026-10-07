@@ -25,7 +25,7 @@ func Install(forebrainHome string) error {
 	if strings.TrimSpace(forebrainHome) == "" {
 		return fmt.Errorf("systemskills: empty forebrainHome")
 	}
-	dest := filepath.Join(forebrainHome, "skills", ".system")
+	dest := filepath.Join(forebrainHome, "skills", systemSkillsDirName)
 	markerPath := filepath.Join(dest, ".forebrain-system-skills.marker")
 
 	expected := Fingerprint()

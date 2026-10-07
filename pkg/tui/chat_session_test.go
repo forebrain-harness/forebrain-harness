@@ -1463,8 +1463,13 @@ func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Full Access for this session: "+mustPreset(t, safety.PresetFullAccess).Description, reply)
 
-	require.Equal(t, appcfg.SandboxModeDangerFullAccess, s.cfg().SandboxMode)
-	require.Equal(t, safety.ModeNever, s.runner().PermissionSnapshotForSession("s1").Mode)
+	// Both halves belong to s1 alone: the live config every other
+	// conversation runs under keeps the configured sandbox.
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	snap := s.runner().PermissionSnapshotForSession("s1")
+	require.Equal(t, safety.ModeNever, snap.Mode)
+	require.Equal(t, safety.ModeNever, snap.ApprovalPolicy.Mode)
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, safety.ConfigForSnapshot(s.cfg(), snap).SandboxMode)
 	_, current := s.PermissionPresets("s1")
 	require.Equal(t, safety.PresetFullAccess, current)
 	for _, call := range []struct {
@@ -1480,9 +1485,16 @@ func TestApplyPermissionPresetSetsSandboxAndApproval(t *testing.T) {
 		require.True(t, decision.BypassSandbox, call)
 	}
 
-	// Another session keeps asking: the approval half is scoped the way a
-	// mid-turn approval is, not applied process-wide.
-	require.Equal(t, safety.ModeOnRequest, s.runner().PermissionSnapshotForSession("s2").Mode)
+	// Another session keeps asking and keeps its sandbox: neither half is
+	// applied process-wide.
+	other := s.runner().PermissionSnapshotForSession("s2")
+	require.Equal(t, safety.ModeOnRequest, other.Mode)
+	require.Empty(t, other.SandboxMode)
+	_, otherCurrent := s.PermissionPresets("s2")
+	require.Equal(t, safety.PresetDefault, otherCurrent)
+	decision := s.runner().EvaluatePermissionForSession("s2", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", decision.Reason)
+	require.False(t, decision.BypassSandbox)
 
 	// Nothing was written to forebrain.yaml.
 	_, statErr := os.Stat(filepath.Join(home, "forebrain.yaml"))
@@ -1497,7 +1509,8 @@ func TestApplyPermissionPresetRejectsUnknownID(t *testing.T) {
 }
 
 // A preset is never written to forebrain.yaml, so a reload of that file must not
-// be able to hand the sandbox back to whatever the file still says.
+// be able to hand the session's sandbox back to whatever the file still says —
+// nor may the preset leak into the config the file is reloaded as.
 func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
@@ -1516,10 +1529,14 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 		Runner:  &run.Runner{Deps: &run.Deps{Home: home}},
 	}.session()
 
+	sessionSandbox := func() appcfg.SandboxMode {
+		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("s1")).SandboxMode
+	}
 	_, err := s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
 	require.NoError(t, err)
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
 	// The file changing under the session does not undo the choice either: an
 	// edit made elsewhere reaches the session through the same reload.
@@ -1530,14 +1547,17 @@ func TestApplyPermissionPresetSurvivesConfigReload(t *testing.T) {
 			"          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n",
 	), 0o600))
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeDangerFullAccess, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
+	decision := s.runner().EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", decision.Reason, "the session's read-only choice outranks the file's full access")
 
 	// Picking another preset is how the choice moves, and it moves both halves.
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetDefault)
 	require.NoError(t, err)
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
 	require.NoError(t, s.reloadConfigFromDisk())
-	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, sessionSandbox())
 	_, current := s.PermissionPresets("s1")
 	require.Equal(t, safety.PresetDefault, current)
 }
@@ -1589,14 +1609,18 @@ func TestApplyModelSelectionKeepsSessionPermissionPreset(t *testing.T) {
 
 	_, err = s.ApplyPermissionPreset("s1", safety.PresetReadOnly)
 	require.NoError(t, err)
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	sessionSandbox := func() appcfg.SandboxMode {
+		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("s1")).SandboxMode
+	}
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
 
 	reply := chooseInSession(t, s, "model", "openai / gpt-new").Reply
 	require.Equal(t, "Switched to openai / gpt-new.", reply)
 
 	// The model change landed as this session's own persisted selection and
-	// the preset is still the active sandbox.
-	require.Equal(t, appcfg.SandboxModeReadOnly, s.cfg().SandboxMode)
+	// the preset is still the session's sandbox.
+	require.Equal(t, appcfg.SandboxModeReadOnly, sessionSandbox())
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, s.cfg().SandboxMode)
 	require.Equal(t, "gpt-new", appcfg.PrimaryLLM(s.cfg().Agents.Definitions["main"]).Model)
 	require.Same(t, s.cfg(), s.runner().AppCfg)
 	sel, hasRow, selErr := s.sessStore().SessionModelSelection(context.Background(), "s1")
@@ -2084,32 +2108,6 @@ func TestOpenChatSessionWiresProjectContextPreHook(t *testing.T) {
 	require.Contains(t, out.SystemAddendum, "project_root: "+memory.ProjectRoot(projectRoot))
 }
 
-// /diff shows the diff of the project the session works in, the directory
-// /status names — not the agent's home workspace.
-func TestHandleDiffSlashShowsGitDiff(t *testing.T) {
-	home := t.TempDir()
-	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(home, "workspace"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "README.md"), []byte("old\n"), 0o600))
-	runInDir(t, ws, "git", "init")
-	runInDir(t, ws, "git", "config", "user.name", "Test")
-	runInDir(t, ws, "git", "config", "user.email", "test@example.com")
-	runInDir(t, ws, "git", "add", "README.md")
-	runInDir(t, ws, "git", "commit", "-m", "init")
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "README.md"), []byte("new\n"), 0o600))
-
-	s := sessionEnv{
-		Home:   home,
-		Runner: &run.Runner{Deps: &run.Deps{Home: home, ProjectRoot: ws}},
-	}.session()
-	reply, handled := s.HandleDiffSlash("s1", "cli", nil)
-	require.True(t, handled)
-	require.Contains(t, reply, "diff --git")
-	require.Contains(t, reply, "README.md")
-	require.Contains(t, reply, "+new")
-	require.Contains(t, reply, "-old")
-}
-
 func runInDir(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -2200,7 +2198,7 @@ body`), 0o600))
 	require.NoError(t, err)
 	require.Contains(t, out, "skill: demo")
 	require.Contains(t, out, "description: test skill")
-	require.Contains(t, out, "source: workspace")
+	require.Contains(t, out, "origin: Agent")
 	require.Contains(t, out, "allowed_tools: view bash")
 	require.NotContains(t, out, "available_actions:")
 }
@@ -5288,43 +5286,37 @@ func TestArrowStartsOnFirstOption_RichPickerFilterReset(t *testing.T) {
 // interrupted run restores queued follow-ups to the composer instead of
 // automatically submitting them.
 func TestBug2_InterruptedRunWithQueuedTurnsRestoresQueue(t *testing.T) {
-	state := &streamState{
-		sessionID: "s1",
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{
-				Text: "queued follow-up", Parts: []llm.ContentPart{llm.Text("queued follow-up")}, DisplayText: "queued follow-up",
-			}},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text: "queued follow-up", Parts: []llm.ContentPart{llm.Text("queued follow-up")}, DisplayText: "queued follow-up",
+	})
 	next, ok := nextAutomaticSubmission(state, runTurnInterrupted)
 	if ok || next.Text != "" {
 		t.Fatalf("interrupted queue must not auto-submit: %#v, %v", next, ok)
 	}
-	if len(state.queuedTurns) != 0 || state.composer.DraftText != "queued follow-up" {
-		t.Fatalf("expected queue restored to composer, state=%#v", state)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() || state.composer.DraftText != "queued follow-up" {
+		t.Fatalf("expected queue restored to composer, preview=%#v draft=%q", preview, state.composer.DraftText)
 	}
 }
 
 func TestBug2_InterruptedRunWithPendingSteersAndQueueRestoresAllWork(t *testing.T) {
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "steer msg", Parts: []llm.ContentPart{llm.Text("steer msg")}, DisplayText: "steer msg"},
-		},
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{
-				Text: "queued follow-up", Parts: []llm.ContentPart{llm.Text("queued follow-up")},
-				DisplayText: "queued follow-up",
-			}},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text: "steer msg", Parts: []llm.ContentPart{llm.Text("steer msg")}, DisplayText: "steer msg",
+	})
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text: "queued follow-up", Parts: []llm.ContentPart{llm.Text("queued follow-up")},
+		DisplayText: "queued follow-up",
+	})
 
 	next, ok := nextAutomaticSubmission(state, runTurnInterrupted)
 	if next.Text != "" || ok {
 		t.Fatalf("interrupted work must be restored, got %q ok=%v", next.Text, ok)
 	}
-	if len(state.queuedTurns) != 0 || state.composer.DraftText != "steer msg\nqueued follow-up" {
-		t.Fatalf("expected combined composer restore, state=%#v", state)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() || state.composer.DraftText != "steer msg\nqueued follow-up" {
+		t.Fatalf("expected combined composer restore, preview=%#v draft=%q", preview, state.composer.DraftText)
 	}
 }
 
@@ -5333,44 +5325,40 @@ func TestBug2_InterruptedRunWithPendingSteersAndQueueRestoresAllWork(t *testing.
 // still undelivered, the steers are submitted as the next turn instead of being
 // silently discarded.
 func TestBug2_CompletedRunWithUndeliveredSteersSubmitsThem(t *testing.T) {
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "steer msg", Parts: []llm.ContentPart{llm.Text("steer msg")}, DisplayText: "steer msg"},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text: "steer msg", Parts: []llm.ContentPart{llm.Text("steer msg")}, DisplayText: "steer msg",
+	})
 
 	next, ok := nextAutomaticSubmission(state, runTurnCompleted)
 	if !ok || strings.TrimSpace(next.Text) != "steer msg" {
 		t.Fatalf("expected undelivered steer submitted, got ok=%v text=%q", ok, next.Text)
 	}
-	if len(state.pendingSteers) != 0 {
-		t.Fatalf("expected pendingSteers cleared after submission, got %d", len(state.pendingSteers))
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.Steers) != 0 {
+		t.Fatalf("expected steers cleared after submission, got %#v", preview.Steers)
 	}
 }
 
 // TestBug2_CompletedRunWithSteersAndQueueSubmitsSteersFirst verifies priority:
 // undelivered steers are submitted before queued follow-up turns.
 func TestBug2_CompletedRunWithSteersAndQueueSubmitsSteersFirst(t *testing.T) {
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "steer", Parts: []llm.ContentPart{llm.Text("steer")}, DisplayText: "steer"},
-		},
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{
-				Text: "follow-up", Parts: []llm.ContentPart{llm.Text("follow-up")}, DisplayText: "follow-up",
-			}},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text: "steer", Parts: []llm.ContentPart{llm.Text("steer")}, DisplayText: "steer",
+	})
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text: "follow-up", Parts: []llm.ContentPart{llm.Text("follow-up")}, DisplayText: "follow-up",
+	})
 
 	// First: steers submitted.
 	next, ok := nextAutomaticSubmission(state, runTurnCompleted)
 	if !ok || strings.TrimSpace(next.Text) != "steer" {
 		t.Fatalf("expected steer first, got ok=%v text=%q", ok, next.Text)
 	}
-	if len(state.queuedTurns) != 1 {
-		t.Fatalf("expected queue preserved, got %d", len(state.queuedTurns))
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.FollowUp) != 1 {
+		t.Fatalf("expected queue preserved, got %#v", preview.FollowUp)
 	}
 
 	// Second: queued turn submitted.
@@ -5378,8 +5366,8 @@ func TestBug2_CompletedRunWithSteersAndQueueSubmitsSteersFirst(t *testing.T) {
 	if !ok || strings.TrimSpace(next.Text) != "follow-up" {
 		t.Fatalf("expected follow-up second, got ok=%v text=%q", ok, next.Text)
 	}
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("expected queue drained, got %d", len(state.queuedTurns))
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected queue drained, got %#v", preview)
 	}
 }
 
@@ -5567,7 +5555,9 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 	t.Cleanup(func() { _ = db.Close() })
 
 	sessStore := state.NewSessionStore(db, "main")
-	runStore := &state.RunStore{DB: db}
+	// The owner is the process identity resume claims are fenced under;
+	// production stores carry one from process.Open.
+	runStore := &state.RunStore{DB: db, Owner: "tui-test"}
 	actions := newTestActions(t, db)
 
 	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
@@ -5653,10 +5643,8 @@ func newCharacterizationSession(t *testing.T, client llm.LLM) *ChatSession {
 			},
 		})),
 	)
-	// Mirrors openProcessChatSession: the environment owns the reload, folds
-	// in the session's own choices before applying it, and re-points the
-	// pointers the session handed out afterwards.
-	env.OnConfigLoaded = s.reapplyPermissionPreset
+	// Mirrors openProcessChatSession: the environment owns the reload and
+	// re-points the pointers the session handed out afterwards.
 	env.OnConfigReload = func(next *appcfg.Root) {
 		if next == nil {
 			return
@@ -7225,6 +7213,41 @@ func TestCharacterizationTransientErrorPartialPersistence(t *testing.T) {
 	}
 }
 
+// A run that fails before saying anything closed live with its error and its
+// "Worked for" line. Everything a resume needs to draw both again is kept: the
+// user's message is bound to the run, the run has its clock, and the error is
+// in the conversation's log under the run.
+func TestCharacterizationSilentFailedRunKeepsWhatReplayCloses(t *testing.T) {
+	s := newCharacterizationSession(t, erroringStreamingLLM{err: errors.New("connection reset by peer")})
+	sessionID := "char-silent-failure"
+	if err := s.DispatchSurfaceTurn(context.Background(), turn.TurnSubmission{SessionID: sessionID, UserText: "hello"}); err == nil {
+		t.Fatal("DispatchSurfaceTurn = nil, want the provider error surfaced")
+	}
+	got := awaitResumedRun(t, s, sessionID)
+	if len(got.Runs) != 1 || got.Runs[0].Status != state.RunStatusFailed {
+		t.Fatalf("Runs = %+v, want one failed run", got.Runs)
+	}
+	runID := got.Runs[0].ID
+
+	rows, err := s.sessStore().ListAllMessages(context.Background(), sessionID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Role != "user" || rows[0].RunID != runID || rows[0].RunWorkedMs <= 0 {
+		t.Fatalf("rows = %+v, want the user's message bound to the timed run %s", rows, runID)
+	}
+	if lines := turn.RunWorkedLines(rows); lines[0].RunID != runID {
+		t.Fatalf("worked lines = %+v, want the run closed after its only row", lines)
+	}
+	events, err := s.runSvc().ListSessionEventsOfType(context.Background(), sessionID, event.RunEventTurnError, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].RunID != runID || !strings.Contains(string(events[0].Payload), "connection reset") {
+		t.Fatalf("turn errors = %+v, want the run's own error kept for replay", events)
+	}
+}
+
 // steerInjectingLLM replays scripted results like sequencedLLM, but calls
 // onCall synchronously before returning each result — used to enqueue a
 // steer (or follow-up) while the run is genuinely active and mid-turn, the
@@ -7276,7 +7299,7 @@ func TestCharacterizationSteerDeliveredMidRun(t *testing.T) {
 			return
 		}
 		deadline := time.Now().Add(2 * time.Second)
-		for !s.SteerSurfaceRun(sessionID, "tui", []llm.ContentPart{llm.Text("also check the logs")}) {
+		for !s.SurfaceInputQueue(sessionID).Steer(run.Input{Parts: []llm.ContentPart{llm.Text("also check the logs")}}) {
 			if time.Now().After(deadline) {
 				steerErr = errors.New("timed out waiting to steer the active run")
 				return
@@ -7332,15 +7355,15 @@ func TestCharacterizationRetractSteerBeforeDelivery(t *testing.T) {
 			return
 		}
 		deadline := time.Now().Add(2 * time.Second)
-		for !s.SteerSurfaceRun(sessionID, "tui", []llm.ContentPart{llm.Text("never mind, ignore this")}) {
+		for !s.SurfaceInputQueue(sessionID).Steer(run.Input{Parts: []llm.ContentPart{llm.Text("never mind, ignore this")}}) {
 			if time.Now().After(deadline) {
 				stepErr = errors.New("timed out waiting to steer the active run")
 				return
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
-		if !s.RetractSurfaceSteer(sessionID, "tui") {
-			stepErr = errors.New("RetractSurfaceSteer = false, want true (steer was never delivered yet)")
+		if _, ok := s.SurfaceInputQueue(sessionID).Recall(); !ok {
+			stepErr = errors.New("Recall = false, want true (steer was never delivered yet)")
 		}
 	}
 
@@ -7438,7 +7461,7 @@ func TestCharacterizationSteerSurvivesApprovalGate(t *testing.T) {
 			return
 		}
 		deadline := time.Now().Add(2 * time.Second)
-		for !s.SteerSurfaceRun(sessionID, "tui", []llm.ContentPart{llm.Text("also check disk space")}) {
+		for !s.SurfaceInputQueue(sessionID).Steer(run.Input{Parts: []llm.ContentPart{llm.Text("also check disk space")}}) {
 			if time.Now().After(deadline) {
 				steerErr = errors.New("timed out waiting to steer the pre-approval run")
 				return
@@ -9209,14 +9232,14 @@ func TestTrackerObserveUsageDeltaDedupesAgainstRunEnd(t *testing.T) {
 
 func TestTrackerObserveAgentDedupes(t *testing.T) {
 	tracker := NewTracker()
-	tracker.ObserveAgent("", time.Time{})
-	tracker.ObserveAgent("   ", time.Time{})
+	tracker.ObserveAgent("", "", time.Time{})
+	tracker.ObserveAgent("   ", "", time.Time{})
 	if got := tracker.SnapshotSession().Agents; got != 0 {
 		t.Fatalf("empty id should be no-op, got Agents=%d", got)
 	}
-	tracker.ObserveAgent("task-1", time.Time{})
-	tracker.ObserveAgent("task-1", time.Time{})
-	tracker.ObserveAgent("task-2", time.Time{})
+	tracker.ObserveAgent("task-1", "", time.Time{})
+	tracker.ObserveAgent("task-1", "", time.Time{})
+	tracker.ObserveAgent("task-2", "", time.Time{})
 	if got := tracker.SnapshotSession().Agents; got != 2 {
 		t.Fatalf("expected 2 unique agents, got %d", got)
 	}
@@ -9224,7 +9247,7 @@ func TestTrackerObserveAgentDedupes(t *testing.T) {
 
 func TestTrackerResetClearsSessionScopedCounters(t *testing.T) {
 	tracker := NewTracker()
-	tracker.ObserveAgent("task-1", time.Time{})
+	tracker.ObserveAgent("task-1", "", time.Time{})
 	tracker.ObserveToolStep("", "read-1", "read_file", "")
 	tracker.ObserveUsageDelta("run-1", 1500, 200)
 	tracker.ObservePlanProgress(2, 5, "reviewing")
@@ -9249,7 +9272,7 @@ func TestTrackerPerRunCountersIsolateTurns(t *testing.T) {
 	tracker.StartRun("run-1")
 	tracker.ObserveToolStep("", "t1", "read_file", "")
 	tracker.ObserveToolStep("", "t2", "read_file", "")
-	tracker.ObserveAgent("agent-1", time.Time{})
+	tracker.ObserveAgent("agent-1", "", time.Time{})
 	tracker.ObserveUsageDelta("run-1", 1000, 100)
 	tracker.ObserveRunEndForRun("run-1", 1000, 100)
 
@@ -9360,7 +9383,7 @@ func TestTrackerEndRunFreesScratchMapsKeepsCounts(t *testing.T) {
 	tracker := NewTracker()
 	tracker.StartRun("run-1")
 	tracker.ObserveToolStep("", "t1", "read_file", "")
-	tracker.ObserveAgent("agent-1", time.Time{})
+	tracker.ObserveAgent("agent-1", "", time.Time{})
 	tracker.ObserveUsageDelta("run-1", 1000, 100)
 	tracker.ObserveRunEndForRun("run-1", 1000, 100)
 
@@ -9496,30 +9519,33 @@ func TestRenderDeliveredSteerMessagesRendersDisplayTextNotModelText(t *testing.T
 	}
 }
 
-// The mirror is what carries the display form, so reconciliation must hand the
-// delivered submissions back rather than dropping them on the floor.
+// The queue's delivered list is what carries the display form, so taking it
+// must hand the delivered submissions back rather than dropping them on the
+// floor.
 func TestReconcilePendingSteersCountReturnsDeliveredPrefix(t *testing.T) {
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "A", DisplayText: "A"},
-			{Text: "B", DisplayText: "B"},
-			{Text: "C", DisplayText: "C"},
-		},
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{Text: "A", Parts: []llm.ContentPart{llm.Text("A")}, DisplayText: "A"})
+	session.enqueueSteer("s1", ComposerSubmission{Text: "B", Parts: []llm.ContentPart{llm.Text("B")}, DisplayText: "B"})
+	// The run hands the queued steers to the model at a tool boundary; the one
+	// typed after that boundary is still queued behind them.
+	if drained := session.SurfaceInputQueue("s1").Runtime().DrainSteers(); len(drained) != 2 {
+		t.Fatalf("expected the queued steers delivered, got %#v", drained)
 	}
+	session.enqueueSteer("s1", ComposerSubmission{Text: "C", Parts: []llm.ContentPart{llm.Text("C")}, DisplayText: "C"})
 
-	delivered := state.reconcilePendingSteersCount(1)
+	delivered := state.takeDeliveredSteers()
 
 	if len(delivered) != 2 || delivered[0].DisplayText != "A" || delivered[1].DisplayText != "B" {
 		t.Fatalf("expected delivered prefix [A B], got %#v", delivered)
 	}
-	if len(state.pendingSteers) != 1 || state.pendingSteers[0].DisplayText != "C" {
-		t.Fatalf("expected undelivered suffix [C], got %#v", state.pendingSteers)
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.Steers) != 1 || preview.Steers[0] != "C" {
+		t.Fatalf("expected undelivered suffix [C], got %#v", preview.Steers)
 	}
-	// Popping is destructive so the other reconcile path cannot render a
+	// Popping is destructive so the other observer path cannot render a
 	// second copy of the same steers.
-	if again := state.reconcilePendingSteersCount(1); len(again) != 0 {
-		t.Fatalf("expected no re-delivery on a second reconcile, got %#v", again)
+	if again := state.takeDeliveredSteers(); len(again) != 0 {
+		t.Fatalf("expected no re-delivery on a second drain, got %#v", again)
 	}
 }
 
@@ -9536,12 +9562,12 @@ func TestDiffGutterWidthFor(t *testing.T) {
 	}
 }
 
-func TestRenderClaudeDiffLine_AddBandPadding(t *testing.T) {
+func TestRenderDiffLine_AddBandPadding(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("COLORTERM", "truecolor")
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 	lexer, style := resolveDiffHighlight("x.go", p)
-	rows := renderClaudeDiffLine(
+	rows := renderDiffLine(
 		event.DiffLine{Kind: event.LineAdd, NewNo: 5, Text: "ok := true"},
 		p, 3, 40, lexer, style,
 	)
@@ -9567,11 +9593,11 @@ func TestRenderClaudeDiffLine_AddBandPadding(t *testing.T) {
 	}
 }
 
-func TestRenderClaudeDiffLine_NoColorPlain(t *testing.T) {
+func TestRenderDiffLine_NoColorPlain(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 	lexer, style := resolveDiffHighlight("x.go", p)
-	rows := renderClaudeDiffLine(
+	rows := renderDiffLine(
 		event.DiffLine{Kind: event.LineDel, OldNo: 7, Text: "drop()"},
 		p, 3, 40, lexer, style,
 	)
@@ -9717,7 +9743,7 @@ func TestRenderDiffSyntaxColorsMatchProseBrightness(t *testing.T) {
 // byte-for-byte.
 func TestNormalizeFGKeepsHueAndLeavesAccentsAlone(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 
 	// github-dark's comment grey, the colour that made the report's diff dim.
 	r, g, b := p.fg.normalize(0x8b, 0x94, 0x9e)
@@ -9735,7 +9761,7 @@ func TestNormalizeFGKeepsHueAndLeavesAccentsAlone(t *testing.T) {
 	}
 
 	// The same rule inverts on a light background: bright colours are deepened.
-	light := claudeDiffPaletteFor(DiffThemeLight)
+	light := diffPaletteFor(DiffThemeLight)
 	if r, g, b := light.fg.normalize(0xff, 0xd0, 0xd0); relativeLuminance(r, g, b) > syntaxLuminanceLight+0.02 {
 		t.Fatalf("light theme kept a washed-out colour: #%02x%02x%02x", r, g, b)
 	}
@@ -10066,21 +10092,21 @@ func TestSoftWrapApprovalCommandUsesAvailableColumns(t *testing.T) {
 	}
 }
 
-func TestClaudeDiffPaletteFor(t *testing.T) {
+func TestDiffPaletteFor(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	// A diff paints code with the same theme as every other code surface, so
 	// the same file reads the same in a read_file card, an edit_file card and
 	// the approval overlay.
-	dark := claudeDiffPaletteFor(DiffThemeDark)
+	dark := diffPaletteFor(DiffThemeDark)
 	if dark.noColor || dark.chromaStyle != codeStyleDark {
 		t.Fatalf("dark palette wrong: %+v", dark)
 	}
-	light := claudeDiffPaletteFor(DiffThemeLight)
+	light := diffPaletteFor(DiffThemeLight)
 	if light.noColor || light.chromaStyle != codeStyleLight {
 		t.Fatalf("light palette wrong: %+v", light)
 	}
 	// unknown falls back to the dark band/style
-	unknown := claudeDiffPaletteFor(DiffThemeUnknown)
+	unknown := diffPaletteFor(DiffThemeUnknown)
 	if unknown.noColor || unknown.chromaStyle != codeStyleDark {
 		t.Fatalf("unknown palette should match dark: %+v", unknown)
 	}
@@ -10088,7 +10114,7 @@ func TestClaudeDiffPaletteFor(t *testing.T) {
 	// End to end: the style a diff row is tokenised with is the very style the
 	// read_file card next to it uses.
 	for _, theme := range []DiffTheme{DiffThemeDark, DiffThemeLight} {
-		_, diffStyle := resolveDiffHighlight("x.go", claudeDiffPaletteFor(theme))
+		_, diffStyle := resolveDiffHighlight("x.go", diffPaletteFor(theme))
 		plainStyle := resolveCodeStyle(theme)
 		if diffStyle == nil || plainStyle == nil || diffStyle.Name != plainStyle.Name {
 			t.Fatalf("theme %v: diff style %v != plain code style %v", theme, diffStyle, plainStyle)
@@ -10096,7 +10122,7 @@ func TestClaudeDiffPaletteFor(t *testing.T) {
 	}
 
 	t.Setenv("NO_COLOR", "1")
-	if got := claudeDiffPaletteFor(DiffThemeDark); !got.noColor {
+	if got := diffPaletteFor(DiffThemeDark); !got.noColor {
 		t.Fatalf("NO_COLOR should force noColor palette: %+v", got)
 	}
 }
@@ -11963,11 +11989,7 @@ func codeModelID(version string) string {
 }
 
 func mcLocalTexts(state *streamState) []string {
-	out := []string{}
-	for _, s := range state.pendingSteers {
-		out = append(out, s.Text)
-	}
-	return out
+	return state.sessionQueue().Preview().Steers
 }
 
 // Simulate the screenshot: user repeatedly edits the last queued steer and
@@ -11975,7 +11997,7 @@ func mcLocalTexts(state *streamState) []string {
 // tool boundaries). interactive=true to match the real composer.
 func TestMultiCycleEditAccumulates(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12015,7 +12037,7 @@ func TestMultiCycleEditAccumulates(t *testing.T) {
 // stacking a new copy per cycle — in both the local mirror and the runtime.
 func TestMultiCycleEditNoDrainReplacesPendingSteer(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12039,54 +12061,23 @@ func TestMultiCycleEditNoDrainReplacesPendingSteer(t *testing.T) {
 	_ = llm.Text
 }
 
-// rtSession backs the steer surface on a real TurnInputRuntime, exactly like the
-// production ChatSession, so divergence between the local pendingSteers mirror
-// and the runtime is observable.
+// rtSession backs the steer surface on a real TurnInputRuntime attached to the
+// conversation's queue, exactly like the production ChatSession, so divergence
+// between the queue and its runtime is observable.
 type rtSession struct {
 	*fakeSession
-	rt     *run.TurnInputRuntime
-	active bool
+	rt *run.TurnInputRuntime
 }
 
 func newRTSession() *rtSession {
-	return &rtSession{fakeSession: &fakeSession{}, rt: run.NewTurnInputRuntime(), active: true}
-}
-
-func (s *rtSession) SteerSurfaceRun(sessionID, channel string, parts []llm.ContentPart) bool {
-	if !s.active || s.rt == nil || len(parts) == 0 {
-		return false
-	}
-	s.rt.Enqueue(run.TurnInputModeSteer, parts)
-	return true
-}
-
-func (s *rtSession) RetractSurfaceSteer(sessionID, channel string) bool {
-	if !s.active || s.rt == nil {
-		return false
-	}
-	_, ok := s.rt.RetractLastSteer()
-	return ok
-}
-
-func (s *rtSession) SurfacePendingSteerCount(sessionID, channel string) (int, bool) {
-	if !s.active || s.rt == nil {
-		return 0, false
-	}
-	count := 0
-	for _, e := range s.rt.Snapshot() {
-		if e.Mode == run.TurnInputModeSteer {
-			count++
-		}
-	}
-	return count, true
+	s := &rtSession{fakeSession: &fakeSession{}}
+	s.rt = run.NewTurnInputRuntime()
+	s.SurfaceInputQueue("s1").Attach(s.rt)
+	return s
 }
 
 func localSteerTexts(state *streamState) []string {
-	out := []string{}
-	for _, s := range state.pendingSteers {
-		out = append(out, s.Text)
-	}
-	return out
+	return state.sessionQueue().Preview().Steers
 }
 
 // An undelivered pending steer is recalled by the queue-edit shortcut: it is
@@ -12094,7 +12085,7 @@ func localSteerTexts(state *streamState) []string {
 // "edit last queued message" hint is honest for the pending-steer section.
 func TestEditPendingSteerNoDrainRecallsSteerForEditing(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12105,10 +12096,12 @@ func TestEditPendingSteerNoDrainRecallsSteerForEditing(t *testing.T) {
 	dispatch(inputEvent{kind: inputEventHotkey, hotkey: hotkeyEditLastQueued})
 
 	if got := localSteerTexts(state); len(got) != 0 {
-		t.Fatalf("recalled steer must leave the mirror, got %v", got)
+		t.Fatalf("recalled steer must leave the queue, got %v", got)
 	}
-	if count, _ := session.SurfacePendingSteerCount("s1", "tui"); count != 0 {
-		t.Fatalf("recalled steer must be retracted from the runtime, got %d", count)
+	for _, entry := range session.rt.Snapshot() {
+		if entry.Mode == run.TurnInputModeSteer {
+			t.Fatalf("recalled steer must be retracted from the runtime, got %#v", entry)
+		}
 	}
 	if state.composer.DraftText != "auto fix all bugs" {
 		t.Fatalf("expected steer restored to composer, got %q", state.composer.DraftText)
@@ -12117,7 +12110,7 @@ func TestEditPendingSteerNoDrainRecallsSteerForEditing(t *testing.T) {
 
 func TestDeliveredPendingSteerIsReconciledBeforeNewSteer(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12142,7 +12135,7 @@ func TestDeliveredPendingSteerIsReconciledBeforeNewSteer(t *testing.T) {
 
 func TestPendingSteerPreviewDropsDeliveredSteerAndKeepsNewOne(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12174,7 +12167,7 @@ func TestPendingSteerPreviewDropsDeliveredSteerAndKeepsNewOne(t *testing.T) {
 // recall shortcut must not hand the user an editable copy of it.
 func TestEditDeliveredPendingSteerLeavesSteerUntouched(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12182,10 +12175,10 @@ func TestEditDeliveredPendingSteerLeavesSteerUntouched(t *testing.T) {
 	}
 
 	dispatch(inputEvent{kind: inputEventLine, line: "review后提交代码"})
-	// The change hook mirrors production: the surface reconciles against the
-	// post-drain count as soon as the delivery notification lands.
-	session.rt.SetChangeHook(func(delivered []run.TurnInputEntry) {
-		renderDeliveredSteerMessages(renderer, state.reconcilePendingSteersCount(0))
+	// The queue hook mirrors production: the surface renders the delivered
+	// steers as soon as the delivery notification lands.
+	session.SurfaceInputQueue("s1").SetChangeHook(func() {
+		renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
 	})
 	session.rt.DrainSteers()
 
@@ -12213,7 +12206,7 @@ func TestDeliveredSteerTranscriptKeepsImageAndPastePlaceholders(t *testing.T) {
 		t.Fatalf("write image: %v", err)
 	}
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12256,7 +12249,7 @@ func TestDeliveredImageOnlySteerReachesTranscript(t *testing.T) {
 		t.Fatalf("write image: %v", err)
 	}
 	session := newRTSession()
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	dispatch := func(ev inputEvent) {
@@ -12268,8 +12261,8 @@ func TestDeliveredImageOnlySteerReachesTranscript(t *testing.T) {
 	dispatch(inputEvent{kind: inputEventDraft, draft: line, cursor: len([]rune(line))})
 	dispatch(inputEvent{kind: inputEventLine, line: line})
 
-	if len(state.pendingSteers) != 1 || state.pendingSteers[0].Text != "" {
-		t.Fatalf("expected one text-less pending steer, got %#v", state.pendingSteers)
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.Steers) != 1 || preview.Steers[0] != "[Image #1]" {
+		t.Fatalf("expected one text-less pending steer, got %#v", preview.Steers)
 	}
 	session.rt.DrainSteers()
 	dispatch(inputEvent{kind: inputEventMouseMove})
@@ -12283,38 +12276,39 @@ func TestDeliveredImageOnlySteerReachesTranscript(t *testing.T) {
 // delivered: queue A then B, deliver both, queue C, then reconcile.
 func TestReconcilePendingSteersKeepsUndeliveredSuffix(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "A", Parts: []llm.ContentPart{llm.Text("A")}, DisplayText: "A"},
-			{Text: "B", Parts: []llm.ContentPart{llm.Text("B")}, DisplayText: "B"},
-			{Text: "C", Parts: []llm.ContentPart{llm.Text("C")}, DisplayText: "C"},
-		},
-	}
-	// Runtime only still holds C (A and B were delivered).
-	session.rt.Enqueue(run.TurnInputModeSteer, []llm.ContentPart{llm.Text("C")})
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{Text: "A", Parts: []llm.ContentPart{llm.Text("A")}, DisplayText: "A"})
+	session.enqueueSteer("s1", ComposerSubmission{Text: "B", Parts: []llm.ContentPart{llm.Text("B")}, DisplayText: "B"})
+	// The run delivers A and B at a tool boundary; C was typed after it.
+	session.rt.DrainSteers()
+	session.enqueueSteer("s1", ComposerSubmission{Text: "C", Parts: []llm.ContentPart{llm.Text("C")}, DisplayText: "C"})
 
-	state.reconcilePendingSteers(session)
+	delivered := state.takeDeliveredSteers()
+	if len(delivered) != 2 || delivered[0].DisplayText != "A" || delivered[1].DisplayText != "B" {
+		t.Fatalf("expected the delivered prefix handed back, got %#v", delivered)
+	}
 
 	if got := localSteerTexts(state); len(got) != 1 || got[0] != "C" {
 		t.Fatalf("expected only undelivered suffix [C], got %v", got)
 	}
 }
 
-// When no run is active (ok=false), the mirror is left untouched so other
-// lifecycle code (turn-boundary clears, interrupt resubmit) keeps working.
+// When no run is active, the delivered-drain path leaves the queued steers
+// untouched so other lifecycle code (turn-boundary decisions, interrupt
+// resubmit) keeps working.
 func TestReconcilePendingSteersNoopWhenInactive(t *testing.T) {
 	session := newRTSession()
-	session.active = false
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "A", Parts: []llm.ContentPart{llm.Text("A")}, DisplayText: "A"},
-		},
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text: "A", Parts: []llm.ContentPart{llm.Text("A")}, DisplayText: "A",
+	})
+	// The turn ended: no runtime is attached, so nothing can be delivered.
+	session.SurfaceInputQueue("s1").Detach()
+	if got := state.takeDeliveredSteers(); len(got) != 0 {
+		t.Fatalf("expected nothing delivered while inactive, got %v", got)
 	}
-	state.reconcilePendingSteers(session)
 	if got := localSteerTexts(state); len(got) != 1 {
-		t.Fatalf("expected mirror untouched when inactive, got %v", got)
+		t.Fatalf("expected queue untouched when inactive, got %v", got)
 	}
 }
 
@@ -12405,12 +12399,29 @@ func newPlanReviewSession(t *testing.T, reviewer turn.Reviewer) (*ChatSession, *
 	if err != nil {
 		t.Fatalf("CreatePending: %v", err)
 	}
+	// The parked run the approval gate holds, with the run store the review's
+	// events persist to: the reviews live on the conversation now, so both
+	// must exist exactly as they do in production.
+	runs := &state.RunStore{DB: db}
+	parkedRun, err := runs.CreateRun(ctx, "session-1", "plan the work")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if err := runs.SetWaitingAction(ctx, parkedRun.ID, state.Wait{
+		RunID: parkedRun.ID, ActionID: act.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}); err != nil {
+		t.Fatalf("SetWaitingAction: %v", err)
+	}
 
 	cs := sessionEnv{
 		Home:      home,
 		ActionSvc: actions,
+		RunSvc:    runs,
 		Runner:    &run.Runner{Deps: &run.Deps{Home: home}},
 	}.session()
+	// The production wiring (notify.go) routes the runner's events back into
+	// the session's own notification path; the review's card travels on it.
+	cs.runner().Events = event.SinkFunc(cs.publishRunEvent)
 	cs.planReviewerFactory = func(turn.Model) (turn.Reviewer, error) {
 		return reviewer, nil
 	}
@@ -12446,12 +12457,17 @@ func TestPlanReviewLeavesTheApprovalPendingAndReachesThePlanner(t *testing.T) {
 	}
 
 	// The review is shown back with the next prompt for this approval.
-	notes := cs.planReviewNotes(actionID)
+	prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1")
+	if perr != nil || prompted == nil {
+		t.Fatalf("the approval must re-prompt after a review: %v %v", prompted, perr)
+	}
+	notes := prompted.PlanReviews
 	if len(notes) != 1 || notes[0].Model != "gpt-5.1" || !strings.Contains(notes[0].Text, "No verification step") {
 		t.Fatalf("collected reviews = %#v", notes)
 	}
 
-	// Keeping planning sends the review to the planner along with the feedback.
+	// Keeping planning sends the review to the planner along with the
+	// feedback — composed at the resume, not stored in the row.
 	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
 		Denied: true, DenyReason: "I disagree about the verification step.",
 	}); err != nil {
@@ -12464,12 +12480,38 @@ func TestPlanReviewLeavesTheApprovalPendingAndReachesThePlanner(t *testing.T) {
 	if act.Status != state.ActionDenied {
 		t.Fatalf("status=%s want denied", act.Status)
 	}
-	if !strings.Contains(act.Error, "No verification step") ||
-		!strings.Contains(act.Error, "I disagree about the verification step.") {
-		t.Fatalf("denial feedback lost the review or the user's words: %q", act.Error)
+	if act.Error != "I disagree about the verification step." {
+		t.Fatalf("stored denial = %q, want only the user's words", act.Error)
 	}
-	if len(cs.planReviewNotes(actionID)) != 0 {
+	// The denial's resume owns the parked run from here; the fixture ends it
+	// the way that resume does, so what follows reads the next prompt.
+	parkedRunID, _, findErr := cs.runSvc().FindRunByAction(ctx, actionID)
+	if findErr != nil || parkedRunID == "" {
+		t.Fatalf("find the parked run: %q %v", parkedRunID, findErr)
+	}
+	if err := cs.runSvc().SetStatus(ctx, parkedRunID, state.RunStatusDone); err != nil {
+		t.Fatalf("end the parked run: %v", err)
+	}
+	var nextNotes []turn.PlanReviewNote
+	if again, aerr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); aerr == nil && again != nil {
+		nextNotes = again.PlanReviews
+	}
+	if len(nextNotes) != 0 {
 		t.Fatal("reviews must be dropped once the approval is resolved")
+	}
+
+	// The resume composes the review back onto the user's words, so the
+	// planner still sees both — read from the conversation's events, where a
+	// restart would read them from too.
+	p := &chatApprovalResume{
+		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	agBase, _ := cs.resumeAgentContext(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true}, time.Now())
+	resumeState := tool.ToolApprovalResumeFromContext(agBase)
+	if !strings.Contains(resumeState.DenyReason, "No verification step") ||
+		!strings.Contains(resumeState.DenyReason, "I disagree about the verification step.") {
+		t.Fatalf("the resumed denial lost the review or the user's words: %q", resumeState.DenyReason)
 	}
 }
 
@@ -12489,19 +12531,28 @@ func TestPlanReviewReachesThePlannerWhenTheUserTypesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get action: %v", err)
 	}
-	if !strings.Contains(act.Error, "Verdict: rework.") {
-		t.Fatalf("a plain denial must still carry the review: %q", act.Error)
+	if act.Error != "" {
+		t.Fatalf("a denial with no typed feedback stores no words, got %q", act.Error)
+	}
+
+	// A plain denial still carries the review to the planner: the resume
+	// composes it even when the user said nothing of their own.
+	p := &chatApprovalResume{
+		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	agBase, _ := cs.resumeAgentContext(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true}, time.Now())
+	if got := tool.ToolApprovalResumeFromContext(agBase).DenyReason; !strings.Contains(got, "Verdict: rework.") {
+		t.Fatalf("a plain denial must still carry the review: %q", got)
 	}
 }
 
 func TestPlanReviewFailureKeepsTheApprovalAndReportsIt(t *testing.T) {
 	ctx := context.Background()
 	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{err: errors.New("upstream 429")})
-	notified := make(chan NewMessageMsg, 8)
+	notified := make(chan any, 8)
 	cs.PrependUINotify(func(msg any) {
-		if event, ok := msg.(NewMessageMsg); ok {
-			notified <- event
-		}
+		notified <- msg
 	})
 	t.Cleanup(cs.stopUINotificationDispatcher)
 
@@ -12517,25 +12568,49 @@ func TestPlanReviewFailureKeepsTheApprovalAndReportsIt(t *testing.T) {
 	if act.Status != state.ActionPending {
 		t.Fatalf("status=%s want the approval still pending", act.Status)
 	}
-	if len(cs.planReviewNotes(actionID)) != 0 {
+	// A failed review is a report, not a review: the next prompt for this
+	// approval offers none.
+	var notes []turn.PlanReviewNote
+	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr == nil && prompted != nil {
+		notes = prompted.PlanReviews
+	}
+	if len(notes) != 0 {
 		t.Fatal("a failed review must not be stored as a review")
 	}
 
+	// The review's own card reports the failure — the old "Plan review by …
+	// failed" notice is gone, because saying it twice is repetition.
+	var started *PlanReviewStartedMsg
+	var reviewed *PlanReviewReviewedMsg
 	deadline := time.After(2 * time.Second)
-	for {
+	for reviewed == nil {
 		select {
-		case event := <-notified:
-			if event.Msg.Kind != MsgKindError {
-				continue
+		case msg := <-notified:
+			switch m := msg.(type) {
+			case PlanReviewStartedMsg:
+				started = &m
+			case PlanReviewReviewedMsg:
+				reviewed = &m
+			case NewMessageMsg:
+				if m.Msg.Kind == MsgKindError {
+					t.Fatalf("a second failure notice was printed beside the card: %q", m.Msg.Content)
+				}
 			}
-			if !strings.Contains(event.Msg.Content, "upstream 429") ||
-				!strings.Contains(event.Msg.Content, "still waiting for your decision") {
-				t.Fatalf("failure notice = %q", event.Msg.Content)
-			}
-			return
 		case <-deadline:
-			t.Fatal("timed out waiting for the review failure notice")
+			t.Fatal("timed out waiting for the review card events")
 		}
+	}
+	if started == nil || started.ReviewID != reviewed.ReviewID {
+		t.Fatalf("the review events do not share one id: %#v %#v", started, reviewed)
+	}
+	var r Reducer
+	_ = r.Reduce(*started)
+	card := lastFanoutFrame(t, r.Reduce(*reviewed))
+	if card.Summary != "Failed to start 1 plan-reviewer task" {
+		t.Fatalf("card header = %q, want Failed to start 1 plan-reviewer task", card.Summary)
+	}
+	if !strings.Contains(card.FanoutCallError, "upstream 429") {
+		t.Fatalf("card error = %q, want the failure reason", card.FanoutCallError)
 	}
 }
 
@@ -12563,6 +12638,212 @@ func TestPlanReviewRefusedForAnApprovalThatIsNotAnExitPlan(t *testing.T) {
 	}
 }
 
+// Every review announces itself and closes itself: the started event is what
+// lets a surface draw a "Starting … plan-reviewer task" card whose failure
+// before the run opens still has a record, and the ended event carries the
+// outcome. The review id ties them, and the reviewer's spawned event points
+// back at it the way any subagent's points at the call that dispatched it.
+func TestPlanReviewPublishesItsStartAndEnd(t *testing.T) {
+	ctx := context.Background()
+	type reviewEvt struct {
+		typ, reviewID, outcome, text string
+	}
+	collect := func(cs *ChatSession) *[]reviewEvt {
+		events := &[]reviewEvt{}
+		cs.runner().Events = event.SinkFunc(func(_ context.Context, evt event.RunEvent) error {
+			switch evt.Type {
+			case event.RunEventPlanReviewStarted:
+				var p event.PlanReviewStartedPayload
+				if json.Unmarshal(evt.Payload, &p) == nil {
+					*events = append(*events, reviewEvt{typ: evt.Type, reviewID: p.ReviewID})
+				}
+			case event.RunEventPlanReviewed:
+				var p event.PlanReviewedPayload
+				if json.Unmarshal(evt.Payload, &p) == nil {
+					*events = append(*events, reviewEvt{typ: evt.Type, reviewID: p.ReviewID, outcome: p.Outcome, text: p.Text})
+				}
+			}
+			return nil
+		})
+		return events
+	}
+
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{err: errors.New("upstream 429")})
+	failed := collect(cs)
+	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
+		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
+	}); err != nil {
+		t.Fatalf("a failed review must not fail the turn: %v", err)
+	}
+	if act, err := actions.Get(ctx, actionID); err != nil || act.Status != state.ActionPending {
+		t.Fatalf("a failed review must leave the approval pending, got %v %v", act, err)
+	}
+	if len(*failed) != 2 ||
+		(*failed)[0].typ != event.RunEventPlanReviewStarted ||
+		(*failed)[1].typ != event.RunEventPlanReviewed ||
+		(*failed)[0].reviewID != (*failed)[1].reviewID ||
+		(*failed)[1].outcome != "failed" {
+		t.Fatalf("a failed review must publish a started/reviewed pair with one id, got %#v", *failed)
+	}
+
+	okSession, okActions, okAction := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework. No verification step."})
+	done := collect(okSession)
+	if err := okSession.completeSurfaceToolApprovalDecision(ctx, okAction, turn.ToolApprovalDecision{
+		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
+	}); err != nil {
+		t.Fatalf("requesting a review failed: %v", err)
+	}
+	if act, err := okActions.Get(ctx, okAction); err != nil || act.Status != state.ActionPending {
+		t.Fatalf("a completed review must leave the approval pending, got %v %v", act, err)
+	}
+	if len(*done) != 2 ||
+		(*done)[1].outcome != "done" ||
+		!strings.Contains((*done)[1].text, "No verification step") {
+		t.Fatalf("a completed review must publish done with its text, got %#v", *done)
+	}
+
+	// The shared review flow carries the review id as the run's tool-use id,
+	// which is what the reviewer's spawned event names as its parent.
+	var capturedToolUseID string
+	executor := &fakeSubagentExecutor{replies: []func(context.Context) (string, error){
+		func(c context.Context) (string, error) {
+			capturedToolUseID = tool.ToolUseIDFromContext(c)
+			return "Verdict: fine.", nil
+		},
+	}}
+	real, _ := newReviewRunSession(t, executor)
+	reviewer, err := real.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	var flowEvents []event.RunEvent
+	if err := runSharedReview(t, real, turn.Model{Provider: "openai", Model: "gpt-4o"}, "Add S3 sync.", "", reviewer, &flowEvents); err != nil {
+		t.Fatalf("run the shared review flow: %v", err)
+	}
+	if len(flowEvents) != 2 {
+		t.Fatalf("the flow must publish a started/reviewed pair, got %#v", flowEvents)
+	}
+	var started event.PlanReviewStartedPayload
+	if json.Unmarshal(flowEvents[0].Payload, &started) != nil {
+		t.Fatalf("started payload: %s", flowEvents[0].Payload)
+	}
+	if capturedToolUseID != started.ReviewID {
+		t.Fatalf("review run tool-use id = %q, want the review id %q", capturedToolUseID, started.ReviewID)
+	}
+}
+
+// The reviewer's answer belongs to its own view. The main conversation gets
+// the lifecycle card, and the approval overlay gets the review to decide
+// with — but a third copy printed as a plan card in the conversation is a
+// leak of the reviewer's transcript into a conversation it never joined.
+func TestPlanReviewAnswerStaysInTheReviewersView(t *testing.T) {
+	ctx := context.Background()
+	cs, _, actionID := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework. No verification step."})
+	planCards := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindPlan {
+			planCards <- m.Msg
+		}
+	})
+	t.Cleanup(cs.stopUINotificationDispatcher)
+
+	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
+		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
+	}); err != nil {
+		t.Fatalf("requesting a review failed: %v", err)
+	}
+	select {
+	case got := <-planCards:
+		t.Fatalf("the review was printed into the main conversation as a plan card: %#v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The review still reaches the user where it is decision material.
+	var notes []turn.PlanReviewNote
+	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr == nil && prompted != nil {
+		notes = prompted.PlanReviews
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0].Text, "No verification step") {
+		t.Fatalf("reviews held for the next approval prompt = %#v", notes)
+	}
+}
+
+// A denial stores the user's own words; the reviews reach the model when the
+// denial is resumed, not in the stored row, and the card the conversation
+// shows for the refused call says only what the user said.
+func TestDeniedExitPlanCardShowsOnlyTheUsersWords(t *testing.T) {
+	ctx := context.Background()
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework. The plan skips the tests."})
+	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
+		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
+	}); err != nil {
+		t.Fatalf("requesting a review failed: %v", err)
+	}
+	var notes []turn.PlanReviewNote
+	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr != nil || prompted == nil {
+		t.Fatalf("the approval must still be pending: %v %v", prompted, perr)
+	} else {
+		notes = prompted.PlanReviews
+	}
+	if len(notes) != 1 {
+		t.Fatalf("reviews = %#v", notes)
+	}
+
+	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
+		Denied: true, DenyReason: "改成先写测试",
+	}); err != nil {
+		t.Fatalf("denying failed: %v", err)
+	}
+	act, err := actions.Get(ctx, actionID)
+	if err != nil {
+		t.Fatalf("Get action: %v", err)
+	}
+	if act.Error != "改成先写测试" {
+		t.Fatalf("action error = %q, want only the user's words", act.Error)
+	}
+
+	p := &chatApprovalResume{
+		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	toolCards := make(chan Message, 4)
+	cs.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			toolCards <- m.Msg
+		}
+	})
+	t.Cleanup(cs.stopUINotificationDispatcher)
+	cs.notifyToolApprovalDenied(p, actionID)
+	select {
+	case got := <-toolCards:
+		if got.Content != "改成先写测试" {
+			t.Fatalf("denied card = %q, want the user's words", got.Content)
+		}
+		if strings.Contains(got.Content, "<review") {
+			t.Fatalf("denied card leaked the review: %q", got.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the denied card")
+	}
+
+	// The model's denial still carries the review: the resume composes it from
+	// the conversation's events, exactly as the denial reason did before the
+	// split.
+	reviewed := turn.Model{Provider: notes[0].Provider, Model: notes[0].Model}
+	agBase, _ := cs.resumeAgentContext(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true}, time.Now())
+	resumeState := tool.ToolApprovalResumeFromContext(agBase)
+	if resumeState == nil || !resumeState.Denied {
+		t.Fatalf("resume state = %#v, want a denial", resumeState)
+	}
+	want := turn.ComposeDenyFeedback([]turn.PlanReviewResult{{Model: reviewed, Text: notes[0].Text}}, "改成先写测试")
+	if resumeState.DenyReason != want || !strings.Contains(resumeState.DenyReason, "<review model=") {
+		t.Fatalf("model-facing deny reason = %q, want the composed review and feedback", resumeState.DenyReason)
+	}
+	if resumeState.DenyFeedback != "改成先写测试" {
+		t.Fatalf("deny feedback = %q, want the user's words alone", resumeState.DenyFeedback)
+	}
+}
+
 func TestPlanReviewOptionsDedupeAndMarkTheCurrentModel(t *testing.T) {
 	cfg := planReviewConfig(
 		appcfg.AgentLLMProviderConfig{Provider: "anthropic", Model: "claude-sonnet-4"},
@@ -12571,7 +12852,7 @@ func TestPlanReviewOptionsDedupeAndMarkTheCurrentModel(t *testing.T) {
 	)
 	cs := sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}.session()
 
-	options := cs.planReviewOptions()
+	options := planReviewOptionsFor(cs)
 	if len(options) != 2 {
 		t.Fatalf("options=%#v, want the duplicate entry collapsed", options)
 	}
@@ -12586,10 +12867,10 @@ func TestPlanReviewOptionsDedupeAndMarkTheCurrentModel(t *testing.T) {
 func TestPlanReviewOptionsAreOnlyOfferedForExitPlanApprovals(t *testing.T) {
 	cfg := planReviewConfig(appcfg.AgentLLMProviderConfig{Provider: "openai", Model: "gpt-4o"})
 	cs := sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: cfg}}}.session()
-	if len(cs.planReviewOptions()) == 0 {
+	if len(planReviewOptionsFor(cs)) == 0 {
 		t.Fatal("a configured session must offer at least one reviewer")
 	}
-	if len((&ChatSession{}).planReviewOptions()) != 0 {
+	if len(planReviewOptionsFor(&ChatSession{})) != 0 {
 		t.Fatal("a session with no configured model must offer no reviewer")
 	}
 }
@@ -12602,10 +12883,48 @@ func TestPlanReviewIsOfferedRegardlessOfSubagentSwitch(t *testing.T) {
 	for name, sw := range map[string]*bool{"enabled": &on, "disabled": &off, "unset": nil} {
 		cfg := *base
 		cfg.Agents.Defaults.EnableSubagent = sw
-		if got := (sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: &cfg}}}.session()).planReviewOptions(); len(got) == 0 {
+		if got := planReviewOptionsFor(sessionEnv{Runner: &run.Runner{Deps: &run.Deps{AppCfg: &cfg}}}.session()); len(got) == 0 {
 			t.Fatalf("enable_subagent %s: a configured model must be offered as reviewer", name)
 		}
 	}
+}
+
+// planReviewOptionsFor reads the review models the shared layer offers this
+// session's configuration — the same inputs the gate's ReviewModels injection
+// passes, gathered for the tests that used to call the surface's own method.
+func planReviewOptionsFor(cs *ChatSession) []turn.PlanReviewModelOption {
+	provider, model := run.PrimaryModel(cs.runner())
+	return turn.PlanReviewModelOptions(modelConfigFromChatSession(cs), chatSessionActiveAgentName(cs), provider, model)
+}
+
+// runSharedReview drives one review through turn.RunPlanReview with the
+// reviewer the surface builds, the way runPlanReview does. The plan comes
+// from the session's plan file and the task from its transcript, which is
+// what the Request fields carried before the flow moved down a layer.
+func runSharedReview(
+	t *testing.T, cs *ChatSession, model turn.Model, task, runID string, reviewer turn.Reviewer, events *[]event.RunEvent,
+) error {
+	t.Helper()
+	return turn.RunPlanReview(context.Background(), turn.PlanReviewRun{
+		ActionID: "plan-action", Model: model,
+		SessionID: "session-1", RunID: runID,
+		StateRoot:   cs.stateRoot(),
+		ProjectKey:  runnerProjectKey(cs.runner()),
+		Transcripts: stubReviewTranscripts{text: task},
+		Reviewer:    reviewer,
+		Publish: func(_ context.Context, evt event.RunEvent) error {
+			if events != nil {
+				*events = append(*events, evt)
+			}
+			return nil
+		},
+	})
+}
+
+type stubReviewTranscripts struct{ text string }
+
+func (s stubReviewTranscripts) ListTranscriptMessages(context.Context, string, int) ([]llm.Message, error) {
+	return []llm.Message{llm.UserMessage(llm.Text(s.text))}, nil
 }
 
 // fakeSubagentExecutor records how each review run was dispatched and replays a
@@ -12624,10 +12943,10 @@ type fakeSubagentCall struct {
 	subagentType    string
 }
 
-func (h *fakeSubagentExecutor) RunSubagentExec(ctx context.Context, task, superviseExistingRunID, parentRunID, sessionID, workerSessionID, subagentType string) (string, error) {
+func (h *fakeSubagentExecutor) RunSubagentExec(ctx context.Context, req run.SubagentExecRequest) (string, error) {
 	h.calls = append(h.calls, fakeSubagentCall{
-		ctx: ctx, task: task, superviseRunID: superviseExistingRunID,
-		sessionID: sessionID, workerSessionID: workerSessionID, subagentType: subagentType,
+		ctx: ctx, task: req.Task, superviseRunID: req.SuperviseRunID,
+		sessionID: req.SessionID, workerSessionID: req.WorkerSessionID, subagentType: req.SubagentType,
 	})
 	idx := len(h.calls) - 1
 	if idx >= len(h.replies) {
@@ -12679,6 +12998,10 @@ func newReviewRunSession(t *testing.T, executor run.SubagentExecutor) (*ChatSess
 		Runner:    &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, ProjectRoot: home}, SubagentExecutor: executor},
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1"})
+	// The shared flow reads the plan from the session's own plan file.
+	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetForProject: %v", err)
+	}
 	return cs, actions
 }
 
@@ -12687,27 +13010,29 @@ func TestPlanReviewRunsAsAPlanReviewerSubagentOnTheChosenModel(t *testing.T) {
 		func(context.Context) (string, error) { return "Verdict: rework. internal/x.go:12 says otherwise.", nil },
 	}}
 	cs, _ := newReviewRunSession(t, executor)
-	reviewer := &planSubagentReviewer{
-		session: cs,
-		model:   turn.Model{Provider: "anthropic", Model: "claude-sonnet-4"},
-	}
-
-	result, err := reviewer.Review(context.Background(), turn.Request{
-		Plan: "# Plan\n\n1. Ship it.", Task: "Add S3 sync.",
-	})
+	model := turn.Model{Provider: "anthropic", Model: "claude-sonnet-4"}
+	reviewer, err := cs.planReviewerFor(model)
 	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	var flowEvents []event.RunEvent
+	if err := runSharedReview(t, cs, model, "Add S3 sync.", "", reviewer, &flowEvents); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
-	if !strings.Contains(result.Text, "Verdict: rework") {
-		t.Fatalf("review text = %q", result.Text)
+	if len(flowEvents) != 2 {
+		t.Fatalf("the flow must publish a started/reviewed pair, got %#v", flowEvents)
+	}
+	var reviewed event.PlanReviewedPayload
+	if json.Unmarshal(flowEvents[1].Payload, &reviewed) != nil || !strings.Contains(reviewed.Text, "Verdict: rework") {
+		t.Fatalf("review text = %q", reviewed.Text)
 	}
 	if len(executor.calls) != 1 {
 		t.Fatalf("subagent calls=%d want 1", len(executor.calls))
 	}
 	call := executor.calls[0]
 
-	if call.subagentType != planReviewerSubtype ||
-		tool.SubagentTypeFromContext(call.ctx) != planReviewerSubtype {
+	if call.subagentType != run.PlanReviewSubagentType ||
+		tool.SubagentTypeFromContext(call.ctx) != run.PlanReviewSubagentType {
 		t.Fatalf("review must run as the plan-reviewer subtype: param=%q ctx=%q",
 			call.subagentType, tool.SubagentTypeFromContext(call.ctx))
 	}
@@ -12746,9 +13071,13 @@ func TestPlanReviewRunsAsAPlanReviewerSubagentOnTheChosenModel(t *testing.T) {
 func TestPlanReviewRefusesAModelTheSessionHasNotConfigured(t *testing.T) {
 	executor := &fakeSubagentExecutor{}
 	cs, _ := newReviewRunSession(t, executor)
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "o3"}}
+	model := turn.Model{Provider: "openai", Model: "o3"}
+	reviewer, err := cs.planReviewerFor(model)
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
 
-	_, err := reviewer.Review(context.Background(), turn.Request{Plan: "# Plan"})
+	err = runSharedReview(t, cs, model, "", "", reviewer, nil)
 	if err == nil || !strings.Contains(err.Error(), "not configured") {
 		t.Fatalf("err = %v, want a refusal for an unconfigured model", err)
 	}
@@ -12781,13 +13110,17 @@ func TestPlanReviewToolApprovalIsShownAndTheRunResumes(t *testing.T) {
 	sink := &scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}}
 	cs.SetToolApprovalSink(sink)
 
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
-	result, err := reviewer.Review(ctx, turn.Request{Plan: "# Plan", Task: "Add S3 sync."})
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
 	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	var flowEvents []event.RunEvent
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "Add S3 sync.", "", reviewer, &flowEvents); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
-	if !strings.Contains(result.Text, "approve with changes") {
-		t.Fatalf("review text = %q", result.Text)
+	var reviewed event.PlanReviewedPayload
+	if json.Unmarshal(flowEvents[len(flowEvents)-1].Payload, &reviewed) != nil || !strings.Contains(reviewed.Text, "approve with changes") {
+		t.Fatalf("review text = %q", reviewed.Text)
 	}
 
 	// The reviewer's tool request reached the user rather than being refused.
@@ -12795,7 +13128,7 @@ func TestPlanReviewToolApprovalIsShownAndTheRunResumes(t *testing.T) {
 		t.Fatalf("approval prompts=%d want 1", len(sink.requests))
 	}
 	if got := sink.requests[0]; got.ToolName != "shell" || got.ActionID != pendingActionID ||
-		got.SubagentType != planReviewerSubtype || !strings.Contains(got.ToolInputJSON, "rg exit_plan_mode") {
+		got.SubagentType != run.PlanReviewSubagentType || !strings.Contains(got.ToolInputJSON, "rg exit_plan_mode") {
 		t.Fatalf("approval request = %#v", got)
 	}
 
@@ -12847,8 +13180,11 @@ func TestPlanReviewDeniedToolResumesWithTheDenial(t *testing.T) {
 		{Denied: true, DenyReason: "no network during review"},
 	}})
 
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
-	if _, err := reviewer.Review(ctx, turn.Request{Plan: "# Plan"}); err != nil {
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err != nil {
 		t.Fatalf("a denied tool must not fail the review: %v", err)
 	}
 	state := tool.ToolApprovalResumeFromContext(executor.calls[1].ctx)
@@ -12875,8 +13211,11 @@ func TestPlanReviewStopsWhenTheUserCancelsATooLApproval(t *testing.T) {
 	}
 	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Cancelled: true}}})
 
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
-	_, err = reviewer.Review(ctx, turn.Request{Plan: "# Plan"})
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	err = runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil)
 	if err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("err = %v, want the review to stop when the user cancels", err)
 	}
@@ -12890,8 +13229,11 @@ func TestPlanReviewPropagatesRunFailure(t *testing.T) {
 		func(context.Context) (string, error) { return "", errors.New("upstream 429") },
 	}}
 	cs, _ := newReviewRunSession(t, executor)
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
-	if _, err := reviewer.Review(context.Background(), turn.Request{Plan: "# Plan"}); err == nil ||
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err == nil ||
 		!strings.Contains(err.Error(), "upstream 429") {
 		t.Fatalf("err = %v", err)
 	}
@@ -12946,9 +13288,16 @@ func TestPlanReviewFencesItsRunWaitSoNothingElseResumesIt(t *testing.T) {
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1"})
 	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}})
+	// The shared flow reads the plan from the session's own plan file.
+	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetForProject: %v", err)
+	}
 
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
-	if _, err := reviewer.Review(ctx, turn.Request{Plan: "# Plan"}); err != nil {
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
 	if len(executor.calls) != 2 {
@@ -13058,16 +13407,19 @@ func TestPlanReviewShowsInTheAgentRosterAndCanBeStoppedFromIt(t *testing.T) {
 		},
 	}
 
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
-	if _, err := reviewer.Review(context.Background(), turn.Request{Plan: "# Plan"}); err == nil {
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "", "", reviewer, nil); err == nil {
 		t.Fatal("a stopped review must report that it did not finish")
 	}
 
 	if strings.TrimSpace(spawned.AgentID) == "" || spawned.AgentID != spawned.TaskID {
 		t.Fatalf("spawn notification = %#v, want a roster key matching the task id", spawned)
 	}
-	if spawned.AgentType != planReviewerSubtype {
-		t.Fatalf("roster label = %q, want %q", spawned.AgentType, planReviewerSubtype)
+	if spawned.AgentType != run.PlanReviewSubagentType {
+		t.Fatalf("roster label = %q, want %q", spawned.AgentType, run.PlanReviewSubagentType)
 	}
 	if !stopped {
 		t.Fatal("the roster must be able to stop the review; no live registry handle was found")
@@ -14362,10 +14714,10 @@ func imagePartCount(parts []llm.ContentPart) int {
 // "[Image #2]", and drops the second image on the next keystroke.
 func TestMergedSubmissionsRenumberImagePlaceholders(t *testing.T) {
 	first, second := auditImageAttachment(t, "first.png"), auditImageAttachment(t, "second.png")
-	state := &streamState{sessionID: "s1", queuedTurns: []queuedSubmission{
-		{Action: queuedSubmissionActionTurn, Submission: submissionWithImage("first", first)},
-		{Action: queuedSubmissionActionTurn, Submission: submissionWithImage("second", second)},
-	}}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", submissionWithImage("first", first))
+	session.enqueueFollowUp("s1", submissionWithImage("second", second))
 
 	nextAutomaticSubmission(state, runTurnInterrupted)
 
@@ -14414,8 +14766,8 @@ func TestSessionSwitchRetractsQueuedSteersFromRuntime(t *testing.T) {
 
 	switchStreamSession(context.Background(), state, renderer, nil, "s2")
 
-	if got := len(state.pendingSteers); got != 0 {
-		t.Fatalf("expected the mirror to be cleared, got %d", got)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected the queue to be cleared, got %#v", preview)
 	}
 	if got := len(session.rt.Snapshot()); got != 0 {
 		t.Fatalf("expected the runtime queue to be retracted, got %d entries", got)
@@ -14426,11 +14778,8 @@ func TestSessionSwitchRetractsQueuedSteersFromRuntime(t *testing.T) {
 // them — the complaint this whole area exists to avoid.
 func TestSessionSwitchReportsDiscardedQueueToUser(t *testing.T) {
 	session := newRTSession()
-	state := &streamState{
-		sessionID:   "s1",
-		session:     session,
-		queuedTurns: []queuedSubmission{{Action: queuedSubmissionActionTurn, Submission: textSubmission("later")}},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", textSubmission("later"))
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -14481,16 +14830,12 @@ func TestEscInterruptWithOnlyQueuedTurnsRestoresInsteadOfSubmitting(t *testing.T
 		dispatchStarted: dispatchStarted,
 		dispatchWait:    dispatchWait,
 	}
-	state := &streamState{
-		sessionID: "s1",
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{
-				Text:        "queued follow-up",
-				DisplayText: "queued follow-up",
-				Parts:       []llm.ContentPart{llm.Text("queued follow-up")},
-			}},
-		},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text:        "queued follow-up",
+		DisplayText: "queued follow-up",
+		Parts:       []llm.ContentPart{llm.Text("queued follow-up")},
+	})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	events := make(chan inputEvent, 1)
@@ -14534,9 +14879,9 @@ func TestEscInterruptResubmitsSteerTheCancelledRunNeverDelivered(t *testing.T) {
 			dispatchStarted: dispatchStarted,
 			dispatchWait:    dispatchWait,
 		},
-		rt:     run.NewTurnInputRuntime(),
-		active: true,
+		rt: run.NewTurnInputRuntime(),
 	}
+	session.SurfaceInputQueue("s1").Attach(session.rt)
 	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
@@ -14581,14 +14926,10 @@ func TestEscInterruptWithOnlyRejectedSteersRestoresInsteadOfSubmitting(t *testin
 		dispatchStarted: dispatchStarted,
 		dispatchWait:    dispatchWait,
 	}
-	state := &streamState{
-		sessionID: "s1",
-		rejectedSteers: []queuedSubmission{
-			{Action: queuedSubmissionActionRejectedSteer, Submission: ComposerSubmission{
-				Text: "rejected", DisplayText: "rejected", Parts: []llm.ContentPart{llm.Text("rejected")},
-			}},
-		},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueRejected("s1", ComposerSubmission{
+		Text: "rejected", DisplayText: "rejected", Parts: []llm.ContentPart{llm.Text("rejected")},
+	})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	events := make(chan inputEvent, 1)
@@ -14619,10 +14960,8 @@ func TestEscInterruptWithOnlyRejectedSteersRestoresInsteadOfSubmitting(t *testin
 // the flags must roll back rather than mislabel the next natural completion.
 func TestEscInterruptRollsBackFlagsWhenNothingCancelled(t *testing.T) {
 	session := &fakeSession{cancelActive: false}
-	state := &streamState{
-		sessionID:     "s1",
-		pendingSteers: []ComposerSubmission{{Text: "steer", Parts: []llm.ContentPart{llm.Text("steer")}, DisplayText: "steer"}},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{Text: "steer", Parts: []llm.ContentPart{llm.Text("steer")}, DisplayText: "steer"})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -14639,20 +14978,18 @@ func TestEscInterruptRollsBackFlagsWhenNothingCancelled(t *testing.T) {
 // Dropping it degrades /goal into a plain prompt (no continuation loop) and
 // /skill into untrusted prompt text.
 func TestMergePreservesStructuredSlashPayload(t *testing.T) {
-	state := &streamState{
-		rejectedSteers: []queuedSubmission{
-			{Action: queuedSubmissionActionRejectedSteer, Submission: ComposerSubmission{
-				Text: "expanded goal prompt", DisplayText: "/goal ship it",
-				RawInput: "/goal ship it", GoalObjective: "ship it",
-				Parts: []llm.ContentPart{llm.Text("expanded goal prompt")},
-			}},
-			{Action: queuedSubmissionActionRejectedSteer, Submission: ComposerSubmission{
-				Text: "second message", DisplayText: "second message",
-				SkillName: "review", SkillPath: "trusted skill path",
-				Parts: []llm.ContentPart{llm.Text("second message")},
-			}},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueRejected("s1", ComposerSubmission{
+		Text: "expanded goal prompt", DisplayText: "/goal ship it",
+		RawInput: "/goal ship it", GoalObjective: "ship it",
+		Parts: []llm.ContentPart{llm.Text("expanded goal prompt")},
+	})
+	session.enqueueRejected("s1", ComposerSubmission{
+		Text: "second message", DisplayText: "second message",
+		SkillName: "review", SkillPath: "trusted skill path",
+		Parts: []llm.ContentPart{llm.Text("second message")},
+	})
 
 	next, ok := nextAutomaticSubmission(state, runTurnCompleted)
 	if !ok {
@@ -14676,42 +15013,39 @@ func TestMergePreservesStructuredSlashPayload(t *testing.T) {
 // queued as its own agent turn.
 func TestPlainInputDuringUserShellRunIsQueuedNotSteered(t *testing.T) {
 	session := &fakeSession{steerAccepted: true}
-	state := &streamState{sessionID: "s1", activeRunIsUserShell: true}
+	state := &streamState{sessionID: "s1", session: session, activeRunIsUserShell: true}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
 		inputEvent{kind: inputEventLine, line: "explain that output"}, nil)
 
-	if len(state.pendingSteers) != 0 {
-		t.Fatalf("plain input must not steer a user shell run, got %#v", state.pendingSteers)
+	q := session.SurfaceInputQueue("s1")
+	for _, entry := range q.Runtime().Snapshot() {
+		if entry.Mode == run.TurnInputModeSteer {
+			t.Fatalf("plain input must not steer a user shell run, got %#v", entry)
+		}
 	}
-	if len(state.queuedTurns) != 1 || state.queuedTurns[0].Submission.Text != "explain that output" {
-		t.Fatalf("expected input queued as ordinary turn, got %#v", state.queuedTurns)
-	}
-	session.mu.Lock()
-	steered := len(session.steered)
-	session.mu.Unlock()
-	if steered != 0 {
-		t.Fatalf("expected no steer attempt during user shell run, got %d", steered)
+	if preview := q.Preview(); len(preview.FollowUp) != 1 || preview.FollowUp[0] != "explain that output" {
+		t.Fatalf("expected input queued as ordinary turn, got %#v", preview.FollowUp)
 	}
 }
 
 // An agent turn still steers normally; the shell guard must not leak.
 func TestPlainInputDuringAgentRunStillSteers(t *testing.T) {
 	session := &fakeSession{steerAccepted: true}
-	state := &streamState{sessionID: "s1", activeRunIsUserShell: false}
+	state := &streamState{sessionID: "s1", session: session, activeRunIsUserShell: false}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
 		inputEvent{kind: inputEventLine, line: "also update the docs"}, nil)
 
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("agent-run input must steer, not queue: %#v", state.queuedTurns)
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.FollowUp) != 0 {
+		t.Fatalf("agent-run input must steer, not queue: %#v", preview.FollowUp)
 	}
-	if len(state.pendingSteers) != 1 {
-		t.Fatalf("expected steer recorded, got %#v", state.pendingSteers)
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.Steers) != 1 {
+		t.Fatalf("expected steer recorded, got %#v", preview.Steers)
 	}
 }
 
@@ -14740,19 +15074,16 @@ func TestRunTurnMarksUserShellTurn(t *testing.T) {
 // A pending modal selection must not be raced by queue draining: the queued
 // turn would run against settings the user is still choosing.
 func TestSuppressedQueueAutosendBlocksDrainUntilSelectionApplied(t *testing.T) {
-	state := &streamState{
-		suppressQueueAutosend: true,
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{
-				Text: "follow up", DisplayText: "follow up", Parts: []llm.ContentPart{llm.Text("follow up")},
-			}},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session, suppressQueueAutosend: true}
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text: "follow up", DisplayText: "follow up", Parts: []llm.ContentPart{llm.Text("follow up")},
+	})
 	if next, ok := nextAutomaticSubmission(state, runTurnCompleted); ok {
 		t.Fatalf("queue must not drain while a selection is pending, got %#v", next)
 	}
-	if len(state.queuedTurns) != 1 {
-		t.Fatalf("suppressed drain must leave the queue intact, got %#v", state.queuedTurns)
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.FollowUp) != 1 {
+		t.Fatalf("suppressed drain must leave the queue intact, got %#v", preview.FollowUp)
 	}
 
 	state.resumeQueueAutosend()
@@ -14811,11 +15142,12 @@ func TestRecallPicksNewestAcrossQueues(t *testing.T) {
 	if got := h.state.composer.DraftText; got != "follow-up second" {
 		t.Fatalf("expected the newest queued message, got %q", got)
 	}
-	if len(h.state.pendingSteers) != 1 {
-		t.Fatalf("the older steer must stay queued: %#v", h.state.pendingSteers)
+	preview := h.session.SurfaceInputQueue("s1").Preview()
+	if len(preview.Steers) != 1 {
+		t.Fatalf("the older steer must stay queued: %#v", preview.Steers)
 	}
-	if len(h.state.queuedTurns) != 0 {
-		t.Fatalf("the recalled follow-up must leave its queue: %#v", h.state.queuedTurns)
+	if len(preview.FollowUp) != 0 {
+		t.Fatalf("the recalled follow-up must leave its queue: %#v", preview.FollowUp)
 	}
 }
 
@@ -14831,8 +15163,8 @@ func TestRecallPicksNewestSteerQueuedAfterFollowUp(t *testing.T) {
 	if got := h.state.composer.DraftText; got != "steer second" {
 		t.Fatalf("expected the newest queued message, got %q", got)
 	}
-	if len(h.state.queuedTurns) != 1 {
-		t.Fatalf("the older follow-up must stay queued: %#v", h.state.queuedTurns)
+	if preview := h.session.SurfaceInputQueue("s1").Preview(); len(preview.FollowUp) != 1 {
+		t.Fatalf("the older follow-up must stay queued: %#v", preview.FollowUp)
 	}
 	if got := len(h.session.rt.Snapshot()); got != 0 {
 		t.Fatalf("recalled steer must be retracted from the runtime, got %d", got)
@@ -14854,7 +15186,7 @@ func TestRecallWalksBackwardsThroughEnqueueOrder(t *testing.T) {
 		// Clearing the composer cancels the recalled message, as the hint says.
 		h.state.clearComposer()
 	}
-	if _, ok := h.state.newestQueuedSubmission(0); ok {
+	if _, ok := h.session.SurfaceInputQueue("s1").Recall(); ok {
 		t.Fatal("expected every queued message to have been recalled")
 	}
 }
@@ -14887,8 +15219,8 @@ func TestRecallTerminatesWhenOnlyDeliveredSteersRemain(t *testing.T) {
 	if h.state.restoreLatestQueuedEditableSubmission(h.session) {
 		t.Fatal("delivered steers must not be recallable")
 	}
-	if len(h.state.pendingSteers) != 2 {
-		t.Fatalf("delivered steers must stay in the mirror for the boundary handler: %#v", h.state.pendingSteers)
+	if got := h.session.SurfaceInputQueue("s1").TakeDelivered(); len(got) != 2 {
+		t.Fatalf("delivered steers must stay held for the boundary handler: %#v", got)
 	}
 }
 
@@ -14900,34 +15232,37 @@ func TestQueueSeqIsSharedAcrossQueues(t *testing.T) {
 	h.queueFollowUp("b")
 	h.steer("c")
 
-	seqs := []int{
-		h.state.pendingSteers[0].QueueSeq,
-		h.state.queuedTurns[0].Submission.QueueSeq,
-		h.state.pendingSteers[1].QueueSeq,
+	// Recall walks backwards from the newest, so the shared clock reads as a
+	// strictly decreasing sequence here — equal stamps from separate lanes
+	// would make two of these compare equal and misorder the recall.
+	var seqs []int
+	for i := 0; i < 3; i++ {
+		in, ok := h.session.SurfaceInputQueue("s1").Recall()
+		if !ok {
+			t.Fatalf("expected message %d to be recallable", i)
+		}
+		seqs = append(seqs, in.Seq)
 	}
 	for i := 1; i < len(seqs); i++ {
-		if seqs[i] <= seqs[i-1] {
-			t.Fatalf("enqueue clock must increase across queues, got %v", seqs)
+		if seqs[i] >= seqs[i-1] {
+			t.Fatalf("enqueue clock must be shared across queues, got %v", seqs)
 		}
 	}
 }
 
 func TestRecalledQueueItemClearedDoesNotDispatchOrReappear(t *testing.T) {
-	state := &streamState{
-		queuedTurns: []queuedSubmission{{
-			Action: queuedSubmissionActionTurn,
-			Submission: ComposerSubmission{
-				Text:        "delete me",
-				DisplayText: "delete me",
-				Parts:       []llm.ContentPart{llm.Text("delete me")},
-			},
-		}},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text:        "delete me",
+		DisplayText: "delete me",
+		Parts:       []llm.ContentPart{llm.Text("delete me")},
+	})
 	if !state.restoreLatestQueuedEditableSubmission(nil) {
 		t.Fatal("expected queued item to be recalled")
 	}
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("recalled item still queued: %#v", state.queuedTurns)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("recalled item still queued: %#v", preview)
 	}
 	if !state.clearComposer() {
 		t.Fatal("expected recalled draft to clear")
@@ -14947,7 +15282,9 @@ func TestUnchangedRecalledSubmissionPreservesStructuredPayload(t *testing.T) {
 		SkillPath:     "trusted skill path",
 		Parts:         []llm.ContentPart{llm.Text("expanded model prompt")},
 	}
-	state := &streamState{queuedTurns: []queuedSubmission{{Action: queuedSubmissionActionTurn, Submission: original}}}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", original)
 	if !state.restoreLatestQueuedEditableSubmission(nil) {
 		t.Fatal("expected recall")
 	}
@@ -14968,22 +15305,23 @@ func TestUnchangedRecalledSubmissionPreservesStructuredPayload(t *testing.T) {
 }
 
 func TestCompletedTurnPrefersRejectedSteersAndInterruptedRestoresShell(t *testing.T) {
-	state := &streamState{
-		rejectedSteers: []queuedSubmission{{Action: queuedSubmissionActionRejectedSteer, Submission: ComposerSubmission{
-			Text: "retry steer", DisplayText: "retry steer", Parts: []llm.ContentPart{llm.Text("retry steer")},
-		}}},
-		queuedTurns: []queuedSubmission{{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{
-			Text: "ordinary", DisplayText: "ordinary", Parts: []llm.ContentPart{llm.Text("ordinary")},
-		}}},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueRejected("s1", ComposerSubmission{
+		Text: "retry steer", DisplayText: "retry steer", Parts: []llm.ContentPart{llm.Text("retry steer")},
+	})
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text: "ordinary", DisplayText: "ordinary", Parts: []llm.ContentPart{llm.Text("ordinary")},
+	})
 	next, ok := nextAutomaticSubmission(state, runTurnCompleted)
-	if !ok || next.Text != "retry steer" || len(state.queuedTurns) != 1 {
-		t.Fatalf("rejected steer priority violated: next=%#v queued=%#v", next, state.queuedTurns)
+	if !ok || next.Text != "retry steer" || len(session.SurfaceInputQueue("s1").Preview().FollowUp) != 1 {
+		t.Fatalf("rejected steer priority violated: next=%#v queued=%#v", next, session.SurfaceInputQueue("s1").Preview().FollowUp)
 	}
 
-	state = &streamState{queuedTurns: []queuedSubmission{{Action: queuedSubmissionActionShell, Submission: ComposerSubmission{
+	state = &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", ComposerSubmission{
 		Text: "!echo deferred", DisplayText: "!echo deferred", Parts: []llm.ContentPart{llm.Text("!echo deferred")},
-	}}}}
+	})
 	if next, ok := nextAutomaticSubmission(state, runTurnInterrupted); ok || len(next.Parts) != 0 {
 		t.Fatalf("interrupted shell must not auto-run: ok=%v next=%#v", ok, next)
 	}
@@ -15002,11 +15340,11 @@ func TestFailedTurnResubmitsPendingSteer(t *testing.T) {
 		steerAccepted: true,
 		dispatchErr:   errors.New("upstream provider error: 429 rate limited"),
 	}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
-	state.enqueuePendingSteer(ComposerSubmission{
+	session.enqueueSteer("s1", ComposerSubmission{
 		Text:        "also update the changelog",
 		DisplayText: "also update the changelog",
 		Parts:       []llm.ContentPart{llm.Text("also update the changelog")},
@@ -15028,20 +15366,21 @@ func TestFailedTurnResubmitsPendingSteer(t *testing.T) {
 	}
 }
 
-// The surface's mirror is what resubmits, so a failed turn must not let the
-// end-of-run reconcile empty it. SurfacePendingSteerCount reports "no live run"
-// once the turn is over, which is not evidence that anything was delivered.
+// The queue is what resubmits, so a failed turn must not let the end-of-run
+// delivered-drain empty it. Nothing was delivered — a turn that died on a
+// provider error never reached a tool boundary — which is not evidence that
+// anything was answered.
 func TestFailedTurnKeepsMirrorWhenSteerCountIsUnavailable(t *testing.T) {
 	session := &fakeSession{
 		steerAccepted:       true,
 		pendingSteerCountOK: false,
 		dispatchErr:         errors.New("upstream provider error: 500"),
 	}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
-	state.enqueuePendingSteer(ComposerSubmission{
+	session.enqueueSteer("s1", ComposerSubmission{
 		Text:  "and run the tests",
 		Parts: []llm.ContentPart{llm.Text("and run the tests")},
 	})
@@ -15049,8 +15388,8 @@ func TestFailedTurnKeepsMirrorWhenSteerCountIsUnavailable(t *testing.T) {
 	if _, err := runTurn(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, "go", "go", "", nil, "", nil, nil, nil); err != nil {
 		t.Fatalf("runTurn: %v", err)
 	}
-	if len(state.pendingSteers) != 1 {
-		t.Fatalf("pending steers=%#v want the queued message preserved for resubmission", state.pendingSteers)
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.Steers) != 1 {
+		t.Fatalf("pending steers=%#v want the queued message preserved for resubmission", preview.Steers)
 	}
 }
 
@@ -15620,11 +15959,9 @@ func textSubmission(text string) ComposerSubmission {
 // the top of the draft and the recalled message is gone for good.
 func TestInterruptKeepsRecalledDraftAlongsideQueuedWork(t *testing.T) {
 	session := &fakeSession{steerRetracted: true}
-	state := &streamState{
-		sessionID:     "s1",
-		pendingSteers: []ComposerSubmission{textSubmission("recalled steer")},
-		queuedTurns:   []queuedSubmission{{Action: queuedSubmissionActionTurn, Submission: textSubmission("queued follow-up")}},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", textSubmission("recalled steer"))
+	session.enqueueFollowUp("s1", textSubmission("queued follow-up"))
 	if !state.restoreLatestQueuedEditableSubmission(session) {
 		t.Fatal("expected the pending steer to be recalled")
 	}
@@ -15646,10 +15983,8 @@ func TestInterruptKeepsRecalledDraftAlongsideQueuedWork(t *testing.T) {
 // left, so it must survive on its own too.
 func TestInterruptKeepsRecalledDraftWithEmptyQueues(t *testing.T) {
 	session := &fakeSession{steerRetracted: true}
-	state := &streamState{
-		sessionID:     "s1",
-		pendingSteers: []ComposerSubmission{textSubmission("recalled steer")},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", textSubmission("recalled steer"))
 	if !state.restoreLatestQueuedEditableSubmission(session) {
 		t.Fatal("expected the pending steer to be recalled")
 	}
@@ -15890,9 +16225,10 @@ func TestRendererBannerDefaultsToForebrain(t *testing.T) {
 	r := NewRenderer(&out, &out)
 	r.Banner(StartupInfo{Version: "v0.1.0", Directory: "~/workspace/forebrain"})
 	got := stripANSI(out.String())
-	// Without colour the mascot is drawn as its silhouette; its crown row is
-	// the same in every profile.
-	if !strings.Contains(got, "▄▄███▄██▄▄██▄███▄▄") {
+	// Without colour the mascot is drawn as its silhouette; its crown row —
+	// one solid dome with its corners rounded off — is the same in every
+	// profile.
+	if !strings.Contains(got, "  ████████████████  ") {
 		t.Fatalf("banner did not contain the mascot: %q", out.String())
 	}
 	for _, want := range []string{"Forebrain Harness", "v0.1.0", "~/workspace/forebrain", "/ commands", "@ mention", "esc interrupt", "ctrl+j newline"} {
@@ -15928,6 +16264,342 @@ func TestRendererBannerKeepsFullWorkingDirectory(t *testing.T) {
 		}
 		if !strings.Contains(text.String(), dir) {
 			t.Fatalf("width %d: banner truncated working directory: %q", width, stripANSI(strings.Join(lines, "\n")))
+		}
+	}
+}
+
+// TestForebrainBannerWrapsLongVersion keeps a development build's
+// pseudo-version inside the card: on a text column too narrow for it, even on
+// a line of its own, it wraps at its separators instead of running through the
+// frame.
+func TestForebrainBannerWrapsLongVersion(t *testing.T) {
+	version := "v0.1.2-0.20261005142755-936df40fba17+dirty"
+	for _, width := range []int{200, 120, 80 - viewportRightPadding, 50, 24} {
+		lines := forebrainBannerLines(version, "~/proj", width)
+		var text strings.Builder
+		for _, line := range lines {
+			if w := displayLineWidth(line); w > width {
+				t.Fatalf("width %d: banner line is %d columns wide: %q", width, w, stripANSI(line))
+			}
+			for _, r := range stripANSI(line) {
+				if r > ' ' && r < 0x7f {
+					text.WriteRune(r)
+				}
+			}
+		}
+		if !strings.Contains(text.String(), version) {
+			t.Fatalf("width %d: banner lost part of the version: %q", width, stripANSI(strings.Join(lines, "\n")))
+		}
+	}
+}
+
+// TestForebrainMascotIsTheApprovedDesign pins the mascot to the design the
+// owner approved for the startup card (docs/design/STARTUP_CARD.html): 10×6
+// pixels — 20 columns by 6 rows — with a rounded crown, a one-pixel harness
+// node, 2x2 eyes with their shine, a small smile and two feet. It supersedes
+// the 14×8 grid of docs/plan/MASCOT_COMPACT_GRID_PLAN.md. It guards the bug
+// where the grid was coarsened to dodge a rendering seam and the face lost
+// that detail: a rendering problem is fixed in forebrainMascotRows, never by
+// redrawing the mascot, and changing the grid needs the owner's sign-off.
+func TestForebrainMascotIsTheApprovedDesign(t *testing.T) {
+	approved := []string{
+		".FFFFFFFF.",
+		"FFFFAAFFFF",
+		"FFWPFFWPFF",
+		"FFPPFFPPFF",
+		".FFFPPFFF.",
+		"..FF..FF..",
+	}
+	if len(forebrainMascot) != len(approved) {
+		t.Fatalf("mascot grid has %d rows, the approved design has %d", len(forebrainMascot), len(approved))
+	}
+	if len(forebrainMascot[0]) != 10 {
+		t.Fatalf("mascot grid is %d pixels wide, the approved design is 10", len(forebrainMascot[0]))
+	}
+	if forebrainMascotWidth != 20 {
+		t.Fatalf("mascot is %d columns wide, the approved design is 20 (10 pixels x %d)", forebrainMascotWidth, forebrainMascotPixelCols)
+	}
+	for y, row := range forebrainMascot {
+		if row != approved[y] {
+			t.Fatalf("mascot grid row %d is %q, the approved design has %q", y, row, approved[y])
+		}
+		for x := 0; x < len(row); x++ {
+			if row[x] == '.' {
+				continue
+			}
+			if _, ok := forebrainMascotPalette[row[x]]; !ok {
+				t.Fatalf("grid row %d column %d uses %q, which has no palette entry", y, x, string(row[x]))
+			}
+		}
+	}
+}
+
+// TestForebrainMascotPaletteIsExactXterm256 keeps the palette on exact
+// xterm-256 entries so a 256-colour terminal shows the same colour a
+// true-colour one does instead of a nearest-match quantisation.
+func TestForebrainMascotPaletteIsExactXterm256(t *testing.T) {
+	for letter, c := range forebrainMascotPalette {
+		hex := string(c)
+		if got := termenv.ConvertToRGB(termenv.ANSI256.Color(hex)).Hex(); got != hex {
+			t.Fatalf("palette colour %q (%s) quantises to %s under xterm-256", string(letter), hex, got)
+		}
+	}
+}
+
+// TestForebrainMascotPaintsBodyAsBackground pins the drawing rule that keeps
+// the mascot free of seams: one pixel row per terminal row, each pixel a run
+// of forebrainMascotPixelCols spaces painted with a single background colour,
+// and no glyph anywhere. A block glyph is a font shape; macOS Terminal rounds
+// its cell up past it at common sizes, and the uncovered remainder shows
+// through as a line.
+func TestForebrainMascotPaintsBodyAsBackground(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	rows := forebrainMascotRows()
+	if len(rows) != len(forebrainMascot) {
+		t.Fatalf("mascot renders as %d terminal rows, want one per pixel row (%d)", len(rows), len(forebrainMascot))
+	}
+	for i, row := range rows {
+		if w := displayLineWidth(row); w != forebrainMascotWidth {
+			t.Fatalf("mascot row %d is %d columns wide, want %d", i, w, forebrainMascotWidth)
+		}
+		for _, r := range stripANSI(row) {
+			if r != ' ' {
+				t.Fatalf("mascot row %d contains %q after stripping colour; every cell must be a plain space, never a glyph", i, string(r))
+			}
+		}
+	}
+	pixel := strings.Repeat(" ", forebrainMascotPixelCols)
+	if !strings.Contains(rows[0], "\x1b[48;5;74m"+pixel+"\x1b[0m") {
+		t.Fatalf("mascot crown row does not paint the body as a background colour: %q", rows[0])
+	}
+	eyeRow := -1
+	for y, line := range forebrainMascot {
+		if strings.IndexByte(line, 'W') >= 0 {
+			eyeRow = y
+			break
+		}
+	}
+	if eyeRow < 0 || !strings.Contains(rows[eyeRow], "\x1b[48;5;231m"+pixel+"\x1b[0m") {
+		t.Fatalf("mascot eye row does not paint the eye shine: %d", eyeRow)
+	}
+	run := regexp.MustCompile("\x1b\\[([0-9;]*)m([^\x1b]*)\x1b\\[0m")
+	for i, row := range rows {
+		for _, m := range run.FindAllStringSubmatch(row, -1) {
+			params, cells := m[1], m[2]
+			if cells != pixel {
+				t.Fatalf("mascot row %d paints %q; a pixel must be %d plain spaces", i, cells, forebrainMascotPixelCols)
+			}
+			if !strings.HasPrefix(params, "48;5;") {
+				t.Fatalf("mascot row %d paints a pixel with %q; a pixel must carry only a background colour", i, params)
+			}
+		}
+	}
+}
+
+// TestForebrainBannerWidthFollowsPath pins the card's width rule: at least
+// bannerMinWidth columns, growing with the path, capped only by the terminal.
+func TestForebrainBannerWidthFollowsPath(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	longDir := "/workspace/very/long/path/that/exceeds/the/old/banner/directory/length/limit/project"
+	chrome := 2*(1+bannerPadding) + forebrainMascotWidth + bannerGutter
+	cardWidth := func(width int, dir string) int {
+		t.Helper()
+		lines := forebrainBannerLines("v0.1.0", dir, width)
+		if len(lines) < 2 {
+			t.Fatalf("width %d, dir %q: banner has %d lines", width, dir, len(lines))
+		}
+		return displayLineWidth(lines[1])
+	}
+	// With the mascot, the shortest text — the two shortcut columns — leaves
+	// the card under the floor, so the floor holds it at bannerMinWidth.
+	if natural := chrome + 2*bannerShortcutItemWidth() + bannerGutter + 1; natural >= bannerMinWidth {
+		t.Fatalf("chrome %d + shortcut columns = %d; the shortest card should sit under the %d-column floor", chrome, natural, bannerMinWidth)
+	}
+	if w := cardWidth(200, "~/proj"); w != bannerMinWidth {
+		t.Fatalf("width 200, ~/proj: card is %d columns wide, want the %d-column floor", w, bannerMinWidth)
+	}
+	// An 80-column terminal paints the transcript at 78 columns; the card
+	// fills that width and still carries the mascot.
+	if w := cardWidth(80-viewportRightPadding, "~/proj"); w != 80-viewportRightPadding {
+		t.Fatalf("width %d, ~/proj: card is %d columns wide, want the full width", 80-viewportRightPadding, w)
+	}
+	if w := cardWidth(200, longDir); w != chrome+displayLineWidth(longDir) {
+		t.Fatalf("width 200, long path: card is %d columns wide, want chrome %d + path %d", w, chrome, displayLineWidth(longDir))
+	}
+	onOneLine := false
+	for _, line := range forebrainBannerLines("v0.1.0", longDir, 200) {
+		if strings.Contains(stripANSI(line), longDir) {
+			onOneLine = true
+		}
+	}
+	if !onOneLine {
+		t.Fatalf("width 200: the long path should fit on one line")
+	}
+	if w := cardWidth(90, longDir); w != 90 {
+		t.Fatalf("width 90, long path: card is %d columns wide, want the terminal width", w)
+	}
+	for _, line := range forebrainBannerLines("v0.1.0", longDir, 90) {
+		if strings.Contains(stripANSI(line), longDir) {
+			t.Fatalf("width 90: the long path should wrap at its separators, not be squeezed or truncated")
+		}
+	}
+	if w := cardWidth(70, "~/proj"); w != 70 {
+		t.Fatalf("width 70, ~/proj: card is %d columns wide; a terminal narrower than the floor still caps the card", w)
+	}
+}
+
+// TestForebrainBannerCentresMascotOnText pins the vertical centring rule:
+// mascot and text column are each centred on the card, and whenever the
+// height difference is odd the mascot sinks half a row so the text never
+// sits low — whichever of the two is taller.
+func TestForebrainBannerCentresMascotOnText(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	longDir := "/workspace/very/long/path/that/exceeds/the/old/banner/directory/length/limit/project"
+	// Below its minimum width the card drops the mascot.
+	for _, line := range forebrainBannerLines("v0.1.0", "~/workspace/forebrain", bannerMascotMinWidth-1) {
+		if strings.ContainsRune(stripANSI(line), '█') {
+			t.Fatalf("width %d: the card should drop the mascot below %d columns: %q", bannerMascotMinWidth-1, bannerMascotMinWidth, stripANSI(line))
+		}
+	}
+	// A path that wraps into many pieces makes the text column taller than
+	// the mascot on a narrow card; at 120 columns the long path leaves the
+	// text an odd number of rows shorter than it.
+	tallDir := strings.Repeat("/abcdefghijklmnopqrstuvwxyz0123", 10)
+	for _, width := range []int{200, 120, 90, bannerMascotMinWidth} {
+		for _, dir := range []string{"~/workspace/forebrain", longDir, tallDir} {
+			lines := forebrainBannerLines("v0.1.0", dir, width)
+			textTop, textBottom, artTop, artBottom := -1, -1, -1, -1
+			for i, line := range lines {
+				plain := stripANSI(line)
+				if textTop < 0 && strings.Contains(plain, "Forebrain Harness") {
+					textTop = i
+				}
+				if strings.Contains(plain, "ctrl+j") {
+					textBottom = i
+				}
+				if strings.ContainsAny(plain, "█▀▄") {
+					if artTop < 0 {
+						artTop = i
+					}
+					artBottom = i
+				}
+			}
+			if textTop < 0 || textBottom < 0 || artTop < 0 || artBottom < 0 {
+				t.Fatalf("width %d, dir %q: could not locate the blocks (text %d..%d, mascot %d..%d)", width, dir, textTop, textBottom, artTop, artBottom)
+			}
+			if artBottom-artTop+1 != len(forebrainMascot) {
+				t.Fatalf("width %d, dir %q: mascot spans %d rows, want %d", width, dir, artBottom-artTop+1, len(forebrainMascot))
+			}
+			// Twice the distance between the two centre lines, in rows;
+			// positive when the mascot sits lower.
+			d := (artTop + artBottom) - (textTop + textBottom)
+			if d != 0 && d != 1 {
+				t.Fatalf("width %d, dir %q: mascot rows %d..%d, text rows %d..%d; the centres must coincide or the mascot sink half a row", width, dir, artTop, artBottom, textTop, textBottom)
+			}
+			if width == 200 && dir != tallDir && d != 0 {
+				t.Fatalf("width 200, dir %q: with the path on one line the centre lines must coincide (mascot rows %d..%d, text rows %d..%d)", dir, artTop, artBottom, textTop, textBottom)
+			}
+			if width == bannerMascotMinWidth && dir == tallDir && textBottom-textTop+1 <= len(forebrainMascot) {
+				t.Fatalf("width %d: the wrapped path should make the text taller than the mascot (text rows %d..%d)", width, textTop, textBottom)
+			}
+		}
+	}
+}
+
+// TestForebrainBannerFrameIsDashed pins the startup card's frame to the
+// dashed design the owner approved (docs/design/STARTUP_CARD.html): the top
+// and bottom edges use U+2504, the sides use U+2506, and the rule under the
+// product name is the same dash as the frame. Solid ─/│ anywhere in the card
+// is the bug this guards.
+func TestForebrainBannerFrameIsDashed(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	if bannerFrameH != "┄" || bannerFrameV != "┆" {
+		t.Fatalf("the frame glyphs are %q/%q, the approved design is U+2504/U+2506 (┄/┆)", bannerFrameH, bannerFrameV)
+	}
+	lines := forebrainBannerLines("v0.1.0", "~/workspace/forebrain", 120)
+	plain := make([]string, len(lines))
+	for i, line := range lines {
+		plain[i] = stripANSI(line)
+	}
+	if len(plain) < 5 {
+		t.Fatalf("banner has %d lines, want the framed card: %q", len(plain), plain)
+	}
+	top, bottom := plain[1], plain[len(plain)-1]
+	if !strings.HasPrefix(top, "╭┄") || !strings.HasSuffix(top, "┄╮") {
+		t.Fatalf("the top edge is not dashed: %q", top)
+	}
+	if !strings.HasPrefix(bottom, "╰┄") || !strings.HasSuffix(bottom, "┄╯") {
+		t.Fatalf("the bottom edge is not dashed: %q", bottom)
+	}
+	cardW := displayLineWidth(top)
+	textW := cardW - (2*(1+bannerPadding) + forebrainMascotWidth + bannerGutter)
+	nameRow := -1
+	for i, line := range plain[2 : len(plain)-1] {
+		if !strings.HasPrefix(line, "┆") || !strings.HasSuffix(line, "┆") {
+			t.Fatalf("row %d is not closed by the dashed sides: %q", i+2, line)
+		}
+		if strings.Contains(line, bannerProductName) {
+			nameRow = i + 2
+		}
+	}
+	if nameRow < 0 || nameRow+1 >= len(plain)-1 {
+		t.Fatalf("could not find the rule under the product name (%d lines): %q", len(plain), plain)
+	}
+	rule := []rune(plain[nameRow+1])
+	rule = rule[1+bannerPadding : len(rule)-1-bannerPadding]
+	if got := string(rule[len(rule)-textW:]); got != strings.Repeat("┄", textW) {
+		t.Fatalf("the rule under the name is not dashed across the %d-column text width: %q", textW, got)
+	}
+	for i, line := range plain {
+		if strings.ContainsAny(line, "│─") {
+			t.Fatalf("card line %d still uses a solid frame glyph: %q", i, line)
+		}
+	}
+}
+
+// TestForebrainBannerKeepsMascotAtFiftyEight pins the mascot's width floor:
+// 58 columns is the narrowest card with room for the 20-column mascot and a
+// 29-column text column, so a 60-column window still shows the mascot, and
+// one column less drops it.
+func TestForebrainBannerKeepsMascotAtFiftyEight(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	hasMascot := func(lines []string) bool {
+		for _, line := range lines {
+			if strings.ContainsRune(stripANSI(line), '█') {
+				return true
+			}
+		}
+		return false
+	}
+	for _, width := range []int{bannerMascotMinWidth, 59, 66, 78} {
+		lines := forebrainBannerLines("v0.1.0", "~/workspace/forebrain", width)
+		if !hasMascot(lines) {
+			t.Fatalf("width %d: the card keeps the mascot at or above %d columns: %q", width, bannerMascotMinWidth, stripANSI(strings.Join(lines, "\n")))
+		}
+		for _, line := range lines {
+			if w := displayLineWidth(line); w > width {
+				t.Fatalf("width %d: banner line is %d columns wide: %q", width, w, stripANSI(line))
+			}
+		}
+	}
+	for _, width := range []int{24, 50, bannerMascotMinWidth - 1} {
+		if hasMascot(forebrainBannerLines("v0.1.0", "~/workspace/forebrain", width)) {
+			t.Fatalf("width %d: the card drops the mascot below %d columns", width, bannerMascotMinWidth)
 		}
 	}
 }
@@ -16603,8 +17275,8 @@ func TestRendererAgentRosterRendersRowsAndSelectedMarker(t *testing.T) {
 				Kind:           "subagent",
 				Label:          "plan-reviewer",
 				Status:         "running",
+				Title:          "Review the plan",
 				Task:           "Review the plan below before the user approves it.",
-				Activity:       "read_file internal/x.go",
 				ElapsedSeconds: 12,
 				ToolCount:      2,
 				FileCount:      1,
@@ -16614,7 +17286,8 @@ func TestRendererAgentRosterRendersRowsAndSelectedMarker(t *testing.T) {
 				Kind:   "subagent",
 				Label:  "explore",
 				Status: "running",
-				Task:   "map the approval flow",
+				Title:  "map the approval flow",
+				Task:   "map the approval flow from the composer to the run events",
 			},
 		},
 	}
@@ -16631,15 +17304,19 @@ func TestRendererAgentRosterRendersRowsAndSelectedMarker(t *testing.T) {
 	if strings.Contains(got, "subagent-9f3a1b2c") || strings.Contains(got, "subagent-7d4e5f60") {
 		t.Fatalf("roster must not show raw ids in %q", got)
 	}
-	// Right of the name: the tool in flight, or the task it was dispatched with.
-	for _, want := range []string{"read_file internal/x.go", "map the approval flow"} {
+	// Right of the name: the task it was dispatched to do, by the same name
+	// its card shows.
+	for _, want := range []string{"Review the plan", "map the approval flow"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("roster missing the row's current work %q in %q", want, got)
+			t.Fatalf("roster missing the row's task %q in %q", want, got)
 		}
 	}
-	// The dispatch prompt is superseded by live activity, not shown twice.
-	if strings.Contains(got, "Review the plan below") {
-		t.Fatalf("a running tool must replace the dispatch task in %q", got)
+	// The dispatch prompt is the first message of the agent's own view, not a
+	// line of the roster.
+	for _, banned := range []string{"before the user approves it", "from the composer to the run events"} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("roster must not show the dispatch prompt in %q", got)
+		}
 	}
 	// Hint must NOT appear when not focused.
 	for _, hint := range []string{agentRosterPrimaryHint, agentRosterSubagentHint} {
@@ -16668,10 +17345,14 @@ func TestRendererAgentRosterRendersRowsAndSelectedMarker(t *testing.T) {
 // dispatcher chose for it. The dispatch prompt is a whole instruction — the
 // first message of the subagent's own view — and the first 56 columns of one
 // name nothing, which is why the row shows the title the dispatcher gave the
-// task. A dispatch that arrives without a title still has to name the row, so
-// the prompt's opening line stands in.
+// task. A dispatch that arrives without a title still names the row: the
+// engine derives the spawn's title from the prompt's opening line.
 func TestAgentRosterRowShowsTheTaskTitleNotThePrompt(t *testing.T) {
 	const prompt = "Read-only investigation in /Users/doudou/workspace/unionj-cloud/forebrain-harness.\nDetermine where RenderFrame is called."
+	// A spawn that was dispatched without a title still carries one: the engine
+	// derives it from the prompt's opening line, so both rows below arrive
+	// named and the roster needs no fallback of its own.
+	derived := strings.SplitN(prompt, "\n", 2)[0]
 	var reducer Reducer
 	reducer.Reduce(SubagentSpawnedMsg{
 		AgentID:   "subagent-5aae6b91",
@@ -16682,6 +17363,7 @@ func TestAgentRosterRowShowsTheTaskTitleNotThePrompt(t *testing.T) {
 	reducer.Reduce(SubagentSpawnedMsg{
 		AgentID:   "subagent-7d4e5f60",
 		AgentType: "explore",
+		Title:     derived,
 		Task:      prompt,
 	})
 
@@ -16703,6 +17385,132 @@ func TestAgentRosterRowShowsTheTaskTitleNotThePrompt(t *testing.T) {
 	painted := strings.Join(formatAgentRosterLines(AgentRosterSnapshot{Rows: rows[:1]}, false, 0, 120), "\n")
 	if strings.Contains(painted, "Read-only investigation") {
 		t.Fatalf("a titled task must not show its prompt on the row: %q", painted)
+	}
+}
+
+// A subagent running tools must not lose the name of its job on the roster:
+// the row keeps showing the task its card shows, verbatim, while the tool in
+// flight is reported on the card's third layer — where it already lives —
+// instead of overwriting the roster row.
+func TestRosterRowShowsTheCardTaskWhileItsAgentRunsTools(t *testing.T) {
+	titles := []string{"任务16 migrate 导入", "任务17 扩展目录"}
+	agentIDs := []string{"subagent-8c5c1a2b", "subagent-37aa9f60"}
+	toolLabels := []string{"read /a/b.go", "edit /c/d.go"}
+
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("step-fanout", tool.StepEvent{
+		Kind:     tool.StepKindToolStarted,
+		ToolName: "subagent_fanout",
+		Input: map[string]any{
+			"tasks": []any{
+				map[string]any{"title": titles[0], "prompt": "run the command", "subagent_type": "general-purpose"},
+				map[string]any{"title": titles[1], "prompt": "run the command", "subagent_type": "general-purpose"},
+			},
+		},
+	})})
+	for i := range titles {
+		_ = r.Reduce(SubagentSpawnedMsg{
+			AgentID:          agentIDs[i],
+			AgentType:        "general-purpose",
+			Title:            titles[i],
+			Task:             "run the command",
+			ParentToolCallID: "step-fanout",
+			TaskIndex:        i,
+		})
+		_ = r.Reduce(NewMessageMsg{Msg: Message{
+			Kind:     MsgKindTool,
+			AgentID:  agentIDs[i],
+			StepID:   fmt.Sprintf("step-tool-%d", i),
+			ToolName: "shell",
+			ToolMeta: tool.ToolMeta{ToolName: "shell", Invocation: toolLabels[i]},
+		}})
+	}
+
+	rows := r.AgentRosterSnapshot().Rows
+	if len(rows) != 2 {
+		t.Fatalf("expected two roster rows, got %#v", rows)
+	}
+	lines := formatAgentRosterLines(r.AgentRosterSnapshot(), false, -1, 120)
+	if len(lines) != 2 {
+		t.Fatalf("expected two painted roster lines, got %q", lines)
+	}
+	for i := range titles {
+		if got := agentRosterRowDetail(rows[i]); got != titles[i] {
+			t.Fatalf("roster row %d detail = %q, want the card task %q while its agent runs tools", i, got, titles[i])
+		}
+		if !strings.Contains(lines[i], titles[i]) {
+			t.Fatalf("roster line %d = %q, must carry the task title", i, lines[i])
+		}
+		if strings.Contains(lines[i], "read /") || strings.Contains(lines[i], "edit /") {
+			t.Fatalf("roster line %d = %q, must not show the tool its agent is running", i, lines[i])
+		}
+	}
+
+	// The same characters, on the card: each task's title is one whole line of
+	// the fanout body, identical to the roster row's title.
+	fs := r.findFanoutByStepID("step-fanout")
+	if fs == nil {
+		t.Fatal("fanout state missing")
+	}
+	content, _, _ := renderFanoutContent(fs)
+	cardLines := strings.Split(content, "\n")
+	for i := range titles {
+		if !slices.Contains(cardLines, titles[i]) {
+			t.Fatalf("card content must name task %d %q on its own line, got %q", i, titles[i], content)
+		}
+	}
+	// The card keeps the live tool progress on its third layer.
+	for _, label := range toolLabels {
+		if !strings.Contains(content, label) {
+			t.Fatalf("card content must keep its third-layer tool progress %q, got %q", label, content)
+		}
+	}
+}
+
+// A task dispatched without a title has exactly one name: the first line of
+// its prompt, derived once. The card must not fold the whole prompt onto one
+// line while the roster shows only its opening line.
+func TestUntitledTaskHasOneNameOnCardAndRoster(t *testing.T) {
+	prompt := "first line of the job\nsecond line"
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("step-fanout", tool.StepEvent{
+		Kind:     tool.StepKindToolStarted,
+		ToolName: "subagent_fanout",
+		Input: map[string]any{
+			"tasks": []any{
+				map[string]any{"prompt": prompt, "subagent_type": "general-purpose"},
+			},
+		},
+	})})
+	// The spawn carries the title the engine derived — the prompt's opening
+	// line — which is what a roster row and the card both show.
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID:          "subagent-8c5c1a2b",
+		AgentType:        "general-purpose",
+		Title:            "first line of the job",
+		Task:             prompt,
+		ParentToolCallID: "step-fanout",
+		TaskIndex:        0,
+	})
+
+	rows := r.AgentRosterSnapshot().Rows
+	if len(rows) != 1 {
+		t.Fatalf("expected one roster row, got %#v", rows)
+	}
+	if got := agentRosterRowDetail(rows[0]); got != "first line of the job" {
+		t.Fatalf("roster detail = %q, want the prompt's first line", got)
+	}
+	fs := r.findFanoutByStepID("step-fanout")
+	if fs == nil {
+		t.Fatal("fanout state missing")
+	}
+	content, _, _ := renderFanoutContent(fs)
+	cardLines := strings.Split(content, "\n")
+	if !slices.Contains(cardLines, "first line of the job") {
+		t.Fatalf("card must name the task by its first line alone, got %q", content)
+	}
+	if strings.Contains(content, "second line") {
+		t.Fatalf("card must not fold the whole prompt onto its task line, got %q", content)
 	}
 }
 
@@ -17042,9 +17850,12 @@ func TestRendererViewportSeedsStartupChromeAsBannerBlock(t *testing.T) {
 		}
 	}
 	// The mascot sits beside the text only when the card has room for both.
+	// Its crown row — a solid dome with its corners rounded off — is the
+	// same in every profile.
 	wide := stripANSI(strings.Join(renderFrameLines(frame, 200, r.DiffTheme(), 0), "\n"))
 	narrow := stripANSI(strings.Join(renderFrameLines(frame, 40, r.DiffTheme(), 0), "\n"))
-	if !strings.Contains(wide, "▄▄███▄██▄▄██▄███▄▄") || strings.Contains(narrow, "▄▄███▄██▄▄██▄███▄▄") {
+	crown := "  ████████████████  "
+	if !strings.Contains(wide, crown) || strings.Contains(narrow, crown) {
 		t.Fatalf("mascot should show at width 200 and not at width 40:\n%s\n---\n%s", wide, narrow)
 	}
 }
@@ -17352,7 +18163,9 @@ func TestRendererMCPRunningShowsHeaderOnly(t *testing.T) {
 	}, "tool", "214")
 
 	plain := stripANSI(out.String())
-	flat := strings.Join(strings.Fields(plain), " ")
+	// A wrapped header continues under its "  │ " rule; drop the rule so the
+	// header reads back as the one line it was wrapped from.
+	flat := strings.Join(strings.Fields(strings.ReplaceAll(plain, "\n  │ ", "\n")), " ")
 	for _, want := range []string{"codegraph.codegraph_explore", "max files: 6", "query: " + query} {
 		if !strings.Contains(flat, want) {
 			t.Fatalf("running MCP header missing %q: %q", want, plain)
@@ -18378,21 +19191,6 @@ func TestToolDisplayHeaderOmitsOutputDerivedSuffixes(t *testing.T) {
 			wantNotContain: []string{"4 entries"},
 		},
 		{
-			name: "subagent_list count",
-			frame: Frame{
-				Kind:    FrameTool,
-				Title:   "subagent_list",
-				Final:   true,
-				Content: `{"count":2}`,
-				ToolMeta: tool.ToolMeta{
-					ToolName: "subagent_list",
-					Status:   "completed",
-				},
-			},
-			wantContains:   []string{"Agent list"},
-			wantNotContain: []string{"2 agents"},
-		},
-		{
 			name: "edit_file diff stats",
 			frame: Frame{
 				Kind:    FrameTool,
@@ -18868,10 +19666,16 @@ func TestRendererUserInteractionShowsFriendlyAnswers(t *testing.T) {
 	}, "tool", "214")
 
 	plain := stripANSI(out.String())
+	// The header names what was asked; the body pairs each question with its
+	// answer, in the order asked.
+	header, body, _ := strings.Cut(plain, "\n")
+	if !strings.Contains(header, "Asked user") || !strings.Contains(header, "交付方式 · 修改范围 · 补充说明") {
+		t.Fatalf("header = %q, want every question named", header)
+	}
 	wantOrder := []string{"交付方式", "→ 设计方案并开发实施", "修改范围", "→ TUI", "→ 回放兼容", "补充说明", "→ 保留旧会话展示能力"}
 	previous := -1
 	for _, needle := range wantOrder {
-		idx := strings.Index(plain, needle)
+		idx := strings.Index(body, needle)
 		if idx < 0 {
 			t.Fatalf("expected rendered card to contain %q, got %q", needle, plain)
 		}
@@ -19928,15 +20732,20 @@ func TestActiveRunQueuesExplicitSkillSlashInsteadOfSteering(t *testing.T) {
 			},
 		},
 	}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 
 	handleActiveRunSlash(context.Background(), session, nil, nil, state, newCommandController(session, nil, &stubSelector{}, nil, ""), "/review change")
 
-	if len(state.pendingSteers) != 0 {
-		t.Fatalf("explicit skill invocation must not steer active context: %+v", state.pendingSteers)
+	q := session.SurfaceInputQueue("s1")
+	preview := q.Preview()
+	if len(preview.Steers) != 0 {
+		t.Fatalf("explicit skill invocation must not steer active context: %+v", preview.Steers)
 	}
-	if len(state.queuedTurns) != 1 || state.queuedTurns[0].Submission.SkillName != "review" {
-		t.Fatalf("queued turns=%+v", state.queuedTurns)
+	if len(preview.FollowUp) != 1 {
+		t.Fatalf("queued turns=%+v", preview.FollowUp)
+	}
+	if in, ok := q.Recall(); !ok || in.Payload.(ComposerSubmission).SkillName != "review" {
+		t.Fatalf("queued turns=%+v", preview.FollowUp)
 	}
 }
 
@@ -20119,19 +20928,25 @@ func TestMemoryImportConfirmsBeforeOverwritingLocalEdits(t *testing.T) {
 }
 
 // A promoted skill is deliberately not in this session's tool table, and the
-// label has to say so rather than looking like the promotion failed.
-func TestMemorySkillLabelDistinguishesPromotedFromActive(t *testing.T) {
-	pending := memorySkillLabel(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true})
+// description column has to say so rather than looking like the promotion
+// failed.
+func TestMemorySkillDescriptionDistinguishesPromotedFromActive(t *testing.T) {
+	pending := memorySkillDescription(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true})
 	if !strings.Contains(pending, "active next session") {
-		t.Fatalf("label=%q", pending)
+		t.Fatalf("description=%q", pending)
 	}
-	active := memorySkillLabel(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true, LoadedInSession: true})
+	active := memorySkillDescription(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true, LoadedInSession: true})
 	if strings.Contains(active, "active next session") {
-		t.Fatalf("label=%q", active)
+		t.Fatalf("description=%q", active)
 	}
-	shadowing := memorySkillLabel(MemorySkillOption{Name: "triage", Status: "new", SlashCommand: "/triage", Shadows: "/home/u/.forebrain/skills/triage"})
+	shadowing := memorySkillDescription(MemorySkillOption{Name: "triage", Status: "new", SlashCommand: "/triage", Shadows: "/home/u/.forebrain/skills/triage"})
 	if !strings.Contains(shadowing, "adds /triage") || !strings.Contains(shadowing, "shadows /home/u/.forebrain/skills/triage") {
-		t.Fatalf("label=%q", shadowing)
+		t.Fatalf("description=%q", shadowing)
+	}
+	for _, got := range []string{pending, active, shadowing} {
+		if strings.Contains(got, " - ") {
+			t.Fatalf("description glued with a dash: %q", got)
+		}
 	}
 }
 
@@ -20139,9 +20954,11 @@ func TestMemorySkillLabelDistinguishesPromotedFromActive(t *testing.T) {
 // what a user would have clicked rather than a hand-built string.
 func (s *memoryImportSelector) pick(t *testing.T, session *fakeSession, name string) string {
 	t.Helper()
-	for _, item := range session.memorySkillOpts {
-		if item.Name == name {
-			return memorySkillLabel(item)
+	rows, _, _ := memoryImportRows(session.memorySkillOpts)
+	labels := tabbedFallbackLabels(rows)
+	for i, row := range rows {
+		if strings.TrimSpace(row.Label) == strings.TrimSpace(name) {
+			return labels[i]
 		}
 	}
 	t.Fatalf("no proposal named %q", name)
@@ -21195,7 +22012,7 @@ func TestSubagentViewNamesTheAgentInTheFooterNotOnToolCards(t *testing.T) {
 			t.Fatalf("tool card names the agent (%q) inside that agent's own view:\n%s", unwanted, painted)
 		}
 	}
-	r.NoteSubagentSpawned(agentID, "explore")
+	r.NoteSubagentSpawned(agentID, "explore", ComposerFooter{})
 	footer := stripANSI(r.composerFooterText(100))
 	if want := "viewing explore · bbfa · esc to return"; !strings.Contains(footer, want) {
 		t.Fatalf("footer = %q, want it to contain %q", footer, want)
@@ -21295,7 +22112,7 @@ func TestSubagentCardRowsAreClickableForHover(t *testing.T) {
 func TestComposerFooterAnnouncesTheSubagentView(t *testing.T) {
 	r := seedSubagentTranscript(t, "subagent-42")
 	r.footer.Model = "openai/gpt-5.1"
-	r.NoteSubagentSpawned("subagent-42", "plan-reviewer")
+	r.NoteSubagentSpawned("subagent-42", "plan-reviewer", ComposerFooter{})
 
 	if got := stripANSI(r.composerFooterText(120)); strings.Contains(got, "viewing") {
 		t.Fatalf("primary view footer must not claim a subagent view: %q", got)
@@ -21317,10 +22134,12 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 
 	r := NewRenderer(nil, nil)
 	r.SetComposerFooter(ComposerFooter{Model: "deepseek/deepseek-v4-flash", ReasoningEffort: "medium"})
-	r.SetComposerTokenStats(ComposerTokenStats{
+	r.SetComposerTokenStats("", ComposerTokenStats{
 		Active: true, InputTokens: 816000, OutputTokens: 20000, PercentLeft: 97, ContextWindow: 1000000,
 	})
-	r.NoteSubagentSpawned(agentID, "explore")
+	r.NoteSubagentSpawned(agentID, "explore", ComposerFooter{
+		Model: "openai/gpt-4.1-mini", ReasoningEffort: "low",
+	})
 
 	// The conversation's own footer is untouched by any of this.
 	primary := stripANSI(r.composerFooterText(140))
@@ -21329,22 +22148,15 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 		t.Fatalf("primary footer = %q", primary)
 	}
 
-	// A type with no chain of its own runs on the primary agent's model, and
-	// the footer says so rather than leaving the model blank.
+	// The view names the model this execution's spawn announced — never the
+	// conversation's, which the run may not be using at all.
 	r.setActiveViewLocked(agentID)
-	inherited := stripANSI(r.composerFooterText(140))
-	if !strings.Contains(inherited, "viewing explore · bbfa · esc to return · deepseek/deepseek-v4-flash · medium") {
-		t.Fatalf("inherited-model footer = %q", inherited)
-	}
-
-	// Once agents.definitions[explore].llm_providers gives the type a model of
-	// its own, the view names that one.
-	r.SetSubagentModels(map[string]ComposerFooter{
-		"explore": {Model: "openai/gpt-4.1-mini", ReasoningEffort: "low"},
-	})
 	running := strings.TrimRight(stripANSI(r.composerFooterText(140)), " ")
 	if running != "viewing explore · bbfa · esc to return · openai/gpt-4.1-mini · low" {
 		t.Fatalf("own-model footer = %q", running)
+	}
+	if strings.Contains(running, "deepseek-v4-flash") {
+		t.Fatalf("the conversation's model leaked into a subagent view: %q", running)
 	}
 	if strings.Contains(running, "97%") {
 		t.Fatalf("the conversation's token budget leaked into a subagent view: %q", running)
@@ -21355,6 +22167,42 @@ func TestSubagentFooterNamesThatSubagentsModelAndNotItsRun(t *testing.T) {
 	}
 }
 
+// The model named under a subagent view is the one this execution runs on —
+// resolved once when it started and carried by its spawn — never the primary
+// agent's by assumption. A spawn recorded before executions carried models
+// (a replayed old session) names no model at all rather than borrowing the
+// conversation's.
+func TestSubagentFooterNamesTheModelThisExecutionRunsOn(t *testing.T) {
+	const agentID = "subagent-e3581eba-0000-0000-0000-000000000000"
+	r := NewRenderer(nil, nil)
+	r.SetComposerFooter(ComposerFooter{Model: "zhipuai/glm-5.3", ReasoningEffort: "xhigh"})
+
+	r.NoteSubagentSpawned(agentID, "plan-reviewer", ComposerFooter{
+		Model: "zhipuai/glm-5.3-flash", ReasoningEffort: "high",
+	})
+	r.setActiveViewLocked(agentID)
+	got := stripANSI(r.composerFooterText(140))
+	if !strings.Contains(got, "zhipuai/glm-5.3-flash · high") {
+		t.Fatalf("subagent view footer = %q, want the model this execution runs on", got)
+	}
+	if strings.Contains(got, "glm-5.3 · xhigh") {
+		t.Fatalf("subagent view footer borrowed the primary agent's model: %q", got)
+	}
+
+	// A spawn with no model of its own — recorded before executions carried
+	// one — leaves the model segment out entirely.
+	const legacyID = "subagent-00000000-0000-0000-0000-000000000001"
+	r.NoteSubagentSpawned(legacyID, "explore", ComposerFooter{})
+	r.setActiveViewLocked(legacyID)
+	legacy := stripANSI(r.composerFooterText(140))
+	if strings.Contains(legacy, "glm-5.3") {
+		t.Fatalf("a spawn with no model must not borrow the conversation's: %q", legacy)
+	}
+	if !strings.Contains(legacy, "viewing explore") || !strings.Contains(legacy, "esc to return") {
+		t.Fatalf("legacy footer = %q, want the view's own facts", legacy)
+	}
+}
+
 // The whole line has to survive a normal terminal. The redesign exists because
 // the old one spent 45 columns on the roster key and 61 on the conversation's
 // token budget, which truncated the model away at 140 columns.
@@ -21362,12 +22210,11 @@ func TestSubagentFooterFitsWithoutTruncationAtOneHundredColumns(t *testing.T) {
 	const agentID = "subagent-bbfae04b-820d-421c-bf30-e67c406c0dda"
 	r := NewRenderer(nil, nil)
 	r.SetComposerFooter(ComposerFooter{Model: "deepseek/deepseek-v4-flash", ReasoningEffort: "medium"})
-	r.SetComposerTokenStats(ComposerTokenStats{
+	r.SetComposerTokenStats("", ComposerTokenStats{
 		Active: true, InputTokens: 816000, OutputTokens: 20000, PercentLeft: 97, ContextWindow: 1000000,
 	})
-	r.NoteSubagentSpawned(agentID, "explore")
-	r.SetSubagentModels(map[string]ComposerFooter{
-		"explore": {Model: "openai/gpt-4.1-mini", ReasoningEffort: "low"},
+	r.NoteSubagentSpawned(agentID, "explore", ComposerFooter{
+		Model: "openai/gpt-4.1-mini", ReasoningEffort: "low",
 	})
 	r.setActiveViewLocked(agentID)
 
@@ -21495,7 +22342,7 @@ func fanoutFrameForTest() Frame {
 		Tasks: []FanoutTaskState{
 			{
 				Title: "map the approval flow", AgentID: "task-a", Status: "done",
-				ToolTotal: 3, TokenCount: 1200,
+				ToolTotal:   3,
 				RecentTools: []fanoutToolEntry{{Label: "read_file approval.go"}},
 			},
 			{
@@ -21511,9 +22358,9 @@ func fanoutFrameForTest() Frame {
 // Every line a task contributes — title, stats, tool progress, error — belongs
 // to that task's subagent, and a task with no agent yet owns none.
 func TestFanoutContentAttributesEveryLineToItsTask(t *testing.T) {
-	content, lineAgents := renderFanoutContent(&fanoutState{Tasks: []FanoutTaskState{
+	content, lineAgents, _ := renderFanoutContent(&fanoutState{Tasks: []FanoutTaskState{
 		{
-			Title: "first", AgentID: "task-a", Status: "done", ToolTotal: 2, TokenCount: 900,
+			Title: "first", AgentID: "task-a", Status: "done", ToolTotal: 2,
 			RecentTools: []fanoutToolEntry{{Label: "grep foo"}},
 		},
 		{Title: "second", AgentID: "task-b", Status: "failed", Error: "boom"},
@@ -21551,10 +22398,10 @@ func TestFanoutContentAttributesEveryLineToItsTask(t *testing.T) {
 func TestFanoutErrorKeepsEverySentenceOnItsOwnContinuationLine(t *testing.T) {
 	const failure = "The provider is rate-limiting this account — available again in 1h 3m, at 2026-09-07 15:40 CST.\n" +
 		"The provider said: Number of requests has exceeded your rate limit."
-	content, lineAgents := renderFanoutContent(&fanoutState{Tasks: []FanoutTaskState{
+	content, lineAgents, _ := renderFanoutContent(&fanoutState{Tasks: []FanoutTaskState{
 		{
 			Title: "read-only investigation", AgentID: "task-a", Status: "failed",
-			ToolTotal: 93, TokenCount: 1973600, Error: failure,
+			ToolTotal: 93, Error: failure,
 			RecentTools: []fanoutToolEntry{{Label: "read render.go"}},
 		},
 		{Title: "second task", AgentID: "task-b", Status: "done"},
@@ -21589,18 +22436,19 @@ func TestFanoutErrorKeepsEverySentenceOnItsOwnContinuationLine(t *testing.T) {
 	r.renderFanout(Frame{Kind: FrameFanout, Final: true, Summary: "Ran 2 tasks", Content: content})
 	painted := strings.Split(stripANSI(out.String()), "\n")
 	indentOf := func(line string) int { return len(line) - len(strings.TrimLeft(line, " ")) }
+	// The tool-progress row is the surviving detail row to align with.
 	want := -1
 	for _, line := range painted {
-		if strings.Contains(line, "· 93 tool uses") {
+		if strings.Contains(line, "read render.go") {
 			want = indentOf(line)
 		}
 	}
 	if want < 0 {
-		t.Fatalf("the stats row was not painted:\n%s", strings.Join(painted, "\n"))
+		t.Fatalf("the tool-progress row was not painted:\n%s", strings.Join(painted, "\n"))
 	}
 	seen := 0
 	for i, line := range painted {
-		if i == 0 || strings.TrimSpace(line) == "" || strings.Contains(line, "· 93 tool uses") {
+		if i == 0 || strings.TrimSpace(line) == "" || strings.Contains(line, "read render.go") {
 			continue
 		}
 		if !strings.Contains(failure, strings.TrimSpace(line)) {
@@ -21730,6 +22578,71 @@ func TestRosterCursorFollowsTheViewOpenedByClickingACard(t *testing.T) {
 	}
 }
 
+// The roster's cursor must follow the view even while the roster holds
+// keyboard focus: taking the keyboard onto the roster and then opening a
+// subagent from its card — with no roster navigation in between — has to move
+// the cursor onto that subagent's row, not leave it on the row focus landed
+// on. This is the reported bug: after one Down and a card click, the arrow
+// still pointed at main while the subagent's transcript was on screen.
+func TestRosterCursorFollowsAClickedCardWhileTheRosterHasFocus(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+	r.SetComposerFooter(ComposerFooter{Model: "m", Directory: "d"})
+	r.retainFrameLocked(fanoutFrameForTest())
+	for _, agentID := range []string{"task-a", "task-b"} {
+		r.ensurePerAgentVM(agentID).append(Frame{
+			Kind: FrameAssistant, Content: "transcript of " + agentID, AgentID: agentID, Final: true,
+		})
+	}
+	r.vpBodyHeight = 30
+	r.vpHeight = 30
+	r.vpLastRender = renderViewport(&r.vm, 100, 30, 0, DiffThemeDark)
+	roster := AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "task-a", Kind: "subagent", Label: "explore", Status: "running", Title: "map the approval flow"},
+		{ID: "task-b", Kind: "subagent", Label: "explore", Status: "running", Title: "check the sandbox profile"},
+	}}
+	// One Down takes the keyboard onto the roster; the cursor lands where the
+	// view already is, on the primary row.
+	st := &streamState{agentRoster: roster}
+	rosterLines := func() string {
+		r.composerState = ComposerRenderState{Text: "", Cursor: ptrInt(0), AgentRoster: roster, RosterFocused: true}
+		block := r.buildComposerBlock(r.composerState, 100)
+		return stripANSI(strings.Join(block.lines, "\n"))
+	}
+	st.handleOverlayNav(hotkeyOverlayDown, r)
+	if !st.agentRosterFocused {
+		t.Fatal("Down must move keyboard focus onto the roster")
+	}
+	painted := rosterLines()
+	if !strings.Contains(painted, "❯ main") {
+		t.Fatalf("focus must land on the primary row while the conversation is shown:\n%s", painted)
+	}
+
+	// Opening a subagent from its card moves the cursor with the view even
+	// though the roster keeps focus.
+	if !r.ViewportClickToggle(0, rowOfPrimaryText(t, r, "check the sandbox profile")) {
+		t.Fatal("clicking a fanout task row must be handled")
+	}
+	if got := r.ActiveView(); got != "task-b" {
+		t.Fatalf("active view = %q, want the clicked task's subagent", got)
+	}
+	painted = rosterLines()
+	cursorRow := ""
+	for _, line := range strings.Split(painted, "\n") {
+		if strings.HasPrefix(line, "❯") {
+			cursorRow = line
+		}
+	}
+	if !strings.Contains(cursorRow, "check the sandbox profile") {
+		t.Fatalf("the cursor must follow the view onto the clicked subagent's row, got %q in:\n%s", cursorRow, painted)
+	}
+	// Exactly one row carries it.
+	if got := strings.Count(painted, "❯"); got != 1 {
+		t.Fatalf("expected one cursor in the roster, got %d:\n%s", got, painted)
+	}
+}
+
 // A wrapped task line must attribute every one of its visual rows to the same
 // subagent: the map is built from the render, so wrapping cannot shift it.
 func TestFanoutRowMappingSurvivesWrapping(t *testing.T) {
@@ -21782,7 +22695,7 @@ func TestSubagentSpawnEmitsTheDispatchPromptForItsView(t *testing.T) {
 	})
 
 	if len(ev.Frames) != 2 {
-		t.Fatalf("frames=%d, want the prompt plus the lifecycle card: %#v", len(ev.Frames), ev.Frames)
+		t.Fatalf("frames=%d, want the prompt plus the card: %#v", len(ev.Frames), ev.Frames)
 	}
 	prompt := ev.Frames[0]
 	if prompt.Kind != FrameUser || prompt.AgentID != "subagent-7" {
@@ -21791,16 +22704,20 @@ func TestSubagentSpawnEmitsTheDispatchPromptForItsView(t *testing.T) {
 	if prompt.Content != "Review the plan below before the user approves it." {
 		t.Fatalf("prompt content = %q", prompt.Content)
 	}
-	if card := ev.Frames[1]; card.Kind != FrameStatus || card.AgentID != "subagent-7" {
-		t.Fatalf("lifecycle card = %#v", card)
+	card := ev.Frames[1]
+	if card.Kind != FrameFanout || card.AgentID != "" {
+		t.Fatalf("card = %#v", card)
+	}
+	if got := card.FanoutLineAgents[0]; got != "subagent-7" {
+		t.Fatalf("card row opens %q's view, want subagent-7", got)
 	}
 }
 
 func TestSubagentSpawnWithoutAPromptEmitsOnlyTheCard(t *testing.T) {
 	r := &Reducer{}
 	ev := r.Reduce(SubagentSpawnedMsg{AgentID: "subagent-7", AgentType: "explore", TaskID: "subagent-7"})
-	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameStatus {
-		t.Fatalf("frames = %#v, want just the lifecycle card", ev.Frames)
+	if len(ev.Frames) != 1 || ev.Frames[0].Kind != FrameFanout {
+		t.Fatalf("frames = %#v, want just the card", ev.Frames)
 	}
 }
 
@@ -21949,12 +22866,13 @@ func TestFanoutSpawnStillEmitsTheDispatchPrompt(t *testing.T) {
 	r := &Reducer{}
 	r.fanoutStates = map[string]*fanoutState{
 		"fanout-1": {
-			StepID: "fanout-1", Running: true,
+			StepID: "fanout-1", Verb: "run", Running: true,
 			Tasks: []FanoutTaskState{{Title: "map the flow", Status: "waiting"}},
 		},
 	}
 	ev := r.Reduce(SubagentSpawnedMsg{
 		AgentID: "task-a", AgentType: "explore", TaskID: "task-a", Task: "map the approval flow",
+		ParentToolCallID: "fanout-1", TaskIndex: 0,
 	})
 
 	sawPrompt, sawFanout := false, false
@@ -21979,18 +22897,20 @@ func TestFanoutSpawnStillEmitsTheDispatchPrompt(t *testing.T) {
 // One dispatch is announced twice — directly by the runner and again through
 // the run-step mirror — and each announcement used to append its own card, so
 // every subagent showed up twice in the transcript.
+// One dispatch is announced twice — directly by the runner and again through
+// the run-step mirror. Both announcements must land on the SAME card (one
+// StepID, replaced in place), never two blocks, and the dispatch prompt still
+// reaches the subagent's own view exactly once.
 func TestSubagentLifecycleCardIsEmittedOncePerEvent(t *testing.T) {
 	r := &Reducer{}
-	countStatus := func(evs ...EventResult) int {
-		n := 0
-		for _, ev := range evs {
-			for _, f := range ev.Frames {
-				if f.Kind == FrameStatus {
-					n++
-				}
+	cardOf := func(ev EventResult) (Frame, bool) {
+		var out Frame
+		for _, f := range ev.Frames {
+			if f.Kind == FrameFanout {
+				out = f
 			}
 		}
-		return n
+		return out, out.Kind == FrameFanout
 	}
 
 	// Mirror path carries no task text; the direct path carries it. Same agent.
@@ -21998,11 +22918,13 @@ func TestSubagentLifecycleCardIsEmittedOncePerEvent(t *testing.T) {
 	spawnB := r.Reduce(SubagentSpawnedMsg{
 		AgentID: "task-1", AgentType: "explore", TaskID: "task-1", Task: "find callers",
 	})
-	if got := countStatus(spawnA, spawnB); got != 1 {
-		t.Fatalf("spawn cards = %d, want 1", got)
+	cardA, okA := cardOf(spawnA)
+	cardB, okB := cardOf(spawnB)
+	if !okA || !okB || cardA.StepID != cardB.StepID {
+		t.Fatalf("the two announcements must be one card: %#v vs %#v", cardA, cardB)
 	}
 	// The prompt still reaches the subagent's view even though the card was
-	// suppressed for the second announcement.
+	// already open for the second announcement.
 	sawPrompt := false
 	for _, f := range spawnB.Frames {
 		if f.Kind == FrameUser && f.AgentID == "task-1" {
@@ -22015,14 +22937,20 @@ func TestSubagentLifecycleCardIsEmittedOncePerEvent(t *testing.T) {
 
 	endA := r.Reduce(SubagentEndedMsg{AgentID: "task-1", AgentType: "explore", TaskID: "task-1", Status: "ok"})
 	endB := r.Reduce(SubagentEndedMsg{AgentID: "task-1", AgentType: "explore", TaskID: "task-1", Status: "ok"})
-	if got := countStatus(endA, endB); got != 1 {
-		t.Fatalf("ended cards = %d, want 1", got)
+	endCard, okEnd := cardOf(endA)
+	if !okEnd || endCard.StepID != cardA.StepID {
+		t.Fatalf("the end must close the card it opened: %#v vs %#v", endCard, cardA)
+	}
+	repeatCard, okRepeat := cardOf(endB)
+	if !okRepeat || repeatCard.StepID != cardA.StepID {
+		t.Fatalf("a re-delivered end must close the same card: %#v", endB.Frames)
 	}
 
 	// A continued subagent runs again: that is a new event, not a repeat.
 	again := r.Reduce(SubagentSpawnedMsg{AgentID: "task-1", AgentType: "explore", TaskID: "task-1"})
-	if got := countStatus(again); got != 1 {
-		t.Fatalf("re-dispatch cards = %d, want 1", got)
+	againCard, okAgain := cardOf(again)
+	if !okAgain || againCard.StepID != cardA.StepID {
+		t.Fatalf("re-dispatch cards = %#v, want the agent's card again", again.Frames)
 	}
 }
 
@@ -22032,7 +22960,7 @@ func TestSubagentEndWithoutASpawnStillEmitsItsCard(t *testing.T) {
 	r := &Reducer{}
 	ev := r.Reduce(SubagentEndedMsg{AgentID: "task-9", AgentType: "explore", TaskID: "task-9", Status: "ok"})
 	for _, f := range ev.Frames {
-		if f.Kind == FrameStatus {
+		if f.Kind == FrameFanout && f.Summary == "Ran 1 explore task" {
 			return
 		}
 	}
@@ -23310,7 +24238,7 @@ func TestPendingTurnInputSurvivesToolApprovalSuspension(t *testing.T) {
 	require.NotNil(t, run.TurnInputRuntimeFromContext(ctx))
 
 	s.tuiTrack("run-1", "sid", func() {})
-	require.True(t, s.SteerSurfaceRun("sid", "tui", []llm.ContentPart{llm.Text("also update the README")}))
+	require.True(t, s.SurfaceInputQueue("sid").Steer(run.Input{Parts: []llm.ContentPart{llm.Text("also update the README")}}))
 
 	// supervisorrun reports the approval gate as RequiresAction and hands the
 	// run back; the decision then resumes it under the same run ID.
@@ -23320,9 +24248,13 @@ func TestPendingTurnInputSurvivesToolApprovalSuspension(t *testing.T) {
 	s.tuiTrack("run-1", "sid", func() {})
 	t.Cleanup(func() { s.tuiFinish("run-1") })
 
-	count, ok := s.SurfacePendingSteerCount("sid", "tui")
-	require.True(t, ok)
-	require.Equal(t, 1, count, "steer queued before the approval must still be pending after the resume")
+	steers := 0
+	for _, entry := range s.SurfaceInputQueue("sid").Runtime().Snapshot() {
+		if entry.Mode == run.TurnInputModeSteer {
+			steers++
+		}
+	}
+	require.Equal(t, 1, steers, "steer queued before the approval must still be pending after the resume")
 
 	rt := run.TurnInputRuntimeFromContext(resumeCtx)
 	require.NotNil(t, rt)
@@ -23343,7 +24275,7 @@ func TestSurfaceTurnBoundaryDiscardsSuspendedTurnInput(t *testing.T) {
 	_, _, cleanupStream := s.prepareTUIAgentBase("sid", context.Background())
 	defer cleanupStream()
 	s.tuiTrack("run-1", "sid", func() {})
-	require.True(t, s.SteerSurfaceRun("sid", "tui", []llm.ContentPart{llm.Text("stale steer")}))
+	require.True(t, s.SurfaceInputQueue("sid").Steer(run.Input{Parts: []llm.ContentPart{llm.Text("stale steer")}}))
 	// The user cancelled the approval, so no resume run ever claims the queue.
 	s.tuiWait("run-1")
 
@@ -23421,7 +24353,7 @@ func TestRenderTurnDiffCard_BandsAndHighlight(t *testing.T) {
 	if !ok {
 		t.Fatal("render failed")
 	}
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 	addBG := p.bandBG(p.addBG, p.addBG256)
 	delBG := p.bandBG(p.delBG, p.delBG256)
 	if !strings.Contains(block, addBG) {
@@ -25196,10 +26128,9 @@ func TestViewportComposerRendersRosterBelowFooterOnlyForRunningSubagent(t *testi
 		Cursor: ptrInt(5),
 		AgentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
 			{ID: "primary", Kind: "primary", Label: "primary", Status: "running"},
-			{ID: "sub-1", Kind: "subagent", Label: "review", Status: "running", Task: "working"},
+			{ID: "sub-1", Kind: "subagent", Label: "review", Status: "running", Title: "working"},
 		}},
-		RosterFocused:  true,
-		RosterSelected: 0,
+		RosterFocused: true,
 	}
 	block = r.buildComposerBlock(r.composerState, 80)
 	plain = stripANSI(strings.Join(block.lines, "\n"))
@@ -26212,6 +27143,98 @@ func TestViewportRunningShellShowsNewestLiveOutput(t *testing.T) {
 	}
 }
 
+// TestViewportPendingToolWrappedHeaderIsNotItsOwnOutput pins a running (or
+// approval-parked) command whose header wraps onto many rows and that has no
+// output yet. The fold used to take every row past the first as the body, so
+// the header's own continuations were folded under a rebuilt header and
+// repeated below it as an unstyled "output" preview in the terminal's
+// foreground, under bare spaces where the header above had its "│" rule.
+func TestViewportPendingToolWrappedHeaderIsNotItsOwnOutput(t *testing.T) {
+	forceColorProfile(t)
+	command := longShellCommand + " && echo fold-dup-marker && " + longShellCommand + " && " + longShellCommand
+	cases := []struct {
+		name      string
+		status    string
+		streaming bool
+	}{
+		{"running", "running", false},
+		{"running streaming", "running", true},
+		{"awaiting approval", "awaiting approval", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vm := viewModel{}
+			vm.append(Frame{
+				Kind:            FrameTool,
+				Title:           "shell",
+				StepID:          "shell-pending",
+				ToolMeta:        tool.ToolMeta{ToolName: "shell", Status: tc.status, Input: map[string]any{"command": command}},
+				StreamingOutput: tc.streaming,
+			})
+
+			vr := renderViewport(&vm, 100, 40, 1<<30, DiffThemeDark)
+			plain := stripANSI(strings.Join(vr.lines, "\n"))
+			if n := strings.Count(plain, "fold-dup-marker"); n != 1 {
+				t.Fatalf("header text appeared %d times, expected once:\n%s", n, plain)
+			}
+			if strings.Contains(plain, "more lines") || strings.Contains(plain, "earlier lines") {
+				t.Fatalf("a card with no output must not fold:\n%s", plain)
+			}
+			if len(vr.lines) < 5 {
+				t.Fatalf("expected the header to wrap onto at least 5 rows, got %d:\n%s", len(vr.lines), plain)
+			}
+			for i, row := range vr.lines {
+				if i > 0 && !strings.HasPrefix(stripANSI(row), "  │ ") {
+					t.Fatalf("header continuation row %d lost its rule: %q", i, row)
+				}
+				if !opensSGRBeforeVisibleText(row) {
+					t.Fatalf("row %d is drawn in the terminal's own foreground: %q", i, row)
+				}
+			}
+		})
+	}
+}
+
+// TestViewportRunningToolHeaderRuleDoesNotChangeWithOutputLength pins that a
+// running command's wrapped header keeps its "│" rule whether its live output
+// fits inline or is folded behind the newest rows: the full and folded paths
+// used to wrap under different gutters, so the rule appeared mid-run.
+func TestViewportRunningToolHeaderRuleDoesNotChangeWithOutputLength(t *testing.T) {
+	for _, outputLines := range []int{2, liveToolOutputMaxLines + 5} {
+		var output strings.Builder
+		for i := 1; i <= outputLines; i++ {
+			fmt.Fprintf(&output, "live line %02d\n", i)
+		}
+		vm := viewModel{}
+		vm.append(Frame{
+			Kind:            FrameTool,
+			Title:           "shell",
+			Content:         output.String(),
+			StepID:          "shell-live",
+			ToolMeta:        tool.ToolMeta{ToolName: "shell", Status: "running", Input: map[string]any{"command": longShellCommand}},
+			StreamingOutput: true,
+		})
+
+		vr := renderViewport(&vm, 100, 40, 1<<30, DiffThemeDark)
+		var continuations int
+		for _, row := range vr.lines[1:] {
+			plain := stripANSI(row)
+			if strings.Contains(plain, "live line") || strings.Contains(plain, "earlier lines") {
+				break
+			}
+			if !strings.HasPrefix(plain, "  │ ") {
+				t.Fatalf("%d output lines: header continuation lost its rule: %q\n%s",
+					outputLines, plain, stripANSI(strings.Join(vr.lines, "\n")))
+			}
+			continuations++
+		}
+		if continuations == 0 {
+			t.Fatalf("%d output lines: expected the header to wrap:\n%s",
+				outputLines, stripANSI(strings.Join(vr.lines, "\n")))
+		}
+	}
+}
+
 type wizardSelector struct {
 	selects       []string
 	inputs        []string
@@ -26752,13 +27775,11 @@ func TestCharacterizationSlashReloadKeepsEnvironmentConfigLive(t *testing.T) {
 // TestCharacterizationHotReloadKeepsTheSessionPermissionPreset pins that a
 // preset chosen with /permissions survives a hot reload of forebrain.yaml.
 //
-// permissionPreset's own doc comment names this case: the choice is never
-// written to forebrain.yaml, so "without it, the next reload of that file -- a hot
-// reload, or /sandbox rewriting it -- would silently restore the sandbox the
-// user just moved away from". The slash-command reload path honours that by
-// calling reapplyPermissionPreset. The hot-reload path runs in the environment,
-// which cannot see session state, and so did not -- meaning editing the config
-// file for any unrelated reason silently reverted the user's sandbox choice.
+// The choice is never written to forebrain.yaml; it lives in the permission
+// store, scoped to the session, so the environment's hot reload — which
+// cannot see session state — has nothing to undo. Editing the config file for
+// any unrelated reason must not silently revert the user's sandbox choice,
+// and the choice must not leak into the reloaded config either.
 func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
@@ -26776,18 +27797,25 @@ func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) 
 	if _, err := s.ApplyPermissionPreset("char-preset", string(safety.PresetReadOnly)); err != nil {
 		t.Fatalf("ApplyPermissionPreset: %v", err)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeReadOnly {
-		t.Fatalf("SandboxMode after preset = %q, want %q", got, appcfg.SandboxModeReadOnly)
+	sessionSandbox := func() appcfg.SandboxMode {
+		return safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession("char-preset")).SandboxMode
+	}
+	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("session sandbox after preset = %q, want %q", got, appcfg.SandboxModeReadOnly)
 	}
 
 	// A hot reload of the same unchanged file must not undo that.
 	if err := s.Env.ReloadConfig(); err != nil {
 		t.Fatalf("ReloadConfig: %v", err)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeReadOnly {
-		t.Fatalf("SandboxMode after hot reload = %q, want the session preset %q to survive: "+
+	if got := sessionSandbox(); got != appcfg.SandboxModeReadOnly {
+		t.Fatalf("session sandbox after hot reload = %q, want the session preset %q to survive: "+
 			"reloading forebrain.yaml must not silently restore the sandbox the user moved away from",
 			got, appcfg.SandboxModeReadOnly)
+	}
+	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeWorkspaceWrite {
+		t.Fatalf("live config sandbox = %q, want the file's %q: a session preset must not move the config other conversations run under",
+			got, appcfg.SandboxModeWorkspaceWrite)
 	}
 }
 
@@ -26795,8 +27823,7 @@ func TestCharacterizationHotReloadKeepsTheSessionPermissionPreset(t *testing.T) 
 // half of the rule above: a session-scoped preset may not walk back YOLO.
 //
 // YOLO comes from the environment, not from anything the user picked in this
-// session, so the hot-reload path folds in the surface's choices only when
-// YOLO is off -- the same rule the slash-command reload path applies.
+// session, so the session's own sandbox choice gives way to it.
 func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) {
 	reply := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 	s := newCharacterizationSession(t, &steerInjectingLLM{results: []*llm.Result{{Message: &reply}}})
@@ -26815,8 +27842,9 @@ func TestCharacterizationHotReloadLetsYOLOOutrankTheSessionPreset(t *testing.T) 
 	if err := s.Env.ReloadConfig(); err != nil {
 		t.Fatalf("ReloadConfig: %v", err)
 	}
-	if got := s.cfg().SandboxMode; got != appcfg.SandboxModeDangerFullAccess {
-		t.Fatalf("SandboxMode under YOLO = %q, want %q: a session preset must not walk YOLO back",
+	snap := s.runner().PermissionSnapshotForSession("char-preset-yolo")
+	if got := safety.ConfigForSnapshot(s.cfg(), snap).SandboxMode; got != appcfg.SandboxModeDangerFullAccess {
+		t.Fatalf("session sandbox under YOLO = %q, want %q: a session preset must not walk YOLO back",
 			got, appcfg.SandboxModeDangerFullAccess)
 	}
 }
@@ -26920,6 +27948,12 @@ func (e sessionEnv) session() *ChatSession {
 		env.Deps.Actions = e.ActionSvc
 	}
 	if e.RunSvc != nil {
+		// Every production store carries the process owner process.Open
+		// stamped on it; the resume claims these tests drive are refused
+		// without one.
+		if strings.TrimSpace(e.RunSvc.Owner) == "" {
+			e.RunSvc.Owner = "tui-test"
+		}
 		env.Deps.RunRT = e.RunSvc
 	}
 	if e.Runner != nil {
@@ -27000,6 +28034,57 @@ func TestUnownedErrorStaysGlobal(t *testing.T) {
 	}
 }
 
+// The reported bug: a subagent stopped by a usage limit fails the turn that
+// dispatched it with the very same sentence. With that subagent's view open,
+// the view read "subagent failed: <limit>", its "Worked for" line, and then
+// "error: <limit>" again — the turn's error mirrored in as global news the
+// view had just shown. The view says it once; the primary transcript keeps the
+// turn's error; and a global error that says something else is still mirrored.
+func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
+	forcedTermWidth = 80
+	forcedTermHeight = 24
+	t.Cleanup(func() {
+		forcedTermWidth = 0
+		forcedTermHeight = 0
+	})
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+	r.composerSuppressed = true
+	red := &Reducer{tracker: NewTracker()}
+	render := func(res EventResult) {
+		for _, f := range res.Frames {
+			r.RenderFrame(f)
+		}
+	}
+
+	const rosterKey = "subagent-b5133178"
+	const limit = "Usage limit reached for this account — available again in 138h 6m, at 2026-10-12 07:08 CST."
+	render(red.Reduce(RunStartedMsg{RunID: "run-parent"}))
+	render(red.Reduce(SubagentSpawnedMsg{AgentID: rosterKey, AgentType: "general-purpose", TaskID: rosterKey, Timestamp: time.Now()}))
+	r.SetActiveView(rosterKey)
+	render(red.Reduce(SubagentEndedMsg{AgentID: rosterKey, AgentType: "general-purpose", TaskID: rosterKey, Status: "failed", Error: limit, Timestamp: time.Now()}))
+	render(red.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: limit, Timestamp: time.Now()}}))
+
+	paint := func(vm *viewModel) string {
+		return stripANSI(strings.Join(renderViewport(vm, 80, 40, 1<<30, DiffThemeDark).lines, "\n"))
+	}
+	view := paint(r.perAgentVM[rosterKey])
+	if !strings.Contains(view, "subagent failed") || !strings.Contains(view, "Worked for") {
+		t.Fatalf("the subagent's view must end on its own failure and worked line:\n%s", view)
+	}
+	if got := strings.Count(view, "Usage limit reached"); got != 1 {
+		t.Fatalf("the subagent's view must say the limit once, said it %d times:\n%s", got, view)
+	}
+	if primary := paint(&r.vm); !strings.Contains(primary, "Usage limit reached") {
+		t.Fatalf("the turn's error must stay on the primary transcript:\n%s", primary)
+	}
+
+	render(red.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: "config reload failed: bad yaml", Timestamp: time.Now()}}))
+	if view := paint(r.perAgentVM[rosterKey]); !strings.Contains(view, "config reload failed: bad yaml") {
+		t.Fatalf("a global error saying something else must still be mirrored into the open view:\n%s", view)
+	}
+}
+
 // The helpers below were production functions that only the tests ever
 // called: each is a thin composition of live code. They live here so the
 // production files carry no unused code while the tests keep exercising
@@ -27028,9 +28113,13 @@ func (s *ChatSession) tuiTrack(runID, sessionID string, cancel context.CancelFun
 	if s.tuiTurnInputRT == nil {
 		s.tuiTurnInputRT = run.NewTurnInputRuntime()
 	}
-	s.installTUITurnInputRuntimeHookLocked(runID, "")
 	ctl, rt := s.tuiControlLocked(), s.tuiTurnInputRT
+	// The turn's runtime connects to the conversation's queue the way
+	// ensureTUITurnInputRuntime does, so a steer the test enqueues reaches it.
+	q := ctl.SessionQueue(strings.TrimSpace(sessionID))
+	s.tuiTurnInputQueue = q
 	s.tuiRunMu.Unlock()
+	q.Attach(rt)
 	ctl.TrackRuntime(runID, sessionID, cancel, rt)
 	s.notifyUI(RunStartedMsg{RunID: runID})
 }
@@ -27684,6 +28773,124 @@ func TestConversationApprovalEventsDoNotNotifyTheSurfaceTwice(t *testing.T) {
 	}
 }
 
+// TestForeignSessionEventsStayOffTheScreen pins the event funnel's session
+// gate: every event is persisted to its own conversation's log, but only the
+// conversation this surface is looking at may paint. Without the gate, a
+// process-wide reaper and another conversation's async subagents drew ghost
+// cards on whichever screen happened to be open.
+func TestForeignSessionEventsStayOffTheScreen(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer db.Close()
+
+	runs := &state.RunStore{DB: db}
+	cs := sessionEnv{Home: home, RunSvc: runs}.session()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "sess-A", "sess-A"))
+	require.NoError(t, sessions.Ensure(ctx, "sess-B", "sess-B"))
+
+	var painted atomic.Int32
+	cs.PrependUINotify(func(msg any) {
+		painted.Add(1)
+	})
+	// publish sends one subagent_ended through the funnel and returns how
+	// many UI messages it painted. No run id: the ending belongs to the
+	// conversation, not to one turn (and a fabricated one would violate the
+	// events table's run foreign key).
+	publish := func(evtID, sessionID string) int32 {
+		t.Helper()
+		painted.Store(0)
+		require.NoError(t, cs.publishRunEvent(ctx, event.NewRunEvent(evtID, "", sessionID,
+			event.RunEventSubagentEnded, event.SubagentEndedPayload{
+				AgentID: "agent-1", AgentType: "general-purpose", Status: "failed",
+			}, time.Now())))
+		waitForQueuedNotifications(t, cs)
+		return painted.Load()
+	}
+
+	// The surface is looking at sess-A: sess-B's ending must stay off the
+	// screen while still landing in sess-B's own log.
+	cs.SetViewingSession("sess-A")
+	if n := publish("ended-b1", "sess-B"); n != 0 {
+		t.Fatalf("another conversation's subagent_ended painted %d message(s) on this screen", n)
+	}
+	bEnded, err := runs.ListSessionEventsOfType(ctx, "sess-B", event.RunEventSubagentEnded, 10)
+	require.NoError(t, err)
+	require.Len(t, bEnded, 1, "the foreign event must still be persisted to its own session's log")
+
+	// The viewed conversation's own ending paints.
+	if n := publish("ended-a1", "sess-A"); n != 1 {
+		t.Fatalf("the viewed conversation's subagent_ended must paint once, got %d", n)
+	}
+
+	// An unattached surface keeps the old behavior: events paint.
+	cs.SetViewingSession("")
+	if n := publish("ended-b2", "sess-B"); n != 1 {
+		t.Fatalf("an unattached surface must still paint, got %d", n)
+	}
+
+	// An event from before any conversation existed has no session to gate on.
+	if n := publish("ended-void", ""); n != 1 {
+		t.Fatalf("a sessionless event must still paint, got %d", n)
+	}
+}
+
+// TestForeignToolStepPaintsAcrossSessions pins the session gate on the tool
+// step funnel: the hook that observes a turn's tool executions draws their
+// cards itself (the canonical event is only persisted alongside), so a turn
+// the surface switched away from mid-run would otherwise keep painting its
+// tool cards on whichever conversation is open now.
+func TestForeignToolStepPaintsAcrossSessions(t *testing.T) {
+	s, cleanup := newSurfaceTestSession(t)
+	defer cleanup()
+	var painted atomic.Int32
+	s.PrependUINotify(func(msg any) { painted.Add(1) })
+
+	step := func(evtID string, kind string) tool.StepEvent {
+		if kind == tool.StepKindToolParallelStarted {
+			return tool.StepEvent{
+				Kind: kind, StepID: evtID, ToolName: "read_file",
+				Output: map[string]any{"summary": "Read 2 files"},
+			}
+		}
+		return tool.StepEvent{
+			Kind: kind, StepID: evtID, ToolName: "read_file",
+			Input:  map[string]any{"file_path": "hello.go"},
+			Output: map[string]any{"preview_text": "1|package hello", "preview_kind": "file"},
+		}
+	}
+	// send pushes one step through the funnel and returns how many UI
+	// messages it painted.
+	send := func(sessionID, evtID, kind string) int32 {
+		t.Helper()
+		painted.Store(0)
+		s.notifyToolStepHooks(tool.WithRunID(context.Background(), "run-1"), sessionID, "run-1", "tui", step(evtID, kind))
+		waitForQueuedNotifications(t, s)
+		return painted.Load()
+	}
+
+	// The surface is looking at sess-A: sess-B's tool card and parallel batch
+	// summary must both stay off this screen.
+	s.SetViewingSession("sess-A")
+	if n := send("sess-B", "tool-b1", event.RunEventToolCompleted); n != 0 {
+		t.Fatalf("another conversation's tool card painted %d message(s)", n)
+	}
+	if n := send("sess-B", "batch-b1", tool.StepKindToolParallelStarted); n != 0 {
+		t.Fatalf("another conversation's parallel batch summary painted %d message(s)", n)
+	}
+	// The viewed conversation's own steps paint.
+	if n := send("sess-A", "tool-a1", event.RunEventToolCompleted); n != 1 {
+		t.Fatalf("the viewed conversation's tool card must paint once, got %d", n)
+	}
+	if n := send("sess-A", "batch-a1", tool.StepKindToolParallelStarted); n != 1 {
+		t.Fatalf("the viewed conversation's parallel batch summary must paint once, got %d", n)
+	}
+}
+
 // TestSkillCardHeaderIsNotTheReasoningColor pins the two cards apart. A Skill
 // card and a "Thought for …" card sit next to each other in almost every turn
 // that loads a skill, and both used foreground 147 for their glyph and header —
@@ -27899,9 +29106,16 @@ func TestPlanReviewRunIsAChildOfTheGatedRun(t *testing.T) {
 		Runner:    &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, ProjectRoot: home, RunRT: runs}, SubagentExecutor: executor},
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1", RunID: gate.ID})
-	reviewer := &planSubagentReviewer{session: cs, model: turn.Model{Provider: "openai", Model: "gpt-4o"}}
+	// The shared flow reads the plan from the session's own plan file.
+	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetForProject: %v", err)
+	}
+	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
+	if err != nil {
+		t.Fatalf("planReviewerFor: %v", err)
+	}
 
-	if _, err := reviewer.Review(context.Background(), turn.Request{Plan: "# Plan\n\n1. Ship it.", Task: "Ship."}); err != nil {
+	if err := runSharedReview(t, cs, turn.Model{Provider: "openai", Model: "gpt-4o"}, "Ship.", gate.ID, reviewer, nil); err != nil {
 		t.Fatalf("Review error: %v", err)
 	}
 	if len(executor.calls) != 1 || executor.calls[0].superviseRunID == "" {
@@ -28118,9 +29332,12 @@ func TestSwitchFailureKeepsQueuedInputAndSession(t *testing.T) {
 	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
 
 	state := newSwitchState(s, "sess-a")
-	state.queuedTurns = []queuedSubmission{{Action: queuedSubmissionActionTurn, Submission: textSubmission("still mine")}}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
+	// Queue input as the live surface would, through the conversation's queue.
+	if q := state.sessionQueue(); q != nil {
+		q.FollowUp(queueInput(textSubmission("still mine")))
+	}
 	switched, warning, err := switchStreamSession(ctx, state, renderer, nil, "sess-b")
 	// The stored pair is gone; the fallback adopts the new configured
 	// default with a warning, and the switch still happens.
@@ -28128,7 +29345,9 @@ func TestSwitchFailureKeepsQueuedInputAndSession(t *testing.T) {
 	require.True(t, switched)
 	require.Contains(t, warning, "no longer configured")
 	requireRunnerModel(t, s, "openai", "gpt-renamed", "")
-	require.Empty(t, state.queuedTurns, "a successful switch still discards queued input")
+	if q := s.SurfaceInputQueue("sess-a"); q != nil {
+		require.False(t, q.Preview().Visible(), "a successful switch still discards queued input")
+	}
 	require.Equal(t, "sess-b", state.sessionID)
 }
 
@@ -28456,3 +29675,341 @@ func TestSelectModelConcurrentWithConfigReload(t *testing.T) {
 	require.Contains(t, []string{"gpt-a", "gpt-b"}, sel.Model)
 	require.NotNil(t, s.runner().Agent())
 }
+
+// A recovered approval that cannot continue fails its run with one error
+// block: publishing the turn error is what draws it, so nothing draws it a
+// second time beside it.
+func TestFailedRecoveredApprovalDrawsItsErrorOnce(t *testing.T) {
+	ctx := context.Background()
+	s := newCharacterizationSession(t, nil)
+	sessionID := "char-recovered-failure"
+	if err := s.sessStore().Ensure(ctx, sessionID, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	rn, err := s.runSvc().CreateRun(ctx, sessionID, "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, err := s.actionSvc().CreatePending(ctx, sessionID, "shell", map[string]any{"session_id": sessionID, "command": "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.runSvc().SetWaitingAction(ctx, rn.ID, state.Wait{RunID: rn.ID, ActionID: act.ID, ToolName: "shell"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := &notifiedRecorder{}
+	s.PrependUINotify(rec.record)
+
+	s.failRecoveredApproval(sessionID, act.ID, "approval action failed")
+
+	errorsDrawn := 0
+	for _, msg := range rec.awaitStable(t) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindError {
+			errorsDrawn++
+		}
+	}
+	if errorsDrawn != 1 {
+		t.Fatalf("error blocks drawn = %d, want exactly one", errorsDrawn)
+	}
+}
+
+// panelLSPControlStub is the control plane the /lsp panel tests drive: it
+// records the actions and answers a fixed snapshot.
+type panelLSPControlStub struct {
+	snapshot  event.LSPSnapshot
+	enabled   []string
+	restarts  []string
+	installs  []string
+	recResets int
+	err       error
+}
+
+func (c *panelLSPControlStub) Snapshot() event.LSPSnapshot { return c.snapshot }
+func (c *panelLSPControlStub) Subscribe(func(event.LSPSnapshot)) func() {
+	return func() {}
+}
+func (c *panelLSPControlStub) SetEnabled(serverID string, enabled bool) error {
+	c.enabled = append(c.enabled, fmt.Sprintf("%v %s", enabled, serverID))
+	return c.err
+}
+func (c *panelLSPControlStub) Restart(serverID string) error {
+	c.restarts = append(c.restarts, serverID)
+	return c.err
+}
+func (c *panelLSPControlStub) Install(context.Context, string, func(string)) error {
+	c.installs = append(c.installs, "")
+	return c.err
+}
+func (c *panelLSPControlStub) SetRecommendationListener(func(context.Context, event.LSPRecommendation)) {
+}
+func (c *panelLSPControlStub) DecideRecommendation(string, event.LSPRecommendationChoice) error {
+	return nil
+}
+func (c *panelLSPControlStub) ResetRecommendations() error {
+	c.recResets++
+	return c.err
+}
+
+// Every /lsp panel action goes through the runner's control plane: without
+// one the panel is unavailable, with one the reply is the sentence the panel
+// shows, verbatim.
+func TestPanelLSPSessionMethods(t *testing.T) {
+	home := t.TempDir()
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	if _, err := s.PanelLSPSnapshot(); err != errPanelUnavailable {
+		t.Fatalf("snapshot without control = %v, want errPanelUnavailable", err)
+	}
+	if _, err := s.PanelSetLSPEnabled("gopls", true); err != errPanelUnavailable {
+		t.Fatalf("enable without control = %v", err)
+	}
+	if _, err := s.PanelRestartLSP("gopls"); err != errPanelUnavailable {
+		t.Fatalf("restart without control = %v", err)
+	}
+	if _, err := s.PanelInstallLSP("gopls"); err != errPanelUnavailable {
+		t.Fatalf("install without control = %v", err)
+	}
+	if _, err := s.PanelResetLSPRecommendations(); err != errPanelUnavailable {
+		t.Fatalf("reset without control = %v", err)
+	}
+	if _, ok := s.SubscribeLSPStatus(); ok {
+		t.Fatal("subscribe without control must report false")
+	}
+
+	ctl := &panelLSPControlStub{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady, InstallCommand: "go install gopls"}},
+	}}
+	s = sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+
+	snap, err := s.PanelLSPSnapshot()
+	require.NoError(t, err)
+	require.Equal(t, "/proj", snap.ProjectRoot)
+
+	reply, err := s.PanelSetLSPEnabled("gopls", true)
+	require.NoError(t, err)
+	require.Equal(t, "Enabled. Diagnostics start with the next edit; the lsp tool appears in new sessions.", reply)
+	reply, err = s.PanelSetLSPEnabled("gopls", false)
+	require.NoError(t, err)
+	require.Equal(t, "Disabled. Its instances in this project have stopped.", reply)
+	reply, err = s.PanelRestartLSP("gopls")
+	require.NoError(t, err)
+	require.Equal(t, "Restarting…", reply)
+	reply, err = s.PanelInstallLSP("gopls")
+	require.NoError(t, err)
+	require.Equal(t, "Installing: go install gopls", reply)
+	reply, err = s.PanelResetLSPRecommendations()
+	require.NoError(t, err)
+	require.Equal(t, "Recommendations are back on.", reply)
+	require.Equal(t, []string{"true gopls", "false gopls"}, ctl.enabled)
+	require.Equal(t, []string{"gopls"}, ctl.restarts)
+	require.Equal(t, 1, ctl.recResets)
+
+	cancel, ok := s.SubscribeLSPStatus()
+	require.True(t, ok)
+	cancel()
+}
+
+// The text fallback of /lsp renders the control plane's snapshot; without a
+// control plane it says so.
+func TestHandleLSPSlashRendersSnapshot(t *testing.T) {
+	home := t.TempDir()
+	empty := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	reply, handled := empty.HandleLSPSlash("s1", "cli")
+	require.True(t, handled)
+	require.Equal(t, "lsp: unavailable", reply)
+
+	ctl := &panelLSPControlStub{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"}}},
+	}}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	reply, handled = s.HandleLSPSlash("s1", "cli")
+	require.True(t, handled)
+	require.Contains(t, reply, "Language servers · 1 configured, 1 enabled")
+	require.Contains(t, reply, "gopls")
+}
+
+// lspInstallWatchStub is the control plane the install watch drives: it
+// hands the subscriber to the test, which feeds it the snapshots an
+// install's lifecycle produces.
+type lspInstallWatchStub struct {
+	panelLSPControlStub
+	subscribed   func(event.LSPSnapshot)
+	unsubscribed bool
+}
+
+func (c *lspInstallWatchStub) Subscribe(fn func(event.LSPSnapshot)) func() {
+	c.subscribed = fn
+	return func() { c.unsubscribed = true }
+}
+
+// Every answer returns the transcript line the spec spells out, and the
+// not-now line says when five dismissals turned recommendations off.
+func TestDecideLSPRecommendationTexts(t *testing.T) {
+	home := t.TempDir()
+	rec := event.LSPRecommendation{
+		ID: "lsprec-1", ServerID: "gopls", DisplayName: "gopls",
+		Languages: []string{"Go", "Go Workspaces"}, TriggerExtension: ".go",
+		Mode: "enable", InstallCommand: "go install golang.org/x/tools/gopls@latest",
+	}
+	newSession := func(snap event.LSPSnapshot) *ChatSession {
+		ctl := &lspInstallWatchStub{}
+		ctl.snapshot = snap
+		return sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	}
+
+	text, err := newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceEnable)
+	require.NoError(t, err)
+	require.Equal(t, "gopls enabled for Go, Go Workspaces. Diagnostics start with the next edit.", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	require.Equal(t, "Installing gopls: go install golang.org/x/tools/gopls@latest", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceNotNow)
+	require.NoError(t, err)
+	require.Equal(t, "Not now. No language server will be suggested again in this session.", text)
+
+	disabled := event.LSPSnapshot{RecommendationsDisabled: true}
+	text, err = newSession(disabled).DecideLSPRecommendation(rec, event.LSPChoiceNotNow)
+	require.NoError(t, err)
+	require.Equal(t, "Language server recommendations are now off (dismissed 5 times in a row). Turn them back on in /lsp.", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceNever)
+	require.NoError(t, err)
+	require.Equal(t, "gopls will not be suggested again. /lsp can still enable it.", text)
+
+	text, err = newSession(event.LSPSnapshot{}).DecideLSPRecommendation(rec, event.LSPChoiceDisableAll)
+	require.NoError(t, err)
+	require.Equal(t, "Language server recommendations are off. Turn them back on in /lsp.", text)
+
+	// Without a control plane there is no line and no decision.
+	bare := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}.session()
+	_, err = bare.DecideLSPRecommendation(rec, event.LSPChoiceEnable)
+	require.ErrorIs(t, err, errPanelUnavailable)
+}
+
+// The install answer decides first and subscribes after, so the watch never
+// observes a pre-start snapshot, and every line the install prints and its
+// outcome reach the UI: progress as the transient line, the result as one
+// frame.
+func TestDecideLSPRecommendationInstallReportsDone(t *testing.T) {
+	home := t.TempDir()
+	ctl := &lspInstallWatchStub{}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	var mu sync.Mutex
+	var got []any
+	s.PrependUINotify(func(m any) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, m)
+	})
+
+	rec := event.LSPRecommendation{
+		ID: "lsprec-2", ServerID: "gopls", DisplayName: "gopls",
+		Languages: []string{"Go"}, TriggerExtension: ".go", Mode: "install",
+		InstallCommand: "go install golang.org/x/tools/gopls@latest",
+	}
+	text, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	require.Equal(t, "Installing gopls: go install golang.org/x/tools/gopls@latest", text)
+	require.NotNil(t, ctl.subscribed, "the install watch never subscribed")
+
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"downloading"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"downloading", "linking"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls"}}})
+	waitForQueuedNotifications(t, s)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Contains(t, got, LSPInstallProgressMsg{ServerID: "gopls", Line: "downloading"})
+	require.Contains(t, got, LSPInstallProgressMsg{ServerID: "gopls", Line: "linking"})
+	require.Contains(t, got, LSPInstallDoneMsg{ServerID: "gopls", Text: "gopls installed and enabled for Go. Diagnostics start with the next edit."})
+}
+
+// A failed install reports the failure text the snapshot carries.
+func TestDecideLSPRecommendationInstallReportsFailure(t *testing.T) {
+	home := t.TempDir()
+	ctl := &lspInstallWatchStub{}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	var mu sync.Mutex
+	var got []any
+	s.PrependUINotify(func(m any) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, m)
+	})
+	rec := event.LSPRecommendation{ID: "lsprec-3", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"}, Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest"}
+	_, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"fetching"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", InstallError: "exit status 1: no network"}}})
+	waitForQueuedNotifications(t, s)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Contains(t, got, LSPInstallDoneMsg{ServerID: "gopls", Err: "exit status 1: no network"})
+}
+
+// installWatchEnv wires a session to a stub control that records delivery
+// and unsubscription, with the notify collector attached.
+func installWatchEnv(t *testing.T) (*ChatSession, *lspInstallWatchStub, *[]any) {
+	t.Helper()
+	home := t.TempDir()
+	ctl := &lspInstallWatchStub{}
+	s := sessionEnv{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, CodeIntelControl: ctl}}}.session()
+	var mu sync.Mutex
+	got := &[]any{}
+	s.PrependUINotify(func(m any) {
+		mu.Lock()
+		defer mu.Unlock()
+		*got = append(*got, m)
+	})
+	return s, ctl, got
+}
+
+// An install that already carries its failure in the first frame the watcher
+// sees — it finished between two snapshots, or never truly started — reports
+// the failure and unsubscribes without having observed Installing.
+func TestInstallWatchFailureWithoutRunningFrame(t *testing.T) {
+	s, ctl, got := installWatchEnv(t)
+	rec := event.LSPRecommendation{ID: "lsprec-4", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"}, Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest"}
+	_, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+	require.NotNil(t, ctl.subscribed, "the install watch never subscribed")
+
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", InstallError: "exit status 1: no network"}}})
+	waitForQueuedNotifications(t, s)
+	require.Contains(t, *got, LSPInstallDoneMsg{ServerID: "gopls", Err: "exit status 1: no network"})
+	require.True(t, ctl.unsubscribed, "the failure terminal must unsubscribe")
+
+	// The watch is over: later frames change nothing.
+	*got = nil
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true}}})
+	waitForQueuedNotifications(t, s)
+	require.Empty(t, *got)
+}
+
+// A first frame that is neither running nor failed keeps the watch waiting:
+// the install may simply not have started yet.
+func TestInstallWatchQuietFirstFrameKeepsWaiting(t *testing.T) {
+	s, ctl, got := installWatchEnv(t)
+	rec := event.LSPRecommendation{ID: "lsprec-5", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"}, Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest"}
+	_, err := s.DecideLSPRecommendation(rec, event.LSPChoiceInstall)
+	require.NoError(t, err)
+
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls"}}})
+	waitForQueuedNotifications(t, s)
+	require.Empty(t, *got, "a quiet first frame must not report anything")
+	require.False(t, ctl.unsubscribed)
+
+	// The lifecycle that follows still reports normally.
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls", Installing: true, InstallLog: []string{"linking"}}}})
+	ctl.subscribed(event.LSPSnapshot{Servers: []event.LSPServerStatus{{ID: "gopls"}}})
+	waitForQueuedNotifications(t, s)
+	require.Contains(t, *got, LSPInstallProgressMsg{ServerID: "gopls", Line: "linking"})
+	require.Contains(t, *got, LSPInstallDoneMsg{ServerID: "gopls", Text: "gopls installed and enabled for Go. Diagnostics start with the next edit."})
+}
+
+func (h *fakeSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn)            {}
+func (h *fakeSubagentExecutor) SubagentExecutionStarting(context.Context, string)                {}
+func (h *fakeSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {}

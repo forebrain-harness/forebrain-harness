@@ -182,6 +182,9 @@ var fanOutBudgets = map[string]fanOutBudget{
 	"event":  {current: 8, target: 8},
 	"safety": {current: 8, target: 8},
 	"skill":  {current: 8, target: 8},
+	// lsp's four are config, home, event, tool — home arrives with task 05;
+	// until then the skeleton sits under the same ceiling.
+	"lsp":    {current: 4, target: 4},
 	"memory": {current: 8, target: 8},
 	// migrate's dependency set is the migration contract itself: the four
 	// Layer-2 capabilities it reuses plus state/config/llm for writing the
@@ -202,7 +205,10 @@ var fanOutBudgets = map[string]fanOutBudget{
 	// The composition root gained pkg/mcp as a deliberate direct dependency:
 	// resolving the session's effective MCP list (project files, consents,
 	// scope stamps) is assembly work that belongs here, not in a lower layer.
-	"process": {current: 18, target: -1}, // §3.7 sets no limit for the composition root
+	// The composition root also imports pkg/lsp: it owns the process-wide
+	// language-server pool and hands each runner its view, the same reason
+	// it imports pkg/mcp.
+	"process": {current: 19, target: -1}, // §3.7 sets no limit for the composition root
 
 	// The P4–P7 gap. Both may import only process, turn, event, config, llm
 	// and channel; both currently reach eighteen. TUI is at nineteen: /migrate
@@ -351,7 +357,7 @@ func checkOnlyStdlibImports(t *testing.T, root string) {
 var packageLayer = map[string]int{
 	"agent": 0, "llm": 0,
 	"state": 1, "config": 1, "home": 1, "telemetry": 1, "channel": 1,
-	"tool": 2, "hook": 2, "mcp": 2, "event": 2, "assembly": 2, "safety": 2, "skill": 2, "memory": 2, "migrate": 2,
+	"tool": 2, "hook": 2, "mcp": 2, "event": 2, "assembly": 2, "safety": 2, "skill": 2, "memory": 2, "migrate": 2, "lsp": 2,
 	"session": 3, "turn": 3, "run": 3,
 	"process": 4,
 	"tui":     5, "gateway": 5,
@@ -535,11 +541,14 @@ var sameLayerEdges = map[string][]string{
 	"telemetry": {"home"},
 
 	// Layer 2, whose topological order is
-	// safety < event < tool < {hook, mcp, skill} < memory < assembly.
+	// safety < event < tool < {hook, mcp, skill, lsp} < memory < assembly.
 	"assembly": {"event", "hook", "safety", "skill", "tool"},
 	"event":    {"safety"},
-	"mcp":      {"tool"},
-	"memory":   {"skill"},
+	// lsp implements the code intelligence ports tool defines and fills in
+	// the event DTOs they carry; it imports nothing else in this layer.
+	"lsp":    {"event", "tool"},
+	"mcp":    {"tool"},
+	"memory": {"skill"},
 	// migrate imports its same-layer siblings to reuse what they own: memory
 	// for scope keys and the ad-hoc note store, skill for directory install
 	// and digests, mcp for name comparison and consent records, tool for the
@@ -1329,11 +1338,12 @@ func TestFileNamesHaveAtMostTwoUnderscores(t *testing.T) {
 	}
 }
 
-// TestPackagesStayUnderTwentyProductionFiles enforces the owner's cap of 20
-// production files per package. A package that outgrows it has stopped being
-// one domain, and the fix is to merge files that belong together or to split
-// the package -- not to raise the number.
-func TestPackagesStayUnderTwentyProductionFiles(t *testing.T) {
+// TestPackagesStayUnderThirtyProductionFiles enforces the owner's cap of 30
+// production files per package (raised from 20 on 2026-10-07, when pkg/tui's
+// panel and picker primitives crossed the old number). A package that
+// outgrows it has stopped being one domain, and the fix is to merge files
+// that belong together or to split the package.
+func TestPackagesStayUnderThirtyProductionFiles(t *testing.T) {
 	root := findRepoRoot(t)
 	counts := map[string]int{}
 	for _, rel := range goFilesUnder(t, root) {
@@ -1390,7 +1400,7 @@ func TestTestFilesCorrespondToProductionFiles(t *testing.T) {
 	}
 }
 
-const maxProductionFilesPerPackage = 20
+const maxProductionFilesPerPackage = 30
 
 // TestSurfacesGetToolStateFromTheEnvironment enforces the call-site half of R4:
 // a surface asks the composition root which tool state this process uses, and

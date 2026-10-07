@@ -3,10 +3,10 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,6 +15,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -507,23 +508,6 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 		http.Error(w, "agent id already exists", http.StatusConflict)
 		return
 	}
-	// The workspace root is derived from the tenant key (<home>/workspaces/
-	// <id>, or <home>/workspace for main); the config schema has no override
-	// for it. A caller may pass the expected root to have it validated —
-	// anything else is a mismatch, not a relocation.
-	root := strings.TrimSpace(req.WorkspaceRoot)
-	if root != "" {
-		absRoot, absErr := filepath.Abs(root)
-		if absErr != nil {
-			http.Error(w, absErr.Error(), http.StatusBadRequest)
-			return
-		}
-		info, statErr := os.Stat(absRoot)
-		if statErr != nil || !info.IsDir() {
-			http.Error(w, "workspace_root must be an existing directory", http.StatusBadRequest)
-			return
-		}
-	}
 	cfg.Agents.Definitions[id] = config.AgentDefinition{
 		Primary:     true,
 		DisplayName: strings.TrimSpace(req.Name),
@@ -532,6 +516,22 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 	if err := validateLoadedRootForAgents(&cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	// The workspace root is derived from the tenant key (<home>/workspaces/
+	// <id>, or <home>/workspace for main); the config schema has no override
+	// for it. A caller may pass the root it expects to have that expectation
+	// checked against the derived one — a different path is a mismatch, not
+	// a relocation, and is refused before anything is written.
+	if expected := strings.TrimSpace(req.WorkspaceRoot); expected != "" {
+		derived, err := derivedWorkspaceRoot(s.Home, &cfg, id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !sameWorkspaceRoot(expected, derived) {
+			http.Error(w, "workspace_root is derived from the agent id: "+derived, http.StatusBadRequest)
+			return
+		}
 	}
 	if err := s.saveAndReload(cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -550,7 +550,41 @@ func (s *Server) handlePrimaryAgentCreate(w http.ResponseWriter, r *http.Request
 			break
 		}
 	}
-	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: "", Records: resolver.All()})
+	writePrimaryAgentsListing(w, resolver)
+}
+
+// derivedWorkspaceRoot is the workspace root the resolver assigns id under
+// cfg — the one place that convention lives.
+func derivedWorkspaceRoot(home string, cfg *config.Root, id string) (string, error) {
+	resolver, err := config.NewResolver(strings.TrimSpace(home), cfg)
+	if err != nil {
+		return "", err
+	}
+	for _, sum := range resolver.All() {
+		if sum.ID == id {
+			return sum.WorkspaceRoot, nil
+		}
+	}
+	return "", fmt.Errorf("agent %q did not resolve", id)
+}
+
+// sameWorkspaceRoot compares two spellings of a workspace root. The derived
+// root need not exist yet, so the comparison resolves the deepest existing
+// ancestor of each side rather than requiring the whole path.
+func sameWorkspaceRoot(a, b string) bool {
+	return skill.CanonicalSkillPath(a) == skill.CanonicalSkillPath(b)
+}
+
+// writePrimaryAgentsListing answers a primary-agent write with the listing
+// the read endpoint serves — the active agent included, since a create, edit
+// or delete never moves it.
+func writePrimaryAgentsListing(w http.ResponseWriter, resolver *config.Resolver) {
+	active, err := resolver.Active()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: active.ID, Records: resolver.All()})
 }
 
 // validateLoadedRootForAgents applies the loader's own validation to the
@@ -597,7 +631,7 @@ func (s *Server) handlePrimaryAgentUpdate(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: "", Records: resolver.All()})
+	writePrimaryAgentsListing(w, resolver)
 }
 
 func (s *Server) handlePrimaryAgentDelete(w http.ResponseWriter, r *http.Request) {

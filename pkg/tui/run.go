@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
@@ -121,8 +120,7 @@ func Run(ctx context.Context, opts Options) error {
 		ReasoningEffort: summarizeComposerReasoningEffort(opts.Session),
 		Directory:       startupWorkingDirectoryDisplay(opts.WorkingDirectory),
 	})
-	renderer.SetSubagentModels(subagentModelsByType(opts.Session))
-	renderer.SetComposerTokenStats(initialComposerTokenStats(opts.Session))
+	renderer.SetComposerTokenStats("", initialComposerTokenStats(opts.Session, initialSessionID))
 	startupInfo := StartupInfo{
 		Version:   strings.TrimSpace(opts.Version),
 		Directory: startupWorkingDirectoryDisplay(opts.WorkingDirectory),
@@ -137,6 +135,9 @@ func Run(ctx context.Context, opts Options) error {
 		session:         opts.Session,
 		titleAnimator:   titleAnimator,
 	}
+	// The surface starts attached to its first conversation, so the event
+	// funnel knows from the first event which screen it is painting.
+	state.session.SetViewingSession(state.sessionID)
 	// Seed the idle terminal title with the resumed session's title (or the
 	// app name for a fresh session); turns animate it from here on.
 	titleAnimator.Settle(initialSessionTitle)
@@ -205,6 +206,8 @@ func Run(ctx context.Context, opts Options) error {
 			opened = openStatusPanel(&state)
 		case "mcp":
 			opened = openMCPPanel(&state)
+		case "lsp":
+			opened = openLSPPanel(&state)
 		}
 		// Painted at once: a panel opened during a run has no idle-loop
 		// iteration coming to draw it.
@@ -219,6 +222,11 @@ func Run(ctx context.Context, opts Options) error {
 
 	var reducer Reducer
 	reducer.WithTracker(tracker)
+	// A resumed conversation's cards are rebuilt by the replay's own reducer;
+	// the live reducer takes them over, so a lifecycle event arriving after
+	// the resume — the reaper settling a subagent the killed process left
+	// running — settles the card on screen instead of opening an orphan.
+	cmds.replayCardsTo = &reducer
 	var turnWorkedStatus string
 
 	// UI notifications are serialized through a queue and drained on the main
@@ -254,6 +262,12 @@ func Run(ctx context.Context, opts Options) error {
 				drawUIPanel(renderer, &state)
 			}
 			return
+		case LSPStatusTickMsg:
+			if state.panel != nil && state.panel.kind == "lsp" {
+				state.panel.refreshLSP()
+				drawUIPanel(renderer, &state)
+			}
+			return
 		case MCPAuthMsg:
 			if state.panel != nil {
 				state.panel.applyAuth(msg)
@@ -266,6 +280,11 @@ func Run(ctx context.Context, opts Options) error {
 				drawUIPanel(renderer, &state)
 			}
 			return
+		case SubagentInputBoundaryMsg:
+			// A subagent's queue decided what follows one of its executions, in a
+			// background goroutine; apply it on the main loop.
+			handleSubagentInputBoundaryMsg(opts.Session, renderer, &state, msg)
+			return
 		}
 		if handleAutoContinueNotification(renderer, &state, m) {
 			return
@@ -277,7 +296,10 @@ func Run(ctx context.Context, opts Options) error {
 		// what agent it belongs to directly rather than inferring it from the
 		// roster.
 		if msg, ok := m.(SubagentSpawnedMsg); ok {
-			renderer.NoteSubagentSpawned(msg.AgentID, msg.AgentType)
+			renderer.NoteSubagentSpawned(msg.AgentID, msg.AgentType, ComposerFooter{
+				Model:           subagentModelFooterLabel(msg.ModelProvider, msg.Model),
+				ReasoningEffort: strings.TrimSpace(msg.ReasoningEffort),
+			})
 		}
 		// The model entering or leaving Plan mode moves the footer at once,
 		// not only when its turn ends.
@@ -340,23 +362,29 @@ func Run(ctx context.Context, opts Options) error {
 			// capturing the pre-reconciliation stream deltas instead of the final
 			// authoritative provider usage.
 			sess := tracker.SnapshotSession()
-			renderer.RefreshComposerTokenUsage(sess.InputTokens, sess.OutputTokens)
+			renderer.RefreshComposerTokenUsage("", sess.InputTokens, sess.OutputTokens)
 		}
 		if ev.ComposerTokenStats != nil {
 			stats := *ev.ComposerTokenStats
-			snap := tracker.SnapshotSession()
-			stats.InputTokens = snap.InputTokens
-			stats.OutputTokens = snap.OutputTokens
-			renderer.SetComposerTokenStats(stats)
+			if view := strings.TrimSpace(ev.ComposerTokenStatsAgent); view != "" {
+				// A subagent's budget is its own; the conversation's tracker
+				// counters are not this view's in/out, so they are not folded in.
+				renderer.SetComposerTokenStats(view, stats)
+			} else {
+				snap := tracker.SnapshotSession()
+				stats.InputTokens = snap.InputTokens
+				stats.OutputTokens = snap.OutputTokens
+				renderer.SetComposerTokenStats("", stats)
+			}
 		}
-		if steerMsg, ok := m.(PendingSteersChangedMsg); ok {
+		if steerMsg, ok := m.(InputQueueChangedMsg); ok {
 			if sid := strings.TrimSpace(steerMsg.SessionID); sid == "" || sid == state.sessionID {
 				if ch := strings.TrimSpace(steerMsg.Channel); ch == "" || ch == "tui" {
-					// Steers just delivered to the model move from the pending
-					// preview into the transcript: drop them from the queue
-					// preview and render them as user-history messages so they
-					// don't silently disappear.
-					renderDeliveredSteerMessages(renderer, state.reconcilePendingSteersCount(steerMsg.Count))
+					// Steers just delivered to the model move from the queue
+					// preview into the transcript: take them off the queue's
+					// delivered list and render them as user-history messages
+					// so they don't silently disappear.
+					renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
 					renderComposerWithState(renderer, &state)
 				}
 			}
@@ -377,7 +405,7 @@ func Run(ctx context.Context, opts Options) error {
 			// The working line itself needs no nudge: it is rendered from the
 			// tracker on every paint.
 			sess := tracker.SnapshotSession()
-			renderer.RefreshComposerTokenUsage(sess.InputTokens, sess.OutputTokens)
+			renderer.RefreshComposerTokenUsage("", sess.InputTokens, sess.OutputTokens)
 		}
 		if rosterChanged {
 			renderComposerWithState(renderer, &state)
@@ -413,7 +441,7 @@ func Run(ctx context.Context, opts Options) error {
 				// Like the skills menu below, a pick that produces work is
 				// queued and drained like any other follow-up.
 				if _, continueRun, sub, _ := runSlashPicker(ctx, cmds, renderer, tracker, &state, ev.RequestPicker); continueRun && len(sub.Parts) > 0 {
-					state.enqueueTurn(sub, queuedSubmissionActionTurn)
+					state.sessionQueue().FollowUp(queueInput(sub))
 				}
 			}
 			if ev.RequestPermissionMgmt {
@@ -424,7 +452,7 @@ func Run(ctx context.Context, opts Options) error {
 				// that produces work (running a skill, handing off to the
 				// workshop) is queued and drained like any other follow-up.
 				if sub, ok := cmds.handleSkills(ctx); ok {
-					state.enqueueTurn(sub, queuedSubmissionActionTurn)
+					state.sessionQueue().FollowUp(queueInput(sub))
 				}
 			}
 		}
@@ -475,6 +503,27 @@ func Run(ctx context.Context, opts Options) error {
 				return
 			}
 			renderer.RenderFrame(migrationReportFrame(title, migration.Report))
+		}
+		// A language-server recommendation is a modal like the migration
+		// preview: it can open mid-turn, the agent keeps working, and queued
+		// input waits until the answer is applied. The install it can start
+		// owns the transient line for as long as it runs.
+		switch lspMsg := m.(type) {
+		case LSPRecommendationMsg:
+			if decider, ok := state.session.(lspRecommendationDecider); ok {
+				handleLSPRecommendation(renderer, selector, &state, decider, lspMsg.Rec)
+			}
+		case LSPInstallProgressMsg:
+			renderer.RenderTransientStatus(transientSourceLSP, "lsp: installing "+lspMsg.ServerID+" · "+lspMsg.Line)
+		case LSPInstallDoneMsg:
+			renderer.FinishTransientStatus(transientSourceLSP)
+			if lspMsg.Err != "" {
+				renderer.RenderFrame(Frame{Kind: FrameError, Title: lspMsg.ServerID + " install failed", Content: lspMsg.Err, Final: true})
+				return
+			}
+			if lspMsg.Text != "" {
+				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: lspMsg.Text, Final: true})
+			}
 		}
 		// A skill install runs in the background and owns one card in the
 		// transcript: every checkpoint replaces it, and the finished install
@@ -727,7 +776,7 @@ func Run(ctx context.Context, opts Options) error {
 			}
 			if ev.kind == inputEventHotkey {
 				if ev.hotkey == hotkeyOverlayUp || ev.hotkey == hotkeyOverlayDown {
-					if state.handleOverlayNav(ev.hotkey, renderer.ActiveView()) {
+					if state.handleOverlayNav(ev.hotkey, renderer) {
 						renderComposerWithState(renderer, &state)
 					}
 					continue
@@ -850,6 +899,12 @@ func Run(ctx context.Context, opts Options) error {
 			state.resumeInputReadIfNeeded()
 			exitSessionID = state.sessionID
 			return nil
+		}
+		// A line typed in a subagent's own view belongs to that subagent: it is
+		// routed to it before any conversation logic (plan 007 §3).
+		if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+			subagentViewLine(ctx, sigCh, events, notifyCh, processUINotification, opts.Session, renderer, tracker, &state, cmds, view, line)
+			continue
 		}
 		toks := strings.Fields(line)
 		// The line is now this loop's to execute, so the composer no longer
@@ -1022,27 +1077,22 @@ func summarizeComposerModel(session Session) string {
 	return strings.Join(strings.Fields(summary), " ")
 }
 
-// subagentModelsByType lists the built-in subagent types that run on a model of
-// their own, as agents.definitions[<type>].llm_providers configures them. It
-// mirrors the runtime's per-type client map: a type with no chain of its own is
-// left out, and the subagent view's footer then shows the primary agent's
-// model, which is what that subagent is actually running on.
-func subagentModelsByType(session Session) map[string]ComposerFooter {
-	if session == nil {
-		return nil
+// subagentModelFooterLabel names the model one spawned execution runs on the
+// way the composer footer does: provider/model, with the spacing a display
+// string may carry normalized away. Empty when the spawn named no model — a
+// view the spawn said nothing about names nothing rather than borrowing the
+// conversation's.
+func subagentModelFooterLabel(provider, model string) string {
+	provider = strings.TrimSpace(provider)
+	model = strings.ReplaceAll(strings.TrimSpace(model), " / ", "/")
+	switch {
+	case provider != "" && model != "":
+		return provider + "/" + model
+	case model != "":
+		return model
+	default:
+		return ""
 	}
-	models := make(map[string]ComposerFooter)
-	for _, agentType := range agent.PublicTypeNames() {
-		model, effort, ok := session.SubagentModelSummary(agentType)
-		if !ok {
-			continue
-		}
-		models[agentType] = ComposerFooter{
-			Model:           strings.ReplaceAll(strings.TrimSpace(model), " / ", "/"),
-			ReasoningEffort: strings.TrimSpace(effort),
-		}
-	}
-	return models
 }
 
 func summarizeComposerReasoningEffort(session Session) string {
@@ -1052,13 +1102,13 @@ func summarizeComposerReasoningEffort(session Session) string {
 	return strings.TrimSpace(session.CurrentModelReasoningEffort())
 }
 
-func initialComposerTokenStats(session Session) ComposerTokenStats {
+func initialComposerTokenStats(session Session, sessionID string) ComposerTokenStats {
 	if session == nil {
 		return ComposerTokenStats{}
 	}
 	// A fresh session holds nothing yet, so the footer shows the full budget
 	// from the first frame rather than the "compact pending" placeholder.
-	return session.SurfaceComposerTokenStats(0)
+	return session.SurfaceComposerTokenStats(sessionID, 0)
 }
 
 func abbreviateHomePath(path string, home string) string {
@@ -1103,7 +1153,7 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		return true, false, ComposerSubmission{}, false
 	}
 	switch cmd {
-	case "", "help":
+	case "":
 		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.CommandCatalog(turn.SurfaceTUI, turn.DiscoveryOptions{FastAvailable: sessionFastAvailable(cmds.session)}), Final: true})
 		return true, false, ComposerSubmission{}, false
 	case "resume":
@@ -1142,11 +1192,11 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	case "mcp":
 		_ = cmds.handleMCP(state.sessionID)
 		return true, false, ComposerSubmission{}, false
+	case "lsp":
+		_ = cmds.handleLSP(state.sessionID)
+		return true, false, ComposerSubmission{}, false
 	case "migrate":
 		_ = cmds.handleMigrate(ctx, state.sessionID)
-		return true, false, ComposerSubmission{}, false
-	case "diff":
-		_ = cmds.handleDiff(state.sessionID, args)
 		return true, false, ComposerSubmission{}, false
 	case "rename":
 		// Bare /rename asks for the name in place, saying what the
@@ -1414,6 +1464,86 @@ func (t *foregroundTurn) isWithdrawn() bool {
 	return t.withdrawn
 }
 
+// lspRecommendationDecider is the session slice of the recommendation
+// modal: the answer goes back through the control plane, and the line it
+// returns is the transcript's record of what was decided.
+type lspRecommendationDecider interface {
+	DecideLSPRecommendation(event.LSPRecommendation, event.LSPRecommendationChoice) (string, error)
+}
+
+// handleLSPRecommendation asks the recommendation's modal question and
+// applies the answer. Like the migration preview, the modal can open while
+// a turn runs: the agent keeps working, and queued input waits until the
+// answer is applied. The result line goes to the transcript only — it never
+// reaches the model's context.
+func handleLSPRecommendation(renderer *Renderer, selector Selector, state *streamState, decider lspRecommendationDecider, rec event.LSPRecommendation) {
+	state.deferQueueAutosendUntilSelectionApplied()
+	defer state.resumeQueueAutosend()
+	label := "LSP recommendation\nA language server gives the agent diagnostics after its edits and lets it find definitions and references by symbol. Enable this language server?"
+	found := ""
+	if rec.Mode == "install" {
+		found = "Not installed. Install with: " + rec.InstallCommand
+	} else {
+		found = tildePath(rec.BinaryPath)
+		if rec.Version != "" {
+			found += " (" + rec.Version + ")"
+		}
+	}
+	facts := []turn.StatusFact{
+		{Label: "Server", Value: rec.DisplayName + " (" + strings.Join(rec.Languages, ", ") + ")"},
+		{Label: "Found", Value: found},
+		{Label: "Triggered by", Value: rec.TriggerExtension + " files"},
+		{Label: "Runs", Value: "in this trusted project, outside the sandbox"},
+	}
+	primaryAction, primaryChoice := "Yes, enable", event.LSPChoiceEnable
+	defaultIdx := 0
+	if rec.Mode == "install" {
+		// Running an install command must not be one keypress away.
+		primaryAction, primaryChoice = "Yes, install and enable", event.LSPChoiceInstall
+		defaultIdx = 1
+	}
+	actions := []string{primaryAction, "No, not now", "Never for " + rec.ServerID, "Disable all LSP recommendations"}
+	idx, confirmed, err := selector.Review(label, facts, actions, defaultIdx)
+	choice := event.LSPChoiceNotNow
+	switch {
+	case err != nil:
+		renderer.PrintError(err)
+	case confirmed:
+		switch idx {
+		case 0:
+			choice = primaryChoice
+		case 2:
+			choice = event.LSPChoiceNever
+		case 3:
+			choice = event.LSPChoiceDisableAll
+		}
+	}
+	text, decideErr := decider.DecideLSPRecommendation(rec, choice)
+	if decideErr != nil {
+		renderer.PrintError(decideErr)
+		return
+	}
+	if text != "" {
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "lsp", Content: text, Final: true})
+	}
+}
+
+// tildePath shortens the user's own home-directory prefix to ~, the way a
+// prompt shows a path that lives there.
+func tildePath(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || p == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~" + p[len(home):]
+	}
+	return p
+}
+
 // finish closes the withdrawal window before ordinary outcome persistence. If
 // Esc won, the dispatcher must instead complete exact-row withdrawal cleanup.
 func (t *foregroundTurn) finish() bool {
@@ -1432,25 +1562,17 @@ type streamState struct {
 	session          Session
 	composer         ComposerState
 	// autoContinue is the continuation the engine armed after a usage limit,
-	// while it waits; autoContinueDue is that continuation once its wait ended,
-	// until the idle loop submits it.
-	autoContinue    *autoContinueView
+	// per view ("" the conversation's, a roster key a subagent's), while it
+	// waits; autoContinueDue is the conversation's own once its wait ended,
+	// until the idle loop submits it. A subagent's due continuation is
+	// delivered when its notice arrives, so it has no separate due slot.
+	autoContinue    map[string]*autoContinueView
 	autoContinueDue *ComposerSubmission
 	// panel is the interactive slash panel (/status, /mcp) owned by this
 	// loop. It is composer state, not a modal: keys arrive through the same
 	// event stream, notifications keep flowing, and the transcript keeps
 	// streaming above it.
-	panel         *uiPanel
-	pendingSteers []ComposerSubmission
-	// queuedTurns is the FIFO ordinary follow-up queue. Its newest item is
-	// destructively recalled for editing.
-	queuedTurns []queuedSubmission
-	// rejectedSteers are inputs that were accepted as steers but rejected by
-	// the active run. They are kept separate from ordinary follow-ups.
-	rejectedSteers []queuedSubmission
-	// queueSeq is the shared enqueue clock across all three queues. It only has
-	// to order messages against each other, so it is never reset.
-	queueSeq int
+	panel *uiPanel
 	// terminalFocused follows CSI I / CSI O focus reports. It starts true so
 	// terminals without focus-reporting support do not produce noisy bells.
 	terminalFocused bool
@@ -1460,18 +1582,24 @@ type streamState struct {
 	clipboardWatch                 *clipboardImageWatcher
 	restoredQueuedSubmission       ComposerSubmission
 	restoredQueuedSubmissionActive bool
-	inputHistoryStore              rawInputHistoryStore
-	historyBrowseActive            bool
-	historyDraftAttachments        []InputAttachment
-	historyDraftPastes             []PendingPaste
-	quitRequested                  bool
-	resumeRawRead                  func()
-	nextPasteID                    int
-	holdComposer                   bool
-	home                           string
-	workspaceRoot                  string
-	workingDir                     string
-	startupInfo                    StartupInfo
+	// composerView is the view the composer currently belongs to: "" for the
+	// conversation's own, a roster key for a subagent's. viewDrafts keeps the
+	// other views' in-progress composers so switching views never loses what
+	// was typed (plan 007 §2). syncComposerToView is the only writer.
+	composerView            string
+	viewDrafts              map[string]composerDraft
+	inputHistoryStore       rawInputHistoryStore
+	historyBrowseActive     bool
+	historyDraftAttachments []InputAttachment
+	historyDraftPastes      []PendingPaste
+	quitRequested           bool
+	resumeRawRead           func()
+	nextPasteID             int
+	holdComposer            bool
+	home                    string
+	workspaceRoot           string
+	workingDir              string
+	startupInfo             StartupInfo
 	// titleAnimator drives the animated terminal window/tab title while a
 	// turn is in flight; nil in tests that construct streamState directly.
 	titleAnimator                *terminalTitleAnimator
@@ -1480,11 +1608,12 @@ type streamState struct {
 	activeRunCtrlCCancelNoReplay bool
 	agentControlPrefixArmed      bool
 	agentRoster                  AgentRosterSnapshot
-	agentRosterSelected          int
 	// agentRosterFocused is true once the user has moved keyboard focus onto
 	// the roster panel via Down. While false, arrows control input history as
 	// usual and the roster shows no per-row hint; Enter/x on the roster are
-	// inert until focus is entered.
+	// inert until focus is entered. The row the focused cursor points at is
+	// the renderer's (Renderer.RosterCursorRow), keyed by agent so it follows
+	// the view rather than a row position.
 	agentRosterFocused bool
 	// userInterrupted is set when the user interrupts an active run with esc.
 	// The run's cancellation error is swallowed downstream and surfaces as a nil
@@ -1573,11 +1702,19 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	// appearing in the transcript — then report what was dropped, because
 	// silently discarding queued messages is indistinguishable from losing them.
 	dropped := state.discardQueuedInput()
+	// A subagent's queued input belongs to that subagent, and the subagent
+	// belongs to this conversation: leaving the conversation abandons it by the
+	// same rule, so it is discarded here too rather than lingering in a queue
+	// whose subagent the user is no longer looking at.
+	dropped += state.discardSubagentQueues(state.session)
 	// A continuation waiting on a usage limit belongs to the conversation
 	// being left. It is cancelled rather than carried along: it would resume a
 	// conversation the reader is no longer looking at.
 	state.leaveAutoContinue(renderer)
 	state.sessionID = next
+	// The event funnel gates painting on the conversation being looked at,
+	// so the switch has to re-point it together with the surface.
+	state.session.SetViewingSession(next)
 	syncPlanModeIndicator(renderer, state)
 	// The MCP watch follows the conversation: its failures belong to the session
 	// the user has open, and the progress line describes that session's runner.
@@ -1605,6 +1742,9 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	state.submitPendingSteersAfterInterrupt = false
 	state.activeRunIsUserShell = false
 	state.suppressQueueAutosend = false
+	// The subagents of the conversation being left no longer exist; their view
+	// drafts are forgotten with it (plan 007 §2).
+	state.clearViewDrafts()
 	if state.session != nil {
 		state.agentRoster = state.session.AgentRosterSnapshot(next)
 		// The conversation the surface speaks for has changed, so its own
@@ -1613,7 +1753,6 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	} else {
 		state.agentRoster = AgentRosterSnapshot{Rows: []AgentRosterRow{}}
 	}
-	state.agentRosterSelected = 0
 	state.agentRosterFocused = false
 	if tracker != nil {
 		tracker.Reset()
@@ -1622,7 +1761,7 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 		// A newly selected session has no usage yet, but its footer must still
 		// show the current model's full context budget immediately. This also
 		// clears prior-session in/out usage without waiting for a provider update.
-		renderer.SetComposerTokenStats(initialComposerTokenStats(state.session))
+		renderer.SetComposerTokenStats("", initialComposerTokenStats(state.session, state.sessionID))
 		// A session switch invalidates every line that was on screen: the MCP
 		// startup, a migration and the previous session's working line all
 		// belonged to the session that just went away.
@@ -1634,7 +1773,7 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 		renderer.Banner(state.startupInfo)
 		// The activated session may run a different model (or a fallback with
 		// a warning); the footer and the budget follow it at once.
-		refreshSessionFooter(renderer, state.session)
+		refreshSessionFooter(renderer, state.session, state.sessionID)
 		if warning != "" {
 			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "model", Content: warning, Final: true})
 		}
@@ -1659,25 +1798,11 @@ func persistSurfaceBrowseState(session Session, renderer *Renderer, sessionID st
 	_ = saver.SaveSurfaceBrowseState(context.Background(), sessionID, renderer.SnapshotBrowseState())
 }
 
-func (s *streamState) selectedAgentRosterRow() (AgentRosterRow, bool) {
-	if s == nil || len(s.agentRoster.Rows) == 0 {
-		return AgentRosterRow{}, false
-	}
-	idx := s.agentRosterSelected
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(s.agentRoster.Rows) {
-		idx = len(s.agentRoster.Rows) - 1
-	}
-	return s.agentRoster.Rows[idx], true
-}
-
 // handleOverlayNav routes hotkeyOverlayUp and hotkeyOverlayDown to the active
 // overlay (slash picker > mention picker > agent roster) and returns true if
 // navigation occurred (so the caller can re-render). Shared between the idle
 // event loop and handleActiveRunInput (live turn).
-func (s *streamState) handleOverlayNav(hotkey inputHotkey, activeView string) bool {
+func (s *streamState) handleOverlayNav(hotkey inputHotkey, renderer *Renderer) bool {
 	if s == nil {
 		return false
 	}
@@ -1698,26 +1823,22 @@ func (s *streamState) handleOverlayNav(hotkey inputHotkey, activeView string) bo
 		overlay.MoveSelection(delta)
 		return true
 	} else if agentRosterHasRunningSubagent(s.agentRoster) {
-		rows := s.agentRoster.Rows
 		if hotkey == hotkeyOverlayDown {
 			if !s.agentRosterFocused {
-				s.agentRosterFocused = true
 				// Focus lands where the cursor already points — the agent whose
-				// transcript is on screen — so taking the keyboard onto the
-				// roster does not move the cursor to a different agent.
-				s.agentRosterSelected = maxInt(0, agentRosterIndexForView(s.agentRoster, activeView))
+				// transcript is on screen, because every view change carries
+				// the cursor — so taking the keyboard onto the roster does not
+				// move it to a different agent.
+				s.agentRosterFocused = true
 			} else {
-				s.agentRosterSelected++
-				if s.agentRosterSelected >= len(rows) {
-					s.agentRosterSelected = 0
-				}
+				renderer.MoveRosterCursor(s.agentRoster, +1)
 			}
 		} else { // hotkeyOverlayUp
 			if s.agentRosterFocused {
-				if s.agentRosterSelected == 0 {
+				if row, ok := renderer.RosterCursorRow(s.agentRoster); ok && row == s.agentRoster.Rows[0] {
 					s.agentRosterFocused = false
 				} else {
-					s.agentRosterSelected--
+					renderer.MoveRosterCursor(s.agentRoster, -1)
 				}
 			}
 		}
@@ -1733,7 +1854,7 @@ func (s *streamState) handleAgentRosterLineInput(session Session, renderer *Rend
 		return false
 	}
 	line = strings.TrimSpace(line)
-	row, ok := s.selectedAgentRosterRow()
+	row, ok := renderer.RosterCursorRow(s.agentRoster)
 	if !ok {
 		return false
 	}
@@ -1773,17 +1894,15 @@ func (s *streamState) handleAgentRosterLineInput(session Session, renderer *Rend
 	return false
 }
 
-// refreshAgentRoster folds the reducer's subagent rows into the roster and
-// keeps the selection inside it. Every message that can add or remove a row
-// goes through here, so the clamp cannot be forgotten on one of them.
+// refreshAgentRoster folds the reducer's subagent rows into the roster. Every
+// message that can add or remove a row goes through here. The cursor needs no
+// clamping: it is an agent key held by the renderer, so a row leaving the
+// roster cannot slide it onto a different agent.
 func (s *streamState) refreshAgentRoster(reducer *Reducer) {
 	if s == nil || reducer == nil {
 		return
 	}
 	s.agentRoster = mergeAgentRoster(s.agentRoster, reducer.AgentRosterSnapshot())
-	if s.agentRosterSelected >= len(s.agentRoster.Rows) {
-		s.agentRosterSelected = maxInt(0, len(s.agentRoster.Rows)-1)
-	}
 }
 
 // mergeAgentRoster keeps the primary-agent row from the existing roster and
@@ -1824,25 +1943,6 @@ type ComposerSubmission struct {
 	// slash parsing to the surface dispatcher; the runner loads the skill.
 	SkillName string
 	SkillPath string
-	// QueueSeq orders this message against everything else queued during the
-	// same run. The three queues are separate FIFOs, so without a shared clock
-	// "edit last queued message" can only guess which queue holds the newest
-	// message. Stamped by the enqueue helpers; meaningless (zero) for a
-	// submission that never sat in a queue.
-	QueueSeq int
-}
-
-type queuedSubmissionAction string
-
-const (
-	queuedSubmissionActionTurn          queuedSubmissionAction = "turn"
-	queuedSubmissionActionRejectedSteer queuedSubmissionAction = "rejected_steer"
-	queuedSubmissionActionShell         queuedSubmissionAction = "shell"
-)
-
-type queuedSubmission struct {
-	Action     queuedSubmissionAction
-	Submission ComposerSubmission
 }
 
 func (s *streamState) resumeInputReadIfNeeded() {
@@ -2007,31 +2107,424 @@ func (s *streamState) composerDisplayCursor() int {
 	return len([]rune(displayPrefix))
 }
 
+// composerDraft is one view's in-progress composer, kept aside while another
+// view is on screen. It is the composer state that is per-view; overlays and
+// the committed Text are not, because they are rebuilt or consumed within one
+// submission.
+type composerDraft struct {
+	DraftText     string
+	Cursor        int
+	Attachments   []InputAttachment
+	PendingPastes []PendingPaste
+	// restored is a recalled queue message the draft stands for, so an
+	// unchanged resend is byte-for-byte the original. restoredReady mirrors
+	// streamState.restoredQueuedSubmissionActive.
+	restored      ComposerSubmission
+	restoredReady bool
+}
+
+// syncComposerToView keeps the composer on the view that is on screen: when the
+// active view changed, it saves the outgoing view's draft and restores the
+// incoming one (empty when that view has nothing), reseeds the raw reader, and
+// loads the incoming view's own footer gauge. It is a no-op while the view has
+// not moved, so streaming a run does not churn the composer.
+func (s *streamState) syncComposerToView(renderer *Renderer) {
+	if s == nil || renderer == nil || s.session == nil {
+		return
+	}
+	view := strings.TrimSpace(renderer.ActiveView())
+	if view == s.composerView {
+		s.composer.SubagentView = view != ""
+		return
+	}
+	if s.viewDrafts == nil {
+		s.viewDrafts = make(map[string]composerDraft)
+	}
+	s.viewDrafts[s.composerView] = s.currentComposerDraft()
+	s.applyComposerDraft(s.viewDrafts[view])
+	s.composerView = view
+	s.composer.SubagentView = view != ""
+	if view != "" {
+		// Each subagent's view shows that subagent's own context window; the
+		// engine computes it from the subagent's worker session and model.
+		renderer.SetComposerTokenStats(view, s.session.SubagentComposerTokenStats(s.sessionID, view))
+	}
+}
+
+// clearViewDrafts forgets every other view's composer. A session switch changes
+// which subagents exist, so the drafts of the outgoing conversation would
+// address agent keys that no longer mean anything.
+func (s *streamState) clearViewDrafts() {
+	if s == nil {
+		return
+	}
+	s.viewDrafts = nil
+	s.composerView = ""
+}
+
+func (s *streamState) currentComposerDraft() composerDraft {
+	return composerDraft{
+		DraftText:     s.composer.DraftText,
+		Cursor:        s.composer.Cursor,
+		Attachments:   append([]InputAttachment(nil), s.composer.Attachments...),
+		PendingPastes: append([]PendingPaste(nil), s.composer.PendingPastes...),
+		restored:      cloneComposerSubmission(s.restoredQueuedSubmission),
+		restoredReady: s.restoredQueuedSubmissionActive,
+	}
+}
+
+func (s *streamState) applyComposerDraft(d composerDraft) {
+	s.composer.DraftText = d.DraftText
+	s.composer.Cursor = composerCursorClamp(d.DraftText, d.Cursor)
+	s.composer.Attachments = append([]InputAttachment(nil), d.Attachments...)
+	s.composer.PendingPastes = append([]PendingPaste(nil), d.PendingPastes...)
+	s.composer.Text = ""
+	s.composer.SlashOverlay = nil
+	s.composer.MentionOverlay = nil
+	s.holdComposer = false
+	if d.restoredReady {
+		s.restoredQueuedSubmission = cloneComposerSubmission(d.restored)
+		s.restoredQueuedSubmissionActive = true
+	} else {
+		s.clearRestoredQueuedSubmission()
+	}
+	// The raw reader owns the line buffer, so switching views must reseed it or
+	// the previous view's text would follow the user into this one.
+	seedInteractiveInput(s.composer.DraftText, seedCursorEnd)
+}
+
 func (s *streamState) composerPendingInputPreview() ComposerPendingInputPreview {
 	if s == nil {
 		return ComposerPendingInputPreview{}
 	}
-	preview := ComposerPendingInputPreview{
-		PendingSteers:  make([]string, 0, len(s.pendingSteers)),
-		RejectedSteers: make([]string, 0, len(s.rejectedSteers)),
-		QueuedMessages: make([]string, 0, len(s.queuedTurns)),
+	// A subagent's view shows that subagent's own queued input, from its own
+	// queue (plan 007 §6).
+	if view := strings.TrimSpace(s.composerView); view != "" {
+		if s.session == nil {
+			return ComposerPendingInputPreview{}
+		}
+		return s.session.SubagentInputPreview(s.sessionID, view)
 	}
-	for _, submission := range s.pendingSteers {
-		if text := composerSubmissionPreview(submission); text != "" {
-			preview.PendingSteers = append(preview.PendingSteers, text)
+	preview := run.QueuePreview{}
+	if q := s.sessionQueue(); q != nil {
+		preview = q.Preview()
+	}
+	return ComposerPendingInputPreview{
+		PendingSteers:  preview.Steers,
+		RejectedSteers: preview.Rejected,
+		QueuedMessages: preview.FollowUp,
+	}
+}
+
+// subagentViewMainOnlyReply is the one sentence a command hidden in a
+// subagent's view answers with (D4 class ③), and what a `!shell` line answers
+// with: both belong to the conversation, not to the subagent.
+const subagentViewMainOnlyReply = "Run this from the main view (press esc to return)."
+
+// subagentViewLine routes one line the user submitted inside a subagent's own
+// view to that subagent. Everything typed there belongs to the subagent:
+// ordinary text runs its next execution, a skill command is sent to it,
+// /compact and /context act on it, and the commands hidden there answer with one
+// sentence pointing back to the conversation (D4).
+func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string) {
+	if state == nil || renderer == nil {
+		return
+	}
+	state.resetActiveRunCtrlCSequence()
+	if acc, ok := state.composer.AcceptMentionSelection(); ok {
+		state.applyMentionAcceptance(acc)
+		renderComposerWithState(renderer, state)
+		return
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+	state.resumeInputReadIfNeeded()
+	state.composer.Text = line
+	submission, submittable := state.submissionFromCurrentDraft()
+	state.resetComposerForActiveRunDraft()
+	renderComposerWithState(renderer, state)
+
+	switch {
+	case strings.HasPrefix(line, "/"):
+		subagentViewSlash(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, line)
+	case strings.HasPrefix(line, "!"):
+		// A shell command is the conversation's, never the subagent's.
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "shell", Content: subagentViewMainOnlyReply, AgentID: view, Final: true})
+		state.composer.DraftText = line
+		state.composer.Cursor = len([]rune(line))
+		seedInteractiveInput(line, seedCursorEnd)
+		renderComposerWithState(renderer, state)
+	default:
+		if submittable {
+			sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, false)
 		}
 	}
-	for _, item := range s.rejectedSteers {
-		if text := composerSubmissionPreview(item.Submission); text != "" {
-			preview.RejectedSteers = append(preview.RejectedSteers, text)
+}
+
+// subagentViewSlash dispatches a slash command typed in a subagent's view by
+// its D4 class.
+func subagentViewSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, cmds *commandController, view, line string) {
+	fields := strings.Fields(strings.TrimSpace(line))
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	builtin, isBuiltin := turn.Find(name)
+	if !isBuiltin {
+		// A skill command acts on the subagent: it is expanded through the
+		// shared slash path and sent to the subagent with the skill explicitly
+		// activated.
+		submission, ok := expandSubagentSkillCommand(ctx, session, state, line)
+		if !ok {
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.UnknownCommandReply(turn.SurfaceTUI, name, turn.DiscoveryOptions{SubagentView: true, FastAvailable: sessionFastAvailable(session)}), AgentID: view, Final: true})
+			return
+		}
+		sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, false)
+		return
+	}
+	switch builtin.SubagentView {
+	case turn.SubagentViewGlobal:
+		// Runs exactly as it does in the conversation's view.
+		dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line)
+	case turn.SubagentViewActs:
+		switch name {
+		case "compact":
+			dispatchSubagentCompactSlash(ctx, sigCh, events, notifyCh, processNotify, cmds, renderer, state, view, line)
+		case "context":
+			reply, ok := session.SubagentContextReport(state.sessionID, view)
+			if ok && strings.TrimSpace(reply) != "" {
+				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "context", Content: strings.TrimSpace(reply), AgentID: view, Final: true})
+			}
+		default:
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: name, Content: subagentViewMainOnlyReply, AgentID: view, Final: true})
+		}
+	default:
+		// Hidden (class ③) or undeclared: point back to the conversation.
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: name, Content: subagentViewMainOnlyReply, AgentID: view, Final: true})
+	}
+}
+
+// expandSubagentSkillCommand expands a skill command into the submission the
+// subagent runs: the shared slash path builds the prompt, and the trusted skill
+// selection rides along so the execution activates that skill.
+func expandSubagentSkillCommand(ctx context.Context, session Session, state *streamState, line string) (ComposerSubmission, bool) {
+	outcome, ok := session.ExecuteSurfaceSlash(ctx, state.sessionID, line)
+	if !ok || !outcome.ShouldContinueRun {
+		return ComposerSubmission{}, false
+	}
+	next := strings.TrimSpace(outcome.ContinueInput)
+	if next == "" {
+		return ComposerSubmission{}, false
+	}
+	sub, ok := buildComposerSubmission(next, strings.TrimSpace(line), nil)
+	if !ok {
+		return ComposerSubmission{}, false
+	}
+	sub.RawInput = strings.TrimSpace(line)
+	sub.SkillName = strings.TrimSpace(outcome.SkillName)
+	sub.SkillPath = strings.TrimSpace(outcome.SkillPath)
+	return sub, true
+}
+
+// sendSubagentViewSubmission hands one submission to the subagent whose view it
+// was typed in, and keeps the composer honest: cleared on success, restored on
+// a refusal so nothing is lost.
+func sendSubagentViewSubmission(ctx context.Context, session Session, renderer *Renderer, state *streamState, view string, submission ComposerSubmission, followUp bool) {
+	if state == nil || renderer == nil {
+		return
+	}
+	if _, err := session.SendToSubagent(state.sessionID, view, submission, followUp); err != nil {
+		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "subagent", Content: "Could not send this to the subagent: " + err.Error(), AgentID: view, Final: true})
+		state.restoreDraftSubmission(submission)
+		renderComposerWithState(renderer, state)
+		return
+	}
+	state.resetComposerForActiveRunDraft()
+	renderComposerWithState(renderer, state)
+}
+
+// dispatchSubagentCompactSlash runs /compact for a subagent's own context on the
+// same cancelable path the conversation's /compact uses: the loop keeps
+// processing input and notifications while the compaction runs, and Ctrl+C/Esc
+// cancels the real operation.
+func dispatchSubagentCompactSlash(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), cmds *commandController, renderer *Renderer, state *streamState, view, line string) {
+	if cmds == nil || cmds.session == nil || state == nil {
+		return
+	}
+	opCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resultCh := make(chan string, 1)
+	sessionID := state.sessionID
+	go func() {
+		reply, _ := cmds.session.CompactSubagent(opCtx, sessionID, view)
+		resultCh <- reply
+	}()
+	ctxDone := ctx.Done()
+	cancelRequested := false
+	requestCancel := func() {
+		if cancelRequested {
+			return
+		}
+		cancelRequested = true
+		cancel()
+	}
+	for {
+		select {
+		case reply := <-resultCh:
+			// The compaction's own events draw its card; here only a one-line
+			// refusal or failure is said, in the subagent's view.
+			drainNotifications(notifyCh, processNotify)
+			if r := strings.TrimSpace(reply); r != "" {
+				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "compact", Content: r, AgentID: view, Final: true})
+			}
+			return
+		case <-ctxDone:
+			ctxDone = nil
+			requestCancel()
+		case <-sigCh:
+			requestCancel()
+		case m, ok := <-notifyCh:
+			if !ok {
+				notifyCh = nil
+				continue
+			}
+			if processNotify != nil {
+				processNotify(m)
+			}
+		case ev, ok := <-events:
+			if !ok || ev.kind == inputEventDone {
+				events = nil
+				requestCancel()
+				continue
+			}
+			if handleBlockingSlashInput(cmds.session, renderer, state, ev) {
+				requestCancel()
+			}
 		}
 	}
-	for _, item := range s.queuedTurns {
-		if text := composerSubmissionPreview(item.Submission); text != "" {
-			preview.QueuedMessages = append(preview.QueuedMessages, text)
+}
+
+// dispatchActiveRunInput routes one input event received during a running turn.
+// A line submitted while a subagent's own view is on screen belongs to that
+// subagent, not the conversation: it goes through subagentViewLine, which owns
+// the slash classification and the cancelable compact path. The channels that
+// handler needs are the loop's, not handleActiveRunInput's, which is why the
+// routing sits here rather than inside it; every other event, and every line in
+// the conversation's own view, is unchanged.
+func dispatchActiveRunInput(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, clipboard ClipboardImageReader, ev inputEvent, cmds *commandController) {
+	if ev.kind == inputEventLine && state != nil && !state.agentRosterFocused && renderer != nil {
+		if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+			subagentViewLine(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, ev.line)
+			return
 		}
 	}
-	return preview
+	handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, ev, cmds)
+}
+
+// handleSubagentViewEsc is Esc's behavior in a subagent's view (D1): take back a
+// just-sent message, else interrupt to send the queued steers, else cancel the
+// subagent's own pending continuation, else return to the conversation. Esc
+// never cancels the subagent itself.
+func handleSubagentViewEsc(session Session, renderer *Renderer, state *streamState, view string) {
+	if state == nil || renderer == nil {
+		return
+	}
+	if restored, ok := session.WithdrawSubagentInput(state.sessionID, view); ok {
+		items := append([]ComposerSubmission(nil), restored...)
+		if draft, ok := state.currentDraftSubmission(); ok {
+			items = append(items, draft)
+		}
+		state.restoreDraftSubmission(mergeComposerSubmissions(items))
+		renderComposerWithState(renderer, state)
+		return
+	}
+	if session.InterruptSubagentToSend(state.sessionID, view) {
+		return
+	}
+	// A continuation this subagent is waiting on is the last thing Esc has to
+	// act on before it leaves the view: "Esc with something in flight works on
+	// that subagent" (D1).
+	if state.cancelAutoContinue(renderer) {
+		renderComposerWithState(renderer, state)
+		return
+	}
+	renderer.SetActiveView("")
+	state.syncComposerToView(renderer)
+	renderComposerWithState(renderer, state)
+}
+
+// handleSubagentInputBoundaryMsg applies what a subagent's queue decided when one
+// of its executions ended: a Send starts its next execution, a Restore goes back
+// into that subagent's composer (or is kept for its view).
+func handleSubagentInputBoundaryMsg(session Session, renderer *Renderer, state *streamState, m SubagentInputBoundaryMsg) {
+	view := strings.TrimSpace(m.AgentKey)
+	if state == nil || renderer == nil || view == "" {
+		return
+	}
+	if len(m.Send) > 0 {
+		merged := mergeComposerSubmissions(m.Send)
+		if _, err := session.SendToSubagent(state.sessionID, view, merged, false); err != nil {
+			renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "subagent", Content: "Could not continue the subagent: " + err.Error(), AgentID: view, Final: true})
+		}
+		renderComposerWithState(renderer, state)
+		return
+	}
+	if len(m.Restore) > 0 {
+		if strings.TrimSpace(renderer.ActiveView()) == view {
+			items := append([]ComposerSubmission(nil), m.Restore...)
+			if draft, ok := state.currentDraftSubmission(); ok {
+				items = append(items, draft)
+			}
+			state.restoreDraftSubmission(mergeComposerSubmissions(items))
+		} else {
+			state.prependRestoredToViewDraft(view, m.Restore)
+		}
+		renderComposerWithState(renderer, state)
+	}
+}
+
+// prependRestoredToViewDraft keeps restored input for a subagent whose view is
+// not on screen, ahead of whatever that view's composer already holds.
+func (s *streamState) prependRestoredToViewDraft(view string, restored []ComposerSubmission) {
+	if s == nil {
+		return
+	}
+	if s.viewDrafts == nil {
+		s.viewDrafts = make(map[string]composerDraft)
+	}
+	items := append([]ComposerSubmission(nil), restored...)
+	if draft, ok := draftSubmissionFromComposerDraft(s.viewDrafts[view]); ok {
+		items = append(items, draft)
+	}
+	merged := mergeComposerSubmissions(items)
+	text := strings.TrimSpace(merged.DisplayText)
+	if text == "" {
+		text = strings.TrimSpace(merged.Text)
+	}
+	s.viewDrafts[view] = composerDraft{
+		DraftText:     text,
+		Cursor:        len([]rune(text)),
+		Attachments:   append([]InputAttachment(nil), merged.Attachments...),
+		PendingPastes: append([]PendingPaste(nil), merged.PendingPastes...),
+		restored:      merged,
+		restoredReady: len(merged.Parts) > 0,
+	}
+}
+
+func draftSubmissionFromComposerDraft(d composerDraft) (ComposerSubmission, bool) {
+	if strings.TrimSpace(d.DraftText) == "" && len(d.Attachments) == 0 {
+		return ComposerSubmission{}, false
+	}
+	parts := []llm.ContentPart(nil)
+	if text := strings.TrimSpace(d.DraftText); text != "" {
+		parts = []llm.ContentPart{llm.Text(text)}
+	}
+	return ComposerSubmission{
+		Text:          d.DraftText,
+		DisplayText:   d.DraftText,
+		Parts:         parts,
+		Attachments:   append([]InputAttachment(nil), d.Attachments...),
+		PendingPastes: append([]PendingPaste(nil), d.PendingPastes...),
+	}, true
 }
 
 func composerSubmissionPreview(submission ComposerSubmission) string {
@@ -2151,64 +2644,94 @@ func (s *streamState) restoreQueuedSubmission(submission ComposerSubmission) {
 	s.rememberRestoredQueuedSubmission(submission)
 }
 
-// enqueuePendingSteer, enqueueRejectedSteer and enqueueTurn are the only ways
-// into the three queues. They exist so every queued message is stamped with the
-// shared clock: an unstamped message would sort as the oldest and could never be
-// recalled while anything else was queued.
-func (s *streamState) enqueuePendingSteer(submission ComposerSubmission) {
-	if s == nil {
-		return
+// sessionQueue returns the conversation's input queue — the single
+// implementation of queue semantics this surface operates. Nil when no
+// session backs this state; the queue's own methods are nil-safe, so callers
+// may use it unconditionally.
+func (s *streamState) sessionQueue() *run.InputQueue {
+	if s == nil || s.session == nil {
+		return nil
 	}
-	submission.QueueSeq = s.nextQueueSeq()
-	s.pendingSteers = append(s.pendingSteers, submission)
+	return s.session.SurfaceInputQueue(s.sessionID)
 }
 
-func (s *streamState) enqueueRejectedSteer(submission ComposerSubmission) {
-	if s == nil {
-		return
+// queueInput wraps a composer submission as the queue's record of it: the
+// preview text the surface shows, the model-facing parts it steers with, and
+// the submission itself as Payload so a recalled, released or restored
+// message comes back whole — text, attachments, folded pastes and all.
+func queueInput(submission ComposerSubmission) run.Input {
+	return run.Input{
+		Text:    composerSubmissionPreview(submission),
+		Parts:   append([]llm.ContentPart(nil), submission.Parts...),
+		Payload: submission,
 	}
-	submission.QueueSeq = s.nextQueueSeq()
-	s.rejectedSteers = append(s.rejectedSteers, queuedSubmission{
-		Action:     queuedSubmissionActionRejectedSteer,
-		Submission: submission,
-	})
 }
 
-func (s *streamState) enqueueTurn(submission ComposerSubmission, action queuedSubmissionAction) {
-	if s == nil {
-		return
-	}
-	submission.QueueSeq = s.nextQueueSeq()
-	s.queuedTurns = append(s.queuedTurns, queuedSubmission{Action: action, Submission: submission})
+// rejectedQueueInput marks a submission as a steer the active run refused —
+// an earlier failed delivery — so the turn's boundary sends it first.
+func rejectedQueueInput(submission ComposerSubmission) run.Input {
+	in := queueInput(submission)
+	in.Rejected = true
+	return in
 }
 
-func (s *streamState) nextQueueSeq() int {
-	s.queueSeq++
-	return s.queueSeq
+// queuedSubmissions pulls the surface's submissions back out of the queue's
+// inputs, in the order the queue listed them.
+func queuedSubmissions(inputs []run.Input) []ComposerSubmission {
+	out := make([]ComposerSubmission, 0, len(inputs))
+	for _, in := range inputs {
+		out = append(out, in.Payload.(ComposerSubmission))
+	}
+	return out
+}
+
+// hasQueuedSteers reports whether the queue still holds steers the model has
+// not received — the state Esc's interrupt-and-send exists to flush.
+func (s *streamState) hasQueuedSteers() bool {
+	q := s.sessionQueue()
+	return q != nil && len(q.Preview().Steers) > 0
+}
+
+// takeDeliveredSteers drains the steers the model has received — in delivery
+// order, whole — so the surface can render them into the transcript. The
+// queue's delivered list is consumed destructively, so whichever observer
+// drains it first owns rendering those messages.
+func (s *streamState) takeDeliveredSteers() []ComposerSubmission {
+	return queuedSubmissions(s.sessionQueue().TakeDelivered())
 }
 
 // discardQueuedInput empties every queue and returns how many messages were
 // discarded. Pending steers are retracted from the run's input runtime first:
-// clearing only the local mirror would leave the runtime free to hand them to
-// the model, with nothing left on this side to render them into the transcript.
+// clearing only the queue would leave the runtime free to hand them to the
+// model, with nothing left on this side to render them into the transcript.
 // Steers already delivered cannot be retracted and are not counted — the model
 // has them, so they are not lost.
 func (s *streamState) discardQueuedInput() int {
 	if s == nil {
 		return 0
 	}
-	dropped := 0
-	for i := len(s.pendingSteers) - 1; i >= 0; i-- {
-		if s.session == nil || !s.session.RetractSurfaceSteer(s.sessionID, "tui") {
-			break
-		}
-		dropped++
+	return s.sessionQueue().Discard()
+}
+
+// discardSubagentQueues empties the queued input of every subagent of this
+// conversation, returning how many messages were dropped. It is the subagent
+// half of discardQueuedInput: the subagents belong to the conversation being
+// left, so their queues are abandoned with it rather than lingering for a view
+// the reader is no longer looking at.
+func (s *streamState) discardSubagentQueues(session Session) int {
+	if s == nil || session == nil {
+		return 0
 	}
-	s.pendingSteers = nil
-	dropped += len(s.queuedTurns) + len(s.rejectedSteers)
-	s.queuedTurns = nil
-	s.rejectedSteers = nil
-	return dropped
+	total := 0
+	for _, row := range s.agentRoster.Rows {
+		if !strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") {
+			continue
+		}
+		if key := strings.TrimSpace(row.ID); key != "" {
+			total += session.DiscardSubagentInput(s.sessionID, key)
+		}
+	}
+	return total
 }
 
 func pluralizeMessages(n int) string {
@@ -2218,51 +2741,12 @@ func pluralizeMessages(n int) string {
 	return fmt.Sprintf("%d queued messages", n)
 }
 
-// reconcilePendingSteers drops steers from the local mirror that the active run
-// has already delivered to the model at a tool boundary, and returns them so the
-// caller can move them into the transcript. The mirror is only cleared wholesale
-// at turn boundaries, so without this it keeps showing delivered steers as
-// "submitted after next tool call" — they can no longer be retracted for
-// editing, and any resubmission stacks on top of the stale entry instead of
-// replacing it.
-func (s *streamState) reconcilePendingSteers(session Session) []ComposerSubmission {
-	if s == nil || session == nil || len(s.pendingSteers) == 0 {
-		return nil
-	}
-	live, ok := session.SurfacePendingSteerCount(s.sessionID, "tui")
-	if !ok {
-		return nil
-	}
-	return s.reconcilePendingSteersCount(live)
-}
-
-// reconcilePendingSteersCount is the same reconciliation driven by the live
-// count carried on PendingSteersChangedMsg. Steers are enqueued into the runtime
-// in lockstep with the mirror and drained in FIFO order, so the surviving
-// runtime steers are always a suffix of the mirror: keep that suffix and hand
-// back the delivered prefix.
-func (s *streamState) reconcilePendingSteersCount(live int) []ComposerSubmission {
-	if s == nil || len(s.pendingSteers) == 0 {
-		return nil
-	}
-	if live < 0 {
-		live = 0
-	}
-	if live >= len(s.pendingSteers) {
-		return nil
-	}
-	cut := len(s.pendingSteers) - live
-	delivered := append([]ComposerSubmission(nil), s.pendingSteers[:cut]...)
-	s.pendingSteers = append([]ComposerSubmission(nil), s.pendingSteers[cut:]...)
-	return delivered
-}
-
 // renderDeliveredSteerMessages renders each just-delivered steer as a user
 // transcript message ("you", gray composer style) so a steer that was queued
 // and then handed to the model at a tool boundary appears in history instead of
-// silently vanishing from the pending preview. Both reconcile paths pop the
-// mirror destructively, so whichever observes the delivery first renders it and
-// the other finds nothing left to render.
+// silently vanishing from the pending preview. The queue's delivered list is
+// consumed destructively, so whichever observer drains it first renders the
+// messages and any other finds nothing left to render.
 func renderDeliveredSteerMessages(renderer *Renderer, delivered []ComposerSubmission) {
 	if renderer == nil {
 		return
@@ -2287,9 +2771,11 @@ func submissionTranscriptText(submission ComposerSubmission) string {
 
 // restoreLatestQueuedEditableSubmission pulls the most recently queued message
 // back into the composer for editing. "Most recently queued" is decided by the
-// shared enqueue clock, not by queue precedence: the three queues are separate
-// FIFOs, so picking one of them first would recall an older message whenever the
-// newest one happened to land in another queue.
+// queue's shared enqueue clock, not by lane precedence: the lanes are separate
+// FIFOs, so picking one of them first would recall an older message whenever
+// the newest one happened to land in another. A pending steer the run already
+// delivered is skipped rather than handed back editable, because it is being
+// answered.
 //
 // The message is removed from its queue before it is restored, so clearing the
 // composer afterwards cancels it rather than leaving a ghost submission behind.
@@ -2297,88 +2783,12 @@ func (s *streamState) restoreLatestQueuedEditableSubmission(session Session) boo
 	if s == nil {
 		return false
 	}
-	// A pending steer also lives in the run's TurnInputRuntime, so the runtime
-	// copy has to be retracted before the message can be handed back. A failed
-	// retract means the run already delivered it to the model: skip it and try
-	// the next-newest candidate rather than handing the user an editable copy of
-	// a message that is already being answered.
-	// skipPendingSteers is scratch for this attempt only. Nothing about a failed
-	// retract is worth remembering: the queues move underneath us as the run
-	// delivers messages, so a count kept across attempts would go stale and hide
-	// steers that are perfectly recallable.
-	skipPendingSteers := 0
-	for {
-		newest, ok := s.newestQueuedSubmission(skipPendingSteers)
-		if !ok {
-			return false
-		}
-		if newest.queue == queueKindPendingSteer {
-			if session == nil || !session.RetractSurfaceSteer(s.sessionID, "tui") {
-				// Undeliverable, and the runtime drains FIFO, so every older
-				// pending steer is already gone too. Skip the whole queue rather
-				// than retrying entries that cannot come back.
-				skipPendingSteers = len(s.pendingSteers)
-				continue
-			}
-		}
-		s.restoreRecalledSubmission(s.takeQueuedSubmission(newest))
-		return true
+	in, ok := s.sessionQueue().Recall()
+	if !ok {
+		return false
 	}
-}
-
-type queueKind int
-
-const (
-	queueKindPendingSteer queueKind = iota
-	queueKindRejectedSteer
-	queueKindTurn
-)
-
-type queuePosition struct {
-	queue queueKind
-	index int
-	seq   int
-}
-
-// newestQueuedSubmission returns the position of the highest-sequence message
-// across the three queues. Each queue is append-only in sequence order, so only
-// the tail of each has to be considered.
-func (s *streamState) newestQueuedSubmission(skipPendingSteers int) (queuePosition, bool) {
-	var best queuePosition
-	found := false
-	consider := func(queue queueKind, index int, seq int) {
-		if !found || seq > best.seq {
-			best = queuePosition{queue: queue, index: index, seq: seq}
-			found = true
-		}
-	}
-	if n := len(s.pendingSteers) - skipPendingSteers; n > 0 {
-		consider(queueKindPendingSteer, n-1, s.pendingSteers[n-1].QueueSeq)
-	}
-	if n := len(s.rejectedSteers); n > 0 {
-		consider(queueKindRejectedSteer, n-1, s.rejectedSteers[n-1].Submission.QueueSeq)
-	}
-	if n := len(s.queuedTurns); n > 0 {
-		consider(queueKindTurn, n-1, s.queuedTurns[n-1].Submission.QueueSeq)
-	}
-	return best, found
-}
-
-func (s *streamState) takeQueuedSubmission(pos queuePosition) ComposerSubmission {
-	switch pos.queue {
-	case queueKindPendingSteer:
-		submission := s.pendingSteers[pos.index]
-		s.pendingSteers = append(s.pendingSteers[:pos.index], s.pendingSteers[pos.index+1:]...)
-		return submission
-	case queueKindRejectedSteer:
-		item := s.rejectedSteers[pos.index]
-		s.rejectedSteers = append(s.rejectedSteers[:pos.index], s.rejectedSteers[pos.index+1:]...)
-		return item.Submission
-	default:
-		item := s.queuedTurns[pos.index]
-		s.queuedTurns = append(s.queuedTurns[:pos.index], s.queuedTurns[pos.index+1:]...)
-		return item.Submission
-	}
+	s.restoreRecalledSubmission(in.Payload.(ComposerSubmission))
+	return true
 }
 
 func (s *streamState) restoreRecalledSubmission(submission ComposerSubmission) {
@@ -2410,6 +2820,26 @@ func (s *streamState) restoreDraftSubmission(submission ComposerSubmission) {
 	}
 }
 
+// withdrawSubmittedMessage takes a submitted message out of the conversation:
+// the user card leaves the transcript, the working status stops, and the text
+// — with anything queued behind it — returns to the composer as one editable
+// draft. Esc reaches it through the withdrawal window, before the model has
+// produced anything; a session the database refused because another live run
+// owns it reaches it with the refusal, because that turn never started and
+// has nothing to show for itself either.
+func withdrawSubmittedMessage(session Session, renderer *Renderer, state *streamState, foreground *foregroundTurn) {
+	if foreground == nil || foreground.restored {
+		return
+	}
+	if foreground.stopStatus != nil {
+		foreground.stopStatus()
+	}
+	renderer.FinishTransientStatus(transientSourceWorking)
+	renderer.withdrawSubmission(foreground)
+	state.restoreWithdrawnWork(session)
+	renderComposerWithState(renderer, state)
+}
+
 // restoreWithdrawnWork recovers the withdrawn input, queued work in arrival
 // order, and the newer draft as ONE editable draft. It is called immediately on
 // Esc so the composer comes back without waiting for the run to drain, then
@@ -2431,14 +2861,17 @@ func (s *streamState) restoreWithdrawnWork(session Session) {
 		return
 	}
 	first := !foreground.restored
-	queuedCount := len(s.pendingSteers) + len(s.rejectedSteers) + len(s.queuedTurns)
-	if !first && queuedCount == 0 {
+	// TakeAll empties the queue and retracts the pending steers from the
+	// turn's runtime in the same step, ordered by the shared enqueue clock —
+	// the order the user wrote them.
+	rest := queuedSubmissions(s.sessionQueue().TakeAll())
+	if !first && len(rest) == 0 {
 		return
 	}
 	// oldest leads the merge. On the first pass that is the withdrawn message
 	// itself; on a later pass it is whatever the first pass already recovered
 	// into the composer, which predates everything queued since.
-	var oldest, rest []ComposerSubmission
+	var oldest []ComposerSubmission
 	if first {
 		original := cloneComposerSubmission(foreground.submission)
 		if original.RawInput != "" {
@@ -2452,21 +2885,6 @@ func (s *streamState) restoreWithdrawnWork(session Session) {
 	} else if draft, ok := s.currentDraftSubmission(); ok {
 		oldest = append(oldest, draft)
 	}
-	queued := append([]ComposerSubmission(nil), s.pendingSteers...)
-	for range s.pendingSteers {
-		if session != nil {
-			session.RetractSurfaceSteer(s.sessionID, "tui")
-		}
-	}
-	for _, item := range s.rejectedSteers {
-		queued = append(queued, item.Submission)
-	}
-	for _, item := range s.queuedTurns {
-		queued = append(queued, item.Submission)
-	}
-	sort.SliceStable(queued, func(i, j int) bool { return queued[i].QueueSeq < queued[j].QueueSeq })
-	rest = append(rest, queued...)
-	s.pendingSteers, s.rejectedSteers, s.queuedTurns = nil, nil, nil
 	if first {
 		// Uncommitted typing is the newest thing the user did, so it trails.
 		if draft, ok := s.currentDraftSubmission(); ok {
@@ -2663,6 +3081,10 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 	if renderer == nil || state == nil {
 		return
 	}
+	// The composer belongs to whichever view is on screen: repainting it is the
+	// natural moment to move the per-view draft and the view's own footer gauge
+	// (plan 007 §2). It is a no-op while the view has not changed.
+	state.syncComposerToView(renderer)
 	overlay := state.composer.SlashOverlay
 	mentionOv := state.composer.MentionOverlay
 	slashOverlayActive.Store(overlay != nil && overlay.Active)
@@ -2678,7 +3100,7 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 	agentRosterFocused.Store(state.agentRosterFocused)
 	rosterStopArmed := false
 	if state.agentRosterFocused && rosterActive {
-		if row, ok := state.selectedAgentRosterRow(); ok && strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") {
+		if row, ok := renderer.RosterCursorRow(state.agentRoster); ok && strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") {
 			rosterStopArmed = true
 		}
 	}
@@ -2694,27 +3116,25 @@ func renderComposerWithState(renderer *Renderer, state *streamState) {
 		}
 		cursor := state.composerDisplayCursor()
 		renderer.RenderComposerState(ComposerRenderState{
-			Text:           state.composerDisplay(),
-			Cursor:         &cursor,
-			PendingInput:   state.composerPendingInputPreview(),
-			AgentRoster:    state.agentRoster,
-			RosterSelected: state.agentRosterSelected,
-			RosterFocused:  state.agentRosterFocused,
-			ArgumentHint:   hint,
-			OverlayRows:    rows,
+			Text:          state.composerDisplay(),
+			Cursor:        &cursor,
+			PendingInput:  state.composerPendingInputPreview(),
+			AgentRoster:   state.agentRoster,
+			RosterFocused: state.agentRosterFocused,
+			ArgumentHint:  hint,
+			OverlayRows:   rows,
 		})
 		return
 	}
 	menu := slashMenuPanel(overlay)
 	cursor := state.composerDisplayCursor()
 	renderer.RenderComposerState(ComposerRenderState{
-		Text:           state.composerDisplay(),
-		Cursor:         &cursor,
-		PendingInput:   state.composerPendingInputPreview(),
-		AgentRoster:    state.agentRoster,
-		RosterSelected: state.agentRosterSelected,
-		RosterFocused:  state.agentRosterFocused,
-		SlashMenu:      &menu,
+		Text:          state.composerDisplay(),
+		Cursor:        &cursor,
+		PendingInput:  state.composerPendingInputPreview(),
+		AgentRoster:   state.agentRoster,
+		RosterFocused: state.agentRosterFocused,
+		SlashMenu:     &menu,
 	})
 }
 
@@ -3108,7 +3528,7 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 				events = nil
 				continue
 			}
-			handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, ev, cmds)
+			dispatchActiveRunInput(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, clipboard, ev, cmds)
 			if state != nil && state.quitRequested {
 				// A repeated Ctrl+C asks the TUI to quit, but DispatchSurfaceTurn
 				// still owns the cancellation cleanup that persists streamed text,
@@ -3143,7 +3563,7 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 			if session.CancelActiveRun() {
 				if state != nil {
 					state.markUserInterrupt()
-					if len(state.pendingSteers) > 0 {
+					if state.hasQueuedSteers() {
 						state.markSubmitPendingSteersAfterInterrupt()
 					}
 				}
@@ -3158,7 +3578,7 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 				events = nil
 				continue
 			}
-			handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, ev, cmds)
+			dispatchActiveRunInput(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, clipboard, ev, cmds)
 			if state != nil && state.quitRequested {
 				events = nil
 				continue
@@ -3180,6 +3600,16 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 			processNotify(m)
 		case err := <-errCh:
 			events = drainActiveRunEvents(ctx, events, notifyCh, processNotify, session, renderer, tracker, state, clipboard, cmds)
+			if errors.Is(err, statepkg.ErrSessionBusy) {
+				// The database refused the session: another live process owns
+				// its turn. This turn never started — there is no run to
+				// report the end of — so the message is taken back the way Esc
+				// takes one back, and the person is told the sentence instead
+				// of an error block.
+				withdrawSubmittedMessage(session, renderer, state, foreground)
+				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "session busy", Content: err.Error(), Final: true})
+				return runTurnWithdrawn, nil
+			}
 			if foreground.isWithdrawn() {
 				state.restoreWithdrawnWork(session)
 				if err != nil && !errors.Is(err, context.Canceled) {
@@ -3188,12 +3618,13 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 				renderComposerWithState(renderer, state)
 				return runTurnWithdrawn, nil
 			}
-			// Last reconcile while the run's input runtime is still observable.
-			// A steer delivered at the final tool boundary may still be in the
-			// mirror if its notification has not been consumed yet; leaving it
-			// there makes the turn-boundary handler treat an answered message as
-			// undelivered and resubmit it, so the model sees it twice.
-			renderDeliveredSteerMessages(renderer, state.reconcilePendingSteers(session))
+			// Last drain while the run's input runtime is still observable. A
+			// steer delivered at the final tool boundary may still sit on the
+			// queue's delivered list if its notification has not been consumed
+			// yet; leaving it there makes the turn-boundary handler treat an
+			// answered message as undelivered and resubmit it, so the model sees
+			// it twice.
+			renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
 			if state != nil {
 				renderComposerWithState(renderer, state)
 			}
@@ -3315,7 +3746,7 @@ func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyC
 							continue
 						}
 						flush()
-						handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, ev2, cmds)
+						dispatchActiveRunInput(ctx, nil, events, notifyCh, processNotify, session, renderer, tracker, state, clipboard, ev2, cmds)
 						break coalesceWheel
 					default:
 						flush()
@@ -3323,7 +3754,7 @@ func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyC
 					}
 				}
 			} else {
-				handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, ev, cmds)
+				dispatchActiveRunInput(ctx, nil, events, notifyCh, processNotify, session, renderer, tracker, state, clipboard, ev, cmds)
 			}
 		default:
 			return events
@@ -3331,95 +3762,58 @@ func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyC
 	}
 }
 
+// nextAutomaticSubmission decides what follows a turn that just ended, by
+// asking the conversation's queue how the turn ended. The queue owns the
+// ordering — which messages merge into the next turn, which go back to the
+// composer — so this function only merges what the engine listed and submits
+// or restores it.
 func nextAutomaticSubmission(state *streamState, disposition runTurnDisposition) (ComposerSubmission, bool) {
 	if state == nil || state.quitRequested || disposition == runTurnWithdrawn {
 		return ComposerSubmission{}, false
 	}
-	popOrdinary := func() (ComposerSubmission, bool) {
-		if len(state.queuedTurns) == 0 {
-			return ComposerSubmission{}, false
-		}
-		next := state.queuedTurns[0]
-		state.queuedTurns = state.queuedTurns[1:]
-		if next.Action == queuedSubmissionActionShell {
-			return ComposerSubmission{
-				Text:        next.Submission.Text,
-				Parts:       []llm.ContentPart{llm.Text(next.Submission.Text)},
-				DisplayText: next.Submission.DisplayText,
-				Attachments: append([]InputAttachment(nil), next.Submission.Attachments...),
-			}, true
-		}
-		return next.Submission, len(next.Submission.Parts) > 0
-	}
-	mergeAndRestoreInterruptedWork := func() {
-		// Restore rejected steers first, then runtime-pending
-		// steers, ordinary queued input, then the visible composer draft.
-		items := make([]ComposerSubmission, 0, len(state.rejectedSteers)+len(state.pendingSteers)+len(state.queuedTurns)+1)
-		for _, item := range state.rejectedSteers {
-			items = append(items, item.Submission)
-		}
-		state.rejectedSteers = nil
-		items = append(items, state.pendingSteers...)
-		state.pendingSteers = nil
-		for _, item := range state.queuedTurns {
-			items = append(items, item.Submission)
-		}
-		state.queuedTurns = nil
-		if current, ok := state.currentDraftSubmission(); ok {
-			items = append(items, current)
-		}
-		if merged := mergeComposerSubmissions(items); len(merged.Parts) > 0 {
-			state.restoreDraftSubmission(merged)
-		}
-	}
-
 	// A pending modal selection (session switch, permissions, skill, model) has
 	// not been applied yet, so draining the queue now would run a turn against
 	// settings the user is still choosing.
 	if state.suppressQueueAutosend {
 		return ComposerSubmission{}, false
 	}
-
+	q := state.sessionQueue()
 	switch disposition {
 	case runTurnInterrupted, runTurnCancelled:
-		// When the interrupt was issued precisely to
-		// flush pending steers ("esc to interrupt and send immediately"), those
-		// steers are merged and submitted as one fresh turn. Everything else about
-		// an interrupted boundary restores work into the composer instead.
+		// When the interrupt was issued precisely to flush the steers queued
+		// behind it ("esc to interrupt and send immediately"), those steers are
+		// merged and submitted as one fresh turn. Everything else about an
+		// interrupted boundary restores work into the composer instead.
 		if state.consumeSubmitPendingSteersAfterInterrupt() && disposition == runTurnInterrupted {
-			if len(state.pendingSteers) > 0 {
-				merged := mergeComposerSubmissions(state.pendingSteers)
-				state.pendingSteers = nil
-				if len(merged.Parts) > 0 {
+			if send, _ := q.Next(run.BoundaryInterruptToSend); len(send) > 0 {
+				if merged := mergeComposerSubmissions(queuedSubmissions(send)); len(merged.Parts) > 0 {
 					return merged, true
 				}
 			}
 		}
-		mergeAndRestoreInterruptedWork()
+		_, restore := q.Next(run.BoundaryInterrupted)
+		items := queuedSubmissions(restore)
+		// The visible composer draft is the newest thing the user wrote, so it
+		// trails the restored work.
+		if current, ok := state.currentDraftSubmission(); ok {
+			items = append(items, current)
+		}
+		if merged := mergeComposerSubmissions(items); len(merged.Parts) > 0 {
+			state.restoreDraftSubmission(merged)
+		}
 		return ComposerSubmission{}, false
 	case runTurnCompleted:
-		// Rejected steers represent an earlier failed delivery and therefore take
-		// priority. Merge them into one replacement turn.
-		if len(state.rejectedSteers) > 0 {
-			items := make([]ComposerSubmission, 0, len(state.rejectedSteers))
-			for _, item := range state.rejectedSteers {
-				items = append(items, item.Submission)
-			}
-			state.rejectedSteers = nil
-			if merged := mergeComposerSubmissions(items); len(merged.Parts) > 0 {
+		// Rejected steers are an earlier failed delivery, so they go first;
+		// then the steers the ended turn never delivered; then the first
+		// queued follow-up. One batch per call: the caller keeps calling at
+		// each completed boundary until the queue is empty.
+		send, _ := q.Next(run.BoundaryCompleted)
+		if len(send) > 0 {
+			if merged := mergeComposerSubmissions(queuedSubmissions(send)); len(merged.Parts) > 0 {
 				return merged, true
 			}
 		}
-		// A runtime-pending steer which was never delivered must not disappear at
-		// a terminal boundary. Retry it before ordinary follow-ups.
-		if len(state.pendingSteers) > 0 {
-			merged := mergeComposerSubmissions(state.pendingSteers)
-			state.pendingSteers = nil
-			if len(merged.Parts) > 0 {
-				return merged, true
-			}
-		}
-		return popOrdinary()
+		return ComposerSubmission{}, false
 	}
 	return ComposerSubmission{}, false
 }
@@ -3671,11 +4065,11 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 		}
 		return
 	}
-	// Drop steers the run has already delivered before acting on or rendering
+	// Drain steers the run has already delivered before acting on or rendering
 	// the queue, so editing/resubmitting operates on what is genuinely pending.
 	// This can observe a delivery before its notification reaches the loop, so
 	// it owns moving those steers into the transcript too.
-	renderDeliveredSteerMessages(renderer, state.reconcilePendingSteers(session))
+	renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
 	// Shift+Left is decoded by the raw reader; bare Up remains history
 	// navigation.
 	switch ev.kind {
@@ -3764,28 +4158,26 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 		// message to a shell invocation that never consults the model. Queue it as
 		// an ordinary follow-up so it runs as its own agent turn.
 		if state.onlyUserShellCommandsRunning() {
-			state.enqueueTurn(submission, queuedSubmissionActionTurn)
+			state.sessionQueue().FollowUp(queueInput(submission))
 			state.resetComposerForActiveRunDraft()
 			return
 		}
 		if state.activeForeground.isWithdrawn() {
-			state.enqueueTurn(submission, queuedSubmissionActionTurn)
+			state.sessionQueue().FollowUp(queueInput(submission))
 			state.resetComposerForActiveRunDraft()
 			return
 		}
-		if session.SteerSurfaceRun(state.sessionID, "tui", submission.Parts) {
-			state.enqueuePendingSteer(submission)
-			state.resetComposerForActiveRunDraft()
-			return
-		}
-		state.enqueueRejectedSteer(submission)
+		// The queue decides admission: with this turn's runtime attached the
+		// message steers at its next tool boundary; without one it is kept as
+		// a refused steer for the boundary to send first.
+		state.sessionQueue().Steer(queueInput(submission))
 		state.resetComposerForActiveRunDraft()
 	case inputEventPaste:
 		state.resetActiveRunCtrlCSequence()
 		state.appendPaste(ev.paste)
 	case inputEventHotkey:
 		if ev.hotkey == hotkeyOverlayDown || ev.hotkey == hotkeyOverlayUp {
-			state.handleOverlayNav(ev.hotkey, renderer.ActiveView())
+			state.handleOverlayNav(ev.hotkey, renderer)
 			return
 		}
 		if ev.hotkey == hotkeyOverlayAccept {
@@ -3809,12 +4201,14 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				state.agentRosterFocused = false
 				return
 			}
-			// Same precedence for a subagent view: Esc backs out of what the
-			// user is looking at before it means "cancel the run", so opening a
-			// subagent mid-turn is never a one-way door (matches handleIdleHotkey).
-			if renderer != nil && renderer.ActiveView() != "" {
-				renderer.SetActiveView("")
-				return
+			// In a subagent's view, Esc takes back what this subagent has not
+			// answered, else interrupts it to send the queued steers, else
+			// leaves its view (D1); it never cancels the run.
+			if renderer != nil {
+				if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+					handleSubagentViewEsc(session, renderer, state, view)
+					return
+				}
 			}
 			state.resetActiveRunCtrlCSequence()
 			// Esc while the MCP startup barrier is still open means "do not make
@@ -3844,19 +4238,11 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// edit. A repeated press while cleanup drains is a no-op rather
 			// than a second recovery or a noisy cancel.
 			if foreground := state.activeForeground; foreground.withdraw() {
-				if !foreground.restored {
-					if foreground.stopStatus != nil {
-						foreground.stopStatus()
-					}
-					renderer.FinishTransientStatus(transientSourceWorking)
-					renderer.withdrawSubmission(foreground)
-					state.restoreWithdrawnWork(session)
-					renderComposerWithState(renderer, state)
-					// withdraw() already cancelled this turn's own context, which
-					// is what stops a run that is not registered yet; this stops
-					// one that is. Neither is enough on its own.
-					session.CancelActiveRun()
-				}
+				withdrawSubmittedMessage(session, renderer, state, foreground)
+				// withdraw() already cancelled this turn's own context, which
+				// is what stops a run that is not registered yet; this stops
+				// one that is. Neither is enough on its own.
+				session.CancelActiveRun()
 				return
 			}
 			// Esc cancels the in-flight run. Discard only the committed
@@ -3875,7 +4261,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			// runTurnCompleted and the queue is auto-submitted as an ordinary
 			// follow-up instead of being restored into the composer.
 			state.markUserInterrupt()
-			if len(state.pendingSteers) > 0 {
+			if state.hasQueuedSteers() {
 				// "esc to interrupt and send immediately": the interrupt exists to
 				// flush the pending steers, so they are submitted as one fresh turn
 				// at the interrupted boundary.
@@ -3930,22 +4316,43 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 		}
 		if ev.hotkey == hotkeyQueueFollowUp {
 			state.resetActiveRunCtrlCSequence()
+			// In a subagent's view the message is queued on that subagent's own
+			// channel, not the conversation's (plan 007 §3).
+			if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+				state.commitDraftForSubmission()
+				submission, ok := state.submissionFromCurrentDraft()
+				if !ok {
+					return
+				}
+				sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, true)
+				return
+			}
 			state.commitDraftForSubmission()
 			submission, ok := state.submissionFromCurrentDraft()
 			if !ok {
 				return
 			}
-			action := queuedSubmissionActionTurn
+			// A queued shell command runs as text alone when its turn comes: the
+			// dispatcher routes a leading "!" to the user shell, which never
+			// consults the model, so image parts folded into it would be noise.
 			if strings.HasPrefix(strings.TrimSpace(submission.Text), "!") && len(submission.Attachments) == 0 {
-				action = queuedSubmissionActionShell
 				submission.Parts = []llm.ContentPart{llm.Text(submission.Text)}
 			}
-			state.enqueueTurn(submission, action)
+			state.sessionQueue().FollowUp(queueInput(submission))
 			state.resetComposerForActiveRunDraft()
 			return
 		}
 		if ev.hotkey == hotkeyEditLastQueued {
 			state.resetActiveRunCtrlCSequence()
+			// In a subagent's view the recall key pulls back that subagent's own
+			// newest queued message.
+			if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+				if sub, ok := session.RecallSubagentInput(state.sessionID, view); ok {
+					state.restoreRecalledSubmission(sub)
+					renderComposerWithState(renderer, state)
+				}
+				return
+			}
 			state.restoreLatestQueuedEditableSubmission(session)
 			return
 		}
@@ -3984,16 +4391,11 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 				// turn so their activation is injected before that turn's first LLM
 				// call instead of degrading back to prompt text.
 				if strings.TrimSpace(submission.SkillPath) != "" || state.onlyUserShellCommandsRunning() {
-					state.enqueueTurn(submission, queuedSubmissionActionTurn)
+					state.sessionQueue().FollowUp(queueInput(submission))
 					state.resetComposerForActiveRunDraft()
 					return
 				}
-				if session.SteerSurfaceRun(state.sessionID, "tui", submission.Parts) {
-					state.enqueuePendingSteer(submission)
-					state.resetComposerForActiveRunDraft()
-					return
-				}
-				state.enqueueRejectedSteer(submission)
+				state.sessionQueue().Steer(queueInput(submission))
 				state.resetComposerForActiveRunDraft()
 				return
 			}
@@ -4008,7 +4410,7 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 	if !ok {
 		return
 	}
-	state.enqueueRejectedSteer(submission)
+	state.sessionQueue().FollowUp(rejectedQueueInput(submission))
 	state.resetComposerForActiveRunDraft()
 	_ = ctx
 }
@@ -4040,13 +4442,13 @@ func runSlashPicker(ctx context.Context, cmds *commandController, renderer *Rend
 	}
 	outcome := cmds.session.ChooseSurfaceSlash(ctx, state.sessionID, turn.SlashChoice{Command: picker.Command, Value: picker.Items[idx].Value})
 	// A model, an effort or an agent may have changed under the footer.
-	refreshSessionFooter(renderer, cmds.session)
+	refreshSessionFooter(renderer, cmds.session, state.sessionID)
 	return applySlashOutcome(ctx, cmds, renderer, tracker, state, strings.TrimSuffix(picker.Command, "-effort"), "", outcome)
 }
 
 // refreshSessionFooter redraws what the footer says about the session: its
 // model and effort, the subagents' models, and the context budget.
-func refreshSessionFooter(renderer *Renderer, session Session) {
+func refreshSessionFooter(renderer *Renderer, session Session, sessionID string) {
 	if renderer == nil || session == nil {
 		return
 	}
@@ -4055,8 +4457,7 @@ func refreshSessionFooter(renderer *Renderer, session Session) {
 		ReasoningEffort: summarizeComposerReasoningEffort(session),
 		Directory:       renderer.footer.Directory,
 	})
-	renderer.SetSubagentModels(subagentModelsByType(session))
-	renderer.SetComposerTokenStats(initialComposerTokenStats(session))
+	renderer.SetComposerTokenStats("", initialComposerTokenStats(session, sessionID))
 }
 
 func applySlashOutcome(ctx context.Context, cmds *commandController, renderer *Renderer, tracker *Tracker, state *streamState, title string, rawLine string, outcome SlashOutcome) (handled bool, continueRun bool, submission ComposerSubmission, exitRequested bool) {
@@ -4163,10 +4564,13 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		renderer.ForceRepaint()
 		return true
 	case hotkeyEscapeInterrupt:
-		// If viewing a subagent alt-screen, Escape returns to the primary view.
-		if renderer != nil && renderer.ActiveView() != "" {
-			renderer.SetActiveView("")
-			return true
+		// In a subagent's view, Esc takes back / interrupts-to-send / returns to
+		// the conversation (D1).
+		if renderer != nil {
+			if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+				handleSubagentViewEsc(session, renderer, state, view)
+				return true
+			}
 		}
 		// The same skip the active-run path offers, for the window before the
 		// first submission: the startup line is on screen from the moment the
@@ -4176,6 +4580,39 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		if skipper, ok := session.(mcpStartupSkipper); ok && skipper.SkipOptionalMCPStartup() {
 			return true
 		}
+		return true
+	case hotkeyQueueFollowUp:
+		state.agentControlPrefixArmed = false
+		// Queueing a follow-up needs something to follow. In a subagent's view
+		// that something is the subagent's own execution, which is alive
+		// whether or not the conversation's turn is (plan 007 §3). In the
+		// conversation's view there is no run behind an idle composer, so the
+		// key stays a no-op there, exactly as before.
+		if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+			state.commitDraftForSubmission()
+			submission, ok := state.submissionFromCurrentDraft()
+			if !ok {
+				return true
+			}
+			sendSubagentViewSubmission(ctx, session, renderer, state, view, submission, true)
+			return true
+		}
+		return true
+	case hotkeyEditLastQueued:
+		state.agentControlPrefixArmed = false
+		// The recall key pulls back the newest queued message of whichever
+		// queue the composer faces — the subagent's own in its view, the
+		// conversation's otherwise — with the same semantics the running-turn
+		// path applies, because the main turn ending does not end a subagent's
+		// queue.
+		if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
+			if sub, ok := session.RecallSubagentInput(state.sessionID, view); ok {
+				state.restoreRecalledSubmission(sub)
+				renderComposerWithState(renderer, state)
+			}
+			return true
+		}
+		state.restoreLatestQueuedEditableSubmission(session)
 		return true
 	case hotkeyBackground:
 		// No backgroundable foreground task is focused at idle.
@@ -4424,10 +4861,11 @@ const uiPanelPageRows = 10
 // notifications keep flowing (so the transcript above keeps streaming), and
 // the panel yields the moment an approval or question needs the composer area.
 type uiPanel struct {
-	kind string // "status" | "mcp"
+	kind string // "status" | "mcp" | "lsp"
 	tab  int    // status: 0 = Status, 1 = Usage
 	// mcp navigation: page is "list", "detail", "tools", "tool" or
-	// "resources"; cursor indexes the page's selectable rows.
+	// "resources"; lsp: "list" or "detail"; cursor indexes the page's
+	// selectable rows. server is the open server's id on both panels.
 	page   string
 	cursor int
 	server string
@@ -4444,8 +4882,13 @@ type uiPanel struct {
 	status    *turn.StatusReport
 	inv       *turn.MCPInventory
 	cancelMCP func() // stops the MCP status subscription
-	session   panelSession
-	sessionID string
+	// lsp is the open /lsp panel's snapshot; lspSession runs its actions,
+	// cancelLSP stops the snapshot subscription.
+	lsp        *event.LSPSnapshot
+	lspSession lspPanelSession
+	cancelLSP  func()
+	session    panelSession
+	sessionID  string
 }
 
 // panelAuthFlow is one OAuth flow started from the panel.
@@ -4471,6 +4914,19 @@ type panelSession interface {
 	PanelSetMCPDisabled(serverName string, disable bool) (string, error)
 	PanelListMCPResources(serverName string)
 	SubscribeMCPStatusTick() (cancel func(), ok bool)
+}
+
+// lspPanelSession is what a session must expose for the /lsp panel. It is a
+// separate interface so the status and mcp test doubles do not have to grow
+// LSP methods; every call returns at once — an install runs in the background
+// and reports through the snapshot.
+type lspPanelSession interface {
+	PanelLSPSnapshot() (event.LSPSnapshot, error)
+	PanelSetLSPEnabled(serverID string, enabled bool) (string, error)
+	PanelRestartLSP(serverID string) (string, error)
+	PanelInstallLSP(serverID string) (string, error)
+	PanelResetLSPRecommendations() (string, error)
+	SubscribeLSPStatus() (cancel func(), ok bool)
 }
 
 // openStatusPanel builds the /status panel. Called from the slash dispatch on
@@ -4512,13 +4968,41 @@ func openMCPPanel(state *streamState) bool {
 	return true
 }
 
+// openLSPPanel builds the /lsp panel and subscribes to snapshot changes so a
+// starting, indexing or installing server repaints in place.
+func openLSPPanel(state *streamState) bool {
+	ls, ok := state.session.(lspPanelSession)
+	if !ok || interactiveInputPauseDepth.Load() > 0 {
+		return false
+	}
+	snap, err := ls.PanelLSPSnapshot()
+	if err != nil {
+		return false
+	}
+	setUIPanelActive(true)
+	panel := &uiPanel{
+		kind: "lsp", page: "list", lsp: &snap, lspSession: ls, sessionID: state.sessionID, top: true,
+		notice: map[string]string{},
+	}
+	if cancel, subscribed := ls.SubscribeLSPStatus(); subscribed {
+		panel.cancelLSP = cancel
+	}
+	state.panel = panel
+	return true
+}
+
 // closeUIPanel tears the panel down and hands the composer block back:
 // EndOverlay is what erases the panel's taller block before the composer
 // repaints underneath it.
 func closeUIPanel(renderer *Renderer, state *streamState) {
 	setUIPanelActive(false)
-	if state.panel != nil && state.panel.cancelMCP != nil {
-		state.panel.cancelMCP()
+	if state.panel != nil {
+		if state.panel.cancelMCP != nil {
+			state.panel.cancelMCP()
+		}
+		if state.panel.cancelLSP != nil {
+			state.panel.cancelLSP()
+		}
 	}
 	state.panel = nil
 	if renderer != nil {
@@ -4534,6 +5018,17 @@ func (panel *uiPanel) refreshInventory() {
 	}
 	if inv, err := panel.session.PanelMCPInventory(); err == nil {
 		panel.inv = inv
+	}
+}
+
+// refreshLSP re-reads the /lsp panel's snapshot. It never blocks: an install
+// or a probe still in flight reports through the next LSPStatusTickMsg.
+func (panel *uiPanel) refreshLSP() {
+	if panel == nil || panel.kind != "lsp" || panel.lspSession == nil {
+		return
+	}
+	if snap, err := panel.lspSession.PanelLSPSnapshot(); err == nil {
+		panel.lsp = &snap
 	}
 }
 
@@ -4592,9 +5087,25 @@ func handleUIPanelKey(renderer *Renderer, state *streamState, ev inputEvent) boo
 	return true
 }
 
-// back returns to the previous mcp page; at the top it reports false, which
-// closes the panel.
+// back returns to the previous mcp or lsp page; at the top it reports false,
+// which closes the panel.
 func (panel *uiPanel) back() bool {
+	if panel.kind == "lsp" {
+		if panel.page != "detail" {
+			return false
+		}
+		panel.page = "list"
+		panel.cursor = 0
+		// The cursor lands back on the row that was opened.
+		for i, row := range panelSelectableRows(panel) {
+			if row.action == panelOpenDetail && row.value == panel.server {
+				panel.cursor = i
+				break
+			}
+		}
+		panel.top = true
+		return true
+	}
 	if panel.kind != "mcp" {
 		return false
 	}
@@ -4646,8 +5157,12 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-// panelAccept runs the highlighted row's action on the mcp panel.
+// panelAccept runs the highlighted row's action on the mcp or lsp panel.
 func panelAccept(panel *uiPanel) {
+	if panel.kind == "lsp" {
+		panelAcceptLSP(panel)
+		return
+	}
 	if panel.kind != "mcp" {
 		return
 	}
@@ -4723,7 +5238,50 @@ const (
 	panelAuth          panelRowAction = "auth"
 	panelDisable       panelRowAction = "disable"
 	panelEnable        panelRowAction = "enable"
+
+	panelLSPEnable    panelRowAction = "lsp-enable"
+	panelLSPDisable   panelRowAction = "lsp-disable"
+	panelLSPRestart   panelRowAction = "lsp-restart"
+	panelLSPInstall   panelRowAction = "lsp-install"
+	panelLSPResetRecs panelRowAction = "lsp-reset-recommendations"
 )
+
+// panelAcceptLSP runs the highlighted /lsp row: navigation moves pages, every
+// action goes through the session and lands its reply (or its error text) in
+// the notice the page shows in place.
+func panelAcceptLSP(panel *uiPanel) {
+	rows := panelSelectableRows(panel)
+	if panel.cursor < 0 || panel.cursor >= len(rows) {
+		return
+	}
+	row := rows[panel.cursor]
+	run := func(key string, reply string, err error) {
+		if err != nil {
+			reply = err.Error()
+		}
+		panel.notice[key] = reply
+		panel.refreshLSP()
+	}
+	switch row.action {
+	case panelOpenDetail:
+		panel.server = row.value
+		panel.page = "detail"
+		panel.cursor = 0
+		panel.top = true
+	case panelLSPEnable, panelLSPDisable:
+		reply, err := panel.lspSession.PanelSetLSPEnabled(row.value, row.action == panelLSPEnable)
+		run(row.value, reply, err)
+	case panelLSPRestart:
+		reply, err := panel.lspSession.PanelRestartLSP(row.value)
+		run(row.value, reply, err)
+	case panelLSPInstall:
+		reply, err := panel.lspSession.PanelInstallLSP(row.value)
+		run(row.value, reply, err)
+	case panelLSPResetRecs:
+		reply, err := panel.lspSession.PanelResetLSPRecommendations()
+		run("", reply, err)
+	}
+}
 
 // panelRow is one selectable row of an mcp page.
 type panelRow struct {
@@ -4732,11 +5290,17 @@ type panelRow struct {
 	value  string
 }
 
-// panelSelectableRows returns the mcp page's cursor-addressable rows, and
-// only those: text a row cannot act on (a group title, "Required by config")
-// is drawn around them, never selected.
+// panelSelectableRows returns the page's cursor-addressable rows, and only
+// those: text a row cannot act on (a group title, "Required by config") is
+// drawn around them, never selected.
 func panelSelectableRows(panel *uiPanel) []panelRow {
-	if panel == nil || panel.inv == nil {
+	if panel == nil {
+		return nil
+	}
+	if panel.kind == "lsp" {
+		return lspPanelRows(panel)
+	}
+	if panel.inv == nil {
 		return nil
 	}
 	switch panel.page {
@@ -4781,6 +5345,63 @@ func panelSelectableRows(panel *uiPanel) []panelRow {
 			rows = append(rows, panelRow{label: t.Name, action: panelOpenTool, value: t.Name})
 		}
 		return rows
+	}
+	return nil
+}
+
+// lspPanelRows returns the /lsp panel's rows: the list offers one row per
+// server (snapshot order, enabled first) plus the recommendations switch-back
+// when they are off; the detail page offers only the actions its state makes
+// sense of.
+func lspPanelRows(panel *uiPanel) []panelRow {
+	if panel.lsp == nil {
+		return nil
+	}
+	switch panel.page {
+	case "list":
+		rows := make([]panelRow, 0, len(panel.lsp.Servers)+1)
+		for _, s := range panel.lsp.Servers {
+			rows = append(rows, panelRow{label: s.ID, action: panelOpenDetail, value: s.ID})
+		}
+		if panel.lsp.RecommendationsDisabled {
+			rows = append(rows, panelRow{label: "Turn recommendations back on", action: panelLSPResetRecs})
+		}
+		return rows
+	case "detail":
+		s := lspPanelServer(panel)
+		if s == nil {
+			return nil
+		}
+		var rows []panelRow
+		if !s.Enabled && s.State != event.LSPStateBlocked {
+			rows = append(rows, panelRow{label: "Enable", action: panelLSPEnable, value: s.ID})
+		}
+		if s.Enabled {
+			rows = append(rows, panelRow{label: "Disable", action: panelLSPDisable, value: s.ID})
+		}
+		if s.Enabled {
+			switch s.State {
+			case event.LSPStateReady, event.LSPStateIndexing, event.LSPStateStarting, event.LSPStateFailed:
+				rows = append(rows, panelRow{label: "Restart", action: panelLSPRestart, value: s.ID})
+			}
+		}
+		if s.State == event.LSPStateNotInstalled && s.InstallCommand != "" && !s.Installing {
+			rows = append(rows, panelRow{label: "Install: " + s.InstallCommand, action: panelLSPInstall, value: s.ID})
+		}
+		return rows
+	}
+	return nil
+}
+
+// lspPanelServer finds the detail page's server in the current snapshot.
+func lspPanelServer(panel *uiPanel) *event.LSPServerStatus {
+	if panel == nil || panel.lsp == nil {
+		return nil
+	}
+	for i := range panel.lsp.Servers {
+		if panel.lsp.Servers[i].ID == panel.server {
+			return &panel.lsp.Servers[i]
+		}
 	}
 	return nil
 }

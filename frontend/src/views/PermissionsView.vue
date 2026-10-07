@@ -41,29 +41,7 @@
             {{ t('permissions.verify') }}
           </button>
         </div>
-        <div v-if="explain" class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
-          <div class="flex flex-wrap items-center gap-2 text-[12px]">
-            <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="behaviorClass(explain.decision?.behavior)">
-              {{ explain.decision?.behavior ? behaviorLabel(explain.decision.behavior) : t('common.none') }}
-            </span>
-            <span class="text-[var(--forebrain-muted-text)]">{{ t('permissions.mode') }}: {{ modeLabel(explain.decision?.mode) }}</span>
-            <span v-if="explain.decision?.reason" class="text-[var(--forebrain-muted-text)]">{{ explain.decision.reason }}</span>
-          </div>
-          <ul v-if="explain.rules?.length" class="mt-2 space-y-1">
-            <li
-              v-for="(rule, idx) in explain.rules"
-              :key="`${rule.source}-${rule.toolName}-${idx}`"
-              class="flex flex-wrap items-center gap-2 text-[11px]"
-              :class="rule.matched ? 'text-[var(--forebrain-text)]' : 'text-[var(--forebrain-muted-text)]'"
-            >
-              <span v-if="rule.matched" class="forebrain-rule-mark" aria-hidden="true" />
-              <span class="font-mono">{{ rule.toolName || '*' }}</span>
-              <span v-if="rule.ruleContent" class="font-mono">{{ rule.ruleContent }}</span>
-              <span>· {{ behaviorLabel(rule.behavior) }}</span>
-              <span>· {{ sourceLabel(rule.source) }}</span>
-            </li>
-          </ul>
-        </div>
+        <PermissionExplainResult v-if="explain" :explain="explain" />
       </section>
 
       <!-- Add a local rule: fixed choices are dropdowns; the pattern is the
@@ -92,35 +70,30 @@
       <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.rulesTitle') }}</h2>
-          <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.mode') }}: {{ modeLabel(mode) }}</span>
-        </div>
-        <div class="mt-3 flex flex-wrap gap-2">
-          <button
-            v-for="option in sourceFilters"
-            :key="option"
-            type="button"
-            class="rounded-full border px-3 py-1 text-[11px]"
-            :class="sourceFilter === option
-              ? 'border-[var(--forebrain-brand-border-strong)] text-[var(--forebrain-text)]'
-              : 'border-[var(--forebrain-divider)] text-[var(--forebrain-muted-text)]'"
-            @click="setSourceFilter(option)"
-          >
-            {{ option === '' ? t('permissions.allSources') : sourceLabel(option) }}
-          </button>
+          <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.mode') }}: {{ permissionModeLabel(mode) }}</span>
         </div>
         <div v-if="loading" class="py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
         <ul v-else-if="rules.length" class="mt-3 space-y-1">
           <li
             v-for="(rule, idx) in rules"
-            :key="`${rule.source}-${rule.toolName}-${rule.ruleContent}-${idx}`"
+            :key="`${rule.behavior}-${rule.toolName}-${rule.ruleContent}-${idx}`"
             class="flex flex-wrap items-center gap-2 rounded-lg px-2 py-1.5 text-[12px] odd:bg-[var(--forebrain-surface)]"
+            data-testid="agent-rule"
           >
-            <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="behaviorClass(rule.behavior)">
-              {{ behaviorLabel(rule.behavior) }}
+            <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="permissionBehaviorClass(rule.behavior)">
+              {{ permissionBehaviorLabel(rule.behavior) }}
             </span>
             <span class="font-mono text-[var(--forebrain-text)]">{{ rule.toolName || '*' }}</span>
-            <span v-if="rule.ruleContent" class="font-mono text-[var(--forebrain-text-2)]">{{ rule.ruleContent }}</span>
-            <span class="ml-auto text-[11px] text-[var(--forebrain-muted-text)]">{{ sourceLabel(rule.source) }}</span>
+            <span v-if="rule.ruleContent" class="min-w-0 break-all font-mono text-[var(--forebrain-text-2)]">{{ rule.ruleContent }}</span>
+            <button
+              type="button"
+              class="forebrain-btn forebrain-btn-ghost ml-auto h-7 px-2 text-[11px] text-[var(--forebrain-danger)]"
+              :disabled="removing"
+              data-testid="remove-rule"
+              @click="removeRule(rule)"
+            >
+              {{ t('common.delete') }}
+            </button>
           </li>
         </ul>
         <p v-else class="mt-3 rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
@@ -139,23 +112,17 @@
  * part worth trusting.
  */
 import { onMounted, reactive, ref } from 'vue'
-import { getErrorMessage, forebrainApi, type PermissionExplainResponse } from '@/lib/api'
+import PermissionExplainResult from '@/components/permissions/PermissionExplainResult.vue'
+import { getErrorMessage, forebrainApi, type PermissionExplainResponse, type PermissionRuleRecord } from '@/lib/api'
+import { permissionBehaviorClass, permissionBehaviorLabel, permissionModeLabel } from '@/lib/permissionLabels'
 import { useI18n } from '@/locales'
 
-type RuleRow = {
-  source?: string
-  behavior?: string
-  toolName?: string
-  ruleContent?: string
-}
-
 const { t } = useI18n()
-const rules = ref<RuleRow[]>([])
+const rules = ref<PermissionRuleRecord[]>([])
 const mode = ref('')
 const loading = ref(false)
 const error = ref('')
-const sourceFilter = ref('')
-const sourceFilters = ['', 'localSettings', 'projectSettings', 'session']
+const removing = ref(false)
 const probe = reactive({ toolName: '', input: '' })
 const tools = ref<string[]>([])
 const ruleForm = reactive({ behavior: 'allow', toolName: '', ruleContent: '' })
@@ -187,83 +154,43 @@ async function addRule() {
     ruleForm.ruleContent = ''
     await loadRules()
   } catch (cause) {
-    ruleError.value = cause instanceof Error ? cause.message : String(cause)
+    ruleError.value = getErrorMessage(cause)
   } finally {
     savingRule.value = false
   }
 }
+
+async function removeRule(rule: PermissionRuleRecord) {
+  if (removing.value) return
+  removing.value = true
+  error.value = ''
+  try {
+    await forebrainApi.permissionsUpdate({
+      type: 'removeRules',
+      destination: 'localSettings',
+      behavior: rule.behavior,
+      rules: [rule.rule],
+    })
+    await loadRules()
+  } catch (cause) {
+    error.value = getErrorMessage(cause)
+  } finally {
+    removing.value = false
+  }
+}
+
 const explain = ref<PermissionExplainResponse | null>(null)
 const verifying = ref(false)
 
-/** Where a rule comes from, in words. */
-function sourceLabel(source?: string): string {
-  switch (source) {
-    case 'localSettings':
-      return t('permissions.source.localSettings')
-    case 'projectSettings':
-      return t('permissions.source.projectSettings')
-    case 'session':
-      return t('permissions.source.session')
-    default:
-      return source || '—'
-  }
-}
-
-/** When the runtime asks before acting, in words. */
-function modeLabel(mode?: string): string {
-  switch (mode) {
-    case 'on-request':
-      return t('permissions.approval.onRequest')
-    case 'never':
-      return t('permissions.approval.never')
-    case 'unless-trusted':
-      return t('permissions.approval.unlessTrusted')
-    case 'granular':
-      return t('permissions.approval.granular')
-    default:
-      return mode || '—'
-  }
-}
-
-/** What a rule does, in words. */
-function behaviorLabel(behavior?: string): string {
-  switch (behavior) {
-    case 'allow':
-      return t('permissions.behavior.allow')
-    case 'deny':
-      return t('permissions.behavior.deny')
-    case 'ask':
-      return t('permissions.behavior.ask')
-    default:
-      return behavior || '—'
-  }
-}
-
-function behaviorClass(behavior?: string): string {
-  switch (String(behavior ?? '').toLowerCase()) {
-    case 'allow':
-      return 'border-[var(--forebrain-brand-border-strong)] text-[var(--forebrain-brand-1)]'
-    case 'deny':
-      return 'border-[var(--forebrain-danger)] text-[var(--forebrain-danger)]'
-    default:
-      return 'border-[var(--forebrain-divider)] text-[var(--forebrain-muted-text)]'
-  }
-}
-
-function setSourceFilter(next: string) {
-  sourceFilter.value = next
-  void loadRules()
-}
-
+// The page is the agent's own: only its local rules are listed here, a
+// project's live in that project's space and a conversation's in the chat.
 async function loadRules() {
   loading.value = true
   error.value = ''
   try {
-    const res = await forebrainApi.permissionsRules(
-      sourceFilter.value ? { source: sourceFilter.value } : undefined,
-    )
+    const res = await forebrainApi.permissionsRules({ source: 'localSettings' })
     mode.value = res.mode
-    rules.value = res.rules as RuleRow[]
+    rules.value = res.rules
   } catch (e) {
     error.value = getErrorMessage(e)
     rules.value = []
@@ -294,12 +221,3 @@ onMounted(() => {
   void loadTools()
 })
 </script>
-
-<style scoped>
-.forebrain-rule-mark {
-  height: 0.375rem;
-  width: 0.375rem;
-  border-radius: 999px;
-  background: var(--forebrain-brand-1);
-}
-</style>

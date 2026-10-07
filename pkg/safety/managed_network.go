@@ -1458,7 +1458,14 @@ func networkTargetIsLocal(host string, port int) bool {
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 	if err != nil {
-		return true
+		// A name that did not resolve here — a slow resolver, a timeout, a
+		// name that does not exist — is not known to be local, and calling it
+		// local turned an unlisted public host into a hard denial the user was
+		// never asked about. Nothing is lost by not guessing: the dial resolves
+		// the name again and refuses any non-public address it lands on
+		// (dialCheckedTarget), so a name can only ever reach what it actually
+		// resolves to.
+		return false
 	}
 	for _, addr := range addrs {
 		if isNonPublicIP(addr) {

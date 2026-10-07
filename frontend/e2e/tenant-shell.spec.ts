@@ -29,9 +29,9 @@ test('settings shows the merged tab bar with appearance as the default', async (
   await signIn(page)
   await page.goto('/settings', { waitUntil: 'networkidle' })
   const tabs = (await page.locator('[data-testid="settings-tabs"] button').allInnerTexts()).map((tab) => tab.trim())
-  const expectedEn = ['Appearance', 'Approval default', 'Primary agents', 'MCP', 'Hooks', 'Memory switches', 'Config file', 'Runtime status', 'Shared skills']
-  const expectedZh = ['外观', '审批默认', '主代理', 'MCP', '钩子', '记忆开关', '配置文件', '运行状态', '共享技能']
-  expect(tabs.length).toBe(9)
+  const expectedEn = ['Appearance', 'Approval default', 'Primary agents', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory switches', 'Config file', 'Runtime status', 'Shared skills']
+  const expectedZh = ['外观', '审批默认', '主代理', 'MCP', '语言服务器', '钩子', '定时任务', '记忆开关', '配置文件', '运行状态', '共享技能']
+  expect(tabs.length).toBe(11)
   expect(expectedEn.every((tab) => tabs.includes(tab)) || expectedZh.every((tab) => tabs.includes(tab))).toBe(true)
   // The appearance card is visible without clicking (default tab) — the
   // brand radiogroup is its content.
@@ -88,6 +88,30 @@ test('switching the tenant re-fetches the session list', async ({ page }) => {
   // exists. Here we only prove the selector opens and keeps one entry.
   await expect(page.locator('.forebrain-tenant-menu')).toBeVisible()
   expect(sessionRequests.length).toBeGreaterThanOrEqual(before)
+})
+
+test('switching the tenant leaves the previous agent\'s conversation behind', async ({ page }) => {
+  await signIn(page)
+  const created = await page.request.post('/api/agents/primary', { data: { id: 'e2e-switch' } })
+  expect(created.ok(), await created.text()).toBeTruthy()
+  try {
+    await page.goto('/', { waitUntil: 'networkidle' })
+    await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
+    await page.click('[data-testid="drawer-new-chat"]')
+    await page.waitForURL(/session=/)
+
+    await page.locator('.forebrain-tenant-trigger').click()
+    await page.locator('.forebrain-tenant-option', { hasText: 'e2e-switch' }).click()
+    // The conversation belonged to the agent just left: it leaves the
+    // address bar instead of being reopened under the new tenant.
+    await expect(page).not.toHaveURL(/session=/, { timeout: 10_000 })
+    await expect(page.locator('.forebrain-tenant-trigger')).toContainText('e2e-switch')
+  } finally {
+    await page.locator('.forebrain-tenant-trigger').click()
+    await page.locator('.forebrain-tenant-option', { hasText: 'main' }).click()
+    await expect(page.locator('.forebrain-tenant-trigger')).toContainText('main', { timeout: 10_000 })
+    await page.request.delete('/api/agents/primary/e2e-switch')
+  }
 })
 
 test('subagents page shows its empty state', async ({ page }) => {

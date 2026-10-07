@@ -48,6 +48,28 @@ export function parseAutoContinue(raw: unknown): AutoContinueState | null {
   }
 }
 
+/** A continuation and the agent whose view it belongs to ("" the conversation). */
+export interface AutoContinueEntry extends AutoContinueState {
+  agentId: string
+}
+
+/**
+ * parseAutoContinueEntries reads the binding snapshot's list of continuations,
+ * one per agent: the conversation's own and each of its subagents'. Anything
+ * without a readable wait is dropped.
+ */
+export function parseAutoContinueEntries(raw: unknown): AutoContinueEntry[] {
+  if (!Array.isArray(raw)) return []
+  const out: AutoContinueEntry[] = []
+  for (const item of raw) {
+    const state = parseAutoContinue(item)
+    if (!state) continue
+    const data = toCamelCase((item ?? {}) as Record<string, unknown>) as Record<string, unknown>
+    out.push({ ...state, agentId: String(data.agentId ?? '').trim() })
+  }
+  return out
+}
+
 /**
  * formatAutoContinueNotice is the one line the page shows while the
  * conversation waits: what stopped it and when it picks up again, on the

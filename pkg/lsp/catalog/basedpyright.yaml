@@ -1,0 +1,14 @@
+id: basedpyright
+display_name: basedpyright
+languages: [Python]
+priority: 60
+command: basedpyright-langserver
+args: [--stdio]
+extension_to_language: {.py: python, .pyi: python}
+root_markers: [pyproject.toml, pyrightconfig.json, setup.py, setup.cfg, requirements.txt, Pipfile]
+env_passthrough: [VIRTUAL_ENV, CONDA_PREFIX, PYTHONPATH]
+install:
+  - requires: pipx
+    argv: [pipx, install, basedpyright]
+readiness: progress
+notes: "Alternative to pyright; chosen only when pyright is disabled."

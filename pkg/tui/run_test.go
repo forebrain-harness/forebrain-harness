@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	mcppkg "github.com/forebrain-harness/forebrain-harness/pkg/mcp"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	runpkg "github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
@@ -215,6 +217,73 @@ func TestRunAuditStepHookPopulatesSubagentToolContent(t *testing.T) {
 				strings.Contains(got.Content, "package main") &&
 				got.Duration == 325*time.Millisecond &&
 				!got.Timestamp.IsZero()
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+}
+
+// The review runs outside any turn — the gated run has already returned — so
+// nothing freezes a step hook onto its context unless the reviewer's own run
+// context carries one. Without it every tool the reviewer calls executes but
+// no card reaches its view, which is exactly what the owner saw.
+func TestPlanReviewRunContextPublishesTheReviewersToolSteps(t *testing.T) {
+	ctx := context.Background()
+	db, err := statepkg.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	runSvc := &statepkg.RunStore{DB: db}
+	require.NoError(t, statepkg.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+	run, err := runSvc.CreateRun(ctx, "sid", "review the plan")
+	require.NoError(t, err)
+
+	cfg := &appcfg.Root{
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {
+					LLMProviders: []appcfg.AgentLLMProviderConfig{{
+						Provider: "openai",
+						Model:    "test-model",
+						APIKey:   "test-key",
+						BaseURL:  "http://127.0.0.1:9/v1",
+					}},
+				},
+			},
+		},
+	}
+	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
+	toolCh := make(chan Message, 4)
+	s.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			toolCh <- m.Msg
+		}
+	})
+
+	// No installRunAuditStepHook here: the reviewer's own wiring must bring
+	// the hook with it, the way a turn freezes one onto the context its
+	// subagents inherit.
+	s.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "sid"})
+	reviewer, rerr := s.planReviewerFor(turn.Model{Provider: "openai", Model: "test-model"})
+	require.NoError(t, rerr)
+	shared, ok := reviewer.(*process.PlanReviewer)
+	require.True(t, ok, "the surface's reviewer is the shared one")
+	require.NotNil(t, shared.StepHook, "the review's reviewer must carry the surface's tool step hook")
+
+	stepCtx := tool.WithHookAgentID(tool.WithRunID(ctx, run.ID), "plan-review-1")
+	shared.StepHook(stepCtx, tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		StepID:   "call-1",
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": "/tmp/a.go"},
+		Output:   map[string]any{"preview_text": "package main\n"},
+	})
+
+	require.Eventually(t, func() bool {
+		select {
+		case got := <-toolCh:
+			return got.AgentID == "plan-review-1" && strings.TrimSpace(got.Content) != ""
 		default:
 			return false
 		}
@@ -443,7 +512,7 @@ func (r *shutdownCallRecorder) Restore() error {
 type fakeSession struct {
 	mu                       sync.Mutex
 	notify                   func(any)
-	subagentModels           map[string]ComposerFooter
+	viewingSession           string
 	dispatched               []string
 	shellCommands            []string
 	dispatchedDisplay        []string
@@ -460,6 +529,7 @@ type fakeSession struct {
 	activeContextTurns       []statepkg.Message
 	transcriptTurnsErr       error
 	recent                   []SessionSummary
+	titles                   map[string]string
 	permissions              string
 	model                    string
 	fastEnabled              bool
@@ -488,7 +558,7 @@ type fakeSession struct {
 	switchedPrimaryQuery     string
 	statusReply              string
 	mcpReply                 string
-	diffReply                string
+	lspReply                 string
 	streamSlashReply         map[string]SlashOutcome
 	streamSlashFn            func(context.Context, string, string) (SlashOutcome, bool)
 	permissionCalls          [][]string
@@ -510,6 +580,7 @@ type fakeSession struct {
 	retractCalls         int
 	pendingSteerCount    int
 	pendingSteerCountOK  bool
+	inputQueues          map[string]*runpkg.InputQueue
 	cancelled            chan struct{}
 	dispatchStarted      chan struct{}
 	dispatchWait         <-chan struct{}
@@ -527,6 +598,33 @@ type fakeSession struct {
 	browseFound          bool
 	savedBrowseSession   string
 	savedBrowseState     RendererBrowseState
+	// Subagent conversation seams (plan 007).
+	subagentSent         []subagentSendCall
+	subagentSendErr      error
+	subagentDelivery     runpkg.SubagentDelivery
+	subagentPreview      ComposerPendingInputPreview
+	recalledSubagent     ComposerSubmission
+	recallSubagentOK     bool
+	recallSubagentCalls  int
+	interruptToSend      bool
+	interruptSentCalls   int
+	withdrawResult       []ComposerSubmission
+	withdrawOK           bool
+	withdrawCalls        int
+	discardSubagentCalls int
+	discardSubagentCount int
+	compactSubagentReply string
+	compactSubagentOK    bool
+	contextReportReply   string
+	contextReportOK      bool
+	subagentTokenStats   ComposerTokenStats
+}
+
+type subagentSendCall struct {
+	SessionID  string
+	AgentKey   string
+	Submission ComposerSubmission
+	FollowUp   bool
 }
 
 type recordingSelector struct {
@@ -681,8 +779,9 @@ func (f *fakeSession) SurfaceTranscriptMessages(context.Context, string) ([]stat
 }
 
 // SurfaceComposerTokenStats computes the footer budget for the fake's model
-// label the way ChatSession computes it for its runner's model.
-func (f *fakeSession) SurfaceComposerTokenStats(usage int) ComposerTokenStats {
+// label the way ChatSession computes it for its runner's model. The fake has
+// no session rows, so the session id it is handed names nothing it reads.
+func (f *fakeSession) SurfaceComposerTokenStats(_ string, usage int) ComposerTokenStats {
 	provider, model := llm.ParseProviderModelLabel(f.model)
 	if strings.TrimSpace(model) == "" {
 		return ComposerTokenStats{}
@@ -745,6 +844,10 @@ func (f *fakeSession) ListSessionsRecent(_ context.Context, limit int) ([]Sessio
 	return append([]SessionSummary(nil), f.recent...), nil
 }
 
+func (f *fakeSession) SessionTitle(_ context.Context, id string) (string, error) {
+	return f.titles[id], nil
+}
+
 func (f *fakeSession) ModelSummaryString() string {
 	return f.model
 }
@@ -788,19 +891,6 @@ func (f *fakeSession) ReloadConfig() error {
 
 func (f *fakeSession) CurrentModelOption() string {
 	return strings.TrimSpace(f.model)
-}
-
-// subagentModels lets a test give a subagent type its own model, the way
-// agents.definitions[<type>].llm_providers does in forebrain.yaml. A type absent
-// from the map runs on the primary agent's model.
-func (f *fakeSession) SubagentModelSummary(agentType string) (string, string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	own, ok := f.subagentModels[strings.TrimSpace(agentType)]
-	if !ok {
-		return "", "", false
-	}
-	return own.Model, own.ReasoningEffort, true
 }
 
 func (f *fakeSession) IsFastMode() bool {
@@ -887,12 +977,12 @@ func (f *fakeSession) HandleMCPSlash(sessionID, channel string) (string, bool) {
 	return f.mcpReply, true
 }
 
-func (f *fakeSession) HandleDiffSlash(sessionID, channel string, args []string) (string, bool) {
-	_, _, _ = sessionID, channel, args
-	if strings.TrimSpace(f.diffReply) == "" {
+func (f *fakeSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
+	_, _ = sessionID, channel
+	if strings.TrimSpace(f.lspReply) == "" {
 		return "", false
 	}
-	return f.diffReply, true
+	return f.lspReply, true
 }
 
 func (f *fakeSession) ChooseSurfaceSlash(_ context.Context, _ string, choice turn.SlashChoice) SlashOutcome {
@@ -933,6 +1023,12 @@ func (f *fakeSession) RecordApprovalDecision(turn.ToolApprovalRequest, turn.Tool
 func (f *fakeSession) PrependUINotify(fn func(any)) {
 	f.mu.Lock()
 	f.notify = fn
+	f.mu.Unlock()
+}
+
+func (f *fakeSession) SetViewingSession(sessionID string) {
+	f.mu.Lock()
+	f.viewingSession = strings.TrimSpace(sessionID)
 	f.mu.Unlock()
 }
 
@@ -990,37 +1086,105 @@ func (f *fakeSession) CancelAllAgents() AgentCancelSummary {
 	return AgentCancelSummary{Main: 1, Subagents: 1}
 }
 
-func (f *fakeSession) SteerSurfaceRun(sessionID string, channel string, parts []llm.ContentPart) bool {
+// SurfaceInputQueue hands the fake's conversation queue to the surface. The
+// queue carries a live runtime, so a steer the surface enqueues is admitted
+// exactly the way a running turn admits it; tests that need the refused lane
+// detach the runtime first.
+func (f *fakeSession) SurfaceInputQueue(sessionID string) *runpkg.InputQueue {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.steered = append(f.steered, llm.TextContent(parts...))
-	f.sessionIDs = append(f.sessionIDs, sessionID)
-	_, _ = channel, parts
-	return f.steerAccepted
+	if f.inputQueues == nil {
+		f.inputQueues = map[string]*runpkg.InputQueue{}
+	}
+	q := f.inputQueues[sessionID]
+	if q == nil {
+		q = runpkg.NewInputQueue()
+		q.Attach(runpkg.NewTurnInputRuntime())
+		f.inputQueues[sessionID] = q
+	}
+	return q
 }
 
-func (f *fakeSession) QueueSurfaceFollowUp(sessionID string, channel string, parts []llm.ContentPart) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.queuedFollowUps = append(f.queuedFollowUps, llm.TextContent(parts...))
-	f.sessionIDs = append(f.sessionIDs, sessionID)
-	_, _ = channel, parts
-	return f.queueAccepted
+// enqueueSteer, enqueueRejected and enqueueFollowUp are the test-side ways to
+// load the conversation's queue the way the surface's keypress paths do.
+func (f *fakeSession) enqueueSteer(sessionID string, submission ComposerSubmission) {
+	f.SurfaceInputQueue(sessionID).Steer(queueInput(submission))
 }
 
-func (f *fakeSession) RetractSurfaceSteer(sessionID string, channel string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	_, _ = sessionID, channel
-	f.retractCalls++
-	return f.steerRetracted
+func (f *fakeSession) enqueueRejected(sessionID string, submission ComposerSubmission) {
+	f.SurfaceInputQueue(sessionID).FollowUp(rejectedQueueInput(submission))
 }
 
-func (f *fakeSession) SurfacePendingSteerCount(sessionID string, channel string) (int, bool) {
+func (f *fakeSession) enqueueFollowUp(sessionID string, submission ComposerSubmission) {
+	f.SurfaceInputQueue(sessionID).FollowUp(queueInput(submission))
+}
+
+// The subagent-conversation seams (plan 007). Each records the call and answers
+// with the canned value the test set.
+
+func (f *fakeSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (runpkg.SubagentDelivery, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, _ = sessionID, channel
-	return f.pendingSteerCount, f.pendingSteerCountOK
+	f.subagentSent = append(f.subagentSent, subagentSendCall{SessionID: sessionID, AgentKey: agentKey, Submission: submission, FollowUp: followUp})
+	if f.subagentSendErr != nil {
+		return "", f.subagentSendErr
+	}
+	if f.subagentDelivery == "" {
+		return runpkg.SubagentDeliveryStarted, nil
+	}
+	return f.subagentDelivery, nil
+}
+
+func (f *fakeSession) SubagentInputPreview(_ string, _ string) ComposerPendingInputPreview {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subagentPreview
+}
+
+func (f *fakeSession) RecallSubagentInput(_ string, _ string) (ComposerSubmission, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recallSubagentCalls++
+	return f.recalledSubagent, f.recallSubagentOK
+}
+
+func (f *fakeSession) InterruptSubagentToSend(_ string, _ string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.interruptSentCalls++
+	return f.interruptToSend
+}
+
+func (f *fakeSession) WithdrawSubagentInput(_ string, _ string) ([]ComposerSubmission, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.withdrawCalls++
+	return f.withdrawResult, f.withdrawOK
+}
+
+func (f *fakeSession) DiscardSubagentInput(_ string, _ string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.discardSubagentCalls++
+	return f.discardSubagentCount
+}
+
+func (f *fakeSession) CompactSubagent(_ context.Context, _ string, _ string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.compactSubagentReply, f.compactSubagentOK
+}
+
+func (f *fakeSession) SubagentContextReport(_ string, _ string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.contextReportReply, f.contextReportOK
+}
+
+func (f *fakeSession) SubagentComposerTokenStats(_ string, _ string) ComposerTokenStats {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subagentTokenStats
 }
 
 type memorySettingsUpdate struct {
@@ -1560,7 +1724,7 @@ func TestExpandComposerTextExpandsSuffixedPlaceholderBeforeBase(t *testing.T) {
 
 func TestActiveRunInputCtrlCProgressionClearThenCancelThenExit(t *testing.T) {
 	session := &fakeSession{cancelActive: true, steerAccepted: true, cancelled: make(chan struct{})}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -1584,7 +1748,6 @@ func TestActiveRunInputCtrlCProgressionClearThenCancelThenExit(t *testing.T) {
 	}
 	session.mu.Lock()
 	cancelCalls := session.cancelCalls
-	steered := append([]string(nil), session.steered...)
 	session.mu.Unlock()
 	if cancelCalls != 0 {
 		t.Fatalf("expected no cancel call on first ctrl+c, got %d", cancelCalls)
@@ -1606,17 +1769,36 @@ func TestActiveRunInputCtrlCProgressionClearThenCancelThenExit(t *testing.T) {
 		t.Fatal("expected third ctrl+c to request quit")
 	}
 
-	if len(state.pendingSteers) != 1 || state.pendingSteers[0].Text != "next turn" {
-		t.Fatalf("expected pending steer, got %#v", state.pendingSteers)
-	}
-	if len(state.pendingSteers[0].Attachments) != 1 || state.pendingSteers[0].Attachments[0].Path != "/tmp/clip.png" {
-		t.Fatalf("expected steer attachment preserved, got %#v", state.pendingSteers[0].Attachments)
-	}
-	if len(state.queuedTurns) != 1 || state.queuedTurns[0].Submission.Text != "queue later" {
-		t.Fatalf("expected queued follow-up, got %#v", state.queuedTurns)
+	q := session.SurfaceInputQueue("s1")
+	var steered []string
+	for _, entry := range q.Runtime().Snapshot() {
+		if entry.Mode == runpkg.TurnInputModeSteer {
+			steered = append(steered, llm.TextContent(entry.Parts...))
+		}
 	}
 	if len(steered) != 1 || steered[0] != "next turn" {
 		t.Fatalf("expected steer request recorded, got %#v", steered)
+	}
+	// The follow-up is the newer message, so it is the one a recall hands back.
+	recalled, ok := q.Recall()
+	if !ok {
+		t.Fatal("expected the newest queued message to be recallable")
+	}
+	recalledSubmission := recalled.Payload.(ComposerSubmission)
+	if recalledSubmission.Text != "queue later" {
+		t.Fatalf("expected the queued follow-up recalled, got %#v", recalledSubmission)
+	}
+	// The steer comes back next, whole: text and the clipboard image it carried.
+	recalled, ok = q.Recall()
+	if !ok {
+		t.Fatal("expected the pending steer to be recallable after the follow-up")
+	}
+	recalledSubmission = recalled.Payload.(ComposerSubmission)
+	if recalledSubmission.Text != "next turn" {
+		t.Fatalf("expected pending steer, got %#v", recalledSubmission)
+	}
+	if len(recalledSubmission.Attachments) != 1 || recalledSubmission.Attachments[0].Path != "/tmp/clip.png" {
+		t.Fatalf("expected steer attachment preserved, got %#v", recalledSubmission.Attachments)
 	}
 }
 
@@ -1626,9 +1808,9 @@ func TestActiveRunInputCtrlCProgressionClearThenCancelThenExit(t *testing.T) {
 func TestRestoreWithdrawnWorkMergesInWrittenOrder(t *testing.T) {
 	session := &fakeSession{}
 	foreground := &foregroundTurn{submission: mustComposerSubmission("the withdrawn message")}
-	state := &streamState{sessionID: "s1", activeForeground: foreground}
+	state := &streamState{sessionID: "s1", session: session, activeForeground: foreground}
 	foreground.withdraw()
-	state.enqueueTurn(mustComposerSubmission("queued behind it"), queuedSubmissionActionTurn)
+	session.enqueueFollowUp("s1", mustComposerSubmission("queued behind it"))
 	state.composer.DraftText = "still typing"
 	state.composer.Cursor = len("still typing")
 
@@ -1641,8 +1823,8 @@ func TestRestoreWithdrawnWorkMergesInWrittenOrder(t *testing.T) {
 	if state.composer.Text != "" {
 		t.Fatalf("recovered draft is committed and can auto-submit: %q", state.composer.Text)
 	}
-	if len(state.pendingSteers)+len(state.rejectedSteers)+len(state.queuedTurns) != 0 {
-		t.Fatal("recovered work was left in the queues as well")
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("recovered work was left in the queues as well: %#v", preview)
 	}
 	if state.submitPendingSteersAfterInterrupt {
 		t.Fatal("withdrawal armed interrupt-and-send")
@@ -1655,7 +1837,7 @@ func TestRestoreWithdrawnWorkMergesInWrittenOrder(t *testing.T) {
 func TestRestoreWithdrawnWorkFoldsInputQueuedWhileCancelling(t *testing.T) {
 	session := &fakeSession{}
 	foreground := &foregroundTurn{submission: mustComposerSubmission("the withdrawn message")}
-	state := &streamState{sessionID: "s1", activeForeground: foreground}
+	state := &streamState{sessionID: "s1", session: session, activeForeground: foreground}
 	foreground.withdraw()
 
 	state.restoreWithdrawnWork(session)
@@ -1668,7 +1850,7 @@ func TestRestoreWithdrawnWorkFoldsInputQueuedWhileCancelling(t *testing.T) {
 		t.Fatalf("second pass duplicated the draft: %q", state.composer.DraftText)
 	}
 
-	state.enqueueTurn(mustComposerSubmission("typed while cancelling"), queuedSubmissionActionTurn)
+	session.enqueueFollowUp("s1", mustComposerSubmission("typed while cancelling"))
 	state.restoreWithdrawnWork(session)
 
 	want := "the withdrawn message\ntyped while cancelling"
@@ -1687,12 +1869,12 @@ func TestRestoreWithdrawnWorkMergesEveryQueueAndKeepsPayloads(t *testing.T) {
 	session := &fakeSession{steerRetracted: true}
 	withdrawn := pastedComposerSubmission("the withdrawn message", "paste body alpha")
 	foreground := &foregroundTurn{submission: withdrawn}
-	state := &streamState{sessionID: "s1", activeForeground: foreground}
+	state := &streamState{sessionID: "s1", session: session, activeForeground: foreground}
 	foreground.withdraw()
 
-	state.enqueuePendingSteer(pastedComposerSubmission("steered follow-up", "paste body bravo"))
-	state.enqueueRejectedSteer(pastedComposerSubmission("refused steer", "paste body delta"))
-	state.enqueueTurn(pastedComposerSubmission("queued follow-up", "paste body gamma"), queuedSubmissionActionTurn)
+	session.enqueueSteer("s1", pastedComposerSubmission("steered follow-up", "paste body bravo"))
+	session.enqueueRejected("s1", pastedComposerSubmission("refused steer", "paste body delta"))
+	session.enqueueFollowUp("s1", pastedComposerSubmission("queued follow-up", "paste body gamma"))
 
 	state.restoreWithdrawnWork(session)
 
@@ -1704,11 +1886,13 @@ func TestRestoreWithdrawnWorkMergesEveryQueueAndKeepsPayloads(t *testing.T) {
 	if i, j := strings.Index(state.composer.DraftText, "the withdrawn message"), strings.Index(state.composer.DraftText, "queued follow-up"); i > j {
 		t.Fatalf("written order not preserved: %q", state.composer.DraftText)
 	}
-	if session.retractCalls != 1 {
-		t.Fatalf("pending steer retractions = %d, want 1", session.retractCalls)
+	for _, entry := range session.SurfaceInputQueue("s1").Runtime().Snapshot() {
+		if entry.Mode == runpkg.TurnInputModeSteer {
+			t.Fatalf("pending steer was left in the run's runtime: %#v", entry)
+		}
 	}
-	if len(state.pendingSteers)+len(state.rejectedSteers)+len(state.queuedTurns) != 0 {
-		t.Fatal("work was recovered into the draft and left in the queues as well")
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("work was recovered into the draft and left in the queues as well: %#v", preview)
 	}
 
 	// All four bodies are the same length, so they all fold behind the same base
@@ -1762,9 +1946,9 @@ func TestRestoreWithdrawnWorkRenumbersImagesAcrossTheMerge(t *testing.T) {
 
 	session := &fakeSession{}
 	foreground := &foregroundTurn{submission: withImage("look at this", imageA)}
-	state := &streamState{sessionID: "s1", activeForeground: foreground}
+	state := &streamState{sessionID: "s1", session: session, activeForeground: foreground}
 	foreground.withdraw()
-	state.enqueueTurn(withImage("and this one", imageB), queuedSubmissionActionTurn)
+	session.enqueueFollowUp("s1", withImage("and this one", imageB))
 
 	state.restoreWithdrawnWork(session)
 
@@ -1787,8 +1971,9 @@ func TestRestoreWithdrawnWorkRenumbersImagesAcrossTheMerge(t *testing.T) {
 // must never hand the queue back to the automatic replay path, which would
 // resend the very message the user just took back.
 func TestWithdrawnTurnStopsAutomaticReplay(t *testing.T) {
-	state := &streamState{sessionID: "s1"}
-	state.enqueueTurn(mustComposerSubmission("queued follow-up"), queuedSubmissionActionTurn)
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", mustComposerSubmission("queued follow-up"))
 
 	if _, ok := nextAutomaticSubmission(state, runTurnWithdrawn); ok {
 		t.Fatal("a withdrawn turn fed its queue back into automatic replay")
@@ -1823,9 +2008,11 @@ func mustComposerSubmission(text string) ComposerSubmission {
 
 func TestActiveRunInputQueuesWhenSteerUnavailable(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
+	// The run cannot take a steer: no turn runtime is attached to the queue.
+	session.SurfaceInputQueue("s1").Detach()
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventDraft, draft: "queue this"}, nil)
 	if state.composer.DraftText != "queue this" {
@@ -1833,11 +2020,12 @@ func TestActiveRunInputQueuesWhenSteerUnavailable(t *testing.T) {
 	}
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventLine, line: "queue this"}, nil)
-	if len(state.pendingSteers) != 0 {
-		t.Fatalf("expected no pending steer when session rejects steer, got %#v", state.pendingSteers)
+	preview := session.SurfaceInputQueue("s1").Preview()
+	if len(preview.Steers) != 0 {
+		t.Fatalf("expected no pending steer when session rejects steer, got %#v", preview.Steers)
 	}
-	if len(state.rejectedSteers) != 1 || state.rejectedSteers[0].Submission.Text != "queue this" {
-		t.Fatalf("expected rejected steer queue, got %#v", state.rejectedSteers)
+	if len(preview.Rejected) != 1 || preview.Rejected[0] != "queue this" {
+		t.Fatalf("expected rejected steer queue, got %#v", preview.Rejected)
 	}
 	if state.composer.Text != "" || state.composer.DraftText != "" {
 		t.Fatalf("expected composer cleared after queueing, got text=%q draft=%q", state.composer.Text, state.composer.DraftText)
@@ -1846,35 +2034,22 @@ func TestActiveRunInputQueuesWhenSteerUnavailable(t *testing.T) {
 
 func TestActiveRunEditLastQueuedMessageRestoresLastQueuedFollowUp(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{
-		sessionID: "s1",
-		queuedTurns: []queuedSubmission{
-			{
-				Action: queuedSubmissionActionRejectedSteer,
-				Submission: ComposerSubmission{
-					Text:        "retry at end",
-					Parts:       []llm.ContentPart{llm.Text("retry at end")},
-					DisplayText: "retry at end",
-				},
-			},
-			{
-				Action: queuedSubmissionActionTurn,
-				Submission: ComposerSubmission{
-					Text:        "first follow-up",
-					Parts:       []llm.ContentPart{llm.Text("first follow-up")},
-					DisplayText: "first follow-up",
-				},
-			},
-			{
-				Action: queuedSubmissionActionTurn,
-				Submission: ComposerSubmission{
-					Text:        "second follow-up",
-					Parts:       []llm.ContentPart{llm.Text("second follow-up")},
-					DisplayText: "second follow-up",
-				},
-			},
-		},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueRejected("s1", ComposerSubmission{
+		Text:        "retry at end",
+		Parts:       []llm.ContentPart{llm.Text("retry at end")},
+		DisplayText: "retry at end",
+	})
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text:        "first follow-up",
+		Parts:       []llm.ContentPart{llm.Text("first follow-up")},
+		DisplayText: "first follow-up",
+	})
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text:        "second follow-up",
+		Parts:       []llm.ContentPart{llm.Text("second follow-up")},
+		DisplayText: "second follow-up",
+	})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -1883,29 +2058,23 @@ func TestActiveRunEditLastQueuedMessageRestoresLastQueuedFollowUp(t *testing.T) 
 	if state.composer.DraftText != "second follow-up" {
 		t.Fatalf("expected last queued follow-up restored to composer, got %q", state.composer.DraftText)
 	}
-	if len(state.queuedTurns) != 2 {
-		t.Fatalf("expected only last queued follow-up removed, got %#v", state.queuedTurns)
+	preview := session.SurfaceInputQueue("s1").Preview()
+	if len(preview.Rejected) != 1 || len(preview.FollowUp) != 1 {
+		t.Fatalf("expected only last queued follow-up removed, got %#v", preview)
 	}
-	if state.queuedTurns[0].Action != queuedSubmissionActionRejectedSteer || state.queuedTurns[1].Submission.Text != "first follow-up" {
-		t.Fatalf("expected rejected steer and earlier follow-up preserved, got %#v", state.queuedTurns)
+	if preview.Rejected[0] != "retry at end" || preview.FollowUp[0] != "first follow-up" {
+		t.Fatalf("expected rejected steer and earlier follow-up preserved, got %#v", preview)
 	}
 }
 
 func TestActiveRunEditLastQueuedMessageQueuesEditedDraft(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{
-		sessionID: "s1",
-		queuedTurns: []queuedSubmission{
-			{
-				Action: queuedSubmissionActionTurn,
-				Submission: ComposerSubmission{
-					Text:        "original follow-up",
-					Parts:       []llm.ContentPart{llm.Text("original follow-up")},
-					DisplayText: "original follow-up",
-				},
-			},
-		},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", ComposerSubmission{
+		Text:        "original follow-up",
+		Parts:       []llm.ContentPart{llm.Text("original follow-up")},
+		DisplayText: "original follow-up",
+	})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -1913,25 +2082,32 @@ func TestActiveRunEditLastQueuedMessageQueuesEditedDraft(t *testing.T) {
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventDraft, draft: "edited follow-up", cursor: len("edited follow-up")}, nil)
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
 
-	if len(state.queuedTurns) != 1 {
-		t.Fatalf("expected edited follow-up requeued once, got %#v", state.queuedTurns)
+	preview := session.SurfaceInputQueue("s1").Preview()
+	if len(preview.FollowUp) != 1 {
+		t.Fatalf("expected edited follow-up requeued once, got %#v", preview.FollowUp)
 	}
-	if got := state.queuedTurns[0].Submission.Text; got != "edited follow-up" {
+	if got := preview.FollowUp[0]; got != "edited follow-up" {
 		t.Fatalf("expected edited draft to replace original queued text, got %q", got)
-	}
-	if got := state.queuedTurns[0].Submission.DisplayText; got != "edited follow-up" {
-		t.Fatalf("expected edited draft to replace original display text, got %q", got)
 	}
 }
 
 func TestActiveRunEditLastQueuedMessageLeavesPendingSteerUntouched(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "auto fix all bugs and issues", Parts: []llm.ContentPart{llm.Text("auto fix all bugs and issues")}, DisplayText: "auto fix all bugs and issues"},
-			{Text: "auto fix all bugs and issue", Parts: []llm.ContentPart{llm.Text("auto fix all bugs and issue")}, DisplayText: "auto fix all bugs and issue"},
-		},
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text:        "auto fix all bugs and issues",
+		Parts:       []llm.ContentPart{llm.Text("auto fix all bugs and issues")},
+		DisplayText: "auto fix all bugs and issues",
+	})
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text:        "auto fix all bugs and issue",
+		Parts:       []llm.ContentPart{llm.Text("auto fix all bugs and issue")},
+		DisplayText: "auto fix all bugs and issue",
+	})
+	// The run already took both steers at tool boundaries, so neither can be
+	// pulled back for editing.
+	if drained := session.SurfaceInputQueue("s1").Runtime().DrainSteers(); len(drained) != 2 {
+		t.Fatalf("expected both steers drained into the run, got %#v", drained)
 	}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
@@ -1941,37 +2117,42 @@ func TestActiveRunEditLastQueuedMessageLeavesPendingSteerUntouched(t *testing.T)
 	if state.composer.DraftText != "" {
 		t.Fatalf("pending steer must not be recalled, got %q", state.composer.DraftText)
 	}
-	if len(state.pendingSteers) != 2 {
-		t.Fatalf("pending steers changed: %#v", state.pendingSteers)
+	if got := deliveredSteerTranscript(t, renderer); len(got) != 2 || got[0] != "auto fix all bugs and issues" || got[1] != "auto fix all bugs and issue" {
+		t.Fatalf("pending steers changed: %#v", got)
 	}
 }
 
 func TestActiveRunEditLastQueuedMessageKeepsSteerWhenAlreadyDelivered(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{
-		sessionID: "s1",
-		pendingSteers: []ComposerSubmission{
-			{Text: "already delivered", Parts: []llm.ContentPart{llm.Text("already delivered")}, DisplayText: "already delivered"},
-		},
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{Text: "follow up", Parts: []llm.ContentPart{llm.Text("follow up")}, DisplayText: "follow up"}},
-		},
-	}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text:        "already delivered",
+		Parts:       []llm.ContentPart{llm.Text("already delivered")},
+		DisplayText: "already delivered",
+	})
+	session.enqueueFollowUp("s1", ComposerSubmission{Text: "follow up", Parts: []llm.ContentPart{llm.Text("follow up")}, DisplayText: "follow up"})
+	// The run already drained the steer at a tool boundary: retraction fails,
+	// which is what recall checks before handing a steer back for editing.
+	session.SurfaceInputQueue("s1").Runtime().DrainSteers()
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyEditLastQueued}, nil)
 
 	// Retract failed (the agent already drained the steer), so the steer stays
-	// put and editing falls back to the locally-held follow-up.
+	// with the run — rendered into the transcript, not handed back for editing.
 	if state.composer.DraftText != "follow up" {
 		t.Fatalf("expected fallback to follow-up when steer not retractable, got %q", state.composer.DraftText)
 	}
-	if len(state.pendingSteers) != 1 {
-		t.Fatalf("expected pending steer preserved when not retractable, got %#v", state.pendingSteers)
+	preview := session.SurfaceInputQueue("s1").Preview()
+	if len(preview.Steers) != 0 {
+		t.Fatalf("expected the delivered steer out of the pending lane, got %#v", preview.Steers)
 	}
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("expected follow-up consumed, got %#v", state.queuedTurns)
+	if len(preview.FollowUp) != 0 {
+		t.Fatalf("expected follow-up consumed, got %#v", preview.FollowUp)
+	}
+	if got := deliveredSteerTranscript(t, renderer); len(got) != 1 || got[0] != "already delivered" {
+		t.Fatalf("expected the delivered steer preserved for the transcript, got %#v", got)
 	}
 }
 
@@ -1986,27 +2167,36 @@ func TestActiveRunSlashContinueInputSteersCurrentTurn(t *testing.T) {
 			},
 		},
 	}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	cmds := newCommandController(session, renderer, &stubSelector{}, nil, "")
 
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventLine, line: "/review"}, cmds)
 
-	session.mu.Lock()
-	steered := append([]string(nil), session.steered...)
-	session.mu.Unlock()
+	q := session.SurfaceInputQueue("s1")
+	var steered []string
+	for _, entry := range q.Runtime().Snapshot() {
+		if entry.Mode == runpkg.TurnInputModeSteer {
+			steered = append(steered, llm.TextContent(entry.Parts...))
+		}
+	}
 	if len(steered) != 1 || steered[0] != "review generated prompt" {
 		t.Fatalf("expected active-run slash continue input to steer current turn, got %#v", steered)
 	}
-	if len(state.pendingSteers) != 1 || state.pendingSteers[0].Text != "review generated prompt" {
-		t.Fatalf("expected pending steer recorded, got %#v", state.pendingSteers)
+	recalled, ok := q.Recall()
+	if !ok {
+		t.Fatal("expected the pending steer to be recallable")
 	}
-	if len(state.pendingSteers) != 1 || state.pendingSteers[0].DisplayText != "/review" {
-		t.Fatalf("expected pending steer display text to preserve raw slash command, got %#v", state.pendingSteers)
+	submission := recalled.Payload.(ComposerSubmission)
+	if submission.Text != "review generated prompt" {
+		t.Fatalf("expected pending steer recorded, got %#v", submission)
 	}
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("expected no queued turns for steerable slash continue input, got %#v", state.queuedTurns)
+	if submission.DisplayText != "/review" {
+		t.Fatalf("expected pending steer display text to preserve raw slash command, got %#v", submission)
+	}
+	if preview := q.Preview(); preview.Visible() {
+		t.Fatalf("expected no queued turns for steerable slash continue input, got %#v", preview)
 	}
 }
 
@@ -2048,7 +2238,7 @@ func TestDispatchStreamSlashInitSubmitsBuiltPrompt(t *testing.T) {
 
 func TestActiveRunBangShellExecutesImmediately(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -2067,14 +2257,14 @@ func TestActiveRunBangShellExecutesImmediately(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("expected no queued shell turn for enter bang command, got %#v", state.queuedTurns)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected no queued shell turn for enter bang command, got %#v", preview)
 	}
 }
 
 func TestActiveRunTabQueuesBangShellAsShellAction(t *testing.T) {
 	session := &fakeSession{}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 
@@ -2082,24 +2272,26 @@ func TestActiveRunTabQueuesBangShellAsShellAction(t *testing.T) {
 	state.composer.DraftText = "!echo hi"
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
 
-	if len(state.queuedTurns) != 1 {
-		t.Fatalf("expected one queued item, got %#v", state.queuedTurns)
+	preview := session.SurfaceInputQueue("s1").Preview()
+	if len(preview.FollowUp) != 1 {
+		t.Fatalf("expected one queued item, got %#v", preview.FollowUp)
 	}
-	if state.queuedTurns[0].Action != queuedSubmissionActionShell {
-		t.Fatalf("expected queued shell action, got %#v", state.queuedTurns[0])
+	if preview.FollowUp[0] != "!echo hi" {
+		t.Fatalf("expected queued shell text preserved, got %#v", preview.FollowUp)
 	}
-	if state.queuedTurns[0].Submission.Text != "!echo hi" {
-		t.Fatalf("expected queued shell text preserved, got %#v", state.queuedTurns[0])
+	// The queued shell runs as its own turn when it comes up, the dispatcher's
+	// leading-"!" routing decides that; the queue carries only the message.
+	next, ok := nextAutomaticSubmission(state, runTurnCompleted)
+	if !ok || next.Text != "!echo hi" {
+		t.Fatalf("expected queued shell to come back whole, ok=%v next=%q", ok, next.Text)
 	}
 }
 
 func TestNextAutomaticSubmissionDrainsQueuedShellBeforeQueuedTurn(t *testing.T) {
-	state := &streamState{
-		queuedTurns: []queuedSubmission{
-			{Action: queuedSubmissionActionShell, Submission: ComposerSubmission{Text: "!echo hi", DisplayText: "!echo hi"}},
-			{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{Text: "after shell", Parts: []llm.ContentPart{llm.Text("after shell")}, DisplayText: "after shell"}},
-		},
-	}
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueFollowUp("s1", ComposerSubmission{Text: "!echo hi", Parts: []llm.ContentPart{llm.Text("!echo hi")}, DisplayText: "!echo hi"})
+	session.enqueueFollowUp("s1", ComposerSubmission{Text: "after shell", Parts: []llm.ContentPart{llm.Text("after shell")}, DisplayText: "after shell"})
 	first, ok := nextAutomaticSubmission(state, runTurnCompleted)
 	if !ok {
 		t.Fatal("expected first queued submission")
@@ -2120,7 +2312,7 @@ func TestActiveRunSlashNativePickerDoesNotQueueTurn(t *testing.T) {
 	session := &fakeSession{streamSlashReply: map[string]SlashOutcome{
 		"/model": {Handled: true, Picker: &turn.Picker{Command: "model", Title: "Model", Items: []turn.PickerItem{{Value: "openai / gpt-4.1 - GPT 4.1", Label: "openai / gpt-4.1 - GPT 4.1", Current: true}}}},
 	}}
-	state := &streamState{sessionID: "s1"}
+	state := &streamState{sessionID: "s1", session: session}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	cmds := newCommandController(session, renderer, &sequenceSelector{
@@ -2132,11 +2324,8 @@ func TestActiveRunSlashNativePickerDoesNotQueueTurn(t *testing.T) {
 	if len(session.choices) != 1 || session.choices[0].Command != "model" {
 		t.Fatalf("expected /model during active run to use native picker, choices=%+v", session.choices)
 	}
-	if len(state.pendingSteers) != 0 {
-		t.Fatalf("expected no pending steers for native /model picker, got %#v", state.pendingSteers)
-	}
-	if len(state.queuedTurns) != 0 {
-		t.Fatalf("expected no queued turns for native /model picker, got %#v", state.queuedTurns)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected nothing queued for native /model picker, got %#v", preview)
 	}
 }
 
@@ -2314,7 +2503,7 @@ func TestWorkingStatusFormatterReportsTheSubagentWhoseViewIsOpen(t *testing.T) {
 	tracker.StartRun("run-1")
 	tracker.ObserveToolStep("", "call-0", "read_file", "")
 	tracker.ObserveUsageDelta("run-1", 150000, 1000)
-	tracker.ObserveAgent(agentID, time.Now().Add(-57*time.Second))
+	tracker.ObserveAgent(agentID, "", time.Now().Add(-57*time.Second))
 	tracker.ObserveToolStep(agentID, "call-1", "shell", "")
 	tracker.ObserveSubagentUsage("run-1", agentID, 5000, 300)
 
@@ -2346,7 +2535,7 @@ func TestTrackerFreezesASubagentsClockWhenItEnds(t *testing.T) {
 	const agentID = "subagent-7"
 	started := time.Now().Add(-10 * time.Minute)
 	tracker := NewTracker()
-	tracker.ObserveAgent(agentID, started)
+	tracker.ObserveAgent(agentID, "", started)
 	tracker.ObserveAgentEnded(agentID, started.Add(4*time.Minute+12*time.Second))
 
 	snap, ok := tracker.SnapshotAgentRun(agentID)
@@ -2530,11 +2719,11 @@ func TestRunTurnEscapeSubmitsPendingSteersImmediatelyWhenCancelSwallowed(t *test
 	}
 	state := &streamState{
 		sessionID: "s1",
-
-		pendingSteers: []ComposerSubmission{
-			{Text: "auto fix all bugs", Parts: []llm.ContentPart{llm.Text("auto fix all bugs")}, DisplayText: "auto fix all bugs"},
-		},
+		session:   session,
 	}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text: "auto fix all bugs", Parts: []llm.ContentPart{llm.Text("auto fix all bugs")}, DisplayText: "auto fix all bugs",
+	})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	events := make(chan inputEvent, 1)
@@ -2562,8 +2751,8 @@ func TestRunTurnEscapeSubmitsPendingSteersImmediatelyWhenCancelSwallowed(t *test
 	if got := strings.TrimSpace(next.Text); got != "auto fix all bugs" {
 		t.Fatalf("expected pending steer submitted as the next turn, got %q", got)
 	}
-	if len(state.pendingSteers) != 0 {
-		t.Fatalf("expected pendingSteers drained after immediate submit, got %#v", state.pendingSteers)
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected queue drained after immediate submit, got %#v", preview)
 	}
 	if got := strings.TrimSpace(state.composer.DraftText); got != "" {
 		t.Fatalf("expected composer left empty when steers are submitted, got %q", got)
@@ -2579,13 +2768,13 @@ func TestRunTurnCtrlCCancelDoesNotReplayPendingSteers(t *testing.T) {
 		dispatchWait:    dispatchWait,
 	}
 	state := &streamState{
-		sessionID: "s1",
-
-		pendingSteers: []ComposerSubmission{
-			{Text: "auto fix all bugs", Parts: []llm.ContentPart{llm.Text("auto fix all bugs")}, DisplayText: "auto fix all bugs"},
-		},
+		sessionID:               "s1",
+		session:                 session,
 		activeRunCtrlCExitArmed: true,
 	}
+	session.enqueueSteer("s1", ComposerSubmission{
+		Text: "auto fix all bugs", Parts: []llm.ContentPart{llm.Text("auto fix all bugs")}, DisplayText: "auto fix all bugs",
+	})
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
 	events := make(chan inputEvent, 1)
@@ -2678,6 +2867,59 @@ func TestExecuteComposerSubmissionPreservesCtrlCEscalationAcrossAutoContinuation
 	}
 }
 
+// A session the database refuses because another live process owns its turn
+// never started one here, so the TUI takes the message back the way Esc does
+// — the user card leaves, the text returns to the composer — and says the
+// refusal as a system line, never as a failed-run block: there is no run to
+// report the end of.
+func TestSessionBusyRefusalIsTakenBackAsAWithdrawal(t *testing.T) {
+	session := &fakeSession{dispatchErr: statepkg.ErrSessionRunning}
+	state := &streamState{sessionID: "s1"}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	events := make(chan inputEvent, 1)
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan runTurnDisposition, 1)
+	submission := ComposerSubmission{
+		Text:        "hello again",
+		Parts:       []llm.ContentPart{llm.Text("hello again")},
+		DisplayText: "hello again",
+	}
+
+	go func() {
+		disposition, _ := executeComposerSubmission(context.Background(), sigCh, events, nil, nil, session, renderer, nil, state, submission, nil, nil, false, nil)
+		done <- disposition
+	}()
+	if got := <-done; got != runTurnWithdrawn {
+		t.Fatalf("disposition = %q, want the refusal treated as a withdrawal", got)
+	}
+	if got := strings.TrimSpace(state.composer.DraftText); got != "hello again" {
+		t.Fatalf("composer draft = %q, want the message back for editing", got)
+	}
+	var userBlocks, errorBlocks, refusals int
+	for _, block := range renderer.vm.blocks {
+		switch block.frame.Kind {
+		case FrameUser:
+			userBlocks++
+		case FrameError:
+			errorBlocks++
+		case FrameSystem:
+			if block.frame.Content == statepkg.ErrSessionRunning.Error() {
+				refusals++
+			}
+		}
+	}
+	if userBlocks != 0 {
+		t.Fatalf("the user card survived the refusal: %d user block(s) remain", userBlocks)
+	}
+	if errorBlocks != 0 {
+		t.Fatalf("the refusal was drawn as an error block: %d error block(s)", errorBlocks)
+	}
+	if refusals != 1 {
+		t.Fatalf("refusal system lines = %d, want exactly the store's own sentence", refusals)
+	}
+}
+
 func TestRunTurnCancelWaitsForCancelledTurnPersistence(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -2758,7 +3000,7 @@ func waitForCancelCalls(t *testing.T, session *fakeSession, want int) {
 
 func TestSwitchStreamSessionResetsTransientSessionState(t *testing.T) {
 	tracker := NewTracker()
-	tracker.ObserveAgent("agent-1", time.Time{})
+	tracker.ObserveAgent("agent-1", "", time.Time{})
 	tracker.ObserveToolStep("", "read-1", "read_file", "")
 	tracker.ObserveUsageDelta("run-1", 1500, 300)
 	tracker.ObservePlanProgress(1, 3, "drafting")
@@ -2772,17 +3014,17 @@ func TestSwitchStreamSessionResetsTransientSessionState(t *testing.T) {
 			Attachments:   []InputAttachment{{Path: "/tmp/a.png", MIMEType: "image/png"}},
 			PendingPastes: []PendingPaste{{ID: "paste-1", Placeholder: "[Pasted Content 5 chars]", Content: "hello"}},
 		},
-		pendingSteers:   []ComposerSubmission{{Text: "pending steer"}},
-		queuedTurns:     []queuedSubmission{{Action: queuedSubmissionActionTurn, Submission: ComposerSubmission{Text: "queued"}}},
 		holdComposer:    true,
 		userInterrupted: true,
 		quitRequested:   true,
 	}
 	var out bytes.Buffer
 	renderer := NewRenderer(&out, &out)
-	renderer.SetComposerTokenStats(ComposerTokenStats{Active: true, InputTokens: 1500, OutputTokens: 300, PercentLeft: 93})
+	renderer.SetComposerTokenStats("", ComposerTokenStats{Active: true, InputTokens: 1500, OutputTokens: 300, PercentLeft: 93})
 
 	state.session = &fakeSession{model: "deepseek/deepseek-v4-flash"}
+	state.session.(*fakeSession).enqueueSteer("s1", ComposerSubmission{Text: "pending steer", Parts: []llm.ContentPart{llm.Text("pending steer")}, DisplayText: "pending steer"})
+	state.session.(*fakeSession).enqueueFollowUp("s1", ComposerSubmission{Text: "queued", Parts: []llm.ContentPart{llm.Text("queued")}, DisplayText: "queued"})
 	if _, _, err := switchStreamSession(context.Background(), state, renderer, tracker, "s2"); err != nil {
 		t.Fatalf("switchStreamSession: %v", err)
 	}
@@ -2796,8 +3038,8 @@ func TestSwitchStreamSessionResetsTransientSessionState(t *testing.T) {
 	if len(state.composer.Attachments) != 0 || len(state.composer.PendingPastes) != 0 {
 		t.Fatalf("expected composer attachments/pastes cleared, got %+v", state.composer)
 	}
-	if len(state.pendingSteers) != 0 || len(state.queuedTurns) != 0 {
-		t.Fatalf("expected pending submissions cleared, got steers=%#v queued=%#v", state.pendingSteers, state.queuedTurns)
+	if preview := state.session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected pending submissions cleared, got %#v", preview)
 	}
 	if state.holdComposer || state.userInterrupted || state.quitRequested {
 		t.Fatalf("expected transient flags cleared, got hold=%v interrupt=%v quit=%v", state.holdComposer, state.userInterrupted, state.quitRequested)
@@ -2805,7 +3047,7 @@ func TestSwitchStreamSessionResetsTransientSessionState(t *testing.T) {
 	if snap := tracker.SnapshotSession(); snap != (Counters{}) {
 		t.Fatalf("expected tracker reset, got %+v", snap)
 	}
-	stats := renderer.ComposerTokenStats()
+	stats := renderer.ComposerTokenStats("")
 	if !stats.Active || stats.PercentLeft != 100 || stats.ContextWindow <= 0 {
 		t.Fatalf("expected fresh-session token budget, got %+v", stats)
 	}
@@ -2844,7 +3086,7 @@ func TestInitialComposerTokenStatsSeedsFullBudget(t *testing.T) {
 	// "100%" from the first frame, not the
 	// "compact pending" placeholder that PercentLeft==0 renders.
 	session := &fakeSession{model: "deepseek/deepseek-v4-flash"}
-	stats := initialComposerTokenStats(session)
+	stats := initialComposerTokenStats(session, "s1")
 	if !stats.Active {
 		t.Fatalf("initialComposerTokenStats() Active=false, want true")
 	}
@@ -2861,7 +3103,7 @@ func TestInitialComposerTokenStatsSeedsFullBudget(t *testing.T) {
 
 func TestInitialComposerTokenStatsUnknownModelStaysInactive(t *testing.T) {
 	session := &fakeSession{model: ""}
-	if stats := initialComposerTokenStats(session); stats.Active {
+	if stats := initialComposerTokenStats(session, "s1"); stats.Active {
 		t.Fatalf("initialComposerTokenStats() Active=true for empty model, want false")
 	}
 }
@@ -2879,12 +3121,12 @@ func TestSurfaceComposerTokenStatsCountsTheConfiguredCompactLimit(t *testing.T) 
 	cfg.Compact.ModelAutoCompactTokenLimit = 1000
 	home := t.TempDir()
 	s := sessionEnv{Home: home, Config: cfg, Runner: &runpkg.Runner{Deps: &runpkg.Deps{Home: home, AppCfg: &cfg}}}.session()
-	full := s.SurfaceComposerTokenStats(0)
+	full := s.SurfaceComposerTokenStats("s-budget", 0)
 	if !full.Active || full.PercentLeft != 100 {
 		t.Fatalf("empty context = %+v, want the full budget", full)
 	}
-	over := s.SurfaceComposerTokenStats(5000)
-	live, ok := s.tokenBudgetMessageFromUsage(5000)
+	over := s.SurfaceComposerTokenStats("s-budget", 5000)
+	live, ok := s.tokenBudgetMessageFromUsage("s-budget", 5000)
 	if !ok || over != composerTokenStatsFromBudget(live) {
 		t.Fatalf("footer %+v differs from the live budget %+v", over, live)
 	}
@@ -2995,9 +3237,8 @@ func TestCtrlXCtrlKRequestsCancelAllAgents(t *testing.T) {
 func TestAgentRosterEnterSwitchesSelectedView(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{
-		sessionID:           "parent",
-		agentRosterSelected: 1,
-		agentRosterFocused:  true,
+		sessionID:          "parent",
+		agentRosterFocused: true,
 		agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
 			{ID: "main", Kind: "primary", SessionID: "parent"},
 			{ID: "child-agent", Kind: "subagent", SessionID: "child-session"},
@@ -3005,6 +3246,7 @@ func TestAgentRosterEnterSwitchesSelectedView(t *testing.T) {
 	}
 	renderer := NewRenderer(io.Discard, io.Discard)
 	tracker := NewTracker()
+	renderer.MoveRosterCursor(state.agentRoster, +1)
 
 	if !state.handleAgentRosterLineInput(session, renderer, tracker, "") {
 		t.Fatal("expected Enter on selected roster row to be handled")
@@ -3015,7 +3257,7 @@ func TestAgentRosterEnterSwitchesSelectedView(t *testing.T) {
 	}
 
 	// Enter on primary row switches back to the primary view.
-	state.agentRosterSelected = 0
+	renderer.MoveRosterCursor(state.agentRoster, -1)
 	if !state.handleAgentRosterLineInput(session, renderer, tracker, "") {
 		t.Fatal("expected Enter on primary roster row to be handled")
 	}
@@ -3027,9 +3269,8 @@ func TestAgentRosterEnterSwitchesSelectedView(t *testing.T) {
 func TestAgentRosterXUsesSelectedRowCancel(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{
-		sessionID:           "parent",
-		agentRosterSelected: 0,
-		agentRosterFocused:  true,
+		sessionID:          "parent",
+		agentRosterFocused: true,
 		agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
 			{ID: "child-agent", Kind: "subagent", Label: "review", SessionID: "child-session", RunID: "run-1"},
 		}},
@@ -3044,12 +3285,128 @@ func TestAgentRosterXUsesSelectedRowCancel(t *testing.T) {
 	}
 }
 
+// The roster cursor is keyed by agent, not by row position: when another
+// agent's row leaves the roster, the cursor must stay on the agent the user
+// selected, so x cancels that agent and not whichever row now occupies the old
+// index.
+func TestRosterCursorStaysOnItsAgentWhenAnotherRowLeaves(t *testing.T) {
+	session := &fakeSession{}
+	rosterWithA := AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "agent-a", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-a", RunID: "run-a"},
+		{ID: "agent-b", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-b", RunID: "run-b"},
+		{ID: "agent-c", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-c", RunID: "run-c"},
+	}}
+	state := &streamState{sessionID: "parent", agentRoster: rosterWithA}
+	renderer := NewRenderer(io.Discard, io.Discard)
+
+	// Focus lands on the primary row, then two Downs move the cursor onto B.
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	if !state.agentRosterFocused {
+		t.Fatal("Down must move keyboard focus onto the roster")
+	}
+
+	// A finishes and its row leaves the roster; the cursor must still be on
+	// B, so cancelling stops B and not C.
+	state.agentRoster = AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "agent-b", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-b", RunID: "run-b"},
+		{ID: "agent-c", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-c", RunID: "run-c"},
+	}}
+	if !state.handleAgentRosterLineInput(session, renderer, nil, "x") {
+		t.Fatal("expected x on selected roster row to be handled")
+	}
+	if session.cancelSubagentQuery.AgentID != "agent-b" || session.cancelSubagentQuery.RunID != "run-b" {
+		t.Fatalf("cancel query=%#v want agent-b/run-b: the cursor must stay on its agent when another row leaves", session.cancelSubagentQuery)
+	}
+}
+
+// Enter on the roster opens the row the cursor is on and leaves the roster
+// focused with the cursor on the agent that just opened — the view and the
+// cursor move together through the single view-assignment entry.
+func TestRosterEnterKeepsFocusAndCursorOnTheOpenedAgent(t *testing.T) {
+	state := &streamState{sessionID: "parent", agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "agent-a", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-a", RunID: "run-a"},
+		{ID: "agent-b", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-b", RunID: "run-b"},
+	}}}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.viewportMode = true
+	renderer.ensurePerAgentVM("agent-a").append(Frame{Kind: FrameAssistant, Content: "a", AgentID: "agent-a", Final: true})
+	renderer.ensurePerAgentVM("agent-b").append(Frame{Kind: FrameAssistant, Content: "b", AgentID: "agent-b", Final: true})
+
+	// Focus lands on the primary row, then two Downs put the cursor on B.
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	if !state.handleAgentRosterLineInput(&fakeSession{}, renderer, nil, "") {
+		t.Fatal("expected Enter on selected roster row to be handled")
+	}
+	if got := renderer.ActiveView(); got != "agent-b" {
+		t.Fatalf("active view = %q, want agent-b", got)
+	}
+	if !state.agentRosterFocused {
+		t.Fatal("Enter must keep the roster focused")
+	}
+	if row, ok := renderer.RosterCursorRow(state.agentRoster); !ok || row.ID != "agent-b" {
+		t.Fatalf("cursor row = %#v (ok=%v), want agent-b", row, ok)
+	}
+}
+
+// Esc returns to the conversation by setting the view back to the primary —
+// the cursor has to follow it off the subagent's row.
+func TestEscapeBackToTheConversationMovesTheCursorToThePrimaryRow(t *testing.T) {
+	roster := AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "agent-b", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-b", RunID: "run-b"},
+	}}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.viewportMode = true
+	renderer.ensurePerAgentVM("agent-b").append(Frame{Kind: FrameAssistant, Content: "b", AgentID: "agent-b", Final: true})
+	renderer.SetActiveView("agent-b")
+	state := &streamState{sessionID: "parent", agentRoster: roster}
+	// Down focuses the roster; the cursor lands on the view's own row.
+	state.handleOverlayNav(hotkeyOverlayDown, renderer)
+	if row, ok := renderer.RosterCursorRow(roster); !ok || row.ID != "agent-b" {
+		t.Fatalf("cursor row = %#v (ok=%v), want agent-b before escaping", row, ok)
+	}
+
+	renderer.SetActiveView("")
+	if row, ok := renderer.RosterCursorRow(roster); !ok || !strings.EqualFold(strings.TrimSpace(row.Kind), "primary") {
+		t.Fatalf("cursor row = %#v (ok=%v), want the primary row after escaping back", row, ok)
+	}
+}
+
+// A restored browse state reopens the view it saved; the cursor rides along
+// onto the restored agent's row.
+func TestRestoredBrowseStateCarriesTheCursorToTheRestoredView(t *testing.T) {
+	roster := AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "task-b", Kind: "subagent", Label: "explore", Status: "running", SessionID: "session-b", RunID: "run-b"},
+	}}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	renderer.viewportMode = true
+	renderer.ensurePerAgentVM("task-b").append(Frame{Kind: FrameAssistant, Content: "b", AgentID: "task-b", Final: true})
+
+	renderer.RestoreBrowseState(RendererBrowseState{
+		ActiveView: "task-b",
+		Views:      map[string]RendererViewBrowseState{"task-b": {Follow: true}},
+	})
+	if got := renderer.ActiveView(); got != "task-b" {
+		t.Fatalf("active view = %q, want task-b", got)
+	}
+	if row, ok := renderer.RosterCursorRow(roster); !ok || row.ID != "task-b" {
+		t.Fatalf("cursor row = %#v (ok=%v), want task-b after the restore", row, ok)
+	}
+}
+
 func TestAgentRosterHotkeyStopCancelsSubagent(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{
-		sessionID:           "parent",
-		agentRosterSelected: 0,
-		agentRosterFocused:  true,
+		sessionID:          "parent",
+		agentRosterFocused: true,
 		agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
 			{ID: "child-agent", Kind: "subagent", Label: "review", SessionID: "child-session", RunID: "run-1"},
 		}},
@@ -3067,9 +3424,8 @@ func TestAgentRosterHotkeyStopCancelsSubagent(t *testing.T) {
 func TestAgentRosterHotkeyStopNoOpWhenNotFocused(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{
-		sessionID:           "parent",
-		agentRosterSelected: 0,
-		agentRosterFocused:  false,
+		sessionID:          "parent",
+		agentRosterFocused: false,
 		agentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
 			{ID: "child-agent", Kind: "subagent", Label: "review", SessionID: "child-session", RunID: "run-1"},
 		}},
@@ -3569,7 +3925,7 @@ func TestSkillsInstallReturnsWithoutWaitingForTheFetch(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
 		richSteps: []richStep{
-			{idx: 0, ok: true}, // Add a skill
+			{label: "Add a skill", ok: true},
 			{idx: 2, ok: true}, // From a GitHub repo or URL
 			{idx: 0, ok: true}, // global
 		},
@@ -3659,7 +4015,7 @@ func TestEscapeWithOnlyRequiredServersLeftWithdrawsTheSubmission(t *testing.T) {
 // still backed out of first, and neither of them consults the MCP skipper.
 func TestEscapePrecedencesStayAheadOfTheMCPStartupSkip(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
-	renderer.NoteSubagentSpawned("sub-1", "explore")
+	renderer.NoteSubagentSpawned("sub-1", "explore", ComposerFooter{})
 
 	// A focused roster swallows Escape.
 	session := &fakeSession{mcpSkipResult: true}
@@ -3714,7 +4070,7 @@ func TestEscapeAtIdleSkipsTheOptionalServersToo(t *testing.T) {
 	// A subagent view is still backed out of first: Escape means "leave what I
 	// am looking at" before it means anything about the servers.
 	renderer.viewportMode = true
-	renderer.NoteSubagentSpawned("sub-1", "explore")
+	renderer.NoteSubagentSpawned("sub-1", "explore", ComposerFooter{})
 	renderer.SetActiveView("sub-1")
 	session = &fakeSession{mcpSkipResult: true}
 	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyEscapeInterrupt) {
@@ -4086,6 +4442,242 @@ func (f *fakePanelSession) PanelSetMCPDisabled(name string, disable bool) (strin
 	return name + ": " + verb + "d from next session", nil
 }
 
+// fakeLSPPanelSession records the /lsp panel's actions and can serve a
+// different snapshot on every read, the way a live install does.
+type fakeLSPPanelSession struct {
+	mu         sync.Mutex
+	snapshot   event.LSPSnapshot
+	actions    []string
+	replies    map[string]string
+	subscribed int
+}
+
+func (f *fakeLSPPanelSession) PanelLSPSnapshot() (event.LSPSnapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	snap := f.snapshot
+	return snap, nil
+}
+
+func (f *fakeLSPPanelSession) PanelSetLSPEnabled(serverID string, enabled bool) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, fmt.Sprintf("enabled=%v %s", enabled, serverID))
+	return f.replies["set"], nil
+}
+
+func (f *fakeLSPPanelSession) PanelRestartLSP(serverID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, "restart "+serverID)
+	return f.replies["restart"], nil
+}
+
+func (f *fakeLSPPanelSession) PanelInstallLSP(serverID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, "install "+serverID)
+	return f.replies["install"], nil
+}
+
+func (f *fakeLSPPanelSession) PanelResetLSPRecommendations() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.actions = append(f.actions, "reset-recommendations")
+	return f.replies["reset"], nil
+}
+
+func (f *fakeLSPPanelSession) SubscribeLSPStatus() (func(), bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.subscribed++
+	return func() {}, true
+}
+
+func lspSnapshotForPanel() event.LSPSnapshot {
+	return event.LSPSnapshot{
+		ProjectRoot:    "/Users/tester/proj",
+		Trusted:        true,
+		FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{
+			{
+				ID: "gopls", Enabled: true, State: event.LSPStateReady, Languages: []string{"Go"},
+				Command: "gopls", BinaryPath: "/usr/local/bin/gopls", Version: "v0.20.0",
+				Roots: []string{"/Users/tester/proj"}, PIDs: []int{4242}, OpenDocuments: 3,
+				Errors: 2, LogPath: "/state/lsp/gopls-ab12cd34.log", ProjectWrites: []string{".gopls"},
+			},
+			{ID: "pyright", Enabled: false, State: event.LSPStateNotInstalled, Languages: []string{"Python"}, InstallCommand: "npm install -g pyright"},
+		},
+	}
+}
+
+// TestLSPPanelListLayout pins the /lsp list at three widths: the project
+// subtitle, the Enabled and Available groups with each state's glyph, the
+// sandbox note, and the selected row as the focus.
+func TestLSPPanelListLayout(t *testing.T) {
+	snap := lspSnapshotForPanel()
+	snap.RecommendationsDisabled = true
+	snap.RecommendationsDisabledReason = "dismissed 5 times"
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, cursor: 1, notice: map[string]string{}}
+	for _, width := range []int{120, 80, 50} {
+		lines, focus := panelTestLines(panel, width, "⠋")
+		assertRowsFit(t, lines, width)
+		joined := stripANSI(strings.Join(lines, "\n"))
+		for _, want := range []string{
+			"Language servers",
+			"/Users/tester/proj · 1 enabled",
+			"Enabled",
+			"gopls · ✓ ready · 2 errors",
+			"Available",
+			"pyright · – not installed",
+			"Servers run on this machine outside the sandbox, only in trusted projects.",
+			"Recommendations are off (dismissed 5 times).",
+			"Turn recommendations back on",
+		} {
+			if !strings.Contains(strings.Join(strings.Fields(joined), " "), want) {
+				t.Fatalf("width %d: lsp panel missing %q:\n%s", width, want, joined)
+			}
+		}
+		if focus < 0 || !strings.Contains(stripANSI(lines[focus]), "❯ pyright") {
+			t.Fatalf("width %d: focus row %d is not the selected server:\n%s", width, focus, joined)
+		}
+	}
+
+	off := lspSnapshotForPanel()
+	off.FeatureEnabled = false
+	panel = &uiPanel{kind: "lsp", page: "list", lsp: &off, notice: map[string]string{}}
+	if _, focus := panelTestLines(panel, 80, "⠋"); focus < 0 || true {
+		lines, _ := panelTestLines(panel, 80, "⠋")
+		if !strings.Contains(stripANSI(strings.Join(lines, "\n")), "Turned off by features.lsp") {
+			t.Fatalf("feature off subtitle:\n%s", stripANSI(strings.Join(lines, "\n")))
+		}
+	}
+}
+
+// TestLSPPanelDetailAndActions pins the drill-down: the detail facts, the
+// action rows per state, the Disable action's reply as the notice, install
+// output while an install runs, and Esc returning to the row it opened.
+func TestLSPPanelDetailAndActions(t *testing.T) {
+	session := &fakeLSPPanelSession{snapshot: lspSnapshotForPanel(), replies: map[string]string{
+		"set":     "Disabled. Its instances in this project have stopped.",
+		"restart": "Restarting…",
+		"install": "Installing: npm install -g pyright",
+		"reset":   "Recommendations are back on.",
+	}}
+	snap := session.snapshot
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, lspSession: session, notice: map[string]string{}}
+
+	panelAccept(panel) // gopls
+	if panel.page != "detail" || panel.server != "gopls" {
+		t.Fatalf("accept on list = %q/%q", panel.page, panel.server)
+	}
+	lines, _ := panelTestLines(panel, 100, "⠋")
+	detail := stripANSI(strings.Join(lines, "\n"))
+	folded := strings.Join(strings.Fields(detail), " ")
+	for _, want := range []string{
+		"gopls language server",
+		"State: ✓ ready · 2 errors",
+		"Languages: Go",
+		"Binary: /usr/local/bin/gopls · v0.20.0",
+		"Processes: 4242",
+		"Open files: 3",
+		"Log: /state/lsp/gopls-ab12cd34.log",
+		"Writes into project: .gopls",
+		"Disable",
+		"Restart",
+	} {
+		if !strings.Contains(folded, want) {
+			t.Fatalf("detail missing %q:\n%s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "Install:") {
+		t.Fatalf("a ready server offers no install:\n%s", detail)
+	}
+
+	rows := panelSelectableRows(panel)
+	if len(rows) != 2 || rows[0].action != panelLSPDisable || rows[1].action != panelLSPRestart {
+		t.Fatalf("ready server rows = %+v", rows)
+	}
+	panelAccept(panel) // Disable
+	if len(session.actions) != 1 || session.actions[0] != "enabled=false gopls" {
+		t.Fatalf("actions = %v", session.actions)
+	}
+	if panel.notice["gopls"] != "Disabled. Its instances in this project have stopped." {
+		t.Fatalf("notice = %q", panel.notice["gopls"])
+	}
+
+	if !panel.back() || panel.page != "list" || panel.cursor != 0 {
+		t.Fatalf("back from detail = %q cursor %d", panel.page, panel.cursor)
+	}
+	if panel.back() {
+		t.Fatal("back at the list must close the panel")
+	}
+
+	// A not-installed server offers Enable and the install, with the command
+	// in the install row.
+	panel.cursor = 1
+	panelAccept(panel) // pyright
+	rows = panelSelectableRows(panel)
+	if len(rows) != 2 || rows[0].action != panelLSPEnable || rows[1].action != panelLSPInstall || rows[1].label != "Install: npm install -g pyright" {
+		t.Fatalf("not-installed rows = %+v", rows)
+	}
+	snap.Servers[1].Installing = true
+	snap.Servers[1].InstallLog = []string{"npm warn deprecated"}
+	snap.Servers[1].InstallError = "npm ERR! code E404\nnpm ERR! 404 Not Found"
+	lines, _ = panelTestLines(panel, 100, "⠋")
+	installing := stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{"⠋ installing…", "Install output", "npm ERR! code E404", "npm warn deprecated"} {
+		if !strings.Contains(installing, want) {
+			t.Fatalf("installing detail missing %q:\n%s", want, installing)
+		}
+	}
+	rows = panelSelectableRows(panel) // installing: the install row is gone, Enable stays
+	if len(rows) != 1 || rows[0].action != panelLSPEnable {
+		t.Fatalf("an installing server offers no install: %+v", rows)
+	}
+}
+
+// The reset-recommendations row on the list runs the reset and shows its
+// reply at the list level.
+func TestLSPPanelResetRecommendationsRow(t *testing.T) {
+	session := &fakeLSPPanelSession{snapshot: lspSnapshotForPanel(), replies: map[string]string{"reset": "Recommendations are back on."}}
+	snap := session.snapshot
+	snap.RecommendationsDisabled = true
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, lspSession: session, notice: map[string]string{}, cursor: 2}
+	rows := panelSelectableRows(panel)
+	if len(rows) != 3 || rows[2].action != panelLSPResetRecs {
+		t.Fatalf("rows = %+v", rows)
+	}
+	panelAccept(panel)
+	if len(session.actions) != 1 || session.actions[0] != "reset-recommendations" {
+		t.Fatalf("actions = %v", session.actions)
+	}
+	lines, _ := panelTestLines(panel, 100, "⠋")
+	if !strings.Contains(stripANSI(strings.Join(lines, "\n")), "Recommendations are back on.") {
+		t.Fatalf("list must show the reset reply:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
+// A status tick re-reads the snapshot, so a server that changed state
+// repaints without a key.
+func TestLSPPanelRefreshOnTick(t *testing.T) {
+	session := &fakeLSPPanelSession{snapshot: lspSnapshotForPanel()}
+	snap := session.snapshot
+	panel := &uiPanel{kind: "lsp", page: "list", lsp: &snap, lspSession: session, notice: map[string]string{}}
+	session.mu.Lock()
+	session.snapshot.Servers[0].State = event.LSPStateIndexing
+	session.snapshot.Servers[0].IndexingPercent = 17
+	session.mu.Unlock()
+	panel.refreshLSP()
+	if panel.lsp.Servers[0].State != event.LSPStateIndexing || panel.lsp.Servers[0].IndexingPercent != 17 {
+		t.Fatalf("snapshot was not refreshed: %+v", panel.lsp.Servers[0])
+	}
+	lines, _ := panelTestLines(panel, 100, "⠋")
+	if !strings.Contains(stripANSI(strings.Join(lines, "\n")), "indexing… 17%") {
+		t.Fatalf("refreshed list:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
 func mcpToolsForPanel(server string) []*llm.Tool {
 	tool, err := llm.NewRawTool("mcp__"+server+"__search", "Search the code graph",
 		map[string]any{
@@ -4182,5 +4774,768 @@ func TestResumeLeavesOutTheConversationOnScreen(t *testing.T) {
 	}
 	if _, listed := promptRecentSession(context.Background(), &fakeSession{recent: []SessionSummary{{ID: "on-screen"}}}, sel, func(context.Context) (string, error) { return "", nil }, "on-screen"); listed {
 		t.Fatal("a picker was offered with nothing else to resume")
+	}
+}
+
+// lspReviewSelector answers one Review with a scripted outcome and records
+// what the recommendation modal asked.
+type lspReviewSelector struct {
+	label      string
+	facts      []turn.StatusFact
+	actions    []string
+	defaultIdx int
+	answer     int
+	confirmed  bool
+	err        error
+}
+
+func (s *lspReviewSelector) Select(string, []string, string) (string, bool, error) {
+	return "", false, fmt.Errorf("unexpected select")
+}
+
+func (s *lspReviewSelector) MultiSelect(string, []string, []string) ([]string, bool, error) {
+	return nil, false, fmt.Errorf("unexpected multiselect")
+}
+
+func (s *lspReviewSelector) Input(string, string) (string, bool, error) {
+	return "", false, fmt.Errorf("unexpected input")
+}
+
+func (s *lspReviewSelector) Secret(string, string) (string, bool, error) {
+	return "", false, fmt.Errorf("unexpected secret")
+}
+
+func (s *lspReviewSelector) Confirm(string, bool) (bool, bool, error) {
+	return false, false, fmt.Errorf("unexpected confirm")
+}
+
+func (s *lspReviewSelector) SelectRich(string, []SelectItem, int) (int, bool, error) {
+	return -1, false, fmt.Errorf("unexpected selectrich")
+}
+
+func (s *lspReviewSelector) Review(label string, facts []turn.StatusFact, actions []string, defaultIdx int) (int, bool, error) {
+	s.label, s.facts, s.actions, s.defaultIdx = label, facts, actions, defaultIdx
+	return s.answer, s.confirmed, s.err
+}
+
+// lspDeciderStub records the answer the modal applied.
+type lspDeciderStub struct {
+	rec    event.LSPRecommendation
+	choice event.LSPRecommendationChoice
+	text   string
+	err    error
+}
+
+func (d *lspDeciderStub) DecideLSPRecommendation(rec event.LSPRecommendation, choice event.LSPRecommendationChoice) (string, error) {
+	d.rec, d.choice = rec, choice
+	return d.text, d.err
+}
+
+// The recommendation modal maps its four actions — and Escape, and a
+// selector failure — onto the five answers, opens on the safe choice in
+// install mode, and shows the facts the spec spells out.
+func TestLSPRecommendationModalChoices(t *testing.T) {
+	enableRec := event.LSPRecommendation{
+		ID: "lsprec-1", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"},
+		TriggerExtension: ".go", Mode: "enable", BinaryPath: "/usr/local/bin/gopls", Version: "v0.23.0",
+	}
+	cases := []struct {
+		name       string
+		rec        event.LSPRecommendation
+		answer     int
+		confirmed  bool
+		selectorEr error
+		want       event.LSPRecommendationChoice
+	}{
+		{name: "action zero enables", rec: enableRec, answer: 0, confirmed: true, want: event.LSPChoiceEnable},
+		{name: "action one is not now", rec: enableRec, answer: 1, confirmed: true, want: event.LSPChoiceNotNow},
+		{name: "action two is never", rec: enableRec, answer: 2, confirmed: true, want: event.LSPChoiceNever},
+		{name: "action three disables all", rec: enableRec, answer: 3, confirmed: true, want: event.LSPChoiceDisableAll},
+		{name: "escape is not now", rec: enableRec, confirmed: false, want: event.LSPChoiceNotNow},
+		{name: "a selector error still answers not now", rec: enableRec, confirmed: true, selectorEr: errors.New("no tty"), want: event.LSPChoiceNotNow},
+		{name: "install mode action zero installs", rec: event.LSPRecommendation{
+			ID: "lsprec-2", ServerID: "gopls", DisplayName: "gopls", Languages: []string{"Go"},
+			TriggerExtension: ".go", Mode: "install", InstallCommand: "go install golang.org/x/tools/gopls@latest",
+		}, answer: 0, confirmed: true, want: event.LSPChoiceInstall},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			forcedTermWidth = 80
+			forcedTermHeight = 24
+			t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+			var out bytes.Buffer
+			renderer := NewRenderer(&out, &out)
+			renderer.EnableViewportMode()
+			t.Cleanup(renderer.DisableViewportMode)
+			sel := &lspReviewSelector{answer: tc.answer, confirmed: tc.confirmed, err: tc.selectorEr}
+			decider := &lspDeciderStub{text: "the transcript line"}
+			state := &streamState{}
+			handleLSPRecommendation(renderer, sel, state, decider, tc.rec)
+
+			if decider.rec.ID != tc.rec.ID || decider.choice != tc.want {
+				t.Fatalf("decided %q for %q, want choice %q", decider.choice, decider.rec.ID, tc.want)
+			}
+			wantDefault := 0
+			if tc.rec.Mode == "install" {
+				wantDefault = 1 // the install command must not sit under Enter
+			}
+			if sel.defaultIdx != wantDefault {
+				t.Fatalf("modal opened on %d, want %d", sel.defaultIdx, wantDefault)
+			}
+			if state.suppressQueueAutosend {
+				t.Fatal("queue autosend is still suppressed after the answer was applied")
+			}
+			if !strings.Contains(out.String(), "the transcript line") {
+				t.Fatalf("the result line never rendered:\n%s", out.String())
+			}
+		})
+	}
+
+	t.Run("the question is the spec's", func(t *testing.T) {
+		var out bytes.Buffer
+		sel := &lspReviewSelector{answer: 1, confirmed: true}
+		handleLSPRecommendation(NewRenderer(&out, &out), sel, &streamState{}, &lspDeciderStub{}, enableRec)
+		if sel.label != "LSP recommendation\nA language server gives the agent diagnostics after its edits and lets it find definitions and references by symbol. Enable this language server?" {
+			t.Fatalf("label = %q", sel.label)
+		}
+		wantFacts := []turn.StatusFact{
+			{Label: "Server", Value: "gopls (Go)"},
+			{Label: "Found", Value: "/usr/local/bin/gopls (v0.23.0)"},
+			{Label: "Triggered by", Value: ".go files"},
+			{Label: "Runs", Value: "in this trusted project, outside the sandbox"},
+		}
+		if !reflect.DeepEqual(sel.facts, wantFacts) {
+			t.Fatalf("facts = %+v", sel.facts)
+		}
+		wantActions := []string{"Yes, enable", "No, not now", "Never for gopls", "Disable all LSP recommendations"}
+		if !reflect.DeepEqual(sel.actions, wantActions) {
+			t.Fatalf("actions = %v", sel.actions)
+		}
+	})
+}
+
+// An install-mode recommendation says what it would run instead of where
+// the binary is.
+func TestLSPRecommendationInstallFacts(t *testing.T) {
+	var out bytes.Buffer
+	sel := &lspReviewSelector{answer: 1, confirmed: true}
+	rec := event.LSPRecommendation{
+		ID: "lsprec-3", ServerID: "pyright", DisplayName: "pyright", Languages: []string{"Python"},
+		TriggerExtension: ".py", Mode: "install", InstallCommand: "npm install -g pyright",
+	}
+	handleLSPRecommendation(NewRenderer(&out, &out), sel, &streamState{}, &lspDeciderStub{}, rec)
+	for _, fact := range sel.facts {
+		if fact.Label == "Found" && fact.Value == "Not installed. Install with: npm install -g pyright" {
+			return
+		}
+	}
+	t.Fatalf("Found fact = %+v, want the install command", sel.facts)
+}
+
+// A binary path under the user's home is shown the way a prompt shows it.
+func TestTildePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	if got := tildePath(filepath.Join(home, "go", "bin", "gopls")); got != "~/go/bin/gopls" {
+		t.Fatalf("tildePath = %q", got)
+	}
+	if got := tildePath("/usr/local/bin/gopls"); got != "/usr/local/bin/gopls" {
+		t.Fatalf("tildePath outside home = %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Queue semantics characterization (SUBAGENT_CONVERSATION plan 004, step 1).
+//
+// Q1–Q12 are the main view's queue semantics as the plan's spec table
+// records them. Entries already covered by existing tests are listed here
+// rather than duplicated:
+//
+//	Q1  steer accept/reject routing .......... TestActiveRunSlashContinueInputSteersCurrentTurn,
+//	                                         TestActiveRunInputQueuesWhenSteerUnavailable
+//	Q2  user-shell half ..................... TestPlainInputDuringUserShellRunIsQueuedNotSteered
+//	Q3  delivered steers leave the mirror ... TestReconcilePendingSteersCountReturnsDeliveredPrefix,
+//	                                         TestReconcilePendingSteersKeepsUndeliveredSuffix,
+//	                                         TestRenderDeliveredSteerMessagesSkipsBlank
+//	Q4  recall by shared clock .............. TestRecallPicksNewestAcrossQueues,
+//	                                         TestRecallPicksNewestSteerQueuedAfterFollowUp,
+//	                                         TestRecallWalksBackwardsThroughEnqueueOrder,
+//	                                         TestRecallSkipsDeliveredSteerAndFallsBackToOlderQueue,
+//	                                         TestRecallTerminatesWhenOnlyDeliveredSteersRemain
+//	Q6  esc interrupt-and-send .............. TestRunTurnEscapeSubmitsPendingSteersImmediatelyWhenCancelSwallowed,
+//	                                         TestEscInterruptResubmitsSteerTheCancelledRunNeverDelivered
+//	Q7  other interrupts restore ............ TestRunTurnCtrlCCancelDoesNotReplayPendingSteers,
+//	                                         TestEscInterruptWithOnlyQueuedTurnsRestoresInsteadOfSubmitting,
+//	                                         TestBug2_InterruptedRunWithQueuedTurnsRestoresQueue
+//	Q8  withdrawal merges everything ........ TestRestoreWithdrawnWorkMergesInWrittenOrder,
+//	                                         TestRestoreWithdrawnWorkFoldsInputQueuedWhileCancelling,
+//	                                         TestRestoreWithdrawnWorkMergesEveryQueueAndKeepsPayloads
+//	Q9  modal selection suppresses .......... TestSuppressedQueueAutosendBlocksDrainUntilSelectionApplied
+//	Q10 session switch discards ............. TestSessionSwitchRetractsQueuedSteersFromRuntime,
+//	                                         TestSessionSwitchReportsDiscardedQueueToUser,
+//	                                         TestSwitchFailureKeepsQueuedInputAndSession
+//	Q12 whole-message restore ............... TestHistoryRecallSubmissionRestoresImageAndLargePaste,
+//	                                         TestUnchangedRecalledSubmissionPreservesStructuredPayload
+//
+// The tests that follow pin the rest.
+
+// Q1 (image half): a message that carries an image still steers the active
+// run in the TUI — the parts (image included) are handed to the run and the
+// whole submission waits in the pending-steer mirror, so recalling it later
+// brings the attachment back too. This is the half the engine queue does not
+// implement today (its Steer refuses attachments), and the reason plan 004
+// adopts the TUI rule.
+func TestQueueSemantics_Q1_ImageBearingSteerWaitsInPendingMirror(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(imagePath, []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	session := &fakeSession{steerAccepted: true}
+	state := &streamState{sessionID: "s1", session: session}
+	state.composer.Attachments = []InputAttachment{{Path: imagePath, MIMEType: "image/png", Label: "shot.png"}}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventLine, line: "look at this [Image #1]"}, nil)
+
+	q := session.SurfaceInputQueue("s1")
+	var steeredTexts []string
+	for _, entry := range q.Runtime().Snapshot() {
+		if entry.Mode == runpkg.TurnInputModeSteer {
+			steeredTexts = append(steeredTexts, llm.TextContent(entry.Parts...))
+		}
+	}
+	if len(steeredTexts) != 1 {
+		t.Fatalf("expected the image-bearing message to steer the run, got %#v", steeredTexts)
+	}
+	if preview := q.Preview(); len(preview.Steers) != 1 {
+		t.Fatalf("expected image-bearing steer pending in the queue, got %#v", preview.Steers)
+	}
+	recalled, ok := q.Recall()
+	if !ok {
+		t.Fatal("expected the pending steer to be recallable")
+	}
+	submission := recalled.Payload.(ComposerSubmission)
+	if len(submission.Parts) != 2 || submission.Parts[1].Type != llm.ContentTypeImageBase64 || submission.Parts[1].MIMEType != "image/png" {
+		t.Fatalf("expected text+image parts carried into the steer, got %#v", submission.Parts)
+	}
+	if len(submission.Attachments) != 1 || submission.Attachments[0].Path != imagePath {
+		t.Fatalf("expected attachment preserved for a whole restore, got %#v", submission.Attachments)
+	}
+	if preview := q.Preview(); preview.Visible() {
+		t.Fatalf("expected no other queue touched, got %#v", preview)
+	}
+}
+
+// Q2 (withdrawn half): a line submitted while the foreground turn is
+// withdrawn is queued as an ordinary follow-up — the run it would steer is
+// already being taken back.
+func TestQueueSemantics_Q2_LineDuringWithdrawnForegroundQueuesAsFollowUp(t *testing.T) {
+	session := &fakeSession{steerAccepted: true}
+	state := &streamState{sessionID: "s1", session: session}
+	foreground := &foregroundTurn{submission: mustComposerSubmission("the turn being withdrawn")}
+	state.activeForeground = foreground
+	if !foreground.withdraw() {
+		t.Fatal("expected foreground withdrawal")
+	}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil, inputEvent{kind: inputEventLine, line: "typed while withdrawing"}, nil)
+
+	q := session.SurfaceInputQueue("s1")
+	for _, entry := range q.Runtime().Snapshot() {
+		if entry.Mode == runpkg.TurnInputModeSteer {
+			t.Fatalf("expected no steer attempted for a withdrawn foreground, got %#v", entry)
+		}
+	}
+	if preview := q.Preview(); len(preview.FollowUp) != 1 || preview.FollowUp[0] != "typed while withdrawing" {
+		t.Fatalf("expected an ordinary follow-up queued, got %#v", preview.FollowUp)
+	}
+}
+
+// Q5: after a turn completes, the queue drains one merged batch per turn:
+// rejected steers first, then undelivered steers, then ordinary follow-ups
+// one at a time, until every queue is empty.
+func TestQueueSemantics_Q5_CompletedDrainsRejectedThenPendingThenFollowUps(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	session.enqueueRejected("s1", mustComposerSubmission("rejected one"))
+	session.enqueueRejected("s1", mustComposerSubmission("rejected two"))
+	session.enqueueSteer("s1", mustComposerSubmission("pending steer"))
+	session.enqueueFollowUp("s1", mustComposerSubmission("first follow-up"))
+	session.enqueueFollowUp("s1", mustComposerSubmission("second follow-up"))
+
+	var got []string
+	for {
+		next, ok := nextAutomaticSubmission(state, runTurnCompleted)
+		if !ok {
+			break
+		}
+		got = append(got, strings.TrimSpace(next.Text))
+	}
+	want := []string{
+		"rejected one\n\nrejected two",
+		"pending steer",
+		"first follow-up",
+		"second follow-up",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("completed-boundary drain order:\nwant %#v\ngot  %#v", want, got)
+	}
+	if preview := session.SurfaceInputQueue("s1").Preview(); preview.Visible() {
+		t.Fatalf("expected every queue drained, got %#v", preview)
+	}
+}
+
+// Q11: the queue preview shows each queue's composer display text, keeping
+// the "[Image #N]" and "[Pasted Content N chars]" placeholders the composer
+// resolves on send.
+func TestQueueSemantics_Q11_PreviewKeepsDisplayPlaceholders(t *testing.T) {
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	pending := mustComposerSubmission("steer text")
+	pending.DisplayText = "steer with [Image #1]"
+	session.enqueueSteer("s1", pending)
+	rejected := mustComposerSubmission("rejected text")
+	rejected.DisplayText = "rejected with [Pasted Content 1200 chars]"
+	session.enqueueRejected("s1", rejected)
+	queued := mustComposerSubmission("queued text")
+	queued.DisplayText = "queued with [Image #2]"
+	session.enqueueFollowUp("s1", queued)
+
+	preview := state.composerPendingInputPreview()
+	if !reflect.DeepEqual(preview.PendingSteers, []string{"steer with [Image #1]"}) {
+		t.Fatalf("pending steer preview: %#v", preview.PendingSteers)
+	}
+	if !reflect.DeepEqual(preview.RejectedSteers, []string{"rejected with [Pasted Content 1200 chars]"}) {
+		t.Fatalf("rejected steer preview: %#v", preview.RejectedSteers)
+	}
+	if !reflect.DeepEqual(preview.QueuedMessages, []string{"queued with [Image #2]"}) {
+		t.Fatalf("queued message preview: %#v", preview.QueuedMessages)
+	}
+}
+
+// --- plan 007: the subagent as a directly-talked-to conversation -----------
+
+// A message typed while a subagent's own view is on screen goes to that
+// subagent and nowhere else: the conversation's queue and its turn are
+// untouched, whether the conversation is running or idle (owner requirements
+// 1 and 2).
+func TestMessageTypedInASubagentViewGoesToThatSubagent(t *testing.T) {
+	newState := func(session *fakeSession) (*Renderer, *streamState) {
+		renderer := NewRenderer(nil, nil)
+		renderer.viewportMode = true
+		renderer.NoteSubagentSpawned("task-b", "general-purpose", ComposerFooter{})
+		renderer.SetActiveView("task-b")
+		return renderer, &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	}
+
+	// A main turn is running.
+	session := &fakeSession{}
+	renderer, state := newState(session)
+	subagentViewLine(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "continue")
+
+	if len(session.subagentSent) != 1 {
+		t.Fatalf("SendToSubagent calls = %d, want 1", len(session.subagentSent))
+	}
+	if got := session.subagentSent[0]; got.AgentKey != "task-b" || got.Submission.Text != "continue" {
+		t.Fatalf("sent %#v, want task-b/continue", got)
+	}
+	if p := session.SurfaceInputQueue("conv").Preview(); len(p.Steers) != 0 || len(p.FollowUp) != 0 || len(p.Rejected) != 0 {
+		t.Fatalf("the conversation's queue received the message: %#v", p)
+	}
+	if len(session.dispatched) != 0 {
+		t.Fatalf("the message started a main turn: %#v", session.dispatched)
+	}
+
+	// Idle (no main run in flight): still no main turn.
+	idle := &fakeSession{}
+	renderer2, state2 := newState(idle)
+	subagentViewLine(context.Background(), nil, nil, nil, nil, idle, renderer2, nil, state2, nil, "task-b", "continue")
+	if len(idle.dispatched) != 0 {
+		t.Fatalf("an idle subagent view started a main turn: %#v", idle.dispatched)
+	}
+	if len(idle.subagentSent) != 1 {
+		t.Fatalf("idle SendToSubagent calls = %d, want 1", len(idle.subagentSent))
+	}
+}
+
+// The composer is per-view: what is typed in the conversation stays there, what
+// is typed in a subagent's view stays there, and switching back and forth
+// restores each — attachments and folded pastes included (plan 007 §2).
+func TestDraftsBelongToTheirViews(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	state := &streamState{sessionID: "conv", session: session}
+
+	state.syncComposerToView(renderer)
+	state.composer.DraftText = "abc"
+	state.composer.Cursor = 3
+	state.composer.Attachments = []InputAttachment{{Path: "/tmp/a.png"}}
+
+	renderer.SetActiveView("task-b")
+	state.syncComposerToView(renderer)
+	if state.composer.DraftText != "" || len(state.composer.Attachments) != 0 {
+		t.Fatalf("the subagent view started with the conversation's draft: %q %#v", state.composer.DraftText, state.composer.Attachments)
+	}
+	state.composer.DraftText = "xyz"
+	state.composer.Cursor = 3
+
+	renderer.SetActiveView("")
+	state.syncComposerToView(renderer)
+	if state.composer.DraftText != "abc" || state.composer.Cursor != 3 {
+		t.Fatalf("conversation draft = %q @%d, want abc@3", state.composer.DraftText, state.composer.Cursor)
+	}
+	if len(state.composer.Attachments) != 1 || state.composer.Attachments[0].Path != "/tmp/a.png" {
+		t.Fatalf("conversation attachments lost: %#v", state.composer.Attachments)
+	}
+
+	renderer.SetActiveView("task-b")
+	state.syncComposerToView(renderer)
+	if state.composer.DraftText != "xyz" {
+		t.Fatalf("subagent draft = %q, want xyz", state.composer.DraftText)
+	}
+}
+
+// Esc in a subagent's view takes back the message it just started, before the
+// subagent has answered (D1 step 1). It does not leave the view.
+func TestEscInASubagentViewWithdrawsTheMessageItJustStarted(t *testing.T) {
+	session := &fakeSession{withdrawOK: true, withdrawResult: []ComposerSubmission{mustComposerSubmission("hurry")}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	handleSubagentViewEsc(session, renderer, state, "task-b")
+
+	if session.withdrawCalls != 1 {
+		t.Fatalf("withdraw consulted %d times, want 1", session.withdrawCalls)
+	}
+	if state.composer.DraftText != "hurry" {
+		t.Fatalf("withdrawn message not restored: %q", state.composer.DraftText)
+	}
+	if !state.holdComposer {
+		t.Fatal("a restored draft must be held, not auto-submitted")
+	}
+	if renderer.ActiveView() != "task-b" {
+		t.Fatal("a withdrawal must not leave the subagent's view")
+	}
+	if session.interruptSentCalls != 0 {
+		t.Fatal("a withdrawal must not reach the interrupt-to-send step")
+	}
+}
+
+// With pending steers and no withdrawal window, Esc stops the subagent
+// precisely to send them now (D1 step 2).
+func TestEscInASubagentViewWithPendingSteersInterruptsAndSends(t *testing.T) {
+	session := &fakeSession{interruptToSend: true}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	handleSubagentViewEsc(session, renderer, state, "task-b")
+
+	if session.withdrawCalls != 1 {
+		t.Fatalf("withdraw must be tried first (%d calls)", session.withdrawCalls)
+	}
+	if !session.interruptToSend || session.interruptSentCalls != 1 {
+		t.Fatalf("interrupt-to-send calls = %d, want 1", session.interruptSentCalls)
+	}
+	if renderer.ActiveView() != "task-b" {
+		t.Fatal("interrupting to send must stay in the subagent's view")
+	}
+}
+
+// With nothing in flight, Esc leaves the subagent's view for the conversation
+// (D1 step 3).
+func TestEscInASubagentViewWithNothingInFlightReturnsToTheMainView(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	handleSubagentViewEsc(session, renderer, state, "task-b")
+
+	if renderer.ActiveView() != "" {
+		t.Fatalf("active view = %q, want the conversation", renderer.ActiveView())
+	}
+	if state.composerView != "" {
+		t.Fatalf("composerView = %q, want the conversation", state.composerView)
+	}
+}
+
+// The conversation's own Esc behavior is untouched: withdraw a just-sent
+// message, else interrupt to send pending steers, else cancel the run.
+func TestEscInTheMainViewIsUnchanged(t *testing.T) {
+	renderer := NewRenderer(nil, nil)
+
+	// Withdraw a just-sent message.
+	session := &fakeSession{}
+	foreground := &foregroundTurn{submission: mustComposerSubmission("deploy")}
+	state := &streamState{sessionID: "s1", session: session, activeForeground: foreground}
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}, nil)
+	if !foreground.isWithdrawn() || state.composer.DraftText != "deploy" {
+		t.Fatalf("main-view Esc must still withdraw (withdrawn=%v draft=%q)", foreground.isWithdrawn(), state.composer.DraftText)
+	}
+
+	// Interrupt to send pending steers.
+	steer := &fakeSession{cancelActive: true}
+	steerState := &streamState{sessionID: "s1", session: steer}
+	steer.enqueueSteer("s1", mustComposerSubmission("keep going"))
+	handleActiveRunInput(context.Background(), steer, renderer, nil, steerState, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}, nil)
+	if !steerState.submitPendingSteersAfterInterrupt || !steerState.userInterrupted {
+		t.Fatal("main-view Esc with pending steers must interrupt and send")
+	}
+
+	// Cancel the run.
+	cancel := &fakeSession{cancelActive: true}
+	cancelState := &streamState{sessionID: "s1", session: cancel}
+	handleActiveRunInput(context.Background(), cancel, renderer, nil, cancelState, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyEscapeInterrupt}, nil)
+	if cancel.cancelCalls != 1 || !cancelState.userInterrupted {
+		t.Fatalf("main-view Esc must cancel the run (cancels=%d interrupted=%v)", cancel.cancelCalls, cancelState.userInterrupted)
+	}
+}
+
+// The queue and recall keys act on the subagent whose view they are pressed in.
+func TestSubagentViewQueueAndRecallHotkeys(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	state.composer.DraftText = "one more"
+	state.composer.Cursor = len("one more")
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
+	if len(session.subagentSent) != 1 || !session.subagentSent[0].FollowUp || session.subagentSent[0].Submission.Text != "one more" {
+		t.Fatalf("queue key sent %#v, want a follow-up of one more", session.subagentSent)
+	}
+
+	session.recallSubagentOK = true
+	session.recalledSubagent = mustComposerSubmission("recalled")
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyEditLastQueued}, nil)
+	if session.recallSubagentCalls != 1 {
+		t.Fatalf("recall consulted %d times, want 1", session.recallSubagentCalls)
+	}
+	if state.composer.DraftText != "recalled" {
+		t.Fatalf("recalled draft = %q, want recalled", state.composer.DraftText)
+	}
+}
+
+// The queue and recall keys keep working once the conversation's own turn has
+// ended while a subagent is still going: the idle path routes them to that
+// subagent's queue with the same semantics the running-turn path applies
+// (plan 007 §3).
+func TestIdleRecallTargetsTheSubagentViewsQueue(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	// Nothing queued: the recall key is a no-op that still consumes the key.
+	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyEditLastQueued) {
+		t.Fatal("the recall key must be consumed by the idle path")
+	}
+	if session.recallSubagentCalls != 1 || state.composer.DraftText != "" {
+		t.Fatalf("empty queue must leave the composer alone (calls=%d draft=%q)", session.recallSubagentCalls, state.composer.DraftText)
+	}
+
+	// The subagent's newest queued message comes back into its composer.
+	session.recallSubagentOK = true
+	session.recalledSubagent = mustComposerSubmission("queued for the subagent")
+	handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyEditLastQueued)
+	if state.composer.DraftText != "queued for the subagent" {
+		t.Fatalf("recalled draft = %q, want the subagent's newest queued message", state.composer.DraftText)
+	}
+
+	// Tab still queues a follow-up on that subagent at idle.
+	state.composer.DraftText = "next thing"
+	state.composer.Cursor = len("next thing")
+	handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyQueueFollowUp)
+	if len(session.subagentSent) != 1 || !session.subagentSent[0].FollowUp || session.subagentSent[0].Submission.Text != "next thing" {
+		t.Fatalf("queue key sent %#v, want a follow-up of next thing", session.subagentSent)
+	}
+
+	// The conversation's own view is unchanged: recall reads the
+	// conversation's queue, never a subagent's.
+	renderer.SetActiveView("")
+	main := &fakeSession{recallSubagentOK: true, recalledSubagent: mustComposerSubmission("not this one")}
+	mainState := &streamState{sessionID: "conv", session: main}
+	main.enqueueFollowUp("conv", mustComposerSubmission("conversation follow-up"))
+	handleIdleHotkey(context.Background(), main, renderer, mainState, nil, nil, hotkeyEditLastQueued)
+	if main.recallSubagentCalls != 0 {
+		t.Fatal("main-view recall must not consult a subagent queue")
+	}
+	if mainState.composer.DraftText != "conversation follow-up" {
+		t.Fatalf("main-view draft = %q, want the conversation's queued message", mainState.composer.DraftText)
+	}
+
+	// An empty conversation queue is a no-op there too.
+	empty := &fakeSession{}
+	emptyState := &streamState{sessionID: "conv", session: empty}
+	handleIdleHotkey(context.Background(), empty, renderer, emptyState, nil, nil, hotkeyEditLastQueued)
+	if emptyState.composer.DraftText != "" {
+		t.Fatalf("empty conversation queue must leave the draft alone, got %q", emptyState.composer.DraftText)
+	}
+}
+
+// Slash commands in a subagent's view follow the D4 table: /context reports the
+// subagent, a hidden command answers with one sentence, and /compact runs
+// against the subagent.
+func TestSubagentViewSlashCommandClasses(t *testing.T) {
+	session := &fakeSession{contextReportReply: "context of the subagent", compactSubagentOK: true}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	// A hidden command points back to the conversation and changes nothing.
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/new")
+	if renderer.ActiveView() != "task-b" {
+		t.Fatal("a hidden command must not change the view")
+	}
+
+	// /context reports this subagent (no error, and the report is rendered in
+	// this view).
+	subagentViewSlash(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "/context")
+	if vm := renderer.ensurePerAgentVM("task-b"); vm == nil || len(vm.blocks) == 0 {
+		t.Fatal("/context must render its report in the subagent's view")
+	}
+
+	// A shell line is refused, with the draft kept.
+	state.composer.DraftText = ""
+	subagentViewLine(context.Background(), nil, nil, nil, nil, session, renderer, nil, state, nil, "task-b", "!echo hi")
+	if !strings.Contains(state.composer.DraftText, "!echo hi") {
+		t.Fatalf("a refused shell line must keep the draft: %q", state.composer.DraftText)
+	}
+}
+
+// The subagent's own footer shows its own N%/window, from its own budget,
+// independent of the conversation's (owner requirement 4).
+func TestSubagentFooterShowsItsOwnContextBudget(t *testing.T) {
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+	r.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	r.SetComposerTokenStats("", ComposerTokenStats{Active: true, PercentLeft: 75, ContextWindow: 1_000_000})
+	r.SetComposerTokenStats("task-b", ComposerTokenStats{Active: true, PercentLeft: 40, ContextWindow: 128_000})
+
+	if got := stripANSI(r.composerFooterText(160)); !strings.Contains(got, "75%/1M") {
+		t.Fatalf("conversation footer = %q, want 75%%/1M", got)
+	}
+	r.SetActiveView("task-b")
+	if got := stripANSI(r.composerFooterText(160)); !strings.Contains(got, "40%/128k") {
+		t.Fatalf("subagent footer = %q, want 40%%/128k", got)
+	}
+}
+
+// plan-reviewer is an ordinary subagent for its footer: it shows its own
+// N%/window, sized by the model the user picked for the review, not the
+// conversation's model (owner 2026-10-05).
+func TestPlanReviewerFooterShowsItsOwnContextBudget(t *testing.T) {
+	const agentID = "subagent-plan-reviewer-1"
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+	r.SetComposerFooter(ComposerFooter{Model: "deepseek/deepseek-v4-flash"})
+	r.SetComposerTokenStats("", ComposerTokenStats{Active: true, PercentLeft: 90, ContextWindow: 1_000_000})
+	r.SetComposerTokenStats(agentID, ComposerTokenStats{Active: true, PercentLeft: 65, ContextWindow: 200_000})
+	r.NoteSubagentSpawned(agentID, "plan-reviewer", ComposerFooter{Model: "zhipuai/glm-5.3-flash", ReasoningEffort: "high"})
+
+	r.SetActiveView(agentID)
+	got := stripANSI(r.composerFooterText(160))
+	if !strings.Contains(got, "65%/200k") {
+		t.Fatalf("plan-reviewer footer = %q, want its own 65%%/200k", got)
+	}
+	if strings.Contains(got, "90%/1M") {
+		t.Fatalf("the conversation's budget leaked into the reviewer's view: %q", got)
+	}
+}
+
+// A message the user sent a running subagent, delivered at a tool boundary, is
+// a user message in that subagent's own view — never in the conversation.
+func TestDeliveredSteerIsDrawnInTheSubagentsView(t *testing.T) {
+	reducer := &Reducer{}
+	result := reducer.Reduce(SubagentInputDeliveredMsg{AgentID: "task-b", RunID: "run-1", Text: "continue"})
+	var userFrame *Frame
+	for i := range result.Frames {
+		if result.Frames[i].Kind == FrameUser {
+			userFrame = &result.Frames[i]
+		}
+	}
+	if userFrame == nil {
+		t.Fatal("a delivered subagent message must draw a user frame")
+	}
+	if userFrame.AgentID != "task-b" || userFrame.Content != "continue" {
+		t.Fatalf("user frame = %#v, want task-b/continue", *userFrame)
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.RenderFrame(*userFrame)
+	if vm := renderer.perAgentVM["task-b"]; vm == nil || len(vm.blocks) == 0 {
+		t.Fatal("the delivered message must land in the subagent's view")
+	}
+	if len(renderer.vm.blocks) != 0 {
+		t.Fatal("the delivered message must not land in the conversation")
+	}
+}
+
+// Input the subagent's queue gives back at a boundary goes into that subagent's
+// composer when its view is on screen, and is kept for its view otherwise.
+func TestRestoredInputGoesBackToItsOwnViewsComposer(t *testing.T) {
+	session := &fakeSession{}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetActiveView("task-b")
+	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+
+	handleSubagentInputBoundaryMsg(session, renderer, state, SubagentInputBoundaryMsg{
+		AgentKey: "task-b",
+		Restore:  []ComposerSubmission{mustComposerSubmission("try again")},
+	})
+	if state.composer.DraftText != "try again" {
+		t.Fatalf("restored draft = %q, want try again", state.composer.DraftText)
+	}
+
+	// The view is not on screen: the input waits in its own view's draft.
+	offscreen := &streamState{sessionID: "conv", session: session}
+	renderer.SetActiveView("")
+	offscreen.syncComposerToView(renderer)
+	handleSubagentInputBoundaryMsg(session, renderer, offscreen, SubagentInputBoundaryMsg{
+		AgentKey: "task-b",
+		Restore:  []ComposerSubmission{mustComposerSubmission("later")},
+	})
+	if offscreen.viewDrafts["task-b"].DraftText != "later" {
+		t.Fatalf("off-screen restore = %#v, want later", offscreen.viewDrafts["task-b"])
+	}
+
+	// A Send at the boundary starts the subagent's next execution.
+	session = &fakeSession{}
+	state = &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	handleSubagentInputBoundaryMsg(session, renderer, state, SubagentInputBoundaryMsg{
+		AgentKey: "task-b",
+		Send:     []ComposerSubmission{mustComposerSubmission("go on")},
+	})
+	if len(session.subagentSent) != 1 || session.subagentSent[0].Submission.Text != "go on" {
+		t.Fatalf("boundary send = %#v, want go on", session.subagentSent)
 	}
 }

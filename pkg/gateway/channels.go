@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -58,6 +60,17 @@ func (s *Server) submitChannelTurn(ctx context.Context, channelID, sessionID, in
 	if s == nil || s.Core == nil {
 		return turn.TurnOutcome{}, false
 	}
+	// The user's message is the turn's first row, stored as the turn starts the
+	// way every other surface stores it: a turn that fails or parks on an
+	// approval still has it, and it belongs to the run once the run exists.
+	// The run folds a stored trailing message into its own input, so the model
+	// is sent exactly what it was sent before.
+	var userRowID int64
+	if s.Sessions != nil {
+		userRowID, _ = turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
+			SessionID: sessionID, ModelInput: input, RawInput: rawInput, EnsureSession: true,
+		})
+	}
 	out, err := s.Core.Submit(ctx, turn.TurnRequest{
 		SessionID: sessionID,
 		Origin:    turn.Origin{Surface: turn.SurfaceChannel, ChannelID: channelID},
@@ -66,10 +79,17 @@ func (s *Server) submitChannelTurn(ctx context.Context, channelID, sessionID, in
 		SkillName: skillName,
 		SkillPath: skillPath,
 	}, nil)
+	if s.Sessions != nil {
+		_ = s.Sessions.BindMessageToRun(ctx, sessionID, userRowID, out.RunID)
+	}
 	switch {
 	case err != nil:
 		slog.Error("inbound run", "channel", channelID, "session", sessionID, "err", err)
-		channelBus{s: s}.deliverOutbound(context.Background(), channelID, sessionID, "Request failed: "+err.Error())
+		// The run ended in failure; its clock is what closes it on replay.
+		s.stampChannelRunEnd(ctx, out)
+		// What the user reads is the failure explained, as on every surface;
+		// the raw error stays in the log.
+		channelBus{s: s}.deliverOutbound(context.Background(), channelID, sessionID, llm.ExplainError(err))
 		return out, false
 	case out.Status == turn.TurnWaitingApproval:
 		// The run stays paused and the resume path owns it. Tell the user what
@@ -77,9 +97,31 @@ func (s *Server) submitChannelTurn(ctx context.Context, channelID, sessionID, in
 		channelBus{s: s}.deliverOutbound(context.Background(), channelID, sessionID, channelApprovalNotice(out))
 		return out, false
 	case out.Result == nil:
+		s.stampChannelRunEnd(ctx, out)
 		return out, false
 	}
 	return out, true
+}
+
+// stampChannelRunEnd records the clock of a channel run that ended with
+// nothing to append.
+func (s *Server) stampChannelRunEnd(ctx context.Context, out turn.TurnOutcome) {
+	if s.Sessions == nil {
+		return
+	}
+	finishedAt := time.Now()
+	_ = s.Sessions.StampRunTiming(ctx, out.RunID, state.RunTiming{StartedAt: finishedAt.Add(-out.Duration), FinishedAt: finishedAt, Worked: out.Duration})
+}
+
+// approvalNoticeText tells a channel user, in one line they can act on, that
+// a conversation is waiting for an approval, without exposing action IDs or
+// internal error text. An unnamed tool is "a tool".
+func approvalNoticeText(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		name = "a tool"
+	}
+	return "Waiting for approval to run " + name + ". Approve it in the Forebrain Harness app to continue."
 }
 
 // channelApprovalNotice describes a pending approval in one line a channel
@@ -87,12 +129,9 @@ func (s *Server) submitChannelTurn(ctx context.Context, channelID, sessionID, in
 func channelApprovalNotice(out turn.TurnOutcome) string {
 	name := ""
 	if out.Approval != nil {
-		name = strings.TrimSpace(out.Approval.PermissionToolName)
+		name = out.Approval.PermissionToolName
 	}
-	if name == "" {
-		name = "a tool"
-	}
-	return "Waiting for approval to run " + name + ". Approve it in the Forebrain Harness app to continue."
+	return approvalNoticeText(name)
 }
 
 type callback struct {

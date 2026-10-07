@@ -3,17 +3,19 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 4
+const stateSchemaVersion = 8
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -38,6 +40,10 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 2, apply: migrateStateV1ToV2},
 	{version: 3, apply: migrateStateV2ToV3},
 	{version: 4, apply: migrateStateV3ToV4},
+	{version: 5, apply: migrateStateV4ToV5},
+	{version: 6, apply: migrateStateV5ToV6},
+	{version: 7, apply: migrateStateV6ToV7},
+	{version: 8, apply: migrateStateV7ToV8},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -56,6 +62,237 @@ func migrateStateV3ToV4(ctx context.Context, conn *sql.Conn) error {
 	}
 	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add fb_sessions.source: %w", err)
+	}
+	return nil
+}
+
+// migrateStateV4ToV5 adds run ownership: the owner column on fb_runs, the
+// fb_run_owners lease table, and the index behind the session-exclusivity
+// check. Every statement tolerates the object already existing — a fixture
+// built from the current schema.sql with a lowered user_version skips it
+// instead of failing on a duplicate. Existing running rows migrate with
+// owner = ” (two ASCII apostrophes): the process that drove them is long
+// gone, so the first reaper to run ends them as abandoned.
+func migrateStateV4ToV5(ctx context.Context, conn *sql.Conn) error {
+	var ownerCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_runs') WHERE name='owner'`).Scan(&ownerCol); err != nil {
+		return err
+	}
+	if ownerCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_runs ADD COLUMN owner TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_runs.owner: %w", err)
+		}
+	}
+	var ownersTable int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fb_run_owners'`).Scan(&ownersTable); err != nil {
+		return err
+	}
+	if ownersTable == 0 {
+		// The same text schema.sql declares, so an upgraded file and a fresh
+		// one hold the same object byte for byte.
+		if _, err := conn.ExecContext(ctx, `
+CREATE TABLE fb_run_owners (
+  owner TEXT PRIMARY KEY CHECK (TRIM(owner) <> ''),
+  heartbeat_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+			return fmt.Errorf("create fb_run_owners: %w", err)
+		}
+	}
+	var liveIdx int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_fb_runs_session_live'`).Scan(&liveIdx); err != nil {
+		return err
+	}
+	if liveIdx == 0 {
+		if _, err := conn.ExecContext(ctx, `
+CREATE INDEX idx_fb_runs_session_live ON fb_runs(session_id)
+  WHERE parent_run_id IS NULL AND status IN ('running', 'waiting_action')`); err != nil {
+			return fmt.Errorf("create idx_fb_runs_session_live: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV5ToV6 indexes fire records by the session they ran in — a
+// run's end finds its fire by that session — and marks the sessions of
+// fires recorded before this version as what they are, so they leave the
+// conversation lists the way every later fire's session is born out of them.
+// The two new columns are added the way v4 added its column: a fixture built
+// from the current schema.sql with a lowered user_version already carries
+// them and skips the ALTER instead of failing on a duplicate.
+func migrateStateV5ToV6(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_fb_cron_runs_session ON fb_cron_runs(session_id)`); err != nil {
+		return fmt.Errorf("create idx_fb_cron_runs_session: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE fb_sessions SET source = 'cron' WHERE source = '' AND id IN (SELECT session_id FROM fb_cron_runs)`); err != nil {
+		return fmt.Errorf("mark the sessions of recorded fires: %w", err)
+	}
+	var runCodeCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_cron_runs') WHERE name='error_code'`).Scan(&runCodeCol); err != nil {
+		return err
+	}
+	if runCodeCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_cron_runs ADD COLUMN error_code TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_cron_runs.error_code: %w", err)
+		}
+	}
+	var jobCodeCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_cron_jobs') WHERE name='last_error_code'`).Scan(&jobCodeCol); err != nil {
+		return err
+	}
+	if jobCodeCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_cron_jobs ADD COLUMN last_error_code TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_cron_jobs.last_error_code: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV6ToV7 gives the tool rows a denied approval wrote before this
+// version their display half. Those rows carry only the message written for
+// the model — the instruction text, the user's feedback, and for a denied
+// exit_plan_mode the full text of every plan review the refusal wrapped
+// around it — so a replay printed that text as the card body. The display
+// part states what the live card stated: the rule pkg/tool's
+// DeniedToolDisplayBody names, frozen here the way a migration freezes every
+// rule of its time. Rows that already carry a tool_display part keep theirs.
+func migrateStateV6ToV7(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `
+SELECT id, content, parts FROM fb_messages
+WHERE role='tool' AND content LIKE 'Tool approval denied by user: the user rejected this %'`)
+	if err != nil {
+		return fmt.Errorf("select denied tool rows: %w", err)
+	}
+	type deniedRow struct {
+		id      int64
+		content string
+		parts   string
+	}
+	var found []deniedRow
+	for rows.Next() {
+		var r deniedRow
+		if err := rows.Scan(&r.id, &r.content, &r.parts); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan denied tool row: %w", err)
+		}
+		found = append(found, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read denied tool rows: %w", err)
+	}
+	rows.Close()
+	for _, r := range found {
+		var parts []map[string]any
+		if raw := strings.TrimSpace(r.parts); raw != "" && raw != "[]" {
+			if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+				return fmt.Errorf("parse parts of denied tool row %d: %w", r.id, err)
+			}
+		}
+		if part, ok := deniedToolDisplayPartV7(r.content); ok && !partsHaveToolDisplayV7(parts) {
+			encoded, err := json.Marshal(append(parts, part))
+			if err != nil {
+				return fmt.Errorf("encode parts of denied tool row %d: %w", r.id, err)
+			}
+			if _, err := conn.ExecContext(ctx, `UPDATE fb_messages SET parts=? WHERE id=?`, string(encoded), r.id); err != nil {
+				return fmt.Errorf("append denied display part to row %d: %w", r.id, err)
+			}
+		}
+	}
+	return nil
+}
+
+func partsHaveToolDisplayV7(parts []map[string]any) bool {
+	for _, part := range parts {
+		if v, _ := part["type"].(string); v == PartTypeToolDisplay {
+			return true
+		}
+	}
+	return false
+}
+
+// deniedToolDisplayPartV7 derives the display part one pre-v7 denial row
+// carries, from the text the row holds. The tool name is the one the stored
+// sentence names; the user's words are the text after the "User feedback:"
+// marker, but only when what follows carries no review — a denial after a
+// plan review wrapped the reviews around the user's own words, and the
+// display half never shows those (decision D15, option B).
+func deniedToolDisplayPartV7(content string) (map[string]any, bool) {
+	const prefix = "Tool approval denied by user: the user rejected this "
+	rest := strings.TrimPrefix(content, prefix)
+	name := rest
+	if idx := strings.Index(name, " tool call."); idx >= 0 {
+		name = name[:idx]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	body := ""
+	switch name {
+	case "exit_plan_mode":
+		body = deniedRowUserFeedbackV7(content)
+		if strings.TrimSpace(body) == "" {
+			body = "(no output)"
+		}
+	case "request_permissions":
+		body = "The user did not approve the requested permissions"
+	}
+	return map[string]any{
+		"type":           PartTypeToolDisplay,
+		"body":           body,
+		"tool_meta_json": fmt.Sprintf(`{"tool_name":%s,"status":"denied"}`, strconv.Quote(name)),
+	}, true
+}
+
+func deniedRowUserFeedbackV7(content string) string {
+	const marker = "\n\nUser feedback: "
+	idx := strings.Index(content, marker)
+	if idx < 0 {
+		return ""
+	}
+	feedback := strings.TrimSpace(content[idx+len(marker):])
+	if strings.Contains(feedback, "<review model=") {
+		return ""
+	}
+	return feedback
+}
+
+// sendCallOfSubagentEventV8 is the one correlation that names the
+// subagent_send call a legacy lifecycle event belongs to: the call's result
+// run_id is the execution id of the subagent it started, so an event whose
+// execution_id names that run answers that call. Used as a scalar it yields
+// the call's step_id; its EXISTS form says whether there is one at all.
+// Executions no send call answers — a goal check, a plan reviewer, a
+// subagent the user started directly — match nothing and keep their empty
+// parent_tool_call_id.
+const sendCallOfSubagentEventV8 = `SELECT json_extract(s.payload_json, '$.step_id') FROM fb_session_events s
+WHERE s.session_id = fb_session_events.session_id
+  AND s.event_type = 'tool_call_completed'
+  AND json_valid(s.payload_json)
+  AND json_extract(s.payload_json, '$.tool_name') = 'subagent_send'
+  AND json_valid(json_extract(s.payload_json, '$.output.output'))
+  AND json_extract(json_extract(s.payload_json, '$.output.output'), '$.run_id')
+      = json_extract(fb_session_events.payload_json, '$.execution_id')
+LIMIT 1`
+
+// migrateStateV7ToV8 backfills the dispatching call of the subagent
+// lifecycle events subagent_send wrote before the dispatcher started
+// carrying the call id over to the async execution (plan 012's A8, decision
+// D10, option A). It changes data only — no table, no column — and leaves
+// every other field of every touched row byte for byte as it was: only the
+// empty parent_tool_call_id gains the step_id of the send call whose result
+// named this execution. Events that already name a call keep theirs.
+func migrateStateV7ToV8(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_session_events
+SET payload_json = json_set(payload_json, '$.parent_tool_call_id', (`+sendCallOfSubagentEventV8+`))
+WHERE event_type IN ('subagent_spawned', 'subagent_ended')
+  AND json_valid(payload_json)
+  AND IFNULL(json_extract(payload_json, '$.parent_tool_call_id'), '') = ''
+  AND EXISTS (`+sendCallOfSubagentEventV8+`)`); err != nil {
+		return fmt.Errorf("backfill the send call of legacy subagent events: %w", err)
 	}
 	return nil
 }

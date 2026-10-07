@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -251,4 +254,108 @@ func FinalizeCancel(ctx context.Context, store RunCanceler, runID string) {
 	}
 	_ = store.SetStatus(ctx, runID, state.RunStatusCancelled)
 	_ = store.CancelRunningDescendants(ctx, runID)
+}
+
+// AbandonedRunReason is what a run reaped from a stopped process says ended it.
+const AbandonedRunReason = "The process running this turn stopped before it finished."
+
+// AbandonedRunReaper ends the runs a stopped process left running, and
+// reports each ending through the surface's own run-event funnel so every
+// page, replay and scheduled-task record sees it the way it sees any other
+// ending. Every process runs one; the reap is a compare-and-swap, so each
+// abandoned run is reported exactly once, by whichever process got there.
+type AbandonedRunReaper struct {
+	Runs    *state.RunStore
+	Publish func(ctx context.Context, sessionID, runID, eventType string, payload any) error
+	// Recover re-runs the surface's own approval-continuation recovery after
+	// each reap. A run that died in the middle of a continuation keeps its wait
+	// row and is skipped by the reap; without this it would stay running until
+	// some process restarted or reopened its session.
+	Recover func(ctx context.Context)
+}
+
+// ReapOnce settles every abandoned run this process can see and reports each
+// one through Publish. A primary run is closed the way any failed turn is; a
+// subagent run is closed the way its task card expects, its facts copied from
+// the spawned event that opened it. One with no spawned event on record had
+// nothing on screen to close.
+func (r AbandonedRunReaper) ReapOnce(ctx context.Context) {
+	if r.Runs == nil || r.Publish == nil {
+		return
+	}
+	reaped, err := r.Runs.ReapAbandonedRuns(ctx, time.Now())
+	if err != nil {
+		slog.Error("reap abandoned runs", "err", err)
+		return
+	}
+	for _, run := range reaped {
+		if run.ParentRunID == "" {
+			_ = r.Publish(ctx, run.SessionID, run.ID, event.RunEventTurnError, event.TurnErrorPayload{
+				Error: AbandonedRunReason, Message: AbandonedRunReason,
+				Detail: &event.TurnErrorDetail{Code: "run_abandoned"},
+			})
+			continue
+		}
+		spawned, ok := r.subagentSpawnFacts(ctx, run.ID)
+		if !ok {
+			continue
+		}
+		_ = r.Publish(ctx, run.SessionID, run.ID, event.RunEventSubagentEnded, event.SubagentEndedPayload{
+			AgentID: spawned.AgentID, AgentType: spawned.AgentType, TaskID: spawned.TaskID,
+			WorkerSessionID: spawned.WorkerSessionID, ParentRunID: spawned.ParentRunID,
+			ParentToolCallID: spawned.ParentToolCallID, TaskIndex: spawned.TaskIndex,
+			ExecutionID: spawned.ExecutionID, Status: "failed", Error: AbandonedRunReason,
+			FinishedAtMs: run.FinishedAtMs,
+		})
+	}
+	if r.Recover != nil {
+		r.Recover(ctx)
+	}
+}
+
+// subagentSpawnFacts reads back the spawned event of a reaped child run: the
+// identity its task card was opened under, which is the identity its ending
+// has to carry to close that same card.
+func (r AbandonedRunReaper) subagentSpawnFacts(ctx context.Context, runID string) (event.SubagentSpawnedPayload, bool) {
+	records, err := r.Runs.ListRunEventsOfTypes(ctx, runID, event.RunEventSubagentSpawned)
+	if err != nil {
+		slog.Error("read abandoned subagent's spawned event", "run_id", runID, "err", err)
+		return event.SubagentSpawnedPayload{}, false
+	}
+	for _, record := range records {
+		var p event.SubagentSpawnedPayload
+		if json.Unmarshal(record.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" {
+			return p, true
+		}
+	}
+	return event.SubagentSpawnedPayload{}, false
+}
+
+// Start reaps once now and then every state.RunOwnerLease, until stop. The
+// interval matches the lease: a dead process's runs become readable as
+// abandoned exactly one cycle after its last heartbeat expires.
+func (r AbandonedRunReaper) Start(ctx context.Context) (stop func()) {
+	r.ReapOnce(ctx)
+	loopCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(state.RunOwnerLease)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-ticker.C:
+				r.ReapOnce(loopCtx)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
 }

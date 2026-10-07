@@ -2,7 +2,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
 
-import { signIn } from './support'
+import { expectAssistantReply, signIn } from './support'
 
 /** The project space: its own shell, its own sessions, its own MCP preview —
  * and nothing from other layers inside it. */
@@ -52,7 +52,7 @@ test('project space shell: band, breadcrumb, default overview', async ({ page })
   await expect(page.locator('.project-band')).toBeVisible()
   await expect(page.locator('.project-band')).toContainText('e2e-alpha')
   const tabLabels = await page.locator('.project-tab').allInnerTexts()
-  expect(tabLabels.map((label) => label.trim()).length).toBe(8)
+  expect(tabLabels.map((label) => label.trim()).length).toBe(9)
   // Placeholder tabs render their notice.
   await page.click('.project-tab:has-text("规则"), .project-tab:has-text("Rules")')
   await expect(page).toHaveURL(/\/rules$/)
@@ -84,6 +84,25 @@ test('project sessions live only in the project space', async ({ page }) => {
   await expect(page.locator('[data-testid="chat-drawer"]')).toBeVisible()
   const drawerText = await page.locator('[data-testid="chat-drawer"]').innerText()
   expect(drawerText).not.toContain('e2e-alpha')
+})
+
+test('the chat page names a project session by its own title', async ({ page }) => {
+  // One full model turn plus the title's read-back exceeds the default minute.
+  test.info().setTimeout(150_000)
+  await signIn(page)
+  await createProject(page, 'e2e-alpha')
+  await page.click('.project-tab:has-text("会话"), .project-tab:has-text("Sessions")')
+  await page.click('button:has-text("新的项目会话"), button:has-text("New session")')
+  await page.waitForURL((url) => url.pathname === '/' && url.searchParams.has('session'), { timeout: 15_000 })
+  await page.waitForSelector('textarea')
+  // Unnamed so far: the header carries the page's placeholder, not a name.
+  await expect(page.locator('[data-testid="chat-session-title"]')).toHaveText(/^(对话|Chat)$/)
+  await page.fill('textarea', 'project-title-e2e')
+  await page.press('textarea', 'Enter')
+  await expectAssistantReply(page)
+  // The first message named the session; the header now reads that title
+  // from the session itself — the drawer's list never carried it.
+  await expect(page.locator('[data-testid="chat-session-title"]')).toContainText('project-title-e2e', { timeout: 15_000 })
 })
 
 test('project mcp shows the trust gate then the preview', async ({ page }) => {

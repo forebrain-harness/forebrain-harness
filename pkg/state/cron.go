@@ -38,10 +38,14 @@ type CronJob struct {
 	RunCount    int `json:"run_count"`
 	// NextRunAt is nil when the job will not fire again — paused, or a
 	// one-shot that has been consumed.
-	NextRunAt     *int64 `json:"next_run_at,omitempty"`
-	LastRunAt     *int64 `json:"last_run_at,omitempty"`
-	LastStatus    string `json:"last_status,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
+	NextRunAt  *int64 `json:"next_run_at,omitempty"`
+	LastRunAt  *int64 `json:"last_run_at,omitempty"`
+	LastStatus string `json:"last_status,omitempty"`
+	LastError  string `json:"last_error,omitempty"`
+	// LastErrorCode classifies the last fire's failure for a surface to word
+	// in its own language; LastError keeps the English sentence as the
+	// fallback for a client that does not know the code.
+	LastErrorCode string `json:"last_error_code,omitempty"`
 	LastOutput    string `json:"last_output,omitempty"`
 	FailureStreak int    `json:"failure_streak"`
 	CreatedAt     int64  `json:"created_at"`
@@ -51,20 +55,28 @@ type CronJob struct {
 // AgentID is the primary agent (tenant) this job belongs to.
 func (j CronJob) AgentID() string { return j.Ag }
 
-// CronRun is one fire of a job, kept after the job itself is edited or removed
-// so the history stays readable.
+// CronRun is one fire of a job: its conversation is the session it ran in.
+// The record is kept after the job itself is edited or removed, and so is the
+// session, so the fire's history stays readable.
 type CronRun struct {
-	ID          int64  `json:"id"`
-	JobID       string `json:"job_id"`
-	AgentID     string `json:"agent_id"`
-	SessionID   string `json:"session_id,omitempty"`
-	Trigger     string `json:"trigger"`
-	Status      string `json:"status"`
-	Output      string `json:"output,omitempty"`
-	Error       string `json:"error,omitempty"`
+	ID        int64  `json:"id"`
+	JobID     string `json:"job_id"`
+	AgentID   string `json:"agent_id"`
+	SessionID string `json:"session_id,omitempty"`
+	Trigger   string `json:"trigger"`
+	Status    string `json:"status"`
+	Output    string `json:"output,omitempty"`
+	Error     string `json:"error,omitempty"`
+	// ErrorCode classifies the failure for a surface to word in its own
+	// language; Error keeps the English sentence as the fallback for a client
+	// that does not know the code.
+	ErrorCode   string `json:"error_code,omitempty"`
 	DeliveredTo string `json:"delivered_to,omitempty"`
 	StartedAt   int64  `json:"started_at"`
 	FinishedAt  *int64 `json:"finished_at,omitempty"`
+	// HasConversation says the fire's session holds a transcript; fires
+	// recorded before fires became conversations have none.
+	HasConversation bool `json:"has_conversation"`
 }
 
 // Heartbeat is a recurring instruction inside one conversation. Unlike a cron
@@ -168,18 +180,20 @@ WHERE id=? AND agent_id=? AND next_run_at=?`,
 
 // RecordOutcome writes a fired job's result. It touches only the result columns:
 // a pause or an edit made while the job was running stands, and a job deleted
-// while it ran updates nothing (0 rows) rather than being recreated.
-func (s *CronStore) RecordOutcome(ctx context.Context, jobID, status, output, errText string, at int64) error {
+// while it ran updates nothing (0 rows) rather than being recreated. errCode
+// classifies the failure for a surface to word in its own language; errText is
+// the English sentence kept as the fallback.
+func (s *CronStore) RecordOutcome(ctx context.Context, jobID, status, output, errText, errCode string, at int64) error {
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
 	_, err := s.DB.ExecContext(ctx, `
 UPDATE fb_cron_jobs
-SET last_run_at=?, last_status=?, last_error=?, last_output=?,
+SET last_run_at=?, last_status=?, last_error=?, last_error_code=?, last_output=?,
     failure_streak=CASE WHEN ?=? THEN failure_streak+1 WHEN ?=? THEN 0 ELSE failure_streak END,
     updated_at=?
 WHERE id=?`,
-		at, status, errText, output,
+		at, status, errText, errCode, output,
 		status, CronStatusFailed, status, CronStatusOK, time.Now().Unix(), strings.TrimSpace(jobID))
 	return err
 }
@@ -279,14 +293,110 @@ VALUES (?,?,?,?,?,?)`,
 	return res.LastInsertId()
 }
 
-func (s *CronStore) FinishRun(ctx context.Context, id int64, status, output, errText, deliveredTo string) error {
+// FinishRun closes a fire exactly once: the WHERE clause is a compare-and-swap
+// on the record still being open, so whichever closer gets there first wins and
+// every other one — a second pass of the same scheduler, or another replica —
+// writes nothing. There is no delivery here: closing comes first, delivery is
+// recorded after it happens.
+func (s *CronStore) FinishRun(ctx context.Context, id int64, status, output, errText, errCode string) (bool, error) {
+	if !s.ok() {
+		return false, fmt.Errorf("cron store unavailable")
+	}
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE fb_cron_runs SET status = ?, output = ?, error = ?, error_code = ?, finished_at = ?
+WHERE id = ? AND status = ?`,
+		status, output, errText, errCode, time.Now().Unix(), id, CronStatusRunning)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+// MarkFireDelivered records where a closed fire's answer went. It only touches
+// a fire that closed successfully: a failed fire delivered nothing.
+func (s *CronStore) MarkFireDelivered(ctx context.Context, id int64, target string) error {
 	if !s.ok() {
 		return fmt.Errorf("cron store unavailable")
 	}
 	_, err := s.DB.ExecContext(ctx, `
-UPDATE fb_cron_runs SET status = ?, output = ?, error = ?, delivered_to = ?, finished_at = ?
-WHERE id = ?`, status, output, errText, deliveredTo, time.Now().Unix(), id)
+UPDATE fb_cron_runs SET delivered_to = ? WHERE id = ? AND status = ?`,
+		strings.TrimSpace(target), id, CronStatusOK)
 	return err
+}
+
+// MarkFireDeliveryFailed records that a closed fire's answer could not be
+// delivered: the work was done, only the delivery failed, which is its own
+// status. errCode classifies the failure for a surface to word in its own
+// language; errText is the channel's own sentence, kept as the fallback and
+// shown as the quoted original under a localized wording.
+func (s *CronStore) MarkFireDeliveryFailed(ctx context.Context, id int64, errCode, errText string) error {
+	if !s.ok() {
+		return fmt.Errorf("cron store unavailable")
+	}
+	_, err := s.DB.ExecContext(ctx, `
+UPDATE fb_cron_runs SET status = ?, error = ?, error_code = ? WHERE id = ? AND status = ?`,
+		CronStatusDeliveryError, errText, errCode, id, CronStatusOK)
+	return err
+}
+
+// OpenFires returns this tenant's fires that have not closed, oldest first —
+// the records one pass of settling has to look at.
+func (s *CronStore) OpenFires(ctx context.Context, agentID string) ([]CronRun, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("cron store unavailable")
+	}
+	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
+WHERE agent_id = ? AND status = ? ORDER BY started_at ASC, id ASC`,
+		strings.TrimSpace(agentID), CronStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCronRuns(rows)
+}
+
+// OpenFireForSession returns the fire that ran in sessionID and has not
+// closed, or nil when there is none.
+func (s *CronStore) OpenFireForSession(ctx context.Context, sessionID string) (*CronRun, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("cron store unavailable")
+	}
+	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
+WHERE session_id = ? AND status = ? ORDER BY started_at ASC, id ASC LIMIT 1`,
+		strings.TrimSpace(sessionID), CronStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs, err := scanCronRuns(rows)
+	if err != nil || len(runs) == 0 {
+		return nil, err
+	}
+	return &runs[0], nil
+}
+
+// LatestOpenFire returns the job's fire that has not closed, or nil when
+// there is none — the run still going that keeps the job from firing again.
+func (s *CronStore) LatestOpenFire(ctx context.Context, jobID string) (*CronRun, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("cron store unavailable")
+	}
+	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
+WHERE job_id = ? AND status = ? ORDER BY started_at DESC, id DESC LIMIT 1`,
+		strings.TrimSpace(jobID), CronStatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs, err := scanCronRuns(rows)
+	if err != nil || len(runs) == 0 {
+		return nil, err
+	}
+	return &runs[0], nil
 }
 
 func (s *CronStore) ListRuns(ctx context.Context, jobID string, limit int) ([]CronRun, error) {
@@ -296,29 +406,89 @@ func (s *CronStore) ListRuns(ctx context.Context, jobID string, limit int) ([]Cr
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := s.DB.QueryContext(ctx, `
-SELECT id, job_id, agent_id, session_id, trigger, status, output, error, delivered_to, started_at, finished_at
-FROM fb_cron_runs WHERE job_id = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
+	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
+WHERE job_id = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
 		strings.TrimSpace(jobID), limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []CronRun{}
+	return scanCronRuns(rows)
+}
+
+// ExpiredFire is one fire past the retention: its record, and its session
+// when that session is still a scheduled-task conversation.
+type ExpiredFire struct {
+	RecordID  int64
+	AgentID   string
+	SessionID string
+	// CronSession is false when the record's session is gone, or is not a
+	// scheduled-task conversation — then only the record is deleted.
+	CronSession bool
+}
+
+// ExpiredFires lists every fire, across all agents, whose conversation has
+// been quiet since before cutoff and whose run is no longer alive. Quiet is
+// the session's last activity while it exists, the record's own time once it
+// does not; a fire still running — or parked on an approval — is never
+// expired, nor is one whose conversation a live run still holds. Retention
+// is a property of the install, so the sweep reads every tenant's fires.
+func (s *CronStore) ExpiredFires(ctx context.Context, cutoff time.Time) ([]ExpiredFire, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("cron store unavailable")
+	}
+	args := append([]any{SessionSourceCron, CronStatusRunning, cutoff.Unix()},
+		liveRunArgs(time.Now())...)
+	rows, err := s.DB.QueryContext(ctx, `
+SELECT r.id, r.agent_id, r.session_id,
+       CASE WHEN s.id IS NOT NULL AND s.source = ? THEN 1 ELSE 0 END
+FROM fb_cron_runs r
+LEFT JOIN fb_sessions s ON s.id = r.session_id
+WHERE r.status <> ?
+  AND COALESCE(s.updated_at, r.finished_at, r.started_at) < ?
+  AND NOT EXISTS (
+    SELECT 1 FROM fb_runs rr
+    WHERE rr.session_id = r.session_id AND rr.parent_run_id IS NULL
+      AND `+fmt.Sprintf(livePrimaryRunCondition, "rr")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ExpiredFire
 	for rows.Next() {
-		var r CronRun
-		var finished sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.JobID, &r.AgentID, &r.SessionID, &r.Trigger,
-			&r.Status, &r.Output, &r.Error, &r.DeliveredTo, &r.StartedAt, &finished); err != nil {
+		var f ExpiredFire
+		var cronSession int
+		if err := rows.Scan(&f.RecordID, &f.AgentID, &f.SessionID, &cronSession); err != nil {
 			return nil, err
 		}
-		if finished.Valid {
-			v := finished.Int64
-			r.FinishedAt = &v
-		}
-		out = append(out, r)
+		f.CronSession = cronSession == 1
+		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// DeleteFireRecords removes fire history records by id. Chunked like every
+// other bounded-IN query: one install can hold years of fires.
+func (s *CronStore) DeleteFireRecords(ctx context.Context, ids []int64) error {
+	if !s.ok() {
+		return fmt.Errorf("cron store unavailable")
+	}
+	for start := 0; start < len(ids); start += sessionLastActiveChunk {
+		end := start + sessionLastActiveChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		if _, err := s.DB.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE id IN (`+placeholders+`)`, args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SaveHeartbeat writes the recurring instruction for one session. It is the
@@ -435,8 +605,15 @@ func (s *CronStore) DeleteHeartbeat(ctx context.Context, sessionID string) error
 
 const cronJobSelect = `
 SELECT id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit, run_count,
-       next_run_at, last_run_at, last_status, last_error, last_output, failure_streak, created_at, updated_at
+       next_run_at, last_run_at, last_status, last_error, last_error_code, last_output, failure_streak, created_at, updated_at
 FROM fb_cron_jobs`
+
+// The conversation column is derived: a fire's session holds a transcript
+// exactly when it holds a visible message.
+const cronRunSelect = `
+SELECT id, job_id, agent_id, session_id, trigger, status, output, error, error_code, delivered_to, started_at, finished_at,
+       EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = fb_cron_runs.session_id AND m.visibility = 'visible')
+FROM fb_cron_runs`
 
 const heartbeatSelect = `
 SELECT h.session_id, h.interval_seconds, h.prompt, h.next_run_at, h.last_fired_at, h.created_at, h.updated_at
@@ -450,7 +627,7 @@ func scanCronJobs(rows *sql.Rows) ([]CronJob, error) {
 		var project sql.NullString
 		var next, lastRun sql.NullInt64
 		if err := rows.Scan(&j.ID, &j.Ag, &project, &j.Name, &j.Sched, &j.Prompt, &j.Deliver, &enabled,
-			&j.RepeatLimit, &j.RunCount, &next, &lastRun, &j.LastStatus, &j.LastError,
+			&j.RepeatLimit, &j.RunCount, &next, &lastRun, &j.LastStatus, &j.LastError, &j.LastErrorCode,
 			&j.LastOutput, &j.FailureStreak, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -465,6 +642,24 @@ func scanCronJobs(rows *sql.Rows) ([]CronJob, error) {
 			j.LastRunAt = &v
 		}
 		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+func scanCronRuns(rows *sql.Rows) ([]CronRun, error) {
+	out := []CronRun{}
+	for rows.Next() {
+		var r CronRun
+		var finished sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.JobID, &r.AgentID, &r.SessionID, &r.Trigger, &r.Status,
+			&r.Output, &r.Error, &r.ErrorCode, &r.DeliveredTo, &r.StartedAt, &finished, &r.HasConversation); err != nil {
+			return nil, err
+		}
+		if finished.Valid {
+			v := finished.Int64
+			r.FinishedAt = &v
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
