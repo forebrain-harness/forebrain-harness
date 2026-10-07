@@ -74,8 +74,17 @@ export async function signInToGateway(token: string): Promise<void> {
   throw new Error(message)
 }
 
-/** Read the token a sign-in link carries in `#token=…`, if any. */
+/**
+ * Read the token a sign-in link carries in `#token=…`, if any. The address
+ * bar is whatever the user pasted: a value that is not valid percent-encoding
+ * is taken as typed, and the server's refusal says whether it is the token.
+ */
 export function tokenFromLocationHash(hash: string): string {
   const match = /(?:^|&)token=([^&]*)/.exec(hash.replace(/^#/, ''))
-  return match ? decodeURIComponent(match[1]) : ''
+  if (!match) return ''
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return match[1]
+  }
 }

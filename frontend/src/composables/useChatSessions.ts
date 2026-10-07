@@ -13,8 +13,9 @@ export interface ChatSessionItem {
 
 /**
  * The primary agent's conversation list, as one shared fact: the rail's
- * drawer lists it, the chat page names its header from it, and a finished
- * run refreshes it. Module-level state, like every tenant-scoped store here.
+ * drawer lists it, a finished run refreshes it, and the chat page watches
+ * it as the signal to re-read the open conversation. Module-level state,
+ * like every tenant-scoped store here.
  */
 const sessions = ref<ChatSessionItem[]>([])
 const loading = ref(false)
@@ -24,11 +25,9 @@ async function fetchSessions() {
   loading.value = true
   error.value = null
   try {
-    const data = await forebrainApi.chatSessions(1, 100)
+    const data = await forebrainApi.chatSessions('')
     const records = data?.records ?? []
-    sessions.value = records
-      .filter((r) => (r.source ?? '') !== 'workshop')
-      .map((r) => ({
+    sessions.value = records.map((r) => ({
         id: r.id,
         title: r.title || t('chatDrawer.untitled'),
         createTime: r.createTime,

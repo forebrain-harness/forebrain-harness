@@ -1,0 +1,14 @@
+id: bash-language-server
+display_name: Bash Language Server
+languages: [Bash]
+priority: 100
+command: bash-language-server
+args: [start]
+extension_to_language: {.sh: shellscript, .bash: shellscript}
+filenames: {.bashrc: shellscript, .bash_profile: shellscript}
+root_markers: []
+install:
+  - requires: npm
+    argv: [npm, install, -g, bash-language-server]
+readiness: none
+notes: "Uses shellcheck for diagnostics when it is on the PATH."

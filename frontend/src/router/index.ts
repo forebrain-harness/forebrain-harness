@@ -70,6 +70,7 @@ const router = createRouter({
         { path: 'memory', name: 'project-memory', component: () => import('@/components/project/ProjectMemory.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'perm', name: 'project-perm', component: () => import('@/components/project/ProjectPerm.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'mcp', name: 'project-mcp', component: () => import('@/components/project/ProjectMcp.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'lsp', name: 'project-lsp', component: () => import('@/components/project/ProjectLsp.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'skills', name: 'project-skills', component: () => import('@/components/project/ProjectSkills.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'cron', name: 'project-cron', component: () => import('@/components/project/ProjectCron.vue'), meta: { title: () => t('routes.projectsTitle') } },
       ],

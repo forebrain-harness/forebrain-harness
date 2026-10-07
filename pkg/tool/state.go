@@ -114,7 +114,7 @@ type State struct {
 	networkApprovalPromptHook    func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)
 	subagentApprovalHook         SubagentApprovalHook
 	stepHook                     func(ctx context.Context, evt StepEvent)
-	readObserver                 func(ctx context.Context, absPath string, content []byte)
+	readObservers                map[string]func(ctx context.Context, absPath string, content []byte)
 }
 
 // runtimeSessionMode is a mode transition a tool performed during a run, held
@@ -1830,22 +1830,60 @@ func (s *State) StepHook() func(ctx context.Context, evt StepEvent) {
 	return s.stepHook
 }
 
+// SetReadObserver installs the read observer under the default name. It stays
+// the single-observer front door; further consumers install themselves under
+// their own name through SetNamedReadObserver.
 func (s *State) SetReadObserver(h func(ctx context.Context, absPath string, content []byte)) {
+	s.SetNamedReadObserver("", h)
+}
+
+// SetNamedReadObserver installs — or, for a nil h, removes — one named read
+// observer. Reads fan out to every installed observer, so the language-server
+// runtime and any other consumer can watch the same reads without knowing
+// about each other.
+func (s *State) SetNamedReadObserver(name string, h func(ctx context.Context, absPath string, content []byte)) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.readObserver = h
+	if h == nil {
+		delete(s.readObservers, name)
+		return
+	}
+	if s.readObservers == nil {
+		s.readObservers = make(map[string]func(ctx context.Context, absPath string, content []byte))
+	}
+	s.readObservers[name] = h
 }
 
+// ReadObserver returns a function that fans one read out to every installed
+// observer, in name order so the fan-out is deterministic. Nil when no
+// observer is installed. The observer set is snapshotted under the lock, so
+// removing an observer cannot affect a fan-out already in flight.
 func (s *State) ReadObserver() func(ctx context.Context, absPath string, content []byte) {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.readObserver
+	if len(s.readObservers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(s.readObservers))
+	for name := range s.readObservers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	observers := make([]func(ctx context.Context, absPath string, content []byte), 0, len(names))
+	for _, name := range names {
+		observers = append(observers, s.readObservers[name])
+	}
+	return func(ctx context.Context, absPath string, content []byte) {
+		for _, observer := range observers {
+			observer(ctx, absPath, content)
+		}
+	}
 }
 
 func (s *State) ToolResultDir() string {

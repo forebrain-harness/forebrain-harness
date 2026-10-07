@@ -1,0 +1,17 @@
+id: intelephense
+display_name: Intelephense
+languages: [PHP]
+priority: 100
+command: intelephense
+args: [--stdio]
+extension_to_language: {.php: php, .phtml: php}
+root_markers: [composer.json]
+detect:
+  version_args: [--version]
+install:
+  - requires: npm
+    argv: [npm, install, -g, intelephense]
+startup_timeout: 60
+readiness: progress
+initialization_options: {storagePath: "${LSP_CACHE_DIR}", globalStoragePath: "${LSP_CACHE_DIR}/global"}
+notes: "Install with: npm install -g intelephense"

@@ -21,11 +21,11 @@
       class="forebrain-agent-tab"
       :class="active === entry.agentId ? 'is-active' : ''"
       :aria-current="active === entry.agentId ? 'page' : undefined"
-      :title="entry.task || entry.agentId"
+      :title="entry.title || entry.agentId"
       @click="$emit('select', entry.agentId)"
     >
       <span class="forebrain-agent-dot" :class="dotClass(entry)" />
-      <span class="truncate">{{ entry.agentType || t('agents.subagent') }}</span>
+      <span class="truncate">{{ tabLabel(entry) }}</span>
       <span
         v-if="unseen(entry)"
         class="forebrain-agent-badge"
@@ -55,6 +55,16 @@ const props = defineProps<{
 }>()
 
 defineEmits<{ (e: 'select', agentId: string): void }>()
+
+// A tab is named the way the terminal's roster row is named: what the agent
+// is, then the task it was dispatched to do — the one name the engine derived,
+// never the prompt. Without a title the type alone stands (the engine names
+// every spawn, so this is the fallback for records older than that rule).
+function tabLabel(entry: SubagentTranscript): string {
+  const type = entry.agentType || t('agents.subagent')
+  const title = (entry.title ?? '').trim()
+  return title ? `${type} · ${title}` : type
+}
 
 function unseen(entry: SubagentTranscript): boolean {
   if (props.active === entry.agentId) return false

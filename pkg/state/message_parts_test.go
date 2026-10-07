@@ -1,11 +1,46 @@
 package state
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
+
+func TestMessageOriginRoundTrip(t *testing.T) {
+	original := llm.UserMessage(llm.Text("anything new?"))
+	partsJSON := MessagePartsJSON(original, "anything new?")
+	if got := MessageOrigin(partsJSON); got != "" {
+		t.Fatalf("plain parts origin=%q, want empty", got)
+	}
+	marked := WithMessageOrigin(partsJSON, MessageOriginHeartbeat)
+	if got := MessageOrigin(marked); got != "heartbeat" {
+		t.Fatalf("marked parts origin=%q, want heartbeat", got)
+	}
+}
+
+// TestWithMessageOriginLeavesTheParsedMessageUnchanged pins the cache
+// invariant: the origin marker is display-only, so parsing a marked message
+// yields exactly what parsing the unmarked one does — the model is sent the
+// same bytes either way.
+func TestWithMessageOriginLeavesTheParsedMessageUnchanged(t *testing.T) {
+	p := MessagePartsJSON(llm.UserMessage(llm.Text("anything new?")), "anything new?")
+	wantParts, wantCalls, wantCallID, wantIsMeta := ParseMessageParts(p, "")
+	gotParts, gotCalls, gotCallID, gotIsMeta := ParseMessageParts(WithMessageOrigin(p, "heartbeat"), "")
+	if !reflect.DeepEqual(gotParts, wantParts) {
+		t.Fatalf("content parts changed by origin marker: %+v vs %+v", gotParts, wantParts)
+	}
+	if !reflect.DeepEqual(gotCalls, wantCalls) {
+		t.Fatalf("tool calls changed by origin marker: %+v vs %+v", gotCalls, wantCalls)
+	}
+	if gotCallID != wantCallID {
+		t.Fatalf("tool_call_id changed by origin marker: %q vs %q", gotCallID, wantCallID)
+	}
+	if gotIsMeta != wantIsMeta {
+		t.Fatalf("isMeta changed by origin marker: %v vs %v", gotIsMeta, wantIsMeta)
+	}
+}
 
 func TestMessagePartsRoundTripPreservesToolDisplay(t *testing.T) {
 	original := llm.ToolResultMessage("call-edit", llm.Text("ok"))

@@ -31,7 +31,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
-	"github.com/google/uuid"
 )
 
 func runnerProjectKey(r *run.Runner) string {
@@ -72,6 +71,13 @@ type ChatSession struct {
 	chatLog       *chatDiskLog
 	tuiMu         sync.Mutex
 	uiNotify      func(any)
+	// uiSessionID is the conversation this surface is currently looking at.
+	// Events the event funnel receives for any other session are persisted
+	// to their own log but never painted here: a process-wide reaper and
+	// async subagents of other conversations would otherwise draw ghosts on
+	// whichever screen happens to be open. Empty while no session is
+	// attached — boot-time events still paint, as they always did.
+	uiSessionID string
 	// uiDispatch* serializes notification delivery independently of the caller.
 	// Producers only enqueue, so a slow or blocked surface callback can never
 	// stall an agent/tool StepHook. The worker reads uiNotify under tuiMu at
@@ -90,24 +96,24 @@ type ChatSession struct {
 	mcpWatchSession string
 	mcpWatchCancel  func()
 
-	approvalMu        sync.Mutex
-	approvalPending   *chatApprovalResume
-	approvalOwnerOnce sync.Once
-	approvalOwner     string
+	approvalMu      sync.Mutex
+	approvalPending *chatApprovalResume
 	// approvalRecovered names the sessions whose durable approval outbox this
 	// process has already drained, keyed by session id because the drain is
 	// scoped to the conversation the surface has open.
 	approvalRecoveryMu sync.Mutex
 	approvalRecovered  map[string]bool
+	// stopAbandonedRunReaper ends this process's share of abandoned-run
+	// reaping (and its approval-continuation recovery pass). Close stops it
+	// before the environment: the owner lease must outlive the reaper that
+	// may still report on this process's behalf.
+	stopAbandonedRunReaper func()
 
-	// planReviews holds the second-opinion reviews collected for a pending
-	// exit-plan approval, keyed by action id. They live here rather than in the
-	// approval request because the approval is re-prompted after each review:
-	// the request is rebuilt from the run every time, the reviews are not.
-	planReviewMu sync.Mutex
-	planReviews  map[string][]turn.PlanReviewResult
 	// planReviewerFactory overrides how a reviewer is built for a chosen model.
-	// Left nil outside tests, where the LLM-backed reviewer is used.
+	// Left nil outside tests, where the shared reviewer in pkg/process is used.
+	// The reviews themselves are not surface state: they live on the
+	// conversation's plan_reviewed events, read back through
+	// turn.PlanReviewsForAction, so a restart or another surface serves them.
 	planReviewerFactory func(turn.Model) (turn.Reviewer, error)
 
 	// fastMode persists the per-session /fast toggle (Anthropic service_tier=auto).
@@ -127,8 +133,12 @@ type ChatSession struct {
 	// Guarded by tuiRunMu together with the run cancel it sits beside.
 	planReviewCancel context.CancelFunc
 	tuiTurnInputRT   *run.TurnInputRuntime
-	tuiUserShells    map[string][]*userShellExecution
-	dispatchTurnMu   sync.Mutex
+	// tuiTurnInputQueue is the conversation queue the current turn's runtime
+	// is attached to, so the turn's end can detach it without knowing the
+	// conversation it ran in. Guarded by tuiRunMu.
+	tuiTurnInputQueue *run.InputQueue
+	tuiUserShells     map[string][]*userShellExecution
+	dispatchTurnMu    sync.Mutex
 
 	// tuiPartialCapture mirrors the orchestration session for the active TUI
 	// run so a cancelled turn can persist already-completed messages. Set in
@@ -164,28 +174,19 @@ type ChatSession struct {
 	// the only one, and the session merely tells it whether a run is in
 	// flight. What remains here is the explicit reload seam: /connect and the
 	// config-writing slash commands call ReloadConfig / reloadConfigFromDisk
-	// directly.
-	configMu sync.Mutex
-	// configApplyMu serializes reloadConfigFromDisk. It is separate from
-	// configMu because the reload calls reapplyPermissionPreset, which takes
-	// configMu itself.
+	// directly. configApplyMu serializes reloadConfigFromDisk.
 	configApplyMu sync.Mutex
-
-	// permissionPreset is the approval preset picked with /permissions this
-	// session, or nil when none was. It exists because the choice is never
-	// written to forebrain.yaml: without it, the next reload of that file — a hot
-	// reload, or /sandbox rewriting it — would silently restore the sandbox the
-	// user just moved away from. Guarded by configMu, which already serializes
-	// the reload path that reads it.
-	permissionPreset *safety.ApprovalPreset
 }
 
+// approvalResumeOwner is the process identity the approval-continuation
+// lease is claimed under. It is the same owner that vouches for this
+// process's runs: one process has one answer to "is it still alive", so the
+// continuation fence and the run lease can never disagree about it.
 func (s *ChatSession) approvalResumeOwner() string {
-	if s == nil {
+	if s == nil || s.runSvc() == nil {
 		return ""
 	}
-	s.approvalOwnerOnce.Do(func() { s.approvalOwner = "tui:" + uuid.NewString() })
-	return s.approvalOwner
+	return s.runSvc().Owner
 }
 
 // OpenChatSessionWithConfigForProject opens a session using a fixed launch cwd,
@@ -287,15 +288,8 @@ func (s *ChatSession) ResumeSession(ctx context.Context, sessionID string) (stri
 		return "", "", "", fmt.Errorf("resume: no session matches %q", sid)
 	}
 	title := sid
-	if rows, err := s.sessStore().ListSessionsRecent(ctx, 500); err == nil {
-		for _, row := range rows {
-			if strings.TrimSpace(row.ID) == sid {
-				if t := strings.TrimSpace(row.Title); t != "" {
-					title = t
-				}
-				break
-			}
-		}
+	if t, err := s.sessStore().SessionTitle(ctx, sid); err == nil && t != "" {
+		title = t
 	}
 	if err := s.sessStore().Ensure(ctx, sid, title); err != nil {
 		return "", "", "", err
@@ -516,6 +510,12 @@ func (s *ChatSession) Close() error {
 	}
 	s.ClearUINotify()
 	s.stopUINotificationDispatcher()
+	// The reaper speaks through this session's publishers; stop it before the
+	// environment it reads from and writes to goes away.
+	if s.stopAbandonedRunReaper != nil {
+		s.stopAbandonedRunReaper()
+		s.stopAbandonedRunReaper = nil
+	}
 	var errs []error
 	if s.chatLog != nil {
 		if err := s.chatLog.Close(); err != nil {
@@ -681,7 +681,12 @@ func (s *ChatSession) interruptUncertainTUIApproval(sessionID string, wait state
 	}
 	s.tuiController().Cancel(wait.RunID, errors.New(reason))
 	s.tuiController().Finish(wait.RunID)
-	s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, AgentID: wait.AgentID, RunID: wait.RunID, Timestamp: time.Now()}})
+	// Publishing the turn error drew it in the conversation already. A
+	// subagent's own view is a separate screen the event does not reach, so
+	// that view is told here; the conversation is not told twice.
+	if strings.TrimSpace(wait.AgentID) != "" {
+		s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, AgentID: wait.AgentID, RunID: wait.RunID, Timestamp: time.Now()}})
+	}
 }
 
 func (s *ChatSession) failRecoveredApproval(sessionID, actionID, reason string) {
@@ -699,11 +704,11 @@ func (s *ChatSession) failRecoveredApproval(sessionID, actionID, reason string) 
 	bg := context.Background()
 	_ = s.runSvc().ClearWait(bg, runID)
 	_ = s.runSvc().SetStatus(bg, runID, state.RunStatusFailed)
+	// Publishing the turn error is what draws it, live as on replay.
 	_ = s.publishTUIRunEvent(bg, sessionID, runID, "turn_error", event.TurnErrorPayload{Error: reason, Message: reason})
 	s.tuiController().Cancel(runID, errors.New(reason))
 	s.tuiController().Finish(runID)
 	s.clearPendingApproval()
-	s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: reason, RunID: runID, Timestamp: time.Now()}})
 }
 
 func (s *ChatSession) ClearUINotify() {
@@ -712,6 +717,18 @@ func (s *ChatSession) ClearUINotify() {
 	}
 	s.tuiMu.Lock()
 	s.uiNotify = nil
+	s.tuiMu.Unlock()
+}
+
+// SetViewingSession records the conversation this surface is attached to.
+// The event funnel consults it to keep other sessions' events off this
+// screen (they still land in their own session's log).
+func (s *ChatSession) SetViewingSession(sessionID string) {
+	if s == nil {
+		return
+	}
+	s.tuiMu.Lock()
+	s.uiSessionID = strings.TrimSpace(sessionID)
 	s.tuiMu.Unlock()
 }
 
@@ -732,6 +749,21 @@ func (s *ChatSession) notifyUI(msg any) {
 		return
 	}
 	s.enqueueUINotification(msg)
+}
+
+// notifyUIForSession paints one event-funnel message when it belongs to the
+// conversation this surface is looking at. Empty sessionID (an event from
+// before any conversation started) and an unattached surface paint as they
+// always did; anything else for another session stays in that session's log
+// alone.
+func (s *ChatSession) notifyUIForSession(sessionID string, msg any) {
+	s.tuiMu.Lock()
+	viewing := s.uiSessionID
+	s.tuiMu.Unlock()
+	if viewing != "" && strings.TrimSpace(sessionID) != "" && strings.TrimSpace(sessionID) != viewing {
+		return
+	}
+	s.notifyUI(msg)
 }
 
 func (s *ChatSession) enqueueUINotification(msg any) {
@@ -893,33 +925,6 @@ func (s *ChatSession) tuiRunIDLocked(sessionID string) string {
 	return ""
 }
 
-func (s *ChatSession) installTUITurnInputRuntimeHookLocked(runID, sessionID string) {
-	if s == nil || s.tuiTurnInputRT == nil {
-		return
-	}
-	rt := s.tuiTurnInputRT
-	channel := "tui"
-	// The surface renders delivered steers from its own queue mirror (it is the
-	// only place that still holds the composer's display form: image and large
-	// paste placeholders, which the model-facing parts have already expanded
-	// away). So the hook reports how many steers survive the drain and lets the
-	// surface derive which ones left, rather than shipping lossy text here.
-	rt.SetChangeHook(func(_ []run.TurnInputEntry) {
-		count := 0
-		for _, entry := range rt.Snapshot() {
-			if entry.Mode == run.TurnInputModeSteer {
-				count++
-			}
-		}
-		s.notifyUI(PendingSteersChangedMsg{
-			RunID:     strings.TrimSpace(runID),
-			SessionID: strings.TrimSpace(sessionID),
-			Channel:   channel,
-			Count:     count,
-		})
-	})
-}
-
 func (s *ChatSession) tuiFinish(runID string) {
 	if s == nil {
 		return
@@ -928,6 +933,12 @@ func (s *ChatSession) tuiFinish(runID string) {
 	finished := s.tuiControlLocked().Finish(runID)
 	if finished {
 		s.tuiTurnInputRT = nil
+		// The run is over, so its runtime must stop accepting steers even
+		// before the surface turn's own boundary retires the queue: whatever
+		// the run never delivered stays queued for the boundary to decide.
+		if s.tuiTurnInputQueue != nil {
+			s.tuiTurnInputQueue.Detach()
+		}
 	}
 	s.tuiRunMu.Unlock()
 	if finished {
@@ -1015,8 +1026,26 @@ func (s *ChatSession) ensureTUITurnInputRuntime(sessionID string) *run.TurnInput
 	if s.tuiTurnInputRT == nil {
 		s.tuiTurnInputRT = run.NewTurnInputRuntime()
 	}
-	s.installTUITurnInputRuntimeHookLocked(s.tuiRunIDLocked(sessionID), sessionID)
-	return s.tuiTurnInputRT
+	rt := s.tuiTurnInputRT
+	// The queue belongs to the conversation; the runtime belongs to this
+	// turn. Connecting them here is what makes a steer enqueued from the
+	// surface reach this turn's tool boundaries, including the window after
+	// the turn began but before the engine registered its run.
+	q := s.tuiControlLocked().SessionQueue(strings.TrimSpace(sessionID))
+	s.tuiTurnInputQueue = q
+	q.Attach(rt)
+	// Delivery moves a steer from the queue onto its delivered list; the
+	// change hook is what tells the surface to render that message into the
+	// transcript instead of leaving the pending preview claiming it is still
+	// editable.
+	channel := "tui"
+	q.SetChangeHook(func() {
+		s.notifyUI(InputQueueChangedMsg{
+			SessionID: strings.TrimSpace(sessionID),
+			Channel:   channel,
+		})
+	})
+	return rt
 }
 
 // discardTUITurnInput drops the queued turn input at the end of a surface
@@ -1030,80 +1059,212 @@ func (s *ChatSession) discardTUITurnInput() {
 	}
 	s.tuiRunMu.Lock()
 	s.tuiTurnInputRT = nil
+	q := s.tuiTurnInputQueue
+	s.tuiTurnInputQueue = nil
 	s.tuiRunMu.Unlock()
+	// Detach the queue this turn attached: undelivered steers stay in it —
+	// the turn's boundary decides what follows them — but without a runtime
+	// they can no longer reach any model, so the next turn's fresh runtime
+	// can never deliver them.
+	if q != nil {
+		q.Detach()
+	}
 }
 
-func (s *ChatSession) QueueSurfaceFollowUp(sessionID string, channel string, parts []llm.ContentPart) bool {
-	if s == nil || len(parts) == 0 {
-		return false
-	}
-	s.tuiRunMu.Lock()
-	rt := s.tuiTurnInputRT
-	_, _, phase, active := s.tuiControlLocked().Current()
-	s.tuiRunMu.Unlock()
-	active = active && phase == run.Running
-	if !active || rt == nil {
-		return false
-	}
-	rt.Enqueue(run.TurnInputModeFollowUp, parts)
-	return true
-}
-
-func (s *ChatSession) SteerSurfaceRun(sessionID string, channel string, parts []llm.ContentPart) bool {
-	if s == nil || len(parts) == 0 {
-		return false
-	}
-	s.tuiRunMu.Lock()
-	ctl := s.tuiControlLocked()
-	runID := s.tuiRunIDLocked(sessionID)
-	_, _, phase, active := ctl.Current()
-	s.tuiRunMu.Unlock()
-	if !active || phase != run.Running || runID == "" {
-		return false
-	}
-	return ctl.Steer(runID, run.Input{Parts: parts})
-}
-
-// RetractSurfaceSteer pulls the most recently enqueued steer back out of the
-// active run's input runtime. It fails once the run has drained the steer at a
-// tool boundary: the message is already on its way to the model, so the surface
-// must leave it queued rather than hand the user an editable copy of something
-// that will be answered anyway.
-func (s *ChatSession) RetractSurfaceSteer(sessionID string, channel string) bool {
+// SurfaceInputQueue returns the conversation's input queue. All queue
+// semantics — admission, recall, boundary decisions, preview — live in it;
+// the surface never picks among queued messages itself.
+func (s *ChatSession) SurfaceInputQueue(sessionID string) *run.InputQueue {
 	if s == nil {
-		return false
+		return nil
 	}
-	s.tuiRunMu.Lock()
-	ctl := s.tuiControlLocked()
-	runID := s.tuiRunIDLocked(sessionID)
-	_, _, phase, active := ctl.Current()
-	s.tuiRunMu.Unlock()
-	if !active || phase != run.Running || runID == "" {
-		return false
-	}
-	_, ok := ctl.Retract(runID)
-	return ok
+	return s.tuiController().SessionQueue(strings.TrimSpace(sessionID))
 }
 
-func (s *ChatSession) SurfacePendingSteerCount(sessionID string, channel string) (int, bool) {
-	if s == nil {
-		return 0, false
+// SendToSubagent hands what the user typed in a subagent's own view to that
+// subagent through the engine's channel: it starts the subagent's next
+// execution when it is idle, and reaches it at its next tool boundary (or waits
+// for the execution after it) when it is running. The surface frames each
+// execution it drives with the same tool-audit step hook a turn installs, and
+// forwards the queue's boundary decision back to the loop as a UI message.
+func (s *ChatSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (run.SubagentDelivery, error) {
+	r := s.runner()
+	if r == nil {
+		return "", errors.New("no runner")
 	}
-	s.tuiRunMu.Lock()
-	rt := s.tuiTurnInputRT
-	_, _, phase, active := s.tuiControlLocked().Current()
-	s.tuiRunMu.Unlock()
-	active = active && phase == run.Running
-	if !active || rt == nil {
-		return 0, false
+	mode := run.TurnInputModeSteer
+	if followUp {
+		mode = run.TurnInputModeFollowUp
 	}
-	count := 0
-	for _, entry := range rt.Snapshot() {
-		if entry.Mode == run.TurnInputModeSteer {
-			count++
+	in := run.Input{
+		Text:      composerSubmissionPreview(submission),
+		Parts:     append([]llm.ContentPart(nil), submission.Parts...),
+		Payload:   submission,
+		SkillName: strings.TrimSpace(submission.SkillName),
+		SkillPath: strings.TrimSpace(submission.SkillPath),
+	}
+	if in.Text == "" {
+		in.Text = strings.Join(strings.Fields(llm.TextContent(submission.Parts...)), " ")
+	}
+	return run.SendToSubagent(context.Background(), r, s.subagentSurface(sessionID), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey), in, mode)
+}
+
+// SubagentInputPreview is the subagent's queued input as its own view shows it.
+func (s *ChatSession) SubagentInputPreview(sessionID, agentKey string) ComposerPendingInputPreview {
+	preview := run.SubagentInputPreview(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	return ComposerPendingInputPreview{
+		PendingSteers:  preview.Steers,
+		RejectedSteers: preview.Rejected,
+		QueuedMessages: preview.FollowUp,
+	}
+}
+
+// RecallSubagentInput pulls the subagent's newest queued message back out for
+// editing, whole.
+func (s *ChatSession) RecallSubagentInput(sessionID, agentKey string) (ComposerSubmission, bool) {
+	in, ok := run.RecallSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if !ok {
+		return ComposerSubmission{}, false
+	}
+	return subagentSubmissionFromInput(in)
+}
+
+// InterruptSubagentToSend stops the subagent's running execution to send the
+// steers queued behind it (Esc's second meaning in its view).
+func (s *ChatSession) InterruptSubagentToSend(sessionID, agentKey string) bool {
+	return run.InterruptSubagentToSend(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
+// WithdrawSubagentInput takes a just-sent message back before the subagent
+// answered, returning it plus everything queued after it.
+func (s *ChatSession) WithdrawSubagentInput(sessionID, agentKey string) ([]ComposerSubmission, bool) {
+	inputs, ok := run.WithdrawSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if !ok {
+		return nil, false
+	}
+	return subagentSubmissions(inputs), true
+}
+
+// DiscardSubagentInput empties the subagent's queued input and returns how many
+// messages were dropped — the same discard the conversation's own queue gets
+// when its conversation is left.
+func (s *ChatSession) DiscardSubagentInput(sessionID, agentKey string) int {
+	return run.DiscardSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
+// CompactSubagent compacts the subagent's own context from its view: it runs
+// against that subagent's worker session, on the model that subagent runs on,
+// and refuses while the subagent is running (the way /compact is refused while
+// the conversation's own run is).
+func (s *ChatSession) CompactSubagent(ctx context.Context, sessionID, agentKey string) (string, bool) {
+	r := s.runner()
+	if r == nil {
+		return "compact: unavailable", true
+	}
+	subCtx, workerSessionID, err := run.SubagentCompactTarget(ctx, r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if err != nil {
+		if errors.Is(err, run.ErrSubagentRunning) {
+			return "Wait for this subagent to finish before compacting it.", true
+		}
+		return "compact: " + err.Error(), true
+	}
+	result := turn.ExecuteCompact(subCtx, workerSessionID, run.CompactionService(r, s.sessStore()))
+	s.tuiMu.Lock()
+	hasTUI := s.uiNotify != nil
+	s.tuiMu.Unlock()
+	if hasTUI {
+		// The compaction's own events draw its card in this subagent's view.
+		return "", true
+	}
+	return result.Reply, true
+}
+
+// SubagentContextReport answers /context for the subagent whose view it is run
+// from: the same report as the conversation's, fed the subagent's own worker
+// session, model and occupancy.
+func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string, bool) {
+	r := s.runner()
+	if r == nil {
+		return "context: unavailable", true
+	}
+	workerSessionID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(context.Background(), r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if err != nil {
+		return "context: " + err.Error(), true
+	}
+	src := turn.ContextSources{
+		Snapshots: s.Env.Tools(),
+		Filtering: tool.CompressorFor(r.StateRoot()).Store(),
+	}
+	if runs := s.runSvc(); runs != nil {
+		src.Compactions = runs
+	}
+	src.Gauge = turn.ContextGaugeOf(provider, model, used, explicitLimit)
+	return turn.ContextReport(context.Background(), src, workerSessionID), true
+}
+
+// SubagentComposerTokenStats is the subagent's own footer gauge — how much of
+// that subagent's context window is left, computed on the model it runs on.
+func (s *ChatSession) SubagentComposerTokenStats(sessionID, agentKey string) ComposerTokenStats {
+	payload, ok := run.SubagentContextBudget(context.Background(), s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if !ok {
+		return ComposerTokenStats{}
+	}
+	return composerTokenStatsFromBudget(tokenBudgetMsgFromPayload(payload))
+}
+
+// subagentSurface frames each execution the user drives from a subagent's view
+// and hands the queue's boundary decision back to the loop.
+//
+// The step hook is built with a nil predecessor on purpose: a subagent's tool
+// steps carry their roster key on the context, so this hook publishes them
+// itself, and chaining the process-wide (conversation) hook would publish the
+// same step a second time.
+func (s *ChatSession) subagentSurface(sessionID string) run.SubagentSurface {
+	hook := s.runAuditStepHook(sessionID, func() tool.StepHook { return nil })
+	return run.SubagentSurface{
+		Frame: func(ctx context.Context) context.Context {
+			if hook == nil {
+				return ctx
+			}
+			return tool.WithStepHook(ctx, hook)
+		},
+		OnBoundary: func(agentKey string, send, restore []run.Input) {
+			s.notifyUI(SubagentInputBoundaryMsg{
+				AgentKey: strings.TrimSpace(agentKey),
+				Send:     subagentSubmissions(send),
+				Restore:  subagentSubmissions(restore),
+			})
+		},
+	}
+}
+
+// subagentSubmissions recovers the surface's own records from a slice of the
+// engine's queue inputs, so a recalled, released or restored message comes back
+// whole (text, attachments, folded pastes and all).
+func subagentSubmissions(inputs []run.Input) []ComposerSubmission {
+	if len(inputs) == 0 {
+		return nil
+	}
+	out := make([]ComposerSubmission, 0, len(inputs))
+	for _, in := range inputs {
+		if sub, ok := subagentSubmissionFromInput(in); ok {
+			out = append(out, sub)
 		}
 	}
-	return count, true
+	return out
+}
+
+func subagentSubmissionFromInput(in run.Input) (ComposerSubmission, bool) {
+	if sub, ok := in.Payload.(ComposerSubmission); ok {
+		return sub, true
+	}
+	// A message without our payload (a foreign or legacy producer) is rebuilt
+	// from the queue's own record so it is still editable.
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		return ComposerSubmission{}, false
+	}
+	return ComposerSubmission{Text: text, DisplayText: text, Parts: append([]llm.ContentPart(nil), in.Parts...)}, true
 }
 
 func (s *ChatSession) NewSessionID(prefix string) string {
@@ -1308,8 +1469,8 @@ func (s *ChatSession) slashContext(ctx context.Context, sessionID, channel strin
 		Status:         s,
 		Permissions:    s,
 		MCP:            s,
+		LSP:            s,
 		Sandbox:        s,
-		Diff:           s,
 		Model:          s,
 		Agent:          s,
 		Fast:           s,
@@ -1445,13 +1606,14 @@ func originatingApprovalToolStepID(rae *tool.RequiresActionError) string {
 	return turn.PendingApprovalToolStepID(rae.SessionSnapshot, rae.ToolName)
 }
 
-func (s *ChatSession) persistRequiresActionSnapshot(sessionID string, startedAt time.Time, snapshot []llm.Message) {
+func (s *ChatSession) persistRequiresActionSnapshot(sessionID, runID string, snapshot []llm.Message) {
 	if s == nil || s.sessStore() == nil || len(snapshot) == 0 {
 		return
 	}
-	_ = s.sessStore().AppendMessageSequence(
+	_ = s.sessStore().AppendMessageSequenceForRun(
 		context.Background(),
 		sessionID,
+		runID,
 		snapshot,
 		cliResultModel(s),
 		"",
@@ -1467,7 +1629,7 @@ func (s *ChatSession) persistRequiresActionSnapshot(sessionID string, startedAt 
 // with a dangling tool_calls row that RepairDanglingToolResults strips on the
 // next turn - causing the LLM to lose knowledge that the tool was called and
 // approved (e.g. exit_plan_mode).
-func (s *ChatSession) persistReplayResults(sessionID string, startedAt time.Time, capture *tool.ReplayResultCapture) {
+func (s *ChatSession) persistReplayResults(sessionID, runID string, capture *tool.ReplayResultCapture) {
 	if s == nil || s.sessStore() == nil || capture == nil {
 		return
 	}
@@ -1493,7 +1655,7 @@ func (s *ChatSession) persistReplayResults(sessionID string, startedAt time.Time
 	_ = s.sessStore().AppendNewMessages(
 		context.Background(),
 		sessionID,
-		"",
+		runID,
 		msgs,
 		cliResultModel(s),
 		"",
@@ -1519,7 +1681,7 @@ func (s *ChatSession) persistReplayResults(sessionID string, startedAt time.Time
 // RepairDanglingToolResults then strips any assistant tool_calls row whose
 // results did not arrive (e.g. the tool was mid-execution at cancel time),
 // keeping the transcript valid for the next round.
-func (s *ChatSession) persistCancelledTurnOutcome(sessionID string, startedAt time.Time) {
+func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, completion turnCompletion) {
 	if s == nil || s.sessStore() == nil {
 		return
 	}
@@ -1534,11 +1696,12 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID string, startedAt ti
 	}
 	turn.PersistCancelledTurn(context.Background(), s.sessStore(), turn.CancelledTurn{
 		SessionID:        sessionID,
+		RunID:            runID,
 		Captured:         captured,
 		PartialText:      partialText,
 		PartialReasoning: partialReasoning,
 		Model:            cliResultModel(s),
-		StartedAt:        startedAt,
+		End:              completion.runEnd(),
 		OnRepairError: func(err error) {
 			if s.chatLog != nil {
 				s.chatLog.Debugf("forebrain chat dangling tool_calls repair failed session=%s err=%v", sessionID, err)
@@ -1710,6 +1873,12 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		if err := agentCtx.Err(); err != nil {
 			return err
 		}
+		// The message was stored before the engine created the run it starts.
+		// It is that run's first row all the same: a run that ends before
+		// writing anything of its own closes after it on replay.
+		if err := s.sessStore().BindMessageToRun(durable, sessionID, userRowID, runID); err != nil && s.chatLog != nil {
+			s.chatLog.Errorf("forebrain chat bind user row session=%s row_id=%d run=%s failed: %v", sessionID, userRowID, runID, err)
+		}
 		s.notifyUI(RunStartedMsg{RunID: runID, turn: foreground})
 		return nil
 	}
@@ -1775,7 +1944,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				rid = strings.TrimSpace(rae.RunID)
 			}
 			if rid != "" {
-				s.persistRequiresActionSnapshot(sessionID, t0, rae.SessionSnapshot)
+				s.persistRequiresActionSnapshot(sessionID, rid, rae.SessionSnapshot)
 				s.attachRunWaitForRequiresAction(rid, sessionID, channel, input, rae, t0)
 				s.emitPartialAssistantFromRAE(rae, streamAssistantViaTUI)
 				emitRunEnded = shouldEmitRunEndedOnRequiresAction(true)
@@ -1784,6 +1953,19 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 				}
 				return nil
 			}
+		}
+		if errors.Is(err, state.ErrSessionBusy) {
+			// The session was refused: another live process owns its turn, so
+			// no run of this message exists and none may be recorded for it.
+			// The user row written on the way in comes back out the same way
+			// Esc takes a message out of the conversation, and the caller
+			// takes the submission back rather than reporting a failed run.
+			if userRowID > 0 {
+				if werr := s.sessStore().WithdrawUserTurn(durable, sessionID, userRowID); werr != nil && s.chatLog != nil {
+					s.chatLog.Errorf("forebrain chat withdraw refused-turn row session=%s row_id=%d err=%v", sessionID, userRowID, werr)
+				}
+			}
+			return err
 		}
 		s.clearPendingApproval()
 		if errors.Is(err, context.Canceled) {
@@ -1795,7 +1977,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			// assistant text/reasoning. Without this a cancelled run loses every
 			// message it produced - the next round and /resume only see the
 			// pre-run user message.
-			s.persistCancelledTurnOutcome(sessionID, t0)
+			s.persistCancelledTurnOutcome(sessionID, runUsage.runID, completion)
 			s.notifyUI(StreamResetMsg{turn: foreground})
 			return nil
 		}
@@ -1806,7 +1988,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		// turn — the session store only has the user message, and the LLM
 		// rebuilds context from scratch on the next attempt, losing the
 		// work already done (tool calls executed, files read, etc.).
-		s.persistCancelledTurnOutcome(sessionID, t0)
+		s.persistCancelledTurnOutcome(sessionID, runUsage.runID, completion)
 		// An explicit skill load that failed already showed its own Skill
 		// failure card before the first LLM request; a generic error card
 		// would repeat the same news twice.
@@ -1821,13 +2003,15 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 			s.chatLog.Errorf("forebrain chat turn error session=%s elapsed=%s err=%v", sessionID, time.Since(t0), err)
 			s.chatLog.Debugf("forebrain chat turn error session=%s elapsed=%s err=%v", sessionID, time.Since(t0), err)
 		}
+		explained := llm.ExplainError(err)
 		if !callerRendersReturnedError {
 			s.notifyUI(NewMessageMsg{Msg: Message{
 				Kind:      MsgKindError,
-				Content:   llm.ExplainError(err),
+				Content:   explained,
 				Timestamp: time.Now(),
 			}})
 		}
+		s.persistRunTurnError(sessionID, runUsage.runID, explained)
 		return err
 	}
 	s.clearPendingApproval()
@@ -1959,11 +2143,7 @@ func (s *ChatSession) applyConfigFromDisk() error {
 	if err != nil {
 		return fmt.Errorf("load %s: %w", cfgPath, err)
 	}
-	// YOLO comes from the environment and is not something a preset picked in
-	// the session may walk back, so the preset only applies when YOLO is off.
-	if !safety.ApplyYOLO(&loaded) {
-		s.reapplyPermissionPreset(&loaded)
-	}
+	safety.ApplyYOLO(&loaded)
 	loaded = safety.EffectiveConfig(loaded, s.LaunchProject)
 	if err := safety.NewManager().StartupCheck(&loaded); err != nil {
 		return fmt.Errorf("sandbox startup check: %w", err)
@@ -2034,8 +2214,8 @@ func (s *ChatSession) PermissionPresets(sessionID string) ([]safety.ApprovalPres
 	for i := range presets {
 		presets[i].Description = presets[i].DescriptionFor(s.cfg())
 	}
-	mode := s.runner().PermissionSnapshotForSession(sessionID).Mode
-	preset, ok := safety.MatchApprovalPreset(mode, s.cfg())
+	snap := s.runner().PermissionSnapshotForSession(sessionID)
+	preset, ok := safety.MatchApprovalPreset(snap.Mode, safety.ConfigForSnapshot(s.cfg(), snap))
 	if !ok {
 		return presets, ""
 	}
@@ -2045,10 +2225,12 @@ func (s *ChatSession) PermissionPresets(sessionID string) ([]safety.ApprovalPres
 // ApplyPermissionPreset switches the session to one of the built-in approval
 // presets and reports the resulting state.
 //
-// Nothing is written to forebrain.yaml. The choice is scoped to the running
-// process the way an approval granted mid-turn is: a preset picked to get
-// through one task should not silently govern the next session started from
-// the same config. Editing forebrain.yaml is what persisting a choice is for.
+// Both halves of the preset are scoped to this session in the permission
+// store; nothing is written to forebrain.yaml or to the live config. A preset
+// picked to get through one task therefore governs neither the other
+// conversations of this process nor the next session, and a reload of the
+// config cannot undo it. Editing forebrain.yaml is what persisting a choice is
+// for.
 func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string, error) {
 	if s == nil || s.runner() == nil {
 		return "", fmt.Errorf("permissions: unavailable")
@@ -2057,43 +2239,11 @@ func (s *ChatSession) ApplyPermissionPreset(sessionID, presetID string) (string,
 	if !ok {
 		return "", fmt.Errorf("permissions: unknown preset %q", strings.TrimSpace(presetID))
 	}
-
-	// The sandbox half lives in the config and the approval half in the
-	// permission store. Both are in-memory, but only the config is reloadable
-	// from disk, so only that half needs remembering for reapplyPermissionPreset.
-	preset.ApplyToConfig(s.cfg())
-	s.configMu.Lock()
-	saved := preset
-	s.permissionPreset = &saved
-	s.configMu.Unlock()
-
-	s.runner().ApplyPermissionUpdate(safety.PermissionUpdate{
-		Type:        safety.UpdateSetMode,
-		Destination: safety.DestinationSession,
-		SessionID:   sessionID,
-		Mode:        preset.Approval,
-	})
-	s.refreshSandboxRuntime()
-
-	return preset.Label + " for this session: " + preset.DescriptionFor(s.cfg()), nil
-}
-
-// reapplyPermissionPreset restores the session's preset over a config just read
-// from disk, so a file that never recorded the choice cannot quietly undo it.
-//
-// It is a no-op when no preset was picked, so the reload paths can call it
-// unconditionally.
-func (s *ChatSession) reapplyPermissionPreset(cfg *appcfg.Root) {
-	if s == nil || cfg == nil {
-		return
+	for _, update := range preset.SessionUpdates(sessionID) {
+		s.runner().ApplyPermissionUpdate(update)
 	}
-	s.configMu.Lock()
-	preset := s.permissionPreset
-	s.configMu.Unlock()
-	if preset == nil {
-		return
-	}
-	preset.ApplyToConfig(cfg)
+	cfg := safety.ConfigForSnapshot(s.cfg(), s.runner().PermissionSnapshotForSession(sessionID))
+	return preset.Label + " for this session: " + preset.DescriptionFor(cfg), nil
 }
 
 type userShellExecution struct {
@@ -2509,3 +2659,188 @@ func (s *ChatSession) SubscribeMCPStatusTick() (func(), bool) {
 }
 
 var errPanelUnavailable = errors.New("panel unavailable")
+
+// lspControl is the /lsp panel's slice of the session's runner: nil when this
+// runtime has no language servers.
+func (s *ChatSession) lspControl() tool.CodeIntelControl {
+	r := s.runner()
+	if r == nil {
+		return nil
+	}
+	return r.CodeIntelControl
+}
+
+// PanelLSPSnapshot answers what /lsp shows. The snapshot never blocks on a
+// probe or an install: both report through SubscribeLSPStatus.
+func (s *ChatSession) PanelLSPSnapshot() (event.LSPSnapshot, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return event.LSPSnapshot{}, errPanelUnavailable
+	}
+	return ctl.Snapshot(), nil
+}
+
+// PanelSetLSPEnabled enables or disables one server. The reply is the sentence
+// the panel shows; the control plane owns what the change does.
+func (s *ChatSession) PanelSetLSPEnabled(serverID string, enabled bool) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if err := ctl.SetEnabled(serverID, enabled); err != nil {
+		return "", err
+	}
+	if enabled {
+		return "Enabled. Diagnostics start with the next edit; the lsp tool appears in new sessions.", nil
+	}
+	return "Disabled. Its instances in this project have stopped.", nil
+}
+
+// PanelRestartLSP restarts one server's instances in this project.
+func (s *ChatSession) PanelRestartLSP(serverID string) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if err := ctl.Restart(serverID); err != nil {
+		return "", err
+	}
+	return "Restarting…", nil
+}
+
+// PanelInstallLSP starts the server's install recipe off the main loop. Every
+// call returns at once; output and outcome arrive through the snapshot.
+func (s *ChatSession) PanelInstallLSP(serverID string) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	command := ""
+	for _, srv := range ctl.Snapshot().Servers {
+		if srv.ID == serverID {
+			command = srv.InstallCommand
+			break
+		}
+	}
+	go func() { _ = ctl.Install(context.Background(), serverID, nil) }()
+	return "Installing: " + command, nil
+}
+
+// PanelResetLSPRecommendations turns recommendations back on.
+func (s *ChatSession) PanelResetLSPRecommendations() (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if err := ctl.ResetRecommendations(); err != nil {
+		return "", err
+	}
+	return "Recommendations are back on.", nil
+}
+
+// SubscribeLSPStatus forwards language-server snapshot changes to the UI loop
+// so an open /lsp panel repaints in place. The callback only posts a message.
+func (s *ChatSession) SubscribeLSPStatus() (func(), bool) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return nil, false
+	}
+	return ctl.Subscribe(func(event.LSPSnapshot) { s.notifyUI(LSPStatusTickMsg{}) }), true
+}
+
+// DecideLSPRecommendation applies the user's answer and returns the line
+// the transcript shows for it ("" when there is nothing to say).
+func (s *ChatSession) DecideLSPRecommendation(rec event.LSPRecommendation, choice event.LSPRecommendationChoice) (string, error) {
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "", errPanelUnavailable
+	}
+	if choice == event.LSPChoiceInstall {
+		// Decide first, watch after: the decision is what starts the
+		// install, and the watcher's subscription must never observe the
+		// pre-start snapshot of a retry (a previous attempt's failure).
+		if err := ctl.DecideRecommendation(rec.ID, choice); err != nil {
+			return "", err
+		}
+		s.watchLSPInstall(ctl, rec)
+		return "Installing " + rec.DisplayName + ": " + rec.InstallCommand, nil
+	}
+	if err := ctl.DecideRecommendation(rec.ID, choice); err != nil {
+		return "", err
+	}
+	switch choice {
+	case event.LSPChoiceEnable:
+		return rec.DisplayName + " enabled for " + strings.Join(rec.Languages, ", ") + ". Diagnostics start with the next edit.", nil
+	case event.LSPChoiceNotNow:
+		if ctl.Snapshot().RecommendationsDisabled {
+			return "Language server recommendations are now off (dismissed 5 times in a row). Turn them back on in /lsp.", nil
+		}
+		return "Not now. No language server will be suggested again in this session.", nil
+	case event.LSPChoiceNever:
+		return rec.ServerID + " will not be suggested again. /lsp can still enable it.", nil
+	case event.LSPChoiceDisableAll:
+		return "Language server recommendations are off. Turn them back on in /lsp.", nil
+	}
+	return "", nil
+}
+
+// watchLSPInstall follows the install a recommendation started: every new
+// output line becomes the transient status line, and the outcome — the
+// enabled line or the failure tail — becomes one transcript frame. The
+// snapshot is the same one every surface reads, so the /lsp panel shows the
+// same install this reports. The returned stop ends the watch early.
+func (s *ChatSession) watchLSPInstall(ctl tool.CodeIntelControl, rec event.LSPRecommendation) (stop func()) {
+	var (
+		lastLine   string
+		wasRunning bool
+		done       bool
+		mu         sync.Mutex
+	)
+	var cancel func()
+	cancel = ctl.Subscribe(func(snap event.LSPSnapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+		if done {
+			return
+		}
+		for _, srv := range snap.Servers {
+			if srv.ID != rec.ServerID {
+				continue
+			}
+			if srv.Installing {
+				wasRunning = true
+				if n := len(srv.InstallLog); n > 0 && srv.InstallLog[n-1] != lastLine {
+					lastLine = srv.InstallLog[n-1]
+					s.notifyUI(LSPInstallProgressMsg{ServerID: srv.ID, Line: lastLine})
+				}
+				return
+			}
+			if srv.InstallError != "" && !wasRunning {
+				// The install finished (or never truly started) between two
+				// snapshots: the failure it carries is already terminal. Report
+				// it without having seen Installing — otherwise the watch would
+				// wait for an end that already happened.
+				done = true
+				cancel()
+				s.notifyUI(LSPInstallDoneMsg{ServerID: srv.ID, Err: srv.InstallError})
+				return
+			}
+			if wasRunning {
+				done = true
+				cancel()
+				if srv.InstallError != "" {
+					s.notifyUI(LSPInstallDoneMsg{ServerID: srv.ID, Err: srv.InstallError})
+				} else {
+					s.notifyUI(LSPInstallDoneMsg{ServerID: srv.ID, Text: rec.DisplayName + " installed and enabled for " + strings.Join(rec.Languages, ", ") + ". Diagnostics start with the next edit."})
+				}
+			}
+			return
+		}
+	})
+	return func() {
+		mu.Lock()
+		done = true
+		mu.Unlock()
+		cancel()
+	}
+}

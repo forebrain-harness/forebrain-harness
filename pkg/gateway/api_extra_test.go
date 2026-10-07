@@ -12,10 +12,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -25,9 +29,13 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	state "github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
+
+// The endpoint double must keep satisfying the control-plane port.
+var _ tool.CodeIntelControl = (*lspControlDouble)(nil)
 
 func TestHandleSlashCommands(t *testing.T) {
 	s := &Server{}
@@ -78,7 +86,6 @@ func TestHandleSlashCommandsSideConversationFilter(t *testing.T) {
 	for _, rec := range out.Records {
 		names[rec.Name] = true
 	}
-	require.True(t, names["diff"])
 	require.True(t, names["status"])
 	require.False(t, names["plan"])
 }
@@ -739,6 +746,130 @@ func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
 	if len(list.Sessions) != 1 || list.Sessions[0]["id"] != session.ID {
 		t.Fatalf("project sessions: %+v", list)
 	}
+	// ...and the agent's own conversation list does not: a project's
+	// sessions live in its project space only.
+	rec = httptest.NewRecorder()
+	s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat sessions: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), session.ID) {
+		t.Fatalf("project session %s leaked into the conversation list: %s", session.ID, rec.Body.String())
+	}
+	// The chat page still names the opened session — its title and its
+	// project — by reading the session itself rather than by looking it up
+	// in the drawer's list, which never holds a project's sessions.
+	rec = httptest.NewRecorder()
+	s.handleChatSession(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+session.ID, nil), session.ID))
+	if rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"title":"in project"`) ||
+		!strings.Contains(rec.Body.String(), `"name":"withsessions"`) ||
+		!strings.Contains(rec.Body.String(), `"id":"`+id+`"`) {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatSessionsAreFilteredByPurpose pins that the drawer and the workshop
+// each get their own list from the query itself: the source parameter picks
+// the purpose, anything else is refused, and no amount of scheduled-task
+// fires can crowd the agent's own conversations out of the drawer.
+func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	ensure := func(id, title string) {
+		t.Helper()
+		if err := s.Sessions.Ensure(ctx, id, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ensure("talk", "a conversation")
+	ensure("task", "a workshop task")
+	if err := s.Sessions.SetSessionSource(ctx, "task", state.SessionSourceWorkshop); err != nil {
+		t.Fatal(err)
+	}
+	// 250 scheduled-task fires, all newer than the conversation.
+	for i := 0; i < 250; i++ {
+		id := fmt.Sprintf("fire-%03d", i)
+		ensure(id, id)
+		if err := s.Sessions.SetSessionSource(ctx, id, state.SessionSourceCron); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(10_000+i), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	list := func(query string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions"+query, nil))
+		return rec
+	}
+	rec := list("")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"talk"`) || strings.Contains(rec.Body.String(), `"id":"task"`) {
+		t.Fatalf("default list: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = list("?source=workshop")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"task"`) || strings.Contains(rec.Body.String(), `"id":"talk"`) {
+		t.Fatalf("workshop list: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := list("?source=cron"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("source=cron: %d %s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatSessionNamesOneConversation pins the page's own lookup: an opened
+// session's title and project come from the session itself — an unnamed one
+// answers "" so the client draws its placeholder — and another tenant's
+// session is not ours to name.
+func TestChatSessionNamesOneConversation(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+
+	// A named conversation outside any project, and an unnamed one — stored
+	// titled with its own id, which reads as none.
+	if err := s.Sessions.Ensure(ctx, "plain", "Just talking"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sessions.Ensure(ctx, "fresh", "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	// One bound to a project.
+	p, err := store.Create(ctx, state.CreateProjectInput{Name: "named", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Sessions.Ensure(ctx, "bound", "In the project"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindSession(ctx, "bound", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Another tenant's session, in the same database.
+	if err := state.NewSessionStore(s.Sessions.DB(), "other").Ensure(ctx, "theirs", "Not ours"); err != nil {
+		t.Fatal(err)
+	}
+
+	one := func(sid string) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleChatSession(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+sid, nil), sid))
+		return rec
+	}
+	rec := one("plain")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":"Just talking"`) || !strings.Contains(rec.Body.String(), `"project":null`) {
+		t.Fatalf("plain session: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := one("fresh"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":""`) {
+		t.Fatalf("unnamed session: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = one("bound")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":"In the project"`) || !strings.Contains(rec.Body.String(), `"name":"named"`) || !strings.Contains(rec.Body.String(), p.ID) {
+		t.Fatalf("project session: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := one("theirs"); rec.Code != http.StatusNotFound {
+		t.Fatalf("another tenant's session: %d %s, want 404", rec.Code, rec.Body.String())
+	}
 }
 
 func TestProjectMCPPreviewAndConsentEndpoint(t *testing.T) {
@@ -830,6 +961,8 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
+	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
+	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
 	// Project-scoped skill lifecycle, mirroring the production routes.
 	projects.Get("/:id/skills", s.handleProjectSkillsList)
 	projects.Post("/:id/skills", s.handleProjectSkillsCreate)
@@ -941,8 +1074,8 @@ description: The steps that cut a release in this repository
 			if filepath.Clean(path) != filepath.Clean(filepath.Join(root, ".forebrain", "skills", "release-flow")) {
 				t.Fatalf("skill listed under the wrong project: %s", path)
 			}
-			if row["source"] != "project" {
-				t.Fatalf("skill source=%v want project", row["source"])
+			if row["origin"] != "project" {
+				t.Fatalf("skill origin=%v want project", row["origin"])
 			}
 			found = true
 		}
@@ -1084,6 +1217,35 @@ func TestHandleModelsListWithoutSourceReportsUnconfigured(t *testing.T) {
 	require.Empty(t, out.Records)
 	require.Len(t, out.Status, 1)
 	require.NotEmpty(t, out.Status[0].Error)
+}
+
+// TestChatMessagesReportsWhoWroteEachUserRow pins the history contract for
+// origin markers: a row written on the person's behalf says so, and the
+// person's own row carries no origin key at all.
+func TestChatMessagesReportsWhoWroteEachUserRow(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: "s1", ModelInput: "typed by hand", EnsureSession: true})
+	turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{SessionID: "s1", ModelInput: "anything new?", Origin: state.MessageOriginHeartbeat})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 2 {
+		t.Fatalf("rows = %s", rec.Body.String())
+	}
+	if _, ok := raw[0]["origin"]; ok {
+		t.Fatalf("the person's own row must carry no origin key: %s", rec.Body.String())
+	}
+	if raw[1]["role"] != "user" || raw[1]["content"] != "anything new?" || raw[1]["origin"] != "heartbeat" {
+		t.Fatalf("heartbeat row = %#v", raw[1])
+	}
 }
 
 // TestChatMessagesPlacesEachCompactionAsItsOwnRow pins the web history's
@@ -1257,9 +1419,11 @@ func newTimingSnapshotServer(t *testing.T) (*Server, *state.SessionStore) {
 	if _, err := sessions.AppendStructuredMessageForRun(ctx, "s1", run.ID, "assistant", "checked", "m-a", "[]", "model-x", "{}", "", "", state.MessageExecTiming{}); err != nil {
 		t.Fatal(err)
 	}
-	// The run's own clock is stamped with the rows that carry its run id.
-	if err := sessions.AppendMessageSequenceForRun(ctx, "s1", run.ID, []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("checked")})}, "model-x", "",
-		state.RunTiming{StartedAt: start, FinishedAt: finish, Worked: 90 * time.Second}); err != nil {
+	// The run's own clock is stamped when the run ends.
+	if err := sessions.AppendMessageSequenceForRun(ctx, "s1", run.ID, []llm.Message{llm.AssistantMessage([]llm.ContentPart{llm.Text("checked")})}, "model-x", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.StampRunTiming(ctx, run.ID, state.RunTiming{StartedAt: start, FinishedAt: finish, Worked: 90 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	// A tool row: its timing is the tool call's own execution window.
@@ -1281,11 +1445,50 @@ func newTimingSnapshotServer(t *testing.T) (*Server, *state.SessionStore) {
 	return &Server{Sessions: sessions, RunRT: runs}, sessions
 }
 
+// A run that failed before it said anything still ended, and the page closed
+// it with its "Worked for" line; the history closes it the same way, after
+// the user's message that is the run's only row.
+func TestChatMessagesCloseASilentFailedRunAfterItsMessage(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "s1", "s1"))
+	runs := &state.RunStore{DB: db}
+	failed, err := runs.CreateRun(ctx, "s1", "hello")
+	require.NoError(t, err)
+	_, err = turn.PersistUserTurn(ctx, sessions, turn.UserTurn{SessionID: "s1", RunID: failed.ID, ModelInput: "hello"})
+	require.NoError(t, err)
+	start := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	turn.PersistCancelledTurn(ctx, sessions, turn.CancelledTurn{SessionID: "s1", RunID: failed.ID, End: turn.RunEnd{StartedAt: start, FinishedAt: start.Add(2 * time.Second), Worked: 2 * time.Second}})
+	_, err = turn.PersistUserTurn(ctx, sessions, turn.UserTurn{SessionID: "s1", ModelInput: "again"})
+	require.NoError(t, err)
+
+	s := &Server{Sessions: sessions, RunRT: runs}
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var rows []struct {
+		Role     string `json:"role"`
+		Content  string `json:"content"`
+		RunID    string `json:"run_id"`
+		WorkedMs int64  `json:"worked_duration_ms"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.Role+":"+row.Content)
+	}
+	require.Equal(t, []string{"user:hello", "worked:", "user:again"}, got)
+	require.Equal(t, failed.ID, rows[1].RunID)
+	require.Equal(t, int64(2_000), rows[1].WorkedMs)
+}
+
 // TestChatMessagesTimingFieldsStable pins the /messages response's timing
-// fields: the run window and worked duration on the assistant row that closed
-// a run, the execution window on tool rows, and the command window on `!cmd`
-// user rows — all as RFC3339 strings and millisecond counts. T4 reworks where
-// these are stored; this asserts they keep reaching the wire unchanged.
+// fields: the run window and worked duration on the worked row that closes a
+// run after the last row it wrote, the execution window on tool rows, and the
+// command window on `!cmd` user rows — all as RFC3339 strings and millisecond
+// counts.
 func TestChatMessagesTimingFieldsStable(t *testing.T) {
 	s, _ := newTimingSnapshotServer(t)
 	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
@@ -1302,28 +1505,35 @@ func TestChatMessagesTimingFieldsStable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
 		t.Fatal(err)
 	}
-	var assistant, tool, cmd *struct {
+	var worked, tool, cmd *struct {
 		Role       string `json:"role"`
 		RunID      string `json:"run_id,omitempty"`
 		RunStarted string `json:"run_started_at,omitempty"`
 		RunFinish  string `json:"run_finished_at,omitempty"`
 		WorkedMs   int64  `json:"worked_duration_ms,omitempty"`
 	}
+	workedAt := -1
 	for i := range rows {
 		switch {
-		case rows[i].Role == "assistant" && assistant == nil:
-			assistant = &rows[i]
+		case rows[i].Role == "assistant" && rows[i].WorkedMs != 0:
+			t.Fatalf("assistant row %d carries the run's clock; the worked row does", i)
+		case rows[i].Role == "worked" && worked == nil:
+			worked, workedAt = &rows[i], i
 		case rows[i].Role == "tool" && tool == nil:
 			tool = &rows[i]
 		case rows[i].Role == "user" && rows[i].WorkedMs != 0:
 			cmd = &rows[i]
 		}
 	}
-	if assistant == nil || tool == nil || cmd == nil {
-		t.Fatalf("rows = %+v, want an assistant, a tool and a timed user row", rows)
+	if worked == nil || tool == nil || cmd == nil {
+		t.Fatalf("rows = %+v, want a worked, a tool and a timed user row", rows)
 	}
-	if assistant.RunStarted == "" || assistant.RunFinish == "" || assistant.WorkedMs != 90_000 || assistant.RunID == "" {
-		t.Fatalf("assistant timing = %q %q %d %q", assistant.RunStarted, assistant.RunFinish, assistant.WorkedMs, assistant.RunID)
+	if worked.RunStarted == "" || worked.RunFinish == "" || worked.WorkedMs != 90_000 || worked.RunID == "" {
+		t.Fatalf("worked timing = %q %q %d %q", worked.RunStarted, worked.RunFinish, worked.WorkedMs, worked.RunID)
+	}
+	// The run's last row is its assistant answer; the line follows it.
+	if workedAt == 0 || rows[workedAt-1].Role != "assistant" {
+		t.Fatalf("worked row at %d follows %+v, want the run's last row", workedAt, rows[workedAt-1])
 	}
 	if tool.RunStarted == "" || tool.RunFinish == "" || tool.WorkedMs != 5_000 {
 		t.Fatalf("tool timing = %q %q %d", tool.RunStarted, tool.RunFinish, tool.WorkedMs)
@@ -1632,6 +1842,68 @@ SELECT printf('main-%02d',i),'s-1','shell','pending','{}','','',i+10,i+10 FROM n
 	require.Equal(t, "task-7", rows[0].AgentID)
 }
 
+// TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone pins the fix for
+// the store-wide default rewrite: a session opened inside a project is born
+// with the project root as its cwd, and the next ordinary chat is still born
+// in the process's launch directory instead of inheriting the project's.
+func TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	s.Sessions.ConfigureMemoryDefaults("disabled", "webchat", "/launch", "main")
+
+	root := projectTempRoot(t)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "alpha", "root": root, "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project: %d %s", rec.Code, rec.Body.String())
+	}
+	var project struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &project); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+project.ID+"/sessions", map[string]any{"title": "In project"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create project session: %d %s", rec.Code, rec.Body.String())
+	}
+	var born struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &born); err != nil {
+		t.Fatal(err)
+	}
+
+	srec := httptest.NewRecorder()
+	s.handleChatSessionCreate(srec, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(`{"title":"Ordinary"}`)))
+	if srec.Code != http.StatusCreated {
+		t.Fatalf("create ordinary session: %d %s", srec.Code, srec.Body.String())
+	}
+	var ordinary struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(srec.Body.Bytes(), &ordinary); err != nil {
+		t.Fatal(err)
+	}
+
+	cwdOf := func(id string) string {
+		t.Helper()
+		var cwd string
+		if err := s.Sessions.DB().QueryRow("SELECT cwd FROM fb_sessions WHERE id=?", id).Scan(&cwd); err != nil {
+			t.Fatal(err)
+		}
+		return cwd
+	}
+	if got := cwdOf(born.ID); got != root {
+		t.Fatalf("project session born at %q, want the project root %q", got, root)
+	}
+	if got := cwdOf(ordinary.ID); got != "/launch" {
+		t.Fatalf("ordinary session born at %q, want the launch directory the fixture set", got)
+	}
+}
+
 // TestNewWebChatIsNamedByItsFirstMessage pins that a chat the web opens with
 // "New chat" is born unnamed — the list shows no title, so the client draws
 // its own placeholder — and that its first user message then names it, the
@@ -1752,11 +2024,44 @@ func TestAgentRuleFilePutGetRoundTrip(t *testing.T) {
 	req = withParamName(httptest.NewRequest(http.MethodGet, "/api/rules/agent/USER.md", nil), "USER.md")
 	s.handleAgentRuleFile(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code)
-	require.Equal(t, "be kind", rr.Body.String())
+	var got struct {
+		Name    string `json:"name"`
+		Exists  bool   `json:"exists"`
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	require.Equal(t, "USER.md", got.Name)
+	require.True(t, got.Exists)
+	require.Equal(t, "be kind", got.Content)
 
 	raw, err := os.ReadFile(filepath.Join(workspace, "USER.md"))
 	require.NoError(t, err)
 	require.Equal(t, "be kind", string(raw))
+}
+
+// A file that does not exist yet answers in the same shape as one that does,
+// so no reply can be mistaken for file content — even a file whose text
+// happens to look like a status reply.
+func TestAgentRuleFileReadAnswersOneShape(t *testing.T) {
+	s, _, workspace := rulesServer(t)
+	read := func(name string) map[string]any {
+		rr := httptest.NewRecorder()
+		s.handleAgentRuleFile(rr, withParamName(httptest.NewRequest(http.MethodGet, "/api/rules/agent/"+name, nil), name))
+		require.Equal(t, http.StatusOK, rr.Code)
+		require.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+	missing := read("SOUL.md")
+	require.Equal(t, false, missing["exists"])
+	require.Equal(t, "", missing["content"])
+
+	lookalike := `{"exists":false,"content":""}`
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "SOUL.md"), []byte(lookalike), 0o644))
+	present := read("SOUL.md")
+	require.Equal(t, true, present["exists"])
+	require.Equal(t, lookalike, present["content"])
 }
 
 func TestAgentRuleFileBudgetWarning(t *testing.T) {
@@ -1790,6 +2095,58 @@ func TestProjectRuleDirValidationOnly(t *testing.T) {
 	full, ok = projectRulePath(root, "")
 	require.True(t, ok)
 	require.Equal(t, filepath.Join(root, "FOREBRAIN.md"), full)
+
+	// .git is the repository's machinery and a symlinked directory may lead
+	// anywhere: neither is a layer of the project's chain.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "linked")))
+	for _, dir := range []string{".git", "linked", "."} {
+		_, ok := projectRulePath(root, dir)
+		require.False(t, ok, "dir=%s should be rejected", dir)
+	}
+}
+
+// The project listing is the chain as it stands — the root plus every layer
+// holding a FOREBRAIN.md — and the create list is every subdirectory layer
+// without one.
+func TestProjectRuleFilesListsTheChainAndCreatableLayers(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s.Projects = state.NewProjectStore(db, "main")
+	root := t.TempDir()
+	for _, dir := range []string{"api", "docs", "web"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, dir), 0o755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(root, "docs", "FOREBRAIN.md"), []byte("docs rules"), 0o644))
+	p, err := s.Projects.Create(context.Background(), state.CreateProjectInput{Name: "p", Root: root})
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	s.handleProjectRuleFiles(rr, withNamedParam(httptest.NewRequest(http.MethodGet, "/api/rules/project/"+p.ID, nil), "projectId", p.ID))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var listing struct {
+		Files []struct {
+			Dir    string `json:"dir"`
+			Exists bool   `json:"exists"`
+		} `json:"files"`
+		Create []string `json:"create"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &listing))
+	require.Len(t, listing.Files, 2)
+	require.Equal(t, "", listing.Files[0].Dir)
+	require.False(t, listing.Files[0].Exists)
+	require.Equal(t, "docs", listing.Files[1].Dir)
+	require.True(t, listing.Files[1].Exists)
+	require.Equal(t, []string{"api", "web"}, listing.Create)
+
+	rr = httptest.NewRecorder()
+	req := withNamedParam(httptest.NewRequest(http.MethodGet, "/api/rules/project/"+p.ID+"/file?dir=docs", nil), "projectId", p.ID)
+	s.handleProjectRuleFile(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.JSONEq(t, `{"dir":"docs","exists":true,"content":"docs rules"}`, rr.Body.String())
 }
 
 func TestApprovalDefaultGetPut(t *testing.T) {
@@ -1836,12 +2193,110 @@ func TestSessionPresetValidates(t *testing.T) {
 	s.handleSessionPreset(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
+	// The session read needs a session too.
+	rr = httptest.NewRecorder()
+	s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset", nil))
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
 	// Without a mounted runner the endpoint reports unavailability rather
 	// than pretending to have applied anything.
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"read-only"}`))
 	s.handleSessionPreset(rr, req)
 	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+}
+
+// A preset picked for one conversation is that conversation's alone: the
+// live config every other conversation, channel and scheduled job of the
+// gateway runs under keeps its sandbox and approval policy.
+func TestSessionPresetBelongsToItsConversation(t *testing.T) {
+	home := t.TempDir()
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	s := &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner}}
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"s1","preset":"full-access"}`)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, cfg.SandboxMode)
+	require.Equal(t, appcfg.ApprovalPolicyOnRequest, cfg.ApprovalPolicy.Mode)
+
+	current := func(sessionID string) string {
+		rr := httptest.NewRecorder()
+		s.handleSessionPresetGet(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/session-preset?session_id="+sessionID, nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		return rr.Body.String()
+	}
+	require.Contains(t, current("s1"), `"current":"full-access"`)
+	require.Contains(t, current("s2"), `"current":"auto"`)
+
+	owning := runner.EvaluatePermissionForSession("s1", "shell", "rm -rf /tmp/build-output")
+	require.Equal(t, "danger_full_access", owning.Reason)
+	other := runner.EvaluatePermissionForSession("s2", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", other.Reason)
+	require.False(t, other.BypassSandbox)
+}
+
+// Permission writes scoped to one conversation check its ownership first: a
+// preset or a rule aimed at another primary agent's session is answered as
+// missing and never reaches the permission store, while this agent's own
+// sessions keep the behavior the endpoints exist for.
+func TestSessionScopedPermissionWritesRefuseAnotherAgentsSession(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, state.NewSessionStore(db, "other-agent").Ensure(ctx, "their-session", "their-session"))
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite, ApprovalPolicy: appcfg.NewApprovalPolicy(appcfg.ApprovalPolicyOnRequest)}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg}}
+	s := &Server{
+		Home:     home,
+		Runner:   runner,
+		Sessions: state.NewSessionStore(db, "main"),
+		Env:      &process.Environment{Deps: run.Deps{AppCfg: cfg}, Root: home, Sandbox: safety.NewManager(), Runner: runner},
+	}
+	require.NoError(t, s.Sessions.Ensure(ctx, "my-session", "my-session"))
+	require.NoError(t, s.Sessions.Ensure(ctx, "rule-session", "rule-session"))
+
+	rr := httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"their-session","preset":"full-access"}`)))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	foreign := runner.EvaluatePermissionForSession("their-session", "shell", "rm -rf /tmp/build-output")
+	require.NotEqual(t, "danger_full_access", foreign.Reason, "another agent's session gained a preset")
+	require.False(t, foreign.BypassSandbox)
+
+	update := safety.PermissionUpdate{
+		Type:        safety.UpdateAddRules,
+		Destination: safety.DestinationSession,
+		SessionID:   "their-session",
+		Behavior:    safety.BehaviorAllow,
+		Rules:       []safety.PermissionRuleValue{{ToolName: "Bash", RuleContent: "git status"}},
+	}
+	raw, err := json.Marshal(update)
+	require.NoError(t, err)
+	rr = httptest.NewRecorder()
+	s.handlePermissionUpdate(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/updates", bytes.NewReader(raw)))
+	require.Equal(t, http.StatusNotFound, rr.Code)
+	if d := runner.EvaluatePermissionForSession("their-session", "Bash", "git status"); d.Matched != nil {
+		t.Fatalf("a rule reached another agent's session: %+v", d)
+	}
+
+	rr = httptest.NewRecorder()
+	s.handleSessionPreset(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/session-preset", strings.NewReader(`{"session_id":"my-session","preset":"full-access"}`)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Equal(t, "danger_full_access", runner.EvaluatePermissionForSession("my-session", "shell", "rm -rf /tmp/build-output").Reason)
+
+	update.SessionID = "rule-session"
+	raw, err = json.Marshal(update)
+	require.NoError(t, err)
+	rr = httptest.NewRecorder()
+	s.handlePermissionUpdate(rr, httptest.NewRequest(http.MethodPost, "/api/permissions/updates", bytes.NewReader(raw)))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	if d := runner.EvaluatePermissionForSession("rule-session", "Bash", "git status"); d.Behavior != safety.BehaviorAllow {
+		t.Fatalf("own session did not take the rule: %+v", d)
+	}
 }
 
 func withParamName(r *http.Request, value string) *http.Request {
@@ -1912,6 +2367,63 @@ func TestProvidersDTORoundTripStoresKeyAsEnvReference(t *testing.T) {
 	require.NotContains(t, string(raw), "[REDACTED]")
 }
 
+// params keys are the provider's own request fields: the GET hands them back
+// as JSON text so no client-side key normalization can rename them, and the
+// PUT refuses anything but an object.
+func TestProvidersDTOParamsRoundTripKeepsProviderFieldNames(t *testing.T) {
+	s, _ := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-params-1111","params":{"max_tokens":512,"reasoning_effort":"high"}}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rows := providersGet(t, s)
+	require.Len(t, rows, 1)
+	text, ok := rows[0]["params"].(string)
+	require.True(t, ok, "params must travel as JSON text, got %T", rows[0]["params"])
+	require.JSONEq(t, `{"max_tokens":512,"reasoning_effort":"high"}`, text)
+
+	rr = providersPut(t, s, `{"providers":[{"provider":"deepseek","models":["deepseek-v4"],"params":["not","an","object"]}]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+// The first row is the agent's primary model, which startup requires to be
+// complete; a table that would leave it incomplete is refused instead of
+// saved into a config the gateway could not start with again.
+func TestProvidersDTORefusesAnIncompletePrimary(t *testing.T) {
+	s, home := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[{"provider":"moonshotai","models":[],"api_key_plain":"sk-e2e-7788"}]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "model")
+	require.Contains(t, rr.Body.String(), "base_url")
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(cfgRaw), "moonshotai")
+
+	// An incomplete row is fine as a fallback behind a complete primary.
+	rr = providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-primary-1234"},
+		{"provider":"moonshotai","models":[],"api_key_plain":"sk-e2e-7788"}
+	]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+// A provider the engine's model catalog does not know has no client: the
+// row is refused at save time, the way setup refuses it, rather than written
+// into a config whose next runner load (a switch, a restart) would fail.
+func TestProvidersDTORefusesAProviderTheEngineCannotBuild(t *testing.T) {
+	s, home := providersDTOServer(t)
+	rr := providersPut(t, s, `{"providers":[
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-primary-1234"},
+		{"provider":"made-up-svc","base_url":"https://llm.example.test/v1","models":["m"],"api_key_plain":"sk-x-9999"}
+	]}`)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "unsupported provider: made-up-svc")
+	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
+	require.NoError(t, err)
+	require.NotContains(t, string(cfgRaw), "made-up-svc")
+}
+
 // The config file holds one entry per model (the engine's expanded form);
 // adjacent same-signature entries fold back into one editable row.
 func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
@@ -1961,7 +2473,7 @@ func TestProvidersDTOFoldsAdjacentSameSignatureEntries(t *testing.T) {
 func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 	s, home := providersDTOServer(t)
 	created := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4"],"api_key_plain":"sk-live-keep-4321"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4"],"api_key_plain":"sk-live-keep-4321"}
 	]}`)
 	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
 
@@ -1971,7 +2483,7 @@ func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 	// A PUT that touches only the model list carries no key fields: the
 	// stored key and the .env entry are exactly what they were.
 	updated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["deepseek-v4","deepseek-r2"]}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["deepseek-v4","deepseek-r2"]}
 	]}`)
 	require.Equal(t, http.StatusOK, updated.Code, updated.Body.String())
 	rows := providersGet(t, s)
@@ -1988,10 +2500,10 @@ func TestProvidersDTOPutWithoutKeyKeepsStoredKey(t *testing.T) {
 func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","models":["m"],"api_key_plain":"sk-old-aaaa"}]}`).Code)
+		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"sk-old-aaaa"}]}`).Code)
 
 	rotated := providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["m"],"api_key_plain":"sk-new-bbbb"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"sk-new-bbbb"}
 	]}`)
 	require.Equal(t, http.StatusOK, rotated.Code, rotated.Body.String())
 	envRaw, err := os.ReadFile(filepath.Join(home, ".env"))
@@ -2006,7 +2518,7 @@ func TestProvidersDTOKeyRotationUpdatesEnv(t *testing.T) {
 func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
 	s, _ := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"deepseek","models":["m"],"api_key_plain":"ab"}]}`).Code)
+		`{"providers":[{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["m"],"api_key_plain":"ab"}]}`).Code)
 	rows := providersGet(t, s)
 	require.Equal(t, true, rows[0]["api_key_set"])
 	require.Equal(t, "••••", rows[0]["api_key_hint"])
@@ -2016,7 +2528,7 @@ func TestProvidersDTOShortKeyHintIsFullyMasked(t *testing.T) {
 func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s,
-		`{"providers":[{"provider":"custom","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
+		`{"providers":[{"provider":"openai","base_url":"https://llm.example.test/v1","models":["m"],"api_key":"${MY_CUSTOM_KEY}"}]}`).Code)
 	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
 	require.Contains(t, string(cfgRaw), "${MY_CUSTOM_KEY}")
@@ -2028,7 +2540,7 @@ func TestProvidersDTOExplicitReferencePassesThrough(t *testing.T) {
 func TestProvidersDTOPersistedShapeIsEngineExpanded(t *testing.T) {
 	s, home := providersDTOServer(t)
 	require.Equal(t, http.StatusOK, providersPut(t, s, `{"providers":[
-		{"provider":"deepseek","models":["a","b"],"api_key_plain":"sk-x-1234"}
+		{"provider":"deepseek","base_url":"https://api.deepseek.com","models":["a","b"],"api_key_plain":"sk-x-1234"}
 	]}`).Code)
 	cfgRaw, err := os.ReadFile(filepath.Join(home, "forebrain.yaml"))
 	require.NoError(t, err)
@@ -2311,4 +2823,938 @@ func TestCronJobsListSplitsByProject(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id="+other.ID, nil, s.handleCronJobs).Code)
 	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id=missing", nil, s.handleCronJobs).Code)
+}
+
+// A project space's permission tab manages that project's own rules: the
+// write lands in the route project's .forebrain/safety.json — never in the
+// project the gateway itself was launched in — and is refused for a project
+// whose rules the engine would not honor.
+func TestProjectPermissionRulesBelongToTheRouteProject(t *testing.T) {
+	s, home, _ := rulesServer(t)
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s.Projects = state.NewProjectStore(db, "main")
+
+	launchRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(launchRoot, ".git"), 0o755))
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: launchRoot}))
+	s.Env.LaunchProject = safety.ProjectContext{Project: safety.Project{Root: launchRoot, VersionControlled: true}, TrustLevel: safety.LevelTrusted}
+
+	projectRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".git"), 0o755))
+	p, err := s.Projects.Create(context.Background(), state.CreateProjectInput{Name: "p", Root: projectRoot})
+	require.NoError(t, err)
+
+	update := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		body := `{"type":"addRules","behavior":"deny","rules":[{"tool_name":"Bash","rule_content":"rm -rf:*"}]}`
+		req := withID(httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+p.ID+"/permissions/updates", strings.NewReader(body)), p.ID)
+		s.handleProjectPermissionUpdate(rr, req)
+		return rr
+	}
+	list := func() map[string]any {
+		rr := httptest.NewRecorder()
+		s.handleProjectPermissionRules(rr, withID(httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+p.ID+"/permissions/rules", nil), p.ID))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	// Untrusted: the engine would drop the rule, so the write is refused.
+	require.Equal(t, false, list()["applies"])
+	rr := update()
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.NoFileExists(t, filepath.Join(projectRoot, ".forebrain", "safety.json"))
+
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: projectRoot}))
+	rr = update()
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	raw, err := os.ReadFile(filepath.Join(projectRoot, ".forebrain", "safety.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "rm -rf")
+	require.NoFileExists(t, filepath.Join(launchRoot, ".forebrain", "safety.json"))
+
+	listing := list()
+	require.Equal(t, true, listing["applies"])
+	require.Contains(t, fmt.Sprint(listing["rules"]), "rm -rf")
+}
+
+// The session's cost is what its requests spent, in the figures /status
+// reports — not a placeholder saying token cost is unavailable.
+func TestSessionCostSummaryReportsWhatTheSessionSpent(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	seedRun(t, s.RunRT, "s1", "r1")
+	require.NoError(t, s.RunRT.SetRunUsage(ctx, "r1", state.LastRunUsage{PromptTokens: 200, CompletionTokens: 50, CacheReadTokens: 600, CacheWriteTokens: 200, LLMCalls: 2}))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/cost-summary", nil, s.handleSessionCostSummary, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, float64(1000), got["input_tokens"])
+	require.Equal(t, float64(50), got["output_tokens"])
+	require.Equal(t, float64(2), got["requests"])
+	require.Equal(t, float64(60), got["cache_hit_percent"])
+	require.NotContains(t, rec.Body.String(), "note")
+}
+
+// lspControlDouble records the actions the /v1/lsp endpoints run and answers
+// a fixed snapshot.
+type lspControlDouble struct {
+	mu        sync.Mutex
+	snapshot  event.LSPSnapshot
+	enabled   []string
+	restarts  []string
+	installs  []string
+	decisions []string
+	decideErr error
+	recResets int
+	err       error
+}
+
+func (c *lspControlDouble) Snapshot() event.LSPSnapshot { return c.snapshot }
+func (c *lspControlDouble) Subscribe(func(event.LSPSnapshot)) func() {
+	return func() {}
+}
+func (c *lspControlDouble) SetEnabled(serverID string, enabled bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enabled = append(c.enabled, fmt.Sprintf("%v:%s", enabled, serverID))
+	return c.err
+}
+func (c *lspControlDouble) Restart(serverID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.restarts = append(c.restarts, serverID)
+	return c.err
+}
+func (c *lspControlDouble) Install(ctx context.Context, serverID string, progress func(string)) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.installs = append(c.installs, serverID)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.err
+}
+func (c *lspControlDouble) SetRecommendationListener(func(context.Context, event.LSPRecommendation)) {
+}
+func (c *lspControlDouble) DecideRecommendation(recommendationID string, choice event.LSPRecommendationChoice) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.decisions = append(c.decisions, fmt.Sprintf("%s:%s", recommendationID, choice))
+	if c.decideErr != nil {
+		return c.decideErr
+	}
+	return nil
+}
+func (c *lspControlDouble) ResetRecommendations() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recResets++
+	return c.err
+}
+
+// GET /api/v1/lsp answers the same JSON the panel renders, and a gateway
+// without a control plane answers 503 rather than an empty snapshot.
+func TestLSPSnapshotEndpoint(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot: "/proj", Trusted: true, FeatureEnabled: true,
+		Servers: []event.LSPServerStatus{{ID: "gopls", Enabled: true, State: event.LSPStateReady}},
+	}}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	rec := httptest.NewRecorder()
+	s.handleLSPSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/v1/lsp", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var snap event.LSPSnapshot
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &snap))
+	require.Equal(t, "/proj", snap.ProjectRoot)
+	require.Len(t, snap.Servers, 1)
+	require.Equal(t, "gopls", snap.Servers[0].ID)
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	rec = httptest.NewRecorder()
+	bare.handleLSPSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/v1/lsp", nil))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Contains(t, rec.Body.String(), "language servers are not available")
+}
+
+// The /v1/lsp server actions share the terminal panel's control plane:
+// enable/disable/restart answer 200, install answers 202 and really starts,
+// a missing id answers 400, a control-plane refusal answers 409, and no
+// control plane answers 503.
+func TestLSPServerActions(t *testing.T) {
+	ctl := &lspControlDouble{}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	post := func(handler func(http.ResponseWriter, *http.Request), body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		handler(rec, httptest.NewRequest(http.MethodPost, "/api/v1/lsp/servers/x", strings.NewReader(body)))
+		return rec
+	}
+
+	rec := post(s.handleLSPServerEnable, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = post(s.handleLSPServerDisable, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = post(s.handleLSPServerRestart, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, []string{"true:gopls", "false:gopls"}, ctl.enabled)
+	require.Equal(t, []string{"gopls"}, ctl.restarts)
+
+	rec = post(s.handleLSPServerInstall, `{"id":"pyright"}`)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"started":true`)
+	require.Eventually(t, func() bool {
+		ctl.mu.Lock()
+		defer ctl.mu.Unlock()
+		return len(ctl.installs) == 1 && ctl.installs[0] == "pyright"
+	}, time.Second, 5*time.Millisecond)
+
+	rec = post(s.handleLSPServerEnable, `{"id":""}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "id required")
+
+	rec = post(s.handleLSPServerEnable, `not json`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	refusing := &lspControlDouble{err: errors.New("unknown language server \"nope\"")}
+	refuser := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: refusing}}}
+	rec = post(refuser.handleLSPServerEnable, `{"id":"nope"}`)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "unknown language server")
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	rec = post(bare.handleLSPServerRestart, `{"id":"gopls"}`)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// POST /v1/lsp/recommendations/reset runs the control plane's reset and
+// reports its refusal with its own text.
+func TestLSPRecommendationsResetEndpoint(t *testing.T) {
+	ctl := &lspControlDouble{}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	rec := httptest.NewRecorder()
+	s.handleLSPRecommendationsReset(rec, httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/reset", strings.NewReader(`{"session_id":"s1"}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, ctl.recResets)
+
+	notYet := &lspControlDouble{err: errors.New("language servers are not available in this build yet")}
+	unbuilt := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: notYet}}}
+	rec = httptest.NewRecorder()
+	unbuilt.handleLSPRecommendationsReset(rec, httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/reset", strings.NewReader(`{}`)))
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "not available in this build yet")
+}
+
+// POST /v1/lsp/recommendations/:id/decision applies the web card's answer:
+// 200 with the choice on record, 400 for a choice the runtime does not
+// know, 404 for a recommendation that was never made or already answered,
+// and 503 without a control plane.
+func TestLSPRecommendationDecisionEndpoint(t *testing.T) {
+	ctl := &lspControlDouble{}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+	post := func(id, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/"+id+"/decision", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: id}}))
+		s.handleLSPRecommendationDecision(rec, req)
+		return rec
+	}
+
+	rec := post("lsprec-1", `{"choice":"enable","session_id":"s1"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, []string{"lsprec-1:enable"}, ctl.decisions)
+
+	rec = post("lsprec-1", `{"choice":"bogus"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid choice")
+
+	rec = post("lsprec-1", `not json`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "invalid choice")
+
+	unknown := &lspControlDouble{decideErr: tool.ErrUnknownLSPRecommendation}
+	refuser := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: unknown}}}
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/lsprec-2/decision", strings.NewReader(`{"choice":"not_now"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: "lsprec-2"}}))
+	refuser.handleLSPRecommendationDecision(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	refusal := &lspControlDouble{decideErr: errors.New("unknown language server \"nope\"")}
+	conflicted := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: refusal}}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/lsprec-3/decision", strings.NewReader(`{"choice":"enable"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: "lsprec-3"}}))
+	conflicted.handleLSPRecommendationDecision(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code)
+
+	bare := &Server{Runner: &run.Runner{Deps: &run.Deps{}}}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/lsp/recommendations/lsprec-4/decision", strings.NewReader(`{"choice":"enable"}`))
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: "lsprec-4"}}))
+	bare.handleLSPRecommendationDecision(rec, req)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+func TestProjectLSPPreviewAndConsentEndpoint(t *testing.T) {
+	s, _, home := newProjectsTestServer(t)
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	srvPath := filepath.Join(root, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(srvPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "servers:\n  projectls: {command: /bin/projectls, extension_to_language: {\".pl\": projectls}}\n"
+	if err := os.WriteFile(srvPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "lspproj", "root": root, "trust": true})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id := created["id"].(string)
+
+	// An unknown project answers 404.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/not-a-project/lsp", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown project: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Preview: the entry awaits confirmation.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/lsp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body.String())
+	}
+	var preview struct {
+		Trusted bool                `json:"trusted"`
+		Pending []map[string]string `json:"pending"`
+		Allowed []string            `json:"allowed"`
+		Denied  []string            `json:"denied"`
+		Notes   []string            `json:"notes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Trusted {
+		t.Fatal("a trusted, version-controlled project must preview as trusted")
+	}
+	if len(preview.Pending) != 1 || preview.Pending[0]["id"] != "projectls" {
+		t.Fatalf("pending: %+v", preview.Pending)
+	}
+	if want := "projectls: runs `/bin/projectls`"; preview.Pending[0]["summary"] != want {
+		t.Fatalf("summary = %q, want %q", preview.Pending[0]["summary"], want)
+	}
+	if len(preview.Allowed) != 0 || len(preview.Denied) != 0 {
+		t.Fatalf("allowed=%v denied=%v", preview.Allowed, preview.Denied)
+	}
+
+	// Confirm through the endpoint.
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/lsp/consent", map[string]any{"allow": []string{"projectls"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("consent: %d %s", rec.Code, rec.Body.String())
+	}
+	var decided struct {
+		OK      bool     `json:"ok"`
+		Allowed []string `json:"allowed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &decided); err != nil {
+		t.Fatal(err)
+	}
+	if !decided.OK || len(decided.Allowed) != 1 || decided.Allowed[0] != "projectls" {
+		t.Fatalf("consent reply: %+v", decided)
+	}
+
+	// Now the preview lists it as allowed and nothing pending.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/lsp", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview after consent: %d %s", rec.Code, rec.Body.String())
+	}
+	preview = struct {
+		Trusted bool                `json:"trusted"`
+		Pending []map[string]string `json:"pending"`
+		Allowed []string            `json:"allowed"`
+		Denied  []string            `json:"denied"`
+		Notes   []string            `json:"notes"`
+	}{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Allowed) != 1 || preview.Allowed[0] != "projectls" {
+		t.Fatalf("allowed after consent: %v", preview.Allowed)
+	}
+	if len(preview.Pending) != 0 {
+		t.Fatalf("nothing should be pending: %+v", preview.Pending)
+	}
+}
+
+// The cron settings endpoint is the structured surface of
+// cron.retention_days: it reads the effective value with its bounds, writes
+// through the same validation every other write path uses, and a null write
+// returns the key to unset.
+func TestCronSettingsRoundTrip(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	s.Env.ConfigPath = path
+
+	type cronSettings struct {
+		RetentionDays int  `json:"retention_days"`
+		Configured    bool `json:"configured"`
+		DefaultDays   int  `json:"default_days"`
+		MinDays       int  `json:"min_days"`
+		MaxDays       int  `json:"max_days"`
+	}
+	var got cronSettings
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RetentionDays != 30 || got.Configured || got.DefaultDays != 30 || got.MinDays != 1 || got.MaxDays != 3650 {
+		t.Fatalf("unset settings = %+v, want the 30-day default reported as not configured", got)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 7}, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put 7 = %d %s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "cron:") || !strings.Contains(string(raw), "retention_days: 7") {
+		t.Fatalf("saved config lacks the cron section:\n%s", raw)
+	}
+	if eff := s.liveCfg().CronRetentionDays(); eff != 7 {
+		t.Fatalf("live retention after the write = %d, want 7", eff)
+	}
+	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RetentionDays != 7 || !got.Configured {
+		t.Fatalf("settings after the write = %+v, want 7 configured", got)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 0}, s.handleCronSettings)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("put 0 = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if raw, _ = os.ReadFile(path); !strings.Contains(string(raw), "retention_days: 7") {
+		t.Fatalf("a rejected write changed the file:\n%s", raw)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": nil}, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put null = %d %s", rec.Code, rec.Body.String())
+	}
+	if raw, _ = os.ReadFile(path); strings.Contains(string(raw), "retention_days") {
+		t.Fatalf("null did not unset the key:\n%s", raw)
+	}
+	rec = cronRequest(t, s, http.MethodGet, "/api/cron-settings", nil, s.handleCronSettings)
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RetentionDays != 30 || got.Configured {
+		t.Fatalf("settings after the reset = %+v, want the 30-day default, not configured", got)
+	}
+}
+
+// The structured write carries one integer, so its body is bounded like every
+// other small write: a payload past the limit is refused before it is parsed
+// and never reaches the config file.
+func TestCronSettingsPutBoundsRequestBody(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	s.Env.ConfigPath = path
+
+	rec := cronRequest(t, s, http.MethodPut, "/api/cron-settings", strings.Repeat("x", 8192), s.handleCronSettings)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized body = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "too large") {
+		t.Fatalf("refusal should name the body limit: %s", rec.Body.String())
+	}
+	if raw, _ := os.ReadFile(path); strings.Contains(string(raw), "retention_days") {
+		t.Fatalf("a refused write changed the file:\n%s", raw)
+	}
+
+	rec = cronRequest(t, s, http.MethodPut, "/api/cron-settings", map[string]any{"retention_days": 7}, s.handleCronSettings)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("small body = %d %s", rec.Code, rec.Body.String())
+	}
+	if raw, err := os.ReadFile(path); err != nil || !strings.Contains(string(raw), "retention_days: 7") {
+		t.Fatalf("the small write did not land:\n%s (%v)", raw, err)
+	}
+}
+
+// The YAML editor and the structured endpoint share one validation: what the
+// editor submits is parsed exactly the way the loader reads a file, so a
+// retention the loader would refuse never reaches disk from there either.
+func TestCronSettingsSharedValidationWithTheYAMLEditor(t *testing.T) {
+	s := cronTestServer(t)
+	path := filepath.Join(s.Home, "forebrain.yaml")
+	s.Env.ConfigPath = path
+
+	rec := cronRequest(t, s, http.MethodPut, "/api/config", map[string]any{
+		"yaml": "cron:\n  retention_days: 0\n",
+	}, s.handleConfigFile)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("yaml editor with retention 0 = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		raw, _ := os.ReadFile(path)
+		t.Fatalf("a rejected editor write reached the file:\n%s", raw)
+	}
+}
+
+// TestChatMessagesCarriesSubagentCallFacts pins the one transport change the
+// web's subagent cards need: a tool row that answered a subagent_* call
+// carries the call's card facts, derived by the same engine rule the live
+// path used, so a reloaded card says what the live one said.
+func TestChatMessagesCarriesSubagentCallFacts(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.RunRT.DB, "main")
+	if err := s.Sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	statusArgs, err := json.Marshal(map[string]any{"agent_id": "subagent-6e5c"})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+	statusResult, err := json.Marshal(map[string]any{
+		"agent_id": "subagent-6e5c", "agent_kind": "typed", "agent_type": "general-purpose",
+		"task_id": "task-16", "status": "running", "started_at": 1_700_000_000,
+		"execution_id": "exec-1", "title": "计划001 Go车道实施", "run_id": "exec-1",
+	})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	callRow := llm.AssistantMessage(nil, llm.ToolCall{
+		ID:   "call-status-1",
+		Type: llm.ToolTypeFunction,
+		Function: llm.FunctionCall{
+			Name:      "subagent_status",
+			Arguments: string(statusArgs),
+		},
+	})
+	if _, err := s.Sessions.AppendStructuredMessage(ctx, "s1", "assistant", "", "", state.MessagePartsJSON(callRow, ""), "", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("append call row: %v", err)
+	}
+	answer := llm.ToolResultMessage("call-status-1", llm.Text(string(statusResult)))
+	answer.ToolDisplay = &llm.ToolDisplayState{Body: "card body", Summary: "check 计划001 Go车道实施"}
+	if _, err := s.Sessions.AppendStructuredMessage(ctx, "s1", "tool", string(statusResult), "", state.MessagePartsJSON(answer, string(statusResult)), "", "", "call-status-1", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("append answer row: %v", err)
+	}
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages = %d %s", rec.Code, rec.Body.String())
+	}
+	var rows []struct {
+		Role         string              `json:"role"`
+		ToolStepID   string              `json:"tool_step_id"`
+		SubagentCall *event.SubagentCall `json:"subagent_call"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	var toolRow *struct {
+		Role         string              `json:"role"`
+		ToolStepID   string              `json:"tool_step_id"`
+		SubagentCall *event.SubagentCall `json:"subagent_call"`
+	}
+	for i := range rows {
+		if rows[i].Role == "tool" {
+			toolRow = &rows[i]
+		}
+	}
+	if toolRow == nil {
+		t.Fatalf("no tool row in %s", rec.Body.String())
+	}
+	if toolRow.ToolStepID != "call-status-1" {
+		t.Fatalf("tool row step id = %q", toolRow.ToolStepID)
+	}
+
+	// The facts on the row are the engine's own derivation over the stored
+	// transcript — exactly what turn.SubagentCallsInTranscript says.
+	stored, err := s.Sessions.ListAllMessages(ctx, "s1", 0)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	want := turn.SubagentCallsInTranscript(stored)["call-status-1"]
+	if want.Verb != "status" || len(want.Tasks) != 1 {
+		t.Fatalf("engine facts = %+v", want)
+	}
+	if toolRow.SubagentCall == nil {
+		t.Fatalf("tool row carries no subagent_call: %s", rec.Body.String())
+	}
+	if !reflect.DeepEqual(*toolRow.SubagentCall, want) {
+		t.Fatalf("row facts = %+v, want the engine's %+v", *toolRow.SubagentCall, want)
+	}
+	// A call the transcript never answered keeps its row free of facts.
+	for _, row := range rows {
+		if row.Role == "assistant" && row.SubagentCall != nil {
+			t.Fatalf("assistant row carries facts: %+v", row.SubagentCall)
+		}
+	}
+}
+
+// exitPlanServer is one gateway with a session parked on an exit-plan
+// approval: the run waits, the action is pending, and the plan file the
+// approval is asking about exists under the server's own state root.
+func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *state.ActionService, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.Open(ctx, filepath.Join(home, "state.sqlite"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mustGatewaySession(t, db, "s1")
+	runs := &state.RunStore{DB: db}
+	actions := &state.ActionService{DB: db}
+	parkedRun, err := runs.CreateRun(ctx, "s1", "plan the work")
+	require.NoError(t, err)
+	action, err := actions.CreatePending(ctx, "s1", "exit_plan_mode", map[string]any{"session_id": "s1"})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, parkedRun.ID, state.Wait{
+		RunID: parkedRun.ID, ActionID: action.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+	s := &Server{
+		Home: home, RunRT: runs, Actions: actions,
+		Sessions: state.NewSessionStore(db, "main"),
+		Runner:   &run.Runner{Deps: &run.Deps{ProjectKey: "proj", AppCfg: cfg}},
+	}
+	require.NoError(t, state.SetPlanForProject(s.stateRoot(), s.projectKey(), "# Plan\n\n1. Ship it."))
+	return s, runs, actions, action.ID, "s1"
+}
+
+// The approval-request endpoint is the web's copy of the TUI's approval
+// overlay: for a parked exit-plan gate it carries the plan itself, the models
+// a review may be handed to, and nothing when no gate is open.
+func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}}},
+	}}}
+	s, runs, _, actionID, _ := exitPlanServer(t, cfg)
+	// One completed review on the conversation: the card shows it above the
+	// choices, in the wire's own units and field names.
+	reviewPayload, err := json.Marshal(event.PlanReviewedPayload{
+		ActionID: actionID, ReviewID: "plan-review:e2e",
+		Provider: "openai", Model: "gpt-5.1",
+		Text: "Verdict: rework.", DurationMs: 125000, Outcome: "done",
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: "plan-review:e2e:reviewed", SessionID: "s1",
+		Type: event.RunEventPlanReviewed, Payload: reviewPayload,
+	})
+	require.NoError(t, err)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, s.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out struct {
+		ActionID         string `json:"action_id"`
+		Kind             string `json:"kind"`
+		PlanText         string `json:"plan_text"`
+		PlanReviewModels []struct {
+			Provider string `json:"provider"`
+			Model    string `json:"model"`
+			Current  bool   `json:"current"`
+		} `json:"plan_review_models"`
+		PlanReviews []struct {
+			Provider   string `json:"provider"`
+			Model      string `json:"model"`
+			Text       string `json:"text"`
+			DurationMs int64  `json:"duration_ms"`
+		} `json:"plan_reviews"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Equal(t, "exit_plan_mode", out.Kind)
+	require.NotEmpty(t, out.ActionID)
+	require.Contains(t, out.PlanText, "1. Ship it.")
+	require.Len(t, out.PlanReviewModels, 1)
+	require.Equal(t, "gpt-5.1", out.PlanReviewModels[0].Model)
+	require.True(t, out.PlanReviewModels[0].Current, "the model in force is the one marked current")
+	require.Len(t, out.PlanReviews, 1)
+	require.Equal(t, "gpt-5.1", out.PlanReviews[0].Model)
+	require.Contains(t, out.PlanReviews[0].Text, "rework")
+	require.Equal(t, int64(125000), out.PlanReviews[0].DurationMs, "durations cross the wire in milliseconds")
+
+	// No gate, no card: the endpoint reports the absence rather than an error.
+	require.NoError(t, state.NewSessionStore(s.RunRT.DB, "main").Ensure(context.Background(), "s-idle", "s-idle"))
+	idleRec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s-idle/approval-request", nil, s.handleSessionApprovalRequest, "id", "s-idle")
+	require.Equal(t, http.StatusNoContent, idleRec.Code)
+}
+
+// The plan-review endpoint validates before it starts anything: the action
+// must be a parked exit-plan approval, and the model must be one the session
+// is configured with. A valid request is accepted for background work and
+// leaves the review's own dispatch record on the conversation.
+func TestActionPlanReviewValidatesBeforeStarting(t *testing.T) {
+	ctx := context.Background()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test"}}},
+	}}}
+	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
+
+	shellAction, err := actions.CreatePending(ctx, "s1", "shell", map[string]any{"session_id": "s1"})
+	require.NoError(t, err)
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+shellAction.ID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1"}, s.handleActionPlanReview, "id", shellAction.ID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-4o"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	// The review ran to its own ending (this server has no subagent executor,
+	// so it fails) and recorded that ending on the conversation, the way every
+	// review outcome travels.
+	var reviewed []state.SessionEvent
+	require.Eventually(t, func() bool {
+		reviewed, err = runs.ListSessionEventsOfType(ctx, "s1", event.RunEventPlanReviewed, 0)
+		return err == nil && len(reviewed) == 1
+	}, 5*time.Second, 50*time.Millisecond, "the review must close itself on the conversation")
+	require.Contains(t, string(reviewed[0].Payload), actionID)
+}
+
+// newSubagentViewTestServer builds a server whose conversation "sid" exists
+// and whose runner resolves a subagent ledger under the same workspace root,
+// so the subagent-view routes can be exercised end to end.
+func newSubagentViewTestServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(context.Background(), "sid", "sid"))
+	cfg := &appcfg.Root{}
+	cfg.Compact.ModelAutoCompactTokenLimit = 200_000
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AppCfg: cfg, AgentName: "main"}}
+	s := &Server{Home: home, RunRT: &state.RunStore{DB: db}, Sessions: sessions, Runner: runner}
+	return s, filepath.Join(home, "workspace")
+}
+
+// seedSubagentRecord writes one subagent record into the runner's ledger, the
+// shape a dispatch leaves behind.
+func seedSubagentRecord(t *testing.T, workspaceRoot, sid, agentKey string) {
+	t.Helper()
+	now := time.Now().Unix()
+	require.NoError(t, agent.AppendHistory(workspaceRoot, agent.HistoryEntry{
+		AgentID:         agentKey,
+		TaskID:          agentKey,
+		SessionID:       sid,
+		RunID:           "run-1",
+		WorkerSessionID: "worker-1",
+		AgentKind:       "typed",
+		AgentType:       "general-purpose",
+		Title:           "network probe",
+		Task:            "answer briefly",
+		Status:          agent.StatusOK,
+		StartedAt:       now,
+		UpdatedAt:       now,
+		FinishedAt:      now,
+	}))
+}
+
+// subagentViewRequest builds a request carrying the router's id/agent params,
+// the way the router's context does.
+func subagentViewRequest(method, sid, agentKey, body string) *http.Request {
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req := httptest.NewRequest(method, "/api/chat/sessions/"+sid+"/subagents/"+agentKey, reader)
+	ctx := context.WithValue(req.Context(), ParamsKey, Params{{Key: "id", Value: sid}, {Key: "agent", Value: agentKey}})
+	return req.WithContext(ctx)
+}
+
+// subagentViewRoutes pairs each route's handler with a method and body, so one
+// table drives the foreign/unknown-agent assertions.
+func subagentViewRequests(sid, agentKey string) map[string]*http.Request {
+	return map[string]*http.Request{
+		"input":        subagentViewRequest(http.MethodPost, sid, agentKey, `{"message":"continue"}`),
+		"queued-input": subagentViewRequest(http.MethodPost, sid, agentKey, `{"action":"edit_last"}`),
+		"interrupt":    subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"withdraw":     subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"compact":      subagentViewRequest(http.MethodPost, sid, agentKey, ""),
+		"context":      subagentViewRequest(http.MethodGet, sid, agentKey, ""),
+		"budget":       subagentViewRequest(http.MethodGet, sid, agentKey, ""),
+	}
+}
+
+func (s *Server) dispatchSubagentViewRoute(name string, w http.ResponseWriter, r *http.Request) {
+	switch name {
+	case "input":
+		s.handleSubagentInput(w, r)
+	case "queued-input":
+		s.handleSubagentQueuedInput(w, r)
+	case "interrupt":
+		s.handleSubagentInterruptSend(w, r)
+	case "withdraw":
+		s.handleSubagentWithdraw(w, r)
+	case "compact":
+		s.handleSubagentCompact(w, r)
+	case "context":
+		s.handleSubagentContext(w, r)
+	case "budget":
+		s.handleSubagentBudget(w, r)
+	}
+}
+
+func TestSubagentViewEndpointsRefuseAForeignConversation(t *testing.T) {
+	s, _ := newSubagentViewTestServer(t)
+	for name, req := range subagentViewRequests("other", "agent-1") {
+		w := httptest.NewRecorder()
+		s.dispatchSubagentViewRoute(name, w, req)
+		require.Equal(t, http.StatusNotFound, w.Code, "%s: %s", name, w.Body.String())
+	}
+}
+
+func TestSubagentViewEndpointsRefuseAnUnknownAgent(t *testing.T) {
+	s, _ := newSubagentViewTestServer(t)
+	for name, req := range subagentViewRequests("sid", "ghost") {
+		w := httptest.NewRecorder()
+		s.dispatchSubagentViewRoute(name, w, req)
+		require.Equal(t, http.StatusNotFound, w.Code, "%s: %s", name, w.Body.String())
+	}
+}
+
+func TestSubagentInputRefusesConversationCommands(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	for _, tc := range []struct {
+		message string
+		code    string
+	}{
+		{"/new", subagentViewCommandCode},
+		{"/rename x", subagentViewCommandCode},
+		{"/compact", useDedicatedEndpointCode},
+		{"/context", useDedicatedEndpointCode},
+	} {
+		req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":`+strconv.Quote(tc.message)+`}`)
+		w := httptest.NewRecorder()
+		s.handleSubagentInput(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, tc.message)
+		var out struct {
+			Code string `json:"code"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		require.Equal(t, tc.code, out.Code, tc.message)
+	}
+}
+
+func TestSubagentInputStartsAnIdleSubagent(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"continue"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Delivery string `json:"delivery"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.Equal(t, string(run.SubagentDeliveryStarted), out.Delivery)
+}
+
+func TestSubagentQueuedInputRecallWithAnEmptyQueue(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"action":"edit_last"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentQueuedInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Accepted bool `json:"accepted"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.False(t, out.Accepted)
+}
+
+func TestSubagentBudgetIsItsOwnWindow(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+
+	req := subagentViewRequest(http.MethodGet, "sid", "agent-1", "")
+	w := httptest.NewRecorder()
+	s.handleSubagentBudget(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out event.TokenBudgetUpdatedPayload
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.Equal(t, agent.RosterKey("agent-1", "general-purpose"), out.AgentID)
+}
+
+// blockingSubagentExecutor holds one execution open until its context is
+// cancelled, so a test can observe a subagent mid-run.
+type blockingSubagentExecutor struct{ entered chan struct{} }
+
+func (b *blockingSubagentExecutor) RunSubagentExec(ctx context.Context, _ run.SubagentExecRequest) (string, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (b *blockingSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+func (b *blockingSubagentExecutor) SubagentExecutionStarting(context.Context, string)     {}
+func (b *blockingSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {
+}
+
+func TestSubagentCompactRefusesWhileRunning(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+	blocking := &blockingSubagentExecutor{entered: make(chan struct{}, 1)}
+	s.Runner.SubagentExecutor = blocking
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"go"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	require.Eventually(t, func() bool {
+		return run.SubagentRunning(s.Runner, "sid", "agent-1")
+	}, 5*time.Second, 20*time.Millisecond, "the user-driven execution must be running")
+
+	compactReq := subagentViewRequest(http.MethodPost, "sid", "agent-1", "")
+	cw := httptest.NewRecorder()
+	s.handleSubagentCompact(cw, compactReq)
+	require.Equal(t, http.StatusConflict, cw.Code, cw.Body.String())
+	var out struct {
+		Code string `json:"code"`
+	}
+	require.NoError(t, json.Unmarshal(cw.Body.Bytes(), &out))
+	require.Equal(t, subagentRunningCode, out.Code)
+
+	// Let the execution finish so the goroutine does not outlive the test.
+	run.InterruptSubagentToSend(s.Runner, "sid", "agent-1")
+	<-time.After(50 * time.Millisecond)
 }

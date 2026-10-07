@@ -14,12 +14,21 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${FOREBRAIN_E2E_WORK:-${TMPDIR:-/tmp}/forebrain-web-e2e}"
 GW_PORT="${FOREBRAIN_E2E_GW_PORT:-8761}"
 LLM_PORT="${FOREBRAIN_E2E_LLM_PORT:-8762}"
+# Real-model mode puts the controllable flaky proxy between the gateway and the
+# provider, so a case can cut the network on demand (see flaky_proxy.py).
+PROXY_PORT="${FOREBRAIN_E2E_PROXY_PORT:-8763}"
+PROXY_UPSTREAM="${FOREBRAIN_E2E_PROXY_UPSTREAM:-https://open.bigmodel.cn/api/coding/paas/v4}"
 HOME_DIR="$WORK/home"
 PROJ="$WORK/proj"
 WEBUI="$WORK/webui"
 SHOTS="$WORK/shots"
 BIN="$WORK/forebrain"
 TOKEN=""
+# The proxy's control file. It is handed to the spec (via E2E_FLAKY_CONTROL)
+# only when a real run routes the provider through the proxy; empty otherwise,
+# so the disconnect case skips in fake mode.
+PROXY_CONTROL="$WORK/flaky-control"
+E2E_FLAKY_CONTROL=""
 
 die() { echo "web e2e: $*" >&2; exit 1; }
 
@@ -28,6 +37,7 @@ die() { echo "web e2e: $*" >&2; exit 1; }
 kill_stale() {
   pkill -f "$BIN gateway start" 2>/dev/null || true
   pkill -f "fake_provider.py reply $LLM_PORT" 2>/dev/null || true
+  pkill -f "flaky_proxy.py $PROXY_PORT" 2>/dev/null || true
   sleep 0.3
 }
 
@@ -35,6 +45,7 @@ cleanup() {
   local code=$?
   [ -n "${GW_PID:-}" ] && kill "$GW_PID" 2>/dev/null || true
   [ -n "${LLM_PID:-}" ] && kill "$LLM_PID" 2>/dev/null || true
+  [ -n "${PROXY_PID:-}" ] && kill "$PROXY_PID" 2>/dev/null || true
   kill_stale
   if [ "$code" -ne 0 ] && [ -f "$WORK/gateway.err" ]; then
     echo '--- gateway.err (last 50 lines) ---' >&2
@@ -84,16 +95,21 @@ gateway:
   auth:
     mode: token
     token: \${FOREBRAIN_GATEWAY_TOKEN}
+compact:
+  model_auto_compact_token_limit: 200000
 agents:
+  # The subagent conversation spec dispatches a general-purpose subagent; the
+  # capability is opt-in (agents.defaults.enable_subagent).
+  defaults:
+    enable_subagent: true
   definitions:
     main:
       primary: true
-      enable_subagent: false
       llm_providers:
-      - provider: zhipu
+      - provider: zhipuai
         model: glm-5.3-flash
         api_key: \${FOREBRAIN_E2E_ZHIPU_KEY}
-        base_url: https://open.bigmodel.cn/api/coding/paas/v4
+        base_url: http://127.0.0.1:$PROXY_PORT
 YAML
 else
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
@@ -102,11 +118,14 @@ gateway:
   auth:
     mode: token
     token: \${FOREBRAIN_GATEWAY_TOKEN}
+compact:
+  model_auto_compact_token_limit: 200000
 agents:
+  defaults:
+    enable_subagent: true
   definitions:
     main:
       primary: true
-      enable_subagent: false
       llm_providers:
       - provider: deepseek
         model: deepseek-chat
@@ -140,6 +159,21 @@ if [ "${FOREBRAIN_E2E_REAL_LLM:-0}" != "1" ]; then
     sleep 0.1
   done
   grep -q LISTENING "$WORK/provider.log" || die "fake provider never bound port $LLM_PORT"
+else
+  # 6b. Real-LLM mode: the provider goes through the flaky proxy, which starts
+  #     in `pass`. The control file is handed to the spec so a case can cut the
+  #     subagent's own request mid-stream. The proxy listens on 127.0.0.1 only
+  #     and logs no bodies or headers (see flaky_proxy.py).
+  printf 'pass\n' > "$PROXY_CONTROL"
+  E2E_FLAKY_CONTROL="$PROXY_CONTROL"
+  ( exec python3 "$REPO/scripts/acceptance/flaky_proxy.py" "$PROXY_PORT" \
+      "$PROXY_UPSTREAM" "$PROXY_CONTROL" > "$WORK/proxy.log" 2>&1 ) &
+  PROXY_PID=$!
+  for _ in $(seq 1 50); do
+    grep -q LISTENING "$WORK/proxy.log" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q LISTENING "$WORK/proxy.log" || die "flaky proxy never bound port $PROXY_PORT"
 fi
 
 # 7. Gateway. `exec` is load-bearing: without it $! is the subshell, the trap
@@ -159,17 +193,21 @@ for _ in $(seq 1 150); do
 done
 curl -fsS "http://127.0.0.1:$GW_PORT/healthz" > /dev/null || die "gateway never answered /healthz"
 
-# 9. Browser suite.
+# 9. Browser suite. FOREBRAIN_E2E_SPEC narrows the run to one spec file
+# (e.g. FOREBRAIN_E2E_SPEC=e2e/subagent-conversation.spec.ts) for targeted
+# re-verification; the full suite remains the gate.
+# shellcheck disable=SC2086
 ( cd "$REPO/frontend" && \
   E2E_BASE_URL="http://127.0.0.1:$GW_PORT" \
   E2E_TOKEN="$TOKEN" \
   E2E_GATEWAY_OUT="$WORK/gateway.out" \
   E2E_SHOTS="$SHOTS" \
   E2E_REAL_LLM="${FOREBRAIN_E2E_REAL_LLM:-0}" \
+  E2E_FLAKY_CONTROL="$E2E_FLAKY_CONTROL" \
   E2E_PROJECT_PARENT="$PROJ" \
   E2E_HOME="$HOME_DIR" \
   E2E_SKILL_ZIP="$WORK/fixtures/demo-skill.zip" \
-  corepack pnpm e2e )
+  corepack pnpm e2e ${FOREBRAIN_E2E_SPEC:-} )
 
 # 10. The CLI still authenticates with the header token.
 FOREBRAIN_HOME="$HOME_DIR" "$BIN" gateway status | grep -q 'status=200' \

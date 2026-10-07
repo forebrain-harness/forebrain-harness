@@ -38,6 +38,19 @@ const (
 	RunEventSessionSwitched        = "session_switched"
 	RunEventSubagentSpawned        = "subagent_spawned"
 	RunEventSubagentEnded          = "subagent_ended"
+	// RunEventSubagentInputDelivered reports a message the user sent a running
+	// subagent, delivered to the model at a tool boundary. The surface draws it
+	// as a user message in that subagent's own view; it persists, so a replay
+	// draws it too.
+	RunEventSubagentInputDelivered = "subagent_input_delivered"
+	// RunEventPlanReviewStarted is a second opinion being asked for an
+	// exit-plan approval. ReviewID is the dispatch id of the review run: the
+	// reviewer's subagent_spawned names it as its ParentToolCallID, the way a
+	// subagent names the tool call that dispatched it.
+	RunEventPlanReviewStarted = "plan_review_started"
+	// RunEventPlanReviewed ends one: Outcome is "done", "stopped",
+	// "timed_out" or "failed", Error the raw error of a failed review.
+	RunEventPlanReviewed = "plan_reviewed"
 	// The auto-continue lifecycle: a turn stopped by a spent usage allowance is
 	// resumed by the runtime itself once the allowance returns. Scheduled when
 	// the wait starts, then exactly one of started (the wait ran out and the
@@ -46,6 +59,9 @@ const (
 	RunEventAutoContinueScheduled = "auto_continue_scheduled"
 	RunEventAutoContinueStarted   = "auto_continue_started"
 	RunEventAutoContinueCancelled = "auto_continue_cancelled"
+	// RunEventHeartbeatFired announces a heartbeat starting a turn in its
+	// own conversation, so a page watching the run can draw its prompt.
+	RunEventHeartbeatFired = "heartbeat_fired"
 )
 
 type RunEvent struct {
@@ -107,24 +123,31 @@ func EncodePayload(v any) json.RawMessage {
 
 type TurnStartedPayload struct{}
 
-type TurnCompletedPayload struct {
-	Text      string `json:"text,omitempty"`
-	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
-	// PlanDone/PlanTotal/PlanActive carry the turn's final checklist state so
-	// every surface's worked line reports the same facts the terminal does.
-	// Empty when the turn had no checklist.
+// RunPlanFacts is a run's final checklist state, carried by every way a run
+// ends — completed, cancelled or failed — because every run closes with its
+// worked line and the terminal's names the checklist whichever way it ended.
+// Empty when the run had no checklist.
+type RunPlanFacts struct {
 	PlanDone   int    `json:"plan_done,omitempty"`
 	PlanTotal  int    `json:"plan_total,omitempty"`
 	PlanActive string `json:"plan_active,omitempty"`
 }
 
+type TurnCompletedPayload struct {
+	Text      string `json:"text,omitempty"`
+	ElapsedMS int64  `json:"elapsed_ms,omitempty"`
+	RunPlanFacts
+}
+
 type TurnCancelledPayload struct {
 	Message string `json:"message,omitempty"`
+	RunPlanFacts
 }
 
 type TurnErrorPayload struct {
 	Error   string `json:"error,omitempty"`
 	Message string `json:"message,omitempty"`
+	RunPlanFacts
 	// Title is the heading a surface shows above the error. A turn error that
 	// belongs to a named subsystem — an MCP server that did not start, say —
 	// says so here rather than in prose, so the surface can render the heading
@@ -191,6 +214,10 @@ type AutoContinueScheduledPayload struct {
 	Plan string `json:"plan,omitempty"`
 	// Attempt counts the continuations in a row this one would be, from 1.
 	Attempt int `json:"attempt,omitempty"`
+	// AgentID is the roster key of the subagent this continuation belongs to,
+	// empty for the conversation's own. It is what routes the notice to that
+	// subagent's view rather than the primary one.
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // AutoContinueStartedPayload marks the wait running out: the continuation turn
@@ -199,6 +226,9 @@ type AutoContinueScheduledPayload struct {
 type AutoContinueStartedPayload struct {
 	Attempt int    `json:"attempt,omitempty"`
 	Prompt  string `json:"prompt,omitempty"`
+	// AgentID is the roster key of the subagent whose continuation this is,
+	// empty for the conversation's own.
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // AutoContinueCancelledPayload ends a wait that never fired. Reason is one of
@@ -207,6 +237,16 @@ type AutoContinueStartedPayload struct {
 type AutoContinueCancelledPayload struct {
 	Reason string `json:"reason,omitempty"`
 	Error  string `json:"error,omitempty"`
+	// AgentID is the roster key of the subagent whose continuation this is,
+	// empty for the conversation's own.
+	AgentID string `json:"agent_id,omitempty"`
+}
+
+// HeartbeatFiredPayload marks a heartbeat starting a turn in its
+// conversation. Prompt is the message it sent, so a page watching a run it
+// did not start can draw that message as the turn's first row.
+type HeartbeatFiredPayload struct {
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // TurnFailedPayload distinguishes a terminal failure from a streamed error.
@@ -299,6 +339,23 @@ type SubagentSpawnedPayload struct {
 	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
 	TaskIndex        int    `json:"task_index"`
 	ExecutionID      string `json:"execution_id,omitempty"`
+	// The model this execution runs on, resolved once when it starts;
+	// surfaces show it rather than re-deriving it from the agent's type.
+	ModelProvider   string `json:"model_provider,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Origin is who started this execution: "user" when a message the user
+	// sent the subagent began it, empty when the dispatching agent did.
+	Origin string `json:"origin,omitempty"`
+}
+
+// SubagentInputDeliveredPayload reports a message the user sent a running
+// subagent, handed to the model at a tool boundary. A surface renders it as a
+// user message in that subagent's own view.
+type SubagentInputDeliveredPayload struct {
+	AgentID     string `json:"agent_id,omitempty"`
+	ExecutionID string `json:"execution_id,omitempty"`
+	Text        string `json:"text,omitempty"`
 }
 
 type SubagentEndedPayload struct {
@@ -313,6 +370,35 @@ type SubagentEndedPayload struct {
 	ParentToolCallID string `json:"parent_tool_call_id,omitempty"`
 	TaskIndex        int    `json:"task_index"`
 	ExecutionID      string `json:"execution_id,omitempty"`
+	// FinishedAtMs is the moment this execution actually stopped, so a
+	// surface stops its task clock there; a reaped execution's is when its
+	// process was last seen, not when it was reaped.
+	FinishedAtMs int64 `json:"finished_at_ms,omitempty"`
+}
+
+// PlanReviewStartedPayload opens one plan review: the user asked a model of
+// their choosing for a second opinion on the plan an exit-plan approval is
+// holding.
+type PlanReviewStartedPayload struct {
+	ActionID string `json:"action_id"`
+	ReviewID string `json:"review_id"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model"`
+	Label    string `json:"label,omitempty"`
+}
+
+// PlanReviewedPayload closes the review PlanReviewStartedPayload opened: its
+// outcome, and the review itself when there is one.
+type PlanReviewedPayload struct {
+	ActionID   string `json:"action_id"`
+	ReviewID   string `json:"review_id"`
+	Provider   string `json:"provider,omitempty"`
+	Model      string `json:"model"`
+	Label      string `json:"label,omitempty"`
+	Text       string `json:"text,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Outcome    string `json:"outcome"`
+	Error      string `json:"error,omitempty"`
 }
 
 type ModeChangedPayload struct {
@@ -321,6 +407,9 @@ type ModeChangedPayload struct {
 }
 
 type PendingInputUpdatedPayload struct {
+	// AgentID names the subagent whose channel preview changed; empty means
+	// the primary conversation's queue.
+	AgentID        string   `json:"agent_id,omitempty"`
 	PendingSteers  []string `json:"pending_steers"`
 	RejectedSteers []string `json:"rejected_steers"`
 	QueuedMessages []string `json:"queued_messages"`
@@ -328,9 +417,16 @@ type PendingInputUpdatedPayload struct {
 
 // QueuedInputReleasedPayload hands back, as a run ends, every message the
 // user sent it that it never took: the client that sent them sends them next
-// or takes them back, so they are never dropped with the run.
+// or takes them back, so they are never dropped with the run. Next lists the
+// messages to merge into one and send as the next turn, in the engine's
+// order; Inputs lists the messages that go back to the composer instead. The
+// engine decides which is which — the client only obeys.
 type QueuedInputReleasedPayload struct {
-	Inputs []ReleasedInput `json:"inputs"`
+	// AgentID names the subagent whose channel released input; empty means
+	// the primary conversation's queue.
+	AgentID string          `json:"agent_id,omitempty"`
+	Inputs  []ReleasedInput `json:"inputs"`
+	Next    []ReleasedInput `json:"next,omitempty"`
 }
 
 // ReleasedInput is one released message, whole.
@@ -359,6 +455,10 @@ type PlanUpdatedPayload struct {
 	Completed   int              `json:"completed,omitempty"`
 	Total       int              `json:"total,omitempty"`
 	Items       []PlanUpdateItem `json:"items,omitempty"`
+	// Active is the in-progress item's title, the one a working line names, as
+	// PlanProgressOf derives it — carried here so every surface reports the
+	// same task without deriving it again.
+	Active string `json:"active,omitempty"`
 	// AgentID is the roster key of the subagent whose todo list this is, empty
 	// for the primary agent. A plan update is the rendering of a session_todo
 	// call, so it belongs to the same view that call's card would have, and a

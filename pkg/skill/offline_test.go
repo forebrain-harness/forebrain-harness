@@ -96,7 +96,7 @@ func TestOfflineInstallZipIntoWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	found := false
 	for _, entry := range entries {
-		if entry.Name == "demo" && entry.Source == string(SourceWorkspace) {
+		if entry.Name == "demo" && entry.Origin == OriginAgent {
 			found = true
 		}
 	}
@@ -129,6 +129,14 @@ func TestOfflineInstallRootLevelSkillMd(t *testing.T) {
 	require.Equal(t, []string{"demo"}, names)
 	require.FileExists(t, filepath.Join(home, "workspace", "skills", "demo", "SKILL.md"))
 	require.FileExists(t, filepath.Join(home, "workspace", "skills", "demo", "helper.md"))
+	// The unpack directory itself became the skill: it has a skill
+	// directory's mode, and no unpack directory is left behind.
+	info, err := os.Stat(filepath.Join(home, "workspace", "skills", "demo"))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	leftovers, err := filepath.Glob(filepath.Join(home, "workspace", ".incoming-*"))
+	require.NoError(t, err)
+	require.Empty(t, leftovers)
 }
 
 // A nameless frontmatter falls back to the archive's own file name.
@@ -397,6 +405,9 @@ func TestOfflineFallbackName(t *testing.T) {
 	require.Equal(t, "demo", offlineFallbackName("demo.tar"))
 	require.Equal(t, "demo", offlineFallbackName("demo.zip"))
 	require.Equal(t, "My Tool", offlineFallbackName("My Tool.zip"))
+	// The extension matches in any case and is cut from the name as given.
+	require.Equal(t, "Demo", offlineFallbackName("Demo.ZIP"))
+	require.Equal(t, "Demo", offlineFallbackName("Demo.Tar.Gz"))
 }
 
 func TestSanitizeOfflineSkillDirName(t *testing.T) {

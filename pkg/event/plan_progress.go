@@ -12,6 +12,11 @@ type PlanProgress struct {
 	Active string
 }
 
+// Facts is the progress as a run-end payload carries it.
+func (p PlanProgress) Facts() RunPlanFacts {
+	return RunPlanFacts{PlanDone: p.Done, PlanTotal: p.Total, PlanActive: p.Active}
+}
+
 // PlanProgressOf folds one plan update into the facts the worked line needs.
 // Done and Total come from the payload's own counters; the active title is
 // the shortest in-progress item — several can run at once but the line has

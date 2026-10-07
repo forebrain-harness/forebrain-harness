@@ -76,7 +76,7 @@ func (s *ChatSession) HandleContextSlash(ctx context.Context, sessionID, channel
 		src.Compactions = runs
 	}
 	provider, model := run.PrimaryModel(s.runner())
-	used, _ := s.contextOccupancy(ctx, sid)
+	used, _ := run.ContextOccupancy(ctx, s.sessStore(), sid)
 	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactExplicitLimit())
 	return turn.ContextReport(ctx, src, sid), true
 }
@@ -107,7 +107,7 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 	if hook := s.Env.RulesHook(); hook != nil {
 		instructions = hook.InstructionSources()
 	}
-	return turn.StatusSource{
+	src := turn.StatusSource{
 		Version:      home.Version,
 		SessionName:  sessionName,
 		SessionID:    sid,
@@ -128,10 +128,15 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		ConfigFiles:  turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
 		SkillOffer:   cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, int) {
-			used, _ := s.contextOccupancy(context.Background(), sid)
+			used, _ := run.ContextOccupancy(context.Background(), s.sessStore(), sid)
 			return used, s.compactExplicitLimit()
 		},
 	}
+	if ctl := r.CodeIntelControl; ctl != nil {
+		snap := ctl.Snapshot()
+		src.LSP = &snap
+	}
+	return src
 }
 
 // mcpInventorySource gathers this session's MCP facts: the frozen list, the
@@ -215,11 +220,7 @@ func (s *ChatSession) SkillListString() string {
 			b.WriteString(": ")
 			b.WriteString(desc)
 		}
-		if src := strings.TrimSpace(skillSourceLabel(strings.TrimSpace(s.home()), strings.TrimSpace(it.RootPath))); src != "" {
-			b.WriteString(" [")
-			b.WriteString(src)
-			b.WriteString("]")
-		}
+		b.WriteString(" [" + it.Origin.Label() + "]")
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String())
@@ -231,22 +232,6 @@ func (s *ChatSession) CurrentModelOption() string {
 
 func (s *ChatSession) CurrentModelReasoningEffort() string {
 	return run.PrimaryReasoningEffort(s.runner())
-}
-
-// SubagentModelSummary names the model and reasoning effort one subagent type
-// runs on, and reports false when the type has no chain of its own and
-// therefore runs on whatever the primary agent runs on. The caller shows the
-// primary agent's own footer values in that case, which is what the runtime
-// actually does.
-func (s *ChatSession) SubagentModelSummary(agentType string) (model string, effort string, ok bool) {
-	if s == nil {
-		return "", "", false
-	}
-	provider, id, effort, own := run.SubagentOwnModel(s.runner(), agentType)
-	if !own {
-		return "", "", false
-	}
-	return llm.FormatProviderModel(provider, id), effort, true
 }
 
 func (s *ChatSession) AvailableSkillOptions() []string {
@@ -314,7 +299,7 @@ func (s *ChatSession) ApplySkillSelection(label string) (string, error) {
 	if desc == "" {
 		desc = "(none)"
 	}
-	return fmt.Sprintf("skill: %s\ndescription: %s\nsource: %s\ntrust: %s\npath: %s\nallowed_tools: %s", strings.TrimSpace(res.Name), desc, strings.TrimSpace(res.Source), strings.TrimSpace(res.Trust), strings.TrimSpace(res.Path), allowedTools), nil
+	return fmt.Sprintf("skill: %s\ndescription: %s\norigin: %s\npath: %s\nallowed_tools: %s", strings.TrimSpace(res.Name), desc, res.Origin.Label(), strings.TrimSpace(res.Path), allowedTools), nil
 }
 
 // The skills catalog is part of the prompt prefix and is frozen when a session
@@ -482,8 +467,7 @@ func skillInstallReport(res *skill.InstallResult) string {
 		lines = append(lines, "path: "+strings.TrimSpace(res.Installed[0].SkillPath))
 	}
 	if res.Metadata != nil {
-		lines = append(lines, "source: "+strings.TrimSpace(res.Metadata.Source))
-		lines = append(lines, "trust: "+strings.TrimSpace(res.Metadata.Trust))
+		lines = append(lines, "origin: "+res.Metadata.Origin.Label())
 		if len(res.Installed) != 1 {
 			lines = append(lines, "path: "+strings.TrimSpace(res.SkillPath))
 		}
@@ -530,42 +514,6 @@ func (s *ChatSession) UpdateSkill(name string, content string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("skills: updated %s\npath: %s", strings.TrimSpace(item.Name), strings.TrimSpace(item.Path)) + skillLoadNowNote(item.Name), nil
-}
-
-func skillSourceLabel(home string, rootPath string) string {
-	home = strings.TrimSpace(home)
-	rootPath = strings.TrimSpace(rootPath)
-	if rootPath == "" {
-		return "unknown"
-	}
-	absRoot := rootPath
-	if resolved, err := filepath.Abs(rootPath); err == nil {
-		absRoot = filepath.Clean(resolved)
-	}
-	if home != "" {
-		if resolvedHome, err := filepath.Abs(home); err == nil {
-			home = filepath.Clean(resolvedHome)
-			wsSkills := filepath.Join(home, "workspace", "skills")
-			homeSkills := filepath.Join(home, "skills")
-			if hasPathPrefix(absRoot, wsSkills) {
-				return "workspace"
-			}
-			if hasPathPrefix(absRoot, homeSkills) {
-				return "home"
-			}
-		}
-	}
-	return "external"
-}
-
-func hasPathPrefix(path string, prefix string) bool {
-	path = filepath.Clean(strings.TrimSpace(path))
-	prefix = filepath.Clean(strings.TrimSpace(prefix))
-	if path == prefix {
-		return true
-	}
-	sep := string(filepath.Separator)
-	return strings.HasPrefix(path, prefix+sep)
 }
 
 func readAllowedToolsFromSkillMarkdown(rootPath string) string {
@@ -1176,6 +1124,15 @@ func (s *ChatSession) HandleMCPSlash(sessionID, channel string) (string, bool) {
 	return turn.RenderMCPInventoryMarkdown(turn.BuildMCPInventory(s.mcpInventorySource())), true
 }
 
+func (s *ChatSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
+	_, _ = sessionID, channel
+	ctl := s.lspControl()
+	if ctl == nil {
+		return "lsp: unavailable", true
+	}
+	return turn.RenderLSPInventoryMarkdown(ctl.Snapshot()), true
+}
+
 // startMCPLocalOAuth begins the local OAuth flow for one server: it listens
 // for the browser callback and returns the authorization URL to open. done
 // receives the outcome once the flow ends — the underlying error verbatim when
@@ -1280,15 +1237,6 @@ func (s *ChatSession) startMCPLocalOAuth(serverName string, done func(result str
 		return "", fmt.Errorf("mcp auth: %w", res.err)
 	}
 	return res.authURL, nil
-}
-
-func (s *ChatSession) HandleDiffSlash(sessionID, channel string, args []string) (string, bool) {
-	_, _ = sessionID, channel
-	if s == nil {
-		return "diff: unavailable", true
-	}
-	// Unfenced: tui/commands.go parses the raw text with event.Parse.
-	return turn.ExecuteDiffSlash(s.runner().ProjectRoot, args, false), true
 }
 
 // HandleSandboxSlash reports what the sandbox is doing. It does not change it:
@@ -1611,11 +1559,13 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 	if c == nil || c.session == nil || c.selector == nil {
 		return ComposerSubmission{}, false
 	}
+	defaultIdx := 0
 	for {
 		entries := c.session.AvailableSkillToggleOptions()
 		memorySkills := c.session.MemorySkillOptions()
-		items, rows := buildSkillsMenu(entries, len(memorySkills) > 0)
-		idx, ok, err := c.selector.SelectRich("Skills\nRun an installed skill, or add, create, and tune skills", items, 0)
+		origins := skillOriginsByPath(entries)
+		items, rows := buildSkillsMenu(entries, origins, len(memorySkills) > 0)
+		idx, ok, err := selectRichTabbed(c.selector, "Skills\nRun an installed skill, or add, create, and tune skills", items, TabbedSelectOptions{DefaultIdx: defaultIdx, Uncounted: []string{skillsManageTab}})
 		if err != nil {
 			c.renderer.PrintError(err)
 			return ComposerSubmission{}, false
@@ -1623,6 +1573,9 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 		if !ok || idx < 0 || idx >= len(rows) {
 			return ComposerSubmission{}, false
 		}
+		// A cancelled sub-flow returns to the menu; remember the row so the
+		// user lands back on the tab and skill they left, not on the first.
+		defaultIdx = idx
 		var outcome skillsOutcome
 		switch row := rows[idx]; row.action {
 		case skillsActionAdd:
@@ -1638,7 +1591,7 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 				outcome = skillsDone()
 			}
 		case skillsActionOpenSkill:
-			outcome = c.handleSkillEntry(row.entry)
+			outcome = c.handleSkillEntry(row.entry, origins)
 		}
 		if outcome.done {
 			return outcome.submission, outcome.submitted
@@ -1646,27 +1599,13 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 	}
 }
 
-// buildSkillsMenu lays out the whole command as one list: the things you can
-// do to your skill set first, then every installed skill grouped by where it
-// came from. Grouping and status live in the row itself so the user never has
-// to open a submenu to learn what is installed or whether it is on.
-func buildSkillsMenu(entries []skill.Entry, hasMemorySkills bool) ([]SelectItem, []skillsMenuRow) {
-	items := []SelectItem{
-		{Label: "Add a skill", Description: "Install from the catalog, a GitHub repo, or a local folder", Category: "Manage"},
-		{Label: "Create a skill", Description: "Design and test a new skill with the skill workshop", Category: "Manage"},
-		{Label: "Improve a skill", Description: "Edit, benchmark, and tune an installed skill", Category: "Manage"},
-		{Label: "Enable / disable skills", Description: "Choose which skills load in new sessions", Category: "Manage"},
-	}
-	rows := []skillsMenuRow{
-		{action: skillsActionAdd},
-		{action: skillsActionCreate},
-		{action: skillsActionImprove},
-		{action: skillsActionToggle},
-	}
-	if hasMemorySkills {
-		items = append(items, SelectItem{Label: importFromMemoryAction, Description: "Promote skills the memory agent drafted for this project", Category: "Manage"})
-		rows = append(rows, skillsMenuRow{action: skillsActionImportMemory})
-	}
+// buildSkillsMenu lays out the whole command as one list: the installed skills
+// first, one tab per layer in load order, then the actions in a Manage tab.
+// Grouping and status live in the row itself so the user never has to open a
+// submenu to learn what is installed or whether it is on.
+func buildSkillsMenu(entries []skill.Entry, origins map[string]skill.Origin, hasMemorySkills bool) ([]SelectItem, []skillsMenuRow) {
+	items := make([]SelectItem, 0, len(entries)+5)
+	rows := make([]skillsMenuRow, 0, len(entries)+5)
 	for _, entry := range sortSkillEntries(entries) {
 		name := strings.TrimSpace(entry.Name)
 		if name == "" {
@@ -1674,15 +1613,31 @@ func buildSkillsMenu(entries []skill.Entry, hasMemorySkills bool) ([]SelectItem,
 		}
 		items = append(items, SelectItem{
 			Label:       name,
-			Description: skillEntryDescription(entry),
+			Description: skillRowDescription(entry, origins, true),
 			Category:    skillEntryCategory(entry),
 		})
 		rows = append(rows, skillsMenuRow{action: skillsActionOpenSkill, entry: entry})
 	}
+	items = append(items,
+		SelectItem{Label: "Add a skill", Description: "Install from the catalog, a GitHub repo, or a local folder", Category: skillsManageTab},
+		SelectItem{Label: "Create a skill", Description: "Design and test a new skill with the skill workshop", Category: skillsManageTab},
+		SelectItem{Label: "Improve a skill", Description: "Edit, benchmark, and tune an installed skill", Category: skillsManageTab},
+		SelectItem{Label: "Enable / disable skills", Description: "Choose which skills load in new sessions", Category: skillsManageTab},
+	)
+	rows = append(rows,
+		skillsMenuRow{action: skillsActionAdd},
+		skillsMenuRow{action: skillsActionCreate},
+		skillsMenuRow{action: skillsActionImprove},
+		skillsMenuRow{action: skillsActionToggle},
+	)
+	if hasMemorySkills {
+		items = append(items, SelectItem{Label: importFromMemoryAction, Description: "Promote skills the memory agent drafted for this project", Category: skillsManageTab})
+		rows = append(rows, skillsMenuRow{action: skillsActionImportMemory})
+	}
 	return items, rows
 }
 
-// sortSkillEntries orders skills by source and then by name so the same skill
+// sortSkillEntries orders skills by layer and then by name so the same skill
 // keeps the same place in the list between invocations. Discovery order is the
 // filesystem walk order, which is stable enough to look deliberate and random
 // enough to make a long list hard to scan.
@@ -1695,43 +1650,44 @@ func sortSkillEntries(entries []skill.Entry) []skill.Entry {
 		out = append(out, entry)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		li, lj := skillSourceRank(out[i].Source), skillSourceRank(out[j].Source)
+		ri, rj := out[i].Origin.Rank(), out[j].Origin.Rank()
+		if ri != rj {
+			return ri < rj
+		}
+		li, lj := strings.ToLower(out[i].Name), strings.ToLower(out[j].Name)
 		if li != lj {
 			return li < lj
 		}
-		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+		return out[i].Path < out[j].Path
 	})
 	return out
 }
 
-func skillSourceRank(source string) int {
-	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "project":
-		return 0
-	case "workspace":
-		return 1
-	case "global", "user":
-		return 2
-	case "system":
-		return 4
-	default:
-		return 3
-	}
-}
-
-// skillEntryCategory is the heading a skill is listed under, capitalized like
-// the picker's other headings.
+// skillEntryCategory is the layer a skill is listed under, by its display name.
 func skillEntryCategory(entry skill.Entry) string {
-	source := strings.TrimSpace(entry.Source)
-	if source == "" {
-		source = "installed"
-	}
-	return strings.ToUpper(source[:1]) + source[1:] + " skills"
+	return entry.Origin.Label()
 }
 
-func skillEntryDescription(entry skill.Entry) string {
-	parts := make([]string, 0, 4)
-	if !entry.Enabled {
+// skillsManageTab is the tab the /skills actions sit in, after every layer's
+// skills.
+const skillsManageTab = "Manage"
+
+// skillOriginsByPath maps every listed copy to its layer, so a row can name
+// the layer of the copy that shadows it.
+func skillOriginsByPath(entries []skill.Entry) map[string]skill.Origin {
+	origins := make(map[string]skill.Origin, len(entries))
+	for _, entry := range entries {
+		origins[strings.TrimSpace(entry.Path)] = entry.Origin
+	}
+	return origins
+}
+
+// skillRowDescription is a skill's description column: its description,
+// "(off)" before it when withState is set and the skill is disabled, and
+// after it which copy wins when another root offers the same name.
+func skillRowDescription(entry skill.Entry, origins map[string]skill.Origin, withState bool) string {
+	parts := make([]string, 0, 3)
+	if withState && !entry.Enabled {
 		parts = append(parts, "(off)")
 	}
 	if desc := strings.TrimSpace(entry.Description); desc != "" {
@@ -1739,17 +1695,19 @@ func skillEntryDescription(entry skill.Entry) string {
 	}
 	switch {
 	case len(entry.ShadowedBy) > 0:
-		parts = append(parts, "· shadowed by a higher-priority copy")
-	case len(entry.Shadows) > 0:
-		parts = append(parts, "· shadows "+strconv.Itoa(len(entry.Shadows))+" other copy/copies")
+		parts = append(parts, "· shadowed by the "+origins[entry.ShadowedBy[0]].Label()+" copy")
+	case len(entry.Shadows) == 1:
+		parts = append(parts, "· shadows the "+origins[entry.Shadows[0]].Label()+" copy")
+	case len(entry.Shadows) > 1:
+		parts = append(parts, "· shadows "+strconv.Itoa(len(entry.Shadows))+" other copies")
 	}
-	return strings.TrimSpace(strings.Join(parts, " "))
+	return strings.Join(parts, " ")
 }
 
 // handleSkillEntry is the per-skill sheet: run it, read what it is, flip it
 // on or off, or send it to the workshop for editing — the four things a user
 // wants after picking a skill out of the list.
-func (c *commandController) handleSkillEntry(entry skill.Entry) skillsOutcome {
+func (c *commandController) handleSkillEntry(entry skill.Entry, origins map[string]skill.Origin) skillsOutcome {
 	name := strings.TrimSpace(entry.Name)
 	toggleLabel := "Disable this skill"
 	toggleDesc := "Stop loading it in new sessions"
@@ -1763,7 +1721,8 @@ func (c *commandController) handleSkillEntry(entry skill.Entry) skillsOutcome {
 		{Label: toggleLabel, Description: toggleDesc},
 		{Label: "Improve it", Description: "Hand it to the skill workshop to edit and evaluate"},
 	}
-	idx, ok, err := c.selector.SelectRich(name+"\n"+skillEntryDescription(entry), items, 0)
+	title := name + " · " + entry.Origin.Label() + "\n" + skillRowDescription(entry, origins, true)
+	idx, ok, err := c.selector.SelectRich(title, items, 0)
 	if err != nil {
 		c.renderer.PrintError(err)
 		return skillsDone()
@@ -1850,29 +1809,21 @@ func (c *commandController) handleSkillToggle(entries []skill.Entry) skillsOutco
 		c.renderFrameForSkills("skills: no skills available")
 		return skillsDone()
 	}
-	options := make([]string, 0, len(entries))
-	defaults := make([]string, 0, len(entries))
-	pathByLabel := make(map[string]string, len(entries))
-	for _, item := range sortSkillEntries(entries) {
-		label := strings.TrimSpace(item.Name)
-		if desc := strings.TrimSpace(item.Description); desc != "" {
-			label += " - " + desc
-		}
-		if src := strings.TrimSpace(item.Source); src != "" {
-			label += " [" + src + "]"
-		}
-		if len(item.ShadowedBy) > 0 {
-			label += " (shadowed)"
-		} else if len(item.Shadows) > 0 {
-			label += " (active, shadows " + strconv.Itoa(len(item.Shadows)) + ")"
-		}
-		options = append(options, label)
-		pathByLabel[label] = strings.TrimSpace(item.Path)
-		if item.Enabled {
-			defaults = append(defaults, label)
+	sorted := sortSkillEntries(entries)
+	origins := skillOriginsByPath(entries)
+	items := make([]SelectItem, 0, len(sorted))
+	checked := make([]int, 0, len(sorted))
+	for i, entry := range sorted {
+		items = append(items, SelectItem{
+			Label:       strings.TrimSpace(entry.Name),
+			Description: skillRowDescription(entry, origins, false),
+			Category:    skillEntryCategory(entry),
+		})
+		if entry.Enabled {
+			checked = append(checked, i)
 		}
 	}
-	selected, ok, err := c.selector.MultiSelect("Enable / disable skills\nSpace toggles, enter saves. Applies to new sessions.", options, defaults)
+	selected, ok, err := multiSelectRichTabbed(c.selector, "Enable / disable skills\nSpace toggles, Enter saves. Applies to new sessions.", items, TabbedSelectOptions{Checked: checked})
 	if err != nil {
 		c.renderer.PrintError(err)
 		return skillsDone()
@@ -1881,10 +1832,8 @@ func (c *commandController) handleSkillToggle(entries []skill.Entry) skillsOutco
 		return skillsBack()
 	}
 	enabledPaths := make([]string, 0, len(selected))
-	for _, label := range selected {
-		if path := strings.TrimSpace(pathByLabel[strings.TrimSpace(label)]); path != "" {
-			enabledPaths = append(enabledPaths, path)
-		}
+	for _, idx := range selected {
+		enabledPaths = append(enabledPaths, strings.TrimSpace(sorted[idx].Path))
 	}
 	msg, applyErr := c.session.ApplySkillEnabledSelection(enabledPaths)
 	if applyErr != nil {
@@ -2002,15 +1951,16 @@ func (c *commandController) handleSkillImprove(entries []skill.Entry) skillsOutc
 		c.renderFrameForSkills("skills: no skills available")
 		return skillsDone()
 	}
+	origins := skillOriginsByPath(entries)
 	items := make([]SelectItem, 0, len(sorted))
 	for _, entry := range sorted {
 		items = append(items, SelectItem{
 			Label:       strings.TrimSpace(entry.Name),
-			Description: skillEntryDescription(entry),
+			Description: skillRowDescription(entry, origins, true),
 			Category:    skillEntryCategory(entry),
 		})
 	}
-	idx, ok, err := c.selector.SelectRich("Improve a skill\nWhich skill should the workshop work on?", items, 0)
+	idx, ok, err := selectRichTabbed(c.selector, "Improve a skill\nWhich skill should the workshop work on?", items, TabbedSelectOptions{})
 	if err != nil {
 		c.renderer.PrintError(err)
 		return skillsDone()
@@ -2072,7 +2022,7 @@ const importFromMemoryAction = "Import from Memory"
 // handleMemorySkillImport is the human gate on model-authored skills. The
 // memory consolidation agent writes them into the memory folder, which no skill
 // root covers, so they stay invisible to the model until someone approves them
-// here. Everything the decision needs is on the label — what the skill is, how
+// here. Everything the decision needs is on the row — what the skill is, how
 // it relates to a copy already promoted, which slash command it would add, what
 // it would shadow — and blocked entries are shown with their reason rather than
 // hidden, so a refusal is explained instead of looking like an omission.
@@ -2086,19 +2036,8 @@ func (c *commandController) handleMemorySkillImport(items []MemorySkillOption) b
 		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "skills", Content: "skills: memory has no skills to import", Final: true})
 		return true
 	}
-	options := make([]string, 0, len(items))
-	nameByLabel := make(map[string]string, len(items))
-	blocked := make([]string, 0)
-	for _, item := range items {
-		label := memorySkillLabel(item)
-		if strings.TrimSpace(item.Blocked) != "" {
-			blocked = append(blocked, label)
-			continue
-		}
-		options = append(options, label)
-		nameByLabel[label] = item.Name
-	}
-	if len(options) == 0 {
+	rows, names, blocked := memoryImportRows(items)
+	if len(rows) == 0 {
 		content := "skills: no memory skill can be imported"
 		if len(blocked) > 0 {
 			content += "\n" + strings.Join(blocked, "\n")
@@ -2109,11 +2048,11 @@ func (c *commandController) handleMemorySkillImport(items []MemorySkillOption) b
 
 	prompt := "Import from Memory\nSkills written by memory consolidation. Selected ones are copied into your workspace and become tools in a new session."
 	if len(blocked) > 0 {
-		prompt += "\n\nNot importable:\n" + strings.Join(blocked, "\n")
+		prompt += " Not importable: " + strings.Join(blocked, "; ") + "."
 	}
 	// Nothing is preselected: this is the approval step, so every import has to
 	// be an explicit choice rather than a default the user forgot to clear.
-	selected, ok, err := c.selector.MultiSelect(prompt, options, nil)
+	selected, ok, err := multiSelectRichTabbed(c.selector, prompt, rows, TabbedSelectOptions{})
 	if err != nil {
 		c.renderer.PrintError(err)
 		return true
@@ -2121,17 +2060,12 @@ func (c *commandController) handleMemorySkillImport(items []MemorySkillOption) b
 	if !ok || len(selected) == 0 {
 		return true
 	}
-	names := make([]string, 0, len(selected))
-	for _, label := range selected {
-		if name := strings.TrimSpace(nameByLabel[strings.TrimSpace(label)]); name != "" {
-			names = append(names, name)
-		}
+	selectedNames := make([]string, 0, len(selected))
+	for _, idx := range selected {
+		selectedNames = append(selectedNames, names[idx])
 	}
-	if len(names) == 0 {
-		return true
-	}
-	sort.Strings(names)
-	if overwriting := divergedAmong(items, names); len(overwriting) > 0 {
+	sort.Strings(selectedNames)
+	if overwriting := divergedAmong(items, selectedNames); len(overwriting) > 0 {
 		confirmed, confirmOK, confirmErr := c.selector.Confirm(
 			"Overwrite local edits to "+strings.Join(overwriting, ", ")+"?", false)
 		if confirmErr != nil {
@@ -2142,7 +2076,7 @@ func (c *commandController) handleMemorySkillImport(items []MemorySkillOption) b
 			return true
 		}
 	}
-	msg, err := c.session.PromoteMemorySkills(names)
+	msg, err := c.session.PromoteMemorySkills(selectedNames)
 	if err != nil {
 		c.renderer.PrintError(err)
 		return true
@@ -2153,28 +2087,46 @@ func (c *commandController) handleMemorySkillImport(items []MemorySkillOption) b
 	return true
 }
 
-func memorySkillLabel(item MemorySkillOption) string {
-	label := strings.TrimSpace(item.Name)
+// memoryImportTab is the one kind of row the import picker lists, so the
+// picker shows no tab bar.
+const memoryImportTab = "Memory"
+
+// memoryImportRows splits the proposals into the rows the picker offers —
+// the name, and everything the decision needs in the description column —
+// and the blocked ones, each named with its reason, which are explained
+// rather than hidden.
+func memoryImportRows(items []MemorySkillOption) (rows []SelectItem, names []string, blocked []string) {
+	for _, item := range items {
+		if reason := strings.TrimSpace(item.Blocked); reason != "" {
+			blocked = append(blocked, strings.TrimSpace(item.Name)+" ("+reason+")")
+			continue
+		}
+		rows = append(rows, SelectItem{
+			Label:       strings.TrimSpace(item.Name),
+			Description: memorySkillDescription(item),
+			Category:    memoryImportTab,
+		})
+		names = append(names, item.Name)
+	}
+	return rows, names, blocked
+}
+
+// memorySkillDescription is a proposal's description column.
+func memorySkillDescription(item MemorySkillOption) string {
+	parts := make([]string, 0, 4)
 	if desc := strings.TrimSpace(item.Description); desc != "" {
-		label += " - " + desc
+		parts = append(parts, desc)
 	}
 	if state := memorySkillStateLabel(item); state != "" {
-		label += " [" + state + "]"
+		parts = append(parts, "· "+state)
 	}
-	if reason := strings.TrimSpace(item.Blocked); reason != "" {
-		return label + " (blocked: " + reason + ")"
-	}
-	var notes []string
 	if cmd := strings.TrimSpace(item.SlashCommand); cmd != "" {
-		notes = append(notes, "adds "+cmd)
+		parts = append(parts, "· adds "+cmd)
 	}
 	if shadowed := strings.TrimSpace(item.Shadows); shadowed != "" {
-		notes = append(notes, "shadows "+shadowed)
+		parts = append(parts, "· shadows "+shadowed)
 	}
-	if len(notes) == 0 {
-		return label
-	}
-	return label + " (" + strings.Join(notes, ", ") + ")"
+	return strings.Join(parts, " ")
 }
 
 // memorySkillStateLabel folds the disk status together with whether this

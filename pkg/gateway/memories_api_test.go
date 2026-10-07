@@ -302,6 +302,21 @@ func TestMemoriesFilesDeleteRefusesCoreAndEscapes(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "core memory files can be edited or cleared, not deleted")
 	require.FileExists(t, filepath.Join(global.MemoryRoot, "MEMORY.md"))
 
+	// The core rule holds for the file, however the path is spelled: a "./"
+	// prefix or a second link to the same file is still the core file.
+	require.NoError(t, os.Link(filepath.Join(global.MemoryRoot, "MEMORY.md"), filepath.Join(global.MemoryRoot, "alias.md")))
+	rr = post(`{"paths":["./MEMORY.md","alias.md"]}`)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"deleted":0`)
+	require.FileExists(t, filepath.Join(global.MemoryRoot, "MEMORY.md"))
+	require.FileExists(t, filepath.Join(global.MemoryRoot, "alias.md"))
+
+	// Only regular files are deleted one at a time; a directory is not one.
+	rr = post(`{"paths":["notes"]}`)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), "not a regular file")
+	require.DirExists(t, filepath.Join(global.MemoryRoot, "notes"))
+
 	rr = post(`{"paths":["notes/disposable.md","../escape.md"]}`)
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), `"deleted":1`)

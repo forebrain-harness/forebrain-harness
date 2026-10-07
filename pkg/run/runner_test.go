@@ -2390,3 +2390,76 @@ func TestResolveSessionModelChoiceEffortSemantics(t *testing.T) {
 		t.Fatalf("missing pair = %v, want not-configured", err)
 	}
 }
+
+// serializeToolTable renders the prompt-prefix-relevant bytes of a tool table:
+// names, descriptions and schemas, in registration order. Two serializations
+// that differ describe a prefix every cached session would have to re-bill.
+func serializeToolTable(tools []*llm.Tool) string {
+	var sb strings.Builder
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		sb.WriteString(t.Name())
+		sb.WriteString("\x00")
+		sb.WriteString(t.Description())
+		sb.WriteString("\x00")
+		schema, err := json.Marshal(t.InputSchema())
+		if err != nil {
+			sb.WriteString("marshal-error:" + err.Error())
+		} else {
+			sb.Write(schema)
+		}
+		sb.WriteString("\x00")
+	}
+	return sb.String()
+}
+
+// The lsp tool sits in the prompt prefix, so its presence and bytes are frozen
+// for the runner's lifetime: a server being enabled or disabled, or a config
+// reload over the same configuration, must not reshape the tool table (spec
+// §8.5). CodeIntelTool is computed once at composition time, never re-derived
+// on reload.
+func TestLSPToolTableStableAcrossServerChanges(t *testing.T) {
+	cfg := &appcfg.Root{
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {
+					LLMProviders: []appcfg.AgentLLMProviderConfig{{
+						Provider: "openai",
+						Model:    "qwen-test",
+						APIKey:   "test-key",
+						BaseURL:  "http://127.0.0.1:9/v1",
+					}},
+				},
+			},
+		},
+	}
+	stub := factoryCodeIntelStub{}
+	r := &Runner{Deps: &Deps{
+		Home: t.TempDir(), AppCfg: cfg,
+		CodeIntel: stub, CodeIntelControl: stub, CodeIntelTool: true,
+	}}
+	if err := r.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	before := serializeToolTable(r.LoadedTools())
+	if !strings.Contains(before, "lsp\x00") {
+		t.Fatalf("tool table does not contain the lsp tool:\n%s", before)
+	}
+
+	// A server toggling on or off is a snapshot change, not a prefix change.
+	if err := stub.SetEnabled("gopls", false); err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	// A config reload over an equal configuration rebuilds the agent without
+	// touching the frozen lsp decision.
+	reload := *cfg
+	if err := r.LoadConfig(&reload); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	after := serializeToolTable(r.LoadedTools())
+	if before != after {
+		t.Fatalf("tool table changed across server/reload events:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}

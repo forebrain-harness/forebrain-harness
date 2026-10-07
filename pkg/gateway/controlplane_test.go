@@ -187,6 +187,52 @@ func TestControlPlaneHTTPMiddlewareRejectsForgedWebSessionCookie(t *testing.T) {
 	}
 }
 
+// A page on another port of the same host is same-site, so the browser
+// attaches the Strict cookie to its POST; the Origin it stamps is what keeps
+// that page from acting with the user's session. Header credentials are not
+// attached by browsers and stay origin-agnostic.
+func TestControlPlaneHTTPMiddlewareRefusesCrossOriginCookieWrites(t *testing.T) {
+	env := tokenAuthEnv("token", "gw-secret")
+	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	cookie := &http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")}
+	cases := []struct {
+		name   string
+		method string
+		origin string
+		cookie bool
+		bearer bool
+		want   int
+	}{
+		{name: "same-origin cookie write", method: http.MethodPost, origin: "http://gateway.test", cookie: true, want: http.StatusNoContent},
+		{name: "cookie write without origin", method: http.MethodPut, cookie: true, want: http.StatusNoContent},
+		{name: "other-port cookie write", method: http.MethodPost, origin: "http://gateway.test:3000", cookie: true, want: http.StatusForbidden},
+		{name: "opaque origin cookie write", method: http.MethodDelete, origin: "null", cookie: true, want: http.StatusForbidden},
+		{name: "cross-origin cookie read", method: http.MethodGet, origin: "http://gateway.test:3000", cookie: true, want: http.StatusNoContent},
+		{name: "cross-origin bearer write", method: http.MethodPost, origin: "http://elsewhere.test", bearer: true, want: http.StatusNoContent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "http://gateway.test/api/resources", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.cookie {
+				req.AddCookie(cookie)
+			}
+			if tc.bearer {
+				req.Header.Set("Authorization", "Bearer gw-secret")
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %q)", rr.Code, tc.want, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestControlPlaneHTTPMiddlewareIgnoresQueryToken(t *testing.T) {
 	env := tokenAuthEnv("token", "gw-secret")
 	handler := ControlPlaneHTTPMiddleware(env, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -414,5 +460,37 @@ func TestWebSessionRoutesThroughFullChain(t *testing.T) {
 	}
 	if body := rr.Body.String(); body != `{"auth_mode":"token"}` {
 		t.Fatalf("probe body = %q", body)
+	}
+}
+
+// The owner's page is never throttled: one load of it is more requests than
+// the burst allowed to strangers, so a few reloads used to earn the signed-in
+// owner a 429. Requests without the credentials are still held to the limit.
+func TestRateLimitHoldsStrangersNotTheSignedInOwner(t *testing.T) {
+	s := &Server{Env: tokenAuthEnv("token", "gw-secret")}
+	chain := ServeHTTPChain(s.Env, s, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	send := func(withCookie bool) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/agents", nil)
+		req.RemoteAddr = "203.0.113.7:5555"
+		if withCookie {
+			req.AddCookie(&http.Cookie{Name: webSessionCookieName("gw-secret"), Value: webSessionValue("gw-secret")})
+		}
+		rr := httptest.NewRecorder()
+		chain.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	for i := 0; i < 400; i++ {
+		if code := send(true); code != http.StatusOK {
+			t.Fatalf("signed-in request %d answered %d", i, code)
+		}
+	}
+	limited := false
+	for i := 0; i < 400 && !limited; i++ {
+		limited = send(false) == http.StatusTooManyRequests
+	}
+	if !limited {
+		t.Fatal("requests without credentials were never limited")
 	}
 }

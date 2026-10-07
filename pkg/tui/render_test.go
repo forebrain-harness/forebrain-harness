@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/mattn/go-runewidth"
 	"github.com/muesli/termenv"
 )
@@ -441,5 +443,279 @@ func TestToolOutputBlockKeepsTheNoOutputPlaceholderFaint(t *testing.T) {
 	cmd := formatToolOutputBlock("\x1b[31mfailed\x1b[0m (no output)")
 	if strings.Contains(cmd, "\x1b[31m") || strings.Contains(cmd, "\x1b[2m") {
 		t.Fatalf("command output kept or gained styling: %q", cmd)
+	}
+}
+
+// A user_interaction card names every question it asks, in full — the same
+// words the web's card header uses — rather than nothing at all.
+func TestUserInteractionCardHeaderNamesItsQuestions(t *testing.T) {
+	meta := tool.ToolMeta{Status: "completed", Input: map[string]any{"questions": []any{
+		map[string]any{"header": "Triggers"},
+		map[string]any{"question": "What should the greeting look like when the user says hi first thing in the morning?"},
+	}}}
+	action, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "user_interaction", ToolMeta: meta, Final: true}, "", "")
+	if action != "Asked user" {
+		t.Fatalf("action = %q", action)
+	}
+	if target != "Triggers · What should the greeting look like when the user says hi first thing in the morning?" {
+		t.Fatalf("target = %q, want every question named in full", target)
+	}
+}
+
+// The lsp card's title names the operation and what it was pointed at: the
+// symbol when one was given, the query for workspace searches, otherwise the
+// file (shortened like a read_file path) with its line.
+func TestToolDisplayPartsLSP(t *testing.T) {
+	input := func(extra map[string]any) tool.ToolMeta {
+		in := map[string]any{"operation": "definition"}
+		for k, v := range extra {
+			in[k] = v
+		}
+		return tool.ToolMeta{Input: in}
+	}
+
+	running, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", ToolMeta: tool.ToolMeta{Status: "running", Input: map[string]any{"operation": "definition", "symbol": "Query"}}}, "", "")
+	if running != "Looking up" || target != "definition · Query" {
+		t.Fatalf("running = (%q, %q), want Looking up / definition · Query", running, target)
+	}
+
+	completed, target, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", Final: true, ToolMeta: input(map[string]any{"query": "auth.Loop"})}, "", "")
+	if completed != "Looked up" || target != "definition · auth.Loop" {
+		t.Fatalf("query target = (%q, %q), want Looked up / definition · auth.Loop", completed, target)
+	}
+
+	failed, _, _ := toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", ToolMeta: tool.ToolMeta{Status: "failed", Input: map[string]any{"operation": "hover", "file_path": "/repo/main.go", "line": 12}}}, "", "")
+	if failed != "Failed to look up" {
+		t.Fatalf("failed action = %q, want Failed to look up", failed)
+	}
+
+	cwd := t.TempDir()
+	p := filepath.Join(cwd, "main.go")
+	_, target, _ = toolDisplayParts(Frame{Kind: FrameTool, Title: "lsp", Final: true, ToolMeta: tool.ToolMeta{Input: map[string]any{"operation": "hover", "file_path": p, "line": 12}}}, "", cwd)
+	if target != "hover · main.go:12" {
+		t.Fatalf("file target = %q, want hover · main.go:12 (shortened like read_file)", target)
+	}
+
+	if phrase := failedActionPhrase("lsp"); phrase != "look up" {
+		t.Fatalf("failedActionPhrase(lsp) = %q, want look up", phrase)
+	}
+}
+
+// An edit card carries its diagnostics section after the turn diff: the card
+// then shows one summary line under the diff and the section's problem lines
+// indented like diff rows. Long cards fold through the existing foldBlock, so
+// nothing here is cut to a row budget on purpose.
+func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	withDiag := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: 2 new in 1 file\n\n" +
+		"```text\n" +
+		"internal/foo/bar.go\n" +
+		"  error 12:6 missing return [gopls syntax]\n" +
+		"  warning 30:1 unused variable\n" +
+		"```"
+	block, ok := renderTurnDiffCard(withDiag, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected render to succeed")
+	}
+	plain := stripANSI(block)
+	if !strings.Contains(plain, "  └ Found 2 new diagnostic issues in 1 file") {
+		t.Fatalf("diagnostics summary line missing:\n%s", plain)
+	}
+	for _, want := range []string{
+		"    internal/foo/bar.go",
+		"      error 12:6 missing return [gopls syntax]",
+		"      warning 30:1 unused variable",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("problem row %q missing:\n%s", want, plain)
+		}
+	}
+	// The diff's own summary stays first.
+	if !strings.HasPrefix(block, "  └ Added 2 lines, removed 1 line") {
+		t.Fatalf("turn-diff summary must stay the card's first line:\n%s", plain)
+	}
+
+	// Singular counts keep their singular nouns.
+	singular := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: 1 new in 1 file\n\n" +
+		"```text\n" +
+		"internal/foo/bar.go\n" +
+		"  error 12:6 missing return [gopls syntax]\n" +
+		"```"
+	block, ok = renderTurnDiffCard(singular, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected singular render to succeed")
+	}
+	if plain := stripANSI(block); !strings.Contains(plain, "  └ Found 1 new diagnostic issue in 1 file") {
+		t.Fatalf("singular summary line missing:\n%s", plain)
+	}
+
+	// A pending-only section names itself instead of a count.
+	pending := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: pending\n\n" +
+		"```text\n" +
+		"diagnostics for internal/foo/bar.go are still being computed and will follow\n" +
+		"```"
+	block, ok = renderTurnDiffCard(pending, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected pending render to succeed")
+	}
+	if plain := stripANSI(block); !strings.Contains(plain, "  └ Diagnostics pending") {
+		t.Fatalf("pending summary line missing:\n%s", plain)
+	}
+
+	// Without a section the card keeps its diff-only shape.
+	block, ok = renderTurnDiffCard(sampleTurnDiff, DiffThemeDark, 0)
+	if !ok {
+		t.Fatal("expected diff-only render to succeed")
+	}
+	if plain := stripANSI(block); strings.Contains(plain, "diagnostic") {
+		t.Fatalf("no diagnostics section, no diagnostics rows:\n%s", plain)
+	}
+}
+
+// A problem message wider than the terminal wraps inside the card instead of
+// running past the edge, where the painter cut it: every row fits the painted
+// width, the continuation rows hang under the problem, and the whole message
+// survives.
+func TestTurnDiffCardWrapsLongDiagnostics(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	const width = 80
+	message := "Type '{ 'nav.chat': string; 'nav.tasks': string; 'nav.agents': string; " +
+		"'nav.memories': string; 'nav.settings': string; 'nav.aria': string; 'nav.toggle': string; } " +
+		"is missing the following properties from type 'Messages': 'chat.compaction.running', 'chat.compaction.done'"
+	content := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: 1 new in 1 file\n\n" +
+		"```text\n" +
+		"frontend/src/locales/index.ts\n" +
+		"  error 980:7 " + message + " [ts 2739]\n" +
+		"```"
+	lines, _ := renderFrameLinesWithAgents(Frame{Kind: FrameTool, Title: "edit_file", Final: true, Content: content}, width, DiffThemeDark, 0)
+
+	problem := -1
+	for i, line := range lines {
+		if fitted := fitPaintRow(line, width); fitted != line {
+			t.Fatalf("row %d is wider than %d columns and gets cut:\n%q\n%q", i, width, line, fitted)
+		}
+		if strings.HasPrefix(stripANSI(line), "      error 980:7 Type") {
+			problem = i
+		}
+	}
+	if problem < 0 {
+		t.Fatalf("problem row missing:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+	var joined []string
+	for _, line := range lines[problem:] {
+		plain := stripANSI(line)
+		if line != lines[problem] && !strings.HasPrefix(plain, "      ") {
+			break
+		}
+		joined = append(joined, strings.TrimSpace(plain))
+	}
+	if len(joined) < 2 {
+		t.Fatalf("long message should wrap onto continuation rows:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+	if got, want := strings.Join(joined, " "), "error 980:7 "+message+" [ts 2739]"; got != want {
+		t.Fatalf("wrapped message lost text:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// A subagent card's body is content text, and content text is never dimmed:
+// the card used to paint every row Faint, which the surface's own rules forbid.
+func TestSubagentCardBodyIsFullBrightness(t *testing.T) {
+	// Styles only render under a color profile; the test writer is not a TTY,
+	// so pin one for the duration of the assertion.
+	lipgloss.SetColorProfile(termenv.ANSI256)
+	defer lipgloss.SetColorProfile(termenv.Ascii)
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, &buf)
+	r.renderFanout(Frame{
+		Kind:    FrameFanout,
+		StepID:  "fanout-bright",
+		Final:   true,
+		Summary: "Ran 2 general-purpose tasks · 1 done, 1 failed",
+		Content: "\x1b[32m✓\x1b[0m 任务16 migrate 导入\n  └ shell gofmt -l pkg cmd\n    … +30 tool uses\n" +
+			"\x1b[31m✗\x1b[0m 任务17 扩展目录\n  上游连接中断（EOF）\n",
+		FanoutLineAgents: []string{"subagent-8c5c", "subagent-8c5c", "subagent-8c5c", "subagent-37aa", "subagent-37aa"},
+	})
+	out := buf.String()
+	if strings.Contains(out, "\x1b[2m") {
+		t.Fatalf("card body is dimmed:\n%q", out)
+	}
+	plain := stripANSI(out)
+	for _, want := range []string{"任务16 migrate 导入", "✗ 任务17 扩展目录", "… +30 tool uses"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("card lost the row %q:\n%s", want, plain)
+		}
+	}
+}
+
+// The reported bug, end to end: the engine formatter dropped the first line's
+// leading spaces, so the shell card's first output row sat two columns left of
+// every later row. This walks the real engine formatter and the real card
+// renderer and requires every body row to align on the same column.
+func TestToolOutputCardAlignsFirstRowWithRest(t *testing.T) {
+	stdout := "  GET     /api/chat/sessions\n" +
+		"  POST    /api/chat/sessions\n" +
+		"  GET     /api/chat/sessions/:id\n"
+	body, _ := tool.FormatToolStepResult(tool.StepEvent{
+		ToolName: "shell",
+		Kind:     "tool_completed",
+		Input:    map[string]any{"command": `grep -E '/api/chat' "$TMPDIR/forebrain-run/gw.log"`},
+		Output:   map[string]any{"stdout": stdout, "exit_code": 0},
+	}, 0)
+	f := Frame{
+		Kind:    FrameTool,
+		Title:   "shell",
+		Final:   true,
+		Content: body,
+		Summary: "shell",
+		ToolMeta: tool.ToolMeta{
+			Status: "completed",
+			Input:  map[string]any{"command": `grep -E '/api/chat' "$TMPDIR/forebrain-run/gw.log"`},
+		},
+	}
+	lines := renderFrameLines(f, 120, DiffThemeDark, 0)
+	plain := make([]string, len(lines))
+	for i, l := range lines {
+		plain[i] = stripANSI(l)
+	}
+
+	// The card header is row 0; the first output row carries the four-column
+	// gutter plus the payload's own two-space indent.
+	if len(plain) < 2 || plain[1] != "  └   GET     /api/chat/sessions" {
+		t.Fatalf("first output row not aligned:\n%s", strings.Join(plain, "\n"))
+	}
+
+	const marker = "/api/chat/sessions"
+	cols := []int{}
+	for _, l := range plain {
+		// Count columns in runes: the "└" gutter glyph is three bytes.
+		if i := strings.Index(l, marker); i >= 0 {
+			cols = append(cols, len([]rune(l[:i])))
+		}
+	}
+	if len(cols) != 3 {
+		t.Fatalf("expected 3 route rows, got %d:\n%s", len(cols), strings.Join(plain, "\n"))
+	}
+	for _, c := range cols[1:] {
+		if c != cols[0] {
+			t.Fatalf("route rows not column-aligned: %v\n%s", cols, strings.Join(plain, "\n"))
+		}
+	}
+	t.Logf("route columns: %v", cols)
+}
+
+// summaryToolBody is the live card-body pipeline (renderCompactFrame calls it
+// when not in full-body test mode), and it used to strings.TrimSpace the whole
+// body — dropping the indent of a first line that is itself payload, as the
+// intermediate_tool notes and retrieve_output bodies are. renderFrameLines
+// forces full-body mode and so never exercises this; assert it directly.
+func TestSummaryToolBodyKeepsFirstLineIndent(t *testing.T) {
+	f := Frame{Kind: FrameTool, Title: "intermediate_tool", Content: "  alpha\n  beta", Final: true}
+	got := summaryToolBody(f, f.Title)
+	if !strings.Contains(got, "  alpha") {
+		t.Fatalf("summaryToolBody dropped the first line's indent: %q", got)
 	}
 }

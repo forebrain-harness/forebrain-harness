@@ -4,9 +4,9 @@
 # ── Title line (write it in the blank line above) ──────────────────────────
 # type    feat | fix | perf | refactor | test | docs | build | ci | chore | revert
 # scope   package or area of the main change: state, tui, gateway, run, turn,
-#         memory, migrate, tool, process, assembly, llm, mcp, config, session,
-#         skill, channel, frontend, npm, docs; for cross-area changes pick the
-#         single most relevant one
+#         memory, migrate, tool, process, assembly, llm, mcp, lsp, config,
+#         session, skill, channel, frontend, npm, docs; for cross-area changes
+#         pick the single most relevant one
 # subject English imperative, whole line <= 100 characters, starts lowercase,
 #         no trailing period
 #   e.g.: fix(state): keep the exec timing triple whole for sub-ms tools

@@ -206,7 +206,7 @@ WebSocket 握手都会自动带上它，前端代码不再接触 token 本身。
            primary: true
            enable_subagent: false
            llm_providers:
-           - provider: zhipu
+           - provider: zhipuai
              model: glm-5.3-flash
              api_key: ${FOREBRAIN_E2E_ZHIPU_KEY}
              base_url: https://open.bigmodel.cn/api/coding/paas/v4

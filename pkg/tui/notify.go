@@ -97,16 +97,15 @@ type RunEndedMsg struct {
 	OutputTokens   int // Phase 2 redesign: provider-reported completion token count; 0 when provider doesn't expose it.
 }
 
-// PendingSteersChangedMsg is emitted when a run drains queued steers into the
-// model at a tool boundary. Count is how many steers remain queued afterwards;
-// the surface diffs it against its own queue mirror to learn which messages were
-// delivered, then moves those into the transcript so they do not silently
-// disappear from the pending preview.
-type PendingSteersChangedMsg struct {
-	RunID     string
+// InputQueueChangedMsg is emitted when the conversation's input queue changes
+// while a turn runs — a steer enqueued, refused, recalled or delivered, or a
+// boundary consuming entries. The surface re-reads the queue: steers the model
+// has received (InputQueue.TakeDelivered) move into the transcript so they do
+// not silently disappear from the pending preview, and the composer's queue
+// preview repaints.
+type InputQueueChangedMsg struct {
 	SessionID string
 	Channel   string
-	Count     int
 }
 
 // TokenUsageDeltaMsg is an internal UI event emitted when one LLM call
@@ -229,6 +228,27 @@ type MigrationDoneMsg struct {
 	Err    error
 }
 
+// LSPRecommendationMsg asks the user whether to enable (or install and
+// enable) a language server. It is shown as a modal; the answer goes back
+// through ChatSession.DecideLSPRecommendation.
+type LSPRecommendationMsg struct {
+	Rec event.LSPRecommendation
+}
+
+// LSPInstallProgressMsg is one output line of an install the user started
+// from a recommendation. It renders as the transient status line.
+type LSPInstallProgressMsg struct {
+	ServerID string
+	Line     string
+}
+
+// LSPInstallDoneMsg ends that install.
+type LSPInstallDoneMsg struct {
+	ServerID string
+	Text     string // the transcript line on success
+	Err      string // the failure text, including the output tail
+}
+
 // SkillInstallProgressMsg is one checkpoint of a background skill install.
 // It renders as a live card in the transcript, replaced in place by the next
 // checkpoint and finally by SkillInstallDoneMsg carrying the same ID.
@@ -266,6 +286,9 @@ type PermissionManagementRequestedMsg struct{}
 type SkillSelectionRequestedMsg struct{}
 
 type TokenBudgetUpdatedMsg struct {
+	// AgentID is the roster key of the agent whose context the budget
+	// measures; empty is the primary agent's, the one the main footer shows.
+	AgentID              string
 	Model                string
 	TokenUsage           int
 	PercentLeft          int
@@ -276,13 +299,6 @@ type TokenBudgetUpdatedMsg struct {
 
 type PlanUpdatedMsg struct {
 	Payload event.PlanUpdatedPayload
-}
-
-// ActivityStatusUpdatedMsg carries a subagent's latest tool activity description
-// for the fanout third-layer live progress display.
-type ActivityStatusUpdatedMsg struct {
-	AgentID string
-	Status  string
 }
 
 // SubagentSpawnedMsg is emitted when a subagent run is dispatched. The reducer
@@ -303,7 +319,14 @@ type SubagentSpawnedMsg struct {
 	ParentToolCallID string
 	TaskIndex        int
 	ExecutionID      string
-	Timestamp        time.Time
+	// The model this execution runs on, as the engine resolved it once at
+	// dispatch: an override the user picked, a type's own chain, or nothing —
+	// which means the conversation's model, and is left for the footer to
+	// name only when the spawn actually said one.
+	ModelProvider   string
+	Model           string
+	ReasoningEffort string
+	Timestamp       time.Time
 }
 
 // SubagentEndedMsg is emitted when a subagent run reaches a terminal state
@@ -320,7 +343,59 @@ type SubagentEndedMsg struct {
 	ParentToolCallID string
 	TaskIndex        int
 	ExecutionID      string
-	Timestamp        time.Time
+	// FinishedAt is when this execution actually stopped — the ended event's
+	// payload when it carries one, the event's own timestamp otherwise. A
+	// task row's final elapsed time is measured to here, so a reaped
+	// execution reports the moment it was last seen, not the moment the
+	// reaper said so.
+	FinishedAt time.Time
+	Timestamp  time.Time
+}
+
+// SubagentInputDeliveredMsg is a message the user sent a running subagent that
+// was handed to its model at a tool boundary (the engine's
+// subagent_input_delivered event). The reducer draws it as a user message in
+// that subagent's own view, the way a delivered steer is drawn in the
+// conversation, so a message queued and then delivered does not silently
+// vanish from the preview.
+type SubagentInputDeliveredMsg struct {
+	AgentID string
+	RunID   string
+	Text    string
+}
+
+// SubagentInputBoundaryMsg is what a subagent's queue decided when one of its
+// executions ended. Send is the queued input to run next, as one message the
+// surface hands back to SendToSubagent; Restore is the input to give back to
+// that subagent's composer. At most one is non-empty.
+type SubagentInputBoundaryMsg struct {
+	AgentKey string
+	Send     []ComposerSubmission
+	Restore  []ComposerSubmission
+}
+
+// PlanReviewStartedMsg opens a plan review's card. The review request itself is
+// the review run's dispatch: the reviewer's subagent_spawned names the ReviewID
+// as its parent tool call, so the card binds its task exactly the way a
+// subagent_run card does.
+type PlanReviewStartedMsg struct {
+	ReviewID string
+	Provider string
+	Model    string
+	Label    string
+}
+
+// PlanReviewReviewedMsg closes the card PlanReviewStartedMsg opened, with the
+// review's outcome: "done", "stopped", "timed_out" or "failed". A failure whose
+// reviewer never started (the model is not configured, there is no plan) reads
+// "Failed to start"; the reviewer's own failures arrive as its ended event.
+type PlanReviewReviewedMsg struct {
+	ReviewID string
+	Provider string
+	Model    string
+	Label    string
+	Outcome  string
+	Error    string
 }
 
 type SendMsgFunc func(content string)
@@ -372,7 +447,7 @@ func (s *ChatSession) notifyToolStepHooks(ctx context.Context, sessionID, runID,
 			return
 		}
 		meta := tool.EnrichToolMeta(ctx, tool.BuildToolMeta(evt))
-		s.notifyUI(NewMessageMsg{Msg: Message{
+		s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 			Kind:            MsgKindTool,
 			StepID:          strings.TrimSpace(evt.StepID),
 			ToolName:        strings.TrimSpace(evt.ToolName),
@@ -389,7 +464,7 @@ func (s *ChatSession) notifyToolStepHooks(ctx context.Context, sessionID, runID,
 		return
 	}
 	if evt.Kind == tool.StepKindToolParallelStarted || evt.Kind == tool.StepKindToolParallelCompleted {
-		s.notifyToolBatchSummary(ctx, evt)
+		s.notifyToolBatchSummary(ctx, sessionID, evt)
 		return
 	}
 	rendered, ok := tool.BuildRenderedToolStepNotification(sessionID, runID, channel, evt)
@@ -410,7 +485,7 @@ func (s *ChatSession) notifyToolStepHooks(ctx context.Context, sessionID, runID,
 		// The ChatSession dispatcher enqueues in FIFO order without invoking the
 		// surface callback from this StepHook, so tool boundaries stay ordered
 		// without allowing a blocked UI sink to stall tool execution.
-		s.notifyUI(NewMessageMsg{Msg: Message{
+		s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 			Kind:            MsgKindTool,
 			StepID:          strings.TrimSpace(evt.StepID),
 			ToolName:        strings.TrimSpace(evt.ToolName),
@@ -436,7 +511,7 @@ func (s *ChatSession) notifyToolStepHooks(ctx context.Context, sessionID, runID,
 	}
 	// See the fallback branch above: keep the producer ordering without making
 	// tool execution wait for the TUI consumer.
-	s.notifyUI(NewMessageMsg{Msg: Message{
+	s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 		Kind:            MsgKindTool,
 		StepID:          strings.TrimSpace(evt.StepID),
 		ToolName:        strings.TrimSpace(rendered.Input.ToolName),
@@ -470,7 +545,7 @@ func compactToolInputBody(meta tool.ToolMeta) string {
 	return "input:\n\n```json\n" + string(b) + "\n```"
 }
 
-func (s *ChatSession) notifyToolBatchSummary(ctx context.Context, evt tool.StepEvent) {
+func (s *ChatSession) notifyToolBatchSummary(ctx context.Context, sessionID string, evt tool.StepEvent) {
 	summary := strings.TrimSpace(stringValueFromMap(evt.Output, "summary"))
 	if summary == "" {
 		summary = toolStepSummary(evt)
@@ -482,7 +557,7 @@ func (s *ChatSession) notifyToolBatchSummary(ctx context.Context, evt tool.StepE
 	meta := tool.EnrichToolMeta(ctx, tool.BuildToolMeta(evt))
 	// Preserve producer order through ChatSession's nonblocking dispatcher; in
 	// particular the parallel batch summary must precede its child tool cards.
-	s.notifyUI(NewMessageMsg{Msg: Message{
+	s.notifyUIForSession(sessionID, NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,
 		StepID:    strings.TrimSpace(evt.StepID),
 		ToolName:  strings.TrimSpace(evt.ToolName),
@@ -718,27 +793,27 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	case event.RunEventAssistantDelta:
 		var p event.AssistantDeltaPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && p.Text != "" {
-			s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: p.Text, AgentID: p.AgentID, RunID: evt.RunID, Timestamp: evt.CreatedAt}})
+			s.notifyUIForSession(evt.SessionID, NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: p.Text, AgentID: p.AgentID, RunID: evt.RunID, Timestamp: evt.CreatedAt}})
 		}
 	case event.RunEventReasoningDelta:
 		var p event.ReasoningDeltaPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && p.Text != "" {
-			s.notifyUI(NewMessageMsg{Msg: Message{Kind: MsgKindReasoning, Content: p.Text, AgentID: p.AgentID, RunID: evt.RunID, Timestamp: evt.CreatedAt}})
+			s.notifyUIForSession(evt.SessionID, NewMessageMsg{Msg: Message{Kind: MsgKindReasoning, Content: p.Text, AgentID: p.AgentID, RunID: evt.RunID, Timestamp: evt.CreatedAt}})
 		}
 	case event.RunEventReasoningDone:
 		var p event.ReasoningDonePayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(ReasoningDoneMsg{AgentID: p.AgentID, Timestamp: evt.CreatedAt})
+			s.notifyUIForSession(evt.SessionID, ReasoningDoneMsg{AgentID: p.AgentID, Timestamp: evt.CreatedAt})
 		}
 	case event.RunEventUsageDelta:
 		var p event.UsageDeltaPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && (p.InputTokens != 0 || p.OutputTokens != 0) {
-			s.notifyUI(TokenUsageDeltaMsg{RunID: evt.RunID, AgentID: p.AgentID, InputTokens: p.InputTokens, OutputTokens: p.OutputTokens})
+			s.notifyUIForSession(evt.SessionID, TokenUsageDeltaMsg{RunID: evt.RunID, AgentID: p.AgentID, InputTokens: p.InputTokens, OutputTokens: p.OutputTokens})
 		}
 	case event.RunEventToolStarted:
 		var p event.ToolCallStartedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(subagentToolStepMsg(evt, p.StepID, p.ToolName, firstNonEmpty(p.Summary, p.Description), p.ToolMeta, evt.Type))
+			s.notifyUIForSession(evt.SessionID, subagentToolStepMsg(evt, p.StepID, p.ToolName, firstNonEmpty(p.Summary, p.Description), p.ToolMeta, evt.Type))
 		}
 	case event.RunEventToolCompleted:
 		var p event.ToolCallCompletedPayload
@@ -747,7 +822,7 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 			msg.Msg.Content = p.DisplayBody
 			msg.Msg.Duration = time.Duration(p.DurationSeconds * float64(time.Second))
 			msg.Msg.RetainAsHistory = p.RetainAsHistory
-			s.notifyUI(msg)
+			s.notifyUIForSession(evt.SessionID, msg)
 		}
 	case event.RunEventToolOutputDelta:
 		var p event.ToolCallOutputDeltaPayload
@@ -755,22 +830,39 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 			msg := subagentToolStepMsg(evt, p.StepID, p.ToolName, p.Summary, p.ToolMeta, evt.Type)
 			msg.Msg.Content = p.Text
 			msg.Msg.ToolOutputDelta = true
-			s.notifyUI(msg)
+			s.notifyUIForSession(evt.SessionID, msg)
 		}
 	case event.RunEventPlanUpdated:
 		var p event.PlanUpdatedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && (len(p.Items) > 0 || strings.TrimSpace(p.Title) != "" || p.Total > 0) {
-			s.notifyUI(PlanUpdatedMsg{Payload: p})
+			s.notifyUIForSession(evt.SessionID, PlanUpdatedMsg{Payload: p})
 		}
 	case event.RunEventSubagentSpawned:
 		var p event.SubagentSpawnedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(SubagentSpawnedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Title: p.Title, Task: p.Task, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, Timestamp: evt.CreatedAt})
+			s.notifyUIForSession(evt.SessionID, SubagentSpawnedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Title: p.Title, Task: p.Task, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, ModelProvider: p.ModelProvider, Model: p.Model, ReasoningEffort: p.ReasoningEffort, Timestamp: evt.CreatedAt})
 		}
 	case event.RunEventSubagentEnded:
 		var p event.SubagentEndedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, Timestamp: evt.CreatedAt})
+			s.notifyUIForSession(evt.SessionID, SubagentEndedMsg{AgentID: p.AgentID, AgentType: p.AgentType, TaskID: p.TaskID, Status: p.Status, Error: p.Error, Output: p.Output, ParentToolCallID: p.ParentToolCallID, TaskIndex: p.TaskIndex, ExecutionID: p.ExecutionID, FinishedAt: time.UnixMilli(p.FinishedAtMs), Timestamp: evt.CreatedAt})
+		}
+	case event.RunEventSubagentInputDelivered:
+		// A message the user sent a running subagent was handed to its model at
+		// a tool boundary: it is drawn as a user message in that subagent's own
+		// view, exactly as a delivered steer is drawn in the conversation.
+		var p event.SubagentInputDeliveredPayload
+		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" && strings.TrimSpace(p.Text) != "" {
+			s.notifyUIForSession(evt.SessionID, SubagentInputDeliveredMsg{AgentID: strings.TrimSpace(p.AgentID), RunID: evt.RunID, Text: strings.TrimSpace(p.Text)})
+		}
+	case event.CompactEventBudgetUpdated:
+		// A per-agent context budget — the gauge that opens a subagent's view
+		// and follows each of its responses. It carries the roster key, so the
+		// reducer routes it to that subagent's own footer, never the
+		// conversation's.
+		var p event.TokenBudgetUpdatedPayload
+		if json.Unmarshal(evt.Payload, &p) == nil {
+			s.notifyUIForSession(evt.SessionID, tokenBudgetMsgFromPayload(p))
 		}
 	// Both approval branches below are replay-and-subagent only: their guard
 	// stays. A conversation approval never reaches them, because the live
@@ -782,46 +874,63 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	case event.RunEventApprovalReq:
 		var p event.ApprovalRequestedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" {
-			s.notifyUI(replayApprovalMessage(evt, p.AgentID, p.ActionID, p.ActionKind, "waiting approval", p.Message))
+			s.notifyUIForSession(evt.SessionID, replayApprovalMessage(evt, p.AgentID, p.ActionID, p.ActionKind, "waiting approval", p.Message))
 		}
 	case event.RunEventApprovalResolved:
 		var p event.ApprovalResolvedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil && strings.TrimSpace(p.AgentID) != "" {
-			s.notifyUI(replayApprovalMessage(evt, p.AgentID, p.ActionID, p.ActionKind, firstNonEmpty(p.Decision, "resolved"), p.Reason))
+			s.notifyUIForSession(evt.SessionID, replayApprovalMessage(evt, p.AgentID, p.ActionID, p.ActionKind, firstNonEmpty(p.Decision, "resolved"), p.Reason))
 		}
 	case event.RunEventGoalStarted, event.RunEventGoalRoundStarted, event.RunEventGoalCompleted:
 		if msg, ok := goalEventMessage(evt); ok {
-			s.notifyUI(msg)
+			s.notifyUIForSession(evt.SessionID, msg)
+		}
+	// A plan review's two events are its card: the request opens it, the
+	// outcome closes it, and the reviewer's own spawned event binds to it
+	// through the ReviewID the way any subagent binds to its dispatching call.
+	case event.RunEventPlanReviewStarted:
+		var p event.PlanReviewStartedPayload
+		if json.Unmarshal(evt.Payload, &p) == nil {
+			s.notifyUIForSession(evt.SessionID, PlanReviewStartedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label})
+		}
+	case event.RunEventPlanReviewed:
+		var p event.PlanReviewedPayload
+		if json.Unmarshal(evt.Payload, &p) == nil {
+			s.notifyUIForSession(evt.SessionID, PlanReviewReviewedMsg{ReviewID: p.ReviewID, Provider: p.Provider, Model: p.Model, Label: p.Label, Outcome: p.Outcome, Error: p.Error})
 		}
 	case event.RunEventContextCompacting:
 		var p event.ContextCompactingPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(ContextCompactingMsg{CompactionID: p.CompactionID, AgentID: p.AgentID, Trigger: p.Trigger, TokensBefore: p.TokensBefore})
+			s.notifyUIForSession(evt.SessionID, ContextCompactingMsg{CompactionID: p.CompactionID, AgentID: p.AgentID, Trigger: p.Trigger, TokensBefore: p.TokensBefore})
 		}
 	case event.RunEventContextCompactProgress:
 		var p event.ContextCompactProgressPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(ContextCompactProgressMsg{CompactionID: p.CompactionID, AgentID: p.AgentID, Percent: p.Percent, Phase: p.Phase})
+			s.notifyUIForSession(evt.SessionID, ContextCompactProgressMsg{CompactionID: p.CompactionID, AgentID: p.AgentID, Percent: p.Percent, Phase: p.Phase})
 		}
 	case event.RunEventContextCompactError:
 		var p event.ContextCompactFailedPayload
 		if json.Unmarshal(evt.Payload, &p) == nil {
-			s.notifyUI(ContextCompactFailedMsg{CompactionID: p.CompactionID, AgentID: p.AgentID, Error: p.Error, Cancelled: p.Cancelled})
+			s.notifyUIForSession(evt.SessionID, ContextCompactFailedMsg{CompactionID: p.CompactionID, AgentID: p.AgentID, Error: p.Error, Cancelled: p.Cancelled})
 		}
 	case event.RunEventContextCompacted:
 		var p event.ContextCompactedPayload
 		if json.Unmarshal(evt.Payload, &p) != nil {
 			return nil
 		}
-		s.notifyUI(ContextCompactedMsg{Payload: p})
+		s.notifyUIForSession(evt.SessionID, ContextCompactedMsg{Payload: p})
 		// The footer reads the last response's prompt, which described the
 		// history that was just replaced. Until the next response reports
 		// again, the checkpoint's own size is what the context holds. A
-		// subagent's compaction leaves the conversation's context as it was.
-		if strings.TrimSpace(p.AgentID) == "" {
-			if budget, ok := s.tokenBudgetMessageFromUsage(p.TokensAfter); ok {
-				s.notifyUI(budget)
+		// subagent's compaction leaves the conversation's context as it was;
+		// its own gauge is recomputed the same instant, from its worker
+		// session, and stays in its view.
+		if agentID := strings.TrimSpace(p.AgentID); agentID == "" {
+			if budget, ok := s.tokenBudgetMessageFromUsage(evt.SessionID, p.TokensAfter); ok {
+				s.notifyUIForSession(evt.SessionID, budget)
 			}
+		} else if payload, ok := run.SubagentContextBudget(context.Background(), s.runner(), evt.SessionID, agentID); ok {
+			s.notifyUIForSession(evt.SessionID, tokenBudgetMsgFromPayload(payload))
 		}
 	// A turn error is durable and it is the surface's own conversation, so the
 	// live path renders it here rather than only on replay. Without this branch
@@ -836,7 +945,16 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	// continuation armed, cancelled or fired by any path reads the same.
 	case event.RunEventAutoContinueScheduled, event.RunEventAutoContinueCancelled:
 		if msg, ok := autoContinueUIMessage(evt); ok {
-			s.notifyUI(msg)
+			s.notifyUIForSession(evt.SessionID, msg)
+		}
+	// A language-server recommendation is the user's to answer, not the
+	// model's: the event is persisted above (so a reconnect does not ask
+	// twice) and only the live surface opens the modal. Replay reads the
+	// answer's transcript line, never this.
+	case event.RunEventLSPRecommendation:
+		var p event.LSPRecommendation
+		if json.Unmarshal(evt.Payload, &p) == nil && p.ID != "" {
+			s.notifyUIForSession(evt.SessionID, LSPRecommendationMsg{Rec: p})
 		}
 	}
 	return nil
@@ -855,7 +973,7 @@ func (s *ChatSession) notifyTurnError(evt event.RunEvent) {
 	if text == "" {
 		return
 	}
-	s.notifyUI(NewMessageMsg{Msg: Message{
+	s.notifyUIForSession(evt.SessionID, NewMessageMsg{Msg: Message{
 		Kind: MsgKindError, Content: text, Title: p.Title, Timestamp: evt.CreatedAt,
 	}})
 }
@@ -890,6 +1008,17 @@ func (s *ChatSession) publishTUIRunEvent(ctx context.Context, sessionID, runID, 
 		return fmt.Errorf("publish TUI run event: run id is required")
 	}
 	return s.publishRunEvent(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
+}
+
+// persistRunTurnError keeps a failed run's error in the conversation's log.
+// The error block was the last thing the run said before its "Worked for"
+// line; this record is what lets a resume draw it there again.
+func (s *ChatSession) persistRunTurnError(sessionID, runID, text string) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(text) == "" {
+		return
+	}
+	s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, sessionID, event.RunEventTurnError,
+		event.TurnErrorPayload{Error: text, Message: text}, time.Now()))
 }
 
 // persistRunEvent stores one canonical event in the conversation's log without
@@ -1122,6 +1251,10 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 			ResultLines:  meta.ResultLines,
 			ResultOffset: meta.ResultOffset,
 			StartedAtMs:  meta.StartedAtMs,
+			// A subagent's own subagent_* call reaches the surface through
+			// this mirror; without its card facts the nested dispatch would
+			// fall back to a generic tool card instead of its own card.
+			SubagentCall: meta.SubagentCall,
 		},
 		ToolPhase: phase,
 		AgentID:   strings.TrimSpace(meta.AgentID),
@@ -1194,9 +1327,17 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 			},
 		})),
 	)
-	// A hot reload has to honour the /permissions preset the same way the
-	// slash-command reload path does; the environment cannot see it otherwise.
-	env.OnConfigLoaded = s.reapplyPermissionPreset
+	// This process reaps the runs whose owners stopped renewing — a gateway
+	// that crashed, another terminal that was killed mid-turn — and reports
+	// each ending through this session's own run-event funnel, so replay and
+	// every page see it the way they see any other ending. The reap itself is
+	// a compare-and-swap, so whichever process gets there first settles the
+	// run and reports it exactly once.
+	s.stopAbandonedRunReaper = turn.AbandonedRunReaper{
+		Runs:    env.Deps.RunRT,
+		Publish: s.publishTUIRunEvent,
+		Recover: func(context.Context) { s.recoverResolvedApprovalWaitsOnce(s.preferredSessionIDForFast()) },
+	}.Start(ctx)
 	env.OnConfigReload = func(next *config.Root) {
 		if next == nil {
 			return
@@ -1207,6 +1348,25 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 		s.configApplyMu.Lock()
 		s.adoptConfig(next)
 		s.configApplyMu.Unlock()
+	}
+	// Every subagent execution reports its start and end here, so the engine
+	// arms that subagent's own auto-continue the same way it arms the
+	// conversation's. The surface is declared at registration because the
+	// execution's context carries no reliable surface of its own.
+	env.OnSubagentExecution = &process.SubagentExecutionHooks{
+		Starting: func(workerSessionID string) {
+			s.Core.SubagentExecutionStarting(context.Background(), workerSessionID)
+		},
+		Ended: func(end run.SubagentExecutionEnd) {
+			s.Core.SubagentExecutionEnded(context.Background(), turn.SubagentExecutionEnd{
+				ConversationSessionID: end.ConversationSessionID,
+				WorkerSessionID:       end.WorkerSessionID,
+				AgentKey:              end.AgentKey,
+				RunID:                 end.RunID,
+				Origin:                turn.Origin{Surface: turn.SurfaceTUI},
+				Err:                   end.Err,
+			})
+		},
 	}
 	s.pipe().Add("00-project-context", s.projectContextPreHook)
 	runner.Events = event.SinkFunc(s.publishRunEvent)
@@ -1262,7 +1422,7 @@ type Session interface {
 	SurfaceActiveContextMessages(ctx context.Context, sessionID string) ([]state.Message, error)
 	// SurfaceComposerTokenStats is the footer's budget for a context holding
 	// usage tokens, computed the way every live budget update computes it.
-	SurfaceComposerTokenStats(usage int) ComposerTokenStats
+	SurfaceComposerTokenStats(sessionID string, usage int) ComposerTokenStats
 	ResumeSession(ctx context.Context, sessionID string) (id string, title string, warning string, err error)
 	// ActivateSessionModel puts the runner on sessionID's own stored model
 	// selection (or the config default when it has none), returning a
@@ -1278,6 +1438,10 @@ type Session interface {
 	PreferredSurfaceTranscriptSessionID(ctx context.Context) string
 	NewSessionID(prefix string) string
 	ListSessionsRecent(ctx context.Context, limit int) ([]SessionSummary, error)
+	// SessionTitle returns the session's own title, "" when it has none. It
+	// reads by id, so a conversation older than any recent list still has
+	// its name.
+	SessionTitle(ctx context.Context, id string) (string, error)
 	ModelSummaryString() string
 	SkillListString() string
 	AvailableSkillToggleOptions() []skill.Entry
@@ -1289,11 +1453,6 @@ type Session interface {
 	ReloadConfig() error
 	CurrentModelOption() string
 	CurrentModelReasoningEffort() string
-	// SubagentModelSummary names the model and reasoning effort one subagent
-	// type runs on, reporting false when that type has no LLM chain of its own
-	// and so runs on the primary agent's model. A subagent's own view names
-	// what that subagent is running, not what the conversation is running.
-	SubagentModelSummary(agentType string) (model string, effort string, ok bool)
 	ApplySkillSelection(label string) (string, error)
 	ApplySkillEnabledSelection(enabledPaths []string) (string, error)
 	// MemorySkillOptions lists the skills the memory consolidation agent wrote.
@@ -1320,16 +1479,21 @@ type Session interface {
 	PermissionPresets(sessionID string) (presets []safety.ApprovalPreset, current string)
 	ApplyPermissionPreset(sessionID, presetID string) (string, error)
 	HandleMCPSlash(sessionID, channel string) (string, bool)
+	// HandleLSPSlash answers /lsp for the text fallback (non-viewport mode).
+	HandleLSPSlash(sessionID, channel string) (string, bool)
 	// HandleSandboxSlash returns the sandbox report. It reports only — the
 	// sandbox is chosen with /permissions, which moves it together with the
 	// approval policy.
 	HandleSandboxSlash(sessionID, channel string, args []string) (string, bool)
-	HandleDiffSlash(sessionID, channel string, args []string) (string, bool)
 	ExecuteSurfaceSlash(ctx context.Context, sessionID string, line string) (SlashOutcome, bool)
 	// ChooseSurfaceSlash applies a choice made in the picker a slash command
 	// offered.
 	ChooseSurfaceSlash(ctx context.Context, sessionID string, choice turn.SlashChoice) SlashOutcome
 	PrependUINotify(fn func(any))
+	// SetViewingSession records the conversation this surface is attached
+	// to. The event funnel consults it to keep other sessions' events off
+	// this screen (they still land in their own session's log).
+	SetViewingSession(sessionID string)
 	// StartApprovalRecovery drains the approval decisions of one conversation
 	// that were committed while no process was driving it. The surface calls it
 	// with the session it has opened, so an interrupted approval is reported to
@@ -1337,21 +1501,42 @@ type Session interface {
 	StartApprovalRecovery(sessionID string)
 	SetToolApprovalSink(sink turn.ToolApprovalDecisionSink)
 	CancelActiveRun() bool
-	SteerSurfaceRun(sessionID string, channel string, parts []llm.ContentPart) bool
-	QueueSurfaceFollowUp(sessionID string, channel string, parts []llm.ContentPart) bool
-	// RetractSurfaceSteer removes the most recently enqueued steer from the
-	// active run's input runtime so it can be pulled back into the composer for
-	// editing. Returns false when no steer is still pending (already delivered
-	// at a tool boundary, or no active run), which is what makes the queue
-	// preview's "edit last queued message" hint honest for pending steers.
-	RetractSurfaceSteer(sessionID string, channel string) bool
-	// SurfacePendingSteerCount reports how many steers the active run still has
-	// queued (enqueued but not yet delivered to the model at a tool boundary).
-	// ok is false when no run is active. Steers are enqueued into the runtime in
-	// lockstep with the local mirror and drained in FIFO order, so the surviving
-	// runtime steers are always a suffix of the mirror; the caller uses this
-	// count to drop already-delivered (leading) entries from its mirror.
-	SurfacePendingSteerCount(sessionID string, channel string) (count int, ok bool)
+	// SurfaceInputQueue returns the conversation's input queue — the one
+	// place queue semantics are decided. The surface enqueues, recalls,
+	// previews and drains through it; the queue belongs to the conversation,
+	// so it outlives any one turn.
+	SurfaceInputQueue(sessionID string) *run.InputQueue
+	// SendToSubagent hands what the user typed in a subagent's own view to that
+	// subagent: it starts its next execution when the subagent is idle, and
+	// reaches it at its next tool boundary (or waits for the execution after
+	// it) when it is running. followUp forces the queued lane while a run is in
+	// flight.
+	SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (run.SubagentDelivery, error)
+	// SubagentInputPreview is the subagent's queued input as its own view shows it.
+	SubagentInputPreview(sessionID, agentKey string) ComposerPendingInputPreview
+	// RecallSubagentInput pulls the subagent's newest queued message back out
+	// for editing.
+	RecallSubagentInput(sessionID, agentKey string) (ComposerSubmission, bool)
+	// InterruptSubagentToSend stops the subagent's running execution to send the
+	// steers queued behind it (Esc's second meaning in its view); false when
+	// there is nothing to flush.
+	InterruptSubagentToSend(sessionID, agentKey string) bool
+	// WithdrawSubagentInput takes a just-sent message back before the subagent
+	// answered, returning it plus everything queued after it.
+	WithdrawSubagentInput(sessionID, agentKey string) ([]ComposerSubmission, bool)
+	// DiscardSubagentInput empties the subagent's queued input and returns how
+	// many messages were dropped, the way the conversation's own queue is
+	// discarded when its conversation is left.
+	DiscardSubagentInput(sessionID, agentKey string) int
+	// CompactSubagent compacts the subagent's own worker context from its view;
+	// it refuses while the subagent is running.
+	CompactSubagent(ctx context.Context, sessionID, agentKey string) (string, bool)
+	// SubagentContextReport answers /context for the subagent whose view it is
+	// run from.
+	SubagentContextReport(sessionID, agentKey string) (string, bool)
+	// SubagentComposerTokenStats is the subagent's own footer gauge — how much
+	// of that subagent's context window is left.
+	SubagentComposerTokenStats(sessionID, agentKey string) ComposerTokenStats
 	// IsFastMode reports whether the active session has /fast enabled.
 	// Anthropic Opus only — sessionFastAvailable() guards the slash UI so
 	// non-Opus models never expose the toggle.
@@ -1392,7 +1577,6 @@ type AgentRosterRow struct {
 	RunID          string
 	ElapsedSeconds int
 	ToolCount      int
-	Activity       string // current tool call description for fanout third layer
 	FileCount      int
 }
 
@@ -1453,6 +1637,10 @@ type ComposerState struct {
 	// pressed Esc on the mention overlay, suppressing re-open until the
 	// draft changes.
 	MentionDismissedDraft string
+	// SubagentView is true while this composer belongs to a subagent's own
+	// view. It is kept in step with the active view by syncComposerToView and
+	// makes the slash picker list only the commands available there (D4).
+	SubagentView bool
 }
 
 // HandleDraftUpdate is the single entry point for applying a new DraftText
@@ -1476,6 +1664,7 @@ func (c *ComposerState) HandleDraftUpdate(draft string, session Session) {
 	if c.SlashOverlay == nil {
 		if composerDisplayText(draft) == "/" {
 			c.SlashOverlay = newSlashOverlay()
+			c.SlashOverlay.SubagentView = c.SubagentView
 			c.SlashOverlay.rebuildFiltered(session)
 		}
 	} else if !c.SlashOverlay.UpdateFromDraft(draft, session) {
@@ -1536,6 +1725,10 @@ type PanelCloseMsg struct {
 // /mcp panel is open, so the panel repaints in place.
 type MCPStatusTickMsg struct{}
 
+// LSPStatusTickMsg tells the main loop a language server's snapshot changed
+// while the /lsp panel is open, so the panel repaints in place.
+type LSPStatusTickMsg struct{}
+
 // MCPAuthMsg reports a panel-started OAuth flow to the main loop: first the
 // URL to open, then the outcome sentence once the flow ends.
 type MCPAuthMsg struct {
@@ -1565,33 +1758,42 @@ const (
 	autoContinueNoticeGlyph = "⚠ "
 )
 
-// AutoContinueScheduledMsg reports a continuation armed by the engine: the
-// conversation will resume by itself at ContinueAt.
+// AutoContinueScheduledMsg reports a continuation armed by the engine: the view
+// it belongs to will resume by itself at ContinueAt. AgentID is the roster key
+// of the subagent whose continuation it is, empty for the conversation's own.
 type AutoContinueScheduledMsg struct {
 	SessionID  string
 	RunID      string
+	AgentID    string
 	ContinueAt time.Time
 	Code       string
 	Attempt    int
 }
 
-// AutoContinueCancelledMsg reports a continuation that ended without firing.
+// AutoContinueCancelledMsg reports a continuation that ended without firing,
+// for the view named by AgentID ("" for the conversation's own).
 type AutoContinueCancelledMsg struct {
 	SessionID string
+	AgentID   string
 	Reason    string
 	Error     string
 }
 
-// AutoContinueDueMsg carries the engine's continuation to the event loop,
-// which submits Prompt as the conversation's next turn.
+// AutoContinueDueMsg carries the engine's continuation to the event loop. The
+// conversation's own is submitted as its next turn; a subagent's (AgentKey set)
+// is delivered to that subagent instead.
 type AutoContinueDueMsg struct {
 	SessionID string
+	AgentKey  string
 	Prompt    string
 }
 
-// autoContinueView is what the event loop knows about a pending continuation.
+// autoContinueView is what the event loop knows about one pending continuation.
 type autoContinueView struct {
-	sessionID  string
+	sessionID string
+	// agentKey is the view this continuation belongs to, "" for the
+	// conversation's own.
+	agentKey   string
 	continueAt time.Time
 	code       string
 	// announced is whether the transcript line has been drawn. A limit that
@@ -1601,10 +1803,24 @@ type autoContinueView struct {
 }
 
 // autoContinueCanceller is the optional half of Session that can stop a
-// pending continuation. It is optional so surfaces without an engine behind
-// them (tests, replay) need not grow a method they would stub.
+// pending continuation of the conversation itself. It is optional so surfaces
+// without an engine behind them (tests, replay) need not grow a method they
+// would stub.
 type autoContinueCanceller interface {
 	CancelAutoContinue(sessionID string) bool
+}
+
+// subagentAutoContinueCanceller is the optional half of Session that can stop
+// one subagent's pending continuation, named by its roster key.
+type subagentAutoContinueCanceller interface {
+	CancelSubagentAutoContinue(sessionID, agentKey string) bool
+}
+
+// subagentAutoContinuer is the optional half of Session that runs one
+// subagent's due continuation: it delivers the prompt to that subagent rather
+// than starting a conversation turn.
+type subagentAutoContinuer interface {
+	ContinueSubagentAuto(plan turn.AutoContinuePlan, prompt string) error
 }
 
 // CancelAutoContinue stops the session's pending continuation on the reader's
@@ -1616,10 +1832,30 @@ func (s *ChatSession) CancelAutoContinue(sessionID string) bool {
 	return s.Core.CancelAutoContinue(context.Background(), sessionID, turn.AutoContinueCancelledByUser)
 }
 
+// CancelSubagentAutoContinue stops one subagent's pending continuation, named
+// by its roster key, on the reader's behalf.
+func (s *ChatSession) CancelSubagentAutoContinue(sessionID, agentKey string) bool {
+	if s == nil || s.Core == nil {
+		return false
+	}
+	return s.Core.CancelAutoContinueForAgent(context.Background(), sessionID, agentKey, turn.AutoContinueCancelledByUser)
+}
+
+// ContinueSubagentAuto delivers a subagent's due continuation to that subagent
+// through the shared process helper, so the terminal and the web write the same
+// delivery.
+func (s *ChatSession) ContinueSubagentAuto(plan turn.AutoContinuePlan, prompt string) error {
+	if s == nil || s.Env == nil {
+		return turn.ErrAutoContinueUnavailable
+	}
+	return s.Env.ContinueSubagent(s.runner(), s.subagentSurface(plan.SessionID), plan, prompt)
+}
+
 // continueAfterUsageLimit is the engine's port into this surface. The turn is
 // not run here: it is handed to the event loop, which owns the composer, the
 // transcript and cancellation, and runs it the way it runs anything the reader
-// submits.
+// submits. A subagent's continuation is delivered to that subagent's view the
+// same way.
 func (s *ChatSession) continueAfterUsageLimit(_ context.Context, plan turn.AutoContinuePlan, prompt string) error {
 	if s == nil {
 		return turn.ErrAutoContinueUnavailable
@@ -1630,7 +1866,7 @@ func (s *ChatSession) continueAfterUsageLimit(_ context.Context, plan turn.AutoC
 	if !attached {
 		return turn.ErrAutoContinueUnavailable
 	}
-	s.notifyUI(AutoContinueDueMsg{SessionID: plan.SessionID, Prompt: prompt})
+	s.notifyUI(AutoContinueDueMsg{SessionID: plan.SessionID, AgentKey: strings.TrimSpace(plan.AgentKey), Prompt: prompt})
 	return nil
 }
 
@@ -1648,11 +1884,11 @@ func autoContinueUIMessage(evt event.RunEvent) (any, bool) {
 		if err != nil {
 			return nil, false
 		}
-		return AutoContinueScheduledMsg{SessionID: evt.SessionID, RunID: evt.RunID, ContinueAt: at, Code: p.Code, Attempt: p.Attempt}, true
+		return AutoContinueScheduledMsg{SessionID: evt.SessionID, RunID: evt.RunID, AgentID: strings.TrimSpace(p.AgentID), ContinueAt: at, Code: p.Code, Attempt: p.Attempt}, true
 	case event.RunEventAutoContinueCancelled:
 		var p event.AutoContinueCancelledPayload
 		_ = json.Unmarshal(evt.Payload, &p)
-		return AutoContinueCancelledMsg{SessionID: evt.SessionID, Reason: p.Reason, Error: p.Error}, true
+		return AutoContinueCancelledMsg{SessionID: evt.SessionID, AgentID: strings.TrimSpace(p.AgentID), Reason: p.Reason, Error: p.Error}, true
 	}
 	return nil, false
 }
@@ -1662,50 +1898,72 @@ func autoContinueUIMessage(evt event.RunEvent) (any, bool) {
 func handleAutoContinueNotification(renderer *Renderer, state *streamState, m any) bool {
 	switch msg := m.(type) {
 	case AutoContinueScheduledMsg:
+		view := strings.TrimSpace(msg.AgentID)
 		if state == nil || !sameSessionID(msg.SessionID, state.sessionID) {
 			return true
 		}
-		state.autoContinue = &autoContinueView{sessionID: msg.SessionID, continueAt: msg.ContinueAt, code: msg.Code}
-		renderer.SetAutoContinueNotice(autoContinueFooterText(msg.Code, msg.ContinueAt, time.Now()))
+		state.setAutoContinue(view, &autoContinueView{sessionID: msg.SessionID, agentKey: view, continueAt: msg.ContinueAt, code: msg.Code})
+		renderer.SetAutoContinueNotice(view, autoContinueFooterText(msg.Code, msg.ContinueAt, time.Now()))
 		if state.activeForeground == nil {
 			state.announceAutoContinue(renderer)
 		}
 		renderComposerWithState(renderer, state)
 		return true
 	case AutoContinueCancelledMsg:
-		if state == nil || state.autoContinue == nil || !sameSessionID(msg.SessionID, state.autoContinue.sessionID) {
+		if state == nil {
 			return true
 		}
-		view := state.autoContinue
-		state.clearAutoContinue(renderer)
+		view := strings.TrimSpace(msg.AgentID)
+		entry := state.autoContinueFor(view)
+		if entry == nil || !sameSessionID(msg.SessionID, entry.sessionID) {
+			return true
+		}
+		state.clearAutoContinue(renderer, view)
 		// A turn the reader sent is its own explanation; anything else ending
 		// the wait is said, so the notice already in scrollback is not left
 		// promising a continuation that will never come.
 		switch {
 		case msg.Reason == turn.AutoContinueSuperseded:
-		case msg.Reason == turn.AutoContinueUnavailable && view.announced:
-			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: autoContinueUnavailableText(msg.Error), Final: true})
-		case view.announced:
-			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", Final: true})
+		case msg.Reason == turn.AutoContinueUnavailable && entry.announced:
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: autoContinueUnavailableText(msg.Error), AgentID: view, Final: true})
+		case entry.announced:
+			renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", AgentID: view, Final: true})
 		}
 		renderComposerWithState(renderer, state)
 		return true
 	case AutoContinueDueMsg:
+		if state == nil {
+			return true
+		}
+		view := strings.TrimSpace(msg.AgentKey)
+		entry := state.autoContinueFor(view)
 		// Only a wait this loop is still showing is continued. A reader who
 		// pressed Esc as the timer fired has cleared it, and the continuation
 		// that raced the key is dropped rather than run against their wish.
-		if state == nil || state.autoContinue == nil || !sameSessionID(msg.SessionID, state.autoContinue.sessionID) {
+		if entry == nil || !sameSessionID(msg.SessionID, entry.sessionID) {
 			return true
 		}
-		state.clearAutoContinue(renderer)
+		state.clearAutoContinue(renderer, view)
 		prompt := strings.TrimSpace(msg.Prompt)
 		if prompt == "" {
 			return true
 		}
-		state.autoContinueDue = &ComposerSubmission{
-			Text:        prompt,
-			Parts:       []llm.ContentPart{llm.Text(prompt)},
-			DisplayText: prompt,
+		if view == "" {
+			state.autoContinueDue = &ComposerSubmission{
+				Text:        prompt,
+				Parts:       []llm.ContentPart{llm.Text(prompt)},
+				DisplayText: prompt,
+			}
+			renderComposerWithState(renderer, state)
+			return true
+		}
+		// A subagent's continuation is delivered to that subagent, not
+		// submitted as a conversation turn.
+		if cont, ok := state.session.(subagentAutoContinuer); ok {
+			plan := turn.AutoContinuePlan{SessionID: msg.SessionID, AgentKey: view}
+			if err := cont.ContinueSubagentAuto(plan, prompt); err != nil {
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: autoContinueUnavailableText(err.Error()), AgentID: view, Final: true})
+			}
 		}
 		renderComposerWithState(renderer, state)
 		return true
@@ -1713,64 +1971,114 @@ func handleAutoContinueNotification(renderer *Renderer, state *streamState, m an
 	return false
 }
 
-// announceAutoContinue draws the transcript line for a pending continuation,
-// once.
-func (s *streamState) announceAutoContinue(renderer *Renderer) {
-	if s == nil || s.autoContinue == nil || s.autoContinue.announced {
+// setAutoContinue records one view's pending continuation.
+func (s *streamState) setAutoContinue(view string, entry *autoContinueView) {
+	if s == nil {
 		return
 	}
-	s.autoContinue.announced = true
-	renderer.RenderFrame(Frame{
-		Kind:  FrameStatus,
-		Title: autoContinueTranscriptText(s.autoContinue.code, s.autoContinue.continueAt, time.Now()),
-		Final: true,
-	})
+	if s.autoContinue == nil {
+		s.autoContinue = map[string]*autoContinueView{}
+	}
+	s.autoContinue[strings.TrimSpace(view)] = entry
 }
 
-// cancelAutoContinue is Esc or typing while a continuation waits. It reports
-// whether there was one, so Esc is consumed only when it did something.
+// autoContinueFor returns one view's pending continuation, nil when none.
+func (s *streamState) autoContinueFor(view string) *autoContinueView {
+	if s == nil {
+		return nil
+	}
+	return s.autoContinue[strings.TrimSpace(view)]
+}
+
+// announceAutoContinue draws the transcript line for each pending continuation
+// that has none, into the view it belongs to, once.
+func (s *streamState) announceAutoContinue(renderer *Renderer) {
+	if s == nil {
+		return
+	}
+	for view, entry := range s.autoContinue {
+		if entry == nil || entry.announced {
+			continue
+		}
+		entry.announced = true
+		renderer.RenderFrame(Frame{
+			Kind:    FrameStatus,
+			Title:   autoContinueTranscriptText(entry.code, entry.continueAt, time.Now()),
+			AgentID: strings.TrimSpace(view),
+			Final:   true,
+		})
+	}
+}
+
+// cancelAutoContinue is Esc or typing while the view on screen waits. It
+// reports whether there was one, so Esc is consumed only when it did something.
 func (s *streamState) cancelAutoContinue(renderer *Renderer) bool {
-	if s == nil || s.autoContinue == nil {
+	if s == nil {
 		return false
 	}
-	sessionID := s.autoContinue.sessionID
-	if canceller, ok := s.session.(autoContinueCanceller); ok && canceller.CancelAutoContinue(sessionID) {
-		// The engine's cancellation event clears the notice and says so in
-		// the transcript, the same way a cancel from any other surface does.
+	view := ""
+	if renderer != nil {
+		view = strings.TrimSpace(renderer.ActiveView())
+	}
+	entry := s.autoContinueFor(view)
+	if entry == nil {
+		return false
+	}
+	if view == "" {
+		if canceller, ok := s.session.(autoContinueCanceller); ok && canceller.CancelAutoContinue(entry.sessionID) {
+			// The engine's cancellation event clears the notice and says so in
+			// the transcript, the same way a cancel from any other surface does.
+			return true
+		}
+	} else if canceller, ok := s.session.(subagentAutoContinueCanceller); ok && canceller.CancelSubagentAutoContinue(entry.sessionID, view) {
 		return true
 	}
 	// Nothing left to cancel in the engine: the timer fired as the key was
 	// pressed. Clearing here is what makes the racing continuation drop.
-	announced := s.autoContinue.announced
-	s.clearAutoContinue(renderer)
+	announced := entry.announced
+	s.clearAutoContinue(renderer, view)
 	if announced {
-		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", Final: true})
+		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", AgentID: view, Final: true})
 	}
 	return true
 }
 
-// leaveAutoContinue drops the pending or due continuation of the conversation
-// being switched away from.
+// leaveAutoContinue drops the pending or due continuations of the conversation
+// being switched away from, each in its own view.
 func (s *streamState) leaveAutoContinue(renderer *Renderer) {
 	if s == nil {
 		return
 	}
 	s.autoContinueDue = nil
-	if s.autoContinue == nil {
-		return
+	for view, entry := range s.autoContinue {
+		if entry == nil {
+			continue
+		}
+		key := strings.TrimSpace(view)
+		if key == "" {
+			if canceller, ok := s.session.(autoContinueCanceller); ok {
+				canceller.CancelAutoContinue(entry.sessionID)
+			}
+		} else if canceller, ok := s.session.(subagentAutoContinueCanceller); ok {
+			canceller.CancelSubagentAutoContinue(entry.sessionID, key)
+		}
+		if renderer != nil {
+			renderer.SetAutoContinueNotice(key, "")
+		}
 	}
-	if canceller, ok := s.session.(autoContinueCanceller); ok {
-		canceller.CancelAutoContinue(s.autoContinue.sessionID)
-	}
-	s.clearAutoContinue(renderer)
+	s.autoContinue = nil
 }
 
-func (s *streamState) clearAutoContinue(renderer *Renderer) {
+// clearAutoContinue drops one view's pending continuation and its notice.
+func (s *streamState) clearAutoContinue(renderer *Renderer, view string) {
 	if s == nil {
 		return
 	}
-	s.autoContinue = nil
-	renderer.SetAutoContinueNotice("")
+	view = strings.TrimSpace(view)
+	delete(s.autoContinue, view)
+	if renderer != nil {
+		renderer.SetAutoContinueNotice(view, "")
+	}
 }
 
 // takeAutoContinueDue hands the loop a continuation that is due, once.

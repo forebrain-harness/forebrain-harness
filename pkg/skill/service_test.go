@@ -216,8 +216,8 @@ body
 	if installed.Count != 1 || len(installed.Installed) != 1 {
 		t.Fatalf("expected single installed skill metadata, got %+v", installed)
 	}
-	if installed.Metadata.Source != "project" {
-		t.Fatalf("source=%q want project", installed.Metadata.Source)
+	if installed.Metadata.Origin != skill.OriginProject {
+		t.Fatalf("origin=%q want project", installed.Metadata.Origin)
 	}
 
 	// The package installs into a directory named for the archive; the skill's

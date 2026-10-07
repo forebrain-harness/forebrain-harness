@@ -1,0 +1,19 @@
+id: metals
+display_name: Metals
+languages: [Scala]
+priority: 100
+command: metals
+extension_to_language: {.scala: scala, .sc: scala, .sbt: scala, .mill: scala}
+root_markers: [build.sbt, build.sc, build.mill, project/build.properties, .bsp, project.scala]
+env_passthrough: [JAVA_HOME, SBT_OPTS, JAVA_OPTS, COURSIER_CACHE, HTTP_PROXY, HTTPS_PROXY, NO_PROXY]
+detect:
+  extra_dirs: ["~/.local/share/coursier/bin", "~/Library/Application Support/Coursier/bin"]
+install:
+  - requires: cs
+    argv: [cs, install, metals]
+startup_timeout: 180
+readiness: none
+auto_answers: {"Import build": "Import build", "New sbt workspace detected": "Import build"}
+initialization_options: {statusBarProvider: log-message, isHttpEnabled: false}
+project_writes: [.metals, .bloop, .bsp]
+notes: "Install with Coursier: cs install metals"

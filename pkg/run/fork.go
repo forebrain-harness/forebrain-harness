@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -323,16 +324,13 @@ func appendSidechainMessages(path string, forkLabel, querySource, sessionID stri
 // owning agent's workspace directory, never the shared FOREBRAIN_HOME: the log
 // replays that agent's prompts, tool arguments and tool results verbatim, so
 // rooting it at the home would publish one tenant's conversation into a
-// directory every other primary agent can read.
+// directory every other primary agent can read. The session's directory is
+// hook.SessionSidechainDir — the one definition — so a deletion that walks it
+// cannot miss logs written by this spelling either.
 func SidechainFilePath(workspaceRoot, sessionID, forkLabel, runKey string) string {
-	workspaceRoot = strings.TrimSpace(workspaceRoot)
-	sid := sanitizePathSegment(sessionID)
 	fl := sanitizePathSegment(forkLabel)
 	rk := sanitizePathSegment(runKey)
-	if rk == "" {
-		rk = "run"
-	}
-	return filepath.Join(workspaceRoot, "state", "fork-sidechain", sid, fl+"-"+rk+".jsonl")
+	return filepath.Join(hook.SessionSidechainDir(workspaceRoot, sessionID), fl+"-"+rk+".jsonl")
 }
 
 func sanitizePathSegment(s string) string {

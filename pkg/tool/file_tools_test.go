@@ -11,6 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
 // unixPermsObservable reports whether the platform exposes POSIX permission
@@ -42,6 +46,33 @@ func TestIsBlockedReadDevicePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// WriteFullFileForRoots was a production function that only the tests in this
+// package ever called: a thin composition of live code. It lives here, beside
+// the one test that calls it, so the production files carry no unused code
+// while the tests keep exercising the live functions underneath.
+func WriteFullFileForRoots(filePath, content string, roots []string) (string, error) {
+	if len(roots) == 0 {
+		return "", fmt.Errorf("no roots")
+	}
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return "", fmt.Errorf("file_path required")
+	}
+	abs, err := ResolveWithinRoots(filePath, roots)
+	if err != nil {
+		return "", err
+	}
+	unlock := lockFileWrite(abs)
+	defer unlock()
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return "", err
+	}
+	if err := atomicWrite(abs, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return abs, nil
 }
 
 func TestWriteFullFileForRootsPreservesExistingPermissions(t *testing.T) {
@@ -570,6 +601,92 @@ func TestFileReadOutsideAllowedRootsStillHonorsDenyRead(t *testing.T) {
 	}
 }
 
+// authorizeRead is the shared authorization of every reading tool, so it must
+// answer the same path the same way whatever tool name it is asked for: the
+// only thing allowed to differ is the name carried by the approval request.
+func TestAuthorizeReadMatchesReadFile(t *testing.T) {
+	root := t.TempDir()
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "note.txt")
+	if err := os.WriteFile(outside, []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write outside text: %v", err)
+	}
+	deniedDir := t.TempDir()
+	denied := filepath.Join(deniedDir, "secret.txt")
+	if err := os.WriteFile(denied, []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write denied text: %v", err)
+	}
+	inside := filepath.Join(root, "main.go")
+	if err := os.WriteFile(inside, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write inside text: %v", err)
+	}
+
+	confined := NewState(root)
+	confined.ConfineToRoot(root)
+	denying := NewState(root)
+	denying.SetReadPolicy([]string{deniedDir}, nil, nil, root)
+
+	for _, tc := range []struct {
+		name  string
+		state *State
+		path  string
+	}{
+		{name: "inside root", state: confined, path: inside},
+		{name: "outside confined root", state: confined, path: outside},
+		{name: "deny_read", state: denying, path: denied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, readErr := authorizeRead(context.Background(), tc.state, "read_file", tc.path)
+			_, lspErr := authorizeRead(context.Background(), tc.state, "lsp", tc.path)
+			if (readErr == nil) != (lspErr == nil) {
+				t.Fatalf("authorizeRead disagrees with itself: read_file err=%v, lsp err=%v", readErr, lspErr)
+			}
+			if readErr == nil {
+				return
+			}
+			if !errors.Is(readErr, ErrPathNotAllowed) && !errors.Is(readErr, ErrPathReadDenied) {
+				t.Fatalf("read_file err = %v, want ErrPathNotAllowed or ErrPathReadDenied", readErr)
+			}
+			if errors.Is(lspErr, ErrPathNotAllowed) != errors.Is(readErr, ErrPathNotAllowed) {
+				t.Fatalf("error classes differ: read_file=%v lsp=%v", readErr, lspErr)
+			}
+			if errors.Is(lspErr, ErrPathReadDenied) != errors.Is(readErr, ErrPathReadDenied) {
+				t.Fatalf("error classes differ: read_file=%v lsp=%v", readErr, lspErr)
+			}
+		})
+	}
+
+	// A protected FOREBRAIN_HOME path asks through an action whose kind and
+	// tool are the reading tool that triggered it, not always read_file.
+	home := t.TempDir()
+	active := t.TempDir()
+	protected := filepath.Join(home, "settings.yaml")
+	if err := os.WriteFile(protected, []byte("kind: spark\n"), 0o644); err != nil {
+		t.Fatalf("write protected text: %v", err)
+	}
+	st := NewState(root)
+	st.SetPrimaryWorkspaceBoundary(home, active, nil)
+	var hookedKind string
+	st.SetActionHook(func(_ context.Context, kind string, _ any) (string, bool, error) {
+		hookedKind = kind
+		return "act-1", true, nil
+	})
+	for _, toolName := range []string{"read_file", "lsp"} {
+		hookedKind = ""
+		_, err := authorizeRead(context.Background(), st, toolName, protected)
+		var req *RequiresActionError
+		if !errors.As(err, &req) {
+			t.Fatalf("%s: err = %v, want RequiresActionError", toolName, err)
+		}
+		if req.ToolName != toolName || req.ActionKind != toolName {
+			t.Fatalf("%s: RequiresActionError names %q/%q", toolName, req.ActionKind, req.ToolName)
+		}
+		if hookedKind != toolName {
+			t.Fatalf("%s: action hook saw kind %q", toolName, hookedKind)
+		}
+	}
+}
+
 func TestFileReadOffsetBeyondEOFReturnsMessageNotError(t *testing.T) {
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "note.txt")
@@ -858,5 +975,316 @@ func TestEditFileToleratesTabsVsSpaces(t *testing.T) {
 	// On-disk tab indentation must be preserved in the replacement.
 	if !strings.Contains(string(out), "\tvalue := 2") {
 		t.Fatalf("file indentation not preserved as tabs: %q", out)
+	}
+}
+
+// editDiagStub records the code-intelligence calls the edit tools make and
+// answers DidWrite with a canned delta. It embeds nopCodeIntel for the rest of
+// the port.
+type editDiagStub struct {
+	nopCodeIntel
+	delta     DiagnosticsDelta
+	calls     []editDiagCall
+	runShells int
+}
+
+type editDiagCall struct {
+	sid     string
+	changes []FileChange
+}
+
+func (s *editDiagStub) DidWrite(ctx context.Context, agentSessionID string, changes []FileChange) DiagnosticsDelta {
+	recorded := append([]FileChange(nil), changes...)
+	for i := range recorded {
+		recorded[i].Before = append([]byte(nil), recorded[i].Before...)
+		recorded[i].After = append([]byte(nil), recorded[i].After...)
+	}
+	s.calls = append(s.calls, editDiagCall{sid: agentSessionID, changes: recorded})
+	return s.delta
+}
+
+func (s *editDiagStub) DidRunShell(ctx context.Context) { s.runShells++ }
+
+func TestWriteFileReportsDiagnostics(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "note.txt")
+	st := NewState(tmp)
+	stub := &editDiagStub{delta: DiagnosticsDelta{
+		Text:    "<diagnostics>\n1 new problem after this edit (gopls)\n</diagnostics>",
+		Summary: event.LSPDiagnosticsSummary{New: 1, Files: 1},
+	}}
+	tool, err := NewFileWriteTool(st, &AgentToolRuntime{CodeIntel: stub})
+	if err != nil {
+		t.Fatalf("NewFileWriteTool: %v", err)
+	}
+	ctx := llm.WithAgentSessionID(WithToolCompletionCapture(context.Background()), "sess-diag")
+	got, err := tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(p)+`","content":"body\n"}`)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	want := "ok\n\n<diagnostics>\n1 new problem after this edit (gopls)\n</diagnostics>"
+	if got.(string) != want {
+		t.Fatalf("result=%q want %q", got, want)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if _, ok := completion.Output["lsp_diagnostics"]; !ok {
+		t.Fatalf("expected lsp_diagnostics on output, got %#v", completion.Output)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("DidWrite calls=%d want 1", len(stub.calls))
+	}
+	call := stub.calls[0]
+	if call.sid != "sess-diag" {
+		t.Fatalf("agent session id=%q want sess-diag", call.sid)
+	}
+	if len(call.changes) != 1 {
+		t.Fatalf("changes=%d want 1", len(call.changes))
+	}
+	if call.changes[0].AbsPath != p {
+		t.Fatalf("change path=%q want %q", call.changes[0].AbsPath, p)
+	}
+	if call.changes[0].Before != nil {
+		t.Fatalf("new file Before=%q want nil", call.changes[0].Before)
+	}
+	if string(call.changes[0].After) != "body\n" {
+		t.Fatalf("change After=%q want %q", call.changes[0].After, "body\n")
+	}
+
+	// Overwriting the same file reports the previous content as Before.
+	stub.calls = nil
+	got, err = tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(p)+`","content":"replaced\n"}`)
+	if err != nil {
+		t.Fatalf("overwrite write_file: %v", err)
+	}
+	if got.(string) != want {
+		t.Fatalf("overwrite result=%q want %q", got, want)
+	}
+	if len(stub.calls) != 1 || string(stub.calls[0].changes[0].Before) != "body\n" {
+		t.Fatalf("overwrite Before: %+v", stub.calls)
+	}
+	if string(stub.calls[0].changes[0].After) != "replaced\n" {
+		t.Fatalf("overwrite After=%q", stub.calls[0].changes[0].After)
+	}
+}
+
+func TestWriteFileWithoutCodeIntelUnchanged(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "plain.txt")
+	st := NewState(tmp)
+	tool, err := NewFileWriteTool(st, nil)
+	if err != nil {
+		t.Fatalf("NewFileWriteTool: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(p)+`","content":"plain\n"}`)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if got.(string) != "ok" {
+		t.Fatalf("result=%q want ok", got)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if _, ok := completion.Output["lsp_diagnostics"]; ok {
+		t.Fatalf("lsp_diagnostics must stay absent: %#v", completion.Output)
+	}
+}
+
+func TestEditFileReportsDiagnostics(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "edit.txt")
+	if err := os.WriteFile(p, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	if _, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`"}`); err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	stub := &editDiagStub{delta: DiagnosticsDelta{
+		Text:    "<diagnostics>\n1 new problem after this edit (gopls)\n</diagnostics>",
+		Summary: event.LSPDiagnosticsSummary{New: 1, Files: 1},
+	}}
+	tool, err := NewFileEditToolWithOptions(st, FileEditOptions{CodeIntel: stub})
+	if err != nil {
+		t.Fatalf("NewFileEditToolWithOptions: %v", err)
+	}
+	ctx := llm.WithAgentSessionID(WithToolCompletionCapture(context.Background()), "sess-edit-diag")
+	got, err := tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(p)+`","old_string":"beta","new_string":"gamma"}`)
+	if err != nil {
+		t.Fatalf("edit_file: %v", err)
+	}
+	want := "ok\n\n<diagnostics>\n1 new problem after this edit (gopls)\n</diagnostics>"
+	if got.(string) != want {
+		t.Fatalf("result=%q want %q", got, want)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if _, ok := completion.Output["lsp_diagnostics"]; !ok {
+		t.Fatalf("expected lsp_diagnostics on output, got %#v", completion.Output)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("DidWrite calls=%d want 1", len(stub.calls))
+	}
+	call := stub.calls[0]
+	if call.sid != "sess-edit-diag" {
+		t.Fatalf("agent session id=%q", call.sid)
+	}
+	if string(call.changes[0].Before) != "alpha\nbeta\n" {
+		t.Fatalf("Before=%q want pre-edit content", call.changes[0].Before)
+	}
+	if string(call.changes[0].After) != "alpha\ngamma\n" {
+		t.Fatalf("After=%q want post-edit content", call.changes[0].After)
+	}
+}
+
+func TestEditFileEmptyDeltaAddsNothing(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "clean.txt")
+	if err := os.WriteFile(p, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	if _, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`"}`); err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	stub := &editDiagStub{}
+	tool, err := NewFileEditToolWithOptions(st, FileEditOptions{CodeIntel: stub})
+	if err != nil {
+		t.Fatalf("NewFileEditToolWithOptions: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(p)+`","old_string":"beta","new_string":"gamma"}`)
+	if err != nil {
+		t.Fatalf("edit_file: %v", err)
+	}
+	if got.(string) != "ok" {
+		t.Fatalf("result=%q want ok", got)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if _, ok := completion.Output["lsp_diagnostics"]; ok {
+		t.Fatalf("lsp_diagnostics must stay absent: %#v", completion.Output)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("DidWrite still runs once, calls=%d", len(stub.calls))
+	}
+}
+
+func TestApplyPatchReportsDiagnosticsOnce(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	st := NewState(root)
+	mustWriteFile(t, root+"/a.txt", "a-one\n")
+	mustWriteFile(t, root+"/b.txt", "b-one\n")
+	mustWriteFile(t, root+"/gone.txt", "delete me\n")
+	mustWriteFile(t, root+"/old.txt", "old\n")
+	stub := &editDiagStub{delta: DiagnosticsDelta{
+		Text:    "<diagnostics>\n2 new problems after this edit (gopls)\n</diagnostics>",
+		Summary: event.LSPDiagnosticsSummary{New: 2, Files: 2},
+	}}
+	tool, err := NewShellTool(st, &AgentToolRuntime{
+		Cfg:       &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+		CodeIntel: stub,
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	cmd := `apply_patch <<'PATCH'
+*** Begin Patch
+*** Update File: a.txt
+@@
+-a-one
++a-two
+*** Update File: b.txt
+@@
+-b-one
++b-two
+*** Delete File: gone.txt
+*** Update File: old.txt
+*** Move to: nested/new.txt
+@@
+-old
++new
+*** End Patch
+PATCH`
+	args, err := json.Marshal(map[string]string{"command": cmd})
+	if err != nil {
+		t.Fatalf("encode args: %v", err)
+	}
+	ctx := llm.WithAgentSessionID(WithToolCompletionCapture(context.Background()), "sess-patch-diag")
+	got, err := tool.Handle(ctx, string(args))
+	if err != nil {
+		t.Fatalf("apply_patch: %v", err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("DidWrite calls=%d want 1 (one patch shares one wait window)", len(stub.calls))
+	}
+	byPath := map[string]FileChange{}
+	for _, ch := range stub.calls[0].changes {
+		byPath[ch.AbsPath] = ch
+	}
+	if len(byPath) != 5 {
+		t.Fatalf("changes=%d want 5 (a, b, delete, move source, move target): %+v", len(byPath), stub.calls[0].changes)
+	}
+	if c := byPath[root+"/a.txt"]; string(c.Before) != "a-one\n" || string(c.After) != "a-two\n" {
+		t.Fatalf("a.txt change: %+v", c)
+	}
+	if c := byPath[root+"/b.txt"]; string(c.Before) != "b-one\n" || string(c.After) != "b-two\n" {
+		t.Fatalf("b.txt change: %+v", c)
+	}
+	if c := byPath[root+"/gone.txt"]; string(c.Before) != "delete me\n" || c.After != nil {
+		t.Fatalf("deleted change: %+v", c)
+	}
+	if c := byPath[root+"/old.txt"]; string(c.Before) != "old\n" || c.After != nil {
+		t.Fatalf("move source change: %+v", c)
+	}
+	if c := byPath[root+"/nested/new.txt"]; c.Before != nil || string(c.After) != "new\n" {
+		t.Fatalf("move target change: %+v", c)
+	}
+	if stub.calls[0].sid != "sess-patch-diag" {
+		t.Fatalf("agent session id=%q", stub.calls[0].sid)
+	}
+	var payload struct {
+		Stdout string `json:"stdout"`
+	}
+	if err := json.Unmarshal([]byte(got.(string)), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(payload.Stdout), "</diagnostics>") {
+		t.Fatalf("stdout must end with the diagnostics text: %q", payload.Stdout)
+	}
+	if !strings.Contains(payload.Stdout, "2 new problems after this edit") {
+		t.Fatalf("stdout missing diagnostics text: %q", payload.Stdout)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if _, ok := completion.Output["lsp_diagnostics"]; !ok {
+		t.Fatalf("expected lsp_diagnostics on completion output: %#v", completion.Output)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(got.(string)), &raw); err != nil {
+		t.Fatalf("decode raw payload: %v", err)
+	}
+	if _, ok := raw["lsp_diagnostics"]; !ok {
+		t.Fatalf("expected lsp_diagnostics on returned payload: %#v", raw)
 	}
 }

@@ -19,7 +19,7 @@ import {
 it('decodes the shared Go/TypeScript subagent live-resume fixture', () => {
   const events = sharedSubagentEvents.map((data) => parseForebrainRunEventMessage({ op: 'run_event', data }))
   expect(events.every(Boolean)).toBe(true)
-  expect(events.map((event) => event?.sequence)).toEqual([41, 42, 43, 44, 45])
+  expect(events.map((event) => event?.sequence)).toEqual([41, 42, 43, 44, 45, 46, 47])
   expect(events[0]).toMatchObject({
     id: 'fixture-spawn-1',
     runId: 'child-run-1',
@@ -38,6 +38,10 @@ it('decodes the shared Go/TypeScript subagent live-resume fixture', () => {
   expect(events[3]).toMatchObject({
     type: 'approval_resolved',
     payload: { actionId: 'action-1', agentId: 'agent-1', decision: 'approved' },
+  })
+  expect(events[6]).toMatchObject({
+    type: 'auto_continue_scheduled',
+    payload: { agentId: 'agent-1', continueAt: '2026-09-06T08:05:05Z', code: 'rate_limit_quota', attempt: 1 },
   })
 })
 

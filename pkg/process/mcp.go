@@ -19,10 +19,12 @@ package process
 
 import (
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -218,4 +220,54 @@ func DecideProjectMCPConsents(agentWorkspace string, launch safety.ProjectContex
 		consents.Decide(projectKey, srv.Name, fp, decision, time.Now())
 	}
 	return mcp.SaveProjectConsents(agentWorkspace, consents)
+}
+
+// PendingProjectLSPConsents lists the project language-server entries that
+// would apply but have no recorded decision. The interactive startup prompt
+// shows exactly these; a nil/empty result means there is nothing to ask about.
+func PendingProjectLSPConsents(agentWorkspace string, launch safety.ProjectContext) []lsp.PendingProjectServer {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	return lsp.ResolveProjectServers(agentWorkspace, root, memory.ProjectKey(root), true).Pending
+}
+
+// DecideProjectLSPConsents records the operator's answers from the startup
+// prompt. allowed carries the server ids that were accepted; every other
+// pending entry is recorded as declined so it is not re-asked until its
+// fingerprint changes.
+func DecideProjectLSPConsents(agentWorkspace string, launch safety.ProjectContext, allowed []string) error {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	return lsp.DecideProjectServers(agentWorkspace, root, memory.ProjectKey(root), allowed)
+}
+
+// InspectProjectLSP is the project language-server view the gateway's project
+// page reads: whether the launch project is trusted at all, and if it is,
+// which entries are pending confirmation, allowed, denied, and why the file
+// or an entry was ignored. It never feeds a running session; surfaces use it
+// to present and record decisions.
+func InspectProjectLSP(agentWorkspace string, launch safety.ProjectContext) (trusted bool, pending []lsp.PendingProjectServer, allowed, denied, notes []string) {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return false, nil, nil, nil, nil
+	}
+	state := lsp.ResolveProjectServers(agentWorkspace, root, memory.ProjectKey(root), true)
+	for _, id := range sortedMapKeys(state.Allowed) {
+		allowed = append(allowed, id)
+	}
+	return true, state.Pending, allowed, state.Denied, state.Notes
+}
+
+// sortedMapKeys lists a map's keys in ascending order.
+func sortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

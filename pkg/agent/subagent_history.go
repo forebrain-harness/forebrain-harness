@@ -46,6 +46,11 @@ type HistoryEntry struct {
 	OneShot     bool   `json:"one_shot,omitempty"`
 	Continuable bool   `json:"continuable,omitempty"`
 	DefSource   string `json:"definition_source,omitempty"`
+	// ModelProvider and Model are the model a dispatch-time override put
+	// this agent on; empty when it runs on its definition's or the
+	// conversation's model.
+	ModelProvider string `json:"model_provider,omitempty"`
+	Model         string `json:"model,omitempty"`
 }
 
 type Query struct {

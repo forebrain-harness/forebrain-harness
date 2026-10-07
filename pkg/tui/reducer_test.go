@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"slices"
@@ -126,7 +127,7 @@ func TestReducerAppendsCountersToWorkedStatus(t *testing.T) {
 	var r Reducer
 	r.WithTracker(tracker)
 	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
-	tracker.ObserveAgent("agent-1", time.Time{})
+	tracker.ObserveAgent("agent-1", "", time.Time{})
 	tracker.ObserveToolStep("", "read-1", "read_file", "")
 	tracker.ObserveUsageDelta("r1", 1500, 300)
 	tracker.ObservePlanProgress(1, 2, "Writing tests")
@@ -483,6 +484,42 @@ func TestReducerFlushesReasoningBeforeAssistant(t *testing.T) {
 	}
 }
 
+func TestReducerSealsAgentTextWhenReasoningStarts(t *testing.T) {
+	var r Reducer
+	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
+	_ = r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:    MsgKindAssistant,
+		Content: "step one.",
+		AgentID: "task-r",
+	}})
+	thinkingStart := r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:    MsgKindReasoning,
+		Content: "think",
+		AgentID: "task-r",
+	}}).Frames
+	// A block of one kind ends when a block of the other kind starts, in
+	// either direction: the reasoning that follows text seals that text as a
+	// final frame, the way reasoning is sealed when text starts.
+	if len(thinkingStart) != 2 || thinkingStart[0].Kind != FrameAssistant ||
+		!thinkingStart[0].Final || thinkingStart[0].Content != "step one." {
+		t.Fatalf("reasoning start must seal the streamed text, got %#v", thinkingStart)
+	}
+	if thinkingStart[1].Kind != FrameThinking || thinkingStart[1].Final {
+		t.Fatalf("reasoning start must stream its own block live, got %#v", thinkingStart[1])
+	}
+	next := r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:    MsgKindAssistant,
+		Content: "step two.",
+		AgentID: "task-r",
+	}}).Frames
+	if len(next) != 2 || next[0].Kind != FrameThinking || !next[0].Final {
+		t.Fatalf("text after thinking must seal the thinking block, got %#v", next)
+	}
+	if next[1].Kind != FrameAssistant || next[1].Content != "step two." || next[1].Final {
+		t.Fatalf("the next text block must start from empty, not repeat what came before: %#v", next[1])
+	}
+}
+
 func TestReducerMapsToolAndErrorMessages(t *testing.T) {
 	var r Reducer
 	tool := r.Reduce(NewMessageMsg{Msg: Message{
@@ -506,27 +543,27 @@ func TestReducerMapsToolAndErrorMessages(t *testing.T) {
 	}
 }
 
+// The executor's duration is the batch's wall clock on a multi-task card's
+// header; a single dispatched task carries its own final elapsed on its row,
+// so its header does not repeat one.
 func TestReducerFanoutCompletionPreservesExecutorDuration(t *testing.T) {
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "inspect durations", "subagent_type": "explore"},
+		map[string]any{"prompt": "inspect the renderer", "subagent_type": "explore"},
+	}}
 	var r Reducer
-	start := r.Reduce(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindTool,
-		StepID:    "fanout-duration",
-		ToolName:  "subagent_run",
-		ToolMeta:  tool.ToolMeta{ToolName: "subagent_run", Status: "running", Input: map[string]any{"task": "inspect durations"}},
-		ToolPhase: "tool_call_started",
-	}}).Frames
+	start := r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-duration", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})}).Frames
 	if len(start) != 1 || start[0].Kind != FrameFanout || start[0].Duration != 0 {
 		t.Fatalf("unexpected fanout start: %#v", start)
 	}
 
-	completed := r.Reduce(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindTool,
-		StepID:    "fanout-duration",
-		ToolName:  "subagent_run",
-		ToolMeta:  tool.ToolMeta{ToolName: "subagent_run", Status: "completed"},
-		ToolPhase: "tool_call_completed",
-		Duration:  1750 * time.Millisecond,
-	}}).Frames
+	completed := r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-duration", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
+		Output:   map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"ok":true}]}`},
+		Duration: 1750 * time.Millisecond,
+	})}).Frames
 	if len(completed) != 1 || completed[0].Kind != FrameFanout {
 		t.Fatalf("unexpected fanout completion: %#v", completed)
 	}
@@ -542,30 +579,16 @@ func TestReducerFanoutCompletionPreservesExecutorDuration(t *testing.T) {
 // same way, or the same conversation shows a failure after a resume that the
 // live surface never painted (or the reverse).
 func TestReducerFanoutFailedDispatchSettlesWaitingTasksBothOrders(t *testing.T) {
+	input := map[string]any{"task": "verify the diff quickly"}
+	const why = "unknown tool \"subagent_run\""
 	newStarted := func() Message {
-		return Message{
-			Kind:      MsgKindTool,
-			StepID:    "fanout-fail",
-			ToolName:  "subagent_run",
-			ToolMeta:  tool.ToolMeta{ToolName: "subagent_run", Status: "running", Input: map[string]any{"task": "verify the diff quickly"}},
-			ToolPhase: "tool_call_started",
-		}
+		return subagentStepMessage("fanout-fail", tool.StepEvent{
+			Kind: tool.StepKindToolStarted, ToolName: "subagent_run", Input: input,
+		})
 	}
-	completed := Message{
-		Kind:     MsgKindTool,
-		StepID:   "fanout-fail",
-		ToolName: "subagent_run",
-		Content:  "**error** (subagent_run)\n\nunknown tool \"subagent_run\"",
-		Summary:  "failed: unknown tool \"subagent_run\"",
-		ToolMeta: tool.ToolMeta{
-			ToolName: "subagent_run",
-			Status:   "failed",
-			// The completed step's meta carries the dispatch input on both
-			// paths: the live event and the replayed row's reconstructed meta.
-			Input: map[string]any{"task": "verify the diff quickly"},
-		},
-		ToolPhase: "tool_call_completed",
-	}
+	completed := subagentStepMessage("fanout-fail", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_run", Input: input, Error: why,
+	})
 
 	// Live order: started, then the failed completion.
 	var live Reducer
@@ -574,8 +597,14 @@ func TestReducerFanoutFailedDispatchSettlesWaitingTasksBothOrders(t *testing.T) 
 	if len(got) != 1 || got[0].Kind != FrameFanout {
 		t.Fatalf("live completion frames=%#v", got)
 	}
-	if s := got[0].Summary; !strings.Contains(s, "0 done, 1 failed") {
+	if s := got[0].Summary; s != "Failed to run 1 fork task" {
 		t.Fatalf("live summary = %q, want the dispatch failure reported", s)
+	}
+	if got[0].FanoutCallError != why {
+		t.Fatalf("live call error = %q, want %q", got[0].FanoutCallError, why)
+	}
+	if strings.Contains(got[0].Content, why) {
+		t.Fatalf("the call's failure must not be copied onto the task rows: %q", got[0].Content)
 	}
 
 	// Replay order: the completed row alone.
@@ -584,7 +613,7 @@ func TestReducerFanoutFailedDispatchSettlesWaitingTasksBothOrders(t *testing.T) 
 	if len(got) != 1 || got[0].Kind != FrameFanout {
 		t.Fatalf("replay frames=%#v", got)
 	}
-	if got[0].Summary != "Ran 1 tasks · 0 done, 1 failed" {
+	if got[0].Summary != "Failed to run 1 fork task" {
 		t.Fatalf("replay summary = %q, want the same card live drew", got[0].Summary)
 	}
 	if liveSummary := liveSummaryOf(t, &live, "fanout-fail"); liveSummary != got[0].Summary {
@@ -598,7 +627,7 @@ func liveSummaryOf(t *testing.T, r *Reducer, stepID string) string {
 	if fs == nil {
 		t.Fatal("fanout state missing")
 	}
-	return renderFanoutSummary(fs)
+	return fanoutCardHeader(fs)
 }
 
 func TestReducerKeepsRunningToolFramesVisible(t *testing.T) {
@@ -642,8 +671,16 @@ func TestReducerSubagentContinueKeepsRepeatedPromptPerExecution(t *testing.T) {
 	duplicate := r.Reduce(SubagentSpawnedMsg{AgentID: "task-1", TaskID: "task-1", Task: "check again", ExecutionID: "exec-1"})
 	_ = r.Reduce(SubagentEndedMsg{AgentID: "task-1", TaskID: "task-1", Status: "done", ExecutionID: "exec-1"})
 	continued := r.Reduce(SubagentSpawnedMsg{AgentID: "task-1", TaskID: "task-1", Task: "check again", ExecutionID: "exec-2"})
-	if len(first.Frames) != 2 || len(duplicate.Frames) != 0 || len(continued.Frames) != 2 {
-		t.Fatalf("frame counts first=%d duplicate=%d continued=%d", len(first.Frames), len(duplicate.Frames), len(continued.Frames))
+	if len(first.Frames) != 2 || len(continued.Frames) != 2 {
+		t.Fatalf("frame counts first=%d continued=%d", len(first.Frames), len(continued.Frames))
+	}
+	// The duplicate spawn repeats no prompt; it re-emits the card it already
+	// opened, which replaces that block in place rather than adding one.
+	if len(duplicate.Frames) != 1 || duplicate.Frames[0].Kind != FrameFanout {
+		t.Fatalf("duplicate spawn frames = %#v, want just the card it already opened", duplicate.Frames)
+	}
+	if duplicate.Frames[0].StepID != first.Frames[len(first.Frames)-1].StepID {
+		t.Fatalf("duplicate spawn opened a second card: %#v", duplicate.Frames)
 	}
 	if continued.Frames[0].Kind != FrameUser || continued.Frames[0].Content != "check again" {
 		t.Fatalf("continued prompt frame = %+v", continued.Frames[0])
@@ -960,20 +997,25 @@ func TestReducerSubagentSpawnedEmitsStatusFrameWithAgentID(t *testing.T) {
 		t.Fatalf("expected one frame, got %#v", out.Frames)
 	}
 	f := out.Frames[0]
-	if f.Kind != FrameStatus {
-		t.Fatalf("expected FrameStatus, got %s", f.Kind)
+	// The dispatch with no call opens a card of its own: the conversation's
+	// account of this agent, and its task row is the way into its view.
+	if f.Kind != FrameFanout {
+		t.Fatalf("expected FrameFanout, got %s", f.Kind)
 	}
-	if f.AgentID != "task-7" {
-		t.Fatalf("expected AgentID=task-7, got %q", f.AgentID)
+	if got := f.FanoutLineAgents[0]; got != "task-7" {
+		t.Fatalf("expected the task row to open task-7's view, got %q", got)
+	}
+	if f.AgentID != "" {
+		t.Fatalf("the card belongs to the conversation, got AgentID=%q", f.AgentID)
 	}
 	if f.RunID != "parent-1" {
 		t.Fatalf("expected RunID=parent-1, got %q", f.RunID)
 	}
-	if !strings.Contains(f.Title, "spawned") || !strings.Contains(f.Title, "general-purpose") {
+	if !strings.Contains(f.Summary, "general-purpose") {
 		t.Fatalf("unexpected title %q", f.Title)
 	}
-	if !strings.Contains(f.Content, "general-purpose") || !strings.Contains(f.Content, "task-7") {
-		t.Fatalf("unexpected content %q", f.Content)
+	if !strings.Contains(f.Content, "general-purpose") {
+		t.Fatalf("the card must name the agent by its type when nothing else did, got %q", f.Content)
 	}
 }
 
@@ -1060,8 +1102,8 @@ func TestReducerSubagentEndedEmitsStatusFrameWithError(t *testing.T) {
 		Status:    "failed",
 		Error:     "tool timed out",
 	})
-	// Two frames: the error the subagent's own view ends on, and the lifecycle
-	// card the primary transcript keeps as the way back into that view.
+	// Two frames: the error the subagent's own view ends on, and the card the
+	// primary transcript keeps as the way back into that view.
 	if len(out.Frames) != 2 {
 		t.Fatalf("expected two frames, got %#v", out.Frames)
 	}
@@ -1076,17 +1118,17 @@ func TestReducerSubagentEndedEmitsStatusFrameWithError(t *testing.T) {
 		t.Fatalf("expected error text in the closing frame, got %q", closing.Content)
 	}
 	f := out.Frames[1]
-	if f.Kind != FrameStatus {
-		t.Fatalf("expected FrameStatus, got %s", f.Kind)
+	if f.Kind != FrameFanout {
+		t.Fatalf("expected the card, got %s", f.Kind)
 	}
-	if f.AgentID != "task-9" {
-		t.Fatalf("expected AgentID=task-9, got %q", f.AgentID)
+	if f.AgentID != "" {
+		t.Fatalf("the card belongs to the conversation, got AgentID=%q", f.AgentID)
 	}
-	if !strings.Contains(f.Title, "ended") {
-		t.Fatalf("expected ended title, got %q", f.Title)
+	if got := f.FanoutLineAgents[0]; got != "task-9" {
+		t.Fatalf("expected the task row to open task-9's view, got %q", got)
 	}
-	if !strings.Contains(f.Content, "status=failed") {
-		t.Fatalf("expected status=failed in content, got %q", f.Content)
+	if f.Summary != "Ran 1 verification task · 0 done, 1 failed" {
+		t.Fatalf("expected the failure counted on the card, got %q", f.Summary)
 	}
 	if !strings.Contains(f.Content, "tool timed out") {
 		t.Fatalf("expected error text in content, got %q", f.Content)
@@ -1110,6 +1152,96 @@ func TestReducerSubagentEndedOKEmitsNoClosingErrorFrame(t *testing.T) {
 	}
 }
 
+// The plan reviewer's view closes the way every subagent's does: a "Worked
+// for" line in its own view, stating how long this execution ran. It is the
+// same code path any other agent takes — the reviewer differs only in who
+// dispatched it — so this pins the equality the owner asked for.
+func TestPlanReviewerViewClosesWithWorkedFor(t *testing.T) {
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	started := time.Now().Add(-2 * time.Minute)
+	red.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-e358", AgentType: "plan-reviewer", TaskID: "subagent-e358",
+		Title: "Plan review", Task: "review the plan", ExecutionID: "exec-1", Timestamp: started,
+	})
+	var worked *Frame
+	for _, f := range red.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-e358", AgentType: "plan-reviewer", TaskID: "subagent-e358",
+		Status: "ok", ExecutionID: "exec-1", Timestamp: started.Add(90 * time.Second),
+	}).Frames {
+		if f.Kind == FrameStatus && strings.HasPrefix(f.Title, "Worked for") {
+			worked = &f
+		}
+	}
+	if worked == nil {
+		t.Fatal("the plan reviewer's view must close with a Worked for line")
+	}
+	if worked.AgentID != "subagent-e358" {
+		t.Fatalf("the Worked for line belongs to the reviewer's own view, got agent %q", worked.AgentID)
+	}
+	if !strings.Contains(worked.Title, "1m 30s") {
+		t.Fatalf("worked line = %q, want the duration of this execution", worked.Title)
+	}
+}
+
+// A subagent's clock belongs to one execution, not to its identity: a second
+// execution (a continue, a user-sent message in its view) must run with a
+// Working line of its own and close with a Worked for line whose duration
+// counts only that execution, leaving the idle gap between the two out.
+func TestContinuedSubagentGetsAClockPerExecution(t *testing.T) {
+	const agentID = "subagent-77"
+	tracker := NewTracker()
+	var red Reducer
+	red.WithTracker(tracker)
+	base := time.Now().Add(-11*time.Minute - 5*time.Second)
+
+	red.Reduce(SubagentSpawnedMsg{AgentID: agentID, AgentType: "explore", TaskID: agentID, ExecutionID: "exec-1", Timestamp: base})
+	red.Reduce(SubagentEndedMsg{AgentID: agentID, AgentType: "explore", TaskID: agentID, Status: "ok", ExecutionID: "exec-1", Timestamp: base.Add(time.Minute)})
+
+	// The checklist spans executions: it belongs to the agent, not the run.
+	red.Reduce(PlanUpdatedMsg{Payload: event.PlanUpdatedPayload{
+		AgentID: agentID, Completed: 2, Total: 5,
+		Items: []event.PlanUpdateItem{{Content: "list files", Status: "in_progress"}},
+	}})
+
+	secondStart := base.Add(11 * time.Minute)
+	red.Reduce(SubagentSpawnedMsg{AgentID: agentID, AgentType: "explore", TaskID: agentID, ExecutionID: "exec-2", Timestamp: secondStart})
+
+	snap, ok := tracker.SnapshotAgentRun(agentID)
+	if !ok {
+		t.Fatal("the second execution must have a working snapshot")
+	}
+	if snap.Ended {
+		t.Fatal("the second execution must report the agent as running, not still ended from the first")
+	}
+	if elapsed := snap.Elapsed; elapsed > time.Minute {
+		t.Fatalf("second execution clock = %v, want it counted from the second start", elapsed)
+	}
+	if counters := formatWorkingCounters(snap.Counters); !strings.Contains(counters, "☑2/5") {
+		t.Fatalf("the working line's counters = %q, want the agent's own checklist progress", counters)
+	}
+
+	var worked *Frame
+	for _, f := range red.Reduce(SubagentEndedMsg{
+		AgentID: agentID, AgentType: "explore", TaskID: agentID, Status: "ok", ExecutionID: "exec-2",
+		Timestamp: secondStart.Add(30 * time.Second),
+	}).Frames {
+		if f.Kind == FrameStatus && strings.HasPrefix(f.Title, "Worked for") {
+			worked = &f
+		}
+	}
+	if worked == nil {
+		t.Fatal("the second execution must close with its own Worked for line")
+	}
+	if !strings.Contains(worked.Title, "Worked for 30s") {
+		t.Fatalf("worked line = %q, want only the second execution's 30s", worked.Title)
+	}
+	if !strings.Contains(worked.Title, "☑2/5") {
+		t.Fatalf("worked line = %q, want the checklist progress it ended with", worked.Title)
+	}
+}
+
 func TestReducerSubagentSpawnedIncrementsTrackerAgents(t *testing.T) {
 	tr := NewTracker()
 	r := (&Reducer{}).WithTracker(tr)
@@ -1125,30 +1257,28 @@ func TestReducerSubagentSpawnedIncrementsTrackerAgents(t *testing.T) {
 func TestReducerFanoutTaskToolFolding(t *testing.T) {
 	var r Reducer
 	// Step 1: start a subagent_run (fanout-of-1) with a task.
-	got := r.Reduce(NewMessageMsg{Msg: Message{
-		Kind:     MsgKindTool,
-		StepID:   "fanout-step-1",
-		ToolName: "subagent_run",
-		ToolMeta: tool.ToolMeta{
-			Input: map[string]any{
-				"task":  "investigate auth bug",
-				"title": "Auth Bug Investigation",
-			},
+	got := r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-step-1", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+		Input: map[string]any{
+			"task":  "investigate auth bug",
+			"title": "Auth Bug Investigation",
 		},
-	}}).Frames
+	})}).Frames
 	if len(got) != 1 || got[0].Kind != FrameFanout {
 		t.Fatalf("expected FrameFanout, got %#v", got)
 	}
 	// Check the tasks were parsed.
-	if got[0].Summary != "Running 1 tasks…" {
-		t.Fatalf("summary = %q, want Running 1 tasks…", got[0].Summary)
+	if got[0].Summary != "Running 1 fork task…" {
+		t.Fatalf("summary = %q, want Running 1 fork task…", got[0].Summary)
 	}
 
-	// Step 2: spawn a subagent matching the fanout task (via waiting-task assign).
+	// Step 2: spawn the subagent the dispatching call names.
 	_ = r.Reduce(SubagentSpawnedMsg{
-		AgentID:   "task-agent-1",
-		AgentType: "explore",
-		TaskID:    "task-agent-1",
+		AgentID:          "task-agent-1",
+		AgentType:        "explore",
+		TaskID:           "task-agent-1",
+		ParentToolCallID: "fanout-step-1",
+		TaskIndex:        0,
 	})
 
 	// Step 3: send a tool_started event for the subagent that belongs to the fanout.
@@ -1199,21 +1329,16 @@ func TestReducerFanoutTaskToolFolding(t *testing.T) {
 func TestReducerFanoutTaskToolRingBufferCap(t *testing.T) {
 	var r Reducer
 	// Start a fanout.
-	_ = r.Reduce(NewMessageMsg{Msg: Message{
-		Kind:     MsgKindTool,
-		StepID:   "fanout-step-buf",
-		ToolName: "subagent_run",
-		ToolMeta: tool.ToolMeta{
-			Input: map[string]any{
-				"task":  "investigate",
-				"title": "Investigation",
-			},
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-step-buf", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+		Input: map[string]any{
+			"task":  "investigate",
+			"title": "Investigation",
 		},
-	}})
+	})})
 	_ = r.Reduce(SubagentSpawnedMsg{
-		AgentID:   "agent-buf-1",
-		AgentType: "explore",
-		TaskID:    "agent-buf-1",
+		AgentID: "agent-buf-1", AgentType: "explore", TaskID: "agent-buf-1",
+		ParentToolCallID: "fanout-step-buf", TaskIndex: 0,
 	})
 
 	// Send 6 started events. Ring buffer caps at 4; ToolTotal should be 6.
@@ -1267,22 +1392,21 @@ func TestReducerFanoutTaskTokenUsageFolding(t *testing.T) {
 	var r Reducer
 	r.WithTracker(tracker)
 	_ = r.Reduce(RunStartedMsg{RunID: "run-tok"})
-	_ = r.Reduce(NewMessageMsg{Msg: Message{
-		Kind:     MsgKindTool,
-		StepID:   "fanout-tok",
-		ToolName: "subagent_run",
-		ToolMeta: tool.ToolMeta{
-			Input: map[string]any{"task": "investigate", "title": "Investigation"},
-		},
-	}})
-	_ = r.Reduce(SubagentSpawnedMsg{AgentID: "agent-tok-1", AgentType: "explore", TaskID: "agent-tok-1"})
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-tok", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+		Input: map[string]any{"task": "investigate", "title": "Investigation"},
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "agent-tok-1", AgentType: "explore", TaskID: "agent-tok-1",
+		ParentToolCallID: "fanout-tok", TaskIndex: 0,
+	})
 
-	// Two subagent-tagged usage deltas fold onto the owning task AND into the
-	// parent run's token totals (via the tracker's subagent accumulator), and
-	// re-emit the fanout frame.
+	// Subagent-tagged usage deltas fold into the parent run's token totals
+	// through the tracker's subagent accumulator. They repaint nothing: the
+	// card shows no token count, so a delta has nothing to add to it.
 	got := r.Reduce(TokenUsageDeltaMsg{AgentID: "agent-tok-1", InputTokens: 1200, OutputTokens: 300}).Frames
-	if len(got) != 1 || got[0].Kind != FrameFanout {
-		t.Fatalf("expected FrameFanout on subagent usage, got %#v", got)
+	if len(got) != 0 {
+		t.Fatalf("a usage delta must not repaint the card, got %#v", got)
 	}
 	_ = r.Reduce(TokenUsageDeltaMsg{AgentID: "agent-tok-1", InputTokens: 500, OutputTokens: 0})
 
@@ -1290,11 +1414,8 @@ func TestReducerFanoutTaskTokenUsageFolding(t *testing.T) {
 	if fs == nil || len(fs.Tasks) != 1 {
 		t.Fatalf("fanout state missing: %#v", fs)
 	}
-	if got := fs.Tasks[0].TokenCount; got != 2000 {
-		t.Fatalf("TokenCount = %d, want 2000 (accumulated in+out across deltas)", got)
-	}
 
-	// Subagent tokens must also land on the parent run's Working line and the
+	// Subagent tokens must land on the parent run's Working line and the
 	// footer session total.
 	if live := tracker.SnapshotActiveRun(); live.InputTokens != 1700 || live.OutputTokens != 300 {
 		t.Fatalf("active-run = %+v, want in=1700 out=300 (subagent folded into parent run)", live)
@@ -1304,11 +1425,14 @@ func TestReducerFanoutTaskTokenUsageFolding(t *testing.T) {
 	}
 
 	// After the task completes, its own view is closed by a "Worked for" line
-	// (the token spend is tracked but no longer painted on it). This task saw
-	// no observed tool call, so the fanout body has no stats line at all.
-	end := r.Reduce(SubagentEndedMsg{AgentID: "agent-tok-1", AgentType: "explore", TaskID: "agent-tok-1", Status: "done"}).Frames
+	// (the token spend is tracked but not painted on the card). This task saw
+	// no observed tool call, so the card body has no third-layer rows at all.
+	end := r.Reduce(SubagentEndedMsg{
+		AgentID: "agent-tok-1", AgentType: "explore", TaskID: "agent-tok-1", Status: "done",
+		ParentToolCallID: "fanout-tok", TaskIndex: 0,
+	}).Frames
 	if len(end) != 2 || end[0].Kind != FrameStatus || end[0].AgentID != "agent-tok-1" || end[1].Kind != FrameFanout {
-		t.Fatalf("expected the subagent's closing status then FrameFanout on end, got %#v", end)
+		t.Fatalf("expected the subagent's closing status then the card on end, got %#v", end)
 	}
 	if !strings.HasPrefix(end[0].Title, "Worked for ") || !workedCompletionSuffix.MatchString(end[0].Title) {
 		t.Fatalf("closing status = %q, want duration and completion time", end[0].Title)
@@ -1317,10 +1441,10 @@ func TestReducerFanoutTaskTokenUsageFolding(t *testing.T) {
 		t.Fatalf("fanout body = %q, want no stats line (no tool uses, no token count)", end[1].Content)
 	}
 
-	// An untagged (primary) delta must not fold into any task.
+	// An untagged (primary) delta folds into the run, not a task.
 	_ = r.Reduce(TokenUsageDeltaMsg{RunID: "run-tok", InputTokens: 10, OutputTokens: 10})
-	if got := fs.Tasks[0].TokenCount; got != 2000 {
-		t.Fatalf("primary delta leaked into task TokenCount: %d", got)
+	if live := tracker.SnapshotActiveRun(); live.InputTokens != 1710 {
+		t.Fatalf("primary delta missing from the run: %+v", live)
 	}
 }
 
@@ -1338,6 +1462,930 @@ func TestReducerMapsSubagentLifecycleSystemMessage(t *testing.T) {
 	}
 	if out.Frames[0].Content != "subagent_completed: verification [task-1] status=ok" {
 		t.Fatalf("unexpected subagent lifecycle content: %#v", out.Frames[0])
+	}
+}
+
+// ---- plan 013: every subagent_* call draws the same card ----
+
+// subagentStepMessage builds the MsgKindTool message the live step hook emits
+// for one subagent_* call, so a test's ToolMeta carries the facts the
+// production path derives (012's SubagentCallFromStep inside BuildToolMeta).
+func subagentStepMessage(stepID string, evt tool.StepEvent) Message {
+	evt.StepID = strings.TrimSpace(stepID)
+	meta := tool.BuildToolMeta(evt)
+	body, _ := tool.FormatToolStepResult(evt, tool.DefaultMaxFormattedBody)
+	return Message{
+		Kind:      MsgKindTool,
+		StepID:    stepID,
+		ToolName:  evt.ToolName,
+		ToolMeta:  meta,
+		Content:   body,
+		ToolPhase: evt.Kind,
+		Duration:  evt.Duration,
+	}
+}
+
+// lastFanoutFrame returns the last FrameFanout of a reduction, the card the
+// later asserts read.
+func lastFanoutFrame(t *testing.T, ev EventResult) Frame {
+	t.Helper()
+	var out Frame
+	for _, f := range ev.Frames {
+		if f.Kind == FrameFanout {
+			out = f
+		}
+	}
+	if out.Kind != FrameFanout {
+		t.Fatalf("no FrameFanout in %#v", ev.Frames)
+	}
+	return out
+}
+
+// fanoutContentLines splits a card's content into ANSI-stripped lines.
+func fanoutContentLines(content string) []string {
+	raw := strings.Split(strings.TrimSuffix(content, "\n"), "\n")
+	out := make([]string, 0, len(raw))
+	for _, line := range raw {
+		out = append(out, stripANSI(line))
+	}
+	return out
+}
+
+// assertNoStatsLine guards T21: no content line is a "· N tool uses" stats row.
+func assertNoStatsLine(t *testing.T, content string) {
+	t.Helper()
+	for _, line := range fanoutContentLines(content) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "· ") && strings.HasSuffix(trimmed, "tool uses") {
+			t.Fatalf("stats row must not appear: %q in\n%s", line, content)
+		}
+	}
+}
+
+// renderFanoutForTest paints one card and returns its ANSI-stripped lines.
+func renderFanoutForTest(f Frame) []string {
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, &buf)
+	r.renderFanout(f)
+	return strings.Split(strings.TrimRight(stripANSI(buf.String()), "\n"), "\n")
+}
+
+func TestSendCardFollowsItsAgentToTheEnd(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{
+		"title": "计划001 Go车道实施", "task": "执行 docs/plan/SRT/001 的 Go 部分",
+		"subagent_type": "general-purpose",
+	}
+	var r Reducer
+	var frames []Frame
+	collect := func(ev EventResult) {
+		frames = append(frames, ev.Frames...)
+	}
+	collect(r.Reduce(NewMessageMsg{Msg: subagentStepMessage("send-1", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_send", Input: input,
+	})}))
+	collect(r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-6e5c", AgentType: "general-purpose", TaskID: "subagent-6e5c",
+		Title: "计划001 Go车道实施", Task: "执行 docs/plan/SRT/001 的 Go 部分",
+		ParentToolCallID: "send-1", TaskIndex: 0, ExecutionID: "exec-1", Timestamp: t0,
+	}))
+	for i, label := range []string{"read README.md", "shell gofmt -l pkg cmd"} {
+		collect(r.Reduce(NewMessageMsg{Msg: Message{
+			Kind: MsgKindTool, StepID: fmt.Sprintf("agent-step-%d", i), ToolName: "shell",
+			ToolMeta: tool.ToolMeta{Invocation: label}, AgentID: "subagent-6e5c",
+			ToolPhase: tool.StepKindToolStarted,
+		}}))
+	}
+	collect(r.Reduce(NewMessageMsg{Msg: subagentStepMessage("send-1", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_send", Input: input, Duration: 20 * time.Millisecond,
+		Output: map[string]any{"output": `{"task_id":"subagent-6e5c","run_id":"exec-1","status":"running","started_at":1790000000,"agent_type":"general-purpose"}`},
+	})}))
+	collect(r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-6e5c", AgentType: "general-purpose", TaskID: "subagent-6e5c",
+		Status: "ok", ParentToolCallID: "send-1", TaskIndex: 0, ExecutionID: "exec-1",
+		FinishedAt: t0.Add(843 * time.Second), Timestamp: t0.Add(843 * time.Second),
+	}))
+
+	for _, f := range frames {
+		if f.Kind == FrameStatus {
+			t.Fatalf("the card replaces the lifecycle text lines, got %#v", f)
+		}
+	}
+	card := Frame{}
+	for _, f := range frames {
+		if f.Kind == FrameFanout {
+			card = f
+		}
+	}
+	if card.Kind != FrameFanout {
+		t.Fatalf("no send card was drawn: %#v", frames)
+	}
+	if card.Summary != "Ran 1 general-purpose task in background" {
+		t.Fatalf("summary = %q, want Ran 1 general-purpose task in background", card.Summary)
+	}
+	if !strings.Contains(stripANSI(card.Content), "计划001 Go车道实施") {
+		t.Fatalf("card body lacks the task name:\n%s", card.Content)
+	}
+	if !strings.Contains(card.Content, "… +1 tool uses") {
+		t.Fatalf("card body lacks the tool overflow row:\n%s", card.Content)
+	}
+	if strings.Contains(card.Content, "{") {
+		t.Fatalf("card body must not contain JSON:\n%s", card.Content)
+	}
+	assertNoStatsLine(t, card.Content)
+	// The single task's clock came from the lifecycle events, not the 20ms call.
+	clock := fanoutClockOfLine(card, fanoutContentLines(card.Content), "计划001 Go车道实施")
+	if !clock.Start.Equal(t0) || !clock.End.Equal(t0.Add(843*time.Second)) {
+		t.Fatalf("task clock = %+v, want the execution's start and stop", clock)
+	}
+}
+
+func fanoutClockOfLine(f Frame, plainLines []string, needle string) fanoutLineClock {
+	var zero fanoutLineClock
+	for i, line := range plainLines {
+		if strings.Contains(line, needle) && i < len(f.FanoutLineClocks) {
+			return f.FanoutLineClocks[i]
+		}
+	}
+	return zero
+}
+
+func TestQueryCardsShowTaskRowsNotJSON(t *testing.T) {
+	record := func(status string, started, finished int64) string {
+		return `{"task_id":"subagent-6e5c","agent_type":"general-purpose","agent_kind":"typed",` +
+			`"title":"计划001 Go车道实施","task":"你在仓库执行 docs/plan 的 Go 部分。先完整阅读该计划文件。",` +
+			`"status":"` + status + `","execution_id":"exec-1","started_at":` + strconv.FormatInt(started, 10) +
+			`,"finished_at":` + strconv.FormatInt(finished, 10) + `}`
+	}
+	cases := []struct {
+		name    string
+		tool    string
+		input   map[string]any
+		output  string
+		running string
+		done    string
+		rows    []string
+		noJSON  string
+	}{
+		{
+			name: "status", tool: "subagent_status", input: map[string]any{"task_id": "subagent-6e5c"},
+			output:  record("ok", 1790000000, 1790000843),
+			running: "Checking 1 task…", done: "Checked 1 general-purpose task",
+			rows: []string{"✓ 计划001 Go车道实施"},
+		},
+		{
+			name: "wait timed out", tool: "subagent_wait", input: map[string]any{"task_id": "subagent-6e5c", "timeout_ms": 1000},
+			output:  `{"record":` + record("running", 1790000000, 0) + `,"timed_out":true}`,
+			running: "Waiting for 1 task…", done: "Waited for 1 general-purpose task",
+			rows: []string{"计划001 Go车道实施", "· still running when the wait ended"},
+		},
+		{
+			name: "close", tool: "subagent_close", input: map[string]any{"task_id": "subagent-6e5c"},
+			output:  `{"status":"cancel_requested","record":` + record("running", 1790000000, 0) + `}`,
+			running: "Stopping 1 task…", done: "Stopped 1 general-purpose task",
+			rows: []string{"计划001 Go车道实施", "· stop requested"},
+		},
+		{
+			name: "list", tool: "subagent_list", input: map[string]any{"limit": 20},
+			output: `{"records":[` + record("ok", 1790000000, 1790000843) + `,` +
+				record("running", 1790000100, 0) + `,` +
+				record("failed", 1790000000, 1790000128) + `]}`,
+			running: "Listing tasks…", done: "Listed 3 tasks",
+			rows: []string{
+				"✓ 计划001 Go车道实施 · 14m3s", "· general-purpose",
+				"计划001 Go车道实施", "· general-purpose",
+				"✗ 计划001 Go车道实施 · 2m8s", "· general-purpose",
+			},
+		},
+		{
+			name: "empty list", tool: "subagent_list", input: map[string]any{"limit": 20},
+			output: `{"records":[]}`, running: "Listing tasks…", done: "Listed 0 tasks",
+			rows: []string{"(no output)"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r Reducer
+			start := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("q-1", tool.StepEvent{
+				Kind: tool.StepKindToolStarted, ToolName: tc.tool, Input: tc.input,
+			})}))
+			if start.Summary != tc.running {
+				t.Fatalf("running header = %q, want %q", start.Summary, tc.running)
+			}
+			card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("q-1", tool.StepEvent{
+				Kind: tool.StepKindToolCompleted, ToolName: tc.tool, Input: tc.input,
+				Output: map[string]any{"output": tc.output}, Duration: 4100 * time.Millisecond,
+			})}))
+			if card.Summary != tc.done {
+				t.Fatalf("settled header = %q, want %q", card.Summary, tc.done)
+			}
+			if !card.Final {
+				t.Fatalf("a settled query card must be Final")
+			}
+			painted := renderFanoutForTest(card)
+			for _, want := range tc.rows {
+				found := false
+				for _, line := range painted {
+					if strings.TrimSpace(line) == want || strings.Contains(strings.TrimSpace(line), want) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("card lacks row %q:\n%s", want, strings.Join(painted, "\n"))
+				}
+			}
+			for _, line := range append(fanoutContentLines(card.Content), painted...) {
+				if strings.Contains(line, "{") || strings.Contains(line, `"agent_id"`) {
+					t.Fatalf("card row is JSON: %q", line)
+				}
+				if strings.Contains(line, "先完整阅读该计划文件") {
+					t.Fatalf("card row leaks the record's prompt: %q", line)
+				}
+			}
+		})
+	}
+}
+
+func TestRunCardNamesOneTaskInTheSingular(t *testing.T) {
+	input := map[string]any{"task": "追踪模型选择器", "subagent_type": "general-purpose"}
+	var r Reducer
+	start := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("run-1", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run", Input: input,
+	})}))
+	if start.Summary != "Running 1 general-purpose task…" {
+		t.Fatalf("running header = %q, want Running 1 general-purpose task…", start.Summary)
+	}
+	done := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("run-1", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_run", Input: input,
+		Output: map[string]any{"output": `{"task_id":"subagent-1a2b","status":"ok","finished_at":1790000182,"agent_type":"general-purpose"}`},
+	})}))
+	if done.Summary != "Ran 1 general-purpose task" {
+		t.Fatalf("settled header = %q, want Ran 1 general-purpose task", done.Summary)
+	}
+}
+
+func TestFanoutCardTakesSkippedOutcomesFromTheCallFacts(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "迁移导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-1", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-8c5c", AgentType: "general-purpose", TaskID: "subagent-8c5c",
+		ParentToolCallID: "fan-1", TaskIndex: 0, ExecutionID: "exec-a", Timestamp: t0,
+	})
+	_ = r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-8c5c", TaskID: "subagent-8c5c", Status: "ok",
+		ParentToolCallID: "fan-1", TaskIndex: 0, ExecutionID: "exec-a", Timestamp: t0.Add(time.Minute),
+	})
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-1", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
+		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"error":"skipped: empty prompt"}]}`},
+	})}))
+	if card.Summary != "Ran 2 general-purpose tasks · 1 done, 1 skipped" {
+		t.Fatalf("summary = %q, want Ran 2 general-purpose tasks · 1 done, 1 skipped", card.Summary)
+	}
+	lines := fanoutContentLines(card.Content)
+	sawEmpty, sawReason := false, false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "! (empty task)" {
+			sawEmpty = true
+		}
+		if strings.TrimSpace(line) == "skipped: empty prompt" {
+			sawReason = true
+		}
+	}
+	if !sawEmpty || !sawReason {
+		t.Fatalf("card lacks the skipped row or its reason:\n%s", card.Content)
+	}
+}
+
+func TestFanoutCardShowsWhyTheCallFailed(t *testing.T) {
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "迁移导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "扩展目录", "subagent_type": "general-purpose"},
+	}}
+	const why = "subagent capacity is 0; main agent must execute this fanout directly"
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-fail", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-fail", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input, Error: why,
+	})}))
+	if card.Summary != "Failed to run 2 general-purpose tasks" {
+		t.Fatalf("summary = %q, want Failed to run 2 general-purpose tasks", card.Summary)
+	}
+	if card.FanoutCallError != why {
+		t.Fatalf("call error = %q, want %q", card.FanoutCallError, why)
+	}
+	painted := renderFanoutForTest(card)
+	if got := strings.TrimSpace(painted[1]); got != why {
+		t.Fatalf("first body line = %q, want the call error:\n%s", got, strings.Join(painted, "\n"))
+	}
+}
+
+func TestCancelledTasksAreCountedOnTheCard(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "任务16", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "任务17", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "任务18", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-3", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	for i, status := range []string{"ok", "cancelled", "cancelled"} {
+		agent := fmt.Sprintf("subagent-%d", i)
+		_ = r.Reduce(SubagentSpawnedMsg{
+			AgentID: agent, AgentType: "general-purpose", TaskID: agent,
+			ParentToolCallID: "fan-3", TaskIndex: i, ExecutionID: fmt.Sprintf("exec-%d", i), Timestamp: t0,
+		})
+		_ = r.Reduce(SubagentEndedMsg{
+			AgentID: agent, TaskID: agent, Status: status,
+			ParentToolCallID: "fan-3", TaskIndex: i, ExecutionID: fmt.Sprintf("exec-%d", i), Timestamp: t0.Add(time.Minute),
+		})
+	}
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-3", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
+		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"ok":true},{"index":2,"ok":true}]}`},
+	})}))
+	if card.Summary != "Ran 3 general-purpose tasks · 1 done, 2 cancelled" {
+		t.Fatalf("summary = %q, want Ran 3 general-purpose tasks · 1 done, 2 cancelled", card.Summary)
+	}
+	for _, line := range fanoutContentLines(card.Content) {
+		if strings.Contains(line, "任务17") || strings.Contains(line, "任务18") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "×") {
+				t.Fatalf("cancelled row must carry ×: %q", line)
+			}
+		}
+	}
+}
+
+func TestSpawnWithoutItsCallNeverJoinsAnotherCard(t *testing.T) {
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "任务16 migrate 导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "任务17 扩展目录", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	before := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-2", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})}))
+	ev := r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-77c0", AgentType: "explore", TaskID: "subagent-77c0",
+		Title: "查找所有调用点", ParentToolCallID: "other-call", TaskIndex: 0, ExecutionID: "exec-x",
+		Timestamp: time.Unix(1790000000, 0).UTC(),
+	})
+	var foreign *Frame
+	for i := range ev.Frames {
+		if ev.Frames[i].Kind == FrameFanout {
+			foreign = &ev.Frames[i]
+		}
+	}
+	if foreign == nil {
+		t.Fatalf("a dispatch without its call must open its own card: %#v", ev.Frames)
+	}
+	if !strings.HasPrefix(foreign.StepID, "subagent-exec:") {
+		t.Fatalf("standalone card StepID = %q, want the subagent-exec: prefix", foreign.StepID)
+	}
+	if foreign.Summary != "Running 1 explore task…" {
+		t.Fatalf("standalone card header = %q", foreign.Summary)
+	}
+	after := r.findFanoutByStepID("fan-2")
+	if after == nil {
+		t.Fatal("the fanout card vanished")
+	}
+	for i, task := range after.Tasks {
+		if task.AgentID == "subagent-77c0" {
+			t.Fatalf("the foreign agent joined task %d: %#v", i, task)
+		}
+	}
+	for i, line := range fanoutContentLines(before.Content) {
+		want := []string{"任务16 migrate 导入", "任务17 扩展目录"}
+		if i < len(want) && strings.TrimSpace(line) != want[i] {
+			t.Fatalf("fanout row %d = %q, want %q", i, line, want[i])
+		}
+	}
+	for _, agent := range before.FanoutLineAgents {
+		if agent == "subagent-77c0" {
+			t.Fatalf("the foreign agent owns a fanout row: %#v", before.FanoutLineAgents)
+		}
+	}
+}
+
+func TestContinueLeavesTheOriginalCardAlone(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "任务16 migrate 导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "任务17 扩展目录", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-4", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	for i := range [2]int{} {
+		agent := fmt.Sprintf("subagent-%d", i)
+		_ = r.Reduce(SubagentSpawnedMsg{
+			AgentID: agent, AgentType: "general-purpose", TaskID: agent,
+			ParentToolCallID: "fan-4", TaskIndex: i, ExecutionID: fmt.Sprintf("exec-%d", i), Timestamp: t0,
+		})
+		_ = r.Reduce(SubagentEndedMsg{
+			AgentID: agent, TaskID: agent, Status: "ok",
+			ParentToolCallID: "fan-4", TaskIndex: i, ExecutionID: fmt.Sprintf("exec-%d", i), Timestamp: t0.Add(time.Minute),
+		})
+	}
+	settled := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-4", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
+		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"ok":true}]}`},
+	})}))
+
+	// Continue the second task through its own call.
+	contInput := map[string]any{"task_id": "subagent-1", "message": "继续做扩展目录"}
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("cont-1", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_continue", Input: contInput,
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-1", AgentType: "general-purpose", TaskID: "subagent-1", Title: "任务17 扩展目录",
+		ParentToolCallID: "cont-1", TaskIndex: 0, ExecutionID: "exec-cont", Timestamp: t0.Add(2 * time.Minute),
+	})
+	_ = r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-1", TaskID: "subagent-1", Status: "ok",
+		ParentToolCallID: "cont-1", TaskIndex: 0, ExecutionID: "exec-cont", Timestamp: t0.Add(3 * time.Minute),
+	})
+	contCard := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("cont-1", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_continue", Input: contInput,
+		Output:   map[string]any{"output": `{"record":{"task_id":"subagent-1","agent_type":"general-purpose","title":"任务17 扩展目录","status":"ok","execution_id":"exec-cont","started_at":1790000120,"finished_at":1790000180}}`},
+		Duration: time.Minute,
+	})}))
+	if contCard.Summary != "Continued 1 general-purpose task" {
+		t.Fatalf("continue header = %q, want Continued 1 general-purpose task", contCard.Summary)
+	}
+	if after := r.findFanoutByStepID("fan-4"); after == nil || emitFanoutContent(after) != settled.Content {
+		t.Fatalf("the original card changed:\n%s\nvs\n%s", emitFanoutContent(after), settled.Content)
+	}
+}
+
+// emitFanoutContent re-renders a fanout state's content for comparison.
+func emitFanoutContent(fs *fanoutState) string {
+	if fs == nil {
+		return ""
+	}
+	content, _, _ := renderFanoutContent(fs)
+	return content
+}
+
+// fanoutStateIDsOf lists the open card ids, for assertions about which cards
+// exist.
+func fanoutStateIDsOf(r *Reducer) []string {
+	ids := make([]string, 0, len(r.fanoutStates))
+	for id := range r.fanoutStates {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func TestNestedDispatchCardBelongsToItsAgentView(t *testing.T) {
+	var r Reducer
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: Message{
+		Kind: MsgKindTool, StepID: "nested-1", ToolName: "subagent_run", AgentID: "task-a",
+		ToolMeta: tool.BuildToolMeta(tool.StepEvent{
+			Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+			Input: map[string]any{"task": "查找所有调用点", "subagent_type": "explore"},
+		}),
+		ToolPhase: tool.StepKindToolStarted,
+	}}))
+	if card.AgentID != "task-a" {
+		t.Fatalf("nested card AgentID = %q, want task-a", card.AgentID)
+	}
+}
+
+// A subagent's own subagent_* call reaches the surface through the run-event
+// mirror, whose meta conversion once dropped the card facts: the nested
+// dispatch then fell back to a generic tool card in the subagent's view
+// instead of the subagent card the preview shows.
+func TestNestedDispatchMirroredThroughRunEventsKeepsItsCard(t *testing.T) {
+	evt := event.NewRunEvent("r-1", "run-n", "s1", event.RunEventToolCompleted,
+		event.ToolCallCompletedPayload{
+			StepID: "nested-2", ToolName: "subagent_run", DurationSeconds: 0.03,
+			Data:        "tool subagent_run: persist subagent run: FOREIGN KEY constraint failed",
+			DisplayBody: "tool subagent_run: persist subagent run: FOREIGN KEY constraint failed",
+			ToolMeta: event.ToolCallMeta{
+				ToolName: "subagent_run", Status: "failed", AgentID: "task-a",
+				SubagentCall: &event.SubagentCall{
+					Verb: "run",
+					Tasks: []event.SubagentCallTask{{
+						Index: 0, Title: "总结 README 内容", AgentType: "explore", Status: "failed",
+					}},
+				},
+			},
+		}, time.Unix(100, 0).UTC())
+	var p event.ToolCallCompletedPayload
+	if err := json.Unmarshal(evt.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	msg := subagentToolStepMsg(evt, p.StepID, p.ToolName, p.Summary, p.ToolMeta, evt.Type)
+	msg.Msg.Content = p.DisplayBody
+	msg.Msg.Duration = time.Duration(p.DurationSeconds * float64(time.Second))
+
+	var r Reducer
+	card := lastFanoutFrame(t, r.Reduce(msg))
+	if card.AgentID != "task-a" {
+		t.Fatalf("nested card AgentID = %q, want task-a", card.AgentID)
+	}
+	if card.Summary != "Failed to run 1 explore task" {
+		t.Fatalf("nested card summary = %q, want Failed to run 1 explore task", card.Summary)
+	}
+	if !strings.Contains(card.FanoutCallError, "FOREIGN KEY constraint failed") {
+		t.Fatalf("nested card lost the call's error: %q", card.FanoutCallError)
+	}
+}
+
+func TestRuntimeDispatchedAgentGetsACardNotStatusLines(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	var r Reducer
+	spawn := r.Reduce(SubagentSpawnedMsg{
+		AgentID: "plan-review-4f1a", AgentType: "plan-reviewer", TaskID: "plan-review-4f1a",
+		Title: "Plan review", ExecutionID: "exec-r", Timestamp: t0,
+	})
+	end := r.Reduce(SubagentEndedMsg{
+		AgentID: "plan-review-4f1a", TaskID: "plan-review-4f1a", Status: "ok",
+		ExecutionID: "exec-r", Timestamp: t0.Add(2 * time.Minute),
+	})
+	for _, ev := range []EventResult{spawn, end} {
+		for _, f := range ev.Frames {
+			if f.Kind == FrameStatus {
+				t.Fatalf("the lifecycle text lines are gone, got %#v", f)
+			}
+		}
+	}
+	card := lastFanoutFrame(t, end)
+	if card.Summary != "Ran 1 plan-reviewer task" {
+		t.Fatalf("summary = %q, want Ran 1 plan-reviewer task", card.Summary)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(fanoutContentLines(card.Content)[0]), "✓ Plan review") {
+		t.Fatalf("card row = %q, want ✓ Plan review", fanoutContentLines(card.Content)[0])
+	}
+}
+
+func TestSettledTaskHasNoToolUseStatsLine(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "任务16 migrate 导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "任务17 扩展目录", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-5", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	statuses := []string{"ok", "failed"}
+	for i, status := range statuses {
+		agent := fmt.Sprintf("subagent-f%d", i)
+		_ = r.Reduce(SubagentSpawnedMsg{
+			AgentID: agent, AgentType: "general-purpose", TaskID: agent,
+			ParentToolCallID: "fan-5", TaskIndex: i, ExecutionID: fmt.Sprintf("exec-f%d", i), Timestamp: t0,
+		})
+		for j := 0; j < 3; j++ {
+			_ = r.Reduce(NewMessageMsg{Msg: Message{
+				Kind: MsgKindTool, StepID: fmt.Sprintf("step-%d-%d", i, j), ToolName: "shell",
+				ToolMeta: tool.ToolMeta{Invocation: fmt.Sprintf("tool %d of %d", j, i)}, AgentID: agent,
+				ToolPhase: tool.StepKindToolStarted,
+			}})
+		}
+		_ = r.Reduce(SubagentEndedMsg{
+			AgentID: agent, TaskID: agent, Status: status, Error: map[bool]string{true: "上游连接中断（EOF）", false: ""}[status == "failed"],
+			ParentToolCallID: "fan-5", TaskIndex: i, ExecutionID: fmt.Sprintf("exec-f%d", i), Timestamp: t0.Add(time.Minute),
+		})
+	}
+	card := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-5", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_fanout", Input: input,
+		Output: map[string]any{"output": `{"results":[{"index":0,"ok":true},{"index":1,"error":"upstream EOF"}]}`},
+	})}))
+	assertNoStatsLine(t, card.Content)
+	if !strings.Contains(card.Content, "上游连接中断（EOF）") {
+		t.Fatalf("card lost the failed task's reason:\n%s", card.Content)
+	}
+	if got := strings.Count(card.Content, "… +2 tool uses"); got != 2 {
+		t.Fatalf("overflow rows = %d, want one per task:\n%s", got, card.Content)
+	}
+}
+
+func TestTaskRowsShowLiveAndFinalElapsed(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	input := map[string]any{"tasks": []any{
+		map[string]any{"prompt": "任务16 migrate 导入", "subagent_type": "general-purpose"},
+		map[string]any{"prompt": "任务17 扩展目录", "subagent_type": "general-purpose"},
+	}}
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fan-6", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_fanout", Input: input,
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-t1", AgentType: "general-purpose", TaskID: "subagent-t1",
+		ParentToolCallID: "fan-6", TaskIndex: 0, ExecutionID: "exec-t1", Timestamp: t0,
+	})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-t2", AgentType: "general-purpose", TaskID: "subagent-t2",
+		ParentToolCallID: "fan-6", TaskIndex: 1, ExecutionID: "exec-t2", Timestamp: t0.Add(time.Second),
+	})
+	card := lastFanoutFrame(t, r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-t2", TaskID: "subagent-t2", Status: "ok",
+		ParentToolCallID: "fan-6", TaskIndex: 1, ExecutionID: "exec-t2",
+		FinishedAt: t0.Add(75 * time.Second), Timestamp: t0.Add(75 * time.Second),
+	}))
+	lines := fanoutContentLines(card.Content)
+	ended := fanoutClockOfLine(card, lines, "任务17 扩展目录")
+	if !ended.Start.Equal(t0.Add(time.Second)) || !ended.End.Equal(t0.Add(75*time.Second)) {
+		t.Fatalf("ended clock = %+v, want t0+1s..t0+75s", ended)
+	}
+	if live := fanoutClockOfLine(card, lines, "任务16 migrate 导入"); !live.End.IsZero() {
+		t.Fatalf("still-running clock already ended: %+v", live)
+	}
+
+	restore := fanoutClockNow
+	fanoutClockNow = func() time.Time { return t0.Add(200 * time.Second) }
+	defer func() { fanoutClockNow = restore }()
+	painted := renderFanoutForTest(card)
+	sawFinal, sawLive := false, false
+	for _, line := range painted {
+		switch {
+		case strings.Contains(line, "任务17 扩展目录"):
+			if !strings.HasSuffix(strings.TrimSpace(line), "· 1m14s") {
+				t.Fatalf("ended row = %q, want the 1m14s final elapsed", line)
+			}
+			sawFinal = true
+		case strings.Contains(line, "任务16 migrate 导入"):
+			if !strings.HasSuffix(strings.TrimSpace(line), "· 3m 20s") {
+				t.Fatalf("running row = %q, want the 3m 20s live clock", line)
+			}
+			sawLive = true
+		}
+	}
+	if !sawFinal || !sawLive {
+		t.Fatalf("card lost a task row:\n%s", strings.Join(painted, "\n"))
+	}
+
+	// A single-task dispatch card names its duration on the task row alone.
+	single := map[string]any{"task": "追踪", "subagent_type": "explore"}
+	var r2 Reducer
+	_ = r2.Reduce(NewMessageMsg{Msg: subagentStepMessage("run-2", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run", Input: single,
+	})})
+	singleCard := lastFanoutFrame(t, r2.Reduce(NewMessageMsg{Msg: subagentStepMessage("run-2", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_run", Input: single,
+		Output:   map[string]any{"output": `{"task_id":"subagent-z","status":"ok","finished_at":1790000182,"agent_type":"explore"}`},
+		Duration: 182 * time.Second,
+	})}))
+	if singleCard.Summary != "Ran 1 explore task" {
+		t.Fatalf("single-task header = %q, want Ran 1 explore task without a duration", singleCard.Summary)
+	}
+	for _, line := range renderFanoutForTest(singleCard) {
+		if strings.HasPrefix(strings.TrimSpace(line), "●") && strings.Contains(line, " · ") {
+			t.Fatalf("single-task header repeats the duration: %q", line)
+		}
+	}
+}
+
+func TestQueryRowFollowsItsExecutionToTheEnd(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	var r Reducer
+	sendInput := map[string]any{"title": "计划001 Go车道实施", "task": "读 README", "subagent_type": "general-purpose"}
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("send-9", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_send", Input: sendInput,
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-9a", AgentType: "general-purpose", TaskID: "subagent-9a", Title: "计划001 Go车道实施",
+		ParentToolCallID: "send-9", TaskIndex: 0, ExecutionID: "exec-9", Timestamp: t0,
+	})
+	closeCard := lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("close-9", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "subagent_close",
+		Input:    map[string]any{"task_id": "subagent-9a"},
+		Output:   map[string]any{"output": `{"status":"cancel_requested","record":{"task_id":"subagent-9a","agent_type":"general-purpose","title":"计划001 Go车道实施","status":"running","execution_id":"exec-9","started_at":1790000000}}`},
+		Duration: 30 * time.Millisecond,
+	})}))
+	lines := fanoutContentLines(closeCard.Content)
+	if got := strings.TrimSpace(lines[0]); !strings.HasPrefix(got, "计划001") {
+		t.Fatalf("query row = %q, want the running task without an icon", got)
+	}
+	if !strings.Contains(closeCard.Content, "stop requested") {
+		t.Fatalf("query row lost its phrase:\n%s", closeCard.Content)
+	}
+
+	// The execution the row follows ends later: the row settles with it, and
+	// the settled card is re-emitted — state no frame carries never repaints
+	// the screen, whose row would keep walking its running clock past the end.
+	endedFrames := r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-9a", TaskID: "subagent-9a", Status: "cancelled",
+		ParentToolCallID: "send-9", TaskIndex: 0, ExecutionID: "exec-9",
+		FinishedAt: t0.Add(302 * time.Second), Timestamp: t0.Add(302 * time.Second),
+	})
+	var settledCard Frame
+	for _, f := range endedFrames.Frames {
+		if f.Kind == FrameFanout && f.StepID == "close-9" {
+			settledCard = f
+		}
+	}
+	if settledCard.StepID == "" {
+		t.Fatalf("the ended execution did not re-emit the close card it settled: %d frames", len(endedFrames.Frames))
+	}
+	lines = fanoutContentLines(settledCard.Content)
+	if got := strings.TrimSpace(lines[0]); !strings.HasPrefix(got, "×") {
+		t.Fatalf("settled query row = %q, want the cancelled icon", got)
+	}
+	if !strings.Contains(settledCard.Content, "stop requested") {
+		t.Fatalf("settled query row lost its phrase:\n%s", settledCard.Content)
+	}
+	if clock := fanoutClockOfLine(settledCard, lines, "计划001"); !clock.End.Equal(t0.Add(302 * time.Second)) {
+		t.Fatalf("settled query clock = %+v, want the execution's stop", clock)
+	}
+}
+
+func TestAbandonedExecutionEndsAtItsRealStopTime(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	const reason = "The process running this turn stopped before it finished."
+	var r Reducer
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "subagent-ab", AgentType: "general-purpose", TaskID: "subagent-ab", Title: "核对迁移",
+		Timestamp: t0,
+	})
+	card := lastFanoutFrame(t, r.Reduce(SubagentEndedMsg{
+		AgentID: "subagent-ab", TaskID: "subagent-ab", Status: "failed", Error: reason,
+		FinishedAt: t0.Add(30 * time.Second), Timestamp: t0.Add(2 * time.Hour),
+	}))
+	lines := fanoutContentLines(card.Content)
+	if got := strings.TrimSpace(lines[0]); !strings.HasPrefix(got, "✗ 核对迁移") {
+		t.Fatalf("row = %q, want the failed icon and the task name", got)
+	}
+	if !strings.Contains(card.Content, reason) {
+		t.Fatalf("row lost the reaper's reason:\n%s", card.Content)
+	}
+	if clock := fanoutClockOfLine(card, lines, "核对迁移"); !clock.End.Equal(t0.Add(30 * time.Second)) {
+		t.Fatalf("clock = %+v, want the execution's real stop at t0+30s", clock)
+	}
+	restore := fanoutClockNow
+	fanoutClockNow = func() time.Time { return t0.Add(2 * time.Hour) }
+	defer func() { fanoutClockNow = restore }()
+	for _, line := range renderFanoutForTest(card) {
+		if strings.Contains(line, "核对迁移") && !strings.HasSuffix(strings.TrimSpace(line), "· 30s") {
+			t.Fatalf("row = %q, want the 30s final elapsed, not two hours", line)
+		}
+	}
+}
+
+func TestPlanReviewCardUsesTheDispatchVerbs(t *testing.T) {
+	t0 := time.Unix(1790000000, 0).UTC()
+	var r Reducer
+	started := lastFanoutFrame(t, r.Reduce(PlanReviewStartedMsg{ReviewID: "rv-1", Provider: "zhipuai", Model: "glm-5.3-flash"}))
+	if started.Summary != "Starting 1 plan-reviewer task…" {
+		t.Fatalf("header = %q, want Starting 1 plan-reviewer task…", started.Summary)
+	}
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "plan-review-4f1a", AgentType: "plan-reviewer", TaskID: "plan-review-4f1a",
+		Title: "Plan review", ParentToolCallID: "rv-1", TaskIndex: 0, ExecutionID: "exec-rv1", Timestamp: t0,
+	})
+	running := lastFanoutFrame(t, r.Reduce(SubagentSpawnedMsg{
+		AgentID: "plan-review-4f1a", AgentType: "plan-reviewer", TaskID: "plan-review-4f1a",
+		Title: "Plan review", ParentToolCallID: "rv-1", TaskIndex: 0, ExecutionID: "exec-rv1", Timestamp: t0,
+	}))
+	if running.Summary != "Running 1 plan-reviewer task…" {
+		t.Fatalf("header = %q, want Running 1 plan-reviewer task…", running.Summary)
+	}
+	for _, id := range fanoutStateIDsOf(&r) {
+		if strings.HasPrefix(id, "subagent-exec:") {
+			t.Fatalf("the reviewer opened a standalone card beside its review card: %v", fanoutStateIDsOf(&r))
+		}
+	}
+	done := lastFanoutFrame(t, r.Reduce(SubagentEndedMsg{
+		AgentID: "plan-review-4f1a", TaskID: "plan-review-4f1a", Status: "ok",
+		ParentToolCallID: "rv-1", TaskIndex: 0, ExecutionID: "exec-rv1", Timestamp: t0.Add(2 * time.Minute),
+	}))
+	if done.Summary != "Ran 1 plan-reviewer task" {
+		t.Fatalf("header = %q, want Ran 1 plan-reviewer task", done.Summary)
+	}
+
+	// A review that never started reports the failure it was stopped by.
+	var r2 Reducer
+	_ = r2.Reduce(PlanReviewStartedMsg{ReviewID: "rv-2", Provider: "zhipuai", Model: "glm-5.3-flash"})
+	const why = "model zhipuai/glm-5.3-flash is not configured for this session"
+	failed := lastFanoutFrame(t, r2.Reduce(PlanReviewReviewedMsg{ReviewID: "rv-2", Provider: "zhipuai", Model: "glm-5.3-flash", Outcome: "failed", Error: why}))
+	if failed.Summary != "Failed to start 1 plan-reviewer task" {
+		t.Fatalf("header = %q, want Failed to start 1 plan-reviewer task", failed.Summary)
+	}
+	if failed.FanoutCallError != why {
+		t.Fatalf("call error = %q, want %q", failed.FanoutCallError, why)
+	}
+	painted := renderFanoutForTest(failed)
+	if got := strings.TrimSpace(painted[1]); got != why {
+		t.Fatalf("first body line = %q, want the error:\n%s", got, strings.Join(painted, "\n"))
+	}
+}
+
+// The plan review happens while the exit-plan approval still holds it: the user
+// asks for the review, the reviewer runs, and only then does the user approve
+// the exit. The three records are one exchange, so the card reads between the
+// two confirmation lines, above the parked exit-plan call they both refer to —
+// not appended after it, where it would read as a footnote to the approval.
+func TestPlanReviewCardLandsBetweenTheApprovalConfirmations(t *testing.T) {
+	r := newComposerRenderer(t, 100, 40)
+	const asked = "✔ You asked zhipuai/glm-5.3-flash to review the plan"
+	const approved = "✔ You approved forebrain to exit plan mode"
+
+	reducer := &Reducer{}
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "the plan is written", Final: true})
+	r.RenderFrame(Frame{Kind: FrameTool, StepID: "call-exit", Title: "exit_plan_mode", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: asked, InsertBeforeLastTool: true, Final: true})
+	for _, f := range reducer.Reduce(PlanReviewStartedMsg{
+		ReviewID: "rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+	}).Frames {
+		r.RenderFrame(f)
+	}
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: approved, InsertBeforeLastTool: true, Final: true})
+
+	got := make([]string, 0, len(r.vm.blocks))
+	for _, block := range r.vm.blocks {
+		switch block.frame.Kind {
+		case FrameAssistant:
+			got = append(got, "assistant")
+		case FrameTool:
+			got = append(got, "exit plan mode")
+		case FrameFanout:
+			got = append(got, "card:"+block.frame.StepID)
+		case FrameStatus:
+			got = append(got, "status:"+strings.TrimSpace(stripANSI(block.frame.Content)))
+		default:
+			got = append(got, string(block.frame.Kind))
+		}
+	}
+	want := []string{"assistant", "status:" + asked, "card:rv-1", "status:" + approved, "exit plan mode"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("transcript order:\n%v\nwant:\n%v", got, want)
+	}
+
+	// A card already carrying this review's StepID updates in place: the
+	// reviewer finishing must not append a second block.
+	for _, f := range reducer.Reduce(PlanReviewReviewedMsg{
+		ReviewID: "rv-1", Provider: "zhipuai", Model: "glm-5.3-flash", Outcome: "done",
+	}).Frames {
+		r.RenderFrame(f)
+	}
+	if n := len(r.vm.blocks); n != len(want) {
+		t.Fatalf("the review's update added a block: %d blocks, want %d", n, len(want))
+	}
+}
+
+// The card's headers and the transcript summaries 012 derives are the same
+// words in different cases: one table feeds both, so they cannot disagree.
+func TestSubagentCardHeadersMatchTheStepSummaries(t *testing.T) {
+	input := map[string]any{"task": "读 README", "subagent_type": "general-purpose"}
+	cases := []struct {
+		tool  string
+		phase string
+	}{
+		{"subagent_run", tool.StepKindToolStarted},
+		{"subagent_run", tool.StepKindToolCompleted},
+		{"subagent_continue", tool.StepKindToolStarted},
+		{"subagent_continue", tool.StepKindToolCompleted},
+		{"subagent_status", tool.StepKindToolStarted},
+		{"subagent_status", tool.StepKindToolCompleted},
+		{"subagent_wait", tool.StepKindToolStarted},
+		{"subagent_wait", tool.StepKindToolCompleted},
+		{"subagent_close", tool.StepKindToolStarted},
+		{"subagent_close", tool.StepKindToolCompleted},
+		{"subagent_list", tool.StepKindToolStarted},
+		{"subagent_list", tool.StepKindToolCompleted},
+	}
+	for _, tc := range cases {
+		evt := tool.StepEvent{Kind: tc.phase, ToolName: tc.tool, Input: input,
+			Output: map[string]any{"output": `{"task_id":"subagent-1","agent_type":"general-purpose","title":"读 README","status":"ok","started_at":1790000000,"finished_at":1790000042}`}}
+		summary := strings.TrimSpace(tool.SummarizeToolStep(evt))
+		var r Reducer
+		start := r.Reduce(NewMessageMsg{Msg: subagentStepMessage("s", evt)})
+		if tc.phase == tool.StepKindToolStarted {
+			evt2 := evt
+			evt2.Kind = tool.StepKindToolCompleted
+			_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("s", evt2)})
+		}
+		card := Frame{}
+		for _, f := range start.Frames {
+			if f.Kind == FrameFanout {
+				card = f
+			}
+		}
+		if card.Kind != FrameFanout {
+			t.Fatalf("%s %s: no card", tc.tool, tc.phase)
+		}
+		want := strings.ToUpper(summary[:1]) + summary[1:]
+		if tc.phase == tool.StepKindToolStarted {
+			want += "…"
+		}
+		if card.Summary != want {
+			t.Fatalf("%s %s: header = %q, want the summary's words %q", tc.tool, tc.phase, card.Summary, want)
+		}
 	}
 }
 
@@ -2320,6 +3368,39 @@ func TestViewportResizeRepaintsEveryRow(t *testing.T) {
 	}
 }
 
+// TestViewportResizeErasesTheDisplayFirst covers the residue a narrowed
+// terminal left behind: macOS Terminal keeps each row's cells past the new
+// right edge out of sight, and erasing a row drops only its visible part, so
+// the hidden tail of the wider layout slid into view on the rows the narrower
+// frame left short. The repaint after a geometry change must erase the whole
+// display before it writes any row; an ordinary repaint must not, or every
+// keystroke would blank the screen.
+func TestViewportResizeErasesTheDisplayFirst(t *testing.T) {
+	r := newComposerRenderer(t, 120, 24)
+	out := r.out.(*bytes.Buffer)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "", Cursor: &cursor})
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "already on screen", Final: true})
+
+	out.Reset()
+	r.RenderComposerState(ComposerRenderState{Text: "h", Cursor: &cursor})
+	if strings.Contains(out.String(), "\x1b[2J") {
+		t.Fatalf("an ordinary repaint must not erase the display, got %q", out.String())
+	}
+
+	forcedTermWidth = 80
+	out.Reset()
+	r.ViewportResize()
+	paint := out.String()
+	erase := strings.Index(paint, "\x1b[2J")
+	if erase < 0 {
+		t.Fatalf("the repaint after narrowing must erase the display, got %q", paint)
+	}
+	if row := regexp.MustCompile(`\x1b\[\d+;1H`).FindStringIndex(paint); row == nil || row[0] < erase {
+		t.Fatalf("the display must be erased before any row is written, got %q", paint)
+	}
+}
+
 // TestSoftwareCaretMoveLeavesNoSecondCaret covers the other half of painting
 // the caret as one cell: when it moves without the line changing, the cell it
 // left must be put back, or the screen shows two carets.
@@ -2945,5 +4026,30 @@ func TestSlashComposerSoftWrapsLongArgument(t *testing.T) {
 	last := block.lines[block.cursorRow]
 	if !strings.Contains(last, "llm") {
 		t.Fatalf("caret row %d is not the last text row: %q", block.cursorRow, last)
+	}
+}
+
+// A query call the run was interrupted on never completes: its card settles as
+// canceled with the turn, instead of waiting forever.
+func TestInterruptedWaitCardSettlesAsCanceled(t *testing.T) {
+	var r Reducer
+	_ = r.Reduce(RunStartedMsg{RunID: "run-w"})
+	started := r.Reduce(NewMessageMsg{Msg: subagentStepMessage("wait-x", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_wait",
+		Input: map[string]any{"task_id": "subagent-6e5c"},
+	})})
+	if got := lastFanoutFrame(t, started); got.Final {
+		t.Fatalf("the wait card must be live while the call runs: %#v", got)
+	}
+	ended := r.Reduce(RunEndedMsg{RunID: "run-w"})
+	card := lastFanoutFrame(t, ended)
+	if !strings.HasPrefix(card.Summary, "Canceled ") {
+		t.Fatalf("summary = %q, want the canceled label", card.Summary)
+	}
+	if !card.Final {
+		t.Fatalf("the interrupted wait card must settle, got %#v", card)
+	}
+	if got := r.findFanoutByStepID("wait-x"); got == nil || got.CallStatus != "canceled" {
+		t.Fatalf("card state = %#v, want canceled", got)
 	}
 }

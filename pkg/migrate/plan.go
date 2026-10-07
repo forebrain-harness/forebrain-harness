@@ -27,6 +27,7 @@ type Report struct {
 	Skills      []SkillOutcome
 	Plans       []PlanOutcome
 	MCP         []MCPOutcome
+	LSP         []LSPOutcome
 	// Projects are the projects the import writes forebrain's own project files
 	// into (a dry run: would write).
 	Projects []ProjectWrite
@@ -85,6 +86,8 @@ type Plan struct {
 	Plans        int
 	MCPGlobal    int
 	MCPProject   int
+	LSPEnabled   int
+	LSPWritten   int
 	HistoryLines int
 	Projects     []ProjectWrite
 	Notices      []string
@@ -195,6 +198,14 @@ func reportToPlan(report *Report) *Plan {
 			plan.Plans++
 		}
 	}
+	for _, outcome := range report.LSP {
+		switch outcome.Status {
+		case "enabled":
+			plan.LSPEnabled++
+		case "written":
+			plan.LSPWritten++
+		}
+	}
 	return plan
 }
 
@@ -218,6 +229,9 @@ func (p *Plan) Text() string {
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "  Memories: %d · Skills: %d · Plans: %d\n", p.Memories, p.Skills, p.Plans)
 	fmt.Fprintf(&b, "  MCP servers: %d global · %d in projects\n", p.MCPGlobal, p.MCPProject)
+	if p.LSPEnabled > 0 || p.LSPWritten > 0 {
+		fmt.Fprintf(&b, "  Language servers: %d enabled · %d added\n", p.LSPEnabled, p.LSPWritten)
+	}
 	fmt.Fprintf(&b, "  Input history: %s lines\n", formatCount(int64(p.HistoryLines)))
 	if p.SourceBytes > 0 {
 		fmt.Fprintf(&b, "  Database: grows by about %s (%s of transcripts)\n", humanBytes(p.DBEstimate), humanBytes(p.SourceBytes))
@@ -300,7 +314,7 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 		return nil, err
 	}
 	report := &Report{Source: KindClaude, SourceRoot: root, DryRun: opts.DryRun}
-	for _, category := range []string{"sessions", "memories", "skills", "plans", "mcp", "history"} {
+	for _, category := range []string{"sessions", "memories", "skills", "plans", "mcp", "lsp", "history"} {
 		if !opts.wants(category) {
 			report.SkippedCategories = append(report.SkippedCategories, category)
 		}
@@ -337,6 +351,14 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 		report.Notices = append(report.Notices, notices...)
 		if err != nil {
 			report.Notices = append(report.Notices, "MCP import stopped early: "+err.Error())
+		}
+	}
+	if opts.wants("lsp") {
+		lspOutcomes, notices, err := importLSP(data, opts, progress)
+		report.LSP = lspOutcomes
+		report.Notices = append(report.Notices, notices...)
+		if err != nil {
+			report.Notices = append(report.Notices, "LSP import stopped early: "+err.Error())
 		}
 	}
 	if opts.wants("history") {
@@ -539,6 +561,14 @@ func (r *Report) Text() string {
 		fmt.Fprintf(&b, "  MCP servers: %d written · %d skipped · %d read natively\n",
 			countStatus(r.MCP, "written"), countStatus(r.MCP, "skipped"), countStatus(r.MCP, "native"))
 	}
+	if len(r.LSP) > 0 {
+		byStatus := map[string]int{}
+		for _, entry := range r.LSP {
+			byStatus[entry.Status]++
+		}
+		fmt.Fprintf(&b, "  Language servers: %d enabled · %d added · %d skipped\n",
+			byStatus["enabled"], byStatus["written"], byStatus["skipped"])
+	}
 	if r.History.SourceLines > 0 || r.History.Added > 0 {
 		fmt.Fprintf(&b, "  Input history: %d added · %d already there, of %d lines\n",
 			r.History.Added, r.History.Skipped, r.History.SourceLines)
@@ -603,6 +633,12 @@ func (r *Report) Text() string {
 		b.WriteString("\nMCP servers\n")
 		for _, entry := range r.MCP {
 			b.WriteString("  " + outcomeLine(entry.Name+" ("+entry.Scope+")", entry.Status, entry.Detail) + "\n")
+		}
+	}
+	if len(r.LSP) > 0 {
+		b.WriteString("\nLanguage servers\n")
+		for _, entry := range r.LSP {
+			b.WriteString("  " + outcomeLine(entry.Name, entry.Status, entry.Detail) + "\n")
 		}
 	}
 	writeImportNotes(&b, r.Source, r.DryRun, r.Projects, r.Notices)

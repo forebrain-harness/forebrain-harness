@@ -14,13 +14,20 @@ import (
 )
 
 type stubSessionStore struct {
-	summaries []state.SessionSummary
-	turns     []state.Message
-	created   []state.SessionSummary
+	turns   []state.Message
+	created []state.SessionSummary
+	births  []state.SessionBirth
 }
 
 func (s *stubSessionStore) Ensure(ctx context.Context, id string, title string) error {
 	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	s.births = append(s.births, state.SessionBirth{})
+	return nil
+}
+
+func (s *stubSessionStore) EnsureAt(ctx context.Context, id, title string, birth state.SessionBirth) error {
+	s.created = append(s.created, state.SessionSummary{ID: id, Title: title})
+	s.births = append(s.births, birth)
 	return nil
 }
 
@@ -29,33 +36,11 @@ func (s *stubSessionStore) SetTitle(ctx context.Context, id string, title string
 	return nil
 }
 
-func (s stubSessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error) {
-	if limit <= 0 || limit >= len(s.summaries) {
-		return append([]state.SessionSummary(nil), s.summaries...), nil
-	}
-	return append([]state.SessionSummary(nil), s.summaries[:limit]...), nil
-}
-
 func (s stubSessionStore) ListRecentMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error) {
 	if limit <= 0 || limit >= len(s.turns) {
 		return append([]state.Message(nil), s.turns...), nil
 	}
 	return append([]state.Message(nil), s.turns[:limit]...), nil
-}
-
-func TestListSessionsRecentUsesSessionStore(t *testing.T) {
-	svc := New(WithSessionStore(&stubSessionStore{
-		summaries: []state.SessionSummary{
-			{ID: "s2", Title: "Second", UpdatedAt: 20},
-			{ID: "s1", Title: "First", UpdatedAt: 10},
-		},
-	}))
-
-	got, err := svc.ListSessionsRecent(context.Background(), 10)
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	require.Equal(t, "s2", got[0].ID)
-	require.Equal(t, "Second", got[0].Title)
 }
 
 func TestListSessionMessagesUsesSessionStore(t *testing.T) {
@@ -105,27 +90,58 @@ func TestCreateSessionWithoutATitleIsUnnamed(t *testing.T) {
 	require.Equal(t, created.ID, store.created[0].Title)
 }
 
+// TestCreateSessionCarriesItsBirthToTheStore pins that a session's directory
+// identity travels with its creation: CreateSessionAt hands the store exactly
+// the birth its caller chose, and CreateSession — the ordinary path — hands
+// over the zero birth, the process default.
+func TestCreateSessionCarriesItsBirthToTheStore(t *testing.T) {
+	store := &stubSessionStore{}
+	svc := New(WithSessionStore(store))
+
+	birth := state.SessionBirth{Cwd: "/proj", GitBranch: "feat"}
+	if _, err := svc.CreateSessionAt(context.Background(), "In project", birth); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateSession(context.Background(), "Ordinary"); err != nil {
+		t.Fatal(err)
+	}
+
+	require.Len(t, store.births, 2)
+	require.Equal(t, birth, store.births[0])
+	require.Equal(t, state.SessionBirth{}, store.births[1])
+}
+
 // fakeCancelStore records what a cancelled turn wrote.
 type fakeCancelStore struct {
 	seqs      [][]llm.Message
+	seqRuns   []string
 	model     string
-	started   string
-	finished  string
-	worked    int64
 	appends   [][2]string
+	appendRun []string
+	stamps    map[string]state.RunTiming
 	repairs   int
 	repairErr error
 }
 
-func (f *fakeCancelStore) AppendMessageSequence(_ context.Context, _ string, msgs []llm.Message, model, _ string) error {
+func (f *fakeCancelStore) AppendMessageSequenceForRun(_ context.Context, _, runID string, msgs []llm.Message, model, _ string) error {
 	f.seqs = append(f.seqs, msgs)
+	f.seqRuns = append(f.seqRuns, runID)
 	f.model = model
 	return nil
 }
 
-func (f *fakeCancelStore) Append(_ context.Context, _, role, content string) (int64, error) {
+func (f *fakeCancelStore) AppendMessageForRun(_ context.Context, _, runID, role, content, _, _ string, _ state.MessageExecTiming) (int64, error) {
 	f.appends = append(f.appends, [2]string{role, content})
+	f.appendRun = append(f.appendRun, runID)
 	return 0, nil
+}
+
+func (f *fakeCancelStore) StampRunTiming(_ context.Context, runID string, timing state.RunTiming) error {
+	if f.stamps == nil {
+		f.stamps = map[string]state.RunTiming{}
+	}
+	f.stamps[runID] = timing
+	return nil
 }
 
 func (f *fakeCancelStore) RepairDanglingToolResults(context.Context, string) (int, error) {
@@ -186,7 +202,7 @@ func TestPersistCancelledTurnKeepsADistinctStreamBuffer(t *testing.T) {
 		PartialText:      "first part and then some more",
 		PartialReasoning: "thinking hard",
 		Model:            "gpt-main",
-		StartedAt:        time.Now().Add(-2 * time.Second),
+		End:              RunEnd{StartedAt: time.Now().Add(-2 * time.Second), FinishedAt: time.Now(), Worked: 2 * time.Second},
 	})
 
 	if len(store.seqs) != 1 || len(store.seqs[0]) != len(captured)+1 {
@@ -246,6 +262,42 @@ func TestPersistCancelledTurnReportsARepairFailure(t *testing.T) {
 	PersistCancelledTurn(context.Background(), &fakeCancelStore{repairErr: errors.New("boom")}, CancelledTurn{SessionID: "s1"})
 }
 
+// A stopped or failed run binds everything it wrote to itself and stamps its
+// clock, so a replay closes it with the "Worked for" line it closed with live.
+func TestPersistCancelledTurnBindsItsRowsAndStampsTheRunsClock(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeCancelStore{}
+	end := RunEnd{StartedAt: time.UnixMilli(1_000), FinishedAt: time.UnixMilli(4_000), Worked: 3 * time.Second}
+	PersistCancelledTurn(context.Background(), store, CancelledTurn{
+		SessionID:        "s1",
+		RunID:            "run-1",
+		Captured:         []llm.Message{llm.UserMessage(llm.Text("do it")), assistantMsg("half")},
+		PartialReasoning: "thinking",
+		End:              end,
+	})
+	if len(store.seqRuns) != 1 || store.seqRuns[0] != "run-1" {
+		t.Fatalf("sequence runs = %v, want the run that wrote it", store.seqRuns)
+	}
+	if len(store.appendRun) != 1 || store.appendRun[0] != "run-1" {
+		t.Fatalf("reasoning runs = %v, want the run that wrote it", store.appendRun)
+	}
+	if got := store.stamps["run-1"]; got != (state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Worked}) {
+		t.Fatalf("stamped %+v, want the run's own clock", got)
+	}
+
+	// A run that failed before writing anything still ended, and still has
+	// its clock: the user's message bound to it is the row its line closes.
+	silent := &fakeCancelStore{}
+	PersistCancelledTurn(context.Background(), silent, CancelledTurn{SessionID: "s1", RunID: "run-2", End: end})
+	if len(silent.seqs) != 0 || len(silent.appends) != 0 {
+		t.Fatalf("nothing to write wrote %v %v", silent.seqs, silent.appends)
+	}
+	if _, ok := silent.stamps["run-2"]; !ok {
+		t.Fatal("a silent run must still have its clock stamped")
+	}
+}
+
 // fakeUserTurnStore records what a user turn wrote.
 type fakeUserTurnStore struct {
 	rowID     int64
@@ -255,6 +307,7 @@ type fakeUserTurnStore struct {
 	content   string
 	parts     string
 	role      string
+	runID     string
 	appended  int
 }
 
@@ -263,8 +316,8 @@ func (f *fakeUserTurnStore) Ensure(_ context.Context, id, _ string) error {
 	return f.ensureErr
 }
 
-func (f *fakeUserTurnStore) AppendStructuredMessage(_ context.Context, _, role, content, _, partsJSON, _ string, _, _, _ string, _ state.MessageExecTiming) (int64, error) {
-	f.role, f.content, f.parts = role, content, partsJSON
+func (f *fakeUserTurnStore) AppendStructuredMessageForRun(_ context.Context, _, runID, role, content, _, partsJSON, _ string, _, _, _ string, _ state.MessageExecTiming) (int64, error) {
+	f.role, f.content, f.parts, f.runID = role, content, partsJSON, runID
 	f.appended++
 	return f.rowID, f.err
 }
@@ -318,6 +371,13 @@ func TestPersistUserTurnStoresTheTypedCommandAsContent(t *testing.T) {
 	if store.role != "user" {
 		t.Fatalf("role = %q", store.role)
 	}
+
+	// A surface that already created the run stores the message bound to it.
+	bound := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), bound, UserTurn{SessionID: "s1", RunID: " run-7 ", ModelInput: "go"})
+	if bound.runID != "run-7" {
+		t.Fatalf("runID = %q, want the run the message starts", bound.runID)
+	}
 }
 
 func TestPersistUserTurnFallsBackAndSkipsEmpty(t *testing.T) {
@@ -352,6 +412,33 @@ func TestPersistUserTurnFallsBackAndSkipsEmpty(t *testing.T) {
 		t.Fatalf("blank input appended %d rows, want 0", blank.appended)
 	}
 	PersistUserTurn(context.Background(), nil, UserTurn{SessionID: "s1", ModelInput: "hi"})
+}
+
+// TestPersistUserTurnMarksWhoWroteThePrompt pins the origin rule: a turn
+// someone other than the person started — a heartbeat — stores its row with
+// the origin part, while the content stays the prompt text itself.
+func TestPersistUserTurnMarksWhoWroteThePrompt(t *testing.T) {
+	t.Parallel()
+
+	beat := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), beat, UserTurn{
+		SessionID:  "s1",
+		RunID:      "run-9",
+		ModelInput: "anything new?",
+		Origin:     state.MessageOriginHeartbeat,
+	})
+	if got := state.MessageOrigin(beat.parts); got != "heartbeat" {
+		t.Fatalf("origin = %q, want heartbeat; parts = %s", got, beat.parts)
+	}
+	if beat.content != "anything new?" {
+		t.Fatalf("content = %q, want the prompt itself", beat.content)
+	}
+
+	plain := &fakeUserTurnStore{}
+	PersistUserTurn(context.Background(), plain, UserTurn{SessionID: "s1", ModelInput: "hello"})
+	if got := state.MessageOrigin(plain.parts); got != "" {
+		t.Fatalf("origin = %q, want empty for the person's own message", got)
+	}
 }
 
 func newAbandonedCallStore(t *testing.T) (*state.SessionStore, string) {

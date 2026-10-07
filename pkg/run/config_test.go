@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,12 +13,77 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
+
+// AgentModel is the one answer to "which model does this agent run on", the
+// way the runtime routes its calls: a dispatch-time override wins, then the
+// type's own chain, then the conversation's model — with the reasoning effort
+// that same configuration gives the model it names.
+func TestAgentModelResolvesEachKindOfAgent(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+				{
+					Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid",
+					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"xhigh"}}`),
+				},
+				{
+					Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "key", BaseURL: "https://example.invalid",
+					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"high"}}`),
+				},
+			}},
+			"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+				{
+					Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "key", BaseURL: "https://example.invalid",
+					Params: appcfg.LLMRequestParams(`{"reasoning":{"effort":"medium"}}`),
+				},
+			}},
+			"general-purpose": {},
+		},
+	}}
+	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+
+	provider, model, effort := AgentModel(r, "session-1", nil)
+	if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
+		t.Fatalf("primary = %s/%s · %s, want the conversation's model and its effort", provider, model, effort)
+	}
+
+	// A fork and a typed subagent without a chain of their own run on the
+	// conversation's model, exactly as the runtime routes them.
+	for _, entry := range []*agent.HistoryEntry{
+		{AgentKind: "fork"},
+		{AgentKind: "typed", AgentType: "general-purpose"},
+	} {
+		provider, model, effort = AgentModel(r, "session-1", entry)
+		if provider != "zhipuai" || model != "glm-5.3" || effort != "xhigh" {
+			t.Fatalf("%s = %s/%s · %s, want the conversation's model", entry.AgentKind, provider, model, effort)
+		}
+	}
+
+	// A typed subagent whose definition has llm_providers runs on the first
+	// of them, with the effort that entry configures.
+	provider, model, effort = AgentModel(r, "session-1", &agent.HistoryEntry{AgentKind: "typed", AgentType: "explore"})
+	if provider != "deepseek" || model != "deepseek-v4-flash" || effort != "medium" {
+		t.Fatalf("typed with its own chain = %s/%s · %s", provider, model, effort)
+	}
+
+	// A dispatch-time override outranks both, and its effort comes from the
+	// provider entry that model resolves to — the same entry
+	// ConfiguredModelClient builds the client from.
+	provider, model, effort = AgentModel(r, "session-1", &agent.HistoryEntry{
+		AgentKind: "typed", AgentType: "plan-reviewer",
+		ModelProvider: "zhipuai", Model: "glm-5.3-flash",
+	})
+	if provider != "zhipuai" || model != "glm-5.3-flash" || effort != "high" {
+		t.Fatalf("override = %s/%s · %s, want the picked model and its own effort", provider, model, effort)
+	}
+}
 
 // TestNewLLMForAgentTypeNilConfig verifies graceful degradation: a nil config
 // yields no client and no error, so callers can treat the feature as disabled.
@@ -465,4 +531,325 @@ func toolTableWithoutSkills(t *testing.T) string {
 		t.Fatalf("load skill-free runtime: %v", err)
 	}
 	return renderedToolTable(t, bare)
+}
+
+// lspLateStub is the CodeIntelligence port with only the late-diagnostics
+// half live: PeekLate answers from fields, AckLate records what the wrapper
+// acknowledged. The rest of the port stays inert.
+type lspLateStub struct {
+	text  string
+	token uint64
+	peeks int
+	acks  []struct {
+		sid   string
+		token uint64
+	}
+}
+
+func (s *lspLateStub) Handles(absPath string) bool { return false }
+
+func (s *lspLateStub) Query(ctx context.Context, q tool.CodeIntelQuery) (tool.CodeIntelResult, error) {
+	return tool.CodeIntelResult{}, nil
+}
+
+func (s *lspLateStub) DidWrite(ctx context.Context, agentSessionID string, changes []tool.FileChange) tool.DiagnosticsDelta {
+	return tool.DiagnosticsDelta{}
+}
+
+func (s *lspLateStub) DidRead(ctx context.Context, absPath string, content []byte) {}
+
+func (s *lspLateStub) DidRunShell(ctx context.Context) {}
+
+func (s *lspLateStub) PeekLate(agentSessionID string) (string, uint64) {
+	s.peeks++
+	return s.text, s.token
+}
+
+func (s *lspLateStub) AckLate(agentSessionID string, token uint64) {
+	s.acks = append(s.acks, struct {
+		sid   string
+		token uint64
+	}{agentSessionID, token})
+}
+
+// lspRecordingLLM captures what the wrapper handed the inner client, and can
+// be scripted to fail so the caller's acknowledgement path is observable.
+type lspRecordingLLM struct {
+	err     error
+	gotMsgs []llm.Message
+	calls   int
+}
+
+func (m *lspRecordingLLM) Execute(_ context.Context, msgs []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	m.gotMsgs = append([]llm.Message(nil), msgs...)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &llm.Result{Message: &llm.Message{Role: llm.RoleAssistant}}, nil
+}
+
+func TestLSPReminderAppendedAndAcked(t *testing.T) {
+	late := "Language server diagnostics changed for files you edited earlier in this session:"
+	stub := &lspLateStub{text: late, token: 7}
+	inner := &lspRecordingLLM{}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	sink := &reminderAdoptionSink{}
+	ctx := withReminderAdoptionSink(llm.WithAgentSessionID(context.Background(), "sess-late"), sink)
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(ctx, base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls=%d want 1", inner.calls)
+	}
+	if len(inner.gotMsgs) != 2 {
+		t.Fatalf("messages=%d want 2 (request plus reminder)", len(inner.gotMsgs))
+	}
+	last := inner.gotMsgs[len(inner.gotMsgs)-1]
+	if last.Role != llm.RoleUser || !last.IsMeta {
+		t.Fatalf("reminder must be an IsMeta user message, got %+v", last)
+	}
+	if got := llm.TextContent(last.Parts...); got != "<system-reminder>\n"+late+"\n</system-reminder>" {
+		t.Fatalf("reminder body=%q", got)
+	}
+	// The incoming request is appended to, never mutated in place.
+	if len(base) != 1 {
+		t.Fatalf("caller's slice mutated: %d", len(base))
+	}
+	// The reminder is published to the orchestration loop at the request's end.
+	adopted := sink.take()
+	if len(adopted) != 1 || adopted[0].insertAt != 1 {
+		t.Fatalf("reminder adoptions=%+v want one at the end of the request", adopted)
+	}
+	// Delivered once: the token is acknowledged only after the call succeeded.
+	if len(stub.acks) != 1 || stub.acks[0].sid != "sess-late" || stub.acks[0].token != 7 {
+		t.Fatalf("acks=%+v want AckLate(sess-late, 7)", stub.acks)
+	}
+}
+
+func TestLSPReminderNotAckedOnError(t *testing.T) {
+	stub := &lspLateStub{text: "late text", token: 3}
+	inner := &lspRecordingLLM{err: errors.New("provider down")}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	ctx := llm.WithAgentSessionID(context.Background(), "sess-late-err")
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("continue"))}, nil); err == nil {
+		t.Fatal("inner error must propagate")
+	}
+	if stub.peeks != 1 {
+		t.Fatalf("PeekLate calls=%d want 1", stub.peeks)
+	}
+	if len(stub.acks) != 0 {
+		t.Fatalf("a failed call must not acknowledge, acks=%+v", stub.acks)
+	}
+}
+
+func TestLSPReminderNoTextNoMessage(t *testing.T) {
+	stub := &lspLateStub{token: 5}
+	inner := &lspRecordingLLM{}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	ctx := llm.WithAgentSessionID(context.Background(), "sess-late-empty")
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(ctx, base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(inner.gotMsgs) != 1 {
+		t.Fatalf("messages=%d want the request unchanged", len(inner.gotMsgs))
+	}
+	if len(stub.acks) != 0 {
+		t.Fatalf("nothing delivered, nothing acknowledged, acks=%+v", stub.acks)
+	}
+}
+
+func TestLSPReminderNeedsSession(t *testing.T) {
+	stub := &lspLateStub{text: "late text", token: 9}
+	inner := &lspRecordingLLM{}
+	w := wrapLSPDiagnosticsReminderLLM(inner, stub)
+	base := []llm.Message{llm.UserMessage(llm.Text("continue"))}
+	if _, err := w.Execute(context.Background(), base, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if stub.peeks != 0 {
+		t.Fatalf("PeekLate calls=%d want 0 without an agent session", stub.peeks)
+	}
+	if len(inner.gotMsgs) != 1 {
+		t.Fatalf("messages=%d want the request unchanged", len(inner.gotMsgs))
+	}
+}
+
+// TestAgentModelAndRoutingAgree pins that the context-based resolution a
+// compaction reads and the record-based resolution surfaces draw answer the
+// same question: for every kind of agent, building the context the way that
+// agent really executes and asking agentModelFor must name the same provider
+// and model AgentModel resolves from its history entry. The two drifting is
+// how a compaction ends up sized by a model the run never talks to.
+func TestAgentModelAndRoutingAgree(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+				{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
+			}},
+			"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+				{Provider: "deepseek", Model: "deepseek-v4-flash", APIKey: "key", BaseURL: "https://example.invalid"},
+			}},
+			"general-purpose": {},
+		},
+	}}
+	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+
+	cases := []struct {
+		name string
+		ctx  context.Context
+		item *agent.HistoryEntry
+	}{
+		{
+			name: "primary agent on the main thread",
+			ctx:  WithQuerySource(context.Background(), "repl_main_thread"),
+		},
+		{
+			name: "fork",
+			ctx:  WithQuerySource(context.Background(), "agent:builtin:fork"),
+			item: &agent.HistoryEntry{AgentKind: "fork"},
+		},
+		{
+			name: "typed without a chain of its own",
+			ctx:  tool.WithSubagentType(WithQuerySource(context.Background(), "agent:custom"), "general-purpose"),
+			item: &agent.HistoryEntry{AgentKind: "typed", AgentType: "general-purpose"},
+		},
+		{
+			name: "typed with its own chain",
+			ctx:  tool.WithSubagentType(WithQuerySource(context.Background(), "agent:builtin:explore"), "explore"),
+			item: &agent.HistoryEntry{AgentKind: "typed", AgentType: "explore"},
+		},
+		{
+			name: "dispatch-time override",
+			ctx: tool.WithSubagentType(
+				WithSubagentModelOverride(
+					WithQuerySource(context.Background(), "agent:custom"),
+					SubagentModelOverride{Provider: "zhipuai", Model: "glm-5.3-flash"},
+				), "plan-reviewer"),
+			item: &agent.HistoryEntry{AgentKind: "typed", AgentType: "plan-reviewer", ModelProvider: "zhipuai", Model: "glm-5.3-flash"},
+		},
+	}
+	for _, tc := range cases {
+		ctxProvider, ctxModel := r.agentModelFor(tc.ctx)
+		recProvider, recModel, _ := AgentModel(r, "session-1", tc.item)
+		if ctxProvider != recProvider || ctxModel != recModel {
+			t.Fatalf("%s: agentModelFor=%s/%s disagrees with AgentModel=%s/%s",
+				tc.name, ctxProvider, ctxModel, recProvider, recModel)
+		}
+	}
+}
+
+// TestContextBudgetUsesEachAgentsOwnModel pins the per-agent half of the
+// context gauge: the budget an agent's view shows must be sized by the window
+// of the model that agent runs on — the same resolution AgentModel performs —
+// never by the primary model's. A subagent on a smaller model would otherwise
+// read "75%" of a window it does not have.
+func TestContextBudgetUsesEachAgentsOwnModel(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3", APIKey: "key", BaseURL: "https://example.invalid"},
+		}},
+		"explore": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "deepseek", Model: "deepseek-v3.2", APIKey: "key", BaseURL: "https://example.invalid"},
+		}},
+		"general-purpose": {},
+	}}}
+	r := &Runner{Deps: &Deps{AppCfg: cfg}}
+
+	cases := []struct {
+		name       string
+		subagent   *agent.HistoryEntry
+		usage      int
+		wantAgent  string
+		wantWindow int
+		wantLeft   int
+	}{
+		{
+			name:       "primary agent",
+			usage:      450000,
+			wantWindow: 1000000,
+			wantLeft:   50,
+		},
+		{
+			name:       "fork on the conversation's model",
+			subagent:   &agent.HistoryEntry{TaskID: "task-fork", AgentKind: "fork"},
+			usage:      450000,
+			wantAgent:  "task-fork",
+			wantWindow: 1000000,
+			wantLeft:   50,
+		},
+		{
+			name:       "typed subagent without a chain of its own",
+			subagent:   &agent.HistoryEntry{TaskID: "task-general", AgentKind: "typed", AgentType: "general-purpose"},
+			usage:      450000,
+			wantAgent:  "task-general",
+			wantWindow: 1000000,
+			wantLeft:   50,
+		},
+		{
+			name:       "typed subagent on its own smaller window",
+			subagent:   &agent.HistoryEntry{TaskID: "task-explore", AgentKind: "typed", AgentType: "explore"},
+			usage:      28800,
+			wantAgent:  "task-explore",
+			wantWindow: 128000,
+			wantLeft:   75,
+		},
+		{
+			name: "plan reviewer on the model the user picked",
+			subagent: &agent.HistoryEntry{
+				TaskID: "task-review", AgentKind: "typed", AgentType: PlanReviewSubagentType,
+				ModelProvider: "zhipuai", Model: "glm-4.5",
+			},
+			usage:      29491,
+			wantAgent:  "task-review",
+			wantWindow: 131072,
+			wantLeft:   75,
+		},
+	}
+	for _, tc := range cases {
+		got, ok := ContextBudget(r, "conversation-1", tc.subagent, tc.usage)
+		if !ok {
+			t.Fatalf("%s: ContextBudget returned false", tc.name)
+		}
+		if got.AgentID != tc.wantAgent {
+			t.Errorf("%s: AgentID = %q, want %q", tc.name, got.AgentID, tc.wantAgent)
+		}
+		if got.ContextWindow != tc.wantWindow {
+			t.Errorf("%s: ContextWindow = %d, want %d", tc.name, got.ContextWindow, tc.wantWindow)
+		}
+		if got.EffectiveWindow != tc.wantWindow {
+			t.Errorf("%s: EffectiveWindow = %d, want %d", tc.name, got.EffectiveWindow, tc.wantWindow)
+		}
+		if got.PercentLeft != tc.wantLeft {
+			t.Errorf("%s: PercentLeft = %d, want %d", tc.name, got.PercentLeft, tc.wantLeft)
+		}
+		if got.TokenUsage != tc.usage {
+			t.Errorf("%s: TokenUsage = %d, want %d", tc.name, got.TokenUsage, tc.usage)
+		}
+	}
+
+	// Usage 0 is a fresh context: the whole window, still per agent.
+	fresh, ok := ContextBudget(r, "conversation-1", nil, 0)
+	if !ok || fresh.TokenUsage != 0 || fresh.PercentLeft != 100 || fresh.ContextWindow != 1000000 {
+		t.Fatalf("fresh primary context = %+v, want the whole 1M window at 100%%", fresh)
+	}
+	smallFresh, ok := ContextBudget(r, "conversation-1", &agent.HistoryEntry{TaskID: "task-explore", AgentKind: "typed", AgentType: "explore"}, 0)
+	if !ok || smallFresh.TokenUsage != 0 || smallFresh.PercentLeft != 100 || smallFresh.ContextWindow != 128000 {
+		t.Fatalf("fresh explore context = %+v, want the whole 128k window at 100%%", smallFresh)
+	}
+
+	// The configured auto-compact limit is part of the budget, for the
+	// subagent's window as much as the primary's.
+	limited := &appcfg.Root{Agents: cfg.Agents, Compact: appcfg.CompactSection{ModelAutoCompactTokenLimit: 50000}}
+	rl := &Runner{Deps: &Deps{AppCfg: limited}}
+	primary, ok := ContextBudget(rl, "conversation-1", nil, 450000)
+	if !ok || primary.AutoCompactThreshold != 50000 || primary.PercentLeft != 0 {
+		t.Fatalf("primary budget past the configured limit = %+v, want threshold 50000 and 0%% left", primary)
+	}
+	explore, ok := ContextBudget(rl, "conversation-1", &agent.HistoryEntry{TaskID: "task-explore", AgentKind: "typed", AgentType: "explore"}, 28800)
+	if !ok || explore.AutoCompactThreshold != 50000 || explore.PercentLeft != 42 {
+		t.Fatalf("explore budget under the configured limit = %+v, want threshold 50000 and 42%% left", explore)
+	}
 }

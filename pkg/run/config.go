@@ -14,7 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/anthropic"
@@ -1089,6 +1091,40 @@ func planReminderMessage(reminder string) llm.Message {
 	}
 }
 
+// lspDiagnosticsReminderLLM appends the language-server diagnostics that
+// arrived after an edit's wait window (spec §8.4). The text is appended at
+// the end of the request, so the cached prefix is untouched; it is delivered
+// once, acknowledged only after the model call succeeds.
+type lspDiagnosticsReminderLLM struct {
+	inner llm.LLM
+	ci    tool.CodeIntelligence
+}
+
+func wrapLSPDiagnosticsReminderLLM(inner llm.LLM, ci tool.CodeIntelligence) llm.LLM {
+	if inner == nil || ci == nil {
+		return inner
+	}
+	return lspDiagnosticsReminderLLM{inner: inner, ci: ci}
+}
+
+func (w lspDiagnosticsReminderLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
+	if sid == "" {
+		return w.inner.Execute(ctx, msgs, tools)
+	}
+	text, token := w.ci.PeekLate(sid)
+	if text == "" {
+		return w.inner.Execute(ctx, msgs, tools)
+	}
+	message := planReminderMessage(text)
+	recordReminderAdoption(ctx, message, len(msgs))
+	res, err := w.inner.Execute(ctx, append(append([]llm.Message(nil), msgs...), message), tools)
+	if err == nil {
+		w.ci.AckLate(sid, token)
+	}
+	return res, err
+}
+
 // clampPlanReminderIndex resolves where a reminder goes in msgs. An
 // out-of-range anchor means the history it was anchored to is gone, so the
 // reminder appends at the end.
@@ -1656,6 +1692,54 @@ func (r *Runner) effectiveModelFor(ctx context.Context) (provider, model string)
 	return PrimaryModel(r)
 }
 
+// agentModelFor is the model the call in ctx is routed to: the dispatch-time
+// override of the subagent making it, else that subagent type's own chain,
+// else the conversation's model. It reads exactly what the routing wrappers
+// read (subagentModelOverrideLLM, typedSubagentProviderLLM), so a compaction
+// sizes itself by the window of the model that will actually receive the
+// request.
+func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
+	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
+		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
+			return strings.TrimSpace(override.Provider), strings.TrimSpace(override.Model)
+		}
+		if p, m, _, ok := SubagentOwnModel(r, tool.SubagentTypeFromContext(ctx)); ok {
+			return p, m
+		}
+	}
+	return r.effectiveModelFor(ctx)
+}
+
+// agentCompactClientFor is the compaction client for the model agentModelFor
+// names: the conversation's client on the main thread, and the client the
+// subagent's own requests run on otherwise — built the way the routing
+// wrappers build theirs. It serves the compaction paths that have no "send it
+// as the conversation would" summarizer: a reactive compaction after the
+// provider refused the request as too long, and a remote compaction.
+func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
+	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
+		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
+			client, err := ConfiguredModelClient(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model)
+			if err != nil {
+				slog.Warn("build subagent compaction client", "err", err)
+				return nil
+			}
+			return client
+		}
+		if subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); subtype != "" {
+			if provider, model, _, ok := SubagentOwnModel(r, subtype); ok {
+				client, err := ConfiguredModelClient(r.AppCfg, subtype, provider, model)
+				if err != nil {
+					slog.Warn("build typed subagent compaction client", "type", subtype, "err", err)
+					return nil
+				}
+				return client
+			}
+		}
+	}
+	return r.sessionClientFor(ctx)
+}
+
 // sessionClientFor builds the client this context's conversation should run
 // on, mirroring effectiveModelFor's resolution order. It serves the explicit
 // compaction path, which runs outside a turn's context.
@@ -1696,4 +1780,88 @@ func PrimaryModelForSession(r *Runner, store *state.SessionStore, sessionID stri
 		}
 	}
 	return PrimaryModel(r)
+}
+
+// AgentModel names the model one agent of a conversation runs on, and the
+// reasoning effort its configuration gives that model, the way the runtime
+// routes its calls. subagent is nil for the primary agent. A subagent
+// dispatched with a model override runs on it; a typed subagent whose
+// definition has llm_providers runs on the first of them; the primary
+// agent, a fork and a typed subagent without a chain of its own run on the
+// conversation's model.
+func AgentModel(r *Runner, conversationSessionID string, subagent *agent.HistoryEntry) (provider, model, effort string) {
+	if subagent != nil && strings.TrimSpace(subagent.Model) != "" {
+		provider = strings.TrimSpace(subagent.ModelProvider)
+		model = strings.TrimSpace(subagent.Model)
+		if r != nil {
+			// The override's effort comes from the provider entry that model
+			// resolves to — the same entry ConfiguredModelClient builds the
+			// client from, so the footer states what the run actually uses.
+			if entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{provider: provider, model: model}); err == nil {
+				effort = reasoningEffortFromParams(entry.Params)
+			}
+		}
+		return provider, model, effort
+	}
+	if subagent != nil {
+		if p, m, e, ok := SubagentOwnModel(r, subagent.AgentType); ok {
+			return p, m, e
+		}
+	}
+	var store *state.SessionStore
+	if r != nil && r.Deps != nil {
+		store = r.Deps.SessionStore
+	}
+	p, m := PrimaryModelForSession(r, store, conversationSessionID)
+	return p, m, PrimaryReasoningEffort(r)
+}
+
+// ContextOccupancy is how much of the context window a session fills right
+// now: the whole prompt of its last API response. Every gauge reads it — the
+// footer of either surface, /status, /context — so they never disagree.
+func ContextOccupancy(ctx context.Context, store *state.SessionStore, sessionID string) (int, bool) {
+	if store == nil {
+		return 0, false
+	}
+	turns, err := store.ListRecentMessages(ctx, sessionID, 400)
+	if err != nil {
+		return 0, false
+	}
+	return state.TokenCountFromLastAPIResponse(turns), true
+}
+
+// ContextBudget is the context gauge of one agent of a conversation holding
+// usage tokens: the window of the model that agent runs on, and how much of
+// it is left before auto-compaction. subagent is nil for the primary agent.
+// Usage 0 is a fresh context, which shows the whole window.
+func ContextBudget(r *Runner, conversationSessionID string, subagent *agent.HistoryEntry, usage int) (event.TokenBudgetUpdatedPayload, bool) {
+	provider, model, _ := AgentModel(r, conversationSessionID, subagent)
+	limits, _ := llm.Lookup(provider, model)
+	explicitLimit := 0
+	if r != nil && r.AppCfg != nil {
+		explicitLimit = r.AppCfg.Compact.ModelAutoCompactTokenLimit
+	}
+	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: explicitLimit})
+	if usage > 0 {
+		// A measured context reports unless the calculation itself produced
+		// nothing to show — the same condition the surface footers used
+		// before the computation moved here.
+		if budget.PercentLeft <= 0 && budget.TokenUsage <= 0 {
+			return event.TokenBudgetUpdatedPayload{}, false
+		}
+	} else if budget.ContextWindow <= 0 {
+		return event.TokenBudgetUpdatedPayload{}, false
+	}
+	payload := event.TokenBudgetUpdatedPayload{
+		Model:                budget.Model,
+		TokenUsage:           budget.TokenUsage,
+		PercentLeft:          budget.PercentLeft,
+		ContextWindow:        budget.ContextWindow,
+		EffectiveWindow:      budget.EffectiveContextWindow,
+		AutoCompactThreshold: budget.AutoCompactThreshold,
+	}
+	if subagent != nil {
+		payload.AgentID = agent.RosterKey(subagent.TaskID, subagent.AgentType)
+	}
+	return payload, true
 }

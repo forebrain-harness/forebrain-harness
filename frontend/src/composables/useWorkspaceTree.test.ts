@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { enableAutoUnmount, mount } from '@vue/test-utils'
+import { enableAutoUnmount } from '@vue/test-utils'
 
 import { useWorkspaceTree } from './useWorkspaceTree'
 import { forebrainApi } from '@/lib/api'
@@ -42,7 +42,7 @@ describe('useWorkspaceTree', () => {
 
   it('toggle loads a directory once, then only flips expansion', async () => {
     const tree = fresh()
-    const mock = vi.fn(async (path: string) => ({ path, records: path === 'docs' ? [node('a.md', 'docs/a.md', false)] : [] }))
+    const mock = vi.fn(async (path = '') => ({ path, records: path === 'docs' ? [node('a.md', 'docs/a.md', false)] : [] }))
     vi.spyOn(forebrainApi, 'workspaceTree').mockImplementation(mock)
 
     tree.toggle('docs')
@@ -57,7 +57,7 @@ describe('useWorkspaceTree', () => {
 
   it('refresh reloads the root and every expanded directory', async () => {
     const tree = fresh()
-    const mock = vi.fn(async (path: string) => ({ path, records: [] }))
+    const mock = vi.fn(async (path = '') => ({ path, records: [] }))
     vi.spyOn(forebrainApi, 'workspaceTree').mockImplementation(mock)
 
     tree.ensureRoot()
@@ -76,7 +76,7 @@ describe('useWorkspaceTree', () => {
 
   it('refresh drops an expanded directory that now 404s', async () => {
     const tree = fresh()
-    const mock = vi.fn(async (path: string) => ({ path, records: [] }))
+    const mock = vi.fn(async (path = '') => ({ path, records: [] }))
     vi.spyOn(forebrainApi, 'workspaceTree').mockImplementation(mock)
 
     tree.ensureRoot()
@@ -87,7 +87,7 @@ describe('useWorkspaceTree', () => {
     await Promise.resolve()
     expect(tree.expanded.has('gone')).toBe(true)
 
-    mock.mockImplementation((path: string) => (path === 'gone'
+    mock.mockImplementation((path = '') => (path === 'gone'
       ? Promise.reject(new Error('no such file or directory'))
       : Promise.resolve({ path, records: [] })))
     await tree.refresh()

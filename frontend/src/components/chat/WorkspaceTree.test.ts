@@ -31,7 +31,7 @@ describe('WorkspaceTree', () => {
   })
 
   it('expands a directory on click and shows its children', async () => {
-    const mock = vi.fn(async (path: string) => (
+    const mock = vi.fn(async (path = '') => (
       path === ''
         ? { path, records: [node('docs', 'docs', true)] }
         : { path, records: [node('a.md', 'docs/a.md', false)] }
@@ -55,7 +55,7 @@ describe('WorkspaceTree', () => {
   })
 
   it('shows the server error and a retry when a directory fails to load', async () => {
-    const mock = vi.fn(async (path: string) => {
+    const mock = vi.fn(async (path = '') => {
       if (path === '') return { path, records: [node('docs', 'docs', true)] }
       throw new Error('no such file or directory')
     })
@@ -72,7 +72,7 @@ describe('WorkspaceTree', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      const mock = vi.fn(async (path: string) => (
+      const mock = vi.fn(async (path = '') => (
         path === ''
           ? { path, records: [node('docs', 'docs', true)] }
           : { path, records: [node('a.md', 'docs/a.md', false)] }

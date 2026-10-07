@@ -57,11 +57,8 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			if in == nil {
 				in = &FileReadInput{}
 			}
-			resolution, err := resolveReadFilePath(ctx, st, in.FilePath)
+			resolution, err := authorizeRead(ctx, st, "read_file", in.FilePath)
 			if err != nil {
-				if errors.Is(err, ErrPathNotAllowed) {
-					CaptureToolError(ctx, err)
-				}
 				return "", err
 			}
 			abs := resolution.Abs
@@ -72,36 +69,6 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			// dedicated Skill card instead of falling back to a read_file card.
 			if skillRead {
 				CaptureToolOutput(ctx, skillReadOutput(skillName, skillPath))
-			}
-			if isBlockedReadDevicePath(abs) {
-				return "", fmt.Errorf("refusing to read blocking or infinite device path")
-			}
-			// FOREBRAIN_HOME is asked about rather than refused -- unless the user
-			// has already approved a write to this very file, in which case the
-			// question was asked and answered. An embedder with no approval hook
-			// has nobody to ask, so there the read stays a refusal instead of
-			// happening unattended.
-			if reason := st.ProtectedReadReason(abs); reason != "" && ApprovedActionIDFromContext(ctx) == "" {
-				hook := st.ActionHook()
-				if hook == nil {
-					err := fmt.Errorf("%w: %s is inside FOREBRAIN_HOME and there is no approval path to ask about it", ErrPathNotAllowed, abs)
-					CaptureToolError(ctx, err)
-					return "", err
-				}
-				payload := map[string]any{"file_path": in.FilePath, "resolved_file_path": abs}
-				markProtectedApproval(payload, reason)
-				id, pending, err := hook(ctx, "read_file", payload)
-				if err != nil {
-					return "", err
-				}
-				if pending && id != "" {
-					CaptureToolRequiresAction(ctx, id, "read_file", map[string]any{"requires_action": true})
-					return "", &RequiresActionError{ActionID: id, ActionKind: "read_file", ToolName: "read_file", ToolInput: payload}
-				}
-			}
-			if st.ReadPathDenied(abs) && !st.PathUnderLoadedSkillRoot(abs) {
-				CaptureToolError(ctx, ErrPathReadDenied)
-				return "", fmt.Errorf("%w: %s", ErrPathReadDenied, abs)
 			}
 			raw, err := os.ReadFile(abs)
 			if err != nil {
@@ -175,6 +142,51 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			return out, nil
 		},
 	)
+}
+
+// authorizeRead settles whether toolName may read filePath, the same way for
+// every reading tool: path resolution against the readable roots, blocking
+// device paths, the FOREBRAIN_HOME approval, and deny rules.
+func authorizeRead(ctx context.Context, st *State, toolName, filePath string) (readPathResolution, error) {
+	resolution, err := resolveReadFilePath(ctx, st, filePath)
+	if err != nil {
+		if errors.Is(err, ErrPathNotAllowed) {
+			CaptureToolError(ctx, err)
+		}
+		return readPathResolution{}, err
+	}
+	abs := resolution.Abs
+	if isBlockedReadDevicePath(abs) {
+		return readPathResolution{}, fmt.Errorf("refusing to read blocking or infinite device path")
+	}
+	// FOREBRAIN_HOME is asked about rather than refused -- unless the user
+	// has already approved a write to this very file, in which case the
+	// question was asked and answered. An embedder with no approval hook
+	// has nobody to ask, so there the read stays a refusal instead of
+	// happening unattended.
+	if reason := st.ProtectedReadReason(abs); reason != "" && ApprovedActionIDFromContext(ctx) == "" {
+		hook := st.ActionHook()
+		if hook == nil {
+			err := fmt.Errorf("%w: %s is inside FOREBRAIN_HOME and there is no approval path to ask about it", ErrPathNotAllowed, abs)
+			CaptureToolError(ctx, err)
+			return readPathResolution{}, err
+		}
+		payload := map[string]any{"file_path": filePath, "resolved_file_path": abs}
+		markProtectedApproval(payload, reason)
+		id, pending, err := hook(ctx, toolName, payload)
+		if err != nil {
+			return readPathResolution{}, err
+		}
+		if pending && id != "" {
+			CaptureToolRequiresAction(ctx, id, toolName, map[string]any{"requires_action": true})
+			return readPathResolution{}, &RequiresActionError{ActionID: id, ActionKind: toolName, ToolName: toolName, ToolInput: payload}
+		}
+	}
+	if st.ReadPathDenied(abs) && !st.PathUnderLoadedSkillRoot(abs) {
+		CaptureToolError(ctx, ErrPathReadDenied)
+		return readPathResolution{}, fmt.Errorf("%w: %s", ErrPathReadDenied, abs)
+	}
+	return resolution, nil
 }
 
 func skillReadOutput(name, path string) map[string]any {
@@ -391,6 +403,33 @@ func sliceWithLineNumbersFromReader(ctx context.Context, r io.Reader, offset, li
 	return strings.TrimRight(s, "\n"), totalLines, nil
 }
 
+// codeIntelOf returns the language-server runtime a tool should report edits
+// and reads to; nil when this runner has none.
+func codeIntelOf(rt *AgentToolRuntime) CodeIntelligence {
+	if rt == nil {
+		return nil
+	}
+	return rt.CodeIntel
+}
+
+// reportEditDiagnostics asks the language-server runtime what an edit
+// introduced (spec §8.3) and returns the text to append to the tool result.
+// It records the summary on output for the surfaces. A nil runtime, or an
+// edit nothing covers, returns "".
+func reportEditDiagnostics(ctx context.Context, ci CodeIntelligence, output map[string]any, changes []FileChange) string {
+	if ci == nil || len(changes) == 0 {
+		return ""
+	}
+	delta := ci.DidWrite(ctx, llm.AgentSessionIDFromContext(ctx), changes)
+	if delta.Empty() {
+		return ""
+	}
+	if output != nil {
+		output["lsp_diagnostics"] = delta.Summary
+	}
+	return delta.Text
+}
+
 type FileWriteInput struct {
 	FilePath string `json:"file_path" jsonschema:"description=Absolute or workspace-relative file path."`
 	Content  string `json:"content" jsonschema:"description=New full content of the file."`
@@ -485,11 +524,18 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				output["repaired_from"] = res.RepairedFrom
 			}
 			attachTurnDiff(output, abs, before, []byte(in.Content))
+			// Diagnostics are collected only after the write landed, so the wait
+			// window can never fail or delay the write itself (spec §8.3.5).
+			diag := reportEditDiagnostics(ctx, codeIntelOf(rt), output, []FileChange{{AbsPath: abs, Before: before, After: []byte(in.Content)}})
 			CaptureToolOutput(ctx, output)
+			result := "ok"
 			if note := skillWritePathRepairNote(res); note != "" {
-				return note + "\n\nok", nil
+				result = note + "\n\nok"
 			}
-			return "ok", nil
+			if diag != "" {
+				result += "\n\n" + diag
+			}
+			return result, nil
 		},
 	)
 }
@@ -535,6 +581,10 @@ type FileEditInput struct {
 
 type FileEditOptions struct {
 	PrepareLocked func(absPath string, current []byte, in *FileEditInput) error
+	// CodeIntel receives the edit for after-edit diagnostics (spec §8.3). The
+	// edit tool is built without a runtime, so the language-server runtime is
+	// handed in here instead.
+	CodeIntel CodeIntelligence
 }
 
 func NewFileEditTool(st *State) (*llm.Tool, error) {
@@ -663,11 +713,18 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 				output["repaired_from"] = res.RepairedFrom
 			}
 			attachTurnDiff(output, abs, raw, []byte(out))
+			// Diagnostics are collected only after the write landed, so the wait
+			// window can never fail or delay the write itself (spec §8.3.5).
+			diag := reportEditDiagnostics(ctx, opts.CodeIntel, output, []FileChange{{AbsPath: abs, Before: raw, After: []byte(out)}})
 			CaptureToolOutput(ctx, output)
+			result := "ok"
 			if note := skillWritePathRepairNote(res); note != "" {
-				return note + "\n\nok", nil
+				result = note + "\n\nok"
 			}
-			return "ok", nil
+			if diag != "" {
+				result += "\n\n" + diag
+			}
+			return result, nil
 		},
 	)
 }
@@ -1192,6 +1249,10 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 	}
 
 	files := make([]map[string]any, 0, len(byAbs))
+	// All of one patch's files share a single diagnostics wait window (spec
+	// §8.3.2): the changes are collected across the write loop and reach the
+	// language-server runtime in one DidWrite call after the last write.
+	var changes []FileChange
 	for _, abs := range uniqueAbs {
 		plan := byAbs[abs]
 		if plan == nil {
@@ -1210,6 +1271,7 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 				return "", err
 			}
 			st.RememberWrite(abs, time.Now(), 0, nil)
+			changes = append(changes, FileChange{AbsPath: abs, Before: plan.Before})
 		} else {
 			writePath := abs
 			if plan.MoveAbs != "" {
@@ -1229,6 +1291,10 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 					return "", err
 				}
 				st.RememberWrite(abs, time.Now(), 0, nil)
+				changes = append(changes, FileChange{AbsPath: abs, Before: plan.Before})
+				changes = append(changes, FileChange{AbsPath: plan.MoveAbs, Before: plan.MoveBefore, After: plan.After})
+			} else {
+				changes = append(changes, FileChange{AbsPath: writePath, Before: plan.Before, After: plan.After})
 			}
 		}
 		outputPath := abs
@@ -1249,6 +1315,13 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 	if len(repairNotes) > 0 {
 		stdout = strings.Join(repairNotes, "\n") + "\n\n" + stdout
 	}
+	// The summary rides on a temporary map so the one delta reaches both the
+	// returned payload and the completion event the surfaces render from.
+	diagOutput := map[string]any{}
+	diag := reportEditDiagnostics(ctx, codeIntelOf(rt), diagOutput, changes)
+	if diag != "" {
+		stdout += "\n" + diag + "\n"
+	}
 	payload := map[string]any{
 		"stdout":      stdout,
 		"stderr":      "",
@@ -1256,20 +1329,25 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 		"apply_patch": true,
 		"files":       files,
 	}
+	completionOutput := appendToolExecutionMetadata(ctx, st, map[string]any{
+		"stdout":       stdout,
+		"stderr":       "",
+		"exit_code":    0,
+		"stdout_bytes": len(stdout),
+		"stderr_bytes": 0,
+		"apply_patch":  true,
+		"files":        files,
+	}, rt, safety.ToolKindShell)
+	if summary, ok := diagOutput["lsp_diagnostics"]; ok {
+		payload["lsp_diagnostics"] = summary
+		completionOutput["lsp_diagnostics"] = summary
+	}
 	if rt != nil && rt.YOLO {
 		payload["yolo"] = true
 		payload["approval_bypassed_by_yolo"] = true
 	}
 	CaptureToolCompletion(ctx, ToolCompletionPayload{
-		Output: appendToolExecutionMetadata(map[string]any{
-			"stdout":       stdout,
-			"stderr":       "",
-			"exit_code":    0,
-			"stdout_bytes": len(stdout),
-			"stderr_bytes": 0,
-			"apply_patch":  true,
-			"files":        files,
-		}, rt, safety.ToolKindShell),
+		Output: completionOutput,
 	})
 	b, _ := json.Marshal(payload)
 	return string(b), nil

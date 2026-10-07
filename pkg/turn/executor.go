@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,10 +83,10 @@ func Execute(ctx Context, content string) Result {
 		return execSubagents(ctx)
 	case "mcp":
 		return execMCP(ctx)
+	case "lsp":
+		return execLSP(ctx)
 	case "sandbox":
 		return execSandbox(ctx, toks)
-	case "diff":
-		return execDiff(ctx, toks)
 	case "compact":
 		return execCompact(ctx, toks)
 	case "clear":
@@ -104,8 +105,6 @@ func Execute(ctx Context, content string) Result {
 		return execConnect(ctx, toks)
 	case "exit":
 		return execExit()
-	case "help":
-		return Result{Handled: true, Reply: CommandCatalog(ctx.Surface, discoveryOptionsOf(ctx))}
 	default:
 		return Result{Handled: true, Reply: UnknownCommandReply(ctx.Surface, cmdName, discoveryOptionsOf(ctx))}
 	}
@@ -151,8 +150,8 @@ func ExecuteDynamicOnly(ctx Context, content string) Result {
 	return dyn.Handler(ctx, line, toks)
 }
 
-// CommandCatalog is /help on every surface: every command this surface
-// offers, the built-in commands then the skills, each with what it does.
+// CommandCatalog is the bare "/" answer on every surface: every command this
+// surface offers, the built-in commands then the skills, each with what it does.
 func CommandCatalog(surface Surface, opts DiscoveryOptions) string {
 	cmds := FilterWithOptions(surface, "", opts)
 	if len(cmds) == 0 {
@@ -640,6 +639,16 @@ func chooseSession(ctx Context, id string) Result {
 	if id == "" || ctx.Sessions == nil {
 		return Result{Handled: true, Reply: "That conversation cannot be opened here."}
 	}
+	// The picker offers this agent's conversations, but the chosen id is
+	// client input all the same: a conversation another primary agent owns
+	// is refused here, in the engine, so no surface can complete the
+	// switch its own boundary check missed.
+	if err := ctx.Sessions.Ensure(ctx.commandContext(), id, id); err != nil {
+		if errors.Is(err, state.ErrSessionNotOwned) {
+			return Result{Handled: true, Reply: "That conversation belongs to another primary agent."}
+		}
+		return Result{Handled: true, Reply: "Could not open that conversation: " + err.Error()}
+	}
 	title := currentSessionTitle(ctx, id)
 	if title == "" {
 		title = id
@@ -679,6 +688,14 @@ func execMCP(ctx Context) Result {
 	return Result{Handled: handled, Reply: reply}
 }
 
+func execLSP(ctx Context) Result {
+	if ctx.LSP == nil {
+		return Result{Handled: true, Reply: "lsp: unavailable"}
+	}
+	reply, handled := ctx.LSP.HandleLSPSlash(ctx.SessionID, ctx.Channel)
+	return Result{Handled: handled, Reply: reply}
+}
+
 func execSandbox(ctx Context, toks []string) Result {
 	if ctx.Sandbox == nil {
 		return Result{Handled: true, Reply: "sandbox: unavailable"}
@@ -688,14 +705,6 @@ func execSandbox(ctx Context, toks []string) Result {
 		return Result{}
 	}
 	return Result{Handled: true, Reply: strings.TrimSpace(reply)}
-}
-
-func execDiff(ctx Context, toks []string) Result {
-	if ctx.Diff == nil {
-		return Result{Handled: true, Reply: "diff: unavailable"}
-	}
-	reply, handled := ctx.Diff.HandleDiffSlash(ctx.SessionID, ctx.Channel, toks[1:])
-	return Result{Handled: handled, Reply: reply}
 }
 
 func execCompact(ctx Context, toks []string) Result {
@@ -939,16 +948,15 @@ func currentSessionTitle(ctx Context, sessionID string) string {
 	if ctx.Sessions == nil {
 		return strings.TrimSpace(sessionID)
 	}
-	summaries, err := ctx.Sessions.ListSessionsRecent(context.Background(), 200)
-	if err != nil {
+	title, err := ctx.Sessions.SessionTitle(context.Background(), sessionID)
+	switch {
+	case err != nil:
 		return strings.TrimSpace(sessionID)
+	case title == "":
+		return "New conversation"
+	default:
+		return title
 	}
-	for _, sum := range summaries {
-		if strings.TrimSpace(sum.ID) == strings.TrimSpace(sessionID) {
-			return sessionSummaryTitle(sum)
-		}
-	}
-	return strings.TrimSpace(sessionID)
 }
 
 func copySlashSessionState(ctx Context, sourceSessionID, targetSessionID string) error {

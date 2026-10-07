@@ -1,0 +1,15 @@
+id: elp
+display_name: Erlang Language Platform
+languages: [Erlang]
+priority: 100
+command: elp
+args: [server]
+extension_to_language: {.erl: erlang, .hrl: erlang}
+filenames: {rebar.config: erlang}
+root_markers: [rebar.config, erlang.mk, .elp.toml]
+env_passthrough: [ERL_LIBS, REBAR_CACHE_DIR]
+detect:
+  version_args: [version]
+startup_timeout: 180
+readiness: progress
+notes: "Download ELP from the WhatsApp/erlang-language-platform releases and put elp on the PATH."

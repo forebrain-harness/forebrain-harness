@@ -139,7 +139,7 @@ func (rt *Runtime) Evaluate(sessionID, toolName, input string, cfg *appcfg.Root,
 	toolName = strings.TrimSpace(toolName)
 	input = strings.TrimSpace(input)
 	store, engine := rt.storeAndEngine(cfg)
-	dangerFullAccess := cfg != nil && cfg.DangerFullAccessEnabled()
+	dangerFullAccess := sessionDangerFullAccess(store, sessionID, cfg)
 	return applyRuntimePermissionOverrides(engine.EvaluateForSession(store, sessionID, toolName, input), yolo, dangerFullAccess)
 }
 
@@ -150,7 +150,7 @@ func (rt *Runtime) Explain(sessionID, toolName, input string, cfg *appcfg.Root, 
 	toolName = strings.TrimSpace(toolName)
 	input = strings.TrimSpace(input)
 	store, engine := rt.storeAndEngine(cfg)
-	dangerFullAccess := cfg != nil && cfg.DangerFullAccessEnabled()
+	dangerFullAccess := sessionDangerFullAccess(store, sessionID, cfg)
 	out := engine.ExplainForSession(store, sessionID, toolName, input)
 	out.Decision = applyRuntimePermissionOverrides(out.Decision, yolo, dangerFullAccess)
 	return out
@@ -225,8 +225,17 @@ func (rt *Runtime) ResetGrants(cfg *appcfg.Root) {
 func (rt *Runtime) RefreshSandboxAvailability(cfg *appcfg.Root) {
 	rt.mu.Lock()
 	rt.ensureLocked(cfg)
-	rt.store.SetSandboxAvailable(shellSandboxAvailable(cfg))
+	refreshSandboxAvailability(rt.store, cfg)
 	rt.mu.Unlock()
+}
+
+// refreshSandboxAvailability re-derives containment for the configured mode
+// and for every conversation that chose its own.
+func refreshSandboxAvailability(store *Store, cfg *appcfg.Root) {
+	store.SetSandboxAvailable(shellSandboxAvailable(cfg))
+	store.refreshSessionSandboxAvailability(func(mode appcfg.SandboxMode) bool {
+		return shellSandboxAvailable(configForSandboxMode(cfg, mode))
+	})
 }
 
 // ApplyUpdate applies a permission update and, for rule changes bound to a
@@ -236,6 +245,8 @@ func (rt *Runtime) ApplyUpdate(update PermissionUpdate, cfg *appcfg.Root, paths 
 	rt.ensureLocked(cfg)
 	ApplyUpdate(rt.store, update)
 	switch update.Type {
+	case UpdateSetSandboxMode:
+		refreshSandboxAvailability(rt.store, cfg)
 	case UpdateAddRules, UpdateReplaceRules, UpdateRemoveRules:
 		switch update.Destination {
 		case DestinationLocalSettings, DestinationProjectSettings:
@@ -291,6 +302,14 @@ func destinationPath(dst PermissionDestination, paths Paths) (string, bool) {
 	}
 }
 
+// ProjectSettingsPath answers where a project's permission rules live for
+// paths, and whether that project may hold any (it must be trusted and under
+// version control) — the very answer LoadFromDisk and ApplyUpdate act on, for
+// a surface that manages one project's rules without running a session in it.
+func ProjectSettingsPath(paths Paths) (string, bool) {
+	return destinationPath(DestinationProjectSettings, paths)
+}
+
 // TrustedRoot returns the launch project's root when the frozen context says
 // it is version controlled and trusted, and "" otherwise.
 //
@@ -311,13 +330,17 @@ func TrustedRoot(launch ProjectContext) string {
 }
 
 // trustedProjectRoot returns the user's project directory when it is version
-// controlled and trusted, and "" otherwise.
+// controlled and trusted, and "" otherwise. paths.ProjectRoot is always an
+// already-resolved project root — a launch project's root or a registered
+// project's — and is taken as the exact boundary: walking up from it again
+// would hand a project registered inside a larger checkout the checkout's
+// rules file and trust decision.
 func trustedProjectRoot(paths Paths) string {
 	dir := strings.TrimSpace(paths.ProjectRoot)
 	if dir == "" {
 		return ""
 	}
-	project, err := Resolve(dir)
+	project, err := ResolveRegisteredProject(dir)
 	if err != nil || !project.VersionControlled {
 		return ""
 	}
@@ -368,8 +391,9 @@ func (rt *Runtime) LoadFromDisk(cfg *appcfg.Root, paths Paths) {
 	runtimeMode := store.Mode()
 	store.SetApprovalPolicy(approvalPolicyFromConfig(cfg))
 	// The engine runs an unmatched shell command unattended only because a
-	// sandbox contains it, so it has to know whether one actually will.
-	store.SetSandboxAvailable(shellSandboxAvailable(cfg))
+	// sandbox contains it, so it has to know whether one actually will — for
+	// the configured mode and for every conversation that chose its own.
+	refreshSandboxAvailability(store, cfg)
 	if runtimeOverride {
 		store.SetRuntimeMode(runtimeMode)
 	}
@@ -504,6 +528,14 @@ func atomicWritePermissionFile(target string, content []byte) error {
 		return err
 	}
 	return replacePermissionFile(tmp, target)
+}
+
+// sessionDangerFullAccess reports whether a conversation runs with full
+// access: under its own sandbox mode when it picked one, and under the
+// configured one otherwise.
+func sessionDangerFullAccess(store *Store, sessionID string, cfg *appcfg.Root) bool {
+	cfg = configForSandboxMode(cfg, store.sessionSandboxMode(sessionID))
+	return cfg != nil && cfg.DangerFullAccessEnabled()
 }
 
 // shellSandboxAvailable reports whether a shell command will be contained.

@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { persistLastSessionId } from '@/composables/useLastSession'
-import { forebrainApi, type PrimaryAgentRecord } from '@/lib/api'
+import { forebrainApi, getErrorMessage, type PrimaryAgentRecord } from '@/lib/api'
 
 const records = ref<PrimaryAgentRecord[]>([])
 const activeId = ref('')
@@ -19,7 +19,7 @@ export function usePrimaryAgents() {
       records.value = Array.isArray(res.records) ? res.records : []
       activeId.value = res.activeId || records.value.find((item) => item.active)?.id || records.value[0]?.id || ''
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e)
+      error.value = getErrorMessage(e)
     } finally {
       loading.value = false
     }
@@ -28,6 +28,7 @@ export function usePrimaryAgents() {
   async function switchPrimaryAgent(id: string) {
     loading.value = true
     error.value = ''
+    const before = activeId.value
     try {
       const res = await forebrainApi.primaryAgentSwitch(id)
       records.value = Array.isArray(res.records) ? res.records : []
@@ -38,7 +39,17 @@ export function usePrimaryAgents() {
       persistLastSessionId(null)
       refreshToken.value += 1
     } catch (e) {
-      error.value = e instanceof Error ? e.message : String(e)
+      const message = getErrorMessage(e)
+      // A switch records its target before it rebuilds the runtime, and a
+      // failed rebuild leaves the gateway on that target, refusing work until
+      // it is repaired. The page shows the tenant the gateway is actually on
+      // rather than the one it was on before asking.
+      await loadPrimaryAgents()
+      if (activeId.value && activeId.value !== before) {
+        persistLastSessionId(null)
+        refreshToken.value += 1
+      }
+      error.value = message
       throw e
     } finally {
       loading.value = false

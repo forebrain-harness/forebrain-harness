@@ -1441,7 +1441,7 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 			default:
 				c.renderer.RenderFrame(Frame{Kind: FrameError, Title: "connect", Content: "The configuration was saved, but this session could not adopt its model: " + selectErr.Error(), Final: true})
 			}
-			c.refreshComposerModelFooter()
+			c.refreshComposerModelFooter(sessionID)
 			return true
 		}
 	}
@@ -1468,7 +1468,7 @@ func (c *commandController) handleConnect(ctx context.Context, sessionID string)
 	// sized by its context window, so both are stale the moment the provider
 	// changes. /model refreshes them for the same reason; a connect that left
 	// the old model on screen would read as "it did not take effect".
-	c.refreshComposerModelFooter()
+	c.refreshComposerModelFooter(sessionID)
 	return true
 }
 
@@ -1502,7 +1502,7 @@ func connectRuntimeContext() (process.Context, error) {
 // refreshComposerModelFooter republishes the model half of the composer footer
 // from the session's current config, keeping the directory the footer already
 // shows.
-func (c *commandController) refreshComposerModelFooter() {
+func (c *commandController) refreshComposerModelFooter(sessionID string) {
 	if c == nil || c.renderer == nil || c.session == nil {
 		return
 	}
@@ -1511,7 +1511,7 @@ func (c *commandController) refreshComposerModelFooter() {
 		ReasoningEffort: summarizeComposerReasoningEffort(c.session),
 		Directory:       c.renderer.footer.Directory,
 	})
-	c.renderer.SetComposerTokenStats(initialComposerTokenStats(c.session))
+	c.renderer.SetComposerTokenStats("", initialComposerTokenStats(c.session, sessionID))
 }
 
 func connectCurrentBaseURL(cfg *appcfg.Root, agentName string) string {
@@ -1612,44 +1612,48 @@ func MainAgentLLMMissingFieldsWithConfig(cfg appcfg.Root) []string {
 
 // The startup banner is one card: the mascot on the left and, beside it, the
 // product name with its version, the workspace, and the few keys a first
-// prompt needs. It is laid out afresh for the width it is painted at, so a
+// prompt needs. The card is never narrower than bannerMinWidth and grows with
+// its content, so only a path wider than the terminal wraps, at its
+// separators. It is laid out afresh for the width it is painted at, so a
 // terminal resize reflows it rather than leaving it clipped or ragged.
 
 // forebrainMascot is the brand mascot — a small brain wearing its harness
-// node — as a pixel grid drawn two pixel rows per terminal row with half
-// blocks. Each letter names a forebrainMascotPalette entry; '.' is clear.
+// node — as a pixel grid: a rounded crown, the node, eyes with their shine,
+// a smile and two feet. Each letter names a forebrainMascotPalette entry;
+// '.' is clear. Each pixel is drawn as forebrainMascotPixelCols blank cells
+// on one terminal row (see forebrainMascotRows). The first and last rows both
+// carry ink, so centring the mascot by row count centres its ink. The grid is
+// the owner-approved design, 10×6 pixels, 20 columns by 6 rows, taken from
+// the startup-card design sheet (docs/design/STARTUP_CARD.html); it replaces
+// the 14×8 grid of docs/plan/MASCOT_COMPACT_GRID_PLAN.md. Changing the grid
+// needs the owner's sign-off, and TestForebrainMascotIsTheApprovedDesign
+// pins it.
 var forebrainMascot = [...]string{
-	"...OOO.OO..OO.OOO...",
-	".OOLLLOLLOOLLOLLLOO.",
-	".OLFDDFFDOODFFDDFLO.",
-	"OLFFFFDDFAAFDDFFFFLO",
-	"OFDDFFFFDOODFFFFDDFO",
-	"OFFFDDFFFFFFFFDDFFFO",
-	"OFDFFWPFFFFFFWPFFDFO",
-	"OFDFFPPFFFFFFPPFFDFO",
-	"OFFDFFFFPFFPFFFFDFFO",
-	".OFDDFFFFPPFFFFDDFO.",
-	".OFFFDDFFFFFFDDFFFO.",
-	"..OOFFFFFOOFFFFFOO..",
-	"....OOOOO..OOOOO....",
-	"....................",
+	".FFFFFFFF.",
+	"FFFFAAFFFF",
+	"FFWPFFWPFF",
+	"FFPPFFPPFF",
+	".FFFPPFFF.",
+	"..FF..FF..",
 }
 
-// forebrainMascotPalette colours the mascot. The body sits in the brand blue
-// and reads on dark and light terminals alike; the amber node is the one
-// warm accent.
+// forebrainMascotPalette colours the mascot. Every colour is an exact
+// xterm-256 entry, so a 256-colour terminal shows the same colour a
+// true-colour one does instead of a nearest-match quantisation.
 var forebrainMascotPalette = map[byte]lipgloss.Color{
-	'O': "#1f5f93", // outline
-	'F': "#5fb0ea", // body
-	'L': "#a8dcfb", // highlight
-	'D': "#3d8ccc", // folds
-	'W': "#f6fbff", // eye shine
-	'P': "#0e2236", // pupils, mouth
-	'A': "#f5b041", // harness node
+	'F': "#5fafd7", // body (xterm 74)
+	'P': "#080808", // pupils, mouth (xterm 232)
+	'W': "#ffffff", // eye shine (xterm 231)
+	'A': "#ffaf5f", // harness node (xterm 215)
 }
+
+// forebrainMascotPixelCols is how many terminal columns one pixel spans. A
+// terminal cell is about twice as tall as it is wide, so two cells side by
+// side on one row make a square pixel.
+const forebrainMascotPixelCols = 2
 
 // forebrainMascotWidth is the mascot's width in terminal columns.
-var forebrainMascotWidth = len(forebrainMascot[0])
+var forebrainMascotWidth = forebrainMascotPixelCols * len(forebrainMascot[0])
 
 var (
 	forebrainLogoStyle = lipgloss.NewStyle().
@@ -1666,21 +1670,35 @@ var (
 
 const (
 	bannerProductName = "Forebrain Harness"
-	// bannerMaxWidth keeps the card a card on a wide terminal instead of a
-	// full-bleed band.
-	bannerMaxWidth = 78
-	// bannerMascotMinWidth is the narrowest card that still has room for
-	// the mascot beside a readable text column.
-	bannerMascotMinWidth = 60
-	// bannerBorderMinWidth is the narrowest card worth a frame; below it the
-	// text is printed bare.
+	// bannerMinWidth keeps the card a card when the content is narrow; long
+	// paths grow past it.
+	bannerMinWidth = 78
+	// bannerMascotMinWidth is the narrowest card width that still has room
+	// for the mascot beside a readable text column. It is the frame (2×1
+	// column), the padding (2×2), the 20-column mascot, the gutter (3) and
+	// the 29 columns the text then gets:
+	// 2 + 4 + 20 + 3 + 29 = 58. It must stay at or below 78, the width the
+	// viewport paints an 80-column terminal at (80 less
+	// viewportRightPadding), so the common default window keeps the mascot.
+	// Recompute it as 6 + forebrainMascotWidth + bannerGutter + 29 whenever
+	// the grid changes.
+	bannerMascotMinWidth = 58
+	// bannerBorderMinWidth is the narrowest terminal worth a frame; below it
+	// the text is printed bare.
 	bannerBorderMinWidth = 32
 	bannerGutter         = 3
 	bannerPadding        = 2
+	// bannerFrameH and bannerFrameV draw the card's dashed frame and the
+	// rule under the product name. A dashed glyph is a font shape like any
+	// other, but these two have the same 1200-unit advance in Fira Code as
+	// ─ (U+2500) and │ (U+2502), so the frame keeps its column maths, and
+	// any font with U+2504/U+2506 renders the dashes (Fira Code does).
+	bannerFrameH = "┄" // U+2504, horizontal dashed
+	bannerFrameV = "┆" // U+2506, vertical dashed
 )
 
 // bannerShortcuts are the keys a newcomer needs before the first prompt; the
-// rest are listed under /help.
+// rest are listed under /.
 var bannerShortcuts = [...]struct{ key, label string }{
 	{"/", "commands"},
 	{"@", "mention"},
@@ -1698,27 +1716,29 @@ func RenderForebrainBanner(out io.Writer, info StartupInfo) {
 }
 
 // forebrainBannerLines lays the startup card out for width columns: a leading
-// blank line, then the card. The directory is never truncated; a path wider
-// than the text column wraps at its separators instead.
+// blank line, then the card. The card is at least bannerMinWidth columns wide
+// and grows with its content — the longer the path, the wider the card —
+// capped only by the terminal. The directory is never truncated; only a path
+// wider than the terminal wraps, at its separators.
 func forebrainBannerLines(version, dir string, width int) []string {
 	version = bannerVersion(version)
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		dir = "~"
 	}
-	cardW := min(width, bannerMaxWidth)
-	framed := cardW >= bannerBorderMinWidth
-	mascot := cardW >= bannerMascotMinWidth
+	framed := width >= bannerBorderMinWidth
+	mascot := width >= bannerMascotMinWidth
 
-	inset := 0
+	chrome := 0
 	if framed {
-		inset = 2 * (1 + bannerPadding)
+		chrome += 2 * (1 + bannerPadding)
 	}
-	textW := cardW - inset
 	if mascot {
-		textW -= forebrainMascotWidth + bannerGutter
+		chrome += forebrainMascotWidth + bannerGutter
 	}
-	textW = max(textW, 1)
+	natural := bannerTextWidth(version, dir) + chrome
+	cardW := min(max(natural, bannerMinWidth), width)
+	textW := max(cardW-chrome, 1)
 
 	text := bannerTextColumn(version, dir, textW)
 	var art []string
@@ -1726,28 +1746,28 @@ func forebrainBannerLines(version, dir string, width int) []string {
 		art = forebrainMascotRows()
 	}
 	rows := max(len(text), len(art))
-	// Centre the text on the mascot; the mascot's last row is half clear, so
-	// round the offset up.
-	offset := 0
-	if len(text) < len(art) {
-		offset = (len(art) - len(text) + 1) / 2
-	}
+	// Centre each block on the card: the mascot's first and last grid rows
+	// both carry ink, so centring by row count is centring by ink. When the
+	// height difference is odd, the mascot's offset rounds up and the text's
+	// rounds down, so the mascot sinks half a row and the text never sits low.
+	artTop := (rows - len(art) + 1) / 2
+	textTop := (rows - len(text)) / 2
 
 	lines := []string{""}
 	if framed {
-		lines = append(lines, bannerBorderStyle.Render("╭"+strings.Repeat("─", cardW-2)+"╮"))
+		lines = append(lines, bannerBorderStyle.Render("╭"+strings.Repeat(bannerFrameH, cardW-2)+"╮"))
 		lines = append(lines, bannerFramedRow("", cardW))
 	}
 	for i := 0; i < rows; i++ {
 		row := ""
 		if mascot {
 			cell := strings.Repeat(" ", forebrainMascotWidth)
-			if i < len(art) {
-				cell = art[i]
+			if a := i - artTop; a >= 0 && a < len(art) {
+				cell = art[a]
 			}
 			row = cell + strings.Repeat(" ", bannerGutter)
 		}
-		if t := i - offset; t >= 0 && t < len(text) {
+		if t := i - textTop; t >= 0 && t < len(text) {
 			row += text[t]
 		}
 		if framed {
@@ -1758,18 +1778,18 @@ func forebrainBannerLines(version, dir string, width int) []string {
 	}
 	if framed {
 		lines = append(lines, bannerFramedRow("", cardW))
-		lines = append(lines, bannerBorderStyle.Render("╰"+strings.Repeat("─", cardW-2)+"╯"))
+		lines = append(lines, bannerBorderStyle.Render("╰"+strings.Repeat(bannerFrameH, cardW-2)+"╯"))
 	}
 	return lines
 }
 
 // bannerFramedRow pads content to the card's inner width and closes it with
-// the frame on both sides.
+// the dashed frame on both sides.
 func bannerFramedRow(content string, cardW int) string {
 	inner := cardW - 2 - 2*bannerPadding
 	pad := max(inner-displayLineWidth(content), 0)
 	side := strings.Repeat(" ", bannerPadding)
-	return bannerBorderStyle.Render("│") + side + content + strings.Repeat(" ", pad) + side + bannerBorderStyle.Render("│")
+	return bannerBorderStyle.Render(bannerFrameV) + side + content + strings.Repeat(" ", pad) + side + bannerBorderStyle.Render(bannerFrameV)
 }
 
 // bannerTextColumn is the card's text: name and version, a rule, the
@@ -1782,21 +1802,34 @@ func bannerTextColumn(version, dir string, width int) []string {
 	if nameW+2+verW <= width {
 		lines = append(lines, name+strings.Repeat(" ", width-nameW-verW)+ver)
 	} else {
-		lines = append(lines, name, ver)
+		// A development build's pseudo-version can be wider than the
+		// column on its own; it wraps at its separators like the path.
+		lines = append(lines, name)
+		for _, piece := range wrapBannerText(version, width, "-+") {
+			lines = append(lines, bannerMutedStyle.Render(piece))
+		}
 	}
-	lines = append(lines, bannerBorderStyle.Render(strings.Repeat("─", width)))
-	lines = append(lines, wrapBannerPath(dir, width)...)
+	// The rule under the name is dashed, the same shape as the card frame.
+	lines = append(lines, bannerBorderStyle.Render(strings.Repeat(bannerFrameH, width)))
+	lines = append(lines, wrapBannerText(dir, width, `/\`)...)
 	lines = append(lines, "")
 	return append(lines, bannerShortcutRows(width)...)
+}
+
+// bannerShortcutItemWidth is the widest "key label" pair among
+// bannerShortcuts.
+func bannerShortcutItemWidth() int {
+	itemW := 0
+	for _, s := range bannerShortcuts {
+		itemW = max(itemW, len(s.key)+1+len(s.label))
+	}
+	return itemW
 }
 
 // bannerShortcutRows lays the shortcuts out in two aligned columns when the
 // text column has room for them, otherwise one per row.
 func bannerShortcutRows(width int) []string {
-	itemW := 0
-	for _, s := range bannerShortcuts {
-		itemW = max(itemW, len(s.key)+1+len(s.label))
-	}
+	itemW := bannerShortcutItemWidth()
 	perRow := 1
 	if 2*itemW+bannerGutter+1 <= width {
 		perRow = 2
@@ -1819,16 +1852,28 @@ func bannerShortcutRows(width int) []string {
 	return rows
 }
 
-// wrapBannerPath splits a path into pieces no wider than width, breaking
-// before a separator where it can and inside a segment only when the segment
-// alone is wider than the column.
-func wrapBannerPath(path string, width int) []string {
-	if width < 1 || displayLineWidth(path) <= width {
-		return []string{path}
+// bannerTextWidth is the natural width of the card's text column: the widest
+// of the name-and-version line, the workspace path, and the two shortcut
+// columns. It is where the card's natural width comes from — the longer the
+// path, the wider the card. The card itself is floored at bannerMinWidth and
+// capped only by the terminal width.
+func bannerTextWidth(version, dir string) int {
+	return max(max(
+		displayLineWidth(bannerProductName)+2+displayLineWidth(version),
+		displayLineWidth(dir)),
+		2*bannerShortcutItemWidth()+bannerGutter+1)
+}
+
+// wrapBannerText splits text into pieces no wider than width, breaking before
+// one of the separators in seps where it can and inside a segment only when
+// the segment alone is wider than the column.
+func wrapBannerText(text string, width int, seps string) []string {
+	if width < 1 || displayLineWidth(text) <= width {
+		return []string{text}
 	}
 	var pieces []string
 	cur := ""
-	for _, seg := range splitBannerPath(path) {
+	for _, seg := range splitBannerText(text, seps) {
 		if cur != "" && displayLineWidth(cur+seg) > width {
 			pieces = append(pieces, cur)
 			cur = ""
@@ -1855,17 +1900,18 @@ func wrapBannerPath(path string, width int) []string {
 	return pieces
 }
 
-// splitBannerPath splits a path before each separator, keeping the separators.
-func splitBannerPath(path string) []string {
+// splitBannerText splits text before each byte in seps, keeping the
+// separators.
+func splitBannerText(text, seps string) []string {
 	var segs []string
 	start := 0
-	for i := 1; i < len(path); i++ {
-		if path[i] == '/' || path[i] == '\\' {
-			segs = append(segs, path[start:i])
+	for i := 1; i < len(text); i++ {
+		if strings.IndexByte(seps, text[i]) >= 0 {
+			segs = append(segs, text[start:i])
 			start = i
 		}
 	}
-	return append(segs, path[start:])
+	return append(segs, text[start:])
 }
 
 // bannerVersion normalises the build version for display: "dev" for an
@@ -1881,25 +1927,24 @@ func bannerVersion(version string) string {
 	return version
 }
 
-// forebrainMascotRows renders the mascot as terminal rows of half blocks: the
-// upper pixel is the foreground, the lower one the background. A terminal
+// forebrainMascotRows renders the mascot one pixel row per terminal row, each
+// pixel as forebrainMascotPixelCols blank cells painted with its background
+// colour. No glyph is used: a background colour fills its whole cell on every
+// terminal, while a block glyph is a font shape, and a terminal that rounds
+// its cell up past the glyph (macOS Terminal with Fira Code at 14pt, SF Mono
+// at 11pt, ...) leaves the remainder showing through as a seam. A terminal
 // without colour gets the silhouette instead, with the face cut out of it, so
 // the shape still reads.
 func forebrainMascotRows() []string {
 	mono := lipgloss.ColorProfile() == termenv.Ascii
-	rows := make([]string, 0, (len(forebrainMascot)+1)/2)
-	for y := 0; y < len(forebrainMascot); y += 2 {
-		top := forebrainMascot[y]
-		bottom := strings.Repeat(".", len(top))
-		if y+1 < len(forebrainMascot) {
-			bottom = forebrainMascot[y+1]
-		}
+	rows := make([]string, 0, len(forebrainMascot))
+	for _, line := range forebrainMascot {
 		var b strings.Builder
-		for x := 0; x < len(top); x++ {
+		for x := 0; x < len(line); x++ {
 			if mono {
-				b.WriteString(monoHalfBlock(top[x], bottom[x]))
+				b.WriteString(monoPixel(line[x]))
 			} else {
-				b.WriteString(colorHalfBlock(top[x], bottom[x]))
+				b.WriteString(colorPixel(line[x]))
 			}
 		}
 		rows = append(rows, b.String())
@@ -1907,35 +1952,19 @@ func forebrainMascotRows() []string {
 	return rows
 }
 
-func colorHalfBlock(top, bottom byte) string {
-	tc, topOn := forebrainMascotPalette[top]
-	bc, bottomOn := forebrainMascotPalette[bottom]
-	switch {
-	case !topOn && !bottomOn:
-		return " "
-	case !bottomOn:
-		return lipgloss.NewStyle().Foreground(tc).Render("▀")
-	case !topOn:
-		return lipgloss.NewStyle().Foreground(bc).Render("▄")
-	case top == bottom:
-		return lipgloss.NewStyle().Foreground(tc).Render("█")
-	default:
-		return lipgloss.NewStyle().Foreground(tc).Background(bc).Render("▀")
+func colorPixel(p byte) string {
+	cells := strings.Repeat(" ", forebrainMascotPixelCols)
+	if c, ok := forebrainMascotPalette[p]; ok {
+		return lipgloss.NewStyle().Background(c).Render(cells)
 	}
+	return cells
 }
 
-// monoHalfBlock draws the silhouette: every coloured pixel is ink except the
-// face, which is left clear.
-func monoHalfBlock(top, bottom byte) string {
-	ink := func(p byte) bool { return p != '.' && p != 'W' && p != 'P' }
-	switch t, b := ink(top), ink(bottom); {
-	case t && b:
-		return "█"
-	case t:
-		return "▀"
-	case b:
-		return "▄"
-	default:
-		return " "
+// monoPixel draws the silhouette: every coloured pixel is ink except the
+// eyes and mouth, which are left clear.
+func monoPixel(p byte) string {
+	if p == '.' || p == 'P' || p == 'W' {
+		return strings.Repeat(" ", forebrainMascotPixelCols)
 	}
+	return strings.Repeat("█", forebrainMascotPixelCols)
 }

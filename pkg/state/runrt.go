@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -22,6 +24,46 @@ var ErrRunNotFound = errors.New("run not found")
 // a caller that conflates the two reports a contended process where there is
 // none.
 var ErrNoWaitContinuation = errors.New("the approval this continuation belongs to is no longer pending")
+
+// ErrSessionBusy is the family of refusals to start a turn in a session that
+// already has one alive; errors.Is matches both members below.
+var ErrSessionBusy = errors.New("session busy")
+
+// sessionBusyError is one member of the ErrSessionBusy family. It matches the
+// family sentinel and its own member value, so a caller can ask "was the
+// session busy" and "which way" with the same errors.Is.
+type sessionBusyError struct{ message string }
+
+func (e sessionBusyError) Error() string { return e.message }
+
+func (e sessionBusyError) Is(target error) bool { return target == ErrSessionBusy }
+
+var (
+	// ErrSessionRunning: another live run is driving the conversation.
+	ErrSessionRunning = sessionBusyError{"This conversation is already running a turn; send again when it finishes."}
+	// ErrSessionAwaitingApproval: a run in it is parked on an approval.
+	ErrSessionAwaitingApproval = sessionBusyError{"This conversation is waiting for an approval; answer it before sending another message."}
+)
+
+// SessionBusyCode is the stable wire code of a session-busy refusal, "" for
+// anything else. A surface that localises the sentence for its viewer keys
+// off the code, not the English text.
+func SessionBusyCode(err error) string {
+	switch {
+	case errors.Is(err, ErrSessionAwaitingApproval):
+		return "session_awaiting_approval"
+	case errors.Is(err, ErrSessionRunning):
+		return "session_running"
+	default:
+		return ""
+	}
+}
+
+// RunOwnerLease is how long a process may go without renewing its
+// registration before its running runs read as abandoned. It is generous on
+// purpose: a process starved of the write lock for a few seconds is alive,
+// and reaping a live run is far worse than reaping a dead one a minute late.
+const RunOwnerLease = 60 * time.Second
 
 type RunStatus string
 
@@ -150,29 +192,73 @@ func ParseWaitSessionSnapshot(raw string) []llm.Message {
 
 type RunStore struct {
 	DB *sql.DB
+	// Owner is the process this store writes runs for. Every run it creates,
+	// and every run it moves back to running, is stamped with it; a store
+	// without one creates runs no live process vouches for.
+	Owner string
+}
+
+// livePrimaryRunCondition is the one definition of "this session has a live
+// primary run": one parked on an approval, or one running under an owner
+// whose lease is still fresh. CreateRun's atomic INSERT and
+// SessionHasLiveRun read the same predicate, so the writer's rule and the
+// reader's rule cannot drift apart. %s takes the fb_runs alias.
+const livePrimaryRunCondition = `(status = ? OR (status = ? AND EXISTS (
+  SELECT 1 FROM fb_run_owners o WHERE o.owner = %s.owner AND o.heartbeat_at_ms >= ?)))`
+
+// liveRunArgs binds the condition's parameters in order, with the lease
+// cutoff computed from now.
+func liveRunArgs(now time.Time) []any {
+	return []any{string(RunStatusWaitingAction), string(RunStatusRunning),
+		now.UnixMilli() - RunOwnerLease.Milliseconds()}
 }
 
 func (s *RunStore) CreateRun(ctx context.Context, sessionID, inputText string) (*Run, error) {
 	if s == nil || s.DB == nil {
 		return nil, fmt.Errorf("nil db")
 	}
-	now := time.Now().Unix()
+	now := time.Now()
 	r := &Run{
 		ID:        uuid.NewString(),
 		SessionID: strings.TrimSpace(sessionID),
 		InputText: inputText,
 		Status:    RunStatusRunning,
-		CreatedAt: now,
-		UpdatedAt: now,
+		CreatedAt: now.Unix(),
+		UpdatedAt: now.Unix(),
 	}
 	if r.SessionID == "" {
 		return nil, fmt.Errorf("a run belongs to a session; create the session first")
 	}
-	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at)
-VALUES(?,?,?,?,?,?)`, r.ID, r.SessionID, r.InputText, string(r.Status), r.CreatedAt, r.UpdatedAt)
+	// One statement decides and inserts: a session may hold at most one live
+	// primary run — one parked on an approval, or one whose owner still
+	// renews its lease. SQLite allows a single writer at a time, so the check
+	// and the insert are atomic against every other process sharing this
+	// database. A running row whose owner's lease has lapsed does not block:
+	// the reaper is on its way to end it.
+	args := append([]any{r.ID, r.SessionID, r.InputText, string(r.Status), strings.TrimSpace(s.Owner), r.CreatedAt, r.UpdatedAt,
+		r.SessionID}, liveRunArgs(now)...)
+	res, err := s.DB.ExecContext(ctx, `
+INSERT INTO fb_runs(id, session_id, input_text, status, owner, created_at, updated_at)
+SELECT ?, ?, ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+  SELECT 1 FROM fb_runs r
+  WHERE r.session_id = ? AND r.parent_run_id IS NULL
+    AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`)`, args...)
 	if err != nil {
 		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Nothing was inserted: name the blocker for the person who asked.
+		var parked int
+		if err := s.DB.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL AND status=?)`,
+			r.SessionID, string(RunStatusWaitingAction)).Scan(&parked); err != nil {
+			return nil, err
+		}
+		if parked != 0 {
+			return nil, ErrSessionAwaitingApproval
+		}
+		return nil, ErrSessionRunning
 	}
 	return r, nil
 }
@@ -203,9 +289,12 @@ func (s *RunStore) CreateSubagentRun(ctx context.Context, parentRunID, sessionID
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
+	// No session-exclusivity check: a subagent run belongs to a parent run
+	// that is alive, and several of them may share one session.
 	_, err := s.DB.ExecContext(ctx, `
-INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?)`, r.ID, r.SessionID, r.ParentRunID, r.InputText, string(r.Status), r.CreatedAt, r.UpdatedAt)
+INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, owner, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?)`,
+		r.ID, r.SessionID, r.ParentRunID, r.InputText, string(r.Status), strings.TrimSpace(s.Owner), r.CreatedAt, r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -883,12 +972,236 @@ FROM fb_run_waits WHERE run_id=?`, runID))
 // SetStatus records where the run stands. A failure's text is not stored with
 // it: the failure is an event the surface that ran the turn publishes, exactly
 // once, not something the storage layer authors.
+//
+// A run ends once. The condition below is the same first-writer-wins rule
+// StampRunTiming applies to the clock: a terminal row is never moved, not to
+// another terminal state and not back to running, and moving a run back to
+// running (an approval resume) is only legal from the two alive states. The
+// caller's signature is unchanged; a transition the rule refuses simply
+// changes nothing.
 func (s *RunStore) SetStatus(ctx context.Context, runID string, st RunStatus) error {
 	if s == nil || s.DB == nil {
 		return fmt.Errorf("nil db")
 	}
-	_, err := s.DB.ExecContext(ctx, `UPDATE fb_runs SET status=?, updated_at=? WHERE id=?`, string(st), time.Now().Unix(), runID)
-	return err
+	switch st {
+	case RunStatusRunning:
+		// Resuming past an approval re-stamps the driver: the lease that
+		// vouches for this run now belongs to whoever continued it.
+		_, err := s.DB.ExecContext(ctx, `
+UPDATE fb_runs SET status=?, owner=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+			string(st), strings.TrimSpace(s.Owner), time.Now().Unix(), runID,
+			string(RunStatusWaitingAction), string(RunStatusRunning))
+		return err
+	case RunStatusDone, RunStatusFailed, RunStatusCancelled:
+		_, err := s.DB.ExecContext(ctx, `
+UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status IN (?, ?)`,
+			string(st), time.Now().Unix(), runID, string(RunStatusRunning), string(RunStatusWaitingAction))
+		return err
+	case RunStatusWaitingAction:
+		_, err := s.DB.ExecContext(ctx, `
+UPDATE fb_runs SET status=?, updated_at=? WHERE id=? AND status=?`,
+			string(st), time.Now().Unix(), runID, string(RunStatusRunning))
+		return err
+	default:
+		return fmt.Errorf("unknown run status %q", st)
+	}
+}
+
+// SessionHasLiveRun reports whether the session holds a live primary run —
+// the same predicate CreateRun refuses a second one for.
+func (s *RunStore) SessionHasLiveRun(ctx context.Context, sessionID string) (bool, error) {
+	if s == nil || s.DB == nil {
+		return false, fmt.Errorf("nil db")
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return false, nil
+	}
+	var live int
+	err := s.DB.QueryRowContext(ctx, `
+SELECT EXISTS(
+  SELECT 1 FROM fb_runs r
+  WHERE r.session_id=? AND r.parent_run_id IS NULL
+    AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`)`,
+		append([]any{sid}, liveRunArgs(time.Now())...)...).Scan(&live)
+	if err != nil {
+		return false, err
+	}
+	return live != 0, nil
+}
+
+// FirstPrimaryRunID returns the session's oldest primary run. A fire's run is
+// the first primary run of its session — the fire's session is born empty,
+// with nothing else in it — which is what makes one session name the fire's
+// run from before the run exists until after it ends. Subagent runs are not
+// the conversation's; a session with no primary run has none.
+func (s *RunStore) FirstPrimaryRunID(ctx context.Context, sessionID string) (string, error) {
+	if s == nil || s.DB == nil {
+		return "", fmt.Errorf("nil db")
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return "", nil
+	}
+	var id string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT id FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL ORDER BY created_at ASC, rowid ASC LIMIT 1`, sid).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// HoldOwnerLease registers this store's owner and keeps its heartbeat fresh
+// until the returned stop is called. Registration happens synchronously — a
+// caller that ignored an error here would create runs no lease vouches for.
+// Renewal failures are logged and retried on the next beat: one missed write
+// must not deregister a live process. stop ends the loop and deletes the
+// owner's row, so any run this process failed to settle is immediately
+// readable as abandoned.
+func (s *RunStore) HoldOwnerLease(ctx context.Context) (stop func(), err error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	owner := strings.TrimSpace(s.Owner)
+	if owner == "" {
+		return nil, fmt.Errorf("a run store without an owner cannot hold a lease")
+	}
+	renew := func(ctx context.Context) error {
+		_, err := s.DB.ExecContext(ctx, `
+INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)
+ON CONFLICT(owner) DO UPDATE SET heartbeat_at_ms=excluded.heartbeat_at_ms`,
+			owner, time.Now().UnixMilli())
+		return err
+	}
+	if err := renew(ctx); err != nil {
+		return nil, err
+	}
+	loopCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(RunOwnerLease / 6)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-ticker.C:
+				if err := renew(loopCtx); err != nil {
+					slog.Warn("run owner lease renewal failed", "owner", owner, "err", err)
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+			if _, err := s.DB.ExecContext(context.Background(), `DELETE FROM fb_run_owners WHERE owner=?`, owner); err != nil {
+				slog.Warn("run owner lease deregistration failed", "owner", owner, "err", err)
+			}
+		})
+	}, nil
+}
+
+// AbandonedRun is a run reaped because the process driving it stopped
+// renewing its lease. FinishedAtMs is the clock the reap stamped on it — the
+// moment its owner was last seen — which is what a surface computes the
+// run's final duration from.
+type AbandonedRun struct {
+	ID, SessionID, ParentRunID, Owner string
+	FinishedAtMs                      int64
+}
+
+// ReapAbandonedRuns ends every running run whose owner's lease has lapsed —
+// failed, with its clock stamped from when it started to when its owner was
+// last seen — and returns them for the caller to report. A run with an
+// approval continuation row is skipped: the continuation recovery
+// (ListUncertainResolvedWaits) owns it and knows whether its tool ran.
+func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]AbandonedRun, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	staleBefore := now.UnixMilli() - RunOwnerLease.Milliseconds()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, session_id, parent_run_id, owner FROM fb_runs
+WHERE status=?
+  AND NOT EXISTS (SELECT 1 FROM fb_run_waits w WHERE w.run_id=fb_runs.id)
+  AND (owner=''
+       OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner)
+       OR (SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner) < ?)
+ORDER BY created_at ASC, id ASC`,
+		string(RunStatusRunning), staleBefore)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []AbandonedRun
+	for rows.Next() {
+		var r AbandonedRun
+		var parent sql.NullString
+		if err := rows.Scan(&r.ID, &r.SessionID, &parent, &r.Owner); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		r.ParentRunID = parent.String
+		candidates = append(candidates, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	// The clock's end is the owner's last heartbeat — when its process was
+	// last seen — falling back to the row's own last write when no owner row
+	// exists at all. Every expression below reads the pre-update row, so the
+	// updated_at this reap writes cannot feed its own arithmetic; COALESCE
+	// keeps a clock a surface already stamped, because a stamp is written
+	// only once a run has ended, which makes it a better end than the lease
+	// fallback. A row like that — clock stamped, status still running — is
+	// exactly the process dying between the two writes, and it is reaped
+	// like any other dead one. RETURNING yields the stamped end only for
+	// the row this compare-and-swap won.
+	const clockExpr = `MAX(COALESCE((SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner), updated_at*1000), created_at*1000)`
+	out := make([]AbandonedRun, 0, len(candidates))
+	for _, r := range candidates {
+		var finished int64
+		err := tx.QueryRowContext(ctx, `
+UPDATE fb_runs
+SET status=?, updated_at=?,
+    started_at_ms=COALESCE(started_at_ms, created_at*1000),
+    finished_at_ms=COALESCE(finished_at_ms, `+clockExpr+`),
+    worked_ms=COALESCE(worked_ms, `+clockExpr+`-created_at*1000)
+WHERE id=? AND status=? AND owner=?
+RETURNING finished_at_ms`,
+			string(RunStatusFailed), now.Unix(), r.ID, string(RunStatusRunning), r.Owner).Scan(&finished)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		r.FinishedAtMs = finished
+		out = append(out, r)
+	}
+	// A lapsed lease reads as dead already; removing its rows keeps the
+	// table from collecting one per process that ever crashed mid-run.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_run_owners WHERE heartbeat_at_ms < ?`, staleBefore); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ActivePrimaryRun returns the agent's newest top-level run that is still

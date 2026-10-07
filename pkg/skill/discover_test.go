@@ -47,7 +47,7 @@ func TestDiscoveryIgnoresSkillsWithoutADescription(t *testing.T) {
 	if len(discovered) != 1 || discovered[0].Name != "described" {
 		t.Fatalf("runtime discovery returned %+v", discovered)
 	}
-	managed, err := (&Hub{Roots: []string{root}}).ListManaged()
+	managed, err := (&Hub{Layers: []Root{{Path: root}}}).ListManaged()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestDiscoveryAcceptsListSpelledAllowedTools(t *testing.T) {
 	if len(got) != 3 || got[0] != "Read" || got[1] != "Write" || got[2] != "Edit" {
 		t.Fatalf("AllowedTools=%#v, want [Read Write Edit]", got)
 	}
-	managed, err := (&Hub{Roots: []string{root}}).ListManaged()
+	managed, err := (&Hub{Layers: []Root{{Path: root}}}).ListManaged()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -205,12 +205,7 @@ func (env *Environment) reloadConfig() error {
 	loaded = safety.EffectiveConfig(loaded, env.LaunchProject)
 	next := new(appcfg.Root)
 	*next = loaded
-	if !safety.ApplyYOLO(next) && env.OnConfigLoaded != nil {
-		// The surface folds in whatever it holds that the file does not, e.g.
-		// a permission preset picked this session. YOLO outranks it, hence the
-		// guard rather than an unconditional call.
-		env.OnConfigLoaded(next)
-	}
+	safety.ApplyYOLO(next)
 	if err := safety.NewManager().StartupCheck(next); err != nil {
 		return err
 	}
@@ -239,6 +234,13 @@ func (env *Environment) reloadConfig() error {
 	}
 	if env.Runner == nil || &env.Deps != env.Runner.Deps {
 		env.Deps.AppCfg = next
+	}
+	// The language-server pool adopts the reloaded configuration the same
+	// way the rest of the environment does. The frozen per-runner decisions
+	// (the lsp tool's registration) deliberately do not move: they sit in
+	// each session's prompt prefix.
+	if env.LSP != nil {
+		env.LSP.Reconcile(next)
 	}
 	if p := env.pool; p != nil {
 		if err := p.PropagateConfig(context.Background(), next); err != nil {
@@ -305,6 +307,9 @@ func (env *Environment) AdoptConfig(next *appcfg.Root) {
 	env.reloadMu.Lock()
 	defer env.reloadMu.Unlock()
 	env.Deps.AppCfg = next
+	if env.LSP != nil {
+		env.LSP.Reconcile(next)
+	}
 	if env.rulesHook != nil {
 		env.rulesHook.Cfg = next
 	}

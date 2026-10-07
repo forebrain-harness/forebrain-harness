@@ -528,10 +528,17 @@ type ToolApprovalResumeState struct {
 	// orchestration loop should inject denial tool results instead of
 	// re-executing the pending tool calls.
 	Denied bool
-	// DenyReason carries the user's feedback when denying (e.g. the
-	// "No, keep planning" feedback text). It is included in the denial
+	// DenyReason carries the model-facing guidance when denying: the user's
+	// feedback, and for a plan approval the reviews it collected (composed at
+	// the resume, where the reviews still are). It is included in the denial
 	// tool result message so the LLM sees the user's guidance.
 	DenyReason string
+	// DenyFeedback is the user's own words alone. The denial's display half —
+	// what the live refusal card shows and the persisted tool result carries
+	// as its tool_display body — states it rather than the model-facing
+	// guidance, the way every other card separates what the user reads from
+	// what the model is told.
+	DenyFeedback string
 	// BeginContinuation atomically crosses the durable execution fence. It is
 	// intentionally runtime-only: the wait row persists the phase, while the
 	// callback binds this process's owner token to the exact continuation.

@@ -123,7 +123,7 @@ owner 要求（第 35 条）："设计技能工坊，skill-workshop"。预览 ca
 
 ### 第 4 步：真机验证
 
-新建 `frontend/e2e/skill-workshop.spec.ts`。**真实模型门控与凭据**：需要真实 LLM 回合的用例（2、3、5）以 `process.env.E2E_REAL_LLM === '1'` 门控，未设置时 `test.skip` 并注明原因——默认假模型档下 `web_e2e.sh` 仍全绿。真实档由 001 脚手架提供：`set -a; . ~/.forebrain/e2e-zhipu.env; set +a; FOREBRAIN_E2E_REAL_LLM=1 scripts/acceptance/web_e2e.sh`，此时隔离 home 的 `forebrain.yaml` 写入智谱真实配置（`provider: zhipu`、`model: glm-5.3-flash`、`base_url: https://open.bigmodel.cn/api/coding/paas/v4`、`api_key: ${FOREBRAIN_E2E_ZHIPU_KEY}`）。密钥只存在于 owner 私有的 `~/.forebrain/e2e-zhipu.env`（`chmod 600`，不进仓库、不写进任何仓库文件与文档）；yaml 走 `${ENV}` 引用是 config 守卫的强制要求。用例：
+新建 `frontend/e2e/skill-workshop.spec.ts`。**真实模型门控与凭据**：需要真实 LLM 回合的用例（2、3、5）以 `process.env.E2E_REAL_LLM === '1'` 门控，未设置时 `test.skip` 并注明原因——默认假模型档下 `web_e2e.sh` 仍全绿。真实档由 001 脚手架提供：`set -a; . ~/.forebrain/e2e-zhipu.env; set +a; FOREBRAIN_E2E_REAL_LLM=1 scripts/acceptance/web_e2e.sh`，此时隔离 home 的 `forebrain.yaml` 写入智谱真实配置（`provider: zhipuai`、`model: glm-5.3-flash`、`base_url: https://open.bigmodel.cn/api/coding/paas/v4`、`api_key: ${FOREBRAIN_E2E_ZHIPU_KEY}`）。密钥只存在于 owner 私有的 `~/.forebrain/e2e-zhipu.env`（`chmod 600`，不进仓库、不写进任何仓库文件与文档）；yaml 走 `${ENV}` 引用是 config 守卫的强制要求。用例：
 1. 菜单出现"技能工坊"；进入后任务列表为空态。
 2. 新任务（从零创建）：填名字（如 `e2e-demo-skill`）、用途、目标层=本主代理；会话创建且**不出现在对话抽屉**（抽屉行数断言）；对话面板出现模型回复（真实 LLM 回合，断言收到 assistant 消息事件）。
 3. 技能面板：任务进行到模型创建 `SKILL.md` 后（脚本在对话中追加一条"请直接创建技能文件"的引导消息；断言 `GET /api/skills/e2e-demo-skill/files` 返回含 SKILL.md），文件树出现该文件；编辑器打开 SKILL.md、改触发描述保存、重新拉取一致。

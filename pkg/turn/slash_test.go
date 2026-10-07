@@ -2,9 +2,6 @@ package turn
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -32,7 +29,6 @@ func TestListSlashCommandsSideConversationFiltersToSafeCommands(t *testing.T) {
 	for _, r := range records {
 		names[r.Name] = true
 	}
-	require.True(t, names["diff"])
 	require.True(t, names["status"])
 	require.False(t, names["plan"])
 	require.False(t, names["new"])
@@ -116,9 +112,6 @@ func (r *recordingSlashHandlers) HandleMCPSlash(sessionID, _ string) (string, bo
 func (r *recordingSlashHandlers) HandleSandboxSlash(sessionID, _ string, args []string) (string, bool) {
 	return r.record("sandbox", sessionID, args)
 }
-func (r *recordingSlashHandlers) HandleDiffSlash(sessionID, _ string, args []string) (string, bool) {
-	return r.record("diff", sessionID, args)
-}
 func (r *recordingSlashHandlers) ModelSettings(sessionID string) (ModelSettings, error) {
 	r.record("model", sessionID, nil)
 	if r.settings != nil {
@@ -168,7 +161,6 @@ func contextForSurface(h *recordingSlashHandlers, surface Surface, channel, home
 		Permissions:    h,
 		MCP:            h,
 		Sandbox:        h,
-		Diff:           h,
 		Model:          h,
 		Agent:          h,
 		Fast:           h,
@@ -305,7 +297,6 @@ func TestHintedCommandsAcceptTheirOwnHint(t *testing.T) {
 		"permissions": "/permissions explain read_file",
 		"rename":      "/rename a fresh title",
 		"plan":        "/plan ship the parser rewrite",
-		"diff":        "/diff main.go",
 		"goal":        "/goal finish the parser rewrite",
 	}
 	for _, cmd := range commands {
@@ -328,36 +319,10 @@ func TestHintedCommandsAcceptTheirOwnHint(t *testing.T) {
 	}
 }
 
-// /diff answers with the project's diff, or one sentence when there is none:
-// never a diff-shaped message, never a fenced sentence.
-func TestExecuteDiffSlashSaysWhyThereIsNoDiff(t *testing.T) {
-	notRepo := t.TempDir()
-	if got := ExecuteDiffSlash(notRepo, nil, true); got != notRepo+" is not a git repository, so there is no diff to show." {
-		t.Fatalf("outside a repository = %q", got)
-	}
-	repo := t.TempDir()
-	cmd := exec.Command("git", "init", "-q")
-	cmd.Dir = repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
-	}
-	if got := ExecuteDiffSlash(repo, nil, true); got != "No uncommitted changes." {
-		t.Fatalf("clean repository = %q", got)
-	}
-	if got := ExecuteDiffSlash(repo, []string{"docs"}, false); got != "No uncommitted changes in docs." {
-		t.Fatalf("clean path = %q", got)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := ExecuteDiffSlash(repo, nil, true); !strings.HasPrefix(got, "```diff\ndiff --git") || !strings.Contains(got, "+hello") {
-		t.Fatalf("fenced diff = %q", got)
-	}
-}
-
-// /help lists the built-in commands, then the skills, on every surface; a
-// command a surface does not have is answered with the closest ones it does.
-func TestHelpCatalogAndUnknownCommandSuggestions(t *testing.T) {
+// The bare "/" lists the built-in commands, then the skills, on every
+// surface; a command a surface does not have, including a removed one, is
+// answered with the closest ones it does.
+func TestUnknownCommandSuggestionsAndBareSlashCatalog(t *testing.T) {
 	ResetDynamic()
 	t.Cleanup(ResetDynamic)
 	skill := DynamicCommand{
@@ -367,11 +332,15 @@ func TestHelpCatalogAndUnknownCommandSuggestions(t *testing.T) {
 	require.NoError(t, ReplaceDynamicSource("test", []DynamicCommand{skill}))
 
 	for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
-		res := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/help")
+		res := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/")
 		require.True(t, res.Handled)
 		require.True(t, strings.HasPrefix(res.Reply, "Commands\n/"), res.Reply)
 		require.Contains(t, res.Reply, "\n\nSkills\n/context-save — save the session context")
 		require.Less(t, strings.Index(res.Reply, "/model —"), strings.Index(res.Reply, "Skills"))
+
+		removed := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/help")
+		require.True(t, removed.Handled)
+		require.True(t, strings.HasPrefix(removed.Reply, "There is no /help"), removed.Reply)
 	}
 	require.Equal(t, "There is no /modle; did you mean /model?", UnknownCommandReply(SurfaceWebChat, "modle", DiscoveryOptions{}))
 	require.Equal(t, "There is no /zzzq; type / to see every command.", UnknownCommandReply(SurfaceWebChat, "zzzq", DiscoveryOptions{}))
@@ -398,4 +367,90 @@ func TestModelChoicesAreTheAgentsConfiguredModels(t *testing.T) {
 	require.Len(t, writer, 1)
 	require.Equal(t, "claude-sonnet-4-5", writer[0].Model)
 	require.Equal(t, ModelChoices(&cfg, "main"), ModelChoices(&cfg, "no-such-agent"), "an unknown agent runs on main's models")
+}
+
+// /lsp is a tools-category panel command on both surfaces, next to /mcp.
+func TestLSPCommandTables(t *testing.T) {
+	cmd, ok := Find("lsp")
+	require.True(t, ok, "/lsp must be a builtin command")
+	require.Equal(t, []Surface{SurfaceWebChat, SurfaceTUI}, cmd.AllowedSurfaces)
+	require.Equal(t, "tools", cmd.Category)
+	require.Equal(t, "open-panel", cmd.ActionKind)
+	for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
+		names := make([]string, 0)
+		for _, c := range VisibleWithOptions(surface, DiscoveryOptions{}) {
+			names = append(names, c.Name)
+		}
+		require.Contains(t, names, "lsp", "surface %s: %v", surface, names)
+	}
+}
+
+// Every built-in command declares how it behaves in a subagent's own view
+// (decision D4). A new command that forgets is caught here, before it silently
+// runs against the wrong conversation in a subagent's view.
+func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
+	want := map[string]SubagentViewScope{
+		// Acts on the subagent whose view it is typed in.
+		"compact": SubagentViewActs,
+		"context": SubagentViewActs,
+		// Runs exactly as it does in the conversation's view.
+		"status":      SubagentViewGlobal,
+		"mcp":         SubagentViewGlobal,
+		"lsp":         SubagentViewGlobal,
+		"permissions": SubagentViewGlobal,
+		"sandbox":     SubagentViewGlobal,
+		"exit":        SubagentViewGlobal,
+		"subagents":   SubagentViewGlobal,
+		"skills":      SubagentViewGlobal,
+		"connect":     SubagentViewGlobal,
+		"memories":    SubagentViewGlobal,
+		"migrate":     SubagentViewGlobal,
+		// Hidden, and answered with one sentence pointing back to the conversation.
+		"new":    SubagentViewHidden,
+		"resume": SubagentViewHidden,
+		"fork":   SubagentViewHidden,
+		"rename": SubagentViewHidden,
+		"init":   SubagentViewHidden,
+		"clear":  SubagentViewHidden,
+		"plan":   SubagentViewHidden,
+		"agent":  SubagentViewHidden,
+		"model":  SubagentViewHidden,
+		"fast":   SubagentViewHidden,
+		"goal":   SubagentViewHidden,
+	}
+	for _, cmd := range commands {
+		got, ok := want[cmd.Name]
+		if !ok {
+			t.Fatalf("builtin /%s has no expected subagent-view scope in this test", cmd.Name)
+		}
+		if cmd.SubagentView == SubagentViewUnset {
+			t.Fatalf("builtin /%s must declare a subagent-view scope", cmd.Name)
+		}
+		if cmd.SubagentView != got {
+			t.Fatalf("/%s subagent-view scope = %q, want %q", cmd.Name, cmd.SubagentView, got)
+		}
+		delete(want, cmd.Name)
+	}
+	if len(want) > 0 {
+		t.Fatalf("commands in the test table are missing from the registry: %v", want)
+	}
+}
+
+// A subagent's own view lists every command that runs there, and hides the ones
+// that would change the conversation (D4).
+func TestSubagentViewHidesConversationCommands(t *testing.T) {
+	listed := map[string]bool{}
+	for _, cmd := range VisibleWithOptions(SurfaceTUI, DiscoveryOptions{SubagentView: true}) {
+		listed[cmd.Name] = true
+	}
+	for _, hidden := range []string{"new", "resume", "fork", "rename", "init", "clear", "plan", "agent", "model", "fast", "goal"} {
+		if listed[hidden] {
+			t.Fatalf("the subagent view must hide /%s", hidden)
+		}
+	}
+	for _, shown := range []string{"compact", "context", "status", "mcp", "lsp", "permissions", "sandbox", "exit", "subagents", "skills", "connect", "memories", "migrate"} {
+		if !listed[shown] {
+			t.Fatalf("the subagent view must keep /%s", shown)
+		}
+	}
 }

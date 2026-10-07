@@ -321,3 +321,55 @@ func TestToolStepStartedAtIsAbsentWithoutADispatcher(t *testing.T) {
 		t.Fatalf("start without WithToolStepStartedAt = %v, want zero", got)
 	}
 }
+
+func TestNamedReadObservers(t *testing.T) {
+	st := NewState(t.TempDir())
+	if st.ReadObserver() != nil {
+		t.Fatal("no observer installed, ReadObserver must be nil")
+	}
+	var order []string
+	st.SetNamedReadObserver("zeta", func(context.Context, string, []byte) {
+		order = append(order, "zeta")
+	})
+	st.SetNamedReadObserver("alpha", func(context.Context, string, []byte) {
+		order = append(order, "alpha")
+	})
+	observer := st.ReadObserver()
+	if observer == nil {
+		t.Fatal("observers installed, ReadObserver must not be nil")
+	}
+	observer(context.Background(), "/x", []byte("body"))
+	if len(order) != 2 || order[0] != "alpha" || order[1] != "zeta" {
+		t.Fatalf("observer order=%v want [alpha zeta] (name order)", order)
+	}
+	// A fan-out already in hand is not affected by a later removal.
+	st.SetNamedReadObserver("alpha", nil)
+	observer(context.Background(), "/x", []byte("body"))
+	if len(order) != 4 || order[2] != "alpha" || order[3] != "zeta" {
+		t.Fatalf("held fan-out order=%v want [alpha zeta alpha zeta]", order)
+	}
+	if st.ReadObserver() == nil {
+		t.Fatal("one observer still installed, ReadObserver must not be nil")
+	}
+	// Removing the last observer returns ReadObserver to nil.
+	st.SetNamedReadObserver("zeta", nil)
+	if st.ReadObserver() != nil {
+		t.Fatal("all observers removed, ReadObserver must be nil")
+	}
+	// The legacy single-observer front door still works and joins the fan-out.
+	var legacy int
+	st.SetReadObserver(func(context.Context, string, []byte) { legacy++ })
+	if observer := st.ReadObserver(); observer == nil {
+		t.Fatal("legacy SetReadObserver must install an observer")
+	} else {
+		observer(context.Background(), "/x", []byte("body"))
+	}
+	if legacy != 1 {
+		t.Fatalf("legacy observer calls=%d want 1", legacy)
+	}
+	// ...and clears it again with nil.
+	st.SetReadObserver(nil)
+	if st.ReadObserver() != nil {
+		t.Fatal("legacy nil must remove the observer")
+	}
+}

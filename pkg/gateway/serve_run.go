@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
@@ -75,11 +77,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// supplied one, so a channel message arriving while a gate was open
 		// started a second run against that session. submitChannelTurn already
 		// knows how to report the wait to the user.
-		turn.WithApprovalGate(&turn.PendingApprovalGate{
-			Runs:      runSvc,
-			Actions:   actionSvc,
-			Evaluator: runner,
-		}),
+		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc)),
 	)
 	// The pool is built before the first request so project sessions are
 	// served by per-project runners from the start.
@@ -115,6 +113,17 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	// into a surface sink. The gateway's sink is a bus because it serves more
 	// than one connection.
 	runner.Events = gw.RunEvents()
+	// Every process reaps the runs whose owners stopped renewing: a crashed
+	// gateway replica, a terminal that was killed mid-turn. The reap is a
+	// compare-and-swap, so whichever process gets there first settles the run,
+	// and its ending is reported exactly once, through the session's own event
+	// funnel — the same way every other ending is.
+	stopReaper := turn.AbandonedRunReaper{
+		Runs:    runSvc,
+		Publish: gw.publishGatewayRunEvent,
+		Recover: func(context.Context) { gw.recoverResolvedApprovalWaitsOnce() },
+	}.Start(ctx)
+	defer stopReaper()
 	stopApprovalExpiry := state.StartExpireSweeper(ctx, actionSvc, state.ExpireSweeperConfig{
 		TTL:    process.ApprovalTTLFromEnv(),
 		Reason: "approval_ttl_expired",
@@ -144,6 +153,25 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 	// the session shows it and can cancel it.
 	core.SetAutoContinue(gw.autoContinueConfig())
 	defer core.StopAutoContinue()
+	// Every subagent execution reports its start and end here, so the engine
+	// arms that subagent's own auto-continue the way it arms the
+	// conversation's. The surface is declared at registration because the
+	// execution's context carries no reliable surface of its own.
+	h.OnSubagentExecution = &process.SubagentExecutionHooks{
+		Starting: func(workerSessionID string) {
+			core.SubagentExecutionStarting(context.Background(), workerSessionID)
+		},
+		Ended: func(end run.SubagentExecutionEnd) {
+			core.SubagentExecutionEnded(context.Background(), turn.SubagentExecutionEnd{
+				ConversationSessionID: end.ConversationSessionID,
+				WorkerSessionID:       end.WorkerSessionID,
+				AgentKey:              end.AgentKey,
+				RunID:                 end.RunID,
+				Origin:                turn.Origin{Surface: turn.SurfaceWebChat},
+				Err:                   end.Err,
+			})
+		},
+	}
 	svc := skill.NewServiceForWorkspace(root, runner.WorkspaceRoot)
 	svc.ProjectRoot = runner.LaunchProject.Project.Root
 	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), runner.LaunchProject) }
@@ -211,6 +239,14 @@ func displayHost(addr net.Addr) string {
 	return net.JoinHostPort(host, port)
 }
 
+// signInFragmentValue encodes the token for the link's #token= fragment the
+// way the sign-in page decodes it (decodeURIComponent): a configured token is
+// free text, and an unescaped "&", "#" or "%" in it would cut or corrupt the
+// value the page reads back.
+func signInFragmentValue(token string) string {
+	return strings.ReplaceAll(url.QueryEscape(token), "+", "%20")
+}
+
 func writeStartupBanner(w io.Writer, b startupBanner) {
 	var out strings.Builder
 	out.WriteString(bannerArt)
@@ -249,7 +285,7 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 		fmt.Fprintf(&out, "Web UI       %s/\n", base)
 	}
 	if b.SignInToken != "" {
-		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, b.SignInToken)
+		fmt.Fprintf(&out, "Sign in      %s/login#token=%s\n", base, signInFragmentValue(b.SignInToken))
 	}
 	fmt.Fprintf(&out, "Auth         %s\n", strings.TrimSpace(b.AuthMode))
 	fmt.Fprintf(&out, "Listening on http://%s\n", b.Addr.String())

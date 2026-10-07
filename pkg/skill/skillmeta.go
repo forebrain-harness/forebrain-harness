@@ -10,13 +10,10 @@ import (
 )
 
 type regEntry struct {
-	Name       string
-	SkillPath  string
-	SkillDir   string
-	Source     string
-	Enabled    bool
-	ShadowedBy []string
-	Shadows    []string
+	Name      string
+	SkillPath string
+	SkillDir  string
+	Enabled   bool
 }
 
 func NormalizeToken(s string) string {
@@ -77,7 +74,6 @@ func (r *Registry) RefreshForWorkspace(home, workspaceRoot, projectRoot string) 
 			Name:      strings.TrimSpace(item.Name),
 			SkillPath: path,
 			SkillDir:  skillDir,
-			Source:    string(SourceForPath(home, projectRoot, skillDir)),
 			Enabled:   item.Enabled,
 		}
 		if e.Name == "" {
@@ -91,12 +87,8 @@ func (r *Registry) RefreshForWorkspace(home, workspaceRoot, projectRoot string) 
 			if k == "" {
 				continue
 			}
-			if prev, ok := by[k]; !ok {
+			if _, ok := by[k]; !ok {
 				by[k] = e
-			} else {
-				prev.ShadowedBy = appendUniqueString(prev.ShadowedBy, skillDir)
-				e.Shadows = appendUniqueString(e.Shadows, prev.SkillDir)
-				by[k] = prev
 			}
 		}
 	}
@@ -104,19 +96,6 @@ func (r *Registry) RefreshForWorkspace(home, workspaceRoot, projectRoot string) 
 	r.byToken = by
 	r.mu.Unlock()
 	return nil
-}
-
-func appendUniqueString(list []string, item string) []string {
-	item = strings.TrimSpace(item)
-	if item == "" {
-		return list
-	}
-	for _, cur := range list {
-		if cur == item {
-			return list
-		}
-	}
-	return append(list, item)
 }
 
 func (r *Registry) DistinctSkillNames() []string {

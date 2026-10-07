@@ -37,8 +37,17 @@ func TestControllerCancelAndQueue(t *testing.T) {
 	if !c.Steer("r1", Input{Text: "first"}) || !c.FollowUp("r1", Input{Text: "next"}) {
 		t.Fatal("queue failed")
 	}
-	if in, ok := c.Retract("r1"); !ok || in.Text != "first" {
-		t.Fatalf("retract = %#v, %v", in, ok)
+	q, _, ok := c.Queue("r1")
+	if !ok {
+		t.Fatal("queue")
+	}
+	// Recall takes the newest by the shared clock — the follow-up, queued
+	// after the steer.
+	if in, ok := q.Recall(); !ok || in.Text != "next" {
+		t.Fatalf("recall = %#v, %v", in, ok)
+	}
+	if in, ok := q.Recall(); !ok || in.Text != "first" {
+		t.Fatalf("recall = %#v, %v", in, ok)
 	}
 	if !c.Cancel("r1", context.Canceled) || c.Cancel("r1", context.Canceled) {
 		t.Fatal("cancel must be idempotent")
@@ -64,16 +73,17 @@ func TestControllerKeepsQueueAcrossApproval(t *testing.T) {
 	if !ok {
 		t.Fatal("queue lost")
 	}
-	in, ok := q.PopNext()
-	if !ok || in.Text != "after approval" {
-		t.Fatalf("input = %#v, %v", in, ok)
+	send, restore := q.Next(BoundaryCompleted)
+	if len(restore) != 0 || len(send) != 1 || send[0].Text != "after approval" {
+		t.Fatalf("next = %#v, %#v", send, restore)
 	}
 }
 
-// TestControllerPopNextKeepsWhatRejectedInputAttached pins that input the run
-// could not take as a steer is merged into one message with everything each
-// piece attached, not reduced to its text.
-func TestControllerPopNextKeepsWhatRejectedInputAttached(t *testing.T) {
+// TestControllerNextListsRejectedInputWhole pins that input the run could not
+// take as a steer is listed by the boundary with everything each piece
+// attached, not reduced to its text; merging the entries into one message is
+// the surface's job.
+func TestControllerNextListsRejectedInputWhole(t *testing.T) {
 	c := NewController()
 	if !c.Track("r1", "s1", func() {}) || !c.WaitApproval("r1") {
 		t.Fatal("track")
@@ -84,15 +94,13 @@ func TestControllerPopNextKeepsWhatRejectedInputAttached(t *testing.T) {
 	if !ok {
 		t.Fatal("queue")
 	}
-	in, ok := q.PopNext()
-	if !ok || !in.Rejected || in.Text != "look at this" {
-		t.Fatalf("input = %#v, %v", in, ok)
+	send, _ := q.Next(BoundaryCompleted)
+	if len(send) != 2 || !send[0].Rejected || send[0].Text != "look at this" || send[0].MentionImages[0] != "shots/a.png" ||
+		!send[1].Rejected || send[1].Attachments[0] != "file-1" {
+		t.Fatalf("next = %#v", send)
 	}
-	if len(in.Attachments) != 1 || in.Attachments[0] != "file-1" || len(in.MentionImages) != 1 || in.MentionImages[0] != "shots/a.png" {
-		t.Fatalf("the merged input lost what it attached: %#v", in)
-	}
-	if _, ok := q.PopNext(); ok {
-		t.Fatal("a rejected input was left behind the merge")
+	if more, _ := q.Next(BoundaryCompleted); len(more) != 0 {
+		t.Fatalf("a rejected input was left behind the boundary: %#v", more)
 	}
 }
 
@@ -125,11 +133,12 @@ func TestControllerTracksProvidedInputRuntime(t *testing.T) {
 	}
 }
 
-// TestControllerReleasesEverythingStillQueued pins that a finishing run hands
-// back every message it never took — the steer that never reached the model
-// first, then queued messages in order, each with what it attached — and takes
-// nothing more once it has, so no message can be dropped with the run.
-func TestControllerReleasesEverythingStillQueued(t *testing.T) {
+// TestControllerReleaseDecidesOneTurnAtATime pins that a finishing run's
+// release decides only the next turn: the undelivered steer goes first, the
+// queued follow-ups wait in the conversation's queue for the releases that
+// follow theirs, and the run takes nothing more once it has been released —
+// so no message can be dropped with the run.
+func TestControllerReleaseDecidesOneTurnAtATime(t *testing.T) {
 	c := NewController()
 	if !c.Track("r1", "s1", func() {}) {
 		t.Fatal("track")
@@ -140,17 +149,29 @@ func TestControllerReleasesEverythingStillQueued(t *testing.T) {
 	if !c.FollowUp("r1", Input{Text: "next", Attachments: []string{"file-1"}, MentionImages: []string{"a.png"}}) || !c.FollowUp("r1", Input{Text: "after that"}) {
 		t.Fatal("follow up")
 	}
-	released := c.Release("r1")
-	if len(released) != 3 || released[0].Text != "later" || !released[0].Rejected ||
-		released[1].Text != "next" || released[1].Attachments[0] != "file-1" || released[1].MentionImages[0] != "a.png" ||
-		released[2].Text != "after that" {
-		t.Fatalf("released = %#v", released)
+	send, restore := c.Release("r1", BoundaryCompleted)
+	if len(restore) != 0 || len(send) != 1 || send[0].Text != "later" || send[0].Rejected {
+		t.Fatalf("first release = %#v, %#v", send, restore)
 	}
 	if c.Steer("r1", Input{Text: "too late"}) || c.FollowUp("r1", Input{Text: "too late"}) {
 		t.Fatal("a released run took more input, which would be dropped with it")
 	}
-	if again := c.Release("r1"); again != nil {
-		t.Fatalf("released twice: %#v", again)
+	if send, restore = c.Release("r1", BoundaryCompleted); send != nil || restore != nil {
+		t.Fatalf("released twice: %#v, %#v", send, restore)
+	}
+	// What the release did not send belongs to the conversation and outlives
+	// the run: its queue decides, one turn at a time, with each entry whole.
+	q := c.SessionQueue("s1")
+	send, _ = q.Next(BoundaryCompleted)
+	if len(send) != 1 || send[0].Text != "next" || send[0].Attachments[0] != "file-1" || send[0].MentionImages[0] != "a.png" {
+		t.Fatalf("second turn = %#v", send)
+	}
+	send, _ = q.Next(BoundaryCompleted)
+	if len(send) != 1 || send[0].Text != "after that" {
+		t.Fatalf("third turn = %#v", send)
+	}
+	if send, _ = q.Next(BoundaryCompleted); len(send) != 0 {
+		t.Fatalf("queue should be empty: %#v", send)
 	}
 }
 

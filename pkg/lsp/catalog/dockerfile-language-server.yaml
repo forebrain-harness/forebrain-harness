@@ -1,0 +1,14 @@
+id: dockerfile-language-server
+display_name: Dockerfile Language Server
+languages: [Dockerfile]
+priority: 100
+command: docker-langserver
+args: [--stdio]
+extension_to_language: {.dockerfile: dockerfile}
+filenames: {Dockerfile: dockerfile, Containerfile: dockerfile}
+root_markers: []
+install:
+  - requires: npm
+    argv: [npm, install, -g, dockerfile-language-server-nodejs]
+readiness: none
+notes: "Install with: npm install -g dockerfile-language-server-nodejs"

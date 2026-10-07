@@ -32,7 +32,7 @@ Packaging flows (only when touching the npm layer): `npm/scripts/build-platform-
 
 Two runtime surfaces share one core:
 
-- `cmd/forebrain` — thin Cobra entrypoint (`gateway`, `interactive`, `resume`, `serve`); keep CLI wiring here, push behavior down into `pkg/...`.
+- `cmd/forebrain` — thin Cobra entrypoint (`gateway`, `interactive`, `resume`, `serve`, `lsp`); keep CLI wiring here, push behavior down into `pkg/...`.
 - `pkg/gateway` — HTTP/WS server and REST API; embeds the Vue build output (`pkg/gateway/dist`) via go:embed. Also binds channel integrations for the active agent.
 - `pkg/tui` — terminal application and its view projection (the interactive TUI).
 
@@ -44,6 +44,7 @@ Core runtime (surface-agnostic):
 - `pkg/assembly` — context assembly: canonical payload, planner, rules, git sources.
 - `pkg/tool` — tool registry and built-ins (file, shell, web, MCP, session tools) with request permissions.
 - Supporting: `pkg/llm`, `pkg/mcp`, `pkg/memory`, `pkg/skill`, `pkg/state` (SQLite), `pkg/event` (typed events/sinks), `pkg/hook` (hook pipeline, plan mode), `pkg/safety`, `pkg/session`, `pkg/process`, `pkg/telemetry`, `pkg/home` (workspace bootstrap, version).
+- `pkg/lsp` — language-server runtime (Layer 2): the built-in catalog (`pkg/lsp/catalog/*.yaml`), JSON-RPC and protocol types, one process pool per forebrain process, a Manager per runner that implements `tool.CodeIntelligence`/`tool.CodeIntelControl`. Only `pkg/process` and `cmd/forebrain` import it; tools and surfaces go through the ports in `pkg/tool/search.go` and the DTOs in `pkg/event/lsp.go`.
 
 Integrations:
 
@@ -54,9 +55,19 @@ Integrations:
 
 Projects (web UI) and the project-level MCP files (`<root>/.forebrain/mcp_servers.yaml`, `<root>/.mcp.json`) are documented in the docs site: `docs/config/projects-and-mcp.md` (中文镜像 `docs/zh/config/`).
 
+## Language servers
+
+Design and task plans: `docs/plan/LSP_CODE_INTELLIGENCE_PLAN.md` and `docs/plan/lsp/`. Rules that keep it safe to change:
+
+- Never start a server on the `Runner.Load` path or in a first-frame path; everything starts lazily or in the background.
+- The `lsp` tool is registered once per session (`Deps.CodeIntelTool`); its description and schema are constants. Enabling, installing or restarting a server never changes the tool table.
+- Model-visible texts (tool description, diagnostics block, late-diagnostics reminder, error messages) are verbatim from the spec's appendices B and C and have golden tests.
+- Unit tests use the fake server in `pkg/lsp/instance_test.go`; real servers run only with `FOREBRAIN_LSP_INTEGRATION` set (`.github/workflows/lsp-integration.yml`).
+- Project entries (`<root>/.forebrain/lsp_servers.yaml`) apply only in trusted, version-controlled projects and only after per-entry consent.
+
 ## Migrating from another agent
 
-`/migrate` (terminal only) imports Claude Code's or Codex's on-disk history — sessions, subagent transcripts, memories, skills, plans, MCP entries and input history — into this install; sessions land with `origin='migrated'` and the run is idempotent. Inline form: `/migrate claude --dry-run`, `/migrate codex --home /Volumes/backup/.codex`, `/migrate --only sessions,memories,skills,plans,mcp,history --project`. Project-level configuration (`.mcp.json`, `.claude/settings*.json` permissions, `.codex/config.toml` `[mcp_servers]`) is migrated into Forebrain Harness's own project files (`.forebrain/mcp_servers.yaml`, `.forebrain/safety.json`); Forebrain Harness never reads another agent's project files. Design: `docs/plan/CLAUDE_CODE_MIGRATION_PLAN.md` + `docs/plan/CODEX_MIGRATION_PLAN.md`; implementation: `pkg/migrate`.
+`/migrate` (terminal only) imports Claude Code's or Codex's on-disk history — sessions, subagent transcripts, memories, skills, plans, MCP entries, language-server plugins and input history — into this install; sessions land with `origin='migrated'` and the run is idempotent. Inline form: `/migrate claude --dry-run`, `/migrate codex --home /Volumes/backup/.codex`, `/migrate --only sessions,memories,skills,plans,mcp,lsp,history --project`. Enabled Claude Code LSP plugins become enabled catalog servers (official plugins) or custom `lsp.servers` entries (other plugins). Project-level configuration (`.mcp.json`, `.claude/settings*.json` permissions, `.codex/config.toml` `[mcp_servers]`) is migrated into Forebrain Harness's own project files (`.forebrain/mcp_servers.yaml`, `.forebrain/safety.json`); Forebrain Harness never reads another agent's project files. Design: `docs/plan/CLAUDE_CODE_MIGRATION_PLAN.md` + `docs/plan/CODEX_MIGRATION_PLAN.md`; implementation: `pkg/migrate`.
 
 ## House rules
 

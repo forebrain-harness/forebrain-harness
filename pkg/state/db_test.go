@@ -142,7 +142,7 @@ INSERT INTO fb_messages(session_id,role,content,created_at) VALUES('legacy','ass
 		llm.UserMessage(llm.Text("question")),
 		llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")}),
 	}
-	if err := store.AppendMessageSequenceForRun(ctx, "new-session", run.ID, sequence, "model", "", RunTiming{}); err != nil {
+	if err := store.AppendMessageSequenceForRun(ctx, "new-session", run.ID, sequence, "model", ""); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := store.ListAllMessages(ctx, "new-session", 0)

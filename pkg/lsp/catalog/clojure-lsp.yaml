@@ -1,0 +1,18 @@
+id: clojure-lsp
+display_name: clojure-lsp
+languages: [Clojure]
+priority: 100
+command: clojure-lsp
+extension_to_language: {.clj: clojure, .cljs: clojure, .cljc: clojure, .edn: clojure, .bb: clojure}
+root_markers: [deps.edn, project.clj, shadow-cljs.edn, bb.edn, build.boot]
+env_passthrough: [JAVA_HOME, CLJ_CONFIG]
+detect:
+  version_args: [--version]
+install:
+  - requires: brew
+    platforms: [darwin, linux]
+    argv: [brew, install, clojure-lsp/brew/clojure-lsp-native]
+startup_timeout: 180
+readiness: progress
+project_writes: [.lsp/.cache, .clj-kondo/.cache]
+notes: "Install with brew, or download the native binary from the clojure-lsp releases."

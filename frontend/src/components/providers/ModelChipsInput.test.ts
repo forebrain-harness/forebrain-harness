@@ -9,7 +9,7 @@ describe('ModelChipsInput', () => {
     // feeds every emit back as the parent would.
     const wrapper = mount(ModelChipsInput, { props: { modelValue: [] } })
     const feed = async () => {
-      const last = wrapper.emitted('update:modelValue')?.at(-1)?.[0] as string[]
+      const last = wrapper.emitted('update:modelValue')?.slice(-1)[0]?.[0] as string[]
       if (last) await wrapper.setProps({ modelValue: last })
     }
     const input = wrapper.find('[data-testid="model-chips-input"]')
@@ -32,7 +32,7 @@ describe('ModelChipsInput', () => {
     // The comma commit happens on input: the first model is already a chip
     // while the rest of the line stays editable.
     await input.trigger('blur')
-    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(['deepseek-v4'])
+    expect(wrapper.emitted('update:modelValue')?.slice(-1)[0]?.[0]).toEqual(['deepseek-v4'])
   })
 
   it('commits on Enter', async () => {
@@ -40,7 +40,7 @@ describe('ModelChipsInput', () => {
     const input = wrapper.find('[data-testid="model-chips-input"]')
     await input.setValue('gpt-test')
     await input.trigger('keydown.enter')
-    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(['gpt-test'])
+    expect(wrapper.emitted('update:modelValue')?.slice(-1)[0]?.[0]).toEqual(['gpt-test'])
   })
 
   it('never duplicates a model', async () => {
@@ -48,14 +48,14 @@ describe('ModelChipsInput', () => {
     const input = wrapper.find('[data-testid="model-chips-input"]')
     await input.setValue('gpt-test, gpt-other')
     await input.trigger('blur')
-    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(['gpt-test', 'gpt-other'])
+    expect(wrapper.emitted('update:modelValue')?.slice(-1)[0]?.[0]).toEqual(['gpt-test', 'gpt-other'])
   })
 
   it('removes a chip through its × button', async () => {
     const wrapper = mount(ModelChipsInput, { props: { modelValue: ['a', 'b'] } })
     const chip = wrapper.find('[data-chip="a"]')
     await chip.find('button').trigger('click')
-    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(['b'])
+    expect(wrapper.emitted('update:modelValue')?.slice(-1)[0]?.[0]).toEqual(['b'])
   })
 
   it('hides suggestions already present and adds the rest on click', async () => {
@@ -66,7 +66,7 @@ describe('ModelChipsInput', () => {
     const suggestionButtons = buttons.filter((b) => ['b', 'c'].includes(b.text()))
     expect(suggestionButtons.length).toBe(2)
     await suggestionButtons[0].trigger('click')
-    expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual(['a', 'b'])
+    expect(wrapper.emitted('update:modelValue')?.slice(-1)[0]?.[0]).toEqual(['a', 'b'])
   })
 
   it('keeps an empty list when nothing was typed', async () => {

@@ -95,7 +95,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { sessions, loading, error, createSession } = useChatSessions()
+const { sessions, loading, error, createSession, fetchSessions } = useChatSessions()
 const { current: heartbeat } = useSessionHeartbeat()
 
 const query = ref('')
@@ -129,6 +129,10 @@ async function newChat() {
 watch(() => props.open, async (open) => {
   if (open) {
     createError.value = ''
+    // The drawer opens from any page — the list is the drawer's to load, not
+    // something the chat page may or may not have fetched earlier (a fresh
+    // load elsewhere, a tenant switch, a turn in another tab).
+    void fetchSessions()
     await nextTick()
     drawerRef.value?.focus()
   }

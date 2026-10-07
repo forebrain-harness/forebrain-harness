@@ -2,6 +2,8 @@ package run
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -144,4 +146,45 @@ type stubLLM struct{}
 
 func (stubLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
 	return &llm.Result{}, nil
+}
+
+// TestSidechainFilePathMatchesItsFormerSpelling pins the compatibility the
+// fork logs depend on: SidechainFilePath moved onto hook.SessionSidechainDir —
+// the one definition, so deleting a session's directory cannot miss logs —
+// and for every non-empty session id the result must be byte-for-byte what
+// the fork's own spelling produced, or existing logs would be orphaned.
+func TestSidechainFilePathMatchesItsFormerSpelling(t *testing.T) {
+	formerSanitize := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.TrimSpace(s) {
+			switch {
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+				b.WriteRune(r)
+			default:
+				b.WriteByte('_')
+			}
+		}
+		if b.Len() == 0 {
+			return "x"
+		}
+		return b.String()
+	}
+	former := func(workspaceRoot, sessionID, forkLabel, runKey string) string {
+		return filepath.Join(strings.TrimSpace(workspaceRoot), "state", "fork-sidechain",
+			formerSanitize(sessionID), formerSanitize(forkLabel)+"-"+formerSanitize(runKey)+".jsonl")
+	}
+	for _, sid := range []string{
+		"cron-job-1-1790000000",
+		"webchat-8dac8616",
+		"session with spaces",
+		"UPPER/../../case",
+		"trailing-whitespace ",
+	} {
+		root := filepath.Join(t.TempDir(), "ws root")
+		got := SidechainFilePath(root, sid, "code review", "run 2026-10-04T10:00:00Z")
+		want := former(root, sid, "code review", "run 2026-10-04T10:00:00Z")
+		if got != want {
+			t.Fatalf("SidechainFilePath(%q) = %q, want the former %q", sid, got, want)
+		}
+	}
 }

@@ -1,0 +1,17 @@
+id: csharp-ls
+display_name: csharp-ls
+languages: [C#]
+priority: 100
+command: csharp-ls
+extension_to_language: {.cs: csharp, .csx: csharp}
+root_markers: ["*.sln", "*.slnx", "*.csproj", global.json, Directory.Build.props]
+env_passthrough: [DOTNET_ROOT, DOTNET_CLI_HOME, NUGET_PACKAGES]
+detect:
+  extra_dirs: ["~/.dotnet/tools"]
+  version_args: [--version]
+install:
+  - requires: dotnet
+    argv: [dotnet, tool, install, --global, csharp-ls]
+startup_timeout: 120
+readiness: progress
+notes: "Needs the .NET SDK. Run dotnet restore for complete diagnostics."

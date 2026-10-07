@@ -229,12 +229,17 @@ type Renderer struct {
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
 	planMode bool
-	// autoContinueNotice is the warning line under the composer while a
-	// conversation stopped by a usage limit waits to continue by itself.
-	autoContinueNotice string
-	composerTokens     ComposerTokenStats
-	fullBodyMode       bool
-	cwd                string
+	// autoContinueNotices are the warning lines under the composer while a view
+	// waits to continue itself after a usage limit, keyed by the view they
+	// belong to ("" is the conversation's own, a roster key is that subagent's).
+	autoContinueNotices map[string]string
+	// composerTokens is the footer's token budget, keyed by the view it
+	// belongs to: "" is the conversation's own, a roster key is that
+	// subagent's (each subagent's view answers "how much context is left for
+	// this subagent", decision D4 point 4).
+	composerTokens ComposerTokenStatsByView
+	fullBodyMode   bool
+	cwd            string
 	// spinnerPhase is the animation frame for in-flight tools' Braille spinner
 	// and for the indeterminate compact progress bar. It is derived from the
 	// time since spinnerEpoch rather than counted per paint, so the animation
@@ -304,11 +309,10 @@ type Renderer struct {
 	// open and readable long after the roster row that described it is gone,
 	// which is precisely when the footer is the only thing still naming it.
 	subagentTypes map[string]string
-	// subagentModels holds the types that run on a model of their own, as
-	// agents.definitions[<type>].llm_providers configures them. A type absent
-	// from the map runs on the primary agent's model, exactly as the runtime's
-	// typed-provider wrapper falls through, so the footer shows this renderer's
-	// own ComposerFooter for it.
+	// subagentModels holds the model each spawned execution runs on, as its
+	// spawn announced it — resolved once by the engine, keyed by the agent.
+	// A spawn that named none leaves no entry, and the footer then names no
+	// model for that view rather than borrowing the conversation's.
 	subagentModels map[string]ComposerFooter
 	// fanoutLineOwners maps each visual line the last renderFanout wrote to the
 	// index of the fanout content line it came from (-1 for header and spacing).
@@ -317,7 +321,14 @@ type Renderer struct {
 	fanoutLineOwners []int
 	// activeView is the AgentID of the currently-displayed view. Empty string
 	// means the primary (main agent) view.
-	activeView      string
+	activeView string
+	// rosterCursor is the agent the roster's keyboard cursor points at, keyed
+	// the same way activeView is (primary view "", subagent by roster key).
+	// Every view change carries the cursor onto the new view — assignActiveView
+	// is the only writer of activeView and it moves the cursor with it — so
+	// while the user is not moving through the roster with Up/Down the cursor
+	// names the agent whose transcript is on screen.
+	rosterCursor    string
 	viewBrowseState map[string]viewportBrowseState
 	// vpScrollOffset is the absolute row at the top of the visible window;
 	// vpFollow keeps it pinned to the bottom as new frames arrive until the user
@@ -507,6 +518,20 @@ type ComposerTokenStats struct {
 	OutputTokens  int
 	PercentLeft   int
 	ContextWindow int
+}
+
+// ComposerTokenStatsByView is the footer's token budget kept per view, keyed by
+// the view it belongs to ("" for the conversation's own, a roster key for a
+// subagent's). A subagent's view answers the "how much context is left"
+// question about that subagent, from that subagent's own window.
+type ComposerTokenStatsByView map[string]ComposerTokenStats
+
+func (m ComposerTokenStatsByView) get(view string) ComposerTokenStats {
+	return m[strings.TrimSpace(view)]
+}
+
+func (m ComposerTokenStatsByView) set(view string, stats ComposerTokenStats) {
+	m[strings.TrimSpace(view)] = stats
 }
 
 func NewRenderer(out io.Writer, err io.Writer) *Renderer {
@@ -770,16 +795,20 @@ func (r *Renderer) finalizePendingToolsVM(vm *viewModel) bool {
 // Transient status sources, highest priority first. A readiness wait is the
 // most urgent thing on screen because it is what the reader is waiting on; a
 // migration outranks the ordinary working line because it is a foreground
-// operation the user started and cannot see otherwise.
+// operation the user started and cannot see otherwise; an install the user
+// confirmed from a language-server recommendation sits with it for the same
+// reason.
 const (
 	transientSourceMCP     = "mcp"
 	transientSourceMigrate = "migrate"
+	transientSourceLSP     = "lsp"
 	transientSourceWorking = "working"
 )
 
 var transientSourcePriority = []string{
 	transientSourceMCP,
 	transientSourceMigrate,
+	transientSourceLSP,
 	transientSourceWorking,
 }
 
@@ -1878,11 +1907,11 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if suffix != "" {
 			line += " " + suffixStyle.Render(suffix)
 		}
-		if toolStatusPending(f) {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "   "))
-		} else {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
-		}
+		// A wrapped header continues under "  │ " in every state. The folded
+		// header foldBlock rebuilds always wraps under that gutter, so a running
+		// card that continued under bare spaces instead lost its rule, or grew
+		// one mid-run, depending on which of the two paths painted it.
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
 	} else {
 		line := bulletStyle.Render(markerGlyph)
 		if title != "" {
@@ -1891,11 +1920,7 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		if summary != "" {
 			line += " " + summaryStyle.Render(summary)
 		}
-		if toolStatusPending(f) {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "   "))
-		} else {
-			_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
-		}
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
 	}
 
 	if f.Kind == FrameTool && isMCPToolTitle(title) && toolStatusPending(f) {
@@ -2264,20 +2289,8 @@ func failedActionPhrase(toolName string) string {
 		return "fetch"
 	case "web_search", "websearch":
 		return "search"
-	case "subagent_run":
-		return "run agent"
-	case "subagent_send":
-		return "send agent"
-	case "subagent_status":
-		return "check agent"
-	case "subagent_wait":
-		return "wait for agent"
-	case "subagent_continue":
-		return "continue agent"
-	case "subagent_close":
-		return "close agent"
-	case "subagent_list":
-		return "list agents"
+	case "lsp":
+		return "look up"
 	case "enter_plan_mode":
 		return "enter plan mode"
 	case "exit_plan_mode":
@@ -2639,6 +2652,33 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 			target = q
 		}
 
+	case lower == "lsp":
+		if isFailed {
+			action = "Failed to " + failedActionPhrase(lower)
+		} else if isRunning || isPending {
+			action = "Looking up"
+		} else {
+			action = "Looked up"
+		}
+		target = inputString(meta, "operation")
+		qualifier := ""
+		if symbol := inputString(meta, "symbol"); symbol != "" {
+			qualifier = symbol
+		} else if query := inputString(meta, "query"); query != "" {
+			qualifier = query
+		} else if p := inputString(meta, "file_path"); p != "" {
+			qualifier = displayPath(p, cwd)
+			if line, ok := inputInt(meta, "line"); ok && line > 0 {
+				qualifier = fmt.Sprintf("%s:%d", qualifier, line)
+			}
+		}
+		switch {
+		case target != "" && qualifier != "":
+			target = target + " · " + qualifier
+		case qualifier != "":
+			target = qualifier
+		}
+
 	case lower == "retrieve_output":
 		switch {
 		case isFailed:
@@ -2795,9 +2835,9 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		} else {
 			action = "Asked user"
 		}
-		if q := inputString(meta, "question"); q != "" {
-			target = truncateForDisplay(q, 60)
-		}
+		// What the call asks, named in full: the same words the web's card
+		// header names it with.
+		target = tool.UserInteractionQuestionsLabel(meta.Input)
 
 	// --- Context ---
 	case lower == "working_set_show":
@@ -2828,103 +2868,6 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 			action = "Dropped"
 		}
 		target = displayP
-
-	// --- Subagent ---
-	case lower == "subagent_run":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Running agent"
-		} else {
-			action = "Agent"
-		}
-		if t := inputString(meta, "title"); t != "" {
-			target = t
-		} else if d := inputString(meta, "description"); d != "" {
-			target = truncateForDisplay(d, 60)
-		}
-		if at := strings.TrimSpace(meta.AgentType); at != "" {
-			suffix = at
-		}
-
-	case lower == "subagent_fanout":
-		return "", "", ""
-
-	case lower == "subagent_send":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Sending agent"
-		} else {
-			action = "Sent agent"
-		}
-		if t := inputString(meta, "title"); t != "" {
-			target = t
-		} else if d := inputString(meta, "description"); d != "" {
-			target = truncateForDisplay(d, 60)
-		}
-		if at := inputString(meta, "subagent_type"); at != "" {
-			suffix = at
-		} else if at := strings.TrimSpace(meta.AgentType); at != "" {
-			suffix = at
-		}
-
-	case lower == "subagent_status":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Checking agent"
-		} else {
-			action = "Agent status"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_wait":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Waiting for agent"
-		} else {
-			action = "Agent done"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_continue":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Continuing agent"
-		} else {
-			action = "Continued agent"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_close":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Closing agent"
-		} else {
-			action = "Closed agent"
-		}
-		if tid := inputString(meta, "task_id"); tid != "" {
-			target = tid
-		}
-
-	case lower == "subagent_list":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Listing agents"
-		} else {
-			action = "Agent list"
-		}
 
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
@@ -3683,7 +3626,7 @@ func summaryToolBody(f Frame, title string) string {
 	// before the call completes, so suppress it explicitly here rather than
 	// relying on empty Content.
 	if f.StreamingOutput {
-		return strings.TrimSpace(f.Content)
+		return trimBlankFenceEdges(strings.Split(f.Content, "\n"))
 	}
 	if toolStatusPending(f) && !f.StreamingOutput {
 		return ""
@@ -3692,7 +3635,7 @@ func summaryToolBody(f Frame, title string) string {
 	if toolStatusCanceled(f) {
 		return ""
 	}
-	content := strings.TrimSpace(f.Content)
+	content := trimBlankFenceEdges(strings.Split(f.Content, "\n"))
 	if content == "" {
 		return ""
 	}
@@ -4214,10 +4157,11 @@ func (r *Renderer) renderUserMessage(content string) {
 }
 
 // NoteSubagentSpawned records what kind of agent a subagent is, so its own view
-// can be titled. The surface calls it from the same spawn notification that adds
+// can be titled, and the model that one execution runs on, so the view's footer
+// can name it. The surface calls it from the same spawn notification that adds
 // the roster row, because the row is dropped the moment the subagent finishes
-// while the view it opened stays readable.
-func (r *Renderer) NoteSubagentSpawned(agentID, agentType string) {
+// while the view it opened stays readable. Entries are never removed.
+func (r *Renderer) NoteSubagentSpawned(agentID, agentType string, model ComposerFooter) {
 	agentID = strings.TrimSpace(agentID)
 	agentType = strings.TrimSpace(agentType)
 	if r == nil || agentID == "" || agentType == "" {
@@ -4229,19 +4173,13 @@ func (r *Renderer) NoteSubagentSpawned(agentID, agentType string) {
 		r.subagentTypes = make(map[string]string)
 	}
 	r.subagentTypes[agentID] = agentType
-}
-
-// SetSubagentModels declares which subagent types run on a model of their own.
-// The map mirrors the runtime's per-type client map: a type is present only
-// when agents.definitions[<type>].llm_providers gives it a chain, and an absent
-// type runs on the primary agent's model.
-func (r *Renderer) SetSubagentModels(models map[string]ComposerFooter) {
-	if r == nil {
+	if strings.TrimSpace(model.Model) == "" && strings.TrimSpace(model.ReasoningEffort) == "" {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.subagentModels = models
+	if r.subagentModels == nil {
+		r.subagentModels = make(map[string]ComposerFooter)
+	}
+	r.subagentModels[agentID] = model
 }
 
 func (r *Renderer) SetComposerFooter(footer ComposerFooter) {
@@ -4264,29 +4202,39 @@ func (r *Renderer) SetPlanMode(on bool) {
 	r.planMode = on
 }
 
-// SetAutoContinueNotice sets the warning line drawn under the composer while a
-// conversation stopped by a usage limit waits to continue by itself; "" removes
-// it. The caller repaints the composer.
-func (r *Renderer) SetAutoContinueNotice(text string) {
+// SetAutoContinueNotice sets the warning line drawn under the composer for one
+// view ("" for the conversation's own, a roster key for a subagent's) while it
+// waits to continue by itself; "" removes it. The caller repaints the composer.
+func (r *Renderer) SetAutoContinueNotice(view, text string) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.autoContinueNotice = strings.TrimSpace(text)
+	view = strings.TrimSpace(view)
+	text = strings.TrimSpace(text)
+	if text == "" {
+		delete(r.autoContinueNotices, view)
+		return
+	}
+	if r.autoContinueNotices == nil {
+		r.autoContinueNotices = map[string]string{}
+	}
+	r.autoContinueNotices[view] = text
 }
 
-// autoContinueNoticeLineLocked renders the auto-continue notice for a
-// termWidth-wide row, or "" when there is none. Caller holds r.mu.
+// autoContinueNoticeLineLocked renders the auto-continue notice of the view on
+// screen for a termWidth-wide row, or "" when there is none. Caller holds r.mu.
 func (r *Renderer) autoContinueNoticeLineLocked(termWidth int) string {
-	if r.autoContinueNotice == "" || r.activeView != "" {
+	notice := r.autoContinueNotices[strings.TrimSpace(r.activeView)]
+	if notice == "" {
 		return ""
 	}
 	width := termWidth - sharedBlockFooterTruncateExtraRoom
 	if width <= 0 {
 		return ""
 	}
-	return autoContinueNoticeStyle + runewidth.Truncate(autoContinueNoticeGlyph+r.autoContinueNotice, width, "…") + sharedBlockReset
+	return autoContinueNoticeStyle + runewidth.Truncate(autoContinueNoticeGlyph+notice, width, "…") + sharedBlockReset
 }
 
 // planModeFooterLabel is the footer's Plan-mode segment, which also says how
@@ -4294,44 +4242,53 @@ func (r *Renderer) autoContinueNoticeLineLocked(termWidth int) string {
 const planModeFooterLabel = "plan mode (shift+tab to exit)"
 
 // SetComposerTokenStats updates the live token figures shown on the right side
-// of the composer footer and re-renders the composer if it is active.
-func (r *Renderer) SetComposerTokenStats(stats ComposerTokenStats) {
+// of the composer footer for one view ("" for the conversation's own, a roster
+// key for a subagent's) and re-renders the composer if it is active.
+func (r *Renderer) SetComposerTokenStats(view string, stats ComposerTokenStats) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	r.composerTokens = stats
+	if r.composerTokens == nil {
+		r.composerTokens = ComposerTokenStatsByView{}
+	}
+	r.composerTokens.set(view, stats)
 	r.mu.Unlock()
 }
 
-// ComposerTokenStats returns a snapshot of the current composer token stats.
-func (r *Renderer) ComposerTokenStats() ComposerTokenStats {
+// ComposerTokenStats returns a snapshot of one view's composer token stats.
+func (r *Renderer) ComposerTokenStats(view string) ComposerTokenStats {
 	if r == nil {
 		return ComposerTokenStats{}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.composerTokens
+	return r.composerTokens.get(view)
 }
 
-// RefreshComposerTokenUsage updates only the in/out figures of the composer
-// footer, preserving the Active flag and PercentLeft captured from the last
-// budget update. The footer's in/out must stay in lockstep with the live
+// RefreshComposerTokenUsage updates only the in/out figures of one view's
+// composer footer, preserving the Active flag and PercentLeft captured from the
+// last budget update. The footer's in/out must stay in lockstep with the live
 // "Working"/"Worked for" line, which refreshes on every token-usage delta; the
 // budget message that carries PercentLeft fires less often, so refreshing in/out
 // only when it arrives left the footer trailing the working line by many deltas.
 // No-op when the footer is not active, so it never lights up a blank footer.
-func (r *Renderer) RefreshComposerTokenUsage(inputTokens, outputTokens int) {
+func (r *Renderer) RefreshComposerTokenUsage(view string, inputTokens, outputTokens int) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	if !r.composerTokens.Active {
+	stats := r.composerTokens.get(view)
+	if !stats.Active {
 		r.mu.Unlock()
 		return
 	}
-	r.composerTokens.InputTokens = inputTokens
-	r.composerTokens.OutputTokens = outputTokens
+	stats.InputTokens = inputTokens
+	stats.OutputTokens = outputTokens
+	if r.composerTokens == nil {
+		r.composerTokens = ComposerTokenStatsByView{}
+	}
+	r.composerTokens.set(view, stats)
 	r.mu.Unlock()
 }
 
@@ -4379,11 +4336,10 @@ func layoutComposerFooter(left, right string, maxWidth int) string {
 // ComposerRenderState bundles all data the renderer needs to paint the
 // composer area including the non-modal slash overlay rows below it.
 type ComposerRenderState struct {
-	Text           string
-	Cursor         *int
-	PendingInput   ComposerPendingInputPreview
-	AgentRoster    AgentRosterSnapshot
-	RosterSelected int
+	Text         string
+	Cursor       *int
+	PendingInput ComposerPendingInputPreview
+	AgentRoster  AgentRosterSnapshot
 	// RosterFocused is true once the user has moved keyboard focus onto the
 	// roster panel via Down. Only the focused row gets the per-kind hint text.
 	RosterFocused bool
@@ -5323,6 +5279,11 @@ func composerCursorVisualPos(text string, cursorRunes int, spans []visualLineSpa
 
 // renderFanout renders a FrameFanout as a non-collapsible block with header
 // and full body always visible. Used for subagent_fanout and subagent_run display.
+// fanoutClockNow is the clock a running task row's live elapsed time is read
+// from at paint time. It exists as a variable so a test can pin "now" and
+// assert the exact text a row shows.
+var fanoutClockNow = time.Now
+
 func (r *Renderer) renderFanout(f Frame) {
 	summary := strings.TrimSpace(f.Summary)
 	content := strings.TrimSpace(f.Content)
@@ -5337,7 +5298,7 @@ func (r *Renderer) renderFanout(f Frame) {
 			r.fanoutLineOwners = append(r.fanoutLineOwners, contentLine)
 		}
 	}
-	if summary == "" && content == "" {
+	if summary == "" && content == "" && f.FanoutCallError == "" {
 		return
 	}
 	// Header: bullet + summary
@@ -5357,42 +5318,85 @@ func (r *Renderer) renderFanout(f Frame) {
 		_, _ = fmt.Fprintln(r.out, headerLine)
 		owner(-1, strings.Count(headerLine, "\n")+1)
 	}
+	// The call's own failure sits under the header, above every task row: it
+	// belongs to no task, and a copy on each row would say it N times.
+	callErr := strings.TrimSpace(f.FanoutCallError)
+	if callErr != "" {
+		for _, line := range strings.Split(callErr, "\n") {
+			_, _ = fmt.Fprintln(r.out, "    "+strings.TrimRight(line, "\r"))
+			owner(-1, 1)
+		}
+	}
+	if content == "" {
+		// A settled call about no tasks (an empty list) says so; a call still
+		// running with nothing to show yet draws its header alone. A failed
+		// call's error line already says everything — "(no output)" under it
+		// would be noise.
+		if f.Final && summary != "" && callErr == "" {
+			_, _ = fmt.Fprintln(r.out, "    "+toolNoOutputText)
+			owner(-1, 1)
+		}
+		_, _ = fmt.Fprintln(r.out)
+		owner(-1, 1)
+		return
+	}
 	// Body: tree hierarchy with └ symbols showing parent-child relationship.
 	// Task lines (starting with ✓/✗/○) are first-level children prefixed
 	// with "  └ "; stat and activity lines are continuations indented with
-	// "    " to align under the task title text.
-	if content != "" {
-		bodyWidth := termWidthOrDefault() - contentRightMargin
-		if bodyWidth < 20 {
-			bodyWidth = 20
+	// "    " to align under the task title text. The body is content text, so
+	// it carries the assistant body's brightness — never dimmed.
+	bodyWidth := termWidthOrDefault() - contentRightMargin
+	if bodyWidth < 20 {
+		bodyWidth = 20
+	}
+	for contentLine, line := range strings.Split(content, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			_, _ = fmt.Fprintln(r.out)
+			owner(-1, 1)
+			continue
 		}
-		for contentLine, line := range strings.Split(content, "\n") {
-			line = strings.TrimRight(line, "\r")
-			if strings.TrimSpace(line) == "" {
-				_, _ = fmt.Fprintln(r.out)
-				owner(-1, 1)
-				continue
-			}
-			lead, leadWidth, text := fanoutRowLead(line)
-			wrapWidth := bodyWidth - leadWidth
-			if wrapWidth < 20 {
-				wrapWidth = 20
-			}
-			wrapped := wrapCardLine(text, wrapWidth)
-			continuation := strings.Repeat(" ", leadWidth)
-			for i, wl := range wrapped {
-				p := lead
-				if i > 0 {
-					p = continuation
-				}
-				styled := lipgloss.NewStyle().Faint(true).Render(p + wl)
-				_, _ = fmt.Fprintln(r.out, styled)
-			}
-			owner(contentLine, len(wrapped))
+		if suffix := fanoutClockSuffix(f, contentLine); suffix != "" {
+			line += suffix
 		}
+		lead, leadWidth, text := fanoutRowLead(line)
+		wrapWidth := bodyWidth - leadWidth
+		if wrapWidth < 20 {
+			wrapWidth = 20
+		}
+		wrapped := wrapCardLine(text, wrapWidth)
+		continuation := strings.Repeat(" ", leadWidth)
+		for i, wl := range wrapped {
+			p := lead
+			if i > 0 {
+				p = continuation
+			}
+			_, _ = fmt.Fprintln(r.out, p+wl)
+		}
+		owner(contentLine, len(wrapped))
 	}
 	_, _ = fmt.Fprintln(r.out)
 	owner(-1, 1)
+}
+
+// fanoutClockSuffix is the elapsed time a task row's title carries: the final
+// elapsed of an ended execution, or a running clock read at paint time. Rows
+// that never started show nothing.
+func fanoutClockSuffix(f Frame, contentLine int) string {
+	if contentLine < 0 || contentLine >= len(f.FanoutLineClocks) {
+		return ""
+	}
+	clock := f.FanoutLineClocks[contentLine]
+	if clock.Start.IsZero() {
+		return ""
+	}
+	if clock.End.IsZero() {
+		return " · " + formatWorkingElapsed(fanoutClockNow().Sub(clock.Start))
+	}
+	if d := clock.End.Sub(clock.Start); d > 0 {
+		return " · " + formatDuration(d)
+	}
+	return ""
 }
 
 // fanoutPrefixWidth is how many columns every fanout row is drawn past the
@@ -5531,28 +5535,14 @@ func shortAgentID(id string) string {
 }
 
 // agentRosterRowDetail is what the row's agent is working on, shown to the
-// right of its name: the tool it is running right now when one is in flight,
-// and otherwise the short title its dispatcher named the task with. A subagent
-// that shows only its type tells the reader nothing about which of several it
-// is.
-//
-// The dispatch prompt is the last resort, not the default. It is a whole
-// instruction — several sentences, often a path — and a row of a roster cannot
-// say anything with the first 56 columns of one; the prompt has a place of its
-// own as the first message of the agent's view.
+// right of its name: the task this agent was dispatched to do, by the same
+// name its card shows. The tool it is running right now already has its place
+// on the card's third layer; a row that switched to it would lose the name of
+// the job.
 func agentRosterRowDetail(row AgentRosterRow) string {
-	detail := strings.TrimSpace(row.Activity)
-	if detail == "" {
-		detail = strings.TrimSpace(row.Title)
-	}
-	if detail == "" {
-		detail = strings.TrimSpace(row.Task)
-	}
+	detail := strings.TrimSpace(row.Title)
 	if detail == "" {
 		return ""
-	}
-	if idx := strings.IndexAny(detail, "\r\n"); idx >= 0 {
-		detail = strings.TrimSpace(detail[:idx])
 	}
 	return truncateForDisplay(detail, agentRosterDetailMaxWidth)
 }
@@ -5585,25 +5575,84 @@ func agentRosterIndexForView(snapshot AgentRosterSnapshot, activeView string) in
 // moving through the roster that is the row they are on — the one Enter would
 // open — and otherwise it is the agent whose transcript is on screen.
 //
-// Deriving it from the view is what keeps the two in step. The roster used to
-// carry its own selection, written only by Up/Down, so every other way of
-// changing the view — clicking a subagent's card, escaping back to the
-// conversation — left the cursor pointing at whatever row was last navigated
-// to, naming an agent the user was not looking at.
-func agentRosterMarkedIndex(snapshot AgentRosterSnapshot, focused bool, cursor int, activeView string) int {
+// The cursor and the view are both the renderer's — keyed the same way — and
+// every change of the view carries the cursor onto it, so under focus the two
+// differ only while the user is actually walking the roster with Up/Down.
+// cursorIndex is where the renderer's cursor resolves in these rows; the view
+// is only consulted when the roster does not hold the keyboard focus.
+func agentRosterMarkedIndex(snapshot AgentRosterSnapshot, focused bool, cursorIndex int, activeView string) int {
 	if len(snapshot.Rows) == 0 {
 		return -1
 	}
 	if !focused {
 		return agentRosterIndexForView(snapshot, activeView)
 	}
-	if cursor < 0 {
+	if cursorIndex < 0 {
 		return 0
 	}
-	if cursor >= len(snapshot.Rows) {
+	if cursorIndex >= len(snapshot.Rows) {
 		return len(snapshot.Rows) - 1
 	}
-	return cursor
+	return cursorIndex
+}
+
+// agentRosterRowViewKey is the view a roster row keys on: the primary row owns
+// the conversation view (""), a subagent row its roster key. The same
+// translation the roster line input applies when Enter opens a row.
+func agentRosterRowViewKey(row AgentRosterRow) string {
+	if strings.EqualFold(strings.TrimSpace(row.Kind), "subagent") {
+		return strings.TrimSpace(row.ID)
+	}
+	return ""
+}
+
+// rosterCursorIndex is where the roster cursor resolves in these rows. The
+// cursor is an agent key, so another row leaving the roster cannot move it
+// onto a different agent; when its own row is gone the cursor follows the view
+// on screen, and when that has no row either it lands on the first row.
+// Caller holds r.mu.
+func (r *Renderer) rosterCursorIndex(snapshot AgentRosterSnapshot) int {
+	for i, row := range snapshot.Rows {
+		if agentRosterRowViewKey(row) == r.rosterCursor {
+			return i
+		}
+	}
+	if idx := agentRosterIndexForView(snapshot, r.activeView); idx >= 0 {
+		return idx
+	}
+	return 0
+}
+
+// MoveRosterCursor moves the roster's keyboard cursor over the snapshot's rows
+// by delta, following the roster's navigation rules: a forward move wraps from
+// the last row back to the first, a backward move stops at the first row —
+// the caller unfocuses the roster there rather than wrapping. The cursor
+// lands on the target row's agent, so the move is by agent key, not by row
+// position.
+func (r *Renderer) MoveRosterCursor(snapshot AgentRosterSnapshot, delta int) {
+	if r == nil || len(snapshot.Rows) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	idx := r.rosterCursorIndex(snapshot) + delta
+	if idx >= len(snapshot.Rows) {
+		idx = 0
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	r.rosterCursor = agentRosterRowViewKey(snapshot.Rows[idx])
+}
+
+// RosterCursorRow is the roster row the keyboard cursor points at.
+func (r *Renderer) RosterCursorRow(snapshot AgentRosterSnapshot) (AgentRosterRow, bool) {
+	if r == nil || len(snapshot.Rows) == 0 {
+		return AgentRosterRow{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return snapshot.Rows[r.rosterCursorIndex(snapshot)], true
 }
 
 // formatAgentRosterLines paints the roster. marked is the row the cursor points
@@ -6047,7 +6096,7 @@ func renderDiffCore(files []event.FileStat, theme DiffTheme, bandW int) string {
 	if bandW < 20 {
 		bandW = 20
 	}
-	p := claudeDiffPaletteFor(theme)
+	p := diffPaletteFor(theme)
 
 	var sb strings.Builder
 	for i, f := range files {
@@ -6067,7 +6116,7 @@ func renderDiffCore(files []event.FileStat, theme DiffTheme, bandW int) string {
 				sb.WriteByte('\n')
 			}
 			for _, line := range hunk.Lines {
-				for _, row := range renderClaudeDiffLine(line, p, gutterW, bandW, lexer, style) {
+				for _, row := range renderDiffLine(line, p, gutterW, bandW, lexer, style) {
 					sb.WriteString(row)
 					sb.WriteByte('\n')
 				}
@@ -6114,10 +6163,10 @@ func softWrap(text string, maxWidth int) []string {
 	return wrapCardLine(text, maxWidth)
 }
 
-// claudeDiffPalette holds the truecolor row backgrounds and chroma style used
+// diffPalette holds the truecolor row backgrounds and chroma style used
 // for full-width add/del bands plus syntax highlighting. Context lines carry no
 // band.
-type claudeDiffPalette struct {
+type diffPalette struct {
 	noColor  bool
 	addBG    [3]uint8
 	delBG    [3]uint8
@@ -6207,14 +6256,14 @@ func plainSyntaxBrightnessFor(theme DiffTheme) syntaxBrightness {
 	return syntaxBrightness{target: plainLuminanceDark, lighten: true}
 }
 
-func claudeDiffPaletteFor(theme DiffTheme) claudeDiffPalette {
+func diffPaletteFor(theme DiffTheme) diffPalette {
 	if noColorActive() {
-		return claudeDiffPalette{noColor: true}
+		return diffPalette{noColor: true}
 	}
 	trueColor := terminalTrueColor()
 	switch theme {
 	case DiffThemeLight:
-		return claudeDiffPalette{
+		return diffPalette{
 			addBG:       [3]uint8{0xcc, 0xf2, 0xd4},
 			delBG:       [3]uint8{0xfb, 0xd5, 0xd2},
 			addBG256:    "194", // 256-color light green fallback
@@ -6227,7 +6276,7 @@ func claudeDiffPaletteFor(theme DiffTheme) claudeDiffPalette {
 			trueColor:   trueColor,
 		}
 	default: // dark + unknown
-		return claudeDiffPalette{
+		return diffPalette{
 			addBG:       [3]uint8{0x12, 0x4d, 0x1f},
 			delBG:       [3]uint8{0x5a, 0x18, 0x18},
 			addBG256:    "22", // 256-color dark green fallback
@@ -6249,7 +6298,7 @@ func claudeDiffPaletteFor(theme DiffTheme) claudeDiffPalette {
 // 24-bit colour: the cube has no dark green or dark red near them, so
 // quantisation lands on the grey ramp and the row loses the one thing the band
 // is for — saying at a glance whether the line was added or removed.
-func (p claudeDiffPalette) bandBG(rgb [3]uint8, fallback256 string) string {
+func (p diffPalette) bandBG(rgb [3]uint8, fallback256 string) string {
 	if p.trueColor {
 		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", rgb[0], rgb[1], rgb[2])
 	}
@@ -6260,7 +6309,7 @@ func (p claudeDiffPalette) bandBG(rgb [3]uint8, fallback256 string) string {
 // gutter colour. ANSI dim (SGR 2) is deliberately never used inside a diff: it
 // halves the brightness of whatever the terminal's palette resolves to, which
 // is exactly the washed-out look the normalisation above exists to prevent.
-func (p claudeDiffPalette) meta(text string) string {
+func (p diffPalette) meta(text string) string {
 	if p.noColor || p.gutterColor == "" {
 		return text
 	}
@@ -6452,7 +6501,7 @@ type diffSeg struct {
 
 // resolveDiffHighlight picks the chroma lexer (by filename) and style for a
 // file. Returns (nil, nil) when color is disabled, so callers render plain text.
-func resolveDiffHighlight(path string, p claudeDiffPalette) (chroma.Lexer, *chroma.Style) {
+func resolveDiffHighlight(path string, p diffPalette) (chroma.Lexer, *chroma.Style) {
 	if p.noColor {
 		return nil, nil
 	}
@@ -6466,7 +6515,7 @@ func resolveDiffHighlight(path string, p claudeDiffPalette) (chroma.Lexer, *chro
 // highlightSegs tokenizes a single line of code with chroma and returns
 // foreground-colored segments. Tokenization is per-line, which loses cross-line
 // state (block comments, multi-line strings) but is adequate for diff rows.
-func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p claudeDiffPalette) []diffSeg {
+func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p diffPalette) []diffSeg {
 	plain := []diffSeg{{text: text}}
 	if lexer == nil || st == nil || strings.TrimSpace(text) == "" {
 		return plain
@@ -6494,7 +6543,7 @@ func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p claudeDi
 	return segs
 }
 
-// renderClaudeDiffLine renders one diff line (possibly soft-wrapped into
+// renderDiffLine renders one diff line (possibly soft-wrapped into
 // several visual rows) with a right-aligned line-number gutter, a +/-/space
 // marker, syntax-highlighted code, and for add/del lines a full-width
 // background band padded to bandW.
@@ -6502,7 +6551,7 @@ func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p claudeDi
 // gutterW is the width reserved for the line number. bandW is the total visible
 // width the band (and padding) should fill. lexer/st drive syntax highlighting
 // (both nil = plain code).
-func renderClaudeDiffLine(l event.DiffLine, p claudeDiffPalette, gutterW, bandW int, lexer chroma.Lexer, st *chroma.Style) []string {
+func renderDiffLine(l event.DiffLine, p diffPalette, gutterW, bandW int, lexer chroma.Lexer, st *chroma.Style) []string {
 	var num int
 	var marker, markerColor, bg string
 	band := false
@@ -6681,7 +6730,7 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 	}
 	f := doc.Files[0]
 
-	p := claudeDiffPaletteFor(theme)
+	p := diffPaletteFor(theme)
 	lexer, style := resolveDiffHighlight(path, p)
 	gutterW := diffGutterWidthFor(f.Hunks)
 	bandW := termWidthOrDefault() - 4 // 4 = tool-card prefix width
@@ -6697,12 +6746,99 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 			out = append(out, "    "+p.meta("⋮"))
 		}
 		for _, line := range hunk.Lines {
-			for _, row := range renderClaudeDiffLine(line, p, gutterW, bandW, lexer, style) {
+			for _, row := range renderDiffLine(line, p, gutterW, bandW, lexer, style) {
 				out = append(out, "    "+row)
 			}
 		}
 	}
+	out = append(out, lspDiagnosticsCardRows(content)...)
 	return strings.Join(out, "\n"), true
+}
+
+// lspDiagnosticsCardRows parses the "lsp diagnostics:" section a tool body
+// carries after its turn diff (tool.lspDiagnosticsSection) into the card rows
+// that follow the diff: one summary line, then the section's problem lines.
+// Long cards are folded by the existing foldBlock, so no folding happens here.
+//
+// Every row is wrapped at the content width here: the painter cuts a row at
+// the terminal edge (fitPaintRow), so a long compiler message emitted as one
+// row lost its tail.
+func lspDiagnosticsCardRows(content string) []string {
+	lines := strings.Split(content, "\n")
+	headerIdx := -1
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "lsp diagnostics:") {
+			headerIdx = i
+			break
+		}
+	}
+	if headerIdx < 0 {
+		return nil
+	}
+	// "lsp diagnostics: 2 new in 1 file" → fields are
+	// [lsp diagnostics: <new> new in <files> file]; anything else (the
+	// pending-only header) keeps the pending summary.
+	summary := "Diagnostics pending"
+	if fields := strings.Fields(strings.TrimSpace(lines[headerIdx])); len(fields) >= 6 && fields[3] == "new" && fields[4] == "in" {
+		if n, errN := strconv.Atoi(fields[2]); errN == nil {
+			if m, errM := strconv.Atoi(fields[5]); errM == nil {
+				summary = lspDiagnosticsSummaryLine(n, m)
+			}
+		}
+	}
+	width := termWidthOrDefault() - contentRightMargin
+	rows := lspDiagnosticsWrappedRows("  └ ", summary, width)
+	// The section's body is the ```text fence that follows the header.
+	for i := headerIdx + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```text") {
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == "```" {
+					return rows
+				}
+				if strings.TrimSpace(lines[j]) == "" {
+					continue
+				}
+				// A problem line's own indent belongs to its lead, so the rows
+				// its message spills onto stay under the problem, not the file.
+				text := strings.TrimLeft(lines[j], " ")
+				indent := lines[j][:len(lines[j])-len(text)]
+				rows = append(rows, lspDiagnosticsWrappedRows("    "+indent, text, width)...)
+			}
+			return rows
+		}
+	}
+	return rows
+}
+
+// lspDiagnosticsWrappedRows wraps text after lead to width columns, each
+// continuation row hanging under the text.
+func lspDiagnosticsWrappedRows(lead, text string, width int) []string {
+	leadWidth := displayLineWidth(lead)
+	wrapWidth := width - leadWidth
+	if wrapWidth < 20 {
+		wrapWidth = 20
+	}
+	parts := wrapCardLine(text, wrapWidth)
+	rows := make([]string, len(parts))
+	for i, part := range parts {
+		if i == 0 {
+			rows[i] = lead + part
+			continue
+		}
+		rows[i] = strings.Repeat(" ", leadWidth) + part
+	}
+	return rows
+}
+
+func lspDiagnosticsSummaryLine(new, files int) string {
+	noun, fileWord := "diagnostic issues", "files"
+	if new == 1 {
+		noun = "diagnostic issue"
+	}
+	if files == 1 {
+		fileWord = "file"
+	}
+	return fmt.Sprintf("Found %d new %s in %d %s", new, noun, files, fileWord)
 }
 
 func turnDiffSummaryLine(added, deleted int) string {
@@ -7195,10 +7331,24 @@ type panelLine struct {
 	lead  string
 	text  string
 	style *lipgloss.Style
+	// chips, when set, takes the place of text: items laid out left to right
+	// panelChipGap cells apart and wrapped whole, so a tab's name and its count
+	// never part across rows (the tab bar).
+	chips []string
+	// col, when colWidth > 0, is a column of its own between lead and text:
+	// the name of a two-column row. See columnRows.
+	col      string
+	colWidth int
 }
 
 // rows wraps the line at width.
 func (l panelLine) rows(width int) []string {
+	if len(l.chips) > 0 {
+		return l.chipRows(width)
+	}
+	if l.colWidth > 0 {
+		return l.columnRows(width)
+	}
 	leadWidth := displayLineWidth(l.lead)
 	chunks := wrapPanelWords(l.text, maxInt(1, width-leadWidth))
 	rows := make([]string, len(chunks))
@@ -7377,6 +7527,8 @@ func buildUIPanel(panel *uiPanel, spinner string) slashPanel {
 		buildStatusPanel(b, panel)
 	case "mcp":
 		buildMCPPanel(b, panel, spinner)
+	case "lsp":
+		buildLSPPanel(b, panel, spinner)
 	}
 	return b.panel()
 }
@@ -7486,15 +7638,24 @@ func (b *panelBuilder) facts(facts []turn.StatusFact, styled map[string]string) 
 // box, a name column. The first row of a group takes the group's heading into
 // its focus, so bringing it into view never leaves the heading out.
 func (b *panelBuilder) selectable(selected bool, lead, text string) {
+	b.addSelectable(selected, panelLine{lead: lead, text: text})
+}
+
+// addSelectable puts the marker's margin before line's lead, making the line
+// the focus when it is the selected one. The first row of a group takes the
+// group's heading into its focus, so bringing it into view never leaves the
+// heading out.
+func (b *panelBuilder) addSelectable(selected bool, line panelLine) {
+	margin := panelIndent
 	if selected {
 		b.focusStart, b.focusEnd = len(b.body), len(b.body)+1
 		if b.heading >= 0 && b.grouped == 0 {
 			b.focusStart = b.heading
 		}
-		b.text(panelCursor+lead, text, nil)
-	} else {
-		b.text(panelIndent+lead, text, nil)
+		margin = panelCursor
 	}
+	line.lead = margin + line.lead
+	b.body = append(b.body, line)
 	b.grouped++
 }
 
@@ -7826,4 +7987,190 @@ func turnCountNoun(n int, noun string) string {
 		return "1 " + noun
 	}
 	return strconv.Itoa(n) + " " + noun + "s"
+}
+
+func buildLSPPanel(b *panelBuilder, panel *uiPanel, spinner string) {
+	switch panel.page {
+	case "detail":
+		buildLSPDetail(b, panel, spinner)
+	default:
+		buildLSPList(b, panel, spinner)
+	}
+}
+
+// lspStateText is one server's state with its glyph coloured by meaning, the
+// same writing mcpStatusText uses for MCP servers.
+func lspStateText(s event.LSPServerStatus, spinner string) string {
+	label := turn.LSPServerStateLabel(s)
+	switch {
+	case s.Installing, s.State == event.LSPStateStarting, s.State == event.LSPStateIndexing:
+		return panelGlyphStyle.Render(spinner) + " " + label
+	}
+	glyph, rest, found := strings.Cut(label, " ")
+	if !found {
+		return label
+	}
+	switch glyph {
+	case "✓":
+		return panelOKStyle.Render(glyph) + " " + rest
+	case "✗":
+		return panelFailStyle.Render(glyph) + " " + rest
+	case "△":
+		return panelWarnStyle.Render(glyph) + " " + rest
+	default:
+		return panelGlyphStyle.Render(glyph) + " " + rest
+	}
+}
+
+// lspProjectSubtitle is the /lsp list's one-line answer to "where am I":
+// nothing starts without a project, an untrusted project, the feature switch,
+// or the project and its enabled count.
+func lspProjectSubtitle(snap event.LSPSnapshot) string {
+	switch {
+	case snap.ProjectRoot == "":
+		return "No project: language servers start only in trusted projects"
+	case !snap.Trusted:
+		return snap.ProjectRoot + " · not trusted, servers do not start here"
+	case !snap.FeatureEnabled:
+		return "Turned off by features.lsp"
+	default:
+		enabled := 0
+		for _, s := range snap.Servers {
+			if s.Enabled {
+				enabled++
+			}
+		}
+		// "enabled" is an adjective here (spec: "{n} enabled"), so unlike
+		// turnCountNoun's real nouns it never takes a plural s.
+		return snap.ProjectRoot + " · " + strconv.Itoa(enabled) + " enabled"
+	}
+}
+
+func buildLSPList(b *panelBuilder, panel *uiPanel, spinner string) {
+	snap := panel.lsp
+	b.title("Language servers")
+	b.subtitle(lspProjectSubtitle(*snap))
+	row := 0
+	group := func(heading string, wantEnabled bool) {
+		first := true
+		for _, s := range snap.Servers {
+			if s.Enabled != wantEnabled {
+				continue
+			}
+			if first {
+				b.group(heading)
+				first = false
+			}
+			b.selectable(row == panel.cursor, "", s.ID+" · "+lspStateText(s, spinner))
+			row++
+		}
+	}
+	group("Enabled", true)
+	group("Available", false)
+	if snap.RecommendationsDisabled {
+		b.group("Recommendations")
+		b.selectable(row == panel.cursor, "", "Turn recommendations back on")
+		row++
+	}
+	if len(b.body) > 0 {
+		b.blank()
+	}
+	b.text(panelIndent, "Servers run on this machine outside the sandbox, only in trusted projects.", nil)
+	for _, note := range snap.ProjectNotes {
+		b.text(panelIndent, "Project file: "+note, nil)
+	}
+	if snap.RecommendationsDisabled {
+		b.text(panelIndent, "Recommendations are off ("+snap.RecommendationsDisabledReason+").", nil)
+	}
+	if notice := panel.notice[""]; notice != "" {
+		b.blank()
+		b.text(panelIndent, notice, nil)
+	}
+	rows := panelSelectableRows(panel)
+	if len(rows) == 0 {
+		b.hint("Esc to close")
+		return
+	}
+	b.hint("↑/↓ to navigate · Enter to open · Esc to close")
+}
+
+func buildLSPDetail(b *panelBuilder, panel *uiPanel, spinner string) {
+	s := lspPanelServer(panel)
+	if s == nil {
+		b.text(panelIndent, panel.server+" is no longer in this project's language server list", nil)
+		b.hint("Esc to go back")
+		return
+	}
+	b.title(s.ID + " language server")
+	var facts []turn.StatusFact
+	add := func(label, value string) {
+		if strings.TrimSpace(value) != "" {
+			facts = append(facts, turn.StatusFact{Label: label, Value: value})
+		}
+	}
+	add("State", turn.LSPServerStateLabel(*s))
+	add("Languages", strings.Join(s.Languages, ", "))
+	add("Scope", s.Scope)
+	add("Command", s.Command)
+	if s.BinaryPath != "" {
+		add("Binary", strings.TrimSuffix(s.BinaryPath+" · "+s.Version, " · "))
+	}
+	add("Roots", strings.Join(s.Roots, ", "))
+	if len(s.PIDs) > 0 {
+		pids := make([]string, 0, len(s.PIDs))
+		for _, pid := range s.PIDs {
+			pids = append(pids, strconv.Itoa(pid))
+		}
+		add("Processes", strings.Join(pids, ", "))
+	}
+	if s.OpenDocuments > 0 {
+		add("Open files", strconv.Itoa(s.OpenDocuments))
+	}
+	if s.Errors > 0 || s.Warnings > 0 {
+		var problems []string
+		if s.Errors > 0 {
+			problems = append(problems, turnCountNoun(s.Errors, "error"))
+		}
+		if s.Warnings > 0 {
+			problems = append(problems, turnCountNoun(s.Warnings, "warning"))
+		}
+		add("Problems", strings.Join(problems, ", "))
+	}
+	add("Last error", s.LastError)
+	add("Log", s.LogPath)
+	add("Writes into project", strings.Join(s.ProjectWrites, ", "))
+	add("Note", s.Note)
+	b.facts(facts, map[string]string{"State": lspStateText(*s, spinner)})
+	if notice := panel.notice[s.ID]; notice != "" {
+		b.blank()
+		b.text(panelIndent, notice, nil)
+	}
+	if s.Installing || s.InstallError != "" {
+		b.blank()
+		b.text(panelIndent, "Install output", &panelAccentStyle)
+		if s.InstallError != "" {
+			b.text(panelIndent, firstLine(s.InstallError), nil)
+		}
+		for _, line := range s.InstallLog {
+			b.text(panelIndent, line, nil)
+		}
+	}
+	rows := panelSelectableRows(panel)
+	if len(rows) > 0 {
+		b.blank()
+		for i, row := range rows {
+			b.selectable(i == panel.cursor, "", row.label)
+		}
+		b.hint("↑/↓ to navigate · Enter to run · Esc to go back")
+		return
+	}
+	b.hint("Esc to go back")
+}
+
+// firstLine is a multi-line error's first line, the one a reader scans first.
+func firstLine(text string) string {
+	if line, _, found := strings.Cut(text, "\n"); found {
+		return line
+	}
+	return text
 }

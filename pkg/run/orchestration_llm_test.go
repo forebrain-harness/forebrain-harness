@@ -1764,45 +1764,48 @@ func TestFileReferencePlaceholder(t *testing.T) {
 
 func TestInputQueuePreservesQueueOrder(t *testing.T) {
 	q := NewInputQueue()
+	q.Attach(NewTurnInputRuntime())
 	if !q.Steer(Input{Text: "first"}) || !q.FollowUp(Input{Text: "next"}) {
 		t.Fatal("queue input")
 	}
 	if got := q.Preview(); len(got.Steers) != 1 || len(got.FollowUp) != 1 {
 		t.Fatalf("preview = %#v", got)
 	}
-	if got := q.RejectSteers(); len(got.Steers) != 0 || len(got.Rejected) != 1 {
-		t.Fatalf("rejected preview = %#v", got)
+	q.Detach()
+	send, _ := q.Next(BoundaryCompleted)
+	if len(send) != 1 || send[0].Text != "first" || send[0].Rejected {
+		t.Fatalf("steer sent after its turn = %#v", send)
 	}
-	in, ok := q.PopNext()
-	if !ok || in.Text != "first" || !in.Rejected {
-		t.Fatalf("rejected input = %#v, %v", in, ok)
-	}
-	in, ok = q.PopNext()
-	if !ok || in.Text != "next" || in.Rejected {
-		t.Fatalf("follow-up input = %#v, %v", in, ok)
+	send, _ = q.Next(BoundaryCompleted)
+	if len(send) != 1 || send[0].Text != "next" || send[0].Rejected {
+		t.Fatalf("follow-up = %#v", send)
 	}
 }
 
-func TestInputQueuePopLatestPrefersSteerAndKeepsAttachments(t *testing.T) {
+func TestInputQueueRecallPicksNewestByEnqueueClock(t *testing.T) {
 	q := NewInputQueue()
+	q.Attach(NewTurnInputRuntime())
 	if !q.Steer(Input{Parts: []llm.ContentPart{llm.Text("steer")}}) {
 		t.Fatal("steer")
 	}
 	if !q.FollowUp(Input{Attachments: []string{" /tmp/shot.png "}}) {
 		t.Fatal("follow-up")
 	}
-	in, _, ok := q.PopLatest()
-	if !ok || in.Text != "steer" {
-		t.Fatalf("steer = %#v, %v", in, ok)
-	}
-	in, _, ok = q.PopLatest()
+	// The follow-up was queued after the steer, so it is the newest — recall
+	// picks it even though a steer is also waiting.
+	in, ok := q.Recall()
 	if !ok || len(in.Attachments) != 1 || in.Attachments[0] != "/tmp/shot.png" {
 		t.Fatalf("attachment = %#v, %v", in, ok)
+	}
+	in, ok = q.Recall()
+	if !ok || in.Text != "steer" {
+		t.Fatalf("steer = %#v, %v", in, ok)
 	}
 }
 
 func TestInputQueueIgnoresEmptyAttachments(t *testing.T) {
 	q := NewInputQueue()
+	q.Attach(NewTurnInputRuntime())
 	if !q.Steer(Input{Text: "steer", Attachments: []string{" "}}) {
 		t.Fatal("empty attachment must not reject steer")
 	}
@@ -1813,6 +1816,7 @@ func TestInputQueueIgnoresEmptyAttachments(t *testing.T) {
 
 func TestInputQueueSteerKeepsRichParts(t *testing.T) {
 	q := NewInputQueue()
+	q.Attach(NewTurnInputRuntime())
 	if !q.Steer(Input{Parts: []llm.ContentPart{llm.ImageURL("https://example.com/image.png")}}) {
 		t.Fatal("rich steer")
 	}
@@ -4389,6 +4393,112 @@ func TestToolOrchestrationResumeDeniedIncludesFeedback(t *testing.T) {
 	}
 	if !foundDenial {
 		t.Fatalf("denial message with feedback not found in resume session messages")
+	}
+}
+
+// exitPlanCallLLM emits one exit_plan_mode tool call, then a plain answer —
+// the shape of a model that asks to leave plan mode and is told no.
+type exitPlanCallLLM struct {
+	calls    int
+	sessions [][]llm.Message
+}
+
+func (m *exitPlanCallLLM) Execute(_ context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	m.sessions = append(m.sessions, append([]llm.Message(nil), messages...))
+	if m.calls == 1 {
+		msg := llm.AssistantMessage(nil,
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: `{}`}},
+		)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer after the refusal")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// The denial tool result carries its display half: the model still receives
+// the instruction text buildDenialMessage writes, while the card a replay
+// draws from the persisted row shows the one sentence the live card showed —
+// the user's own words — not the text written for the model.
+func TestDeniedToolResultCarriesItsDisplay(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "exit_plan_mode", Destructive: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+
+	gated, err := llm.NewTool("exit_plan_mode", "gated tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "" {
+			return "", &toolpkg.RequiresActionError{
+				ActionID:   "act-1",
+				ActionKind: "exit_plan_mode",
+				ToolName:   "exit_plan_mode",
+				ToolInput:  map[string]any{},
+			}
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+
+	inner := &exitPlanCallLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+
+	_, err = wrapped.Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("hi"))},
+		[]*llm.Tool{gated},
+	)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("expected RequiresActionError, got %T %v", err, err)
+	}
+
+	composed := turn.ComposeDenyFeedback(nil, "改成先写测试")
+	ctx := toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+		Session:      rae.SessionSnapshot,
+		Denied:       true,
+		DenyReason:   composed,
+		DenyFeedback: "改成先写测试",
+	})
+	if _, rerr := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, []*llm.Tool{gated}); rerr != nil {
+		t.Fatalf("resume Execute err=%v", rerr)
+	}
+
+	var denial *llm.Message
+	for i := range inner.sessions[1] {
+		msg := inner.sessions[1][i]
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+				denial = &msg
+			}
+		}
+	}
+	if denial == nil {
+		t.Fatal("the denial tool result is missing from the resumed session")
+	}
+	if denial.ToolDisplay == nil {
+		t.Fatal("the denial tool result must carry the display the replay draws from")
+	}
+	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", "改成先写测试") {
+		t.Fatalf("denial display body = %q, want the sentence the live card shows", got)
+	}
+	if body := denial.ToolDisplay.Body; strings.Contains(body, "Tool approval denied by user") {
+		t.Fatalf("the display half must not show the model-facing instruction: %q", body)
+	}
+	var meta struct {
+		ToolName string `json:"tool_name"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(denial.ToolDisplay.ToolMetaJSON), &meta); err != nil {
+		t.Fatalf("denial display meta = %q: %v", denial.ToolDisplay.ToolMetaJSON, err)
+	}
+	if meta.ToolName != "exit_plan_mode" || meta.Status != "denied" {
+		t.Fatalf("denial display meta = %#v, want the refused call named as denied", meta)
 	}
 }
 

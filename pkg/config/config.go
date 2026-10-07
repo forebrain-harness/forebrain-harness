@@ -88,6 +88,28 @@ func (c CompactSection) UseRemoteV2() bool {
 	return c.RemoteCompactionV2 == nil || *c.RemoteCompactionV2
 }
 
+// CronSection configures scheduled tasks for the whole install.
+type CronSection struct {
+	// RetentionDays is how long a scheduled run's conversation and history
+	// record are kept after their last activity. Unset means the default.
+	RetentionDays *int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
+}
+
+const (
+	DefaultCronRetentionDays = 30
+	MinCronRetentionDays     = 1
+	MaxCronRetentionDays     = 3650
+)
+
+// CronRetentionDays is the retention in force: the configured value, or the
+// default when none is set.
+func (r *Root) CronRetentionDays() int {
+	if r != nil && r.Cron.RetentionDays != nil {
+		return *r.Cron.RetentionDays
+	}
+	return DefaultCronRetentionDays
+}
+
 type Root struct {
 	// SourceFiles lists the files this configuration was read from, in read
 	// order: the config file itself, then the forebrain home's .env when one was
@@ -101,12 +123,14 @@ type Root struct {
 	SandboxMode           SandboxMode           `yaml:"sandbox_mode,omitempty" json:"sandbox_mode,omitempty"`
 	SandboxWorkspaceWrite SandboxWorkspaceWrite `yaml:"sandbox_workspace_write,omitempty" json:"sandbox_workspace_write,omitempty"`
 	Compact               CompactSection        `yaml:"compact,omitempty" json:"compact,omitempty"`
+	Cron                  CronSection           `yaml:"cron,omitempty" json:"cron,omitempty"`
 	Gateway               Gateway               `yaml:"gateway,omitempty" json:"gateway,omitempty"`
 	Agents                AgentsSection         `yaml:"agents,omitempty" json:"agents,omitempty"`
 	Hooks                 HooksSettings         `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	Memories              MemorySection         `yaml:"memories,omitempty" json:"memories,omitempty"`
 	Tools                 ToolsSection          `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Features              FeaturesSection       `yaml:"features,omitempty" json:"features,omitempty"`
+	LSP                   LSPSection            `yaml:"lsp,omitempty" json:"lsp,omitempty"`
 	Windows               WindowsSection        `yaml:"windows,omitempty" json:"windows,omitempty"`
 	Credentials           CredentialsSection    `yaml:"credentials,omitempty" json:"credentials,omitempty"`
 }
@@ -128,6 +152,7 @@ type FeaturesSection struct {
 	RequestPermissionsTool  *bool                     `yaml:"request_permissions_tool,omitempty" json:"request_permissions_tool,omitempty"`
 	Memories                *bool                     `yaml:"memories,omitempty" json:"memories,omitempty"`
 	SkillOffer              *bool                     `yaml:"skill_offer,omitempty" json:"skill_offer,omitempty"`
+	LSP                     *bool                     `yaml:"lsp,omitempty" json:"lsp,omitempty"`
 	NetworkProxy            NetworkProxyFeatureConfig `yaml:"network_proxy,omitempty" json:"network_proxy,omitempty"`
 }
 
@@ -143,6 +168,7 @@ func (r *Root) EffectiveFeatures() EffectiveFeaturesConfig {
 		RequestPermissionsTool:  boolValue(f.RequestPermissionsTool, false),
 		Memories:                boolValue(f.Memories, true),
 		SkillOffer:              boolValue(f.SkillOffer, true),
+		LSP:                     boolValue(f.LSP, true),
 	}
 }
 
@@ -152,6 +178,7 @@ type EffectiveFeaturesConfig struct {
 	RequestPermissionsTool  bool
 	Memories                bool
 	SkillOffer              bool
+	LSP                     bool
 }
 
 type WindowsSandboxMode string

@@ -1,0 +1,14 @@
+id: svelte-language-server
+display_name: Svelte Language Server
+languages: [Svelte]
+priority: 100
+command: svelteserver
+args: [--stdio]
+extension_to_language: {.svelte: svelte}
+root_markers: [svelte.config.js, svelte.config.ts, package.json]
+env_passthrough: [NODE_PATH, NODE_OPTIONS]
+install:
+  - requires: npm
+    argv: [npm, install, -g, svelte-language-server]
+readiness: progress
+notes: "Install with: npm install -g svelte-language-server"

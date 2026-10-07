@@ -1,0 +1,17 @@
+id: kotlin-language-server
+display_name: Kotlin Language Server (fwcd)
+languages: [Kotlin]
+priority: 50
+command: kotlin-language-server
+extension_to_language: {.kt: kotlin, .kts: kotlin}
+root_markers: [settings.gradle.kts, settings.gradle, build.gradle.kts, build.gradle, pom.xml]
+env_passthrough: [JAVA_HOME, GRADLE_USER_HOME, GRADLE_OPTS]
+install:
+  - requires: brew
+    platforms: [darwin, linux]
+    argv: [brew, install, kotlin-language-server]
+startup_timeout: 180
+readiness: progress
+initialization_options:
+  storagePath: "${LSP_CACHE_DIR}"
+notes: "Alternative to kotlin-lsp; chosen only when kotlin-lsp is disabled."

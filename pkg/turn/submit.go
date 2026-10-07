@@ -3,6 +3,7 @@ package turn
 import (
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,11 +218,21 @@ var ErrAutoContinueUnavailable = errors.New("turn: auto-continue unavailable")
 // AutoContinuePlan is one scheduled continuation: which session stopped, why,
 // and when it picks up again.
 type AutoContinuePlan struct {
+	// SessionID is the conversation the turn belongs to: what the lifecycle
+	// events are filed under and what a surface routes by. It is the
+	// conversation's session id even for a subagent's continuation.
 	SessionID string
 	// RunID is the run the usage limit stopped. The lifecycle events are
 	// filed under it, since the continuation's own run does not exist yet.
 	RunID  string
 	Origin Origin
+	// AgentKey and WorkerSessionID identify the subagent this continuation
+	// belongs to, and are empty for the conversation's own continuation.
+	// AgentKey is the subagent's roster key: it rides on the events so a
+	// surface draws the notice in that subagent's view. WorkerSessionID is
+	// the subagent's own session, the plan's key.
+	AgentKey        string
+	WorkerSessionID string
 	// Code is the llm explanation code of the failure.
 	Code string
 	Plan string
@@ -233,6 +244,16 @@ type AutoContinuePlan struct {
 	Attempt int
 }
 
+// key is the identity of one continuation: the worker session for a subagent,
+// the conversation session for a primary turn. Two subagents of one
+// conversation and the conversation itself each have their own.
+func (p AutoContinuePlan) key() string {
+	if k := strings.TrimSpace(p.AgentKey); k != "" {
+		return strings.TrimSpace(p.WorkerSessionID)
+	}
+	return strings.TrimSpace(p.SessionID)
+}
+
 // Payload is the plan as the auto_continue_scheduled event carries it. The
 // gateway also sends it when a client binds, so a page opened mid-wait shows
 // the same notice a page that saw the event does.
@@ -242,6 +263,7 @@ func (p AutoContinuePlan) Payload() event.AutoContinueScheduledPayload {
 		Code:       p.Code,
 		Plan:       p.Plan,
 		Attempt:    p.Attempt,
+		AgentID:    strings.TrimSpace(p.AgentKey),
 	}
 	if !p.ResetAt.IsZero() {
 		out.ResetAt = p.ResetAt.UTC().Format(time.RFC3339)
@@ -298,21 +320,88 @@ func (s *Service) SetAutoContinue(cfg AutoContinueConfig) {
 	s.autoContinue = newAutoContinuer(cfg)
 }
 
-// PendingAutoContinue reports the continuation waiting in a session, if any.
-func (s *Service) PendingAutoContinue(sessionID string) (AutoContinuePlan, bool) {
+// PendingAutoContinue reports the continuation waiting for a plan key — a
+// conversation's own session id, or a subagent's worker session id — if any.
+func (s *Service) PendingAutoContinue(key string) (AutoContinuePlan, bool) {
 	if s == nil || s.autoContinue == nil {
 		return AutoContinuePlan{}, false
 	}
-	return s.autoContinue.pendingPlan(strings.TrimSpace(sessionID))
+	return s.autoContinue.pendingPlan(strings.TrimSpace(key))
 }
 
-// CancelAutoContinue stops a session's pending continuation and reports
-// whether there was one. reason is one of the AutoContinue* reasons.
-func (s *Service) CancelAutoContinue(ctx context.Context, sessionID, reason string) bool {
+// PendingAutoContinuePlans returns every continuation waiting in a
+// conversation: the conversation's own first, then each of its subagents', so
+// a surface binding to the conversation can show each wait in the view it
+// belongs to.
+func (s *Service) PendingAutoContinuePlans(sessionID string) []AutoContinuePlan {
+	if s == nil || s.autoContinue == nil {
+		return nil
+	}
+	return s.autoContinue.pendingPlans(strings.TrimSpace(sessionID))
+}
+
+// CancelAutoContinue stops a plan key's pending continuation and reports
+// whether there was one. key is a conversation's own session id, or a
+// subagent's worker session id; reason is one of the AutoContinue* reasons.
+func (s *Service) CancelAutoContinue(ctx context.Context, key, reason string) bool {
 	if s == nil || s.autoContinue == nil {
 		return false
 	}
-	return s.autoContinue.cancel(ctx, strings.TrimSpace(sessionID), reason)
+	return s.autoContinue.cancel(ctx, strings.TrimSpace(key), reason)
+}
+
+// CancelAutoContinueForAgent stops the continuation waiting for one subagent of
+// a conversation, named by its roster key. The scheduler holds the plan, which
+// names the subagent's worker session, so a surface cancels by the key it has
+// without resolving the worker session id itself.
+func (s *Service) CancelAutoContinueForAgent(ctx context.Context, sessionID, agentKey, reason string) bool {
+	if s == nil || s.autoContinue == nil {
+		return false
+	}
+	return s.autoContinue.cancelAgent(ctx, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey), reason)
+}
+
+// SubagentExecutionEnd reports one finished execution of a subagent to the
+// scheduler. The scheduler decides from Err whether that execution stopped on
+// a usage limit and, if so, arms the subagent's own continuation — by the same
+// rules a primary turn is armed by.
+type SubagentExecutionEnd struct {
+	// ConversationSessionID is the conversation the subagent belongs to: the
+	// session the continuation's lifecycle events are filed under and the
+	// surface routes by.
+	ConversationSessionID string
+	// WorkerSessionID is the subagent's own session, which keys its
+	// continuation.
+	WorkerSessionID string
+	// AgentKey is the subagent's roster key, carried on the events so the
+	// surface draws the notice in that subagent's view.
+	AgentKey string
+	// RunID is the run the usage limit stopped.
+	RunID string
+	// Origin is the surface the subagent's conversation belongs to.
+	Origin Origin
+	// Err is how the execution ended; nil when it succeeded.
+	Err error
+}
+
+// SubagentExecutionStarting supersedes a subagent's pending continuation: a
+// new execution reaching it — the user's message, the model's
+// subagent_continue — moves its conversation on.
+func (s *Service) SubagentExecutionStarting(ctx context.Context, workerSessionID string) {
+	if s == nil || s.autoContinue == nil {
+		return
+	}
+	s.autoContinue.subagentExecutionStarting(ctx, strings.TrimSpace(workerSessionID))
+}
+
+// SubagentExecutionEnded arms a subagent's continuation when its execution
+// stopped on a usage limit with a known reset, by the same rules a primary
+// turn is armed by, and otherwise closes the subagent's run of continuations.
+func (s *Service) SubagentExecutionEnded(ctx context.Context, end SubagentExecutionEnd) {
+	if s == nil || s.autoContinue == nil {
+		return
+	}
+	s.autoContinue.subagentExecutionEnded(ctx, end)
 }
 
 // StopAutoContinue drops every pending continuation without firing it. A
@@ -403,38 +492,63 @@ func (a *autoContinuer) turnEnded(ctx context.Context, req TurnRequest, runID st
 	if a == nil {
 		return
 	}
-	sessionID := strings.TrimSpace(req.SessionID)
 	plan, ok := a.planFor(req, runID, err)
-	a.mu.Lock()
-	if !ok || a.closed {
-		delete(a.fired, sessionID)
-		a.mu.Unlock()
+	if !ok {
+		a.closeRun(strings.TrimSpace(req.SessionID))
 		return
 	}
-	plan.Attempt = a.fired[sessionID] + 1
-	if plan.Attempt > a.cfg.maxAttempts {
-		// Refused again right after every reset: stop here and start the
-		// count afresh, so the next failure — necessarily a turn the person
-		// sent — is armed as a first attempt.
-		delete(a.fired, sessionID)
-		a.mu.Unlock()
-		return
-	}
-	if prev := a.pending[sessionID]; prev != nil && prev.timer != nil {
-		prev.timer()
-	}
-	a.seq++
-	entry := &pendingContinuation{plan: plan, id: a.seq}
-	a.pending[sessionID] = entry
-	a.armLocked(entry)
-	a.mu.Unlock()
-	a.publish(ctx, plan, "scheduled", event.RunEventAutoContinueScheduled, plan.Payload())
+	a.arm(ctx, plan.key(), plan)
 }
 
-// planFor decides whether a failed turn gets a continuation, and when.
+// subagentExecutionStarting supersedes a subagent's pending continuation: a
+// new execution reaching it moves its conversation on.
+func (a *autoContinuer) subagentExecutionStarting(ctx context.Context, workerSessionID string) {
+	if a == nil {
+		return
+	}
+	if a.cancel(ctx, workerSessionID, AutoContinueSuperseded) {
+		a.closeRun(workerSessionID)
+	}
+}
+
+// subagentExecutionEnded arms a subagent's continuation when its execution
+// stopped on a usage limit with a known reset, and otherwise closes the
+// subagent's run of continuations. A successful execution reaches the same
+// closing path a primary turn's does: it is what makes Attempt count
+// continuations in a row.
+func (a *autoContinuer) subagentExecutionEnded(ctx context.Context, end SubagentExecutionEnd) {
+	if a == nil {
+		return
+	}
+	plan, ok := a.continuationFor(strings.TrimSpace(end.ConversationSessionID), end.RunID, end.Origin, end.Err)
+	if !ok {
+		a.closeRun(strings.TrimSpace(end.WorkerSessionID))
+		return
+	}
+	plan.AgentKey = strings.TrimSpace(end.AgentKey)
+	plan.WorkerSessionID = strings.TrimSpace(end.WorkerSessionID)
+	a.arm(ctx, plan.key(), plan)
+}
+
+// planFor decides whether a failed primary turn gets a continuation, and when.
 func (a *autoContinuer) planFor(req TurnRequest, runID string, err error) (AutoContinuePlan, bool) {
-	sessionID := strings.TrimSpace(req.SessionID)
-	if err == nil || sessionID == "" || strings.TrimSpace(req.ParentRunID) != "" || !a.accepts(req.Origin) {
+	// An unattended turn's usage limit ends it for good: nobody is watching
+	// to want it resumed, and the next trigger comes on schedule or by a
+	// person. A child run is not this session's own turn either — this keeps
+	// a primary Submit from adopting its subagent's run as its own. Both fall
+	// through to the ordinary close below.
+	if strings.TrimSpace(req.ParentRunID) != "" || req.Unattended {
+		return AutoContinuePlan{}, false
+	}
+	return a.continuationFor(req.SessionID, runID, req.Origin, err)
+}
+
+// continuationFor decides whether a failure from origin earns a continuation
+// and when. It is the single decision the primary turn path and the subagent
+// path share, so a usage limit is read and timed identically for both.
+func (a *autoContinuer) continuationFor(sessionID, runID string, origin Origin, err error) (AutoContinuePlan, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if err == nil || sessionID == "" || !a.accepts(origin) {
 		return AutoContinuePlan{}, false
 	}
 	explanation, ok := llm.Explain(err)
@@ -455,12 +569,56 @@ func (a *autoContinuer) planFor(req TurnRequest, runID string, err error) (AutoC
 	return AutoContinuePlan{
 		SessionID:  sessionID,
 		RunID:      strings.TrimSpace(runID),
-		Origin:     req.Origin,
+		Origin:     origin,
 		Code:       string(explanation.Code),
 		Plan:       explanation.Plan,
 		ResetAt:    resetAt,
 		ContinueAt: continueAt,
 	}, true
+}
+
+// arm schedules plan as key's pending continuation and publishes the
+// lifecycle event. Attempt is one past the count key last fired, so a provider
+// whose reset times are wrong is not asked forever.
+func (a *autoContinuer) arm(ctx context.Context, key string, plan AutoContinuePlan) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return
+	}
+	plan.Attempt = a.fired[key] + 1
+	if plan.Attempt > a.cfg.maxAttempts {
+		// Refused again right after every reset: stop here and start the
+		// count afresh, so the next failure — necessarily a turn the person
+		// sent — is armed as a first attempt.
+		delete(a.fired, key)
+		a.mu.Unlock()
+		return
+	}
+	if prev := a.pending[key]; prev != nil && prev.timer != nil {
+		prev.timer()
+	}
+	a.seq++
+	entry := &pendingContinuation{plan: plan, id: a.seq}
+	a.pending[key] = entry
+	a.armLocked(entry)
+	a.mu.Unlock()
+	a.publish(ctx, plan, "scheduled", event.RunEventAutoContinueScheduled, plan.Payload())
+}
+
+// closeRun drops a key's run-of-continuations count without arming anything:
+// an execution that ended without a usage limit is the boundary the count is
+// measured since.
+func (a *autoContinuer) closeRun(key string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.fired, key)
+	a.mu.Unlock()
 }
 
 // armLocked starts the next timer slice for entry. Caller holds a.mu.
@@ -472,15 +630,15 @@ func (a *autoContinuer) armLocked(entry *pendingContinuation) {
 	if wait < 0 {
 		wait = 0
 	}
-	sessionID, id := entry.plan.SessionID, entry.id
+	sessionID, id := entry.plan.key(), entry.id
 	entry.timer = a.cfg.afterFunc(wait, func() { a.tick(sessionID, id) })
 }
 
 // tick runs when a timer slice ends: it re-arms while the wall clock is short
 // of the continuation time, and fires once it is not.
-func (a *autoContinuer) tick(sessionID string, id uint64) {
+func (a *autoContinuer) tick(key string, id uint64) {
 	a.mu.Lock()
-	entry := a.pending[sessionID]
+	entry := a.pending[key]
 	if a.closed || entry == nil || entry.id != id {
 		a.mu.Unlock()
 		return
@@ -490,18 +648,18 @@ func (a *autoContinuer) tick(sessionID string, id uint64) {
 		a.mu.Unlock()
 		return
 	}
-	delete(a.pending, sessionID)
-	a.fired[sessionID] = entry.plan.Attempt
+	delete(a.pending, key)
+	a.fired[key] = entry.plan.Attempt
 	a.mu.Unlock()
 
 	ctx := context.Background()
 	plan := entry.plan
-	a.publish(ctx, plan, "started", event.RunEventAutoContinueStarted, event.AutoContinueStartedPayload{Attempt: plan.Attempt, Prompt: AutoContinuePrompt})
+	a.publish(ctx, plan, "started", event.RunEventAutoContinueStarted, event.AutoContinueStartedPayload{Attempt: plan.Attempt, Prompt: AutoContinuePrompt, AgentID: plan.AgentKey})
 	if err := a.cfg.Continue(ctx, plan, AutoContinuePrompt); err != nil {
 		a.mu.Lock()
-		delete(a.fired, sessionID)
+		delete(a.fired, key)
 		a.mu.Unlock()
-		payload := event.AutoContinueCancelledPayload{Reason: AutoContinueUnavailable}
+		payload := event.AutoContinueCancelledPayload{Reason: AutoContinueUnavailable, AgentID: plan.AgentKey}
 		if !errors.Is(err, ErrAutoContinueUnavailable) {
 			payload.Error = err.Error()
 		}
@@ -509,44 +667,96 @@ func (a *autoContinuer) tick(sessionID string, id uint64) {
 	}
 }
 
-func (a *autoContinuer) cancel(ctx context.Context, sessionID, reason string) bool {
-	if a == nil || sessionID == "" {
+func (a *autoContinuer) cancel(ctx context.Context, key, reason string) bool {
+	if a == nil || key == "" {
 		return false
 	}
 	a.mu.Lock()
-	entry := a.pending[sessionID]
+	entry := a.pending[key]
 	if entry == nil {
 		a.mu.Unlock()
 		return false
 	}
-	delete(a.pending, sessionID)
+	delete(a.pending, key)
 	if entry.timer != nil {
 		entry.timer()
 	}
 	if reason == AutoContinueCancelledByUser {
 		// An explicit cancel ends the run of continuations; the next usage
 		// limit is a fresh first attempt.
-		delete(a.fired, sessionID)
+		delete(a.fired, key)
 	}
 	a.mu.Unlock()
 	if strings.TrimSpace(reason) == "" {
 		reason = AutoContinueCancelledByUser
 	}
-	a.publish(ctx, entry.plan, "cancelled", event.RunEventAutoContinueCancelled, event.AutoContinueCancelledPayload{Reason: reason})
+	a.publish(ctx, entry.plan, "cancelled", event.RunEventAutoContinueCancelled, event.AutoContinueCancelledPayload{Reason: reason, AgentID: entry.plan.AgentKey})
 	return true
 }
 
-func (a *autoContinuer) pendingPlan(sessionID string) (AutoContinuePlan, bool) {
-	if a == nil || sessionID == "" {
+func (a *autoContinuer) pendingPlan(key string) (AutoContinuePlan, bool) {
+	if a == nil || key == "" {
 		return AutoContinuePlan{}, false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	entry := a.pending[sessionID]
+	entry := a.pending[key]
 	if entry == nil {
 		return AutoContinuePlan{}, false
 	}
 	return entry.plan, true
+}
+
+// pendingPlans lists the continuations waiting in a conversation: its own
+// first, then its subagents' in roster-key order, so a surface binding to the
+// conversation shows each in the view it belongs to.
+func (a *autoContinuer) pendingPlans(sessionID string) []AutoContinuePlan {
+	if a == nil || sessionID == "" {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var primary *pendingContinuation
+	subagents := make([]AutoContinuePlan, 0, len(a.pending))
+	for _, entry := range a.pending {
+		if entry.plan.SessionID != sessionID {
+			continue
+		}
+		if entry.plan.AgentKey == "" {
+			primary = entry
+			continue
+		}
+		subagents = append(subagents, entry.plan)
+	}
+	sort.Slice(subagents, func(i, j int) bool { return subagents[i].AgentKey < subagents[j].AgentKey })
+	out := make([]AutoContinuePlan, 0, len(subagents)+1)
+	if primary != nil {
+		out = append(out, primary.plan)
+	}
+	return append(out, subagents...)
+}
+
+// cancelAgent stops the continuation waiting for one subagent of a
+// conversation, named by its roster key. The plan's own key is looked up from
+// the pending map, so a surface cancels by the key it holds without resolving
+// the subagent's worker session id itself.
+func (a *autoContinuer) cancelAgent(ctx context.Context, sessionID, agentKey, reason string) bool {
+	if a == nil || sessionID == "" || agentKey == "" {
+		return false
+	}
+	a.mu.Lock()
+	key := ""
+	for k, entry := range a.pending {
+		if entry.plan.SessionID == sessionID && entry.plan.AgentKey == agentKey {
+			key = k
+			break
+		}
+	}
+	a.mu.Unlock()
+	if key == "" {
+		return false
+	}
+	return a.cancel(ctx, key, reason)
 }
 
 func (a *autoContinuer) stop() {

@@ -55,6 +55,10 @@ type TurnRequest struct {
 	// "resume". Empty means "user".
 	Trigger       string `json:"trigger,omitempty"`
 	ExistingRunID string `json:"existing_run_id,omitempty"`
+	// Unattended marks a turn nobody is watching. An unattended turn has
+	// nobody watching it: a usage limit ends it for good — the next trigger
+	// comes on schedule or by a person, never by a continuation timer.
+	Unattended bool `json:"-"`
 	// AgentContextIsRunContext says the caller already built the run context --
 	// it holds the cancel function the controller tracks and has seeded the
 	// session and run ids. The executor then passes the context through
@@ -132,6 +136,27 @@ const (
 	VisibilityHidden    Visibility = "hidden"
 )
 
+// SubagentViewScope is how one built-in command behaves when it is typed in a
+// subagent's own view instead of the conversation's (decision D4): the shared
+// classification lives here so both surfaces read one table rather than each
+// keeping its own copy.
+type SubagentViewScope string
+
+const (
+	// SubagentViewUnset is a command that forgot to declare a scope. Every
+	// built-in must set one; TestEveryBuiltinCommandHasASubagentViewScope
+	// catches a new command that does not.
+	SubagentViewUnset SubagentViewScope = ""
+	// SubagentViewActs acts on the subagent whose view it is typed in
+	// (/compact, /context), or, for a skill command, is sent to that subagent.
+	SubagentViewActs SubagentViewScope = "acts"
+	// SubagentViewGlobal runs exactly as it does in the conversation's view.
+	SubagentViewGlobal SubagentViewScope = "global"
+	// SubagentViewHidden is not offered in a subagent's view and, typed
+	// anyway, answers with one sentence pointing back to the conversation.
+	SubagentViewHidden SubagentViewScope = "hidden"
+)
+
 type Command struct {
 	Name                        string
 	CanonicalName               string
@@ -146,12 +171,17 @@ type Command struct {
 	AvailableInSideConversation bool
 	FeatureGate                 string
 	Visibility                  Visibility
+	// SubagentView is how the command behaves in a subagent's own view (D4).
+	SubagentView SubagentViewScope
 }
 
 type DiscoveryOptions struct {
 	DuringRun        bool
 	SideConversation bool
 	FastAvailable    bool
+	// SubagentView lists the commands available while a subagent's own view is
+	// on screen: the hidden ones are dropped, the rest behave per SubagentView.
+	SubagentView bool
 }
 
 func (c Command) AllowedOn(surface Surface) bool {
@@ -195,12 +225,13 @@ type MCPSlashHandler interface {
 	HandleMCPSlash(sessionID, channel string) (reply string, handled bool)
 }
 
-type SandboxSlashHandler interface {
-	HandleSandboxSlash(sessionID, channel string, args []string) (reply string, handled bool)
+// LSPSlashHandler answers /lsp, which takes no arguments.
+type LSPSlashHandler interface {
+	HandleLSPSlash(sessionID, channel string) (reply string, handled bool)
 }
 
-type DiffSlashHandler interface {
-	HandleDiffSlash(sessionID, channel string, args []string) (reply string, handled bool)
+type SandboxSlashHandler interface {
+	HandleSandboxSlash(sessionID, channel string, args []string) (reply string, handled bool)
 }
 
 // ModelSlashHandler is where /model reads a session's model settings, applies
@@ -366,6 +397,10 @@ type MemoriesSlashHandler interface {
 type SessionStore interface {
 	Ensure(ctx context.Context, id string, title string) error
 	ListSessionsRecent(ctx context.Context, limit int) ([]state.SessionSummary, error)
+	// SessionTitle returns the session's own title, "" when it has none. It
+	// reads by id, so a conversation older than any recent list still has
+	// its name.
+	SessionTitle(ctx context.Context, id string) (string, error)
 	// ForkInto makes target the same conversation as source, as stored.
 	ForkInto(ctx context.Context, sourceID, targetID string) error
 	SetTitle(ctx context.Context, id string, title string) error
@@ -409,8 +444,8 @@ type Context struct {
 	Status           StatusSlashHandler
 	Permissions      PermissionsSlashHandler
 	MCP              MCPSlashHandler
+	LSP              LSPSlashHandler
 	Sandbox          SandboxSlashHandler
-	Diff             DiffSlashHandler
 	Model            ModelSlashHandler
 	Agent            AgentSlashHandler
 	Fast             FastSlashHandler
@@ -536,6 +571,15 @@ type PlanReviewModelOption struct {
 	Current  bool
 }
 
+// MatchesSelection reports whether this option is the provider/model pair a
+// review request named — the one comparison a surface validates a requested
+// reviewer with, shared so the web cannot accept a model the terminal would
+// refuse.
+func (o PlanReviewModelOption) MatchesSelection(provider, model string) bool {
+	return strings.EqualFold(strings.TrimSpace(o.Provider), strings.TrimSpace(provider)) &&
+		strings.EqualFold(strings.TrimSpace(o.Model), strings.TrimSpace(model))
+}
+
 type PlanReviewNote struct {
 	Provider string
 	Model    string
@@ -638,6 +682,7 @@ type StatusReport struct {
 	Permissions  StatusPermissions
 	Sandbox      string
 	MCP          MCPCountLine
+	LSP          string
 	Instructions []StatusInstruction
 	ConfigFiles  []string
 	// SkillOfferOff, when non-empty, is the rendered "off (setting)" line; the
@@ -685,6 +730,9 @@ type StatusSource struct {
 	// MCP is exactly what /mcp is built from: the MCP row counts the entries
 	// of that inventory, so /status and /mcp agree by construction.
 	MCP MCPInventorySource
+	// LSP is the language-server snapshot; nil when the runtime has no
+	// language servers, which leaves the /status row out.
+	LSP *event.LSPSnapshot
 	// Instructions is the rules-cache source list from the assembly PreHook.
 	Instructions []StatusInstruction
 	// ConfigFiles lists the config files the session's configuration was
@@ -735,6 +783,9 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		}
 	}
 	rep.MCP = BuildMCPInventory(src.MCP).Counts()
+	if src.LSP != nil {
+		rep.LSP = LSPStatusLine(*src.LSP)
+	}
 	// Work: plan existence and todo progress.
 	if planText, err := state.GetPlanForProject(src.StateRoot, src.ProjectKey); err == nil {
 		rep.Work.PlanSet = strings.TrimSpace(planText) != ""
@@ -756,15 +807,7 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 	rep.Context = ContextGaugeOf(src.Provider, src.Model, estimated, explicitLimit)
 	if src.RunStore != nil {
 		if totals, err := src.RunStore.SessionUsageForSession(ctx, sid); err == nil {
-			rep.Session = StatusUsageTotals{
-				InputTokens:     totals.PromptTokens + totals.CacheReadTokens + totals.CacheWriteTokens,
-				OutputTokens:    totals.CompletionTokens,
-				CacheRead:       totals.CacheReadTokens,
-				CacheWritten:    totals.CacheWriteTokens,
-				Uncached:        totals.PromptTokens,
-				Requests:        totals.LLMCalls,
-				CacheHitPercent: CacheHitPercent(totals.CacheReadTokens, totals.CacheWriteTokens, totals.PromptTokens),
-			}
+			rep.Session = SessionUsageTotalsOf(totals)
 		}
 		if last, err := src.RunStore.LastRunUsageForSession(ctx, sid); err == nil {
 			rep.LastTurn = StatusLastTurn{
@@ -775,6 +818,21 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		}
 	}
 	return rep
+}
+
+// SessionUsageTotalsOf reads a session's stored usage the way every surface
+// reports it: input is everything the requests sent, and the cache split beside
+// it is what the hit rate is computed from.
+func SessionUsageTotalsOf(totals state.SessionUsage) StatusUsageTotals {
+	return StatusUsageTotals{
+		InputTokens:     totals.PromptTokens + totals.CacheReadTokens + totals.CacheWriteTokens,
+		OutputTokens:    totals.CompletionTokens,
+		CacheRead:       totals.CacheReadTokens,
+		CacheWritten:    totals.CacheWriteTokens,
+		Uncached:        totals.PromptTokens,
+		Requests:        totals.LLMCalls,
+		CacheHitPercent: CacheHitPercent(totals.CacheReadTokens, totals.CacheWriteTokens, totals.PromptTokens),
+	}
 }
 
 // CacheHitPercent is the provider-level cache-hit rate: read / (read + written
@@ -896,6 +954,9 @@ func StatusFacts(rep StatusReport) []StatusFact {
 	add("Sandbox", rep.Sandbox)
 	if counts := rep.MCP.Render(); counts != "" {
 		add("MCP servers", counts+" · /mcp")
+	}
+	if rep.LSP != "" {
+		add("Language servers", rep.LSP+" · /lsp")
 	}
 	add("Instructions", RenderInstructionsLine(rep.Instructions))
 	add("Config files", strings.Join(rep.ConfigFiles, ", "))

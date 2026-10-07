@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,6 +194,10 @@ func (f *fakeNewSessionStore) ListSessionsRecent(ctx context.Context, limit int)
 	return nil, nil
 }
 
+func (f *fakeNewSessionStore) SessionTitle(ctx context.Context, id string) (string, error) {
+	return "", nil
+}
+
 func (f *fakeNewSessionStore) ForkInto(ctx context.Context, sourceID, targetID string) error {
 	return nil
 }
@@ -237,6 +242,39 @@ func TestExecNewPersistsSessionIDAsTitleSentinel(t *testing.T) {
 	}
 }
 
+// titledSessions answers the by-id title lookup the way the store does,
+// while its recent list stays bounded and never reaches the older session.
+type titledSessions struct {
+	fakeNewSessionStore
+	titles map[string]string
+}
+
+func (t titledSessions) ListSessionsRecent(context.Context, int) ([]state.SessionSummary, error) {
+	list := make([]state.SessionSummary, 300)
+	for i := range list {
+		list[i] = state.SessionSummary{ID: fmt.Sprintf("newer-%03d", i), Title: "newer", UpdatedAt: int64(1000 - i)}
+	}
+	return list, nil
+}
+
+func (t titledSessions) SessionTitle(_ context.Context, id string) (string, error) {
+	return t.titles[id], nil
+}
+
+// TestCurrentSessionTitleReadsTheSessionByID pins that a conversation's title
+// is looked up by its id rather than found by scanning a recent list: a
+// session older than the list still has its name, and an unnamed one still
+// reads as "New conversation".
+func TestCurrentSessionTitleReadsTheSessionByID(t *testing.T) {
+	store := &titledSessions{titles: map[string]string{
+		"older":   "An older conversation",
+		"unnamed": "",
+	}}
+
+	require.Equal(t, "An older conversation", currentSessionTitle(Context{Sessions: store}, "older"))
+	require.Equal(t, "New conversation", currentSessionTitle(Context{Sessions: store}, "unnamed"))
+}
+
 // pickerSessions is a session store with a few conversations and one child.
 type pickerSessions struct{ fakeNewSessionStore }
 
@@ -270,6 +308,40 @@ func TestResumeAndSubagentsOfferConversations(t *testing.T) {
 	require.Equal(t, "child-1", moved.SessionID)
 }
 
+// notOwnedSessions is a session store holding one conversation that belongs
+// to another primary agent: Ensure refuses it exactly the way the sqlite
+// store's ownership conflict does, while this agent's own conversations
+// pass.
+type notOwnedSessions struct {
+	fakeNewSessionStore
+	foreign string
+}
+
+func (n *notOwnedSessions) Ensure(ctx context.Context, id string, title string) error {
+	if id == n.foreign {
+		return fmt.Errorf("%w: %s", state.ErrSessionNotOwned, id)
+	}
+	return n.fakeNewSessionStore.Ensure(ctx, id, title)
+}
+
+// A conversation that belongs to another primary agent is not opened: the
+// engine itself refuses the switch, so a surface that forgot the check at
+// its own boundary still cannot move into it.
+func TestChooseSessionRefusesAnotherAgentsConversation(t *testing.T) {
+	ctx := Context{Surface: SurfaceWebChat, SessionID: "here", Sessions: &notOwnedSessions{foreign: "theirs"}}
+
+	res := Choose(ctx, SlashChoice{Command: "resume", Value: "theirs"})
+	require.True(t, res.Handled)
+	require.False(t, res.SessionSwitched)
+	require.False(t, res.SessionChanged)
+	require.Empty(t, res.SessionID)
+	require.Equal(t, "That conversation belongs to another primary agent.", res.Reply)
+
+	own := Choose(ctx, SlashChoice{Command: "resume", Value: "mine"})
+	require.True(t, own.SessionSwitched)
+	require.Equal(t, "mine", own.SessionID)
+}
+
 // /agent offers the primary agents with the one in force marked; picking it
 // again changes nothing, picking another switches.
 func TestAgentPickerSwitchesPrimaryAgents(t *testing.T) {
@@ -281,4 +353,24 @@ func TestAgentPickerSwitchesPrimaryAgents(t *testing.T) {
 	require.Equal(t, "Still on primary agent main.", Choose(ctx, SlashChoice{Command: "agent", Value: "main"}).Reply)
 	require.Equal(t, "Switched to primary agent ops, working in /w/ops.", Choose(ctx, SlashChoice{Command: "agent", Value: "ops"}).Reply)
 	require.Contains(t, h.calls, "switch(ops,)")
+}
+
+type lspSlashStub struct {
+	reply   string
+	handled bool
+}
+
+func (s lspSlashStub) HandleLSPSlash(_, _ string) (string, bool) {
+	return s.reply, s.handled
+}
+
+// /lsp without a handler answers unavailable; with one it returns its text.
+func TestExecLSPSlash(t *testing.T) {
+	res := Execute(Context{Surface: SurfaceTUI}, "/lsp")
+	require.True(t, res.Handled)
+	require.Equal(t, "lsp: unavailable", res.Reply)
+
+	res = Execute(Context{Surface: SurfaceWebChat, LSP: lspSlashStub{reply: "Language servers · 1 configured", handled: true}}, "/lsp")
+	require.True(t, res.Handled)
+	require.Equal(t, "Language servers · 1 configured", res.Reply)
 }

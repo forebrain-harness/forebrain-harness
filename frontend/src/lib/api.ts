@@ -1,6 +1,8 @@
 import axios, { type AxiosError } from 'axios'
 
 import { toCamelCase, toSnakeCase } from './case'
+import type { ForebrainTokenBudget } from './forebrainGatewayRuntime'
+import type { LspRecommendationChoice } from './lspRecommendation'
 import { reportGatewayUnauthorized } from './gatewaySession'
 
 export function getErrorMessage(error: unknown): string {
@@ -56,10 +58,16 @@ export interface ChatMessageRecord {
   planJson?: string | null
   /** What a user message attached, in the order it was attached. */
   attachments?: ChatAttachmentRecord[] | null
+  /** Who wrote a user message on the person's behalf ('heartbeat'). */
+  origin?: string
+  /**
+   * A tool row's or a `!cmd` row's own execution window; on a "worked" row —
+   * the line that closes a run, after the last row it wrote — the run's clock.
+   */
   runStartedAt?: string
   runFinishedAt?: string
   workedDurationMs?: number
-  /** The run's final checklist state, for the worked line. */
+  /** The run's final checklist state, on its "worked" row. */
   planDone?: number
   planTotal?: number
   planActive?: string
@@ -67,6 +75,11 @@ export interface ChatMessageRecord {
   compaction?: Record<string, unknown> | null
   /** A line of a /goal the server placed in the history; its row role is "goal". */
   goal?: Record<string, unknown> | null
+  /**
+   * A tool row's subagent_* card facts, as the gateway derived them from the
+   * transcript — the reloaded card says what the live one said.
+   */
+  subagentCall?: import('@/composables/useChatStream').SubagentCall | null
   memoryCitation?: MemoryCitation | null
 }
 
@@ -93,6 +106,27 @@ export interface RunInputResponse {
   message?: string
   attachments?: string[]
   mentionImages?: string[]
+  preview: PendingInputPreview
+}
+
+/** Where a message the user sent a subagent went (plan 005's delivery). */
+export type SubagentDelivery = 'started' | 'steered' | 'queued'
+
+export interface SubagentInputResponse {
+  delivery: SubagentDelivery
+  preview: PendingInputPreview
+}
+
+/** A message taken back out of a subagent before it answered, whole. */
+export interface SubagentWithdrawnInput {
+  message?: string
+  attachments?: string[]
+  mentionImages?: string[]
+}
+
+export interface SubagentWithdrawResponse {
+  withdrawn: SubagentWithdrawnInput[]
+  any?: boolean
   preview: PendingInputPreview
 }
 
@@ -300,11 +334,21 @@ export interface SlashCommandRecord {
   visibility: string
 }
 
+export interface PermissionRuleValue {
+  toolName: string
+  ruleContent?: string
+  commandPrefix?: string[]
+  command?: string
+  bypassSandbox?: boolean
+}
+
 export interface PermissionRuleRecord {
   source: string
   behavior: string
   toolName: string
   ruleContent?: string
+  /** The rule exactly as stored; removing a listed rule sends this back. */
+  rule: PermissionRuleValue
 }
 
 export interface PermissionRulesResponse {
@@ -408,6 +452,96 @@ export async function mcpSetServerDisabled(name: string, disabled: boolean, sess
   return postJson<{ ok: boolean; reply: string }, Record<string, string>>(path, payload)
 }
 
+/**
+ * One language server as the runtime reports it. `state` stays an open
+ * vocabulary for the same reason MCP's connection status does: a state this
+ * client does not know renders as itself, not as whichever state happens to
+ * be the fallback.
+ */
+export interface LspServerStatus {
+  id: string
+  displayName?: string
+  languages?: string[]
+  role: string
+  scope: string
+  enabled: boolean
+  state: string
+  command?: string
+  binaryPath?: string
+  version?: string
+  installCommand?: string
+  roots?: string[]
+  pids?: number[]
+  openDocuments?: number
+  errors?: number
+  warnings?: number
+  indexingPercent?: number
+  lastError?: string
+  logPath?: string
+  note?: string
+  projectWrites?: string[]
+  installing?: boolean
+  installLog?: string[]
+  installError?: string
+}
+
+/** Everything /lsp shows for one runner: the project, the servers, the switches. */
+export interface LspSnapshot {
+  projectRoot?: string
+  trusted: boolean
+  featureEnabled: boolean
+  toolRegistered: boolean
+  recommendationsDisabled: boolean
+  recommendationsDisabledReason?: string
+  projectNotes?: string[]
+  servers: LspServerStatus[]
+}
+
+/** The language-server snapshot the /lsp surfaces render. */
+export async function lspSnapshot(sessionId?: string): Promise<LspSnapshot> {
+  const params = sessionId ? { sessionId } : undefined
+  const data = await api.get<Record<string, unknown>>('/v1/lsp', { params: toSnakeCase(params ?? {}) })
+  const snap = toCamelCase(data.data) as unknown as LspSnapshot
+  if (!Array.isArray(snap.servers)) snap.servers = []
+  return snap
+}
+
+/** Enable or disable one server; its instances in this project follow. */
+export async function lspSetEnabled(id: string, enabled: boolean, sessionId?: string) {
+  const payload = toSnakeCase({ id, sessionId: sessionId ?? '' })
+  const path = enabled ? '/v1/lsp/servers/enable' : '/v1/lsp/servers/disable'
+  return postJson<{ ok: boolean }, Record<string, string>>(path, payload)
+}
+
+/** Restart one server's instances in this project. */
+export async function lspRestart(id: string, sessionId?: string) {
+  return postJson<{ ok: boolean }, Record<string, string>>('/v1/lsp/servers/restart', toSnakeCase({ id, sessionId: sessionId ?? '' }))
+}
+
+/**
+ * Start the server's install recipe. The gateway answers 202 at once; the
+ * command only runs after the user saw it whole and confirmed.
+ */
+export async function lspInstall(id: string, sessionId?: string) {
+  return postJson<{ ok: boolean; started: boolean }, Record<string, string>>('/v1/lsp/servers/install', toSnakeCase({ id, sessionId: sessionId ?? '' }))
+}
+
+/** Turn language-server recommendations back on for this agent. */
+export async function lspResetRecommendations(sessionId?: string) {
+  return postJson<{ ok: boolean }, Record<string, string>>('/v1/lsp/recommendations/reset', toSnakeCase({ sessionId: sessionId ?? '' }))
+}
+
+/**
+ * Apply the user's answer to one recommendation. The card's buttons and the
+ * terminal modal's actions run the same decision.
+ */
+export async function decideLspRecommendation(id: string, choice: LspRecommendationChoice, sessionId?: string) {
+  return postJson<{ ok: boolean }, Record<string, string>>(
+    `/v1/lsp/recommendations/${encodeURIComponent(id)}/decision`,
+    toSnakeCase({ choice, sessionId: sessionId ?? '' }),
+  )
+}
+
 /** McpServersResponse is the envelope, including which Runner answered. */
 export interface McpServersResponse {
   servers: McpServerRecord[]
@@ -456,6 +590,8 @@ export interface ProjectRecord {
   createdAt: number
   updatedAt: number
   trustRecorded?: boolean
+  /** The persisted trust decision for this project's root (the detail read carries it). */
+  trusted?: boolean
 }
 
 export interface ProjectSessionRecord {
@@ -469,6 +605,15 @@ export interface ProjectMcpRecord {
   overriddenGlobal: string[]
   notApplied: Array<{ name: string; reason: string }>
   pendingConsent: Array<{ name: string; summary: string }>
+}
+
+/** The project-level language-server view: what <root>/.forebrain/lsp_servers.yaml declares and its per-entry decisions. */
+export interface ProjectLspRecord {
+  trusted: boolean
+  pending: Array<{ id: string; summary: string }>
+  allowed: string[]
+  denied: string[]
+  notes: string[]
 }
 
 
@@ -501,6 +646,8 @@ export interface CronJobRecord {
   lastRunAt?: number
   lastStatus?: string
   lastError?: string
+  /** Stable classifier of the last error, for wording in the viewer's language. */
+  lastErrorCode?: string
   lastOutput?: string
   failureStreak?: number
   createdAt?: number
@@ -511,10 +658,14 @@ export interface CronRunRecord {
   id: number
   jobId: string
   sessionId?: string
+  /** The fire's session holds a transcript; fires recorded before fires became conversations have none. */
+  hasConversation?: boolean
   trigger?: string
   status: string
   output?: string
   error?: string
+  /** Stable classifier of the error, for wording in the viewer's language. */
+  errorCode?: string
   deliveredTo?: string
   startedAt: number
   finishedAt?: number
@@ -536,6 +687,19 @@ export interface CronPreviewResponse {
   kind?: string
   next?: string[]
   error?: string
+}
+
+/**
+ * The install's scheduled-task settings. RetentionDays is the value in force
+ * (the default when the file carries no key), and minDays/maxDays bound what
+ * a save may carry — the form checks them before any request.
+ */
+export interface CronSettings {
+  retentionDays: number
+  configured: boolean
+  defaultDays: number
+  minDays: number
+  maxDays: number
 }
 
 export interface HeartbeatRecord {
@@ -573,7 +737,8 @@ export interface ProviderRecord {
   models: string[]
   baseUrl?: string
   apiPath?: string
-  params?: unknown
+  /** The provider request params as JSON text, keys verbatim. */
+  params?: string
   apiKeySet?: boolean
   apiKeyHint?: string
 }
@@ -591,7 +756,7 @@ export interface PermissionUpdateBody {
   type: 'addRules' | 'replaceRules' | 'removeRules' | 'setMode'
   destination: string
   behavior?: string
-  rules?: { toolName: string; ruleContent?: string; commandPrefix?: string[]; bypassSandbox?: boolean }[]
+  rules?: PermissionRuleValue[]
   mode?: string
 }
 
@@ -627,8 +792,58 @@ export interface ActionApprovalBody {
   requestPermissionsResponse?: RequestPermissionsResponse
 }
 
+/** One model a pending exit-plan approval may be handed to for a review. */
+export interface PlanReviewModelOption {
+  provider: string
+  model: string
+  label?: string
+  current?: boolean
+}
+
+/** One completed review a pending exit-plan approval already collected. */
+export interface PlanReviewNote {
+  provider: string
+  model: string
+  text: string
+  durationMs?: number
+}
+
+/** The review a pending exit-plan approval is waiting on, from its events. */
+export interface PlanReviewInFlight {
+  reviewId: string
+  provider?: string
+  model: string
+  label?: string
+  /** The reviewer subagent's roster key; cancelling it stops the review. */
+  agentId?: string
+}
+
+/**
+ * The typed approval request a session is parked on, as the terminal's
+ * overlay sees it. For a parked exit-plan approval it carries the plan
+ * itself, the models a review may be handed to, the reviews already
+ * collected, and the review currently running.
+ */
+export interface SessionApprovalRequest {
+  actionId: string
+  kind: string
+  toolName?: string
+  planText?: string
+  planReviewModels?: PlanReviewModelOption[]
+  planReviews?: PlanReviewNote[]
+  planReviewActive?: PlanReviewInFlight | null
+}
+
 export interface ChatSessionsResponse {
   records: { id: string; title: string | null; createTime: string; updateTime: string; source?: string }[]
+}
+
+/** One conversation's own facts: its title, and the project it belongs to
+ * when it belongs to one. */
+export interface ChatSessionInfo {
+  id: string
+  title: string
+  project: { id: string; name: string } | null
 }
 
 export interface SessionTodosResponse {
@@ -684,11 +899,19 @@ export interface ToolAuditRow {
 }
 
 
+/** What a session spent, in the figures /status reports. */
 export interface SessionCostSummary {
   sessionId: string
+  /** Everything the requests sent: uncached input plus cache reads and writes. */
+  inputTokens: number
+  outputTokens: number
+  cacheRead: number
+  cacheWritten: number
+  uncached: number
+  requests: number
+  cacheHitPercent: number
   toolCalls: number
   byTool: Record<string, number>
-  note?: string
 }
 
 export interface SessionSubagentHistoryResponse {
@@ -748,8 +971,6 @@ export interface SkillRecord {
   description: string
   allowedTools?: string
   rootPath?: string
-  source?: string
-  trust?: string
   enabled: boolean
   /** Which layer owns this row: project, agent, shared, builtin, cross-tool. */
   origin?: SkillOrigin
@@ -765,8 +986,7 @@ export interface SkillInspectResponse {
   skill: {
     name: string
     description: string
-    source: string
-    trust: string
+    origin: SkillOrigin
     path: string
     allowedTools?: string
   }
@@ -804,6 +1024,19 @@ export interface SkillInstallResponse {
   taskId: string
   sessionId: string
   installed: SkillInstallResult
+}
+
+/** One instruction file as the rules editor reads it. */
+export interface RuleFileContent {
+  name?: string
+  dir?: string
+  exists: boolean
+  content: string
+}
+
+export interface RuleFileSaveResponse {
+  bytes: number
+  warning?: string
 }
 
 export interface SkillUploadResponse {
@@ -950,6 +1183,27 @@ async function gatewayFetch(input: string, init?: RequestInit): Promise<Response
   return res
 }
 
+/**
+ * The words a failed fetch answered with: the gateway's {"error": …} reply
+ * (with the names a batch could not find, when it lists them), or the plain
+ * text http.Error writes. Never the raw JSON body.
+ */
+async function gatewayErrorText(res: Response): Promise<string> {
+  const body = await res.text()
+  try {
+    const data: unknown = JSON.parse(body)
+    if (data !== null && typeof data === 'object' && 'error' in data) {
+      const { error, missing } = data as { error?: unknown; missing?: unknown }
+      const names = Array.isArray(missing) ? missing.map(String).filter(Boolean) : []
+      const message = String(error ?? '').trim() || `HTTP ${res.status}`
+      return names.length ? `${message}: ${names.join(', ')}` : message
+    }
+  } catch {
+    // Not JSON: the plain-text reply is already the message.
+  }
+  return body.trim() || `HTTP ${res.status}`
+}
+
 /** The file name an attachment header carried, unquoted; empty when absent. */
 function filenameFromContentDisposition(header: string | null): string {
   if (!header) return ''
@@ -1024,9 +1278,11 @@ export const forebrainApi = {
     )
   },
 
-  chatSessions(current = 1, size = 100) {
+  /** The agent's conversations of one purpose: '' the drawer lists,
+   * 'workshop' the skill workshop lists. The filter is the server's. */
+  chatSessions(source: '' | 'workshop' = '') {
     return api.get<ChatSessionsResponse>('/chat/sessions', {
-      params: { current, size },
+      params: { source },
     }).then((res) => res.data)
   },
 
@@ -1055,6 +1311,15 @@ export const forebrainApi = {
       title: title ?? '',
       ...(source ? { source } : {}),
     })
+  },
+
+  /** One conversation by id, named for the page that has it open: the
+   * drawer's list never carries a project's session, so the page reads its
+   * title and project straight from the session. */
+  chatSession(sessionId: string) {
+    return api
+      .get<ChatSessionInfo>(`/chat/sessions/${encodeURIComponent(sessionId)}`)
+      .then((res) => res.data)
   },
 
   chatSessionTitle(sessionId: string, title: string) {
@@ -1087,13 +1352,14 @@ export const forebrainApi = {
     return api.get<SessionModeResponse>(`/chat/sessions/${sessionId}/mode`).then((res) => res.data)
   },
 
-  slashCommands(surface = 'webchat', q = '', opts?: { duringRun?: boolean; sideConversation?: boolean }) {
+  slashCommands(surface = 'webchat', q = '', opts?: { duringRun?: boolean; sideConversation?: boolean; subagentView?: boolean }) {
     return api.get<SlashCommandsResponse>('/slash/commands', {
       params: {
         surface,
         q,
         ...(opts?.duringRun ? { during_run: 1 } : {}),
         ...(opts?.sideConversation ? { side: 1 } : {}),
+        ...(opts?.subagentView ? { view: 'subagent' } : {}),
       },
     }).then((res) => res.data)
   },
@@ -1134,7 +1400,66 @@ export const forebrainApi = {
     ).then((res) => res.data)
   },
 
-  runInput(runId: string, body: { message: string; attachments?: string[] }) {
+  /**
+   * A subagent's own view, talked to through the conversation it belongs to.
+   * The engine owns every decision (plan 005); these calls are its transport.
+   */
+  subagentInput(sessionId: string, agentId: string, body: {
+    message: string
+    attachments?: string[]
+    mentionImages?: string[]
+    mode?: 'steer' | 'follow_up'
+  }) {
+    return postJson<SubagentInputResponse, typeof body>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/input`,
+      body,
+    )
+  },
+
+  subagentQueuedInput(sessionId: string, agentId: string, body: { action: 'edit_last' }) {
+    return postJson<RunInputResponse, typeof body>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/queued-input`,
+      body,
+    )
+  },
+
+  subagentInterruptSend(sessionId: string, agentId: string) {
+    return postJson<{ interrupted: boolean }, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/interrupt-send`,
+      {},
+    )
+  },
+
+  subagentWithdraw(sessionId: string, agentId: string) {
+    return postJson<SubagentWithdrawResponse, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/withdraw`,
+      {},
+    )
+  },
+
+  /** Compact the subagent's own context; its events draw the card in its view. */
+  subagentCompact(sessionId: string, agentId: string) {
+    return postJson<Record<string, unknown>, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/compact`,
+      {},
+    )
+  },
+
+  /** /context for a subagent, in the same shape as the conversation's. */
+  subagentContext(sessionId: string, agentId: string) {
+    return api.get<SessionContextDebug>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/context`,
+    ).then((res) => res.data)
+  },
+
+  /** The gauge a subagent's view opens with: its own context window. */
+  subagentBudget(sessionId: string, agentId: string) {
+    return api.get<ForebrainTokenBudget>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/budget`,
+    ).then((res) => res.data)
+  },
+
+  runInput(runId: string, body: { message: string; attachments?: string[]; mentionImages?: string[] }) {
     return postJson<RunInputResponse, typeof body>(
       `/runs/${encodeURIComponent(runId)}/input`,
       body,
@@ -1294,7 +1619,7 @@ export const forebrainApi = {
   // handling as axios) and come back as a blob plus the server's file name.
   skillDownload(url: string): Promise<SkillDownloadBlob> {
     return gatewayFetch(url).then(async (res) => {
-      if (!res.ok) throw new Error(await res.text())
+      if (!res.ok) throw new Error(await gatewayErrorText(res))
       return {
         blob: await res.blob(),
         filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) || 'skill.zip',
@@ -1309,7 +1634,7 @@ export const forebrainApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ names }),
     }).then(async (res) => {
-      if (!res.ok) throw new Error(await res.text())
+      if (!res.ok) throw new Error(await gatewayErrorText(res))
       return {
         blob: await res.blob(),
         filename: filenameFromContentDisposition(res.headers.get('Content-Disposition')) || 'skills.zip',
@@ -1487,6 +1812,33 @@ export const forebrainApi = {
     })
   },
 
+  /** The approval a session is parked on, with everything its card needs.
+   * Null when nothing is parked (the gateway answers 204). */
+  sessionApprovalRequest(sessionId: string) {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/approval-request`, {
+      method: 'GET',
+    }).then(async (r) => {
+      if (r.status === 204) return null
+      if (!r.ok) throw new GatewayHttpError(r.status, (await r.text()).trim())
+      return toCamelCase(await r.json()) as SessionApprovalRequest
+    })
+  },
+
+  /** Ask one configured model to review a pending exit-plan approval. The
+   * review runs in the background; its events are its progress. */
+  actionPlanReview(id: string, body: { provider: string; model: string }) {
+    return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/plan-review`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(toSnakeCase(body)),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return r.status === 202
+    })
+  },
+
   workspaceTree(path = '') {
     return api
       .get<WorkspaceTreeResponse>('/workspace/tree', { params: path ? { path } : undefined })
@@ -1579,26 +1931,29 @@ export const forebrainApi = {
     return postJson<{ ok: boolean }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/mcp/consent`, { allow })
   },
 
+  projectLsp(id: string) {
+    return api.get<ProjectLspRecord>(`/v1/projects/${encodeURIComponent(id)}/lsp`).then((res) => res.data)
+  },
+
+  projectLspConsent(id: string, allow: string[]) {
+    return postJson<{ ok: boolean; allowed: string[] }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/lsp/consent`, { allow })
+  },
+
   agentRuleFiles() {
     return api.get<{ files: Array<{ name: string; exists: boolean; sizeBytes?: number; updatedAt?: number }> }>('/rules/agent').then((res) => res.data)
   },
 
+  // Rule files travel as their raw text on save; a read always answers one
+  // JSON shape, so a file that does not exist yet is never mistaken for one
+  // whose text happens to look like a status reply.
   agentRuleFile(name: string) {
-    return fetch(`/api/rules/agent/${encodeURIComponent(name)}`).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return r.text()
-    })
+    return api.get<RuleFileContent>(`/rules/agent/${encodeURIComponent(name)}`).then((res) => res.data)
   },
 
   saveAgentRuleFile(name: string, content: string) {
-    return fetch(`/api/rules/agent/${encodeURIComponent(name)}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/plain' },
-      body: content,
-    }).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return toCamelCase(await r.json()) as { bytes: number; warning?: string }
-    })
+    return api
+      .put<RuleFileSaveResponse>(`/rules/agent/${encodeURIComponent(name)}`, content, { headers: { 'Content-Type': 'text/plain' } })
+      .then((res) => res.data)
   },
 
   projectRuleFiles(projectId: string) {
@@ -1606,23 +1961,47 @@ export const forebrainApi = {
   },
 
   projectRuleFile(projectId: string, dir: string) {
-    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
-    return fetch(`/api/rules/project/${encodeURIComponent(projectId)}/file${query}`).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return r.text()
-    })
+    return api
+      .get<RuleFileContent>(`/rules/project/${encodeURIComponent(projectId)}/file`, { params: dir ? { dir } : undefined })
+      .then((res) => res.data)
   },
 
   saveProjectRuleFile(projectId: string, dir: string, content: string) {
-    const query = dir ? `?dir=${encodeURIComponent(dir)}` : ''
-    return fetch(`/api/rules/project/${encodeURIComponent(projectId)}/file${query}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'text/plain' },
-      body: content,
-    }).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
-      return toCamelCase(await r.json()) as { bytes: number; warning?: string }
-    })
+    return api
+      .put<RuleFileSaveResponse>(`/rules/project/${encodeURIComponent(projectId)}/file`, content, {
+        params: dir ? { dir } : undefined,
+        headers: { 'Content-Type': 'text/plain' },
+      })
+      .then((res) => res.data)
+  },
+
+  // A project space's own permission rules: read, changed and probed against
+  // that project's settings, whichever project the gateway was launched in.
+  projectPermissionRules(projectId: string) {
+    return api
+      .get<{ applies: boolean; rules: PermissionRuleRecord[] }>(`/v1/projects/${encodeURIComponent(projectId)}/permissions/rules`)
+      .then((res) => ({ applies: Boolean(res.data?.applies), rules: Array.isArray(res.data?.rules) ? res.data.rules : [] }))
+  },
+
+  projectPermissionUpdate(projectId: string, body: Omit<PermissionUpdateBody, 'destination'>) {
+    return postJson<{ ok: boolean; rules: PermissionRuleRecord[] }, Omit<PermissionUpdateBody, 'destination'>>(
+      `/v1/projects/${encodeURIComponent(projectId)}/permissions/updates`,
+      body,
+    )
+  },
+
+  projectPermissionExplain(projectId: string, params: { toolName: string; input?: string }) {
+    return api
+      .get<PermissionExplainResponse>(`/v1/projects/${encodeURIComponent(projectId)}/permissions/explain`, {
+        params: { tool_name: params.toolName, input: params.input ?? '' },
+      })
+      .then((res) => res.data)
+  },
+
+  sessionPresetCurrent(sessionId: string) {
+    return api
+      .get<{ current: string | null; description?: string }>('/permissions/session-preset', { params: { session_id: sessionId } })
+      .then((res) => res.data)
   },
 
   approvalDefault() {
@@ -1669,6 +2048,18 @@ export const forebrainApi = {
 
   saveHooks(hooks: HooksSettingsRecord) {
     return api.put<{ applied: boolean }>('/hooks', toSnakeCase({ hooks })).then((res) => res.data)
+  },
+
+  // Retention is the install's configuration, so these live apart from the
+  // agent-scoped /cron routes. null removes the key: the default applies.
+  cronSettings() {
+    return api.get<CronSettings>('/cron-settings').then((res) => res.data)
+  },
+
+  saveCronSettings(retentionDays: number | null) {
+    return api
+      .put<{ applied: boolean; path: string }>('/cron-settings', { retention_days: retentionDays })
+      .then((res) => res.data)
   },
 
   cronJobs(projectId?: string) {
@@ -1722,9 +2113,16 @@ export const forebrainApi = {
     return api.delete<{ cleared: string }>('/heartbeat', { params: { session_id: sessionId } }).then((res) => res.data)
   },
 
-  /** Stops the continuation a session is waiting to run once a usage limit resets. */
-  cancelAutoContinue(sessionId: string) {
-    return api.delete<{ cancelled: boolean }>('/auto-continue', { params: { session_id: sessionId } }).then((res) => res.data)
+  /**
+   * Stops the continuation a session is waiting to run once a usage limit
+   * resets. With agentId, it stops that subagent's own continuation instead of
+   * the conversation's.
+   */
+  cancelAutoContinue(sessionId: string, agentId?: string) {
+    const id = String(agentId ?? '').trim()
+    const params: Record<string, string> = { session_id: sessionId }
+    if (id) params.agent_id = id
+    return api.delete<{ cancelled: boolean }>('/auto-continue', { params }).then((res) => res.data)
   },
 
   permissionsExplain(params: { toolName: string; input?: string; sessionId?: string }) {

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -408,6 +409,37 @@ func (m *sessionToolCallLLM) Execute(context.Context, []llm.Message, []*llm.Tool
 	default:
 		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+// The plan update the engine publishes names its in-flight task the one way
+// every surface reports it: the payload's Active is the shared rule's answer
+// for the same items, so the web's working and worked lines and the
+// terminal's agree without each deriving it again.
+func TestPlanUpdatePayloadActiveMatchesTheSharedRule(t *testing.T) {
+	var captured *StepEvent
+	st := NewState(t.TempDir())
+	st.SetStepHook(func(_ context.Context, evt StepEvent) {
+		captured = &evt
+	})
+	list := state.List{Items: []state.Item{
+		{ID: "one", Content: "Read the diff", Status: state.StatusCompleted},
+		{ID: "two", Content: "Fix the reducer", Title: "reducer", Status: state.StatusInProgress},
+		{ID: "three", Content: "Add a test", Title: "a much longer in-flight title", Status: state.StatusInProgress},
+		{ID: "four", Content: "Ship it", Status: state.StatusPending},
+	}}
+
+	emitPlanUpdateStep(context.Background(), st, list)
+	if captured == nil || captured.PlanUpdate == nil {
+		t.Fatalf("no plan update step was emitted: %#v", captured)
+	}
+	payload := *captured.PlanUpdate
+	want := event.PlanProgressOf(payload.Items, payload.Completed, payload.Total, payload.Explanation).Active
+	if payload.Active != want {
+		t.Fatalf("payload active = %q, want the shared rule's %q", payload.Active, want)
+	}
+	if payload.Active != "reducer" {
+		t.Fatalf("payload active = %q, want the shortest in-progress title", payload.Active)
 	}
 }
 

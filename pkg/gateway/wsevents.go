@@ -74,21 +74,20 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 	case "run_completed":
 		typeName = event.RunEventTurnCompleted
 		payload = event.TurnCompletedPayload{
-			Text:       m.Text,
-			ElapsedMS:  int64Field(m.Data, "elapsed_ms"),
-			PlanDone:   int(int64Field(m.Data, "plan_done")),
-			PlanTotal:  int(int64Field(m.Data, "plan_total")),
-			PlanActive: planActiveField(m.Data),
+			Text:         m.Text,
+			ElapsedMS:    int64Field(m.Data, "elapsed_ms"),
+			RunPlanFacts: m.RunPlanFacts,
 		}
 	case "run_cancelled":
 		typeName = event.RunEventTurnCancelled
-		payload = event.TurnCancelledPayload{Message: strings.TrimSpace(m.Message)}
+		payload = event.TurnCancelledPayload{Message: strings.TrimSpace(m.Message), RunPlanFacts: m.RunPlanFacts}
 	case "run_error":
 		typeName = event.RunEventTurnError
 		payload = event.TurnErrorPayload{
-			Error:   strings.TrimSpace(m.Error),
-			Message: strings.TrimSpace(m.Message),
-			Detail:  turnErrorDetail(m.Data),
+			Error:        strings.TrimSpace(m.Error),
+			Message:      strings.TrimSpace(m.Message),
+			Detail:       turnErrorDetail(m.Data),
+			RunPlanFacts: m.RunPlanFacts,
 		}
 	case "requires_action":
 		typeName = event.RunEventApprovalReq
@@ -337,6 +336,7 @@ func tokenBudgetUpdatedPayload(v any) (event.TokenBudgetUpdatedPayload, bool) {
 		return event.TokenBudgetUpdatedPayload{}, false
 	}
 	return event.TokenBudgetUpdatedPayload{
+		AgentID:              strings.TrimSpace(stringOr(asMap["agent_id"])),
 		Model:                strings.TrimSpace(stringOr(asMap["model"])),
 		TokenUsage:           int(int64Field(asMap, "token_usage")),
 		PercentLeft:          int(int64Field(asMap, "percent_left")),
@@ -362,7 +362,13 @@ func boolField(v map[string]any, key string) bool {
 }
 
 func (s *Server) tokenBudgetWSMessageFromSession(ctx context.Context, requestID, runID, sessionID string) (wsServerMsg, bool) {
-	payload, ok := s.tokenBudgetPayloadFromSession(ctx, sessionID)
+	// The engine's one copy of the gauge: the session's occupancy, budgeted
+	// on the conversation's own model.
+	usage, ok := run.ContextOccupancy(ctx, s.Sessions, sessionID)
+	if !ok || usage <= 0 {
+		return wsServerMsg{}, false
+	}
+	payload, ok := run.ContextBudget(s.Runner, sessionID, nil, usage)
 	if !ok {
 		return wsServerMsg{}, false
 	}
@@ -372,39 +378,6 @@ func (s *Server) tokenBudgetWSMessageFromSession(ctx context.Context, requestID,
 		RunID:     strings.TrimSpace(runID),
 		SessionID: strings.TrimSpace(sessionID),
 		Data:      payload,
-	}, true
-}
-
-// contextOccupancy is how much of the context window the conversation fills
-// right now: the last API response's whole prompt. The web's context gauge and
-// /status both read it — the same input the terminal's footer uses — so the
-// numbers agree everywhere.
-func (s *Server) contextOccupancy(ctx context.Context, sessionID string) (int, bool) {
-	if s == nil || s.Sessions == nil {
-		return 0, false
-	}
-	turns, err := s.Sessions.ListRecentMessages(ctx, sessionID, 400)
-	if err != nil {
-		return 0, false
-	}
-	return state.TokenCountFromLastAPIResponse(turns), true
-}
-
-func (s *Server) tokenBudgetPayloadFromSession(ctx context.Context, sessionID string) (event.TokenBudgetUpdatedPayload, bool) {
-	usage, ok := s.contextOccupancy(ctx, sessionID)
-	if !ok || usage <= 0 {
-		return event.TokenBudgetUpdatedPayload{}, false
-	}
-	provider, model := run.PrimaryModel(s.Runner)
-	limits, _ := llm.Lookup(provider, model)
-	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: s.compactExplicitLimit()})
-	return event.TokenBudgetUpdatedPayload{
-		Model:                budget.Model,
-		TokenUsage:           budget.TokenUsage,
-		PercentLeft:          budget.PercentLeft,
-		ContextWindow:        budget.ContextWindow,
-		EffectiveWindow:      budget.EffectiveContextWindow,
-		AutoCompactThreshold: budget.AutoCompactThreshold,
 	}, true
 }
 
@@ -519,6 +492,18 @@ func toolCallMetaFromWS(top map[string]any, nested map[string]any) event.ToolCal
 		meta.ResultLines = int(float64OrZero(metaMap["result_lines"]))
 		meta.ResultOffset = int(float64OrZero(metaMap["result_offset"]))
 		meta.StartedAtMs = int64(float64OrZero(metaMap["started_at_ms"]))
+		// The subagent_* card facts (plan 012) ride the same tool_meta; the
+		// conversion rebuilds the meta field by field, so they are decoded
+		// here rather than dropped — a lost copy leaves the web rendering the
+		// call as a generic tool card instead of the subagent card.
+		if raw := metaMap["subagent_call"]; raw != nil {
+			if encoded, err := json.Marshal(raw); err == nil {
+				var call event.SubagentCall
+				if json.Unmarshal(encoded, &call) == nil && (call.Verb != "" || len(call.Tasks) > 0) {
+					meta.SubagentCall = &call
+				}
+			}
+		}
 	}
 	if meta.ToolName == "" {
 		meta.ToolName = strings.TrimSpace(stringOr(top["tool_name"]))
@@ -580,6 +565,12 @@ type runEventBus struct {
 	next  int64
 	subs  map[int64]*runEventSubscription
 	store *state.RunStore
+	// onRunEnded is told about a run's ending the moment it is persisted and
+	// before any page is delivered it. The scheduler uses it to settle a
+	// fire's record now rather than on its next tick; the hook carries
+	// nothing but the event, and the scheduler reads the ending back from
+	// the store, so removing the hook changes only how soon settling runs.
+	onRunEnded func(event.RunEvent)
 }
 
 func newRunEventBus(stores ...*state.RunStore) *runEventBus {
@@ -614,6 +605,9 @@ func (b *runEventBus) Publish(ctx context.Context, evt event.RunEvent) error {
 		default:
 			evt = turn.RunEventFromRecord(persisted)
 		}
+	}
+	if b.onRunEnded != nil {
+		b.onRunEnded(evt)
 	}
 	b.mu.RLock()
 	subs := make([]*runEventSubscription, 0, len(b.subs))
@@ -760,16 +754,17 @@ func (sub *runEventSubscription) Close() {
 	sub.bus.mu.Unlock()
 }
 
-// planActiveField reads the worked line's active-task title from a legacy
-// run_completed data map. Absent keys mean the turn had no checklist in
-// flight; the payload then stays silent rather than naming an empty task.
-func planActiveField(v any) string {
-	asMap, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	s, _ := asMap["plan_active"].(string)
-	return strings.TrimSpace(s)
+// wsRunEndOps are the operations that end a run; each carries the run's
+// checklist facts.
+var wsRunEndOps = map[string]bool{
+	"run_completed": true,
+	"run_cancelled": true,
+	"run_error":     true,
+}
+
+// runPlanFacts is a run's final checklist state as its end carries it.
+func (s *Server) runPlanFacts(ctx context.Context, runID string) event.RunPlanFacts {
+	return lastPlanProgressOfRun(ctx, s.RunRT, runID).Facts()
 }
 
 // runPlanEventLister is the slice of the run store the plan lookup needs.
@@ -793,6 +788,12 @@ func lastPlanProgressOfRun(ctx context.Context, runs runPlanEventLister, runID s
 	for i := len(events) - 1; i >= 0; i-- {
 		var payload event.PlanUpdatedPayload
 		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
+			continue
+		}
+		// A subagent's checklist is recorded under its parent's run but is
+		// that subagent's own; the conversation's worked line reports the
+		// conversation's plan, exactly as the terminal's tracker does.
+		if strings.TrimSpace(payload.AgentID) != "" {
 			continue
 		}
 		last = &payload

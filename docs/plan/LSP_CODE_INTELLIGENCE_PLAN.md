@@ -1,7 +1,7 @@
 # LSP 代码智能接入规范：给 forebrain 加上语言服务器的语义与功能
 
 > 日期：2026-09-29（定稿）
-> 状态：**已定稿，可实施**。§15 的全部决策已定，实施按 [`docs/plan/lsp/`](lsp/README.md) 的 18 个任务计划分批交付
+> 状态：**已实施**（任务 01–18，见 [`docs/plan/lsp/README.md`](lsp/README.md)）。后续改动先改本规范再改代码
 > 基线：`main` / `6305ea9`
 > 范围：新增 `pkg/lsp`；改动 `pkg/config`、`pkg/event`、`pkg/tool`、`pkg/safety`、`pkg/run`、`pkg/turn`、`pkg/process`、`pkg/tui`、`pkg/gateway`、`frontend`、`pkg/migrate`、`cmd/forebrain`、`pkg/architecture`、`.github/workflows/lsp-integration.yml`（新）
 > 对标：Claude Code 的 code intelligence 插件（`gopls-lsp`、`jdtls-lsp`、`rust-analyzer-lsp` 等）、`LSP` 工具、编辑后诊断、**LSP plugin recommendation** 对话框
@@ -688,8 +688,8 @@ rust-analyzer 执行 `build.rs` 与过程宏；jdtls、kotlin-lsp、metals 执�
 1. `features.lsp && lsp.recommendations`，且 `recommendations.json` 的 `disabled` 为 false。
 2. 项目受信任。
 3. 触发点：`DidWrite` 中某个被写文件没有已启用服务器负责，且其扩展名或文件名命中某个**未启用**、不在 `never` 列表里的目录服务器（多个命中时按 §6.3 选 primary）。
-4. 调用上下文不是 fork 子会话（`tool.IsForkChildFromContext`）也不是类型化子代理（`tool.SubagentTypeFromContext != ""`）。
-5. 本会话（`tool.ConversationSessionIDFromContext`）还没推荐过任何服务器。
+4. 编辑即触发：主代理、类型化子代理、fork 子会话相同——子代理/fork 的调用上下文携带父会话 id，推荐发往父会话界面由用户回答（2026-10-05 修订；原条件「非 fork 子会话且非类型化子代理」删除，owner 裁决：subagent 做的写操作也必须触发推荐）。
+5. 本会话（`tool.ConversationSessionIDFromContext`，子代理/fork 时即父会话 id）还没推荐过任何服务器——推荐按 conversation session 去重，同会话内父与子代理只推荐一次。
 6. 二进制已找到 → `mode: "enable"`；未找到但有可用安装配方 → `mode: "install"`；都没有 → 不推荐。
 
 推荐以回调 `SetRecommendationListener` 交出。监听器由组合根 `pkg/process` 为主 Runner 与每个项目 Runner 各安装一次（子代理与 fork 共用父 Runner 的 Manager，若在 `pkg/run` 的载入路径上安装，子 Runner 会覆盖父 Runner 的监听器），发布时读取 `runner.Events`，发出 `RunEvent{Type: "lsp_recommendation", SessionID: 会话 id, RunID, Payload: event.LSPRecommendation}`（任务 13）。二进制探测在后台 goroutine 进行，不阻塞 `DidWrite`（探测未完成时本次不推荐，下一次编辑再判断）。

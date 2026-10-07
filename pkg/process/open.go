@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,10 +15,12 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	openaiauth "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -28,6 +31,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
+	"github.com/google/uuid"
 )
 
 // OpenOptions controls process-wide runtime composition.
@@ -66,12 +70,17 @@ type Environment struct {
 	Control       *run.Controller
 	sessionSource string
 
-	ConfigPath     string
-	reloadMu       sync.Mutex
-	managerMu      sync.RWMutex
-	reload         *ConfigManager
-	poolOnce       sync.Once
-	pool           *RunnerPool
+	ConfigPath string
+	reloadMu   sync.Mutex
+	managerMu  sync.RWMutex
+	reload     *ConfigManager
+	poolOnce   sync.Once
+	pool       *RunnerPool
+	// LSP is the process-wide language-server pool; lspManager is the
+	// primary runner's view of it. Project runners get their own managers
+	// from the same pool (see RunnerPool).
+	LSP            *lsp.Pool
+	lspManager     *lsp.Manager
 	watchMu        sync.Mutex
 	watchStop      func()
 	watchID        uint64
@@ -80,18 +89,19 @@ type Environment struct {
 	rulesHook      *assembly.PreHook
 	ctxHook        *assembly.Hook
 	OnConfigReload func(*appcfg.Root)
-	// OnConfigLoaded lets the surface fold session-scoped choices into a
-	// freshly loaded config before it becomes live. Only the surface knows
-	// them: the TUI's /permissions preset is never written to forebrain.yaml, so
-	// without this a hot reload would restore the sandbox the user just moved
-	// away from -- which is exactly the case that preset exists to prevent.
-	//
-	// Not called when YOLO is on. YOLO comes from the environment and is not
-	// something a session-scoped choice may walk back, which is the same rule
-	// the slash-command reload path applies.
-	OnConfigLoaded    func(*appcfg.Root)
-	telShutdown       func(context.Context) error
-	approvalSweepStop func()
+	// OnSubagentExecution reports every subagent execution's start and end to
+	// the surface that opened the session, so it can arm the subagent's own
+	// auto-continue. Nil — a one-shot run, a channel with nobody to cancel a
+	// wait — schedules nothing, which is how "a channel never auto-continues"
+	// is structural rather than a surface check.
+	OnSubagentExecution *SubagentExecutionHooks
+	telShutdown         func(context.Context) error
+	approvalSweepStop   func()
+	// ownerLeaseStop deregisters this process's run-owner lease. It runs
+	// after the runners are closed and before the SQL handle is: while any
+	// runner lives it may still settle runs under this owner, and the DELETE
+	// needs the database.
+	ownerLeaseStop func()
 }
 
 func (env *Environment) Close() {
@@ -111,6 +121,18 @@ func (env *Environment) Close() {
 		_ = env.Runner.Close()
 	}
 	env.CloseRunnerPool()
+	// This process's runs are nobody's now: deregistering the lease makes
+	// any run it failed to settle immediately readable as abandoned. It must
+	// precede the SQL close below, which the DELETE and the renewal loop
+	// both need.
+	if env.ownerLeaseStop != nil {
+		env.ownerLeaseStop()
+	}
+	// Language servers are children of this process too; they go after
+	// every runner that could still ask them for something.
+	if env.LSP != nil {
+		_ = env.LSP.Close()
+	}
 	if env.telShutdown != nil && env.SQL != nil {
 		_ = env.telShutdown(context.Background())
 	}
@@ -264,7 +286,10 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	frozenOverridden := mcpRes.Summary.OverriddenGlobal
 
 	actionSvc := &state.ActionService{DB: sqlDB}
-	runSvc := &state.RunStore{DB: sqlDB}
+	// The owner names this process to the shared database: the runs it creates
+	// and resumes are stamped with it, and the lease it holds below is what
+	// tells every other process on this machine that those runs are alive.
+	runSvc := &state.RunStore{DB: sqlDB, Owner: source + "-" + uuid.NewString()}
 	fileSvc := &state.FileStore{DB: sqlDB, Home: root, Cfg: state.LoadConfigFromEnv()}
 	if v := strings.TrimSpace(os.Getenv("FOREBRAIN_WORK_ITEM_LEASE_SEC")); v != "" {
 		if _, err := strconv.Atoi(v); err == nil {
@@ -275,6 +300,19 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// sessions they record before the first one is written.
 	sessStore := state.NewSessionStore(sqlDB, activeAgent.ID)
 	memStore := memory.NewStore(sqlDB, activeAgent.ID)
+	env.LSP = lsp.NewPool(cfgRoot)
+	lspOpts := lsp.ManagerOptions{
+		Home:              root,
+		AgentWorkspace:    activeAgent.WorkspaceRoot,
+		ProjectRoot:       launchProject.Project.Root,
+		Trusted:           safety.TrustedRoot(launchProject) != "",
+		VersionControlled: launchProject.Project.VersionControlled,
+	}
+	if lspOpts.ProjectRoot != "" {
+		lspOpts.ProjectKey = memory.ProjectKey(lspOpts.ProjectRoot)
+	}
+	lspOpts.ToolRegistered = lsp.ToolEnabled(cfgRoot, lspOpts)
+	env.lspManager = env.LSP.NewManager(lspOpts)
 	env.Deps = run.Deps{
 		Home:        root,
 		Actions:     actionSvc,
@@ -291,10 +329,16 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			summary.OverriddenGlobal = frozenOverridden
 			return summary
 		},
-		MemoryStore:  memStore,
-		AppCfg:       cfgRoot,
-		SessionStore: sessStore,
-		RunRT:        runSvc,
+		// The language-server runtime is the same frozen shape: the pool is
+		// process-wide, this manager is the primary runner's view of it, and
+		// the tool decision is computed once and never recomputed on reload.
+		CodeIntel:        env.lspManager,
+		CodeIntelControl: env.lspManager,
+		CodeIntelTool:    lspOpts.ToolRegistered,
+		MemoryStore:      memStore,
+		AppCfg:           cfgRoot,
+		SessionStore:     sessStore,
+		RunRT:            runSvc,
 	}
 	runner := &run.Runner{Deps: &env.Deps, Control: env.Control, SkillCommands: run.SkillCommandHooks{
 		Refresh:   turn.RefreshSkills,
@@ -305,6 +349,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// primary agent on main's model.
 	runner.AgentName = activeAgent.ID
 	runner.WorkspaceRoot = activeAgent.WorkspaceRoot
+	publishLSPRecommendations(env.lspManager, runner)
 	if launchProject.Project.Root != "" {
 		runner.ProjectRoot = launchProject.Project.Root
 		runner.ProjectKey = memory.ProjectKey(launchProject.Project.Root)
@@ -324,6 +369,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// every later symptom (no tools, no skills, an empty model) pointed at the
 	// surface instead of at the load that actually failed.
 	if err := runner.Load(); err != nil {
+		_ = env.LSP.Close()
 		return nil, fmt.Errorf("process agent load: %w", err)
 	}
 	safety.UpdateManagerWithLocalConfig(env.Sandbox, root, cfgRoot, runner.PermissionSnapshot(), nil)
@@ -419,7 +465,39 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	}
 	runner.FileResolver = fileReferenceResolver(fileSvc, runner.AgentName)
 	runner.SubagentExecutor = env
+	// The lease is registered only once every failure path is behind us: the
+	// renewal goroutine must not outlive an Open that is about to return an
+	// error. From here the process is live — its runs are vouched for until
+	// Close deregisters it.
+	ownerStop, err := runSvc.HoldOwnerLease(ctx)
+	if err != nil {
+		_ = env.LSP.Close()
+		_ = env.Runner.Close()
+		return nil, fmt.Errorf("register run owner lease: %w", err)
+	}
+	env.ownerLeaseStop = ownerStop
 	return env, nil
+}
+
+// publishLSPRecommendations hands recommendations from mgr to whichever
+// surface is attached to runner when one is made. The sink is read at
+// publish time: surfaces attach it after the runner is built, and a
+// subagent or fork sharing the parent's manager still reaches the parent
+// runner's surface — the reason this is wired here rather than in pkg/run,
+// whose sub-runner Load would overwrite the parent's listener.
+func publishLSPRecommendations(mgr *lsp.Manager, runner *run.Runner) {
+	if mgr == nil || runner == nil {
+		return
+	}
+	mgr.SetRecommendationListener(func(ctx context.Context, rec event.LSPRecommendation) {
+		sink := runner.Events
+		if sink == nil {
+			return
+		}
+		_ = sink.Publish(context.WithoutCancel(ctx), event.NewRunEvent(
+			rec.ID, tool.RunIDFromContext(ctx), tool.ConversationSessionIDFromContext(ctx),
+			event.RunEventLSPRecommendation, rec, time.Now()))
+	})
 }
 
 // fileReferenceResolver resolves the file_id of a persisted file_reference
@@ -490,6 +568,84 @@ func ActiveAgentWorkspace() (string, error) {
 		}
 	}
 	return strings.TrimSpace(activePrimaryAgent(root, &ctx.Config).WorkspaceRoot), nil
+}
+
+// ResolveConsentProjectContext resolves the project the startup consent
+// prompts speak about: a registered project wins whenever cwd sits inside
+// its root (deepest match), because that is the boundary the runtime gives
+// the project's sessions — the runner pool resolves registered roots through
+// ResolveRegisteredContext, and a launch-style walk to the enclosing .git
+// would record the answer under a checkout the sessions never run as.
+// Anything outside every registered project keeps the launch resolution.
+func ResolveConsentProjectContext(root, cwd string) (safety.ProjectContext, error) {
+	root = strings.TrimSpace(root)
+	launch, launchErr := safety.ResolveProjectContext(root, strings.TrimSpace(cwd))
+	registered := consentRegisteredRoot(root, cwd)
+	if registered == "" {
+		return launch, launchErr
+	}
+	if registeredCtx, err := safety.ResolveRegisteredContext(root, registered); err == nil {
+		return registeredCtx, nil
+	}
+	return launch, launchErr
+}
+
+// consentRegisteredRoot answers the registered project root containing cwd,
+// deepest first, or "" when cwd sits outside every registered project. The
+// registry is the one the runner pool resolves session→project through: the
+// state database's project rows for the active primary agent.
+func consentRegisteredRoot(root, cwd string) string {
+	dir := strings.TrimSpace(cwd)
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if dir == "" {
+		return ""
+	}
+	dir, err := safety.CanonicalPath(dir)
+	if err != nil {
+		return ""
+	}
+	rt, err := Resolve()
+	if err != nil {
+		return ""
+	}
+	agent := activePrimaryAgent(rt.Home, &rt.Config)
+	if strings.TrimSpace(agent.ID) == "" {
+		return ""
+	}
+	ctx := context.Background()
+	db, err := state.OpenStateFromHome(ctx, root, &rt.Config)
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	projects := state.NewProjectStore(db, agent.ID)
+	var best string
+	for offset := 0; ; offset += 500 {
+		page, err := projects.ListProjects(ctx, state.ListProjectsOptions{}, 500, offset)
+		if err != nil {
+			return best
+		}
+		for _, p := range page {
+			candidate, err := safety.CanonicalPath(strings.TrimSpace(p.Root))
+			if err != nil {
+				continue
+			}
+			rel, err := filepath.Rel(candidate, dir)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			if best == "" || len(candidate) > len(best) {
+				best = candidate
+			}
+		}
+		if len(page) < 500 {
+			return best
+		}
+	}
 }
 
 func mergeAgentClawbotSession(cfg *appcfg.Root, active appcfg.Summary) {

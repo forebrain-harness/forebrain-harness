@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"unicode"
-
-	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 type SlashCommandRecord struct {
@@ -70,32 +68,35 @@ func (s *Service) ExecuteSlashCommand(ctx Context, content string) Result {
 	return s.commands.Execute(ctx, content)
 }
 
+// The SubagentView field on each command is the D4 classification: which
+// commands act on the subagent whose view they are typed in, which run
+// globally as before, and which are hidden there. It is a property of the
+// command (not of a surface), so the TUI and the web read one table.
 var commands = []Command{
-	{Name: "model", Description: "choose what model and reasoning effort to use", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "fast", Description: "toggle Fast mode to enable fastest inference with increased plan usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "permissions", Description: "choose what Forebrain Harness is allowed to do", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[explain <tool>]", Visibility: VisibilityPublic},
-	{Name: "skills", Description: "run, add, create, improve, and toggle skills", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "rename", Description: "rename the current thread", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<title>", Visibility: VisibilityPublic},
-	{Name: "new", Description: "start a new chat during a conversation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "resume", Description: "resume a saved chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "fork", Description: "fork the current chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "init", Description: "analyze the repo and create/refresh FOREBRAIN.md guidance", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "compact", Description: "summarize conversation to prevent hitting the context limit", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "clear", Description: "clear conversation history and start fresh", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "context", Description: "inspect current context snapshot and compaction state", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "memories", Description: "configure memory use and generation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "plan", Description: "switch to Plan mode, optionally starting toward a description", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[description]", Visibility: VisibilityPublic},
-	{Name: "agent", Description: "switch to another primary agent and its workspace", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "diff", Description: "show git diff (including untracked files)", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[path]", AvailableInSideConversation: true, Visibility: VisibilityPublic},
-	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic},
-	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "exit", Description: "exit Forebrain Harness", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "help", Description: "list every command and skill", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "subagents", Description: "open one of this chat's subagent sessions", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "goal", Description: "run continuously toward an objective until done", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<objective>", Visibility: VisibilityPublic},
-	{Name: "connect", Description: "configure or switch LLM provider", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
-	{Name: "migrate", Description: "migrate sessions, memories, skills, and MCP servers from another agent", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic},
+	{Name: "model", Description: "choose what model and reasoning effort to use", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "fast", Description: "toggle Fast mode to enable fastest inference with increased plan usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "permissions", Description: "choose what Forebrain Harness is allowed to do", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[explain <tool>]", Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "skills", Description: "run, add, create, improve, and toggle skills", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "rename", Description: "rename the current thread", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<title>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "new", Description: "start a new chat during a conversation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "resume", Description: "resume a saved chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "fork", Description: "fork the current chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "init", Description: "analyze the repo and create/refresh FOREBRAIN.md guidance", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "compact", Description: "summarize conversation to prevent hitting the context limit", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewActs},
+	{Name: "clear", Description: "clear conversation history and start fresh", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "context", Description: "inspect current context snapshot and compaction state", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewActs},
+	{Name: "memories", Description: "configure memory use and generation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "plan", Description: "switch to Plan mode, optionally starting toward a description", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[description]", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "agent", Description: "switch to another primary agent and its workspace", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "exit", Description: "exit Forebrain Harness", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "subagents", Description: "open one of this chat's subagent sessions", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "goal", Description: "run continuously toward an objective until done", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<objective>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "connect", Description: "configure or switch LLM provider", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "migrate", Description: "migrate sessions, memories, skills, and MCP servers from another agent", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 }
 
 var runDisallowedCommands = map[string]bool{
@@ -139,7 +140,11 @@ func All() []Command {
 		out = append(out, normalizeCommand(cmd))
 	}
 	for _, d := range dyn {
-		out = append(out, normalizeCommand(d.Command))
+		cmd := normalizeCommand(d.Command)
+		// A skill command acts on the subagent whose view it is typed in: it
+		// is sent to that subagent with the skill explicitly activated (D4).
+		cmd.SubagentView = SubagentViewActs
+		out = append(out, cmd)
 	}
 	return out
 }
@@ -153,6 +158,9 @@ func VisibleWithOptions(surface Surface, opts DiscoveryOptions) []Command {
 			continue
 		}
 		if !cmd.AllowedOn(surface) {
+			continue
+		}
+		if opts.SubagentView && cmd.SubagentView == SubagentViewHidden {
 			continue
 		}
 		if opts.DuringRun && !availableDuringRun(cmd) {
@@ -221,7 +229,7 @@ func defaultCategory(name string) string {
 	switch name {
 	case "new", "resume", "fork", "rename", "migrate", "exit":
 		return "session"
-	case "compact", "diff", "memories":
+	case "compact", "memories":
 		return "context"
 	case "context":
 		return "context"
@@ -229,7 +237,7 @@ func defaultCategory(name string) string {
 		return "agent"
 	case "permissions":
 		return "permissions"
-	case "skills", "mcp", "sandbox":
+	case "skills", "mcp", "lsp", "sandbox":
 		return "tools"
 	case "status":
 		return "ui"
@@ -240,7 +248,7 @@ func defaultCategory(name string) string {
 
 func defaultActionKind(name string) string {
 	switch name {
-	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp":
+	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp", "lsp":
 		return "open-panel"
 	case "plan", "init", "goal":
 		return "inject-prompt"
@@ -375,6 +383,8 @@ var removedSlashCommandNames = map[string]struct{}{
 	"statusline": {},
 	"title":      {},
 	"todo":       {},
+	"diff":       {},
+	"help":       {},
 }
 
 func ReplaceDynamicSource(source string, commands []DynamicCommand) error {
@@ -654,32 +664,4 @@ func (CommandService) Execute(ctx Context, content string) Result {
 // ExecuteDynamic runs only registered skill commands for channel adapters.
 func (CommandService) ExecuteDynamic(ctx Context, content string) Result {
 	return ExecuteDynamicOnly(ctx, content)
-}
-
-// ExecuteDiffSlash is /diff: the uncommitted work of the project the agent
-// works in, as a unified diff, or one sentence when there is none to show.
-// paths narrow it to those files or directories.
-//
-// fenced wraps a diff in a diff code fence. That is the one thing the two
-// surfaces legitimately differ on: the web chat highlights fenced diffs, while
-// the terminal parses the raw text itself and would render the fence markers
-// literally. A sentence is never fenced; it also never parses as a diff, which
-// is how the terminal tells the two apart.
-func ExecuteDiffSlash(projectRoot string, paths []string, fenced bool) string {
-	root := strings.TrimSpace(projectRoot)
-	diff, err := tool.ProjectDiff(root, paths)
-	switch {
-	case errors.Is(err, tool.ErrNotGitRepository):
-		return root + " is not a git repository, so there is no diff to show."
-	case err != nil:
-		return err.Error()
-	case strings.TrimSpace(diff) == "" && len(paths) > 0:
-		return "No uncommitted changes in " + strings.Join(paths, ", ") + "."
-	case strings.TrimSpace(diff) == "":
-		return "No uncommitted changes."
-	case fenced:
-		return "```diff\n" + strings.TrimRight(diff, "\n") + "\n```"
-	default:
-		return diff
-	}
 }

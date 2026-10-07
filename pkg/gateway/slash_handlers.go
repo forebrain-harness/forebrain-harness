@@ -64,7 +64,7 @@ func (s *Server) HandleContextSlash(ctx context.Context, sessionID, channel stri
 		r = s.Runner
 	}
 	provider, model := run.PrimaryModelForSession(r, s.Sessions, sessionID)
-	used, _ := s.contextOccupancy(ctx, sessionID)
+	used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
 	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactExplicitLimit())
 	return turn.ContextReport(ctx, src, sessionID), true
 }
@@ -89,7 +89,7 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 	if s.Sessions != nil {
 		sessionName, _ = s.Sessions.SessionTitle(ctx, sessionID)
 	}
-	rep := turn.BuildStatusReport(ctx, turn.StatusSource{
+	src := turn.StatusSource{
 		Version:     process.AppVersion(),
 		SessionName: sessionName,
 		SessionID:   sessionID,
@@ -108,10 +108,15 @@ func (s *Server) HandleStatusSlash(sessionID, channel string, side bool) (string
 		ConfigFiles: turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
 		SkillOffer:  cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, int) {
-			used, _ := s.contextOccupancy(ctx, sessionID)
+			used, _ := run.ContextOccupancy(ctx, s.Sessions, sessionID)
 			return used, s.compactExplicitLimit()
 		},
-	})
+	}
+	if r.CodeIntelControl != nil {
+		snap := r.CodeIntelControl.Snapshot()
+		src.LSP = &snap
+	}
+	rep := turn.BuildStatusReport(ctx, src)
 	return turn.RenderStatusMarkdown(rep), true
 }
 
@@ -150,6 +155,18 @@ func (s *Server) HandleMCPSlash(sessionID, channel string) (string, bool) {
 		return "mcp: unavailable", true
 	}
 	return turn.RenderMCPInventoryMarkdown(turn.BuildMCPInventory(s.mcpInventorySource(r, cfg))), true
+}
+
+func (s *Server) HandleLSPSlash(sessionID, channel string) (string, bool) {
+	_ = channel
+	r := s.runnerFor(context.Background(), sessionID)
+	if r == nil {
+		r = s.Runner
+	}
+	if r == nil || r.CodeIntelControl == nil {
+		return "lsp: unavailable", true
+	}
+	return turn.RenderLSPInventoryMarkdown(r.CodeIntelControl.Snapshot()), true
 }
 
 // mcpInventorySource gathers a session runner's MCP facts exactly as the
@@ -196,17 +213,6 @@ func (s *Server) HandleSandboxSlash(sessionID, channel string, args []string) (s
 		manager = s.Env.Sandbox
 	}
 	return safety.FormatSandboxReport(cfg, manager), true
-}
-
-func (s *Server) HandleDiffSlash(sessionID, channel string, args []string) (string, bool) {
-	_ = channel
-	r := s.runnerFor(context.Background(), sessionID)
-	if r == nil {
-		r = s.Runner
-	}
-	// The project /status names as the session's directory; fenced so the
-	// webchat syntax-highlights it.
-	return turn.ExecuteDiffSlash(r.ProjectRoot, args, true), true
 }
 
 // ModelSettings is what /model works from on the web: the live config, the

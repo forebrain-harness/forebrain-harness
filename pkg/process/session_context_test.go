@@ -13,6 +13,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/joho/godotenv"
@@ -585,17 +586,11 @@ func TestAgentContextIsolatesTwoAgents(t *testing.T) {
 }
 
 func TestNilAndLightweightWorkerhostPaths(t *testing.T) {
-	if _, _, err := RunSubagentSupervised(context.Background(), nil, "task", "", "", "", "", ""); err == nil {
+	if _, _, err := RunSubagentSupervised(context.Background(), nil, run.SubagentExecRequest{Task: "task"}); err == nil {
 		t.Fatal("expected nil environment subagent error")
 	}
-	if _, _, err := RunAgentOnceSupervised(context.Background(), nil, AgentOnceInput{}); err == nil {
-		t.Fatal("expected nil environment once error")
-	}
-	if _, err := (*Environment)(nil).RunSubagentExec(context.Background(), "task", "", "", "", "", ""); err == nil {
+	if _, err := (*Environment)(nil).RunSubagentExec(context.Background(), run.SubagentExecRequest{Task: "task"}); err == nil {
 		t.Fatal("expected nil environment exec error")
-	}
-	if out, errText := (*Environment)(nil).RunAgentOnceExec(context.Background(), "", "", "", "input"); out != "" || errText == "" {
-		t.Fatalf("agent once nil out=%q err=%q", out, errText)
 	}
 }
 

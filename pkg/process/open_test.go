@@ -2,15 +2,24 @@ package process
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
+	"github.com/forebrain-harness/forebrain-harness/pkg/lsp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 func activeAgentTestConfig() appcfg.Root {
@@ -200,4 +209,321 @@ func TestOpenFilesSessionsUnderTheLaunchProjectScope(t *testing.T) {
 		t.Fatalf("ReloadConfig: %v", err)
 	}
 	assertScope("after a config reload", sessionCwd("s-reload"))
+}
+
+// TestOpenWiresCodeIntelligence pins the composition-root contract of task 03:
+// Open builds the process-wide language-server pool, hands the primary Runner
+// its view through the Deps ports, and Close releases both. The skeleton
+// registers no tool, so the frozen decision must read false.
+func TestOpenWiresCodeIntelligence(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	cfg := activeAgentTestConfig()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
+		"        - provider: openai\n          model: gpt-main\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := Open(ctx, OpenOptions{Home: home, ConfigPath: cfgPath, LaunchDir: project, Config: &cfg, SessionSource: memory.SessionSourceTUI})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if env.LSP == nil {
+		t.Fatal("Open built no language-server pool")
+	}
+	if env.Deps.CodeIntel == nil || env.Deps.CodeIntelControl == nil {
+		t.Fatal("the primary runner's Deps carry no language-server runtime")
+	}
+	if env.Deps.CodeIntelTool {
+		t.Fatal("the skeleton must not register the lsp tool")
+	}
+	// The launch project's root is stored symlink-resolved, which on macOS
+	// turns t.TempDir()'s /var/... into /private/var/...; compare against
+	// the resolved form.
+	wantRoot := project
+	if resolved, rerr := filepath.EvalSymlinks(project); rerr == nil {
+		wantRoot = resolved
+	}
+	if got := env.Deps.CodeIntelControl.Snapshot().ProjectRoot; got != wantRoot {
+		t.Fatalf("snapshot project root = %q, want the launch project %q", got, wantRoot)
+	}
+
+	env.Close()
+	late := env.LSP.NewManager(lsp.ManagerOptions{})
+	if snap := late.Snapshot(); snap.Servers == nil || len(snap.Servers) != 0 {
+		t.Fatalf("a manager built after Close answered with %v, want an empty snapshot", snap.Servers)
+	}
+	cancel := late.Subscribe(func(event.LSPSnapshot) {})
+	if cancel == nil {
+		t.Fatal("nil cancel from a closed manager's Subscribe")
+	}
+	cancel()
+}
+
+// TestLSPRecommendationPublishedToSurface pins the composition-root wiring
+// of task 13: a recommendation the manager makes becomes one run event on
+// the runner's sink, carrying the session and run of the edit that earned
+// it, and a runner no surface has attached yet is simply skipped.
+func TestLSPRecommendationPublishedToSurface(t *testing.T) {
+	// The real catalog's gopls entry stands in for a recommendable server:
+	// a fake gopls on PATH makes detection answer "installed", so the
+	// recommendation is the enable kind and no install recipe runs.
+	bin := t.TempDir()
+	gopls := filepath.Join(bin, "gopls")
+	if err := os.WriteFile(gopls, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	project := t.TempDir()
+	file := filepath.Join(project, "main.go")
+	if err := os.WriteFile(file, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pool := lsp.NewPool(&appcfg.Root{})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	var mu sync.Mutex
+	var events []event.RunEvent
+	runner := &run.Runner{Events: event.SinkFunc(func(_ context.Context, evt event.RunEvent) error {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, evt)
+		return nil
+	})}
+	mgr := pool.NewManager(lsp.ManagerOptions{
+		Home:           t.TempDir(),
+		AgentWorkspace: t.TempDir(),
+		ProjectRoot:    project,
+		Trusted:        true,
+	})
+	publishLSPRecommendations(mgr, runner)
+
+	// The first edit only probes; retries keep editing until the probe has
+	// answered and the recommendation lands on the sink.
+	ctx := tool.WithRunID(tool.WithConversationSessionID(context.Background(), "sess-7"), "run-9")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_ = mgr.DidWrite(ctx, "sess-7", []tool.FileChange{{AbsPath: file, After: []byte("package main\n")}})
+		mu.Lock()
+		got := len(events)
+		mu.Unlock()
+		if got > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want exactly one recommendation", len(events))
+	}
+	evt := events[0]
+	if evt.Type != event.RunEventLSPRecommendation {
+		t.Fatalf("type = %q, want %q", evt.Type, event.RunEventLSPRecommendation)
+	}
+	if evt.SessionID != "sess-7" || evt.RunID != "run-9" {
+		t.Fatalf("session/run = %q/%q, want sess-7/run-9 from the edit's context", evt.SessionID, evt.RunID)
+	}
+	if !strings.HasPrefix(evt.ID, "lsprec-") {
+		t.Fatalf("event id = %q, want the recommendation's own id", evt.ID)
+	}
+	var rec event.LSPRecommendation
+	if err := json.Unmarshal(evt.Payload, &rec); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if rec.ServerID != "gopls" || rec.Mode != "enable" || rec.TriggerExtension != ".go" {
+		t.Fatalf("recommendation = %+v, want gopls enable-mode on .go", rec)
+	}
+
+	// A runner no surface has attached (Events nil) publishes nothing and
+	// must not panic doing it.
+	bareRunner := &run.Runner{}
+	bareMgr := pool.NewManager(lsp.ManagerOptions{
+		Home:           t.TempDir(),
+		AgentWorkspace: t.TempDir(),
+		ProjectRoot:    project,
+		Trusted:        true,
+	})
+	publishLSPRecommendations(bareMgr, bareRunner)
+	_ = bareMgr.DidWrite(ctx, "sess-bare", []tool.FileChange{{AbsPath: file, After: []byte("package main\n")}})
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestOpenRegistersTheRunOwner pins the process-identity contract of the
+// abandoned-run plan: Open stamps the one production RunStore with an owner
+// and registers its lease, so every run this process starts is vouched for
+// while it lives; Close deregisters it, so any run it failed to settle is
+// immediately readable as abandoned.
+func TestOpenRegistersTheRunOwner(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	cfg := activeAgentTestConfig()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
+		"        - provider: openai\n          model: gpt-main\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := Open(ctx, OpenOptions{Home: home, ConfigPath: cfgPath, LaunchDir: project, Config: &cfg, SessionSource: memory.SessionSourceTUI})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	owner := env.Deps.RunRT.Owner
+	if owner == "" {
+		t.Fatal("the production RunStore must carry the process owner")
+	}
+	if !strings.HasPrefix(owner, memory.SessionSourceTUI+"-") {
+		t.Fatalf("owner %q must name the session source it was opened for", owner)
+	}
+	ownerRows := func() int {
+		var n int
+		if err := env.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&n); err != nil {
+			t.Fatalf("read owner lease row: %v", err)
+		}
+		return n
+	}
+	if n := ownerRows(); n != 1 {
+		t.Fatalf("owner lease rows after Open = %d, want 1", n)
+	}
+	env.Close()
+	// The environment owned the handle; read the file back through a fresh
+	// one to see what Close left behind.
+	after, err := state.Open(ctx, state.StateDBPath(home), nil)
+	if err != nil {
+		t.Fatalf("reopen state database: %v", err)
+	}
+	defer after.Close()
+	var left int
+	if err := after.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_run_owners WHERE owner=?`, owner).Scan(&left); err != nil {
+		t.Fatalf("read owner lease row after Close: %v", err)
+	}
+	if left != 0 {
+		t.Fatalf("owner lease rows after Close = %d, want 0", left)
+	}
+}
+
+// TestResolveConsentProjectContextRegisteredWins pins the startup prompts'
+// project boundary: a registered gitless subdirectory of a larger checkout
+// resolves through its registration — the same context the runner pool
+// builds that project's runner with — while a directory no project claims
+// keeps the launch resolution unchanged.
+func TestResolveConsentProjectContextRegisteredWins(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	ResetResolve()
+	t.Cleanup(ResetResolve)
+
+	checkout := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(checkout, "pkg", "inner")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err) // a gitless checkout subdirectory
+	}
+
+	ctx := context.Background()
+	// Resolve ensures the home layout (the state directory included) the
+	// same way the first call inside ResolveConsentProjectContext would.
+	if _, err := Resolve(); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	db, err := state.Open(ctx, state.StateDBPath(home), nil)
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	projects := state.NewProjectStore(db, "main")
+	registered, err := projects.Create(ctx, state.CreateProjectInput{Name: "inner", Root: sub})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: sub}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ResolveConsentProjectContext(home, sub)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext: %v", err)
+	}
+	want, err := safety.ResolveRegisteredContext(home, registered.Root)
+	if err != nil {
+		t.Fatalf("ResolveRegisteredContext: %v", err)
+	}
+	if got != want {
+		t.Fatalf("consent context = %+v, want the runner pool's registered context %+v", got, want)
+	}
+	// The gitless registration is not version controlled, so the prompt
+	// resolves the same fail-closed answer the runner gets — no project
+	// boundary at all — instead of asking about (and deciding for) the
+	// enclosing checkout.
+	if root := safety.TrustedRoot(got); root != "" {
+		t.Fatalf("TrustedRoot = %q, want empty for a gitless registration", root)
+	}
+	// The launch resolution would have answered the enclosing checkout.
+	checkoutCanonical, err := safety.CanonicalPath(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch, err := safety.ResolveProjectContext(home, sub); err != nil || launch.Project.Root != checkoutCanonical {
+		t.Fatalf("launch resolution = %+v, %v; want the checkout root %s", launch, err, checkoutCanonical)
+	}
+
+	// A registered project with its own .git resolves through its
+	// registration too, trusted at the registered root — the boundary whose
+	// project key the runner's frozen consent decisions use.
+	owned := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(owned, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(owned, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projects.Create(ctx, state.CreateProjectInput{Name: "owned", Root: owned}); err != nil {
+		t.Fatalf("create owned project: %v", err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: owned}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ResolveConsentProjectContext(home, nested)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext(owned): %v", err)
+	}
+	wantOwned, err := safety.ResolveRegisteredContext(home, owned)
+	if err != nil {
+		t.Fatalf("ResolveRegisteredContext(owned): %v", err)
+	}
+	if got != wantOwned {
+		t.Fatalf("owned consent context = %+v, want %+v", got, wantOwned)
+	}
+	if root := safety.TrustedRoot(got); root != wantOwned.Project.Root {
+		t.Fatalf("TrustedRoot = %q, want the registered root %q", root, wantOwned.Project.Root)
+	}
+
+	// A directory no registered project contains keeps the launch resolution.
+	elsewhere := t.TempDir()
+	got, err = ResolveConsentProjectContext(home, elsewhere)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext(unregistered): %v", err)
+	}
+	wantLaunch, err := safety.ResolveProjectContext(home, elsewhere)
+	if err != nil {
+		t.Fatalf("ResolveProjectContext: %v", err)
+	}
+	if got != wantLaunch {
+		t.Fatalf("unregistered consent context = %+v, want the launch resolution %+v", got, wantLaunch)
+	}
 }

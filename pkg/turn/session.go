@@ -39,6 +39,13 @@ type SessionCreateResult struct {
 // such as "New chat" is the surface's to draw for an unnamed session, never a
 // name to store: a stored one would outrank the first message forever.
 func (s *Service) CreateSession(ctx context.Context, title string) (SessionCreateResult, error) {
+	return s.CreateSessionAt(ctx, title, state.SessionBirth{})
+}
+
+// CreateSessionAt opens a conversation born in a directory its creator chose:
+// birth is the session's project identity, fixed at creation exactly like the
+// title default above.
+func (s *Service) CreateSessionAt(ctx context.Context, title string, birth state.SessionBirth) (SessionCreateResult, error) {
 	title = strings.TrimSpace(title)
 	if s == nil || s.sessionStore == nil {
 		return SessionCreateResult{Title: title}, nil
@@ -55,7 +62,7 @@ func (s *Service) CreateSession(ctx context.Context, title string) (SessionCreat
 	if stored == "" {
 		stored = id
 	}
-	if err := s.sessionStore.Ensure(ctx, id, stored); err != nil {
+	if err := s.sessionStore.EnsureAt(ctx, id, stored, birth); err != nil {
 		return SessionCreateResult{}, err
 	}
 	return SessionCreateResult{ID: id, Title: title}, nil
@@ -76,13 +83,6 @@ func (s *Service) RenameSession(ctx context.Context, sessionID, title string) er
 	return s.sessionStore.SetTitle(ctx, sessionID, title)
 }
 
-func (s *Service) ListSessionsRecent(ctx context.Context, limit int) ([]SessionSummary, error) {
-	if s == nil || s.sessionStore == nil {
-		return []SessionSummary{}, nil
-	}
-	return s.sessionStore.ListSessionsRecent(ctx, limit)
-}
-
 func (s *Service) ListSessionMessages(ctx context.Context, sessionID string, limit int) ([]state.Message, error) {
 	if s == nil || s.sessionStore == nil {
 		return []state.Message{}, nil
@@ -90,17 +90,47 @@ func (s *Service) ListSessionMessages(ctx context.Context, sessionID string, lim
 	return s.sessionStore.ListRecentMessages(ctx, sessionID, limit)
 }
 
+// RunTranscriptStore is the slice of the session store a run's own output is
+// written through: every row bound to the run that wrote it, and the run's
+// clock stamped when it ends.
+type RunTranscriptStore interface {
+	AppendMessageForRun(ctx context.Context, sessionID, runID, role, content, toolStepID, toolMetaJSON string, exec state.MessageExecTiming) (int64, error)
+	AppendMessageSequenceForRun(ctx context.Context, sessionID, runID string, msgs []llm.Message, model, usageJSON string) error
+	StampRunTiming(ctx context.Context, runID string, timing state.RunTiming) error
+}
+
 // CancelledTurnStore is the slice of the session store a cancelled turn writes
 // through.
 type CancelledTurnStore interface {
-	AppendMessageSequence(ctx context.Context, sessionID string, msgs []llm.Message, model, usageJSON string) error
-	Append(ctx context.Context, sessionID, role, content string) (int64, error)
+	RunTranscriptStore
 	RepairDanglingToolResults(ctx context.Context, sessionID string) (int, error)
 }
 
-// CancelledTurn is what a surface hands over when its turn was cancelled.
+// RunEnd is a run's own clock, measured by the surface that ran it: the same
+// window its "Worked for" line reported live.
+type RunEnd struct {
+	StartedAt  time.Time
+	FinishedAt time.Time
+	Worked     time.Duration
+}
+
+// stampRunEnd records the run's clock, however the run ended. It is what
+// gives a replay the run's "Worked for" line back — a run that wrote nothing
+// of its own included, since the user's message is bound to it.
+func stampRunEnd(ctx context.Context, store RunTranscriptStore, runID string, end RunEnd) error {
+	if strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	return store.StampRunTiming(ctx, runID, state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Worked})
+}
+
+// CancelledTurn is what a surface hands over when its turn was cancelled or
+// failed.
 type CancelledTurn struct {
 	SessionID string
+	// RunID binds what the turn wrote to the run that wrote it, and names the
+	// run whose clock End stamps.
+	RunID string
 	// Captured is the orchestration's partial session: the assistant tool_calls
 	// and tool results that completed before the cancellation.
 	Captured []llm.Message
@@ -110,8 +140,7 @@ type CancelledTurn struct {
 	// PartialReasoning is stored as its own reasoning row, as on a normal turn.
 	PartialReasoning string
 	Model            string
-	StartedAt        time.Time
-	FinishedAt       time.Time
+	End              RunEnd
 	// OnRepairError reports a failed RepairDanglingToolResults call. The repair
 	// itself stays best-effort -- a failure here must not abort the cancel
 	// path, which is why the call site below discards the error rather than
@@ -159,15 +188,18 @@ func PersistCancelledTurn(ctx context.Context, store CancelledTurnStore, in Canc
 		toPersist = append(toPersist, llm.AssistantMessage([]llm.ContentPart{llm.Text(partialText)}))
 	}
 	if len(toPersist) > 0 {
-		_ = store.AppendMessageSequence(
-			ctx, in.SessionID, toPersist,
+		_ = store.AppendMessageSequenceForRun(
+			ctx, in.SessionID, in.RunID, toPersist,
 			in.Model,
 			"", // usage is unknown at cancel time; the store tolerates it
 		)
 	}
 	if reasoning := strings.TrimSpace(in.PartialReasoning); reasoning != "" {
-		_, _ = store.Append(ctx, in.SessionID, "reasoning", reasoning)
+		_, _ = store.AppendMessageForRun(ctx, in.SessionID, in.RunID, "reasoning", reasoning, "", "", state.MessageExecTiming{})
 	}
+	// The run ended here, so its clock is stamped here too: a stopped or
+	// failed run closed with a "Worked for" line live, and replay gives it back.
+	_ = stampRunEnd(ctx, store, in.RunID, in.End)
 	// Best effort: a repair failure must not abort the cancel path.
 	if _, err := store.RepairDanglingToolResults(ctx, in.SessionID); err != nil && in.OnRepairError != nil {
 		in.OnRepairError(err)
@@ -201,12 +233,17 @@ func CapturedAssistantTextForTurn(snapshot []llm.Message) string {
 // through.
 type UserTurnStore interface {
 	Ensure(ctx context.Context, id, title string) error
-	AppendStructuredMessage(ctx context.Context, sessionID, role, content, messageID, partsJSON, model, usageJSON, toolStepID, toolMetaJSON string, exec state.MessageExecTiming) (int64, error)
+	AppendStructuredMessageForRun(ctx context.Context, sessionID, runID, role, content, messageID, partsJSON, model, usageJSON, toolStepID, toolMetaJSON string, exec state.MessageExecTiming) (int64, error)
 }
 
 // UserTurn is the user message a turn persists.
 type UserTurn struct {
 	SessionID string
+	// RunID is the run this message starts, when the surface created the run
+	// before storing the message. A surface whose run does not exist yet binds
+	// the row once it does (SessionStore.BindMessageToRun): a run that ends
+	// before writing anything still has this row to close with its line.
+	RunID string
 	// ModelInput is the prompt actually fed to the model. For a slash command
 	// this is the expanded prompt, not what the user typed.
 	ModelInput string
@@ -219,6 +256,9 @@ type UserTurn struct {
 	// PartsJSON is the surface's own rendering, which wins when set: it is the
 	// one that carries attachment references.
 	PartsJSON string
+	// Origin is who wrote this message on the person's behalf; empty when
+	// the person did.
+	Origin string
 	// EnsureSession creates the session row first. A surface that has already
 	// ensured it can leave this false.
 	EnsureSession bool
@@ -261,17 +301,19 @@ func PersistUserTurn(ctx context.Context, store UserTurnStore, in UserTurn) (int
 		}
 		partsJSON = state.MessagePartsJSON(msg, modelInput)
 	}
-	return store.AppendStructuredMessage(
-		ctx, sid, "user", displayContent, "", partsJSON, "", "", "", "", state.MessageExecTiming{},
+	if in.Origin != "" {
+		partsJSON = state.WithMessageOrigin(partsJSON, in.Origin)
+	}
+	return store.AppendStructuredMessageForRun(
+		ctx, sid, strings.TrimSpace(in.RunID), "user", displayContent, "", partsJSON, "", "", "", "", state.MessageExecTiming{},
 	)
 }
 
 // AssistantTurnStore is the slice of the session store a finished turn's
 // assistant output is written through.
 type AssistantTurnStore interface {
-	Append(ctx context.Context, sessionID, role, content string) (int64, error)
-	AppendMessageSequence(ctx context.Context, sessionID string, msgs []llm.Message, model, usageJSON string) error
-	AppendStructuredMessage(ctx context.Context, sessionID, role, content, messageID, partsJSON, model, usageJSON, toolStepID, toolMetaJSON string, exec state.MessageExecTiming) (int64, error)
+	RunTranscriptStore
+	AppendStructuredMessageForRun(ctx context.Context, sessionID, runID, role, content, messageID, partsJSON, model, usageJSON, toolStepID, toolMetaJSON string, exec state.MessageExecTiming) (int64, error)
 }
 
 // AssistantTurn is the assistant output a finished turn persists.
@@ -287,11 +329,9 @@ type AssistantTurn struct {
 	// the user was actually shown.
 	Text  string
 	Model string
-	// StartedAt and FinishedAt are the surface's clock for the run — the
-	// same window its "Worked for" line reported live.
-	StartedAt  time.Time
-	FinishedAt time.Time
-	WorkedMs   int64
+	// End is the surface's clock for the run — the same window its "Worked
+	// for" line reported live.
+	End RunEnd
 	// OnSequenceError reports a failed session append. It matters because the
 	// run itself has already been marked done by the time this runs, so a
 	// dropped append leaves the transcript missing content the user was told
@@ -311,6 +351,16 @@ func PersistAssistantTurn(ctx context.Context, store AssistantTurnStore, in Assi
 	if store == nil {
 		return
 	}
+	appendAssistantRows(ctx, store, in)
+	// The run ended here, whatever it wrote; its clock is what replay closes
+	// it with.
+	if err := stampRunEnd(ctx, store, in.RunID, in.End); err != nil && in.OnSequenceError != nil {
+		in.OnSequenceError(err)
+	}
+}
+
+// appendAssistantRows writes the turn's output, every row bound to its run.
+func appendAssistantRows(ctx context.Context, store AssistantTurnStore, in AssistantTurn) {
 	resolved, reasoning := AssistantOutcomeText(in.Result)
 	text := strings.TrimSpace(in.Text)
 	if text == "" {
@@ -321,24 +371,13 @@ func PersistAssistantTurn(ctx context.Context, store AssistantTurnStore, in Assi
 		text = ""
 	}
 	if reasoning != "" {
-		_, _ = store.Append(ctx, in.SessionID, "reasoning", reasoning)
+		_, _ = store.AppendMessageForRun(ctx, in.SessionID, in.RunID, "reasoning", reasoning, "", "", state.MessageExecTiming{})
 	}
 	if in.Result != nil && len(in.Result.Session) > 0 {
-		var err error
-		if runStore, ok := store.(interface {
-			AppendMessageSequenceForRun(context.Context, string, string, []llm.Message, string, string, state.RunTiming) error
-		}); ok && strings.TrimSpace(in.RunID) != "" {
-			err = runStore.AppendMessageSequenceForRun(
-				ctx, in.SessionID, in.RunID, in.Result.Session,
-				in.Model, state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
-				state.RunTiming{StartedAt: in.StartedAt, FinishedAt: in.FinishedAt, Worked: time.Duration(in.WorkedMs) * time.Millisecond},
-			)
-		} else {
-			err = store.AppendMessageSequence(
-				ctx, in.SessionID, in.Result.Session,
-				in.Model, state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
-			)
-		}
+		err := store.AppendMessageSequenceForRun(
+			ctx, in.SessionID, in.RunID, in.Result.Session,
+			in.Model, state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
+		)
 		if err != nil && in.OnSequenceError != nil {
 			in.OnSequenceError(err)
 		}
@@ -351,21 +390,11 @@ func PersistAssistantTurn(ctx context.Context, store AssistantTurnStore, in Assi
 	if in.Result != nil {
 		assistant.MemoryCitation = in.Result.MemoryCitation
 	}
-	if runStore, ok := store.(interface {
-		AppendStructuredMessageForRun(context.Context, string, string, string, string, string, string, string, string, string, state.MessageExecTiming) (int64, error)
-	}); ok && strings.TrimSpace(in.RunID) != "" {
-		_, _ = runStore.AppendStructuredMessageForRun(
-			ctx, in.SessionID, in.RunID, "assistant", text, "",
-			state.MessagePartsJSON(assistant, text),
-			in.Model,
-			state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
-			"", state.MessageExecTiming{},
-		)
-		return
-	}
-	_, _ = store.AppendStructuredMessage(
-		ctx, in.SessionID, "assistant", text, "", state.MessagePartsJSON(assistant, text),
-		in.Model, state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
+	_, _ = store.AppendStructuredMessageForRun(
+		ctx, in.SessionID, in.RunID, "assistant", text, "",
+		state.MessagePartsJSON(assistant, text),
+		in.Model,
+		state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
 		"", "", state.MessageExecTiming{},
 	)
 }

@@ -2,16 +2,20 @@
 # This file is intentionally verbose and documents the current settings in internal/config.
 # Secret-like fields must use ${ENV_NAME} placeholders or stay empty, otherwise config.Load will reject the file.
 
-# Default: empty, which means "no explicit personality override"; runtime falls back to friendly.
-# Currently applies only to OpenAI models marked with SupportsPersonality in the model catalog:
-# gpt-5.5, gpt-5.4, gpt-5.4-mini, and gpt-5.3-codex. Other models ignore this setting.
-# Valid values in current code: friendly, pragmatic, none.
-personality: "pragmatic"
-
-# Default: none.
-# Example: local gateway HTTP and auth settings.
+# Default: derived per project — untrusted for untrusted projects, on-request otherwise.
+# Example: explicit policy. Values: untrusted, on-request, never, granular, or the
+# legacy alias on-failure (normalized to on-request). granular is an object with
+# required sandbox_approval, rules, and mcp_elicitations fields.
 approval_policy: "on-request"
+# Default: "user". Values: user or auto_review (auto_review requires the guardian
+# reviewer to be resolvable; see auto_review below).
 approvals_reviewer: "user"
+# Default: empty.
+# Example: extra policy text appended to the guardian reviewer's prompt when
+# approvals_reviewer is auto_review and a guardian LLM is configured. Free text,
+# no fixed value set.
+auto_review:
+  policy: ""
 gateway:
   # Default: 127.0.0.1:6060.
   # Example: local HTTP listen address for the Forebrain Harness gateway.
@@ -30,7 +34,8 @@ gateway:
 # Example: explicit sandbox mode override for model-generated commands.
 sandbox_mode: "workspace-write"
 
-# Defaults: empty writable_roots, network disabled, and both temporary roots included.
+# Defaults: empty writable_roots, network_access enabled (nil means true; unset
+# does not cut the network), and both temporary roots included.
 sandbox_workspace_write:
   writable_roots: []
   network_access: false
@@ -79,29 +84,77 @@ sandbox_workspace_write:
 #       unix_sockets:
 #         "/var/run/example.sock": allow
 #       allow_local_binding: false
+#       # Default: none. MITM interception hooks for the managed proxy;
+#       # only permission-profile networks have this, the features.network_proxy
+#       # object form does not.
+#       mitm:
+#         # Default: none. Strip these request headers before forwarding.
+#         strip_request_headers:
+#           - "Authorization"
+#         # Default: none. Inject headers, optionally per host/method/path match.
+#         inject_headers:
+#           - name: "X-Static-Token"
+#             value: "${MITM_TOKEN}"
+#             host: "api.example.com"
+#         # Default: none. Trigger outbound HTTP hooks on matching requests.
+#         hooks:
+#           - url: "http://127.0.0.1:9999/mitm"
+#             host: "api.example.com"
+#             method: "POST"
+#             path: "/v1/upload"
 
-# Permission-expansion and managed-network features default to false.
+# Permission-expansion and managed-network features default to false; memories,
+# skill offering, and language servers default to true.
 features:
   exec_permission_approvals: false
   request_permissions_tool: false
   # A boolean enables the managed proxy with profile/default settings. The
   # object form accepts enabled plus the proxy_url, SOCKS5, mode, domains,
   # unix_sockets, local-binding, upstream-proxy, and dangerous-listener fields
-  # shown under a permission profile above.
+  # shown under a permission profile above (it has no mitm sub-object).
+  # network_proxy:
+  #   enabled: true
+  #   proxy_url: "http://127.0.0.1:3128"
+  #   enable_socks5: true
+  #   socks_url: "http://127.0.0.1:8081"
+  #   enable_socks5_udp: true
+  #   allow_upstream_proxy: true
+  #   dangerously_allow_non_loopback_proxy: false
+  #   dangerously_allow_all_unix_sockets: false
+  #   mode: "full"
+  #   domains:
+  #     "example.com": allow
+  #   unix_sockets:
+  #     "/var/run/example.sock": allow
+  #   allow_local_binding: false
   network_proxy: false
-  # Default: false. Enables memory use, generation, tools, and /memories.
+  # Default: true. Enables memory use, generation, tools, and /memories.
+  # Explicitly disabled here; the memories: section below is then inert.
   memories: false
+  # Default: true. Shows the standing offer to capture a workflow as a skill.
+  skill_offer: true
+  # Default: true. Master switch for language-server code intelligence; the
+  # lsp: section below only takes effect while this is true.
+  lsp: true
 
-# Windows sandbox selection defaults to disabled. When enabled, private desktop defaults to true.
+# Windows sandbox selection defaults to disabled (sandbox empty). When enabled
+# with unelevated or elevated, private desktop defaults to true.
 windows:
+  # Default: empty, which disables the sandbox. Values: unelevated or elevated.
+  sandbox: ""
   sandbox_private_desktop: true
 
 # Default: automatic and manual replacement-history compaction.
 compact:
-  # Default: empty (the model's automatic-compaction limit, at most 90% of its context window).
-  # Add model_auto_compact_token_limit with a smaller positive threshold when earlier compaction is desired.
+  # Default: 0, meaning the model's automatic-compaction limit (at most 90% of
+  # its context window). A positive value triggers compaction earlier and is
+  # clamped to that 90% ceiling; negative values are rejected at load.
+  model_auto_compact_token_limit: 0
   # Default: total. Also accepts body_after_prefix.
   model_auto_compact_token_limit_scope: "total"
+  # Default: empty, which uses the built-in local-compaction handoff prompt.
+  # Example: override the prompt a compaction checkpoint hands to the model.
+  prompt: ""
   # Default: false. Local summarization builds a checkpoint out of plain messages,
   # so a session can keep switching provider and model across rounds.
   # Provider-native compaction instead stores an opaque item only the issuing
@@ -120,6 +173,13 @@ agents:
   # Default: none.
   # Example: defaults inherited by agent definitions.
   defaults:
+    # Default: off (false). Opt-in switch for the model-visible subagent_*
+    # tools; enabling it registers the typed-subagent tool set.
+    enable_subagent: false
+    # Default: max(0, CPU cores - 1). Upper bound on concurrently running
+    # subagents; a negative value clamps to 0.
+    # execution:
+    #   max_parallel_subagents: 7
     # Default: none.
     # Example: context injection and bootstrap settings.
     context_inject:
@@ -132,9 +192,12 @@ agents:
       # Default: none.
       # Example: explicit model context window in tokens.
       model_context_tokens: 128000
-      # Default: 8000.
-      # Example: warning threshold for remaining tokens.
+      # Default: 25000 when persisted; 0 or unset at runtime means no warning.
+      # Example: warn once remaining tokens drop below this threshold.
       warn_remaining_tokens: 8000
+      # Default: 13000 when persisted; 0 or unset at runtime never blocks.
+      # Example: remaining tokens below this enter the "block" pressure tier.
+      block_remaining_tokens: 13000
     # Default: none.
     # Example: declarative MCP server registry used by agents.
     mcp_servers:
@@ -209,6 +272,21 @@ agents:
         # Default: empty.
         # Example: pinned command binary hash; when set, command must be an absolute path.
         expected_command_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        # Default: auto. Approval tier for every tool of this server: auto,
+        # prompt, writes, or approve; an unrecognized value falls back to auto.
+        default_tools_approval_mode: "auto"
+        # Default: none; each tool inherits default_tools_approval_mode. Map a
+        # tool by name to an approval_mode to override just that one.
+        # tools:
+        #   "search":
+        #     approval_mode: "prompt"
+        # Default: 0, which the runtime reads as 30 seconds. Startup plus
+        # first-listTools patience in (fractional) seconds; not part of the
+        # server fingerprint.
+        startup_timeout: 30
+        # Default: false. A required server's failure fails unattended runs
+        # outright instead of degrading to the remaining servers.
+        required: false
       - # Default: empty.
         # Example: second server demonstrating SSE transport.
         name: "demo_sse"
@@ -277,27 +355,6 @@ agents:
         # Example: unused placeholder hash.
         expected_command_sha256: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
     # Default: none.
-    # Example: optional tool-classifier settings.
-    tool_classifier:
-      # Default: none/off unless set by caller.
-      # Example: enable allow/soft-deny classification lists.
-      enabled: true
-      # Default: none.
-      # Example: explicitly allowed tool ids.
-      allow:
-        - "read_file"
-        - "shell"
-      # Default: none.
-      # Example: tools that should trigger soft-deny guidance.
-      soft_deny:
-        - "rm"
-        - "curl"
-      # Default: none.
-      # Example: env vars exposed to the classifier.
-      environment:
-        - "HOME"
-        - "PATH"
-    # Default: none.
     # Example: input/output/retrieval guardrails.
     guardrails:
       # Default: none.
@@ -311,8 +368,12 @@ agents:
         block_substrings:
           - "DROP TABLE"
           - "rm -rf /"
-      # The input, output, and retrieval rails are always on and cannot be
-      # disabled; only the tunables below are configurable.
+      # The input and retrieval rails are always on and cannot be disabled;
+      # the output rail is on unless explicitly disabled here.
+      # Default: unset (nil), which keeps the output rail enabled.
+      output:
+        # Example: the only rail that can be turned off.
+        enabled: true
       # Default: none.
       # Example: retrieval guardrails.
       retrieval:
@@ -328,6 +389,9 @@ agents:
       # Default: empty; runtime infers from active agent provider when possible.
       # Example: model used for token counting heuristics.
       model: "gpt-4.1"
+      # Default: empty. Path to a HuggingFace tokenizer.json; when set it takes
+      # precedence over encoding and model.
+      tokenizer_path: ""
     # Default: none.
     # Example: web search provider settings.
     web_search:
@@ -372,22 +436,23 @@ agents:
     # Default: auto-created when omitted.
     # Example: primary coding agent definition.
     main:
-      # Default: Forebrain Harness assistant when the main definition is auto-created.
-      # Example: primary agent role.
-      role: "Forebrain Harness assistant"
-      # Default: Help the user using workspace context and skills when auto-created.
-      # Example: primary agent goal.
-      goal: "Help the user using workspace context and skills"
-      # Default: You are a careful, tool-using agent. when auto-created.
-      # Example: backstory injected into prompts.
-      backstory: "You are a careful, tool-using agent."
+      # Default: false; the definition named "main" is always primary regardless.
+      # Example: mark the tenant's primary agent — the only one that may carry channels.
+      primary: true
+      # Default: empty.
+      # Example: roster display name for the primary agent.
+      display_name: ""
+      # Default: empty.
+      # Example: short description shown when switching agents.
+      description: ""
       # Default: none.
       # Example: primary LLM provider chain.
       llm_providers:
         - # Default: empty.
           # Example: provider name.
           provider: "openai"
-          # Default: empty.
+          # Default: empty. Also accepts a list of model names, expanded into
+          # one chain entry per model.
           # Example: model name.
           model: "gpt-4.1"
           # Default: empty; env overrides also apply.
@@ -760,10 +825,11 @@ agents:
             - "qq-user-10001"
     # Default: falls back to the "main" agent's providers when omitted.
     # Example: every built-in typed subagent — general-purpose, explore, plan,
-    # and verification, the four names agent.PublicTypeNames() returns — can run
-    # on its own provider, model and request params, configured here under its
-    # own type name. A type with no llm_providers entry transparently uses the
-    # main agent's LLM, so you only configure the ones you want to move.
+    # and verification, the four names agent.PublicTypeNames() returns, plus
+    # the guardian reviewer — can run on its own provider, model and request
+    # params, configured here under its own type name. A type with no
+    # llm_providers entry transparently uses the main agent's LLM, so you only
+    # configure the ones you want to move.
     #
     # The provider chain and params are read exactly like the main agent's: the
     # first entry is the model the type runs on, and params is the same
@@ -837,15 +903,10 @@ agents:
     # Default: none.
     # Example: secondary review-focused agent definition.
     reviewer:
-      # Default: none.
-      # Example: secondary agent role.
-      role: "Reviewer"
-      # Default: none.
-      # Example: secondary agent goal.
-      goal: "Review changes for bugs, regressions, and missing tests"
-      # Default: none.
-      # Example: secondary agent backstory.
-      backstory: "You prioritize findings over summaries."
+      # Default: false; only "main" is primary.
+      # Example: roster display name and description for the secondary agent.
+      display_name: "Reviewer"
+      description: "Reviews changes for bugs, regressions, and missing tests."
       # Default: none.
       # Example: reviewer LLM provider chain.
       llm_providers:
@@ -865,10 +926,112 @@ agents:
           # Example: API path.
           api_path: "/v1/chat/completions"
           # Default: none.
-          # Example: top-level params alias accepted by current unmarshal code; merged into config.params when config.params is empty.
+          # Example: provider-native request params (temperature, reasoning
+          # effort, max_tokens, …) — this top-level position is the only place
+          # params are read from.
           params:
             temperature: 0
             max_tokens: 2048
+
+# Default: none.
+# Example: language-server code intelligence (Layer 2). Servers start lazily
+# in the background — never on a load or first-frame path — and the built-in
+# catalog (gopls, typescript-language-server, pyright, rust-analyzer, …) is
+# used without any configuration. Custom entries below extend or override it.
+lsp:
+  # Default: true. Recommend catalog installs when a project's language has
+  # no enabled server.
+  recommendations: true
+  # Default: 6. Upper bound on concurrently running servers (1–32).
+  max_servers: 6
+  # Default: 600 seconds. An idle server stops after this long (60–86400).
+  idle_timeout: 600
+  # Default: 30 seconds. Per-request budget (1–600).
+  request_timeout: 30
+  # Diagnostics are pushed to the model after edits and on demand.
+  diagnostics:
+    # Default: true. Request diagnostics after an edit.
+    after_edit: true
+    # Default: 2500 ms. How long an edit waits for diagnostics before moving
+    # on (0–30000; explicit 0 means do not wait).
+    wait_ms: 2500
+    # Default: warning. Also accepts error, information, hint.
+    min_severity: "warning"
+    # Default: 20. Cap per file (1–200).
+    max_per_file: 20
+    # Default: 10. Cap per request (1–50).
+    max_files: 10
+    # Default: true. Deliver diagnostics that arrive after the wait window as
+    # a late reminder instead of dropping them.
+    late_delivery: true
+  # Default: none. Custom servers by id ([a-z0-9][a-z0-9._-]{0,63}); a catalog
+  # entry with the same id is overridden. Shown as one primary Go server plus
+  # one diagnostics-only server for another language.
+  servers:
+    gopls:
+      # Default: true when set by the catalog; explicit for custom entries.
+      enabled: true
+      command: "gopls"
+      args: ["serve"]
+      # Map file extensions (leading dot, 2+ chars) to LSP language ids.
+      extension_to_language:
+        ".go": "go"
+      # Exact filenames mapped to a language id (no path separators).
+      filenames:
+        "go.mod": "go.mod"
+        "go.work": "go.work"
+      # A workspace root is detected where any of these markers exists.
+      root_markers: ["go.work", "go.mod"]
+      # Default: none. Environment variables passed to the server process.
+      env:
+        GOFLAGS: "-mod=mod"
+      # Default: none. Host environment variables passed through as-is.
+      env_passthrough: ["GOPATH", "GOROOT", "GOPROXY", "GOFLAGS", "CGO_ENABLED"]
+      # Default: none. JSON object sent as initializationOptions.
+      initialization_options:
+        usePlaceholders: true
+      # Default: none. JSON object sent as workspace/didChangeConfiguration.
+      settings:
+        gopls:
+          analyses:
+            shadow: true
+      # Default: 30 seconds. Startup budget (0–600).
+      startup_timeout: 60
+      # Default: 10 seconds. Shutdown budget (0–60).
+      shutdown_timeout: 10
+      # Default: true. Restart a server that crashed on its own.
+      restart_on_crash: true
+      # Default: 5. Give up restarting after this many crashes (0–20).
+      max_restarts: 5
+      # Default: true. This server provides diagnostics.
+      diagnostics: true
+      # Default: primary. Also accepts diagnostics — a server that only ever
+      # provides diagnostics and never serves completion, hover, or definitions.
+      role: "primary"
+      # Default: none. Catalog tie-breaker when a language has several enabled
+      # servers; higher wins.
+      priority: 100
+    pyright-diagnostics:
+      enabled: true
+      command: "pyright-langserver"
+      args: ["--stdio"]
+      extension_to_language:
+        ".py": "python"
+      root_markers: ["pyproject.toml", "setup.py", ".git"]
+      role: "diagnostics"
+      priority: 50
+      diagnostics: true
+
+# Default: none.
+# Example: scheduled-task settings for the whole install. Every fire of a job
+# is a conversation of its own; this section says how long those conversations
+# and their history records are kept after their last activity.
+cron:
+  # Default: 30. Days to keep a scheduled run's conversation and history
+  # record after their last activity (1–3650). The cleanup runs about once an
+  # hour and reads the hot-reloaded value, so a change applies without a
+  # restart. The web settings page (Scheduled tasks tab) edits the same key.
+  retention_days: 30
 # Default: none.
 # Example: persistent host hooks by lifecycle event.
 hooks:
@@ -878,22 +1041,24 @@ hooks:
     - # Default: empty.
       # Example: sample matcher that is unlikely to fire accidentally.
       matcher: "sample_tool(*)"
-      # Default: none.
+      # Required: a matcher's hooks array must be non-empty.
       # Example: hooks executed for the matcher.
       hooks:
-        - # Default: empty.
+        - # Required: one of command, prompt, agent, or http; there is no default.
           # Example: command hook.
           type: "command"
-          # Default: empty.
+          # Required for type command; empty is rejected at validation.
           # Example: benign command to run.
           command: "printf pretool"
           # Default: empty.
           # Example: permission-rule style condition.
           if: "sample_tool(*)"
-          # Default: empty.
+          # Default: empty, which runs under bash. Values: bash or powershell.
           # Example: shell interpreter.
           shell: "bash"
-          # Default: 0.
+          # Default: 0. Timeout in seconds; at runtime a value of 0 or less
+          # falls back to a 10-minute budget (negative values are rejected at
+          # validation).
           # Example: timeout in seconds.
           timeout: 3
           # Default: empty.
@@ -921,6 +1086,22 @@ hooks:
             - "HOME"
             - "PATH"
   # Default: no matchers.
+  # Example: hook chain when a tool call asks for permission.
+  # PermissionRequest:
+  #   - matcher: "shell(*)"
+  #     hooks:
+  #       - type: "command"
+  #         command: "printf permissionrequest"
+  #         if: "shell(*)"
+  #         shell: "bash"
+  #         timeout: 3
+  #         status_message: "permission request sample"
+  #         once: false
+  #         async: false
+  #         async_rewake: false
+  #         allowed_env_vars:
+  #           - "HOME"
+  # Default: no matchers.
   # Example: hook chain after successful tool execution.
   PostToolUse:
     - matcher: "sample_tool(*)"
@@ -928,7 +1109,7 @@ hooks:
       # Example: hooks executed for the matcher.
       hooks:
         - type: "prompt"
-          # Default: empty.
+          # Required for type prompt or agent; empty is rejected at validation.
           # Example: prompt sent to the host prompt-hook engine.
           prompt: "Summarize the sample tool result."
           if: "sample_tool(*)"
@@ -978,7 +1159,7 @@ hooks:
       # Example: hooks executed for the matcher.
       hooks:
         - type: "http"
-          # Default: empty.
+          # Required for type http; must be an absolute URL (scheme and host).
           # Example: webhook target.
           url: "http://127.0.0.1:9999/hooks/sample"
           if: "notify(*)"
@@ -1051,6 +1232,26 @@ hooks:
             - "FOREBRAIN_HOME"
             - "HOME"
             - "PATH"
+  # Default: no matchers.
+  # Example: hook chain before a compaction runs.
+  # PreCompact:
+  #   - matcher: "compact(*)"
+  #     hooks:
+  #       - type: "prompt"
+  #         prompt: "Note what the checkpoint must preserve."
+  #         if: "compact(*)"
+  #         timeout: 3
+  #         status_message: "pre compact sample"
+  # Default: no matchers.
+  # Example: hook chain after a compaction committed.
+  # PostCompact:
+  #   - matcher: "compact(*)"
+  #     hooks:
+  #       - type: "command"
+  #         command: "printf postcompact"
+  #         shell: "bash"
+  #         timeout: 3
+  #         status_message: "post compact sample"
   # Default: no matchers.
   # Example: hook chain on session start.
   SessionStart:
@@ -1130,9 +1331,13 @@ memories:
   use_memories: true
   # Default: true. Extract and consolidate memories from eligible threads.
   generate_memories: true
-  # Default: false. Register memories_add_ad_hoc_note, memories_list,
+  # Default: true. Register memories_add_ad_hoc_note, memories_list,
   # memories_read, and memories_search.
+  # Example: explicitly disabled; those tools then stay out of the tool table.
   dedicated_tools: false
+  # Default: 5. How many hits one memories_search may return; values are
+  # clamped to 1–20 rather than rejected.
+  search_top_k: 5
   # Default: false. Exclude a thread from generation after external context use.
   disable_on_external_context: false
   # Defaults and accepted ranges are enforced when the config is loaded.
@@ -1145,3 +1350,23 @@ memories:
   # Empty uses the active provider's default model.
   extract_model: ""
   consolidation_model: ""
+
+# Default: none.
+# Example: tool-level settings. command_rewrite inserts display-only flags
+# (no pager, no color) into shell commands before they are shown for approval,
+# so what the person approves is exactly what runs.
+tools:
+  command_rewrite:
+    # Default: true (unset means enabled).
+    enabled: true
+
+# Default: none.
+# Example: credential files kept outside forebrain.yaml. They hold OAuth
+# tokens, so they stay in their own files rather than being inlined into a
+# config a user may share or check in.
+credentials:
+  # Default: empty, which means <FOREBRAIN_HOME>/auth.json. A relative path
+  # resolves against FOREBRAIN_HOME so the config stays portable; a leading ~
+  # is expanded. The file uses the Codex CLI's format, so pointing this at
+  # ~/.codex/auth.json works and one login serves both tools.
+  chatgpt: ""

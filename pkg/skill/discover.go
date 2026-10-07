@@ -34,8 +34,11 @@ type discoveredSkill struct {
 // not this one's.
 //
 // The rules:
-//   - Only directories, and never a dot-directory — except ".system", which is
-//     where the built-in skills are installed.
+//   - Only directories, and never a dot-directory. The built-in skills live
+//     in one ($FOREBRAIN_HOME/skills/.system), and they are reached as a root
+//     of their own — the lowest-priority one — never from the shared root
+//     above it, so a skill the user installed always outranks a built-in one
+//     of the same name.
 //   - A directory with a parseable SKILL.md is a skill. A directory without one
 //     is a bundle, and is descended into exactly one level, so a bundle's
 //     skills are found while the layout stays predictable.
@@ -48,14 +51,10 @@ type discoveredSkill struct {
 func scanSkillRoots(roots []string) []discoveredSkill {
 	out := make([]discoveredSkill, 0, len(roots))
 	for _, root := range roots {
-		root = strings.TrimSpace(root)
-		if root == "" {
+		if strings.TrimSpace(root) == "" {
 			continue
 		}
-		absRoot, err := skillAbs(root)
-		if err != nil {
-			absRoot = filepath.Clean(root)
-		}
+		absRoot := scanRootKey(root)
 		scanSkillDir(absRoot, absRoot, "", 0, &out)
 	}
 	return out
@@ -75,7 +74,7 @@ func scanSkillDir(root, dir, rel string, depth int, out *[]discoveredSkill) {
 			continue
 		}
 		leaf := strings.TrimSpace(item.Name())
-		if leaf == "" || (strings.HasPrefix(leaf, ".") && !strings.EqualFold(leaf, systemSkillsDirName)) {
+		if leaf == "" || strings.HasPrefix(leaf, ".") {
 			continue
 		}
 		skillDir := filepath.Join(dir, leaf)

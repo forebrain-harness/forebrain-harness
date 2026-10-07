@@ -3,7 +3,9 @@ package process
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -11,9 +13,10 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
-func RunSubagentSupervised(ctx context.Context, env *Environment, task string, childRunID string, parentRunID string, sessionID string, workerSessionID string, subagentType string) (*agent.Result, hook.PreHookResult, error) {
+func RunSubagentSupervised(ctx context.Context, env *Environment, req run.SubagentExecRequest) (*agent.Result, hook.PreHookResult, error) {
 	if env == nil {
 		return nil, hook.PreHookResult{}, errors.New("nil environment")
 	}
@@ -24,6 +27,12 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, task string, c
 	if err := awaitRequiredMCP(ctx, env.Runner); err != nil {
 		return nil, hook.PreHookResult{}, err
 	}
+	task := req.Task
+	sessionID := req.SessionID
+	workerSessionID := req.WorkerSessionID
+	subagentType := req.SubagentType
+	childRunID := req.SuperviseRunID
+	parentRunID := req.ParentRunID
 	sid := strings.TrimSpace(workerSessionID)
 	if sid == "" {
 		sid = strings.TrimSpace(sessionID)
@@ -58,6 +67,44 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, task string, c
 		channel = "subagent_typed"
 	}
 	hc := hook.HookContext{SessionID: sid, Channel: channel, Trigger: "subagent_run"}
+	started := time.Now()
+	runID := strings.TrimSpace(childRunID)
+	// The dispatch reaches the worker session the way a surface writes a
+	// primary turn's user message: before the run, bound to the run — the
+	// session builder reads it back and replaces it with the pipeline-
+	// enriched version, so the first request gains no duplicate. An attempt
+	// resuming across an approval gate must not write again: the first
+	// attempt's row is the one the replay continues from.
+	if tool.ToolApprovalResumeFromContext(ctx) == nil && env.Deps.SessionStore != nil {
+		// The pre-turn compaction runs before the new user turn is written,
+		// the way the conversation's own pre-turn compaction does. A failure
+		// only logs — it must not stop the continuation it was making room
+		// for, which is how chat_session's maybeAutoCompactBeforeAppend
+		// treats a failure too. A first dispatch's empty worker session sits
+		// far below any threshold and decides against it on its own.
+		if _, _, cerr := run.CompactionService(env.Runner, env.Deps.SessionStore).AutoCompactSession(ctx, sid, ""); cerr != nil {
+			slog.Warn("subagent pre-turn compaction skipped", "session_id", sid, "err", cerr)
+		}
+		rowID, err := turn.PersistUserTurn(ctx, env.Deps.SessionStore, turn.UserTurn{
+			SessionID:  sid,
+			RunID:      runID,
+			ModelInput: strings.TrimSpace(task),
+			Parts:      req.Parts,
+		})
+		if err != nil {
+			return nil, hook.PreHookResult{}, err
+		}
+		// Tell the channel which row this execution's user message is, so a
+		// user-driven execution can be withdrawn before the model answers.
+		if req.OnUserTurn != nil {
+			req.OnUserTurn(rowID)
+		}
+	}
+	// The worker session's own partial capture: a cancelled execution
+	// persists what it did. Installing it here also stops the dispatching
+	// run's capture from collecting the child's rows.
+	capture := run.NewPartialSessionCapture()
+	agBase = run.WithPartialSessionCapture(agBase, capture)
 	opts := run.Options{
 		RunRT:        env.Deps.RunRT,
 		Runner:       env.Runner,
@@ -65,15 +112,43 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, task string, c
 		AgBase:       agBase,
 		HC:           hc,
 		Input:        strings.TrimSpace(task),
+		InputParts:   req.Parts,
 		PreviewMax:   4096,
 		CreateRunCtx: ctx,
+		RunIDOut:     &runID,
 	}
 	if ch := strings.TrimSpace(childRunID); ch != "" {
 		opts.SuperviseExistingRunID = ch
 	} else if p := strings.TrimSpace(parentRunID); p != "" {
 		opts.ParentRunID = p
 	}
-	return run.Run(opts)
+	res, pre, runErr := run.Run(opts)
+	env.PersistSubagentTurn(ctx, run.SubagentTurn{
+		WorkerSessionID: sid,
+		RunID:           runID,
+		Model:           subagentTurnModel(ctx, env, sessionID, subagentType),
+		Result:          res,
+		Partial:         capture.Snapshot(),
+		Err:             runErr,
+		Started:         started,
+	})
+	return res, pre, runErr
+}
+
+// subagentTurnModel names the model this execution ran on, the way the
+// primary session's rows do: a dispatch-time override wins — the plan
+// reviewer's chosen model — then a typed subagent's own provider chain, then
+// the conversation's model. subagentType is empty for a fork, whose chain
+// resolves through the same function to the conversation's model.
+func subagentTurnModel(ctx context.Context, env *Environment, sessionID, subagentType string) string {
+	if override, ok := run.SubagentModelOverrideFromContext(ctx); ok {
+		return override.Model
+	}
+	if env == nil || env.Runner == nil {
+		return ""
+	}
+	_, model, _ := run.AgentModel(env.Runner, sessionID, &agent.HistoryEntry{AgentType: subagentType})
+	return model
 }
 
 // awaitRequiredMCP waits for the runner's MCP generation to settle and reports
@@ -88,47 +163,4 @@ func awaitRequiredMCP(ctx context.Context, runner *run.Runner) error {
 		return nil
 	}
 	return runner.MCPStartup().Wait(ctx)
-}
-
-func RunAgentOnceSupervised(ctx context.Context, env *Environment, in AgentOnceInput) (*agent.Result, hook.PreHookResult, error) {
-	if env == nil {
-		return nil, hook.PreHookResult{}, errors.New("nil environment")
-	}
-	// scheduled and one-shot runs are unattended: no surface is watching a
-	// status line, so a required server that did not come up has to fail the run
-	// rather than let it proceed without the tools it was configured to require.
-	if err := awaitRequiredMCP(ctx, env.Runner); err != nil {
-		return nil, hook.PreHookResult{}, err
-	}
-	sid := strings.TrimSpace(in.SessionID)
-	if sid == "" {
-		sid = "default"
-	}
-	// Every scheduled fire runs in a session of its own that nobody opened;
-	// it is recorded for the bound primary agent before the run row that
-	// references it (see runExecutor.Run).
-	if err := env.Deps.SessionStore.Ensure(ctx, sid, sid); err != nil {
-		return nil, hook.PreHookResult{}, err
-	}
-	ch := strings.TrimSpace(in.ChannelID)
-	if ch == "" {
-		ch = "agent-once"
-	}
-	agBase := AgentContext(ctx, config.ActiveStateRoot(env.Root, env.Deps.AppCfg), sid)
-	agBase = tool.WithMode(agBase, "agent")
-	hc := hook.HookContext{SessionID: sid, Channel: ch, Trigger: "agent-once"}
-	opts := run.Options{
-		RunRT:        env.Deps.RunRT,
-		Runner:       env.Runner,
-		Hooks:        env.Hooks,
-		AgBase:       agBase,
-		HC:           hc,
-		Input:        strings.TrimSpace(in.Input),
-		PreviewMax:   4096,
-		CreateRunCtx: ctx,
-	}
-	if p := strings.TrimSpace(in.ParentRunID); p != "" {
-		opts.ParentRunID = p
-	}
-	return run.Run(opts)
 }

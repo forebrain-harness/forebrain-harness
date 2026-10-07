@@ -19,6 +19,11 @@ const (
 	// model is told about in the message's own text rather than shown. It is
 	// display-only: it adds nothing to what the model is sent.
 	PartTypeAttachment = "attachment"
+	// PartTypeOrigin names who wrote a user message on the person's behalf —
+	// a heartbeat, a scheduled task. It is display-only: ParseMessageParts
+	// ignores it, so the model is sent exactly what the same text typed by
+	// hand would send, and the cached prefix is unchanged.
+	PartTypeOrigin = "origin"
 )
 
 func stringField(m map[string]any, key string) string {
@@ -111,6 +116,47 @@ func fileEntryPartJSON(partType, fileID, label, mimeType string) string {
 		return ""
 	}
 	return string(b)
+}
+
+// Who wrote a user message on the person's behalf, carried by PartTypeOrigin.
+const (
+	MessageOriginHeartbeat = "heartbeat"
+	MessageOriginCron      = "cron"
+)
+
+// WithMessageOrigin returns partsJSON with the origin part appended.
+func WithMessageOrigin(partsJSON, origin string) string {
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(partsJSON), &parts); err != nil {
+		return partsJSON
+	}
+	parts = append(parts, map[string]any{
+		"type": PartTypeOrigin,
+		"kind": strings.TrimSpace(origin),
+	})
+	b, err := json.Marshal(parts)
+	if err != nil {
+		return partsJSON
+	}
+	return string(b)
+}
+
+// MessageOrigin reads the origin part back; "" for a message the person wrote.
+func MessageOrigin(partsJSON string) string {
+	raw := strings.TrimSpace(partsJSON)
+	if raw == "" || raw == "[]" {
+		return ""
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+		return ""
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(stringField(part, "type")) == PartTypeOrigin {
+			return strings.TrimSpace(stringField(part, "kind"))
+		}
+	}
+	return ""
 }
 
 func MessagePartsJSON(msg llm.Message, fallbackText string) string {

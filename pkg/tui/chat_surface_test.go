@@ -182,7 +182,7 @@ func TestPrepareTUIAgentBaseInstallsRuntimeBeforeTrack(t *testing.T) {
 
 	s.tuiTrack("run-1", "sid", func() {})
 	t.Cleanup(func() { s.tuiFinish("run-1") })
-	require.True(t, s.SteerSurfaceRun("sid", "tui", []llm.ContentPart{llm.Text("please adjust")}))
+	require.True(t, s.SurfaceInputQueue("sid").Steer(run.Input{Parts: []llm.ContentPart{llm.Text("please adjust")}}))
 
 	entries := rt.DrainSteers()
 	require.Len(t, entries, 1)

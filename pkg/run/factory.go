@@ -43,7 +43,8 @@ func (f Factory) NewIsolatedRunner(label string) *Runner {
 	var runRT = f.ownerRunRT()
 	var subagentExecutor = f.ownerSubagentExecutor()
 	var control = f.ownerControl()
-	return &Runner{Deps: &Deps{Home: f.Home, AgentName: f.AgentName, WorkspaceRoot: f.workspaceRoot(), StateDir: filepath.Join(root, dir), Actions: actions, MCPServers: f.ownerMCPServers(), MCPProject: f.ownerMCPProject(), MemoryStore: f.MemoryStore, AppCfg: f.AppCfg, SessionStore: sessionStore, RunRT: runRT, ProjectKey: f.projectKey(), ProjectRoot: f.projectRoot()}, SubagentExecutor: subagentExecutor, Control: control, FileResolver: f.ownerFileResolver()}
+	codeIntel, codeIntelControl, codeIntelTool := f.ownerCodeIntel()
+	return &Runner{Deps: &Deps{Home: f.Home, AgentName: f.AgentName, WorkspaceRoot: f.workspaceRoot(), StateDir: filepath.Join(root, dir), Actions: actions, MCPServers: f.ownerMCPServers(), MCPProject: f.ownerMCPProject(), MemoryStore: f.MemoryStore, AppCfg: f.AppCfg, SessionStore: sessionStore, RunRT: runRT, ProjectKey: f.projectKey(), ProjectRoot: f.projectRoot(), CodeIntel: codeIntel, CodeIntelControl: codeIntelControl, CodeIntelTool: codeIntelTool}, SubagentExecutor: subagentExecutor, Control: control, FileResolver: f.ownerFileResolver()}
 }
 
 func (f Factory) workspaceRoot() string {
@@ -175,6 +176,16 @@ func (f Factory) ownerMCPProject() string {
 		return strings.TrimSpace(f.Owner.MCPProject)
 	}
 	return ""
+}
+
+// ownerCodeIntel hands a subagent its parent's language-server runtime:
+// the child works in the same project, and a child whose tool table
+// differed from its parent's would break a fork's shared prompt prefix.
+func (f Factory) ownerCodeIntel() (tool.CodeIntelligence, tool.CodeIntelControl, bool) {
+	if f.Owner != nil && f.Owner.Deps != nil {
+		return f.Owner.CodeIntel, f.Owner.CodeIntelControl, f.Owner.CodeIntelTool
+	}
+	return nil, nil, false
 }
 
 func (f Factory) ownerSubagentExecutor() SubagentExecutor {

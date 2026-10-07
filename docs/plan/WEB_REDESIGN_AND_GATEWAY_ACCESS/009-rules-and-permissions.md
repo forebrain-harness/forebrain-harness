@@ -69,10 +69,11 @@ owner 要求（第 34 条）："左侧菜单栏加上主代理的规则指令和
   - 删除规则 = `{type:"removeRules", destination:"localSettings", behavior, rules:[...]}`（行内按钮）。
 - **判定验证**：现有 `/explain` + `/evaluate` 表单保留，输入改为工具下拉（同上数据源）+ 内容输入。
 - 项目规则在项目空间的权限标签维护（见第 5 条），本页不放项目规则。
+- 实现说明：不带 `session_id` 的 `/api/permissions/rules|explain|evaluate` 只按本主代理自己的设置（localSettings + 配置）作答，不再经过绑定 gateway 启动目录项目的 runner；`/api/permissions/updates` 的 localSettings 写入会同步给本主代理所有在跑的 runner，projectSettings 一律拒绝（交给第 5 条的项目端点）；带 `session_id` 的读写落在该会话自己的 runner 上。列表行带 `rule`（规则原样），删除时原样回传。
 
 ### 5. 项目空间权限标签（`/projects/:id/perm`）
 
-替换 008 占位 `ProjectPermTab.vue`：规则表走 `GET /api/permissions/rules?source=projectSettings`；添加/删除同第 4 条但 `destination:"projectSettings"`（后端已有信任门：项目不受信时 handler 仍会接受请求但 `destinationPath` 拒绝——前端在项目未信任时禁用表单并显示"信任此项目"引导，与 008 的 MCP 信任按钮同一状态源）。"只按本项目的规则匹配"判定验证复用同一 `/explain` 表单组件，传项目会话的 `session_id`（项目空间会话列表里的最近会话，无会话则不带 `session_id`）。
+替换 008 占位 `ProjectPermTab.vue`：规则表走 `GET /api/permissions/rules?source=projectSettings`；添加/删除同第 4 条但 `destination:"projectSettings"`（实现说明：已改为项目自己的端点 `GET /api/v1/projects/:id/permissions/rules`、`POST …/updates`、`GET …/explain`，按该项目根加载，写入后同步给该项目所有在跑的 runner——通用端点只认 gateway 启动目录那一个项目）（后端已有信任门：项目不受信时 handler 仍会接受请求但 `destinationPath` 拒绝——前端在项目未信任时禁用表单并显示"信任此项目"引导，与 008 的 MCP 信任按钮同一状态源）。"只按本项目的规则匹配"判定验证复用同一 `/explain` 表单组件，传项目会话的 `session_id`（项目空间会话列表里的最近会话，无会话则不带 `session_id`）。
 
 ### 6. 审批三档：全局默认（设置 → 审批默认标签）
 
@@ -90,7 +91,7 @@ owner 要求（第 34 条）："左侧菜单栏加上主代理的规则指令和
 
 ### 8. 会话级审批切换（对话输入框旁）
 
-- 新端点 `POST /api/permissions/session-preset` `{session_id, preset}`：镜像 TUI `ApplyPermissionPreset`（`chat_session.go:2047`）——`preset.ApplyToConfig(该会话绑定的运行配置)`（内存态）+ `perm.ApplyPermissionUpdate({Type: UpdateSetMode, Destination: session, SessionID, Mode: preset.Approval})` + `s.Env.RefreshSandboxRuntime()`。响应 `{ok, description}`。**只影响该会话，不写任何文件**（TUI 语义：临时选择不落盘）。
+- 新端点 `POST /api/permissions/session-preset` `{session_id, preset}`：镜像 TUI `ApplyPermissionPreset`——对该会话所在的 runner 应用 `preset.SessionUpdates(session_id)`：`setMode` 与 `setSandboxMode` 两条会话级更新，审批模式和沙箱模式都只记在权限存储里该会话名下，不改任何进程共享的配置。沙箱判定一律读 `safety.ConfigForSnapshot(cfg, 会话快照)`。响应 `{ok, description}`。**只影响该会话，不写任何文件**（TUI 语义：临时选择不落盘；配置重载不会撤销它，YOLO 优先于它）。`GET /api/permissions/session-preset?session_id=` 返回该会话当前档位。
 - 前端：对话输入框旁"审批模式"下拉（005 已留位），三项 = 三档 Label，选中即调端点；新会话不预选（跟随全局默认）。会话切换时拉 `GET /api/permissions/rules?session_id=<id>` 里的 mode 信息或端点返回的当前态刷新显示（实现取最简，验收以"切换后行为生效"为准）。
 - 说明文案：下拉每项 hover/展开显示 `DescriptionFor` 语义的中文说明（预览 380-384 行文案）。
 

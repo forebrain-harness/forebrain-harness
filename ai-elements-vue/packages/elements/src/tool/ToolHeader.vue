@@ -34,9 +34,11 @@ const derivedName = computed(() =>
     "
     v-bind="$attrs"
   >
-    <div class="flex items-center gap-2">
-      <WrenchIcon class="size-4 text-muted-foreground" />
-      <span class="font-medium text-sm">{{ props.title ?? derivedName }}</span>
+    <div class="flex min-w-0 items-center gap-2">
+      <WrenchIcon class="size-4 shrink-0 text-muted-foreground" />
+      <!-- A trigger is a button, which centres its text; a title long enough
+           to wrap reads from the left like every other line of the card. -->
+      <span class="min-w-0 break-words text-left font-medium text-sm">{{ props.title ?? derivedName }}</span>
       <StatusBadge :state="props.state" />
     </div>
     <ChevronDownIcon

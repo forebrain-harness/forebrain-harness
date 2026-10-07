@@ -5,10 +5,14 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tui"
 	"github.com/spf13/cobra"
 )
@@ -168,6 +172,7 @@ func stubInteractiveLaunch(t *testing.T) {
 	prevIsTerminal := interactiveIsTerminal
 	prevTrusted := interactiveEnsureWorkspaceTrusted
 	prevMCPConsent := interactiveEnsureProjectMCPConsent
+	prevLSPConsent := interactiveEnsureProjectLSPConsent
 	prevNeedsSetup := interactiveNeedsFirstSetup
 	prevRunOnboard := interactiveRunOnboard
 	prevStartupError := interactiveStartupConfigError
@@ -177,6 +182,7 @@ func stubInteractiveLaunch(t *testing.T) {
 		interactiveIsTerminal = prevIsTerminal
 		interactiveEnsureWorkspaceTrusted = prevTrusted
 		interactiveEnsureProjectMCPConsent = prevMCPConsent
+		interactiveEnsureProjectLSPConsent = prevLSPConsent
 		interactiveNeedsFirstSetup = prevNeedsSetup
 		interactiveRunOnboard = prevRunOnboard
 		interactiveStartupConfigError = prevStartupError
@@ -186,6 +192,7 @@ func stubInteractiveLaunch(t *testing.T) {
 	interactiveIsTerminal = func(*os.File) bool { return true }
 	interactiveEnsureWorkspaceTrusted = func(io.Reader, io.Writer, string, string) (bool, error) { return true, nil }
 	interactiveEnsureProjectMCPConsent = func(io.Reader, io.Writer, string, string) error { return nil }
+	interactiveEnsureProjectLSPConsent = func(io.Reader, io.Writer, string, string) error { return nil }
 	interactiveNeedsFirstSetup = func() (bool, error) { return false, nil }
 	interactiveRunOnboard = func(context.Context, io.Reader, io.Writer) error { return nil }
 	interactiveStartupConfigError = func() error { return nil }
@@ -260,5 +267,182 @@ func TestRunStreamingTerminalRestoresCaretWhenTrustDeclined(t *testing.T) {
 	}
 	if !strings.HasPrefix(out.String(), hideCaretSeq) || !caretShown(out.String()) {
 		t.Fatalf("expected the caret hidden during the launch and back after it, got %q", out.String())
+	}
+}
+
+// The language-server prompt runs immediately after the MCP one: both ask
+// about project files, in the order the plan fixes.
+func TestInteractiveAsksProjectLSPConsentAfterMCP(t *testing.T) {
+	stubInteractiveLaunch(t)
+	var order []string
+	interactiveEnsureProjectMCPConsent = func(io.Reader, io.Writer, string, string) error {
+		order = append(order, "mcp")
+		return nil
+	}
+	interactiveEnsureProjectLSPConsent = func(io.Reader, io.Writer, string, string) error {
+		order = append(order, "lsp")
+		return nil
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetIn(strings.NewReader(""))
+	if err := runStreamingTerminal(cmd); err != nil {
+		t.Fatalf("runStreamingTerminal error: %v", err)
+	}
+	if len(order) != 2 || order[0] != "mcp" || order[1] != "lsp" {
+		t.Fatalf("call order = %v, want mcp then lsp", order)
+	}
+}
+
+// The startup prompt asks entry by entry: y allows, anything else declines,
+// both texts verbatim, and the answers land in the consent store.
+func TestEnsureProjectLSPConsentPrompt(t *testing.T) {
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
+	process.ResetResolve()
+	t.Cleanup(process.ResetResolve)
+	home, err := home.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: project}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(project, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "servers:\n  first: {command: /bin/first}\n  second: {command: /bin/second}\n"
+	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureProjectLSPConsent(strings.NewReader("y\nn\n"), &out, home, project); err != nil {
+		t.Fatalf("ensureProjectLSPConsent: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"This project configures language servers. Confirm each one before it runs in this session.",
+		"first: runs `/bin/first`",
+		"second: runs `/bin/second`",
+		"Allow it? [y/N] ",
+		"  confirmed — it applies from now on",
+		"  skipped — confirm later on the project page or at the next start",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("prompt output missing %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "Allow it? [y/N] "); n != 2 {
+		t.Fatalf("asked %d times, want 2:\n%s", n, got)
+	}
+
+	launch := safety.ProjectContext{Project: safety.Project{Root: project, VersionControlled: true}, TrustLevel: safety.LevelTrusted}
+	workspace := activeWorkspace(t)
+	_, _, allowed, denied, _ := process.InspectProjectLSP(workspace, launch)
+	if len(allowed) != 1 || allowed[0] != "first" {
+		t.Fatalf("allowed = %v", allowed)
+	}
+	if len(denied) != 1 || denied[0] != "second" {
+		t.Fatalf("denied = %v", denied)
+	}
+}
+
+// The startup prompt and the runtime read the same project boundary: for a
+// registered project the answers land under the registered root's key — the
+// context the runner pool freezes the session's consents with — and a gitless
+// registered subdirectory of a trusted checkout no longer makes the prompt
+// ask about (and decide for) the enclosing checkout.
+func TestEnsureProjectLSPConsentRegisteredProjectBoundary(t *testing.T) {
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
+	process.ResetResolve()
+	t.Cleanup(process.ResetResolve)
+	homeDir, err := home.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolve ensures the home layout (the state directory included), the
+	// same way the first resolution inside the prompt would.
+	if _, err := process.Resolve(); err != nil {
+		t.Fatalf("process.Resolve: %v", err)
+	}
+	db, err := state.Open(context.Background(), state.StateDBPath(homeDir), nil)
+	if err != nil {
+		t.Fatalf("open state database: %v", err)
+	}
+	defer db.Close()
+	projects := state.NewProjectStore(db, "main")
+
+	// An owned project: its own .git, the launch directory a nested
+	// subdirectory of it.
+	owned := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(owned, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(owned, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servers := filepath.Join(owned, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(servers), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(servers, []byte("servers:\n  first: {command: /bin/first}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projects.Create(context.Background(), state.CreateProjectInput{Name: "owned", Root: owned}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := safety.MarkTrusted(homeDir, safety.Project{Root: owned}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureProjectLSPConsent(strings.NewReader("y\n"), &out, homeDir, nested); err != nil {
+		t.Fatalf("ensureProjectLSPConsent: %v", err)
+	}
+	if n := strings.Count(out.String(), "Allow it? [y/N] "); n != 1 {
+		t.Fatalf("asked %d times, want 1:\n%s", n, out.String())
+	}
+
+	// The runner reads the decision through the registered context.
+	registered, err := safety.ResolveRegisteredContext(homeDir, owned)
+	if err != nil {
+		t.Fatalf("ResolveRegisteredContext: %v", err)
+	}
+	workspace := activeWorkspace(t)
+	_, _, allowed, denied, _ := process.InspectProjectLSP(workspace, registered)
+	if len(allowed) != 1 || allowed[0] != "first" {
+		t.Fatalf("allowed under the registered context = %v (denied %v)", allowed, denied)
+	}
+
+	// A gitless registered subdirectory of a trusted checkout: the prompt
+	// stays silent — the runtime gives that project no trusted boundary,
+	// so there is nothing to ask or decide for the checkout either.
+	checkout := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(checkout, "pkg", "inner")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projects.Create(context.Background(), state.CreateProjectInput{Name: "inner", Root: sub}); err != nil {
+		t.Fatalf("create inner project: %v", err)
+	}
+	if err := safety.MarkTrusted(homeDir, safety.Project{Root: checkout}); err != nil {
+		t.Fatal(err)
+	}
+	var quiet bytes.Buffer
+	if err := ensureProjectLSPConsent(strings.NewReader("y\n"), &quiet, homeDir, sub); err != nil {
+		t.Fatalf("ensureProjectLSPConsent(inner): %v", err)
+	}
+	if strings.Contains(quiet.String(), "Allow it?") {
+		t.Fatalf("the prompt decided for the enclosing checkout of a registered subdirectory:\n%s", quiet.String())
 	}
 }
