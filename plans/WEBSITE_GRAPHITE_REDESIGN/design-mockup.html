@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>forebrain-harness.github.io · 石墨主题设计稿 v1</title>
+<style>
+/* ============================================================
+   设计稿画板（sheet chrome）— 本身也守石墨纪律：纯色、发丝线、无渐变
+   画板注释用衬线；被设计的产品界面一律系统无衬线（产品规则）
+   ============================================================ */
+:root {
+  /* —— 画板底色 —— */
+  --board: #F2F4F7;
+  /* —— 产品令牌（逐一取自 frontend/src/assets/main.css，石墨 brand + 基础面） —— */
+  --paper: #FFFFFF;
+  --paper-alt: #F7F8FA;
+  --surface: #F2F4F7;
+  --surface-hover: #EAECF0;
+  --hairline: #E4E7EC;
+  --hairline-strong: #D0D5DD;
+  --ink: #101828;
+  --ink-2: #475467;
+  --ink-3: #667085;
+  --graphite: #1C1C1F;
+  --graphite-hover: #3A3A40;
+  --graphite-soft: #F1F1F2;
+  --graphite-border: #D4D4D8;
+  --graphite-border-strong: #A1A1AA;
+  /* rail = 侧栏/目录（产品 rail 语义） */
+  --rail: #F6F6F7;
+  --rail-fg: #18181B;
+  --rail-fg-2: #52525B;
+  --rail-line: #E4E4E7;
+  --rail-hover: #ECECEE;
+  --rail-active: #E6E6E8;
+  /* rail-dark = 暗色模式整体面 */
+  --rd-bg: #141416;
+  --rd-alt: #1C1C1F;
+  --rd-soft: #1E1E21;
+  --rd-hover: #2A2A2E;
+  --rd-line: #26262A;
+  --rd-fg: #EDEDEF;
+  --rd-fg-2: #A1A1A8;
+  /* 状态色（同色阶） */
+  --success: #067647;   --success-soft: #ECFDF3;  --success-up: #47CD89;
+  --warning: #B54708;   --warning-soft: #FFFAEB;  --warning-up: #FDB022;
+  --danger: #B42318;    --danger-soft: #FEF3F2;   --danger-up: #F04438;
+  /* 代码画布（Monokai 对） */
+  --code-canvas: #FAFAFA;
+  --code-text: #111111;
+  --code-canvas-dark: #272822;
+  --code-text-dark: #F8F8F2;
+  /* 字体 */
+  --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+          "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --serif: Georgia, "Iowan Old Style", "Songti SC", "Noto Serif SC", serif;
+  /* Monokai Light 令牌色 */
+  --mk-comment: #75715E;
+  --mk-cyan: #00A8C8;
+  --mk-green: #75AF00;
+  --mk-orange: #D88200;
+  --mk-pink: #F92672;
+  --mk-purple: #AE81FF;
+  /* Monokai（暗）令牌色 */
+  --mkd-comment: #88846F;
+  --mkd-cyan: #66D9EF;
+  --mkd-green: #A6E22E;
+  --mkd-orange: #FD971F;
+  --mkd-pink: #F92672;
+  --mkd-purple: #AE81FF;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--board);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 15px;
+  line-height: 1.75;
+  padding: 56px 32px 96px;
+}
+.board { max-width: 1504px; margin: 0 auto; }
+.board a { color: var(--ink); }
+.board :focus-visible { outline: 2px solid var(--graphite); outline-offset: 2px; }
+
+/* —— 封面 —— */
+.cover { border: 1px solid var(--hairline-strong); background: var(--paper); padding: 48px 56px 40px; }
+.cover-kicker { font-family: var(--mono); font-size: 12px; color: var(--ink-3); margin-bottom: 18px; }
+.cover h1 { font-size: 30px; line-height: 1.3; font-weight: 700; color: var(--ink); margin-bottom: 8px; }
+.cover .sub { color: var(--ink-2); max-width: 62ch; }
+.cover-meta { display: flex; flex-wrap: wrap; gap: 28px; margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--hairline); font-size: 13.5px; color: var(--ink-3); }
+.cover-meta b { color: var(--ink-2); font-weight: 600; }
+
+.section-label { margin: 56px 0 14px; font-size: 17px; font-weight: 700; color: var(--ink); }
+.section-label span { color: var(--ink-3); font-weight: 400; font-size: 14px; margin-left: 10px; }
+.note { color: var(--ink-2); max-width: 78ch; margin-bottom: 18px; }
+
+/* —— 令牌表 —— */
+.tokens { border: 1px solid var(--hairline-strong); background: var(--paper); }
+.swatches { display: grid; grid-template-columns: repeat(6, 1fr); }
+.swatch { padding: 16px 16px 14px; border-right: 1px solid var(--hairline); border-bottom: 1px solid var(--hairline); }
+.swatch:nth-child(6n) { border-right: none; }
+.chip { height: 44px; border: 1px solid var(--hairline); margin-bottom: 10px; }
+.swatch .nm { font-family: var(--mono); font-size: 12.5px; color: var(--ink); }
+.swatch .hex { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.swatch .role { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+
+.mapping { width: 100%; border-collapse: collapse; background: var(--paper); border: 1px solid var(--hairline-strong); font-size: 13.5px; }
+.mapping th, .mapping td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+.mapping th { color: var(--ink-2); font-weight: 600; border-bottom: 1px solid var(--hairline-strong); background: var(--paper-alt); }
+.mapping td { color: var(--ink-2); }
+.mapping td:first-child { color: var(--ink); }
+.mapping code { font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--surface); padding: 1px 5px; }
+
+.decisions { border: 1px solid var(--hairline-strong); background: var(--paper); padding: 22px 26px; }
+.decisions ol { margin-left: 20px; color: var(--ink-2); }
+.decisions li { margin-bottom: 7px; }
+.decisions code { font-family: var(--mono); font-size: 12px; color: var(--ink); background: var(--surface); padding: 1px 5px; }
+
+/* —— 画板上的屏幕 —— */
+.screen-cap { display: flex; justify-content: space-between; align-items: baseline; margin: 26px 0 10px; font-size: 13.5px; color: var(--ink-3); }
+.screen-cap .t { color: var(--ink); font-weight: 700; font-size: 14.5px; }
+.screen { width: 1440px; max-width: 100%; border: 1px solid var(--hairline-strong); background: var(--paper); box-shadow: 0 8px 24px rgba(16, 24, 40, 0.08); font-family: var(--sans); overflow: hidden; }
+
+/* ============================================================
+   以下是被设计的界面本体 —— VitePress 默认主题 1:1 度量：
+   nav 64 · 侧栏 272(rail) · 正文列 784 · 目录 256 · 容器 1104 · 版心 1152/1440
+   ============================================================ */
+
+/* —— 导航栏（64px，白底，发丝下边线；暗色 #141416） —— */
+.nav { height: 64px; display: flex; align-items: center; padding: 0 24px; border-bottom: 1px solid var(--hairline); background: var(--paper); }
+.nav.dark { background: var(--rd-bg); border-bottom-color: var(--rd-line); }
+.nav-side { display: flex; align-items: center; gap: 10px; flex: 1; }
+.nav-logo { width: 26px; height: 26px; display: block; }
+.nav-title { font-size: 16px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+.nav.dark .nav-title { color: var(--rd-fg); }
+.nav-links { display: flex; gap: 8px; justify-content: center; flex: 1.4; }
+.nav-links a { font-size: 14px; color: var(--ink-2); text-decoration: none; padding: 6px 12px; border-radius: 8px; }
+.nav-links a.active { color: var(--ink); font-weight: 500; }
+.nav.dark .nav-links a { color: var(--rd-fg-2); }
+.nav.dark .nav-links a.active { color: var(--rd-fg); }
+.nav-right { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex: 1; }
+.search-pill { display: flex; align-items: center; justify-content: space-between; width: 192px; height: 40px; padding: 0 12px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--paper-alt); font-size: 14px; color: var(--ink-3); }
+.nav.dark .search-pill { background: var(--rd-soft); border-color: var(--rd-line); color: var(--rd-fg-2); }
+.search-pill .kbd { font-family: var(--mono); font-size: 11px; border: 1px solid var(--hairline); padding: 1px 5px; color: var(--ink-3); }
+.nav.dark .search-pill .kbd { border-color: var(--rd-line); color: var(--rd-fg-2); }
+.gh { width: 22px; height: 22px; fill: var(--ink-2); }
+.nav.dark .gh { fill: var(--rd-fg-2); }
+
+/* —— 首页 Hero（版心 1152，居中） —— */
+.home-main { background: var(--paper); }
+.hero { max-width: 1152px; margin: 0 auto; padding: 72px 64px 24px; text-align: center; }
+.hero-mark { width: 128px; height: 128px; display: block; margin: 0 auto 28px; }
+.hero-name { font-size: 52px; line-height: 1.15; font-weight: 700; color: var(--graphite); letter-spacing: -0.02em; }
+.hero-text { font-size: 40px; line-height: 1.2; font-weight: 700; color: var(--ink); letter-spacing: -0.02em; margin-top: 6px; }
+.hero-tagline { font-size: 18px; line-height: 1.6; color: var(--ink-2); max-width: 40rem; margin: 18px auto 0; }
+.hero-actions { display: flex; justify-content: center; gap: 12px; margin-top: 32px; }
+.btn { display: inline-flex; align-items: center; height: 48px; padding: 0 24px; border-radius: 20px; font-size: 16px; font-weight: 600; text-decoration: none; }
+.btn.brand { background: var(--graphite); color: #FFFFFF; border: 1px solid var(--graphite); }
+.btn.brand:hover { background: var(--graphite-hover); border-color: var(--graphite-hover); }
+.btn.alt { background: var(--surface); color: var(--ink); border: 1px solid var(--surface); }
+.btn.alt:hover { background: var(--surface-hover); border-color: var(--surface-hover); }
+/* 暗色 signature：品牌按钮反白（rail-dark 的 btn-bg #FFFFFF / btn-fg #141416） */
+.dark-home .btn.brand { background: #FFFFFF; color: var(--rd-bg); border-color: #FFFFFF; }
+.dark-home .btn.brand:hover { background: #E4E4E7; border-color: #E4E4E7; }
+.dark-home .btn.alt { background: var(--rd-soft); color: var(--rd-fg); border-color: var(--rd-soft); }
+.dark-home .btn.alt:hover { background: var(--rd-hover); border-color: var(--rd-hover); }
+
+/* —— 首页特性卡（版心 1152，3 列，8px 沟槽，卡 radius 12） —— */
+.features { max-width: 1152px; margin: 0 auto; padding: 40px 64px 56px; }
+.feat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.feat { border: 1px solid var(--hairline); border-radius: 12px; background: var(--paper); padding: 24px; }
+.feat:hover { border-color: var(--hairline-strong); }
+.feat h3 { font-size: 16px; font-weight: 600; color: var(--ink); line-height: 1.4; margin-bottom: 8px; }
+.feat p { font-size: 14px; line-height: 1.6; color: var(--ink-2); }
+.dark-home { background: var(--rd-bg); }
+.dark-home .feat { background: var(--rd-alt); border-color: var(--rd-line); }
+.dark-home .feat:hover { border-color: var(--graphite-border-strong); }
+.dark-home .feat h3 { color: var(--rd-fg); }
+.dark-home .feat p { color: var(--rd-fg-2); }
+.dark-home .hero-name { color: var(--rd-fg); }
+.dark-home .hero-text { color: var(--rd-fg); }
+.dark-home .hero-tagline { color: var(--rd-fg-2); }
+.dark-home .hero-mark { opacity: 0.92; }
+
+/* —— 页脚 —— */
+.footer { border-top: 1px solid var(--hairline); padding: 24px 64px 32px; text-align: center; font-size: 14px; color: var(--ink-3); background: var(--paper); }
+.dark-home .footer, .screen.dark .footer { background: var(--rd-bg); border-top-color: var(--rd-line); color: var(--rd-fg-2); }
+
+/* —— 文档页骨架：272(rail) | 784 正文 | 256 目录 —— */
+.doc { display: grid; grid-template-columns: 272px minmax(0, 1fr); background: var(--paper); }
+.doc.dark { background: var(--rd-bg); }
+.doc-body { display: grid; grid-template-columns: 784px 64px 256px; justify-content: center; padding: 0 32px; }
+
+/* 侧栏 = rail（产品 rail 语义：light #F6F6F7 / dark #141416） */
+.side { background: var(--rail); border-right: 1px solid var(--rail-line); padding: 28px 24px 48px 32px; }
+.side.dark { background: var(--rd-bg); border-right-color: var(--rd-line); }
+.side-group { font-size: 13px; font-weight: 700; color: var(--rail-fg); margin: 22px 0 8px; }
+.side-group:first-child { margin-top: 0; }
+.side.dark .side-group { color: var(--rd-fg); }
+.side a { display: block; font-size: 14px; line-height: 1.6; color: var(--rail-fg-2); text-decoration: none; padding: 5px 10px; margin-left: -10px; border-left: 2px solid transparent; border-radius: 0 8px 8px 0; }
+.side a:hover { background: var(--rail-hover); color: var(--rail-fg); }
+.side a.on { background: var(--rail-active); color: var(--rail-fg); font-weight: 500; border-left-color: var(--graphite); }
+.side.dark a { color: var(--rd-fg-2); }
+.side.dark a:hover { background: var(--rd-soft); color: var(--rd-fg); }
+.side.dark a.on { background: var(--rd-hover); color: #FFFFFF; border-left-color: #FFFFFF; }
+
+/* —— 正文（.vp-doc 度量：h1 32/40、h2 24 + 顶部发丝线、h3 20、正文 16/1.7） —— */
+.article { padding: 32px 0 96px; }
+.article.dark h1, .article.dark h2, .article.dark h3 { color: var(--rd-fg); }
+.article h1 { font-size: 32px; line-height: 40px; font-weight: 700; color: var(--ink); letter-spacing: -0.02em; margin-bottom: 20px; }
+.article h2 { font-size: 24px; line-height: 32px; font-weight: 600; color: var(--ink); letter-spacing: -0.02em; border-top: 1px solid var(--hairline); padding-top: 24px; margin: 40px 0 16px; }
+.article h3 { font-size: 20px; line-height: 28px; font-weight: 600; color: var(--ink); margin: 28px 0 12px; }
+.article.dark h2 { border-top-color: var(--rd-line); }
+.article p, .article li { font-size: 16px; line-height: 1.7; color: var(--ink); }
+.article.dark p, .article.dark li { color: var(--rd-fg); }
+.article p { margin-bottom: 16px; }
+.article ul, .article ol { margin: 0 0 16px 22px; }
+.article li { margin-bottom: 6px; }
+.article a { color: var(--graphite); text-decoration: underline; text-decoration-color: var(--hairline-strong); text-underline-offset: 0.14em; }
+.article a:hover { text-decoration-color: currentColor; }
+.article.dark a { color: var(--rd-fg); text-decoration-color: var(--rd-line); }
+.article .quiet { color: var(--ink-2); }
+.article.dark .quiet { color: var(--rd-fg-2); }
+
+/* 行内代码：#F2F4F7 面上的墨字（code-surface / text） */
+.ic { font-family: var(--mono); font-size: 13.6px; background: var(--surface); color: var(--ink); padding: 2px 6px; border-radius: 4px; }
+.article.dark .ic { background: var(--rd-alt); color: var(--rd-fg); }
+
+/* 代码块：Monokai Light 画布 #FAFAFA（暗=Monokai #272822），发丝线框，radius 8 */
+.codeblock { position: relative; border: 1px solid var(--hairline); border-radius: 8px; background: var(--code-canvas); padding: 18px 20px; margin: 4px 0 20px; overflow-x: auto; }
+.codeblock pre { font-family: var(--mono); font-size: 13.6px; line-height: 1.7; color: var(--code-text); white-space: pre; }
+.codeblock .lang { position: absolute; right: 14px; bottom: 8px; font-size: 11px; color: var(--ink-3); }
+.codeblock .copy { position: absolute; right: 14px; top: 12px; width: 18px; height: 18px; border: 1px solid var(--hairline); border-radius: 4px; color: var(--ink-3); font-size: 11px; line-height: 16px; text-align: center; }
+.screen.dark .codeblock { background: var(--code-canvas-dark); border-color: var(--rd-line); }
+.screen.dark .codeblock pre { color: var(--code-text-dark); }
+.screen.dark .codeblock .lang, .screen.dark .codeblock .copy { color: var(--rd-fg-2); border-color: var(--rd-line); }
+/* Monokai 令牌（浅/深） */
+.c-cm { color: var(--mk-comment); } .c-cy { color: var(--mk-cyan); } .c-gr { color: var(--mk-green); }
+.c-or { color: var(--mk-orange); } .c-pk { color: var(--mk-pink); } .c-pu { color: var(--mk-purple); }
+.d-cm { color: var(--mkd-comment); } .d-cy { color: var(--mkd-cyan); } .d-gr { color: var(--mkd-green); }
+.d-or { color: var(--mkd-orange); } .d-pk { color: var(--mkd-pink); } .d-pu { color: var(--mkd-purple); }
+.screen.dark .c-cm, .screen.dark .c-cy, .screen.dark .c-gr,
+.screen.dark .c-or, .screen.dark .c-pk, .screen.dark .c-pu { color: var(--code-text-dark); }
+
+/* 提示块：软底 + 同色边 + 同色题（light: 产品 soft 令牌 / dark: 同色阶上一档） */
+.cb { border: 1px solid; border-radius: 8px; padding: 16px 20px; margin: 4px 0 20px; }
+.cb .t { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.cb p { font-size: 15px; margin: 0; }
+.cb.tip { background: var(--success-soft); border-color: var(--success); }
+.cb.tip .t { color: var(--success); }
+.cb.warn { background: var(--warning-soft); border-color: var(--warning); }
+.cb.warn .t { color: var(--warning); }
+.cb.danger { background: var(--danger-soft); border-color: var(--danger); }
+.cb.danger .t { color: var(--danger); }
+.screen.dark .cb { background: var(--rd-soft); }
+.screen.dark .cb.tip { border-color: var(--success-up); } .screen.dark .cb.tip .t { color: var(--success-up); }
+.screen.dark .cb.warn { border-color: var(--warning-up); } .screen.dark .cb.warn .t { color: var(--warning-up); }
+.screen.dark .cb.danger { border-color: var(--danger-up); } .screen.dark .cb.danger .t { color: var(--danger-up); }
+.screen.dark .cb p { color: var(--rd-fg-2); }
+
+/* 表格：发丝线，无底色表头 */
+.article table { width: 100%; border-collapse: collapse; margin: 4px 0 20px; }
+.article th, .article td { border: 1px solid var(--hairline); padding: 8px 14px; font-size: 15px; line-height: 1.6; text-align: left; }
+.article th { font-weight: 600; color: var(--ink-2); background: var(--paper-alt); }
+.article td { color: var(--ink-2); }
+.article.dark th, .article.dark td { border-color: var(--rd-line); }
+.article.dark th { background: var(--rd-soft); color: var(--rd-fg-2); }
+.article.dark td { color: var(--rd-fg-2); }
+
+/* 右侧目录 = rail 语义 */
+.aside { padding: 48px 8px 48px 0; }
+.aside .ot { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 12px; }
+.aside.dark .ot { color: var(--rd-fg); }
+.aside a { display: block; font-size: 13px; line-height: 1.7; color: var(--ink-3); text-decoration: none; padding: 3px 0 3px 14px; border-left: 1px solid var(--hairline); }
+.aside a.l3 { padding-left: 28px; }
+.aside a.on { color: var(--ink); font-weight: 500; border-left: 2px solid var(--graphite); padding-left: 13px; }
+.aside.dark a { color: var(--rd-fg-2); border-left-color: var(--rd-line); }
+.aside.dark a.on { color: var(--rd-fg); border-left: 2px solid var(--rd-fg); padding-left: 13px; }
+
+/* —— 自查区 —— */
+.checks { border: 1px solid var(--hairline-strong); background: var(--paper); padding: 22px 26px; font-size: 13.5px; color: var(--ink-2); }
+.checks code { font-family: var(--mono); font-size: 12px; background: var(--surface); padding: 1px 5px; color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="board">
+
+  <!-- ═══════════ 封面 ═══════════ -->
+  <section class="cover">
+    <div class="cover-kicker">forebrain-harness.github.io / design sheet / graphite</div>
+    <h1>官网石墨主题重设计 · 高保真设计稿</h1>
+    <p class="sub">以 frontend（gateway web 前端）的石墨（graphite）品牌方案为唯一主题来源，重造 VitePress 文档站的全部视觉面：品牌色、表面、发丝线、字体、代码高亮、提示块、暗色模式。本稿即实现计划的视觉验收基准。</p>
+    <div class="cover-meta">
+      <span><b>版本</b> v1</span>
+      <span><b>日期</b> 2026-10-07</span>
+      <span><b>主题来源</b> frontend/src/assets/main.css（:root[data-brand="graphite"] + 基础面 + rail）</span>
+      <span><b>布局基准</b> VitePress 1.6.4 默认主题实测：nav 64 · 侧栏 272 · 正文列 784 · 目录 256 · 版心 1152/1440</span>
+      <span><b>代码主题</b> Monokai / Monokai Light（产品统一代码对）</span>
+    </div>
+  </section>
+
+  <!-- ═══════════ 令牌 ═══════════ -->
+  <div class="section-label">一、核心令牌 <span>全部取自 frontend main.css，未新造色</span></div>
+  <p class="note">光面（light）：纸白内容区 + 纸灰替代面 + 发丝线，graphite 近黑作唯一品牌墨；暗面（dark）= 石墨 rail-dark 色板（#141416 族），品牌按钮反白是其签名。状态色只出现在提示块与代码里。</p>
+  <div class="tokens">
+    <div class="swatches">
+      <div class="swatch"><div class="chip" style="background:#FFFFFF"></div><div class="nm">paper</div><div class="hex">#FFFFFF</div><div class="role">内容区底（恒白）</div></div>
+      <div class="swatch"><div class="chip" style="background:#F7F8FA"></div><div class="nm">paper-alt</div><div class="hex">#F7F8FA</div><div class="role">替代面（alt）</div></div>
+      <div class="swatch"><div class="chip" style="background:#1C1C1F"></div><div class="nm">graphite</div><div class="hex">#1C1C1F</div><div class="role">品牌墨（按钮/强调）</div></div>
+      <div class="swatch"><div class="chip" style="background:#101828"></div><div class="nm">ink</div><div class="hex">#101828</div><div class="role">正文墨</div></div>
+      <div class="swatch"><div class="chip" style="background:#475467"></div><div class="nm">ink-2</div><div class="hex">#475467</div><div class="role">次级墨</div></div>
+      <div class="swatch"><div class="chip" style="background:#667085"></div><div class="nm">ink-3</div><div class="hex">#667085</div><div class="role">弱墨/注记</div></div>
+      <div class="swatch"><div class="chip" style="background:#F6F6F7"></div><div class="nm">rail</div><div class="hex">#F6F6F7</div><div class="role">侧栏=光面 rail</div></div>
+      <div class="swatch"><div class="chip" style="background:#141416"></div><div class="nm">rail-dark</div><div class="hex">#141416</div><div class="role">暗面 rail 底</div></div>
+      <div class="swatch"><div class="chip" style="background:#E4E7EC"></div><div class="nm">hairline</div><div class="hex">#E4E7EC</div><div class="role">发丝线</div></div>
+      <div class="swatch"><div class="chip" style="background:#FAFAFA; border-bottom-width:3px"></div><div class="nm">code-canvas</div><div class="hex">#FAFAFA</div><div class="role">代码画布（Monokai Light）</div></div>
+      <div class="swatch"><div class="chip" style="background:#272822"></div><div class="nm">code-canvas-dark</div><div class="hex">#272822</div><div class="role">代码画布（Monokai）</div></div>
+      <div class="swatch"><div class="chip" style="background:#ECFDF3; border-bottom:3px solid #067647"></div><div class="nm">success</div><div class="hex">#067647 / #ECFDF3</div><div class="role">tip 提示块</div></div>
+      <div class="swatch"><div class="chip" style="background:#FFFAEB; border-bottom:3px solid #B54708"></div><div class="nm">warning</div><div class="hex">#B54708 / #FFFAEB</div><div class="role">warning 提示块</div></div>
+      <div class="swatch"><div class="chip" style="background:#FEF3F2; border-bottom:3px solid #B42318"></div><div class="nm">danger</div><div class="hex">#B42318 / #FEF3F2</div><div class="role">danger 提示块</div></div>
+      <div class="swatch"><div class="chip" style="background:#1C1C1F; border-bottom:3px solid #EDEDEF"></div><div class="nm">rd-fg</div><div class="hex">#EDEDEF on #141416</div><div class="role">暗面前景（7.0:1）</div></div>
+      <div class="swatch"><div class="chip" style="background:#F2F4F7"></div><div class="nm">surface</div><div class="hex">#F2F4F7</div><div class="role">行内代码/替代按钮面</div></div>
+    </div>
+  </div>
+
+  <div class="section-label">二、关键映射 <span>产品令牌 → 站点变量</span></div>
+  <table class="mapping">
+    <tr><th>站点角色</th><th>取值</th><th>frontend 来源</th><th>说明</th></tr>
+    <tr><td>品牌色 --vp-c-brand-1</td><td><code>#1C1C1F</code>（暗 <code>#EDEDEF</code>）</td><td>graphite brand-1 / rail-mark</td><td>链接、激活态、hero 名</td></tr>
+    <tr><td>品牌按钮</td><td><code>#1C1C1F</code>→hover <code>#3A3A40</code></td><td>brand-1 / brand-hover</td><td>暗面反白：<code>#FFFFFF</code>/<code>#141416</code></td></tr>
+    <tr><td>侧栏（rail）</td><td><code>#F6F6F7</code>（暗 <code>#141416</code>）</td><td>rail-bg light/dark</td><td>rail 语义映射，激活 = rail-active</td></tr>
+    <tr><td>正文字体</td><td>系统 sans 栈</td><td>--forebrain-ui-font</td><td>弃用衬线 Source Serif 4</td></tr>
+    <tr><td>代码高亮</td><td>light=monokailight / dark=monokai</td><td>code-block/theme.ts 契约</td><td>画布 <code>#FAFAFA</code>/<code>#272822</code></td></tr>
+    <tr><td>渐变</td><td>无</td><td>产品裁决：渐变全禁</td><td>现站 6 处渐变全部移除</td></tr>
+  </table>
+
+  <div class="section-label">三、本稿决策（frontend 未定义处的延伸）</div>
+  <div class="decisions">
+    <ol>
+      <li><b>侧栏/目录 = rail</b>：文档站的导航面按产品 rail 语义取色（光面 rail-light，暗面 rail-dark），激活项左侧 2px 墨条用品牌墨。</li>
+      <li><b>保留暗色模式</b>：graphite 本身定义了暗 rail 面（#141416 族），暗色文档页是它的自然延伸；暗面品牌按钮沿用 rail-dark 的反白签名。</li>
+      <li><b>暗色提示块</b>：状态色取同一色阶的上一档（success <code>#47CD89</code> / warning <code>#FDB022</code> / danger <code>#F04438</code>，frontend rail-dark 已用 #F04438），底统一压到 rail hover 面 <code>#1E1E21</code>。</li>
+      <li><b>danger 软底 <code>#FEF3F2</code></b>：frontend 只定义了 warning/success 的 soft 面；#B42318 与 #FEF3F2 同属一个色阶，取其 50 步。</li>
+      <li><b>链接加下划线</b>：品牌墨近黑，不加下划线无法与正文区分；下划线用发丝 strong 色，悬停转实。</li>
+      <li><b>Mermaid 保持 neutral 主题</b>：本身即为灰阶，契合石墨，不改。</li>
+    </ol>
+  </div>
+
+  <!-- ═══════════ Screen A：光面首页 ═══════════ -->
+  <div class="screen-cap"><span class="t">Screen A · 首页（light）</span><span>1440 视口 · nav 64 · 版心 1152 · 特性 3 列 · 内容取自现站 docs/index.md 真实文案</span></div>
+  <div class="screen">
+    <header class="nav">
+      <div class="nav-side">
+        <img class="nav-logo" src="../../forebrain-harness.github.io/docs/public/mark.svg" alt="Forebrain Harness mark">
+        <span class="nav-title">Forebrain Harness</span>
+      </div>
+      <nav class="nav-links">
+        <a class="active" href="#a">Guide</a><a href="#a">Configuration</a><a href="#a">Develop</a>
+      </nav>
+      <div class="nav-right">
+        <div class="search-pill">Search <span class="kbd">Ctrl K</span></div>
+        <svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      </div>
+    </header>
+    <main class="home-main">
+      <section class="hero">
+        <img class="hero-mark" src="../../forebrain-harness.github.io/docs/public/mark.svg" alt="">
+        <div class="hero-name">Forebrain Harness</div>
+        <div class="hero-text">The terminal AI work agent that also runs as an agent gateway</div>
+        <p class="hero-tagline">An open-source agent product for developers and everyday productivity users who want terminal work, service-backed gateway APIs, multi-channel integrations, memory, skills, subagents, and execution controls in one runtime.</p>
+        <div class="hero-actions">
+          <a class="btn brand" href="#a">Get Started</a>
+          <a class="btn alt" href="#a">Architecture</a>
+          <a class="btn alt" href="#a">GitHub</a>
+        </div>
+      </section>
+      <section class="features">
+        <div class="feat-grid">
+          <div class="feat"><h3>Terminal-First Coding Agent</h3><p>Forebrain Harness's interactive TUI is built for local development work: live sessions, slash commands, approvals, visible tool progress, session resume, local workspace access, and shell-oriented execution.</p></div>
+          <div class="feat"><h3>Gateway Runtime, Not A Sidecar</h3><p>The same runtime is exposed through the Forebrain Harness gateway with HTTP APIs, WebSocket chat, run events, sessions, files, permissions, skills, memory, and channel delivery.</p></div>
+          <div class="feat"><h3>Multi-Channel Agent Gateway</h3><p>Adapters for Telegram, Discord, Slack, WhatsApp, WeCom, Weixin, Feishu, DingTalk, QQ, Signal, Matrix, Mattermost, email, SMS, webhooks, and more.</p></div>
+          <div class="feat"><h3>Office Productivity Agent</h3><p>The gateway and channel surfaces can support daily productivity workflows such as document-heavy tasks, knowledge recall, recurring automation, approvals, and team communication.</p></div>
+          <div class="feat"><h3>Stateful Work Beyond Chat</h3><p>Sessions, runs, context budgets, compaction, Active Memory, transcript continuity, durable memory, and subagents give durable structure for long-running work.</p></div>
+          <div class="feat"><h3>Safety As A Product Surface</h3><p>Permissions, approvals, sandboxing, guardrails, path controls, and audit surfaces are separated so powerful agents stay observable and controllable.</p></div>
+        </div>
+      </section>
+      <footer class="footer">Official product documentation for Forebrain Harness. · Copyright © Forebrain Harness</footer>
+    </main>
+  </div>
+
+  <!-- ═══════════ Screen B：光面文档页 ═══════════ -->
+  <div class="screen-cap"><span class="t">Screen B · 文档页（light）</span><span>272(rail) | 784 正文 | 256 目录 · 代码 = Monokai Light · 提示块 = 产品 soft 面</span></div>
+  <div class="screen">
+    <header class="nav">
+      <div class="nav-side">
+        <img class="nav-logo" src="../../forebrain-harness.github.io/docs/public/mark.svg" alt="">
+        <span class="nav-title">Forebrain Harness</span>
+      </div>
+      <nav class="nav-links"><a class="active" href="#b">Guide</a><a href="#b">Configuration</a><a href="#b">Develop</a></nav>
+      <div class="nav-right">
+        <div class="search-pill">Search <span class="kbd">Ctrl K</span></div>
+        <svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      </div>
+    </header>
+    <div class="doc">
+      <aside class="side">
+        <div class="side-group">Guide</div>
+        <a class="on" href="#b">Getting Started</a>
+        <a href="#b">CLI and Surfaces</a>
+        <a href="#b">Architecture</a>
+        <a href="#b">Context and Compaction</a>
+        <a href="#b">Memory Systems</a>
+        <a href="#b">Skills and Tools</a>
+        <a href="#b">Subagents</a>
+        <a href="#b">Safety Model</a>
+        <div class="side-group">Configuration Reference</div>
+        <a href="#b">Overview</a>
+        <a href="#b">Runtime, Gateway, And Channels</a>
+        <a href="#b">Agents and Models</a>
+        <a href="#b">Sandbox and Permissions</a>
+      </aside>
+      <div class="doc-body">
+        <article class="article">
+          <h1>Getting Started</h1>
+          <p>This is the first guide page for Forebrain Harness. It explains what Forebrain Harness provides, what to expect during the first run, and where to go next after the interactive session opens.</p>
+          <h2>Install</h2>
+          <p>Install with npm (Node.js 18+; macOS arm64/x64, Linux x64/arm64, Windows x64):</p>
+          <div class="codeblock">
+            <div class="copy">⧉</div>
+<pre><span class="c-cm"># one global install, then verify</span>
+<span class="c-gr">npm</span> install -g <span class="c-or">@forebrain-harness/forebrain</span>
+<span class="c-gr">forebrain</span> <span class="c-cy">--version</span></pre>
+            <div class="lang">bash</div>
+          </div>
+          <p>Or with Go (Go 1.26+ and a C compiler): see <a href="#b">Build and Release</a> for the full toolchain. The <span class="ic">fts5</span> tag enables full-text memory search.</p>
+          <div class="codeblock">
+<pre><span class="c-cy">CGO_ENABLED</span>=1 <span class="c-gr">go</span> install -<span class="c-or">tags</span> fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest</pre>
+            <div class="lang">bash</div>
+          </div>
+          <h2>What You Need</h2>
+          <ul>
+            <li>a local terminal session</li>
+            <li>a <a href="#b">Forebrain Harness installation</a></li>
+            <li>valid model-provider credentials for the main agent</li>
+            <li>a workspace you are willing to trust for file access and tool execution</li>
+          </ul>
+          <div class="cb tip"><div class="t">TIP</div><p>Run <span class="ic">forebrain --version</span> before the first session; the build embeds the web UI and needs CGO on every platform.</p></div>
+          <div class="cb warn"><div class="t">WARNING</div><p>Prebuilt archives attach to each GitHub release; a source build downloads CJK tokenization dictionaries on first use.</p></div>
+          <div class="cb danger"><div class="t">DANGER</div><p>Only trust workspaces you control. The permission and sandbox layers in <a href="#b">Sandbox and Permissions</a> assume a trusted root.</p></div>
+          <h2>Surfaces At A Glance</h2>
+          <table>
+            <tr><th>Surface</th><th>Role</th><th>Entry</th></tr>
+            <tr><td>TUI</td><td>Interactive coding work</td><td><span class="ic">forebrain</span></td></tr>
+            <tr><td>Gateway</td><td>HTTP/WS APIs, web client, channels</td><td><span class="ic">forebrain gateway</span></td></tr>
+            <tr><td>CLI</td><td>Scripting and automation</td><td><span class="ic">forebrain resume</span></td></tr>
+          </table>
+        </article>
+        <aside class="aside">
+          <div class="ot">On this page</div>
+          <a class="on" href="#b">Install</a>
+          <a href="#b">What You Need</a>
+          <a class="l3" href="#b">Credentials</a>
+          <a class="l3" href="#b">Trusted workspace</a>
+          <a href="#b">Surfaces At A Glance</a>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Screen C：暗面文档页 ═══════════ -->
+  <div class="screen-cap"><span class="t">Screen C · 文档页（dark）</span><span>rail-dark #141416 族 · 代码 = Monokai · 暗面 signature：品牌墨反白</span></div>
+  <div class="screen dark">
+    <header class="nav dark">
+      <div class="nav-side">
+        <img class="nav-logo" src="../../forebrain-harness.github.io/docs/public/mark.svg" alt="">
+        <span class="nav-title">Forebrain Harness</span>
+      </div>
+      <nav class="nav-links"><a class="active" href="#c">Guide</a><a href="#c">Configuration</a><a href="#c">Develop</a></nav>
+      <div class="nav-right">
+        <div class="search-pill">Search <span class="kbd">Ctrl K</span></div>
+        <svg class="gh" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      </div>
+    </header>
+    <div class="doc dark">
+      <aside class="side dark">
+        <div class="side-group">Guide</div>
+        <a class="on" href="#c">Getting Started</a>
+        <a href="#c">CLI and Surfaces</a>
+        <a href="#c">Architecture</a>
+        <a href="#c">Context and Compaction</a>
+        <a href="#c">Memory Systems</a>
+        <div class="side-group">Configuration Reference</div>
+        <a href="#c">Overview</a>
+        <a href="#c">Agents and Models</a>
+      </aside>
+      <div class="doc-body">
+        <article class="article dark">
+          <h1>Getting Started</h1>
+          <p>This is the first guide page for Forebrain Harness. It explains what Forebrain Harness provides, what to expect during the first run, and where to go next after the interactive session opens.</p>
+          <h2>Install</h2>
+          <p>Install with npm (Node.js 18+; macOS arm64/x64, Linux x64/arm64, Windows x64):</p>
+          <div class="codeblock">
+            <div class="copy">⧉</div>
+<pre><span class="d-cm"># one global install, then verify</span>
+<span class="d-gr">npm</span> install -g <span class="d-or">@forebrain-harness/forebrain</span>
+<span class="d-gr">forebrain</span> <span class="d-cy">--version</span></pre>
+            <div class="lang">bash</div>
+          </div>
+          <p>Or with Go (Go 1.26+ and a C compiler): see <a href="#c">Build and Release</a> for the full toolchain.</p>
+          <div class="codeblock">
+<pre><span class="d-cy">CGO_ENABLED</span>=1 <span class="d-gr">go</span> install -<span class="d-or">tags</span> fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest</pre>
+            <div class="lang">bash</div>
+          </div>
+          <div class="cb tip"><div class="t">TIP</div><p>Run <span class="ic">forebrain --version</span> before the first session; the build embeds the web UI and needs CGO on every platform.</p></div>
+          <div class="cb danger"><div class="t">DANGER</div><p>Only trust workspaces you control.</p></div>
+        </article>
+        <aside class="aside dark">
+          <div class="ot">On this page</div>
+          <a class="on" href="#c">Install</a>
+          <a href="#c">What You Need</a>
+          <a href="#c">Surfaces At A Glance</a>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════ Screen D：暗面首页（压缩示意） ═══════════ -->
+  <div class="screen-cap"><span class="t">Screen D · 首页（dark，压缩示意）</span><span>hero 名/文同 ink 反白 · 品牌按钮反白 · 特性卡 #1C1C1F + #26262A 发丝线</span></div>
+  <div class="screen dark-home">
+    <header class="nav dark">
+      <div class="nav-side">
+        <img class="nav-logo" src="../../forebrain-harness.github.io/docs/public/mark.svg" alt="">
+        <span class="nav-title">Forebrain Harness</span>
+      </div>
+      <nav class="nav-links"><a class="active" href="#d">Guide</a><a href="#d">Configuration</a></nav>
+      <div class="nav-right"><div class="search-pill">Search <span class="kbd">Ctrl K</span></div></div>
+    </header>
+    <main>
+      <section class="hero">
+        <img class="hero-mark" src="../../forebrain-harness.github.io/docs/public/mark.svg" alt="">
+        <div class="hero-name">Forebrain Harness</div>
+        <div class="hero-text">The terminal AI work agent that also runs as an agent gateway</div>
+        <div class="hero-actions">
+          <a class="btn brand" href="#d">Get Started</a>
+          <a class="btn alt" href="#d">Architecture</a>
+        </div>
+      </section>
+      <section class="features">
+        <div class="feat-grid">
+          <div class="feat"><h3>Terminal-First Coding Agent</h3><p>Live sessions, slash commands, approvals, visible tool progress, session resume.</p></div>
+          <div class="feat"><h3>Gateway Runtime, Not A Sidecar</h3><p>HTTP APIs, WebSocket chat, run events, sessions, files, permissions, skills, memory.</p></div>
+          <div class="feat"><h3>Safety As A Product Surface</h3><p>Permissions, approvals, sandboxing, guardrails, path controls, audit surfaces.</p></div>
+        </div>
+      </section>
+      <footer class="footer">Official product documentation for Forebrain Harness. · Copyright © Forebrain Harness</footer>
+    </main>
+  </div>
+
+  <!-- ═══════════ 自查 ═══════════ -->
+  <div class="section-label">交付前自查 <span>对照 owner 设计稿验收规则</span></div>
+  <div class="checks">
+    <p><b>比例 1:1</b>：所有屏幕按真实 CSS 像素绘制，度量取 VitePress 1.6.4 实装值（nav 64px、侧栏 272px、正文列 784px、目录 256px、版心 1152/1440px、按钮高 48px、卡 radius 12px、代码字号 13.6px），非缩略示意。</p>
+    <p><b>渐变</b>：全稿 0 处渐变（<code>grep -i gradient</code> 为空即通过）；现站 6 处渐变（hero 名、hero 底、body 三处 radial、feature 卡、navbar 毛玻璃）全部移除。</p>
+    <p><b>禁粉</b>：#F92672（monokai 粉）只出现在代码块令牌内，不用于任何 UI 面或强调。</p>
+    <p><b>对比度</b>：ink #101828/纸白 ≈ 15.6:1 · ink-3 #667085/纸白 ≈ 5.6:1 · 白/graphite ≈ 15.9:1 · rd-fg #EDEDEF/#141416 ≈ 12.9:1 · rd-fg-2 #A1A1A8/#141416 ≈ 6.9:1 · mk-comment #75715E/#FAFAFA ≈ 4.9:1。</p>
+    <p><b>字体</b>：产品界面全部系统 sans 栈（--forebrain-ui-font），代码 ui-monospace；画板注记用衬线以区分"说明"与"被设计的界面"。</p>
+  </div>
+
+</div>
+</body>
+</html>
