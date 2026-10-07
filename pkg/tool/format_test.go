@@ -2349,3 +2349,125 @@ func TestSubagentLifecycleToolsNeverShowJSON(t *testing.T) {
 		})
 	}
 }
+
+// trimBlankEdgeLines is the boundary-trim used on every multi-line tool
+// payload. It must drop only the blank lines at either edge plus the last
+// content line's trailing whitespace, and leave every content line otherwise
+// byte-for-byte intact — most importantly the FIRST line's own indent.
+func TestTrimBlankEdgeLines(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"keeps first-line indent", "  GET x\n  POST y\n", "  GET x\n  POST y"},
+		{"drops blank edge lines", "\n\n  GET x\n\n\n", "  GET x"},
+		{"trims last-line trailing space", "  GET x   \n", "  GET x"},
+		{"keeps interior blank line", "a\n\nb", "a\n\nb"},
+		{"all blank becomes empty", "   \n\t\n", ""},
+		{"empty stays empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trimBlankEdgeLines(tc.in); got != tc.want {
+				t.Fatalf("trimBlankEdgeLines(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The reported bug: the shell card's output body dropped the leading spaces of
+// its first line, so a grep'd route table started two columns left of every
+// later row. The payload here is byte-for-byte the gateway startup banner
+// ("  %-8s%s" in pkg/gateway/serve_run.go).
+func TestFormatShellStepKeepsFirstLineIndent(t *testing.T) {
+	t.Parallel()
+	routeTable := "  GET     /api/chat/sessions\n" +
+		"  POST    /api/chat/sessions\n" +
+		"  GET     /api/chat/sessions/:id\n"
+	evt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "grep -E '/api/chat' gw.log"},
+		Output:   map[string]any{"stdout": routeTable, "exit_code": 0},
+	}
+	body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	wantFence := "```text\n" +
+		"  GET     /api/chat/sessions\n" +
+		"  POST    /api/chat/sessions\n" +
+		"  GET     /api/chat/sessions/:id\n```"
+	if !strings.Contains(body, wantFence) {
+		t.Fatalf("stdout fence lost the first line's indent:\n%q", body)
+	}
+	assertPayloadLinesShareColumn(t, body, "/api/chat/sessions", 3)
+
+	// Same shape on stderr.
+	stderrEvt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "shell",
+		Input:    map[string]any{"command": "routing-probe"},
+		Output:   map[string]any{"stderr": routeTable, "exit_code": 1},
+	}
+	stderrBody, _ := FormatToolStepResult(stderrEvt, DefaultMaxFormattedBody)
+	if !strings.Contains(stderrBody, wantFence) {
+		t.Fatalf("stderr fence lost the first line's indent:\n%q", stderrBody)
+	}
+	assertPayloadLinesShareColumn(t, stderrBody, "/api/chat/sessions", 3)
+}
+
+// Every multi-line payload that is drawn line by line hit the same TrimSpace
+// defect: only the first line lost its indent. One case per surface.
+func TestToolBodiesKeepFirstLineIndent(t *testing.T) {
+	t.Parallel()
+	const payload = "  MARKER_ONE\n  MARKER_TWO\n"
+	const want = "  MARKER_ONE\n  MARKER_TWO"
+	cases := []struct {
+		name     string
+		toolName string
+		input    map[string]any
+		output   map[string]any
+	}{
+		{"shell stdout", "shell", map[string]any{"command": "probe"}, map[string]any{"stdout": payload}},
+		{"shell stderr", "shell", map[string]any{"command": "probe"}, map[string]any{"stderr": payload}},
+		{"generic stdout_preview", "generic_tool", nil, map[string]any{"stdout_preview": payload}},
+		{"generic preview_text", "generic_tool", nil, map[string]any{"preview_text": payload}},
+		{"lsp output", "lsp", map[string]any{"operation": "references"}, map[string]any{"output": payload}},
+		{"retrieve_output body", "retrieve_output", nil, map[string]any{"output": payload}},
+		{"intermediate_tool content", "intermediate_tool", map[string]any{"content": payload}, map[string]any{"content": payload}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evt := StepEvent{
+				Kind:     event.RunEventToolCompleted,
+				ToolName: tc.toolName,
+				Input:    tc.input,
+				Output:   tc.output,
+			}
+			body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+			if !strings.Contains(body, want) {
+				t.Fatalf("payload first line lost its indent:\n%q", body)
+			}
+		})
+	}
+}
+
+// assertPayloadLinesShareColumn checks that every line containing marker puts
+// it at the same column — the aligned-table property the fix restores.
+func assertPayloadLinesShareColumn(t *testing.T, body, marker string, wantLines int) {
+	t.Helper()
+	cols := []int{}
+	for _, line := range strings.Split(body, "\n") {
+		if i := strings.Index(line, marker); i >= 0 {
+			cols = append(cols, i)
+		}
+	}
+	if len(cols) != wantLines {
+		t.Fatalf("expected %d marker lines, got %d in:\n%q", wantLines, len(cols), body)
+	}
+	for _, c := range cols[1:] {
+		if c != cols[0] {
+			t.Fatalf("marker %q not column-aligned: %v in:\n%q", marker, cols, body)
+		}
+	}
+}
