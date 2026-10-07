@@ -27950,6 +27950,57 @@ func TestUnownedErrorStaysGlobal(t *testing.T) {
 	}
 }
 
+// The reported bug: a subagent stopped by a usage limit fails the turn that
+// dispatched it with the very same sentence. With that subagent's view open,
+// the view read "subagent failed: <limit>", its "Worked for" line, and then
+// "error: <limit>" again — the turn's error mirrored in as global news the
+// view had just shown. The view says it once; the primary transcript keeps the
+// turn's error; and a global error that says something else is still mirrored.
+func TestTurnErrorRepeatingSubagentFailureIsNotMirroredTwice(t *testing.T) {
+	forcedTermWidth = 80
+	forcedTermHeight = 24
+	t.Cleanup(func() {
+		forcedTermWidth = 0
+		forcedTermHeight = 0
+	})
+	r := NewRenderer(nil, nil)
+	r.viewportMode = true
+	r.composerSuppressed = true
+	red := &Reducer{tracker: NewTracker()}
+	render := func(res EventResult) {
+		for _, f := range res.Frames {
+			r.RenderFrame(f)
+		}
+	}
+
+	const rosterKey = "subagent-b5133178"
+	const limit = "Usage limit reached for this account — available again in 138h 6m, at 2026-10-12 07:08 CST."
+	render(red.Reduce(RunStartedMsg{RunID: "run-parent"}))
+	render(red.Reduce(SubagentSpawnedMsg{AgentID: rosterKey, AgentType: "general-purpose", TaskID: rosterKey, Timestamp: time.Now()}))
+	r.SetActiveView(rosterKey)
+	render(red.Reduce(SubagentEndedMsg{AgentID: rosterKey, AgentType: "general-purpose", TaskID: rosterKey, Status: "failed", Error: limit, Timestamp: time.Now()}))
+	render(red.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: limit, Timestamp: time.Now()}}))
+
+	paint := func(vm *viewModel) string {
+		return stripANSI(strings.Join(renderViewport(vm, 80, 40, 1<<30, DiffThemeDark).lines, "\n"))
+	}
+	view := paint(r.perAgentVM[rosterKey])
+	if !strings.Contains(view, "subagent failed") || !strings.Contains(view, "Worked for") {
+		t.Fatalf("the subagent's view must end on its own failure and worked line:\n%s", view)
+	}
+	if got := strings.Count(view, "Usage limit reached"); got != 1 {
+		t.Fatalf("the subagent's view must say the limit once, said it %d times:\n%s", got, view)
+	}
+	if primary := paint(&r.vm); !strings.Contains(primary, "Usage limit reached") {
+		t.Fatalf("the turn's error must stay on the primary transcript:\n%s", primary)
+	}
+
+	render(red.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindError, Content: "config reload failed: bad yaml", Timestamp: time.Now()}}))
+	if view := paint(r.perAgentVM[rosterKey]); !strings.Contains(view, "config reload failed: bad yaml") {
+		t.Fatalf("a global error saying something else must still be mirrored into the open view:\n%s", view)
+	}
+}
+
 // The helpers below were production functions that only the tests ever
 // called: each is a thin composition of live code. They live here so the
 // production files carry no unused code while the tests keep exercising
