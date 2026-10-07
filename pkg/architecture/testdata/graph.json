@@ -74,7 +74,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/lsp",
-      "loc": 10120,
+      "loc": 10129,
       "fan_in": 1,
       "fan_out": 4
     },
@@ -146,7 +146,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
-      "loc": 20380,
+      "loc": 20412,
       "fan_in": 9,
       "fan_out": 8
     },
