@@ -234,10 +234,6 @@ type SandboxSlashHandler interface {
 	HandleSandboxSlash(sessionID, channel string, args []string) (reply string, handled bool)
 }
 
-type DiffSlashHandler interface {
-	HandleDiffSlash(sessionID, channel string, args []string) (reply string, handled bool)
-}
-
 // ModelSlashHandler is where /model reads a session's model settings, applies
 // a live selection to the session's runtime, and refreshes the in-memory
 // catalog after a default-file write.
@@ -450,7 +446,6 @@ type Context struct {
 	MCP              MCPSlashHandler
 	LSP              LSPSlashHandler
 	Sandbox          SandboxSlashHandler
-	Diff             DiffSlashHandler
 	Model            ModelSlashHandler
 	Agent            AgentSlashHandler
 	Fast             FastSlashHandler

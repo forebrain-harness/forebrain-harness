@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,41 +165,6 @@ func TestHandleMCPServersV1MarksOfficialRegistryURLs(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Servers, 1)
 	require.Equal(t, true, body.Servers[0]["official_url"])
-}
-
-// /diff shows the diff of the project the session works in, the directory
-// /status names — not the agent's home workspace.
-func TestHandleDiffSlashShowsGitDiff(t *testing.T) {
-	home := t.TempDir()
-	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(home, "workspace"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(ws, "docs"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "docs", "plan.md"), []byte("old\n"), 0o600))
-	runInDirGateway(t, ws, "git", "init")
-	runInDirGateway(t, ws, "git", "config", "user.name", "Test")
-	runInDirGateway(t, ws, "git", "config", "user.email", "test@example.com")
-	runInDirGateway(t, ws, "git", "add", ".")
-	runInDirGateway(t, ws, "git", "commit", "-m", "init")
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "docs", "plan.md"), []byte("slash diff\n"), 0o600))
-
-	s := &Server{
-		Home:   home,
-		Runner: &run.Runner{Deps: &run.Deps{Home: home, ProjectRoot: ws}},
-	}
-	reply, handled := s.HandleDiffSlash("s1", "webchat", nil)
-	require.True(t, handled)
-	require.Contains(t, reply, "diff --git")
-	require.Contains(t, reply, "docs/plan.md")
-	require.Contains(t, reply, "+slash diff")
-	require.Contains(t, reply, "-old")
-}
-
-func runInDirGateway(t *testing.T, dir string, name string, args ...string) {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
 }
 
 // /model on the web offers the agent's configured models as a picker, the one

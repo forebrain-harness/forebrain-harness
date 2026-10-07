@@ -559,7 +559,6 @@ type fakeSession struct {
 	statusReply              string
 	mcpReply                 string
 	lspReply                 string
-	diffReply                string
 	streamSlashReply         map[string]SlashOutcome
 	streamSlashFn            func(context.Context, string, string) (SlashOutcome, bool)
 	permissionCalls          [][]string
@@ -984,14 +983,6 @@ func (f *fakeSession) HandleLSPSlash(sessionID, channel string) (string, bool) {
 		return "", false
 	}
 	return f.lspReply, true
-}
-
-func (f *fakeSession) HandleDiffSlash(sessionID, channel string, args []string) (string, bool) {
-	_, _, _ = sessionID, channel, args
-	if strings.TrimSpace(f.diffReply) == "" {
-		return "", false
-	}
-	return f.diffReply, true
 }
 
 func (f *fakeSession) ChooseSurfaceSlash(_ context.Context, _ string, choice turn.SlashChoice) SlashOutcome {
@@ -3934,7 +3925,7 @@ func TestSkillsInstallReturnsWithoutWaitingForTheFetch(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
 		richSteps: []richStep{
-			{idx: 0, ok: true}, // Add a skill
+			{label: "Add a skill", ok: true},
 			{idx: 2, ok: true}, // From a GitHub repo or URL
 			{idx: 0, ok: true}, // global
 		},

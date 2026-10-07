@@ -2,9 +2,6 @@ package turn
 
 import (
 	"context"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -32,7 +29,6 @@ func TestListSlashCommandsSideConversationFiltersToSafeCommands(t *testing.T) {
 	for _, r := range records {
 		names[r.Name] = true
 	}
-	require.True(t, names["diff"])
 	require.True(t, names["status"])
 	require.False(t, names["plan"])
 	require.False(t, names["new"])
@@ -116,9 +112,6 @@ func (r *recordingSlashHandlers) HandleMCPSlash(sessionID, _ string) (string, bo
 func (r *recordingSlashHandlers) HandleSandboxSlash(sessionID, _ string, args []string) (string, bool) {
 	return r.record("sandbox", sessionID, args)
 }
-func (r *recordingSlashHandlers) HandleDiffSlash(sessionID, _ string, args []string) (string, bool) {
-	return r.record("diff", sessionID, args)
-}
 func (r *recordingSlashHandlers) ModelSettings(sessionID string) (ModelSettings, error) {
 	r.record("model", sessionID, nil)
 	if r.settings != nil {
@@ -168,7 +161,6 @@ func contextForSurface(h *recordingSlashHandlers, surface Surface, channel, home
 		Permissions:    h,
 		MCP:            h,
 		Sandbox:        h,
-		Diff:           h,
 		Model:          h,
 		Agent:          h,
 		Fast:           h,
@@ -305,7 +297,6 @@ func TestHintedCommandsAcceptTheirOwnHint(t *testing.T) {
 		"permissions": "/permissions explain read_file",
 		"rename":      "/rename a fresh title",
 		"plan":        "/plan ship the parser rewrite",
-		"diff":        "/diff main.go",
 		"goal":        "/goal finish the parser rewrite",
 	}
 	for _, cmd := range commands {
@@ -328,36 +319,10 @@ func TestHintedCommandsAcceptTheirOwnHint(t *testing.T) {
 	}
 }
 
-// /diff answers with the project's diff, or one sentence when there is none:
-// never a diff-shaped message, never a fenced sentence.
-func TestExecuteDiffSlashSaysWhyThereIsNoDiff(t *testing.T) {
-	notRepo := t.TempDir()
-	if got := ExecuteDiffSlash(notRepo, nil, true); got != notRepo+" is not a git repository, so there is no diff to show." {
-		t.Fatalf("outside a repository = %q", got)
-	}
-	repo := t.TempDir()
-	cmd := exec.Command("git", "init", "-q")
-	cmd.Dir = repo
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
-	}
-	if got := ExecuteDiffSlash(repo, nil, true); got != "No uncommitted changes." {
-		t.Fatalf("clean repository = %q", got)
-	}
-	if got := ExecuteDiffSlash(repo, []string{"docs"}, false); got != "No uncommitted changes in docs." {
-		t.Fatalf("clean path = %q", got)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "a.txt"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := ExecuteDiffSlash(repo, nil, true); !strings.HasPrefix(got, "```diff\ndiff --git") || !strings.Contains(got, "+hello") {
-		t.Fatalf("fenced diff = %q", got)
-	}
-}
-
-// /help lists the built-in commands, then the skills, on every surface; a
-// command a surface does not have is answered with the closest ones it does.
-func TestHelpCatalogAndUnknownCommandSuggestions(t *testing.T) {
+// The bare "/" lists the built-in commands, then the skills, on every
+// surface; a command a surface does not have, including a removed one, is
+// answered with the closest ones it does.
+func TestUnknownCommandSuggestionsAndBareSlashCatalog(t *testing.T) {
 	ResetDynamic()
 	t.Cleanup(ResetDynamic)
 	skill := DynamicCommand{
@@ -367,11 +332,15 @@ func TestHelpCatalogAndUnknownCommandSuggestions(t *testing.T) {
 	require.NoError(t, ReplaceDynamicSource("test", []DynamicCommand{skill}))
 
 	for _, surface := range []Surface{SurfaceWebChat, SurfaceTUI} {
-		res := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/help")
+		res := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/")
 		require.True(t, res.Handled)
 		require.True(t, strings.HasPrefix(res.Reply, "Commands\n/"), res.Reply)
 		require.Contains(t, res.Reply, "\n\nSkills\n/context-save — save the session context")
 		require.Less(t, strings.Index(res.Reply, "/model —"), strings.Index(res.Reply, "Skills"))
+
+		removed := Execute(Context{Home: t.TempDir(), SessionID: "s1", Surface: surface}, "/help")
+		require.True(t, removed.Handled)
+		require.True(t, strings.HasPrefix(removed.Reply, "There is no /help"), removed.Reply)
 	}
 	require.Equal(t, "There is no /modle; did you mean /model?", UnknownCommandReply(SurfaceWebChat, "modle", DiscoveryOptions{}))
 	require.Equal(t, "There is no /zzzq; type / to see every command.", UnknownCommandReply(SurfaceWebChat, "zzzq", DiscoveryOptions{}))
@@ -424,16 +393,14 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		// Acts on the subagent whose view it is typed in.
 		"compact": SubagentViewActs,
 		"context": SubagentViewActs,
-		// Runs exactly as it does in the conversation's view.
-		"help":        SubagentViewGlobal,
-		"status":      SubagentViewGlobal,
-		"mcp":         SubagentViewGlobal,
-		"lsp":         SubagentViewGlobal,
-		"permissions": SubagentViewGlobal,
-		"sandbox":     SubagentViewGlobal,
-		"exit":        SubagentViewGlobal,
-		"diff":        SubagentViewGlobal,
-		"subagents":   SubagentViewGlobal,
+	// Runs exactly as it does in the conversation's view.
+	"status":      SubagentViewGlobal,
+	"mcp":         SubagentViewGlobal,
+	"lsp":         SubagentViewGlobal,
+	"permissions": SubagentViewGlobal,
+	"sandbox":     SubagentViewGlobal,
+	"exit":        SubagentViewGlobal,
+	"subagents":   SubagentViewGlobal,
 		"skills":      SubagentViewGlobal,
 		"connect":     SubagentViewGlobal,
 		"memories":    SubagentViewGlobal,
@@ -481,7 +448,7 @@ func TestSubagentViewHidesConversationCommands(t *testing.T) {
 			t.Fatalf("the subagent view must hide /%s", hidden)
 		}
 	}
-	for _, shown := range []string{"compact", "context", "help", "status", "mcp", "lsp", "permissions", "sandbox", "exit", "diff", "subagents", "skills", "connect", "memories", "migrate"} {
+	for _, shown := range []string{"compact", "context", "status", "mcp", "lsp", "permissions", "sandbox", "exit", "subagents", "skills", "connect", "memories", "migrate"} {
 		if !listed[shown] {
 			t.Fatalf("the subagent view must keep /%s", shown)
 		}

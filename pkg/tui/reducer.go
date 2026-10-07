@@ -70,9 +70,11 @@ type Frame struct {
 	// content exceeds the cap, the final line is truncated with an ellipsis.
 	// Zero leaves rendering unrestricted.
 	MaxDisplayLines int
-	// InsertBeforeLastTool is a tui-only layout hint for approval
-	// confirmation statuses. Ordinary status frames must leave it false so they
-	// retain their production order in the transcript.
+	// InsertBeforeLastTool is a tui-only layout hint for an approval-exchange
+	// frame — a confirmation status, or the plan-review card the confirmation
+	// asked for. Such a frame lands above the parked tool block it belongs to,
+	// not at the transcript tail. Ordinary status and fanout frames must leave
+	// it false so they retain their producer order.
 	InsertBeforeLastTool bool
 	StepID               string
 	RunID                string
@@ -834,18 +836,23 @@ func (r *Reducer) emitFanoutFrame(fs *fanoutState) Frame {
 		duration = 0
 	}
 	return Frame{
-		Kind:             FrameFanout,
-		StepID:           fs.StepID,
-		RunID:            r.activeRunID,
-		AgentID:          fs.OwnerAgentID,
-		Final:            fanoutCardSettled(fs),
-		Content:          content,
-		FanoutLineAgents: lineAgents,
-		FanoutLineClocks: clocks,
-		Summary:          fanoutCardHeader(fs),
-		Duration:         duration,
-		FanoutQuery:      fs.Query,
-		FanoutCallError:  fs.CallError,
+		Kind:   FrameFanout,
+		StepID: fs.StepID,
+		// A plan review is part of the approval exchange that asked for it:
+		// it lands above the parked exit-plan call, between that approval's
+		// two confirmation lines, not at the transcript tail. Every other
+		// fanout card keeps its producer order.
+		InsertBeforeLastTool: fs.Verb == "review",
+		RunID:                r.activeRunID,
+		AgentID:              fs.OwnerAgentID,
+		Final:                fanoutCardSettled(fs),
+		Content:              content,
+		FanoutLineAgents:     lineAgents,
+		FanoutLineClocks:     clocks,
+		Summary:              fanoutCardHeader(fs),
+		Duration:             duration,
+		FanoutQuery:          fs.Query,
+		FanoutCallError:      fs.CallError,
 	}
 }
 
@@ -4965,7 +4972,15 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 	// previous block with the same StepID (compact running → compact ran,
 	// installing → installed).
 	if f.Kind == FrameFanout || f.Kind == FrameTool || f.Kind == FrameMemoryCompact || f.Kind == FrameSkillInstall {
-		r.vm.replaceOrAppendBlock(f)
+		if f.Kind == FrameFanout && f.InsertBeforeLastTool {
+			// A plan-review card belongs to the approval exchange that asked
+			// for it, so it lands above the parked tool block the approval is
+			// holding — between that approval's confirmation lines — and then
+			// updates in place, exactly as the lines do.
+			r.vm.replaceOrInsertBeforeLastTool(f)
+		} else {
+			r.vm.replaceOrAppendBlock(f)
+		}
 		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout {
 			r.syncLiveBlockAnimationLocked()
 		}

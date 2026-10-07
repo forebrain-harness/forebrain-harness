@@ -122,8 +122,24 @@ func TestSkillListCarriesOriginEditableAndDownloadURL(t *testing.T) {
 	require.Contains(t, body, `"download_url":"/api/skills/agent-skill/download"`)
 	// The global listing belongs to the primary agent: its rows are the
 	// editable ones, everything else is inherited and read-only.
-	require.Contains(t, body, `"name":"agent-skill","description":"agent-skill skill","root_path":"`+filepath.Join(workspace, "skills", "agent-skill")+`","source":"workspace","trust":"workspace","enabled":true,"origin":"agent","editable":true`)
-	require.Contains(t, body, `"origin":"builtin","editable":false`)
+	require.Contains(t, body, `"name":"agent-skill","description":"agent-skill skill","root_path":"`+filepath.Join(workspace, "skills", "agent-skill")+`","origin":"agent","enabled":true,"editable":true`)
+	require.NotContains(t, body, `"source":`)
+	require.NotContains(t, body, `"trust":`)
+	require.Contains(t, body, `"origin":"builtin","enabled":true,"editable":false`)
+}
+
+// Two roots offering the same name are one row in the listing — the unshadowed
+// one — so that is the copy downloads, edits and deletes must act on.
+func TestLocateSkillPicksTheLoadedCopy(t *testing.T) {
+	_, home, workspace := rulesServer(t)
+	sharedDir := writeGatewaySkill(t, filepath.Join(home, "skills"), "demo")
+	writeGatewaySkill(t, filepath.Join(home, "skills", ".system"), "demo")
+
+	svc := skill.NewServiceForWorkspace(home, workspace)
+	entry, ok := locateSkill(svc, "demo")
+	require.True(t, ok)
+	require.Equal(t, skill.CanonicalSkillPath(sharedDir), skill.CanonicalSkillPath(entry.Path))
+	require.Equal(t, skill.OriginShared, entry.Origin)
 }
 
 // A gateway started inside a checkout carries that checkout as its launch
@@ -137,7 +153,7 @@ func TestSkillListOwnerFollowsTheRouteNotTheLaunchProject(t *testing.T) {
 	rr := httptest.NewRecorder()
 	s.handleSkillsList(rr, httptest.NewRequest(http.MethodGet, "/api/skills/", nil))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	require.Contains(t, rr.Body.String(), `"origin":"agent","editable":true`)
+	require.Contains(t, rr.Body.String(), `"origin":"agent","enabled":true,"editable":true`)
 }
 
 func TestSkillDeleteOnlyInTheOwningLayer(t *testing.T) {
@@ -302,9 +318,9 @@ func TestProjectSkillListScopesRowsToTheProjectLayer(t *testing.T) {
 	s.handleSkillsListWith(launch, "proj-1", rr, httptest.NewRequest(http.MethodGet, "/api/v1/projects/proj-1/skills", nil))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	body := rr.Body.String()
-	require.Contains(t, body, `"origin":"project","editable":true`)
+	require.Contains(t, body, `"origin":"project","enabled":true,"editable":true`)
 	require.Contains(t, body, `"download_url":"/api/v1/projects/proj-1/skills/project-skill/download"`)
-	require.Contains(t, body, `"origin":"agent","editable":false`)
+	require.Contains(t, body, `"origin":"agent","enabled":true,"editable":false`)
 }
 
 // workshopServer builds a server with one agent-scope skill (writable) and

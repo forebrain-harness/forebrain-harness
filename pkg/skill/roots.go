@@ -60,26 +60,7 @@ func AgentSkillRoots(home string, workspaceRoot string, launch safety.ProjectCon
 }
 
 func agentSkillRoots(home string, workspaceRoot string, trustedProjectRoots []string) []string {
-	h := strings.TrimSpace(home)
-	workspaceRoot = strings.TrimSpace(workspaceRoot)
-	out := make([]string, 0, len(projectSkillDirs)+len(userSkillDirs)+3)
-	// 1. Trusted project-level skills (highest priority).
-	out = append(out, trustedProjectRoots...)
-	// 2. Workspace skills
-	if workspaceRoot != "" {
-		out = append(out, filepath.Join(workspaceRoot, "skills"))
-	}
-	// 3. User-installed skills
-	if h != "" {
-		out = append(out, filepath.Join(h, "skills"))
-	}
-	// 4. Cross-tool user skill dirs
-	out = append(out, UserSkillRoots()...)
-	// 5. Built-in system skills (lowest priority)
-	if h != "" {
-		out = append(out, filepath.Join(h, "skills", ".system"))
-	}
-	return out
+	return RootPaths(skillLayers(home, workspaceRoot, trustedProjectRoots))
 }
 
 // UserSkillRoots returns the cross-tool user-level skill roots, highest

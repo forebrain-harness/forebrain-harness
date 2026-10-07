@@ -215,17 +215,6 @@ func (s *Server) HandleSandboxSlash(sessionID, channel string, args []string) (s
 	return safety.FormatSandboxReport(cfg, manager), true
 }
 
-func (s *Server) HandleDiffSlash(sessionID, channel string, args []string) (string, bool) {
-	_ = channel
-	r := s.runnerFor(context.Background(), sessionID)
-	if r == nil {
-		r = s.Runner
-	}
-	// The project /status names as the session's directory; fenced so the
-	// webchat syntax-highlights it.
-	return turn.ExecuteDiffSlash(r.ProjectRoot, args, true), true
-}
-
 // ModelSettings is what /model works from on the web: the live config, the
 // session's agent, and the config file the providers page writes too. The
 // marker is the session's own resolved choice — its stored row validated

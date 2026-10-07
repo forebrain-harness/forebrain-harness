@@ -9,13 +9,17 @@ import (
 )
 
 type Entry struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Path        string   `json:"path"`
-	Source      string   `json:"source,omitempty"`
-	Enabled     bool     `json:"enabled"`
-	ShadowedBy  []string `json:"shadowed_by,omitempty"`
-	Shadows     []string `json:"shadows,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Path        string `json:"path"`
+	Origin      Origin `json:"origin,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	// ShadowedBy is the higher-priority copy sharing this skill's name — the
+	// one the runtime loads instead of this one.
+	ShadowedBy []string `json:"shadowed_by,omitempty"`
+	// Shadows are the lower-priority copies sharing this skill's name that
+	// this one hides.
+	Shadows []string `json:"shadows,omitempty"`
 }
 
 // State is the per-primary-agent skill state. It lives under the agent's own
@@ -146,7 +150,8 @@ func stateRootForWorkspace(home, workspaceRoot string) string {
 }
 
 func DiscoverForWorkspace(home string, workspaceRoot string, projectRoot string) ([]Entry, error) {
-	roots := agentSkillRoots(home, workspaceRoot, TrustedProjectSkillRoots(home, projectRoot))
+	layers := skillLayers(home, workspaceRoot, TrustedProjectSkillRoots(home, projectRoot))
+	origins := layerOrigins(layers)
 	stateRoot := stateRootForWorkspace(home, workspaceRoot)
 	st, err := Load(stateRoot)
 	if err != nil {
@@ -154,7 +159,7 @@ func DiscoverForWorkspace(home string, workspaceRoot string, projectRoot string)
 	}
 	seen := make(map[string]struct{})
 	entries := make([]Entry, 0)
-	for _, found := range scanSkillRoots(roots) {
+	for _, found := range scanSkillRoots(RootPaths(layers)) {
 		// The picker keys a skill by its canonical directory, the same key the
 		// toggle store writes, so one skill reached through two roots is one
 		// row with one enabled flag.
@@ -170,7 +175,7 @@ func DiscoverForWorkspace(home string, workspaceRoot string, projectRoot string)
 			Name:        found.Name,
 			Description: strings.TrimSpace(found.Skill.Description),
 			Path:        skillDir,
-			Source:      string(SourceForPathWithWorkspace(strings.TrimSpace(home), stateRoot, strings.TrimSpace(projectRoot), skillDir)),
+			Origin:      origins[found.Root],
 			Enabled:     !st.Disabled[skillDir],
 		})
 	}
@@ -186,6 +191,9 @@ func DiscoverForWorkspace(home string, workspaceRoot string, projectRoot string)
 	return entries, nil
 }
 
+// annotateShadows marks, for every name more than one root offers, the copy
+// scanned first — the one the runtime loads (see mergedSkillParser.collect) —
+// as shadowing the others.
 func annotateShadows(entries []Entry) {
 	if len(entries) < 2 {
 		return
@@ -204,8 +212,8 @@ func annotateShadows(entries []Entry) {
 		}
 		winner := idxs[0]
 		for _, i := range idxs[1:] {
-			entries[winner].ShadowedBy = appendUnique(entries[winner].ShadowedBy, entries[i].Path)
-			entries[i].Shadows = appendUnique(entries[i].Shadows, entries[winner].Path)
+			entries[winner].Shadows = appendUnique(entries[winner].Shadows, entries[i].Path)
+			entries[i].ShadowedBy = appendUnique(entries[i].ShadowedBy, entries[winner].Path)
 		}
 	}
 }

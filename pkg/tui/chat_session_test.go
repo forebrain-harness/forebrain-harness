@@ -2108,32 +2108,6 @@ func TestOpenChatSessionWiresProjectContextPreHook(t *testing.T) {
 	require.Contains(t, out.SystemAddendum, "project_root: "+memory.ProjectRoot(projectRoot))
 }
 
-// /diff shows the diff of the project the session works in, the directory
-// /status names — not the agent's home workspace.
-func TestHandleDiffSlashShowsGitDiff(t *testing.T) {
-	home := t.TempDir()
-	ws := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(home, "workspace"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "README.md"), []byte("old\n"), 0o600))
-	runInDir(t, ws, "git", "init")
-	runInDir(t, ws, "git", "config", "user.name", "Test")
-	runInDir(t, ws, "git", "config", "user.email", "test@example.com")
-	runInDir(t, ws, "git", "add", "README.md")
-	runInDir(t, ws, "git", "commit", "-m", "init")
-	require.NoError(t, os.WriteFile(filepath.Join(ws, "README.md"), []byte("new\n"), 0o600))
-
-	s := sessionEnv{
-		Home:   home,
-		Runner: &run.Runner{Deps: &run.Deps{Home: home, ProjectRoot: ws}},
-	}.session()
-	reply, handled := s.HandleDiffSlash("s1", "cli", nil)
-	require.True(t, handled)
-	require.Contains(t, reply, "diff --git")
-	require.Contains(t, reply, "README.md")
-	require.Contains(t, reply, "+new")
-	require.Contains(t, reply, "-old")
-}
-
 func runInDir(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -2224,7 +2198,7 @@ body`), 0o600))
 	require.NoError(t, err)
 	require.Contains(t, out, "skill: demo")
 	require.Contains(t, out, "description: test skill")
-	require.Contains(t, out, "source: workspace")
+	require.Contains(t, out, "origin: Agent")
 	require.Contains(t, out, "allowed_tools: view bash")
 	require.NotContains(t, out, "available_actions:")
 }
@@ -9588,12 +9562,12 @@ func TestDiffGutterWidthFor(t *testing.T) {
 	}
 }
 
-func TestRenderClaudeDiffLine_AddBandPadding(t *testing.T) {
+func TestRenderDiffLine_AddBandPadding(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	t.Setenv("COLORTERM", "truecolor")
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 	lexer, style := resolveDiffHighlight("x.go", p)
-	rows := renderClaudeDiffLine(
+	rows := renderDiffLine(
 		event.DiffLine{Kind: event.LineAdd, NewNo: 5, Text: "ok := true"},
 		p, 3, 40, lexer, style,
 	)
@@ -9619,11 +9593,11 @@ func TestRenderClaudeDiffLine_AddBandPadding(t *testing.T) {
 	}
 }
 
-func TestRenderClaudeDiffLine_NoColorPlain(t *testing.T) {
+func TestRenderDiffLine_NoColorPlain(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 	lexer, style := resolveDiffHighlight("x.go", p)
-	rows := renderClaudeDiffLine(
+	rows := renderDiffLine(
 		event.DiffLine{Kind: event.LineDel, OldNo: 7, Text: "drop()"},
 		p, 3, 40, lexer, style,
 	)
@@ -9769,7 +9743,7 @@ func TestRenderDiffSyntaxColorsMatchProseBrightness(t *testing.T) {
 // byte-for-byte.
 func TestNormalizeFGKeepsHueAndLeavesAccentsAlone(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 
 	// github-dark's comment grey, the colour that made the report's diff dim.
 	r, g, b := p.fg.normalize(0x8b, 0x94, 0x9e)
@@ -9787,7 +9761,7 @@ func TestNormalizeFGKeepsHueAndLeavesAccentsAlone(t *testing.T) {
 	}
 
 	// The same rule inverts on a light background: bright colours are deepened.
-	light := claudeDiffPaletteFor(DiffThemeLight)
+	light := diffPaletteFor(DiffThemeLight)
 	if r, g, b := light.fg.normalize(0xff, 0xd0, 0xd0); relativeLuminance(r, g, b) > syntaxLuminanceLight+0.02 {
 		t.Fatalf("light theme kept a washed-out colour: #%02x%02x%02x", r, g, b)
 	}
@@ -10118,21 +10092,21 @@ func TestSoftWrapApprovalCommandUsesAvailableColumns(t *testing.T) {
 	}
 }
 
-func TestClaudeDiffPaletteFor(t *testing.T) {
+func TestDiffPaletteFor(t *testing.T) {
 	t.Setenv("NO_COLOR", "")
 	// A diff paints code with the same theme as every other code surface, so
 	// the same file reads the same in a read_file card, an edit_file card and
 	// the approval overlay.
-	dark := claudeDiffPaletteFor(DiffThemeDark)
+	dark := diffPaletteFor(DiffThemeDark)
 	if dark.noColor || dark.chromaStyle != codeStyleDark {
 		t.Fatalf("dark palette wrong: %+v", dark)
 	}
-	light := claudeDiffPaletteFor(DiffThemeLight)
+	light := diffPaletteFor(DiffThemeLight)
 	if light.noColor || light.chromaStyle != codeStyleLight {
 		t.Fatalf("light palette wrong: %+v", light)
 	}
 	// unknown falls back to the dark band/style
-	unknown := claudeDiffPaletteFor(DiffThemeUnknown)
+	unknown := diffPaletteFor(DiffThemeUnknown)
 	if unknown.noColor || unknown.chromaStyle != codeStyleDark {
 		t.Fatalf("unknown palette should match dark: %+v", unknown)
 	}
@@ -10140,7 +10114,7 @@ func TestClaudeDiffPaletteFor(t *testing.T) {
 	// End to end: the style a diff row is tokenised with is the very style the
 	// read_file card next to it uses.
 	for _, theme := range []DiffTheme{DiffThemeDark, DiffThemeLight} {
-		_, diffStyle := resolveDiffHighlight("x.go", claudeDiffPaletteFor(theme))
+		_, diffStyle := resolveDiffHighlight("x.go", diffPaletteFor(theme))
 		plainStyle := resolveCodeStyle(theme)
 		if diffStyle == nil || plainStyle == nil || diffStyle.Name != plainStyle.Name {
 			t.Fatalf("theme %v: diff style %v != plain code style %v", theme, diffStyle, plainStyle)
@@ -10148,7 +10122,7 @@ func TestClaudeDiffPaletteFor(t *testing.T) {
 	}
 
 	t.Setenv("NO_COLOR", "1")
-	if got := claudeDiffPaletteFor(DiffThemeDark); !got.noColor {
+	if got := diffPaletteFor(DiffThemeDark); !got.noColor {
 		t.Fatalf("NO_COLOR should force noColor palette: %+v", got)
 	}
 }
@@ -16252,8 +16226,9 @@ func TestRendererBannerDefaultsToForebrain(t *testing.T) {
 	r.Banner(StartupInfo{Version: "v0.1.0", Directory: "~/workspace/forebrain"})
 	got := stripANSI(out.String())
 	// Without colour the mascot is drawn as its silhouette; its crown row —
-	// two solid hemispheres — is the same in every profile.
-	if !strings.Contains(got, "██████████████    ██████████████") {
+	// one solid dome with its corners rounded off — is the same in every
+	// profile.
+	if !strings.Contains(got, "  ████████████████  ") {
 		t.Fatalf("banner did not contain the mascot: %q", out.String())
 	}
 	for _, want := range []string{"Forebrain Harness", "v0.1.0", "~/workspace/forebrain", "/ commands", "@ mention", "esc interrupt", "ctrl+j newline"} {
@@ -16319,29 +16294,30 @@ func TestForebrainBannerWrapsLongVersion(t *testing.T) {
 }
 
 // TestForebrainMascotIsTheApprovedDesign pins the mascot to the design the
-// owner approved (plan A, https://claude.ai/artifact/4NFmLaLrMfboe6YLoU8dkc):
-// ears, a one-pixel harness node, eyes with their shine, a smile with raised
-// corners, a chin step and two feet. It guards the bug where the grid was
-// coarsened to dodge a rendering seam and the face lost that detail: a
-// rendering problem is fixed in forebrainMascotRows, never by redrawing the
-// mascot, and changing the grid needs the owner's sign-off.
+// owner approved for the startup card (docs/design/STARTUP_CARD.html): 10×6
+// pixels — 20 columns by 6 rows — with a rounded crown, a one-pixel harness
+// node, 2x2 eyes with their shine, a small smile and two feet. It supersedes
+// the 14×8 grid of docs/plan/MASCOT_COMPACT_GRID_PLAN.md. It guards the bug
+// where the grid was coarsened to dodge a rendering seam and the face lost
+// that detail: a rendering problem is fixed in forebrainMascotRows, never by
+// redrawing the mascot, and changing the grid needs the owner's sign-off.
 func TestForebrainMascotIsTheApprovedDesign(t *testing.T) {
 	approved := []string{
-		"..FFFFFFF..FFFFFFF..",
-		"..FFFFFFF..FFFFFFF..",
-		".FFFFFFFFAAFFFFFFFF.",
-		".FFFFFFFFFFFFFFFFFF.",
-		"FFFFFFFFFFFFFFFFFFFF",
-		"FFFFFWPFFFFFFWPFFFFF",
-		"FFFFFPPFFFFFFPPFFFFF",
-		"FFFFFFFFPFFPFFFFFFFF",
-		".FFFFFFFFPPFFFFFFFF.",
-		".FFFFFFFFFFFFFFFFFF.",
-		"..FFFFFFFFFFFFFFFF..",
-		"....FFFFF..FFFFF....",
+		".FFFFFFFF.",
+		"FFFFAAFFFF",
+		"FFWPFFWPFF",
+		"FFPPFFPPFF",
+		".FFFPPFFF.",
+		"..FF..FF..",
 	}
 	if len(forebrainMascot) != len(approved) {
 		t.Fatalf("mascot grid has %d rows, the approved design has %d", len(forebrainMascot), len(approved))
+	}
+	if len(forebrainMascot[0]) != 10 {
+		t.Fatalf("mascot grid is %d pixels wide, the approved design is 10", len(forebrainMascot[0]))
+	}
+	if forebrainMascotWidth != 20 {
+		t.Fatalf("mascot is %d columns wide, the approved design is 20 (10 pixels x %d)", forebrainMascotWidth, forebrainMascotPixelCols)
 	}
 	for y, row := range forebrainMascot {
 		if row != approved[y] {
@@ -16399,8 +16375,15 @@ func TestForebrainMascotPaintsBodyAsBackground(t *testing.T) {
 	if !strings.Contains(rows[0], "\x1b[48;5;74m"+pixel+"\x1b[0m") {
 		t.Fatalf("mascot crown row does not paint the body as a background colour: %q", rows[0])
 	}
-	if !strings.Contains(rows[5], "\x1b[48;5;231m"+pixel+"\x1b[0m") {
-		t.Fatalf("mascot eye row does not paint the eye shine: %q", rows[5])
+	eyeRow := -1
+	for y, line := range forebrainMascot {
+		if strings.IndexByte(line, 'W') >= 0 {
+			eyeRow = y
+			break
+		}
+	}
+	if eyeRow < 0 || !strings.Contains(rows[eyeRow], "\x1b[48;5;231m"+pixel+"\x1b[0m") {
+		t.Fatalf("mascot eye row does not paint the eye shine: %d", eyeRow)
 	}
 	run := regexp.MustCompile("\x1b\\[([0-9;]*)m([^\x1b]*)\x1b\\[0m")
 	for i, row := range rows {
@@ -16433,10 +16416,13 @@ func TestForebrainBannerWidthFollowsPath(t *testing.T) {
 		}
 		return displayLineWidth(lines[1])
 	}
-	// With the mascot, even the shortest text — the two shortcut columns —
-	// takes the card past the floor.
-	if w, want := cardWidth(200, "~/proj"), chrome+2*bannerShortcutItemWidth()+bannerGutter+1; w != want || w < bannerMinWidth {
-		t.Fatalf("width 200, ~/proj: card is %d columns wide, want chrome %d + shortcut columns = %d", w, chrome, want)
+	// With the mascot, the shortest text — the two shortcut columns — leaves
+	// the card under the floor, so the floor holds it at bannerMinWidth.
+	if natural := chrome + 2*bannerShortcutItemWidth() + bannerGutter + 1; natural >= bannerMinWidth {
+		t.Fatalf("chrome %d + shortcut columns = %d; the shortest card should sit under the %d-column floor", chrome, natural, bannerMinWidth)
+	}
+	if w := cardWidth(200, "~/proj"); w != bannerMinWidth {
+		t.Fatalf("width 200, ~/proj: card is %d columns wide, want the %d-column floor", w, bannerMinWidth)
 	}
 	// An 80-column terminal paints the transcript at 78 columns; the card
 	// fills that width and still carries the mascot.
@@ -16525,6 +16511,95 @@ func TestForebrainBannerCentresMascotOnText(t *testing.T) {
 			if width == bannerMascotMinWidth && dir == tallDir && textBottom-textTop+1 <= len(forebrainMascot) {
 				t.Fatalf("width %d: the wrapped path should make the text taller than the mascot (text rows %d..%d)", width, textTop, textBottom)
 			}
+		}
+	}
+}
+
+// TestForebrainBannerFrameIsDashed pins the startup card's frame to the
+// dashed design the owner approved (docs/design/STARTUP_CARD.html): the top
+// and bottom edges use U+2504, the sides use U+2506, and the rule under the
+// product name is the same dash as the frame. Solid ─/│ anywhere in the card
+// is the bug this guards.
+func TestForebrainBannerFrameIsDashed(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	if bannerFrameH != "┄" || bannerFrameV != "┆" {
+		t.Fatalf("the frame glyphs are %q/%q, the approved design is U+2504/U+2506 (┄/┆)", bannerFrameH, bannerFrameV)
+	}
+	lines := forebrainBannerLines("v0.1.0", "~/workspace/forebrain", 120)
+	plain := make([]string, len(lines))
+	for i, line := range lines {
+		plain[i] = stripANSI(line)
+	}
+	if len(plain) < 5 {
+		t.Fatalf("banner has %d lines, want the framed card: %q", len(plain), plain)
+	}
+	top, bottom := plain[1], plain[len(plain)-1]
+	if !strings.HasPrefix(top, "╭┄") || !strings.HasSuffix(top, "┄╮") {
+		t.Fatalf("the top edge is not dashed: %q", top)
+	}
+	if !strings.HasPrefix(bottom, "╰┄") || !strings.HasSuffix(bottom, "┄╯") {
+		t.Fatalf("the bottom edge is not dashed: %q", bottom)
+	}
+	cardW := displayLineWidth(top)
+	textW := cardW - (2*(1+bannerPadding) + forebrainMascotWidth + bannerGutter)
+	nameRow := -1
+	for i, line := range plain[2 : len(plain)-1] {
+		if !strings.HasPrefix(line, "┆") || !strings.HasSuffix(line, "┆") {
+			t.Fatalf("row %d is not closed by the dashed sides: %q", i+2, line)
+		}
+		if strings.Contains(line, bannerProductName) {
+			nameRow = i + 2
+		}
+	}
+	if nameRow < 0 || nameRow+1 >= len(plain)-1 {
+		t.Fatalf("could not find the rule under the product name (%d lines): %q", len(plain), plain)
+	}
+	rule := []rune(plain[nameRow+1])
+	rule = rule[1+bannerPadding : len(rule)-1-bannerPadding]
+	if got := string(rule[len(rule)-textW:]); got != strings.Repeat("┄", textW) {
+		t.Fatalf("the rule under the name is not dashed across the %d-column text width: %q", textW, got)
+	}
+	for i, line := range plain {
+		if strings.ContainsAny(line, "│─") {
+			t.Fatalf("card line %d still uses a solid frame glyph: %q", i, line)
+		}
+	}
+}
+
+// TestForebrainBannerKeepsMascotAtFiftyEight pins the mascot's width floor:
+// 58 columns is the narrowest card with room for the 20-column mascot and a
+// 29-column text column, so a 60-column window still shows the mascot, and
+// one column less drops it.
+func TestForebrainBannerKeepsMascotAtFiftyEight(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.Ascii)
+	t.Cleanup(func() { lipgloss.SetColorProfile(previous) })
+
+	hasMascot := func(lines []string) bool {
+		for _, line := range lines {
+			if strings.ContainsRune(stripANSI(line), '█') {
+				return true
+			}
+		}
+		return false
+	}
+	for _, width := range []int{bannerMascotMinWidth, 59, 66, 78} {
+		lines := forebrainBannerLines("v0.1.0", "~/workspace/forebrain", width)
+		if !hasMascot(lines) {
+			t.Fatalf("width %d: the card keeps the mascot at or above %d columns: %q", width, bannerMascotMinWidth, stripANSI(strings.Join(lines, "\n")))
+		}
+		for _, line := range lines {
+			if w := displayLineWidth(line); w > width {
+				t.Fatalf("width %d: banner line is %d columns wide: %q", width, w, stripANSI(line))
+			}
+		}
+	}
+	for _, width := range []int{24, 50, bannerMascotMinWidth - 1} {
+		if hasMascot(forebrainBannerLines("v0.1.0", "~/workspace/forebrain", width)) {
+			t.Fatalf("width %d: the card drops the mascot below %d columns", width, bannerMascotMinWidth)
 		}
 	}
 }
@@ -17775,10 +17850,11 @@ func TestRendererViewportSeedsStartupChromeAsBannerBlock(t *testing.T) {
 		}
 	}
 	// The mascot sits beside the text only when the card has room for both.
-	// Its crown row — two solid hemispheres — is the same in every profile.
+	// Its crown row — a solid dome with its corners rounded off — is the
+	// same in every profile.
 	wide := stripANSI(strings.Join(renderFrameLines(frame, 200, r.DiffTheme(), 0), "\n"))
 	narrow := stripANSI(strings.Join(renderFrameLines(frame, 40, r.DiffTheme(), 0), "\n"))
-	crown := "██████████████    ██████████████"
+	crown := "  ████████████████  "
 	if !strings.Contains(wide, crown) || strings.Contains(narrow, crown) {
 		t.Fatalf("mascot should show at width 200 and not at width 40:\n%s\n---\n%s", wide, narrow)
 	}
@@ -20852,19 +20928,25 @@ func TestMemoryImportConfirmsBeforeOverwritingLocalEdits(t *testing.T) {
 }
 
 // A promoted skill is deliberately not in this session's tool table, and the
-// label has to say so rather than looking like the promotion failed.
-func TestMemorySkillLabelDistinguishesPromotedFromActive(t *testing.T) {
-	pending := memorySkillLabel(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true})
+// description column has to say so rather than looking like the promotion
+// failed.
+func TestMemorySkillDescriptionDistinguishesPromotedFromActive(t *testing.T) {
+	pending := memorySkillDescription(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true})
 	if !strings.Contains(pending, "active next session") {
-		t.Fatalf("label=%q", pending)
+		t.Fatalf("description=%q", pending)
 	}
-	active := memorySkillLabel(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true, LoadedInSession: true})
+	active := memorySkillDescription(MemorySkillOption{Name: "triage", Status: "up-to-date", Promoted: true, LoadedInSession: true})
 	if strings.Contains(active, "active next session") {
-		t.Fatalf("label=%q", active)
+		t.Fatalf("description=%q", active)
 	}
-	shadowing := memorySkillLabel(MemorySkillOption{Name: "triage", Status: "new", SlashCommand: "/triage", Shadows: "/home/u/.forebrain/skills/triage"})
+	shadowing := memorySkillDescription(MemorySkillOption{Name: "triage", Status: "new", SlashCommand: "/triage", Shadows: "/home/u/.forebrain/skills/triage"})
 	if !strings.Contains(shadowing, "adds /triage") || !strings.Contains(shadowing, "shadows /home/u/.forebrain/skills/triage") {
-		t.Fatalf("label=%q", shadowing)
+		t.Fatalf("description=%q", shadowing)
+	}
+	for _, got := range []string{pending, active, shadowing} {
+		if strings.Contains(got, " - ") {
+			t.Fatalf("description glued with a dash: %q", got)
+		}
 	}
 }
 
@@ -20872,9 +20954,11 @@ func TestMemorySkillLabelDistinguishesPromotedFromActive(t *testing.T) {
 // what a user would have clicked rather than a hand-built string.
 func (s *memoryImportSelector) pick(t *testing.T, session *fakeSession, name string) string {
 	t.Helper()
-	for _, item := range session.memorySkillOpts {
-		if item.Name == name {
-			return memorySkillLabel(item)
+	rows, _, _ := memoryImportRows(session.memorySkillOpts)
+	labels := tabbedFallbackLabels(rows)
+	for i, row := range rows {
+		if strings.TrimSpace(row.Label) == strings.TrimSpace(name) {
+			return labels[i]
 		}
 	}
 	t.Fatalf("no proposal named %q", name)
@@ -24269,7 +24353,7 @@ func TestRenderTurnDiffCard_BandsAndHighlight(t *testing.T) {
 	if !ok {
 		t.Fatal("render failed")
 	}
-	p := claudeDiffPaletteFor(DiffThemeDark)
+	p := diffPaletteFor(DiffThemeDark)
 	addBG := p.bandBG(p.addBG, p.addBG256)
 	delBG := p.bandBG(p.delBG, p.delBG256)
 	if !strings.Contains(block, addBG) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1477,5 +1478,161 @@ func TestPickersShowEveryRowWhole(t *testing.T) {
 	head := long2.layout(40, 0, 0, false)
 	if head.caretRow != long2.fieldRow(40) || head.caretRow < 2 || !strings.Contains(stripAnsi(head.lines[head.caretRow]), "Type to filter") {
 		t.Fatalf("long label head = %q", head.lines)
+	}
+}
+
+// requirePlainLines lays nothing out itself: it strips a panel's rendered
+// lines of their styling and pins them, row for row, to want.
+func requirePlainLines(t *testing.T, lines []string, want []string) {
+	t.Helper()
+	plain := make([]string, len(lines))
+	for i, line := range lines {
+		plain[i] = stripANSI(line)
+	}
+	if !slices.Equal(plain, want) {
+		t.Fatalf("picker rows:\ngot:  %q\nwant: %q", plain, want)
+	}
+}
+
+// richPickerPanelLines builds the picker's panel and lays it out, returning
+// its still-styled rows.
+func richPickerPanelLines(t *testing.T, p *richPickerState, label string, width int) []string {
+	t.Helper()
+	return p.panel(label).layout(width, 0, 0, false).lines
+}
+
+// The rich picker lays each item in two columns: the label in a column as
+// wide as the widest label, the description a fixed gap right of it, so every
+// description starts — and wraps — in one column of its own.
+func TestRichPickerLaysRowsInTwoColumns(t *testing.T) {
+	p := &richPickerState{items: []SelectItem{
+		{Label: "Default", Description: "Asks before edits and commands outside the workspace."},
+		{Label: "Read only", Description: "Never writes."},
+	}}
+	p.rebuildSelectable()
+	p.cursor = 0
+	requirePlainLines(t, richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80), []string{
+		"  Permissions",
+		"  What may run without asking",
+		"› Type to filter",
+		"",
+		"❯ Default    Asks before edits and commands outside the workspace.",
+		"  Read only  Never writes.",
+		"",
+		"  ↑/↓ to navigate · Enter to confirm · Esc to cancel",
+	})
+	for _, line := range richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80) {
+		if strings.Contains(stripANSI(line), " — ") {
+			t.Fatalf("a row still joins name and description with a dash: %q", stripANSI(line))
+		}
+	}
+}
+
+// Groups share one name column: every category's descriptions start in the
+// column the widest label across all of them set.
+func TestRichPickerAlignsDescriptionsAcrossGroups(t *testing.T) {
+	p := &richPickerState{items: []SelectItem{
+		{Label: "gpt-5", Description: "the default model", Category: "OpenAI"},
+		{Label: "deepseek-chat", Description: "fast and cheap", Category: "DeepSeek"},
+	}}
+	p.rebuildSelectable()
+	requirePlainLines(t, richPickerPanelLines(t, p, "Model", 80), []string{
+		"  Model",
+		"› Type to filter",
+		"",
+		"  OpenAI",
+		"❯ gpt-5" + strings.Repeat(" ", 10) + "the default model",
+		"",
+		"  DeepSeek",
+		"  deepseek-chat  fast and cheap",
+		"",
+		"  ↑/↓ to navigate · Enter to confirm · Esc to cancel",
+	})
+}
+
+// containsRun reports whether needle appears in haystack as one unbroken run.
+func containsRun(haystack, needle []string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if slices.Equal(haystack[i:i+len(needle)], needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// An item without a description (/resume labels its rows whole) keeps the
+// rows it had before the two-column layout: exactly what a plain selectable
+// row of the same label produces.
+func TestRichPickerWithoutDescriptionsKeepsItsRows(t *testing.T) {
+	p := &richPickerState{items: []SelectItem{
+		{Label: "just now New conversation"},
+		{Label: "2h ago   " + strings.Repeat("a long conversation title ", 4)},
+	}}
+	p.rebuildSelectable()
+	for _, width := range []int{80, 30} {
+		var want []string
+		for ci, idx := range p.selectable {
+			lead := panelIndent
+			if ci == p.cursor {
+				lead = panelCursor
+			}
+			for _, row := range (panelLine{lead: lead, text: p.items[idx].Label}).rows(width) {
+				want = append(want, stripANSI(row))
+			}
+		}
+		plain := make([]string, 0, len(want))
+		for _, line := range richPickerPanelLines(t, p, "Resume", width) {
+			plain = append(plain, stripANSI(line))
+		}
+		if !containsRun(plain, want) {
+			t.Fatalf("width %d: description-less rows changed:\ngot:  %q\nwant: %q", width, plain, want)
+		}
+	}
+}
+
+// The column holds still while the filter narrows: its width follows every
+// item the picker holds, not only the ones matching right now.
+func TestRichPickerColumnHoldsStillWhileFiltering(t *testing.T) {
+	p := &richPickerState{items: []SelectItem{
+		{Label: "Default", Description: "Asks before edits and commands outside the workspace."},
+		{Label: "Read only", Description: "Never writes."},
+	}}
+	p.filter = filterField{text: "read", cursor: 4}
+	p.rebuildSelectable()
+	for _, line := range richPickerPanelLines(t, p, "Permissions", 80) {
+		if stripANSI(line) == "❯ Read only  Never writes." {
+			return
+		}
+	}
+	t.Fatalf("the filtered row lost the column shared with every item:\n%q", richPickerPanelLines(t, p, "Permissions", 80))
+}
+
+// Whatever the width, every row fits it whole: nothing is cut, nothing is
+// ellipsized, the description wraps inside its column.
+func TestRichPickerRowsFitAtEveryWidth(t *testing.T) {
+	pickers := []*richPickerState{
+		{items: []SelectItem{
+			{Label: "Default", Description: "Asks before edits and commands outside the workspace."},
+			{Label: "Read only", Description: "Never writes."},
+		}},
+		{items: []SelectItem{
+			{Label: "gpt-5", Description: "the default model", Category: "OpenAI"},
+			{Label: "deepseek-chat", Description: "fast and cheap", Category: "DeepSeek"},
+		}},
+	}
+	for _, p := range pickers {
+		p.rebuildSelectable()
+		for _, width := range []int{120, 80, 50, 30} {
+			lines := richPickerPanelLines(t, p, "Model", width)
+			assertRowsFit(t, lines, width)
+			for _, line := range lines {
+				if plain := stripANSI(line); strings.Contains(plain, "…") || strings.Contains(plain, "...") {
+					t.Fatalf("width %d cut a row: %q", width, plain)
+				}
+			}
+		}
 	}
 }

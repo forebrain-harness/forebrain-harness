@@ -1153,7 +1153,7 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		return true, false, ComposerSubmission{}, false
 	}
 	switch cmd {
-	case "", "help":
+	case "":
 		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "commands", Content: turn.CommandCatalog(turn.SurfaceTUI, turn.DiscoveryOptions{FastAvailable: sessionFastAvailable(cmds.session)}), Final: true})
 		return true, false, ComposerSubmission{}, false
 	case "resume":
@@ -1197,9 +1197,6 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		return true, false, ComposerSubmission{}, false
 	case "migrate":
 		_ = cmds.handleMigrate(ctx, state.sessionID)
-		return true, false, ComposerSubmission{}, false
-	case "diff":
-		_ = cmds.handleDiff(state.sessionID, args)
 		return true, false, ComposerSubmission{}, false
 	case "rename":
 		// Bare /rename asks for the name in place, saying what the

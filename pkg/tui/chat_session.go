@@ -1471,7 +1471,6 @@ func (s *ChatSession) slashContext(ctx context.Context, sessionID, channel strin
 		MCP:            s,
 		LSP:            s,
 		Sandbox:        s,
-		Diff:           s,
 		Model:          s,
 		Agent:          s,
 		Fast:           s,

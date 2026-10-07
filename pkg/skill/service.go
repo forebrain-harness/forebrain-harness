@@ -93,8 +93,7 @@ type UpdateRequest struct {
 type InspectResult struct {
 	Name             string    `json:"name"`
 	Description      string    `json:"description"`
-	Source           string    `json:"source"`
-	Trust            string    `json:"trust"`
+	Origin           Origin    `json:"origin"`
 	Path             string    `json:"path"`
 	AllowedTools     string    `json:"allowed_tools,omitempty"`
 	AvailableActions []string  `json:"available_actions,omitempty"`
@@ -167,11 +166,10 @@ func (s *Service) Inspect(name string) (*InspectResult, error) {
 			return &InspectResult{
 				Name:             strings.TrimSpace(item.Name),
 				Description:      strings.TrimSpace(item.Description),
-				Source:           strings.TrimSpace(item.Source),
-				Trust:            strings.TrimSpace(item.Trust),
+				Origin:           item.Origin,
 				Path:             strings.TrimSpace(item.RootPath),
 				AllowedTools:     strings.TrimSpace(item.AllowedTools),
-				AvailableActions: inspectActionsForSource(strings.TrimSpace(item.Source)),
+				AvailableActions: inspectActionsForOrigin(item.Origin),
 				Metadata:         &item,
 			}, nil
 		}
@@ -452,10 +450,10 @@ func (s *Service) projectSkillPath(name string, create bool) (string, string, er
 	return dir, md, nil
 }
 
-func inspectActionsForSource(source string) []string {
+func inspectActionsForOrigin(origin Origin) []string {
 	actions := []string{"inspect", "toggle"}
-	switch strings.TrimSpace(source) {
-	case "project":
+	switch origin {
+	case OriginProject:
 		actions = append(actions, "update")
 	}
 	return actions

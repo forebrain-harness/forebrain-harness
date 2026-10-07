@@ -86,7 +86,6 @@ func TestHandleSlashCommandsSideConversationFilter(t *testing.T) {
 	for _, rec := range out.Records {
 		names[rec.Name] = true
 	}
-	require.True(t, names["diff"])
 	require.True(t, names["status"])
 	require.False(t, names["plan"])
 }
@@ -1075,8 +1074,8 @@ description: The steps that cut a release in this repository
 			if filepath.Clean(path) != filepath.Clean(filepath.Join(root, ".forebrain", "skills", "release-flow")) {
 				t.Fatalf("skill listed under the wrong project: %s", path)
 			}
-			if row["source"] != "project" {
-				t.Fatalf("skill source=%v want project", row["source"])
+			if row["origin"] != "project" {
+				t.Fatalf("skill origin=%v want project", row["origin"])
 			}
 			found = true
 		}

@@ -9,7 +9,7 @@ forebrain paints code in several places, and two very different policies were
 being applied to them:
 
 - **A diff row** sits on a coloured add/del band. The band raises the background
-  out from under the text, so `claudeDiffPaletteFor` lifts *every* token to one
+  out from under the text, so `diffPaletteFor` lifts *every* token to one
   target luminance (`syntaxLuminanceDark = 0.62` on a dark theme) — otherwise
   chroma's deliberately muted comment grey becomes unreadable against the band.
 - **Code on the plain terminal background** (read_file output, markdown fenced

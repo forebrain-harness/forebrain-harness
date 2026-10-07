@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"unicode"
-
-	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 type SlashCommandRecord struct {
@@ -90,13 +88,11 @@ var commands = []Command{
 	{Name: "memories", Description: "configure memory use and generation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "plan", Description: "switch to Plan mode, optionally starting toward a description", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[description]", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "agent", Description: "switch to another primary agent and its workspace", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
-	{Name: "diff", Description: "show git diff (including untracked files)", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[path]", AvailableInSideConversation: true, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "sandbox", Description: "show sandbox runtime mode and backend", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "exit", Description: "exit Forebrain Harness", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
-	{Name: "help", Description: "list every command and skill", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "subagents", Description: "open one of this chat's subagent sessions", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "goal", Description: "run continuously toward an objective until done", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<objective>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "connect", Description: "configure or switch LLM provider", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
@@ -233,7 +229,7 @@ func defaultCategory(name string) string {
 	switch name {
 	case "new", "resume", "fork", "rename", "migrate", "exit":
 		return "session"
-	case "compact", "diff", "memories":
+	case "compact", "memories":
 		return "context"
 	case "context":
 		return "context"
@@ -387,6 +383,8 @@ var removedSlashCommandNames = map[string]struct{}{
 	"statusline": {},
 	"title":      {},
 	"todo":       {},
+	"diff":       {},
+	"help":       {},
 }
 
 func ReplaceDynamicSource(source string, commands []DynamicCommand) error {
@@ -666,32 +664,4 @@ func (CommandService) Execute(ctx Context, content string) Result {
 // ExecuteDynamic runs only registered skill commands for channel adapters.
 func (CommandService) ExecuteDynamic(ctx Context, content string) Result {
 	return ExecuteDynamicOnly(ctx, content)
-}
-
-// ExecuteDiffSlash is /diff: the uncommitted work of the project the agent
-// works in, as a unified diff, or one sentence when there is none to show.
-// paths narrow it to those files or directories.
-//
-// fenced wraps a diff in a diff code fence. That is the one thing the two
-// surfaces legitimately differ on: the web chat highlights fenced diffs, while
-// the terminal parses the raw text itself and would render the fence markers
-// literally. A sentence is never fenced; it also never parses as a diff, which
-// is how the terminal tells the two apart.
-func ExecuteDiffSlash(projectRoot string, paths []string, fenced bool) string {
-	root := strings.TrimSpace(projectRoot)
-	diff, err := tool.ProjectDiff(root, paths)
-	switch {
-	case errors.Is(err, tool.ErrNotGitRepository):
-		return root + " is not a git repository, so there is no diff to show."
-	case err != nil:
-		return err.Error()
-	case strings.TrimSpace(diff) == "" && len(paths) > 0:
-		return "No uncommitted changes in " + strings.Join(paths, ", ") + "."
-	case strings.TrimSpace(diff) == "":
-		return "No uncommitted changes."
-	case fenced:
-		return "```diff\n" + strings.TrimRight(diff, "\n") + "\n```"
-	default:
-		return diff
-	}
 }

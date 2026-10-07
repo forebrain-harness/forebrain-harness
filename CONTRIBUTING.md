@@ -118,7 +118,7 @@ A few ground rules keep the codebase healthy:
 - **One engine, two surfaces.** Behavior shared by the terminal and the web
   belongs in the shared engine (`pkg/turn`, `pkg/run`), not in one surface.
 - **Respect the architecture tests.** `pkg/architecture` enforces the package
-  layering, at most 20 production files per package, a `doc.go` in every
+  layering, at most 30 production files per package, a `doc.go` in every
   package, and test files named after the file they cover. If you change
   imports between packages, regenerate the graph with `scripts/package-graph.sh`.
 - **CGO is required** on every platform, and tests run with `-tags fts5`.
