@@ -76,7 +76,7 @@ func (s *ChatSession) HandleContextSlash(ctx context.Context, sessionID, channel
 		src.Compactions = runs
 	}
 	provider, model := run.PrimaryModel(s.runner())
-	used, _ := s.contextOccupancy(ctx, sid)
+	used, _ := run.ContextOccupancy(ctx, s.sessStore(), sid)
 	src.Gauge = turn.ContextGaugeOf(provider, model, used, s.compactExplicitLimit())
 	return turn.ContextReport(ctx, src, sid), true
 }
@@ -128,7 +128,7 @@ func (s *ChatSession) statusSource(cfg *appcfg.Root, sessionID string, side bool
 		ConfigFiles:  turn.StatusConfigFiles(cfg, r.MCPProjectStatus().ProjectRoot),
 		SkillOffer:   cfg.EffectiveFeatures().SkillOffer,
 		ContextUsage: func() (int, int) {
-			used, _ := s.contextOccupancy(context.Background(), sid)
+			used, _ := run.ContextOccupancy(context.Background(), s.sessStore(), sid)
 			return used, s.compactExplicitLimit()
 		},
 	}
@@ -236,22 +236,6 @@ func (s *ChatSession) CurrentModelOption() string {
 
 func (s *ChatSession) CurrentModelReasoningEffort() string {
 	return run.PrimaryReasoningEffort(s.runner())
-}
-
-// SubagentModelSummary names the model and reasoning effort one subagent type
-// runs on, and reports false when the type has no chain of its own and
-// therefore runs on whatever the primary agent runs on. The caller shows the
-// primary agent's own footer values in that case, which is what the runtime
-// actually does.
-func (s *ChatSession) SubagentModelSummary(agentType string) (model string, effort string, ok bool) {
-	if s == nil {
-		return "", "", false
-	}
-	provider, id, effort, own := run.SubagentOwnModel(s.runner(), agentType)
-	if !own {
-		return "", "", false
-	}
-	return llm.FormatProviderModel(provider, id), effort, true
 }
 
 func (s *ChatSession) AvailableSkillOptions() []string {

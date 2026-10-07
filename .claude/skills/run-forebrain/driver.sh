@@ -38,7 +38,7 @@ cmd_build() {
   echo "built $BIN"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit] [answer-text] [drip-delay]
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
   local mode="${1:-hang}" text="${2:-FAKE_ANSWER}" delay="${3:-0.6}"
   cmd_stop >/dev/null 2>&1 || true
   [ -x "$BIN" ] || cmd_build
@@ -47,13 +47,20 @@ cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limi
 
   # api_key MUST be a ${ENV_NAME} reference: forebrain rejects a plaintext secret
   # at startup and exits 1 before the TUI ever paints.
+  # ENABLE_SUBAGENT=1 turns the subagent tools on for the session: the plan
+  # scripts that dispatch a subagent (roster, subagent cards, live continue)
+  # need them, while every other script keeps the lean default. The switch the
+  # runtime reads is agents.defaults.enable_subagent (absent means off).
+  local subagent=false
+  [ -n "${ENABLE_SUBAGENT:-}" ] && subagent=true
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
 approval_policy: on-request
 agents:
+  defaults:
+    enable_subagent: $subagent
   definitions:
     main:
       primary: true
-      enable_subagent: false
       llm_providers:
       - provider: deepseek
         model: deepseek-chat
@@ -112,6 +119,14 @@ YAML
 cmd_send() { tmux send-keys -t "$SESSION" -l "$*"; }          # literal text, no Enter
 cmd_key() { tmux send-keys -t "$SESSION" "$@"; }              # Enter, Escape, C-c, ...
 cmd_submit() { tmux send-keys -t "$SESSION" -l "$*"; sleep 0.5; tmux send-keys -t "$SESSION" Enter; }
+# click <col> <row> — one mouse click at 1-based screen coordinates, as the
+# SGR press+release pair the TUI's mouse reporting reads. tmux forwards both
+# sequences verbatim, so the TUI sees a click exactly where a terminal would
+# send one.
+cmd_click() {
+  tmux send-keys -t "$SESSION" -l "$(printf '\033[<0;%s;%sM' "$1" "$2")"
+  tmux send-keys -t "$SESSION" -l "$(printf '\033[<0;%s;%sm' "$1" "$2")"
+}
 cmd_screen() { tmux capture-pane -t "$SESSION" -p; }
 cmd_wait() { wait_for "${2:-20}" "$1"; }
 cmd_provider_log() { cat "$WORK/provider.log"; }
@@ -119,7 +134,7 @@ cmd_provider_log() { cat "$WORK/provider.log"; }
 # The state DB is the durable half of the contract: what the next model request
 # would carry, and what /resume would show.
 cmd_db() { sqlite3 "$(echo "$HOME_DIR"/state/*.sqlite)" "$*"; }
-cmd_messages() { cmd_db "SELECT id, role, source, substr(content,1,60) FROM fb_messages ORDER BY id;"; }
+cmd_messages() { cmd_db "SELECT id, role, visibility, substr(content,1,60) FROM fb_messages ORDER BY id;"; }
 # The id RESUME_ID wants: the session the last message was written to.
 cmd_sid() { cmd_db "SELECT session_id FROM fb_messages ORDER BY id DESC LIMIT 1;"; }
 cmd_title() { cmd_db "SELECT id, title FROM fb_sessions;"; }
@@ -134,12 +149,12 @@ cmd_stop() {
 cmd_reset() { cmd_stop >/dev/null 2>&1 || true; rm -rf "$HOME_DIR" "$PROJ"; echo "reset $WORK"; }
 
 case "${1:-}" in
-  build|start|send|key|submit|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
+  build|start|send|key|submit|click|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
   provider-log) shift; cmd_provider_log ;;
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
   build                  build the binary into $WORK
-  start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit] [answer-text] [drip-delay]
+  start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
                          launch the TUI against a fake provider (default: hang)
                          drip = stream word by word; the only mode that proves
                          streaming actually renders
@@ -150,11 +165,24 @@ usage: driver.sh <command>
                          real approval overlay appears
                          ask = a two-question user_interaction call, so the real
                          question form with its Other field appears
+                        subagent-net = the main agent dispatches a general-purpose
+                        probe (needs ENABLE_SUBAGENT=1); the subagent's own
+                        request is dropped on the wire until the user sends it
+                        "continue" from its view, when it answers with the
+                        answer text
+                        subagent-limit = the main agent dispatches a
+                        general-purpose probe (needs ENABLE_SUBAGENT=1); the
+                        subagent's own request is refused with a usage-limit 429
+                        for FAKE_LIMIT_SECONDS (default 20) and then answers,
+                        so the subagent's automatic continuation is what runs
                          RESUME_ID=<session> resumes that session instead of
                          starting a new one (does not reset the home)
+                         ENABLE_SUBAGENT=1 enables the subagent tools
+                         (subagent_run, subagent_fanout, ...) for the session
   submit <text>          type <text> and press Enter
   send <text>            type <text> without pressing Enter
   key <key...>           send keys (Enter, Escape, C-c, Down, ...)
+  click <col> <row>      click at 1-based screen coordinates (SGR mouse)
   wait <text> [secs]     poll the screen until <text> appears
   screen                 print the rendered screen
   messages | title       read the state DB

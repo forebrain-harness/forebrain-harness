@@ -79,18 +79,24 @@ type Environment struct {
 	// LSP is the process-wide language-server pool; lspManager is the
 	// primary runner's view of it. Project runners get their own managers
 	// from the same pool (see RunnerPool).
-	LSP               *lsp.Pool
-	lspManager        *lsp.Manager
-	watchMu           sync.Mutex
-	watchStop         func()
-	watchID           uint64
-	cronOnce          sync.Once
-	cron              *CronService
-	rulesHook         *assembly.PreHook
-	ctxHook           *assembly.Hook
-	OnConfigReload    func(*appcfg.Root)
-	telShutdown       func(context.Context) error
-	approvalSweepStop func()
+	LSP            *lsp.Pool
+	lspManager     *lsp.Manager
+	watchMu        sync.Mutex
+	watchStop      func()
+	watchID        uint64
+	cronOnce       sync.Once
+	cron           *CronService
+	rulesHook      *assembly.PreHook
+	ctxHook        *assembly.Hook
+	OnConfigReload func(*appcfg.Root)
+	// OnSubagentExecution reports every subagent execution's start and end to
+	// the surface that opened the session, so it can arm the subagent's own
+	// auto-continue. Nil — a one-shot run, a channel with nobody to cancel a
+	// wait — schedules nothing, which is how "a channel never auto-continues"
+	// is structural rather than a surface check.
+	OnSubagentExecution *SubagentExecutionHooks
+	telShutdown         func(context.Context) error
+	approvalSweepStop   func()
 	// ownerLeaseStop deregisters this process's run-owner lease. It runs
 	// after the runners are closed and before the SQL handle is: while any
 	// runner lives it may still settle runs under this owner, and the DELETE

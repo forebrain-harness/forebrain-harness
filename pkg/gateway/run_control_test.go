@@ -339,13 +339,15 @@ func TestHandleRunQueuedInputEditLastQueuedMessageFallsBackToRejectedSteer(t *te
 	runID := "run-edit-rejected"
 	q := queue(t, s, runID)
 
+	// The run cannot take a steer (no turn runtime is attached), so the
+	// message is kept as a refused steer — still recallable for editing.
+	q.Detach()
+
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/input", strings.NewReader(`{"message":"retry at end"}`))
 	req.SetPathValue("id", runID)
 	rr := httptest.NewRecorder()
 	s.handleRunInput(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	q.RejectSteers()
 
 	req = httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/queued-input", strings.NewReader(`{"action":"edit_last"}`))
 	req.SetPathValue("id", runID)
@@ -385,7 +387,9 @@ func TestHandleRunQueuedInputKeepsWhatTheMessageAttached(t *testing.T) {
 	s := &Server{}
 	queue(t, s, "run-steer-images")
 	steer := post(s, "run-steer-images", "/input", attached, s.handleRunInput)
-	require.Equal(t, false, steer["accepted"], "a steer cannot carry what the message attached")
+	// A message with parts steers whatever it attached (D7): what it attached
+	// travels in the queue's record of it, so it comes back whole on recall.
+	require.Equal(t, true, steer["accepted"], "a steer carries what the message attached")
 
 	runID := "run-recall"
 	queue(t, s, runID)
@@ -401,10 +405,13 @@ func TestHandleRunQueuedInputKeepsWhatTheMessageAttached(t *testing.T) {
 	require.Equal(t, true, again["accepted"], "recalling the last queued message closed the run to input")
 }
 
+// edit_last recalls the newest queued message by the shared enqueue clock —
+// the rule that replaced steer-first precedence, which recalled an older
+// steer whenever the newest message happened to be an ordinary follow-up.
 func TestHandleRunQueuedInputEditLastRetractsPendingSteer(t *testing.T) {
 	s := &Server{}
 	runID := "run-edit-steer"
-	queue(t, s, runID)
+	q := queue(t, s, runID)
 
 	// One accepted steer + one queued follow-up.
 	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/input", strings.NewReader(`{"message":"please adjust"}`))
@@ -419,7 +426,8 @@ func TestHandleRunQueuedInputEditLastRetractsPendingSteer(t *testing.T) {
 	s.handleRunQueuedInput(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	// edit_last pulls the pending steer back first (parity with the CLI).
+	// The follow-up was queued after the steer, so it is the one that comes
+	// back; the older steer keeps waiting for the run's next tool boundary.
 	req = httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/queued-input", strings.NewReader(`{"action":"edit_last"}`))
 	req.SetPathValue("id", runID)
 	rr = httptest.NewRecorder()
@@ -436,31 +444,61 @@ func TestHandleRunQueuedInputEditLastRetractsPendingSteer(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	require.True(t, resp.Accepted)
+	require.Equal(t, "next turn", resp.Message)
+	require.Equal(t, []string{"please adjust"}, resp.Preview.PendingSteers)
+	require.Empty(t, resp.Preview.QueuedMessages)
+
+	// With the follow-up gone, the steer is the newest message left: recall
+	// hands it back too, retracting the run's copy so it cannot also be
+	// delivered to the model.
+	req = httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/queued-input", strings.NewReader(`{"action":"edit_last"}`))
+	req.SetPathValue("id", runID)
+	rr = httptest.NewRecorder()
+	s.handleRunQueuedInput(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.True(t, resp.Accepted)
 	require.Equal(t, "please adjust", resp.Message)
 	require.Empty(t, resp.Preview.PendingSteers)
-	require.Equal(t, []string{"next turn"}, resp.Preview.QueuedMessages)
+	for _, entry := range q.Runtime().Snapshot() {
+		if entry.Mode == run.TurnInputModeSteer {
+			t.Fatalf("recalled steer must be retracted from the run's runtime: %#v", entry)
+		}
+	}
 }
 
+// Each completed run releases one batch of the conversation's queue as the
+// next turn's input, oldest follow-up first; the turn after that takes the
+// next one. (The engine's own boundary table is pinned in pkg/run; this is
+// the gateway-side shape: release per run, in run order.)
 func TestRunInputDrainNextFollowUpStartsWithOldestQueuedMessage(t *testing.T) {
 	s := &Server{}
-	runID := "run-drain"
-	q := queue(t, s, runID)
+	ctl := s.runController()
+	require.True(t, ctl.Track("run-drain-1", "sid", func() {}))
+	q, _, ok := ctl.Queue("run-drain-1")
+	require.True(t, ok)
 
 	require.True(t, q.FollowUp(run.Input{Text: "first"}))
 	require.True(t, q.FollowUp(run.Input{Text: "second"}))
 
-	got, ok := q.PopNext()
-	require.True(t, ok)
-	require.Equal(t, "first", got.Text)
+	send, restore := ctl.Release("run-drain-1", run.BoundaryCompleted)
+	require.Empty(t, restore)
+	require.Len(t, send, 1)
+	require.Equal(t, "first", send[0].Text)
 
-	got, ok = q.PopNext()
-	require.True(t, ok)
-	require.Equal(t, "second", got.Text)
+	require.True(t, ctl.Track("run-drain-2", "sid", func() {}))
+	send, restore = ctl.Release("run-drain-2", run.BoundaryCompleted)
+	require.Empty(t, restore)
+	require.Len(t, send, 1)
+	require.Equal(t, "second", send[0].Text)
 
-	_, ok = q.PopNext()
-	require.False(t, ok)
+	require.True(t, ctl.Track("run-drain-3", "sid", func() {}))
+	send, _ = ctl.Release("run-drain-3", run.BoundaryCompleted)
+	require.Empty(t, send)
 }
 
+// Steers the ended turn never delivered run as the next turn's input, ahead
+// of the ordinary follow-up queued behind them.
 func TestRunInputDrainNextMergesRejectedSteersBeforeQueuedMessage(t *testing.T) {
 	s := &Server{}
 	runID := "run-drain-rejected"
@@ -475,17 +513,18 @@ func TestRunInputDrainNextMergesRejectedSteersBeforeQueuedMessage(t *testing.T) 
 	}
 	require.True(t, q.FollowUp(run.Input{Text: "queued turn"}))
 
-	q.RejectSteers()
+	send, restore := s.runController().Release(runID, run.BoundaryCompleted)
+	require.Empty(t, restore)
+	require.Len(t, send, 2)
+	require.Equal(t, "steer one", send[0].Text)
+	require.Equal(t, "steer two", send[1].Text)
 
-	got, ok := q.PopNext()
-	require.True(t, ok)
-	require.Equal(t, "steer one\n\nsteer two", got.Text)
-	require.True(t, got.Rejected)
-
-	got, ok = q.PopNext()
-	require.True(t, ok)
-	require.Equal(t, "queued turn", got.Text)
-	require.False(t, got.Rejected)
+	// The follow-up the first release left behind is the next turn's input.
+	require.True(t, s.runController().Track("run-drain-rejected-2", "sid", func() {}))
+	send, restore = s.runController().Release("run-drain-rejected-2", run.BoundaryCompleted)
+	require.Empty(t, restore)
+	require.Len(t, send, 1)
+	require.Equal(t, "queued turn", send[0].Text)
 }
 
 // TestGatewayDoesNotEmitOrPersistIndependentRunPlans keeps the gateway from
@@ -548,37 +587,39 @@ func TestPopLatestEditableRecallsAttachmentOnlyMessage(t *testing.T) {
 		t.Fatal("expected the attachment-only message to be queued")
 	}
 
-	item, preview, popped := q.PopLatest()
+	item, ok := q.Recall()
 
-	if !popped {
+	if !ok {
 		t.Fatal("expected the attachment-only message to be recallable")
 	}
 	if len(item.Attachments) != 1 || item.Attachments[0] != "/tmp/shot.png" {
 		t.Fatalf("recall lost the attachment: %#v", item)
 	}
-	if len(preview.FollowUp) != 0 {
+	if preview := q.Preview(); len(preview.FollowUp) != 0 {
 		t.Fatalf("recalled message must leave the queue: %#v", preview.FollowUp)
 	}
 }
 
-// Ordinary messages still take priority over rejected steers, newest first.
+// Recall hands back the newest message by the shared enqueue clock — a later
+// ordinary message before an earlier refused steer — and reports nothing once
+// every message has come back.
 func TestPopLatestEditablePrefersNewestOrdinaryMessage(t *testing.T) {
 	q := run.NewInputQueue()
 	q.FollowUp(run.Input{Text: "rejected", Rejected: true})
 	q.FollowUp(run.Input{Text: "first"})
 	q.FollowUp(run.Input{Text: "second"})
 
-	item, _, popped := q.PopLatest()
+	item, popped := q.Recall()
 	if !popped || item.Text != "second" {
 		t.Fatalf("expected the newest ordinary message, got %#v", item)
 	}
-	if item, _, popped = q.PopLatest(); !popped || item.Text != "first" {
+	if item, popped = q.Recall(); !popped || item.Text != "first" {
 		t.Fatalf("expected the remaining ordinary message, got %#v", item)
 	}
-	if item, _, popped = q.PopLatest(); !popped || item.Text != "rejected" {
+	if item, popped = q.Recall(); !popped || item.Text != "rejected" {
 		t.Fatalf("expected the rejected steer last, got %#v", item)
 	}
-	if _, _, popped = q.PopLatest(); popped {
+	if _, popped = q.Recall(); popped {
 		t.Fatal("expected an empty queue to report nothing to recall")
 	}
 }
@@ -662,19 +703,24 @@ func TestDeliveredSteerPublishesRefreshedPendingInputPreview(t *testing.T) {
 	require.True(t, accepted)
 	accepted = q.FollowUp(run.Input{Text: "next turn"})
 	require.True(t, accepted)
-	require.Empty(t, pendingInputSteps(t, s, runID), "enqueue publishes over its own response, not a run step")
+	// Enqueues publish through the queue's change hook as well as over their
+	// own response; each publication carries the settled preview.
+	steps := pendingInputSteps(t, s, runID)
+	require.Len(t, steps, 2)
+	require.Equal(t, []string{"first steer"}, steps[0].PendingSteers)
+	require.Equal(t, []string{"next turn"}, steps[1].QueuedMessages)
 
 	require.Len(t, rt.DrainSteers(), 1)
 
 	published := pendingInputSteps(t, s, runID)
-	require.Len(t, published, 1)
-	require.Empty(t, published[0].PendingSteers, "the delivered steer must leave the preview")
-	require.Equal(t, []string{"next turn"}, published[0].QueuedMessages, "untouched queued input must stay")
+	require.Len(t, published, 3)
+	require.Empty(t, published[2].PendingSteers, "the delivered steer must leave the preview")
+	require.Equal(t, []string{"next turn"}, published[2].QueuedMessages, "untouched queued input must stay")
 }
 
-// Re-queueing steers at the end of a turn is not a delivery: rejectPendingSteers
-// moves them into the end-of-turn queue and returns the resulting preview, so
-// the delivery hook must not publish the half-applied state in between.
+// The queue's change hook is the one publication path for preview changes:
+// it fires for enqueues and deliveries alike, each time with the queue's
+// settled state — never a half-applied transition in the middle of a step.
 func TestRejectingPendingSteersDoesNotPublishIntermediatePreview(t *testing.T) {
 	s := newRunInputTestServer(t)
 	runID := "run-steer-reject"
@@ -682,10 +728,11 @@ func TestRejectingPendingSteersDoesNotPublishIntermediatePreview(t *testing.T) {
 	accepted := q.Steer(run.Input{Text: "undelivered steer"})
 	require.True(t, accepted)
 
-	preview := q.RejectSteers()
-	require.Equal(t, []string{"undelivered steer"}, preview.Rejected)
-	require.Empty(t, preview.Steers)
-	require.Empty(t, pendingInputSteps(t, s, runID), "the caller owns the preview for this transition")
+	// Every hook publication carries a state the client can act on: after
+	// the enqueue the steer is pending, and the turn's boundary consuming it
+	// is one settled step.
+	require.Len(t, pendingInputSteps(t, s, runID), 1)
+	require.Equal(t, []string{"undelivered steer"}, pendingInputSteps(t, s, runID)[0].PendingSteers)
 }
 
 // The helpers below were production functions that only the tests in this
@@ -984,6 +1031,63 @@ func TestAutoContinuationRunsAsADetachedWebTurn(t *testing.T) {
 	require.Equal(t, []string{"user", "assistant"}, roles)
 	require.Equal(t, turn.AutoContinuePrompt, contents[0])
 	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
+}
+
+// recordingSubagentExecutor is the composition root's subagent executor for the
+// gateway tests: it records what each execution was asked to do.
+type recordingSubagentExecutor struct {
+	mu    sync.Mutex
+	tasks []string
+}
+
+func (e *recordingSubagentExecutor) RunSubagentExec(_ context.Context, req run.SubagentExecRequest) (string, error) {
+	e.mu.Lock()
+	e.tasks = append(e.tasks, req.Task)
+	e.mu.Unlock()
+	return "answered", nil
+}
+
+func (e *recordingSubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+
+func (e *recordingSubagentExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (e *recordingSubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {
+}
+
+func (e *recordingSubagentExecutor) last() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.tasks) == 0 {
+		return ""
+	}
+	return e.tasks[len(e.tasks)-1]
+}
+
+// A subagent stopped by a usage limit is continued by a message the engine
+// sends that subagent, not by a turn in the conversation: the web turn path is
+// never reached, and the subagent's own execution receives the prompt.
+func TestGatewayContinuesASubagentAfterItsUsageLimit(t *testing.T) {
+	g := newAutoContinueGateway(t)
+	rec := &recordingSubagentExecutor{}
+	g.server.Runner.SubagentExecutor = rec
+	// A worker session id unique to this test: the engine's channels are
+	// process-global and keyed by it, so sharing one with another test would
+	// leave a stale execution in front of this continuation.
+	now := time.Now().Unix()
+	require.NoError(t, agent.AppendHistory(filepath.Join(g.server.Home, "workspace"), agent.HistoryEntry{
+		AgentID: "task-limit", TaskID: "task-limit", SessionID: "session-ws", RunID: "run-limit",
+		WorkerSessionID: "worker-limit", AgentKind: "typed", AgentType: "general-purpose",
+		Title: "usage limit probe", Task: "answer briefly", Status: agent.StatusOK,
+		StartedAt: now, UpdatedAt: now, FinishedAt: now,
+	}))
+
+	err := g.server.continueAfterUsageLimit(context.Background(), turn.AutoContinuePlan{
+		SessionID: "session-ws", AgentKey: "task-limit", Origin: turn.Origin{Surface: turn.SurfaceWebChat}, Attempt: 1,
+	}, turn.AutoContinuePrompt)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool { return strings.Contains(rec.last(), "usage limit") }, 5*time.Second, 5*time.Millisecond)
+	require.Equal(t, turn.TurnRequest{}, g.executor.last(), "a subagent's continuation must not run as a conversation turn")
 }
 
 // occupySessionWithAnotherOwner leaves, on the fixture's own database, the

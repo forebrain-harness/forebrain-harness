@@ -43,6 +43,10 @@ func (p ContextCompactedPayload) Canonicalized() ContextCompactedPayload {
 }
 
 type TokenBudgetUpdatedPayload struct {
+	// AgentID is the roster key of the agent whose context this budget
+	// measures; empty is the primary agent's. A subagent's gauge is that
+	// subagent's own, so the event that carries it says whose it is.
+	AgentID              string `json:"agent_id,omitempty"`
 	Model                string `json:"model,omitempty"`
 	TokenUsage           int    `json:"token_usage,omitempty"`
 	PercentLeft          int    `json:"percent_left,omitempty"`

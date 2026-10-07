@@ -3,10 +3,12 @@ package state
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1536,5 +1538,213 @@ VALUES('job-1', 'main', 'cron-job-1-1790000000', 'schedule', 'running', 1)`); er
 	}
 	if runs[0].ErrorCode != "delivery_failed" {
 		t.Fatalf("error_code after the migration = %q", runs[0].ErrorCode)
+	}
+}
+
+// TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay builds a database
+// that is really at v6 and holds the four shapes a denied approval could
+// leave: an exit_plan_mode refusal whose reason wrapped plan reviews, one
+// with the user's plain words, a refused request_permissions, a refused
+// ordinary tool, and one row that already carries a display part. Opening it
+// appends the display half to the first four and leaves the fifth alone, so
+// a replay of any of them draws what the live refusal card drew rather than
+// the text written for the model (D15, option B).
+func TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 6`); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "s-v6"
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
+		sid, "main", sid, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(content, parts string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, content, parts, created_at) VALUES(?,?,?,?,1)`,
+			sid, "tool", content, parts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withReview := "Tool approval denied by user: the user rejected this exit_plan_mode tool call. Try a different approach or ask the user for guidance.\n\n" +
+		"User feedback: The user asked openai / gpt-5.1 to review this plan before approving it.\n" +
+		"<review model=\"openai / gpt-5.1\">\nVerdict: rework.\n</review>\n" +
+		"The user's own feedback, which outranks the reviews:\n改成先写测试"
+	insert(withReview, "[]")
+	plainWords := "Tool approval denied by user: the user rejected this exit_plan_mode tool call. Try a different approach or ask the user for guidance.\n\nUser feedback: 改成先写测试"
+	insert(plainWords, `[{"type":"tool_result_meta","tool_call_id":"c2"}]`)
+	insert("Tool approval denied by user: the user rejected this request_permissions tool call. Try a different approach or ask the user for guidance.", "[]")
+	insert("Tool approval denied by user: the user rejected this shell tool call.", "[]")
+	alreadyCarried := `[{"type":"tool_display","body":"kept"}]`
+	insert("Tool approval denied by user: the user rejected this shell tool call.", alreadyCarried)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open v6 database: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+
+	display := func(nth int) (string, string) {
+		t.Helper()
+		var partsJSON string
+		if err := migrated.QueryRowContext(ctx,
+			`SELECT parts FROM fb_messages WHERE session_id=? AND role='tool' ORDER BY id LIMIT 1 OFFSET ?`, sid, nth).
+			Scan(&partsJSON); err != nil {
+			t.Fatal(err)
+		}
+		var parts []map[string]any
+		if err := json.Unmarshal([]byte(partsJSON), &parts); err != nil {
+			t.Fatalf("parts of row %d: %v", nth, err)
+		}
+		for _, part := range parts {
+			if v, _ := part["type"].(string); v == PartTypeToolDisplay {
+				body, _ := part["body"].(string)
+				meta, _ := part["tool_meta_json"].(string)
+				return body, meta
+			}
+		}
+		return "", ""
+	}
+	if body, meta := display(0); body != "(no output)" || !strings.Contains(meta, `"tool_name":"exit_plan_mode"`) || !strings.Contains(meta, `"status":"denied"`) {
+		t.Fatalf("review-carrying refusal display = %q / %q, want (no output) and denied exit_plan_mode", body, meta)
+	}
+	if body, meta := display(1); body != "改成先写测试" || !strings.Contains(meta, `"tool_name":"exit_plan_mode"`) {
+		t.Fatalf("plain refusal display = %q / %q, want the user's words", body, meta)
+	}
+	if body, _ := display(2); body != "The user did not approve the requested permissions" {
+		t.Fatalf("request_permissions refusal display = %q", body)
+	}
+	if body, meta := display(3); body != "" || !strings.Contains(meta, `"tool_name":"shell"`) {
+		t.Fatalf("ordinary refusal display = %q / %q, want an empty body on a denied shell", body, meta)
+	}
+	if body, _ := display(4); body != "kept" {
+		t.Fatalf("a row that already carried a display part must keep it, got %q", body)
+	}
+	// The stored model-facing text is untouched: the model's history reads
+	// exactly what it read before the migration.
+	var withReviewAfter string
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT content FROM fb_messages WHERE session_id=? AND role='tool' ORDER BY id LIMIT 1`, sid).Scan(&withReviewAfter); err != nil {
+		t.Fatal(err)
+	}
+	if withReviewAfter != withReview {
+		t.Fatal("the migration must not rewrite the denial text the model reads")
+	}
+}
+
+// TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents builds a
+// database that is really at v7 and holds the shapes the backfill has to
+// tell apart: a subagent_send call whose result named the execution it
+// started, that execution's spawned/ended pair, a goal check's pair no send
+// call answers, and an event that already names its call. Opening it links
+// the first pair to the send call and touches nothing else — not the goal
+// check's empty link, not the already-named one, and not a single other byte
+// of any touched payload (decision D10, option A).
+func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 7`); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "s-v7"
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
+		sid, "main", sid, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	payloads := map[string]string{}
+	insertEvent := func(eventID, typ, payload string) {
+		t.Helper()
+		payloads[eventID] = payload
+		if _, err := db.Exec(`INSERT INTO fb_session_events(session_id, event_id, event_type, payload_json, occurred_at_ms) VALUES(?,?,?,?,1)`,
+			sid, eventID, typ, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The send call's result carries the run_id of the execution it started.
+	sendResult := `{"agent_id":"agent-1","task_id":"task-1","run_id":"exec-1","status":"running"}`
+	insertEvent("evt-send", "tool_call_completed", fmt.Sprintf(
+		`{"kind":"tool_call_completed","step_id":"call-send-1","tool_name":"subagent_send","output":{"output":%s}}`,
+		strconv.Quote(sendResult)))
+	insertEvent("evt-spawn", "subagent_spawned", `{"agent_id":"task-1","agent_type":"general-purpose","task_id":"task-1","title":"Legacy send","task_index":0,"execution_id":"exec-1"}`)
+	insertEvent("evt-end", "subagent_ended", `{"agent_id":"task-1","agent_type":"general-purpose","task_id":"task-1","status":"ok","task_index":0,"execution_id":"exec-1"}`)
+	// A goal check's execution: no send call ever answered it.
+	insertEvent("evt-goal-spawn", "subagent_spawned", `{"agent_id":"goal-1","task_id":"goal-1","task_index":0,"execution_id":"exec-goal"}`)
+	insertEvent("evt-goal-end", "subagent_ended", `{"agent_id":"goal-1","task_id":"goal-1","status":"ok","task_index":0,"execution_id":"exec-goal"}`)
+	// An event that already names its call keeps it.
+	insertEvent("evt-kept", "subagent_spawned", `{"agent_id":"task-2","task_id":"task-2","task_index":0,"execution_id":"exec-2","parent_tool_call_id":"call-kept"}`)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open v7 database: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+
+	payloadAfter := func(eventID string) string {
+		t.Helper()
+		var payload string
+		if err := migrated.QueryRowContext(ctx, `SELECT payload_json FROM fb_session_events WHERE event_id=?`, eventID).Scan(&payload); err != nil {
+			t.Fatalf("read %s: %v", eventID, err)
+		}
+		return payload
+	}
+	parentOf := func(payload string) string {
+		t.Helper()
+		var parent any
+		if err := migrated.QueryRowContext(ctx, `SELECT json_extract(?, '$.parent_tool_call_id')`, payload).Scan(&parent); err != nil {
+			t.Fatal(err)
+		}
+		if parent == nil {
+			return ""
+		}
+		s, _ := parent.(string)
+		return s
+	}
+	for _, eventID := range []string{"evt-spawn", "evt-end"} {
+		after := payloadAfter(eventID)
+		if got := parentOf(after); got != "call-send-1" {
+			t.Fatalf("%s parent_tool_call_id = %q, want call-send-1", eventID, got)
+		}
+		var stripped string
+		if err := migrated.QueryRowContext(ctx, `SELECT json_remove(?, '$.parent_tool_call_id')`, after).Scan(&stripped); err != nil {
+			t.Fatal(err)
+		}
+		if stripped != payloads[eventID] {
+			t.Fatalf("%s payload changed beyond the backfilled key:\n got %s\nwant %s", eventID, stripped, payloads[eventID])
+		}
+	}
+	for _, eventID := range []string{"evt-goal-spawn", "evt-goal-end"} {
+		after := payloadAfter(eventID)
+		if got := parentOf(after); got != "" {
+			t.Fatalf("%s parent_tool_call_id = %q, want still empty: no send call answers a goal check", eventID, got)
+		}
+		if after != payloads[eventID] {
+			t.Fatalf("%s payload must be byte-identical, got %s want %s", eventID, after, payloads[eventID])
+		}
+	}
+	if after := payloadAfter("evt-kept"); after != payloads["evt-kept"] || parentOf(after) != "call-kept" {
+		t.Fatalf("an event that already named its call must be untouched, got %s", after)
 	}
 }

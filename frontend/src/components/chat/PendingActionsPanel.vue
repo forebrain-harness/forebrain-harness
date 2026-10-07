@@ -16,6 +16,105 @@
     <div v-if="pendingApprovals.length" class="space-y-2">
       <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.pendingApprovals') }}</div>
       <div v-for="a in pendingApprovals" :key="a.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2" data-testid="pending-approval" :data-action-id="a.id">
+        <template v-if="isExitPlan(a)">
+          <div data-testid="exit-plan-approval">
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.exitPlanMode') }}</div>
+              <div class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanWaiting') }}</div>
+            </div>
+            <div
+              v-if="exitPlanRequest(a)?.planText?.trim()"
+              class="mt-2 max-h-56 overflow-y-auto rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] px-3 py-2 text-[13px] leading-relaxed"
+              data-testid="exit-plan-text"
+            >
+              <MessageResponse :content="exitPlanRequest(a)!.planText!.trim()" />
+            </div>
+            <div
+              v-for="review in exitPlanRequest(a)?.planReviews ?? []"
+              :key="`${a.id}-review-${review.model}`"
+              class="mt-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2"
+            >
+              <div class="text-xs text-[var(--forebrain-muted-text)]">
+                {{ t('chat.exitPlanReviewBy', { model: reviewModelLabel(review), duration: formatToolDuration(review.durationMs ?? 0) }) }}
+              </div>
+              <div class="mt-1 text-[13px] leading-relaxed"><MessageResponse :content="review.text" /></div>
+            </div>
+            <div class="mt-2">
+              <div v-if="exitPlanRequest(a)?.planReviewActive" class="space-y-1">
+                <div class="flex items-center gap-2 text-[13px] text-[var(--forebrain-text)]">
+                  <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--forebrand-1,var(--forebrain-brand-1))]" />
+                  <span>{{ t('chat.exitPlanReviewRunning', { model: activeReviewLabel(a) }) }}</span>
+                  <span class="flex-1" />
+                  <button
+                    class="forebrain-btn forebrain-btn-ghost text-xs"
+                    type="button"
+                    data-testid="exit-plan-stop-review"
+                    @click="stopReview(a)"
+                  >{{ t('chat.exitPlanReviewStop') }}</button>
+                </div>
+                <div class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanReviewHint') }}</div>
+              </div>
+              <div v-else class="space-y-2">
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    class="forebrain-btn forebrain-btn-primary text-xs"
+                    type="button"
+                    :disabled="submitting[a.id]"
+                    data-testid="exit-plan-approve-clear"
+                    @click="approveExitPlan(a, true)"
+                  >{{ clearContextLabel }}</button>
+                  <button
+                    class="forebrain-btn forebrain-btn-ghost text-xs"
+                    type="button"
+                    :disabled="submitting[a.id]"
+                    data-testid="exit-plan-approve"
+                    @click="approveExitPlan(a, false)"
+                  >{{ t('chat.exitPlanApprove') }}</button>
+                  <button
+                    class="forebrain-btn forebrain-btn-ghost text-xs"
+                    type="button"
+                    :disabled="submitting[a.id]"
+                    data-testid="exit-plan-keep-planning"
+                    @click="keepPlanning(a)"
+                  >{{ t('chat.exitPlanKeepPlanning') }}</button>
+                  <button
+                    v-if="(exitPlanRequest(a)?.planReviewModels ?? []).length"
+                    class="forebrain-btn forebrain-btn-ghost text-xs"
+                    type="button"
+                    :disabled="submitting[a.id]"
+                    data-testid="exit-plan-ask-review"
+                    @click="toggleModelPicker(a)"
+                  >{{ t('chat.exitPlanAskReview') }}</button>
+                </div>
+                <input
+                  v-model="denyFeedback[a.id]"
+                  class="w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
+                  :disabled="submitting[a.id]"
+                  :placeholder="t('chat.exitPlanFeedbackPlaceholder')"
+                />
+                <div
+                  v-if="modelPicking[a.id]"
+                  class="overflow-hidden rounded-lg border border-[var(--forebrain-divider)]"
+                >
+                  <button
+                    v-for="model in exitPlanRequest(a)?.planReviewModels ?? []"
+                    :key="`${a.id}-model-${model.provider}-${model.model}`"
+                    type="button"
+                    class="flex w-full items-center justify-between border-t border-[var(--forebrain-divider)] px-3 py-1.5 text-left text-[13px] text-[var(--forebrain-text)] first:border-t-0 hover:bg-[var(--forebrain-bg-alt)] disabled:opacity-60"
+                    :disabled="submitting[a.id]"
+                    data-testid="plan-review-model"
+                    @click="requestReview(a, model)"
+                  >
+                    <span>{{ modelLabel(model) }}</span>
+                    <span v-if="model.current" class="text-xs text-[var(--forebrain-muted-text)]">{{ t('chat.exitPlanReviewCurrent') }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div v-if="errors[a.id]" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
+          </div>
+        </template>
+        <template v-else>
         <div class="flex items-center justify-between gap-3">
           <div class="min-w-0">
             <div class="text-sm font-medium text-[var(--forebrain-text)] truncate">{{ approvalKindLabel(a.kind) }}</div>
@@ -41,7 +140,8 @@
           :disabled="submitting[a.id]"
           :placeholder="t('chat.otherOptional')"
         />
-        <div v-if="approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
+        </template>
+        <div v-if="!isExitPlan(a) && approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
           <div class="flex flex-wrap items-center gap-2">
             <span class="font-medium text-[var(--forebrain-text)]">{{ t('chat.permissionMemory') }}</span>
             <span class="font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ approvalSuggestionLabel(a) }}</span>
@@ -110,12 +210,18 @@
  * agent's questions — with everything needed to decide them in place. Any
  * page that runs a conversation shows this panel, so a gate is answered where
  * the run was started rather than on another page.
+ *
+ * A parked exit-plan approval gets its own card, drawn from the typed
+ * approval request the gateway serves: the plan itself, the reviews already
+ * collected, and the four choices the terminal's overlay offers.
  */
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { CircleAlert } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
+import { MessageResponse } from '@repo/elements/message'
 import { parseJsonCamelCase } from '@/lib/case'
-import { GatewayHttpError, getErrorMessage, forebrainApi } from '@/lib/api'
+import { GatewayHttpError, getErrorMessage, forebrainApi, type PlanReviewModelOption, type PlanReviewNote, type SessionApprovalRequest } from '@/lib/api'
+import { formatToolDuration } from '@/composables/useChatStream'
 import { useI18n, type I18nKey } from '@/locales'
 import {
   approvalDecisions,
@@ -132,7 +238,10 @@ const props = withDefaults(defineProps<{
   version: number
   /** Whether a subagent's request can open that subagent's own view here. */
   canOpenAgent?: boolean
-}>(), { canOpenAgent: false })
+  /** How full the context window is, from the footer's own number; the
+   * clear-context choice says what it would free. Null when unknown. */
+  contextUsedPercent?: number | null
+}>(), { canOpenAgent: false, contextUsedPercent: null })
 
 const emit = defineEmits<{ (e: 'open-agent', agentId: string): void }>()
 
@@ -177,10 +286,46 @@ const others = ref<Record<string, Record<string, string>>>({})
 const submitting = ref<Record<string, boolean>>({})
 const errors = ref<Record<string, string>>({})
 const denyFeedback = ref<Record<string, string>>({})
+/** The typed approval requests behind parked exit-plan approvals. */
+const exitPlans = ref<Record<string, SessionApprovalRequest | null>>({})
+/** Whether a card's review-model picker is open, by action id. */
+const modelPicking = ref<Record<string, boolean>>({})
 const loading = ref(false)
 const loadError = ref<string | null>(null)
 let generation = 0
 let loadedSession = ''
+
+/** The typed request behind one parked exit-plan approval, when it arrived. */
+function exitPlanRequest(a: ActionRow): SessionApprovalRequest | null {
+  return exitPlans.value[a.id] ?? null
+}
+
+function isExitPlan(a: ActionRow): boolean {
+  return String(a.kind ?? '').trim().toLowerCase() === 'exit_plan_mode'
+}
+
+function reviewModelLabel(review: PlanReviewNote): string {
+  return [review.provider, review.model].filter(Boolean).join('/')
+}
+
+function modelLabel(model: PlanReviewModelOption): string {
+  return [model.provider, model.model].filter(Boolean).join('/')
+}
+
+function activeReviewLabel(a: ActionRow): string {
+  const active = exitPlanRequest(a)?.planReviewActive
+  return [active?.provider, active?.model ?? ''].filter(Boolean).join('/') || active?.label || ''
+}
+
+/** The clear-context choice names what it frees when the number is known,
+ * exactly the sentence the terminal's overlay offers. */
+const clearContextLabel = computed(() => {
+  const percent = props.contextUsedPercent
+  if (percent == null || !Number.isFinite(percent) || percent <= 0) {
+    return t('chat.exitPlanApproveClearPlain')
+  }
+  return t('chat.exitPlanApproveClear', { percent: Math.round(percent) })
+})
 
 function currentSession(): string {
   return String(props.sessionId ?? '').trim()
@@ -230,6 +375,8 @@ function reset() {
   submitting.value = {}
   errors.value = {}
   denyFeedback.value = {}
+  exitPlans.value = {}
+  modelPicking.value = {}
   loadError.value = null
 }
 
@@ -297,6 +444,25 @@ async function load() {
     pendingAsk.value = asks
     pendingApprovals.value = approvals
     loadError.value = null
+    // A parked exit-plan approval reads its typed request — the plan, the
+    // models a review may be handed to, the reviews already collected, and
+    // the one running — so its card is drawn from the same facts the
+    // terminal's overlay prompts with. A request that fails leaves the card
+    // on its three verdict choices and says so; the action itself is fine.
+    const nextExitPlans: Record<string, SessionApprovalRequest | null> = {}
+    const nextErrors = { ...errors.value }
+    for (const a of approvals) {
+      if (!isExitPlan(a)) continue
+      try {
+        nextExitPlans[a.id] = await forebrainApi.sessionApprovalRequest(sid)
+      } catch (cause) {
+        nextExitPlans[a.id] = null
+        nextErrors[a.id] = getErrorMessage(cause)
+      }
+      if (current !== generation || currentSession() !== sid) return
+    }
+    exitPlans.value = nextExitPlans
+    errors.value = nextErrors
   } catch (cause) {
     if (current !== generation || currentSession() !== sid) return
     // Keep this session's already-rendered requests. A transient refresh
@@ -346,6 +512,38 @@ async function submitApprovalDecision(action: ActionRow, option: ApprovalDecisio
 async function denyAction(id: string) {
   const reason = String(denyFeedback.value[id] ?? '').trim()
   await submitAction(id, () => forebrainApi.actionsDeny(id, reason ? { reason } : {}))
+}
+
+/** The exit-plan card's two approvals: with and without clearing context. */
+async function approveExitPlan(a: ActionRow, clearContext: boolean) {
+  await submitAction(a.id, () => forebrainApi.actionsApprove(a.id, clearContext ? { clearContext: true } : {}))
+}
+
+/** Keeping planning denies the approval; the typed feedback is the user's own
+ * words for the planner, exactly the sentence the terminal's overlay sends. */
+async function keepPlanning(a: ActionRow) {
+  const reason = String(denyFeedback.value[a.id] ?? '').trim()
+  await submitAction(a.id, () => forebrainApi.actionsDeny(a.id, reason ? { reason } : {}))
+}
+
+function toggleModelPicker(a: ActionRow) {
+  modelPicking.value = { ...modelPicking.value, [a.id]: !modelPicking.value[a.id] }
+}
+
+/** Asking for a review does not decide anything: the approval stays pending,
+ * the review runs in the background, and the card learns its progress from
+ * the conversation's events. */
+async function requestReview(a: ActionRow, model: PlanReviewModelOption) {
+  modelPicking.value = { ...modelPicking.value, [a.id]: false }
+  await submitAction(a.id, () => forebrainApi.actionPlanReview(a.id, { provider: model.provider, model: model.model }))
+}
+
+/** Stopping a review is stopping the reviewer subagent, the same way any
+ * other subagent is stopped. */
+async function stopReview(a: ActionRow) {
+  const agentId = String(exitPlanRequest(a)?.planReviewActive?.agentId ?? '').trim()
+  if (!agentId) return
+  await submitAction(a.id, () => forebrainApi.subagentCancel(agentId))
 }
 
 function approvalSuggestion(action: ActionRow): PermissionSuggestionRecord | null {
@@ -405,6 +603,7 @@ function approvalSuggestionLabel(action: ActionRow): string {
 function approvalKindLabel(kind: string): string {
   const k = String(kind ?? '').trim().toLowerCase()
   if (k === 'enter_plan_mode') return t('chat.enterPlanMode')
+  if (k === 'exit_plan_mode') return t('chat.exitPlanMode')
   return kind
 }
 

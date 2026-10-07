@@ -49,6 +49,8 @@ $D stop
 | `toolcall` | `enter_plan_mode`, then `exit_plan_mode` | a real approval overlay and the action row it leaves |
 | `ask` | one two-question `user_interaction` call | the real question form: tab bar, options, and the Other text field |
 | `limit` | 429 "usage limit reached" (with `resets_in_seconds`) until `FAKE_LIMIT_SECONDS` (default 20) after the first request, then like `reply` | auto-continue: the notice under the composer, Esc or typing to cancel it, and the continuation turn once the limit resets |
+| `subagent-net` | the main agent's first request dispatches a general-purpose `subagent_run` probe; the subagent's own request (recognised by its system prompt) is dropped on the wire until its last user message is `continue`, then answers with the answer text; the main agent's later requests answer with a fixed line | talking to a subagent directly: after it fails on the network, sending it `continue` from its own view and seeing the answer there. Needs `ENABLE_SUBAGENT=1` |
+| `subagent-limit` | the main agent's first request dispatches a general-purpose `subagent_run` probe; the subagent's own request is refused with the `limit` 429 (with `resets_in_seconds`) for `FAKE_LIMIT_SECONDS` (default 20) after its first request and then answers with the answer text; the main agent's later requests answer with a fixed line | a subagent's automatic continuation: the notice in the subagent's own view, and, once the limit resets, the continuation message running there without the user doing anything. Needs `ENABLE_SUBAGENT=1` |
 
 ```bash
 $D start drip 'the answer arrives one word at a time as it streams' 0.6
@@ -148,6 +150,11 @@ Uses the real `~/.forebrain` config and real providers. Ctrl+C twice to quit.
 - **`-l` matters when sending text.** `tmux send-keys -t s -l 'text'` sends it
   literally; without `-l`, words like `Escape` or `Enter` are interpreted as key
   names. `$D submit`/`$D send` already use `-l`; `$D key` deliberately does not.
+- **`$D click <col> <row>`** sends one mouse click at 1-based screen
+  coordinates (as the SGR press+release pair, forwarded literally like any
+  other `-l` bytes). Mouse reporting is already on, so the TUI reads it as a
+  real click — use it to hit a card row, a roster row or a footer control
+  without a keybinding. Find the coordinates in a `$D screen` capture.
 - **The binary is ~90MB and the build is not fast.** `$D start` reuses
   `$TMPDIR/forebrain-run/forebrain` if it exists — run `$D build` explicitly after
   changing Go code, or `$D reset` will not rebuild it for you.

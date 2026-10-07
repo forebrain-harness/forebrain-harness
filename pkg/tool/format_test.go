@@ -3,8 +3,10 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 )
@@ -1878,5 +1880,472 @@ func TestLSPDiagnosticsSection(t *testing.T) {
 	}
 	if got := lspDiagnosticsSection(map[string]any{}); got != "" {
 		t.Fatalf("absent summary section = %q, want empty", got)
+	}
+}
+
+// SubagentTaskTitle is the one derivation of a dispatched task's name; the
+// table pins the rule every surface inherits by calling it.
+func TestSubagentTaskTitle(t *testing.T) {
+	long := strings.Repeat("界", 200) // 600 bytes of one rune
+	truncated := SubagentTaskTitle("", long)
+	for _, tc := range []struct {
+		name   string
+		title  string
+		prompt string
+		want   string
+	}{
+		{name: "title given", title: "Goal check", prompt: "check the goal", want: "Goal check"},
+		{name: "title whitespace trimmed", title: "  Goal check \t", prompt: "check the goal", want: "Goal check"},
+		{name: "no title takes prompt's first line", prompt: "first line of the job\nsecond line", want: "first line of the job"},
+		{name: "no title and crlf prompt", prompt: "first line\r\nsecond line", want: "first line"},
+		{name: "overlong prompt truncated on a rune boundary", prompt: long, want: truncated},
+		{name: "both empty", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SubagentTaskTitle(tc.title, tc.prompt)
+			if got != tc.want {
+				t.Fatalf("SubagentTaskTitle(%q, %q) = %q, want %q", tc.title, tc.prompt, got, tc.want)
+			}
+		})
+	}
+	// The truncation itself: content within the byte budget plus the
+	// ellipsis, never mid-rune.
+	if n := len(strings.TrimSuffix(truncated, "…")); n > SubagentTaskTitleMaxBytes {
+		t.Fatalf("truncated title keeps %d bytes, over the %d bound: %q", n, SubagentTaskTitleMaxBytes, truncated)
+	}
+	if !utf8.ValidString(truncated) {
+		t.Fatalf("truncated title split a rune: %q", truncated)
+	}
+	if !strings.HasSuffix(truncated, "…") {
+		t.Fatalf("truncated title must end in the ellipsis: %q", truncated)
+	}
+	// A title is used as given even when the prompt is longer.
+	if got := SubagentTaskTitle("short", long); got != "short" {
+		t.Fatalf("title must win over the prompt, got %q", got)
+	}
+}
+
+// SubagentCallFromStep is the one derivation of a subagent_* call's card
+// facts; the table walks every tool at its two states — input only, and the
+// settled result the model received — including the execution clock each
+// result does and does not carry.
+func TestSubagentCallFromStep(t *testing.T) {
+	t.Parallel()
+	const started = event.RunEventToolStarted
+	const completed = event.RunEventToolCompleted
+	mustJSON := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return string(b)
+	}
+	// One HistoryEntry as the record-bearing tools return it.
+	record := func(status string, finished int64) map[string]any {
+		return map[string]any{
+			"agent_id": "agent-7", "agent_kind": "typed", "task_id": "task-7",
+			"run_id": "run-7", "parent_run_id": "parent-1", "session_id": "session-1",
+			"worker_session_id": "worker-1", "task_index": 2, "execution_id": "exec-7",
+			"title": "Extend the ledger", "task": "the whole brief",
+			"status": status, "error": "", "started_at": 1700000000,
+			"updated_at": finished, "finished_at": finished,
+			"agent_type": "general-purpose", "runtime_kind": "typed_subagent",
+		}
+	}
+	failedRecord := func() map[string]any {
+		m := record("failed", 1700000090)
+		m["error"] = "provider refused the request"
+		return m
+	}
+	runInput := map[string]any{"title": "Fix the parser", "task": "the whole prompt", "subagent_type": "explore"}
+	sendInput := map[string]any{"title": "Async fix", "task": "the whole prompt", "subagent_type": "general-purpose"}
+	queryInput := func() map[string]any { return map[string]any{"task_id": "task-7"} }
+	fanoutInput := map[string]any{
+		"max_parallel": 2,
+		"tasks": []any{
+			map[string]any{"title": "First", "prompt": "brief one", "subagent_type": "explore"},
+			map[string]any{"prompt": "untitled prompt first line\nsecond line", "subagent_type": "general-purpose"},
+			map[string]any{"title": "Third", "prompt": "brief three"},
+		},
+	}
+	toolCall := func(kind, tool string, input map[string]any, result string) StepEvent {
+		evt := StepEvent{Kind: kind, ToolName: tool, Input: input}
+		if result != "" {
+			evt.Output = map[string]any{"output": result}
+		}
+		return evt
+	}
+	cases := []struct {
+		name string
+		evt  StepEvent
+		want *event.SubagentCall
+	}{
+		{
+			name: "run started",
+			evt:  toolCall(started, "subagent_run", runInput, ""),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{{
+				Index: 0, Title: "Fix the parser", AgentType: "explore", Status: "waiting",
+			}}},
+		},
+		{
+			name: "run ok",
+			evt: toolCall(completed, "subagent_run", runInput, mustJSON(map[string]any{
+				"agent_id": "agent-9", "task_id": "task-9", "run_id": "run-9", "parent_run_id": "parent-1",
+				"session_id": "session-1", "query_source": "q", "status": "ok", "output": "answer",
+				"finished_at": 1700000060, "agent_type": "explore", "agent_kind": "typed",
+				"runtime_kind": "typed_subagent", "definition_source": "built-in",
+				"one_shot": false, "continuable": true,
+			})),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-9", Title: "Fix the parser", AgentType: "explore",
+				Status: "done", ExecutionID: "run-9", FinishedAt: 1700000060,
+			}}},
+		},
+		{
+			name: "run skipped",
+			evt:  toolCall(completed, "subagent_run", runInput, mustJSON(map[string]any{"status": "skipped", "error": "skipped: empty prompt"})),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{{
+				Index: 0, Title: "Fix the parser", AgentType: "explore",
+				Status: "skipped", Error: "skipped: empty prompt",
+			}}},
+		},
+		{
+			name: "fanout started",
+			evt:  toolCall(started, "subagent_fanout", fanoutInput, ""),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{
+				{Index: 0, Title: "First", AgentType: "explore", Status: "waiting"},
+				{Index: 1, Title: "untitled prompt first line", AgentType: "general-purpose", Status: "waiting"},
+				{Index: 2, Title: "Third", AgentType: "fork", Status: "waiting"},
+			}},
+		},
+		{
+			name: "fanout settled",
+			evt: toolCall(completed, "subagent_fanout", fanoutInput, mustJSON(map[string]any{
+				"summary": map[string]any{"total": 3, "succeed": 1, "failed": 2, "finished": 1700000060},
+				"results": []any{
+					map[string]any{"index": 0, "task": "brief one", "subagent_type": "explore", "output": "done", "ok": true},
+					map[string]any{"index": 1, "task": "untitled", "error": "skipped: empty prompt", "ok": false},
+					map[string]any{"index": 2, "task": "brief three", "error": "provider refused", "ok": false},
+				},
+			})),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{
+				{Index: 0, Title: "First", AgentType: "explore", Status: "done"},
+				{Index: 1, Title: "untitled prompt first line", AgentType: "general-purpose", Status: "skipped", Error: "skipped: empty prompt"},
+				{Index: 2, Title: "Third", AgentType: "fork", Status: "failed", Error: "provider refused"},
+			}},
+		},
+		{
+			name: "fanout skipped by fail_fast",
+			evt: toolCall(completed, "subagent_fanout", fanoutInput, mustJSON(map[string]any{
+				"summary": map[string]any{"total": 3, "succeed": 0, "failed": 3, "finished": 1700000060},
+				"results": []any{
+					map[string]any{"index": 0, "task": "brief one", "error": "skipped due to fail_fast", "ok": false},
+				},
+			})),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{
+				{Index: 0, Title: "First", AgentType: "explore", Status: "skipped", Error: "skipped due to fail_fast"},
+				{Index: 1, Title: "untitled prompt first line", AgentType: "general-purpose", Status: "waiting"},
+				{Index: 2, Title: "Third", AgentType: "fork", Status: "waiting"},
+			}},
+		},
+		{
+			name: "send started",
+			evt:  toolCall(started, "subagent_send", sendInput, ""),
+			want: &event.SubagentCall{Verb: "send", Tasks: []event.SubagentCallTask{{
+				Index: 0, Title: "Async fix", AgentType: "general-purpose", Status: "waiting",
+			}}},
+		},
+		{
+			name: "send accepted",
+			evt: toolCall(completed, "subagent_send", sendInput, mustJSON(map[string]any{
+				"agent_id": "agent-8", "task_id": "task-8", "run_id": "run-8", "parent_run_id": "parent-1",
+				"session_id": "session-1", "worker_session_id": "worker-8", "query_source": "q",
+				"status": "running", "started_at": 1700000000, "agent_kind": "typed",
+				"agent_type": "general-purpose", "runtime_kind": "typed_subagent",
+			})),
+			want: &event.SubagentCall{Verb: "send", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-8", Title: "Async fix", AgentType: "general-purpose",
+				Status: "running", ExecutionID: "run-8", StartedAt: 1700000000,
+			}}},
+		},
+		{
+			name: "send skipped",
+			evt:  toolCall(completed, "subagent_send", sendInput, mustJSON(map[string]any{"status": "skipped", "error": "skipped: empty prompt"})),
+			want: &event.SubagentCall{Verb: "send", Tasks: []event.SubagentCallTask{{
+				Index: 0, Title: "Async fix", AgentType: "general-purpose",
+				Status: "skipped", Error: "skipped: empty prompt",
+			}}},
+		},
+		{
+			name: "continue started",
+			evt:  toolCall(started, "subagent_continue", map[string]any{"task_id": "task-7", "message": "go on"}, ""),
+			want: &event.SubagentCall{Verb: "continue", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
+		},
+		{
+			name: "continue settled",
+			evt:  toolCall(completed, "subagent_continue", map[string]any{"task_id": "task-7", "message": "go on"}, mustJSON(map[string]any{"record": record("ok", 1700000060)})),
+			want: &event.SubagentCall{Verb: "continue", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+				Status: "done", ExecutionID: "exec-7", StartedAt: 1700000000, FinishedAt: 1700000060,
+			}}},
+		},
+		{
+			name: "status started",
+			evt:  toolCall(started, "subagent_status", queryInput(), ""),
+			want: &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
+		},
+		{
+			name: "status settled is the record itself",
+			evt:  toolCall(completed, "subagent_status", queryInput(), mustJSON(record("running", 0))),
+			want: &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+				Status: "running", ExecutionID: "exec-7", StartedAt: 1700000000,
+			}}},
+		},
+		{
+			name: "wait started",
+			evt:  toolCall(started, "subagent_wait", queryInput(), ""),
+			want: &event.SubagentCall{Verb: "wait", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
+		},
+		{
+			name: "wait timed out still running",
+			evt:  toolCall(completed, "subagent_wait", queryInput(), mustJSON(map[string]any{"record": record("running", 0), "timed_out": true})),
+			want: &event.SubagentCall{Verb: "wait", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+				Status: "running", TimedOut: true, ExecutionID: "exec-7", StartedAt: 1700000000,
+			}}},
+		},
+		{
+			name: "wait ended within the timeout",
+			evt:  toolCall(completed, "subagent_wait", queryInput(), mustJSON(map[string]any{"record": failedRecord()})),
+			want: &event.SubagentCall{Verb: "wait", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+				Status: "failed", Error: "provider refused the request",
+				ExecutionID: "exec-7", StartedAt: 1700000000, FinishedAt: 1700000090,
+			}}},
+		},
+		{
+			name: "close started",
+			evt:  toolCall(started, "subagent_close", queryInput(), ""),
+			want: &event.SubagentCall{Verb: "close", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
+		},
+		{
+			name: "close with record",
+			evt:  toolCall(completed, "subagent_close", queryInput(), mustJSON(map[string]any{"status": "cancel_requested", "record": record("running", 0)})),
+			want: &event.SubagentCall{Verb: "close", Tasks: []event.SubagentCallTask{{
+				Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+				Status: "running", StopRequested: true, ExecutionID: "exec-7", StartedAt: 1700000000,
+			}}},
+		},
+		{
+			name: "close without record keeps the input key",
+			evt:  toolCall(completed, "subagent_close", queryInput(), mustJSON(map[string]any{"status": "cancel_requested"})),
+			want: &event.SubagentCall{Verb: "close", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7", StopRequested: true}}},
+		},
+		{
+			name: "list started",
+			evt:  toolCall(started, "subagent_list", map[string]any{"limit": 5}, ""),
+			want: &event.SubagentCall{Verb: "list"},
+		},
+		{
+			name: "list settled",
+			evt: toolCall(completed, "subagent_list", map[string]any{"limit": 5}, mustJSON(map[string]any{
+				"records": []any{record("ok", 1700000060), failedRecord()},
+			})),
+			want: &event.SubagentCall{Verb: "list", Tasks: []event.SubagentCallTask{
+				{
+					Index: 0, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+					Status: "done", ExecutionID: "exec-7", StartedAt: 1700000000, FinishedAt: 1700000060,
+				},
+				{
+					Index: 1, Key: "task-7", Title: "Extend the ledger", AgentType: "general-purpose",
+					Status: "failed", Error: "provider refused the request",
+					ExecutionID: "exec-7", StartedAt: 1700000000, FinishedAt: 1700000090,
+				},
+			}},
+		},
+		{
+			name: "list empty",
+			evt:  toolCall(completed, "subagent_list", map[string]any{"limit": 5}, mustJSON(map[string]any{"records": []any{}})),
+			want: &event.SubagentCall{Verb: "list", Tasks: []event.SubagentCallTask{}},
+		},
+		{
+			name: "fork dispatch types itself fork",
+			evt:  toolCall(started, "subagent_run", map[string]any{"task": "fork line one\nmore"}, ""),
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{{
+				Index: 0, Title: "fork line one", AgentType: "fork", Status: "waiting",
+			}}},
+		},
+		{
+			name: "call error fails every task without its own reason",
+			evt:  StepEvent{Kind: completed, ToolName: "subagent_fanout", Input: fanoutInput, Error: "boom"},
+			want: &event.SubagentCall{Verb: "run", Tasks: []event.SubagentCallTask{
+				{Index: 0, Title: "First", AgentType: "explore", Status: "failed"},
+				{Index: 1, Title: "untitled prompt first line", AgentType: "general-purpose", Status: "failed"},
+				{Index: 2, Title: "Third", AgentType: "fork", Status: "failed"},
+			}},
+		},
+		{
+			name: "result in an unknown shape leaves the status unsaid",
+			evt:  toolCall(completed, "subagent_status", queryInput(), "not json at all"),
+			want: &event.SubagentCall{Verb: "status", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
+		},
+		{
+			name: "result object without the tool's shape leaves the status unsaid",
+			evt:  toolCall(completed, "subagent_wait", queryInput(), mustJSON(map[string]any{"something": "else"})),
+			want: &event.SubagentCall{Verb: "wait", Tasks: []event.SubagentCallTask{{Index: 0, Key: "task-7"}}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := SubagentCallFromStep(tc.evt)
+			if !ok {
+				t.Fatalf("SubagentCallFromStep said no for %q", tc.evt.ToolName)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("facts =\n%+v\nwant\n%+v", got, tc.want)
+			}
+		})
+	}
+	if _, ok := SubagentCallFromStep(StepEvent{Kind: completed, ToolName: "read_file"}); ok {
+		t.Fatal("a non-subagent tool must have no SubagentCall")
+	}
+}
+
+// Every subagent_* tool result carries a dispatch prompt or a full record
+// (task text, output) the model needs but a card must never show: the prompt
+// and the subagent's answer belong to the subagent's own view, and no surface
+// may render raw JSON. This pins the body, the summary and the invocation
+// label of all eight tools to facts only.
+func TestSubagentLifecycleToolsNeverShowJSON(t *testing.T) {
+	t.Parallel()
+	const secret = "SECRET-PROMPT-TEXT"
+	mustJSON := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("marshal result: %v", err)
+		}
+		return string(b)
+	}
+	// One realistic HistoryEntry as the tools return it (subagent_status is
+	// the bare record; wait/continue/close wrap it; list wraps several).
+	record := map[string]any{
+		"agent_id": "agent-1", "agent_kind": "typed", "task_id": "task-1",
+		"run_id": "run-1", "parent_run_id": "parent-1", "session_id": "session-1",
+		"worker_session_id": "worker-1", "task_index": 2, "execution_id": "exec-1",
+		"title": "Check the exports", "task": secret + "\nsecond line of the brief",
+		"status": "ok", "output": "found auth.go:12", "started_at": 1700000000,
+		"updated_at": 1700000060, "finished_at": 1700000060,
+		"agent_type": "general-purpose", "runtime_kind": "typed_subagent",
+	}
+	cases := []struct {
+		tool  string
+		input map[string]any
+		// result is the JSON string the tool returned to the model.
+		result string
+	}{
+		{
+			tool: "subagent_send",
+			input: map[string]any{
+				"title": "Ship the card facts", "task": secret,
+				"subagent_type": "general-purpose",
+			},
+			result: mustJSON(map[string]any{
+				"agent_id": "agent-1", "task_id": "task-1", "run_id": "run-1",
+				"parent_run_id": "parent-1", "session_id": "session-1",
+				"worker_session_id": "worker-1", "query_source": "agent:builtin:typed",
+				"status": "running", "started_at": 1700000000, "agent_kind": "typed",
+				"agent_type": "general-purpose", "runtime_kind": "typed_subagent",
+			}),
+		},
+		{
+			tool:   "subagent_status",
+			input:  map[string]any{"task_id": "task-1"},
+			result: mustJSON(record),
+		},
+		{
+			tool:   "subagent_wait",
+			input:  map[string]any{"task_id": "task-1", "timeout_ms": 5000},
+			result: mustJSON(map[string]any{"record": record, "timed_out": true}),
+		},
+		{
+			tool:   "subagent_continue",
+			input:  map[string]any{"task_id": "task-1", "message": "keep going"},
+			result: mustJSON(map[string]any{"record": record}),
+		},
+		{
+			tool:   "subagent_close",
+			input:  map[string]any{"task_id": "task-1"},
+			result: mustJSON(map[string]any{"status": "cancel_requested", "record": record}),
+		},
+		{
+			tool:   "subagent_list",
+			input:  map[string]any{"limit": 5},
+			result: mustJSON(map[string]any{"records": []any{record}}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			evt := StepEvent{
+				Kind:     event.RunEventToolCompleted,
+				ToolName: tc.tool,
+				Input:    tc.input,
+				Output:   map[string]any{"output": tc.result},
+			}
+			body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+			if strings.Contains(body, "{") || strings.Contains(body, `"agent_id"`) || strings.Contains(body, secret) {
+				t.Fatalf("%s body leaked raw facts: %q", tc.tool, body)
+			}
+			summary := SummarizeToolStep(evt)
+			if strings.Contains(summary, "{") || strings.Contains(summary, secret) {
+				t.Fatalf("%s summary leaked raw facts: %q", tc.tool, summary)
+			}
+			invocation := BuildToolMeta(evt).Invocation
+			if strings.Contains(invocation, "{") || strings.Contains(invocation, secret) {
+				t.Fatalf("%s invocation leaked raw facts: %q", tc.tool, invocation)
+			}
+		})
+	}
+
+	// The dispatching tools put the whole prompt in their result and their
+	// input; the card body may name the task, never quote the prompt.
+	dispatched := []struct {
+		tool  string
+		input map[string]any
+	}{
+		{
+			tool: "subagent_run",
+			input: map[string]any{
+				"title": "One blocking task", "task": secret,
+				"subagent_type": "general-purpose",
+			},
+		},
+		{
+			tool: "subagent_fanout",
+			input: map[string]any{
+				"max_parallel": 2,
+				"tasks": []any{
+					map[string]any{"title": "First", "prompt": secret, "subagent_type": "explore"},
+					map[string]any{"title": "Second", "prompt": secret, "subagent_type": "explore"},
+				},
+			},
+		},
+	}
+	for _, tc := range dispatched {
+		t.Run(tc.tool, func(t *testing.T) {
+			evt := StepEvent{
+				Kind:     event.RunEventToolCompleted,
+				ToolName: tc.tool,
+				Input:    tc.input,
+				Output: map[string]any{"output": mustJSON(map[string]any{
+					"summary": map[string]any{"total": 1, "succeed": 1, "failed": 0, "finished": 1700000060},
+					"results": []any{map[string]any{"index": 0, "task": secret, "subagent_type": "explore", "output": "done", "ok": true}},
+				})},
+			}
+			body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+			if strings.Contains(body, secret) {
+				t.Fatalf("%s body leaked the dispatch prompt: %q", tc.tool, body)
+			}
+		})
 	}
 }

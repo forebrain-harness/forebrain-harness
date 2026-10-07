@@ -13,6 +13,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 type Compactor interface {
@@ -218,6 +219,73 @@ func RunWorkedLines(turns []state.Message) map[int]RunWorkedLine {
 		}
 	}
 	return lines
+}
+
+// SubagentCallsInTranscript derives the card facts of every subagent_* call
+// a stored transcript answered, keyed by tool call id, from the call's
+// arguments and the result the model received — the same derivation the live
+// path applies, so a reloaded card says what the live one said, including in
+// sessions recorded before these facts existed. A tool row that recorded a
+// failed call (its tool_display part's tool_meta_json says "failed") feeds
+// its content to the derivation as the call's error, the way the live path
+// carried it in the step event.
+func SubagentCallsInTranscript(turns []state.Message) map[string]event.SubagentCall {
+	type dispatchedCall struct {
+		name  string
+		input map[string]any
+	}
+	calls := make(map[string]dispatchedCall)
+	for _, row := range turns {
+		if !strings.EqualFold(strings.TrimSpace(row.Role), llm.RoleAssistant) {
+			continue
+		}
+		_, toolCalls, _, _ := state.ParseMessageParts(row.PartsJSON, "")
+		for _, tc := range toolCalls {
+			id := strings.TrimSpace(tc.ID)
+			name := strings.TrimSpace(tc.Function.Name)
+			if id == "" || name == "" {
+				continue
+			}
+			var input map[string]any
+			if args := strings.TrimSpace(tc.Function.Arguments); args != "" {
+				_ = json.Unmarshal([]byte(args), &input)
+			}
+			calls[id] = dispatchedCall{name: name, input: input}
+		}
+	}
+	facts := make(map[string]event.SubagentCall)
+	for _, row := range turns {
+		if !strings.EqualFold(strings.TrimSpace(row.Role), llm.RoleTool) {
+			continue
+		}
+		_, _, callID, _ := state.ParseMessageParts(row.PartsJSON, "")
+		callID = strings.TrimSpace(callID)
+		if callID == "" {
+			continue
+		}
+		call, known := calls[callID]
+		if !known {
+			continue
+		}
+		evt := tool.StepEvent{
+			Kind:     tool.StepKindToolCompleted,
+			ToolName: call.name,
+			Input:    call.input,
+			Output:   map[string]any{"output": row.Content},
+		}
+		if display, hasDisplay := state.ParseToolDisplayPart(row.PartsJSON); hasDisplay {
+			var meta struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal([]byte(display.ToolMetaJSON), &meta) == nil && strings.EqualFold(strings.TrimSpace(meta.Status), "failed") {
+				evt.Error = row.Content
+			}
+		}
+		if callFacts, ok := tool.SubagentCallFromStep(evt); ok {
+			facts[callID] = *callFacts
+		}
+	}
+	return facts
 }
 
 // This file holds the composer-side half of the engine: locating the "@" token

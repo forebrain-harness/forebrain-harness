@@ -84,6 +84,54 @@ type ToolCallMeta struct {
 	// Origin distinguishes an explicit skill invocation from an LLM-initiated
 	// skill read for audit only. Surfaces must not branch on it.
 	Origin string `json:"origin,omitempty"`
+	// SubagentCall is the structured card facts of a subagent_* call, derived
+	// once by the runtime so every surface draws the same card.
+	SubagentCall *SubagentCall `json:"subagent_call,omitempty"`
+}
+
+// SubagentCall is what one subagent_* tool call is about — the tasks it
+// dispatched, checked, waited for, stopped or listed — decoded once from the
+// call's input and from the result the model received, so the terminal and
+// the web draw the same card from the same facts. It never carries a prompt or
+// a subagent's answer: those belong in the subagent's own view.
+type SubagentCall struct {
+	// Verb is what the call does to its tasks: "run" (subagent_run and
+	// subagent_fanout), "send", "continue", "status", "wait", "close", "list".
+	Verb  string             `json:"verb"`
+	Tasks []SubagentCallTask `json:"tasks"`
+}
+
+// SubagentCallTask is one task a subagent_* call is about.
+type SubagentCallTask struct {
+	// Index is the task's position in the call: tasks[i] of a fanout, the
+	// i-th record of a list, 0 otherwise. A dispatch's lifecycle events carry
+	// the same index, which is how a surface binds the task to its agent.
+	Index int `json:"index"`
+	// Key is the roster key of the agent the task runs as (agent.RosterKey),
+	// when the input or result names it; empty for a task that has not
+	// started or never will.
+	Key       string `json:"key,omitempty"`
+	Title     string `json:"title,omitempty"`
+	AgentType string `json:"agent_type,omitempty"`
+	// Status is one of "waiting", "running", "done", "failed", "cancelled",
+	// "skipped", or "" when the call has not said yet.
+	Status string `json:"status,omitempty"`
+	// Error is why a task failed or was skipped, as the engine described it.
+	Error string `json:"error,omitempty"`
+	// TimedOut is set when subagent_wait returned while the task was still
+	// running.
+	TimedOut bool `json:"timed_out,omitempty"`
+	// StopRequested is set when subagent_close asked the task to stop.
+	StopRequested bool `json:"stop_requested,omitempty"`
+	// ExecutionID names the execution the result describes (one agent runs
+	// once per dispatch and once per continue). A surface uses it to keep a
+	// row's clock on the same execution the lifecycle events report.
+	ExecutionID string `json:"execution_id,omitempty"`
+	// StartedAt and FinishedAt are that execution's clock as the result
+	// reported it, unix seconds; every task row shows its elapsed time from
+	// them (running: live from StartedAt; ended: FinishedAt - StartedAt).
+	StartedAt  int64 `json:"started_at,omitempty"`
+	FinishedAt int64 `json:"finished_at,omitempty"`
 }
 
 type ToolCallCompletedPayload struct {

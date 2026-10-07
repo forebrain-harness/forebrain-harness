@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -15,6 +16,58 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
+
+// approvalGateOn builds the gateway's pending-approval gate over explicit
+// dependencies, so the submit-time gate (RunServeBlocking) and the
+// request-time gate (the approval-request read) are one construction. The
+// plan scope and review models are injected because they carry facts the
+// TUI's overlay derives for itself: which plan file the gate is asking about
+// and which models a review may be handed to.
+func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *state.RunStore, actions *state.ActionService) *turn.PendingApprovalGate {
+	gate := &turn.PendingApprovalGate{Runs: runs}
+	if actions != nil {
+		gate.Actions = actions
+	}
+	if runner != nil {
+		gate.Evaluator = runner
+	}
+	gate.PlanScope = func(context.Context, string) (string, string) {
+		projectKey := ""
+		if runner != nil {
+			projectKey = strings.TrimSpace(runner.ProjectKey)
+		}
+		return config.ActiveStateRoot(home, cfg), projectKey
+	}
+	gate.ReviewModels = func() []turn.PlanReviewModelOption {
+		if runner == nil {
+			return nil
+		}
+		provider, model := run.PrimaryModel(runner)
+		agentName := strings.TrimSpace(runner.AgentName)
+		if agentName == "" {
+			agentName = "main"
+		}
+		return turn.PlanReviewModelOptions(cfg, agentName, provider, model)
+	}
+	return gate
+}
+
+// approvalGate is the gate the gateway's own handlers read through.
+func (s *Server) approvalGate() *turn.PendingApprovalGate {
+	if s == nil {
+		return nil
+	}
+	return approvalGateOn(s.Home, s.modelConfig(), s.Runner, s.RunRT, s.Actions)
+}
+
+// modelConfig is the configuration the active agent's models resolve against:
+// the runner's own when it holds one, the environment's otherwise.
+func (s *Server) modelConfig() *config.Root {
+	if s != nil && s.Runner != nil && s.Runner.AppCfg != nil {
+		return s.Runner.AppCfg
+	}
+	return s.liveCfg()
+}
 
 // withDetachedGatewayApprovalHooks restores the per-run surface seams for a
 // continuation that no longer belongs to the request websocket which started

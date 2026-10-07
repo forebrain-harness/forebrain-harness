@@ -4,7 +4,6 @@ package tui
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -227,7 +227,7 @@ func (s *ChatSession) ClearSurfaceSession(ctx context.Context, sessionID string)
 
 	// The token budget footer shows the whole window again until the next
 	// assembly measures it.
-	if postMsg, ok := s.tokenBudgetResetMessage(); ok {
+	if postMsg, ok := s.tokenBudgetResetMessage(sid); ok {
 		s.notifyUI(postMsg)
 	}
 
@@ -399,6 +399,24 @@ func (s *ChatSession) approvalGate() *turn.PendingApprovalGate {
 			}
 			return ""
 		},
+		// The plan a parked plan gate is asking about resolves against the
+		// per-agent state root (workspace root), NOT s.home(). The plan is
+		// written/edited at state.PlanPathForProject(stateRoot, projectKey) -
+		// the same root/project scope the plan-mode LLM wrapper, enter/exit_plan_mode
+		// tools and write_file/edit_file gating all resolve. The main agent's root
+		// is <home>/workspace, so using s.home() here would resolve a different path
+		// and the overlay would show "No plan found".
+		PlanScope: func(context.Context, string) (string, string) {
+			return s.stateRoot(), runnerProjectKey(s.runner())
+		},
+		// The models a review may be handed to come from the active agent's
+		// configured provider chain, with the model in force marked current.
+		ReviewModels: func() []turn.PlanReviewModelOption {
+			currentProvider, currentModel := run.PrimaryModel(s.runner())
+			return turn.PlanReviewModelOptions(
+				modelConfigFromChatSession(s), chatSessionActiveAgentName(s), currentProvider, currentModel,
+			)
+		},
 	}
 	if s.actionSvc() != nil {
 		gate.Actions = s.actionSvc()
@@ -410,28 +428,10 @@ func (s *ChatSession) approvalGate() *turn.PendingApprovalGate {
 }
 
 func (s *ChatSession) buildSurfaceToolApprovalRequest(ctx context.Context, sessionID string) (*turn.ToolApprovalRequest, error) {
-	req, err := s.approvalGate().Pending(ctx, sessionID)
-	if err != nil || req == nil {
-		return req, err
-	}
-	// Everything above is shared with the gateway. What remains is genuinely
-	// this surface's: the plan reviews live in TUI memory, and the plan file
-	// path resolves against the per-agent state root.
-	toolName := strings.TrimSpace(req.ToolName)
-	if strings.EqualFold(toolName, "exit_plan_mode") {
-		req.PlanReviewModels = s.planReviewOptions()
-		req.PlanReviews = s.planReviewNotes(strings.TrimSpace(req.ActionID))
-	}
-	if strings.EqualFold(toolName, "enter_plan_mode") || strings.EqualFold(toolName, "exit_plan_mode") {
-		// Use the per-agent state root (workspace root), NOT s.home(). The plan
-		// is written/edited at state.PlanPathForProject(stateRoot, projectKey) -
-		// the same root/project scope the plan-mode LLM wrapper, enter/exit_plan_mode
-		// tools and write_file/edit_file gating all resolve. The main agent's root
-		// is <home>/workspace, so using s.home() here would resolve a different path
-		// and the overlay would show "No plan found".
-		req.PlanFilePath = state.PlanPathForProject(s.stateRoot(), runnerProjectKey(s.runner()))
-	}
-	return req, nil
+	// Everything the request carries — the parked call's identity, the plan
+	// file path, the review models, the reviews already collected — comes
+	// from the shared gate; nothing here is this surface's own.
+	return s.approvalGate().Pending(ctx, sessionID)
 }
 
 func (s *ChatSession) completeSurfaceToolApprovalDecision(ctx context.Context, actionID string, decision turn.ToolApprovalDecision) (err error) {
@@ -449,13 +449,6 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	if decision.RequestPlanReview != nil {
 		return s.completeSurfacePlanReviewRequest(ctx, actionID, *decision.RequestPlanReview)
 	}
-	// Every path below either resolves the approval or fails the turn, so the
-	// reviews collected for it have no further reader once one returns cleanly.
-	defer func() {
-		if err == nil {
-			s.clearPlanReviews(actionID)
-		}
-	}()
 	act, aerr := s.actionSvc().Get(ctx, actionID)
 	if aerr != nil || act == nil {
 		return fmt.Errorf("load action: %w", aerr)
@@ -493,7 +486,11 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 	}
 	result, err := service.Decide(ctx, actionID, turn.ApprovalReply{
 		Choice: choice, Update: decision.Update, Network: decision.NetworkPolicyAmendment,
-		Permissions: decision.RequestPermissionsResponse, Reason: s.planReviewDenyReason(actionID, decision.DenyReason), ClearContext: decision.ClearContext,
+		// The stored reason is the user's own words: it is what the denial
+		// card and the approval-resolved event print. The reviews a denied
+		// plan collected reach the model when the denial is resumed, composed
+		// there (resumeAgentContext), so the conversation never displays them.
+		Permissions: decision.RequestPermissionsResponse, Reason: decision.DenyReason, ClearContext: decision.ClearContext,
 	})
 	if err != nil {
 		return err
@@ -817,129 +814,6 @@ func (s *ChatSession) SurfaceTranscript(ctx context.Context, sessionID string, l
 // no ChatSession dependency, so they belong in the lower layer that owns
 // canonical turn input normalization, not the TUI surface.
 
-// planReviewTaskMessages bounds how far back the reviewer's task context
-// reaches. Only user turns are kept, so this is a window over the request the
-// plan is meant to serve, not over the agent's own work.
-const (
-	planReviewTaskMessages = 6
-	planReviewMaxReviews   = 4
-)
-
-// planReviewOptions lists the models the user may hand the plan to. They come
-// from the active agent's configured provider chain — the same list /model
-// offers — because a reviewer must run on credentials the session already has.
-func (s *ChatSession) planReviewOptions() []turn.PlanReviewModelOption {
-	if s == nil {
-		return nil
-	}
-	// Plan review is the user's own request for a second opinion, not a
-	// subagent the model spawns, so agents.defaults.enable_subagent does not
-	// govern it. Returning no models — which removes the row from the approval
-	// overlay — happens only when there is no configured model to ask.
-	entries := turn.ModelChoices(modelConfigFromChatSession(s), chatSessionActiveAgentName(s))
-	if len(entries) == 0 {
-		return nil
-	}
-	currentProvider, currentModel := run.PrimaryModel(s.runner())
-	seen := make(map[string]struct{}, len(entries))
-	out := make([]turn.PlanReviewModelOption, 0, len(entries))
-	for _, entry := range entries {
-		provider := strings.TrimSpace(entry.Provider)
-		model := strings.TrimSpace(entry.Model)
-		if model == "" {
-			continue
-		}
-		key := strings.ToLower(provider + "/" + model)
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, turn.PlanReviewModelOption{
-			Provider: provider,
-			Model:    model,
-			Label:    strings.TrimSpace(entry.Name),
-			Current: strings.EqualFold(provider, strings.TrimSpace(currentProvider)) &&
-				strings.EqualFold(model, strings.TrimSpace(currentModel)),
-		})
-	}
-	return out
-}
-
-// planReviewNotes returns the reviews already collected for one pending
-// approval, so a re-prompted overlay shows them above the choices.
-func (s *ChatSession) planReviewNotes(actionID string) []turn.PlanReviewNote {
-	results := s.planReviewResults(actionID)
-	if len(results) == 0 {
-		return nil
-	}
-	notes := make([]turn.PlanReviewNote, 0, len(results))
-	for _, result := range results {
-		notes = append(notes, turn.PlanReviewNote{
-			Provider: result.Model.Provider,
-			Model:    result.Model.Model,
-			Text:     result.Text,
-			Duration: result.Duration,
-		})
-	}
-	return notes
-}
-
-func (s *ChatSession) planReviewResults(actionID string) []turn.PlanReviewResult {
-	if s == nil {
-		return nil
-	}
-	actionID = strings.TrimSpace(actionID)
-	if actionID == "" {
-		return nil
-	}
-	s.planReviewMu.Lock()
-	defer s.planReviewMu.Unlock()
-	return append([]turn.PlanReviewResult(nil), s.planReviews[actionID]...)
-}
-
-func (s *ChatSession) appendPlanReview(actionID string, result turn.PlanReviewResult) {
-	if s == nil {
-		return
-	}
-	actionID = strings.TrimSpace(actionID)
-	if actionID == "" {
-		return
-	}
-	s.planReviewMu.Lock()
-	defer s.planReviewMu.Unlock()
-	if s.planReviews == nil {
-		s.planReviews = map[string][]turn.PlanReviewResult{}
-	}
-	kept := append(s.planReviews[actionID], result)
-	if len(kept) > planReviewMaxReviews {
-		kept = kept[len(kept)-planReviewMaxReviews:]
-	}
-	s.planReviews[actionID] = kept
-}
-
-// clearPlanReviews drops the reviews for an approval that has been resolved.
-func (s *ChatSession) clearPlanReviews(actionID string) {
-	if s == nil {
-		return
-	}
-	actionID = strings.TrimSpace(actionID)
-	if actionID == "" {
-		return
-	}
-	s.planReviewMu.Lock()
-	defer s.planReviewMu.Unlock()
-	delete(s.planReviews, actionID)
-}
-
-// planReviewDenyReason merges the collected reviews with the user's own
-// feedback into the text the planning model receives on denial. Composing it
-// here rather than in the surface keeps one wording for every surface, and
-// keeps the review reaching the model even when the user denies from the
-// choice list without typing anything.
-func (s *ChatSession) planReviewDenyReason(actionID, userFeedback string) string {
-	return turn.ComposeDenyFeedback(s.planReviewResults(actionID), userFeedback)
-}
-
 // completeSurfacePlanReviewRequest handles the one decision that is not a
 // verdict: the user asked another model to review the plan first. The action
 // stays pending, so the surface's approval loop prompts again once the review
@@ -966,6 +840,11 @@ func (s *ChatSession) completeSurfacePlanReviewRequest(ctx context.Context, acti
 // A failed review is reported to the user and leaves the approval untouched. It
 // must not return an error, which would abort the whole turn and take the
 // pending approval down with it over a second opinion that did not arrive.
+//
+// The review announces itself before it starts and closes itself on every path
+// out of the shared flow (turn.RunPlanReview), and its closing event is also
+// its storage: this surface no longer keeps the result anywhere, so a restart
+// or another surface reading the conversation serves the same review.
 func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, selection turn.PlanReviewModelOption) {
 	if s == nil {
 		return
@@ -975,56 +854,75 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 		Model:    strings.TrimSpace(selection.Model),
 		Label:    strings.TrimSpace(selection.Label),
 	}
-	plan, err := state.GetPlanForProject(s.stateRoot(), runnerProjectKey(s.runner()))
-	if err != nil {
-		s.notifyPlanReviewFailure(model, fmt.Errorf("read plan: %w", err))
-		return
-	}
-	if strings.TrimSpace(plan) == "" {
-		s.notifyPlanReviewFailure(model, turn.ErrNoPlan)
-		return
-	}
 	reviewer, err := s.planReviewerFor(model)
 	if err != nil {
-		s.notifyPlanReviewFailure(model, err)
-		return
+		// The reviewer never opened. Failing it through the review flow keeps
+		// the approval pending and leaves the same trace any reviewer failure
+		// leaves, rather than aborting the turn over a second opinion that did
+		// not arrive.
+		reviewer = planReviewConstructionError{err}
 	}
+	sessionID, runID := s.planReviewEventTarget(actionID)
 	// No "review started" notice is emitted here: the surface already printed
 	// the approval confirmation naming the reviewer, and the review run opens
 	// its own subagent block in the transcript, which is where its progress is
 	// visible while it reads the code.
+	//
+	// The review runs between two approval prompts, when the run that asked
+	// for the approval has already returned, so a user interrupt has nothing
+	// else to cancel: the review's own context is what Esc reaches.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	s.trackPlanReviewCancel(cancel)
 	defer s.forgetPlanReviewCancel()
-	result, err := reviewer.Review(ctx, turn.Request{
-		Plan:  plan,
-		Task:  s.planReviewTaskContext(ctx, actionID),
-		Model: model,
-	})
-	if err != nil {
-		s.notifyPlanReviewFailure(model, err)
-		return
+	// A session without a transcript store reviews without a task context
+	// rather than handing the flow a typed-nil store: the interface would not
+	// see the nil the way a direct call did.
+	var transcripts turn.PlanReviewTranscripts
+	if store := s.sessStore(); store != nil {
+		transcripts = store
 	}
-	s.appendPlanReview(actionID, result)
-	s.notifyUI(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindPlan,
-		Summary:   planReviewSummary(result),
-		Content:   result.Text,
-		Duration:  result.Duration,
-		Timestamp: time.Now(),
-	}})
+	_ = turn.RunPlanReview(ctx, turn.PlanReviewRun{
+		ActionID:    actionID,
+		Model:       model,
+		SessionID:   sessionID,
+		RunID:       runID,
+		StateRoot:   s.stateRoot(),
+		ProjectKey:  runnerProjectKey(s.runner()),
+		Transcripts: transcripts,
+		Reviewer:    reviewer,
+		Publish: func(ctx context.Context, evt event.RunEvent) error {
+			if s == nil || s.runner() == nil || s.runner().Events == nil {
+				return nil
+			}
+			return s.runner().Events.Publish(ctx, evt)
+		},
+	})
 }
 
-// planReviewerFor builds the reviewer for one model. The factory field is the
-// seam tests use to drive the approval flow without a provider; a session that
-// has not set one gets the real reviewer, which runs as a plan-reviewer agent
-// with the repository in front of it.
-func (s *ChatSession) planReviewerFor(model turn.Model) (turn.Reviewer, error) {
-	if s.planReviewerFactory != nil {
-		return s.planReviewerFactory(model)
+// planReviewConstructionError lets a reviewer that could not be built fail
+// through the review flow every reviewer failure takes.
+type planReviewConstructionError struct{ err error }
+
+func (e planReviewConstructionError) Review(context.Context, turn.Request) (turn.PlanReviewResult, error) {
+	return turn.PlanReviewResult{}, e.err
+}
+
+// planReviewEventTarget names the conversation and run a review belongs to:
+// the one the approval gate it answers is holding. The events land there so
+// a reload replays them beside the approval that asked for them.
+func (s *ChatSession) planReviewEventTarget(actionID string) (sessionID, runID string) {
+	if p := s.peekPendingApproval(); p != nil {
+		if sid := strings.TrimSpace(p.SessionID); sid != "" {
+			return sid, strings.TrimSpace(p.RunID)
+		}
 	}
-	return &planSubagentReviewer{session: s, model: model}, nil
+	if s.actionSvc() != nil {
+		if act, err := s.actionSvc().Get(context.Background(), actionID); err == nil && act != nil {
+			return strings.TrimSpace(act.SessionID), ""
+		}
+	}
+	return "", ""
 }
 
 // trackPlanReviewCancel publishes the review's cancel func so a user interrupt
@@ -1047,165 +945,28 @@ func (s *ChatSession) forgetPlanReviewCancel() {
 	s.tuiRunMu.Unlock()
 }
 
-func planReviewSummary(result turn.PlanReviewResult) string {
-	summary := "Plan review · " + result.Model.Display()
-	if result.Duration > 0 {
-		summary += fmt.Sprintf(" · %.1fs", result.Duration.Seconds())
+// planReviewerFor builds the reviewer for one model. The factory field is the
+// seam tests use to drive the approval flow without a provider; a session that
+// has not set one gets the shared reviewer in pkg/process, which runs as a
+// plan-reviewer agent with the repository in front of it. What the surface
+// contributes are its own seams: the step hook that publishes the reviewer's
+// tool steps, and the approval func that answers the reviewer's own tool
+// gates in the place the plan approval left.
+func (s *ChatSession) planReviewerFor(model turn.Model) (turn.Reviewer, error) {
+	if s.planReviewerFactory != nil {
+		return s.planReviewerFactory(model)
 	}
-	return summary
-}
-
-func (s *ChatSession) notifyPlanReviewFailure(model turn.Model, err error) {
-	if s == nil || err == nil {
-		return
-	}
-	target := model.Display()
-	if target == "" {
-		target = "the selected model"
-	}
-	// A review the user stopped, or one that ran out of time, is not a failure
-	// to report as one — the wording says what actually happened to it.
-	message := ""
-	switch {
-	case errors.Is(err, context.Canceled):
-		message = "Plan review by " + target + " was stopped."
-	case errors.Is(err, context.DeadlineExceeded):
-		message = "Plan review by " + target + " timed out."
-	default:
-		message = "Plan review by " + target + " failed: " + strings.TrimSpace(err.Error()) + "."
-	}
-	message += " The plan is still waiting for your decision."
-	if s.chatLog != nil {
-		s.chatLog.Debugf("forebrain tui plan_review failed model=%s err=%v", target, err)
-	}
-	s.notifyUI(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindError,
-		Content:   message,
-		Timestamp: time.Now(),
-	}})
-}
-
-// planReviewTaskContext recovers what the user asked for, so the reviewer
-// judges the plan against the actual request. Only user turns are used: the
-// agent's own messages are how the plan came to say what it says, and feeding
-// them back would have the reviewer grade the plan against its own reasoning.
-func (s *ChatSession) planReviewTaskContext(ctx context.Context, actionID string) string {
-	if s == nil || s.sessStore() == nil {
-		return ""
-	}
-	sessionID := ""
-	if p := s.peekPendingApproval(); p != nil {
-		sessionID = strings.TrimSpace(p.SessionID)
-	}
-	if sessionID == "" && s.actionSvc() != nil {
-		if act, err := s.actionSvc().Get(ctx, actionID); err == nil {
-			sessionID = act.SessionID
-		}
-	}
-	if sessionID == "" {
-		return ""
-	}
-	messages, err := s.sessStore().ListTranscriptMessages(ctx, sessionID, 200)
-	if err != nil {
-		return ""
-	}
-	userTurns := make([]string, 0, planReviewTaskMessages)
-	for i := len(messages) - 1; i >= 0 && len(userTurns) < planReviewTaskMessages; i-- {
-		if messages[i].Role != llm.RoleUser {
-			continue
-		}
-		text := strings.TrimSpace(messages[i].TextContent())
-		if text == "" {
-			continue
-		}
-		userTurns = append(userTurns, text)
-	}
-	if len(userTurns) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for i := len(userTurns) - 1; i >= 0; i-- {
-		b.WriteString(userTurns[i])
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-	}
-	return turn.Truncate(b.String(), turn.MaxTaskChars)
-}
-
-// planReviewerSubtype is the built-in agent definition the review run adopts.
-// It carries the reviewer's system prompt and its tool policy: everything a
-// plan subagent may call, minus the two plan-mode tools.
-const planReviewerSubtype = run.PlanReviewSubagentType
-
-// planSubagentReviewer runs the review as a first-class subagent: dispatched
-// through the same path subagent_run uses, so it appears in the agent roster,
-// owns a per-agent view the user can open from that roster, streams its
-// assistant text, reasoning and tool calls into that view, and can be stopped
-// from the roster row like any other subagent. The only differences are who
-// asks for it (the exit-plan approval overlay) and which model answers (the one
-// the user picked).
-//
-// It works in a worker session id of its own, never the user's session: the
-// reviewer's transcript must not land in the conversation the primary agent
-// replays, both because it is not the user's dialogue and because appending to
-// that transcript would perturb the prompt prefix the next turn is cached on.
-// Its run row, like every subagent's, is a child of the run that asked for it.
-type planSubagentReviewer struct {
-	session *ChatSession
-	model   turn.Model
-}
-
-func (r *planSubagentReviewer) Review(ctx context.Context, req turn.Request) (turn.PlanReviewResult, error) {
-	if r == nil || r.session == nil {
-		return turn.PlanReviewResult{}, fmt.Errorf("nil plan reviewer session")
-	}
-	s := r.session
-	if s.runner() == nil {
-		return turn.PlanReviewResult{}, fmt.Errorf("plan review requires a runner")
-	}
-	if strings.TrimSpace(req.Plan) == "" {
-		return turn.PlanReviewResult{}, turn.ErrNoPlan
-	}
-	// Fail before the run starts when the chosen model cannot be built, rather
-	// than opening a roster row for a run that dies on its first LLM call.
-	if _, err := run.ConfiguredModelClient(
-		modelConfigFromChatSession(s), chatSessionActiveAgentName(s), r.model.Provider, r.model.Model,
-	); err != nil {
-		return turn.PlanReviewResult{}, err
-	}
-
 	sessionID := planReviewSessionID(s)
-	// Dispatch under the conversation's session id, the way a subagent spawned
-	// from inside a turn is: it is what gives the reviewer a worker session
-	// derived from this conversation and keeps it in the parent's prompt-cache
-	// bucket, exactly like every other subagent.
-	runCtx := llm.WithAgentSessionID(ctx, sessionID)
-	// The review is asked for from the approval gate of a run parked at
-	// exit_plan_mode, so it is that run's subagent: its run row is a child of
-	// the gated run, recorded in the conversation like every other subagent's,
-	// and its tokens count toward the conversation without standing in for the
-	// user's last turn.
-	if p := s.peekPendingApproval(); p != nil && strings.TrimSpace(p.RunID) != "" {
-		runCtx = tool.WithRunID(runCtx, p.RunID)
-	}
-	started := time.Now()
-	text, err := s.runner().RunPlanReviewSubagent(
-		runCtx,
-		turn.BuildPrompt(req),
-		run.SubagentModelOverride{Provider: r.model.Provider, Model: r.model.Model},
-		func(runCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
+	return &process.PlanReviewer{
+		Runner:    s.runner(),
+		Model:     model,
+		Config:    modelConfigFromChatSession(s),
+		AgentName: chatSessionActiveAgentName(s),
+		StepHook:  s.runAuditStepHook(sessionID, s.currentStepHook),
+		Approve: func(runCtx context.Context, rae *tool.RequiresActionError) (context.Context, error) {
 			return s.resolvePlanReviewApproval(runCtx, sessionID, rae)
 		},
-	)
-	if err != nil {
-		return turn.PlanReviewResult{}, err
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return turn.PlanReviewResult{}, fmt.Errorf("%s returned an empty review", r.model.Display())
-	}
-	return turn.PlanReviewResult{Model: r.model, Text: text, Duration: time.Since(started)}, nil
+	}, nil
 }
 
 // resolvePlanReviewApproval puts one of the reviewer's tool requests to the
@@ -1386,7 +1147,7 @@ func (s *ChatSession) planReviewToolApprovalRequest(sessionID string, rae *tool.
 		ActionKind:   rae.ActionKind,
 		ToolInput:    rae.ToolInput,
 		AgentID:      rae.AgentID,
-		SubagentType: planReviewerSubtype,
+		SubagentType: run.PlanReviewSubagentType,
 	})
 	req.Description = "Requested by the plan reviewer."
 	return req

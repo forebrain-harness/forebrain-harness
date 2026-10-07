@@ -12,7 +12,7 @@ import (
 
 type factoryTestSubagentExecutor struct{}
 
-func (factoryTestSubagentExecutor) RunSubagentExec(context.Context, string, string, string, string, string, string) (string, error) {
+func (factoryTestSubagentExecutor) RunSubagentExec(context.Context, SubagentExecRequest) (string, error) {
 	return "", nil
 }
 
@@ -122,3 +122,7 @@ func TestIsolatedRunnerInheritsCodeIntel(t *testing.T) {
 		t.Fatal("a factory without an owner must produce zero-valued code-intel fields")
 	}
 }
+
+func (factoryTestSubagentExecutor) PersistSubagentTurn(context.Context, SubagentTurn)            {}
+func (factoryTestSubagentExecutor) SubagentExecutionStarting(context.Context, string)            {}
+func (factoryTestSubagentExecutor) SubagentExecutionEnded(context.Context, SubagentExecutionEnd) {}

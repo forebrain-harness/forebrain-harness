@@ -625,3 +625,135 @@ func TestAutoContinueUnattendedEndingsWithoutAUsageLimitKeepTheirBookkeeping(t *
 		t.Fatalf("plan = %+v, pending %v; want a fresh first attempt after an unattended ending", plan, ok)
 	}
 }
+
+// endSubagent reports one finished execution of the harness conversation's
+// subagent to the scheduler.
+func (h *autoContinueHarness) endSubagent(err error, worker, agentKey string) {
+	h.svc.SubagentExecutionEnded(context.Background(), SubagentExecutionEnd{
+		ConversationSessionID: "s1",
+		WorkerSessionID:       worker,
+		AgentKey:              agentKey,
+		RunID:                 "subrun-" + worker,
+		Origin:                Origin{Surface: SurfaceTUI},
+		Err:                   err,
+	})
+}
+
+// The primary conversation's own continuation behaves exactly as it does when
+// no subagent is waiting: a subagent's continuation is a separate plan that
+// neither arms nor cancels the conversation's.
+func TestPrimaryAutoContinueIsUnchangedBySubagentPlans(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	resetAt := h.clock.Now().Add(3 * time.Hour)
+	h.submit(t, quotaError(resetAt, ""), SurfaceTUI)
+	h.endSubagent(quotaError(resetAt, ""), "worker-a", "task-a")
+
+	plan, ok := h.svc.PendingAutoContinue("s1")
+	if !ok || plan.Attempt != 1 || plan.AgentKey != "" {
+		t.Fatalf("primary plan = %+v, pending %v", plan, ok)
+	}
+	if want := resetAt.Add(defaultAutoContinueGrace); !plan.ContinueAt.Equal(want) {
+		t.Fatalf("primary continue at %v, want %v", plan.ContinueAt, want)
+	}
+	if plans := h.svc.PendingAutoContinuePlans("s1"); len(plans) != 2 || plans[0].AgentKey != "" || plans[1].AgentKey != "task-a" {
+		t.Fatalf("pending plans = %+v", plans)
+	}
+	if !h.svc.CancelAutoContinue(context.Background(), "s1", AutoContinueCancelledByUser) {
+		t.Fatal("primary cancel reported nothing pending")
+	}
+	if _, ok := h.svc.PendingAutoContinue("s1"); ok {
+		t.Fatal("primary still pending after its cancel")
+	}
+	if _, ok := h.svc.PendingAutoContinue("worker-a"); !ok {
+		t.Fatal("cancelling the primary dropped the subagent's continuation")
+	}
+	h.clock.Advance(3*time.Hour + defaultAutoContinueGrace)
+	got := h.continuations()
+	if len(got) != 1 || got[0].plan.AgentKey != "task-a" {
+		t.Fatalf("continuations = %+v, want only the subagent's", got)
+	}
+}
+
+func TestSubagentUsageLimitArmsItsOwnContinuation(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	resetAt := h.clock.Now().Add(3 * time.Hour)
+	h.endSubagent(quotaError(resetAt, "pro"), "worker-a", "task-a")
+
+	plan, ok := h.svc.PendingAutoContinue("worker-a")
+	if !ok {
+		t.Fatal("subagent continuation not armed")
+	}
+	if plan.SessionID != "s1" || plan.AgentKey != "task-a" || plan.WorkerSessionID != "worker-a" || plan.Attempt != 1 {
+		t.Fatalf("plan identity = %+v", plan)
+	}
+	if want := resetAt.Add(defaultAutoContinueGrace); !plan.ContinueAt.Equal(want) {
+		t.Fatalf("continue at %v, want %v", plan.ContinueAt, want)
+	}
+	if _, ok := h.svc.PendingAutoContinue("s1"); ok {
+		t.Fatal("the conversation armed its own continuation for a subagent's failure")
+	}
+	var scheduled event.AutoContinueScheduledPayload
+	evt := h.sink.last(t, event.RunEventAutoContinueScheduled, &scheduled)
+	if evt.SessionID != "s1" || scheduled.AgentID != "task-a" {
+		t.Fatalf("scheduled event filed session %q agent %q", evt.SessionID, scheduled.AgentID)
+	}
+	h.clock.Advance(3*time.Hour + defaultAutoContinueGrace)
+	got := h.continuations()
+	if len(got) != 1 || got[0].plan.AgentKey != "task-a" || got[0].plan.SessionID != "s1" || got[0].prompt != AutoContinuePrompt {
+		t.Fatalf("continuations = %+v", got)
+	}
+	var started event.AutoContinueStartedPayload
+	h.sink.last(t, event.RunEventAutoContinueStarted, &started)
+	if started.AgentID != "task-a" {
+		t.Fatalf("started payload = %+v", started)
+	}
+}
+
+func TestSubagentContinuationIsSupersededByItsNextExecution(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")
+	h.svc.SubagentExecutionStarting(context.Background(), "worker-a")
+	if _, ok := h.svc.PendingAutoContinue("worker-a"); ok {
+		t.Fatal("still pending after the subagent's next execution reached it")
+	}
+	var cancelled event.AutoContinueCancelledPayload
+	h.sink.last(t, event.RunEventAutoContinueCancelled, &cancelled)
+	if cancelled.Reason != AutoContinueSuperseded || cancelled.AgentID != "task-a" {
+		t.Fatalf("cancelled = %+v", cancelled)
+	}
+	h.clock.Advance(2 * time.Hour)
+	if got := h.continuations(); len(got) != 0 {
+		t.Fatalf("a superseded continuation fired: %+v", got)
+	}
+}
+
+func TestSubagentContinuationsStopAfterFiveInARow(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	for attempt := 1; attempt <= defaultAutoContinueMaxAttempts; attempt++ {
+		h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")
+		plan, ok := h.svc.PendingAutoContinue("worker-a")
+		if !ok || plan.Attempt != attempt {
+			t.Fatalf("attempt %d: plan = %+v, pending %v", attempt, plan, ok)
+		}
+		h.clock.Advance(time.Hour + defaultAutoContinueGrace)
+	}
+	h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")
+	if _, ok := h.svc.PendingAutoContinue("worker-a"); ok {
+		t.Fatal("kept continuing past the attempt cap")
+	}
+	h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")
+	if plan, ok := h.svc.PendingAutoContinue("worker-a"); !ok || plan.Attempt != 1 {
+		t.Fatalf("after the cap: plan = %+v, pending %v", plan, ok)
+	}
+}
+
+func TestSubagentSuccessResetsItsContinuationCount(t *testing.T) {
+	h := newAutoContinueHarness(t)
+	h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")
+	h.clock.Advance(time.Hour + defaultAutoContinueGrace)
+	h.endSubagent(nil, "worker-a", "task-a")
+	h.endSubagent(quotaError(h.clock.Now().Add(time.Hour), ""), "worker-a", "task-a")
+	if plan, ok := h.svc.PendingAutoContinue("worker-a"); !ok || plan.Attempt != 1 {
+		t.Fatalf("plan = %+v, pending %v; want a fresh first attempt after success", plan, ok)
+	}
+}

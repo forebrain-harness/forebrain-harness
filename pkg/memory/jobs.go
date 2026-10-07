@@ -38,6 +38,12 @@ const (
 	// born with. It mirrors state.SessionSourceCron; this package does not
 	// import state, so a test pins the two equal.
 	sessionSourceCron = "cron"
+	// sessionSourceSubagent is the session-purpose value a subagent's private
+	// conversation is born with. It mirrors state.SessionSourceSubagent and is
+	// pinned equal by the same test: a subagent's work is already represented
+	// in its dispatching conversation, so extracting from it would pay a
+	// stage-1 model call to relearn what the main session already holds.
+	sessionSourceSubagent = "subagent"
 )
 
 // Stage1RolloutAbsoluteCap bounds a single stage-1 extraction input regardless
@@ -124,7 +130,9 @@ type Phase2Claim struct {
 //
 // A fire's conversation is never a candidate: each one is a fresh, report-
 // shaped transcript, so extracting it would pay a stage-1 model call to
-// relearn what the last fire already wrote.
+// relearn what the last fire already wrote. A subagent's private conversation
+// is excluded for the same reason — its work already stands in the
+// conversation that dispatched it.
 //
 // This is also the single place a thread's project scope is decided. The SQL
 // below can only approximate it (a non-blank cwd), so the real resolution
@@ -141,11 +149,11 @@ func (s *Store) ClaimStage1JobsForStartup(ctx context.Context, currentThreadID s
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, updated_at, created_at, cwd, git_branch, memory_source
 		FROM fb_sessions
 		WHERE agent_id=? AND memory_mode=? AND id<>? AND memory_source IN (?,?)
-		  AND TRIM(cwd)<>'' AND updated_at>=? AND updated_at<=? AND source<>?
+		  AND TRIM(cwd)<>'' AND updated_at>=? AND updated_at<=? AND source NOT IN (?,?)
 		ORDER BY updated_at DESC, id DESC LIMIT ?`, agentID, ThreadMemoryEnabled, strings.TrimSpace(currentThreadID),
 		SessionSourceTUI, SessionSourceWebchat,
 		now.Add(-time.Duration(maxAgeDays)*24*time.Hour).Unix(),
-		now.Add(-time.Duration(minIdleHours)*time.Hour).Unix(), sessionSourceCron, stage1ThreadScanLimit)
+		now.Add(-time.Duration(minIdleHours)*time.Hour).Unix(), sessionSourceCron, sessionSourceSubagent, stage1ThreadScanLimit)
 	if err != nil {
 		return nil, err
 	}

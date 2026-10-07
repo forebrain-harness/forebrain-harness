@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -299,5 +300,45 @@ func TestRunEventFromStepCarriesTheRunningStart(t *testing.T) {
 	}
 	if payload.ToolMeta.StartedAtMs != start.UnixMilli() {
 		t.Fatalf("canonical started_at_ms = %d, want %d", payload.ToolMeta.StartedAtMs, start.UnixMilli())
+	}
+}
+
+// TestRunEventFromStepCarriesTheSubagentCall pins that the canonical event's
+// tool meta carries the same card facts BuildToolMeta derived, so the web and
+// a subagent's view draw from the identical derivation the TUI reads.
+func TestRunEventFromStepCarriesTheSubagentCall(t *testing.T) {
+	result, err := json.Marshal(map[string]any{
+		"agent_id": "agent-8", "task_id": "task-8", "run_id": "run-8", "parent_run_id": "parent-1",
+		"session_id": "session-1", "worker_session_id": "worker-8", "query_source": "q",
+		"status": "running", "started_at": 1700000000, "agent_kind": "typed",
+		"agent_type": "general-purpose", "runtime_kind": "typed_subagent",
+	})
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	evt := StepEvent{
+		Kind:     StepKindToolCompleted,
+		StepID:   "call-send-9",
+		ToolName: "subagent_send",
+		Input:    map[string]any{"title": "Async fix", "task": "the whole prompt", "subagent_type": "general-purpose"},
+		Output:   map[string]any{"output": string(result)},
+	}
+	evtRun, ok := RunEventFromStep(context.Background(), "sess", "run", "tui", evt)
+	if !ok {
+		t.Fatal("completed subagent_send step produced no run event")
+	}
+	var payload event.ToolCallCompletedPayload
+	if err := json.Unmarshal(evtRun.Payload, &payload); err != nil {
+		t.Fatalf("decode completed payload: %v", err)
+	}
+	want := BuildToolMeta(evt).SubagentCall
+	if want == nil {
+		t.Fatal("BuildToolMeta derived no subagent call")
+	}
+	if payload.ToolMeta.SubagentCall == nil {
+		t.Fatal("canonical tool meta lost the subagent call")
+	}
+	if !reflect.DeepEqual(payload.ToolMeta.SubagentCall, want) {
+		t.Fatalf("canonical subagent call =\n%+v\nwant the meta's own\n%+v", payload.ToolMeta.SubagentCall, want)
 	}
 }

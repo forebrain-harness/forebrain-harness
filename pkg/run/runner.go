@@ -1001,9 +1001,9 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	compactSvc := assembly.Service{
 		Sessions: r.SessionStore,
 		PrimaryModel: func(ctx context.Context) (string, string) {
-			return r.effectiveModelFor(ctx)
+			return r.agentModelFor(ctx)
 		},
-		CompactLLM: r.sessionClientFor,
+		CompactLLM: r.agentCompactClientFor,
 		ModelProvider: func(model string) string {
 			return ProviderForAgentModel(r.AppCfg, r.activeAgentNameForModel(), model)
 		},
@@ -1027,10 +1027,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	compactDeps := &CompactChainDeps{
 		ExplicitLimit: r.AppCfg.Compact.ModelAutoCompactTokenLimit,
 		LimitScope:    strings.TrimSpace(r.AppCfg.Compact.ModelAutoCompactTokenLimitScope),
-		// Observed window behaviour is per-model, so the checkpoint path needs the
-		// same identity the compact service resolves.
+		// Observed window behaviour is per-model, so the checkpoint path needs
+		// the same identity the compact service resolves.
 		ActiveModel: func(ctx context.Context) (string, string) {
-			return r.effectiveModelFor(ctx)
+			return r.agentModelFor(ctx)
 		},
 		TryCompact: func(ctx context.Context, msgs []llm.Message, tools []*llm.Tool, reactive bool) ([]llm.Message, bool, error) {
 			// Compaction owns model history, so it remains scoped to the worker

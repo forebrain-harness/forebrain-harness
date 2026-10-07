@@ -71,6 +71,13 @@ type ChatSession struct {
 	chatLog       *chatDiskLog
 	tuiMu         sync.Mutex
 	uiNotify      func(any)
+	// uiSessionID is the conversation this surface is currently looking at.
+	// Events the event funnel receives for any other session are persisted
+	// to their own log but never painted here: a process-wide reaper and
+	// async subagents of other conversations would otherwise draw ghosts on
+	// whichever screen happens to be open. Empty while no session is
+	// attached — boot-time events still paint, as they always did.
+	uiSessionID string
 	// uiDispatch* serializes notification delivery independently of the caller.
 	// Producers only enqueue, so a slow or blocked surface callback can never
 	// stall an agent/tool StepHook. The worker reads uiNotify under tuiMu at
@@ -102,14 +109,11 @@ type ChatSession struct {
 	// may still report on this process's behalf.
 	stopAbandonedRunReaper func()
 
-	// planReviews holds the second-opinion reviews collected for a pending
-	// exit-plan approval, keyed by action id. They live here rather than in the
-	// approval request because the approval is re-prompted after each review:
-	// the request is rebuilt from the run every time, the reviews are not.
-	planReviewMu sync.Mutex
-	planReviews  map[string][]turn.PlanReviewResult
 	// planReviewerFactory overrides how a reviewer is built for a chosen model.
-	// Left nil outside tests, where the LLM-backed reviewer is used.
+	// Left nil outside tests, where the shared reviewer in pkg/process is used.
+	// The reviews themselves are not surface state: they live on the
+	// conversation's plan_reviewed events, read back through
+	// turn.PlanReviewsForAction, so a restart or another surface serves them.
 	planReviewerFactory func(turn.Model) (turn.Reviewer, error)
 
 	// fastMode persists the per-session /fast toggle (Anthropic service_tier=auto).
@@ -129,8 +133,12 @@ type ChatSession struct {
 	// Guarded by tuiRunMu together with the run cancel it sits beside.
 	planReviewCancel context.CancelFunc
 	tuiTurnInputRT   *run.TurnInputRuntime
-	tuiUserShells    map[string][]*userShellExecution
-	dispatchTurnMu   sync.Mutex
+	// tuiTurnInputQueue is the conversation queue the current turn's runtime
+	// is attached to, so the turn's end can detach it without knowing the
+	// conversation it ran in. Guarded by tuiRunMu.
+	tuiTurnInputQueue *run.InputQueue
+	tuiUserShells     map[string][]*userShellExecution
+	dispatchTurnMu    sync.Mutex
 
 	// tuiPartialCapture mirrors the orchestration session for the active TUI
 	// run so a cancelled turn can persist already-completed messages. Set in
@@ -712,6 +720,18 @@ func (s *ChatSession) ClearUINotify() {
 	s.tuiMu.Unlock()
 }
 
+// SetViewingSession records the conversation this surface is attached to.
+// The event funnel consults it to keep other sessions' events off this
+// screen (they still land in their own session's log).
+func (s *ChatSession) SetViewingSession(sessionID string) {
+	if s == nil {
+		return
+	}
+	s.tuiMu.Lock()
+	s.uiSessionID = strings.TrimSpace(sessionID)
+	s.tuiMu.Unlock()
+}
+
 // notifyUI appends a foreground-visible notification to ChatSession's
 // serialized, nonblocking UI dispatcher. Producers never invoke the surface
 // callback directly, so a slow UI sink cannot stall tool execution. FIFO order
@@ -729,6 +749,21 @@ func (s *ChatSession) notifyUI(msg any) {
 		return
 	}
 	s.enqueueUINotification(msg)
+}
+
+// notifyUIForSession paints one event-funnel message when it belongs to the
+// conversation this surface is looking at. Empty sessionID (an event from
+// before any conversation started) and an unattached surface paint as they
+// always did; anything else for another session stays in that session's log
+// alone.
+func (s *ChatSession) notifyUIForSession(sessionID string, msg any) {
+	s.tuiMu.Lock()
+	viewing := s.uiSessionID
+	s.tuiMu.Unlock()
+	if viewing != "" && strings.TrimSpace(sessionID) != "" && strings.TrimSpace(sessionID) != viewing {
+		return
+	}
+	s.notifyUI(msg)
 }
 
 func (s *ChatSession) enqueueUINotification(msg any) {
@@ -890,33 +925,6 @@ func (s *ChatSession) tuiRunIDLocked(sessionID string) string {
 	return ""
 }
 
-func (s *ChatSession) installTUITurnInputRuntimeHookLocked(runID, sessionID string) {
-	if s == nil || s.tuiTurnInputRT == nil {
-		return
-	}
-	rt := s.tuiTurnInputRT
-	channel := "tui"
-	// The surface renders delivered steers from its own queue mirror (it is the
-	// only place that still holds the composer's display form: image and large
-	// paste placeholders, which the model-facing parts have already expanded
-	// away). So the hook reports how many steers survive the drain and lets the
-	// surface derive which ones left, rather than shipping lossy text here.
-	rt.SetChangeHook(func(_ []run.TurnInputEntry) {
-		count := 0
-		for _, entry := range rt.Snapshot() {
-			if entry.Mode == run.TurnInputModeSteer {
-				count++
-			}
-		}
-		s.notifyUI(PendingSteersChangedMsg{
-			RunID:     strings.TrimSpace(runID),
-			SessionID: strings.TrimSpace(sessionID),
-			Channel:   channel,
-			Count:     count,
-		})
-	})
-}
-
 func (s *ChatSession) tuiFinish(runID string) {
 	if s == nil {
 		return
@@ -925,6 +933,12 @@ func (s *ChatSession) tuiFinish(runID string) {
 	finished := s.tuiControlLocked().Finish(runID)
 	if finished {
 		s.tuiTurnInputRT = nil
+		// The run is over, so its runtime must stop accepting steers even
+		// before the surface turn's own boundary retires the queue: whatever
+		// the run never delivered stays queued for the boundary to decide.
+		if s.tuiTurnInputQueue != nil {
+			s.tuiTurnInputQueue.Detach()
+		}
 	}
 	s.tuiRunMu.Unlock()
 	if finished {
@@ -1012,8 +1026,26 @@ func (s *ChatSession) ensureTUITurnInputRuntime(sessionID string) *run.TurnInput
 	if s.tuiTurnInputRT == nil {
 		s.tuiTurnInputRT = run.NewTurnInputRuntime()
 	}
-	s.installTUITurnInputRuntimeHookLocked(s.tuiRunIDLocked(sessionID), sessionID)
-	return s.tuiTurnInputRT
+	rt := s.tuiTurnInputRT
+	// The queue belongs to the conversation; the runtime belongs to this
+	// turn. Connecting them here is what makes a steer enqueued from the
+	// surface reach this turn's tool boundaries, including the window after
+	// the turn began but before the engine registered its run.
+	q := s.tuiControlLocked().SessionQueue(strings.TrimSpace(sessionID))
+	s.tuiTurnInputQueue = q
+	q.Attach(rt)
+	// Delivery moves a steer from the queue onto its delivered list; the
+	// change hook is what tells the surface to render that message into the
+	// transcript instead of leaving the pending preview claiming it is still
+	// editable.
+	channel := "tui"
+	q.SetChangeHook(func() {
+		s.notifyUI(InputQueueChangedMsg{
+			SessionID: strings.TrimSpace(sessionID),
+			Channel:   channel,
+		})
+	})
+	return rt
 }
 
 // discardTUITurnInput drops the queued turn input at the end of a surface
@@ -1027,80 +1059,212 @@ func (s *ChatSession) discardTUITurnInput() {
 	}
 	s.tuiRunMu.Lock()
 	s.tuiTurnInputRT = nil
+	q := s.tuiTurnInputQueue
+	s.tuiTurnInputQueue = nil
 	s.tuiRunMu.Unlock()
+	// Detach the queue this turn attached: undelivered steers stay in it —
+	// the turn's boundary decides what follows them — but without a runtime
+	// they can no longer reach any model, so the next turn's fresh runtime
+	// can never deliver them.
+	if q != nil {
+		q.Detach()
+	}
 }
 
-func (s *ChatSession) QueueSurfaceFollowUp(sessionID string, channel string, parts []llm.ContentPart) bool {
-	if s == nil || len(parts) == 0 {
-		return false
-	}
-	s.tuiRunMu.Lock()
-	rt := s.tuiTurnInputRT
-	_, _, phase, active := s.tuiControlLocked().Current()
-	s.tuiRunMu.Unlock()
-	active = active && phase == run.Running
-	if !active || rt == nil {
-		return false
-	}
-	rt.Enqueue(run.TurnInputModeFollowUp, parts)
-	return true
-}
-
-func (s *ChatSession) SteerSurfaceRun(sessionID string, channel string, parts []llm.ContentPart) bool {
-	if s == nil || len(parts) == 0 {
-		return false
-	}
-	s.tuiRunMu.Lock()
-	ctl := s.tuiControlLocked()
-	runID := s.tuiRunIDLocked(sessionID)
-	_, _, phase, active := ctl.Current()
-	s.tuiRunMu.Unlock()
-	if !active || phase != run.Running || runID == "" {
-		return false
-	}
-	return ctl.Steer(runID, run.Input{Parts: parts})
-}
-
-// RetractSurfaceSteer pulls the most recently enqueued steer back out of the
-// active run's input runtime. It fails once the run has drained the steer at a
-// tool boundary: the message is already on its way to the model, so the surface
-// must leave it queued rather than hand the user an editable copy of something
-// that will be answered anyway.
-func (s *ChatSession) RetractSurfaceSteer(sessionID string, channel string) bool {
+// SurfaceInputQueue returns the conversation's input queue. All queue
+// semantics — admission, recall, boundary decisions, preview — live in it;
+// the surface never picks among queued messages itself.
+func (s *ChatSession) SurfaceInputQueue(sessionID string) *run.InputQueue {
 	if s == nil {
-		return false
+		return nil
 	}
-	s.tuiRunMu.Lock()
-	ctl := s.tuiControlLocked()
-	runID := s.tuiRunIDLocked(sessionID)
-	_, _, phase, active := ctl.Current()
-	s.tuiRunMu.Unlock()
-	if !active || phase != run.Running || runID == "" {
-		return false
-	}
-	_, ok := ctl.Retract(runID)
-	return ok
+	return s.tuiController().SessionQueue(strings.TrimSpace(sessionID))
 }
 
-func (s *ChatSession) SurfacePendingSteerCount(sessionID string, channel string) (int, bool) {
-	if s == nil {
-		return 0, false
+// SendToSubagent hands what the user typed in a subagent's own view to that
+// subagent through the engine's channel: it starts the subagent's next
+// execution when it is idle, and reaches it at its next tool boundary (or waits
+// for the execution after it) when it is running. The surface frames each
+// execution it drives with the same tool-audit step hook a turn installs, and
+// forwards the queue's boundary decision back to the loop as a UI message.
+func (s *ChatSession) SendToSubagent(sessionID, agentKey string, submission ComposerSubmission, followUp bool) (run.SubagentDelivery, error) {
+	r := s.runner()
+	if r == nil {
+		return "", errors.New("no runner")
 	}
-	s.tuiRunMu.Lock()
-	rt := s.tuiTurnInputRT
-	_, _, phase, active := s.tuiControlLocked().Current()
-	s.tuiRunMu.Unlock()
-	active = active && phase == run.Running
-	if !active || rt == nil {
-		return 0, false
+	mode := run.TurnInputModeSteer
+	if followUp {
+		mode = run.TurnInputModeFollowUp
 	}
-	count := 0
-	for _, entry := range rt.Snapshot() {
-		if entry.Mode == run.TurnInputModeSteer {
-			count++
+	in := run.Input{
+		Text:      composerSubmissionPreview(submission),
+		Parts:     append([]llm.ContentPart(nil), submission.Parts...),
+		Payload:   submission,
+		SkillName: strings.TrimSpace(submission.SkillName),
+		SkillPath: strings.TrimSpace(submission.SkillPath),
+	}
+	if in.Text == "" {
+		in.Text = strings.Join(strings.Fields(llm.TextContent(submission.Parts...)), " ")
+	}
+	return run.SendToSubagent(context.Background(), r, s.subagentSurface(sessionID), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey), in, mode)
+}
+
+// SubagentInputPreview is the subagent's queued input as its own view shows it.
+func (s *ChatSession) SubagentInputPreview(sessionID, agentKey string) ComposerPendingInputPreview {
+	preview := run.SubagentInputPreview(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	return ComposerPendingInputPreview{
+		PendingSteers:  preview.Steers,
+		RejectedSteers: preview.Rejected,
+		QueuedMessages: preview.FollowUp,
+	}
+}
+
+// RecallSubagentInput pulls the subagent's newest queued message back out for
+// editing, whole.
+func (s *ChatSession) RecallSubagentInput(sessionID, agentKey string) (ComposerSubmission, bool) {
+	in, ok := run.RecallSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if !ok {
+		return ComposerSubmission{}, false
+	}
+	return subagentSubmissionFromInput(in)
+}
+
+// InterruptSubagentToSend stops the subagent's running execution to send the
+// steers queued behind it (Esc's second meaning in its view).
+func (s *ChatSession) InterruptSubagentToSend(sessionID, agentKey string) bool {
+	return run.InterruptSubagentToSend(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
+// WithdrawSubagentInput takes a just-sent message back before the subagent
+// answered, returning it plus everything queued after it.
+func (s *ChatSession) WithdrawSubagentInput(sessionID, agentKey string) ([]ComposerSubmission, bool) {
+	inputs, ok := run.WithdrawSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if !ok {
+		return nil, false
+	}
+	return subagentSubmissions(inputs), true
+}
+
+// DiscardSubagentInput empties the subagent's queued input and returns how many
+// messages were dropped — the same discard the conversation's own queue gets
+// when its conversation is left.
+func (s *ChatSession) DiscardSubagentInput(sessionID, agentKey string) int {
+	return run.DiscardSubagentInput(s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+}
+
+// CompactSubagent compacts the subagent's own context from its view: it runs
+// against that subagent's worker session, on the model that subagent runs on,
+// and refuses while the subagent is running (the way /compact is refused while
+// the conversation's own run is).
+func (s *ChatSession) CompactSubagent(ctx context.Context, sessionID, agentKey string) (string, bool) {
+	r := s.runner()
+	if r == nil {
+		return "compact: unavailable", true
+	}
+	subCtx, workerSessionID, err := run.SubagentCompactTarget(ctx, r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if err != nil {
+		if errors.Is(err, run.ErrSubagentRunning) {
+			return "Wait for this subagent to finish before compacting it.", true
+		}
+		return "compact: " + err.Error(), true
+	}
+	result := turn.ExecuteCompact(subCtx, workerSessionID, run.CompactionService(r, s.sessStore()))
+	s.tuiMu.Lock()
+	hasTUI := s.uiNotify != nil
+	s.tuiMu.Unlock()
+	if hasTUI {
+		// The compaction's own events draw its card in this subagent's view.
+		return "", true
+	}
+	return result.Reply, true
+}
+
+// SubagentContextReport answers /context for the subagent whose view it is run
+// from: the same report as the conversation's, fed the subagent's own worker
+// session, model and occupancy.
+func (s *ChatSession) SubagentContextReport(sessionID, agentKey string) (string, bool) {
+	r := s.runner()
+	if r == nil {
+		return "context: unavailable", true
+	}
+	workerSessionID, provider, model, used, explicitLimit, err := run.SubagentContextGauge(context.Background(), r, strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if err != nil {
+		return "context: " + err.Error(), true
+	}
+	src := turn.ContextSources{
+		Snapshots: s.Env.Tools(),
+		Filtering: tool.CompressorFor(r.StateRoot()).Store(),
+	}
+	if runs := s.runSvc(); runs != nil {
+		src.Compactions = runs
+	}
+	src.Gauge = turn.ContextGaugeOf(provider, model, used, explicitLimit)
+	return turn.ContextReport(context.Background(), src, workerSessionID), true
+}
+
+// SubagentComposerTokenStats is the subagent's own footer gauge — how much of
+// that subagent's context window is left, computed on the model it runs on.
+func (s *ChatSession) SubagentComposerTokenStats(sessionID, agentKey string) ComposerTokenStats {
+	payload, ok := run.SubagentContextBudget(context.Background(), s.runner(), strings.TrimSpace(sessionID), strings.TrimSpace(agentKey))
+	if !ok {
+		return ComposerTokenStats{}
+	}
+	return composerTokenStatsFromBudget(tokenBudgetMsgFromPayload(payload))
+}
+
+// subagentSurface frames each execution the user drives from a subagent's view
+// and hands the queue's boundary decision back to the loop.
+//
+// The step hook is built with a nil predecessor on purpose: a subagent's tool
+// steps carry their roster key on the context, so this hook publishes them
+// itself, and chaining the process-wide (conversation) hook would publish the
+// same step a second time.
+func (s *ChatSession) subagentSurface(sessionID string) run.SubagentSurface {
+	hook := s.runAuditStepHook(sessionID, func() tool.StepHook { return nil })
+	return run.SubagentSurface{
+		Frame: func(ctx context.Context) context.Context {
+			if hook == nil {
+				return ctx
+			}
+			return tool.WithStepHook(ctx, hook)
+		},
+		OnBoundary: func(agentKey string, send, restore []run.Input) {
+			s.notifyUI(SubagentInputBoundaryMsg{
+				AgentKey: strings.TrimSpace(agentKey),
+				Send:     subagentSubmissions(send),
+				Restore:  subagentSubmissions(restore),
+			})
+		},
+	}
+}
+
+// subagentSubmissions recovers the surface's own records from a slice of the
+// engine's queue inputs, so a recalled, released or restored message comes back
+// whole (text, attachments, folded pastes and all).
+func subagentSubmissions(inputs []run.Input) []ComposerSubmission {
+	if len(inputs) == 0 {
+		return nil
+	}
+	out := make([]ComposerSubmission, 0, len(inputs))
+	for _, in := range inputs {
+		if sub, ok := subagentSubmissionFromInput(in); ok {
+			out = append(out, sub)
 		}
 	}
-	return count, true
+	return out
+}
+
+func subagentSubmissionFromInput(in run.Input) (ComposerSubmission, bool) {
+	if sub, ok := in.Payload.(ComposerSubmission); ok {
+		return sub, true
+	}
+	// A message without our payload (a foreign or legacy producer) is rebuilt
+	// from the queue's own record so it is still editable.
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		return ComposerSubmission{}, false
+	}
+	return ComposerSubmission{Text: text, DisplayText: text, Parts: append([]llm.ContentPart(nil), in.Parts...)}, true
 }
 
 func (s *ChatSession) NewSessionID(prefix string) string {

@@ -136,6 +136,27 @@ const (
 	VisibilityHidden    Visibility = "hidden"
 )
 
+// SubagentViewScope is how one built-in command behaves when it is typed in a
+// subagent's own view instead of the conversation's (decision D4): the shared
+// classification lives here so both surfaces read one table rather than each
+// keeping its own copy.
+type SubagentViewScope string
+
+const (
+	// SubagentViewUnset is a command that forgot to declare a scope. Every
+	// built-in must set one; TestEveryBuiltinCommandHasASubagentViewScope
+	// catches a new command that does not.
+	SubagentViewUnset SubagentViewScope = ""
+	// SubagentViewActs acts on the subagent whose view it is typed in
+	// (/compact, /context), or, for a skill command, is sent to that subagent.
+	SubagentViewActs SubagentViewScope = "acts"
+	// SubagentViewGlobal runs exactly as it does in the conversation's view.
+	SubagentViewGlobal SubagentViewScope = "global"
+	// SubagentViewHidden is not offered in a subagent's view and, typed
+	// anyway, answers with one sentence pointing back to the conversation.
+	SubagentViewHidden SubagentViewScope = "hidden"
+)
+
 type Command struct {
 	Name                        string
 	CanonicalName               string
@@ -150,12 +171,17 @@ type Command struct {
 	AvailableInSideConversation bool
 	FeatureGate                 string
 	Visibility                  Visibility
+	// SubagentView is how the command behaves in a subagent's own view (D4).
+	SubagentView SubagentViewScope
 }
 
 type DiscoveryOptions struct {
 	DuringRun        bool
 	SideConversation bool
 	FastAvailable    bool
+	// SubagentView lists the commands available while a subagent's own view is
+	// on screen: the hidden ones are dropped, the rest behave per SubagentView.
+	SubagentView bool
 }
 
 func (c Command) AllowedOn(surface Surface) bool {
@@ -548,6 +574,15 @@ type PlanReviewModelOption struct {
 	Model    string
 	Label    string
 	Current  bool
+}
+
+// MatchesSelection reports whether this option is the provider/model pair a
+// review request named — the one comparison a surface validates a requested
+// reviewer with, shared so the web cannot accept a model the terminal would
+// refuse.
+func (o PlanReviewModelOption) MatchesSelection(provider, model string) bool {
+	return strings.EqualFold(strings.TrimSpace(o.Provider), strings.TrimSpace(provider)) &&
+		strings.EqualFold(strings.TrimSpace(o.Model), strings.TrimSpace(model))
 }
 
 type PlanReviewNote struct {

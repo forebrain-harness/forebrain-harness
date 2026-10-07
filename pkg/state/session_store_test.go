@@ -366,6 +366,64 @@ func TestConversationListsAreFilteredInTheQuery(t *testing.T) {
 	}
 }
 
+// TestSubagentSessionsAreBornHiddenFromEveryList pins what a subagent's
+// worker session is at birth: a private conversation of one subagent, whose
+// row carries its conversation's id in parent_session_id and source
+// 'subagent' — and is therefore invisible to every conversation list, every
+// child listing, while still being a real session the subagent's own view
+// reads back. A later plain Ensure must not rewrite either birth column.
+func TestSubagentSessionsAreBornHiddenFromEveryList(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+
+	if err := store.Ensure(ctx, "c1", "the conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureAt(ctx, "w1", "the subagent's own conversation", SessionBirth{
+		Source:          SessionSourceSubagent,
+		ParentSessionID: "c1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, list := range map[string]func() ([]SessionSummary, error){
+		"ListSessionsRecent":      func() ([]SessionSummary, error) { return store.ListSessionsRecent(ctx, 100) },
+		"ListSessionsRecentPaged": func() ([]SessionSummary, error) { return store.ListSessionsRecentPaged(ctx, 100, 0) },
+		"ListChildSessionsRecent": func() ([]SessionSummary, error) { return store.ListChildSessionsRecent(ctx, "c1", 100) },
+	} {
+		rows, err := list()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.ID == "w1" {
+				t.Fatalf("%s returned a subagent's worker session: %+v", name, row)
+			}
+		}
+	}
+
+	var parent, source string
+	if err := db.QueryRow(`SELECT parent_session_id, source FROM fb_sessions WHERE id='w1'`).Scan(&parent, &source); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "c1" || source != SessionSourceSubagent {
+		t.Fatalf("worker session birth = parent %q source %q, want c1/%q", parent, source, SessionSourceSubagent)
+	}
+
+	// A later write that merely touches the session (every append path runs
+	// the upsert first) must not rewrite what it was born with.
+	if err := store.Ensure(ctx, "w1", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT parent_session_id, source FROM fb_sessions WHERE id='w1'`).Scan(&parent, &source); err != nil {
+		t.Fatal(err)
+	}
+	if parent != "c1" || source != SessionSourceSubagent {
+		t.Fatalf("after re-ensure = parent %q source %q, want the birth values", parent, source)
+	}
+}
+
 // TestProjectSessionListListsOnlyConversations pins the project list to
 // conversations: a scheduled task's fire bound to the project is reached
 // from the project's scheduled-tasks tab, not from its conversation list.

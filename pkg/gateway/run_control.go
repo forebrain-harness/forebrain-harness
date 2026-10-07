@@ -127,8 +127,8 @@ func (s *Server) handleRunQueuedInput(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(req.Action), "edit_last") {
-		item, preview, accepted := q.PopLatest()
-		out := toPendingInputPreview(preview)
+		item, accepted := q.Recall()
+		out := toPendingInputPreview(q.Preview())
 		if accepted {
 			s.appendPendingInputUpdated(r.Context(), runID, sessionID, out)
 		}
@@ -148,8 +148,10 @@ func (s *Server) handleRunQueuedInput(w http.ResponseWriter, r *http.Request) {
 // turn the person sends is never refused by the run that just told them it
 // ended. What the user steered or queued that the run never took is handed
 // back as a durable event on the conversation, published before whatever the
-// caller then reports about the run's end, so the client that sent those
-// messages sends them next or takes them back: none is dropped with the run.
+// caller then reports about the run's end: the queue's boundary decision —
+// what runs next versus what returns to the composer — travels in the event,
+// so the client sends or takes back accordingly and nothing is dropped with
+// the run.
 func (s *Server) finishRun(ctx context.Context, sessionID, runID string, status state.RunStatus) {
 	if s.RunRT != nil {
 		// A run the executor already settled is refused by the status rule
@@ -157,18 +159,39 @@ func (s *Server) finishRun(ctx context.Context, sessionID, runID string, status 
 		// error to report.
 		_ = s.RunRT.SetStatus(ctx, runID, status)
 	}
-	if released := s.runController().Release(runID); len(released) > 0 {
-		inputs := make([]event.ReleasedInput, 0, len(released))
-		for _, in := range released {
-			inputs = append(inputs, event.ReleasedInput{Text: in.Text, Attachments: in.Attachments, MentionImages: in.MentionImages})
+	send, restore := s.runController().Release(runID, runBoundaryForStatus(status))
+	if len(send) > 0 || len(restore) > 0 {
+		payload := event.QueuedInputReleasedPayload{}
+		for _, in := range restore {
+			payload.Inputs = append(payload.Inputs, releasedInput(in))
 		}
-		if err := s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventQueuedInputReleased, event.QueuedInputReleasedPayload{Inputs: inputs}); err != nil {
+		for _, in := range send {
+			payload.Next = append(payload.Next, releasedInput(in))
+		}
+		if err := s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventQueuedInputReleased, payload); err != nil {
 			slog.Error("release queued input", "run_id", runID, "session_id", sessionID, "err", err)
 		}
 	}
 	s.stampRunEnd(ctx, runID)
 	s.runController().Finish(runID)
 	s.runStartedAt.Delete(runID)
+}
+
+// runBoundaryForStatus maps how a gateway run ended onto the queue boundary
+// the engine decides with. A run that ran to its end completed; anything else
+// — a cancellation, a failure — is an interruption, so what the run never took
+// goes back to the composer. The gateway has no path that interrupts a run in
+// order to send its steers; that boundary belongs to surfaces that know why
+// the interrupt was issued.
+func runBoundaryForStatus(status state.RunStatus) run.Boundary {
+	if status == state.RunStatusDone {
+		return run.BoundaryCompleted
+	}
+	return run.BoundaryInterrupted
+}
+
+func releasedInput(in run.Input) event.ReleasedInput {
+	return event.ReleasedInput{Text: in.Text, Attachments: in.Attachments, MentionImages: in.MentionImages}
 }
 
 // stampRunEnd gives a run that ends here its clock, so replay closes it with
@@ -652,16 +675,25 @@ func (s *Server) startDetachedTurn(t detachedTurn) (string, error) {
 	return runID, nil
 }
 
-// continueAfterUsageLimit starts the continuation as a detached run. It is
-// detached for the same reason an approval resume is: the page that sent the
-// stopped turn may have been closed hours ago, and whichever pages are open
-// now observe the session through the event bus rather than own the run.
+// continueAfterUsageLimit starts the continuation. A subagent's continuation is
+// a message the engine sends that subagent; the conversation's own runs as a
+// detached run. Both are detached for the same reason an approval resume is:
+// the page that sent the stopped turn may have been closed hours ago, and
+// whichever pages are open now observe the session through the event bus rather
+// than own the run.
 func (s *Server) continueAfterUsageLimit(_ context.Context, plan turn.AutoContinuePlan, prompt string) error {
 	if s == nil || s.Core == nil {
 		return turn.ErrAutoContinueUnavailable
 	}
 	if strings.TrimSpace(plan.SessionID) == "" {
 		return turn.ErrAutoContinueUnavailable
+	}
+	if strings.TrimSpace(plan.AgentKey) != "" {
+		runner := s.runnerFor(context.Background(), plan.SessionID)
+		if runner == nil {
+			return turn.ErrAutoContinueUnavailable
+		}
+		return s.Env.ContinueSubagent(runner, s.subagentConversationSurface(plan.SessionID), plan, prompt)
 	}
 	_, err := s.startDetachedTurn(detachedTurn{
 		SessionID: plan.SessionID,
@@ -916,35 +948,56 @@ func (s *Server) handleCancelAutoContinueMessage(ctx context.Context, m wsClient
 		reply.Error = "unknown session"
 		return reply
 	}
-	cancelled := s.Core != nil && s.Core.CancelAutoContinue(ctx, sid, turn.AutoContinueCancelledByUser)
+	agentID := strings.TrimSpace(m.AgentID)
+	var cancelled bool
+	switch {
+	case agentID == "":
+		cancelled = s.Core != nil && s.Core.CancelAutoContinue(ctx, sid, turn.AutoContinueCancelledByUser)
+	case s.subagentNamed(sid, agentID):
+		// The subagent must belong to this conversation and this primary
+		// agent; another conversation's subagent is not found, exactly as its
+		// input channel is.
+		cancelled = s.Core != nil && s.Core.CancelAutoContinueForAgent(ctx, sid, agentID, turn.AutoContinueCancelledByUser)
+	}
 	reply.Data = map[string]any{"cancelled": cancelled}
 	return reply
 }
 
-// autoContinueSnapshot is the pending continuation a page binding to sid is
-// told about. The event log alone cannot say it: a scheduled event from before
-// a restart describes a wait that no longer exists.
-func (s *Server) autoContinueSnapshot(sid string) (event.AutoContinueScheduledPayload, bool) {
+// autoContinuePlans is every continuation waiting in a conversation: its own
+// first (when it has one), then each of its subagents'. A page binding to the
+// conversation is told all of them, so a wait armed for a subagent before the
+// page opened still shows in that subagent's view.
+func (s *Server) autoContinuePlans(sid string) []event.AutoContinueScheduledPayload {
 	if s == nil || s.Core == nil {
-		return event.AutoContinueScheduledPayload{}, false
+		return nil
 	}
-	plan, ok := s.Core.PendingAutoContinue(sid)
-	if !ok {
-		return event.AutoContinueScheduledPayload{}, false
+	plans := s.Core.PendingAutoContinuePlans(sid)
+	out := make([]event.AutoContinueScheduledPayload, 0, len(plans))
+	for _, plan := range plans {
+		out = append(out, plan.Payload())
 	}
-	return plan.Payload(), true
+	return out
 }
 
 // sessionBoundData is the session_bound reply's data: where the replay starts
-// and ends, and the continuation pending right now, when there is one.
-func sessionBoundData(cursor, highWater int64, autoContinue event.AutoContinueScheduledPayload, pending bool) map[string]any {
+// and ends, and the continuations pending right now, when there are any. The
+// conversation's own is also sent as the single auto_continue every client
+// already reads; the whole list, subagents included, travels as auto_continues.
+func sessionBoundData(cursor, highWater int64, plans []event.AutoContinueScheduledPayload) map[string]any {
 	data := map[string]any{
 		"cursor":         cursor,
 		"high_water":     highWater,
 		"schema_version": event.RunEventSchemaVersion,
 	}
-	if pending {
-		data["auto_continue"] = autoContinue
+	if len(plans) == 0 {
+		return data
+	}
+	data["auto_continues"] = plans
+	for _, plan := range plans {
+		if plan.AgentID == "" {
+			data["auto_continue"] = plan
+			break
+		}
 	}
 	return data
 }
@@ -968,16 +1021,29 @@ func (s *Server) handleAutoContinue(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	plans := s.autoContinuePlans(sid)
 	switch r.Method {
 	case http.MethodGet:
-		out := map[string]any{"session_id": sid, "pending": false}
-		if snapshot, ok := s.autoContinueSnapshot(sid); ok {
-			out["pending"] = true
-			out["auto_continue"] = snapshot
+		out := map[string]any{"session_id": sid, "pending": len(plans) > 0}
+		if len(plans) > 0 {
+			out["auto_continues"] = plans
+			for _, plan := range plans {
+				if plan.AgentID == "" {
+					out["auto_continue"] = plan
+					break
+				}
+			}
 		}
 		writeAgentsJSON(w, out)
 	case http.MethodDelete:
-		cancelled := s.Core != nil && s.Core.CancelAutoContinue(r.Context(), sid, turn.AutoContinueCancelledByUser)
+		agentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+		var cancelled bool
+		switch {
+		case agentID == "":
+			cancelled = s.Core != nil && s.Core.CancelAutoContinue(r.Context(), sid, turn.AutoContinueCancelledByUser)
+		case s.subagentNamed(sid, agentID):
+			cancelled = s.Core != nil && s.Core.CancelAutoContinueForAgent(r.Context(), sid, agentID, turn.AutoContinueCancelledByUser)
+		}
 		writeAgentsJSON(w, map[string]any{"session_id": sid, "cancelled": cancelled})
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)

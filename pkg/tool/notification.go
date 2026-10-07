@@ -37,7 +37,8 @@ func RunEventFromStep(ctx context.Context, sessionID, runID, channel string, evt
 		StartedAtMs: meta.StartedAtMs,
 		// Origin is audit metadata; it rides on the canonical payload but never
 		// on ToolMeta, so no renderer can branch on it.
-		Origin: strings.TrimSpace(evt.Origin),
+		Origin:       strings.TrimSpace(evt.Origin),
+		SubagentCall: meta.SubagentCall,
 	}
 	stepID := strings.TrimSpace(evt.StepID)
 	id := ""
@@ -302,6 +303,10 @@ type ToolMeta struct {
 	// zero once the call has settled or when the engine did not observe the
 	// start. Every surface derives "running for N seconds" from it.
 	StartedAtMs int64 `json:"started_at_ms,omitempty"`
+	// SubagentCall is the structured card facts of a subagent_* call, derived
+	// once from the call's input and result so the terminal and the web draw
+	// the same card from the same facts.
+	SubagentCall *event.SubagentCall `json:"subagent_call,omitempty"`
 }
 
 // RunningFor reports how long an executing call has been running as of now,

@@ -336,6 +336,7 @@ func tokenBudgetUpdatedPayload(v any) (event.TokenBudgetUpdatedPayload, bool) {
 		return event.TokenBudgetUpdatedPayload{}, false
 	}
 	return event.TokenBudgetUpdatedPayload{
+		AgentID:              strings.TrimSpace(stringOr(asMap["agent_id"])),
 		Model:                strings.TrimSpace(stringOr(asMap["model"])),
 		TokenUsage:           int(int64Field(asMap, "token_usage")),
 		PercentLeft:          int(int64Field(asMap, "percent_left")),
@@ -361,7 +362,13 @@ func boolField(v map[string]any, key string) bool {
 }
 
 func (s *Server) tokenBudgetWSMessageFromSession(ctx context.Context, requestID, runID, sessionID string) (wsServerMsg, bool) {
-	payload, ok := s.tokenBudgetPayloadFromSession(ctx, sessionID)
+	// The engine's one copy of the gauge: the session's occupancy, budgeted
+	// on the conversation's own model.
+	usage, ok := run.ContextOccupancy(ctx, s.Sessions, sessionID)
+	if !ok || usage <= 0 {
+		return wsServerMsg{}, false
+	}
+	payload, ok := run.ContextBudget(s.Runner, sessionID, nil, usage)
 	if !ok {
 		return wsServerMsg{}, false
 	}
@@ -371,39 +378,6 @@ func (s *Server) tokenBudgetWSMessageFromSession(ctx context.Context, requestID,
 		RunID:     strings.TrimSpace(runID),
 		SessionID: strings.TrimSpace(sessionID),
 		Data:      payload,
-	}, true
-}
-
-// contextOccupancy is how much of the context window the conversation fills
-// right now: the last API response's whole prompt. The web's context gauge and
-// /status both read it — the same input the terminal's footer uses — so the
-// numbers agree everywhere.
-func (s *Server) contextOccupancy(ctx context.Context, sessionID string) (int, bool) {
-	if s == nil || s.Sessions == nil {
-		return 0, false
-	}
-	turns, err := s.Sessions.ListRecentMessages(ctx, sessionID, 400)
-	if err != nil {
-		return 0, false
-	}
-	return state.TokenCountFromLastAPIResponse(turns), true
-}
-
-func (s *Server) tokenBudgetPayloadFromSession(ctx context.Context, sessionID string) (event.TokenBudgetUpdatedPayload, bool) {
-	usage, ok := s.contextOccupancy(ctx, sessionID)
-	if !ok || usage <= 0 {
-		return event.TokenBudgetUpdatedPayload{}, false
-	}
-	provider, model := run.PrimaryModel(s.Runner)
-	limits, _ := llm.Lookup(provider, model)
-	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: s.compactExplicitLimit()})
-	return event.TokenBudgetUpdatedPayload{
-		Model:                budget.Model,
-		TokenUsage:           budget.TokenUsage,
-		PercentLeft:          budget.PercentLeft,
-		ContextWindow:        budget.ContextWindow,
-		EffectiveWindow:      budget.EffectiveContextWindow,
-		AutoCompactThreshold: budget.AutoCompactThreshold,
 	}, true
 }
 
@@ -518,6 +492,18 @@ func toolCallMetaFromWS(top map[string]any, nested map[string]any) event.ToolCal
 		meta.ResultLines = int(float64OrZero(metaMap["result_lines"]))
 		meta.ResultOffset = int(float64OrZero(metaMap["result_offset"]))
 		meta.StartedAtMs = int64(float64OrZero(metaMap["started_at_ms"]))
+		// The subagent_* card facts (plan 012) ride the same tool_meta; the
+		// conversion rebuilds the meta field by field, so they are decoded
+		// here rather than dropped — a lost copy leaves the web rendering the
+		// call as a generic tool card instead of the subagent card.
+		if raw := metaMap["subagent_call"]; raw != nil {
+			if encoded, err := json.Marshal(raw); err == nil {
+				var call event.SubagentCall
+				if json.Unmarshal(encoded, &call) == nil && (call.Verb != "" || len(call.Tasks) > 0) {
+					meta.SubagentCall = &call
+				}
+			}
+		}
 	}
 	if meta.ToolName == "" {
 		meta.ToolName = strings.TrimSpace(stringOr(top["tool_name"]))

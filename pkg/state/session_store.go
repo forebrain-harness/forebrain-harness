@@ -82,6 +82,9 @@ type SessionBirth struct {
 	// Source is what the session is for (SessionSource*); born with it,
 	// never changed by later writes.
 	Source string
+	// ParentSessionID is the conversation this session belongs to; born
+	// with it, never changed by later writes.
+	ParentSessionID string
 }
 
 // ConfigureMemoryDefaults stamps the process-wide values a session row is
@@ -205,12 +208,14 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// conversation fails here instead of quietly writing into it — every append
 	// path runs this first, which is what keeps writes inside the boundary.
 	// Source is the same kind of fact, so it too is written at birth only.
+	// ParentSessionID is as well: the conversation a session belongs to is
+	// whoever created it, never a later writer.
 	res, err := q.ExecContext(ctx,
-		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id)
+		VALUES(?,?,?,?,?,?,?,?,?,?,NULLIF(?, ''))
 		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
 		WHERE fb_sessions.agent_id=excluded.agent_id`,
-		id, title, now, now, mode, source, cwd, branch, s.AgentID(), strings.TrimSpace(birth.Source))
+		id, title, now, now, mode, source, cwd, branch, s.AgentID(), strings.TrimSpace(birth.Source), strings.TrimSpace(birth.ParentSessionID))
 	if err != nil {
 		return err
 	}
@@ -630,6 +635,9 @@ const (
 	SessionSourceConversation = ""         // an ordinary conversation
 	SessionSourceWorkshop     = "workshop" // a skill-workshop task
 	SessionSourceCron         = "cron"     // one fire of a scheduled task
+	// SessionSourceSubagent is the private conversation of one subagent;
+	// reached only through that subagent's view, never listed.
+	SessionSourceSubagent = "subagent"
 )
 
 type SessionSummary struct {
@@ -660,10 +668,10 @@ func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessio
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
-		 WHERE parent_session_id = ? AND agent_id = ?
+		 WHERE parent_session_id = ? AND agent_id = ? AND source <> ?
 		 ORDER BY updated_at DESC
 		 LIMIT ?`,
-		parentSessionID, s.AgentID(), limit)
+		parentSessionID, s.AgentID(), SessionSourceSubagent, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -697,10 +705,10 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
 		 FROM fb_sessions
-		 WHERE agent_id = ? AND source <> ?
+		 WHERE agent_id = ? AND source NOT IN (?, ?)
 		 ORDER BY updated_at DESC
 		 LIMIT ?`,
-		s.AgentID(), SessionSourceCron, limit)
+		s.AgentID(), SessionSourceCron, SessionSourceSubagent, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -820,10 +828,10 @@ func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offse
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
-		 WHERE agent_id = ? AND source <> ?
+		 WHERE agent_id = ? AND source NOT IN (?, ?)
 		 ORDER BY updated_at DESC, id ASC
 		 LIMIT ? OFFSET ?`,
-		s.AgentID(), SessionSourceCron, limit, offset)
+		s.AgentID(), SessionSourceCron, SessionSourceSubagent, limit, offset)
 	if err != nil {
 		return nil, err
 	}

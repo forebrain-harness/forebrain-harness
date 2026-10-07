@@ -1,6 +1,7 @@
 import axios, { type AxiosError } from 'axios'
 
 import { toCamelCase, toSnakeCase } from './case'
+import type { ForebrainTokenBudget } from './forebrainGatewayRuntime'
 import type { LspRecommendationChoice } from './lspRecommendation'
 import { reportGatewayUnauthorized } from './gatewaySession'
 
@@ -74,6 +75,11 @@ export interface ChatMessageRecord {
   compaction?: Record<string, unknown> | null
   /** A line of a /goal the server placed in the history; its row role is "goal". */
   goal?: Record<string, unknown> | null
+  /**
+   * A tool row's subagent_* card facts, as the gateway derived them from the
+   * transcript — the reloaded card says what the live one said.
+   */
+  subagentCall?: import('@/composables/useChatStream').SubagentCall | null
   memoryCitation?: MemoryCitation | null
 }
 
@@ -100,6 +106,27 @@ export interface RunInputResponse {
   message?: string
   attachments?: string[]
   mentionImages?: string[]
+  preview: PendingInputPreview
+}
+
+/** Where a message the user sent a subagent went (plan 005's delivery). */
+export type SubagentDelivery = 'started' | 'steered' | 'queued'
+
+export interface SubagentInputResponse {
+  delivery: SubagentDelivery
+  preview: PendingInputPreview
+}
+
+/** A message taken back out of a subagent before it answered, whole. */
+export interface SubagentWithdrawnInput {
+  message?: string
+  attachments?: string[]
+  mentionImages?: string[]
+}
+
+export interface SubagentWithdrawResponse {
+  withdrawn: SubagentWithdrawnInput[]
+  any?: boolean
   preview: PendingInputPreview
 }
 
@@ -765,6 +792,48 @@ export interface ActionApprovalBody {
   requestPermissionsResponse?: RequestPermissionsResponse
 }
 
+/** One model a pending exit-plan approval may be handed to for a review. */
+export interface PlanReviewModelOption {
+  provider: string
+  model: string
+  label?: string
+  current?: boolean
+}
+
+/** One completed review a pending exit-plan approval already collected. */
+export interface PlanReviewNote {
+  provider: string
+  model: string
+  text: string
+  durationMs?: number
+}
+
+/** The review a pending exit-plan approval is waiting on, from its events. */
+export interface PlanReviewInFlight {
+  reviewId: string
+  provider?: string
+  model: string
+  label?: string
+  /** The reviewer subagent's roster key; cancelling it stops the review. */
+  agentId?: string
+}
+
+/**
+ * The typed approval request a session is parked on, as the terminal's
+ * overlay sees it. For a parked exit-plan approval it carries the plan
+ * itself, the models a review may be handed to, the reviews already
+ * collected, and the review currently running.
+ */
+export interface SessionApprovalRequest {
+  actionId: string
+  kind: string
+  toolName?: string
+  planText?: string
+  planReviewModels?: PlanReviewModelOption[]
+  planReviews?: PlanReviewNote[]
+  planReviewActive?: PlanReviewInFlight | null
+}
+
 export interface ChatSessionsResponse {
   records: { id: string; title: string | null; createTime: string; updateTime: string; source?: string }[]
 }
@@ -1286,13 +1355,14 @@ export const forebrainApi = {
     return api.get<SessionModeResponse>(`/chat/sessions/${sessionId}/mode`).then((res) => res.data)
   },
 
-  slashCommands(surface = 'webchat', q = '', opts?: { duringRun?: boolean; sideConversation?: boolean }) {
+  slashCommands(surface = 'webchat', q = '', opts?: { duringRun?: boolean; sideConversation?: boolean; subagentView?: boolean }) {
     return api.get<SlashCommandsResponse>('/slash/commands', {
       params: {
         surface,
         q,
         ...(opts?.duringRun ? { during_run: 1 } : {}),
         ...(opts?.sideConversation ? { side: 1 } : {}),
+        ...(opts?.subagentView ? { view: 'subagent' } : {}),
       },
     }).then((res) => res.data)
   },
@@ -1333,7 +1403,66 @@ export const forebrainApi = {
     ).then((res) => res.data)
   },
 
-  runInput(runId: string, body: { message: string; attachments?: string[] }) {
+  /**
+   * A subagent's own view, talked to through the conversation it belongs to.
+   * The engine owns every decision (plan 005); these calls are its transport.
+   */
+  subagentInput(sessionId: string, agentId: string, body: {
+    message: string
+    attachments?: string[]
+    mentionImages?: string[]
+    mode?: 'steer' | 'follow_up'
+  }) {
+    return postJson<SubagentInputResponse, typeof body>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/input`,
+      body,
+    )
+  },
+
+  subagentQueuedInput(sessionId: string, agentId: string, body: { action: 'edit_last' }) {
+    return postJson<RunInputResponse, typeof body>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/queued-input`,
+      body,
+    )
+  },
+
+  subagentInterruptSend(sessionId: string, agentId: string) {
+    return postJson<{ interrupted: boolean }, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/interrupt-send`,
+      {},
+    )
+  },
+
+  subagentWithdraw(sessionId: string, agentId: string) {
+    return postJson<SubagentWithdrawResponse, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/withdraw`,
+      {},
+    )
+  },
+
+  /** Compact the subagent's own context; its events draw the card in its view. */
+  subagentCompact(sessionId: string, agentId: string) {
+    return postJson<Record<string, unknown>, Record<string, never>>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/compact`,
+      {},
+    )
+  },
+
+  /** /context for a subagent, in the same shape as the conversation's. */
+  subagentContext(sessionId: string, agentId: string) {
+    return api.get<SessionContextDebug>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/context`,
+    ).then((res) => res.data)
+  },
+
+  /** The gauge a subagent's view opens with: its own context window. */
+  subagentBudget(sessionId: string, agentId: string) {
+    return api.get<ForebrainTokenBudget>(
+      `/chat/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(agentId)}/budget`,
+    ).then((res) => res.data)
+  },
+
+  runInput(runId: string, body: { message: string; attachments?: string[]; mentionImages?: string[] }) {
     return postJson<RunInputResponse, typeof body>(
       `/runs/${encodeURIComponent(runId)}/input`,
       body,
@@ -1686,6 +1815,33 @@ export const forebrainApi = {
     })
   },
 
+  /** The approval a session is parked on, with everything its card needs.
+   * Null when nothing is parked (the gateway answers 204). */
+  sessionApprovalRequest(sessionId: string) {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/approval-request`, {
+      method: 'GET',
+    }).then(async (r) => {
+      if (r.status === 204) return null
+      if (!r.ok) throw new GatewayHttpError(r.status, (await r.text()).trim())
+      return toCamelCase(await r.json()) as SessionApprovalRequest
+    })
+  },
+
+  /** Ask one configured model to review a pending exit-plan approval. The
+   * review runs in the background; its events are its progress. */
+  actionPlanReview(id: string, body: { provider: string; model: string }) {
+    return gatewayFetch(`/api/actions/${encodeURIComponent(id)}/plan-review`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(toSnakeCase(body)),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return r.status === 202
+    })
+  },
+
   workspaceTree(path = '') {
     return api
       .get<WorkspaceTreeResponse>('/workspace/tree', { params: path ? { path } : undefined })
@@ -1960,9 +2116,16 @@ export const forebrainApi = {
     return api.delete<{ cleared: string }>('/heartbeat', { params: { session_id: sessionId } }).then((res) => res.data)
   },
 
-  /** Stops the continuation a session is waiting to run once a usage limit resets. */
-  cancelAutoContinue(sessionId: string) {
-    return api.delete<{ cancelled: boolean }>('/auto-continue', { params: { session_id: sessionId } }).then((res) => res.data)
+  /**
+   * Stops the continuation a session is waiting to run once a usage limit
+   * resets. With agentId, it stops that subagent's own continuation instead of
+   * the conversation's.
+   */
+  cancelAutoContinue(sessionId: string, agentId?: string) {
+    const id = String(agentId ?? '').trim()
+    const params: Record<string, string> = { session_id: sessionId }
+    if (id) params.agent_id = id
+    return api.delete<{ cancelled: boolean }>('/auto-continue', { params }).then((res) => res.data)
   },
 
   permissionsExplain(params: { toolName: string; input?: string; sessionId?: string }) {

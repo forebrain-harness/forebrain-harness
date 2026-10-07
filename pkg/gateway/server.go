@@ -206,7 +206,8 @@ func gatewayToolMetaPayload(meta tool.ToolMeta) map[string]any {
 		strings.TrimSpace(meta.Status) == "" &&
 		strings.TrimSpace(meta.Purpose) == "" &&
 		strings.TrimSpace(meta.Invocation) == "" &&
-		len(meta.Input) == 0 {
+		len(meta.Input) == 0 &&
+		meta.SubagentCall == nil {
 		return nil
 	}
 	out := map[string]any{}
@@ -224,6 +225,13 @@ func gatewayToolMetaPayload(meta tool.ToolMeta) map[string]any {
 	}
 	if len(meta.Input) > 0 {
 		out["input"] = meta.Input
+	}
+	// SubagentCall is the card facts of a subagent_* call (plan 012). It rides
+	// the same meta the history rows carry; without this copy the live web
+	// path drops it and the call renders as a generic tool card instead of
+	// the subagent card both surfaces otherwise draw from the same facts.
+	if meta.SubagentCall != nil {
+		out["subagent_call"] = meta.SubagentCall
 	}
 	if v := strings.TrimSpace(meta.AgentID); v != "" {
 		out["agent_id"] = v
@@ -602,13 +610,17 @@ func (s *Server) AttachREST(srv *RestServer) {
 var upgrader = websocket.Upgrader{}
 
 type wsClientMsg struct {
-	Op                     string                             `json:"op"`
-	ProtocolVersion        string                             `json:"protocol_version"`
-	Type                   string                             `json:"type"`
-	RequestID              string                             `json:"request_id"`
-	RunID                  string                             `json:"run_id"`
-	ActionID               string                             `json:"action_id"`
-	SessionID              string                             `json:"session_id"`
+	Op              string `json:"op"`
+	ProtocolVersion string `json:"protocol_version"`
+	Type            string `json:"type"`
+	RequestID       string `json:"request_id"`
+	RunID           string `json:"run_id"`
+	ActionID        string `json:"action_id"`
+	SessionID       string `json:"session_id"`
+	// AgentID names the subagent a client op targets, for the ops that act on
+	// one subagent of a conversation (cancelling its auto-continue). Empty
+	// means the conversation itself.
+	AgentID                string                             `json:"agent_id"`
 	CreateBy               string                             `json:"create_by"`
 	ModelID                string                             `json:"model_id"`
 	Mode                   string                             `json:"mode"`
@@ -891,8 +903,8 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		if s.RunRT == nil {
 			runEvtSub.Bind(sid)
 			bound := wsServerMsg{Op: "session_bound", RequestID: requestID, SessionID: sid, Message: "subscribed"}
-			if autoContinue, autoContinuePending := s.autoContinueSnapshot(sid); autoContinuePending {
-				bound.Data = map[string]any{"auto_continue": autoContinue}
+			if plans := s.autoContinuePlans(sid); len(plans) > 0 {
+				bound.Data = sessionBoundData(0, 0, plans)
 			}
 			writeMsg(bound)
 			return true, false
@@ -904,18 +916,19 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			return false, false
 		}
 		// A continuation waiting on a usage limit is live state, not history:
-		// the page is told whether one is pending now, and the auto-continue
-		// events it replays up to highWater only draw what already happened.
-		// It is read after highWater, and the engine records a change before
-		// it publishes the event, so the snapshot is at least as new as every
+		// the page is told whether any are pending now — the conversation's
+		// own and each of its subagents' — and the auto-continue events it
+		// replays up to highWater only draw what already happened. They are
+		// read after highWater, and the engine records a change before it
+		// publishes the event, so the snapshot is at least as new as every
 		// event the replay holds; anything later arrives live after it.
-		autoContinue, autoContinuePending := s.autoContinueSnapshot(sid)
+		autoContinuePlans := s.autoContinuePlans(sid)
 		writeMsg(wsServerMsg{
 			Op:        "session_bound",
 			RequestID: requestID,
 			SessionID: sid,
 			Message:   "subscribed",
-			Data:      sessionBoundData(cursor, highWater, autoContinue, autoContinuePending),
+			Data:      sessionBoundData(cursor, highWater, autoContinuePlans),
 		})
 		next := cursor
 		for next < highWater {

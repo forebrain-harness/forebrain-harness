@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
@@ -83,11 +82,12 @@ type Frame struct {
 	// agent is retained in that agent's view, never in the conversation.
 	AgentID string
 	// SubagentLifecycleCard marks the one class of frame that names an agent
-	// yet belongs to the conversation: the spawned/ended cards, which are the
-	// primary transcript's account of a subagent and the durable way back into
-	// its view after its roster row is gone. Everything else a subagent
-	// produces — including the confirmation of an approval answered on its
-	// behalf — is retained in the subagent's own view.
+	// yet belongs to the conversation: its own account of something done with
+	// that agent — a goal line opening the view of the check that decided it.
+	// The subagent card itself needs no marker: it is a fanout frame, whose
+	// owner is the dispatching agent and whose task rows carry the agents.
+	// Everything else a subagent produces — including the confirmation of an
+	// approval answered on its behalf — is retained in the subagent's own view.
 	SubagentLifecycleCard bool
 	// FanoutLineAgents maps each line of a fanout frame's Content to the roster
 	// key of the subagent that line describes ("" when a line belongs to none).
@@ -95,8 +95,21 @@ type Frame struct {
 	// the frame's single AgentID; this is what lets a click on one task row open
 	// that task's subagent view.
 	FanoutLineAgents []string
-	Summary          string // Phase 1 redesign: pre-rendered one-line summary.
-	ToolMeta         tool.ToolMeta
+	// FanoutLineClocks aligns with the Content lines the same way
+	// FanoutLineAgents does, and carries a task row's execution clock: the
+	// running clock while the task runs (rendered from "now" at paint time),
+	// the final elapsed once it ended. Only task title lines carry a clock.
+	FanoutLineClocks []fanoutLineClock
+	// FanoutQuery marks a fanout frame as a query card (subagent_status, wait,
+	// close, list): a snapshot of the call that must settle when its turn or
+	// its agent ends, unlike a dispatch card whose agents outlive the call.
+	FanoutQuery bool
+	// FanoutCallError is the dispatch or query call's own failure text, drawn
+	// as the first line under the card header: the one place it belongs,
+	// instead of a copy on every task row.
+	FanoutCallError string
+	Summary         string // Phase 1 redesign: pre-rendered one-line summary.
+	ToolMeta        tool.ToolMeta
 	// FilePath is the file path extracted from tool input (e.g. read_file file_path).
 	// Carried separately from ToolMeta.Input so the renderer always has a reliable
 	// path for syntax highlighting even when ToolMeta.Input is nil or malformed.
@@ -141,6 +154,10 @@ type EventResult struct {
 	RequestSkillSelect    bool
 	QuitRequested         bool
 	ComposerTokenStats    *ComposerTokenStats
+	// ComposerTokenStatsAgent names the view the budget belongs to ("" for the
+	// conversation's own, a roster key for a subagent's). The caller routes
+	// the stats to that view's footer.
+	ComposerTokenStatsAgent string
 }
 
 // composerTokenStatsFromBudget is the footer's reading of a budget: how much
@@ -210,27 +227,73 @@ type fanoutToolEntry struct {
 	Label  string
 }
 
-// FanoutTaskState tracks one task inside a subagent_fanout or subagent_run block.
-type FanoutTaskState struct {
-	Title        string            // display title (from SubagentTask.Title or truncated prompt)
-	Prompt       string            // full task prompt
-	SubagentType string            // e.g. "explore"
-	AgentID      string            // subagent task_id for routing events
-	Status       string            // "waiting" | "running" | "done" | "failed" | "skipped"
-	Error        string            // error or skip reason, shown below the task title
-	Activity     string            // current tool call description from ActivityStatusUpdatedMsg
-	ToolTotal    int               // total subagent tool calls (deduped by StepID)
-	RecentTools  []fanoutToolEntry // recent tool labels (ring buffer, cap maxFanoutRecentTools)
-	TokenCount   int               // subagent token usage (accumulated input+output)
+// fanoutLineClock is one task row's execution clock, aligned with the fanout
+// content lines. Start is when the execution bound to the row began (its
+// subagent_spawned), End when it stopped (its subagent_ended). A zero End with
+// a non-zero Start is a clock still running; both zero is a row that never
+// started (waiting or skipped) and shows no time at all.
+type fanoutLineClock struct {
+	Start time.Time
+	End   time.Time
 }
 
-// fanoutState tracks the live state of one fanout block.
+// FanoutTaskState is one task of a subagent card: a dispatched execution, the
+// execution a query looked at, or the single task of a plan review. Dispatch
+// tasks bind to their agent through the lifecycle events; query tasks carry
+// the snapshot the call's facts reported.
+type FanoutTaskState struct {
+	Title        string // display title (SubagentTaskTitle's answer, one line by construction)
+	SubagentType string // e.g. "explore"; "fork" when the dispatch named none
+	AgentID      string // roster key of the execution this row follows, "" while unbound
+	Status       string // "waiting" | "running" | "done" | "failed" | "cancelled" | "skipped" | ""
+	Error        string // error or skip reason, shown below the task title
+	ExecutionID  string // the execution this row's clock follows
+	StartedAt    time.Time
+	EndedAt      time.Time
+	// TimedOut and StopRequested are a query row's phrases: the wait ended
+	// while the task was still running, and the close asked it to stop.
+	TimedOut      bool
+	StopRequested bool
+	ToolTotal     int               // total subagent tool calls (deduped by StepID)
+	RecentTools   []fanoutToolEntry // recent tool labels (ring buffer, cap maxFanoutRecentTools)
+}
+
+// fanoutState is one subagent card: the subagent_* call (or the review
+// request, or an execution dispatched with no call at all) and the tasks it is
+// about. The names stay "fanout" — the card kind is FrameFanout — but every
+// subagent_* tool draws through here.
 type fanoutState struct {
-	StepID      string
-	Tasks       []FanoutTaskState
-	MaxParallel int
-	Running     bool
-	Duration    time.Duration
+	StepID string
+	// Verb is what the call does to its tasks: "run" (subagent_run,
+	// subagent_fanout and dispatches with no call), "send", "continue",
+	// "status", "wait", "close", "list", or "review" (the plan review card).
+	Verb string
+	// Query marks the snapshot verbs (status/wait/close/list): their card is
+	// the call's answer and settles when the call, its turn or its agent ends,
+	// unlike a dispatch card whose agents outlive the call.
+	Query   bool
+	Tasks   []FanoutTaskState
+	Running bool
+	// Duration is the call's own execution time.
+	Duration time.Duration
+	RunID    string
+	// OwnerAgentID is the subagent whose view owns this card: the agent that
+	// made the call. Empty — the conversation — for the primary agent's calls
+	// and for executions dispatched with no call.
+	OwnerAgentID string
+	// CallError is the call's own failure, shown once under the header.
+	CallError string
+	// CallStatus is "canceled" when the call never ran to completion.
+	CallStatus string
+	// ReviewTarget names the model a plan review runs on ("provider/model"),
+	// for the canceled review's label.
+	ReviewTarget string
+}
+
+// cardTaskRef locates the card task an agent's current execution belongs to.
+type cardTaskRef struct {
+	stepID string
+	index  int
 }
 
 type Reducer struct {
@@ -244,20 +307,31 @@ type Reducer struct {
 	tracker          *Tracker
 	agentRoster      map[string]AgentRosterRow
 	agentRosterOrder []string
-	// fanoutStates tracks live fanout blocks keyed by StepID.
+	// fanoutStates tracks live subagent cards keyed by StepID: the dispatching
+	// or querying call's id, a review's ReviewID, or "subagent-exec:<id>" for
+	// an execution dispatched with no call.
 	fanoutStates map[string]*fanoutState
+	// cardTaskOfAgent maps a roster key to the card task its current execution
+	// belongs to. It is written when a subagent_spawned binds a task and
+	// cleared when that execution ends, and it is the only way a subagent's
+	// tool messages and a query's rows find their card.
+	cardTaskOfAgent map[string]cardTaskRef
+	// queryRowsOfExecution holds the query-card rows that reported an
+	// execution, keyed by that execution: the execution's ended event settles
+	// those rows with it, so a snapshot taken while a task ran ends the way
+	// the task did.
+	queryRowsOfExecution map[string][]cardTaskRef
+	// endedExecutions remembers how each execution ended. A replayed
+	// transcript flushes a run's rows after its subagent events, so a query
+	// row can arrive after the execution's end already did; the row settles
+	// from this record the way the live order settles from the event.
+	endedExecutions map[string]endedExecution
 	// lastAgentPrompt holds the dispatch prompt most recently shown in each
 	// subagent's view, keyed by roster key. Spawn notifications can arrive twice
 	// for one subagent (the direct call and the run-step mirror), so the text is
 	// compared rather than the key: a repeat is skipped, while a genuinely new
 	// instruction — a continued subagent — is appended as the next message.
 	lastAgentPrompt map[string]string
-	// agentLifecycle holds the last lifecycle state a subagent's card announced
-	// ("running" / "ended"), keyed by roster key. One dispatch is announced
-	// twice — directly by the runner and again through the run-step mirror —
-	// and each announcement would otherwise append its own card to the
-	// transcript. The roster upsert is idempotent, so only the card needs this.
-	agentLifecycle map[string]string
 	// toolOutput holds bounded, transient output for in-flight shell cards.
 	toolOutput map[string]string
 	// compactions holds each running compaction's card state, keyed by
@@ -322,22 +396,7 @@ func (r *Reducer) agentBuf(agentID string) *agentBuffer {
 	return buf
 }
 
-// findFanoutByAgentID returns the fanout state that owns the given agentID.
-func (r *Reducer) findFanoutByAgentID(agentID string) *fanoutState {
-	if r == nil || r.fanoutStates == nil || agentID == "" {
-		return nil
-	}
-	for _, fs := range r.fanoutStates {
-		for _, t := range fs.Tasks {
-			if t.AgentID == agentID {
-				return fs
-			}
-		}
-	}
-	return nil
-}
-
-// findFanoutByStepID returns the fanout state for the given StepID.
+// findFanoutByStepID returns the card state for the given StepID.
 func (r *Reducer) findFanoutByStepID(stepID string) *fanoutState {
 	if r == nil || r.fanoutStates == nil {
 		return nil
@@ -345,6 +404,9 @@ func (r *Reducer) findFanoutByStepID(stepID string) *fanoutState {
 	return r.fanoutStates[strings.TrimSpace(stepID)]
 }
 
+// fanoutTaskForLifecycle resolves the exact card task a lifecycle event names:
+// the dispatching call's StepID and the task's index in it. Anything else — a
+// missing call, an index past the call's tasks — is not this card's task.
 func (r *Reducer) fanoutTaskForLifecycle(parentToolCallID string, taskIndex int) (*fanoutState, *FanoutTaskState) {
 	stepID := strings.TrimSpace(parentToolCallID)
 	if stepID == "" {
@@ -355,39 +417,6 @@ func (r *Reducer) fanoutTaskForLifecycle(parentToolCallID string, taskIndex int)
 		return nil, nil
 	}
 	return fs, &fs.Tasks[taskIndex]
-}
-
-// findFanoutWithWaitingTask returns the first fanout that has a task with
-// status "waiting" (subagent not yet assigned).
-func (r *Reducer) findFanoutWithWaitingTask() *fanoutState {
-	if r == nil || r.fanoutStates == nil {
-		return nil
-	}
-	for _, fs := range r.fanoutStates {
-		if !fs.Running {
-			continue
-		}
-		for _, t := range fs.Tasks {
-			if t.Status == "waiting" {
-				return fs
-			}
-		}
-	}
-	return nil
-}
-
-// assignFanoutTaskAgent assigns the given agentID to the first "waiting" task
-// in the fanout (subagents are dispatched in order).
-func (r *Reducer) assignFanoutTaskAgent(fs *fanoutState, agentID string) {
-	if fs == nil || agentID == "" {
-		return
-	}
-	for i := range fs.Tasks {
-		if fs.Tasks[i].Status == "waiting" && fs.Tasks[i].AgentID == "" {
-			fs.Tasks[i].AgentID = agentID
-			return
-		}
-	}
 }
 
 // appendFanoutTaskTool folds a subagent tool event into a task ring buffer.
@@ -415,32 +444,6 @@ func appendFanoutTaskTool(t *FanoutTaskState, stepID, label, phase string) {
 	}
 }
 
-// updateFanoutTaskTool locates the task owning agentID and folds a tool event in.
-func (r *Reducer) updateFanoutTaskTool(fs *fanoutState, agentID, stepID, label, phase string) {
-	if fs == nil || agentID == "" {
-		return
-	}
-	for i := range fs.Tasks {
-		if fs.Tasks[i].AgentID == agentID {
-			appendFanoutTaskTool(&fs.Tasks[i], stepID, label, phase)
-			return
-		}
-	}
-}
-
-// updateFanoutTaskTokens adds token usage to the task owning agentID.
-func (r *Reducer) updateFanoutTaskTokens(fs *fanoutState, agentID string, tokens int) {
-	if fs == nil || agentID == "" || tokens <= 0 {
-		return
-	}
-	for i := range fs.Tasks {
-		if fs.Tasks[i].AgentID == agentID {
-			fs.Tasks[i].TokenCount += tokens
-			return
-		}
-	}
-}
-
 // fanoutToolLabel builds a display label for a subagent tool event.
 func fanoutToolLabel(msg Message) string {
 	if inv := strings.TrimSpace(msg.ToolMeta.Invocation); inv != "" {
@@ -450,22 +453,6 @@ func fanoutToolLabel(msg Message) string {
 		return name
 	}
 	return "tool"
-}
-
-// updateFanoutTaskStatus finds a task by agentID in the fanout and updates its status and error.
-func (r *Reducer) updateFanoutTaskStatus(fs *fanoutState, agentID, status, errText string) {
-	if fs == nil || agentID == "" {
-		return
-	}
-	for i := range fs.Tasks {
-		if fs.Tasks[i].AgentID == agentID {
-			fs.Tasks[i].Status = status
-			if errText != "" {
-				fs.Tasks[i].Error = errText
-			}
-			return
-		}
-	}
 }
 
 // removeSubagentRoster removes a subagent from the agent roster.
@@ -483,171 +470,704 @@ func (r *Reducer) removeSubagentRoster(agentID string) {
 	r.agentRosterOrder = filtered
 }
 
-// // updateFanoutTaskActivity finds a task by agentID in the fanout and updates its activity text.
-func (r *Reducer) updateFanoutTaskActivity(fs *fanoutState, agentID, activity string) {
-	if fs == nil || agentID == "" {
+// standaloneExecStepID is the card id of an execution dispatched with no call:
+// the reviewer of a plan the user asked about, an engine-dispatched helper. It
+// is keyed by the execution, so the second delivery of one spawn (the direct
+// notification and the run-step mirror) finds the same card.
+func standaloneExecStepID(executionID, taskID string) string {
+	id := strings.TrimSpace(executionID)
+	if id == "" {
+		id = strings.TrimSpace(taskID)
+	}
+	return "subagent-exec:" + id
+}
+
+// setCardTaskOfAgent records which card task an agent's current execution
+// belongs to.
+func (r *Reducer) setCardTaskOfAgent(agentID string, ref cardTaskRef) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
 		return
 	}
+	if r.cardTaskOfAgent == nil {
+		r.cardTaskOfAgent = make(map[string]cardTaskRef)
+	}
+	r.cardTaskOfAgent[agentID] = ref
+}
+
+// dropCardTaskOfAgent forgets an agent's execution binding: the execution
+// ended, and the next one names the card it belongs to.
+func (r *Reducer) dropCardTaskOfAgent(agentID string) {
+	delete(r.cardTaskOfAgent, strings.TrimSpace(agentID))
+}
+
+// cardTaskOf looks up the card task an agent's current execution belongs to.
+func (r *Reducer) cardTaskOf(agentID string) (*fanoutState, *FanoutTaskState) {
+	ref, ok := r.cardTaskOfAgent[strings.TrimSpace(agentID)]
+	if !ok {
+		return nil, nil
+	}
+	fs := r.findFanoutByStepID(ref.stepID)
+	if fs == nil || ref.index < 0 || ref.index >= len(fs.Tasks) {
+		return nil, nil
+	}
+	return fs, &fs.Tasks[ref.index]
+}
+
+// adoptReplayedCards takes over the card state a resume's replay built. The
+// replay renders through its own reducer, which is then discarded, while the
+// events that still arrive for the resumed conversation — this process's
+// reaper settling a subagent the killed one left running, first among them —
+// reach the live reducer, which never saw the dispatch. Handing the replayed
+// cards over keeps one binding: the ended settles the card on screen, with the
+// stop time its payload stamps, exactly as the full replay settles it from the
+// log. The replayed conversation is everything on screen after the switch, so
+// its state replaces whatever an earlier conversation left behind.
+func (r *Reducer) adoptReplayedCards(from *Reducer) {
+	r.fanoutStates = from.fanoutStates
+	r.cardTaskOfAgent = from.cardTaskOfAgent
+	r.queryRowsOfExecution = from.queryRowsOfExecution
+	r.endedExecutions = from.endedExecutions
+}
+
+// bindFanoutTaskToSpawn binds a spawned execution to a card task: the task now
+// runs as this agent, its clock starts at the spawn, and the agent's tool
+// messages find the row through cardTaskOfAgent. A task already settled by its
+// own end — a re-delivered spawn arriving after it — keeps its outcome.
+func (r *Reducer) bindFanoutTaskToSpawn(fs *fanoutState, index int, m SubagentSpawnedMsg) {
+	if fs == nil || index < 0 || index >= len(fs.Tasks) {
+		return
+	}
+	t := &fs.Tasks[index]
+	started := m.Timestamp
+	if started.IsZero() {
+		started = time.Now()
+	}
+	t.AgentID = strings.TrimSpace(m.AgentID)
+	t.ExecutionID = strings.TrimSpace(m.ExecutionID)
+	t.StartedAt = started
+	if fanoutTaskTerminal(t.Status) {
+		// The task's outcome already arrived — a re-delivered spawn after its
+		// end, or a replay whose completed row settled it before the events.
+		// The identity is still the fact this message carries.
+		return
+	}
+	t.Status = "running"
+	t.EndedAt = time.Time{}
+	if t.Title == "" {
+		t.Title = firstNonEmpty(strings.TrimSpace(m.Title), tool.SubagentTaskTitle("", strings.TrimSpace(m.Task)))
+	}
+	if t.SubagentType == "" {
+		t.SubagentType = strings.TrimSpace(m.AgentType)
+	}
+	r.setCardTaskOfAgent(m.AgentID, cardTaskRef{stepID: fs.StepID, index: index})
+}
+
+// settleFanoutTaskOnEnd writes an execution's outcome into the card task it
+// was bound to. The clock stops at the payload's own stop time — a reaped
+// execution was already dead when the reaper said so.
+func settleFanoutTaskOnEnd(t *FanoutTaskState, m SubagentEndedMsg, status string) {
+	t.Status = status
+	t.Error = strings.TrimSpace(m.Error)
+	ended := m.FinishedAt
+	if ended.IsZero() {
+		ended = m.Timestamp
+	}
+	if !ended.IsZero() && !t.StartedAt.IsZero() {
+		t.EndedAt = ended
+	}
+}
+
+// fanoutTaskTerminal reports whether a task's outcome is final.
+func fanoutTaskTerminal(status string) bool {
+	switch status {
+	case "done", "failed", "cancelled", "skipped":
+		return true
+	default:
+		return false
+	}
+}
+
+// subagentQueryVerb reports whether a verb's card is a snapshot of its call.
+func subagentQueryVerb(verb string) bool {
+	switch strings.TrimSpace(verb) {
+	case "status", "wait", "close", "list":
+		return true
+	default:
+		return false
+	}
+}
+
+// fanoutTaskFromFacts copies one task's facts into a card task. The facts'
+// seconds become times; a running clock needs only its start.
+func fanoutTaskFromFacts(task event.SubagentCallTask) FanoutTaskState {
+	out := FanoutTaskState{
+		Title:         strings.TrimSpace(task.Title),
+		SubagentType:  strings.TrimSpace(task.AgentType),
+		AgentID:       strings.TrimSpace(task.Key),
+		Status:        strings.TrimSpace(task.Status),
+		Error:         strings.TrimSpace(task.Error),
+		ExecutionID:   strings.TrimSpace(task.ExecutionID),
+		TimedOut:      task.TimedOut,
+		StopRequested: task.StopRequested,
+	}
+	if task.StartedAt > 0 {
+		out.StartedAt = time.Unix(task.StartedAt, 0).UTC()
+	}
+	if task.FinishedAt > 0 {
+		out.EndedAt = time.Unix(task.FinishedAt, 0).UTC()
+	}
+	return out
+}
+
+// applyFanoutTaskFacts settles one dispatch task from the call's facts,
+// keeping what the lifecycle events already said where they said more.
+func applyFanoutTaskFacts(t *FanoutTaskState, task event.SubagentCallTask) {
+	from := fanoutTaskFromFacts(task)
+	t.Status = from.Status
+	if from.Error != "" {
+		t.Error = from.Error
+	}
+	if from.Title != "" {
+		t.Title = from.Title
+	}
+	if from.SubagentType != "" {
+		t.SubagentType = from.SubagentType
+	}
+	if from.AgentID != "" {
+		t.AgentID = from.AgentID
+	}
+	if from.ExecutionID != "" {
+		t.ExecutionID = from.ExecutionID
+	}
+	if !from.StartedAt.IsZero() {
+		t.StartedAt = from.StartedAt
+	}
+	if !from.EndedAt.IsZero() {
+		t.EndedAt = from.EndedAt
+	}
+}
+
+// resolveQueryTaskTitles names a query call's tasks while only their ids are
+// known: the title the reducer already has for the agent behind the key. Rows
+// it cannot name stay titleless and are not drawn until the result names them.
+func (r *Reducer) resolveQueryTaskTitles(fs *fanoutState) {
 	for i := range fs.Tasks {
-		if fs.Tasks[i].AgentID == agentID {
-			fs.Tasks[i].Activity = activity
-			return
+		t := &fs.Tasks[i]
+		if t.Title != "" || t.AgentID == "" {
+			continue
+		}
+		if _, bound := r.cardTaskOf(t.AgentID); bound != nil {
+			t.Title = bound.Title
+			if t.SubagentType == "" {
+				t.SubagentType = bound.SubagentType
+			}
 		}
 	}
 }
 
-// emitFanoutFrame builds a FrameFanout frame from the current fanout state.
+// handleSubagentToolMessage is the card path every subagent_* call takes. The
+// start opens the card from the call's facts; the completion settles it — a
+// dispatch card takes the facts only for the tasks no lifecycle event ever
+// bound, a query card is redrawn from them whole.
+func (r *Reducer) handleSubagentToolMessage(msg Message) []Frame {
+	stepID := strings.TrimSpace(msg.StepID)
+	call := msg.ToolMeta.SubagentCall
+	owner := strings.TrimSpace(msg.AgentID)
+	buf := r.agentBuf(owner)
+	if fs := r.findFanoutByStepID(stepID); fs != nil {
+		fs.Running = false
+		fs.Duration = msg.Duration
+		r.applySubagentCallCompletion(fs, msg)
+		return r.withFlushedBuffers(buf, r.emitFanoutFrame(fs), msg.Timestamp)
+	}
+	runID := strings.TrimSpace(msg.RunID)
+	if runID == "" {
+		runID = r.activeRunID
+	}
+	fs := r.fanoutStateFromCall(stepID, call, msg, runID)
+	fs.Duration = msg.Duration
+	if r.fanoutStates == nil {
+		r.fanoutStates = make(map[string]*fanoutState)
+	}
+	r.fanoutStates[stepID] = fs
+	r.resolveQueryTaskTitles(fs)
+	if !fs.Running {
+		r.applySubagentCallCompletion(fs, msg)
+	}
+	return r.withFlushedBuffers(buf, r.emitFanoutFrame(fs), msg.Timestamp)
+}
+
+// fanoutStateFromCall opens a card from a call's facts: which tasks, named
+// how, and what the call does to them.
+func (r *Reducer) fanoutStateFromCall(stepID string, call *event.SubagentCall, msg Message, runID string) *fanoutState {
+	fs := &fanoutState{
+		StepID:       stepID,
+		Verb:         strings.TrimSpace(call.Verb),
+		Query:        subagentQueryVerb(call.Verb),
+		OwnerAgentID: strings.TrimSpace(msg.AgentID),
+		RunID:        runID,
+		Tasks:        make([]FanoutTaskState, 0, len(call.Tasks)),
+	}
+	for _, task := range call.Tasks {
+		fs.Tasks = append(fs.Tasks, fanoutTaskFromFacts(task))
+	}
+	fs.Running = msg.ToolPhase != event.RunEventToolCompleted &&
+		(strings.TrimSpace(msg.ToolMeta.Status) == "" || strings.EqualFold(strings.TrimSpace(msg.ToolMeta.Status), "running"))
+	return fs
+}
+
+// applySubagentCallCompletion settles a card from its completed call. The
+// call's own failure or cancellation is the header's story; the tasks take
+// their outcomes from the facts.
+func (r *Reducer) applySubagentCallCompletion(fs *fanoutState, msg Message) {
+	status := strings.TrimSpace(msg.ToolMeta.Status)
+	call := msg.ToolMeta.SubagentCall
+	switch {
+	case strings.EqualFold(status, "canceled"):
+		fs.CallStatus = "canceled"
+	case strings.EqualFold(status, "failed"):
+		fs.CallError = normalizeFailedToolContent(strings.TrimSpace(msg.Content))
+	}
+	if call == nil {
+		return
+	}
+	if fs.Query {
+		// The result replaces the rows: a snapshot reports the tasks as the
+		// record described them, titled by the record itself.
+		fs.Tasks = make([]FanoutTaskState, 0, len(call.Tasks))
+		for _, task := range call.Tasks {
+			fs.Tasks = append(fs.Tasks, fanoutTaskFromFacts(task))
+		}
+		r.followQueryRowsOfExecution(fs)
+		return
+	}
+	for i := range fs.Tasks {
+		if i >= len(call.Tasks) {
+			break
+		}
+		if fs.Tasks[i].AgentID != "" {
+			// Bound by a lifecycle event: its own end says how it went.
+			continue
+		}
+		applyFanoutTaskFacts(&fs.Tasks[i], call.Tasks[i])
+	}
+}
+
+// endedExecution is how one execution ended, as its ended event said.
+type endedExecution struct {
+	status string
+	at     time.Time
+}
+
+// followQueryRowsOfExecution remembers, per execution, the query rows that
+// reported it: when that execution ends in this session, the rows end with
+// it, so a snapshot taken while a task ran closes the way the task did.
+func (r *Reducer) followQueryRowsOfExecution(fs *fanoutState) {
+	for i := range fs.Tasks {
+		t := &fs.Tasks[i]
+		if t.ExecutionID == "" || t.Status != "running" {
+			continue
+		}
+		// A replayed transcript delivers a run's rows after its subagent
+		// events, so the end may already have been seen: the row settles from
+		// that record now, exactly as the live order settles from the event.
+		if ended, ok := r.endedExecutions[t.ExecutionID]; ok {
+			t.Status = ended.status
+			if !ended.at.IsZero() {
+				t.EndedAt = ended.at
+			}
+			continue
+		}
+		if r.queryRowsOfExecution == nil {
+			r.queryRowsOfExecution = make(map[string][]cardTaskRef)
+		}
+		ref := cardTaskRef{stepID: fs.StepID, index: i}
+		rows := r.queryRowsOfExecution[t.ExecutionID]
+		for _, existing := range rows {
+			if existing == ref {
+				continue
+			}
+		}
+		r.queryRowsOfExecution[t.ExecutionID] = append(rows, ref)
+	}
+}
+
+// settleQueryRowsOnExecutionEnd closes the query rows that reported an
+// execution when that execution ends. Every card a settled row belongs to is
+// re-emitted: the row on screen is the conversation's account of the task, and
+// state no frame carries never reaches it — the row's running clock would walk
+// past the execution's own end.
+func (r *Reducer) settleQueryRowsOnExecutionEnd(executionID string, status string, ended time.Time) []Frame {
+	if executionID == "" {
+		return nil
+	}
+	rows := r.queryRowsOfExecution[executionID]
+	delete(r.queryRowsOfExecution, executionID)
+	var out []Frame
+	for _, ref := range rows {
+		fs := r.findFanoutByStepID(ref.stepID)
+		if fs == nil || ref.index < 0 || ref.index >= len(fs.Tasks) {
+			continue
+		}
+		t := &fs.Tasks[ref.index]
+		t.Status = status
+		if !ended.IsZero() {
+			t.EndedAt = ended
+		}
+		out = append(out, r.emitFanoutFrame(fs))
+	}
+	return out
+}
+
+// emitFanoutFrame builds the FrameFanout card from the current state.
 func (r *Reducer) emitFanoutFrame(fs *fanoutState) Frame {
 	if fs == nil {
 		return Frame{}
 	}
-	runID := r.activeRunID
-	content, lineAgents := renderFanoutContent(fs)
+	content, lineAgents, clocks := renderFanoutContent(fs)
+	// The header names a duration only when the rows do not already: a
+	// query's own call, and a multi-task batch's wall clock. A single
+	// dispatched task carries its final elapsed on its row.
+	duration := fs.Duration
+	if !fs.Query && len(fs.Tasks) <= 1 {
+		duration = 0
+	}
 	return Frame{
 		Kind:             FrameFanout,
 		StepID:           fs.StepID,
-		RunID:            runID,
-		Final:            !fs.Running,
+		RunID:            r.activeRunID,
+		AgentID:          fs.OwnerAgentID,
+		Final:            fanoutCardSettled(fs),
 		Content:          content,
 		FanoutLineAgents: lineAgents,
-		Summary:          renderFanoutSummary(fs),
-		Duration:         fs.Duration,
+		FanoutLineClocks: clocks,
+		Summary:          fanoutCardHeader(fs),
+		Duration:         duration,
+		FanoutQuery:      fs.Query,
+		FanoutCallError:  fs.CallError,
 	}
 }
 
-// handleFanoutToolMessage processes subagent_fanout and subagent_run tool messages.
-// On start (no existing fanoutState): parses tasks from input and creates a new fanout block.
-// On completion (existing fanoutState): marks the fanout as done and emits the final frame.
-func (r *Reducer) handleFanoutToolMessage(msg Message, toolName string) []Frame {
-	stepID := strings.TrimSpace(msg.StepID)
-	buf := r.agentBuf(strings.TrimSpace(msg.AgentID))
+// fanoutCardSettled reports whether the card has nothing left in flight: its
+// call finished and none of its tasks is running or waiting. A query card
+// settles with its call — the rows it leaves running describe a snapshot.
+func fanoutCardSettled(fs *fanoutState) bool {
+	switch fanoutCardPhase(fs) {
+	case "running", "starting":
+		return false
+	default:
+		return true
+	}
+}
 
-	// Check if this is a completion (fanout state already exists).
-	if fs := r.findFanoutByStepID(stepID); fs != nil {
+// fanoutCardPhase is which header row the card shows: starting, running, the
+// settled done/failed forms, or the canceled label.
+func fanoutCardPhase(fs *fanoutState) string {
+	if fs.CallStatus == "canceled" {
+		return "canceled"
+	}
+	if fs.CallError != "" {
+		return "failed"
+	}
+	if fs.Query {
+		if fs.Running {
+			return "running"
+		}
+		return "done"
+	}
+	if fs.Running || fanoutAnyTaskLive(fs) {
+		// A send or a review whose agent has not begun — and none has ended —
+		// is starting one; every other dispatch is already going.
+		if (fs.Verb == "send" || fs.Verb == "review") &&
+			!fanoutAnyTaskRunning(fs) && !fanoutAnyTaskTerminal(fs) {
+			return "starting"
+		}
+		return "running"
+	}
+	return "done"
+}
+
+// fanoutAnyTaskTerminal reports whether any task already reached an outcome.
+func fanoutAnyTaskTerminal(fs *fanoutState) bool {
+	for _, t := range fs.Tasks {
+		if fanoutTaskTerminal(t.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func fanoutAnyTaskRunning(fs *fanoutState) bool {
+	for _, t := range fs.Tasks {
+		if t.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+func fanoutAnyTaskLive(fs *fanoutState) bool {
+	for _, t := range fs.Tasks {
+		if t.Status == "running" || t.Status == "waiting" {
+			return true
+		}
+	}
+	return false
+}
+
+// fanoutTaskCountLabel is the "<N> [<type>] task(s)" a subagent card header
+// counts its tasks with: the type appears when every task runs as the same
+// known type. The rule is pkg/tool's subagentTaskCountLabel restated, so the
+// card header and the transcript summary cannot disagree.
+func fanoutTaskCountLabel(fs *fanoutState, withType bool) string {
+	n := len(fs.Tasks)
+	noun := "tasks"
+	if n == 1 {
+		noun = "task"
+	}
+	if !withType || n == 0 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	first := ""
+	same := true
+	for i, t := range fs.Tasks {
+		typ := strings.TrimSpace(t.SubagentType)
+		if typ == "" {
+			same = false
+			break
+		}
+		if i == 0 {
+			first = typ
+		} else if typ != first {
+			same = false
+			break
+		}
+	}
+	if !same {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %s %s", n, first, noun)
+}
+
+// fanoutCardHeader is the card's header row: the verb's phrase for the phase
+// the card is in, its task count, and — for a settled dispatch whose tasks
+// did not all succeed — the outcome tally. One table, one place; the lowercase
+// forms are what pkg/tool's step summaries say.
+func fanoutCardHeader(fs *fanoutState) string {
+	phase := fanoutCardPhase(fs)
+	if phase == "canceled" {
+		return "Canceled " + fanoutCanceledLabel(fs)
+	}
+	count := func(withType bool) string { return fanoutTaskCountLabel(fs, withType) }
+	var head string
+	switch fs.Verb {
+	case "send":
+		switch phase {
+		case "starting":
+			head = "Starting " + count(true) + " in background…"
+		case "running":
+			head = "Running " + count(true) + " in background…"
+		case "failed":
+			head = "Failed to start " + count(true) + " in background"
+		default:
+			head = "Ran " + count(true) + " in background"
+		}
+	case "continue":
+		switch phase {
+		case "running":
+			head = "Continuing " + count(true) + "…"
+		case "failed":
+			head = "Failed to continue " + count(true)
+		default:
+			head = "Continued " + count(true)
+		}
+	case "status":
+		switch phase {
+		case "running":
+			head = "Checking " + count(false) + "…"
+		case "failed":
+			head = "Failed to check " + count(false)
+		default:
+			head = "Checked " + count(true)
+		}
+	case "wait":
+		switch phase {
+		case "running":
+			head = "Waiting for " + count(true) + "…"
+		case "failed":
+			head = "Failed to wait for " + count(false)
+		default:
+			head = "Waited for " + count(true)
+		}
+	case "close":
+		switch phase {
+		case "running":
+			head = "Stopping " + count(false) + "…"
+		case "failed":
+			head = "Failed to stop " + count(false)
+		default:
+			head = "Stopped " + count(true)
+		}
+	case "list":
+		switch phase {
+		case "running":
+			head = "Listing tasks…"
+		case "failed":
+			head = "Failed to list tasks"
+		default:
+			head = "Listed " + count(false)
+		}
+	case "review":
+		switch phase {
+		case "starting":
+			head = "Starting " + count(true) + "…"
+		case "running":
+			head = "Running " + count(true) + "…"
+		case "failed":
+			head = "Failed to start " + count(true)
+		default:
+			head = "Ran " + count(true)
+		}
+	default: // "run": subagent_run, subagent_fanout, dispatches with no call
+		switch phase {
+		case "running":
+			head = "Running " + count(true) + "…"
+		case "failed":
+			head = "Failed to run " + count(true)
+		default:
+			head = "Ran " + count(true)
+		}
+	}
+	if phase == "done" && !fs.Query {
+		if breakdown := fanoutOutcomeBreakdown(fs); breakdown != "" {
+			head += " · " + breakdown
+		}
+	}
+	return head
+}
+
+// fanoutOutcomeBreakdown counts the outcomes a settled dispatch card reports
+// on its header. All-done needs no arithmetic; anything else lists every
+// non-zero count, done included.
+func fanoutOutcomeBreakdown(fs *fanoutState) string {
+	var done, failed, cancelled, skipped int
+	for _, t := range fs.Tasks {
+		switch t.Status {
+		case "done":
+			done++
+		case "failed":
+			failed++
+		case "cancelled":
+			cancelled++
+		case "skipped":
+			skipped++
+		}
+	}
+	if failed+cancelled+skipped == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	parts = append(parts, fmt.Sprintf("%d done", done))
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	if cancelled > 0 {
+		parts = append(parts, fmt.Sprintf("%d cancelled", cancelled))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d skipped", skipped))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// fanoutCanceledLabel is what a canceled call says it was doing, in the voice
+// the invocation labels use ("wait for X", "run 3 tasks").
+func fanoutCanceledLabel(fs *fanoutState) string {
+	name := ""
+	for _, t := range fs.Tasks {
+		if t.Title != "" {
+			name = t.Title
+			break
+		}
+	}
+	switch fs.Verb {
+	case "send":
+		return "send " + name
+	case "continue":
+		return "continue " + name
+	case "status":
+		return "check " + name
+	case "wait":
+		return "wait for " + name
+	case "close":
+		return "stop " + name
+	case "list":
+		return "list tasks"
+	case "review":
+		if fs.ReviewTarget != "" {
+			return "review the plan with " + fs.ReviewTarget
+		}
+		return "review the plan"
+	default:
+		if len(fs.Tasks) > 1 {
+			return "run " + fanoutTaskCountLabel(fs, true)
+		}
+		return "run " + name
+	}
+}
+
+// cancelInFlightQueryCards settles the query cards a run or an agent leaves
+// behind: their call never completed, so the card says the call was canceled
+// rather than waiting forever. Dispatch cards are left alone — their agents
+// outlive the call and the turn.
+func (r *Reducer) cancelInFlightQueryCards(runID, ownerAgentID string) []Frame {
+	var out []Frame
+	for _, fs := range r.fanoutStates {
+		if !fs.Query || !fs.Running {
+			continue
+		}
+		if runID != "" && fs.RunID != "" && fs.RunID != runID {
+			continue
+		}
+		if ownerAgentID != "" && fs.OwnerAgentID != ownerAgentID {
+			continue
+		}
 		fs.Running = false
-		fs.Duration = msg.Duration
-		// Update task statuses from the tool output for skipped/failed
-		// tasks that never sent a SubagentEndedMsg (e.g. empty prompt).
-		applyFanoutResults(fs, strings.TrimSpace(msg.Content))
-		settleUnreportedFanoutTasks(fs, msg.ToolMeta)
-		// Flush buffered text before emitting final fanout frame.
-		return r.withFlushedBuffers(buf, r.emitFanoutFrame(fs), msg.Timestamp)
+		fs.CallStatus = "canceled"
+		out = append(out, r.emitFanoutFrame(fs))
 	}
+	return out
+}
 
-	// Start: parse tasks from the tool input.
-	tasks := parseFanoutTasksFromMeta(msg.ToolMeta)
-	if len(tasks) == 0 {
-		// Fallback: render as a normal tool frame.
-		return r.withFlushedBuffers(buf, r.buildFrame(FrameTool, toolName, msg), msg.Timestamp)
+// openPlanReviewCard opens the plan review's card: one task, waiting, named
+// for what the review is of. The review request is the dispatch — the
+// reviewer's spawned event names the ReviewID as its parent tool call.
+func (r *Reducer) openPlanReviewCard(reviewID, provider, model, label string) *fanoutState {
+	stepID := strings.TrimSpace(reviewID)
+	if fs := r.findFanoutByStepID(stepID); fs != nil {
+		return fs
 	}
-
+	target := strings.TrimSpace(provider) + "/" + strings.TrimSpace(model)
+	if strings.TrimSpace(provider) == "" || strings.TrimSpace(model) == "" {
+		target = strings.TrimSpace(label)
+	}
 	fs := &fanoutState{
-		StepID:  stepID,
-		Tasks:   tasks,
-		Running: msg.ToolPhase != event.RunEventToolCompleted && (strings.TrimSpace(msg.ToolMeta.Status) == "" || strings.EqualFold(strings.TrimSpace(msg.ToolMeta.Status), "running")),
-	}
-	if !fs.Running {
-		applyFanoutResults(fs, strings.TrimSpace(msg.Content))
-		settleUnreportedFanoutTasks(fs, msg.ToolMeta)
+		StepID:       stepID,
+		Verb:         "review",
+		RunID:        r.activeRunID,
+		ReviewTarget: target,
+		Tasks: []FanoutTaskState{{
+			Title:        "Plan review",
+			SubagentType: run.PlanReviewSubagentType,
+			Status:       "waiting",
+		}},
 	}
 	if r.fanoutStates == nil {
 		r.fanoutStates = make(map[string]*fanoutState)
 	}
 	r.fanoutStates[stepID] = fs
-
-	return r.withFlushedBuffers(buf, r.emitFanoutFrame(fs), msg.Timestamp)
-}
-
-// settleUnreportedFanoutTasks gives every task that never reported an end the
-// outcome of the call that was supposed to dispatch it. A dispatch that failed
-// leaves its tasks waiting — no subagent ever spawned to speak for them — and a
-// card that then reads "Ran N tasks" hides the failure the run recorded. Both
-// arrival orders must settle identically: live reduces a started message and
-// then the completion, a replay reduces the completed row alone. The two paths
-// used to disagree, and the replay alone reported the failure.
-func settleUnreportedFanoutTasks(fs *fanoutState, meta tool.ToolMeta) {
-	if fs == nil {
-		return
-	}
-	for i := range fs.Tasks {
-		if fs.Tasks[i].Status != "waiting" && fs.Tasks[i].Status != "" {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(meta.Status), "failed") {
-			fs.Tasks[i].Status = "failed"
-		} else {
-			fs.Tasks[i].Status = "done"
-		}
-	}
-}
-
-// parseFanoutTasksFromMeta extracts FanoutTaskState items from the ToolMeta input.
-func parseFanoutTasksFromMeta(meta tool.ToolMeta) []FanoutTaskState {
-	if len(meta.Input) == 0 {
-		return nil
-	}
-	rawTasks, ok := meta.Input["tasks"]
-	if !ok {
-		// subagent_run: single task in "task" field.
-		taskPrompt := stringFromMetaInput(meta.Input, "task")
-		if taskPrompt == "" {
-			return nil
-		}
-		title := stringFromMetaInput(meta.Input, "title")
-		if title == "" {
-			title = truncateForDisplay(taskPrompt, 80)
-		}
-		subType := stringFromMetaInput(meta.Input, "subagent_type")
-		return []FanoutTaskState{{
-			Title:        title,
-			Prompt:       taskPrompt,
-			SubagentType: subType,
-			Status:       "waiting",
-		}}
-	}
-	arr, ok := rawTasks.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]FanoutTaskState, 0, len(arr))
-	for _, item := range arr {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		prompt := stringFromMap(m, "prompt")
-		title := stringFromMap(m, "title")
-		if title == "" {
-			title = truncateForDisplay(prompt, 80)
-		}
-		subType := stringFromMap(m, "subagent_type")
-		out = append(out, FanoutTaskState{
-			Title:        title,
-			Prompt:       prompt,
-			SubagentType: subType,
-			Status:       "waiting",
-		})
-	}
-	return out
-}
-
-func stringFromMetaInput(input map[string]any, key string) string {
-	return stringFromMap(input, key)
-}
-
-func stringFromMap(m map[string]any, key string) string {
-	if m == nil {
-		return ""
-	}
-	v, ok := m[key]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(s)
+	return fs
 }
 
 func (r *Reducer) AgentRosterSnapshot() AgentRosterSnapshot {
@@ -763,6 +1283,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			buf.reasoning.Reset()
 			buf.runningStepIDs = nil
 		}
+		// The turn's own query calls (subagent_status and friends) that never
+		// completed are canceled with it. A dispatch's agents outlive the
+		// turn, so those cards are deliberately left running.
+		out = append(out, r.cancelInFlightQueryCards(runID, "")...)
 		return EventResult{Frames: out, WorkedStatus: worked}
 	case TokenUsageDeltaMsg:
 		if r.tracker != nil && (m.InputTokens > 0 || m.OutputTokens > 0) {
@@ -774,18 +1298,12 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			// dedicated subagent counters so they survive the parent run's
 			// end-of-run reconciliation (ObserveRunEndForRun overwrites
 			// runUsage with the parent's authoritative Summary.Usage, which
-			// does not include subagent LLM calls).  Fanout subagents
-			// additionally update the fanout task token counters and emit a
-			// fanout frame.
+			// does not include subagent LLM calls).
 			if saID := strings.TrimSpace(m.AgentID); saID != "" {
 				// Use the parent's activeRunID for the per-run subagent
 				// accumulator so SnapshotRun(parentRunID) includes subagent
 				// tokens in the "Worked for" message and turn separator.
 				r.tracker.ObserveSubagentUsage(r.activeRunID, saID, m.InputTokens, m.OutputTokens)
-				if fs := r.findFanoutByAgentID(saID); fs != nil {
-					r.updateFanoutTaskTokens(fs, saID, m.InputTokens+m.OutputTokens)
-					return EventResult{Frames: []Frame{r.emitFanoutFrame(fs)}}
-				}
 				return EventResult{}
 			}
 			r.tracker.ObserveUsageDelta(runID, m.InputTokens, m.OutputTokens)
@@ -799,7 +1317,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			buf.assistant.Reset()
 			buf.reasoning.Reset()
 		}
-		return EventResult{}
+		// An aborted run takes its still-running query calls with it: the
+		// calls never complete, so their cards settle as canceled here the
+		// way the tool cards do below them (Renderer.FinalizePendingTools).
+		return EventResult{Frames: r.cancelInFlightQueryCards(r.activeRunID, "")}
 	case GoalStartedMsg:
 		if r.tracker != nil {
 			r.tracker.ObserveGoalRound(1)
@@ -869,8 +1390,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		}
 		return EventResult{Frames: frames}
 	case TokenBudgetUpdatedMsg:
+		// A budget tagged with an agent is that subagent's own gauge; it
+		// belongs to that subagent's view footer, never to the conversation's.
 		stats := composerTokenStatsFromBudget(m)
-		return EventResult{ComposerTokenStats: &stats}
+		return EventResult{ComposerTokenStats: &stats, ComposerTokenStatsAgent: strings.TrimSpace(m.AgentID)}
 	case PlanUpdatedMsg:
 		// A subagent's plan is its own: it belongs in that subagent's view, its
 		// progress belongs on that view's working line, and the composer's
@@ -878,7 +1401,13 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		// being overwritten by a worker's checklist.
 		agentID := strings.TrimSpace(m.Payload.AgentID)
 		if r.tracker != nil {
-			active := shortestActiveTaskTitle(m.Payload.Items, m.Payload.Explanation)
+			// The task in flight is the payload's own derivation, which the
+			// engine computed once; events persisted before it carried one
+			// still replay through the same rule, where it lives.
+			active := strings.TrimSpace(m.Payload.Active)
+			if active == "" {
+				active = shortestActiveTaskTitle(m.Payload.Items, m.Payload.Explanation)
+			}
 			if agentID == "" {
 				r.tracker.ObservePlanProgress(m.Payload.Completed, m.Payload.Total, active)
 			} else {
@@ -887,9 +1416,26 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		}
 		frame := Frame{Kind: FramePlan, Title: planTitle(m.Payload), Content: planText(m.Payload), RunID: r.activeRunID, Final: true, AgentID: agentID}
 		return EventResult{Frames: r.withFlushedBuffers(r.agentBuf(agentID), frame)}
+	case SubagentInputDeliveredMsg:
+		// A message the user sent this subagent reached its model: it is a user
+		// message in that subagent's own view, the way a delivered steer is one
+		// in the conversation. It never appears in the primary transcript.
+		text := strings.TrimSpace(m.Text)
+		agentID := strings.TrimSpace(m.AgentID)
+		if text == "" || agentID == "" {
+			return EventResult{}
+		}
+		return EventResult{Frames: []Frame{{
+			Kind:    FrameUser,
+			Title:   "you",
+			Content: text,
+			RunID:   strings.TrimSpace(m.RunID),
+			AgentID: agentID,
+			Final:   true,
+		}}}
 	case SubagentSpawnedMsg:
 		if r.tracker != nil {
-			r.tracker.ObserveAgent(strings.TrimSpace(m.AgentID), m.Timestamp)
+			r.tracker.ObserveAgent(strings.TrimSpace(m.AgentID), strings.TrimSpace(m.ExecutionID), m.Timestamp)
 		}
 		r.upsertSubagentRoster(m.AgentID, m.AgentType, m.Title, m.Task, "running")
 		// The dispatching agent's prompt opens the subagent's own view, ahead of
@@ -902,53 +1448,50 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			if r.tracker != nil {
 				r.tracker.ObserveGoalCheck(true)
 			}
-			r.markSubagentLifecycle(strings.TrimSpace(m.AgentID), subagentLifecycleRunning)
 			return EventResult{Frames: frames}
 		}
-		if fs, task := r.fanoutTaskForLifecycle(m.ParentToolCallID, m.TaskIndex); task != nil {
-			task.AgentID = strings.TrimSpace(m.AgentID)
-			r.updateFanoutTaskStatus(fs, task.AgentID, "running", "")
+		// Exact binding first: the dispatching call's id and the task's index
+		// in it. A dispatch the transcript cannot account for — a runtime
+		// dispatch, an unmigrated old send — opens a card of its own keyed by
+		// its execution, which the spawn's own re-delivery finds again.
+		if fs, _ := r.fanoutTaskForLifecycle(m.ParentToolCallID, m.TaskIndex); fs != nil {
+			r.bindFanoutTaskToSpawn(fs, m.TaskIndex, m)
 			return EventResult{Frames: append(frames, r.emitFanoutFrame(fs))}
 		}
-		// If this subagent belongs to a fanout block, update the task
-		// status and emit a replacement FrameFanout instead of a standalone status.
-		agentID := strings.TrimSpace(m.AgentID)
-		if fs := r.findFanoutByAgentID(agentID); fs != nil {
-			r.updateFanoutTaskStatus(fs, agentID, "running", "")
-			return EventResult{Frames: append(frames, r.emitFanoutFrame(fs))}
+		stepID := standaloneExecStepID(m.ExecutionID, m.TaskID)
+		fs := r.findFanoutByStepID(stepID)
+		if fs == nil {
+			fs = &fanoutState{
+				StepID: stepID,
+				Verb:   "run",
+				RunID:  r.activeRunID,
+				Tasks: []FanoutTaskState{{
+					Title: firstNonEmpty(strings.TrimSpace(m.Title),
+						tool.SubagentTaskTitle("", strings.TrimSpace(m.Task)),
+						strings.TrimSpace(m.AgentType)),
+					SubagentType: strings.TrimSpace(m.AgentType),
+					Status:       "waiting",
+				}},
+			}
+			if r.fanoutStates == nil {
+				r.fanoutStates = make(map[string]*fanoutState)
+			}
+			r.fanoutStates[stepID] = fs
 		}
-		// Also try to match by finding the first "waiting" task in any fanout
-		// (subagents are dispatched in order, so the next waiting task gets this agent).
-		if fs := r.findFanoutWithWaitingTask(); fs != nil {
-			r.assignFanoutTaskAgent(fs, agentID)
-			r.updateFanoutTaskStatus(fs, agentID, "running", "")
-			return EventResult{Frames: append(frames, r.emitFanoutFrame(fs))}
-		}
-		if !r.markSubagentLifecycle(agentID, subagentLifecycleRunning) {
-			// This agent is already announced as running (a re-delivered spawn,
-			// or a continuation that reuses the roster key); the roster row is
-			// refreshed above either way.
-			return EventResult{Frames: frames}
-		}
-		title := "subagent spawned"
-		if t := strings.TrimSpace(m.AgentType); t != "" {
-			title = "subagent " + t + " spawned"
-		}
-		content := subagentSummary(strings.TrimSpace(m.AgentType), strings.TrimSpace(m.TaskID), "")
-		frame := Frame{
-			Kind:                  FrameStatus,
-			Title:                 title,
-			Content:               content,
-			RunID:                 r.activeRunID,
-			AgentID:               strings.TrimSpace(m.AgentID),
-			SubagentLifecycleCard: true,
-			Final:                 true,
-		}
-		return EventResult{Frames: append(frames, frame)}
+		r.bindFanoutTaskToSpawn(fs, 0, m)
+		return EventResult{Frames: append(frames, r.emitFanoutFrame(fs))}
 	case SubagentEndedMsg:
 		status := strings.TrimSpace(m.Status)
 		if status == "" {
 			status = "done"
+		}
+		endStatus := status
+		if endStatus != "cancelled" {
+			if endStatus == "failed" || strings.TrimSpace(m.Error) != "" {
+				endStatus = "failed"
+			} else {
+				endStatus = "done"
+			}
 		}
 		agentID := strings.TrimSpace(m.AgentID)
 		if agentID == "" {
@@ -965,11 +1508,10 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			flushed = append(flushed, Frame{Kind: FrameAssistant, Content: strings.TrimSpace(m.Output), RunID: r.activeRunID, AgentID: agentID, Final: true})
 		}
 		buf.sawAssistant = false
-		// The closing frames belong to the subagent's own view; the fanout card
-		// and the lifecycle card below are the primary transcript's account of
-		// the same event. Both are needed: a user who opens the agent to read
-		// what happened must find the ending there, not only on the card they
-		// clicked to get in.
+		// The closing frames belong to the subagent's own view; the card is
+		// the conversation's account of the same event. Both are needed: a
+		// user who opens the agent to read what happened must find the ending
+		// there, not only on the card they clicked to get in.
 		if r.tracker != nil {
 			r.tracker.ObserveAgentEnded(agentID, m.Timestamp)
 		}
@@ -979,53 +1521,91 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			if r.tracker != nil {
 				r.tracker.ObserveGoalCheck(false)
 			}
-			r.markSubagentLifecycle(agentID, subagentLifecycleEnded)
 			return EventResult{Frames: append(flushed, closing...)}
 		}
-		// If this subagent belongs to a fanout block, update the task
-		// status and emit a replacement FrameFanout.
-		fs := r.findFanoutByAgentID(agentID)
-		if exact, task := r.fanoutTaskForLifecycle(m.ParentToolCallID, m.TaskIndex); task != nil {
-			task.AgentID = agentID
-			fs = exact
+		// The card task this end settles: the one its dispatching call names,
+		// else the one this agent's execution was bound to. An end whose start
+		// was never seen (a replay window that begins mid-execution) closes a
+		// card of its own, already ended.
+		fs, task := r.fanoutTaskForLifecycle(m.ParentToolCallID, m.TaskIndex)
+		if task == nil {
+			fs, task = r.cardTaskOf(agentID)
 		}
-		if fs != nil {
-			endStatus := status
-			if endStatus == "cancelled" {
-				endStatus = "cancelled"
-			} else if endStatus == "failed" || strings.TrimSpace(m.Error) != "" {
-				endStatus = "failed"
-			} else {
-				endStatus = "done"
+		if task == nil {
+			stepID := standaloneExecStepID(m.ExecutionID, m.TaskID)
+			fs = r.findFanoutByStepID(stepID)
+			if fs == nil {
+				fs = &fanoutState{
+					StepID: stepID,
+					Verb:   "run",
+					RunID:  r.activeRunID,
+					Tasks: []FanoutTaskState{{
+						Title:        firstNonEmpty(strings.TrimSpace(m.AgentType), "(empty task)"),
+						SubagentType: strings.TrimSpace(m.AgentType),
+						AgentID:      agentID,
+						ExecutionID:  strings.TrimSpace(m.ExecutionID),
+					}},
+				}
+				if r.fanoutStates == nil {
+					r.fanoutStates = make(map[string]*fanoutState)
+				}
+				r.fanoutStates[stepID] = fs
 			}
-			r.updateFanoutTaskStatus(fs, agentID, endStatus, strings.TrimSpace(m.Error))
-			return EventResult{Frames: append(append(flushed, closing...), r.emitFanoutFrame(fs))}
+			task = &fs.Tasks[0]
 		}
-		if !r.markSubagentLifecycle(agentID, subagentLifecycleEnded) {
-			return EventResult{Frames: append(flushed, closing...)}
+		settleFanoutTaskOnEnd(task, m, endStatus)
+		card := r.emitFanoutFrame(fs)
+		// The event's own clock settles everything this end touches: a task
+		// with no start of its own (a dispatch never bound) still knows when
+		// it stopped, and the rows following this execution end at that time.
+		ended := m.FinishedAt
+		if ended.IsZero() {
+			ended = m.Timestamp
 		}
-		flushed = append(flushed, closing...)
-		title := "subagent ended"
-		if t := strings.TrimSpace(m.AgentType); t != "" {
-			title = "subagent " + t + " ended"
-		}
-		content := subagentSummary(strings.TrimSpace(m.AgentType), strings.TrimSpace(m.TaskID), strings.TrimSpace(m.Status))
-		if errText := strings.TrimSpace(m.Error); errText != "" {
-			if content != "" {
-				content += "\n"
+		executionKey := firstNonEmpty(strings.TrimSpace(m.ExecutionID), agentID)
+		if executionKey != "" {
+			if r.endedExecutions == nil {
+				r.endedExecutions = make(map[string]endedExecution)
 			}
-			content += errText
+			r.endedExecutions[executionKey] = endedExecution{status: endStatus, at: ended}
 		}
-		frame := Frame{
-			Kind:                  FrameStatus,
-			Title:                 title,
-			Content:               content,
-			RunID:                 r.activeRunID,
-			AgentID:               strings.TrimSpace(m.AgentID),
-			SubagentLifecycleCard: true,
-			Final:                 true,
+		// The query rows that reported this execution end with it, and the
+		// agent's own in-flight query calls are canceled by its end.
+		extra := r.settleQueryRowsOnExecutionEnd(executionKey, endStatus, ended)
+		extra = append(extra, r.cancelInFlightQueryCards("", agentID)...)
+		r.dropCardTaskOfAgent(agentID)
+		return EventResult{Frames: append(append(append(flushed, closing...), card), extra...)}
+	case PlanReviewStartedMsg:
+		fs := r.openPlanReviewCard(m.ReviewID, m.Provider, m.Model, m.Label)
+		return EventResult{Frames: []Frame{r.emitFanoutFrame(fs)}}
+	case PlanReviewReviewedMsg:
+		fs := r.openPlanReviewCard(m.ReviewID, m.Provider, m.Model, m.Label)
+		task := &fs.Tasks[0]
+		outcome := strings.TrimSpace(m.Outcome)
+		switch outcome {
+		case "done":
+			if !fanoutTaskTerminal(task.Status) {
+				task.Status = "done"
+			}
+		case "stopped":
+			if !fanoutTaskTerminal(task.Status) {
+				// The review was stopped before its reviewer started; once
+				// one ran, its own ended event settles the task.
+				fs.CallStatus = "canceled"
+			}
+		default: // "failed", "timed_out"
+			if fanoutTaskTerminal(task.Status) {
+				// The reviewer ran and ended; this only adds the review's own
+				// account of why it did not produce one.
+				task.Error = firstNonEmpty(strings.TrimSpace(m.Error), task.Error)
+				break
+			}
+			// The reviewer never started: the request itself is what failed,
+			// and the card says so without naming a subject.
+			fs.CallError = strings.TrimSpace(m.Error)
+			task.Status = "failed"
 		}
-		return EventResult{Frames: append(flushed, frame)}
+		return EventResult{Frames: []Frame{r.emitFanoutFrame(fs)}}
 	case SessionSwitchedMsg:
 		frames := []Frame{}
 		content := sessionSummary(m)
@@ -1053,19 +1633,6 @@ func (r *Reducer) Reduce(msg any) EventResult {
 		return EventResult{RequestPermissionMgmt: true}
 	case SkillSelectionRequestedMsg:
 		return EventResult{RequestSkillSelect: true}
-	case ActivityStatusUpdatedMsg:
-		status := strings.TrimSpace(m.Status)
-		if status == "" {
-			return EventResult{}
-		}
-		r.updateSubagentActivity(strings.TrimSpace(m.AgentID), status)
-		// If this subagent belongs to a fanout block, update the activity
-		// text and emit a replacement FrameFanout.
-		if fs := r.findFanoutByAgentID(strings.TrimSpace(m.AgentID)); fs != nil {
-			r.updateFanoutTaskActivity(fs, strings.TrimSpace(m.AgentID), status)
-			return EventResult{Frames: []Frame{r.emitFanoutFrame(fs)}}
-		}
-		return EventResult{}
 	case QuitRequestedMsg:
 		return EventResult{
 			Frames:        []Frame{{Kind: FrameStatus, Title: "quit", Content: strings.TrimSpace(m.Reason), Final: true}},
@@ -1074,32 +1641,6 @@ func (r *Reducer) Reduce(msg any) EventResult {
 	default:
 		return EventResult{}
 	}
-}
-
-const (
-	subagentLifecycleRunning = "running"
-	subagentLifecycleEnded   = "ended"
-)
-
-// markSubagentLifecycle records that a subagent reached state and reports
-// whether that is news. A repeat of the state the agent is already in is the
-// second announcement of one event (the direct notification and the run-step
-// mirror both fire), and must not add a second card to the transcript. A state
-// the agent has not been in yet always is news: a continued subagent runs
-// again, and an end whose spawn was never seen still has to close the block.
-func (r *Reducer) markSubagentLifecycle(agentID, state string) bool {
-	agentID = strings.TrimSpace(agentID)
-	if agentID == "" {
-		return true
-	}
-	if r.agentLifecycle == nil {
-		r.agentLifecycle = make(map[string]string)
-	}
-	if r.agentLifecycle[agentID] == state {
-		return false
-	}
-	r.agentLifecycle[agentID] = state
-	return true
 }
 
 // subagentPromptFrames renders the dispatching agent's prompt in the
@@ -1167,30 +1708,6 @@ func (r *Reducer) upsertSubagentRoster(agentID, agentType, title, task, status s
 	if row.Status == "" {
 		row.Status = "running"
 	}
-	if !subagentStatusRunning(row.Status) {
-		row.Activity = ""
-	}
-	r.agentRoster[id] = row
-}
-
-// updateSubagentActivity stores the latest agentsummary activity text on the
-// matching roster row (keyed by the same id upsertSubagentRoster uses, i.e. the
-// subagent task id). No-op when the row is not yet known, so a summary that
-// races ahead of the spawn event is simply dropped rather than creating a
-// rosterless entry.
-func (r *Reducer) updateSubagentActivity(agentID, activity string) {
-	if r == nil {
-		return
-	}
-	id := strings.TrimSpace(agentID)
-	if id == "" || r.agentRoster == nil {
-		return
-	}
-	row, ok := r.agentRoster[id]
-	if !ok {
-		return
-	}
-	row.Activity = strings.TrimSpace(activity)
 	r.agentRoster[id] = row
 }
 
@@ -1205,10 +1722,6 @@ func (r *Reducer) updateSubagentStatus(agentID, status string) {
 	}
 	row.Status = strings.TrimSpace(status)
 	r.agentRoster[id] = row
-}
-
-func subagentStatusRunning(status string) bool {
-	return strings.EqualFold(strings.TrimSpace(status), "running")
 }
 
 func (r *Reducer) formatWorkedStatusTitle(workDuration time.Duration, runID string) string {
@@ -1337,6 +1850,12 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		}
 		agentID := strings.TrimSpace(msg.AgentID)
 		buf := r.agentBuf(agentID)
+		// A block of one kind ends when a block of the other kind starts, in
+		// either direction; the tool frame that usually sits between them is
+		// not what ends the text. Sealing the streamed answer here is what
+		// keeps the next text block its own block instead of a repeat of
+		// everything said so far.
+		out := r.flushAssistantFinal(buf)
 		runID := r.activeRunID
 		if rid := strings.TrimSpace(msg.RunID); rid != "" {
 			runID = rid
@@ -1350,17 +1869,17 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		buf.reasoning.WriteString(content)
 		text := strings.TrimSpace(buf.reasoning.String())
 		if text == "" {
-			return nil
+			return out
 		}
 		// Pass the full accumulated reasoning as Content (not just this delta)
 		// so the renderer re-wraps and redraws the whole thinking block. Sending
 		// only the delta makes token-level streaming print one fragment per line.
-		return []Frame{{
+		return append(out, Frame{
 			Kind:    FrameThinking,
 			Content: text,
 			RunID:   runID,
 			AgentID: agentID,
-		}}
+		})
 	case MsgKindUser:
 		buf := r.agentBuf("")
 		return r.withFlushedBuffers(buf, r.buildFrame(FrameUser, "you", msg), msg.Timestamp)
@@ -1383,9 +1902,12 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 			r.tracker.ObserveToolStep(strings.TrimSpace(msg.AgentID), stepID, strings.TrimSpace(msg.ToolName), strings.TrimSpace(msg.FilePath))
 		}
 		toolName := strings.TrimSpace(msg.ToolName)
-		// Route subagent_fanout and subagent_run to the fanout display path.
-		if toolName == "subagent_fanout" || toolName == "subagent_run" {
-			return r.handleFanoutToolMessage(msg, toolName)
+		// A subagent_* call is a card, whatever its verb and whoever called it —
+		// a nested dispatch from inside a subagent included. The facts on the
+		// meta are the card; a call with no task facts yet (subagent_list at its
+		// start) draws the header alone.
+		if msg.ToolMeta.SubagentCall != nil {
+			return r.handleSubagentToolMessage(msg)
 		}
 		agentID := strings.TrimSpace(msg.AgentID)
 		if agentID != "" && strings.EqualFold(strings.TrimSpace(msg.ToolMeta.Category), "approval") {
@@ -1408,16 +1930,11 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 			// painted a nameless "Ran" block beside the call it was gating.
 			return nil
 		}
-		// A tool from a fanout subagent folds into the fanout task live
-		// third-layer progress. Emit AgentID-tagged FrameTool for the per-agent
-		// view, then re-emit the FrameFanout for the main turn.
-		// The roster row shows what its subagent is doing right now, whether or
-		// not the agent belongs to a fanout block.
-		if agentID != "" && !msg.ToolOutputDelta {
-			r.updateSubagentActivity(agentID, fanoutToolLabel(msg))
-		}
-		if fs := r.findFanoutByAgentID(agentID); fs != nil {
-			r.updateFanoutTaskTool(fs, agentID, stepID, fanoutToolLabel(msg), strings.TrimSpace(msg.ToolPhase))
+		// A subagent's own tool calls fold into the card task its execution is
+		// bound to. Emit AgentID-tagged FrameTool for the per-agent view, then
+		// re-emit the card for the surface that shows it.
+		if fs, task := r.cardTaskOf(agentID); task != nil {
+			appendFanoutTaskTool(task, stepID, fanoutToolLabel(msg), strings.TrimSpace(msg.ToolPhase))
 			frames := r.withFlushedBuffers(r.agentBuf(agentID), r.buildFrame(FrameTool, toolName, msg), msg.Timestamp)
 			return append(frames, r.emitFanoutFrame(fs))
 		}
@@ -1531,12 +2048,7 @@ func (r *Reducer) flushBufferedText(buf *agentBuffer, at ...time.Time) []Frame {
 	}
 	out := make([]Frame, 0, 3)
 	out = append(out, r.flushReasoningFinal(buf, at...)...)
-	text := strings.TrimSpace(buf.assistant.String())
-	if text == "" {
-		return out
-	}
-	buf.assistant.Reset()
-	out = append(out, Frame{Kind: FrameAssistant, Content: text, RunID: r.activeRunID, Final: true, AgentID: buf.agentID})
+	out = append(out, r.flushAssistantFinal(buf)...)
 	return out
 }
 
@@ -1579,144 +2091,65 @@ func (r *Reducer) flushReasoningFinal(buf *agentBuffer, at ...time.Time) []Frame
 	}}
 }
 
-// subagentSummary builds a compact "type [task-id] status=ok" string. Empty
-// fields are skipped so spawn (no status yet) renders as "type [task-id]".
-func subagentSummary(agentType, taskID, status string) string {
-	parts := []string{}
-	if agentType != "" {
-		parts = append(parts, agentType)
+// flushAssistantFinal seals buffered assistant text into one final frame and
+// clears it — the mirror of flushReasoningFinal. A block of one kind ends
+// when a block of the other kind starts, in either direction; the tool frame
+// that usually sits between them is not what ends the text.
+func (r *Reducer) flushAssistantFinal(buf *agentBuffer) []Frame {
+	if buf == nil {
+		return nil
 	}
-	if taskID != "" {
-		parts = append(parts, "["+taskID+"]")
+	text := strings.TrimSpace(buf.assistant.String())
+	if text == "" {
+		return nil
 	}
-	if status != "" {
-		parts = append(parts, "status="+status)
-	}
-	return strings.Join(parts, " ")
+	buf.assistant.Reset()
+	return []Frame{{
+		Kind:    FrameAssistant,
+		Content: text,
+		RunID:   r.activeRunID,
+		Final:   true,
+		AgentID: buf.agentID,
+	}}
 }
 
-// applyFanoutResults parses the subagent_fanout tool output JSON and updates
-// task statuses for tasks skipped or failed without a SubagentEndedMsg (e.g.
-// tasks skipped because their prompt was empty).
-func applyFanoutResults(fs *fanoutState, content string) {
-	if fs == nil {
-		return
-	}
-	content = strings.TrimSpace(content)
-	if content == "" || !strings.HasPrefix(content, "{") {
-		return
-	}
-	var wrapper struct {
-		Results []struct {
-			Index int    `json:"index"`
-			Error string `json:"error,omitempty"`
-			OK    bool   `json:"ok"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal([]byte(content), &wrapper); err != nil {
-		return
-	}
-	for _, r := range wrapper.Results {
-		if r.Index < 0 || r.Index >= len(fs.Tasks) {
-			continue
-		}
-		t := &fs.Tasks[r.Index]
-		if t.Status == "waiting" || t.Status == "" {
-			if r.OK {
-				t.Status = "done"
-			} else if strings.HasPrefix(strings.TrimSpace(r.Error), "skipped") {
-				t.Status = "skipped"
-				t.Error = strings.TrimSpace(r.Error)
-			} else {
-				t.Status = "failed"
-				if errText := strings.TrimSpace(r.Error); errText != "" {
-					t.Error = errText
-				}
-			}
-		}
-	}
-}
-
-// renderFanoutSummary builds the one-line summary for a fanout block header.
-func renderFanoutSummary(fs *fanoutState) string {
-	verb := "Running"
-	if !fs.Running {
-		verb = "Ran"
-	}
-	n := len(fs.Tasks)
-	typeLabel := ""
-	if n > 0 {
-		firstType := fs.Tasks[0].SubagentType
-		allSame := true
-		for _, t := range fs.Tasks {
-			if t.SubagentType != firstType {
-				allSame = false
-				break
-			}
-		}
-		if allSame && firstType != "" {
-			typeLabel = " " + firstType
-		}
-	}
-	done := 0
-	failed := 0
-	skipped := 0
-	for _, t := range fs.Tasks {
-		switch t.Status {
-		case "done":
-			done++
-		case "failed":
-			failed++
-		case "skipped":
-			skipped++
-		}
-	}
-	if !fs.Running {
-		if failed > 0 || skipped > 0 {
-			extra := []string{}
-			if done > 0 || failed > 0 {
-				extra = append(extra, fmt.Sprintf("%d done", done))
-			}
-			if failed > 0 {
-				extra = append(extra, fmt.Sprintf("%d failed", failed))
-			}
-			if skipped > 0 {
-				extra = append(extra, fmt.Sprintf("%d skipped", skipped))
-			}
-			return fmt.Sprintf("%s %d%s tasks · %s", verb, n, typeLabel, strings.Join(extra, ", "))
-		}
-		return fmt.Sprintf("%s %d%s tasks", verb, n, typeLabel)
-	}
-	return fmt.Sprintf("%s %d%s tasks…", verb, n, typeLabel)
-}
-
-// renderFanoutContent builds the full multi-line content for a fanout block.
-// renderFanoutContent renders the fanout body and, alongside it, which subagent
-// owns each content line. The two are built in one pass on purpose: the
-// ownership map is what turns a click on a task row into "open that subagent's
-// view", and deriving it separately would let it drift out of step with the
-// text the user is actually clicking on.
+// renderFanoutContent builds the card's body and, alongside it, which
+// subagent owns each content line and where each task row's clock sits. The
+// three are built in one pass on purpose: the ownership map is what turns a
+// click on a task row into "open that subagent's view", and the clock is what
+// the renderer turns into the row's live or final elapsed — deriving either
+// separately would let it drift out of step with the text the user is actually
+// looking at.
 //
 // lineAgents[i] is the roster key of the subagent whose task produced content
-// line i, or "" for a line that belongs to no single agent.
-func renderFanoutContent(fs *fanoutState) (string, []string) {
+// line i, or "" for a line that belongs to no single agent. FanoutLineClocks
+// aligns the same way; only task title lines carry a clock.
+func renderFanoutContent(fs *fanoutState) (string, []string, []fanoutLineClock) {
 	lines := make([]string, 0, len(fs.Tasks)*2)
 	lineAgents := make([]string, 0, len(fs.Tasks)*2)
-	for _, t := range fs.Tasks {
+	clocks := make([]fanoutLineClock, 0, len(fs.Tasks)*2)
+	for i := range fs.Tasks {
+		t := &fs.Tasks[i]
 		agentID := strings.TrimSpace(t.AgentID)
-		// Every element of lines is exactly one content line, and lineAgents is
-		// indexed by that same line number: the renderer splits the joined
-		// content on newlines, reads each line's role from its leading
-		// whitespace, and resolves a click through that index. Text that
-		// carries its own line breaks — a described provider failure is several
-		// sentences — therefore becomes one prefixed line per break here.
-		// Added whole, its later sentences reached the renderer without the
-		// indent that marks a continuation, so they were drawn as new "└" task
-		// rows and every following line reported the wrong owner.
+		if fs.Query && strings.TrimSpace(t.Title) == "" {
+			// A query row the call could not name yet: the result will, and a
+			// row that says only an id says nothing.
+			continue
+		}
+		// Every element of lines is exactly one content line, and lineAgents
+		// and clocks are indexed by that same line number: the renderer splits
+		// the joined content on newlines, reads each line's role from its
+		// leading whitespace, and resolves a click through that index. Text
+		// that carries its own line breaks — a described provider failure is
+		// several sentences — therefore becomes one prefixed line per break
+		// here. Added whole, its later sentences reached the renderer without
+		// the indent that marks a continuation, so they were drawn as new "└"
+		// task rows and every following line reported the wrong owner.
 		add := func(prefix, text string) {
 			for _, line := range strings.Split(text, "\n") {
 				lines = append(lines, prefix+strings.TrimRight(line, "\r"))
 				lineAgents = append(lineAgents, agentID)
+				clocks = append(clocks, fanoutLineClock{})
 			}
 		}
 		head := strings.Builder{}
@@ -1730,29 +2163,24 @@ func renderFanoutContent(fs *fanoutState) (string, []string) {
 		case "skipped":
 			head.WriteString("\x1b[33m!\x1b[0m ")
 		}
-		title := singleDisplayLine(t.Title)
-		if title == "" {
-			title = truncateForDisplay(t.Prompt, 80)
-		}
-		head.WriteString(title)
-		add("", head.String())
-		// Stats line (when available)
-		if t.Status == "done" || t.Status == "failed" || t.Status == "skipped" {
-			parts := []string{}
-			if t.ToolTotal > 0 {
-				parts = append(parts, fmt.Sprintf("%d tool uses", t.ToolTotal))
-			}
-			if len(parts) > 0 {
-				add("  · ", strings.Join(parts, " · "))
-			}
-			// Show error/skip reason in third layer below the task title. The
-			// indent is repeated on every sentence so the whole reason reads as
-			// one continuation of the task above it.
-			if t.Error != "" {
-				add("  ", t.Error)
+		// The task's name is SubagentTaskTitle's answer — one line by
+		// construction — so the head row writes it as it stands. A dispatch
+		// task with no prompt was skipped before it had one.
+		head.WriteString(firstNonEmpty(strings.TrimSpace(t.Title), "(empty task)"))
+		lines = append(lines, head.String())
+		lineAgents = append(lineAgents, agentID)
+		clocks = append(clocks, fanoutLineClock{Start: t.StartedAt, End: t.EndedAt})
+		if fs.Query {
+			if phrase := fanoutQueryPhrase(fs, t); phrase != "" {
+				add("  · ", phrase)
 			}
 		}
-		// Live tool progress (third layer): recent tool labels.
+		// Reason line. The indent is repeated on every sentence so the whole
+		// reason reads as one continuation of the task above it.
+		if t.Error != "" && fanoutTaskTerminal(t.Status) {
+			add("  ", t.Error)
+		}
+		// Live tool progress (third layer): the most recent tool label.
 		overflow := t.ToolTotal - len(t.RecentTools)
 		for _, tool := range t.RecentTools {
 			add("  └ ", singleDisplayLine(tool.Label))
@@ -1760,17 +2188,31 @@ func renderFanoutContent(fs *fanoutState) (string, []string) {
 		if t.ToolTotal > 0 && overflow > 0 {
 			add("    ", fmt.Sprintf("… +%d tool uses", overflow))
 		}
-		// Activity line
-		if t.Activity != "" {
-			add("  ⎿  ", singleDisplayLine(t.Activity))
-		}
 	}
 	if len(lines) == 0 {
-		return "", nil
+		return "", nil, nil
 	}
 	// The trailing newline the previous formatting emitted is preserved so the
 	// rendered block keeps its final empty content line.
-	return strings.Join(lines, "\n") + "\n", lineAgents
+	return strings.Join(lines, "\n") + "\n", lineAgents, clocks
+}
+
+// fanoutQueryPhrase is the one-line status phrase under a query card's task
+// row: only what the call's moment can mean — a wait that ended with the task
+// still running, a stop that was asked for. The icon and the clock already say
+// running, done, failed and cancelled.
+func fanoutQueryPhrase(fs *fanoutState, t *FanoutTaskState) string {
+	parts := make([]string, 0, 2)
+	if fs.Verb == "list" && strings.TrimSpace(t.SubagentType) != "" {
+		parts = append(parts, strings.TrimSpace(t.SubagentType))
+	}
+	if t.TimedOut {
+		parts = append(parts, "still running when the wait ended")
+	}
+	if t.StopRequested {
+		parts = append(parts, "stop requested")
+	}
+	return strings.Join(parts, " · ")
 }
 
 // singleDisplayLine folds text that arrives with its own line breaks onto one
@@ -2033,12 +2475,11 @@ func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 
 // agentAtScreenRow reports which subagent the block under this row belongs to.
 //
-// Subagent lifecycle cards (spawned / ended) are retained in the PRIMARY
-// transcript carrying the agent's roster key, while the agent's own assistant,
-// reasoning and tool frames go to its per-agent view. That card is therefore
-// the durable way back into a subagent's transcript: the roster row disappears
-// when the subagent finishes, but the card stays in the history for the rest of
-// the session.
+// A subagent card is the conversation's durable account of that agent — the
+// roster row disappears when the subagent finishes, but the card stays — and a
+// nested card inside a subagent's view is that view's account of a
+// grandchild. So a fanout block answers by the row that was hit first (which
+// grandchild's task it is) and only then by the block's own owner.
 func (m *viewModel) agentAtScreenRow(vr viewportRender, screenRow int) (string, bool) {
 	blockID, _ := vr.blockAtRow(screenRow)
 	if blockID < 0 {
@@ -2048,12 +2489,15 @@ func (m *viewModel) agentAtScreenRow(vr viewportRender, screenRow int) (string, 
 	if b == nil {
 		return "", false
 	}
+	if b.frame.Kind == FrameFanout {
+		if agentID, ok := b.agentAtLocalRow(vr, screenRow); ok {
+			return agentID, true
+		}
+	}
 	if agentID := strings.TrimSpace(b.frame.AgentID); agentID != "" {
 		return agentID, true
 	}
-	// A fanout block shows one row per subagent task, so the answer depends on
-	// which row was hit rather than on the block as a whole.
-	return b.agentAtLocalRow(vr, screenRow)
+	return "", false
 }
 
 // agentAtLocalRow resolves a screen row to the subagent owning that row within
@@ -2382,8 +2826,16 @@ func foldBlock(b *viewBlock, full []string, width int, spinnerPhase int, cwdOpt 
 
 // toolBodyLines returns the tool output body from full, skipping past every
 // header line. renderCompactFrame emits the header (possibly wrapped across
-// multiple lines: first line starts with ●/○, continuations start with
-// "  │ " or "   ") followed by the body (lines starting with "  └ " from
+// multiple lines: first line starts with the status marker, continuations
+// start with "  │ ") followed by the body (lines starting with "  └ " from
+//
+// Every body a collapsible block draws opens on "  └ " (output blocks, the
+// Markdown and diff cards, a settled checkpoint), so a block without that row
+// has no body at all: a running tool with no output yet, an awaiting-approval
+// or header-only card, a checkpoint still in progress. Taking the rows past
+// the first as body counted a wrapped header's own continuations as output,
+// so a long running command was folded under its own header and those rows
+// were repeated below it as an unstyled "output" preview.
 // formatToolOutputBlock). When the header wraps, full[0] is only the first
 // header line and full[1:] still contains header continuations — which would
 // duplicate the fold header foldBlock builds separately. This skips past
@@ -2394,11 +2846,6 @@ func toolBodyLines(full []string) []string {
 		if strings.HasPrefix(plain, "  └ ") {
 			return full[i:]
 		}
-	}
-	// No body marker found (e.g. turn-diff card or pending tool): fall back to
-	// skipping just the first header line.
-	if len(full) > 1 {
-		return full[1:]
 	}
 	return nil
 }
@@ -2464,10 +2911,23 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 	animated := (toolStatusRunning(b.frame) && !toolStatusAwaitingApproval(b.frame)) ||
 		(b.frame.Kind == FrameMemoryCompact && !b.frame.Final) ||
 		(b.frame.Kind == FrameSkillInstall && !b.frame.Final)
+	// A subagent card with a running task clock depends on the second, not the
+	// spinner phase: the clock walks once a second, so keying it on the tick
+	// would re-render the whole card ten times for one visible change.
+	clockSec := 0
+	clocked := b.frame.Kind == FrameFanout && fanoutHasLiveClock(b.frame)
+	if clocked {
+		clockSec = int(time.Now().Unix())
+	}
 	if c.valid && c.width == width && c.cwd == cwd {
-		// Running tools and compact blocks depend on the animation phase; all
-		// other blocks are phase-independent and reuse their cached lines.
-		if !animated || c.spinnerPhase == spinnerPhase {
+		if clocked {
+			if c.clockSec == clockSec {
+				return c.lines
+			}
+		} else if !animated || c.spinnerPhase == spinnerPhase {
+			// Running tools and compact blocks depend on the animation phase;
+			// all other blocks are phase-independent and reuse their cached
+			// lines.
 			return c.lines
 		}
 	}
@@ -2476,10 +2936,23 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 	c.width = width
 	c.cwd = cwd
 	c.spinnerPhase = spinnerPhase
+	c.clockSec = clockSec
 	c.gen++
 	c.lines = lines
 	c.lineAgents = lineAgents
 	return lines
+}
+
+// fanoutHasLiveClock reports whether a subagent card holds a task row whose
+// execution is still running: its clock is computed at paint time from "now",
+// so the card changes once a second until the execution ends.
+func fanoutHasLiveClock(f Frame) bool {
+	for _, clock := range f.FanoutLineClocks {
+		if !clock.Start.IsZero() && clock.End.IsZero() {
+			return true
+		}
+	}
+	return false
 }
 
 // renderFrameLinesWithAgents renders a frame and, for a fanout block, reports
@@ -2854,7 +3327,7 @@ func (r *Renderer) buildComposerBlock(cs ComposerRenderState, termWidth int) com
 	if slashMode {
 		return r.buildSlashComposerBlock(cs, composerText, statusText, footerText, previewLines, cs.OverlayRows, termWidth)
 	}
-	return r.buildNormalComposerBlock(cs, composerText, statusText, footerText, previewLines, cs.OverlayRows, cs.AgentRoster, cs.RosterSelected, termWidth)
+	return r.buildNormalComposerBlock(cs, composerText, statusText, footerText, previewLines, cs.OverlayRows, cs.AgentRoster, termWidth)
 }
 
 func (r *Renderer) composerFooterText(termWidth int) string {
@@ -2877,21 +3350,20 @@ func (r *Renderer) composerFooterText(termWidth int) string {
 //
 // The conversation's footer answers "what is this session running and how much
 // context is left". A subagent's view answers the first question about that
-// subagent instead: the model is the one its type resolved to. It answers the
-// second about nothing — the conversation's token budget belongs to a
-// transcript the reader is not looking at, and how the subagent's own run is
-// going is stated, live and in full, by the working and worked lines inside the
-// view itself.
+// subagent instead: the model is the one its type resolved to. Its right half
+// answers the second question about that subagent — how much of its own
+// context window is left — the same way the conversation's does about the
+// conversation (owner requirement 4, formatComposerTokenStats).
 func (r *Renderer) composerFooterSidesLocked() (string, string) {
 	if view := strings.TrimSpace(r.activeView); view != "" {
-		return r.subagentFooterLeftLocked(view), ""
+		return r.subagentFooterLeftLocked(view), formatComposerTokenStats(r.composerTokens.get(view))
 	}
 	plan := ""
 	if r.planMode {
 		plan = planModeFooterLabel
 	}
 	return joinFooterSegments(plan, r.footer.Model, r.footer.ReasoningEffort),
-		formatComposerTokenStats(r.composerTokens)
+		formatComposerTokenStats(r.composerTokens.get(""))
 }
 
 // subagentFooterLeftLocked names the subagent whose view is open, how to leave
@@ -2901,12 +3373,15 @@ func (r *Renderer) composerFooterSidesLocked() (string, string) {
 // to tell two agents of one type apart: the whole "subagent-<uuid>" is 45
 // columns, which used to push the model and effort off the end of the line
 // entirely.
+//
+// The model is the one this execution's spawn announced — a dispatch-time
+// override, a type's own chain, or nothing. Nothing means the spawn predates
+// executions carrying models (a replayed old session): the segment is left out
+// rather than answered with the conversation's model, which the run may never
+// have used.
 func (r *Renderer) subagentFooterLeftLocked(agentID string) string {
 	agentType := r.subagentTypes[agentID]
-	model, effort := r.footer.Model, r.footer.ReasoningEffort
-	if own, ok := r.subagentModels[agentType]; ok {
-		model, effort = own.Model, own.ReasoningEffort
-	}
+	model, effort := r.subagentModels[agentID].Model, r.subagentModels[agentID].ReasoningEffort
 	return joinFooterSegments(
 		"viewing "+joinFooterSegments(agentType, shortAgentID(agentID)),
 		"esc to return", model, effort,
@@ -2925,7 +3400,7 @@ func joinFooterSegments(segments ...string) string {
 	return strings.Join(kept, " · ")
 }
 
-func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText, statusText, footerText string, previewLines []string, overlayRows []OverlayRow, roster AgentRosterSnapshot, rosterSelected int, termWidth int) composerBlock {
+func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText, statusText, footerText string, previewLines []string, overlayRows []OverlayRow, roster AgentRosterSnapshot, termWidth int) composerBlock {
 	displayText := composerText
 	if cs.ArgumentHint != "" {
 		displayText = composerText + "\x1b[38;5;245m " + cs.ArgumentHint + sharedBlockReset
@@ -2934,10 +3409,10 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	rosterVisible := len(overlayRows) == 0 && agentRosterHasRunningSubagent(roster)
 	rosterLines := []string(nil)
 	if rosterVisible {
-		// The cursor follows the view being shown, so it is resolved here,
-		// against the renderer that owns it, rather than tracked a second time
-		// by the caller.
-		marked := agentRosterMarkedIndex(roster, cs.RosterFocused, rosterSelected, r.activeView)
+		// The cursor is the renderer's own state — keyed by agent, kept on
+		// the view by every view change — so it is resolved here, against
+		// the renderer that owns it, rather than tracked by the caller.
+		marked := agentRosterMarkedIndex(roster, cs.RosterFocused, r.rosterCursorIndex(roster), r.activeView)
 		rosterLines = formatAgentRosterLines(roster, cs.RosterFocused, marked, termWidth)
 	}
 
@@ -3245,7 +3720,7 @@ func (r *Renderer) startCompactAnimationLocked() {
 				return
 			case <-ticker.C:
 				r.mu.Lock()
-				if !r.viewportMode || !r.hasRunningCompactLocked() {
+				if !r.viewportMode || !r.hasLiveBlockLocked() {
 					r.mu.Unlock()
 					return
 				}
@@ -3267,9 +3742,11 @@ func (r *Renderer) stopCompactAnimationLocked() {
 	}
 }
 
-// hasRunningCompactLocked reports whether the view on screen shows a running
-// compaction — the conversation's, or the subagent's whose view is open.
-func (r *Renderer) hasRunningCompactLocked() bool {
+// hasLiveBlockLocked reports whether the view on screen holds a block that
+// changes with time on its own: a running compaction — the conversation's, or
+// the subagent's whose view is open — or a subagent card with a task clock
+// still walking.
+func (r *Renderer) hasLiveBlockLocked() bool {
 	vm := &r.vm
 	if r.activeView != "" {
 		vm = r.perAgentVM[r.activeView]
@@ -3278,15 +3755,18 @@ func (r *Renderer) hasRunningCompactLocked() bool {
 		return false
 	}
 	for _, block := range vm.blocks {
-		if block.frame.Kind == FrameMemoryCompact && !block.frame.Final {
+		switch {
+		case block.frame.Kind == FrameMemoryCompact && !block.frame.Final:
+			return true
+		case block.frame.Kind == FrameFanout && fanoutHasLiveClock(block.frame):
 			return true
 		}
 	}
 	return false
 }
 
-func (r *Renderer) syncCompactAnimationLocked() {
-	if r.hasRunningCompactLocked() {
+func (r *Renderer) syncLiveBlockAnimationLocked() {
+	if r.hasLiveBlockLocked() {
 		r.startCompactAnimationLocked()
 		return
 	}
@@ -3898,6 +4378,15 @@ func (r *Renderer) paintViewportLocked() {
 		r.vpPainted = scrollShadow(r.vpPainted, bodyHeight, shift)
 		r.vpCursor = r.vpCursor.scrolled(bodyHeight, shift)
 	}
+	// With no shadow the painter knows nothing about the physical screen, so
+	// the frame starts from a blank one. Erasing row by row is not enough: a
+	// terminal narrowed under us (macOS Terminal) keeps each row's cells past
+	// the new right edge out of sight, erasing a row drops only its visible
+	// part, and the hidden tail slides into view as residue of the wider
+	// layout. Erasing the display drops every row whole.
+	if r.vpPainted == nil {
+		b.WriteString("\x1b[2J")
+	}
 	// Address only the rows whose bytes differ from what is on screen. A row
 	// that did not change receives nothing: it is not erased, so it cannot be
 	// caught blank by the terminal's next present. Each row is addressed
@@ -4176,6 +4665,15 @@ func (r *Renderer) SetActiveView(agentID string) {
 	r.setActiveViewLocked(agentID)
 }
 
+// assignActiveViewLocked is the single writer of the active view: it sets the
+// view and carries the roster cursor onto it, so nothing can change what is on
+// screen while leaving the cursor naming an agent the user is not looking at.
+// Caller holds r.mu.
+func (r *Renderer) assignActiveViewLocked(view string) {
+	r.activeView = view
+	r.rosterCursor = view
+}
+
 // setActiveViewLocked switches the displayed view and repaints. Caller holds
 // r.mu.
 func (r *Renderer) setActiveViewLocked(agentID string) {
@@ -4191,9 +4689,9 @@ func (r *Renderer) setActiveViewLocked(agentID string) {
 		Follow:       r.vpFollow,
 		NewMessages:  r.vpNewMessages,
 	}
-	r.activeView = nextView
+	r.assignActiveViewLocked(nextView)
 	// The sweep animates the view on screen, which just changed.
-	r.syncCompactAnimationLocked()
+	r.syncLiveBlockAnimationLocked()
 	if saved, ok := r.viewBrowseState[nextView]; ok {
 		r.vpScrollOffset = saved.ScrollOffset
 		r.vpFollow = saved.Follow
@@ -4323,7 +4821,7 @@ func (r *Renderer) RestoreBrowseState(saved RendererBrowseState) {
 	if vm := vmFor(active); active != "" && (vm == nil || len(vm.blocks) == 0) {
 		active = ""
 	}
-	r.activeView = active
+	r.assignActiveViewLocked(active)
 	view, ok := r.viewBrowseState[active]
 	if ok {
 		r.vpScrollOffset = view.ScrollOffset
@@ -4409,7 +4907,11 @@ func (r *Renderer) countNewMessageLocked(f Frame, visible *viewModel, blocksBefo
 func (r *Renderer) retainFrameLocked(f Frame) bool {
 	// Terminal errors with no owner are global: retain them in the primary
 	// transcript and mirror them into the currently visible subagent
-	// transcript. An error that names the subagent it belongs to is not global
+	// transcript — unless that view already ends on the same failure. A
+	// subagent stopped by a usage limit fails the turn that dispatched it with
+	// the very same sentence, so its view would otherwise read the news twice:
+	// once as its own "subagent failed" ending and again as the turn's error.
+	// An error that names the subagent it belongs to is not global
 	// and falls through to the per-agent routing below. A provider
 	// error can reach this point after RunEndedMsg has already rendered this
 	// turn's final Worked for status. Only move the error ahead of that status
@@ -4429,7 +4931,9 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 			r.vm.append(f)
 		}
 		if r.activeView != "" {
-			r.ensurePerAgentVM(r.activeView).append(f)
+			if vm := r.ensurePerAgentVM(r.activeView); !vm.endsOnError(f.Content) {
+				vm.append(f)
+			}
 		}
 		return true
 	}
@@ -4440,8 +4944,9 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 	// which is that view's last, and the "✔ You approved …" status confirming a
 	// tool call the user authorised on its behalf, which belongs beside the call
 	// it authorises rather than in a conversation that never showed the request.
-	// The lifecycle cards are the single exception: they name the agent but are
-	// the conversation's account of it, and the entry point back into this view.
+	// SubagentLifecycleCard marks the exception: a frame that names an agent
+	// but is the conversation's own account of it — a goal line opening the
+	// view of the check that decided it.
 	if f.AgentID != "" && !f.SubagentLifecycleCard {
 		vm := r.ensurePerAgentVM(f.AgentID)
 		if f.Kind == FrameStatus && f.InsertBeforeLastTool {
@@ -4451,8 +4956,8 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 		} else {
 			vm.replaceOrAppendBlock(f)
 		}
-		if f.Kind == FrameMemoryCompact {
-			r.syncCompactAnimationLocked()
+		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout {
+			r.syncLiveBlockAnimationLocked()
 		}
 		return r.activeView == f.AgentID
 	}
@@ -4461,8 +4966,8 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 	// installing → installed).
 	if f.Kind == FrameFanout || f.Kind == FrameTool || f.Kind == FrameMemoryCompact || f.Kind == FrameSkillInstall {
 		r.vm.replaceOrAppendBlock(f)
-		if f.Kind == FrameMemoryCompact {
-			r.syncCompactAnimationLocked()
+		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout {
+			r.syncLiveBlockAnimationLocked()
 		}
 	} else if f.Kind == FrameStatus && f.InsertBeforeLastTool {
 		// Approval confirmations explicitly land above the tool block they
@@ -4976,9 +5481,9 @@ func (r *Renderer) ViewportResetSession() {
 		return
 	}
 	r.vm.reset()
-	r.syncCompactAnimationLocked()
+	r.syncLiveBlockAnimationLocked()
 	r.perAgentVM = nil
-	r.activeView = ""
+	r.assignActiveViewLocked("")
 	r.viewBrowseState = nil
 	r.vpScrollOffset = 0
 	r.vpFollow = true
@@ -5928,12 +6433,16 @@ type Tracker struct {
 	agentRuns map[string]*agentRun
 }
 
-// agentRun is one subagent's own account of itself: the window it ran in and
-// what it spent inside that window.
+// agentRun is one subagent's own account of itself: the window its current
+// execution ran in and what it spent inside that window. executionID is the
+// run that window belongs to — the clock belongs to one execution, not to
+// the agent's identity, so a continued subagent starts a fresh window and
+// its Worked for line counts only the execution that just ended.
 type agentRun struct {
-	counters  Counters
-	startedAt time.Time
-	endedAt   time.Time
+	counters    Counters
+	executionID string
+	startedAt   time.Time
+	endedAt     time.Time
 }
 
 // AgentRunSnapshot is one subagent's own working figures: how long it has been
@@ -6053,14 +6562,18 @@ func (t *Tracker) ObserveToolStep(agentID, stepID, toolName, filePath string) {
 }
 
 // ObserveAgent increments the session subagent counter the first time agentID
-// is observed. Re-spawn of the same id (e.g. continue on existing worker) is a
-// no-op so the session "agents touched" total reflects unique subagent
-// identities. Empty agentID is a no-op. Safe for concurrent use. Phase 3b
+// is observed. Re-delivery of the same execution (a re-observed spawn event)
+// is a no-op so the session "agents touched" total reflects unique subagent
+// identities and a running clock is not reset by a duplicate. A different
+// executionID — a continue, a user-sent message in its view — opens a new
+// window: the clock restarts and any earlier end is forgotten, while the
+// checklist counters carry over, because the agent's list spans its
+// executions. Empty agentID is a no-op. Safe for concurrent use. Phase 3b
 // (locked by 2C).
 //
-// at is when the subagent started, which is what its own view's working and
+// at is when this execution started, which is what its view's working and
 // worked lines count from.
-func (t *Tracker) ObserveAgent(agentID string, at time.Time) {
+func (t *Tracker) ObserveAgent(agentID, executionID string, at time.Time) {
 	if t == nil {
 		return
 	}
@@ -6068,11 +6581,17 @@ func (t *Tracker) ObserveAgent(agentID string, at time.Time) {
 	if agentID == "" {
 		return
 	}
+	executionID = strings.TrimSpace(executionID)
 	if at.IsZero() {
 		at = time.Now()
 	}
 	t.mu.Lock()
-	if run := t.agentRunLocked(agentID); run.startedAt.IsZero() {
+	run := t.agentRunLocked(agentID)
+	if run.executionID != executionID {
+		run.executionID = executionID
+		run.startedAt = at
+		run.endedAt = time.Time{}
+	} else if run.startedAt.IsZero() {
 		run.startedAt = at
 	}
 	if _, seen := t.agentIDs[agentID]; !seen {
