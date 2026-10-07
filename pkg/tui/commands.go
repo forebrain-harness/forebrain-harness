@@ -270,6 +270,10 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 	callIndex, callRow := buildToolCallIndex(turns)
 	resultRow := toolResultRows(turns)
 	pending := make(map[int][]replayEventItem)
+	// A plan review's events carry the approval action they answer but no
+	// tool step of their own, so they are anchored to the call that action
+	// names — the same position its confirmation lines replay at.
+	reviewAnchors := planReviewAnchorByAction(events, callRow, resultRow)
 	// Every run that ended closes with its "Worked for" line after the last
 	// row it wrote. A failed run's error was the last thing it said before
 	// that line live, so the error is drawn there too rather than wherever its
@@ -314,6 +318,13 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 		}
 		eventCount++
 		pos := approvalEventAnchorPosition(evt, callRow, resultRow)
+		if pos < 0 {
+			if id, ok := planReviewEventActionID(evt); ok {
+				if reviewPos, found := reviewAnchors[id]; found {
+					pos = reviewPos
+				}
+			}
+		}
 		if placed, ok := turn.CompactionPosition(turns, evt); ok {
 			pos = placed
 		}
@@ -545,6 +556,55 @@ func approvalEventToolStepID(evt event.RunEvent) string {
 		return strings.TrimSpace(p.ToolStepID)
 	default:
 		return ""
+	}
+}
+
+// planReviewAnchorByAction maps each approval action to the transcript position
+// its records replay at: the tool call the action names. A plan review's card
+// then shares one position with the confirmation lines of the approval it
+// answers, and the group's own sequence order puts the card between them.
+func planReviewAnchorByAction(events []event.RunEvent, callRow, resultRow map[string]int) map[string]int {
+	out := make(map[string]int)
+	for i := range events {
+		switch events[i].Type {
+		case event.RunEventApprovalReq, event.RunEventApprovalResolved:
+		default:
+			continue
+		}
+		var p struct {
+			ActionID string `json:"action_id"`
+		}
+		if json.Unmarshal(events[i].Payload, &p) != nil || strings.TrimSpace(p.ActionID) == "" {
+			continue
+		}
+		id := strings.TrimSpace(p.ActionID)
+		if _, seen := out[id]; seen {
+			continue
+		}
+		if pos := approvalEventAnchorPosition(events[i], callRow, resultRow); pos >= 0 {
+			out[id] = pos
+		}
+	}
+	return out
+}
+
+// planReviewEventActionID is the approval action a plan-review event answers.
+func planReviewEventActionID(evt event.RunEvent) (string, bool) {
+	switch evt.Type {
+	case event.RunEventPlanReviewStarted:
+		var p event.PlanReviewStartedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return "", false
+		}
+		return strings.TrimSpace(p.ActionID), true
+	case event.RunEventPlanReviewed:
+		var p event.PlanReviewedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return "", false
+		}
+		return strings.TrimSpace(p.ActionID), true
+	default:
+		return "", false
 	}
 }
 
@@ -1798,43 +1858,6 @@ func (c *commandController) handleMigrate(ctx context.Context, sessionID string)
 		session.RunMigrationAsync(context.Background(), runOpts)
 	})
 	return true
-}
-
-func (c *commandController) handleDiff(sessionID string, args []string) bool {
-	reply, handled := c.session.HandleDiffSlash(strings.TrimSpace(sessionID), "tui", args)
-	if !handled || strings.TrimSpace(reply) == "" {
-		return false
-	}
-	doc := event.Parse(reply)
-	if len(doc.Files) == 0 {
-		// Not a diff: the one sentence saying why there is none to show.
-		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "diff", Content: strings.TrimSpace(reply), Final: true})
-		return true
-	}
-	// Use the theme resolved in run.go before raw mode (cached on the renderer);
-	// re-probing here would run an OSC 11 query inside raw mode.
-	c.renderer.RenderFrame(Frame{
-		Kind:    FrameSystem,
-		Title:   diffFrameTitle(doc),
-		Content: RenderDiff(doc, c.renderer.DiffTheme()),
-		Final:   true,
-	})
-	return true
-}
-
-// diffFrameTitle says what /diff found: how many files changed and how many
-// lines were added and removed.
-func diffFrameTitle(doc event.DiffDoc) string {
-	added, removed := 0, 0
-	for _, f := range doc.Files {
-		added += f.Added
-		removed += f.Deleted
-	}
-	files := "1 file changed"
-	if len(doc.Files) != 1 {
-		files = fmt.Sprintf("%d files changed", len(doc.Files))
-	}
-	return fmt.Sprintf("%s · +%d −%d", files, added, removed)
 }
 
 // sessionFastAvailable reports whether the active session supports the /fast

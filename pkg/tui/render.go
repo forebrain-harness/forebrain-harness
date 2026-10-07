@@ -6096,7 +6096,7 @@ func renderDiffCore(files []event.FileStat, theme DiffTheme, bandW int) string {
 	if bandW < 20 {
 		bandW = 20
 	}
-	p := claudeDiffPaletteFor(theme)
+	p := diffPaletteFor(theme)
 
 	var sb strings.Builder
 	for i, f := range files {
@@ -6116,7 +6116,7 @@ func renderDiffCore(files []event.FileStat, theme DiffTheme, bandW int) string {
 				sb.WriteByte('\n')
 			}
 			for _, line := range hunk.Lines {
-				for _, row := range renderClaudeDiffLine(line, p, gutterW, bandW, lexer, style) {
+				for _, row := range renderDiffLine(line, p, gutterW, bandW, lexer, style) {
 					sb.WriteString(row)
 					sb.WriteByte('\n')
 				}
@@ -6163,10 +6163,10 @@ func softWrap(text string, maxWidth int) []string {
 	return wrapCardLine(text, maxWidth)
 }
 
-// claudeDiffPalette holds the truecolor row backgrounds and chroma style used
+// diffPalette holds the truecolor row backgrounds and chroma style used
 // for full-width add/del bands plus syntax highlighting. Context lines carry no
 // band.
-type claudeDiffPalette struct {
+type diffPalette struct {
 	noColor  bool
 	addBG    [3]uint8
 	delBG    [3]uint8
@@ -6256,14 +6256,14 @@ func plainSyntaxBrightnessFor(theme DiffTheme) syntaxBrightness {
 	return syntaxBrightness{target: plainLuminanceDark, lighten: true}
 }
 
-func claudeDiffPaletteFor(theme DiffTheme) claudeDiffPalette {
+func diffPaletteFor(theme DiffTheme) diffPalette {
 	if noColorActive() {
-		return claudeDiffPalette{noColor: true}
+		return diffPalette{noColor: true}
 	}
 	trueColor := terminalTrueColor()
 	switch theme {
 	case DiffThemeLight:
-		return claudeDiffPalette{
+		return diffPalette{
 			addBG:       [3]uint8{0xcc, 0xf2, 0xd4},
 			delBG:       [3]uint8{0xfb, 0xd5, 0xd2},
 			addBG256:    "194", // 256-color light green fallback
@@ -6276,7 +6276,7 @@ func claudeDiffPaletteFor(theme DiffTheme) claudeDiffPalette {
 			trueColor:   trueColor,
 		}
 	default: // dark + unknown
-		return claudeDiffPalette{
+		return diffPalette{
 			addBG:       [3]uint8{0x12, 0x4d, 0x1f},
 			delBG:       [3]uint8{0x5a, 0x18, 0x18},
 			addBG256:    "22", // 256-color dark green fallback
@@ -6298,7 +6298,7 @@ func claudeDiffPaletteFor(theme DiffTheme) claudeDiffPalette {
 // 24-bit colour: the cube has no dark green or dark red near them, so
 // quantisation lands on the grey ramp and the row loses the one thing the band
 // is for — saying at a glance whether the line was added or removed.
-func (p claudeDiffPalette) bandBG(rgb [3]uint8, fallback256 string) string {
+func (p diffPalette) bandBG(rgb [3]uint8, fallback256 string) string {
 	if p.trueColor {
 		return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", rgb[0], rgb[1], rgb[2])
 	}
@@ -6309,7 +6309,7 @@ func (p claudeDiffPalette) bandBG(rgb [3]uint8, fallback256 string) string {
 // gutter colour. ANSI dim (SGR 2) is deliberately never used inside a diff: it
 // halves the brightness of whatever the terminal's palette resolves to, which
 // is exactly the washed-out look the normalisation above exists to prevent.
-func (p claudeDiffPalette) meta(text string) string {
+func (p diffPalette) meta(text string) string {
 	if p.noColor || p.gutterColor == "" {
 		return text
 	}
@@ -6501,7 +6501,7 @@ type diffSeg struct {
 
 // resolveDiffHighlight picks the chroma lexer (by filename) and style for a
 // file. Returns (nil, nil) when color is disabled, so callers render plain text.
-func resolveDiffHighlight(path string, p claudeDiffPalette) (chroma.Lexer, *chroma.Style) {
+func resolveDiffHighlight(path string, p diffPalette) (chroma.Lexer, *chroma.Style) {
 	if p.noColor {
 		return nil, nil
 	}
@@ -6515,7 +6515,7 @@ func resolveDiffHighlight(path string, p claudeDiffPalette) (chroma.Lexer, *chro
 // highlightSegs tokenizes a single line of code with chroma and returns
 // foreground-colored segments. Tokenization is per-line, which loses cross-line
 // state (block comments, multi-line strings) but is adequate for diff rows.
-func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p claudeDiffPalette) []diffSeg {
+func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p diffPalette) []diffSeg {
 	plain := []diffSeg{{text: text}}
 	if lexer == nil || st == nil || strings.TrimSpace(text) == "" {
 		return plain
@@ -6543,7 +6543,7 @@ func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p claudeDi
 	return segs
 }
 
-// renderClaudeDiffLine renders one diff line (possibly soft-wrapped into
+// renderDiffLine renders one diff line (possibly soft-wrapped into
 // several visual rows) with a right-aligned line-number gutter, a +/-/space
 // marker, syntax-highlighted code, and for add/del lines a full-width
 // background band padded to bandW.
@@ -6551,7 +6551,7 @@ func highlightSegs(text string, lexer chroma.Lexer, st *chroma.Style, p claudeDi
 // gutterW is the width reserved for the line number. bandW is the total visible
 // width the band (and padding) should fill. lexer/st drive syntax highlighting
 // (both nil = plain code).
-func renderClaudeDiffLine(l event.DiffLine, p claudeDiffPalette, gutterW, bandW int, lexer chroma.Lexer, st *chroma.Style) []string {
+func renderDiffLine(l event.DiffLine, p diffPalette, gutterW, bandW int, lexer chroma.Lexer, st *chroma.Style) []string {
 	var num int
 	var marker, markerColor, bg string
 	band := false
@@ -6730,7 +6730,7 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 	}
 	f := doc.Files[0]
 
-	p := claudeDiffPaletteFor(theme)
+	p := diffPaletteFor(theme)
 	lexer, style := resolveDiffHighlight(path, p)
 	gutterW := diffGutterWidthFor(f.Hunks)
 	bandW := termWidthOrDefault() - 4 // 4 = tool-card prefix width
@@ -6746,7 +6746,7 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 			out = append(out, "    "+p.meta("⋮"))
 		}
 		for _, line := range hunk.Lines {
-			for _, row := range renderClaudeDiffLine(line, p, gutterW, bandW, lexer, style) {
+			for _, row := range renderDiffLine(line, p, gutterW, bandW, lexer, style) {
 				out = append(out, "    "+row)
 			}
 		}
@@ -6759,6 +6759,10 @@ func renderTurnDiffCard(content string, theme DiffTheme, maxRows int) (string, b
 // carries after its turn diff (tool.lspDiagnosticsSection) into the card rows
 // that follow the diff: one summary line, then the section's problem lines.
 // Long cards are folded by the existing foldBlock, so no folding happens here.
+//
+// Every row is wrapped at the content width here: the painter cuts a row at
+// the terminal edge (fitPaintRow), so a long compiler message emitted as one
+// row lost its tail.
 func lspDiagnosticsCardRows(content string) []string {
 	lines := strings.Split(content, "\n")
 	headerIdx := -1
@@ -6782,7 +6786,8 @@ func lspDiagnosticsCardRows(content string) []string {
 			}
 		}
 	}
-	rows := []string{"  └ " + summary}
+	width := termWidthOrDefault() - contentRightMargin
+	rows := lspDiagnosticsWrappedRows("  └ ", summary, width)
 	// The section's body is the ```text fence that follows the header.
 	for i := headerIdx + 1; i < len(lines); i++ {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```text") {
@@ -6793,10 +6798,34 @@ func lspDiagnosticsCardRows(content string) []string {
 				if strings.TrimSpace(lines[j]) == "" {
 					continue
 				}
-				rows = append(rows, "    "+lines[j])
+				// A problem line's own indent belongs to its lead, so the rows
+				// its message spills onto stay under the problem, not the file.
+				text := strings.TrimLeft(lines[j], " ")
+				indent := lines[j][:len(lines[j])-len(text)]
+				rows = append(rows, lspDiagnosticsWrappedRows("    "+indent, text, width)...)
 			}
 			return rows
 		}
+	}
+	return rows
+}
+
+// lspDiagnosticsWrappedRows wraps text after lead to width columns, each
+// continuation row hanging under the text.
+func lspDiagnosticsWrappedRows(lead, text string, width int) []string {
+	leadWidth := displayLineWidth(lead)
+	wrapWidth := width - leadWidth
+	if wrapWidth < 20 {
+		wrapWidth = 20
+	}
+	parts := wrapCardLine(text, wrapWidth)
+	rows := make([]string, len(parts))
+	for i, part := range parts {
+		if i == 0 {
+			rows[i] = lead + part
+			continue
+		}
+		rows[i] = strings.Repeat(" ", leadWidth) + part
 	}
 	return rows
 }
@@ -7302,10 +7331,24 @@ type panelLine struct {
 	lead  string
 	text  string
 	style *lipgloss.Style
+	// chips, when set, takes the place of text: items laid out left to right
+	// panelChipGap cells apart and wrapped whole, so a tab's name and its count
+	// never part across rows (the tab bar).
+	chips []string
+	// col, when colWidth > 0, is a column of its own between lead and text:
+	// the name of a two-column row. See columnRows.
+	col      string
+	colWidth int
 }
 
 // rows wraps the line at width.
 func (l panelLine) rows(width int) []string {
+	if len(l.chips) > 0 {
+		return l.chipRows(width)
+	}
+	if l.colWidth > 0 {
+		return l.columnRows(width)
+	}
 	leadWidth := displayLineWidth(l.lead)
 	chunks := wrapPanelWords(l.text, maxInt(1, width-leadWidth))
 	rows := make([]string, len(chunks))
@@ -7595,15 +7638,24 @@ func (b *panelBuilder) facts(facts []turn.StatusFact, styled map[string]string) 
 // box, a name column. The first row of a group takes the group's heading into
 // its focus, so bringing it into view never leaves the heading out.
 func (b *panelBuilder) selectable(selected bool, lead, text string) {
+	b.addSelectable(selected, panelLine{lead: lead, text: text})
+}
+
+// addSelectable puts the marker's margin before line's lead, making the line
+// the focus when it is the selected one. The first row of a group takes the
+// group's heading into its focus, so bringing it into view never leaves the
+// heading out.
+func (b *panelBuilder) addSelectable(selected bool, line panelLine) {
+	margin := panelIndent
 	if selected {
 		b.focusStart, b.focusEnd = len(b.body), len(b.body)+1
 		if b.heading >= 0 && b.grouped == 0 {
 			b.focusStart = b.heading
 		}
-		b.text(panelCursor+lead, text, nil)
-	} else {
-		b.text(panelIndent+lead, text, nil)
+		margin = panelCursor
 	}
+	line.lead = margin + line.lead
+	b.body = append(b.body, line)
 	b.grouped++
 }
 

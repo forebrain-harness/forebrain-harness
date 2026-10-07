@@ -96,7 +96,7 @@ func TestOfflineInstallZipIntoWorkspace(t *testing.T) {
 	require.NoError(t, err)
 	found := false
 	for _, entry := range entries {
-		if entry.Name == "demo" && entry.Source == string(SourceWorkspace) {
+		if entry.Name == "demo" && entry.Origin == OriginAgent {
 			found = true
 		}
 	}

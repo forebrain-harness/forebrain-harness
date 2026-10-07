@@ -48,6 +48,33 @@ func TestIsBlockedReadDevicePath(t *testing.T) {
 	}
 }
 
+// WriteFullFileForRoots was a production function that only the tests in this
+// package ever called: a thin composition of live code. It lives here, beside
+// the one test that calls it, so the production files carry no unused code
+// while the tests keep exercising the live functions underneath.
+func WriteFullFileForRoots(filePath, content string, roots []string) (string, error) {
+	if len(roots) == 0 {
+		return "", fmt.Errorf("no roots")
+	}
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return "", fmt.Errorf("file_path required")
+	}
+	abs, err := ResolveWithinRoots(filePath, roots)
+	if err != nil {
+		return "", err
+	}
+	unlock := lockFileWrite(abs)
+	defer unlock()
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return "", err
+	}
+	if err := atomicWrite(abs, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
 func TestWriteFullFileForRootsPreservesExistingPermissions(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "script.sh")

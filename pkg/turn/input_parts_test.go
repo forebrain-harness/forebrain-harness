@@ -501,7 +501,7 @@ func TestReplaceDynamicSourceRejectsRemovedSlashCommandNames(t *testing.T) {
 	ResetDynamic()
 	t.Cleanup(ResetDynamic)
 
-	for _, removed := range []string{"copy", "side", "statusline", "title", "todo"} {
+	for _, removed := range []string{"copy", "side", "statusline", "title", "todo", "diff", "help"} {
 		err := ReplaceDynamicSource("test-home-"+removed, []DynamicCommand{
 			{
 				Command: Command{

@@ -2285,6 +2285,59 @@ func TestPlanReviewCardUsesTheDispatchVerbs(t *testing.T) {
 	}
 }
 
+// The plan review happens while the exit-plan approval still holds it: the user
+// asks for the review, the reviewer runs, and only then does the user approve
+// the exit. The three records are one exchange, so the card reads between the
+// two confirmation lines, above the parked exit-plan call they both refer to —
+// not appended after it, where it would read as a footnote to the approval.
+func TestPlanReviewCardLandsBetweenTheApprovalConfirmations(t *testing.T) {
+	r := newComposerRenderer(t, 100, 40)
+	const asked = "✔ You asked zhipuai/glm-5.3-flash to review the plan"
+	const approved = "✔ You approved forebrain to exit plan mode"
+
+	reducer := &Reducer{}
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "the plan is written", Final: true})
+	r.RenderFrame(Frame{Kind: FrameTool, StepID: "call-exit", Title: "exit_plan_mode", Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: asked, InsertBeforeLastTool: true, Final: true})
+	for _, f := range reducer.Reduce(PlanReviewStartedMsg{
+		ReviewID: "rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+	}).Frames {
+		r.RenderFrame(f)
+	}
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: approved, InsertBeforeLastTool: true, Final: true})
+
+	got := make([]string, 0, len(r.vm.blocks))
+	for _, block := range r.vm.blocks {
+		switch block.frame.Kind {
+		case FrameAssistant:
+			got = append(got, "assistant")
+		case FrameTool:
+			got = append(got, "exit plan mode")
+		case FrameFanout:
+			got = append(got, "card:"+block.frame.StepID)
+		case FrameStatus:
+			got = append(got, "status:"+strings.TrimSpace(stripANSI(block.frame.Content)))
+		default:
+			got = append(got, string(block.frame.Kind))
+		}
+	}
+	want := []string{"assistant", "status:" + asked, "card:rv-1", "status:" + approved, "exit plan mode"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("transcript order:\n%v\nwant:\n%v", got, want)
+	}
+
+	// A card already carrying this review's StepID updates in place: the
+	// reviewer finishing must not append a second block.
+	for _, f := range reducer.Reduce(PlanReviewReviewedMsg{
+		ReviewID: "rv-1", Provider: "zhipuai", Model: "glm-5.3-flash", Outcome: "done",
+	}).Frames {
+		r.RenderFrame(f)
+	}
+	if n := len(r.vm.blocks); n != len(want) {
+		t.Fatalf("the review's update added a block: %d blocks, want %d", n, len(want))
+	}
+}
+
 // The card's headers and the transcript summaries 012 derives are the same
 // words in different cases: one table feeds both, so they cannot disagree.
 func TestSubagentCardHeadersMatchTheStepSummaries(t *testing.T) {

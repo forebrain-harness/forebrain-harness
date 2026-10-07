@@ -89,27 +89,32 @@ func (s *stubSelector) Review(string, []turn.StatusFact, []string, int) (int, bo
 // scriptedSelector plays back a scripted answer per selector primitive, so a
 // test can walk the /skills picker the way a user does.
 type scriptedSelector struct {
-	richSteps  []richStep
-	richIdx    int
-	inputs     []selectorInput
-	inputIdx   int
-	multi      []string
-	multiOK    bool
-	richLabels []string
-	richItems  [][]SelectItem
+	richSteps    []richStep
+	richIdx      int
+	inputs       []selectorInput
+	inputIdx     int
+	multi        []string
+	multiOK      bool
+	multiOptions []string
+	richLabels   []string
+	richItems    [][]SelectItem
 }
 
+// A step answers by label when set — the row a user meant, wherever the menu
+// puts it — and by idx otherwise.
 type richStep struct {
-	idx int
-	ok  bool
-	err error
+	idx   int
+	ok    bool
+	err   error
+	label string
 }
 
 func (s *scriptedSelector) Select(string, []string, string) (string, bool, error) {
 	return "", false, nil
 }
 
-func (s *scriptedSelector) MultiSelect(string, []string, []string) ([]string, bool, error) {
+func (s *scriptedSelector) MultiSelect(_ string, options []string, _ []string) ([]string, bool, error) {
+	s.multiOptions = append(s.multiOptions, options...)
 	return s.multi, s.multiOK, nil
 }
 
@@ -132,6 +137,14 @@ func (s *scriptedSelector) SelectRich(label string, items []SelectItem, _ int) (
 	}
 	step := s.richSteps[s.richIdx]
 	s.richIdx++
+	if step.label != "" {
+		for i, item := range items {
+			if item.Label == step.label {
+				return i, step.ok, step.err
+			}
+		}
+		return -1, false, nil
+	}
 	return step.idx, step.ok, step.err
 }
 
@@ -146,8 +159,8 @@ func (s *scriptedSelector) Review(string, []turn.StatusFact, []string, int) (int
 func skillsTestSession() *fakeSession {
 	return &fakeSession{
 		skillToggleOpts: []skill.Entry{
-			{Name: "repo", Description: "inspect repo", Source: "project", Path: "/skills/repo", Enabled: true},
-			{Name: "skill-workshop", Description: "work on skills", Source: "system", Path: "/skills/.system/skill-workshop", Enabled: true},
+			{Name: "repo", Description: "inspect repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true},
+			{Name: "skill-workshop", Description: "work on skills", Origin: skill.OriginBuiltin, Path: "/skills/.system/skill-workshop", Enabled: true},
 		},
 	}
 }
@@ -179,14 +192,40 @@ func TestSkillsMenuOffersManageActionsAndInstalledSkills(t *testing.T) {
 	if strings.Contains(out.String(), "inspect repo") {
 		t.Fatalf("expected no fallback rendering on cancel, got %q", out.String())
 	}
+	// Skills sit in their layer's tab, actions in the Manage tab at the end,
+	// so the labels are exactly the names and no skill row trails a Manage row.
+	firstManage := -1
+	skills := map[string]string{}
+	for i, item := range selector.richItems[0] {
+		if item.Category == "Manage" {
+			if firstManage < 0 {
+				firstManage = i
+			}
+			continue
+		}
+		skills[item.Label] = item.Category
+	}
+	if skills["repo"] != "Project" {
+		t.Fatalf("repo tab = %q, want Project", skills["repo"])
+	}
+	if skills["skill-workshop"] != "Built-in" {
+		t.Fatalf("skill-workshop tab = %q, want Built-in", skills["skill-workshop"])
+	}
+	manageCount := 0
+	for _, item := range selector.richItems[0] {
+		if item.Category == "Manage" {
+			manageCount++
+		}
+	}
+	if manageCount != 4 || firstManage != len(selector.richItems[0])-manageCount {
+		t.Fatalf("manage rows = %d, first at %d of %d", manageCount, firstManage, len(selector.richItems[0]))
+	}
 }
 
 func TestSkillsRunNowSubmitsSkillSelection(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
-		// Row 4 is the first installed skill (four manage rows precede it),
-		// then "Run it now".
-		richSteps: []richStep{{idx: 4, ok: true}, {idx: 0, ok: true}},
+		richSteps: []richStep{{label: "repo", ok: true}, {idx: 0, ok: true}},
 		inputs:    []selectorInput{{value: "summarize the repo", ok: true}},
 	}
 	var out bytes.Buffer
@@ -211,7 +250,7 @@ func TestSkillsRunNowSubmitsSkillSelection(t *testing.T) {
 func TestSkillsCreateHandsOffToWorkshop(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
-		richSteps: []richStep{{idx: 1, ok: true}},
+		richSteps: []richStep{{label: "Create a skill", ok: true}},
 		inputs:    []selectorInput{{value: "write release notes", ok: true}},
 	}
 	var out bytes.Buffer
@@ -235,7 +274,7 @@ func TestSkillsInstallFromSourceAsksOnlyForSourceAndScope(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
 		richSteps: []richStep{
-			{idx: 0, ok: true}, // Add a skill
+			{label: "Add a skill", ok: true},
 			{idx: 2, ok: true}, // From a GitHub repo or URL
 			{idx: 0, ok: true}, // global
 		},
@@ -261,9 +300,9 @@ func TestSkillsSubmenuCancelReturnsToTopLevel(t *testing.T) {
 	session := skillsTestSession()
 	selector := &scriptedSelector{
 		richSteps: []richStep{
-			{idx: 0, ok: true},   // Add a skill
-			{idx: -1, ok: false}, // cancel the source picker
-			{idx: 1, ok: true},   // back on the top menu: Create a skill
+			{label: "Add a skill", ok: true},    // into the source picker
+			{idx: -1, ok: false},                // cancel the source picker
+			{label: "Create a skill", ok: true}, // back on the top menu
 		},
 		inputs: []selectorInput{{value: "write release notes", ok: true}},
 	}
@@ -272,6 +311,216 @@ func TestSkillsSubmenuCancelReturnsToTopLevel(t *testing.T) {
 	if _, submitted := ctrl.handleSkills(context.Background()); !submitted {
 		t.Fatal("expected the top-level menu to stay active after a submenu cancel")
 	}
+}
+
+// tabbedRecordingSelector records every tabbed picker call so a test can
+// assert the shape the /skills lists were opened with. The tabbed steps
+// answer by label when set (the row the user meant, wherever the menu puts
+// it) and by idx otherwise; an exhausted queue cancels, as scriptedSelector
+// does for SelectRich. Sub-flows keep going through the embedded
+// scriptedSelector.
+type tabbedRecordingSelector struct {
+	*scriptedSelector
+	tabbedSteps []richStep
+
+	selectCalls int
+	selectItems [][]SelectItem
+	selectOpts  []TabbedSelectOptions
+
+	multiCalls int
+	multiItems [][]SelectItem
+	multiOpts  []TabbedSelectOptions
+	multiIdx   []int
+	multiOK    bool
+}
+
+func (s *tabbedRecordingSelector) SelectRichTabbed(_ string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error) {
+	s.selectCalls++
+	s.selectItems = append(s.selectItems, items)
+	s.selectOpts = append(s.selectOpts, opts)
+	if len(s.tabbedSteps) == 0 {
+		return -1, false, nil
+	}
+	step := s.tabbedSteps[0]
+	s.tabbedSteps = s.tabbedSteps[1:]
+	if step.label != "" {
+		for i, item := range items {
+			if item.Label == step.label {
+				return i, step.ok, step.err
+			}
+		}
+		return -1, false, nil
+	}
+	return step.idx, step.ok, step.err
+}
+
+func (s *tabbedRecordingSelector) MultiSelectRichTabbed(_ string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error) {
+	s.multiCalls++
+	s.multiItems = append(s.multiItems, items)
+	s.multiOpts = append(s.multiOpts, opts)
+	return s.multiIdx, s.multiOK, nil
+}
+
+// The menu opens as a tabbed picker: skills in their layers' tabs, the
+// actions in an uncounted Manage tab, and every skill row's label exactly the
+// skill's name.
+func TestSkillsMenuUsesTabsWithManageLast(t *testing.T) {
+	session := skillsTestSession()
+	selector := &tabbedRecordingSelector{scriptedSelector: &scriptedSelector{}}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	if _, submitted := ctrl.handleSkills(context.Background()); submitted {
+		t.Fatalf("cancelling the picker must not submit a turn")
+	}
+	if selector.selectCalls != 1 {
+		t.Fatalf("expected one tabbed open, got %d", selector.selectCalls)
+	}
+	opts := selector.selectOpts[0]
+	if len(opts.Uncounted) != 1 || opts.Uncounted[0] != "Manage" {
+		t.Fatalf("uncounted tabs = %v, want [Manage]", opts.Uncounted)
+	}
+	if opts.DefaultIdx != 0 {
+		t.Fatalf("default row = %d, want the first", opts.DefaultIdx)
+	}
+	items := selector.selectItems[0]
+	if items[0].Label != "repo" {
+		t.Fatalf("first row = %q, want repo", items[0].Label)
+	}
+	skills := map[string]bool{"repo": false, "skill-workshop": false}
+	for _, item := range items {
+		if _, isSkill := skills[item.Label]; isSkill {
+			skills[item.Label] = true
+		}
+	}
+	for name, found := range skills {
+		if !found {
+			t.Fatalf("skill %q absent or its label carries more than the name: %v", name, items)
+		}
+	}
+}
+
+// A cancelled sub-flow returns to the menu on the row the user left, so
+// browsing skills never resets to the first tab's first row.
+func TestSkillsMenuReopensOnTheRowItLeft(t *testing.T) {
+	session := skillsTestSession()
+	selector := &tabbedRecordingSelector{
+		scriptedSelector: &scriptedSelector{},
+		tabbedSteps: []richStep{
+			{idx: 0, ok: true}, // repo's detail page
+			{label: "Add a skill", ok: true},
+		},
+	}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	if _, submitted := ctrl.handleSkills(context.Background()); submitted {
+		t.Fatalf("walking out of the menu must not submit a turn")
+	}
+	if selector.selectCalls != 3 {
+		t.Fatalf("expected three tabbed opens, got %d", selector.selectCalls)
+	}
+	if got := selector.selectOpts[1].DefaultIdx; got != 0 {
+		t.Fatalf("reopen after repo defaulted to %d, want 0", got)
+	}
+	addIdx := -1
+	for i, item := range selector.selectItems[0] {
+		if item.Label == "Add a skill" {
+			addIdx = i
+			break
+		}
+	}
+	if addIdx < 0 {
+		t.Fatalf("no Add a skill row: %v", selector.selectItems[0])
+	}
+	if got := selector.selectOpts[2].DefaultIdx; got != addIdx {
+		t.Fatalf("reopen after Add a skill defaulted to %d, want %d", got, addIdx)
+	}
+}
+
+// The toggle is a tabbed multi-select whose checks are item indices, and the
+// confirmed set goes to the store as paths.
+func TestSkillsToggleUsesTabbedMultiSelect(t *testing.T) {
+	session := skillsTestSession()
+	selector := &tabbedRecordingSelector{
+		scriptedSelector: &scriptedSelector{},
+		tabbedSteps:      []richStep{{label: "Enable / disable skills", ok: true}},
+		multiIdx:         []int{0},
+		multiOK:          true,
+	}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	ctrl.handleSkills(context.Background())
+
+	if selector.multiCalls != 1 {
+		t.Fatalf("expected one tabbed multi-select, got %d", selector.multiCalls)
+	}
+	require.Equal(t, []int{0, 1}, selector.multiOpts[0].Checked, "checked rows must be every enabled skill")
+	require.Equal(t, []string{"/skills/repo"}, session.appliedEnabledPaths)
+}
+
+// Without the tabbed capability the toggle falls back to a plain MultiSelect
+// whose options name each row's tab, so no two rows share an option.
+func TestSkillsToggleFallbackShowsUniqueLabels(t *testing.T) {
+	session := skillsTestSession()
+	selector := &scriptedSelector{
+		richSteps: []richStep{{label: "Enable / disable skills", ok: true}},
+		multiOK:   false,
+	}
+	var out bytes.Buffer
+	ctrl := newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	ctrl.handleSkills(context.Background())
+	require.Equal(t, []string{"repo (Project)", "skill-workshop (Built-in)"}, selector.multiOptions)
+}
+
+// The shadowing note names the winning layer, so a row says which copy the
+// user is really looking at.
+func TestSkillRowDescriptionNamesTheShadowingLayer(t *testing.T) {
+	project := skill.Entry{
+		Name:        "improve",
+		Description: "Work on skills",
+		Enabled:     true,
+		Origin:      skill.OriginProject,
+		Path:        "/proj/.forebrain/skills/improve",
+		Shadows:     []string{"/home/u/.claude/skills/improve"},
+	}
+	cross := skill.Entry{
+		Name:       "improve",
+		Enabled:    false,
+		Origin:     skill.OriginCrossTool,
+		Path:       "/home/u/.claude/skills/improve",
+		ShadowedBy: []string{"/proj/.forebrain/skills/improve"},
+	}
+	origins := skillOriginsByPath([]skill.Entry{project, cross})
+	if got := skillRowDescription(project, origins, true); !strings.HasSuffix(got, "· shadows the Cross-tool copy") {
+		t.Fatalf("winning copy description = %q", got)
+	}
+	got := skillRowDescription(cross, origins, true)
+	if !strings.HasPrefix(got, "(off) ") || !strings.HasSuffix(got, "· shadowed by the Project copy") {
+		t.Fatalf("shadowed copy description = %q", got)
+	}
+	if plain := skillRowDescription(cross, origins, false); strings.Contains(plain, "(off)") {
+		t.Fatalf("toggle row carries the state twice: %q", plain)
+	}
+}
+
+// The import picker's rows split the decision across two columns: the name,
+// and everything else in the description; blocked proposals are explained,
+// not offered.
+func TestMemoryImportRowsUseTwoColumns(t *testing.T) {
+	rows, names, blocked := memoryImportRows([]MemorySkillOption{
+		{Name: "release-check", Description: "Verify a release", Status: "new", SlashCommand: "/release-check"},
+		{Name: "compact", Description: "Squeeze things", Blocked: "name collides with the built-in /compact command"},
+	})
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Label != "release-check" || rows[0].Category != "Memory" {
+		t.Fatalf("row = %+v", rows[0])
+	}
+	if rows[0].Description != "Verify a release · new · adds /release-check" {
+		t.Fatalf("description = %q", rows[0].Description)
+	}
+	require.Equal(t, []string{"release-check"}, names)
+	require.Equal(t, []string{"compact (name collides with the built-in /compact command)"}, blocked)
 }
 
 // A slash command's picker is shown in the terminal and a pick goes back to
@@ -1790,6 +2039,88 @@ func TestReplayTimelineAnchorsSubagentCardsToTheCallThatSpawnedThem(t *testing.T
 	}
 }
 
+// A plan review's own events carry the approval action they answer but no tool
+// step of their own, so without an anchor they fall back to the clock and land
+// wherever their timestamp happens to sort — after the approval that produced
+// them. The card belongs to that approval's exchange, so replay anchors it to
+// the call the action names and its sequence puts it between the two lines.
+func TestReplayTimelinePutsThePlanReviewCardBetweenTheApprovalLines(t *testing.T) {
+	callArgs := `{"plan":"do the thing"}`
+	body := `{"plan":"do the thing"}`
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 100},
+		{RowID: 2, Role: "assistant", CreatedAt: 300,
+			PartsJSON: state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+				ID: "call-exit", Type: llm.ToolTypeFunction,
+				Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: callArgs},
+			}), "")},
+		{RowID: 3, Role: "tool", Content: body, ToolStepID: "call-exit", CreatedAt: 300,
+			PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage("call-exit", llm.Text(body)), body)},
+		{RowID: 4, Role: "assistant", Content: "all done", CreatedAt: 300},
+	}
+	at := time.Unix(400, 0).UTC()
+	events := []event.RunEvent{
+		event.NewRunEvent("approval-requested:act-1", "run-1", "s1", event.RunEventApprovalReq,
+			event.ApprovalRequestedPayload{ActionID: "act-1", ActionKind: "exit_plan_mode", ToolStepID: "call-exit"}, at),
+		event.NewRunEvent("approval-resolved:act-1:review_requested", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-1", ActionKind: "exit_plan_mode", Decision: "review_requested", ToolStepID: "call-exit",
+				Confirmation: "✔ You asked zhipuai/glm-5.3-flash to review the plan",
+			}, at),
+		event.NewRunEvent("plan-review-started", "run-1", "s1", event.RunEventPlanReviewStarted,
+			event.PlanReviewStartedPayload{
+				ActionID: "act-1", ReviewID: "plan-review:rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+			}, at),
+		event.NewRunEvent("plan-reviewed", "run-1", "s1", event.RunEventPlanReviewed,
+			event.PlanReviewedPayload{
+				ActionID: "act-1", ReviewID: "plan-review:rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+				Outcome: "done",
+			}, at),
+		event.NewRunEvent("approval-resolved:act-1:approved", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-1", ActionKind: "exit_plan_mode", Decision: "approved", ToolStepID: "call-exit",
+				Confirmation: "✔ You approved forebrain to exit plan mode",
+			}, at),
+	}
+	for i := range events {
+		events[i].Sequence = int64(i + 1)
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, events, &Reducer{}, nil)
+
+	asked, card, approved, tool := -1, -1, -1, -1
+	seq := make([]string, 0, len(renderer.vm.blocks))
+	for i, block := range renderer.vm.blocks {
+		f := block.frame
+		switch {
+		case f.Kind == FrameFanout:
+			card = i
+			seq = append(seq, "card:"+f.StepID)
+			if f.Summary != "Ran 1 plan-reviewer task" {
+				t.Fatalf("card summary = %q, want Ran 1 plan-reviewer task", f.Summary)
+			}
+		case f.Kind == FrameTool && f.Title == "exit_plan_mode":
+			tool = i
+			seq = append(seq, "exit plan mode")
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You asked"):
+			asked = i
+			seq = append(seq, "asked")
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You approved"):
+			approved = i
+			seq = append(seq, "approved")
+		}
+	}
+	if asked < 0 || card < 0 || approved < 0 || tool < 0 {
+		t.Fatalf("replay lost a record: asked=%d card=%d approved=%d tool=%d %v", asked, card, approved, tool, seq)
+	}
+	if !(asked < card && card < approved && approved < tool) {
+		t.Fatalf("the card must replay between the approval's two confirmation lines, above the call it names: %v", seq)
+	}
+}
+
 // ---- canceled gates and their confirmation lines belong in the replay ----
 
 // assistantToolCallRow builds the transcript row shape a gate leaves behind: the
@@ -2317,28 +2648,6 @@ func TestReplayTimelineDrawsAGoalWhereItHappened(t *testing.T) {
 		}
 	}
 	require.Equal([]string{"/goal ship", goalTitleStarted, "round one answer", "Round 2", "round two answer", goalTitleDone, "thanks"}, order)
-}
-
-// /diff draws a diff under a title that says how much changed, and a sentence
-// explaining why there is no diff as just that sentence.
-func TestHandleDiffDrawsADiffOrItsReason(t *testing.T) {
-	require := require.New(t)
-	render := func(reply string) Frame {
-		renderer := NewRenderer(nil, nil)
-		renderer.EnableViewportMode()
-		t.Cleanup(renderer.DisableViewportMode)
-		cmds := &commandController{session: &fakeSession{diffReply: reply}, renderer: renderer}
-		require.True(cmds.handleDiff("s1", nil))
-		require.NotEmpty(renderer.vm.blocks)
-		return renderer.vm.blocks[len(renderer.vm.blocks)-1].frame
-	}
-	msg := render("No uncommitted changes.")
-	require.Equal("diff", msg.Title)
-	require.Equal("No uncommitted changes.", msg.Content)
-
-	diff := render("diff --git a/a.txt b/a.txt\nnew file mode 100644\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n")
-	require.Equal("1 file changed · +2 −0", diff.Title)
-	require.Contains(stripAllANSI(diff.Content), "hello")
 }
 
 // A finished import's report is a frame in the conversation, the same frame

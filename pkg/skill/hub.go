@@ -18,7 +18,8 @@ type Hub struct {
 	// state, and a hub that re-derived the root from the process working
 	// directory listed whichever project the process happened to start in.
 	ProjectRoot string
-	Roots       []string
+	// Layers is the table the hub lists, highest priority first.
+	Layers []Root
 }
 
 func NewForWorkspace(home string, workspaceRoot string, projectRoot string) *Hub {
@@ -27,27 +28,13 @@ func NewForWorkspace(home string, workspaceRoot string, projectRoot string) *Hub
 		WorkspaceRoot: strings.TrimSpace(workspaceRoot),
 		ProjectRoot:   strings.TrimSpace(projectRoot),
 	}
-	// Same roots, same order as the runtime (skillroots owns the list), with
+	// Same roots, same order as the runtime (skillLayers owns the table), with
 	// one deliberate difference: the project roots are listed without the trust
 	// gate. This is the management view, and a skill the user cannot see is a
 	// skill they cannot decide about; what the model may load stays gated.
 	// First root scanned wins on name collision (dedup by skill name).
-	for _, root := range ProjectSkillRootsForDir(h.ProjectRoot) {
-		h.AddRoot(root)
-	}
-	if strings.TrimSpace(workspaceRoot) != "" {
-		h.AddRoot(filepath.Join(strings.TrimSpace(workspaceRoot), "skills"))
-	}
-	h.AddRoot(filepath.Join(home, "skills"))
-	for _, root := range UserSkillRoots() {
-		h.AddRoot(root)
-	}
-	h.AddRoot(filepath.Join(home, "skills", ".system"))
+	h.Layers = skillLayers(h.Home, h.WorkspaceRoot, ProjectSkillRootsForDir(h.ProjectRoot))
 	return h
-}
-
-func (h *Hub) AddRoot(p string) {
-	h.Roots = append(h.Roots, p)
 }
 
 func (h *Hub) workspaceRoot() string {
@@ -69,8 +56,7 @@ type SkillDTO struct {
 	Description  string `json:"description"`
 	AllowedTools string `json:"allowed_tools,omitempty"`
 	RootPath     string `json:"root_path,omitempty"`
-	Source       string `json:"source,omitempty"`
-	Trust        string `json:"trust,omitempty"`
+	Origin       Origin `json:"origin,omitempty"`
 	Enabled      bool   `json:"enabled"`
 }
 
@@ -83,20 +69,21 @@ func (h *Hub) ListDTO() ([]SkillDTO, error) {
 }
 
 func (h *Hub) ListEnabledDTO() ([]SkillDTO, error) {
-	list, err := h.List()
+	list, err := h.ListManaged()
 	if err != nil {
 		return nil, err
 	}
 	out := make([]SkillDTO, 0, len(list))
-	for i := range list {
-		s := &list[i]
+	for _, item := range list {
+		if !item.Enabled {
+			continue
+		}
 		out = append(out, SkillDTO{
-			Name:         s.Name,
-			Description:  s.Description,
-			AllowedTools: strings.Join(s.AllowedTools, ", "),
-			RootPath:     s.RootPath,
-			Source:       string(SourceForPathWithWorkspace(strings.TrimSpace(h.Home), h.workspaceRoot(), h.ProjectRoot, strings.TrimSpace(s.RootPath))),
-			Trust:        trustLabelForPathWithWorkspace(strings.TrimSpace(h.Home), h.workspaceRoot(), h.ProjectRoot, strings.TrimSpace(s.RootPath)),
+			Name:         item.Name,
+			Description:  item.Description,
+			AllowedTools: item.AllowedTools,
+			RootPath:     item.RootPath,
+			Origin:       item.Origin,
 			Enabled:      true,
 		})
 	}
@@ -115,25 +102,11 @@ func (h *Hub) ListManagedDTO() ([]SkillDTO, error) {
 			Description:  item.Description,
 			AllowedTools: item.AllowedTools,
 			RootPath:     item.RootPath,
-			Source:       item.Source,
-			Trust:        item.Trust,
+			Origin:       item.Origin,
 			Enabled:      item.Enabled,
 		})
 	}
 	return out, nil
-}
-
-func trustLabelForPathWithWorkspace(home, workspaceRoot, projectRoot, rootPath string) string {
-	switch SourceForPathWithWorkspace(strings.TrimSpace(home), strings.TrimSpace(workspaceRoot), strings.TrimSpace(projectRoot), rootPath) {
-	case SourceProject:
-		return "project"
-	case SourceWorkspace:
-		return "workspace"
-	case SourceGlobal:
-		return "global"
-	default:
-		return "external"
-	}
 }
 
 func (h *Hub) List() ([]Skill, error) {
@@ -157,17 +130,17 @@ type ManagedSkill struct {
 	Description  string
 	AllowedTools string
 	RootPath     string
-	Source       string
-	Trust        string
+	Origin       Origin
 	Enabled      bool
 }
 
 func (h *Hub) ListManaged() ([]ManagedSkill, error) {
 	workspaceRoot := h.workspaceRoot()
+	origins := layerOrigins(h.Layers)
 	disabled := loadDisabledSkills(workspaceRoot)
 	seen := make(map[string]struct{})
 	all := make([]ManagedSkill, 0)
-	for _, found := range scanSkillRoots(h.Roots) {
+	for _, found := range scanSkillRoots(RootPaths(h.Layers)) {
 		// The management view keys a skill by display name: two roots offering
 		// the same name are one skill, and the higher-priority root wins.
 		nameKey := strings.ToLower(found.Name)
@@ -181,8 +154,7 @@ func (h *Hub) ListManaged() ([]ManagedSkill, error) {
 			Description:  strings.TrimSpace(found.Skill.Description),
 			AllowedTools: strings.Join(found.Skill.AllowedTools, ", "),
 			RootPath:     found.Dir,
-			Source:       string(SourceForPathWithWorkspace(strings.TrimSpace(h.Home), workspaceRoot, h.ProjectRoot, found.Dir)),
-			Trust:        trustLabelForPathWithWorkspace(strings.TrimSpace(h.Home), workspaceRoot, h.ProjectRoot, found.Dir),
+			Origin:       origins[found.Root],
 			Enabled:      !disabled[NormalizeSkillPath(found.Dir)],
 		})
 	}

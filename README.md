@@ -131,12 +131,10 @@ Coming from Claude Code or Codex? Run `/migrate`.
 | `/lsp`         | Language servers: status, enable, install, restart                                     |
 | `/memories`    | Configure memory use and generation                                                    |
 | `/init`        | Analyze the repo and write `FOREBRAIN.md` guidance                                     |
-| `/diff`        | Show the git diff, untracked files included                                            |
 | `/context`     | Inspect the context window and compaction state                                        |
 | `/compact`     | Summarize the conversation before it hits the context limit                            |
 | `/resume`      | Resume a saved chat · `/fork` fork it · `/new` start fresh                             |
 | `/migrate`     | Import sessions, memories, skills, MCP servers and language servers from another agent |
-| `/help`        | List every command and skill                                                           |
 
 ### In the browser
 

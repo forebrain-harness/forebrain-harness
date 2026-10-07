@@ -19,6 +19,7 @@
 - **预览（owner 已确认方案 A）**：https://claude.ai/artifact/4NFmLaLrMfboe6YLoU8dkc
 - **绘制规则已被 MASCOT_VERTICAL_SLIVER_LINES_PLAN 取代（2026-10-06，竖线回归）**
 - **「吉祥物 6 行」与半块字形绘制已被 MASCOT_WHOLE_CELL_PIXELS_PLAN 取代（2026-10-07）：方案 A 网格保留，改为每像素 2 列 × 1 行的纯背景色，吉祥物 40×12；卡片宽度、下限 78、居中规则不变**
+- **吉祥物网格、吉祥物显示门槛，以及本计划 §「边框是 `╭─╮│╰╯`，分隔线是 `─`」的边框字形，均已由 `docs/plan/TUI_STARTUP_CARD_DESIGN_SHEET_PLAN.md` 取代（2026-10-07）：网格 10×6（20 列 × 6 行），门槛 58，边框与名称下分隔线改为虚线 `┄`/`┆`（四角仍为 `╭╮╰╯`）**
 
 ## 目标（Why this matters）
 

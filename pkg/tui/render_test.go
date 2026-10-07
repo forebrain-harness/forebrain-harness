@@ -575,6 +575,52 @@ func TestTurnDiffCardShowsDiagnostics(t *testing.T) {
 	}
 }
 
+// A problem message wider than the terminal wraps inside the card instead of
+// running past the edge, where the painter cut it: every row fits the painted
+// width, the continuation rows hang under the problem, and the whole message
+// survives.
+func TestTurnDiffCardWrapsLongDiagnostics(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	const width = 80
+	message := "Type '{ 'nav.chat': string; 'nav.tasks': string; 'nav.agents': string; " +
+		"'nav.memories': string; 'nav.settings': string; 'nav.aria': string; 'nav.toggle': string; } " +
+		"is missing the following properties from type 'Messages': 'chat.compaction.running', 'chat.compaction.done'"
+	content := sampleTurnDiff + "\n\n" +
+		"lsp diagnostics: 1 new in 1 file\n\n" +
+		"```text\n" +
+		"frontend/src/locales/index.ts\n" +
+		"  error 980:7 " + message + " [ts 2739]\n" +
+		"```"
+	lines, _ := renderFrameLinesWithAgents(Frame{Kind: FrameTool, Title: "edit_file", Final: true, Content: content}, width, DiffThemeDark, 0)
+
+	problem := -1
+	for i, line := range lines {
+		if fitted := fitPaintRow(line, width); fitted != line {
+			t.Fatalf("row %d is wider than %d columns and gets cut:\n%q\n%q", i, width, line, fitted)
+		}
+		if strings.HasPrefix(stripANSI(line), "      error 980:7 Type") {
+			problem = i
+		}
+	}
+	if problem < 0 {
+		t.Fatalf("problem row missing:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+	var joined []string
+	for _, line := range lines[problem:] {
+		plain := stripANSI(line)
+		if line != lines[problem] && !strings.HasPrefix(plain, "      ") {
+			break
+		}
+		joined = append(joined, strings.TrimSpace(plain))
+	}
+	if len(joined) < 2 {
+		t.Fatalf("long message should wrap onto continuation rows:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+	if got, want := strings.Join(joined, " "), "error 980:7 "+message+" [ts 2739]"; got != want {
+		t.Fatalf("wrapped message lost text:\ngot  %q\nwant %q", got, want)
+	}
+}
+
 // A subagent card's body is content text, and content text is never dimmed:
 // the card used to paint every row Faint, which the surface's own rules forbid.
 func TestSubagentCardBodyIsFullBrightness(t *testing.T) {

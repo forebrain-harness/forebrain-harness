@@ -1485,7 +1485,6 @@ type Session interface {
 	// sandbox is chosen with /permissions, which moves it together with the
 	// approval policy.
 	HandleSandboxSlash(sessionID, channel string, args []string) (string, bool)
-	HandleDiffSlash(sessionID, channel string, args []string) (string, bool)
 	ExecuteSurfaceSlash(ctx context.Context, sessionID string, line string) (SlashOutcome, bool)
 	// ChooseSurfaceSlash applies a choice made in the picker a slash command
 	// offered.

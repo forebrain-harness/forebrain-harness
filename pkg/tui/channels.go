@@ -1427,6 +1427,33 @@ type PagedRichSelector interface {
 	SelectRichPaged(label string, items []SelectItem, defaultIdx int, fetchMore func() []SelectItem) (int, bool, error)
 }
 
+// TabbedSelectOptions shapes a tabbed picker.
+type TabbedSelectOptions struct {
+	// DefaultIdx is the row the picker opens on, an index into items; one that
+	// names no selectable row opens the first tab's first row.
+	DefaultIdx int
+	// Checked are the rows checked when a multi-select opens.
+	Checked []int
+	// Uncounted are tabs shown without a row count: a tab of actions rather
+	// than of things.
+	Uncounted []string
+}
+
+// TabbedRichSelector is an optional Selector capability for a long list that
+// sorts into a few kinds: each item's Category is a tab, one tab is shown at a
+// time, and every row is two columns — the label, then the description, each
+// left-aligned, a fixed gap apart. Tabs come in the order their category first
+// appears in items. Implemented by the interactive selector without widening
+// Selector; selectRichTabbed and multiSelectRichTabbed fall back to the plain
+// primitives for every other selector.
+type TabbedRichSelector interface {
+	// SelectRichTabbed returns the index into items of the row chosen.
+	SelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) (int, bool, error)
+	// MultiSelectRichTabbed returns the indices into items checked when the
+	// user confirms, ascending.
+	MultiSelectRichTabbed(label string, items []SelectItem, opts TabbedSelectOptions) ([]int, bool, error)
+}
+
 type MemorySettingsAction int
 
 const (

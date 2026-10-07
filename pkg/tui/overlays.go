@@ -4430,10 +4430,12 @@ func (s *rawSelector) renderRichPicker(p *richPickerState, label string) {
 
 // panel lays the rich picker out as a slash panel: the label and the filter
 // in the head, the matching items grouped under their categories' headings,
-// each with its description, the ❯ on the focused one, and the keys.
+// each in two columns — the label, then its description, each left-aligned a
+// fixed gap apart — the ❯ on the focused one, and the keys.
 func (p *richPickerState) panel(label string) slashPanel {
 	b := newPanelBuilder()
 	pickerHead(b, label)
+	nameWidth := p.nameWidth()
 	category := ""
 	for ci, idx := range p.selectable {
 		item := p.items[idx]
@@ -4441,11 +4443,7 @@ func (p *richPickerState) panel(label string) slashPanel {
 			b.group(item.Category)
 			category = item.Category
 		}
-		text := item.Label
-		if desc := strings.TrimSpace(item.Description); desc != "" {
-			text += " — " + desc
-		}
-		b.selectable(ci == p.cursor, "", text)
+		b.selectableColumns(ci == p.cursor, "", item.Label, nameWidth, strings.TrimSpace(item.Description))
 	}
 	if len(p.selectable) == 0 {
 		b.text(panelIndent, "No matches", nil)
@@ -4454,6 +4452,21 @@ func (p *richPickerState) panel(label string) slashPanel {
 	panel := b.panel()
 	panel.field = p.filter.panelField()
 	return panel
+}
+
+// nameWidth is the name column for every row the picker could show: the
+// widest label of all its items, not just the ones matching the filter, so the
+// description column holds still while the user types; at most
+// panelNameColumnMax.
+func (p *richPickerState) nameWidth() int {
+	width := 0
+	for _, item := range p.items {
+		if item.Disabled {
+			continue
+		}
+		width = maxInt(width, displayLineWidth(item.Label))
+	}
+	return min(width, panelNameColumnMax)
 }
 
 func (s *rawSelector) SelectRich(label string, items []SelectItem, defaultIdx int) (int, bool, error) {

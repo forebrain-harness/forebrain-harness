@@ -87,8 +87,6 @@ func Execute(ctx Context, content string) Result {
 		return execLSP(ctx)
 	case "sandbox":
 		return execSandbox(ctx, toks)
-	case "diff":
-		return execDiff(ctx, toks)
 	case "compact":
 		return execCompact(ctx, toks)
 	case "clear":
@@ -107,8 +105,6 @@ func Execute(ctx Context, content string) Result {
 		return execConnect(ctx, toks)
 	case "exit":
 		return execExit()
-	case "help":
-		return Result{Handled: true, Reply: CommandCatalog(ctx.Surface, discoveryOptionsOf(ctx))}
 	default:
 		return Result{Handled: true, Reply: UnknownCommandReply(ctx.Surface, cmdName, discoveryOptionsOf(ctx))}
 	}
@@ -154,8 +150,8 @@ func ExecuteDynamicOnly(ctx Context, content string) Result {
 	return dyn.Handler(ctx, line, toks)
 }
 
-// CommandCatalog is /help on every surface: every command this surface
-// offers, the built-in commands then the skills, each with what it does.
+// CommandCatalog is the bare "/" answer on every surface: every command this
+// surface offers, the built-in commands then the skills, each with what it does.
 func CommandCatalog(surface Surface, opts DiscoveryOptions) string {
 	cmds := FilterWithOptions(surface, "", opts)
 	if len(cmds) == 0 {
@@ -709,14 +705,6 @@ func execSandbox(ctx Context, toks []string) Result {
 		return Result{}
 	}
 	return Result{Handled: true, Reply: strings.TrimSpace(reply)}
-}
-
-func execDiff(ctx Context, toks []string) Result {
-	if ctx.Diff == nil {
-		return Result{Handled: true, Reply: "diff: unavailable"}
-	}
-	reply, handled := ctx.Diff.HandleDiffSlash(ctx.SessionID, ctx.Channel, toks[1:])
-	return Result{Handled: handled, Reply: reply}
 }
 
 func execCompact(ctx Context, toks []string) Result {

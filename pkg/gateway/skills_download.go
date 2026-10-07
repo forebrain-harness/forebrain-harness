@@ -19,33 +19,8 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
-// The skill download, delete and offline-upload handlers, plus the origin
-// classifier the three skill pages share. The routes themselves are
-// registered in api_extra.go's skills group.
-
-// skillOrigin maps a listed skill's engine source and path onto the layer the
-// web surfaces name it by: project, agent (the primary agent's workspace),
-// shared (<home>/skills), builtin (<home>/skills/.system) or cross-tool (the
-// user-level directories other agents also read). The engine's Source stays
-// the fact; this is the one place that turns it into the UI's vocabulary.
-func skillOrigin(homeDir string, item skill.SkillDTO) string {
-	rootPath := strings.TrimSpace(item.RootPath)
-	switch strings.TrimSpace(item.Source) {
-	case string(skill.SourceProject):
-		return "project"
-	case string(skill.SourceWorkspace):
-		return "agent"
-	case string(skill.SourceLocal):
-		return "cross-tool"
-	case string(skill.SourceGlobal):
-		if skillPathWithin(rootPath, filepath.Join(strings.TrimSpace(homeDir), "skills", ".system")) {
-			return "builtin"
-		}
-		return "shared"
-	default:
-		return "shared"
-	}
-}
+// The skill download, delete and offline-upload handlers. The routes
+// themselves are registered in api_extra.go's skills group.
 
 // skillPathWithin compares canonical paths: a skill directory reached through
 // a symlinked root is still the same directory.
@@ -76,10 +51,9 @@ func skillDownloadBase(projectID string) string {
 }
 
 // skillListEntry is one row of the skill listing responses: the engine's DTO
-// plus the layer vocabulary the three pages render by.
+// plus what the page asking may do with it.
 type skillListEntry struct {
 	skill.SkillDTO
-	Origin      string   `json:"origin"`
 	Editable    bool     `json:"editable"`
 	DownloadURL string   `json:"download_url"`
 	Shadows     []string `json:"shadows,omitempty"`
@@ -109,11 +83,9 @@ func (s *Server) decorateSkillList(launch safety.ProjectContext, projectID strin
 	}
 	out := make([]skillListEntry, 0, len(list))
 	for _, item := range list {
-		origin := skillOrigin(s.Home, item)
 		row := skillListEntry{
 			SkillDTO:    item,
-			Origin:      origin,
-			Editable:    origin == owner,
+			Editable:    string(item.Origin) == owner,
 			DownloadURL: base + "/" + url.PathEscape(strings.TrimSpace(item.Name)) + "/download",
 		}
 		if entry, ok := shadowsByPath[filepath.Clean(strings.TrimSpace(item.RootPath))]; ok {
@@ -135,32 +107,31 @@ func (s *Server) decoratedSkillList(launch safety.ProjectContext, projectID stri
 	return s.decorateSkillList(launch, projectID, svc, list), nil
 }
 
-// locateSkillDir finds the directory a skill name refers to inside the
-// caller's effective set. Names may repeat across layers; the row the user
-// sees is the unshadowed one, so that is the one downloads and deletes act
-// on.
-func locateSkillDir(svc *skill.Service, name string) (string, bool) {
+// locateSkill finds the entry a skill name refers to inside the caller's
+// effective set. Names may repeat across layers; the row the user sees is the
+// unshadowed one, so that is the one downloads and deletes act on.
+func locateSkill(svc *skill.Service, name string) (skill.Entry, bool) {
 	entries, err := skill.DiscoverForWorkspace(svc.Home, svc.Workspace(), svc.ProjectRoot)
 	if err != nil {
-		return "", false
+		return skill.Entry{}, false
 	}
 	target := strings.TrimSpace(name)
-	first := ""
+	var first skill.Entry
 	for i := range entries {
 		if !strings.EqualFold(strings.TrimSpace(entries[i].Name), target) {
 			continue
 		}
 		if len(entries[i].ShadowedBy) == 0 {
-			return entries[i].Path, true
+			return entries[i], true
 		}
-		if first == "" {
-			first = entries[i].Path
+		if first.Path == "" {
+			first = entries[i]
 		}
 	}
-	if first != "" {
+	if first.Path != "" {
 		return first, true
 	}
-	return "", false
+	return skill.Entry{}, false
 }
 
 // countSkillZipSkips counts the entries a download zip will leave out —
@@ -268,11 +239,12 @@ func (s *Server) handleSkillDownloadWith(launch safety.ProjectContext, w http.Re
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	dir, ok := locateSkillDir(svc, name)
+	entry, ok := locateSkill(svc, name)
 	if !ok {
 		http.Error(w, "skill not found", http.StatusNotFound)
 		return
 	}
+	dir := entry.Path
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", url.PathEscape(name)+".zip"))
 	w.Header().Set("X-Skipped-Symlinks", fmt.Sprintf("%d", countSkillZipSkips(dir)))
@@ -335,12 +307,12 @@ func (s *Server) handleSkillsDownloadBatchWith(launch safety.ProjectContext, w h
 			continue
 		}
 		seen[key] = struct{}{}
-		dir, ok := locateSkillDir(svc, name)
+		entry, ok := locateSkill(svc, name)
 		if !ok {
 			missing = append(missing, name)
 			continue
 		}
-		pickedNames = append(pickedNames, picked{name: name, dir: dir})
+		pickedNames = append(pickedNames, picked{name: name, dir: entry.Path})
 	}
 	if len(missing) > 0 {
 		// All or nothing: a partial archive would look complete to whoever
@@ -397,23 +369,23 @@ func (s *Server) handleSkillDeleteWith(launch safety.ProjectContext, projectID s
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	dir, ok := locateSkillDir(svc, name)
+	entry, ok := locateSkill(svc, name)
 	if !ok {
 		http.Error(w, "skill not found", http.StatusNotFound)
 		return
 	}
-	origin := skillOrigin(s.Home, skill.SkillDTO{RootPath: dir, Source: string(skill.SourceForPathWithWorkspace(svc.Home, svc.Workspace(), svc.ProjectRoot, dir))})
+	dir := entry.Path
 	layer, allowed := skillDeleteLayer(scope, svc)
 	if !allowed {
 		http.Error(w, "scope must be agent, shared or project", http.StatusBadRequest)
 		return
 	}
-	if origin == "builtin" {
+	if entry.Origin == skill.OriginBuiltin {
 		http.Error(w, "built-in skills cannot be deleted", http.StatusForbidden)
 		return
 	}
-	if origin != layer {
-		http.Error(w, fmt.Sprintf("this skill belongs to the %s layer; delete it there", origin), http.StatusForbidden)
+	if string(entry.Origin) != layer {
+		http.Error(w, fmt.Sprintf("this skill belongs to the %s layer; delete it there", entry.Origin), http.StatusForbidden)
 		return
 	}
 	resolved, err := tool.ResolveWithinRoots(dir, skillDeleteRoots(scope, svc))
@@ -622,11 +594,11 @@ func (s *Server) workshopSkillDir(launch safety.ProjectContext, name string) (st
 	if err != nil {
 		return "", nil, false
 	}
-	dir, ok := locateSkillDir(svc, name)
+	entry, ok := locateSkill(svc, name)
 	if !ok {
 		return "", nil, false
 	}
-	return dir, svc, true
+	return entry.Path, svc, true
 }
 
 type workshopFileRow struct {

@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	// systemSkillsDirName is the one dot-directory the scanner descends into:
-	// the built-in skills are installed there (see system.go).
+	// systemSkillsDirName is the directory under $FOREBRAIN_HOME/skills the
+	// built-in skills are installed in. The scanner never descends into it
+	// from its parent; skillLayers lists it as a root of its own.
 	systemSkillsDirName  = ".system"
 	skillFileName        = "SKILL.md"
 	yamlFrontmatterDelim = "---"

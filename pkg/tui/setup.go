@@ -1618,26 +1618,23 @@ func MainAgentLLMMissingFieldsWithConfig(cfg appcfg.Root) []string {
 // terminal resize reflows it rather than leaving it clipped or ragged.
 
 // forebrainMascot is the brand mascot — a small brain wearing its harness
-// node — as a pixel grid: ears, node, eyes with their shine, smile and feet.
-// Each letter names a forebrainMascotPalette entry; '.' is clear. Each pixel
-// is drawn as forebrainMascotPixelCols blank cells on one terminal row (see
-// forebrainMascotRows). The first and last rows both carry ink, so centring
-// the mascot by row count centres its ink. The grid is the owner-approved
-// design (docs/plan/MASCOT_WHOLE_CELL_PIXELS_PLAN.md);
-// TestForebrainMascotIsTheApprovedDesign pins it.
+// node — as a pixel grid: a rounded crown, the node, eyes with their shine,
+// a smile and two feet. Each letter names a forebrainMascotPalette entry;
+// '.' is clear. Each pixel is drawn as forebrainMascotPixelCols blank cells
+// on one terminal row (see forebrainMascotRows). The first and last rows both
+// carry ink, so centring the mascot by row count centres its ink. The grid is
+// the owner-approved design, 10×6 pixels, 20 columns by 6 rows, taken from
+// the startup-card design sheet (docs/design/STARTUP_CARD.html); it replaces
+// the 14×8 grid of docs/plan/MASCOT_COMPACT_GRID_PLAN.md. Changing the grid
+// needs the owner's sign-off, and TestForebrainMascotIsTheApprovedDesign
+// pins it.
 var forebrainMascot = [...]string{
-	"..FFFFFFF..FFFFFFF..",
-	"..FFFFFFF..FFFFFFF..",
-	".FFFFFFFFAAFFFFFFFF.",
-	".FFFFFFFFFFFFFFFFFF.",
-	"FFFFFFFFFFFFFFFFFFFF",
-	"FFFFFWPFFFFFFWPFFFFF",
-	"FFFFFPPFFFFFFPPFFFFF",
-	"FFFFFFFFPFFPFFFFFFFF",
-	".FFFFFFFFPPFFFFFFFF.",
-	".FFFFFFFFFFFFFFFFFF.",
-	"..FFFFFFFFFFFFFFFF..",
-	"....FFFFF..FFFFF....",
+	".FFFFFFFF.",
+	"FFFFAAFFFF",
+	"FFWPFFWPFF",
+	"FFPPFFPPFF",
+	".FFFPPFFF.",
+	"..FF..FF..",
 }
 
 // forebrainMascotPalette colours the mascot. Every colour is an exact
@@ -1677,20 +1674,31 @@ const (
 	// paths grow past it.
 	bannerMinWidth = 78
 	// bannerMascotMinWidth is the narrowest card width that still has room
-	// for the mascot beside a readable text column: the frame, the 40-column
-	// mascot and the gutter leave 29 columns for the text. It is the width
-	// the viewport paints an 80-column terminal at (80 less
+	// for the mascot beside a readable text column. It is the frame (2×1
+	// column), the padding (2×2), the 20-column mascot, the gutter (3) and
+	// the 29 columns the text then gets:
+	// 2 + 4 + 20 + 3 + 29 = 58. It must stay at or below 78, the width the
+	// viewport paints an 80-column terminal at (80 less
 	// viewportRightPadding), so the common default window keeps the mascot.
-	bannerMascotMinWidth = 78
+	// Recompute it as 6 + forebrainMascotWidth + bannerGutter + 29 whenever
+	// the grid changes.
+	bannerMascotMinWidth = 58
 	// bannerBorderMinWidth is the narrowest terminal worth a frame; below it
 	// the text is printed bare.
 	bannerBorderMinWidth = 32
 	bannerGutter         = 3
 	bannerPadding        = 2
+	// bannerFrameH and bannerFrameV draw the card's dashed frame and the
+	// rule under the product name. A dashed glyph is a font shape like any
+	// other, but these two have the same 1200-unit advance in Fira Code as
+	// ─ (U+2500) and │ (U+2502), so the frame keeps its column maths, and
+	// any font with U+2504/U+2506 renders the dashes (Fira Code does).
+	bannerFrameH = "┄" // U+2504, horizontal dashed
+	bannerFrameV = "┆" // U+2506, vertical dashed
 )
 
 // bannerShortcuts are the keys a newcomer needs before the first prompt; the
-// rest are listed under /help.
+// rest are listed under /.
 var bannerShortcuts = [...]struct{ key, label string }{
 	{"/", "commands"},
 	{"@", "mention"},
@@ -1747,7 +1755,7 @@ func forebrainBannerLines(version, dir string, width int) []string {
 
 	lines := []string{""}
 	if framed {
-		lines = append(lines, bannerBorderStyle.Render("╭"+strings.Repeat("─", cardW-2)+"╮"))
+		lines = append(lines, bannerBorderStyle.Render("╭"+strings.Repeat(bannerFrameH, cardW-2)+"╮"))
 		lines = append(lines, bannerFramedRow("", cardW))
 	}
 	for i := 0; i < rows; i++ {
@@ -1770,18 +1778,18 @@ func forebrainBannerLines(version, dir string, width int) []string {
 	}
 	if framed {
 		lines = append(lines, bannerFramedRow("", cardW))
-		lines = append(lines, bannerBorderStyle.Render("╰"+strings.Repeat("─", cardW-2)+"╯"))
+		lines = append(lines, bannerBorderStyle.Render("╰"+strings.Repeat(bannerFrameH, cardW-2)+"╯"))
 	}
 	return lines
 }
 
 // bannerFramedRow pads content to the card's inner width and closes it with
-// the frame on both sides.
+// the dashed frame on both sides.
 func bannerFramedRow(content string, cardW int) string {
 	inner := cardW - 2 - 2*bannerPadding
 	pad := max(inner-displayLineWidth(content), 0)
 	side := strings.Repeat(" ", bannerPadding)
-	return bannerBorderStyle.Render("│") + side + content + strings.Repeat(" ", pad) + side + bannerBorderStyle.Render("│")
+	return bannerBorderStyle.Render(bannerFrameV) + side + content + strings.Repeat(" ", pad) + side + bannerBorderStyle.Render(bannerFrameV)
 }
 
 // bannerTextColumn is the card's text: name and version, a rule, the
@@ -1801,7 +1809,8 @@ func bannerTextColumn(version, dir string, width int) []string {
 			lines = append(lines, bannerMutedStyle.Render(piece))
 		}
 	}
-	lines = append(lines, bannerBorderStyle.Render(strings.Repeat("─", width)))
+	// The rule under the name is dashed, the same shape as the card frame.
+	lines = append(lines, bannerBorderStyle.Render(strings.Repeat(bannerFrameH, width)))
 	lines = append(lines, wrapBannerText(dir, width, `/\`)...)
 	lines = append(lines, "")
 	return append(lines, bannerShortcutRows(width)...)

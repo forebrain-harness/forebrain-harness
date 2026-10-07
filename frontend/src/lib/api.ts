@@ -971,8 +971,6 @@ export interface SkillRecord {
   description: string
   allowedTools?: string
   rootPath?: string
-  source?: string
-  trust?: string
   enabled: boolean
   /** Which layer owns this row: project, agent, shared, builtin, cross-tool. */
   origin?: SkillOrigin
@@ -988,8 +986,7 @@ export interface SkillInspectResponse {
   skill: {
     name: string
     description: string
-    source: string
-    trust: string
+    origin: SkillOrigin
     path: string
     allowedTools?: string
   }

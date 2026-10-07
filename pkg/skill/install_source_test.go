@@ -31,9 +31,6 @@ func TestGlobalSkillWinsOverWorkspaceShadow(t *testing.T) {
 	if !ok {
 		t.Fatal("expected to find global skill")
 	}
-	if entry.Source != "global" {
-		t.Fatalf("expected global skill source, got %+v", entry)
-	}
 	if entry.SkillDir == workspaceDir {
 		t.Fatalf("workspace shadow unexpectedly won: %+v", entry)
 	}
