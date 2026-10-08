@@ -209,9 +209,11 @@ curl -fsS "http://127.0.0.1:$GW_PORT/healthz" > /dev/null || die "gateway never 
   E2E_SKILL_ZIP="$WORK/fixtures/demo-skill.zip" \
   corepack pnpm e2e ${FOREBRAIN_E2E_SPEC:-} )
 
-# 10. The CLI still authenticates with the header token.
-FOREBRAIN_HOME="$HOME_DIR" "$BIN" gateway status | grep -q 'status=200' \
-  || die "gateway status no longer reports status=200"
+# 10. The CLI still authenticates with the header token. The probe's success
+#     line is the one pkg/gateway/http_server_test.go pins — `gateway status`
+#     prints a sentence, not the raw `status=200` it printed once.
+FOREBRAIN_HOME="$HOME_DIR" "$BIN" gateway status | grep -q 'ok (HTTP 200)' \
+  || die "gateway status no longer reports a healthy probe"
 
 echo "screenshots: $SHOTS"
 echo "web e2e: PASS"
