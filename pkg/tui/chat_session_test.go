@@ -16,6 +16,7 @@ import (
 	"log"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -7923,6 +7924,19 @@ func TestCharacterizationNetworkApproval(t *testing.T) {
 	if _, err := exec.LookPath("sandbox-exec"); err != nil {
 		t.Skip("sandbox-exec not available on this host")
 	}
+	// The managed proxy performs the approved fetch from this test process
+	// (http.Transport with ProxyFromEnvironment, AllowUpstreamProxy default
+	// true), so probe example.com with the same egress policy: if this
+	// process cannot reach it, the in-test curl cannot either, and the
+	// contract above says skip, not fail. 4s < curl's --max-time 5 so a
+	// probe failure predicts the timeout. Any completed response (any
+	// status code) proves reachability.
+	probe := &http.Client{Timeout: 4 * time.Second}
+	probeResp, err := probe.Get("https://example.com")
+	if err != nil {
+		t.Skipf("skipping: no internet access from the test process (example.com: %v); the approved-fetch assertion needs genuine connectivity", err)
+	}
+	_ = probeResp.Body.Close()
 	s := newCharacterizationSession(t, nil)
 	s.runner().ProjectRoot = s.home()
 	// SandboxWorkspaceWrite.NetworkAccess defaults to true (network
