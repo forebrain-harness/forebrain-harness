@@ -107,6 +107,10 @@ jobs:
           # Read by the script only when it cross-compiles darwin/amd64 on the
           # arm64 runner; empty everywhere else.
           FOREBRAIN_CC_DARWIN_AMD64: ${{ matrix.darwin_amd64_cc }}
+          # The release tag already carries the web UI committed by the
+          # webui-into-release-pr job; this job has no Node/pnpm (and Windows
+          # runners have no make), so the packaging script must not rebuild it.
+          FOREBRAIN_SKIP_UI_BUILD: "1"
         run: npm/scripts/build-platform-packages.sh
       - if: matrix.native
         name: Smoke test

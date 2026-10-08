@@ -189,6 +189,37 @@ func TestInputQueueRecallPicksNewestByLane(t *testing.T) {
 	})
 }
 
+// A steer still queued when the turn's runtime detached was never
+// delivered — the run's deliveries settle before it can end — so it must
+// stay editable, and once recalled the boundary must not send it either.
+func TestRecallSteerAfterRuntimeDetach(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	if !q.Steer(Input{Text: "test message", Parts: []llm.ContentPart{llm.Text("test message")}}) {
+		t.Fatal("Steer failed")
+	}
+
+	q.Detach()
+	if q.Runtime() != nil {
+		t.Fatal("expected runtime to be nil after Detach")
+	}
+
+	in, ok := q.Recall()
+	if !ok {
+		t.Fatal("Recall failed after runtime detach, but the steer was never delivered")
+	}
+	if in.Text != "test message" {
+		t.Fatalf("recalled %q, want %q", in.Text, "test message")
+	}
+	if preview := q.Preview(); len(preview.Steers) != 0 {
+		t.Fatalf("expected 0 steers after recall, got %d", len(preview.Steers))
+	}
+	if send, _ := q.Next(BoundaryCompleted); len(send) != 0 {
+		t.Fatalf("a recalled steer must not be sent by the boundary: %#v", send)
+	}
+}
+
 // Q5, Q6, Q7: the boundary decides what follows a turn.
 func TestInputQueueNextBoundaries(t *testing.T) {
 	t.Run("completed drains one batch per turn", func(t *testing.T) {

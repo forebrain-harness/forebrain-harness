@@ -139,6 +139,13 @@ cmd_messages() { cmd_db "SELECT id, role, visibility, substr(content,1,60) FROM 
 cmd_sid() { cmd_db "SELECT session_id FROM fb_messages ORDER BY id DESC LIMIT 1;"; }
 cmd_title() { cmd_db "SELECT id, title FROM fb_sessions;"; }
 
+cmd_wheel() {  # wheel <col> <row> <up|down>
+  local col="$1" row="$2" dir="${3:-down}"
+  local cb=65  # 65=down
+  [ "$dir" = "up" ] && cb=64
+  tmux send-keys -t "$SESSION" -l "$(printf '\033[<%s;%s;%sM' "$cb" "$col" "$row")"
+}
+
 cmd_stop() {
   tmux kill-session -t "$SESSION" 2>/dev/null || true
   [ -f "$WORK/provider.pid" ] && kill "$(cat "$WORK/provider.pid")" 2>/dev/null || true
@@ -149,7 +156,7 @@ cmd_stop() {
 cmd_reset() { cmd_stop >/dev/null 2>&1 || true; rm -rf "$HOME_DIR" "$PROJ"; echo "reset $WORK"; }
 
 case "${1:-}" in
-  build|start|send|key|submit|click|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
+  build|start|send|key|submit|click|wheel|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
   provider-log) shift; cmd_provider_log ;;
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
@@ -183,6 +190,8 @@ usage: driver.sh <command>
   send <text>            type <text> without pressing Enter
   key <key...>           send keys (Enter, Escape, C-c, Down, ...)
   click <col> <row>      click at 1-based screen coordinates (SGR mouse)
+  wheel <col> <row> <up|down>
+                         send one wheel notch at 1-based coordinates (default: down)
   wait <text> [secs]     poll the screen until <text> appears
   screen                 print the rendered screen
   messages | title       read the state DB

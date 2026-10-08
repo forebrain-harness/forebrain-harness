@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
 func ListenForOAuthCode(
@@ -36,9 +38,6 @@ func ListenForOAuthCode(
 		err  error
 	}
 	ch := make(chan result, 1)
-	srv := &http.Server{
-		ReadHeaderTimeout: 5 * time.Second,
-	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		code := strings.TrimSpace(r.URL.Query().Get("code"))
@@ -56,7 +55,11 @@ func ListenForOAuthCode(
 			ch <- result{code: code}
 		}
 	})
-	srv.Handler = mux
+	srv := &http.Server{
+		Handler:           telemetry.AccessLogMiddleware(mux),
+		ErrorLog:          telemetry.SlogErrorLog(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	go func() {
 		_ = srv.Serve(ln)
 	}()

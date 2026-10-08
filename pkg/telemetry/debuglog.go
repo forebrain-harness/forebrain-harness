@@ -34,7 +34,7 @@ func writeDebugFileLog(section, msg string) {
 			return
 		}
 		p := filepath.Join(root, home.LogsDir, "debug.log")
-		f, err := Open(p, Options{ExistingParentOnly: true, SyncWrites: true})
+		f, err := Open(p, Options{ExistingParentOnly: true})
 		if err == nil {
 			debugFileLogFile = f
 		}

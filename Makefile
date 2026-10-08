@@ -5,8 +5,8 @@
 #   make test     run the Go test suite
 #   make hooks    install the repository git hooks (commit title + DCO sign-off)
 #   make docker   build the container image
-#   make release  build per-platform npm packages (runs make ui first; the UI
-#                 is embedded in each binary)
+#   make release  build per-platform npm packages (the script rebuilds the UI
+#                 first; it is embedded in each binary)
 #   make clean    remove build artifacts
 #
 # The frontend is embedded via go:embed (pkg/gateway). `make build` always
@@ -58,9 +58,9 @@ hooks:
 docker:
 	docker build --build-arg FOREBRAIN_VERSION=v$(VERSION) -t forebrain:$(VERSION) .
 
-## release: build per-platform npm packages. Depends on ui: the script embeds
-## whatever web UI build is in pkg/gateway/dist.
-release: ui
+## release: build per-platform npm packages. The script rebuilds the web UI
+## first (make ui) so every binary embeds the current frontend.
+release:
 	FOREBRAIN_VERSION=$(VERSION) npm/scripts/build-platform-packages.sh
 
 ## clean: drop build outputs. pkg/gateway/dist is committed source now; `make

@@ -494,3 +494,63 @@ func TestRateLimitHoldsStrangersNotTheSignedInOwner(t *testing.T) {
 		t.Fatal("requests without credentials were never limited")
 	}
 }
+
+// The middleware is the outermost layer of the chain the gateway serves, so
+// the websocket branch and the rate limiter's own rejections are reported
+// like any other request. What is under test here is the shared
+// telemetry.AccessLogMiddleware, through the chain that installs it.
+func TestServeHTTPChainLogsEveryRequest(t *testing.T) {
+	logs := captureDefaultSlog(t)
+	chain := ServeHTTPChain(nil, nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+
+	serve := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.RemoteAddr = "203.0.113.7:41234"
+		rec := httptest.NewRecorder()
+		chain.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := serve("/api/runs"); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 from the inner handler", rec.Code)
+	}
+	// The websocket path is served by the chain itself, before the router.
+	if rec := serve("/ws/chat"); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want the chain's own 404 without a server", rec.Code)
+	}
+	// The limiter bounds requests that carry no credentials; the access log
+	// still reports them, which is the point of sitting outermost.
+	var limited bool
+	for i := 0; i < 300 && !limited; i++ {
+		if serve("/login").Code == http.StatusTooManyRequests {
+			limited = true
+		}
+	}
+	if !limited {
+		t.Fatal("the limiter never rejected a request, so the 429 path was not exercised")
+	}
+
+	byPath := map[string]string{}
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, "msg=request") {
+			continue
+		}
+		var path, status string
+		for _, field := range strings.Fields(line) {
+			if v, ok := strings.CutPrefix(field, "path="); ok {
+				path = v
+			}
+			if v, ok := strings.CutPrefix(field, "status="); ok {
+				status = v
+			}
+		}
+		byPath[path] = status
+	}
+	for path, want := range map[string]string{"/api/runs": "200", "/ws/chat": "404", "/login": "429"} {
+		if got := byPath[path]; got != want {
+			t.Errorf("logged status for %s = %q, want %q", path, got, want)
+		}
+	}
+}

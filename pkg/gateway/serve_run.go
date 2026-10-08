@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
@@ -20,7 +19,7 @@ import (
 
 // ServeOptions is what the command line hands the gateway when it starts.
 type ServeOptions struct {
-	// Out receives the startup banner and the route table.
+	// Out receives the startup banner.
 	Out io.Writer
 	// Version is this build's version, printed under the banner.
 	Version string
@@ -192,13 +191,10 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		signInToken = strings.TrimSpace(h.Deps.AppCfg.Gateway.Auth.Token)
 	}
 	banner := startupBanner{
-		Version:       opts.Version,
-		Routes:        httpSrv.Routes(),
-		ChannelAgent:  chReg.AgentID(),
-		ChannelRoutes: chReg.RouteKeys(),
-		AuthMode:      authMode,
-		SignInToken:   signInToken,
-		WebUI:         gw.resolveStaticFS() != nil,
+		Version:     opts.Version,
+		AuthMode:    authMode,
+		SignInToken: signInToken,
+		WebUI:       gw.resolveStaticFS() != nil,
 	}
 	return httpSrv.Run(func(a net.Addr) {
 		banner.Addr = a
@@ -216,14 +212,11 @@ const bannerArt = " _____              _               _\n" +
 	"|_|  \\___/|_|  \\___|_.__/|_|  \\__,_|_|_| |_|\n"
 
 type startupBanner struct {
-	Version       string      // this build's version, "" prints no version line suffix
-	Routes        []RouteInfo // the router's table, web UI routes included
-	ChannelAgent  string      // the primary agent whose channels are mounted
-	ChannelRoutes []string    // "METHOD /path", from channel.Registry.RouteKeys
-	Addr          net.Addr    // the address actually bound
-	AuthMode      string
-	SignInToken   string // set only when a sign-in link is to be printed
-	WebUI         bool   // true when the web UI is being served
+	Version     string   // this build's version, "" prints no version line suffix
+	Addr        net.Addr // the address actually bound
+	AuthMode    string
+	SignInToken string // set only when a sign-in link is to be printed
+	WebUI       bool   // true when the web UI is being served
 }
 
 // displayHost maps an unspecified bind address to loopback for the clickable
@@ -256,30 +249,7 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 		out.WriteString("Forebrain Harness Gateway\n")
 	}
 
-	routes := make([]RouteInfo, 0, len(b.Routes)+1)
-	routes = append(routes, b.Routes...)
-	// /ws/chat is served by the middleware chain before the router ever sees
-	// it, so it is not in the router's table; the listing must still show it.
-	routes = append(routes, RouteInfo{Method: "WS", Path: "/ws/chat"})
-	sort.Slice(routes, func(i, j int) bool {
-		if routes[i].Path != routes[j].Path {
-			return routes[i].Path < routes[j].Path
-		}
-		return routes[i].Method < routes[j].Method
-	})
-	fmt.Fprintf(&out, "\nRoutes (%d)\n", len(routes))
-	for _, r := range routes {
-		fmt.Fprintf(&out, "  %-8s%s\n", r.Method, r.Path)
-	}
-
-	if len(b.ChannelRoutes) > 0 {
-		fmt.Fprintf(&out, "Channel routes · %s (%d)\n", strings.TrimSpace(b.ChannelAgent), len(b.ChannelRoutes))
-		for _, key := range b.ChannelRoutes {
-			method, path, _ := strings.Cut(key, " ")
-			fmt.Fprintf(&out, "  %-8s%s\n", method, path)
-		}
-	}
-
+	out.WriteString("\n")
 	base := "http://" + displayHost(b.Addr.String())
 	if b.WebUI {
 		fmt.Fprintf(&out, "Web UI       %s/\n", base)
