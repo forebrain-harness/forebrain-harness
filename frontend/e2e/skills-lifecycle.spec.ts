@@ -64,11 +64,11 @@ test('offline install uploads a zip, then the toggle persists', async ({ page })
   await signIn(page)
   await ensureDemoSkill(page)
 
-  // The visible switch is the label around the checkbox; clicking it is
-  // what a user does, and the checkbox input carries the state.
+  // The switch is one button that carries its own state (role="switch" with
+  // aria-checked), so clicking it and reading it are the same locator.
   const state = page.locator('[data-testid="skill-toggle-demo-e2e"]')
   await expect(state).toBeChecked()
-  await page.click('[data-testid="skill-switch-demo-e2e"]')
+  await page.click('[data-testid="skill-toggle-demo-e2e"]')
   await expect(state).not.toBeChecked()
   // Reload proves the state is on disk, not just in the page.
   await page.reload({ waitUntil: 'networkidle' })

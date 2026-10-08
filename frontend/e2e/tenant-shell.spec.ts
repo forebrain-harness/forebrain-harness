@@ -44,19 +44,18 @@ test('primary agent lifecycle: create, edit with immutable id, guards', async ({
   await page.goto('/settings', { waitUntil: 'networkidle' })
   await page.locator('[data-testid="settings-tabs"] button', { hasText: /主代理|Primary agents/ }).click()
 
-  // Create — the form is the last card; fill its first (id) and second (name) inputs.
-  const form = page.locator('section').last()
+  // Create — the form card holds the id and name fields.
+  const form = page.locator('[data-testid="agent-form"]')
   await form.locator('input').nth(0).fill('e2e-helper')
   await form.locator('input').nth(1).fill('E2E 助手')
   await page.locator('button', { hasText: /^创建$|^Create$/ }).click()
-  await expect(page.locator('section', { hasText: 'e2e-helper' }).first()).toBeVisible({ timeout: 10_000 })
+  await expect(page.locator('[data-testid="agent-card"]', { hasText: 'e2e-helper' }).first()).toBeVisible({ timeout: 10_000 })
   await expect(page.locator('text=E2E 助手')).toBeVisible()
 
   // Edit: id input is read-only, name changes.
-  // Cards are every section except the form (the last one).
-  const helperCard = page.locator('section:not(:last-child)', { hasText: 'e2e-helper' }).first()
+  const helperCard = page.locator('[data-testid="agent-card"]', { hasText: 'e2e-helper' }).first()
   await helperCard.locator('button', { hasText: /^编辑$|^Edit$/ }).click()
-  const editForm = page.locator('section').last()
+  const editForm = page.locator('[data-testid="agent-form"]')
   await expect(editForm.locator('input').nth(0)).toBeDisabled()
   await editForm.locator('input').nth(1).fill('E2E 助手2')
   await page.locator('button', { hasText: /^保存$|^Save$/ }).click()
@@ -64,14 +63,14 @@ test('primary agent lifecycle: create, edit with immutable id, guards', async ({
 
   // The active/default agent's delete is disabled at the button — the
   // refused state is visible before any confirm dialog.
-  const mainDelete = page.locator('section:not(:last-child)', { hasText: 'main' }).first().locator('button', { hasText: /^删除$|^Delete$/ })
+  const mainDelete = page.locator('[data-testid="agent-card"]', { hasText: 'main' }).first().locator('button', { hasText: /^删除$|^Delete$/ })
   await expect(mainDelete).toBeDisabled()
   await expect(page.locator('text=main').first()).toBeVisible()
 
   // Clean up: delete the helper (not active, not main).
   page.once('dialog', (dialog) => dialog.accept())
-  await page.locator('section:not(:last-child)', { hasText: 'e2e-helper' }).first().locator('button', { hasText: /^删除$|^Delete$/ }).click()
-  await expect(page.locator('section', { hasText: 'e2e-helper' })).toHaveCount(0, { timeout: 10_000 })
+  await page.locator('[data-testid="agent-card"]', { hasText: 'e2e-helper' }).first().locator('button', { hasText: /^删除$|^Delete$/ }).click()
+  await expect(page.locator('[data-testid="agent-card"]', { hasText: 'e2e-helper' })).toHaveCount(0, { timeout: 10_000 })
 })
 
 test('switching the tenant re-fetches the session list', async ({ page }) => {
