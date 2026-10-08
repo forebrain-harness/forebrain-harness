@@ -451,9 +451,29 @@
         <span class="fnote">四个边全部虚线：上下边框用 ┄，左右两侧用 ┆，圆角保持 ╭ ╮ ╰ ╯</span></li>
       <li><b>名称下的横线</b><span class="fpos">┄ × 文案列宽</span>
         <span class="fnote">「Forebrain Harness / dev」下面那条分隔线同样换成 ┄</span></li>
-      <li><b>颜色</b><span class="fpos">#35506a · xterm 60 左右量化</span>
-        <span class="fnote">沿用 bannerBorderStyle 的深色值（与左侧虚线框一致），浅色主题仍是 #b7c6d4，不改动</span></li>
+      <li><b>颜色</b><span class="fpos">#35506a · 真彩与 xterm 60 各给一个值</span>
+        <span class="fnote">沿用 bannerBorderStyle 的深色值（与左侧虚线框一致）；256 色终端下发 60 本身，不再让终端对 #35506a 做最近匹配</span></li>
     </ul>
+    <p class="lead">卡片四色的完整规格。真彩列就是本稿的 hex；256 色终端没有这些 hex，
+    最近匹配会把藏青的边框量化成中性灰、把快捷键与名称拆成两个色 —— 所以 256 列写的是
+    <b>直接下发的调色板条目</b>（按 CIEDE2000 从本稿 hex 选出；边框那条按本稿 §04 的「xterm 60」）。
+    深色主题：</p>
+    <table class="check">
+      <tr><th>角色</th><th>真彩</th><th>xterm-256</th></tr>
+      <tr><td>边框 · 名称下的横线</td><td>#35506a</td><td>60</td></tr>
+      <tr><td>名称 · 快捷键</td><td>#87c3ea</td><td>117</td></tr>
+      <tr><td>版本 · 快捷键说明</td><td>#7d93a6</td><td>67</td></tr>
+      <tr><td>工作目录</td><td>#cfd9e2</td><td>188</td></tr>
+    </table>
+    <p class="lead">浅色主题（真彩值不变，只补 256 条目；工作目录取本稿的
+    <code>--ink-2</code>，与深色主题里「工作目录是主文案色」的角色对齐）：</p>
+    <table class="check">
+      <tr><th>角色</th><th>真彩</th><th>xterm-256</th></tr>
+      <tr><td>边框 · 名称下的横线</td><td>#b7c6d4</td><td>251</td></tr>
+      <tr><td>名称 · 快捷键</td><td>#0d6e9c</td><td>24</td></tr>
+      <tr><td>版本 · 快捷键说明</td><td>#6f8494</td><td>67</td></tr>
+      <tr><td>工作目录</td><td>#3d4750</td><td>238</td></tr>
+    </table>
   </section>
 
   <section>

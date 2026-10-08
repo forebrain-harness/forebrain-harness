@@ -1655,17 +1655,61 @@ const forebrainMascotPixelCols = 2
 // forebrainMascotWidth is the mascot's width in terminal columns.
 var forebrainMascotWidth = forebrainMascotPixelCols * len(forebrainMascot[0])
 
+// The startup card's colours, one per role. Each is a
+// lipgloss.CompleteAdaptiveColor — an exact value for every colour profile —
+// because the design sheet's colours (docs/design/STARTUP_CARD.html) are
+// true-colour hexes that are not xterm-256 entries: a plain AdaptiveColor in a
+// 256-colour terminal quantises them to the nearest entry, which is how the
+// frame turned grey and the keys stopped matching the title. The ANSI256
+// values are xterm-256 indices — the CIEDE2000 nearest entry of the design hex,
+// except the frame, which the sheet names — so a 256-colour terminal shows the
+// design colour instead of a quantised cousin. The ANSI (16-colour) values keep
+// the design hex, so a 16-colour terminal quantises the sheet's own colour
+// rather than carrying a palette this file invents.
+// TestForebrainBannerPaletteIsTheDesignSheet pins every entry.
+var (
+	// bannerBorderColor draws the card's frame and the rule under the product
+	// name. Its 256 entry is 60 rather than the nearest match (24): the design
+	// sheet names 60 for this role, and its low-saturation navy keeps the
+	// frame as quiet as the dashed hairline the sheet draws.
+	bannerBorderColor = lipgloss.CompleteAdaptiveColor{
+		Light: lipgloss.CompleteColor{TrueColor: "#b7c6d4", ANSI256: "251", ANSI: "#b7c6d4"},
+		Dark:  lipgloss.CompleteColor{TrueColor: "#35506a", ANSI256: "60", ANSI: "#35506a"},
+	}
+	// bannerTitleColor is the product name and, deliberately, the shortcut
+	// keys: the design sheet gives both the same blue, so the keys read as
+	// part of the heading. One value serves both, so they cannot drift apart.
+	bannerTitleColor = lipgloss.CompleteAdaptiveColor{
+		Light: lipgloss.CompleteColor{TrueColor: "#0d6e9c", ANSI256: "24", ANSI: "#0d6e9c"},
+		Dark:  lipgloss.CompleteColor{TrueColor: "#87c3ea", ANSI256: "117", ANSI: "#87c3ea"},
+	}
+	// bannerMutedColor is the version and the shortcut labels.
+	bannerMutedColor = lipgloss.CompleteAdaptiveColor{
+		Light: lipgloss.CompleteColor{TrueColor: "#6f8494", ANSI256: "67", ANSI: "#6f8494"},
+		Dark:  lipgloss.CompleteColor{TrueColor: "#7d93a6", ANSI256: "67", ANSI: "#7d93a6"},
+	}
+	// bannerPathColor is the workspace path, the card's main body text. Its
+	// light value follows the sheet's own --ink-2, the role the dark card's
+	// path colour plays there.
+	bannerPathColor = lipgloss.CompleteAdaptiveColor{
+		Light: lipgloss.CompleteColor{TrueColor: "#3d4750", ANSI256: "238", ANSI: "#3d4750"},
+		Dark:  lipgloss.CompleteColor{TrueColor: "#cfd9e2", ANSI256: "188", ANSI: "#cfd9e2"},
+	}
+)
+
 var (
 	forebrainLogoStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#0d6e9c", Dark: "#5DADE2"}).
+				Foreground(bannerTitleColor).
 				Bold(true)
 	bannerBorderStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#b7c6d4", Dark: "#35506a"})
+				Foreground(bannerBorderColor)
 	bannerMutedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.AdaptiveColor{Light: "#6f8494", Dark: "#7d93a6"})
+				Foreground(bannerMutedColor)
 	bannerKeyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.AdaptiveColor{Light: "#0d6e9c", Dark: "#87c3ea"}).
+			Foreground(bannerTitleColor).
 			Bold(true)
+	bannerPathStyle = lipgloss.NewStyle().
+			Foreground(bannerPathColor)
 )
 
 const (
@@ -1811,7 +1855,9 @@ func bannerTextColumn(version, dir string, width int) []string {
 	}
 	// The rule under the name is dashed, the same shape as the card frame.
 	lines = append(lines, bannerBorderStyle.Render(strings.Repeat(bannerFrameH, width)))
-	lines = append(lines, wrapBannerText(dir, width, `/\`)...)
+	for _, piece := range wrapBannerText(dir, width, `/\`) {
+		lines = append(lines, bannerPathStyle.Render(piece))
+	}
 	lines = append(lines, "")
 	return append(lines, bannerShortcutRows(width)...)
 }
