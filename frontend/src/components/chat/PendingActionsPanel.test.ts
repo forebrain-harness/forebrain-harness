@@ -12,7 +12,16 @@ function action(id: string, kind: string, payload: Record<string, unknown>, extr
 
 describe('PendingActionsPanel', () => {
   beforeAll(() => setLocale('en'))
-  afterAll(() => setLocale('en'))
+  // The markdown this panel renders loads its node renderers as Vue async
+  // components, so a plan body or review note starts a dynamic import that
+  // nothing awaits. Left in flight, it is still loading when the file ends and
+  // vitest tears the environment down, which fails the run with an
+  // EnvironmentTeardownError even though every test passed. Settling the
+  // imports here is what closes that window, while the environment is alive.
+  afterAll(async () => {
+    await vi.dynamicImportSettled()
+    setLocale('en')
+  })
   afterEach(() => vi.restoreAllMocks())
 
   it('decides a parked approval in place and reads the set again', async () => {
