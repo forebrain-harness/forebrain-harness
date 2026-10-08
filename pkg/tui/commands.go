@@ -1145,18 +1145,15 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 		// The row's own execution clock, the same source the shell replay
 		// path reads: a settled card names how long its call took.
 		Duration: time.Duration(turn.ExecDurationMs) * time.Millisecond,
-		FilePath: replayToolFilePath(toolName, meta.Input, body),
+		FilePath: replayToolFilePath(meta.Input, body),
 	}, toolName, true
 }
 
 // replayToolFilePath reproduces the live notification's file-path derivation
 // (extractFilePathFromEvent) from the same facts the stored row holds: the
-// call's path argument, a read the engine repaired into another file, or — for
-// exit_plan_mode — the plan file its output envelope names. The live card
-// renders the "Plan file:" affordance from this field, so a replay that skipped
-// it drew a shorter card than the run did: same message, missing line, and a
-// truncation hint the replayed card could not have.
-func replayToolFilePath(toolName string, input map[string]any, body string) string {
+// call's path argument, or a read the engine repaired into another file — the
+// card has to name the file that was actually read.
+func replayToolFilePath(input map[string]any, body string) string {
 	var output map[string]any
 	if raw := strings.TrimSpace(body); raw != "" && strings.HasPrefix(raw, "{") {
 		_ = json.Unmarshal([]byte(raw), &output)
@@ -1173,11 +1170,6 @@ func replayToolFilePath(toolName string, input map[string]any, body string) stri
 	}
 	if fp := extractFilePathFromInput(input); fp != "" {
 		return fp
-	}
-	if strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode") && output != nil {
-		if fp, _ := output["plan_file"].(string); strings.TrimSpace(fp) != "" {
-			return strings.TrimSpace(fp)
-		}
 	}
 	return ""
 }

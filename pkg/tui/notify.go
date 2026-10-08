@@ -720,9 +720,7 @@ func extractFilePathFromInput(input map[string]any) string {
 
 // extractFilePathFromEvent resolves the display file path for a tool step.
 // It checks the input first (read_file/write_file/edit_file carry file_path
-// in their arguments). For exit_plan_mode the plan file path lives in the
-// output JSON envelope instead, so parse it from there so the renderer can
-// display it.
+// in their arguments).
 func extractFilePathFromEvent(evt tool.StepEvent) string {
 	// A read_file whose path was repaired into the skill catalog read a
 	// different file than the arguments name; the card has to name the file
@@ -730,29 +728,7 @@ func extractFilePathFromEvent(evt tool.StepEvent) string {
 	if fp := tool.RepairedReadPath(evt); fp != "" {
 		return fp
 	}
-	if fp := extractFilePathFromInput(evt.Input); fp != "" {
-		return fp
-	}
-	if strings.EqualFold(strings.TrimSpace(evt.ToolName), "exit_plan_mode") {
-		return extractPlanFileFromOutput(evt.Output)
-	}
-	return ""
-}
-
-// extractPlanFileFromOutput parses the exit_plan_mode output envelope (wrapped
-// under the "output" key as a JSON string) and returns the plan_file path.
-func extractPlanFileFromOutput(output map[string]any) string {
-	raw := strings.TrimSpace(stringValueFromMap(output, "output"))
-	if raw == "" {
-		return ""
-	}
-	var parsed struct {
-		PlanFile string `json:"plan_file"`
-	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(parsed.PlanFile)
+	return extractFilePathFromInput(evt.Input)
 }
 
 // isSkillTool was the natural-language prefix check that recognized an

@@ -20105,22 +20105,20 @@ func TestRendererUserInteractionReplaySortsAnswersWithoutInput(t *testing.T) {
 	}
 }
 
-func TestRendererExitPlanModeShowsMessageAndPlanPath(t *testing.T) {
+func TestRendererExitPlanModeShowsMessage(t *testing.T) {
 	cwd := "/home/user/project"
-	planAbs := "/home/user/.forebrain/workspace/plans/project/add-feature.md"
 
 	var out bytes.Buffer
 	r := NewRenderer(&out, &out)
 	r.cwd = cwd
 
 	r.renderCompactFrame(Frame{
-		Kind:     FrameTool,
-		Title:    "exit_plan_mode",
-		StepID:   "call-exit",
-		Final:    true,
-		FilePath: planAbs,
-		Content:  "Exited plan mode. You can now make edits, run tools, and take actions. The plan file is available for reference if needed.",
-		Summary:  "ran exit_plan_mode",
+		Kind:    FrameTool,
+		Title:   "exit_plan_mode",
+		StepID:  "call-exit",
+		Final:   true,
+		Content: "Exited plan mode. You can now make edits, run tools, and take actions. The plan file is available for reference if needed.",
+		Summary: "ran exit_plan_mode",
 		ToolMeta: tool.ToolMeta{
 			ToolName: "exit_plan_mode",
 			Status:   "completed",
@@ -20132,14 +20130,6 @@ func TestRendererExitPlanModeShowsMessageAndPlanPath(t *testing.T) {
 	if !strings.Contains(plain, "Exited plan mode. You can now make edits") {
 		t.Fatalf("expected confirmation message in output, got %q", plain)
 	}
-	// The plan file path must appear in the same output area.
-	if !strings.Contains(plain, "Plan file:") {
-		t.Fatalf("expected 'Plan file:' label, got %q", plain)
-	}
-	// Path is outside cwd -> must be absolute.
-	if !strings.Contains(plain, planAbs) {
-		t.Fatalf("expected absolute plan path %q, got %q", planAbs, plain)
-	}
 	// Must NOT show the old "output:" label or raw JSON.
 	if strings.Contains(plain, "output:") {
 		t.Fatalf("must not show 'output:' label, got %q", plain)
@@ -20147,43 +20137,6 @@ func TestRendererExitPlanModeShowsMessageAndPlanPath(t *testing.T) {
 	// The header must NOT redundantly repeat the tool name.
 	if strings.Contains(plain, "Exited plan mode exit_plan_mode") {
 		t.Fatalf("header must not repeat tool name, got %q", plain)
-	}
-}
-
-func TestRendererExitPlanModeShowsRelativePlanPathUnderCwd(t *testing.T) {
-	cwd := "/home/user/project"
-	// Plan file lives inside the cwd subtree.
-	planAbs := "/home/user/project/.forebrain/plans/project/plan.md"
-
-	var out bytes.Buffer
-	r := NewRenderer(&out, &out)
-	r.cwd = cwd
-
-	r.renderCompactFrame(Frame{
-		Kind:     FrameTool,
-		Title:    "exit_plan_mode",
-		StepID:   "call-exit",
-		Final:    true,
-		FilePath: planAbs,
-		Content:  "Exited plan mode. You can now make edits, run tools, and take actions.",
-		Summary:  "ran exit_plan_mode",
-		ToolMeta: tool.ToolMeta{
-			ToolName: "exit_plan_mode",
-			Status:   "completed",
-		},
-	}, "tool", "70")
-
-	plain := stripANSI(out.String())
-	// Path is under cwd -> must be relative, not absolute.
-	if strings.Contains(plain, planAbs) {
-		t.Fatalf("expected relative path, but got absolute %q in %q", planAbs, plain)
-	}
-	if !strings.Contains(plain, "Plan file:") {
-		t.Fatalf("expected 'Plan file:' label, got %q", plain)
-	}
-	// The relative path should start with ".forebrain/plans/...".
-	if !strings.Contains(plain, ".forebrain/plans/project/plan.md") {
-		t.Fatalf("expected relative plan path in output, got %q", plain)
 	}
 }
 
