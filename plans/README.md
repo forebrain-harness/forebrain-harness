@@ -1,95 +1,133 @@
-# plans/ — 审计产出的实施计划索引
+# Forebrain Harness 改进计划索引
 
-来源：2026-10-08 branch 审计（范围=未提交工作区 diff；PLAN_REVIEW_DELIVERY 批次标
-`introduced`，gateway status/stop 友好化批次标 `pre-existing`）。每份计划自包含，
-执行者无需本会话上下文。
+本目录包含由 `improve` skill 生成的代码改进计划。每个计划都是自包含的实施指南，可由其他执行器模型独立完成。
 
-| 顺序 | 计划 | 来源发现 | 工作量 | 风险 | 标签 | 依赖 | 状态 |
-|---|---|---|---|---|---|---|---|
-| 1 | [GATEWAY_DELIVERY_OBSERVABILITY_PLAN.md](GATEWAY_DELIVERY_OBSERVABILITY_PLAN.md) | #1 | S | LOW | introduced | 无（建议在 PLAN_REVIEW_DELIVERY 之后合入） | DONE（2026-10-08 executed） |
-| 2 | [APPROVE_RETRY_REVIEW_CANCEL_PLAN.md](APPROVE_RETRY_REVIEW_CANCEL_PLAN.md) | #4 | S | LOW | introduced | 无 | DONE（2026-10-08 executed） |
-| 3 | [PLAN_REVIEW_MARKER_COLLISION_PLAN.md](PLAN_REVIEW_MARKER_COLLISION_PLAN.md) | #3 | M | MED | introduced | 无 | DONE（2026-10-08 executed） |
-| 4 | [GATEWAY_DISPLAY_HOST_DEDUP_PLAN.md](GATEWAY_DISPLAY_HOST_DEDUP_PLAN.md) | #2+#5 | S | LOW | pre-existing | 无 | DONE（2026-10-08 executed） |
-| 5 | [REVISED_PLAN_DIFF_VIEW_PLAN.md](REVISED_PLAN_DIFF_VIEW_PLAN.md) | D1 | M-L | LOW（spike） | direction | 建议 1-3 先合入（其行为基线更稳） | DONE（spike；交付物 [docs/plan/REVISED_PLAN_DIFF_DESIGN.md](../docs/plan/REVISED_PLAN_DIFF_DESIGN.md)，实施另立计划） |
-| 6 | [GATEWAY_PROBE_TEST_PORT_RACE_PLAN.md](GATEWAY_PROBE_TEST_PORT_RACE_PLAN.md) | 二轮#1 | S | LOW | introduced（flake） | 无 | DONE（2026-10-08 executed，评审 APPROVE） |
-| 7 | [PLAN_REVIEW_DELIVERY_STATUS_BACKFILL_PLAN.md](PLAN_REVIEW_DELIVERY_STATUS_BACKFILL_PLAN.md) | 二轮#2 | S | LOW | introduced（docs） | 无 | DONE（2026-10-08 executed，评审 APPROVE） |
+## 最新审核信息
 
-排序原则：杠杆=影响÷工作量，置信度与修复风险折减。#1/#4 是刚落地特性的收尾
-（S、LOW、验证路径干净）；#3 是正确性边缘但需要动刚建立的契约（M、MED）；
-#2 是既有债务顺手清（S）；D1 是产品方向，先 spike 再定实施。
+- **审核日期**：2026-10-08
+- **基准 commit**：eafaf46
+- **审核类型**：TUI message queue bug 根因分析与修复
+- **问题报告**：用户报告"入队消息等待一段时间后，按 Shift+← 无法撤回"
 
-执行纪律（全计划通用）：
-- 测试先行；`CGO_ENABLED=1 go test -tags fts5` 是唯一可信 Go 测试形态。
-- 每份计划落地后：`gofmt -l pkg cmd` 为空、`go vet ./...` 0、
-  `scripts/package-graph.sh` 无 diff、全量 `./...` 回归 ok。
-- 改动留工作区，禁止 git commit（owner 手动审阅提交）。
+## 计划列表
 
-## 执行记录（2026-10-08，improve execute）
+| # | 标题 | 类别 | 状态 | 优先级 | 工作量 | 风险 |
+|---|------|------|------|--------|--------|------|
+| [001-fix-message-recall-after-detach](001-fix-message-recall-after-detach.md) | 修复 runtime detach 后消息无法撤回 | Bug Fix | TODO | **HIGH** | S | LOW |
+| [001-frontend-component-design-spec-alignment](001-frontend-component-design-spec-alignment.md) | 前端通用组件样式规范对齐 | Design System | TODO | HIGH | M (4-6h) | MEDIUM |
 
-五份计划全部执行完毕、评审 APPROVE，改动留工作区待 owner 审阅。执行编队：
-独立计划并行派发 subagent（1→2 串行因同文件；2 评审后 3/4/5 三路并行），
-每份由评审者亲跑验收命令。全局收口：`gofmt -l pkg cmd` 空、`go vet ./...` 0、
-`scripts/package-graph.sh` 两次运行字节一致（仅 LOC 计数变化，零 import/边
-变更）、全量 `CGO_ENABLED=1 go test -tags fts5 ./... -count=1` 34 包 ok。
+## 执行顺序
 
-- **1 GATEWAY_DELIVERY_OBSERVABILITY**：`deliverGatewayPlanReview` 区分
-  `ErrNotPending`（静默）与其他错误（slog.Error）；`gatewayResumeState` 纯函数
-  抽取 + `TestGatewayResumeStateCarriesDeliveredReview`。无偏差。
-- **2 APPROVE_RETRY_REVIEW_CANCEL**：两 surface 的 Idempotent approved 分支补
-  `cancelInFlightPlanReview`；TUI/gateway 各一条新测试（先落决策制造幂等态）。
-  NOTES：`refreshSandboxRuntime` 在该分支被跳过经分析为非缺口（分支契约=同
-  进程派发失败恢复，首响应已 refresh），未扩面。
-- **3 PLAN_REVIEW_MARKER_COLLISION**：`DenyWithAnswer`（CAS）+ `ApprovalStore`
-  扩展 + `DeliverPlanReview` 双读数 + `ActionIsReviewDelivered` 谓词三处消费；
-  显示契约零变更（`Reason: act.Error` 不动）。存量无戳回传行按计划选 (a)
-  降级（run 已终结不可 resume，路径不可达）。标记裸串非测试命中仅常量定义。
-- **4 GATEWAY_DISPLAY_HOST_DEDUP**：`displayHost` 单一映射源、
-  `gatewayProbeTimeout` 常量同源（文案派生）、`serve_run.go` 零改动；
-  输出逐字不变由表测锁定（含 displayHost 一致性双断言）。
-- **5 REVISED_PLAN_DIFF_VIEW（spike）**：交付
-  `docs/plan/REVISED_PLAN_DIFF_DESIGN.md`（Q1-Q4 全裁决）。**有据修订**：Q3
-  由计划初判「下发两版正文、前端渲染 diff」改为引擎侧 `event.Build` 统一
-  diff（frontend 零 diff 库、两端已在渲染引擎产 diff、parity 单算法）；
-  计划事实 3 精确化为「新计划新文件、修订覆写当前文件」。多轮正确性以
-  不变量论证（可读数据中无含标记的多轮序列）。
+推荐按以下顺序执行：
 
-## 二轮 branch 审计（2026-10-08 晚，范围=同一工作区 diff 的复核）
+```
+001-fix-message-recall-after-detach (独立，无依赖，优先修复)
+001-frontend-component-design-spec-alignment (独立，需用户确认命名策略)
+```
 
-四包并行测试复现 gateway flake 一次（`refusedAddr` TOCTOU，见计划 6）；
-`go build ./...`、`go vet ./...`、touched 包测试其余全绿。产出计划 6/7。
+## 状态说明
 
-### 本轮考虑并否决（勿重审）
+- **TODO**：待执行
+- **IN_PROGRESS**：执行中
+- **BLOCKED**：被阻塞（等待决策或依赖）
+- **DONE**：已完成
+- **REJECTED**：已拒绝（说明原因）
 
-- **deny 不取消在途评审**：`docs/plan/PLAN_REVIEW_DELIVERY_PLAN.md:25` 已
-  明确裁决——批准=取消；deny 走 `ComposeDenyFeedback` 既有通道。by-design。
-- **`gatewayResumeState` 字段级复制的 lockstep 隐患**：注释自带警告 +
-  `TestGatewayResumeStateCarriesDeliveredReview` 已钉住；跨包无编译期穷举
-  手段，现状务实。
-- **render.go 删 `truncateURLForHeader`/`middleTruncate`**：生产引用清零，
-  头部走 `wrapToolDisplayLine` 折行，符合"长内容滚动不截断"既定产品裁决。
-- **`RowsAffected` 后 `_ = err` 吞错**（`pkg/state/action_service.go`
-  Approve/Deny/DenyWithAnswer 三处）：pre-existing 模式复制；sqlite 成功
-  Exec 后 RowsAffected 出错实际不可达。顺手清理项，不独立成计划。
-- **`displayHost` 签名 net.Addr→string**：banner 与 status 输出共用单一映射
-  源，表测锁定输出逐字不变。by-design 去重。
+---
 
-## 执行记录（2026-10-08 晚，二轮 improve execute：计划 6/7）
+## 最新审核发现总结（2026-10-08）
 
-两计划文件不相交，按并行规则同时派发两执行者（主工作树直改——目标代码
-只存在于未提交工作树，从 HEAD 拉隔离 worktree 会缺失全部改动对象；沿上轮
-先例，零 commit 留工作区待 owner 审阅）。评审=重跑全部 done criteria +
-逐 hunk 读 diff + 事实抽查，双双 APPROVE。
+### 类别：Correctness / Message Queue Bug
 
-- **6 GATEWAY_PROBE_TEST_PORT_RACE**：`refusedAddr` 重写为拨号验证
-  ECONNREFUSED 才返回（8 次换候选，抢端口场景静默换下一个）。执行者增量
-  恰 +19 行（函数体+注释+`time` 导入），两个 NotRunning 测试断言未动，
-  `errors`/`syscall` 已有导入复用。评审亲验：gofmt 空、vet 0、定向测试绿、
-  并行拓扑（turn/gateway/run/state）复跑全 ok。有据解读：done criteria
-  "pkg/gateway 下仅一个 M" 在故意 dirty 的树上按"本人增量仅此一文件"执行。
-- **7 PLAN_REVIEW_DELIVERY_STATUS_BACKFILL**：`docs/plan/` 计划文档末尾追加
-  Implementation Status（:219-261，落地内容表格/偏差/验证/未做），明确记录
-  "字符串白名单 → marker+answer-stamp 双读数"取代及理由（防用户手打 marker
-  误判）。执行者对全部 file:line 亲 grep 后书写，并把计划笔误"三处消费"按
-  实证改为两处直接+一处经 `gatewayResumeState` 间接；插入位置一次中部事故
-  经 verify 当场暴露并自愈（章节结构评审复核完整）。评审抽查 8 处 file:line
-  引用全部精确命中。
+**严重程度**：**HIGH**
+
+**症状**：用户提交消息后，等待一段时间，按 Shift+← 键无法撤回该消息。
+
+**根因**：
+
+`pkg/run/turn_input.go` 中的 `InputQueue.Recall()` 方法错误地将 `q.rt == nil`（runtime detached）当作"不可撤回"的条件。实际语义是：
+
+- `q.rt == nil`：runtime 已 detach，但消息仍在 `InputQueue.steers` 中（未交付）
+- 真正的"已交付"标志：消息从 `steers` 移到 `delivered`（通过 `BeginSteerDelivery` → `Commit` 路径）
+
+**错误逻辑**：
+```go
+case laneSteer:
+    if q.rt == nil {           // ← 错误假设
+        skipSteers = true
+        continue
+    }
+```
+
+**正确语义**：
+- Runtime attached → 需要先从 `TurnInputRuntime.pending` 撤回
+- Runtime detached → 消息只在 `InputQueue.steers` 中，可以直接撤回
+- 已交付的消息 → 在 `InputQueue.delivered` 中，`newestLocked` 不会选中
+
+**影响**：
+
+- 用户体验严重受损：无法撤回刚提交的消息
+- 复现条件：提交消息后等待 1-2 秒（让 turn 执行到 runtime detach 时刻）
+
+**修复方案**：
+
+见 `001-fix-message-recall-after-detach.md`，核心是放宽 `Recall()` 的撤回条件：
+```go
+case laneSteer:
+    if q.rt != nil {
+        if _, ok := q.rt.RetractLastSteer(); !ok {
+            skipSteers = true
+            continue
+        }
+    }
+    // Runtime nil or retract succeeded → recall from queue
+    laneEntries = &q.steers
+```
+
+**验证**：
+- 单元测试：`TestRecallSteerAfterRuntimeDetach`
+- TUI 真机：提交 → 等待 → Shift+← 撤回
+
+---
+
+## 历史审核记录
+
+### 2026-10-08 - 设计稿与实现一致性审核（通用组件样式）
+
+**审核范围**：`frontend/src/assets/main.css` vs `docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/app-preview.html`
+
+**发现**：设计稿定义的通用组件规范（`.btn`, `.field`, `.badge`, `.sw`, `.card`）与 `main.css` 实现存在三类问题：
+
+1. **命名空间不一致**：设计稿用简短类名（`.btn`），实现用前缀类名（`.forebrain-btn`）
+2. **数值偏差**：按钮、输入框的 `border-radius` 和 `padding` 不匹配
+3. **组件缺失**：`.badge`、`.sw`、`.card` 及部分变体完全缺失
+
+**计划**：见 `001-frontend-component-design-spec-alignment.md`（需用户确认命名策略）
+
+---
+
+## 已审核但未计划的发现
+
+无。
+
+## 已考虑并拒绝的发现
+
+无。
+
+## 下一步
+
+1. **优先执行**：`001-fix-message-recall-after-detach`（用户阻塞 bug）
+2. **用户审阅**：`001-frontend-component-design-spec-alignment`，确认命名策略
+3. **后续审核方向**（可选）：
+   - 审核其他 TUI 交互缺陷
+   - 审核 gateway 响应式布局断点
+   - 审核暗色模式适配完整性
+
+## 联系与反馈
+
+如对计划有疑问或需要修订，请在计划文件对应章节添加注释，或联系计划作者。
+
+---
+
+**索引生成时间**：2026-10-08  
+**Improve Skill 版本**：按 improve skill 模板生成

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
 const (
@@ -194,7 +195,17 @@ func startManagedNetworkProxy(config appcfg.EffectiveNetworkProxyConfig) (*manag
 	if !config.AllowUpstreamProxy {
 		proxy.transport.Proxy = nil
 	}
-	proxy.httpServer = &http.Server{Handler: proxy, ReadHeaderTimeout: 30 * time.Second}
+	// The proxy's own handler is wrapped in the shared access log: every
+	// request a tool makes through the sandbox — host, method, status, bytes —
+	// becomes one record, which is the audit trail an operator needs when
+	// asking "what did this tool contact". One `npm install` produces one line
+	// per request; that volume is intended, and FOREBRAIN_LOG_LEVEL=warn is
+	// the documented lever to shed the INFO records.
+	proxy.httpServer = &http.Server{
+		Handler:           telemetry.AccessLogMiddleware(proxy),
+		ErrorLog:          telemetry.SlogErrorLog(),
+		ReadHeaderTimeout: 30 * time.Second,
+	}
 	go func() { _ = proxy.httpServer.Serve(httpListener) }()
 	if config.EnableSOCKS5 {
 		proxy.socksListener, err = listenProxyURL(config.SOCKSURL, 8081, config.DangerouslyAllowNonLoopbackProxy, forceLoopback)

@@ -1063,12 +1063,49 @@ type foldLineCache struct {
 type viewModel struct {
 	blocks []*viewBlock
 	nextID int
+	// liveBlockCount tracks the number of blocks that need animation (running
+	// compact or fanout with live clock), so hasLiveBlockLocked answers in
+	// O(1) instead of walking every block on each repaint. Every frame lands
+	// on a block through setFrame, which adjusts the count when a block
+	// crosses the isLiveFrame line, and reset() zeroes it with the blocks.
+	// removeLast keeps no bookkeeping of its own: it only ever removes
+	// user-message blocks, which are never live.
+	liveBlockCount int
 	// spinnerPhase is stamped by the viewport painter (paintViewportLocked) on
 	// every repaint and read by renderViewport to animate the running-tool
 	// marker. It advances ~every 200ms while a turn is active (driven by the
 	// working-status repaint) so in-flight tools show a rotating Braille
 	// spinner instead of a static circle.
 	spinnerPhase int
+}
+
+// isLiveFrame reports whether a frame requires animation (compact in progress
+// or fanout with running task clock).
+func isLiveFrame(f Frame) bool {
+	if f.Kind == FrameMemoryCompact && !f.Final {
+		return true
+	}
+	if f.Kind == FrameFanout && fanoutHasLiveClock(f) {
+		return true
+	}
+	return false
+}
+
+// setFrame lands f on an existing block and keeps liveBlockCount honest: a
+// block starts or stops needing animation exactly when its frame crosses the
+// isLiveFrame line. Every frame assignment on a view model goes through here
+// — append's coalescing paths and new blocks, the replace paths behind
+// StepID matches, insertBeforeLast's inserts — so the cached count never
+// drifts from the blocks it summarizes.
+func (m *viewModel) setFrame(b *viewBlock, f Frame) {
+	oldLive, newLive := isLiveFrame(b.frame), isLiveFrame(f)
+	switch {
+	case oldLive && !newLive:
+		m.liveBlockCount--
+	case !oldLive && newLive:
+		m.liveBlockCount++
+	}
+	b.frame = f
 }
 
 // append adds a frame as a new block and returns it, with one exception:
@@ -1098,7 +1135,7 @@ func (m *viewModel) append(f Frame) *viewBlock {
 			// unrelated frames were inserted in between.
 			for i := len(m.blocks) - 1; i >= 0; i-- {
 				if m.blocks[i].frame.Kind == f.Kind && !m.blocks[i].frame.Final {
-					m.blocks[i].frame = f
+					m.setFrame(m.blocks[i], f)
 					m.blocks[i].cache.valid = false
 					return m.blocks[i]
 				}
@@ -1112,7 +1149,7 @@ func (m *viewModel) append(f Frame) *viewBlock {
 			if n := len(m.blocks); n > 0 {
 				last := m.blocks[n-1]
 				if last.frame.Kind == f.Kind && !last.frame.Final {
-					last.frame = f
+					m.setFrame(last, f)
 					last.cache.valid = false
 					return last
 				}
@@ -1121,10 +1158,10 @@ func (m *viewModel) append(f Frame) *viewBlock {
 	}
 	b := &viewBlock{
 		id:          m.nextID,
-		frame:       f,
 		collapsible: collapsibleKind(f.Kind),
 	}
 	m.nextID++
+	m.setFrame(b, f)
 	m.blocks = append(m.blocks, b)
 	return b
 }
@@ -1153,6 +1190,7 @@ func (m *viewModel) blockByID(id int) *viewBlock {
 // stale click on a row from the previous session never resolves to a new block.
 func (m *viewModel) reset() {
 	m.blocks = m.blocks[:0]
+	m.liveBlockCount = 0
 }
 
 // removeLast deletes the last block whose frame matches a predicate and reports
@@ -1178,10 +1216,10 @@ func (m *viewModel) insertBeforeLast(match func(Frame) bool, f Frame) *viewBlock
 		if match(m.blocks[i].frame) {
 			b := &viewBlock{
 				id:          m.nextID,
-				frame:       f,
 				collapsible: collapsibleKind(f.Kind),
 			}
 			m.nextID++
+			m.setFrame(b, f)
 			m.blocks = append(m.blocks[:i], append([]*viewBlock{b}, m.blocks[i:]...)...)
 			return b
 		}
@@ -1210,7 +1248,7 @@ func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall:
 			for _, b := range m.blocks {
 				if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
-					b.frame = f
+					m.setFrame(b, f)
 					b.cache.valid = false
 					return b
 				}
@@ -1229,7 +1267,7 @@ func (m *viewModel) replaceOrInsertBeforeLastTool(f Frame) *viewBlock {
 	if f.StepID != "" {
 		for _, b := range m.blocks {
 			if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
-				b.frame = f
+				m.setFrame(b, f)
 				b.cache.valid = false
 				return b
 			}

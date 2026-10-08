@@ -26,6 +26,14 @@ func runGatewayE(cmd *cobra.Command, _ []string) error {
 	if err := ensureGatewayStartSetup(ctx, cmd); err != nil {
 		return err
 	}
+	// The console log is what an operator reads live and what an operator
+	// reads later, so it also lands in <home>/logs with debug.log's rotation.
+	root, err := home.Root()
+	if err != nil {
+		return err
+	}
+	restoreLog := installGatewayConsoleLog(root)
+	defer restoreLog()
 	// The sign-in link carries the gateway token, so it is printed only when
 	// stdout is a terminal a human is reading — never into captured logs.
 	return gatewayRunBlocking(ctx, gateway.ServeOptions{

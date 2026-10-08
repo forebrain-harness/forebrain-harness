@@ -21,29 +21,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 )
 
-func TestRestServerRoutesSorted(t *testing.T) {
-	srv := NewRestServer("127.0.0.1:0")
-	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	srv.Post("/b", noop)
-	srv.Get("/a", noop)
-	srv.Get("/b", noop)
-
-	got := srv.Routes()
-	want := []RouteInfo{
-		{Method: "GET", Path: "/a"},
-		{Method: "GET", Path: "/b"},
-		{Method: "POST", Path: "/b"},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("routes = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("routes[%d] = %v, want %v", i, got[i], want[i])
-		}
-	}
-}
-
 func TestRestServerRunReportsBusyPort(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -73,25 +50,16 @@ func bannerAddr(t *testing.T, s string) net.Addr {
 func TestWriteStartupBannerGolden(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
-		Version:       "v0.3.0",
-		Routes:        []RouteInfo{{Method: "GET", Path: "/api/agents/primary"}, {Method: "POST", Path: "/api/auth/session"}},
-		ChannelAgent:  "main",
-		ChannelRoutes: []string{"POST /channels/telegram/webhook"},
-		Addr:          bannerAddr(t, "127.0.0.1:6060"),
-		AuthMode:      "token",
-		SignInToken:   "tok",
-		WebUI:         true,
+		Version:     "v0.3.0",
+		Addr:        bannerAddr(t, "127.0.0.1:6060"),
+		AuthMode:    "token",
+		SignInToken: "tok",
+		WebUI:       true,
 	})
 
 	want := bannerArt +
 		"Forebrain Harness Gateway v0.3.0\n" +
 		"\n" +
-		"Routes (3)\n" +
-		"  GET     /api/agents/primary\n" +
-		"  POST    /api/auth/session\n" +
-		"  WS      /ws/chat\n" +
-		"Channel routes · main (1)\n" +
-		"  POST    /channels/telegram/webhook\n" +
 		"Web UI       http://127.0.0.1:6060/\n" +
 		"Sign in      http://127.0.0.1:6060/login#token=tok\n" +
 		"Auth         token\n" +
@@ -121,7 +89,6 @@ func TestWriteStartupBannerOmitsSignInWithoutToken(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
 		Version:  "v0.3.0",
-		Routes:   []RouteInfo{{Method: "GET", Path: "/healthz"}},
 		Addr:     bannerAddr(t, "127.0.0.1:6060"),
 		AuthMode: "none",
 	})
@@ -137,7 +104,6 @@ func TestWriteStartupBannerUnspecifiedHost(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
 		Version:  "v0.3.0",
-		Routes:   []RouteInfo{{Method: "GET", Path: "/healthz"}},
 		Addr:     bannerAddr(t, "0.0.0.0:6060"),
 		AuthMode: "token",
 		WebUI:    true,
@@ -150,23 +116,9 @@ func TestWriteStartupBannerUnspecifiedHost(t *testing.T) {
 	}
 }
 
-func TestWriteStartupBannerNoChannels(t *testing.T) {
-	var buf bytes.Buffer
-	writeStartupBanner(&buf, startupBanner{
-		Version:  "v0.3.0",
-		Routes:   []RouteInfo{{Method: "GET", Path: "/healthz"}},
-		Addr:     bannerAddr(t, "127.0.0.1:6060"),
-		AuthMode: "token",
-	})
-	if strings.Contains(buf.String(), "Channel routes") {
-		t.Fatalf("banner must omit the channel section when no channels are mounted:\n%s", buf.String())
-	}
-}
-
 func TestWriteStartupBannerNoVersion(t *testing.T) {
 	var buf bytes.Buffer
 	writeStartupBanner(&buf, startupBanner{
-		Routes:   []RouteInfo{{Method: "GET", Path: "/healthz"}},
 		Addr:     bannerAddr(t, "127.0.0.1:6060"),
 		AuthMode: "token",
 	})
@@ -427,5 +379,13 @@ func TestDisplayBaseURLMatchesDisplayHost(t *testing.T) {
 		if got, want := displayBaseURL(tc.addr), "http://"+displayHost(tc.addr); got != want {
 			t.Fatalf("displayBaseURL(%q) = %q, want %q (displayHost agreement)", tc.addr, got, want)
 		}
+	}
+}
+
+// The server's own error reports — a panicking handler's stack among them —
+// are wired through slog at construction time, not left on raw stderr.
+func TestNewRestServerRoutesHTTPErrorsThroughSlog(t *testing.T) {
+	if NewRestServer("127.0.0.1:0").ErrorLog == nil {
+		t.Fatal("ErrorLog = nil, want the server's error reports routed through slog")
 	}
 }

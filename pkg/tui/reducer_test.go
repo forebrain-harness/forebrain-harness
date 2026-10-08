@@ -4053,3 +4053,493 @@ func TestInterruptedWaitCardSettlesAsCanceled(t *testing.T) {
 		t.Fatalf("card state = %#v, want canceled", got)
 	}
 }
+
+// The benchmarks below measure the hot paths of renderViewport and
+// paintViewportLocked: full repaints, no-change repaints, single-row
+// streaming updates, scrolling over large histories, and the row-level
+// helpers they call on every painted line.
+
+// BenchmarkPaintViewportFullRepaint measures the cost of a full viewport
+// repaint when the shadow is empty (cold start or after ForceRepaint).
+func BenchmarkPaintViewportFullRepaint(b *testing.B) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.viewportMode = true
+
+	// Build a realistic conversation state with multiple blocks
+	r.RenderFrame(Frame{
+		Kind:    FrameUser,
+		Content: "What is the meaning of life?",
+	})
+	r.RenderFrame(Frame{
+		Kind:    FrameAssistant,
+		Content: strings.Repeat("The meaning of life is a profound question. ", 50),
+	})
+	r.RenderFrame(Frame{
+		Kind:    FrameTool,
+		StepID:  "tool-1",
+		Title:   "read_file",
+		Content: "file_path: README.md\noffset: 0\nlimit: 100",
+	})
+	r.RenderFrame(Frame{
+		Kind:    FrameTool,
+		StepID:  "tool-1",
+		Title:   "read_file",
+		Content: strings.Repeat("# Project Documentation\n\nThis is a sample file.\n", 20),
+		Final:   true,
+	})
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out.Reset()
+		r.mu.Lock()
+		r.dropPaintShadowLocked()
+		r.paintViewportLocked()
+		r.mu.Unlock()
+	}
+}
+
+// BenchmarkPaintViewportNoChanges measures the cost when the shadow matches
+// the desired state (no rows need repainting).
+func BenchmarkPaintViewportNoChanges(b *testing.B) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.viewportMode = true
+
+	// Build conversation state
+	r.RenderFrame(Frame{
+		Kind:    FrameUser,
+		Content: "Hello",
+	})
+	r.RenderFrame(Frame{
+		Kind:    FrameAssistant,
+		Content: strings.Repeat("Response text. ", 100),
+	})
+
+	// Initial paint to populate shadow
+	r.mu.Lock()
+	r.paintViewportLocked()
+	r.mu.Unlock()
+	out.Reset()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out.Reset()
+		r.mu.Lock()
+		r.paintViewportLocked()
+		r.mu.Unlock()
+	}
+}
+
+// BenchmarkPaintViewportSingleRowChange measures incremental repaint cost
+// when only one row changes (typical streaming scenario).
+func BenchmarkPaintViewportSingleRowChange(b *testing.B) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.viewportMode = true
+
+	r.RenderFrame(Frame{
+		Kind:    FrameAssistant,
+		StepID:  "msg-1",
+		Content: "Initial content",
+	})
+
+	// Initial paint
+	r.mu.Lock()
+	r.paintViewportLocked()
+	r.mu.Unlock()
+	out.Reset()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out.Reset()
+		// Simulate streaming: update one block
+		r.RenderFrame(Frame{
+			Kind:    FrameAssistant,
+			StepID:  "msg-1",
+			Content: "Initial content " + strings.Repeat("x", i%10),
+		})
+		r.mu.Lock()
+		r.paintViewportLocked()
+		r.mu.Unlock()
+	}
+}
+
+// BenchmarkRenderViewport measures the cost of building the viewport
+// representation (before damage tracking and actual terminal I/O).
+func BenchmarkRenderViewport(b *testing.B) {
+	vm := &viewModel{
+		blocks: make([]*viewBlock, 0, 50),
+	}
+
+	// Build a realistic block list
+	for i := 0; i < 20; i++ {
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameAssistant,
+				StepID:  "msg",
+				Content: strings.Repeat("Sample content line. ", 50),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameTool,
+				StepID:  "tool",
+				Title:   "shell",
+				Content: "command: ls -la\ndescription: List files",
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = renderViewport(vm, 100, 40, 0, DiffThemeDark, "/home/user")
+	}
+}
+
+// BenchmarkRenderViewportLargeHistory measures the cost when there are
+// hundreds of historical blocks (realistic long session scenario).
+func BenchmarkRenderViewportLargeHistory(b *testing.B) {
+	vm := &viewModel{
+		blocks: make([]*viewBlock, 0, 200),
+	}
+
+	// Build a large conversation history (100 blocks)
+	for i := 0; i < 50; i++ {
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameUser,
+				Content: "User question " + strings.Repeat("x", 50),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameAssistant,
+				Content: strings.Repeat("Assistant response text. ", 100),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Scroll to top (offset 0) - this is where the lag happens
+		_ = renderViewport(vm, 100, 40, 0, DiffThemeDark, "/home/user")
+	}
+}
+
+// BenchmarkRenderViewportLargeHistoryScrolling measures the cost of
+// scrolling through a large history.
+func BenchmarkRenderViewportLargeHistoryScrolling(b *testing.B) {
+	vm := &viewModel{
+		blocks: make([]*viewBlock, 0, 200),
+	}
+
+	// Build a large conversation history (100 blocks)
+	for i := 0; i < 50; i++ {
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameUser,
+				Content: "User question " + strings.Repeat("x", 50),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameAssistant,
+				Content: strings.Repeat("Assistant response text. ", 100),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Simulate scrolling at various positions
+		offset := (i * 10) % 200
+		_ = renderViewport(vm, 100, 40, offset, DiffThemeDark, "/home/user")
+	}
+}
+
+// BenchmarkRenderViewportVeryLargeHistory measures performance with 500 blocks
+// (realistic long development session with many tool calls and responses).
+func BenchmarkRenderViewportVeryLargeHistory(b *testing.B) {
+	vm := &viewModel{
+		blocks: make([]*viewBlock, 0, 500),
+	}
+
+	// Build a very large conversation history (500 blocks)
+	for i := 0; i < 250; i++ {
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameUser,
+				Content: "User question " + strings.Repeat("x", 50),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameAssistant,
+				Content: strings.Repeat("Assistant response text. ", 100),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Scroll to top - this is where the user-reported lag happens
+		_ = renderViewport(vm, 100, 40, 0, DiffThemeDark, "/home/user")
+	}
+}
+
+// BenchmarkSliceAppendGrowth measures the cost of slice growth patterns.
+func BenchmarkSliceAppendGrowth(b *testing.B) {
+	b.Run("SmallCapacity256", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			lines := make([]string, 0, 256)
+			for j := 0; j < 5000; j++ {
+				lines = append(lines, "sample line")
+			}
+			_ = lines
+		}
+	})
+
+	b.Run("LargeCapacity8192", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			lines := make([]string, 0, 8192)
+			for j := 0; j < 5000; j++ {
+				lines = append(lines, "sample line")
+			}
+			_ = lines
+		}
+	})
+}
+
+// BenchmarkFitPaintRow measures the cost of fitting a single row to width
+// (used on every painted row).
+func BenchmarkFitPaintRow(b *testing.B) {
+	// Test various row types
+	rows := []string{
+		"Simple ASCII text that fits in the terminal width exactly",
+		"\x1b[38;5;252mColored text with SGR sequences\x1b[0m that needs width calculation",
+		strings.Repeat("Very long line that exceeds terminal width ", 10),
+		"Line with 中文 characters that take two cells each",
+		"\x1b[1mBold\x1b[0m \x1b[3mitalic\x1b[0m \x1b[4munderline\x1b[0m mixed styles",
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		row := rows[i%len(rows)]
+		_ = fitPaintRow(row, 80)
+	}
+}
+
+// BenchmarkApplySelectionHighlight measures selection highlighting cost.
+func BenchmarkApplySelectionHighlight(b *testing.B) {
+	line := "\x1b[38;5;252mThis is a line of text with some color codes\x1b[0m"
+	selectBgSeq := "\x1b[48;5;24m"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = applySelectionHighlight(line, selectBgSeq, 10, 30)
+	}
+}
+
+// BenchmarkActionCardScroll measures the cost of scrolling through a long
+// action card (tool output with many lines).
+func BenchmarkActionCardScroll(b *testing.B) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.viewportMode = true
+
+	// Create a tool result with 1000 lines
+	content := strings.Repeat("Line of tool output\n", 1000)
+	r.RenderFrame(Frame{
+		Kind:    FrameTool,
+		StepID:  "tool-1",
+		Title:   "shell",
+		Content: content,
+		Final:   true,
+	})
+
+	// Initial paint
+	r.mu.Lock()
+	r.paintViewportLocked()
+	r.mu.Unlock()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out.Reset()
+		// Simulate scrolling
+		r.mu.Lock()
+		r.vpScrollOffset = i % 500
+		r.vpFollow = false
+		r.paintViewportLocked()
+		r.mu.Unlock()
+	}
+}
+
+// BenchmarkSpinnerUpdate measures the cost of updating spinner phase
+// (happens on every paint during tool execution).
+func BenchmarkSpinnerUpdate(b *testing.B) {
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.viewportMode = true
+	r.spinnerEpoch = time.Now()
+
+	// Create a running tool
+	r.RenderFrame(Frame{
+		Kind:    FrameTool,
+		StepID:  "tool-1",
+		Title:   "shell",
+		Content: "command: sleep 10",
+		Summary: "running",
+	})
+
+	// Initial paint
+	r.mu.Lock()
+	r.paintViewportLocked()
+	r.mu.Unlock()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out.Reset()
+		r.mu.Lock()
+		// Simulate time passing
+		r.spinnerEpoch = time.Now().Add(-time.Duration(i) * spinnerAnimationTick)
+		r.paintViewportLocked()
+		r.mu.Unlock()
+	}
+}
+
+// BenchmarkVerticalShift measures the cost of detecting vertical scroll
+// (used to optimize repaints during streaming).
+func BenchmarkVerticalShift(b *testing.B) {
+	painted := make([]string, 40)
+	rows := make([]string, 40)
+
+	// Simulate a 1-row scroll
+	for i := 0; i < 39; i++ {
+		painted[i] = "Line " + strings.Repeat("x", 70)
+		rows[i] = painted[i+1] // Shifted up by 1
+	}
+	rows[39] = "New bottom line"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = verticalShift(painted, rows, 40)
+	}
+}
+
+// BenchmarkRenderViewportCacheEfficiency measures how effective the block
+// cache is by rendering the same viewport multiple times.
+func BenchmarkRenderViewportCacheEfficiency(b *testing.B) {
+	vm := &viewModel{
+		blocks: make([]*viewBlock, 0, 500),
+	}
+
+	// Build 500 blocks
+	for i := 0; i < 250; i++ {
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameUser,
+				Content: "User question " + strings.Repeat("x", 50),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameAssistant,
+				Content: strings.Repeat("Assistant response text. ", 100),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+	}
+
+	// First render to populate cache
+	_ = renderViewport(vm, 100, 40, 0, DiffThemeDark, "/home/user")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Subsequent renders should hit cache
+		_ = renderViewport(vm, 100, 40, 0, DiffThemeDark, "/home/user")
+	}
+}
+
+// BenchmarkRealisticScrollingScenario simulates a realistic user scrolling
+// through a large conversation with cache hits.
+func BenchmarkRealisticScrollingScenario(b *testing.B) {
+	vm := &viewModel{
+		blocks: make([]*viewBlock, 0, 500),
+	}
+
+	// Build 500 blocks
+	for i := 0; i < 250; i++ {
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameUser,
+				Content: "User question " + strings.Repeat("x", 50),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+		vm.blocks = append(vm.blocks, &viewBlock{
+			id: vm.nextID,
+			frame: Frame{
+				Kind:    FrameAssistant,
+				Content: strings.Repeat("Assistant response text. ", 100),
+			},
+			cache:     blockLineCache{},
+			foldCache: foldLineCache{},
+		})
+		vm.nextID++
+	}
+
+	// Warm up cache
+	for offset := 0; offset < 1000; offset += 10 {
+		_ = renderViewport(vm, 100, 40, offset, DiffThemeDark, "/home/user")
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Simulate smooth scrolling: small offset changes
+		offset := (i * 3) % 1000 // Scroll 3 lines at a time
+		_ = renderViewport(vm, 100, 40, offset, DiffThemeDark, "/home/user")
+	}
+}

@@ -190,14 +190,16 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 	// The channel dispatcher is built once and consults the registry per
 	// request, so it always reflects the currently bound agent.
 	withChannels := ControlPlaneHTTPMiddleware(env, gw.channelHandler(inner))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// The access log wraps the whole chain, limiter and websocket included, so
+	// every request an operator could wonder about is reported.
+	return telemetry.AccessLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The limiter bounds what can be sent without the gateway's
 		// credentials: guesses at the token, the sign-in exchange, the login
 		// page. A request that carries them is the owner's own page at work —
 		// one load of it fans out into more asset and API requests than any
 		// burst sized for strangers, and throttling the holder of the token
 		// protects nothing the token does not already grant.
-		if !requestAuthorized(env, r) && !rl.allow(clientIP(r)) {
+		if !requestAuthorized(env, r) && !rl.allow(telemetry.ClientIP(r)) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
@@ -210,7 +212,7 @@ func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) ht
 			return
 		}
 		withChannels.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // requestAuthorized reports whether r carries the gateway's credentials under
@@ -324,7 +326,7 @@ func (s *Server) handleWebSessionCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	got := strings.TrimSpace(req.Token)
 	if len(got) != len(expected) || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
-		slog.Warn("gateway web sign-in rejected", "remote", clientIP(r))
+		slog.Warn("gateway web sign-in rejected", "remote", telemetry.ClientIP(r))
 		writeControlPlaneUnauthorized(w, `{"error":"invalid gateway token"}`)
 		return
 	}

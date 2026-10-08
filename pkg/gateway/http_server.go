@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 	"golang.org/x/time/rate"
 )
 
@@ -48,19 +48,12 @@ type Routes interface {
 	RouteAdder() func(method, path string, hf http.HandlerFunc)
 }
 
-// RouteInfo is one row of the route table the gateway prints at startup.
-type RouteInfo struct {
-	Method string
-	Path   string
-}
-
 // RestServer wraps an Router and the standard *http.Server. The
 // embedded *http.Server exposes the Handler field that the gateway swaps out
 // to install its own middleware chain.
 type RestServer struct {
 	router      *Router
 	middlewares []func(http.Handler) http.Handler
-	routes      []RouteInfo
 	*http.Server
 }
 
@@ -77,6 +70,9 @@ func NewRestServer(addr string) *RestServer {
 		router: router,
 		Server: &http.Server{
 			Addr: addr,
+			// The server's own error reports go through slog; see
+			// telemetry.SlogErrorLog.
+			ErrorLog: telemetry.SlogErrorLog(),
 			// No write timeout: streaming endpoints (SSE, websockets) must
 			// not be cut off mid-response.
 			ReadHeaderTimeout: 60 * time.Second,
@@ -150,22 +146,7 @@ func (srv *RestServer) AddRoute(routes ...Route) {
 			h = srv.middlewares[i](h)
 		}
 		srv.router.Handle(rt.Method, rt.Pattern, h)
-		srv.routes = append(srv.routes, RouteInfo{Method: rt.Method, Path: rt.Pattern})
 	}
-}
-
-// Routes returns the registered route table sorted by path then method, so
-// the startup listing is stable regardless of registration order.
-func (srv *RestServer) Routes() []RouteInfo {
-	out := make([]RouteInfo, len(srv.routes))
-	copy(out, srv.routes)
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Path != out[j].Path {
-			return out[i].Path < out[j].Path
-		}
-		return out[i].Method < out[j].Method
-	})
-	return out
 }
 
 // RouteGroup registers routes under a shared path prefix.
@@ -569,24 +550,6 @@ func newIPRateLimiter(rps float64, burst int) *ipRateLimiter {
 		lastHit: map[string]time.Time{},
 		ttl:     10 * time.Minute,
 	}
-}
-
-func clientIP(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			return strings.TrimSpace(parts[0])
-		}
-	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil {
-		return host
-	}
-	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func (b *ipRateLimiter) allow(ip string) bool {

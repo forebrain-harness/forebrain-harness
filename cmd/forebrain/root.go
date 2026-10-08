@@ -106,7 +106,7 @@ func prepPersistentHome(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	inner := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: defaultSlogLevel(), AddSource: true})
+	inner := stderrLogHandler(defaultSlogLevel(), true)
 	slog.SetDefault(slog.New(telemetry.NewSlogTeeHandler(root, inner)))
 	return nil
 }

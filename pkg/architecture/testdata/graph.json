@@ -20,7 +20,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/channel",
-      "loc": 5105,
+      "loc": 5087,
       "fan_in": 2,
       "fan_out": 1
     },
@@ -38,7 +38,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 15780,
+      "loc": 15715,
       "fan_in": 0,
       "fan_out": 18
     },
@@ -80,9 +80,9 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
-      "loc": 3874,
+      "loc": 3877,
       "fan_in": 6,
-      "fan_out": 4
+      "fan_out": 5
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/memory",
@@ -110,9 +110,9 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
-      "loc": 16697,
+      "loc": 16708,
       "fan_in": 11,
-      "fan_out": 3
+      "fan_out": 4
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/session",
@@ -134,8 +134,8 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry",
-      "loc": 1651,
-      "fan_in": 5,
+      "loc": 2253,
+      "fan_in": 7,
       "fan_out": 2
     },
     {
@@ -152,7 +152,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 45310,
+      "loc": 45257,
       "fan_in": 0,
       "fan_out": 20
     },
@@ -335,6 +335,10 @@
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/mcp",
@@ -543,6 +547,10 @@
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
       "to": "github.com/forebrain-harness/forebrain-harness/pkg/llm"
+    },
+    {
+      "from": "github.com/forebrain-harness/forebrain-harness/pkg/safety",
+      "to": "github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
     },
     {
       "from": "github.com/forebrain-harness/forebrain-harness/pkg/session",

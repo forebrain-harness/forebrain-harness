@@ -719,3 +719,17 @@ func TestSummaryToolBodyKeepsFirstLineIndent(t *testing.T) {
 		t.Fatalf("summaryToolBody dropped the first line's indent: %q", got)
 	}
 }
+
+// BenchmarkSelfContainedRows measures the cost of making rows self-contained
+// (each row opens its own style and resets at the end).
+func BenchmarkSelfContainedRows(b *testing.B) {
+	rows := make([]string, 50)
+	for i := range rows {
+		rows[i] = "\x1b[38;5;252mLine " + strings.Repeat("content ", 20) + "\x1b[0m"
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = selfContainedRows(rows)
+	}
+}

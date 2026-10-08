@@ -7,7 +7,7 @@ import (
 )
 
 // LevelLogger owns the common info/debug log pair used by interactive
-// components. Both files use the same bounded rotation and sync policy.
+// components. Both files use the same bounded rotation policy.
 type LevelLogger struct {
 	mu        sync.Mutex
 	infoLog   *log.Logger
@@ -17,7 +17,6 @@ type LevelLogger struct {
 }
 
 func OpenLevelLogger(infoPath, debugPath string, options Options) (*LevelLogger, error) {
-	options.SyncWrites = true
 	infoFile, err := Open(infoPath, options)
 	if err != nil {
 		return nil, err

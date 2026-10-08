@@ -2351,7 +2351,16 @@ func renderViewport(m *viewModel, width, height, scrollOffset int, theme DiffThe
 	if height < 1 {
 		height = 1
 	}
-	all := make([]string, 0, 256)
+	// Pre-allocate 'all' slice based on block count to reduce reallocation.
+	// Typical block averages ~8 lines. Start with a reasonable estimate
+	// capped at 8192 to balance memory vs reallocation for very large sessions.
+	estimatedLines := len(m.blocks) * 8
+	if estimatedLines < 256 {
+		estimatedLines = 256
+	} else if estimatedLines > 8192 {
+		estimatedLines = 8192
+	}
+	all := make([]string, 0, estimatedLines)
 	spans := make([]lineSpan, 0, len(m.blocks))
 	visibleBlocks := 0
 	// The painter stamps the current spinner phase on the model each repaint;
@@ -3761,15 +3770,9 @@ func (r *Renderer) hasLiveBlockLocked() bool {
 	if vm == nil {
 		return false
 	}
-	for _, block := range vm.blocks {
-		switch {
-		case block.frame.Kind == FrameMemoryCompact && !block.frame.Final:
-			return true
-		case block.frame.Kind == FrameFanout && fanoutHasLiveClock(block.frame):
-			return true
-		}
-	}
-	return false
+	// Use the cached live block count instead of O(N) traversal.
+	// The count is maintained by viewModel.append when blocks are added/updated.
+	return vm.liveBlockCount > 0
 }
 
 func (r *Renderer) syncLiveBlockAnimationLocked() {

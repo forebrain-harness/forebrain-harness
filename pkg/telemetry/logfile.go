@@ -1,8 +1,10 @@
 // Package logfile owns Forebrain Harness's bounded, rotating file-log primitives.
 //
 // Callers decide what to log and which severity/file receives it. This package
-// is the single owner of file creation, record bounds, runtime rotation,
-// periodic rotation for redirected descriptors, syncing, and closing.
+// is the single owner of file creation, record bounds, runtime rotation for
+// redirected descriptors, and closing. Records reach the descriptor unbuffered
+// and unsynced by design (see File.Write); File.Sync is the explicit,
+// on-demand durability call.
 package telemetry
 
 import (
@@ -26,7 +28,6 @@ type Options struct {
 	Backups            int
 	Perm               os.FileMode
 	ExistingParentOnly bool
-	SyncWrites         bool
 }
 
 func (o Options) normalized() Options {
@@ -46,6 +47,23 @@ func (o Options) normalized() Options {
 type File struct {
 	raw     *os.File
 	options Options
+	// mu serializes writes and rotation for THIS file. Rotation needs the
+	// package-level rotateMu as well, but that lock is taken once per rotation
+	// (every MaxBytes), not once per record: a global lock on the write path
+	// would serialize every log file in the process behind one another.
+	mu sync.Mutex
+	// size is the number of bytes this File has written to raw's path. It
+	// replaces an fstat per record, so it is a hint, not the truth: it counts
+	// only what this File wrote, and another writer touching the same path
+	// (the TUI's StartPeriodicRotation does) can make it drift. The drift is
+	// bounded either way. A writer that truncates — the TUI's rotation is
+	// copy-and-truncate on this same inode — makes size an over-estimate, so
+	// at worst this File rotates early. A writer that appends makes size an
+	// under-estimate, so the active file can exceed MaxBytes until that
+	// writer's own 2-second rotation brings it back. writeLocked re-asks the
+	// filesystem only when the counter says a rotation may be due, so no
+	// periodic stat timer is needed.
+	size int64
 }
 
 // Open creates the parent directory, performs startup rotation, and opens an
@@ -56,7 +74,11 @@ func Open(path string, options Options) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &File{raw: raw, options: options}, nil
+	f := &File{raw: raw, options: options}
+	if info, statErr := raw.Stat(); statErr == nil {
+		f.size = info.Size()
+	}
+	return f, nil
 }
 
 // OpenRaw applies the same directory creation and startup rotation policy when
@@ -83,13 +105,52 @@ func OpenRaw(path string, flags int, perm os.FileMode, options Options) (*os.Fil
 	return os.OpenFile(path, flags, perm)
 }
 
+// Write appends one bounded record.
+//
+// Records are written straight to the descriptor: no userspace buffering, and
+// deliberately no fsync. Buffering would delay `tail -f` and lose the tail on a
+// crash; an fsync per record buys only power-loss durability, which a diagnostic
+// log does not need, at the cost of a disk barrier on the caller's thread (the
+// LLM request path and the HTTP response path both call this). The package's own
+// error.log has always written this way. write(2) already survives process death.
 func (f *File) Write(p []byte) (int, error) {
 	if f == nil {
 		return 0, os.ErrInvalid
 	}
-	n, err := WriteRaw(f.raw, p, f.options.MaxBytes, f.options.Backups)
-	if err == nil && f.options.SyncWrites {
-		err = f.Sync()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.writeLocked(p)
+}
+
+// writeLocked is Write's body, called with f.mu held.
+func (f *File) writeLocked(p []byte) (int, error) {
+	originalLen := len(p)
+	if int64(len(p)) > f.options.MaxBytes {
+		budget := int(f.options.MaxBytes)
+		if budget > 256 {
+			budget -= 128
+		}
+		p = []byte(BoundText(string(p), budget))
+	}
+	if f.size+int64(len(p)) > f.options.MaxBytes {
+		// f.size counts only what this File wrote, so it can drift when another
+		// writer touches the same path (the TUI's StartPeriodicRotation does).
+		// Ask the filesystem once, but only when the counter says a rotation may
+		// be due — not on every record.
+		if info, err := f.raw.Stat(); err == nil {
+			f.size = info.Size()
+		}
+		if f.size+int64(len(p)) > f.options.MaxBytes {
+			rotateMu.Lock()
+			rotateActiveLocked(f.raw, f.options.MaxBytes, f.options.Backups)
+			rotateMu.Unlock()
+			f.size = 0
+		}
+	}
+	n, err := f.raw.Write(p)
+	f.size += int64(n)
+	if err == nil && originalLen != len(p) {
+		return originalLen, nil
 	}
 	return n, err
 }

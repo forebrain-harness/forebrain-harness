@@ -609,7 +609,10 @@ func (q *InputQueue) newestLocked(skipSteers bool) (queueLane, int) {
 // copy is retracted first; a retraction that fails means the run already
 // delivered it to the model — and since the runtime drains FIFO, every older
 // steer is gone too — so the whole steer lane is skipped rather than handing
-// back an editable copy of a message that is being answered.
+// back an editable copy of a message that is being answered. A detached
+// runtime leaves the steer only in the queue — delivery settles inside the
+// run loop before the run can end, so it was never delivered — and the steer
+// can be recalled directly.
 func (q *InputQueue) Recall() (Input, bool) {
 	if q == nil {
 		return Input{}, false
@@ -625,13 +628,17 @@ func (q *InputQueue) Recall() (Input, bool) {
 		var laneEntries *[]Input
 		switch lane {
 		case laneSteer:
-			if q.rt == nil {
-				skipSteers = true
-				continue
-			}
-			if _, ok := q.rt.RetractLastSteer(); !ok {
-				skipSteers = true
-				continue
+			// When a runtime is attached, retract from it first: a failed
+			// retraction means the run already drained the steer for a model
+			// call — and since the runtime drains FIFO, every older steer is
+			// gone too. When the runtime is detached, the steer never left the
+			// queue (delivery settles inside the run loop before the run can
+			// end, and Detach runs after that), so it can be recalled directly.
+			if q.rt != nil {
+				if _, ok := q.rt.RetractLastSteer(); !ok {
+					skipSteers = true
+					continue
+				}
 			}
 			laneEntries = &q.steers
 		case laneRejected:

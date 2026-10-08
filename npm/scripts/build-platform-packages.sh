@@ -6,9 +6,10 @@
 #                                     beside the binary; see scripts/install-dictionary.sh)
 #   package.json (with os/cpu fields)
 #
-# The web UI is not built here: pkg/gateway/dist must already contain a build
-# (`make ui`, or the release workflow) because go:embed compiles it into every
-# platform binary.
+# The web UI is rebuilt here by default (`make ui`) so every platform binary
+# embeds the current frontend. Set FOREBRAIN_SKIP_UI_BUILD=1 to embed the
+# pkg/gateway/dist already in the tree instead (the release pipeline does
+# this: its tag carries the UI committed by the release PR).
 # Every platform (including windows/amd64) is built with CGO_ENABLED=1 so the
 # weixin silk voice decoder, sqlite, and other cgo features are always present.
 # Cross-compiling therefore needs the matching C toolchain; this script honors
@@ -19,6 +20,7 @@
 # Env:
 #   FOREBRAIN_VERSION            — package version (default: the VERSION file's content)
 #   FOREBRAIN_BUILD_TARGETS      — space-separated targets (e.g. "darwin/arm64 linux/amd64 windows/amd64"); default = host
+#   FOREBRAIN_SKIP_UI_BUILD      — set to 1 to skip the web UI rebuild and embed pkg/gateway/dist as-is
 #   FOREBRAIN_CC_WINDOWS_AMD64   — C compiler for windows/amd64 cross-build (default: x86_64-w64-mingw32-gcc)
 #   FOREBRAIN_CC_LINUX_ARM64     — C compiler for linux/arm64 cross-build (default: aarch64-linux-gnu-gcc)
 #   FOREBRAIN_CC_LINUX_AMD64     — C compiler override for linux/amd64 cross-build
@@ -36,11 +38,20 @@ FOREBRAIN_VERSION="${FOREBRAIN_VERSION:-$(tr -d '[:space:]' < "$ROOT_DIR/VERSION
 DEFAULT_TARGET="$(go env GOOS)/$(go env GOARCH)"
 TARGETS="${FOREBRAIN_BUILD_TARGETS:-$DEFAULT_TARGET}"
 
+if [ "${FOREBRAIN_SKIP_UI_BUILD:-}" = "1" ]; then
+  [ -f "$ROOT_DIR/pkg/gateway/dist/index.html" ] || { echo "pkg/gateway/dist has no web UI build; run make ui first" >&2; exit 1; }
+else
+  echo "==> building the web UI (make ui)"
+  make -C "$ROOT_DIR" ui || {
+    echo "web UI build failed; fix the frontend build, or set FOREBRAIN_SKIP_UI_BUILD=1 to embed the existing pkg/gateway/dist" >&2
+    exit 1
+  }
+  echo "==> web UI rebuilt into pkg/gateway/dist (release-managed: do not commit local rebuilds; scripts/check-webui-dist.sh rejects PR changes)"
+fi
+
 DIST_DIR="$NPM_DIR/dist"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
-
-[ -f "$ROOT_DIR/pkg/gateway/dist/index.html" ] || { echo "pkg/gateway/dist has no web UI build; run make ui first" >&2; exit 1; }
 
 triple_for() {
   case "$1" in
