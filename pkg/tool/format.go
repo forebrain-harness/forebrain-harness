@@ -21,6 +21,12 @@ import (
 
 const DefaultMaxFormattedBody = 120_000
 
+// PlanReviewDeliveredText is the one line every display of a delivered plan
+// review says — the refusal card's body, the notice line, and every replay of
+// the tool result row that recorded it. It lives in the display layer beside
+// DeniedToolDisplayBody; pkg/turn re-exports it for the surfaces.
+const PlanReviewDeliveredText = "Plan review delivered — the planner is revising the plan."
+
 // DeniedToolDisplayBody is the one sentence a refused tool call shows as its
 // card body — live when the refusal lands, and on every replay of the tool
 // result row that recorded it. feedback is the user's own words from the

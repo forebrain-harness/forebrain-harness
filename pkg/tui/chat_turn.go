@@ -781,6 +781,9 @@ func (s *ChatSession) resumeAgentContext(
 			Denied:       v.denied,
 			DenyReason:   denyReason,
 			DenyFeedback: resume.Feedback,
+			// A delivered review has no user words: the persisted denial's
+			// display half says the handoff line instead.
+			DeliveredReview: resume.DeliveredReview,
 		}
 		// The fence travels with the resume state rather than being crossed
 		// here, so it opens when the replay starts and closes when the replay
@@ -1061,12 +1064,20 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 	// display half carries, from the same place the persisted tool result's
 	// tool_display body comes — never the guidance composed for the model.
 	feedback := ""
+	deliveredReview := false
 	if status == "denied" && s.actionSvc() != nil {
 		if act, err := s.actionSvc().Get(context.Background(), actionID); err == nil && act != nil {
 			feedback = act.Error
+			deliveredReview = turn.ActionIsReviewDelivered(act)
 		}
 	}
 	content := tool.DeniedToolDisplayBody(toolName, feedback)
+	// A delivered review closed this gate, not the user: the answer stamp says
+	// so even when the typed feedback happens to equal the marker string. The
+	// card reports the handoff instead of a refusal with no words behind it.
+	if status == "denied" && deliveredReview {
+		content = turn.PlanReviewDeliveredText
+	}
 	meta.Status = status
 	s.notifyUI(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,

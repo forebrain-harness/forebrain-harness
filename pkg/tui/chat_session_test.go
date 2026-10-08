@@ -12445,7 +12445,51 @@ func newPlanReviewSession(t *testing.T, reviewer turn.Reviewer) (*ChatSession, *
 	return cs, actions, act.ID
 }
 
-func TestPlanReviewLeavesTheApprovalPendingAndReachesThePlanner(t *testing.T) {
+// appendPlanReviewedEvent stores one plan_reviewed event the way a finished
+// reviewer publishes it, for races constructed deterministically.
+func appendPlanReviewedEvent(t *testing.T, runs *state.RunStore, sessionID, actionID, reviewID, text string) {
+	t.Helper()
+	payload, err := json.Marshal(event.PlanReviewedPayload{
+		ActionID: actionID, ReviewID: reviewID,
+		Provider: "openai", Model: "gpt-5.1",
+		Text: text, DurationMs: 125000, Outcome: "done",
+	})
+	if err != nil {
+		t.Fatalf("marshal plan_reviewed: %v", err)
+	}
+	if _, err := runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: "plan-review:" + reviewID + ":reviewed", SessionID: sessionID,
+		Type: event.RunEventPlanReviewed, Payload: payload,
+	}); err != nil {
+		t.Fatalf("append plan_reviewed: %v", err)
+	}
+}
+
+// listApprovalResolvedEvents reads one conversation's approval_resolved
+// records back exactly as a reload would.
+func listApprovalResolvedEvents(t *testing.T, runs *state.RunStore, sessionID string) []event.ApprovalResolvedPayload {
+	t.Helper()
+	records, err := runs.ListSessionEventsOfType(context.Background(), sessionID, event.RunEventApprovalResolved, 0)
+	if err != nil {
+		t.Fatalf("list approval_resolved: %v", err)
+	}
+	out := make([]event.ApprovalResolvedPayload, 0, len(records))
+	for _, record := range records {
+		var payload event.ApprovalResolvedPayload
+		if json.Unmarshal(record.Payload, &payload) == nil {
+			out = append(out, payload)
+		}
+	}
+	return out
+}
+
+// Behavior contract, revised 2026-10-08: a completed review delivers itself.
+// The approval closes as a marker denial the moment the reviewer finishes, so
+// the planner revises against the review and re-submits its own exit_plan_mode
+// — what the user approves from then on has already absorbed the review. A
+// deny the user submits after that lands on a resolved action: it converges
+// idempotently and never overwrites the marker.
+func TestPlanReviewAutoDeliversAndALateUserDenyConverges(t *testing.T) {
 	ctx := context.Background()
 	reviewer := &stubReviewer{text: "Verdict: rework. No verification step."}
 	cs, actions, actionID := newPlanReviewSession(t, reviewer)
@@ -12456,67 +12500,56 @@ func TestPlanReviewLeavesTheApprovalPendingAndReachesThePlanner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("requesting a review failed: %v", err)
 	}
-	act, err := actions.Get(ctx, actionID)
-	if err != nil {
-		t.Fatalf("Get action: %v", err)
-	}
-	if act.Status != state.ActionPending {
-		t.Fatalf("a review must not decide the approval; status=%s", act.Status)
-	}
 	if !strings.Contains(reviewer.seen.Plan, "1. Ship it.") {
 		t.Fatalf("reviewer did not receive the plan: %#v", reviewer.seen)
 	}
 	if reviewer.seen.Model.Model != "gpt-5.1" {
 		t.Fatalf("reviewer model = %#v", reviewer.seen.Model)
 	}
-
-	// The review is shown back with the next prompt for this approval.
-	prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1")
-	if perr != nil || prompted == nil {
-		t.Fatalf("the approval must re-prompt after a review: %v %v", prompted, perr)
+	act, err := actions.Get(ctx, actionID)
+	if err != nil {
+		t.Fatalf("Get action: %v", err)
 	}
-	notes := prompted.PlanReviews
-	if len(notes) != 1 || notes[0].Model != "gpt-5.1" || !strings.Contains(notes[0].Text, "No verification step") {
-		t.Fatalf("collected reviews = %#v", notes)
+	if act.Status != state.ActionDenied || act.Error != turn.PlanReviewDeliveredReason {
+		t.Fatalf("a completed review delivers itself; status=%s error=%q", act.Status, act.Error)
 	}
 
-	// Keeping planning sends the review to the planner along with the
-	// feedback — composed at the resume, not stored in the row.
+	// The gate the delivery closed does not come back: the next approval the
+	// user sees is the revised plan's own.
+	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr == nil && prompted != nil {
+		t.Fatalf("a delivered review must close the approval, got re-prompt %#v", prompted)
+	}
+
+	// A deny the user submits after the delivery — the race window where they
+	// answered while the reviewer was finishing — lands on the resolved
+	// action. It must converge without error and leave the stored marker
+	// alone: the delivery already told the planner everything.
 	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
 		Denied: true, DenyReason: "I disagree about the verification step.",
 	}); err != nil {
-		t.Fatalf("denying failed: %v", err)
+		t.Fatalf("a late deny must converge idempotently: %v", err)
 	}
 	act, err = actions.Get(ctx, actionID)
 	if err != nil {
 		t.Fatalf("Get action: %v", err)
 	}
-	if act.Status != state.ActionDenied {
-		t.Fatalf("status=%s want denied", act.Status)
+	if act.Status != state.ActionDenied || act.Error != turn.PlanReviewDeliveredReason {
+		t.Fatalf("the late deny overwrote the delivery; status=%s error=%q", act.Status, act.Error)
 	}
-	if act.Error != "I disagree about the verification step." {
-		t.Fatalf("stored denial = %q, want only the user's words", act.Error)
-	}
-	// The denial's resume owns the parked run from here; the fixture ends it
-	// the way that resume does, so what follows reads the next prompt.
-	parkedRunID, _, findErr := cs.runSvc().FindRunByAction(ctx, actionID)
-	if findErr != nil || parkedRunID == "" {
-		t.Fatalf("find the parked run: %q %v", parkedRunID, findErr)
-	}
-	if err := cs.runSvc().SetStatus(ctx, parkedRunID, state.RunStatusDone); err != nil {
-		t.Fatalf("end the parked run: %v", err)
-	}
-	var nextNotes []turn.PlanReviewNote
-	if again, aerr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); aerr == nil && again != nil {
-		nextNotes = again.PlanReviews
-	}
-	if len(nextNotes) != 0 {
-		t.Fatal("reviews must be dropped once the approval is resolved")
-	}
+}
 
-	// The resume composes the review back onto the user's words, so the
-	// planner still sees both — read from the conversation's events, where a
-	// restart would read them from too.
+// The race the other way round — the user's typed deny commits while the
+// reviewer is still finishing — keeps the old composition: the resume ranks
+// the user's words above the review, and the stored row keeps only the words.
+func TestDeniedExitPlanResumeRanksTheUsersWordsAboveTheReview(t *testing.T) {
+	ctx := context.Background()
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{})
+
+	if _, err := actions.Deny(ctx, actionID, "I disagree about the verification step."); err != nil {
+		t.Fatalf("deny: %v", err)
+	}
+	appendPlanReviewedEvent(t, cs.runSvc(), "session-1", actionID, "rev-race", "Verdict: rework. No verification step.")
+
 	p := &chatApprovalResume{
 		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
 		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
@@ -12527,20 +12560,24 @@ func TestPlanReviewLeavesTheApprovalPendingAndReachesThePlanner(t *testing.T) {
 		!strings.Contains(resumeState.DenyReason, "I disagree about the verification step.") {
 		t.Fatalf("the resumed denial lost the review or the user's words: %q", resumeState.DenyReason)
 	}
+	if resumeState.DenyFeedback != "I disagree about the verification step." {
+		t.Fatalf("DenyFeedback = %q, want only the user's words", resumeState.DenyFeedback)
+	}
 }
 
 func TestPlanReviewReachesThePlannerWhenTheUserTypesNothing(t *testing.T) {
 	ctx := context.Background()
 	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework."})
 
-	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
-		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
-	}); err != nil {
-		t.Fatalf("requesting a review failed: %v", err)
+	// The user's deny wins the race with an in-flight review: the review lands
+	// after the decision, its delivery finds nothing pending, and the plain
+	// denial the user made is what resumes. Constructed directly — deny, then
+	// the review event the finished reviewer would have published — so the
+	// race is deterministic.
+	if _, err := actions.Deny(ctx, actionID, ""); err != nil {
+		t.Fatalf("deny: %v", err)
 	}
-	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{Denied: true}); err != nil {
-		t.Fatalf("denying failed: %v", err)
-	}
+	appendPlanReviewedEvent(t, cs.runSvc(), "session-1", actionID, "rev-race", "Verdict: rework.")
 	act, err := actions.Get(ctx, actionID)
 	if err != nil {
 		t.Fatalf("Get action: %v", err)
@@ -12558,6 +12595,91 @@ func TestPlanReviewReachesThePlannerWhenTheUserTypesNothing(t *testing.T) {
 	agBase, _ := cs.resumeAgentContext(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true}, time.Now())
 	if got := tool.ToolApprovalResumeFromContext(agBase).DenyReason; !strings.Contains(got, "Verdict: rework.") {
 		t.Fatalf("a plain denial must still carry the review: %q", got)
+	}
+}
+
+// A completed review is delivered, not displayed and forgotten: the approval
+// closes as a denial carrying the delivery marker, the planner's resume leads
+// with the delivery instruction and carries the review, and neither the marker
+// nor a user's words the user never typed reach anyone.
+func TestPlanReviewAutoDeliversToPlannerAfterDone(t *testing.T) {
+	ctx := context.Background()
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework the cache story."})
+	notified := make(chan any, 16)
+	cs.PrependUINotify(func(msg any) {
+		notified <- msg
+	})
+	t.Cleanup(cs.stopUINotificationDispatcher)
+
+	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
+		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
+	}); err != nil {
+		t.Fatalf("requesting a review failed: %v", err)
+	}
+	act, err := actions.Get(ctx, actionID)
+	if err != nil {
+		t.Fatalf("Get action: %v", err)
+	}
+	if act.Status != state.ActionDenied {
+		t.Fatalf("a completed review delivers itself to the planner; status=%s", act.Status)
+	}
+	if act.Error != turn.PlanReviewDeliveredReason {
+		t.Fatalf("stored denial = %q, want the delivery marker", act.Error)
+	}
+
+	// The delivery is durable: the resolution event names the denial, so a
+	// reload replays the handoff instead of re-prompting the old approval.
+	resolved := listApprovalResolvedEvents(t, cs.runSvc(), "session-1")
+	if len(resolved) != 1 {
+		t.Fatalf("approval_resolved events = %d, want the delivery's one", len(resolved))
+	}
+	if resolved[0].Decision != string(state.ActionDenied) || resolved[0].Reason != turn.PlanReviewDeliveredReason {
+		t.Fatalf("delivery event = %#v, want the marker denial", resolved[0])
+	}
+	if resolved[0].Confirmation != turn.PlanReviewDeliveredText {
+		t.Fatalf("delivery confirmation = %q, want the delivered line the web replays", resolved[0].Confirmation)
+	}
+
+	// The gate no longer re-prompts: the planner is revising, and the approval
+	// the user will see next is the revised plan's own.
+	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr == nil && prompted != nil {
+		t.Fatalf("a delivered review must close the approval, got re-prompt %#v", prompted)
+	}
+
+	// One line says what happened — not a decision confirmation, because no
+	// user decision was made.
+	sawNotice := false
+	deadline := time.After(2 * time.Second)
+	for !sawNotice {
+		select {
+		case msg := <-notified:
+			if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindSystem &&
+				strings.Contains(m.Msg.Content, "Plan review delivered") {
+				sawNotice = true
+			}
+		case <-deadline:
+			t.Fatal("the delivery must tell the user the planner is revising")
+		}
+	}
+
+	// The resume the planner runs under: instruction header plus the review,
+	// never the marker, and no user feedback claimed.
+	p := &chatApprovalResume{
+		ActionID: actionID, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	agBase, _ := cs.resumeAgentContext(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true}, time.Now())
+	resumeState := tool.ToolApprovalResumeFromContext(agBase)
+	if !strings.Contains(resumeState.DenyReason, "The plan review you asked for has returned.") ||
+		!strings.Contains(resumeState.DenyReason, "Verdict: rework the cache story.") ||
+		strings.Contains(resumeState.DenyReason, turn.PlanReviewDeliveredReason) {
+		t.Fatalf("the delivered resume lost the review or leaked the marker: %q", resumeState.DenyReason)
+	}
+	if resumeState.DenyFeedback != "" {
+		t.Fatalf("DenyFeedback = %q, want empty: delivery claims no user words", resumeState.DenyFeedback)
+	}
+	if !resumeState.DeliveredReview {
+		t.Fatal("the delivered resume must carry the delivery flag: its display half has no user words")
 	}
 }
 
@@ -12707,8 +12829,12 @@ func TestPlanReviewPublishesItsStartAndEnd(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("requesting a review failed: %v", err)
 	}
-	if act, err := okActions.Get(ctx, okAction); err != nil || act.Status != state.ActionPending {
-		t.Fatalf("a completed review must leave the approval pending, got %v %v", act, err)
+	// Contract revised 2026-10-08: a completed review no longer leaves the
+	// approval pending — it delivers itself, closing the gate as the marker
+	// denial so the planner revises against it.
+	if act, err := okActions.Get(ctx, okAction); err != nil ||
+		act.Status != state.ActionDenied || act.Error != turn.PlanReviewDeliveredReason {
+		t.Fatalf("a completed review delivers itself, got %v %v", act, err)
 	}
 	if len(*done) != 2 ||
 		(*done)[1].outcome != "done" ||
@@ -12772,13 +12898,15 @@ func TestPlanReviewAnswerStaysInTheReviewersView(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// The review still reaches the user where it is decision material.
-	var notes []turn.PlanReviewNote
+	// Contract revised 2026-10-08: the review no longer waits on the next
+	// approval prompt — it is handed straight to the planner, the gate it
+	// informed closes, and the reviewer's own card is where the user read it.
 	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr == nil && prompted != nil {
-		notes = prompted.PlanReviews
+		t.Fatalf("a delivered review must close the approval, got re-prompt %#v", prompted)
 	}
-	if len(notes) != 1 || !strings.Contains(notes[0].Text, "No verification step") {
-		t.Fatalf("reviews held for the next approval prompt = %#v", notes)
+	notes, nerr := turn.PlanReviewsForAction(ctx, cs.runSvc(), "session-1", actionID)
+	if nerr != nil || len(notes) != 1 || !strings.Contains(notes[0].Text, "No verification step") {
+		t.Fatalf("reviews the conversation holds = %#v (%v), want the finished review", notes, nerr)
 	}
 }
 
@@ -12787,27 +12915,15 @@ func TestPlanReviewAnswerStaysInTheReviewersView(t *testing.T) {
 // shows for the refused call says only what the user said.
 func TestDeniedExitPlanCardShowsOnlyTheUsersWords(t *testing.T) {
 	ctx := context.Background()
-	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework. The plan skips the tests."})
-	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
-		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
-	}); err != nil {
-		t.Fatalf("requesting a review failed: %v", err)
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{})
+	// The user's typed deny commits while the reviewer is still finishing —
+	// deny first, then the review event the finished reviewer publishes — so
+	// the words, not the delivery, own the stored row.
+	if _, err := actions.Deny(ctx, actionID, "改成先写测试"); err != nil {
+		t.Fatalf("deny: %v", err)
 	}
-	var notes []turn.PlanReviewNote
-	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr != nil || prompted == nil {
-		t.Fatalf("the approval must still be pending: %v %v", prompted, perr)
-	} else {
-		notes = prompted.PlanReviews
-	}
-	if len(notes) != 1 {
-		t.Fatalf("reviews = %#v", notes)
-	}
-
-	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
-		Denied: true, DenyReason: "改成先写测试",
-	}); err != nil {
-		t.Fatalf("denying failed: %v", err)
-	}
+	reviewText := "Verdict: rework. The plan skips the tests."
+	appendPlanReviewedEvent(t, cs.runSvc(), "session-1", actionID, "rev-race", reviewText)
 	act, err := actions.Get(ctx, actionID)
 	if err != nil {
 		t.Fatalf("Get action: %v", err)
@@ -12843,18 +12959,88 @@ func TestDeniedExitPlanCardShowsOnlyTheUsersWords(t *testing.T) {
 	// The model's denial still carries the review: the resume composes it from
 	// the conversation's events, exactly as the denial reason did before the
 	// split.
-	reviewed := turn.Model{Provider: notes[0].Provider, Model: notes[0].Model}
+	reviewed := turn.Model{Provider: "openai", Model: "gpt-5.1"}
 	agBase, _ := cs.resumeAgentContext(p, actionID, resumeVariant{logLabel: "resume-denied", denied: true}, time.Now())
 	resumeState := tool.ToolApprovalResumeFromContext(agBase)
 	if resumeState == nil || !resumeState.Denied {
 		t.Fatalf("resume state = %#v, want a denial", resumeState)
 	}
-	want := turn.ComposeDenyFeedback([]turn.PlanReviewResult{{Model: reviewed, Text: notes[0].Text}}, "改成先写测试")
+	want := turn.ComposeDenyFeedback([]turn.PlanReviewResult{{Model: reviewed, Text: reviewText}}, "改成先写测试")
 	if resumeState.DenyReason != want || !strings.Contains(resumeState.DenyReason, "<review model=") {
 		t.Fatalf("model-facing deny reason = %q, want the composed review and feedback", resumeState.DenyReason)
 	}
 	if resumeState.DenyFeedback != "改成先写测试" {
 		t.Fatalf("deny feedback = %q, want the user's words alone", resumeState.DenyFeedback)
+	}
+
+	// The collision the marker invites: the user literally types the plumbing
+	// string as their deny feedback. The row carries no delivery stamp, so the
+	// card says their words — not the delivered-review line.
+	markerSession, markerActions, markerAction := newPlanReviewSession(t, &stubReviewer{})
+	if _, err := markerActions.Deny(ctx, markerAction, turn.PlanReviewDeliveredReason); err != nil {
+		t.Fatalf("deny with the marker string: %v", err)
+	}
+	markerP := &chatApprovalResume{
+		ActionID: markerAction, RunID: "run-1", SessionID: "session-1",
+		ToolName: "exit_plan_mode", SessionSnapshot: resumeSnapshotFixture(),
+	}
+	markerCards := make(chan Message, 4)
+	markerSession.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			markerCards <- m.Msg
+		}
+	})
+	t.Cleanup(markerSession.stopUINotificationDispatcher)
+	markerSession.notifyToolApprovalDenied(markerP, markerAction)
+	select {
+	case got := <-markerCards:
+		if got.Content != turn.PlanReviewDeliveredReason {
+			t.Fatalf("typed-marker card = %q, want the user's typed words", got.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the typed-marker denied card")
+	}
+}
+
+// An approval retry that converges on the already-committed decision is still
+// an approval: the in-flight review the first response should have stopped
+// must not outlive it just because the retry took the idempotent path.
+func TestIdempotentApproveStillCancelsInFlightReview(t *testing.T) {
+	ctx := context.Background()
+	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{})
+	// The decision is already committed: the surface call below is the retry
+	// a dropped continuation dispatch recovers through.
+	if _, err := actions.Approve(ctx, actionID, "approved"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	cancelled := make(chan struct{})
+	cs.trackPlanReviewCancel(func() { close(cancelled) })
+	t.Cleanup(cs.forgetPlanReviewCancel)
+	// Retire the parked run's wait row so the retry's resume dispatch exits on
+	// its first lookup instead of spawning a background resume that would
+	// race this test's temp dir cleanup.
+	fenceRunID, _, findErr := cs.runSvc().FindRunByAction(ctx, actionID)
+	if findErr != nil || fenceRunID == "" {
+		t.Fatalf("FindRunByAction: runID=%q err=%v", fenceRunID, findErr)
+	}
+	if err := cs.runSvc().ClearWait(ctx, fenceRunID); err != nil {
+		t.Fatalf("ClearWait: %v", err)
+	}
+
+	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{Approved: true}); err != nil {
+		t.Fatalf("approve retry error: %v", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an approved retry must still stop the review running against the plan")
+	}
+	act, err := actions.Get(ctx, actionID)
+	if err != nil {
+		t.Fatalf("Get action: %v", err)
+	}
+	if act.Status != state.ActionApproved {
+		t.Fatalf("action status = %s, want the committed approval kept", act.Status)
 	}
 }
 
@@ -19302,6 +19488,22 @@ func TestToolDisplayHeaderOmitsOutputDerivedSuffixes(t *testing.T) {
 			wantNotContain: []string{"lines 1000-1000"},
 		},
 		{
+			name: "web_fetch long URL",
+			frame: Frame{
+				Kind:    FrameTool,
+				Title:   "web_fetch",
+				Final:   true,
+				Content: "output:\n\n```json\n{\"bytes\":2048}\n```",
+				ToolMeta: tool.ToolMeta{
+					ToolName: "web_fetch",
+					Status:   "completed",
+					Input:    map[string]any{"url": "https://raw.githubusercontent.com/erlang/otp/main/lib/erlang/src/erlang_long_example_file_name.rs"},
+				},
+			},
+			wantContains:   []string{"Fetched", "https://raw.githubusercontent.com/erlang/otp/main/lib/erlang/src/erlang_long_example_file_name.rs"},
+			wantNotContain: []string{"2048", "2.0 KB", "…"},
+		},
+		{
 			name: "web_fetch size",
 			frame: Frame{
 				Kind:    FrameTool,
@@ -20353,6 +20555,36 @@ func TestWrapToolDisplayLineWidthWrapsCJKAndLongTokens(t *testing.T) {
 				t.Fatalf("wrapped content changed: got %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestWebFetchHeaderWrapsLongURLWithoutLoss(t *testing.T) {
+	const prefix = "  │ "
+	url := "https://raw.githubusercontent.com/erlang/otp/main/lib/erlang/src/erlang_long_example_file_name.rs"
+	header := ToolDisplayHeader(Frame{
+		Kind:  FrameTool,
+		Title: "web_fetch",
+		Final: true,
+		ToolMeta: tool.ToolMeta{
+			ToolName: "web_fetch",
+			Status:   "completed",
+			Input:    map[string]any{"url": url},
+		},
+	}, "")
+
+	out := wrapToolDisplayLineWidth(header, prefix, 48)
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("expected long URL header to wrap, got %q", out)
+	}
+	assertWrappedToolDisplayLines(t, out, prefix, 48)
+	if strings.Contains(out, "…") {
+		t.Fatalf("wrapped web_fetch header contains an ellipsis: %q", out)
+	}
+
+	got := strings.ReplaceAll(out, "\n"+prefix, "")
+	got = strings.ReplaceAll(got, "\n", "")
+	if !strings.Contains(got, url) {
+		t.Fatalf("wrapped header lost URL characters: got %q, want %q", got, url)
 	}
 }
 
@@ -23191,6 +23423,40 @@ func TestMouseEventFromSGRDropsNoButtonMotion(t *testing.T) {
 	}
 	if got, ok := mouseEventFromSGR(sgrMouseEvent{button: 32, press: true, col: 4, row: 2}); !ok || got.kind != inputEventMouseDrag {
 		t.Fatalf("left drag = (%#v, %v), want mouse drag", got, ok)
+	}
+}
+
+// TestWheelReleaseAndMotionReportsDoNotScroll guards the SGR wheel guard in
+// mouseEventFromSGR: only a press report (terminator 'M') without the motion
+// bit is a wheel notch. Terminals that answer one physical wheel gesture with
+// press+release, or with press+motion samples+release, must not translate the
+// extra reports into extra 3-row scrolls (the "scroll a little, keep
+// scrolling" runaway).
+func TestWheelReleaseAndMotionReportsDoNotScroll(t *testing.T) {
+	// press = one notch (mirror what parseSGRMouse produces for Cb 64/65 'M')
+	if ev, ok := mouseEventFromSGR(sgrMouseEvent{button: 64, wheel: true, wheelUp: true, press: true, col: 4, row: 2}); !ok || ev.kind != inputEventMouseWheel || ev.wheelDelta != -wheelScrollLines {
+		t.Fatalf("wheel-up press = (%#v, %v), want one -%d wheel notch", ev, ok, wheelScrollLines)
+	}
+	if ev, ok := mouseEventFromSGR(sgrMouseEvent{button: 65, wheel: true, press: true}); !ok || ev.wheelDelta != wheelScrollLines {
+		t.Fatalf("wheel-down press = (%#v, %v), want one +%d wheel notch", ev, ok, wheelScrollLines)
+	}
+	// release (terminator 'm' => press=false) must not scroll again
+	for _, cb := range []int{64, 65} {
+		if got, ok := mouseEventFromSGR(sgrMouseEvent{button: cb, wheel: true, wheelUp: cb == 64, press: false, col: 4, row: 2}); ok {
+			t.Fatalf("wheel release Cb=%d produced %#v; a wheel notch has no release", cb, got)
+		}
+	}
+	// motion samples (Cb 96/97 = 64+32) must not scroll
+	for _, cb := range []int{96, 97} {
+		if got, ok := mouseEventFromSGR(sgrMouseEvent{button: cb, wheel: true, wheelUp: cb == 96, press: true, col: 4, row: 2}); ok {
+			t.Fatalf("wheel-bit motion Cb=%d produced %#v; motion samples are not notches", cb, got)
+		}
+	}
+	// end-to-end decode: a release report is still decoded but ignored
+	if mev, ok := parseSGRMouse([]byte("\x1b[<64;30;10m")); !ok {
+		t.Fatalf("parseSGRMouse failed on wheel release report")
+	} else if _, ok := mouseEventFromSGR(mev); ok {
+		t.Fatalf("wheel release decoded into a scroll event")
 	}
 }
 

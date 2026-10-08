@@ -4,6 +4,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -496,6 +497,11 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 		return err
 	}
 	if result.Idempotent {
+		// An approved answer's retry is still an approval: it ends any review
+		// still running against the plan, exactly as the first response did.
+		if result.Approved && strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") {
+			s.cancelInFlightPlanReview()
+		}
 		if result.Cancelled {
 			s.retryResumeDispatch(actionID, "cancel", abort)
 		} else if result.Denied {
@@ -527,8 +533,16 @@ func (s *ChatSession) completeSurfaceApproval(ctx context.Context, actionID stri
 			}, time.Now(),
 		))
 	}
-	if result.Approved && s.runner() != nil {
-		s.refreshSandboxRuntime()
+	if result.Approved {
+		// Approving the plan a review is second-guessing ends the review: its
+		// result has no decision left to inform, so stop it rather than let it
+		// deliver against a gate that is already closed.
+		if strings.EqualFold(strings.TrimSpace(act.Kind), "exit_plan_mode") {
+			s.cancelInFlightPlanReview()
+		}
+		if s.runner() != nil {
+			s.refreshSandboxRuntime()
+		}
 	}
 	if decision.ClearContext {
 		if sid := act.SessionID; sid != "" {
@@ -882,7 +896,7 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 	if store := s.sessStore(); store != nil {
 		transcripts = store
 	}
-	_ = turn.RunPlanReview(ctx, turn.PlanReviewRun{
+	reviewErr := turn.RunPlanReview(ctx, turn.PlanReviewRun{
 		ActionID:    actionID,
 		Model:       model,
 		SessionID:   sessionID,
@@ -898,6 +912,81 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 			return s.runner().Events.Publish(ctx, evt)
 		},
 	})
+	// A review that finished delivers itself: the planner revises against it
+	// and submits a fresh exit_plan_mode, so the approval the user answers
+	// next has already absorbed the review. A review that failed keeps the
+	// approval exactly where it was.
+	if reviewErr == nil {
+		s.deliverCompletedPlanReview(ctx, actionID)
+	}
+}
+
+// deliverCompletedPlanReview hands a finished review to the planning model:
+// the approval closes as the marker denial, the resolution event lands on the
+// conversation, one line says what happened — not a decision confirmation,
+// because the user decided nothing — and the denied resume, the same path a
+// user's deny takes, carries the review into the parked run. An approval the
+// user already decided on reports ErrNotPending and the delivery stops there:
+// the user's decision keeps the last word.
+func (s *ChatSession) deliverCompletedPlanReview(ctx context.Context, actionID string) {
+	if s == nil || s.actionSvc() == nil {
+		return
+	}
+	act, err := turn.DeliverPlanReview(ctx, s.actionSvc(), actionID)
+	if errors.Is(err, state.ErrNotPending) {
+		return
+	}
+	if err != nil || act == nil {
+		if s.chatLog != nil {
+			s.chatLog.Errorf("forebrain tui plan_review deliver failed action_id=%s err=%v", actionID, err)
+		}
+		return
+	}
+	runID := ""
+	sessionID := act.SessionID
+	if s.runSvc() != nil {
+		if foundRunID, _, findErr := s.runSvc().FindRunByAction(ctx, act.ID); findErr == nil {
+			runID = strings.TrimSpace(foundRunID)
+			if sessionID == "" && runID != "" {
+				if runRecord, runErr := s.runSvc().GetRun(ctx, runID); runErr == nil && runRecord != nil {
+					sessionID = strings.TrimSpace(runRecord.SessionID)
+				}
+			}
+		}
+	}
+	_ = s.publishRunEvent(ctx, event.NewRunEvent(
+		approvalResolvedEventID(act.ID, string(act.Status)), runID, sessionID,
+		event.RunEventApprovalResolved, event.ApprovalResolvedPayload{
+			ActionID: act.ID, ActionKind: act.Kind, Decision: string(act.Status),
+			Reason: act.Error,
+			// The line the surface printed for this handoff, so the web
+			// timeline replays the same sentence the terminal showed instead
+			// of the marker, exactly as every decision line travels.
+			Confirmation: turn.PlanReviewDeliveredText,
+		}, time.Now(),
+	))
+	s.notifyUI(NewMessageMsg{Msg: Message{
+		Kind:      MsgKindSystem,
+		Content:   turn.PlanReviewDeliveredText,
+		Timestamp: time.Now(),
+	}})
+	s.retryResumeDispatch(act.ID, "deny", s.resumeAfterDenial)
+}
+
+// cancelInFlightPlanReview stops a review this process is still running: the
+// user approved the plan the review was second-guessing, so its result has no
+// decision left to inform. Best-effort by design — if the review finishes
+// first, its delivery finds nothing pending and the review stays a card.
+func (s *ChatSession) cancelInFlightPlanReview() {
+	if s == nil {
+		return
+	}
+	s.tuiRunMu.Lock()
+	cancel := s.planReviewCancel
+	s.tuiRunMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // planReviewConstructionError lets a reviewer that could not be built fail

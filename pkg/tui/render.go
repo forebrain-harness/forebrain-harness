@@ -2408,59 +2408,6 @@ func displayPath(absPath, cwd string) string {
 	return absPath
 }
 
-// truncateURLForHeader middle-truncates a URL for display in a tool header,
-// preserving the scheme+host and last path segment.
-// Example: "https://example.com/a/b/c" → "…://example.com/…/c".
-func truncateURLForHeader(url string, maxWidth int) string {
-	if maxWidth <= 0 || lipgloss.Width(url) <= maxWidth {
-		return url
-	}
-	// Find scheme+host boundary.
-	idx := strings.Index(url, "://")
-	if idx < 0 {
-		return middleTruncate(url, maxWidth)
-	}
-	schemeHostEnd := idx + 3 // after "://"
-	rest := url[schemeHostEnd:]
-	hostEnd := strings.Index(rest, "/")
-	if hostEnd < 0 {
-		// No path — just scheme+host.
-		return middleTruncate(url, maxWidth)
-	}
-	schemeHost := url[:schemeHostEnd+hostEnd]
-	path := rest[hostEnd:]
-	// Keep last path segment.
-	parts := strings.Split(strings.TrimRight(path, "/"), "/")
-	lastSegment := parts[len(parts)-1]
-	if lastSegment == "" && len(parts) > 1 {
-		lastSegment = parts[len(parts)-2]
-	}
-	candidate := schemeHost + "/…/" + lastSegment
-	if lipgloss.Width(candidate) <= maxWidth {
-		return candidate
-	}
-	return middleTruncate(url, maxWidth)
-}
-
-// middleTruncate truncates a string to maxWidth by removing characters from
-// the middle and inserting "…". Preserves the beginning and end.
-func middleTruncate(s string, maxWidth int) string {
-	if maxWidth <= 0 || lipgloss.Width(s) <= maxWidth {
-		return s
-	}
-	if maxWidth <= 3 {
-		return s[:maxWidth]
-	}
-	runes := []rune(s)
-	half := (maxWidth - 1) / 2 // reserve 1 for "…"
-	left := half
-	right := maxWidth - 1 - half
-	if left+right > len(runes) {
-		return s
-	}
-	return string(runes[:left]) + "…" + string(runes[len(runes)-right:])
-}
-
 // turnDiffStats extracts added/deleted line counts from a ```diff fenced block.
 func turnDiffStats(content string) (added, deleted int, ok bool) {
 	lines := strings.Split(content, "\n")
@@ -2637,7 +2584,7 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 			action = "Fetched"
 		}
 		if u := inputString(meta, "url"); u != "" {
-			target = truncateURLForHeader(u, 60)
+			target = u
 		}
 
 	case lower == "web_search" || lower == "websearch":

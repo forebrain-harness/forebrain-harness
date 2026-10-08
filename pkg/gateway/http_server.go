@@ -4,10 +4,10 @@ package gateway
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -621,6 +621,34 @@ func gatewayControlPlaneAuthToken(rt process.Context) string {
 	return strings.TrimSpace(rt.Config.Gateway.Auth.Token)
 }
 
+// gatewayProbeTimeout bounds the status/stop local probes; the outcome
+// text derives from it so the sentence never disagrees with the clock.
+const gatewayProbeTimeout = 3 * time.Second
+
+// reachOutcome classifies a probe error for the status and stop commands:
+// whether nothing is listening (the gateway is simply not running) and the
+// short cause a person can act on. Only the outcomes a local probe can
+// actually hit are named; anything else passes through as its own text
+// (the ExplainError convention: replace only what can be improved).
+func reachOutcome(err error, addr string) (refused bool, reason string) {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true, "nothing is listening on " + addr
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return false, fmt.Sprintf("no response within %ds", int(gatewayProbeTimeout.Seconds()))
+	}
+	return false, strings.TrimSpace(err.Error())
+}
+
+// displayBaseURL is the clickable gateway base URL, with the same
+// unspecified-host mapping the startup banner applies (a browser cannot
+// connect to "0.0.0.0" as a destination). displayHost is the single
+// mapping source shared with the banner.
+func displayBaseURL(addr string) string {
+	return "http://" + displayHost(addr)
+}
+
 func GatewayHealthText(ctx context.Context, w io.Writer) error {
 	rt, err := process.Resolve()
 	if err != nil {
@@ -631,19 +659,39 @@ func GatewayHealthText(ctx context.Context, w io.Writer) error {
 		addr = "127.0.0.1:6060"
 	}
 	url := "http://" + addr + "/healthz"
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: gatewayProbeTimeout}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if tok := gatewayControlPlaneAuthToken(rt); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Info("gateway health probe skipped", "addr", addr, "err", err)
-		_, _ = fmt.Fprintf(w, "gateway=not_running (optional for TUI) addr=%s err=%v\n", addr, err)
+		// A failed probe is this command's answer, not a log event; the
+		// raw transport error stays out of the person-readable output.
+		refused, reason := reachOutcome(err, addr)
+		if refused {
+			_, _ = fmt.Fprintln(w, "Gateway is not running (optional — the terminal works without it).")
+		} else {
+			_, _ = fmt.Fprintln(w, "The gateway could not be reached.")
+		}
+		_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Address", displayBaseURL(addr))
+		_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Reach", reason)
+		if refused {
+			_, _ = fmt.Fprintln(w, "  Start it with `forebrain gateway start`")
+		}
 		return nil
 	}
 	defer resp.Body.Close()
-	_, _ = fmt.Fprintf(w, "gateway=up addr=%s status=%d\n", addr, resp.StatusCode)
+	if resp.StatusCode == http.StatusOK {
+		_, _ = fmt.Fprintln(w, "Gateway is running.")
+		_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Address", displayBaseURL(addr))
+		_, _ = fmt.Fprintf(w, "  %-10s ok (HTTP %d)\n", "Health", resp.StatusCode)
+		_, _ = fmt.Fprintf(w, "  %-10s %s/\n", "Web UI", displayBaseURL(addr))
+		return nil
+	}
+	_, _ = fmt.Fprintln(w, "Gateway is reachable but the health check failed.")
+	_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Address", displayBaseURL(addr))
+	_, _ = fmt.Fprintf(w, "  %-10s HTTP %d\n", "Health", resp.StatusCode)
 	return nil
 }
 
@@ -657,19 +705,30 @@ func GatewayShutdownRequest(ctx context.Context, w io.Writer) error {
 		addr = "127.0.0.1:6060"
 	}
 	url := "http://" + addr + "/admin/shutdown"
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: gatewayProbeTimeout}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if tok := gatewayControlPlaneAuthToken(rt); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Info("gateway shutdown skipped", "addr", addr, "err", err)
-		_, _ = fmt.Fprintf(w, "gateway stop skipped (not listening) addr=%s err=%v\n", addr, err)
+		refused, reason := reachOutcome(err, addr)
+		if refused {
+			_, _ = fmt.Fprintln(w, "Gateway is not running — nothing to stop.")
+		} else {
+			_, _ = fmt.Fprintln(w, "The gateway could not be reached — nothing was stopped.")
+		}
+		_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Address", displayBaseURL(addr))
+		_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Reach", reason)
 		return nil
 	}
 	defer resp.Body.Close()
-	_, _ = fmt.Fprintf(w, "gateway stop requested addr=%s status=%d\n", addr, resp.StatusCode)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		_, _ = fmt.Fprintf(w, "Shutdown requested — the gateway at %s is stopping.\n", displayBaseURL(addr))
+		return nil
+	}
+	_, _ = fmt.Fprintf(w, "The gateway answered HTTP %d — the shutdown may not have been accepted.\n", resp.StatusCode)
+	_, _ = fmt.Fprintf(w, "  %-10s %s\n", "Address", displayBaseURL(addr))
 	return nil
 }
 

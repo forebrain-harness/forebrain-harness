@@ -129,8 +129,15 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					"tool_name": strings.TrimSpace(tc.Function.Name),
 					"status":    "denied",
 				})
+				// A delivered review closed this gate: the card's body is the
+				// handoff line, the same sentence every other display of the
+				// delivery says, never "(no output)".
+				denialBody := tool.DeniedToolDisplayBody(tc.Function.Name, resumeAssistant.denyFeedback)
+				if resumeAssistant.deliveredReview {
+					denialBody = tool.PlanReviewDeliveredText
+				}
 				denial.ToolDisplay = &llm.ToolDisplayState{
-					Body:         tool.DeniedToolDisplayBody(tc.Function.Name, resumeAssistant.denyFeedback),
+					Body:         denialBody,
 					ToolMetaJSON: string(denialMeta),
 				}
 				session = append(session, denial)
@@ -423,6 +430,9 @@ type resumeSnapshot struct {
 	// denyFeedback is the user's own words, the display half of the denial
 	// while denyReason is the model-facing half.
 	denyFeedback string
+	// deliveredReview marks a denial review delivery closed: the display half
+	// says the handoff line, because there are no user words to state.
+	deliveredReview bool
 }
 
 // consumeResumeSnapshot extracts and clears the resume state, so subsequent
@@ -468,8 +478,9 @@ func (w *toolOrchestrationLLM) consumeResumeSnapshot(ctx context.Context, curren
 	denied := state.Denied
 	denyReason := state.DenyReason
 	denyFeedback := state.DenyFeedback
+	deliveredReview := state.DeliveredReview
 	state.Session = nil
-	return resumeSnapshot{session: session, pendingMsg: pending, completedResults: completed, denied: denied, denyReason: denyReason, denyFeedback: denyFeedback}, true
+	return resumeSnapshot{session: session, pendingMsg: pending, completedResults: completed, denied: denied, denyReason: denyReason, denyFeedback: denyFeedback, deliveredReview: deliveredReview}, true
 }
 
 // buildDenialMessage constructs the tool result message injected when the user

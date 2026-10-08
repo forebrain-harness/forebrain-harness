@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,16 @@ func (s *approvalStoreStub) Deny(_ context.Context, _ string, reason string) (*s
 	}
 	s.action.Status = state.ActionDenied
 	s.action.Error = reason
+	return s.action, nil
+}
+
+func (s *approvalStoreStub) DenyWithAnswer(_ context.Context, _ string, reason string, answer string) (*state.Action, error) {
+	if s.action.Status != state.ActionPending {
+		return nil, state.ErrNotPending
+	}
+	s.action.Status = state.ActionDenied
+	s.action.Error = reason
+	s.action.AnswerJSON = answer
 	return s.action, nil
 }
 
@@ -677,4 +688,177 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 	require.Len(t, req.PlanReviews, 1)
 	require.Equal(t, "gpt-5.1", req.PlanReviews[0].Model)
 	require.Contains(t, req.PlanReviews[0].Text, "rework")
+}
+
+// The delivery denial is the one write that closes a completed review's
+// approval from the engine side: it lands only while the action is a pending
+// exit-plan gate, and it carries the marker reason every surface recognizes.
+func TestDeliverPlanReviewDeniesPendingExitPlan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	planAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	shellAction, err := actions.CreatePending(ctx, sessionID, "shell", map[string]any{"command": "ls"})
+	require.NoError(t, err)
+	_ = db
+
+	delivered, err := DeliverPlanReview(ctx, actions, planAction.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionDenied, delivered.Status)
+	require.Equal(t, PlanReviewDeliveredReason, delivered.Error)
+
+	// A decision the user already made wins the race: the delivery is a no-op,
+	// not an overwrite.
+	_, err = DeliverPlanReview(ctx, actions, planAction.ID)
+	require.ErrorIs(t, err, state.ErrNotPending)
+
+	// Only an exit-plan gate hands reviews back to the planner.
+	_, err = DeliverPlanReview(ctx, actions, shellAction.ID)
+	require.ErrorIs(t, err, state.ErrNotPending)
+}
+
+// Delivery guidance is the model input for a review handed back with no user
+// decision behind it: the instruction header, then the reviews — and never a
+// "user's own feedback" section, because the user has not spoken.
+func TestReviewDeliveryGuidanceCarriesReviewWithoutUserFeedback(t *testing.T) {
+	t.Parallel()
+
+	got := ComposeReviewDeliveryGuidance([]PlanReviewResult{{
+		Model: Model{Provider: "zhipuai", Model: "glm-5.3-flash"},
+		Text:  "Verdict: approve with changes. Add a test for the cancel race.",
+	}})
+	for _, want := range []string{
+		"The plan review you asked for has returned.",
+		"call exit_plan_mode again",
+		`<review model="zhipuai / glm-5.3-flash">`,
+		"Add a test for the cancel race.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("delivery guidance missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "outranks the reviews") {
+		t.Fatalf("delivery must not claim user feedback the user never gave:\n%s", got)
+	}
+}
+
+// The stored marker reason is plumbing, not the user's words: the resume the
+// planning model receives leads with the delivery instruction and carries the
+// review, while every display of the action's own feedback sees none.
+func TestBuildApprovalResumeTreatsDeliveredReasonAsNoUserWords(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	action := &state.Action{
+		ID: "act-1", SessionID: sessionID, Kind: "exit_plan_mode",
+		Status: state.ActionDenied, Error: PlanReviewDeliveredReason,
+		AnswerJSON: planReviewDeliveredAnswer,
+	}
+	appendPlanReviewed(t, runs, sessionID, "act-1", "rev-done", "done", "Verdict: rework the cache story.")
+
+	out := BuildApprovalResumeWithPlanReviews(ctx, runs, action, nil, "exit_plan_mode", false)
+	if !out.Denied {
+		t.Fatal("the delivered action resumes as denied")
+	}
+	if !out.DeliveredReview {
+		t.Fatal("the delivery must mark the resume: its display half has no user words")
+	}
+	for _, want := range []string{
+		"The plan review you asked for has returned.",
+		"Verdict: rework the cache story.",
+	} {
+		if !strings.Contains(out.Reason, want) {
+			t.Fatalf("resume reason missing %q:\n%s", want, out.Reason)
+		}
+	}
+	if strings.Contains(out.Reason, PlanReviewDeliveredReason) {
+		t.Fatalf("the marker must not reach the model:\n%s", out.Reason)
+	}
+	if out.Feedback != "" {
+		t.Fatalf("Feedback = %q, want empty: the marker is not the user's words", out.Feedback)
+	}
+
+	// A denial the user typed keeps its shape: no delivery flag, their words
+	// are both halves' anchor.
+	plain := BuildApprovalResumeWithPlanReviews(ctx, runs, &state.Action{
+		ID: "act-2", SessionID: sessionID, Kind: "exit_plan_mode",
+		Status: state.ActionDenied, Error: "改成先写测试",
+	}, nil, "exit_plan_mode", false)
+	if plain.DeliveredReview || plain.Feedback != "改成先写测试" {
+		t.Fatalf("plain denial = %+v, want the user's words and no delivery flag", plain)
+	}
+}
+
+// The marker string is also a sentence a curious user can type verbatim as
+// their deny feedback. Only the delivery's structured answer stamp tells the
+// two apart, so the typed words stay the user's: kept as Feedback, composed
+// into the model-facing reason, no delivery flag.
+func TestManualDenyTypingTheMarkerKeepsTheUsersWords(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	action := &state.Action{
+		ID: "act-typed", SessionID: sessionID, Kind: "exit_plan_mode",
+		Status: state.ActionDenied, Error: PlanReviewDeliveredReason,
+	}
+	appendPlanReviewed(t, runs, sessionID, "act-typed", "rev-done", "done", "Verdict: rework the cache story.")
+
+	out := BuildApprovalResumeWithPlanReviews(ctx, runs, action, nil, "exit_plan_mode", false)
+	if !out.Denied {
+		t.Fatal("a manual denial resumes as denied")
+	}
+	if out.DeliveredReview {
+		t.Fatal("a typed marker is the user's words, not a delivery")
+	}
+	if out.Feedback != PlanReviewDeliveredReason {
+		t.Fatalf("Feedback = %q, want the user's typed words kept", out.Feedback)
+	}
+	if !strings.Contains(out.Reason, PlanReviewDeliveredReason) {
+		t.Fatalf("the typed words must reach the model inside the composed reason:\n%s", out.Reason)
+	}
+	if !strings.Contains(out.Reason, "Verdict: rework the cache story.") {
+		t.Fatalf("the review must still ride along:\n%s", out.Reason)
+	}
+}
+
+// The delivery denial carries a second read the user's own deny cannot set:
+// the structured answer stamp, which is what lets every consumer treat the
+// marker in the reason column as plumbing rather than words someone typed.
+func TestDeliverPlanReviewStampsTheAnswer(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	planAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+
+	delivered, err := DeliverPlanReview(ctx, actions, planAction.ID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionDenied, delivered.Status)
+	require.Equal(t, PlanReviewDeliveredReason, delivered.Error)
+	require.Contains(t, delivered.AnswerJSON, "plan_review_delivered")
+
+	stored, err := actions.Get(ctx, planAction.ID)
+	require.NoError(t, err)
+	if !ActionIsReviewDelivered(stored) {
+		t.Fatalf("the delivered row must satisfy the discriminator: %+v", stored)
+	}
+
+	// The marker alone is not a delivery: a manual deny stores the reason and
+	// nothing in the answer column.
+	manualAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	_, err = actions.Deny(ctx, manualAction.ID, PlanReviewDeliveredReason)
+	require.NoError(t, err)
+	manual, err := actions.Get(ctx, manualAction.ID)
+	require.NoError(t, err)
+	if ActionIsReviewDelivered(manual) {
+		t.Fatalf("a typed marker without the stamp is the user's words: %+v", manual)
+	}
 }

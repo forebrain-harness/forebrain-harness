@@ -4502,6 +4502,82 @@ func TestDeniedToolResultCarriesItsDisplay(t *testing.T) {
 	}
 }
 
+// A delivered review closed the gate, not the user: the denial result's
+// display half is the handoff line — the same sentence every other display of
+// the delivery says — never the model-facing guidance and never "(no output)".
+func TestDeliveredReviewDenialCarriesTheHandoffLine(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "exit_plan_mode", Destructive: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+
+	gated, err := llm.NewTool("exit_plan_mode", "gated tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "" {
+			return "", &toolpkg.RequiresActionError{
+				ActionID:   "act-1",
+				ActionKind: "exit_plan_mode",
+				ToolName:   "exit_plan_mode",
+				ToolInput:  map[string]any{},
+			}
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+
+	inner := &exitPlanCallLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+
+	_, err = wrapped.Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("hi"))},
+		[]*llm.Tool{gated},
+	)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("expected RequiresActionError, got %T %v", err, err)
+	}
+
+	ctx := toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+		Session: rae.SessionSnapshot,
+		Denied:  true,
+		// The resume a delivered review produces: the delivery guidance for
+		// the model, no user words, the delivery flag for the display.
+		DenyReason:      turn.ComposeReviewDeliveryGuidance(nil),
+		DeliveredReview: true,
+	})
+	if _, rerr := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, []*llm.Tool{gated}); rerr != nil {
+		t.Fatalf("resume Execute err=%v", rerr)
+	}
+
+	var denial *llm.Message
+	for i := range inner.sessions[1] {
+		msg := inner.sessions[1][i]
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+				denial = &msg
+			}
+		}
+	}
+	if denial == nil {
+		t.Fatal("the denial tool result is missing from the resumed session")
+	}
+	if denial.ToolDisplay == nil {
+		t.Fatal("the denial tool result must carry the display the replay draws from")
+	}
+	if got := denial.ToolDisplay.Body; got != toolpkg.PlanReviewDeliveredText {
+		t.Fatalf("denial display body = %q, want the handoff line", got)
+	}
+	if body := denial.ToolDisplay.Body; strings.Contains(body, "(no output)") || strings.Contains(body, "The plan review you asked for has returned") {
+		t.Fatalf("the display half must not show the empty-refusal or model-facing text: %q", body)
+	}
+}
+
 // TestToolOrchestrationResumeDeniedWithoutFeedback verifies that denying
 // without a DenyReason still produces a valid denial message (backward compat).
 func TestToolOrchestrationResumeDeniedWithoutFeedback(t *testing.T) {

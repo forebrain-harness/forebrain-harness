@@ -738,6 +738,16 @@ const wheelScrollLines = 3
 
 func mouseEventFromSGR(ev sgrMouseEvent) (inputEvent, bool) {
 	if ev.wheel {
+		// One wheel notch is one PRESS report (Cb 64/65, terminator 'M')
+		// without the motion bit. Terminals that answer a wheel gesture with
+		// release reports (same Cb, terminator 'm') or wheel-bit motion
+		// samples (Cb 96/97 = 64+32) must not scroll again for each of
+		// those: this branch used to turn every report carrying the wheel
+		// bit into a 3-row scroll, so one physical notch scrolled 2x
+		// (press+release) or Nx (press+motion stream+release).
+		if !ev.press || ev.button&0x20 != 0 {
+			return inputEvent{}, false
+		}
 		delta := wheelScrollLines
 		if ev.wheelUp {
 			delta = -wheelScrollLines
