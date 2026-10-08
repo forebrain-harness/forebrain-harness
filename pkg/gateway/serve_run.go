@@ -228,10 +228,10 @@ type startupBanner struct {
 
 // displayHost maps an unspecified bind address to loopback for the clickable
 // URLs: a browser cannot connect to "0.0.0.0" as a destination.
-func displayHost(addr net.Addr) string {
-	host, port, err := net.SplitHostPort(addr.String())
+func displayHost(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return addr.String()
+		return addr
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
@@ -280,7 +280,7 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 		}
 	}
 
-	base := "http://" + displayHost(b.Addr)
+	base := "http://" + displayHost(b.Addr.String())
 	if b.WebUI {
 		fmt.Fprintf(&out, "Web UI       %s/\n", base)
 	}

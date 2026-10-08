@@ -1999,6 +1999,32 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
+  it('shows a delivered plan review as the handoff line, never the marker', withFakeWebSocket(async () => {
+    const { stream, socket, pendingSend } = await startLiveStream('live-delivery', 'run-delivery')
+
+    runEvent(socket, 'evt-1', 1, 'run-delivery', 'live-delivery', 'approval_requested', {
+      actionId: 'act-1', actionKind: 'exit_plan_mode', toolStepId: 'call-exit',
+    })
+    // The engine closed the approval to hand a finished review to the planner:
+    // the decision carries the plumbing marker as its reason, and the line the
+    // surface printed is the sentence both surfaces show for it.
+    runEvent(socket, 'evt-2', 2, 'run-delivery', 'live-delivery', 'approval_resolved', {
+      actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'denied', toolStepId: 'call-exit',
+      reason: 'plan-review:delivered',
+      confirmation: 'Plan review delivered — the planner is revising the plan.',
+    })
+
+    const host = stream.messages.value.find((message) => message.runId === 'run-delivery')
+    expect(host?.blocks?.[0]).toMatchObject({
+      kind: 'approval',
+      actionId: 'act-1',
+      status: 'denied',
+      confirmation: 'Plan review delivered — the planner is revising the plan.',
+    })
+    endTurn(socket, 'evt-3', 3, 'run-delivery', 'live-delivery')
+    await pendingSend
+  }))
+
   it('keeps a subagent approval out of the conversation timeline', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-subagent-approval', 'run-subagent-approval')
 

@@ -2857,8 +2857,70 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 			return bus.Publish(ctx, evt)
 		},
 	}
-	go func() { _ = turn.RunPlanReview(detached, review) }()
+	go func() {
+		if err := turn.RunPlanReview(detached, review); err != nil {
+			return
+		}
+		s.deliverGatewayPlanReview(detached, id)
+	}()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// deliverGatewayPlanReview hands a finished review to the planning model on
+// the web's path: the approval closes as the marker denial, the resolution
+// event lands on the conversation, and the denied resume — the same resume a
+// user's deny dispatches — carries the review into the parked run. An
+// approval the user already decided on reports ErrNotPending and the delivery
+// stops there: the user's decision keeps the last word.
+func (s *Server) deliverGatewayPlanReview(ctx context.Context, actionID string) {
+	if s == nil || s.Actions == nil {
+		return
+	}
+	act, err := turn.DeliverPlanReview(ctx, s.Actions, actionID)
+	if errors.Is(err, state.ErrNotPending) {
+		// ErrNotPending is the race the user won: their decision stands.
+		return
+	}
+	if err != nil || act == nil {
+		slog.Error("deliver plan review to planner failed",
+			"action_id", actionID, "err", err)
+		return
+	}
+	sid := strings.TrimSpace(act.SessionID)
+	runID := ""
+	if s.RunRT != nil {
+		runID, _, _ = s.RunRT.FindRunByAction(ctx, act.ID)
+	}
+	agentID, subagentType := turn.ActionSubagent(act)
+	_ = s.RunEvents().Publish(ctx, event.NewRunEvent(
+		"approval-resolved:"+act.ID+":"+string(act.Status), runID, sid,
+		event.RunEventApprovalResolved, event.ApprovalResolvedPayload{
+			ActionID: act.ID, ActionKind: act.Kind, Decision: string(act.Status),
+			Reason: act.Error, AgentID: agentID, SubagentType: subagentType,
+			// The same line the TUI prints for a delivery, so the web
+			// timeline replays one sentence on both surfaces instead of the
+			// marker, the way every decision line travels.
+			Confirmation: turn.PlanReviewDeliveredText,
+		}, time.Now(),
+	))
+	go s.resumeGatewayRun(act.ID, false)
+}
+
+// cancelInFlightPlanReview stops the review an exit-plan approval is still
+// waiting on: approving the plan ends the second opinion, because its result
+// has no decision left to inform. Best-effort by design — a review that
+// finishes first delivers against a closed gate and the delivery stops there.
+func (s *Server) cancelInFlightPlanReview(ctx context.Context, sessionID, actionID string) {
+	if s == nil || s.RunRT == nil {
+		return
+	}
+	open, ok := turn.ActivePlanReview(ctx, s.RunRT, sessionID, actionID)
+	if !ok || strings.TrimSpace(open.AgentID) == "" {
+		return
+	}
+	if _, err := s.cancelSubagent(open.AgentID); err != nil {
+		slog.Error("cancel in-flight plan review", "action_id", actionID, "agent_id", open.AgentID, "err", err)
+	}
 }
 
 func (s *Server) clearContextForAction(ctx context.Context, actionID string) {
@@ -2957,6 +3019,11 @@ func (s *Server) resolveGatewayApproval(ctx context.Context, actionID string, re
 		// The first response may have committed the decision and then failed to
 		// dispatch its continuation. An exact HTTP/WS retry is the recovery
 		// signal; the durable claim below still guarantees only one execution.
+		// A retried approval is still an approval: it ends any review still
+		// running against the plan, exactly as the first response did.
+		if result.Approved && strings.EqualFold(strings.TrimSpace(pending.Kind), "exit_plan_mode") {
+			s.cancelInFlightPlanReview(ctx, sid, actionID)
+		}
 		if result.Cancelled {
 			s.abortGatewayRunForAction(result.Action)
 		} else {
@@ -2966,6 +3033,12 @@ func (s *Server) resolveGatewayApproval(ctx context.Context, actionID string, re
 	}
 	if result.Approved && turn.ActionClearedContext(result.Action) {
 		s.clearContextForAction(ctx, actionID)
+	}
+	// Approving the plan ends any review still running against it: the
+	// approval is the decision, and a second opinion with no decision left to
+	// inform should not keep burning a model.
+	if result.Approved && strings.EqualFold(strings.TrimSpace(pending.Kind), "exit_plan_mode") {
+		s.cancelInFlightPlanReview(ctx, sid, actionID)
 	}
 	if result.Action != nil {
 		runID := ""
@@ -2987,6 +3060,20 @@ func (s *Server) resolveGatewayApproval(ctx context.Context, actionID string, re
 	}
 	go s.resumeGatewayRun(actionID, turn.ActionClearedContext(result.Action))
 	return nil
+}
+
+// gatewayResumeState projects one canonical approval resume into the resume
+// state the parked run executes under. Field-for-field: anything the engine
+// adds to turn.ApprovalResume must land here, or the surface silently drops
+// it — the DeliveredReview copy is exactly such a field.
+func gatewayResumeState(resume turn.ApprovalResume) *tool.ToolApprovalResumeState {
+	return &tool.ToolApprovalResumeState{
+		Session:         resume.Session,
+		Denied:          resume.Denied,
+		DenyReason:      resume.Reason,
+		DenyFeedback:    resume.Feedback,
+		DeliveredReview: resume.DeliveredReview,
+	}
 }
 
 // resumeGatewayRun resumes the paused run for actionID. When
@@ -3104,12 +3191,7 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 				_ = s.Sessions.AppendMessageSequence(ctx, sid, resume.Session, "", "")
 			}
 		}
-		resumeState := &tool.ToolApprovalResumeState{
-			Session:      resume.Session,
-			Denied:       resume.Denied,
-			DenyReason:   resume.Reason,
-			DenyFeedback: resume.Feedback,
-		}
+		resumeState := gatewayResumeState(resume)
 		// The durable fence is crossed by the replay itself, not here: this
 		// path still has prompt assembly, pre-hooks and possibly a compaction
 		// ahead of it, and a process that dies in that preamble has executed

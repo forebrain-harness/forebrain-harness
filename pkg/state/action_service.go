@@ -291,6 +291,34 @@ WHERE id=? AND status=?`, string(ActionDenied), strings.TrimSpace(reason), now, 
 	return s.Get(ctx, id)
 }
 
+// DenyWithAnswer atomically denies an action and records a structured marker
+// alongside the denial reason. The plan-review delivery uses it to stamp the
+// denial as engine-closed: the reason column stays the display contract, the
+// answer column carries the machine discriminator a manual denial cannot set.
+func (s *ActionService) DenyWithAnswer(ctx context.Context, id, reason, answerJSON string) (*Action, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, ErrActionNotFound
+	}
+	now := time.Now().Unix()
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE fb_actions
+SET status=?, error=?, answer_json=?, updated_at=?
+WHERE id=? AND status=?`, string(ActionDenied), strings.TrimSpace(reason), strings.TrimSpace(answerJSON), now, id, string(ActionPending))
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	_ = err
+	if n == 0 {
+		return nil, ErrNotPending
+	}
+	return s.Get(ctx, id)
+}
+
 func (s *ActionService) Cancel(ctx context.Context, id string, reason string) (*Action, error) {
 	if s == nil || s.DB == nil {
 		return nil, fmt.Errorf("nil db")

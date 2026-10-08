@@ -3540,6 +3540,214 @@ func TestActionPlanReviewValidatesBeforeStarting(t *testing.T) {
 	require.Contains(t, string(reviewed[0].Payload), actionID)
 }
 
+// fakeGatewaySubagentExecutor stands in for the reviewer's execution: plan
+// review runs as a subagent, so a stub on the runner is the seam that makes a
+// review complete with text instead of failing to open.
+type fakeGatewaySubagentExecutor struct{ reply string }
+
+func (f *fakeGatewaySubagentExecutor) RunSubagentExec(context.Context, run.SubagentExecRequest) (string, error) {
+	return f.reply, nil
+}
+func (f *fakeGatewaySubagentExecutor) PersistSubagentTurn(context.Context, run.SubagentTurn) {}
+
+func (f *fakeGatewaySubagentExecutor) SubagentExecutionStarting(context.Context, string) {}
+
+func (f *fakeGatewaySubagentExecutor) SubagentExecutionEnded(context.Context, run.SubagentExecutionEnd) {
+}
+
+// A finished review delivers itself on the web's path too: the approval
+// closes as the marker denial, the resolution event lands on the
+// conversation, and the resume composition the gateway submits — the same
+// call resumeGatewayRun makes — carries the review to the planning model
+// with no user words claimed. The provider points at a closed port so the
+// resumed turn cannot leave the machine.
+func TestActionPlanReviewDeliversOnDone(t *testing.T) {
+	ctx := context.Background()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+		}}},
+	}}}
+	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
+	s.Runner.SubagentExecutor = &fakeGatewaySubagentExecutor{reply: "Verdict: rework the cache story."}
+	// Retire the parked run's wait row so the resume the delivery dispatches
+	// exits on its first lookup instead of writing (mode switch, run status)
+	// into a temp dir the test is about to remove. Everything asserted here —
+	// the denial, the event, the resume composition — commits before that
+	// goroutine is spawned.
+	fenceRunID, _, findErr := runs.FindRunByAction(ctx, actionID)
+	require.NoError(t, findErr)
+	require.NotEmpty(t, fenceRunID)
+	require.NoError(t, runs.ClearWait(ctx, fenceRunID))
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/plan-review",
+		map[string]string{"provider": "openai", "model": "gpt-5.1"}, s.handleActionPlanReview, "id", actionID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	require.Eventually(t, func() bool {
+		act, err := actions.Get(ctx, actionID)
+		return err == nil && act != nil &&
+			act.Status == state.ActionDenied && act.Error == turn.PlanReviewDeliveredReason
+	}, 5*time.Second, 50*time.Millisecond, "the review must deliver itself to the planner")
+
+	var resolved []state.SessionEvent
+	var err error
+	require.Eventually(t, func() bool {
+		resolved, err = runs.ListSessionEventsOfType(ctx, "s1", event.RunEventApprovalResolved, 0)
+		return err == nil && len(resolved) == 1
+	}, 5*time.Second, 50*time.Millisecond, "the delivery must record its resolution")
+	var payload event.ApprovalResolvedPayload
+	require.NoError(t, json.Unmarshal(resolved[0].Payload, &payload))
+	require.Equal(t, actionID, payload.ActionID)
+	require.Equal(t, string(state.ActionDenied), payload.Decision)
+	require.Equal(t, turn.PlanReviewDeliveredReason, payload.Reason)
+	require.Equal(t, turn.PlanReviewDeliveredText, payload.Confirmation,
+		"the web timeline replays the delivered line, never the marker")
+
+	act, err := actions.Get(ctx, actionID)
+	require.NoError(t, err)
+	resume := turn.BuildApprovalResumeWithPlanReviews(ctx, runs, act, nil, "exit_plan_mode", false)
+	require.True(t, resume.Denied)
+	require.Contains(t, resume.Reason, "The plan review you asked for has returned.")
+	require.Contains(t, resume.Reason, "Verdict: rework the cache story.")
+	require.NotContains(t, resume.Reason, turn.PlanReviewDeliveredReason)
+	require.Empty(t, resume.Feedback, "delivery claims no user words")
+}
+
+// Approving the plan a review is still running against stops the review: its
+// result has no decision left to inform. The cancel is best-effort — a review
+// that finishes first delivers against a closed gate and stays a card.
+func TestGatewayApproveCancelsAnInFlightPlanReview(t *testing.T) {
+	ctx := context.Background()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+		}}},
+	}}}
+	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
+
+	// One in-flight review, derived the way every surface derives it: a
+	// plan_review_started no plan_reviewed has closed, and the subagent it
+	// spawned pointing back at it.
+	reviewID := "plan-review:rev-live"
+	startedPayload, err := json.Marshal(event.PlanReviewStartedPayload{
+		ActionID: actionID, ReviewID: reviewID, Provider: "openai", Model: "gpt-5.1",
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{
+		ID: reviewID + ":started", SessionID: "s1",
+		Type: event.RunEventPlanReviewStarted, Payload: startedPayload,
+	})
+	require.NoError(t, err)
+	spawnedPayload, err := json.Marshal(event.SubagentSpawnedPayload{
+		AgentID: "agent-review", ParentToolCallID: reviewID,
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{
+		ID: "spawn-agent-review", SessionID: "s1",
+		Type: event.RunEventSubagentSpawned, Payload: spawnedPayload,
+	})
+	require.NoError(t, err)
+	cancelled := make(chan struct{})
+	h := agent.RegistryFor(s.stateRoot()).Start(agent.HistoryEntry{
+		AgentID: "agent-review", TaskID: "agent-review", RunID: "run-review", SessionID: "s1",
+		Status: agent.StatusRunning, StartedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
+	}, func() { close(cancelled) })
+	t.Cleanup(func() {
+		h.Finish(agent.HistoryEntry{
+			AgentID: "agent-review", TaskID: "agent-review", RunID: "run-review", SessionID: "s1",
+			Status: agent.StatusCancelled, UpdatedAt: time.Now().Unix(),
+		})
+	})
+	// Retire the parked run's wait row so the resume the approve dispatches
+	// exits on its first lookup: a goroutine writing the mode switch or run
+	// status would race this test's temp dir cleanup.
+	fenceRunID, _, findErr := runs.FindRunByAction(ctx, actionID)
+	require.NoError(t, findErr)
+	require.NotEmpty(t, fenceRunID)
+	require.NoError(t, runs.ClearWait(ctx, fenceRunID))
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/approve", nil, s.handleActionsApprove, "id", actionID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("approving the plan must stop the review still running against it")
+	}
+	act, err := actions.Get(ctx, actionID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionApproved, act.Status, "the approval the user made keeps the last word")
+}
+
+// The retry of an approval whose decision already committed converges on the
+// idempotent path; it must still stop a review running against the plan, the
+// same way the first response did.
+func TestGatewayIdempotentApproveStillCancelsAnInFlightPlanReview(t *testing.T) {
+	ctx := context.Background()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{
+			Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://127.0.0.1:1",
+		}}},
+	}}}
+	s, runs, actions, actionID, _ := exitPlanServer(t, cfg)
+
+	// One in-flight review, derived the way every surface derives it: a
+	// plan_review_started no plan_reviewed has closed, and the subagent it
+	// spawned pointing back at it.
+	reviewID := "plan-review:rev-retry"
+	startedPayload, err := json.Marshal(event.PlanReviewStartedPayload{
+		ActionID: actionID, ReviewID: reviewID, Provider: "openai", Model: "gpt-5.1",
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{
+		ID: reviewID + ":started", SessionID: "s1",
+		Type: event.RunEventPlanReviewStarted, Payload: startedPayload,
+	})
+	require.NoError(t, err)
+	spawnedPayload, err := json.Marshal(event.SubagentSpawnedPayload{
+		AgentID: "agent-review", ParentToolCallID: reviewID,
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(ctx, state.SessionEvent{
+		ID: "spawn-agent-review", SessionID: "s1",
+		Type: event.RunEventSubagentSpawned, Payload: spawnedPayload,
+	})
+	require.NoError(t, err)
+	cancelled := make(chan struct{})
+	h := agent.RegistryFor(s.stateRoot()).Start(agent.HistoryEntry{
+		AgentID: "agent-review", TaskID: "agent-review", RunID: "run-review", SessionID: "s1",
+		Status: agent.StatusRunning, StartedAt: time.Now().Unix(), UpdatedAt: time.Now().Unix(),
+	}, func() { close(cancelled) })
+	t.Cleanup(func() {
+		h.Finish(agent.HistoryEntry{
+			AgentID: "agent-review", TaskID: "agent-review", RunID: "run-review", SessionID: "s1",
+			Status: agent.StatusCancelled, UpdatedAt: time.Now().Unix(),
+		})
+	})
+	// The decision commits first; the HTTP call below is its exact retry.
+	_, err = actions.Approve(ctx, actionID, "approved")
+	require.NoError(t, err)
+	// Retire the parked run's wait row so the retry's resume goroutine exits
+	// on its first lookup and cannot race this test's temp dir cleanup.
+	fenceRunID, _, findErr := runs.FindRunByAction(ctx, actionID)
+	require.NoError(t, findErr)
+	require.NotEmpty(t, fenceRunID)
+	require.NoError(t, runs.ClearWait(ctx, fenceRunID))
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/actions/"+actionID+"/approve", nil, s.handleActionsApprove, "id", actionID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an approved retry must still stop the review running against it")
+	}
+	act, err := actions.Get(ctx, actionID)
+	require.NoError(t, err)
+	require.Equal(t, state.ActionApproved, act.Status, "the committed approval keeps the last word")
+}
+
 // newSubagentViewTestServer builds a server whose conversation "sid" exists
 // and whose runner resolves a subagent ledger under the same workspace root,
 // so the subagent-view routes can be exercised end to end.
@@ -3757,4 +3965,31 @@ func TestSubagentCompactRefusesWhileRunning(t *testing.T) {
 	// Let the execution finish so the goroutine does not outlive the test.
 	run.InterruptSubagentToSend(s.Runner, "sid", "agent-1")
 	<-time.After(50 * time.Millisecond)
+}
+
+// The delivered-review handoff is only as durable as the field copy that
+// carries it into the parked run: the flag decides whether the persisted
+// denial's display half says the handoff line or "(no output)". Both chain
+// ends are tested elsewhere (turn builds the flag, run renders the body); this
+// pins the gateway hop so a refactor that drops the copy fails here instead of
+// silently degrading the web timeline.
+func TestGatewayResumeStateCarriesDeliveredReview(t *testing.T) {
+	resume := turn.ApprovalResume{
+		Session:         []llm.Message{llm.UserMessage(llm.Text("run the plan by me first"))},
+		Denied:          true,
+		Reason:          "The user asked reviewer to review this plan before approving it.",
+		Feedback:        "",
+		DeliveredReview: true,
+	}
+	got := gatewayResumeState(resume)
+	require.NotNil(t, got)
+	require.True(t, got.DeliveredReview, "the delivered-review marker must reach the parked run")
+	require.True(t, got.Denied)
+	require.Equal(t, resume.Reason, got.DenyReason)
+	require.Equal(t, resume.Feedback, got.DenyFeedback)
+	require.Equal(t, resume.Session, got.Session)
+	// The projection is pure: the continuation fence is the caller's to bind
+	// once the resume state is known to be used.
+	require.Nil(t, got.BeginContinuation)
+	require.Nil(t, got.EndContinuation)
 }

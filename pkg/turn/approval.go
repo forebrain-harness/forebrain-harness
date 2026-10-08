@@ -60,6 +60,7 @@ type ApprovalStore interface {
 	ApproveWithAnswer(context.Context, string, string, string) (*state.Action, error)
 	AnswerAsk(context.Context, string, state.AskAnswer) (*state.Action, error)
 	Deny(context.Context, string, string) (*state.Action, error)
+	DenyWithAnswer(context.Context, string, string, string) (*state.Action, error)
 	Cancel(context.Context, string, string) (*state.Action, error)
 }
 
@@ -98,7 +99,11 @@ type ApprovalResume struct {
 	// Feedback is the user's own words, unwrapped: the denial card and every
 	// display of the stored action print these, never the composed guidance.
 	Feedback string
-	Cleared  bool
+	// DeliveredReview marks a denial that review delivery closed, not the
+	// user: Feedback unwraps to empty, Reason is the delivery guidance, and
+	// every display says the handoff line rather than user words.
+	DeliveredReview bool
+	Cleared         bool
 }
 
 // BuildApprovalResume derives one canonical resume state from an action wait.
@@ -126,6 +131,12 @@ func BuildApprovalResume(action *state.Action, snapshot []llm.Message, toolName 
 // the user's own words for everything that displays them. Every surface
 // resumes a denied exit-plan approval through here, so the planning model
 // hears the same guidance whichever surface the user answered on.
+//
+// A denial ActionIsReviewDelivered recognizes — the reason marker plus the
+// answer stamp only the delivery write sets — was closed by the engine to
+// hand a completed review back, not by the user: the delivery guidance
+// replaces the composed feedback and Feedback unwraps to empty, so displays
+// show no user words and the model gets the review alone.
 func BuildApprovalResumeWithPlanReviews(
 	ctx context.Context, log PlanReviewLog, action *state.Action, snapshot []llm.Message, toolName string, cleared bool,
 ) ApprovalResume {
@@ -137,8 +148,38 @@ func BuildApprovalResumeWithPlanReviews(
 	if err != nil {
 		return out
 	}
+	if ActionIsReviewDelivered(action) {
+		out.Feedback = ""
+		out.Reason = ComposeReviewDeliveryGuidance(results)
+		out.DeliveredReview = true
+		return out
+	}
 	out.Reason = ComposeDenyFeedback(results, out.Feedback)
 	return out
+}
+
+// DeliverPlanReview closes a pending exit-plan approval the way a completed
+// review needs it closed: denied with PlanReviewDeliveredReason as its stored
+// reason plus the structured answer stamp only this write path sets, so the
+// denial resume hands the review to the planning model and no surface
+// mistakes the marker for the user's words — not even when the user typed the
+// marker string themselves. It is the single write every delivery path funnels
+// through; an action the user already decided on reports ErrNotPending and the
+// caller treats that as the no-op it is — the user's decision keeps the last
+// word.
+func DeliverPlanReview(ctx context.Context, actions ApprovalStore, actionID string) (*state.Action, error) {
+	if actions == nil {
+		return nil, state.ErrNotPending
+	}
+	action, err := actions.Get(ctx, actionID)
+	if err != nil {
+		return nil, err
+	}
+	if action == nil || action.Status != state.ActionPending ||
+		!strings.EqualFold(strings.TrimSpace(action.Kind), "exit_plan_mode") {
+		return nil, state.ErrNotPending
+	}
+	return actions.DenyWithAnswer(ctx, actionID, PlanReviewDeliveredReason, planReviewDeliveredAnswer)
 }
 
 // ApprovalService applies canonical approval decisions.
@@ -1041,6 +1082,60 @@ func ComposeDenyFeedback(results []PlanReviewResult, userFeedback string) string
 		b.WriteString("\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// PlanReviewDeliveredReason marks the internal denial that hands a completed
+// review back to the planning model. It is never the user's words: the UI
+// reads it — together with the answer stamp below — to say the review was
+// delivered, and the resume composer treats the pair as "no user feedback" so
+// the model gets the review alone.
+const PlanReviewDeliveredReason = "plan-review:delivered"
+
+// planReviewDeliveredAnswer is the structured stamp that discriminates a
+// review-delivery denial from a user who typed the marker string as their own
+// deny feedback: only DeliverPlanReview's write path can set it.
+const planReviewDeliveredAnswer = `{"plan_review_delivered":true}`
+
+// ActionIsReviewDelivered reports whether an action was closed by review
+// delivery rather than by the user: both the reason marker (the display
+// contract) and the structured answer stamp (the discriminator a manual
+// denial cannot set) must be present. A user who literally types the marker
+// as deny feedback has typed their own words, not this.
+func ActionIsReviewDelivered(action *state.Action) bool {
+	if action == nil || strings.TrimSpace(action.Error) != PlanReviewDeliveredReason {
+		return false
+	}
+	var a struct {
+		PlanReviewDelivered bool `json:"plan_review_delivered"`
+	}
+	return json.Unmarshal([]byte(strings.TrimSpace(action.AnswerJSON)), &a) == nil && a.PlanReviewDelivered
+}
+
+// PlanReviewDeliveredText is the one line every display of a delivered review
+// says — the TUI's notice, its denial card, and the web timeline's replay of
+// the resolution event. It replaces the marker string, which is plumbing and
+// never user-facing. The value lives in pkg/tool's display layer; this alias
+// keeps the surfaces reading it from the layer that owns delivery.
+const PlanReviewDeliveredText = tool.PlanReviewDeliveredText
+
+// reviewDeliveryGuidanceHeader is the fixed instruction a delivered review
+// resumes with. It is a compile-time constant on purpose: the words are part
+// of the model-facing contract, and keeping them out of variable state keeps
+// the prompt prefix stable for cache reuse.
+const reviewDeliveryGuidanceHeader = "The plan review you asked for has returned. The user has not decided yet: " +
+	"this approval was closed only to hand the review to you. " +
+	"Weigh each review, update the plan file, then call exit_plan_mode again to submit the revised plan for approval."
+
+// ComposeReviewDeliveryGuidance builds the text the planning model receives
+// when a completed review is handed back with no user decision attached: the
+// delivery instruction, then the reviews. Unlike ComposeDenyFeedback there is
+// no user-feedback slot to fill — the user has not spoken.
+func ComposeReviewDeliveryGuidance(results []PlanReviewResult) string {
+	body := ComposeDenyFeedback(results, "")
+	if body == "" {
+		return reviewDeliveryGuidanceHeader
+	}
+	return reviewDeliveryGuidanceHeader + "\n\n" + body
 }
 
 func reviewerList(results []PlanReviewResult) string {

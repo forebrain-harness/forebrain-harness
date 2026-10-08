@@ -539,6 +539,10 @@ type ToolApprovalResumeState struct {
 	// guidance, the way every other card separates what the user reads from
 	// what the model is told.
 	DenyFeedback string
+	// DeliveredReview marks a denial that review delivery closed, not the
+	// user: there are no user words to show, and the display half says the
+	// handoff line instead of "(no output)".
+	DeliveredReview bool
 	// BeginContinuation atomically crosses the durable execution fence. It is
 	// intentionally runtime-only: the wait row persists the phase, while the
 	// callback binds this process's owner token to the exact continuation.

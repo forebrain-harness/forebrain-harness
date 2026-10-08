@@ -2,12 +2,23 @@ package gateway
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 )
 
 func TestRestServerRoutesSorted(t *testing.T) {
@@ -182,5 +193,239 @@ func TestFS(t *testing.T) {
 	}
 	if len(entries) == 0 {
 		t.Fatal("embedded assets dir is empty")
+	}
+}
+
+// --- gateway status/stop person-readable output ---
+
+// useGatewayTestHome points the process config at an isolated home whose
+// forebrain.yaml sets the gateway HTTP address, resetting the process-level
+// Resolve cache around the test (it is global state).
+func useGatewayTestHome(t *testing.T, addr string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "forebrain.yaml"),
+		[]byte("gateway:\n  http_addr: \""+addr+"\"\n"), 0o600); err != nil {
+		t.Fatalf("write test config: %v", err)
+	}
+	t.Setenv("FOREBRAIN_HOME", dir)
+	process.ResetResolve()
+	t.Cleanup(process.ResetResolve)
+}
+
+// warmResolve loads the isolated home's config once, before the output under
+// test runs, so startup-time resolve work cannot leak into the probe-path
+// silence assertions.
+func warmResolve(t *testing.T) {
+	t.Helper()
+	if _, err := process.Resolve(); err != nil {
+		t.Fatalf("resolve test home: %v", err)
+	}
+}
+
+// captureDefaultSlog records everything logged through the default logger,
+// restoring the previous one on cleanup.
+func captureDefaultSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// refusedAddr returns a loopback address verified to refuse connections.
+// Binding :0 and closing only *hopes* the port stays free: under the full
+// parallel test run (make test), sibling package binaries churn ephemeral
+// ports and can grab the candidate between the close and the probe, turning
+// the "not running" fixture into a flake. So each candidate is verified by
+// dialing it: only an address whose dial fails with ECONNREFUSED is returned.
+func refusedAddr(t *testing.T) string {
+	t.Helper()
+	const attempts = 8
+	for i := 0; i < attempts; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("open probe port: %v", err)
+		}
+		addr := ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close probe port: %v", err)
+		}
+		conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+		if err == nil {
+			// Another process grabbed the port between close and dial.
+			_ = conn.Close()
+			continue
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return addr
+		}
+		// Unexpected dial failure (e.g. timeout): try a fresh candidate.
+	}
+	t.Fatalf("no loopback candidate refused a dial in %d attempts", attempts)
+	return ""
+}
+
+func TestGatewayHealthTextNotRunning(t *testing.T) {
+	addr := refusedAddr(t)
+	useGatewayTestHome(t, addr)
+	warmResolve(t)
+	logs := captureDefaultSlog(t)
+
+	var out bytes.Buffer
+	if err := GatewayHealthText(context.Background(), &out); err != nil {
+		t.Fatalf("GatewayHealthText: %v", err)
+	}
+	want := "Gateway is not running (optional — the terminal works without it).\n" +
+		"  Address    http://" + addr + "\n" +
+		"  Reach      nothing is listening on " + addr + "\n" +
+		"  Start it with `forebrain gateway start`\n"
+	if out.String() != want {
+		t.Fatalf("output mismatch:\n--- got ---\n%s\n--- want ---\n%s", out.String(), want)
+	}
+	if logs.Len() > 0 {
+		t.Fatalf("a not-running probe is the command's answer, not a log event; got:\n%s", logs.String())
+	}
+}
+
+func TestGatewayHealthTextRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	useGatewayTestHome(t, addr)
+	warmResolve(t)
+
+	var out bytes.Buffer
+	if err := GatewayHealthText(context.Background(), &out); err != nil {
+		t.Fatalf("GatewayHealthText: %v", err)
+	}
+	want := "Gateway is running.\n" +
+		"  Address    http://" + addr + "\n" +
+		"  Health     ok (HTTP 200)\n" +
+		"  Web UI     http://" + addr + "/\n"
+	if out.String() != want {
+		t.Fatalf("output mismatch:\n--- got ---\n%s\n--- want ---\n%s", out.String(), want)
+	}
+}
+
+func TestGatewayHealthTextUnhealthyStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	useGatewayTestHome(t, addr)
+	warmResolve(t)
+
+	var out bytes.Buffer
+	if err := GatewayHealthText(context.Background(), &out); err != nil {
+		t.Fatalf("GatewayHealthText: %v", err)
+	}
+	want := "Gateway is reachable but the health check failed.\n" +
+		"  Address    http://" + addr + "\n" +
+		"  Health     HTTP 500\n"
+	if out.String() != want {
+		t.Fatalf("output mismatch:\n--- got ---\n%s\n--- want ---\n%s", out.String(), want)
+	}
+}
+
+func TestGatewayShutdownRequestNotRunning(t *testing.T) {
+	addr := refusedAddr(t)
+	useGatewayTestHome(t, addr)
+	warmResolve(t)
+	logs := captureDefaultSlog(t)
+
+	var out bytes.Buffer
+	if err := GatewayShutdownRequest(context.Background(), &out); err != nil {
+		t.Fatalf("GatewayShutdownRequest: %v", err)
+	}
+	want := "Gateway is not running — nothing to stop.\n" +
+		"  Address    http://" + addr + "\n" +
+		"  Reach      nothing is listening on " + addr + "\n"
+	if out.String() != want {
+		t.Fatalf("output mismatch:\n--- got ---\n%s\n--- want ---\n%s", out.String(), want)
+	}
+	if logs.Len() > 0 {
+		t.Fatalf("a not-running probe is the command's answer, not a log event; got:\n%s", logs.String())
+	}
+}
+
+func TestGatewayShutdownRequestAccepted(t *testing.T) {
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	useGatewayTestHome(t, addr)
+	warmResolve(t)
+
+	var out bytes.Buffer
+	if err := GatewayShutdownRequest(context.Background(), &out); err != nil {
+		t.Fatalf("GatewayShutdownRequest: %v", err)
+	}
+	want := "Shutdown requested — the gateway at http://" + addr + " is stopping.\n"
+	if out.String() != want {
+		t.Fatalf("output mismatch:\n--- got ---\n%s\n--- want ---\n%s", out.String(), want)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/admin/shutdown" {
+		t.Fatalf("probe hit %s %s, want POST /admin/shutdown", gotMethod, gotPath)
+	}
+}
+
+type fakeTimeoutError struct{}
+
+func (fakeTimeoutError) Error() string   { return "probe timed out" }
+func (fakeTimeoutError) Timeout() bool   { return true }
+func (fakeTimeoutError) Temporary() bool { return true }
+
+func TestReachOutcomeClassification(t *testing.T) {
+	refused, reason := reachOutcome(
+		fmt.Errorf("Get %q: %w", "http://127.0.0.1:6060/healthz", syscall.ECONNREFUSED),
+		"127.0.0.1:6060")
+	if !refused || reason != "nothing is listening on 127.0.0.1:6060" {
+		t.Fatalf("ECONNREFUSED → (%v, %q), want (true, %q)", refused, reason, "nothing is listening on 127.0.0.1:6060")
+	}
+
+	wantTimeout := fmt.Sprintf("no response within %ds", int(gatewayProbeTimeout.Seconds()))
+	refused, reason = reachOutcome(fakeTimeoutError{}, "127.0.0.1:6060")
+	if refused || reason != wantTimeout {
+		t.Fatalf("timeout → (%v, %q), want (false, %q)", refused, reason, wantTimeout)
+	}
+
+	refused, reason = reachOutcome(errors.New("weird probe failure"), "127.0.0.1:6060")
+	if refused || reason != "weird probe failure" {
+		t.Fatalf("passthrough → (%v, %q), want (false, %q)", refused, reason, "weird probe failure")
+	}
+}
+
+func TestDisplayBaseURLMatchesDisplayHost(t *testing.T) {
+	cases := []struct {
+		addr string
+		want string
+	}{
+		{addr: "0.0.0.0:6060", want: "http://127.0.0.1:6060"},
+		{addr: ":6060", want: "http://127.0.0.1:6060"},
+		{addr: "[::]:6060", want: "http://127.0.0.1:6060"},
+		{addr: "127.0.0.1:6060", want: "http://127.0.0.1:6060"},
+		{addr: "localhost", want: "http://localhost"}, // no port: passthrough
+	}
+	for _, tc := range cases {
+		if got := displayBaseURL(tc.addr); got != tc.want {
+			t.Fatalf("displayBaseURL(%q) = %q, want %q", tc.addr, got, tc.want)
+		}
+		// displayHost is the single mapping source; the URL must agree with it.
+		if got, want := displayBaseURL(tc.addr), "http://"+displayHost(tc.addr); got != want {
+			t.Fatalf("displayBaseURL(%q) = %q, want %q (displayHost agreement)", tc.addr, got, want)
+		}
 	}
 }
