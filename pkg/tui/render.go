@@ -4926,7 +4926,7 @@ func sharedCardPad(row string, termWidth int) string {
 // column is one explicit space on the card background rather than an \x1b[K
 // fill, which would depend on back-color-erase (absent on macOS Terminal.app)
 // and leave the edge unpainted. The rule color matches the forebrain banner logo
-// (#5DADE2 dark / #0d6e9c light) so the card frame visually ties back to the
+// (#87c3ea dark / #0d6e9c light) so the card frame visually ties back to the
 // startup banner.
 func renderSharedBlockBorderLine(width int) string {
 	if width < 2 {

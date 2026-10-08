@@ -16346,6 +16346,150 @@ func TestForebrainMascotPaletteIsExactXterm256(t *testing.T) {
 	}
 }
 
+// bannerSGRBefore returns the SGR sequence that opens the first occurrence of
+// text in a rendered card line, or "" when the text carries no style.
+func bannerSGRBefore(line, text string) string {
+	i := strings.Index(line, text)
+	if i < 0 {
+		return ""
+	}
+	start := strings.LastIndex(line[:i], "\x1b[")
+	if start < 0 || !strings.HasSuffix(line[start:i], "m") {
+		return ""
+	}
+	return line[start:i]
+}
+
+// bannerRoleSGR renders the startup card once and reports the SGR sequence
+// each named role is painted with: the frame ("border"), the rule under the
+// product name ("rule"), the product name ("title"), the version ("version"),
+// the workspace path ("path"), the shortcut key ("key") and its label
+// ("label").
+func bannerRoleSGR(t *testing.T) map[string]string {
+	t.Helper()
+	lines := forebrainBannerLines("v0.1.0", "~/workspace/forebrain", 120)
+	plain := make([]string, len(lines))
+	for i, line := range lines {
+		plain[i] = stripANSI(line)
+	}
+	nameRow := -1
+	for i, line := range plain {
+		if strings.Contains(line, bannerProductName) {
+			nameRow = i
+		}
+	}
+	if nameRow < 0 || nameRow+4 >= len(lines) {
+		t.Fatalf("could not find the card's rows in %q", plain)
+	}
+	return map[string]string{
+		"border":  bannerSGRBefore(lines[1], "╭"),
+		"rule":    bannerSGRBefore(lines[nameRow+1], bannerFrameH),
+		"title":   bannerSGRBefore(lines[nameRow], bannerProductName),
+		"version": bannerSGRBefore(lines[nameRow], "v0.1.0"),
+		"path":    bannerSGRBefore(lines[nameRow+2], "~/workspace/forebrain"),
+		"key":     bannerSGRBefore(lines[nameRow+4], "/"),
+		"label":   bannerSGRBefore(lines[nameRow+4], "commands"),
+	}
+}
+
+// TestForebrainBannerPaletteIsTheDesignSheet pins the startup card's colours
+// to docs/design/STARTUP_CARD.html in every colour profile. The true-colour
+// values are the sheet's own hexes. The 256-colour values are xterm-256
+// entries, given as the palette index itself: a 256-colour terminal quantises
+// a plain hex, which is how the frame turned grey and the shortcut keys
+// stopped matching the title. The title and the keys share one colour by
+// design, so they must render byte-identically.
+func TestForebrainBannerPaletteIsTheDesignSheet(t *testing.T) {
+	previous := lipgloss.ColorProfile()
+	previousDark := lipgloss.HasDarkBackground()
+	t.Cleanup(func() {
+		lipgloss.SetColorProfile(previous)
+		lipgloss.SetHasDarkBackground(previousDark)
+	})
+
+	scenarios := []struct {
+		name    string
+		profile termenv.Profile
+		dark    bool
+		want    map[string]string
+	}{
+		{
+			name:    "truecolour dark",
+			profile: termenv.TrueColor,
+			dark:    true,
+			want: map[string]string{
+				"border":  "\x1b[38;2;52;80;105m",     // #35506a
+				"title":   "\x1b[1;38;2;135;195;234m", // #87c3ea
+				"version": "\x1b[38;2;125;147;166m",   // #7d93a6
+				"path":    "\x1b[38;2;207;217;226m",   // #cfd9e2
+			},
+		},
+		{
+			name:    "256-colour dark",
+			profile: termenv.ANSI256,
+			dark:    true,
+			want: map[string]string{
+				"border":  "\x1b[38;5;60m",    // xterm 60, the sheet's quantisation note
+				"title":   "\x1b[1;38;5;117m", // xterm 117, nearest #87c3ea
+				"version": "\x1b[38;5;67m",    // xterm 67, nearest #7d93a6
+				"path":    "\x1b[38;5;188m",   // xterm 188, nearest #cfd9e2
+			},
+		},
+		{
+			name:    "truecolour light",
+			profile: termenv.TrueColor,
+			dark:    false,
+			want: map[string]string{
+				"border":  "\x1b[38;2;183;198;211m",  // #b7c6d4
+				"title":   "\x1b[1;38;2;13;110;156m", // #0d6e9c
+				"version": "\x1b[38;2;111;131;147m",  // #6f8494
+				"path":    "\x1b[38;2;60;71;80m",     // #3d4750, the sheet's --ink-2
+			},
+		},
+		{
+			name:    "256-colour light",
+			profile: termenv.ANSI256,
+			dark:    false,
+			want: map[string]string{
+				"border":  "\x1b[38;5;251m",  // xterm 251, nearest #b7c6d4
+				"title":   "\x1b[1;38;5;24m", // xterm 24, nearest #0d6e9c
+				"version": "\x1b[38;5;67m",   // xterm 67, nearest #6f8494
+				"path":    "\x1b[38;5;238m",  // xterm 238, nearest #3d4750
+			},
+		},
+	}
+
+	for _, tc := range scenarios {
+		t.Run(tc.name, func(t *testing.T) {
+			lipgloss.SetColorProfile(tc.profile)
+			lipgloss.SetHasDarkBackground(tc.dark)
+			got := bannerRoleSGR(t)
+			for role, want := range tc.want {
+				if got[role] != want {
+					t.Errorf("%s: the %s is %q, want %q", tc.name, role, got[role], want)
+				}
+			}
+			if got["rule"] != got["border"] {
+				t.Errorf("%s: the rule under the name is %q, the frame is %q; the sheet draws both in one colour", tc.name, got["rule"], got["border"])
+			}
+			if got["key"] != got["title"] {
+				t.Errorf("%s: the shortcut keys are %q, the title is %q; the sheet gives both the same blue", tc.name, got["key"], got["title"])
+			}
+			if got["label"] != got["version"] {
+				t.Errorf("%s: the shortcut labels are %q, the version is %q; the sheet draws both in one colour", tc.name, got["label"], got["version"])
+			}
+			roles := []string{"border", "title", "version", "path"}
+			for i := range roles {
+				for j := i + 1; j < len(roles); j++ {
+					if got[roles[i]] == got[roles[j]] {
+						t.Errorf("%s: the %s and the %s share one colour (%q); the four roles must stay apart", tc.name, roles[i], roles[j], got[roles[i]])
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestForebrainMascotPaintsBodyAsBackground pins the drawing rule that keeps
 // the mascot free of seams: one pixel row per terminal row, each pixel a run
 // of forebrainMascotPixelCols spaces painted with a single background colour,
