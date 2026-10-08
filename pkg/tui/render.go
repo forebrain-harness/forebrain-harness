@@ -1978,18 +1978,10 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
-				if strings.EqualFold(title, "exit_plan_mode") {
-					planPath := strings.TrimSpace(f.FilePath)
-					if planPath == "" {
-						planPath = filePathFromToolMeta(f.ToolMeta)
-					}
-					if planPath != "" {
-						planLine := lipgloss.NewStyle().Faint(true).Render("Plan file: " + displayPath(planPath, r.cwd))
-						_, _ = fmt.Fprintln(r.out, prefixLines(planLine, "  └ ", "    "))
-					}
-					_, _ = fmt.Fprintln(r.out)
-					return
-				}
+			if strings.EqualFold(title, "exit_plan_mode") {
+				_, _ = fmt.Fprintln(r.out)
+				return
+			}
 				content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 				content = wrapCardContent(content, maxCardContentWidth()-2)
 				_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))
@@ -2122,22 +2114,13 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 	}
 	if f.Kind == FrameTool {
 		if strings.EqualFold(title, "exit_plan_mode") {
-			// Resolve the plan file path: prefer the frame's FilePath (carried
-			// from the tool output via extractFilePathFromEvent), fall back to
-			// the tool meta input. displayPath converts to a relative path when
-			// it falls under the TUI's cwd, otherwise keeps it absolute.
-			planPath := strings.TrimSpace(f.FilePath)
-			if planPath == "" {
-				planPath = filePathFromToolMeta(f.ToolMeta)
-			}
 			bodyContent := summaryToolBody(f, title)
 			if bodyContent == "" {
 				bodyContent = f.Content
 			}
 			bodyContent = formatToolContentWithInput(title, bodyContent, r.cwd, f.ToolMeta.Input)
-			// Build the message body and the plan-file line as a single block
-			// under the "└" prefix so the whole result reads as one cohesive
-			// output area rather than a separate "plan:" header.
+			// The message body renders as a single block under the "└" prefix
+			// so the result reads as one cohesive output area.
 			var outLines []string
 			if bodyContent != "" {
 				bodyWidth := maxCardContentWidth() - 2
@@ -2149,10 +2132,6 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					md = bodyContent
 				}
 				outLines = append(outLines, md)
-			}
-			if planPath != "" {
-				planLine := lipgloss.NewStyle().Faint(true).Render("Plan file: " + displayPath(planPath, r.cwd))
-				outLines = append(outLines, planLine)
 			}
 			if len(outLines) > 0 {
 				_, _ = fmt.Fprintln(r.out, prefixLines(strings.Join(outLines, "\n\n"), "  └ ", "    "))

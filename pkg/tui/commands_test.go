@@ -1351,43 +1351,38 @@ func TestReplayWebFetchUsesLiveFormatterInsteadOfRawTransportJSON(t *testing.T) 
 	}
 }
 
-// The live exit_plan_mode card renders a "Plan file:" affordance from the plan
-// path the notification extracted out of the tool's output. The replayed card
-// must carry the same field — derived from the same facts the row stores — or
-// the same conversation shows a longer card live than after a resume.
-func TestReplayExitPlanModeCardCarriesThePlanFileLine(t *testing.T) {
-	const planFile = "/state/plans/proj/plan.md"
-	body := `{"message":"Exited plan mode. You can now make edits.","mode":"agent","plan_file":"` + planFile + `"}`
-	call := llm.ToolCall{ID: "call-exit-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: `{}`}}
-	assistantParts := state.MessagePartsJSON(llm.AssistantMessage(nil, call), "")
-	toolResult := llm.ToolResultMessage("call-exit-1", llm.Text(body))
-	toolResult.ToolDisplay = &llm.ToolDisplayState{Body: "Exited plan mode. You can now make edits."}
-	toolParts := state.MessagePartsJSON(toolResult, body)
-
-	renderer := NewRenderer(nil, nil)
-	renderer.EnableViewportMode()
-	t.Cleanup(renderer.DisableViewportMode)
-	replayTurnsToRenderer(renderer, []state.Message{
-		{RowID: 1, Role: "user", Content: "ship it"},
-		{RowID: 2, Role: "assistant", PartsJSON: assistantParts},
-		{RowID: 3, Role: "tool", Content: body, PartsJSON: toolParts},
-	})
-
-	painted := stripANSI(strings.Join(renderViewport(&renderer.vm, 120, 30, 0, DiffThemeDark).lines, "\n"))
-	if !strings.Contains(painted, "Plan file: "+planFile) {
-		t.Fatalf("replayed exit_plan_mode card lost the plan-file affordance:\n%s", painted)
+func TestReplayToolFilePathDerivesReadPaths(t *testing.T) {
+	cases := []struct {
+		name  string
+		input map[string]any
+		body  string
+		want  string
+	}{
+		{
+			name:  "input path",
+			input: map[string]any{"file_path": "a.go"},
+			body:  "{}",
+			want:  "a.go",
+		},
+		{
+			name:  "repaired read names the file actually read",
+			input: map[string]any{"file_path": "SKILL.md"},
+			body:  `{"repaired_from":"SKILL.md","abs_path":"/skills/x/SKILL.md"}`,
+			want:  "/skills/x/SKILL.md",
+		},
+		{
+			name:  "no path yields empty",
+			input: map[string]any{"command": "ls"},
+			body:  `{"summary":"ok"}`,
+			want:  "",
+		},
 	}
-	// The path derivation mirrors the live notification's, from the row's own
-	// facts: input first, then the output envelope.
-	if got := replayToolFilePath("exit_plan_mode", map[string]any{}, body); got != planFile {
-		t.Fatalf("replayToolFilePath(exit_plan_mode) = %q want %q", got, planFile)
-	}
-	if got := replayToolFilePath("read_file", map[string]any{"file_path": "a.go"}, "{}"); got != "a.go" {
-		t.Fatalf("replayToolFilePath(read_file) = %q want the input path", got)
-	}
-	repaired := `{"repaired_from":"SKILL.md","abs_path":"/skills/x/SKILL.md"}`
-	if got := replayToolFilePath("read_file", map[string]any{"file_path": "SKILL.md"}, repaired); got != "/skills/x/SKILL.md" {
-		t.Fatalf("replayToolFilePath(repaired read) = %q want the repaired path", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := replayToolFilePath(tc.input, tc.body); got != tc.want {
+				t.Fatalf("replayToolFilePath(%v, %q) = %q want %q", tc.input, tc.body, got, tc.want)
+			}
+		})
 	}
 }
 
