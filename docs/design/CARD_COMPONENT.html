@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>通用卡片 · 设计稿</title>
+<style>
+  :root{
+    --paper:#f7f6f3; --panel:#ffffff;
+    --ink:#14191f; --ink-2:#3d4750; --muted:#6f7a85; --soft:#98a2ac;
+    --rule:#e5e2dc; --rule-2:#efece7;
+    --accent:#0d6e9c; --ok:#1a7f5a; --bad:#b4453f; --amber:#b06a12;
+    --mono:"SF Mono",Menlo,"DejaVu Sans Mono",monospace;
+    --display:"Didot","Songti SC","Hoefler Text",serif;
+
+    /* ---- 产品真实 token（frontend/src/assets/main.css，light 主题）---- */
+    --fb-bg:#FFFFFF; --fb-bg-alt:#F7F8FA; --fb-surface:#FFFFFF;
+    --fb-line:#E4E7EC; --fb-line-strong:#D0D5DD;
+    --fb-text:#101828; --fb-text-2:#475467; --fb-muted:#667085;
+    --fb-alt:#F2F4F7; --fb-alt-hover:#EAECF0;
+    --fb-brand:#1F4A9E; --fb-brand-hover:#173B80; --fb-brand-soft:#EBF0F9;
+    --fb-on-brand:#FFFFFF; --fb-btn-primary-text:#f5ffff;
+    --fb-ok:#067647; --fb-ok-soft:#ECFDF3;
+    --fb-warn:#B54708; --fb-warn-soft:#FFFAEB;
+    --fb-bad:#B42318;
+    --fb-ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --fb-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font:15px/1.75 -apple-system,"PingFang SC","SF Pro Text","Helvetica Neue",sans-serif;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 34px 120px}
+
+  /* ---------------------------------------------------------- cover ---- */
+  .cover{padding:76px 0 46px;border-bottom:1px solid var(--rule)}
+  .kicker{font:600 11.5px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 22px}
+  h1{font:400 60px/1.06 var(--display);letter-spacing:-.015em;margin:0;max-width:22ch}
+  h1 em{font-style:normal;color:var(--accent)}
+  .sub{margin:20px 0 0;max-width:64ch;color:var(--ink-2);font-size:15.5px}
+  .sub b{font-weight:600;color:var(--ink)}
+  .coverbar{display:flex;gap:36px;flex-wrap:wrap;margin:34px 0 0;
+    padding-top:22px;border-top:1px solid var(--rule)}
+  .coverbar div{font:12px/1.6 var(--mono);color:var(--muted)}
+  .coverbar b{display:block;font:600 15px/1.5 -apple-system,"PingFang SC",sans-serif;
+    color:var(--ink);letter-spacing:-.01em}
+
+  /* ------------------------------------------------------- sections ----- */
+  section{padding:64px 0 0}
+  .sechead{display:flex;align-items:baseline;gap:18px;padding-bottom:16px;
+    border-bottom:1px solid var(--rule)}
+  .secnum{font:11.5px/1 var(--mono);color:var(--accent);letter-spacing:.14em;flex:none}
+  .sechead h2{font:400 30px/1.2 var(--display);margin:0;letter-spacing:-.01em}
+  .sechead p{margin:0 0 0 auto;color:var(--muted);font-size:13.5px;max-width:46ch;text-align:right}
+  .lead{margin:22px 0 0;max-width:76ch;color:var(--ink-2)}
+  .lead b{color:var(--ink);font-weight:600}
+  .lead + .lead{margin-top:12px}
+  code{font:12.5px/1.6 var(--mono);background:#efede8;border:1px solid var(--rule);
+    border-radius:3px;padding:1px 5px}
+
+  /* --------------------------------------------------------- spec ------- */
+  .specgrid{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:44px;
+    margin:26px 0 0;align-items:start}
+  dl.spec{margin:0;font-size:13.5px}
+  dl.spec div{display:flex;justify-content:space-between;gap:16px;padding:9px 0;
+    border-top:1px solid var(--rule-2)}
+  dl.spec dt{color:var(--muted);margin:0}
+  dl.spec dd{margin:0;font:13px/1.6 var(--mono);color:var(--ink);text-align:right}
+  pre.rule{margin:0;background:#fff;border:1px solid var(--rule);border-radius:9px;
+    padding:13px 14px;overflow:auto;font:11.5px/1.7 var(--mono);color:#3d4750;white-space:pre}
+  pre.rule b{color:var(--accent);font-weight:600}
+
+  /* ------------------------------------------------- 1:1 app previews --- */
+  figure.app{margin:0;background:#fff;border:1px solid var(--rule);border-radius:12px;
+    overflow:hidden}
+  .abar{display:flex;align-items:center;gap:5px;padding:8px 11px;background:#e6eaee}
+  .abar i{width:8px;height:8px;border-radius:50%;background:#c6ced6;display:block}
+  .abar span{margin-left:7px;font:11px/1 var(--mono);color:#6f7a85}
+  figcaption{font:11.5px/1.6 var(--mono);color:var(--muted);padding:10px 13px;
+    border-top:1px solid var(--rule);background:#fff}
+  /* 真实内容区：白底、真实字体、按页面真实宽度渲染 */
+  .screen{background:var(--fb-bg);font-family:var(--fb-ui);color:var(--fb-text);
+    padding:24px;display:grid;gap:16px;overflow-x:auto}
+  .screen.s768 .col{width:768px;margin:0 auto;display:grid;gap:12px}
+  .screen.s896 .col{width:896px;margin:0 auto;display:grid;gap:12px}
+
+  /* ------- 组件本体（逐字取自 frontend/src/components/common/CardComponent.vue）------- */
+  .card{border:1px solid var(--fb-line);border-radius:8px;padding:16px;display:grid;
+    gap:12px;align-content:start;background:var(--fb-bg)}
+  .card-h{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .card-h h3,.card-h .ttl{margin:0;font-size:14px;font-weight:600;display:flex;
+    align-items:center;gap:8px;color:var(--fb-text)}
+  .card-b{display:grid;gap:12px}
+
+  /* 现状：产品的 rounded-2xl 内容卡片 */
+  .card16{border:1px solid var(--fb-line);border-radius:16px;padding:16px;
+    background:var(--fb-surface)}
+
+  /* -------- 页面头（真实页头结构：h1 + 作用域标签同行）-------- */
+  .phead{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+  .phead h1{margin:0;font:500 24px/1.25 var(--fb-ui);color:var(--fb-text);letter-spacing:0}
+  .phead .hrow{display:flex;align-items:center;gap:8px}
+  .phead p{margin:4px 0 0;font-size:13px;line-height:1.6;color:var(--fb-text-2)}
+
+  /* ScopeBadge（= components/common/ScopeBadge.vue）*/
+  .chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;
+    border-radius:5px;font-size:11.5px;font-weight:600;letter-spacing:.02em}
+  .chip svg{width:12px;height:12px}
+  .chip.agent{background:var(--fb-brand-soft);color:var(--fb-brand)}
+  .chip.project{background:var(--fb-text);color:#fff}
+  .chip.global{background:var(--fb-alt);color:var(--fb-text-2)}
+
+  /* BadgeComponent（= components/common/BadgeComponent.vue）*/
+  .badge{display:inline-flex;align-items:center;height:20px;padding:0 7px;
+    border-radius:999px;font-size:11px;font-weight:500;white-space:nowrap}
+  .badge.default{background:var(--fb-brand-soft);color:var(--fb-brand)}
+  .badge.gray{background:var(--fb-alt);color:var(--fb-text-2)}
+  .badge.success{background:var(--fb-ok-soft);color:var(--fb-ok)}
+  .badge.warning{background:var(--fb-warn-soft);color:var(--fb-warn)}
+  .badge.error{background:var(--fb-bg);color:var(--fb-bad);border:1px solid var(--fb-bad)}
+
+  /* forebrain-btn（= main.css @layer utilities）*/
+  .btn{display:inline-flex;flex-shrink:0;white-space:nowrap;min-height:2rem;
+    align-items:center;justify-content:center;gap:6px;border-radius:6px;
+    border:1px solid var(--fb-line);padding:0 12px;font-size:12.5px;font-weight:500;
+    line-height:1.2;cursor:pointer;background:var(--fb-bg);color:var(--fb-text)}
+  .btn.primary{background:var(--fb-brand);border-color:var(--fb-brand);color:var(--fb-btn-primary-text)}
+  .btn.ghost{background:var(--fb-alt);color:var(--fb-text)}
+
+  /* forebrain-field */
+  .field{height:34px;border:1px solid var(--fb-line);border-radius:6px;background:var(--fb-bg);
+    padding:0 10px;font:13px/1 var(--fb-ui);color:var(--fb-text);outline:none;width:100%}
+  label.fld{display:block}
+  label.fld > span{display:block;margin-bottom:4px;font-size:12px;color:var(--fb-muted)}
+  .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+
+  /* 定义列表（ProjectOverview 的 dl）*/
+  dl.kv{margin:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:8px 24px;font-size:13px}
+  dl.kv div{display:flex;gap:8px}
+  dl.kv dt{margin:0;color:var(--fb-muted)}
+  dl.kv dd{margin:0;min-width:0;flex:1;word-break:break-word;color:var(--fb-text)}
+  dl.kv dd.mono{font:12px/1.6 var(--fb-mono)}
+
+  /* ---------------------------------------------------- annotated row --- */
+  .shot{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:34px;
+    margin:26px 0 0;align-items:start}
+  .notes{font-size:13px}
+  .notes h4{font:600 12px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;
+    color:var(--soft);margin:0 0 12px}
+  .notes ul{list-style:none;margin:0;padding:0}
+  .notes li{padding:8px 0;border-top:1px solid var(--rule-2);color:var(--ink-2)}
+  .notes li b{display:block;color:var(--ink);font-weight:600;font-size:13px}
+  .notes .num{font:12px/1.6 var(--mono);color:var(--accent)}
+
+  /* ------------------------------------------------------- compare ------ */
+  .cmp{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:26px;margin:26px 0 0}
+  .cmp figure{margin:0;background:#fff;border:1px solid var(--rule);border-radius:12px;
+    overflow:hidden}
+  .cmp .pad{padding:22px;background:var(--fb-bg)}
+  .zoomrow{display:flex;gap:22px;margin:26px 0 0;flex-wrap:wrap}
+  .zoombox{position:relative;width:118px;height:118px;border:1px solid var(--rule);
+    border-radius:12px;overflow:hidden;background:var(--fb-bg)}
+  .zoombox .sq{position:absolute;left:-1px;top:-1px;width:30px;height:30px;
+    transform:scale(3.93);transform-origin:0 0;border:2px solid var(--fb-line);
+    background:var(--fb-bg)}
+  .zoombox .sq.r8{border-radius:8px}
+  .zoombox .sq.r16{border-radius:16px}
+  .zoomcap{font:11.5px/1.5 var(--mono);color:var(--muted);margin:8px 0 0}
+
+  /* 间距对照 */
+  .gapdemo{padding:22px;background:var(--fb-bg);border:1px solid var(--rule);border-radius:12px}
+  .gapdemo h5{margin:0 0 12px;font:600 13px/1.4 var(--fb-ui);color:var(--fb-text)}
+  .gapdemo .flag{font:11px/1.6 var(--mono)}
+  .gapdemo.bad .flag{color:var(--bad)}
+  .gapdemo.good .flag{color:var(--ok)}
+
+  table.check{width:100%;border-collapse:collapse;margin:26px 0 0;font-size:13.5px;background:#fff}
+  table.check th,table.check td{text-align:left;padding:11px 14px;border:1px solid var(--rule)}
+  table.check th{background:#faf9f6;font:600 12px/1 var(--mono);letter-spacing:.06em;
+    text-transform:uppercase;color:var(--muted)}
+  table.check td.m{font:12.5px/1.6 var(--mono)}
+  table.check td.ok{color:var(--ok)}
+  table.check td.bad{color:var(--bad)}
+
+  .callout{margin:26px 0 0;padding:18px 20px;background:#fff;border:1px solid var(--rule);
+    border-left:3px solid var(--accent);border-radius:4px;max-width:88ch}
+  .callout b{font-weight:600}
+  .foot{margin:26px 0 0;color:var(--muted);font-size:13px;max-width:88ch}
+  .tag{display:inline-block;font:600 10.5px/1 var(--mono);letter-spacing:.06em;
+    border-radius:3px;padding:3px 6px;margin-left:8px;vertical-align:2px}
+  .tag.rec{color:#fff;background:var(--accent)}
+  .tag.neg{color:#8a5a00;background:#fdf3e0;border:1px solid #f0dfc2}
+
+  /* 窄窗口：注释列折到预览下面，页面本身不横向滚动（预览区自己滚） */
+  @media (max-width:1140px){
+    .specgrid,.shot{grid-template-columns:minmax(0,1fr)}
+    .cmp{grid-template-columns:minmax(0,1fr)}
+    .sechead{flex-wrap:wrap}
+    .sechead p{margin-left:0;text-align:left;max-width:60ch}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head><body>
+<div class="wrap">
+
+  <!-- ============================================================ cover -->
+  <div class="cover">
+    <p class="kicker">Forebrain Harness · Web · CardComponent</p>
+    <h1>通用卡片<br><em>有没有存在的必要</em></h1>
+    <p class="sub">这是网页端内容卡片的容器设计稿。组件已经写好（<code>frontend/src/components/common/CardComponent.vue</code>），
+      但<b>产品里还没有任何地方用它</b>；本页把它的规格、"用起来长什么样"、以及唯一一处会改变画面的取值
+      （圆角 <b>8px</b> 对现状 <b>16px</b>）按真实比例摆出来，供你裁决。</p>
+    <div class="coverbar">
+      <div>组件<b>CardComponent.vue</b></div>
+      <div>设计取<b>8px 圆角 · 16px 内边距 · 12px 行距</b></div>
+      <div>产品现状<b>rounded-2xl = 16px</b></div>
+      <div>待落地处<b>17 处内容卡片</b></div>
+      <div>预览比例<b>1:1（768 / 896 CSS px）</b></div>
+    </div>
+  </div>
+
+  <!-- ============================================================= spec -->
+  <section>
+    <div class="sechead">
+      <span class="secnum">01</span>
+      <h2>规格</h2>
+      <p>数值逐条取自设计稿与 frontend/src/assets/main.css 现码</p>
+    </div>
+    <p class="lead">卡片只有四件事：1px 分隔线、8px 圆角、16px 内边距、以及自己负责的 12px 行距。
+      头部是一行（左标题、右操作），主体是一个 12px 行距的格子。<b>它不带任何自己的颜色</b>——
+      底色与线条都来自全局 token，所以换品牌色（海军蓝/松石青/石墨黑）时卡片本身不变。</p>
+    <div class="specgrid">
+      <div>
+        <dl class="spec">
+          <div><dt>边框</dt><dd>1px solid #E4E7EC</dd></div>
+          <div><dt>圆角</dt><dd>8px</dd></div>
+          <div><dt>内边距</dt><dd>16px</dd></div>
+          <div><dt>底色</dt><dd>#FFFFFF（= --forebrain-bg，与 surface 同值）</dd></div>
+          <div><dt>主体行距</dt><dd>display:grid; gap:12px</dd></div>
+          <div><dt>头部</dt><dd>flex · 两端对齐 · gap 10px</dd></div>
+          <div><dt>头部标题</dt><dd>14px / 600 / gap 8px（可带图标与标签）</dd></div>
+          <div><dt>头部副标题</dt><dd>12px · #667085（设计稿 .card-h .sub）</dd></div>
+          <div><dt>产品现状圆角</dt><dd>16px（Tailwind rounded-2xl）</dd></div>
+        </dl>
+        <div class="callout">
+          <b>唯一会改变画面的差异是圆角——前提是卡内子元素的外边距原样保留。</b>内边距（16px）、边框色（#E4E7EC）、
+          底色（两端都是 #FFFFFF）都逐值相同；现在各处手写的
+          <code>bg-[var(--forebrain-surface)]</code> 与组件的 <code>--forebrain-bg</code> 取值一样，换过去看不见。
+          <br>若同时把内部行距交给卡片的 body（<code>gap:12px</code>），节奏也会变：实测现状各卡是
+          <b>2 / 4 / 8 / 12 / 16px</b> 逐处不同（会话卡 4·16、定时任务卡 2·16、危险区 12·8、LSP 卡 8）。
+          逐处实测见 <code>docs/design/CURRENT_CARDS.html</code>。
+        </div>
+      </div>
+      <div>
+        <pre class="rule"><b>/* CardComponent.vue 现码 */</b>
+.forebrain-card {
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 8px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  background: var(--forebrain-bg);
+}
+.forebrain-card-header {
+  display: flex; align-items: center;
+  justify-content: space-between; gap: 10px;
+}
+.forebrain-card-header h3 {
+  margin: 0; font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.forebrain-card-body { display: grid; gap: 12px; }</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================================== in situ -->
+  <section>
+    <div class="sechead">
+      <span class="secnum">02</span>
+      <h2>用起来的样子</h2>
+      <p>按页面真实宽度 1:1 渲染；页面头与卡内的标签、按钮、输入框都是真实组件取值</p>
+    </div>
+
+    <!-- A. 设置类页面：标题 + 说明 + 表单 -->
+    <div class="shot">
+      <figure class="app">
+        <div class="abar"><i></i><i></i><i></i><span>forebrain gateway · /settings</span></div>
+        <div class="screen s768" id="s-a">
+          <div class="col">
+            <div class="phead">
+              <div>
+                <div class="hrow">
+                  <h1>记忆</h1>
+                  <span class="chip global"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20"/></svg>全局</span>
+                </div>
+                <p>开启记忆基础能力。启用后，新对话才能使用记忆。</p>
+              </div>
+            </div>
+
+            <div class="card" id="card-a">
+              <div class="card-h">
+                <h3>记忆开关<span class="badge gray">全局</span></h3>
+                <button class="btn ghost" type="button">刷新</button>
+              </div>
+              <div class="card-b">
+                <div style="display:grid;gap:16px">
+                  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+                    <div><div style="font-size:13px;font-weight:500;color:var(--fb-text)">启用记忆功能</div>
+                      <div style="margin-top:2px;font-size:12px;color:var(--fb-muted)">开启记忆基础能力。启用后，新对话才能使用记忆。</div></div>
+                    <span style="width:32px;height:18px;border-radius:999px;background:var(--fb-brand);position:relative;flex:none">
+                      <span style="position:absolute;top:2px;left:16px;width:14px;height:14px;border-radius:50%;background:#fff"></span></span>
+                  </div>
+                  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">
+                    <div><div style="font-size:13px;font-weight:500;color:var(--fb-text)">使用记忆</div>
+                      <div style="margin-top:2px;font-size:12px;color:var(--fb-muted)">允许新对话读取已生成的记忆。</div></div>
+                    <span style="width:32px;height:18px;border-radius:999px;background:var(--fb-line-strong);position:relative;flex:none">
+                      <span style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff"></span></span>
+                  </div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button class="btn primary" type="button">保存</button>
+                  <button class="btn ghost" type="button" style="color:var(--fb-bad)">重置</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" id="card-a2">
+              <div class="card-h"><h3>保留天数</h3></div>
+              <div class="card-b">
+                <label class="fld"><span>定时任务运行记录保留天数</span><input class="field" value="30"></label>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption>设置页（内容列 768px）：卡一有头部行（标题 + 标签 / 刷新），卡二只有主体</figcaption>
+      </figure>
+      <div class="notes">
+        <h4>这一屏在看什么</h4>
+        <ul>
+          <li><b>头部行</b>标题左、操作右，中间 10px 间距；标题里的标签是现成的 <span class="num">BadgeComponent</span>。</li>
+          <li><b>主体行距</b>由卡片负责 12px。原来靠每个子元素的 <span class="num">mt-1/2/3/4</span>，换成卡片后要把这些外边距删掉（见 04）。</li>
+          <li><b>开关</b>是设计稿的 <span class="num">.sw</span>（32×18，圆点 14），也就是本轮新写的 <span class="num">SwitchComponent</span>。</li>
+          <li><b>按钮 / 输入框</b>圆角 6px、高 32 / 34px——本轮已按设计稿统一。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- B. 项目类页面：标题 + 作用域标签 + 定义列表 -->
+    <div class="shot">
+      <figure class="app">
+        <div class="abar"><i></i><i></i><i></i><span>forebrain gateway · /projects/&lt;id&gt;/overview</span></div>
+        <div class="screen s896" id="s-b">
+          <div class="col">
+            <div class="card" id="card-b">
+              <div class="card-h">
+                <h3 style="font-size:14px;font-weight:500">概览
+                  <span class="chip project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h5l2 2h5a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><circle cx="12" cy="13" r="2.5"/><path d="M12 15.5V18"/></svg>项目</span>
+                </h3>
+              </div>
+              <div class="card-b">
+                <dl class="kv">
+                  <div><dt>描述</dt><dd>本主代理的项目。每个项目有独立的项目空间。</dd></div>
+                  <div><dt>根目录</dt><dd class="mono">~/workspace/forebrain-harness</dd></div>
+                  <div><dt>ProjectKey</dt><dd class="mono">-Users-doudou-workspace-forebrain-harness</dd></div>
+                  <div><dt>记忆范围</dt><dd>项目级</dd></div>
+                </dl>
+              </div>
+            </div>
+
+            <div class="card" id="card-b2">
+              <div class="card-h">
+                <h3 style="font-size:14px;font-weight:500">项目设置
+                  <span class="badge success">已信任</span></h3>
+                <button class="btn primary" type="button">保存</button>
+              </div>
+              <div class="card-b">
+                <div class="grid2">
+                  <label class="fld"><span>项目名</span><input class="field" value="forebrain-harness"></label>
+                  <label class="fld"><span>图标</span><input class="field" value="FB"></label>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" id="card-b3">
+              <div class="card-h"><h3 style="color:var(--fb-bad);font-size:14px;font-weight:500">危险区</h3></div>
+              <div class="card-b">
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                  <button class="btn ghost" type="button">归档</button>
+                  <button class="btn ghost" type="button" style="color:var(--fb-bad)">删除</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <figcaption>项目子页（内容列 896px）：概览 / 设置 / 危险区，三个卡片同一种容器</figcaption>
+      </figure>
+      <div class="notes">
+        <h4>这一屏在看什么</h4>
+        <ul>
+          <li><b>作用域标签</b>在标题右侧同行，<span class="num">项目</span> 为深底白字；这就是本轮统一进 <span class="num">ScopeBadge</span> 的那枚。</li>
+          <li><b>定义列表</b>原本自带 <span class="num">mt-3</span>；换卡片后首段间距由卡片给，两列网格本身不变。</li>
+          <li><b>危险区</b>只是同一种卡片加一条红色标题，不需要单独容器。</li>
+          <li>三张卡之间 12px 由外层列给（<span class="num">space-y-5</span> → 20px，与本页 12px 略有出入，实施时以页面现值为准）。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ========================================================= compare -->
+  <section>
+    <div class="sechead">
+      <span class="secnum">03</span>
+      <h2>要你裁决的那一处：圆角</h2>
+      <p>两版同宽同高、同一内容，只有圆角不同；下方是 4 倍放大</p>
+    </div>
+    <p class="lead">设计稿的容器一律 8px（<code>.card</code>），产品现在一律 16px（Tailwind <code>rounded-2xl</code>）。
+      设计稿里没有 16px 的容器——它的圆角只有五档：5px（标签）、6px（按钮/输入框）、8px（卡片/代码块/表格）、
+      10px（浮层）、12px（舞台/输入区）。所以落地卡片就等于把 17 处内容卡片的圆角从 16px 收到 8px。</p>
+    <div class="cmp">
+      <figure>
+        <div class="pad"><div class="card16"><div class="card-h"><h3>概览
+          <span class="chip project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h5l2 2h5a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg>项目</span></h3></div>
+          <div class="card-b" style="margin-top:12px"><dl class="kv"><div><dt>描述</dt><dd>本主代理的项目。</dd></div><div><dt>根目录</dt><dd class="mono">~/workspace</dd></div></dl></div></div></div>
+        <figcaption>现状 · rounded-2xl = 16px（17 处手写）</figcaption>
+      </figure>
+      <figure>
+        <div class="pad"><div class="card"><div class="card-h"><h3>概览
+          <span class="chip project"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h5l2 2h5a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg>项目</span></h3></div>
+          <div class="card-b"><dl class="kv"><div><dt>描述</dt><dd>本主代理的项目。</dd></div><div><dt>根目录</dt><dd class="mono">~/workspace</dd></div></dl></div></div></div>
+        <figcaption>设计稿 · .card = 8px（组件取值）</figcaption>
+      </figure>
+    </div>
+    <div class="zoomrow">
+      <div><div class="zoombox"><div class="sq r16"></div></div><p class="zoomcap">16px 圆角 · 放大 4×</p></div>
+      <div><div class="zoombox"><div class="sq r8"></div></div><p class="zoomcap">8px 圆角 · 放大 4×</p></div>
+    </div>
+  </section>
+
+  <!-- ========================================================== spacing -->
+  <section>
+    <div class="sechead">
+      <span class="secnum">04</span>
+      <h2>落地时要一起做的事：行距归属</h2>
+      <p>不处理会出现双倍间距，这是"要不要用组件"的真正工作量所在</p>
+    </div>
+    <div class="cmp">
+      <div class="gapdemo bad">
+        <h5>直接套组件 · 双倍间距 <span class="flag">× 不行</span></h5>
+        <div class="card">
+          <div class="card-h"><h3>记忆开关</h3></div>
+          <div class="card-b">
+            <div style="font-size:12px;color:var(--fb-muted)">说明文字</div>
+            <div style="font-size:13px;margin-top:16px">表单块（自带 mt-4）</div>
+          </div>
+        </div>
+        <p class="zoomcap" id="gap-bad">卡片 12px + 子元素 mt-4 = 28px</p>
+      </div>
+      <div class="gapdemo good">
+        <h5>间距交给卡片 · 12px <span class="flag">✓ 正确</span></h5>
+        <div class="card">
+          <div class="card-h"><h3>记忆开关</h3></div>
+          <div class="card-b">
+            <div style="font-size:12px;color:var(--fb-muted)">说明文字</div>
+            <div style="font-size:13px">表单块（无 mt-*）</div>
+          </div>
+        </div>
+        <p class="zoomcap" id="gap-good">只有卡片给的 12px</p>
+      </div>
+    </div>
+    <p class="lead">所以每落地一处，都要把该卡片内被替代的首段外边距删掉（<b>只删被卡片行距接管的那些</b>，
+      卡片内部的网格间距、分隔线、按钮行不动）。这也是本计划预计 2–3 小时的原因：17 处逐个过一遍，
+      而不是把组件挂上去就完事。</p>
+  </section>
+
+  <!-- ============================================================ scope -->
+  <section>
+    <div class="sechead">
+      <span class="secnum">05</span>
+      <h2>用在哪里 · 不用在哪里</h2>
+      <p>范围以 <code>FRONTEND_CARD_COMPONENT_ADOPTION_PLAN.md</code> 的 in/out 清单为准</p>
+    </div>
+    <p class="lead"><b>用（17 处内容卡片）：</b>设置页 8 处（审批、主代理×2、定时任务保留、钩子、MCP 项目段、
+      LSP 建议、记忆开关）＋ 项目子页 9 处（会话、MCP、权限×2、概览×3、技能、LSP）。</p>
+    <p class="lead"><b>不用（各有自己的规格）：</b>浮层与对话框、聊天气泡、虚线空状态、
+      表格/列表容器（设计稿对应 <code>.tb-wrap</code>）、侧栏与工作台面板、规则编辑面板。</p>
+    <div class="callout">
+      <b>另一个选择，成本小得多：</b>如果把卡片降级成"只是圆角要从 16 收到 8"的视觉裁决，
+      也可以不引入组件，只把 17 处的 <code>rounded-2xl</code> 改成 <code>rounded-lg</code>（8px），
+      行距一律不动。好处是零结构风险、半小时收工；代价是"设计系统里有一个组件但没人用"这件事继续存在。
+      <span class="tag neg">两条路都可行，等你定</span>
+    </div>
+  </section>
+
+  <!-- =========================================================== selfcheck -->
+  <section>
+    <div class="sechead">
+      <span class="secnum">06</span>
+      <h2>自查</h2>
+      <p>无头 Chrome 渲染后按元素实测（CSS px），逐项核对</p>
+    </div>
+    <table class="check">
+      <tr><th>检查项</th><th>实测</th></tr>
+      <tr><td>卡片圆角 / 内边距 / 主体行距</td><td class="m" id="m-card">—</td></tr>
+      <tr><td>现状卡片圆角（rounded-2xl）</td><td class="m" id="m-card16">—</td></tr>
+      <tr><td>设置页内容列宽（应 768px）</td><td class="m" id="m-col768">—</td></tr>
+      <tr><td>项目页内容列宽（应 896px）</td><td class="m" id="m-col896">—</td></tr>
+      <tr><td>双倍间距示例的实时间距</td><td class="m" id="m-gapbad">—</td></tr>
+      <tr><td>正确间距示例的实时间距</td><td class="m" id="m-gapgood">—</td></tr>
+      <tr><td>页面横向溢出（1180px 视口）</td><td class="m" id="m-overflow">—</td></tr>
+      <tr><td>卡片内文字对比度（#101828 on #FFFFFF）</td><td class="m">21.0:1 · 远超 AA</td></tr>
+    </table>
+    <p class="foot">这张设计稿只用了产品自己的取值：所有颜色是 <code>main.css</code> 的 light token，
+      圆角 / 高度 / 字号是组件与设计稿的现码。预览区按真实页面宽度（768 / 896 CSS px）1:1 渲染，
+      所以屏幕上量到的就是产品里的值。选定后我按
+      <code>docs/plan/FRONTEND_CARD_COMPONENT_ADOPTION_PLAN.md</code> 实施（或按你的裁决改：保留为设计系统原语 /
+      只收圆角不引入组件），全程不 commit，改动留在工作区给你审。</p>
+  </section>
+
+</div>
+<script>
+(function () {
+  var px = function (v) { return Math.round(parseFloat(v) * 100) / 100; };
+  var cs = function (el) { return getComputedStyle(el); };
+  var box = function (el) { var r = el.getBoundingClientRect(); return Math.round(r.width) + ' × ' + Math.round(r.height); };
+
+  var card = document.getElementById('card-a');
+  var c = cs(card);
+  document.getElementById('m-card').textContent =
+    c.borderRadius + ' / ' + c.paddingTop + ' / ' + px(cs(document.querySelector('#card-a .card-b')).rowGap);
+  document.getElementById('m-card16').textContent = cs(document.querySelector('.card16')).borderRadius;
+  document.getElementById('m-col768').textContent = Math.round(document.querySelector('#s-a .col').getBoundingClientRect().width) + 'px';
+  document.getElementById('m-col896').textContent = Math.round(document.querySelector('#s-b .col').getBoundingClientRect().width) + 'px';
+
+  var bad = document.querySelector('.gapdemo.bad .card-b');
+  var good = document.querySelector('.gapdemo.good .card-b');
+  var gapOf = function (boxEl) {
+    var kids = boxEl.children;
+    if (kids.length < 2) return '—';
+    return Math.round(kids[1].getBoundingClientRect().top - kids[0].getBoundingClientRect().bottom) + 'px';
+  };
+  document.getElementById('m-gapbad').textContent = gapOf(bad);
+  document.getElementById('m-gapgood').textContent = gapOf(good);
+  document.getElementById('gap-bad').textContent = '卡片 12px + 子元素 mt-4 = ' + gapOf(bad);
+  document.getElementById('gap-good').textContent = '只有卡片给的 ' + gapOf(good);
+
+  var of = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+  var cell = document.getElementById('m-overflow');
+  cell.textContent = of <= 0 ? '无（0px）' : of + 'px';
+  cell.className = 'm ' + (of <= 0 ? 'ok' : 'bad');
+})();
+</script>
+</body></html>

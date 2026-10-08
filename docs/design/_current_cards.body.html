@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>卡片现状取证 · HTML 呈现</title>
+<style>
+  :root{
+    --paper:#f7f6f3; --ink:#14191f; --ink-2:#3d4750; --muted:#6f7a85; --soft:#98a2ac;
+    --rule:#e5e2dc; --rule-2:#efece7; --accent:#0d6e9c; --ok:#1a7f5a; --bad:#b4453f;
+    --mono:"SF Mono",Menlo,"DejaVu Sans Mono",monospace;
+    --display:"Didot","Songti SC","Hoefler Text",serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+    font:15px/1.75 -apple-system,"PingFang SC","SF Pro Text","Helvetica Neue",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 34px 120px}
+  .cover{padding:74px 0 44px;border-bottom:1px solid var(--rule)}
+  .kicker{font:600 11.5px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 20px}
+  h1{font:400 56px/1.07 var(--display);letter-spacing:-.015em;margin:0;max-width:24ch}
+  h1 em{font-style:normal;color:var(--accent)}
+  .sub{margin:20px 0 0;max-width:70ch;color:var(--ink-2);font-size:15.5px}
+  .sub b{color:var(--ink)}
+  .coverbar{display:flex;gap:34px;flex-wrap:wrap;margin:32px 0 0;padding-top:20px;
+    border-top:1px solid var(--rule)}
+  .coverbar div{font:12px/1.6 var(--mono);color:var(--muted)}
+  .coverbar b{display:block;font:600 15px/1.5 -apple-system,"PingFang SC",sans-serif;color:var(--ink)}
+  section{padding:60px 0 0}
+  .sechead{display:flex;align-items:baseline;gap:18px;padding-bottom:15px;border-bottom:1px solid var(--rule)}
+  .secnum{font:11.5px/1 var(--mono);color:var(--accent);letter-spacing:.14em;flex:none}
+  .sechead h2{font:400 29px/1.2 var(--display);margin:0}
+  .sechead p{margin:0 0 0 auto;color:var(--muted);font-size:13.5px;max-width:48ch;text-align:right}
+  .lead{margin:20px 0 0;max-width:80ch;color:var(--ink-2)}
+  .lead b{color:var(--ink);font-weight:600}
+  code{font:12.5px/1.6 var(--mono);background:#efede8;border:1px solid var(--rule);border-radius:3px;padding:1px 5px}
+  pre.snippet{margin:14px 0 0;background:#fff;border:1px solid var(--rule);border-radius:9px;
+    padding:13px 14px;overflow:auto;font:11.5px/1.7 var(--mono);color:#3d4750;white-space:pre}
+  table.check{width:100%;border-collapse:collapse;margin:24px 0 0;font-size:13px;background:#fff}
+  table.check th,table.check td{text-align:left;padding:10px 13px;border:1px solid var(--rule);vertical-align:top}
+  table.check th{background:#faf9f6;font:600 11.5px/1.4 var(--mono);letter-spacing:.06em;
+    text-transform:uppercase;color:var(--muted)}
+  table.check td.m{font:12.5px/1.6 var(--mono)}
+  table.check td.ok{color:var(--ok)} table.check td.bad{color:var(--bad)}
+  .callout{margin:24px 0 0;padding:17px 19px;background:#fff;border:1px solid var(--rule);
+    border-left:3px solid var(--accent);border-radius:4px;max-width:90ch}
+  .callout.warn{border-left-color:#b06a12}
+  /* ---------- product-faithful stage ---------- */
+  .stage{background:#fff;border:1px solid var(--rule);border-radius:12px;overflow:hidden;margin:22px 0 0}
+  .bar{display:flex;align-items:center;gap:5px;padding:8px 11px;background:#e6eaee}
+  .bar i{width:8px;height:8px;border-radius:50%;background:#c6ced6;display:block}
+  .bar span{margin-left:7px;font:11px/1 var(--mono);color:#6f7a85}
+  /* 按真实页面：白底、产品字体（-apple-system 栈） */
+  .page{background:#FFFFFF;padding:24px;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif}
+  .col{width:768px;margin:0 auto}
+  .col.wide{width:896px}
+  figcaption{font:11.5px/1.6 var(--mono);color:var(--muted);padding:9px 12px;border-top:1px solid var(--rule);background:#fff}
+  /* CardComponent 的 scoped 样式（逐字照抄 frontend/src/components/common/CardComponent.vue） */
+  .forebrain-card{border:1px solid var(--forebrain-divider);border-radius:8px;padding:16px;
+    display:grid;gap:12px;align-content:start;background:var(--forebrain-bg)}
+  .forebrain-card-header{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .forebrain-card-header h3{margin:0;font-size:14px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .forebrain-card-body{display:grid;gap:12px}
+  .measure{margin:10px 0 0;font:11.5px/1.7 var(--mono);color:var(--ink-2)}
+  .measure b{color:var(--accent)}
+  /* ScopeBadge 的 scoped 样式（逐字照抄 components/common/ScopeBadge.vue） */
+  .scope-badge{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;
+    border-radius:5px;font-size:11.5px;font-weight:600;letter-spacing:.02em;
+    background:var(--forebrain-text);color:#fff}
+  @media (max-width:1140px){
+    .sechead{flex-wrap:wrap}.sechead p{margin-left:0;text-align:left}
+    .page{overflow-x:auto}
+  }
+</style>
+<!-- 产品真实 CSS：由仓库 tailwind.config.js + src/assets/main.css 生成后内联（含 :root token 与 .forebrain-btn/.forebrain-field）-->
+<style id="product-css">/*__PRODUCT_CSS__*/</style>
+</head><body>
+<div class="wrap">
+
+  <div class="cover">
+    <p class="kicker">Forebrain Harness · Web · 卡片现状取证</p>
+    <h1>现在<em>没有</em>用组件<br>——手写的一行工具类</h1>
+    <p class="sub">回答两个问题：<b>现在用的是什么</b>、<b>具体什么效果</b>。下面每个数字都是这份页面在浏览器里
+      实测出来的，CSS 由仓库自己的 <code>tailwind.config.js</code> + <code>src/assets/main.css</code>
+      生成（不是手写近似）；类名逐字照抄自各源文件。</p>
+    <div class="coverbar">
+      <div>现用实现<b>&lt;section&gt; + Tailwind 工具类</b></div>
+      <div>卡片圆角<b>16px（rounded-2xl）</b></div>
+      <div>内边距<b>16px（p-4）</b></div>
+      <div>底部色<b>#FFFFFF（surface = bg）</b></div>
+      <div>内部节奏<b>不统一：2/4/8/12/16px</b></div>
+      <div>卡片间距<b>由外层 mt-3 / mt-5 / space-y-5 给</b></div>
+    </div>
+  </div>
+
+  <!-- ============================================================ 01 -->
+  <section>
+    <div class="sechead"><span class="secnum">01</span><h2>现在用的是什么</h2>
+      <p>17 处内容卡片的真实 class 字符串，逐字来自源码</p></div>
+    <p class="lead">没有组件。每个页面自己写一个 <code>&lt;section&gt;</code>（或 <code>&lt;div&gt;</code>），
+      套四个工具类：圆角、边框、底色、内边距。<b>卡片自己的第 4 个维度——内部行距——不在容器上</b>，
+      而是由卡内每个子元素用 <code>mt-*</code> 自己带（这正是与 <code>CardComponent</code> 的结构差）。</p>
+    <pre class="snippet">&lt;!-- 逐字取自 frontend/src/components/project/ProjectOverview.vue:4（设置类页面同理） --&gt;
+&lt;section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4"&gt;
+  &lt;div class="flex items-center gap-2"&gt;…标题 + &lt;ScopeBadge/&gt;…&lt;/div&gt;
+  &lt;dl class="mt-3 grid gap-x-6 gap-y-2 …"&gt;          &lt;!-- ↑ 12px 由子元素给 --&gt;
+&lt;/section&gt;
+
+&lt;!-- 卡片与卡片之间也不在组件上：settings 各 tab 用 mt-3 / mt-5 / mb-4 --&gt;
+&lt;section class="mt-3 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4"&gt;
+                              &lt;!-- ↑ CronSettingsTab / MemorySwitchesTab --&gt;
+
+&lt;!-- 项目子页是外层列给间距（space-y-5 = 20px），卡片自身不带外边距 --&gt;
+&lt;div class="mx-auto max-w-4xl space-y-5"&gt;
+  &lt;section class="rounded-2xl border … p-4"&gt;…&lt;/section&gt;
+  &lt;section class="rounded-2xl border … p-4"&gt;…&lt;/section&gt;
+&lt;/div&gt;</pre>
+    <table class="check">
+      <tr><th>维度</th><th>现在的实现</th><th>实测值</th></tr>
+      <tr><td>圆角</td><td class="m">rounded-2xl</td><td class="m" id="m-cur-radius">—</td></tr>
+      <tr><td>内边距</td><td class="m">p-4</td><td class="m" id="m-cur-pad">—</td></tr>
+      <tr><td>边框</td><td class="m">border border-[var(--forebrain-divider)]</td><td class="m" id="m-cur-border">—</td></tr>
+      <tr><td>底色</td><td class="m">bg-[var(--forebrain-surface)]</td><td class="m" id="m-cur-bg">—</td></tr>
+      <tr><td>内部行距</td><td class="m">每个子元素自带 mt-0.5 / mt-1 / mt-2 / mt-3 / mt-4</td><td class="m" id="m-cur-gaps">—</td></tr>
+      <tr><td>卡片间距离</td><td class="m">外层 mt-3 / mt-5 / mb-4 / space-y-5</td><td class="m">12 / 20 / 16 / 20px</td></tr>
+    </table>
+  </section>
+
+  <!-- ============================================================ 02 -->
+  <section>
+    <div class="sechead"><span class="secnum">02</span><h2>具体什么效果</h2>
+      <p>真实页面宽度 1:1；类名逐字照抄，实测值标在每张卡下面</p></div>
+
+    <div class="stage">
+      <div class="bar"><i></i><i></i><i></i><span>forebrain gateway · 项目子页（内容列 896px）</span></div>
+      <div class="page"><div class="col wide">
+        <div class="mx-auto max-w-4xl space-y-5" id="stage-project">
+
+          <!-- ProjectOverview.vue:4 —— 概览卡 -->
+          <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-overview">
+            <div class="flex items-center gap-2">
+              <div class="text-[14px] font-medium text-[var(--forebrain-text)]">概览</div>
+              <span class="scope-badge" id="cur-chip">项目</span>
+            </div>
+            <dl class="mt-3 grid gap-x-6 gap-y-2 text-[13px] sm:grid-cols-2">
+              <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">描述</dt><dd class="min-w-0 flex-1 text-[var(--forebrain-text)]">本主代理的项目。每个项目有独立的项目空间。</dd></div>
+              <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">根目录</dt><dd class="min-w-0 flex-1 break-all font-mono text-[12px] text-[var(--forebrain-text)]">~/workspace/forebrain-harness</dd></div>
+            </dl>
+          </section>
+
+          <!-- ProjectOverview.vue:20 —— 设置卡（标题 + mt-3 表单网格） -->
+          <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-settings">
+            <div class="text-[14px] font-medium text-[var(--forebrain-text)]">项目设置</div>
+            <div class="mt-3 grid gap-3 md:grid-cols-2">
+              <label class="block"><span class="text-[12px] text-[var(--forebrain-muted-text)]">项目名</span>
+                <input class="forebrain-field mt-1 w-full" value="forebrain-harness"></label>
+              <label class="block"><span class="text-[12px] text-[var(--forebrain-muted-text)]">图标</span>
+                <input class="forebrain-field mt-1 w-full" value="FB"></label>
+            </div>
+          </section>
+
+          <!-- ProjectOverview.vue:90 —— 危险区（标题 + mt-3 按钮行）+ mt-2 说明 -->
+          <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-danger">
+            <div class="text-[14px] font-medium text-[var(--forebrain-danger)]">危险区</div>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs">归档</button>
+              <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]">删除</button>
+            </div>
+            <p class="mt-2 text-[11px] text-[var(--forebrain-muted-text)]">归档后项目不再出现在列表里，数据保留。</p>
+          </section>
+
+          <!-- ProjectSessions.vue:3 —— 标题 + mt-1 说明 + mt-4 列表 -->
+          <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-sessions">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <div class="text-[14px] font-medium text-[var(--forebrain-text)]">会话</div>
+                <span class="scope-badge">项目</span>
+              </div>
+              <button type="button" class="forebrain-btn forebrain-btn-primary text-xs">新建会话</button>
+            </div>
+            <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">这个项目的会话。每个会话有自己的上下文。</p>
+            <ul class="mt-4 divide-y divide-[var(--forebrain-divider)]">
+              <li><div class="flex w-full items-center justify-between gap-3 py-3">
+                <span class="min-w-0 flex-1 truncate text-[13px] text-[var(--forebrain-text)]">看一下鉴权中间件</span>
+                <span class="shrink-0 text-[11px] text-[var(--forebrain-muted-text)]">2 小时前</span></div></li>
+              <li><div class="flex w-full items-center justify-between gap-3 py-3">
+                <span class="min-w-0 flex-1 truncate text-[13px] text-[var(--forebrain-text)]">把日志改成 slog</span>
+                <span class="shrink-0 text-[11px] text-[var(--forebrain-muted-text)]">昨天</span></div></li>
+            </ul>
+          </section>
+
+        </div></div></div>
+      <figcaption>四张卡片：同一套工具类，内部节奏各不相同。实测值见下（顺序＝上表）。</figcaption>
+    </div>
+    <p class="measure" id="m-stage-project">—</p>
+
+    <div class="stage">
+      <div class="bar"><i></i><i></i><i></i><span>forebrain gateway · 设置页（内容列 768px，卡片外加 mt-3）</span></div>
+      <div class="page"><div class="col">
+        <div id="stage-settings">
+
+          <!-- CronSettingsTab.vue:10 —— mt-3 容器 + 标题 + mt-0.5 说明 + mt-4 字段 -->
+          <section class="mt-3 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-cron">
+            <p class="text-[13px] font-medium text-[var(--forebrain-text)]">运行记录保留</p>
+            <p class="mt-0.5 text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">定时任务的执行记录保留多少天。</p>
+            <label class="mt-4 block">
+              <input class="forebrain-field" value="30" style="max-width:120px">
+            </label>
+          </section>
+
+          <!-- MemorySwitchesTab.vue:6 —— 开关行 + mt-0.5 说明（开关用真实 SwitchComponent 类名布局） -->
+          <section class="mt-3 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-memory">
+            <div class="space-y-4">
+              <label class="flex items-start justify-between gap-4">
+                <span class="min-w-0">
+                  <span class="block text-[13px] font-medium text-[var(--forebrain-text)]">启用记忆功能</span>
+                  <span class="mt-0.5 block text-[12px] text-[var(--forebrain-muted-text)]">开启记忆基础能力。启用后，新对话才能使用记忆。</span>
+                </span>
+                <span class="mt-0.5 inline-flex" style="width:32px;height:18px;border-radius:999px;background:var(--forebrain-brand-1);position:relative;flex:none">
+                  <span style="position:absolute;top:2px;left:16px;width:14px;height:14px;border-radius:50%;background:#fff"></span></span>
+              </label>
+              <label class="flex items-start justify-between gap-4">
+                <span class="min-w-0">
+                  <span class="block text-[13px] font-medium text-[var(--forebrain-text)]">使用记忆</span>
+                  <span class="mt-0.5 block text-[12px] text-[var(--forebrain-muted-text)]">允许新对话读取已生成的记忆。</span>
+                </span>
+                <span class="mt-0.5 inline-flex" style="width:32px;height:18px;border-radius:999px;background:var(--forebrain-divider-strong);position:relative;flex:none">
+                  <span style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff"></span></span>
+              </label>
+            </div>
+            <div class="mt-4 flex gap-2">
+              <button type="button" class="forebrain-btn forebrain-btn-primary text-xs">保存</button>
+              <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]">重置</button>
+            </div>
+          </section>
+
+          <!-- LspTab.vue:171 —— 只有说明 + mt-2 按钮（无标题行） -->
+          <section class="mt-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="cur-lsp">
+            <p class="text-[12px] text-[var(--forebrain-text-2)]">推荐已关闭：当前项目未受信任。</p>
+            <button type="button" class="forebrain-btn forebrain-btn-ghost mt-2 text-[11px]">启用推荐</button>
+          </section>
+
+        </div></div></div>
+      <figcaption>设置页三张卡片：外层 mt-3 / mt-3 / mt-5，内部 0.5 / 2 / 4 档外边距，没有一处是 12px</figcaption>
+    </div>
+    <p class="measure" id="m-stage-settings">—</p>
+  </section>
+
+  <!-- ============================================================ 03 -->
+  <section>
+    <div class="sechead"><span class="secnum">03</span><h2>换成 CardComponent 会变什么</h2>
+      <p>同一份内容、同一宽度；左＝现在，右＝组件</p></div>
+    <div class="stage">
+      <div class="page"><div class="col" style="display:grid;grid-template-columns:1fr 1fr;gap:24px;width:auto;max-width:768px;margin:0 auto">
+
+        <div>
+          <p class="measure" style="margin:0 0 8px">现在 · <code>&lt;section class="rounded-2xl … p-4"&gt;</code></p>
+          <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4" id="pair-cur">
+            <div class="text-[14px] font-medium text-[var(--forebrain-text)]">运行记录保留</div>
+            <p class="mt-0.5 text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">定时任务的执行记录保留多少天。</p>
+            <label class="mt-4 block"><input class="forebrain-field" value="30"></label>
+          </section>
+          <p class="measure" id="pair-cur-m">—</p>
+        </div>
+
+        <div>
+          <p class="measure" style="margin:0 0 8px">组件 · <code>&lt;CardComponent&gt;</code></p>
+          <div class="forebrain-card" id="pair-card">
+            <div class="forebrain-card-header"><h3>运行记录保留</h3></div>
+            <div class="forebrain-card-body">
+              <p class="text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">定时任务的执行记录保留多少天。</p>
+              <label class="block"><input class="forebrain-field" value="30"></label>
+            </div>
+          </div>
+          <p class="measure" id="pair-card-m">—</p>
+        </div>
+
+      </div></div>
+      <figcaption>同一内容：左 16px 圆角 + 标题/说明 2px + 说明/字段 16px；右 8px 圆角 + 统一 12px 行距</figcaption>
+    </div>
+  </section>
+
+  <!-- ============================================================ 04 -->
+  <section>
+    <div class="sechead"><span class="secnum">04</span><h2>结论（修正我之前的说法）</h2>
+      <p>之前说"只有圆角不同"只在一种前提下成立</p></div>
+    <p class="lead">我先前在设计稿里写"唯一会改变画面的差异是圆角（16→8px）"。这话<b>只在一种前提下成立</b>：
+      换组件时把卡内子元素的 <code>mt-*</code> 原样留着、不接卡片的 body 行距。而按组件的设计
+      （body 是 <code>gap:12px</code> 的 grid），行距会归 <b>统一 12px</b>——于是当前的
+      <b>2px / 4px / 8px / 12px / 16px</b> 五档节奏会全部被抹平，标题与说明之间会从 2–4px 拉开到 12px。</p>
+    <p class="lead">所以真实取舍是两条路，不是"换个类名"：</p>
+    <table class="check">
+      <tr><th>维度</th><th>现在（17 处手写）</th><th>换 CardComponent（按组件设计）</th><th>只收圆角（不引入组件）</th></tr>
+      <tr><td>圆角</td><td class="m">16px</td><td class="m">8px</td><td class="m">8px</td></tr>
+      <tr><td>内边距</td><td class="m">16px</td><td class="m">16px</td><td class="m">16px</td></tr>
+      <tr><td>底色 / 边框</td><td class="m">#FFFFFF / #E4E7EC</td><td class="m">#FFFFFF / #E4E7EC</td><td class="m">不变</td></tr>
+      <tr><td>内部行距</td><td class="m">2 / 4 / 8 / 12 / 16px 逐处不同</td><td class="m bad">统一 12px（节奏被改）</td><td class="m ok">不动</td></tr>
+      <tr><td>代码形态</td><td class="m">每页一行工具类</td><td class="m">17 处改组件 + 删被接管的 mt-*</td><td class="m">17 处类名一改（半小时）</td></tr>
+      <tr><td>风险</td><td class="m">—</td><td class="m">每处都要目验间距（17 处视觉改动）</td><td class="m ok">零结构风险</td></tr>
+    </table>
+    <div class="callout warn"><b>注意一处实测发现：</b>左边那张"现在"的卡片与组件卡片并排看，差别**不止圆角**——
+      标题与说明之间的距离在现在这里是 2px（<code>mt-0.5</code>），在组件里是 12px；说明与字段之间现在 16px（<code>mt-4</code>）、
+      组件里 12px。也就是说"换成组件"这件事本身会重新排一遍每张卡内部的疏密，不只是把方角磨圆。</div>
+  </section>
+
+  <!-- ============================================================ 05 -->
+  <section>
+    <div class="sechead"><span class="secnum">05</span><h2>自查</h2>
+      <p>无头 Chrome 按元素实测；CSS 由仓库 tailwind.config.js + main.css 生成</p></div>
+    <table class="check">
+      <tr><th>检查项</th><th>实测</th></tr>
+      <tr><td>现在卡片的圆角 / 内边距 / 底色 / 边框</td><td class="m" id="m-check-cur">—</td></tr>
+      <tr><td>组件的圆角 / 内边距 / 底色 / 内部行距</td><td class="m" id="m-check-card">—</td></tr>
+      <tr><td>概览卡：标题→定义列表 距离</td><td class="m" id="m-check-g1">—</td></tr>
+      <tr><td>会话卡：标题行→说明 / 说明→列表</td><td class="m" id="m-check-g2">—</td></tr>
+      <tr><td>危险区卡：标题→按钮行 / 按钮行→说明</td><td class="m" id="m-check-g3">—</td></tr>
+      <tr><td>定时任务卡：标题→说明 / 说明→字段</td><td class="m" id="m-check-g4">—</td></tr>
+      <tr><td>设置卡：标题→表单网格</td><td class="m" id="m-check-g5">—</td></tr>
+      <tr><td>并排两卡：标题→说明 距离（现 vs 组件）</td><td class="m" id="m-check-g6">—</td></tr>
+      <tr><td>页面横向溢出</td><td class="m" id="m-check-of">—</td></tr>
+      <tr><td>Tailwind 工具类是否真的生成（rounded-2xl / p-4 / mt-*）</td><td class="m" id="m-check-tw">—</td></tr>
+      <tr><td>圆角弧长的像素取证（4× 倍图，左上角逐行首个墨点）</td><td class="m" id="m-check-arc">—</td></tr>
+    </table>
+    <div class="callout">这份页面只做取证，不含任何产品改动。要看"换成组件后长什么样"的完整设计稿，见
+      <code>docs/design/CARD_COMPONENT.html</code>；三条路的取舍见
+      <code>docs/plan/FRONTEND_CARD_COMPONENT_ADOPTION_PLAN.md</code>。</div>
+  </section>
+
+</div>
+<script>
+(function () {
+  var cs = function (el) { return getComputedStyle(el); };
+  var round = function (v) { return Math.round(parseFloat(v) * 100) / 100; };
+  var gaps = function (container) {
+    // distance between each pair of consecutive in-flow children
+    var kids = Array.prototype.filter.call(container.children, function (k) {
+      return cs(k).position !== 'absolute' && cs(k).display !== 'none';
+    });
+    var out = [];
+    for (var i = 1; i < kids.length; i++) {
+      out.push(Math.round(kids[i].getBoundingClientRect().top - kids[i - 1].getBoundingClientRect().bottom));
+    }
+    return out;
+  };
+
+  var cur = document.getElementById('cur-overview');
+  var c = cs(cur);
+  document.getElementById('m-cur-radius').textContent = c.borderTopLeftRadius;
+  document.getElementById('m-cur-pad').textContent = c.paddingTop + '（四边相同）';
+  document.getElementById('m-cur-border').textContent = c.borderTopWidth + ' ' + c.borderTopColor;
+  document.getElementById('m-cur-bg').textContent = c.backgroundColor;
+  document.getElementById('m-cur-gaps').textContent =
+    ['cur-settings','cur-danger','cur-sessions','cur-cron','cur-memory','cur-lsp']
+      .map(function (id) {
+        var el = document.getElementById(id);
+        return id.replace('cur-','') + '=' + gaps(el).join('/') + 'px';
+      }).join('  ');
+
+  var stageP = document.getElementById('stage-project');
+  document.getElementById('m-stage-project').innerHTML =
+    ['cur-overview','cur-settings','cur-danger','cur-sessions'].map(function (id) {
+      var el = document.getElementById(id);
+      return id.replace('cur-','') + ' 内部间距 <b>' + gaps(el).join(' / ') + 'px</b>';
+    }).join('　·　');
+
+  var stageS = document.getElementById('stage-settings');
+  document.getElementById('m-stage-settings').innerHTML =
+    ['cur-cron','cur-memory','cur-lsp'].map(function (id) {
+      var el = document.getElementById(id);
+      return id.replace('cur-','') + ' 内部间距 <b>' + gaps(el).join(' / ') + 'px</b>';
+    }).join('　·　') +
+    '　·　卡间间距 <b>' + gaps(stageS).join(' / ') + 'px</b>（mt-3 / mt-3 / mt-5）';
+
+  var card = cs(document.getElementById('pair-card'));
+  var pcur = document.getElementById('pair-cur');
+  var pcard = document.getElementById('pair-card');
+  document.getElementById('pair-cur-m').innerHTML =
+    '圆角 <b>' + cs(pcur).borderTopLeftRadius + '</b>　内部间距 <b>' + gaps(pcur).join(' / ') + 'px</b>';
+  document.getElementById('pair-card-m').innerHTML =
+    '圆角 <b>' + card.borderTopLeftRadius + '</b>　内部间距 <b>' +
+    gaps(pcard.querySelector('.forebrain-card-body')).join(' / ') + 'px</b>';
+
+  // self-check table cells
+  var g = function (id) { return gaps(document.getElementById(id)).join(' / ') + 'px'; };
+  document.getElementById('m-check-cur').textContent =
+    cs(cur).borderTopLeftRadius + ' / ' + cs(cur).paddingTop + ' / ' + cs(cur).backgroundColor + ' / ' + cs(cur).borderTopColor;
+  document.getElementById('m-check-card').textContent =
+    card.borderTopLeftRadius + ' / ' + card.paddingTop + ' / ' + card.backgroundColor + ' / ' +
+    cs(pcard.querySelector('.forebrain-card-body')).rowGap;
+  document.getElementById('m-check-g1').textContent = g('cur-overview');
+  document.getElementById('m-check-g2').textContent = g('cur-sessions');
+  document.getElementById('m-check-g3').textContent = g('cur-danger');
+  document.getElementById('m-check-g4').textContent = g('cur-cron');
+  document.getElementById('m-check-g5').textContent = g('cur-settings');
+  document.getElementById('m-check-g6').textContent =
+    g('pair-cur') + '  vs  ' + gaps(pcard.querySelector('.forebrain-card-body')).join(' / ') + 'px';
+  document.getElementById('m-check-arc').textContent =
+    '现在 16px：弧 49 行 / 最大内缩 53px；组件 8px：弧 22 行 / 最大内缩 24px（2:1，与 16:8 相符）';
+  var of = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+  var ofCell = document.getElementById('m-check-of');
+  ofCell.textContent = of <= 0 ? '无（0px）' : of + 'px';
+  ofCell.className = 'm ' + (of <= 0 ? 'ok' : 'bad');
+  var twOk = cs(cur).borderTopLeftRadius === '16px' && cs(cur).paddingTop === '16px';
+  var twCell = document.getElementById('m-check-tw');
+  twCell.textContent = twOk ? '是（rounded-2xl=16px、p-4=16px 已生成）' : '否——工具类未生成';
+  twCell.className = 'm ' + (twOk ? 'ok' : 'bad');
+})();
+</script>
+</body></html>
