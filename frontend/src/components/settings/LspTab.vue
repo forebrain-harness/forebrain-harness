@@ -166,16 +166,16 @@
         {{ t('lsp.empty') }}
       </p>
 
-      <section
+      <CardComponent
         v-if="snapshot?.recommendationsDisabled"
-        class="mt-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4"
+        class="mt-5"
         data-testid="lsp-recommendations"
       >
         <p class="text-[12px] text-[var(--forebrain-text-2)]">{{ t('lsp.recommendationsOff', { reason: snapshot.recommendationsDisabledReason || '' }) }}</p>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost mt-2 text-[11px]" :disabled="busy === 'recommendations'" @click="resetRecommendations">
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-[11px]" :disabled="busy === 'recommendations'" @click="resetRecommendations">
           {{ t('lsp.recommendationsEnable') }}
         </button>
-      </section>
+      </CardComponent>
     </div>
   </div>
 </template>
@@ -188,6 +188,7 @@
  * the terminal's /lsp panel uses, so the two surfaces cannot disagree.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import {
   getErrorMessage,
   lspInstall,

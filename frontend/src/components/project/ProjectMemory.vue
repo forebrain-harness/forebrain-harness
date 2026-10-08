@@ -2,7 +2,7 @@
   <div class="mx-auto max-w-4xl space-y-4">
     <div class="flex items-center gap-2">
       <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('memories.projectTitle') }}</div>
-      <span class="scope-badge">{{ t('scope.project') }}</span>
+      <ScopeBadge type="project" :label="t('scope.project')" />
     </div>
     <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.projectFilesDescription') }}</p>
 
@@ -18,6 +18,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import MemoryFilesPanel from '@/components/memory/MemoryFilesPanel.vue'
 import type { ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'

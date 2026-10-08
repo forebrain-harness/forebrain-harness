@@ -5,7 +5,7 @@
         <div>
           <div class="flex items-center gap-2">
             <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('cron.title') }}</h1>
-            <span class="scope-badge">{{ scope === 'project' ? t('scope.project') : t('scope.agent') }}</span>
+            <ScopeBadge :type="scope === 'project' ? 'project' : 'agent'" :label="scope === 'project' ? t('scope.project') : t('scope.agent')" />
           </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ scope === 'project' ? t('cron.projectDescription') : t('cron.description') }}</p>
         </div>
@@ -156,6 +156,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
 import { getErrorMessage, forebrainApi, type CronJobRecord, type CronRunRecord } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'

@@ -5,7 +5,7 @@
         <div>
           <div class="flex items-center gap-2">
             <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('projects.title') }}</h1>
-            <span class="scope-badge scope-badge--agent">{{ t('projects.scopeAgent', { name: agentName }) }}</span>
+            <ScopeBadge type="agent" :label="t('projects.scopeAgent', { name: agentName })" />
           </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('projects.description') }}</p>
         </div>
@@ -125,6 +125,7 @@
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
@@ -240,18 +241,3 @@ function formatTime(unixSeconds: number): string {
 
 onMounted(load)
 </script>
-
-<style scoped>
-.scope-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 500;
-}
-.scope-badge--agent {
-  background: var(--forebrain-brand-1);
-  color: var(--forebrain-on-brand);
-}
-</style>

@@ -43,11 +43,10 @@
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
-            <span class="scope-badge" :data-skill-origin-badge="row.origin">{{ originLabel(row.origin) }}</span>
-            <span
-              v-if="isOwned(row)"
-              class="rounded-full bg-[var(--forebrain-brand-soft)] px-2 py-0.5 text-[11px] text-[var(--forebrain-brand-1)]"
-            >{{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}</span>
+            <BadgeComponent variant="gray">{{ originLabel(row.origin) }}</BadgeComponent>
+            <BadgeComponent v-if="isOwned(row)" :variant="row.enabled ? 'success' : 'gray'">
+              {{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}
+            </BadgeComponent>
             <LockIcon
               v-else
               class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]"
@@ -65,24 +64,15 @@
         </div>
 
         <div class="flex shrink-0 flex-wrap items-center gap-2">
-          <label
+          <SwitchComponent
             v-if="isOwned(row)"
-            class="relative inline-flex cursor-pointer items-center"
+            :model-value="row.enabled"
+            :disabled="saving"
+            :data-testid="`skill-toggle-${row.name}`"
             :title="t('skills.toggleHint')"
-            :data-testid="`skill-switch-${row.name}`"
-          >
-            <input
-              type="checkbox"
-              class="peer sr-only"
-              :checked="row.enabled"
-              :disabled="saving"
-              :data-testid="`skill-toggle-${row.name}`"
-              @change="emit('toggle', row, ($event.target as HTMLInputElement).checked)"
-            />
-            <span class="pointer-events-none h-5 w-9 rounded-full bg-[var(--forebrain-divider-strong)] transition peer-checked:bg-[var(--forebrain-brand-1)] peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--forebrain-ring-soft)]"></span>
-            <span class="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition peer-checked:translate-x-4"></span>
-            <span class="sr-only">{{ t('skills.toggleHint') }}</span>
-          </label>
+            :aria-label="t('skills.toggleHint')"
+            @update:model-value="emit('toggle', row, $event)"
+          />
           <button
             v-if="row.downloadUrl"
             type="button"
@@ -110,6 +100,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { LockIcon } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import type { SkillRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 

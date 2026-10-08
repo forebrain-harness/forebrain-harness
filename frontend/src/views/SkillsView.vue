@@ -3,7 +3,7 @@
     <div class="mx-auto w-full max-w-5xl">
       <div class="flex items-center gap-2">
         <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('skills.title') }}</h1>
-        <span class="scope-badge">{{ t('scope.agent') }}</span>
+        <ScopeBadge type="agent" :label="t('scope.agent')" />
       </div>
       <p class="mt-1 text-[13px] text-[var(--forebrain-text-2)]">{{ t('skills.agentDescription') }}</p>
 
@@ -73,6 +73,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
 import forebrainApi, {

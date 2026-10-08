@@ -4,7 +4,7 @@
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2">
           <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('subagents.title') }}</h1>
-          <span class="scope-badge scope-badge--agent" data-testid="scope-badge">{{ t('scope.agent') }}</span>
+          <ScopeBadge type="agent" :label="t('scope.agent')" data-testid="scope-badge" />
         </div>
         <button
           type="button"
@@ -63,6 +63,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Users } from 'lucide-vue-next'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { agentRosterViewTarget, useAgentRoster } from '@/composables/useAgentRoster'
 import { getErrorMessage, type AgentRosterRow } from '@/lib/api'
 import { useI18n } from '@/locales'
@@ -135,18 +136,3 @@ onUnmounted(() => {
   if (refreshTimer) clearInterval(refreshTimer)
 })
 </script>
-
-<style scoped>
-.scope-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 500;
-}
-.scope-badge--agent {
-  background: var(--forebrain-brand-1);
-  color: var(--forebrain-on-brand);
-}
-</style>

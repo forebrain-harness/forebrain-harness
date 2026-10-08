@@ -1,12 +1,14 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-5">
     <!-- Overview card -->
-    <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="flex items-center gap-2">
-        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.overviewTitle') }}</div>
-        <span class="scope-badge">{{ t('scope.project') }}</span>
-      </div>
-      <dl class="mt-3 grid gap-x-6 gap-y-2 text-[13px] sm:grid-cols-2">
+    <CardComponent>
+      <template #header>
+        <div class="flex items-center gap-2">
+          <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.overviewTitle') }}</div>
+          <ScopeBadge type="project" :label="t('scope.project')" />
+        </div>
+      </template>
+      <dl class="grid gap-x-6 gap-y-2 text-[13px] sm:grid-cols-2">
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldDescription') }}</dt><dd class="min-w-0 flex-1 break-words text-[var(--forebrain-text)]">{{ project?.description || '—' }}</dd></div>
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldRoot') }}</dt><dd class="min-w-0 flex-1 break-all font-mono text-[12px] text-[var(--forebrain-text)]">{{ project?.root }}</dd></div>
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">ProjectKey</dt><dd class="min-w-0 flex-1 break-all font-mono text-[12px] text-[var(--forebrain-text)]">{{ project?.projectKey }}</dd></div>
@@ -14,12 +16,14 @@
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldCreated') }}</dt><dd class="text-[var(--forebrain-text)]">{{ formatTime(project?.createdAt) }}</dd></div>
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldArchived') }}</dt><dd class="text-[var(--forebrain-text)]">{{ project?.archivedAt ? t('projects.archived') : t('projects.live') }}</dd></div>
       </dl>
-    </section>
+    </CardComponent>
 
     <!-- Project settings card -->
-    <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.settingsTitle') }}</div>
-      <div class="mt-3 grid gap-3 md:grid-cols-2">
+    <CardComponent>
+      <template #header>
+        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.settingsTitle') }}</div>
+      </template>
+      <div class="grid gap-3 md:grid-cols-2">
         <label class="block">
           <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.namePlaceholder') }}</span>
           <input v-model="draft.name" class="forebrain-field mt-1 w-full" />
@@ -39,7 +43,7 @@
         </label>
       </div>
 
-      <div class="mt-4 space-y-3">
+      <div class="space-y-3">
         <div>
           <div class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.memoryScopeLabel') }}</div>
           <div class="mt-1 flex gap-2" role="radiogroup" :aria-label="t('projects.memoryScopeLabel')">
@@ -77,19 +81,21 @@
         </label>
       </div>
 
-      <p v-if="formError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ formError }}</p>
-      <p v-if="formNotice" class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">{{ formNotice }}</p>
-      <div class="mt-3">
+      <p v-if="formError" class="text-[12px] text-[var(--forebrain-danger)]">{{ formError }}</p>
+      <p v-if="formNotice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ formNotice }}</p>
+      <div>
         <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!changed || saving" @click="save">
           {{ saving ? t('common.loading') : t('common.save') }}
         </button>
       </div>
-    </section>
+    </CardComponent>
 
     <!-- Danger zone -->
-    <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="text-[14px] font-medium text-[var(--forebrain-danger)]">{{ t('projects.dangerTitle') }}</div>
-      <div class="mt-3 flex flex-wrap gap-2">
+    <CardComponent>
+      <template #header>
+        <div class="text-[14px] font-medium text-[var(--forebrain-danger)]">{{ t('projects.dangerTitle') }}</div>
+      </template>
+      <div class="flex flex-wrap gap-2">
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="toggleArchive">
           {{ project?.archivedAt ? t('projects.restore') : t('projects.archive') }}
         </button>
@@ -97,14 +103,16 @@
           {{ t('common.delete') }}
         </button>
       </div>
-      <p class="mt-2 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.deleteHint') }}</p>
-    </section>
+      <p class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.deleteHint') }}</p>
+    </CardComponent>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import CardComponent from '@/components/common/CardComponent.vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -198,16 +206,3 @@ async function removeProject() {
   }
 }
 </script>
-
-<style scoped>
-.scope-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--forebrain-brand-1);
-  color: var(--forebrain-on-brand);
-}
-</style>
