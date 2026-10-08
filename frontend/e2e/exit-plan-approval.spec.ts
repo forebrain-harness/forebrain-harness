@@ -11,6 +11,10 @@ import { signIn, shot } from './support'
  * gate, plus the review flow running live against the configured provider
  * (fake or real; the harness swaps the provider, not the flow).
  *
+ * A finished review is handed to the planner on both surfaces: the approval
+ * closes as the handoff and the timeline prints the line the terminal prints —
+ * it is not left on the card for a second decision.
+ *
  * The parked approval and its events are seeded straight into the gateway's
  * state database — the same shape a real plan-mode turn parks — because the
  * words a model writes cannot be scripted, and the states that matter here
@@ -166,7 +170,7 @@ test('a review in flight is an event away: the card says so and the reviewer has
   await shot(page, 'exit-plan-reviewer-view')
 })
 
-test('asking for a review runs it live and the answer comes back on the card', async ({ page }) => {
+test('asking for a review hands it to the planner: the card closes and the timeline says so', async ({ page }) => {
   test.info().setTimeout(240_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
@@ -193,14 +197,32 @@ test('asking for a review runs it live and the answer comes back on the card', a
 
   // The review runs as its own subagent on the conversation's timeline…
   await expect(page.locator('[data-testid="subagent-call-card"]').first()).toBeVisible({ timeout: 120_000 })
-  // …and its closing event is what returns the choices to the card, with the
-  // review above them.
-  await expect(card.filter({ hasText: '评审 ·' })).toBeVisible({ timeout: 180_000 })
-  await expect(page.locator('[data-testid="exit-plan-approve-clear"]')).toBeVisible()
-  await shot(page, 'exit-plan-approval-reviewed')
 
-  // Approving with the context cleared says so on the wire, and resolves the
-  // approval: the card leaves with it.
+  // …and a finished review is delivered, not shown for a second decision: the
+  // approval closes as the handoff, the line the terminal prints for it lands
+  // on the timeline, and the card the review was asked from leaves with it.
+  // (The revised plan comes back as a new approval of its own.)
+  const handoff = page.locator('[data-approval-id="act-e2e-exitplan-live"][data-approval-status="denied"]')
+  await expect(handoff).toContainText('Plan review delivered', { timeout: 180_000 })
+  await expect(handoff).toContainText('revising the plan')
+  await expect(card).toHaveCount(0, { timeout: 30_000 })
+  await shot(page, 'exit-plan-approval-delivered')
+})
+
+test('approving with the context cleared says so on the wire and closes the card', async ({ page }) => {
+  test.info().setTimeout(120_000)
+  await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
+  await signIn(page)
+
+  const created = await page.request.post('/api/chat/sessions', { data: {} })
+  expect(created.ok()).toBeTruthy()
+  const session = String((await created.json()).id)
+  parkExitPlan(session, 'approve')
+
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await expect(page.locator('[data-testid="exit-plan-approval"]')).toBeVisible()
+  await expect(page.locator('[data-testid="exit-plan-approve-clear"]')).toBeVisible()
+
   const approve = page.waitForRequest((req) => req.url().includes('/approve') && req.method() === 'POST')
   await page.locator('[data-testid="exit-plan-approve-clear"]').click()
   const approveBody = await (await approve).postDataJSON()
