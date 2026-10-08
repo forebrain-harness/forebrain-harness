@@ -4,7 +4,7 @@
       <div class="flex flex-wrap items-end justify-between gap-4">
         <div class="flex items-center gap-2">
           <h1 class="text-2xl font-medium text-[var(--forebrain-text)]">{{ t('settings.title') }}</h1>
-          <span class="scope-badge scope-badge--global" data-testid="scope-badge">{{ t('scope.global') }}</span>
+          <ScopeBadge type="global" :label="t('scope.global')" data-testid="scope-badge" />
         </div>
         <RouterLink
           to="/"
@@ -62,6 +62,7 @@ import MemorySwitchesTab from '@/components/settings/MemorySwitchesTab.vue'
 import PrimaryAgentsTab from '@/components/settings/PrimaryAgentsTab.vue'
 import RuntimeStatusTab from '@/components/settings/RuntimeStatusTab.vue'
 import SettingsSharedSkillsTab from '@/components/settings/SettingsSharedSkillsTab.vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { useI18n } from '@/locales'
 
 /**
@@ -134,17 +135,5 @@ watch(activeTab, (tab) => {
   background: var(--forebrain-brand-soft);
   color: var(--forebrain-brand-1);
   font-weight: 500;
-}
-.scope-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 500;
-}
-.scope-badge--global {
-  background: #101828;
-  color: #ffffff;
 }
 </style>

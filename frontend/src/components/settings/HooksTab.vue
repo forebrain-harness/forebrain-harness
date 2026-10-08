@@ -15,9 +15,11 @@
       <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
       <p v-if="notice" class="mb-4 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
 
-      <section class="mb-4 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-        <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('hooks.addTitle') }}</h2>
-        <div class="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <CardComponent class="mb-4">
+        <template #header>
+          <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('hooks.addTitle') }}</h2>
+        </template>
+        <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <select v-model="draft.event" class="forebrain-field">
             <option v-for="name in events" :key="name" :value="name">{{ name }}</option>
           </select>
@@ -25,12 +27,12 @@
             <option v-for="kind in knownTypes" :key="kind" :value="kind">{{ kind }}</option>
           </select>
         </div>
-        <input v-model="draft.matcher" :placeholder="t('hooks.matcherPlaceholder')" class="forebrain-field mt-2 w-full font-mono" />
-        <input v-model="draft.command" :placeholder="t('hooks.commandPlaceholder')" class="forebrain-field mt-2 w-full font-mono" />
-        <button type="button" class="forebrain-btn forebrain-btn-primary mt-2 h-9 px-4 text-[12px]" :disabled="!draft.event || !draft.command.trim()" @click="add">
+        <input v-model="draft.matcher" :placeholder="t('hooks.matcherPlaceholder')" class="forebrain-field w-full font-mono" />
+        <input v-model="draft.command" :placeholder="t('hooks.commandPlaceholder')" class="forebrain-field w-full font-mono" />
+        <button type="button" class="forebrain-btn forebrain-btn-primary h-9 px-4 text-[12px]" :disabled="!draft.event || !draft.command.trim()" @click="add">
           {{ t('hooks.add') }}
         </button>
-      </section>
+      </CardComponent>
 
       <div v-if="loading && !eventKeys.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <ul v-else-if="eventKeys.length" class="space-y-2">
@@ -64,6 +66,7 @@
  * load.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import { getErrorMessage, forebrainApi, type HooksSettingsRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 

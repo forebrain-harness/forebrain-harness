@@ -5,7 +5,7 @@
         <div>
           <div class="flex items-center gap-2">
             <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('providers.title') }}</h1>
-            <span class="scope-badge">{{ t('scope.agent') }}</span>
+            <ScopeBadge type="agent" :label="t('scope.agent')" />
           </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('providers.description') }}</p>
         </div>
@@ -119,6 +119,7 @@
  * only its masked tail says one exists.
  */
 import { onMounted, ref } from 'vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import ModelChipsInput from '@/components/providers/ModelChipsInput.vue'
 import { getErrorMessage, forebrainApi, type ProviderRecord } from '@/lib/api'
 import { useI18n } from '@/locales'

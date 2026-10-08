@@ -3,7 +3,10 @@
     <div class="mx-auto w-full max-w-3xl">
       <header class="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('permissions.title') }}</h1>
+          <div class="flex items-center gap-2">
+            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('permissions.title') }}</h1>
+            <ScopeBadge type="agent" :label="t('scope.agent')" />
+          </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('permissions.description') }}</p>
         </div>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="loadRules">
@@ -15,10 +18,12 @@
 
       <!-- Verify before you trust: ask the runtime what it would actually do
            with a given call, and see which rule decided it. -->
-      <section class="mb-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-        <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.verifyTitle') }}</h2>
-        <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.verifyDescription') }}</p>
-        <div class="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
+      <CardComponent class="mb-5">
+        <template #header>
+          <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.verifyTitle') }}</h2>
+        </template>
+        <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.verifyDescription') }}</p>
+        <div class="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
           <select
             v-model="probe.toolName"
             :aria-label="t('permissions.tool')"
@@ -42,14 +47,16 @@
           </button>
         </div>
         <PermissionExplainResult v-if="explain" :explain="explain" />
-      </section>
+      </CardComponent>
 
       <!-- Add a local rule: fixed choices are dropdowns; the pattern is the
            only free text. -->
-      <section class="mb-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-        <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.addRuleTitle') }}</h2>
-        <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.addRuleDescription') }}</p>
-        <div class="mt-3 grid gap-2 md:grid-cols-[130px_minmax(0,1fr)_minmax(0,1.4fr)_auto]">
+      <CardComponent class="mb-5">
+        <template #header>
+          <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.addRuleTitle') }}</h2>
+        </template>
+        <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.addRuleDescription') }}</p>
+        <div class="grid gap-2 md:grid-cols-[130px_minmax(0,1fr)_minmax(0,1.4fr)_auto]">
           <select v-model="ruleForm.behavior" class="forebrain-field text-[13px]" :aria-label="t('permissions.behavior')">
             <option value="allow">{{ t('permissions.allow') }}</option>
             <option value="deny">{{ t('permissions.deny') }}</option>
@@ -64,16 +71,18 @@
             {{ savingRule ? t('common.loading') : t('common.add') }}
           </button>
         </div>
-        <p v-if="ruleError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ ruleError }}</p>
-      </section>
+        <p v-if="ruleError" class="text-[12px] text-[var(--forebrain-danger)]">{{ ruleError }}</p>
+      </CardComponent>
 
-      <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.rulesTitle') }}</h2>
-          <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.mode') }}: {{ permissionModeLabel(mode) }}</span>
-        </div>
+      <CardComponent>
+        <template #header>
+          <div class="flex w-full flex-wrap items-center justify-between gap-2">
+            <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('permissions.rulesTitle') }}</h2>
+            <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.mode') }}: {{ permissionModeLabel(mode) }}</span>
+          </div>
+        </template>
         <div v-if="loading" class="py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-        <ul v-else-if="rules.length" class="mt-3 space-y-1">
+        <ul v-else-if="rules.length" class="space-y-1">
           <li
             v-for="(rule, idx) in rules"
             :key="`${rule.behavior}-${rule.toolName}-${rule.ruleContent}-${idx}`"
@@ -96,10 +105,10 @@
             </button>
           </li>
         </ul>
-        <p v-else class="mt-3 rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+        <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
           {{ t('common.empty') }}
         </p>
-      </section>
+      </CardComponent>
     </div>
   </div>
 </template>
@@ -112,6 +121,8 @@
  * part worth trusting.
  */
 import { onMounted, reactive, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import PermissionExplainResult from '@/components/permissions/PermissionExplainResult.vue'
 import { getErrorMessage, forebrainApi, type PermissionExplainResponse, type PermissionRuleRecord } from '@/lib/api'
 import { permissionBehaviorClass, permissionBehaviorLabel, permissionModeLabel } from '@/lib/permissionLabels'

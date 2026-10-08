@@ -3,7 +3,7 @@
     <div class="mx-auto w-full max-w-5xl">
       <div class="flex items-center gap-2">
         <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('rules.title') }}</h1>
-        <span class="scope-badge">{{ t('scope.agent') }}</span>
+        <ScopeBadge type="agent" :label="t('scope.agent')" />
       </div>
       <p class="mt-1 text-[13px] text-[var(--forebrain-text-2)]">{{ t('rules.agentDescription') }}</p>
       <div class="mt-4">
@@ -35,6 +35,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import RulesFileEditor from '@/components/rules/RulesFileEditor.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'
@@ -126,16 +127,3 @@ onMounted(async () => {
   }
 })
 </script>
-
-<style scoped>
-.scope-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--forebrain-brand-1);
-  color: var(--forebrain-on-brand);
-}
-</style>

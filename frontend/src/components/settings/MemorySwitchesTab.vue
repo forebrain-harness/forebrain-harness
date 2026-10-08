@@ -3,23 +3,22 @@
     <p v-if="error" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
     <p v-if="notice" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
 
-    <section class="mt-3 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
+    <CardComponent class="mt-3">
       <div class="space-y-4">
         <label v-for="row in switches" :key="row.key" class="flex items-start justify-between gap-4">
           <span class="min-w-0">
             <span class="block text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.title }}</span>
             <span class="mt-0.5 block text-[12px] text-[var(--forebrain-muted-text)]">{{ row.description }}</span>
           </span>
-          <input
-            type="checkbox"
-            class="mt-1 size-4 accent-[var(--forebrain-brand-1)]"
-            :checked="draft[row.key]"
+          <SwitchComponent
+            :model-value="draft[row.key]"
             :disabled="loading || saving"
-            @change="draft[row.key] = ($event.target as HTMLInputElement).checked"
+            class="mt-0.5"
+            @update:model-value="draft[row.key] = $event"
           />
         </label>
       </div>
-      <div class="mt-4 flex gap-2">
+      <div class="flex gap-2">
         <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!changed || saving" @click="saveSettings">
           {{ saving ? t('common.loading') : t('common.save') }}
         </button>
@@ -27,12 +26,14 @@
           {{ resetting ? t('common.loading') : t('memories.reset') }}
         </button>
       </div>
-    </section>
+    </CardComponent>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import forebrainApi, { type MemorySettings } from '@/lib/api'
 import { useI18n } from '@/locales'
 

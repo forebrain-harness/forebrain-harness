@@ -3,7 +3,10 @@
     <div class="mx-auto w-full max-w-3xl">
       <header class="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('tools.title') }}</h1>
+          <div class="flex items-center gap-2">
+            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('tools.title') }}</h1>
+            <ScopeBadge type="agent" :label="t('scope.agent')" />
+          </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('tools.description') }}</p>
         </div>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
@@ -76,6 +79,7 @@
  * with the safety flags the approval policy reads.
  */
 import { computed, onMounted, ref } from 'vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { getErrorMessage, forebrainApi, type ToolMetaRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 

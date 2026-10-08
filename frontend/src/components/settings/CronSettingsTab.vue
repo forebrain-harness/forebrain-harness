@@ -7,11 +7,13 @@
     >{{ errorText }}</p>
     <p v-if="notice" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
 
-    <section class="mt-3 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <p class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('cronSettings.retentionTitle') }}</p>
-      <p class="mt-0.5 text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('cronSettings.retentionDescription') }}</p>
+    <CardComponent class="mt-3">
+      <template #header>
+        <p class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('cronSettings.retentionTitle') }}</p>
+      </template>
+      <p class="text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('cronSettings.retentionDescription') }}</p>
 
-      <label class="mt-4 block">
+      <label class="block">
         <input
           v-model.number="draft"
           type="number"
@@ -27,7 +29,7 @@
         </span>
       </label>
 
-      <div class="mt-4 flex gap-2">
+      <div class="flex gap-2">
         <button
           type="button"
           class="forebrain-btn forebrain-btn-primary text-xs"
@@ -47,12 +49,13 @@
           {{ resetting ? t('common.loading') : t('cronSettings.reset') }}
         </button>
       </div>
-    </section>
+    </CardComponent>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import forebrainApi, { type CronSettings, GatewayHttpError, getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 

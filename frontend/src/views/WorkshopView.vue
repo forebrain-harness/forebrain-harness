@@ -2,7 +2,7 @@
   <div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--forebrain-bg)]">
     <div class="flex items-center gap-2 border-b border-[var(--forebrain-divider)] px-4 py-3">
       <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('workshop.title') }}</h1>
-      <span class="scope-badge">{{ t('scope.agent') }}</span>
+      <ScopeBadge type="agent" :label="t('scope.agent')" />
       <div class="ml-auto flex gap-2">
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="newTaskOpen = true" data-testid="workshop-new-task">
           {{ t('workshop.newTask') }}
@@ -149,6 +149,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { MessageResponse } from '@repo/elements/message'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import PendingActionsPanel from '@/components/chat/PendingActionsPanel.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'

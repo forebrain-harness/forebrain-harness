@@ -136,16 +136,18 @@
         {{ t('mcp.empty') }}
       </p>
 
-      <section
+      <CardComponent
         v-if="projectStatus && (projectStatus.overriddenGlobal?.length || projectStatus.notApplied?.length || projectStatus.pendingReload)"
-        class="mt-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4"
+        class="mt-5"
       >
-        <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('mcp.projectSection') }}</h2>
-        <p v-if="projectStatus.pendingReload" class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">{{ t('mcp.pendingReload') }}</p>
-        <p v-if="projectStatus.overriddenGlobal?.length" class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">
+        <template #header>
+          <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('mcp.projectSection') }}</h2>
+        </template>
+        <p v-if="projectStatus.pendingReload" class="text-[12px] text-[var(--forebrain-text-2)]">{{ t('mcp.pendingReload') }}</p>
+        <p v-if="projectStatus.overriddenGlobal?.length" class="text-[12px] text-[var(--forebrain-text-2)]">
           {{ t('projects.mcpOverridden', { names: projectStatus.overriddenGlobal.join(', ') }) }}
         </p>
-        <div v-if="projectStatus.notApplied?.length" class="mt-2">
+        <div v-if="projectStatus.notApplied?.length">
           <p class="text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpNotAppliedTitle') }}</p>
           <ul class="mt-1 space-y-0.5">
             <li v-for="row in projectStatus.notApplied" :key="row.name" class="text-[11px] text-[var(--forebrain-text-2)]">
@@ -154,7 +156,7 @@
             </li>
           </ul>
         </div>
-      </section>
+      </CardComponent>
     </div>
   </div>
 </template>
@@ -167,6 +169,7 @@
  * running list say why, in one line.
  */
 import { onMounted, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import {
   getErrorMessage,
   mcpSetServerDisabled,

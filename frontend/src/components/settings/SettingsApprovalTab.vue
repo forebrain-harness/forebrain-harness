@@ -1,10 +1,12 @@
 <template>
   <div class="pb-6">
-    <div class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('approval.title') }}</div>
-      <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.description') }}</p>
+    <CardComponent>
+      <template #header>
+        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('approval.title') }}</div>
+      </template>
+      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.description') }}</p>
 
-      <div class="mt-4 space-y-2">
+      <div class="space-y-2">
         <button
           v-for="preset in presets"
           :key="preset.id"
@@ -24,15 +26,16 @@
         </button>
       </div>
 
-      <p v-if="current === null && loaded" class="mt-3 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.custom') }}</p>
-      <p v-if="error" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-if="notice" class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
-    </div>
+      <p v-if="current === null && loaded" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.custom') }}</p>
+      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="notice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
+    </CardComponent>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'
 

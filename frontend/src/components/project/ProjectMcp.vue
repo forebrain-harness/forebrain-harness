@@ -1,22 +1,24 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-5">
-    <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.mcpTitle') }}</div>
-          <span class="scope-badge">{{ t('scope.project') }}</span>
+    <CardComponent>
+      <template #header>
+        <div class="flex w-full flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.mcpTitle') }}</div>
+            <ScopeBadge type="project" :label="t('scope.project')" />
+          </div>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+            {{ loading ? t('common.loading') : t('common.refresh') }}
+          </button>
         </div>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ loading ? t('common.loading') : t('common.refresh') }}
-        </button>
-      </div>
-      <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpDescription') }}</p>
+      </template>
+      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpDescription') }}</p>
 
-      <p v-if="error" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <!-- Trust gate: until the project is trusted, nothing from its directory
            loads — the button is the gate, exactly as the terminal's. -->
-      <div v-if="!trusted" class="mt-4 rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
+      <div v-if="!trusted" class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
         <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
         <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
         <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
@@ -44,12 +46,12 @@
           </ul>
         </div>
 
-        <div v-if="!records.pendingConsent.length && !records.servers.length && !records.notApplied.length" class="mt-6 rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center">
+        <div v-if="!records.pendingConsent.length && !records.servers.length && !records.notApplied.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center">
           <p class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpEmpty') }}</p>
           <p class="mt-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpAddHint') }}</p>
         </div>
 
-        <ul v-if="records.servers.length" class="mt-4 space-y-2">
+        <ul v-if="records.servers.length" class="space-y-2">
           <li v-for="server in records.servers" :key="server.name" class="flex items-center justify-between gap-3 rounded-xl border border-[var(--forebrain-divider)] px-4 py-3">
             <div class="min-w-0">
               <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ server.name }}</div>
@@ -58,7 +60,7 @@
           </li>
         </ul>
 
-        <div v-if="records.notApplied.length" class="mt-4">
+        <div v-if="records.notApplied.length">
           <div class="text-[12px] font-medium text-[var(--forebrain-text-2)]">{{ t('projects.mcpNotAppliedTitle') }}</div>
           <ul class="mt-2 space-y-1">
             <li v-for="item in records.notApplied" :key="item.name" class="text-[12px] text-[var(--forebrain-muted-text)]">
@@ -67,14 +69,16 @@
           </ul>
         </div>
 
-        <p class="mt-4 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpAddHint') }}</p>
+        <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.mcpAddHint') }}</p>
       </template>
-    </section>
+    </CardComponent>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { getErrorMessage, forebrainApi, type ProjectMcpRecord, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -149,16 +153,3 @@ onMounted(() => {
   void load()
 })
 </script>
-
-<style scoped>
-.scope-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 9999px;
-  padding: 2px 10px;
-  font-size: 11px;
-  font-weight: 500;
-  background: var(--forebrain-brand-1);
-  color: var(--forebrain-on-brand);
-}
-</style>

@@ -1,10 +1,11 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-5">
-    <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+    <CardComponent>
+      <template #header>
+        <div class="flex w-full flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2">
           <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('skills.projectTitle') }}</div>
-          <span class="scope-badge">{{ t('scope.project') }}</span>
+          <ScopeBadge type="project" :label="t('scope.project')" />
         </div>
         <div class="flex flex-wrap gap-2">
           <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="project-skills-online-install" @click="onlineOpen = true">
@@ -17,14 +18,15 @@
             {{ loading ? t('common.loading') : t('common.refresh') }}
           </button>
         </div>
-      </div>
-      <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.projectDescription') }}</p>
+        </div>
+      </template>
+      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.projectDescription') }}</p>
 
-      <p v-if="error" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <!-- Trust gate: until the project is trusted, none of its skills load —
            the same gate the terminal applies. -->
-      <div v-if="!trusted" class="mt-4 rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
+      <div v-if="!trusted" class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
         <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
         <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
         <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
@@ -32,7 +34,7 @@
         </button>
       </div>
 
-      <div v-else class="mt-4">
+      <div v-else>
         <SkillsTable
           :rows="rows"
           :loading="loading"
@@ -45,7 +47,7 @@
           @batch-download="onBatchDownload"
         />
       </div>
-    </section>
+    </CardComponent>
 
     <InstallDialogs
       v-model:online="onlineOpen"
@@ -77,6 +79,8 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
 import forebrainApi, {

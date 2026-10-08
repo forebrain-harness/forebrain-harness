@@ -3,7 +3,10 @@
     <div class="mx-auto w-full max-w-3xl">
       <header class="mb-5 flex items-end justify-between gap-4">
         <div>
-          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('channels.title') }}</h1>
+          <div class="flex items-center gap-2">
+            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('channels.title') }}</h1>
+            <ScopeBadge type="agent" :label="t('scope.agent')" />
+          </div>
           <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('channels.description') }}</p>
         </div>
         <div class="flex gap-2">
@@ -23,7 +26,7 @@
             <span class="font-mono text-[13px] text-[var(--forebrain-text)]">{{ entry.key }}</span>
             <label class="flex items-center gap-2 text-[12px] text-[var(--forebrain-text-2)]">
               {{ t('channels.enabled') }}
-              <input type="checkbox" class="h-4 w-4 accent-[var(--forebrain-brand-1)]" :checked="isEnabled(entry.key)" @change="setEnabled(entry.key, ($event.target as HTMLInputElement).checked)" />
+              <SwitchComponent :model-value="isEnabled(entry.key)" @update:model-value="setEnabled(entry.key, $event)" />
             </label>
           </div>
           <div class="mt-2 grid gap-2 sm:grid-cols-2">
@@ -53,6 +56,8 @@
  * already on disk; typing over it replaces that value.
  */
 import { computed, onMounted, ref } from 'vue'
+import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'
 

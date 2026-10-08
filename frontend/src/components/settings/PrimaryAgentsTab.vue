@@ -4,11 +4,11 @@
 
     <!-- The list: every primary agent of this install. Switching happens in
          the rail's selector only — this page manages definitions. -->
-    <section
+    <CardComponent
       v-for="agent in records"
       :key="agent.id"
-      class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4"
-      :class="{ 'border-[var(--forebrain-brand-border)]': agent.active }"
+      data-testid="agent-card"
+      :style="agent.active ? { '--forebrain-card-border': 'var(--forebrain-brand-border)' } : undefined"
     >
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0">
@@ -34,14 +34,16 @@
           >{{ t('common.delete') }}</button>
         </div>
       </div>
-    </section>
+    </CardComponent>
 
     <!-- Create / edit form -->
-    <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-      <div class="text-[14px] font-medium text-[var(--forebrain-text)]">
-        {{ editing ? t('agents.editTitle', { id: editing }) : t('agents.createTitle') }}
-      </div>
-      <div class="mt-3 grid gap-3 md:grid-cols-2">
+    <CardComponent data-testid="agent-form">
+      <template #header>
+        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">
+          {{ editing ? t('agents.editTitle', { id: editing }) : t('agents.createTitle') }}
+        </div>
+      </template>
+      <div class="grid gap-3 md:grid-cols-2">
         <label class="block">
           <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('agents.idLabel') }}</span>
           <input
@@ -61,19 +63,20 @@
           <textarea v-model="form.description" rows="2" class="forebrain-field mt-1 w-full" :placeholder="t('agents.descriptionPlaceholder')" />
         </label>
       </div>
-      <p v-if="formError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ formError }}</p>
-      <div class="mt-3 flex gap-2">
+      <p v-if="formError" class="text-[12px] text-[var(--forebrain-danger)]">{{ formError }}</p>
+      <div class="flex gap-2">
         <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="busy || !formValid" @click="submit">
           {{ editing ? t('common.save') : t('common.create') }}
         </button>
         <button v-if="editing" type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="cancelEdit">{{ t('common.cancel') }}</button>
       </div>
-    </section>
+    </CardComponent>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import { getErrorMessage, forebrainApi, type PrimaryAgentRecord } from '@/lib/api'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { useI18n } from '@/locales'
