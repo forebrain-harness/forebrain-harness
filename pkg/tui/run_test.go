@@ -5202,6 +5202,42 @@ func TestDraftsBelongToTheirViews(t *testing.T) {
 	}
 }
 
+// Opening a subagent's view mid-execution must keep the live per-response
+// budget the view already received: the seed reads persisted occupancy,
+// which stays empty until the execution finishes, so seeding over a live
+// gauge repaints the footer as a stale "100%" (SUBAGENT_FOOTER_BUDGET_STOMP).
+func TestOpeningASubagentViewKeepsTheLiveBudgetItAlreadyReceived(t *testing.T) {
+	session := &fakeSession{subagentTokenStats: ComposerTokenStats{Active: true, PercentLeft: 100, ContextWindow: 1_050_000}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	renderer.SetComposerTokenStats("task-b", ComposerTokenStats{Active: true, PercentLeft: 72, ContextWindow: 1_050_000})
+	state := &streamState{sessionID: "conv", session: session}
+
+	renderer.SetActiveView("task-b")
+	state.syncComposerToView(renderer)
+	if got := renderer.ComposerTokenStats("task-b"); got.PercentLeft != 72 {
+		t.Fatalf("subagent gauge = %d%%, want the live 72%%", got.PercentLeft)
+	}
+}
+
+// A view with no gauge yet (first open in this process, or a finished
+// subagent's history) still seeds from the persisted occupancy.
+func TestOpeningASubagentViewWithoutALiveBudgetSeedsPersistedStats(t *testing.T) {
+	session := &fakeSession{subagentTokenStats: ComposerTokenStats{Active: true, PercentLeft: 40, ContextWindow: 128_000}}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
+	state := &streamState{sessionID: "conv", session: session}
+
+	renderer.SetActiveView("task-b")
+	state.syncComposerToView(renderer)
+	got := renderer.ComposerTokenStats("task-b")
+	if got.PercentLeft != 40 || got.ContextWindow != 128_000 {
+		t.Fatalf("subagent gauge = %d%%/%d, want the seeded 40%%/128000", got.PercentLeft, got.ContextWindow)
+	}
+}
+
 // Esc in a subagent's view takes back the message it just started, before the
 // subagent has answered (D1 step 1). It does not leave the view.
 func TestEscInASubagentViewWithdrawsTheMessageItJustStarted(t *testing.T) {

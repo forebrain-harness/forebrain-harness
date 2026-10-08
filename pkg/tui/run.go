@@ -2145,9 +2145,14 @@ func (s *streamState) syncComposerToView(renderer *Renderer) {
 	s.composerView = view
 	s.composer.SubagentView = view != ""
 	if view != "" {
-		// Each subagent's view shows that subagent's own context window; the
-		// engine computes it from the subagent's worker session and model.
-		renderer.SetComposerTokenStats(view, s.session.SubagentComposerTokenStats(s.sessionID, view))
+		// A live per-response gauge may have arrived before the user opened
+		// this view; the persisted occupancy the seed reads stays empty until
+		// the execution finishes appending its rows, so seeding over a live
+		// gauge repaints a mid-flight view as a fresh "100%". Seed only when
+		// the view has no gauge yet.
+		if !renderer.ComposerTokenStats(view).Active {
+			renderer.SetComposerTokenStats(view, s.session.SubagentComposerTokenStats(s.sessionID, view))
+		}
 	}
 }
 
