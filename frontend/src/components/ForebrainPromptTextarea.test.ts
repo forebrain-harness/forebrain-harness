@@ -21,7 +21,7 @@ describe('ForebrainPromptTextarea', () => {
   })
   afterAll(() => setLocale('en'))
 
-  function mountComposer() {
+  function mountComposer(props: Record<string, unknown> = {}) {
     let context!: PromptInputContext
     const Probe = defineComponent({
       setup() {
@@ -31,7 +31,7 @@ describe('ForebrainPromptTextarea', () => {
     })
     const wrapper = mount(PromptInputProvider, {
       props: { maxFiles: 5, accept: 'image/*,application/pdf' },
-      slots: { default: () => [h(ForebrainPromptTextarea), h(Probe)] },
+      slots: { default: () => [h(ForebrainPromptTextarea, props), h(Probe)] },
     })
     const composer = wrapper.findComponent(ForebrainPromptTextarea)
     return { wrapper, composer, context: () => context }
@@ -159,5 +159,15 @@ describe('ForebrainPromptTextarea', () => {
     await textarea.trigger('keydown', { key: 'Escape' })
     expect(composer.emitted('escape')).toHaveLength(1)
     expect(composer.emitted('interrupt-run')).toBeUndefined()
+  })
+
+  it('recalls the newest queued message on Shift+← whenever the queue shows one', async () => {
+    const shown = mountComposer({ queueVisible: true })
+    await shown.composer.find('textarea').trigger('keydown', { key: 'ArrowLeft', shiftKey: true })
+    expect(shown.composer.emitted('edit-last-queued')).toHaveLength(1)
+
+    const empty = mountComposer()
+    await empty.composer.find('textarea').trigger('keydown', { key: 'ArrowLeft', shiftKey: true })
+    expect(empty.composer.emitted('edit-last-queued')).toBeUndefined()
   })
 })

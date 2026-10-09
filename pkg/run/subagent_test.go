@@ -4956,6 +4956,94 @@ func TestSubagentViewQueueQuestionsAnswerFromTheLiveChannel(t *testing.T) {
 	waitSubagentIdle(t, owner, conv, "task-live")
 }
 
+// A surface that does not read a subagent's queue on every paint — the web —
+// must hear of every change to it, or its view keeps showing a message the
+// model already has, or one the queue settled, as still queued and recallable.
+func TestSubagentQueueChangesReachTheSurface(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	owner.Events = &channelEventProbe{}
+	release := make(chan struct{})
+	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
+	var mu sync.Mutex
+	var previews []QueuePreview
+	boundary := make(chan struct{}, 1)
+	surface := SubagentSurface{
+		OnBoundary: func(string, []Input, []Input) { boundary <- struct{}{} },
+		OnQueueChanged: func(agentKey string, preview QueuePreview) {
+			if agentKey != "task-hook" {
+				t.Errorf("OnQueueChanged key = %q, want the roster key", agentKey)
+			}
+			mu.Lock()
+			previews = append(previews, preview)
+			mu.Unlock()
+		},
+	}
+	last := func() QueuePreview {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(previews) == 0 {
+			return QueuePreview{}
+		}
+		return previews[len(previews)-1]
+	}
+	conv := "conv-queue-hook"
+	worker := "main:conv-queue-hook:worker:00000000-0000-0000-0000-0000000005bb"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-hook", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	send := func(text string, mode TurnInputMode, want SubagentDelivery) {
+		t.Helper()
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-hook", Input{Text: text}, mode); err != nil || got != want {
+			t.Fatalf("send %q = %q, %v; want %q", text, got, err, want)
+		}
+	}
+	send("start", TurnInputModeSteer, SubagentDeliveryStarted)
+	waitSubagentBusy(t, owner, conv, "task-hook")
+	send("one", TurnInputModeSteer, SubagentDeliverySteered)
+	send("two", TurnInputModeSteer, SubagentDeliverySteered)
+	if got := strings.Join(last().Steers, ","); got != "one,two" {
+		t.Fatalf("surface preview steers = %q, want one,two", got)
+	}
+
+	// The model takes both steers and begins answering: the view must drop them.
+	delivery := owner.Control.SessionQueue(worker).Runtime().BeginSteerDelivery(context.Background())
+	if delivery == nil || !delivery.Commit() {
+		t.Fatal("expected the running execution to take the steers")
+	}
+	if p := last(); len(p.Steers) != 0 {
+		t.Fatalf("after delivery the surface still shows %v as queued", p.Steers)
+	}
+
+	send("later", TurnInputModeFollowUp, SubagentDeliveryQueued)
+	if got := strings.Join(last().FollowUp, ","); got != "later" {
+		t.Fatalf("surface preview follow-ups = %q, want later", got)
+	}
+	if in, ok := RecallSubagentInput(owner, conv, "task-hook"); !ok || in.Text != "later" {
+		t.Fatalf("RecallSubagentInput = %+v, %v; want later", in, ok)
+	}
+	if p := last(); p.Visible() {
+		t.Fatalf("after recall the surface still shows %+v", p)
+	}
+
+	// A follow-up the execution's end settles leaves the view as well.
+	send("after", TurnInputModeFollowUp, SubagentDeliveryQueued)
+	close(release)
+	select {
+	case <-boundary:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the execution never reached its boundary")
+	}
+	if p := last(); p.Visible() {
+		t.Fatalf("after the execution ended the surface still shows %+v", p)
+	}
+	waitSubagentIdle(t, owner, conv, "task-hook")
+}
+
 // TestWithdrawBeforeTheSubagentAnswers pins Esc's first meaning (D1): a message
 // the user just sent a subagent can be taken back before its model answers —
 // the worker row is hidden and no result is written — but not after. The

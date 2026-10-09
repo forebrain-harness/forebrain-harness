@@ -1440,7 +1440,8 @@ type PlanReviewRun struct {
 	// run row is a child of the latter.
 	SessionID string
 	RunID     string
-	// StateRoot and ProjectKey resolve the plan file the approval is holding.
+	// StateRoot and ProjectKey, together with SessionID, resolve the plan
+	// file the approval is holding.
 	StateRoot  string
 	ProjectKey string
 	// Transcripts supplies the reviewer's task context.
@@ -1502,7 +1503,7 @@ func RunPlanReview(ctx context.Context, in PlanReviewRun) error {
 		publish(event.NewRunEvent("plan-review:"+reviewID+":reviewed", runID, sessionID,
 			event.RunEventPlanReviewed, reviewed, time.Now()))
 	}
-	plan, err := state.GetPlanForProject(strings.TrimSpace(in.StateRoot), strings.TrimSpace(in.ProjectKey))
+	plan, err := state.GetPlanForSession(strings.TrimSpace(in.StateRoot), strings.TrimSpace(in.ProjectKey), sessionID)
 	if err != nil {
 		finish(planReviewOutcomeOf(err), err, "", 0)
 		return err
@@ -1573,7 +1574,8 @@ type PendingApprovalGate struct {
 	// holding in memory. Nil, or returning "", falls back to the store.
 	RunIDHint func() string
 	// PlanScope resolves the state root and project key the session's plan
-	// file lives under. Nil leaves PlanFilePath unset, which is what a surface
+	// file lives under; the gate adds the session id to derive that session's
+	// own plan. Nil leaves PlanFilePath unset, which is what a surface
 	// without a plan scope wants.
 	PlanScope func(ctx context.Context, sessionID string) (stateRoot, projectKey string)
 	// ReviewModels lists the models a pending exit-plan approval may be handed
@@ -1666,7 +1668,7 @@ func (g *PendingApprovalGate) Pending(ctx context.Context, sessionID string) (*T
 	if strings.EqualFold(toolName, "enter_plan_mode") || strings.EqualFold(toolName, "exit_plan_mode") {
 		if g.PlanScope != nil {
 			if stateRoot, projectKey := g.PlanScope(ctx, sessionID); strings.TrimSpace(stateRoot) != "" {
-				req.PlanFilePath = state.PlanPathForProject(stateRoot, projectKey)
+				req.PlanFilePath = state.PlanPathForSession(stateRoot, projectKey, sessionID)
 			}
 		}
 	}

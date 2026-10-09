@@ -410,7 +410,7 @@ func execPlan(ctx Context, line string, toks []string) Result {
 				Phase:       "plan",
 			}
 		}
-		p, err := state.GetPlanForProject(ctx.stateRoot(), ctx.projectKey())
+		p, err := state.GetPlanForSession(ctx.stateRoot(), ctx.projectKey(), ctx.SessionID)
 		if err != nil {
 			return Result{Handled: true, Reply: "Could not read the plan: " + err.Error()}
 		}
@@ -961,12 +961,10 @@ func currentSessionTitle(ctx Context, sessionID string) string {
 
 func copySlashSessionState(ctx Context, sourceSessionID, targetSessionID string) error {
 	stateRoot := ctx.stateRoot()
-	if plan, err := state.GetPlanForProject(stateRoot, ctx.projectKey()); err != nil {
+	// A fork starts with the plans its source had; each conversation then
+	// works in its own plan directory.
+	if err := state.CopySessionPlans(stateRoot, ctx.projectKey(), sourceSessionID, targetSessionID); err != nil {
 		return err
-	} else if strings.TrimSpace(plan) != "" {
-		if err := state.SetPlanForProject(stateRoot, ctx.projectKey(), plan); err != nil {
-			return err
-		}
 	}
 	if todos, err := state.Load(stateRoot, sourceSessionID); err != nil {
 		return err

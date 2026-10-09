@@ -743,10 +743,11 @@ func TestAgentPermissionEndpointsLeaveTheLaunchProjectOut(t *testing.T) {
 	require.NotEqual(t, safety.BehaviorDeny, ex.Decision.Behavior, rr.Body.String())
 }
 
-// Plan files live in <stateRoot>/plans/<projectKey>, and the plan-mode
-// reminder tells the model that exact directory. A gateway context wired with a
-// different key (it used to hardcode the project-less one) permits writes to
-// another directory, so every plan write the model attempts is rejected.
+// Plan files live in <stateRoot>/plans/<projectKey>/<sessionID>, and the
+// plan-mode reminder tells the model that exact directory. A gateway context
+// wired with a different key (it used to hardcode the project-less one)
+// permits writes to another directory, so every plan write the model attempts
+// is rejected.
 func TestGatewayPlanContextMatchesAdvertisedPlanDir(t *testing.T) {
 	home := t.TempDir()
 	sid := "sid-gateway-plan"
@@ -762,7 +763,7 @@ func TestGatewayPlanContextMatchesAdvertisedPlanDir(t *testing.T) {
 	}
 
 	ctx := process.AgentContextForProject(context.Background(), stateRoot, sid, s.projectKey())
-	want := state.PlanDirForProject(stateRoot, s.projectKey())
+	want := state.PlanDirForSession(stateRoot, s.projectKey(), sid)
 	if got := tool.AllowedPlanPathFromContext(ctx); got != want {
 		t.Fatalf("allowed plan path=%q, want the advertised plan dir %q", got, want)
 	}

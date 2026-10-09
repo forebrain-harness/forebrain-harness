@@ -478,7 +478,7 @@ func TestAgentContextDefaults(t *testing.T) {
 	}
 	// The plan directory is writable in every mode: after leaving plan mode the
 	// agent still has to record the plan's implementation status in it.
-	if want := state.PlanDirForProject(root, ""); tool.AllowedPlanPathFromContext(ctx) != want {
+	if want := state.PlanDirForSession(root, "", "default"); tool.AllowedPlanPathFromContext(ctx) != want {
 		t.Fatalf("plan path=%q want=%q", tool.AllowedPlanPathFromContext(ctx), want)
 	}
 	if got := llm.PromptCacheKeyFromContext(ctx); got != "default" {
@@ -503,8 +503,37 @@ func TestAgentContextPlanMode(t *testing.T) {
 	if got := tool.ModeFromContext(ctx); got != string(state.ModePlan) {
 		t.Fatalf("mode=%q", got)
 	}
-	if got, want := tool.AllowedPlanPathFromContext(ctx), state.PlanDirForProject(home, ""); got != want {
+	if got, want := tool.AllowedPlanPathFromContext(ctx), state.PlanDirForSession(home, "", "sid"); got != want {
 		t.Fatalf("plan path=%q want=%q", got, want)
+	}
+}
+
+// TestAgentContextPlanDirFollowsTheConversation pins the subagent rule: the
+// allowed plan directory follows the user-visible conversation, not the
+// subagent's worker session id — a worker inheriting plan mode writes into its
+// parent conversation's plan directory, where the parent's exit_plan_mode (and
+// only the parent's) resolves it. The segment is asserted literally so a
+// regression to project-scoped resolution (no session segment at all) fails
+// this test rather than collapsing both sides of an equality.
+func TestAgentContextPlanDirFollowsTheConversation(t *testing.T) {
+	root := t.TempDir()
+	base := tool.WithConversationSessionID(context.Background(), "conv-1")
+	ctx := AgentContext(base, root, "worker-1")
+	got := tool.AllowedPlanPathFromContext(ctx)
+	if filepath.Base(got) != "conv-1" || filepath.Dir(got) != state.PlanDirForProject(root, "") {
+		t.Fatalf("plan path=%q, want the conversation's own directory %q (base conv-1)", got, state.PlanDirForSession(root, "", "conv-1"))
+	}
+	if want := state.PlanDirForSession(root, "", "conv-1"); got != want {
+		t.Fatalf("plan path=%q want %q", got, want)
+	}
+	// Without a conversation id the session itself names the directory.
+	plain := AgentContext(context.Background(), root, "s2")
+	got = tool.AllowedPlanPathFromContext(plain)
+	if filepath.Base(got) != "s2" || filepath.Dir(got) != state.PlanDirForProject(root, "") {
+		t.Fatalf("plan path=%q, want the session's own directory (base s2)", got)
+	}
+	if want := state.PlanDirForSession(root, "", "s2"); got != want {
+		t.Fatalf("plan path=%q want %q", got, want)
 	}
 }
 
@@ -575,11 +604,11 @@ func TestAgentContextIsolatesTwoAgents(t *testing.T) {
 	}
 
 	// Plan paths are rooted in each agent's own state root.
-	wantMainPlan := state.PlanDirForProject(mainRoot, "")
+	wantMainPlan := state.PlanDirForSession(mainRoot, "", "sid")
 	if got := tool.AllowedPlanPathFromContext(mainCtx); got != wantMainPlan {
 		t.Fatalf("main plan path=%q want=%q", got, wantMainPlan)
 	}
-	wantReviewPlan := state.PlanDirForProject(reviewRoot, "")
+	wantReviewPlan := state.PlanDirForSession(reviewRoot, "", "sid")
 	if got := tool.AllowedPlanPathFromContext(reviewCtx); got != wantReviewPlan {
 		t.Fatalf("review plan path=%q want=%q", got, wantReviewPlan)
 	}

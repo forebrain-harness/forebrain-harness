@@ -27,8 +27,12 @@ type TurnInputEntry struct {
 }
 
 type TurnInputRuntime struct {
-	mu       sync.Mutex
-	pending  []TurnInputEntry
+	mu      sync.Mutex
+	pending []TurnInputEntry
+	// inflight are the deliveries taken for a model call that have not settled.
+	// A steer in one of them has left pending but is still the user's to take
+	// back until its call commits (see RetractSteer).
+	inflight []*SteerDelivery
 	onChange []func(delivered []TurnInputEntry)
 }
 
@@ -68,8 +72,12 @@ func (r *TurnInputRuntime) takeSteers(ctx context.Context) []TurnInputEntry {
 		return nil
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.takeSteersLocked(ctx)
+}
+
+func (r *TurnInputRuntime) takeSteersLocked(ctx context.Context) []TurnInputEntry {
 	if len(r.pending) == 0 || (ctx != nil && ctx.Err() != nil) {
-		r.mu.Unlock()
 		return nil
 	}
 	out := make([]TurnInputEntry, 0, len(r.pending))
@@ -86,7 +94,6 @@ func (r *TurnInputRuntime) takeSteers(ctx context.Context) []TurnInputEntry {
 		rest = append(rest, entry)
 	}
 	r.pending = rest
-	r.mu.Unlock()
 	return out
 }
 
@@ -104,24 +111,11 @@ func (r *TurnInputRuntime) notifyDelivered(delivered []TurnInputEntry) {
 	}
 }
 
-// restoreSteers puts entries back at the head of the queue. Steers are drained
-// FIFO, so entries that came out first must go back in first for the next drain
-// to hand the model the same order the user typed.
-func (r *TurnInputRuntime) restoreSteers(entries []TurnInputEntry) {
-	if r == nil || len(entries) == 0 {
-		return
-	}
-	r.mu.Lock()
-	restored := make([]TurnInputEntry, 0, len(entries)+len(r.pending))
-	restored = append(restored, entries...)
-	restored = append(restored, r.pending...)
-	r.pending = restored
-	r.mu.Unlock()
-}
-
 // SteerDelivery is one in-flight handoff of queued steers to the model. The
-// entries have left the queue - they cannot be retracted while a model call is
-// carrying them - but they are not reported as delivered until Commit.
+// entries have left the runtime's pending list, but they are not reported as
+// delivered until Commit — and until then the user can still take one back
+// (see TurnInputRuntime.RetractSteer): the call carrying it is abandoned and
+// the orchestration loop sends what is left without it.
 //
 // Delivery is not settled by the drain itself. The orchestration loop drains at
 // a tool boundary, appends the entries to the session, and only then makes the
@@ -132,11 +126,16 @@ func (r *TurnInputRuntime) restoreSteers(entries []TurnInputEntry) {
 // transcript as a sent user message - and then nothing answers it and no turn
 // boundary resubmits it. The first model-output event commits delivery; failure
 // before that boundary rolls it back.
+//
+// A delivery's state lives under its runtime's lock, so a steer is always in
+// exactly one place — pending, or an unsettled delivery — and a retraction
+// can never slip between the two.
 type SteerDelivery struct {
-	rt      *TurnInputRuntime
-	entries []TurnInputEntry
-	mu      sync.Mutex
-	settled bool
+	rt        *TurnInputRuntime
+	entries   []TurnInputEntry
+	settled   bool
+	retracted bool   // the user took a steer back out before the call settled
+	abort     func() // abandons the model call carrying the delivery
 }
 
 // BeginSteerDelivery takes the queued steers for a model call that is about to
@@ -154,79 +153,157 @@ type SteerDelivery struct {
 // call observes the cancellation - so skipping the take avoids churning the
 // queue on a turn that is already over.
 func (r *TurnInputRuntime) BeginSteerDelivery(ctx context.Context) *SteerDelivery {
-	entries := r.takeSteers(ctx)
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries := r.takeSteersLocked(ctx)
 	if len(entries) == 0 {
 		return nil
 	}
-	return &SteerDelivery{rt: r, entries: entries}
+	d := &SteerDelivery{rt: r, entries: entries}
+	r.inflight = append(r.inflight, d)
+	return d
 }
 
-// Entries returns the steers this delivery is carrying.
+// Entries returns the steers this delivery is still carrying: a copy, since a
+// retraction can shrink the delivery while its call is in flight.
 func (d *SteerDelivery) Entries() []TurnInputEntry {
 	if d == nil {
 		return nil
 	}
-	return d.entries
+	d.rt.mu.Lock()
+	defer d.rt.mu.Unlock()
+	return append([]TurnInputEntry(nil), d.entries...)
 }
 
 // Commit reports the entries as delivered. It is called before the first model
 // output event is forwarded, or after a successful non-streaming
 // call. It returns true only for the transition that committed the delivery.
+// A delivery a steer was retracted from cannot commit: the call carrying it is
+// being abandoned whatever it returns, and the loop re-sends the rest.
 func (d *SteerDelivery) Commit() bool {
 	if d == nil {
 		return false
 	}
-	d.mu.Lock()
-	if d.settled {
-		d.mu.Unlock()
+	r := d.rt
+	r.mu.Lock()
+	if d.settled || d.retracted {
+		r.mu.Unlock()
 		return false
 	}
 	d.settled = true
-	d.mu.Unlock()
-	d.rt.notifyDelivered(d.entries)
+	r.forgetDeliveryLocked(d)
+	entries := d.entries
+	r.mu.Unlock()
+	r.notifyDelivered(entries)
 	return true
 }
 
 // Rollback returns the entries to the queue because the call that was to carry
-// them failed before establishing delivery. No change hook fires: the surface
-// was never told they left the queue, so its mirror still holds them and the
-// turn boundary resubmits them from there. It returns true only when this call
-// won the settlement and actually restored the entries.
+// them failed before establishing delivery, or was abandoned because the user
+// retracted one of them. No change hook fires: the surface was never told they
+// left the queue, so its mirror still holds them and the turn boundary — or the
+// loop's re-send — takes them from there. It returns true only when this call
+// won the settlement, even when a retraction left nothing to restore.
+//
+// Steers are drained FIFO, so entries that came out first must go back in
+// first for the next drain to hand the model the same order the user typed.
 func (d *SteerDelivery) Rollback() bool {
 	if d == nil {
 		return false
 	}
-	d.mu.Lock()
+	r := d.rt
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if d.settled {
-		d.mu.Unlock()
 		return false
 	}
 	d.settled = true
-	d.mu.Unlock()
-	d.rt.restoreSteers(d.entries)
+	r.forgetDeliveryLocked(d)
+	if len(d.entries) > 0 {
+		restored := make([]TurnInputEntry, 0, len(d.entries)+len(r.pending))
+		restored = append(restored, d.entries...)
+		restored = append(restored, r.pending...)
+		r.pending = restored
+	}
 	return true
 }
 
-// RetractLastSteer removes and returns the most recently enqueued steer entry
-// that has not yet been drained. It returns false when no steer is pending
-// (already delivered at a tool boundary, or never queued), which lets callers
-// distinguish a still-editable steer from one the agent has already consumed.
-func (r *TurnInputRuntime) RetractLastSteer() ([]llm.ContentPart, bool) {
-	if r == nil {
-		return nil, false
+// Retracted reports whether the user took a steer back out of this delivery
+// before it settled. The call that carried it must not count as delivering
+// anything: whatever it produced was produced with the retracted message in
+// view, so it is discarded.
+func (d *SteerDelivery) Retracted() bool {
+	if d == nil {
+		return false
+	}
+	d.rt.mu.Lock()
+	defer d.rt.mu.Unlock()
+	return d.retracted && !d.settled
+}
+
+// bindAbort registers how to abandon the model call carrying this delivery.
+// A retraction that landed before the call began aborts it at once.
+func (d *SteerDelivery) bindAbort(abort func()) {
+	if d == nil || abort == nil {
+		return
+	}
+	d.rt.mu.Lock()
+	d.abort = abort
+	now := d.retracted && !d.settled
+	d.rt.mu.Unlock()
+	if now {
+		abort()
+	}
+}
+
+func (r *TurnInputRuntime) forgetDeliveryLocked(d *SteerDelivery) {
+	for i, in := range r.inflight {
+		if in == d {
+			r.inflight = append(r.inflight[:i], r.inflight[i+1:]...)
+			return
+		}
+	}
+}
+
+// RetractSteer takes back the steer the conversation queue stamped with seq,
+// so the model never answers it. A steer still pending just leaves the list.
+// One already taken for a model call that has not begun answering is
+// retracted from that delivery: the call is aborted, and the orchestration
+// loop re-sends what the delivery still carries without it. It returns false
+// only when the steer is out of reach — committed, so the model is answering
+// it — or was never queued here.
+func (r *TurnInputRuntime) RetractSteer(seq int) bool {
+	if r == nil || seq <= 0 {
+		return false
 	}
 	r.mu.Lock()
-	for i := len(r.pending) - 1; i >= 0; i-- {
-		if r.pending[i].Mode != TurnInputModeSteer {
-			continue
+	for i, entry := range r.pending {
+		if entry.Mode == TurnInputModeSteer && entry.Seq == seq {
+			r.pending = append(r.pending[:i], r.pending[i+1:]...)
+			r.mu.Unlock()
+			return true
 		}
-		parts := append([]llm.ContentPart(nil), r.pending[i].Parts...)
-		r.pending = append(r.pending[:i], r.pending[i+1:]...)
-		r.mu.Unlock()
-		return parts, true
+	}
+	for _, d := range r.inflight {
+		for i, entry := range d.entries {
+			if entry.Seq != seq {
+				continue
+			}
+			d.entries = append(d.entries[:i], d.entries[i+1:]...)
+			d.retracted = true
+			abort := d.abort
+			r.mu.Unlock()
+			if abort != nil {
+				abort()
+			}
+			return true
+		}
 	}
 	r.mu.Unlock()
-	return nil, false
+	return false
 }
 
 func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {
@@ -605,14 +682,17 @@ func (q *InputQueue) newestLocked(skipSteers bool) (queueLane, int) {
 // "Most recently queued" is decided by the shared enqueue clock, not by lane
 // precedence: the lanes are separate FIFOs, so picking one of them first
 // would recall an older message whenever the newest happened to land in
-// another lane. A pending steer also lives in the attached runtime, so that
-// copy is retracted first; a retraction that fails means the run already
-// delivered it to the model — and since the runtime drains FIFO, every older
-// steer is gone too — so the whole steer lane is skipped rather than handing
-// back an editable copy of a message that is being answered. A detached
-// runtime leaves the steer only in the queue — delivery settles inside the
-// run loop before the run can end, so it was never delivered — and the steer
-// can be recalled directly.
+// another lane. While a runtime is attached a steer also lives there, so it is
+// retracted from it first — from the pending list, or from the model call that
+// is carrying it but has not begun answering, which is then abandoned and
+// re-sent without it. A steer shows in the queue until that call commits, and
+// it stays recallable for exactly as long. A retraction fails only once the
+// model is answering the steer — and since the runtime delivers FIFO, every
+// older steer is being answered too — so the whole steer lane is skipped
+// rather than handing back an editable copy of a message that is being
+// answered. A detached runtime leaves the steer only in the queue — delivery
+// settles inside the run loop before the run can end, so it was never
+// delivered — and the steer can be recalled directly.
 func (q *InputQueue) Recall() (Input, bool) {
 	if q == nil {
 		return Input{}, false
@@ -628,17 +708,15 @@ func (q *InputQueue) Recall() (Input, bool) {
 		var laneEntries *[]Input
 		switch lane {
 		case laneSteer:
-			// When a runtime is attached, retract from it first: a failed
-			// retraction means the run already drained the steer for a model
-			// call — and since the runtime drains FIFO, every older steer is
-			// gone too. When the runtime is detached, the steer never left the
-			// queue (delivery settles inside the run loop before the run can
-			// end, and Detach runs after that), so it can be recalled directly.
-			if q.rt != nil {
-				if _, ok := q.rt.RetractLastSteer(); !ok {
-					skipSteers = true
-					continue
-				}
+			// While a runtime is attached the steer also lives there — pending,
+			// or carried by a model call that has not begun answering — and must
+			// be retracted from it too. When the runtime is detached, the steer
+			// never left the queue (delivery settles inside the run loop before
+			// the run can end, and Detach runs after that), so it can be recalled
+			// directly.
+			if q.rt != nil && !q.rt.RetractSteer(q.steers[idx].Seq) {
+				skipSteers = true
+				continue
 			}
 			laneEntries = &q.steers
 		case laneRejected:
@@ -735,22 +813,23 @@ func (q *InputQueue) consumeSteersLocked() {
 }
 
 // Discard empties every lane and returns how many messages were dropped.
-// Pending steers are retracted from the attached runtime first: clearing
-// only the queue would leave the runtime free to hand them to the model.
-// Steers already delivered cannot be retracted and are not counted — the
-// model has them, so they are not lost.
+// Steers are retracted from the attached runtime first — pending, or carried
+// by a model call that has not begun answering, which is then abandoned and
+// re-sent without them: clearing only the queue would leave the runtime free
+// to hand them to the model, with nothing left to render them into the
+// transcript. A steer the model is already answering cannot be retracted and
+// is not counted — the model has it, so it is not lost. With no runtime
+// attached the steers never left the queue, so every one of them is dropped.
 func (q *InputQueue) Discard() int {
 	if q == nil {
 		return 0
 	}
 	q.mu.Lock()
 	dropped := 0
-	for len(q.steers) > 0 && q.rt != nil {
-		if _, ok := q.rt.RetractLastSteer(); !ok {
-			break
+	for _, in := range q.steers {
+		if q.rt == nil || q.rt.RetractSteer(in.Seq) {
+			dropped++
 		}
-		q.steers = q.steers[:len(q.steers)-1]
-		dropped++
 	}
 	dropped += len(q.rejected) + len(q.followUp)
 	q.steers, q.rejected, q.followUp, q.delivered = nil, nil, nil, nil

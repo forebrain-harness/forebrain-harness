@@ -1313,9 +1313,10 @@ func TestApproveCallbackCancelAbortsRun(t *testing.T) {
 // TestBuildSurfaceToolApprovalRequestExitPlanModePlanPath verifies that the
 // exit_plan_mode approval request resolves the plan file path from the per-agent
 // state root (workspace root), NOT from s.home(). The plan is written/edited at
-// state.PlanPathForProject(stateRoot, projectKey) by the plan-mode tools and write_file/edit
-// gating; if the approval request used s.home() the overlay would look at a
-// different path and show "No plan found" even though the plan exists.
+// state.PlanPathForSession(stateRoot, projectKey, sessionID) by the plan-mode tools
+// and write_file/edit gating; if the approval request used s.home() the overlay
+// would look at a different path and show "No plan found" even though the plan
+// exists.
 func TestBuildSurfaceToolApprovalRequestExitPlanModePlanPath(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
@@ -1361,8 +1362,8 @@ func TestBuildSurfaceToolApprovalRequestExitPlanModePlanPath(t *testing.T) {
 
 	// Write the plan at the location the plan-mode tools actually use.
 	wantPlan := "# Plan\n1. Do the thing\n2. Verify"
-	wantPath := state.PlanPathForProject(stateRoot, "")
-	if err := state.SetPlanForProject(stateRoot, "", wantPlan); err != nil {
+	wantPath := state.PlanPathForSession(stateRoot, "", "s1")
+	if err := state.SetPlanForSession(stateRoot, "", "s1", wantPlan); err != nil {
 		t.Fatalf("planstore.Set error: %v", err)
 	}
 
@@ -1378,7 +1379,7 @@ func TestBuildSurfaceToolApprovalRequestExitPlanModePlanPath(t *testing.T) {
 	if req.PlanFilePath != wantPath {
 		t.Fatalf("PlanFilePath=%q want %q (stateRoot-based)", req.PlanFilePath, wantPath)
 	}
-	homePath := state.PlanPathForProject(home, "")
+	homePath := state.PlanPathForSession(home, "", "s1")
 	if req.PlanFilePath == homePath {
 		t.Fatalf("PlanFilePath should NOT be the home-based path %q (this is the bug: plan written under stateRoot but read under home)", homePath)
 	}
@@ -12430,8 +12431,8 @@ func newPlanReviewSession(t *testing.T, reviewer turn.Reviewer) (*ChatSession, *
 	cs.planReviewerFactory = func(turn.Model) (turn.Reviewer, error) {
 		return reviewer, nil
 	}
-	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
-		t.Fatalf("SetForProject: %v", err)
+	if err := state.SetPlanForSession(cs.stateRoot(), runnerProjectKey(cs.runner()), "session-1", "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
 	}
 	return cs, actions, act.ID
 }
@@ -13166,8 +13167,8 @@ func newReviewRunSession(t *testing.T, executor run.SubagentExecutor) (*ChatSess
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1"})
 	// The shared flow reads the plan from the session's own plan file.
-	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
-		t.Fatalf("SetForProject: %v", err)
+	if err := state.SetPlanForSession(cs.stateRoot(), runnerProjectKey(cs.runner()), "session-1", "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
 	}
 	return cs, actions
 }
@@ -13456,8 +13457,8 @@ func TestPlanReviewFencesItsRunWaitSoNothingElseResumesIt(t *testing.T) {
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1"})
 	cs.SetToolApprovalSink(&scriptedApprovalSink{decisions: []turn.ToolApprovalDecision{{Approved: true}}})
 	// The shared flow reads the plan from the session's own plan file.
-	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
-		t.Fatalf("SetForProject: %v", err)
+	if err := state.SetPlanForSession(cs.stateRoot(), runnerProjectKey(cs.runner()), "session-1", "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
 	}
 
 	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
@@ -29417,8 +29418,8 @@ func TestPlanReviewRunIsAChildOfTheGatedRun(t *testing.T) {
 	}.session()
 	cs.setPendingApproval(&chatApprovalResume{ActionID: "plan-action", SessionID: "session-1", RunID: gate.ID})
 	// The shared flow reads the plan from the session's own plan file.
-	if err := state.SetPlanForProject(cs.stateRoot(), runnerProjectKey(cs.runner()), "# Plan\n\n1. Ship it."); err != nil {
-		t.Fatalf("SetForProject: %v", err)
+	if err := state.SetPlanForSession(cs.stateRoot(), runnerProjectKey(cs.runner()), "session-1", "# Plan\n\n1. Ship it."); err != nil {
+		t.Fatalf("SetPlanForSession: %v", err)
 	}
 	reviewer, err := cs.planReviewerFor(turn.Model{Provider: "openai", Model: "gpt-4o"})
 	if err != nil {

@@ -469,17 +469,18 @@ func newEnterPlanModeTool(st *State, stateRoot string, projectKeys ...string) (*
 			if _, err := state.Switch(stateRoot, sid, state.ModePlan); err != nil {
 				return "", err
 			}
-			planDir := state.PlanDirForProject(stateRoot, projectKey)
+			planSID := PlanSessionIDFromContext(ctx)
+			planDir := state.PlanDirForSession(stateRoot, projectKey, planSID)
 			st.SetRuntimeSessionMode(ctx, sid, string(state.ModePlan), planDir)
 			// Check whether a plan file already exists so we can guide the LLM
 			// to create a NEW descriptive-named file instead of overwriting the
 			// generic plan.md fallback.
-			existingContent, _ := state.GetPlanForProject(stateRoot, projectKey)
+			existingContent, _ := state.GetPlanForSession(stateRoot, projectKey, planSID)
 			planExists := strings.TrimSpace(existingContent) != ""
 			respPlanFile := ""
 			nextSteps := "Explore the codebase, design the approach, then create a NEW <descriptive-name>.md plan file inside plan_dir (choose a name based on the task, e.g. 'add-auth-validation.md'). Do NOT use the generic name plan.md - it overwrites previous plans and loses history. Then call exit_plan_mode."
 			if planExists {
-				respPlanFile = state.PlanPathForProject(stateRoot, projectKey)
+				respPlanFile = state.PlanPathForSession(stateRoot, projectKey, planSID)
 				if isReentry {
 					// Re-entering plan mode with an existing plan: guide the LLM
 					// to read and evaluate the existing plan first, then decide
@@ -551,12 +552,13 @@ func newExitPlanModeTool(st *State, stateRoot string, projectKeys ...string) (*l
 			if _, err := state.Switch(stateRoot, sid, restored); err != nil {
 				return "", err
 			}
-			planDir := state.PlanDirForProject(stateRoot, projectKey)
+			planSID := PlanSessionIDFromContext(ctx)
+			planDir := state.PlanDirForSession(stateRoot, projectKey, planSID)
 			// Keep the plan directory writable in the restored mode so the agent
 			// can close the loop by recording the implementation status in the
 			// plan file once the work is done.
 			st.SetRuntimeSessionMode(ctx, sid, string(restored), planDir)
-			planFile := state.PlanPathForProject(stateRoot, projectKey)
+			planFile := state.PlanPathForSession(stateRoot, projectKey, planSID)
 			// Keep the LLM-facing payload minimal: only the restored mode, the
 			// plan file reference, and a human-readable confirmation message.
 			b, _ := json.Marshal(map[string]any{

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -167,6 +168,39 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 	// out of the session as well as back into the queue.
 	var inFlightSteers *SteerDelivery
 	sessionBeforeSteers := 0
+	// heldAnswer is the tool-call-free answer a steer delivery reopened the turn
+	// after; it sits in the session right before those steers. If the user
+	// retracts every one of them before the model answers, the turn ends on it,
+	// exactly as it would have with no steer queued.
+	var heldAnswer *llm.Result
+	// endTurn closes the turn on a tool-call-free answer.
+	endTurn := func(res *llm.Result, latestUsage *llm.Usage) (*llm.Result, error) {
+		resolved, stopErr := w.applyStopHooks(ctx, session, res)
+		if stopErr != nil {
+			return nil, stopErr
+		}
+		if !sameUsage(latestUsage, resolved) {
+			accumulateUsage(&totalUsage, usageCopy(resolved))
+		}
+		attachTotalUsage(&totalUsage, resolved)
+		// Propagate the full orchestration session (including intermediate
+		// tool calls and results) plus the final assistant message so the
+		// agent's Result.Session is the complete conversation tail and the
+		// persisters (appendAssistantOutcome / post_turn_runtime) write it to
+		// the transcript DB. Without appending resolved.Message, the final
+		// assistant answer is streamed to the UI but never persisted, so the
+		// next round and /resume replay lose it.
+		//
+		// Safe (no duplicate): in this no-tool-call branch `session` never
+		// received the current resolved.Message - the only append of a
+		// response message is at line "session = append(session, *res.Message)"
+		// below, which is the tool-call branch. See plan fix-message-persistence-loss.
+		resolved.Session = append([]llm.Message(nil), session...)
+		if resolved.Message != nil {
+			resolved.Session = append(resolved.Session, *resolved.Message)
+		}
+		return resolved, nil
+	}
 	for {
 		ctx = w.state.ContextWithRuntimeSessionMode(ctx)
 		// Snapshot the session right before the LLM call: this is where a
@@ -174,8 +208,78 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		// completed so far (including drain steers from the
 		// prior iteration) so the dispatcher can persist it.
 		partialCapture.Set(session)
-		callCtx := withSteerDeliveryResponseStart(ctx, inFlightSteers)
+		// The call runs under its own cancellation, so a retracted steer can
+		// abandon it without cancelling the run.
+		callCtx, abandonCall := context.WithCancelCause(ctx)
+		if inFlightSteers != nil {
+			provisionalFrom := sessionBeforeSteers
+			if heldAnswer != nil {
+				provisionalFrom--
+			}
+			callCtx = withProvisionalTail(callCtx, ctx, len(session), len(session)-provisionalFrom)
+			inFlightSteers.bindAbort(func() { abandonCall(errSteerRetracted) })
+		}
+		callCtx = withSteerDeliveryResponseStart(callCtx, inFlightSteers)
 		res, err := w.inner.Execute(callCtx, session, tools)
+		abandonCall(nil)
+		if err == nil {
+			// A successful non-streaming call has no response-start event, so commit
+			// here. For streaming calls this is an idempotent no-op: the first event
+			// committed before any assistant/reasoning output was forwarded.
+			// Committing before the retraction check below is what makes the two
+			// exclusive: a retraction that lands after this commit finds the
+			// steers delivered and fails.
+			inFlightSteers.Commit()
+		}
+		if inFlightSteers.Retracted() {
+			if ctx.Err() == nil {
+				// The user took a steer back out of this call before the model
+				// began answering it. Whatever the call returned — the abort's
+				// cancellation, or an answer written with the retracted message in
+				// view — is discarded; only the tokens it spent are counted. The
+				// steers still riding on it go back to the queue and are taken
+				// again for a fresh call, together with any queued since.
+				accumulateUsage(&totalUsage, usageCopy(res))
+				steerCount := len(session) - sessionBeforeSteers
+				inFlightSteers.Rollback()
+				inFlightSteers = nil
+				session = session[:sessionBeforeSteers]
+				if replaced, ok := adoptionSink.take(); ok && len(replaced) >= steerCount {
+					// A mid-turn compaction finished inside the abandoned call. Its
+					// checkpoint stops before the steers (see provisionalTail), so
+					// the replacement ends with exactly the steer messages: keep the
+					// checkpoint, drop them.
+					session = replaced[:len(replaced)-steerCount]
+				}
+				// Reminders injected into the abandoned request were never part of
+				// an exchange; the next call injects them again.
+				reminderSink.discard()
+				if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
+					inFlightSteers = delivery
+					sessionBeforeSteers = len(session)
+					for _, entry := range delivery.Entries() {
+						session = append(session, llm.UserMessage(entry.Parts...))
+					}
+					continue
+				}
+				if heldAnswer != nil {
+					// Every steer that reopened the turn is gone: end it on the
+					// answer it had already reached, whose usage was counted when
+					// it arrived.
+					answer := heldAnswer
+					heldAnswer = nil
+					session = session[:len(session)-1]
+					partialCapture.Set(session)
+					return endTurn(answer, usageCopy(answer))
+				}
+				continue
+			}
+			// The run itself is being cancelled too: settle this call the way
+			// any failed call is settled below.
+			if err == nil {
+				res, err = nil, ctx.Err()
+			}
+		}
 		if err != nil {
 			// If the provider produced no model output, this call did not establish
 			// delivery. Returning the steers to the queue is what lets the turn
@@ -195,11 +299,8 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			}
 			return res, err
 		}
-		// A successful non-streaming call has no response-start event, so commit
-		// here. For streaming calls this is an idempotent no-op: the first event
-		// committed before any assistant/reasoning output was forwarded.
-		inFlightSteers.Commit()
 		inFlightSteers = nil
+		heldAnswer = nil
 		// If a mid-turn compaction replaced the model context during this call,
 		// adopt the compacted history as the live session before appending the
 		// response below. Everything the inner call sent is represented by the
@@ -246,6 +347,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
 					session = append(session, *res.Message)
 					noteResponseCompleted()
+					heldAnswer = res
 					sessionBeforeSteers = len(session)
 					for _, entry := range delivery.Entries() {
 						session = append(session, llm.UserMessage(entry.Parts...))
@@ -255,31 +357,7 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					continue
 				}
 			}
-			resolved, stopErr := w.applyStopHooks(ctx, session, res)
-			if stopErr != nil {
-				return nil, stopErr
-			}
-			if !sameUsage(latestUsage, resolved) {
-				accumulateUsage(&totalUsage, usageCopy(resolved))
-			}
-			attachTotalUsage(&totalUsage, resolved)
-			// Propagate the full orchestration session (including intermediate
-			// tool calls and results) plus the final assistant message so the
-			// agent's Result.Session is the complete conversation tail and the
-			// persisters (appendAssistantOutcome / post_turn_runtime) write it to
-			// the transcript DB. Without appending resolved.Message, the final
-			// assistant answer is streamed to the UI but never persisted, so the
-			// next round and /resume replay lose it.
-			//
-			// Safe (no duplicate): in this no-tool-call branch `session` never
-			// received the current resolved.Message - the only append of a
-			// response message is at line "session = append(session, *res.Message)"
-			// below, which is the tool-call branch. See plan fix-message-persistence-loss.
-			resolved.Session = append([]llm.Message(nil), session...)
-			if resolved.Message != nil {
-				resolved.Session = append(resolved.Session, *resolved.Message)
-			}
-			return resolved, nil
+			return endTurn(res, latestUsage)
 		}
 		session = append(session, *res.Message)
 		noteResponseCompleted()
@@ -336,6 +414,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 	}
 }
 
+// errSteerRetracted is the cause a model call is abandoned with when the user
+// takes back a queued steer it was carrying before the model began answering.
+var errSteerRetracted = errors.New("queued steer retracted before the model answered it")
+
 // withSteerDeliveryResponseStart binds a provisional delivery to the provider's
 // response boundary. The provider fires OnResponseStarted before forwarding its
 // first output-bearing event, so the surface enqueues the user message before
@@ -343,6 +425,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 // correct transaction boundary: a later stream failure cannot make the
 // already-observed model output "undelivered" and put the input back into the
 // queue.
+//
+// If the user retracted a steer from the delivery before that boundary, the
+// call is being abandoned: the commit is refused, and nothing the response
+// produces — the acknowledgement included — reaches the surface.
 func withSteerDeliveryResponseStart(ctx context.Context, delivery *SteerDelivery) context.Context {
 	if delivery == nil {
 		return ctx
@@ -352,11 +438,44 @@ func withSteerDeliveryResponseStart(ctx context.Context, delivery *SteerDelivery
 		return ctx
 	}
 	wrapped := *sink
+	var abandoned atomic.Bool
 	downstream := wrapped.OnResponseStarted
 	wrapped.OnResponseStarted = func() {
 		delivery.Commit()
+		if delivery.Retracted() {
+			abandoned.Store(true)
+			return
+		}
 		if downstream != nil {
 			downstream()
+		}
+	}
+	if onDelta := wrapped.OnDelta; onDelta != nil {
+		wrapped.OnDelta = func(text string) {
+			if !abandoned.Load() {
+				onDelta(text)
+			}
+		}
+	}
+	if onReasoning := wrapped.OnReasoningDelta; onReasoning != nil {
+		wrapped.OnReasoningDelta = func(text string) {
+			if !abandoned.Load() {
+				onReasoning(text)
+			}
+		}
+	}
+	if onReasoningDone := wrapped.OnReasoningDone; onReasoningDone != nil {
+		wrapped.OnReasoningDone = func() {
+			if !abandoned.Load() {
+				onReasoningDone()
+			}
+		}
+	}
+	if onWebSearch := wrapped.OnWebSearch; onWebSearch != nil {
+		wrapped.OnWebSearch = func(id, detail string, completed bool) {
+			if !abandoned.Load() {
+				onWebSearch(id, detail, completed)
+			}
 		}
 	}
 	return llm.WithStreamSink(ctx, &wrapped)

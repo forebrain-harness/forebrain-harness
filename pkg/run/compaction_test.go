@@ -355,3 +355,121 @@ func TestCompactionSizesATypedSubagentByItsOwnModel(t *testing.T) {
 		t.Fatalf("agentModelFor on the main thread = %s/%s, want the conversation's model zhipuai/glm-5.3", mainProvider, mainModel)
 	}
 }
+
+// steerCompactLLM answers the first sampling with a call for a large chunk and
+// finishes on every later one, recording what each sampling it served was sent.
+// A sampling whose context is already cancelled is refused unrecorded, the way
+// a provider refuses an aborted request.
+type steerCompactLLM struct {
+	calls [][]llm.Message
+}
+
+func (m *steerCompactLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.calls = append(m.calls, append([]llm.Message(nil), messages...))
+	if len(m.calls) == 1 {
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "chunk", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_chunk", Arguments: `{}`}})
+		return &llm.Result{Message: &msg}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+func steerCompactFixture(t *testing.T, steer string) (*tool.State, *llm.Tool, *InputQueue, *TurnInputRuntime) {
+	t.Helper()
+	st := tool.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_chunk", ReadOnly: true, ConcurrencySafe: true})
+	readTool, err := llm.NewTool("read_chunk", "read a chunk", func(context.Context, *struct{}) (string, error) {
+		return strings.Repeat("large tool result\n", 300), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: steer, Parts: []llm.ContentPart{llm.Text(steer)}})
+	return st, readTool, q, rt
+}
+
+// A checkpoint is durable and a queued steer riding on the call is not settled
+// yet, so a mid-turn compaction summarizes only the history before the steer
+// and the request carries the steer verbatim after the checkpoint.
+func TestCompactionKeepsInFlightSteersOutOfTheCheckpoint(t *testing.T) {
+	st, readTool, q, rt := steerCompactFixture(t, "also check the tests")
+	var compacted [][]llm.Message
+	inner := &steerCompactLLM{}
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
+		ExplicitLimit: 500,
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compacted = append(compacted, append([]llm.Message(nil), messages...))
+			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
+		},
+	})
+	ctx := WithTurnInputRuntime(tool.WithRunID(context.Background(), "steer-compaction"), rt)
+	res, err := wrapToolOrchestrationLLM(recoverable, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compacted) != 1 {
+		t.Fatalf("compactions=%d want 1", len(compacted))
+	}
+	if last := compacted[0][len(compacted[0])-1]; last.Role != llm.RoleTool {
+		t.Fatalf("the checkpoint covered the in-flight steer: compaction input %v", roles(compacted[0]))
+	}
+	if second := inner.calls[1]; len(second) != 2 || second[0].TextContent() != "checkpoint" || second[1].TextContent() != "also check the tests" {
+		t.Fatalf("second request = %v, want the checkpoint followed by the steer", roles(second))
+	}
+	if len(res.Session) != 3 || res.Session[1].TextContent() != "also check the tests" || res.Session[2].TextContent() != "done" {
+		t.Fatalf("session = %v, want checkpoint, steer, answer", roles(res.Session))
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 {
+		t.Fatalf("delivered = %#v, want the answered steer", delivered)
+	}
+}
+
+// Recalling the steer while the checkpoint is being written must neither cancel
+// the compaction — it never included the steer — nor let the steer reach the
+// model: the checkpoint is kept and the call is re-sent without it.
+func TestRetractionDuringCompactionKeepsTheCheckpoint(t *testing.T) {
+	st, readTool, q, rt := steerCompactFixture(t, "never mind")
+	compactions := 0
+	var compactCtxErr error
+	inner := &steerCompactLLM{}
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
+		ExplicitLimit: 500,
+		TryCompact: func(ctx context.Context, _ []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compactions++
+			if _, ok := q.Recall(); !ok {
+				t.Error("recall refused a steer that is still in the queue")
+			}
+			compactCtxErr = ctx.Err()
+			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
+		},
+	})
+	ctx := WithTurnInputRuntime(tool.WithRunID(context.Background(), "steer-compaction-retract"), rt)
+	res, err := wrapToolOrchestrationLLM(recoverable, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compactCtxErr != nil {
+		t.Fatalf("the retraction cancelled the compaction: %v", compactCtxErr)
+	}
+	if compactions != 1 {
+		t.Fatalf("compactions=%d want 1: the kept checkpoint must not be redone", compactions)
+	}
+	if len(inner.calls) != 2 || len(inner.calls[1]) != 1 || inner.calls[1][0].TextContent() != "checkpoint" {
+		t.Fatalf("requests = %d, last %v; want the re-sent call to carry only the checkpoint", len(inner.calls), roles(inner.calls[len(inner.calls)-1]))
+	}
+	if len(res.Session) != 2 || res.Session[0].TextContent() != "checkpoint" || res.Session[1].TextContent() != "done" {
+		t.Fatalf("session = %v, want checkpoint and answer", roles(res.Session))
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 0 {
+		t.Fatalf("a retracted steer was rendered as sent: %#v", delivered)
+	}
+}

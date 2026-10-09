@@ -402,9 +402,10 @@ func (s *ChatSession) approvalGate() *turn.PendingApprovalGate {
 		},
 		// The plan a parked plan gate is asking about resolves against the
 		// per-agent state root (workspace root), NOT s.home(). The plan is
-		// written/edited at state.PlanPathForProject(stateRoot, projectKey) -
-		// the same root/project scope the plan-mode LLM wrapper, enter/exit_plan_mode
-		// tools and write_file/edit_file gating all resolve. The main agent's root
+		// written/edited at state.PlanPathForSession(stateRoot, projectKey,
+		// sessionID) - the same root/project scope the plan-mode LLM wrapper,
+		// enter/exit_plan_mode tools and write_file/edit_file gating all
+		// resolve, plus this gate's own session id. The main agent's root
 		// is <home>/workspace, so using s.home() here would resolve a different path
 		// and the overlay would show "No plan found".
 		PlanScope: func(context.Context, string) (string, string) {

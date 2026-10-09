@@ -47,7 +47,9 @@ Modes:
           names: a JSON object {"name": ..., "arguments": {...}}, or an array of
           them to script one call per turn. Use it to put a card that only one
           tool produces on screen - a memories_search result, say - without
-          teaching the harness about that tool.
+          teaching the harness about that tool. FAKE_REPLY_DELAY=<seconds> holds
+          the plain-text replies that follow the script, which is how to keep a
+          queued steer in flight.
   subagent-net
           drive the "subagent dies on the network, then the user continues it
           from its own view" scenario, told apart by request content rather
@@ -88,6 +90,13 @@ MODE = sys.argv[1] if len(sys.argv) > 1 else "hang"
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8731
 TEXT = sys.argv[3] if len(sys.argv) > 3 else "FAKE_ANSWER"
 DRIP_DELAY = float(sys.argv[4]) if len(sys.argv) > 4 else 0.6
+
+# FAKE_REPLY_DELAY holds every plain-text reply of a scripted mode for that many
+# seconds before its first byte. A queued steer rides on the request that
+# follows a scripted tool call, so this is what keeps the window between the
+# steer leaving the queue and the model's first output open long enough to act
+# in it.
+REPLY_DELAY = float(os.environ.get("FAKE_REPLY_DELAY") or 0)
 
 # The tool calls a scripted mode hands out, in order. Each request past the end
 # of its list is answered in plain text, so a cancelled gate leaves the run
@@ -507,6 +516,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def serve_tool_script(self, nth):
         """Answer request `nth` with the scripted tool call, or with text."""
+        if nth >= len(TOOL_SCRIPT) and REPLY_DELAY > 0:
+            # No bytes at all until the delay is over, like a provider still
+            # working on its first token.
+            time.sleep(REPLY_DELAY)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")

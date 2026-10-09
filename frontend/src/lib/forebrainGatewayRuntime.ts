@@ -23,6 +23,7 @@ export type ForebrainRunEventType =
   | 'subagent_spawned'
   | 'subagent_ended'
   | 'subagent_input_delivered'
+  | 'input_delivered'
   | 'tool_call_started'
   | 'tool_output_delta'
   | 'tool_call_completed'

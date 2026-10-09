@@ -41,8 +41,9 @@ func planModeShellEnv(ctx context.Context, rt *AgentToolRuntime) []string {
 		return []string{"FOREBRAIN_PLAN_MODE_FORCE=active"}
 	}
 	projectKey := strings.TrimSpace(rt.ProjectKey)
-	planDir := state.PlanDirForProject(stateRoot, projectKey)
-	planFile := state.PlanPathForProject(stateRoot, projectKey)
+	planSID := PlanSessionIDFromContext(ctx)
+	planDir := state.PlanDirForSession(stateRoot, projectKey, planSID)
+	planFile := state.PlanPathForSession(stateRoot, projectKey, planSID)
 	return []string{
 		"FOREBRAIN_PLAN_FILE=" + planFile,
 		"FOREBRAIN_PLAN_DIR=" + planDir,

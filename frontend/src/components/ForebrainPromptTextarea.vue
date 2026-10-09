@@ -39,6 +39,13 @@ const props = defineProps<{
   bots?: BotOption[]
   botsFetchDone?: boolean
   duringRun?: boolean
+  /**
+   * The composer's queue preview shows a message. Recalling the newest one
+   * (Shift+← or Alt+↑) works whenever one is shown: a subagent's view keeps
+   * its own queue while the conversation is idle, and a page reloaded mid-run
+   * shows the run's queue without having started it.
+   */
+  queueVisible?: boolean
   sideConversation?: boolean
 }>()
 
@@ -594,7 +601,7 @@ function handleKeyDown(e: KeyboardEvent) {
     return
   }
 
-  if (props.duringRun && ((e.altKey && e.key === 'ArrowUp') || (e.shiftKey && e.key === 'ArrowLeft'))) {
+  if ((props.duringRun || props.queueVisible) && ((e.altKey && e.key === 'ArrowUp') || (e.shiftKey && e.key === 'ArrowLeft'))) {
     e.preventDefault()
     emit('edit-last-queued')
     return

@@ -467,6 +467,44 @@ func TestHandleRunQueuedInputEditLastRetractsPendingSteer(t *testing.T) {
 	}
 }
 
+// A steer the run took for a model call that has not begun answering still
+// shows in the page's queue, so edit_last must hand it back — and the call
+// carrying it must not commit it.
+func TestHandleRunQueuedInputEditLastRetractsInFlightSteer(t *testing.T) {
+	s := &Server{}
+	runID := "run-edit-in-flight"
+	q := queue(t, s, runID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/input", strings.NewReader(`{"message":"please adjust"}`))
+	req.SetPathValue("id", runID)
+	rr := httptest.NewRecorder()
+	s.handleRunInput(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	require.NotNil(t, delivery, "the run takes the steer for its next model call")
+
+	req = httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/queued-input", strings.NewReader(`{"action":"edit_last"}`))
+	req.SetPathValue("id", runID)
+	rr = httptest.NewRecorder()
+	s.handleRunQueuedInput(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var resp struct {
+		Accepted bool   `json:"accepted"`
+		Message  string `json:"message"`
+		Preview  struct {
+			PendingSteers []string `json:"pending_steers"`
+		} `json:"preview"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.True(t, resp.Accepted, "a steer still shown in the queue must come back")
+	require.Equal(t, "please adjust", resp.Message)
+	require.Empty(t, resp.Preview.PendingSteers)
+	require.True(t, delivery.Retracted())
+	require.False(t, delivery.Commit(), "the call that carried a recalled steer must not commit it")
+}
+
 // Each completed run releases one batch of the conversation's queue as the
 // next turn's input, oldest follow-up first; the turn after that takes the
 // next one. (The engine's own boundary table is pinned in pkg/run; this is
@@ -660,10 +698,125 @@ func trackedQueue(t *testing.T, s *Server, runID string) *run.InputQueue {
 	t.Cleanup(func() { ctl.Untrack(runID) })
 	q, sid, ok := ctl.Queue(runID)
 	require.True(t, ok)
-	q.SetChangeHook(func() {
-		s.appendPendingInputUpdated(context.Background(), runID, sid, toPendingInputPreview(q.Preview()))
-	})
+	s.watchRunQueue(q, runID, sid)
 	return q
+}
+
+// A steer the run hands its model is drawn into the conversation as the user's
+// own message, ahead of the queue preview that no longer lists it — and only
+// once, however often the queue changes afterwards.
+func TestRunQueuePublishesDeliveredSteerOnce(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-delivered"
+	q := trackedQueue(t, s, runID)
+	require.True(t, q.Steer(run.Input{Text: "also run lint", Attachments: []string{"file-1"}}))
+
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	require.NotNil(t, delivery)
+	require.True(t, delivery.Commit())
+	require.True(t, q.FollowUp(run.Input{Text: "a later change to the queue"}))
+
+	events, err := s.RunRT.ListRunEvents(context.Background(), runID, 100)
+	require.NoError(t, err)
+	var order []string
+	var delivered []event.InputDeliveredPayload
+	for _, evt := range events {
+		switch evt.Type {
+		case event.RunEventInputDelivered:
+			var p event.InputDeliveredPayload
+			require.NoError(t, json.Unmarshal(evt.Payload, &p))
+			delivered = append(delivered, p)
+			order = append(order, "delivered")
+		case event.RunEventPendingInputUpdated:
+			order = append(order, "preview")
+		}
+	}
+	require.Len(t, delivered, 1, "each delivered steer is drawn once")
+	require.Equal(t, "also run lint", delivered[0].Text)
+	require.Equal(t, []string{"file-1"}, delivered[0].Attachments)
+	at := -1
+	for i, kind := range order {
+		if kind == "delivered" {
+			at = i
+		}
+	}
+	require.True(t, at >= 0 && at+1 < len(order) && order[at+1] == "preview",
+		"the message is drawn before the preview that drops it: %v", order)
+	require.Empty(t, q.TakeDelivered(), "the hook drains what it publishes")
+}
+
+// The queue's change hook runs on whichever goroutine changed the queue: the
+// run's stream when a steer is committed, a request handler when the user
+// queues or recalls. A second invocation slipping in while the first is still
+// publishing could take the steer the first one moved and publish it after the
+// run had gone on to the answer, so the web would draw the answer's first words
+// before the message it answers. Invocations publish one change at a time.
+func TestRunQueueHookPublishesOneChangeAtATime(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-serialized"
+	q := trackedQueue(t, s, runID)
+	require.True(t, q.Steer(run.Input{Text: "also run lint"}))
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	require.NotNil(t, delivery)
+
+	// Hold the commit's hook in the middle of its publishing: its
+	// input_delivered event is stored, the preview after it is not yet.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var holdOnce sync.Once
+	sub := s.RunEvents().Subscribe(func(evt event.RunEvent) {
+		if evt.Type != event.RunEventInputDelivered {
+			return
+		}
+		holdOnce.Do(func() {
+			close(held)
+			<-release
+		})
+	})
+	require.NotNil(t, sub)
+	sub.Bind("sid")
+	t.Cleanup(sub.Close)
+
+	countEvents := func() int {
+		events, err := s.RunRT.ListRunEvents(context.Background(), runID, 100)
+		require.NoError(t, err)
+		return len(events)
+	}
+
+	committed := make(chan struct{})
+	go func() {
+		defer close(committed)
+		delivery.Commit()
+	}()
+	<-held
+	before := countEvents()
+
+	queued := make(chan struct{})
+	go func() {
+		defer close(queued)
+		q.FollowUp(run.Input{Text: "a change from another request"})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	stored := countEvents()
+	close(release)
+	<-committed
+	<-queued
+
+	require.Equal(t, before, stored, "another change was published while the commit's hook was still publishing")
+	events, err := s.RunRT.ListRunEvents(context.Background(), runID, 100)
+	require.NoError(t, err)
+	var order []string
+	for _, evt := range events {
+		switch evt.Type {
+		case event.RunEventInputDelivered:
+			order = append(order, "delivered")
+		case event.RunEventPendingInputUpdated:
+			order = append(order, "preview")
+		}
+	}
+	require.GreaterOrEqual(t, len(order), 3, "order: %v", order)
+	require.Equal(t, []string{"delivered", "preview", "preview"}, order[len(order)-3:],
+		"the commit's preview follows its delivered steer before the next change: %v", order)
 }
 
 // An approval gate ends the run that hit it; the decision starts a new run over

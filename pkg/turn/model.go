@@ -787,7 +787,7 @@ func BuildStatusReport(ctx context.Context, src StatusSource) StatusReport {
 		rep.LSP = LSPStatusLine(*src.LSP)
 	}
 	// Work: plan existence and todo progress.
-	if planText, err := state.GetPlanForProject(src.StateRoot, src.ProjectKey); err == nil {
+	if planText, err := state.GetPlanForSession(src.StateRoot, src.ProjectKey, sid); err == nil {
 		rep.Work.PlanSet = strings.TrimSpace(planText) != ""
 	}
 	if todos, err := state.Load(src.StateRoot, sid); err == nil {

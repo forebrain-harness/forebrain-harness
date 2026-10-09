@@ -67,6 +67,11 @@ short scripted conversation crosses it; with `drip` the compaction's own summary
 streams slowly, which is how to watch the progress card move. `/compact` in any
 mode exercises the manual path, and Escape during it cancels it.
 
+`FAKE_REPLY_DELAY=20 $D start tool '{"name":"shell","arguments":{"command":"sleep 6"}}'`
+holds the reply that follows the scripted tool call for 20 seconds: a message
+queued while the tool runs is taken for that request and sits in flight —
+still shown in the queue, not yet answered — for the whole delay.
+
 Full command list: `$D` with no arguments.
 
 ### Reading the result

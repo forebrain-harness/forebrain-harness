@@ -892,6 +892,34 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  it('reloads a steer the run was handed once, from the transcript', async () => {
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', role: 'user', content: 'run the tests', runId: 'r-steer' },
+      { id: 'a1', role: 'assistant', content: 'checking the build', runId: 'r-steer' },
+      { id: 'u2', role: 'user', content: 'also run lint', runId: 'r-steer' },
+      { id: 'a2', role: 'assistant', content: 'lint is clean', runId: 'r-steer' },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's-steer', nextCursor: 1, highWater: 1, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'e1', sequence: 1, schemaVersion: 1, sessionId: 's-steer', runId: 'r-steer', type: 'input_delivered', createdAt: '2026-10-03T09:00:01Z', payload: { text: 'also run lint' } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's-steer', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's-steer'
+      await stream.loadMessages('s-steer')
+
+      expect(stream.messages.value.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+      expect(stream.messages.value.filter((m) => m.role === 'user' && m.content === 'also run lint')).toHaveLength(1)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
   it('keeps the projected prefix and resumes from its durable cursor after disconnect', async () => {
     FakeChatWebSocket.instances = []
     const originalWebSocket = globalThis.WebSocket
@@ -1909,6 +1937,32 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
+  it('draws a steer the run handed its model as its own message between two answers', withFakeWebSocket(async () => {
+    const { stream, socket, pendingSend } = await startLiveStream('live-delivered', 'run-delivered')
+
+    runEvent(socket, 'evt-1', 1, 'run-delivered', 'live-delivered', 'assistant_delta', { text: 'checking the build' })
+    runEvent(socket, 'evt-2', 2, 'run-delivered', 'live-delivered', 'input_delivered', { text: 'also run lint' })
+    runEvent(socket, 'evt-3', 3, 'run-delivered', 'live-delivered', 'assistant_delta', { text: 'lint is clean' })
+
+    expect(stream.messages.value.map((message) => [message.role, message.content])).toEqual([
+      ['user', 'run the tests'],
+      ['assistant', 'checking the build'],
+      ['user', 'also run lint'],
+      ['assistant', 'lint is clean'],
+    ])
+    expect(stream.messages.value.slice(1).map((message) => message.runId)).toEqual(['run-delivered', 'run-delivered', 'run-delivered'])
+
+    endTurn(socket, 'evt-done', 4, 'run-delivered', 'live-delivered')
+    await pendingSend
+    // The run's end settles the answer it was drawing into, not the closed one.
+    expect(stream.messages.value.map((message) => [message.role, message.content])).toEqual([
+      ['user', 'run the tests'],
+      ['assistant', 'checking the build'],
+      ['user', 'also run lint'],
+      ['assistant', 'lint is clean'],
+    ])
+  }))
+
   it('draws a goal as it runs: its lines, its rounds apart, and its check off the conversation', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-goal', 'run-goal')
     const host = () => stream.messages.value.find((message) => message.runId === 'run-goal')
@@ -2750,6 +2804,18 @@ describe('conversation tool and approval timeline', () => {
     } finally {
       queued.mockRestore()
       info.mockRestore()
+    }
+  }))
+
+  it('recalls nothing, and does not throw, when the run ended before the key', withFakeWebSocket(async () => {
+    const queued = vi.spyOn(forebrainApi, 'runQueuedInput').mockRejectedValue(new Error('active run input not available'))
+    try {
+      const { stream, socket, pendingSend } = await startLiveStream('live-gone', 'run-gone')
+      await expect(stream.editLastQueuedMessage()).resolves.toBeNull()
+      endTurn(socket, 'evt-done', 1, 'run-gone', 'live-gone')
+      await pendingSend
+    } finally {
+      queued.mockRestore()
     }
   }))
 

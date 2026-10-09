@@ -574,6 +574,14 @@ type SubagentSurface struct {
 	// merges it and calls SendToSubagent), restore is the input to give back
 	// to the subagent's composer.
 	OnBoundary func(agentKey string, send, restore []Input)
+	// OnQueueChanged receives the subagent's queue preview after every change
+	// to it — a message queued, recalled, handed to the model, discarded, or
+	// settled when an execution ends — so a surface that does not read the
+	// queue on every paint can republish what its view shows. It can be called
+	// while the channel's own lock is held (a withdrawal empties the queue
+	// under it), so it must not call back into the channel: publishing the
+	// preview is all it may do.
+	OnQueueChanged func(agentKey string, preview QueuePreview)
 }
 
 // subagentChannel is the user's side of one subagent's conversation: the queue
@@ -601,6 +609,11 @@ type subagentChannel struct {
 	mu      sync.Mutex
 	running *subagentExecution
 	surface SubagentSurface
+	// queueHookMu guards onQueueChanged apart from mu: the queue's change hook
+	// fires from queue operations that run while mu is held (withdraw), so it
+	// must not take mu.
+	queueHookMu    sync.Mutex
+	onQueueChanged func(agentKey string, preview QueuePreview)
 }
 
 // subagentExecution is one run of a subagent while it is in flight.
@@ -661,6 +674,7 @@ func subagentChannelFor(fac Factory, record agent.HistoryEntry) *subagentChannel
 		}
 		if control := fac.ownerControl(); control != nil {
 			ch.queue = control.SessionQueue(workerSessionID)
+			ch.queue.SetChangeHook(ch.queueChanged)
 		}
 		subagentChannels[workerSessionID] = ch
 	}
@@ -677,6 +691,21 @@ func (ch *subagentChannel) setSurface(surface SubagentSurface) {
 	ch.mu.Lock()
 	ch.surface = surface
 	ch.mu.Unlock()
+	ch.queueHookMu.Lock()
+	ch.onQueueChanged = surface.OnQueueChanged
+	ch.queueHookMu.Unlock()
+}
+
+// queueChanged hands the surface the subagent's queue as its view shows it.
+// It is the queue's change hook, so it runs after the queue has released its
+// own lock.
+func (ch *subagentChannel) queueChanged() {
+	ch.queueHookMu.Lock()
+	notify := ch.onQueueChanged
+	ch.queueHookMu.Unlock()
+	if notify != nil {
+		notify(ch.agentKey, ch.queue.Preview())
+	}
 }
 
 func (ch *subagentChannel) surfaceFor() SubagentSurface {

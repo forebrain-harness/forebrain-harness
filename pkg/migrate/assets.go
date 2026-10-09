@@ -16,7 +16,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
-	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -993,24 +992,27 @@ func mcpEntries(projectPath string) []appcfg.MCPServerConfig {
 type PlanOutcome struct {
 	Name       string
 	ProjectKey string // "" when the plan landed in the unscoped plans root
+	SessionID  string // the imported conversation whose plan directory received it; "" for the unscoped plans root
 	Status     string // installed | up-to-date | diverged | skipped
 	Detail     string
 }
 
 // importPlans copies the source's plan files into forebrain's plan store:
-// <workspaceRoot>/plans/<projectKey>/<slug>.md. Attribution goes through the
-// conversation that wrote the plan — its slug names the file, its cwd names
-// the project — so a plan lands in the same project scope /plan reads from.
-// A plan whose slug matches no imported conversation goes to the unscoped
-// plans root (the gateway/channel scope) and the report says so. Content is
-// never overwritten: an existing identical file is up-to-date, a differing
-// one is diverged and left alone.
+// <workspaceRoot>/plans/<projectKey>/cli-<session>/<slug>.md. Attribution goes
+// through the conversations that carried the plan — the slug names the file,
+// each conversation's cwd names the project — and a slug shared by several
+// conversations gives each of them its own copy (owner decision 2026-10-09:
+// the plan belongs to the conversation that resumes it, and any of them may
+// be the one resumed). A plan whose slug matches no imported conversation
+// goes to the unscoped plans root as history — no conversation reads it —
+// and the report says so. Content is never overwritten: an existing
+// identical file is up-to-date, a differing one is diverged and left alone.
 func importPlans(data *claudeData, opts *Options, progress func(Progress)) []PlanOutcome {
 	out := []PlanOutcome{}
 	if len(data.Plans) == 0 {
 		return out
 	}
-	slugProject := planSlugProjects(data)
+	slugSessions := planSlugSessions(data)
 	workspace := strings.TrimSpace(opts.AgentWorkspace)
 	if workspace == "" {
 		for _, plan := range data.Plans {
@@ -1022,63 +1024,59 @@ func importPlans(data *claudeData, opts *Options, progress func(Progress)) []Pla
 		if progress != nil {
 			progress(Progress{Stage: "plans", Detail: plan.Name})
 		}
-		cwd := slugProject[plan.Name]
-		projectKey := ""
-		scope := "the unscoped plans root"
-		if cwd != "" {
-			projectKey = memory.ProjectKey(cwd)
-			scope = "project " + projectKey
-		}
-		destDir := state.PlanDirForProject(workspace, projectKey)
-		dest := filepath.Join(destDir, plan.Name+".md")
 		body, err := os.ReadFile(plan.Path)
 		if err != nil {
-			out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "skipped", Detail: err.Error()})
+			out = append(out, PlanOutcome{Name: plan.Name, Status: "skipped", Detail: err.Error()})
 			continue
 		}
-		if existing, err := os.ReadFile(dest); err == nil {
-			if planContentEqual(existing, body) {
-				out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "up-to-date"})
-			} else {
-				out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "diverged", Detail: "a plan with this name already differs in " + scope + "; not overwritten"})
+		normalized := string(bytes.TrimRight(body, "\n")) + "\n"
+		sessions := slugSessions[plan.Name]
+		if len(sessions) == 0 {
+			outcome := writeExtractedPlan(workspace, "", "", plan.Name, normalized, opts.DryRun)
+			if outcome.Status == "installed" {
+				outcome.Detail += " (no conversation matched this plan's slug)"
 			}
+			out = append(out, outcome)
 			continue
 		}
-		if opts.DryRun {
-			out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "installed", Detail: "planned for " + scope})
-			continue
+		for _, session := range sessions {
+			projectKey := memory.ProjectKey(session.Cwd)
+			out = append(out, writeExtractedPlan(workspace, projectKey, claudeSessionTarget(session.SessionID), plan.Name, normalized, opts.DryRun))
 		}
-		if err := os.MkdirAll(destDir, 0o755); err != nil {
-			out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "skipped", Detail: err.Error()})
-			continue
-		}
-		if err := os.WriteFile(dest, append(bytes.TrimRight(body, "\n"), '\n'), 0o600); err != nil {
-			out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "skipped", Detail: err.Error()})
-			continue
-		}
-		detail := "written to " + scope
-		if projectKey == "" {
-			detail += " (no conversation matched this plan's slug)"
-		}
-		out = append(out, PlanOutcome{Name: plan.Name, ProjectKey: projectKey, Status: "installed", Detail: detail})
 	}
 	return out
 }
 
-// planSlugProjects maps a plan slug to the cwd of the conversation that
-// carried it. When several conversations share a slug the first discovered
-// wins; their cwd is the same project in every observed case.
-func planSlugProjects(data *claudeData) map[string]string {
-	out := map[string]string{}
+// planSlugSessions maps a plan slug to every imported conversation that
+// carried it. A slug shared by several conversations gives each of them its
+// own copy of the plan (owner decision 2026-10-09): a plan belongs to the
+// conversation that resumes it, and any of them may be the one resumed. The
+// list is deduplicated by target conversation id and sorted by it, so the
+// report and the write order are deterministic.
+func planSlugSessions(data *claudeData) map[string][]claudeSession {
+	out := map[string][]claudeSession{}
+	seen := map[string]map[string]bool{}
 	for _, project := range data.Projects {
 		for _, session := range project.Sessions {
 			if session.Slug == "" || session.Cwd == "" {
 				continue
 			}
-			if _, exists := out[session.Slug]; !exists {
-				out[session.Slug] = session.Cwd
+			target := claudeSessionTarget(session.SessionID)
+			if seen[session.Slug] == nil {
+				seen[session.Slug] = map[string]bool{}
 			}
+			if seen[session.Slug][target] {
+				continue
+			}
+			seen[session.Slug][target] = true
+			out[session.Slug] = append(out[session.Slug], session)
 		}
+	}
+	for slug := range out {
+		sessions := out[slug]
+		sort.Slice(sessions, func(i, j int) bool {
+			return claudeSessionTarget(sessions[i].SessionID) < claudeSessionTarget(sessions[j].SessionID)
+		})
 	}
 	return out
 }

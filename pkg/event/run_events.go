@@ -35,9 +35,15 @@ const (
 	RunEventGoalCompleted          = "goal_completed"
 	RunEventPendingInputUpdated    = "pending_input_updated"
 	RunEventQueuedInputReleased    = "queued_input_released"
-	RunEventSessionSwitched        = "session_switched"
-	RunEventSubagentSpawned        = "subagent_spawned"
-	RunEventSubagentEnded          = "subagent_ended"
+	// RunEventInputDelivered reports a steer the run handed its model at a
+	// tool boundary: the user's own message, which a surface draws into the
+	// conversation where the model received it — between what the run said
+	// before it and what it says in answer — the way the terminal draws it
+	// and where the transcript keeps it.
+	RunEventInputDelivered  = "input_delivered"
+	RunEventSessionSwitched = "session_switched"
+	RunEventSubagentSpawned = "subagent_spawned"
+	RunEventSubagentEnded   = "subagent_ended"
 	// RunEventSubagentInputDelivered reports a message the user sent a running
 	// subagent, delivered to the model at a tool boundary. The surface draws it
 	// as a user message in that subagent's own view; it persists, so a replay
@@ -356,6 +362,14 @@ type SubagentInputDeliveredPayload struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Text        string `json:"text,omitempty"`
+}
+
+// InputDeliveredPayload is a steer the run handed its model: the message as
+// its sender wrote it, with what it attached.
+type InputDeliveredPayload struct {
+	Text          string   `json:"text"`
+	Attachments   []string `json:"attachments,omitempty"`
+	MentionImages []string `json:"mention_images,omitempty"`
 }
 
 type SubagentEndedPayload struct {

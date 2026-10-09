@@ -63,7 +63,7 @@ func TestBuildStatusReportAssemblesThePanel(t *testing.T) {
 
 	stateRoot := t.TempDir()
 	require.NoError(t, state.Set(stateRoot, "s1", state.State{Mode: state.ModePlan, Phase: "draft"}))
-	require.NoError(t, state.SetPlanForProject(stateRoot, "proj", "a plan"))
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", "s1", "a plan"))
 	if err := state.Save(stateRoot, "s1", state.List{Items: []state.Item{
 		{Content: "one", Status: state.StatusCompleted},
 		{Content: "two", Status: state.StatusPending},
@@ -472,6 +472,38 @@ func TestForkCopiesMaterializedModelSelection(t *testing.T) {
 
 	// The copied selection becomes the new session's live selection.
 	require.Equal(t, ModelSelectionState{Provider: "deepseek", Model: "deepseek-chat", Effort: "high", Set: true}, f.handler.selection)
+}
+
+// TestForkCopiesThePlansIntoTheForksOwnDirectory pins /fork's plan semantics:
+// the fork starts with its own copy of the source's plan files, the source
+// keeps everything, and nothing leaks into the flat project directory.
+func TestForkCopiesThePlansIntoTheForksOwnDirectory(t *testing.T) {
+	f := newModelSelectionFixture(t, ModelSelectionState{})
+	stateRoot := f.ctx.stateRoot()
+	srcDir := state.PlanDirForSession(stateRoot, f.ctx.projectKey(), "s1")
+	require.NoError(t, os.MkdirAll(srcDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "plan-a.md"), []byte("# Plan A\n"), 0o600))
+
+	res := execFork(f.ctx)
+	require.True(t, res.Handled)
+	require.True(t, res.SessionSwitched)
+
+	dstDir := state.PlanDirForSession(stateRoot, f.ctx.projectKey(), res.SessionID)
+	got, err := os.ReadFile(filepath.Join(dstDir, "plan-a.md"))
+	require.NoError(t, err, "the fork must carry a copy of the source's plan")
+	require.Equal(t, "# Plan A\n", string(got))
+	if _, err := os.Stat(filepath.Join(srcDir, "plan-a.md")); err != nil {
+		t.Fatalf("the source's plan must stay where it was: %v", err)
+	}
+	// Nothing new appears flat in the project plans directory.
+	flat := state.PlanDirForProject(stateRoot, f.ctx.projectKey())
+	if entries, err := os.ReadDir(flat); err == nil {
+		for _, e := range entries {
+			require.NotEqual(t, "plan-a.md", e.Name(), "the copy must not land in the flat plans directory")
+		}
+	} else {
+		require.True(t, os.IsNotExist(err), "reading the flat plans directory: %v", err)
+	}
 }
 
 func TestForkRequiresCopiedSelectionOnTUI(t *testing.T) {

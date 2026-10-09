@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -667,7 +668,7 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 	}))
 	appendPlanReviewed(t, runs, sessionID, action.ID, "rev-done", "done", "Verdict: rework.")
 	stateRoot := t.TempDir()
-	require.NoError(t, state.SetPlanForProject(stateRoot, "proj", "# Plan\n\n1. Ship it."))
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", sessionID, "# Plan\n\n1. Ship it."))
 
 	gate := &PendingApprovalGate{
 		Runs: runs, Actions: actions,
@@ -682,12 +683,59 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 	req, err := gate.Pending(ctx, sessionID)
 	require.NoError(t, err)
 	require.NotNil(t, req)
-	require.Equal(t, state.PlanPathForProject(stateRoot, "proj"), req.PlanFilePath)
+	require.Equal(t, state.PlanPathForSession(stateRoot, "proj", sessionID), req.PlanFilePath)
 	require.Len(t, req.PlanReviewModels, 2)
 	require.True(t, req.PlanReviewModels[0].Current)
 	require.Len(t, req.PlanReviews, 1)
-	require.Equal(t, "gpt-5.1", req.PlanReviews[0].Model)
+	require.Equal(t, "gpt-5.1", req.PlanReviewModels[0].Model)
 	require.Contains(t, req.PlanReviews[0].Text, "rework")
+}
+
+// TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan is the gate-layer
+// regression test for the cross-conversation plan leak: the approval card the
+// user is looking at (TUI overlay and web card render the same request) must
+// show this conversation's plan even when another conversation — or a legacy
+// flat file — was written more recently.
+func TestPendingExitPlanRequestResolvesOnlyItsOwnSessionPlan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	run, err := runs.CreateRun(ctx, sessionID, "plan the work")
+	require.NoError(t, err)
+	action, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, run.ID, state.Wait{
+		RunID: run.ID, ActionID: action.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+
+	stateRoot := t.TempDir()
+	require.NoError(t, state.SetPlanForSession(stateRoot, "proj", sessionID, "# Mine"))
+
+	// Two foreign plans, both newer than the session's own: another
+	// conversation's directory and the legacy flat project directory.
+	foreign := func(dir, name string) {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte("# Theirs\n"), 0o600))
+		future := time.Now().Add(time.Hour)
+		require.NoError(t, os.Chtimes(p, future, future))
+	}
+	foreign(state.PlanDirForSession(stateRoot, "proj", "another-session"), "theirs.md")
+	foreign(state.PlanDirForProject(stateRoot, "proj"), "legacy.md")
+
+	gate := &PendingApprovalGate{
+		Runs: runs, Actions: actions,
+		PlanScope: func(context.Context, string) (string, string) { return stateRoot, "proj" },
+	}
+	req, err := gate.Pending(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.Equal(t, state.PlanPathForSession(stateRoot, "proj", sessionID), req.PlanFilePath)
+	body, err := os.ReadFile(req.PlanFilePath)
+	require.NoError(t, err)
+	require.Equal(t, "# Mine", strings.TrimSpace(string(body)))
 }
 
 // The delivery denial is the one write that closes a completed review's

@@ -2154,12 +2154,12 @@ func TestWriteFileConfinedRootLandsInRootNotWorkingDirectory(t *testing.T) {
 
 // planModeWriteCtx builds a context that mimics what wrapPlanModeLLM sets up for
 // a tool call during plan mode: mode=plan, a bound session, and the allowed plan
-// path pointing at the active plan directory.
+// path pointing at that conversation's plan directory.
 func planModeWriteCtx(home, sid string) context.Context {
 	ctx := context.Background()
 	ctx = llm.WithAgentSessionID(ctx, sid)
 	ctx = WithMode(ctx, "plan")
-	ctx = WithAllowedPlanPath(ctx, state.PlanDirForProject(home, ""))
+	ctx = WithAllowedPlanPath(ctx, state.PlanDirForSession(home, "", sid))
 	return ctx
 }
 
@@ -2167,7 +2167,7 @@ func TestPlanModeWriteFileAllowsPlanFile(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	sid := "sid-plan-write"
-	planFile := state.PlanPathForProject(home, "")
+	planFile := state.PlanPathForSession(home, "", sid)
 
 	st := NewState(workspace)
 	tool, err := NewFileWriteTool(st, &AgentToolRuntime{Home: home})
@@ -2197,7 +2197,7 @@ func TestPlanModeWriteFileAllowsPlanFileUnderStateRoot(t *testing.T) {
 	stateRoot := filepath.Join(t.TempDir(), ".forebrain", "workspace")
 	workspace := t.TempDir()
 	sid := "sid-plan-state-root"
-	planDir := state.PlanDirForProject(stateRoot, "forebrain")
+	planDir := state.PlanDirForSession(stateRoot, "forebrain", sid)
 	planFile := filepath.Join(planDir, "remove-cron-semantics.md")
 
 	ctx := llm.WithAgentSessionID(context.Background(), sid)
@@ -2226,6 +2226,41 @@ func TestPlanModeWriteFileAllowsPlanFileUnderStateRoot(t *testing.T) {
 	other := filepath.Join(stateRoot, "state", "permissions.json")
 	if err := st.GuardWrite(ctx, other); err == nil {
 		t.Fatalf("non-plan state path was writable: %s", other)
+	}
+}
+
+// TestPlanModeWriteFileStaysInOwnSessionPlanDir pins the isolation the
+// per-conversation plan directory buys: a session in plan mode may write only
+// inside its own directory — never another conversation's, never the flat
+// project directory legacy plans live in.
+func TestPlanModeWriteFileStaysInOwnSessionPlanDir(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+
+	st := NewState(workspace)
+	tool, err := NewFileWriteTool(st, &AgentToolRuntime{Home: home})
+	if err != nil {
+		t.Fatalf("NewFileWriteTool: %v", err)
+	}
+	ctx := planModeWriteCtx(home, "sid-a")
+
+	mine := filepath.Join(state.PlanDirForSession(home, "", "sid-a"), "mine.md")
+	args, _ := json.Marshal(FileWriteInput{FilePath: mine, Content: "# Mine\n"})
+	if _, err := tool.Handle(ctx, string(args)); err != nil {
+		t.Fatalf("own-session plan write should succeed, got: %v", err)
+	}
+
+	for _, target := range []string{
+		filepath.Join(state.PlanDirForSession(home, "", "sid-b"), "theirs.md"),
+		filepath.Join(state.PlanDirForProject(home, ""), "flat.md"),
+	} {
+		args, _ := json.Marshal(FileWriteInput{FilePath: target, Content: "# Not mine\n"})
+		if _, err := tool.Handle(ctx, string(args)); err == nil {
+			t.Fatalf("write outside the session's plan directory should fail: %s", target)
+		}
+		if _, statErr := os.Stat(target); statErr == nil {
+			t.Fatalf("file must not exist after a rejected write: %s", target)
+		}
 	}
 }
 
@@ -2269,7 +2304,7 @@ func TestPlanModeReadOnlySubagentCannotWritePlanFile(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	sid := "sid-plan-subagent"
-	planFile := state.PlanPathForProject(home, "")
+	planFile := state.PlanPathForSession(home, "", sid)
 
 	st := NewState(workspace)
 	tool, err := NewFileWriteTool(st, &AgentToolRuntime{Home: home})
@@ -2297,7 +2332,7 @@ func TestPlanModeEditFileAllowsPlanFileBlocksOthers(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
 	sid := "sid-plan-edit"
-	planFile := state.PlanPathForProject(home, "")
+	planFile := state.PlanPathForSession(home, "", sid)
 
 	// Seed an existing plan file and register a read state so edit_file's
 	// read-before-edit precondition is satisfied.

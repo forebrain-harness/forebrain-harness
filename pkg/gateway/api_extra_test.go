@@ -3442,7 +3442,7 @@ func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *
 		Sessions: state.NewSessionStore(db, "main"),
 		Runner:   &run.Runner{Deps: &run.Deps{ProjectKey: "proj", AppCfg: cfg}},
 	}
-	require.NoError(t, state.SetPlanForProject(s.stateRoot(), s.projectKey(), "# Plan\n\n1. Ship it."))
+	require.NoError(t, state.SetPlanForSession(s.stateRoot(), s.projectKey(), "s1", "# Plan\n\n1. Ship it."))
 	return s, runs, actions, action.ID, "s1"
 }
 
@@ -3990,4 +3990,51 @@ func TestGatewayResumeStateCarriesDeliveredReview(t *testing.T) {
 	// once the resume state is known to be used.
 	require.Nil(t, got.BeginContinuation)
 	require.Nil(t, got.EndContinuation)
+}
+
+// The engine tells the web's subagent surface about every change to that
+// subagent's queue; the surface republishes the preview, so the open view
+// stops showing a message the model already has.
+func TestSubagentSurfacePublishesQueueChanges(t *testing.T) {
+	s := newRunInputTestServer(t)
+	surface := s.subagentConversationSurface("sid")
+	require.NotNil(t, surface.OnQueueChanged)
+	surface.OnQueueChanged("agent-1", run.QueuePreview{Steers: []string{"still queued"}})
+
+	events, err := s.RunRT.ListSessionEventsOfType(context.Background(), "sid", event.RunEventPendingInputUpdated, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	var payload event.PendingInputUpdatedPayload
+	require.NoError(t, json.Unmarshal(events[0].Payload, &payload))
+	require.Equal(t, "agent-1", payload.AgentID)
+	require.Equal(t, []string{"still queued"}, payload.PendingSteers)
+}
+
+// plan-md is the web's window on a conversation's plan; it must resolve that
+// one session's plan even when another conversation in the same project wrote
+// a plan more recently.
+func TestSessionPlanMarkdownReturnsOnlyThatSessionsPlan(t *testing.T) {
+	s := &Server{Home: t.TempDir(), Runner: &run.Runner{Deps: &run.Deps{ProjectKey: "proj"}}}
+	require.NoError(t, state.SetPlanForSession(s.stateRoot(), s.projectKey(), "s1", "# Mine"))
+
+	// A second session's plan, written later: invisible to s1's plan-md.
+	other := state.PlanPathForSession(s.stateRoot(), s.projectKey(), "s2")
+	require.NoError(t, os.MkdirAll(filepath.Dir(other), 0o755))
+	require.NoError(t, os.WriteFile(other, []byte("# Theirs\n"), 0o600))
+	future := time.Now().Add(time.Hour)
+	require.NoError(t, os.Chtimes(other, future, future))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/s1/plan-md", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+		{Key: "id", Value: "s1"},
+	}))
+	rr := httptest.NewRecorder()
+	s.handleSessionPlanMarkdown(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var body struct {
+		Markdown string `json:"markdown"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	require.Equal(t, "# Mine", body.Markdown)
 }

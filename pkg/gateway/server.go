@@ -1704,9 +1704,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		s.runController().Track(runID, sid, cancelFn)
 		turnInputRT := (*run.TurnInputRuntime)(nil)
 		if q, _, ok := s.runController().Queue(runID); ok {
-			q.SetChangeHook(func() {
-				s.appendPendingInputUpdated(context.Background(), runID, sid, toPendingInputPreview(q.Preview()))
-			})
+			s.watchRunQueue(q, runID, sid)
 			turnInputRT = q.Runtime()
 		}
 		writeMsg(wsServerMsg{

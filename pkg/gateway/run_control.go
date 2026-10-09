@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -258,6 +259,37 @@ func (s *Server) appendPendingInputUpdated(ctx context.Context, runID, sessionID
 		PendingSteers:  preview.PendingSteers,
 		RejectedSteers: preview.RejectedSteers,
 		QueuedMessages: preview.QueuedMessages,
+	})
+}
+
+// watchRunQueue republishes a run's queue after every change to it, and draws
+// each steer the run hands its model into the conversation as the user's own
+// message, ahead of the preview that no longer lists it. The delivered list is
+// drained here — the way the terminal takes it to render — so each steer is
+// published exactly once and the conversation's queue does not keep growing.
+func (s *Server) watchRunQueue(q *run.InputQueue, runID, sessionID string) {
+	if s == nil || q == nil {
+		return
+	}
+	// The hook runs on whichever goroutine changed the queue — the run's
+	// stream when a steer is committed, a request handler when the user queues
+	// or recalls — so changes are published one at a time. A delivered steer
+	// is then always published by the invocation that moved it, before the
+	// commit returns to the stream whose next event is the answer, and the
+	// last preview stored is one read after the last change.
+	var publishing sync.Mutex
+	q.SetChangeHook(func() {
+		publishing.Lock()
+		defer publishing.Unlock()
+		ctx := context.Background()
+		for _, in := range q.TakeDelivered() {
+			_ = s.publishGatewayRunEvent(ctx, sessionID, runID, event.RunEventInputDelivered, event.InputDeliveredPayload{
+				Text:          in.Text,
+				Attachments:   in.Attachments,
+				MentionImages: in.MentionImages,
+			})
+		}
+		s.appendPendingInputUpdated(ctx, runID, sessionID, toPendingInputPreview(q.Preview()))
 	})
 }
 
@@ -666,9 +698,7 @@ func (s *Server) startDetachedTurn(t detachedTurn) (string, error) {
 	s.runController().Track(runID, sid, func() { cancelCause(context.Canceled) })
 	var inputRT *run.TurnInputRuntime
 	if q, _, ok := s.runController().Queue(runID); ok {
-		q.SetChangeHook(func() {
-			s.appendPendingInputUpdated(context.Background(), runID, sid, toPendingInputPreview(q.Preview()))
-		})
+		s.watchRunQueue(q, runID, sid)
 		inputRT = q.Runtime()
 	}
 	go s.runDetachedTurn(runCtx, t, runID, startedAt, inputRT)
