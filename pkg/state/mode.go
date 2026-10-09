@@ -191,6 +191,11 @@ func SetFast(home, sessionID string, enabled bool) error {
 // A file that does not exist is not an error: deletion must be repeatable
 // over a session that never wrote some of them. Anything new that lands here
 // must be added to this list or deleting a session leaves it orphaned.
+//
+// A session's plan directory (plans/<project>/<session>/, see
+// PlanDirForSession) is deliberately not on this list: plans are kept as
+// history after the conversation that wrote them is gone (owner decision
+// 2026-10-09).
 func RemoveSessionStateFiles(stateRoot, sessionID string) error {
 	for _, p := range []string{
 		modePath(stateRoot, sessionID),

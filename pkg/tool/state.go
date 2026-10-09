@@ -255,6 +255,16 @@ func ConversationSessionIDFromContext(ctx context.Context) string {
 	return strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
 }
 
+// PlanSessionIDFromContext names the conversation whose plan files a call
+// reads and writes. Plans belong to the user-visible conversation, not to a
+// subagent's worker transcript: a subagent that inherits plan mode works in
+// its parent conversation's plan directory, so the parent's exit_plan_mode
+// sees what it wrote. Every plan directory derived from a context goes
+// through here.
+func PlanSessionIDFromContext(ctx context.Context) string {
+	return ConversationSessionIDFromContext(ctx)
+}
+
 func WithApprovedActionID(ctx context.Context, actionID string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()

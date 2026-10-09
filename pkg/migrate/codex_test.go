@@ -342,7 +342,10 @@ func TestCodexPlansExtracted(t *testing.T) {
 	if report.Plans[0].Status != "installed" {
 		t.Fatalf("plan status = %s", report.Plans[0].Status)
 	}
-	body, err := os.ReadFile(filepath.Join(state.PlanDirForProject(opts.AgentWorkspace, report.Plans[0].ProjectKey), report.Plans[0].Name+".md"))
+	if !strings.HasPrefix(report.Plans[0].SessionID, "cli-") {
+		t.Fatalf("plan session = %q, want a cli-<thread> conversation id", report.Plans[0].SessionID)
+	}
+	body, err := os.ReadFile(filepath.Join(state.PlanDirForSession(opts.AgentWorkspace, report.Plans[0].ProjectKey, report.Plans[0].SessionID), report.Plans[0].Name+".md"))
 	if err != nil {
 		t.Fatal(err)
 	}

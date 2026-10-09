@@ -504,7 +504,7 @@
               >
                 <PromptInputBody>
                   <ForebrainPromptTextarea ref="promptRef" :placeholder="inputPlaceholder" :bots="availableBots"
-                    :bots-fetch-done="botsFetchDone" :during-run="isStreaming"
+                    :bots-fetch-done="botsFetchDone" :during-run="isStreaming" :queue-visible="composerQueueVisible"
                     @queue-follow-up="markNextSubmissionAsQueued"
                     @edit-last-queued="restoreLastQueuedMessage"
                     @interrupt-run="interruptAndSendPendingSteers"
@@ -944,6 +944,13 @@ const composerPendingInput = computed(() => (
     ? (subagentPendingInput.value[activeAgentView.value] ?? emptyPendingInputPreview())
     : pendingInputPreview.value
 ))
+
+// Whether the composer's queue preview shows anything: recalling the newest
+// message is offered exactly as long as one is shown.
+const composerQueueVisible = computed(() => {
+  const preview = composerPendingInput.value
+  return preview.pendingSteers.length + preview.rejectedSteers.length + preview.queuedMessages.length > 0
+})
 
 // Composer drafts belong to the view they were typed in: switching between the
 // conversation and a subagent's own view saves one and restores the other

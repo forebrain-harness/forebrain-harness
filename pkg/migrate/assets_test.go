@@ -12,6 +12,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // TestResolveProjectPathFourLevels exercises B5's ladder in isolation:
@@ -357,7 +358,7 @@ func TestImportPlansAttribution(t *testing.T) {
 	project := t.TempDir()
 	data := &claudeData{
 		Projects: []claudeProject{{
-			Sessions: []claudeSession{{Slug: "known-slug", Cwd: project}},
+			Sessions: []claudeSession{{SessionID: "s-1", Slug: "known-slug", Cwd: project}},
 		}},
 		Plans: []claudePlan{
 			{Name: "known-slug", Path: writePlanFile(t, "# scoped\n")},
@@ -372,12 +373,19 @@ func TestImportPlansAttribution(t *testing.T) {
 	if outcomes[0].ProjectKey != memory.ProjectKey(project) || outcomes[0].Status != "installed" {
 		t.Fatalf("scoped = %+v", outcomes[0])
 	}
-	if outcomes[1].ProjectKey != "" || outcomes[1].Status != "installed" {
+	if outcomes[0].SessionID != "cli-s-1" {
+		t.Fatalf("scoped session = %q, want cli-s-1", outcomes[0].SessionID)
+	}
+	if outcomes[1].ProjectKey != "" || outcomes[1].Status != "installed" || outcomes[1].SessionID != "" {
 		t.Fatalf("orphan = %+v", outcomes[1])
 	}
-	scoped := filepath.Join(workspace, "plans", memory.ProjectKey(project), "known-slug.md")
+	scoped := filepath.Join(state.PlanDirForSession(workspace, memory.ProjectKey(project), "cli-s-1"), "known-slug.md")
 	if body, err := os.ReadFile(scoped); err != nil || !strings.HasPrefix(string(body), "# scoped") {
 		t.Fatalf("scoped plan missing: %v", err)
+	}
+	// The imported conversation, once resumed, reads the plan as its own.
+	if plan, err := state.GetPlanForSession(workspace, memory.ProjectKey(project), "cli-s-1"); err != nil || !strings.HasPrefix(plan, "# scoped") {
+		t.Fatalf("GetPlanForSession(cli-s-1) = %q, %v", plan, err)
 	}
 	orphan := filepath.Join(workspace, "plans", "orphan-slug.md")
 	if _, err := os.Stat(orphan); err != nil {
@@ -394,6 +402,57 @@ func TestImportPlansAttribution(t *testing.T) {
 	}
 	if body, _ := os.ReadFile(scoped); string(body) != "# local edits\n" {
 		t.Fatal("diverged plan was overwritten")
+	}
+}
+
+// TestImportPlansCopiesIntoEveryConversationWithTheSlug pins the owner
+// decision 2026-10-09: a slug carried by several conversations gives each of
+// them its own copy in its own plan directory, and nothing is written into
+// the flat project directory no conversation reads anymore.
+func TestImportPlansCopiesIntoEveryConversationWithTheSlug(t *testing.T) {
+	workspace := t.TempDir()
+	project := t.TempDir()
+	data := &claudeData{
+		Projects: []claudeProject{{
+			Sessions: []claudeSession{
+				{SessionID: "s-b", Slug: "shared", Cwd: project},
+				{SessionID: "s-a", Slug: "shared", Cwd: project},
+			},
+		}},
+		Plans: []claudePlan{
+			{Name: "shared", Path: writePlanFile(t, "# Shared\n")},
+		},
+	}
+	opts := &Options{AgentWorkspace: workspace, Now: fixedClock}
+	outcomes := importPlans(data, opts, nil)
+	if len(outcomes) != 2 {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	if outcomes[0].SessionID != "cli-s-a" || outcomes[1].SessionID != "cli-s-b" {
+		t.Fatalf("session order = %q, %q; want cli-s-a, cli-s-b", outcomes[0].SessionID, outcomes[1].SessionID)
+	}
+	if outcomes[0].Status != "installed" || outcomes[1].Status != "installed" {
+		t.Fatalf("outcomes = %+v", outcomes)
+	}
+	first, err := os.ReadFile(filepath.Join(state.PlanDirForSession(workspace, memory.ProjectKey(project), "cli-s-a"), "shared.md"))
+	if err != nil {
+		t.Fatalf("copy for cli-s-a missing: %v", err)
+	}
+	second, err := os.ReadFile(filepath.Join(state.PlanDirForSession(workspace, memory.ProjectKey(project), "cli-s-b"), "shared.md"))
+	if err != nil {
+		t.Fatalf("copy for cli-s-b missing: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("copies differ: %q vs %q", first, second)
+	}
+	if _, err := os.Stat(filepath.Join(state.PlanDirForProject(workspace, memory.ProjectKey(project)), "shared.md")); err == nil {
+		t.Fatal("shared.md must not land in the flat project plans directory")
+	}
+
+	// Re-running is up-to-date for every copy, never a duplicate.
+	again := importPlans(data, opts, nil)
+	if len(again) != 2 || again[0].Status != "up-to-date" || again[1].Status != "up-to-date" {
+		t.Fatalf("second run = %+v", again)
 	}
 }
 

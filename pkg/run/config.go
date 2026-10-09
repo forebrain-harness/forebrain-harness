@@ -575,10 +575,15 @@ func (w *planModeLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*
 	if st.Mode != state.ModePlan {
 		return w.executeImplementationPhase(ctx, msgs, tools, projectKey, st)
 	}
-	planDir := state.PlanDirForProject(w.stateRoot, projectKey)
-	planFile := state.PlanPathForProject(w.stateRoot, projectKey)
+	// Plans belong to the conversation (PlanSessionIDFromContext falls back to
+	// sid when no explicit conversation id is set), never to the agent session
+	// of a subagent: a worker inheriting plan mode writes into its parent
+	// conversation's directory so the parent's exit_plan_mode sees the plan.
+	planSID := tool.PlanSessionIDFromContext(ctx)
+	planDir := state.PlanDirForSession(w.stateRoot, projectKey, planSID)
+	planFile := state.PlanPathForSession(w.stateRoot, projectKey, planSID)
 	planExists := false
-	if content, err := state.GetPlanForProject(w.stateRoot, projectKey); err == nil && strings.TrimSpace(content) != "" {
+	if content, err := state.GetPlanForSession(w.stateRoot, projectKey, planSID); err == nil && strings.TrimSpace(content) != "" {
 		planExists = true
 	}
 	// Stateless throttle + kind, derived from the transcript-visible msgs.
@@ -669,7 +674,8 @@ func planMessagePrefixHash(msgs []llm.Message) [sha256.Size]byte {
 // Writing the implementation record is therefore what ends the reminders, which
 // is precisely the loop closing.
 func (w *planModeLLM) executeImplementationPhase(ctx context.Context, msgs []llm.Message, tools []*llm.Tool, projectKey string, st state.State) (*llm.Result, error) {
-	planDir := state.PlanDirForProject(w.stateRoot, projectKey)
+	planSID := tool.PlanSessionIDFromContext(ctx)
+	planDir := state.PlanDirForSession(w.stateRoot, projectKey, planSID)
 	// The plan directory stays writable outside plan mode: it is the only path
 	// under the agent state root the implementation record may be written to.
 	ctx = tool.WithAllowedPlanPath(ctx, planDir)
@@ -681,7 +687,7 @@ func (w *planModeLLM) executeImplementationPhase(ctx context.Context, msgs []llm
 	if tool.IsForkChildFromContext(ctx) || strings.TrimSpace(tool.SubagentTypeFromContext(ctx)) != "" {
 		return w.inner.Execute(ctx, msgs, tools)
 	}
-	content, err := state.GetPlanForProject(w.stateRoot, projectKey)
+	content, err := state.GetPlanForSession(w.stateRoot, projectKey, planSID)
 	if err != nil || strings.TrimSpace(content) == "" || state.HasImplementationRecord(content) {
 		return w.inner.Execute(ctx, msgs, tools)
 	}
@@ -689,7 +695,7 @@ func (w *planModeLLM) executeImplementationPhase(ctx context.Context, msgs []llm
 	if !(reminderCount == 0 || turnsSinceReminder >= planModeTurnsBetweenReminders) {
 		return w.inner.Execute(ctx, msgs, tools)
 	}
-	planFile := state.PlanPathForProject(w.stateRoot, projectKey)
+	planFile := state.PlanPathForSession(w.stateRoot, projectKey, planSID)
 	reminder := buildPlanImplementationReminder(planFile, planModeKindForCount(reminderCount))
 	reminder, insertAt := w.stableReminderForRun(ctx, msgs, reminder)
 	msgs = injectAndRecordPlanReminder(ctx, msgs, reminder, insertAt)

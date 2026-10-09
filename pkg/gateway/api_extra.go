@@ -1575,9 +1575,10 @@ func (s *Server) handleSessionPlanMarkdown(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
-	// Project-scoped, like every other plan resolution: a hardcoded empty key
-	// reads <stateRoot>/plans instead of the session's <stateRoot>/plans/<project>.
-	p, err := state.GetPlanForProject(s.stateRoot(), s.projectKey())
+	// Project- and session-scoped, like every other plan resolution: plans
+	// live per conversation, so plan-md returns the plan of exactly the
+	// session in the URL — never another conversation's newer file.
+	p, err := state.GetPlanForSession(s.stateRoot(), s.projectKey(), sid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1730,6 +1731,13 @@ func (s *Server) subagentConversationSurface(sid string) run.SubagentSurface {
 		OnBoundary: func(agentKey string, send, restore []run.Input) {
 			s.publishSubagentQueuedInputReleased(sid, agentKey, send, restore)
 		},
+		// Every change to the subagent's queue reaches its open views: the
+		// web reads the queue only from these events, so a message the model
+		// took, or one the queue settled, would otherwise stay on screen as
+		// queued and recallable.
+		OnQueueChanged: func(agentKey string, preview run.QueuePreview) {
+			s.publishSubagentPreview(context.Background(), sid, agentKey, toPendingInputPreview(preview))
+		},
 	}
 }
 
@@ -1753,12 +1761,20 @@ func (s *Server) publishSubagentQueuedInputReleased(sid, agentKey string, send, 
 }
 
 // publishSubagentPendingInputUpdated reports a subagent's queue as its own view
-// shows it, tagged with its roster key so it lands there and nowhere else.
+// shows it, read from the live channel.
 func (s *Server) publishSubagentPendingInputUpdated(ctx context.Context, sid, agentKey string, runner *run.Runner) {
-	if s == nil || s.RunEvents() == nil || runner == nil {
+	if runner == nil {
 		return
 	}
-	preview := subagentInputPreview(runner, sid, agentKey)
+	s.publishSubagentPreview(ctx, sid, agentKey, subagentInputPreview(runner, sid, agentKey))
+}
+
+// publishSubagentPreview reports a subagent's queue as its own view shows it,
+// tagged with its roster key so it lands there and nowhere else.
+func (s *Server) publishSubagentPreview(ctx context.Context, sid, agentKey string, preview turn.PendingInputPreview) {
+	if s == nil || s.RunEvents() == nil {
+		return
+	}
 	payload := event.PendingInputUpdatedPayload{
 		AgentID:        strings.TrimSpace(agentKey),
 		PendingSteers:  preview.PendingSteers,

@@ -254,7 +254,7 @@ func TestHandleStatusSlashUsesRuntimeStores(t *testing.T) {
 	// Main agent state lives under its workspace root, not raw home.
 	stateRoot := filepath.Join(home, "workspace")
 	require.NoError(t, state.Set(stateRoot, "s1", state.State{Mode: state.ModePlan, Phase: "draft"}))
-	require.NoError(t, state.SetPlanForProject(stateRoot, "", "1. do work"))
+	require.NoError(t, state.SetPlanForSession(stateRoot, "", "s1", "1. do work"))
 	require.NoError(t, state.Save(stateRoot, "s1", state.List{Items: []state.Item{
 		{ID: "1", Content: "todo", Status: state.StatusPending},
 	}}))

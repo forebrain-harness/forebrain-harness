@@ -154,6 +154,38 @@ func TestStreamingOverflowRecoversAndContinues(t *testing.T) {
 	}
 }
 
+// The reactive compaction a provider overflow forces must keep the steers
+// riding on the call out of its checkpoint, exactly like the proactive one.
+func TestOverflowCompactionKeepsProvisionalSteersOutOfTheCheckpoint(t *testing.T) {
+	llm.ResetObservedForTest()
+	history := append(overflowTestHistory(40), llm.UserMessage(llm.Text("steer riding on the call")))
+	inner := &streamOverflowLLM{limit: llm.EstimateMessages(history) / 3}
+	var compactedInput []llm.Message
+	deps := &CompactChainDeps{
+		ActiveModel: func(context.Context) (string, string) { return "openai", "gpt-5.1-codex" },
+		TryCompact: func(_ context.Context, msgs []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compactedInput = append([]llm.Message(nil), msgs...)
+			return []llm.Message{
+				llm.SystemMessage("system prompt"),
+				llm.UserMessage(llm.Text("summary of prior work")),
+			}, true, nil
+		},
+	}
+	adoption := &compactionAdoptionSink{}
+	ctx := withCompactionAdoptionSink(toolpkg.WithRunID(context.Background(), "run-overflow-steer"), adoption)
+	ctx = withProvisionalTail(ctx, ctx, len(history), 1)
+	if _, err := WrapRecoverableLLM(inner, nil, deps).Execute(ctx, history, nil); err != nil {
+		t.Fatalf("overflow was not recovered: %v", err)
+	}
+	if len(compactedInput) != len(history)-1 {
+		t.Fatalf("compaction saw %d messages, want the %d before the steer", len(compactedInput), len(history)-1)
+	}
+	replaced, ok := adoption.take()
+	if !ok || replaced[len(replaced)-1].TextContent() != "steer riding on the call" {
+		t.Fatalf("the request after the checkpoint must still end with the steer, got %v", roles(replaced))
+	}
+}
+
 // TestOverflowTeachesWindowSoNextRunCompactsProactively asserts the learning
 // loop: after one rejection, the same history must be compacted *before* being
 // sent rather than rejected again.
@@ -2287,7 +2319,7 @@ func TestPlanModeE2EFullCycle(t *testing.T) {
 		t.Fatalf("turn-0 should get full reminder: %q", body)
 	}
 	allowed := toolpkg.AllowedPlanPathFromContext(innerLLM.gotCtx)
-	wantDir := state.PlanDirForProject(home, "")
+	wantDir := state.PlanDirForSession(home, "", sid)
 	if allowed == "" || allowed != wantDir {
 		t.Fatalf("AllowedPlanPath not wired: got %q want %q", allowed, wantDir)
 	}
@@ -2299,7 +2331,7 @@ func TestPlanModeE2EFullCycle(t *testing.T) {
 	}
 
 	// --- Step 4: write a descriptive-named plan file (as the LLM should) ---
-	planDir := state.PlanDirForProject(home, "")
+	planDir := state.PlanDirForSession(home, "", sid)
 	planFile = filepath.Join(planDir, "fix-cache-hit-rate.md")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatalf("mkdir plan dir: %v", err)
@@ -2308,7 +2340,7 @@ func TestPlanModeE2EFullCycle(t *testing.T) {
 		t.Fatalf("write plan file: %v", err)
 	}
 	// PlanPath should now return the descriptive-named file, not plan.md.
-	if got := state.PlanPathForProject(home, ""); got != planFile {
+	if got := state.PlanPathForSession(home, "", sid); got != planFile {
 		t.Fatalf("PlanPath=%q want %q after writing descriptive plan", got, planFile)
 	}
 
@@ -2390,11 +2422,11 @@ func TestPlanModeE2EFullCycle(t *testing.T) {
 	}
 
 	// --- Step 9: recording the implementation closes the loop ---
-	content, err := state.GetPlanForProject(home, "")
+	content, err := state.GetPlanForSession(home, "", sid)
 	if err != nil {
 		t.Fatalf("read plan: %v", err)
 	}
-	if err := state.SetPlanForProject(home, "", content+"\n\n"+state.ImplementationHeading+"\n\nLanded in foo.go; go test ./... passes.\n"); err != nil {
+	if err := state.SetPlanForSession(home, "", sid, content+"\n\n"+state.ImplementationHeading+"\n\nLanded in foo.go; go test ./... passes.\n"); err != nil {
 		t.Fatalf("record implementation: %v", err)
 	}
 	innerLLM3 := &capturingLLM{}
@@ -2418,10 +2450,10 @@ func exitedPlanState(t *testing.T, home, sid string) {
 	}
 }
 
-func writePlan(t *testing.T, home, content string) {
+func writePlan(t *testing.T, home, sid, content string) {
 	t.Helper()
-	if err := state.SetPlanForProject(home, "", content); err != nil {
-		t.Fatalf("planstore.SetForProject: %v", err)
+	if err := state.SetPlanForSession(home, "", sid, content); err != nil {
+		t.Fatalf("planstore.SetPlanForSession: %v", err)
 	}
 }
 
@@ -2438,7 +2470,7 @@ func TestImplementationReminderInjectedAfterExitingPlanMode(t *testing.T) {
 	home := t.TempDir()
 	sid := "impl-1"
 	exitedPlanState(t, home, sid)
-	writePlan(t, home, "# Plan\n\n- [ ] do the thing\n")
+	writePlan(t, home, sid, "# Plan\n\n- [ ] do the thing\n")
 
 	inner := &capturingLLM{}
 	w := wrapPlanModeLLM(inner, home)
@@ -2463,7 +2495,7 @@ func TestImplementationReminderStopsOnceRecorded(t *testing.T) {
 	home := t.TempDir()
 	sid := "impl-2"
 	exitedPlanState(t, home, sid)
-	writePlan(t, home, "# Plan\n\n- [x] do the thing\n\n"+state.ImplementationHeading+"\n\nDone in foo.go.\n")
+	writePlan(t, home, sid, "# Plan\n\n- [x] do the thing\n\n"+state.ImplementationHeading+"\n\nDone in foo.go.\n")
 
 	inner := &capturingLLM{}
 	w := wrapPlanModeLLM(inner, home)
@@ -2494,7 +2526,7 @@ func TestImplementationReminderSkippedWithoutPlanOrExit(t *testing.T) {
 
 	sid2 := "impl-4"
 	setMode(t, home, sid2, state.ModeAgent, 0)
-	writePlan(t, home, "# Plan\n")
+	writePlan(t, home, sid, "# Plan\n")
 	inner2 := &capturingLLM{}
 	w2 := wrapPlanModeLLM(inner2, home)
 	ctx2 := llm.WithAgentSessionID(context.Background(), sid2)
@@ -2510,7 +2542,7 @@ func TestImplementationReminderThrottledBetweenTurns(t *testing.T) {
 	home := t.TempDir()
 	sid := "impl-5"
 	exitedPlanState(t, home, sid)
-	writePlan(t, home, "# Plan\n")
+	writePlan(t, home, sid, "# Plan\n")
 
 	prior := llm.Message{
 		Role:   llm.RoleUser,
@@ -2533,7 +2565,7 @@ func TestImplementationReminderSkippedForSubagents(t *testing.T) {
 	home := t.TempDir()
 	sid := "impl-6"
 	exitedPlanState(t, home, sid)
-	writePlan(t, home, "# Plan\n")
+	writePlan(t, home, sid, "# Plan\n")
 
 	inner := &capturingLLM{}
 	w := wrapPlanModeLLM(inner, home)
@@ -2690,7 +2722,7 @@ func TestPlanModeLLMReminderKeepsStablePrefixAcrossToolIterations(t *testing.T) 
 	}
 	// Reproduces write_file creating the plan between requests. The reminder
 	// must not be rebuilt with a different "plan exists" variant afterward.
-	if err := state.SetPlanForProject(home, "", "# Newly written plan"); err != nil {
+	if err := state.SetPlanForSession(home, "", sid, "# Newly written plan"); err != nil {
 		t.Fatalf("planstore.Set: %v", err)
 	}
 
@@ -2744,7 +2776,7 @@ func TestPlanModeToolOrchestrationKeepsWriteFileHistoryAsExactPrefix(t *testing.
 	inner := &planWriteThenDoneLLM{}
 	tools := toolpkg.NewState(home)
 	writeTool, err := llm.NewTool("write_file", "write the plan", func(context.Context, *struct{}) (string, error) {
-		if err := state.SetPlanForProject(home, "", "# Written by tool orchestration"); err != nil {
+		if err := state.SetPlanForSession(home, "", sid, "# Written by tool orchestration"); err != nil {
 			return "", err
 		}
 		return "ok", nil
@@ -2788,8 +2820,55 @@ func TestPlanModeLLMWiresAllowedPlanPathCtx(t *testing.T) {
 	if allowed == "" {
 		t.Fatalf("AllowedPlanPath not wired into downstream ctx")
 	}
-	if got, want := allowed, state.PlanDirForProject(home, ""); got != want {
+	if got, want := allowed, state.PlanDirForSession(home, "", sid); got != want {
 		t.Fatalf("allowed path %q want %q", got, want)
+	}
+}
+
+// TestPlanModeReminderNamesOnlyTheConversationsPlan pins the reminder side of
+// the cross-conversation leak: the per-turn plan-mode reminder must advertise
+// THIS conversation's plan directory and writable region even when another
+// conversation in the same project wrote a plan more recently.
+func TestPlanModeReminderNamesOnlyTheConversationsPlan(t *testing.T) {
+	home := t.TempDir()
+	setMode(t, home, "sid-a", state.ModePlan, 0)
+
+	mineDir := state.PlanDirForSession(home, "", "sid-a")
+	if err := os.MkdirAll(mineDir, 0o755); err != nil {
+		t.Fatalf("mkdir mine dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mineDir, "mine.md"), []byte("# Mine\n"), 0o600); err != nil {
+		t.Fatalf("write mine: %v", err)
+	}
+	theirsDir := state.PlanDirForSession(home, "", "sid-b")
+	if err := os.MkdirAll(theirsDir, 0o755); err != nil {
+		t.Fatalf("mkdir theirs dir: %v", err)
+	}
+	theirs := filepath.Join(theirsDir, "theirs.md")
+	if err := os.WriteFile(theirs, []byte("# Theirs\n"), 0o600); err != nil {
+		t.Fatalf("write theirs: %v", err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(theirs, future, future); err != nil {
+		t.Fatalf("chtimes theirs: %v", err)
+	}
+
+	inner := &capturingLLM{}
+	w := wrapPlanModeLLM(inner, home)
+	ctx := llm.WithAgentSessionID(context.Background(), "sid-a")
+
+	if _, err := w.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("design"))}, nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	body := lastReminderBody(inner.gotMsgs)
+	if !strings.Contains(body, mineDir) {
+		t.Fatalf("reminder must name this conversation's plan dir %q: %q", mineDir, body)
+	}
+	if strings.Contains(body, "theirs.md") {
+		t.Fatalf("reminder must not name another conversation's plan: %q", body)
+	}
+	if got, want := toolpkg.AllowedPlanPathFromContext(inner.gotCtx), mineDir; got != want {
+		t.Fatalf("AllowedPlanPath=%q want %q", got, want)
 	}
 }
 
@@ -2906,7 +2985,7 @@ func TestPlanModeLLMReentryRestartsCount(t *testing.T) {
 	setMode(t, home, sid, state.ModePlan, 0)
 	// A plan file exists from the previous (exited) plan session, so the
 	// re-entry section (which guides reading the existing plan) is emitted.
-	if err := state.SetPlanForProject(home, "", "# Previous Plan\nold content"); err != nil {
+	if err := state.SetPlanForSession(home, "", sid, "# Previous Plan\nold content"); err != nil {
 		t.Fatalf("planstore.Set: %v", err)
 	}
 
@@ -5124,6 +5203,349 @@ func TestToolOrchestrationConsumesPendingSteerWhenTurnHasNoToolCall(t *testing.T
 	}
 	if rt.HasSteers() {
 		t.Fatalf("expected steer runtime queue drained")
+	}
+}
+
+// retractDuringCallLLM answers the first sampling with a tool call. On the
+// second — the one carrying the queued steers — it stands in for the user
+// pressing the recall key while the request waits on the provider: it recalls
+// from the conversation queue, then waits for the abort that recall triggers.
+// Every later sampling finishes the turn.
+type retractDuringCallLLM struct {
+	queue    *InputQueue
+	recalled []Input
+	calls    [][]llm.Message
+}
+
+func (m *retractDuringCallLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls = append(m.calls, append([]llm.Message(nil), messages...))
+	switch len(m.calls) {
+	case 1:
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	case 2:
+		in, ok := m.queue.Recall()
+		if !ok {
+			return nil, errors.New("recall refused a steer that is still in the queue")
+		}
+		m.recalled = append(m.recalled, in)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil, errors.New("recalling an in-flight steer did not abort the call carrying it")
+		}
+	default:
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+func readFileTestTool(t *testing.T) *llm.Tool {
+	t.Helper()
+	type readInput struct {
+		FilePath string `json:"file_path"`
+	}
+	readTool, err := llm.NewTool("read_file", "read", func(_ context.Context, _ *readInput) (string, error) {
+		return "package main", nil
+	})
+	if err != nil {
+		t.Fatalf("read_file tool: %v", err)
+	}
+	return readTool
+}
+
+// A steer taken for a model call that has not begun answering still shows in
+// the queue, so recall must hand it back — and the model must never see it:
+// the call carrying it is abandoned and re-sent with only the steers left.
+func TestRetractedInFlightSteerIsResentWithoutIt(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "keep the old API", Parts: []llm.ContentPart{llm.Text("keep the old API")}})
+	q.Steer(Input{Text: "never mind", Parts: []llm.ContentPart{llm.Text("never mind")}})
+
+	inner := &retractDuringCallLLM{queue: q}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		WithTurnInputRuntime(context.Background(), rt),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{readFileTestTool(t)},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	if len(inner.recalled) != 1 || inner.recalled[0].Text != "never mind" {
+		t.Fatalf("recalled %#v, want the newest steer", inner.recalled)
+	}
+	if len(inner.calls) != 3 {
+		t.Fatalf("model calls=%d want 3 (tool call, abandoned call, re-sent call)", len(inner.calls))
+	}
+	third := inner.calls[2]
+	if last := third[len(third)-1]; last.Role != llm.RoleUser || last.TextContent() != "keep the old API" {
+		t.Fatalf("re-sent call must end with the steer left, got %v", roles(third))
+	}
+	for _, msg := range append(append([]llm.Message(nil), third...), res.Session...) {
+		if msg.TextContent() == "never mind" {
+			t.Fatal("the retracted steer reached the model or the persisted session")
+		}
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "keep the old API" {
+		t.Fatalf("delivered = %#v, want only the steer the model answered", delivered)
+	}
+	if preview := q.Preview(); preview.Visible() {
+		t.Fatalf("queue not empty: %#v", preview)
+	}
+}
+
+// retractAtAnswerLLM ends the turn without a tool call — the branch that
+// reopens it for a queued steer — and then, on the sampling that carries the
+// steer, recalls it the way the user's recall key would.
+type retractAtAnswerLLM struct {
+	queue *InputQueue
+	calls int
+}
+
+func (m *retractAtAnswerLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("first answer")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 10, OutputTokens: 2}}, nil
+	}
+	if _, ok := m.queue.Recall(); !ok {
+		return nil, errors.New("recall refused a steer that is still in the queue")
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		return nil, errors.New("recalling an in-flight steer did not abort the call carrying it")
+	}
+}
+
+// When every steer that reopened a finished turn is retracted, the turn ends
+// on the answer it had already reached — once, and counted once.
+func TestRetractingEveryReopeningSteerEndsTurnOnTheAnswer(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "actually, also do X", Parts: []llm.ContentPart{llm.Text("actually, also do X")}})
+
+	inner := &retractAtAnswerLLM{queue: q}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		WithTurnInputRuntime(context.Background(), rt),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("model calls=%d want 2 (the answer, then the abandoned call)", inner.calls)
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "first answer" {
+		t.Fatalf("the turn must end on the answer it had reached, got %#v", res)
+	}
+	if len(res.Session) != 2 || res.Session[1].TextContent() != "first answer" {
+		t.Fatalf("session = %v, want the request and the answer once", roles(res.Session))
+	}
+	if res.Usage == nil || res.Usage.InputTokens != 10 {
+		t.Fatalf("usage = %#v, want the answer counted once", res.Usage)
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 0 {
+		t.Fatalf("a retracted steer was rendered as sent: %#v", delivered)
+	}
+	if rt.HasSteers() || q.Preview().Visible() {
+		t.Fatal("the retracted steer is still queued")
+	}
+}
+
+// answerThenRecallLLM begins answering the call that carries the steer — the
+// response-start boundary — and only then tries to recall it.
+type answerThenRecallLLM struct {
+	queue      *InputQueue
+	calls      int
+	recalledOK bool
+}
+
+func (m *answerThenRecallLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+	if sink := llm.StreamSinkFrom(ctx); sink != nil && sink.OnResponseStarted != nil {
+		sink.OnResponseStarted()
+	}
+	_, m.recalledOK = m.queue.Recall()
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+}
+
+// Once the model has begun answering a steer it has left the queue and can no
+// longer be recalled: the user sees it as a sent message instead.
+func TestSteerCannotBeRecalledOnceTheModelAnswersIt(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "too late", Parts: []llm.ContentPart{llm.Text("too late")}})
+	inner := &answerThenRecallLLM{queue: q}
+	ctx := llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), &llm.StreamSink{})
+	if _, err := wrapToolOrchestrationLLM(inner, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{readFileTestTool(t)}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if inner.recalledOK {
+		t.Fatal("a steer the model is answering was handed back for editing")
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 1 || delivered[0].Text != "too late" {
+		t.Fatalf("delivered = %#v, want the answered steer", delivered)
+	}
+}
+
+// recallThenLeakLLM recalls the in-flight steer, then behaves like a provider
+// whose first output event raced the abort: it fires the response-start
+// boundary and a delta, and even returns a complete answer. None of that may
+// reach the surface or the session.
+type recallThenLeakLLM struct {
+	queue *InputQueue
+	calls int
+}
+
+func (m *recallThenLeakLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	sink := llm.StreamSinkFrom(ctx)
+	switch m.calls {
+	case 1:
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	case 2:
+		if _, ok := m.queue.Recall(); !ok {
+			return nil, errors.New("recall refused a steer that is still in the queue")
+		}
+		sink.OnResponseStarted()
+		sink.OnDelta("answer to the retracted steer")
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer to the retracted steer")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	default:
+		sink.OnResponseStarted()
+		sink.OnDelta("done")
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+func TestAbandonedCallOutputNeverReachesTheSurface(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "retract me", Parts: []llm.ContentPart{llm.Text("retract me")}})
+	var events []string
+	ctx := llm.WithStreamSink(WithTurnInputRuntime(context.Background(), rt), &llm.StreamSink{
+		OnResponseStarted: func() { events = append(events, "started") },
+		OnDelta:           func(text string) { events = append(events, text) },
+	})
+	inner := &recallThenLeakLLM{queue: q}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{readFileTestTool(t)})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got, want := strings.Join(events, ","), "started,done"; got != want {
+		t.Fatalf("surface saw %q, want %q: the abandoned call's output leaked", got, want)
+	}
+	if inner.calls != 3 || res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("calls=%d result=%#v, want the turn finished by a fresh call", inner.calls, res)
+	}
+	for _, msg := range res.Session {
+		if strings.Contains(msg.TextContent(), "retract") {
+			t.Fatalf("the abandoned exchange reached the session: %v", roles(res.Session))
+		}
+	}
+}
+
+// discardDuringCallLLM answers the first sampling with a tool call. On the
+// second — the one carrying the queued steer — the user leaves the
+// conversation, which discards its queue, and the call waits for the abort
+// that triggers. Every later sampling finishes the turn.
+type discardDuringCallLLM struct {
+	queue   *InputQueue
+	dropped int
+	calls   [][]llm.Message
+}
+
+func (m *discardDuringCallLLM) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls = append(m.calls, append([]llm.Message(nil), messages...))
+	switch len(m.calls) {
+	case 1:
+		msg := llm.AssistantMessage(nil, llm.ToolCall{ID: "call-read", Type: llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"server.go"}`}})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	case 2:
+		m.dropped = m.queue.Discard()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil, errors.New("discarding an in-flight steer did not abort the call carrying it")
+		}
+	default:
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{}}, nil
+	}
+}
+
+// Leaving a conversation discards its queue. A steer already taken for a model
+// call that has not begun answering must go with it — otherwise the outgoing
+// run hands it to the model with nothing left to render it into the transcript.
+func TestDiscardRetractsTheInFlightSteer(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "left behind", Parts: []llm.ContentPart{llm.Text("left behind")}})
+
+	inner := &discardDuringCallLLM{queue: q}
+	res, err := wrapToolOrchestrationLLM(inner, st).Execute(
+		WithTurnInputRuntime(context.Background(), rt),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))},
+		[]*llm.Tool{readFileTestTool(t)},
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if inner.dropped != 1 {
+		t.Fatalf("dropped = %d, want 1: the in-flight steer was never answered", inner.dropped)
+	}
+	if len(inner.calls) != 3 {
+		t.Fatalf("model calls=%d want 3 (tool call, abandoned call, re-sent call)", len(inner.calls))
+	}
+	if third := inner.calls[2]; third[len(third)-1].Role != llm.RoleTool {
+		t.Fatalf("re-sent call must end at the tool result, got %v", roles(third))
+	}
+	if res == nil || res.Message == nil || res.Message.TextContent() != "done" {
+		t.Fatalf("unexpected result: %#v", res)
+	}
+	for _, msg := range res.Session {
+		if msg.TextContent() == "left behind" {
+			t.Fatal("the discarded steer reached the persisted session")
+		}
+	}
+	if delivered := q.TakeDelivered(); len(delivered) != 0 {
+		t.Fatalf("a discarded steer was rendered as sent: %#v", delivered)
 	}
 }
 

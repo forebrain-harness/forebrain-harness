@@ -9,18 +9,14 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
-func TestRetractLastSteerRemovesMostRecentSteer(t *testing.T) {
+func TestRetractSteerRemovesThePendingSteerItNames(t *testing.T) {
 	rt := NewTurnInputRuntime()
-	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("first steer")})
-	rt.Enqueue(TurnInputModeFollowUp, []llm.ContentPart{llm.Text("a follow up")})
-	rt.Enqueue(TurnInputModeSteer, []llm.ContentPart{llm.Text("second steer")})
+	rt.enqueueEntry(TurnInputEntry{Mode: TurnInputModeSteer, Parts: []llm.ContentPart{llm.Text("first steer")}, Seq: 1})
+	rt.enqueueEntry(TurnInputEntry{Mode: TurnInputModeFollowUp, Parts: []llm.ContentPart{llm.Text("a follow up")}, Seq: 2})
+	rt.enqueueEntry(TurnInputEntry{Mode: TurnInputModeSteer, Parts: []llm.ContentPart{llm.Text("second steer")}, Seq: 3})
 
-	parts, ok := rt.RetractLastSteer()
-	if !ok {
-		t.Fatalf("expected a steer to retract")
-	}
-	if got := llm.TextContent(parts...); got != "second steer" {
-		t.Fatalf("expected most recent steer retracted, got %q", got)
+	if !rt.RetractSteer(3) {
+		t.Fatalf("expected the named steer to be retracted")
 	}
 
 	remaining := rt.Snapshot()
@@ -47,19 +43,19 @@ func TestTurnInputRuntimeNotifiesAllDeliveryHooks(t *testing.T) {
 	}
 }
 
-func TestRetractLastSteerReturnsFalseWhenNoSteers(t *testing.T) {
+func TestRetractSteerLeavesFollowUpsAlone(t *testing.T) {
 	rt := NewTurnInputRuntime()
-	rt.Enqueue(TurnInputModeFollowUp, []llm.ContentPart{llm.Text("just a follow up")})
+	rt.enqueueEntry(TurnInputEntry{Mode: TurnInputModeFollowUp, Parts: []llm.ContentPart{llm.Text("just a follow up")}, Seq: 1})
 
-	if _, ok := rt.RetractLastSteer(); ok {
-		t.Fatalf("expected no steer to retract when only follow-ups are queued")
+	if rt.RetractSteer(1) {
+		t.Fatalf("a follow-up is not a steer to retract")
 	}
 	if remaining := rt.Snapshot(); len(remaining) != 1 {
 		t.Fatalf("expected follow-up untouched, got %#v", remaining)
 	}
 
 	var nilRT *TurnInputRuntime
-	if _, ok := nilRT.RetractLastSteer(); ok {
+	if nilRT.RetractSteer(1) {
 		t.Fatalf("expected nil runtime to report no steer")
 	}
 }
@@ -87,7 +83,7 @@ func TestTurnInputRuntimeChangeHookFiresWhenPendingChanges(t *testing.T) {
 		t.Fatalf("expected delivered steer passed to hook, got %#v", lastDelivered)
 	}
 
-	if _, ok := rt.RetractLastSteer(); ok {
+	if rt.RetractSteer(1) {
 		t.Fatalf("expected no steer left to retract")
 	}
 	if calls != 1 {
@@ -134,8 +130,8 @@ func TestInputQueueSteerAdmission(t *testing.T) {
 }
 
 // Q4: recall picks the newest message by the shared enqueue clock, whichever
-// lane it landed in. A steer the runtime can no longer retract is skipped —
-// and because the runtime drains FIFO, so is the whole steer lane.
+// lane it landed in. A steer the model is already answering is skipped —
+// and because the runtime delivers FIFO, so is the whole steer lane.
 func TestInputQueueRecallPicksNewestByLane(t *testing.T) {
 	t.Run("newest is a pending steer", func(t *testing.T) {
 		q := NewInputQueue()
@@ -165,17 +161,38 @@ func TestInputQueueRecallPicksNewestByLane(t *testing.T) {
 			t.Fatalf("older steer must stay queued: %#v", preview)
 		}
 	})
-	t.Run("unretractable steer is skipped", func(t *testing.T) {
+	t.Run("in-flight steer is retracted from its delivery", func(t *testing.T) {
 		q := NewInputQueue()
 		rt := NewTurnInputRuntime()
 		q.Attach(rt)
 		q.FollowUp(Input{Text: "older follow-up"})
 		q.Steer(Input{Text: "in flight"})
-		// The runtime drained the steer for a model call that has not
-		// committed yet: retracting finds nothing, so recall must not hand
-		// back a message the model is about to answer.
-		if delivery := rt.BeginSteerDelivery(context.Background()); delivery == nil {
+		// The runtime took the steer for a model call that has not begun
+		// answering: it still shows in the queue, so it is still the user's.
+		delivery := rt.BeginSteerDelivery(context.Background())
+		if delivery == nil {
 			t.Fatal("expected an in-flight delivery")
+		}
+		in, ok := q.Recall()
+		if !ok || in.Text != "in flight" {
+			t.Fatalf("recall = %#v, %v", in, ok)
+		}
+		if delivery.Commit() {
+			t.Fatal("the call that carried a recalled steer must not commit it")
+		}
+	})
+	t.Run("steer the model is answering is skipped", func(t *testing.T) {
+		q := NewInputQueue()
+		rt := NewTurnInputRuntime()
+		q.Attach(rt)
+		q.FollowUp(Input{Text: "older follow-up"})
+		q.Steer(Input{Text: "being answered"})
+		// Stand in for the instant between the commit and the queue hearing
+		// of it: the steer still shows, but the model is answering it.
+		rt.SetChangeHook(nil)
+		delivery := rt.BeginSteerDelivery(context.Background())
+		if delivery == nil || !delivery.Commit() {
+			t.Fatal("expected a committed delivery")
 		}
 		in, ok := q.Recall()
 		if !ok || in.Text != "older follow-up" {
@@ -217,6 +234,90 @@ func TestRecallSteerAfterRuntimeDetach(t *testing.T) {
 	}
 	if send, _ := q.Next(BoundaryCompleted); len(send) != 0 {
 		t.Fatalf("a recalled steer must not be sent by the boundary: %#v", send)
+	}
+}
+
+// A steer taken for a model call that has not committed is still the user's:
+// retracting it shrinks the delivery, aborts the call carrying it, and keeps
+// that call from committing; rolling back returns only what is left.
+func TestRetractSteerTakesItBackFromAnInFlightDelivery(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "first"})
+	q.Steer(Input{Text: "second"})
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil || len(delivery.Entries()) != 2 {
+		t.Fatalf("expected both steers in flight, got %#v", delivery.Entries())
+	}
+	aborted := 0
+	delivery.bindAbort(func() { aborted++ })
+	if !rt.RetractSteer(2) {
+		t.Fatal("a steer whose call has not begun answering must be retractable")
+	}
+	if aborted != 1 {
+		t.Fatalf("aborts=%d want 1: the call carrying the steer must be abandoned", aborted)
+	}
+	if got := delivery.Entries(); len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("delivery still carries %#v, want only the first steer", got)
+	}
+	if !delivery.Retracted() {
+		t.Fatal("the delivery must report the retraction")
+	}
+	if delivery.Commit() {
+		t.Fatal("a delivery a steer was retracted from must not commit")
+	}
+	if rt.RetractSteer(2) {
+		t.Fatal("the same steer was retracted twice")
+	}
+	if !delivery.Rollback() {
+		t.Fatal("rollback must settle the abandoned delivery")
+	}
+	if got := rt.Snapshot(); len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("rollback restored %#v, want only the steer that is left", got)
+	}
+	if delivery.Retracted() {
+		t.Fatal("a settled delivery is no longer in flight")
+	}
+}
+
+// A retraction can land between the tool boundary that took the steer and the
+// start of the call that will carry it; binding the call's abort then fires it
+// at once, so that call is never made with the steer.
+func TestRetractSteerBeforeTheCallStartsAbortsItOnBind(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "only"})
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil {
+		t.Fatal("expected a delivery")
+	}
+	if !rt.RetractSteer(1) {
+		t.Fatal("expected the in-flight steer to be retractable")
+	}
+	aborted := 0
+	delivery.bindAbort(func() { aborted++ })
+	if aborted != 1 {
+		t.Fatalf("aborts=%d want 1", aborted)
+	}
+}
+
+// Once the model is answering a steer it is out of reach.
+func TestRetractSteerFailsOnceCommitted(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "answered"})
+	delivery := rt.BeginSteerDelivery(context.Background())
+	if delivery == nil || !delivery.Commit() {
+		t.Fatal("expected a committed delivery")
+	}
+	if rt.RetractSteer(1) {
+		t.Fatal("a committed steer was retracted")
+	}
+	if rt.RetractSteer(0) {
+		t.Fatal("seq 0 never names a queued steer")
 	}
 }
 
@@ -332,16 +433,46 @@ func TestInputQueueDiscardCountsWhatItDrops(t *testing.T) {
 		t.Fatalf("queue not emptied: %#v", preview)
 	}
 
+	// A steer taken for a model call that has not begun answering is still
+	// the user's: discarding retracts it from that call and counts it.
 	q2 := NewInputQueue()
 	rt2 := NewTurnInputRuntime()
 	q2.Attach(rt2)
 	q2.Steer(Input{Text: "in flight"})
-	if delivery := rt2.BeginSteerDelivery(context.Background()); delivery == nil {
+	delivery := rt2.BeginSteerDelivery(context.Background())
+	if delivery == nil {
 		t.Fatal("expected an in-flight delivery")
 	}
 	q2.FollowUp(Input{Text: "follow-up"})
-	if dropped := q2.Discard(); dropped != 1 {
-		t.Fatalf("an undeliverable steer must not be counted as dropped, got %d", dropped)
+	if dropped := q2.Discard(); dropped != 2 {
+		t.Fatalf("dropped = %d, want 2: the in-flight steer was never answered", dropped)
+	}
+	if delivery.Commit() {
+		t.Fatal("the call carrying a discarded steer must not commit it")
+	}
+
+	// A steer the model is already answering is out of reach and not counted.
+	q3 := NewInputQueue()
+	rt3 := NewTurnInputRuntime()
+	q3.Attach(rt3)
+	q3.Steer(Input{Text: "being answered"})
+	// Stand in for the instant between the commit and the queue hearing of it.
+	rt3.SetChangeHook(nil)
+	if d := rt3.BeginSteerDelivery(context.Background()); d == nil || !d.Commit() {
+		t.Fatal("expected a committed delivery")
+	}
+	q3.FollowUp(Input{Text: "follow-up"})
+	if dropped := q3.Discard(); dropped != 1 {
+		t.Fatalf("a steer the model is answering must not be counted as dropped, got %d", dropped)
+	}
+
+	// With the runtime detached the steers never left the queue: all count.
+	q4 := NewInputQueue()
+	q4.Attach(NewTurnInputRuntime())
+	q4.Steer(Input{Text: "never sent"})
+	q4.Detach()
+	if dropped := q4.Discard(); dropped != 1 {
+		t.Fatalf("dropped = %d, want 1: a steer left behind by a detached runtime was never delivered", dropped)
 	}
 }
 

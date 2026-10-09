@@ -23,7 +23,9 @@ func AgentContext(base context.Context, stateRoot, sid string) context.Context {
 // primaryagent.ActiveStateRoot), or the allowed plan path here won't match the
 // path the model is told to edit / GuardWrite permits. projectKey is the
 // session's launch-project identity (memories.ProjectKey); empty means
-// gateway/channel plans live directly under <workspaceRoot>/plans.
+// gateway/channel plans live directly under <workspaceRoot>/plans. The allowed
+// plan path is the CONVERSATION's plan directory under that root, so two
+// conversations planning in the same project never share a writable region.
 func AgentContextForProject(base context.Context, stateRoot, sid, projectKey string) context.Context {
 	sid = strings.TrimSpace(sid)
 	if sid == "" {
@@ -50,7 +52,10 @@ func AgentContextForProject(base context.Context, stateRoot, sid, projectKey str
 	// mode it is the ONLY writable region; outside plan mode it is the one path
 	// under the agent state root that GuardWrite's protected-metadata rule must
 	// not reject, so that the agent can record the plan's implementation status
-	// back into the plan file after the work is done.
-	agCtx = tool.WithAllowedPlanPath(agCtx, state.PlanDirForProject(stateRoot, projectKey))
+	// back into the plan file after the work is done. agCtx already carries the
+	// agent session id (and, when the caller set one, the conversation id), so
+	// PlanSessionIDFromContext resolves the conversation this context belongs
+	// to — a subagent inherits its parent conversation's directory.
+	agCtx = tool.WithAllowedPlanPath(agCtx, state.PlanDirForSession(stateRoot, projectKey, tool.PlanSessionIDFromContext(agCtx)))
 	return agCtx
 }

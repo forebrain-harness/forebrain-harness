@@ -219,7 +219,7 @@ func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
 
 func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	// Each LLM call is a pre-turn or mid-turn auto-compact checkpoint.
-	messages, compacted := r.applyRunScopedCompact(ctx, messages, tools)
+	messages, tail, compacted := r.applyRunScopedCompact(ctx, messages, tools)
 	if compacted {
 		// A mid-turn compaction just replaced the model context. Hand the
 		// compacted history back to the enclosing orchestration loop so its live
@@ -249,7 +249,7 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 		r.observeOverflow(ctx, lastErr, sent)
 		// A provider overflow uses the same replacement-checkpoint operation as
 		// proactive compaction. Never recover by silently dropping exchanges.
-		if compacted, ok := r.forceCompact(ctx, messages, tools); ok {
+		if compacted, ok := r.forceCompact(ctx, messages, tail, tools); ok {
 			recordCompactionAdoption(ctx, compacted)
 			if res2, err2 := r.inner.Execute(ctx, compacted, tools); err2 == nil {
 				r.observeSuccess(ctx, res2, llm.EstimateMessages(compacted)+estimateToolsTokens(tools))
@@ -298,28 +298,41 @@ func blankOutputError(err error) error {
 // applyRunScopedCompact keeps a compacted checkpoint as the base for later LLM
 // calls in the same run, then appends messages produced after that checkpoint.
 // It reports whether a new compaction happened on this call so the caller can
-// propagate the replacement history to the orchestration loop.
-func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) ([]llm.Message, bool) {
+// propagate the replacement history to the orchestration loop, and how many
+// trailing messages are provisional (see provisionalTail): those stay out of
+// the checkpoint and follow it verbatim.
+func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) ([]llm.Message, int, bool) {
 	runID := strings.TrimSpace(tool.RunIDFromContext(ctx))
 	prefillTokens := r.runGuard.prefill(runID, llm.EstimateMessages(messages))
+	tail := provisionalTailLen(ctx, len(messages))
 	if base, baseLen, ok := r.runGuard.get(runID); ok && baseLen <= len(messages) {
 		newMsgs := messages[baseLen:]
+		if tail > len(newMsgs) {
+			// A cached base reaching into the provisional messages is not the
+			// history the orchestration loop described; compact the slice whole,
+			// as before.
+			tail = 0
+		}
 		combined := make([]llm.Message, 0, len(base)+len(newMsgs))
 		combined = append(combined, base...)
 		combined = append(combined, newMsgs...)
 		messages = combined
 	}
+	head, provisional := messages[:len(messages)-tail], messages[len(messages)-tail:]
 	var snapshotRaw json.RawMessage
 	if r.snapshot != nil {
 		if raw, ok := r.snapshot(ctx); ok {
 			snapshotRaw = raw
 		}
 	}
-	messages, compacted := compactIfNeeded(ctx, messages, snapshotRaw, r.compactDeps, prefillTokens, tools)
-	if compacted {
-		r.runGuard.set(runID, messages)
+	compactCtx, release := compactionContext(ctx)
+	head, compacted := compactIfNeeded(compactCtx, head, snapshotRaw, r.compactDeps, prefillTokens, tools)
+	release()
+	if !compacted {
+		return messages, tail, false
 	}
-	return messages, compacted
+	r.runGuard.set(runID, head)
+	return joinProvisionalTail(head, provisional), tail, true
 }
 
 // observeSuccess records the provider's own prompt size for an accepted call.
@@ -346,13 +359,16 @@ func (r recoverableLLM) observeOverflow(ctx context.Context, err error, estimate
 	llm.RecordOverflow(provider, model, realInput, estimated)
 }
 
-func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) ([]llm.Message, bool) {
-	compacted, ok := r.compactDeps.tryCompact(ctx, messages, tools, true)
+func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message, tail int, tools []*llm.Tool) ([]llm.Message, bool) {
+	head, provisional := messages[:len(messages)-tail], messages[len(messages)-tail:]
+	compactCtx, release := compactionContext(ctx)
+	compacted, ok := r.compactDeps.tryCompact(compactCtx, head, tools, true)
+	release()
 	if !ok {
 		return messages, false
 	}
 	r.runGuard.set(strings.TrimSpace(tool.RunIDFromContext(ctx)), compacted)
-	return compacted, true
+	return joinProvisionalTail(compacted, provisional), true
 }
 
 // guardrailRunDedup tracks which run IDs have already had their input rails

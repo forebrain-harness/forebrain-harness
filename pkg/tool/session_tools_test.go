@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
@@ -134,7 +135,7 @@ func TestEnterPlanModeReturnsExistingPlanFile(t *testing.T) {
 	home := t.TempDir()
 	sid := "sid-pf-existing"
 	// Seed an existing descriptive-named plan file.
-	planDir := state.PlanDirForProject(home, "")
+	planDir := state.PlanDirForSession(home, "", sid)
 	existingPath := filepath.Join(planDir, "add-feature-x.md")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -245,7 +246,7 @@ func TestEnterPlanModeDetectsReentry(t *testing.T) {
 		Mode:          state.ModeAgent,
 		HasExitedPlan: true,
 	})
-	_ = state.SetPlanForProject(home, "", "# Previous Plan\n\nold content")
+	_ = state.SetPlanForSession(home, "", sid, "# Previous Plan\n\nold content")
 	st := &State{}
 	tool, _ := newEnterPlanModeTool(st, home)
 	ctx := WithApprovedActionID(withSession(context.Background(), sid), "ok")
@@ -270,7 +271,7 @@ func TestEnterPlanModeNoReentryWithoutExit(t *testing.T) {
 	home := t.TempDir()
 	sid := "sid-no-reentry"
 	// First entry: HasExitedPlan is false
-	_ = state.SetPlanForProject(home, "", "# Previous Plan\n\nold content")
+	_ = state.SetPlanForSession(home, "", sid, "# Previous Plan\n\nold content")
 	st := &State{}
 	tool, _ := newEnterPlanModeTool(st, home)
 	ctx := WithApprovedActionID(withSession(context.Background(), sid), "ok")
@@ -305,6 +306,49 @@ func TestExitPlanModeRestoresModeNoPrompts(t *testing.T) {
 	final, _ := state.Get(home, sid)
 	if final.Mode != state.ModeAgent {
 		t.Fatalf("mode=%v want agent", final.Mode)
+	}
+}
+
+// TestExitPlanModeReportsOwnSessionPlan pins the isolation at the tool layer:
+// after approval the model is told to implement the plan of ITS conversation,
+// never a plan another session wrote more recently.
+func TestExitPlanModeReportsOwnSessionPlan(t *testing.T) {
+	home := t.TempDir()
+	sid := "sid-own"
+	_ = state.Set(home, sid, state.State{
+		Mode:        state.ModePlan,
+		PrePlanMode: state.ModeAgent,
+	})
+	if err := state.SetPlanForSession(home, "", sid, "# Mine"); err != nil {
+		t.Fatalf("seed own plan: %v", err)
+	}
+	// Another conversation's plan, written later: must stay invisible.
+	otherDir := state.PlanDirForSession(home, "", "sid-other")
+	if err := os.MkdirAll(otherDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	theirs := filepath.Join(otherDir, "theirs.md")
+	if err := os.WriteFile(theirs, []byte("# Theirs\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(theirs, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	st := approvedExitPlanState()
+	tool, _ := newExitPlanModeTool(st, home)
+	raw, err := tool.Handle(withSession(context.Background(), sid), `{}`)
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	out, _ := raw.(string)
+	want := state.PlanPathForSession(home, "", sid)
+	if !strings.Contains(out, want) {
+		t.Fatalf("output should name the session's own plan %q: %s", want, out)
+	}
+	if strings.Contains(out, "theirs.md") {
+		t.Fatalf("output must not mention another session's plan: %s", out)
 	}
 }
 

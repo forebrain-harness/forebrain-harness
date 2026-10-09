@@ -427,7 +427,7 @@ func extractCodexPlans(parsed map[string]*parsedSession, opts *Options, progress
 			}
 			used[name] = threadID
 			body := strings.TrimRight(block, "\n") + "\n\n---\norigin: codex plan mode (thread " + threadID + ")\n"
-			outcome := writeExtractedPlan(workspace, projectKey, name, body, opts.DryRun)
+			outcome := writeExtractedPlan(workspace, projectKey, target, name, body, opts.DryRun)
 			out = append(out, outcome)
 		}
 	}
@@ -475,32 +475,42 @@ func threadIDSuffix(threadID string) string {
 	return clean
 }
 
-// writeExtractedPlan writes one extracted plan with the same three-state
-// idempotency the file-copy importer uses: identical → up-to-date,
-// differing → diverged and left alone.
-func writeExtractedPlan(workspace, projectKey, name, body string, dryRun bool) PlanOutcome {
+// writeExtractedPlan writes one plan for whichever importer extracted it
+// (Claude's file copy and Codex's block extraction both land here): into the
+// conversation's own plan directory when sessionID names one, into the flat
+// directory writeExtractedPlan's callers used before per-conversation plans
+// when it does not. The same three-state idempotency as the file-copy
+// importer: identical → up-to-date, differing → diverged and left alone.
+func writeExtractedPlan(workspace, projectKey, sessionID, name, body string, dryRun bool) PlanOutcome {
 	scope := "the unscoped plans root"
-	if projectKey != "" {
+	destDir := state.PlanDirForProject(workspace, projectKey)
+	if sessionID != "" {
+		destDir = state.PlanDirForSession(workspace, projectKey, sessionID)
+		if projectKey != "" {
+			scope = "project " + projectKey + ", conversation " + sessionID
+		} else {
+			scope = "conversation " + sessionID
+		}
+	} else if projectKey != "" {
 		scope = "project " + projectKey
 	}
-	destDir := state.PlanDirForProject(workspace, projectKey)
 	dest := filepath.Join(destDir, name+".md")
 	if existing, err := os.ReadFile(dest); err == nil {
 		if planContentEqual(existing, []byte(body)) {
-			return PlanOutcome{Name: name, ProjectKey: projectKey, Status: "up-to-date"}
+			return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "up-to-date"}
 		}
-		return PlanOutcome{Name: name, ProjectKey: projectKey, Status: "diverged", Detail: "a plan with this name already differs in " + scope + "; not overwritten"}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "diverged", Detail: "a plan with this name already differs in " + scope + "; not overwritten"}
 	}
 	if dryRun {
-		return PlanOutcome{Name: name, ProjectKey: projectKey, Status: "installed", Detail: "planned for " + scope}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "installed", Detail: "planned for " + scope}
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return PlanOutcome{Name: name, ProjectKey: projectKey, Status: "skipped", Detail: err.Error()}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "skipped", Detail: err.Error()}
 	}
 	if err := os.WriteFile(dest, []byte(body), 0o600); err != nil {
-		return PlanOutcome{Name: name, ProjectKey: projectKey, Status: "skipped", Detail: err.Error()}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "skipped", Detail: err.Error()}
 	}
-	return PlanOutcome{Name: name, ProjectKey: projectKey, Status: "installed", Detail: "written to " + scope}
+	return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "installed", Detail: "written to " + scope}
 }
 
 // importCodexProjectConfig migrates every discovered project root's

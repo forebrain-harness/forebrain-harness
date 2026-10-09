@@ -255,6 +255,74 @@ func recordCompactionAdoption(ctx context.Context, messages []llm.Message) {
 	compactionAdoptionSinkFromContext(ctx).record(messages)
 }
 
+// provisionalTail marks the trailing messages of one model call that are not
+// settled history yet: the queued steers riding on it — and, when they reopened
+// a finished turn, the answer they follow — any of which the user can still
+// retract until the call commits. recoverableLLM keeps them out of a
+// checkpoint, which is durable: a retracted steer must never survive in it, and
+// a steer rolled back after a failed call is sent again, so folding it in would
+// send it twice.
+type provisionalTail struct {
+	sent  int             // length of the message slice the call was handed
+	count int             // how many of its trailing messages are provisional
+	outer context.Context // the orchestration context, without the call's retraction abort
+}
+
+type provisionalTailKey struct{}
+
+// withProvisionalTail marks the last count of the sent messages handed to the
+// call made under ctx as provisional. outer is the context the call's own was
+// derived from: a compaction runs on its cancellation, not the call's, so a
+// retraction that aborts the call does not throw away a checkpoint that never
+// included the retracted steer.
+func withProvisionalTail(ctx, outer context.Context, sent, count int) context.Context {
+	if count <= 0 || count > sent {
+		return ctx
+	}
+	return context.WithValue(ctx, provisionalTailKey{}, provisionalTail{sent: sent, count: count, outer: outer})
+}
+
+// provisionalTailLen is how many trailing messages of a sent slice are
+// provisional — zero unless ctx describes exactly this slice, so a nested call
+// that inherits the context with other messages compacts them whole, as before.
+func provisionalTailLen(ctx context.Context, sent int) int {
+	if ctx == nil {
+		return 0
+	}
+	pt, ok := ctx.Value(provisionalTailKey{}).(provisionalTail)
+	if !ok || pt.sent != sent {
+		return 0
+	}
+	return pt.count
+}
+
+// compactionContext is ctx minus the call's retraction abort: it keeps every
+// value, but it is cancelled only when the orchestration context is. Without a
+// provisional tail there is nothing to retract, and ctx is returned as is.
+func compactionContext(ctx context.Context) (context.Context, func()) {
+	pt, ok := ctx.Value(provisionalTailKey{}).(provisionalTail)
+	if !ok || pt.outer == nil {
+		return ctx, func() {}
+	}
+	detached, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(pt.outer, func() { cancel(context.Cause(pt.outer)) })
+	return detached, func() {
+		stop()
+		cancel(nil)
+	}
+}
+
+// joinProvisionalTail appends the provisional messages after a checkpoint, in a
+// fresh slice so the checkpoint the run guard caches is never written through.
+func joinProvisionalTail(head, tail []llm.Message) []llm.Message {
+	if len(tail) == 0 {
+		return head
+	}
+	out := make([]llm.Message, 0, len(head)+len(tail))
+	out = append(out, head...)
+	return append(out, tail...)
+}
+
 // CompactionService assembles the compaction service for an explicit /compact.
 //
 // It was implemented twice, byte for byte, in the TUI and the gateway, and the

@@ -1243,6 +1243,18 @@ interface RunProjectionState {
   /** The send that started the run has yet to act on what its run hands back. */
   awaitingRelease?: boolean
   released?: ReleasedInput[]
+  /**
+   * The answer the run's output is drawn into once a steer has been handed to
+   * its model: each delivered steer closes the answer so far and opens a new
+   * one after it. Unset until the first, when the output goes to the answer
+   * the run started with.
+   */
+  answerMessageId?: string
+}
+
+/** The message a run's output is drawn into now (see RunProjectionState.answerMessageId). */
+function answerTarget(state: RunProjectionState, startedWith: string): string {
+  return state.answerMessageId || startedWith
 }
 
 /**
@@ -2374,6 +2386,8 @@ export function useChatStream() {
     'assistant_delta',
     'reasoning_delta',
     'reasoning_done',
+    // A delivered steer is a user row of the transcript once its run is persisted.
+    'input_delivered',
     'tool_call_started',
     'tool_call_completed',
     'tool_output_delta',
@@ -3126,10 +3140,16 @@ export function useChatStream() {
     }
     const runId = activeRunId?.trim()
     if (!runId) return null
-    const resp = await forebrainApi.runQueuedInput(runId, { action: 'edit_last' })
-    applyPendingInputPreview(resp.preview)
-    if (!resp.accepted) return null
-    return queuedSubmission(resp)
+    try {
+      const resp = await forebrainApi.runQueuedInput(runId, { action: 'edit_last' })
+      applyPendingInputPreview(resp.preview)
+      if (!resp.accepted) return null
+      return queuedSubmission(resp)
+    } catch {
+      // The run ended between the preview and the key: its queue is being
+      // handed back as it ends, so there is nothing left to recall here.
+      return null
+    }
   }
 
   /**
@@ -3418,6 +3438,10 @@ export function useChatStream() {
 	  sessionEventCursor = Number(evt.sequence)
 	}
     const payload = evt.payload ?? {}
+    // A run's output lands in its latest answer: the one opened after the
+    // newest steer the run handed its model (see input_delivered), or the
+    // answer the run started with.
+    assistantMessageId = answerTarget(state, assistantMessageId)
     if (evt.type === 'approval_requested' || evt.type === 'approval_resolved') {
       // The global pending-action controls and the per-agent history card read
       // one durable action. Refresh on both edges so a decision made in another
@@ -3693,6 +3717,56 @@ export function useChatStream() {
           ...message,
           turnDiffs: [...(message.turnDiffs ?? []), ...turnDiffs],
         }))
+        return
+      }
+      case 'input_delivered': {
+        // A steer the run handed its model is the user's own message, drawn
+        // where the model received it: the answer so far closes, the message
+        // follows it, and what the run says next opens a new answer after it —
+        // the shape a reload draws from the transcript, and the place the
+        // terminal draws it live.
+        const delivered: ReleasedInput = {
+          text: String(payload.text ?? ''),
+          attachments: stringList(payload.attachments),
+          mentionImages: stringList(payload.mentionImages),
+        }
+        if (!delivered.text.trim() && delivered.attachments.length === 0 && delivered.mentionImages.length === 0) return
+        const seed = eventID || `${Date.now()}`
+        const userId = `user-delivered-${seed}`
+        const nextAnswerId = `assistant-delivered-${seed}`
+        const runId = String(evt.runId ?? '').trim() || undefined
+        const inserted: ChatMessage[] = [
+          { id: userId, role: 'user', content: delivered.text, runId },
+          { id: nextAnswerId, role: 'assistant', content: NOTHING_SAID_YET, runId },
+        ]
+        const index = messages.value.findIndex((message) => message.id === assistantMessageId)
+        if (index >= 0) {
+          const closing = messages.value[index]!
+          const blocks = closeStreamedBlocks(closing.blocks ?? [], ['assistant', 'thinking'], evt.createdAt)
+          messages.value = [
+            ...messages.value.slice(0, index),
+            { ...closing, blocks, content: spokenText(blocks) },
+            ...inserted,
+            ...messages.value.slice(index + 1),
+          ]
+        } else {
+          messages.value = [...messages.value, ...inserted]
+        }
+        state.answerMessageId = nextAnswerId
+        // The answer text the run accumulates is the new answer's alone now.
+        state.fullAnswer = ''
+        answer.value = ''
+        if (delivered.attachments.length || delivered.mentionImages.length) {
+          // What it attached is described by name once the gateway answers.
+          void releasedSubmission(delivered).then((submission) => {
+            const attachments = messageAttachments(submission)
+            updateMessageById(userId, (message) => ({
+              ...message,
+              content: message.content.trim() ? message.content : attachedOnlyText(attachments),
+              attachments,
+            }))
+          })
+        }
         return
       }
       case 'pending_input_updated':
@@ -4001,6 +4075,8 @@ export function useChatStream() {
     // This send's view of its run. It hears the messages its run hands back
     // until it acts on them at its end; later, they go back to the composer.
     const eventState: RunProjectionState = { fullAnswer: '', sentHere: true, awaitingRelease: true, released: [] }
+    // The answer this send's run is drawing into now (see answerTarget).
+    const answerId = () => answerTarget(eventState, assistantMessageId)
     // The controller this send owns. A later send, or a session reset,
     // replaces the global one before this send ends; the cleanup at the end
     // answers to whoever owns the slot then, not to every send that passed
@@ -4095,7 +4171,7 @@ export function useChatStream() {
           const data = (payload.data && typeof payload.data === 'object')
             ? toCamelCase(payload.data as Record<string, unknown>)
             : payload
-          updateMessageById(assistantMessageId, (message) => ({
+          updateMessageById(answerId(), (message) => ({
             ...withSettledTurnText(message, finalText, finishedAt),
             ...runEndPatch(finishedAt, data.elapsedMs, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
@@ -4112,7 +4188,7 @@ export function useChatStream() {
           eventState.completedNormally = false
           const msg = String(payload.error ?? payload.message ?? 'Request failed')
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
-          updateMessageById(assistantMessageId, (message) => ({
+          updateMessageById(answerId(), (message) => ({
             ...withRunError(message, String(payload.runId ?? activeRunId ?? '').trim(), msg, parseProviderErrorDetail(payload.data), finishedAt),
             ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
@@ -4153,7 +4229,7 @@ export function useChatStream() {
           eventState.completedNormally = false
           eventState.completedRunId = String(payload.runId ?? activeRunId ?? '').trim() || eventState.completedRunId || null
           const finishedAt = String(payload.createdAt ?? payload.finishedAt ?? new Date().toISOString()).trim()
-          updateMessageById(assistantMessageId, (message) => ({
+          updateMessageById(answerId(), (message) => ({
             ...withCancelledTurn(message, finishedAt),
             ...runEndPatch(finishedAt, undefined, eventState.runStartedAt, planProgressOfPayload(payload)),
           }))
@@ -4367,7 +4443,7 @@ export function useChatStream() {
           updateRuntimeKind('working')
         }
       }
-      const currentAssistant = messages.value.find((message) => message.id === assistantMessageId)
+      const currentAssistant = messages.value.find((message) => message.id === answerId())
       const hasAssistantData = Boolean(eventState.fullAnswer) ||
 		Boolean(currentAssistant?.picker) ||
 		Boolean(currentAssistant?.blocks?.length) ||
@@ -4378,9 +4454,9 @@ export function useChatStream() {
       // every run; the turn stays to carry that line.
       const runEnded = currentAssistant?.workedDurationMs != null
       if (!hasAssistantData && !runEnded) {
-        messages.value = messages.value.filter((message) => message.id !== assistantMessageId)
+        messages.value = messages.value.filter((message) => message.id !== answerId())
       } else {
-        updateMessageById(assistantMessageId, (message) => ({
+        updateMessageById(answerId(), (message) => ({
           ...message,
           // The timeline is what the turn said, in the order it said it; the raw
           // delta stream is only a fallback for a turn that produced no blocks
@@ -4396,15 +4472,15 @@ export function useChatStream() {
       const isAbort = (e as { name?: string })?.name === 'AbortError'
       if (isAbort) {
         const finalContent = answer.value?.trim() ? answer.value : translate('chat.cancelled')
-        updateMessageById(assistantMessageId, (message) => ({
+        updateMessageById(answerId(), (message) => ({
           ...message,
           content: finalContent,
         }))
       } else {
         setError(getErrorMessage(e))
-	const partial = messages.value.find((message) => message.id === assistantMessageId)
+	const partial = messages.value.find((message) => message.id === answerId())
 	if (!partial?.blocks?.length && !partial?.content?.trim()) {
-		  messages.value = messages.value.filter((message) => message.id !== assistantMessageId)
+		  messages.value = messages.value.filter((message) => message.id !== answerId())
 		}
       }
     } finally {
