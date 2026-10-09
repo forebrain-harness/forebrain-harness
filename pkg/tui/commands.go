@@ -608,6 +608,14 @@ func planReviewEventActionID(evt event.RunEvent) (string, bool) {
 	}
 }
 
+// isPlanReviewDeliveredDisplay reports whether a stored denial display body is
+// the review-delivery drop key: a gate a delivered review closed — never the
+// user — carries exactly that sentence, which is internal handoff plumbing,
+// so every replay projection drops the row whole.
+func isPlanReviewDeliveredDisplay(body string) bool {
+	return strings.TrimSpace(body) == tool.PlanReviewDeliveredDisplayKey
+}
+
 // replayApprovalEventFrames rebuilds the frames an approval record carries that
 // have no message form. Only the confirmation line does: the gate's own card is
 // the tool call the record names, and replay rebuilds it as a canceled card
@@ -626,6 +634,11 @@ func replayApprovalEventFrames(evt event.RunEvent) []Frame {
 	// replayed frame carries the same fields PrintApprovalConfirmation set.
 	line := strings.TrimSpace(sgrPattern.ReplaceAllString(p.Confirmation, ""))
 	if line == "" {
+		return nil
+	}
+	// A delivered review's record carries the drop key as its line: the
+	// handoff was never user-facing, so the replayed frame is dropped whole.
+	if isPlanReviewDeliveredDisplay(line) {
 		return nil
 	}
 	return []Frame{{
@@ -1112,6 +1125,12 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 		}
 	} else {
 		displayBody = replayToolDisplayBody(toolName, call.args, body)
+	}
+	// A delivered review closed this gate, not the user: the stored display
+	// body is the delivery drop key, so the row draws nothing — the handoff
+	// it recorded was never user-facing.
+	if hasStoredDisplay && isPlanReviewDeliveredDisplay(storedDisplay.Body) {
+		return Message{}, "", false
 	}
 	summary := strings.TrimSpace(transcriptToolSummaryWithMeta(body, meta))
 	if hasStoredDisplay && strings.TrimSpace(storedDisplay.Summary) != "" {

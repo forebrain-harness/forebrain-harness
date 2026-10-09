@@ -1999,15 +1999,15 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
-  it('shows a delivered plan review as the handoff line, never the marker', withFakeWebSocket(async () => {
+  it('closes a delivered plan review card silently, with no line', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-delivery', 'run-delivery')
 
     runEvent(socket, 'evt-1', 1, 'run-delivery', 'live-delivery', 'approval_requested', {
       actionId: 'act-1', actionKind: 'exit_plan_mode', toolStepId: 'call-exit',
     })
-    // The engine closed the approval to hand a finished review to the planner:
-    // the decision carries the plumbing marker as its reason, and the line the
-    // surface printed is the sentence both surfaces show for it.
+    // A persisted delivery event replays to a new connection with the
+    // internal handoff key as its line: the card still closes, and the line
+    // is dropped — the handoff was never something to read.
     runEvent(socket, 'evt-2', 2, 'run-delivery', 'live-delivery', 'approval_resolved', {
       actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'denied', toolStepId: 'call-exit',
       reason: 'plan-review:delivered',
@@ -2015,15 +2015,44 @@ describe('conversation tool and approval timeline', () => {
     })
 
     const host = stream.messages.value.find((message) => message.runId === 'run-delivery')
-    expect(host?.blocks?.[0]).toMatchObject({
+    const block = host?.blocks?.[0]
+    expect(block).toMatchObject({
       kind: 'approval',
       actionId: 'act-1',
       status: 'denied',
-      confirmation: 'Plan review delivered — the planner is revising the plan.',
     })
+    if (block?.kind === 'approval') {
+      expect(block.confirmation).toBeUndefined()
+    }
     endTurn(socket, 'evt-3', 3, 'run-delivery', 'live-delivery')
     await pendingSend
   }))
+
+  it('draws nothing for a delivered gate and its card for a user denial', () => {
+    const denialParts = (body: string) => JSON.stringify([
+      { type: 'tool_result_meta', tool_call_id: 'call-exit' },
+      { type: 'tool_display', body, summary: 'kept planning', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied' }) },
+    ])
+    const assistantParts = JSON.stringify([
+      { type: 'text', text: '' },
+      { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+
+    // A delivered review closed the gate: the row's body is the internal
+    // handoff key, so the history draws no card at all.
+    const delivered = conversationFromTranscript([
+      { id: 'a1', rowId: 1, role: 'assistant', content: '', partsJson: assistantParts },
+      { id: 't1', rowId: 2, role: 'tool', content: '{}', toolStepId: 'call-exit', partsJson: denialParts('Plan review delivered — the planner is revising the plan.') },
+    ] as unknown as Parameters<typeof conversationFromTranscript>[0])
+    expect(delivered.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))).toEqual([])
+
+    // The user's own denial keeps its card — their words are history.
+    const denied = conversationFromTranscript([
+      { id: 'a1', rowId: 1, role: 'assistant', content: '', partsJson: assistantParts },
+      { id: 't1', rowId: 2, role: 'tool', content: '{}', toolStepId: 'call-exit', partsJson: denialParts('Please split the plan into milestones.') },
+    ] as unknown as Parameters<typeof conversationFromTranscript>[0])
+    expect(denied.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))).toHaveLength(1)
+  })
 
   it('keeps a subagent approval out of the conversation timeline', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-subagent-approval', 'run-subagent-approval')
@@ -2157,10 +2186,12 @@ describe('conversation tool and approval timeline', () => {
       expect(timeline(reloaded.messages.value)).toEqual(timeline(live.messages.value))
       // And it is the timeline both are supposed to have, not two matching
       // empties: what it thought, what it said, the call it ran, what it said
-      // next, the line the gate printed, and the call that gate stopped.
+      // next, and the line the gate printed. The gate itself holds no card on
+      // either path — its prompt is the whole wait — so its record lands above
+      // the turn's last call, where the terminal prints the line.
       expect(timeline(live.messages.value).map((message) => message.role)).toEqual(['user', 'assistant'])
       expect(timeline(live.messages.value)[1]?.blocks.map((block) => block.kind))
-        .toEqual(['thinking', 'assistant', 'tool', 'assistant', 'approval', 'tool'])
+        .toEqual(['thinking', 'assistant', 'approval', 'tool', 'assistant'])
       expect(timeline(live.messages.value)[1]?.content).toBe('let me check\n\nnow the plan')
     } finally {
       chatMessagesSpy.mockRestore()
@@ -2186,7 +2217,7 @@ describe('conversation tool and approval timeline', () => {
       { id: 'a1', rowId: 2, role: 'assistant', content: 'let me check', runId: 'run-1', partsJson: assistantParts },
       { id: 't1', rowId: 3, role: 'tool', content: '{"stdout":"a.go"}', toolStepId: 'call-1', partsJson: toolParts },
       { id: 'a2', rowId: 4, role: 'assistant', content: '', partsJson: JSON.stringify([
-        { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name: 'exit_plan_mode', arguments: '{"plan":"do the thing"}' } }] },
+        { type: 'tool_calls', tool_calls: [{ id: 'call-grep', type: 'function', function: { name: 'read_file', arguments: '{"file_path":"docs/plan/do-the-thing.md"}' } }] },
       ]) },
     ] as never)
     const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
@@ -2208,12 +2239,9 @@ describe('conversation tool and approval timeline', () => {
       expect(turn?.blocks?.[0]).toMatchObject({ kind: 'assistant', text: 'let me check' })
       expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-1', status: 'completed', output: 'a.go\nb.go' } })
       expect(turn?.blocks?.[2]).toMatchObject({ kind: 'tool', step: { stepId: 'call-2', status: 'canceled', summary: 'Canceled · go test ./...' } })
-      expect(turn?.blocks?.[3]).toMatchObject({ kind: 'tool', step: { stepId: 'call-exit', status: 'canceled', summary: 'Canceled' } })
+      expect(turn?.blocks?.[3]).toMatchObject({ kind: 'tool', step: { stepId: 'call-grep', status: 'canceled' } })
       // The row that only issued a call contributes its card and no prose.
       expect(turn?.content).toBe('let me check')
-      // The plan-mode call carries a whole plan document as its argument, and
-      // none of it may reach the card.
-      expect(JSON.stringify(turn?.blocks)).not.toContain('do the thing')
     } finally {
       chatMessagesSpy.mockRestore()
       sessionEventsSpy.mockRestore()
@@ -2255,7 +2283,7 @@ describe('conversation tool and approval timeline', () => {
 
   it('keeps one card per call id when the same call is persisted twice', async () => {
     const duplicatedAssistant = JSON.stringify([
-      { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name: 'exit_plan_mode', arguments: '{"plan":"do the thing"}' } }] },
+      { type: 'tool_calls', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'shell', arguments: '{"command":"ls"}' } }] },
     ])
     const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
       { id: 'a1', rowId: 1, role: 'assistant', content: 'here is the plan', partsJson: duplicatedAssistant },
@@ -2720,14 +2748,14 @@ describe('approval anchoring on the conversation timeline', () => {
       await stream.loadMessages('anchor-session')
 
       const turn = stream.messages.value[0]
-      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['approval', 'tool', 'tool'])
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['approval', 'tool'])
       expect(turn?.blocks?.[0]).toMatchObject({
         kind: 'approval', actionId: 'act-exit', status: 'cancelled',
         confirmation: '✗ You canceled forebrain\'s request to exit plan mode',
       })
-      // The line sits above the call it held, not above the next one.
-      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-exit' } })
-      expect(turn?.blocks?.[2]).toMatchObject({ kind: 'tool', step: { stepId: 'call-shell' } })
+      // The gate's own card is withheld on every surface; the record lands
+      // above the turn's remaining call, where the terminal prints the line.
+      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-shell' } })
     } finally {
       chatMessagesSpy.mockRestore()
       sessionEventsSpy.mockRestore()

@@ -1111,13 +1111,6 @@ func ActionIsReviewDelivered(action *state.Action) bool {
 	return json.Unmarshal([]byte(strings.TrimSpace(action.AnswerJSON)), &a) == nil && a.PlanReviewDelivered
 }
 
-// PlanReviewDeliveredText is the one line every display of a delivered review
-// says — the TUI's notice, its denial card, and the web timeline's replay of
-// the resolution event. It replaces the marker string, which is plumbing and
-// never user-facing. The value lives in pkg/tool's display layer; this alias
-// keeps the surfaces reading it from the layer that owns delivery.
-const PlanReviewDeliveredText = tool.PlanReviewDeliveredText
-
 // reviewDeliveryGuidanceHeader is the fixed instruction a delivered review
 // resumes with. It is a compile-time constant on purpose: the words are part
 // of the model-facing contract, and keeping them out of variable state keeps

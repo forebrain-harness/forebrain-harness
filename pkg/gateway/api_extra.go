@@ -2897,10 +2897,6 @@ func (s *Server) deliverGatewayPlanReview(ctx context.Context, actionID string) 
 		event.RunEventApprovalResolved, event.ApprovalResolvedPayload{
 			ActionID: act.ID, ActionKind: act.Kind, Decision: string(act.Status),
 			Reason: act.Error, AgentID: agentID, SubagentType: subagentType,
-			// The same line the TUI prints for a delivery, so the web
-			// timeline replays one sentence on both surfaces instead of the
-			// marker, the way every decision line travels.
-			Confirmation: turn.PlanReviewDeliveredText,
 		}, time.Now(),
 	))
 	go s.resumeGatewayRun(act.ID, false)

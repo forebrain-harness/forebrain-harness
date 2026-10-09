@@ -12,8 +12,9 @@ import { signIn, shot } from './support'
  * (fake or real; the harness swaps the provider, not the flow).
  *
  * A finished review is handed to the planner on both surfaces: the approval
- * closes as the handoff and the timeline prints the line the terminal prints —
- * it is not left on the card for a second decision.
+ * closes as the handoff, silently — the handoff is internal plumbing, so no
+ * line lands on the timeline and the card is not left open for a second
+ * decision.
  *
  * The parked approval and its events are seeded straight into the gateway's
  * state database — the same shape a real plan-mode turn parks — because the
@@ -170,7 +171,7 @@ test('a review in flight is an event away: the card says so and the reviewer has
   await shot(page, 'exit-plan-reviewer-view')
 })
 
-test('asking for a review hands it to the planner: the card closes and the timeline says so', async ({ page }) => {
+test('asking for a review hands it to the planner: the card closes silently', async ({ page }) => {
   test.info().setTimeout(240_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
@@ -199,13 +200,10 @@ test('asking for a review hands it to the planner: the card closes and the timel
   await expect(page.locator('[data-testid="subagent-call-card"]').first()).toBeVisible({ timeout: 120_000 })
 
   // …and a finished review is delivered, not shown for a second decision: the
-  // approval closes as the handoff, the line the terminal prints for it lands
-  // on the timeline, and the card the review was asked from leaves with it.
-  // (The revised plan comes back as a new approval of its own.)
-  const handoff = page.locator('[data-approval-id="act-e2e-exitplan-live"][data-approval-status="denied"]')
-  await expect(handoff).toContainText('Plan review delivered', { timeout: 180_000 })
-  await expect(handoff).toContainText('revising the plan')
-  await expect(card).toHaveCount(0, { timeout: 30_000 })
+  // handoff is internal plumbing, so the card the review was asked from
+  // leaves with no line behind it. (The revised plan comes back as a new
+  // approval of its own.)
+  await expect(card).toHaveCount(0, { timeout: 180_000 })
   await shot(page, 'exit-plan-approval-delivered')
 })
 

@@ -915,7 +915,8 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 	// A review that finished delivers itself: the planner revises against it
 	// and submits a fresh exit_plan_mode, so the approval the user answers
 	// next has already absorbed the review. A review that failed keeps the
-	// approval exactly where it was.
+	// approval exactly where it was: the gate re-prompts through its own
+	// sink, and the transcript paints nothing — the wait has no card.
 	if reviewErr == nil {
 		s.deliverCompletedPlanReview(ctx, actionID)
 	}
@@ -923,9 +924,10 @@ func (s *ChatSession) runPlanReview(ctx context.Context, actionID string, select
 
 // deliverCompletedPlanReview hands a finished review to the planning model:
 // the approval closes as the marker denial, the resolution event lands on the
-// conversation, one line says what happened — not a decision confirmation,
-// because the user decided nothing — and the denied resume, the same path a
-// user's deny takes, carries the review into the parked run. An approval the
+// conversation, and the denied resume, the same path a user's deny takes,
+// carries the review into the parked run. Nothing is printed: the handoff is
+// internal plumbing, so the planner revises silently and submits a fresh
+// exit_plan_mode. An approval the
 // user already decided on reports ErrNotPending and the delivery stops there:
 // the user's decision keeps the last word.
 func (s *ChatSession) deliverCompletedPlanReview(ctx context.Context, actionID string) {
@@ -959,17 +961,8 @@ func (s *ChatSession) deliverCompletedPlanReview(ctx context.Context, actionID s
 		event.RunEventApprovalResolved, event.ApprovalResolvedPayload{
 			ActionID: act.ID, ActionKind: act.Kind, Decision: string(act.Status),
 			Reason: act.Error,
-			// The line the surface printed for this handoff, so the web
-			// timeline replays the same sentence the terminal showed instead
-			// of the marker, exactly as every decision line travels.
-			Confirmation: turn.PlanReviewDeliveredText,
 		}, time.Now(),
 	))
-	s.notifyUI(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindSystem,
-		Content:   turn.PlanReviewDeliveredText,
-		Timestamp: time.Now(),
-	}})
 	s.retryResumeDispatch(act.ID, "deny", s.resumeAfterDenial)
 }
 

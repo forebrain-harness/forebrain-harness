@@ -3601,8 +3601,6 @@ func TestActionPlanReviewDeliversOnDone(t *testing.T) {
 	require.Equal(t, actionID, payload.ActionID)
 	require.Equal(t, string(state.ActionDenied), payload.Decision)
 	require.Equal(t, turn.PlanReviewDeliveredReason, payload.Reason)
-	require.Equal(t, turn.PlanReviewDeliveredText, payload.Confirmation,
-		"the web timeline replays the delivered line, never the marker")
 
 	act, err := actions.Get(ctx, actionID)
 	require.NoError(t, err)

@@ -4570,8 +4570,8 @@ func TestDeliveredReviewDenialCarriesTheHandoffLine(t *testing.T) {
 	if denial.ToolDisplay == nil {
 		t.Fatal("the denial tool result must carry the display the replay draws from")
 	}
-	if got := denial.ToolDisplay.Body; got != toolpkg.PlanReviewDeliveredText {
-		t.Fatalf("denial display body = %q, want the handoff line", got)
+	if got := denial.ToolDisplay.Body; got != toolpkg.PlanReviewDeliveredDisplayKey {
+		t.Fatalf("denial display body = %q, want the delivery drop key", got)
 	}
 	if body := denial.ToolDisplay.Body; strings.Contains(body, "(no output)") || strings.Contains(body, "The plan review you asked for has returned") {
 		t.Fatalf("the display half must not show the empty-refusal or model-facing text: %q", body)

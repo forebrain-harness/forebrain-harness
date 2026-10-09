@@ -21,11 +21,13 @@ import (
 
 const DefaultMaxFormattedBody = 120_000
 
-// PlanReviewDeliveredText is the one line every display of a delivered plan
-// review says — the refusal card's body, the notice line, and every replay of
-// the tool result row that recorded it. It lives in the display layer beside
-// DeniedToolDisplayBody; pkg/turn re-exports it for the surfaces.
-const PlanReviewDeliveredText = "Plan review delivered — the planner is revising the plan."
+// PlanReviewDeliveredDisplayKey is the delivery drop key carried as the body
+// of a plan-review gate's persisted denial display: a gate closed by review
+// delivery — never by the user — writes exactly this sentence, and no surface
+// renders it. The TUI's and the web's replay projections recognize the key
+// and drop the whole row, which is the value's only surviving role: only the
+// delivery's persistence path writes it.
+const PlanReviewDeliveredDisplayKey = "Plan review delivered — the planner is revising the plan."
 
 // DeniedToolDisplayBody is the one sentence a refused tool call shows as its
 // card body — live when the refusal lands, and on every replay of the tool
@@ -2257,6 +2259,23 @@ func subagentElapsedLabel(startedAt, finishedAt int64) string {
 		return fmt.Sprintf("%ds", int(sec))
 	}
 	return fmt.Sprintf("%.1fs", sec)
+}
+
+// ToolStepHoldsNoCard reports whether a tool step's transcript card is
+// withheld: the exit-plan gate's wait lives entirely in its approval prompt,
+// so no surface paints a card for it while the call runs or awaits the
+// decision. Its settled cards — the denial the user made, a failure, the
+// exit itself — still paint.
+func ToolStepHoldsNoCard(toolName, status string) bool {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode") {
+		return false
+	}
+	switch strings.TrimSpace(status) {
+	case "running", "awaiting approval":
+		return true
+	default:
+		return false
+	}
 }
 
 func stepStatusLabel(evt StepEvent) string {
