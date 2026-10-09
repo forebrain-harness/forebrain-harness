@@ -4876,6 +4876,86 @@ func TestInterruptSubagentToSendRunsThePendingSteersNext(t *testing.T) {
 	}
 }
 
+// TestSubagentViewQueueQuestionsAnswerFromTheLiveChannel pins where a
+// subagent view's per-repaint and per-keystroke questions are answered: from
+// the channel this process holds, never from the subagent ledger. The view
+// repaints its composer — and asks for the queue preview — after every input
+// event, so a lookup that re-reads the whole ledger each time puts that cost on
+// every wheel notch. The ledger is made unreadable mid-run here, so an answer
+// that still goes through it comes back empty.
+func TestSubagentViewQueueQuestionsAnswerFromTheLiveChannel(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	owner.Events = &channelEventProbe{}
+	release := make(chan struct{})
+	owner.SubagentExecutor = &channelTestExecutor{store: fix.store, hold: true, release: release, answer: "x"}
+	surface := SubagentSurface{OnBoundary: func(string, []Input, []Input) {}}
+	conv := "conv-live-channel"
+	worker := "main:conv-live-channel:worker:00000000-0000-0000-0000-0000000004bb"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-live", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "work", Status: agent.StatusOK, AgentType: "explore", AgentKind: "typed", RuntimeKind: "typed_subagent",
+		Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-live", Input{Text: "start"}, TurnInputModeSteer); err != nil || got != SubagentDeliveryStarted {
+		t.Fatalf("SendToSubagent = %q, %v; want started", got, err)
+	}
+	waitSubagentBusy(t, owner, conv, "task-live")
+	for _, text := range []string{"one", "two"} {
+		if got, err := SendToSubagent(context.Background(), owner, surface, conv, "task-live", Input{Text: text}, TurnInputModeSteer); err != nil || got != SubagentDeliverySteered {
+			t.Fatalf("steer %q = %q, %v; want steered", text, got, err)
+		}
+	}
+
+	// From here on every ledger read fails: the file becomes a directory.
+	root := fix.fac.subagentScopeRoot()
+	ledger := filepath.Join(root, "state", "subagent-history.jsonl")
+	saved, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ledger, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := agent.GetMerged(root, agent.Query{SessionID: conv, TaskID: "task-live"}); err == nil {
+		t.Fatal("the ledger is still readable, so this test would prove nothing")
+	}
+
+	if p := SubagentInputPreview(owner, conv, "task-live"); len(p.Steers) != 2 || p.Steers[0] != "one" || p.Steers[1] != "two" {
+		t.Fatalf("SubagentInputPreview = %+v, want steers [one two] from the live channel", p)
+	}
+	if !SubagentRunning(owner, conv, "task-live") {
+		t.Fatal("SubagentRunning = false, want true from the live channel")
+	}
+	if p := SubagentInputPreview(owner, "conv-other", "task-live"); p.Visible() {
+		t.Fatalf("another conversation's preview = %+v, want nothing", p)
+	}
+	if p := SubagentInputPreview(owner, conv, "task-missing"); p.Visible() {
+		t.Fatalf("unknown task's preview = %+v, want nothing", p)
+	}
+	if in, ok := RecallSubagentInput(owner, conv, "task-live"); !ok || in.Text != "two" {
+		t.Fatalf("RecallSubagentInput = %+v, %v; want the newest steer", in, ok)
+	}
+	if n := DiscardSubagentInput(owner, conv, "task-live"); n != 1 {
+		t.Fatalf("DiscardSubagentInput = %d, want 1", n)
+	}
+
+	// The execution's end appends to the ledger: give the file back first.
+	if err := os.Remove(ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledger, saved, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	waitSubagentIdle(t, owner, conv, "task-live")
+}
+
 // TestWithdrawBeforeTheSubagentAnswers pins Esc's first meaning (D1): a message
 // the user just sent a subagent can be taken back before its model answers —
 // the worker row is hidden and no result is written — but not after. The

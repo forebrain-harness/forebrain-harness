@@ -625,7 +625,19 @@ type subagentExecution struct {
 var (
 	subagentChannelsMu sync.Mutex
 	subagentChannels   = map[string]*subagentChannel{}
+	// subagentChannelsByTask indexes the same channels by what a surface names
+	// a subagent with — the conversation and the task id — so the questions a
+	// subagent's view asks on every input event are answered from memory. See
+	// liveSubagentChannel.
+	subagentChannelsByTask = map[subagentTaskKey]*subagentChannel{}
 )
+
+// subagentTaskKey is the conversation and task id one subagent is filed
+// under: the same two fields the ledger lookup filters on.
+type subagentTaskKey struct {
+	conversationSessionID string
+	taskID                string
+}
 
 // subagentChannelFor returns the channel of one subagent, creating it on first
 // use. It is keyed by the worker session, which is unique to the subagent; the
@@ -651,6 +663,12 @@ func subagentChannelFor(fac Factory, record agent.HistoryEntry) *subagentChannel
 			ch.queue = control.SessionQueue(workerSessionID)
 		}
 		subagentChannels[workerSessionID] = ch
+	}
+	// Every path that creates or reuses a channel passes here with the record
+	// it resolved, so the index always names the channel the ledger lookup
+	// would have reached.
+	if conv, task := strings.TrimSpace(record.SessionID), strings.TrimSpace(record.TaskID); conv != "" && task != "" {
+		subagentChannelsByTask[subagentTaskKey{conversationSessionID: conv, taskID: task}] = ch
 	}
 	return ch
 }
@@ -1824,6 +1842,35 @@ func subagentChannelForConversation(r *Runner, conversationSessionID, agentKey s
 	return subagentChannelFor(fac, record), record, nil
 }
 
+// liveSubagentChannel returns the channel this process already holds for one
+// subagent of a conversation, or nil when it holds none. It never reads the
+// subagent ledger, and that is its point: a subagent's view asks what is
+// queued on every repaint of its composer — once per input event — and the
+// ledger lookup re-reads and re-decodes the whole workspace-wide history file
+// each time, a cost that grows with every subagent ever run and, under a fast
+// wheel scroll, held the view's input back for seconds.
+//
+// A subagent with no channel here has nothing queued and no execution running
+// in this process: its queue and its executions exist only through a channel,
+// which SendToSubagent and runSubagentExecution create first. So callers read
+// nil as the empty answer. The key is the conversation and task id the ledger
+// lookup filtered on, so another conversation's subagent is not found.
+func liveSubagentChannel(r *Runner, conversationSessionID, agentKey string) *subagentChannel {
+	if r == nil {
+		return nil
+	}
+	key := subagentTaskKey{
+		conversationSessionID: strings.TrimSpace(conversationSessionID),
+		taskID:                strings.TrimSpace(agentKey),
+	}
+	if key.conversationSessionID == "" || key.taskID == "" {
+		return nil
+	}
+	subagentChannelsMu.Lock()
+	defer subagentChannelsMu.Unlock()
+	return subagentChannelsByTask[key]
+}
+
 // SubagentDelivery says where a message the user sent a subagent went.
 type SubagentDelivery string
 
@@ -1868,9 +1915,11 @@ func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, con
 }
 
 // SubagentInputPreview is the subagent's queued input as its view shows it.
+// The view asks on every repaint of its composer, so it is answered from the
+// live channel only (see liveSubagentChannel).
 func SubagentInputPreview(r *Runner, conversationSessionID, agentKey string) QueuePreview {
-	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
-	if err != nil {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
 		return QueuePreview{}
 	}
 	return ch.queue.Preview()
@@ -1879,8 +1928,8 @@ func SubagentInputPreview(r *Runner, conversationSessionID, agentKey string) Que
 // RecallSubagentInput pulls the newest queued message back out for editing,
 // exactly as Recall does for the primary conversation's queue.
 func RecallSubagentInput(r *Runner, conversationSessionID, agentKey string) (Input, bool) {
-	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
-	if err != nil {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
 		return Input{}, false
 	}
 	return ch.queue.Recall()
@@ -1891,8 +1940,8 @@ func RecallSubagentInput(r *Runner, conversationSessionID, agentKey string) (Inp
 // returns false when no execution is running or no steer is waiting, so the
 // surface can fall back to Esc's other meanings.
 func InterruptSubagentToSend(r *Runner, conversationSessionID, agentKey string) bool {
-	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
-	if err != nil {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
 		return false
 	}
 	return ch.interruptToSend()
@@ -1902,8 +1951,8 @@ func InterruptSubagentToSend(r *Runner, conversationSessionID, agentKey string) 
 // answers — Esc's first meaning. It returns the withdrawn message plus
 // everything queued after it, or false when the window has closed.
 func WithdrawSubagentInput(r *Runner, conversationSessionID, agentKey string) ([]Input, bool) {
-	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
-	if err != nil {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
 		return nil, false
 	}
 	return ch.withdraw()
@@ -1912,8 +1961,8 @@ func WithdrawSubagentInput(r *Runner, conversationSessionID, agentKey string) ([
 // DiscardSubagentInput empties the subagent's queue and returns how many
 // messages were dropped.
 func DiscardSubagentInput(r *Runner, conversationSessionID, agentKey string) int {
-	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
-	if err != nil {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
 		return 0
 	}
 	return ch.queue.Discard()
@@ -1923,8 +1972,8 @@ func DiscardSubagentInput(r *Runner, conversationSessionID, agentKey string) int
 // is the one definition of "running" for a subagent: the registry handle that
 // used to answer it does not cover a user-driven execution.
 func SubagentRunning(r *Runner, conversationSessionID, agentKey string) bool {
-	ch, _, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
-	if err != nil || ch == nil {
+	ch := liveSubagentChannel(r, conversationSessionID, agentKey)
+	if ch == nil {
 		return false
 	}
 	ch.mu.Lock()
