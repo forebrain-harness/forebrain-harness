@@ -2351,16 +2351,7 @@ func renderViewport(m *viewModel, width, height, scrollOffset int, theme DiffThe
 	if height < 1 {
 		height = 1
 	}
-	// Pre-allocate 'all' slice based on block count to reduce reallocation.
-	// Typical block averages ~8 lines. Start with a reasonable estimate
-	// capped at 8192 to balance memory vs reallocation for very large sessions.
-	estimatedLines := len(m.blocks) * 8
-	if estimatedLines < 256 {
-		estimatedLines = 256
-	} else if estimatedLines > 8192 {
-		estimatedLines = 8192
-	}
-	all := make([]string, 0, estimatedLines)
+	all := make([]string, 0, 256)
 	spans := make([]lineSpan, 0, len(m.blocks))
 	visibleBlocks := 0
 	// The painter stamps the current spinner phase on the model each repaint;
@@ -3590,9 +3581,6 @@ func (r *Renderer) EnableViewportMode() {
 	// The screen we just cleared is blank, and nothing the painter remembers
 	// from a previous viewport session applies to it.
 	r.dropPaintShadowLocked()
-	// Terminal paints now leave the input pipeline: a terminal that stalls
-	// its drain must not freeze keys and wheel with it.
-	r.startAsyncPaintWriterLocked()
 	r.paintViewportLocked()
 }
 
@@ -3611,9 +3599,6 @@ func (r *Renderer) DisableViewportMode() {
 	r.stopCompactAnimationLocked()
 	r.softwareCursor = false
 	r.viewportMode = false
-	// Drain the async painter before leaving the alt-screen: the last frame
-	// must be on the wire, and the writer must not race the exit escapes.
-	r.stopAsyncPaintWriterLocked()
 	_, _ = fmt.Fprint(r.out, "\x1b[?25h\x1b[?1049l")
 	r.dropPaintShadowLocked()
 	// Leaving the alt-screen re-shows the caret above; drop the tracked state so
@@ -3654,7 +3639,7 @@ func (r *Renderer) EnableSoftwareCursor() {
 	r.cursorScreenCol = 0
 	// Hide the hardware cursor once; paintViewportLocked's software-cursor
 	// path never emits ?25h/?25l afterwards.
-	r.writeTTYOrderedLocked("\x1b[?25l")
+	_, _ = fmt.Fprint(r.out, "\x1b[?25l")
 	r.startCursorBlinkLocked()
 	r.paintViewportLocked()
 }
@@ -3676,7 +3661,7 @@ func (r *Renderer) DisableSoftwareCursor() {
 	r.cursorShown = false
 	r.cursorScreenRow = 0
 	r.cursorScreenCol = 0
-	r.writeTTYOrderedLocked("\x1b[?25h")
+	_, _ = fmt.Fprint(r.out, "\x1b[?25h")
 	r.paintViewportLocked()
 }
 
@@ -3776,9 +3761,15 @@ func (r *Renderer) hasLiveBlockLocked() bool {
 	if vm == nil {
 		return false
 	}
-	// Use the cached live block count instead of O(N) traversal.
-	// The count is maintained by viewModel.append when blocks are added/updated.
-	return vm.liveBlockCount > 0
+	for _, block := range vm.blocks {
+		switch {
+		case block.frame.Kind == FrameMemoryCompact && !block.frame.Final:
+			return true
+		case block.frame.Kind == FrameFanout && fanoutHasLiveClock(block.frame):
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Renderer) syncLiveBlockAnimationLocked() {
@@ -4036,11 +4027,6 @@ func (r *Renderer) paintViewportLocked() {
 	// surface below and does NOT set this flag.
 	if r.composerSuppressed {
 		return
-	}
-	// A frame the async writer dropped leaves the shadow describing a screen
-	// that never happened; discard it so this paint is a full repaint.
-	if w := r.asyncPaint; w != nil && w.consumeDrop() {
-		r.dropPaintShadowLocked()
 	}
 	width, height := termWidthOrDefault(), termHeightOrDefault()
 	if width < 1 {
@@ -4519,14 +4505,6 @@ func (r *Renderer) paintViewportLocked() {
 	// terminal that supports it presents the changed rows in one step instead of
 	// sampling the screen somewhere between a row's erase and its rewrite.
 	// Terminals that do not support it ignore the unknown private mode.
-	if w := r.asyncPaint; w != nil {
-		frame := make([]byte, 0, b.Len()+len("\x1b[?2026h")+len("\x1b[?2026l"))
-		frame = append(frame, "\x1b[?2026h"...)
-		frame = append(frame, b.String()...)
-		frame = append(frame, "\x1b[?2026l"...)
-		w.submit(frame)
-		return
-	}
 	_, _ = fmt.Fprint(r.out, "\x1b[?2026h"+b.String()+"\x1b[?2026l")
 }
 
@@ -6361,7 +6339,7 @@ func (r *Renderer) writeClipboardOSC52Locked(text string) {
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
 	// Terminate with ST (ESC \) rather than BEL so Terminal.app does not ring
 	// the terminal bell when using OSC 52 as a clipboard fallback.
-	r.writeTTYOrderedLocked("\x1b]52;c;%s\x1b\\", encoded)
+	fmt.Fprintf(r.out, "\x1b]52;c;%s\x1b\\", encoded)
 }
 
 func (r *Renderer) setClipNotification(text string) {

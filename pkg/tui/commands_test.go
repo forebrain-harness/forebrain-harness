@@ -2131,11 +2131,12 @@ func assistantToolCallRow(text, callID, toolName, args string) state.Message {
 	}
 }
 
-// A gate that was canceled leaves an assistant row with a tool call and no tool
-// row. Live stamped that call's card canceled when the run aborted
-// (Renderer.FinalizePendingTools); replay has to rebuild the same card, exactly
-// once, and place the confirmation line the user read above it.
-func TestResumeRebuildsOneCanceledCardPerOrphanToolCall(t *testing.T) {
+// A gate that was canceled leaves an assistant row with a tool call and no
+// tool row. Live painted no card for that call — the gate's wait lives
+// entirely in its approval prompt, and the walk-away left only the
+// confirmation line — so replay paints the same: the decision line alone, no
+// tool card for an exit that never happened.
+func TestReplayDrawsNoCardForCanceledExitGate(t *testing.T) {
 	callArgs := `{"plan":"do the thing"}`
 	turns := []state.Message{
 		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
@@ -2155,31 +2156,19 @@ func TestResumeRebuildsOneCanceledCardPerOrphanToolCall(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
 	renderer.viewportMode = true
 	renderer.composerSuppressed = true
-	// The gate record paints nothing of its own - the card is the tool call the
-	// record names - so only the decision counts as a replayed record here.
+	// The gate record paints nothing of its own, and the call draws no card:
+	// only the decision counts as a replayed record here.
 	if got := replayTimelineWithReducer(renderer, turns, events, &Reducer{}, nil); got != 1 {
 		t.Fatalf("replayed records = %d, want the decision alone", got)
 	}
 
-	cardIndex, lineIndex := -1, -1
-	for i, block := range renderer.vm.blocks {
+	decisions := 0
+	for _, block := range renderer.vm.blocks {
 		switch {
 		case block.frame.Kind == FrameTool:
-			if cardIndex >= 0 {
-				t.Fatalf("more than one tool card replay: %#v", renderer.vm.blocks)
-			}
-			cardIndex = i
-			if block.frame.Title != "exit_plan_mode" {
-				t.Fatalf("rebuilt card title = %q, want the tool that was gated", block.frame.Title)
-			}
-			if block.frame.ToolMeta.Status != "canceled" {
-				t.Fatalf("rebuilt card status = %q, want the one-l 'canceled' Renderer.FinalizePendingTools stamps", block.frame.ToolMeta.Status)
-			}
-			if block.frame.Content != "" {
-				t.Fatalf("a canceled card claims output it never produced: %q", block.frame.Content)
-			}
+			t.Fatalf("a canceled gate replayed a card live never drew: %#v", block.frame)
 		case block.frame.Kind == FrameStatus && strings.Contains(block.frame.Content, "You canceled"):
-			lineIndex = i
+			decisions++
 			if block.frame.MaxDisplayLines != approvalConfirmationMaxLines {
 				t.Fatalf("replayed confirmation lost its line cap: %#v", block.frame)
 			}
@@ -2188,11 +2177,119 @@ func TestResumeRebuildsOneCanceledCardPerOrphanToolCall(t *testing.T) {
 			}
 		}
 	}
-	if cardIndex < 0 || lineIndex < 0 {
-		t.Fatalf("replay lost the gate card (%d) or its confirmation (%d): %#v", cardIndex, lineIndex, renderer.vm.blocks)
+	if decisions != 1 {
+		t.Fatalf("replay lost the cancellation confirmation: %#v", renderer.vm.blocks)
 	}
-	if lineIndex > cardIndex {
-		t.Fatalf("the confirmation must read above the card it answers: line=%d card=%d", lineIndex, cardIndex)
+}
+
+// toolRowWithDisplay appends the stored tool_display part a settled gate row
+// carries onto an otherwise plain tool row.
+func toolRowWithDisplay(rowID int64, callID, content, metaJSON string) state.Message {
+	row := state.Message{
+		RowID: rowID, Role: "tool", Content: content,
+		PartsJSON: state.MessagePartsJSON(llm.ToolResultMessage(callID, llm.Text(content)), ""),
+		CreatedAt: 101,
+	}
+	display, err := json.Marshal([]map[string]any{{
+		"type":           "tool_display",
+		"body":           content,
+		"summary":        "",
+		"tool_meta_json": metaJSON,
+	}})
+	if err != nil {
+		panic(err)
+	}
+	row.PartsJSON = strings.TrimSuffix(row.PartsJSON, "]") + "," + strings.TrimPrefix(string(display), "[")
+	return row
+}
+
+// The canceled gate's settled tool row — the row the abort writes for the
+// unanswered call — draws nothing either: the same rule live follows, that the
+// wait's only record is the approval confirmation line. The settled answers of
+// the same shape still paint their cards.
+func TestReplayDropsCanceledExitGateSettledRow(t *testing.T) {
+	callArgs := `{"plan":"do the thing"}`
+	for _, tc := range []struct {
+		name     string
+		metaJSON string
+		wantCard bool
+		wantText string
+	}{
+		{name: "canceled row holds no card", metaJSON: `{"tool_name":"exit_plan_mode","status":"canceled"}`},
+		{name: "denied row keeps its card", metaJSON: `{"tool_name":"exit_plan_mode","status":"denied"}`, wantCard: true, wantText: "Kept planning"},
+		{name: "approved row keeps its card", metaJSON: `{"tool_name":"exit_plan_mode","status":"completed"}`, wantCard: true, wantText: "Exited plan mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			turns := []state.Message{
+				{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+				assistantToolCallRow("here is the plan", "call-exit", "exit_plan_mode", callArgs),
+				toolRowWithDisplay(3, "call-exit", "plan review closed the gate", tc.metaJSON),
+			}
+
+			renderer := NewRenderer(nil, nil)
+			renderer.viewportMode = true
+			renderer.composerSuppressed = true
+			replayTimelineWithReducer(renderer, turns, nil, &Reducer{}, nil)
+
+			var card *Frame
+			for i := range renderer.vm.blocks {
+				if renderer.vm.blocks[i].frame.Kind != FrameTool {
+					continue
+				}
+				if card != nil {
+					t.Fatalf("more than one tool card replay: %#v", renderer.vm.blocks)
+				}
+				card = &renderer.vm.blocks[i].frame
+			}
+			if !tc.wantCard {
+				if card != nil {
+					t.Fatalf("a canceled gate row replayed a card live never drew: %#v", card)
+				}
+				return
+			}
+			if card == nil {
+				t.Fatalf("settled gate row lost its card: %#v", renderer.vm.blocks)
+			}
+			action, _, _ := toolDisplayParts(*card, card.Summary, "")
+			if action != tc.wantText {
+				t.Fatalf("settled card reads %q, want %q", action, tc.wantText)
+			}
+		})
+	}
+}
+
+// The orphan rebuild the exit gate opted out of still serves every other call:
+// a non-gate call issued but never answered replays as the one canceled card
+// live stamped on it when the run aborted.
+func TestResumeRebuildsCanceledCardForNonGateOrphan(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "run it", CreatedAt: 99},
+		assistantToolCallRow("running it", "call-1", "shell", `{"command":"ls"}`),
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	replayTimelineWithReducer(renderer, turns, nil, &Reducer{}, nil)
+
+	cards := 0
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind != FrameTool {
+			continue
+		}
+		cards++
+		if block.frame.Title != "shell" {
+			t.Fatalf("rebuilt card title = %q, want the orphaned tool", block.frame.Title)
+		}
+		if block.frame.ToolMeta.Status != "canceled" {
+			t.Fatalf("rebuilt card status = %q, want the one-l 'canceled' Renderer.FinalizePendingTools stamps", block.frame.ToolMeta.Status)
+		}
+		if block.frame.Content != "" {
+			t.Fatalf("a canceled card claims output it never produced: %q", block.frame.Content)
+		}
+	}
+	if cards != 1 {
+		t.Fatalf("orphan rebuild drew %d cards, want exactly the canceled one: %#v", cards, renderer.vm.blocks)
 	}
 }
 
@@ -2226,9 +2323,9 @@ func TestResumeDoesNotRebuildACardForAToolCallThatRan(t *testing.T) {
 // assistant row can appear twice. Orphan detection is a set subtraction over the
 // whole transcript, so both duplicates still yield exactly one card.
 func TestResumeRebuildsOneCanceledCardForADuplicatedOrphanCall(t *testing.T) {
-	row := assistantToolCallRow("here is the plan", "call-exit", "exit_plan_mode", `{"plan":"do the thing"}`)
+	row := assistantToolCallRow("running it", "call-1", "shell", `{"command":"ls"}`)
 	turns := []state.Message{
-		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+		{RowID: 1, Role: "user", Content: "run it", CreatedAt: 99},
 		row,
 		row,
 	}
@@ -2418,9 +2515,10 @@ func TestResumeDoesNotRebuildACardForAnInterruptedDispatch(t *testing.T) {
 }
 
 // The whole path, end to end: a gate is shown and canceled, the process ends,
-// and a fresh store reads back both records, replays them, and shows the same
-// two things the user saw as they quit.
-func TestCanceledGateAndConfirmationSurviveAReopenedStore(t *testing.T) {
+// and a fresh store reads back the records and replays them. The walk-away's
+// only record is the confirmation line the user read — live drew no card for
+// the gate, and the reopened store draws none either.
+func TestCanceledGateConfirmationSurvivesAReopenedStore(t *testing.T) {
 	ctx := context.Background()
 	home := t.TempDir()
 	dbPath := filepath.Join(home, "state.sqlite")
@@ -2478,25 +2576,16 @@ func TestCanceledGateAndConfirmationSurviveAReopenedStore(t *testing.T) {
 	ctrl.printSessionResumeContext("s1")
 
 	cards, lines := 0, 0
-	lineIndex, cardIndex := -1, -1
-	for i, block := range renderer.vm.blocks {
+	for _, block := range renderer.vm.blocks {
 		if block.frame.Kind == FrameTool && block.frame.Title == "exit_plan_mode" {
 			cards++
-			cardIndex = i
-			if block.frame.ToolMeta.Status != "canceled" {
-				t.Fatalf("replayed card status = %q, want canceled", block.frame.ToolMeta.Status)
-			}
 		}
 		if block.frame.Kind == FrameStatus && strings.Contains(block.frame.Content, "You canceled forebrain's request to exit plan mode") {
 			lines++
-			lineIndex = i
 		}
 	}
-	if cards != 1 || lines != 1 {
-		t.Fatalf("resume replayed %d cards and %d confirmation lines, want one of each: %#v", cards, lines, renderer.vm.blocks)
-	}
-	if lineIndex > cardIndex {
-		t.Fatalf("resume put the confirmation below the card it answers: line=%d card=%d", lineIndex, cardIndex)
+	if cards != 0 || lines != 1 {
+		t.Fatalf("resume replayed %d exit cards and %d confirmation lines, want only the line: %#v", cards, lines, renderer.vm.blocks)
 	}
 }
 

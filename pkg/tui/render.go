@@ -330,11 +330,6 @@ type Renderer struct {
 	// names the agent whose transcript is on screen.
 	rosterCursor    string
 	viewBrowseState map[string]viewportBrowseState
-	// asyncPaint, when non-nil, carries viewport frames to the terminal on
-	// its own goroutine so a stalled terminal drain cannot freeze the input
-	// pipeline (see paint_writer.go). Nil when painting synchronously —
-	// always the case for non-terminal writers such as test buffers.
-	asyncPaint *asyncPaintWriter
 	// vpScrollOffset is the absolute row at the top of the visible window;
 	// vpFollow keeps it pinned to the bottom as new frames arrive until the user
 	// scrolls up. vpHeight is the body height of the last paint (for wheel/click

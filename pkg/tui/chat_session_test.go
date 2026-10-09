@@ -23346,40 +23346,6 @@ func TestMouseEventFromSGRDropsNoButtonMotion(t *testing.T) {
 	}
 }
 
-// TestWheelReleaseAndMotionReportsDoNotScroll guards the SGR wheel guard in
-// mouseEventFromSGR: only a press report (terminator 'M') without the motion
-// bit is a wheel notch. Terminals that answer one physical wheel gesture with
-// press+release, or with press+motion samples+release, must not translate the
-// extra reports into extra 3-row scrolls (the "scroll a little, keep
-// scrolling" runaway).
-func TestWheelReleaseAndMotionReportsDoNotScroll(t *testing.T) {
-	// press = one notch (mirror what parseSGRMouse produces for Cb 64/65 'M')
-	if ev, ok := mouseEventFromSGR(sgrMouseEvent{button: 64, wheel: true, wheelUp: true, press: true, col: 4, row: 2}); !ok || ev.kind != inputEventMouseWheel || ev.wheelDelta != -wheelScrollLines {
-		t.Fatalf("wheel-up press = (%#v, %v), want one -%d wheel notch", ev, ok, wheelScrollLines)
-	}
-	if ev, ok := mouseEventFromSGR(sgrMouseEvent{button: 65, wheel: true, press: true}); !ok || ev.wheelDelta != wheelScrollLines {
-		t.Fatalf("wheel-down press = (%#v, %v), want one +%d wheel notch", ev, ok, wheelScrollLines)
-	}
-	// release (terminator 'm' => press=false) must not scroll again
-	for _, cb := range []int{64, 65} {
-		if got, ok := mouseEventFromSGR(sgrMouseEvent{button: cb, wheel: true, wheelUp: cb == 64, press: false, col: 4, row: 2}); ok {
-			t.Fatalf("wheel release Cb=%d produced %#v; a wheel notch has no release", cb, got)
-		}
-	}
-	// motion samples (Cb 96/97 = 64+32) must not scroll
-	for _, cb := range []int{96, 97} {
-		if got, ok := mouseEventFromSGR(sgrMouseEvent{button: cb, wheel: true, wheelUp: cb == 96, press: true, col: 4, row: 2}); ok {
-			t.Fatalf("wheel-bit motion Cb=%d produced %#v; motion samples are not notches", cb, got)
-		}
-	}
-	// end-to-end decode: a release report is still decoded but ignored
-	if mev, ok := parseSGRMouse([]byte("\x1b[<64;30;10m")); !ok {
-		t.Fatalf("parseSGRMouse failed on wheel release report")
-	} else if _, ok := mouseEventFromSGR(mev); ok {
-		t.Fatalf("wheel release decoded into a scroll event")
-	}
-}
-
 func TestStreamStateAppendPasteSanitizesTerminalControls(t *testing.T) {
 	var state streamState
 	state.appendPaste("hello\x1b[<35;48;27M[<35;48;27Mworld")

@@ -693,7 +693,10 @@ type orphanToolCall struct {
 // builds, not a tool block, and live never stamps one canceled
 // (Renderer.FinalizePendingTools only touches tool blocks) - rebuilding it here
 // would invent per-task outcomes for work the run never reached. A query call
-// (status/wait/close/list) is rebuilt as the canceled card it became live.
+// (status/wait/close/list) is rebuilt as the canceled card it became live. An
+// exit-plan gate call is excluded too: its wait holds no card on any surface,
+// so a run that died on the gate replays with the pending approval overlay
+// re-asking it, not with a canceled card it never drew.
 func orphanToolCalls(callIndex map[string]replayToolCall, callRow, resultRow map[string]int) []orphanToolCall {
 	orphans := make([]orphanToolCall, 0, len(callRow))
 	for callID, row := range callRow {
@@ -701,7 +704,7 @@ func orphanToolCalls(callIndex map[string]replayToolCall, callRow, resultRow map
 			continue
 		}
 		call, ok := callIndex[callID]
-		if !ok || isSubagentDispatchTool(call.name) {
+		if !ok || isSubagentDispatchTool(call.name) || tool.ToolStepHoldsNoCard(call.name, "canceled") {
 			continue
 		}
 		orphans = append(orphans, orphanToolCall{callID: callID, row: row, call: call})
@@ -1130,6 +1133,12 @@ func replayToolMessage(turn state.Message, meta tool.ToolMeta, callIndex map[str
 	// body is the delivery drop key, so the row draws nothing — the handoff
 	// it recorded was never user-facing.
 	if hasStoredDisplay && isPlanReviewDeliveredDisplay(storedDisplay.Body) {
+		return Message{}, "", false
+	}
+	// The gate's wait holds no card on any surface, live included, and a
+	// canceled gate was abandoned to that same wait: replay records the
+	// abandonment only in the approval confirmation line, never in a card.
+	if tool.ToolStepHoldsNoCard(toolName, meta.Status) {
 		return Message{}, "", false
 	}
 	summary := strings.TrimSpace(transcriptToolSummaryWithMeta(body, meta))
