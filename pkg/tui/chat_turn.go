@@ -1071,13 +1071,13 @@ func (s *ChatSession) notifyToolApprovalDenied(p *chatApprovalResume, actionID s
 			deliveredReview = turn.ActionIsReviewDelivered(act)
 		}
 	}
-	content := tool.DeniedToolDisplayBody(toolName, feedback)
-	// A delivered review closed this gate, not the user: the answer stamp says
-	// so even when the typed feedback happens to equal the marker string. The
-	// card reports the handoff instead of a refusal with no words behind it.
+	// A delivered review closed this gate, not the user: the handoff is
+	// internal plumbing and prints nothing — the planner revises against the
+	// review and submits a fresh exit_plan_mode on its own.
 	if status == "denied" && deliveredReview {
-		content = turn.PlanReviewDeliveredText
+		return
 	}
+	content := tool.DeniedToolDisplayBody(toolName, feedback)
 	meta.Status = status
 	s.notifyUI(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,

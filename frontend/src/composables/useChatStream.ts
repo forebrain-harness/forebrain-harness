@@ -110,6 +110,13 @@ export interface ChatMessage {
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
   picked?: string
+  /**
+   * Tool steps this turn's transcript carried whose cards are withheld — the
+   * exit-plan gate holds no card on any surface. An approval record naming
+   * one of these anchors to this turn: the decision it carries is history
+   * even though the wait it held drew nothing.
+   */
+  gateStepIds?: string[]
 }
 
 /**
@@ -224,6 +231,30 @@ export function parseStoredToolCalls(partsJson?: string | null): StoredToolCall[
     }
   }
   return out
+}
+
+/**
+ * parseToolDisplayPart reads the formatted completion card the runtime stores
+ * beside a tool result. Its body is what the terminal showed the user; the
+ * model-facing JSON in the row's own content is not, and must never be rendered
+ * as prose.
+ */
+/**
+ * The body a plan-review gate's persisted denial carries when a delivered
+ * review — never the user — closed it. It is the runtime's internal handoff
+ * key: no surface renders it, and every replay projection that meets it drops
+ * the row whole. Must stay byte-identical with the runtime's
+ * tool.PlanReviewDeliveredDisplayKey.
+ */
+export const PLAN_REVIEW_DELIVERED_KEY = 'Plan review delivered — the planner is revising the plan.'
+
+/**
+ * isPlanReviewDeliveredRow reports whether a stored tool row is the delivery
+ * drop key: such a row is internal handoff plumbing, so the timeline draws
+ * nothing for it.
+ */
+function isPlanReviewDeliveredRow(row: { partsJson?: string | null }): boolean {
+  return String(parseToolDisplayPart(row.partsJson).body ?? '').trim() === PLAN_REVIEW_DELIVERED_KEY
 }
 
 /**
@@ -419,6 +450,24 @@ export function toolStepFromPayload(
 }
 
 /**
+ * isExitPlanGate reports whether a call is the exit-plan gate, whose wait
+ * paints no card on any surface: its approval prompt is the whole wait.
+ * Bound to the runtime's tool.ToolStepHoldsNoCard.
+ */
+function isExitPlanGate(toolName: string): boolean {
+  return String(toolName ?? '').trim().toLowerCase() === 'exit_plan_mode'
+}
+
+/**
+ * stepHoldsNoCard reports whether a tool step's card is withheld: the
+ * exit-plan gate while the call runs or awaits the decision. Its settled
+ * cards - the denial the user made, a failure, the exit itself - still paint.
+ */
+function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
+  return isExitPlanGate(step.toolName) && ['running', 'awaiting approval'].includes(String(step.status ?? '').trim())
+}
+
+/**
  * toolStepFromRow rebuilds one card from a persisted tool row. A subagent_*
  * row carries its card facts as the gateway's own field — the stored display
  * part is what the surface once showed, and the subagent card never reads it.
@@ -557,6 +606,9 @@ export function conversationFromTranscript(
       // place rather than disappearing.
       const stepId = String(row.toolStepId ?? '').trim()
       if (!stepId || drawn.has(stepId)) return
+      // A delivered review closed this gate, not the user: the row's body is
+      // the delivery drop key, so the row draws nothing.
+      if (isPlanReviewDeliveredRow(row)) return
       const current = openTurn(row, index)
       drawn.add(stepId)
       current.blocks = [...(current.blocks ?? []), { kind: 'tool', step: toolStepFromRow(row, calls.get(stepId)) }]
@@ -576,8 +628,20 @@ export function conversationFromTranscript(
     }
     for (const call of parseStoredToolCalls(row.partsJson)) {
       if (drawn.has(call.id)) continue
-      drawn.add(call.id)
       const answer = toolRowByCall.get(call.id)
+      // A delivered review closed this gate: the answer row's body is the
+      // delivery drop key, so the call draws nothing - the same whole-row
+      // drop an unclaimed row takes above.
+      if (answer && isPlanReviewDeliveredRow(answer)) continue
+      // The exit-plan gate holds no card while it waits, and none when a run
+      // stopped before it resolved: only its settled answers draw. The step
+      // still anchors this turn, because an approval record naming it is
+      // history even though the wait drew nothing.
+      if (!answer && isExitPlanGate(String(call.name ?? ''))) {
+        current.gateStepIds = [...(current.gateStepIds ?? []), String(call.id ?? '').trim()].filter(Boolean)
+        continue
+      }
+      drawn.add(call.id)
       current.blocks = [...(current.blocks ?? []), {
         kind: 'tool',
         // A call with no tool row never ran: the gate the user canceled, or a
@@ -798,8 +862,13 @@ export function upsertApprovalBlock(
   const gated = next.toolStepId
     ? blocks.findIndex((block) => block.kind === 'tool' && block.step.stepId === next.toolStepId)
     : -1
-  if (gated < 0) return [...blocks, next]
-  return [...blocks.slice(0, gated), next, ...blocks.slice(gated)]
+  if (gated >= 0) return [...blocks.slice(0, gated), next, ...blocks.slice(gated)]
+  // A gate whose own card is withheld - the exit-plan gate holds no card -
+  // still lands above the calls of the turn it belongs to, the same place the
+  // terminal prints the line for it.
+  const lastTool = blocks.map((block) => block.kind === 'tool').lastIndexOf(true)
+  if (lastTool >= 0) return [...blocks.slice(0, lastTool), next, ...blocks.slice(lastTool)]
+  return [...blocks, next]
 }
 
 /**
@@ -2791,8 +2860,13 @@ export function useChatStream() {
       }
       case 'approval_resolved': {
         const actionId = String(payload.actionId ?? '').trim()
-		const decision = normalizeApprovalDecision(String(payload.decision ?? payload.status ?? 'resolved'))
-        const confirmation = String(payload.confirmation ?? '').trim() || undefined
+	const decision = normalizeApprovalDecision(String(payload.decision ?? payload.status ?? 'resolved'))
+        // A delivered review's record carries the internal handoff key, not
+        // user-facing words: the line is dropped, the decision still lands.
+        const confirmation = (() => {
+          const raw = String(payload.confirmation ?? '').trim()
+          return raw && raw !== PLAN_REVIEW_DELIVERED_KEY ? raw : undefined
+        })()
         updateSubagent(agentId, (entry) => ({
           ...entry,
 		  status: decision === 'cancelled'
@@ -3261,7 +3335,7 @@ export function useChatStream() {
     const owner = toolStepId
       ? messages.value.find((message) => (message.blocks ?? []).some(
         (existing) => existing.kind === 'tool' && existing.step.stepId === toolStepId,
-      ))
+      ) || message.gateStepIds?.includes(toolStepId))
       : undefined
     if (!owner?.id) {
       updateMessageById(assistantMessageId, (message) => ({
@@ -3297,6 +3371,9 @@ export function useChatStream() {
       completed,
       `${String(evt.description ?? 'tool')}-${evt.id ?? ''}`,
     )
+    // The exit-plan gate's wait paints no card: its approval prompt is the
+    // whole wait (stepHoldsNoCard).
+    if (stepHoldsNoCard(step)) return
     rememberSubagentCallStep(step)
     updateMessageById(assistantMessageId, (message) => ({
       ...message,
@@ -3762,15 +3839,19 @@ export function useChatStream() {
         // The decision, with the one line the surface printed for it. Rendering
         // that line rather than rebuilding it keeps the web and the terminal
         // word-for-word identical, including wording only the surface knows.
+        // A delivered review's record carries the internal handoff key instead
+        // of user-facing words, so its line is dropped and the card closes
+        // silently - the delivery was never something to read.
         const actionId = String(payload.actionId ?? '').trim()
         if (!actionId) return
+        const confirmationRaw = String(payload.confirmation ?? '').trim()
         upsertConversationApproval(assistantMessageId, String(payload.toolStepId ?? '').trim(), {
           kind: 'approval',
           id: `approval-${actionId}`,
           actionId,
           actionKind: String(payload.actionKind ?? '').trim(),
           status: normalizeApprovalDecision(String(payload.decision ?? payload.status ?? 'resolved').trim()),
-          confirmation: String(payload.confirmation ?? '').trim() || undefined,
+          confirmation: confirmationRaw && confirmationRaw !== PLAN_REVIEW_DELIVERED_KEY ? confirmationRaw : undefined,
           message: String(payload.reason ?? '').trim() || undefined,
           toolStepId: String(payload.toolStepId ?? '').trim() || undefined,
         })

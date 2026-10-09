@@ -5,9 +5,9 @@ import { setLocale } from '@/locales'
 import ApprovalCard from './ApprovalCard.vue'
 
 /**
- * A delivered plan review closes the approval as a denial whose stored reason
- * is plumbing, not words: the card replays the handoff line the surface
- * printed, and the marker never reaches the screen.
+ * An approval card replays the one line the surface printed for the decision:
+ * a card with a line shows the line and never the stored reason; a card
+ * without one prints nothing.
  */
 describe('ApprovalCard', () => {
   beforeAll(() => setLocale('en'))
@@ -24,16 +24,16 @@ describe('ApprovalCard', () => {
     return { wrapper, text: wrapper.text() }
   }
 
-  it('replays the delivered line for a review handed back to the planner', () => {
+  it('replays the line the surface printed for the decision', () => {
     const got = card({
       actionId: 'act-1',
       actionKind: 'exit_plan_mode',
       status: 'denied',
-      confirmation: 'Plan review delivered — the planner is revising the plan.',
-      message: 'plan-review:delivered',
+      confirmation: "✗ You canceled forebrain's request to exit plan mode",
+      message: 'canceled by user',
     })
-    expect(got.text).toBe('Plan review delivered — the planner is revising the plan.')
-    expect(got.text).not.toContain('plan-review:delivered')
+    expect(got.text).toBe("✗ You canceled forebrain's request to exit plan mode")
+    expect(got.text).not.toContain('canceled by user')
     expect(got.wrapper.find('[data-approval-status="denied"]').exists()).toBe(true)
   })
 

@@ -130,11 +130,12 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					"status":    "denied",
 				})
 				// A delivered review closed this gate: the card's body is the
-				// handoff line, the same sentence every other display of the
-				// delivery says, never "(no output)".
+				// delivery drop key, never "(no output)". The key is replay
+				// plumbing, not user-facing words — every surface's replay
+				// projection recognizes it and drops the row whole.
 				denialBody := tool.DeniedToolDisplayBody(tc.Function.Name, resumeAssistant.denyFeedback)
 				if resumeAssistant.deliveredReview {
-					denialBody = tool.PlanReviewDeliveredText
+					denialBody = tool.PlanReviewDeliveredDisplayKey
 				}
 				denial.ToolDisplay = &llm.ToolDisplayState{
 					Body:         denialBody,

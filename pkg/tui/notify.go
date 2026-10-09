@@ -788,12 +788,14 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		}
 	case event.RunEventToolStarted:
 		var p event.ToolCallStartedPayload
-		if json.Unmarshal(evt.Payload, &p) == nil {
+		// The exit-plan gate's wait paints no card on any surface: its
+		// approval prompt is the whole wait (tool.ToolStepHoldsNoCard).
+		if json.Unmarshal(evt.Payload, &p) == nil && !tool.ToolStepHoldsNoCard(p.ToolName, "running") {
 			s.notifyUIForSession(evt.SessionID, subagentToolStepMsg(evt, p.StepID, p.ToolName, firstNonEmpty(p.Summary, p.Description), p.ToolMeta, evt.Type))
 		}
 	case event.RunEventToolCompleted:
 		var p event.ToolCallCompletedPayload
-		if json.Unmarshal(evt.Payload, &p) == nil {
+		if json.Unmarshal(evt.Payload, &p) == nil && !tool.ToolStepHoldsNoCard(p.ToolName, p.ToolMeta.Status) {
 			msg := subagentToolStepMsg(evt, p.StepID, p.ToolName, firstNonEmpty(p.Summary, p.Description), p.ToolMeta, evt.Type)
 			msg.Msg.Content = p.DisplayBody
 			msg.Msg.Duration = time.Duration(p.DurationSeconds * float64(time.Second))

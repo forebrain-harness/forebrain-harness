@@ -10400,19 +10400,10 @@ func TestApprovalConfirmationTextEnterPlanDenial(t *testing.T) {
 	}
 }
 
-func TestExitPlanModeDeniedToolFrameReplacesPendingCard(t *testing.T) {
+func TestExitPlanModeDeniedToolFrameStandsAlone(t *testing.T) {
 	var reducer Reducer
-	pending := reducer.Reduce(NewMessageMsg{Msg: Message{
-		Kind:      MsgKindTool,
-		StepID:    "exit-call-1",
-		ToolName:  "exit_plan_mode",
-		ToolMeta:  tool.ToolMeta{ToolName: "exit_plan_mode", Status: "awaiting approval"},
-		Timestamp: time.Now(),
-	}}).Frames
-	if len(pending) != 1 || !strings.Contains(ToolDisplayHeader(pending[0], ""), "Exiting plan mode") {
-		t.Fatalf("pending = %#v", pending)
-	}
-
+	// The gate's wait paints no card on any surface, so the denial the user
+	// made is the first and only frame the step produces: it stands alone.
 	denied := reducer.Reduce(NewMessageMsg{Msg: Message{
 		Kind:      MsgKindTool,
 		StepID:    "exit-call-1",
@@ -12605,11 +12596,6 @@ func TestPlanReviewReachesThePlannerWhenTheUserTypesNothing(t *testing.T) {
 func TestPlanReviewAutoDeliversToPlannerAfterDone(t *testing.T) {
 	ctx := context.Background()
 	cs, actions, actionID := newPlanReviewSession(t, &stubReviewer{text: "Verdict: rework the cache story."})
-	notified := make(chan any, 16)
-	cs.PrependUINotify(func(msg any) {
-		notified <- msg
-	})
-	t.Cleanup(cs.stopUINotificationDispatcher)
 
 	if err := cs.completeSurfaceToolApprovalDecision(ctx, actionID, turn.ToolApprovalDecision{
 		RequestPlanReview: &turn.PlanReviewModelOption{Provider: "openai", Model: "gpt-5.1"},
@@ -12636,30 +12622,11 @@ func TestPlanReviewAutoDeliversToPlannerAfterDone(t *testing.T) {
 	if resolved[0].Decision != string(state.ActionDenied) || resolved[0].Reason != turn.PlanReviewDeliveredReason {
 		t.Fatalf("delivery event = %#v, want the marker denial", resolved[0])
 	}
-	if resolved[0].Confirmation != turn.PlanReviewDeliveredText {
-		t.Fatalf("delivery confirmation = %q, want the delivered line the web replays", resolved[0].Confirmation)
-	}
 
 	// The gate no longer re-prompts: the planner is revising, and the approval
 	// the user will see next is the revised plan's own.
 	if prompted, perr := cs.buildSurfaceToolApprovalRequest(ctx, "session-1"); perr == nil && prompted != nil {
 		t.Fatalf("a delivered review must close the approval, got re-prompt %#v", prompted)
-	}
-
-	// One line says what happened — not a decision confirmation, because no
-	// user decision was made.
-	sawNotice := false
-	deadline := time.After(2 * time.Second)
-	for !sawNotice {
-		select {
-		case msg := <-notified:
-			if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindSystem &&
-				strings.Contains(m.Msg.Content, "Plan review delivered") {
-				sawNotice = true
-			}
-		case <-deadline:
-			t.Fatal("the delivery must tell the user the planner is revising")
-		}
 	}
 
 	// The resume the planner runs under: instruction header plus the review,

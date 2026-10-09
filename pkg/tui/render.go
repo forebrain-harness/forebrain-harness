@@ -2656,12 +2656,13 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		}
 
 	case lower == "exit_plan_mode":
+		// No running/pending title on purpose: the gate's wait paints no card
+		// on any surface (tool.ToolStepHoldsNoCard), so no frame can arrive
+		// asking for one. The settled states are all that can render.
 		if isDenied {
 			action = "Kept planning"
 		} else if isFailed {
 			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Exiting plan mode"
 		} else {
 			action = "Exited plan mode"
 		}
