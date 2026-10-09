@@ -330,6 +330,11 @@ type Renderer struct {
 	// names the agent whose transcript is on screen.
 	rosterCursor    string
 	viewBrowseState map[string]viewportBrowseState
+	// asyncPaint, when non-nil, carries viewport frames to the terminal on
+	// its own goroutine so a stalled terminal drain cannot freeze the input
+	// pipeline (see paint_writer.go). Nil when painting synchronously —
+	// always the case for non-terminal writers such as test buffers.
+	asyncPaint *asyncPaintWriter
 	// vpScrollOffset is the absolute row at the top of the visible window;
 	// vpFollow keeps it pinned to the bottom as new frames arrive until the user
 	// scrolls up. vpHeight is the body height of the last paint (for wheel/click
@@ -1978,10 +1983,10 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 					_, _ = fmt.Fprintln(r.out)
 					return
 				}
-			if strings.EqualFold(title, "exit_plan_mode") {
-				_, _ = fmt.Fprintln(r.out)
-				return
-			}
+				if strings.EqualFold(title, "exit_plan_mode") {
+					_, _ = fmt.Fprintln(r.out)
+					return
+				}
 				content = lipgloss.NewStyle().Faint(true).Render(toolNoOutputText)
 				content = wrapCardContent(content, maxCardContentWidth()-2)
 				_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(content))

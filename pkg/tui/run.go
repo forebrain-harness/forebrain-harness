@@ -4089,6 +4089,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	case inputEventMouseMove:
 		renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
 	case inputEventMouseWheel:
+		renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
 		renderer.ViewportScrollAt(ev.wheelDelta, ev.mouseCol, ev.mouseRow)
 	case inputEventDraft:
 		state.resetActiveRunCtrlCSequence()
