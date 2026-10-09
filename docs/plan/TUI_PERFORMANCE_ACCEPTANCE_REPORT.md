@@ -1,5 +1,11 @@
 # TUI 性能优化真机验收报告
 
+> **[REVERTED 2026-10-09]** 本计划所述代码已于 2026-10-09 由
+> `docs/plan/SUBAGENT_VIEW_PERF_ROLLBACK_PLAN.md` 整体回滚（owner 裁决：该系列
+> subagent/主视图性能优化全部无效，验收通过不改变该裁决）。文中的验收结论仅作
+> 历史记录；验收所测的代码位置（`liveBlockCount`、`setFrame`、`renderViewport`
+> 预分配、wheel guard 等）均已不存在，勿按本文实施或复现。
+
 **日期**: 2026-10-09  
 **验收人**: AI Agent  
 **测试环境**: macOS (Apple M4), tmux + fake provider  

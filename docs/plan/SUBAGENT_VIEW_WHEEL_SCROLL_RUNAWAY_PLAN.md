@@ -1,5 +1,12 @@
 # Plan: 修复 TUI subagent 视图鼠标滚轮"越滚越多停不下来"（SGR 滚轮 release/motion 事件被重复当档位）
 
+> **[REVERTED 2026-10-09]** 本计划所述代码已于 2026-10-09 由
+> `docs/plan/SUBAGENT_VIEW_PERF_ROLLBACK_PLAN.md` 整体回滚（owner 裁决：该系列
+> subagent/主视图性能优化全部无效）。文中的 COMPLETED/验收回填仅作历史记录；
+> 提及的代码位置（`input_events.go` 滚轮 press/motion guard、`TestWheelReleaseAndMotionReportsDoNotScroll`）
+> 均已不存在，勿按本文实施或复现。press+release 双倍、motion 采样 N 倍超滚的旧行为
+> 系 owner 已知悉并接受的回滚后果。
+
 > 本文件为送审版。批准后第一步复制为仓库惯例路径
 > `docs/plan/SUBAGENT_VIEW_WHEEL_SCROLL_RUNAWAY_PLAN.md`，收口时在该文件回填验收记录。
 

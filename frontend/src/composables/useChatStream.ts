@@ -258,6 +258,17 @@ function isPlanReviewDeliveredRow(row: { partsJson?: string | null }): boolean {
 }
 
 /**
+ * isCanceledExitRow reports whether a stored tool row is the settled answer a
+ * canceled exit-plan gate left behind. The gate's wait holds no card on any
+ * surface, and the walk-away's only record is the approval confirmation line —
+ * so like a delivered review's row, this one draws nothing whole.
+ */
+function isCanceledExitRow(row: { partsJson?: string | null }): boolean {
+  const meta = toolMetaRecord(parseToolDisplayPart(row.partsJson).toolMetaJson)
+  return isExitPlanGate(metaString(meta, 'tool_name')) && metaString(meta, 'status').toLowerCase() === 'canceled'
+}
+
+/**
  * parseToolDisplayPart reads the formatted completion card the runtime stores
  * beside a tool result. Its body is what the terminal showed the user; the
  * model-facing JSON in the row's own content is not, and must never be rendered
@@ -460,11 +471,12 @@ function isExitPlanGate(toolName: string): boolean {
 
 /**
  * stepHoldsNoCard reports whether a tool step's card is withheld: the
- * exit-plan gate while the call runs or awaits the decision. Its settled
- * cards - the denial the user made, a failure, the exit itself - still paint.
+ * exit-plan gate while the call runs, awaits the decision, or was abandoned to
+ * that wait - waiting, abandoned and canceled hold no card. Only the settled
+ * answers draw: the user's denial, a failure, the exit itself.
  */
 function stepHoldsNoCard(step: { toolName: string; status: string }): boolean {
-  return isExitPlanGate(step.toolName) && ['running', 'awaiting approval'].includes(String(step.status ?? '').trim())
+  return isExitPlanGate(step.toolName) && ['running', 'awaiting approval', 'canceled'].includes(String(step.status ?? '').trim().toLowerCase())
 }
 
 /**
@@ -607,8 +619,11 @@ export function conversationFromTranscript(
       const stepId = String(row.toolStepId ?? '').trim()
       if (!stepId || drawn.has(stepId)) return
       // A delivered review closed this gate, not the user: the row's body is
-      // the delivery drop key, so the row draws nothing.
+      // the delivery drop key, so the row draws nothing. A canceled gate's
+      // settled row draws nothing either — the wait's only record is the
+      // approval confirmation line.
       if (isPlanReviewDeliveredRow(row)) return
+      if (isCanceledExitRow(row)) return
       const current = openTurn(row, index)
       drawn.add(stepId)
       current.blocks = [...(current.blocks ?? []), { kind: 'tool', step: toolStepFromRow(row, calls.get(stepId)) }]
@@ -631,8 +646,10 @@ export function conversationFromTranscript(
       const answer = toolRowByCall.get(call.id)
       // A delivered review closed this gate: the answer row's body is the
       // delivery drop key, so the call draws nothing - the same whole-row
-      // drop an unclaimed row takes above.
+      // drop an unclaimed row takes above. A canceled gate's settled answer
+      // drops the same way.
       if (answer && isPlanReviewDeliveredRow(answer)) continue
+      if (answer && isCanceledExitRow(answer)) continue
       // The exit-plan gate holds no card while it waits, and none when a run
       // stopped before it resolved: only its settled answers draw. The step
       // still anchors this turn, because an approval record naming it is

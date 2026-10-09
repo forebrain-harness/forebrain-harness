@@ -1,5 +1,11 @@
 # TUI 性能优化实施总结
 
+> **[REVERTED 2026-10-09]** 本计划所述代码已于 2026-10-09 由
+> `docs/plan/SUBAGENT_VIEW_PERF_ROLLBACK_PLAN.md` 整体回滚（owner 裁决：该系列
+> subagent/主视图性能优化全部无效）。文中的 COMPLETED/验收回填仅作历史记录；
+> 提及的代码位置（`liveBlockCount`、`isLiveFrame`、`setFrame`、`renderViewport`
+> 预分配、`hasLiveBlockLocked` 快路径等）均已不存在，勿按本文实施或复现。
+
 **日期**: 2026-10-09  
 **状态**: COMPLETED  
 **实施者**: AI Agent

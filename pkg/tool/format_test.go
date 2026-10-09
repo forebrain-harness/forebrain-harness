@@ -2473,9 +2473,10 @@ func assertPayloadLinesShareColumn(t *testing.T, body, marker string, wantLines 
 }
 
 // The exit-plan gate's wait paints no card on any surface: its approval prompt
-// is the whole wait. The settled states still paint.
+// is the whole wait, and a canceled gate was abandoned to that same wait. The
+// settled states still paint.
 func TestToolStepHoldsNoCard(t *testing.T) {
-	for _, status := range []string{"running", "awaiting approval"} {
+	for _, status := range []string{"running", "awaiting approval", "canceled"} {
 		if !ToolStepHoldsNoCard("exit_plan_mode", status) {
 			t.Fatalf("exit_plan_mode/%q must hold no card", status)
 		}

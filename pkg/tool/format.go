@@ -2263,15 +2263,16 @@ func subagentElapsedLabel(startedAt, finishedAt int64) string {
 
 // ToolStepHoldsNoCard reports whether a tool step's transcript card is
 // withheld: the exit-plan gate's wait lives entirely in its approval prompt,
-// so no surface paints a card for it while the call runs or awaits the
-// decision. Its settled cards — the denial the user made, a failure, the
-// exit itself — still paint.
+// so no surface paints a card for it while the call runs, awaits the
+// decision, or was abandoned to that wait — waiting, abandoned and canceled
+// hold no card. Only the settled answers draw: the user's denial, a failure,
+// the exit itself.
 func ToolStepHoldsNoCard(toolName, status string) bool {
 	if !strings.EqualFold(strings.TrimSpace(toolName), "exit_plan_mode") {
 		return false
 	}
 	switch strings.TrimSpace(status) {
-	case "running", "awaiting approval":
+	case "running", "awaiting approval", "canceled":
 		return true
 	default:
 		return false

@@ -2054,6 +2054,88 @@ describe('conversation tool and approval timeline', () => {
     expect(denied.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))).toHaveLength(1)
   })
 
+  it('drops a canceled gate row whole and still shows the confirmation line', async () => {
+    const gateRow = (status: string) => ({
+      id: 't1', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-exit',
+      partsJson: JSON.stringify([
+        { type: 'tool_result_meta', tool_call_id: 'call-exit' },
+        { type: 'tool_display', body: 'plan review closed the gate', summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status }) },
+      ]),
+    })
+    const assistantParts = JSON.stringify([
+      { type: 'text', text: 'here is the plan' },
+      { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'plan the work' },
+      { id: 'a1', rowId: 2, role: 'assistant', content: 'here is the plan', runId: 'run-1', partsJson: assistantParts },
+      gateRow('canceled'),
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'cancel-gate-session', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'evt-1', sequence: 1, schemaVersion: 1, runId: 'run-1', sessionId: 'cancel-gate-session', type: 'approval_resolved', payload: { actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'cancelled', toolStepId: 'call-exit', confirmation: "✗ You canceled forebrain's request to exit plan mode" } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'cancel-gate-session', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 'cancel-gate-session'
+      await stream.loadMessages('cancel-gate-session')
+
+      // The walk-away's only record is the confirmation line: no card for a
+      // gate that never answered, the line where its turn ended.
+      const turn = stream.messages.value[1]
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'approval'])
+      expect(turn?.blocks?.[1]).toMatchObject({
+        kind: 'approval',
+        status: 'cancelled',
+        confirmation: "✗ You canceled forebrain's request to exit plan mode",
+      })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  it('keeps a denied gate row card from history', async () => {
+    const assistantParts = JSON.stringify([
+      { type: 'text', text: 'here is the plan' },
+      { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'plan the work' },
+      { id: 'a1', rowId: 2, role: 'assistant', content: 'here is the plan', runId: 'run-1', partsJson: assistantParts },
+      {
+        id: 't1', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-exit',
+        partsJson: JSON.stringify([
+          { type: 'tool_result_meta', tool_call_id: 'call-exit' },
+          { type: 'tool_display', body: 'Please split the plan into milestones.', summary: 'kept planning', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied' }) },
+        ]),
+      },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 'deny-gate-session', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'deny-gate-session', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 'deny-gate-session'
+      await stream.loadMessages('deny-gate-session')
+
+      // The user's denial is a settled answer: the card stays.
+      const turn = stream.messages.value[1]
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'tool'])
+      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-exit', status: 'denied' } })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
   it('keeps a subagent approval out of the conversation timeline', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-subagent-approval', 'run-subagent-approval')
 
