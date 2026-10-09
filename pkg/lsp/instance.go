@@ -1040,6 +1040,16 @@ func (i *Instance) handleCrash() {
 	}
 
 	if err := i.launchAndInitialize(context.Background()); err != nil {
+		// A Shutdown that landed mid-launch killed this attempt and already
+		// owns the terminal state (stopped, callers resolved); failing here
+		// would overwrite it. The launch can take seconds (initialize), so
+		// the pre-launch aborted check is not enough — re-check now.
+		i.mu.Lock()
+		aborted := i.stopping || i.doneClosed
+		i.mu.Unlock()
+		if aborted {
+			return
+		}
 		i.setLastError(err.Error())
 		i.setState(StateFailed)
 		i.finishTerminal()
