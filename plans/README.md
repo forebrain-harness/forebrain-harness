@@ -13,7 +13,7 @@
 
 | # | 标题 | 类别 | 状态 | 优先级 | 工作量 | 风险 |
 |---|------|------|------|--------|--------|------|
-| [001-fix-message-recall-after-detach](001-fix-message-recall-after-detach.md) | 修复 runtime detach 后消息无法撤回 | Bug Fix | TODO | **HIGH** | S | LOW |
+| [001-fix-message-recall-after-detach](001-fix-message-recall-after-detach.md) | 修复 runtime detach 后消息无法撤回 | Bug Fix | DONE | **HIGH** | S | LOW |
 | [001-frontend-component-design-spec-alignment](001-frontend-component-design-spec-alignment.md) | 前端通用组件样式规范对齐 | Design System | TODO | HIGH | M (4-6h) | MEDIUM |
 
 ## 执行顺序
