@@ -2258,6 +2258,271 @@ func TestReplayDropsCanceledExitGateSettledRow(t *testing.T) {
 	}
 }
 
+// A canceled exit gate leaves no card behind, so replay has no settled row to
+// anchor its records after: they anchor right after the row that issued the
+// call, the position live printed them at. The enter gate before it, which
+// parks a card, keeps the old rule and reads above its own card.
+func TestReplayPlacesCardlessGateConfirmationAfterItsCall(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+		assistantToolCallRow("calling enter_plan_mode", "call-enter", "enter_plan_mode", "{}"),
+		toolRowWithDisplay(3, "call-enter", "entered plan mode", `{"tool_name":"enter_plan_mode","status":"completed"}`),
+		assistantToolCallRow("calling exit_plan_mode", "call-exit", "exit_plan_mode", "{}"),
+		toolRowWithDisplay(5, "call-exit", "abandoned", `{"tool_name":"exit_plan_mode","status":"canceled"}`),
+	}
+	events := []event.RunEvent{
+		event.NewRunEvent("approval-resolved:act-enter:approved", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-enter", ActionKind: "enter_plan_mode", Decision: "approved", ToolStepID: "call-enter",
+				Confirmation: "✔ You approved forebrain to enter plan mode",
+			}, time.Unix(101, 0).UTC()),
+		event.NewRunEvent("approval-resolved:act-exit:cancelled", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-exit", ActionKind: "exit_plan_mode", Decision: "cancelled", ToolStepID: "call-exit",
+				Confirmation: "✗ You canceled forebrain's request to exit plan mode",
+			}, time.Unix(102, 0).UTC()),
+	}
+	for i := range events {
+		events[i].Sequence = int64(i + 1)
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	reducer := &Reducer{}
+	replayTimelineWithReducer(renderer, turns, events, reducer, nil)
+	flushReplayReducer(renderer, reducer)
+
+	enterCard, exitCall, canceled := -1, -1, -1
+	for i, block := range renderer.vm.blocks {
+		f := block.frame
+		switch {
+		case f.Kind == FrameTool && f.Title == "exit_plan_mode":
+			t.Fatalf("a canceled gate replayed a card live never drew: %#v", f)
+		case f.Kind == FrameTool && f.Title == "enter_plan_mode":
+			enterCard = i
+		case f.Kind == FrameAssistant && strings.Contains(f.Content, "calling exit_plan_mode"):
+			exitCall = i
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You canceled"):
+			canceled = i
+		}
+	}
+	if enterCard < 0 || exitCall < 0 || canceled < 0 {
+		t.Fatalf("replay lost a record: enterCard=%d exitCall=%d canceled=%d %#v", enterCard, exitCall, canceled, renderer.vm.blocks)
+	}
+	if !(enterCard < exitCall && exitCall < canceled) {
+		t.Fatalf("the cardless gate's line must read after the call that asked: enterCard=%d exitCall=%d canceled=%d", enterCard, exitCall, canceled)
+	}
+}
+
+// A cardless gate that settled keeps the same order: the decision line reads
+// after the response that asked and before the settled card the decision
+// produced — the approved exit, or the denial that kept planning.
+func TestReplayCardlessGateDecisionPrecedesItsSettledCard(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		decision     string
+		metaJSON     string
+		body         string
+		confirmation string
+		wantAction   string
+	}{
+		{
+			name: "approved", decision: "approved",
+			metaJSON:     `{"tool_name":"exit_plan_mode","status":"completed"}`,
+			body:         `{"mode":"agent","message":"Exited plan mode."}`,
+			confirmation: "✔ You approved forebrain to exit plan mode",
+			wantAction:   "Exited plan mode",
+		},
+		{
+			name: "denied", decision: "denied",
+			metaJSON:     `{"tool_name":"exit_plan_mode","status":"denied"}`,
+			body:         "split the milestones first",
+			confirmation: "✗ You did not approve forebrain to exit plan mode",
+			wantAction:   "Kept planning",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			turns := []state.Message{
+				{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+				assistantToolCallRow("calling exit_plan_mode", "call-exit", "exit_plan_mode", `{"plan":"do the thing"}`),
+				toolRowWithDisplay(3, "call-exit", tc.body, tc.metaJSON),
+			}
+			events := []event.RunEvent{
+				event.NewRunEvent("approval-resolved:act-exit:"+tc.decision, "run-1", "s1", event.RunEventApprovalResolved,
+					event.ApprovalResolvedPayload{
+						ActionID: "act-exit", ActionKind: "exit_plan_mode", Decision: tc.decision, ToolStepID: "call-exit",
+						Confirmation: tc.confirmation,
+					}, time.Unix(102, 0).UTC()),
+			}
+			events[0].Sequence = 1
+
+			renderer := NewRenderer(nil, nil)
+			renderer.viewportMode = true
+			renderer.composerSuppressed = true
+			reducer := &Reducer{}
+			replayTimelineWithReducer(renderer, turns, events, reducer, nil)
+			flushReplayReducer(renderer, reducer)
+
+			exitCall, line, card := -1, -1, -1
+			for i, block := range renderer.vm.blocks {
+				f := block.frame
+				switch {
+				case f.Kind == FrameTool && f.Title == "exit_plan_mode":
+					if card >= 0 {
+						t.Fatalf("more than one exit card replay: %#v", renderer.vm.blocks)
+					}
+					card = i
+					if action, _, _ := toolDisplayParts(f, f.Summary, ""); action != tc.wantAction {
+						t.Fatalf("settled card reads %q, want %q", action, tc.wantAction)
+					}
+				case f.Kind == FrameAssistant && strings.Contains(f.Content, "calling exit_plan_mode"):
+					exitCall = i
+				case f.Kind == FrameStatus && strings.Contains(f.Content, "You "):
+					line = i
+				}
+			}
+			if exitCall < 0 || line < 0 || card < 0 {
+				t.Fatalf("replay lost a record: exitCall=%d line=%d card=%d %#v", exitCall, line, card, renderer.vm.blocks)
+			}
+			if !(exitCall < line && line < card) {
+				t.Fatalf("the decision must read after its call and before its settled card: exitCall=%d line=%d card=%d", exitCall, line, card)
+			}
+		})
+	}
+}
+
+// The owner's real flow: a review was asked, delivered, the model revised and
+// asked again, and only then did the user approve. The delivered review's own
+// denial row and confirmation are internal handoff and draw nothing; the
+// revision and the second gate read below the review card they followed, and
+// exactly one exit card exists — the approved one.
+func TestReplayDeliveredReviewKeepsTheRevisedTurnBelowIt(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+		assistantToolCallRow("here is the plan", "call-exit-a", "exit_plan_mode", "{}"),
+		toolRowWithDisplay(3, "call-exit-a", tool.PlanReviewDeliveredDisplayKey, `{"tool_name":"exit_plan_mode","status":"denied"}`),
+		assistantToolCallRow("revised plan", "call-exit-b", "exit_plan_mode", "{}"),
+		toolRowWithDisplay(5, "call-exit-b", `{"mode":"agent","message":"Exited plan mode."}`, `{"tool_name":"exit_plan_mode","status":"completed"}`),
+	}
+	events := []event.RunEvent{
+		event.NewRunEvent("approval-resolved:act-1:review_requested", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-1", ActionKind: "exit_plan_mode", Decision: "review_requested", ToolStepID: "call-exit-a",
+				Confirmation: "✔ You asked zhipuai/glm-5.3-flash to review the plan",
+			}, time.Unix(101, 0).UTC()),
+		event.NewRunEvent("plan-review-started", "run-1", "s1", event.RunEventPlanReviewStarted,
+			event.PlanReviewStartedPayload{
+				ActionID: "act-1", ReviewID: "plan-review:rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+			}, time.Unix(102, 0).UTC()),
+		event.NewRunEvent("plan-reviewed", "run-1", "s1", event.RunEventPlanReviewed,
+			event.PlanReviewedPayload{
+				ActionID: "act-1", ReviewID: "plan-review:rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
+				Outcome: "done",
+			}, time.Unix(103, 0).UTC()),
+		event.NewRunEvent("approval-resolved:act-1:denied", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-1", ActionKind: "exit_plan_mode", Decision: "denied", ToolStepID: "call-exit-a",
+				Confirmation: tool.PlanReviewDeliveredDisplayKey,
+			}, time.Unix(104, 0).UTC()),
+		event.NewRunEvent("approval-resolved:act-2:approved", "run-1", "s1", event.RunEventApprovalResolved,
+			event.ApprovalResolvedPayload{
+				ActionID: "act-2", ActionKind: "exit_plan_mode", Decision: "approved", ToolStepID: "call-exit-b",
+				Confirmation: "✔ You approved forebrain to exit plan mode",
+			}, time.Unix(105, 0).UTC()),
+	}
+	for i := range events {
+		events[i].Sequence = int64(i + 1)
+	}
+
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	reducer := &Reducer{}
+	replayTimelineWithReducer(renderer, turns, events, reducer, nil)
+	flushReplayReducer(renderer, reducer)
+
+	planText, asked, reviewCard, revised, approved, exitCard := -1, -1, -1, -1, -1, -1
+	for i, block := range renderer.vm.blocks {
+		f := block.frame
+		switch {
+		case f.Kind == FrameTool && f.Title == "exit_plan_mode":
+			if exitCard >= 0 {
+				t.Fatalf("more than one exit card replay: %#v", renderer.vm.blocks)
+			}
+			exitCard = i
+		case f.Kind == FrameFanout:
+			reviewCard = i
+		case f.Kind == FrameAssistant && strings.Contains(f.Content, "here is the plan"):
+			planText = i
+		case f.Kind == FrameAssistant && strings.Contains(f.Content, "revised plan"):
+			revised = i
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You asked"):
+			asked = i
+		case f.Kind == FrameStatus && strings.Contains(f.Content, "You approved"):
+			approved = i
+		}
+	}
+	// Each response is its own sealed block, exactly once: the first one ended
+	// when it issued the gate's call, so the revision that followed the review
+	// is a new block, not the first response with the revision appended.
+	for _, block := range renderer.vm.blocks {
+		f := block.frame
+		if f.Kind != FrameAssistant {
+			continue
+		}
+		if !f.Final {
+			t.Fatalf("a replayed response was left unsealed: %#v", f)
+		}
+		if strings.Contains(f.Content, "here is the plan") && strings.Contains(f.Content, "revised plan") {
+			t.Fatalf("two responses replayed as one block: %q", f.Content)
+		}
+	}
+	if planText < 0 || asked < 0 || reviewCard < 0 || revised < 0 || approved < 0 || exitCard < 0 {
+		t.Fatalf("replay lost a record: plan=%d asked=%d card=%d revised=%d approved=%d exit=%d %#v",
+			planText, asked, reviewCard, revised, approved, exitCard, renderer.vm.blocks)
+	}
+	if !(planText < asked && asked < reviewCard && reviewCard < revised && revised < approved && approved < exitCard) {
+		t.Fatalf("the exchange must keep producer order: plan=%d asked=%d card=%d revised=%d approved=%d exit=%d",
+			planText, asked, reviewCard, revised, approved, exitCard)
+	}
+}
+
+// A gate whose wait holds no card still ends the response that issued it: live,
+// its running step sealed the streamed text. A delivered review's answer row
+// draws nothing, so replay alone has to seal that response, or the revision
+// the planner wrote next is appended to it as one block.
+func TestReplaySealsTheResponseThatIssuedACardlessGate(t *testing.T) {
+	turns := []state.Message{
+		{RowID: 1, Role: "user", Content: "plan the work", CreatedAt: 99},
+		assistantToolCallRow("first answer", "call-exit-a", "exit_plan_mode", "{}"),
+		toolRowWithDisplay(3, "call-exit-a", tool.PlanReviewDeliveredDisplayKey, `{"tool_name":"exit_plan_mode","status":"denied"}`),
+		{RowID: 4, Role: "assistant", Content: "second answer", CreatedAt: 100},
+	}
+	renderer := NewRenderer(nil, nil)
+	renderer.viewportMode = true
+	renderer.composerSuppressed = true
+	reducer := &Reducer{}
+	replayTimelineWithReducer(renderer, turns, nil, reducer, nil)
+	flushReplayReducer(renderer, reducer)
+
+	var got []string
+	for _, block := range renderer.vm.blocks {
+		f := block.frame
+		if f.Kind != FrameAssistant {
+			continue
+		}
+		if !f.Final {
+			t.Fatalf("a replayed response was left unsealed: %#v", f)
+		}
+		got = append(got, f.Content)
+	}
+	want := []string{"first answer", "second answer"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("replayed responses:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 // The orphan rebuild the exit gate opted out of still serves every other call:
 // a non-gate call issued but never answered replays as the one canceled card
 // live stamped on it when the run aborted.

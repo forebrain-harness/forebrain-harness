@@ -2,7 +2,7 @@
   <div class="relative flex items-center" ref="menuRef">
     <button
       type="button"
-      class="inline-flex h-8 items-center gap-1.5 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)]"
+      class="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)]"
       :disabled="disabled"
       :title="t('approval.pickerTitle')"
       data-testid="approval-picker"
@@ -15,12 +15,12 @@
     <p
       v-if="error && !open"
       role="alert"
-      class="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-2.5 py-2 text-[12px] text-[var(--forebrain-danger)]"
+      class="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-2.5 py-2 text-[12px] text-[var(--forebrain-danger)]"
       data-testid="approval-picker-error"
     >
       {{ error }}
     </p>
-    <div v-if="open" class="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-1.5 shadow-[var(--forebrain-shadow-pop)]">
+    <div v-if="open" class="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-1.5 shadow-[var(--forebrain-shadow-pop)]">
       <button
         v-for="preset in presets"
         :key="preset.id"

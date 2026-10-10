@@ -17,7 +17,7 @@
       <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div v-if="loading" class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!sessions.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
+      <div v-else-if="!sessions.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
         {{ t('projects.noSessions') }}
       </div>
       <ul v-else class="divide-y divide-[var(--forebrain-divider)]">

@@ -30,7 +30,7 @@
     </nav>
 
     <div class="min-h-0 flex-1 overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
-      <div v-if="error" class="mx-auto max-w-4xl rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</div>
+      <div v-if="error" class="mx-auto max-w-4xl rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</div>
       <RouterView v-else :project="project" :project-id="projectId" />
     </div>
   </div>

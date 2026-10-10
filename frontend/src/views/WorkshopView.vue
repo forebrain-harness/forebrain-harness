@@ -18,7 +18,7 @@
           v-for="task in tasks"
           :key="task.id"
           type="button"
-          class="mb-1 rounded-xl px-3 py-2 text-left text-[12px]"
+          class="mb-1 rounded-lg px-3 py-2 text-left text-[12px]"
           :class="task.id === activeTaskId ? 'bg-[var(--forebrain-brand-soft)] text-[var(--forebrain-brand-1)]' : 'text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]'"
           @click="openTask(task.id)"
         >
@@ -39,7 +39,7 @@
                  the order they happened — not just the final words. -->
             <div
               v-if="message.role === 'assistant' && message.blocks?.length"
-              class="max-w-[85%] rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
+              class="max-w-[85%] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
             >
               <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
                 <div
@@ -54,7 +54,7 @@
             </div>
             <div
               v-else-if="message.role !== 'assistant' || String(message.content ?? '').trim()"
-              class="inline-block max-w-[85%] rounded-2xl px-4 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap"
+              class="inline-block max-w-[85%] rounded-lg px-4 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap"
               :class="message.role === 'user'
                 ? 'bg-[var(--forebrain-brand-1)] text-[var(--forebrain-on-brand)]'
                 : 'border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] text-[var(--forebrain-text)]'"
@@ -95,7 +95,7 @@
       data-testid="workshop-new-dialog"
       @click.self="newTaskOpen = false"
     >
-      <div class="w-full max-w-md rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
+      <div class="w-full max-w-md rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
         <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('workshop.newTask') }}</div>
         <div class="mt-3 space-y-3">
           <label class="block">

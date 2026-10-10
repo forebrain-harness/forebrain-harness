@@ -1,5 +1,5 @@
 <template>
-  <div class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2" data-testid="permission-explain-result">
+  <div class="mt-3 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2" data-testid="permission-explain-result">
     <div class="flex flex-wrap items-center gap-2 text-[12px]">
       <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="permissionBehaviorClass(explain.decision?.behavior)">
         {{ explain.decision?.behavior ? permissionBehaviorLabel(explain.decision.behavior) : t('common.none') }}

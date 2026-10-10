@@ -5,23 +5,23 @@
     data-testid="skills-install-dialog"
     @click.self="close"
   >
-    <div class="w-full max-w-lg rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
+    <div class="w-full max-w-lg rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
       <div class="text-[14px] font-medium text-[var(--forebrain-text)]">
         {{ online ? t('skills.onlineInstall') : t('skills.offlineInstall') }}
       </div>
       <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.installDestHint') }} · {{ destLabel }}</p>
 
-      <p v-if="error" class="mt-3 rounded-xl bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-else-if="notice" class="mt-3 rounded-xl bg-[var(--forebrand-soft,var(--forebrain-brand-soft))] px-3 py-2 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
+      <p v-if="error" class="mt-3 rounded-lg bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-else-if="notice" class="mt-3 rounded-lg bg-[var(--forebrand-soft,var(--forebrain-brand-soft))] px-3 py-2 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
 
       <template v-if="online">
-        <p class="mt-3 rounded-xl bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text-2)]">
+        <p class="mt-3 rounded-lg bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text-2)]">
           {{ t('skills.onlineInstallHint') }}
         </p>
         <input
           v-model="sourceRef"
           type="text"
-          class="mt-3 w-full rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
+          class="mt-3 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
           :placeholder="t('skills.sourceRefPlaceholder')"
           :disabled="submitting"
           data-testid="skills-online-source"
@@ -39,7 +39,7 @@
         />
         <button
           type="button"
-          class="mt-3 w-full rounded-xl border border-dashed border-[var(--forebrain-divider-strong)] px-3 py-4 text-[13px] text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]"
+          class="mt-3 w-full rounded-md border border-dashed border-[var(--forebrain-divider-strong)] px-3 py-4 text-[13px] text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]"
           :disabled="submitting"
           data-testid="skills-offline-pick"
           @click="fileInput?.click()"

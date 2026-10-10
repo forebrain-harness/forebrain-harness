@@ -1,5 +1,5 @@
 <template>
-  <section class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-3 ">
+  <section class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-3 ">
     <div class="mb-3 flex items-center justify-between gap-3">
       <div class="min-w-0">
         <div class="truncate text-sm font-semibold text-[var(--forebrain-text)]">{{ title }}</div>
@@ -14,20 +14,20 @@
         {{ t('agents.stopAll') }}
       </button>
     </div>
-    <div v-if="loading" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
+    <div v-if="loading" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
       {{ t('common.loading') }}
     </div>
-    <div v-else-if="error" class="rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-3 py-3 text-xs text-[var(--forebrain-danger)]">
+    <div v-else-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-3 py-3 text-xs text-[var(--forebrain-danger)]">
       {{ error }}
     </div>
-    <div v-else-if="!records.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
+    <div v-else-if="!records.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-3 py-5 text-center text-xs text-[var(--forebrain-muted-text)]">
       {{ t('agents.noLiveAgents') }}
     </div>
     <ul v-else class="space-y-2">
       <li
         v-for="row in records"
         :key="`${row.kind}-${row.id}-${row.sessionId || row.runId || ''}`"
-        class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2"
+        class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2"
       >
         <button
           class="w-full text-left disabled:cursor-default"

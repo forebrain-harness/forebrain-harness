@@ -765,6 +765,14 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 			evt = turn.RunEventFromRecord(persisted)
 		}
 	}
+	// The store has said its piece (or had no session row to say it against):
+	// recording and painting are two decisions, and a fact this surface has
+	// already painted once in this conversation is not painted again. This is
+	// the publishing half's counterpart of the store's dedupe for the window
+	// where no session row exists yet — see markEventShownOnce.
+	if !s.markEventShownOnce(evt.SessionID, evt.ID) {
+		return nil
+	}
 	switch evt.Type {
 	case event.RunEventAssistantDelta:
 		var p event.AssistantDeltaPayload
@@ -788,14 +796,12 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		}
 	case event.RunEventToolStarted:
 		var p event.ToolCallStartedPayload
-		// The exit-plan gate's wait paints no card on any surface: its
-		// approval prompt is the whole wait (tool.ToolStepHoldsNoCard).
-		if json.Unmarshal(evt.Payload, &p) == nil && !tool.ToolStepHoldsNoCard(p.ToolName, "running") {
+		if json.Unmarshal(evt.Payload, &p) == nil {
 			s.notifyUIForSession(evt.SessionID, subagentToolStepMsg(evt, p.StepID, p.ToolName, firstNonEmpty(p.Summary, p.Description), p.ToolMeta, evt.Type))
 		}
 	case event.RunEventToolCompleted:
 		var p event.ToolCallCompletedPayload
-		if json.Unmarshal(evt.Payload, &p) == nil && !tool.ToolStepHoldsNoCard(p.ToolName, p.ToolMeta.Status) {
+		if json.Unmarshal(evt.Payload, &p) == nil {
 			msg := subagentToolStepMsg(evt, p.StepID, p.ToolName, firstNonEmpty(p.Summary, p.Description), p.ToolMeta, evt.Type)
 			msg.Msg.Content = p.DisplayBody
 			msg.Msg.Duration = time.Duration(p.DurationSeconds * float64(time.Second))
@@ -936,6 +942,45 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 		}
 	}
 	return nil
+}
+
+// markEventShownOnce claims the right to paint one event carrying a derived
+// (stable) identity in one conversation: the first delivery returns true,
+// every later delivery of the same (session, event id) returns false.
+//
+// The store is and stays the arbiter once a session row exists — its
+// UNIQUE(session_id,event_id) is what keeps a resubscribing surface quiet, not
+// this memory. What the store cannot arbitrate is the window where the
+// conversation has not started yet (state.ErrSessionNotStarted): the event is
+// shown and stored nowhere, so a subscription that replays its snapshot — a
+// registry transition, the generation settling, every later Load — would
+// redeliver the same fact with no one to say it was already painted. This
+// memory is that someone, and only that: it is per process and per surface,
+// keyed per conversation, and deliberately unpersisted. A restart re-observes
+// what still holds, which is the same rule the store's own absence follows.
+//
+// Events with no derived identity (empty session or event id) always pass:
+// they are one-shot occurrences with nothing to dedupe on.
+func (s *ChatSession) markEventShownOnce(sessionID, eventID string) bool {
+	if s == nil {
+		return true
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	eventID = strings.TrimSpace(eventID)
+	if sessionID == "" || eventID == "" {
+		return true
+	}
+	key := sessionID + "\x00" + eventID
+	s.shownEventsMu.Lock()
+	defer s.shownEventsMu.Unlock()
+	if s.shownEvents == nil {
+		s.shownEvents = make(map[string]struct{})
+	}
+	if _, seen := s.shownEvents[key]; seen {
+		return false
+	}
+	s.shownEvents[key] = struct{}{}
+	return true
 }
 
 // notifyTurnError draws one turn-error event the way the live path does. A

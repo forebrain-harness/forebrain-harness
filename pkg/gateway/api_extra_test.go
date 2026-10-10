@@ -1736,6 +1736,46 @@ func TestHeartbeatEndpointsAnswerOnlyForOwnedSessions(t *testing.T) {
 	require.Equal(t, http.StatusOK, mine.Code, mine.Body.String())
 }
 
+// TestHeartbeatsListNamesEachConversation pins the list the chat page reads to
+// show which conversations a heartbeat asks again: this agent's beats only,
+// each with its conversation's title, and an unnamed conversation reads as
+// untitled rather than as its id.
+func TestHeartbeatsListNamesEachConversation(t *testing.T) {
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.RunRT.DB, "main")
+	ctx := context.Background()
+	require.NoError(t, s.Sessions.Ensure(ctx, "s-named", "Release notes"))
+	mustGatewaySession(t, s.RunRT.DB, "s-unnamed")
+	require.NoError(t, state.NewSessionStore(s.RunRT.DB, "other").Ensure(ctx, "s-theirs", "Theirs"))
+	store := &state.CronStore{DB: s.RunRT.DB}
+	require.NoError(t, store.SaveHeartbeat(ctx, state.Heartbeat{SessionID: "s-theirs", IntervalSec: 600, Prompt: "theirs"}))
+	for _, sid := range []string{"s-named", "s-unnamed"} {
+		rec := cronRequest(t, s, http.MethodPut, "/api/heartbeat", map[string]any{
+			"session_id": sid, "interval_seconds": 600, "prompt": "anything new?", "paused": sid == "s-unnamed",
+		}, s.handleHeartbeat)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/heartbeats", nil, s.handleHeartbeats)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out struct {
+		Records []struct {
+			SessionID    string `json:"session_id"`
+			SessionTitle string `json:"session_title"`
+			Paused       bool   `json:"paused"`
+		} `json:"records"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	got := map[string]string{}
+	paused := map[string]bool{}
+	for _, row := range out.Records {
+		got[row.SessionID] = row.SessionTitle
+		paused[row.SessionID] = row.Paused
+	}
+	require.Equal(t, map[string]string{"s-named": "Release notes", "s-unnamed": ""}, got)
+	require.Equal(t, map[string]bool{"s-named": false, "s-unnamed": true}, paused)
+}
+
 // TestFileUploadBelongsToAnOwnedSession pins that an upload lands in one of
 // this agent's conversations: without a session it is refused in one
 // sentence, and another agent's session reads as missing, instead of the file

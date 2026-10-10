@@ -1,6 +1,6 @@
 <template>
   <section class="space-y-4" :aria-label="t('chat.subagentViewAria')">
-    <header class="flex items-start justify-between gap-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
+    <header class="flex items-start justify-between gap-3 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
       <div class="min-w-0">
         <div class="flex min-w-0 items-center gap-2">
           <button
@@ -60,7 +60,7 @@
 
         <details
           v-else-if="block.kind === 'thinking'"
-          class="rounded-xl border border-[var(--forebrain-divider)] px-3 py-2"
+          class="rounded-lg border border-[var(--forebrain-divider)] px-3 py-2"
           :open="foldOpen(blockFoldId(block, idx), false)"
           @toggle="updateNativeFold(blockFoldId(block, idx), $event)"
         >

@@ -12,8 +12,8 @@
         </div>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-if="notice" class="mb-4 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="notice" class="mb-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
 
       <CardComponent class="mb-4">
         <template #header>
@@ -36,7 +36,7 @@
 
       <div v-if="loading && !eventKeys.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <ul v-else-if="eventKeys.length" class="space-y-2">
-        <li v-for="event in eventKeys" :key="event" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3">
+        <li v-for="event in eventKeys" :key="event" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3">
           <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ event }}</div>
           <ul class="mt-2 space-y-1">
             <li v-for="(matcher, mIdx) in hooks[event]" :key="mIdx" class="rounded-lg bg-[var(--forebrain-surface)] px-2 py-1.5">
@@ -51,7 +51,7 @@
           </ul>
         </li>
       </ul>
-      <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('hooks.empty') }}
       </p>
     </div>

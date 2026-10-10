@@ -1,5 +1,5 @@
 <template>
-  <div class="flex h-full min-h-0 flex-col rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
+  <div class="flex h-full min-h-0 flex-col rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
     <div class="flex flex-wrap items-center gap-2 border-b border-[var(--forebrain-divider)] px-4 py-3">
       <div class="text-[13px] font-medium text-[var(--forebrain-text)]">
         {{ skillName ? t('workshop.skillPanelFor', { name: skillName }) : t('workshop.skillPanelEmpty') }}

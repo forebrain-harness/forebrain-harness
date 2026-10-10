@@ -7,7 +7,7 @@
       </p>
     </header>
 
-    <section class="space-y-3 rounded-xl border border-[var(--forebrain-divider)] p-4">
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">ScopeBadge 作用域标签</h2>
       <div class="flex flex-wrap items-center gap-3">
         <ScopeBadge type="agent" label="主代理" />
@@ -16,7 +16,7 @@
       </div>
     </section>
 
-    <section class="space-y-3 rounded-xl border border-[var(--forebrain-divider)] p-4">
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">BadgeComponent 徽标</h2>
       <div class="flex flex-wrap items-center gap-3">
         <BadgeComponent>默认</BadgeComponent>
@@ -27,7 +27,7 @@
       </div>
     </section>
 
-    <section class="space-y-3 rounded-xl border border-[var(--forebrain-divider)] p-4">
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">SwitchComponent 开关</h2>
       <div class="flex flex-wrap items-center gap-3">
         <SwitchComponent v-model="off" aria-label="关闭状态" />
@@ -36,7 +36,7 @@
       </div>
     </section>
 
-    <section class="space-y-3 rounded-xl border border-[var(--forebrain-divider)] p-4">
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">CardComponent 卡片</h2>
       <CardComponent>
         <template #header>

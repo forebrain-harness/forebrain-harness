@@ -14,13 +14,13 @@
         </button>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <input
         v-model="query"
         type="search"
         :placeholder="t('tools.filter')"
-        class="mb-3 w-full rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
+        class="mb-3 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
       />
 
       <p class="mb-3 text-[12px] text-[var(--forebrain-muted-text)]">
@@ -32,7 +32,7 @@
         <li
           v-for="record in filtered"
           :key="record.name"
-          class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3"
+          class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3"
         >
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
@@ -65,7 +65,7 @@
           >{{ formatSchema(record.inputSchema) }}</pre>
         </li>
       </ul>
-      <p v-if="!loading && !filtered.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      <p v-if="!loading && !filtered.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('common.empty') }}
       </p>
     </div>

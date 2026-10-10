@@ -14,7 +14,7 @@
         </button>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <!-- Verify before you trust: ask the runtime what it would actually do
            with a given call, and see which rule decided it. -->
@@ -27,14 +27,14 @@
           <select
             v-model="probe.toolName"
             :aria-label="t('permissions.tool')"
-            class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
+            class="rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
           >
             <option v-for="tool in tools" :key="tool" :value="tool">{{ tool }}</option>
           </select>
           <input
             v-model="probe.input"
             :placeholder="t('permissions.inputPlaceholder')"
-            class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
+            class="rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
             @keyup.enter="verify"
           />
           <button
@@ -105,7 +105,7 @@
             </button>
           </li>
         </ul>
-        <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+        <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
           {{ t('common.empty') }}
         </p>
       </CardComponent>

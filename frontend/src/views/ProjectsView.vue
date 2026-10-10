@@ -21,7 +21,7 @@
         </div>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div class="mb-4 flex flex-wrap items-center gap-2">
         <input
@@ -37,18 +37,20 @@
 
       </div>
 
-      <div v-if="creating" class="mb-5 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
-        <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.createTitle') }}</h2>
-        <div class="mt-3 grid gap-2 sm:grid-cols-2">
+      <CardComponent v-if="creating" class="mb-5">
+        <template #header>
+          <h2 class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.createTitle') }}</h2>
+        </template>
+        <div class="grid gap-2 sm:grid-cols-2">
           <input v-model="draft.name" :placeholder="t('projects.namePlaceholder')" class="forebrain-field" />
           <input v-model="draft.icon" :placeholder="t('projects.iconPlaceholder')" class="forebrain-field w-20 text-center" maxlength="4" />
         </div>
-        <input v-model="draft.root" :placeholder="t('projects.rootPlaceholder')" class="forebrain-field mt-2 w-full font-mono text-[12px]" />
-        <p class="mt-1 text-[11px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('projects.rootHint') }}</p>
-        <input v-model="draft.description" :placeholder="t('projects.descriptionPlaceholder')" class="forebrain-field mt-2 w-full" />
-        <textarea v-model="draft.instructions" rows="3" :placeholder="t('projects.instructionsPlaceholder')" class="forebrain-field mt-2 w-full" />
-        <p class="mt-1 text-[11px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('projects.instructionsHint') }}</p>
-        <div class="mt-3 flex flex-wrap items-center gap-4">
+        <input v-model="draft.root" :placeholder="t('projects.rootPlaceholder')" class="forebrain-field w-full font-mono text-[12px]" />
+        <p class="text-[11px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('projects.rootHint') }}</p>
+        <input v-model="draft.description" :placeholder="t('projects.descriptionPlaceholder')" class="forebrain-field w-full" />
+        <textarea v-model="draft.instructions" rows="3" :placeholder="t('projects.instructionsPlaceholder')" class="forebrain-field w-full" />
+        <p class="text-[11px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('projects.instructionsHint') }}</p>
+        <div class="flex flex-wrap items-center gap-4">
           <label class="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--forebrain-text-2)]">
             <input v-model="draft.trust" type="checkbox" class="accent-[var(--forebrain-brand-1)]" />
             {{ t('projects.trustLabel') }}
@@ -65,8 +67,8 @@
             {{ t('projects.resourceAccessLabel') }}
           </label>
         </div>
-        <p class="mt-1 text-[11px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('projects.resourceAccessHint') }}</p>
-        <div class="mt-3 flex items-center gap-2">
+        <p class="text-[11px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('projects.resourceAccessHint') }}</p>
+        <div class="flex items-center gap-2">
           <button type="button" class="forebrain-btn forebrain-btn-primary h-9 px-4 text-[12px]" :disabled="!draft.name.trim() || !draft.root.trim() || submitting" @click="create">
             {{ t('projects.create') }}
           </button>
@@ -74,14 +76,14 @@
             {{ t('common.cancel') }}
           </button>
         </div>
-      </div>
+      </CardComponent>
 
       <div v-if="loading && !projects.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <ul v-else-if="projects.length" class="grid gap-3 sm:grid-cols-2">
         <li
           v-for="project in projects"
           :key="project.id"
-          class="rounded-xl border px-4 py-3"
+          class="rounded-lg border px-4 py-3"
           :class="project.archivedAt ? 'border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] opacity-70' : 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]'"
         >
           <div class="flex items-start justify-between gap-3">
@@ -110,7 +112,7 @@
           </div>
         </li>
       </ul>
-      <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('projects.empty') }}
       </p>
     </div>
@@ -126,6 +128,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 import { usePrimaryAgents } from '@/composables/usePrimaryAgents'

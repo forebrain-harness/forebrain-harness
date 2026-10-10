@@ -485,6 +485,15 @@ func (c *CronService) Heartbeat(ctx context.Context, sessionID string) (*state.H
 	return store.GetHeartbeat(ctx, sessionID)
 }
 
+// ListHeartbeats returns every heartbeat on one agent's conversations.
+func (c *CronService) ListHeartbeats(ctx context.Context, agentID string) ([]state.Heartbeat, error) {
+	store := c.store()
+	if store == nil {
+		return nil, fmt.Errorf("cron storage unavailable")
+	}
+	return store.ListHeartbeats(ctx, agentID)
+}
+
 // SetHeartbeat installs or replaces a session's recurring instruction. paused
 // is the user's intent; it is folded into the stored schedule so "paused" and
 // "no next fire" are one fact.

@@ -25,21 +25,27 @@
               data-testid="chat-project-tag"
             >{{ t('chat.projectTag', { name: sessionProject.name }) }}</RouterLink>
           </div>
-          <button
-            type="button"
-            class="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--forebrain-divider)] px-2.5 text-xs text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-button-alt-bg)]"
-            :aria-pressed="workbench.open.value"
-            data-testid="workbench-toggle"
-            @click="workbench.toggle()"
-          >
-            <PanelRight class="size-3.5" aria-hidden="true" />
-            {{ t('chat.workbench') }}
-            <span
-              v-if="runningRoster.length"
-              class="inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-4 text-[var(--forebrain-on-brand)]"
-              style="background: var(--forebrain-brand-1)"
-            >{{ runningRoster.length }}</span>
-          </button>
+          <div class="flex shrink-0 items-center gap-2">
+            <!-- The heartbeat is this conversation's, so its control sits in
+                 the conversation's header; without a conversation there is
+                 nothing for it to ask again. -->
+            <SessionHeartbeat v-if="sessionId" :session-id="sessionId" />
+            <button
+              type="button"
+              class="inline-flex h-7 items-center gap-1.5 rounded-lg border border-[var(--forebrain-divider)] px-2.5 text-xs text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-button-alt-bg)]"
+              :aria-pressed="workbench.open.value"
+              data-testid="workbench-toggle"
+              @click="workbench.toggle()"
+            >
+              <PanelRight class="size-3.5" aria-hidden="true" />
+              {{ t('chat.workbench') }}
+              <span
+                v-if="runningRoster.length"
+                class="inline-flex min-w-4 items-center justify-center rounded-full px-1 text-[10px] leading-4 text-[var(--forebrain-on-brand)]"
+                style="background: var(--forebrain-brand-1)"
+              >{{ runningRoster.length }}</span>
+            </button>
+          </div>
         </div>
         <div class="min-h-0 flex-1 overflow-hidden">
           <Conversation
@@ -168,7 +174,7 @@
                         />
                       </div>
                       <div v-if="msg.role === 'assistant' && isStreaming && !msg.blocks?.length && !String(msg.content ?? '').trim()"
-                        class="inline-flex items-center rounded-xl bg-muted px-4 py-3">
+                        class="inline-flex items-center rounded-lg bg-muted px-4 py-3">
                         <span class="sr-only">{{ t('chat.thinking') }}</span>
                         <span class="typing-dots" aria-hidden="true">
                           <span class="typing-dot" />
@@ -259,7 +265,7 @@
                       <MessageResponse v-else-if="String(msg.content ?? '').trim()" :key="`msg-content-${msg.id ?? idx}`" :content="msg.content" />
                       <div
                         v-if="msg.role === 'assistant' && msg.turnDiffs?.length"
-                        class="mt-3 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-3"
+                        class="mt-3 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-3"
                       >
                         <DiffView
                           :files="msg.turnDiffs"
@@ -306,7 +312,7 @@
         <details
           v-if="sessionId"
           data-testid="session-workspace"
-          class="mx-auto mb-2 w-full max-w-[880px] shrink-0 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 text-sm text-[var(--forebrain-text-2)] sm:px-5"
+          class="mx-auto mb-2 w-full max-w-[880px] shrink-0 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 text-sm text-[var(--forebrain-text-2)] sm:px-5"
         >
           <summary class="cursor-pointer select-none font-medium text-[var(--forebrain-text)]">
             <span class="inline-flex w-full flex-wrap items-center gap-2 pr-2">
@@ -516,7 +522,7 @@
                     <ApprovalPresetPicker :session-id="sessionId" />
                     <button
                       type="button"
-                      class="inline-flex h-8 items-center gap-2 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)] disabled:cursor-not-allowed disabled:opacity-60"
+                      class="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)] disabled:cursor-not-allowed disabled:opacity-60"
                       :disabled="isStreaming"
                       @click="toggleModeMenu"
                     >
@@ -526,7 +532,7 @@
                     </button>
                     <div
                       v-if="modeMenuOpen"
-                      class="absolute bottom-full left-0 z-20 mb-2 min-w-[168px] rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-0.5 "
+                      class="absolute bottom-full left-0 z-20 mb-2 min-w-[168px] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-0.5 "
                     >
                       <button
                         v-for="item in modeOptions"
@@ -584,6 +590,7 @@ import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon,
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import AgentViewTabs from '@/components/chat/AgentViewTabs.vue'
+import SessionHeartbeat from '@/components/chat/SessionHeartbeat.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import SubagentConversation from '@/components/chat/SubagentConversation.vue'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'

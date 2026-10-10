@@ -10,7 +10,7 @@
       <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('permissions.projectRulesDescription') }}</p>
 
       <!-- Trust gate: project rules only load for a trusted project. -->
-      <div v-if="!trusted" class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
+      <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
         <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
         <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
         <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="perm-trust" @click="trust">
@@ -18,7 +18,7 @@
         </button>
       </div>
 
-      <p v-else-if="!applies" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-3 text-[12px] text-[var(--forebrain-muted-text)]" data-testid="perm-not-applied">
+      <p v-else-if="!applies" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-3 text-[12px] text-[var(--forebrain-muted-text)]" data-testid="perm-not-applied">
         {{ t('permissions.projectRulesNotApplied') }}
       </p>
 
@@ -42,7 +42,7 @@
         <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
         <div v-if="loading" class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-        <div v-else-if="!rules.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-8 text-center text-[13px] text-[var(--forebrain-muted-text)]">
+        <div v-else-if="!rules.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-8 text-center text-[13px] text-[var(--forebrain-muted-text)]">
           {{ t('settings.noRules') }}
         </div>
         <ul v-else class="divide-y divide-[var(--forebrain-divider)]">

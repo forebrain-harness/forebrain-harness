@@ -57,12 +57,14 @@ function projectKey(): string {
   return realpathSync(root).replace(/[/\\:]/g, '-')
 }
 
-/** Write the plan the parked approval is asking about, under the state root
- * and project key the gateway itself resolves. */
-function seedPlan(markdown: string): void {
+/** Write the plan the parked approval is asking about, under the state root,
+ * the project key and the session directory the gateway itself resolves —
+ * plans live per conversation (plans/<projectKey>/<session>/), so the seed
+ * must land in the parked session's own directory. */
+function seedPlan(session: string, markdown: string): void {
   const home = process.env.E2E_HOME
   if (!home) throw new Error('E2E_HOME must point at the gateway FOREBRAIN_HOME')
-  const path = `${home}/workspace/plans/${projectKey()}/plan.md`
+  const path = `${home}/workspace/plans/${projectKey()}/${session}/plan.md`
   mkdirSync(path.slice(0, path.lastIndexOf('/')), { recursive: true })
   writeFileSync(path, markdown)
 }
@@ -81,7 +83,7 @@ function parkExitPlan(session: string, suffix: string): { runId: string; actionI
     INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, created_at, updated_at)
       VALUES('${runId}', '${actionId}', 'exit_plan_mode', '{}', ${now - 60}, ${now - 60});
   `)
-  seedPlan('# 计划：退出计划模式的网页审批\n\n1. 先读 README。\n2. 再对照计划逐条检查。\n')
+  seedPlan(session, '# 计划：退出计划模式的网页审批\n\n1. 先读 README。\n2. 再对照计划逐条检查。\n')
   return { runId, actionId }
 }
 

@@ -1,6 +1,6 @@
 <template>
   <div
-    class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]"
+    class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]"
   >
     <div class="mb-2 flex items-center gap-2 font-semibold text-[var(--forebrain-brand-1)]">
       <span class="text-lg leading-none">•</span>

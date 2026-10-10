@@ -54,12 +54,17 @@
           @click="emit('select', row.id)"
         >
           <span class="chat-drawer-row-title">{{ row.title }}</span>
-          <Activity
-            v-if="row.id === activeSessionId && heartbeatEnabled"
-            class="size-[13px] chat-drawer-heart"
+          <span
+            v-if="beatOf(row.id)"
+            class="chat-drawer-heart"
+            :class="{ 'chat-drawer-heart--paused': beatOf(row.id)?.paused }"
+            :title="heartbeatLabel(row.id)"
+            :aria-label="heartbeatLabel(row.id)"
+            role="img"
             data-testid="drawer-heartbeat-indicator"
-            aria-hidden="true"
-          />
+          >
+            <Activity class="size-[13px]" aria-hidden="true" />
+          </span>
         </button>
       </div>
 
@@ -72,7 +77,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { Activity, Plus, X } from 'lucide-vue-next'
 import { useChatSessions } from '@/composables/useChatSessions'
-import { useSessionHeartbeat } from '@/composables/useSessionHeartbeat'
+import { useHeartbeats } from '@/composables/useHeartbeats'
 import { getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -96,7 +101,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const { sessions, loading, error, createSession, fetchSessions } = useChatSessions()
-const { current: heartbeat } = useSessionHeartbeat()
+const { forSession: beatOf, refresh: refreshHeartbeats } = useHeartbeats()
 
 const query = ref('')
 const creating = ref(false)
@@ -109,7 +114,14 @@ const filtered = computed(() => {
   return sessions.value.filter((row) => (row.title ?? '').toLowerCase().includes(q))
 })
 
-const heartbeatEnabled = computed(() => Boolean(heartbeat.value && !heartbeat.value.paused))
+/** Every conversation a heartbeat asks again is marked, the open one or not. */
+function heartbeatLabel(sessionId: string): string {
+  const beat = beatOf(sessionId)
+  if (!beat) return ''
+  return beat.paused
+    ? t('heartbeat.indicatorPaused')
+    : t('heartbeat.indicatorRunning', { minutes: Math.max(1, Math.round(beat.intervalSeconds / 60)) })
+}
 
 async function newChat() {
   if (creating.value) return
@@ -133,6 +145,8 @@ watch(() => props.open, async (open) => {
     // something the chat page may or may not have fetched earlier (a fresh
     // load elsewhere, a tenant switch, a turn in another tab).
     void fetchSessions()
+    // The marks are the drawer's to read too; a failed read leaves them off.
+    refreshHeartbeats().catch(() => {})
     await nextTick()
     drawerRef.value?.focus()
   }
@@ -261,8 +275,12 @@ watch(() => props.open, async (open) => {
   white-space: nowrap;
 }
 .chat-drawer-heart {
+  display: inline-flex;
   color: var(--forebrain-brand-1);
   flex: none;
+}
+.chat-drawer-heart--paused {
+  color: var(--forebrain-muted-text);
 }
 .chat-drawer-foot {
   border-top: 1px solid var(--forebrain-divider);

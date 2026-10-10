@@ -1,6 +1,6 @@
 <template>
   <div class="pb-6">
-    <div class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-4 py-3 text-sm text-[var(--forebrain-text)]">
+    <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-4 py-3 text-sm text-[var(--forebrain-text)]">
       <div class="font-medium text-[var(--forebrain-text)]">{{ t('settings.appearance') }}</div>
       <div class="mt-3">
         <div class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('settings.appearanceBrand') }}</div>

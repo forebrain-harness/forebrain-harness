@@ -38,7 +38,7 @@ const notice = computed(() => (props.state ? formatAutoContinueNotice(props.stat
 <template>
   <div
     v-if="state"
-    class="auto-continue-banner mb-2 flex items-center gap-2 rounded-xl border px-3 py-2 text-[13px]"
+    class="auto-continue-banner mb-2 flex items-center gap-2 rounded-lg border px-3 py-2 text-[13px]"
     role="status"
     aria-live="polite"
     data-testid="auto-continue-banner"

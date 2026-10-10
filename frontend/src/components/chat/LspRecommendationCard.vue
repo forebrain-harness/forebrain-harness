@@ -130,7 +130,7 @@ function showResult(line: string) {
 
 <template>
   <div
-    class="lsp-recommendation-card mb-2 rounded-xl border bg-[var(--forebrain-surface)] px-3 py-2.5 text-[13px]"
+    class="lsp-recommendation-card mb-2 rounded-lg border bg-[var(--forebrain-surface)] px-3 py-2.5 text-[13px]"
     role="dialog"
     aria-live="polite"
     data-testid="lsp-rec-card"

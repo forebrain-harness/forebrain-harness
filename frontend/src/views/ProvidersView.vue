@@ -19,7 +19,7 @@
         </div>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
 
@@ -27,9 +27,8 @@
         <li
           v-for="(row, index) in rows"
           :key="index"
-          class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4"
-          :data-provider-row="row.provider || index"
         >
+          <CardComponent :data-provider-row="row.provider || index">
           <div class="flex flex-wrap items-center gap-2">
             <span class="text-[13px] font-medium text-[var(--forebrain-text)]">#{{ index + 1 }}</span>
             <span
@@ -43,7 +42,7 @@
             </div>
           </div>
 
-          <div class="mt-3 grid gap-2 sm:grid-cols-2">
+          <div class="grid gap-2 sm:grid-cols-2">
             <label class="block">
               <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.providerLabel') }}</span>
               <input
@@ -62,15 +61,15 @@
             </label>
           </div>
 
-          <div class="mt-2">
+          <div>
             <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.modelsLabel') }}</span>
             <ModelChipsInput v-model="row.models" :suggestions="suggestionsFor(row.provider)" />
           </div>
 
-          <div class="mt-3">
+          <div>
             <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.apiKeyLabel') }}</span>
             <div v-if="row.apiKeySet && !row.keyEdit" class="flex flex-wrap items-center gap-2">
-              <span class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text-2)]" :data-testid="`provider-key-saved-${index}`">
+              <span class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 font-mono text-[12px] text-[var(--forebrain-text-2)]" :data-testid="`provider-key-saved-${index}`">
                 {{ t('providers.keySaved', { hint: row.apiKeyHint ?? '' }) }}
               </span>
               <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" :data-testid="`provider-key-change-${index}`" @click="row.keyEdit = true">
@@ -88,7 +87,7 @@
             />
           </div>
 
-          <details class="mt-3">
+          <details>
             <summary class="cursor-pointer text-[12px] text-[var(--forebrain-muted-text)]">{{ t('providers.advanced') }}</summary>
             <div class="mt-2 grid gap-2 sm:grid-cols-2">
               <label class="block">
@@ -101,10 +100,11 @@
               </label>
             </div>
           </details>
+          </CardComponent>
         </li>
       </ul>
 
-      <button type="button" class="mt-3 w-full rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-3 text-sm text-[var(--forebrain-muted-text)] hover:bg-[var(--forebrain-input-hover-bg)]" data-testid="providers-add" @click="addRow">
+      <button type="button" class="mt-3 w-full rounded-md border border-dashed border-[var(--forebrain-divider)] px-4 py-3 text-sm text-[var(--forebrain-muted-text)] hover:bg-[var(--forebrain-input-hover-bg)]" data-testid="providers-add" @click="addRow">
         + {{ t('providers.add') }}
       </button>
     </div>
@@ -120,6 +120,7 @@
  */
 import { onMounted, ref } from 'vue'
 import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import CardComponent from '@/components/common/CardComponent.vue'
 import ModelChipsInput from '@/components/providers/ModelChipsInput.vue'
 import { getErrorMessage, forebrainApi, type ProviderRecord } from '@/lib/api'
 import { useI18n } from '@/locales'

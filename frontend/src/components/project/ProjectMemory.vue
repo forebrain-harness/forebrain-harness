@@ -9,7 +9,7 @@
     <!-- A project with no project key shares no memory directory of its own;
          there is nothing to manage here. -->
     <div v-if="!project" class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-    <div v-else-if="!hasScope" class="rounded-2xl border border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-6 py-10 text-center">
+    <div v-else-if="!hasScope" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-6 py-10 text-center">
       <p class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('memories.noProjectScope') }}</p>
     </div>
     <MemoryFilesPanel v-else scope="project" :project-id="projectId" />

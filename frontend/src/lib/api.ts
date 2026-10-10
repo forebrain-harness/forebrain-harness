@@ -710,6 +710,8 @@ export interface HeartbeatRecord {
   paused: boolean
   lastFiredAt?: number
   nextRunAt?: number
+  /** The conversation's title, on a listed heartbeat; empty when unnamed. */
+  sessionTitle?: string
 }
 
 export interface HookCommandRecord {
@@ -2092,6 +2094,12 @@ export const forebrainApi = {
 
   cronRuns(id: string, limit = 20) {
     return api.get<{ records: CronRunRecord[] }>(`/cron/${encodeURIComponent(id)}/runs`, { params: { limit } })
+      .then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
+  },
+
+  /** Every heartbeat on the active agent's conversations, newest set up first. */
+  heartbeats() {
+    return api.get<{ records: HeartbeatRecord[] }>('/heartbeats')
       .then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
   },
 

@@ -96,6 +96,16 @@ type ChatSession struct {
 	mcpWatchSession string
 	mcpWatchCancel  func()
 
+	// shownEvents* remember which events carrying a derived (stable) identity
+	// this surface has already painted, keyed per conversation. They are the
+	// publishing half's counterpart of the store's UNIQUE(session_id,event_id)
+	// for the window where no session row exists yet to arbitrate: a
+	// subscription that replays its snapshot redelivers the same fact, and
+	// without this memory the pre-session path would paint it again on every
+	// delivery. See markEventShownOnce for the exact contract.
+	shownEventsMu sync.Mutex
+	shownEvents   map[string]struct{}
+
 	approvalMu      sync.Mutex
 	approvalPending *chatApprovalResume
 	// approvalRecovered names the sessions whose durable approval outbox this

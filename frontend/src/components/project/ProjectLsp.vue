@@ -19,7 +19,7 @@
       <!-- Trust gate: language-server entries load only in trusted,
            version-controlled projects — the button is the gate, exactly as
            the MCP tab's. -->
-      <div v-if="!trusted" class="rounded-xl border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
+      <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
         <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
         <p class="mt-1 text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.trustHint') }}</p>
         <button type="button" class="forebrain-btn forebrain-btn-primary mt-3 text-xs" :disabled="trusting" data-testid="project-trust" @click="trust">
@@ -31,7 +31,7 @@
         <!-- Entries awaiting the per-entry confirmation: allow applies the
              entry from now on, decline records it so it asks again only
              when the file changes. -->
-        <div v-if="records.pending.length" class="rounded-xl border border-[rgba(180,140,60,0.4)] bg-[rgba(180,140,60,0.07)] p-3" data-testid="project-lsp-pending">
+        <div v-if="records.pending.length" class="rounded-lg border border-[rgba(180,140,60,0.4)] bg-[rgba(180,140,60,0.07)] p-3" data-testid="project-lsp-pending">
           <p class="text-[12px] font-medium text-[var(--forebrain-text)]">{{ t('projects.lspPendingTitle') }}</p>
           <ul class="mt-2 space-y-1">
             <li v-for="row in records.pending" :key="row.id" class="flex flex-wrap items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-[12px] odd:bg-[var(--forebrain-surface-soft)]">
@@ -61,7 +61,7 @@
           </ul>
         </div>
 
-        <div v-if="!records.pending.length && !records.allowed.length && !records.denied.length && !records.notes.length" class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center">
+        <div v-if="!records.pending.length && !records.allowed.length && !records.denied.length && !records.notes.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center">
           <p class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('projects.lspEmpty') }}</p>
           <p class="mt-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.lspAddHint') }}</p>
         </div>

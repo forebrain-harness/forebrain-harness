@@ -61,7 +61,7 @@
       <label
         v-for="day in weekdays"
         :key="day.value"
-        class="flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 py-1.5 text-[12px]"
+        class="flex cursor-pointer items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px]"
         :class="pickedDays.has(day.value)
           ? 'border-[var(--forebrain-brand-border-strong)] bg-[var(--forebrain-brand-soft)] text-[var(--forebrain-brand-1)]'
           : 'border-[var(--forebrain-divider)] text-[var(--forebrain-text-2)]'"
@@ -76,7 +76,7 @@
       </label>
     </div>
 
-    <div class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2" data-testid="schedule-preview">
+    <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2" data-testid="schedule-preview">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
         <span class="text-[var(--forebrain-text-2)]">{{ t('cron.willSaveAs') }}</span>
         <code class="font-mono text-[var(--forebrain-text)]">{{ expression || '—' }}</code>

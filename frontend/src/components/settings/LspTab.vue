@@ -11,11 +11,11 @@
         </button>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <p
         v-if="snapshot"
-        class="mb-4 rounded-xl border px-4 py-3 text-[12px] leading-relaxed"
+        class="mb-4 rounded-lg border px-4 py-3 text-[12px] leading-relaxed"
         :class="projectLineClass"
         data-testid="lsp-project-line"
       >
@@ -34,7 +34,7 @@
         <li
           v-for="server in servers"
           :key="server.id"
-          class="rounded-xl border px-4 py-3"
+          class="rounded-lg border px-4 py-3"
           :class="server.scope === 'project' ? 'border-[var(--forebrain-brand-border-strong)] bg-[var(--forebrain-surface)]' : 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]'"
           :data-server="server.id"
         >
@@ -162,7 +162,7 @@
           </div>
         </li>
       </ul>
-      <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('lsp.empty') }}
       </p>
 

@@ -15,13 +15,13 @@
         </div>
       </header>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-if="notice" class="mb-4 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="notice" class="mb-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
       <p class="mb-3 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('channels.secretNotice') }}</p>
 
       <div v-if="loading && !entries.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <ul v-else class="space-y-2">
-        <li v-for="entry in entries" :key="entry.key" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3">
+        <li v-for="entry in entries" :key="entry.key" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3">
           <div class="flex items-center justify-between gap-3">
             <span class="font-mono text-[13px] text-[var(--forebrain-text)]">{{ entry.key }}</span>
             <label class="flex items-center gap-2 text-[12px] text-[var(--forebrain-text-2)]">

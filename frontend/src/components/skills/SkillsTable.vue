@@ -1,5 +1,5 @@
 <template>
-  <div class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
+  <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
     <div class="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--forebrain-divider)] px-4 py-3">
       <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('skills.listTitle') }}</div>
       <div class="flex items-center gap-3">

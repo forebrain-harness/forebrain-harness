@@ -534,6 +534,24 @@ func (s *CronStore) GetHeartbeat(ctx context.Context, sessionID string) (*Heartb
 	return &list[0], nil
 }
 
+// ListHeartbeats returns every beat on one agent's conversations, paused ones
+// included, newest first. The order is when each was set up, not when it last
+// changed, so pausing one does not move it in a surface's list. Tenancy is
+// resolved through the session, the way the scheduler's due query does it.
+func (s *CronStore) ListHeartbeats(ctx context.Context, agentID string) ([]Heartbeat, error) {
+	if !s.ok() {
+		return nil, fmt.Errorf("cron store unavailable")
+	}
+	rows, err := s.DB.QueryContext(ctx, heartbeatSelect+`
+WHERE EXISTS(SELECT 1 FROM fb_sessions s WHERE s.id = h.session_id AND s.agent_id = ?)
+ORDER BY h.created_at DESC, h.session_id ASC`, strings.TrimSpace(agentID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanHeartbeats(rows)
+}
+
 // DueHeartbeats returns one agent's beats whose interval has elapsed. Whether
 // the session is actually idle is the scheduler's question, not the store's;
 // which tenant a beat belongs to is the store's, resolved through the session

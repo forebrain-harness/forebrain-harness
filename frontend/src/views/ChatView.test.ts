@@ -140,6 +140,7 @@ describe('ChatView subagent view', () => {
           PendingActionsPanel: true,
           ContextDebugPanel: true,
           ApprovalPresetPicker: true,
+          SessionHeartbeat: true,
           LspRecommendationCard: true,
           AutoContinueBanner: true,
           PendingInputQueuePopover: true,

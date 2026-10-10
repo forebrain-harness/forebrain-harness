@@ -1,7 +1,7 @@
 <template>
   <div
     role="alert"
-    class="whitespace-pre-wrap break-words rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-3 py-2 text-[13px] leading-relaxed text-[var(--forebrain-danger)]"
+    class="whitespace-pre-wrap break-words rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-surface)] px-3 py-2 text-[13px] leading-relaxed text-[var(--forebrain-danger)]"
     data-testid="run-error"
   >{{ shown }}</div>
 </template>

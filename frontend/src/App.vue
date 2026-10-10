@@ -137,21 +137,6 @@
       </nav>
 
       <div class="forebrain-rail-foot">
-        <button
-          type="button"
-          class="forebrain-rail-link"
-          :aria-label="L.heartbeat"
-          :disabled="!heartbeatSessionId"
-          :title="heartbeatSessionId ? undefined : t('heartbeat.needsSession')"
-          @mouseenter="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, L.heartbeat)"
-          @mouseleave="clearTooltip"
-          @focus="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, L.heartbeat)"
-          @blur="clearTooltip"
-          @click="toggleHeartbeatPopover"
-        >
-          <Activity class="forebrain-rail-ic" aria-hidden="true" />
-          <span>{{ L.heartbeat }}</span>
-        </button>
         <RouterLink
           to="/settings"
           class="forebrain-rail-link"
@@ -186,16 +171,10 @@
       :open="chatDrawerOpen"
       :rail-width="railWidth"
       :agent-name="activePrimary?.id || ''"
-      :active-session-id="heartbeatSessionId"
+      :active-session-id="chatSessionId"
       @close="chatDrawerOpen = false"
       @select="(id) => { chatDrawerOpen = false; openSession(id) }"
       @created="async (id) => { await openSession(id) }"
-    />
-    <RailHeartbeat
-      :open="heartbeatOpen"
-      :rail-width="railWidth"
-      :session-id="heartbeatSessionId"
-      @close="heartbeatOpen = false"
     />
     <RailTooltip :anchor="tooltipAnchor" :text="tooltipText" />
 
@@ -248,7 +227,6 @@
 
 <script setup lang="ts">
 import {
-  Activity,
   ScrollText,
   Users,
   Boxes,
@@ -274,7 +252,6 @@ import {
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChatDrawer from '@/components/ChatDrawer.vue'
-import RailHeartbeat from '@/components/RailHeartbeat.vue'
 import RailTooltip from '@/components/RailTooltip.vue'
 import BrandMark from '@/components/BrandMark.vue'
 import { useAppearance } from '@/composables/useAppearance'
@@ -310,16 +287,15 @@ const languageMenuRef = ref<HTMLElement | null>(null)
 const tenantMenuOpen = ref(false)
 const tenantMenuRef = ref<HTMLElement | null>(null)
 const chatDrawerOpen = ref(false)
-const heartbeatOpen = ref(false)
 const tooltipAnchor = ref<HTMLElement | null>(null)
 const tooltipText = ref('')
 
 /** The rail's own width: the overlays anchor to its right edge. */
 const railWidth = computed(() => (railCollapsed.value ? 64 : 264))
 
-/** The conversation whose heartbeat the rail would act on: the session the
- *  address bar names, when the chat page is where we are. */
-const heartbeatSessionId = computed(() => {
+/** The conversation the chat page has open, for the drawer to highlight: the
+ *  session the address bar names, when the chat page is where we are. */
+const chatSessionId = computed(() => {
   const sid = String(route.query.session ?? '').trim()
   return route.path === '/' && sid ? sid : null
 })
@@ -336,10 +312,6 @@ function clearTooltip() {
 
 function toggleChatDrawer() {
   chatDrawerOpen.value = !chatDrawerOpen.value
-}
-
-function toggleHeartbeatPopover() {
-  heartbeatOpen.value = !heartbeatOpen.value
 }
 
 async function openSession(id: string) {
