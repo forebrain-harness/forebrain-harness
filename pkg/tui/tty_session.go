@@ -1220,24 +1220,6 @@ func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 	return m.append(f)
 }
 
-// replaceOrInsertBeforeLastTool is replaceOrAppendBlock for a frame that
-// belongs to an approval exchange: a block already carrying this StepID is
-// updated in place, and a new one lands immediately before the last tool
-// block — beside the approval's own confirmation lines — instead of at the
-// tail, where the parked call the approval is holding already sits.
-func (m *viewModel) replaceOrInsertBeforeLastTool(f Frame) *viewBlock {
-	if f.StepID != "" {
-		for _, b := range m.blocks {
-			if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
-				b.frame = f
-				b.cache.valid = false
-				return b
-			}
-		}
-	}
-	return m.insertBeforeLast(func(prev Frame) bool { return prev.Kind == FrameTool }, f)
-}
-
 // collapsibleKind reports whether a frame kind participates in click-to-expand.
 // Thinking and the compact "card" kinds (tool/memory compact) fold; every other
 // kind — conversational kinds (assistant, user), status lines, plan updates,

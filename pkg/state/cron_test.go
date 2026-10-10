@@ -40,6 +40,44 @@ func TestSaveHeartbeatKeepsWhenItLastFired(t *testing.T) {
 	}
 }
 
+// TestListHeartbeatsKeepsToOneAgent pins that the list a surface shows holds
+// every beat on the agent's own conversations — a paused one included, since
+// it is still set up — and none of another agent's, newest set up first.
+func TestListHeartbeatsKeepsToOneAgent(t *testing.T) {
+	ctx := context.Background()
+	db := openSessionDB(t)
+	for _, sid := range []string{"older", "newer"} {
+		if err := NewSessionStore(db, "main").Ensure(ctx, sid, sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := NewSessionStore(db, "other").Ensure(ctx, "theirs", "theirs"); err != nil {
+		t.Fatal(err)
+	}
+	store := &CronStore{DB: db}
+	next := int64(2000)
+	beats := []Heartbeat{
+		{SessionID: "older", IntervalSec: 600, Prompt: "check", NextRunAt: &next, CreatedAt: 100},
+		{SessionID: "newer", IntervalSec: 900, Prompt: "paused one", CreatedAt: 200},
+		{SessionID: "theirs", IntervalSec: 600, Prompt: "not ours", NextRunAt: &next, CreatedAt: 300},
+	}
+	for _, hb := range beats {
+		if err := store.SaveHeartbeat(ctx, hb); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := store.ListHeartbeats(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 || list[0].SessionID != "newer" || list[1].SessionID != "older" {
+		t.Fatalf("ListHeartbeats = %+v, want newer then older and nothing of another agent's", list)
+	}
+	if list[0].NextRunAt != nil || list[1].NextRunAt == nil {
+		t.Fatalf("listed schedules = %+v, want the paused one without a next fire", list)
+	}
+}
+
 // TestListJobsForProjectReadsUnboundJobsAsNoProject pins that the empty
 // project names the agent's jobs bound to no project, which the table records
 // as NULL rather than as an empty string.

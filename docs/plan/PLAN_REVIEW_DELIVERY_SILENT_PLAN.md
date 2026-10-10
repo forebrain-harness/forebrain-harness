@@ -17,6 +17,11 @@
 > (WithdrawPendingTool 撤卡)与 Step 4(失败重挂补发等待卡)连同其测试全部作废
 > 并按"删除语义无痕迹"纪律清除。失败重挂只剩审批 overlay 重提示,transcript 不画卡。
 
+> **勘误（2026-10-10，见 `plans/007-exit-gate-live-card-and-cardless-anchoring.md`）**：主 agent 的工具步骤经
+> `runAuditStepHook → notifyToolStepHooks` 直接进 UI，不经 `publishRunEvent` 漏斗，所以本文"TUI live 已干净 /
+> 等待卡已删除"的结论不成立；gate 等待帧仍被画成 "Exited plan mode"、取消后被改成 "Canceled"。007 把过滤移到
+> reducer 入口，并让无卡 gate 的确认行与 review 卡按产生顺序落位（live 与回放一致）。
+
 ## Status
 
 - **Priority**: P1

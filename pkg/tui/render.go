@@ -724,6 +724,15 @@ func (r *Renderer) PrintError(err error) {
 	r.appendFrameViewportLocked(Frame{Kind: FrameError, Title: "error", Content: llm.ExplainError(err), Final: true})
 }
 
+// approvalGateHoldsNoCard reports whether the call an approval gates draws no
+// card while it waits — the exit-plan gate (tool.ToolStepHoldsNoCard). The
+// records about such a gate, its confirmation line and the plan review it
+// asked for, have no parked card to sit above, so they keep the order they
+// were produced in: right after the response that issued the call.
+func approvalGateHoldsNoCard(actionKind string) bool {
+	return tool.ToolStepHoldsNoCard(actionKind, "awaiting approval")
+}
+
 // PrintApprovalConfirmation writes the finished "✔ You approved …" line into
 // the scrollback above the interactive composer, capped at maxLines visual
 // lines (a truncated final line ends in an ellipsis and is intentionally not
@@ -736,7 +745,12 @@ func (r *Renderer) PrintError(err error) {
 // the conversation's own approvals. A subagent's confirmation is retained in
 // that subagent's view, immediately above the call it authorises, because that
 // is the only view the request itself was ever put in.
-func (r *Renderer) PrintApprovalConfirmation(agentID, text string, maxLines int) {
+//
+// aboveGatedCall lands the line above the parked tool block it answers, so
+// "✔ You approved" reads before "● shell ran". A gate whose call holds no
+// card (approvalGateHoldsNoCard) passes false: with no parked block to sit
+// above, the line keeps the order it was produced in.
+func (r *Renderer) PrintApprovalConfirmation(agentID, text string, maxLines int, aboveGatedCall bool) {
 	if r == nil {
 		return
 	}
@@ -750,7 +764,7 @@ func (r *Renderer) PrintApprovalConfirmation(agentID, text string, maxLines int)
 		Kind:                 FrameStatus,
 		Content:              strings.TrimSpace(sgrPattern.ReplaceAllString(text, "")),
 		MaxDisplayLines:      maxLines,
-		InsertBeforeLastTool: true,
+		InsertBeforeLastTool: aboveGatedCall,
 		AgentID:              strings.TrimSpace(agentID),
 		Final:                true,
 	})
@@ -2652,8 +2666,9 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 
 	case lower == "exit_plan_mode":
 		// No running/pending title on purpose: the gate's wait paints no card
-		// on any surface (tool.ToolStepHoldsNoCard), so no frame can arrive
-		// asking for one. The settled states are all that can render.
+		// on any surface (tool.ToolStepHoldsNoCard, enforced where the tool
+		// message enters the reducer), so no frame can arrive asking for one.
+		// The settled states are all that can render.
 		if isDenied {
 			action = "Kept planning"
 		} else if isFailed {

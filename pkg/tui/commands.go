@@ -258,6 +258,12 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 // a call that never ran is drawn at the same position and first, so the
 // confirmation line the user read lands above the card it answers - exactly
 // where it was live.
+//
+// A gate whose wait holds no card is the exception on both counts: its records
+// anchor right after the row that issued the call, and that row's response is
+// sealed before them by the same running step live fed the reducer
+// (heldGateCallsByRow), so the response that follows the gate is a block of
+// its own rather than an extension of the one before it.
 func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events []event.RunEvent, reducer *Reducer, planUpdates []event.PlanUpdatedPayload) int {
 	if renderer == nil || reducer == nil {
 		return 0
@@ -395,9 +401,26 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 			}
 		}
 	}
+	heldCalls := heldGateCallsByRow(callIndex, callRow)
 	for i := range turns {
 		flush(i)
 		replayTurnWithReducer(renderer, reducer, turns[i], callIndex, subagentCalls, &planUpdates)
+		// A held gate's records are parked right after this row; the response
+		// they follow has to be sealed first, as live sealed it.
+		if calls := heldCalls[i]; len(calls) > 0 {
+			at := time.Time{}
+			if turns[i].CreatedAt > 0 {
+				at = time.Unix(turns[i].CreatedAt, 0).UTC()
+			}
+			for _, call := range calls {
+				result := reducer.Reduce(NewMessageMsg{Msg: replayHeldGateStepMessage(call, at)})
+				for _, frame := range result.Frames {
+					if frame.Kind != FrameThinking || frame.Final {
+						renderer.RenderFrame(frame)
+					}
+				}
+			}
+		}
 		if line, ok := workedLines[i]; ok {
 			// The run's own text is out first, then its error if it failed;
 			// its line closes it, as live.
@@ -522,6 +545,11 @@ type replayEventItem struct {
 // draws a rebuilt canceled card just after the assistant row that issued it,
 // and sorts ahead of the records parked there.
 //
+// A gate that holds no card (approvalGateHoldsNoCard) is the exception: its
+// records have no card of their own to sit above, so they anchor right after
+// the row that issued the call and before whatever answered it, the position
+// live printed them at.
+//
 // It reports -1 for any other event, and for a record naming no call this
 // transcript can place, which leaves the caller to fall back to the run's
 // anchor and then to the clock.
@@ -529,6 +557,11 @@ func approvalEventAnchorPosition(evt event.RunEvent, callRow, resultRow map[stri
 	stepID := approvalEventToolStepID(evt)
 	if stepID == "" {
 		return -1
+	}
+	if approvalGateHoldsNoCard(approvalEventActionKind(evt)) {
+		if row, ok := callRow[stepID]; ok {
+			return row + 1
+		}
 	}
 	if row, ok := resultRow[stepID]; ok {
 		return row + 1
@@ -554,6 +587,28 @@ func approvalEventToolStepID(evt event.RunEvent) string {
 			return ""
 		}
 		return strings.TrimSpace(p.ToolStepID)
+	default:
+		return ""
+	}
+}
+
+// approvalEventActionKind is the gated action an approval record names, which
+// is how replay recognises a gate whose call holds no card: the record's own
+// action kind, with no tool name or live request to consult.
+func approvalEventActionKind(evt event.RunEvent) string {
+	switch evt.Type {
+	case event.RunEventApprovalReq:
+		var p event.ApprovalRequestedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return ""
+		}
+		return strings.TrimSpace(p.ActionKind)
+	case event.RunEventApprovalResolved:
+		var p event.ApprovalResolvedPayload
+		if json.Unmarshal(evt.Payload, &p) != nil {
+			return ""
+		}
+		return strings.TrimSpace(p.ActionKind)
 	default:
 		return ""
 	}
@@ -642,10 +697,13 @@ func replayApprovalEventFrames(evt event.RunEvent) []Frame {
 		return nil
 	}
 	return []Frame{{
-		Kind:                 FrameStatus,
-		Content:              line,
-		MaxDisplayLines:      approvalConfirmationMaxLines,
-		InsertBeforeLastTool: true,
+		Kind:            FrameStatus,
+		Content:         line,
+		MaxDisplayLines: approvalConfirmationMaxLines,
+		// The line sits above the gated call's parked card, unless the gate
+		// holds no card at all: then it keeps the anchor position it was
+		// sorted at, right after the row that issued the call.
+		InsertBeforeLastTool: !approvalGateHoldsNoCard(p.ActionKind),
 		AgentID:              strings.TrimSpace(p.AgentID),
 		RunID:                evt.RunID,
 		Final:                true,
@@ -751,6 +809,49 @@ func replayOrphanToolCallMessage(callID string, call replayToolCall) (Message, s
 		ToolPhase: tool.StepKindToolCompleted,
 	}
 	return msg, toolName, true
+}
+
+// heldGateCall is a call whose wait holds no card (tool.ToolStepHoldsNoCard):
+// the exit-plan gate. Live, its running step still reached the reducer, which
+// drew nothing for it but sealed the response that issued it.
+type heldGateCall struct {
+	callID string
+	name   string
+	order  int
+}
+
+// heldGateCallsByRow groups those calls by the assistant row that issued them,
+// in the order the model asked for them. Replay has no row of its own for the
+// running step — the wait draws nothing, and a canceled or review-delivered
+// answer row is dropped — so this is where it learns the step happened.
+func heldGateCallsByRow(callIndex map[string]replayToolCall, callRow map[string]int) map[int][]heldGateCall {
+	out := make(map[int][]heldGateCall)
+	for callID, row := range callRow {
+		call, ok := callIndex[callID]
+		if !ok || !tool.ToolStepHoldsNoCard(call.name, "running") {
+			continue
+		}
+		out[row] = append(out[row], heldGateCall{callID: callID, name: call.name, order: call.order})
+	}
+	for row := range out {
+		calls := out[row]
+		sort.SliceStable(calls, func(i, j int) bool { return calls[i].order < calls[j].order })
+	}
+	return out
+}
+
+// replayHeldGateStepMessage is the running step live fed the reducer when the
+// gate's call started. The reducer draws nothing for it and seals the response
+// that issued the call (Reducer.reduceMessage), at the issuing row's time.
+func replayHeldGateStepMessage(call heldGateCall, at time.Time) Message {
+	return Message{
+		Kind:      MsgKindTool,
+		StepID:    call.callID,
+		ToolName:  call.name,
+		ToolMeta:  tool.ToolMeta{ToolName: call.name, Status: "running"},
+		ToolPhase: event.RunEventToolStarted,
+		Timestamp: at,
+	}
 }
 
 // subagentEventAnchors resolves, per subagent run, the transcript position its

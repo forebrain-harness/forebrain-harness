@@ -256,6 +256,75 @@ func TestMCPStartupFailureBeforeTheSessionExistsIsShownButNotStored(t *testing.T
 	}, time.Second, 10*time.Millisecond)
 }
 
+// TestMCPStartupFailureBeforeTheSessionExistsIsShownOnceAndItsRecordPaintsNoSecondCopy
+// pins the pre-session window against redelivery: the MCP subscription replays
+// its snapshot on every registry transition, when the generation settles, and
+// again on every later Load, and with no session row the store cannot
+// arbitrate — so the surface's own once-memory is what keeps one failure to
+// one card. The record that lands when the conversation finally starts is
+// stored but never repainted on top of the card already on screen, which keeps
+// live and replay at one card each.
+func TestMCPStartupFailureBeforeTheSessionExistsIsShownOnceAndItsRecordPaintsNoSecondCopy(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+	runs := &state.RunStore{DB: db}
+	sessions := state.NewSessionStore(db, "main")
+	session := sessionEnv{Home: home, SQL: db, SessStore: sessions, RunSvc: runs}.session()
+
+	shown := make(chan NewMessageMsg, 4)
+	session.PrependUINotify(func(m any) {
+		if msg, ok := m.(NewMessageMsg); ok && msg.Msg.Kind == MsgKindError {
+			shown <- msg
+		}
+	})
+	cardWaiting := func() bool {
+		select {
+		case <-shown:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// The failure observed before the conversation exists: drawn once.
+	failed := run.MCPSnapshot{
+		Generation: "gen-1",
+		Servers:    []mcp.ServerRecord{mcpFailureRecord("docs", "connection refused")},
+	}
+	session.recordMCPStartupFailures("ghost", failed)
+	got := requireUIMessage(t, shown)
+	require.Equal(t, "mcp docs", got.Msg.Title)
+	require.Equal(t, "connection refused", got.Msg.Content)
+
+	// The same snapshot delivered twice more — a registry transition, the
+	// settle, a later Load's replay — paints no second copy, and the fact is
+	// still stored nowhere (the conversation has not started).
+	session.recordMCPStartupFailures("ghost", failed)
+	session.recordMCPStartupFailures("ghost", failed)
+	require.Never(t, cardWaiting, 300*time.Millisecond, 10*time.Millisecond)
+	stored, err := runs.ListSessionEvents(ctx, "ghost", 0, 0, 50)
+	require.NoError(t, err)
+	require.Empty(t, stored.Events, "a pre-session failure belongs to no history")
+
+	// The conversation starts (a first /model or first message Ensures the
+	// row): the next redelivery records the fact exactly once and paints no
+	// second card over the one already shown.
+	require.NoError(t, sessions.Ensure(ctx, "ghost", "ghost"))
+	session.recordMCPStartupFailures("ghost", failed)
+	require.Eventually(t, func() bool {
+		page, listErr := runs.ListSessionEvents(ctx, "ghost", 0, 0, 50)
+		return listErr == nil && len(page.Events) == 1
+	}, time.Second, 10*time.Millisecond)
+	page, err := runs.ListSessionEvents(ctx, "ghost", 0, 0, 50)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.Equal(t, "mcp:gen-1:docs:error", page.Events[0].ID)
+	require.Never(t, cardWaiting, 300*time.Millisecond, 10*time.Millisecond)
+}
+
 // TestCancelledServerStartupIsNotAFailure pins that a server the operator
 // skipped stays out of the transcript's error path: nothing failed, so there is
 // nothing to report as one, and no frame is written for it.

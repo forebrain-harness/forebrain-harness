@@ -17,10 +17,10 @@
       </div>
       <p class="mt-2 text-[13px] text-[var(--forebrain-text-2)]">{{ t('subagents.description') }}</p>
 
-      <p v-if="error" class="mt-4 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error || actionError }}</p>
+      <p v-if="error" class="mt-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error || actionError }}</p>
 
       <div v-if="loading" class="mt-6 text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!runningRows.length" class="mt-10 rounded-2xl border border-dashed border-[var(--forebrain-divider)] px-6 py-12 text-center">
+      <div v-else-if="!runningRows.length" class="mt-10 rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-12 text-center">
         <Users class="mx-auto size-10 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
         <p class="mt-3 text-sm text-[var(--forebrain-muted-text)]">{{ t('subagents.empty') }}</p>
       </div>

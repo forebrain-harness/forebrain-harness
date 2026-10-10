@@ -1,16 +1,16 @@
 <template>
-  <div class="rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
+  <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
     <div class="flex flex-wrap items-center gap-2 border-b border-[var(--forebrain-divider)] px-4 py-3">
       <input
         v-model="searchDraft"
         type="search"
-        class="min-w-[180px] flex-1 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
+        class="min-w-[180px] flex-1 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
         :placeholder="t('memories.searchPlaceholder')"
         data-testid="memories-search"
       />
       <select
         v-model="sortKey"
-        class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text)] outline-none"
+        class="rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text)] outline-none"
         data-testid="memories-sort"
       >
         <option value="updated-desc">{{ t('memories.sortUpdatedDesc') }}</option>
@@ -20,7 +20,7 @@
       </select>
       <select
         v-model.number="pageSize"
-        class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text)] outline-none"
+        class="rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text)] outline-none"
       >
         <option :value="20">20</option>
         <option :value="50">50</option>
@@ -30,7 +30,7 @@
       </button>
       <button
         type="button"
-        class="rounded-xl border border-[var(--forebrain-danger)] px-3 py-2 text-[12px] font-medium text-[var(--forebrain-danger)] hover:bg-[var(--forebrain-input-hover-bg)]"
+        class="rounded-md border border-[var(--forebrain-danger)] px-3 py-2 text-[12px] font-medium text-[var(--forebrain-danger)] hover:bg-[var(--forebrain-input-hover-bg)]"
         data-testid="memories-clear-all"
         @click="confirmClear = true"
       >
@@ -131,7 +131,7 @@
       data-testid="memories-editor"
       @click.self="closeEditor"
     >
-      <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
+      <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
         <div class="flex items-center gap-2">
           <div class="font-mono text-[13px] font-medium break-all text-[var(--forebrain-text)]">{{ editing.path }}</div>
           <LockIcon v-if="editing.core" class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]" :title="t('memories.coreFileHint')" />
@@ -141,7 +141,7 @@
           v-model="draft"
           :disabled="loadingEditor"
           rows="18"
-          class="mt-3 min-h-[240px] flex-1 resize-y rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] p-3 font-mono text-[12px] leading-relaxed text-[var(--forebrain-code-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
+          class="mt-3 min-h-[240px] flex-1 resize-y rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] p-3 font-mono text-[12px] leading-relaxed text-[var(--forebrain-code-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
           data-testid="memories-editor-text"
         />
         <p v-if="editorError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ editorError }}</p>
@@ -161,7 +161,7 @@
       data-testid="memories-clear-confirm"
       @click.self="confirmClear = false"
     >
-      <div class="w-full max-w-md rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
+      <div class="w-full max-w-md rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
         <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('memories.clearAllTitle') }}</div>
         <p class="mt-2 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">
           {{ scope === 'global' ? t('memories.clearGlobalHint') : t('memories.clearProjectHint') }}

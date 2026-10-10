@@ -15,14 +15,14 @@
         {{ t('mcp.runtimeUnavailable') }}
       </p>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div v-if="loading && !records.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <ul v-else-if="records.length" class="space-y-2">
         <li
           v-for="record in records"
           :key="record.name"
-          class="rounded-xl border px-4 py-3"
+          class="rounded-lg border px-4 py-3"
           :class="record.scope === 'project' ? 'border-[var(--forebrain-brand-border-strong)] bg-[var(--forebrain-surface)]' : 'border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]'"
         >
           <div class="flex flex-wrap items-center gap-2">
@@ -132,7 +132,7 @@
           </dl>
         </li>
       </ul>
-      <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('mcp.empty') }}
       </p>
 

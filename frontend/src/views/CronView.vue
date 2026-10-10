@@ -30,11 +30,11 @@
         </RouterLink>
       </p>
 
-      <p v-if="error" class="mb-4 rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <div v-if="loading && !jobs.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <ul v-else-if="jobs.length" class="space-y-2">
-        <li v-for="job in jobs" :key="job.id" class="rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3" :data-cron-job="job.name || job.id">
+        <li v-for="job in jobs" :key="job.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3" :data-cron-job="job.name || job.id">
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
@@ -84,7 +84,7 @@
           </div>
         </li>
       </ul>
-      <p v-else class="rounded-xl border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
         {{ t('cron.empty') }}
       </p>
     </div>
@@ -96,7 +96,7 @@
       data-testid="cron-editor"
       @click.self="closeEditor"
     >
-      <div class="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
+      <div class="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
         <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ editingId ? t('cron.editJob') : t('cron.newJob') }}</div>
 
         <label class="mt-3 block">

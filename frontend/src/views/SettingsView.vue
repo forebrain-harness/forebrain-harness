@@ -122,7 +122,7 @@ watch(activeTab, (tab) => {
 }
 .settings-tab {
   text-align: left;
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 9px 12px;
   font-size: 13px;
   color: var(--forebrain-text-2);

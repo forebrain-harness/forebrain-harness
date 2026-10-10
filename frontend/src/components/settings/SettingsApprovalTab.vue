@@ -99,7 +99,7 @@ onMounted(() => {
   width: 100%;
   text-align: left;
   border: 1px solid var(--forebrain-divider);
-  border-radius: 12px;
+  border-radius: 8px;
   padding: 12px 14px;
   background: var(--forebrain-surface);
 }

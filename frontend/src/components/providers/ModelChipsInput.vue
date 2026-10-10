@@ -1,6 +1,6 @@
 <template>
   <div class="space-y-2" data-testid="model-chips">
-    <div class="flex flex-wrap items-center gap-1.5 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2 py-1.5">
+    <div class="flex flex-wrap items-center gap-1.5 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2 py-1.5">
       <span
         v-for="model in models"
         :key="model"

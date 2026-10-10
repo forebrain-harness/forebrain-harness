@@ -1,5 +1,5 @@
 <template>
-  <div class="forebrain-subagent-call-card overflow-hidden rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]" data-testid="subagent-call-card">
+  <div class="forebrain-subagent-call-card overflow-hidden rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]" data-testid="subagent-call-card">
     <div class="flex w-full items-center gap-2.5 px-3 py-2 text-left">
       <Loader2 v-if="running" class="size-4 shrink-0 animate-spin text-[var(--forebrain-brand-1)]" aria-hidden="true" />
       <Bot v-else class="size-4 shrink-0" :class="failed ? 'text-[var(--forebrain-danger)]' : 'text-[var(--forebrain-brand-1)]'" aria-hidden="true" />

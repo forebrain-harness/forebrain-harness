@@ -129,6 +129,11 @@ owner 原话：
 
 ### 4. 心跳入口
 
+> **2026-10-10 变更（取代本节下文）**：菜单栏入口在非对话页一律禁用，点击无反应、被当成 bug；owner 改为"心跳按钮可以只放在对话页"。
+> 现状：`RailHeartbeat.vue` 与 `useSessionHeartbeat.ts` 已删除；入口是对话页顶栏"工作台"左侧的 `chat/SessionHeartbeat.vue`（按钮 + 向下弹层，没有打开会话时不显示），
+> 共享状态是 `useHeartbeats.ts`（本主代理全部心跳，来自新接口 `GET /api/heartbeats`，带会话标题）；弹层底部列出其他对话的心跳（一键暂停/恢复、点标题跳转），
+> 对话抽屉给每个有心跳的会话行加图标（运行中品牌色、暂停灰色）。原型 `app-preview.html` 已同步。
+
 - 新组件 `frontend/src/components/RailHeartbeat.vue`：菜单栏底部的"心跳"按钮 + 向上弹出的浮层（`role="dialog"`，`aria-label` 为心跳标题）。
   浮层是内容层，白底（`--forebrain-surface`）、`--forebrain-divider` 描边、`--forebrain-shadow-pop` 阴影，内部直接复用 `SessionHeartbeat.vue` 表单（去掉它外层的卡片边框样式，由浮层提供）。
 - 作用对象是当前会话（`route.query.session`）；没有打开会话时按钮禁用，`title` 为 `heartbeat.needsSession`。

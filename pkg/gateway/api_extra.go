@@ -203,6 +203,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	cron.Post("/:id/run", s.handleCronJobRun)
 	cron.Get("/:id/runs", s.handleCronJobRuns)
 
+	api.Get("/heartbeats", s.handleHeartbeats)
 	api.Get("/heartbeat", s.handleHeartbeat)
 	api.Put("/heartbeat", s.handleHeartbeat)
 	api.Delete("/heartbeat", s.handleHeartbeat)
@@ -4636,6 +4637,33 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleHeartbeats lists the heartbeats on this agent's conversations, each
+// with the title of the conversation it belongs to, so a surface can show
+// which conversations are being asked again without opening each one.
+func (s *Server) handleHeartbeats(w http.ResponseWriter, r *http.Request) {
+	svc, agentID, ok := s.cronScope(w)
+	if !ok {
+		return
+	}
+	beats, err := svc.ListHeartbeats(r.Context(), agentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	records := make([]map[string]any, 0, len(beats))
+	for i := range beats {
+		title, err := s.Sessions.SessionTitle(r.Context(), beats[i].SessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		row := heartbeatResponse(&beats[i])
+		row["session_title"] = title
+		records = append(records, row)
+	}
+	writeAgentsJSON(w, map[string]any{"records": records})
 }
 
 // heartbeatResponse renders a heartbeat for a surface. The pause flag is not

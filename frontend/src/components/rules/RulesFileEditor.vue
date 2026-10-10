@@ -25,7 +25,7 @@
       </div>
     </aside>
 
-    <section class="min-w-0 rounded-2xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
+    <section class="min-w-0 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-4">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ activeLabel }}</div>
         <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!canSave || saving" data-testid="rules-save" @click="emit('save')">
@@ -98,7 +98,7 @@ function onCreate(event: Event) {
   display: flex;
   align-items: center;
   gap: 8px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--forebrain-divider);
   background: var(--forebrain-surface);
   padding: 9px 11px;
@@ -130,7 +130,7 @@ function onCreate(event: Event) {
   min-height: 420px;
   box-sizing: border-box;
   border: 1px solid var(--forebrain-divider-strong);
-  border-radius: 10px;
+  border-radius: 8px;
   padding: 12px;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   font-size: 12.5px;

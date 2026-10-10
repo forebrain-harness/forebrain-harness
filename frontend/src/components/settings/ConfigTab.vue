@@ -13,14 +13,14 @@
       </header>
 
       <p class="mb-3 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('config.notice') }}</p>
-      <p v-if="error" class="mb-4 whitespace-pre-wrap rounded-xl border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-if="notice" class="mb-4 rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
+      <p v-if="error" class="mb-4 whitespace-pre-wrap rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="notice" class="mb-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
 
       <textarea
         v-model="yaml"
         spellcheck="false"
         rows="26"
-        class="w-full rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] px-3 py-3 font-mono text-[12px] leading-relaxed text-[var(--forebrain-code-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
+        class="w-full rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] px-3 py-3 font-mono text-[12px] leading-relaxed text-[var(--forebrain-code-text)] outline-none focus:border-[var(--forebrain-focus-border)]"
       />
     </div>
   </div>

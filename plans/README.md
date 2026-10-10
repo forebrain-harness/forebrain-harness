@@ -4,10 +4,17 @@
 
 ## 最新审核信息
 
-- **审核日期**：2026-10-09
-- **基准 commit**：71c0449
-- **审核类型**：多个 TUI 进程同时在 plan 模式时 exit_plan_mode 审批串台的根因定位与修复（`plan` 模式，单计划 004）
-- **问题报告**：owner 报告"启动多个 tui 进程，不同进程里分别同时进行 plan 模式下的会话，其中一个会话调用 exit_plan_mode，审批 overlay 里会出现其他 tui 进程里的会话生成的计划文件"
+- **审核日期**：2026-10-10
+- **基准 commit**：9656051（工作区含 owner 未提交改动：`pkg/tui/notify.go` 的 `markEventShownOnce` 等，与 007 无关）
+- **审核类型**：exit_plan_mode 审批期间 TUI 出现假 "Exited plan mode" 卡、取消后多一张 "Canceled" 卡的根因定位与修复（`plan` 模式，单计划 007）
+- **问题报告**：owner 报告（附截图）"running plan-review subagent 时并没有退出 plan 模式，但是显示了 Exited plan mode 消息卡片"；"按下 ctrl+c 取消审批后，已经显示了 You canceled forebrain's request to exit plan mode，不需要重复显示 Canceled 消息卡片"
+- **结论（007）**：两个 bug 同一根因——主 agent 的工具步骤经 `runAuditStepHook → notifyToolStepHooks` 直接进 UI，不经 d501e09 加了过滤的 `publishRunEvent` 漏斗，gate 的等待帧被画成卡（标题落进 "Exited plan mode"），取消时被 `FinalizePendingTools` 改成 "Canceled"。去掉假卡会暴露确认行"插到最后一张工具卡之前"的落位错位（回放今天已错位，真机复现），所以 007 一并修 live 与回放的落位。web 同源错位未纳入，待 owner 决定是否另立计划
+- **同日追加（008）**：owner 要求另写 web 同步计划。web 除了同源的落位错位，还会丢行（同一 gate 的多条决定只留最后一条，review 交付会抹掉 "You asked … review"）、重载时 review 卡落到整轮末尾。008 用不渲染的 gate 锚点块标记无卡调用的位置，exit gate 的决定行逐条插在锚点之前
+- **008 执行（2026-10-10，owner 指定 worktree）**：已派发执行者在独立 worktree `../forebrain-harness-008`（detached 于 9656051）完成，评审 **APPROVE**。5 条 Done criteria 评审侧复跑全过（326 tests 全绿 / vue-tsc 无输出 / build 成功 / grep gateStepIds 与旧注释均无输出）；diff 逐段对照计划、范围干净（4 个 in-scope 前端文件 + `pkg/gateway/dist` 构建产物）；两处申报偏差均接受（`messageHasBubble` doc 注释同步一句；计划第 11 条"live 与重载各一遍"拆成两个用例，新增共 7 个）。**改动未提交、留在 worktree，由 owner 决定并回方式**（主树 ChatView.vue / WorkshopView.vue 有 owner 未提交改动，并回时注意）；007（TUI 侧）仍 TODO，两端应一起交付。
+- **007 执行（2026-10-10，owner 指定 worktree）**：已派发执行者在独立 worktree `wt/improve-007-exit-gate`（`$TMPDIR/fb-007-wt`，基于 9656051）完成，评审 **APPROVE**。全部 Done criteria 评审侧独立复跑通过（8 个新/改写测试 PASS、`./pkg/... ./cmd/forebrain` 全绿、vet/gofmt 干净、graph.json 无 diff、grep 项全过）；diff 逐段对照计划（9 个 in-scope 文件 + 2 个勘误文档，无 import 增删）；driver 真机 A–F 全过（A/B/D 假卡与 Canceled 卡为 0、C 回放同序、E review 落位与批准卡正确、F 拒绝带反馈 live/回放一致）。三处申报偏差均接受（test 8 首匹配调整——回放合并 assistant 文本为 9656051 既有行为，非本改动引入；场景 C 的 "Worked for" 行落位为既有 run_id 缺失投影；channels.go 注释补两句）。**改动未提交、留在 worktree，由 owner 决定并回方式**（主树 `pkg/tui/notify.go` 有 owner 未提交的 `markEventShownOnce` 改动，并回时注意；`$TMPDIR` 重启会清空，尽快落地）。待 owner：用真实模型复核一次成功 review 路径（review 期间无 "Exited plan mode" 卡、交付后修订与新 gate 依次出现在 review 卡之后）。
+- **007 branch 审核（2026-10-10，第二轮，`/improve branch` 针对 worktree `$TMPDIR/fb-007-wt`）**：逐段复核 007 实现，发现 1 处语义缺口 + 1 处文档落位问题，立计划 009 并派执行者在同一 worktree 叠加修复。① **回放未封存发出无卡 gate 调用的那段回答**（探针实证）：live 里 gate 的 running 步骤进 reducer 时封存文本，回放没有这条步骤的行（等待不画卡、取消/交付结果行被丢弃），owner 截图 1 的流程（review → 交付 → 修订 → 批准）回放成"残留 non-final 的 `here is the plan` 块 + 粘连块 `here is the planrevised plan`"，第一段回答出现两次；只有 transcript 时也会把两段回答粘成一块。缺口在 9656051 已存在，但 007 的行为矩阵与 test 8 明确要求修好——执行者把 test 8 改成"只取第一个匹配"，测试在 bug 存在时仍通过（上一轮评审接受的"test 8 首匹配调整"偏差即此，应驳回）。② `docs/plan/PLAN_REVIEW_DELIVERY_SILENT_PLAN.md` 的勘误段插进了第一个引用块中间，把"评审记录 / owner 裁决"并进了勘误引用块。其余逐项核对无问题：live 入口过滤取对缓冲区；漏斗删除后发布事件的 started 帧 `ToolMeta.Status` 恒为 `running`（`BuildToolMeta → stepStatusLabel`），仍被 reducer 拦截；所有带 `Confirmation` 的审批记录都写 `action_kind` 与 `tool_step_id`；gofmt/vet 干净。修法原型已在 scratchpad 副本验证：`./pkg/tui` 全绿，交付流程回放与 live 一致。
+- **009 执行（2026-10-10，叠加在 007 的 worktree `$TMPDIR/fb-007-wt` 上）**：评审 **APPROVE**。执行者先让收紧后的 test 8 与新测试 `TestReplaySealsTheResponseThatIssuedACardlessGate` 在修复前失败（`here is the plan` 块 `Final:false`；`["first answersecond answer"]`），修复后通过；评审侧独立复跑：`./pkg/tui`、`./pkg/architecture` ok，007+009 相关 12 个测试全部 PASS，vet/gofmt/graph.json 干净，`git status` 仍是同样 11 个文件（009 只改 `commands.go`、`commands_test.go` 和勘误文档的位置）。真机：C'（取消后回放）由执行者跑通；E'（review → 批准 → 回放）被执行者误判跳过（driver 里 review 失败本来就在预期内），由评审补跑：live 与回放都是 `calling exit_plan_mode` → `You asked` → `Failed to start 1 plan-reviewer task` → `You approved` → 唯一一张 `◆ Exited plan mode`，`calling exit_plan_mode` 只出现 1 次，无 `◆ Canceled`。**007 + 009 的改动都未提交、留在同一个 worktree**，由 owner 决定并回方式（`$TMPDIR` 重启会清空，尽快落地；主树 `pkg/tui/notify.go` 有 owner 未提交改动，并回时注意）。上一轮接受的 007 偏差「test 8 首匹配调整」应视为驳回，已由 009 纠正。**已并回主树工作区**（2026-10-10，`git apply` 到 main 工作区、未提交、未动暂存区；与 owner 未提交的 `notify.go` 改动无冲突）。并回后 worktree `$TMPDIR/fb-007-wt` 与分支 `wt/improve-007-exit-gate` 已删除（删除前核对：分支无额外提交，worktree 改动在主树逐文件一致）。**review 交付成功路径已在主树用 glm-5.3 真机跑通**：review 期间 0 张假卡、交付静默、修订回答独立成块，live 与 `resume` 回放关键行逐行相同（记录见 009 末尾）。附带发现：home 在符号链接路径下时计划写入守卫只做字面比较（`pkg/tool/state.go:916`），既有问题，未立计划。
+- **上上轮（004）**：多 TUI 进程 plan 模式计划文件串台
 - **Owner 裁决（004）**：隔离方案选「每会话子目录」`plans/<projectKey>/<sessionID>/`（评估过保持平铺的后缀命名 / 绑定文件名 / SQLite 归属表后仍维持子目录）；旧会话不迁移（扁平目录里的旧计划只作历史）；`/migrate` 导入的计划进入所属对话的目录，一个 Claude slug 对应多个会话时复制到每个会话；删会话不碰计划目录
 - **上一轮（003）**：TUI message queue 在途 steer 无法撤回；owner 裁决：压缩窗口选「压缩不吞未送达 steer」；「清空队列对在途 steer 不撤回」和 web/gateway 同类问题并入本期一起修，web 送达的 steer 实时拆成独立气泡
 
@@ -22,6 +29,9 @@
 | [004-session-scoped-plan-files](004-session-scoped-plan-files.md) | 计划文件按会话隔离：多个 TUI / 会话同时在 plan 模式时 exit_plan_mode 审批不再显示别人的计划 | Bug Fix | DONE | **P1** | M | MED |
 | [005-serialize-run-queue-hook-and-drop-retract-last-steer](005-serialize-run-queue-hook-and-drop-retract-last-steer.md) | gateway 的 run 队列 hook 一次只发一个变化；删掉已无人使用的 `RetractLastSteer` | Bug Fix / Tech Debt | DONE | P3 | S | LOW |
 | [006-shared-compaction-guard-and-unseparable-provisional-tail](006-shared-compaction-guard-and-unseparable-provisional-tail.md) | 排查 Runner 共享的压缩 guard 会否被同 run ID 的另一段历史覆盖；不可达则让分不清暂定尾巴的调用不压缩 | Investigation | TODO | P3 | S | LOW |
+| [007-exit-gate-live-card-and-cardless-anchoring](007-exit-gate-live-card-and-cardless-anchoring.md) | exit_plan_mode 审批期间不再画假 "Exited plan mode" 卡、取消后不再多 "Canceled" 卡；无卡 gate 的确认行与 review 卡按真实顺序落位（live 与回放一致） | Bug Fix | DONE | **P1** | M | MED |
+| [008-web-cardless-exit-gate-anchoring](008-web-cardless-exit-gate-anchoring.md) | web 端 exit gate 的决定行逐条显示、按真实顺序落在 gate 调用处，review 卡跟在请求它的行之后；live 与重载一致（对齐 007 后的 TUI） | Bug Fix | DONE | P2 | M | MED |
+| [009-replay-seals-response-before-cardless-gate](009-replay-seals-response-before-cardless-gate.md) | 回放在发出无卡 exit gate 调用的行之后补喂 running 步骤、封存那段回答（修 review 交付流程回放文本重复 / 粘连）；收紧 007 test 8；勘误段放回原位 | Bug Fix | DONE | **P1** | S | LOW |
 
 ## 执行顺序
 
@@ -33,6 +43,9 @@
 001-frontend-component-design-spec-alignment (独立，需用户确认命名策略)
 005-serialize-run-queue-hook-and-drop-retract-last-steer (依赖 003 的代码在工作区或已提交；与 004 不重叠)
 006-shared-compaction-guard-and-unseparable-provisional-tail (依赖 003；排查计划，Step 4 是决策闸门，可达时停下交 owner 拍板；与 005 不重叠，可并行)
+007-exit-gate-live-card-and-cardless-anchoring (独立，owner 报告的可见 bug，优先；只改 pkg/tui，与 006 不重叠；notify.go 里有 owner 未提交改动，只删两处过滤条件，不碰其余)
+008-web-cardless-exit-gate-anchoring (语义依赖 007、代码不重叠，可与 007 并行，应一起交付；只改 frontend；ChatView.vue / WorkshopView.vue 有 owner 未提交改动，只改点名的行)
+009-replay-seals-response-before-cardless-gate (依赖 007 的未提交实现，在同一 worktree $TMPDIR/fb-007-wt 里叠加；与 007 一起并回)
 ```
 
 ## 状态说明
@@ -155,6 +168,8 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 
 ## 已审核但未计划的发现
 
+- ~~web 端无卡 exit gate 的审批记录落位错位~~ → 已立计划 008（2026-10-10，owner 要求另写 web 同步计划）。
+
 - **会话内容落在磁盘文件里，而非只在 SQLite**（owner 2026-10-09 定方向："所有会话消息无论是 primary agent
   的还是 subagent 的，都不应该存在磁盘文件里，都应该只存在 sqlite 数据库里"；同日裁决"本期先优先解决
   subagent 视图卡死，其他放在以后处理"）。已盘点到的落盘位置（均在 `<workspaceRoot>/state/` 下，
@@ -169,6 +184,24 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
     state 库在 home 级，导入旧 jsonl 只能在运行期做，不能放进纯 SQL 的 schema 迁移）。
 
 ## 已考虑并拒绝的发现
+
+- **007 入口过滤提前返回、跳过了 `Tracker.ObserveToolStep`，取消/交付掉的 exit gate 不再计入工具计数**（007 branch 审核第二轮）：
+  属实，但 `Counters.Tools` 只被追踪、从不绘制（`formatWorkingCounters` 只画计划清单进度；回放用的是不带 tracker 的新 `Reducer`），
+  没有用户可见后果，不值得为此挪动 007 已评审的过滤位置。
+- **回放的封存直接在 `flush` 里调 `reducer.flushBufferedText`**（009）：能修，但在回放侧复制了 live 规则（缓冲区选择、reasoning 时长）；
+  009 改为补喂 live 同款的 running 步骤，让回放走 reducer 同一入口。
+
+- **只在 `notifyToolStepHooks`（主 agent 生产者处）补一道 `ToolStepHoldsNoCard` 过滤**（007）：能修这次的两个 bug，
+  但和 d501e09 一样是"在某条生产路径上打补丁"，下一条新路径照样漏。007 把过滤放在所有工具消息都必经的
+  `Reducer.reduceMessage`，并删掉漏斗处的重复检查。
+- **给 exit gate 保留一个不可见的占位块，让确认行继续"插到它之前"**（007）：不用改落位规则，但不可见块要在视口行数、
+  点击展开、`FinalizePendingTools` 等处处特判，复杂度和风险都更高。
+- **web 用"隐藏的 exit_plan_mode 工具块"代替锚点块**（008）：能复用"插在被审批卡之上"的旧逻辑，但要撤回 d501e09 在
+  `handleStepEvent` 的跳过、让运行状态行与各处工具块消费者都学会忽略它，牵连更广；锚点块是一个只有落位语义的新类型，渲染层天然忽略。
+- **web 保持"一个 action 一个审批块"，把多条决定行合进同一块**（008）：改动小，但 review 卡无法夹在 "You asked" 与
+  "You approved" 之间，读起来与 TUI 不同；008 对 exit gate 改为一条决定一个块。
+- **把所有审批确认行的落位改成"按 StepID 找被审批的块，找不到就追加"**（007）：规则更精确，但改变所有工具审批的语义
+  （并行调用时位置会变），超出两个 bug 的范围；007 只对无卡 gate 改规则。
 
 - **在 `InputQueue` 引擎层统一串行化所有 change hook**（branch 审核，2026-10-09）：能顺带覆盖 TUI 与 subagent 通道，但 subagent 的 hook
   会在持有通道锁时被调用，要重新论证锁序；问题只在 gateway 有可见后果，005 只在 `watchRunQueue` 里加锁。

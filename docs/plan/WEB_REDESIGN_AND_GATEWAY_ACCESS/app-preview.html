@@ -90,9 +90,35 @@
   .r-foot .fl:hover { background: var(--r-hover); color: var(--r-fg); }
   .r-foot .fl.on { background: var(--r-active); color: var(--r-active-fg); }
   .r-foot .theme { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--r-line); color: var(--r-fg2); background: transparent; cursor: pointer; }
-  .hb-pop { position: absolute; left: 12px; bottom: 50px; width: 300px; background: var(--page); color: var(--text); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--pop); padding: 14px; display: grid; gap: 10px; z-index: 5; }
-  .hb-pop h4 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-  .hb-pop p { margin: 0; font-size: 12px; color: var(--text-2); }
+  .hb-anchor { position: relative; display: inline-flex; }
+  .chip-btn.hb-chip.on { border-color: var(--brand-border); background: var(--brand-soft); color: var(--brand); }
+  .chip-btn.hb-chip .hb-meta { color: var(--muted); }
+  .chip-btn.hb-chip.on .hb-meta { color: inherit; opacity: 0.8; }
+  .chip-btn.hb-chip.on svg.lucide { animation: hb-beat 2.4s ease-in-out infinite; }
+  @keyframes hb-beat { 0%, 70%, 100% { transform: scale(1); } 80% { transform: scale(1.25); } 90% { transform: scale(0.95); } }
+  @media (prefers-reduced-motion: reduce) { .chip-btn.hb-chip.on svg.lucide { animation: none; } }
+  .hb-pop { position: absolute; top: calc(100% + 8px); right: 0; width: 340px; background: var(--page); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--pop); padding: 14px; display: grid; gap: 8px; z-index: 6; text-align: left; }
+  .hb-pop .hb-h { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .hb-pop h4 { margin: 0; font-size: 13.5px; font-weight: 600; }
+  .hb-pop p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
+  .hb-pop .hb-sched { border-radius: 8px; background: var(--soft); padding: 6px 8px; font-size: 11.5px; color: var(--text-2); }
+  .hb-pop .hb-l { font-size: 11.5px; font-weight: 500; color: var(--text-2); margin-top: 2px; }
+  .hb-pop .hb-act { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
+  .hb-pop .btn.ghost-dgr { border-color: transparent; color: var(--danger); background: transparent; }
+  .hb-pop .btn.ghost-dgr:hover { background: var(--soft); }
+  .hb-pop .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .hb-others { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 10px; display: grid; gap: 2px; }
+  .hb-others .cap { font-size: 11.5px; font-weight: 500; color: var(--muted); margin-bottom: 2px; }
+  .hb-other { display: flex; align-items: center; gap: 6px; }
+  .hb-other .go { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; border: 0; background: transparent; border-radius: 6px; padding: 4px 6px; font-size: 12.5px; color: var(--text); cursor: pointer; text-align: left; }
+  .hb-other .go:hover { background: var(--subtle); }
+  .hb-other .go span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hb-other .go svg.lucide { width: 12px; height: 12px; flex: none; color: var(--brand); }
+  .hb-other .go.off svg.lucide { color: var(--muted); }
+  .hb-other .st { flex: none; font-size: 11.5px; color: var(--muted); }
+  .hb-other .pp { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; }
+  .hb-other .pp:hover { background: var(--subtle); color: var(--text); }
+  .hb-other .pp svg.lucide { width: 12px; height: 12px; }
 
   /* work area */
   .work { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -297,7 +323,10 @@
   .d-list button { width: 100%; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 7px 9px; color: var(--text-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; display: block; }
   .d-list button:hover { background: var(--subtle); color: var(--text); }
   .d-list button.on { background: var(--brand-soft); color: var(--brand); font-weight: 500; padding-right: 28px; }
-  .d-list .hb { position: absolute; right: 8px; top: 9px; width: 13px; height: 13px; color: var(--brand); }
+  .d-list button.has-hb { padding-right: 28px; }
+  .d-list .hb { position: absolute; right: 8px; top: 9px; display: flex; color: var(--brand); }
+  .d-list .hb.off { color: var(--muted); }
+  .d-list .hb svg.lucide { width: 13px; height: 13px; }
   .d-foot { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
   .subnav-wrap { display: grid; grid-template-columns: 168px minmax(0, 1fr); gap: 24px; align-items: start; }
   .subnav { display: grid; gap: 1px; position: sticky; top: 0; }
@@ -361,9 +390,10 @@
 <script>
 (function () {
   var tenants = {
-    main: { path: '~/workspace/forebrain-harness', sessions: ['重构 gateway 鉴权中间件', '排查 MCP 启动超时', '发布 v0.3.0 的 release notes', '记忆检索补充日文分词', '整理 permissions 的三档预设', '未命名对话'], provider: ['deepseek', 'deepseek-v4'] },
-    review: { path: '~/.forebrain/workspaces/review', sessions: ['审阅 PR #42：调度器重试', '审阅 PR #45：目录树懒加载', '未命名对话'], provider: ['openai', 'gpt-5.5'] },
-    ops: { path: '~/workspace/infra', sessions: ['排查 gateway 集群 502', '整理告警阈值', '未命名对话'], provider: ['deepseek', 'deepseek-v4'] }
+    main: { path: '~/workspace/forebrain-harness', sessions: ['重构 gateway 鉴权中间件', '排查 MCP 启动超时', '发布 v0.3.0 的 release notes', '记忆检索补充日文分词', '整理 permissions 的三档预设', '未命名对话'], provider: ['deepseek', 'deepseek-v4'],
+      beats: { '重构 gateway 鉴权中间件': { min: 30, prompt: '有新变化吗？没有就简单回一句。', paused: false, next: '10:12', last: '09:42' }, '发布 v0.3.0 的 release notes': { min: 60, prompt: 'CI 跑完了吗？跑完就把 release notes 补上。', paused: true, last: '昨天 18:00' } } },
+    review: { path: '~/.forebrain/workspaces/review', sessions: ['审阅 PR #42：调度器重试', '审阅 PR #45：目录树懒加载', '未命名对话'], provider: ['openai', 'gpt-5.5'], beats: {} },
+    ops: { path: '~/workspace/infra', sessions: ['排查 gateway 集群 502', '整理告警阈值', '未命名对话'], provider: ['deepseek', 'deepseek-v4'], beats: {} }
   };
   var S = {
     tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', drawer: false, tmenu: false,
@@ -390,7 +420,7 @@
     'pkg/gateway': [['controlplane.go', 0], ['http_server.go', 0], ['serve_run.go', 0], ['server.go', 0]], 'scripts': [['acceptance', 1], ['package-graph.sh', 0]]
   };
   var captions = {
-    chat: ['对话 · 主代理', ['点菜单栏“对话”向右弹出对话抽屉：新聊天、搜索会话、会话列表都在抽屉里，选中会话后抽屉收起。抽屉只列本主代理的会话，项目会话在各自的项目空间里。', '默认只有菜单栏和内容区；顶栏“工作台”打开第三栏（运行中的代理、懒加载目录树），数字徽标是运行中的代理数。', '输入框旁的“审批模式”选择框只对本会话生效（与终端 /permissions 一致）：Read Only / Default / Full Access，每项有说明；全局默认在“设置 → 审批默认”。', '每轮回答末尾的结束行与终端一致：“已工作 时长 · [勾选方框图标]完成/总数（有任务清单时） · 完成时间”，网页端用与数字同字号（1em）的图标代替终端里的 ☑ 字符，灰色整宽分隔线。', '菜单栏底部“心跳”作用于当前会话。', '菜单栏品牌区右侧的按钮可以把菜单栏折叠成只显示图标（64px），默认展开；折叠后鼠标移到图标上（或用键盘聚焦）立即在右侧显示菜单名称，主代理选择器缩成首字母方块，对话抽屉从折叠后的菜单栏右缘弹出。']],
+    chat: ['对话 · 主代理', ['点菜单栏“对话”向右弹出对话抽屉：新聊天、搜索会话、会话列表都在抽屉里，选中会话后抽屉收起。抽屉只列本主代理的会话，项目会话在各自的项目空间里。', '默认只有菜单栏和内容区；顶栏“工作台”打开第三栏（运行中的代理、懒加载目录树），数字徽标是运行中的代理数。', '输入框旁的“审批模式”选择框只对本会话生效（与终端 /permissions 一致）：Read Only / Default / Full Access，每项有说明；全局默认在“设置 → 审批默认”。', '每轮回答末尾的结束行与终端一致：“已工作 时长 · [勾选方框图标]完成/总数（有任务清单时） · 完成时间”，网页端用与数字同字号（1em）的图标代替终端里的 ☑ 字符，灰色整宽分隔线。', '“心跳”入口在对话页顶栏、“工作台”左侧，只作用于当前对话，没有打开对话时不显示：未设置时是普通按钮；运行中高亮并显示“每 N 分钟”（图标缓慢跳动，系统开启减少动态效果时不动）；暂停时显示“已暂停”。', '点开心跳弹层：右上角开关暂停/恢复（只用已保存的设置，不动未保存的修改），灰底一行写明“每 N 分钟 · 下次约 hh:mm · 上次 hh:mm”；改间隔或发送内容后“保存修改”才可点，保存不改变运行/暂停状态；“删除”去掉这个心跳。Esc 或点弹层外关闭。', '弹层底部“其他对话的心跳”列出本主代理其他开着心跳的对话：行尾按钮一键暂停/恢复，点标题跳到那个对话，弹层留在原处显示它的心跳。对话抽屉里每个有心跳的会话行尾都有心跳图标（运行中品牌色、暂停灰色），从任何页面打开抽屉都能看到。', '菜单栏品牌区右侧的按钮可以把菜单栏折叠成只显示图标（64px），默认展开；折叠后鼠标移到图标上（或用键盘聚焦）立即在右侧显示菜单名称，主代理选择器缩成首字母方块，对话抽屉从折叠后的菜单栏右缘弹出。']],
     projects: ['项目 · 主代理', ['本主代理的项目列表。点“进入项目空间”进入该项目的独立页面，项目的规则指令、会话、记忆、权限、MCP、技能、定时任务都在那里读写。', '列表页只做项目层面的管理：新建、置顶、归档、删除。']],
     project: ['项目空间 · 项目', ['独立的项目页面，顶部黑底“项目”标签与面包屑标明当前在项目层，和主代理页面区分开。', '标签页：概览、规则指令、会话、记忆、权限、MCP、技能、定时任务。', '规则指令：项目指令 + 项目的 FOREBRAIN.md（根目录与子目录），与菜单栏“规则指令”页同一套布局，可新建和编辑。记忆：与菜单栏“记忆”页同一套文件列表，只列本项目的。', '技能：列出本项目能加载的全部技能（项目、主代理、共享、内置），主代理与共享的只读；其余标签只展示本项目自己的配置和数据。', '点顶部面包屑“项目”回到列表。']],
     rules: ['规则指令 · 主代理', ['本主代理的规则文件：AGENTS.md（行为准则）、SOUL.md（性格与做事方式）、USER.md（关于你），位于主代理工作区根目录。', '左边列出已有文件，右边编辑；“新建规则文件”下拉只列出 Forebrain Harness 支持、且还没创建的文件。与项目空间的“规则指令”页同一套布局。', '保存后从新会话开始生效，不打断正在进行的会话。']],
@@ -430,7 +460,6 @@
       h += '<button type="button" class="r-link' + (on ? ' on' : '') + (n[0] === 'chat' && S.drawer ? ' open' : '') + '" data-nav="' + n[0] + '"' + (rc ? ' data-tip="' + n[1] + '" aria-label="' + n[1] + '"' : '') + '>' + ic(n[2]) + '<span class="lbl">' + n[1] + '</span>' + (n[0] === 'chat' ? ic('chevron-right', 'chev') : '') + '</button>';
     });
     h += '</nav><div class="r-foot">' +
-      '<button type="button" class="fl' + (S.hb ? ' on' : '') + '" data-act="hb"' + (rc ? ' data-tip="心跳" aria-label="心跳"' : '') + '>' + ic('activity') + '<span class="lbl">心跳</span></button>' +
       '<button type="button" class="fl' + (S.page === 'settings' ? ' on' : '') + '" data-go="settings"' + (rc ? ' data-tip="设置" aria-label="设置"' : '') + '>' + ic('settings') + '<span class="lbl">设置</span></button>' +
       '<button type="button" class="theme" data-act="railtheme"' + (rc ? ' data-tip="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '"' : ' title="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '"') + ' aria-label="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '">' + ic(S.rail === 'dark' ? 'sun' : 'moon') + '</button></div>';
     return h + '</aside>';
@@ -443,15 +472,38 @@
       Object.keys(tenants).forEach(function (k) { h += '<button type="button" class="t-opt' + (k === S.tenant ? ' on' : '') + '" data-tenant="' + k + '"><b>' + (k === S.tenant ? '<i class="dot"></i>' : '') + k + '</b><span>' + tenants[k].path + '</span></button>'; });
       h += '</div>';
     }
-    if (S.hb) {
-      var cur = S.projectSession || sessionsOf()[S.session];
-      h += '<div class="hb-pop" role="dialog" aria-label="心跳" style="left:' + x + 'px;bottom:' + (S.rc ? 12 : 50) + 'px"><h4>' + ic('activity') + '心跳</h4><p>作用于当前会话：<b>' + cur + '</b></p>' +
-        '<p>会话空闲到间隔时间后，把这句话作为一次普通提问发回本对话；正在执行时不会打断。</p>' +
-        '<div class="row"><select class="field" style="width:120px"><option>每 10 分钟</option><option selected>每 30 分钟</option><option>每 1 小时</option><option>每 4 小时</option><option>自定义…</option></select><span class="badge ok" style="margin-left:auto">已启用</span></div>' +
-        '<textarea class="field" rows="2">有新变化吗？没有就简单回一句。</textarea>' +
-        '<div class="row"><button type="button" class="btn pri sm">更新</button><button type="button" class="btn sm">暂停</button><button type="button" class="btn sm dgr">清除</button><button type="button" class="btn sm" data-act="hb" style="margin-left:auto">关闭</button></div></div>';
-    }
     return h;
+  }
+
+  function curTitle() { return S.projectSession || sessionsOf()[S.session]; }
+  function beatsOf() { return tenants[S.tenant].beats; }
+  function beatStatus(b) { return b.paused ? '已暂停' : '每 ' + b.min + ' 分钟'; }
+  function hbChip() {
+    var b = beatsOf()[curTitle()];
+    var h = '<span class="hb-anchor"><button type="button" class="chip-btn hb-chip' + (b && !b.paused ? ' on' : '') + '" data-act="hb" aria-haspopup="dialog" aria-expanded="' + S.hb + '">' + ic('activity') + '心跳' + (b ? '<span class="hb-meta">' + beatStatus(b) + '</span>' : '') + '</button>';
+    if (S.hb) h += hbPop(b);
+    return h + '</span>';
+  }
+  function hbPop(b) {
+    var sched = b ? (b.paused ? '已暂停，不会再发送' : beatStatus(b) + (b.next ? ' · 下次约 ' + b.next : '')) + (b.last ? ' · 上次 ' + b.last : '') : '';
+    var h = '<div class="hb-pop" role="dialog" aria-label="心跳"><div class="hb-h"><h4>心跳</h4>' + (b ? '<button type="button" class="sw" role="switch" aria-checked="' + !b.paused + '" aria-label="心跳运行中" data-act="hbsw"></button>' : '') + '</div>' +
+      '<p>对话空闲满设定的间隔后，自动把下面这句话作为一次普通提问发回本对话；正在执行时不会打断。</p>' +
+      (b ? '<div class="hb-sched">' + sched + '</div>' : '') +
+      '<label class="hb-l" for="hb-min">间隔</label><div class="row"><input id="hb-min" class="field" type="number" min="1" value="' + (b ? b.min : 10) + '" style="width:80px"><span class="hint">分钟</span></div>' +
+      '<label class="hb-l" for="hb-prompt">发送内容</label><textarea id="hb-prompt" class="field" rows="3" placeholder="要反复问的内容，例如：有新变化吗？没有就简单回一句。">' + (b ? b.prompt : '') + '</textarea>' +
+      '<div class="hb-act">' + (b ? '<button type="button" class="btn sm ghost-dgr" data-act="hbdel">删除</button>' : '<span></span>') +
+      '<button type="button" class="btn pri sm" id="hb-save" data-act="hbsave" disabled>' + (b ? '保存修改' : '启用心跳') + '</button></div>';
+    var others = Object.keys(beatsOf()).filter(function (k) { return k !== curTitle(); });
+    if (others.length) {
+      h += '<div class="hb-others"><div class="cap">其他对话的心跳 · ' + others.length + '</div>';
+      others.forEach(function (k) {
+        var o = beatsOf()[k];
+        h += '<div class="hb-other"><button type="button" class="go' + (o.paused ? ' off' : '') + '" data-hbopen="' + k + '" title="打开这个对话">' + ic('activity') + '<span>' + k + '</span></button><span class="st">' + beatStatus(o) + '</span>' +
+          '<button type="button" class="pp" data-hbpause="' + k + '" aria-label="' + (o.paused ? '恢复' : '暂停') + '" title="' + (o.paused ? '恢复' : '暂停') + '">' + ic(o.paused ? 'play' : 'pause') + '</button></div>';
+      });
+      h += '</div>';
+    }
+    return h + '</div>';
   }
 
   function drawer() {
@@ -460,7 +512,8 @@
       '<div class="d-search">' + ic('search') + '搜索会话</div><div class="d-cap">会话</div><ul class="d-list">';
     sessionsOf().forEach(function (s, i) {
       var on = S.page === 'chat' && !S.projectSession && S.session === i;
-      h += '<li><button type="button" class="' + (on ? 'on' : '') + '" data-session="' + i + '">' + s + (i === 0 && S.tenant === 'main' ? ic('activity', 'hb') : '') + '</button></li>';
+      var b = beatsOf()[s];
+      h += '<li><button type="button" class="' + (on ? 'on' : '') + (b ? ' has-hb' : '') + '" data-session="' + i + '">' + s + (b ? '<span class="hb' + (b.paused ? ' off' : '') + '" role="img" title="' + (b.paused ? '心跳已暂停' : '心跳：每 ' + b.min + ' 分钟') + '" aria-label="' + (b.paused ? '心跳已暂停' : '心跳：每 ' + b.min + ' 分钟') + '">' + ic('activity') + '</span>' : '') + '</button></li>';
     });
     return h + '</ul><div class="d-foot">项目里的会话在各自的项目空间中。</div></div></aside>';
   }
@@ -471,6 +524,7 @@
     if (S.page === 'chat' && S.projectSession) h += '<button type="button" class="scope project" data-go="project" style="border:0;cursor:pointer">' + ic('folder-git-2') + '项目 · forebrain-harness</button>';
     else if (S.page === 'chat') h += '<span class="meta">' + tenants[S.tenant].provider[1] + '</span>';
     h += '<span class="sp"></span>';
+    if (S.page === 'chat' && curTitle() !== '未命名对话') h += hbChip();
     if (S.page === 'chat') h += '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台<span class="badge-n">2</span></button>';
     return h + '<span class="chip-btn">' + ic('languages') + '中文</span></header>';
   }
@@ -945,6 +999,11 @@
   });
   document.getElementById('app').addEventListener('input', function (ev) {
     var el = ev.target;
+    if (el.id === 'hb-min' || el.id === 'hb-prompt') {
+      var b = beatsOf()[curTitle()], m = Number(document.getElementById('hb-min').value), pr = document.getElementById('hb-prompt').value.trim();
+      document.getElementById('hb-save').disabled = !(pr && m >= 1 && (!b || b.min !== m || b.prompt !== pr));
+      return;
+    }
     if (el.dataset.models !== undefined && el.value.indexOf(',') >= 0) {
       var idx = Number(el.dataset.models);
       el.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).forEach(function (m) { if (S.models[idx].indexOf(m) < 0) S.models[idx].push(m); });
@@ -955,7 +1014,7 @@
   document.getElementById('app').addEventListener('click', function (ev) {
     if (ev.target.matches('input[type="checkbox"], select, input, textarea, label.drop, label.drop *')) return;
     var t = ev.target.closest('button, [data-go]');
-    if (!t) { if (S.drawer || S.tmenu || S.presetMenu) { S.drawer = false; S.tmenu = false; S.presetMenu = false; render(); } return; }
+    if (!t) { if (ev.target.closest('.hb-pop')) return; if (S.drawer || S.tmenu || S.presetMenu || S.hb) { S.drawer = false; S.tmenu = false; S.presetMenu = false; S.hb = false; render(); } return; }
     var d = t.dataset;
     if (d.nav === 'chat') { closePops(); S.drawer = !S.drawer; }
     else if (d.nav) { closePops(); S.drawer = false; S.page = d.nav; }
@@ -978,6 +1037,15 @@
     else if (d.wstask !== undefined) { S.wsTask = Number(d.wstask); }
     else if (d.act === 'bench') { S.bench = !S.bench; }
     else if (d.act === 'hb') { var hb = !S.hb; closePops(); S.hb = hb; }
+    else if (d.act === 'hbsw') { var sb = beatsOf()[curTitle()]; sb.paused = !sb.paused; sb.next = sb.paused ? '' : '约 ' + sb.min + ' 分钟后'; }
+    else if (d.act === 'hbsave') {
+      var key = curTitle(), old = beatsOf()[key];
+      beatsOf()[key] = { min: Number(document.getElementById('hb-min').value), prompt: document.getElementById('hb-prompt').value.trim(), paused: old ? old.paused : false, last: old ? old.last : '' };
+      if (!beatsOf()[key].paused) beatsOf()[key].next = '约 ' + beatsOf()[key].min + ' 分钟后';
+    }
+    else if (d.act === 'hbdel') { delete beatsOf()[curTitle()]; }
+    else if (d.hbpause) { var ob = beatsOf()[d.hbpause]; ob.paused = !ob.paused; ob.next = ob.paused ? '' : '约 ' + ob.min + ' 分钟后'; }
+    else if (d.hbopen) { var si = sessionsOf().indexOf(d.hbopen); if (si >= 0) { S.session = si; S.projectSession = ''; } else { S.projectSession = d.hbopen; } S.ref = ''; }
     else if (d.act === 'preset') { var pm = !S.presetMenu; closePops(); S.presetMenu = pm; }
     else if (d.preset) { S.preset = d.preset; S.presetMenu = false; }
     else if (d.act === 'railtheme') { S.rail = S.rail === 'dark' ? 'light' : 'dark'; }
@@ -996,6 +1064,7 @@
     } else { return; }
     render();
   });
+  document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape' && S.hb) { S.hb = false; render(); } });
   render();
 })();
 </script>

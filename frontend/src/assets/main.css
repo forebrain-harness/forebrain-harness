@@ -312,7 +312,7 @@
   position: relative;
   border: 1px solid var(--rail-line);
   border-left: 2px solid var(--rail-btn-bg);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--rail-field-bg);
 }
 
@@ -367,7 +367,7 @@
   max-height: 300px;
   overflow-y: auto;
   border: 1px solid var(--rail-line);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--rail-pop-bg);
   box-shadow: var(--forebrain-shadow-pop);
   padding: 4px;
@@ -384,7 +384,7 @@
 .forebrain-tenant-option {
   display: block;
   width: 100%;
-  border-radius: 9px;
+  border-radius: 6px;
   padding: 7px 9px;
   text-align: left;
 }
@@ -579,7 +579,7 @@
   top: calc(100% + 6px);
   min-width: 132px;
   border: 1px solid var(--forebrain-divider);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--forebrain-surface);
   box-shadow: var(--forebrain-shadow-pop);
   padding: 4px;
@@ -591,7 +591,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  border-radius: 7px;
+  border-radius: 6px;
   padding: 6px 8px;
   font-size: 12px;
   color: var(--forebrain-text-2);
@@ -782,7 +782,7 @@ textarea.forebrain-field {
 .forebrain-rail-expand {
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: 6px;
 }
 .forebrain-rail-caret {
   width: 14px;
@@ -816,7 +816,7 @@ textarea.forebrain-field {
   justify-content: center;
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--rail-line);
   background: var(--rail-field-bg);
   color: var(--rail-fg);

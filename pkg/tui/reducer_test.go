@@ -2285,26 +2285,144 @@ func TestPlanReviewCardUsesTheDispatchVerbs(t *testing.T) {
 	}
 }
 
-// The plan review happens while the exit-plan approval still holds it: the user
-// asks for the review, the reviewer runs, and only then does the user approve
-// the exit. The three records are one exchange, so the card reads between the
-// two confirmation lines, above the parked exit-plan call they both refer to —
-// not appended after it, where it would read as a footnote to the approval.
-func TestPlanReviewCardLandsBetweenTheApprovalConfirmations(t *testing.T) {
+// The exit-plan gate's wait holds no card on any surface, and the reducer's
+// tool-message entry is the one place that rule is enforced: the main agent's
+// own step hook, the published-event funnel and replay all hand their tool
+// messages to it. The wait's settled answers — the exit itself, the denial,
+// the failure — are ordinary cards and must keep painting, and so must every
+// other tool's running frame.
+func TestReducerHoldsNoCardForTheExitGateWait(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		tool     string
+		status   string
+		wantCard bool
+	}{
+		{name: "running", tool: "exit_plan_mode", status: "running"},
+		{name: "awaiting approval", tool: "exit_plan_mode", status: "awaiting approval"},
+		{name: "canceled", tool: "exit_plan_mode", status: "canceled"},
+		{name: "completed", tool: "exit_plan_mode", status: "completed", wantCard: true},
+		{name: "denied", tool: "exit_plan_mode", status: "denied", wantCard: true},
+		{name: "failed", tool: "exit_plan_mode", status: "failed", wantCard: true},
+		{name: "other tools keep their running card", tool: "shell", status: "running", wantCard: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var r Reducer
+			got := r.Reduce(NewMessageMsg{Msg: Message{
+				Kind:     MsgKindTool,
+				StepID:   "call-exit",
+				ToolName: tc.tool,
+				ToolMeta: tool.ToolMeta{ToolName: tc.tool, Status: tc.status},
+			}}).Frames
+			cards := 0
+			for _, f := range got {
+				if f.Kind == FrameTool {
+					cards++
+				}
+			}
+			if tc.wantCard && cards != 1 {
+				t.Fatalf("a settled answer must paint exactly one card, got %d: %#v", cards, got)
+			}
+			if !tc.wantCard && cards != 0 {
+				t.Fatalf("the gate's wait must hold no card, got %d: %#v", cards, got)
+			}
+		})
+	}
+
+	// A held call still ends the response that issued it: the streamed text
+	// is sealed exactly as a drawn card would have sealed it, so the wait
+	// leaves one final assistant frame and nothing of its own.
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: "calling exit_plan_mode"}})
+	got := r.Reduce(NewMessageMsg{Msg: Message{
+		Kind:     MsgKindTool,
+		StepID:   "call-exit",
+		ToolName: "exit_plan_mode",
+		ToolMeta: tool.ToolMeta{ToolName: "exit_plan_mode", Status: "running"},
+	}}).Frames
+	if len(got) != 1 || got[0].Kind != FrameAssistant || got[0].Content != "calling exit_plan_mode" || !got[0].Final {
+		t.Fatalf("the held call must seal the streamed text as one final assistant frame, got %#v", got)
+	}
+}
+
+// Canceling the exit gate leaves only its confirmation line. The wait held no
+// card, so the abort's finalize has nothing to stamp canceled, and the line
+// keeps the order it was produced in: right after the response that asked.
+func TestCanceledExitGateLeavesOnlyItsConfirmationLine(t *testing.T) {
+	r := newComposerRenderer(t, 100, 40)
+	reducer := &Reducer{}
+	r.RenderFrame(Frame{
+		Kind: FrameTool, StepID: "call-enter", Title: "enter_plan_mode",
+		ToolMeta: tool.ToolMeta{ToolName: "enter_plan_mode", Status: "completed"}, Final: true,
+	})
+	for _, f := range reducer.Reduce(NewMessageMsg{Msg: Message{
+		Kind: MsgKindAssistant, Content: "calling exit_plan_mode",
+	}}).Frames {
+		r.RenderFrame(f)
+	}
+	for _, status := range []string{"running", "awaiting approval"} {
+		for _, f := range reducer.Reduce(NewMessageMsg{Msg: Message{
+			Kind: MsgKindTool, StepID: "call-exit", ToolName: "exit_plan_mode",
+			ToolMeta: tool.ToolMeta{ToolName: "exit_plan_mode", Status: status},
+		}}).Frames {
+			r.RenderFrame(f)
+		}
+	}
+	r.PrintApprovalConfirmation("", "✗ You canceled forebrain's request to exit plan mode", approvalConfirmationMaxLines, false)
+	for _, f := range reducer.Reduce(StreamResetMsg{}).Frames {
+		r.RenderFrame(f)
+	}
+	r.FinalizePendingTools()
+
+	if len(r.vm.blocks) != 3 {
+		t.Fatalf("the transcript must hold the enter card, the sealed text and the line, got %d blocks: %#v", len(r.vm.blocks), r.vm.blocks)
+	}
+	enter := r.vm.blocks[0].frame
+	if enter.Kind != FrameTool || enter.Title != "enter_plan_mode" {
+		t.Fatalf("first block must be the settled enter card, got %#v", enter)
+	}
+	assistant := r.vm.blocks[1].frame
+	if assistant.Kind != FrameAssistant || assistant.Content != "calling exit_plan_mode" || !assistant.Final {
+		t.Fatalf("second block must be the sealed response, got %#v", assistant)
+	}
+	line := r.vm.blocks[2].frame
+	if line.Kind != FrameStatus || !strings.Contains(line.Content, "You canceled") {
+		t.Fatalf("last block must be the cancellation line, got %#v", line)
+	}
+	for _, b := range r.vm.blocks {
+		if b.frame.ToolMeta.Status == "canceled" {
+			t.Fatalf("a block was stamped canceled: %#v", b.frame)
+		}
+	}
+}
+
+// The plan review happens while the exit-plan approval still holds it, and
+// that gate parks no card while it waits. The records of the exchange — the
+// ask, the review card, the answer — therefore keep the order they were
+// produced in: after the response that issued the call and the plan file it
+// wrote, before the settled exit card the answer allows.
+func TestPlanReviewKeepsProducerOrderAroundTheCardlessGate(t *testing.T) {
 	r := newComposerRenderer(t, 100, 40)
 	const asked = "✔ You asked zhipuai/glm-5.3-flash to review the plan"
 	const approved = "✔ You approved forebrain to exit plan mode"
 
 	reducer := &Reducer{}
+	r.RenderFrame(Frame{
+		Kind: FrameTool, StepID: "call-write", Title: "write_file",
+		ToolMeta: tool.ToolMeta{ToolName: "write_file", Status: "completed"}, Final: true,
+	})
 	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "the plan is written", Final: true})
-	r.RenderFrame(Frame{Kind: FrameTool, StepID: "call-exit", Title: "exit_plan_mode", Final: true})
-	r.RenderFrame(Frame{Kind: FrameStatus, Content: asked, InsertBeforeLastTool: true, Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: asked, Final: true})
 	for _, f := range reducer.Reduce(PlanReviewStartedMsg{
 		ReviewID: "rv-1", Provider: "zhipuai", Model: "glm-5.3-flash",
 	}).Frames {
 		r.RenderFrame(f)
 	}
-	r.RenderFrame(Frame{Kind: FrameStatus, Content: approved, InsertBeforeLastTool: true, Final: true})
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: approved, Final: true})
+	r.RenderFrame(Frame{
+		Kind: FrameTool, StepID: "call-exit", Title: "exit_plan_mode",
+		ToolMeta: tool.ToolMeta{ToolName: "exit_plan_mode", Status: "completed"}, Final: true,
+	})
 
 	got := make([]string, 0, len(r.vm.blocks))
 	for _, block := range r.vm.blocks {
@@ -2312,7 +2430,7 @@ func TestPlanReviewCardLandsBetweenTheApprovalConfirmations(t *testing.T) {
 		case FrameAssistant:
 			got = append(got, "assistant")
 		case FrameTool:
-			got = append(got, "exit plan mode")
+			got = append(got, block.frame.Title+" card")
 		case FrameFanout:
 			got = append(got, "card:"+block.frame.StepID)
 		case FrameStatus:
@@ -2321,7 +2439,7 @@ func TestPlanReviewCardLandsBetweenTheApprovalConfirmations(t *testing.T) {
 			got = append(got, string(block.frame.Kind))
 		}
 	}
-	want := []string{"assistant", "status:" + asked, "card:rv-1", "status:" + approved, "exit plan mode"}
+	want := []string{"write_file card", "assistant", "status:" + asked, "card:rv-1", "status:" + approved, "exit_plan_mode card"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("transcript order:\n%v\nwant:\n%v", got, want)
 	}

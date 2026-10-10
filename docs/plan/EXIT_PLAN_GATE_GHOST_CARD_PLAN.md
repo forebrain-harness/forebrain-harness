@@ -6,6 +6,11 @@
 > 基线:`d501e09`(工作区含大量与本修复无关的未提交改动,见 Scope"不碰"清单;
 > drift 检查用下方 file:line 对照,不依赖 SHA)。
 
+> **勘误（2026-10-10，见 `plans/007-exit-gate-live-card-and-cardless-anchoring.md`）**：主 agent 的工具步骤经
+> `runAuditStepHook → notifyToolStepHooks` 直接进 UI，不经 `publishRunEvent` 漏斗，所以本文"TUI live 已干净 /
+> 等待卡已删除"的结论不成立；gate 等待帧仍被画成 "Exited plan mode"、取消后被改成 "Canceled"。007 把过滤移到
+> reducer 入口，并让无卡 gate 的确认行与 review 卡按产生顺序落位（live 与回放一致）。
+
 > 评审记录:2026-10-09 deepseek/deepseek-v4-flash 评审结论 rework,5 项主张
 > 逐条核实**全部成立**并已吸收:
 > ① 被 cancel 的 exit gate 会经 `turn.AnswerAbandonedToolCalls` 写出**成交**

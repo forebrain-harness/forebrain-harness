@@ -17958,7 +17958,7 @@ func TestRendererViewportPrintApprovalConfirmationRetainsStatusBeforeTool(t *tes
 	out.Reset()
 
 	r.RenderFrame(Frame{Kind: FrameTool, Title: "shell", StepID: "call-1", Content: "done", Final: true})
-	r.PrintApprovalConfirmation("", "\x1b[32m✔\x1b[0m approved this time", approvalConfirmationMaxLines)
+	r.PrintApprovalConfirmation("", "\x1b[32m✔\x1b[0m approved this time", approvalConfirmationMaxLines, true)
 
 	if len(r.vm.blocks) != 2 {
 		t.Fatalf("expected approval and tool viewport blocks, got %d", len(r.vm.blocks))
@@ -18017,7 +18017,7 @@ func TestRendererViewportApprovalConfirmationLimitedToThreeLines(t *testing.T) {
 	t.Cleanup(r.DisableViewportMode)
 	out.Reset()
 
-	r.PrintApprovalConfirmation("", strings.Repeat("approval command ", 40), 3)
+	r.PrintApprovalConfirmation("", strings.Repeat("approval command ", 40), 3, true)
 
 	if len(r.vm.blocks) != 1 {
 		t.Fatalf("expected retained viewport block, got %d", len(r.vm.blocks))
@@ -22206,6 +22206,58 @@ func TestApprovalSink_SubagentConfirmationStaysInTheSubagentView(t *testing.T) {
 	}
 }
 
+// A gate whose call holds no card has no parked block for its confirmation to
+// sit above: the line keeps the order it was produced in, right after the
+// response that asked. A gated call that does park a card keeps the old rule
+// — its line still reads above that card.
+func TestApprovalSink_CardlessGateConfirmationKeepsProducerOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		actionKind string
+		toolName   string
+		wantTail   bool
+	}{
+		{name: "exit gate holds no card", actionKind: "exit_plan_mode", toolName: "exit_plan_mode", wantTail: true},
+		{name: "gated call keeps its card above", actionKind: "shell", toolName: "shell", wantTail: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			r := NewRenderer(&out, &out)
+			r.EnableViewportMode()
+			t.Cleanup(r.DisableViewportMode)
+			r.RenderFrame(Frame{
+				Kind: FrameTool, Title: "shell", StepID: "call-1",
+				ToolMeta: tool.ToolMeta{ToolName: "shell", Status: "awaiting approval"},
+			})
+			r.RenderFrame(Frame{Kind: FrameAssistant, Content: "here is the plan", Final: true})
+
+			req := turn.ToolApprovalRequest{ActionID: "act-exit", ActionKind: tc.actionKind, ToolName: tc.toolName}
+			decision := turn.ToolApprovalDecision{Cancelled: true}
+			NewInteractiveApprovalSinkWithTTY(&out, nil).WithRenderer(r).printApprovalConfirmation(req, decision)
+
+			confirmation := -1
+			lastTool := -1
+			for i, b := range r.vm.blocks {
+				switch {
+				case b.frame.Kind == FrameStatus && strings.Contains(b.frame.Content, "canceled"):
+					confirmation = i
+				case b.frame.Kind == FrameTool:
+					lastTool = i
+				}
+			}
+			if confirmation < 0 || lastTool < 0 {
+				t.Fatalf("replay lost a record: confirmation=%d tool=%d %#v", confirmation, lastTool, r.vm.blocks)
+			}
+			if tc.wantTail && confirmation != len(r.vm.blocks)-1 {
+				t.Fatalf("a cardless gate's line must be the transcript's last record, at %d of %d", confirmation, len(r.vm.blocks))
+			}
+			if !tc.wantTail && confirmation > lastTool {
+				t.Fatalf("a gated call's line must read above its card: confirmation=%d tool=%d", confirmation, lastTool)
+			}
+		})
+	}
+}
+
 // One approval-gated shell call leaves three blocks in the subagent's view, and
 // only three: the attempt the sandbox refused, the confirmation answering the
 // gate, and the result the approved replay returned. The gate's own card is not
@@ -23911,6 +23963,60 @@ func TestNotifyToolStepHooksUsesLocalNotificationHookWhenNoExternalHook(t *testi
 	turns, err := s.sessStore().ListRecentMessages(context.Background(), "sid", 8)
 	require.NoError(t, err)
 	require.Len(t, turns, 0)
+}
+
+// The main agent's own tool steps reach the UI straight from the step hook —
+// they never pass the published-event funnel — so the reducer's tool-message
+// entry is the only filter they meet. A gate parked on its approval must come
+// through that entry and still draw nothing: no running card, no awaiting
+// card, nothing for an abort to relabel.
+func TestMainAgentExitGateStepsDrawNoCard(t *testing.T) {
+	s, cleanup := newSurfaceTestSession(t)
+	defer cleanup()
+	msgCh := make(chan Message, 4)
+	s.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok {
+			msgCh <- m.Msg
+		}
+	})
+
+	s.notifyToolStepHooks(context.Background(), "sid", "run-1", "tui", tool.StepEvent{
+		Kind:     tool.StepKindToolStarted,
+		StepID:   "call-exit",
+		ToolName: "exit_plan_mode",
+	})
+	s.notifyToolStepHooks(context.Background(), "sid", "run-1", "tui", tool.StepEvent{
+		Kind:       tool.StepKindToolCompleted,
+		StepID:     "call-exit",
+		ToolName:   "exit_plan_mode",
+		ActionID:   "act-1",
+		ActionKind: "exit_plan_mode",
+		Output:     map[string]any{"requires_action": true},
+	})
+
+	var msgs []Message
+	require.Eventually(t, func() bool {
+		for {
+			select {
+			case got := <-msgCh:
+				msgs = append(msgs, got)
+			default:
+				return len(msgs) == 2
+			}
+		}
+	}, time.Second, 10*time.Millisecond)
+
+	var r Reducer
+	for _, m := range msgs {
+		if m.Kind != MsgKindTool || m.ToolName != "exit_plan_mode" {
+			t.Fatalf("unexpected step message: %#v", m)
+		}
+		for _, f := range r.Reduce(NewMessageMsg{Msg: m}).Frames {
+			if f.Kind == FrameTool {
+				t.Fatalf("the gate's wait drew a card from status %q: %#v", m.ToolMeta.Status, f)
+			}
+		}
+	}
 }
 
 func TestNotifyToolStepHooksForwardsShellOutputDelta(t *testing.T) {

@@ -1041,7 +1041,12 @@ func (s *ApprovalSink) printApprovalConfirmation(req turn.ToolApprovalRequest, d
 		// The request's AgentID decides which transcript it lands in: a
 		// subagent's confirmation belongs in that subagent's view, beside the
 		// call it authorises, not in the conversation.
-		s.renderer.PrintApprovalConfirmation(req.AgentID, symbol+" "+msg, approvalConfirmationMaxLines)
+		// A gate whose call holds no card has no parked block to sit above:
+		// its line keeps producer order, right after the response that asked.
+		// Both identities are checked because the line's own wording keys off
+		// the tool name while a replayed record only carries the action kind.
+		cardless := approvalGateHoldsNoCard(req.ActionKind) || approvalGateHoldsNoCard(approvalToolName(req))
+		s.renderer.PrintApprovalConfirmation(req.AgentID, symbol+" "+msg, approvalConfirmationMaxLines, !cardless)
 		return
 	}
 	// The renderer-less path (tests, non-composer surfaces) writes straight to
