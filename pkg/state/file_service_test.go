@@ -356,3 +356,88 @@ func TestRemoveStoredDeletesTheS3Object(t *testing.T) {
 		t.Fatalf("deletions = %v, want exactly DELETE /uploads/ab/file-2.pdf", deletions)
 	}
 }
+
+// TestCreateInProjectAndOriginalPath pins where a project-saved upload lives:
+// the original is written into the project directory, the row records the
+// relative path with an empty storage_key, and OriginalPath turns it back into
+// an absolute path under the session's project root. A workspace-backed file
+// still resolves under the workspace, and a project file whose session has no
+// project resolves to nothing rather than a fabricated path.
+func TestCreateInProjectAndOriginalPath(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := NewSessionStore(db, "main").Ensure(ctx, "s-1", "s-1"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	projects := NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, CreateProjectInput{Name: "p", Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s-1", project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &FileStore{DB: db, Home: t.TempDir(), Cfg: LoadConfigFromEnv()}
+	if err := os.Mkdir(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := svc.CreateInProject(ctx, "s-1", root, "docs", "note.txt", strings.NewReader("hi"), 2, "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.ProjectPath != "docs/note.txt" || f.StorageKey != "" {
+		t.Fatalf("row = %q/%q, want docs/note.txt and an empty storage_key", f.ProjectPath, f.StorageKey)
+	}
+	p, ok := svc.OriginalPath(ctx, f)
+	if !ok || p != filepath.Join(root, "docs", "note.txt") {
+		t.Fatalf("OriginalPath = %q/%v, want the project file", p, ok)
+	}
+	if raw, err := os.ReadFile(p); err != nil || string(raw) != "hi" {
+		t.Fatalf("read %q: %v", raw, err)
+	}
+	if r, ok := svc.ProjectRootForSession(ctx, "s-1"); !ok || r != root {
+		t.Fatalf("ProjectRootForSession = %q/%v, want %q", r, ok, root)
+	}
+
+	// A file with no project path still resolves under the workspace files dir.
+	ws, err := svc.CreateFromReader(ctx, "s-1", "w.txt", strings.NewReader("w"), 1, "text/plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := svc.OriginalPath(ctx, ws); !ok {
+		t.Fatal("a workspace-backed file must still resolve")
+	}
+}
+
+// TestCreateInProjectNamesEveryCollision pins the " (n)" suffix: two uploads of
+// the same name in one directory never overwrite each other.
+func TestCreateInProjectNamesEveryCollision(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := NewSessionStore(db, "main").Ensure(ctx, "s-1", "s-1"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	svc := &FileStore{DB: db, Home: t.TempDir(), Cfg: LoadConfigFromEnv()}
+
+	want := []string{"x.png", "x (1).png", "x (2).png"}
+	for i, name := range want {
+		f, err := svc.CreateInProject(ctx, "s-1", root, "", "x.png", strings.NewReader("d"), 1, "image/png")
+		if err != nil {
+			t.Fatalf("upload %d: %v", i, err)
+		}
+		if f.ProjectPath != name {
+			t.Fatalf("upload %d stored %q, want %q", i, f.ProjectPath, name)
+		}
+	}
+}

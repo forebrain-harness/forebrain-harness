@@ -46,6 +46,8 @@ export interface PickedFile {
   file: File
   filename: string
   mediaType: string
+  /** True when the file came from a paste, not a pick or a drop. */
+  fromClipboard?: boolean
 }
 
 export interface UploadedSubmission {

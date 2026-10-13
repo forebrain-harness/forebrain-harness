@@ -42,8 +42,11 @@ type Project struct {
 	MemoryScope    string
 	ResourceAccess bool
 	Pinned         bool
-	CreatedAt      int64
-	UpdatedAt      int64
+	// LastAttachDir is the directory, relative to Root, the "save to" dialog
+	// last uploaded into. Empty is the root itself.
+	LastAttachDir string
+	CreatedAt     int64
+	UpdatedAt     int64
 }
 
 // ErrProjectNotFound reports a missing or cross-tenant project id.
@@ -233,15 +236,15 @@ func (s *ProjectStore) AgentID() string {
 	return s.agentID
 }
 
-const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, created_at, updated_at`
+const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, last_attach_dir, created_at, updated_at`
 
-const projectColumnCount = 13
+const projectColumnCount = 14
 
 func scanProject(scanner interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var resourceAccess int
 	var pinned int
-	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.LastAttachDir, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return Project{}, err
 	}
 	p.ResourceAccess = resourceAccess != 0
@@ -297,8 +300,8 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 		UpdatedAt:      now,
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.CreatedAt, p.UpdatedAt)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.LastAttachDir, p.CreatedAt, p.UpdatedAt)
 	if err != nil {
 		if isUniqueConstraint(err) {
 			if existing, ok, getErr := s.GetByRoot(ctx, root); getErr == nil && ok {
@@ -363,9 +366,9 @@ func (s *ProjectStore) FindOrCreateByRoot(ctx context.Context, root string, defa
 		UpdatedAt:      now,
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(agent_id, root) DO NOTHING`,
-		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.CreatedAt, fresh.UpdatedAt); err != nil {
+		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.LastAttachDir, fresh.CreatedAt, fresh.UpdatedAt); err != nil {
 		return Project{}, false, err
 	}
 	stored, ok, err := s.GetByRoot(ctx, canonical)
@@ -474,6 +477,26 @@ func (s *ProjectStore) SetPinned(ctx context.Context, id string, pinned bool) er
 		return ErrProjectNotFound
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET pinned=?, updated_at=? WHERE id=? AND agent_id=?`, boolInt(pinned), time.Now().Unix(), strings.TrimSpace(id), s.agentID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
+// SetLastAttachDir records the directory the project's "save to" dialog last
+// uploaded into, relative to the root with '/' separators (empty is the root
+// itself). It deliberately does not touch updated_at: remembering where a file
+// was saved is a dialog convenience, not an edit that should reorder the
+// projects list. A missing project is refused with ErrProjectNotFound.
+func (s *ProjectStore) SetLastAttachDir(ctx context.Context, id, dir string) error {
+	if s == nil || s.db == nil {
+		return ErrProjectNotFound
+	}
+	normalized := strings.Trim(strings.ReplaceAll(strings.TrimSpace(dir), "\\", "/"), "/")
+	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET last_attach_dir=? WHERE id=? AND agent_id=?`, normalized, strings.TrimSpace(id), s.agentID)
 	if err != nil {
 		return err
 	}
