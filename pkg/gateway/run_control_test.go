@@ -1528,7 +1528,9 @@ func TestHeartbeatStandsDownWhenTheSessionIsParked(t *testing.T) {
 	g.occupySessionWithAnotherOwner(t, state.RunStatusWaitingAction)
 	err := g.server.startHeartbeatTurn(context.Background(), "session-ws", "anything new?")
 	require.ErrorIs(t, err, state.ErrSessionBusy)
-	require.ErrorIs(t, err, state.ErrSessionAwaitingApproval)
+	// Another process holds the parked run, so the heartbeat's store is told
+	// the approval is on the other surface.
+	require.ErrorIs(t, err, state.ErrSessionAwaitingApprovalElsewhere)
 	require.Empty(t, g.executor.requests)
 	rows, rerr := g.sessions.ListRecentMessages(context.Background(), "session-ws", 10)
 	require.NoError(t, rerr)

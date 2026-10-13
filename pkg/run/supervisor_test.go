@@ -46,10 +46,10 @@ func TestRunReturnsTheSessionBusyRefusalAsItIs(t *testing.T) {
 	if !errors.Is(err, state.ErrSessionBusy) {
 		t.Fatalf("error = %v, want the session-busy family", err)
 	}
-	if !errors.Is(err, state.ErrSessionRunning) {
-		t.Fatalf("error = %v, want the running member", err)
+	if !errors.Is(err, state.ErrSessionRunningElsewhere) {
+		t.Fatalf("error = %v, want the running-elsewhere member", err)
 	}
-	const sentence = "This conversation is already running a turn; send again when it finishes."
+	const sentence = "This conversation is running on another surface (the terminal or the web); send again when it finishes there."
 	if err.Error() != sentence {
 		t.Fatalf("error text = %q, want the store's own sentence %q", err.Error(), sentence)
 	}

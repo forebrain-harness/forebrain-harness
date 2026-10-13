@@ -312,15 +312,17 @@ func TestCreateRunRefusesASessionWithALiveRun(t *testing.T) {
 	if !errors.Is(err, ErrSessionBusy) {
 		t.Fatalf("second owner's run refused with %v, want the session-busy family", err)
 	}
-	if !errors.Is(err, ErrSessionRunning) {
-		t.Fatalf("refusal = %v, want ErrSessionRunning", err)
+	// b is a different process from the one driving the run, so the refusal
+	// names the other surface rather than the plain "already running".
+	if !errors.Is(err, ErrSessionRunningElsewhere) {
+		t.Fatalf("refusal = %v, want ErrSessionRunningElsewhere", err)
 	}
-	const want = "This conversation is already running a turn; send again when it finishes."
+	const want = "This conversation is running on another surface (the terminal or the web); send again when it finishes there."
 	if err.Error() != want {
 		t.Fatalf("refusal text = %q, want %q", err.Error(), want)
 	}
-	if code := SessionBusyCode(err); code != "session_running" {
-		t.Fatalf("SessionBusyCode = %q, want session_running", code)
+	if code := SessionBusyCode(err); code != "session_running_elsewhere" {
+		t.Fatalf("SessionBusyCode = %q, want session_running_elsewhere", code)
 	}
 	// Another session is untouched: the rule is per conversation.
 	if _, err := b.CreateRun(ctx, "s2", "fresh conversation"); err != nil {
@@ -352,12 +354,128 @@ func TestCreateRunRefusesASessionParkedOnApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = b.CreateRun(ctx, "s1", "while parked")
-	if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, ErrSessionAwaitingApproval) {
-		t.Fatalf("refusal = %v, want ErrSessionAwaitingApproval", err)
+	// b is a different process from the one that parked the run, so it is
+	// told the approval is on the other surface.
+	if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, ErrSessionAwaitingApprovalElsewhere) {
+		t.Fatalf("refusal = %v, want ErrSessionAwaitingApprovalElsewhere", err)
 	}
-	const want = "This conversation is waiting for an approval; answer it before sending another message."
+	const want = "This conversation is waiting for an approval on another surface (the terminal or the web); answer it there before sending another message."
 	if err.Error() != want {
 		t.Fatalf("refusal text = %q, want %q", err.Error(), want)
+	}
+	if code := SessionBusyCode(err); code != "session_awaiting_approval_elsewhere" {
+		t.Fatalf("SessionBusyCode = %q, want session_awaiting_approval_elsewhere", code)
+	}
+}
+
+// TestCreateRunNamesTheSurfaceHoldingTheSession pins who the refusal blames:
+// the run's own process hears the plain sentence, another live process is told
+// the conversation is on another surface, and a store with no owner — which
+// cannot tell two surfaces apart — keeps the old, unqualified sentence.
+func TestCreateRunNamesTheSurfaceHoldingTheSession(t *testing.T) {
+	ctx := context.Background()
+	const (
+		runningText          = "This conversation is already running a turn; send again when it finishes."
+		runningElsewhereText = "This conversation is running on another surface (the terminal or the web); send again when it finishes there."
+		parkedText           = "This conversation is waiting for an approval; answer it before sending another message."
+		parkedElsewhereText  = "This conversation is waiting for an approval on another surface (the terminal or the web); answer it there before sending another message."
+	)
+	for _, parked := range []bool{false, true} {
+		name := "a running run"
+		if parked {
+			name = "a run parked on an approval"
+		}
+		t.Run(name, func(t *testing.T) {
+			a, b, db := newTwoOwnerStores(t, "s1")
+			// Both processes are live, so the run's owner is a real surface.
+			for _, s := range []*RunStore{a, b} {
+				stop, err := s.HoldOwnerLease(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stop()
+			}
+			run, err := a.CreateRun(ctx, "s1", "occupied by a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parked {
+				mustWaitAction(t, db, "s1", "act-named")
+				if err := a.SetWaitingAction(ctx, run.ID, Wait{ActionID: "act-named", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			wantOwn, wantOther := ErrSessionRunning, ErrSessionRunningElsewhere
+			textOwn, textOther, codeOther := runningText, runningElsewhereText, "session_running_elsewhere"
+			if parked {
+				wantOwn, wantOther = ErrSessionAwaitingApproval, ErrSessionAwaitingApprovalElsewhere
+				textOwn, textOther, codeOther = parkedText, parkedElsewhereText, "session_awaiting_approval_elsewhere"
+			}
+
+			// The process driving the run hears the plain sentence.
+			_, err = a.CreateRun(ctx, "s1", "again")
+			if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, wantOwn) {
+				t.Fatalf("holder refused with %v, want %v", err, wantOwn)
+			}
+			if err.Error() != textOwn {
+				t.Fatalf("holder refusal text = %q, want %q", err.Error(), textOwn)
+			}
+			if code := SessionBusyCode(err); code != SessionBusyCode(wantOwn) {
+				t.Fatalf("holder code = %q, want %q", code, SessionBusyCode(wantOwn))
+			}
+
+			// Another live process is told the conversation is on another surface.
+			_, err = b.CreateRun(ctx, "s1", "from the other surface")
+			if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, wantOther) {
+				t.Fatalf("other process refused with %v, want %v", err, wantOther)
+			}
+			if err.Error() != textOther {
+				t.Fatalf("other refusal text = %q, want %q", err.Error(), textOther)
+			}
+			if code := SessionBusyCode(err); code != codeOther {
+				t.Fatalf("other code = %q, want %q", code, codeOther)
+			}
+
+			// A store with no owner cannot tell one surface from another, so it
+			// keeps the old, unqualified sentence.
+			ownerless := &RunStore{DB: db}
+			_, err = ownerless.CreateRun(ctx, "s1", "from a store without an owner")
+			if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, wantOwn) {
+				t.Fatalf("ownerless refusal = %v, want %v", err, wantOwn)
+			}
+			if err.Error() != textOwn {
+				t.Fatalf("ownerless refusal text = %q, want %q", err.Error(), textOwn)
+			}
+		})
+	}
+}
+
+// TestCreateRunDoesNotBlameASurfaceThatIsGone covers a parked run whose owner
+// stopped renewing its lease: a parked run blocks whatever its owner's lease
+// says, but a refusal must not send the reader to a surface that is no longer
+// there.
+func TestCreateRunDoesNotBlameASurfaceThatIsGone(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s1")
+	// a parks a run, then a's lease lapses: its heartbeat row is stale.
+	run, err := a.CreateRun(ctx, "s1", "parked by a process that went quiet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWaitAction(t, db, "s1", "act-stale")
+	if err := a.SetWaitingAction(ctx, run.ID, Wait{ActionID: "act-stale", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO fb_run_owners(owner, heartbeat_at_ms) VALUES(?, ?)`,
+		"owner-a", time.Now().UnixMilli()-RunOwnerLease.Milliseconds()-5000); err != nil {
+		t.Fatal(err)
+	}
+	_, err = b.CreateRun(ctx, "s1", "while parked by a gone process")
+	if !errors.Is(err, ErrSessionBusy) || !errors.Is(err, ErrSessionAwaitingApproval) {
+		t.Fatalf("refusal = %v, want the plain ErrSessionAwaitingApproval", err)
+	}
+	if errors.Is(err, ErrSessionAwaitingApprovalElsewhere) {
+		t.Fatalf("refusal blamed a surface that is gone: %v", err)
 	}
 	if code := SessionBusyCode(err); code != "session_awaiting_approval" {
 		t.Fatalf("SessionBusyCode = %q, want session_awaiting_approval", code)

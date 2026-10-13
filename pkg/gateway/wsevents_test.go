@@ -1402,8 +1402,10 @@ func TestHandleChatWSSessionBusyWithdrawsTheMessage(t *testing.T) {
 		}
 	}
 	require.Equal(t, "req-turn", withdrawn.RequestID)
-	require.Equal(t, "This conversation is already running a turn; send again when it finishes.", withdrawn.Error)
-	require.Equal(t, map[string]any{"code": "session_running"}, withdrawn.Data)
+	// The run the gateway refused beside belongs to another process, so the
+	// sentence names the other surface and the code says so.
+	require.Equal(t, "This conversation is running on another surface (the terminal or the web); send again when it finishes there.", withdrawn.Error)
+	require.Equal(t, map[string]any{"code": "session_running_elsewhere"}, withdrawn.Data)
 	rows, err := sessions.ListAllMessages(ctx, "session-ws", 0)
 	require.NoError(t, err)
 	require.Empty(t, rows, "no user row may be written for a turn that never started")
