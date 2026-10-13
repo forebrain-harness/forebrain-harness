@@ -3894,6 +3894,27 @@ func scrollShadow(painted []string, h, shift int) []string {
 	return moved
 }
 
+// glyphsCrossRowEdge reports whether a painted row holds a glyph that can draw
+// past its own row, onto the rows above and below it.
+//
+// Damage tracking assumes a row's pixels come from that row's bytes alone. Box
+// drawing and block elements break that: they are built to meet the glyphs in
+// the next cell, and fonts draw them to the full line box or beyond it. In
+// macOS Terminal.app with Fira Code, a │ reaches about a sixth of a row into the
+// row below and a ╰ into the row above, while the terminal redraws only the rows
+// it is sent. When such a row changes, the part of its old glyph lying over a
+// neighbour stays on screen until that neighbour is written as well, and a row
+// that never changes keeps it for good: the dot a scroll left under the
+// transcript, on the composer's spacer row, was the foot of a card's │.
+func glyphsCrossRowEdge(row string) bool {
+	for _, rn := range row {
+		if rn >= 0x2500 && rn <= 0x259f {
+			return true
+		}
+	}
+	return false
+}
+
 // dropPaintShadowLocked forgets what the painter believes is on the physical
 // screen, so the next paint addresses every row. It is called wherever
 // something other than the painter has changed the screen — entering or
@@ -4395,12 +4416,20 @@ func (r *Renderer) paintViewportLocked() {
 		// overlay row looks like the option arrow started on the wrong item.
 		b.WriteString("\x1b[?25l")
 	}
+	// overdrawn marks the rows whose bytes are right but whose pixels may still
+	// carry ink from a neighbour's glyph that is gone (see glyphsCrossRowEdge).
+	overdrawn := make([]bool, len(rows))
 	// A transcript that scrolled is the same content on different rows, and
 	// re-sending all of it is the other half of the flicker: a reply streaming
 	// in follow mode shifts every row up on every delta. Hand the shift to the
 	// terminal, which moves its own grid, and let the damage loop below fill in
 	// only the rows the scroll exposed.
 	if shift := verticalShift(r.vpPainted, rows, bodyHeight); shift != 0 {
+		// The terminal redraws the region it scrolled, but not the row under
+		// it, which keeps whatever the region's old bottom row drew over it.
+		if bodyHeight < len(rows) && glyphsCrossRowEdge(r.vpPainted[bodyHeight-1]) {
+			overdrawn[bodyHeight] = true
+		}
 		writeRegionScroll(&b, bodyHeight, shift)
 		r.vpPainted = scrollShadow(r.vpPainted, bodyHeight, shift)
 		r.vpCursor = r.vpCursor.scrolled(bodyHeight, shift)
@@ -4415,14 +4444,39 @@ func (r *Renderer) paintViewportLocked() {
 		b.WriteString("\x1b[2J")
 	}
 	// Address only the rows whose bytes differ from what is on screen. A row
-	// that did not change receives nothing: it is not erased, so it cannot be
-	// caught blank by the terminal's next present. Each row is addressed
-	// absolutely because a full-width line leaves many terminals in
-	// delayed-wrap state; CUP also resets the column before EL clears the exact
-	// row we are about to redraw.
+	// that did not change is not erased, so it cannot be caught blank by the
+	// terminal's next present; it receives nothing at all unless a changed
+	// neighbour's old glyphs drew over it. Each row is addressed absolutely
+	// because a full-width line leaves many terminals in delayed-wrap state;
+	// CUP also resets the column before EL clears the exact row we are about
+	// to redraw.
+	for i, content := range rows {
+		if i < len(r.vpPainted) && r.vpPainted[i] != content && glyphsCrossRowEdge(r.vpPainted[i]) {
+			if i > 0 {
+				overdrawn[i-1] = true
+			}
+			if i+1 < len(rows) {
+				overdrawn[i+1] = true
+			}
+		}
+	}
 	repainted := make([]bool, len(rows))
 	for i, content := range rows {
 		if i < len(r.vpPainted) && r.vpPainted[i] == content {
+			if !overdrawn[i] {
+				continue
+			}
+			// Writing the row over itself makes the terminal redraw it, which
+			// wipes the neighbour's leftover ink, and as nothing is erased the
+			// row is never caught blank. A row with no visible cell writes
+			// nothing a terminal would redraw for, so it is erased instead:
+			// it is blank either way.
+			fmt.Fprintf(&b, "\x1b[%d;1H", i+1)
+			if lipgloss.Width(content) == 0 {
+				b.WriteString("\x1b[K")
+			}
+			b.WriteString(content)
+			repainted[i] = true
 			continue
 		}
 		fmt.Fprintf(&b, "\x1b[%d;1H\x1b[2K", i+1)

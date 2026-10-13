@@ -345,7 +345,8 @@ type Renderer struct {
 	// the exact bytes the last paint put on 1-based screen row i+1, composed
 	// but not yet compared. paintViewportLocked composes every row of the new
 	// frame the same way and addresses ONLY the rows whose bytes differ, so a
-	// row that did not change is never erased and never rewritten.
+	// row that did not change is never erased, and is rewritten in place only
+	// when a changed neighbour's glyphs drew over it (glyphsCrossRowEdge).
 	//
 	// Without this the painter re-emitted "\x1b[<row>;1H\x1b[2K<content>" for
 	// every row of every frame. Repaints are frequent — one per streamed delta,

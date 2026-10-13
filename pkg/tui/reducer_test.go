@@ -3468,6 +3468,129 @@ func TestVerticalShiftPicksTheScrollThatSavesTheMostRows(t *testing.T) {
 	}
 }
 
+// rewrittenInPlace lists the 1-based screen rows a paint addressed and wrote
+// without erasing them first.
+func rewrittenInPlace(paint string) []int {
+	var rows []int
+	for _, m := range regexp.MustCompile(`\x1b\[(\d+);1H`).FindAllStringSubmatchIndex(paint, -1) {
+		if strings.HasPrefix(paint[m[1]:], "\x1b[2K") {
+			continue
+		}
+		n, _ := strconv.Atoi(paint[m[2]:m[3]])
+		rows = append(rows, n)
+	}
+	return rows
+}
+
+// paintedRowContaining returns the 0-based screen row whose text holds s.
+func paintedRowContaining(t *testing.T, rows []string, s string) int {
+	t.Helper()
+	for i, row := range rows {
+		if strings.Contains(stripANSI(row), s) {
+			return i
+		}
+	}
+	t.Fatalf("no painted row holds %q: %q", s, rows)
+	return -1
+}
+
+// A box-drawing glyph draws past its own row: in Terminal.app with Fira Code a
+// card's │ reaches into the row below it, and the terminal redraws only the
+// rows it is sent. Replacing such a row left the foot of the old │ on the
+// unchanged row under it — the dot reported under a scrolled subagent view.
+// The rows around a replaced box-drawing row are therefore written again, in
+// place and never erased; around a row of plain text nothing else is touched.
+func TestViewportRewritesTheRowsAReplacedBoxGlyphDrewOver(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	out := r.out.(*bytes.Buffer)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "", Cursor: &cursor})
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: "- alpha\n- bravo\n- charlie", Final: true})
+	paintFrame(t, r, out)
+
+	r.mu.Lock()
+	row := paintedRowContaining(t, r.vpPainted, "bravo")
+	above, below := r.vpPainted[row-1], r.vpPainted[row+1]
+	if !strings.Contains(above, "alpha") || !strings.Contains(below, "charlie") {
+		r.mu.Unlock()
+		t.Fatalf("rows around bravo are %q and %q", above, below)
+	}
+	// The screen last showed other plain text there.
+	r.vpPainted[row] = "an old line"
+	r.mu.Unlock()
+	paint := paintFrame(t, r, out)
+	if rows := erasedRows(paint); !slices.Equal(rows, []int{row + 1}) {
+		t.Fatalf("only the changed row %d may be repainted, repainted %v", row+1, rows)
+	}
+	if rows := rewrittenInPlace(paint); len(rows) != 0 {
+		t.Fatalf("replacing plain text must leave its neighbours alone, rewrote %v\npaint: %q", rows, paint)
+	}
+
+	// The screen last showed a card border there.
+	r.mu.Lock()
+	r.vpPainted[row] = "  │ an old card border"
+	r.mu.Unlock()
+	paint = paintFrame(t, r, out)
+	if rows := erasedRows(paint); !slices.Equal(rows, []int{row + 1}) {
+		t.Fatalf("only the changed row %d may be erased, erased %v", row+1, rows)
+	}
+	if rows := rewrittenInPlace(paint); !slices.Equal(rows, []int{row, row + 2}) {
+		t.Fatalf("the rows around the replaced border (%d and %d) must be written again, rewrote %v\npaint: %q",
+			row, row+2, rows, paint)
+	}
+	for i, content := range map[int]string{row: above, row + 2: below} {
+		if !strings.Contains(paint, fmt.Sprintf("\x1b[%d;1H%s", i, content)) {
+			t.Fatalf("row %d must be written over itself with its unchanged bytes %q\npaint: %q", i, content, paint)
+		}
+	}
+	if rows := append(erasedRows(paintFrame(t, r, out)), rewrittenInPlace(out.String())...); len(rows) != 0 {
+		t.Fatalf("the screen is settled, a repaint must touch nothing, touched %v", rows)
+	}
+}
+
+// A region scroll is redrawn by the terminal row by row inside the region, but
+// the row under it — the composer's blank spacer, whose bytes never change —
+// keeps whatever the region's old bottom row drew over it, so a card border
+// scrolled off the bottom left its foot there for good.
+func TestViewportScrollRewritesTheRowUnderTheRegionAfterABoxGlyph(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	out := r.out.(*bytes.Buffer)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "", Cursor: &cursor})
+	lines := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		lines = append(lines, fmt.Sprintf("- line %02d", i))
+	}
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: strings.Join(lines, "\n"), Final: false})
+	paintFrame(t, r, out)
+
+	out.Reset()
+	lines = append(lines, "- line 40 │")
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: strings.Join(lines, "\n"), Final: false})
+	if !strings.Contains(out.String(), "\x1b[1S") {
+		t.Fatalf("the streamed line must scroll the region, got %q", out.String())
+	}
+	if rows := rewrittenInPlace(out.String()); len(rows) != 0 {
+		t.Fatalf("plain text scrolled off the bottom must leave the composer alone, rewrote %v", rows)
+	}
+
+	// The bottom row now carries a │; the next line scrolls it up.
+	out.Reset()
+	lines = append(lines, "- line 41")
+	r.RenderFrame(Frame{Kind: FrameAssistant, Content: strings.Join(lines, "\n"), Final: false})
+	paint := out.String()
+	if !strings.Contains(paint, "\x1b[1S") {
+		t.Fatalf("the streamed line must scroll the region, got %q", paint)
+	}
+	r.mu.Lock()
+	under := r.vpBodyHeight + 1
+	r.mu.Unlock()
+	if rows := rewrittenInPlace(paint); !slices.Equal(rows, []int{under}) {
+		t.Fatalf("the row under the region (%d) must be written again after a │ left the bottom row, rewrote %v\npaint: %q",
+			under, rows, paint)
+	}
+}
+
 // TestViewportResizeRepaintsEveryRow guards the one thing damage tracking must
 // not get wrong: after the terminal reflows its own grid, nothing the painter
 // remembers about the screen still holds.
