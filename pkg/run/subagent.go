@@ -430,7 +430,10 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			Description: "Use when delegating one self-contained subtask and you want to block until it finishes: runs a bounded isolated agent and returns its final text output.",
 			Category:    "subagent",
 			ReadOnly:    true,
-			InputSchema: subagentSchemaRaw(reflect.TypeOf(SubagentInput{}), []string{"properties", "subagent_type"}),
+			// Each call runs its own isolated agent, so several calls of one
+			// answer start together — the model's parallel dispatch.
+			ConcurrencySafe: true,
+			InputSchema:     subagentSchemaRaw(reflect.TypeOf(SubagentInput{}), []string{"properties", "subagent_type"}),
 		})
 	}
 	return registerFanoutTool(a, fac)
@@ -439,6 +442,18 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 func subagentToolName(name string) bool {
 	switch strings.TrimSpace(name) {
 	case "subagent_run", "subagent_fanout", "subagent_send", "subagent_status", "subagent_wait", "subagent_continue", "subagent_close", "subagent_list":
+		return true
+	default:
+		return false
+	}
+}
+
+// subagentDispatchTool names the tools that block on subagents they dispatch
+// and answer those subagents' approval gates in place (runAcrossApprovals)
+// when the surface offers a hook for it, instead of stopping the turn.
+func subagentDispatchTool(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "subagent_run", "subagent_fanout":
 		return true
 	default:
 		return false
@@ -2631,11 +2646,12 @@ func registerFanoutTool(a *agent.Agent, fac Factory) error {
 	}
 	if fac.Tools != nil {
 		fac.Tools.RegisterToolMeta(event.ToolMeta{
-			Name:        "subagent_fanout",
-			Description: "Use when running several independent subtasks at once: dispatches them concurrently in isolated agents and aggregates results.",
-			Category:    "subagent",
-			ReadOnly:    true,
-			InputSchema: subagentSchemaRaw(reflect.TypeOf(FanoutInput{}), []string{"properties", "tasks", "items", "properties", "subagent_type"}),
+			Name:            "subagent_fanout",
+			Description:     "Use when running several independent subtasks at once: dispatches them concurrently in isolated agents and aggregates results.",
+			Category:        "subagent",
+			ReadOnly:        true,
+			ConcurrencySafe: true,
+			InputSchema:     subagentSchemaRaw(reflect.TypeOf(FanoutInput{}), []string{"properties", "tasks", "items", "properties", "subagent_type"}),
 		})
 	}
 	return registerSubagentLifecycleTools(a, fac)
@@ -3214,15 +3230,21 @@ func governSubagentOutput(fac Factory, toolName, callID, output string) tool.Gov
 // only carry one gate to the surface, and an approval left pending would sit on
 // the queue for a run that has already been cancelled.
 func cancelPendingAction(fac Factory, err error) {
+	fac.Owner.withdrawPendingAction(err, "the fanout that requested it was stopped at another approval")
+}
+
+// withdrawPendingAction cancels the approval request behind err, so a gate
+// nobody is going to answer does not sit on the queue.
+func (r *Runner) withdrawPendingAction(err error, reason string) {
 	var rae *tool.RequiresActionError
 	if !errors.As(err, &rae) || rae == nil {
 		return
 	}
 	actionID := strings.TrimSpace(rae.ActionID)
-	if fac.Owner == nil || fac.Owner.Actions == nil || actionID == "" {
+	if r == nil || r.Deps == nil || r.Actions == nil || actionID == "" {
 		return
 	}
-	_, _ = fac.Owner.Actions.Cancel(context.Background(), actionID, "the fanout that requested it was stopped at another approval")
+	_, _ = r.Actions.Cancel(context.Background(), actionID, reason)
 }
 
 func factoryToolsState(fac Factory) *tool.State {

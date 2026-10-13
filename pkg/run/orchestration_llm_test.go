@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -9135,5 +9136,303 @@ func TestEachReasoningBlockIsItsOwnRow(t *testing.T) {
 	})
 	if got := len(reasoningRowParts(t, store, sid)); got != 2 {
 		t.Fatalf("reasoning rows after the turn's own persist = %d, want still 2", got)
+	}
+}
+
+// batchScriptLLM answers its first call with one assistant message carrying
+// the given tool calls, and every later call with plain text.
+type batchScriptLLM struct {
+	mu    sync.Mutex
+	calls []llm.ToolCall
+	n     int
+}
+
+func (m *batchScriptLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.n++
+	if m.n == 1 {
+		msg := llm.AssistantMessage(nil, m.calls...)
+		return &llm.Result{Message: &msg}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+func dispatchCall(id, task string) llm.ToolCall {
+	return llm.ToolCall{ID: id, Type: llm.ToolTypeFunction, Function: llm.FunctionCall{
+		Name: "subagent_run", Arguments: fmt.Sprintf(`{"task":%q}`, task),
+	}}
+}
+
+type dispatchInput struct {
+	Task string `json:"task"`
+}
+
+// newApprovalState is a tool state with an approval path, the way every
+// product surface runs one; inPlace adds the hook through which the surface
+// answers a subagent's approvals without stopping the turn.
+func newApprovalState(t *testing.T, inPlace bool) *toolpkg.State {
+	t.Helper()
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "subagent_run", ReadOnly: true, ConcurrencySafe: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) { return "", false, nil })
+	if inPlace {
+		st.SetSubagentApprovalHook(func(ctx context.Context, _ *toolpkg.RequiresActionError) (context.Context, error) {
+			return ctx, nil
+		})
+	}
+	return st
+}
+
+func awaitStarted(t *testing.T, started <-chan string, want int, why string) {
+	t.Helper()
+	seen := map[string]bool{}
+	for len(seen) < want {
+		select {
+		case task := <-started:
+			seen[task] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s; started=%v", why, seen)
+		}
+	}
+}
+
+// The dispatches the model emits in one answer have to land in one
+// concurrency-safe plan, or each runs alone whatever the executor allows.
+func TestSubagentDispatchToolsShareOneConcurrentPlan(t *testing.T) {
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	st := toolpkg.NewState(t.TempDir())
+	if err := RegisterSubagentTool(a, Factory{
+		Home:  t.TempDir(),
+		Tools: st,
+		Owner: &Runner{Deps: &Deps{AppCfg: subagentsEnabledConfig()}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+	}); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	plans := st.PartitionToolCalls([]string{"subagent_run", "subagent_run", "subagent_fanout"})
+	if len(plans) != 1 || !plans[0].ConcurrencySafe {
+		t.Fatalf("plans=%+v want one concurrency-safe plan", plans)
+	}
+}
+
+func TestToolOrchestrationStartsSubagentDispatchesOfOneAnswerTogether(t *testing.T) {
+	st := newApprovalState(t, true)
+	var mu sync.Mutex
+	var events []toolpkg.StepEvent
+	st.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, evt)
+	})
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	dispatch, err := llm.NewTool("subagent_run", "dispatch", func(ctx context.Context, in *dispatchInput) (string, error) {
+		started <- in.Task
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return in.Task + "-out", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	inner := &batchScriptLLM{calls: []llm.ToolCall{dispatchCall("call-a", "a"), dispatchCall("call-b", "b")}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := wrapToolOrchestrationLLM(inner, st).Execute(context.Background(),
+			[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{dispatch})
+		done <- err
+	}()
+	awaitStarted(t, started, 2, "the second dispatch waited for the first to finish")
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("orchestrated execution did not finish")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var lifecycle int
+	for _, evt := range events {
+		switch evt.Kind {
+		case toolpkg.StepKindToolParallelStarted, toolpkg.StepKindToolParallelCompleted:
+			// Each dispatch draws its own card from its own events; a
+			// summary row would suppress them.
+			t.Fatalf("subagent dispatches were folded into a batch summary: %+v", evt)
+		case toolpkg.StepKindToolStarted, toolpkg.StepKindToolCompleted:
+			if evt.ToolName != "subagent_run" {
+				continue
+			}
+			lifecycle++
+			if evt.SuppressUI {
+				t.Fatalf("dispatch lifecycle event hidden from the surface: %+v", evt)
+			}
+		}
+	}
+	if lifecycle != 4 {
+		t.Fatalf("dispatch lifecycle events=%d want 4 (start and completion of each)", lifecycle)
+	}
+}
+
+// Without the in-place hook a subagent's approval stops the turn, and two
+// such gates must not be raised side by side.
+func TestToolOrchestrationKeepsDispatchesSerialWhenTheirApprovalsStopTheTurn(t *testing.T) {
+	st := newApprovalState(t, false)
+	var inFlight, peak atomic.Int32
+	dispatch, err := llm.NewTool("subagent_run", "dispatch", func(_ context.Context, in *dispatchInput) (string, error) {
+		n := inFlight.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		inFlight.Add(-1)
+		return in.Task + "-out", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	inner := &batchScriptLLM{calls: []llm.ToolCall{dispatchCall("call-a", "a"), dispatchCall("call-b", "b")}}
+	if _, err := wrapToolOrchestrationLLM(inner, st).Execute(context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{dispatch}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := peak.Load(); got != 1 {
+		t.Fatalf("dispatches in flight at once=%d want 1", got)
+	}
+}
+
+// The approval a resume carries reaches the gated call alone; the dispatches
+// queued behind it start together, as the model's own batch would have.
+func TestToolOrchestrationResumeStartsQueuedDispatchesTogether(t *testing.T) {
+	st := newApprovalState(t, true)
+	st.RegisterToolMeta(event.ToolMeta{Name: "approval_shell", Destructive: true})
+	shellRuns := 0
+	shell, err := llm.NewTool("approval_shell", "shell", func(ctx context.Context, _ *struct{}) (string, error) {
+		shellRuns++
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "act-1" {
+			return "shell-out", nil
+		}
+		return "", &toolpkg.RequiresActionError{ActionID: "act-1", ActionKind: "shell", ToolName: "approval_shell", ToolInput: map[string]any{}}
+	})
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var leaked atomic.Bool
+	dispatch, err := llm.NewTool("subagent_run", "dispatch", func(ctx context.Context, in *dispatchInput) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) != "" {
+			leaked.Store(true)
+		}
+		started <- in.Task
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return in.Task + "-out", nil
+	})
+	if err != nil {
+		t.Fatalf("dispatch tool: %v", err)
+	}
+	tools := []*llm.Tool{shell, dispatch}
+	inner := &batchScriptLLM{calls: []llm.ToolCall{
+		{ID: "call-shell", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "approval_shell", Arguments: `{}`}},
+		dispatchCall("call-a", "a"),
+		dispatchCall("call-b", "b"),
+	}}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+
+	_, err = wrapped.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("go"))}, tools)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae.ActionID != "act-1" {
+		t.Fatalf("expected the shell gate, got %T %v", err, err)
+	}
+	if len(started) != 0 {
+		t.Fatalf("a dispatch started before the gate ahead of it was answered")
+	}
+
+	resumeCtx := toolpkg.WithApprovedActionID(context.Background(), "act-1")
+	resumeCtx = toolpkg.WithToolApprovalResume(resumeCtx, &toolpkg.ToolApprovalResumeState{Session: rae.SessionSnapshot})
+	done := make(chan error, 1)
+	go func() {
+		_, err := wrapped.Execute(resumeCtx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, tools)
+		done <- err
+	}()
+	awaitStarted(t, started, 2, "the dispatches behind the approved call ran one after another")
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("resume: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("resume did not finish")
+	}
+	if shellRuns != 2 {
+		t.Fatalf("shell runs=%d want 2 (gated, then approved)", shellRuns)
+	}
+	if leaked.Load() {
+		t.Fatal("the approval granted to the shell call reached a dispatch")
+	}
+}
+
+// Two gates raised in one concurrent segment: the turn stops on the first in
+// call order — the call a resume replays first — whichever finished first,
+// and the other is withdrawn and asked again on the replay.
+func TestToolOrchestrationConcurrentGatesStopOnTheFirstAndWithdrawTheRest(t *testing.T) {
+	st := newApprovalState(t, true)
+	dispatch, err := llm.NewTool("subagent_run", "dispatch", func(ctx context.Context, in *dispatchInput) (string, error) {
+		id := "act-" + in.Task
+		if toolpkg.ApprovedActionIDFromContext(ctx) == id {
+			return in.Task + "-out", nil
+		}
+		if in.Task == "a" {
+			time.Sleep(30 * time.Millisecond)
+		}
+		return "", &toolpkg.RequiresActionError{ActionID: id, ActionKind: "shell", ToolName: "shell", ToolInput: map[string]any{}}
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+	inner := &batchScriptLLM{calls: []llm.ToolCall{dispatchCall("call-a", "a"), dispatchCall("call-b", "b")}}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+	var withdrawn []string
+	wrapped.(*toolOrchestrationLLM).withdrawGate = func(err error) {
+		var rae *toolpkg.RequiresActionError
+		if errors.As(err, &rae) {
+			withdrawn = append(withdrawn, rae.ActionID)
+		}
+	}
+	tools := []*llm.Tool{dispatch}
+
+	_, err = wrapped.Execute(context.Background(), []llm.Message{llm.UserMessage(llm.Text("go"))}, tools)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae.ActionID != "act-a" {
+		t.Fatalf("expected the first gate in call order, got %T %v", err, err)
+	}
+	if len(withdrawn) != 1 || withdrawn[0] != "act-b" {
+		t.Fatalf("withdrawn=%v want [act-b]", withdrawn)
+	}
+
+	resumeCtx := toolpkg.WithApprovedActionID(context.Background(), "act-a")
+	resumeCtx = toolpkg.WithToolApprovalResume(resumeCtx, &toolpkg.ToolApprovalResumeState{Session: rae.SessionSnapshot})
+	_, err = wrapped.Execute(resumeCtx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, tools)
+	var again *toolpkg.RequiresActionError
+	if !errors.As(err, &again) || again.ActionID != "act-b" {
+		t.Fatalf("expected the withdrawn gate to be asked again, got %T %v", err, err)
 	}
 }

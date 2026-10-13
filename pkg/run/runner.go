@@ -1320,10 +1320,16 @@ func (r *Runner) wrapExecutionLLM(inner llm.LLM, bootstrap bool) llm.LLM {
 	if r.SessionStore != nil {
 		transcript = r.SessionStore
 	}
-	return wrapToolOrchestrationLLMWithProgress(wrapped, r.tools, home, transcript, func(ctx context.Context) string {
+	orchestrated := wrapToolOrchestrationLLMWithProgress(wrapped, r.tools, home, transcript, func(ctx context.Context) string {
 		_, model := r.agentModelFor(ctx)
 		return model
 	})
+	if o, ok := orchestrated.(*toolOrchestrationLLM); ok {
+		o.withdrawGate = func(err error) {
+			r.withdrawPendingAction(err, "another call of the same batch stopped the turn at its own approval")
+		}
+	}
+	return orchestrated
 }
 
 func (r *Runner) SetUserTracer(t agent.Tracer) {
