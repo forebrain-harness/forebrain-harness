@@ -233,7 +233,9 @@ func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
 
 	// The turn-end notification: the session's occupancy, budgeted on the
 	// conversation's model, no configured compact limit.
-	got, ok := s.tokenBudgetMessage(ctx, "s-budget")
+	usage, ok := run.ContextOccupancy(ctx, s.sessStore(), "s-budget")
+	require.True(t, ok)
+	got, ok := s.tokenBudgetMessageFromUsage("s-budget", usage)
 	require.True(t, ok)
 	require.Equal(t, TokenBudgetUpdatedMsg{
 		Model:                "glm-5.3",
@@ -341,6 +343,40 @@ func TestMainAgentPlanUpdateCardGatesOnViewingSession(t *testing.T) {
 	if painted.Load() != 1 {
 		t.Fatalf("the viewed conversation's plan card must paint once, got %d", painted.Load())
 	}
+}
+
+// A main-agent tool step that changed a file records both rows the gateway
+// records for the same call: the tool event and its turn-diff companion, so a
+// reload (either surface) draws the diff card the terminal drew live.
+func TestMainAgentToolStepRecordsTheTurnDiffCompanion(t *testing.T) {
+	ctx := context.Background()
+	s, runner, runSvc, runID, restore := newAuditHookEnv(t)
+	defer restore()
+
+	hook := runner.Tools().StepHook()
+	require.NotNil(t, hook)
+	hook(tool.WithRunID(llm.WithAgentSessionID(ctx, "sess-B"), runID), tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		StepID:   "call-1",
+		ToolName: "write_file",
+		Output: map[string]any{
+			"status": "ok",
+			"turn_diff": map[string]any{
+				"path":         "plan.md",
+				"added":        3,
+				"deleted":      0,
+				"unified_diff": "--- a/plan.md\n+++ b/plan.md\n@@ -1 +1,2 @@\n-old\n+new\n+more\n",
+			},
+		},
+	})
+	waitForQueuedNotifications(t, s)
+
+	events, err := runSvc.ListRunEvents(ctx, runID, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 2, "the tool event and its turn-diff companion")
+	require.Equal(t, event.RunEventToolCompleted, events[0].Type)
+	require.Equal(t, event.DiffEventTurnUpdated, events[1].Type)
+	require.Equal(t, events[0].ID+"-diff", events[1].ID)
 }
 
 // A subagent's steps reach their view through the canonical event stream; the

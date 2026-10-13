@@ -12,6 +12,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 // ListRunEvents returns a run's own events in the wire shape, oldest first.
@@ -90,6 +91,35 @@ func LastPlanProgressOfRun(ctx context.Context, runs RunPlanEventLister, runID s
 		return event.PlanProgress{}
 	}
 	return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
+}
+
+// CanonicalEventsFromStep turns one user-visible tool step into the canonical
+// events every surface records for it: the step's own event, and — when the
+// step's output carries a turn diff — the diff companion event the surfaces
+// draw as a diff card. Keeping this next to the step normalizer is what lets
+// the terminal and the gateway file identical rows for the same call, so a
+// resumed conversation draws the same diff card whichever surface wrote it.
+//
+// The companion's id is the step event's id with a "-diff" suffix, so a step a
+// surface re-observes (a reconnect, a replayed boundary) writes neither row
+// twice under the log's idempotent identity. A step event with no id (an
+// unknown step) yields a companion with none, which the store then keys on its
+// own. A step the surfaces do not show produces no events at all.
+func CanonicalEventsFromStep(ctx context.Context, sessionID, runID, channel string, evt tool.StepEvent) []event.RunEvent {
+	canonical, ok := tool.RunEventFromStep(ctx, sessionID, runID, channel, evt)
+	if !ok {
+		return nil
+	}
+	events := []event.RunEvent{canonical}
+	diffPayload, ok := ExtractTurnDiffPayload(canonical.Payload)
+	if !ok {
+		return events
+	}
+	diffID := ""
+	if strings.TrimSpace(canonical.ID) != "" {
+		diffID = canonical.ID + "-diff"
+	}
+	return append(events, event.NewRunEvent(diffID, canonical.RunID, canonical.SessionID, event.DiffEventTurnUpdated, diffPayload, canonical.CreatedAt))
 }
 
 func ExtractTurnDiffPayload(payload any) (event.TurnDiffUpdatedPayload, bool) {

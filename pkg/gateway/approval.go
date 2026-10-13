@@ -109,7 +109,10 @@ func (s *Server) withDetachedGatewayApprovalHooks(ctx context.Context, sessionID
 		if stepSessionID == "" {
 			stepSessionID = sid
 		}
-		if canonical, ok := tool.RunEventFromStep(stepCtx, stepSessionID, stepRunID, "webchat", step); ok {
+		// The step's canonical events, and its turn-diff companion when the
+		// call changed a file: the same pair the request socket files, so a
+		// continuation past an approval leaves the same diff card behind.
+		for _, canonical := range turn.CanonicalEventsFromStep(stepCtx, stepSessionID, stepRunID, "webchat", step) {
 			if err := s.RunEvents().Publish(stepCtx, canonical); err != nil {
 				slog.Error("publish detached gateway tool step", "run_id", stepRunID, "session_id", stepSessionID, "event", step.Kind, "err", err)
 			}
