@@ -76,6 +76,25 @@ func TestPrepareTUIAgentBaseClosesWithdrawalWindowOnFirstOutput(t *testing.T) {
 	}
 }
 
+// A conversation's turn runs on its project's runner, whose tool state is not
+// the one the surface installs its hooks on. The approval hooks travel on the
+// run's context, or a subagent's approval stops the whole turn — which also
+// kept the subagents of one answer from starting together — and a sandboxed
+// command's network approval is refused.
+func TestPrepareTUIAgentBaseCarriesApprovalHooksOnTheRunContext(t *testing.T) {
+	s, cleanup := newSurfaceTestSession(t)
+	defer cleanup()
+	ctx, _, cleanupStream := s.prepareTUIAgentBase("sid", context.Background())
+	cleanupStream()
+	require.Nil(t, tool.SubagentApprovalHookFromContext(ctx, nil), "with no surface attached there is nobody to ask")
+
+	s.SetToolApprovalSink(&scriptedApprovalSink{})
+	ctx, _, cleanupStream = s.prepareTUIAgentBase("sid", context.Background())
+	defer cleanupStream()
+	require.NotNil(t, tool.SubagentApprovalHookFromContext(ctx, nil))
+	require.NotNil(t, tool.NetworkApprovalPromptHookFromContext(ctx, nil))
+}
+
 // A nested/internal call (compaction, an evaluator) runs under a muted sink. It
 // did not receive this submission and must not acknowledge it on its behalf.
 func TestMutedForegroundStreamCannotCloseTheWithdrawalWindow(t *testing.T) {

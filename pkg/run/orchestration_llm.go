@@ -31,6 +31,10 @@ type toolOrchestrationLLM struct {
 	transcript transcriptProgressStore
 	// transcriptModel names the model the run's rows record. nil reads as "".
 	transcriptModel func(context.Context) string
+	// withdrawGate cancels the pending action of an approval gate the turn
+	// does not stop on. nil leaves it pending (a bare wrapper with no action
+	// queue).
+	withdrawGate func(err error)
 }
 
 type stopAfterToolResultKey struct{}
@@ -737,27 +741,32 @@ func (w *toolOrchestrationLLM) replayPendingToolCalls(ctx context.Context, sessi
 		return beginErr
 	}
 	toolCtx := withForkRuntimeSnapshot(ctx, *session)
-	results := make([]orchestratedToolResult, 0, len(missing))
 	approvedActionID := strings.TrimSpace(tool.ApprovedActionIDFromContext(toolCtx))
 	toolCtx = tool.WithApprovedActionID(toolCtx, "")
-	for i, call := range missing {
-		callCtx := toolCtx
-		if approvedActionID != "" {
-			callCtx = tool.WithApprovedActionID(callCtx, approvedActionID)
-		}
-		result := w.executeOneToolCall(callCtx, i, call, toolMap, toolUISuppression{})
-		results = append(results, result)
+	// The approval belongs to the first pending call alone: every call ahead
+	// of the gate had finished when the turn stopped on it. The calls behind
+	// it never started, so they run as the batch they were — partitioned like
+	// any other — and the subagents dispatched behind an approved command
+	// still start together.
+	firstCtx := toolCtx
+	if approvedActionID != "" {
+		firstCtx = tool.WithApprovedActionID(toolCtx, approvedActionID)
+	}
+	results := []orchestratedToolResult{w.executeOneToolCall(firstCtx, 0, missing[0], toolMap, toolUISuppression{})}
+	if len(missing) > 1 && !isRequiresActionError(results[0].err) {
+		results = append(results, w.executeToolCalls(toolCtx, missing[1:], toolMap)...)
+	}
+	var gate error
+	for _, result := range results {
 		if isRequiresActionError(result.err) {
-			// A second gate inside a replay is the same suspension the first
-			// one was, and it is raised on the same action queue whether the
-			// run is the primary agent's or a child's. Rewriting a child's
-			// gate into a tool error here told the worker its request had been
-			// refused for lack of an approval path, which stopped being true
-			// once children began suspending through that queue — and it fires
-			// exactly where it does most damage, on the replay that a granted
-			// approval just started.
-			attachSessionSnapshotToRAE(result.err, appendToolResultsInAssistantOrder(*session, assistant, completed, results))
-			return result.err
+			if gate == nil {
+				gate = result.err
+			}
+			continue
+		}
+		// A call the batch stopped before reaching has no result to keep.
+		if strings.TrimSpace(result.call.ID) == "" {
+			continue
 		}
 		// Capture replayed tool results so the resume caller can persist them
 		// to the session store. Without this, the result lives only in this
@@ -772,9 +781,18 @@ func (w *toolOrchestrationLLM) replayPendingToolCalls(ctx context.Context, sessi
 				ToolDisplay: result.display,
 			})
 		}
-		if approvedActionID != "" {
-			approvedActionID = ""
-		}
+	}
+	if gate != nil {
+		// A second gate inside a replay is the same suspension the first
+		// one was, and it is raised on the same action queue whether the
+		// run is the primary agent's or a child's. Rewriting a child's
+		// gate into a tool error here told the worker its request had been
+		// refused for lack of an approval path, which stopped being true
+		// once children began suspending through that queue — and it fires
+		// exactly where it does most damage, on the replay that a granted
+		// approval just started.
+		attachSessionSnapshotToRAE(gate, appendToolResultsInAssistantOrder(*session, assistant, completed, results))
+		return gate
 	}
 	*session = appendToolResultsInAssistantOrder(*session, assistant, completed, results)
 	return nil
@@ -951,15 +969,21 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 	callIndex := 0
 	for _, plan := range plans {
 		batch := calls[callIndex : callIndex+len(plan.ToolNames)]
-		if plan.ConcurrencySafe && !w.requiresSequentialApproval(batch) {
-			groups := parallelToolCallSummaryGroups(batch, toolMap)
-			w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelStarted, nil)
-			w.executeConcurrentBatch(ctx, batch, callIndex, toolMap, results)
-			w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelCompleted, results[callIndex:callIndex+len(batch)])
-		} else {
-			for i, call := range batch {
-				results[callIndex+i] = w.executeOneToolCall(ctx, callIndex+i, call, toolMap, toolUISuppression{})
-				if isRequiresActionError(results[callIndex+i].err) {
+		for _, seg := range w.segmentToolCallPlan(ctx, plan, batch, callIndex) {
+			if seg.concurrent {
+				segResults := results[seg.offset : seg.offset+len(seg.calls)]
+				groups := parallelToolCallSummaryGroups(seg.calls, toolMap)
+				w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelStarted, nil)
+				w.executeConcurrentBatch(ctx, seg.calls, seg.offset, toolMap, results)
+				w.emitParallelBatchSummary(ctx, groups, tool.StepKindToolParallelCompleted, segResults)
+				if w.settleConcurrentGates(segResults) {
+					return results
+				}
+				continue
+			}
+			for i, call := range seg.calls {
+				results[seg.offset+i] = w.executeOneToolCall(ctx, seg.offset+i, call, toolMap, toolUISuppression{})
+				if isRequiresActionError(results[seg.offset+i].err) {
 					return results
 				}
 			}
@@ -969,11 +993,71 @@ func (w *toolOrchestrationLLM) executeToolCalls(
 	return results
 }
 
-func (w *toolOrchestrationLLM) requiresSequentialApproval(batch []llm.ToolCall) bool {
-	if w == nil || w.state == nil || len(batch) == 0 {
-		return false
+// toolCallSegment is a run of one plan's calls that execute together: a
+// concurrent segment starts every call at once, any other runs them one at a
+// time.
+type toolCallSegment struct {
+	calls      []llm.ToolCall
+	offset     int
+	concurrent bool
+}
+
+// segmentToolCallPlan splits one partition plan into the segments it executes
+// as.
+//
+// With an approval path, a call that can stop the turn on its own approval
+// gate runs alone: the run has one wait row, and a resume hands its approval
+// to the first call it replays, so two such gates raised side by side would
+// leave the run waiting on one action and spend the approval on another call.
+// A subagent dispatch does not stop the turn that way while the surface
+// answers its children's approvals in place, so consecutive dispatches still
+// start together — they are the calls that take minutes, and running them one
+// after another is what made the model's parallel dispatch serial.
+func (w *toolOrchestrationLLM) segmentToolCallPlan(ctx context.Context, plan tool.ToolCallPlan, calls []llm.ToolCall, offset int) []toolCallSegment {
+	if !plan.ConcurrencySafe {
+		return []toolCallSegment{{calls: calls, offset: offset}}
 	}
-	return w.state.ActionHook() != nil
+	if w.state.ActionHook() == nil {
+		return []toolCallSegment{{calls: calls, offset: offset, concurrent: true}}
+	}
+	inPlace := tool.SubagentApprovalHookFromContext(ctx, w.state) != nil
+	out := make([]toolCallSegment, 0, len(calls))
+	for i, call := range calls {
+		concurrent := inPlace && subagentDispatchTool(call.Function.Name)
+		if last := len(out) - 1; concurrent && last >= 0 && out[last].concurrent {
+			out[last].calls = append(out[last].calls, call)
+			continue
+		}
+		out = append(out, toolCallSegment{calls: []llm.ToolCall{call}, offset: offset + i, concurrent: concurrent})
+	}
+	// A dispatch with no other dispatch beside it has nothing to overlap
+	// with, and runs the way it always has.
+	for i := range out {
+		if len(out[i].calls) == 1 {
+			out[i].concurrent = false
+		}
+	}
+	return out
+}
+
+// settleConcurrentGates reports whether a concurrent segment raised an
+// approval gate. The first gate in call order is the one the turn stops on:
+// every call ahead of it finished, so it is the first call a resume replays
+// and the one its approval reaches. Any later gate is withdrawn, the way
+// subagent_fanout withdraws the gates of its other children; its call is
+// replayed after the approved one and asks again then.
+func (w *toolOrchestrationLLM) settleConcurrentGates(results []orchestratedToolResult) bool {
+	gated := false
+	for _, result := range results {
+		if !isRequiresActionError(result.err) {
+			continue
+		}
+		if gated && w.withdrawGate != nil {
+			w.withdrawGate(result.err)
+		}
+		gated = true
+	}
+	return gated
 }
 
 func (w *toolOrchestrationLLM) emitParallelBatchSummary(ctx context.Context, groups []parallelToolCallSummaryGroup, kind string, results []orchestratedToolResult) {
@@ -1051,7 +1135,10 @@ func parallelToolCallSummaryGroups(batch []llm.ToolCall, toolMap map[string]*llm
 	byName := make(map[string]*acc)
 	for index, call := range batch {
 		name := strings.TrimSpace(call.Function.Name)
-		if name == "" {
+		// A subagent call draws its own card — its agents, their progress,
+		// their results — from its own lifecycle events. Folding two of them
+		// into a summary row would suppress exactly those events.
+		if name == "" || subagentToolName(name) {
 			continue
 		}
 		g := byName[name]

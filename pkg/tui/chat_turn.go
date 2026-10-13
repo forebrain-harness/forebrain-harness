@@ -549,6 +549,17 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			agBase = tool.WithStepHook(agBase, audit)
 		}
 	}
+	// The approval hooks ride on the run's context too. A conversation's turn
+	// runs on its project's runner, whose tool state is not the one
+	// syncToolApprovalHooks installs on, so a hook left only on that state
+	// never reaches the turn: a sandboxed command's network approval became a
+	// refusal, and a subagent's approval stopped the whole turn instead of
+	// pausing that subagent — which also kept the subagents of one answer from
+	// starting together.
+	if s.toolApprovalSinkGet() != nil {
+		agBase = tool.WithNetworkApprovalPromptHook(agBase, s.promptInlineNetworkApproval)
+		agBase = tool.WithSubagentApprovalHook(agBase, s.resolveSubagentApproval)
+	}
 	cleanup = restoreAudit
 	return agBase, streamFlag, cleanup
 }
