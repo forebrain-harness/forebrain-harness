@@ -163,6 +163,50 @@ func TestDetachedResumePublishesARefusedCall(t *testing.T) {
 	require.Equal(t, "split milestones", payload.DisplayBody)
 }
 
+// The detached approval continuation files a step's turn-diff companion too,
+// not only the step itself: the file change a resumed tool made reaches the
+// conversation's log as the same pair the request socket writes, so a web
+// reload draws the diff card for a resumed turn.
+func TestDetachedApprovalResumeFilesTheTurnDiffCompanion(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	runs := &state.RunStore{DB: db}
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "conversation-1", "conversation-1"))
+	mustGatewaySession(t, db, "conversation-1")
+	runRecord, err := runs.CreateRun(ctx, "conversation-1", "resume")
+	require.NoError(t, err)
+	s := &Server{RunRT: runs}
+
+	runCtx := tool.WithConversationSessionID(tool.WithRunID(ctx, runRecord.ID), "conversation-1")
+	runCtx = s.withDetachedGatewayApprovalHooks(runCtx, "conversation-1", runRecord.ID)
+	stepHook := tool.StepHookFromContext(runCtx, nil)
+	require.NotNil(t, stepHook)
+	stepHook(runCtx, tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, StepID: "call-1", ToolName: "write_file",
+		Output: map[string]any{
+			"status": "ok",
+			"turn_diff": map[string]any{
+				"path":         "a.go",
+				"added":        1,
+				"deleted":      1,
+				"unified_diff": "--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n",
+			},
+		},
+	})
+
+	page, err := runs.ListSessionEvents(ctx, "conversation-1", 0, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 2, "the step event and its turn-diff companion")
+	require.Equal(t, event.RunEventToolCompleted, page.Events[0].Type)
+	require.Equal(t, event.DiffEventTurnUpdated, page.Events[1].Type)
+	var diff event.TurnDiffUpdatedPayload
+	require.NoError(t, json.Unmarshal(page.Events[1].Payload, &diff))
+	require.Len(t, diff.Files, 1)
+	require.Equal(t, "a.go", diff.Files[0].Path)
+}
+
 func TestHTTPApprovalRejectsWidenedExecPolicyAmendment(t *testing.T) {
 	s, actions := newApprovalHTTPServer(t)
 	action, err := actions.CreatePending(context.Background(), "session-1", "shell", map[string]any{

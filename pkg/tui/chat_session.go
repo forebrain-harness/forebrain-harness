@@ -180,6 +180,17 @@ type ChatSession struct {
 	tuiPartialCapture *run.PartialSessionCapture
 	tuiStreamAccum    *turn.StreamPartial
 
+	// tuiTurnRunID is the run id the engine assigned to the latest TUI turn.
+	// turnBeforeAgent records it before any tool or usage event for that run
+	// reaches the surface, and it is kept until the next turn replaces it. The
+	// canonical records this surface files itself — a per-response context
+	// budget, a delivered steer, a mode switch observed mid-turn — read it to
+	// name the run that produced them. It is not cleared at the turn boundary
+	// because the final delivered-steer drain runs after DispatchSurfaceTurn
+	// has returned and still belongs to the run that just ended.
+	tuiTurnRunMu sync.Mutex
+	tuiTurnRunID string
+
 	toolApprovalMu    sync.Mutex
 	toolApprovalSink  turn.ToolApprovalDecisionSink
 	networkApprovalMu sync.Mutex
@@ -1212,6 +1223,11 @@ func (s *ChatSession) ensureTUITurnInputRuntime(sessionID string) *run.TurnInput
 			SessionID: strings.TrimSpace(sessionID),
 			Channel:   channel,
 		})
+		// The preview the surface shows is what a reload must show too, so the
+		// queue files it here. The hook is a read of the queue's current
+		// pending/refused/follow-up lanes; the delivered list is left for the
+		// UI loop, which owns rendering those into the transcript.
+		s.persistPendingInput(sessionID, q)
 	})
 	return rt
 }
@@ -2047,6 +2063,9 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		if err := agentCtx.Err(); err != nil {
 			return err
 		}
+		// The surface files its own canonical records for this run — a
+		// per-response budget, a delivered steer — under this id.
+		s.noteTUIRunID(runID)
 		// The message was stored before the engine created the run it starts.
 		// It is that run's first row all the same: a run that ends before
 		// writing anything of its own closes after it on replay.

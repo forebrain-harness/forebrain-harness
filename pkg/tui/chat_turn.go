@@ -270,7 +270,7 @@ func (s *ChatSession) runAuditStepHook(sessionID string, prev func() tool.StepHo
 				if evt.PlanUpdate == nil {
 					break
 				}
-				if canonical, ok := tool.RunEventFromStep(stepCtx, sid, rid, "tui", evt); ok {
+				for _, canonical := range turn.CanonicalEventsFromStep(stepCtx, sid, rid, "tui", evt) {
 					s.persistRunEvent(stepCtx, canonical)
 				}
 				s.notifyUIForSession(sid, PlanUpdatedMsg{Payload: *evt.PlanUpdate})
@@ -283,17 +283,23 @@ func (s *ChatSession) runAuditStepHook(sessionID string, prev func() tool.StepHo
 				if strings.TrimSpace(evt.ToolName) == "" || !shouldNotifyToolStep(evt) || tool.ToolStepRendersAsPlan(evt) {
 					break
 				}
-				canonical, canonicalOK := tool.RunEventFromStep(stepCtx, sid, rid, "tui", evt)
+				// The step's canonical events, and its turn-diff companion when
+				// the call changed a file. Both are filed here from the one
+				// shared computation, so the conversation shows the same diff
+				// card on resume that the gateway files for its own sessions.
+				canonicals := turn.CanonicalEventsFromStep(stepCtx, sid, rid, "tui", evt)
 				// An explicit skill step has no transcript tool row — the model
 				// never issued a call — so it reaches the surfaces through the
 				// canonical event, which persists it and draws it; the hook's
 				// ordinary path would show the card live and lose it on resume.
-				if strings.EqualFold(strings.TrimSpace(evt.Category), "skill") && canonicalOK && s.runner().Events != nil {
-					_ = s.runner().Events.Publish(stepCtx, canonical)
+				if strings.EqualFold(strings.TrimSpace(evt.Category), "skill") && len(canonicals) > 0 && s.runner().Events != nil {
+					_ = s.runner().Events.Publish(stepCtx, canonicals[0])
 					return
 				}
-				if canonicalOK && !event.IsPushOnlyStreamEvent(canonical.Type) {
-					s.persistRunEvent(stepCtx, canonical)
+				for _, canonical := range canonicals {
+					if !event.IsPushOnlyStreamEvent(canonical.Type) {
+						s.persistRunEvent(stepCtx, canonical)
+					}
 				}
 				// The terminal drew this refusal when the user answered it
 				// (notifyToolApprovalDenied), in words only it knows - a nested
@@ -524,8 +530,11 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			// callback is an absolute snapshot: usage deltas are unsuitable
 			// here because Anthropic emits input at message_start and the
 			// remaining output at message_delta.
-			if msg, ok := s.tokenBudgetMessageFromUsage(sessionID, inputTokens+outputTokens); ok {
-				s.notifyUIForSession(sessionID, msg)
+			if payload, ok := s.tokenBudgetPayloadFromUsage(sessionID, inputTokens+outputTokens); ok {
+				// The same numbers the footer shows are filed for a reload, one
+				// record per response, exactly as the gateway files its own.
+				s.persistTokenBudget(sessionID, s.currentTUIRunID(), payload)
+				s.notifyUIForSession(sessionID, tokenBudgetMsgFromPayload(payload))
 			}
 		},
 	})
@@ -566,7 +575,7 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 	if strings.TrimSpace(runID) != "" {
 		s.persistRunEvent(context.Background(), s.turnCompletedEvent(sessionID, runID, completion.Duration))
 	}
-	s.notifyTokenBudget(context.Background(), sessionID)
+	s.notifyTokenBudget(context.Background(), sessionID, runID)
 	hideFromForeground := false
 	elapsed := completion.Duration
 	if s.chatLog != nil {
@@ -908,6 +917,9 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// before any tool/usage event for the run reaches the reducer, so
 		// per-run counters key off the real run ID instead of "".
 		//
+		// A continuation past an approval reuses the gated run's id, so the
+		// surface's own records for this turn keep naming that one run.
+		s.noteTUIRunID(runID)
 		// The run's start, in the log both surfaces read: the gateway records
 		// its own turns the same way. The fixed id keeps a continuation past an
 		// approval — the same run — from recording a second start.
@@ -1259,23 +1271,126 @@ func (s *ChatSession) maybeAutoCompactBeforeAppend(ctx context.Context, sessionI
 	return nil
 }
 
-func (s *ChatSession) notifyTokenBudget(ctx context.Context, sessionID string) {
+// noteTUIRunID records the run id the engine assigned to the turn in flight.
+// It is called from turnBeforeAgent, before any tool or usage event for that
+// run can reach the surface, so every canonical record this surface files for
+// the turn can name it.
+func (s *ChatSession) noteTUIRunID(runID string) {
 	if s == nil {
 		return
 	}
-	msg, ok := s.tokenBudgetMessage(ctx, sessionID)
+	s.tuiTurnRunMu.Lock()
+	s.tuiTurnRunID = strings.TrimSpace(runID)
+	s.tuiTurnRunMu.Unlock()
+}
+
+// currentTUIRunID is the run the surface is currently filing events under: the
+// latest turn's run id, or "" before any turn ran.
+func (s *ChatSession) currentTUIRunID() string {
+	if s == nil {
+		return ""
+	}
+	s.tuiTurnRunMu.Lock()
+	defer s.tuiTurnRunMu.Unlock()
+	return s.tuiTurnRunID
+}
+
+// persistPendingInput files the conversation queue's current preview in the
+// event log. The terminal already draws the preview from its own message; this
+// row is what a reload reads, so both surfaces show the same pending, refused
+// and queued messages.
+func (s *ChatSession) persistPendingInput(sessionID string, q *run.InputQueue) {
+	if s == nil || q == nil {
+		return
+	}
+	preview := q.Preview()
+	s.persistRunEvent(context.Background(), event.NewRunEvent("", s.currentTUIRunID(), strings.TrimSpace(sessionID),
+		event.RunEventPendingInputUpdated, event.PendingInputUpdatedPayload{
+			PendingSteers:  preview.Steers,
+			RejectedSteers: preview.Rejected,
+			QueuedMessages: preview.FollowUp,
+		}, time.Now()))
+}
+
+// recordDeliveredSteers files every steer the run handed its model into the
+// event log as an input_delivered event. The UI loop drains the queue's
+// delivered list to render those messages into the transcript; this records
+// what it drained, so a reload draws the steer where the model received it.
+func (s *ChatSession) recordDeliveredSteers(sessionID string, delivered []ComposerSubmission) {
+	if s == nil || len(delivered) == 0 {
+		return
+	}
+	runID := s.currentTUIRunID()
+	for _, submission := range delivered {
+		s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, strings.TrimSpace(sessionID),
+			event.RunEventInputDelivered, deliveredSteerPayload(submission), time.Now()))
+	}
+}
+
+// deliveredSteerPayload is a delivered steer as its sender wrote it, with what
+// they attached — the same shape the gateway files, so a reload reads the
+// message and its attachments identically whichever surface delivered it.
+func deliveredSteerPayload(submission ComposerSubmission) event.InputDeliveredPayload {
+	payload := event.InputDeliveredPayload{Text: composerSubmissionPreview(submission)}
+	for _, attachment := range submission.Attachments {
+		label := strings.TrimSpace(attachment.Label)
+		if label == "" {
+			label = strings.TrimSpace(attachment.Path)
+		}
+		if label != "" {
+			payload.Attachments = append(payload.Attachments, label)
+		}
+		if path := strings.TrimSpace(attachment.Path); path != "" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(attachment.MIMEType)), "image/") {
+			payload.MentionImages = append(payload.MentionImages, path)
+		}
+	}
+	return payload
+}
+
+// recordModeChanged files a mode switch in the event log, the way the gateway
+// records its own. The switch carries no run: the mode the conversation is in
+// is a fact of the conversation, and a switch made from the keyboard happens
+// with no run in flight at all.
+func (s *ChatSession) recordModeChanged(sessionID, mode, phase string) {
+	if s == nil || strings.TrimSpace(mode) == "" {
+		return
+	}
+	s.persistRunEvent(context.Background(), event.NewRunEvent("", "", strings.TrimSpace(sessionID),
+		event.RunEventModeChanged, event.ModeChangedPayload{Mode: strings.TrimSpace(mode), Phase: strings.TrimSpace(phase)}, time.Now()))
+}
+
+func (s *ChatSession) notifyTokenBudget(ctx context.Context, sessionID, runID string) {
+	if s == nil {
+		return
+	}
+	usage, ok := run.ContextOccupancy(ctx, s.sessStore(), sessionID)
 	if !ok {
 		return
 	}
-	s.notifyUI(msg)
+	payload, ok := s.tokenBudgetPayloadFromUsage(sessionID, usage)
+	if !ok {
+		return
+	}
+	s.persistTokenBudget(sessionID, runID, payload)
+	s.notifyUI(tokenBudgetMsgFromPayload(payload))
 }
 
-func (s *ChatSession) tokenBudgetMessage(ctx context.Context, sessionID string) (TokenBudgetUpdatedMsg, bool) {
-	usage, ok := run.ContextOccupancy(ctx, s.sessStore(), sessionID)
-	if !ok {
-		return TokenBudgetUpdatedMsg{}, false
+// persistTokenBudget files the conversation's context budget in the event log.
+// The terminal draws the same numbers from its own message; this row is what a
+// reload reads, so the budget the footer shows survives a restart.
+func (s *ChatSession) persistTokenBudget(sessionID, runID string, payload event.TokenBudgetUpdatedPayload) {
+	s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, strings.TrimSpace(sessionID),
+		event.CompactEventBudgetUpdated, payload, time.Now()))
+}
+
+// tokenBudgetPayloadFromUsage is the engine's one budget computation for a raw
+// context-occupancy token count of sessionID's conversation: the payload both
+// the footer message and the durable budget event are built from.
+func (s *ChatSession) tokenBudgetPayloadFromUsage(sessionID string, usage int) (event.TokenBudgetUpdatedPayload, bool) {
+	if s == nil || usage <= 0 {
+		return event.TokenBudgetUpdatedPayload{}, false
 	}
-	return s.tokenBudgetMessageFromUsage(sessionID, usage)
+	return run.ContextBudget(s.runner(), sessionID, nil, usage)
 }
 
 // tokenBudgetMessageFromUsage builds the composer-footer budget message from a
@@ -1285,10 +1400,7 @@ func (s *ChatSession) tokenBudgetMessage(ctx context.Context, sessionID string) 
 // usage to the session state. The computation itself is the engine's one copy,
 // which sizes it by the model the conversation's session runs on.
 func (s *ChatSession) tokenBudgetMessageFromUsage(sessionID string, usage int) (TokenBudgetUpdatedMsg, bool) {
-	if s == nil || usage <= 0 {
-		return TokenBudgetUpdatedMsg{}, false
-	}
-	payload, ok := run.ContextBudget(s.runner(), sessionID, nil, usage)
+	payload, ok := s.tokenBudgetPayloadFromUsage(sessionID, usage)
 	if !ok {
 		return TokenBudgetUpdatedMsg{}, false
 	}

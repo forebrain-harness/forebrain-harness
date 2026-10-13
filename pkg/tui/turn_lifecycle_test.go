@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
 )
@@ -92,6 +93,91 @@ func TestTurnLifecycleIsRecordedLikeTheGateway(t *testing.T) {
 	require.Empty(t, payload.Text, "the answer text belongs to the transcript, not the lifecycle event")
 	require.NotContains(t, string(completed[0].Payload), `"text"`,
 		"a turn with no answer text must not serialise an empty text field")
+}
+
+// TestCancelledAndFailedTurnsCarryPlanFacts pins that the two ways a run can
+// end without completing still name the checklist: the cancelled record the
+// surface publishes and the error record it persists both carry the same facts
+// the completed turn does.
+// TestTUIStateEventsAreRecordedLikeTheGateway pins the other main-agent facts
+// the terminal now files alongside its cards: the context budget, the queue
+// preview, a delivered steer and a mode switch. None of them draws anything
+// itself — the terminal still paints from its own messages — but each is what
+// a reload reads, so the conversation reads the same on either surface.
+func TestTUIStateEventsAreRecordedLikeTheGateway(t *testing.T) {
+	_, s, runSvc, runID := turnLifecycleRig(t)
+	s.noteTUIRunID(runID)
+	require.Equal(t, runID, s.currentTUIRunID())
+
+	// A per-response context budget, filed under the run that produced it.
+	s.persistTokenBudget("sid", s.currentTUIRunID(), event.TokenBudgetUpdatedPayload{
+		Model: "glm-5.3", TokenUsage: 152500, PercentLeft: 83,
+	})
+
+	// A steer the model has received, filed where the model got it.
+	s.recordDeliveredSteers("sid", []ComposerSubmission{{DisplayText: "also run lint"}})
+
+	events := turnLifecycleEvents(t, runSvc, "sid")
+
+	budgets := turnLifecycleEventsOfType(events, event.CompactEventBudgetUpdated)
+	require.Len(t, budgets, 1)
+	require.Equal(t, runID, budgets[0].RunID)
+	var budget event.TokenBudgetUpdatedPayload
+	require.NoError(t, json.Unmarshal(budgets[0].Payload, &budget))
+	require.Equal(t, 83, budget.PercentLeft)
+	require.Equal(t, 152500, budget.TokenUsage)
+
+	delivered := turnLifecycleEventsOfType(events, event.RunEventInputDelivered)
+	require.Len(t, delivered, 1)
+	require.Equal(t, runID, delivered[0].RunID)
+	var input event.InputDeliveredPayload
+	require.NoError(t, json.Unmarshal(delivered[0].Payload, &input))
+	require.Equal(t, "also run lint", input.Text)
+}
+
+// TestTUIQueuePreviewIsRecordedLikeTheGateway files the conversation queue's
+// preview through the same change hook the surface uses: a follow-up queued
+// while a turn runs reaches the log as pending_input_updated, so a reload
+// shows the same waiting message the footer already does.
+func TestTUIQueuePreviewIsRecordedLikeTheGateway(t *testing.T) {
+	_, s, runSvc, runID := turnLifecycleRig(t)
+	s.noteTUIRunID(runID)
+	// Installing the turn's input runtime is what arms the queue's change hook.
+	require.NotNil(t, s.ensureTUITurnInputRuntime("sid"))
+	q := s.SurfaceInputQueue("sid")
+	require.NotNil(t, q)
+	require.True(t, q.FollowUp(run.Input{Text: "queued next"}))
+
+	events := turnLifecycleEvents(t, runSvc, "sid")
+	previews := turnLifecycleEventsOfType(events, event.RunEventPendingInputUpdated)
+	require.NotEmpty(t, previews)
+	var preview event.PendingInputUpdatedPayload
+	require.NoError(t, json.Unmarshal(previews[len(previews)-1].Payload, &preview))
+	require.Equal(t, []string{"queued next"}, preview.QueuedMessages)
+}
+
+// TestTUIModeSwitchIsRecordedLikeTheGateway files a mode switch the way the
+// gateway does, and only for a switch: the first look at a conversation adopts
+// its mode silently, and the record carries no run because a keyboard switch
+// happens with none in flight.
+func TestTUIModeSwitchIsRecordedLikeTheGateway(t *testing.T) {
+	_, s, runSvc, _ := turnLifecycleRig(t)
+	view := &streamState{sessionID: "sid", session: s}
+
+	// First look: adopt agent mode without filing anything.
+	view.recordModeChange(state.State{Mode: state.ModeAgent})
+	// The switch to plan mode is filed; a second look at the same mode is not.
+	view.recordModeChange(state.State{Mode: state.ModePlan, Phase: "plan"})
+	view.recordModeChange(state.State{Mode: state.ModePlan, Phase: "plan"})
+
+	events := turnLifecycleEvents(t, runSvc, "sid")
+	modes := turnLifecycleEventsOfType(events, event.RunEventModeChanged)
+	require.Len(t, modes, 1, "only the actual switch is recorded")
+	require.Empty(t, modes[0].RunID, "a keyboard switch belongs to no run")
+	var mode event.ModeChangedPayload
+	require.NoError(t, json.Unmarshal(modes[0].Payload, &mode))
+	require.Equal(t, "plan", mode.Mode)
+	require.Equal(t, "plan", mode.Phase)
 }
 
 // TestCancelledAndFailedTurnsCarryPlanFacts pins that the two ways a run can

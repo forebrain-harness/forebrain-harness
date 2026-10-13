@@ -384,7 +384,7 @@ func Run(ctx context.Context, opts Options) error {
 					// preview into the transcript: take them off the queue's
 					// delivered list and render them as user-history messages
 					// so they don't silently disappear.
-					renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
+					renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
 					renderComposerWithState(renderer, &state)
 				}
 			}
@@ -1646,6 +1646,13 @@ type streamState struct {
 	// permissions, skills, model) so queued input is not drained into a turn
 	// before the user's selection has been applied.
 	suppressQueueAutosend bool
+	// recordedModeSession and recordedMode are the last mode the surface filed
+	// for the conversation it was showing. A mode_changed record is written
+	// only when that same conversation's mode actually moves; the first look at
+	// a conversation (startup, or a switch to another session) adopts its mode
+	// silently rather than filing a switch nothing made.
+	recordedModeSession string
+	recordedMode        statepkg.Mode
 }
 
 // stateRoot returns the per-agent state root (the active agent's workspace
@@ -1674,6 +1681,35 @@ func syncPlanModeIndicator(renderer *Renderer, state *streamState) {
 	}
 	st, _ := statepkg.Get(state.stateRoot(), state.sessionID)
 	renderer.SetPlanMode(st.Mode == statepkg.ModePlan)
+	state.recordModeChange(st)
+}
+
+// recordModeChange files a mode switch in the conversation's log when the
+// conversation on screen actually moved mode — the hotkey, /plan and the
+// enter/exit plan-mode tools all reach the store and are read back here. A
+// first look at a conversation is not a switch: it adopts the mode it finds so
+// that opening a session (or starting up) never files a mode_changed nothing
+// made. The switch carries no run — a keyboard switch happens with no run in
+// flight at all, which the gateway allows too.
+func (s *streamState) recordModeChange(st statepkg.State) {
+	if s == nil {
+		return
+	}
+	sid := strings.TrimSpace(s.sessionID)
+	if s.recordedModeSession != sid {
+		s.recordedModeSession = sid
+		s.recordedMode = st.Mode
+		return
+	}
+	if s.recordedMode == st.Mode {
+		return
+	}
+	s.recordedMode = st.Mode
+	if recorder, ok := s.session.(interface {
+		recordModeChanged(sessionID, mode, phase string)
+	}); ok {
+		recorder.recordModeChanged(sid, string(st.Mode), st.Phase)
+	}
 }
 
 // switchStreamSession activates the target session's own model selection and,
@@ -2715,6 +2751,23 @@ func (s *streamState) takeDeliveredSteers() []ComposerSubmission {
 	return queuedSubmissions(s.sessionQueue().TakeDelivered())
 }
 
+// takeDeliveredSteersForDisplay drains the delivered steers and files each one
+// in the conversation's log before the caller renders it: the surface that
+// takes them off the queue owns both drawing them into the transcript and
+// recording where the model received them, so a reload draws the same message.
+func (s *streamState) takeDeliveredSteersForDisplay() []ComposerSubmission {
+	delivered := s.takeDeliveredSteers()
+	if len(delivered) == 0 {
+		return delivered
+	}
+	if recorder, ok := s.session.(interface {
+		recordDeliveredSteers(sessionID string, delivered []ComposerSubmission)
+	}); ok {
+		recorder.recordDeliveredSteers(s.sessionID, delivered)
+	}
+	return delivered
+}
+
 // discardQueuedInput empties every queue and returns how many messages were
 // discarded. Pending steers are retracted from the run's input runtime first:
 // clearing only the queue would leave the runtime free to hand them to the
@@ -3639,7 +3692,7 @@ func runTurnWithSkill(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 			// yet; leaving it there makes the turn-boundary handler treat an
 			// answered message as undelivered and resubmit it, so the model sees
 			// it twice.
-			renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
+			renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
 			if state != nil {
 				renderComposerWithState(renderer, state)
 			}
@@ -4084,7 +4137,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	// the queue, so editing/resubmitting operates on what is genuinely pending.
 	// This can observe a delivery before its notification reaches the loop, so
 	// it owns moving those steers into the transcript too.
-	renderDeliveredSteerMessages(renderer, state.takeDeliveredSteers())
+	renderDeliveredSteerMessages(renderer, state.takeDeliveredSteersForDisplay())
 	// Shift+Left is decoded by the raw reader; bare Up remains history
 	// navigation.
 	switch ev.kind {

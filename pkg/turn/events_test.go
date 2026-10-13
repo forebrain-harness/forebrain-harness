@@ -9,8 +9,66 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
 )
+
+// One completed tool step that changed a file produces both rows the surfaces
+// record for it: the step's own event, and the turn-diff companion the diff
+// card is drawn from. The companion's id is the step's with a "-diff" suffix,
+// so a re-observed step writes neither row twice.
+func TestCanonicalEventsFromStepCarriesTheTurnDiffCompanion(t *testing.T) {
+	events := CanonicalEventsFromStep(context.Background(), "s1", "r1", "tui", tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		StepID:   "call-1",
+		ToolName: "write_file",
+		Output: map[string]any{
+			"status": "ok",
+			"turn_diff": map[string]any{
+				"path":         "a.go",
+				"added":        2,
+				"deleted":      1,
+				"unified_diff": "--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n",
+			},
+		},
+	})
+	require.Len(t, events, 2)
+	require.Equal(t, event.RunEventToolCompleted, events[0].Type)
+	require.NotEmpty(t, events[0].ID)
+	require.Equal(t, events[0].ID+"-diff", events[1].ID, "the companion keeps the step event's identity")
+	require.Equal(t, event.DiffEventTurnUpdated, events[1].Type)
+	require.Equal(t, "r1", events[1].RunID)
+	require.Equal(t, "s1", events[1].SessionID)
+	var diff event.TurnDiffUpdatedPayload
+	require.NoError(t, json.Unmarshal(events[1].Payload, &diff))
+	require.Len(t, diff.Files, 1)
+	require.Equal(t, "a.go", diff.Files[0].Path)
+	require.NotEmpty(t, diff.Files[0].Hunks)
+}
+
+// A step whose output carries no turn diff produces only its own event; there
+// is no companion to record.
+func TestCanonicalEventsFromStepHasNoCompanionWithoutATurnDiff(t *testing.T) {
+	events := CanonicalEventsFromStep(context.Background(), "s1", "r1", "tui", tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		StepID:   "call-1",
+		ToolName: "read_file",
+		Output:   map[string]any{"content": "done"},
+	})
+	require.Len(t, events, 1)
+	require.Equal(t, event.RunEventToolCompleted, events[0].Type)
+}
+
+// A step the surfaces never show produces no events at all.
+func TestCanonicalEventsFromStepSkipsAHiddenStep(t *testing.T) {
+	events := CanonicalEventsFromStep(context.Background(), "s1", "r1", "tui", tool.StepEvent{
+		Kind:       event.RunEventToolCompleted,
+		StepID:     "call-1",
+		ToolName:   "read_file",
+		SuppressUI: true,
+	})
+	require.Empty(t, events)
+}
 
 func TestExtractTurnDiffPayloadIncludesStatsAndHunks(t *testing.T) {
 	payload, ok := ExtractTurnDiffPayload(map[string]any{
