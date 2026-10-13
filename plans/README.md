@@ -89,7 +89,7 @@
 | [018-stream-deltas-pushed-not-persisted](018-stream-deltas-pushed-not-persisted.md) | 回答/思考/工具输出增量只推送不落库；持久化的生命周期事件不带回答文字（cron 改读 transcript）；断线重连与刷新时 gateway 从内存补发在途文字与在途工具输出 | Bug Fix | DONE（2026-10-13 执行完毕） | **P1** | L | HIGH |
 | [019-migrate-away-stored-stream-deltas](019-migrate-away-stored-stream-deltas.md) | 状态库迁移：先备份，再处理旧增量（含工具输出）——已有完整记录的删除，没有的合并成段；迁移后照框架自动 VACUUM（owner 2026-10-11 撤回"不回收"） | Migration | DONE（2026-10-14 执行完毕） | P2 | M | HIGH |
 | [020-tui-persists-main-agent-state-events](020-tui-persists-main-agent-state-events.md) | TUI 主 agent 的 turn diff、预算、队列、steer 送达、模式事件落库；gateway 审批续跑补上 turn diff 伴随事件 | Bug Fix | DONE（2026-10-14 执行完毕，未提交） | P2 | M | LOW-MED |
-| [021-busy-session-names-the-other-surface](021-busy-session-names-the-other-surface.md) | 会话被另一端（另一个进程）运行或停在审批上时，按 `fb_runs.owner` 判断并提示"正在另一端运行" | Bug Fix | TODO | P2 | S | LOW |
+| [021-busy-session-names-the-other-surface](021-busy-session-names-the-other-surface.md) | 会话被另一端（另一个进程）运行或停在审批上时，按 `fb_runs.owner` 判断并提示"正在另一端运行" | Bug Fix | DONE（2026-10-13 执行完毕） | P2 | S | LOW |
 | [022-workbench-files-follow-session-directory](022-workbench-files-follow-session-directory.md) | web 文件视图（树、片段、`@` 补全、`@` 图片）以会话所属项目的根为准，主代理级工坊为主代理技能目录；新对话按所选项目（2026-10-11 改写） | Bug Fix | DONE（2026-10-12 执行完毕，未提交；评审 APPROVE） | **P1** | M | MED |
 | [023-continue-in-session-birth-directory-design](023-continue-in-session-birth-directory-design.md) | 调研与方案：续聊时在会话出生目录执行（gateway runner 池 + TUI 单 runner），产出设计文档，信任处理交 owner 拍板 | Design | DONE（定稿设计已写，所有待决项已定；下一步写实现计划 025–031） | **P1** | M | — |
 | [024-cross-surface-see-and-continue-acceptance](024-cross-surface-see-and-continue-acceptance.md) | 验收：两端双向看到并续聊、另一端在跑时拒绝、工具在项目根执行、信任按项目根、子目录项目、工作台根（2026-10-11 改写，并入原 031） | Tests | TODO | **P1** | M | — |

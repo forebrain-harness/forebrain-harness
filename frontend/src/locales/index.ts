@@ -959,6 +959,8 @@ const zh = {
   'providerError.statusSuffix': '（{status}）',
   'runError.sessionAwaitingApproval': '这个对话正在等待审批，请先处理审批再发送。',
   'runError.sessionRunning': '这个对话正在运行一个回合，等它结束后再发送。',
+  'runError.sessionAwaitingApprovalElsewhere': '这个对话正在另一端等待审批（终端或网页），请在那一端处理后再发送。',
+  'runError.sessionRunningElsewhere': '这个对话正在另一端运行（终端或网页），等它结束后再发送。',
   // 定时任务触发的结局（执行记录与任务的"上次错误"按这些代码写句子，
   // 引用原文的代码由 providerError 在句子下一行放原文）。
   'runError.runFailed': '这次运行失败了。',
@@ -2325,6 +2327,8 @@ const en: Record<keyof typeof zh, string> = {
   'providerError.statusSuffix': ' ({status})',
   'runError.sessionAwaitingApproval': 'This conversation is waiting for an approval; answer it before sending another message.',
   'runError.sessionRunning': 'This conversation is already running a turn; send again when it finishes.',
+  'runError.sessionAwaitingApprovalElsewhere': 'This conversation is waiting for an approval on another surface (the terminal or the web); answer it there before sending another message.',
+  'runError.sessionRunningElsewhere': 'This conversation is running on another surface (the terminal or the web); send again when it finishes there.',
   'runError.runFailed': 'This run failed.',
   'runError.runAbandoned': 'The process running this turn stopped before it finished.',
   'runError.runStopped': 'The run was stopped before it finished.',

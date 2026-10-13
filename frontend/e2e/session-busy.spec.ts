@@ -32,6 +32,9 @@ function sqlite(sql: string): void {
  * language — following a switch made while the notice is on screen — and the
  * message waits in the composer whole, without adding a user row. Once the
  * run's owner stops renewing its lease, the same message goes through.
+ *
+ * The run below is owned by another process, so the refusal names the other
+ * surface (the terminal or the web) rather than this one's own turn.
  */
 test('a busy session refuses a new message until the run owning it is gone', async ({ page }) => {
   test.info().setTimeout(120_000)
@@ -61,7 +64,7 @@ test('a busy session refuses a new message until the run owning it is gone', asy
   // The refusal is said in the viewer's language, the message is the user's
   // draft again, and the conversation gained no user row: the turn the
   // message would have started never existed.
-  const noticeZh = page.getByText('这个对话正在运行一个回合，等它结束后再发送。')
+  const noticeZh = page.getByText('这个对话正在另一端运行（终端或网页），等它结束后再发送。')
   await expect(noticeZh).toBeVisible()
   await expect(page.locator('textarea')).toHaveValue('is anybody out there?')
   await expect(page.locator('[role=log] .is-user')).toHaveCount(0)
@@ -70,7 +73,7 @@ test('a busy session refuses a new message until the run owning it is gone', asy
   // while the notice is on screen — the way a run's error block does.
   await page.click('.forebrain-language-trigger')
   await page.locator('.forebrain-language-option', { hasText: 'English' }).click()
-  await expect(page.getByText('This conversation is already running a turn; send again when it finishes.')).toBeVisible()
+  await expect(page.getByText('This conversation is running on another surface (the terminal or the web); send again when it finishes there.')).toBeVisible()
   await expect(noticeZh).toHaveCount(0)
 
   // The owner stops renewing: the run it left behind no longer counts as
