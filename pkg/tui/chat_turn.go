@@ -559,6 +559,13 @@ func (s *ChatSession) appendAssistantOutcome(sessionID string, runID string, cha
 			}
 		},
 	})
+	// The run's end, as the gateway records its own: the clock the worked line
+	// reports and the checklist facts. The answer itself is the transcript's,
+	// recorded above; the event does not carry a second copy of it. No run means
+	// no end to record.
+	if strings.TrimSpace(runID) != "" {
+		s.persistRunEvent(context.Background(), s.turnCompletedEvent(sessionID, runID, completion.Duration))
+	}
 	s.notifyTokenBudget(context.Background(), sessionID)
 	hideFromForeground := false
 	elapsed := completion.Duration
@@ -900,6 +907,11 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 		// See the identical call in dispatchUserTurnContent: this must run
 		// before any tool/usage event for the run reaches the reducer, so
 		// per-run counters key off the real run ID instead of "".
+		//
+		// The run's start, in the log both surfaces read: the gateway records
+		// its own turns the same way. The fixed id keeps a continuation past an
+		// approval — the same run — from recording a second start.
+		s.persistRunEvent(agentCtx, event.NewRunEvent("turn-started:"+runID, runID, p.SessionID, event.RunEventTurnStarted, event.TurnStartedPayload{}, time.Now()))
 		s.notifyUI(RunStartedMsg{RunID: runID})
 		return nil
 	}
