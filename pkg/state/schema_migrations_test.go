@@ -490,6 +490,58 @@ SELECT storage_key, storage_bucket, parse_error FROM fb_files WHERE id='f-s3'`).
 	}
 }
 
+// TestStateV11UpgradesToV12AddsProjectFileColumns pins the two columns this
+// version adds. A database that predates them — modelled by dropping them from
+// the current schema and lowering the version — gains them with their default
+// when it is opened again, and its version moves forward.
+func TestStateV11UpgradesToV12AddsProjectFileColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE fb_files DROP COLUMN project_path`,
+		`ALTER TABLE fb_projects DROP COLUMN last_attach_dir`,
+		`PRAGMA user_version = 11`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v11 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+
+	for _, col := range []struct{ table, name string }{
+		{"fb_files", "project_path"},
+		{"fb_projects", "last_attach_dir"},
+	} {
+		var n int
+		if err := migrated.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, col.table, col.name).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("%s.%s must exist after the migration (found %d)", col.table, col.name, n)
+		}
+	}
+}
+
 // TestStateOpenIsIdempotentAtCurrentVersion pins §4.5 check 5: opening a
 // database already at the current version runs no DDL at all.
 func TestStateOpenIsIdempotentAtCurrentVersion(t *testing.T) {

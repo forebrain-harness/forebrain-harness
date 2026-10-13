@@ -519,7 +519,14 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 		if mimeType != "" {
 			named += " (" + mimeType + ")"
 		}
-		blocks = append(blocks, "[Attachment "+named+"]\nSaved at: "+absPath+"\nUse your file tools to open and process it as needed.")
+		// A file saved into the project is named by its path inside the
+		// project: the agent's working directory is the project root, so the
+		// same file its file tools read is the one the user attached.
+		savedAt := absPath
+		if rec != nil && strings.TrimSpace(rec.ProjectPath) != "" {
+			savedAt = rec.ProjectPath
+		}
+		blocks = append(blocks, "[Attachment "+named+"]\nSaved at: "+savedAt+"\nUse your file tools to open and process it as needed.")
 		markers = append(markers, "[Attachment "+label+"]")
 		if strings.HasPrefix(mimeType, "image/") {
 			parts = append(parts, state.FileReferencePartJSON(fid, label, mimeType))

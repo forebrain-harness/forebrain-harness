@@ -585,6 +585,9 @@ export interface ProjectRecord {
   memoryScope: string
   resourceAccess: boolean
   pinned: boolean
+  /** The directory the "save to" dialog last uploaded into, relative to the
+   * root ('' is the root). */
+  lastAttachDir?: string
   createdAt: number
   updatedAt: number
   trustRecorded?: boolean
@@ -619,6 +622,20 @@ export interface HostDirListing {
   /** The picker's fixed sidebar: home, Desktop, Documents and Downloads. */
   places: Array<{ name: string; path: string }>
   entries: HostDirEntry[]
+}
+
+/** One subdirectory of a project directory, for the "save to" dialog. */
+export interface ProjectDirEntry {
+  name: string
+  /** Whether drawing this directory would find anything: a chevron, or none. */
+  hasChildren: boolean
+}
+
+/** A project directory listing: the relative directory and its subdirectories. */
+export interface ProjectDirListing {
+  /** The listed directory relative to the project root ('' is the root). */
+  path: string
+  entries: ProjectDirEntry[]
 }
 
 export interface ProjectSessionRecord {
@@ -873,7 +890,7 @@ export interface ChatSessionsResponse {
 export interface ChatSessionInfo {
   id: string
   title: string
-  project: { id: string; name: string; root?: string; missing?: boolean } | null
+  project: { id: string; name: string; root?: string; missing?: boolean; lastAttachDir?: string } | null
 }
 
 export interface SessionTodosResponse {
@@ -2302,6 +2319,24 @@ export const forebrainApi = {
     return postJson<{ path: string }, { parent: string; name: string }>('/host/dirs', { parent, name })
   },
 
+  /** The subdirectories of one directory inside a project, for the "save to"
+   * dialog. `path` is relative to the project root; empty is the root. */
+  projectDirs(id: string, path = '') {
+    return api
+      .get<ProjectDirListing>(`/v1/projects/${encodeURIComponent(id)}/dirs`, { params: path ? { path } : undefined })
+      .then((res) => res.data)
+  },
+
+  /** Create one subdirectory inside a project (`parent` is relative to the
+   * root; empty is the root). A name already taken answers 409 {
+   * error: 'exists' }. */
+  projectDirCreate(id: string, parent: string, name: string) {
+    return postJson<{ path: string }, { parent: string; name: string }>(
+      `/v1/projects/${encodeURIComponent(id)}/dirs`,
+      { parent, name },
+    )
+  },
+
   /** One directory's trust decision. */
   hostTrust(path: string) {
     return api.get<{ level: TrustLevel }>('/host/trust', { params: { path } }).then((res) => res.data)
@@ -2592,10 +2627,11 @@ export const forebrainApi = {
     return api.get<FileInfo>(`/files/${encodeURIComponent(fileId)}`).then((res) => res.data)
   },
 
-  filesUpload(file: File, sessionId?: string): Promise<FileUploadResult> {
+  filesUpload(file: File, sessionId?: string, dir?: string): Promise<FileUploadResult> {
     const form = new FormData()
     form.append('file', file)
     if (sessionId) form.append('session_id', sessionId)
+    if (dir) form.append('dir', dir)
     return gatewayFetch(`${API_BASE}/files`, {
       method: 'POST',
       body: form,

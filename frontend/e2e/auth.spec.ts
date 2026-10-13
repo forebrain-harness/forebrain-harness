@@ -119,6 +119,9 @@ test('uploaded image reaches the api through the cookie', async ({ page }) => {
       'base64',
     ),
   })
+  // Since plan 030 a file is saved into the project the moment it is attached,
+  // through the "save to" dialog; the upload runs on confirm, not on send.
+  await page.click('[data-testid="attach-confirm"]')
   await page.fill('textarea', 'ping')
   await page.press('textarea', 'Enter')
   const attachment = page.locator('a[href*="/api/files/"]').first()

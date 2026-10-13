@@ -123,7 +123,7 @@ beforeAll(() => {
   })
 })
 
-async function mountView() {
+async function mountView(extraStubs: Record<string, unknown> = {}) {
   const router = makeRouter()
   router.push('/')
   await router.isReady()
@@ -153,6 +153,7 @@ async function mountView() {
         RunErrorBlock: true,
         CompactionCard: true,
         GoalLine: true,
+        ...extraStubs,
       },
     },
   })
@@ -556,6 +557,78 @@ describe('ChatView rewind to a message (plan 033)', () => {
     await chatOnly!.trigger('click')
     await nextTick()
     expect(wrapper.find('.rw-files').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+/**
+ * Saving an attachment into the project (plan 030): a file added to the
+ * composer — picked, dropped or pasted — pops the "save to" dialog at once,
+ * the upload runs on confirm into the directory the user chose, and a confirm
+ * leaves the file in the composer's attachment strip. The upload no longer
+ * waits for the send.
+ */
+describe('ChatView saves attachments into the project', () => {
+  beforeAll(() => {
+    // The composer's own add path calls URL.createObjectURL on each attached
+    // file; jsdom's shim cannot take a File made in a test.
+    ;(URL as unknown as { createObjectURL: () => string }).createObjectURL = () => 'blob:mock'
+    ;(URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {}
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  async function pasteImage(wrapper: Awaited<ReturnType<typeof mountView>>, file: File) {
+    await wrapper.find('textarea').trigger('paste', {
+      clipboardData: { items: [{ kind: 'file', getAsFile: () => file }] },
+    })
+    await flushPromises()
+  }
+
+  it('pops the dialog on paste and uploads into the chosen directory on confirm', async () => {
+    const upload = vi.spyOn(forebrainApi, 'filesUpload').mockResolvedValue({ fileId: 'f1' })
+    vi.spyOn(forebrainApi, 'chatSession').mockResolvedValue({
+      id: 's1', title: '', project: { id: 'p1', name: 'demo', root: '/p', lastAttachDir: 'docs' },
+    })
+    vi.spyOn(forebrainApi, 'projectDirs').mockResolvedValue({ path: '', entries: [] })
+
+    const wrapper = await mountView({ teleport: true })
+    await flushPromises()
+    const file = new File(['x'], 'shot.png', { type: 'image/png' })
+    await pasteImage(wrapper, file)
+
+    // The dialog is up, nothing has uploaded yet.
+    const confirm = wrapper.find('[data-testid="attach-confirm"]')
+    expect(confirm.exists()).toBe(true)
+    expect(upload).not.toHaveBeenCalled()
+
+    await confirm.trigger('click')
+    await flushPromises()
+    // The upload ran into the project's last attach directory, and the file is
+    // now in the composer's strip.
+    expect(upload).toHaveBeenCalledWith(file, 's1', 'docs')
+    expect(wrapper.text()).toContain('shot.png')
+    expect(wrapper.find('[data-testid="attach-confirm"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('drops the file when the dialog is cancelled', async () => {
+    const upload = vi.spyOn(forebrainApi, 'filesUpload').mockResolvedValue({ fileId: 'f1' })
+    vi.spyOn(forebrainApi, 'chatSession').mockResolvedValue({
+      id: 's1', title: '', project: { id: 'p1', name: 'demo', root: '/p', lastAttachDir: '' },
+    })
+    vi.spyOn(forebrainApi, 'projectDirs').mockResolvedValue({ path: '', entries: [] })
+
+    const wrapper = await mountView({ teleport: true })
+    await flushPromises()
+    await pasteImage(wrapper, new File(['x'], 'shot.png', { type: 'image/png' }))
+    await wrapper.find('[data-testid="attach-cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(upload).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('shot.png')
     wrapper.unmount()
   })
 })

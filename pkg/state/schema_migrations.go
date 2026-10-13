@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 11
+const stateSchemaVersion = 12
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -50,6 +50,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 9, apply: migrateStateV8ToV9},
 	{version: 10, apply: migrateStateV9ToV10},
 	{version: 11, apply: migrateStateV10ToV11},
+	{version: 12, apply: migrateStateV11ToV12},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -545,6 +546,35 @@ func migrateStateV10ToV11(ctx context.Context, conn *sql.Conn) error {
 		"tool_steps_merged", tool.mergedSteps,
 		"tool_output_rows_merged_away", tool.mergedRows,
 		"tool_output_rows_without_step_id", tool.withoutStepID)
+	return nil
+}
+
+// migrateStateV11ToV12 gives uploaded files a project-relative home and each
+// project a remembered attach directory. Two plain ADD COLUMNs, so a database
+// that already carries them (a fixture built from the current schema.sql with
+// a lowered user_version) skips the ALTER instead of failing on a duplicate.
+// Every existing row reads as it did before: a file with no project_path is
+// where storage_key says, and a project with no last_attach_dir defaults to
+// its root.
+func migrateStateV11ToV12(ctx context.Context, conn *sql.Conn) error {
+	var fileCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_files') WHERE name='project_path'`).Scan(&fileCol); err != nil {
+		return err
+	}
+	if fileCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_files ADD COLUMN project_path TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_files.project_path: %w", err)
+		}
+	}
+	var projectCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_projects') WHERE name='last_attach_dir'`).Scan(&projectCol); err != nil {
+		return err
+	}
+	if projectCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_projects ADD COLUMN last_attach_dir TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add fb_projects.last_attach_dir: %w", err)
+		}
+	}
 	return nil
 }
 

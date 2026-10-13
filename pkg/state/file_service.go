@@ -205,6 +205,109 @@ func (s *FileStore) CreateFromReader(ctx context.Context, sessionID, originalNam
 	return frec, nil
 }
 
+// CreateInProject writes an upload into a directory inside a project's root and
+// records it as a file whose original lives there, leaving storage_key empty.
+// dir is the directory relative to projectRoot with '/' separators; "" is the
+// root itself. The caller has already checked the directory exists and stays
+// inside the project. A name already taken in that directory gains " (n)"
+// before its extension, so an upload never overwrites a file the user has. The
+// original is staged in a temporary file in the target directory and renamed
+// into place, so the rename never crosses a filesystem and a half-written
+// upload is never visible under its final name.
+func (s *FileStore) CreateInProject(ctx context.Context, sessionID, projectRoot, dir, originalName string, r io.Reader, sizeHint int64, mediaType string) (*File, error) {
+	if s == nil || s.DB == nil {
+		return nil, fmt.Errorf("nil db")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id required")
+	}
+	projectRoot = strings.TrimSpace(projectRoot)
+	if projectRoot == "" {
+		return nil, fmt.Errorf("project root required")
+	}
+	if mediaType == "" {
+		mediaType = sniffMediaType(originalName)
+	}
+	dir = strings.Trim(strings.ReplaceAll(strings.TrimSpace(dir), "\\", "/"), "/")
+	targetDir := filepath.Join(projectRoot, filepath.FromSlash(dir))
+	if st, err := os.Stat(targetDir); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("target directory does not exist")
+	}
+	id := uuid.NewString()
+	now := time.Now().Unix()
+
+	sum := sha256.New()
+	tmp := filepath.Join(targetDir, fmt.Sprintf("%s.uploading", id))
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	n, err := io.Copy(io.MultiWriter(f, sum), r)
+	closeErr := f.Close()
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return nil, closeErr
+	}
+	sha := hex.EncodeToString(sum.Sum(nil))
+	finalName, err := uniqueFileName(targetDir, originalName)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	final := filepath.Join(targetDir, finalName)
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return nil, err
+	}
+	rel := filepath.ToSlash(filepath.Join(filepath.FromSlash(dir), finalName))
+	frec := &File{
+		ID:             id,
+		SessionID:      sessionID,
+		OriginalName:   strings.TrimSpace(filepath.Base(originalName)),
+		MediaType:      strings.TrimSpace(mediaType),
+		SizeBytes:      n,
+		SHA256:         sha,
+		StorageBackend: string(StorageBackendLocal),
+		StorageBucket:  "",
+		StorageKey:     "",
+		ProjectPath:    rel,
+		ParseStatus:    string(ParseStatusPending),
+		ParseError:     "",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := s.insert(ctx, frec); err != nil {
+		return nil, err
+	}
+	return frec, nil
+}
+
+// uniqueFileName is the name an upload takes inside dir: the original name, or
+// — when that is already there — "stem (n)ext" for the smallest n that is not.
+func uniqueFileName(dir, name string) (string, error) {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "upload.bin"
+	}
+	ext := filepath.Ext(base)
+	stem := strings.TrimSuffix(base, ext)
+	candidate := base
+	for i := 1; ; i++ {
+		if _, err := os.Lstat(filepath.Join(dir, candidate)); err != nil {
+			if os.IsNotExist(err) {
+				return candidate, nil
+			}
+			return "", err
+		}
+		candidate = fmt.Sprintf("%s (%d)%s", stem, i, ext)
+	}
+}
+
 func (s *FileStore) UpdateParsedText(ctx context.Context, fileID string, relpath string) error {
 	if s == nil || s.DB == nil {
 		return fmt.Errorf("nil db")
@@ -249,11 +352,11 @@ func (s *FileStore) insert(ctx context.Context, f *File) error {
 	_, err := s.DB.ExecContext(ctx, `
 INSERT INTO fb_files(
   id, session_id, original_name, media_type, size_bytes, sha256,
-  storage_backend, storage_bucket, storage_key,
+  storage_backend, storage_bucket, storage_key, project_path,
   parse_status, parsed_text_path, parse_error, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		f.ID, f.SessionID, f.OriginalName, f.MediaType, f.SizeBytes, f.SHA256,
-		f.StorageBackend, f.StorageBucket, f.StorageKey,
+		f.StorageBackend, f.StorageBucket, f.StorageKey, f.ProjectPath,
 		f.ParseStatus, f.ParsedTextPath, f.ParseError, f.CreatedAt, f.UpdatedAt,
 	)
 	return err
@@ -273,13 +376,13 @@ func (s *FileStore) Get(ctx context.Context, agentID, id string) (*File, error) 
 	var f File
 	err := s.DB.QueryRowContext(ctx, `
 SELECT f.id, f.session_id, f.original_name, f.media_type, f.size_bytes, f.sha256,
-       f.storage_backend, f.storage_bucket, f.storage_key,
+       f.storage_backend, f.storage_bucket, f.storage_key, f.project_path,
        f.parse_status, f.parsed_text_path, f.parse_error, f.created_at, f.updated_at
 FROM fb_files f
 JOIN fb_sessions s ON s.id=f.session_id AND s.agent_id=?
 WHERE f.id=?`, strings.TrimSpace(agentID), id).Scan(
 		&f.ID, &f.SessionID, &f.OriginalName, &f.MediaType, &f.SizeBytes, &f.SHA256,
-		&f.StorageBackend, &f.StorageBucket, &f.StorageKey,
+		&f.StorageBackend, &f.StorageBucket, &f.StorageKey, &f.ProjectPath,
 		&f.ParseStatus, &f.ParsedTextPath, &f.ParseError, &f.CreatedAt, &f.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -314,12 +417,59 @@ func (s *FileStore) ParsedTextLocalPath(f *File) (string, bool) {
 	return "", false
 }
 
+// ProjectRootForSession is the root of the project a session belongs to, or
+// "" when the session has no project (a primary-agent workshop task) or the
+// store cannot name it. A project-bound file's project_path resolves against
+// it, so it is the one place that turns a stored relative path back into an
+// absolute one.
+func (s *FileStore) ProjectRootForSession(ctx context.Context, sessionID string) (string, bool) {
+	if s == nil || s.DB == nil {
+		return "", false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", false
+	}
+	var root string
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COALESCE(p.root, '')
+FROM fb_sessions s
+JOIN fb_projects p ON p.id = s.project_id
+WHERE s.id = ?`, sessionID).Scan(&root)
+	if err != nil {
+		return "", false
+	}
+	root = strings.TrimSpace(root)
+	return root, root != ""
+}
+
+// OriginalPath is where a file's original bytes are, resolved to an absolute
+// path. A file saved into a project (project_path set) lives under that
+// session's project root; every other file is where storage_key says. The
+// bool is false when neither names a readable location — an unset project
+// path with no local storage_key, or a project file whose project can no
+// longer be named.
+func (s *FileStore) OriginalPath(ctx context.Context, f *File) (string, bool) {
+	if f == nil {
+		return "", false
+	}
+	if pp := strings.TrimSpace(f.ProjectPath); pp != "" {
+		root, ok := s.ProjectRootForSession(ctx, f.SessionID)
+		if !ok {
+			return "", false
+		}
+		return filepath.Join(root, filepath.FromSlash(pp)), true
+	}
+	return s.LocalPath(f)
+}
+
 // EnsureLocalFile returns an absolute, agent-readable path to the original
-// uploaded file. Local-backed files already live under <workspace>/files and
-// their path is returned directly. S3-backed files are materialized into
-// <workspace>/files/<id>/<name> so they too fall inside the agent's allowed
-// roots and can be opened by its file tools. The returned File carries the
-// original name and media type for building a reference for the agent.
+// uploaded file. A file saved into the project lives under the project root;
+// a workspace-backed file lives under <workspace>/files; an S3-backed file is
+// materialized into <workspace>/files/<id>/<name> so it too falls inside the
+// agent's allowed roots and can be opened by its file tools. The returned File
+// carries the original name and media type for building a reference for the
+// agent.
 func (s *FileStore) EnsureLocalFile(ctx context.Context, agentID, fileID string) (absPath string, f *File, err error) {
 	if s == nil {
 		return "", nil, fmt.Errorf("nil service")
@@ -332,7 +482,7 @@ func (s *FileStore) EnsureLocalFile(ctx context.Context, agentID, fileID string)
 	if err != nil {
 		return "", nil, err
 	}
-	if p, ok := s.LocalPath(rec); ok {
+	if p, ok := s.OriginalPath(ctx, rec); ok {
 		return p, rec, nil
 	}
 	if strings.EqualFold(rec.StorageBackend, string(StorageBackendS3)) && strings.TrimSpace(rec.StorageKey) != "" {
@@ -387,7 +537,7 @@ func (s *FileStore) EnsureParsedText(ctx context.Context, agentID, fileID string
 
 	srcPath := ""
 	tmpPath := ""
-	if p, ok := s.LocalPath(f); ok {
+	if p, ok := s.OriginalPath(ctx, f); ok {
 		srcPath = p
 	} else if strings.EqualFold(f.StorageBackend, string(StorageBackendS3)) && strings.TrimSpace(f.StorageKey) != "" {
 		if err := os.MkdirAll(s.tmpDir(), 0o755); err != nil {
@@ -545,7 +695,7 @@ func (s *FileStore) RemoveStored(ctx context.Context, f File) error {
 	}
 	switch {
 	case strings.EqualFold(f.StorageBackend, string(StorageBackendLocal)):
-		if p, ok := s.LocalPath(&f); ok {
+		if p, ok := s.OriginalPath(ctx, &f); ok {
 			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 				return err
 			}
@@ -729,6 +879,11 @@ type File struct {
 	StorageBackend string `json:"storage_backend"`
 	StorageBucket  string `json:"storage_bucket"`
 	StorageKey     string `json:"storage_key"`
+	// ProjectPath is where the original lives when it was saved inside the
+	// project the session belongs to: a path under the project root with '/'
+	// separators. Non-empty leaves StorageKey empty, and the file resolves
+	// against the project root instead of the workspace's files directory.
+	ProjectPath    string `json:"project_path"`
 	ParseStatus    string `json:"parse_status"`
 	ParsedTextPath string `json:"parsed_text_path"`
 	ParseError     string `json:"parse_error"`

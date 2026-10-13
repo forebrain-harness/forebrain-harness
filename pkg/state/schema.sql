@@ -17,6 +17,10 @@ CREATE TABLE fb_projects (
   memory_scope TEXT NOT NULL DEFAULT 'shared' CHECK (memory_scope IN ('shared', 'project_only')),
   resource_access INTEGER NOT NULL DEFAULT 1 CHECK (resource_access IN (0, 1)),
   pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  -- The directory the project's "save to" dialog last uploaded into, relative
+  -- to the root with '/' separators. '' is the project root itself, and a
+  -- directory since deleted falls back to the root when the dialog opens.
+  last_attach_dir TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
@@ -287,6 +291,11 @@ CREATE TABLE fb_files (
   storage_backend TEXT NOT NULL CHECK (storage_backend IN ('local', 's3')),
   storage_bucket TEXT NOT NULL DEFAULT '',
   storage_key TEXT NOT NULL,
+  -- Where the original lives when the upload was saved into the project the
+  -- session belongs to: a path under the project root with '/' separators,
+  -- and storage_key left empty. '' means the original is under the workspace's
+  -- files directory, keyed by storage_key as before.
+  project_path TEXT NOT NULL DEFAULT '',
   parse_status TEXT NOT NULL CHECK (parse_status IN ('pending', 'running', 'done', 'failed')),
   parsed_text_path TEXT NOT NULL DEFAULT '',
   parse_error TEXT NOT NULL DEFAULT '',

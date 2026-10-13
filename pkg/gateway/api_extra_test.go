@@ -1899,9 +1899,18 @@ func TestFileUploadBelongsToAnOwnedSession(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	mustGatewaySession(t, db, "s-mine")
 	require.NoError(t, state.NewSessionStore(db, "other").Ensure(ctx, "s-other", "s-other"))
+	// Since plan 029 an upload is saved into the conversation's project, so the
+	// owner's session is bound to one. The other agent's session is nobody's
+	// here and reads as missing before a project is ever consulted.
+	root := t.TempDir()
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "mine", Root: root})
+	require.NoError(t, err)
+	require.NoError(t, projects.BindSession(ctx, "s-mine", project.ID))
 	s := &Server{
 		Files:    &state.FileStore{DB: db, Home: t.TempDir(), Cfg: state.LoadConfigFromEnv()},
 		Sessions: state.NewSessionStore(db, "main"),
+		Projects: projects,
 	}
 	upload := func(sessionID string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -1932,6 +1941,11 @@ func TestFileUploadBelongsToAnOwnedSession(t *testing.T) {
 	f, err := s.Files.Get(ctx, "main", out.FileID)
 	require.NoError(t, err)
 	require.Equal(t, "s-mine", f.SessionID)
+	// The original was saved into the project (the root, since no dir was
+	// given) rather than the workspace, and its row says so.
+	require.Equal(t, "note.txt", f.ProjectPath)
+	require.Empty(t, f.StorageKey)
+	require.FileExists(t, filepath.Join(root, "note.txt"))
 }
 
 // TestAskActionBelongsToAnOwnedSession pins that an ask posted over HTTP is

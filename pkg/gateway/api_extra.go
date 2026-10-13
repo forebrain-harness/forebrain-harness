@@ -191,6 +191,10 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Delete("/:id", s.handleProjectDelete)
 	projects.Get("/:id/delete-preview", s.handleProjectDeletePreview)
 	projects.Post("/:id/pin", s.handleProjectPin)
+	// The "save to" dialog's view of a project's own directories: list one
+	// directory's subdirectories, and make a new one.
+	projects.Get("/:id/dirs", s.handleProjectDirs)
+	projects.Post("/:id/dirs", s.handleProjectDirs)
 	projects.Get("/:id/sessions", s.handleProjectSessionsList)
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
@@ -918,14 +922,78 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 			mediaType = strings.TrimSpace(arr[0].Header.Get("Content-Type"))
 		}
 	}
-	rec, err := s.Files.CreateFromReader(r.Context(), sessionID, filename, fh, 0, mediaType)
+	rec, err := s.createUpload(r.Context(), sessionID, r.FormValue("dir"), filename, fh, mediaType)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeUploadError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]any{"file_id": rec.ID})
+}
+
+// createUpload saves one upload for a session. On the local backend the file is
+// written into the directory dir named under the session's project root (an
+// empty dir is the root itself, which must exist — the new-folder endpoint is
+// what makes a directory, so an upload never creates one implicitly) and the
+// project remembers dir as its last attach directory. The S3 backend has no
+// project path: it ignores dir and keeps its workspace-backed behaviour.
+func (s *Server) createUpload(ctx context.Context, sessionID, dir, filename string, body io.Reader, mediaType string) (*state.File, error) {
+	if s.Files == nil {
+		return nil, fmt.Errorf("files disabled")
+	}
+	if s.Files.Cfg.DefaultStorageBackend == state.StorageBackendS3 {
+		return s.Files.CreateFromReader(ctx, sessionID, filename, body, 0, mediaType)
+	}
+	store := s.projectStore()
+	if store == nil {
+		return nil, errProjectRequired
+	}
+	project, ok, err := store.ProjectForSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		// A conversation with no project — a primary-agent workshop task —
+		// has nowhere in a project to save an attachment to.
+		return nil, errProjectRequired
+	}
+	root, err := existingFilesRoot(project.Root)
+	if err != nil {
+		return nil, err
+	}
+	rel, abs, err := projectDir(root, dir)
+	if err != nil {
+		return nil, err
+	}
+	if st, statErr := os.Stat(abs); statErr != nil || !st.IsDir() {
+		return nil, errUploadDirMissing
+	}
+	rec, err := s.Files.CreateInProject(ctx, sessionID, root, rel, filename, body, 0, mediaType)
+	if err != nil {
+		return nil, err
+	}
+	// The dialog reopens here. A failure to remember is not worth failing the
+	// upload over: the file is already saved.
+	_ = store.SetLastAttachDir(ctx, project.ID, rel)
+	return rec, nil
+}
+
+// writeUploadError maps an upload's failure onto a status: a conversation with
+// no project is the session-create refusal, a directory outside the project or
+// missing is a 400, and anything else keeps the 400 the endpoint has always
+// answered a bad upload with.
+func writeUploadError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errProjectRequired):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "project_required"})
+	case errors.Is(err, errUploadDirOutside), errors.Is(err, errUploadDirMissing):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
 }
 
 func (s *Server) handleFileOne(w http.ResponseWriter, r *http.Request) {
@@ -966,7 +1034,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	p, ok := s.Files.LocalPath(f)
+	p, ok := s.Files.OriginalPath(r.Context(), f)
 	if !ok {
 		if strings.EqualFold(f.StorageBackend, string(state.StorageBackendS3)) && strings.TrimSpace(f.StorageKey) != "" {
 			rc, ct, _, _, err := s.Files.GetOriginalObject(r.Context(), f.StorageBucket, f.StorageKey)
@@ -1351,7 +1419,7 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			// Root and missing say whether the conversation can still run: a
 			// directory that is gone leaves the page its read-only notice.
-			project = map[string]any{"id": p.ID, "name": p.Name, "root": p.Root, "missing": !hostDirExists(p.Root)}
+			project = map[string]any{"id": p.ID, "name": p.Name, "root": p.Root, "missing": !hostDirExists(p.Root), "last_attach_dir": p.LastAttachDir}
 		}
 	}
 	writeJSON(w, map[string]any{"id": sid, "title": title, "project": project})
@@ -5245,6 +5313,7 @@ func (s *Server) projectRow(p state.Project) map[string]any {
 		"memory_scope":    p.MemoryScope,
 		"resource_access": p.ResourceAccess,
 		"pinned":          p.Pinned,
+		"last_attach_dir": p.LastAttachDir,
 		"created_at":      p.CreatedAt,
 		"updated_at":      p.UpdatedAt,
 		// The picker reads these two to badge a row: a root that is no longer

@@ -425,7 +425,8 @@
                 <PromptInputBody>
                   <ForebrainPromptTextarea ref="promptRef" :placeholder="inputPlaceholder" :bots="availableBots"
                     :bots-fetch-done="botsFetchDone" :during-run="isStreaming" :queue-visible="composerQueueVisible"
-                    :disabled="composerLocked" :scope="workbenchScope"
+                    :disabled="composerLocked" :scope="workbenchScope" attach-save
+                    @files-picked="onFilesPicked"
                     @queue-follow-up="markNextSubmissionAsQueued"
                     @edit-last-queued="restoreLastQueuedMessage"
                     @interrupt-run="interruptAndSendPendingSteers"
@@ -522,6 +523,14 @@
         @restore="applyRewind"
         @cancel="closeRewind"
       />
+      <AttachSaveDialog
+        :open="attachOpen"
+        :project="attachProject"
+        :files="attachRows"
+        :initial-dir="attachDir"
+        @confirm="confirmAttach"
+        @cancel="closeAttach"
+      />
     </div>
   </div>
 </template>
@@ -606,7 +615,8 @@ import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { getErrorMessage, forebrainApi, type AgentRosterRow, type ChatAttachmentRecord, type ProjectRecord, type RewindPreview, type SessionContextDebug, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
 import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { formatProviderError } from '@/lib/providerError'
-import { uploadSubmission, type ComposerSubmission, type PickedFile } from '@/lib/composerSubmission'
+import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
+import AttachSaveDialog, { type AttachFileRow } from '@/components/chat/AttachSaveDialog.vue'
 import { useI18n } from '@/locales'
 import type { I18nKey } from '@/locales'
 const { lastSessionId } = useLastSession()
@@ -698,6 +708,25 @@ const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
 const composerMaxFiles = 5
 const availableBots = ref<BotOption[]>([])
 const botsFetchDone = ref(true)
+
+// ---- "Save to" attach dialog (plan 030) ----
+
+/** The files a paste, drop or pick handed up, waiting to be saved. */
+const attachPending = ref<PickedFile[]>([])
+const attachProject = ref<{ id: string; name: string } | null>(null)
+/** The project's last attach directory the dialog opens on ('' is the root). */
+const attachDir = ref('')
+const attachOpen = ref(false)
+/** The attach upload in flight, so a send that races it waits, not drops it. */
+let pendingAttachUpload: Promise<void> | null = null
+
+const attachRows = computed<AttachFileRow[]>(() =>
+  attachPending.value.map((f) => ({
+    filename: f.filename,
+    size: f.file.size,
+    mediaType: f.mediaType,
+    fromClipboard: f.fromClipboard ?? false,
+  })))
 
 // ---- New-conversation project picker (plan 029) ----
 
@@ -973,6 +1002,90 @@ async function ensureSessionForSend(): Promise<string | null> {
       composerNotice.value = { title: t('chat.messageNotSent'), detail: message }
     }
     return null
+  }
+}
+
+/**
+ * A file the user attached is saved into the project before the message is
+ * sent. The conversation is opened first — an upload belongs to a session, and
+ * a project is where it lands, so no project picked marks the pill exactly as
+ * a send would — then the "save to" dialog is shown. Nothing uploads until it
+ * is confirmed; a cancel simply drops the files.
+ */
+async function onFilesPicked(files: PickedFile[]) {
+  const allowed = files.filter((f) => isAllowedAttachmentType(f.mediaType, f.filename))
+  if (!allowed.length) return
+  const opened = await ensureSessionForSend()
+  if (!opened) return
+  const project = await attachProjectFor(opened)
+  if (!project) return
+  attachPending.value = allowed
+  attachProject.value = { id: project.id, name: project.name }
+  attachDir.value = project.lastAttachDir ?? ''
+  attachOpen.value = true
+}
+
+/** The project a conversation belongs to, in the shape the dialog needs. */
+async function attachProjectFor(session: string): Promise<{ id: string; name: string; lastAttachDir: string } | null> {
+  try {
+    const info = await forebrainApi.chatSession(session)
+    if (!info.project) return null
+    return { id: info.project.id, name: info.project.name, lastAttachDir: info.project.lastAttachDir ?? '' }
+  } catch {
+    return null
+  }
+}
+
+function closeAttach() {
+  attachOpen.value = false
+  attachPending.value = []
+}
+
+/** Save the waiting files into dir and hand them to the composer, which sends
+ *  them by id with the next message. A send that lands before the upload
+ *  finishes waits for it (waitForPendingAttachUpload), so an attachment
+ *  confirmed and sent in quick succession is never dropped. */
+async function confirmAttach(dir: string) {
+  const session = sessionId.value
+  const pending = attachPending.value
+  if (!session || !pending.length) {
+    closeAttach()
+    return
+  }
+  const run = (async () => {
+    const uploaded: SubmittedAttachment[] = []
+    for (const item of pending) {
+      try {
+        const res = await forebrainApi.filesUpload(item.file, session, dir)
+        uploaded.push({ fileId: res.fileId, filename: item.filename, mediaType: item.mediaType })
+      } catch (error) {
+        // The dialog stays open so the user can retry; nothing the user
+        // attached is lost.
+        composerNotice.value = {
+          title: t('chat.messageNotSent'),
+          detail: `${t('chat.uploadFailed', { name: item.filename })}\n${getErrorMessage(error)}`,
+        }
+        return
+      }
+    }
+    promptRef.value?.addUploaded(uploaded)
+  })()
+  pendingAttachUpload = run
+  try {
+    await run
+  } finally {
+    if (pendingAttachUpload === run) pendingAttachUpload = null
+  }
+  closeAttach()
+}
+
+/** A send that lands while an attach upload is in flight waits for it: the
+ *  attachment must be in the composer before the message takes what it holds.
+ *  A failed upload resolves too — the message then carries no attachment, and
+ *  the failure is already shown. */
+async function waitForPendingAttachUpload() {
+  while (pendingAttachUpload) {
+    await pendingAttachUpload
   }
 }
 
@@ -1664,30 +1777,14 @@ async function handleSubagentSubmit(message: { text: string; files?: { url?: str
     }
     // A skill command: sent raw; the gateway expands it for this subagent.
   }
+  await waitForPendingAttachUpload()
   const attached = promptRef.value?.takeAttached() ?? { attachments: [], mentionImages: [] }
   composerNotice.value = null
   const queued = nextSubmissionDisposition.value === 'queue'
   nextSubmissionDisposition.value = 'steer'
-  const picked: PickedFile[] = files
-    .filter((f) => isAllowedAttachmentType(f.mediaType ?? '', f.filename ?? ''))
-    .flatMap((f) => (f.file ? [{ file: f.file, filename: f.filename || f.file.name, mediaType: f.mediaType || f.file.type }] : []))
-  let uploadSession: Promise<string> | null = null
-  const sessionForUpload = () => {
-    uploadSession ??= sessionId.value
-      ? Promise.resolve(sessionId.value)
-      : forebrainApi.chatSessionCreate().then((created) => created.id)
-    return uploadSession
-  }
-  const { submission, unsent, failure } = await uploadSubmission(text, attached, picked,
-    async (file) => forebrainApi.filesUpload(file, await sessionForUpload()))
-  if (failure) {
-    composerNotice.value = {
-      title: t('chat.messageNotSent'),
-      detail: `${t('chat.uploadFailed', { name: failure.filename })}\n${getErrorMessage(failure.error)}`,
-    }
-    promptRef.value?.restoreSubmission(submission, unsent)
-    return
-  }
+  // Attachments were saved into the project when they were added (the "save to"
+  // dialog), so the submission just carries what the composer already holds.
+  const submission: ComposerSubmission = { text, attachments: attached.attachments, mentionImages: attached.mentionImages }
   await sendToSubagent(agentId, submission, queued)
 }
 
@@ -1739,6 +1836,7 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
   }
   // Everything the composer attached leaves it with this message at once, so
   // an image picked while the files upload belongs to the next one.
+  await waitForPendingAttachUpload()
   const attached = promptRef.value?.takeAttached() ?? { attachments: [], mentionImages: [] }
   composerNotice.value = null
   // The first message of a new chat opens its conversation first, in the
@@ -1753,35 +1851,16 @@ async function handleSubmit(message: { text: string; files?: { url?: string; fil
   }
   const activeInputDisposition = isStreaming.value ? nextSubmissionDisposition.value : undefined
   nextSubmissionDisposition.value = 'steer'
-  const picked: PickedFile[] = files
-    .filter((f) => isAllowedAttachmentType(f.mediaType ?? '', f.filename ?? ''))
-    .flatMap((f) => (f.file ? [{ file: f.file, filename: f.filename || f.file.name, mediaType: f.mediaType || f.file.type }] : []))
-  // A file belongs to a conversation, so the first message of a new chat opens
-  // its session before the first upload, once, and is then sent into it.
-  let uploadSession: Promise<string> | null = null
-  const sessionForUpload = () => {
-    uploadSession ??= sessionId.value
-      ? Promise.resolve(sessionId.value)
-      : forebrainApi.chatSessionCreate().then((created) => created.id)
-    return uploadSession
-  }
-  const { submission, unsent, failure } = await uploadSubmission(text, attached, picked,
-    async (file) => forebrainApi.filesUpload(file, await sessionForUpload()))
-  if (failure) {
-    // The message waits in the composer, whole, until its files upload.
-    composerNotice.value = {
-      title: t('chat.messageNotSent'),
-      detail: `${t('chat.uploadFailed', { name: failure.filename })}\n${getErrorMessage(failure.error)}`,
-    }
-    promptRef.value?.restoreSubmission(submission, unsent)
-    return
-  }
+  // Files were saved into the project when they were attached (the "save to"
+  // dialog), so this send only carries what the composer already holds: its
+  // uploaded attachments and its @ images.
+  const submission: ComposerSubmission = { text, attachments: attached.attachments, mentionImages: attached.mentionImages }
   await send(text, {
     // The address bar is the one source of which session is open. The
     // composer's submit can land before the route watcher has applied a
     // just-pushed session switch, so read the target here rather than
     // trusting the (possibly one-tick-stale) sessionId ref.
-    sessionId: uploadSession ? await uploadSession : (String(route.query.session ?? '').trim() || sessionId.value || undefined),
+    sessionId: String(route.query.session ?? '').trim() || sessionId.value || undefined,
     attached: submission,
     activeInputDisposition,
   })

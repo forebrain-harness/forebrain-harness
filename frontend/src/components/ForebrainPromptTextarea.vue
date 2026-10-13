@@ -5,7 +5,7 @@ import { cn } from '@repo/shadcn-vue/lib/utils'
 import { Bot, ChevronLeft, ChevronRight, FileText, Folder, Image as ImageIcon, Paperclip, Slash, X } from 'lucide-vue-next'
 import { computed, nextTick, ref, watch } from 'vue'
 import { forebrainApi, type MentionCandidate, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
-import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
+import { mergeSubmissions, type ComposerSubmission, type PickedFile, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { useI18n } from '@/locales'
 
 export type BotOption = {
@@ -57,6 +57,13 @@ const props = defineProps<{
    * file view.
    */
   scope?: WorkspaceScope
+  /**
+   * When true, a newly attached file leaves the composer at once and is handed
+   * to the parent to save into the project through the "save to" dialog (the
+   * upload happens on confirm, not at send). Off, the composer keeps the file
+   * and it uploads when the message is sent.
+   */
+  attachSave?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -68,6 +75,10 @@ const emit = defineEmits<{
   // waiting on a usage limit, as they do in the terminal.
   (e: 'typed'): void
   (e: 'escape'): void
+  // Files the user just attached (picked, dropped or pasted), handed up for
+  // the "save to" dialog when attachSave is on. They are already gone from the
+  // composer's own list.
+  (e: 'files-picked', files: PickedFile[]): void
 }>()
 
 const { textInput, setTextInput, submitForm, addFiles, clearFiles, files, removeFile } = usePromptInput()
@@ -99,6 +110,38 @@ const mentionImages = ref<string[]>([])
 // before its turn began, or recalled from the queue. They are sent by id again
 // rather than uploaded twice.
 const uploadedAttachments = ref<SubmittedAttachment[]>([])
+// Whether the files the watcher below is about to hand up came from a paste.
+let pastedFromClipboard = false
+
+// With attachSave on, a file the user just attached does not wait in the
+// composer: it is handed to the parent, which opens the "save to" dialog and
+// uploads it once confirmed. The composer's own list is cleared either way, so
+// a send never uploads it a second time and a cancel simply leaves nothing.
+watch(
+  () => files.value.length,
+  () => {
+    if (!props.attachSave || files.value.length === 0) return
+    const pending: PickedFile[] = files.value.map((attachment) => ({
+      file: attachment.file as File,
+      filename: attachment.filename || attachment.file?.name || '',
+      mediaType: attachment.mediaType || attachment.file?.type || '',
+      fromClipboard: pastedFromClipboard,
+    }))
+    for (const attachment of [...files.value]) removeFile(attachment.id)
+    pastedFromClipboard = false
+    emit('files-picked', pending)
+  },
+)
+
+/**
+ * Adds attachments the composer has already uploaded (the parent saved them
+ * through the "save to" dialog). They ride the next submission by id, exactly
+ * like one given back from the queue.
+ */
+function addUploaded(attachments: SubmittedAttachment[]) {
+  if (!attachments.length) return
+  uploadedAttachments.value = [...uploadedAttachments.value, ...attachments]
+}
 
 const modelValue = computed({
   get: () => textInput.value,
@@ -198,7 +241,7 @@ function mentionImageLabel(path: string): string {
   return path.split('/').filter(Boolean).pop() ?? path
 }
 
-defineExpose({ insertWorkspacePath, takeAttached, hasAttached, restoreSubmission })
+defineExpose({ insertWorkspacePath, takeAttached, hasAttached, restoreSubmission, addUploaded })
 
 const filteredBots = computed(() => {
   const list = props.bots ?? []
@@ -650,6 +693,7 @@ function handlePaste(e: ClipboardEvent) {
 
   if (pastedFiles.length > 0) {
     e.preventDefault()
+    pastedFromClipboard = true
     addFiles(pastedFiles)
   }
 }
