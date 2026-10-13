@@ -2080,6 +2080,10 @@ export function useChatStream() {
   let sessionEventCursor = 0
   let historyLoadingSession = ''
   const bufferedSessionEvents: ForebrainRunEvent[] = []
+  // In-flight text and tool output the gateway pushed while the history was
+  // still loading: its target message does not exist yet, so it is applied once
+  // the snapshot has been projected, in the order it arrived.
+  const bufferedStreamPartials: Record<string, unknown>[] = []
   const appliedEventIDs = new Set<string>()
   const legacyMirroredRunIDs = new Set<string>()
   const eventProjectionByRun = new Map<string, {
@@ -2716,6 +2720,14 @@ export function useChatStream() {
     for (const evt of queued) applyObservedEvent(evt)
   }
 
+  // flushStreamPartials applies the in-flight pieces that arrived while the
+  // history was still loading, once their target messages exist.
+  function flushStreamPartials() {
+    if (historyLoadingSession || bufferedStreamPartials.length === 0) return
+    const queued = bufferedStreamPartials.splice(0, bufferedStreamPartials.length)
+    for (const partial of queued) applyStreamPartial(partial)
+  }
+
   function startSessionObserver(sid: string): Promise<void> {
     const target = sid.trim()
     if (!target) return Promise.resolve()
@@ -2767,6 +2779,20 @@ export function useChatStream() {
             mcpStatus.value = mcpStatusMsg
             return
           }
+          if (String(raw.op ?? '').trim() === 'stream_partial') {
+            // The in-flight text and tool output this process holds for the
+            // conversation; the durable snapshot cannot carry them because the
+            // deltas are push-only. Until the history has been projected its
+            // target message does not exist, so it waits in order to be applied
+            // after. A local send owns the live tail: its own socket handles
+            // the partials, so the observer drops them rather than fighting it.
+            if (historyLoadingSession) {
+              bufferedStreamPartials.push(toCamelCase(raw) as Record<string, unknown>)
+            } else if (!isStreaming.value) {
+              applyStreamPartial(toCamelCase(raw) as Record<string, unknown>)
+            }
+            return
+          }
           const evt = parseForebrainRunEventMessage(raw)
 		  if (evt && !isSupportedForebrainRunEventSchema(evt.schemaVersion)) {
 			observerSessionId = ''
@@ -2807,6 +2833,7 @@ export function useChatStream() {
 	  eventProjectionByRun.clear()
 	  clearSubagentCardState()
 	  bufferedSessionEvents.splice(0, bufferedSessionEvents.length)
+	  bufferedStreamPartials.splice(0, bufferedStreamPartials.length)
 	  historyLoadingSession = sid
 	  if (sessionObserver) {
 	    try { sessionObserver.close() } catch { /* noop */ }
@@ -3205,6 +3232,105 @@ export function useChatStream() {
       default:
         return false
     }
+  }
+
+  /**
+   * replaceInFlightThinking replaces the words of a view's last still-open
+   * thinking block with `text`, or opens one when there is none. It is a
+   * replace, not an append: the gateway sends the whole block it holds, and a
+   * page that already drew part of the same block before a gap would otherwise
+   * show the text twice.
+   */
+  function replaceInFlightThinking(blocks: TimelineBlock[], text: string, occurredAt?: unknown): TimelineBlock[] {
+    const next = String(text ?? '')
+    if (!next) return blocks
+    const index = blocks.map((block) => block.kind === 'thinking' && block.open).lastIndexOf(true)
+    if (index >= 0) {
+      return blocks.map((block, i) => (i === index ? { ...block, text: next } : block))
+    }
+    return [...blocks, { kind: 'thinking', text: next, open: true, startedAt: eventTimestamp(occurredAt) }]
+  }
+
+  /**
+   * replaceToolOutputs replaces the output of the running card for each named
+   * step with the text the gateway holds, so a page that missed a call's output
+   * mid-stream shows the same output the live deltas would have.
+   */
+  function replaceToolOutputs(blocks: TimelineBlock[], outputs: Record<string, unknown>[]): TimelineBlock[] {
+    if (!outputs.length) return blocks
+    const byStep = new Map<string, string>()
+    for (const entry of outputs) {
+      const stepId = String(entry.stepId ?? '').trim()
+      if (stepId) byStep.set(stepId, String(entry.text ?? ''))
+    }
+    if (!byStep.size) return blocks
+    return blocks.map((block) => (
+      block.kind === 'tool' && byStep.has(block.step.stepId)
+        ? { ...block, step: { ...block.step, output: byStep.get(block.step.stepId) } }
+        : block
+    ))
+  }
+
+  /**
+   * applyStreamPartial applies the in-flight text and tool output the gateway
+   * sends a page that arrives mid-turn — a reconnect, a fresh binding. The
+   * deltas that built them are push-only and stored nowhere, so this is what a
+   * page that missed them draws; the pieces are replaced, never appended, so
+   * what it already had of the same block is not said twice.
+   */
+  function applyStreamPartial(payload: Record<string, unknown>, hostId = '') {
+    const data = (payload.data && typeof payload.data === 'object') ? payload.data as Record<string, unknown> : payload
+    const runId = String(payload.runId ?? '').trim()
+    const agentId = String(data.agentId ?? payload.agentId ?? '').trim()
+    const content = String(data.content ?? '')
+    const reasoning = String(data.reasoning ?? '')
+    const toolOutputs = Array.isArray(data.toolOutputs) ? data.toolOutputs as Record<string, unknown>[] : []
+    if (!content && !reasoning && !toolOutputs.length) return
+    const paint = (blocks: TimelineBlock[]): TimelineBlock[] => {
+      let next = blocks
+      if (content) {
+        // Text after thinking closes the thinking block, the way the terminal
+        // finalises reasoning before it prints the answer, and the answer is
+        // the tail so a following delta continues it rather than opening a
+        // second block.
+        next = closeStreamedBlocks(next, ['thinking'])
+        const index = next.map((block) => block.kind === 'assistant' && block.open).lastIndexOf(true)
+        if (index >= 0) {
+          const updated = { ...(next[index] as Extract<TimelineBlock, { kind: 'assistant' }>), text: content }
+          next = [...next.slice(0, index), ...next.slice(index + 1), updated]
+        } else {
+          next = [...next, { kind: 'assistant', text: content, open: true }]
+        }
+        if (reasoning) {
+          const tail = next.length - 1
+          next = [...next.slice(0, tail), { kind: 'thinking', text: reasoning, open: false, startedAt: eventTimestamp(undefined) }, next[tail]]
+        }
+      } else if (reasoning) {
+        next = replaceInFlightThinking(next, reasoning)
+      }
+      return replaceToolOutputs(next, toolOutputs)
+    }
+    if (agentId) {
+      updateSubagent(agentId, (entry) => ({ ...entry, blocks: paint(entry.blocks) }))
+      return
+    }
+    const target = hostId
+      || String(eventProjectionByRun.get(runId)?.assistantMessageId ?? '').trim()
+      || streamPartialHost(runId)
+    if (!target) return
+    updateMessageById(target, (message) => {
+      const blocks = paint(message.blocks ?? [])
+      return { ...message, blocks, content: spokenText(blocks) || message.content }
+    })
+  }
+
+  /** streamPartialHost finds the running turn's message for a run by its id. */
+  function streamPartialHost(runId: string): string {
+    if (!runId) return ''
+    const host = [...messages.value].reverse().find(
+      (message) => message.role === 'assistant' && String(message.runId ?? '').trim() === runId,
+    )
+    return host?.id ?? ''
   }
 
   function applyPlanRuntimeStatus(planUpdate: PlanUpdateData) {
@@ -4437,6 +4563,13 @@ export function useChatStream() {
           }
           return { terminal: sessionSwitched }
         }
+        if (op === 'stream_partial') {
+          // The in-flight text and tool output the gateway re-pushes after a
+          // reconnect: the durable replay cannot carry the push-only deltas the
+          // page missed. The pieces are replaced on the running turn's message.
+          applyStreamPartial(payload, answerId())
+          return
+        }
         if (op === 'slash_reply') {
           // Slash replies are UI-only output: never persisted in the
           // transcript, never sent to the model, and no run lifecycle rides
@@ -5097,6 +5230,7 @@ export function useChatStream() {
 		historyLoadingSession = ''
 		historyLoading.value = false
 		flushBufferedSessionEvents()
+		flushStreamPartials()
 	  }
     }
   }

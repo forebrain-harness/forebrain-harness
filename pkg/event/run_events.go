@@ -70,6 +70,19 @@ const (
 	RunEventHeartbeatFired = "heartbeat_fired"
 )
 
+// IsPushOnlyStreamEvent reports a fragment of a run as it happens — answer and
+// reasoning text, the end of a reasoning block, a chunk of a tool's output.
+// Each is kept once elsewhere: the words in the transcript (written as each
+// block ends), the tool's output on its completed step. These events are
+// pushed to whoever is watching and never stored.
+func IsPushOnlyStreamEvent(eventType string) bool {
+	switch eventType {
+	case RunEventAssistantDelta, RunEventReasoningDelta, RunEventReasoningDone, RunEventToolOutputDelta:
+		return true
+	}
+	return false
+}
+
 type RunEvent struct {
 	ID string `json:"id"`
 	// Sequence is the durable, conversation-wide cursor. Run-local step

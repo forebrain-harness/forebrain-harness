@@ -72,6 +72,56 @@ type Server struct {
 
 	runEventsOnce sync.Once
 	runEvents     *runEventBus
+
+	streamPartsOnce  sync.Once
+	streamPartsCache *streamParts
+}
+
+// streamParts is the gateway's in-memory record of what the runs this process
+// is executing are producing right now. It is created on first use so a Server
+// assembled field-by-field never has to remember to build it, and it is the one
+// the bus and every streaming surface share.
+func (s *Server) streamParts() *streamParts {
+	if s == nil {
+		return nil
+	}
+	s.streamPartsOnce.Do(func() {
+		s.streamPartsCache = newStreamParts()
+	})
+	return s.streamPartsCache
+}
+
+// pushStreamPartials sends the in-flight text and tool output of every stream
+// this process is running in a conversation, so a page that arrives mid-turn —
+// a reconnect, a fresh binding — draws what the durable replay cannot carry:
+// the deltas that built the running answer and reasoning block and each running
+// tool's output are push-only and stored nowhere. Each is a legacy op, not a
+// fact about the conversation: it is what is on this process's screen now, it
+// is never stored, and a page that already shows the same text replaces it
+// rather than appending a second copy.
+func (s *Server) pushStreamPartials(writeMsg func(wsServerMsg), requestID, sessionID string) {
+	parts := s.streamParts()
+	if parts == nil {
+		return
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return
+	}
+	for _, snap := range parts.sessionSnapshots(sid) {
+		writeMsg(wsServerMsg{
+			Op:        "stream_partial",
+			RequestID: requestID,
+			RunID:     snap.RunID,
+			SessionID: sid,
+			Data: map[string]any{
+				"agent_id":     snap.AgentID,
+				"content":      snap.Content,
+				"reasoning":    snap.Reasoning,
+				"tool_outputs": snap.Tools,
+			},
+		})
+	}
 }
 
 // runnerFor resolves the Runner one session's requests must run on. A session
@@ -186,6 +236,9 @@ func (s *Server) RunEvents() *runEventBus {
 	}
 	s.runEventsOnce.Do(func() {
 		s.runEvents = newRunEventBus(s.RunRT)
+		// The bus feeds the in-flight registry every event it carries, so the
+		// runs streaming through it know what a mid-turn page is missing.
+		s.runEvents.streams = s.streamParts()
 		if s.Env != nil {
 			// No Env, no cron service: without one there is nothing a run's
 			// end settles, so the hook is not installed.
@@ -1275,10 +1328,20 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				SessionID: sid,
 				Message:   "bound",
 			}, 2*time.Minute, time.Now())
+			// The durable snapshot is out; now the in-flight text and tool
+			// output this process holds for the conversation, which the log no
+			// longer carries. A fresh page fills its running turn from here.
+			s.pushStreamPartials(writeMsg, m.RequestID, sid)
 			continue
 		}
 		if op == "resume_connection" {
 			if ok, resyncRequired := resumeRunEvents(m.RequestID, m.RunID, m.Cursor); ok {
+				// The durable tail is replayed; the in-flight pieces the
+				// reconnect missed — the answer being written, the running
+				// tool's output — follow from memory.
+				if wsSid != "" {
+					s.pushStreamPartials(writeMsg, m.RequestID, wsSid)
+				}
 				continue
 			} else if resyncRequired {
 				writeMsg(wsServerMsg{

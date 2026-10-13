@@ -75,6 +75,11 @@ type FireRun struct {
 
 // FireEndingFromRunEvent reads how a run ended from its ending event. It
 // returns false for any event that is not a run's end.
+//
+// A completion carries no answer: the run's words live in its transcript,
+// written as each block ends, and the ending event only says it ended. The
+// reader that wants the answer — a scheduled fire delivering it to a channel —
+// reads it from there (state.SessionStore.LastAssistantTextForRun).
 func FireEndingFromRunEvent(evt event.RunEvent) (FireEnding, bool) {
 	switch evt.Type {
 	case event.RunEventTurnCompleted:
@@ -82,7 +87,7 @@ func FireEndingFromRunEvent(evt event.RunEvent) (FireEnding, bool) {
 		if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 			return FireEnding{}, false
 		}
-		return FireEnding{Output: payload.Text}, true
+		return FireEnding{}, true
 	case event.RunEventTurnError:
 		var payload event.TurnErrorPayload
 		if err := json.Unmarshal(evt.Payload, &payload); err != nil {

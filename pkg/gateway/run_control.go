@@ -420,6 +420,10 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 		return ctx
 	}
 	stream := run.EventStreamSink(context.WithoutCancel(ctx), s.RunEvents(), runID, sessionID, "", streamed)
+	// Register the in-flight block so a page that arrives mid-turn is shown the
+	// answer and reasoning the push-only deltas carried and no log keeps. The
+	// entry is dropped when the run's ending event reaches the bus.
+	s.streamParts().registerPrimary(runID, sessionID, partial)
 	publishDelta, publishReasoning := stream.OnDelta, stream.OnReasoningDelta
 	publishReasoningDone := stream.OnReasoningDone
 	stream.OnDelta = func(text string) {
@@ -863,8 +867,9 @@ func (s *Server) runDetachedTurn(runCtx context.Context, t detachedTurn, runID s
 		AppendAssistant: true,
 	})
 	s.finishRun(ctx, sid, runID, state.RunStatusDone)
+	// No answer on the completion record: the run's words are in the transcript,
+	// written as each block ends, and this durable event only says the run ended.
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
-		Text:      answer,
 		ElapsedMS: elapsed.Milliseconds(),
 	})
 }

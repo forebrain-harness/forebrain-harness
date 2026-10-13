@@ -170,7 +170,25 @@ func (c *CronService) fireRunState(ctx context.Context, sessionID string) (turn.
 	if !ok {
 		return turn.FireRun{}, nil
 	}
+	// A completed run's answer is no longer carried by its ending event: the
+	// words live in the conversation's transcript, written as each block ended,
+	// so a fire that delivers its answer reads it there. A run that ended
+	// another way has nothing to read.
+	if evts[0].Type == event.RunEventTurnCompleted {
+		if text, terr := c.lastAssistantText(ctx, id); terr == nil {
+			ending.Output = text
+		}
+	}
 	return turn.FireRun{Ended: true, Ending: ending}, nil
+}
+
+// lastAssistantText reads the answer a run's transcript ends with. A store-less
+// deployment (or a session store that is not wired) simply has none.
+func (c *CronService) lastAssistantText(ctx context.Context, runID string) (string, error) {
+	if c == nil || c.env == nil || c.env.Deps.SessionStore == nil {
+		return "", nil
+	}
+	return c.env.Deps.SessionStore.LastAssistantTextForRun(ctx, runID)
 }
 
 // SettleFire asks the bound scheduler to look at the fire that ran in

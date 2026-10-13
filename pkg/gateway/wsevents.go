@@ -72,9 +72,12 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 		typeName = event.RunEventTurnStarted
 		payload = event.TurnStartedPayload{}
 	case "run_completed":
+		// The answer is not carried: the run's words live in the transcript,
+		// written as each block ends, so the durable completion record says only
+		// that the turn ended. The legacy op the socket itself receives keeps
+		// its own Text — that frame is not stored.
 		typeName = event.RunEventTurnCompleted
 		payload = event.TurnCompletedPayload{
-			Text:         m.Text,
 			ElapsedMS:    int64Field(m.Data, "elapsed_ms"),
 			RunPlanFacts: m.RunPlanFacts,
 		}
@@ -572,6 +575,11 @@ type runEventBus struct {
 	// nothing but the event, and the scheduler reads the ending back from
 	// the store, so removing the hook changes only how soon settling runs.
 	onRunEnded func(event.RunEvent)
+	// streams is the gateway's in-memory record of what the runs on this
+	// process are producing right now, so a page that arrives mid-turn can be
+	// shown the in-flight text and tool output the push-only deltas carried
+	// and no log keeps. Nil when the composition root did not build one.
+	streams *streamParts
 }
 
 func newRunEventBus(stores ...*state.RunStore) *runEventBus {
@@ -595,6 +603,23 @@ func (b *runEventBus) Publish(ctx context.Context, evt event.RunEvent) error {
 		// without being shown to every other session's user.
 		return nil
 	}
+	// The in-flight registry is fed every event, push-only or not, so a running
+	// tool is forgotten the moment its completion arrives. It is in memory and
+	// independent of the store, so it is updated before durability is tried.
+	if b.streams != nil {
+		b.streams.observe(evt)
+	}
+	// A stream fragment — the words of an answer or reasoning block, a chunk of
+	// a tool's output — is pushed and stored nowhere: the words live in the
+	// transcript (written as each block ends) and the tool's output on its
+	// completed step. Storing the fragment too would duplicate the durable
+	// record and grow the log without bound, so it is delivered as it stands,
+	// with no sequence and no event id. onRunEnded is not told either: nothing
+	// ended.
+	if event.IsPushOnlyStreamEvent(evt.Type) {
+		b.deliver(session, evt)
+		return nil
+	}
 	if b.store != nil {
 		persisted, err := b.store.AppendSessionEvent(ctx, sessionEventRecord(evt))
 		switch {
@@ -610,6 +635,16 @@ func (b *runEventBus) Publish(ctx context.Context, evt event.RunEvent) error {
 	if b.onRunEnded != nil {
 		b.onRunEnded(evt)
 	}
+	b.deliver(session, evt)
+	return nil
+}
+
+// deliver hands one event to every connection watching its session. It never
+// blocks on a subscriber: delivery is a bounded enqueue.
+func (b *runEventBus) deliver(session string, evt event.RunEvent) {
+	if b == nil {
+		return
+	}
 	b.mu.RLock()
 	subs := make([]*runEventSubscription, 0, len(b.subs))
 	for _, sub := range b.subs {
@@ -619,7 +654,6 @@ func (b *runEventBus) Publish(ctx context.Context, evt event.RunEvent) error {
 	for _, sub := range subs {
 		sub.deliver(session, evt)
 	}
-	return nil
 }
 
 func sessionEventRecord(evt event.RunEvent) state.SessionEvent {

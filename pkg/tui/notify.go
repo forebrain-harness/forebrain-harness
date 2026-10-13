@@ -740,7 +740,14 @@ func (s *ChatSession) publishRunEvent(ctx context.Context, evt event.RunEvent) e
 	if s == nil {
 		return nil
 	}
-	if s.runSvc() != nil && strings.TrimSpace(evt.SessionID) != "" {
+	// A stream fragment — the words of an answer or reasoning block, a chunk of
+	// a tool's output — is painted but never stored. The words live once, in the
+	// transcript (written as each block ends), and a tool's output on its
+	// completed step; storing the fragment too would duplicate the durable
+	// record and grow the log without bound. It passes markEventShownOnce
+	// because it has no derived identity, which is exactly right: there is
+	// nothing to dedupe a fragment against.
+	if s.runSvc() != nil && strings.TrimSpace(evt.SessionID) != "" && !event.IsPushOnlyStreamEvent(evt.Type) {
 		persisted, inserted, err := s.runSvc().AppendSessionEventOnce(ctx, state.SessionEvent{
 			ID: evt.ID, RunID: evt.RunID, SessionID: evt.SessionID, Type: evt.Type,
 			Payload: append(json.RawMessage(nil), evt.Payload...), CreatedAt: evt.CreatedAt,

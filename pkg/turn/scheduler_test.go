@@ -843,8 +843,11 @@ func TestFireEndingFromRunEventMapsTheThreeEndings(t *testing.T) {
 	mk := func(kind string, payload any) event.RunEvent {
 		return event.NewRunEvent("", "r-1", "cron-job-1-1", kind, payload, time.Now())
 	}
+	// A completion carries no answer: the run's words are in its transcript, so
+	// the ending says only that the run finished. The answer is read back from
+	// the transcript by the reader that delivers it (see the cron service).
 	end, ok := FireEndingFromRunEvent(mk(event.RunEventTurnCompleted, event.TurnCompletedPayload{Text: "the answer"}))
-	if !ok || end.Output != "the answer" || end.ErrCode != "" || end.ErrText != "" {
+	if !ok || end.Output != "" || end.ErrCode != "" || end.ErrText != "" {
 		t.Fatalf("completed = %+v %v", end, ok)
 	}
 
