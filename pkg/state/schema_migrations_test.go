@@ -287,10 +287,13 @@ func TestStateMigrationMatchesFreshSchema(t *testing.T) {
 
 	// T5: the run-step ledger is folded into the one event log. The events keep
 	// the order their cursor gave them, and the migrated steps land where the
-	// conversation drew them: seq 1 before the turn's start, seq 2 between the
-	// start and the child's delta, the main plan update after the child's
-	// delta. Everything else the ledger held is gone — a step an event already
-	// stood for, and every step kind that has a canonical event or no reader.
+	// conversation drew them: seq 1 before the turn's start, seq 2 after it,
+	// the main plan update after the twin tool completion. Everything else the
+	// ledger held is gone — a step an event already stood for, and every step
+	// kind that has a canonical event or no reader. The fixture's two stored
+	// stream deltas (evt-child-delta, evt-norun) are removed by the v11
+	// migration: they carry no agent_id, so they are the main agent's own
+	// fragments, which nothing reads.
 	type storedEvent struct{ id, runID, typ string }
 	var merged []storedEvent
 	eventRows, err := migrated.QueryContext(ctx, `
@@ -314,11 +317,9 @@ SELECT event_id, IFNULL(run_id,''), event_type FROM fb_session_events ORDER BY s
 		{"evt-rz-top-1", "rz-top", event.RunEventToolStarted},
 		{"evt-turn-start", "rz-top", event.RunEventTurnStarted},
 		{"evt-rz-top-2", "rz-top", event.RunEventToolCompleted},
-		{"evt-child-delta", "rz-sub", event.RunEventAssistantDelta},
 		{"evt-twin", "rz-top", event.RunEventToolCompleted},
 		{"evt-rz-top-7", "rz-top", event.RunEventPlanUpdated},
 		{"evt-main-done", "rz-top", event.RunEventTurnCompleted},
-		{"evt-norun", "", event.RunEventAssistantDelta},
 	}
 	if len(merged) != len(wantOrder) {
 		t.Fatalf("merged events = %+v, want %d rows", merged, len(wantOrder))
@@ -1995,4 +1996,339 @@ INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_
 		}
 	}
 	requireForeignKeysClean(ctx, t, migrated)
+}
+
+// streamDeltaFixtureV11 is a database at the given user_version holding every
+// shape the v10→v11 stream-delta migration must tell apart: a main agent's own
+// fragments, an execution whose worker transcript covers it, one whose worker
+// session is gone, one with no spawn at all, and tool-output chunks both with
+// and without their completed step.
+func streamDeltaFixtureV11(t *testing.T, userVersion int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	rows := []string{
+		`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES
+		   ('P','main','P',10,10,'/repo/P'),
+		   ('W1','main','W1',10,10,'/repo/W1')`,
+		`INSERT INTO fb_runs(id, session_id, parent_run_id, input_text, status, created_at, updated_at) VALUES
+		   ('R-main','P',NULL,'hi','done',10,10),
+		   ('E1','P','R-main','sub','done',11,11),
+		   ('E2','P','R-main','sub','done',12,12),
+		   ('E3','P','R-main','sub','done',13,13)`,
+		// W1's transcript covers E1's deltas: 9 characters against their 9.
+		`INSERT INTO fb_messages(session_id, run_id, role, content, created_at) VALUES
+		   ('W1',NULL,'assistant','123456789',10)`,
+		// The main agent's own fragments (no agent_id) — five rows.
+		`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES
+		   ('P','R-main','m1','assistant_delta','{"text":"aa"}',100),
+		   ('P','R-main','m2','assistant_delta','{"text":"bb"}',101),
+		   ('P','R-main','m3','reasoning_delta','{"text":"cc"}',102),
+		   ('P','R-main','m4','reasoning_delta','{"text":"dd"}',103),
+		   ('P','R-main','m5','reasoning_done','{}',104)`,
+		// E1: covered by W1 → deleted.
+		`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES
+		   ('P','E1','e1spawn','subagent_spawned','{"agent_id":"subagent-1","execution_id":"E1","worker_session_id":"W1"}',109),
+		   ('P','E1','e1a','assistant_delta','{"agent_id":"subagent-1","text":"aaaaaa"}',110),
+		   ('P','E1','e1b','reasoning_delta','{"agent_id":"subagent-1","text":"bbb"}',111)`,
+		// E2: worker session gone → merge each contiguous block.
+		`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES
+		   ('P','E2','e2spawn','subagent_spawned','{"agent_id":"subagent-2","execution_id":"E2","worker_session_id":"W-gone"}',119),
+		   ('P','E2','e2-1','reasoning_delta','{"agent_id":"subagent-2","text":"R1"}',120),
+		   ('P','E2','e2-2','reasoning_delta','{"agent_id":"subagent-2","text":"R2"}',121),
+		   ('P','E2','e2-3','reasoning_delta','{"agent_id":"subagent-2","text":"R3"}',122),
+		   ('P','E2','e2-4','reasoning_done','{"agent_id":"subagent-2"}',123),
+		   ('P','E2','e2-5','assistant_delta','{"agent_id":"subagent-2","text":"A1"}',124),
+		   ('P','E2','e2-6','assistant_delta','{"agent_id":"subagent-2","text":"A2"}',125),
+		   ('P','E2','e2-7','tool_call_started','{"agent_id":"subagent-2","step_id":"E2S"}',126),
+		   ('P','E2','e2-8','assistant_delta','{"agent_id":"subagent-2","text":"A3"}',127),
+		   ('P','E2','e2-9','assistant_delta','{"agent_id":"subagent-2","text":"A4"}',128)`,
+		// E3: no spawn at all → merge (never delete an execution with nowhere
+		// else to keep its words).
+		`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES
+		   ('P','E3','e3-1','assistant_delta','{"agent_id":"subagent-3","text":"X"}',130),
+		   ('P','E3','e3-2','assistant_delta','{"agent_id":"subagent-3","text":"Y"}',131)`,
+		// Tool output: the main agent's step with and without its completion.
+		`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES
+		   ('P','R-main','t1a','tool_output_delta','{"step_id":"MS1","text":"p"}',200),
+		   ('P','R-main','t1b','tool_output_delta','{"step_id":"MS1","text":"q"}',201),
+		   ('P','R-main','t1c','tool_output_delta','{"step_id":"MS1","text":"r"}',202),
+		   ('P','R-main','t1done','tool_call_completed','{"step_id":"MS1","tool_name":"shell"}',203),
+		   ('P','R-main','t2a','tool_output_delta','{"step_id":"MS2","text":"s"}',210),
+		   ('P','R-main','t2b','tool_output_delta','{"step_id":"MS2","text":"t"}',211),
+		   ('P','R-main','t2c','tool_output_delta','{"step_id":"MS2","text":"u"}',212)`,
+		// Tool output: a subagent's step with and without its completion.
+		`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES
+		   ('P','E2','ts1a','tool_output_delta','{"step_id":"SS1","agent_id":"subagent-2","text":"h"}',220),
+		   ('P','E2','ts1b','tool_output_delta','{"step_id":"SS1","agent_id":"subagent-2","text":"i"}',221),
+		   ('P','E2','ts1c','tool_output_delta','{"step_id":"SS1","agent_id":"subagent-2","text":"j"}',222),
+		   ('P','E2','ts1done','tool_call_completed','{"step_id":"SS1","tool_name":"shell"}',223),
+		   ('P','E2','ts2a','tool_output_delta','{"step_id":"SS2","agent_id":"subagent-2","text":"k"}',230),
+		   ('P','E2','ts2b','tool_output_delta','{"step_id":"SS2","agent_id":"subagent-2","text":"l"}',231),
+		   ('P','E2','ts2c','tool_output_delta','{"step_id":"SS2","agent_id":"subagent-2","text":"m"}',232)`,
+		fmt.Sprintf(`PRAGMA user_version = %d`, userVersion),
+	}
+	// A bulk of the main agent's own fragments, big enough that deleting them
+	// frees whole pages: the test then proves the framework's trailing VACUUM
+	// (not merely "nothing was ever freed") leaves freelist_count at zero.
+	var bulk strings.Builder
+	bulk.WriteString(`INSERT INTO fb_session_events(session_id, run_id, event_id, event_type, payload_json, occurred_at_ms) VALUES `)
+	pad := strings.Repeat("x", 400)
+	for i := 0; i < streamDeltaBulkV11; i++ {
+		if i > 0 {
+			bulk.WriteString(",")
+		}
+		fmt.Fprintf(&bulk, "('P','R-main','bulk-%d','assistant_delta','{\"text\":\"%s\"}',%d)", i, pad, 1000+i)
+	}
+	rows = append(rows, bulk.String())
+	for _, stmt := range rows {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("build stream-delta fixture: %v", err)
+		}
+	}
+	return path
+}
+
+// streamDeltaBulkV11 is how many extra main-agent fragments the fixture adds,
+// so the migration frees whole pages.
+const streamDeltaBulkV11 = 400
+
+// countStreamDeltas counts the push-only stream events in a database: the
+// fragments an older forebrain stored and this one does not.
+func countStreamDeltas(ctx context.Context, t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM fb_session_events
+WHERE event_type IN ('assistant_delta','reasoning_delta','reasoning_done','tool_output_delta')`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestMigrateAwayStoredStreamDeltas pins the v10→v11 migration that removes
+// the stream deltas an older forebrain stored: the main agent's own fragments
+// are deleted outright, a covered execution's are deleted, an uncovered one's
+// contiguous blocks are merged into single rows (keeping every other field),
+// tool-output chunks are deleted where the completed step carries the whole
+// output and merged where it does not, the framework's trailing VACUUM leaves
+// no free pages, and a backup of the whole database is taken first.
+func TestMigrateAwayStoredStreamDeltas(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("covered executions are deleted, uncovered ones merged", func(t *testing.T) {
+		path := streamDeltaFixtureV11(t, 10)
+		raw, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := countStreamDeltas(ctx, t, raw)
+		if before != 29+streamDeltaBulkV11 {
+			t.Fatalf("fixture holds %d stream deltas, want %d", before, 29+streamDeltaBulkV11)
+		}
+		raw.Close()
+
+		migrated, err := Open(ctx, path, nil)
+		if err != nil {
+			t.Fatalf("open the v10 fixture: %v", err)
+		}
+		defer migrated.Close()
+		requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+		requireForeignKeysClean(ctx, t, migrated)
+
+		count := func(query string, args ...any) int {
+			t.Helper()
+			var n int
+			if err := migrated.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		textTypes := `event_type IN ('assistant_delta','reasoning_delta','reasoning_done')`
+
+		// 1. The main agent's own deltas (no agent_id) are gone.
+		if n := count(`SELECT COUNT(*) FROM fb_session_events
+			WHERE ` + textTypes + ` AND COALESCE(json_extract(payload_json,'$.agent_id'),'')=''`); n != 0 {
+			t.Fatalf("main agent deltas after migration = %d, want 0", n)
+		}
+		// 2a. E1 is covered by W1's transcript → its deltas are gone.
+		if n := count(`SELECT COUNT(*) FROM fb_session_events WHERE run_id='E1' AND ` + textTypes); n != 0 {
+			t.Fatalf("covered execution E1 deltas = %d, want 0", n)
+		}
+		// 2b. E2 is not covered → each contiguous block is one row, in order,
+		// with the block's text joined and the other fields kept.
+		type ev struct{ typ, text, agent string }
+		var got []ev
+		rows, err := migrated.QueryContext(ctx, `
+SELECT event_type, COALESCE(json_extract(payload_json,'$.text'),''),
+       COALESCE(json_extract(payload_json,'$.agent_id'),'')
+FROM fb_session_events
+WHERE run_id='E2' AND event_type IN ('reasoning_delta','reasoning_done','assistant_delta','tool_call_started')
+ORDER BY sequence`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var e ev
+			if err := rows.Scan(&e.typ, &e.text, &e.agent); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			got = append(got, e)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		want := []ev{
+			{"reasoning_delta", "R1R2R3", "subagent-2"},
+			{"reasoning_done", "", "subagent-2"},
+			{"assistant_delta", "A1A2", "subagent-2"},
+			{"tool_call_started", "", "subagent-2"},
+			{"assistant_delta", "A3A4", "subagent-2"},
+		}
+		if len(got) != len(want) {
+			t.Fatalf("E2 rows after migration = %+v, want %+v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("E2 row %d = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+		// 2c. E3 has no spawn → merged, not dropped.
+		var e3Count int
+		var e3Text string
+		if err := migrated.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(MAX(json_extract(payload_json,'$.text')),'')
+FROM fb_session_events WHERE run_id='E3'`).Scan(&e3Count, &e3Text); err != nil {
+			t.Fatal(err)
+		}
+		if e3Count != 1 || e3Text != "XY" {
+			t.Fatalf("execution with no spawn = (%d,%q), want one row of %q", e3Count, e3Text, "XY")
+		}
+
+		// 3. Tool output: deleted where the completed step carries it, merged
+		// where it does not, for the main agent and a subagent alike.
+		step := func(runID, stepID string) (deltas int, text string) {
+			t.Helper()
+			if err := migrated.QueryRowContext(ctx, `
+SELECT COUNT(*), COALESCE(MAX(json_extract(payload_json,'$.text')),'')
+FROM fb_session_events
+WHERE COALESCE(run_id,'')=? AND event_type='tool_output_delta'
+  AND COALESCE(json_extract(payload_json,'$.step_id'),'')=?`, runID, stepID).Scan(&deltas, &text); err != nil {
+				t.Fatal(err)
+			}
+			return deltas, text
+		}
+		if n, _ := step("R-main", "MS1"); n != 0 {
+			t.Fatalf("MS1 tool deltas = %d, want 0", n)
+		}
+		if n, _ := step("R-main", "MS2"); n != 1 {
+			t.Fatalf("MS2 tool deltas = %d, want 1", n)
+		} else if _, text := step("R-main", "MS2"); text != "stu" {
+			t.Fatalf("MS2 merged text = %q, want %q", text, "stu")
+		}
+		if n, _ := step("E2", "SS1"); n != 0 {
+			t.Fatalf("SS1 tool deltas = %d, want 0", n)
+		}
+		if n, _ := step("E2", "SS2"); n != 1 {
+			t.Fatalf("SS2 tool deltas = %d, want 1", n)
+		} else if _, text := step("E2", "SS2"); text != "klm" {
+			t.Fatalf("SS2 merged text = %q, want %q", text, "klm")
+		}
+		// The completed steps survive.
+		for _, c := range []struct{ runID, stepID string }{{"R-main", "MS1"}, {"E2", "SS1"}} {
+			if n := count(`SELECT COUNT(*) FROM fb_session_events
+				WHERE COALESCE(run_id,'')=? AND event_type='tool_call_completed'
+				  AND COALESCE(json_extract(payload_json,'$.step_id'),'')=?`, c.runID, c.stepID); n != 1 {
+				t.Fatalf("completed step %s/%s = %d, want 1", c.runID, c.stepID, n)
+			}
+		}
+
+		// After: 4 text deltas of E2 (e2spawn is not one) + 1 of E3 + 2 tool
+		// chunks.
+		if n := countStreamDeltas(ctx, t, migrated); n != 7 {
+			t.Fatalf("stream deltas after migration = %d, want 7", n)
+		}
+
+		// The framework's trailing VACUUM reclaimed every freed page.
+		var freelist int
+		if err := migrated.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freelist); err != nil {
+			t.Fatal(err)
+		}
+		if freelist != 0 {
+			t.Fatalf("freelist_count after migration = %d, want 0 (the VACUUM ran)", freelist)
+		}
+
+		// The backup exists, is openable, and holds every delta the database
+		// had before the migration.
+		backupsDir := filepath.Join(filepath.Dir(path), "backups")
+		entries, err := os.ReadDir(backupsDir)
+		if err != nil {
+			t.Fatalf("read the backup directory: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("backup directory holds %d files, want 1", len(entries))
+		}
+		backup, err := sql.Open("sqlite3", filepath.Join(backupsDir, entries[0].Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer backup.Close()
+		if got := countStreamDeltas(ctx, t, backup); got != before {
+			t.Fatalf("backup holds %d stream deltas, want the %d the database had before", got, before)
+		}
+	})
+
+	t.Run("the space check refuses before touching the database", func(t *testing.T) {
+		path := streamDeltaFixtureV11(t, 10)
+		old := migrationFreeSpace
+		migrationFreeSpace = func(string) (int64, error) { return 1, nil }
+		defer func() { migrationFreeSpace = old }()
+
+		if _, err := Open(ctx, path, nil); err == nil || !strings.Contains(err.Error(), "free some space and start again") {
+			t.Fatalf("open with no room = %v, want the free-space refusal", err)
+		}
+		raw, err := sql.Open("sqlite3", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		var version int
+		if err := raw.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		if version != 10 {
+			t.Fatalf("user_version after a refused backup = %d, want the fixture's 10 (the database was not touched)", version)
+		}
+		if n := countStreamDeltas(ctx, t, raw); n != 29+streamDeltaBulkV11 {
+			t.Fatalf("stream deltas after a refused backup = %d, want all %d", n, 29+streamDeltaBulkV11)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "backups")); !os.IsNotExist(err) {
+			t.Fatalf("a refused backup left a backups directory behind: %v", err)
+		}
+	})
+
+	t.Run("an already-current database is left alone", func(t *testing.T) {
+		path := streamDeltaFixtureV11(t, stateSchemaVersion)
+		migrated, err := Open(ctx, path, nil)
+		if err != nil {
+			t.Fatalf("open an already-current database: %v", err)
+		}
+		defer migrated.Close()
+		requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+		if n := countStreamDeltas(ctx, t, migrated); n != 29+streamDeltaBulkV11 {
+			t.Fatalf("an already-current database's deltas changed: %d, want the kept %d", n, 29+streamDeltaBulkV11)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "backups")); !os.IsNotExist(err) {
+			t.Fatalf("an already-current database was backed up: %v", err)
+		}
+	})
 }

@@ -47,7 +47,7 @@ func Open(ctx context.Context, absSQLitePath string, opts *OpenOptions) (*sql.DB
 		}
 		return db, nil
 	}
-	if err := migrateStateSchema(ctx, db); err != nil {
+	if err := migrateStateSchema(ctx, db, abs); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate state schema: %w", err)
 	}
