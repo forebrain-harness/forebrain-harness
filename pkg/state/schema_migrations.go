@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 10
+const stateSchemaVersion = 11
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -48,6 +49,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 8, apply: migrateStateV7ToV8},
 	{version: 9, apply: migrateStateV8ToV9},
 	{version: 10, apply: migrateStateV9ToV10},
+	{version: 11, apply: migrateStateV10ToV11},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -482,6 +484,489 @@ func rebuildMessagesForRewoundV10(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
+// streamDeltaTypesV11 are the push-only events an older forebrain wrote to
+// fb_session_events: a fragment of a run as it happened. From this version on
+// they are pushed to whoever is watching and never stored — the words live in
+// the transcript, a tool's output on its completed step — so a database that
+// still holds them is carried forward by migrateStateV10ToV11. The list is the
+// migration's own frozen copy of event.IsPushOnlyStreamEvent's set, kept here
+// so the state layer keeps its distance from pkg/event.
+var streamDeltaTypesV11 = []string{"assistant_delta", "reasoning_delta", "reasoning_done", "tool_output_delta"}
+
+// streamDeltaTextTypesV11 are the stored fragments of a run's answer and
+// reasoning text. reasoning_done is a block boundary, not text, but it is a
+// stored delta all the same and leaves with them.
+var streamDeltaTextTypesV11 = []string{"assistant_delta", "reasoning_delta", "reasoning_done"}
+
+// streamDeltaAnswerTypesV11 are the two whose text decides whether a worker
+// transcript covers an execution and whose text the merge carries. A
+// reasoning_done holds no text.
+var streamDeltaAnswerTypesV11 = []string{"assistant_delta", "reasoning_delta"}
+
+// streamDeltaToolOutputV11 is the stored fragment of a tool's output.
+const streamDeltaToolOutputV11 = "tool_output_delta"
+
+// migrateStateV10ToV11 removes the stream deltas an older forebrain stored —
+// a multi-million-row tax on every user's library, almost all of it a
+// subagent's reasoning and answer fragments. The words are kept where they now
+// live: in the transcript for an execution whose worker session survived, and,
+// for one with no transcript to fall back on, merged into a single row per
+// contiguous block so plan 017's event replay still draws it unchanged. The
+// main agent's own deltas are simply removed (a surface reloads it from the
+// transcript) and a tool's output fragments are removed where the completed
+// step already carries the whole output, merged where it does not.
+//
+// It changes data only — no table, no column — and runs, like every migration
+// here, in the framework's single transaction. It tolerates a database already
+// in its final shape: a database with no deltas passes through, and a second
+// run over an already-uncovered execution merges a one-row block into itself
+// (a no-op). The backup migrateStateSchema takes before this step, and the
+// VACUUM it takes after, are the framework's own, unchanged.
+func migrateStateV10ToV11(ctx context.Context, conn *sql.Conn) error {
+	mainDeleted, err := deleteMainAgentStreamDeltasV11(ctx, conn)
+	if err != nil {
+		return err
+	}
+	subagent, err := pruneSubagentStreamDeltasV11(ctx, conn)
+	if err != nil {
+		return err
+	}
+	tool, err := pruneToolOutputDeltasV11(ctx, conn)
+	if err != nil {
+		return err
+	}
+	slog.Info("state v10→v11 removed the stored stream deltas",
+		"main_agent_rows_deleted", mainDeleted,
+		"subagent_rows_deleted", subagent.deleted,
+		"subagent_executions_merged", subagent.mergedExecutions,
+		"subagent_rows_merged_away", subagent.mergedRows,
+		"subagent_executions_without_spawn", subagent.withoutSpawn,
+		"tool_output_rows_deleted", tool.deleted,
+		"tool_steps_merged", tool.mergedSteps,
+		"tool_output_rows_merged_away", tool.mergedRows,
+		"tool_output_rows_without_step_id", tool.withoutStepID)
+	return nil
+}
+
+// sqlInListV11 renders a comma-separated list of single-quoted literals for an
+// IN (...) clause. The values are the frozen constants above, never user
+// input, so there is no injection surface and no per-call bind-parameter list
+// to thread through the queries.
+func sqlInListV11(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = "'" + v + "'"
+	}
+	return strings.Join(quoted, ",")
+}
+
+// deleteMainAgentStreamDeltasV11 removes the main agent's own stream deltas —
+// the text fragments that carry no agent_id. A surface reloads the main agent
+// from the transcript, so nothing reads them. The deletes run in bounded
+// batches by sequence so a multi-million-row purge never grows one statement
+// past what a single transaction can hold.
+func deleteMainAgentStreamDeltasV11(ctx context.Context, conn *sql.Conn) (int64, error) {
+	inList := sqlInListV11(streamDeltaTextTypesV11)
+	var total int64
+	for {
+		res, err := conn.ExecContext(ctx, `
+DELETE FROM fb_session_events WHERE sequence IN (
+  SELECT sequence FROM fb_session_events
+  WHERE event_type IN (`+inList+`)
+    AND COALESCE(json_extract(payload_json, '$.agent_id'), '') = ''
+  ORDER BY sequence LIMIT 50000)`)
+		if err != nil {
+			return total, fmt.Errorf("delete the main agent's stream deltas: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n == 0 {
+			return total, nil
+		}
+	}
+}
+
+// subagentDeltaPruneV11 is what pruneSubagentStreamDeltasV11 reports, for the
+// migration log and the executor's dry run.
+type subagentDeltaPruneV11 struct {
+	deleted          int64
+	mergedExecutions int64
+	mergedRows       int64
+	withoutSpawn     int64
+}
+
+// deltaRunV11 names one subagent execution that still holds stream deltas: the
+// run id is the execution id, the session the parent conversation the deltas
+// and the spawn were written under.
+type deltaRunV11 struct {
+	runID     string
+	sessionID string
+}
+
+// pruneSubagentStreamDeltasV11 handles the deltas an execution produced, run by
+// run: it removes them when the worker session's transcript covers them, and
+// merges each contiguous block into one row when it does not, so an execution
+// that survives only in its deltas keeps its words for plan 017's replay.
+func pruneSubagentStreamDeltasV11(ctx context.Context, conn *sql.Conn) (subagentDeltaPruneV11, error) {
+	var out subagentDeltaPruneV11
+	runs, err := selectSubagentDeltaRunsV11(ctx, conn)
+	if err != nil {
+		return out, err
+	}
+	for _, run := range runs {
+		worker, found, err := subagentWorkerSessionV11(ctx, conn, run)
+		if err != nil {
+			return out, err
+		}
+		if !found {
+			// No spawn names this execution, so no worker session can be
+			// checked against it. Removing the deltas would be a guess that
+			// destroys words with nowhere else to live; merging keeps them at
+			// a fraction of the size. The count is reported so the executor
+			// can look at every such execution.
+			out.withoutSpawn++
+		} else {
+			covered, err := workerTranscriptCoversV11(ctx, conn, run.runID, worker)
+			if err != nil {
+				return out, err
+			}
+			if covered {
+				n, err := deleteRunStreamDeltasV11(ctx, conn, run.runID)
+				if err != nil {
+					return out, err
+				}
+				out.deleted += n
+				continue
+			}
+		}
+		merged, err := mergeRunStreamDeltasV11(ctx, conn, run.runID)
+		if err != nil {
+			return out, err
+		}
+		out.mergedExecutions++
+		out.mergedRows += merged
+	}
+	return out, nil
+}
+
+// selectSubagentDeltaRunsV11 lists the executions whose text deltas survived
+// the main-agent purge, one row per execution, with the parent session the
+// deltas were written under.
+func selectSubagentDeltaRunsV11(ctx context.Context, conn *sql.Conn) ([]deltaRunV11, error) {
+	rows, err := conn.QueryContext(ctx, `
+SELECT run_id, MIN(session_id) FROM fb_session_events
+WHERE event_type IN (`+sqlInListV11(streamDeltaTextTypesV11)+`)
+  AND run_id IS NOT NULL
+GROUP BY run_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list the executions with stream deltas: %w", err)
+	}
+	defer rows.Close()
+	var runs []deltaRunV11
+	for rows.Next() {
+		var run deltaRunV11
+		if err := rows.Scan(&run.runID, &run.sessionID); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// subagentWorkerSessionV11 resolves the worker session of an execution from
+// the subagent_spawned event of the same conversation. It reports whether such
+// a spawn exists at all: without one the execution's coverage cannot be judged.
+func subagentWorkerSessionV11(ctx context.Context, conn *sql.Conn, run deltaRunV11) (string, bool, error) {
+	var worker string
+	err := conn.QueryRowContext(ctx, `
+SELECT COALESCE(json_extract(payload_json, '$.worker_session_id'), '')
+FROM fb_session_events
+WHERE event_type = 'subagent_spawned' AND session_id = ?
+  AND json_extract(payload_json, '$.execution_id') = ?
+ORDER BY sequence LIMIT 1`, run.sessionID, run.runID).Scan(&worker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("find the spawn of execution %q: %w", run.runID, err)
+	}
+	return strings.TrimSpace(worker), true, nil
+}
+
+// workerTranscriptCoversV11 reports whether the worker session's transcript
+// covers an execution's deltas. It requires the session to exist and its
+// assistant and reasoning rows to hold at least 90% of the text the execution's
+// answer and reasoning deltas carry — a threshold that clears the transcript's
+// small formatting differences from the raw token stream while still failing on
+// a session that holds only a sliver.
+func workerTranscriptCoversV11(ctx context.Context, conn *sql.Conn, runID, workerSessionID string) (bool, error) {
+	if workerSessionID == "" {
+		return false, nil
+	}
+	var exists int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE id = ?`, workerSessionID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists == 0 {
+		return false, nil
+	}
+	var deltaLen, workerLen sql.NullInt64
+	if err := conn.QueryRowContext(ctx, `
+SELECT SUM(LENGTH(COALESCE(json_extract(payload_json, '$.text'), '')))
+FROM fb_session_events
+WHERE run_id = ? AND event_type IN (`+sqlInListV11(streamDeltaAnswerTypesV11)+`)`, runID).Scan(&deltaLen); err != nil {
+		return false, fmt.Errorf("measure execution %q's delta text: %w", runID, err)
+	}
+	if err := conn.QueryRowContext(ctx, `
+SELECT SUM(LENGTH(content)) FROM fb_messages
+WHERE session_id = ? AND role IN ('assistant', 'reasoning')`, workerSessionID).Scan(&workerLen); err != nil {
+		return false, fmt.Errorf("measure worker session %q's transcript: %w", workerSessionID, err)
+	}
+	if deltaLen.Int64 <= 0 {
+		// No answer or reasoning text to lose; the deltas are boundary marks
+		// alone and removing them costs nothing.
+		return true, nil
+	}
+	return workerLen.Int64*100 >= deltaLen.Int64*90, nil
+}
+
+// deleteRunStreamDeltasV11 removes every stored text delta an execution
+// produced.
+func deleteRunStreamDeltasV11(ctx context.Context, conn *sql.Conn, runID string) (int64, error) {
+	res, err := conn.ExecContext(ctx, `
+DELETE FROM fb_session_events
+WHERE run_id = ? AND event_type IN (`+sqlInListV11(streamDeltaTextTypesV11)+`)`, runID)
+	if err != nil {
+		return 0, fmt.Errorf("delete the stream deltas of execution %q: %w", runID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// streamDeltaRowV11 is one stored event of an execution, as the merge needs it.
+type streamDeltaRowV11 struct {
+	sequence  int64
+	eventType string
+	agentID   string
+	text      string
+}
+
+// mergeRunStreamDeltasV11 folds each contiguous block of an execution's answer
+// and reasoning deltas into a single row: the same event_type and agent_id,
+// with no other event of the execution between them (a reasoning_done, a tool
+// delta, a tool step — anything but the two text types — breaks a block). The
+// first row of a block keeps its sequence, event id and timestamp and takes the
+// whole block's text; the rest are dropped. A reasoning_done is a block
+// boundary and is left as it is. It returns how many rows were folded away.
+func mergeRunStreamDeltasV11(ctx context.Context, conn *sql.Conn, runID string) (int64, error) {
+	rows, err := conn.QueryContext(ctx, `
+SELECT sequence, event_type,
+       COALESCE(json_extract(payload_json, '$.agent_id'), ''),
+       COALESCE(json_extract(payload_json, '$.text'), '')
+FROM fb_session_events
+WHERE run_id = ?
+ORDER BY sequence`, runID)
+	if err != nil {
+		return 0, fmt.Errorf("read execution %q's events: %w", runID, err)
+	}
+	var all []streamDeltaRowV11
+	for rows.Next() {
+		var r streamDeltaRowV11
+		if err := rows.Scan(&r.sequence, &r.eventType, &r.agentID, &r.text); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	var merged int64
+	var block []streamDeltaRowV11
+	flush := func() error {
+		defer func() { block = nil }()
+		if len(block) <= 1 {
+			return nil
+		}
+		var text strings.Builder
+		for _, r := range block {
+			text.WriteString(r.text)
+		}
+		if _, err := conn.ExecContext(ctx,
+			`UPDATE fb_session_events SET payload_json = json_set(payload_json, '$.text', ?) WHERE sequence = ?`,
+			text.String(), block[0].sequence); err != nil {
+			return fmt.Errorf("merge execution %q's stream text: %w", runID, err)
+		}
+		seqs := make([]string, 0, len(block)-1)
+		for _, r := range block[1:] {
+			seqs = append(seqs, strconv.FormatInt(r.sequence, 10))
+		}
+		if _, err := conn.ExecContext(ctx,
+			`DELETE FROM fb_session_events WHERE sequence IN (`+strings.Join(seqs, ",")+`)`); err != nil {
+			return fmt.Errorf("drop execution %q's merged rows: %w", runID, err)
+		}
+		merged += int64(len(block) - 1)
+		return nil
+	}
+	for _, r := range all {
+		if r.eventType == "assistant_delta" || r.eventType == "reasoning_delta" {
+			if len(block) > 0 && block[0].eventType == r.eventType && block[0].agentID == r.agentID {
+				block = append(block, r)
+				continue
+			}
+			if err := flush(); err != nil {
+				return merged, err
+			}
+			block = []streamDeltaRowV11{r}
+			continue
+		}
+		if err := flush(); err != nil {
+			return merged, err
+		}
+	}
+	if err := flush(); err != nil {
+		return merged, err
+	}
+	return merged, nil
+}
+
+// toolOutputPruneV11 is what pruneToolOutputDeltasV11 reports.
+type toolOutputPruneV11 struct {
+	deleted       int64
+	mergedSteps   int64
+	mergedRows    int64
+	withoutStepID int64
+}
+
+// pruneToolOutputDeltasV11 handles the stored chunks of a tool's output, step
+// by step, the main agent's and a subagent's alike. A step whose
+// tool_call_completed carries the whole output has its chunks removed; a step
+// with none has its chunks merged into one, so nothing that exists only in the
+// chunks is lost. A chunk with no step_id (a shape no writer produced) is
+// counted and left alone rather than guessed at.
+func pruneToolOutputDeltasV11(ctx context.Context, conn *sql.Conn) (toolOutputPruneV11, error) {
+	var out toolOutputPruneV11
+	rows, err := conn.QueryContext(ctx, `
+SELECT COALESCE(run_id, ''), COALESCE(json_extract(payload_json, '$.step_id'), ''), COUNT(*)
+FROM fb_session_events
+WHERE event_type = ?
+GROUP BY COALESCE(run_id, ''), COALESCE(json_extract(payload_json, '$.step_id'), '')`, streamDeltaToolOutputV11)
+	if err != nil {
+		return out, fmt.Errorf("list the tool-output steps: %w", err)
+	}
+	type toolStepV11 struct{ runID, stepID string }
+	var steps []toolStepV11
+	for rows.Next() {
+		var runID, stepID string
+		var count int
+		if err := rows.Scan(&runID, &stepID, &count); err != nil {
+			rows.Close()
+			return out, err
+		}
+		if stepID == "" {
+			out.withoutStepID += int64(count)
+			continue
+		}
+		steps = append(steps, toolStepV11{runID: runID, stepID: stepID})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return out, err
+	}
+	rows.Close()
+
+	for _, step := range steps {
+		var completed int
+		if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM fb_session_events
+WHERE COALESCE(run_id, '') = ? AND event_type = 'tool_call_completed'
+  AND COALESCE(json_extract(payload_json, '$.step_id'), '') = ?`, step.runID, step.stepID).Scan(&completed); err != nil {
+			return out, err
+		}
+		if completed > 0 {
+			res, err := conn.ExecContext(ctx, `
+DELETE FROM fb_session_events
+WHERE COALESCE(run_id, '') = ? AND event_type = ?
+  AND COALESCE(json_extract(payload_json, '$.step_id'), '') = ?`, step.runID, streamDeltaToolOutputV11, step.stepID)
+			if err != nil {
+				return out, fmt.Errorf("delete step %q's tool-output chunks: %w", step.stepID, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return out, err
+			}
+			out.deleted += n
+			continue
+		}
+		merged, err := mergeStepToolOutputV11(ctx, conn, step.runID, step.stepID)
+		if err != nil {
+			return out, err
+		}
+		out.mergedSteps++
+		out.mergedRows += merged
+	}
+	return out, nil
+}
+
+// mergeStepToolOutputV11 folds every chunk of one tool step into a single row,
+// in sequence order: the first keeps its sequence, event id and timestamp and
+// takes the concatenated text, the rest are dropped. It returns how many rows
+// were folded away.
+func mergeStepToolOutputV11(ctx context.Context, conn *sql.Conn, runID, stepID string) (int64, error) {
+	rows, err := conn.QueryContext(ctx, `
+SELECT sequence, COALESCE(json_extract(payload_json, '$.text'), '')
+FROM fb_session_events
+WHERE COALESCE(run_id, '') = ? AND event_type = ?
+  AND COALESCE(json_extract(payload_json, '$.step_id'), '') = ?
+ORDER BY sequence`, runID, streamDeltaToolOutputV11, stepID)
+	if err != nil {
+		return 0, fmt.Errorf("read step %q's tool-output chunks: %w", stepID, err)
+	}
+	var seqs []int64
+	var text strings.Builder
+	for rows.Next() {
+		var seq int64
+		var chunk string
+		if err := rows.Scan(&seq, &chunk); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		seqs = append(seqs, seq)
+		text.WriteString(chunk)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(seqs) <= 1 {
+		return 0, nil
+	}
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE fb_session_events SET payload_json = json_set(payload_json, '$.text', ?) WHERE sequence = ?`,
+		text.String(), seqs[0]); err != nil {
+		return 0, fmt.Errorf("merge step %q's tool output: %w", stepID, err)
+	}
+	rest := make([]string, 0, len(seqs)-1)
+	for _, seq := range seqs[1:] {
+		rest = append(rest, strconv.FormatInt(seq, 10))
+	}
+	if _, err := conn.ExecContext(ctx,
+		`DELETE FROM fb_session_events WHERE sequence IN (`+strings.Join(rest, ",")+`)`); err != nil {
+		return 0, fmt.Errorf("drop step %q's merged tool-output rows: %w", stepID, err)
+	}
+	return int64(len(seqs) - 1), nil
+}
+
 // tableSQLContains reports whether the named table's declared SQL contains
 // needle. A missing table reads as false.
 func tableSQLContains(ctx context.Context, conn *sql.Conn, name, needle string) (bool, error) {
@@ -806,13 +1291,117 @@ func canonicalRootForMigrationV9(root string) string {
 	return filepath.Clean(root)
 }
 
+// migrationFreeSpace reports the bytes available for a write in the
+// filesystem that holds path. It is a variable so a test can force the
+// not-enough-room branch of the pre-migration backup without filling a disk.
+var migrationFreeSpace = diskFreeSpace
+
+// backupBeforeStreamDeltaMigrationV11 copies the database aside — VACUUM INTO
+// a timestamped file under a "backups" directory beside it — before the v11
+// stream-delta migration rewrites it. It runs only when that migration will
+// actually run (the file is older than v11) and the database still holds a
+// push-only stream delta to touch, so a migration that would change nothing
+// takes no copy and a second launch takes none either.
+//
+// The copy is the owner's insurance against a bulk delete over their own
+// library: VACUUM INTO writes a fresh, self-contained database that a plain
+// restore is (point a fresh forebrain at the copy). Because the copy is a
+// second full database on the same filesystem, the backup refuses to start
+// when there is not a little more free space than the file's own size, and it
+// fails the migration rather than modify the database when either the space
+// check or the copy fails.
+//
+// This runs on the migration's own connection but before its transaction:
+// VACUUM cannot run inside one, and the framework's write lock is only held by
+// that transaction.
+func backupBeforeStreamDeltaMigrationV11(ctx context.Context, conn *sql.Conn, dbPath string) error {
+	var version int
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= stateSchemaVersion {
+		return nil
+	}
+	present, err := stateTableExists(ctx, conn, "fb_session_events")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	var pending int
+	if err := conn.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM (
+  SELECT 1 FROM fb_session_events
+  WHERE event_type IN (`+sqlInListV11(streamDeltaTypesV11)+`) LIMIT 1)`,
+	).Scan(&pending); err != nil {
+		return fmt.Errorf("check for stream deltas before backup: %w", err)
+	}
+	if pending == 0 {
+		return nil
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		return fmt.Errorf("stat the state database for backup: %w", err)
+	}
+	need := int64(float64(info.Size()) * 1.1)
+	stateDir := filepath.Dir(dbPath)
+	free, err := migrationFreeSpace(stateDir)
+	if err != nil {
+		return fmt.Errorf("measure free space for the state backup: %w", err)
+	}
+	if free < need {
+		return fmt.Errorf("state backup before migration v%d needs %s free; free some space and start again",
+			stateSchemaVersion, formatBytesV11(need))
+	}
+	backupDir := filepath.Join(stateDir, "backups")
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return fmt.Errorf("create the state backup directory: %w", err)
+	}
+	backupPath := filepath.Join(backupDir, fmt.Sprintf("forebrain.state.v%d.%s.sqlite",
+		version, time.Now().UTC().Format("20060102T150405.000000000Z")))
+	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, backupPath); err != nil {
+		return fmt.Errorf("copy the state database to %s: %w", backupPath, err)
+	}
+	slog.Info("backed up the state database before migrating",
+		"from_version", version, "to_version", stateSchemaVersion, "path", backupPath)
+	return nil
+}
+
+// stateTableExists reports whether the database declares a table of the given
+// name. The pre-migration backup asks it so a database too old to have
+// fb_session_events is not queried for a table it lacks.
+func stateTableExists(ctx context.Context, conn *sql.Conn, name string) (bool, error) {
+	var n int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// formatBytesV11 renders a byte count in the largest binary unit that keeps
+// one decimal, for the disk-space half of the backup's error.
+func formatBytesV11(n int64) string {
+	const unit = int64(1024)
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := unit, 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
 // migrateStateSchema brings the database behind db to stateSchemaVersion. The
 // whole decision runs inside one IMMEDIATE transaction: taking the write lock
 // before reading user_version means a second process that starts while an
 // 800MB migration is in flight waits (its connection raised busy_timeout for
 // exactly that) and then sees the version the first process committed, instead
 // of racing it or failing after the pool's five seconds.
-func migrateStateSchema(ctx context.Context, db *sql.DB) (err error) {
+func migrateStateSchema(ctx context.Context, db *sql.DB, dbPath string) (err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
@@ -842,6 +1431,13 @@ func migrateStateSchema(ctx context.Context, db *sql.DB) (err error) {
 			err = pragmaErr
 		}
 	}()
+	// The v11 stream-delta migration removes user data in bulk, so copy the
+	// database aside first — while no transaction is open, since VACUUM INTO
+	// cannot run inside one and the migration's write lock belongs to the
+	// transaction below.
+	if err := backupBeforeStreamDeltaMigrationV11(ctx, conn, dbPath); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
 		return err
 	}
