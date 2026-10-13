@@ -38,6 +38,11 @@ type ManagerOptions struct {
 // shorten it. Production code must not write it.
 var quietWindow = 300 * time.Millisecond
 
+// didWriteGrace is how long DidWrite waits past its window (or its
+// cancellation) for a diagnostics group that has not come back; after it the
+// edit returns without that group (spec §8.3.2: the hard ceiling).
+const didWriteGrace = time.Second
+
 // lateEditedTTL is how long a session's edited files stay eligible for late
 // diagnostics (spec §8.4: 30 minutes).
 const lateEditedTTL = 30 * time.Minute
@@ -421,9 +426,11 @@ func (m *Manager) DidWrite(ctx context.Context, agentSessionID string, changes [
 		pending:  map[string]bool{},
 		acquired: map[string]bool{},
 		known:    map[string][]Problem{},
+		finished: map[*writeGroup]bool{},
 	}
 	m.beginWindow(agentSessionID, eff, paths)
-	defer m.finishWindow(agentSessionID, st.known)
+	var known map[string][]Problem // what the window learned; nil after a panic
+	defer func() { m.finishWindow(agentSessionID, known) }()
 
 	var wg sync.WaitGroup
 	for _, key := range order {
@@ -431,6 +438,7 @@ func (m *Manager) DidWrite(ctx context.Context, agentSessionID string, changes [
 		wg.Add(1)
 		go func(g *writeGroup) {
 			defer wg.Done()
+			defer st.markFinished(g)
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Debug("lsp: one diagnostics group failed", "server", g.srv.ID, "panic", r)
@@ -439,11 +447,31 @@ func (m *Manager) DidWrite(ctx context.Context, agentSessionID string, changes [
 			m.didWriteGroup(windowCtx, g, st, eff, start, deadline)
 		}(g)
 	}
-	wg.Wait()
+	if !awaitGroups(&wg, windowCtx, didWriteGrace) {
+		// Every wait inside a group honors the window; a group still out
+		// past the grace is stuck on something that does not, and the edit
+		// is not held hostage by it. Its files report pending, and what the
+		// server says later reaches the session through the late queue.
+		st.mu.Lock()
+		for _, key := range order {
+			g := groups[key]
+			if st.finished[g] {
+				continue
+			}
+			slog.Debug("lsp: a diagnostics group outlived its window; its files are pending", "server", g.srv.ID)
+			for _, path := range g.paths() {
+				st.pending[path] = true
+			}
+		}
+		st.mu.Unlock()
+	}
 
+	// A group abandoned above may still write to st: read it once, under the
+	// lock.
+	st.mu.Lock()
 	var pending []string
 	for _, path := range paths {
-		if st.isPending(path) {
+		if st.pending[path] {
 			pending = append(pending, path)
 		}
 	}
@@ -451,10 +479,41 @@ func (m *Manager) DidWrite(ctx context.Context, agentSessionID string, changes [
 	for id := range st.acquired {
 		serverIDs = append(serverIDs, id)
 	}
+	problems := append([]Problem(nil), st.problems...)
+	unavailable := st.baselineUnavailable
+	known = make(map[string][]Problem, len(st.known))
+	for path, list := range st.known {
+		known[path] = append([]Problem(nil), list...)
+	}
+	st.mu.Unlock()
 	sort.Strings(serverIDs)
-	text, summary := FormatEditDiagnostics(st.problems, pending, serverIDs, st.baselineUnavailable, m.reportOptions(eff, paths))
+	text, summary := FormatEditDiagnostics(problems, pending, serverIDs, unavailable, m.reportOptions(eff, paths))
 	delta.Text, delta.Summary = text, summary
 	return delta
+}
+
+// awaitGroups waits for a window's groups until they all finish or grace
+// past the window's end (or its cancellation), and reports whether they all
+// finished.
+func awaitGroups(wg *sync.WaitGroup, window context.Context, grace time.Duration) bool {
+	finished := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return true
+	case <-window.Done():
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-finished:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // considerRecommendation offers to enable (or install and enable) a language
@@ -656,6 +715,13 @@ type didWriteState struct {
 	acquired            map[string]bool
 	known               map[string][]Problem
 	baselineUnavailable bool
+	finished            map[*writeGroup]bool // groups that came back, however they ended
+}
+
+func (s *didWriteState) markFinished(g *writeGroup) {
+	s.mu.Lock()
+	s.finished[g] = true
+	s.mu.Unlock()
 }
 
 func (s *didWriteState) addPending(paths []string) {

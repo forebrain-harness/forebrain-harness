@@ -53,6 +53,45 @@ func RunEventFromRecord(record state.SessionEvent) event.RunEvent {
 	}
 }
 
+// RunPlanEventLister is the slice of the run store a run's checklist lookup
+// needs. Both surfaces close a run with its end facts through the same lookup.
+type RunPlanEventLister interface {
+	ListRunEventsOfTypes(ctx context.Context, runID string, types ...string) ([]state.SessionEvent, error)
+}
+
+// LastPlanProgressOfRun folds the run's final checklist update into the
+// worked line's three facts. A run without a checklist reports zeros — the
+// same silence the terminal's formatWorkingCounters produces.
+func LastPlanProgressOfRun(ctx context.Context, runs RunPlanEventLister, runID string) event.PlanProgress {
+	runID = strings.TrimSpace(runID)
+	if runID == "" || runs == nil {
+		return event.PlanProgress{}
+	}
+	events, err := runs.ListRunEventsOfTypes(ctx, runID, event.RunEventPlanUpdated)
+	if err != nil {
+		return event.PlanProgress{}
+	}
+	var last *event.PlanUpdatedPayload
+	for i := len(events) - 1; i >= 0; i-- {
+		var payload event.PlanUpdatedPayload
+		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
+			continue
+		}
+		// A subagent's checklist is recorded under its parent's run but is
+		// that subagent's own; the conversation's worked line reports the
+		// conversation's plan, exactly as the terminal's tracker does.
+		if strings.TrimSpace(payload.AgentID) != "" {
+			continue
+		}
+		last = &payload
+		break
+	}
+	if last == nil {
+		return event.PlanProgress{}
+	}
+	return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
+}
+
 func ExtractTurnDiffPayload(payload any) (event.TurnDiffUpdatedPayload, bool) {
 	payloadMap, ok := normalizePayloadMap(payload)
 	if !ok {

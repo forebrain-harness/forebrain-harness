@@ -605,6 +605,65 @@ func TestCrashRestart(t *testing.T) {
 	}
 }
 
+// TestStalledServerIsACrash covers a server that is alive but hung: it never
+// exits, so only its unread input gives it away. Sending to it must never
+// block, and the stall must kill the process and restart it like a crash.
+func TestStalledServerIsACrash(t *testing.T) {
+	setWriteStallTimeout(t, 300*time.Millisecond)
+	previous := restartBackoff
+	restartBackoff = []time.Duration{10 * time.Millisecond}
+	t.Cleanup(func() { restartBackoff = previous })
+
+	restarted := make(chan struct{}, 4)
+	inst, record := startFake(t, map[string]any{"stop_reading_after_initialized": true}, func(s *InstanceSpec) {
+		s.RestartOnCrash = true
+		s.MaxRestarts = 1
+		s.OnRestart = func(ctx context.Context) { restarted <- struct{}{} }
+	})
+	recs := pollRecord(t, record, func(recs []map[string]any) bool {
+		_, ok := recordInt(recs, "pid")
+		return ok
+	}, "the server pid")
+	hung, _ := recordInt(recs, "pid")
+
+	// Far more than any pipe buffer holds: written synchronously, this used
+	// to block its caller for as long as the server stayed hung.
+	text := strings.Repeat("x", 1<<20)
+	start := time.Now()
+	for n := 1; n <= 3; n++ {
+		err := inst.Notify("textDocument/didChange", didChangeParams{
+			TextDocument:   VersionedTextDocumentIdentifier{URI: PathToURI(filepath.Join(t.TempDir(), "a.fk")), Version: int32(n)},
+			ContentChanges: []textChange{{Text: text}},
+		})
+		if err != nil {
+			t.Fatalf("Notify %d: %v", n, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("notifying a hung server took %s", elapsed)
+	}
+
+	select {
+	case <-restarted:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the stalled server was not restarted")
+	}
+	if msg := inst.LastError(); !strings.Contains(msg, "stopped reading its input") {
+		t.Errorf("LastError = %q, want it to name the stall", msg)
+	}
+	if runtime.GOOS != "windows" {
+		waitForProcessGone(t, hung)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := inst.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady after the restart: %v", err)
+	}
+	if pids := recordedPIDs(t, record); len(pids) != 2 {
+		t.Errorf("recorded pids = %v, want the hung one and its replacement", pids)
+	}
+}
+
 func TestShutdownKillsTree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixture spawns sleep 600, which Windows does not have")
@@ -1298,6 +1357,13 @@ func handleNotification(script map[string]json.RawMessage, method string, params
 	case "initialized":
 		if raw, ok := script["after_initialized"]; ok && len(raw) > 0 {
 			go runActions(raw)
+		}
+		if boolField(script, "stop_reading_after_initialized") {
+			// Hung, not dead: the process stays up and never reads its
+			// input again, like a server whose binary's volume vanished.
+			for {
+				time.Sleep(time.Hour)
+			}
 		}
 	case "textDocument/didOpen":
 		td := textDocumentOf(params)

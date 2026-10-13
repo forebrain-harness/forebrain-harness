@@ -239,3 +239,60 @@ func mustMarshalTurnEvent(t *testing.T, v any) json.RawMessage {
 	require.NoError(t, err)
 	return json.RawMessage(b)
 }
+
+// stubPlanEventStore is the engine-level counterpart of the gateway's own stub:
+// it answers the run checklist lookup out of a fixed slice so the folded facts
+// can be pinned without a database.
+type stubPlanEventStore struct {
+	events []state.SessionEvent
+	err    error
+}
+
+func (s *stubPlanEventStore) ListRunEventsOfTypes(_ context.Context, runID string, types ...string) ([]state.SessionEvent, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []state.SessionEvent
+	for _, evt := range s.events {
+		if evt.RunID != runID {
+			continue
+		}
+		for _, want := range types {
+			if evt.Type == want {
+				out = append(out, evt)
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func lastPlanEvent(t *testing.T, runID string, payload event.PlanUpdatedPayload) state.SessionEvent {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	return state.SessionEvent{ID: "evt-" + runID, RunID: runID, Type: event.RunEventPlanUpdated, Payload: raw, CreatedAt: time.Now()}
+}
+
+// TestLastPlanProgressOfRun pins the engine-level lookup both surfaces close a
+// run with: the last checklist update's counters and active title, zeros for a
+// run that has no checklist, and zeros (not a panic) for a nil store.
+func TestLastPlanProgressOfRun(t *testing.T) {
+	t.Parallel()
+	store := &stubPlanEventStore{events: []state.SessionEvent{
+		lastPlanEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 1, Total: 3, Explanation: "first"}),
+		lastPlanEvent(t, "run-1", event.PlanUpdatedPayload{Completed: 2, Total: 3, Items: []event.PlanUpdateItem{
+			{ID: "1", Content: "done", Status: "completed"},
+			{ID: "2", Content: "short", Status: "in_progress"},
+		}}),
+		lastPlanEvent(t, "run-2", event.PlanUpdatedPayload{Completed: 9, Total: 9}),
+	}}
+	got := LastPlanProgressOfRun(context.Background(), store, "run-1")
+	require.Equal(t, 2, got.Done)
+	require.Equal(t, 3, got.Total)
+	require.Equal(t, "short", got.Active)
+	// A run with no checklist reports zeros, not a stale other-run value.
+	require.Equal(t, event.PlanProgress{}, LastPlanProgressOfRun(context.Background(), store, "run-3"))
+	// No store at all is the same silence rather than a nil dereference.
+	require.Equal(t, event.PlanProgress{}, LastPlanProgressOfRun(context.Background(), nil, "run-1"))
+}
