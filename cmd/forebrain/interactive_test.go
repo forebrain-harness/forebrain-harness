@@ -83,6 +83,13 @@ func TestRunStreamingTerminalAutoRunsOnboardWhenNeeded(t *testing.T) {
 }
 
 func TestRunStreamingTerminalStopsWhenOnboardCancelled(t *testing.T) {
+	// Every sibling of this test pins the home to a temp directory and this one
+	// must too. Without it the session open below reaches the developer's real
+	// ~/.forebrain, which is harmless only while the schema happens to be
+	// current: a build with a newer schema migrates the real database as a side
+	// effect of running the suite, and blocks on whatever process holds its
+	// write lock.
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	prevIsTerminal := interactiveIsTerminal
 	prevTrusted := interactiveEnsureWorkspaceTrusted
 	prevNeedsSetup := interactiveNeedsFirstSetup
