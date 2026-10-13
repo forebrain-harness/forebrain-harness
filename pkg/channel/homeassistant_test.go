@@ -561,67 +561,53 @@ func TestConcurrentBindAndStopLeaveNothingRunning(t *testing.T) {
 	}
 }
 
-func twoAgentConfig() *appcfg.Root {
-	cfg := &appcfg.Root{}
-	appcfg.SetChannelsForAgent(cfg, "main", appcfg.ChannelsSection{
-		Slack: appcfg.Slack{Enabled: true, InboundPath: "/main/slack", BotToken: "main-token"},
-	})
-	appcfg.SetChannelsForAgent(cfg, "acme", appcfg.ChannelsSection{
-		Slack: appcfg.Slack{Enabled: true, InboundPath: "/acme/slack", BotToken: "acme-token"},
-	})
-	def := cfg.Agents.Definitions["acme"]
-	def.Primary = true
-	cfg.Agents.Definitions["acme"] = def
-	return cfg
+func bindProjectChannels(t *testing.T, reg *Registry, bus Bus, stateRoot string, configs ...ProjectChannelConfig) {
+	t.Helper()
+	if err := reg.BindProjects(context.Background(), "main", BuildProjectChannels(configs, stateRoot), bus); err != nil {
+		t.Fatalf("BindProjects: %v", err)
+	}
 }
 
-// The handlers built for an agent carry that agent's settings only. Mounting
-// them therefore exposes that agent's endpoints and no other's.
-func TestBuildAgentChannelsUsesTheNamedAgentsConfiguration(t *testing.T) {
-	cfg := twoAgentConfig()
+// The handlers built for one project carry that project's settings only.
+// Mounting them therefore exposes that project's endpoints and no other's.
+func TestBuildProjectChannelsUsesTheProjectsConfiguration(t *testing.T) {
+	mainSection := appcfg.ChannelsSection{Slack: appcfg.Slack{Enabled: true, InboundPath: "/main/slack", BotToken: "main-token"}}
+	acmeSection := appcfg.ChannelsSection{Slack: appcfg.Slack{Enabled: true, InboundPath: "/acme/slack", BotToken: "acme-token"}}
 	reg := NewRegistry()
 
-	if err := reg.Bind(context.Background(), "main", BuildAgentChannels(cfg, "main", t.TempDir()), nil); err != nil {
-		t.Fatalf("bind main: %v", err)
-	}
+	bindProjectChannels(t, reg, nil, t.TempDir(), ProjectChannelConfig{ProjectID: "p-main", Kind: "slack", Section: mainSection})
 	if _, ok := reg.Route(http.MethodPost, "/main/slack"); !ok {
-		t.Fatal("main's slack inbound path is not mounted")
+		t.Fatal("the project's slack inbound path is not mounted")
 	}
 	if _, ok := reg.Route(http.MethodPost, "/acme/slack"); ok {
-		t.Fatal("another agent's slack inbound path is mounted")
+		t.Fatal("another project's slack inbound path is mounted")
 	}
 
-	if err := reg.Bind(context.Background(), "acme", BuildAgentChannels(cfg, "acme", t.TempDir()), nil); err != nil {
-		t.Fatalf("bind acme: %v", err)
-	}
+	bindProjectChannels(t, reg, nil, t.TempDir(), ProjectChannelConfig{ProjectID: "p-acme", Kind: "slack", Section: acmeSection})
 	if _, ok := reg.Route(http.MethodPost, "/acme/slack"); !ok {
-		t.Fatal("acme's slack inbound path is not mounted after the switch")
+		t.Fatal("the second project's slack inbound path is not mounted after the switch")
 	}
 	if _, ok := reg.Route(http.MethodPost, "/main/slack"); ok {
-		t.Fatal("main's slack inbound path survived the switch")
+		t.Fatal("the first project's slack inbound path survived the switch")
 	}
 }
 
-// An agent that configured nothing gets handlers that are all disabled, so it
-// mounts no endpoints — rather than inheriting whatever main configured.
-func TestBuildAgentChannelsForUnconfiguredAgentMountsNothing(t *testing.T) {
-	cfg := twoAgentConfig()
+// A project that configured nothing mounts no endpoints, rather than
+// inheriting whatever another project configured.
+func TestBuildProjectChannelsForUnconfiguredProjectMountsNothing(t *testing.T) {
 	reg := NewRegistry()
-
-	if err := reg.Bind(context.Background(), "quiet", BuildAgentChannels(cfg, "quiet", t.TempDir()), nil); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
+	bindProjectChannels(t, reg, nil, t.TempDir())
 	if _, ok := reg.Route(http.MethodPost, "/main/slack"); ok {
-		t.Fatal("an unconfigured agent inherited main's endpoints")
+		t.Fatal("an unconfigured project inherited another project's endpoints")
 	}
 }
 
-func TestBuildAgentChannelsRequiresConfigAndAgent(t *testing.T) {
-	if got := BuildAgentChannels(nil, "main", ""); got != nil {
-		t.Fatalf("nil config produced handlers: %#v", got)
+func TestBuildProjectChannelUnknownKindIsNil(t *testing.T) {
+	if got := BuildProjectChannel("nope", appcfg.ChannelsSection{}, ""); got != nil {
+		t.Fatalf("unknown kind produced a handler: %#v", got)
 	}
-	if got := BuildAgentChannels(twoAgentConfig(), " ", ""); got != nil {
-		t.Fatalf("blank agent produced handlers: %#v", got)
+	if got := BuildProjectChannel("slack", appcfg.ChannelsSection{Slack: appcfg.Slack{Enabled: true}}, ""); got == nil {
+		t.Fatal("a known kind produced no handler")
 	}
 }
 
@@ -1438,21 +1424,14 @@ func TestStandaloneWebhookRoundTrip(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Channels: appcfg.ChannelsSection{Webhook: appcfg.Webhook{
-			Enabled:     true,
-			InboundPath: "/hook",
-			OutboundURL: upstream.URL,
-			Token:       "tok",
-		}}},
-	}
-
 	r := NewRegistry()
 	bus := &collectingBus{}
-	if err := r.BindAgent(context.Background(), cfg, "main", t.TempDir(), bus); err != nil {
-		t.Fatalf("BindAgent: %v", err)
-	}
+	bindProjectChannels(t, r, bus, t.TempDir(), ProjectChannelConfig{ProjectID: "p1", Kind: "webhook", Section: appcfg.ChannelsSection{Webhook: appcfg.Webhook{
+		Enabled:     true,
+		InboundPath: "/hook",
+		OutboundURL: upstream.URL,
+		Token:       "tok",
+	}}})
 	t.Cleanup(func() { _ = r.Stop(context.Background()) })
 
 	srv := httptest.NewServer(r.HTTPHandler(nil))
@@ -1530,18 +1509,11 @@ func TestStandaloneBotTokenRoundTrip(t *testing.T) {
 	defer api.Close()
 	telegramAPIBase = api.URL + "/bot"
 
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Channels: appcfg.ChannelsSection{Telegram: appcfg.Telegram{
-			Enabled: true, BotToken: "bot-token",
-		}}},
-	}
-
 	r := NewRegistry()
 	bus := &collectingBus{}
-	if err := r.BindAgent(context.Background(), cfg, "main", t.TempDir(), bus); err != nil {
-		t.Fatalf("BindAgent: %v", err)
-	}
+	bindProjectChannels(t, r, bus, t.TempDir(), ProjectChannelConfig{ProjectID: "p1", Kind: "telegram", Section: appcfg.ChannelsSection{Telegram: appcfg.Telegram{
+		Enabled: true, BotToken: "bot-token",
+	}}})
 	t.Cleanup(func() { _ = r.Stop(context.Background()) })
 
 	// Inbound leg: arrives by polling, with no HTTP surface on our side.
@@ -1585,18 +1557,11 @@ func (b *recordingBus) PublishInbound(_ context.Context, m Inbound) error {
 // the route table has drifted back onto the router and a primary agent switch
 // can no longer withdraw a retired agent's inbound endpoint.
 func TestWebhookIsServedWithNoGatewayRouter(t *testing.T) {
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Channels: appcfg.ChannelsSection{
-			Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/main/hook"},
-		}},
-	}
-
 	r := NewRegistry()
 	bus := &recordingBus{}
-	if err := r.BindAgent(context.Background(), cfg, "main", t.TempDir(), bus); err != nil {
-		t.Fatalf("BindAgent: %v", err)
-	}
+	bindProjectChannels(t, r, bus, t.TempDir(), ProjectChannelConfig{ProjectID: "p1", Kind: "webhook", Section: appcfg.ChannelsSection{
+		Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/main/hook"},
+	}})
 	t.Cleanup(func() { _ = r.Stop(context.Background()) })
 
 	// nil fallthrough: nothing but the channels is mounted.
@@ -1626,38 +1591,6 @@ func TestWebhookIsServedWithNoGatewayRouter(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("POST /other/hook = %d, want 404", resp.StatusCode)
-	}
-}
-
-// A blank agent ID means "no active agent named", which is a startup state
-// rather than a fault — and crucially it must leave the currently bound agent
-// alone. Asserting only that nothing new gets bound would be vacuous, since
-// BuildAgentChannels already returns no handlers for a blank ID; the property
-// that actually needs a guard is that the blank call is not a teardown. Without
-// it, one caller that has not resolved its active agent yet would silently
-// unbind the running agent's bots.
-func TestBindAgentWithNoAgentNamedLeavesTheBoundAgentAlone(t *testing.T) {
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Channels: appcfg.ChannelsSection{
-			Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/main/hook"},
-		}},
-	}
-	r := NewRegistry()
-	if err := r.BindAgent(context.Background(), cfg, "main", t.TempDir(), &recordingBus{}); err != nil {
-		t.Fatalf("BindAgent(main): %v", err)
-	}
-	t.Cleanup(func() { _ = r.Stop(context.Background()) })
-
-	if err := r.BindAgent(context.Background(), cfg, "  ", t.TempDir(), nil); err != nil {
-		t.Fatalf("BindAgent(blank) = %v, want nil", err)
-	}
-
-	if got := r.AgentID(); got != "main" {
-		t.Fatalf("AgentID = %q after a blank bind, want main still bound", got)
-	}
-	if _, ok := r.Route(http.MethodPost, "/main/hook"); !ok {
-		t.Fatal("main's inbound path was withdrawn by a bind that named no agent")
 	}
 }
 

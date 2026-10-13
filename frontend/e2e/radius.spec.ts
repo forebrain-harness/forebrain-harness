@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import { expect, test, type Page } from '@playwright/test'
 
-import { signIn } from './support'
+import { seedProject, signIn } from './support'
 
 /**
  * The radius scale is law (CARD_RADIUS_UNIFY_8PX): containers 8px, form
@@ -73,8 +73,6 @@ const ROUTES = [
   '/permissions',
   '/tools',
   '/projects',
-  '/cron',
-  '/channels',
   '/providers',
   '/memories',
 ]
@@ -93,7 +91,7 @@ const SETTINGS_TABS = [
   'shared-skills',
 ]
 
-const PROJECT_TABS = ['overview', 'rules', 'sessions', 'memory', 'perm', 'mcp', 'lsp', 'skills', 'cron']
+const PROJECT_TABS = ['overview', 'rules', 'sessions', 'memory', 'perm', 'mcp', 'lsp', 'skills', 'cron', 'channels']
 
 test('no retired border radius anywhere on the app surface', async ({ page }) => {
   test.info().setTimeout(240_000)
@@ -143,7 +141,8 @@ test('no retired border radius anywhere on the app surface', async ({ page }) =>
     await page.waitForTimeout(200)
   }
 
-  await page.goto('/cron', { waitUntil: 'networkidle' })
+  const cronProjectId = await seedProject(page, 'radius-cron')
+  await page.goto(`/projects/${cronProjectId}/cron`, { waitUntil: 'networkidle' })
   await openDialog(
     'dialog:cron-editor',
     () => page.click('[data-testid="cron-new"]'),

@@ -210,7 +210,6 @@ func (env *Environment) reloadConfig() error {
 	if err := safety.NewManager().StartupCheck(next); err != nil {
 		return err
 	}
-	mergeAgentClawbotSession(next, activePrimaryAgent(env.Root, next))
 	if env.Sandbox == nil {
 		env.Sandbox = safety.NewManager()
 	}

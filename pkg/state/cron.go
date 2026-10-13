@@ -23,8 +23,8 @@ const (
 type CronJob struct {
 	ID string `json:"id"`
 	Ag string `json:"-"`
-	// ProjectID binds a job to one project; empty is an agent-wide job.
-	ProjectID string `json:"project_id,omitempty"`
+	// ProjectID is the project the job fires in; a job always has one.
+	ProjectID string `json:"project_id"`
 	Name      string `json:"name"`
 	Sched     string `json:"schedule"`
 	Prompt    string `json:"prompt"`
@@ -115,6 +115,9 @@ func (s *CronStore) InsertJob(ctx context.Context, job CronJob) error {
 	if strings.TrimSpace(job.Ag) == "" {
 		return fmt.Errorf("cron job agent id required")
 	}
+	if strings.TrimSpace(job.ProjectID) == "" {
+		return fmt.Errorf("cron job project id required")
+	}
 	now := time.Now().Unix()
 	if job.CreatedAt <= 0 {
 		job.CreatedAt = now
@@ -124,7 +127,7 @@ func (s *CronStore) InsertJob(ctx context.Context, job CronJob) error {
 INSERT INTO fb_cron_jobs (id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
   run_count, next_run_at, last_run_at, last_status, last_error, last_output, failure_streak, created_at, updated_at)
 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		strings.TrimSpace(job.ID), strings.TrimSpace(job.Ag), nullIfEmpty(job.ProjectID), strings.TrimSpace(job.Name),
+		strings.TrimSpace(job.ID), strings.TrimSpace(job.Ag), strings.TrimSpace(job.ProjectID), strings.TrimSpace(job.Name),
 		strings.TrimSpace(job.Sched), job.Prompt, strings.TrimSpace(job.Deliver), boolToInt(job.Enabled),
 		job.RepeatLimit, job.RunCount, job.NextRunAt, job.LastRunAt, job.LastStatus, job.LastError,
 		job.LastOutput, job.FailureStreak, job.CreatedAt, job.UpdatedAt)
@@ -144,11 +147,14 @@ func (s *CronStore) UpdateJobConfig(ctx context.Context, job CronJob) error {
 	if strings.TrimSpace(job.Ag) == "" {
 		return fmt.Errorf("cron job agent id required")
 	}
+	if strings.TrimSpace(job.ProjectID) == "" {
+		return fmt.Errorf("cron job project id required")
+	}
 	_, err := s.DB.ExecContext(ctx, `
 UPDATE fb_cron_jobs
 SET project_id=?, name=?, schedule=?, prompt=?, deliver=?, enabled=?, repeat_limit=?, next_run_at=?, updated_at=?
 WHERE id=? AND agent_id=?`,
-		nullIfEmpty(job.ProjectID), strings.TrimSpace(job.Name), strings.TrimSpace(job.Sched), job.Prompt,
+		strings.TrimSpace(job.ProjectID), strings.TrimSpace(job.Name), strings.TrimSpace(job.Sched), job.Prompt,
 		strings.TrimSpace(job.Deliver), boolToInt(job.Enabled), job.RepeatLimit, job.NextRunAt, time.Now().Unix(),
 		strings.TrimSpace(job.ID), strings.TrimSpace(job.Ag))
 	return err
@@ -217,26 +223,13 @@ func (s *CronStore) GetJob(ctx context.Context, id string) (*CronJob, error) {
 	return &jobs[0], nil
 }
 
-// ListJobs returns one agent's jobs, newest first.
-func (s *CronStore) ListJobs(ctx context.Context, agentID string) ([]CronJob, error) {
-	if !s.ok() {
-		return nil, fmt.Errorf("cron store unavailable")
-	}
-	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE agent_id = ? ORDER BY created_at DESC`, strings.TrimSpace(agentID))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanCronJobs(rows)
-}
-
 // ListJobsForProject returns one project's jobs for the agent, newest first.
-// The empty project returns the agent's unbound jobs, whose project is NULL.
+// A job always belongs to a project, so there is no agent-wide list.
 func (s *CronStore) ListJobsForProject(ctx context.Context, agentID, projectID string) ([]CronJob, error) {
 	if !s.ok() {
 		return nil, fmt.Errorf("cron store unavailable")
 	}
-	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE agent_id = ? AND project_id IS NULLIF(?, '') ORDER BY created_at DESC`,
+	rows, err := s.DB.QueryContext(ctx, cronJobSelect+` WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`,
 		strings.TrimSpace(agentID), strings.TrimSpace(projectID))
 	if err != nil {
 		return nil, err

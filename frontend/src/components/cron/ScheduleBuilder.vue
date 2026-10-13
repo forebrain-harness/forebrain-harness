@@ -104,7 +104,7 @@ import { useI18n } from '@/locales'
  * writes an expression by hand — except in the cron mode, which exists for the
  * ones who can.
  */
-const props = defineProps<{ modelValue: string }>()
+const props = defineProps<{ modelValue: string; projectId: string }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
@@ -221,7 +221,7 @@ watch(expression, (value) => {
   previewDebounce = setTimeout(async () => {
     previewing.value = true
     try {
-      const out = await forebrainApi.cronPreview(value)
+      const out = await forebrainApi.cronPreview(props.projectId, value)
       // An answer for an expression the user has since changed says nothing
       // about the one on screen; the newer request's answer will.
       if (expression.value !== value) return

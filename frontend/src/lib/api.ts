@@ -2509,12 +2509,19 @@ export const forebrainApi = {
     return postJson<{ path: string; applied: boolean }, { yaml: string }>('/config', { yaml })
   },
 
-  channels() {
-    return api.get<{ agentId?: string; channels: Record<string, unknown> }>('/channels').then((res) => res.data)
+  // Channels belong to a project, so they are read and written through the
+  // project's own route.
+  projectChannels(projectId: string) {
+    return api.get<{ projectId?: string; kinds?: string[]; channels: Record<string, unknown> }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/channels`,
+    ).then((res) => res.data)
   },
 
-  saveChannels(channels: Record<string, unknown>) {
-    return api.put<{ applied: boolean }>('/channels', toSnakeCase(channels)).then((res) => res.data)
+  saveProjectChannels(projectId: string, channels: Record<string, unknown>) {
+    return api.put<{ applied: boolean }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/channels`,
+      toSnakeCase(channels),
+    ).then((res) => res.data)
   },
 
   providers() {
@@ -2535,8 +2542,8 @@ export const forebrainApi = {
     return api.put<{ applied: boolean }>('/hooks', toSnakeCase({ hooks })).then((res) => res.data)
   },
 
-  // Retention is the install's configuration, so these live apart from the
-  // agent-scoped /cron routes. null removes the key: the default applies.
+  // Retention is the install's configuration, so it lives apart from the
+  // per-project cron routes. null removes the key: the default applies.
   cronSettings() {
     return api.get<CronSettings>('/cron-settings').then((res) => res.data)
   },
@@ -2547,37 +2554,53 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
-  cronJobs(projectId?: string) {
-    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''
-    return api.get<{ agentId?: string; records: CronJobRecord[] }>(`/cron${query}`)
-      .then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
+  cronJobs(projectId: string) {
+    return api.get<{ agentId?: string; records: CronJobRecord[] }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs`,
+    ).then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
   },
 
   // The schedule preview is the engine's own parse, so what the builder shows
   // is exactly what the scheduler will later fire.
-  cronPreview(schedule: string) {
-    return postJson<CronPreviewResponse, { schedule: string }>('/cron/preview', { schedule })
+  cronPreview(projectId: string, schedule: string) {
+    return postJson<CronPreviewResponse, { schedule: string }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/preview`,
+      { schedule },
+    )
   },
 
-  cronCreate(body: CronJobBody) {
-    return postJson<CronJobRecord, CronJobBody>('/cron', body)
+  cronCreate(projectId: string, body: CronJobBody) {
+    return postJson<CronJobRecord, CronJobBody>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs`,
+      body,
+    )
   },
 
-  cronUpdate(id: string, body: CronJobBody) {
-    return api.put<CronJobRecord>(`/cron/${encodeURIComponent(id)}`, toSnakeCase(body)).then((res) => res.data)
+  cronUpdate(projectId: string, id: string, body: CronJobBody) {
+    return api.put<CronJobRecord>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs/${encodeURIComponent(id)}`,
+      toSnakeCase(body),
+    ).then((res) => res.data)
   },
 
-  cronDelete(id: string) {
-    return api.delete<{ deleted: string }>(`/cron/${encodeURIComponent(id)}`).then((res) => res.data)
+  cronDelete(projectId: string, id: string) {
+    return api.delete<{ deleted: string }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs/${encodeURIComponent(id)}`,
+    ).then((res) => res.data)
   },
 
-  cronRunNow(id: string) {
-    return postJson<{ started: string }, Record<string, never>>(`/cron/${encodeURIComponent(id)}/run`, {})
+  cronRunNow(projectId: string, id: string) {
+    return postJson<{ started: string }, Record<string, never>>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs/${encodeURIComponent(id)}/run`,
+      {},
+    )
   },
 
-  cronRuns(id: string, limit = 20) {
-    return api.get<{ records: CronRunRecord[] }>(`/cron/${encodeURIComponent(id)}/runs`, { params: { limit } })
-      .then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
+  cronRuns(projectId: string, id: string, limit = 20) {
+    return api.get<{ records: CronRunRecord[] }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs/${encodeURIComponent(id)}/runs`,
+      { params: { limit } },
+    ).then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
   },
 
   /** Every heartbeat on the active agent's conversations, newest set up first. */

@@ -202,30 +202,6 @@ func TestApplyMergedEnvOverridesCoversGatewaySearchAndLLM(t *testing.T) {
 	}
 }
 
-// A bare channel variable in the environment would configure "the" channel of
-// no particular agent. Channels are per primary agent, so the environment must
-// not be able to reach one: a secret gets there through an ${ENV_NAME}
-// reference written under the agent that owns the channel.
-func TestApplyMergedEnvOverridesLeavesChannelsAlone(t *testing.T) {
-	root := &Root{
-		Agents: AgentsSection{
-			Definitions: map[string]AgentDefinition{
-				"main": {Channels: ChannelsSection{Telegram: Telegram{Enabled: true}}},
-			},
-		},
-	}
-	applyMergedEnvOverrides(root, map[string]string{
-		"TELEGRAM_BOT_TOKEN":          "tg-token",
-		"FOREBRAIN_FEISHU_APP_SECRET": "feishu-secret",
-		"WECOM_CORP_SECRET":           "wecom-secret",
-	})
-
-	ch := ChannelsForAgent(root, "main")
-	if ch.Telegram.BotToken != "" || ch.Feishu.AppSecret != "" || ch.WeCom.CorpSecret != "" {
-		t.Fatalf("environment reached an agent's channels: %+v", ch)
-	}
-}
-
 func TestLoadAndSaveJSONYAML(t *testing.T) {
 	dir := t.TempDir()
 
@@ -627,7 +603,7 @@ func TestProviderEnvLookups(t *testing.T) {
 }
 
 func TestGatewayWebhookInboundPathsAndAnonymousGET(t *testing.T) {
-	if got := gatewayWebhookInboundPaths(ChannelsSection{}); got != nil {
+	if got := WebhookInboundPaths(ChannelsSection{}); got != nil {
 		t.Fatalf("nil gateway webhook paths = %#v", got)
 	}
 	channels := ChannelsSection{
@@ -640,23 +616,21 @@ func TestGatewayWebhookInboundPathsAndAnonymousGET(t *testing.T) {
 		WeCom:         WeCom{Enabled: true, CallbackPath: "/wecom"},
 		WeComCallback: WeComCallback{Enabled: true, CallbackPath: "/wecom_callback"},
 	}
-	got := strings.Join(gatewayWebhookInboundPaths(channels), ",")
+	got := strings.Join(WebhookInboundPaths(channels), ",")
 	want := "/webhook,/blue,/sms,/slack,/email,/whatsapp,/wecom,/wecom_callback"
 	if got != want {
-		t.Fatalf("gatewayWebhookInboundPaths = %q, want %q", got, want)
+		t.Fatalf("WebhookInboundPaths = %q, want %q", got, want)
 	}
 	channels.Webhook.InboundPath = " "
-	if strings.Contains(strings.Join(gatewayWebhookInboundPaths(channels), ","), "webhook") {
+	if strings.Contains(strings.Join(WebhookInboundPaths(channels), ","), "webhook") {
 		t.Fatal("empty enabled webhook path should be skipped")
 	}
 	channels.Webhook.InboundPath = " /webhook "
-	root := &Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-		"main": {Channels: channels},
-	}}}
-	if !GatewayControlPlaneAuthExemptPath(" /webhook ", root, "main") || !GatewayControlPlaneAuthExemptPath("/channels/x/health", root, "main") {
+	sections := []ChannelsSection{channels}
+	if !GatewayControlPlaneAuthExemptPath(" /webhook ", sections) || !GatewayControlPlaneAuthExemptPath("/channels/x/health", sections) {
 		t.Fatal("expected gateway path auth exemption")
 	}
-	if GatewayControlPlaneAuthExemptPath("/api", root, "main") {
+	if GatewayControlPlaneAuthExemptPath("/api", sections) {
 		t.Fatal("unexpected gateway auth exemption")
 	}
 	if GatewayAllowsAnonymousGET("") || GatewayAllowsAnonymousGET("/ws/chat") || GatewayAllowsAnonymousGET("/api/x") || GatewayAllowsAnonymousGET("/v1/x") {
@@ -743,8 +717,7 @@ memories:
 			if err != nil {
 				t.Fatal(err)
 			}
-			gotWeixin := ChannelsForAgent(&got, "main").Weixin
-			if gotWeixin.Enabled || gotWeixin.SilkVoiceDecode || got.Agents.Definitions["worker"].Primary || got.ApprovalPolicy.Granular.SandboxApproval || got.ApprovalPolicy.Granular.Rules || got.ApprovalPolicy.Granular.SkillApproval || got.ApprovalPolicy.Granular.RequestPermissions || got.ApprovalPolicy.Granular.MCPElicitations || got.Memories.DisableOnExternalContext == nil || *got.Memories.DisableOnExternalContext {
+			if got.Agents.Definitions["worker"].Primary || got.ApprovalPolicy.Granular.SandboxApproval || got.ApprovalPolicy.Granular.Rules || got.ApprovalPolicy.Granular.SkillApproval || got.ApprovalPolicy.Granular.RequestPermissions || got.ApprovalPolicy.Granular.MCPElicitations || got.Memories.DisableOnExternalContext == nil || *got.Memories.DisableOnExternalContext {
 				t.Fatalf("explicit false values changed after Save: %+v", got)
 			}
 			hook := got.Hooks["PreToolUse"][0].Hooks[0]

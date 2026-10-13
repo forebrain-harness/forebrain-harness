@@ -203,6 +203,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		AuthMode:    authMode,
 		SignInToken: signInToken,
 		WebUI:       gw.resolveStaticFS() != nil,
+		Notes:       h.ChannelMigrationNotes,
 	}
 	return httpSrv.Run(func(a net.Addr) {
 		banner.Addr = a
@@ -225,6 +226,10 @@ type startupBanner struct {
 	AuthMode    string
 	SignInToken string // set only when a sign-in link is to be printed
 	WebUI       bool   // true when the web UI is being served
+	// Notes are one-off startup notices, printed under the banner. The
+	// primary-agent-level channel removal is the first: a channel that was
+	// enabled when plan 035 retired the section is named once here.
+	Notes []string
 }
 
 // displayHost maps an unspecified bind address to loopback for the clickable
@@ -267,5 +272,10 @@ func writeStartupBanner(w io.Writer, b startupBanner) {
 	}
 	fmt.Fprintf(&out, "Auth         %s\n", strings.TrimSpace(b.AuthMode))
 	fmt.Fprintf(&out, "Listening on http://%s\n", b.Addr.String())
+	for _, note := range b.Notes {
+		if n := strings.TrimSpace(note); n != "" {
+			fmt.Fprintf(&out, "Note         %s\n", n)
+		}
+	}
 	_, _ = io.WriteString(w, out.String())
 }

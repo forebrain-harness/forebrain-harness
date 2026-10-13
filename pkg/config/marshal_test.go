@@ -8,38 +8,34 @@ import (
 )
 
 func TestMarshalYAMLPreservesFalseBooleanConfiguration(t *testing.T) {
+	disabled := false
 	r := Root{
 		Gateway: Gateway{HTTPAddr: "127.0.0.1:6060"},
-		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-			"main": {Channels: ChannelsSection{
-				Telegram: Telegram{Enabled: true, BotToken: "tok"},
-				Feishu:   Feishu{Enabled: false, AppID: "kept-under-its-agent"},
-				Weixin:   Weixin{Enabled: false, AccountID: "acct"},
-			}},
-		}},
+		Agents: AgentsSection{
+			Definitions: map[string]AgentDefinition{
+				"main": {Primary: true, DisplayName: "Main"},
+			},
+			Defaults: AgentDefaults{EnableSubagent: &disabled},
+		},
 	}
 	b, err := yaml.Marshal(r)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	text := string(b)
-	if !strings.Contains(text, "telegram:") {
-		t.Fatalf("enabled telegram channel missing:\n%s", text)
+	if !strings.Contains(text, "main:") {
+		t.Fatalf("the agent definition is missing:\n%s", text)
 	}
-	// A channel the user disabled but still configured keeps both its settings
-	// and the explicit false, so turning it back on does not lose them.
-	for _, want := range []string{"feishu:", "weixin:", "enabled: false"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("false-valued configuration %q missing:\n%s", want, text)
-		}
+	// An explicit false on a pointer bool is written, so turning the switch
+	// back on does not depend on an absent key meaning "off".
+	if !strings.Contains(text, "enable_subagent: false") {
+		t.Fatalf("explicit false was dropped:\n%s", text)
 	}
 	// Sections that carry content are emitted.
 	if !strings.Contains(text, "gateway:") {
 		t.Fatalf("section with content %q missing:\n%s", "gateway:", text)
 	}
 	// A section carrying nothing is dropped rather than written as `key: {}`.
-	// Save materializes every optional default first, so the persisted file
-	// still documents each setting; see TestSaveWritesNoEmptyMappings.
 	if strings.Contains(text, "{}") {
 		t.Fatalf("empty mapping written instead of being omitted:\n%s", text)
 	}
@@ -48,39 +44,24 @@ func TestMarshalYAMLPreservesFalseBooleanConfiguration(t *testing.T) {
 	}
 }
 
-func TestMarshalYAMLRoundTripEnabledChannel(t *testing.T) {
+// Channels are project data now, so a configuration never names one at any
+// level of the file: the old per-agent section is gone.
+func TestMarshalYAMLWritesNoChannelSections(t *testing.T) {
 	r := Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-		"main": {Channels: ChannelsSection{Slack: Slack{Enabled: true, BotToken: "b", InboundPath: "/x"}}},
+		"main": {Primary: true},
 	}}}
 	b, err := yaml.Marshal(r)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var back Root
-	if err := yaml.Unmarshal(b, &back); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	text := string(b)
+	if strings.Contains(text, "channels:") {
+		t.Fatalf("a channels section was written to the config:\n%s", text)
 	}
-	slack := ChannelsForAgent(&back, "main").Slack
-	if !slack.Enabled || slack.BotToken != "b" || slack.InboundPath != "/x" {
-		t.Fatalf("enabled channel did not round-trip: %+v", slack)
-	}
-}
-
-// A channel section only exists inside an agent definition. Nothing at the top
-// level of the file configures a channel, so a configuration that names one
-// there is describing an agent that does not exist.
-func TestMarshalYAMLWritesNoTopLevelChannelSections(t *testing.T) {
-	r := Root{Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-		"main": {Channels: ChannelsSection{Telegram: Telegram{Enabled: true, BotToken: "tok"}}},
-	}}}
-	b, err := yaml.Marshal(r)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		for _, channel := range []string{"telegram:", "slack:", "weixin:", "wecom:", "feishu:", "qq:"} {
+	for _, channel := range []string{"telegram:", "slack:", "weixin:", "wecom:", "feishu:", "qq:"} {
+		for _, line := range strings.Split(text, "\n") {
 			if line == channel {
-				t.Fatalf("channel %q written at the top level of the config:\n%s", channel, b)
+				t.Fatalf("channel %q written into the config:\n%s", channel, text)
 			}
 		}
 	}

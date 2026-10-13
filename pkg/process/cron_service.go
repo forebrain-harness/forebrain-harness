@@ -226,8 +226,17 @@ func (c *CronService) deliver(ctx context.Context, channelID, sessionID, text st
 	if c == nil || c.env == nil || c.env.Channels == nil {
 		return fmt.Errorf("no channels are bound")
 	}
+	// A fire runs in its job's project, so the answer goes back through that
+	// project's own instance of the channel.
+	projectID := ""
+	if c.env.SQL != nil {
+		if p, ok, err := state.NewProjectStore(c.env.SQL, c.agentID).ProjectForSession(ctx, strings.TrimSpace(sessionID)); err == nil && ok {
+			projectID = p.ID
+		}
+	}
 	return c.env.Channels.Deliver(ctx, channel.Outbound{
 		ChannelID: strings.TrimSpace(channelID),
+		ProjectID: projectID,
 		SessionID: strings.TrimSpace(sessionID),
 		Text:      text,
 	})
@@ -361,17 +370,17 @@ type CronJobInput struct {
 	Deliver     string
 	Enabled     *bool
 	RepeatLimit int
-	// ProjectID binds the job to one project; empty is agent-wide.
+	// ProjectID is the project the job fires in; a job always belongs to one.
 	ProjectID string
 }
 
-// ListJobs returns the bound agent's jobs, newest first.
-func (c *CronService) ListJobs(ctx context.Context, agentID string) ([]state.CronJob, error) {
+// ListJobsForProject returns one project's jobs, newest first.
+func (c *CronService) ListJobsForProject(ctx context.Context, agentID, projectID string) ([]state.CronJob, error) {
 	store := c.store()
 	if store == nil {
 		return nil, fmt.Errorf("cron storage unavailable")
 	}
-	return store.ListJobs(ctx, agentID)
+	return store.ListJobsForProject(ctx, agentID, projectID)
 }
 
 // CreateJob validates the schedule before the job is written, so a job that
@@ -385,18 +394,20 @@ func (c *CronService) CreateJob(ctx context.Context, agentID string, in CronJobI
 	if strings.TrimSpace(in.Prompt) == "" {
 		return state.CronJob{}, fmt.Errorf("prompt is required")
 	}
-	// A job binds to one of this agent's projects or to none: the binding is
-	// tenant data like the job, so a project id learned elsewhere is refused
-	// as not found rather than tying the job to another agent's project.
-	if projectID := strings.TrimSpace(in.ProjectID); projectID != "" {
-		if _, err := state.NewProjectStore(c.env.SQL, agentID).Get(ctx, projectID); err != nil {
-			return state.CronJob{}, err
-		}
+	// A job always belongs to one of this agent's projects: the project id is
+	// tenant data, so one learned elsewhere is refused as not found rather
+	// than tying the job to another agent's project.
+	projectID := strings.TrimSpace(in.ProjectID)
+	if projectID == "" {
+		return state.CronJob{}, fmt.Errorf("project is required")
+	}
+	if _, err := state.NewProjectStore(c.env.SQL, agentID).Get(ctx, projectID); err != nil {
+		return state.CronJob{}, err
 	}
 	job := state.CronJob{
 		ID:          state.NewID("cron"),
 		Ag:          strings.TrimSpace(agentID),
-		ProjectID:   strings.TrimSpace(in.ProjectID),
+		ProjectID:   projectID,
 		Name:        strings.TrimSpace(in.Name),
 		Sched:       strings.TrimSpace(in.Schedule),
 		Prompt:      in.Prompt,
@@ -437,6 +448,19 @@ func (c *CronService) UpdateJob(ctx context.Context, agentID, jobID string, in C
 	job, err := c.Job(ctx, agentID, jobID)
 	if err != nil {
 		return state.CronJob{}, err
+	}
+	// A job always names the project it fires in. An edit that drops it is
+	// refused; an edit that names a different one must name one of this
+	// agent's projects.
+	projectID := strings.TrimSpace(in.ProjectID)
+	if projectID == "" {
+		return state.CronJob{}, fmt.Errorf("project is required")
+	}
+	if projectID != job.ProjectID {
+		if _, err := state.NewProjectStore(c.env.SQL, agentID).Get(ctx, projectID); err != nil {
+			return state.CronJob{}, err
+		}
+		job.ProjectID = projectID
 	}
 	if v := strings.TrimSpace(in.Name); v != "" {
 		job.Name = v

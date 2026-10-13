@@ -993,6 +993,7 @@ type autoContinueGateway struct {
 	sessions  *state.SessionStore
 	executor  *recordingRunExecutor
 	cronStore *state.CronStore
+	projectID string
 	url       string
 }
 
@@ -1040,9 +1041,14 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 	t.Cleanup(s.Core.StopAutoContinue)
 	env.Cron().Bind(ctx, "main", process.ScheduledTurns{StartHeartbeat: s.startHeartbeatTurn, StartFire: s.startCronFire})
 	t.Cleanup(env.Cron().Stop)
+	// A fire runs in its job's project, so the fixture has one.
+	projRoot := filepath.Join(home, "project")
+	require.NoError(t, os.MkdirAll(projRoot, 0o755))
+	proj, err := state.NewProjectStore(db, "main").Create(ctx, state.CreateProjectInput{Name: "p", Root: projRoot})
+	require.NoError(t, err)
 	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
 	t.Cleanup(server.Close)
-	return &autoContinueGateway{server: s, sessions: sessions, executor: executor, cronStore: &state.CronStore{DB: db}, url: "ws" + strings.TrimPrefix(server.URL, "http")}
+	return &autoContinueGateway{server: s, sessions: sessions, executor: executor, cronStore: &state.CronStore{DB: db}, projectID: proj.ID, url: "ws" + strings.TrimPrefix(server.URL, "http")}
 }
 
 // bind opens a page on the session and returns it with its session_bound reply.
@@ -1633,7 +1639,7 @@ func TestFailedChannelTurnKeepsTheMessageBoundToItsTimedRun(t *testing.T) {
 	executor := &failingChannelExecutor{runs: s.RunRT, err: errors.New("connection reset by peer")}
 	s.Core = turn.New(turn.WithSessionStore(s.Sessions), turn.WithRunExecutor(executor))
 
-	_, ok := s.submitChannelTurn(ctx, "wecom", "wecom:u1", "the expanded prompt", "/plan ship it", "", "")
+	_, ok := s.submitChannelTurn(ctx, "wecom", "", "wecom:u1", "the expanded prompt", "/plan ship it", "", "")
 	require.False(t, ok)
 
 	rows, err := s.Sessions.ListAllMessages(ctx, "wecom:u1", 0)
@@ -1698,7 +1704,7 @@ func TestChannelTurnRefusedByABusySessionTellsTheUserTheSentence(t *testing.T) {
 	blocked := &failingChannelExecutor{runs: s.RunRT}
 	s.Core = turn.New(turn.WithSessionStore(s.Sessions), turn.WithRunExecutor(blocked))
 
-	_, ok := s.submitChannelTurn(ctx, "wecom", "wecom:u1", "hello", "hello", "", "")
+	_, ok := s.submitChannelTurn(ctx, "wecom", "", "wecom:u1", "hello", "hello", "", "")
 	require.False(t, ok)
 	require.Empty(t, blocked.runID, "no run was created beside the live one")
 	require.Equal(t, []string{"This conversation is already running a turn; send again when it finishes."}, rec.delivered())
@@ -1737,6 +1743,9 @@ func (f *fireGatewayChannel) delivered() []string {
 func fireAJobNow(t *testing.T, g *autoContinueGateway, in process.CronJobInput) (state.CronJob, state.CronRun) {
 	t.Helper()
 	ctx := context.Background()
+	if strings.TrimSpace(in.ProjectID) == "" {
+		in.ProjectID = g.projectID
+	}
 	job, err := g.server.Env.Cron().CreateJob(ctx, "main", in)
 	require.NoError(t, err)
 	require.NoError(t, g.server.Env.Cron().RunJobNow(ctx, "main", job.ID))
@@ -1870,7 +1879,7 @@ func TestCronFireParkedOnApprovalSettlesWhenItsRunEnds(t *testing.T) {
 	ctx := context.Background()
 	out := &fireGatewayChannel{}
 	g.server.Env.Channels = channel.NewRegistry()
-	require.NoError(t, g.server.Env.Channels.Bind(ctx, "main", []channel.Handler{out}, nil))
+	require.NoError(t, g.server.Env.Channels.BindProjects(ctx, "main", []channel.BoundChannel{{ProjectID: g.projectID, Handler: out}}, nil))
 	g.executor.waiting = &turn.WaitingError{
 		Request: &turn.ToolApprovalRequest{ActionID: "a-fire", ToolName: "write_file"},
 		Resume: &turn.ApprovalResumeState{ActionID: "a-fire", ToolName: "write_file",
@@ -1940,7 +1949,7 @@ func TestCronFireAbandonedByACrashIsSettled(t *testing.T) {
 	g := newAutoContinueGateway(t)
 	ctx := context.Background()
 	enabled := true
-	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{ProjectID: g.projectID,
 		Name: "long report", Schedule: "every 1h", Prompt: "write a long report", Enabled: &enabled,
 	})
 	require.NoError(t, err)
@@ -1970,7 +1979,7 @@ func TestCronFireReapedElsewhereIsSettledByTheTick(t *testing.T) {
 	g := newAutoContinueGateway(t)
 	ctx := context.Background()
 	enabled := true
-	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{ProjectID: g.projectID,
 		Name: "long report elsewhere", Schedule: "every 1h", Prompt: "write a long report", Enabled: &enabled,
 	})
 	require.NoError(t, err)
@@ -2016,7 +2025,7 @@ func TestRunEndingOfAnOrdinarySessionTouchesNoFire(t *testing.T) {
 	g := newAutoContinueGateway(t)
 	ctx := context.Background()
 	enabled := true
-	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{ProjectID: g.projectID,
 		Name: "quiet job", Schedule: "every 1h", Prompt: "x", Enabled: &enabled,
 	})
 	require.NoError(t, err)
@@ -2042,7 +2051,7 @@ func TestSubagentEndingDoesNotSettleAFire(t *testing.T) {
 	g := newAutoContinueGateway(t)
 	ctx := context.Background()
 	enabled := true
-	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{
+	job, err := g.server.Env.Cron().CreateJob(ctx, "main", process.CronJobInput{ProjectID: g.projectID,
 		Name: "dispatches work", Schedule: "every 1h", Prompt: "x", Enabled: &enabled,
 	})
 	require.NoError(t, err)

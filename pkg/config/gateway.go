@@ -5,7 +5,10 @@ import (
 	"strings"
 )
 
-func gatewayWebhookInboundPaths(ch ChannelsSection) []string {
+// WebhookInboundPaths lists the inbound endpoints one channel section mounts.
+// The control-plane middleware exempts these from its auth because the
+// endpoints authenticate their caller themselves (signature, channel token).
+func WebhookInboundPaths(ch ChannelsSection) []string {
 	var out []string
 	add := func(enabled bool, p string) {
 		if !enabled {
@@ -30,11 +33,11 @@ func gatewayWebhookInboundPaths(ch ChannelsSection) []string {
 
 // GatewayControlPlaneAuthExemptPath reports whether a request may skip
 // control-plane auth. Beyond the health probes, the exempt set is the inbound
-// webhook paths of the active primary agent's channels — those endpoints
-// authenticate their caller themselves (signature, channel token), and only
-// the active agent's channels are mounted, so naming the agent here keeps the
-// exemption and the routing table describing the same set of paths.
-func GatewayControlPlaneAuthExemptPath(path string, r *Root, agentID string) bool {
+// webhook paths of the active agent's project channels — those endpoints
+// authenticate their caller themselves, and only the active agent's channels
+// are mounted, so naming the agent's channels here keeps the exemption and the
+// routing table describing the same set of paths.
+func GatewayControlPlaneAuthExemptPath(path string, channels []ChannelsSection) bool {
 	p := strings.TrimSpace(path)
 	if p == "/health" || p == "/healthz" || p == "/readyz" {
 		return true
@@ -42,9 +45,11 @@ func GatewayControlPlaneAuthExemptPath(path string, r *Root, agentID string) boo
 	if strings.HasPrefix(p, "/channels/") && strings.HasSuffix(p, "/health") {
 		return true
 	}
-	for _, x := range gatewayWebhookInboundPaths(ChannelsForAgent(r, agentID)) {
-		if p == strings.TrimSpace(x) {
-			return true
+	for _, ch := range channels {
+		for _, x := range WebhookInboundPaths(ch) {
+			if p == strings.TrimSpace(x) {
+				return true
+			}
 		}
 	}
 	return false

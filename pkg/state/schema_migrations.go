@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 13
+const stateSchemaVersion = 14
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -52,6 +52,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 11, apply: migrateStateV10ToV11},
 	{version: 12, apply: migrateStateV11ToV12},
 	{version: 13, apply: migrateStateV12ToV13},
+	{version: 14, apply: migrateStateV13ToV14},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -593,6 +594,101 @@ func migrateStateV12ToV13(ctx context.Context, conn *sql.Conn) error {
 	if firstTokenCol == 0 {
 		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_runs ADD COLUMN first_token_ms INTEGER`); err != nil {
 			return fmt.Errorf("add fb_runs.first_token_ms: %w", err)
+		}
+	}
+	return nil
+}
+
+// fbCronJobsDDLV14 is fb_cron_jobs exactly as schema.sql declares it after
+// v14: project_id is NOT NULL, since a job always belongs to a project.
+const fbCronJobsDDLV14 = `
+CREATE TABLE fb_cron_jobs (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  schedule TEXT NOT NULL,
+  prompt TEXT NOT NULL DEFAULT '',
+  deliver TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  repeat_limit INTEGER NOT NULL DEFAULT 0,
+  run_count INTEGER NOT NULL DEFAULT 0,
+  next_run_at INTEGER,
+  last_run_at INTEGER,
+  last_status TEXT NOT NULL DEFAULT '' CHECK (last_status IN ('', 'ok', 'failed', 'running', 'delivery_failed')),
+  last_error TEXT NOT NULL DEFAULT '',
+  last_error_code TEXT NOT NULL DEFAULT '',
+  last_output TEXT NOT NULL DEFAULT '',
+  failure_streak INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT`
+
+// migrateStateV13ToV14 makes channels belong to a project and every scheduled
+// task carry the project it fires in (plan 035).
+//
+// It adds fb_project_channels — the per-project channel table, with the
+// account uniqueness that keeps one bot out of two projects — and rebuilds
+// fb_cron_jobs so project_id is NOT NULL. A job with no project could never
+// run, so those rows are deleted first; migration v8→v9 already removed them,
+// so this is a guard rather than a purge. fb_cron_runs names its job by id
+// without a foreign key, so nothing detaches when the table is rebuilt. Every
+// step tolerates the object already being in its final shape, so a fixture
+// built from the current schema.sql with a lowered user_version passes through
+// unchanged.
+func migrateStateV13ToV14(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_project_channels (
+  project_id TEXT NOT NULL REFERENCES fb_projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (TRIM(kind) <> ''),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  account_key TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (project_id, kind)
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_project_channels: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_project_channels_account ON fb_project_channels(account_key) WHERE account_key <> ''`); err != nil {
+		return fmt.Errorf("create idx_fb_project_channels_account: %w", err)
+	}
+	var projectNotNull int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_cron_jobs') WHERE name='project_id' AND "notnull"=1`).Scan(&projectNotNull); err != nil {
+		return err
+	}
+	if projectNotNull > 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE project_id IS NULL OR TRIM(project_id) = ''`); err != nil {
+		return fmt.Errorf("delete projectless cron jobs: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `DROP INDEX IF EXISTS idx_fb_cron_jobs_agent`); err != nil {
+		return fmt.Errorf("drop idx_fb_cron_jobs_agent: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_cron_jobs RENAME TO fb_cron_jobs_v13`); err != nil {
+		return fmt.Errorf("rename fb_cron_jobs: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, fbCronJobsDDLV14); err != nil {
+		return fmt.Errorf("create fb_cron_jobs v14: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO fb_cron_jobs (id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
+  run_count, next_run_at, last_run_at, last_status, last_error, last_error_code, last_output, failure_streak, created_at, updated_at)
+SELECT id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
+  run_count, next_run_at, last_run_at, last_status, last_error, last_error_code, last_output, failure_streak, created_at, updated_at
+FROM fb_cron_jobs_v13`); err != nil {
+		return fmt.Errorf("copy fb_cron_jobs: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `DROP TABLE fb_cron_jobs_v13`); err != nil {
+		return fmt.Errorf("drop fb_cron_jobs_v13: %w", err)
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_fb_cron_jobs_agent_project ON fb_cron_jobs(agent_id, project_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_fb_cron_jobs_due ON fb_cron_jobs(agent_id, next_run_at) WHERE next_run_at IS NOT NULL`,
+	} {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("create fb_cron_jobs index: %w", err)
 		}
 	}
 	return nil
@@ -1316,10 +1412,10 @@ VALUES(?,?,?,'','','',?,?,'shared',1,0,?,?)`,
 // history: every cron job belongs to a project after this migration (plan 035
 // delivers the picker that creates them that way).
 func deleteOrphanCronJobsV9(ctx context.Context, conn *sql.Conn) (int64, error) {
-	if _, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id IS NULL)`); err != nil {
+	if _, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id IS NULL OR TRIM(project_id) = '')`); err != nil {
 		return 0, err
 	}
-	res, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE project_id IS NULL`)
+	res, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE project_id IS NULL OR TRIM(project_id) = ''`)
 	if err != nil {
 		return 0, err
 	}
@@ -2420,8 +2516,11 @@ WHERE IFNULL(%s,'attachment')='attachment'
 		bucket, key, textPath, failure, source))
 }
 
-// migrateV1CronJobs maps the project link onto NULL-for-none (dropping one that
-// points at a project that did not survive) and NULL onto "no last run".
+// migrateV1CronJobs carries a job forward only when its project survives: a
+// job now always belongs to a project (project_id is NOT NULL), so one that
+// names no project, or one whose project is not in the rebuilt table, is
+// dropped rather than resurrected without one. last_run_at maps NULL onto "no
+// last run".
 func migrateV1CronJobs(ctx context.Context, conn *sql.Conn) (int64, error) {
 	if ok, err := legacyTableExists(ctx, conn, "legacy_fb_cron_jobs"); err != nil || !ok {
 		return 0, err
@@ -2441,16 +2540,15 @@ func migrateV1CronJobs(ctx context.Context, conn *sql.Conn) (int64, error) {
   id, agent_id, project_id, name, schedule, prompt, deliver, enabled, repeat_limit,
   run_count, next_run_at, last_run_at, last_status, last_error, last_output, failure_streak,
   created_at, updated_at)
-SELECT id, agent_id,
-  CASE WHEN NULLIF(%s,'') IS NULL THEN NULL
-       WHEN EXISTS(SELECT 1 FROM fb_projects p WHERE p.id=legacy_fb_cron_jobs.project_id) THEN %s
-       ELSE NULL END,
+SELECT id, agent_id, %s,
   IFNULL(%s,''), schedule, IFNULL(%s,''), IFNULL(%s,''), IFNULL(%s,1), IFNULL(%s,0),
   IFNULL(%s,0), next_run_at, NULLIF(%s,0), IFNULL(%s,''), IFNULL(%s,''), IFNULL(%s,''), IFNULL(%s,0),
   created_at, updated_at
-FROM legacy_fb_cron_jobs`,
-		project, project, name, prompt, deliver, enabled, repeat, runCount,
-		lastRun, lastStatus, lastError, lastOutput, streak))
+FROM legacy_fb_cron_jobs
+WHERE NULLIF(%s,'') IS NOT NULL
+  AND EXISTS(SELECT 1 FROM fb_projects p WHERE p.id=legacy_fb_cron_jobs.project_id)`,
+		project, name, prompt, deliver, enabled, repeat, runCount,
+		lastRun, lastStatus, lastError, lastOutput, streak, project))
 }
 
 // migrateV1CronRuns drops the always-empty run_id, maps finished_at onto

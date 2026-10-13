@@ -55,7 +55,7 @@ test('project space shell: breadcrumb, tabs, default overview', async ({ page })
   await expect(page.locator('.proj-head')).toBeVisible()
   await expect(page.locator('.proj-head')).toContainText('e2e-alpha')
   const tabLabels = await page.locator('.proj-tab').allInnerTexts()
-  expect(tabLabels.map((label) => label.trim()).length).toBe(9)
+  expect(tabLabels.map((label) => label.trim()).length).toBe(10)
   // Placeholder tabs render their notice.
   await page.click('.proj-tab:has-text("规则"), .proj-tab:has-text("Rules")')
   await expect(page).toHaveURL(/\/rules$/)

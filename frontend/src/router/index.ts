@@ -73,20 +73,13 @@ const router = createRouter({
         { path: 'lsp', name: 'project-lsp', component: () => import('@/components/project/ProjectLsp.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'skills', name: 'project-skills', component: () => import('@/components/project/ProjectSkills.vue'), meta: { title: () => t('routes.projectsTitle') } },
         { path: 'cron', name: 'project-cron', component: () => import('@/components/project/ProjectCron.vue'), meta: { title: () => t('routes.projectsTitle') } },
+        { path: 'channels', name: 'project-channels', component: () => import('@/components/project/ProjectChannels.vue'), meta: { title: () => t('routes.projectsTitle') } },
       ],
     },
-    {
-      path: '/cron',
-      name: 'cron',
-      component: () => import('@/views/CronView.vue'),
-      meta: { title: () => t('routes.cronTitle') },
-    },
-    {
-      path: '/channels',
-      name: 'channels',
-      component: () => import('@/views/ChannelsView.vue'),
-      meta: { title: () => t('routes.channelsTitle') },
-    },
+    // Scheduled tasks and channels belong to a project now; the old
+    // agent-level pages send the visitor to the project list.
+    { path: '/cron', redirect: '/projects' },
+    { path: '/channels', redirect: '/projects' },
     {
       path: '/providers',
       name: 'providers',

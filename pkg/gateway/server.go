@@ -189,6 +189,16 @@ func (s *Server) projectStore() *state.ProjectStore {
 	return s.Projects
 }
 
+// projectChannelStore builds the project-channel store for one primary agent.
+// Channels are project data, so every read and write is scoped to the agent
+// whose projects they belong to.
+func (s *Server) projectChannelStore(agentID string) *state.ProjectChannelStore {
+	if s == nil || s.Env == nil || s.Env.SQL == nil {
+		return nil
+	}
+	return state.NewProjectChannelStore(s.Env.SQL, agentID)
+}
+
 // approvalResumeOwner is the process identity the approval-continuation
 // lease is claimed under. It is the same owner that vouches for this
 // process's runs: one process has one answer to "is it still alive", so the
@@ -524,9 +534,11 @@ func (b channelBus) deliverOutboundMaybeSanitized(ctx context.Context, channelID
 			text = safety.SanitizeOutbound(lc, text)
 		}
 	}
+	projectID, rawSession := state.UnwrapProjectChannelSession(chID, sessionID)
 	err := b.s.Channels.Deliver(ctx, channel.Outbound{
 		ChannelID: chID,
-		SessionID: state.UnwrapChannelSession(chID, sessionID),
+		ProjectID: projectID,
+		SessionID: rawSession,
 		Text:      text,
 	})
 	// An unbound or inbound-only channel is a normal outcome (an agent switch
@@ -544,11 +556,12 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 		if ch == "" {
 			ch = "wecom"
 		}
-		sid := state.WrapChannelSession(ch, m.SessionID)
+		sid := state.WrapProjectChannelSession(ch, m.ProjectID, m.SessionID)
 		if sid == "" {
 			slog.Warn("drop inbound message with empty session id", "channel", ch)
 			return
 		}
+		projectID := strings.TrimSpace(m.ProjectID)
 		sc := parseSlashCommand(b.s, sid, ch, m.Text)
 		if sc.ModeChanged {
 			slog.Info("mode changed", "session", sid, "mode", sc.Mode, "phase", sc.Phase, "source", "channel")
@@ -561,7 +574,7 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 			if cerr := b.s.autoCompactBeforeUserAppend(context.Background(), sid, ch, input, m.Text); cerr != nil {
 				slog.Debug("channel auto compact skipped", "session", sid, "channel", ch, "err", cerr)
 			}
-			outcome, ok := b.s.submitChannelTurn(context.Background(), ch, sid, input, m.Text, sc.SkillName, sc.SkillPath)
+			outcome, ok := b.s.submitChannelTurn(context.Background(), ch, projectID, sid, input, m.Text, sc.SkillName, sc.SkillPath)
 			if !ok {
 				return
 			}
@@ -659,7 +672,7 @@ func (b channelBus) PublishInbound(ctx context.Context, m channel.Inbound) error
 				return
 			}
 		}
-		outcome, ok := b.s.submitChannelTurn(context.Background(), ch, sid, input, "", "", "")
+		outcome, ok := b.s.submitChannelTurn(context.Background(), ch, projectID, sid, input, "", "", "")
 		if !ok {
 			return
 		}

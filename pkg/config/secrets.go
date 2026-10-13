@@ -65,6 +65,13 @@ func appendKeyPath(base []string, key string) []string {
 }
 
 func isSecretLikeConfigKey(key string) bool {
+	return IsSecretLikeConfigKey(key)
+}
+
+// IsSecretLikeConfigKey reports whether a configuration key names a secret a
+// surface must mask. It is the same rule the redactor walks struct tags by, so
+// a channel section stored as a plain field map is masked by one decision.
+func IsSecretLikeConfigKey(key string) bool {
 	k := strings.ToLower(strings.TrimSpace(key))
 	k = strings.ReplaceAll(k, "-", "_")
 	if isNonSecretConfigKey(k) {

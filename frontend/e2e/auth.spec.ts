@@ -6,8 +6,6 @@ const PAGES = [
   '/',
   '/projects',
   '/subagents',
-  '/cron',
-  '/channels',
   '/permissions',
   '/tools',
   '/providers',

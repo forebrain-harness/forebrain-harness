@@ -68,6 +68,7 @@ async function createOnceJob(page: Page, projectId: string, name: string, prompt
  */
 async function waitForRunRecord(
   page: Page,
+  projectId: string,
   jobId: string,
   status: RegExp,
 ): Promise<{ id: number; session_id?: string; status?: string }> {
@@ -76,7 +77,7 @@ async function waitForRunRecord(
   await expect
     .poll(
       async () => {
-        const res = await page.request.get(`/api/cron/${jobId}/runs`)
+        const res = await page.request.get(`/api/v1/projects/${projectId}/cron/jobs/${jobId}/runs`)
         const data = (await res.json()) as { records?: Array<{ id: number; session_id?: string; status?: string }> }
         found = data.records?.find((row) => status.test(row.status ?? ''))
         if (found || process.env.E2E_REAL_LLM !== '1') return Boolean(found)
@@ -107,12 +108,12 @@ test('a fire is a conversation its record opens, and not one the drawer lists', 
   const projectId = await seedCronProject(page)
   await createOnceJob(page, projectId, 'fire brief', 'cron e2e fire prompt')
 
-  const jobs = (await (await page.request.get(`/api/cron?project_id=${projectId}`)).json()) as { records: Array<{ id: string; name?: string }> }
+  const jobs = (await (await page.request.get(`/api/v1/projects/${projectId}/cron/jobs`)).json()) as { records: Array<{ id: string; name?: string }> }
   const job = jobs.records.find((row) => row.name === 'fire brief')
   expect(job, 'the created job is in the project list').toBeTruthy()
 
   await page.locator('[data-cron-job="fire brief"]').getByRole('button', { name: /立即执行|Run now/ }).click()
-  const record = await waitForRunRecord(page, job!.id, /^ok$/)
+  const record = await waitForRunRecord(page, projectId, job!.id, /^ok$/)
   expect(record.session_id, 'a fire that finished has its conversation').toBeTruthy()
 
   // The history panel "Run now" opened was filled before the run settled;
@@ -158,21 +159,20 @@ test('a delivery that no channel takes is said in the viewer\'s language, quotin
   // The builder's delivery dropdown lists only channels that exist, so a job
   // addressed to one that does not is written straight through the API, into
   // the project the job belongs to.
-  const created = await page.request.post('/api/cron', {
+  const created = await page.request.post(`/api/v1/projects/${projectId}/cron/jobs`, {
     data: {
       name: 'fire undelivered',
       schedule: 'in 30m',
       prompt: 'cron e2e deliver prompt',
       deliver: 'no-such-channel',
-      project_id: projectId,
     },
   })
   expect(created.ok()).toBeTruthy()
   const job = (await created.json()) as { id: string }
-  const fired = await page.request.post(`/api/cron/${job.id}/run`, { data: {} })
+  const fired = await page.request.post(`/api/v1/projects/${projectId}/cron/jobs/${job.id}/run`, { data: {} })
   expect(fired.ok()).toBeTruthy()
 
-  const record = await waitForRunRecord(page, job.id, /^delivery_failed$/)
+  const record = await waitForRunRecord(page, projectId, job.id, /^delivery_failed$/)
   expect(record.session_id).toBeTruthy()
 
   await page.goto(`/projects/${projectId}/cron`, { waitUntil: 'networkidle' })

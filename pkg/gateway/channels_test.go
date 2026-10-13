@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -29,24 +30,38 @@ import (
 )
 
 // twoAgentChannelServer builds a gateway whose two primary agents each own a
-// webhook channel on their own inbound path.
+// project with a webhook channel on its own inbound path. Channels are project
+// data now, so they live in the state database.
 func twoAgentChannelServer(t *testing.T, home string) *Server {
 	t.Helper()
+	t.Setenv("FOREBRAIN_HOME", home)
 	cfg := &appcfg.Root{}
 	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Channels: appcfg.ChannelsSection{
-			Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/main/hook"},
-		}},
-		"acme": {Primary: true, Channels: appcfg.ChannelsSection{
-			Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/acme/hook"},
-		}},
+		"main": {},
+		"acme": {Primary: true},
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
+	db, err := state.OpenStateFromHome(context.Background(), home, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	seedProjectChannel(t, db, "main", filepath.Join(home, "workspace"), "/main/hook")
+	seedProjectChannel(t, db, "acme", filepath.Join(home, "workspaces", "acme"), "/acme/hook")
 	return &Server{
 		Home:     home,
 		Channels: channel.NewRegistry(),
-		Env:      &process.Environment{Deps: run.Deps{AppCfg: cfg}},
+		Env:      &process.Environment{SQL: db, Deps: run.Deps{AppCfg: cfg}},
 	}
+}
+
+func seedProjectChannel(t *testing.T, db *sql.DB, agentID, root, inboundPath string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	p, err := state.NewProjectStore(db, agentID).Create(context.Background(), state.CreateProjectInput{Name: agentID + "-p", Root: root})
+	require.NoError(t, err)
+	body := `{"enabled":true,"inbound_path":"` + inboundPath + `"}`
+	require.NoError(t, state.NewProjectChannelStore(db, agentID).Upsert(context.Background(),
+		state.ProjectChannel{ProjectID: p.ID, Kind: "webhook", Enabled: true, ConfigJSON: body}))
 }
 
 func summaryFor(home, id string) appcfg.Summary {
@@ -71,7 +86,7 @@ func TestPrimaryAgentSwitchRebindsChannelsToTheNewAgent(t *testing.T) {
 	_, mounted = s.Channels.Route(http.MethodPost, "/acme/hook")
 	require.False(t, mounted, "another agent's inbound path must not be mounted")
 
-	require.NoError(t, s.applyPrimaryAgent(summaryFor(home, "acme")))
+	s.bindChannelsTo(context.Background(), summaryFor(home, "acme"))
 
 	require.Equal(t, "acme", s.Channels.AgentID())
 	_, mounted = s.Channels.Route(http.MethodPost, "/acme/hook")
@@ -108,15 +123,11 @@ func TestChannelRoutesDispatchToTheBoundAgentsChannels(t *testing.T) {
 // Control-plane auth exemption follows the same agent: an inbound path is
 // exempt only while the agent that owns it is active.
 func TestControlPlaneExemptionFollowsTheActiveAgentsChannels(t *testing.T) {
-	cfg := &appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {Channels: appcfg.ChannelsSection{
-			Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/main/hook"},
-		}},
-		"acme": {Primary: true},
-	}
-	require.True(t, appcfg.GatewayControlPlaneAuthExemptPath("/main/hook", cfg, "main"))
-	require.False(t, appcfg.GatewayControlPlaneAuthExemptPath("/main/hook", cfg, "acme"))
+	main := appcfg.ChannelsSection{Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/main/hook"}}
+	acme := appcfg.ChannelsSection{Webhook: appcfg.Webhook{Enabled: true, InboundPath: "/acme/hook"}}
+	require.True(t, appcfg.GatewayControlPlaneAuthExemptPath("/main/hook", []appcfg.ChannelsSection{main}))
+	require.False(t, appcfg.GatewayControlPlaneAuthExemptPath("/main/hook", []appcfg.ChannelsSection{acme}))
+	require.False(t, appcfg.GatewayControlPlaneAuthExemptPath("/main/hook", nil))
 }
 
 func TestBuildToolStepNotificationForGatewayHook(t *testing.T) {
