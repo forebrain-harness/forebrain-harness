@@ -3802,8 +3802,9 @@ func (s *Server) resumeGatewayRun(actionID string, clearedContext bool) {
 	// the same way the webchat turn loop closes out a run it owns.
 	_ = s.RunRT.ClearWait(ctx, runID)
 	s.finishRun(ctx, sid, runID, state.RunStatusDone)
+	// No answer on the completion record: the run's words are in the transcript,
+	// written as each block ends, and this durable event only says the run ended.
 	_ = s.publishGatewayRunEvent(ctx, sid, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{
-		Text:      ans,
 		ElapsedMS: elapsed.Milliseconds(),
 	})
 }

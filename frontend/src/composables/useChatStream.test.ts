@@ -4410,3 +4410,111 @@ describe('thinkingBlockLabel', () => {
     expect(thinkingBlockLabel(block())).toBe('Thinking')
   })
 })
+
+describe('useChatStream stream_partial', () => {
+  function installFakeSocket(): () => void {
+    const original = globalThis.WebSocket
+    FakeChatWebSocket.instances = []
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    return () => Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: original })
+  }
+
+  function textOf(blocks: TimelineBlock[], kind: 'assistant' | 'thinking'): string[] {
+    return blocks.filter((b) => b.kind === kind).map((b) => (b as { text: string }).text)
+  }
+
+  async function startedTurn(stream: ReturnType<typeof useChatStream>) {
+    const pending = stream.send('hello')
+    const socket = FakeChatWebSocket.instances[0]!
+    socket.open()
+    const sent = JSON.parse(socket.sent[0] ?? '{}') as { request_id: string }
+    socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-1', session_id: 's1' })
+    return { pending, socket, sent }
+  }
+
+  it('replaces the in-flight answer a reconnect re-pushes instead of appending it twice', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const { pending, socket, sent } = await startedTurn(stream)
+      const delta = (text: string) => socket.message({
+        op: 'run_event', request_id: sent.request_id,
+        data: { id: `e-${text}`, sequence: 1, type: 'assistant_delta', run_id: 'run-1', session_id: 's1', payload: { text } },
+      })
+      const partial = (data: Record<string, unknown>) => socket.message({
+        op: 'stream_partial', request_id: sent.request_id, run_id: 'run-1', session_id: 's1', data,
+      })
+      delta('half an ans')
+      partial({ content: 'half an answer', reasoning: 'why' })
+      let assistant = stream.messages.value.find((m) => m.role === 'assistant')
+      // The whole unfinished block replaces what was drawn, never extends it.
+      expect(textOf(assistant?.blocks ?? [], 'assistant')).toEqual(['half an answer'])
+      expect(textOf(assistant?.blocks ?? [], 'thinking')).toEqual(['why'])
+
+      // Deltas after the reconnect continue the same block rather than opening
+      // a second one next to it.
+      delta(' and more')
+      assistant = stream.messages.value.find((m) => m.role === 'assistant')
+      expect(textOf(assistant?.blocks ?? [], 'assistant')).toEqual(['half an answer and more'])
+
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: 'half an answer and more', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  it('fills a running tool card from the output a reconnect re-pushes', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const { pending, socket, sent } = await startedTurn(stream)
+      socket.message({
+        op: 'run_event', request_id: sent.request_id,
+        data: {
+          id: 'e-tool', sequence: 1, type: 'tool_call_started', run_id: 'run-1', session_id: 's1',
+          payload: { kind: 'tool_call_started', step_id: 'call-1', tool_name: 'shell', tool_meta: { status: 'running' } },
+        },
+      })
+      socket.message({
+        op: 'stream_partial', request_id: sent.request_id, run_id: 'run-1', session_id: 's1',
+        data: { tool_outputs: [{ step_id: 'call-1', text: 'partial output\n' }] },
+      })
+      const assistant = stream.messages.value.find((m) => m.role === 'assistant')
+      const card = (assistant?.blocks ?? []).find((b) => b.kind === 'tool' && b.step.stepId === 'call-1') as { step: SubagentToolStep }
+      expect(card.step.output).toBe('partial output\n')
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+
+  it('writes the in-flight text and tool output a reconnect re-pushes into a subagent view', async () => {
+    const restore = installFakeSocket()
+    try {
+      const stream = useChatStream()
+      const { pending, socket, sent } = await startedTurn(stream)
+      socket.message({
+        op: 'run_event', request_id: sent.request_id,
+        data: {
+          id: 'e-child-tool', sequence: 1, type: 'tool_call_started', run_id: 'child-run', session_id: 's1',
+          payload: { kind: 'tool_call_started', step_id: 'call-2', tool_name: 'shell', tool_meta: { status: 'running', agent_id: 'task-1' } },
+        },
+      })
+      socket.message({
+        op: 'stream_partial', request_id: sent.request_id, run_id: 'child-run', session_id: 's1',
+        data: { agent_id: 'task-1', content: 'the child answer', reasoning: 'child thinking', tool_outputs: [{ step_id: 'call-2', agent_id: 'task-1', text: 'child output\n' }] },
+      })
+      const child = stream.subagents.value.find((s) => s.agentId === 'task-1')
+      expect(textOf(child?.blocks ?? [], 'assistant')).toEqual(['the child answer'])
+      expect(textOf(child?.blocks ?? [], 'thinking')).toEqual(['child thinking'])
+      const card = (child?.blocks ?? []).find((b) => b.kind === 'tool' && b.step.stepId === 'call-2') as { step: SubagentToolStep }
+      expect(card.step.output).toBe('child output\n')
+      socket.message({ op: 'run_completed', request_id: sent.request_id, text: '', data: { elapsed_ms: 1 } })
+      await pending
+    } finally {
+      restore()
+    }
+  })
+})

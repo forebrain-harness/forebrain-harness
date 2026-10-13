@@ -912,15 +912,10 @@ func TestWebAnswerStreamsAsItIsWritten(t *testing.T) {
 
 	records, err := s.RunRT.ListSessionEventsOfType(ctx, "s1", event.RunEventAssistantDelta, 10)
 	require.NoError(t, err)
-	var pieces []string
-	for _, rec := range records {
-		var p event.AssistantDeltaPayload
-		require.NoError(t, json.Unmarshal(rec.Payload, &p))
-		require.Empty(t, p.AgentID, "the primary agent's answer is not tagged as a subagent's")
-		require.Equal(t, "r1", rec.RunID)
-		pieces = append(pieces, p.Text)
-	}
-	require.Equal(t, []string{"Hel", "lo"}, pieces)
+	// A stream fragment is pushed and stored nowhere: the words live in the
+	// transcript (written as each block ends), and the partial keeps what a
+	// cancel persists. The run's event log carries no delta.
+	require.Empty(t, records, "a stream fragment must never reach the session log")
 	require.Equal(t, "Hello", partial.Content())
 	require.Equal(t, "thinking", partial.Reasoning())
 
@@ -1169,7 +1164,9 @@ func TestAutoContinuationRunsAsADetachedWebTurn(t *testing.T) {
 	require.Equal(t, started.RunID, completed.RunID)
 	var done event.TurnCompletedPayload
 	require.NoError(t, json.Unmarshal(completed.Payload, &done))
-	require.Equal(t, "picked up where it left off", done.Text)
+	// The completion record carries no answer any more: the words live in the
+	// transcript, written as each block ended.
+	require.Empty(t, done.Text, "a completion record carries no answer")
 
 	req := g.executor.last()
 	require.Equal(t, turn.AutoContinuePrompt, req.UserText)
@@ -1188,6 +1185,7 @@ func TestAutoContinuationRunsAsADetachedWebTurn(t *testing.T) {
 	}
 	require.Equal(t, []string{"user", "assistant"}, roles)
 	require.Equal(t, turn.AutoContinuePrompt, contents[0])
+	require.Equal(t, "picked up where it left off", contents[1], "the answer is in the transcript, where the completion no longer carries it")
 	require.Eventually(t, func() bool { return g.server.runController().Active() == 0 }, 5*time.Second, 10*time.Millisecond)
 }
 
@@ -1897,8 +1895,13 @@ func TestCronFireParkedOnApprovalSettlesWhenItsRunEnds(t *testing.T) {
 	runID, err := g.server.RunRT.FirstPrimaryRunID(ctx, fire.SessionID)
 	require.NoError(t, err)
 	require.NotEmpty(t, runID)
+	// The run's answer is in the transcript (written as each block ends, as it
+	// is now); the completion event carries none, so the fire reads it back
+	// from there.
+	_, err = g.server.Sessions.AppendMessageForRun(ctx, fire.SessionID, runID, "assistant", "done", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
 	require.NoError(t, g.server.RunRT.SetStatus(ctx, runID, state.RunStatusDone))
-	_ = g.server.publishGatewayRunEvent(ctx, fire.SessionID, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{Text: "done"})
+	_ = g.server.publishGatewayRunEvent(ctx, fire.SessionID, runID, event.RunEventTurnCompleted, event.TurnCompletedPayload{})
 
 	rec := fireWaitsForStatus(t, g, job.ID, state.CronStatusOK)
 	require.Equal(t, "done", rec.Output)

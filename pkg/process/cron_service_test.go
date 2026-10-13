@@ -402,15 +402,20 @@ func TestSettleFireAndFireParkedReachTheBoundScheduler(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// One fire whose run already ended with an answer, one still open.
+	// One fire whose run already ended with an answer, one still open. The
+	// answer is not on the ending event any more — a run's words live in its
+	// transcript — so the settled fire's output is read back from there.
 	run, err := env.Deps.RunRT.CreateRun(ctx, "cron-job-1-1", "x")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.Deps.RunRT.AppendSessionEvent(ctx, state.SessionEvent{
 		ID: "evt-fire-done", RunID: run.ID, SessionID: "cron-job-1-1",
-		Type: event.RunEventTurnCompleted, Payload: event.EncodePayload(event.TurnCompletedPayload{Text: "the answer"}),
+		Type: event.RunEventTurnCompleted, Payload: event.EncodePayload(event.TurnCompletedPayload{}),
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendMessageForRun(ctx, "cron-job-1-1", run.ID, "assistant", "the answer", "", "", state.MessageExecTiming{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.Deps.RunRT.SetStatus(ctx, run.ID, state.RunStatusDone); err != nil {

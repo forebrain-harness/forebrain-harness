@@ -5852,6 +5852,126 @@ func TestHandleRewindRestoresAndUndoes(t *testing.T) {
 	require.Equal(t, "a1\n", mustReadFile(t, a), "undo restores the pre-rewind bytes")
 }
 
+// A subagent's stream — its answer, its reasoning, a chunk of its tool's
+// output — is drawn as it happens and stored nowhere: the words live in the
+// worker's transcript and a tool's output on its completed step.
+func TestSubagentStreamIsDrawnNotStored(t *testing.T) {
+	ctx := context.Background()
+	db, err := statepkg.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	runSvc := &statepkg.RunStore{DB: db}
+	require.NoError(t, statepkg.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+	run, err := runSvc.CreateRun(ctx, "sid", "inspect source")
+	require.NoError(t, err)
+
+	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir()}}
+	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
+	said := make(chan Message, 4)
+	s.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindAssistant {
+			said <- m.Msg
+		}
+	})
+
+	if err := s.publishRunEvent(ctx, event.NewRunEvent("", run.ID, "sid", event.RunEventAssistantDelta,
+		event.AssistantDeltaPayload{Text: "working on it", AgentID: "task-1"}, time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case m := <-said:
+		require.Equal(t, "task-1", m.AgentID)
+		require.Equal(t, "working on it", m.Content)
+	case <-time.After(time.Second):
+		t.Fatal("the subagent's stream was not drawn")
+	}
+
+	events, err := runSvc.ListRunEvents(ctx, run.ID, 10)
+	require.NoError(t, err)
+	require.Empty(t, events, "a stream fragment must never be stored")
+}
+
+// A shell output chunk is drawn as it happens — for the primary agent and for a
+// subagent — and stored nowhere; the completed step after it persists.
+func TestToolOutputDeltaIsDrawnNotStored(t *testing.T) {
+	ctx := context.Background()
+	db, err := statepkg.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	runSvc := &statepkg.RunStore{DB: db}
+	require.NoError(t, statepkg.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+	run, err := runSvc.CreateRun(ctx, "sid", "run a command")
+	require.NoError(t, err)
+
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "test-model", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	}}}
+	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
+	drawn := make(chan Message, 8)
+	s.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			drawn <- m.Msg
+		}
+	})
+
+	// The primary agent's output chunk. Its card is drawn by the step hook; the
+	// canonical event beside it must not reach the log.
+	restore := s.installRunAuditStepHook("sid")
+	defer restore()
+	hook := runner.Tools().StepHook()
+	require.NotNil(t, hook)
+	stepCtx := tool.WithRunID(llm.WithAgentSessionID(ctx, "sid"), run.ID)
+	hook(stepCtx, tool.StepEvent{
+		Kind:     tool.StepKindToolOutputDelta,
+		StepID:   "call-shell-1",
+		ToolName: "shell",
+		Output:   map[string]any{"stream": "stdout", "chunk": "line one\n"},
+	})
+	select {
+	case m := <-drawn:
+		require.True(t, m.ToolOutputDelta, "the primary agent's output chunk was not drawn as a delta")
+		require.Equal(t, "line one\n", m.Content)
+	case <-time.After(time.Second):
+		t.Fatal("the primary agent's output chunk was not drawn")
+	}
+	events, err := runSvc.ListRunEvents(ctx, run.ID, 10)
+	require.NoError(t, err)
+	require.Empty(t, events, "a tool output fragment must never be stored")
+
+	// A subagent's output chunk reaches the surface through the same sink and
+	// is equally never stored.
+	if err := s.publishRunEvent(ctx, event.NewRunEvent("", run.ID, "sid", event.RunEventToolOutputDelta,
+		event.ToolCallOutputDeltaPayload{StepID: "call-shell-2", ToolName: "shell", AgentID: "task-1",
+			ToolMeta: event.ToolCallMeta{ToolName: "shell", Status: "running", AgentID: "task-1"}, Text: "child chunk\n"}, time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case m := <-drawn:
+		require.True(t, m.ToolOutputDelta)
+		require.Equal(t, "task-1", m.AgentID)
+		require.Equal(t, "child chunk\n", m.Content)
+	case <-time.After(time.Second):
+		t.Fatal("the subagent's output chunk was not drawn")
+	}
+
+	// The completed step after each chunk persists, as the durable record of
+	// the call's output.
+	hook(stepCtx, tool.StepEvent{
+		Kind:     tool.StepKindToolCompleted,
+		StepID:   "call-shell-1",
+		ToolName: "shell",
+		Output:   map[string]any{"stdout": "line one\n"},
+	})
+	events, err = runSvc.ListRunEvents(ctx, run.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	require.Equal(t, event.RunEventToolCompleted, events[0].Type)
+}
+
 func mustReadFile(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)

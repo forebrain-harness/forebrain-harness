@@ -1150,6 +1150,33 @@ func (s *SessionStore) ListTranscriptMessages(ctx context.Context, sessionID str
 	return out, nil
 }
 
+// LastAssistantTextForRun returns the answer the run's transcript ends with —
+// its last assistant row's text — or "" when the run has none. It is the reader
+// a scheduled fire's delivery uses now that a run's lifecycle event no longer
+// carries the answer: the transcript is the one durable record of a
+// conversation's words (each block written as it ends), and an ending event
+// says only that the run ended, not what it said.
+func (s *SessionStore) LastAssistantTextForRun(ctx context.Context, runID string) (string, error) {
+	if s == nil || s.db == nil {
+		return "", nil
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return "", nil
+	}
+	var content string
+	err := s.db.QueryRowContext(ctx, `SELECT content FROM fb_messages
+		WHERE run_id = ? AND role = 'assistant' AND visibility = 'visible'
+		ORDER BY id DESC LIMIT 1`, runID).Scan(&content)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	case err != nil:
+		return "", err
+	}
+	return strings.TrimSpace(content), nil
+}
+
 // ListMemoryTranscriptMessages returns the append-only transcript without
 // applying model-context compaction or clear cursors. Memory extraction needs
 // the complete thread evidence, not only the current inference window.

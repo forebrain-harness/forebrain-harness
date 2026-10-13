@@ -1305,3 +1305,36 @@ func TestDeleteSessionsSparesASessionALiveRunHolds(t *testing.T) {
 		t.Fatal("the ended session was not deleted on the second pass")
 	}
 }
+
+// LastAssistantTextForRun is the reader a scheduled fire's delivery uses now
+// that a run's ending event carries no answer: the transcript is the durable
+// record of a conversation's words.
+func TestLastAssistantTextForRunReadsTheFinalAnswer(t *testing.T) {
+	db := openStateDB(t)
+	store := NewSessionStore(db, "owner")
+	ctx := context.Background()
+	if err := store.Ensure(ctx, "s", "s"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := (&RunStore{DB: db}).CreateRun(ctx, "s", "a turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text, err := store.LastAssistantTextForRun(ctx, run.ID); err != nil || text != "" {
+		t.Fatalf("a run with no answer = %q (%v), want empty", text, err)
+	}
+	appendAssistant := func(text string) {
+		t.Helper()
+		if _, err := store.AppendMessageForRun(ctx, "s", run.ID, "assistant", text, "", "", MessageExecTiming{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendAssistant("first block")
+	appendAssistant("the final answer")
+	if text, err := store.LastAssistantTextForRun(ctx, run.ID); err != nil || text != "the final answer" {
+		t.Fatalf("last assistant text = %q (%v)", text, err)
+	}
+	if text, err := store.LastAssistantTextForRun(ctx, "no-such-run"); err != nil || text != "" {
+		t.Fatalf("an unknown run = %q (%v), want empty", text, err)
+	}
+}

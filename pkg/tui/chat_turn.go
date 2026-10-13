@@ -292,7 +292,7 @@ func (s *ChatSession) runAuditStepHook(sessionID string, prev func() tool.StepHo
 					_ = s.runner().Events.Publish(stepCtx, canonical)
 					return
 				}
-				if canonicalOK {
+				if canonicalOK && !event.IsPushOnlyStreamEvent(canonical.Type) {
 					s.persistRunEvent(stepCtx, canonical)
 				}
 				// The terminal drew this refusal when the user answered it
