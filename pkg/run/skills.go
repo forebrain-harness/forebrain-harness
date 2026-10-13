@@ -321,77 +321,136 @@ type explicitSkillActivation struct {
 	Content   string
 }
 
-type explicitSkillActivationContextKey struct{}
+type explicitSkillActivationsContextKey struct{}
 
-// WithExplicitSkillActivation seeds an already-loaded activation into the run
-// context. It is the runner's own hand-off between the preload phase and the
-// transcript builder: surfaces never call it, because they cannot be trusted to
-// load skill files — a skill path is resolved and its content is read inside
-// the runner, after the running card has been shown.
-func WithExplicitSkillActivation(ctx context.Context, skillName, content string) context.Context {
-	skillName = strings.TrimSpace(skillName)
-	content = strings.TrimSpace(content)
+// WithExplicitSkillActivations seeds already-loaded activations into the run
+// context, one per skill, in load order. It is the runner's own hand-off
+// between the preload phase and the transcript builder: surfaces never call it,
+// because they cannot be trusted to load skill files — a skill path is resolved
+// and its content is read inside the runner, after the running card has been
+// shown.
+func WithExplicitSkillActivations(ctx context.Context, activations []explicitSkillActivation) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if skillName == "" || content == "" {
+	kept := make([]explicitSkillActivation, 0, len(activations))
+	for _, activation := range activations {
+		name := strings.TrimSpace(activation.SkillName)
+		if name == "" || strings.TrimSpace(activation.Content) == "" {
+			continue
+		}
+		kept = append(kept, explicitSkillActivation{SkillName: name, Content: activation.Content})
+	}
+	if len(kept) == 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, explicitSkillActivationContextKey{}, explicitSkillActivation{
-		SkillName: skillName,
-		Content:   content,
-	})
+	return context.WithValue(ctx, explicitSkillActivationsContextKey{}, kept)
 }
 
-func explicitSkillActivationFromContext(ctx context.Context) (explicitSkillActivation, bool) {
+// WithExplicitSkillActivation seeds one activation; it is the single-skill
+// shorthand for WithExplicitSkillActivations.
+func WithExplicitSkillActivation(ctx context.Context, skillName, content string) context.Context {
+	return WithExplicitSkillActivations(ctx, []explicitSkillActivation{{SkillName: skillName, Content: content}})
+}
+
+// explicitSkillActivationsFromContext returns every seeded activation, in load
+// order.
+func explicitSkillActivationsFromContext(ctx context.Context) ([]explicitSkillActivation, bool) {
 	if ctx == nil {
-		return explicitSkillActivation{}, false
+		return nil, false
 	}
-	activation, ok := ctx.Value(explicitSkillActivationContextKey{}).(explicitSkillActivation)
-	if !ok || strings.TrimSpace(activation.SkillName) == "" || strings.TrimSpace(activation.Content) == "" {
-		return explicitSkillActivation{}, false
+	activations, ok := ctx.Value(explicitSkillActivationsContextKey{}).([]explicitSkillActivation)
+	if !ok || len(activations) == 0 {
+		return nil, false
 	}
-	return activation, true
+	return activations, true
 }
 
-// explicitSkillSelection is the trusted trace of an explicit skill invocation:
-// which skill the user picked and where its SKILL.md lived when the command was
-// registered. Nothing about the skill's content travels with it — the content
-// is loaded by the runner's preload phase so the user sees the real load.
+// explicitSkillActivationFromContext returns the first seeded activation.
+func explicitSkillActivationFromContext(ctx context.Context) (explicitSkillActivation, bool) {
+	activations, ok := explicitSkillActivationsFromContext(ctx)
+	if !ok {
+		return explicitSkillActivation{}, false
+	}
+	return activations[0], true
+}
+
+// explicitSkillSelection is the trusted trace of one explicit skill
+// invocation: which skill the user picked and where its SKILL.md lived when the
+// command was registered. Nothing about the skill's content travels with it —
+// the content is loaded by the runner's preload phase so the user sees the real
+// load.
 type explicitSkillSelection struct {
 	SkillName string
 	SkillPath string
 }
 
-type explicitSkillSelectionContextKey struct{}
+type explicitSkillSelectionsContextKey struct{}
 
-// WithExplicitSkillSelection marks a run as an explicit skill invocation. It is
-// internal metadata: ordinary user prompt text cannot opt into this path by
-// imitating a marker.
-func WithExplicitSkillSelection(ctx context.Context, skillName, skillPath string) context.Context {
-	skillName = strings.TrimSpace(skillName)
-	skillPath = strings.TrimSpace(skillPath)
+// SkillSelection names one skill a turn activates by name. It is the run
+// package's copy of the pair turn.SkillSelection carries: run must not import
+// turn (session, turn and run do not import each other), so the surface — which
+// does see turn — hands the same name and path across this boundary.
+type SkillSelection struct {
+	Name string
+	Path string
+}
+
+// WithExplicitSkillSelections marks a run as activating these skills by name,
+// in order. It is internal metadata: ordinary user prompt text cannot opt into
+// this path by imitating a marker. Duplicate names collapse; an entry missing a
+// name or path is dropped.
+func WithExplicitSkillSelections(ctx context.Context, selections []SkillSelection) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if skillName == "" || skillPath == "" {
+	kept := make([]explicitSkillSelection, 0, len(selections))
+	seen := map[string]struct{}{}
+	for _, selection := range selections {
+		name := strings.TrimSpace(selection.Name)
+		path := strings.TrimSpace(selection.Path)
+		if name == "" || path == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		kept = append(kept, explicitSkillSelection{SkillName: name, SkillPath: path})
+	}
+	if len(kept) == 0 {
 		return ctx
 	}
-	return context.WithValue(ctx, explicitSkillSelectionContextKey{}, explicitSkillSelection{
-		SkillName: skillName,
-		SkillPath: skillPath,
-	})
+	return context.WithValue(ctx, explicitSkillSelectionsContextKey{}, kept)
 }
 
-func explicitSkillSelectionFromContext(ctx context.Context) (explicitSkillSelection, bool) {
+// WithExplicitSkillSelection marks a run as one explicit skill invocation; it
+// is the single-skill shorthand for WithExplicitSkillSelections.
+func WithExplicitSkillSelection(ctx context.Context, skillName, skillPath string) context.Context {
+	return WithExplicitSkillSelections(ctx, []SkillSelection{{Name: skillName, Path: skillPath}})
+}
+
+// explicitSkillSelectionsFromContext returns every explicit selection, in
+// order.
+func explicitSkillSelectionsFromContext(ctx context.Context) ([]explicitSkillSelection, bool) {
 	if ctx == nil {
+		return nil, false
+	}
+	selections, ok := ctx.Value(explicitSkillSelectionsContextKey{}).([]explicitSkillSelection)
+	if !ok || len(selections) == 0 {
+		return nil, false
+	}
+	return selections, true
+}
+
+// explicitSkillSelectionFromContext returns the first explicit selection.
+func explicitSkillSelectionFromContext(ctx context.Context) (explicitSkillSelection, bool) {
+	selections, ok := explicitSkillSelectionsFromContext(ctx)
+	if !ok {
 		return explicitSkillSelection{}, false
 	}
-	selection, ok := ctx.Value(explicitSkillSelectionContextKey{}).(explicitSkillSelection)
-	if !ok || strings.TrimSpace(selection.SkillName) == "" || strings.TrimSpace(selection.SkillPath) == "" {
-		return explicitSkillSelection{}, false
-	}
-	return selection, true
+	return selections[0], true
 }
 
 // ExplicitSkillLoadError reports that an explicitly selected skill failed to
@@ -439,76 +498,81 @@ func explicitSkillActivationMessage(activation explicitSkillActivation) llm.Mess
 	return msg
 }
 
-// preloadExplicitSkill runs the explicit skill's real load inside the runner,
-// before the first LLM request. The slash phase hands over only the trusted
-// selection (name and path); this phase owns everything the user used to miss:
-// the running card while the file is read, the true duration, and a failure
-// card instead of a generic error.
+// preloadExplicitSkills runs each explicit skill's real load inside the runner,
+// before the first LLM request, in order, drawing one Skill card per skill. The
+// slash phase hands over only the trusted selections (name and path); this
+// phase owns everything the user used to miss: the running card while the file
+// is read, the true duration, and a failure card instead of a generic error.
 //
 // The load lives here and nowhere else. Surfaces cannot be trusted to read
 // skill files — they would race the skill being replaced on disk and they have
-// no place to show the load happening — so they submit only the selection.
+// no place to show the load happening — so they submit only the selections.
 //
-// On success the activation content is seeded into the returned context, where
-// the transcript builder picks it up; the model context is byte-identical to
-// the previous behavior. On failure the turn ends before any LLM call with an
-// ExplicitSkillLoadError, whose card the step events have already shown.
-func (r *Runner) preloadExplicitSkill(ctx context.Context) (context.Context, error) {
-	selection, ok := explicitSkillSelectionFromContext(ctx)
+// On success the activation contents are seeded into the returned context,
+// where the transcript builder picks them up. A load failure ends the turn
+// before any LLM call with an ExplicitSkillLoadError, whose card the step
+// events have already shown — the same stop a single explicit skill has always
+// caused, so skills after the failing one are not loaded this turn.
+func (r *Runner) preloadExplicitSkills(ctx context.Context) (context.Context, error) {
+	selections, ok := explicitSkillSelectionsFromContext(ctx)
 	if !ok || r == nil {
 		return ctx, nil
 	}
 	step := tool.StepHookFromContext(ctx, r.tools)
-	stepID := "skill-explicit-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	// The pinned copy when this session's loaded catalog carries the skill:
-	// an explicit invocation reads the same version every other load in this
-	// session does. A skill outside the catalog (a cross-tool directory, a
-	// built-in) keeps the path the slash command registered.
-	skillPath := strings.TrimSpace(selection.SkillPath)
-	if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
-		skillPath = item.PinnedSkillFile()
-	}
-	identity := tool.StepEvent{
-		StepID:    stepID,
-		ToolName:  "skill",
-		Category:  "skill",
-		SkillName: selection.SkillName,
-		SkillPath: skillPath,
-		Origin:    "explicit",
-	}
 	emit := func(evt tool.StepEvent) {
 		if step != nil {
 			step(ctx, evt)
 		}
 	}
-	emit(tool.StepEvent{Kind: event.RunEventToolStarted, StepID: identity.StepID,
-		ToolName: identity.ToolName, Category: identity.Category,
-		SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin})
-	started := time.Now()
-	activation, err := skill.LoadActivation(skillPath)
-	if err == nil {
+	var activations []explicitSkillActivation
+	for i, selection := range selections {
+		stepID := "skill-explicit-" + strconv.Itoa(i) + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		// The pinned copy when this session's loaded catalog carries the skill:
+		// an explicit invocation reads the same version every other load in
+		// this session does. A skill outside the catalog (a cross-tool
+		// directory, a built-in) keeps the path the slash command registered.
+		skillPath := strings.TrimSpace(selection.SkillPath)
 		if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
-			if _, statErr := os.Stat(skillPath); statErr != nil {
-				err = fmt.Errorf("skill %q v%d no longer exists; its version directory was removed — start a new session to load the skill's current version", item.Name, item.Version)
+			skillPath = item.PinnedSkillFile()
+		}
+		identity := tool.StepEvent{
+			StepID:    stepID,
+			ToolName:  "skill",
+			Category:  "skill",
+			SkillName: selection.SkillName,
+			SkillPath: skillPath,
+			Origin:    "explicit",
+		}
+		emit(tool.StepEvent{Kind: event.RunEventToolStarted, StepID: identity.StepID,
+			ToolName: identity.ToolName, Category: identity.Category,
+			SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin})
+		started := time.Now()
+		activation, err := skill.LoadActivation(skillPath)
+		if err == nil {
+			if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
+				if _, statErr := os.Stat(skillPath); statErr != nil {
+					err = fmt.Errorf("skill %q v%d no longer exists; its version directory was removed — start a new session to load the skill's current version", item.Name, item.Version)
+				}
 			}
 		}
-	}
-	duration := time.Since(started)
-	if err == nil && !strings.EqualFold(skill.NormalizeToken(activation.Name), skill.NormalizeToken(selection.SkillName)) {
-		err = fmt.Errorf("skill file at %s now names %q", selection.SkillPath, activation.Name)
-	}
-	if err != nil {
+		duration := time.Since(started)
+		if err == nil && !strings.EqualFold(skill.NormalizeToken(activation.Name), skill.NormalizeToken(selection.SkillName)) {
+			err = fmt.Errorf("skill file at %s now names %q", selection.SkillPath, activation.Name)
+		}
+		if err != nil {
+			emit(tool.StepEvent{Kind: event.RunEventToolCompleted, StepID: identity.StepID,
+				ToolName: identity.ToolName, Category: identity.Category,
+				SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin,
+				Duration: duration, Error: err.Error()})
+			return ctx, &ExplicitSkillLoadError{SkillName: selection.SkillName, SkillPath: selection.SkillPath, Err: err}
+		}
 		emit(tool.StepEvent{Kind: event.RunEventToolCompleted, StepID: identity.StepID,
 			ToolName: identity.ToolName, Category: identity.Category,
 			SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin,
-			Duration: duration, Error: err.Error()})
-		return ctx, &ExplicitSkillLoadError{SkillName: selection.SkillName, SkillPath: selection.SkillPath, Err: err}
+			Duration: duration})
+		activations = append(activations, explicitSkillActivation{SkillName: selection.SkillName, Content: activation.Content})
 	}
-	emit(tool.StepEvent{Kind: event.RunEventToolCompleted, StepID: identity.StepID,
-		ToolName: identity.ToolName, Category: identity.Category,
-		SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin,
-		Duration: duration})
-	return WithExplicitSkillActivation(ctx, selection.SkillName, activation.Content), nil
+	return WithExplicitSkillActivations(ctx, activations), nil
 }
 
 // SkillCommandHooks lets the turn-owned slash command registry stay in sync
@@ -653,9 +717,12 @@ func (w *skillOfferLLM) suppressed(ctx context.Context, msgs []llm.Message) bool
 		return true
 	}
 	// A run the generator itself started must not propose generating.
-	if selection, ok := explicitSkillSelectionFromContext(ctx); ok &&
-		skill.NormalizeToken(selection.SkillName) == skill.NormalizeToken(skillOfferCommandName) {
-		return true
+	if selections, ok := explicitSkillSelectionsFromContext(ctx); ok {
+		for _, selection := range selections {
+			if skill.NormalizeToken(selection.SkillName) == skill.NormalizeToken(skillOfferCommandName) {
+				return true
+			}
+		}
 	}
 	// One offer per session: the marker in any persisted reminder counts.
 	if skillOfferAlreadyInHistory(msgs) {

@@ -2047,6 +2047,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				GoalObjective:            goalObjective,
 				SkillName:                skillName,
 				SkillPath:                skillPath,
+				Skills:                   sc.Skills,
 				ExistingRunID:            runID,
 				AgentContextIsRunContext: true,
 			}, nil)

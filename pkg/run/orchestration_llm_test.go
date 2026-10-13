@@ -1050,7 +1050,7 @@ func TestPreloadExplicitSkillEmitsRealLifecycleAndSeedsContent(t *testing.T) {
 	runner := &Runner{Deps: &Deps{}, tools: state}
 	ctx := WithExplicitSkillSelection(context.Background(), "review", skillPath)
 
-	seeded, err := runner.preloadExplicitSkill(ctx)
+	seeded, err := runner.preloadExplicitSkills(ctx)
 	if err != nil {
 		t.Fatalf("preload failed: %v", err)
 	}
@@ -1092,7 +1092,7 @@ func TestPreloadExplicitSkillFailsBeforeLLMWithTypedError(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "skills", "gone", "SKILL.md")
 	ctx := WithExplicitSkillSelection(context.Background(), "gone", missing)
 
-	_, err := runner.preloadExplicitSkill(ctx)
+	_, err := runner.preloadExplicitSkills(ctx)
 	var loadErr *ExplicitSkillLoadError
 	if !errors.As(err, &loadErr) {
 		t.Fatalf("err=%v, want *ExplicitSkillLoadError", err)
@@ -1128,7 +1128,7 @@ func TestPreloadExplicitSkillRejectsRenamedSkillFile(t *testing.T) {
 	})
 	runner := &Runner{Deps: &Deps{}, tools: state}
 
-	_, err := runner.preloadExplicitSkill(WithExplicitSkillSelection(context.Background(), "review", skillPath))
+	_, err := runner.preloadExplicitSkills(WithExplicitSkillSelection(context.Background(), "review", skillPath))
 	if err == nil {
 		t.Fatal("expected the renamed skill file to fail the preload")
 	}
@@ -1138,6 +1138,61 @@ func TestPreloadExplicitSkillRejectsRenamedSkillFile(t *testing.T) {
 	}
 	if len(got) != 2 || got[1].Error == "" {
 		t.Fatalf("steps=%+v", got)
+	}
+}
+
+// One turn may activate several skills by name; each draws its own Skill card
+// and its own activation, in the order they were named.
+func TestPreloadExplicitSkillsDrawsOneCardPerSkill(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill := func(name, body string) string {
+		path := filepath.Join(dir, "skills", name, "SKILL.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := "---\nname: " + name + "\ndescription: " + name + "\n---\n" + body
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	alphaPath := writeSkill("alpha", "Alpha body.")
+	betaPath := writeSkill("beta", "Beta body.")
+	stepState := toolpkg.NewState(t.TempDir())
+	var got []toolpkg.StepEvent
+	stepState.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		got = append(got, evt)
+	})
+	runner := &Runner{Deps: &Deps{}, tools: stepState}
+	ctx := WithExplicitSkillSelections(context.Background(), []SkillSelection{
+		{Name: "alpha", Path: alphaPath},
+		{Name: "beta", Path: betaPath},
+	})
+
+	seeded, err := runner.preloadExplicitSkills(ctx)
+	if err != nil {
+		t.Fatalf("preload failed: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("steps=%d, want 4 (a card each): %+v", len(got), got)
+	}
+	for i := 0; i+1 < len(got); i += 2 {
+		if got[i].Kind != toolpkg.StepKindToolStarted || got[i+1].Kind != toolpkg.StepKindToolCompleted {
+			t.Fatalf("pair %d not a started/completed card: %+v", i, got[i:i+2])
+		}
+		if got[i].StepID != got[i+1].StepID {
+			t.Fatalf("pair %d mismatched ids %q/%q", i, got[i].StepID, got[i+1].StepID)
+		}
+	}
+	if got[0].SkillName != "alpha" || got[2].SkillName != "beta" {
+		t.Fatalf("cards not in load order: %q then %q", got[0].SkillName, got[2].SkillName)
+	}
+	activations, ok := explicitSkillActivationsFromContext(seeded)
+	if !ok || len(activations) != 2 {
+		t.Fatalf("activations=%+v ok=%v", activations, ok)
+	}
+	if !strings.Contains(activations[0].Content, "Alpha body.") || !strings.Contains(activations[1].Content, "Beta body.") {
+		t.Fatalf("activation contents=%+v", activations)
 	}
 }
 

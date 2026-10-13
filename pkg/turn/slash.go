@@ -374,6 +374,10 @@ func (r WorkspaceResolver) Resolve(path string) (string, string, bool) {
 type DynamicCommand struct {
 	Command Command
 	Handler func(ctx Context, line string, toks []string) Result
+	// SkillPath is the SKILL.md the command was registered from. It is exposed
+	// so a mid-sentence skill reference can name the same trusted selection the
+	// command's own handler would, without calling the handler.
+	SkillPath string
 }
 
 var dynamicRegistry struct {

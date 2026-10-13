@@ -1729,12 +1729,23 @@ func (c *ComposerState) HandleDraftUpdate(draft string, session Session) {
 	c.DraftText = draft
 	c.Cursor = composerCursorClamp(draft, c.Cursor)
 	if c.SlashOverlay == nil {
-		if composerDisplayText(draft) == "/" {
+		if strings.HasPrefix(composerDisplayText(draft), "/") {
+			// The whole composer is a slash command: the full command list
+			// (built-in commands and skills).
 			c.SlashOverlay = newSlashOverlay()
 			c.SlashOverlay.SubagentView = c.SubagentView
 			c.SlashOverlay.rebuildFiltered(session)
+		} else if start, query, _, ok := turn.SlashTokenAtCursor(draft, c.Cursor); ok {
+			// A "/" anywhere else is a skill reference: the inline picker
+			// lists skills only.
+			c.SlashOverlay = newSlashOverlay()
+			c.SlashOverlay.SubagentView = c.SubagentView
+			c.SlashOverlay.Inline = true
+			c.SlashOverlay.TokenStart = start
+			c.SlashOverlay.FilterText = strings.ToLower(query)
+			c.SlashOverlay.rebuildFiltered(session)
 		}
-	} else if !c.SlashOverlay.UpdateFromDraft(draft, session) {
+	} else if !c.SlashOverlay.UpdateFromDraft(draft, c.Cursor, session) {
 		c.SlashOverlay = nil
 	}
 	c.updateMentionOverlay(draft)

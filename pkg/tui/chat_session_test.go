@@ -21652,7 +21652,7 @@ func TestLookupExactOrSinglePrefix_SinglePrefixLocks(t *testing.T) {
 func TestUpdateFromDraft_RejectsNonSlashPrefix(t *testing.T) {
 	t.Parallel()
 	o := newSlashOverlay()
-	kept := o.UpdateFromDraft("hello", nil)
+	kept := o.UpdateFromDraft("hello", 5, nil)
 	if kept {
 		t.Fatal("non-slash prefix must signal overlay removal")
 	}
@@ -21661,7 +21661,7 @@ func TestUpdateFromDraft_RejectsNonSlashPrefix(t *testing.T) {
 func TestUpdateFromDraft_SlashPrefixActivatesFiltering(t *testing.T) {
 	t.Parallel()
 	o := newSlashOverlay()
-	o.UpdateFromDraft("/co", nil)
+	o.UpdateFromDraft("/co", 3, nil)
 	if !o.Active {
 		t.Fatal("'/co' must keep overlay Active for filtering")
 	}
@@ -21676,7 +21676,7 @@ func TestUpdateFromDraft_SlashPrefixActivatesFiltering(t *testing.T) {
 func TestUpdateFromDraft_SpaceLocksExactMatch(t *testing.T) {
 	t.Parallel()
 	o := newSlashOverlay()
-	o.UpdateFromDraft("/compact ", nil)
+	o.UpdateFromDraft("/compact ", 9, nil)
 	if o.Active {
 		t.Fatal("space after exact match must dismiss Active")
 	}
@@ -21691,7 +21691,7 @@ func TestUpdateFromDraft_SpaceLocksExactMatch(t *testing.T) {
 func TestUpdateFromDraft_AmbiguousSpaceStaysActive(t *testing.T) {
 	t.Parallel()
 	o := newSlashOverlay()
-	o.UpdateFromDraft("/co ", nil)
+	o.UpdateFromDraft("/co ", 4, nil)
 	if !o.Active {
 		t.Fatal("space after ambiguous prefix must keep Active")
 	}
@@ -21704,12 +21704,12 @@ func TestUpdateFromDraft_BackspaceFromLockedReactivates(t *testing.T) {
 	t.Parallel()
 	o := newSlashOverlay()
 	// Lock first.
-	o.UpdateFromDraft("/compact ", nil)
+	o.UpdateFromDraft("/compact ", 9, nil)
 	if o.HintCommand == nil {
 		t.Fatal("setup: expected HintCommand after lock")
 	}
 	// Now user backspaces the space.
-	o.UpdateFromDraft("/compact", nil)
+	o.UpdateFromDraft("/compact", 8, nil)
 	if !o.Active {
 		t.Fatal("after backspacing space, overlay should re-activate")
 	}
@@ -21959,6 +21959,82 @@ func TestComposerStateHandleDraftUpdate_ActivatesWhenLeadingNewlineHidesTheSlash
 	}
 }
 
+// registerTUISkill installs one skill-derived command so the inline picker has
+// something to list; the dynamic registry is process-global, so the test resets
+// it back.
+func registerTUISkill(t *testing.T, name string) {
+	t.Helper()
+	turn.ResetDynamic()
+	t.Cleanup(turn.ResetDynamic)
+	if err := turn.ReplaceDynamicSource("tui-test", []turn.DynamicCommand{{
+		Command: turn.Command{
+			Name: name, Description: name, Category: turn.SkillCategory,
+			AllowedSurfaces: []turn.Surface{turn.SurfaceTUI, turn.SurfaceWebChat},
+			Visibility:      turn.VisibilityPublic,
+		},
+		SkillPath: "/skills/" + name + "/SKILL.md",
+		Handler: func(turn.Context, string, []string) turn.Result {
+			return turn.Result{}
+		},
+	}}); err != nil {
+		t.Fatalf("ReplaceDynamicSource: %v", err)
+	}
+}
+
+// A "/" in the middle of a message opens the picker inline, listing only skills,
+// and accepting it replaces just the token — the rest of the message is left
+// alone.
+func TestHandleDraftUpdate_OpensInlineSkillPicker(t *testing.T) {
+	registerTUISkill(t, "improve")
+	c := &ComposerState{}
+	draft := "看下 /imp"
+	c.Cursor = len([]rune(draft))
+	c.HandleDraftUpdate(draft, nil)
+	if c.SlashOverlay == nil || !c.SlashOverlay.Inline {
+		t.Fatalf("inline skill picker did not open: %#v", c.SlashOverlay)
+	}
+	if c.SlashOverlay.TokenStart != 3 {
+		t.Fatalf("TokenStart = %d, want 3", c.SlashOverlay.TokenStart)
+	}
+	if len(c.SlashOverlay.Visible) == 0 {
+		t.Fatal("inline picker listed nothing for /imp")
+	}
+	for _, cmd := range c.SlashOverlay.Visible {
+		if cmd.Category != turn.SkillCategory {
+			t.Fatalf("inline picker must list skills only, got %q", cmd.Name)
+		}
+	}
+	c.SlashOverlay.SelectedIdx = 0
+	newDraft, cursor, ok := c.AcceptSlashSelection()
+	if !ok || newDraft != "看下 /improve " {
+		t.Fatalf("inline accept = %q, want %q (ok=%v)", newDraft, "看下 /improve ", ok)
+	}
+	if want := len([]rune("看下 /improve ")); cursor != want {
+		t.Fatalf("inline accept cursor = %d, want %d", cursor, want)
+	}
+}
+
+// A "@" token under the cursor wins over an open command picker: "/plan see @pk"
+// opens the file picker, not the command menu.
+func TestUpdateMentionOverlayWinsOverSlashPicker(t *testing.T) {
+	newMentionTestRoot(t)
+	c := &ComposerState{}
+	c.Cursor = len([]rune("/plan "))
+	c.HandleDraftUpdate("/plan ", nil)
+	if c.SlashOverlay == nil {
+		t.Fatal("setup: '/plan ' should open the slash picker")
+	}
+	draft := "/plan see @pk"
+	c.Cursor = len([]rune(draft))
+	c.HandleDraftUpdate(draft, nil)
+	if c.MentionOverlay == nil || !c.MentionOverlay.Active {
+		t.Fatalf("the @ token did not open the file picker: %#v", c.MentionOverlay)
+	}
+	if c.SlashOverlay != nil {
+		t.Fatal("the command picker must yield to the @ token")
+	}
+}
+
 func TestComposerStateHandleDraftUpdate_FiltersThroughALeadingNewline(t *testing.T) {
 	t.Parallel()
 	c := &ComposerState{}
@@ -22064,7 +22140,7 @@ func TestAcceptSlashSelection(t *testing.T) {
 	}
 	c.SlashOverlay.SelectedIdx = 0
 	firstCmd := c.SlashOverlay.Visible[0].Name
-	newDraft, ok := c.AcceptSlashSelection()
+	newDraft, cursor, ok := c.AcceptSlashSelection()
 	if !ok {
 		t.Fatal("AcceptSlashSelection should return true when overlay is active")
 	}
@@ -22072,12 +22148,15 @@ func TestAcceptSlashSelection(t *testing.T) {
 	if newDraft != expected {
 		t.Fatalf("AcceptSlashSelection: got %q, want %q", newDraft, expected)
 	}
+	if want := len([]rune(expected)); cursor != want {
+		t.Fatalf("AcceptSlashSelection cursor = %d, want %d", cursor, want)
+	}
 }
 
 func TestAcceptSlashSelection_NilOverlay(t *testing.T) {
 	t.Parallel()
 	c := &ComposerState{}
-	newDraft, ok := c.AcceptSlashSelection()
+	newDraft, _, ok := c.AcceptSlashSelection()
 	if ok || newDraft != "" {
 		t.Fatalf("AcceptSlashSelection on nil overlay: got %q %v", newDraft, ok)
 	}
@@ -22094,7 +22173,7 @@ func TestAcceptSlashSelection_InactiveOverlay(t *testing.T) {
 		Visible:     []turn.Command{{Name: "help", Description: "Show help"}},
 		SelectedIdx: 0,
 	}
-	newDraft, ok := c.AcceptSlashSelection()
+	newDraft, _, ok := c.AcceptSlashSelection()
 	if ok || newDraft != "" {
 		t.Fatalf("AcceptSlashSelection on inactive overlay: got %q %v", newDraft, ok)
 	}
@@ -22104,7 +22183,7 @@ func TestAcceptSlashSelection_EmptyVisible(t *testing.T) {
 	t.Parallel()
 	c := &ComposerState{}
 	c.SlashOverlay = &SlashOverlay{Active: true, Visible: []turn.Command{}}
-	newDraft, ok := c.AcceptSlashSelection()
+	newDraft, _, ok := c.AcceptSlashSelection()
 	if ok || newDraft != "" {
 		t.Fatalf("AcceptSlashSelection with empty visible: got %q %v", newDraft, ok)
 	}

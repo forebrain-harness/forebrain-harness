@@ -134,3 +134,111 @@ func TestRefreshSkillsDropsTheGeneratorCommandWhenDisabled(t *testing.T) {
 		t.Fatal("re-enabling the skill did not bring the command back")
 	}
 }
+
+// registerSkillCommands installs the named skills as dynamic commands whose
+// trusted selection points at a real SKILL.md — the same shape RefreshSkills
+// registers for installed skills, so a mid-sentence reference resolves to the
+// same name and path a leading command would.
+func registerSkillCommands(t *testing.T, names ...string) {
+	t.Helper()
+	ResetDynamic()
+	t.Cleanup(ResetDynamic)
+	cmds := make([]DynamicCommand, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(t.TempDir(), name+".md")
+		body := "---\nname: " + name + "\ndescription: " + name + " skill\n---\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmds = append(cmds, DynamicCommand{
+			Command: Command{
+				Name: name, Description: name, Category: SkillCategory,
+				AllowedSurfaces:    []Surface{SurfaceWebChat, SurfaceTUI},
+				SupportsInlineArgs: true, Visibility: VisibilityPublic,
+			},
+			SkillPath: path,
+			Handler: func(_ Context, line string, toks []string) Result {
+				request := ""
+				if len(toks) > 1 {
+					request = strings.TrimSpace(strings.TrimPrefix(line, toks[0]))
+				}
+				return Result{
+					Handled: true, ShouldContinueRun: true,
+					ContinueInput: SkillCommandInput(name, request),
+					SkillName:     name, SkillPath: path,
+				}
+			},
+		})
+	}
+	if err := ReplaceDynamicSource("test-skills", cmds); err != nil {
+		t.Fatalf("ReplaceDynamicSource: %v", err)
+	}
+}
+
+func skillNames(sels []SkillSelection) []string {
+	out := make([]string, len(sels))
+	for i, s := range sels {
+		out[i] = s.Name
+	}
+	return out
+}
+
+// A "/name" in the middle of a message names a skill wherever it sits: after a
+// space, after a newline, several at once, de-duplicated, and never a built-in
+// command (those only mean something at the start).
+func TestSkillReferences(t *testing.T) {
+	registerSkillCommands(t, "alpha", "beta")
+
+	cases := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"one after a space", "please run /alpha now", []string{"alpha"}},
+		{"several in order", "use /alpha then /beta", []string{"alpha", "beta"}},
+		{"after a newline", "do this\n/beta please", []string{"beta"}},
+		{"duplicate collapses", "run /alpha and /alpha again", []string{"alpha"}},
+		{"unknown ignored", "run /alpha and /nosuch", []string{"alpha"}},
+		{"mid built-in ignored", "switch /plan and /alpha", []string{"alpha"}},
+		{"leading token skipped", "/alpha with /beta", []string{"beta"}},
+		{"word slash ignored", "see pkg/run and a/b", nil},
+		{"trailing comma ends name", "use /alpha, thanks", []string{"alpha"}},
+		{"none", "just a plain message", nil},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := skillNames(SkillReferences(tc.text))
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("SkillReferences(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// Execute reports the same list for a plain message and for a leading skill
+// command, and the leading command comes first.
+func TestExecuteSkillsList(t *testing.T) {
+	registerSkillCommands(t, "alpha", "beta")
+
+	mid := Execute(Context{Surface: SurfaceWebChat}, "please run /alpha here")
+	if got := skillNames(mid.Skills); strings.Join(got, ",") != "alpha" {
+		t.Fatalf("plain message skills = %v, want [alpha]", got)
+	}
+	if mid.Handled || mid.ShouldContinueRun {
+		t.Fatalf("a mid-sentence skill must not make the message a command: %+v", mid)
+	}
+
+	lead := Execute(Context{Surface: SurfaceWebChat}, "/alpha and also /beta")
+	if got := skillNames(lead.Skills); strings.Join(got, ",") != "alpha,beta" {
+		t.Fatalf("leading + mid skills = %v, want [alpha beta]", got)
+	}
+	if !lead.ShouldContinueRun || lead.SkillName != "alpha" {
+		t.Fatalf("leading skill command did not hand off: %+v", lead)
+	}
+	// The message text is not rewritten: the mid-sentence reference stays in
+	// the text the model sees.
+	if !strings.Contains(lead.ContinueInput, "and also /beta") {
+		t.Fatalf("message text was rewritten: %q", lead.ContinueInput)
+	}
+}

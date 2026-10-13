@@ -1,0 +1,22 @@
+[
+  {"draft": "/", "cursor": 1, "kind": "/", "ok": true, "start": 0, "query": "", "at_start": true},
+  {"draft": "/imp", "cursor": 4, "kind": "/", "ok": true, "start": 0, "query": "imp", "at_start": true},
+  {"draft": "see /imp", "cursor": 8, "kind": "/", "ok": true, "start": 4, "query": "imp", "at_start": false},
+  {"draft": "line\n/co", "cursor": 8, "kind": "/", "ok": true, "start": 5, "query": "co", "at_start": false},
+  {"draft": "foo@bar", "cursor": 7, "kind": "@", "ok": false, "start": 0, "query": "", "at_start": false},
+  {"draft": "a/b", "cursor": 3, "kind": "/", "ok": false, "start": 0, "query": "", "at_start": false},
+  {"draft": "see pkg/run", "cursor": 11, "kind": "/", "ok": false, "start": 0, "query": "", "at_start": false},
+  {"draft": "see /a,b", "cursor": 8, "kind": "/", "ok": false, "start": 0, "query": "", "at_start": false},
+  {"draft": "@\"my file", "cursor": 9, "kind": "@", "ok": true, "start": 0, "query": "my file", "at_start": false},
+  {"draft": "/pkg/extra", "cursor": 4, "kind": "/", "ok": true, "start": 0, "query": "pkg", "at_start": true},
+  {"draft": "see @pkg/extra", "cursor": 8, "kind": "@", "ok": true, "start": 4, "query": "pkg", "at_start": false},
+  {"draft": "请用 /improve 帮我", "cursor": 11, "kind": "/", "ok": true, "start": 3, "query": "improve", "at_start": false},
+  {"draft": "看下 @pk 目录", "cursor": 6, "kind": "@", "ok": true, "start": 3, "query": "pk", "at_start": false},
+  {"draft": "/plan see @pk", "cursor": 13, "kind": "@", "ok": true, "start": 10, "query": "pk", "at_start": false},
+  {"draft": "/plan see /imp", "cursor": 14, "kind": "/", "ok": true, "start": 10, "query": "imp", "at_start": false},
+  {"draft": "/compact ", "cursor": 9, "kind": "/", "ok": false, "start": 0, "query": "", "at_start": false},
+  {"draft": "", "cursor": 0, "kind": "/", "ok": false, "start": 0, "query": "", "at_start": false},
+  {"draft": "  /x", "cursor": 4, "kind": "/", "ok": true, "start": 2, "query": "x", "at_start": true},
+  {"draft": "@foo", "cursor": 4, "kind": "@", "ok": true, "start": 0, "query": "foo", "at_start": false},
+  {"draft": "a\n@x", "cursor": 4, "kind": "@", "ok": true, "start": 2, "query": "x", "at_start": false}
+]

@@ -134,10 +134,17 @@ func (t transcriptSession) history(ctx context.Context, sessionID string) ([]llm
 func (t transcriptSession) build(ctx context.Context, parts []llm.ContentPart) ([]llm.Message, int, error) {
 	messages := t.head(ctx)
 	addendum := strings.TrimSpace(tool.SystemAddendumFromContext(ctx))
-	explicitActivation, hasExplicitActivation := explicitSkillActivationFromContext(ctx)
+	activations, _ := explicitSkillActivationsFromContext(ctx)
+	// One activation message per explicitly selected skill, in load order,
+	// ahead of this turn's user message.
+	appendActivations := func() {
+		for _, activation := range activations {
+			messages = append(messages, explicitSkillActivationMessage(activation))
+		}
+	}
 	if t.store == nil {
-		if hasExplicitActivation && len(parts) > 0 {
-			messages = append(messages, explicitSkillActivationMessage(explicitActivation))
+		if len(parts) > 0 {
+			appendActivations()
 		}
 		if len(parts) > 0 {
 			messages = append(messages, llm.UserMessage(parts...))
@@ -149,8 +156,8 @@ func (t transcriptSession) build(ctx context.Context, parts []llm.ContentPart) (
 	}
 	sessionID := strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
 	if sessionID == "" {
-		if hasExplicitActivation && len(parts) > 0 {
-			messages = append(messages, explicitSkillActivationMessage(explicitActivation))
+		if len(parts) > 0 {
+			appendActivations()
 		}
 		if len(parts) > 0 {
 			messages = append(messages, llm.UserMessage(parts...))
@@ -183,20 +190,14 @@ func (t transcriptSession) build(ctx context.Context, parts []llm.ContentPart) (
 		curText := llm.TextContent(currentUser.Parts...)
 		if lastText != "" && strings.Contains(curText, lastText) {
 			messages = messages[:len(messages)-1]
-			if hasExplicitActivation {
-				messages = append(messages, explicitSkillActivationMessage(explicitActivation))
-			}
+			appendActivations()
 			messages = append(messages, currentUser)
 		} else {
-			if hasExplicitActivation {
-				messages = append(messages, explicitSkillActivationMessage(explicitActivation))
-			}
+			appendActivations()
 			messages = append(messages, currentUser)
 		}
 	} else {
-		if hasExplicitActivation {
-			messages = append(messages, explicitSkillActivationMessage(explicitActivation))
-		}
+		appendActivations()
 		messages = append(messages, currentUser)
 	}
 	if environment, changed := changedPromptCacheEnvironment(transcript, addendum); changed {

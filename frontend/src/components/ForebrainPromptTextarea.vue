@@ -5,6 +5,7 @@ import { cn } from '@repo/shadcn-vue/lib/utils'
 import { Bot, ChevronLeft, ChevronRight, FileText, Folder, Image as ImageIcon, Paperclip, Slash, X } from 'lucide-vue-next'
 import { computed, nextTick, ref, watch } from 'vue'
 import { forebrainApi, type MentionCandidate, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
+import { parseMention, parseSlash } from '@/lib/composerTokens'
 import { mergeSubmissions, type ComposerSubmission, type PickedFile, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { useI18n } from '@/locales'
 
@@ -93,6 +94,10 @@ const mentionQuery = ref('')
 const highlightIndex = ref(0)
 const slashOpen = ref(false)
 const slashQuery = ref('')
+// The "/" token's offset and whether it begins the message. Mid-sentence the
+// menu lists skills only and an accept replaces just the token.
+const slashStart = ref(0)
+const slashAtStart = ref(true)
 const slashCommands = ref<SlashCommandRecord[]>([])
 const slashHighlightIndex = ref(0)
 const slashLoading = ref(false)
@@ -277,7 +282,7 @@ watch(slashQuery, () => {
   slashHighlightIndex.value = 0
 })
 
-watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation], async ([open, query]) => {
+watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation, slashAtStart], async ([open, query]) => {
   if (!open) {
     slashCommands.value = []
     slashLoading.value = false
@@ -291,7 +296,10 @@ watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversatio
       sideConversation: props.sideConversation === true,
     })
     if (req !== slashRequestSeq) return
-    slashCommands.value = Array.isArray(res.records) ? res.records : []
+    const records = Array.isArray(res.records) ? res.records : []
+    // A "/" that is not the start of the message only ever names a skill, so
+    // the built-in commands are not offered there.
+    slashCommands.value = slashAtStart.value ? records : records.filter((record) => record.category === 'skill')
   } catch {
     if (req !== slashRequestSeq) return
     slashCommands.value = []
@@ -299,24 +307,6 @@ watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversatio
     if (req === slashRequestSeq) slashLoading.value = false
   }
 })
-
-function parseSlash(text: string, cursor: number) {
-  const before = text.slice(0, cursor)
-  if (before.includes('\n')) return null
-  if (!before.startsWith('/')) return null
-  const raw = before.slice(1)
-  if (/\s/.test(raw)) return null
-  return { query: raw }
-}
-
-function parseMention(text: string, cursor: number) {
-  const before = text.slice(0, cursor)
-  const m = before.match(/[@\uFF04]([^\s\n@\uFF04]*)$/)
-  if (!m) return null
-  const full = m[0]
-  const start = cursor - full.length
-  return { query: m[1] ?? '', start }
-}
 
 function openBotsSubmenu() {
   mentionMenuLevel.value = 'bots'
@@ -443,6 +433,8 @@ function syncMentionState() {
   if (slashParsed) {
     slashOpen.value = true
     slashQuery.value = slashParsed.query
+    slashStart.value = slashParsed.start
+    slashAtStart.value = slashParsed.atStart
     mentionOpen.value = false
     return
   }
@@ -508,10 +500,24 @@ function applySlashCommand(cmd: SlashCommandRecord) {
   if (!parsed) return
   const name = cmd.canonicalName || cmd.name
   const insert = cmd.supportsInlineArgs ? `/${name} ` : `/${name}`
-  setTextInput(insert)
+  if (parsed.atStart) {
+    setTextInput(insert)
+    slashOpen.value = false
+    nextTick(() => {
+      const pos = insert.length
+      el.focus()
+      el.setSelectionRange(pos, pos)
+    })
+    return
+  }
+  // A mid-sentence reference replaces only its token, leaving the rest of the
+  // message — and the text after the cursor — intact.
+  const before = el.value.slice(0, parsed.start)
+  const after = el.value.slice(cursor)
+  setTextInput(before + insert + after)
   slashOpen.value = false
+  const pos = before.length + insert.length
   nextTick(() => {
-    const pos = insert.length
     el.focus()
     el.setSelectionRange(pos, pos)
   })

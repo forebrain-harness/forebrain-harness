@@ -84,7 +84,7 @@
 | [013-chatview-blocks-that-draw-nothing-yield-to-content](013-chatview-blocks-that-draw-nothing-yield-to-content.md) | ChatView 只在有可见块时走块分支；`hasVisibleBlocks` 不再把锚点与无确认行的审批块算作可见（修空气泡） | Bug Fix | DONE | P3 | S | LOW |
 | [014-tui-persists-main-agent-turn-lifecycle](014-tui-persists-main-agent-turn-lifecycle.md) | TUI 主 agent 的 `turn_started`/`turn_completed` 落库（不带回答文字），取消/失败事件带计划进度；计划进度计算下沉到 `pkg/turn` | Bug Fix | DONE（2026-10-14 执行完毕） | **P1** | S | LOW |
 | [015-first-token-latency-per-turn](015-first-token-latency-per-turn.md) | 首 token 延迟：引擎在 `Submit` 测一次，存 `fb_runs.first_token_ms`（加列+迁移），两端运行中状态行与 Worked 行显示 | Feature | TODO | P2 | M | MED |
-| [016-transcript-written-at-text-block-end](016-transcript-written-at-text-block-end.md) | 回答/思考在文字块结束时写入 transcript（引擎层，两端与 subagent 共用，幂等对账）；每个思考块单独一行并记录耗时 | Bug Fix | TODO | **P1** | M | MED |
+| [016-transcript-written-at-text-block-end](016-transcript-written-at-text-block-end.md) | 回答/思考在文字块结束时写入 transcript（引擎层，两端与 subagent 共用，幂等对账）；每个思考块单独一行并记录耗时 | Bug Fix | DONE（2026-10-13 执行完毕）| **P1** | M | MED |
 | [017-subagent-views-from-worker-transcript](017-subagent-views-from-worker-transcript.md) | subagent 视图（web 与 TUI）重载/回放时从 worker 会话 transcript 重建文字；worker 会话缺失时退回事件重放 | Bug Fix | DONE（2026-10-13 执行完毕） | **P1** | L | HIGH |
 | [018-stream-deltas-pushed-not-persisted](018-stream-deltas-pushed-not-persisted.md) | 回答/思考/工具输出增量只推送不落库；持久化的生命周期事件不带回答文字（cron 改读 transcript）；断线重连与刷新时 gateway 从内存补发在途文字与在途工具输出 | Bug Fix | DONE（2026-10-13 执行完毕） | **P1** | L | HIGH |
 | [019-migrate-away-stored-stream-deltas](019-migrate-away-stored-stream-deltas.md) | 状态库迁移：先备份，再处理旧增量（含工具输出）——已有完整记录的删除，没有的合并成段；迁移后照框架自动 VACUUM（owner 2026-10-11 撤回"不回收"） | Migration | DONE（2026-10-14 执行完毕） | P2 | M | HIGH |
@@ -104,12 +104,12 @@
 | [036-skill-drafts-publish-and-versions](036-skill-drafts-publish-and-versions.md) | 技能草稿 / 发布 / 版本：存储、发布原子、会话按版本加载、正式目录改动自动进草稿、gateway 接口 | Feature | DONE（2026-10-12/13；改动已落地并复跑全绿，评审待补：执行者运行被限额中断，无交付报告） | **P1** | L | MED |
 | [037-tui-skills-panel-publish-and-versions](037-tui-skills-panel-publish-and-versions.md) | TUI `/skills` 面板：状态段、随状态变化的子菜单、发布、查看改动、版本记录（分页）、恢复、拉取更新 | Feature | DONE（2026-10-13 执行完毕，未提交）| **P1** | M | LOW–MED |
 | [032-remove-working-set-tools](032-remove-working-set-tools.md) | 删除 working_set_* 工具与 WorkingSetSource（模型从未调用），连带 TUI 显示、安全白名单、上下文 API 字段与 web 面板区块 | Tech Debt | DONE（2026-10-13 执行完毕，未提交）| P2 | S | LOW |
-| [034-composer-pickers-anywhere](034-composer-pickers-anywhere.md) | TUI 与 web 输入框任意位置输入 / 和 @ 都能呼出选择器；中间的 / 只列技能，发送时加载（一轮可多个）；两端共用一份记号用例表 | Bug Fix / Feature | TODO | **P1** | M | MED |
+| [034-composer-pickers-anywhere](034-composer-pickers-anywhere.md) | TUI 与 web 输入框任意位置输入 / 和 @ 都能呼出选择器；中间的 / 只列技能，发送时加载（一轮可多个）；两端共用一份记号用例表 | Bug Fix / Feature | DONE（2026-10-14 执行完毕）| **P1** | M | MED |
 | [038-pre-turn-anchor-only-trusts-own-usage](038-pre-turn-anchor-only-trusts-own-usage.md) | 上下文占用只用 forebrain 自己请求（有 run_id）的用量当锚点，迁移会话续聊第一句不再被误压缩；压缩卡片显示判定用的数 | Bug Fix | DONE（2026-10-13 执行完毕，未提交；评审 APPROVE）| **P1** | S | LOW |
 | [039-models-json-ships-beside-binary](039-models-json-ships-beside-binary.md) | models.json 不再嵌入二进制：随 npm 包 / 归档 / 镜像装在二进制旁（`install-assets.sh`），首次运行种入 home；go install 发行版缺文件时下载 | Packaging | DONE（2026-10-13 执行完毕，未提交）| **P1** | M | MED |
 | [040-link-hf-tokenizers-library](040-link-hf-tokenizers-library.md) | 所有平台强制链接 daulet/tokenizers v1.27.0（`fetch-libtokenizers.sh`，Windows 用 Rust 现编），建 `pkg/llm/hftok` 包装 | Dependency / Build | DONE（2026-10-13 执行完毕，未提交）| **P1** | L | HIGH |
 | [041-tokenizer-assets-and-per-model-estimator](041-tokenizer-assets-and-per-model-estimator.md) | 10 个家族的分词器文件随包分发、缓存优先、缺失按 HF→ModelScope 下载；按模型选分词器；删除 `hftokenizer.go` 与 tiktoken-go | Feature / Tech Debt | DONE（2026-10-13 执行完毕，未提交）| **P1** | L | MED |
-| [042-compaction-estimates-with-session-model-tokenizer](042-compaction-estimates-with-session-model-tokenizer.md) | 轮前 / 轮中压缩判定与用量观测按本次调用所用模型的分词器估算（同口径）；glm-5.3 真机验收 | Bug Fix | TODO | P2 | M | MED |
+| [042-compaction-estimates-with-session-model-tokenizer](042-compaction-estimates-with-session-model-tokenizer.md) | 轮前 / 轮中压缩判定与用量观测按本次调用所用模型的分词器估算（同口径）；glm-5.3 真机验收 | Bug Fix | DONE（2026-10-13 执行完毕）| P2 | M | MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 

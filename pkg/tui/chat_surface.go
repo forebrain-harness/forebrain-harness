@@ -62,8 +62,11 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	goalObjective := strings.TrimSpace(submission.GoalObjective)
 	skillName := strings.TrimSpace(submission.SkillName)
 	skillPath := strings.TrimSpace(submission.SkillPath)
-	if res, ok := s.slashCommandResult(ctx, sessionID, ch, userText); ok {
+	var skills []turn.SkillSelection
+	res, ok := s.slashCommandResult(ctx, sessionID, ch, userText)
+	if ok {
 		if res.ShouldContinueRun {
+			skills = res.Skills
 			next := strings.TrimSpace(res.ContinueInput)
 			if next != "" {
 				rawInput = userText
@@ -122,6 +125,11 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 			}
 			return nil
 		}
+	} else {
+		// A plain message is not a slash command, but a mid-sentence "/name"
+		// still names a skill: the message runs as ordinary text and the
+		// runner loads the named skills first (see turn.SkillReferences).
+		skills = turn.SkillReferences(userText)
 	}
 	// @ mentions are resolved in the composer, not here: picking a file leaves
 	// a bare path in the draft and picking an image attaches it outright, so a
@@ -154,7 +162,7 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 		}
 	}
 	defer unlock()
-	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, goalObjective, skillName, skillPath, submission.CallerRendersReturnedError, io.Discard); err != nil {
+	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, goalObjective, skillName, skillPath, skills, submission.CallerRendersReturnedError, io.Discard); err != nil {
 		return err
 	}
 	sink := s.toolApprovalSinkGet()
