@@ -66,6 +66,139 @@ func (f runFunc) Run(ctx context.Context, req TurnRequest, started func(string))
 	return f(ctx, req, started)
 }
 
+// firstTokenCall is one StampRunFirstToken the engine made, with the context it
+// saw — recorded so a test can prove the stamp outlived the run's own
+// cancellation.
+type firstTokenCall struct {
+	runID  string
+	wait   time.Duration
+	ctxErr error
+}
+
+type fakeFirstTokenStore struct {
+	mu    sync.Mutex
+	calls []firstTokenCall
+}
+
+func (f *fakeFirstTokenStore) StampRunFirstToken(ctx context.Context, runID string, wait time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, firstTokenCall{runID: runID, wait: wait, ctxErr: ctx.Err()})
+	return nil
+}
+
+func (f *fakeFirstTokenStore) recorded() []firstTokenCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]firstTokenCall(nil), f.calls...)
+}
+
+// TestSubmitStampsTheFirstTokenOncePerRun pins the owner's rule that the wait
+// is one value per run: the model answering the turn a second time (a tool
+// round-trip) does not measure again, and the store is handed the run the
+// executor actually persisted under.
+func TestSubmitStampsTheFirstTokenOncePerRun(t *testing.T) {
+	store := &fakeFirstTokenStore{}
+	var gotRunID string
+	var gotWait time.Duration
+	svc := New(
+		WithFirstTokenStore(store),
+		WithRunExecutor(runFunc(func(ctx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+			started("run-1")
+			sink := llm.StreamSinkFrom(ctx)
+			if sink == nil {
+				t.Fatal("Submit must install a stream sink for the engine to observe")
+			}
+			sink.OnResponseStarted() // the first output of this turn
+			sink.OnResponseStarted() // a later block: must not be measured again
+			return &agent.Result{}, nil
+		})),
+	)
+	out, err := svc.Submit(llm.WithStreamSink(context.Background(), &llm.StreamSink{}), TurnRequest{
+		SessionID: "s1",
+		OnFirstToken: func(runID string, wait time.Duration) {
+			gotRunID, gotWait = runID, wait
+		},
+	}, &eventSink{})
+	if err != nil || out.Status != TurnCompleted {
+		t.Fatalf("outcome = %#v, error = %v", out, err)
+	}
+	calls := store.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("store received %d stamps, want exactly one per run: %+v", len(calls), calls)
+	}
+	if calls[0].runID != "run-1" {
+		t.Fatalf("stamped run = %q, want the executor's run-1", calls[0].runID)
+	}
+	if gotRunID != "run-1" || gotWait != calls[0].wait {
+		t.Fatalf("OnFirstToken = (%q, %v), want the same as the stamp %+v", gotRunID, gotWait, calls[0])
+	}
+}
+
+// TestSubmitFirstTokenOutlivesACancelledTurn pins what a cancelled turn keeps:
+// the wait is written through context.WithoutCancel, so a turn the user
+// stopped after the model began answering still records the wait it measured.
+func TestSubmitFirstTokenOutlivesACancelledTurn(t *testing.T) {
+	store := &fakeFirstTokenStore{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := New(
+		WithFirstTokenStore(store),
+		WithRunExecutor(runFunc(func(runCtx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+			started("run-cancelled")
+			sink := llm.StreamSinkFrom(runCtx)
+			if sink == nil {
+				t.Fatal("Submit must install a stream sink for the engine to observe")
+			}
+			sink.OnResponseStarted() // the model began answering
+			cancel()                 // then the user stopped the turn
+			return nil, context.Canceled
+		})),
+	)
+	out, err := svc.Submit(llm.WithStreamSink(ctx, &llm.StreamSink{}), TurnRequest{SessionID: "s1"}, &eventSink{})
+	if out.Status != TurnCancelled || !errors.Is(err, context.Canceled) {
+		t.Fatalf("outcome = %#v, error = %v, want a cancelled turn", out, err)
+	}
+	calls := store.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("a measured cancelled turn recorded %d stamps, want one: %+v", len(calls), calls)
+	}
+	if calls[0].ctxErr != nil {
+		t.Fatalf("the stamp was handed a cancelled context (%v); it must outlive the run", calls[0].ctxErr)
+	}
+}
+
+// TestSubmitMeasuresNothingWithoutAStreamSink pins that the engine does not
+// invent a measurement: a turn that runs with no streaming sink has no first
+// output to observe, so neither the store nor the surface callback fires.
+func TestSubmitMeasuresNothingWithoutAStreamSink(t *testing.T) {
+	store := &fakeFirstTokenStore{}
+	callbackFired := false
+	svc := New(
+		WithFirstTokenStore(store),
+		WithRunExecutor(runFunc(func(ctx context.Context, _ TurnRequest, started func(string)) (*agent.Result, error) {
+			started("run-2")
+			if llm.StreamSinkFrom(ctx) != nil {
+				t.Fatal("no sink was installed; the engine must not add one")
+			}
+			return &agent.Result{}, nil
+		})),
+	)
+	out, err := svc.Submit(context.Background(), TurnRequest{
+		SessionID:    "s1",
+		OnFirstToken: func(string, time.Duration) { callbackFired = true },
+	}, &eventSink{})
+	if err != nil || out.Status != TurnCompleted {
+		t.Fatalf("outcome = %#v, error = %v", out, err)
+	}
+	if calls := store.recorded(); len(calls) != 0 {
+		t.Fatalf("store received %+v, want nothing without a sink", calls)
+	}
+	if callbackFired {
+		t.Fatal("OnFirstToken fired with no sink to observe")
+	}
+}
+
 type gateFunc func(context.Context, string) (*ToolApprovalRequest, error)
 
 func (f gateFunc) Pending(ctx context.Context, id string) (*ToolApprovalRequest, error) {

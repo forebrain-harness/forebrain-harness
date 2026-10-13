@@ -71,6 +71,11 @@ type TurnRequest struct {
 	// for the same run and orphan the caller's.
 	AgentContextIsRunContext bool   `json:"-"`
 	ParentRunID              string `json:"parent_run_id,omitempty"`
+	// OnFirstToken, when set, is called once per run at the moment the model
+	// began answering this turn, with how long the turn waited for that first
+	// output. Submit itself stamps the wait onto the run; this callback lets a
+	// surface show it live without waiting for the run to end.
+	OnFirstToken func(runID string, wait time.Duration) `json:"-"`
 }
 
 // TurnStatus is the terminal or waiting state of a turn.

@@ -8,11 +8,59 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
+
+// TestStampRunFirstTokenRecordsOneWaitAndReadsItBack pins the owner's rule
+// (plan 015): the first-token wait is one value per run — a second stamp, as a
+// continuation past an approval would attempt, leaves the measured wait — and
+// the transcript reader hands it back on every row of that run.
+func TestStampRunFirstTokenRecordsOneWaitAndReadsItBack(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	ensureSessionsForRuns(t, db, "s1")
+	runs := &RunStore{DB: db}
+	run, err := runs.CreateRun(ctx, "s1", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StampRunFirstToken(ctx, run.ID, 1200*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	// A continuation is the same run: the second stamp must not overwrite it.
+	if err := store.StampRunFirstToken(ctx, run.ID, 5000*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendMessageForRun(ctx, "s1", run.ID, "assistant", "hi", "", "", messageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := store.ListRecentMessages(ctx, "s1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var answer *Message
+	for i := range messages {
+		if strings.TrimSpace(messages[i].RunID) == run.ID {
+			answer = &messages[i]
+		}
+	}
+	if answer == nil {
+		t.Fatalf("no transcript row carried run %s: %+v", run.ID, messages)
+	}
+	if answer.RunFirstTokenMs != 1200 {
+		t.Fatalf("RunFirstTokenMs = %d, want the first measured 1200ms", answer.RunFirstTokenMs)
+	}
+	if answer.RunWorkedMs != 0 {
+		t.Fatalf("RunWorkedMs = %d, want the run still untimed", answer.RunWorkedMs)
+	}
+}
 
 func TestWithdrawUserTurn(t *testing.T) {
 	db := openStateDB(t)

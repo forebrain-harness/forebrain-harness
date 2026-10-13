@@ -542,6 +542,64 @@ func TestStateV11UpgradesToV12AddsProjectFileColumns(t *testing.T) {
 	}
 }
 
+// TestStateV12UpgradesToV13AddsFirstTokenColumn pins the column this version
+// adds. A database that predates it — modelled by dropping it from the current
+// schema and lowering the version — gains it when it is opened again, its
+// version moves forward, and the run references stay intact. The column is
+// nullable with no default: a run that never measured the wait reads NULL
+// rather than a guessed zero.
+func TestStateV12UpgradesToV13AddsFirstTokenColumn(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE fb_runs DROP COLUMN first_token_ms`,
+		`PRAGMA user_version = 12`,
+	} {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			_ = raw.Close()
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = raw.Close()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open a v12 state file: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	var n int
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_runs') WHERE name='first_token_ms'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("fb_runs.first_token_ms must exist after the migration (found %d)", n)
+	}
+	var notNull int
+	var dflt sql.NullString
+	if err := migrated.QueryRowContext(ctx,
+		`SELECT "notnull", dflt_value FROM pragma_table_info('fb_runs') WHERE name='first_token_ms'`).Scan(&notNull, &dflt); err != nil {
+		t.Fatal(err)
+	}
+	if notNull != 0 || dflt.Valid {
+		t.Fatalf("first_token_ms = notnull %d default %q, want a nullable column with no default", notNull, dflt.String)
+	}
+}
+
 // TestStateOpenIsIdempotentAtCurrentVersion pins §4.5 check 5: opening a
 // database already at the current version runs no DDL at all.
 func TestStateOpenIsIdempotentAtCurrentVersion(t *testing.T) {

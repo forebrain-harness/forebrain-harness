@@ -96,6 +96,10 @@ export interface ChatMessage {
   runStartedAt?: string
   runFinishedAt?: string
   workedDurationMs?: number
+  /** How long this turn waited for the model's first output, when it was
+   * measured. Live it arrives on its own `first_token` op; a reload reads it
+   * off the run's "worked" row. Absent means the run never measured one. */
+  firstTokenMs?: number
   plan?: ExecutionPlan | null
   planBlocks?: PlanBlock[]
   /** What a user message attached, in the order it was attached. */
@@ -774,6 +778,7 @@ function applyRunWorkedLine(message: ChatMessage, row: ChatMessageRecord) {
   if (row.runStartedAt) message.runStartedAt = String(row.runStartedAt)
   if (row.runFinishedAt) message.runFinishedAt = String(row.runFinishedAt)
   if (row.workedDurationMs != null) message.workedDurationMs = Number(row.workedDurationMs)
+  if (row.firstTokenMs != null) message.firstTokenMs = Number(row.firstTokenMs)
   const planTotal = Number(row.planTotal)
   if (Number.isFinite(planTotal) && planTotal > 0) {
     const planDone = Number(row.planDone)
@@ -1258,6 +1263,8 @@ export interface RuntimeStatus {
   goalRound?: number
   /** Set while the goal's check reads the workspace. */
   goalChecking?: boolean
+  /** How long this run waited for the model's first output, once it arrived. */
+  firstTokenMs?: number
 }
 
 export interface ContextRuntimeSignals {
@@ -1603,11 +1610,29 @@ export interface WorkedPlanProgress {
  */
 export interface WorkedLine {
   label: string
+  /** The turn's first-token wait, when the run measured one. */
+  firstToken?: string
   plan?: WorkedPlanProgress
   time?: string
 }
 
-export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn = translate, finishedAt?: string, plan?: WorkedPlanProgress): WorkedLine {
+/**
+ * formatFirstTokenDuration renders how long a run waited for the model's first
+ * output, to a tenth of a second below a minute ("1.2s") and the worked line's
+ * own minute:second shape above it. Zero or negative reads as unknown.
+ */
+export function formatFirstTokenDuration(durationMs?: number): string {
+  if (durationMs == null || !Number.isFinite(durationMs) || durationMs <= 0) return ''
+  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(1)}s`
+  const totalSeconds = Math.floor(durationMs / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+}
+
+export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn = translate, finishedAt?: string, plan?: WorkedPlanProgress, firstTokenMs?: number): WorkedLine {
   if (durationMs == null || !Number.isFinite(durationMs) || durationMs < 0) return { label: '' }
   let totalSeconds = Math.floor(durationMs / 1000)
   if (totalSeconds === 0 && durationMs > 0) totalSeconds = 1
@@ -1623,8 +1648,10 @@ export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn =
   const time = finished && !Number.isNaN(finished.getTime())
     ? `${String(finished.getHours()).padStart(2, '0')}:${String(finished.getMinutes()).padStart(2, '0')}`
     : undefined
+  const firstTokenDuration = formatFirstTokenDuration(firstTokenMs)
   return {
     label: tr('chat.workedFor', { duration }),
+    ...(firstTokenDuration ? { firstToken: tr('chat.firstToken', { duration: firstTokenDuration }) } : {}),
     plan: plan && plan.total > 0 ? plan : undefined,
     time,
   }
@@ -1651,20 +1678,21 @@ export function thinkingBlockLabel(
  * when the run had one, then the finish time. Every surface that shows a
  * conversation draws it from this, so a run reads the same wherever it ran.
  */
-export function workedLineOf(  msg: Pick<ChatMessage, 'role' | 'workedDurationMs' | 'runFinishedAt' | 'workedPlanDone' | 'workedPlanTotal' | 'workedPlanActive'>,
+export function workedLineOf(  msg: Pick<ChatMessage, 'role' | 'workedDurationMs' | 'firstTokenMs' | 'runFinishedAt' | 'workedPlanDone' | 'workedPlanTotal' | 'workedPlanActive'>,
   tr: TranslateFn = translate,
 ): WorkedLine {
   if (msg.role !== 'assistant') return { label: '' }
   const plan = msg.workedPlanTotal && msg.workedPlanTotal > 0
     ? { done: msg.workedPlanDone ?? 0, total: msg.workedPlanTotal, active: msg.workedPlanActive }
     : undefined
-  return formatWorkedDurationLabel(msg.workedDurationMs, tr, msg.runFinishedAt, plan)
+  return formatWorkedDurationLabel(msg.workedDurationMs, tr, msg.runFinishedAt, plan, msg.firstTokenMs)
 }
 
 /** Join a WorkedLine's segments with the worked line's separator. */
 export function workedLineText(line: WorkedLine): string {
   return [
     line.label,
+    line.firstToken ?? '',
     line.plan ? `${line.plan.done}/${line.plan.total}` : '',
     line.plan?.active ?? '',
     line.time ?? '',
@@ -1963,20 +1991,24 @@ export function formatRuntimeStatusLabel(status: RuntimeStatus, tr: TranslateFn 
   const plan = (status.planTotal ?? 0) > 0
     ? { done: status.planCompleted ?? 0, total: status.planTotal ?? 0, active: status.planActive || undefined }
     : undefined
+  // The wait the run already spent on the model's first token, in the same
+  // segment style the worked line uses, once it is known.
+  const firstTokenDuration = formatFirstTokenDuration(status.firstTokenMs)
+  const firstToken = firstTokenDuration ? ` · ${tr('chat.firstToken', { duration: firstTokenDuration })}` : ''
   if (status.kind === 'working' && status.goalChecking) {
-    return { label: tr('chat.goal.runtimeChecking', { round: status.goalRound ?? 1, duration }), plan }
+    return { label: tr('chat.goal.runtimeChecking', { round: status.goalRound ?? 1, duration }) + firstToken, plan }
   }
   if (status.kind === 'working' && status.toolName === 'shell') {
-    return { label: tr('chat.runtimeShell', { duration }), plan }
+    return { label: tr('chat.runtimeShell', { duration }) + firstToken, plan }
   }
   if (status.kind === 'working' && (status.goalRound ?? 0) > 0) {
-    return { label: tr('chat.goal.runtimeWorking', { round: status.goalRound ?? 1, duration }), plan }
+    return { label: tr('chat.goal.runtimeWorking', { round: status.goalRound ?? 1, duration }) + firstToken, plan }
   }
-  if (status.kind === 'working') return { label: tr('chat.runtimeWorking', { duration }), plan }
+  if (status.kind === 'working') return { label: tr('chat.runtimeWorking', { duration }) + firstToken, plan }
   if (status.kind === 'reconnecting') {
     const attempt = status.attempt ?? 1
     const max = status.maxAttempts ?? 5
-    return { label: tr('chat.runtimeReconnecting', { attempt, max, duration }), plan }
+    return { label: tr('chat.runtimeReconnecting', { attempt, max, duration }) + firstToken, plan }
   }
   return { label: '', plan }
 }
@@ -4622,6 +4654,21 @@ export function useChatStream() {
           const data = (payload.data && typeof payload.data === 'object') ? payload.data as Record<string, unknown> : payload
           mode.value = normalizeMode(data.mode)
           modePhase.value = String(data.phase ?? '').trim()
+          return
+        }
+        if (op === 'first_token') {
+          // The run's first output just began answering this turn: how long it
+          // waited. Live state, never persisted — the durable copy is on the
+          // run's "worked" row, which the reload reads. It rides the running
+          // status line and the answer's own worked line.
+          const data = (payload.data && typeof payload.data === 'object')
+            ? toCamelCase(payload.data as Record<string, unknown>)
+            : payload
+          const waitMs = Number(data.firstTokenMs)
+          if (Number.isFinite(waitMs) && waitMs > 0) {
+            runtimeStatus.value = { ...runtimeStatus.value, firstTokenMs: waitMs }
+            updateMessageById(answerId(), (message) => ({ ...message, firstTokenMs: waitMs }))
+          }
           return
         }
         if (op === 'run_completed') {

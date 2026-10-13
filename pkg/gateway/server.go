@@ -2050,6 +2050,19 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				Skills:                   sc.Skills,
 				ExistingRunID:            runID,
 				AgentContextIsRunContext: true,
+				// The turn's first token reaches this socket as a legacy op —
+				// live state that never enters the session log
+				// (canonicalRunEventsFromWS drops an op it does not know) — so
+				// the running status line can name the wait before the run ends.
+				OnFirstToken: func(rid string, wait time.Duration) {
+					writeMsg(wsServerMsg{
+						Op:        "first_token",
+						RequestID: m.RequestID,
+						RunID:     rid,
+						SessionID: sid,
+						Data:      map[string]any{"first_token_ms": wait.Milliseconds()},
+					})
+				},
 			}, nil)
 			res = outcome.Result
 			agentErr = err

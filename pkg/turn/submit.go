@@ -117,6 +117,35 @@ func (s *Service) Submit(ctx context.Context, req TurnRequest, sink EventSink) (
 		}
 		s.publish(ctx, sink, event.RunEvent{RunID: runID, SessionID: req.SessionID, Type: event.RunEventTurnStarted})
 	}
+	// The turn's first output, measured once per run: the moment the model
+	// began answering this turn. The sink only fires for the foreground
+	// response — an internal call (compaction, a goal check) is muted through
+	// WithMutedForegroundStream and never reaches this wrapper — so the wait is
+	// the user's, not the plumbing's. A turn with no streaming sink is not
+	// measured: there is no first output to observe.
+	if store := s.firstTokens; store != nil {
+		if sink := llm.StreamSinkFrom(ctx); sink != nil {
+			wrapped := *sink
+			original := sink.OnResponseStarted
+			var once sync.Once
+			wrapped.OnResponseStarted = func() {
+				if original != nil {
+					original()
+				}
+				once.Do(func() {
+					wait := time.Since(startedAt)
+					id := strings.TrimSpace(runID)
+					if id != "" {
+						_ = store.StampRunFirstToken(context.WithoutCancel(ctx), id, wait)
+					}
+					if req.OnFirstToken != nil {
+						req.OnFirstToken(id, wait)
+					}
+				})
+			}
+			ctx = llm.WithStreamSink(ctx, &wrapped)
+		}
+	}
 	result, err := s.runner.Run(ctx, req, announce)
 	// An executor that failed before it ever had a run ID still owes the
 	// caller a turn_started, so the event stream stays well-formed.

@@ -56,6 +56,10 @@ var wsOutboundOps = map[string]struct{}{
 	// The answer to cancel_auto_continue. What the cancel changed reaches the
 	// session log as its own auto_continue_cancelled event.
 	wsOpAutoContinueCancelAck: {},
+	// first_token is the live wait for the model's first output (plan 015). It
+	// is measured once per run and stored on fb_runs; the socket op only shows
+	// it while the run is going, so it must never enter the session log.
+	"first_token": {},
 }
 
 var wsOpsRequireRequestID = map[string]struct{}{

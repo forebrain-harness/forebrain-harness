@@ -7,6 +7,7 @@
   >
     <span class="h-px w-3 bg-[var(--forebrain-divider-strong)]" />
     <span class="whitespace-nowrap font-mono">{{ line.label }}</span>
+    <span v-if="line.firstToken" class="whitespace-nowrap font-mono">{{ line.firstToken }}</span>
     <PlanProgressSegments :plan="line.plan" />
     <span v-if="line.time" class="whitespace-nowrap font-mono">{{ line.time }}</span>
     <span class="h-px flex-1 bg-[var(--forebrain-divider-strong)]" />

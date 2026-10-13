@@ -216,6 +216,10 @@ CREATE TABLE fb_runs (
   -- reaped by whichever process notices first. '' means no live process
   -- vouches for it (pre-owner rows, or an owner that deregistered).
   owner TEXT NOT NULL DEFAULT '',
+  -- How long the turn waited for the model's first output, measured once by
+  -- the surface that ran it; NULL for a run that never produced output or
+  -- was stored before turns kept this.
+  first_token_ms INTEGER,
   -- The surface that ran the turn owns its clock and records all three when
   -- the run completes; a run that never completed has none.
   CHECK ((started_at_ms IS NULL) = (finished_at_ms IS NULL)
