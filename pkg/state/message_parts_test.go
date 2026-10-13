@@ -1,9 +1,12 @@
 package state
 
 import (
+	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
@@ -156,4 +159,88 @@ func findImageBase64Part(parts []llm.ContentPart) (llm.ContentPart, bool) {
 		}
 	}
 	return llm.ContentPart{}, false
+}
+
+// TestReasoningPartsRoundTrip pins the shape a reasoning row's parts carry: the
+// block's text and the time the model spent on it. The duration belongs here,
+// not in the exec_* columns, whose CHECK admits only a tool or user row.
+func TestReasoningPartsRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		text  string
+		spent time.Duration
+	}{
+		{name: "seconds", text: "weighing the options", spent: 12 * time.Second},
+		{name: "sub-second", text: "quick", spent: 250 * time.Millisecond},
+		{name: "zero", text: "instant", spent: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			parts := ReasoningPartsJSON(tc.text, tc.spent)
+			got, ok := ParseReasoningTiming(parts)
+			if !ok {
+				t.Fatalf("ParseReasoningTiming(%q) = not ok, want the duration back", parts)
+			}
+			if got != tc.spent {
+				t.Fatalf("ParseReasoningTiming = %v, want %v", got, tc.spent)
+			}
+		})
+	}
+
+	// A row without the part (an older row, a plain "[]") has no timing.
+	for _, raw := range []string{"", "[]", `[{"type":"text","text":"hi"}]`, "not json"} {
+		if _, ok := ParseReasoningTiming(raw); ok {
+			t.Fatalf("ParseReasoningTiming(%q) = ok, want no timing", raw)
+		}
+	}
+}
+
+// TestReasoningRowStaysOutOfTheModelTranscript pins the cache boundary: a
+// reasoning row is display-only, so it never reaches the message list the next
+// request is built from, even with its timing part present.
+func TestReasoningRowStaysOutOfTheModelTranscript(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db, err := OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := NewSessionStore(db, "main")
+	const sid = "reasoning-transcript"
+	if _, err := store.Append(ctx, sid, "user", "what am I thinking?"); err != nil {
+		t.Fatal(err)
+	}
+	run, err := (&RunStore{DB: db}).CreateRun(ctx, sid, "what am I thinking?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendStructuredMessageForRun(ctx, sid, run.ID, "reasoning", "a private thought", "", ReasoningPartsJSON("a private thought", 3*time.Second), "", "", "", "", MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, sid, "assistant", "the answer"); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs, err := store.ListTranscriptMessages(ctx, sid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if strings.EqualFold(strings.TrimSpace(m.Role), "reasoning") {
+			t.Fatalf("reasoning row reached the model transcript: %+v", m)
+		}
+	}
+	// The row is on disk all the same — the projection drops it, not the store.
+	var reasoningRows int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM fb_messages WHERE session_id=? AND role='reasoning'`, sid).Scan(&reasoningRows); err != nil {
+		t.Fatal(err)
+	}
+	if reasoningRows != 1 {
+		t.Fatalf("reasoning rows on disk = %d, want 1", reasoningRows)
+	}
 }

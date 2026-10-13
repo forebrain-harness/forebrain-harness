@@ -414,6 +414,36 @@
   color: var(--rail-fg-2);
 }
 
+/* One row of the tenant dropdown: the option fills the row, the delete
+   control (absent for main and the active agent) sits beside it. */
+.forebrain-tenant-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.forebrain-tenant-row .forebrain-tenant-option {
+  flex: 1;
+  min-width: 0;
+}
+.forebrain-tenant-option-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--rail-fg-2);
+}
+.forebrain-tenant-option-del:hover {
+  background: var(--rail-hover);
+  color: var(--rail-danger);
+}
+.forebrain-tenant-option-del-ic {
+  width: 14px;
+  height: 14px;
+}
+
 .forebrain-tenant-dot {
   width: 6px;
   height: 6px;
@@ -520,8 +550,191 @@
   color: var(--forebrain-text-2);
 }
 
+/* The model this conversation runs on, named beside its title (prototype
+   .top .meta). */
+.forebrain-topbar-model {
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+  white-space: nowrap;
+}
+
+/* A project conversation's tag, drawn in the top bar the conversation
+   filled: the project band's dark ground, as a chip. */
+.chat-project-tag {
+  flex-shrink: 0;
+  border-radius: 9999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 16px;
+  background: #0f1d38;
+  color: #ffffff;
+}
+
+.chat-project-tag:hover {
+  text-decoration: underline;
+}
+
 .forebrain-topbar-spacer {
   flex: 1;
+}
+
+/* The thread's notice block (prototype .err-block): a bordered row with a
+   3px left accent, one sentence and a muted recovery line under it. Warn
+   carries the warning accent instead of the danger one. */
+.forebrain-err-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid var(--forebrain-divider);
+  border-left: 3px solid var(--forebrain-danger);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--forebrain-text);
+  background: var(--forebrain-surface);
+}
+
+.forebrain-err-block svg.lucide {
+  color: var(--forebrain-danger);
+  margin-top: 3px;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.forebrain-err-block .forebrain-err-s {
+  color: var(--forebrain-muted-text);
+  font-size: 12px;
+  display: block;
+  margin-top: 2px;
+}
+
+.forebrain-err-block--warn {
+  border-left-color: var(--forebrain-warning);
+}
+
+.forebrain-err-block--warn svg.lucide {
+  color: var(--forebrain-warning);
+}
+
+/* The composer's chip row (prototype .chip-btn): the compact bordered chip
+   every composer control is drawn as. */
+.forebrain-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 6px;
+  padding: 0 10px;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+  background: var(--forebrain-surface);
+  cursor: pointer;
+  position: relative;
+  white-space: nowrap;
+}
+
+.forebrain-chip-btn:hover {
+  border-color: var(--forebrain-divider-strong);
+  color: var(--forebrain-text);
+}
+
+.forebrain-chip-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.forebrain-chip-btn svg.lucide {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.forebrain-chip-btn .forebrain-chip-caret {
+  width: 12px;
+  height: 12px;
+  color: var(--forebrain-muted-text);
+}
+
+.forebrain-chip-btn--pressed {
+  border-color: var(--forebrain-brand-1);
+  color: var(--forebrain-brand-1);
+  background: var(--forebrain-brand-soft);
+}
+
+.forebrain-chip-btn--plan {
+  border-color: var(--forebrain-brand-border);
+  color: var(--forebrain-brand-1);
+  background: var(--forebrain-brand-soft);
+}
+
+.forebrain-chip-btn .forebrain-chip-count {
+  min-width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--forebrain-brand-1);
+  color: var(--forebrain-on-brand);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+/* The popover menus the composer's chips open (prototype .mode-menu /
+   .effort-menu / .preset-menu): one column of options, each a label with a
+   muted description, opened upwards from the chip. */
+.forebrain-chip-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  background: var(--forebrain-surface);
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 10px;
+  box-shadow: var(--forebrain-shadow-pop);
+  padding: 6px;
+  z-index: 20;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.forebrain-chip-menu-cap {
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+  padding: 4px 10px 2px;
+}
+
+.forebrain-chip-menu-opt {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--forebrain-text);
+}
+
+.forebrain-chip-menu-opt:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+
+.forebrain-chip-menu-opt b {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.forebrain-chip-menu-opt span {
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+}
+
+.forebrain-chip-menu-opt--on b {
+  color: var(--forebrain-brand-1);
 }
 
 .forebrain-main {
@@ -539,7 +752,8 @@
 }
 
 .forebrain-language-trigger,
-.forebrain-theme-toggle {
+.forebrain-theme-toggle,
+.forebrain-topbar-action {
   display: inline-flex;
   font-family: var(--forebrain-ui-font);
   align-items: center;
@@ -555,13 +769,15 @@
 }
 
 .forebrain-language-trigger:hover,
-.forebrain-theme-toggle:hover {
+.forebrain-theme-toggle:hover,
+.forebrain-topbar-action:hover {
   color: var(--forebrain-text);
   border-color: var(--forebrain-divider-strong);
 }
 
 .forebrain-language-ic,
-.forebrain-theme-toggle-ic {
+.forebrain-theme-toggle-ic,
+.forebrain-topbar-action-ic {
   width: 14px;
   height: 14px;
 }
@@ -702,24 +918,10 @@
   }
 }
 
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-button:focus-visible {
-  outline: 1px solid rgba(13, 145, 176, 0.72);
-  outline-offset: 1px;
-}
-
-input:focus:not(:focus-visible),
-textarea:focus:not(:focus-visible),
-select:focus:not(:focus-visible),
-button:focus:not(:focus-visible) {
-  outline: none;
-  box-shadow: none;
-}
-
 /* One field style for the settings screens, so a form reads as one thing
-   rather than a collection of differently-shaped inputs. */
+   rather than a collection of differently-shaped inputs. Focus is the
+   browser's own outline: the field does not suppress it, so a keyboard
+   visitor sees the ring the platform draws. */
 .forebrain-field {
   border-radius: 6px;
   border: 1px solid var(--forebrain-divider);
@@ -728,7 +930,6 @@ button:focus:not(:focus-visible) {
   font-family: var(--forebrain-ui-font);
   font-size: 13px;
   color: var(--forebrain-text);
-  outline: none;
 }
 
 /* A textarea is the one field that grows: the vertical padding the single-line
@@ -738,10 +939,6 @@ textarea.forebrain-field {
   padding: 8px 10px;
   line-height: 1.55;
   resize: vertical;
-}
-
-.forebrain-field:focus {
-  border-color: var(--forebrain-focus-border);
 }
 
 .forebrain-field.font-mono {
@@ -797,18 +994,33 @@ textarea.forebrain-field {
 }
 .forebrain-rail-foot {
   margin-top: auto;
-  padding-top: 10px;
+  padding-top: 8px;
   border-top: 1px solid var(--rail-line);
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 4px;
 }
 .forebrain-rail-foot .forebrain-rail-link {
   padding: 6px 10px;
   font-size: 12px;
 }
-.forebrain-rail-scheme {
-  font-size: 12px;
+/* The rail scheme toggle: a square icon button at the foot's right edge. */
+.forebrain-rail-theme {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  margin-left: auto;
+  border: 1px solid var(--rail-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--rail-fg-2);
+}
+.forebrain-rail-theme:hover {
+  background: var(--rail-hover);
+  color: var(--rail-fg);
 }
 .forebrain-tenant-tile {
   display: inline-flex;
@@ -842,7 +1054,6 @@ textarea.forebrain-field {
 .forebrain-rail--collapsed .forebrain-rail-wordmark,
 .forebrain-rail--collapsed .forebrain-rail-version,
 .forebrain-rail--collapsed .forebrain-rail-link span,
-.forebrain-rail--collapsed .forebrain-rail-scheme,
 .forebrain-rail--collapsed .forebrain-rail-caret,
 .forebrain-rail--collapsed .forebrain-tenant-scope,
 .forebrain-rail--collapsed .forebrain-tenant-label,
@@ -875,9 +1086,95 @@ textarea.forebrain-field {
   display: flex;
   justify-content: center;
 }
+.forebrain-rail--collapsed .forebrain-rail-foot {
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.forebrain-rail--collapsed .forebrain-rail-foot .forebrain-rail-link {
+  width: 40px;
+  justify-content: center;
+  padding: 7px 0;
+}
+.forebrain-rail--collapsed .forebrain-rail-theme {
+  margin-left: 0;
+}
 @media (prefers-reduced-motion: reduce) {
   .forebrain-rail--collapsed {
     transition: none;
   }
+}
+
+/* ---- Page structure: one top row, flat lists and tables (plan 015) ----
+   The top bar already names the page, so a page's first line is its title,
+   a one-line description and its buttons — never a second title layer. A
+   page that is a single list or table shows it bare; a page with several
+   groups gives each one level. */
+.forebrain-page-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+.forebrain-page-top-title {
+  margin: 0;
+  font-family: var(--forebrain-ui-font);
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 650;
+  color: var(--forebrain-text);
+}
+.forebrain-page-top-desc {
+  font-size: 13px;
+  color: var(--forebrain-text-2);
+}
+.forebrain-page-top-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* A boxed list: one hairline container, its rows separated by their own
+   padding rather than nested cards. */
+.forebrain-list-boxed {
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 8px;
+  padding: 0 14px;
+}
+.forebrain-list-boxed > :first-child {
+  padding-top: 11px;
+}
+
+/* A boxed table: the container clips the header's fill to the rounded edge. */
+.forebrain-table-wrap {
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.forebrain-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  color: var(--forebrain-text);
+}
+.forebrain-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--forebrain-text-2);
+  background: var(--forebrain-bg-alt);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--forebrain-divider);
+}
+.forebrain-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--forebrain-divider);
+  vertical-align: top;
+}
+.forebrain-table tr:last-child td {
+  border-bottom: 0;
 }
 

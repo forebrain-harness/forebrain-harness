@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { expect, test } from '@playwright/test'
 
-import { signIn, shot } from './support'
+import { seedProjectSession, signIn, shot } from './support'
 
 /**
  * The subagent_* call cards, proven on the real page: one card per call, one
@@ -69,9 +69,7 @@ test('a fanout card carries its tasks, their clocks, and nothing raw', async ({ 
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedProjectSession(page, 'subagent-cards')
   const now = Math.floor(Date.now() / 1000)
 
   const fanoutArgs = {
@@ -173,9 +171,7 @@ test('an empty list is a card that says it listed nothing', async ({ page }) => 
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedProjectSession(page, 'subagent-cards')
   const now = Math.floor(Date.now() / 1000)
   sqlite(`
     INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)
@@ -199,9 +195,7 @@ test('the five lifecycle verbs each draw their own card, none with raw material'
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedProjectSession(page, 'subagent-cards')
   const now = Math.floor(Date.now() / 1000)
   const record = (status: string, extra: Record<string, unknown> = {}) => ({
     agent_id: 'subagent-e2e-a', agent_kind: 'typed', agent_type: 'general-purpose',

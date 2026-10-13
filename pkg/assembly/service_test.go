@@ -2,12 +2,15 @@ package assembly
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
@@ -60,14 +63,20 @@ func (f *remoteFallbackTestLLM) Execute(context.Context, []llm.Message, []*llm.T
 	return &llm.Result{Message: &msg}, nil
 }
 
-func newCompactTestStore(t *testing.T) *state.SessionStore {
+func newCompactTestStoreWithDB(t *testing.T) (*state.SessionStore, *sql.DB) {
 	t.Helper()
 	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return state.NewSessionStore(db, "main")
+	return state.NewSessionStore(db, "main"), db
+}
+
+func newCompactTestStore(t *testing.T) *state.SessionStore {
+	t.Helper()
+	sess, _ := newCompactTestStoreWithDB(t)
+	return sess
 }
 
 func TestManualCompactPersistsReplacementCheckpoint(t *testing.T) {
@@ -406,15 +415,25 @@ func (f *systemOnlyCompactor) Execute(context.Context, []llm.Message, []*llm.Too
 // modelContextFloor rejects it and silently falls back to reading the FULL
 // transcript, so every later round re-summarizes the entire history.
 func TestEmptyReplacementMustNotPersistDeadCheckpoint(t *testing.T) {
-	ctx, sess := context.Background(), newCompactTestStore(t)
+	ctx := context.Background()
+	sess, db := newCompactTestStoreWithDB(t)
 	sid := "dead"
 
 	bigUser := strings.Repeat("a long standing requirement sentence. ", 200)
+	// A run's usage anchors occupancy only when it belongs to forebrain's own
+	// request, so the seed rows must carry a real run id.
+	if _, err := sess.Append(ctx, sid, "user", bigUser); err != nil {
+		t.Fatal(err)
+	}
+	run, err := (&state.RunStore{DB: db}).CreateRun(ctx, sid, "seed")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 6; i++ {
 		if _, err := sess.Append(ctx, sid, "user", bigUser); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := sess.AppendStructuredMessage(ctx, sid, "assistant", "answer", "",
+		if _, err := sess.AppendStructuredMessageForRun(ctx, sid, run.ID, "assistant", "answer", "",
 			state.ContentPartsJSON(nil, "answer"), "gpt-test",
 			`{"input_tokens":900000,"output_tokens":500}`, "", "", state.MessageExecTiming{}); err != nil {
 			t.Fatal(err)
@@ -459,6 +478,163 @@ func TestEmptyReplacementMustNotPersistDeadCheckpoint(t *testing.T) {
 		t.Fatalf("DEAD CHECKPOINT: compaction reported success but the next round still reads the full history "+
 			"(%d tokens vs %d before). modelContextFloor rejected the empty ReplacementHistory and silently "+
 			"fell back to the entire transcript, so every round re-summarizes everything.", afterTokens, fullTokens)
+	}
+}
+
+// Migrated usage measured another harness's request; it must not compact the
+// session on its first native message. Once forebrain's own response lands, its
+// usage anchors again.
+func TestMigratedSessionDoesNotCompactOnImportedUsage(t *testing.T) {
+	ctx := context.Background()
+	sess, db := newCompactTestStoreWithDB(t)
+	sid := "migrated"
+
+	if _, err := sess.Append(ctx, sid, "user", "migrated question"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessage(ctx, sid, "assistant", "imported answer", "",
+		state.ContentPartsJSON(nil, "imported answer"), "claude-opus-5-5",
+		`{"input_tokens":900089,"output_tokens":1403}`, "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := Service{
+		Sessions:     sess,
+		PrimaryModel: func(context.Context) (string, string) { return "test-provider", "test-model" },
+	}
+	if should, usage, err := svc.ShouldAutoCompactSession(ctx, sid, ""); err != nil || should {
+		t.Fatalf("imported usage compacted a migrated session: should=%v usage=%d err=%v", should, usage, err)
+	}
+
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, sid, "seed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessageForRun(ctx, sid, seedRun.ID, "assistant", "native answer", "",
+		state.ContentPartsJSON(nil, "native answer"), "test-model",
+		`{"input_tokens":190000,"output_tokens":100}`, "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+	should, _, err := svc.ShouldAutoCompactSession(ctx, sid, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !should {
+		t.Fatal("native usage above the threshold must compact")
+	}
+}
+
+// scaledEstimator counts 100 tokens per byte, so a test can move one fixed
+// history across a threshold by switching the estimator alone.
+type scaledEstimator struct{}
+
+func (scaledEstimator) Count(text string) int { return len(text) * 100 }
+func (scaledEstimator) Name() string          { return "scaled-100" }
+
+// The pre-turn checkpoint must count the history with the session's own model's
+// tokenizer, not a process-wide default: only the estimator decides these two
+// outcomes, and the same rows must cross the threshold under the session model
+// and stay under it otherwise.
+func TestAutoCompactDecisionUsesSessionModelEstimator(t *testing.T) {
+	ctx, sess := context.Background(), newCompactTestStore(t)
+	sid := "estimator"
+	// Two rows whose default (rune/4) occupancy is ~1.5k, far below the
+	// 180000-token threshold of an uncatalogued model. Under the 100x
+	// estimator the same rows run to ~600k and cross it.
+	for i := 0; i < 2; i++ {
+		if _, err := sess.Append(ctx, sid, "user", strings.Repeat("x", 3000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := Service{
+		Sessions:     sess,
+		PrimaryModel: func(context.Context) (string, string) { return "test-provider", "model-x" },
+	}
+	if should, _, err := svc.ShouldAutoCompactSession(ctx, sid, ""); err != nil || should {
+		t.Fatalf("default estimator compacted below the threshold: should=%v err=%v", should, err)
+	}
+
+	restore := llm.SetEstimatorForTest("test-provider", "model-x", scaledEstimator{})
+	should, _, err := svc.ShouldAutoCompactSession(ctx, sid, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !should {
+		t.Fatal("the session model's estimator did not drive the compaction decision")
+	}
+	restore()
+	if should, _, err := svc.ShouldAutoCompactSession(ctx, sid, ""); err != nil || should {
+		t.Fatalf("restored estimator still compacted: should=%v err=%v", should, err)
+	}
+}
+
+// The compaction card must report the occupancy the decision used — the same
+// number the gauge reads — not a fresh local estimate that would contradict it.
+func TestAutoCompactCardReportsDecisionUsage(t *testing.T) {
+	ctx := context.Background()
+	sess, db := newCompactTestStoreWithDB(t)
+	sid := "card"
+
+	if _, err := sess.Append(ctx, sid, "user", "migrated question"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessage(ctx, sid, "assistant", "imported answer", "",
+		state.ContentPartsJSON(nil, "imported answer"), "claude-opus-5-5",
+		`{"input_tokens":900089,"output_tokens":1403}`, "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, sid, "seed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sess.AppendStructuredMessageForRun(ctx, sid, seedRun.ID, "assistant", "native answer", "",
+		state.ContentPartsJSON(nil, "native answer"), "test-model",
+		`{"input_tokens":190000,"output_tokens":100}`, "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := &recordingSink{}
+	svc := Service{
+		Sessions:     sess,
+		Events:       sink,
+		CompactLLM:   func(context.Context) llm.LLM { return checkpointTestLLM{summary: "handoff state"} },
+		PrimaryModel: func(context.Context) (string, string) { return "test-provider", "test-model" },
+	}
+	should, decisionUsage, err := svc.ShouldAutoCompactSession(ctx, sid, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !should {
+		t.Fatal("expected the native usage to schedule a compaction")
+	}
+
+	res, did, err := svc.AutoCompactSession(ctx, sid, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !did {
+		t.Fatal("expected an automatic compaction")
+	}
+	if res.TokensBefore != decisionUsage {
+		t.Fatalf("result TokensBefore=%d want the decision usage %d", res.TokensBefore, decisionUsage)
+	}
+
+	var started event.ContextCompactingPayload
+	var done event.ContextCompactedPayload
+	sawStarted, sawDone := false, false
+	for _, evt := range sink.all() {
+		switch evt.Type {
+		case event.RunEventContextCompacting:
+			sawStarted = json.Unmarshal(evt.Payload, &started) == nil
+		case event.RunEventContextCompacted:
+			sawDone = json.Unmarshal(evt.Payload, &done) == nil
+		}
+	}
+	if !sawStarted || !sawDone {
+		t.Fatal("compaction lifecycle events missing")
+	}
+	if started.TokensBefore != decisionUsage || done.TokensBefore != decisionUsage {
+		t.Fatalf("card numbers: started=%d done=%d want %d", started.TokensBefore, done.TokensBefore, decisionUsage)
 	}
 }
 

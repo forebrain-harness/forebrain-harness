@@ -214,20 +214,19 @@ func TestSessionIDsListsEverySessionKeyedMap(t *testing.T) {
 	setContextShotForTest(st, "s-shot")
 	st.RecordToolResultSpill(ToolResultSpill{SessionID: "s-spill", RunID: "r-2", Path: "/tmp/x"})
 	setNetworkDecisionForTest(st, "s-net")
-	st.UpsertWorkingSetPins("s-pin", []string{"/a"}, nil)
 	setRuntimeModeForTest(st, "s-mode")
 
 	got := map[string]bool{}
 	for _, sid := range st.SessionIDs() {
 		got[sid] = true
 	}
-	for _, want := range []string{"s-shot", "s-spill", "s-net", "s-pin", "s-mode"} {
+	for _, want := range []string{"s-shot", "s-spill", "s-net", "s-mode"} {
 		if !got[want] {
 			t.Fatalf("SessionIDs = %v, missing %s", got, want)
 		}
 	}
-	if len(got) != 5 {
-		t.Fatalf("SessionIDs = %v, want exactly the five sessions", got)
+	if len(got) != 4 {
+		t.Fatalf("SessionIDs = %v, want exactly the four sessions", got)
 	}
 }
 
@@ -237,7 +236,6 @@ func TestDropSessionsForgetsEverythingTheSessionLeft(t *testing.T) {
 	st.RecordToolResultSpill(ToolResultSpill{SessionID: "gone", RunID: "r-gone", Path: "/tmp/g"})
 	st.RecordToolResultSpill(ToolResultSpill{SessionID: "kept", RunID: "r-kept", Path: "/tmp/k"})
 	setNetworkDecisionForTest(st, "gone")
-	st.UpsertWorkingSetPins("gone", []string{"/p"}, nil)
 	setRuntimeModeForTest(st, "gone")
 
 	if dropped := st.DropSessions([]string{"gone"}); dropped != 1 {

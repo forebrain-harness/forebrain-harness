@@ -86,7 +86,7 @@ type streamOverflowLLM struct {
 
 func (m *streamOverflowLLM) Execute(_ context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	m.calls++
-	size := llm.EstimateMessages(messages) + estimateToolsTokens(tools)
+	size := llm.EstimateMessages(messages) + estimateToolsTokens(llm.DefaultEstimator(), tools)
 	if size > m.limit {
 		return nil, fmt.Errorf(
 			`received error while streaming: {"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again.","param":"input"}`,
@@ -275,10 +275,10 @@ func TestToolSchemasCountTowardOccupancy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := estimateToolsTokens([]*llm.Tool{tool}); got < 300 {
+	if got := estimateToolsTokens(llm.DefaultEstimator(), []*llm.Tool{tool}); got < 300 {
 		t.Fatalf("tool schema tokens=%d; schemas must count toward occupancy", got)
 	}
-	schemaTokens := estimateToolsTokens([]*llm.Tool{tool})
+	schemaTokens := estimateToolsTokens(llm.DefaultEstimator(), []*llm.Tool{tool})
 	// modelLimit is chosen so the schema alone exceeds 90% of the window,
 	// but the tiny message alone does not.
 	modelLimit := int(float64(schemaTokens) * 1.05)
@@ -2080,8 +2080,10 @@ func TestConcurrentLoadAndPermissionEvaluationDoNotRace(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	if cat, err := llm.Parse(llm.EmbeddedModelsJSON()); err == nil {
-		llm.SetGlobalCatalogForTest(cat)
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if cat, err := llm.Parse(data); err == nil {
+			llm.SetGlobalCatalogForTest(cat)
+		}
 	}
 	os.Exit(m.Run())
 }
@@ -4654,6 +4656,221 @@ func TestDeliveredReviewDenialCarriesTheHandoffLine(t *testing.T) {
 	}
 	if body := denial.ToolDisplay.Body; strings.Contains(body, "(no output)") || strings.Contains(body, "The plan review you asked for has returned") {
 		t.Fatalf("the display half must not show the empty-refusal or model-facing text: %q", body)
+	}
+}
+
+// A refused call announces its own settled step where the runtime injects
+// the denial result — exactly once, carrying the user's feedback — and the
+// denial result's persisted display is derived from that same step, so a
+// live surface and every replay of the row draw one card.
+func TestDeniedToolCallAnnouncesItsSettledStep(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "exit_plan_mode", Destructive: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+	var mu sync.Mutex
+	var steps []toolpkg.StepEvent
+	st.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		mu.Lock()
+		steps = append(steps, evt)
+		mu.Unlock()
+	})
+
+	gated, err := llm.NewTool("exit_plan_mode", "gated tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "" {
+			return "", &toolpkg.RequiresActionError{
+				ActionID:   "act-1",
+				ActionKind: "exit_plan_mode",
+				ToolName:   "exit_plan_mode",
+				ToolInput:  map[string]any{},
+			}
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+
+	inner := &exitPlanCallLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+
+	_, err = wrapped.Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("hi"))},
+		[]*llm.Tool{gated},
+	)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("expected RequiresActionError, got %T %v", err, err)
+	}
+
+	composed := turn.ComposeDenyFeedback(nil, "改成先写测试")
+	ctx := toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+		Session:      rae.SessionSnapshot,
+		Denied:       true,
+		DenyReason:   composed,
+		DenyFeedback: "改成先写测试",
+	})
+	if _, rerr := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, []*llm.Tool{gated}); rerr != nil {
+		t.Fatalf("resume Execute err=%v", rerr)
+	}
+
+	mu.Lock()
+	var deniedSteps []toolpkg.StepEvent
+	for _, evt := range steps {
+		if evt.Denied {
+			deniedSteps = append(deniedSteps, evt)
+		}
+	}
+	mu.Unlock()
+	if len(deniedSteps) != 1 {
+		t.Fatalf("expected exactly 1 denied step, got %d: %#v", len(deniedSteps), deniedSteps)
+	}
+	deniedStep := deniedSteps[0]
+	if deniedStep.StepID != "call-1" {
+		t.Fatalf("denied step StepID = %q, want %q", deniedStep.StepID, "call-1")
+	}
+	if deniedStep.ToolName != "exit_plan_mode" {
+		t.Fatalf("denied step ToolName = %q, want %q", deniedStep.ToolName, "exit_plan_mode")
+	}
+	if deniedStep.Kind != toolpkg.StepKindToolCompleted {
+		t.Fatalf("denied step Kind = %q, want %q", deniedStep.Kind, toolpkg.StepKindToolCompleted)
+	}
+	if deniedStep.DenyFeedback != "改成先写测试" {
+		t.Fatalf("denied step DenyFeedback = %q, want %q", deniedStep.DenyFeedback, "改成先写测试")
+	}
+
+	var denial *llm.Message
+	for i := range inner.sessions[1] {
+		msg := inner.sessions[1][i]
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+				denial = &msg
+			}
+		}
+	}
+	if denial == nil {
+		t.Fatal("the denial tool result is missing from the resumed session")
+	}
+	if denial.ToolDisplay == nil {
+		t.Fatal("the denial tool result must carry the display derived from the denied step")
+	}
+	wantDisplay := toolDisplayState(deniedStep)
+	if denial.ToolDisplay.Body != wantDisplay.Body {
+		t.Fatalf("denial display body = %q, want %q (derived from the denied step)", denial.ToolDisplay.Body, wantDisplay.Body)
+	}
+	if denial.ToolDisplay.Summary != wantDisplay.Summary {
+		t.Fatalf("denial display summary = %q, want %q (derived from the denied step)", denial.ToolDisplay.Summary, wantDisplay.Summary)
+	}
+	if denial.ToolDisplay.ToolMetaJSON != wantDisplay.ToolMetaJSON {
+		t.Fatalf("denial display meta = %q, want %q (derived from the denied step)", denial.ToolDisplay.ToolMetaJSON, wantDisplay.ToolMetaJSON)
+	}
+	if got := denial.ToolDisplay.Body; got != toolpkg.DeniedToolDisplayBody("exit_plan_mode", "改成先写测试") {
+		t.Fatalf("denial display body = %q, want the sentence the live card shows", got)
+	}
+}
+
+// A delivered review closes the gate without the user ever being asked, so
+// no step announces it: the card nothing draws needs no event, and the
+// denial result's persisted display stays the delivery drop key.
+func TestDeliveredReviewDenialAnnouncesNoStep(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "exit_plan_mode", Destructive: true})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+	var mu sync.Mutex
+	var steps []toolpkg.StepEvent
+	st.SetStepHook(func(_ context.Context, evt toolpkg.StepEvent) {
+		mu.Lock()
+		steps = append(steps, evt)
+		mu.Unlock()
+	})
+
+	gated, err := llm.NewTool("exit_plan_mode", "gated tool", func(ctx context.Context, _ *struct{}) (string, error) {
+		if toolpkg.ApprovedActionIDFromContext(ctx) == "" {
+			return "", &toolpkg.RequiresActionError{
+				ActionID:   "act-1",
+				ActionKind: "exit_plan_mode",
+				ToolName:   "exit_plan_mode",
+				ToolInput:  map[string]any{},
+			}
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("tool: %v", err)
+	}
+
+	inner := &exitPlanCallLLM{}
+	wrapped := wrapToolOrchestrationLLM(inner, st)
+
+	_, err = wrapped.Execute(
+		context.Background(),
+		[]llm.Message{llm.UserMessage(llm.Text("hi"))},
+		[]*llm.Tool{gated},
+	)
+	var rae *toolpkg.RequiresActionError
+	if !errors.As(err, &rae) || rae == nil {
+		t.Fatalf("expected RequiresActionError, got %T %v", err, err)
+	}
+
+	ctx := toolpkg.WithToolApprovalResume(context.Background(), &toolpkg.ToolApprovalResumeState{
+		Session:         rae.SessionSnapshot,
+		Denied:          true,
+		DenyReason:      turn.ComposeReviewDeliveryGuidance(nil),
+		DeliveredReview: true,
+	})
+	if _, rerr := wrapped.Execute(ctx, []llm.Message{llm.UserMessage(llm.Text("ignored"))}, []*llm.Tool{gated}); rerr != nil {
+		t.Fatalf("resume Execute err=%v", rerr)
+	}
+
+	mu.Lock()
+	var deniedSteps []toolpkg.StepEvent
+	for _, evt := range steps {
+		if evt.Denied {
+			deniedSteps = append(deniedSteps, evt)
+		}
+	}
+	mu.Unlock()
+	if len(deniedSteps) != 0 {
+		t.Fatalf("expected 0 denied steps for a delivered review, got %d: %#v", len(deniedSteps), deniedSteps)
+	}
+
+	var denial *llm.Message
+	for i := range inner.sessions[1] {
+		msg := inner.sessions[1][i]
+		if msg.Role != llm.RoleTool {
+			continue
+		}
+		for _, part := range msg.Parts {
+			if part.Type == llm.ContentTypeText && strings.Contains(part.Text, "denied by user") {
+				denial = &msg
+			}
+		}
+	}
+	if denial == nil {
+		t.Fatal("the denial tool result is missing from the resumed session")
+	}
+	if denial.ToolDisplay == nil {
+		t.Fatal("the denial tool result must carry the display the replay draws from")
+	}
+	if got := denial.ToolDisplay.Body; got != toolpkg.PlanReviewDeliveredDisplayKey {
+		t.Fatalf("denial display body = %q, want the delivery drop key", got)
+	}
+	if denial.ToolDisplay.Summary != "" {
+		t.Fatalf("denial display summary = %q, want empty", denial.ToolDisplay.Summary)
+	}
+	var meta map[string]string
+	if err := json.Unmarshal([]byte(denial.ToolDisplay.ToolMetaJSON), &meta); err != nil {
+		t.Fatalf("denial display meta = %q: %v", denial.ToolDisplay.ToolMetaJSON, err)
+	}
+	if len(meta) != 2 || meta["tool_name"] != "exit_plan_mode" || meta["status"] != "denied" {
+		t.Fatalf("denial display meta = %#v, want exactly tool_name and status", meta)
 	}
 }
 
@@ -8626,5 +8843,242 @@ func TestSkillToolLoadIsAnUnpromptedSkillStepEndToEnd(t *testing.T) {
 	}
 	if strings.TrimSpace(steps[1].Error) != "" {
 		t.Fatalf("load failed: %s", steps[1].Error)
+	}
+}
+
+// progressTurnLLM emits one probe tool call, then a plain answer: the shape of a
+// turn that ends a text block by turning to a tool and then ends on its answer.
+type progressTurnLLM struct {
+	calls int
+}
+
+func (m *progressTurnLLM) Execute(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("let me look")},
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "probe_transcript", Arguments: `{}`}},
+		)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 3, OutputTokens: 2}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("all done")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 4, OutputTokens: 1}}, nil
+}
+
+// reasoningBlocksLLM streams one reasoning block per response (through the
+// context's sink, exactly as a provider does) and then answers, keeping the
+// turn alive across two responses with a probe call.
+type reasoningBlocksLLM struct {
+	calls int
+}
+
+func (m *reasoningBlocksLLM) Execute(ctx context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	n := fmt.Sprintf("%d", m.calls)
+	if sink := llm.StreamSinkFrom(ctx); sink != nil {
+		if sink.OnReasoningDelta != nil {
+			sink.OnReasoningDelta("thinking ")
+			sink.OnReasoningDelta("block " + n)
+		}
+		if sink.OnReasoningDone != nil {
+			sink.OnReasoningDone()
+		}
+	}
+	if m.calls == 1 {
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("preamble " + n)},
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "probe_transcript", Arguments: `{}`}},
+		)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 3, OutputTokens: 2}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("answer " + n)})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 4, OutputTokens: 1}}, nil
+}
+
+func newProgressStore(t *testing.T, sid string) (*state.SessionStore, string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	if err := store.Ensure(ctx, sid, sid); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	// A transcript row that names a run must have that run to point at.
+	run, err := (&state.RunStore{DB: db}).CreateRun(ctx, sid, "input")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	return store, run.ID
+}
+
+func transcriptRowCount(t *testing.T, store *state.SessionStore, sid string) int {
+	t.Helper()
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	return len(rows)
+}
+
+func transcriptRoles(t *testing.T, store *state.SessionStore, sid string) []string {
+	t.Helper()
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Role)
+	}
+	return out
+}
+
+func reasoningRowParts(t *testing.T, store *state.SessionStore, sid string) []string {
+	t.Helper()
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	var out []string
+	for _, row := range rows {
+		if row.Role == "reasoning" {
+			out = append(out, row.PartsJSON)
+		}
+	}
+	return out
+}
+
+// TestTranscriptIsWrittenAsEachBlockEnds is plan 016's core: a turn's blocks
+// reach the transcript as each block ends, not only when the turn does, and the
+// surface's own write at the turn's end is idempotent with them.
+func TestTranscriptIsWrittenAsEachBlockEnds(t *testing.T) {
+	ctx := context.Background()
+	const sid = "progress-idempotent"
+	store, runID := newProgressStore(t, sid)
+	if _, err := store.Append(ctx, sid, "user", "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_transcript"})
+	var midTurn []llm.Message
+	var midTurnErr error
+	probe, err := llm.NewTool("probe_transcript", "reads this run's transcript", func(hctx context.Context, _ *struct{}) (string, error) {
+		msgs, err := store.ListTranscriptMessages(hctx, llm.AgentSessionIDFromContext(hctx), 0)
+		if err != nil {
+			midTurnErr = err
+			return "", err
+		}
+		midTurn = msgs
+		return "probe ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe tool: %v", err)
+	}
+
+	w := wrapToolOrchestrationLLMWithProgress(&progressTurnLLM{}, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("do the thing"))}, []*llm.Tool{probe})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if midTurnErr != nil {
+		t.Fatalf("mid-turn transcript read: %v", midTurnErr)
+	}
+
+	// Mount point A wrote the assistant row that issued the call before the tool
+	// ran, so the words the block said are on disk mid-turn.
+	sawAssistant := false
+	for _, m := range midTurn {
+		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
+			sawAssistant = true
+		}
+	}
+	if !sawAssistant {
+		t.Fatalf("the turn's assistant row was not in the transcript while its tool ran: %+v", midTurn)
+	}
+
+	before := transcriptRowCount(t, store, sid)
+	if before < 4 {
+		t.Fatalf("transcript rows after the turn = %d, want the whole exchange (user, call, result, answer)", before)
+	}
+
+	// The surface's own write at the turn's end reconciles against what the
+	// block-end writes already stored: the same block written twice adds a row
+	// only if the write point is wrong.
+	turn.PersistAssistantTurn(ctx, store, turn.AssistantTurn{
+		SessionID: sid,
+		RunID:     runID,
+		Result:    &agent.Result{Session: res.Session, LastResponseUsage: res.Usage},
+		Model:     "gpt-main",
+	})
+	if after := transcriptRowCount(t, store, sid); after != before {
+		t.Fatalf("re-persisting the turn changed the row count from %d to %d: the block-end writes are not idempotent", before, after)
+	}
+}
+
+// TestEachReasoningBlockIsItsOwnRow is plan 016's other half: every thinking
+// block becomes its own row, in order, before the answer it preceded, carrying
+// its own duration — and the turn's end does not add a duplicate of the last
+// block.
+func TestEachReasoningBlockIsItsOwnRow(t *testing.T) {
+	ctx := context.Background()
+	const sid = "reasoning-rows"
+	store, runID := newProgressStore(t, sid)
+	if _, err := store.Append(ctx, sid, "user", "think then answer"); err != nil {
+		t.Fatal(err)
+	}
+
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "probe_transcript"})
+	probe, err := llm.NewTool("probe_transcript", "no-op probe", func(_ context.Context, _ *struct{}) (string, error) {
+		return "probe ok", nil
+	})
+	if err != nil {
+		t.Fatalf("probe tool: %v", err)
+	}
+
+	w := wrapToolOrchestrationLLMWithProgress(&reasoningBlocksLLM{}, st, "", store, func(context.Context) string { return "gpt-main" })
+	execCtx := llm.WithStreamSink(
+		llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+		&llm.StreamSink{OnReasoningDelta: func(string) {}, OnReasoningDone: func() {}, OnDelta: func(string) {}},
+	)
+	res, err := w.Execute(execCtx, []llm.Message{llm.UserMessage(llm.Text("think then answer"))}, []*llm.Tool{probe})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	roles := transcriptRoles(t, store, sid)
+	want := []string{"user", "reasoning", "assistant", "tool", "reasoning", "assistant"}
+	if len(roles) != len(want) {
+		t.Fatalf("transcript roles = %v, want %v", roles, want)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("transcript roles = %v, want %v", roles, want)
+		}
+	}
+
+	parts := reasoningRowParts(t, store, sid)
+	if len(parts) != 2 {
+		t.Fatalf("reasoning rows = %d, want one per thinking block (2)", len(parts))
+	}
+	for i, p := range parts {
+		if _, ok := state.ParseReasoningTiming(p); !ok {
+			t.Fatalf("reasoning row %d has no timing part: %q", i, p)
+		}
+	}
+
+	// The turn's end must not write a third reasoning row for the last block.
+	turn.PersistAssistantTurn(ctx, store, turn.AssistantTurn{
+		SessionID: sid,
+		RunID:     runID,
+		Result:    &agent.Result{Session: res.Session, LastResponseUsage: res.Usage},
+		Model:     "gpt-main",
+	})
+	if got := len(reasoningRowParts(t, store, sid)); got != 2 {
+		t.Fatalf("reasoning rows after the turn's own persist = %d, want still 2", got)
 	}
 }

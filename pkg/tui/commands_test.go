@@ -98,6 +98,24 @@ type scriptedSelector struct {
 	multiOptions []string
 	richLabels   []string
 	richItems    [][]SelectItem
+	// reviewSteps scripts Review, one per call; the recordings let a test see
+	// the facts, actions and default the panel showed.
+	reviewSteps    []richStep
+	reviewIdx      int
+	reviewLabels   []string
+	reviewFacts    [][]turn.StatusFact
+	reviewActions  [][]string
+	reviewDefaults []int
+	// SelectRichPaged recordings: the initial page, what each fetchMore
+	// returned as the test drains the list, and how many rows it saw.
+	pagedSteps   []richStep
+	pagedIdx     int
+	pagedLabels  []string
+	pagedItems   [][]SelectItem
+	pagedMore    [][]SelectItem
+	pagedFetches int
+	pagedTotal   int
+	pagedDrain   bool
 }
 
 // A step answers by label when set — the row a user meant, wherever the menu
@@ -152,8 +170,58 @@ func (s *scriptedSelector) Secret(label string, defaultValue string) (string, bo
 	return s.Input(label, defaultValue)
 }
 
-func (s *scriptedSelector) Review(string, []turn.StatusFact, []string, int) (int, bool, error) {
-	return -1, false, nil
+func (s *scriptedSelector) Review(label string, facts []turn.StatusFact, actions []string, defaultIdx int) (int, bool, error) {
+	s.reviewLabels = append(s.reviewLabels, label)
+	s.reviewFacts = append(s.reviewFacts, append([]turn.StatusFact(nil), facts...))
+	s.reviewActions = append(s.reviewActions, append([]string(nil), actions...))
+	s.reviewDefaults = append(s.reviewDefaults, defaultIdx)
+	if s.reviewIdx >= len(s.reviewSteps) {
+		return -1, false, nil
+	}
+	step := s.reviewSteps[s.reviewIdx]
+	s.reviewIdx++
+	if step.label != "" {
+		for i, action := range actions {
+			if action == step.label {
+				return i, step.ok, step.err
+			}
+		}
+		return -1, false, nil
+	}
+	return step.idx, step.ok, step.err
+}
+
+// SelectRichPaged records the initial page and, when pagedDrain is set, pulls
+// every remaining page through fetchMore exactly as the picker's ↓ does.
+func (s *scriptedSelector) SelectRichPaged(label string, items []SelectItem, defaultIdx int, fetchMore func() []SelectItem) (int, bool, error) {
+	s.pagedLabels = append(s.pagedLabels, label)
+	s.pagedItems = append(s.pagedItems, append([]SelectItem(nil), items...))
+	if s.pagedDrain {
+		s.pagedTotal = len(items)
+		for {
+			next := fetchMore()
+			if len(next) == 0 {
+				break
+			}
+			s.pagedMore = append(s.pagedMore, append([]SelectItem(nil), next...))
+			s.pagedFetches++
+			s.pagedTotal += len(next)
+		}
+	}
+	if s.pagedIdx >= len(s.pagedSteps) {
+		return -1, false, nil
+	}
+	step := s.pagedSteps[s.pagedIdx]
+	s.pagedIdx++
+	if step.label != "" {
+		for i, item := range items {
+			if item.Label == step.label {
+				return i, step.ok, step.err
+			}
+		}
+		return -1, false, nil
+	}
+	return step.idx, step.ok, step.err
 }
 
 func skillsTestSession() *fakeSession {
@@ -904,7 +972,7 @@ func TestPrintSessionResumeContextUsesActiveContextForFooterWhileReplayingFullHi
 		model: "deepseek/deepseek-v4-flash",
 		transcriptTurns: []state.Message{
 			{Role: "user", Content: "old question"},
-			{Role: "assistant", Content: "old answer", UsageJSON: fullUsage},
+			{Role: "assistant", Content: "old answer", RunID: "run-1", UsageJSON: fullUsage},
 		},
 		// Non-nil empty slice means the active model context was cleared even
 		// though the full transcript remains available for visual replay.
@@ -3471,5 +3539,334 @@ func TestReplayedQueryRowSettlesWhenItsEndCameFirst(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "✓ 读 README · 42s") {
 		t.Fatalf("replayed query row did not settle with its execution's end:\n%s", rendered)
+	}
+}
+
+// --- Plan 037: the /skills panel's draft and version surface ---
+
+// versionRecordsFor builds n consecutive published versions for a fixture.
+func versionRecordsFor(n int) []skill.VersionRecord {
+	out := make([]skill.VersionRecord, n)
+	for i := range out {
+		out[i] = skill.VersionRecord{
+			V:    i + 1,
+			Kind: skill.VersionKindPublished,
+			At:   "2026-10-09T18:20:00Z",
+			Stat: skill.VersionStat{Added: 12, Removed: 3},
+		}
+	}
+	return out
+}
+
+func skillMenuLabels(items []skillMenuItem) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = item.label
+	}
+	return out
+}
+
+func newSkillsTestController(session Session, selector Selector) *commandController {
+	var out bytes.Buffer
+	return newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+}
+
+// The sheet's items follow the skill's state, in the order the design fixes.
+func TestSkillEntryMenuPerState(t *testing.T) {
+	session := &fakeSession{skillDiffs: []SkillFileDiff{
+		{Path: "SKILL.md", Added: 6, Removed: 2},
+		{Path: "references/runbook.md", Added: 3},
+	}}
+	ctrl := newSkillsTestController(session, &scriptedSelector{})
+
+	draftEntry := skill.Entry{Name: "gateway-5xx", Origin: skill.OriginAgent, Path: "/agent/skills/gateway-5xx"}
+	require.Equal(t,
+		[]string{"Publish v1", "Show changes", "Continue in workshop", "Discard draft"},
+		skillMenuLabels(ctrl.skillEntryMenu(draftEntry, skillStatus{known: true, label: skill.SkillStateDraft})))
+
+	opsEntry := skill.Entry{Name: "gateway-ops", Origin: skill.OriginAgent, Path: "/agent/skills/gateway-ops", Enabled: true}
+	require.Equal(t,
+		[]string{"Publish v4", "Show changes", "Discard draft", "Run it now", "Improve it", "Version history", "Disable this skill", "Show details"},
+		skillMenuLabels(ctrl.skillEntryMenu(opsEntry, skillStatus{known: true, label: skill.SkillStatePending, version: 3, versions: 3, hasDraft: true})))
+
+	require.Equal(t,
+		[]string{"Run it now", "Improve it", "Version history", "Disable this skill", "Show details"},
+		skillMenuLabels(ctrl.skillEntryMenu(opsEntry, skillStatus{known: true, label: skill.SkillStatePublished, version: 3, versions: 3})))
+
+	builtinEntry := skill.Entry{Name: "skill-workshop", Origin: skill.OriginBuiltin, Path: "/home/skills/.system/skill-workshop", Enabled: true}
+	require.Equal(t,
+		[]string{"Run it now", "Disable this skill", "Show details"},
+		skillMenuLabels(ctrl.skillEntryMenu(builtinEntry, skillStatus{known: true, builtin: true})))
+
+	withUpdate := skillMenuLabels(ctrl.skillEntryMenu(opsEntry, skillStatus{
+		known: true, label: skill.SkillStatePending, version: 3, versions: 3, hasDraft: true,
+		update: &skill.SkillUpdate{Rev: "d41c8e0aaaaaa", Date: "Oct 10", Files: 2},
+	}))
+	require.Equal(t, "Pull the update into a draft", withUpdate[0])
+}
+
+// The publish row counts the files a draft changes, and the history row counts
+// the versions.
+func TestSkillEntryMenuDescriptions(t *testing.T) {
+	session := &fakeSession{skillDiffs: []SkillFileDiff{{Path: "a"}, {Path: "b"}}}
+	ctrl := newSkillsTestController(session, &scriptedSelector{})
+	entry := skill.Entry{Name: "gateway-ops", Origin: skill.OriginAgent, Path: "/agent/skills/gateway-ops", Enabled: true}
+	menu := ctrl.skillEntryMenu(entry, skillStatus{known: true, label: skill.SkillStatePending, version: 3, versions: 3, hasDraft: true})
+	require.Equal(t, "2 files changed since v3", menu[0].desc)
+	require.Equal(t, "Compare the draft with v3", menu[1].desc)
+	require.Equal(t, "Keep v3, drop the unpublished changes", menu[2].desc)
+	require.Equal(t, "3 versions · compare or restore", menu[5].desc)
+}
+
+// The main list carries the status segment before the description, each piece
+// in its own colour role, and the update clause after it.
+func TestSkillsListStatusSegments(t *testing.T) {
+	entries := []skill.Entry{
+		{Name: "gateway-5xx", Description: "Gateway 5xx triage", Origin: skill.OriginAgent, Path: "/a/skills/gateway-5xx"},
+		{Name: "gateway-ops", Description: "Runbook", Origin: skill.OriginAgent, Path: "/a/skills/gateway-ops", Enabled: true},
+		{Name: "incident-review", Description: "Template", Origin: skill.OriginAgent, Path: "/a/skills/incident-review", Enabled: false},
+		{Name: "skill-workshop", Description: "Work on skills", Origin: skill.OriginBuiltin, Path: "/home/skills/.system/skill-workshop", Enabled: true},
+	}
+	statuses := map[string]skillStatus{
+		"/a/skills/gateway-5xx":               {known: true, label: skill.SkillStateDraft},
+		"/a/skills/gateway-ops":               {known: true, label: skill.SkillStatePending, version: 3, hasDraft: true, update: &skill.SkillUpdate{Rev: "d41c8e0"}},
+		"/a/skills/incident-review":           {known: true, label: skill.SkillStatePublished, version: 1},
+		"/home/skills/.system/skill-workshop": {known: true, builtin: true},
+	}
+	items, _ := buildSkillsMenu(entries, skillOriginsByPath(entries), statuses, false)
+	got := map[string]string{}
+	for _, item := range items {
+		if item.Category == skillsManageTab {
+			continue
+		}
+		got[item.Label] = stripANSI(item.Description)
+	}
+	require.Equal(t, "Draft · Gateway 5xx triage", got["gateway-5xx"])
+	require.Equal(t, "v3 · unpublished changes · Runbook · update available", got["gateway-ops"])
+	require.Equal(t, "v1 · (off) Template", got["incident-review"])
+	require.Equal(t, "Built-in · Work on skills", got["skill-workshop"])
+}
+
+// A pending skill publishes through the confirm page and its release note, and
+// the list returns with the success line.
+func TestSkillsPublishFlow(t *testing.T) {
+	session := &fakeSession{
+		skillToggleOpts: []skill.Entry{{Name: "repo", Description: "inspect repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true}},
+		skillVersionStates: map[string]skill.SkillVersionState{
+			"/skills/repo": {Name: "repo", Current: 3, Versions: versionRecordsFor(3), HasDraft: true, DraftBase: 3},
+		},
+		skillDiffs:     []SkillFileDiff{{Path: "SKILL.md", Added: 6, Removed: 2}},
+		publishVersion: 4,
+	}
+	selector := &scriptedSelector{
+		richSteps:   []richStep{{label: "repo", ok: true}, {label: "Publish v4", ok: true}},
+		inputs:      []selectorInput{{value: "Tighten the trigger", ok: true}},
+		reviewSteps: []richStep{{label: "Publish v4", ok: true}},
+	}
+	ctrl := newSkillsTestController(session, selector)
+	ctrl.handleSkills(context.Background())
+
+	require.Equal(t, "repo", session.publishedSkill)
+	require.Equal(t, "Tighten the trigger", session.publishNote)
+	// The confirm page opened on Publish and listed the change.
+	require.Equal(t, "Publish v4", selector.reviewActions[0][0])
+	require.Equal(t, "Publish repo v4?\nNew sessions use v4; sessions already running keep v3.", selector.reviewLabels[0])
+	// The list came back with the success line.
+	if len(selector.richLabels) < 3 || !strings.Contains(stripANSI(selector.richLabels[2]), "Published repo v4 · new sessions use it") {
+		t.Fatalf("list notice missing: %#v", selector.richLabels)
+	}
+}
+
+// Discarding opens on Cancel, so a stray Enter never drops a draft.
+func TestSkillsDiscardDefaultsToCancel(t *testing.T) {
+	session := &fakeSession{
+		skillToggleOpts: []skill.Entry{{Name: "repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true}},
+		skillVersionStates: map[string]skill.SkillVersionState{
+			"/skills/repo": {Name: "repo", Current: 3, Versions: versionRecordsFor(3), HasDraft: true, DraftBase: 3},
+		},
+	}
+	selector := &scriptedSelector{
+		richSteps:   []richStep{{label: "repo", ok: true}, {label: "Discard draft", ok: true}},
+		reviewSteps: []richStep{{label: "Cancel", ok: true}},
+	}
+	ctrl := newSkillsTestController(session, selector)
+	ctrl.handleSkills(context.Background())
+
+	require.Equal(t, 1, selector.reviewDefaults[0], "the discard confirm must open on Cancel")
+	require.Equal(t, "Keep v3, drop the unpublished changes?", selector.reviewLabels[0])
+	require.Equal(t, "", session.discardedSkill)
+}
+
+// A confirmed discard drops the draft.
+func TestSkillsDiscardConfirmed(t *testing.T) {
+	session := &fakeSession{
+		skillToggleOpts: []skill.Entry{{Name: "repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true}},
+		skillVersionStates: map[string]skill.SkillVersionState{
+			"/skills/repo": {Name: "repo", Current: 3, Versions: versionRecordsFor(3), HasDraft: true, DraftBase: 3},
+		},
+	}
+	selector := &scriptedSelector{
+		richSteps:   []richStep{{label: "repo", ok: true}, {label: "Discard draft", ok: true}},
+		reviewSteps: []richStep{{label: "Discard draft", ok: true}},
+	}
+	ctrl := newSkillsTestController(session, selector)
+	ctrl.handleSkills(context.Background())
+	require.Equal(t, "repo", session.discardedSkill)
+}
+
+// The version history loads twenty rows and pulls the rest as the list is
+// scrolled.
+func TestSkillsVersionHistoryPages(t *testing.T) {
+	session := &fakeSession{
+		skillToggleOpts: []skill.Entry{{Name: "repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true}},
+		skillVersionStates: map[string]skill.SkillVersionState{
+			"/skills/repo": {Name: "repo", Current: 25, Versions: versionRecordsFor(25)},
+		},
+	}
+	selector := &scriptedSelector{
+		richSteps:  []richStep{{label: "repo", ok: true}, {label: "Version history", ok: true}},
+		pagedSteps: []richStep{{idx: -1}},
+		pagedDrain: true,
+	}
+	ctrl := newSkillsTestController(session, selector)
+	ctrl.handleSkills(context.Background())
+
+	require.Len(t, selector.pagedItems, 1)
+	require.Len(t, selector.pagedItems[0], 20, "the first page holds twenty versions")
+	require.Equal(t, 25, selector.pagedTotal, "draining loaded every version")
+	require.Equal(t, 1, selector.pagedFetches, "the remaining five arrived in one more page")
+}
+
+// The restore confirm page warns about replacing the current draft only when
+// one exists.
+func TestSkillRestoreConfirmReplacementLine(t *testing.T) {
+	session := &fakeSession{}
+	entry := skill.Entry{Name: "gateway-ops", Origin: skill.OriginAgent, Path: "/agent/skills/gateway-ops"}
+
+	withDraft := &scriptedSelector{reviewSteps: []richStep{{label: "Cancel", ok: true}}}
+	ctrl := newSkillsTestController(session, withDraft)
+	ctrl.restoreVersionFlow(entry, skill.SkillVersionState{Name: "gateway-ops", Current: 3, Versions: versionRecordsFor(3), HasDraft: true, DraftBase: 3}, 2)
+	require.Contains(t, withDraft.reviewLabels[0], "The current draft will be replaced.")
+
+	withoutDraft := &scriptedSelector{reviewSteps: []richStep{{label: "Cancel", ok: true}}}
+	ctrl2 := newSkillsTestController(session, withoutDraft)
+	ctrl2.restoreVersionFlow(entry, skill.SkillVersionState{Name: "gateway-ops", Current: 3, Versions: versionRecordsFor(3)}, 2)
+	require.NotContains(t, withoutDraft.reviewLabels[0], "The current draft will be replaced.")
+	require.Contains(t, withoutDraft.reviewLabels[0], "Restore v2 as a draft?")
+}
+
+// Toggling a skill from its sheet stays on the sheet and shows what the toggle
+// did.
+func TestSkillsToggleStaysInSheet(t *testing.T) {
+	session := &fakeSession{
+		skillToggleOpts: []skill.Entry{
+			{Name: "repo", Origin: skill.OriginProject, Path: "/skills/repo", Enabled: true},
+			{Name: "skill-workshop", Origin: skill.OriginBuiltin, Path: "/skills/.system/skill-workshop", Enabled: true},
+		},
+		skillVersionStates: map[string]skill.SkillVersionState{
+			"/skills/repo": {Name: "repo", Current: 3, Versions: versionRecordsFor(3)},
+		},
+	}
+	selector := &scriptedSelector{
+		richSteps: []richStep{{label: "repo", ok: true}, {label: "Disable this skill", ok: true}},
+	}
+	ctrl := newSkillsTestController(session, selector)
+	ctrl.handleSkills(context.Background())
+
+	require.Equal(t, []string{"/skills/.system/skill-workshop"}, session.appliedEnabledPaths)
+	require.GreaterOrEqual(t, len(selector.richLabels), 3)
+	if !strings.Contains(stripANSI(selector.richLabels[2]), "Disabled repo · new sessions skip it") {
+		t.Fatalf("sheet did not show the toggle status: %#v", selector.richLabels)
+	}
+}
+
+// A restored version becomes the draft through the confirm page.
+func TestSkillRestoreConfirmed(t *testing.T) {
+	session := &fakeSession{}
+	entry := skill.Entry{Name: "gateway-ops", Origin: skill.OriginAgent, Path: "/agent/skills/gateway-ops"}
+	selector := &scriptedSelector{reviewSteps: []richStep{{label: "Restore as a draft", ok: true}}}
+	ctrl := newSkillsTestController(session, selector)
+	_, _ = ctrl.restoreVersionFlow(entry, skill.SkillVersionState{Name: "gateway-ops", Current: 3, Versions: versionRecordsFor(3)}, 2)
+	require.Equal(t, "gateway-ops", session.restoredSkill)
+	require.Equal(t, 2, session.restoredVersion)
+	require.True(t, session.restoredReplace)
+}
+
+// A draft-only skill is listed beside the published ones and its sheet offers
+// publish, changes, workshop and discard.
+func TestSkillsDraftOnlyListed(t *testing.T) {
+	session := &fakeSession{
+		draftOnlySkills: []skill.Entry{{Name: "gateway-5xx", Description: "Gateway 5xx triage", Origin: skill.OriginAgent, Path: "/a/skills/.drafts/gateway-5xx"}},
+		skillVersionStates: map[string]skill.SkillVersionState{
+			"/a/skills/.drafts/gateway-5xx": {Name: "gateway-5xx", HasDraft: true, DraftDir: "/a/skills/.drafts/gateway-5xx"},
+		},
+		skillDiffs: []SkillFileDiff{{Path: "SKILL.md"}, {Path: "a.md"}, {Path: "b.md"}},
+	}
+	selector := &scriptedSelector{richSteps: []richStep{{label: "gateway-5xx", ok: true}}}
+	ctrl := newSkillsTestController(session, selector)
+	ctrl.handleSkills(context.Background())
+
+	require.GreaterOrEqual(t, len(selector.richItems), 2)
+	listed := map[string]string{}
+	for _, item := range selector.richItems[0] {
+		if item.Category == skillsManageTab {
+			continue
+		}
+		listed[item.Label] = stripANSI(item.Description)
+	}
+	require.Equal(t, "Draft · Gateway 5xx triage", listed["gateway-5xx"])
+	// Opening the draft-only skill offers publish, changes, workshop, discard.
+	require.Equal(t,
+		[]string{"Publish v1", "Show changes", "Continue in workshop", "Discard draft"},
+		[]string{selector.richItems[1][0].Label, selector.richItems[1][1].Label, selector.richItems[1][2].Label, selector.richItems[1][3].Label})
+}
+
+// Pulling an upstream update confirms, then hands the pull to the session and
+// stays on the sheet, which redraws as "unpublished changes".
+func TestSkillPullUpdateFlow(t *testing.T) {
+	session := &fakeSession{}
+	entry := skill.Entry{Name: "gateway-ops", Origin: skill.OriginAgent, Path: "/agent/skills/gateway-ops", Enabled: true}
+	selector := &scriptedSelector{reviewSteps: []richStep{{label: "Pull the update", ok: true}}}
+	ctrl := newSkillsTestController(session, selector)
+
+	st := skillStatus{known: true, label: skill.SkillStatePublished, version: 3, versions: 3, hasDraft: true, update: &skill.SkillUpdate{Rev: "d41c8e0aaaaaa"}}
+	// The update row is offered first, with the revision in its description.
+	menu := ctrl.skillEntryMenu(entry, st)
+	require.Equal(t, "Pull the update into a draft", menu[0].label)
+	require.Equal(t, "d41c8e0", menu[0].desc)
+
+	out, leave := ctrl.pullUpdateFlow(entry, st)
+	require.False(t, leave, "a successful pull stays on the sheet")
+	require.Equal(t, "", out.notice)
+	require.Equal(t, "gateway-ops", session.pulledSkill)
+	require.True(t, session.pulledReplace)
+	require.Contains(t, selector.reviewLabels[0], "Pull the update into a draft?")
+	// The upstream revision and the about-to-be-replaced draft are both shown.
+	labels := map[string]string{}
+	for _, fact := range selector.reviewFacts[0] {
+		labels[fact.Label] = fact.Value
+	}
+	require.Contains(t, labels["Upstream"], "d41c8e0")
+	require.Equal(t, "The current draft will be replaced.", labels["Draft"])
+}
+
+// TestReplayReasoningRowShowsItsStoredDuration pins plan 016's replay half: a
+// reasoning row carries the block's own thinking duration, so a replay draws
+// "Thought for Ns" — instead of deriving a zero from the row's second-precision
+// created_at, which every row of a turn shares.
+func TestReplayReasoningRowShowsItsStoredDuration(t *testing.T) {
+	parts := state.ReasoningPartsJSON("weighing it up", 12*time.Second)
+	renderer := NewRenderer(nil, nil)
+	renderer.EnableViewportMode()
+	t.Cleanup(renderer.DisableViewportMode)
+
+	replayTurnsToRenderer(renderer, []state.Message{
+		{Role: "reasoning", Content: "weighing it up", PartsJSON: parts, CreatedAt: 1780308000},
+		{Role: "assistant", Content: "here is the answer", CreatedAt: 1780308000},
+	})
+
+	painted := stripANSI(strings.Join(renderViewport(&renderer.vm, 120, 24, 0, DiffThemeDark).lines, "\n"))
+	if !strings.Contains(painted, "Thought for 12s") {
+		t.Fatalf("replay did not draw the stored thinking duration:\n%s", painted)
 	}
 }

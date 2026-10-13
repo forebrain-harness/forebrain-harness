@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -63,9 +65,22 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	if err != nil {
 		return err
 	}
+	// The directory the TUI starts in is its project (R2). It is resolved and
+	// validated before anything else — trust, MCP/LSP consent, the session —
+	// so a launch the project model cannot accept stops here, and every
+	// prompt and session that follows speaks about this exact directory
+	// rather than a .git ancestor it would otherwise walk up to.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	launchRoot, err := state.ValidateProjectRoot(root, cwd)
+	if err != nil {
+		return launchDirRefusal(err)
+	}
 	caret := hideLaunchCaret(cmd.OutOrStdout())
 	defer caret.restore()
-	allowed, err := interactiveEnsureWorkspaceTrusted(cmd.InOrStdin(), cmd.OutOrStdout(), root, "")
+	allowed, err := interactiveEnsureWorkspaceTrusted(cmd.InOrStdin(), cmd.OutOrStdout(), root, launchRoot)
 	if err != nil {
 		return err
 	}
@@ -75,13 +90,13 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	// Project-level MCP entries are confirmed right after the trust prompt:
 	// the list is frozen for the session, so startup is the only moment to
 	// ask. Anything left unconfirmed stays out of the session.
-	if err := interactiveEnsureProjectMCPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, ""); err != nil {
+	if err := interactiveEnsureProjectMCPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, launchRoot); err != nil {
 		return err
 	}
 	// The project's language-server entries follow the same rule, asked
 	// right after the MCP ones (spec §5.2): an unconfirmed entry does not
 	// apply, not even as an override of a built-in server.
-	if err := interactiveEnsureProjectLSPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, ""); err != nil {
+	if err := interactiveEnsureProjectLSPConsent(cmd.InOrStdin(), cmd.OutOrStdout(), root, launchRoot); err != nil {
 		return err
 	}
 	restoreLog := tui.RedirectProcessLoggingForTUI(root)
@@ -104,16 +119,25 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 	if err := interactiveStartupConfigError(); err != nil {
 		return err
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		cwd = ""
-	}
 	slog.Info("opening chat session for streaming terminal")
-	sess, err := interactiveOpenChatSession(cmd.Context(), cwd)
+	sess, err := interactiveOpenChatSession(cmd.Context(), launchRoot)
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
+	// A fresh launch registers its directory as a project and files its
+	// conversations under it; a resume instead adopts the resumed
+	// conversation's own project, refusing one that belongs to a different
+	// directory so a conversation never continues as the wrong project.
+	if resumeID := strings.TrimSpace(initialSessionID); resumeID != "" {
+		if err := sess.ResumeOnLaunchProject(cmd.Context(), resumeID); err != nil {
+			return resumeRefusal(err)
+		}
+	} else {
+		if err := sess.AdoptLaunchProject(cmd.Context()); err != nil {
+			return err
+		}
+	}
 	// Typed input is tenant data: it is what the operator said to *this*
 	// primary agent. It hangs off the agent workspace root like the other
 	// per-agent stores, never off the shared home.
@@ -131,10 +155,45 @@ func runStreamingTerminalWithInitialSessionID(cmd *cobra.Command, initialSession
 		Banner:           "Forebrain Harness",
 		Version:          home.Version,
 		InputHistoryPath: filepath.Join(workspaceRoot, "state", "cli-input-history.txt"),
-		WorkingDirectory: cwd,
+		WorkingDirectory: launchRoot,
 		Home:             root,
 		WorkspaceRoot:    workspaceRoot,
 	})
+}
+
+// launchDirRefusal renders a launch whose directory the project model cannot
+// accept. The messages are Chinese because the interactive surface speaks
+// Chinese to its operator; the underlying validation errors stay English, the
+// wording the project API reports. The returned error both prints to stderr
+// and ends the process non-zero through the root command.
+func launchDirRefusal(err error) error {
+	switch {
+	case errors.Is(err, state.ErrProjectRootIsHome), errors.Is(err, state.ErrProjectRootInsideHome):
+		return errors.New("不能在 forebrain 的数据目录里启动，请到项目目录下运行。")
+	case errors.Is(err, state.ErrProjectRootFilesystem):
+		return errors.New("不能在文件系统根目录启动，请到项目目录下运行。")
+	default:
+		return err
+	}
+}
+
+// resumeRefusal renders a resume the project model refuses. Each refusal names
+// the project and, where it helps, the command that would work.
+func resumeRefusal(err error) error {
+	var foreign tui.ErrResumeForeignProject
+	if errors.As(err, &foreign) {
+		return fmt.Errorf("这个对话属于项目 %s（%s），请在该目录运行：forebrain resume <id>。",
+			strings.TrimSpace(foreign.Name), strings.TrimSpace(foreign.Root))
+	}
+	var missing tui.ErrResumeProjectMissing
+	if errors.As(err, &missing) {
+		return fmt.Errorf("这个对话所在的目录已不存在：%s。无法继续。", strings.TrimSpace(missing.Root))
+	}
+	var none tui.ErrResumeNoProject
+	if errors.As(err, &none) {
+		return errors.New("这个对话属于技能工坊，请在网页端打开。")
+	}
+	return err
 }
 
 // Caret visibility (DECTCEM).

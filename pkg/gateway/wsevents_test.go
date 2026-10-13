@@ -59,6 +59,14 @@ func TestCanonicalRunEventFromWS(t *testing.T) {
 			wantValue: "Awaiting approval",
 		},
 		{
+			name:      "requires action names the gated call",
+			msg:       wsServerMsg{Op: "requires_action", Data: map[string]any{"id": "a1", "kind": "exit_plan_mode", "tool_step_id": "call-7"}},
+			wantType:  event.RunEventApprovalReq,
+			wantOK:    true,
+			needField: "tool_step_id",
+			wantValue: "call-7",
+		},
+		{
 			name: "requires action carries permission suggestion",
 			msg: wsServerMsg{
 				Op: "requires_action",
@@ -304,9 +312,14 @@ func TestTokenBudgetWSMessageFromSessionUsesLastAPIResponseUsage(t *testing.T) {
 	defer db.Close()
 	sess := state.NewSessionStore(db, "main")
 	_, _ = sess.Append(ctx, "session-1", "user", "first")
-	_, _ = sess.AppendStructuredMessage(
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "session-1", "seed")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	_, _ = sess.AppendStructuredMessageForRun(
 		ctx,
 		"session-1",
+		seedRun.ID,
 		"assistant",
 		"answer",
 		"msg-1",
@@ -1566,9 +1579,14 @@ func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
 	defer db.Close()
 	sess := state.NewSessionStore(db, "main")
 	_, _ = sess.Append(ctx, "session-1", "user", "first")
-	_, _ = sess.AppendStructuredMessage(
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "session-1", "seed")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	_, _ = sess.AppendStructuredMessageForRun(
 		ctx,
 		"session-1",
+		seedRun.ID,
 		"assistant",
 		"answer",
 		"msg-1",

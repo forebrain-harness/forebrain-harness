@@ -1,11 +1,13 @@
 // Project storage: the fb_projects table and its read/write surface.
 //
 // A project binds a working directory to the settings that travel with it.
-// The primary agent is the tenant (agent_id), exactly like sessions; the
-// project key is the memory identity of the bound root, so a project's
-// memories and its ProjectKey agree by construction. Archiving is a soft
-// delete — rows stay and lists hide them — and deletion removes the project
-// and unbinds its sessions without touching their transcripts.
+// The primary agent is the tenant (agent_id), exactly like sessions; every
+// ordinary session belongs to a project (the sole exception is a
+// primary-agent-level skill-workshop task). The project key is the memory
+// identity of the bound root — the root itself, never a walk up to a git
+// ancestor — so a project's memories and its ProjectKey agree by
+// construction. Deleting a project deletes its conversations and cron jobs
+// with it; the bound directory's files are not touched.
 package state
 
 import (
@@ -13,8 +15,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // Memory scopes for a project.
@@ -36,14 +42,21 @@ type Project struct {
 	MemoryScope    string
 	ResourceAccess bool
 	Pinned         bool
-	// ArchivedAt is nil while the project is live; archiving is a soft delete.
-	ArchivedAt *int64
-	CreatedAt  int64
-	UpdatedAt  int64
+	CreatedAt      int64
+	UpdatedAt      int64
 }
 
 // ErrProjectNotFound reports a missing or cross-tenant project id.
 var ErrProjectNotFound = errors.New("project not found")
+
+// ErrProjectRootTaken reports that the agent already has a project bound to
+// the requested root: one project per (agent, root). Create returns the
+// existing row alongside it.
+var ErrProjectRootTaken = errors.New("project root already registered")
+
+// ErrProjectBusy reports that a project cannot be deleted while one of its
+// conversations has a run in flight.
+var ErrProjectBusy = errors.New("project has a run in flight")
 
 // NormalizeProjectMemoryScope canonicalizes a stored scope value.
 func NormalizeProjectMemoryScope(scope string) string {
@@ -51,6 +64,152 @@ func NormalizeProjectMemoryScope(scope string) string {
 		return ProjectMemoryProjectOnly
 	}
 	return ProjectMemoryShared
+}
+
+// canonicalStatePath resolves a path to the single spelling the state store
+// stores and compares it by: absolute, cleaned, and with symlinks resolved
+// when the path exists. It mirrors safety.CanonicalPath, which pkg/state
+// cannot call — the architecture layer table forbids a layer-1 package
+// importing a layer-2 one — so the rule is stated here as well.
+func canonicalStatePath(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty project path")
+	}
+	abs, err := filepath.Abs(raw)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil && strings.TrimSpace(resolved) != "" {
+		return filepath.Clean(resolved), nil
+	}
+	return abs, nil
+}
+
+// ProjectKeyForRoot is a project's memory and plan-file identity: the project
+// root itself, canonical, with separators and colons turned into dashes. It
+// never walks up to a git root — a subdirectory is its own project (owner
+// 2026-10-11).
+func ProjectKeyForRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return ""
+	}
+	canonical, err := canonicalStatePath(root)
+	if err != nil {
+		canonical = filepath.Clean(root)
+	}
+	return denseProjectKey(canonical)
+}
+
+// denseProjectKey maps a path onto its dash-encoded key, the same transform
+// memory.ProjectKey applies to a resolved root.
+func denseProjectKey(path string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':':
+			return '-'
+		default:
+			return r
+		}
+	}, filepath.ToSlash(path))
+}
+
+// canonicalProjectRoot resolves a caller's root to the single spelling every
+// other part of the process stores and compares it by.
+func canonicalProjectRoot(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return "", fmt.Errorf("project root is required")
+	}
+	canonical, err := canonicalStatePath(root)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(canonical) == "" {
+		return "", fmt.Errorf("project root is required")
+	}
+	return canonical, nil
+}
+
+// projectNameForRoot derives a project's default name from its root: the last
+// path segment, or the root itself when there is none (the filesystem root).
+func projectNameForRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return ""
+	}
+	base := filepath.Base(root)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return root
+	}
+	return base
+}
+
+// The validation errors a bound root can be refused with. They are the exact
+// strings the project API has always answered with, so a client that matched
+// on the text still does; the sentinels exist so a surface that shows its own
+// wording (the interactive launch, which speaks Chinese) can tell which
+// refusal it is holding without matching on a message.
+var (
+	ErrProjectRootFilesystem = errors.New("root must not be the filesystem root")
+	ErrProjectRootIsHome     = errors.New("root must not be the forebrain home directory")
+	ErrProjectRootInsideHome = errors.New("root must not be inside the forebrain home directory")
+)
+
+// ValidateProjectRoot checks the bound directory is a real place a project can
+// live: it exists, is a directory, is not the forebrain home, and is not the
+// filesystem root.
+//
+// It returns the canonical path, because that is the spelling every other part
+// of the process uses for the same directory: the trust store records it that
+// way, the launch context a route resolves reports it that way, and so does
+// the project key written into the very same row. Keeping the path as the
+// caller typed it would put two names for one directory in one record — a
+// client could not tell that a skill listed under the canonical path belongs
+// to the project it is showing, and the same checkout could be bound twice
+// under two spellings.
+//
+// Existence is therefore checked before anything is compared: only a directory
+// that is there can be resolved, and a check that mixed a resolved path with
+// an unresolved one would silently stop catching what it is there to catch.
+func ValidateProjectRoot(home, candidate string) (string, error) {
+	root := strings.TrimSpace(candidate)
+	if root == "" {
+		return "", fmt.Errorf("root is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("root must be an absolute path")
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("root directory does not exist")
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("root must be a directory")
+	}
+	abs, err = canonicalStatePath(abs)
+	if err != nil {
+		return "", fmt.Errorf("root directory could not be resolved")
+	}
+	if abs == string(filepath.Separator) {
+		return "", ErrProjectRootFilesystem
+	}
+	if trimmedHome := strings.TrimSpace(home); trimmedHome != "" {
+		canonicalHome, err := canonicalStatePath(trimmedHome)
+		if err != nil {
+			return "", fmt.Errorf("the forebrain home directory could not be resolved")
+		}
+		if abs == canonicalHome {
+			return "", ErrProjectRootIsHome
+		}
+		if strings.HasPrefix(abs, canonicalHome+string(filepath.Separator)) {
+			return "", ErrProjectRootInsideHome
+		}
+	}
+	return abs, nil
 }
 
 // ProjectStore reads and writes fb_projects for one primary agent.
@@ -74,22 +233,19 @@ func (s *ProjectStore) AgentID() string {
 	return s.agentID
 }
 
-const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, archived_at, created_at, updated_at`
+const projectColumns = `id, agent_id, name, icon, description, instructions, root, project_key, memory_scope, resource_access, pinned, created_at, updated_at`
+
+const projectColumnCount = 13
 
 func scanProject(scanner interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var resourceAccess int
 	var pinned int
-	var archivedAt sql.NullInt64
-	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &archivedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := scanner.Scan(&p.ID, &p.AgentID, &p.Name, &p.Icon, &p.Description, &p.Instructions, &p.Root, &p.ProjectKey, &p.MemoryScope, &resourceAccess, &pinned, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return Project{}, err
 	}
 	p.ResourceAccess = resourceAccess != 0
 	p.Pinned = pinned != 0
-	if archivedAt.Valid {
-		at := archivedAt.Int64
-		p.ArchivedAt = &at
-	}
 	p.MemoryScope = NormalizeProjectMemoryScope(p.MemoryScope)
 	return p, nil
 }
@@ -106,7 +262,9 @@ type CreateProjectInput struct {
 	ResourceAccess bool
 }
 
-// Create inserts a project for this agent.
+// Create inserts a project for this agent. A root the agent has already
+// registered is refused with ErrProjectRootTaken, carrying the existing row;
+// one project per (agent, root) is what the unique index declares.
 func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Project, error) {
 	if s == nil || s.db == nil {
 		return Project{}, fmt.Errorf("project store unavailable")
@@ -135,17 +293,89 @@ func (s *ProjectStore) Create(ctx context.Context, in CreateProjectInput) (Proje
 		MemoryScope:    NormalizeProjectMemoryScope(in.MemoryScope),
 		ResourceAccess: in.ResourceAccess,
 		Pinned:         false,
-		ArchivedAt:     nil,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.ArchivedAt, p.CreatedAt, p.UpdatedAt)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.AgentID, p.Name, p.Icon, p.Description, p.Instructions, p.Root, p.ProjectKey, p.MemoryScope, boolInt(p.ResourceAccess), boolInt(p.Pinned), p.CreatedAt, p.UpdatedAt)
 	if err != nil {
+		if isUniqueConstraint(err) {
+			if existing, ok, getErr := s.GetByRoot(ctx, root); getErr == nil && ok {
+				return existing, ErrProjectRootTaken
+			}
+		}
 		return Project{}, err
 	}
 	return p, nil
+}
+
+// isUniqueConstraint reports whether err is SQLite's UNIQUE-constraint
+// failure, the conflict the root index raises.
+func isUniqueConstraint(err error) bool {
+	var sqliteErr sqlite3.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique
+}
+
+// FindOrCreateByRoot returns this agent's project bound to root, creating one
+// from defaults when none exists. root is canonicalized, and a defaults value
+// with no ProjectKey takes the key derived from the root itself. The insert is
+// a no-op when a concurrent writer registered the same root first, so two
+// surfaces opening one directory converge on a single row.
+func (s *ProjectStore) FindOrCreateByRoot(ctx context.Context, root string, defaults CreateProjectInput) (Project, bool, error) {
+	if s == nil || s.db == nil {
+		return Project{}, false, fmt.Errorf("project store unavailable")
+	}
+	canonical, err := canonicalProjectRoot(root)
+	if err != nil {
+		return Project{}, false, err
+	}
+	if existing, ok, err := s.GetByRoot(ctx, canonical); err != nil {
+		return Project{}, false, err
+	} else if ok {
+		return existing, false, nil
+	}
+	name := strings.TrimSpace(defaults.Name)
+	if name == "" {
+		name = projectNameForRoot(canonical)
+	}
+	if name == "" {
+		name = canonical
+	}
+	key := strings.TrimSpace(defaults.ProjectKey)
+	if key == "" {
+		key = ProjectKeyForRoot(canonical)
+	}
+	now := time.Now().Unix()
+	fresh := Project{
+		ID:             "prj_" + NewID("project"),
+		AgentID:        s.agentID,
+		Name:           name,
+		Icon:           strings.TrimSpace(defaults.Icon),
+		Description:    strings.TrimSpace(defaults.Description),
+		Instructions:   strings.TrimSpace(defaults.Instructions),
+		Root:           canonical,
+		ProjectKey:     key,
+		MemoryScope:    NormalizeProjectMemoryScope(defaults.MemoryScope),
+		ResourceAccess: defaults.ResourceAccess,
+		Pinned:         false,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO fb_projects(`+projectColumns+`)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(agent_id, root) DO NOTHING`,
+		fresh.ID, fresh.AgentID, fresh.Name, fresh.Icon, fresh.Description, fresh.Instructions, fresh.Root, fresh.ProjectKey, fresh.MemoryScope, boolInt(fresh.ResourceAccess), boolInt(fresh.Pinned), fresh.CreatedAt, fresh.UpdatedAt); err != nil {
+		return Project{}, false, err
+	}
+	stored, ok, err := s.GetByRoot(ctx, canonical)
+	if err != nil {
+		return Project{}, false, err
+	}
+	if !ok {
+		return Project{}, false, fmt.Errorf("project for root %q was not stored", canonical)
+	}
+	return stored, stored.ID == fresh.ID, nil
 }
 
 func boolInt(b bool) int {
@@ -170,11 +400,12 @@ func (s *ProjectStore) Get(ctx context.Context, id string) (Project, error) {
 }
 
 // GetByRoot returns this agent's project bound to root (exact path), if any.
+// The root index makes at most one row match.
 func (s *ProjectStore) GetByRoot(ctx context.Context, root string) (Project, bool, error) {
 	if s == nil || s.db == nil {
 		return Project{}, false, nil
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM fb_projects WHERE agent_id=? AND root=? ORDER BY archived_at ASC, updated_at DESC LIMIT 1`, s.agentID, strings.TrimSpace(root))
+	row := s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM fb_projects WHERE agent_id=? AND root=?`, s.agentID, strings.TrimSpace(root))
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Project{}, false, nil
@@ -252,34 +483,50 @@ func (s *ProjectStore) SetPinned(ctx context.Context, id string, pinned bool) er
 	return nil
 }
 
-// SetArchived soft-deletes (at > 0) or restores (at == 0) a project. Rows are
-// never removed here: an archived project's sessions and files stay reachable.
-func (s *ProjectStore) SetArchived(ctx context.Context, id string, at int64) error {
-	if s == nil || s.db == nil {
-		return ErrProjectNotFound
-	}
-	res, err := s.db.ExecContext(ctx, `UPDATE fb_projects SET archived_at=NULLIF(?,0), updated_at=? WHERE id=? AND agent_id=?`, at, time.Now().Unix(), strings.TrimSpace(id), s.agentID)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrProjectNotFound
-	}
-	return nil
-}
-
-// Delete removes the project row and unbinds its sessions (their transcripts
-// stay; they simply no longer belong to a project).
+// Delete removes a project together with its conversations, their runs and
+// their cron jobs; the bound directory's files are not touched. A project
+// whose conversations have a run in flight is refused with ErrProjectBusy.
 func (s *ProjectStore) Delete(ctx context.Context, id string) error {
 	if s == nil || s.db == nil {
 		return ErrProjectNotFound
 	}
+	id = strings.TrimSpace(id)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	id = strings.TrimSpace(id)
+	var live int
+	if err := tx.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM fb_runs r
+JOIN fb_sessions s ON s.id = r.session_id
+WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_action')`,
+		id, s.agentID).Scan(&live); err != nil {
+		return err
+	}
+	if live > 0 {
+		return ErrProjectBusy
+	}
+	// The fire history and the stage-1 memory jobs carry no foreign key to the
+	// sessions and cron jobs they name, so they are cleared by hand before the
+	// rows they refer to go. Everything else hangs off fb_sessions through a
+	// foreign key and cascades when those rows are deleted (foreign keys are on
+	// at runtime).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE session_id IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`, id, s.agentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_memory_jobs WHERE kind='memory_stage1' AND job_key IN (SELECT id FROM fb_sessions WHERE project_id=? AND agent_id=?)`, id, s.agentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id=? AND agent_id=?)`, id, s.agentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`, id, s.agentID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fb_sessions WHERE project_id=? AND agent_id=?`, id, s.agentID); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM fb_projects WHERE id=? AND agent_id=?`, id, s.agentID)
 	if err != nil {
 		return err
@@ -287,9 +534,35 @@ func (s *ProjectStore) Delete(ctx context.Context, id string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrProjectNotFound
 	}
-	// Unbinding the project's sessions is fb_sessions.project_id's ON DELETE
-	// SET NULL; no statement here needs to remember it.
 	return tx.Commit()
+}
+
+// DeletePreview reports what Delete would remove: the project's own
+// conversations (sub-sessions excluded, so the count matches the list the
+// user sees), its cron jobs, and whether a run is in flight.
+func (s *ProjectStore) DeletePreview(ctx context.Context, id string) (sessions int, cronJobs int, running bool, err error) {
+	if s == nil || s.db == nil {
+		return 0, 0, false, ErrProjectNotFound
+	}
+	id = strings.TrimSpace(id)
+	if _, err = s.Get(ctx, id); err != nil {
+		return 0, 0, false, err
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE project_id=? AND agent_id=? AND parent_session_id IS NULL`, id, s.agentID).Scan(&sessions); err != nil {
+		return 0, 0, false, err
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`, id, s.agentID).Scan(&cronJobs); err != nil {
+		return 0, 0, false, err
+	}
+	var live int
+	if err = s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM fb_runs r
+JOIN fb_sessions s ON s.id = r.session_id
+WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_action')`,
+		id, s.agentID).Scan(&live); err != nil {
+		return 0, 0, false, err
+	}
+	return sessions, cronJobs, live > 0, nil
 }
 
 // ListProjectsOptions controls ListProjects.
@@ -298,8 +571,6 @@ type ListProjectsOptions struct {
 	Search string
 	// Sort is "updated" (default, newest first) or "name" (ascending).
 	Sort string
-	// IncludeArchived adds archived projects to the result.
-	IncludeArchived bool
 }
 
 // ListProjects returns the agent's projects. Pinned ones lead within the
@@ -319,9 +590,6 @@ func (s *ProjectStore) ListProjects(ctx context.Context, opts ListProjectsOption
 	}
 	where := "agent_id=?"
 	args := []any{s.agentID}
-	if !opts.IncludeArchived {
-		where += " AND archived_at IS NULL"
-	}
 	if q := strings.TrimSpace(opts.Search); q != "" {
 		where += " AND (name LIKE ? OR root LIKE ?)"
 		like := "%" + q + "%"

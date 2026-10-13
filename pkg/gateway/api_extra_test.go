@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -606,7 +607,9 @@ func TestProjectsCreateTrustIsExplicitOperatorChoice(t *testing.T) {
 	}
 
 	// With trust: the decision lands in the existing workspace trust store.
-	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "trusted", "root": root, "trust": true})
+	// With trust: the project exists and the decision is recorded.
+	trustedRoot := t.TempDir()
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "trusted", "root": trustedRoot, "trust": true})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create trusted: %d %s", rec.Code, rec.Body.String())
 	}
@@ -617,13 +620,13 @@ func TestProjectsCreateTrustIsExplicitOperatorChoice(t *testing.T) {
 	if row["trust_recorded"] != true {
 		t.Fatalf("trust should be recorded when explicitly chosen: %v", row["trust_recorded"])
 	}
-	trusted, err = safety.IsTrusted(home, safety.Project{Root: root})
+	trusted, err = safety.IsTrusted(home, safety.Project{Root: trustedRoot})
 	if err != nil || !trusted {
 		t.Fatalf("trust decision missing: %v %v", trusted, err)
 	}
 }
 
-func TestProjectsCRUDPinArchiveDelete(t *testing.T) {
+func TestProjectsCRUDPinDelete(t *testing.T) {
 	s, store, _ := newProjectsTestServer(t)
 	root := t.TempDir()
 
@@ -665,14 +668,10 @@ func TestProjectsCRUDPinArchiveDelete(t *testing.T) {
 		t.Fatalf("patch not applied: %+v %v", p, err)
 	}
 
-	// Pin then archive then list filtering.
+	// Pin keeps the project live and listed.
 	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/pin", map[string]any{"pinned": true})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pin: %d", rec.Code)
-	}
-	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects/"+id+"/archive", map[string]any{"archived": true})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("archive: %d", rec.Code)
 	}
 	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects", nil)
 	list = struct {
@@ -681,18 +680,8 @@ func TestProjectsCRUDPinArchiveDelete(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Projects) != 0 {
-		t.Fatalf("archived project must be hidden: %+v", list)
-	}
-	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?archived=true", nil)
-	list = struct {
-		Projects []map[string]any `json:"projects"`
-	}{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatal(err)
-	}
 	if len(list.Projects) != 1 {
-		t.Fatalf("archived project must be listed with filter: %+v", list)
+		t.Fatalf("a pinned project must stay listed: %+v", list)
 	}
 
 	// Delete removes it.
@@ -702,6 +691,123 @@ func TestProjectsCRUDPinArchiveDelete(t *testing.T) {
 	}
 	if _, err := store.Get(context.Background(), id); err == nil {
 		t.Fatalf("deleted project still present")
+	}
+}
+
+// TestProjectArchiveRouteIsGone pins that archiving a project is gone: the
+// route no longer exists.
+func TestProjectArchiveRouteIsGone(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects/any/archive", map[string]any{"archived": true})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("archive route = %d, want 404", rec.Code)
+	}
+}
+
+// TestProjectCreateRootTakenReturnsConflict pins that a second project on a
+// root the agent already registered is a 409 carrying the existing project.
+func TestProjectCreateRootTakenReturnsConflict(t *testing.T) {
+	s, _, _ := newProjectsTestServer(t)
+	root := t.TempDir()
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "one", "root": root})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("first create: %d %s", rec.Code, rec.Body.String())
+	}
+	var first map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "two", "root": root})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "project_root_taken" {
+		t.Fatalf("conflict body error = %v", body["error"])
+	}
+	project, _ := body["project"].(map[string]any)
+	if project == nil || project["id"] != first["id"] {
+		t.Fatalf("conflict must return the existing project: %v vs %v", project, first)
+	}
+}
+
+// TestProjectDeletePreviewReturnsCounts pins what the confirmation dialog reads.
+func TestProjectDeletePreviewReturnsCounts(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "prev", "root": root})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := created["id"].(string)
+	for _, sid := range []string{"p1", "p2"} {
+		if err := s.Sessions.Ensure(ctx, sid, "t"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.BindSession(ctx, sid, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/delete-preview", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["sessions"].(float64) != 2 || body["cron_jobs"].(float64) != 0 || body["running"] != false {
+		t.Fatalf("preview body = %v", body)
+	}
+}
+
+// TestProjectDeleteBusyReturnsConflict pins that deleting a project whose
+// conversation has a run in flight is a 409 the dialog can name.
+func TestProjectDeleteBusyReturnsConflict(t *testing.T) {
+	s, store, home := newProjectsTestServer(t)
+	ctx := context.Background()
+	root := t.TempDir()
+	rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", map[string]any{"name": "busy", "root": root})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := created["id"].(string)
+	if err := s.Sessions.Ensure(ctx, "sess-busy", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindSession(ctx, "sess-busy", id); err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := (&state.RunStore{DB: db}).CreateRun(ctx, "sess-busy", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodDelete, "/api/v1/projects/"+id, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("busy delete: %d %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["error"] != "project_busy" {
+		t.Fatalf("busy body = %v", body)
 	}
 }
 
@@ -955,8 +1061,8 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects.Get("/:id", s.handleProjectOne)
 	projects.Patch("/:id", s.handleProjectOne)
 	projects.Delete("/:id", s.handleProjectDelete)
+	projects.Get("/:id/delete-preview", s.handleProjectDeletePreview)
 	projects.Post("/:id/pin", s.handleProjectPin)
-	projects.Post("/:id/archive", s.handleProjectArchive)
 	projects.Get("/:id/sessions", s.handleProjectSessionsList)
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
@@ -970,6 +1076,11 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	projects.Get("/:id/skills/:name", s.handleProjectSkillGet)
 	projects.Put("/:id/skills/:name", s.handleProjectSkillsUpdate)
 	projects.Post("/:id/skills/toggle", s.handleProjectSkillsToggle)
+	host := rest.Group("/api/host")
+	host.Get("/dirs", s.handleHostDirs)
+	host.Post("/dirs", s.handleHostDirs)
+	host.Get("/trust", s.handleHostTrust)
+	host.Post("/trust", s.handleHostTrust)
 	rest.Handler.ServeHTTP(w, r)
 }
 
@@ -1916,18 +2027,6 @@ func TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	srec := httptest.NewRecorder()
-	s.handleChatSessionCreate(srec, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(`{"title":"Ordinary"}`)))
-	if srec.Code != http.StatusCreated {
-		t.Fatalf("create ordinary session: %d %s", srec.Code, srec.Body.String())
-	}
-	var ordinary struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(srec.Body.Bytes(), &ordinary); err != nil {
-		t.Fatal(err)
-	}
-
 	cwdOf := func(id string) string {
 		t.Helper()
 		var cwd string
@@ -1939,26 +2038,38 @@ func TestProjectSessionIsBornInTheProjectAndLeavesOthersAlone(t *testing.T) {
 	if got := cwdOf(born.ID); got != root {
 		t.Fatalf("project session born at %q, want the project root %q", got, root)
 	}
-	if got := cwdOf(ordinary.ID); got != "/launch" {
+	// A conversation born with no directory of its own — the terminal's own
+	// path through the store — still takes the process's launch directory:
+	// opening a project session must not have moved that default.
+	const ordinaryID = "ordinary-launch"
+	if err := s.Sessions.Ensure(context.Background(), ordinaryID, "Ordinary"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cwdOf(ordinaryID); got != "/launch" {
 		t.Fatalf("ordinary session born at %q, want the launch directory the fixture set", got)
 	}
 }
 
-// TestNewWebChatIsNamedByItsFirstMessage pins that a chat the web opens with
-// "New chat" is born unnamed — the list shows no title, so the client draws
-// its own placeholder — and that its first user message then names it, the
-// way a terminal session is named, instead of a stored placeholder outranking
-// that message forever.
+// TestNewWebChatIsNamedByItsFirstMessage pins that a chat the web opens from
+// the new-chat page is born unnamed — its stored title is its own id, which
+// the client draws as a placeholder — and that its first user message then
+// names it, the way a terminal session is named, instead of a stored
+// placeholder outranking that message forever. (Since plan 029 a web chat is
+// opened into a project, so it is born under the folder the picker chose.)
 func TestNewWebChatIsNamedByItsFirstMessage(t *testing.T) {
 	ctx := context.Background()
-	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	home := t.TempDir()
+	db, err := state.Open(ctx, filepath.Join(home, "state.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	sessions := state.NewSessionStore(db, "main")
-	s := &Server{Sessions: sessions}
+	s := &Server{Home: home, Sessions: sessions, Projects: state.NewProjectStore(db, "main")}
 
+	folder := t.TempDir()
+	payload, err := json.Marshal(map[string]any{"title": "", "folder": folder})
+	require.NoError(t, err)
 	rec := httptest.NewRecorder()
-	s.handleChatSessionCreate(rec, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(`{"title":""}`)))
+	s.handleChatSessionCreate(rec, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(string(payload))))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var created struct {
 		ID    string `json:"id"`
@@ -1967,30 +2078,101 @@ func TestNewWebChatIsNamedByItsFirstMessage(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 	require.NotEmpty(t, created.ID)
 
-	listTitle := func() string {
-		t.Helper()
-		rec := httptest.NewRecorder()
-		s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
-		var list struct {
-			Records []struct {
-				ID    string `json:"id"`
-				Title string `json:"title"`
-			} `json:"records"`
-		}
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
-		for _, row := range list.Records {
-			if row.ID == created.ID {
-				return row.Title
-			}
-		}
-		t.Fatalf("session %s missing from the list", created.ID)
-		return ""
-	}
-	require.Empty(t, listTitle())
+	// Born unnamed: the stored title is the session's own id, which the store
+	// reports as an empty display title, so the client draws its placeholder.
+	storedTitle, err := sessions.SessionTitle(ctx, created.ID)
+	require.NoError(t, err)
+	require.Empty(t, storedTitle)
 
 	_, err = sessions.Append(ctx, created.ID, "user", "Plan the release checklist")
 	require.NoError(t, err)
-	require.Equal(t, "Plan the release checklist", listTitle())
+	storedTitle, err = sessions.SessionTitle(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, "Plan the release checklist", storedTitle)
+}
+
+// TestChatSessionCreateRequiresProjectOrFolder pins the plan-029 contract for
+// the new-chat endpoint: an ordinary conversation can only be opened into a
+// project (named by id, or created from a folder), a folder already bound to a
+// project reuses it, and the one exception — a primary-agent-level workshop
+// task — still opens with no project.
+func TestChatSessionCreateRequiresProjectOrFolder(t *testing.T) {
+	ctx := context.Background()
+	s, store, _ := newProjectsTestServer(t)
+	s.Sessions.ConfigureMemoryDefaults("disabled", "webchat", "/launch", "main")
+
+	create := func(body map[string]any) *httptest.ResponseRecorder {
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		rr := httptest.NewRecorder()
+		s.handleChatSessionCreate(rr, httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(string(raw))))
+		return rr
+	}
+	cwdOf := func(id string) string {
+		var cwd string
+		require.NoError(t, s.Sessions.DB().QueryRow("SELECT cwd FROM fb_sessions WHERE id=?", id).Scan(&cwd))
+		return cwd
+	}
+
+	// No project, an ordinary source: refused.
+	rr := create(map[string]any{"title": "orphan"})
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "project_required")
+
+	// A folder that is not yet a project: the project is created from it and
+	// the session is born in that directory.
+	folder := projectTempRoot(t)
+	rr = create(map[string]any{"title": "with folder", "folder": folder})
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var first struct {
+		ID      string `json:"id"`
+		Project struct {
+			ID   string `json:"id"`
+			Root string `json:"root"`
+		} `json:"project"`
+		Created bool `json:"created"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &first))
+	require.True(t, first.Created, "the folder had no project, so one should have been created")
+	require.NotEmpty(t, first.Project.ID)
+	require.Equal(t, folder, first.Project.Root)
+	require.Equal(t, folder, cwdOf(first.ID))
+
+	// The same folder again reuses the project.
+	rr = create(map[string]any{"title": "again", "folder": folder})
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var second struct {
+		ID      string `json:"id"`
+		Project struct {
+			ID string `json:"id"`
+		} `json:"project"`
+		Created bool `json:"created"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &second))
+	require.False(t, second.Created, "the folder already had a project")
+	require.Equal(t, first.Project.ID, second.Project.ID)
+
+	// A known project id opens its session in the project root.
+	rr = create(map[string]any{"title": "by id", "project_id": first.Project.ID})
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var byID struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &byID))
+	require.Equal(t, folder, cwdOf(byID.ID))
+
+	// A project whose root no longer exists is refused with the directory code.
+	gone := projectTempRoot(t)
+	p, err := store.Create(ctx, state.CreateProjectInput{Name: "gone", Root: gone, ProjectKey: state.ProjectKeyForRoot(gone)})
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(gone))
+	rr = create(map[string]any{"title": "missing dir", "project_id": p.ID})
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "session_directory_missing")
+
+	// A primary-agent-level workshop task is the one no-project exception.
+	rr = create(map[string]any{"title": "agent workshop", "source": "workshop"})
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 }
 
 // TestCronJobBindsOnlyToThisAgentsProject pins that a job's project binding
@@ -2590,8 +2772,10 @@ func TestProvidersDTOPersistedShapeIsEngineExpanded(t *testing.T) {
 	require.NotContains(t, body, "- a")
 }
 
-// workspaceTreeServer builds a Server whose active workspace is one temp dir.
-func workspaceTreeServer(t *testing.T) (*Server, string) {
+// workspaceTreeServer builds a Server whose file view is one conversation's,
+// filed under a project rooted at one temp dir. The conversation id the tree
+// and snippet requests name is returned alongside the workspace.
+func workspaceTreeServer(t *testing.T) (*Server, string, string) {
 	t.Helper()
 	home := t.TempDir()
 	ws := filepath.Join(home, "workspace")
@@ -2602,19 +2786,46 @@ func workspaceTreeServer(t *testing.T) (*Server, string) {
 	}
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "state"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(home, "state", "primary-agent.json"), []byte(`{"active":"main"}`+"\n"), 0o600))
-	return &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}, ws
+	s := &Server{Home: home, Env: &process.Environment{Deps: run.Deps{AppCfg: cfg}}}
+	return s, ws, scopeServerToRoot(t, s, home, ws)
 }
 
-func getWorkspaceTree(t *testing.T, s *Server, query string) *httptest.ResponseRecorder {
+// scopeServerToRoot files s's file view under a project rooted at root: one
+// conversation bound to it, returned as the id the tree, snippet and @ requests
+// carry. The file view resolves its root from the session's project, so a
+// request names the conversation the browser has open rather than the agent's
+// workspace.
+func scopeServerToRoot(t *testing.T, s *Server, home, root string) string {
 	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "ws", Root: root})
+	require.NoError(t, err)
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "ws-session", "ws-session"))
+	require.NoError(t, projects.BindSession(ctx, "ws-session", project.ID))
+	s.Sessions = sessions
+	s.Projects = projects
+	return "ws-session"
+}
+
+func getWorkspaceTree(t *testing.T, s *Server, sid, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := "/api/workspace/tree?session_id=" + sid
+	if path != "" {
+		target += "&path=" + path
+	}
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/workspace/tree"+query, nil)
+	req := httptest.NewRequest(http.MethodGet, target, nil)
 	s.handleWorkspaceTree(rr, req)
 	return rr
 }
 
 func TestWorkspaceTreeListsOneLevelDirectoriesFirst(t *testing.T) {
-	s, ws := workspaceTreeServer(t)
+	s, ws, sid := workspaceTreeServer(t)
 	for _, name := range []string{"b.txt", "A.txt"} {
 		require.NoError(t, os.WriteFile(filepath.Join(ws, name), []byte("x"), 0o644))
 	}
@@ -2623,7 +2834,7 @@ func TestWorkspaceTreeListsOneLevelDirectoriesFirst(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "adir", "nested.txt"), []byte("x"), 0o644))
 
-	rr := getWorkspaceTree(t, s, "")
+	rr := getWorkspaceTree(t, s, sid, "")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	body := rr.Body.String()
 	// Directories first, case-insensitive name order, .git hidden, one level.
@@ -2643,15 +2854,15 @@ func TestWorkspaceTreeListsOneLevelDirectoriesFirst(t *testing.T) {
 }
 
 func TestWorkspaceTreeRejectsPathsOutsideWorkspace(t *testing.T) {
-	s, _ := workspaceTreeServer(t)
-	rr := getWorkspaceTree(t, s, "?path=../")
+	s, _, sid := workspaceTreeServer(t)
+	rr := getWorkspaceTree(t, s, sid, "../")
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "path is outside the workspace")
 }
 
 func TestWorkspaceTreeHidesSymlinksLeavingWorkspace(t *testing.T) {
 
-	s, ws := workspaceTreeServer(t)
+	s, ws, sid := workspaceTreeServer(t)
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "real.txt"), []byte("x"), 0o644))
 	outside := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(outside, "sub"), 0o755))
@@ -2660,60 +2871,60 @@ func TestWorkspaceTreeHidesSymlinksLeavingWorkspace(t *testing.T) {
 	// target's type.
 	require.NoError(t, os.Symlink(filepath.Join(ws, "real.txt"), filepath.Join(ws, "in")))
 
-	rr := getWorkspaceTree(t, s, "")
+	rr := getWorkspaceTree(t, s, sid, "")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.NotContains(t, rr.Body.String(), `"name":"out"`)
 	require.Contains(t, rr.Body.String(), `"name":"in"`)
 
-	rr = getWorkspaceTree(t, s, "?path=out")
+	rr = getWorkspaceTree(t, s, sid, "out")
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 
-	s2, ws2 := workspaceTreeServer(t)
+	s2, ws2, sid2 := workspaceTreeServer(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(ws2, "target"), 0o755))
 	require.NoError(t, os.Symlink(filepath.Join(ws2, "target"), filepath.Join(ws2, "in")))
-	rr = getWorkspaceTree(t, s2, "")
+	rr = getWorkspaceTree(t, s2, sid2, "")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"name":"in"`)
 	require.Contains(t, rr.Body.String(), `"is_dir":true`)
 }
 
 func TestWorkspaceTreeMissingAndFilePaths(t *testing.T) {
-	s, ws := workspaceTreeServer(t)
+	s, ws, sid := workspaceTreeServer(t)
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "A.txt"), []byte("x"), 0o644))
 
-	rr := getWorkspaceTree(t, s, "?path=missing")
+	rr := getWorkspaceTree(t, s, sid, "missing")
 	require.Equal(t, http.StatusNotFound, rr.Code)
 
-	rr = getWorkspaceTree(t, s, "?path=A.txt")
+	rr = getWorkspaceTree(t, s, sid, "A.txt")
 	require.Equal(t, http.StatusBadRequest, rr.Code)
 	require.Contains(t, rr.Body.String(), "not a directory")
 }
 
 func TestWorkspaceTreeEmptyDirectory(t *testing.T) {
-	s, ws := workspaceTreeServer(t)
+	s, ws, sid := workspaceTreeServer(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(ws, "empty"), 0o755))
-	rr := getWorkspaceTree(t, s, "?path=empty")
+	rr := getWorkspaceTree(t, s, sid, "empty")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"records":[]`)
 }
 
 func TestWorkspaceSnippetRejectsSymlinkEscape(t *testing.T) {
 
-	s, ws := workspaceTreeServer(t)
+	s, ws, sid := workspaceTreeServer(t)
 	secret := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(secret, "secret.txt"), []byte("secret"), 0o644))
 	require.NoError(t, os.Symlink(filepath.Join(secret, "secret.txt"), filepath.Join(ws, "leak.txt")))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, "..notes.md"), []byte("dots are a legal name"), 0o644))
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?path=leak.txt", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?session_id="+sid+"&path=leak.txt", nil)
 	s.handleWorkspaceSnippet(rr, req)
 	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), "path is outside the workspace")
 	require.NotContains(t, rr.Body.String(), "secret")
 
 	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?path=..notes.md", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?session_id="+sid+"&path=..notes.md", nil)
 	s.handleWorkspaceSnippet(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), "dots are a legal name")
@@ -3477,12 +3688,20 @@ func exitPlanServer(t *testing.T, cfg *appcfg.Root) (*Server, *state.RunStore, *
 	require.NoError(t, runs.SetWaitingAction(ctx, parkedRun.ID, state.Wait{
 		RunID: parkedRun.ID, ActionID: action.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
 	}))
+	// The session belongs to a project: a gateway process has no launch project
+	// of its own, so the plan the approval asks about is resolved from the
+	// session's project, not the base runner.
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "exitplan", Root: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, projects.BindSession(ctx, "s1", project.ID))
 	s := &Server{
 		Home: home, RunRT: runs, Actions: actions,
 		Sessions: state.NewSessionStore(db, "main"),
-		Runner:   &run.Runner{Deps: &run.Deps{ProjectKey: "proj", AppCfg: cfg}},
+		Projects: projects,
+		Runner:   &run.Runner{Deps: &run.Deps{AppCfg: cfg}},
 	}
-	require.NoError(t, state.SetPlanForSession(s.stateRoot(), s.projectKey(), "s1", "# Plan\n\n1. Ship it."))
+	require.NoError(t, state.SetPlanForSession(s.stateRoot(), s.sessionProjectKey(ctx, "s1"), "s1", "# Plan\n\n1. Ship it."))
 	return s, runs, actions, action.ID, "s1"
 }
 
@@ -4051,14 +4270,29 @@ func TestSubagentSurfacePublishesQueueChanges(t *testing.T) {
 }
 
 // plan-md is the web's window on a conversation's plan; it must resolve that
-// one session's plan even when another conversation in the same project wrote
-// a plan more recently.
+// one session's plan under the session's own project key, even when another
+// conversation in the same project wrote a plan more recently. The process has
+// no launch project of its own, so the key comes from the session, not the base
+// runner.
 func TestSessionPlanMarkdownReturnsOnlyThatSessionsPlan(t *testing.T) {
-	s := &Server{Home: t.TempDir(), Runner: &run.Runner{Deps: &run.Deps{ProjectKey: "proj"}}}
-	require.NoError(t, state.SetPlanForSession(s.stateRoot(), s.projectKey(), "s1", "# Mine"))
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "planmd", Root: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "s1", "s1"))
+	require.NoError(t, projects.BindSession(ctx, "s1", project.ID))
+
+	s := &Server{Home: home, Projects: projects}
+	key := s.sessionProjectKey(ctx, "s1")
+	require.Equal(t, state.ProjectKeyForRoot(project.Root), key)
+	require.NoError(t, state.SetPlanForSession(s.stateRoot(), key, "s1", "# Mine"))
 
 	// A second session's plan, written later: invisible to s1's plan-md.
-	other := state.PlanPathForSession(s.stateRoot(), s.projectKey(), "s2")
+	other := state.PlanPathForSession(s.stateRoot(), key, "s2")
 	require.NoError(t, os.MkdirAll(filepath.Dir(other), 0o755))
 	require.NoError(t, os.WriteFile(other, []byte("# Theirs\n"), 0o600))
 	future := time.Now().Add(time.Hour)
@@ -4077,4 +4311,175 @@ func TestSessionPlanMarkdownReturnsOnlyThatSessionsPlan(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
 	require.Equal(t, "# Mine", body.Markdown)
+}
+
+// The session-model endpoints serve one conversation's own choice and the
+// options it may be switched to: the options are the agent's configured chain
+// with their catalog-reported reasoning levels, a pair or an effort the
+// options do not offer is refused with 400, and a valid write lands on the
+// session's row only — the runner's published default stays untouched, so the
+// change rides the next turn exactly as /model's live switch does.
+func TestChatSessionModelEndpoints(t *testing.T) {
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	t.Setenv("FOREBRAIN_WEB_MODEL_TEST_KEY", "test-key")
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
+			{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
+		}},
+	}}}
+	require.NoError(t, appcfg.Save(cfgPath, cfg))
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	require.NoError(t, sess.Ensure(context.Background(), "s1", "s1"))
+	env := &process.Environment{Root: home, ConfigPath: cfgPath, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sess}}
+	runner := &run.Runner{Deps: &env.Deps}
+	env.Runner = runner
+	s := &Server{Home: home, Runner: runner, Sessions: sess, Env: env}
+	require.NoError(t, s.Env.ReloadConfig())
+
+	modelCall := func(method string, body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		var reader io.Reader
+		if body != nil {
+			raw, err := json.Marshal(body)
+			require.NoError(t, err)
+			reader = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, "/api/chat/sessions/s1/model", reader)
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+			{Key: "id", Value: "s1"},
+		}))
+		rec := httptest.NewRecorder()
+		if method == http.MethodGet {
+			s.handleChatSessionModelGet(rec, req)
+		} else {
+			s.handleChatSessionModelPut(rec, req)
+		}
+		return rec
+	}
+
+	// GET: a session that never chose reads the chain's first entry; a model
+	// the catalog knows can reason carries /model's levels, one it knows
+	// cannot carries none.
+	rec := modelCall(http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Effort   string `json:"effort"`
+		Options  []struct {
+			Provider string   `json:"provider"`
+			Model    string   `json:"model"`
+			Efforts  []string `json:"efforts"`
+		} `json:"options"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, "zhipuai", got.Provider)
+	require.Equal(t, "glm-5.3-flash", got.Model)
+	require.Len(t, got.Options, 2)
+	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, got.Options[0].Efforts)
+	require.Empty(t, got.Options[1].Efforts)
+	publishedBefore := run.PrimaryModelSelection(runner)
+
+	// A pair the agent is not configured with is refused before any write.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "openai", "model": "gpt-9"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// An effort the model does not offer is refused the same way.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": "ultra"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	_, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.False(t, hasRow, "a refused write must not store anything")
+
+	// A valid write is the session's own row: read back verbatim, while the
+	// runner's published default stays with the chain's first entry.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": "high"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"effort":"high"`)
+	row, hasRow, err := sess.SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.True(t, hasRow)
+	require.Equal(t, state.SessionModelSelection{Provider: "zhipuai", Model: "glm-5.3-flash", Effort: "high"}, row)
+	require.Equal(t, publishedBefore, run.PrimaryModelSelection(runner), "the runner's published default must stay untouched")
+
+	// An empty effort is the explicit "model default" pin, not a level.
+	rec = modelCall(http.MethodPut, map[string]any{"provider": "zhipuai", "model": "glm-5.3-flash", "effort": ""})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	row, _, err = sess.SessionModelSelection(context.Background(), "s1")
+	require.NoError(t, err)
+	require.Equal(t, "", row.Effort)
+}
+
+// TestRewindRoutes pins the plan-033 HTTP surface: the six new routes answer,
+// and the removed rewind-last route is gone (a 404 on the real router).
+func TestRewindRoutes(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	store := state.NewSessionStore(db, "main")
+	runs := &state.RunStore{DB: db}
+	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
+	a := filepath.Join(t.TempDir(), "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("a1\n"), 0o644))
+	rowID, err := store.Append(ctx, "s1", "user", "hello")
+	require.NoError(t, err)
+	require.NoError(t, store.RecordFileChange(ctx, state.FileChange{
+		SessionID: "s1", AnchorMessageID: rowID, Path: a, ExistedBefore: true, AfterSHA256: "x",
+	}))
+	// A file the conversation created and that is gone from disk: reverting it
+	// needs no snapshot writer, so the route is exercised without a tool state.
+	gone := filepath.Join(t.TempDir(), "gone.go")
+	require.NoError(t, store.RecordFileChange(ctx, state.FileChange{
+		SessionID: "s1", AnchorMessageID: rowID, Path: gone, ExistedBefore: false,
+	}))
+
+	s := &Server{Sessions: store, RunRT: runs}
+	srv := NewRestServer("")
+	s.AttachExtraRoutes(srv)
+
+	do := func(method, target string, body any) *httptest.ResponseRecorder {
+		var reader io.Reader
+		if body != nil {
+			raw, err := json.Marshal(body)
+			require.NoError(t, err)
+			reader = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, target, reader)
+		rec := httptest.NewRecorder()
+		srv.Server.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	require.Equal(t, http.StatusNotFound,
+		do(http.MethodPost, "/api/chat/sessions/s1/rewind-last", nil).Code,
+		"the removed rewind-last route must not answer")
+
+	esc := url.QueryEscape(a)
+	msgID := strconv.FormatInt(rowID, 10)
+	rec := do(http.MethodGet, "/api/chat/sessions/s1/rewind-preview?message_id="+msgID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), a)
+
+	rec = do(http.MethodGet, "/api/chat/sessions/s1/file-changes", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), a)
+
+	rec = do(http.MethodGet, "/api/chat/sessions/s1/file-changes/diff?path="+esc, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Chat-only needs no snapshot writer, so it runs without a tool state.
+	rec = do(http.MethodPost, "/api/chat/sessions/s1/rewind", map[string]any{"message_id": rowID, "mode": "chat"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = do(http.MethodPost, "/api/chat/sessions/s1/rewind/undo", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = do(http.MethodPost, "/api/chat/sessions/s1/file-changes/revert", map[string]any{"path": gone})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }

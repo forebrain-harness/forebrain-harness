@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -32,6 +31,12 @@ type writePathResolution struct {
 	// changed a file that does not exist.
 	RepairedFrom string
 	Skill        LoadedSkill
+	// Draft names the skill draft a write was redirected into, set only when
+	// the write addressed a formal skill directory (or a path inside the
+	// version store's own homes) and the version store redirected or answered
+	// it. The write tools report it: a change the model believes is live but
+	// that only a publish makes live is the one thing it must be told.
+	Draft *SkillDraftTarget
 }
 
 // resolveGuardedWritePath settles both questions a write has to answer before
@@ -53,6 +58,25 @@ func resolveGuardedWritePath(ctx context.Context, st *State, requested string) (
 		return writePathResolution{Abs: planPath, PlanWrite: true}, nil
 	}
 	var out writePathResolution
+	// A write the version store owns is settled before anything else: one
+	// aimed at a formal skill directory lands in that skill's draft (the
+	// published version is what sessions load, so changes wait for a
+	// publish), and one aimed at the version records or a whole skill
+	// directory is a refusal. The loaded-skill repair has not run yet, so
+	// the draft resolver applies its own — a shortened catalog path is still
+	// recognized as addressing the skill it names.
+	if draft, handled, err := st.resolveSkillDraftWrite(requested); err != nil {
+		return writePathResolution{}, err
+	} else if handled {
+		out = draft
+		if err := st.GuardWrite(ctx, out.Abs); err != nil {
+			return writePathResolution{}, err
+		}
+		if out.Protected == "" {
+			out.Protected = st.ProtectedWriteReason(ctx, out.Abs)
+		}
+		return out, nil
+	}
 	// A path addressing a loaded skill is settled by the catalog rather than by
 	// root expansion. The catalog is where that skill really lives, so a
 	// shortened catalog path is repaired into it instead of resolving against
@@ -88,6 +112,17 @@ func skillWritePathRepairNote(res writePathResolution) string {
 	}
 	return fmt.Sprintf("note: %s does not exist, so the %q skill's file at %s was written instead — that skill's files all live under %s.",
 		res.RepairedFrom, res.Skill.Name, res.Abs, res.Skill.RootDir)
+}
+
+// skillDraftWriteNote is the sentence a write redirected into a skill draft
+// owes the model: the change is saved, but it is the published version every
+// session loads, so the change is not live until the draft is published.
+func skillDraftWriteNote(res writePathResolution) string {
+	if res.Draft == nil {
+		return ""
+	}
+	return fmt.Sprintf("note: this write went to the %q skill's draft (%s); it takes effect when that draft is published.",
+		res.Draft.SkillName, res.Draft.Target)
 }
 
 // loadedSkillWriteReason is the sentence a write into a loaded skill has to
@@ -228,17 +263,25 @@ func resolveFileToolPath(ctx context.Context, st *State, requestedPath string, a
 	if confined := st.ConfinedRoot(); confined != "" {
 		return resolveWithinConfinedRoot(confined, requestedPath)
 	}
-	absCandidate, absErr := filepath.Abs(trimmed)
+	cwd, cwdErr := WorkingDir(ctx)
+	if cwdErr != nil {
+		return "", cwdErr
+	}
+	absCandidate, absErr := ResolvePath(ctx, trimmed)
 	if absErr != nil {
 		return "", absErr
 	}
 	absCandidate = filepath.Clean(absCandidate)
 	sessionID := ConversationSessionIDFromContext(ctx)
-	if st.PathDeniedByGrant(absCandidate, sessionID, RunIDFromContext(ctx)) {
+	if st.PathDeniedByGrant(absCandidate, sessionID, RunIDFromContext(ctx), cwd) {
 		return "", fmt.Errorf("%w: denied by request_permissions grant: %s", ErrPathNotAllowed, absCandidate)
 	}
 	resolutionRoots := MergeAllowedRootPaths(st.AllowedRoots(), st.PermissionRoots(access))
-	abs, err := ResolveWithinRoots(requestedPath, resolutionRoots)
+	// Resolve the path the turn already anchored (absCandidate), not the raw
+	// spelling: ResolveWithinRoots calls filepath.Abs, which for a relative
+	// path would read the process directory rather than the session's project
+	// root.
+	abs, err := ResolveWithinRoots(absCandidate, resolutionRoots)
 	if err == nil {
 		return abs, nil
 	}
@@ -306,11 +349,15 @@ func resolveWithinConfinedRoot(root, requestedPath string) (string, error) {
 func resolveWithinGrantedRoots(ctx context.Context, st *State, requestedPath string, access safety.FileSystemPermissionAccess) (string, bool) {
 	sessionID := ConversationSessionIDFromContext(ctx)
 	runID := RunIDFromContext(ctx)
-	abs, err := filepath.Abs(strings.TrimSpace(requestedPath))
+	cwd, cwdErr := WorkingDir(ctx)
+	if cwdErr != nil {
+		return "", false
+	}
+	abs, err := ResolvePath(ctx, requestedPath)
 	if err != nil {
 		return "", false
 	}
-	if !st.PathGranted(filepath.Clean(abs), access, sessionID, runID) {
+	if !st.PathGranted(filepath.Clean(abs), access, sessionID, runID, cwd) {
 		return "", false
 	}
 	// Reuse pathguard's realpath/nearest-parent checks by treating the
@@ -323,7 +370,7 @@ func resolveWithinGrantedRoots(ctx context.Context, st *State, requestedPath str
 		if !ok {
 			continue
 		}
-		if granted, grantErr := ResolveWithinRoots(requestedPath, []string{root}); grantErr == nil {
+		if granted, grantErr := ResolveWithinRoots(filepath.Clean(abs), []string{root}); grantErr == nil {
 			return granted, true
 		}
 	}
@@ -340,7 +387,7 @@ func planFileWriteTarget(ctx context.Context, filePath string) (string, bool) {
 	if p == "" {
 		return "", false
 	}
-	abs, err := filepath.Abs(p)
+	abs, err := ResolvePath(ctx, p)
 	if err != nil {
 		return "", false
 	}
@@ -409,7 +456,9 @@ func permissionSnapshotForContext(ctx context.Context, st *State, rt *AgentToolR
 
 // PathGranted reports whether request_permissions grants permit access to path
 // for the current run. Explicit deny entries take precedence over allows.
-func (s *State) PathGranted(path string, access safety.FileSystemPermissionAccess, sessionID, runID string) bool {
+// cwd is the session's working directory, against which a relative grant path
+// is matched.
+func (s *State) PathGranted(path string, access safety.FileSystemPermissionAccess, sessionID, runID, cwd string) bool {
 	path = normalizeRootPath(path)
 	if path == "" {
 		return false
@@ -417,7 +466,6 @@ func (s *State) PathGranted(path string, access safety.FileSystemPermissionAcces
 	runID = strings.TrimSpace(runID)
 	grants := s.permissionSnapshotForSession(sessionID).FileSystemGrants
 	allowed := false
-	cwd, _ := os.Getwd()
 	for _, grant := range grants {
 		if !grantAppliesToRun(grant, runID) || !grant.Entry.Path.Matches(path, cwd) {
 			continue
@@ -439,7 +487,10 @@ func permissionAccessAllows(granted, requested safety.FileSystemPermissionAccess
 	return granted == safety.FileSystemAccessWrite && requested == safety.FileSystemAccessRead
 }
 
-func (s *State) PathDeniedByGrant(path, sessionID, runID string) bool {
+// PathDeniedByGrant reports whether an explicit deny grant matches path. cwd is
+// the session's working directory, against which a relative grant path is
+// matched.
+func (s *State) PathDeniedByGrant(path, sessionID, runID, cwd string) bool {
 	path = normalizeRootPath(path)
 	if path == "" {
 		return false
@@ -448,7 +499,6 @@ func (s *State) PathDeniedByGrant(path, sessionID, runID string) bool {
 		if grant.Entry.Access != safety.FileSystemAccessDeny || !grantAppliesToRun(grant, runID) {
 			continue
 		}
-		cwd, _ := os.Getwd()
 		if grant.Entry.Path.Matches(path, cwd) {
 			return true
 		}

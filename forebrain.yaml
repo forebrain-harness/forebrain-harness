@@ -381,17 +381,30 @@ agents:
         # Example: max retrieval chunk size in runes.
         max_chunk_runes: 120000
     # Default: none.
-    # Example: token estimation settings.
+    # Example: local token estimation settings. Each model is counted with its
+    # own tokenizer; built-in ids and the model names they cover are listed in
+    # assets/tokenizers/README.md.
     token_estimate:
-      # Default: empty; runtime falls back to first active model or cl100k_base.
-      # Example: explicit tokenizer encoding.
-      encoding: "cl100k_base"
-      # Default: empty; runtime infers from active agent provider when possible.
-      # Example: model used for token counting heuristics.
-      model: "gpt-4.1"
-      # Default: empty. Path to a HuggingFace tokenizer.json; when set it takes
-      # precedence over encoding and model.
-      tokenizer_path: ""
+      # Default: empty means huggingface then modelscope, in that order.
+      # Example: download order when a tokenizer is neither cached nor beside the binary.
+      hubs: []
+      # Default: empty uses $HF_ENDPOINT, then https://huggingface.co.
+      # Example: a HuggingFace mirror endpoint.
+      huggingface_endpoint: ""
+      # Default: empty uses https://modelscope.cn.
+      # Example: a ModelScope endpoint.
+      modelscope_endpoint: ""
+      # Default: empty uses gpt-o200k.
+      # Example: the built-in tokenizer id used when no model prefix or provider matches.
+      default_tokenizer: ""
+      # Default: none.
+      # Example: map a model-name prefix to a built-in tokenizer id or a local tokenizer.json.
+      # tokenizers:
+      #   - model: "my-model-prefix"
+      #     tokenizer: "qwen-3.8"
+      #   - model: "another-prefix"
+      #     path: "/path/to/tokenizer.json"
+      tokenizers: []
     # Default: none.
     # Example: web search provider settings.
     web_search:

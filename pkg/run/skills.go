@@ -223,8 +223,10 @@ func RegisterSkillTool(a tool.ToolAdder, st *tool.State) error {
 			if !ok {
 				return "", fmt.Errorf("no skill named %q is available in this session", name)
 			}
-			skillFile := filepath.Join(item.RootDir, "SKILL.md")
-			activation, err := skill.LoadActivation(skillFile)
+			// The session's pinned copy, not the formal directory: a version
+			// published after this session started is the next session's skill.
+			skillFile := item.PinnedSkillFile()
+			activation, err := pinnedSkillLoad(item)
 			if err != nil {
 				return "", err
 			}
@@ -275,6 +277,43 @@ func loadedSkillByName(st *tool.State, name string) (tool.LoadedSkill, bool) {
 		}
 	}
 	return tool.LoadedSkill{}, false
+}
+
+// pinnedSkillLoad reads one loaded skill's instructions from the copy this
+// session is pinned to. A versioned skill whose version directory has gone
+// missing is an error naming the version — falling back to the formal
+// directory would silently load content the session was never described to.
+func pinnedSkillLoad(item tool.LoadedSkill) (skill.Activation, error) {
+	skillFile := item.PinnedSkillFile()
+	activation, err := skill.LoadActivation(skillFile)
+	if err == nil {
+		return activation, nil
+	}
+	if item.Version > 0 {
+		if _, statErr := os.Stat(skillFile); statErr != nil {
+			return skill.Activation{}, fmt.Errorf("skill %q v%d no longer exists; its version directory was removed — start a new session to load the skill's current version", item.Name, item.Version)
+		}
+	}
+	return skill.Activation{}, err
+}
+
+// skillDraftResolver adapts the version store's draft redirection into the
+// port pkg/tool defines for it. tool sits below skill in Layer 2's order and
+// cannot import the store, so the runner closes over the versioned roots and
+// hands this adapter in; the port is the whole of tool's knowledge about it.
+func skillDraftResolver(roots []string) tool.SkillDraftResolver {
+	roots = append([]string(nil), roots...)
+	return func(path string) (tool.SkillDraftTarget, bool, error) {
+		target, handled, err := skill.ResolveDraftTarget(roots, path)
+		if err != nil || !handled {
+			return tool.SkillDraftTarget{}, handled, err
+		}
+		return tool.SkillDraftTarget{
+			SkillName: target.SkillName,
+			Target:    target.Target,
+			Source:    target.Source,
+		}, true, nil
+	}
 }
 
 type explicitSkillActivation struct {
@@ -421,12 +460,20 @@ func (r *Runner) preloadExplicitSkill(ctx context.Context) (context.Context, err
 	}
 	step := tool.StepHookFromContext(ctx, r.tools)
 	stepID := "skill-explicit-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	// The pinned copy when this session's loaded catalog carries the skill:
+	// an explicit invocation reads the same version every other load in this
+	// session does. A skill outside the catalog (a cross-tool directory, a
+	// built-in) keeps the path the slash command registered.
+	skillPath := strings.TrimSpace(selection.SkillPath)
+	if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
+		skillPath = item.PinnedSkillFile()
+	}
 	identity := tool.StepEvent{
 		StepID:    stepID,
 		ToolName:  "skill",
 		Category:  "skill",
 		SkillName: selection.SkillName,
-		SkillPath: selection.SkillPath,
+		SkillPath: skillPath,
 		Origin:    "explicit",
 	}
 	emit := func(evt tool.StepEvent) {
@@ -438,7 +485,14 @@ func (r *Runner) preloadExplicitSkill(ctx context.Context) (context.Context, err
 		ToolName: identity.ToolName, Category: identity.Category,
 		SkillName: identity.SkillName, SkillPath: identity.SkillPath, Origin: identity.Origin})
 	started := time.Now()
-	activation, err := skill.LoadActivation(selection.SkillPath)
+	activation, err := skill.LoadActivation(skillPath)
+	if err == nil {
+		if item, ok := loadedSkillByName(r.tools, selection.SkillName); ok && item.Version > 0 {
+			if _, statErr := os.Stat(skillPath); statErr != nil {
+				err = fmt.Errorf("skill %q v%d no longer exists; its version directory was removed — start a new session to load the skill's current version", item.Name, item.Version)
+			}
+		}
+	}
 	duration := time.Since(started)
 	if err == nil && !strings.EqualFold(skill.NormalizeToken(activation.Name), skill.NormalizeToken(selection.SkillName)) {
 		err = fmt.Errorf("skill file at %s now names %q", selection.SkillPath, activation.Name)
@@ -579,9 +633,10 @@ func (w *skillOfferLLM) suppressed(ctx context.Context, msgs []llm.Message) bool
 	if !w.appCfg.EffectiveFeatures().SkillOffer {
 		return true
 	}
-	// No version-controlled project root: there is no project skills directory
-	// to write into, so the proposal could not be kept.
-	if strings.TrimSpace(w.project.Project.Root) == "" || !w.project.Project.VersionControlled {
+	// No project root: there is no project skills directory to write into, so
+	// the proposal could not be kept. Version control is not required (R6): a
+	// trusted project needs no .git to hold skills.
+	if strings.TrimSpace(w.project.Project.Root) == "" {
 		return true
 	}
 	// The generator skill unavailable or disabled: its command is gone, so
@@ -788,7 +843,11 @@ func guardSkillWrite(ctx context.Context, t *llm.Tool, canonicalRoots []string, 
 		if err := json.Unmarshal([]byte(arguments), &in); err != nil {
 			return nil
 		}
-		content, ok := previewEdit(in.FilePath, in.OldString, in.NewString, in.ReplaceAll)
+		var editState *tool.State
+		if loadedTools != nil {
+			editState = loadedTools()
+		}
+		content, ok := previewEdit(editState, in.FilePath, in.OldString, in.NewString, in.ReplaceAll)
 		if !ok {
 			// The edit does not apply as written, or the file is not there.
 			// The tool reports that itself, in its own words.
@@ -833,13 +892,23 @@ func guardSkillWrite(ctx context.Context, t *llm.Tool, canonicalRoots []string, 
 // in the one place they can differ: when the match is ambiguous, or the file
 // cannot be read, the caller is told to leave the call alone rather than to
 // refuse it.
-func previewEdit(path, oldString, newString string, replaceAll bool) ([]byte, bool) {
+//
+// The preview reads through the same draft redirection the edit itself goes
+// through: a skill's edit reads the draft, so a preview read from the formal
+// directory would validate content the tool is not about to write.
+func previewEdit(st *tool.State, path, oldString, newString string, replaceAll bool) ([]byte, bool) {
 	path = strings.TrimSpace(path)
 	if path == "" || oldString == "" {
 		return nil, false
 	}
-	abs := path
-	if resolved, err := filepath.Abs(path); err == nil {
+	readPath := path
+	if st != nil {
+		if target, handled, err := st.SkillDraftWriteTarget(path); err == nil && handled {
+			readPath = target
+		}
+	}
+	abs := readPath
+	if resolved, err := filepath.Abs(readPath); err == nil {
 		abs = resolved
 	}
 	raw, err := os.ReadFile(abs)
@@ -896,10 +965,12 @@ func validateSkillWrite(path string, content []byte, canonicalRoots []string, is
 	return nil
 }
 
-// skillRootChildDir reports whether path is exactly <skill root>/<name>/SKILL.md
-// and returns <skill root>/<name>. Both sides are canonicalized first — symlink
-// and all — so a path that only reaches the same file through a link is judged
-// like the file it is.
+// skillRootChildDir reports whether path is a skill's SKILL.md — the formal
+// directory (<skill root>/<name>/SKILL.md, one bundle level deeper included)
+// or its draft (<skill root>/.drafts/<name>/SKILL.md) — and returns the
+// directory the skill's name must match. Both sides are canonicalized first —
+// symlink and all — so a path that only reaches the same file through a link
+// is judged like the file it is.
 func skillRootChildDir(path string, canonicalRoots []string) (string, bool) {
 	canonical := skill.CanonicalSkillPath(path)
 	if canonical == "" || !strings.EqualFold(filepath.Base(canonical), "SKILL.md") {
@@ -914,6 +985,11 @@ func skillRootChildDir(path string, canonicalRoots []string) (string, bool) {
 		// A bundled skill lives one level deeper inside a namespace directory
 		// (a bundle's own subdirectory), which discovery also accepts.
 		if filepath.Dir(parent) == root {
+			return dir, true
+		}
+		// A draft lives in the root's .drafts directory; the directory name
+		// beside the SKILL.md is the skill's name there too.
+		if filepath.Base(parent) == ".drafts" && filepath.Dir(parent) == root {
 			return dir, true
 		}
 	}

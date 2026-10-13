@@ -123,7 +123,7 @@ test('project cron jobs stay in the project tab', async ({ page }) => {
   await page.getByRole('textbox', { name: /绝对路径|absolute path/i }).fill(root)
   await page.click('button:has-text("创建"), button:has-text("Create")')
   await page.waitForURL(/\/projects\/.+\/overview/, { timeout: 15_000 })
-  await page.click('.project-tab:has-text("定时"), .project-tab:has-text("Cron")')
+  await page.click('.proj-tab:has-text("定时"), .proj-tab:has-text("Cron")')
 
   await page.click('[data-testid="cron-new"]')
   await page.fill('[data-testid="cron-name"]', 'project brief')

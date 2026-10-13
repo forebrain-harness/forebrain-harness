@@ -1028,7 +1028,12 @@ func newAutoContinueGateway(t *testing.T) *autoContinueGateway {
 	}}
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
 	require.NoError(t, runner.Load())
-	env := &process.Environment{Root: home, SQL: db, Runner: runner,
+	// This fixture predates R1 (its session carries no project row). It is a
+	// process with a project of its own rather than the project-less gateway,
+	// so the conversation runs on the base runner these tests drive. RawConfig
+	// is the underived config a project runner would derive its effective form
+	// from.
+	env := &process.Environment{Root: home, SQL: db, Runner: runner, RawConfig: *cfg,
 		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, RunRT: runStore}}
 	s := &Server{
 		Home: home, Sessions: sessions, RunRT: runStore, Runner: runner,

@@ -94,9 +94,9 @@ func TestOpenMigratesMessageRunIdentityAndPersistsExactAssociation(t *testing.T)
 	_, err = legacy.ExecContext(ctx, `
 CREATE TABLE fb_sessions (
   id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, title TEXT, updated_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL DEFAULT 0
+  created_at INTEGER NOT NULL DEFAULT 0, cwd TEXT NOT NULL DEFAULT ''
 );
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('legacy','main','legacy',2,1);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('legacy','main','legacy',2,1,'/repo/legacy');
 CREATE TABLE fb_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
   role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL,

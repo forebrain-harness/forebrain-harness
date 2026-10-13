@@ -23,12 +23,11 @@ import (
 // ManagerOptions describes the runner a Manager serves. Everything here is
 // frozen for the runner's lifetime.
 type ManagerOptions struct {
-	Home              string // FOREBRAIN_HOME
-	AgentWorkspace    string // the primary agent's workspace root; state lives in <AgentWorkspace>/state/lsp
-	ProjectRoot       string // the launch project root; "" when the runner has no project
-	ProjectKey        string
-	Trusted           bool // safety.TrustedRoot(launch) != ""
-	VersionControlled bool
+	Home           string // FOREBRAIN_HOME
+	AgentWorkspace string // the primary agent's workspace root; state lives in <AgentWorkspace>/state/lsp
+	ProjectRoot    string // the launch project root; "" when the runner has no project
+	ProjectKey     string
+	Trusted        bool // safety.TrustedRoot(launch) != ""
 	// ToolRegistered is the frozen answer of ToolEnabled for this runner; the
 	// caller computes it and passes it in so the snapshot can report it.
 	ToolRegistered bool

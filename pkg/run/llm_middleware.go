@@ -149,7 +149,10 @@ func (g *compactRunGuard) get(runID string) (base []llm.Message, baseLen int, ok
 }
 
 // set caches the compacted base for the given run ID, replacing any previous
-// entry (which would be from a different run).
+// entry (which would be from a different run). prefillTokens is the compacted
+// base's token count, computed by the caller with the session's own model's
+// estimator so this prefix baseline shares the unit of the compaction decision
+// and the observed overhead.
 //
 // baseLen is stored as the compacted length because the orchestration loop
 // adopts the compacted history (see compactionAdoptionSink): the next call's
@@ -157,7 +160,7 @@ func (g *compactRunGuard) get(runID string) (base []llm.Message, baseLen int, ok
 // base + messages[baseLen:] is an identity that appends only genuinely-new
 // messages. Anchoring on the pre-compaction length instead would, on an
 // unusually long turn, slice past newly produced messages and drop them.
-func (g *compactRunGuard) set(runID string, compacted []llm.Message) {
+func (g *compactRunGuard) set(runID string, compacted []llm.Message, prefillTokens int) {
 	if g == nil || runID == "" || len(compacted) == 0 {
 		return
 	}
@@ -166,7 +169,7 @@ func (g *compactRunGuard) set(runID string, compacted []llm.Message) {
 	g.runID = runID
 	g.compactedBase = compacted
 	g.baseLen = len(compacted)
-	g.prefillTokens = llm.EstimateMessages(compacted)
+	g.prefillTokens = max(0, prefillTokens)
 	g.prefillSet = true
 }
 
@@ -218,8 +221,18 @@ func wrapBlankOutputRetryLLM(inner llm.LLM) llm.LLM {
 }
 
 func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	// Resolve the estimator once, for this call's own model, and thread it
+	// through every occupancy number this call produces: the compaction
+	// decision (compactIfNeeded -> shouldCompactMessages), the prefix baseline
+	// cached in the run guard, and the estimate the observation is calibrated
+	// against (observeSuccess/observeOverflow). The learned overhead is
+	// server-real minus local-estimate, so all three must count in the same
+	// unit or the overhead is added to a base it was never measured against.
+	provider, model := r.compactDeps.activeModel(ctx)
+	est := llm.EstimatorFor(provider, model)
+
 	// Each LLM call is a pre-turn or mid-turn auto-compact checkpoint.
-	messages, tail, compacted := r.applyRunScopedCompact(ctx, messages, tools)
+	messages, tail, compacted := r.applyRunScopedCompact(ctx, messages, tools, est)
 	if compacted {
 		// A mid-turn compaction just replaced the model context. Hand the
 		// compacted history back to the enclosing orchestration loop so its live
@@ -230,7 +243,7 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 		recordCompactionAdoption(ctx, messages)
 	}
 
-	sent := llm.EstimateMessages(messages) + estimateToolsTokens(tools)
+	sent := llm.EstimateMessagesWith(est, messages) + estimateToolsTokens(est, tools)
 	res, err := r.inner.Execute(ctx, messages, tools)
 	if err == nil {
 		r.observeSuccess(ctx, res, sent)
@@ -249,10 +262,10 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 		r.observeOverflow(ctx, lastErr, sent)
 		// A provider overflow uses the same replacement-checkpoint operation as
 		// proactive compaction. Never recover by silently dropping exchanges.
-		if compacted, ok := r.forceCompact(ctx, messages, tail, tools); ok {
+		if compacted, ok := r.forceCompact(ctx, messages, tail, tools, est); ok {
 			recordCompactionAdoption(ctx, compacted)
 			if res2, err2 := r.inner.Execute(ctx, compacted, tools); err2 == nil {
-				r.observeSuccess(ctx, res2, llm.EstimateMessages(compacted)+estimateToolsTokens(tools))
+				r.observeSuccess(ctx, res2, llm.EstimateMessagesWith(est, compacted)+estimateToolsTokens(est, tools))
 				return res2, nil
 			} else {
 				lastErr = err2
@@ -301,9 +314,9 @@ func blankOutputError(err error) error {
 // propagate the replacement history to the orchestration loop, and how many
 // trailing messages are provisional (see provisionalTail): those stay out of
 // the checkpoint and follow it verbatim.
-func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool) ([]llm.Message, int, bool) {
+func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, int, bool) {
 	runID := strings.TrimSpace(tool.RunIDFromContext(ctx))
-	prefillTokens := r.runGuard.prefill(runID, llm.EstimateMessages(messages))
+	prefillTokens := r.runGuard.prefill(runID, llm.EstimateMessagesWith(est, messages))
 	tail := provisionalTailLen(ctx, len(messages))
 	if base, baseLen, ok := r.runGuard.get(runID); ok && baseLen <= len(messages) {
 		newMsgs := messages[baseLen:]
@@ -331,7 +344,7 @@ func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []ll
 	if !compacted {
 		return messages, tail, false
 	}
-	r.runGuard.set(runID, head)
+	r.runGuard.set(runID, head, llm.EstimateMessagesWith(est, head))
 	return joinProvisionalTail(head, provisional), tail, true
 }
 
@@ -359,7 +372,7 @@ func (r recoverableLLM) observeOverflow(ctx context.Context, err error, estimate
 	llm.RecordOverflow(provider, model, realInput, estimated)
 }
 
-func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message, tail int, tools []*llm.Tool) ([]llm.Message, bool) {
+func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message, tail int, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, bool) {
 	head, provisional := messages[:len(messages)-tail], messages[len(messages)-tail:]
 	compactCtx, release := compactionContext(ctx)
 	compacted, ok := r.compactDeps.tryCompact(compactCtx, head, tools, true)
@@ -367,7 +380,7 @@ func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message
 	if !ok {
 		return messages, false
 	}
-	r.runGuard.set(strings.TrimSpace(tool.RunIDFromContext(ctx)), compacted)
+	r.runGuard.set(strings.TrimSpace(tool.RunIDFromContext(ctx)), compacted, llm.EstimateMessagesWith(est, compacted))
 	return joinProvisionalTail(compacted, provisional), true
 }
 

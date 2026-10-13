@@ -135,6 +135,9 @@ func validateLoadedRoot(r *Root) error {
 	if err := validateMCPToolApprovalModes(r); err != nil {
 		return err
 	}
+	if err := validateTokenEstimate(r.Agents.Defaults.TokenEstimate); err != nil {
+		return err
+	}
 	if err := validateLSPSection(r); err != nil {
 		return err
 	}
@@ -516,6 +519,30 @@ func validateMCPToolApprovalModes(r *Root) error {
 		return nil
 	}
 	return ValidateMCPServers("agents.defaults.mcp_servers", r.Agents.Defaults.MCPServers)
+}
+
+// validateTokenEstimate checks the agents.defaults.token_estimate section: the
+// hubs are known, and every override names a model and exactly one of a
+// built-in tokenizer id or a local path.
+func validateTokenEstimate(c TokenEstimateConfig) error {
+	for _, hub := range c.Hubs {
+		switch strings.ToLower(strings.TrimSpace(hub)) {
+		case "", "huggingface", "modelscope":
+		default:
+			return fmt.Errorf("agents.defaults.token_estimate.hubs: unknown hub %q (want huggingface or modelscope)", hub)
+		}
+	}
+	for i, override := range c.Tokenizers {
+		if strings.TrimSpace(override.Model) == "" {
+			return fmt.Errorf("agents.defaults.token_estimate.tokenizers[%d]: model is required", i)
+		}
+		hasTokenizer := strings.TrimSpace(override.Tokenizer) != ""
+		hasPath := strings.TrimSpace(override.Path) != ""
+		if hasTokenizer == hasPath {
+			return fmt.Errorf("agents.defaults.token_estimate.tokenizers[%d] (%s): exactly one of tokenizer or path must be set", i, override.Model)
+		}
+	}
+	return nil
 }
 
 func intPtr(v int) *int { return &v }

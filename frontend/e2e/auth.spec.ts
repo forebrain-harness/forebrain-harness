@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import { expectAssistantReply, shot, signIn, watch401 } from './support'
+import { expectAssistantReply, seedProjectSession, shot, signIn, watch401 } from './support'
 
 const PAGES = [
   '/',
@@ -60,7 +60,7 @@ test('sign-in unlocks every page without 401', async ({ page }) => {
   }
   // The endpoints behind the merged settings tabs fire when each tab opens.
   await page.goto('/settings', { waitUntil: 'networkidle' })
-  for (const label of [/主代理|Primary agents/, /MCP/, /钩子|Hooks/, /记忆开关|Memory switches/]) {
+  for (const label of [/语言服务器|Language servers/, /MCP/, /钩子|Hooks/, /记忆开关|Memory switches/]) {
     await page.locator('[data-testid="settings-tabs"] button', { hasText: label }).click()
     await page.waitForLoadState('networkidle')
   }
@@ -97,6 +97,9 @@ test('one-click link signs in and scrubs the token from the address bar', async 
 
 test('chat streams over the cookie-authenticated websocket', async ({ page }) => {
   await signIn(page)
+  const session = await seedProjectSession(page, 'auth-ws')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
   await page.fill('textarea', 'ping')
   await page.press('textarea', 'Enter')
   await expectAssistantReply(page)
@@ -105,6 +108,9 @@ test('chat streams over the cookie-authenticated websocket', async ({ page }) =>
 
 test('uploaded image reaches the api through the cookie', async ({ page }) => {
   await signIn(page)
+  const session = await seedProjectSession(page, 'auth-upload')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
   await page.setInputFiles('input[type=file]', {
     name: 'dot.png',
     mimeType: 'image/png',

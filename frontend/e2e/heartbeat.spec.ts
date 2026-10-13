@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-import { expectAssistantReply, signIn } from './support'
+import { expectAssistantReply, seedProjectSession, signIn } from './support'
 
 /**
  * A heartbeat is a turn of the conversation it belongs to: the prompt it
@@ -15,9 +15,7 @@ test('a heartbeat turn appears in its conversation and survives a reload', async
   test.info().setTimeout(240_000)
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedProjectSession(page, 'heartbeat')
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('textarea')

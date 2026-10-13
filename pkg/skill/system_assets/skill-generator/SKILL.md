@@ -1,6 +1,6 @@
 ---
 name: skill-generator
-description: Turn the workflow that just worked in this session into a reusable project skill. Use when the user asks to keep, save, capture, or formalize the steps just done — "固化这套步骤", "save this workflow as a skill", "turn what we just did into a skill", "把这个流程存下来", or when they accept an offer to keep a run's steps. Writes <project>/.forebrain/skills/<name>/SKILL.md. Not for researching, editing, or benchmarking an existing skill (use /skills), and not for ordinary "save the file" requests.
+description: Turn the workflow that just worked in this session into a reusable project skill. Use when the user asks to keep, save, capture, or formalize the steps just done — "固化这套步骤", "save this workflow as a skill", "turn what we just did into a skill", "把这个流程存下来", or when they accept an offer to keep a run's steps. Writes the skill as a draft under <project>/.forebrain/skills/; it goes live when the user publishes it. Not for researching, editing, or benchmarking an existing skill (use /skills), and not for ordinary "save the file" requests.
 ---
 
 # Skill Generator
@@ -14,10 +14,10 @@ just did. What matters is what you learned while doing it.
 
 ## Step 0: confirm there is a project root
 
-The skill is written into the project's own skills directory:
+The skill is written as a **draft** into the project's own skills directory:
 
 ```
-<project-root>/.forebrain/skills/<name>/SKILL.md
+<project-root>/.forebrain/skills/.drafts/<name>/SKILL.md
 ```
 
 `<project-root>` is the repository you are working in — the version-controlled
@@ -26,9 +26,17 @@ root, say so in one sentence and stop: there is nowhere to put the skill, and
 writing it somewhere else would leave it in a place the next session never
 looks.
 
-The skill becomes visible from the **next** session onward: the skills catalog
-sits in the cached prompt prefix, so this session keeps the one it started with.
-The file is on disk immediately, and `/<name>` reads it in this session too.
+A draft is not live yet. It is not loaded, listed, or runnable until the user
+publishes it — on the web from the skill page's "Publish" button, in the
+terminal from the `/skills` panel. Never publish it yourself; writing the
+draft is the end of this skill's job. (Writing to the formal path
+`<project-root>/.forebrain/skills/<name>/` also lands in the draft — the
+system redirects skill writes there — but write the draft path above so the
+two never disagree.)
+
+Once published, the skill becomes visible from the **next** session onward:
+the skills catalog sits in the cached prompt prefix, so a running session
+keeps the one it started with.
 
 ## Step 1: Extract the reproducible part
 
@@ -76,7 +84,7 @@ environment variable or config key holds it.
 ## Step 4: Write the files
 
 ```
-<project-root>/.forebrain/skills/<name>/
+<project-root>/.forebrain/skills/.drafts/<name>/
 ├── SKILL.md          required
 ├── scripts/          optional — deterministic steps, ready to run
 └── references/       optional — detail that does not fit the body
@@ -109,9 +117,10 @@ Read the file back and confirm:
 - The description says when to use it, in the words someone would actually think
   in.
 
-Then say so in one sentence: which file you wrote and that it takes effect in
-the new session. If the write was refused, fix what the error names and write
-again rather than reporting the failure as the outcome.
+Then leave one line for the user: `Draft <name> saved · publish it to make it live`
+(naming the draft path). That one line is the only prompt about publishing —
+do not open or push any panel. If the write was refused, fix what the error
+names and write again rather than reporting the failure as the outcome.
 
 ## Arguments
 

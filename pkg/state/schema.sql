@@ -2,8 +2,9 @@
 -- Projects bind a working directory to the settings that travel with it:
 -- instructions the sessions carry, a memory scope, and a resource-access
 -- switch. The primary agent is the tenant; the project key is the memory
--- identity of the bound root. Archiving is a soft delete: rows stay, lists
--- hide them; archived_at NULL means the project is live.
+-- identity of the bound root. Every ordinary session belongs to a project,
+-- and one agent has at most one project per root — that uniqueness is what
+-- lets two surfaces opening the same directory converge on one row.
 CREATE TABLE fb_projects (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
@@ -16,12 +17,11 @@ CREATE TABLE fb_projects (
   memory_scope TEXT NOT NULL DEFAULT 'shared' CHECK (memory_scope IN ('shared', 'project_only')),
   resource_access INTEGER NOT NULL DEFAULT 1 CHECK (resource_access IN (0, 1)),
   pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
-  archived_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX idx_fb_projects_agent_updated ON fb_projects(agent_id, updated_at DESC);
-CREATE INDEX idx_fb_projects_agent_root ON fb_projects(agent_id, root);
+CREATE UNIQUE INDEX idx_fb_projects_agent_root_unique ON fb_projects(agent_id, root);
 
 -- The compact/context-reset pointers reference fb_messages rows, and
 -- fb_messages references this table back; SQLite checks foreign keys at DML
@@ -57,13 +57,15 @@ CREATE INDEX idx_fb_sessions_parent ON fb_sessions(parent_session_id) WHERE pare
 
 -- The stored transcript. visibility hides a row from display and from the
 -- next model request while keeping it on disk: 'repaired' marks a mechanical
--- transcript repair, 'withdrawn' a message the user deliberately took back.
+-- transcript repair, 'withdrawn' a message the user deliberately took back,
+-- 'rewound' a message moved aside by "rewind to before a message" (put back
+-- as 'visible' when that rewind is undone).
 CREATE TABLE fb_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
   run_id TEXT REFERENCES fb_runs(id) ON DELETE SET NULL,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'reasoning', 'system')),
-  visibility TEXT NOT NULL DEFAULT 'visible' CHECK (visibility IN ('visible', 'repaired', 'withdrawn')),
+  visibility TEXT NOT NULL DEFAULT 'visible' CHECK (visibility IN ('visible', 'repaired', 'withdrawn', 'rewound')),
   content TEXT NOT NULL,
   parts TEXT NOT NULL DEFAULT '[]',
   message_id TEXT NOT NULL DEFAULT '',
@@ -83,6 +85,54 @@ CREATE TABLE fb_messages (
 ) STRICT;
 CREATE INDEX idx_fb_messages_session_visibility ON fb_messages(session_id, visibility);
 CREATE INDEX idx_fb_messages_run ON fb_messages(run_id) WHERE run_id IS NOT NULL;
+
+-- One row per file a file tool wrote in a conversation: the record behind
+-- "rewind to before a message" and the workbench's changed-files list. Only
+-- the file tools (write_file, edit_file, apply_patch) write here; a change a
+-- shell command made is not recorded and cannot be rewound. The row keys the
+-- write to the conversation (session_id), the run and step that made it, and
+-- the user message whose turn it belongs to (anchor_message_id): rewinding to
+-- before that message restores every file changed at or after it.
+CREATE TABLE fb_file_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL DEFAULT '',
+  step_id TEXT NOT NULL DEFAULT '',
+  -- The fb_messages row id of the user message this write's turn belongs to.
+  anchor_message_id INTEGER NOT NULL DEFAULT 0,
+  -- Absolute, normalized path of the file the tool wrote.
+  path TEXT NOT NULL,
+  -- 1 when the file existed before the write, 0 when the tool created it.
+  existed_before INTEGER NOT NULL DEFAULT 0 CHECK (existed_before IN (0, 1)),
+  -- Snapshot of the file's bytes before the write; empty when it did not exist.
+  before_snapshot TEXT NOT NULL DEFAULT '',
+  -- sha256 of the file's bytes after the write; empty when the write deleted it.
+  after_sha256 TEXT NOT NULL DEFAULT '',
+  deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+  created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_fb_file_changes_session_anchor ON fb_file_changes(session_id, anchor_message_id);
+CREATE INDEX idx_fb_file_changes_session_path ON fb_file_changes(session_id, path);
+
+-- One row per "rewind to before this message". It records the rewind and the
+-- state that makes it undoable: while it is pending the surface offers "undo"
+-- and the rows it hid and the files it restored can be put back; the first new
+-- user message after it fixes it in place. An undone rewind's row is deleted.
+CREATE TABLE fb_rewinds (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  anchor_message_id INTEGER NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('both', 'chat', 'code')),
+  -- The sequence of the first fb_session_events row the rewind hides; 0 when
+  -- no events are hidden (a code-only rewind).
+  hidden_event_seq_from INTEGER NOT NULL DEFAULT 0,
+  -- JSON: the files the rewind restored, each with the snapshot of the bytes
+  -- as they were just before the rewind (for undo) and whether it existed then.
+  files_json TEXT NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL CHECK (state IN ('pending', 'fixed')),
+  created_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE INDEX idx_fb_rewinds_session_state ON fb_rewinds(session_id, state);
 
 -- Surface-specific browsing state is deliberately separate from transcript
 -- and model context. Rebuilding history never mutates it, and clearing model

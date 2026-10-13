@@ -10,7 +10,10 @@ import (
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 func TestLoadedSkillCatalogAllowsReadsOutsideAllowedRoots(t *testing.T) {
@@ -599,4 +602,220 @@ func TestLoadedSkillWriteTargetCoversSymlinkEntryInsideRoot(t *testing.T) {
 
 func quoteJSON(s string) string {
 	return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"`
+}
+
+// --- Skill drafts and versions: the write redirection and the pinned reads.
+
+// draftTestWorkspace builds a skill root with one published skill (v1) and
+// installs the real draft resolver over it, so the write tools exercise the
+// same redirection production wires.
+func draftTestWorkspace(t *testing.T) (*State, string, *llm.Tool) {
+	t.Helper()
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "gateway-ops")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: gateway-ops\ndescription: runbook\n---\n\nv1 body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := skillVersionStore(t, root)
+	if _, err := store.Bootstrap("gateway-ops", skill.VersionRecord{Kind: skill.VersionKindCreated}); err != nil {
+		t.Fatal(err)
+	}
+	st := NewState(root)
+	st.SetPrimaryWorkspaceBoundary("", root, nil)
+	roots := []string{root}
+	st.SetSkillDraftResolver(func(path string) (SkillDraftTarget, bool, error) {
+		target, handled, err := skill.ResolveDraftTarget(roots, path)
+		if err != nil || !handled {
+			return SkillDraftTarget{}, handled, err
+		}
+		return SkillDraftTarget{SkillName: target.SkillName, Target: target.Target, Source: target.Source}, true, nil
+	})
+	writeTool, err := NewFileWriteTool(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, root, writeTool
+}
+
+// skillVersionStore builds the skill package's version store over a root; the
+// indirection keeps the test readable where the store is only a fixture.
+func skillVersionStore(t *testing.T, root string) skill.VersionStore {
+	t.Helper()
+	return skill.VersionStore{Root: root}
+}
+
+// TestWriteFileRedirectsFormalSkillPathToDraft pins the owner rule from
+// 2026-10-11: a write aimed at a formal skill directory lands in the skill's
+// draft, seeded from the current version, and the formal directory is
+// untouched.
+func TestWriteFileRedirectsFormalSkillPathToDraft(t *testing.T) {
+	st, root, writeTool := draftTestWorkspace(t)
+	formal := filepath.Join(root, "gateway-ops", "SKILL.md")
+	// The draft is seeded from the current version, so overwriting it owes
+	// the same read an overwrite anywhere else owes.
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(formal)+`"}`); err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+
+	out, err := writeTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(formal)+`","content":"---\nname: gateway-ops\ndescription: runbook\n---\n\nv2 draft body\n"}`)
+	if err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if outText, _ := out.(string); !strings.Contains(outText, "draft") || !strings.Contains(outText, "publish") {
+		t.Fatalf("result does not name the draft: %q", out)
+	}
+	draft := filepath.Join(root, ".drafts", "gateway-ops", "SKILL.md")
+	raw, err := os.ReadFile(draft)
+	if err != nil {
+		t.Fatalf("draft write: %v", err)
+	}
+	if !strings.Contains(string(raw), "v2 draft body") {
+		t.Fatalf("draft content: %q", raw)
+	}
+	formalRaw, err := os.ReadFile(formal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(formalRaw), "v1 body") {
+		t.Fatalf("formal directory changed by a draft write: %q", formalRaw)
+	}
+}
+
+// TestEditFileRedirectsWithFormalReadState pins the workshop's primary flow:
+// the model reads the formal file, edits the formal path, and the edit lands
+// in the draft holding exactly the bytes that were read.
+func TestEditFileRedirectsWithFormalReadState(t *testing.T) {
+	st, root, _ := draftTestWorkspace(t)
+	formal := filepath.Join(root, "gateway-ops", "SKILL.md")
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(formal)+`"}`); err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	editTool, err := NewFileEditTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := editTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(formal)+`","old_string":"v1 body","new_string":"edited draft body"}`)
+	if err != nil {
+		t.Fatalf("edit_file: %v", err)
+	}
+	if outText, _ := out.(string); !strings.Contains(outText, "draft") {
+		t.Fatalf("edit result does not name the draft: %q", out)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".drafts", "gateway-ops", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "edited draft body") || strings.Contains(string(raw), "v1 body") {
+		t.Fatalf("draft after edit: %q", raw)
+	}
+}
+
+// TestWriteFileRefusesVersionStoreAndSkillDir pins the two hard refusals:
+// the version records are history, and a whole skill directory is the skills
+// list's to delete.
+func TestWriteFileRefusesVersionStoreAndSkillDir(t *testing.T) {
+	_, root, writeTool := draftTestWorkspace(t)
+	manifest := filepath.Join(root, ".versions", "gateway-ops", "manifest.json")
+	if _, err := writeTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(manifest)+`","content":"forged"}`); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("version store write: err=%v", err)
+	}
+	if _, err := writeTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(filepath.Join(root, "gateway-ops"))+`","content":"x"}`); err == nil || !strings.Contains(err.Error(), "skills list") {
+		t.Fatalf("skill directory write: err=%v", err)
+	}
+}
+
+// TestDraftWriteRecordsFileChange pins 033's contract for drafts: a redirected
+// write flows through SnapshotBeforeWrite and RecordFileChange like any
+// other, so "回到这里" can undo a draft's changes.
+func TestDraftWriteRecordsFileChange(t *testing.T) {
+	st, root, writeTool := draftTestWorkspace(t)
+	st.SetHistoryDir(filepath.Join(root, ".history"))
+	var recorded []state.FileChange
+	st.SetFileChangeRecorder(recorderFunc(func(ctx context.Context, c state.FileChange) error {
+		recorded = append(recorded, c)
+		return nil
+	}))
+	formal := filepath.Join(root, "gateway-ops", "SKILL.md")
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(formal)+`"}`); err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	ctx := WithConversationSessionID(context.Background(), "sess-draft")
+	if _, err := writeTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(formal)+`","content":"---\nname: gateway-ops\ndescription: runbook\n---\n\nv2 body\n"}`); err != nil {
+		t.Fatalf("write_file: %v", err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("recorded %d file changes, want 1", len(recorded))
+	}
+	want := filepath.Join(root, ".drafts", "gateway-ops", "SKILL.md")
+	// The redirection answers under the canonical root spelling.
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		want = filepath.Join(resolvedRoot, ".drafts", "gateway-ops", "SKILL.md")
+	}
+	if recorded[0].Path != want {
+		t.Fatalf("recorded path = %s, want the draft path %s", recorded[0].Path, want)
+	}
+	if recorded[0].BeforeSnapshot == "" {
+		t.Fatal("draft write recorded no pre-write snapshot")
+	}
+	if _, err := os.Stat(recorded[0].BeforeSnapshot); err != nil {
+		t.Fatalf("snapshot file: %v", err)
+	}
+}
+
+// recorderFunc adapts a function to the FileChangeRecorder interface.
+type recorderFunc func(ctx context.Context, c state.FileChange) error
+
+func (f recorderFunc) RecordFileChange(ctx context.Context, c state.FileChange) error {
+	return f(ctx, c)
+}
+
+// TestPinnedVersionDirIsReadableThroughSkillCatalog pins the read side of a
+// pinned session: the version directory a session reads from is as readable
+// as the formal directory, through the same catalog-backed resolution.
+func TestPinnedVersionDirIsReadableThroughSkillCatalog(t *testing.T) {
+	_, root, _ := draftTestWorkspace(t)
+	store := skillVersionStore(t, root)
+	draft, err := store.EnsureDraft("gateway-ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(draft, "SKILL.md"), []byte("---\nname: gateway-ops\ndescription: runbook\n---\n\nv2 body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Publish("gateway-ops", "v2"); err != nil {
+		t.Fatal(err)
+	}
+	st := NewState(root)
+	st.ReplaceLoadedSkillCatalog([]LoadedSkill{{
+		Name:         "gateway-ops",
+		RootDir:      filepath.Join(root, "gateway-ops"),
+		Version:      2,
+		VersionsRoot: filepath.Join(root, ".versions", "gateway-ops"),
+	}})
+	pinned := filepath.Join(root, ".versions", "gateway-ops", "v2", "SKILL.md")
+	if resolved, ok := st.ResolveLoadedSkillRead(pinned); !ok || resolved != pinned {
+		t.Fatalf("pinned read: resolved=%q ok=%v", resolved, ok)
+	}
+	item, ok := st.LoadedSkillForPath(pinned)
+	if !ok || item.Name != "gateway-ops" {
+		t.Fatalf("pinned path not attributed to the skill: %+v ok=%v", item, ok)
+	}
+	if got := item.PinnedSkillFile(); got != pinned {
+		t.Fatalf("pinned skill file = %q want %q", got, pinned)
+	}
 }

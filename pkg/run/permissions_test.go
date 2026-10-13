@@ -970,3 +970,46 @@ func TestDangerFullAccessRelaxesOnlyPolicyGeneratedDenies(t *testing.T) {
 		t.Fatalf("explain diverged from evaluate: explain=%+v evaluate=%+v", explained.Decision, unmatched)
 	}
 }
+
+// TestPermissionRequestHookCwdIsSessionProjectRoot pins that the
+// PermissionRequest hook receives the session's project root as its cwd, not
+// the main agent's workspace root.
+func TestPermissionRequestHookCwdIsSessionProjectRoot(t *testing.T) {
+	sink := filepath.Join(t.TempDir(), "hook-input.json")
+	command := "cat > " + sink
+	cfg := &appcfg.Root{Hooks: appcfg.HooksSettings{
+		hook.EventPermissionRequest: {{Matcher: "Bash", Hooks: []appcfg.HookCommand{{Type: appcfg.HookTypeCommand, Command: command}}}},
+	}}
+	workspace := t.TempDir()
+	project := t.TempDir()
+	tools := tool.NewState(t.TempDir())
+	tools.SetRuntimeValue("hooks_runtime", &hook.Runtime{
+		Home: t.TempDir(), Cfg: cfg,
+		PermissionMode: func() string { return "on-request" },
+	})
+	runner := &Runner{
+		Deps:        &Deps{AppCfg: cfg, WorkspaceRoot: workspace, ProjectRoot: project},
+		tools:       tools,
+		permRuntime: safety.NewRuntimeWithStore(safety.NewStore()),
+	}
+	ctx := tool.WithProjectRoot(context.Background(), project)
+	if _, _, err := runner.runPermissionRequestHook(ctx, "shell", map[string]any{"command": "curl example.com"}); err != nil {
+		t.Fatalf("permission request hook: %v", err)
+	}
+	raw, err := os.ReadFile(sink)
+	if err != nil {
+		t.Fatalf("hook did not write its input: %v", err)
+	}
+	var got struct {
+		Cwd string `json:"cwd"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode hook input: %v raw=%s", err, raw)
+	}
+	if filepath.Clean(got.Cwd) != filepath.Clean(project) {
+		t.Fatalf("hook cwd = %q, want the session project root %q", got.Cwd, project)
+	}
+	if filepath.Clean(got.Cwd) == filepath.Clean(workspace) {
+		t.Fatalf("hook cwd leaked the main agent workspace %q", workspace)
+	}
+}

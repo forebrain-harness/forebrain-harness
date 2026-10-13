@@ -39,18 +39,19 @@ const (
 
 // estimateToolsTokens estimates the tool-schema block sent with every request.
 // This is part of the model's input on each call and is often the largest fixed
-// cost in the request, so occupancy that omits it systematically reads low.
-func estimateToolsTokens(tools []*llm.Tool) int {
+// cost in the request, so occupancy that omits it systematically reads low. It
+// counts with the same estimator as the message block it is added to.
+func estimateToolsTokens(e llm.Estimator, tools []*llm.Tool) int {
 	total := 0
 	for _, tool := range tools {
 		if tool == nil {
 			continue
 		}
-		total += llm.EstimateText(tool.Name())
-		total += llm.EstimateText(tool.Description())
+		total += llm.EstimateTextWith(e, tool.Name())
+		total += llm.EstimateTextWith(e, tool.Description())
 		if schema := tool.InputSchema(); len(schema) > 0 {
 			if raw, err := json.Marshal(schema); err == nil {
-				total += llm.EstimateText(string(raw))
+				total += llm.EstimateTextWith(e, string(raw))
 			}
 		}
 		total += 8
@@ -135,12 +136,20 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 	if modelLimit <= 0 {
 		return false
 	}
+	// This mid-turn checkpoint must count with the session's own model's
+	// estimator, the same one the pre-turn checkpoint
+	// (assembly.autoCompactDecision) and the observed overhead
+	// (RecordSuccess/RecordOverflow) use. The overhead is server-real minus
+	// local-estimate; if the decision counted with a different tokenizer than
+	// the observation measured against, the learned overhead would be added to
+	// the wrong base and the two checkpoints would fire at different real sizes.
+	est := llm.EstimatorFor(provider, model)
 	// Tool schemas are part of every request's input and can run to tens of
 	// thousands of tokens, so occupancy that ignores them reads far below the
 	// truth and the threshold never fires. The rest of what this layer cannot
 	// see -- the prefix the inner wrappers prepend, the provider's own framing
 	// -- is added back as the token overhead those same providers have reported.
-	total := llm.Project(provider, model, llm.EstimateMessages(messages)+estimateToolsTokens(tools))
+	total := llm.Project(provider, model, llm.EstimateMessagesWith(est, messages)+estimateToolsTokens(est, tools))
 	if total >= modelLimit {
 		return true
 	}
@@ -153,13 +162,13 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 		if bodyPrefixTokens >= 0 {
 			used = max(0, total-bodyPrefixTokens)
 		} else {
-			used = bodyAfterPrefixTokens(messages, total)
+			used = bodyAfterPrefixTokens(est, messages, total)
 		}
 	}
 	return used >= threshold
 }
 
-func bodyAfterPrefixTokens(messages []llm.Message, total int) int {
+func bodyAfterPrefixTokens(e llm.Estimator, messages []llm.Message, total int) int {
 	checkpoint := -1
 	for i, msg := range messages {
 		if msg.Compaction != nil || (msg.Role == llm.RoleUser && strings.HasPrefix(strings.TrimSpace(msg.TextContent()), assembly.SummaryPrefix+"\n")) {
@@ -178,7 +187,7 @@ func bodyAfterPrefixTokens(messages []llm.Message, total int) int {
 	if prefixEnd < 0 {
 		return total
 	}
-	return max(0, total-llm.EstimateMessages(messages[:prefixEnd+1]))
+	return max(0, total-llm.EstimateMessagesWith(e, messages[:prefixEnd+1]))
 }
 
 // compactionAdoptionSink is a context-scoped, one-shot channel that lets an

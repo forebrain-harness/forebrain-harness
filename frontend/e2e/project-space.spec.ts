@@ -11,13 +11,16 @@ import { expectAssistantReply, signIn } from './support'
 // rejects it), so the fixture lives in the scratch project directory the
 // e2e gateway runs from — resolved from E2E_PROJECT_PARENT when set.
 let fixtureParent = ''
+// One project per (agent, root) is enforced now (plan 025), so each test needs
+// its own root even though the project name is reused.
+let seedSeq = 0
 
 async function seed(_page: Page, name: string): Promise<string> {
   if (!fixtureParent) {
     fixtureParent = process.env.E2E_PROJECT_PARENT ?? ''
     if (!fixtureParent) throw new Error('E2E_PROJECT_PARENT must point at a directory outside the forebrain home')
   }
-  const root = join(fixtureParent, 'e2e-proj', name)
+  const root = join(fixtureParent, 'e2e-proj', `${name}-${++seedSeq}`)
   mkdirSync(root, { recursive: true })
   writeFileSync(join(root, 'README.md'), `project ${name}`)
   return root
@@ -45,16 +48,16 @@ test('project list shows the agent scope and a created card', async ({ page }) =
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/projects-list.png`, fullPage: true })
 })
 
-test('project space shell: band, breadcrumb, default overview', async ({ page }) => {
+test('project space shell: breadcrumb, tabs, default overview', async ({ page }) => {
   await signIn(page)
   await createProject(page, 'e2e-alpha')
   await expect(page).toHaveURL(/\/projects\/.+\/overview$/)
-  await expect(page.locator('.project-band')).toBeVisible()
-  await expect(page.locator('.project-band')).toContainText('e2e-alpha')
-  const tabLabels = await page.locator('.project-tab').allInnerTexts()
+  await expect(page.locator('.proj-head')).toBeVisible()
+  await expect(page.locator('.proj-head')).toContainText('e2e-alpha')
+  const tabLabels = await page.locator('.proj-tab').allInnerTexts()
   expect(tabLabels.map((label) => label.trim()).length).toBe(9)
   // Placeholder tabs render their notice.
-  await page.click('.project-tab:has-text("规则"), .project-tab:has-text("Rules")')
+  await page.click('.proj-tab:has-text("规则"), .proj-tab:has-text("Rules")')
   await expect(page).toHaveURL(/\/rules$/)
 })
 
@@ -74,7 +77,7 @@ test('project sessions live only in the project space', async ({ page }) => {
   await signIn(page)
   await createProject(page, 'e2e-alpha')
   const projectUrl = page.url().replace(/\/overview$/, '')
-  await page.click('.project-tab:has-text("会话"), .project-tab:has-text("Sessions")')
+  await page.click('.proj-tab:has-text("会话"), .proj-tab:has-text("Sessions")')
   await page.click('button:has-text("新的项目会话"), button:has-text("New session")')
   await page.waitForURL((url) => url.pathname === '/' && url.searchParams.has('session'), { timeout: 15_000 })
   await page.goto(projectUrl + '/sessions', { waitUntil: 'networkidle' })
@@ -91,7 +94,7 @@ test('the chat page names a project session by its own title', async ({ page }) 
   test.info().setTimeout(150_000)
   await signIn(page)
   await createProject(page, 'e2e-alpha')
-  await page.click('.project-tab:has-text("会话"), .project-tab:has-text("Sessions")')
+  await page.click('.proj-tab:has-text("会话"), .proj-tab:has-text("Sessions")')
   await page.click('button:has-text("新的项目会话"), button:has-text("New session")')
   await page.waitForURL((url) => url.pathname === '/' && url.searchParams.has('session'), { timeout: 15_000 })
   await page.waitForSelector('textarea')
@@ -108,7 +111,7 @@ test('the chat page names a project session by its own title', async ({ page }) 
 test('project mcp shows the trust gate then the preview', async ({ page }) => {
   await signIn(page)
   await createProject(page, 'e2e-alpha')
-  await page.click('.project-tab:has-text("MCP")')
+  await page.click('.proj-tab:has-text("MCP")')
   await expect(page.locator('[data-testid="project-trust"]')).toBeVisible()
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/project-mcp.png`, fullPage: true })
   await page.click('[data-testid="project-trust"]')
@@ -118,6 +121,6 @@ test('project mcp shows the trust gate then the preview', async ({ page }) => {
 test('breadcrumb returns to the list', async ({ page }) => {
   await signIn(page)
   await createProject(page, 'e2e-alpha')
-  await page.click('.project-breadcrumb-link')
+  await page.click('.crumb-link')
   await page.waitForURL(/\/projects$/)
 })

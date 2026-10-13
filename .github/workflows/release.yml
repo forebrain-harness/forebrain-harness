@@ -100,6 +100,18 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential
       - run: test -f pkg/gateway/dist/index.html
       - run: scripts/check-release-versions.sh
+      # darwin/linux targets download a prebuilt tokenizers archive inside
+      # build-platform-packages.sh; windows/amd64 compiles it from source, so
+      # the runner needs the Rust Windows GNU target (cached across runs).
+      - if: runner.os == 'Windows'
+        name: Cache the tokenizers static library
+        uses: actions/cache@v4
+        with:
+          path: third_party/libtokenizers/windows_amd64
+          key: libtokenizers-windows-amd64-${{ hashFiles('go.mod') }}
+      - if: runner.os == 'Windows'
+        name: Add the Windows GNU Rust target
+        run: rustup target add x86_64-pc-windows-gnu
       - name: Build the platform package
         env:
           FOREBRAIN_BUILD_TARGETS: ${{ matrix.target }}
@@ -220,9 +232,14 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: sudo apt-get update && sudo apt-get install -y build-essential
+      # The tokenizers archive is not part of the module, so it is fetched from
+      # this checkout (the tagged source) and go install is pointed at it.
+      - name: Fetch the tokenizers static library
+        run: scripts/fetch-libtokenizers.sh linux/amd64
       - name: Install the release the way a user does
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
+          CGO_LDFLAGS: -L${{ github.workspace }}/third_party/libtokenizers/linux_amd64
         run: |
           cd "$RUNNER_TEMP"
           env -u GOFLAGS GOWORK=off CGO_ENABLED=1 GOBIN="$RUNNER_TEMP/bin" \

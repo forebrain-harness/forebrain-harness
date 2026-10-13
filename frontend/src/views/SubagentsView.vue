@@ -1,60 +1,59 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-3 pb-12 pt-6 sm:px-6">
     <div class="mx-auto w-full max-w-4xl">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('subagents.title') }}</h1>
-          <ScopeBadge type="agent" :label="t('scope.agent')" data-testid="scope-badge" />
-        </div>
-        <button
-          type="button"
-          class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]"
-          :disabled="!runningRows.length || cancellingAll"
-          @click="cancelAll"
-        >
-          {{ cancellingAll ? t('common.loading') : t('subagents.cancelAll') }}
-        </button>
-      </div>
-      <p class="mt-2 text-[13px] text-[var(--forebrain-text-2)]">{{ t('subagents.description') }}</p>
+      <PageTopRow :title="t('subagents.title')" :description="t('subagents.description')">
+        <template #actions>
+          <button
+            type="button"
+            class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]"
+            :disabled="!runningRows.length || cancellingAll"
+            @click="cancelAll"
+          >
+            {{ cancellingAll ? t('common.loading') : t('subagents.cancelAll') }}
+          </button>
+        </template>
+      </PageTopRow>
 
       <p v-if="error" class="mt-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error || actionError }}</p>
 
       <div v-if="loading" class="mt-6 text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!runningRows.length" class="mt-10 rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-12 text-center">
+      <div v-else-if="!runningRows.length" class="mt-6 rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-12 text-center">
         <Users class="mx-auto size-10 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
         <p class="mt-3 text-sm text-[var(--forebrain-muted-text)]">{{ t('subagents.empty') }}</p>
       </div>
 
-      <table v-else class="mt-6 w-full border-collapse text-left">
-        <thead>
-          <tr class="border-b border-[var(--forebrain-divider)] text-[12px] text-[var(--forebrain-muted-text)]">
-            <th class="py-2 pr-4 font-medium">{{ t('subagents.agent') }}</th>
-            <th class="py-2 pr-4 font-medium">{{ t('subagents.session') }}</th>
-            <th class="py-2 pr-4 font-medium">{{ t('subagents.status') }}</th>
-            <th class="py-2 pr-4 font-medium">{{ t('subagents.startedAt') }}</th>
-            <th class="py-2 font-medium" />
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in runningRows" :key="row.id" class="border-b border-[var(--forebrain-divider)] text-[13px] text-[var(--forebrain-text)]">
-            <td class="py-3 pr-4">
-              <div class="font-medium">{{ row.label || row.id }}</div>
-              <div v-if="row.title" class="mt-0.5 max-w-[280px] truncate text-[11px] text-[var(--forebrain-muted-text)]" :title="row.title">{{ row.title }}</div>
-            </td>
-            <td class="py-3 pr-4 font-mono text-[11px] text-[var(--forebrain-text-2)]">{{ row.sessionId || '—' }}</td>
-            <td class="py-3 pr-4">
-              <span class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[11px] text-[var(--forebrain-text-2)]">{{ row.status }}</span>
-            </td>
-            <td class="py-3 pr-4 text-[12px] text-[var(--forebrain-text-2)]">{{ formatStarted(row) }}</td>
-            <td class="py-3 text-right">
-              <button v-if="row.sessionId" type="button" class="forebrain-btn forebrain-btn-ghost mr-2 text-xs" @click="jumpToSession(row)">{{ t('subagents.openSession') }}</button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="cancelling.has(row.id)" @click="cancelOne(row)">
-                {{ cancelling.has(row.id) ? t('common.loading') : t('subagents.stop') }}
-              </button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      <div v-else class="forebrain-table-wrap mt-6">
+        <table class="forebrain-table">
+          <thead>
+            <tr>
+              <th>{{ t('subagents.agent') }}</th>
+              <th>{{ t('subagents.session') }}</th>
+              <th>{{ t('subagents.status') }}</th>
+              <th>{{ t('subagents.startedAt') }}</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in runningRows" :key="row.id">
+              <td>
+                <div class="font-medium">{{ row.label || row.id }}</div>
+                <div v-if="row.title" class="mt-0.5 max-w-[280px] truncate text-[11px] text-[var(--forebrain-muted-text)]" :title="row.title">{{ row.title }}</div>
+              </td>
+              <td class="font-mono text-[11px] text-[var(--forebrain-text-2)]">{{ row.sessionId || '—' }}</td>
+              <td>
+                <span class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[11px] text-[var(--forebrain-text-2)]">{{ row.status }}</span>
+              </td>
+              <td class="text-[12px] text-[var(--forebrain-text-2)]">{{ formatStarted(row) }}</td>
+              <td class="text-right">
+                <button v-if="row.sessionId" type="button" class="forebrain-btn forebrain-btn-ghost mr-2 text-xs" @click="jumpToSession(row)">{{ t('subagents.openSession') }}</button>
+                <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="cancelling.has(row.id)" @click="cancelOne(row)">
+                  {{ cancelling.has(row.id) ? t('common.loading') : t('subagents.stop') }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 </template>
@@ -63,7 +62,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Users } from 'lucide-vue-next'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import { agentRosterViewTarget, useAgentRoster } from '@/composables/useAgentRoster'
 import { getErrorMessage, type AgentRosterRow } from '@/lib/api'
 import { useI18n } from '@/locales'

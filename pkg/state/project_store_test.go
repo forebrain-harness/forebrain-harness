@@ -2,7 +2,9 @@ package state
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -36,52 +38,80 @@ func TestProjectStoreTenantIsolation(t *testing.T) {
 	}
 }
 
-func TestProjectArchiveKeepsData(t *testing.T) {
+func TestProjectCreateRejectsDuplicateRoot(t *testing.T) {
 	ctx := context.Background()
 	a, _ := newProjectStoreForTest(t, "main")
-	p, err := a.Create(ctx, CreateProjectInput{Name: "keep", Root: "/tmp/keep"})
+	first, err := a.Create(ctx, CreateProjectInput{Name: "one", Root: "/tmp/dup-root"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.SetArchived(ctx, p.ID, 1700000000); err != nil {
-		t.Fatal(err)
+	second, err := a.Create(ctx, CreateProjectInput{Name: "two", Root: "/tmp/dup-root"})
+	if !errors.Is(err, ErrProjectRootTaken) {
+		t.Fatalf("duplicate root err = %v, want ErrProjectRootTaken", err)
 	}
-	list, err := a.ListProjects(ctx, ListProjectsOptions{}, 50, 0)
-	if err != nil || len(list) != 0 {
-		t.Fatalf("archived project hidden by default: %v %+v", err, list)
+	if second.ID != first.ID {
+		t.Fatalf("a conflict must hand back the existing project: %+v vs %+v", second, first)
 	}
-	list, err = a.ListProjects(ctx, ListProjectsOptions{IncludeArchived: true}, 50, 0)
-	if err != nil || len(list) != 1 {
-		t.Fatalf("archived project visible with filter: %v %+v", err, list)
-	}
-	if list[0].ArchivedAt == nil {
-		t.Fatalf("archived_at not persisted")
-	}
-	if err := a.SetArchived(ctx, p.ID, 0); err != nil {
-		t.Fatal(err)
-	}
-	list, _ = a.ListProjects(ctx, ListProjectsOptions{}, 50, 0)
+	list, _ := a.ListProjects(ctx, ListProjectsOptions{}, 50, 0)
 	if len(list) != 1 {
-		t.Fatalf("restore failed")
+		t.Fatalf("one project per root, got %d", len(list))
 	}
 }
 
-func TestProjectDeleteCascadesAndUnbindsSessions(t *testing.T) {
+// TestProjectFindOrCreateByRootIsIdempotent pins that two surfaces opening the
+// same directory at once converge on a single project row.
+func TestProjectFindOrCreateByRootIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	a, _ := newProjectStoreForTest(t, "main")
+	root := t.TempDir()
+	ids := make([]string, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p, _, err := a.FindOrCreateByRoot(ctx, root, CreateProjectInput{Name: "concurrent"})
+			ids[i], errs[i] = p.ID, err
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if ids[0] != ids[1] {
+		t.Fatalf("concurrent calls must converge on one project: %v vs %v", ids[0], ids[1])
+	}
+	list, _ := a.ListProjects(ctx, ListProjectsOptions{}, 50, 0)
+	if len(list) != 1 {
+		t.Fatalf("one row expected, got %d", len(list))
+	}
+	if _, created, err := a.FindOrCreateByRoot(ctx, root, CreateProjectInput{}); err != nil || created {
+		t.Fatalf("a second call on a known root reports created=%v err=%v", created, err)
+	}
+}
+
+// TestProjectDeleteRemovesItsConversations pins the new delete semantics: the
+// project's conversations (and sub-sessions) go with it, not merely unbound.
+func TestProjectDeleteRemovesItsConversations(t *testing.T) {
 	ctx := context.Background()
 	a, sessions := newProjectStoreForTest(t, "main")
 	p, err := a.Create(ctx, CreateProjectInput{Name: "gone", Root: "/tmp/gone"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sessions.Ensure(ctx, "sess-1", "title"); err != nil {
-		t.Fatal(err)
+	for _, sid := range []string{"sess-1", "child-1"} {
+		if err := sessions.Ensure(ctx, sid, "title"); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.BindSession(ctx, sid, p.ID); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := a.BindSession(ctx, "sess-1", p.ID); err != nil {
+	if err := sessions.SetParentSessionID(ctx, "child-1", "sess-1"); err != nil {
 		t.Fatal(err)
-	}
-	got, ok, err := a.ProjectForSession(ctx, "sess-1")
-	if err != nil || !ok || got.ID != p.ID {
-		t.Fatalf("bind failed: %v %v %+v", err, ok, got)
 	}
 	if err := a.Delete(ctx, p.ID); err != nil {
 		t.Fatal(err)
@@ -89,12 +119,67 @@ func TestProjectDeleteCascadesAndUnbindsSessions(t *testing.T) {
 	if _, err := a.Get(ctx, p.ID); err == nil {
 		t.Fatalf("deleted project still readable")
 	}
-	if _, ok, _ := a.ProjectForSession(ctx, "sess-1"); ok {
-		t.Fatalf("session should be unbound after delete")
+	if exists, _ := sessions.HasSession(ctx, "sess-1"); exists {
+		t.Fatalf("project deletion must remove its conversations")
 	}
-	// Session itself survives.
-	if exists, _ := sessions.HasSession(ctx, "sess-1"); !exists {
-		t.Fatalf("session transcript must survive project deletion")
+	if exists, _ := sessions.HasSession(ctx, "child-1"); exists {
+		t.Fatalf("project deletion must remove its sub-sessions too")
+	}
+}
+
+// TestProjectDeleteBusyWhileRunInFlight pins that a project with a run in
+// flight is refused rather than torn out from under the run.
+func TestProjectDeleteBusyWhileRunInFlight(t *testing.T) {
+	ctx := context.Background()
+	a, sessions := newProjectStoreForTest(t, "main")
+	p, err := a.Create(ctx, CreateProjectInput{Name: "busy", Root: "/tmp/busy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.Ensure(ctx, "sess-busy", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.BindSession(ctx, "sess-busy", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	rt := &RunStore{DB: a.db}
+	if _, err := rt.CreateRun(ctx, "sess-busy", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Delete(ctx, p.ID); !errors.Is(err, ErrProjectBusy) {
+		t.Fatalf("delete while a run is in flight = %v, want ErrProjectBusy", err)
+	}
+	if _, err := a.Get(ctx, p.ID); err != nil {
+		t.Fatalf("project must survive a refused delete: %v", err)
+	}
+}
+
+// TestProjectDeletePreviewCounts pins the counts the confirmation dialog shows:
+// the project's own conversations (sub-sessions excluded) and its cron jobs.
+func TestProjectDeletePreviewCounts(t *testing.T) {
+	ctx := context.Background()
+	a, sessions := newProjectStoreForTest(t, "main")
+	p, err := a.Create(ctx, CreateProjectInput{Name: "preview", Root: "/tmp/preview"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{"s1", "s2", "s2-child"} {
+		if err := sessions.Ensure(ctx, sid, "t"); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.BindSession(ctx, sid, p.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sessions.SetParentSessionID(ctx, "s2-child", "s2"); err != nil {
+		t.Fatal(err)
+	}
+	sessionCount, cronJobs, running, err := a.DeletePreview(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionCount != 2 || cronJobs != 0 || running {
+		t.Fatalf("preview = %d sessions, %d jobs, running=%v; want 2, 0, false", sessionCount, cronJobs, running)
 	}
 }
 

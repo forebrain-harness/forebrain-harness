@@ -112,7 +112,7 @@ func TestContextSnapshotResolvesConfiguredPrimaryModel(t *testing.T) {
 				Cfg: cfg, Home: home,
 				PrimaryModel: func(string) (string, string) { return run.PrimaryModel(runner) },
 			})
-			snapshot, ok, err := h.Assemble(hook.HookContext{SessionID: "s1", Trigger: "user"}, "continue")
+			snapshot, ok, err := h.Assemble(context.Background(), hook.HookContext{SessionID: "s1", Trigger: "user"}, "continue")
 			if err != nil || !ok {
 				t.Fatalf("Assemble: ok=%v err=%v", ok, err)
 			}
@@ -465,12 +465,13 @@ func TestResolveConsentProjectContextRegisteredWins(t *testing.T) {
 	if got != want {
 		t.Fatalf("consent context = %+v, want the runner pool's registered context %+v", got, want)
 	}
-	// The gitless registration is not version controlled, so the prompt
-	// resolves the same fail-closed answer the runner gets — no project
-	// boundary at all — instead of asking about (and deciding for) the
-	// enclosing checkout.
-	if root := safety.TrustedRoot(got); root != "" {
-		t.Fatalf("TrustedRoot = %q, want empty for a gitless registration", root)
+	// Version control is no longer part of the gate (R6): the trusted (gitless)
+	// registration is trusted at its own root, so the prompt and the runner
+	// agree this subdirectory is the project boundary — not the enclosing
+	// checkout it is checked out inside. The old expectation (empty TrustedRoot
+	// for a gitless registration) was the VCS gate the project model dropped.
+	if root := safety.TrustedRoot(got); root != want.Project.Root {
+		t.Fatalf("TrustedRoot = %q, want the registered gitless root %q", root, want.Project.Root)
 	}
 	// The launch resolution would have answered the enclosing checkout.
 	checkoutCanonical, err := safety.CanonicalPath(checkout)
@@ -525,5 +526,63 @@ func TestResolveConsentProjectContextRegisteredWins(t *testing.T) {
 	}
 	if got != wantLaunch {
 		t.Fatalf("unregistered consent context = %+v, want the launch resolution %+v", got, wantLaunch)
+	}
+}
+
+// TestGatewayEnvironmentHasNoLaunchProject pins R4: a process started with
+// NoLaunchProject — the gateway — treats its working directory as having no
+// business meaning. Even when that directory is a trusted project carrying
+// FOREBRAIN.md and project MCP servers, it does not become the base runner's
+// project, its trust does not derive the sandbox, and its project MCP servers
+// do not load. Sessions get their project from their own row instead.
+func TestGatewayEnvironmentHasNoLaunchProject(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "FOREBRAIN.md"), []byte("# project rules\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mcpPath := filepath.Join(projectDir, ".forebrain", "mcp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mcpPath, []byte("mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: projectDir}); err != nil {
+		t.Fatal(err)
+	}
+	// The process is started INSIDE the trusted project: NoLaunchProject must
+	// ignore the working directory entirely.
+	t.Chdir(projectDir)
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	cfg := activeAgentTestConfig()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
+		"        - provider: openai\n          model: gpt-main\n          api_key: ${OPENAI_API_KEY}\n          base_url: http://localhost:0/v1\n"
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env, err := Open(ctx, OpenOptions{Home: home, ConfigPath: cfgPath, Config: &cfg, NoLaunchProject: true, SessionSource: "webchat"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer env.Close()
+
+	if env.LaunchProject.Project.Root != "" {
+		t.Fatalf("LaunchProject.Root = %q, want empty under NoLaunchProject", env.LaunchProject.Project.Root)
+	}
+	if env.LaunchDir != "" {
+		t.Fatalf("LaunchDir = %q, want empty under NoLaunchProject", env.LaunchDir)
+	}
+	if env.Runner.ProjectRoot != "" {
+		t.Fatalf("base runner ProjectRoot = %q, want empty", env.Runner.ProjectRoot)
+	}
+	for _, srv := range env.Deps.MCPServers {
+		if strings.EqualFold(strings.TrimSpace(srv.Name), "projtool") {
+			t.Fatalf("the launch directory's project MCP entry loaded: %+v", env.Deps.MCPServers)
+		}
 	}
 }

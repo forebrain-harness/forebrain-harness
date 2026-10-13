@@ -64,13 +64,23 @@ type ChatSession struct {
 	// serving the pre-reload value -- which is exactly what P2-8 removes.
 	Env  *process.Environment
 	Core *turn.Service
-	// WorkingDir is the TUI launch cwd, captured once at start. Its git-root
-	// derives the session's fixed project identity for tools and agent.
+	// WorkingDir is the TUI launch cwd, captured once at start. Under the
+	// project model it IS the session's project root: the directory the TUI
+	// was started in is the project, never a walk up to a .git ancestor
+	// (R2). Its memory scope, the runner's project root and the project row
+	// all name this directory.
 	WorkingDir    string
 	LaunchProject safety.ProjectContext
-	chatLog       *chatDiskLog
-	tuiMu         sync.Mutex
-	uiNotify      func(any)
+	// ProjectID is the fb_projects row this session's conversations are filed
+	// under: the project bound to WorkingDir for the active primary agent
+	// (AdoptLaunchProject), or the resumed conversation's own project
+	// (ResumeOnLaunchProject). /resume lists this project's conversations,
+	// and new sessions are born under it. Empty when the surface has no
+	// project registry (a bare test fixture).
+	ProjectID string
+	chatLog   *chatDiskLog
+	tuiMu     sync.Mutex
+	uiNotify  func(any)
 	// uiSessionID is the conversation this surface is currently looking at.
 	// Events the event funnel receives for any other session are persisted
 	// to their own log but never painted here: a process-wide reaper and
@@ -105,6 +115,14 @@ type ChatSession struct {
 	// delivery. See markEventShownOnce for the exact contract.
 	shownEventsMu sync.Mutex
 	shownEvents   map[string]struct{}
+
+	// skillDraftMu guards skillDraftNotes: the skill names whose drafts the
+	// workshop wrote during the current turn (plan 037). The tool-step hook
+	// records a name from each skill write's structured output; the turn's
+	// end drains the list and leaves one "Draft <name> saved · /skills to
+	// publish" line, which is the only hint the panel asks for.
+	skillDraftMu    sync.Mutex
+	skillDraftNotes []string
 
 	approvalMu      sync.Mutex
 	approvalPending *chatApprovalResume
@@ -205,6 +223,127 @@ func OpenChatSessionWithConfigForProject(ctx context.Context, cfg appcfg.Root, c
 	return openProcessChatSession(ctx, cfg, cwd)
 }
 
+// ErrResumeForeignProject reports a resume for a conversation bound to a
+// project other than this process's launch directory.
+type ErrResumeForeignProject struct {
+	Name string
+	Root string
+}
+
+func (e ErrResumeForeignProject) Error() string {
+	return "resume: conversation belongs to project " + strings.TrimSpace(e.Name) +
+		" at " + strings.TrimSpace(e.Root)
+}
+
+// ErrResumeProjectMissing reports a resume whose conversation's project
+// directory is gone from disk.
+type ErrResumeProjectMissing struct {
+	Root string
+}
+
+func (e ErrResumeProjectMissing) Error() string {
+	return "resume: project directory is gone: " + strings.TrimSpace(e.Root)
+}
+
+// ErrResumeNoProject reports a resume for a project-less conversation: on the
+// interactive surface only a primary-agent skill-workshop task is born without
+// a project.
+type ErrResumeNoProject struct {
+	SessionID string
+}
+
+func (e ErrResumeNoProject) Error() string {
+	return "resume: conversation has no project: " + strings.TrimSpace(e.SessionID)
+}
+
+// projectStoreFor builds the project store for the active primary agent, or
+// nil when this surface has no project registry (a bare test fixture).
+func (s *ChatSession) projectStoreFor() *state.ProjectStore {
+	if s == nil || s.Env == nil || s.Env.SQL == nil {
+		return nil
+	}
+	return state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName)
+}
+
+// AdoptLaunchProject registers this session's launch directory as a project
+// for the active primary agent (creating the row when none exists) and points
+// the session and its session-store default at it: conversations started here
+// are filed under the directory they were launched in, and /resume lists that
+// project's conversations.
+//
+// The directory is taken as given — the same boundary the launch resolved
+// (R2). It is called at launch and after every primary-agent switch, because
+// each primary agent is its own tenant and holds its own project rows.
+func (s *ChatSession) AdoptLaunchProject(ctx context.Context) error {
+	if s == nil || s.Env == nil || strings.TrimSpace(s.WorkingDir) == "" {
+		return nil
+	}
+	store := s.projectStoreFor()
+	if store == nil {
+		return nil
+	}
+	project, _, err := store.FindOrCreateByRoot(ctx, strings.TrimSpace(s.WorkingDir), state.CreateProjectInput{
+		ResourceAccess: true,
+	})
+	if err != nil {
+		return err
+	}
+	s.ProjectID = project.ID
+	if sessStore := s.sessStore(); sessStore != nil {
+		sessStore.ConfigureProjectDefault(project.ID)
+	}
+	return nil
+}
+
+// ResumeOnLaunchProject verifies a conversation being resumed belongs to this
+// process's launch directory and adopts its project, so /resume lists that
+// project's conversations and new sessions in this surface are filed under it.
+//
+// It returns nil when the conversation may be resumed, including for a session
+// id with no row: that case has no project to check, and the ordinary resume
+// path reports the missing session itself. A typed refusal means the launch
+// must stop instead.
+func (s *ChatSession) ResumeOnLaunchProject(ctx context.Context, sessionID string) error {
+	if s == nil || s.Env == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	sessStore := s.sessStore()
+	if sessStore == nil {
+		return nil
+	}
+	exists, err := sessStore.HasSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	store := s.projectStoreFor()
+	if store == nil {
+		return nil
+	}
+	project, ok, err := store.ProjectForSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrResumeNoProject{SessionID: sessionID}
+	}
+	if !sameProjectContextPath(project.Root, s.WorkingDir) {
+		return ErrResumeForeignProject{Name: project.Name, Root: project.Root}
+	}
+	if info, statErr := os.Stat(strings.TrimSpace(project.Root)); statErr != nil || !info.IsDir() {
+		return ErrResumeProjectMissing{Root: project.Root}
+	}
+	s.ProjectID = project.ID
+	sessStore.ConfigureProjectDefault(project.ID)
+	return nil
+}
+
 func (s *ChatSession) projectContextPreHook(ctx context.Context, phase string, hc hook.HookContext, text string) (hook.PreHookResult, error) {
 	out := hook.PreHookResult{Text: text}
 	if s == nil {
@@ -214,10 +353,9 @@ func (s *ChatSession) projectContextPreHook(ctx context.Context, phase string, h
 	if cwd == "" {
 		return out, nil
 	}
-	projectRoot := strings.TrimSpace(memory.ProjectRoot(cwd))
-	if projectRoot == "" {
-		projectRoot = cwd
-	}
+	// Under the project model the launch directory IS the project root (R2):
+	// it is taken as given, never walked up to a .git ancestor.
+	projectRoot := cwd
 	currentWorkingDir, ok := terminalCurrentWorkingDir()
 	if !ok {
 		return out, nil
@@ -500,6 +638,26 @@ func (s *ChatSession) runSvc() *state.RunStore {
 		return nil
 	}
 	return d.RunRT
+}
+
+// RewindEngine builds the shared rewind engine's dependencies for /rewind: the
+// conversation and run stores, and the tool state whose history directory
+// holds a rewind's undo snapshots.
+func (s *ChatSession) RewindEngine() *turn.RewindStore {
+	if s == nil {
+		return nil
+	}
+	store := s.sessStore()
+	if store == nil {
+		return nil
+	}
+	var snap turn.SnapshotWriter
+	if r := s.runner(); r != nil {
+		if t := r.Tools(); t != nil {
+			snap = t
+		}
+	}
+	return &turn.RewindStore{Store: store, Runs: s.runSvc(), Snap: snap}
 }
 
 func (s *ChatSession) ctxHook() *assembly.Hook {
@@ -1639,6 +1797,13 @@ func (s *ChatSession) persistRequiresActionSnapshot(sessionID, runID string, sna
 // with a dangling tool_calls row that RepairDanglingToolResults strips on the
 // next turn - causing the LLM to lose knowledge that the tool was called and
 // approved (e.g. exit_plan_mode).
+//
+// It reconciles through the sequence append rather than writing blindly: the
+// orchestration now writes each block as it ends, so on a resume that runs to
+// completion the replayed result is already in the transcript, and appending it
+// a second time would duplicate the row (and, by breaking the stored tail, make
+// the turn's own finish append the answer again too). A tool result is
+// identified by the call it answers, so the reconciliation keeps exactly one.
 func (s *ChatSession) persistReplayResults(sessionID, runID string, capture *tool.ReplayResultCapture) {
 	if s == nil || s.sessStore() == nil || capture == nil {
 		return
@@ -1660,9 +1825,7 @@ func (s *ChatSession) persistReplayResults(sessionID, runID string, capture *too
 		}
 		msgs = append(msgs, msg)
 	}
-	// These results answer calls the gate stored before it suspended, so they
-	// are new rows by construction and carry no shared history to reconcile.
-	_ = s.sessStore().AppendNewMessages(
+	_ = s.sessStore().AppendMessageSequenceForRun(
 		context.Background(),
 		sessionID,
 		runID,
@@ -1741,6 +1904,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		if !emitRunEnded {
 			return
 		}
+		s.emitSkillDraftNotes()
 		s.notifyUI(RunEndedMsg{
 			turn:           foreground,
 			RunID:          runUsage.runID,

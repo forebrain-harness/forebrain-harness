@@ -144,7 +144,6 @@ type contextSnapshot struct {
 
 // contextSourceNames names what each assembly source brings into a turn.
 var contextSourceNames = map[string]string{
-	"working_set_source":  "Files you pinned or referenced",
 	"recent_files_source": "Files read recently",
 	"git_context_source":  "Git status and changes",
 }

@@ -322,12 +322,9 @@ func (r *Runner) restrictedProfileHasFullDiskWrite(ctx context.Context, snapshot
 		return false
 	}
 	cfg := safety.ConfigForSnapshot(r.AppCfg, snapshot)
-	cwd, err := os.Getwd()
+	cwd, err := tool.WorkingDir(ctx)
 	if err != nil {
 		return false
-	}
-	if root := strings.TrimSpace(tool.ProjectRootFromContext(ctx)); root != "" {
-		cwd = root
 	}
 	if cwd, err = filepath.Abs(cwd); err != nil {
 		return false

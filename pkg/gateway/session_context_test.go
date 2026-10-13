@@ -170,7 +170,6 @@ func TestHandleChatSessionContextReadsCompactCheckpoint(t *testing.T) {
 	require.NoError(t, tools.SetContextSnapshot("s1", map[string]any{
 		"session_id":       "s1",
 		"mode":             "agent",
-		"working_set":      []string{"tail summary"},
 		"context_pressure": "warn",
 		"budget": map[string]any{
 			"used_tokens":  4096,
@@ -181,7 +180,7 @@ func TestHandleChatSessionContextReadsCompactCheckpoint(t *testing.T) {
 		"projected_context_tokens": 8192,
 		"remaining_context_tokens": 119808,
 		"items": []map[string]any{
-			{"source_id": "working_set_source", "title": "Task Working Set", "content": "internal/gateway/server.go"},
+			{"source_id": "recent_files_source", "title": "Recent File Activity", "content": "internal/gateway/server.go"},
 		},
 	}))
 	setRunnerToolsForTest(runner, tools)
@@ -525,9 +524,17 @@ func TestHandleChatMessagesHonorsLimitQuery(t *testing.T) {
 func TestHandleChatSessionCreateAndTitleUseAppCore(t *testing.T) {
 	store := &stubGatewaySessionStore{}
 	core := turn.New(turn.WithSessionStore(store))
-	s := &Server{Core: core}
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	// A web chat is opened into a project (plan 029): the folder the picker
+	// chose becomes the project, and the app core creates the session.
+	s := &Server{Core: core, Home: home, Projects: state.NewProjectStore(db, "main")}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(`{"title":"Draft"}`))
+	payload, err := json.Marshal(map[string]any{"title": "Draft", "folder": t.TempDir()})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/chat/sessions", strings.NewReader(string(payload)))
 	rr := httptest.NewRecorder()
 	s.handleChatSessionCreate(rr, req)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())

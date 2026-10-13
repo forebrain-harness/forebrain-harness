@@ -1,16 +1,5 @@
 <template>
   <div class="workspace-tree" role="group" :aria-label="t('chat.workspaceFiles')">
-    <div class="workspace-tree-head">
-      <span class="workspace-tree-title">{{ t('chat.workspaceFiles') }}</span>
-      <button
-        type="button"
-        class="workspace-tree-refresh"
-        :aria-label="t('workspaceTree.refresh')"
-        @click="() => void refresh()"
-      >
-        <RotateCw class="size-3.5" aria-hidden="true" />
-      </button>
-    </div>
     <ul role="tree" :aria-label="t('chat.workspaceFiles')" class="workspace-tree-list">
       <WorkspaceRow
         v-for="child in rootChildren"
@@ -18,10 +7,14 @@
         :node="child"
         :depth="0"
         :tabbed="isTabbed(child.path)"
+        :scope="scope"
         @activate="onActivate"
         @move="onMove"
         @toggle="toggle"
         @insert="emit('insert-ref', $event)"
+        @edit="emit('edit', $event)"
+        @delete="emit('delete', $event)"
+        @new-file="emit('new-file', $event)"
       />
       <p v-if="rootStatus === 'loading'" class="workspace-tree-hint">{{ t('workspaceTree.loading') }}</p>
       <p v-else-if="rootStatus === 'error'" class="workspace-tree-hint workspace-tree-error">
@@ -33,26 +26,43 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { RotateCw } from 'lucide-vue-next'
+import { computed, onMounted, ref, toRef } from 'vue'
 import WorkspaceRow from '@/components/chat/WorkspaceRow.vue'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
-import type { WorkspaceTreeNode } from '@/lib/api'
+import type { WorkspaceScope, WorkspaceTreeNode } from '@/lib/api'
 import { useI18n } from '@/locales'
 
+/** One tree row's identity for the per-node actions a parent renders. */
+export interface WorkspaceNodeHandle {
+  path: string
+  name: string
+  isDir: boolean
+}
+
 /**
- * The workspace's files as a lazily loaded directory tree. The workbench is
- * collapsed by default and this component only mounts with it, so no
- * directory request happens until the tree is first shown.
+ * The conversation's files as a lazily loaded directory tree, rooted at the
+ * project the session belongs to (or the project its composer's pill chose
+ * before the conversation exists). The workbench is collapsed by default and
+ * this component only mounts with it, so no directory request happens until
+ * the tree is first shown. The card head, the dialogs and the refresh live in
+ * the tab that owns this tree; the tree itself only lists rows and reports
+ * what the user asked to do with one.
  */
-const emit = defineEmits<{ (e: 'insert-ref', path: string): void }>()
+const props = withDefaults(defineProps<{ scope?: WorkspaceScope }>(), { scope: () => ({}) })
+
+const emit = defineEmits<{
+  (e: 'insert-ref', path: string): void
+  (e: 'edit', node: WorkspaceNodeHandle): void
+  (e: 'delete', node: WorkspaceNodeHandle): void
+  (e: 'new-file', node: WorkspaceNodeHandle): void
+}>()
 
 const { t } = useI18n()
-const { dirs, expanded, ensureRoot, toggle, refresh, load } = useWorkspaceTree()
+const { dirs, expanded, ensureRoot, toggle, load } = useWorkspaceTree(toRef(props, 'scope'))
 
 const tabbedPath = ref('')
 
-const rootState = computed(() => dirs.get(''))
+const rootState = computed(() => dirs.value.get(''))
 const rootChildren = computed(() => rootState.value?.children ?? [])
 const rootStatus = computed(() => rootState.value?.status ?? 'loading')
 const rootError = computed(() => rootState.value?.error ?? '')
@@ -86,8 +96,8 @@ function visiblePaths(): string[] {
   const walk = (children: WorkspaceTreeNode[]) => {
     for (const child of children) {
       out.push(child.path)
-      if (child.isDir && expanded.has(child.path)) {
-        walk(dirs.get(child.path)?.children ?? [])
+      if (child.isDir && expanded.value.has(child.path)) {
+        walk(dirs.value.get(child.path)?.children ?? [])
       }
     }
   }
@@ -101,29 +111,6 @@ function visiblePaths(): string[] {
   display: flex;
   flex-direction: column;
   gap: 4px;
-}
-.workspace-tree-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.workspace-tree-title {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--forebrain-text-2);
-}
-.workspace-tree-refresh {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  color: var(--forebrain-muted-text);
-}
-.workspace-tree-refresh:hover {
-  background: var(--forebrain-button-alt-bg);
-  color: var(--forebrain-text);
 }
 .workspace-tree-list {
   list-style: none;

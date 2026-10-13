@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -119,7 +121,7 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// this is what once let one surface write plans to a directory other than
 	// the one the plan-mode reminder names, so this must stay the only way an
 	// agent context is seeded here.
-	agBase := AgentContextForProject(ctx, x.env.stateRoot(), sid, x.env.projectScope())
+	agBase := AgentContextForProject(ctx, x.env.stateRoot(), sid, x.env.SessionProjectKey(ctx, sid))
 	if req.SkillName != "" || req.SkillPath != "" {
 		agBase = run.WithExplicitSkillSelection(agBase, req.SkillName, req.SkillPath)
 	}
@@ -145,7 +147,16 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// below must be about the same Runner the turn executes on. The pooled
 	// Runner is shared by every session in this project, so its generation is a
 	// shared resource — this waits for it, and never cancels it.
-	runner := x.env.RunnerForSession(ctx, sid)
+	//
+	// This is the start-a-turn resolution, so it never falls back to the base
+	// runner: a conversation whose project directory is gone, or which belongs
+	// to no project this process can serve, has no runner and the turn fails
+	// rather than running on a sandbox derived from the wrong directory.
+	runner, runnerErr := x.env.RunnerForTurn(ctx, sid)
+	if runnerErr != nil {
+		slog.Error("turn cannot start: no runner for the session", "session", sid, "err", runnerErr)
+		return nil, runnerErr
+	}
 	if x.opts.FailOnRequiredMCP {
 		if err := awaitRequiredMCP(ctx, runner); err != nil {
 			return nil, err
@@ -253,15 +264,32 @@ func (env *Environment) stateRoot() string {
 	return appcfg.ActiveStateRoot(strings.TrimSpace(env.Root), env.Deps.AppCfg)
 }
 
-// projectScope is the runner's launch-project key. Plan files live under
-// <stateRoot>/plans/<key>, so a context wired with a different key lets the
-// agent write somewhere other than the directory the plan-mode reminder names
-// and every plan write is then rejected.
-func (env *Environment) projectScope() string {
-	if env == nil || env.Runner == nil {
+// SessionProjectKey is the key a session's project-scoped state lives under:
+// its project's key (state.ProjectKeyForRoot of the project root), or "" when
+// the session belongs to no project. Plan files live in
+// <stateRoot>/plans/<key>/<session>, so every read and write must resolve this
+// key from the session's own project: a gateway process has no launch project
+// of its own (OpenOptions.NoLaunchProject), so the base Runner.ProjectKey is
+// empty while the session runs on a project runner whose key is set — reading
+// the base runner's key would make the read path name a directory other than
+// the one the session writes to.
+//
+// A workshop session (and any other project-less conversation) keeps "" — its
+// plan files belong under the project-less directory, which is where they have
+// always lived. A store that cannot be read also yields "".
+func (env *Environment) SessionProjectKey(ctx context.Context, sessionID string) string {
+	if env == nil || env.SQL == nil {
 		return ""
 	}
-	return strings.TrimSpace(env.Runner.ProjectKey)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	project, ok, err := state.NewProjectStore(env.SQL, env.Deps.AgentName).ProjectForSession(ctx, sessionID)
+	if err != nil || !ok {
+		return ""
+	}
+	return state.ProjectKeyForRoot(project.Root)
 }
 
 // persistPartialTurn writes the tool calls and results a failed or cancelled

@@ -22,10 +22,20 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
-func DefaultAllowedRootsForWorkspace(workspaceRoot string) []string {
+// DefaultAllowedRootsForWorkspace is the base allowed-root list for a session:
+// the session's project root first, then the agent workspace root. projectRoot
+// empty (a session without a launch project) falls back to the process
+// directory, which is the TUI's own project root.
+func DefaultAllowedRootsForWorkspace(projectRoot, workspaceRoot string) []string {
 	var roots []string
-	if wd, err := os.Getwd(); err == nil && wd != "" {
-		roots = append(roots, wd)
+	pr := strings.TrimSpace(projectRoot)
+	if pr == "" {
+		if wd, err := os.Getwd(); err == nil && wd != "" {
+			pr = wd
+		}
+	}
+	if pr != "" {
+		roots = append(roots, pr)
 	}
 	if ws := strings.TrimSpace(workspaceRoot); ws != "" {
 		roots = append(roots, ws)

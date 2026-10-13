@@ -127,18 +127,33 @@ func TestResolveSessionMCPUntrustedProjectExcludesEntries(t *testing.T) {
 	}
 }
 
-func TestResolveSessionMCPNonVCSProjectExcludesEntries(t *testing.T) {
+// A trusted project needs no .git for its MCP entries to load (R6): version
+// control is no longer part of the gate — only trust and per-entry consent are.
+// The old expectation (a non-VCS project's entries never load) was wrong: it
+// hid a real project configuration behind a VCS check the project model dropped.
+func TestResolveSessionMCPTrustedNonVCSProjectLoadsEntries(t *testing.T) {
 	home := t.TempDir()
 	ws := t.TempDir()
-	dir := t.TempDir()
-	launch := safety.ProjectContext{Project: safety.Project{Root: dir}}
+	dir := t.TempDir() // deliberately NOT version controlled
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir}, TrustLevel: safety.LevelTrusted}
 	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
-	if names := serverNames(res.Servers); len(names) != 1 {
-		t.Fatalf("non-VCS project entries must not load: %v", names)
+
+	// Unconfirmed: the entry is not loaded yet, and the reason is consent,
+	// never a missing .git.
+	pending := ResolveSessionMCP(home, ws, globalList(), launch)
+	if names := serverNames(pending.Servers); len(names) != 1 {
+		t.Fatalf("unconfirmed project entry must not load yet: %v", names)
 	}
-	if len(res.Summary.NotApplied) != 1 || !strings.Contains(res.Summary.NotApplied[0].Reason, "version controlled") {
-		t.Fatalf("notApplied=%+v", res.Summary.NotApplied)
+	if len(pending.Summary.NotApplied) != 1 || !strings.Contains(pending.Summary.NotApplied[0].Reason, "awaiting confirmation") {
+		t.Fatalf("notApplied=%+v", pending.Summary.NotApplied)
+	}
+
+	if err := DecideProjectMCPConsents(ws, launch, []string{"projtool"}); err != nil {
+		t.Fatal(err)
+	}
+	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	if names := serverNames(res.Servers); len(names) != 2 {
+		t.Fatalf("a trusted non-VCS project must load its confirmed entries: %v", names)
 	}
 }
 

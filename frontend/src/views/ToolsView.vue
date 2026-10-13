@@ -1,18 +1,13 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-3 pb-12 pt-6 sm:px-6">
     <div class="mx-auto w-full max-w-3xl">
-      <header class="mb-5 flex items-end justify-between gap-4">
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('tools.title') }}</h1>
-            <ScopeBadge type="agent" :label="t('scope.agent')" />
-          </div>
-          <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('tools.description') }}</p>
-        </div>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ t('common.refresh') }}
-        </button>
-      </header>
+      <PageTopRow :title="t('tools.title')" :description="t('tools.description')">
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+            {{ t('common.refresh') }}
+          </button>
+        </template>
+      </PageTopRow>
 
       <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
@@ -79,7 +74,7 @@
  * with the safety flags the approval policy reads.
  */
 import { computed, onMounted, ref } from 'vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import { getErrorMessage, forebrainApi, type ToolMetaRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 

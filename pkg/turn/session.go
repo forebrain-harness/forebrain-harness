@@ -340,8 +340,10 @@ type AssistantTurn struct {
 	OnSequenceError func(error)
 }
 
-// PersistAssistantTurn writes a finished turn's assistant output: the reasoning
-// row, then either the accumulated session or a single structured message.
+// PersistAssistantTurn writes a finished turn's assistant output: either the
+// accumulated session or, when there is none, a single structured message with
+// its last reasoning row. Every reasoning block the run streamed already wrote
+// its own row as it ended, so the accumulated-session branch does not repeat it.
 //
 // The two surfaces had this twice and it drifted -- only the terminal dropped a
 // reasoning-only echo. Sharing it is also what lets a cross-surface contract
@@ -370,10 +372,11 @@ func appendAssistantRows(ctx context.Context, store AssistantTurnStore, in Assis
 		// of it is not an answer either.
 		text = ""
 	}
-	if reasoning != "" {
-		_, _ = store.AppendMessageForRun(ctx, in.SessionID, in.RunID, "reasoning", reasoning, "", "", state.MessageExecTiming{})
-	}
 	if in.Result != nil && len(in.Result.Session) > 0 {
+		// Every reasoning block already wrote its own row as it ended (the
+		// orchestration's transcript progress writer), so the last block is not
+		// written again here — that would show it twice on replay. The sequence
+		// append reconciles whatever the block-end writes left unpersisted.
 		err := store.AppendMessageSequenceForRun(
 			ctx, in.SessionID, in.RunID, in.Result.Session,
 			in.Model, state.MarshalTokenUsage(in.Result.LastResponseUsageCopy()),
@@ -382,6 +385,11 @@ func appendAssistantRows(ctx context.Context, store AssistantTurnStore, in Assis
 			in.OnSequenceError(err)
 		}
 		return
+	}
+	// A surface with no accumulated session (a single structured answer): its
+	// reasoning has no block-end writer, so this is the only place it is kept.
+	if reasoning != "" {
+		_, _ = store.AppendMessageForRun(ctx, in.SessionID, in.RunID, "reasoning", reasoning, "", "", state.MessageExecTiming{})
 	}
 	if text == "" {
 		return
@@ -552,14 +560,27 @@ func (p *StreamPartial) AppendReasoning(text string) {
 
 // ResponseCompleted drops the answer text collected so far: a finished
 // response has entered the session, where the run's partial session capture
-// owns it. Reasoning is kept: a completed response's reasoning reaches the
-// transcript only through the reasoning row the cancel path writes.
+// owns it. Reasoning is kept: a block that has not ended yet still reaches the
+// transcript only through the cancel path's reasoning row.
 func (p *StreamPartial) ResponseCompleted() {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	p.content.Reset()
+	p.mu.Unlock()
+}
+
+// ResponseReasoningDone drops the reasoning collected so far: the block it
+// holds just ended and was written to the transcript as its own row, so
+// keeping it would make a later cancel write that block a second time. What
+// remains is only the thinking of a block still in flight.
+func (p *StreamPartial) ResponseReasoningDone() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.reasoning.Reset()
 	p.mu.Unlock()
 }
 

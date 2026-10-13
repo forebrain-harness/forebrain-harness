@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
@@ -24,6 +25,12 @@ const (
 	// ignores it, so the model is sent exactly what the same text typed by
 	// hand would send, and the cached prefix is unchanged.
 	PartTypeOrigin = "origin"
+	// PartTypeReasoningTiming records how long the model spent on a reasoning
+	// ("thinking") block, on the reasoning row that block produced. It is
+	// display-only: a reasoning row is not part of the model history
+	// (ParseMessage returns false for the role), so this part only lets a
+	// replay draw "Thought for Ns" the way the live surface did.
+	PartTypeReasoningTiming = "reasoning_timing"
 )
 
 func stringField(m map[string]any, key string) string {
@@ -157,6 +164,71 @@ func MessageOrigin(partsJSON string) string {
 		}
 	}
 	return ""
+}
+
+// ReasoningPartsJSON is a reasoning row's parts: its text and how long the
+// model spent thinking it, so a replay says "Thought for 12s" as live did.
+// The duration is a part rather than an exec_* column because the table's
+// CHECK lets those columns carry only a tool or user row.
+func ReasoningPartsJSON(text string, spent time.Duration) string {
+	parts := make([]map[string]any, 0, 2)
+	if body := strings.TrimSpace(text); body != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": body})
+	}
+	if spent < 0 {
+		spent = 0
+	}
+	parts = append(parts, map[string]any{
+		"type":        PartTypeReasoningTiming,
+		"duration_ms": spent.Milliseconds(),
+	})
+	b, err := json.Marshal(parts)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+// ParseReasoningTiming reads a reasoning row's thinking duration back; false
+// when the row carries none (an older row, or one with no timing part).
+func ParseReasoningTiming(partsJSON string) (time.Duration, bool) {
+	raw := strings.TrimSpace(partsJSON)
+	if raw == "" || raw == "[]" {
+		return 0, false
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+		return 0, false
+	}
+	for _, part := range parts {
+		if strings.TrimSpace(stringField(part, "type")) != PartTypeReasoningTiming {
+			continue
+		}
+		ms, ok := numericField(part["duration_ms"])
+		if !ok {
+			return 0, false
+		}
+		return time.Duration(ms) * time.Millisecond, true
+	}
+	return 0, false
+}
+
+// numericField reads a JSON number that may decode as float64 or, when the
+// decoder was configured with UseNumber, json.Number.
+func numericField(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, true
+		}
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	}
+	return 0, false
 }
 
 func MessagePartsJSON(msg llm.Message, fallbackText string) string {

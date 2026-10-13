@@ -1,294 +1,662 @@
 <template>
-  <div class="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--forebrain-bg)]">
-    <div class="flex items-center gap-2 border-b border-[var(--forebrain-divider)] px-4 py-3">
-      <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('workshop.title') }}</h1>
-      <ScopeBadge type="agent" :label="t('scope.agent')" />
-      <div class="ml-auto flex gap-2">
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="newTaskOpen = true" data-testid="workshop-new-task">
-          {{ t('workshop.newTask') }}
-        </button>
-      </div>
-    </div>
-    <p class="border-b border-[var(--forebrain-divider)] px-4 py-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('workshop.description') }}</p>
-
-    <div class="grid min-h-0 flex-1 grid-cols-[200px_minmax(0,1fr)_320px]">
-      <!-- Task list -->
-      <aside class="flex min-h-0 flex-col overflow-y-auto border-r border-[var(--forebrain-divider)] p-2" data-testid="workshop-tasks">
-        <button
-          v-for="task in tasks"
-          :key="task.id"
-          type="button"
-          class="mb-1 rounded-lg px-3 py-2 text-left text-[12px]"
-          :class="task.id === activeTaskId ? 'bg-[var(--forebrain-brand-soft)] text-[var(--forebrain-brand-1)]' : 'text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]'"
-          @click="openTask(task.id)"
+  <div class="chat-shell flex h-full min-h-0 w-full flex-1 overflow-hidden">
+    <div class="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+      <main class="mx-auto flex h-full min-h-0 w-full max-w-[880px] flex-1 flex-col overflow-hidden px-3 sm:px-5">
+        <!-- Fresh task: the greeting and the composer, no thread yet. -->
+        <div v-if="isFresh" class="flex flex-1 flex-col items-center justify-center gap-4">
+          <h2 class="text-center text-[17px] font-medium text-[var(--forebrain-text)]" data-testid="workshop-greeting">
+            {{ greeting }}
+          </h2>
+        </div>
+        <Conversation
+          v-else
+          class="chat-scrollbar relative h-full overflow-y-scroll overscroll-contain"
         >
-          <div class="truncate font-medium">{{ task.title || task.id }}</div>
-          <div class="mt-0.5 text-[11px] text-[var(--forebrain-muted-text)]">{{ formatTaskTime(task.updateTime) }}</div>
-        </button>
-        <p v-if="listError" class="px-2 py-2 text-[12px] text-[var(--forebrain-danger)]">{{ listError }}</p>
-        <p v-else-if="!tasks.length" class="px-2 py-6 text-center text-[12px] text-[var(--forebrain-muted-text)]">{{ t('workshop.noTasks') }}</p>
-      </aside>
-
-      <!-- Conversation -->
-      <section class="flex min-h-0 min-w-0 flex-col">
-        <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-          <p v-if="!stream.messages.value.length" class="py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">{{ t('workshop.emptyConversation') }}</p>
-          <div v-for="message in stream.messages.value" :key="message.id" class="mb-3" :data-workshop-message="message.role">
-            <!-- A turn reads as the chat page reads it, live: what was said,
-                 what was thought, the calls made and the gates passed, in
-                 the order they happened — not just the final words. -->
-            <div
-              v-if="message.role === 'assistant' && message.blocks?.length"
-              class="max-w-[85%] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
-            >
-              <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
-                <div
-                  v-if="block.kind === 'thinking'"
-                  class="mb-2 whitespace-pre-wrap break-words text-[12px] text-[var(--forebrain-muted-text)]"
-                >{{ block.text }}</div>
-                <MessageResponse v-else-if="block.kind === 'assistant'" :content="block.text" />
-                <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :default-open="false" />
-                <ApprovalCard v-else-if="block.kind === 'approval'" class="my-2" :block="block" />
-                <RunErrorBlock v-else-if="block.kind === 'error'" class="my-2" :text="block.text" :detail="block.detail" />
-              </template>
+          <ConversationContent>
+            <div v-if="!stream.messages.value.length && !stream.isStreaming.value" class="py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
+              {{ t('workshop.emptyConversation') }}
             </div>
-            <div
-              v-else-if="message.role !== 'assistant' || String(message.content ?? '').trim()"
-              class="inline-block max-w-[85%] rounded-lg px-4 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap"
-              :class="message.role === 'user'
-                ? 'bg-[var(--forebrain-brand-1)] text-[var(--forebrain-on-brand)]'
-                : 'border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] text-[var(--forebrain-text)]'"
-            >{{ message.content }}</div>
-            <!-- Every run closes with its line, a run that said nothing too. -->
-            <RunWorkedLine class="max-w-[85%]" :message="message" />
-          </div>
-          <!-- A gate the task's turn is parked on is decided here, with the
-               same controls the chat page has. -->
-          <PendingActionsPanel :session-id="activeTaskId || null" :version="stream.pendingActionsVersion.value" />
-          <p v-if="stream.error.value" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-error">{{ stream.error.value }}</p>
+            <div v-for="message in stream.messages.value" :key="message.id" class="mb-3" :data-workshop-message="message.role">
+              <div
+                v-if="message.role === 'assistant' && hasVisibleBlocks(message.blocks)"
+                class="max-w-[85%] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-2.5 text-[13px] leading-relaxed text-[var(--forebrain-text)]"
+              >
+                <template v-for="(block, blockIdx) in message.blocks" :key="`${message.id}-block-${blockIdx}`">
+                  <div v-if="block.kind === 'thinking'" class="mb-2">
+                    <div class="text-[11px] text-[var(--forebrain-muted-text)]">{{ thinkingBlockLabel(block, t) }}</div>
+                    <div class="whitespace-pre-wrap break-words text-[12px] text-[var(--forebrain-muted-text)]">{{ block.text }}</div>
+                  </div>
+                  <template v-else-if="block.kind === 'assistant'">
+                    <MessageResponse :content="candidateText(block.text)" />
+                    <CandidateCards
+                      v-if="candidateList(block.text).length"
+                      :candidates="candidateList(block.text)"
+                      :installed="installedNames"
+                      :busy="installingSkill"
+                      @install="installCandidate"
+                    />
+                  </template>
+                  <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :default-open="false" />
+                  <ApprovalCard v-else-if="block.kind === 'approval'" class="my-2" :block="block" />
+                  <RunErrorBlock v-else-if="block.kind === 'error'" class="my-2" :text="block.text" :detail="block.detail" />
+                </template>
+              </div>
+              <div
+                v-else-if="message.role !== 'assistant' || String(message.content ?? '').trim()"
+                class="inline-block max-w-[85%] rounded-lg px-4 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap"
+                :class="message.role === 'user'
+                  ? 'bg-[var(--forebrain-brand-1)] text-[var(--forebrain-on-brand)]'
+                  : 'border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] text-[var(--forebrain-text)]'"
+              >{{ message.content }}</div>
+              <RunWorkedLine class="max-w-[85%]" :message="message" />
+            </div>
+            <div v-for="name in installedNames" :key="name" class="sys-line text-[12px] text-[var(--forebrain-text-2)]" data-testid="workshop-installed-line">
+              {{ t('workshop.installedLine', { name }) }}
+            </div>
+            <ApprovalCard
+              :session-id="activeSessionId || null"
+              :version="stream.pendingActionsVersion.value"
+              :context-used-percent="contextUsedPercent"
+            />
+            <p v-if="stream.error.value" class="text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-error">{{ stream.error.value }}</p>
+          </ConversationContent>
+          <ConversationScrollButton />
+        </Conversation>
+
+        <!-- The chat page's composer, reused. -->
+        <div class="z-10 shrink-0 border-t border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-4 sm:px-5">
+          <p v-if="notice" class="mb-2 rounded-lg bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-notice">{{ notice }}</p>
+          <PromptInputProvider :max-files="4" accept="image/*,application/pdf" @submit="handleSubmit">
+            <div class="w-full" data-testid="workshop-composer">
+            <PromptInput multiple global-drop class="w-full">
+              <PromptInputBody>
+                <ForebrainPromptTextarea
+                  ref="promptRef"
+                  :placeholder="inputPlaceholder"
+                  :during-run="stream.isStreaming.value"
+                  :disabled="composerLocked"
+                  :scope="workbenchScope"
+                  @typed="() => (notice = '')"
+                />
+              </PromptInputBody>
+              <PromptInputFooter>
+                <div class="flex min-w-0 flex-1 items-center gap-1">
+                  <ComposerPlusMenu :disabled="composerLocked" @insert="insertPlusCommand" />
+                  <ModeChip :mode="stream.mode.value" :disabled="stream.isStreaming.value || composerLocked" @select="selectMode" />
+                  <ApprovalPresetPicker :session-id="activeSessionId || null" />
+                </div>
+                <div class="flex items-center gap-1">
+                  <ContextRing v-if="contextUsedPercent != null" :percent="contextUsedPercent" @open="workbench.toggle()" />
+                  <ModelChip
+                    v-if="sessionModelData"
+                    :session-id="activeSessionId"
+                    :selection="sessionModelData"
+                    :options="sessionModelData.options"
+                    :disabled="composerLocked"
+                    @saved="loadSessionModel(activeSessionId)"
+                  />
+                  <EffortChip
+                    v-if="sessionModelData && sessionEfforts.length"
+                    :effort="sessionModelData.effort"
+                    :efforts="sessionEfforts"
+                    :disabled="composerLocked"
+                    @select="selectEffort"
+                  />
+                  <PromptInputSubmit :status="submitStatus" :disabled="composerLocked" />
+                </div>
+              </PromptInputFooter>
+            </PromptInput>
+            </div>
+            <div v-if="isFresh && starters.length" class="mt-2 flex flex-wrap gap-2" data-testid="workshop-starters">
+              <button
+                v-for="starter in starters"
+                :key="starter.label"
+                type="button"
+                class="rounded-lg border border-[var(--forebrain-divider)] px-2.5 py-1 text-[12px] text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]"
+                :data-testid="`workshop-starter-${starter.label}`"
+                @click="fillComposer(starter.text)"
+              >
+                {{ t(starter.label) }}
+              </button>
+            </div>
+          </PromptInputProvider>
         </div>
-        <form class="flex items-end gap-2 border-t border-[var(--forebrain-divider)] px-4 py-3" @submit.prevent="submit">
-          <textarea
-            v-model="draft"
-            rows="2"
-            class="min-w-0 flex-1 resize-none rounded-xl border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
-            :placeholder="t('workshop.composerPlaceholder')"
-            data-testid="workshop-composer"
-            @keydown.enter.exact.prevent="submit"
+      </main>
+
+      <ChatWorkbench
+        v-if="workbench.open.value"
+        :records="runningRoster"
+        :loading="rosterLoading"
+        :error="rosterError"
+        :overlay="workbenchOverlay"
+        :scope="workbenchScope"
+        :wide="true"
+        :extra-tabs="extraTabs"
+        @close="workbench.close()"
+      >
+        <template #changes>
+          <ChangesTab ref="changesRef" :skill-name="activeSkill" :project-id="projectId" :editable="editable" @compare="openCompare" />
+        </template>
+        <template #cases>
+          <CasesTab ref="casesRef" :skill-name="activeSkill" :project-id="projectId" :editable="editable" />
+        </template>
+        <template #evals>
+          <EvalsTab
+            ref="evalsRef"
+            :skill-name="activeSkill"
+            :project-id="projectId"
+            :running="evalRunning"
+            :done-count="0"
+            @send="sendDirect"
+            @fill="fillComposer"
           />
-          <button type="submit" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="stream.isStreaming.value || !draft.trim() || !activeTaskId" data-testid="workshop-send">
-            {{ stream.isStreaming.value ? t('common.loading') : t('workshop.send') }}
-          </button>
-        </form>
-      </section>
-
-      <!-- Skill panel -->
-      <aside class="min-h-0 overflow-hidden border-l border-[var(--forebrain-divider)] p-3">
-        <WorkshopSkillPanel :skill-name="panelSkill" />
-      </aside>
+        </template>
+        <template #trigger>
+          <TriggerTab ref="triggerRef" :skill-name="activeSkill" :project-id="projectId" :editable="editable" @send="sendDirect" @fill="fillComposer" />
+        </template>
+        <template #versions>
+          <VersionsTab
+            ref="versionsRef"
+            :skill-name="activeSkill"
+            :project-id="projectId"
+            :editable="editable"
+            @compare="openCompare"
+            @changed="reloadAfterChange"
+          />
+        </template>
+      </ChatWorkbench>
     </div>
 
-    <!-- New-task dialog -->
-    <div
-      v-if="newTaskOpen"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-      data-testid="workshop-new-dialog"
-      @click.self="newTaskOpen = false"
-    >
-      <div class="w-full max-w-md rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
-        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('workshop.newTask') }}</div>
-        <div class="mt-3 space-y-3">
-          <label class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.taskKind') }}</span>
-            <select v-model="taskKind" class="forebrain-field h-9" data-testid="workshop-task-kind">
-              <option value="new">{{ t('workshop.taskNew') }}</option>
-              <option value="improve">{{ t('workshop.taskImprove') }}</option>
-            </select>
-          </label>
-          <label v-if="taskKind === 'new'" class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.skillNameLabel') }}</span>
-            <input v-model="newName" type="text" class="forebrain-field h-9" data-testid="workshop-new-name" :placeholder="t('workshop.skillNamePlaceholder')" />
-          </label>
-          <label v-else class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.pickSkill') }}</span>
-            <select v-model="improveName" class="forebrain-field h-9" data-testid="workshop-improve-name">
-              <option value="">{{ t('workshop.pickSkillPlaceholder') }}</option>
-              <option v-for="skill in editableSkills" :key="skill.name" :value="skill.name">{{ skill.name }}</option>
-            </select>
-          </label>
-          <label class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.purposeLabel') }}</span>
-            <textarea v-model="purpose" rows="2" class="forebrain-field w-full" data-testid="workshop-purpose" :placeholder="t('workshop.purposePlaceholder')" />
-          </label>
-          <label v-if="taskKind === 'new'" class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('workshop.targetLabel') }}</span>
-            <select v-model="target" class="forebrain-field h-9" data-testid="workshop-target">
-              <option value="agent">{{ t('skills.destAgent') }}</option>
-              <option value="shared">{{ t('skills.destShared') }}</option>
-            </select>
-          </label>
-        </div>
-        <p v-if="dialogError" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ dialogError }}</p>
-        <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="newTaskOpen = false">{{ t('common.cancel') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="workshop-create-task" @click="createTask">
-            {{ creating ? t('common.loading') : t('workshop.start') }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <PublishDialog
+      :open="publishOpen"
+      :skill-name="activeSkill"
+      :project-id="projectId"
+      :current-version="activeVersion"
+      @published="onPublished"
+      @cancel="publishOpen = false"
+    />
+    <CompareDialog
+      :open="compareOpen"
+      :skill-name="activeSkill"
+      :project-id="projectId"
+      :from="compareFrom"
+      :to="compareTo"
+      @cancel="compareOpen = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 /**
- * The skill workshop: a conversation with the skill-workshop skill on the
- * left, the skill's own files on the right. Tasks are sessions marked
- * source=workshop, which the chat drawer's list never includes — a workshop
- * task is tooling, not a conversation.
+ * The skill workshop — the chat page plus the skill tabs. It reuses the chat
+ * page's message blocks, its composer (the whole PromptInput stack and its
+ * chips) and its workbench; the workbench gains four skill tabs (test cases,
+ * evaluation, trigger description, versions) and the changes tab shows the
+ * draft against the current version. The conversation is a workshop session
+ * (source=workshop); the skill it works on is named on the route.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton,
+} from '@repo/elements/conversation'
 import { MessageResponse } from '@repo/elements/message'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputFooter,
+  PromptInputProvider,
+  PromptInputSubmit,
+} from '@repo/elements/prompt-input'
+import ForebrainPromptTextarea from '@/components/ForebrainPromptTextarea.vue'
+import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
-import PendingActionsPanel from '@/components/chat/PendingActionsPanel.vue'
-import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
+import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
+import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
+import ContextRing from '@/components/chat/ContextRing.vue'
+import EffortChip from '@/components/chat/EffortChip.vue'
+import ModeChip from '@/components/chat/ModeChip.vue'
+import ModelChip from '@/components/chat/ModelChip.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
-import WorkshopSkillPanel from '@/components/workshop/WorkshopSkillPanel.vue'
-import forebrainApi, { getErrorMessage, type SkillRecord } from '@/lib/api'
-import { useChatStream } from '@/composables/useChatStream'
-import { useI18n } from '@/locales'
+import WorkshopTopbar from '@/components/workshop/WorkshopTopbar.vue'
+import CasesTab from '@/components/workshop/CasesTab.vue'
+import ChangesTab from '@/components/workshop/ChangesTab.vue'
+import EvalsTab from '@/components/workshop/EvalsTab.vue'
+import TriggerTab from '@/components/workshop/TriggerTab.vue'
+import VersionsTab from '@/components/workshop/VersionsTab.vue'
+import CandidateCards from '@/components/workshop/CandidateCards.vue'
+import PublishDialog from '@/components/workshop/PublishDialog.vue'
+import CompareDialog from '@/components/workshop/CompareDialog.vue'
+import { useAgentRoster } from '@/composables/useAgentRoster'
+import { useChatStream, hasVisibleBlocks, thinkingBlockLabel } from '@/composables/useChatStream'
+import { useTopbar } from '@/composables/useTopbar'
+import { useWorkbench } from '@/composables/useWorkbench'
+import forebrainApi, {
+  getErrorMessage,
+  type ProjectRecord,
+  type SessionModelResponse,
+  type SkillCandidate,
+  type SkillRecord,
+  type WorkspaceScope,
+} from '@/lib/api'
+import { parseSkillCandidates } from '@/lib/skillCandidates'
+import { parseWorkshopTarget } from '@/lib/workshopTarget'
+import { useI18n, type I18nKey } from '@/locales'
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
+const route = useRoute()
+const router = useRouter()
 const stream = useChatStream()
+const workbench = useWorkbench()
+const { set: setTopbar } = useTopbar()
+const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
+const { records: rosterRecords, loading: rosterLoading, error: rosterError, loadRoster } = useAgentRoster()
 
-type TaskRow = { id: string; title: string | null; updateTime: string }
+const target = computed(() => parseWorkshopTarget(route.query as Record<string, unknown>))
+const scope = computed(() => target.value.scope)
+const mode = computed(() => target.value.mode)
+const projectId = computed(() => target.value.projectId)
 
-const tasks = ref<TaskRow[]>([])
-const activeTaskId = ref('')
-const draft = ref('')
-const newTaskOpen = ref(false)
-const taskKind = ref<'new' | 'improve'>('new')
-const newName = ref('')
-const improveName = ref('')
-const purpose = ref('')
-const target = ref<'agent' | 'shared'>('agent')
-const creating = ref(false)
-const dialogError = ref('')
-const listError = ref('')
-const editableSkills = ref<SkillRecord[]>([])
+// ---- Skill facts ----
+const skills = ref<SkillRecord[]>([])
+const activeSkill = ref('')
+const activeVersion = ref(0)
+const activeState = ref('')
+const activeHasUpdate = ref(false)
+const activeEditable = ref(false)
 
-// The skill the panel shows: the one the active task was started for. A
-// workshop task's title is "Workshop: <skill>" by construction, so the panel
-// resolves the skill from it; the name remembered from this page's own
-// create/open actions wins when present.
-const panelByName = ref('')
-const panelSkill = computed(() => {
-  if (panelByName.value) return panelByName.value
-  const task = tasks.value.find((item) => item.id === activeTaskId.value)
-  const fromTitle = (task?.title ?? '').trim()
-  if (!fromTitle) return ''
-  return fromTitle.replace(/^(工坊改进：|工坊：|Workshop improve: |Workshop: )/, '').trim()
+const currentRecord = computed(() => {
+  if (!activeSkill.value) return null
+  const rows = skills.value.filter((row) => row.name === activeSkill.value)
+  if (scope.value === 'project') return rows.find((row) => row.origin === 'project') ?? rows[0] ?? null
+  return rows.find((row) => row.origin === 'agent') ?? rows[0] ?? null
 })
 
-async function loadTasks() {
+const editable = computed(() => currentRecord.value?.editable ?? (scope.value === 'agent' && currentRecord.value?.origin === 'agent'))
+const hasSkill = computed(() => !!activeSkill.value)
+const publishVersion = computed(() => String(activeVersion.value + (activeState.value === 'published' ? 0 : 1)))
+const canPublish = computed(() => hasSkill.value && activeState.value !== 'published')
+
+async function loadSkills() {
   try {
-    const data = await forebrainApi.chatSessions('workshop')
-    tasks.value = data.records
-    listError.value = ''
-  } catch (e: unknown) {
-    tasks.value = []
-    listError.value = getErrorMessage(e)
+    const data = scope.value === 'project' && projectId.value
+      ? await forebrainApi.projectSkillsOverview(projectId.value)
+      : await forebrainApi.skillsOverview()
+    skills.value = data.installed
+  } catch {
+    skills.value = []
   }
 }
 
-// What a task may improve: the agent's own skills, which are edited in
-// place, and the built-ins, which the workshop copies to a layer the user
-// owns first. Inherited rows belong to the layer that manages them.
-async function loadEditableSkills() {
-  try {
-    const data = await forebrainApi.skillsOverview()
-    editableSkills.value = data.installed.filter((row) => row.origin === 'agent' || row.origin === 'builtin')
-  } catch (e: unknown) {
-    editableSkills.value = []
-    listError.value = getErrorMessage(e)
+function syncActiveSkill() {
+  const record = currentRecord.value
+  activeVersion.value = record?.version ?? 0
+  activeState.value = record?.state ?? ''
+  activeHasUpdate.value = !!record?.update
+  activeEditable.value = record?.editable ?? false
+}
+
+// ---- Session ----
+const activeSessionId = ref('')
+const notice = ref('')
+const projects = ref<ProjectRecord[]>([])
+
+const projectName = computed(() => projects.value.find((p) => p.id === projectId.value)?.name ?? '')
+const isFresh = computed(() => !activeSessionId.value && !stream.messages.value.length && !stream.isStreaming.value)
+const composerLocked = computed(() => stream.isStreaming.value)
+
+const workbenchScope = computed<WorkspaceScope>(() =>
+  activeSessionId.value ? { sessionId: activeSessionId.value } : projectId.value ? { projectId: projectId.value } : {},
+)
+const runningRoster = computed(() => rosterRecords.value.filter((row) => String(row.status ?? '').trim().toLowerCase() === 'running'))
+const workbenchOverlay = ref(false)
+let workbenchMq: MediaQueryList | null = null
+function syncWorkbenchOverlay() {
+  workbenchOverlay.value = workbenchMq?.matches ?? false
+}
+
+const evalRunning = ref(false)
+const submitStatus = computed(() => (stream.isStreaming.value ? 'streaming' : 'ready'))
+
+const contextUsedPercent = computed(() => {
+  for (let i = stream.messages.value.length - 1; i >= 0; i--) {
+    const left = stream.messages.value[i]?.tokenBudget?.percentLeft
+    if (typeof left === 'number' && Number.isFinite(left)) return Math.max(0, Math.min(100, 100 - left))
   }
-}
+  return null
+})
 
-function formatTaskTime(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime())
-    ? ''
-    : date.toLocaleString(locale.value === 'zh' ? 'zh-CN' : 'en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
-}
-
-async function openTask(id: string) {
-  if (activeTaskId.value === id) return
-  activeTaskId.value = id
-  await stream.switchToSession(id)
-  panelByName.value = ''
-}
-
-function firstMessage(kind: 'new' | 'improve', name: string, why: string, dest: string): string {
-  if (kind === 'improve') {
-    return t('workshop.firstMessageImprove', { name, why })
-  }
-  return t('workshop.firstMessageNew', { name, why, dest })
-}
-
-async function createTask() {
-  dialogError.value = ''
-  const name = taskKind.value === 'new' ? newName.value.trim() : improveName.value.trim()
-  if (!name) {
-    dialogError.value = t('workshop.nameRequired')
+const sessionModelData = ref<SessionModelResponse | null>(null)
+let modelGeneration = 0
+async function loadSessionModel(sid: string | null) {
+  const generation = ++modelGeneration
+  if (!sid) {
+    sessionModelData.value = null
     return
   }
-  creating.value = true
   try {
-    // The task is a conversation with the skill-workshop skill; without it
-    // in this agent's set there is nothing to start, and a task that silently
-    // ran without it would be an ordinary chat in a workshop's clothes.
-    const overview = await forebrainApi.skillsOverview()
-    const workshop = overview.installed.find((item) => item.name === 'skill-workshop' && item.enabled)
-    if (!workshop?.rootPath) {
-      dialogError.value = t('workshop.skillUnavailable')
-      return
-    }
-    const created = await forebrainApi.chatSessionCreate(
-      taskKind.value === 'new' ? t('workshop.taskTitle', { name }) : t('workshop.taskTitleImprove', { name }),
-      'workshop',
-    )
-    await loadTasks()
-    newTaskOpen.value = false
-    await openTask(created.id)
-    panelByName.value = name
-    // The workshop skill is activated for the first message — the same
-    // handoff the terminal performs.
-    await stream.send(firstMessage(taskKind.value, name, purpose.value.trim(), target.value), {
-      sessionId: created.id,
-      skillName: workshop.name,
-      skillPath: workshop.rootPath,
-    })
-    newName.value = ''
-    improveName.value = ''
-    purpose.value = ''
-  } catch (e: unknown) {
-    dialogError.value = getErrorMessage(e)
-  } finally {
-    creating.value = false
+    const res = await forebrainApi.sessionModel(sid)
+    if (generation === modelGeneration) sessionModelData.value = res
+  } catch {
+    if (generation === modelGeneration) sessionModelData.value = null
+  }
+}
+const sessionEfforts = computed(() => {
+  const data = sessionModelData.value
+  if (!data) return []
+  return data.options.find((option) => option.provider === data.provider && option.model === data.model)?.efforts ?? []
+})
+
+async function selectEffort(effort: string) {
+  const sid = activeSessionId.value
+  const data = sessionModelData.value
+  if (!sid || !data) return
+  try {
+    const saved = await forebrainApi.saveSessionModel(sid, { provider: data.provider, model: data.model, effort })
+    sessionModelData.value = { ...data, provider: saved.provider, model: saved.model, effort: saved.effort }
+  } catch {
+    /* the chip keeps its state; the next load reconciles */
   }
 }
 
-async function submit() {
-  const text = draft.value.trim()
-  if (!text || !activeTaskId.value || stream.isStreaming.value) return
-  draft.value = ''
-  await stream.send(text, { sessionId: activeTaskId.value })
+// ---- Workbench tabs ----
+const extraTabs = computed<{ key: string; label: I18nKey; disabled?: boolean }[]>(() => [
+  { key: 'cases', label: 'workshop.tabCases', disabled: !hasSkill.value },
+  { key: 'evals', label: 'workshop.tabEvals', disabled: !hasSkill.value },
+  { key: 'trigger', label: 'workshop.tabTrigger', disabled: !hasSkill.value },
+  { key: 'versions', label: 'workshop.tabVersions', disabled: !hasSkill.value },
+])
+
+const changesRef = ref<InstanceType<typeof ChangesTab> | null>(null)
+const casesRef = ref<InstanceType<typeof CasesTab> | null>(null)
+const evalsRef = ref<InstanceType<typeof EvalsTab> | null>(null)
+const triggerRef = ref<InstanceType<typeof TriggerTab> | null>(null)
+const versionsRef = ref<InstanceType<typeof VersionsTab> | null>(null)
+
+function reloadAfterChange() {
+  void loadSkills()
+  void changesRef.value?.reload?.()
+  void evalsRef.value?.reload?.()
+  void triggerRef.value?.reload?.()
 }
 
+// ---- Compare / publish ----
+const compareOpen = ref(false)
+const compareFrom = ref('')
+const compareTo = ref('')
+function openCompare(payload: { from: string; to: string }) {
+  compareFrom.value = payload.from
+  compareTo.value = payload.to
+  compareOpen.value = true
+}
+
+const publishOpen = ref(false)
+async function onPublished() {
+  publishOpen.value = false
+  await loadSkills()
+  await versionsRef.value?.reload?.()
+  await changesRef.value?.reload?.()
+}
+
+// ---- Greeting / starters ----
+const greeting = computed(() => {
+  if (mode.value === 'discover') return t('workshop.greetDiscover')
+  if (activeSkill.value) return t('workshop.greetImprove', { name: activeSkill.value })
+  return t('workshop.greetCreate')
+})
+
+const starters = computed<{ label: I18nKey; text: string }[]>(() => {
+  if (mode.value === 'discover') return []
+  if (activeSkill.value) {
+    return [
+      { label: 'workshop.starterEval', text: t('workshop.starterEvalText') },
+      { label: 'workshop.starterTrigger', text: t('workshop.starterTriggerText') },
+      { label: 'workshop.starterCases', text: t('workshop.starterCasesText') },
+    ]
+  }
+  return [
+    { label: 'workshop.starterSteps', text: t('workshop.starterStepsText') },
+    { label: 'workshop.starterDoc', text: t('workshop.starterDocText') },
+    { label: 'workshop.starterCopy', text: t('workshop.starterCopyText') },
+  ]
+})
+
+const inputPlaceholder = computed(() => {
+  if (mode.value === 'discover') return t('workshop.composerDiscover')
+  if (activeSkill.value) return t('workshop.composerImprove', { name: activeSkill.value })
+  return t('workshop.composerPlaceholder')
+})
+
+// ---- Composer actions ----
+function insertPlusCommand(text: string) {
+  promptRef.value?.restoreSubmission({ text, attachments: [], mentionImages: [] })
+}
+
+function fillComposer(text: string) {
+  promptRef.value?.restoreSubmission({ text, attachments: [], mentionImages: [] })
+}
+
+function selectMode(next: string) {
+  if (next === stream.mode.value) return
+  void sendDirect(next === 'plan' ? '/plan' : '/agent')
+}
+
+async function sendDirect(text: string) {
+  const value = String(text ?? '').trim()
+  if (!value) return
+  const sid = await ensureSession()
+  if (!sid) return
+  await stream.send(value, { sessionId: sid })
+}
+
+async function sendFirst(text: string) {
+  const overview = await forebrainApi.skillsOverview().catch(() => null)
+  const workshop = overview?.installed.find((item) => item.name === 'skill-workshop' && item.enabled)
+  if (!workshop?.rootPath) {
+    notice.value = t('workshop.skillUnavailable')
+    promptRef.value?.restoreSubmission({ text, attachments: [], mentionImages: [] })
+    return false
+  }
+  await stream.send(text, { sessionId: activeSessionId.value, skillName: workshop.name, skillPath: workshop.rootPath })
+  return true
+}
+
+async function handleSubmit(message: { text: string; files?: { url?: string; filename?: string; mediaType?: string }[] }) {
+  const text = (message.text ?? '').trim()
+  if (!text && !(message.files ?? []).length) return
+  if (!text) return
+  const wasFresh = !activeSessionId.value
+  const sid = await ensureSession()
+  if (!sid) return
+  if (wasFresh) {
+    const ok = await sendFirst(text)
+    if (!ok) return
+  } else {
+    await stream.send(text, { sessionId: sid })
+  }
+}
+
+async function ensureSession(): Promise<string> {
+  if (activeSessionId.value) return activeSessionId.value
+  try {
+    const created = await forebrainApi.chatSessionCreate({
+      title: sessionTitle(),
+      source: 'workshop',
+      ...(scope.value === 'project' && projectId.value ? { projectId: projectId.value } : {}),
+    })
+    activeSessionId.value = created.id
+    await stream.switchToSession(created.id)
+    void loadRoster()
+    return created.id
+  } catch (e: unknown) {
+    notice.value = getErrorMessage(e)
+    return ''
+  }
+}
+
+function sessionTitle(): string {
+  if (activeSkill.value) return t('workshop.taskTitleImprove', { name: activeSkill.value })
+  return t('workshop.newSkillTitle')
+}
+
+// ---- Discovery: install a candidate from the model's reply ----
+const installedNames = ref<string[]>([])
+const installingSkill = ref('')
+
+function candidateList(text: string): SkillCandidate[] {
+  return parseSkillCandidates(text).candidates
+}
+function candidateText(text: string): string {
+  return parseSkillCandidates(text).text
+}
+
+async function installCandidate(candidate: SkillCandidate) {
+  installingSkill.value = candidate.name
+  notice.value = ''
+  try {
+    const dest = scope.value === 'project' ? 'project' : 'workspace'
+    if (scope.value === 'project' && projectId.value) {
+      await forebrainApi.projectSkillInstall(projectId.value, { sourceRef: candidate.source, dest, skill: candidate.name, name: candidate.name })
+    } else {
+      await forebrainApi.skillInstall({ sourceRef: candidate.source, dest, skill: candidate.name, name: candidate.name })
+    }
+    installedNames.value = [...installedNames.value, candidate.name]
+    // The workshop switches onto the installed skill and becomes an improve
+    // task; its four skill tabs come alive.
+    await loadSkills()
+    activeSkill.value = candidate.name
+    syncActiveSkill()
+  } catch (e: unknown) {
+    notice.value = getErrorMessage(e)
+  } finally {
+    installingSkill.value = ''
+  }
+}
+
+async function startNewSession() {
+  activeSessionId.value = ''
+  stream.resetForNewChat()
+  sessionModelData.value = null
+  notice.value = ''
+}
+
+// ---- Top bar ----
+const runningCount = computed(() => runningRoster.value.length)
+const crumbLabel = computed(() => {
+  if (mode.value === 'discover') return t('workshop.modeDiscover')
+  if (mode.value === 'create' && !hasSkill.value) return t('workshop.modeCreate')
+  return activeSkill.value || t('workshop.modeCreate')
+})
+
+function backToSource() {
+  if (scope.value === 'project' && projectId.value) {
+    void router.push({ path: `/projects/${encodeURIComponent(projectId.value)}/skills` })
+    return
+  }
+  void router.push({ name: 'skills' })
+}
+
+const modelLabel = computed(() => sessionModelData.value?.model ?? '')
+const topbarLeading = () => [
+  h(WorkshopTopbar, {
+    part: 'leading',
+    label: crumbLabel.value,
+    hasSkill: hasSkill.value,
+    version: activeVersion.value,
+    state: activeState.value,
+    scope: scope.value,
+    projectName: projectName.value,
+    model: modelLabel.value,
+    workbenchOpen: workbench.open.value,
+    publishVersion: publishVersion.value,
+    canPublish: canPublish.value,
+    onBack: backToSource,
+    onOpenProject: () => {
+      if (projectId.value) void router.push({ path: `/projects/${encodeURIComponent(projectId.value)}/overview` })
+    },
+  }),
+]
+const topbarTrailing = () => [
+  h(WorkshopTopbar, {
+    part: 'trailing',
+    label: crumbLabel.value,
+    hasSkill: hasSkill.value,
+    version: activeVersion.value,
+    state: activeState.value,
+    scope: scope.value,
+    sessionId: activeSessionId.value,
+    workbenchOpen: workbench.open.value,
+    runningCount: runningCount.value,
+    publishVersion: publishVersion.value,
+    canPublish: canPublish.value,
+    onNewSession: startNewSession,
+    onToggleWorkbench: () => workbench.toggle(),
+    onPublish: () => (publishOpen.value = true),
+  }),
+]
+
+// ---- Load ----
+async function findRecentSession(name: string): Promise<string> {
+  try {
+    const data = await forebrainApi.chatSessions('workshop')
+    const match = data.records.find((rec) => titleNamesSkill(rec.title ?? '', name))
+    return match?.id ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function titleNamesSkill(title: string, name: string): boolean {
+  const trimmed = title.trim()
+  return trimmed === t('workshop.taskTitle', { name })
+    || trimmed === t('workshop.taskTitleImprove', { name })
+    || trimmed === `Workshop: ${name}`
+    || trimmed === `Workshop improve: ${name}`
+    || trimmed.endsWith(`：${name}`)
+    || trimmed.endsWith(`: ${name}`)
+}
+
+async function loadProjects() {
+  try {
+    projects.value = await forebrainApi.projectsList({ sort: 'updated' })
+  } catch {
+    projects.value = []
+  }
+}
+
+watch(activeSessionId, (sid) => void loadSessionModel(sid || null), { immediate: true })
+
+async function bootstrap() {
+  const parsed = parseWorkshopTarget(route.query as Record<string, unknown>)
+  await loadSkills()
+  activeSkill.value = parsed.skill
+  syncActiveSkill()
+  if (scope.value === 'project' && projectId.value) void loadProjects()
+  if (parsed.skill && parsed.mode === 'improve') {
+    const recent = await findRecentSession(parsed.skill)
+    if (recent) {
+      activeSessionId.value = recent
+      await stream.switchToSession(recent)
+    }
+  }
+}
+
+watch(() => route.fullPath, () => void bootstrap())
+
 onMounted(() => {
-  void loadTasks()
-  void loadEditableSkills()
+  workbenchMq = window.matchMedia('(max-width: 1023px)')
+  syncWorkbenchOverlay()
+  workbenchMq.addEventListener('change', syncWorkbenchOverlay)
+  setTopbar({ leading: topbarLeading, trailing: topbarTrailing })
+  void loadRoster()
+  void bootstrap()
+})
+
+onUnmounted(() => {
+  workbenchMq?.removeEventListener('change', syncWorkbenchOverlay)
 })
 </script>

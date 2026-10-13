@@ -12,6 +12,7 @@ export { default as CodeBlockLanguageSelectorTrigger } from './CodeBlockLanguage
 export { default as CodeBlockLanguageSelectorValue } from './CodeBlockLanguageSelectorValue.vue'
 export { default as CodeBlockTitle } from './CodeBlockTitle.vue'
 export { languageForPath, PLAIN_LANGUAGE } from './language'
+export { monokaiLightPalette } from './palette'
 export {
   codeThemeDark,
   codeThemeInputs,

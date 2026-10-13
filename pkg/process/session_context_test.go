@@ -638,10 +638,10 @@ func TestEnvironmentConfigHelpers(t *testing.T) {
 }
 
 func TestAssembleContextSnapshot(t *testing.T) {
-	if res, ok, err := (*Environment)(nil).AssembleContextSnapshot(hook.HookContext{Trigger: "user"}, "hello"); err != nil || ok || res.SessionID != "" {
+	if res, ok, err := (*Environment)(nil).AssembleContextSnapshot(context.Background(), hook.HookContext{Trigger: "user"}, "hello"); err != nil || ok || res.SessionID != "" {
 		t.Fatalf("nil environment result=%+v ok=%v err=%v", res, ok, err)
 	}
-	if res, ok, err := (&Environment{}).AssembleContextSnapshot(hook.HookContext{Trigger: "user"}, "hello"); err != nil || ok || res.SessionID != "" {
+	if res, ok, err := (&Environment{}).AssembleContextSnapshot(context.Background(), hook.HookContext{Trigger: "user"}, "hello"); err != nil || ok || res.SessionID != "" {
 		t.Fatalf("nil hook result=%+v ok=%v err=%v", res, ok, err)
 	}
 
@@ -659,7 +659,11 @@ func TestAssembleContextSnapshot(t *testing.T) {
 	if _, err := store.Append(context.Background(), "s", "user", "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AppendStructuredMessage(context.Background(), "s", "assistant", "hello", "m1", "", "m",
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(context.Background(), "s", "seed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendStructuredMessageForRun(context.Background(), "s", seedRun.ID, "assistant", "hello", "m1", "", "m",
 		`{"input_tokens":3,"output_tokens":4,"cache_read_input_tokens":40}`, "", "", state.MessageExecTiming{}); err != nil {
 		t.Fatal(err)
 	}
@@ -668,26 +672,20 @@ func TestAssembleContextSnapshot(t *testing.T) {
 	ctxHook.ModeProvider = func(sessionID string) (string, string) {
 		return "agent", "plan"
 	}
-	ctxHook.PinsProvider = func(sessionID string) []string {
-		return []string{"README.md"}
-	}
 	env := &Environment{ctxHook: ctxHook}
 
-	if _, ok, err := env.AssembleContextSnapshot(hook.HookContext{Trigger: "background", SessionID: "s"}, "hello"); err != nil || ok {
+	if _, ok, err := env.AssembleContextSnapshot(context.Background(), hook.HookContext{Trigger: "background", SessionID: "s"}, "hello"); err != nil || ok {
 		t.Fatalf("background ok=%v err=%v", ok, err)
 	}
-	if _, ok, err := env.AssembleContextSnapshot(hook.HookContext{Trigger: "user", SessionID: "s"}, "/status"); err != nil || ok {
+	if _, ok, err := env.AssembleContextSnapshot(context.Background(), hook.HookContext{Trigger: "user", SessionID: "s"}, "/status"); err != nil || ok {
 		t.Fatalf("slash ok=%v err=%v", ok, err)
 	}
-	res, ok, err := env.AssembleContextSnapshot(hook.HookContext{Trigger: "user", SessionID: "s", Channel: "webchat", RunKind: "agent", AgentID: "main"}, "please inspect README")
+	res, ok, err := env.AssembleContextSnapshot(context.Background(), hook.HookContext{Trigger: "user", SessionID: "s", Channel: "webchat", RunKind: "agent", AgentID: "main"}, "please inspect README")
 	if err != nil || !ok {
 		t.Fatalf("assemble ok=%v err=%v", ok, err)
 	}
 	if res.SessionID != "s" || res.Mode != "agent" || res.ModelContextTokens != 100 || res.ConversationTokens != 47 {
 		t.Fatalf("snapshot=%+v", res)
-	}
-	if len(res.WorkingSet) == 0 || res.WorkingSet[0] != "README.md" {
-		t.Fatalf("working set=%v", res.WorkingSet)
 	}
 }
 

@@ -48,6 +48,21 @@ func DeniedToolDisplayBody(toolName, feedback string) string {
 	}
 }
 
+// DeniedToolStep is the completed step of a call the user refused (see
+// StepEvent.Denied). The runtime emits it where it injects the denial result
+// and derives that result's persisted display from it, so the card a live
+// surface draws and the card every replay of the row draws are one card.
+func DeniedToolStep(stepID, toolName string, input map[string]any, feedback string) StepEvent {
+	return StepEvent{
+		Kind:         StepKindToolCompleted,
+		StepID:       strings.TrimSpace(stepID),
+		ToolName:     strings.TrimSpace(toolName),
+		Input:        input,
+		Denied:       true,
+		DenyFeedback: strings.TrimSpace(feedback),
+	}
+}
+
 func NormalizeToolStepForDisplay(evt StepEvent) StepEvent {
 	return evt
 }
@@ -64,6 +79,10 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 	kind := strings.TrimSpace(evt.Kind)
 	if kind == StepKindToolStarted || kind == StepKindToolParallelStarted {
 		return "", false
+	}
+	// A refused call never ran; its body is the refusal's own sentence.
+	if evt.Denied {
+		return DeniedToolDisplayBody(toolName, evt.DenyFeedback), false
 	}
 	if stepRequiresApproval(evt) {
 		return "", false
@@ -118,8 +137,6 @@ func FormatToolStepResult(evt StepEvent, maxBytes int) (formatted string, trunca
 		body, truncated = formatExitPlanModeStep(evt, maxBytes)
 	case "user_interaction":
 		body, truncated = formatUserInteractionStep(evt, maxBytes)
-	case "working_set_pin":
-		body, truncated = formatWorkingSetPinStep(evt, maxBytes)
 	case "request_permissions":
 		body, truncated = formatRequestPermissionsStep(evt, maxBytes)
 	case "retrieve_output":
@@ -250,6 +267,13 @@ func SummarizeToolStep(evt StepEvent) string {
 	}
 	if errText := strings.TrimSpace(evt.Error); errText != "" {
 		return "failed: " + truncateSummary(errText)
+	}
+	// A refused call never ran, so "ran ..." would claim it did. It carries
+	// no summary of its own - its status and body say what happened - and
+	// surfaces label it by its invocation, exactly as they label the
+	// persisted denial row.
+	if evt.Denied {
+		return ""
 	}
 	invocation := toolInvocationLabel(evt)
 	if invocation == "" {
@@ -1954,47 +1978,6 @@ func firstFencedBody(content string) string {
 	return ""
 }
 
-// formatWorkingSetPinStep renders the pinned working set as a readable list.
-// The tool result is a JSON object wrapped as a string under the "output" key;
-// parsing it here avoids exposing the transport envelope in the TUI.
-func formatWorkingSetPinStep(evt StepEvent, maxBytes int) (string, bool) {
-	raw := strings.TrimSpace(stringFromAny(evt.Output["output"]))
-	if raw == "" {
-		return "", false
-	}
-	var parsed struct {
-		Count int      `json:"count"`
-		Pins  []string `json:"pins"`
-	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return formatGenericToolStep(evt, "working_set_pin", maxBytes)
-	}
-	count := parsed.Count
-	if count == 0 && len(parsed.Pins) > 0 {
-		count = len(parsed.Pins)
-	}
-	var sb strings.Builder
-	if count == 0 {
-		sb.WriteString("No working set entries are pinned.")
-	} else {
-		sb.WriteString(fmt.Sprintf("Pinned %s in the working set", formatCountLabel(count, "entry", "entries")))
-		if count != len(parsed.Pins) && len(parsed.Pins) > 0 {
-			sb.WriteString(fmt.Sprintf(" (%d shown)", len(parsed.Pins)))
-		}
-		sb.WriteString(":")
-		for _, pin := range parsed.Pins {
-			pin = strings.TrimSpace(pin)
-			if pin == "" {
-				continue
-			}
-			sb.WriteString("\n- `")
-			sb.WriteString(pin)
-			sb.WriteString("`")
-		}
-	}
-	return clampBody(sb.String(), maxBytes)
-}
-
 // formatRequestPermissionsStep renders a request_permissions lifecycle event as
 // a readable card. The request is always shown (whether or not it needed an
 // interactive approval prompt); when the call was auto-approved — exempt from
@@ -2292,6 +2275,9 @@ func stepStatusLabel(evt StepEvent) string {
 	case StepKindToolStarted, StepKindToolParallelStarted, StepKindToolOutputDelta:
 		return "running"
 	case StepKindToolCompleted, StepKindToolParallelCompleted:
+		if evt.Denied {
+			return "denied"
+		}
 		if stepRequiresApproval(evt) {
 			return "awaiting approval"
 		}
@@ -2353,7 +2339,7 @@ func toolPurpose(evt StepEvent) string {
 		return "Save a user-requested durable memory note."
 	case "memories_list", "memories_read", "memories_search":
 		return "Inspect durable memory notes."
-	case "session_todo", "enter_plan_mode", "exit_plan_mode", "working_set_show", "working_set_pin", "working_set_drop":
+	case "session_todo", "enter_plan_mode", "exit_plan_mode":
 		return "Inspect or update session planning context."
 	case "user_interaction":
 		return "Ask the human for a structured decision."
@@ -2463,7 +2449,7 @@ func toolInvocationNamedLabel(evt StepEvent) (string, bool) {
 		return "stop " + subagentCallName(evt), true
 	case "subagent_list":
 		return "list tasks", true
-	case "session_todo", "enter_plan_mode", "exit_plan_mode", "working_set_show", "working_set_pin", "working_set_drop":
+	case "session_todo", "enter_plan_mode", "exit_plan_mode":
 		return tool + " " + compactFields(evt.Input, "action", "id", "path", "reason"), true
 	}
 	return "", false

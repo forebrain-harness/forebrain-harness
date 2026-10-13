@@ -1,4 +1,5 @@
 import type { ThemeRegistration } from 'shiki'
+import { monokaiLightPalette as M } from './palette'
 
 /**
  * Monokai Light — the light counterpart of the Monokai theme every forebrain
@@ -10,19 +11,20 @@ import type { ThemeRegistration } from 'shiki'
  * theme is the point — a file reads the same way in either mode, and in the
  * terminal and the browser alike.
  *
- * The substitutions, from Shiki's Monokai to chroma's monokailight:
+ * The colours come from `monokai-light-palette` (the one place they are named);
+ * the substitutions, from Shiki's Monokai to chroma's monokailight, are:
  *
- *   #f8f8f2, #cfcfc2 → #111111   names, punctuation, plain text
- *   #272822          → #fafafa   canvas
- *   #66d9ef          → #00a8c8   storage and keyword cyan
- *   #a6e22e          → #75af00   functions, classes, attributes
- *   #e6db74, #fd971f → #d88200   strings, parameters
- *   #f44747          → #960050   invalid
- *   #6796e6          → #2f6fd0   editor annotation tokens
+ *   #f8f8f2, #cfcfc2 → M.name       names, punctuation, plain text
+ *   #272822          → M.background canvas
+ *   #66d9ef          → M.keyword    storage and keyword cyan
+ *   #a6e22e          → M.green      functions, classes, attributes
+ *   #e6db74, #fd971f → M.string     strings, parameters
+ *   #f44747          → M.error      invalid
+ *   #6796e6          → #2f6fd0      editor annotation tokens (no palette entry)
  *   #cd9731          → #a06a00
  *   #b267e6          → #7b3fbf
- *   #88846f          → #75715e   comments (unchanged in the counterpart)
- *   #ae81ff, #f92672 unchanged   literals, operators and tags
+ *   #88846f          → M.comment    comments (unchanged in the counterpart)
+ *   #ae81ff, #f92672 unchanged      literals, operators and tags
  *
  * Redo that table rather than hand-editing entries if the bundled Monokai
  * changes.
@@ -32,13 +34,13 @@ export const monokaiLight: ThemeRegistration = {
   displayName: 'Monokai Light',
   type: 'light',
   colors: {
-    'editor.background': '#fafafa',
-    'editor.foreground': '#111111',
+    'editor.background': M.background,
+    'editor.foreground': M.name,
   },
   tokenColors: [
     {
       settings: {
-        foreground: '#111111',
+        foreground: M.name,
       },
     },
     {
@@ -49,19 +51,19 @@ export const monokaiLight: ThemeRegistration = {
         'variable.legacy.builtin.python',
       ],
       settings: {
-        foreground: '#111111',
+        foreground: M.name,
       },
     },
     {
       scope: 'comment',
       settings: {
-        foreground: '#75715e',
+        foreground: M.comment,
       },
     },
     {
       scope: 'string',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
     {
@@ -70,7 +72,7 @@ export const monokaiLight: ThemeRegistration = {
         'punctuation.section.embedded',
       ],
       settings: {
-        foreground: '#f92672',
+        foreground: M.operator,
       },
     },
     {
@@ -78,56 +80,56 @@ export const monokaiLight: ThemeRegistration = {
         'meta.template.expression',
       ],
       settings: {
-        foreground: '#111111',
+        foreground: M.name,
       },
     },
     {
       scope: 'constant.numeric',
       settings: {
-        foreground: '#ae81ff',
+        foreground: M.literal,
       },
     },
     {
       scope: 'constant.language',
       settings: {
-        foreground: '#ae81ff',
+        foreground: M.literal,
       },
     },
     {
       scope: 'constant.character, constant.other',
       settings: {
-        foreground: '#ae81ff',
+        foreground: M.literal,
       },
     },
     {
       scope: 'variable',
       settings: {
-        foreground: '#111111',
+        foreground: M.name,
       },
     },
     {
       scope: 'keyword',
       settings: {
-        foreground: '#f92672',
+        foreground: M.operator,
       },
     },
     {
       scope: 'storage',
       settings: {
-        foreground: '#f92672',
+        foreground: M.operator,
       },
     },
     {
       scope: 'storage.type',
       settings: {
-        foreground: '#00a8c8',
+        foreground: M.keyword,
         fontStyle: 'italic',
       },
     },
     {
       scope: 'entity.name.type, entity.name.class, entity.name.namespace, entity.name.scope-resolution',
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
         fontStyle: 'underline',
       },
     },
@@ -137,51 +139,51 @@ export const monokaiLight: ThemeRegistration = {
         'punctuation.separator.namespace.ruby',
       ],
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
         fontStyle: 'italic underline',
       },
     },
     {
       scope: 'entity.name.function',
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
       },
     },
     {
       scope: 'variable.parameter',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
         fontStyle: 'italic',
       },
     },
     {
       scope: 'entity.name.tag',
       settings: {
-        foreground: '#f92672',
+        foreground: M.tag,
       },
     },
     {
       scope: 'entity.other.attribute-name',
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
       },
     },
     {
       scope: 'support.function',
       settings: {
-        foreground: '#00a8c8',
+        foreground: M.keyword,
       },
     },
     {
       scope: 'support.constant',
       settings: {
-        foreground: '#00a8c8',
+        foreground: M.keyword,
       },
     },
     {
       scope: 'support.type, support.class',
       settings: {
-        foreground: '#00a8c8',
+        foreground: M.keyword,
         fontStyle: 'italic',
       },
     },
@@ -192,43 +194,43 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'invalid',
       settings: {
-        foreground: '#960050',
+        foreground: M.error,
       },
     },
     {
       scope: 'invalid.deprecated',
       settings: {
-        foreground: '#960050',
+        foreground: M.error,
       },
     },
     {
       scope: 'meta.structure.dictionary.json string.quoted.double.json',
       settings: {
-        foreground: '#111111',
+        foreground: M.name,
       },
     },
     {
       scope: 'meta.diff, meta.diff.header',
       settings: {
-        foreground: '#75715e',
+        foreground: M.comment,
       },
     },
     {
       scope: 'markup.deleted',
       settings: {
-        foreground: '#f92672',
+        foreground: M.tag,
       },
     },
     {
       scope: 'markup.inserted',
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
       },
     },
     {
       scope: 'markup.changed',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
     {
@@ -240,43 +242,43 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'entity.name.filename.find-in-files',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
     {
       scope: 'markup.quote',
       settings: {
-        foreground: '#f92672',
+        foreground: M.tag,
       },
     },
     {
       scope: 'markup.list',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
     {
       scope: 'markup.bold, markup.italic',
       settings: {
-        foreground: '#00a8c8',
+        foreground: M.keyword,
       },
     },
     {
       scope: 'markup.inline.raw',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
     {
       scope: 'markup.heading',
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
       },
     },
     {
       scope: 'markup.heading.setext',
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
         fontStyle: 'bold',
       },
     },
@@ -289,7 +291,7 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'markup.quote.markdown',
       settings: {
-        foreground: '#75715e',
+        foreground: M.comment,
         fontStyle: 'italic',
       },
     },
@@ -302,13 +304,13 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'string.other.link.title.markdown,string.other.link.description.markdown',
       settings: {
-        foreground: '#ae81ff',
+        foreground: M.literal,
       },
     },
     {
       scope: 'markup.underline.link.markdown,markup.underline.link.image.markdown',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
     {
@@ -326,7 +328,7 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'markup.list.unnumbered.markdown, markup.list.numbered.markdown',
       settings: {
-        foreground: '#111111',
+        foreground: M.name,
       },
     },
     {
@@ -334,7 +336,7 @@ export const monokaiLight: ThemeRegistration = {
         'punctuation.definition.list.begin.markdown',
       ],
       settings: {
-        foreground: '#75af00',
+        foreground: M.green,
       },
     },
     {
@@ -352,7 +354,7 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'token.error-token',
       settings: {
-        foreground: '#960050',
+        foreground: M.error,
       },
     },
     {
@@ -364,7 +366,7 @@ export const monokaiLight: ThemeRegistration = {
     {
       scope: 'variable.language',
       settings: {
-        foreground: '#d88200',
+        foreground: M.string,
       },
     },
   ],

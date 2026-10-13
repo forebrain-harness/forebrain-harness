@@ -284,10 +284,11 @@ func TestBuildToolApprovalRequestSuppressesPersistentCommandChoicesAfterMatch(t 
 }
 
 func TestRequestPermissionsFromJSON(t *testing.T) {
-	response := RequestPermissionsFromJSON("request_permissions", `{"permissions":{"file_system":{"read":["."]}}}`)
+	ctx := context.Background()
+	response := RequestPermissionsFromJSON(ctx, "request_permissions", `{"permissions":{"file_system":{"read":["."]}}}`)
 	require.NotNil(t, response)
 	require.Len(t, response.Permissions.FileSystem.Entries, 1)
-	require.Nil(t, RequestPermissionsFromJSON("shell", `{}`))
+	require.Nil(t, RequestPermissionsFromJSON(ctx, "shell", `{}`))
 }
 
 func TestValidateNetworkSessionUpdate(t *testing.T) {
@@ -909,4 +910,35 @@ func TestDeliverPlanReviewStampsTheAnswer(t *testing.T) {
 	if ActionIsReviewDelivered(manual) {
 		t.Fatalf("a typed marker without the stamp is the user's words: %+v", manual)
 	}
+}
+
+// Every surface that records an approval gate names the gated call through
+// ApprovalToolStepID, so the record anchors to the same call whichever
+// surface wrote it.
+func TestApprovalToolStepIDNamesTheGatedCall(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "", ApprovalToolStepID(nil))
+
+	withOrigin := &tool.RequiresActionError{
+		OriginatingToolCallID: "call-orig",
+		ToolName:              "exit_plan_mode",
+		SessionSnapshot: []llm.Message{
+			llm.AssistantMessage(nil,
+				llm.ToolCall{ID: "call-other", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: "{}"}},
+			),
+		},
+	}
+	require.Equal(t, "call-orig", ApprovalToolStepID(withOrigin))
+
+	fromSnapshot := &tool.RequiresActionError{
+		ToolName: "exit_plan_mode",
+		SessionSnapshot: []llm.Message{
+			llm.UserMessage(llm.Text("plan")),
+			llm.AssistantMessage(nil,
+				llm.ToolCall{ID: "call-exit-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: "{}"}},
+			),
+		},
+	}
+	require.Equal(t, "call-exit-1", ApprovalToolStepID(fromSnapshot))
 }

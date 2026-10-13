@@ -2005,13 +2005,14 @@ func TestApplyModelSelectionUsesActiveAgentNotMain(t *testing.T) {
 	require.JSONEq(t, `{"stream":true}`, string(got.Params))
 }
 
-func TestChatSessionProjectContextAddendumUsesLaunchGitRoot(t *testing.T) {
+func TestChatSessionProjectContextAddendumUsesLaunchRootNotGitAncestor(t *testing.T) {
 	home := t.TempDir()
 	rawProjectRoot := filepath.Join(home, "src", "demo")
 	nested := filepath.Join(rawProjectRoot, "cmd", "tui")
 	require.NoError(t, os.MkdirAll(nested, 0o755))
+	// A .git marker above the launch directory must not be walked up to: the
+	// directory the TUI was started in is the project (R2).
 	runInDir(t, rawProjectRoot, "git", "init")
-	projectRoot := memory.ProjectRoot(nested)
 	t.Chdir(nested)
 
 	s := &ChatSession{}
@@ -2021,10 +2022,12 @@ func TestChatSessionProjectContextAddendumUsesLaunchGitRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "go test", out.Text)
 	require.Contains(t, out.SystemAddendum, "<project_context>")
-	require.Contains(t, out.SystemAddendum, "project_root: "+projectRoot)
+	require.Contains(t, out.SystemAddendum, "project_root: "+nested+"\n")
+	require.NotContains(t, out.SystemAddendum, "project_root: "+rawProjectRoot+"\n")
 	require.Contains(t, out.SystemAddendum, "current_working_directory: "+nested)
 	require.Contains(t, out.SystemAddendum, "Use project_root for project-relative shell commands")
-	require.NotContains(t, out.SystemAddendum, "without `cd "+projectRoot+" &&`")
+	// The terminal is already at the project root, so no cd is needed.
+	require.Contains(t, out.SystemAddendum, "without `cd "+nested+" &&`")
 }
 
 func TestChatSessionProjectContextAddendumOmitsProjectRootCDHintWhenTerminalCWDIsNotProjectRoot(t *testing.T) {
@@ -2032,26 +2035,24 @@ func TestChatSessionProjectContextAddendumOmitsProjectRootCDHintWhenTerminalCWDI
 	projectRoot := filepath.Join(home, "src", "demo")
 	nested := filepath.Join(projectRoot, "cmd", "tui")
 	require.NoError(t, os.MkdirAll(nested, 0o755))
-	runInDir(t, projectRoot, "git", "init")
-	projectRoot = memory.ProjectRoot(nested)
 	t.Chdir(nested)
 
 	s := &ChatSession{}
-	s.WorkingDir = nested
+	// The launch directory is the project root (R2); the terminal, meanwhile,
+	// sits in a subdirectory, so the "already there" cd hint must not appear.
+	s.WorkingDir = projectRoot
 
 	out, err := s.projectContextPreHook(context.Background(), "pre", hook.HookContext{SessionID: "s1", Channel: "tui"}, "go test")
 	require.NoError(t, err)
 	require.Contains(t, out.SystemAddendum, "project_root: "+projectRoot)
 	require.Contains(t, out.SystemAddendum, "current_working_directory: "+nested)
-	require.NotContains(t, out.SystemAddendum, "without `cd "+projectRoot+" &&`")
+	require.NotContains(t, out.SystemAddendum, "without `cd ")
 }
 
 func TestChatSessionProjectContextAddendumAddsProjectRootCDHintWhenTerminalCWDIsProjectRoot(t *testing.T) {
 	home := t.TempDir()
 	projectRoot := filepath.Join(home, "src", "demo")
 	require.NoError(t, os.MkdirAll(projectRoot, 0o755))
-	runInDir(t, projectRoot, "git", "init")
-	projectRoot = memory.ProjectRoot(projectRoot)
 	t.Chdir(projectRoot)
 
 	s := &ChatSession{}
@@ -2068,8 +2069,6 @@ func TestChatSessionProjectContextAddendumDoesNotFallbackCurrentWorkingDirectory
 	home := t.TempDir()
 	projectRoot := filepath.Join(home, "src", "demo")
 	require.NoError(t, os.MkdirAll(projectRoot, 0o755))
-	runInDir(t, projectRoot, "git", "init")
-	projectRoot = memory.ProjectRoot(projectRoot)
 	origGetwd := projectContextGetwd
 	projectContextGetwd = func() (string, error) {
 		return "", os.ErrNotExist
@@ -2107,7 +2106,150 @@ func TestOpenChatSessionWiresProjectContextPreHook(t *testing.T) {
 	out, err := s.pipe().Run(context.Background(), "pre", hook.HookContext{SessionID: "s1", Channel: "tui"}, "pwd")
 	require.NoError(t, err)
 	require.Contains(t, out.SystemAddendum, "<project_context>")
-	require.Contains(t, out.SystemAddendum, "project_root: "+memory.ProjectRoot(projectRoot))
+	require.Contains(t, out.SystemAddendum, "project_root: "+projectRoot)
+}
+
+// TestAdoptLaunchProjectRegistersTheLaunchDirectory pins the TUI launch
+// contract (R2): the directory the session was opened on becomes a project for
+// the active primary agent, the session points at it, and conversations the
+// session creates are filed under it.
+func TestAdoptLaunchProjectRegistersTheLaunchDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	// A gitless subdirectory of a larger checkout: it is the project, and the
+	// enclosing checkout is not walked up to.
+	repo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0o755))
+	sub := filepath.Join(repo, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), sub)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+	require.NotEmpty(t, s.ProjectID)
+
+	projects := state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName)
+	project, err := projects.Get(ctx, s.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, "sub", project.Name)
+
+	// A conversation the surface starts is born under the project.
+	require.NoError(t, s.sessStore().Ensure(ctx, "new-conv", "new-conv"))
+	var projectID string
+	require.NoError(t, s.Env.SQL.QueryRowContext(ctx, `SELECT COALESCE(project_id,'') FROM fb_sessions WHERE id='new-conv'`).Scan(&projectID))
+	require.Equal(t, s.ProjectID, projectID)
+}
+
+// sessionIDsOf maps a session list to the ids it holds, for membership checks.
+func sessionIDsOf(list []state.SessionSummary) []string {
+	out := make([]string, 0, len(list))
+	for _, item := range list {
+		out = append(out, item.ID)
+	}
+	return out
+}
+
+// TestResumeListsOnlyTheSessionsProject pins /resume's scope: a session bound
+// to a project lists only that project's conversations, not the agent's other
+// projects'.
+func TestResumeListsOnlyTheSessionsProject(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	launch := t.TempDir()
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), launch)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+
+	projects := state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName)
+	other, _, err := projects.FindOrCreateByRoot(ctx, t.TempDir(), state.CreateProjectInput{})
+	require.NoError(t, err)
+
+	sessions := s.sessStore()
+	require.NoError(t, sessions.Ensure(ctx, "cur", "cur")) // born under the launch project
+	require.NoError(t, sessions.Ensure(ctx, "oth", "oth"))
+	require.NoError(t, projects.BindSession(ctx, "oth", other.ID))
+
+	recent, err := s.ListSessionsRecent(ctx, 50)
+	require.NoError(t, err)
+	require.Contains(t, sessionIDsOf(recent), "cur")
+	require.NotContains(t, sessionIDsOf(recent), "oth")
+
+	paged, err := s.ListSessionsRecentPaged(ctx, 50, 0)
+	require.NoError(t, err)
+	require.Contains(t, sessionIDsOf(paged), "cur")
+	require.NotContains(t, sessionIDsOf(paged), "oth")
+}
+
+// TestResumeOnLaunchProjectRefusals pins the launch-time resume checks: a
+// conversation from another project, one whose directory is gone, and a
+// project-less workshop task are each refused, while a conversation in this
+// launch directory is adopted and a missing session is left to the ordinary
+// resume path.
+func TestResumeOnLaunchProjectRefusals(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	launch := t.TempDir()
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), launch)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+	projects := state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName)
+	sessions := s.sessStore()
+
+	// A conversation in another project is refused with its name and root.
+	otherRoot := t.TempDir()
+	other, _, err := projects.FindOrCreateByRoot(ctx, otherRoot, state.CreateProjectInput{Name: "elsewhere"})
+	require.NoError(t, err)
+	require.NoError(t, sessions.Ensure(ctx, "foreign", "foreign"))
+	require.NoError(t, projects.BindSession(ctx, "foreign", other.ID))
+	var foreign ErrResumeForeignProject
+	require.ErrorAs(t, s.ResumeOnLaunchProject(ctx, "foreign"), &foreign)
+	require.Equal(t, other.Root, foreign.Root)
+	require.Equal(t, "elsewhere", foreign.Name)
+
+	// A project-less conversation (a workshop task) is refused.
+	require.NoError(t, sessions.EnsureAt(ctx, "workshop-1", "workshop-1", state.SessionBirth{Source: state.SessionSourceWorkshop}))
+	require.NoError(t, projects.BindSession(ctx, "workshop-1", ""))
+	var noProject ErrResumeNoProject
+	require.ErrorAs(t, s.ResumeOnLaunchProject(ctx, "workshop-1"), &noProject)
+
+	// A session id with no row has no project to check: the ordinary resume
+	// path reports the missing session itself.
+	require.NoError(t, s.ResumeOnLaunchProject(ctx, "does-not-exist"))
+
+	// A conversation in this launch directory is adopted.
+	require.NoError(t, sessions.Ensure(ctx, "here", "here"))
+	require.NoError(t, s.ResumeOnLaunchProject(ctx, "here"))
+}
+
+// TestResumeOnLaunchProjectRefusesMissingDirectory pins the missing-directory
+// refusal: a conversation whose project root no longer exists on disk cannot
+// continue.
+func TestResumeOnLaunchProjectRefusesMissingDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	launch := t.TempDir()
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), launch)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+	require.NoError(t, s.sessStore().Ensure(ctx, "gone", "gone"))
+
+	// The launch directory vanished after the conversation was born.
+	require.NoError(t, os.RemoveAll(launch))
+
+	var missing ErrResumeProjectMissing
+	require.ErrorAs(t, s.ResumeOnLaunchProject(ctx, "gone"), &missing)
 }
 
 func runInDir(t *testing.T, dir string, name string, args ...string) {
@@ -6322,12 +6464,28 @@ func TestCharacterizationStreamingAssistantAndReasoning(t *testing.T) {
 		}
 	}
 
+	// The reasoning block is written as one row when it ends, then the answer as
+	// one row: one row per block, never one per delta. The reasoning row carries
+	// the block's duration so a replay draws the same "Thought for Ns" the live
+	// view showed.
 	got := captureCharacterization(t, s, sessionID)
-	if len(got.Messages) != 2 {
-		t.Fatalf("Messages = %d, want 2 (user, one complete assistant message): %+v", len(got.Messages), got.Messages)
+	wantRoles := []string{"user", "reasoning", "assistant"}
+	if len(got.Messages) != len(wantRoles) {
+		t.Fatalf("Messages = %d, want %d (user, one complete reasoning row, one complete assistant message): %+v", len(got.Messages), len(wantRoles), got.Messages)
 	}
-	if got.Messages[1].Content != "Sure, here's what I found." {
-		t.Fatalf("Messages[1].Content = %q, want the full concatenated text as a single row", got.Messages[1].Content)
+	for i, role := range wantRoles {
+		if got.Messages[i].Role != role {
+			t.Fatalf("Messages[%d].Role = %q, want %q (full transcript: %+v)", i, got.Messages[i].Role, role, got.Messages)
+		}
+	}
+	if got.Messages[1].Content != "Let me check the notes first." {
+		t.Fatalf("Messages[1].Content = %q, want the full concatenated reasoning as a single row", got.Messages[1].Content)
+	}
+	if _, ok := state.ParseReasoningTiming(got.Messages[1].PartsJSON); !ok {
+		t.Fatalf("reasoning row carries no timing part: %+v", got.Messages[1])
+	}
+	if got.Messages[2].Content != "Sure, here's what I found." {
+		t.Fatalf("Messages[2].Content = %q, want the full concatenated text as a single row", got.Messages[2].Content)
 	}
 }
 
@@ -11392,8 +11550,10 @@ func createTempLog(t *testing.T) *os.File {
 }
 
 func TestMain(m *testing.M) {
-	if cat, err := llm.Parse(llm.EmbeddedModelsJSON()); err == nil {
-		llm.SetGlobalCatalogForTest(cat)
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if cat, err := llm.Parse(data); err == nil {
+			llm.SetGlobalCatalogForTest(cat)
+		}
 	}
 	os.Exit(m.Run())
 }
@@ -17114,7 +17274,10 @@ func TestRendererSkillReadCardUsesDedicatedHeaderAndProjectRelativeSource(t *tes
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projectRoot := memory.ProjectRoot(nested)
+	// The launch directory is the project root (R2): the enclosing .git at
+	// project is not walked up to, so the root the skill path shortens
+	// against is nested, the renderer's cached cwd.
+	projectRoot := nested
 	skillPath := filepath.Join(projectRoot, ".forebrain", "skills", "review", "SKILL.md")
 	// The completed card carries exactly the shared semantic body the runtime
 	// persisted for this read — never the file preview it replaced.
@@ -19504,21 +19667,6 @@ func TestToolDisplayHeaderOmitsOutputDerivedSuffixes(t *testing.T) {
 			wantNotContain: []string{"5 results"},
 		},
 		{
-			name: "working_set_show count",
-			frame: Frame{
-				Kind:    FrameTool,
-				Title:   "working_set_show",
-				Final:   true,
-				Content: `{"count":4}`,
-				ToolMeta: tool.ToolMeta{
-					ToolName: "working_set_show",
-					Status:   "completed",
-				},
-			},
-			wantContains:   []string{"Working set"},
-			wantNotContain: []string{"4 entries"},
-		},
-		{
 			name: "edit_file diff stats",
 			frame: Frame{
 				Kind:    FrameTool,
@@ -19924,48 +20072,6 @@ func TestRendererReadFileHeaderDoesNotTruncatePathOutsideCwd(t *testing.T) {
 	}
 	if strings.Contains(plain, "…/") {
 		t.Fatalf("header must not truncate the file path, got %q", plain)
-	}
-}
-
-func TestFormatWorkingSetPinOutputUsesCwdRelativePaths(t *testing.T) {
-	cwd := "/home/user/project"
-	outside := "/other/workspace/src/foo.go"
-	content := "Pinned 3 entries in the working set:\n" +
-		"- `" + cwd + "/internal/foo.go`\n" +
-		"- `" + outside + "`\n" +
-		"- `already/relative.go`"
-
-	got := formatToolContent("working_set_pin", content, cwd)
-	if strings.Contains(got, cwd) {
-		t.Fatalf("expected cwd-relative paths, still contains cwd: %q", got)
-	}
-	if !strings.Contains(got, "- `internal/foo.go`") {
-		t.Fatalf("expected relative path under cwd, got %q", got)
-	}
-	if !strings.Contains(got, "- `"+outside+"`") {
-		t.Fatalf("expected absolute path outside cwd preserved, got %q", got)
-	}
-	if !strings.Contains(got, "- `already/relative.go`") {
-		t.Fatalf("expected already-relative path preserved, got %q", got)
-	}
-}
-
-func TestFormatWorkingSetPinOutputParsesRawJSON(t *testing.T) {
-	cwd := "/home/user/project"
-	content := `{"count":2,"pins":["` + cwd + `/internal/foo.go","/other/workspace/src/foo.go"],"session_id":"cli-123"}`
-
-	got := formatToolContent("working_set_pin", content, cwd)
-	if strings.Contains(got, cwd) || strings.Contains(got, "session_id") || strings.Contains(got, "cli-123") {
-		t.Fatalf("unexpected raw/internal data in output: %q", got)
-	}
-	if !strings.Contains(got, "Pinned 2 entries in the working set:") {
-		t.Fatalf("expected readable heading, got %q", got)
-	}
-	if !strings.Contains(got, "- `internal/foo.go`") {
-		t.Fatalf("expected relative pin path, got %q", got)
-	}
-	if !strings.Contains(got, "- `/other/workspace/src/foo.go`") {
-		t.Fatalf("expected outside path preserved, got %q", got)
 	}
 }
 

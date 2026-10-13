@@ -65,7 +65,7 @@
           @toggle="updateNativeFold(blockFoldId(block, idx), $event)"
         >
           <summary class="cursor-pointer text-[11px] text-[var(--forebrain-muted-text)]">
-            {{ thinkingLabel(block) }}
+            {{ thinkingBlockLabel(block, t) }}
           </summary>
           <p class="mt-2 whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ block.text }}</p>
         </details>
@@ -185,7 +185,7 @@ import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
-import { formatRuntimeDuration, formatWorkedDurationLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { formatRuntimeDuration, formatWorkedDurationLabel, thinkingBlockLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
 import { t } from '@/locales'
 
@@ -259,13 +259,6 @@ const workingDuration = computed(() => {
   if (!Number.isFinite(start)) return ''
   return formatRuntimeDuration(Math.max(0, nowMs.value - start))
 })
-
-function thinkingLabel(block: Extract<TimelineBlock, { kind: 'thinking' }>): string {
-  if (block.durationMs && block.durationMs >= 1000) {
-    return t('chat.subagentThoughtFor', { seconds: Math.round(block.durationMs / 1000) })
-  }
-  return t('chat.subagentThinking')
-}
 
 function blockFoldId(block: TimelineBlock, index: number): string {
   if (block.id) return `${block.kind}:${block.id}`

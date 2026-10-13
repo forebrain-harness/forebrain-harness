@@ -96,7 +96,6 @@ func TestContextReportReadsLikeTheConversation(t *testing.T) {
 		t.Fatalf("compactions = %+v err=%v", got, err)
 	}
 	st := snapshotStub{raw: `{"budget":{"limit_tokens":1800},"provenance":[
-		{"source_id":"working_set_source","included":false,"reason":"empty"},
 		{"source_id":"recent_files_source","included":true,"reason":"selected","estimated_tokens":1200},
 		{"source_id":"git_context_source","included":false,"reason":"budget","estimated_tokens":2400}
 	],"tool_result_spills":[{"call_id":"c1"},{"call_id":"c2"}]}`}
@@ -117,7 +116,7 @@ func TestContextReportReadsLikeTheConversation(t *testing.T) {
 			t.Fatalf("report misses %q:\n%s", want, reply)
 		}
 	}
-	for _, internal := range []string{"working_set_source", "Pressure", "Items:", "provenance", "{"} {
+	for _, internal := range []string{"Pressure", "Items:", "provenance", "{"} {
 		if strings.Contains(reply, internal) {
 			t.Fatalf("report shows the internal %q:\n%s", internal, reply)
 		}

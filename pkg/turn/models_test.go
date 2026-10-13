@@ -117,9 +117,10 @@ func useStaticCatalog(t *testing.T) {
 	}`))
 	require.NoError(t, err)
 	llm.SetGlobalCatalogForTest(cat)
-	embedded, err := llm.Parse(llm.EmbeddedModelsJSON())
-	if err == nil {
-		t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if embedded, err := llm.Parse(data); err == nil {
+			t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+		}
 	}
 }
 

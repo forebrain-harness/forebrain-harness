@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -198,4 +199,64 @@ func InstallFromSkillsShRecord(ctx context.Context, workspace, ownerRepo, destSk
 		}
 	}
 	return InstallFromGitRecord(ctx, workspace, repo, destSkillsDir, name, ref)
+}
+
+// remoteHeadTTL is how long one upstream probe's answer stands. The check
+// runs on list interfaces, so an hour keeps a listing cheap while still
+// noticing an upstream that moved on.
+const remoteHeadTTL = time.Hour
+
+// remoteHeadEntry is one cached upstream probe.
+type remoteHeadEntry struct {
+	at  time.Time
+	rev string
+	ok  bool
+}
+
+// remoteHeadCache memoizes upstream probes per repository URL, in this
+// process, for remoteHeadTTL. A cache entry is only ever a hint about a
+// remote, so a stale or racing entry marks an update that may already have
+// been pulled, and costs one extra probe an hour later — never a wrong write.
+var remoteHeadCache = struct {
+	sync.Mutex
+	m map[string]remoteHeadEntry
+}{m: map[string]remoteHeadEntry{}}
+
+// RemoteHead reports the newest revision a git source's default branch
+// advertises, without cloning it. The answer is cached per repository for an
+// hour; only a fresh-enough cache hit avoids the probe.
+//
+// ok=false is a failed probe — the source is unreachable, private or gone —
+// and the caller answers "no update" rather than an error: the listing that
+// triggered the check must not fail because an upstream is offline.
+func RemoteHead(ctx context.Context, repo string) (string, bool) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return "", false
+	}
+	now := time.Now()
+	remoteHeadCache.Lock()
+	if entry, ok := remoteHeadCache.m[repo]; ok && now.Sub(entry.at) < remoteHeadTTL {
+		remoteHeadCache.Unlock()
+		return entry.rev, entry.ok
+	}
+	remoteHeadCache.Unlock()
+	rev, ok := "", false
+	if out, err := gitOut(ctx, "", "ls-remote", repo, "HEAD"); err == nil {
+		if fields := strings.Fields(out); len(fields) > 0 {
+			rev, ok = fields[0], true
+		}
+	}
+	remoteHeadCache.Lock()
+	remoteHeadCache.m[repo] = remoteHeadEntry{at: now, rev: rev, ok: ok}
+	remoteHeadCache.Unlock()
+	return rev, ok
+}
+
+// ForgetRemoteHeadCache drops the cached upstream probes, so a test or an
+// explicit re-check can force a fresh probe.
+func ForgetRemoteHeadCache() {
+	remoteHeadCache.Lock()
+	remoteHeadCache.m = map[string]remoteHeadEntry{}
+	remoteHeadCache.Unlock()
 }

@@ -705,7 +705,10 @@ func TestImportProjectMCPReportsOnlyProjectsItWritesInto(t *testing.T) {
 	if len(projects) != 1 || projects[0].Path != withServer {
 		t.Fatalf("projects = %+v, want only the one with a server to copy", projects)
 	}
-	if projects[0].Unloaded != "not a version-controlled project" {
+	// Version control is no longer part of the gate (R6): an unversioned
+	// project's file is held back only until the user trusts it, so the reason
+	// is trust, not a missing .git.
+	if projects[0].Unloaded != "not trusted yet" {
 		t.Fatalf("unloaded = %q", projects[0].Unloaded)
 	}
 }

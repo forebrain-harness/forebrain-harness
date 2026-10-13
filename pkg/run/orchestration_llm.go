@@ -25,6 +25,12 @@ type toolOrchestrationLLM struct {
 	inner llm.LLM
 	state *tool.State
 	home  string
+	// transcript, when set, receives the run's conversation and its reasoning
+	// blocks as each block ends, not only when the turn does. nil disables it
+	// (a bare wrapper with no store).
+	transcript transcriptProgressStore
+	// transcriptModel names the model the run's rows record. nil reads as "".
+	transcriptModel func(context.Context) string
 }
 
 type stopAfterToolResultKey struct{}
@@ -57,6 +63,63 @@ func wrapToolOrchestrationLLMWithHome(inner llm.LLM, state *tool.State, home str
 	return &toolOrchestrationLLM{inner: inner, state: state, home: strings.TrimSpace(home)}
 }
 
+// wrapToolOrchestrationLLMWithProgress is the product construction: the same
+// orchestration, plus the session store its conversation is written to as each
+// block ends. model names the model those rows record; nil reads as "". A
+// store-less or model-less test keeps using the plain constructors above.
+func wrapToolOrchestrationLLMWithProgress(inner llm.LLM, state *tool.State, home string, transcript transcriptProgressStore, model func(context.Context) string) llm.LLM {
+	w := wrapToolOrchestrationLLMWithHome(inner, state, home)
+	if o, ok := w.(*toolOrchestrationLLM); ok {
+		o.transcript = transcript
+		o.transcriptModel = model
+	}
+	return w
+}
+
+// recordReasoningBlocks wraps the foreground sink so each reasoning block is
+// written to the transcript as the block ends, then chains to the surface's own
+// callbacks untouched. A block ends when the provider signals OnReasoningDone
+// within one response — the "thinking turned into the answer" boundary — or,
+// for a provider that never signals it, at the first answer delta that follows
+// the thinking. Both paths write once and clear the buffer, so the same block
+// is never written twice.
+func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *llm.StreamSink, transcript *transcriptProgress) *llm.StreamSink {
+	if sink == nil || transcript == nil {
+		return sink
+	}
+	// The write must survive a cancel that lands as the surfaces tear the turn
+	// down, and the closure must not read the loop's reassigned ctx.
+	sinkCtx := context.WithoutCancel(ctx)
+	wrapped := *sink
+	downstreamReasoning := wrapped.OnReasoningDelta
+	downstreamDone := wrapped.OnReasoningDone
+	downstreamDelta := wrapped.OnDelta
+	finishReasoning := func() {
+		if text, startedAt, ok := transcript.takeReasoning(); ok {
+			transcript.reasoningDone(sinkCtx, text, startedAt, time.Now())
+		}
+	}
+	wrapped.OnReasoningDelta = func(text string) {
+		transcript.appendReasoning(text)
+		if downstreamReasoning != nil {
+			downstreamReasoning(text)
+		}
+	}
+	wrapped.OnReasoningDone = func() {
+		finishReasoning()
+		if downstreamDone != nil {
+			downstreamDone()
+		}
+	}
+	if downstreamDelta != nil {
+		wrapped.OnDelta = func(text string) {
+			finishReasoning()
+			downstreamDelta(text)
+		}
+	}
+	return &wrapped
+}
+
 // WrapToolOrchestrationLLM exposes the canonical execution-chain wrapper used
 // by Forebrain Harness product runtimes when tool results must be governed before they are
 // replayed into model context.
@@ -66,6 +129,24 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 	}
 	ctx = w.state.ContextWithRuntimeSessionMode(ctx)
 	tools = effectiveToolsForContext(ctx, tools)
+	// Write the run's conversation to its transcript as each block ends, not
+	// only when the turn does. Nothing here when no store is wired, when the
+	// context names no session, or when the model call has no foreground sink
+	// to hang the reasoning-block callbacks on.
+	transcript := newTranscriptProgress(w.transcript, llm.AgentSessionIDFromContext(ctx), tool.RunIDFromContext(ctx))
+	if transcript != nil {
+		if sink := llm.StreamSinkFrom(ctx); sink != nil {
+			ctx = llm.WithStreamSink(ctx, w.recordReasoningBlocks(ctx, sink, transcript))
+		}
+	}
+	// modelForTranscript names the model the rows this run writes record; the
+	// surface's own write at the turn's end reconciles against the same rows.
+	modelForTranscript := func() string {
+		if w == nil || w.transcriptModel == nil {
+			return ""
+		}
+		return w.transcriptModel(ctx)
+	}
 	var totalUsage llm.Usage
 	toolMap := make(map[string]*llm.Tool, len(tools))
 	for _, tool := range tools {
@@ -120,27 +201,36 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				denial := llm.ToolResultMessage(tc.ID, llm.Text(
 					buildDenialMessage(tc.Function.Name, resumeAssistant.denyReason),
 				))
-				// The refusal has two halves: the instruction text above is
-				// what the model reads, and this display body is what the
-				// card says — live, and on every replay of the row this
-				// result persists to. Without it a replay printed the
-				// model-facing text (and, for a denied plan, the reviews it
-				// carried) as if it were the user's words.
-				denialMeta, _ := json.Marshal(map[string]string{
-					"tool_name": strings.TrimSpace(tc.Function.Name),
-					"status":    "denied",
-				})
-				// A delivered review closed this gate: the card's body is the
-				// delivery drop key, never "(no output)". The key is replay
-				// plumbing, not user-facing words — every surface's replay
-				// projection recognizes it and drops the row whole.
-				denialBody := tool.DeniedToolDisplayBody(tc.Function.Name, resumeAssistant.denyFeedback)
 				if resumeAssistant.deliveredReview {
-					denialBody = tool.PlanReviewDeliveredDisplayKey
+					// A delivered review closed this gate: the card's body is
+					// the delivery drop key, never "(no output)". The key is
+					// replay plumbing, not user-facing words — every
+					// surface's replay projection recognizes it and drops
+					// the row whole. No surface draws it, so no step
+					// announces it either.
+					denialMeta, _ := json.Marshal(map[string]string{
+						"tool_name": strings.TrimSpace(tc.Function.Name),
+						"status":    "denied",
+					})
+					denial.ToolDisplay = &llm.ToolDisplayState{
+						Body:         tool.PlanReviewDeliveredDisplayKey,
+						ToolMetaJSON: string(denialMeta),
+					}
+					session = append(session, denial)
+					continue
 				}
-				denial.ToolDisplay = &llm.ToolDisplayState{
-					Body:         denialBody,
-					ToolMetaJSON: string(denialMeta),
+				// The refusal has two halves: the instruction text above is
+				// what the model reads, and the refused call's own step is what
+				// the card says. The step is announced like any completed call's,
+				// and the row it persists to carries the display derived from
+				// that same step, so the card a live surface draws and the card
+				// every replay of the row draws are one card. Without it a
+				// replay printed the model-facing text as if it were the user's
+				// words, and a live surface that only sees events drew nothing.
+				refused := tool.DeniedToolStep(toolStepID(tc), tc.Function.Name, toolInputMap(tc.Function.Arguments), resumeAssistant.denyFeedback)
+				denial.ToolDisplay = toolDisplayState(refused)
+				if step := tool.StepHookFromContext(ctx, w.state); step != nil {
+					step(ctx, refused)
 				}
 				session = append(session, denial)
 			}
@@ -357,11 +447,20 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					continue
 				}
 			}
+			if res != nil && res.Message != nil {
+				// The answer this turn ends on is a block too: write it now,
+				// without disturbing the session endTurn is about to close
+				// over.
+				transcript.flush(ctx, append(append([]llm.Message(nil), session...), *res.Message), modelForTranscript(), latestUsage)
+			}
 			return endTurn(res, latestUsage)
 		}
 		session = append(session, *res.Message)
 		noteResponseCompleted()
 		partialCapture.Set(session)
+		// The answer's text block ended as the turn turned to its tool calls:
+		// write it now, so the words survive a process that stops mid-turn.
+		transcript.flush(ctx, session, modelForTranscript(), latestUsage)
 		toolCtx := withForkRuntimeSnapshot(w.state.ContextWithRuntimeSessionMode(ctx), session)
 		results := w.executeToolCalls(toolCtx, res.Message.ToolCalls, toolMap)
 		if err := firstControlFlowToolError(results); err != nil {
@@ -384,6 +483,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			session = append(session, toolResultMessage(result))
 		}
 		partialCapture.Set(session)
+		// The tool-result batch ended a block: write the exchange before any
+		// steer rides on the next call (a steer is provisional until the model
+		// answers it, so it is never part of a flush).
+		transcript.flush(ctx, session, modelForTranscript(), latestUsage)
 		if shouldStopAfterToolResult(ctx, results) {
 			msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
 			resolved := &llm.Result{Message: &msg}

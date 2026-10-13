@@ -140,7 +140,8 @@ func (s *RunStore) SessionEventHighWater(ctx context.Context, sessionID string) 
 	// A conversation with no events yet has no high water: MAX over an empty
 	// set is NULL, and the cursor that no events have been written is zero.
 	var high int64
-	err := s.DB.QueryRowContext(ctx, `SELECT IFNULL(MAX(sequence), 0) FROM fb_session_events WHERE session_id=?`, strings.TrimSpace(sessionID)).Scan(&high)
+	err := s.DB.QueryRowContext(ctx, `SELECT IFNULL(MAX(sequence), 0) FROM fb_session_events WHERE session_id=? AND `+
+		RewindEventsPredicate("session_id", "sequence"), strings.TrimSpace(sessionID)).Scan(&high)
 	return high, err
 }
 
@@ -164,7 +165,7 @@ func (s *RunStore) ListRunEvents(ctx context.Context, runID string, limit int) (
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT `+eventColumns+`
 FROM fb_session_events
-WHERE run_id=?
+WHERE run_id=? AND `+RewindEventsPredicate("session_id", "sequence")+`
 ORDER BY sequence ASC LIMIT ?`, runID, limit)
 	if err != nil {
 		return nil, err
@@ -200,7 +201,7 @@ func (s *RunStore) ListRunEventsOfTypes(ctx context.Context, runID string, types
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT `+eventColumns+`
 FROM fb_session_events
-WHERE run_id=? AND event_type IN (`+strings.Join(marks, ",")+`)
+WHERE run_id=? AND event_type IN (`+strings.Join(marks, ",")+`) AND `+RewindEventsPredicate("session_id", "sequence")+`
 ORDER BY sequence ASC`, args...)
 	if err != nil {
 		return nil, err
@@ -234,7 +235,7 @@ func (s *RunStore) ListSessionEventsOfType(ctx context.Context, sessionID, event
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT `+eventColumns+`
 FROM fb_session_events
-WHERE session_id=? AND event_type=?
+WHERE session_id=? AND event_type=? AND `+RewindEventsPredicate("session_id", "sequence")+`
 ORDER BY sequence DESC LIMIT ?`, sessionID, strings.TrimSpace(eventType), limit)
 	if err != nil {
 		return nil, err
@@ -285,7 +286,7 @@ func (s *RunStore) ListSessionEvents(ctx context.Context, sessionID string, curs
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT `+eventColumns+`
 FROM fb_session_events
-WHERE session_id=? AND sequence>? AND sequence<=?
+WHERE session_id=? AND sequence>? AND sequence<=? AND `+RewindEventsPredicate("session_id", "sequence")+`
 ORDER BY sequence ASC LIMIT ?`, page.SessionID, cursor, highWater, limit+1)
 	if err != nil {
 		return page, err
@@ -348,7 +349,7 @@ func (s *RunStore) ListSessionToolCalls(ctx context.Context, sessionID, runID, t
 	}
 	query := `SELECT event_id, IFNULL(run_id,''), session_id, IFNULL(payload_json->>'$.tool_name',''), payload_json, occurred_at_ms
 FROM fb_session_events
-WHERE session_id=? AND ` + visibleToolCallPredicate
+WHERE session_id=? AND ` + visibleToolCallPredicate + ` AND ` + RewindEventsPredicate("session_id", "sequence")
 	args := []any{sessionID}
 	if runID = strings.TrimSpace(runID); runID != "" {
 		query += ` AND run_id=?`
@@ -397,7 +398,7 @@ func (s *RunStore) CountSessionToolCalls(ctx context.Context, sessionID string) 
 	rows, err := s.DB.QueryContext(ctx, `
 SELECT IFNULL(payload_json->>'$.tool_name',''), COUNT(*)
 FROM fb_session_events
-WHERE session_id=? AND `+visibleToolCallPredicate+`
+WHERE session_id=? AND `+visibleToolCallPredicate+` AND `+RewindEventsPredicate("session_id", "sequence")+`
 GROUP BY 1`, sessionID)
 	if err != nil {
 		return nil, 0, err
@@ -415,33 +416,4 @@ GROUP BY 1`, sessionID)
 		total += count
 	}
 	return byTool, total, rows.Err()
-}
-
-// LatestRewindableToolCall names the file the conversation's most recent
-// successful edit_file or write_file call changed, for a rewind to restore. A
-// call that failed changed nothing, so it is not the change a rewind undoes.
-func (s *RunStore) LatestRewindableToolCall(ctx context.Context, sessionID string) (string, bool, error) {
-	if s == nil || s.DB == nil {
-		return "", false, fmt.Errorf("nil db")
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return "", false, fmt.Errorf("session id required")
-	}
-	var path string
-	err := s.DB.QueryRowContext(ctx, `
-SELECT IFNULL(payload_json->>'$.tool_meta.input.file_path','')
-FROM fb_session_events
-WHERE session_id=? AND event_type='tool_call_completed'
-  AND IFNULL(payload_json->>'$.tool_name','') IN ('edit_file','write_file')
-  AND TRIM(IFNULL(payload_json->>'$.error','')) = ''
-ORDER BY sequence DESC LIMIT 1`, sessionID).Scan(&path)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	path = strings.TrimSpace(path)
-	return path, path != "", nil
 }

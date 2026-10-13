@@ -1,10 +1,6 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-4">
-    <div class="flex items-center gap-2">
-      <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('memories.projectTitle') }}</div>
-      <ScopeBadge type="project" :label="t('scope.project')" />
-    </div>
-    <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.projectFilesDescription') }}</p>
+    <PageTopRow :title="t('memories.projectTitle')" :description="t('memories.projectFilesDescription')" />
 
     <!-- A project with no project key shares no memory directory of its own;
          there is nothing to manage here. -->
@@ -18,7 +14,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import MemoryFilesPanel from '@/components/memory/MemoryFilesPanel.vue'
 import type { ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'

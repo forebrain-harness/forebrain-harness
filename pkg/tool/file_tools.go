@@ -19,6 +19,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 var blockedReadDevicePaths = map[string]struct{}{
@@ -462,8 +463,9 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				return "", err
 			}
 			abs, planWrite, protected := res.Abs, res.PlanWrite, res.Protected
+			grantCWD, _ := WorkingDir(ctx)
 			if hook := st.ActionHook(); hook != nil && !planWrite {
-				if ApprovedActionIDFromContext(ctx) == "" && (protected != "" || (!PolicyApprovedFromContext(ctx) && !st.PathGranted(abs, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx)))) {
+				if ApprovedActionIDFromContext(ctx) == "" && (protected != "" || (!PolicyApprovedFromContext(ctx) && !st.PathGranted(abs, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx), grantCWD))) {
 					payload := map[string]any{"file_path": in.FilePath, "resolved_file_path": abs, "content": in.Content}
 					markProtectedApproval(payload, protected)
 					id, ok, err := hook(ctx, "write_file", payload)
@@ -488,13 +490,21 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			unlock := lockFileWrite(abs)
 			defer unlock()
 			var before []byte
+			existed := false
 			if fi, err := statFile(abs); err == nil && fi != nil {
 				rs, ok := st.GetReadState(abs)
+				if ok {
+					if fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size {
+						return "", fmt.Errorf("file changed since last read")
+					}
+				} else if mapped, mappedOK := st.draftRedirectReadState(res, abs); mappedOK {
+					// The model read the formal file; the draft holds those very
+					// bytes, so the read it owes is satisfied by content, not by
+					// a matching mtime between two copies of one file.
+					rs, ok = mapped, true
+				}
 				if !ok {
 					return "", fmt.Errorf("must read_file before overwriting")
-				}
-				if fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size {
-					return "", fmt.Errorf("file changed since last read")
 				}
 				prev, err := os.ReadFile(abs)
 				if err != nil {
@@ -504,7 +514,11 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 					return "", fmt.Errorf("file changed since last read")
 				}
 				before = append([]byte(nil), prev...)
-				_ = st.SnapshotBeforeWrite(abs, prev)
+				existed = true
+			}
+			snapshotPath, err := st.SnapshotBeforeWrite(ctx, abs, before, existed)
+			if err != nil {
+				return "", err
 			}
 			if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 				return "", err
@@ -512,6 +526,12 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if err := atomicWrite(abs, []byte(in.Content), 0o644); err != nil {
 				return "", err
 			}
+			st.recordFileChange(ctx, state.FileChange{
+				Path:           abs,
+				ExistedBefore:  existed,
+				BeforeSnapshot: snapshotPath,
+				AfterSHA256:    sha256Hex([]byte(in.Content)),
+			})
 			fi, err := statFile(abs)
 			if err == nil && fi != nil {
 				st.RememberWrite(abs, fi.ModTime(), fi.Size(), []byte(in.Content))
@@ -523,6 +543,12 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if res.RepairedFrom != "" {
 				output["repaired_from"] = res.RepairedFrom
 			}
+			if res.Draft != nil {
+				output["skill_draft"] = map[string]any{
+					"skill":      res.Draft.SkillName,
+					"draft_path": res.Draft.Target,
+				}
+			}
 			attachTurnDiff(output, abs, before, []byte(in.Content))
 			// Diagnostics are collected only after the write landed, so the wait
 			// window can never fail or delay the write itself (spec §8.3.5).
@@ -530,7 +556,10 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			CaptureToolOutput(ctx, output)
 			result := "ok"
 			if note := skillWritePathRepairNote(res); note != "" {
-				result = note + "\n\nok"
+				result = note + "\n\n" + result
+			}
+			if note := skillDraftWriteNote(res); note != "" {
+				result = note + "\n\n" + result
 			}
 			if diag != "" {
 				result += "\n\n" + diag
@@ -618,8 +647,9 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 				return "", err
 			}
 			abs, planWrite, protected := res.Abs, res.PlanWrite, res.Protected
+			grantCWD, _ := WorkingDir(ctx)
 			if hook := st.ActionHook(); hook != nil && !planWrite {
-				if ApprovedActionIDFromContext(ctx) == "" && (protected != "" || (!PolicyApprovedFromContext(ctx) && !st.PathGranted(abs, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx)))) {
+				if ApprovedActionIDFromContext(ctx) == "" && (protected != "" || (!PolicyApprovedFromContext(ctx) && !st.PathGranted(abs, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx), grantCWD))) {
 					payload := map[string]any{
 						"file_path":          in.FilePath,
 						"resolved_file_path": abs,
@@ -650,6 +680,17 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			unlock := lockFileWrite(abs)
 			defer unlock()
 			rs, ok := st.GetReadState(abs)
+			mapped := false
+			if !ok {
+				// A redirected edit still owes the read it would have owed on
+				// the formal path: a read of the formal file counts when the
+				// draft still holds exactly those bytes. The mtime check
+				// below is skipped for it — the draft's clock is a copy's
+				// clock, and the content check is the real one.
+				if mappedRS, mappedOK := st.draftRedirectReadState(res, abs); mappedOK {
+					rs, ok, mapped = mappedRS, true, true
+				}
+			}
 			if !ok {
 				return "", fmt.Errorf("must read_file before edit")
 			}
@@ -657,7 +698,7 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			if err != nil {
 				return "", err
 			}
-			if fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size {
+			if !mapped && (fi.ModTime().After(rs.ModTime) || fi.Size() != rs.Size) {
 				return "", fmt.Errorf("file changed since last read")
 			}
 			raw, err := os.ReadFile(abs)
@@ -675,7 +716,10 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			if strings.TrimSpace(in.OldString) == "" {
 				return "", fmt.Errorf("old_string required")
 			}
-			_ = st.SnapshotBeforeWrite(abs, raw)
+			snapshotPath, err := st.SnapshotBeforeWrite(ctx, abs, raw, true)
+			if err != nil {
+				return "", err
+			}
 			src := string(raw)
 			oldString := in.OldString
 			actualOld := findActualEditString(src, oldString)
@@ -700,6 +744,12 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			if err := atomicWrite(abs, []byte(out), 0o644); err != nil {
 				return "", err
 			}
+			st.recordFileChange(ctx, state.FileChange{
+				Path:           abs,
+				ExistedBefore:  true,
+				BeforeSnapshot: snapshotPath,
+				AfterSHA256:    sha256Hex([]byte(out)),
+			})
 			fi2, err := statFile(abs)
 			if err == nil && fi2 != nil {
 				st.RememberWrite(abs, fi2.ModTime(), fi2.Size(), []byte(out))
@@ -712,6 +762,12 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			if res.RepairedFrom != "" {
 				output["repaired_from"] = res.RepairedFrom
 			}
+			if res.Draft != nil {
+				output["skill_draft"] = map[string]any{
+					"skill":      res.Draft.SkillName,
+					"draft_path": res.Draft.Target,
+				}
+			}
 			attachTurnDiff(output, abs, raw, []byte(out))
 			// Diagnostics are collected only after the write landed, so the wait
 			// window can never fail or delay the write itself (spec §8.3.5).
@@ -719,7 +775,10 @@ func NewFileEditToolWithOptions(st *State, opts FileEditOptions) (*llm.Tool, err
 			CaptureToolOutput(ctx, output)
 			result := "ok"
 			if note := skillWritePathRepairNote(res); note != "" {
-				result = note + "\n\nok"
+				result = note + "\n\n" + result
+			}
+			if note := skillDraftWriteNote(res); note != "" {
+				result = note + "\n\n" + result
 			}
 			if diag != "" {
 				result += "\n\n" + diag
@@ -1101,6 +1160,7 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 		}
 		abs, planWrite, protected := res.Abs, res.PlanWrite, res.Protected
 		repairNotes = appendProtectedReason(repairNotes, skillWritePathRepairNote(res))
+		repairNotes = appendProtectedReason(repairNotes, skillDraftWriteNote(res))
 		absByPath[op.Path] = abs
 		resolvedPaths = append(resolvedPaths, abs)
 		hasNonPlanWrite = hasNonPlanWrite || !planWrite
@@ -1122,6 +1182,7 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 			}
 			moveAbs, movePlanWrite, moveProtected := moveRes.Abs, moveRes.PlanWrite, moveRes.Protected
 			repairNotes = appendProtectedReason(repairNotes, skillWritePathRepairNote(moveRes))
+			repairNotes = appendProtectedReason(repairNotes, skillDraftWriteNote(moveRes))
 			moveAbsByPath[op.Path] = moveAbs
 			resolvedPaths = append(resolvedPaths, moveAbs)
 			hasNonPlanWrite = hasNonPlanWrite || !movePlanWrite
@@ -1154,8 +1215,9 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 				return "", &RequiresActionError{ActionID: id, ActionKind: "apply_patch", ToolName: "apply_patch", ToolInput: payload, OriginatingToolCallID: ToolUseIDFromContext(ctx)}
 			}
 		} else if ApprovedActionIDFromContext(ctx) == "" && !SandboxBypassApprovedFromContext(ctx) {
+			grantCWD, _ := WorkingDir(ctx)
 			for _, path := range resolvedPaths {
-				if _, err := ResolveWithinRoots(path, st.AllowedRoots()); err != nil && !st.PathGranted(path, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx)) {
+				if _, err := ResolveWithinRoots(path, st.AllowedRoots()); err != nil && !st.PathGranted(path, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx), grantCWD) {
 					return "", fmt.Errorf("%w: %s", ErrPathNotAllowed, path)
 				}
 			}
@@ -1258,12 +1320,21 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 		if plan == nil {
 			continue
 		}
-		if err := st.SnapshotBeforeWrite(abs, plan.Before); err != nil {
-			return "", err
-		}
+		// Existence is read before any write: the snapshot loop runs first, so
+		// fileExists still reports the pre-write state of each path.
+		absExisted := fileExists(abs)
+		moveExisted := false
 		if plan.MoveAbs != "" {
-			if err := st.SnapshotBeforeWrite(plan.MoveAbs, plan.MoveBefore); err != nil {
-				return "", err
+			moveExisted = fileExists(plan.MoveAbs)
+		}
+		absSnapshot, snapErr := st.SnapshotBeforeWrite(ctx, abs, plan.Before, absExisted)
+		if snapErr != nil {
+			return "", snapErr
+		}
+		moveSnapshot := ""
+		if plan.MoveAbs != "" {
+			if moveSnapshot, snapErr = st.SnapshotBeforeWrite(ctx, plan.MoveAbs, plan.MoveBefore, moveExisted); snapErr != nil {
+				return "", snapErr
 			}
 		}
 		if plan.Delete {
@@ -1272,6 +1343,12 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 			}
 			st.RememberWrite(abs, time.Now(), 0, nil)
 			changes = append(changes, FileChange{AbsPath: abs, Before: plan.Before})
+			st.recordFileChange(ctx, state.FileChange{
+				Path:           abs,
+				ExistedBefore:  absExisted,
+				BeforeSnapshot: absSnapshot,
+				Deleted:        true,
+			})
 		} else {
 			writePath := abs
 			if plan.MoveAbs != "" {
@@ -1293,8 +1370,26 @@ func applyPatchOperations(ctx context.Context, st *State, rt *AgentToolRuntime, 
 				st.RememberWrite(abs, time.Now(), 0, nil)
 				changes = append(changes, FileChange{AbsPath: abs, Before: plan.Before})
 				changes = append(changes, FileChange{AbsPath: plan.MoveAbs, Before: plan.MoveBefore, After: plan.After})
+				st.recordFileChange(ctx, state.FileChange{
+					Path:           abs,
+					ExistedBefore:  absExisted,
+					BeforeSnapshot: absSnapshot,
+					Deleted:        true,
+				})
+				st.recordFileChange(ctx, state.FileChange{
+					Path:           plan.MoveAbs,
+					ExistedBefore:  moveExisted,
+					BeforeSnapshot: moveSnapshot,
+					AfterSHA256:    sha256Hex(plan.After),
+				})
 			} else {
 				changes = append(changes, FileChange{AbsPath: writePath, Before: plan.Before, After: plan.After})
+				st.recordFileChange(ctx, state.FileChange{
+					Path:           writePath,
+					ExistedBefore:  absExisted,
+					BeforeSnapshot: absSnapshot,
+					AfterSHA256:    sha256Hex(plan.After),
+				})
 			}
 		}
 		outputPath := abs
@@ -1365,6 +1460,21 @@ func resolveApplyPatchPath(ctx context.Context, st *State, path string) (writePa
 	if st == nil {
 		return writePathResolution{}, fmt.Errorf("nil state")
 	}
+	// The version store answers first, for the same reasons a write_file
+	// path goes through it: formal-directory writes land in the skill's
+	// draft, and the version records or a whole skill directory are refused.
+	if draft, handled, err := st.resolveSkillDraftWrite(path); err != nil {
+		return writePathResolution{}, err
+	} else if handled {
+		out := draft
+		if err := st.GuardWrite(ctx, out.Abs); err != nil {
+			return writePathResolution{}, err
+		}
+		if out.Protected == "" {
+			out.Protected = st.ProtectedWriteReason(ctx, out.Abs)
+		}
+		return out, nil
+	}
 	if target, item, ok := st.LoadedSkillWriteTarget(path); ok {
 		out := writePathResolution{Abs: target, Protected: loadedSkillWriteReason(target, item)}
 		if normalizeRootPath(path) != target {
@@ -1372,12 +1482,13 @@ func resolveApplyPatchPath(ctx context.Context, st *State, path string) (writePa
 		}
 		return out, nil
 	}
-	abs, err := filepath.Abs(strings.TrimSpace(path))
+	abs, err := ResolvePath(ctx, path)
 	if err != nil {
 		return writePathResolution{}, err
 	}
 	abs = filepath.Clean(abs)
-	if st.PathDeniedByGrant(abs, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx)) {
+	grantCWD, _ := WorkingDir(ctx)
+	if st.PathDeniedByGrant(abs, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx), grantCWD) {
 		return writePathResolution{}, fmt.Errorf("%w: denied by request_permissions grant: %s", ErrPathNotAllowed, abs)
 	}
 	if st.PathOverlapsSiblingPrimaryWorkspace(abs) {

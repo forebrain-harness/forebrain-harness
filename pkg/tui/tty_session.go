@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -447,14 +448,33 @@ func sessionTitleForTurn(ctx context.Context, session Session, sessionID, conten
 // no-op rather than a failure, so callers ignore it instead of surfacing it.
 var errClipboardNoImage = errors.New("clipboard does not contain an image")
 
-type systemClipboardImageReader struct{}
-
-func DefaultClipboardImageReader() ClipboardImageReader {
-	return systemClipboardImageReader{}
+type systemClipboardImageReader struct {
+	// projectRoot is the launch directory's project root. When set, a pasted
+	// image is written under <projectRoot>/attachments/ so it lives with the
+	// project rather than in the system temp directory. Empty (a test, or a
+	// surface with no project) keeps the temp-directory behavior.
+	projectRoot string
 }
 
-func (systemClipboardImageReader) ReadClipboardImage(ctx context.Context) (InputAttachment, error) {
-	tmp, err := os.CreateTemp(os.TempDir(), fmt.Sprintf("forebrain-clipboard-%d-*.png", os.Getpid()))
+// clipboardWritePNG extracts the current clipboard image into path. It is a
+// variable rather than a direct call so a test can supply a fake extractor
+// instead of driving a real clipboard helper (osascript/pngpaste/wl-paste).
+var clipboardWritePNG = writeClipboardPNG
+
+func DefaultClipboardImageReader(projectRoot string) ClipboardImageReader {
+	return systemClipboardImageReader{projectRoot: strings.TrimSpace(projectRoot)}
+}
+
+func (r systemClipboardImageReader) ReadClipboardImage(ctx context.Context) (InputAttachment, error) {
+	dir := os.TempDir()
+	if root := strings.TrimSpace(r.projectRoot); root != "" {
+		attachments := filepath.Join(root, "attachments")
+		if err := os.MkdirAll(attachments, 0o755); err != nil {
+			return InputAttachment{}, err
+		}
+		dir = attachments
+	}
+	tmp, err := os.CreateTemp(dir, fmt.Sprintf("forebrain-clipboard-%d-*.png", os.Getpid()))
 	if err != nil {
 		return InputAttachment{}, err
 	}
@@ -463,7 +483,7 @@ func (systemClipboardImageReader) ReadClipboardImage(ctx context.Context) (Input
 		_ = os.Remove(path)
 		return InputAttachment{}, err
 	}
-	if err := writeClipboardPNG(ctx, path); err != nil {
+	if err := clipboardWritePNG(ctx, path); err != nil {
 		_ = os.Remove(path)
 		return InputAttachment{}, err
 	}

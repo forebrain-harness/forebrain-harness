@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -364,6 +365,128 @@ func TestRunAuditStepHookEmitsPrimaryToolMessagesDirectly(t *testing.T) {
 	require.Len(t, events, 2)
 }
 
+// TestRunAuditStepHookRecordsARefusalWithoutDrawingIt pins the main-agent
+// branch's "record it, do not draw it" handling of a refused call (plan 012):
+// the terminal already drew the refusal card itself when the user answered
+// the approval prompt (notifyToolApprovalDenied), so the runtime's own denied
+// step must reach the session event log for the other surfaces and for
+// resume, without producing a second UI message.
+func TestRunAuditStepHookRecordsARefusalWithoutDrawingIt(t *testing.T) {
+	ctx := context.Background()
+	db, err := statepkg.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	defer db.Close()
+
+	runSvc := &statepkg.RunStore{DB: db}
+	require.NoError(t, statepkg.NewSessionStore(db, "main").Ensure(ctx, "sid", "sid"))
+	run, err := runSvc.CreateRun(ctx, "sid", "plan something")
+	require.NoError(t, err)
+
+	cfg := &appcfg.Root{
+		Agents: appcfg.AgentsSection{
+			Definitions: map[string]appcfg.AgentDefinition{
+				"main": {
+					LLMProviders: []appcfg.AgentLLMProviderConfig{{
+						Provider: "openai",
+						Model:    "test-model",
+						APIKey:   "test-key",
+						BaseURL:  "http://127.0.0.1:9/v1",
+					}},
+				},
+			},
+		},
+	}
+	runner := &runpkg.Runner{Deps: &runpkg.Deps{Home: t.TempDir(), AppCfg: cfg}}
+	s := sessionEnv{Home: runner.Home, RunSvc: runSvc, Runner: runner}.session()
+	var mu sync.Mutex
+	var uiMessages []Message
+	s.PrependUINotify(func(msg any) {
+		if m, ok := msg.(NewMessageMsg); ok && m.Msg.Kind == MsgKindTool {
+			mu.Lock()
+			uiMessages = append(uiMessages, m.Msg)
+			mu.Unlock()
+		}
+	})
+
+	restore := s.installRunAuditStepHook("sid")
+	defer restore()
+	hook := runner.Tools().StepHook()
+	require.NotNil(t, hook)
+	stepCtx := tool.WithRunID(llm.WithAgentSessionID(ctx, "sid"), run.ID)
+
+	// 1. The "awaiting approval" completion frame for the exit_plan_mode call.
+	hook(stepCtx, tool.StepEvent{
+		Kind: event.RunEventToolCompleted, StepID: "call-exit-1", ToolName: "exit_plan_mode",
+		ActionID: "act-1", ActionKind: "exit_plan_mode",
+		Output: map[string]any{"requires_action": true},
+	})
+	// 2. The runtime's own account of the refusal.
+	hook(stepCtx, tool.DeniedToolStep("call-exit-1", "exit_plan_mode", map[string]any{}, "split milestones"))
+	// 3. A sentinel: an ordinary completed call, published after the refusal.
+	// UI dispatch is FIFO, so if the refusal had produced a UI message it
+	// would already be in uiMessages by the time this sentinel's message
+	// arrives.
+	hook(stepCtx, tool.StepEvent{
+		Kind: event.RunEventToolStarted, StepID: "call-sentinel", ToolName: "read_file",
+		Input: map[string]any{"file_path": "/tmp/a.go"},
+	})
+	hook(stepCtx, tool.StepEvent{
+		Kind: event.RunEventToolCompleted, StepID: "call-sentinel", ToolName: "read_file",
+		Input: map[string]any{"file_path": "/tmp/a.go"}, Output: map[string]any{"preview_text": "package main\n"},
+	})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, m := range uiMessages {
+			if m.StepID == "call-sentinel" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond, "sentinel's UI message never arrived")
+
+	mu.Lock()
+	for _, m := range uiMessages {
+		require.NotEqual(t, "denied", m.ToolMeta.Status, "a denied-status message was drawn: %#v", m)
+		require.NotContains(t, m.Content, "split milestones", "the refusal's feedback was drawn as a UI message: %#v", m)
+	}
+	mu.Unlock()
+
+	page, err := runSvc.ListSessionEvents(ctx, "sid", 0, 0, 20)
+	require.NoError(t, err)
+	var completedForCallExit1 []statepkg.SessionEvent
+	for _, evt := range page.Events {
+		if evt.Type == event.RunEventToolCompleted {
+			var payload event.ToolCallCompletedPayload
+			require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+			if payload.StepID == "call-exit-1" {
+				completedForCallExit1 = append(completedForCallExit1, evt)
+			}
+		}
+	}
+	require.Len(t, completedForCallExit1, 2, "expected one awaiting-approval and one denied completion event for call-exit-1")
+
+	var awaiting, denied *statepkg.SessionEvent
+	for i := range completedForCallExit1 {
+		evt := completedForCallExit1[i]
+		if strings.HasSuffix(evt.ID, ":denied") {
+			denied = &completedForCallExit1[i]
+		} else {
+			awaiting = &completedForCallExit1[i]
+		}
+	}
+	require.NotNil(t, awaiting, "missing the awaiting-approval completion event")
+	require.True(t, strings.HasSuffix(awaiting.ID, ":tool_call_completed"), "awaiting-approval event id = %q", awaiting.ID)
+	require.NotNil(t, denied, "missing the denied completion event")
+	require.True(t, strings.HasSuffix(denied.ID, ":tool_call_completed:denied"), "denied event id = %q", denied.ID)
+
+	var deniedPayload event.ToolCallCompletedPayload
+	require.NoError(t, json.Unmarshal(denied.Payload, &deniedPayload))
+	require.Equal(t, "denied", deniedPayload.ToolMeta.Status)
+	require.Equal(t, "split milestones", deniedPayload.DisplayBody)
+}
+
 // TestPublishRunEventDrawsTheCompactionLifecycle pins the terminal's reading
 // of a compaction's events: each becomes the message that moves its card, and
 // the canonical payload reaches the reducer whole.
@@ -555,6 +678,24 @@ type fakeSession struct {
 	skillActivationName      string
 	appliedLoadMode          string
 	skillActivationErr       error
+	skillVersionStates       map[string]skill.SkillVersionState
+	skillVersionOK           map[string]bool
+	draftOnlySkills          []skill.Entry
+	skillDiffs               []SkillFileDiff
+	skillDiffErr             error
+	publishedSkill           string
+	publishNote              string
+	publishVersion           int
+	publishErr               error
+	discardedSkill           string
+	discardErr               error
+	restoredSkill            string
+	restoredVersion          int
+	restoredReplace          bool
+	restoreErr               error
+	pulledSkill              string
+	pulledReplace            bool
+	pullErr                  error
 	switchedPrimaryQuery     string
 	statusReply              string
 	mcpReply                 string
@@ -931,6 +1072,50 @@ func (f *fakeSession) SkillSelectionByName(name string) (string, string, error) 
 		return "", "", f.skillActivationErr
 	}
 	return strings.TrimSpace(name), "/skills/" + strings.TrimSpace(name) + "/SKILL.md", nil
+}
+
+func (f *fakeSession) SkillVersionState(entry skill.Entry) (skill.SkillVersionState, bool) {
+	key := strings.TrimSpace(entry.Path)
+	state, ok := f.skillVersionStates[key]
+	if !ok {
+		return skill.SkillVersionState{}, false
+	}
+	if f.skillVersionOK != nil {
+		return state, f.skillVersionOK[key]
+	}
+	return state, state.StateLabel() != ""
+}
+
+func (f *fakeSession) PublishSkill(entry skill.Entry, note string) (int, error) {
+	f.publishedSkill = strings.TrimSpace(entry.Name)
+	f.publishNote = note
+	return f.publishVersion, f.publishErr
+}
+
+func (f *fakeSession) DiscardSkillDraft(entry skill.Entry) error {
+	f.discardedSkill = strings.TrimSpace(entry.Name)
+	return f.discardErr
+}
+
+func (f *fakeSession) RestoreSkillVersion(entry skill.Entry, version int, replaceDraft bool) error {
+	f.restoredSkill = strings.TrimSpace(entry.Name)
+	f.restoredVersion = version
+	f.restoredReplace = replaceDraft
+	return f.restoreErr
+}
+
+func (f *fakeSession) PullSkillUpdate(entry skill.Entry, replaceDraft bool) error {
+	f.pulledSkill = strings.TrimSpace(entry.Name)
+	f.pulledReplace = replaceDraft
+	return f.pullErr
+}
+
+func (f *fakeSession) SkillDiff(skill.Entry, string, string) ([]SkillFileDiff, error) {
+	return append([]SkillFileDiff(nil), f.skillDiffs...), f.skillDiffErr
+}
+
+func (f *fakeSession) DraftOnlySkills() []skill.Entry {
+	return append([]skill.Entry(nil), f.draftOnlySkills...)
 }
 
 func (f *fakeSession) HandleStatusSlash(sessionID, channel string, side bool) (string, bool) {
@@ -5574,4 +5759,102 @@ func TestRestoredInputGoesBackToItsOwnViewsComposer(t *testing.T) {
 	if len(session.subagentSent) != 1 || session.subagentSent[0].Submission.Text != "go on" {
 		t.Fatalf("boundary send = %#v, want go on", session.subagentSent)
 	}
+}
+
+// rewindTestSession is a fakeSession that also answers the rewind engine, so
+// /rewind's flow can be driven with a real store and a real tool state.
+type rewindTestSession struct {
+	fakeSession
+	eng *turn.RewindStore
+}
+
+func (r *rewindTestSession) RewindEngine() *turn.RewindStore { return r.eng }
+
+// rewindSelector answers SelectRich by label and MultiSelect by returning every
+// option it was offered (nothing excluded), driving /rewind's two pickers.
+type rewindSelector struct {
+	richSteps []selectorStep
+	richIdx   int
+}
+
+func (s *rewindSelector) Select(string, []string, string) (string, bool, error) {
+	return "", false, nil
+}
+func (s *rewindSelector) MultiSelect(_ string, options []string, _ []string) ([]string, bool, error) {
+	return append([]string(nil), options...), true, nil
+}
+func (s *rewindSelector) Input(string, string) (string, bool, error)  { return "", false, nil }
+func (s *rewindSelector) Secret(string, string) (string, bool, error) { return "", false, nil }
+func (s *rewindSelector) Confirm(string, bool) (bool, bool, error)    { return false, false, nil }
+func (s *rewindSelector) SelectRich(_ string, items []SelectItem, _ int) (int, bool, error) {
+	if s.richIdx >= len(s.richSteps) {
+		return -1, false, nil
+	}
+	step := s.richSteps[s.richIdx]
+	s.richIdx++
+	if !step.ok {
+		return -1, false, step.err
+	}
+	for i, item := range items {
+		if item.Label == step.value {
+			return i, true, nil
+		}
+	}
+	return -1, false, nil
+}
+func (s *rewindSelector) Review(string, []turn.StatusFact, []string, int) (int, bool, error) {
+	return -1, false, nil
+}
+
+// TestHandleRewindRestoresAndUndoes drives /rewind end to end through the
+// terminal: pick the message, pick "Code and conversation", restore, then undo.
+func TestHandleRewindRestoresAndUndoes(t *testing.T) {
+	ctx := context.Background()
+	db, err := statepkg.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	store := statepkg.NewSessionStore(db, "main")
+	runs := &statepkg.RunStore{DB: db}
+	require.NoError(t, store.Ensure(ctx, "s1", "s1"))
+	a := filepath.Join(t.TempDir(), "a.go")
+	require.NoError(t, os.WriteFile(a, []byte("a0\n"), 0o644))
+	rowID, err := store.Append(ctx, "s1", "user", "hello")
+	require.NoError(t, err)
+	tools := tool.NewState()
+	tools.SetHistoryDir(filepath.Join(t.TempDir(), "history"))
+	snap, err := tools.SnapshotBeforeWrite(ctx, a, []byte("a0\n"), true)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(a, []byte("a1\n"), 0o644))
+	require.NoError(t, store.RecordFileChange(ctx, statepkg.FileChange{
+		SessionID: "s1", AnchorMessageID: rowID, Path: a, ExistedBefore: true,
+		BeforeSnapshot: snap, AfterSHA256: statepkg.SHA256Hex([]byte("a1\n")),
+	}))
+	eng := &turn.RewindStore{Store: store, Runs: runs, Snap: tools}
+	session := &rewindTestSession{eng: eng}
+
+	sel := &rewindSelector{richSteps: []selectorStep{
+		{value: "hello", ok: true},
+		{value: "Code and conversation", ok: true},
+	}}
+	ctrl := newCommandController(session, NewRenderer(io.Discard, io.Discard), sel, nil, "")
+	anchor, applied := ctrl.handleRewind(ctx, "s1")
+	require.True(t, applied)
+	require.Equal(t, "hello", anchor)
+	require.Equal(t, "a0\n", mustReadFile(t, a), "the file is restored")
+
+	// The rewind is pending, so the picker offers undo; choosing it puts the
+	// file back.
+	undoSel := &rewindSelector{richSteps: []selectorStep{{value: "Undo the last rewind", ok: true}}}
+	undoCtrl := newCommandController(session, NewRenderer(io.Discard, io.Discard), undoSel, nil, "")
+	if _, ok := undoCtrl.handleRewind(ctx, "s1"); !ok {
+		t.Fatal("undo rewind not applied")
+	}
+	require.Equal(t, "a1\n", mustReadFile(t, a), "undo restores the pre-rewind bytes")
+}
+
+func mustReadFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return string(b)
 }

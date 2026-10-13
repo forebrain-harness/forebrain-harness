@@ -23,7 +23,13 @@ import (
 // plan scope and review models are injected because they carry facts the
 // TUI's overlay derives for itself: which plan file the gate is asking about
 // and which models a review may be handed to.
-func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *state.RunStore, actions *state.ActionService) *turn.PendingApprovalGate {
+//
+// projects is what the plan scope resolves a conversation's project key from:
+// the session's own project, never the base runner's — the gateway process has
+// no launch project of its own, so the base runner's key is empty while the
+// session runs on a project runner whose key is set. The plan the gate advertises
+// must be the plan under the same key the session writes to.
+func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *state.RunStore, actions *state.ActionService, projects *state.ProjectStore) *turn.PendingApprovalGate {
 	gate := &turn.PendingApprovalGate{Runs: runs}
 	if actions != nil {
 		gate.Actions = actions
@@ -31,12 +37,8 @@ func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *sta
 	if runner != nil {
 		gate.Evaluator = runner
 	}
-	gate.PlanScope = func(context.Context, string) (string, string) {
-		projectKey := ""
-		if runner != nil {
-			projectKey = strings.TrimSpace(runner.ProjectKey)
-		}
-		return config.ActiveStateRoot(home, cfg), projectKey
+	gate.PlanScope = func(ctx context.Context, sessionID string) (string, string) {
+		return config.ActiveStateRoot(home, cfg), projectKeyForSession(ctx, projects, sessionID)
 	}
 	gate.ReviewModels = func() []turn.PlanReviewModelOption {
 		if runner == nil {
@@ -57,7 +59,7 @@ func (s *Server) approvalGate() *turn.PendingApprovalGate {
 	if s == nil {
 		return nil
 	}
-	return approvalGateOn(s.Home, s.modelConfig(), s.Runner, s.RunRT, s.Actions)
+	return approvalGateOn(s.Home, s.modelConfig(), s.Runner, s.RunRT, s.Actions, s.Projects)
 }
 
 // modelConfig is the configuration the active agent's models resolve against:
@@ -145,6 +147,17 @@ func (s *Server) publishGatewayRunEvent(ctx context.Context, sessionID, runID, e
 	return s.RunEvents().Publish(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
 }
 
+// withApprovalToolStepID names, on a gate's approval data, the tool call the
+// gate is holding (turn.ApprovalToolStepID) - the same call the terminal
+// records for its own gates - so a surface can place the gate's records at
+// that call. A gate whose call nothing names carries none.
+func withApprovalToolStepID(data map[string]any, gate *tool.RequiresActionError) map[string]any {
+	if id := turn.ApprovalToolStepID(gate); id != "" {
+		data["tool_step_id"] = id
+	}
+	return data
+}
+
 func (s *Server) publishDetachedGatewayApprovalRequest(ctx context.Context, sessionID string, gate *tool.RequiresActionError) {
 	if s == nil || gate == nil {
 		return
@@ -154,6 +167,7 @@ func (s *Server) publishDetachedGatewayApprovalRequest(ctx context.Context, sess
 	data["action_kind"] = gate.ActionKind
 	data["agent_id"] = gate.AgentID
 	data["subagent_type"] = gate.SubagentType
+	data = withApprovalToolStepID(data, gate)
 	for _, evt := range canonicalRunEventsFromWS(wsServerMsg{
 		Op: "requires_action", RunID: gate.RunID, SessionID: sessionID,
 		Data: data, Message: "Awaiting approval or authorization to continue",

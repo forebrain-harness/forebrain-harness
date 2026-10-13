@@ -9,9 +9,13 @@ import (
 
 func loadTestCatalog(t *testing.T) {
 	t.Helper()
-	cat, err := llm.Parse(llm.EmbeddedModelsJSON())
+	data, err := llm.RepoModelsJSONForTest()
 	if err != nil {
-		t.Fatalf("parse embedded models.json: %v", err)
+		t.Fatalf("read repository models.json: %v", err)
+	}
+	cat, err := llm.Parse(data)
+	if err != nil {
+		t.Fatalf("parse repository models.json: %v", err)
 	}
 	llm.SetGlobalCatalogForTest(cat)
 }

@@ -32,12 +32,12 @@ func sourcePriorityBoost(mode string, sourceID string) int {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "plan":
 		switch sourceID {
-		case "rules_source", "working_set_source":
+		case "rules_source":
 			return 12
 		}
 	default:
 		switch sourceID {
-		case "working_set_source", "rules_source", "turn_diff_source":
+		case "rules_source", "turn_diff_source":
 			return 8
 		}
 	}

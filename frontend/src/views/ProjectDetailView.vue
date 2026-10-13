@@ -1,33 +1,28 @@
 <template>
-  <!-- The project space shell: a dark band names the project layer and carries
-       the breadcrumb back to the list; the tab bar addresses one project's
-       own configuration surfaces. -->
+  <!-- The project space shell: a breadcrumb names the project layer and its
+       directory, and the tab bar below addresses one project's own
+       configuration surfaces. -->
   <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
-    <header class="project-band">
-      <div class="flex min-w-0 max-w-[50%] shrink-0 items-center gap-3">
-        <span class="project-band-badge">{{ t('scope.project') }}</span>
-        <nav class="flex min-w-0 items-center gap-2 text-[13px]" :aria-label="t('projects.breadcrumb')">
-          <RouterLink to="/projects" class="project-breadcrumb-link">{{ t('projects.title') }}</RouterLink>
-          <span class="text-white/40" aria-hidden="true">/</span>
-          <span class="truncate font-medium text-white">{{ project?.name || project?.id }}</span>
-        </nav>
+    <div class="proj-head">
+      <div class="crumb">
+        <RouterLink to="/projects" class="crumb-link">{{ t('projects.title') }}</RouterLink>
+        <ChevronRight class="crumb-ic" aria-hidden="true" />
+        <b>{{ project?.name || project?.id }}</b>
+        <span v-if="project?.root" class="crumb-path">{{ project.root }}</span>
+        <span v-if="project?.trusted" class="crumb-badge">{{ t('projects.trusted') }}</span>
       </div>
-      <!-- The root is shown whole: a long path wraps inside its half of the
-           band instead of pushing over the breadcrumb. -->
-      <span class="hidden min-w-0 break-all text-right font-mono text-[11px] text-white/60 md:block" :title="project?.root">{{ project?.root }}</span>
-    </header>
-
-    <nav class="project-tabs" :aria-label="t('projects.title')">
-      <RouterLink
-        v-for="tab in tabs"
-        :key="tab.key"
-        :to="{ name: tab.routeName, params: { id: projectId } }"
-        class="project-tab"
-        :class="{ 'project-tab--active': route.name === tab.routeName }"
-      >
-        {{ tab.label }}
-      </RouterLink>
-    </nav>
+      <nav class="proj-tabs" :aria-label="t('projects.title')">
+        <RouterLink
+          v-for="tab in tabs"
+          :key="tab.key"
+          :to="{ name: tab.routeName, params: { id: projectId } }"
+          class="proj-tab"
+          :class="{ 'proj-tab--active': route.name === tab.routeName }"
+        >
+          {{ tab.label }}
+        </RouterLink>
+      </nav>
+    </div>
 
     <div class="min-h-0 flex-1 overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
       <div v-if="error" class="mx-auto max-w-4xl rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</div>
@@ -40,6 +35,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { RouterLink, RouterView } from 'vue-router'
+import { ChevronRight } from 'lucide-vue-next'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { setActiveProject } from '@/composables/useTenantScope'
 import { useI18n } from '@/locales'
@@ -91,42 +87,56 @@ watch(projectId, () => {
 </script>
 
 <style scoped>
-.project-band {
+.proj-head {
+  display: grid;
+  gap: 6px;
+  border-bottom: 1px solid var(--forebrain-divider);
+  padding: 14px 28px 0;
+}
+.crumb {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 20px;
-  background: #0f1d38;
-  color: #ffffff;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--forebrain-muted-text);
 }
-.project-band-badge {
+.crumb-link {
+  color: var(--forebrain-brand-1);
+  text-decoration: none;
+}
+.crumb-link:hover {
+  text-decoration: underline;
+}
+.crumb-ic {
+  width: 14px;
+  height: 14px;
+  color: var(--forebrain-muted-text);
+}
+.crumb b {
+  color: var(--forebrain-text);
+  font-weight: 650;
+  font-size: 15px;
+}
+.crumb-path {
+  font-family: var(--forebrain-mono-font);
+  font-size: 12px;
+}
+.crumb-badge {
   display: inline-flex;
   align-items: center;
-  border-radius: 9999px;
-  padding: 3px 12px;
+  border-radius: 999px;
+  padding: 2px 9px;
   font-size: 11px;
-  font-weight: 500;
-  background: var(--forebrain-brand-1, #1f4a9e);
-  color: #ffffff;
+  background: var(--forebrain-success-soft);
+  color: var(--forebrain-success);
 }
-.project-breadcrumb-link {
-  color: rgba(255, 255, 255, 0.72);
-  text-decoration: none;
-  white-space: nowrap;
-}
-.project-breadcrumb-link:hover {
-  color: #ffffff;
-}
-.project-tabs {
+.proj-tabs {
   display: flex;
   gap: 2px;
-  border-bottom: 1px solid var(--forebrain-divider);
-  padding: 0 16px;
-  background: var(--forebrain-surface);
   overflow-x: auto;
 }
-.project-tab {
+.proj-tab {
   padding: 10px 14px;
   font-size: 13px;
   color: var(--forebrain-text-2);
@@ -134,10 +144,10 @@ watch(projectId, () => {
   border-bottom: 2px solid transparent;
   white-space: nowrap;
 }
-.project-tab:hover {
+.proj-tab:hover {
   color: var(--forebrain-text);
 }
-.project-tab--active {
+.proj-tab--active {
   color: var(--forebrain-brand-1);
   border-bottom-color: var(--forebrain-brand-1);
   font-weight: 500;

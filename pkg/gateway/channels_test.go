@@ -301,23 +301,27 @@ func TestHandleActionsEnrichesToolApprovalsWithPermissionSuggestion(t *testing.T
 	require.Equal(t, string(safety.ModeOnRequest), rows[0].PermissionSuggestion.PermissionMode)
 }
 
-func TestGatewayWorkspaceAPIsUseActivePrimaryWorkspace(t *testing.T) {
+// The file view belongs to the conversation, not the process: its root is the
+// project the session is filed under, so the tree reads that project's
+// directory and never the active agent's own workspace.
+func TestGatewayWorkspaceAPIsUseTheConversationsProject(t *testing.T) {
 	home := t.TempDir()
 	mainWS := filepath.Join(home, "workspace")
 	reviewWS := filepath.Join(home, "workspaces", "review")
 	require.NoError(t, os.MkdirAll(mainWS, 0o755))
 	require.NoError(t, os.MkdirAll(reviewWS, 0o755))
-	// One marker file per workspace plus a nested file only in the review
-	// workspace: the tree must read the active agent's workspace, and only one
-	// level of it.
+	// One marker file per directory plus a nested file only in the project
+	// root: the tree must read the conversation's project, and only one level
+	// of it.
 	require.NoError(t, os.WriteFile(filepath.Join(mainWS, "main-only.md"), []byte("main only"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(reviewWS, "review-only.md"), []byte("review only"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(reviewWS, "docs"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(reviewWS, "docs", "a.md"), []byte("nested"), 0o644))
 	s := newActiveReviewGatewayServer(t, home)
+	sid := scopeServerToRoot(t, s, home, reviewWS)
 
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/workspace/tree", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/workspace/tree?session_id="+sid, nil)
 	s.handleWorkspaceTree(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"path":"review-only.md"`)
@@ -326,13 +330,13 @@ func TestGatewayWorkspaceAPIsUseActivePrimaryWorkspace(t *testing.T) {
 	require.NotContains(t, rr.Body.String(), "docs/a.md")
 
 	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/workspace/tree?path=docs", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/workspace/tree?session_id="+sid+"&path=docs", nil)
 	s.handleWorkspaceTree(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), `"path":"docs/a.md"`)
 
 	rr = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?path=review-only.md", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/workspace/snippet?session_id="+sid+"&path=review-only.md", nil)
 	s.handleWorkspaceSnippet(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.Contains(t, rr.Body.String(), "review only")
@@ -432,8 +436,10 @@ func TestGatewayControlPlaneAuthTokenEmptyWhenUnset(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	if cat, err := llm.Parse(llm.EmbeddedModelsJSON()); err == nil {
-		llm.SetGlobalCatalogForTest(cat)
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if cat, err := llm.Parse(data); err == nil {
+			llm.SetGlobalCatalogForTest(cat)
+		}
 	}
 	// Point the OS user home at a scratch directory for the whole package.
 	// Skill discovery reads user-level roots (~/.agents, ~/.claude, ~/.codex),
@@ -744,17 +750,29 @@ func TestAgentPermissionEndpointsLeaveTheLaunchProjectOut(t *testing.T) {
 }
 
 // Plan files live in <stateRoot>/plans/<projectKey>/<sessionID>, and the
-// plan-mode reminder tells the model that exact directory. A gateway context
-// wired with a different key (it used to hardcode the project-less one)
-// permits writes to another directory, so every plan write the model attempts
-// is rejected.
+// plan-mode reminder tells the model that exact directory. The key is the
+// session's own project key: a gateway process has no launch project of its
+// own, so the base runner carries none, and a context wired from the base
+// runner (or any other key) would permit writes to another directory, so every
+// plan write the model attempts is rejected.
 func TestGatewayPlanContextMatchesAdvertisedPlanDir(t *testing.T) {
 	home := t.TempDir()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 	sid := "sid-gateway-plan"
-	s := &Server{Home: home, Runner: &run.Runner{Deps: &run.Deps{Home: home, ProjectKey: "-Users-ada-work-forebrain"}}}
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "planctx", Root: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, sid, sid))
+	require.NoError(t, projects.BindSession(ctx, sid, project.ID))
 
-	if got := s.projectKey(); got != "-Users-ada-work-forebrain" {
-		t.Fatalf("projectKey()=%q, want the runner's key", got)
+	s := &Server{Home: home, Projects: projects, Runner: &run.Runner{Deps: &run.Deps{Home: home}}}
+
+	key := s.sessionProjectKey(ctx, sid)
+	if key != state.ProjectKeyForRoot(project.Root) {
+		t.Fatalf("sessionProjectKey()=%q, want the session project's key", key)
 	}
 
 	stateRoot := s.stateRoot()
@@ -762,8 +780,8 @@ func TestGatewayPlanContextMatchesAdvertisedPlanDir(t *testing.T) {
 		t.Fatalf("enter plan mode: %v", err)
 	}
 
-	ctx := process.AgentContextForProject(context.Background(), stateRoot, sid, s.projectKey())
-	want := state.PlanDirForSession(stateRoot, s.projectKey(), sid)
+	ctx = process.AgentContextForProject(ctx, stateRoot, sid, s.sessionProjectKey(ctx, sid))
+	want := state.PlanDirForSession(stateRoot, key, sid)
 	if got := tool.AllowedPlanPathFromContext(ctx); got != want {
 		t.Fatalf("allowed plan path=%q, want the advertised plan dir %q", got, want)
 	}

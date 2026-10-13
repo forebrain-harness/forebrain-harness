@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
@@ -34,6 +35,25 @@ func TestMain(m *testing.M) {
 
 func withSession(ctx context.Context, sid string) context.Context {
 	return llm.WithAgentSessionID(ctx, sid)
+}
+
+// The working_set_* tools were removed: the model never called them. A session
+// tool table must not carry any name in that family.
+func TestWorkingSetToolsAreGone(t *testing.T) {
+	a, err := agent.New(noopLLM{}, "test", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := NewState(t.TempDir())
+	rt := &AgentToolRuntime{Cfg: &appcfg.Root{}, WorkspaceRoot: t.TempDir()}
+	if err := RegisterDefaultTools(a, st, rt); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range a.Tools() {
+		if strings.HasPrefix(tool.Name(), "working_set_") {
+			t.Fatalf("working_set_* tool %q must be gone", tool.Name())
+		}
+	}
 }
 
 func approvedExitPlanState() *State {

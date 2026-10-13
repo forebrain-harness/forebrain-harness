@@ -37,7 +37,7 @@ import (
 
 func TestDefaultAllowedRootsForWorkspaceIncludesWorkspace(t *testing.T) {
 	ws := filepath.Join(t.TempDir(), "workspaces", "review")
-	roots := DefaultAllowedRootsForWorkspace(ws)
+	roots := DefaultAllowedRootsForWorkspace("", ws)
 	if !rootListContains(roots, ws) {
 		t.Fatalf("allowed roots %v missing workspace root %q", roots, ws)
 	}
@@ -47,7 +47,7 @@ func TestDefaultAllowedRootsForWorkspaceExcludesSiblingAgents(t *testing.T) {
 	home := t.TempDir()
 	mainWS := filepath.Join(home, "workspace")
 	reviewWS := filepath.Join(home, "workspaces", "review")
-	for _, root := range DefaultAllowedRootsForWorkspace(reviewWS) {
+	for _, root := range DefaultAllowedRootsForWorkspace("", reviewWS) {
 		if root == mainWS {
 			t.Fatalf("review agent allowed roots leak main workspace %q", mainWS)
 		}
@@ -55,7 +55,7 @@ func TestDefaultAllowedRootsForWorkspaceExcludesSiblingAgents(t *testing.T) {
 }
 
 func TestDefaultAllowedRootsEmptyWorkspace(t *testing.T) {
-	for _, root := range DefaultAllowedRootsForWorkspace("") {
+	for _, root := range DefaultAllowedRootsForWorkspace("", "") {
 		if root == "" {
 			t.Fatal("empty workspace produced an empty allowed root")
 		}
@@ -3452,7 +3452,7 @@ func containsTool(in []string, want string) bool {
 func TestVisibleToolsPlanReviewerMatchesPlanMinusPlanModeTools(t *testing.T) {
 	all := []string{
 		"read_file", "shell", "web_fetch", "web_search", "session_todo",
-		"memories_search", "retrieve_output", "working_set_show",
+		"memories_search", "retrieve_output",
 		"write_file", "edit_file", "request_permissions",
 		"enter_plan_mode", "exit_plan_mode",
 		"subagent_run", "subagent_fanout",
@@ -3464,7 +3464,7 @@ func TestVisibleToolsPlanReviewerMatchesPlanMinusPlanModeTools(t *testing.T) {
 	for _, name := range reviewer {
 		visible[name] = true
 	}
-	for _, name := range []string{"read_file", "shell", "web_fetch", "web_search", "memories_search", "retrieve_output", "working_set_show", "request_permissions"} {
+	for _, name := range []string{"read_file", "shell", "web_fetch", "web_search", "memories_search", "retrieve_output", "request_permissions"} {
 		if !visible[name] {
 			t.Fatalf("reviewer must be able to call %q; got %v", name, reviewer)
 		}
@@ -4374,7 +4374,7 @@ func TestWriteGrantAlsoAllowsRead(t *testing.T) {
 	})
 	st := NewState(t.TempDir())
 	st.SetRuntimeValue("permission_snapshot_for_session", store.SnapshotForSession)
-	if !st.PathGranted(file, safety.FileSystemAccessRead, "session-1", "") {
+	if !st.PathGranted(file, safety.FileSystemAccessRead, "session-1", "", t.TempDir()) {
 		t.Fatalf("grant not recognized: %+v", store.SnapshotForSession("session-1").FileSystemGrants)
 	}
 	if _, err := resolveReadFilePath(llm.WithAgentSessionID(context.Background(), "session-1"), st, file); err != nil {

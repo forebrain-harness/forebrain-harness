@@ -47,17 +47,21 @@ type AssemblyRequest struct {
 	AgentID      string
 	Mode         string
 	Query        string
-	PinnedSet    []string
 	LimitTokens  int
 	MaxItems     int
 	Now          time.Time
 	IncludeEmpty bool
+	// WorkingDir is the session's project root, filled by the runner that
+	// initiates assembly from the turn's context. Sources that read the
+	// "current directory" (git context) resolve against it rather than the
+	// process directory, which has no meaning in a process serving many
+	// projects. Empty falls back to the process directory.
+	WorkingDir string
 }
 
 type AssemblyResult struct {
 	SessionID       string              `json:"session_id"`
 	Mode            string              `json:"mode"`
-	WorkingSet      []string            `json:"working_set"`
 	Budget          ContextBudget       `json:"budget"`
 	Items           []ContextItem       `json:"items"`
 	Provenance      []ContextProvenance `json:"provenance"`

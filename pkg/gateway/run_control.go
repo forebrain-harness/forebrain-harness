@@ -421,6 +421,7 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 	}
 	stream := run.EventStreamSink(context.WithoutCancel(ctx), s.RunEvents(), runID, sessionID, "", streamed)
 	publishDelta, publishReasoning := stream.OnDelta, stream.OnReasoningDelta
+	publishReasoningDone := stream.OnReasoningDone
 	stream.OnDelta = func(text string) {
 		partial.AppendContent(text)
 		publishDelta(text)
@@ -428,6 +429,15 @@ func (s *Server) withAnswerStream(ctx context.Context, runID, sessionID string, 
 	stream.OnReasoningDelta = func(text string) {
 		partial.AppendReasoning(text)
 		publishReasoning(text)
+	}
+	stream.OnReasoningDone = func() {
+		// The block ended and was written to the transcript as its own row;
+		// drop it from the cancel buffer so a later cancel keeps only what is
+		// still in flight.
+		partial.ResponseReasoningDone()
+		if publishReasoningDone != nil {
+			publishReasoningDone()
+		}
 	}
 	stream.OnResponseCompleted = partial.ResponseCompleted
 	return llm.WithStreamSink(ctx, stream)
@@ -481,7 +491,7 @@ type webTurnInput struct {
 // image the @ picker attached are also shown to the model. Anything that
 // cannot be made available fails the whole message with the error that
 // stopped it: a turn never starts without a file the user attached.
-func (s *Server) prepareWebTurnInput(ctx context.Context, content string, uploads, mentionImages []string) (webTurnInput, error) {
+func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content string, uploads, mentionImages []string) (webTurnInput, error) {
 	text := strings.TrimSpace(content)
 	var blocks, markers, parts []string
 	for _, fid := range uploads {
@@ -513,7 +523,18 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, content string, upload
 			parts = append(parts, state.AttachmentPartJSON(fid, label, mimeType))
 		}
 	}
-	resolver := turn.WorkspaceResolver{Root: s.mentionRoot()}
+	// The @ picker's images are the conversation's files: a message that
+	// attached one resolves it against the turn's session — the same root the
+	// composer's file view used — never the agent's workspace. A message with
+	// no attached image never asks for a root at all.
+	var resolver turn.WorkspaceResolver
+	if len(mentionImages) > 0 {
+		root, rootErr := s.filesRoot(ctx, sessionID, "")
+		if rootErr != nil {
+			return webTurnInput{}, rootErr
+		}
+		resolver = turn.WorkspaceResolver{Root: root}
+	}
 	var imageMarkers []string
 	seen := map[string]bool{}
 	for _, picked := range mentionImages {
@@ -564,7 +585,7 @@ func (s *Server) assembleContextSnapshotForUserInput(ctx context.Context, sessio
 	if s == nil || s.Env == nil {
 		return assembly.AssemblyResult{}, false, nil
 	}
-	return s.Env.AssembleContextSnapshot(hook.HookContext{
+	return s.Env.AssembleContextSnapshot(ctx, hook.HookContext{
 		SessionID: sessionID,
 		Channel:   channel,
 		Trigger:   "user",
@@ -760,7 +781,7 @@ func (s *Server) runDetachedTurn(runCtx context.Context, t detachedTurn, runID s
 	if inputRT != nil {
 		agCtx = run.WithTurnInputRuntime(agCtx, inputRT)
 	}
-	agCtx = process.AgentContextForProject(agCtx, s.stateRoot(), sid, s.projectKey())
+	agCtx = process.AgentContextForProject(agCtx, s.stateRoot(), sid, s.sessionProjectKey(agCtx, sid))
 	agCtx = s.withDetachedGatewayApprovalHooks(agCtx, sid, runID)
 
 	outcome, err := s.Core.Submit(agCtx, turn.TurnRequest{

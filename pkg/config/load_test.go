@@ -192,3 +192,67 @@ func TestForebrainYamlExampleStaysValid(t *testing.T) {
 		t.Fatalf("compact example wrong: %+v", r.Compact)
 	}
 }
+
+func TestLoadRejectsInvalidTokenEstimate(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "unknown hub",
+			body: "agents:\n  defaults:\n    token_estimate:\n      hubs: [\"gitlab\"]\n",
+			want: "unknown hub",
+		},
+		{
+			name: "tokenizer and path",
+			body: "agents:\n  defaults:\n    token_estimate:\n      tokenizers:\n        - model: \"x\"\n          tokenizer: \"qwen-3.8\"\n          path: \"/tmp/tokenizer.json\"\n",
+			want: "exactly one of",
+		},
+		{
+			name: "neither tokenizer nor path",
+			body: "agents:\n  defaults:\n    token_estimate:\n      tokenizers:\n        - model: \"x\"\n",
+			want: "exactly one of",
+		},
+		{
+			name: "missing model",
+			body: "agents:\n  defaults:\n    token_estimate:\n      tokenizers:\n        - tokenizer: \"qwen-3.8\"\n",
+			want: "model is required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "forebrain.yaml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("Load accepted an invalid token_estimate")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsValidTokenEstimate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forebrain.yaml")
+	body := "agents:\n  defaults:\n    token_estimate:\n      hubs: [\"modelscope\"]\n      default_tokenizer: \"kimi-k3\"\n      tokenizers:\n        - model: \"my-\"\n          tokenizer: \"qwen-3.8\"\n        - model: \"other-\"\n          path: \"/tmp/tokenizer.json\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := r.Agents.Defaults.TokenEstimate.DefaultTokenizer; got != "kimi-k3" {
+		t.Fatalf("default_tokenizer = %q, want kimi-k3", got)
+	}
+	if got := len(r.Agents.Defaults.TokenEstimate.Tokenizers); got != 2 {
+		t.Fatalf("tokenizers = %d entries, want 2", got)
+	}
+}

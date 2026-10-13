@@ -125,63 +125,60 @@
     </template>
 
     <!-- Editor -->
-    <div
-      v-if="editing"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-      data-testid="memories-editor"
-      @click.self="closeEditor"
-    >
-      <div class="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
-        <div class="flex items-center gap-2">
-          <div class="font-mono text-[13px] font-medium break-all text-[var(--forebrain-text)]">{{ editing.path }}</div>
-          <LockIcon v-if="editing.core" class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]" :title="t('memories.coreFileHint')" />
-        </div>
-        <p v-if="editing.core" class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.coreFileHint') }}</p>
-        <textarea
+    <ForebrainModal :open="editing !== null" size="xl" @close="closeEditor">
+      <template #title>
+        <span class="font-mono">{{ editing?.path }}</span>
+      </template>
+      <div data-testid="memories-editor">
+        <p class="mb-2 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('memories.updatedAtLabel', { time: formatTime(editing?.updatedAt ?? 0) }) }}</p>
+        <p v-if="editing?.core" class="mb-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.coreFileHint') }}</p>
+        <FileEditor
+          v-if="!loadingEditor"
+          :key="editorKey"
+          :path="editing?.path ?? ''"
+          height="440px"
           v-model="draft"
-          :disabled="loadingEditor"
-          rows="18"
-          class="mt-3 min-h-[240px] flex-1 resize-y rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] p-3 font-mono text-[12px] leading-relaxed text-[var(--forebrain-code-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
-          data-testid="memories-editor-text"
+          @dirty="dirty = $event"
         />
+        <div v-else class="min-h-[240px] rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-code-bg)] p-3 text-[12px] text-[var(--forebrain-muted-text)]">
+          {{ t('common.loading') }}
+        </div>
         <p v-if="editorError" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ editorError }}</p>
-        <div class="mt-4 flex justify-end gap-2">
+        <div class="mt-3 flex items-center gap-2 border-t border-[var(--forebrain-divider)] pt-3">
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="saving" data-testid="memories-editor-delete" @click="deleteFromEditor">
+            {{ editing?.core ? t('memories.emptyContent') : t('memories.deleteFile') }}
+          </button>
+          <span class="flex-1" />
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeEditor">{{ t('common.cancel') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving" data-testid="memories-editor-save" @click="saveEditor">
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" data-testid="memories-editor-save" @click="saveEditor">
             {{ saving ? t('common.loading') : t('common.save') }}
           </button>
         </div>
       </div>
-    </div>
+    </ForebrainModal>
 
     <!-- Clear-all confirm -->
-    <div
-      v-if="confirmClear"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-      data-testid="memories-clear-confirm"
-      @click.self="confirmClear = false"
-    >
-      <div class="w-full max-w-md rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
-        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('memories.clearAllTitle') }}</div>
-        <p class="mt-2 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">
-          {{ scope === 'global' ? t('memories.clearGlobalHint') : t('memories.clearProjectHint') }}
-        </p>
-        <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="confirmClear = false">{{ t('common.cancel') }}</button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="clearing" data-testid="memories-clear-confirm-ok" @click="clearAll">
-            {{ clearing ? t('common.loading') : t('memories.clearAllConfirm') }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ConfirmDialog
+      :open="confirmClear"
+      :title="t('memories.clearAllTitle')"
+      :message="scope === 'global' ? t('memories.clearGlobalHint') : t('memories.clearProjectHint')"
+      :confirm-label="t('memories.clearAllConfirm')"
+      danger
+      @cancel="confirmClear = false"
+      @confirm="clearAll"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { LockIcon } from 'lucide-vue-next'
+import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import forebrainApi, { getErrorMessage, type MemoryFileRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
+
+const FileEditor = defineAsyncComponent(() => import('@/components/editor/FileEditor.vue'))
 
 /**
  * The memory file panel both memory surfaces share: the primary agent's page
@@ -216,6 +213,11 @@ const draft = ref('')
 const loadingEditor = ref(false)
 const editorError = ref('')
 const confirmClear = ref(false)
+// True once the open file differs from the bytes it was loaded with; saving is
+// refused otherwise, so an untouched file is never rewritten.
+const dirty = ref(false)
+// Remounting the editor re-baselines it for each newly opened file.
+const editorKey = ref(0)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 
@@ -297,6 +299,7 @@ async function openEditor(file: MemoryFileRecord) {
   editing.value = file
   draft.value = ''
   editorError.value = ''
+  dirty.value = false
   loadingEditor.value = true
   try {
     const data = await forebrainApi.memoryFileRead(props.scope, file.path, props.projectId)
@@ -305,6 +308,7 @@ async function openEditor(file: MemoryFileRecord) {
     editorError.value = getErrorMessage(e)
   } finally {
     loadingEditor.value = false
+    editorKey.value += 1
   }
 }
 
@@ -320,6 +324,32 @@ async function saveEditor() {
   try {
     await forebrainApi.memoryFileWrite(props.scope, file.path, draft.value, props.projectId)
     notice.value = t('memories.savedFile', { path: file.path })
+    closeEditor()
+    await load()
+  } catch (e: unknown) {
+    editorError.value = getErrorMessage(e)
+  } finally {
+    saving.value = false
+  }
+}
+
+async function deleteFromEditor() {
+  const file = editing.value
+  if (!file) return
+  saving.value = true
+  editorError.value = ''
+  try {
+    if (file.core) {
+      // A core file can be cleared but never removed.
+      await forebrainApi.memoryFileWrite(props.scope, file.path, '', props.projectId)
+      notice.value = t('memories.emptiedFile', { path: file.path })
+    } else {
+      const res = await forebrainApi.memoryFilesDelete(props.scope, [file.path], props.projectId)
+      const refused = res.results.filter((row) => !row.ok)
+      notice.value = refused.length
+        ? refused.map((row) => `${row.path}: ${row.error ?? ''}`).join('; ')
+        : t('memories.deletedFile', { path: file.path })
+    }
     closeEditor()
     await load()
   } catch (e: unknown) {

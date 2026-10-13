@@ -8,12 +8,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
@@ -715,4 +719,196 @@ func TestMCPServersV1RejectsNonGet(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
+}
+
+// pwdStubLLM answers the first call with a single tool call, then finishes, so
+// a turn runs end to end without a provider.
+type pwdStubLLM struct{ calls int }
+
+func (m *pwdStubLLM) Execute(_ context.Context, _ []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	m.calls++
+	if m.calls == 1 {
+		call := llm.ToolCall{
+			ID:       "call-1",
+			Type:     llm.ToolTypeFunction,
+			Function: llm.FunctionCall{Name: "pwd_tool", Arguments: `{}`},
+		}
+		msg := llm.AssistantMessage(nil, call)
+		return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 1, OutputTokens: 1}}, nil
+	}
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("done")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: 1, OutputTokens: 1}}, nil
+}
+
+func setRunnerMainForTest(t *testing.T, r *run.Runner, a *agent.Agent) {
+	t.Helper()
+	v := reflect.ValueOf(r).Elem().FieldByName("main")
+	if !v.IsValid() || !v.CanAddr() {
+		t.Fatalf("runner main field is not settable")
+	}
+	reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem().Set(reflect.ValueOf(a))
+}
+
+// TestProjectRunnersExecuteInTheirOwnRoot models one gateway process serving
+// two projects: the process directory is neither project, yet each project's
+// runner executes its tools in its own root, because RunContent stamps the
+// session project root onto the turn's context.
+func TestProjectRunnersExecuteInTheirOwnRoot(t *testing.T) {
+	processDir := t.TempDir()
+	project1 := t.TempDir()
+	project2 := t.TempDir()
+	t.Chdir(processDir)
+
+	sawDir := func(project string) string {
+		var seen string
+		rec, err := llm.NewTool("pwd_tool", "record the working dir", func(ctx context.Context, _ *struct{}) (string, error) {
+			seen, _ = tool.WorkingDir(ctx)
+			return seen, nil
+		})
+		if err != nil {
+			t.Fatalf("NewTool: %v", err)
+		}
+		main, err := agent.New(&pwdStubLLM{}, "main", "desc")
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		if err := main.AddTool(rec); err != nil {
+			t.Fatalf("AddTool: %v", err)
+		}
+		main.SetTracer(agent.Noop)
+		r := &run.Runner{Deps: &run.Deps{ProjectRoot: project}}
+		setRunnerMainForTest(t, r, main)
+		if _, err := r.RunContent(context.Background(), []llm.ContentPart{llm.Text("go")}); err != nil {
+			t.Fatalf("RunContent for %s: %v", project, err)
+		}
+		return seen
+	}
+
+	if got := sawDir(project1); filepath.Clean(got) != filepath.Clean(project1) {
+		t.Fatalf("project 1 turn ran in %q, want %q", got, project1)
+	}
+	if got := sawDir(project2); filepath.Clean(got) != filepath.Clean(project2) {
+		t.Fatalf("project 2 turn ran in %q, want %q", got, project2)
+	}
+}
+
+// TestHandleChatWSRefusesATurnWithoutARunnableProject pins the start-run
+// resolution (R1): a conversation whose project directory is gone, or which
+// belongs to no project, is refused with a stable code BEFORE any run row
+// exists — never silently run on a sandbox derived from the wrong directory.
+func TestHandleChatWSRefusesATurnWithoutARunnableProject(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	// The real gateway shape: process.Open with NoLaunchProject, so the
+	// environment genuinely has no project of its own (R4).
+	t.Setenv("FOREBRAIN_GATEWAY_PROJECT_KEY", "test-key")
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	raw := "gateway:\n  auth:\n    mode: none\n" +
+		"agents:\n  definitions:\n    main:\n      primary: true\n      llm_providers:\n" +
+		"        - provider: openai\n          model: gpt-main\n          api_key: ${FOREBRAIN_GATEWAY_PROJECT_KEY}\n          base_url: http://127.0.0.1:9/v1\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(raw), 0o600))
+	env, err := process.Open(ctx, process.OpenOptions{Home: home, ConfigPath: cfgPath, NoLaunchProject: true, SessionSource: "webchat"})
+	require.NoError(t, err)
+	defer env.Close()
+	db := env.SQL
+	sessions := env.Deps.SessionStore
+	runStore := env.Deps.RunRT
+	s := &Server{Home: home, Sessions: sessions, RunRT: runStore, Runner: env.Runner, Env: env}
+	projects := state.NewProjectStore(db, "main")
+
+	goneRoot := filepath.Join(t.TempDir(), "gone")
+	pg, err := projects.Create(ctx, state.CreateProjectInput{Name: "gone", Root: goneRoot, ProjectKey: state.ProjectKeyForRoot(goneRoot)})
+	require.NoError(t, err)
+	require.NoError(t, sessions.Ensure(ctx, "s-gone", "s-gone"))
+	require.NoError(t, projects.BindSession(ctx, "s-gone", pg.ID))
+	require.NoError(t, sessions.Ensure(ctx, "s-orphan", "s-orphan"))
+
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	refusal := func(t *testing.T, sid string) wsServerMsg {
+		t.Helper()
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+		require.NoError(t, err)
+		defer conn.Close()
+		var connected wsServerMsg
+		require.NoError(t, conn.ReadJSON(&connected))
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+		require.NoError(t, conn.WriteJSON(wsClientMsg{
+			Op: "start_run", RequestID: "req-1", SessionID: sid,
+			Message: wsClientMessage{Content: "hello", Role: "user"},
+		}))
+		for {
+			var msg wsServerMsg
+			require.NoError(t, conn.ReadJSON(&msg))
+			if msg.Op == "run_error" {
+				return msg
+			}
+		}
+	}
+	countRuns := func(t *testing.T, sid string) int {
+		t.Helper()
+		var n int
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_runs WHERE session_id=?`, sid).Scan(&n))
+		return n
+	}
+
+	gone := refusal(t, "s-gone")
+	require.Equal(t, "session_directory_missing", gone.Message)
+	require.Contains(t, gone.Error, goneRoot)
+	goneData, _ := gone.Data.(map[string]any)
+	require.Equal(t, "session_directory_missing", goneData["code"])
+	require.Zero(t, countRuns(t, "s-gone"), "a refused turn must not leave a run behind")
+
+	orphan := refusal(t, "s-orphan")
+	require.Equal(t, "session_has_no_project", orphan.Message)
+	orphanData, _ := orphan.Data.(map[string]any)
+	require.Equal(t, "session_has_no_project", orphanData["code"])
+	require.Zero(t, countRuns(t, "s-orphan"), "a refused turn must not leave a run behind")
+}
+
+// TestWorkshopTurnRunsInTheAgentSkillDirectory pins the one project-less
+// conversation R1 lets run: a primary-agent workshop task runs on the agent's
+// workshop runner, working in the agent's own skill directory, with no project
+// MCP/LSP/skills loaded.
+func TestWorkshopTurnRunsInTheAgentSkillDirectory(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	workspace := filepath.Join(home, "workspace")
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.EnsureAt(ctx, "s-workshop", "s-workshop", state.SessionBirth{Source: state.SessionSourceWorkshop}))
+
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "test-key", BaseURL: "http://127.0.0.1:9/v1"}}},
+	}}}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, WorkspaceRoot: workspace}}
+	require.NoError(t, runner.Load())
+	env := &process.Environment{Root: home, SQL: db, Runner: runner, RawConfig: *cfg,
+		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions, WorkspaceRoot: workspace}}
+
+	workshop, err := env.RunnerForTurn(ctx, "s-workshop")
+	require.NoError(t, err)
+	require.NotNil(t, workshop)
+	require.Empty(t, workshop.LaunchProject.Project.Root, "the workshop entry loads no project config")
+	require.Equal(t, filepath.Join(workspace, "skills"), filepath.Clean(workshop.ProjectRoot))
+
+	// A fake tool records the turn's working dir; the workshop runner's own
+	// agent is swapped for one carrying it, the way the project-root test does.
+	var seen string
+	rec, err := llm.NewTool("pwd_tool", "record the working dir", func(tctx context.Context, _ *struct{}) (string, error) {
+		seen, _ = tool.WorkingDir(tctx)
+		return seen, nil
+	})
+	require.NoError(t, err)
+	main, err := agent.New(&pwdStubLLM{}, "main", "desc")
+	require.NoError(t, err)
+	require.NoError(t, main.AddTool(rec))
+	main.SetTracer(agent.Noop)
+	setRunnerMainForTest(t, workshop, main)
+	_, err = workshop.RunContent(ctx, []llm.ContentPart{llm.Text("go")})
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(workspace, "skills"), filepath.Clean(seen))
 }

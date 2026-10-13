@@ -599,7 +599,7 @@ func Run(ctx context.Context, opts Options) error {
 		renderer.EnableViewportMode()
 		clipProbe, _ := opts.Clipboard.(ClipboardImageProbe)
 		if opts.Clipboard == nil {
-			clipProbe = systemClipboardImageReader{}
+			clipProbe = systemClipboardImageReader{projectRoot: strings.TrimSpace(opts.WorkingDirectory)}
 		}
 		if clipProbe != nil {
 			watchCtx, stopWatch := context.WithCancel(ctx)
@@ -1197,6 +1197,16 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 		return true, false, ComposerSubmission{}, false
 	case "migrate":
 		_ = cmds.handleMigrate(ctx, state.sessionID)
+		return true, false, ComposerSubmission{}, false
+	case "rewind":
+		// /rewind's picker flow runs here, before the runtime dispatch: the
+		// anchor message it restores goes back into the composer, and the
+		// conversation is replayed from the store without the rewound part.
+		anchor, applied := cmds.handleRewind(ctx, state.sessionID)
+		if applied && strings.TrimSpace(anchor) != "" {
+			state.composer.HandleDraftUpdate(anchor, cmds.session)
+			renderComposerWithState(renderer, state)
+		}
 		return true, false, ComposerSubmission{}, false
 	case "rename":
 		// Bare /rename asks for the name in place, saying what the
@@ -4676,7 +4686,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 	case hotkeyPasteImage:
 		state.agentControlPrefixArmed = false
 		if clipboard == nil {
-			clipboard = DefaultClipboardImageReader()
+			clipboard = DefaultClipboardImageReader(state.workingDir)
 		}
 		att, err := clipboard.ReadClipboardImage(ctx)
 		if errors.Is(err, errClipboardNoImage) || (err == nil && strings.TrimSpace(att.Path) == "") {

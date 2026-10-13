@@ -1,132 +1,201 @@
 <template>
-  <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
-    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--forebrain-divider)] px-4 py-3">
-      <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('skills.listTitle') }}</div>
-      <div class="flex items-center gap-3">
-        <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.rowCount', { count: rows.length }) }}</span>
-        <button
-          type="button"
-          class="forebrain-btn forebrain-btn-ghost text-xs"
-          :disabled="!selectedNames.length || downloading"
-          data-testid="skills-batch-download"
-          @click="emit('batchDownload', selectedNames)"
-        >
-          {{ downloading ? t('common.loading') : t('skills.batchDownload', { count: selectedNames.length }) }}
-        </button>
-      </div>
+  <div>
+    <div class="flex flex-wrap items-center gap-2">
+      <input
+        v-model="query"
+        type="search"
+        class="forebrain-field h-8 max-w-[240px]"
+        :placeholder="t('skills.searchPlaceholder')"
+        data-testid="skills-search"
+      />
+      <select v-model="sourceFilter" class="forebrain-field h-8 w-[120px]" data-testid="skills-source-filter">
+        <option value="all">{{ t('skills.sourceAll') }}</option>
+        <option value="project">{{ t('skills.originProject') }}</option>
+        <option value="agent">{{ t('skills.originAgent') }}</option>
+        <option value="shared">{{ t('skills.originShared') }}</option>
+        <option value="builtin">{{ t('skills.originBuiltin') }}</option>
+      </select>
+      <span class="flex-1" />
+      <span v-if="selectedNames.length" class="text-[12px] text-[var(--forebrain-muted-text)]">
+        {{ t('skills.selectedCount', { count: selectedNames.length }) }}
+      </span>
+      <button
+        type="button"
+        class="forebrain-btn forebrain-btn-ghost text-xs"
+        :disabled="!selectedNames.length || downloading"
+        data-testid="skills-batch-download"
+        @click="emit('batchDownload', selectedNames)"
+      >
+        {{ downloading ? t('common.loading') : t('skills.batchDownload', { count: selectedNames.length }) }}
+      </button>
     </div>
 
     <div v-if="loading" class="px-4 py-8 text-center text-[13px] text-[var(--forebrain-muted-text)]">
       {{ t('common.loading') }}
     </div>
-    <div v-else-if="!rows.length" class="px-4 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
+    <div v-else-if="!visibleRows.length" class="px-4 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
       {{ t('skills.empty') }}
     </div>
-    <ul v-else class="divide-y divide-[var(--forebrain-divider)]">
-      <li
-        v-for="row in rows"
-        :key="row.rootPath || row.name"
-        class="flex flex-wrap items-start gap-3 px-4 py-3"
-        :data-skill-row="row.name"
-        :data-skill-origin="row.origin"
-      >
-        <label class="mt-1 flex shrink-0 cursor-pointer items-center" :class="{ invisible: !row.downloadUrl }">
-          <input
-            type="checkbox"
-            class="h-4 w-4 rounded border-[var(--forebrain-divider-strong)] text-[var(--forebrain-brand-1)] focus:ring-[var(--forebrain-brand-1)]"
-            :checked="selected.has(selectKey(row))"
-            @change="toggleSelect(row, ($event.target as HTMLInputElement).checked)"
-          />
-          <span class="sr-only">{{ t('skills.selectForDownload', { name: row.name }) }}</span>
-        </label>
-
-        <div class="min-w-0 flex-1">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
-            <BadgeComponent variant="gray">{{ originLabel(row.origin) }}</BadgeComponent>
-            <BadgeComponent v-if="isOwned(row)" :variant="row.enabled ? 'success' : 'gray'">
-              {{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}
-            </BadgeComponent>
-            <LockIcon
-              v-else
-              class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]"
-              :title="t('skills.inheritedReadOnly')"
-              :aria-label="t('skills.inheritedReadOnly')"
+    <table v-else class="forebrain-table mt-3 w-full">
+      <thead>
+        <tr>
+          <th class="w-8">
+            <input
+              type="checkbox"
+              :checked="allSelected"
+              :aria-label="t('skills.selectAll')"
+              @change="toggleAll(($event.target as HTMLInputElement).checked)"
             />
-            <span
-              v-if="row.shadows && row.shadows.length"
-              class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[11px] text-[var(--forebrain-muted-text)]"
-              :title="row.shadows.join('\n')"
-            >{{ t('skills.shadows', { count: row.shadows.length }) }}</span>
-          </div>
-          <p v-if="row.description" class="mt-1 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">{{ row.description }}</p>
-          <div v-if="row.rootPath" class="mt-1 font-mono text-[11px] break-all text-[var(--forebrain-muted-text)]">{{ row.rootPath }}</div>
-        </div>
-
-        <div class="flex shrink-0 flex-wrap items-center gap-2">
-          <SwitchComponent
-            v-if="isOwned(row)"
-            :model-value="row.enabled"
-            :disabled="saving"
-            :data-testid="`skill-toggle-${row.name}`"
-            :title="t('skills.toggleHint')"
-            :aria-label="t('skills.toggleHint')"
-            @update:model-value="emit('toggle', row, $event)"
-          />
-          <button
-            v-if="row.downloadUrl"
-            type="button"
-            class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 py-1 text-[11px] text-[var(--forebrain-text)] hover:bg-[var(--forebrain-surface)]"
-            :data-testid="`skill-download-${row.name}`"
-            @click="emit('download', row)"
-          >
-            {{ t('skills.download') }}
-          </button>
-          <button
-            v-if="isOwned(row)"
-            type="button"
-            class="rounded-lg border border-[var(--forebrain-divider)] px-2.5 py-1 text-[11px] text-[var(--forebrain-danger)] hover:bg-[var(--forebrain-input-hover-bg)]"
-            :data-testid="`skill-delete-${row.name}`"
-            @click="emit('delete', row)"
-          >
-            {{ t('common.delete') }}
-          </button>
-        </div>
-      </li>
-    </ul>
+          </th>
+          <th>{{ t('skills.colSkill') }}</th>
+          <th class="w-[110px]">{{ t('skills.colSource') }}</th>
+          <th class="w-[190px] text-right">{{ t('skills.colStatus') }}</th>
+          <th class="w-[170px] text-right">{{ t('skills.colActions') }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr
+          v-for="row in visibleRows"
+          :key="row.rootPath || row.name"
+          :data-skill-row="row.name"
+          :data-skill-origin="row.origin"
+        >
+          <td>
+            <input
+              type="checkbox"
+              :checked="selected.has(selectKey(row))"
+              :aria-label="t('skills.selectForDownload', { name: row.name })"
+              @change="toggleSelect(row, ($event.target as HTMLInputElement).checked)"
+            />
+          </td>
+          <td>
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-mono text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
+              <BadgeComponent v-if="row.state === 'pending'" variant="warning">{{ t('skills.unpublished') }}</BadgeComponent>
+              <BadgeComponent v-if="row.update" variant="default">{{ t('skills.hasUpdate') }}</BadgeComponent>
+            </div>
+            <div class="mt-0.5 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">
+              {{ row.description || '—' }}
+              <span v-if="row.rootPath" class="font-mono text-[11px] text-[var(--forebrain-muted-text)]"> · {{ row.rootPath }}</span>
+            </div>
+          </td>
+          <td>
+            <BadgeComponent variant="gray">{{ originLabel(row.origin) }}</BadgeComponent>
+          </td>
+          <td class="text-right">
+            <div class="inline-flex items-center gap-2">
+              <BadgeComponent v-if="row.state === 'draft'" variant="warning">{{ t('skills.draft') }}</BadgeComponent>
+              <BadgeComponent v-else-if="row.version" variant="gray">{{ `v${row.version}` }}</BadgeComponent>
+              <SwitchComponent
+                v-if="isOwned(row) && !isDraft(row)"
+                :model-value="row.enabled"
+                :disabled="saving"
+                :data-testid="`skill-toggle-${row.name}`"
+                :title="t('skills.toggleHint')"
+                :aria-label="t('skills.toggleHint')"
+                @update:model-value="emit('toggle', row, $event)"
+              />
+              <template v-else-if="!isOwned(row)">
+                <BadgeComponent :variant="row.enabled ? 'success' : 'gray'">
+                  {{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}
+                </BadgeComponent>
+                <LockIcon class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]" :title="t('skills.inheritedReadOnly')" :aria-label="t('skills.inheritedReadOnly')" />
+              </template>
+            </div>
+          </td>
+          <td class="text-right">
+            <div class="inline-flex items-center gap-1">
+              <button
+                v-if="(isOwned(row) && ownerOrigin !== 'shared') || row.update"
+                type="button"
+                class="forebrain-btn forebrain-btn-ghost text-xs"
+                :data-testid="`skill-detail-${row.name}`"
+                @click="emit('detail', row)"
+              >
+                {{ t('skills.detail') }}
+              </button>
+              <button
+                v-if="row.downloadUrl"
+                type="button"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]"
+                :title="t('skills.download')"
+                :aria-label="t('skills.download')"
+                :data-testid="`skill-download-${row.name}`"
+                @click="emit('download', row)"
+              >
+                <Download class="h-4 w-4" aria-hidden="true" />
+              </button>
+              <button
+                v-if="isOwned(row) && row.origin !== 'builtin'"
+                type="button"
+                class="skill-row-danger inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-[var(--forebrain-input-hover-bg)]"
+                :title="t('common.delete')"
+                :aria-label="t('common.delete')"
+                :data-testid="`skill-delete-${row.name}`"
+                @click="emit('delete', row)"
+              >
+                <Trash2 class="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+    <span v-if="hint" class="mt-2 block text-[11px] text-[var(--forebrain-muted-text)]">{{ hint }}</span>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { LockIcon } from 'lucide-vue-next'
+import { Download, Lock as LockIcon, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import type { SkillRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   rows: SkillRecord[]
   loading: boolean
   saving: boolean
   downloading: boolean
   /** The layer this page owns: rows of any other origin are read-only. */
   ownerOrigin: 'agent' | 'shared' | 'project'
-}>()
+  /** The trailing path line under the table. */
+  hint?: string
+}>(), { hint: '' })
 
 const emit = defineEmits<{
   toggle: [row: SkillRecord, enabled: boolean]
   delete: [row: SkillRecord]
   download: [row: SkillRecord]
   batchDownload: [names: string[]]
+  detail: [row: SkillRecord]
 }>()
 
 const { t } = useI18n()
+
+const query = ref('')
+const sourceFilter = ref('all')
+
+const visibleRows = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return props.rows.filter((row) => {
+    if (sourceFilter.value !== 'all' && row.origin !== sourceFilter.value) return false
+    if (!q) return true
+    return row.name.toLowerCase().includes(q) || (row.description ?? '').toLowerCase().includes(q)
+  })
+})
 
 // Inherited rows carry no controls at all (decision D9): a skill is toggled
 // and deleted only in the layer that owns it.
 function isOwned(row: SkillRecord) {
   return row.origin === props.ownerOrigin
+}
+
+// A draft-only row has no published version to enable, so it never grows a
+// switch: the badge says 草稿 instead.
+function isDraft(row: SkillRecord) {
+  return row.state === 'draft' || row.draftOnly === true
 }
 
 function originLabel(origin: SkillRecord['origin']) {
@@ -150,12 +219,22 @@ const selectedNames = computed(() =>
   props.rows.filter((row) => selected.value.has(selectKey(row))).map((row) => row.name),
 )
 
+const allSelected = computed(() =>
+  visibleRows.value.length > 0 && visibleRows.value.every((row) => selected.value.has(selectKey(row))),
+)
+
 function toggleSelect(row: SkillRecord, checked: boolean) {
   const next = new Set(selected.value)
-  if (checked) {
-    next.add(selectKey(row))
-  } else {
-    next.delete(selectKey(row))
+  if (checked) next.add(selectKey(row))
+  else next.delete(selectKey(row))
+  selected.value = next
+}
+
+function toggleAll(checked: boolean) {
+  const next = new Set(selected.value)
+  for (const row of visibleRows.value) {
+    if (checked) next.add(selectKey(row))
+    else next.delete(selectKey(row))
   }
   selected.value = next
 }
@@ -173,3 +252,9 @@ watch(
   },
 )
 </script>
+
+<style scoped>
+.skill-row-danger {
+  color: var(--forebrain-danger);
+}
+</style>

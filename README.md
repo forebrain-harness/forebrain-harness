@@ -84,9 +84,25 @@ Or with Go (Go 1.26+ and a C compiler):
 CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest
 ```
 
+forebrain links a native tokenizers static library that is not part of the Go
+module, so a `go install` build needs `CGO_LDFLAGS` pointing at it. Get
+`libtokenizers.a` for your platform (macOS/Linux: unpack
+`libtokenizers.<os>-<arch>.tar.gz` from the
+[daulet/tokenizers releases](https://github.com/daulet/tokenizers/releases);
+Windows: build it with Rust — `scripts/fetch-libtokenizers.sh` automates both)
+and point `CGO_LDFLAGS` at its directory:
+
+```bash
+CGO_ENABLED=1 CGO_LDFLAGS="-L/path/to/libtokenizers" \
+  go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest
+```
+
+Easier is to clone the repository and run `make build`, which fetches the
+library first.
+
 A `go install` build downloads the tokenization dictionaries used for Chinese
-and Japanese memory search automatically on first use, and works offline
-afterwards.
+and Japanese memory search, and the model catalog (models.json), automatically
+on first use, and works offline afterwards.
 
 Prebuilt archives for every platform are attached to each
 [GitHub release](https://github.com/forebrain-harness/forebrain-harness/releases).
@@ -200,10 +216,36 @@ architecture, the [CLI reference](https://forebrain-harness.github.io/guide/cli-
 [memory systems](https://forebrain-harness.github.io/guide/memory-systems), subagents,
 skills and tools, and configuration.
 
+## Token estimation and offline use
+
+Forebrain counts the tokens of the conversation it sends with the tokenizer of the
+model in use — not with one global encoder — so auto-compaction triggers at the right
+point for each model. The tokenizer files for the mainstream families ship with
+forebrain; the ids and the model names they cover are listed in
+[`assets/tokenizers/README.md`](assets/tokenizers/README.md).
+
+A tokenizer file is looked up in this order:
+
+1. the cache, `$FOREBRAIN_HOME/cache/tokenizers/<id>/<file>`;
+2. beside the binary, `<binary dir>/tokenizers/<id>/<file>.gz`;
+3. downloaded, from HuggingFace first and ModelScope second.
+
+`agents.defaults.token_estimate` configures it: `hubs` (the download order),
+`huggingface_endpoint` and `modelscope_endpoint` (for a mirror or an internal hub),
+and `default_tokenizer` and `tokenizers` (per-model selection).
+
+**In an intranet or offline environment**, run forebrain once on a machine with
+internet access — or unzip the release archive's `tokenizers/*.gz` and `gzip -d` each
+file — then copy the whole `cache/tokenizers` directory to the same location on the
+offline machine. The cache holds the decompressed original files, so it is copied
+as-is.
+
 ## Build from source
 
 Requirements: Go 1.26 with CGO enabled (a C toolchain), and Node.js 22 with pnpm
-10 for the web UI.
+10 for the web UI. The first build runs `scripts/fetch-libtokenizers.sh` to
+download the tokenizers static library the binary links (Windows builds it from
+source with Rust).
 
 ```bash
 git clone https://github.com/forebrain-harness/forebrain-harness.git
@@ -215,8 +257,10 @@ make build            # web UI + binary + dictionaries → build/bin/forebrain
 For day-to-day Go work, skip the UI rebuild:
 
 ```bash
+scripts/fetch-libtokenizers.sh               # the tokenizers static library the binary links
 CGO_ENABLED=1 go build -tags fts5 -o ./build/bin/forebrain ./cmd/forebrain
 scripts/install-dictionary.sh ./build/bin   # memory search reads dict/ beside the binary
+scripts/install-assets.sh ./build/bin       # models.json beside the binary
 ```
 
 The `fts5` tag is required: memory search needs SQLite's full-text index.
@@ -246,7 +290,7 @@ npm i -g forebrain-harness-forebrain-<version>.tgz
 
 | Scenario                            | Use                                                             |
 | ----------------------------------- | --------------------------------------------------------------- |
-| Iterating on Go code                | `go build` + `scripts/install-dictionary.sh`                    |
+| Iterating on Go code                | `go build` + `scripts/install-dictionary.sh` + `scripts/install-assets.sh` |
 | Iterating on the launcher / package | `build-platform-packages.sh` + `npm link`                       |
 | Verifying a release before publish  | `npm pack` + global install                                     |
 | Publishing                          | `build-platform-packages.sh` for every target + `npm publish`   |

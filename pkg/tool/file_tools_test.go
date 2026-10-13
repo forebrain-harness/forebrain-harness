@@ -15,6 +15,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // unixPermsObservable reports whether the platform exposes POSIX permission
@@ -1286,5 +1287,85 @@ PATCH`
 	}
 	if _, ok := raw["lsp_diagnostics"]; !ok {
 		t.Fatalf("expected lsp_diagnostics on returned payload: %#v", raw)
+	}
+}
+
+// recordingFileChanges captures the file-change rows the file tools report.
+type recordingFileChanges struct {
+	mu  sync.Mutex
+	got []state.FileChange
+}
+
+func (r *recordingFileChanges) RecordFileChange(_ context.Context, c state.FileChange) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, c)
+	return nil
+}
+
+// TestFileToolsRecordChangesForRewind pins Step 2: every file-tool write — an
+// overwrite, a create — reports a ledger row stamped with the conversation,
+// run and anchor the context carries, and the pre-write snapshot lands under
+// the conversation's own directory. A subagent resolves to its parent
+// conversation, so its writes are recorded there.
+func TestFileToolsRecordChangesForRewind(t *testing.T) {
+	dir := t.TempDir()
+	hist := filepath.Join(t.TempDir(), "history")
+	a := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(a, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := NewState(dir)
+	st.SetPrimaryWorkspaceBoundary("", dir, nil)
+	st.SetHistoryDir(hist)
+	rec := &recordingFileChanges{}
+	st.SetFileChangeRecorder(rec)
+
+	ctx := WithConversationSessionID(context.Background(), "parent")
+	ctx = llm.WithAgentSessionID(ctx, "worker")
+	ctx = WithRunID(ctx, "run-1")
+	ctx = WithTurnAnchorMessageID(ctx, 42)
+
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(a)+`"}`); err != nil {
+		t.Fatalf("read_file: %v", err)
+	}
+	writeTool, err := NewFileWriteTool(st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(a)+`","content":"new\n"}`); err != nil {
+		t.Fatalf("write_file overwrite: %v", err)
+	}
+	b := filepath.Join(dir, "b.txt")
+	if _, err := writeTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(b)+`","content":"b\n"}`); err != nil {
+		t.Fatalf("write_file create: %v", err)
+	}
+
+	if len(rec.got) != 2 {
+		t.Fatalf("recorded changes = %d, want 2", len(rec.got))
+	}
+	over := rec.got[0]
+	if over.SessionID != "parent" || over.RunID != "run-1" || over.AnchorMessageID != 42 {
+		t.Fatalf("overwrite change identity = %+v", over)
+	}
+	if !over.ExistedBefore || over.Deleted {
+		t.Fatalf("overwrite change flags = %+v, want existed, not deleted", over)
+	}
+	if over.BeforeSnapshot == "" || !strings.Contains(over.BeforeSnapshot, string(filepath.Separator)+"parent"+string(filepath.Separator)) {
+		t.Fatalf("overwrite snapshot %q is not under the conversation directory", over.BeforeSnapshot)
+	}
+	if raw, err := os.ReadFile(over.BeforeSnapshot); err != nil || string(raw) != "old\n" {
+		t.Fatalf("overwrite snapshot content = %q, %v; want the pre-write bytes", raw, err)
+	}
+	created := rec.got[1]
+	if created.ExistedBefore || created.BeforeSnapshot != "" {
+		t.Fatalf("created-file change = %+v, want existed_before false and no snapshot", created)
+	}
+	if created.SessionID != "parent" {
+		t.Fatalf("a subagent's write recorded under session %q, want the parent conversation", created.SessionID)
 	}
 }

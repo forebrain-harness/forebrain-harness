@@ -35,10 +35,13 @@ package process
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +121,13 @@ type poolEntry struct {
 	key     string
 	runner  *run.Runner
 	project state.Project
+	// cfgLaunch is the launch-project trust decision this entry's sandbox and
+	// approval policy are derived from. For an ordinary project runner it is the
+	// project's own context; for the primary agent's workshop entry it is the
+	// (trusted) context of forebrain's own skill directory. It is retained so a
+	// config reload re-derives each entry's effective config from its own trust,
+	// not the base runner's.
+	cfgLaunch safety.ProjectContext
 	// lsp is this project's view of the environment's language-server pool.
 	lsp *lsp.Manager
 	// instructions freezes per-session project instructions.
@@ -144,6 +154,59 @@ func (env *Environment) RunnerForSession(ctx context.Context, sessionID string) 
 		return env.Runner
 	}
 	return env.pool.RunnerForSession(ctx, sessionID)
+}
+
+// ErrSessionHasNoProject reports a turn that cannot start: its conversation
+// belongs to no project, and this process has none of its own to run it on.
+var ErrSessionHasNoProject = errors.New("session has no project")
+
+// ErrSessionDirectoryMissing reports a turn whose conversation's project root
+// no longer exists on disk, so there is nowhere to run it.
+type ErrSessionDirectoryMissing struct {
+	Dir string
+}
+
+func (e ErrSessionDirectoryMissing) Error() string {
+	return "session directory missing: " + strings.TrimSpace(e.Dir)
+}
+
+// RunnerForTurn resolves the Runner one turn must start on. It is the entry
+// point every surface begins a turn through; RunnerForSession stays for
+// agent-level reads (status, slash commands, rosters), which are the same on
+// any runner of the agent.
+//
+// A turn belongs to a conversation, and R1 says a conversation runs on its
+// project's runner. So RunnerForTurn does not fall back to the base runner for
+// a conversation that HAS a project: a project runner that cannot be built, or
+// whose project directory is gone, is refused with an error the caller reports
+// rather than silently running on a sandbox derived from the wrong directory.
+// The fallbacks it does keep are the ones a process that IS a project needs:
+// no registry at all, or a project-less conversation in a process whose own
+// launch directory is its project (the interactive surface). A gateway process
+// — started with no project of its own (R4) — refuses a project-less
+// conversation outright. The one project-less conversation that may always run
+// is a primary-agent workshop task, on the agent's own workshop runner.
+func (env *Environment) RunnerForTurn(ctx context.Context, sessionID string) (*run.Runner, error) {
+	if env == nil {
+		return nil, ErrSessionHasNoProject
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, ErrSessionHasNoProject
+	}
+	if env.SQL == nil || env.Deps.SessionStore == nil {
+		// No project registry to resolve against: there is no project concept
+		// in this process, so the conversation runs on its own runner, exactly
+		// as RunnerForSession answers. A served gateway always has the registry.
+		return env.Runner, nil
+	}
+	env.poolOnce.Do(func() {
+		env.pool = NewRunnerPool(env, 0)
+	})
+	if env.pool == nil {
+		return nil, ErrSessionHasNoProject
+	}
+	return env.pool.RunnerForTurn(ctx, sessionID)
 }
 
 // RunnerPool exposes the environment's pool for surfaces that need more than
@@ -501,6 +564,132 @@ func (p *RunnerPool) RunnerForSession(ctx context.Context, sessionID string) *ru
 	return entry.runner
 }
 
+// RunnerForTurn resolves the Runner one conversation's turn must run on,
+// creating it if necessary. It never falls back to the base runner for a
+// conversation with a project — a project runner that cannot be built is
+// reported, not papered over with the wrong sandbox.
+func (p *RunnerPool) RunnerForTurn(ctx context.Context, sessionID string) (*run.Runner, error) {
+	if p == nil || p.env == nil {
+		return nil, ErrSessionHasNoProject
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || p.projects == nil {
+		return nil, ErrSessionHasNoProject
+	}
+	project, ok, err := p.projects.ProjectForSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		if _, statErr := os.Stat(strings.TrimSpace(project.Root)); statErr != nil {
+			return nil, ErrSessionDirectoryMissing{Dir: project.Root}
+		}
+		entry, berr := p.entryForSession(ctx, sessionID, project)
+		if berr != nil {
+			return nil, berr
+		}
+		if entry == nil || entry.runner == nil {
+			return nil, ErrSessionHasNoProject
+		}
+		return entry.runner, nil
+	}
+	// No project row: the only project-less conversation that may run is a
+	// primary-agent workshop task.
+	source, serr := p.sessionSource(ctx, sessionID)
+	if serr != nil {
+		return nil, serr
+	}
+	if strings.EqualFold(strings.TrimSpace(source), state.SessionSourceWorkshop) {
+		entry, werr := p.workshopEntry(ctx, sessionID)
+		if werr != nil {
+			return nil, werr
+		}
+		return entry.runner, nil
+	}
+	// A conversation with no project row belongs to no project, and R1 gives
+	// it no runner of its own. The exception is a process that IS a project —
+	// the interactive surface, whose launch directory is its project root (R2)
+	// and whose base runner already serves it (nil for a runner-less harness,
+	// where run.Run treats the turn as a no-op, as it always has). The gateway
+	// was started with no project of its own (R4), so a gateway conversation
+	// with no project cannot start.
+	if !p.env.noLaunchProject {
+		return p.env.Runner, nil
+	}
+	return nil, ErrSessionHasNoProject
+}
+
+// sessionSource reads one conversation's purpose (fb_sessions.source). It is
+// empty for an ordinary conversation, "workshop" for a primary-agent workshop
+// task, "cron" for a scheduled fire. The project store owns the session table's
+// project binding but exposes no single-row source read, and the pool needs this
+// one fact (whether to route a project-less session to the workshop runner), so
+// it is read here under the same agent scope every other pool read uses.
+func (p *RunnerPool) sessionSource(ctx context.Context, sessionID string) (string, error) {
+	if p == nil || p.env == nil || p.env.SQL == nil {
+		return "", nil
+	}
+	agentID := ""
+	if p.projects != nil {
+		agentID = p.projects.AgentID()
+	}
+	var source sql.NullString
+	err := p.env.SQL.QueryRowContext(ctx,
+		`SELECT source FROM fb_sessions WHERE id=? AND agent_id=?`,
+		strings.TrimSpace(sessionID), agentID).Scan(&source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !source.Valid {
+		return "", nil
+	}
+	return source.String, nil
+}
+
+// workshopEntry resolves the primary agent's single workshop entry: one entry
+// per agent, keyed separately from every project, whose runner serves
+// project-less workshop conversations. It is built with an empty project
+// context (no project MCP/LSP/skills) rooted at the agent's own skill
+// directory, so the model can read and edit the skills it is working on.
+func (p *RunnerPool) workshopEntry(ctx context.Context, sessionID string) (*poolEntry, error) {
+	key := workshopPoolKey(p.env.Deps.AgentName)
+	p.mu.Lock()
+	if entry, ok := p.entries[key]; ok {
+		p.sessions[strings.TrimSpace(sessionID)] = key
+		entry.touchLocked()
+		p.mu.Unlock()
+		return entry, nil
+	}
+	agentWorkspace := p.env.Deps.WorkspaceRoot
+	if strings.TrimSpace(agentWorkspace) == "" {
+		agentWorkspace = workspaceRootFor(p.env)
+	}
+	if strings.TrimSpace(agentWorkspace) == "" {
+		p.mu.Unlock()
+		return nil, ErrSessionHasNoProject
+	}
+	skillsDir := filepath.Join(agentWorkspace, "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("runner pool: prepare workshop directory: %w", err)
+	}
+	entry, err := p.buildEntryLocked(ctx, state.Project{Root: skillsDir}, true)
+	if err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
+	p.entries[key] = entry
+	p.lru = append(p.lru, entry)
+	p.sessions[strings.TrimSpace(sessionID)] = key
+	evicted := p.evictLocked()
+	p.mu.Unlock()
+	closePoolEntries(evicted)
+	return entry, nil
+}
+
 func (p *RunnerPool) entryForSession(ctx context.Context, sessionID string, project state.Project) (*poolEntry, error) {
 	p.mu.Lock()
 	if bound, ok := p.sessions[sessionID]; ok {
@@ -514,7 +703,7 @@ func (p *RunnerPool) entryForSession(ctx context.Context, sessionID string, proj
 	entry, ok := p.entries[key]
 	if !ok {
 		var err error
-		entry, err = p.buildEntryLocked(ctx, project)
+		entry, err = p.buildEntryLocked(ctx, project, false)
 		if err != nil {
 			p.mu.Unlock()
 			return nil, err
@@ -655,21 +844,37 @@ func closePoolEntries(entries []*poolEntry) {
 // cancellation, so exceeding this means a server or transport ignored it.
 const runnerPoolCloseDeadline = 20 * time.Second
 
-// buildEntryLocked assembles one project runner. Caller holds p.mu.
-func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project) (*poolEntry, error) {
+// buildEntryLocked assembles one project runner. Caller holds p.mu. A workshop
+// entry is the primary agent's own skill directory: it has no project row, no
+// project MCP/LSP/skills, and its config is derived as trusted (forebrain's own
+// directory), so it shares this branch with the ordinary per-project build.
+func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project, workshop bool) (*poolEntry, error) {
 	env := p.env
 	baseDeps := env.Deps
 	if baseDeps.AppCfg == nil {
 		return nil, fmt.Errorf("runner pool: environment has no config")
 	}
-	// A registered project's boundary is the path the user registered: the
-	// project space, its trust record and its skills all name that exact
-	// root, so the sessions run inside it too. Resolving it as a launch
-	// directory would walk up to an enclosing checkout and run a subdirectory
-	// project under the checkout's skills, MCP servers and trust decision.
-	launch, err := safety.ResolveRegisteredContext(env.Root, project.Root)
-	if err != nil {
-		return nil, fmt.Errorf("runner pool: resolve project %s: %w", project.Root, err)
+	// launch is the frozen project context this entry's project-gated features
+	// (project MCP/LSP/skills, instructions) read; cfgLaunch is the context its
+	// sandbox and approval policy are derived from. They are the same for an
+	// ordinary project runner. The workshop entry has an empty launch — no
+	// project MCP/LSP/skills load — but a trusted cfgLaunch, because the workshop
+	// directory is forebrain's own and its sessions must be writable.
+	var launch, cfgLaunch safety.ProjectContext
+	if workshop {
+		cfgLaunch = safety.ProjectContext{TrustLevel: safety.LevelTrusted}
+	} else {
+		// A registered project's boundary is the path the user registered: the
+		// project space, its trust record and its skills all name that exact
+		// root, so the sessions run inside it too. Resolving it as a launch
+		// directory would walk up to an enclosing checkout and run a subdirectory
+		// project under the checkout's skills, MCP servers and trust decision.
+		resolved, err := safety.ResolveRegisteredContext(env.Root, project.Root)
+		if err != nil {
+			return nil, fmt.Errorf("runner pool: resolve project %s: %w", project.Root, err)
+		}
+		launch = resolved
+		cfgLaunch = resolved
 	}
 	agentWorkspace := baseDeps.WorkspaceRoot
 	if strings.TrimSpace(agentWorkspace) == "" {
@@ -685,17 +890,19 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	frozenOverridden := mcpRes.Summary.OverriddenGlobal
 	entry := &poolEntry{
 		project:      frozenProject,
+		cfgLaunch:    cfgLaunch,
 		instructions: make(map[string]string),
 	}
 	// The language-server view freezes with the entry, like the MCP list:
 	// a manager from the environment's pool, decided once for this project.
+	// The project-bound root is the launch project's root: empty for the
+	// workshop entry, so no project language servers load there.
 	lspOpts := lsp.ManagerOptions{
-		Home:              env.Root,
-		AgentWorkspace:    agentWorkspace,
-		ProjectRoot:       project.Root,
-		ProjectKey:        project.ProjectKey,
-		Trusted:           safety.TrustedRoot(launch) != "",
-		VersionControlled: launch.Project.VersionControlled,
+		Home:           env.Root,
+		AgentWorkspace: agentWorkspace,
+		ProjectRoot:    launch.Project.Root,
+		ProjectKey:     project.ProjectKey,
+		Trusted:        safety.TrustedRoot(launch) != "",
 	}
 	lspOpts.ToolRegistered = lsp.ToolEnabled(baseDeps.AppCfg, lspOpts)
 	if env.LSP != nil {
@@ -719,9 +926,13 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		},
 		LaunchProject: launch,
 		MemoryStore:   baseDeps.MemoryStore,
-		AppCfg:        baseDeps.AppCfg,
-		SessionStore:  baseDeps.SessionStore,
-		RunRT:         baseDeps.RunRT,
+		// Derived from the raw configuration and this entry's own launch
+		// context: a project runner's sandbox and approval policy follow the
+		// project's trust decision, never the base runner's (which follows the
+		// gateway's launch directory and, there, nothing at all).
+		AppCfg:       effectiveFor(env.RawConfig, cfgLaunch),
+		SessionStore: baseDeps.SessionStore,
+		RunRT:        baseDeps.RunRT,
 		// The frozen lsp-tool decision; the manager itself is attached below
 		// only when one exists, so a nil *lsp.Manager never lands in the
 		// interface fields as a non-nil interface.
@@ -747,9 +958,25 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 		entry.lsp.Close()
 		return nil, fmt.Errorf("runner pool: load project runner: %w", err)
 	}
+	// Attach the process-owned services the base runner is wired with and a
+	// hand-built project runner would otherwise drop: this environment as its
+	// subagent executor and a file-reference resolver. Without them a session
+	// bound to a project cannot start a subagent or resolve file references.
+	env.wireRunner(runner)
 	entry.runner = runner
-	entry.key = poolKey(baseDeps.AgentName, project)
+	if workshop {
+		entry.key = workshopPoolKey(baseDeps.AgentName)
+	} else {
+		entry.key = poolKey(baseDeps.AgentName, project)
+	}
 	return entry, nil
+}
+
+// workshopPoolKey is the pool key of the primary agent's single workshop entry:
+// one per agent, distinct from every project key (which begins with the agent
+// id and two NUL separators), so it can never collide with a project's entry.
+func workshopPoolKey(agentID string) string {
+	return "agent:" + strings.TrimSpace(agentID) + ":workshop"
 }
 
 // frozenInstructions snapshots the project's instructions for one session on
@@ -793,15 +1020,19 @@ func (p *RunnerPool) Close() {
 	closePoolEntries(entries)
 }
 
-// PropagateConfig offers next to every live pool entry through its own
-// LoadConfig transaction: pointer swap, pinned ordinary reload, rollback. An
-// entry whose load fails keeps its previous configuration and runtime and is
-// named in the joined error; an entry evicted concurrently (its runner already
-// closed) is skipped — teardown is not a propagation failure. The pool lock is
-// held only to collect entries, because LoadConfig rebuilds a chain and one
-// slow entry must not hold up session resolution for every other project.
-func (p *RunnerPool) PropagateConfig(ctx context.Context, next *appcfg.Root) error {
-	if p == nil || next == nil {
+// PropagateConfig offers the raw, on-disk configuration to every live pool
+// entry through its own LoadConfig transaction: pointer swap, pinned ordinary
+// reload, rollback. raw is the configuration before any project-scoped
+// derivation; each entry derives its own effective config from its own launch
+// context, so a reload never overwrites a project runner's sandbox with the
+// base runner's. An entry whose load fails keeps its previous configuration and
+// runtime and is named in the joined error; an entry evicted concurrently (its
+// runner already closed) is skipped — teardown is not a propagation failure.
+// The pool lock is held only to collect entries, because LoadConfig rebuilds a
+// chain and one slow entry must not hold up session resolution for every other
+// project.
+func (p *RunnerPool) PropagateConfig(ctx context.Context, raw appcfg.Root) error {
+	if p == nil {
 		return nil
 	}
 	p.mu.Lock()
@@ -815,7 +1046,8 @@ func (p *RunnerPool) PropagateConfig(ctx context.Context, next *appcfg.Root) err
 	p.mu.Unlock()
 	var failed []error
 	for _, entry := range entries {
-		err := entry.runner.LoadConfig(next)
+		effective := effectiveFor(raw, entry.cfgLaunch)
+		err := entry.runner.LoadConfig(effective)
 		if err == nil || run.IsRunnerClosed(err) {
 			continue
 		}

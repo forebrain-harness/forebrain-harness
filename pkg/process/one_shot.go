@@ -131,9 +131,9 @@ func (env *Environment) PersistSubagentTurn(ctx context.Context, t run.SubagentT
 	}
 }
 
-func (env *Environment) AssembleContextSnapshot(hc hook.HookContext, text string) (assembly.AssemblyResult, bool, error) {
+func (env *Environment) AssembleContextSnapshot(ctx context.Context, hc hook.HookContext, text string) (assembly.AssemblyResult, bool, error) {
 	if env == nil || env.ctxHook == nil {
 		return assembly.AssemblyResult{}, false, nil
 	}
-	return env.ctxHook.Assemble(hc, text)
+	return env.ctxHook.Assemble(ctx, hc, text)
 }

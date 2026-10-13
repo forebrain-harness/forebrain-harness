@@ -154,14 +154,12 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				in.SandboxPermissions = safety.SandboxPermissionsRequireEscalated
 			}
 			// Resolve cwd early for path-based read-only validation (cd / ls
-			// targets must stay under one of the allowed roots).
-			wd, err := os.Getwd()
+			// targets must stay under one of the allowed roots). It is the
+			// session's project root, not the process directory, and it is the
+			// same directory the command actually runs in (cwd: wdAbs below).
+			wdAbs, err := WorkingDir(ctx)
 			if err != nil {
 				return "", err
-			}
-			wdAbs, werr := filepath.Abs(wd)
-			if werr != nil {
-				return "", werr
 			}
 			assessment := safety.AssessShellCommand(cmd)
 			mutation := safety.ClassifyShellCommand(cmd, shellAllowedRoots(ctx, st, rt), wdAbs)

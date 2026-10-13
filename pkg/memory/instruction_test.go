@@ -873,26 +873,34 @@ func TestProjectKeyEncodesTheWholeRoot(t *testing.T) {
 	}
 }
 
-// TestProjectKeyResolvesFromAnySubdirectory covers the everyday case: a session
-// started deep inside a repository belongs to the repository, not to the
-// directory it happened to launch from.
-func TestProjectKeyResolvesFromAnySubdirectory(t *testing.T) {
+// TestProjectKeyIsTheDirectoryItselfNotItsGitRoot covers the everyday case: a
+// session started deep inside a repository belongs to that directory as its own
+// project, never to an enclosing checkout found by walking up to .git (owner
+// 2026-10-11: a subdirectory is its own project, trust and memory included).
+// The old expectation (a nested directory resolving to the repository key) was
+// the git-ancestor identity the project model replaced.
+func TestProjectKeyIsTheDirectoryItselfNotItsGitRoot(t *testing.T) {
 	root := filepath.Join(realTempDir(t), "repo")
 	mkGitRepo(t, root)
 	nested := filepath.Join(root, "internal", "memories")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := ProjectKey(nested), ProjectKey(root); got != want {
-		t.Fatalf("ProjectKey(nested) = %q, want the repository key %q", got, want)
+	got := ProjectKey(nested)
+	if got == ProjectKey(root) {
+		t.Fatalf("ProjectKey(%q) collapsed onto the enclosing checkout's key %q", nested, got)
+	}
+	if want := strings.ReplaceAll(nested, string(filepath.Separator), "-"); got != want {
+		t.Fatalf("ProjectKey(nested) = %q, want the nested directory's own key %q", got, want)
 	}
 }
 
-// TestProjectKeyResolvesWorktreesToTheirMainCheckout covers linked worktrees.
-// Every worktree of a repository is the same project, so they must share one
-// memory folder; otherwise each new worktree starts with an empty memory and
-// pays for its own consolidation pass.
-func TestProjectKeyResolvesWorktreesToTheirMainCheckout(t *testing.T) {
+// TestProjectKeyTreatsAWorktreeAsItsOwnProject covers linked worktrees: each
+// worktree is its own project (owner 2026-10-11), so it keeps its own memory
+// folder rather than sharing the main checkout's. The old expectation (a
+// worktree resolving to the main checkout) was the same git-ancestor identity
+// removed with the subdirectory rule.
+func TestProjectKeyTreatsAWorktreeAsItsOwnProject(t *testing.T) {
 	base := realTempDir(t)
 	main := filepath.Join(base, "repo")
 	mkGitRepo(t, main)
@@ -907,8 +915,12 @@ func TestProjectKeyResolvesWorktreesToTheirMainCheckout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := ProjectKey(worktree), ProjectKey(main); got != want {
-		t.Fatalf("ProjectKey(worktree) = %q, want the main checkout key %q", got, want)
+	got := ProjectKey(worktree)
+	if got == ProjectKey(main) {
+		t.Fatalf("ProjectKey(worktree) collapsed onto the main checkout's key %q", got)
+	}
+	if want := strings.ReplaceAll(worktree, string(filepath.Separator), "-"); got != want {
+		t.Fatalf("ProjectKey(worktree) = %q, want the worktree's own key %q", got, want)
 	}
 }
 

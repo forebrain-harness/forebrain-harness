@@ -32,8 +32,10 @@ make build            # web UI + binary + dictionaries → build/bin/forebrain
 For day-to-day Go work, skip the UI rebuild:
 
 ```bash
+scripts/fetch-libtokenizers.sh              # the tokenizers static library the binary links
 CGO_ENABLED=1 go build -tags fts5 -o ./build/bin/forebrain ./cmd/forebrain
 scripts/install-dictionary.sh ./build/bin   # memory search reads dict/ beside the binary
+scripts/install-assets.sh ./build/bin       # models.json beside the binary
 ```
 
 Install the repository git hooks once per clone (commit title check and

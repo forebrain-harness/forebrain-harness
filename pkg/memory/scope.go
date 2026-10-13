@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
 // ScopeKind distinguishes the two kinds of memory a session can read or write:
@@ -226,6 +228,18 @@ func rolloutEvidenceID(threadID string) string {
 	return fmt.Sprintf("%x", digest[:16])
 }
 
+// ProjectRoot walks up from path to the nearest enclosing checkout (a
+// directory or worktree-style file named .git), returning path itself when
+// there is none.
+//
+// It is NOT a project identity. The runtime, the project registry and project
+// Key all key on the path's own root (state.ProjectKeyForRoot); this walk-up
+// survives only for the /migrate import matcher, which deliberately matches
+// more broadly — a historical Claude/Codex session recorded in a repo
+// subdirectory should still be found as belonging to the project rooted at the
+// checkout — and for the TUI's display of the enclosing repo, both of which are
+// being reworked (plans 028). Anything that needs "which project is this" must
+// use ProjectKey, not this.
 func ProjectRoot(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -285,30 +299,25 @@ func mainWorktreeRoot(dir string) string {
 	return filepath.Clean(main)
 }
 
-// ProjectKey is the identity of the project containing path: its absolute root
-// with every path separator turned into a dash, so
+// ProjectKey is the identity of the project at path: the path's own canonical
+// root with every path separator turned into a dash, so
 // /Users/ada/work/openclaw becomes -Users-ada-work-openclaw.
 //
+// It does NOT walk up to a .git ancestor: a subdirectory is its own project
+// (owner 2026-10-11), so a session started in a repo subdirectory keeps its own
+// project space rather than the whole checkout's. The transform lives in
+// state.ProjectKeyForRoot so the runtime, the project registry and the
+// migration all derive one identity by one rule.
+//
 // The whole root is encoded, which is what makes the key safe to use as a
-// directory name for per-project state: two checkouts that share a base name
+// directory name for per-project state: two projects that share a base name
 // ("api" under two different parents) get different keys instead of sharing one
 // folder. It is a pure function of the path — no registry, no allocation, no
 // collision handling — and an empty result means path has no project identity,
 // which callers must treat as "this feature does not apply", never as a bucket
 // of its own.
 func ProjectKey(path string) string {
-	root := ProjectRoot(path)
-	if root == "" {
-		return ""
-	}
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '/', '\\', ':':
-			return '-'
-		default:
-			return r
-		}
-	}, filepath.ToSlash(root))
+	return state.ProjectKeyForRoot(path)
 }
 
 // GitBranch reports the branch checked out at path.

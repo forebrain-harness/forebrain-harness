@@ -46,6 +46,71 @@
         <p class="text-[13px] text-[var(--forebrain-text-2)]">卡片主体内容，头部可选。</p>
       </CardComponent>
     </section>
+
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
+      <h2 class="text-[15px] font-medium">PageTopRow 页面首行</h2>
+      <PageTopRow title="技能" description="本主代理能使用的全部技能。">
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs">在线安装</button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs">刷新</button>
+        </template>
+      </PageTopRow>
+    </section>
+
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
+      <h2 class="text-[15px] font-medium">ForebrainModal 弹窗</h2>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalSmOpen = true">小弹窗 sm</button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalMdOpen = true">普通弹窗 md</button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalXlOpen = true">编辑器弹窗 xl</button>
+      </div>
+      <ForebrainModal :open="modalSmOpen" size="sm" title="小弹窗" @close="modalSmOpen = false">
+        <p class="text-[13px] text-[var(--forebrain-text-2)]">440px 宽，用于只有一个输入框的表单。</p>
+        <template #footer>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalSmOpen = false">取消</button>
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="modalSmOpen = false">创建</button>
+        </template>
+      </ForebrainModal>
+      <ForebrainModal :open="modalMdOpen" title="普通弹窗" @close="modalMdOpen = false">
+        <p class="text-[13px] text-[var(--forebrain-text-2)]">560px 宽，默认尺寸。</p>
+        <template #footer>
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="modalMdOpen = false">好</button>
+        </template>
+      </ForebrainModal>
+      <ForebrainModal :open="modalXlOpen" size="xl" title="编辑器弹窗" @close="modalXlOpen = false">
+        <p class="text-[13px] text-[var(--forebrain-text-2)]">860px 宽，用于文件编辑器。</p>
+        <template #footer>
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="modalXlOpen = false">保存</button>
+        </template>
+      </ForebrainModal>
+    </section>
+
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
+      <h2 class="text-[15px] font-medium">ConfirmDialog 确认框</h2>
+      <div class="flex flex-wrap gap-2">
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="confirmOpen = true">普通确认</button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" @click="typedOpen = true">危险确认（需输入）</button>
+      </div>
+      <ConfirmDialog
+        :open="confirmOpen"
+        title="删除主代理 docs？"
+        message="删除后不能恢复；工作区目录里的文件不会删除。"
+        confirm-label="删除"
+        danger
+        @confirm="confirmOpen = false"
+        @cancel="confirmOpen = false"
+      />
+      <ConfirmDialog
+        :open="typedOpen"
+        title="删除项目？"
+        message="删除项目会一起删除它的全部对话和定时任务；目录里的文件不会删除。"
+        confirm-label="删除"
+        danger
+        typed-confirm="forebrain-harness"
+        @confirm="typedOpen = false"
+        @cancel="typedOpen = false"
+      />
+    </section>
   </main>
 </template>
 
@@ -58,10 +123,18 @@
 import { ref } from 'vue'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import CardComponent from '@/components/common/CardComponent.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 
 const off = ref(false)
 const on = ref(true)
 const disabled = ref(true)
+const modalSmOpen = ref(false)
+const modalMdOpen = ref(false)
+const modalXlOpen = ref(false)
+const confirmOpen = ref(false)
+const typedOpen = ref(false)
 </script>

@@ -304,17 +304,25 @@ func TestConversationSummaryRequestStartsLikeTheConversation(t *testing.T) {
 	}
 	summary, summaryTools := model.requests[len(model.requests)-1], model.tools[len(model.tools)-1]
 
-	// Everything before the turn's input is the summary request's too.
-	prefix := len(turn) - 1
-	if len(summary) != prefix+1 {
-		t.Fatalf("summary request has %d messages, want the turn's %d before its input and the instruction", len(summary), prefix)
+	// Everything the turn's request carried, the summary request carries too:
+	// the same system prompt, injected context and history, byte for byte.
+	// The engine writes the turn's rows as each block ends, so by the time the
+	// summary runs the conversation already holds the answer the turn produced;
+	// the summary request therefore carries that answer after the turn's
+	// request, with the instruction where the conversation's next input would
+	// go.
+	if len(summary) != len(turn)+2 {
+		t.Fatalf("summary request has %d messages, want the turn's %d plus the turn's stored answer and the instruction", len(summary), len(turn))
 	}
-	for i := 0; i < prefix; i++ {
+	for i := 0; i < len(turn); i++ {
 		want, _ := json.Marshal(turn[i])
 		got, _ := json.Marshal(summary[i])
 		if string(want) != string(got) {
 			t.Fatalf("message %d differs:\nturn:    %s\nsummary: %s", i, want, got)
 		}
+	}
+	if answer := summary[len(turn)]; answer.Role != llm.RoleAssistant || answer.TextContent() != "summary of the conversation" {
+		t.Fatalf("summary request message %d = (%s, %q), want the turn's stored answer", len(turn), answer.Role, answer.TextContent())
 	}
 	if last := summary[len(summary)-1]; last.TextContent() != "summarize" {
 		t.Fatalf("the instruction must end the summary request, got %q", last.TextContent())
@@ -471,5 +479,94 @@ func TestRetractionDuringCompactionKeepsTheCheckpoint(t *testing.T) {
 	}
 	if delivered := q.TakeDelivered(); len(delivered) != 0 {
 		t.Fatalf("a retracted steer was rendered as sent: %#v", delivered)
+	}
+}
+
+// scaledEstimator counts 100 tokens per byte, so a test can move one fixed
+// history across a threshold by switching the estimator alone.
+type scaledEstimator struct{}
+
+func (scaledEstimator) Count(text string) int { return len(text) * 100 }
+func (scaledEstimator) Name() string          { return "scaled-100" }
+
+// The mid-turn checkpoint must count with the active call's own model's
+// estimator. The same rows must cross the threshold under that model and stay
+// under it with the default — which is the regression guard against this
+// checkpoint silently falling back to the global encoder.
+func TestShouldCompactMessagesUsesActiveModelEstimator(t *testing.T) {
+	llm.ResetObservedForTest()
+	const modelLimit = 180000
+	const provider, model = "test-provider", "model-x"
+	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("x", 3000)))}
+
+	if shouldCompactMessages(msgs, modelLimit, nil, -1, nil, provider, model) {
+		t.Fatal("default estimator compacted below the threshold")
+	}
+
+	restore := llm.SetEstimatorForTest(provider, model, scaledEstimator{})
+	should := shouldCompactMessages(msgs, modelLimit, nil, -1, nil, provider, model)
+	restore()
+	if !should {
+		t.Fatal("shouldCompactMessages did not use the active model's estimator")
+	}
+	if shouldCompactMessages(msgs, modelLimit, nil, -1, nil, provider, model) {
+		t.Fatal("restored estimator still compacted")
+	}
+}
+
+// observedUsageLLM accepts every request and reports input tokens as the
+// provider's own prompt count, the ground truth the overhead is learned from.
+type observedUsageLLM struct{ input int }
+
+func (m *observedUsageLLM) Execute(context.Context, []llm.Message, []*llm.Tool) (*llm.Result, error) {
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("ok")})
+	return &llm.Result{Message: &msg, Usage: &llm.Usage{InputTokens: m.input}}, nil
+}
+
+// The overhead the model observes (server-real minus local estimate) must be
+// measured against the SAME estimate the compaction decision counts with. If
+// the sent estimate were sized by the global encoder while the decision used
+// the session model's tokenizer, the learned overhead would be added to a base
+// it was never measured against.
+func TestObservedEstimateMatchesDecisionEstimator(t *testing.T) {
+	llm.ResetObservedForTest()
+	// This test records an observation; remove it so it cannot leak into others.
+	t.Cleanup(llm.ResetObservedForTest)
+
+	const provider, model = "test-provider", "observed"
+	const real = 500000
+	restore := llm.SetEstimatorForTest(provider, model, scaledEstimator{})
+	t.Cleanup(restore)
+
+	noteTool, err := llm.NewTool("note", "note tool", func(context.Context, *struct{}) (string, error) { return "", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := []*llm.Tool{noteTool}
+	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("y", 3000)))}
+
+	recoverable := WrapRecoverableLLM(&observedUsageLLM{input: real}, nil, &CompactChainDeps{
+		ActiveModel: func(context.Context) (string, string) { return provider, model },
+	})
+	if _, err := recoverable.Execute(context.Background(), msgs, tools); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, ok := llm.Get(provider, model)
+	if !ok {
+		t.Fatal("no observation recorded for the active model")
+	}
+	est := scaledEstimator{}
+	sent := llm.EstimateMessagesWith(est, msgs) + estimateToolsTokens(est, tools)
+	want := real - sent
+	if obs.Overhead != want {
+		t.Fatalf("Overhead=%d want %d (real %d - decision-estimator estimate %d)", obs.Overhead, want, real, sent)
+	}
+	// Guard the test itself: the global estimator must size the same request
+	// differently, or the assertion above proves nothing.
+	if global := llm.EstimateMessages(msgs) + estimateToolsTokens(llm.DefaultEstimator(), tools); global == sent {
+		t.Fatal("fixture: the model estimator must differ from the global one")
+	} else if obs.Overhead == real-global {
+		t.Fatal("Overhead was measured against the global estimator, not the decision estimator")
 	}
 }

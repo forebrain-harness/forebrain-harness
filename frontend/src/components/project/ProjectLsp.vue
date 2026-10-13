@@ -1,18 +1,13 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-5">
-    <CardComponent>
-      <template #header>
-        <div class="flex w-full flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.lspTitle') }}</div>
-          <ScopeBadge type="project" :label="t('scope.project')" />
-        </div>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ loading ? t('common.loading') : t('common.refresh') }}
-        </button>
-        </div>
-      </template>
-      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.lspDescription') }}</p>
+    <div class="space-y-3">
+      <PageTopRow :title="t('projects.lspTitle')" :description="t('projects.lspDescription')">
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+            {{ loading ? t('common.loading') : t('common.refresh') }}
+          </button>
+        </template>
+      </PageTopRow>
 
       <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
@@ -73,14 +68,13 @@
           </ul>
         </div>
       </template>
-    </CardComponent>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
-import CardComponent from '@/components/common/CardComponent.vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import { getErrorMessage, forebrainApi, type ProjectLspRecord, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 

@@ -21,7 +21,6 @@ type Hook struct {
 	Store               *state.SessionStore
 	RunRT               *state.RunStore
 	SkillHub            *skill.Hub
-	PinsProvider        func(sessionID string) []string
 	ReadStatesProvider  func() []tool.ReadState
 	ModeProvider        func(sessionID string) (mode string, phase string)
 	SnapshotWriter      func(sessionID string, snapshot AssemblyResult)
@@ -39,7 +38,7 @@ func (h *Hook) Hook() hook.AgentHook {
 	return h.run
 }
 
-func (h *Hook) Assemble(hc hook.HookContext, text string) (AssemblyResult, bool, error) {
+func (h *Hook) Assemble(ctx context.Context, hc hook.HookContext, text string) (AssemblyResult, bool, error) {
 	if h == nil {
 		return AssemblyResult{}, false, nil
 	}
@@ -65,10 +64,11 @@ func (h *Hook) Assemble(hc hook.HookContext, text string) (AssemblyResult, bool,
 			mode = strings.TrimSpace(m)
 		}
 	}
-	pins := []string(nil)
-	if h.PinsProvider != nil {
-		pins = h.PinsProvider(sid)
-	}
+	// The runner stamps the session project root on the turn's context; the
+	// git source reads it as "the current directory" instead of the process
+	// directory. Empty (assembly outside a turn) falls back to the process
+	// directory inside WorkingDir.
+	workingDir, _ := tool.WorkingDir(ctx)
 	req := AssemblyRequest{
 		SessionID:   sid,
 		RunID:       strings.TrimSpace(hc.RunID),
@@ -77,14 +77,13 @@ func (h *Hook) Assemble(hc hook.HookContext, text string) (AssemblyResult, bool,
 		AgentID:     hc.AgentID,
 		Mode:        mode,
 		Query:       query,
-		PinnedSet:   pins,
 		LimitTokens: 0,
 		MaxItems:    0,
 		Now:         time.Now().UTC(),
+		WorkingDir:  workingDir,
 	}
 	ApplyRetrievalPlan(&req)
 	engine := New()
-	engine.Register(WorkingSetSource{})
 	if h.ReadStatesProvider != nil {
 		engine.Register(RecentFilesSource{ReadStatesProvider: h.ReadStatesProvider})
 	}
@@ -161,7 +160,7 @@ func (h *Hook) run(ctx context.Context, phase string, hc hook.HookContext, text 
 	if h == nil || phase != "pre" {
 		return out, nil
 	}
-	res, ok, err := h.Assemble(hc, text)
+	res, ok, err := h.Assemble(ctx, hc, text)
 	if err != nil {
 		return out, err
 	}

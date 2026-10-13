@@ -24,11 +24,9 @@
         </button>
       </header>
 
-      <p v-if="createError" class="chat-drawer-error" role="alert">{{ createError }}</p>
-
-      <button type="button" class="chat-drawer-new" data-testid="drawer-new-chat" :disabled="creating" @click="newChat">
+      <button type="button" class="chat-drawer-new" data-testid="drawer-new-chat" @click="newChat">
         <Plus class="size-4" aria-hidden="true" />
-        {{ creating ? t('common.loading') : t('chatDrawer.newChat') }}
+        {{ t('chatDrawer.newChat') }}
       </button>
 
       <input
@@ -78,7 +76,6 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { Activity, Plus, X } from 'lucide-vue-next'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useHeartbeats } from '@/composables/useHeartbeats'
-import { getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 
 /**
@@ -96,16 +93,15 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'select', id: string): void
-  (e: 'created', id: string): void
+  /** A new conversation was asked for: the host opens the new-chat page. */
+  (e: 'new'): void
 }>()
 
 const { t } = useI18n()
-const { sessions, loading, error, createSession, fetchSessions } = useChatSessions()
+const { sessions, loading, error, fetchSessions } = useChatSessions()
 const { forSession: beatOf, refresh: refreshHeartbeats } = useHeartbeats()
 
 const query = ref('')
-const creating = ref(false)
-const createError = ref('')
 const drawerRef = ref<HTMLElement | null>(null)
 
 const filtered = computed(() => {
@@ -123,24 +119,16 @@ function heartbeatLabel(sessionId: string): string {
     : t('heartbeat.indicatorRunning', { minutes: Math.max(1, Math.round(beat.intervalSeconds / 60)) })
 }
 
-async function newChat() {
-  if (creating.value) return
-  creating.value = true
-  createError.value = ''
-  try {
-    const id = await createSession()
-    emit('created', id)
-    emit('close')
-  } catch (cause) {
-    createError.value = getErrorMessage(cause)
-  } finally {
-    creating.value = false
-  }
+function newChat() {
+  // A new chat opens the new-conversation page, where the project is chosen
+  // and the conversation is created on its first message (plan 029). The
+  // drawer no longer creates a project-less conversation.
+  emit('new')
+  emit('close')
 }
 
 watch(() => props.open, async (open) => {
   if (open) {
-    createError.value = ''
     // The drawer opens from any page — the list is the drawer's to load, not
     // something the chat page may or may not have fetched earlier (a fresh
     // load elsewhere, a tenant switch, a turn in another tab).

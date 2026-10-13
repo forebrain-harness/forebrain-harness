@@ -683,9 +683,9 @@ func buildSessionIDWithLatestFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{
-		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('s-old','main','old',1500,1000)`,
-		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('s-new','main','new',3000,2500)`,
-		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('s-empty','main','empty',4000,3500)`,
+		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s-old','main','old',1500,1000,'/repo/s-old')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s-new','main','new',3000,2500,'/repo/s-new')`,
+		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s-empty','main','empty',4000,3500,'/repo/s-empty')`,
 		`INSERT INTO fb_messages(session_id, run_id, role, content, created_at, source) VALUES('s-old','','user','old question',1500,'transcript')`,
 		`INSERT INTO fb_messages(session_id, run_id, role, content, created_at, source) VALUES('s-new','','user','new question',2900,'transcript')`,
 		`INSERT INTO fb_messages(session_id, run_id, role, content, created_at, source) VALUES('s-new','','user','taken back',3000,'transcript_withdrawn')`,
@@ -985,6 +985,102 @@ func TestSessionBirthNamesWhatTheSessionIsFor(t *testing.T) {
 	}
 	if got := sourceOf("plain"); got != "" {
 		t.Fatalf("an ordinary session born without a source = %q, want the default", got)
+	}
+}
+
+// TestSessionBornUnderTheConfiguredProject pins the TUI's launch binding:
+// once a surface registers its launch directory as a project and points the
+// store at it, every conversation the store creates is filed under that
+// project at birth.
+func TestSessionBornUnderTheConfiguredProject(t *testing.T) {
+	projects, sessions := newProjectStoreForTest(t, "main")
+	ctx := context.Background()
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "launch", Root: "/tmp/launch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.ConfigureProjectDefault(p.ID)
+
+	if err := sessions.Ensure(ctx, "talk", "talk"); err != nil {
+		t.Fatal(err)
+	}
+	var projectID sql.NullString
+	if err := sessions.db.QueryRowContext(ctx, `SELECT project_id FROM fb_sessions WHERE id='talk'`).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if !projectID.Valid || projectID.String != p.ID {
+		t.Fatalf("session project = %q valid=%v, want the configured project %q", projectID.String, projectID.Valid, p.ID)
+	}
+}
+
+// TestSessionChildInheritsParentProjectAndDirectory pins the birth rule for a
+// child conversation: with no project or directory of its own it takes both
+// from its parent, so a subagent's memories land in the project its
+// conversation belongs to rather than in the process default.
+func TestSessionChildInheritsParentProjectAndDirectory(t *testing.T) {
+	projects, sessions := newProjectStoreForTest(t, "main")
+	ctx := context.Background()
+	parent, err := projects.Create(ctx, CreateProjectInput{Name: "parent", Root: "/tmp/parent-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A process default that points somewhere else: the child must ignore it
+	// in favor of its parent.
+	other, err := projects.Create(ctx, CreateProjectInput{Name: "other", Root: "/tmp/other-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.ConfigureProjectDefault(other.ID)
+
+	if err := sessions.EnsureAt(ctx, "parent-talk", "parent-talk", SessionBirth{Cwd: "/tmp/parent-project", ProjectID: parent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.EnsureAt(ctx, "child", "child", SessionBirth{ParentSessionID: "parent-talk"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var projectID, cwd string
+	if err := sessions.db.QueryRowContext(ctx, `SELECT COALESCE(project_id,''), cwd FROM fb_sessions WHERE id='child'`).Scan(&projectID, &cwd); err != nil {
+		t.Fatal(err)
+	}
+	if projectID != parent.ID {
+		t.Fatalf("child project = %q, want the parent's project %q", projectID, parent.ID)
+	}
+	if cwd != "/tmp/parent-project" {
+		t.Fatalf("child cwd = %q, want the parent's directory %q", cwd, "/tmp/parent-project")
+	}
+}
+
+// TestSessionProjectIsFixedAtBirth pins that project_id is a birth fact like
+// the owning agent: re-ensuring the row does not move it, even after the
+// process default changed underneath.
+func TestSessionProjectIsFixedAtBirth(t *testing.T) {
+	projects, sessions := newProjectStoreForTest(t, "main")
+	ctx := context.Background()
+	born, err := projects.Create(ctx, CreateProjectInput{Name: "born", Root: "/tmp/born"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	later, err := projects.Create(ctx, CreateProjectInput{Name: "later", Root: "/tmp/later"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.ConfigureProjectDefault(born.ID)
+	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The default moves and the row is re-ensured; the birth project stays.
+	sessions.ConfigureProjectDefault(later.ID)
+	if err := sessions.Ensure(ctx, "s1", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	var projectID string
+	if err := sessions.db.QueryRowContext(ctx, `SELECT COALESCE(project_id,'') FROM fb_sessions WHERE id='s1'`).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if projectID != born.ID {
+		t.Fatalf("session project moved to %q, want it fixed at birth %q", projectID, born.ID)
 	}
 }
 

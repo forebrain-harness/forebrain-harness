@@ -134,12 +134,16 @@ func (s Service) AutoCompactSession(ctx context.Context, sessionID, _ string) (R
 	if err != nil {
 		return Result{}, false, err
 	}
-	ctx, run := s.beginCompaction(ctx, sid, "auto", llm.EstimateMessages(messages))
+	ctx, run := s.beginCompaction(ctx, sid, "auto", decision.Usage)
 	res, err := s.compactSession(ctx, sid, messages, "auto", decision.Reason, decision.PreviousModel)
 	if err != nil {
 		run.fail(err)
 		return Result{}, false, err
 	}
+	// The card reports the occupancy that triggered the compaction, the same
+	// number the gauge reads — not a fresh local estimate that would disagree
+	// with the decision the user is looking at.
+	res.TokensBefore = decision.Usage
 	return run.finish(res), true, nil
 }
 
@@ -214,11 +218,16 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 	if err != nil {
 		return autoCompactDecision{}, err
 	}
-	usage := state.TokenCountWithEstimation(turns)
+	// Resolve the model before measuring: the occupancy number the card
+	// reports and the threshold both come from this session's own model's
+	// tokenizer, not a process-wide default. The mid-turn checkpoint
+	// (shouldCompactMessages) resolves the same way, so the two agree.
 	provider, model := "", ""
 	if s.PrimaryModel != nil {
 		provider, model = s.PrimaryModel(ctx)
 	}
+	est := llm.EstimatorFor(provider, model)
+	usage := state.TokenCountWithEstimationFor(turns, est)
 	limits, _ := llm.Lookup(provider, model)
 	budget := state.CalculateTokenBudgetWithOptions(usage, model, limits, state.TokenBudgetOptions{ExplicitLimit: s.ExplicitLimit})
 	previousModel := lastAssistantModel(turns)
@@ -259,9 +268,9 @@ func (s Service) autoCompactDecision(ctx context.Context, sessionID string) (aut
 		if _, checkpoint, checkpointErr := s.Sessions.LatestCompactBoundary(ctx, sid); checkpointErr != nil {
 			return autoCompactDecision{}, checkpointErr
 		} else if len(checkpoint.ReplacementHistory) > 0 {
-			estimatedPrefill = llm.EstimateMessages(checkpoint.ReplacementHistory)
+			estimatedPrefill = llm.EstimateMessagesWith(est, checkpoint.ReplacementHistory)
 		}
-		thresholdUsage = state.BodyAfterPrefixTokenCount(turns, estimatedPrefill)
+		thresholdUsage = state.BodyAfterPrefixTokenCountFor(turns, estimatedPrefill, est)
 	}
 	return autoCompactDecision{Should: thresholdUsage >= threshold, Usage: usage, Reason: "model_context_window_pressure"}, nil
 }

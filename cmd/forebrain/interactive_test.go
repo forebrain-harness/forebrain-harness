@@ -295,6 +295,66 @@ func TestInteractiveAsksProjectLSPConsentAfterMCP(t *testing.T) {
 	}
 }
 
+// A launch inside the forebrain data directory (or below it) is refused before
+// any prompt: the data directory is not a project.
+func TestRunStreamingTerminalRefusesDataDirectoryLaunch(t *testing.T) {
+	stubInteractiveLaunch(t)
+	dataRoot, err := home.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(dataRoot, "workspace", "sub")
+	if err := os.MkdirAll(inside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	trusted := false
+	interactiveEnsureWorkspaceTrusted = func(io.Reader, io.Writer, string, string) (bool, error) {
+		trusted = true
+		return true, nil
+	}
+	t.Chdir(inside)
+
+	err = runStreamingTerminal(&cobra.Command{})
+	if err == nil || !strings.Contains(err.Error(), "数据目录") {
+		t.Fatalf("launch inside the data directory must be refused with the data-directory message, got %v", err)
+	}
+	if trusted {
+		t.Fatal("the trust prompt must not open for a refused launch")
+	}
+}
+
+// The launch directory is the project boundary: a TUI started in a checkout
+// subdirectory trusts (and later files conversations under) that
+// subdirectory, never the enclosing repository.
+func TestRunStreamingTerminalTrustsTheLaunchSubdirectory(t *testing.T) {
+	stubInteractiveLaunch(t)
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var gotTarget string
+	interactiveEnsureWorkspaceTrusted = func(_ io.Reader, _ io.Writer, _ string, cwd string) (bool, error) {
+		gotTarget = cwd
+		return true, nil
+	}
+	t.Chdir(sub)
+
+	if err := runStreamingTerminal(&cobra.Command{}); err != nil {
+		t.Fatalf("runStreamingTerminal: %v", err)
+	}
+	want := sub
+	if resolved, err := filepath.EvalSymlinks(sub); err == nil && strings.TrimSpace(resolved) != "" {
+		want = resolved
+	}
+	if gotTarget != want {
+		t.Fatalf("trust target = %q, want the launch subdirectory %q", gotTarget, want)
+	}
+}
+
 // The startup prompt asks entry by entry: y allows, anything else declines,
 // both texts verbatim, and the answers land in the consent store.
 func TestEnsureProjectLSPConsentPrompt(t *testing.T) {

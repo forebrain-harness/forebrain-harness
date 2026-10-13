@@ -1289,46 +1289,6 @@ func TestFormatUserInteractionResult_missingAnswerAndMalformedFallback(t *testin
 	}
 }
 
-func TestFormatToolStepResult_workingSetPinRendersReadableList(t *testing.T) {
-	t.Parallel()
-	payload := `{"count":3,"pins":["/repo/a.go","/repo/b.go","/repo/c.go"],"session_id":"cli-123"}`
-	got, trunc := FormatToolStepResult(StepEvent{
-		Kind:     StepKindToolCompleted,
-		ToolName: "working_set_pin",
-		Output:   map[string]any{"output": payload},
-	}, DefaultMaxFormattedBody)
-	if trunc {
-		t.Fatal("unexpected truncation")
-	}
-	for _, needle := range []string{
-		"Pinned 3 entries in the working set:",
-		"- `/repo/a.go`",
-		"- `/repo/b.go`",
-		"- `/repo/c.go`",
-	} {
-		if !strings.Contains(got, needle) {
-			t.Fatalf("expected body to contain %q, got %q", needle, got)
-		}
-	}
-	for _, needle := range []string{"output:", `"pins"`, `"session_id"`, "cli-123", `\\"`, "```json"} {
-		if strings.Contains(got, needle) {
-			t.Fatalf("body must not contain %q, got %q", needle, got)
-		}
-	}
-}
-
-func TestFormatToolStepResult_workingSetPinFallsBackOnBadPayload(t *testing.T) {
-	t.Parallel()
-	got, _ := FormatToolStepResult(StepEvent{
-		Kind:     StepKindToolCompleted,
-		ToolName: "working_set_pin",
-		Output:   map[string]any{"output": "not-json"},
-	}, DefaultMaxFormattedBody)
-	if !strings.Contains(got, "not-json") {
-		t.Fatalf("fallback should surface raw payload, got %q", got)
-	}
-}
-
 func TestEnrichToolMetaCarriesSubagentIdentityFromContext(t *testing.T) {
 	t.Parallel()
 	ctx := WithHookAgentID(
@@ -2469,6 +2429,87 @@ func assertPayloadLinesShareColumn(t *testing.T, body, marker string, wantLines 
 		if c != cols[0] {
 			t.Fatalf("marker %q not column-aligned: %v in:\n%q", marker, cols, body)
 		}
+	}
+}
+
+// TestDeniedToolStepReadsAsTheRefusalEverywhere checks that DeniedToolStep's
+// status, body, summary and event identity all agree with the display a
+// denial result persists (DeniedToolDisplayBody), and that its canonical
+// event id is distinct from the "awaiting approval" completion it answers —
+// otherwise the idempotent event log would drop the refusal as a duplicate.
+func TestDeniedToolStepReadsAsTheRefusalEverywhere(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		toolName string
+		feedback string
+		wantBody string
+	}{
+		{name: "exit with feedback", toolName: "exit_plan_mode", feedback: "split milestones", wantBody: "split milestones"},
+		{name: "exit without feedback", toolName: "exit_plan_mode", feedback: "", wantBody: "(no output)"},
+		{name: "request_permissions", toolName: "request_permissions", feedback: "", wantBody: "The user did not approve the requested permissions"},
+		{name: "shell", toolName: "shell", feedback: "no", wantBody: ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			evt := DeniedToolStep("call-1", tc.toolName, map[string]any{}, tc.feedback)
+			if got := BuildToolMeta(evt).Status; got != "denied" {
+				t.Fatalf("status = %q, want %q", got, "denied")
+			}
+			body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+			if body != tc.wantBody {
+				t.Fatalf("body = %q, want %q", body, tc.wantBody)
+			}
+			if summary := SummarizeToolStep(evt); summary != "" {
+				t.Fatalf("summary = %q, want empty", summary)
+			}
+			runEvt, ok := RunEventFromStep(context.Background(), "s1", "r1", "tui", evt)
+			if !ok {
+				t.Fatal("RunEventFromStep returned ok=false for a denied step")
+			}
+			wantID := "tool:r1:call-1:tool_call_completed:denied"
+			if runEvt.ID != wantID {
+				t.Fatalf("event id = %q, want %q", runEvt.ID, wantID)
+			}
+			var payload event.ToolCallCompletedPayload
+			if err := json.Unmarshal(runEvt.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.ToolMeta.Status != "denied" {
+				t.Fatalf("payload tool_meta.status = %q, want %q", payload.ToolMeta.Status, "denied")
+			}
+			if payload.DisplayBody != tc.wantBody {
+				t.Fatalf("payload display_body = %q, want %q", payload.DisplayBody, tc.wantBody)
+			}
+			if payload.Summary != "" {
+				t.Fatalf("payload summary = %q, want empty", payload.Summary)
+			}
+		})
+	}
+
+	// The "awaiting approval" completion frame for the same StepID gets a
+	// different event id than the denied completion that answers it.
+	awaiting := StepEvent{
+		Kind: StepKindToolCompleted, StepID: "call-1", ToolName: "exit_plan_mode",
+		ActionID: "act-1", ActionKind: "exit_plan_mode",
+		Output: map[string]any{"requires_action": true},
+	}
+	awaitingEvt, ok := RunEventFromStep(context.Background(), "s1", "r1", "tui", awaiting)
+	if !ok {
+		t.Fatal("RunEventFromStep returned ok=false for the awaiting-approval frame")
+	}
+	wantAwaitingID := "tool:r1:call-1:tool_call_completed"
+	if awaitingEvt.ID != wantAwaitingID {
+		t.Fatalf("awaiting-approval event id = %q, want %q", awaitingEvt.ID, wantAwaitingID)
+	}
+	deniedEvt, ok := RunEventFromStep(context.Background(), "s1", "r1", "tui", DeniedToolStep("call-1", "exit_plan_mode", map[string]any{}, "split milestones"))
+	if !ok {
+		t.Fatal("RunEventFromStep returned ok=false for the denied frame")
+	}
+	if deniedEvt.ID == awaitingEvt.ID {
+		t.Fatalf("denied event id %q collides with awaiting-approval event id", deniedEvt.ID)
 	}
 }
 

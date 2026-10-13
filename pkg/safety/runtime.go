@@ -272,10 +272,10 @@ type permissionSettingsFile struct {
 //   - projectSettings sits under the user's project next to .forebrain/skills, so
 //     the rules travel with the repository and apply to whoever works on it.
 //
-// Project rules are only honoured for a version-controlled, trusted project,
-// matching how project skills are gated. Without that check a hostile
-// repository could commit a permissions file that grants itself sandbox-bypass
-// on checkout. An untrusted or absent project simply has no project settings.
+// Project rules are only honoured for a trusted project, matching how project
+// skills are gated. Without that check a hostile repository could commit a
+// permissions file that grants itself sandbox-bypass on checkout. An untrusted
+// or absent project simply has no project settings.
 func destinationPath(dst PermissionDestination, paths Paths) (string, bool) {
 	switch dst {
 	case DestinationLocalSettings:
@@ -303,15 +303,17 @@ func destinationPath(dst PermissionDestination, paths Paths) (string, bool) {
 }
 
 // ProjectSettingsPath answers where a project's permission rules live for
-// paths, and whether that project may hold any (it must be trusted and under
-// version control) — the very answer LoadFromDisk and ApplyUpdate act on, for
-// a surface that manages one project's rules without running a session in it.
+// paths, and whether that project may hold any (it must be trusted) — the very
+// answer LoadFromDisk and ApplyUpdate act on, for a surface that manages one
+// project's rules without running a session in it.
 func ProjectSettingsPath(paths Paths) (string, bool) {
 	return destinationPath(DestinationProjectSettings, paths)
 }
 
 // TrustedRoot returns the launch project's root when the frozen context says
-// it is version controlled and trusted, and "" otherwise.
+// it is trusted, and "" otherwise. Version control is not part of the gate:
+// project MCP/LSP/skills load in any trusted project, with each entry's own
+// consent still required (R6).
 //
 // It is a pure function of a ProjectContext the caller already holds, on
 // purpose: the assembly points freeze the launch project for the whole
@@ -319,7 +321,7 @@ func ProjectSettingsPath(paths Paths) (string, bool) {
 // second source of truth — a trust decision changed mid-session would then
 // flip features that were already decided from it.
 func TrustedRoot(launch ProjectContext) string {
-	if !launch.Project.VersionControlled || !launch.IsTrusted() {
+	if !launch.IsTrusted() {
 		return ""
 	}
 	root := strings.TrimSpace(launch.Project.Root)
@@ -329,19 +331,18 @@ func TrustedRoot(launch ProjectContext) string {
 	return filepath.Clean(root)
 }
 
-// trustedProjectRoot returns the user's project directory when it is version
-// controlled and trusted, and "" otherwise. paths.ProjectRoot is always an
-// already-resolved project root — a launch project's root or a registered
-// project's — and is taken as the exact boundary: walking up from it again
-// would hand a project registered inside a larger checkout the checkout's
-// rules file and trust decision.
+// trustedProjectRoot returns the user's project directory when it is trusted,
+// and "" otherwise. paths.ProjectRoot is always an already-resolved project
+// root — a launch project's root or a registered project's — and is taken as
+// the exact boundary: walking up from it again would hand a project registered
+// inside a larger checkout the checkout's rules file and trust decision.
 func trustedProjectRoot(paths Paths) string {
 	dir := strings.TrimSpace(paths.ProjectRoot)
 	if dir == "" {
 		return ""
 	}
 	project, err := ResolveRegisteredProject(dir)
-	if err != nil || !project.VersionControlled {
+	if err != nil {
 		return ""
 	}
 	trusted, err := IsTrusted(strings.TrimSpace(paths.Home), project)
@@ -1233,14 +1234,6 @@ func filePathSuggestionDir(p string) string {
 		return ""
 	}
 	return clean[:idx]
-}
-
-func NormalizeRequestPermissionsResponse(response RequestPermissionsResponse) (RequestPermissionsResponse, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return RequestPermissionsResponse{}, fmt.Errorf("resolve permission cwd: %w", err)
-	}
-	return NormalizeRequestPermissionsResponseAtCWD(response, cwd)
 }
 
 func NormalizeRequestPermissionsResponseAtCWD(response RequestPermissionsResponse, cwd string) (RequestPermissionsResponse, error) {

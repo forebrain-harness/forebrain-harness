@@ -3,10 +3,7 @@
     <!-- Overview card -->
     <CardComponent>
       <template #header>
-        <div class="flex items-center gap-2">
-          <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.overviewTitle') }}</div>
-          <ScopeBadge type="project" :label="t('scope.project')" />
-        </div>
+        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.overviewTitle') }}</div>
       </template>
       <dl class="grid gap-x-6 gap-y-2 text-[13px] sm:grid-cols-2">
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldDescription') }}</dt><dd class="min-w-0 flex-1 break-words text-[var(--forebrain-text)]">{{ project?.description || '—' }}</dd></div>
@@ -14,7 +11,6 @@
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">ProjectKey</dt><dd class="min-w-0 flex-1 break-all font-mono text-[12px] text-[var(--forebrain-text)]">{{ project?.projectKey }}</dd></div>
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldUpdated') }}</dt><dd class="text-[var(--forebrain-text)]">{{ formatTime(project?.updatedAt) }}</dd></div>
         <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldCreated') }}</dt><dd class="text-[var(--forebrain-text)]">{{ formatTime(project?.createdAt) }}</dd></div>
-        <div class="flex gap-2"><dt class="text-[var(--forebrain-muted-text)]">{{ t('projects.fieldArchived') }}</dt><dd class="text-[var(--forebrain-text)]">{{ project?.archivedAt ? t('projects.archived') : t('projects.live') }}</dd></div>
       </dl>
     </CardComponent>
 
@@ -35,11 +31,6 @@
         <label class="block md:col-span-2">
           <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.descriptionPlaceholder') }}</span>
           <textarea v-model="draft.description" rows="2" class="forebrain-field mt-1 w-full" />
-        </label>
-        <label class="block md:col-span-2">
-          <span class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.instructionsLabel') }}</span>
-          <textarea v-model="draft.instructions" rows="5" class="forebrain-field mt-1 w-full" :placeholder="t('projects.instructionsPlaceholder')" />
-          <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('projects.instructionsHint') }}</span>
         </label>
       </div>
 
@@ -96,9 +87,6 @@
         <div class="text-[14px] font-medium text-[var(--forebrain-danger)]">{{ t('projects.dangerTitle') }}</div>
       </template>
       <div class="flex flex-wrap gap-2">
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="toggleArchive">
-          {{ project?.archivedAt ? t('projects.restore') : t('projects.archive') }}
-        </button>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" @click="removeProject">
           {{ t('common.delete') }}
         </button>
@@ -112,7 +100,6 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import CardComponent from '@/components/common/CardComponent.vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -126,7 +113,7 @@ const props = defineProps<{ project: ProjectRecord | null; projectId: string }>(
 const { t } = useI18n()
 const router = useRouter()
 
-const draft = reactive({ name: '', icon: '', description: '', instructions: '', memoryScope: 'shared', resourceAccess: false, pinned: false })
+const draft = reactive({ name: '', icon: '', description: '', memoryScope: 'shared', resourceAccess: false, pinned: false })
 const saving = ref(false)
 const formError = ref('')
 const formNotice = ref('')
@@ -137,7 +124,6 @@ watch(() => props.project, (project) => {
     name: project.name,
     icon: project.icon,
     description: project.description,
-    instructions: project.instructions,
     memoryScope: project.memoryScope || 'shared',
     resourceAccess: Boolean(project.resourceAccess),
     pinned: Boolean(project.pinned),
@@ -150,7 +136,6 @@ const changed = computed(() => {
   return draft.name !== p.name
     || draft.icon !== p.icon
     || draft.description !== p.description
-    || draft.instructions !== p.instructions
     || draft.memoryScope !== (p.memoryScope || 'shared')
     || draft.resourceAccess !== Boolean(p.resourceAccess)
     || draft.pinned !== Boolean(p.pinned)
@@ -171,7 +156,6 @@ async function save() {
       name: draft.name.trim(),
       icon: draft.icon.trim(),
       description: draft.description,
-      instructions: draft.instructions,
       memoryScope: draft.memoryScope,
       resourceAccess: draft.resourceAccess,
     })
@@ -186,15 +170,6 @@ async function save() {
   }
 }
 
-async function toggleArchive() {
-  formError.value = ''
-  try {
-    await forebrainApi.projectArchive(props.projectId, !props.project?.archivedAt)
-  } catch (cause) {
-    formError.value = getErrorMessage(cause)
-  }
-}
-
 async function removeProject() {
   if (!window.confirm(t('projects.deleteConfirm'))) return
   formError.value = ''
@@ -202,7 +177,13 @@ async function removeProject() {
     await forebrainApi.projectDelete(props.projectId)
     await router.push('/projects')
   } catch (cause) {
-    formError.value = getErrorMessage(cause)
+    formError.value = isProjectBusy(cause) ? t('projects.deleteBusy') : getErrorMessage(cause)
   }
+}
+
+/** A 409 from the delete is the project-busy refusal: a run is in flight. */
+function isProjectBusy(cause: unknown): boolean {
+  const response = (cause as { response?: { status?: number; data?: { error?: string } } }).response
+  return response?.status === 409 && response.data?.error === 'project_busy'
 }
 </script>

@@ -1169,3 +1169,104 @@ func TestShellNotifiesCodeIntel(t *testing.T) {
 		t.Fatalf("stub must stay untouched, calls=%d", stub.runShells)
 	}
 }
+
+// resolvedWorkingDir returns the symlink-resolved form so a comparison does not
+// depend on whether the platform reports a temp directory by its physical path.
+func resolvedWorkingDir(t *testing.T, p string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	return r
+}
+
+// TestShellToolRunsInSessionWorkingDir pins that the shell's working directory
+// is the session project root carried on the context, not the process
+// directory a gateway serves many projects from.
+func TestShellToolRunsInSessionWorkingDir(t *testing.T) {
+	home := t.TempDir()
+	projectDir := t.TempDir()
+	st := NewState(projectDir)
+	tl, err := NewShellTool(st, &AgentToolRuntime{
+		Home: home,
+		Cfg:  &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	ctx := WithProjectRoot(context.Background(), projectDir)
+	out, err := tl.Handle(ctx, `{"command":"pwd"}`)
+	if err != nil {
+		t.Fatalf("shell pwd: %v", err)
+	}
+	raw, _ := out.(string)
+	var parsed struct {
+		Stdout string `json:"stdout"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("decode shell output %q: %v", raw, err)
+	}
+	got := strings.TrimSpace(parsed.Stdout)
+	if got == "" {
+		t.Fatalf("empty pwd output: %q", raw)
+	}
+	if resolvedWorkingDir(t, got) != resolvedWorkingDir(t, projectDir) {
+		t.Fatalf("shell ran in %q, want the session working dir %q", got, projectDir)
+	}
+}
+
+// TestWriteFileRelativePathResolvesAgainstWorkingDir pins that a relative model
+// path lands under the session project root rather than the process directory.
+func TestWriteFileRelativePathResolvesAgainstWorkingDir(t *testing.T) {
+	projectDir := t.TempDir()
+	st := NewState(projectDir)
+	st.SetPrimaryWorkspaceBoundary("", projectDir, nil)
+	tl, err := NewFileWriteTool(st, nil)
+	if err != nil {
+		t.Fatalf("NewFileWriteTool: %v", err)
+	}
+	ctx := WithProjectRoot(context.Background(), projectDir)
+	if _, err := tl.Handle(ctx, `{"file_path":"x.txt","content":"hello"}`); err != nil {
+		t.Fatalf("write_file relative: %v", err)
+	}
+	target := filepath.Join(projectDir, "x.txt")
+	body, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("expected relative write at %s: %v", target, err)
+	}
+	if string(body) != "hello" {
+		t.Fatalf("content=%q want hello", body)
+	}
+}
+
+// TestPathGrantedMatchesRelativeGrantAgainstWorkingDir pins that a relative
+// grant path is matched against the cwd the caller passes (the session working
+// directory), not the process directory.
+func TestPathGrantedMatchesRelativeGrantAgainstWorkingDir(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store := safety.NewStore()
+	safety.ApplyUpdate(store, safety.PermissionUpdate{
+		Type: safety.UpdateAddPermissionGrants, Destination: safety.DestinationSession, SessionID: "s",
+		FileSystemGrants: []safety.FileSystemPermissionGrant{{
+			Entry: safety.FileSystemPermissionEntry{
+				Path:   safety.FileSystemPermissionPath{Path: "notes"},
+				Access: safety.FileSystemAccessWrite,
+			},
+			Scope: safety.GrantScopeSession,
+		}},
+	})
+	st := NewState(projectDir)
+	st.SetRuntimeValue("permission_snapshot_for_session", store.SnapshotForSession)
+
+	target := filepath.Join(projectDir, "notes", "a.txt")
+	if !st.PathGranted(target, safety.FileSystemAccessWrite, "s", "", projectDir) {
+		t.Fatalf("relative grant must match a path under the working dir")
+	}
+	if st.PathGranted(target, safety.FileSystemAccessWrite, "s", "", t.TempDir()) {
+		t.Fatalf("relative grant must not match a path under a different dir")
+	}
+}

@@ -22,7 +22,6 @@ type HookParams struct {
 	// takes the session id because a shared runner may serve sessions on
 	// different models.
 	PrimaryModel       func(sessionID string) (string, string)
-	PinsProvider       func(string) []string
 	ReadStatesProvider func() []tool.ReadState
 	SnapshotWriter     func(string, AssemblyResult)
 }
@@ -42,7 +41,6 @@ func NewRuntimeHook(params HookParams) *Hook {
 		}
 	}
 	hook.ModeProvider = StoredModeProvider(modeStateRoot(hook.Home, hook.WorkspaceRoot))
-	hook.PinsProvider = params.PinsProvider
 	hook.ReadStatesProvider = params.ReadStatesProvider
 	hook.SnapshotWriter = params.SnapshotWriter
 	return hook

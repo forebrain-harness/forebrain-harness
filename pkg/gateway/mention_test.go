@@ -43,12 +43,40 @@ func newMentionWorkspace(t *testing.T) (home string, workspace string) {
 	return home, workspace
 }
 
+// scopedMentionServer builds a server whose file view resolves to the
+// workspace: a project bound to it and one conversation filed under that
+// project. Every mention and web-turn request reaches the workspace through
+// this session, exactly as the workbench does, so the file view is the
+// conversation's — never the agent's workspace by default.
+func scopedMentionServer(t *testing.T, home, workspace string) (*Server, string) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "workspace", Root: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := state.NewSessionStore(db, "main")
+	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s1", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	return &Server{Home: home, Sessions: sessions, Projects: projects}, "s1"
+}
+
 func TestHandleMentionSearchReturnsWorkspaceCandidates(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 
 	rec := httptest.NewRecorder()
-	s.handleMentionSearch(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/mentions?q=note", nil))
+	s.handleMentionSearch(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/mentions?session_id="+sid+"&q=note", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -80,11 +108,11 @@ func TestHandleMentionSearchReturnsWorkspaceCandidates(t *testing.T) {
 // The web picker is workspace-scoped: a traversal query must not list files
 // the browser has no business seeing.
 func TestHandleMentionSearchRejectsEscapes(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 
 	rec := httptest.NewRecorder()
-	s.handleMentionSearch(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/mentions?q=../", nil))
+	s.handleMentionSearch(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/mentions?session_id="+sid+"&q=../", nil))
 
 	var body struct {
 		Records []struct {
@@ -118,10 +146,10 @@ func acceptMention(t *testing.T, s *Server, payload string) (*httptest.ResponseR
 // The web composer holds no semantics of its own: accepting a file yields the
 // same bare path the terminal composer produces.
 func TestHandleMentionAcceptResolvesFileToBarePath(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 
-	rec, body := acceptMention(t, s, `{"draft":"read @main","token_start":5,"token_end":10,"path":"main.go"}`)
+	rec, body := acceptMention(t, s, `{"session_id":"`+sid+`","draft":"read @main","token_start":5,"token_end":10,"path":"main.go"}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
@@ -138,10 +166,10 @@ func TestHandleMentionAcceptResolvesFileToBarePath(t *testing.T) {
 }
 
 func TestHandleMentionAcceptKeepsDirectoryTokenOpen(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 
-	_, body := acceptMention(t, s, `{"draft":"@doc","token_start":0,"token_end":4,"path":"docs","is_dir":true}`)
+	_, body := acceptMention(t, s, `{"session_id":"`+sid+`","draft":"@doc","token_start":0,"token_end":4,"path":"docs","is_dir":true}`)
 
 	if body.Draft != "@docs/" || !body.KeepOpen {
 		t.Fatalf("dir accept = %#v", body)
@@ -151,11 +179,11 @@ func TestHandleMentionAcceptKeepsDirectoryTokenOpen(t *testing.T) {
 // An accepted image drops out of the text and comes back as a
 // workspace-relative path, which the turn re-resolves before attaching.
 func TestHandleMentionAcceptAttachesImageAsRelativePath(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 
 	_, body := acceptMention(t, s,
-		`{"draft":"see @docs/shot.png","token_start":4,"token_end":18,"path":"docs/shot.png"}`)
+		`{"session_id":"`+sid+`","draft":"see @docs/shot.png","token_start":4,"token_end":18,"path":"docs/shot.png"}`)
 
 	if body.ImagePath != "docs/shot.png" {
 		t.Fatalf("image path = %q, want a workspace-relative path", body.ImagePath)
@@ -166,10 +194,10 @@ func TestHandleMentionAcceptAttachesImageAsRelativePath(t *testing.T) {
 }
 
 func TestHandleMentionAcceptRejectsEscape(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 
-	rec, _ := acceptMention(t, s, `{"draft":"@x","token_start":0,"token_end":2,"path":"../secret.png"}`)
+	rec, _ := acceptMention(t, s, `{"session_id":"`+sid+`","draft":"@x","token_start":0,"token_end":2,"path":"../secret.png"}`)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
@@ -180,11 +208,11 @@ func TestHandleMentionAcceptRejectsEscape(t *testing.T) {
 // rather than trusting the picker's earlier answer, and a path it cannot
 // show the model fails the message instead of being dropped from it.
 func TestWebTurnInputValidatesClientImagePaths(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
 	ctx := context.Background()
 
-	in, err := s.prepareWebTurnInput(ctx, "compare", nil, []string{"docs/shot.png", "docs/shot.png"})
+	in, err := s.prepareWebTurnInput(ctx, sid, "compare", nil, []string{"docs/shot.png", "docs/shot.png"})
 	if err != nil {
 		t.Fatalf("prepareWebTurnInput: %v", err)
 	}
@@ -192,7 +220,7 @@ func TestWebTurnInputValidatesClientImagePaths(t *testing.T) {
 		t.Fatalf("an image picked twice is attached once: %+v", refs)
 	}
 	for _, bad := range []string{"../secret.png", "docs/note.txt", "docs/missing.png"} {
-		if _, err := s.prepareWebTurnInput(ctx, "compare", nil, []string{"docs/shot.png", bad}); err == nil {
+		if _, err := s.prepareWebTurnInput(ctx, sid, "compare", nil, []string{"docs/shot.png", bad}); err == nil {
 			t.Errorf("%s was accepted", bad)
 		}
 	}
@@ -215,6 +243,15 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
 		t.Fatal(err)
 	}
+	// The conversation's file view is its project's root, so it is filed there.
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "workspace", Root: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s1", project.ID); err != nil {
+		t.Fatal(err)
+	}
 	report, err := files.CreateFromReader(ctx, "s1", "report.pdf", strings.NewReader("%PDF-1.4"), 8, "application/pdf")
 	if err != nil {
 		t.Fatal(err)
@@ -223,9 +260,9 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{Home: home, Files: files, Sessions: sessions}
+	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects}
 
-	in, err := s.prepareWebTurnInput(ctx, "look at these", []string{report.ID, photo.ID}, []string{"docs/shot.png"})
+	in, err := s.prepareWebTurnInput(ctx, "s1", "look at these", []string{report.ID, photo.ID}, []string{"docs/shot.png"})
 	if err != nil {
 		t.Fatalf("prepareWebTurnInput: %v", err)
 	}
@@ -275,9 +312,9 @@ func TestWebTurnInputIsTheMessageItStores(t *testing.T) {
 // A message that attaches only an image reads the way the terminal shows one:
 // the image's marker is its text, sent to the model and shown on the row.
 func TestWebTurnInputWithNothingTyped(t *testing.T) {
-	home, _ := newMentionWorkspace(t)
-	s := &Server{Home: home}
-	in, err := s.prepareWebTurnInput(context.Background(), "", nil, []string{"docs/shot.png"})
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
+	in, err := s.prepareWebTurnInput(context.Background(), sid, "", nil, []string{"docs/shot.png"})
 	if err != nil {
 		t.Fatalf("prepareWebTurnInput: %v", err)
 	}

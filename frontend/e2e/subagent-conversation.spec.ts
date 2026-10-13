@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 
-import { signIn, shot } from './support'
+import { seedSessionInRoot, signIn, shot } from './support'
 
 /**
  * A subagent's own view, proven on the real page: the composer there talks to
@@ -56,7 +56,8 @@ test('a subagent view talks to its own subagent', async ({ page }) => {
   test.info().setTimeout(240_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
   await signIn(page)
-  await page.goto('/', { waitUntil: 'networkidle' })
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('textarea')
   await page.fill('textarea', 'delegate the probe [[e2e:subagent-net]]')
   await page.press('textarea', 'Enter')
@@ -116,7 +117,8 @@ test('a subagent that lost the network is continued from its own view', async ({
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
   await signIn(page)
   setProxyPolicy('pass')
-  await page.goto('/', { waitUntil: 'networkidle' })
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('textarea')
 
   // The main agent dispatches a general-purpose subagent and waits for it; the
@@ -170,9 +172,7 @@ test('a plan-reviewer view opens with its own review model and budget', async ({
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-subagent')
   const now = Math.floor(Date.now() / 1000)
   sqlite(`
     INSERT INTO fb_runs (id, session_id, input_text, status, created_at, updated_at)

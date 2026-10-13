@@ -80,6 +80,7 @@ var commands = []Command{
 	{Name: "rename", Description: "rename the current thread", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "<title>", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "new", Description: "start a new chat during a conversation", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "resume", Description: "resume a saved chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
+	{Name: "rewind", Description: "restore code and/or the conversation to before a message", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "fork", Description: "fork the current chat", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "init", Description: "analyze the repo and create/refresh FOREBRAIN.md guidance", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "compact", Description: "summarize conversation to prevent hitting the context limit", AllowedSurfaces: []Surface{SurfaceWebChat, SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewActs},
@@ -105,6 +106,9 @@ var runDisallowedCommands = map[string]bool{
 	"fork":     true,
 	"exit":     true,
 	"memories": true,
+	// A rewind moves files and transcript rows aside, and must not race a
+	// running turn whose writes and messages are still moving.
+	"rewind": true,
 	// Compaction replaces the active model history and must not race an
 	// in-flight turn that is still appending to that same history.
 	"compact": true,
@@ -227,7 +231,7 @@ func normalizeCommand(cmd Command) Command {
 
 func defaultCategory(name string) string {
 	switch name {
-	case "new", "resume", "fork", "rename", "migrate", "exit":
+	case "new", "resume", "fork", "rename", "migrate", "exit", "rewind":
 		return "session"
 	case "compact", "memories":
 		return "context"

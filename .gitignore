@@ -9,6 +9,10 @@ skills-lock.json
 !.forebrain/skills/
 .env
 build
+# The tokenizers static library is fetched, not committed:
+# scripts/fetch-libtokenizers.sh places it at third_party/libtokenizers/<goos>_<goarch>/
+# (fixed version + sha256). See pkg/llm/hftok.
+third_party/libtokenizers/
 .idea
 .cursor
 .DS_Store
