@@ -1883,7 +1883,7 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 	})
 }
 
-func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, goalObjective string, skillName string, skillPath string, callerRendersReturnedError bool, out io.Writer) (retErr error) {
+func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, callerRendersReturnedError bool, out io.Writer) (retErr error) {
 	s.dispatchTurnMu.Lock()
 	defer s.dispatchTurnMu.Unlock()
 	foreground := foregroundTurnFrom(ctx)
@@ -2070,6 +2070,7 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		GoalObjective: strings.TrimSpace(goalObjective),
 		SkillName:     skillName,
 		SkillPath:     skillPath,
+		Skills:        skills,
 	}, nil)
 	res := outcome.Result
 	runIDOut = outcome.RunID

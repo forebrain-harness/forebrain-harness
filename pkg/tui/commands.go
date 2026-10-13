@@ -2479,6 +2479,16 @@ type SlashOverlay struct {
 	// so the list drops the commands hidden there (D4). It is copied from the
 	// composer when the overlay opens.
 	SubagentView bool
+
+	// Inline is true when the picker was opened on a "/" token that is not the
+	// start of the message. Only skills can be referenced there — a built-in
+	// command means something only at the start — so the list is narrowed to
+	// skills and, on accept, only the token is replaced, not the whole draft.
+	Inline bool
+
+	// TokenStart is the rune offset of the "/" the inline picker is editing.
+	// Unused when Inline is false (the leading command replaces the draft).
+	TokenStart int
 }
 
 // newSlashOverlay returns a fresh overlay seeded with the full visible
@@ -2510,6 +2520,17 @@ func (o *SlashOverlay) rebuildFiltered(session Session) {
 	// prefix and substring matches, the built-in commands and the skills as
 	// two groups with the best match's group first.
 	o.Visible = turn.FilterWithOptions(turn.SurfaceTUI, o.FilterText, opts)
+	if o.Inline {
+		// A mid-sentence "/" only ever names a skill, so the built-in
+		// commands are not offered there.
+		narrowed := make([]turn.Command, 0, len(o.Visible))
+		for _, cmd := range o.Visible {
+			if cmd.Category == turn.SkillCategory {
+				narrowed = append(narrowed, cmd)
+			}
+		}
+		o.Visible = narrowed
+	}
 	// Reset the cursor to the first matching command so the selection
 	// highlight is always on the first option after a filter change. Without
 	// this the cursor stays at its old index and is merely clamped, leaving
@@ -2565,70 +2586,102 @@ func (o *SlashOverlay) lookupExactOrSinglePrefix(name string) *turn.Command {
 }
 
 // UpdateFromDraft transitions the overlay state in response to a new
-// composer.DraftText value. The contract mirrors the design's
-// updateOverlayFromDraft pseudocode (post-review v3):
+// composer.DraftText value at the given cursor. Two modes:
 //
-//   - non-"/" prefix => caller clears the overlay (returns false).
-//   - "/foo" (no space) => Active=true, filter narrows Visible.
-//   - "/foo " (with space) => try to lock the command via lookupExactOrSinglePrefix.
-//     Lock on hit: Active=false, HintCommand=match.
-//     Miss/ambiguous: stay Active, footer shows "no match".
+//   - A leading "/" (the whole composer is a slash command) keeps the original
+//     contract: "/foo" (no space) narrows Visible; "/foo " (with space) tries
+//     to lock the command via lookupExactOrSinglePrefix — Active=false with
+//     HintCommand on a hit, still Active with a "no match" footer otherwise.
+//   - A "/" anywhere else (Inline) is a skill reference: the token under the
+//     cursor is recomputed and Visible narrows to skills only.
 //
 // Returns true if the overlay should remain on ComposerState; false when the
 // caller should set composer.SlashOverlay = nil.
-func (o *SlashOverlay) UpdateFromDraft(draft string, session Session) bool {
+func (o *SlashOverlay) UpdateFromDraft(draft string, cursor int, session Session) bool {
 	if o == nil {
 		return false
 	}
 	// Read the buffer as the composer draws it, so the leading newlines the
 	// card hides cannot make this disagree with the screen.
-	draft = composerDisplayText(draft)
-	if !strings.HasPrefix(draft, "/") {
-		return false
-	}
-	spaceIdx := strings.IndexByte(draft, ' ')
-	if spaceIdx == -1 {
-		// "/foo" — filtering mode.
+	if display := composerDisplayText(draft); strings.HasPrefix(display, "/") {
+		o.Inline = false
+		o.TokenStart = 0
+		spaceIdx := strings.IndexByte(display, ' ')
+		if spaceIdx == -1 {
+			// "/foo" — filtering mode.
+			o.Active = true
+			o.HintCommand = nil
+			o.FilterText = strings.ToLower(display[1:])
+			o.rebuildFiltered(session)
+			return true
+		}
+		// "/foo " or "/foo bar" — try to lock the command.
+		cmdName := strings.ToLower(display[1:spaceIdx])
+		// Visible may have been narrowed to a stale filter (or never populated
+		// when UpdateFromDraft is called on a fresh overlay). Rebuild against the
+		// full registry before locking so exact-name resolution always works.
+		o.FilterText = ""
+		o.rebuildFiltered(session)
+		if cmd := o.lookupExactOrSinglePrefix(cmdName); cmd != nil {
+			o.Active = false
+			o.HintCommand = cmd
+			o.FilterText = cmdName
+			return true
+		}
+		// No exact or single-prefix match — keep picker open with footer "no match".
 		o.Active = true
 		o.HintCommand = nil
-		o.FilterText = strings.ToLower(draft[1:])
+		o.FilterText = cmdName
 		o.rebuildFiltered(session)
 		return true
 	}
-	// "/foo " or "/foo bar" — try to lock the command.
-	cmdName := strings.ToLower(draft[1:spaceIdx])
-	// Visible may have been narrowed to a stale filter (or never populated
-	// when UpdateFromDraft is called on a fresh overlay). Rebuild against the
-	// full registry before locking so exact-name resolution always works.
-	o.FilterText = ""
-	o.rebuildFiltered(session)
-	if cmd := o.lookupExactOrSinglePrefix(cmdName); cmd != nil {
-		o.Active = false
-		o.HintCommand = cmd
-		o.FilterText = cmdName
-		return true
+	start, query, _, ok := turn.SlashTokenAtCursor(draft, cursor)
+	if !ok {
+		return false
 	}
-	// No exact or single-prefix match — keep picker open with footer "no match".
+	o.Inline = true
+	o.TokenStart = start
 	o.Active = true
 	o.HintCommand = nil
-	o.FilterText = cmdName
+	o.FilterText = strings.ToLower(query)
 	o.rebuildFiltered(session)
 	return true
 }
 
 // AcceptSlashSelection completes the currently selected slash command,
-// replacing DraftText with "/<command> " (trailing space so UpdateFromDraft
-// locks HintCommand and shows the argument hint). Returns the new draft and
-// true on success; ("", false) when nothing is selected.
-func (c *ComposerState) AcceptSlashSelection() (string, bool) {
+// returning the new draft and the cursor offset just past what was inserted.
+//
+// A leading command replaces the whole draft with "/<command> " (trailing space
+// so UpdateFromDraft locks HintCommand and shows the argument hint). An inline
+// skill reference replaces only its token [TokenStart, Cursor), leaving the rest
+// of the message intact. ok is false when nothing is selected.
+func (c *ComposerState) AcceptSlashSelection() (draft string, cursor int, ok bool) {
 	if c == nil || c.SlashOverlay == nil || !c.SlashOverlay.Active || len(c.SlashOverlay.Visible) == 0 {
-		return "", false
+		return "", 0, false
 	}
-	idx := c.SlashOverlay.SelectedIdx
-	if idx < 0 || idx >= len(c.SlashOverlay.Visible) {
+	o := c.SlashOverlay
+	idx := o.SelectedIdx
+	if idx < 0 || idx >= len(o.Visible) {
 		idx = 0
 	}
-	return "/" + c.SlashOverlay.Visible[idx].Name + " ", true
+	insert := "/" + o.Visible[idx].Name + " "
+	if !o.Inline {
+		return insert, len([]rune(insert)), true
+	}
+	runes := []rune(c.DraftText)
+	start := o.TokenStart
+	if start < 0 {
+		start = 0
+	}
+	if start > len(runes) {
+		start = len(runes)
+	}
+	end := c.Cursor
+	if end < start || end > len(runes) {
+		end = len(runes)
+	}
+	rebuilt := string(runes[:start]) + insert + string(runes[end:])
+	return rebuilt, start + len([]rune(insert)), true
 }
 
 // showArgumentHint reports whether the dim ArgumentHint should be rendered
@@ -2687,15 +2740,20 @@ type MentionOverlay struct {
 }
 
 func (c *ComposerState) updateMentionOverlay(draft string) {
-	if c.SlashOverlay != nil {
+	// A "@" token under the cursor is a file mention and wins over the command
+	// picker: "see /x @pk" (or "/plan see @pk") must open the file picker, not
+	// be swallowed by an open slash overlay.
+	start, query, hasMention := turn.TokenAtCursor(draft, c.Cursor)
+	if hasMention {
+		c.SlashOverlay = nil
+	} else if c.SlashOverlay != nil {
 		c.MentionOverlay = nil
 		return
 	}
 	if c.MentionDismissedDraft != "" && draft != c.MentionDismissedDraft {
 		c.MentionDismissedDraft = ""
 	}
-	start, query, ok := turn.TokenAtCursor(draft, c.Cursor)
-	if !ok || c.MentionDismissedDraft == draft {
+	if !hasMention || c.MentionDismissedDraft == draft {
 		c.MentionOverlay = nil
 		return
 	}

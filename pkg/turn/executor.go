@@ -18,7 +18,27 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
+// Execute resolves a message against the slash-command registry and reports the
+// skills it activates by name.
+//
+// A message that starts with "/" is the whole slash surface: a built-in command
+// or a skill's own command. Anywhere else a "/name" is a skill reference only —
+// built-in commands mean something only at the start — so those are collected
+// into Skills and the message runs as ordinary text with its "/name" left in
+// it. Both surfaces read the list off this one result, so a slash-command turn
+// and a plain message with a mid-sentence skill resolve identically.
 func Execute(ctx Context, content string) Result {
+	res := executeSlash(ctx, content)
+	refs := SkillReferences(content)
+	if res.SkillName != "" && res.SkillPath != "" {
+		res.Skills = append([]SkillSelection{{Name: res.SkillName, Path: res.SkillPath}}, refs...)
+	} else {
+		res.Skills = refs
+	}
+	return res
+}
+
+func executeSlash(ctx Context, content string) Result {
 	line := strings.TrimSpace(content)
 	if !strings.HasPrefix(line, "/") {
 		return Result{}

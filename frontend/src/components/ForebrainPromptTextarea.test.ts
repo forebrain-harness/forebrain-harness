@@ -171,6 +171,53 @@ describe('ForebrainPromptTextarea', () => {
     expect(empty.composer.emitted('edit-last-queued')).toBeUndefined()
   })
 
+  // A "/" that is not the start of the message lists only skills, and an accept
+  // replaces just the token — the rest of the message survives.
+  it('lists only skills mid-message and replaces just the token', async () => {
+    const record = (name: string, category: string, supportsInlineArgs: boolean): SlashCommandRecord => ({
+      canonicalName: name, name, description: `${name} does its thing`, category,
+      argumentHint: '', actionKind: 'local', allowedModes: [], supportsInlineArgs,
+      availableDuringRun: true, availableInSideConversation: true, visibility: 'public',
+    } as SlashCommandRecord)
+    const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
+      records: [record('plan', 'mode', true), record('model-tuning', 'skill', true)],
+    } as Awaited<ReturnType<typeof forebrainApi.slashCommands>>)
+    try {
+      const { composer, context } = mountComposer()
+      const textarea = composer.find('textarea')
+      ;(textarea.element as HTMLTextAreaElement).value = '看下 /m'
+      ;(textarea.element as HTMLTextAreaElement).setSelectionRange(5, 5)
+      await textarea.trigger('input')
+      await vi.waitFor(() => expect(composer.findAll('[role="menuitem"]')).toHaveLength(1))
+      // The built-in command is filtered out; only the skill remains.
+      expect(composer.findAll('[role="menuitem"]').map((item) => item.find('.font-medium').text())).toEqual([
+        '/model-tuning',
+      ])
+      await textarea.trigger('keydown', { key: 'Enter' })
+      await nextTick()
+      expect(context().textInput.value).toBe('看下 /model-tuning ')
+    } finally {
+      list.mockRestore()
+    }
+  })
+
+  // A mid-word "@" (foo@bar) is not a mention: neither picker opens.
+  it('ignores a mid-word @', async () => {
+    const search = vi.spyOn(forebrainApi, 'mentionSearch').mockResolvedValue({ query: '', records: [] })
+    try {
+      const { composer } = mountComposer()
+      const textarea = composer.find('textarea')
+      ;(textarea.element as HTMLTextAreaElement).value = 'foo@bar'
+      ;(textarea.element as HTMLTextAreaElement).setSelectionRange(7, 7)
+      await textarea.trigger('input')
+      await nextTick()
+      expect(composer.findAll('[role="menu"]')).toHaveLength(0)
+      expect(search).not.toHaveBeenCalled()
+    } finally {
+      search.mockRestore()
+    }
+  })
+
   // The @ picker resolves against the conversation's file view, so its scope
   // rides every candidate request: the composer is told which project or
   // session it belongs to and passes it straight through.

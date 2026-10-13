@@ -48,6 +48,11 @@ type TurnRequest struct {
 	GoalObjective string            `json:"goal_objective,omitempty"`
 	SkillName     string            `json:"skill_name,omitempty"`
 	SkillPath     string            `json:"skill_path,omitempty"`
+	// Skills is every skill this turn activates by name, the leading command
+	// first (see Result.Skills). The run executor applies the whole list in
+	// one place, so a surface only copies it across; empty keeps the single
+	// SkillName/SkillPath behavior.
+	Skills []SkillSelection `json:"skills,omitempty"`
 	// Trigger names what caused this turn, and reaches hooks as
 	// HookContext.Trigger. It cannot be derived from ExistingRunID: the
 	// gateway supervises an existing run for an ordinary "user" turn, while
@@ -475,6 +480,12 @@ type Result struct {
 	// before the first LLM request — and surfaces never read skill files.
 	SkillName string
 	SkillPath string
+	// Skills is every skill this turn activates by name: the leading skill
+	// command when the line is one, then every mid-sentence "/name" reference
+	// (see SkillReferences). The leading entry duplicates SkillName/SkillPath
+	// for callers that only need the whole list; the message text itself is
+	// sent unchanged, its "/name" tokens left in place.
+	Skills []SkillSelection
 
 	// GoalObjective, when non-empty, tells the surface to run this turn in
 	// goal-continuation mode (see run.Options.GoalObjective). Set only
@@ -490,15 +501,19 @@ type Result struct {
 type SlashOutcome = Result
 
 type TurnSubmission struct {
-	SessionID                  string
-	Channel                    string
-	UserText                   string
-	DisplayText                string
-	RawInput                   string
-	Attachments                []InputAttachment
-	GoalObjective              string
-	SkillName                  string
-	SkillPath                  string
+	SessionID     string
+	Channel       string
+	UserText      string
+	DisplayText   string
+	RawInput      string
+	Attachments   []InputAttachment
+	GoalObjective string
+	SkillName     string
+	SkillPath     string
+	// Skills carries every skill the turn activates by name, the leading
+	// command first (see Result.Skills). Empty keeps the single SkillName/
+	// SkillPath behavior.
+	Skills                     []SkillSelection
 	CallerRendersReturnedError bool
 }
 

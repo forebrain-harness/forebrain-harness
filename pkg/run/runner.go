@@ -1458,7 +1458,7 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 	if len(parts) == 0 {
 		parts = []llm.ContentPart{llm.Text("")}
 	}
-	preloaded, err := r.preloadExplicitSkill(ctx)
+	preloaded, err := r.preloadExplicitSkills(ctx)
 	if err != nil {
 		// The Skill failure card has already been shown; ending here keeps the
 		// turn from spending an LLM request on instructions that never loaded.

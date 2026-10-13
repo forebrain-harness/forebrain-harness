@@ -44,6 +44,17 @@ type runExecutor struct {
 	opts    RunExecutorOptions
 }
 
+// runSkillSelections converts the turn-facing skill selections to the run
+// package's copy of the same pair. run must not import turn, so the two types
+// stay separate and this is the one boundary that bridges them.
+func runSkillSelections(selections []turn.SkillSelection) []run.SkillSelection {
+	out := make([]run.SkillSelection, 0, len(selections))
+	for _, selection := range selections {
+		out = append(out, run.SkillSelection{Name: selection.Name, Path: selection.Path})
+	}
+	return out
+}
+
 // RunExecutorOptions carries the per-surface extension points that genuinely
 // cannot be derived from a TurnRequest. Everything else the executor needs is
 // either on the Environment or in the request itself; anything added here
@@ -122,7 +133,14 @@ func (x *runExecutor) Run(ctx context.Context, req turn.TurnRequest, started fun
 	// the one the plan-mode reminder names, so this must stay the only way an
 	// agent context is seeded here.
 	agBase := AgentContextForProject(ctx, x.env.stateRoot(), sid, x.env.SessionProjectKey(ctx, sid))
-	if req.SkillName != "" || req.SkillPath != "" {
+	// The one place a turn's skills become run metadata, whatever surface
+	// submitted it. A turn can name several skills (a leading command plus
+	// mid-sentence references, or several references), so the list wins when
+	// present and the single pair is the fallback for a caller that only has
+	// one.
+	if len(req.Skills) > 0 {
+		agBase = run.WithExplicitSkillSelections(agBase, runSkillSelections(req.Skills))
+	} else if req.SkillName != "" || req.SkillPath != "" {
 		agBase = run.WithExplicitSkillSelection(agBase, req.SkillName, req.SkillPath)
 	}
 	// A cancelled or failed turn must still persist the tool calls and results

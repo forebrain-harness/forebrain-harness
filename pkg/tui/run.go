@@ -802,11 +802,11 @@ func Run(ctx context.Context, opts Options) error {
 					continue
 				}
 				if ev.hotkey == hotkeyOverlayAccept {
-					if newDraft, ok := state.composer.AcceptSlashSelection(); ok {
+					if newDraft, newCursor, ok := state.composer.AcceptSlashSelection(); ok {
 						state.composer.DraftText = newDraft
-						state.composer.Cursor = len([]rune(newDraft))
+						state.composer.Cursor = composerCursorClamp(newDraft, newCursor)
 						state.composer.HandleDraftUpdate(newDraft, opts.Session)
-						seedInteractiveInput(newDraft, seedCursorEnd)
+						seedInteractiveInput(newDraft, newCursor)
 						renderComposerWithState(renderer, &state)
 						continue
 					}
@@ -887,7 +887,7 @@ func Run(ctx context.Context, opts Options) error {
 		// Enter on Active overlay substitutes line with /<selected-cmd>. The
 		// user typed "/" or "/prefix" and pressed Enter; pick the highlighted
 		// row from Visible and dispatch that command.
-		if overlay := state.composer.SlashOverlay; overlay != nil && overlay.Active &&
+		if overlay := state.composer.SlashOverlay; overlay != nil && overlay.Active && !overlay.Inline &&
 			len(overlay.Visible) > 0 && strings.HasPrefix(strings.TrimSpace(line), "/") {
 			idx := overlay.SelectedIdx
 			if idx >= 0 && idx < len(overlay.Visible) {
@@ -4196,11 +4196,11 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 			return
 		}
 		if ev.hotkey == hotkeyOverlayAccept {
-			if newDraft, ok := state.composer.AcceptSlashSelection(); ok {
+			if newDraft, newCursor, ok := state.composer.AcceptSlashSelection(); ok {
 				state.composer.DraftText = newDraft
-				state.composer.Cursor = len([]rune(newDraft))
+				state.composer.Cursor = composerCursorClamp(newDraft, newCursor)
 				state.composer.HandleDraftUpdate(newDraft, session)
-				seedInteractiveInput(newDraft, seedCursorEnd)
+				seedInteractiveInput(newDraft, newCursor)
 				return
 			}
 			if acc, ok := state.composer.AcceptMentionSelection(); ok {

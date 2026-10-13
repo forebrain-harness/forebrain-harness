@@ -2,6 +2,7 @@ package turn
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
@@ -66,6 +67,7 @@ func skillCommand(path string) (DynamicCommand, bool) {
 			AllowedSurfaces:    []Surface{SurfaceWebChat, SurfaceTUI},
 			SupportsInlineArgs: true, ArgumentHint: "[request]", Visibility: VisibilityPublic,
 		},
+		SkillPath: path,
 		// The handler submits only the trusted selection. The file is read by
 		// the runner's preload phase, so a skill replaced or deleted after
 		// registration shows up as the same failed Skill card as any other
@@ -101,4 +103,75 @@ func SkillCommandInput(name, request string) string {
 	return "I ran " + invocation + " with no additional arguments. " +
 		"Carry out the skill's instructions below for this session now. " +
 		"Only ask me for more input if its instructions require input that you cannot determine yourself."
+}
+
+// SkillSelection names one skill a turn activates by name: the trusted name and
+// the SKILL.md it was registered from, exactly the pair a skill's own slash
+// command hands the runner.
+type SkillSelection struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// SkillReferences returns the skills a message names by a "/name" token that is
+// not the message's first token.
+//
+// A mid-sentence "/" starts a skill reference at the start of a line or after
+// whitespace; a "/" inside a word (a/b, pkg/run) is not one. Only names that
+// resolve to a skill — not a built-in command — are references, because a
+// built-in only ever means something at the start of a message. The token's
+// name is the run of tokenRuneAllowed characters, so a trailing comma, quote or
+// other punctuation ends it the same way it ends the picker's query.
+//
+// The leading token is skipped: it is the slash command Execute handles, and its
+// selection (if it is a skill) travels as the command's own result.
+func SkillReferences(text string) []SkillSelection {
+	runes := []rune(text)
+	lead := firstNonSpaceRune(runes)
+	var out []SkillSelection
+	seen := map[string]struct{}{}
+	for i := 0; i < len(runes); i++ {
+		if runes[i] != '/' {
+			continue
+		}
+		if i > 0 && !unicode.IsSpace(runes[i-1]) {
+			continue
+		}
+		j := i + 1
+		for j < len(runes) && tokenRuneAllowed(runes[j]) {
+			j++
+		}
+		if i == lead || j == i+1 {
+			i = j - 1
+			continue
+		}
+		sel, ok := skillSelectionForName(string(runes[i+1 : j]))
+		if !ok {
+			i = j - 1
+			continue
+		}
+		if _, dup := seen[sel.Name]; dup {
+			i = j - 1
+			continue
+		}
+		seen[sel.Name] = struct{}{}
+		out = append(out, sel)
+		i = j - 1
+	}
+	return out
+}
+
+// skillSelectionForName resolves a name to a skill's trusted selection. A
+// built-in name, an unknown name, or a skill command without a path is not a
+// reference.
+func skillSelectionForName(name string) (SkillSelection, bool) {
+	dyn, ok := findDynamic(name)
+	if !ok || dyn.Command.Category != SkillCategory {
+		return SkillSelection{}, false
+	}
+	path := strings.TrimSpace(dyn.SkillPath)
+	if path == "" {
+		return SkillSelection{}, false
+	}
+	return SkillSelection{Name: dyn.Command.Name, Path: path}, true
 }
