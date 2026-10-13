@@ -1696,18 +1696,21 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		RunStartedAt   string              `json:"run_started_at,omitempty"`
 		RunFinishedAt  string              `json:"run_finished_at,omitempty"`
 		WorkedMs       int64               `json:"worked_duration_ms,omitempty"`
-		PlanDone       int                 `json:"plan_done,omitempty"`
-		PlanTotal      int                 `json:"plan_total,omitempty"`
-		PlanActive     string              `json:"plan_active,omitempty"`
-		Compaction     *chatCompactionRow  `json:"compaction,omitempty"`
-		Goal           *chatGoalRow        `json:"goal,omitempty"`
-		PartsJSON      string              `json:"parts_json,omitempty"`
-		ToolStepID     string              `json:"tool_step_id,omitempty"`
-		ToolMetaJSON   string              `json:"tool_meta_json,omitempty"`
-		CreatedAt      int64               `json:"created_at,omitempty"`
-		RunID          string              `json:"run_id,omitempty"`
-		Origin         string              `json:"origin,omitempty"`
-		Attachments    []chatAttachment    `json:"attachments,omitempty"`
+		// The run's first-token wait, on its "worked" row (plan 015). Absent
+		// for a run that never measured it.
+		FirstTokenMs int64              `json:"first_token_ms,omitempty"`
+		PlanDone     int                `json:"plan_done,omitempty"`
+		PlanTotal    int                `json:"plan_total,omitempty"`
+		PlanActive   string             `json:"plan_active,omitempty"`
+		Compaction   *chatCompactionRow `json:"compaction,omitempty"`
+		Goal         *chatGoalRow       `json:"goal,omitempty"`
+		PartsJSON    string             `json:"parts_json,omitempty"`
+		ToolStepID   string             `json:"tool_step_id,omitempty"`
+		ToolMetaJSON string             `json:"tool_meta_json,omitempty"`
+		CreatedAt    int64              `json:"created_at,omitempty"`
+		RunID        string             `json:"run_id,omitempty"`
+		Origin       string             `json:"origin,omitempty"`
+		Attachments  []chatAttachment   `json:"attachments,omitempty"`
 		// SubagentCall is a tool row's card facts: what the subagent_* call
 		// it answered was about, derived once by the engine so the reloaded
 		// card says what the live one said. Transport only; the derivation
@@ -1811,6 +1814,7 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 				RunStartedAt:  line.StartedAt.UTC().Format(time.RFC3339Nano),
 				RunFinishedAt: line.FinishedAt.UTC().Format(time.RFC3339Nano),
 				WorkedMs:      line.Worked.Milliseconds(),
+				FirstTokenMs:  line.FirstToken.Milliseconds(),
 			}
 			if s.RunRT != nil {
 				progress := lastPlanProgressOfRun(r.Context(), s.RunRT, line.RunID)

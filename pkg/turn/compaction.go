@@ -178,12 +178,17 @@ func GoalPosition(turns []state.Message, evt event.RunEvent) (int, bool) {
 }
 
 // RunWorkedLine is the line that closed one run: how long it worked and when
-// it finished, read from the run's own clock.
+// it finished, read from the run's own clock, plus how long it waited for the
+// model's first output when the run measured it.
 type RunWorkedLine struct {
 	RunID      string
 	StartedAt  time.Time
 	FinishedAt time.Time
 	Worked     time.Duration
+	// FirstToken is the one wait the run kept for the model's first output; 0
+	// when the run never measured it (a run stored before turns kept this) or
+	// never produced output.
+	FirstToken time.Duration
 }
 
 // RunWorkedLines places every run's "Worked for" line in a stored transcript,
@@ -216,6 +221,7 @@ func RunWorkedLines(turns []state.Message) map[int]RunWorkedLine {
 			StartedAt:  time.UnixMilli(row.RunStartedAtMs),
 			FinishedAt: time.UnixMilli(row.RunFinishedAtMs),
 			Worked:     time.Duration(row.RunWorkedMs) * time.Millisecond,
+			FirstToken: time.Duration(row.RunFirstTokenMs) * time.Millisecond,
 		}
 	}
 	return lines

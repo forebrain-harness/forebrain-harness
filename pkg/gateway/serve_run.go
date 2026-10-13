@@ -69,6 +69,9 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		turn.WithRunEventStore(runSvc),
 		turn.WithChildRunStore(runSvc),
 		turn.WithSessionStore(sessStore),
+		// The engine stamps each run's own first-token wait onto fb_runs; the
+		// web reload reads it back as the worked line's segment.
+		turn.WithFirstTokenStore(sessStore),
 		turn.WithForegroundLocker(h.Foreground),
 		turn.WithSessionSource("web"),
 		// The web /models listing discovers ChatGPT models on this node's own

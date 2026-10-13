@@ -659,6 +659,9 @@ type Message struct {
 	RunStartedAtMs  int64
 	RunFinishedAtMs int64
 	RunWorkedMs     int64
+	// How long the run waited for its first output; 0 when the run never
+	// measured it (pre-first_token rows) or never produced output.
+	RunFirstTokenMs int64
 	CreatedAt       int64
 }
 
@@ -1074,6 +1077,7 @@ type storedMessage struct {
 	RunStartedAtMs  int64
 	RunFinishedAtMs int64
 	RunWorkedMs     int64
+	RunFirstTokenMs int64
 }
 
 // messageColumns is the one stored-transcript column list; scanMessage is its
@@ -1083,7 +1087,7 @@ const messageColumns = `id, run_id, role, content, message_id, parts, model, cre
 // messageColumnsJoined is messageColumns plus the run's timing tail, every
 // column qualified for the `fb_messages m LEFT JOIN fb_runs r` shape every
 // message reader uses: a row reports its run's clock without storing a copy.
-const messageColumnsJoined = `m.id, m.run_id, m.role, m.content, m.message_id, m.parts, m.model, m.created_at, m.usage_json, m.tool_step_id, m.tool_meta_json, m.exec_started_at_ms, m.exec_finished_at_ms, m.exec_duration_ms, r.started_at_ms, r.finished_at_ms, r.worked_ms`
+const messageColumnsJoined = `m.id, m.run_id, m.role, m.content, m.message_id, m.parts, m.model, m.created_at, m.usage_json, m.tool_step_id, m.tool_meta_json, m.exec_started_at_ms, m.exec_finished_at_ms, m.exec_duration_ms, r.started_at_ms, r.finished_at_ms, r.worked_ms, r.first_token_ms`
 
 // scanMessageWithRun scans the joined form and fills the run timing tail.
 func scanMessageWithRun(scanner interface{ Scan(...any) error }) (storedMessage, error) {
@@ -1092,15 +1096,16 @@ func scanMessageWithRun(scanner interface{ Scan(...any) error }) (storedMessage,
 	var execStart, execFinish, execDuration sql.NullInt64
 	// The run tail is NULL whenever the row has no run (LEFT JOIN misses) or
 	// that run was never timed; both read as zero.
-	var runStart, runFinish, runWorked sql.NullInt64
+	var runStart, runFinish, runWorked, runFirstToken sql.NullInt64
 	if err := scanner.Scan(&row.ID, &runID, &row.Role, &row.Content, &row.MessageID, &row.PartsJSON, &row.Model, &row.CreatedAt, &row.UsageJSON, &row.ToolStepID, &row.ToolMetaJSON, &execStart, &execFinish, &execDuration,
-		&runStart, &runFinish, &runWorked); err != nil {
+		&runStart, &runFinish, &runWorked, &runFirstToken); err != nil {
 		return storedMessage{}, err
 	}
 	row.RunID = runID.String
 	exec := execTimingFromColumns(execStart, execFinish, execDuration)
 	row.ExecStartedAtMs, row.ExecFinishedAtMs, row.ExecDurationMs = exec.StartedAtMs, exec.FinishedAtMs, exec.DurationMs
 	row.RunStartedAtMs, row.RunFinishedAtMs, row.RunWorkedMs = runStart.Int64, runFinish.Int64, runWorked.Int64
+	row.RunFirstTokenMs = runFirstToken.Int64
 	return row, nil
 }
 
@@ -1122,6 +1127,7 @@ func messageFromStored(row storedMessage) Message {
 		RunStartedAtMs:   row.RunStartedAtMs,
 		RunFinishedAtMs:  row.RunFinishedAtMs,
 		RunWorkedMs:      row.RunWorkedMs,
+		RunFirstTokenMs:  row.RunFirstTokenMs,
 		CreatedAt:        row.CreatedAt,
 	}
 }
@@ -1520,6 +1526,24 @@ func (s *SessionStore) StampRunTiming(ctx context.Context, runID string, timing 
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE fb_runs SET started_at_ms=?, finished_at_ms=?, worked_ms=?, updated_at=? WHERE id=? AND finished_at_ms IS NULL`,
 		timing.StartedAt.UnixMilli(), timing.FinishedAt.UnixMilli(), timing.Worked.Milliseconds(), time.Now().Unix(), runID)
+	return err
+}
+
+// StampRunFirstToken records how long the run waited for the model's first
+// output — the moment it began answering this turn. It is written once: the
+// guard keeps the run's own first answer's wait, and a continuation past an
+// approval is the same run, so it does not restart the clock. The surface that
+// measured it passes it in already resolved, the way it owns the run's clock.
+func (s *SessionStore) StampRunFirstToken(ctx context.Context, runID string, wait time.Duration) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE fb_runs SET first_token_ms=?, updated_at=? WHERE id=? AND first_token_ms IS NULL`,
+		wait.Milliseconds(), time.Now().Unix(), runID)
 	return err
 }
 

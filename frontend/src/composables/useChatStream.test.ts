@@ -17,6 +17,7 @@ import {
   hasVisibleBlocks,
   placeBeforeGateAnchor,
   subagentCallView,
+  workedLineOf,
   workedLineText,
   skillCardTitle,
   thinkingBlockLabel,
@@ -108,7 +109,7 @@ describe('useChatStream helpers', () => {
     const rows = [
       { role: 'user', content: 'first', runId: 'r1' },
       { role: 'assistant', content: 'answer', runId: 'r1' },
-      { role: 'worked', content: '', runId: 'r1', runStartedAt: '2026-10-03T09:00:00Z', runFinishedAt: '2026-10-03T09:00:05Z', workedDurationMs: 5000, planDone: 1, planTotal: 2, planActive: 'tests' },
+      { role: 'worked', content: '', runId: 'r1', runStartedAt: '2026-10-03T09:00:00Z', runFinishedAt: '2026-10-03T09:00:05Z', workedDurationMs: 5000, firstTokenMs: 1200, planDone: 1, planTotal: 2, planActive: 'tests' },
       // A run that failed before it said anything: its message, then its line.
       { role: 'user', content: 'second', runId: 'r2' },
       { role: 'worked', content: '', runId: 'r2', runStartedAt: '2026-10-03T09:01:00Z', runFinishedAt: '2026-10-03T09:01:02Z', workedDurationMs: 2000 },
@@ -116,7 +117,7 @@ describe('useChatStream helpers', () => {
     ]
     const conversation = conversationFromTranscript(rows)
     expect(conversation.map((m) => `${m.role}:${m.content}`)).toEqual(['user:first', 'assistant:answer', 'user:second', 'assistant:', 'user:third'])
-    expect(conversation[1]).toMatchObject({ runId: 'r1', workedDurationMs: 5000, workedPlanDone: 1, workedPlanTotal: 2, workedPlanActive: 'tests', runFinishedAt: '2026-10-03T09:00:05Z' })
+    expect(conversation[1]).toMatchObject({ runId: 'r1', workedDurationMs: 5000, firstTokenMs: 1200, workedPlanDone: 1, workedPlanTotal: 2, workedPlanActive: 'tests', runFinishedAt: '2026-10-03T09:00:05Z' })
     expect(conversation[3]).toMatchObject({ runId: 'r2', workedDurationMs: 2000 })
     expect(conversation[3].blocks).toBeUndefined()
   })
@@ -251,6 +252,31 @@ describe('useChatStream helpers', () => {
     expect(workedLineText(withPlan)).toBe('Worked for 1m 12s · 3/5 · short task · 15:04')
     // A checklist of zero total is no checklist at all.
     expect(formatWorkedDurationLabel(1000, undefined, undefined, { done: 0, total: 0 }).plan).toBeUndefined()
+  })
+
+  it('names the first-token wait right after the worked duration', () => {
+    const finished = new Date(2026, 8, 25, 15, 4, 0)
+    expect(workedLineText(formatWorkedDurationLabel(12_000, undefined, finished.toISOString(), undefined, 1200)))
+      .toBe('Worked for 12s · first token 1.2s · 15:04')
+    // The reloaded message carries the wait; the worked line derives it the
+    // same way the live one does.
+    expect(workedLineText(workedLineOf({
+      role: 'assistant',
+      workedDurationMs: 12_000,
+      firstTokenMs: 1200,
+      runFinishedAt: finished.toISOString(),
+    }))).toBe('Worked for 12s · first token 1.2s · 15:04')
+    // A run that never measured one draws no segment.
+    expect(workedLineText(formatWorkedDurationLabel(12_000, undefined, undefined, undefined, 0))).toBe('Worked for 12s')
+    expect(workedLineText(workedLineOf({ role: 'assistant', workedDurationMs: 12_000 }))).toBe('Worked for 12s')
+  })
+
+  it('appends the measured first-token wait to the running line', () => {
+    expect(formatRuntimeStatusLabel({ kind: 'working', elapsedMs: 3000, firstTokenMs: 1200 }).label)
+      .toBe('Working (3s • esc to interrupt) · first token 1.2s')
+    // Unknown stays off the line.
+    expect(formatRuntimeStatusLabel({ kind: 'working', elapsedMs: 3000 }).label)
+      .toBe('Working (3s • esc to interrupt)')
   })
 
   it('formats active runtime labels with interrupt hints', () => {
@@ -819,6 +845,51 @@ describe('useChatStream helpers', () => {
       }
     })
   }
+
+  // The engine pushes the run's first-token wait on its own op, once per run:
+  // it rides the running line while the run goes, then the answer's worked line.
+  it('shows the first-token wait live, then closes the turn with it', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([])
+    const sessionModeSpy = vi.spyOn(forebrainApi, 'sessionMode').mockResolvedValue({ mode: 'agent', phase: '' })
+    try {
+      const stream = useChatStream()
+      const pendingSend = stream.send('hello')
+      const socket = FakeChatWebSocket.instances[0]
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as Record<string, unknown>
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 'web-ft' })
+      socket.message({ op: 'run_started', request_id: sent.request_id, run_id: 'run-ft', session_id: 'web-ft' })
+      socket.message({
+        op: 'first_token',
+        request_id: sent.request_id,
+        run_id: 'run-ft',
+        session_id: 'web-ft',
+        data: { first_token_ms: 1200 },
+      })
+      expect(stream.runtimeStatus.value.firstTokenMs).toBe(1200)
+      socket.message({
+        op: 'run_completed',
+        request_id: sent.request_id,
+        run_id: 'run-ft',
+        session_id: 'web-ft',
+        text: 'done',
+        finished_at: '2026-06-11T00:00:01.000Z',
+        data: { elapsed_ms: 12000 },
+      })
+      await pendingSend.catch(() => {})
+
+      const turn = stream.messages.value[1]
+      expect(turn).toMatchObject({ role: 'assistant', workedDurationMs: 12000, firstTokenMs: 1200 })
+      expect(workedLineText(workedLineOf(turn)).startsWith('Worked for 12s · first token 1.2s')).toBe(true)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionModeSpy.mockRestore()
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
 
   // A run that said nothing still ran: however it ended, its turn stays to
   // carry the worked line that closes it, with no placeholder text.

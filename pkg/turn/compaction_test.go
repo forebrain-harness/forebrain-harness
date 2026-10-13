@@ -244,6 +244,23 @@ func TestRunWorkedLinesCloseEachRunAfterItsLastRow(t *testing.T) {
 	}
 }
 
+// TestRunWorkedLinesCarryTheFirstTokenWait pins that a run's one first-token
+// wait travels with its worked line, and that a run that never measured one
+// reads as zero rather than a guess.
+func TestRunWorkedLinesCarryTheFirstTokenWait(t *testing.T) {
+	turns := []state.Message{
+		{RunID: "r1", Role: "user", RunStartedAtMs: 1_000, RunFinishedAtMs: 4_000, RunWorkedMs: 3_000, RunFirstTokenMs: 1_200},
+		{RunID: "r2", Role: "user", RunStartedAtMs: 1_000, RunFinishedAtMs: 2_500, RunWorkedMs: 1_500},
+	}
+	lines := RunWorkedLines(turns)
+	if got := lines[0]; got.FirstToken != 1_200*time.Millisecond {
+		t.Fatalf("r1 first token = %v, want 1.2s", got.FirstToken)
+	}
+	if got := lines[1]; got.FirstToken != 0 {
+		t.Fatalf("r2 first token = %v, want zero for a run that measured none", got.FirstToken)
+	}
+}
+
 // assistantCallRow stores one assistant turn that asked for a tool call.
 func assistantCallRow(callID, name, argsJSON string) state.Message {
 	msg := llm.AssistantMessage(nil, llm.ToolCall{

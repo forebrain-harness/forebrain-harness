@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 12
+const stateSchemaVersion = 13
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -51,6 +51,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 10, apply: migrateStateV9ToV10},
 	{version: 11, apply: migrateStateV10ToV11},
 	{version: 12, apply: migrateStateV11ToV12},
+	{version: 13, apply: migrateStateV12ToV13},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -573,6 +574,25 @@ func migrateStateV11ToV12(ctx context.Context, conn *sql.Conn) error {
 	if projectCol == 0 {
 		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_projects ADD COLUMN last_attach_dir TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("add fb_projects.last_attach_dir: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateStateV12ToV13 adds the one first-token wait a run keeps: how long the
+// turn waited for the model's first output, measured once by the surface that
+// ran it. It is a plain ADD COLUMN, so a database that already carries it (a
+// fixture built from the current schema.sql with a lowered user_version) skips
+// the ALTER instead of failing on a duplicate. A run stored before this version
+// never measured the wait, so it reads as NULL rather than a guess.
+func migrateStateV12ToV13(ctx context.Context, conn *sql.Conn) error {
+	var firstTokenCol int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_runs') WHERE name='first_token_ms'`).Scan(&firstTokenCol); err != nil {
+		return err
+	}
+	if firstTokenCol == 0 {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_runs ADD COLUMN first_token_ms INTEGER`); err != nil {
+			return fmt.Errorf("add fb_runs.first_token_ms: %w", err)
 		}
 	}
 	return nil

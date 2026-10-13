@@ -2,6 +2,7 @@ package turn
 
 import (
 	"context"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -15,6 +16,14 @@ type RunEventStore interface {
 
 type ChildRunStore interface {
 	ListChildRuns(ctx context.Context, parentRunID string, limit int, statuses ...state.RunStatus) ([]state.Run, error)
+}
+
+// FirstTokenStore records the one first-token wait each run keeps: how long the
+// turn waited for the model's first output. It is written once per run — a
+// continuation past an approval is the same run — and a run that never produced
+// output keeps nothing.
+type FirstTokenStore interface {
+	StampRunFirstToken(ctx context.Context, runID string, wait time.Duration) error
 }
 
 type SessionRepository interface {
@@ -48,6 +57,7 @@ type Service struct {
 	commands           CommandService
 	chatgptModels      ChatGPTModelsSource
 	autoContinue       *autoContinuer
+	firstTokens        FirstTokenStore
 }
 
 type Option func(*Service)
@@ -118,6 +128,16 @@ func WithRunExecutor(runner RunExecutor) Option {
 	return func(s *Service) {
 		if s != nil {
 			s.runner = runner
+		}
+	}
+}
+
+// WithFirstTokenStore installs the port that records how long each run waited
+// for the model's first output. Without it the engine measures nothing.
+func WithFirstTokenStore(store FirstTokenStore) Option {
+	return func(s *Service) {
+		if s != nil {
+			s.firstTokens = store
 		}
 	}
 }

@@ -67,6 +67,11 @@ export interface ChatMessageRecord {
   runStartedAt?: string
   runFinishedAt?: string
   workedDurationMs?: number
+  /**
+   * How long the run waited for the model's first output, on its "worked" row
+   * (plan 015). Absent for a run that never measured it.
+   */
+  firstTokenMs?: number
   /** The run's final checklist state, on its "worked" row. */
   planDone?: number
   planTotal?: number
