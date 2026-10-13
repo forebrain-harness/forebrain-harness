@@ -143,6 +143,27 @@ describe('provider error wording', () => {
     )
   })
 
+  it('names the other surface when the run driving the turn is not this one, in both languages', () => {
+    // The live run belongs to another process — the other surface, or another
+    // window of this one — so the sentence says where it is running rather
+    // than leaving the reader to guess whether it is their own turn.
+    const detail = parseProviderErrorDetail({ code: 'session_running_elsewhere' })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('这个对话正在另一端运行（终端或网页），等它结束后再发送。')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      'This conversation is running on another surface (the terminal or the web); send again when it finishes there.',
+    )
+  })
+
+  it('names the other surface holding an approval, in both languages', () => {
+    // A run parked on an approval that another process is holding: the reader
+    // is told the approval is elsewhere, not left holding the composer.
+    const detail = parseProviderErrorDetail({ code: 'session_awaiting_approval_elsewhere' })!
+    expect(formatProviderError(detail, 'zh', arrivedAt)).toBe('这个对话正在另一端等待审批（终端或网页），请在那一端处理后再发送。')
+    expect(formatProviderError(detail, 'en', arrivedAt)).toBe(
+      'This conversation is waiting for an approval on another surface (the terminal or the web); answer it there before sending another message.',
+    )
+  })
+
   it('words a scheduled run\'s ending in one sentence, in both languages', () => {
     // A fire's record carries the runtime's English sentence as its fallback;
     // the code says which sentence the viewer reads, and the stored words are

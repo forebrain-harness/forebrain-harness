@@ -112,6 +112,12 @@ export function formatProviderError(
   if (detail.code === 'context_window') {
     return tr('providerError.contextWindow')
   }
+  if (detail.code === 'session_awaiting_approval_elsewhere') {
+    return tr('runError.sessionAwaitingApprovalElsewhere')
+  }
+  if (detail.code === 'session_running_elsewhere') {
+    return tr('runError.sessionRunningElsewhere')
+  }
   if (detail.code === 'session_awaiting_approval') {
     return tr('runError.sessionAwaitingApproval')
   }
