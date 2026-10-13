@@ -375,6 +375,103 @@ func TestDidWriteCancel(t *testing.T) {
 	// whatever the caller wrote, untouched by DidWrite.
 }
 
+// TestDidWriteHungServerKeepsTheWindow is the edit that hung for an hour: a
+// server that stopped reading its input must not hold an edit past the
+// diagnostics window, however large the document.
+func TestDidWriteHungServerKeepsTheWindow(t *testing.T) {
+	lsp := appcfg.LSPSection{}
+	lsp.Diagnostics.WaitMS = intPtr(500)
+	env := newFakePool(t, lsp, fakeServerCfg{
+		id: "fake", ext: ".fk",
+		script: map[string]any{"stop_reading_after_initialized": true},
+	})
+	// The first edit starts the server; from initialized on it reads nothing.
+	small := filepath.Join(env.project, "small.fk")
+	mustWrite(t, small, "b\n")
+	env.manager.DidWrite(context.Background(), "s1", []tool.FileChange{{AbsPath: small, Before: []byte("a\n"), After: []byte("b\n")}})
+	pollRecord(t, env.records["fake"], func(recs []map[string]any) bool {
+		for _, rec := range recs {
+			if recv, ok := rec["recv"].(map[string]any); ok && recv["method"] == "initialized" {
+				return true
+			}
+		}
+		return false
+	}, "the initialized notification")
+
+	// Far beyond any pipe buffer: the baseline open alone used to block on
+	// the server's full input for as long as it stayed hung.
+	big := filepath.Join(env.project, "big.fk")
+	before := strings.Repeat("before\n", 1<<17)
+	after := strings.Repeat("after\n", 1<<17)
+	mustWrite(t, big, after)
+	start := time.Now()
+	done := make(chan tool.DiagnosticsDelta, 1)
+	go func() {
+		done <- env.manager.DidWrite(context.Background(), "s1", []tool.FileChange{{AbsPath: big, Before: []byte(before), After: []byte(after)}})
+	}()
+	select {
+	case delta := <-done:
+		if len(delta.Summary.PendingFiles) != 1 {
+			t.Errorf("summary = %+v, want the file pending", delta.Summary)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DidWrite never returned while the server was hung")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("DidWrite took %s against a 500ms window", elapsed)
+	}
+}
+
+// TestDidWriteStuckGroupKeepsTheWindow covers the backstop: whatever a group
+// is stuck on — here a document lock no window can interrupt — the edit
+// returns within the window and its grace, with the file pending.
+func TestDidWriteStuckGroupKeepsTheWindow(t *testing.T) {
+	lsp := appcfg.LSPSection{}
+	lsp.Diagnostics.WaitMS = intPtr(300)
+	env := newFakePool(t, lsp, fakeServerCfg{
+		id: "fake", ext: ".fk",
+		script: diagScript(map[string]any{"bad": []any{diagRule("bad thing", 0)}}),
+	})
+	file := filepath.Join(env.project, "a.fk")
+	mustWrite(t, file, "ok\n")
+	env.manager.DidWrite(context.Background(), "s1", []tool.FileChange{{AbsPath: file, Before: []byte("x\n"), After: []byte("ok\n")}})
+	docs := waitStartedDocs(t, env.pool)
+
+	docs.mu.Lock()
+	start := time.Now()
+	delta := env.manager.DidWrite(context.Background(), "s1", []tool.FileChange{{AbsPath: file, Before: []byte("ok\n"), After: []byte("bad\n")}})
+	elapsed := time.Since(start)
+	docs.mu.Unlock()
+
+	if limit := 300*time.Millisecond + didWriteGrace + time.Second; elapsed > limit {
+		t.Fatalf("DidWrite took %s with a stuck group, want at most %s", elapsed, limit)
+	}
+	if len(delta.Summary.PendingFiles) != 1 {
+		t.Errorf("summary = %+v, want the stuck group's file pending", delta.Summary)
+	}
+}
+
+// waitStartedDocs returns the document layer of the pool's first started
+// instance.
+func waitStartedDocs(t *testing.T, p *Pool) *DocSync {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		for _, e := range p.instances {
+			if e.docs != nil {
+				docs := e.docs
+				p.mu.Unlock()
+				return docs
+			}
+		}
+		p.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no instance started")
+	return nil
+}
+
 func TestLateDeliveryOffRecordsNothing(t *testing.T) {
 	lsp := appcfg.LSPSection{}
 	lsp.Diagnostics.LateDelivery = boolPtr(false)

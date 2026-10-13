@@ -768,40 +768,14 @@ func (s *Server) runPlanFacts(ctx context.Context, runID string) event.RunPlanFa
 	return lastPlanProgressOfRun(ctx, s.RunRT, runID).Facts()
 }
 
-// runPlanEventLister is the slice of the run store the plan lookup needs.
-type runPlanEventLister interface {
-	ListRunEventsOfTypes(ctx context.Context, runID string, types ...string) ([]state.SessionEvent, error)
-}
+// runPlanEventLister is the slice of the run store the plan lookup needs. The
+// lookup itself lives in the engine (turn.LastPlanProgressOfRun) so both
+// surfaces close a run with the same facts.
+type runPlanEventLister = turn.RunPlanEventLister
 
 // lastPlanProgressOfRun folds the run's final checklist update into the
-// worked line's three facts. A run without a checklist reports zeros — the
-// same silence the terminal's formatWorkingCounters produces.
+// worked line's three facts. It is the engine's lookup, kept here as the
+// gateway's own name for it.
 func lastPlanProgressOfRun(ctx context.Context, runs runPlanEventLister, runID string) event.PlanProgress {
-	runID = strings.TrimSpace(runID)
-	if runID == "" || runs == nil {
-		return event.PlanProgress{}
-	}
-	events, err := runs.ListRunEventsOfTypes(ctx, runID, event.RunEventPlanUpdated)
-	if err != nil {
-		return event.PlanProgress{}
-	}
-	var last *event.PlanUpdatedPayload
-	for i := len(events) - 1; i >= 0; i-- {
-		var payload event.PlanUpdatedPayload
-		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
-			continue
-		}
-		// A subagent's checklist is recorded under its parent's run but is
-		// that subagent's own; the conversation's worked line reports the
-		// conversation's plan, exactly as the terminal's tracker does.
-		if strings.TrimSpace(payload.AgentID) != "" {
-			continue
-		}
-		last = &payload
-		break
-	}
-	if last == nil {
-		return event.PlanProgress{}
-	}
-	return event.PlanProgressOf(last.Items, last.Completed, last.Total, last.Explanation)
+	return turn.LastPlanProgressOfRun(ctx, runs, runID)
 }

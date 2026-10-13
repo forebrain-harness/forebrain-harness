@@ -10,10 +10,30 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MaxMessageBytes bounds one incoming message (spec §7.1).
 const MaxMessageBytes = 64 << 20
+
+// maxOutboxBytes bounds what may wait for the peer to read it. A peer that
+// leaves this much of its input unread is as hung as one that stalls.
+const maxOutboxBytes = 64 << 20
+
+// writeChunkBytes is the most one write hands the peer at once, so the stall
+// timer measures progress rather than the size of the whole frame.
+const writeChunkBytes = 16 << 10
+
+// writeStallTimeout is how long one chunk of an outgoing frame may wait for
+// the peer to read it before the connection ends with ErrWriteStalled. A
+// package-level variable only so tests can shorten it; production code must
+// not write it.
+var writeStallTimeout = 30 * time.Second
+
+// ErrWriteStalled ends a connection whose peer stopped reading its input: a
+// language server that is alive but hung (its binary's volume vanished, it
+// deadlocked) never exits, so only its unread input gives it away.
+var ErrWriteStalled = errors.New("jsonrpc: the peer stopped reading its input")
 
 // Standard JSON-RPC and LSP error codes used by this package.
 const (
@@ -108,23 +128,29 @@ type ConnOptions struct {
 	OnNotify  NotificationHandler // nil: notifications are dropped
 }
 
-// Conn is one JSON-RPC connection. It starts its read loop in NewConn.
+// Conn is one JSON-RPC connection. It starts its read and write loops in
+// NewConn. Sending never waits on the peer: frames queue on the outbox and
+// the write loop is the only goroutine that ever blocks on w.
 type Conn struct {
 	r       *bufio.Reader
 	w       io.Writer
 	closer  io.Closer // r's source, when closing it can unblock the read loop
+	wcloser io.Closer // w, when closing it can unblock a write the peer never reads
 	opts    ConnOptions
 	ctx     context.Context // cancelled once the connection ends
 	cancel  context.CancelFunc
-	writeMu sync.Mutex // one frame at a time: header and body stay adjacent
+	stall   time.Duration // writeStallTimeout when the connection opened
+	wake    chan struct{} // buffered 1: the outbox has frames
 
-	mu         sync.Mutex
-	nextID     int64
-	pending    map[int64]chan *wireMessage
-	closed     bool // the connection ended; guards err and pending below
-	err        error
-	userClosed bool // Close was called; the closer is closed exactly once
-	done       chan struct{}
+	mu          sync.Mutex
+	nextID      int64
+	pending     map[int64]chan *wireMessage
+	outbox      [][]byte // framed messages not yet written, in send order
+	outboxBytes int
+	closed      bool // the connection ended; guards err, pending and outbox
+	err         error
+	userClosed  bool // Close was called; the closers are closed exactly once
+	done        chan struct{}
 }
 
 // NewConn starts one JSON-RPC connection over the peer's streams (a language
@@ -137,13 +163,19 @@ func NewConn(r io.Reader, w io.Writer, opts ConnOptions) *Conn {
 		opts:    opts,
 		ctx:     ctx,
 		cancel:  cancel,
+		stall:   writeStallTimeout,
+		wake:    make(chan struct{}, 1),
 		pending: map[int64]chan *wireMessage{},
 		done:    make(chan struct{}),
 	}
 	if closer, ok := r.(io.Closer); ok {
 		c.closer = closer
 	}
+	if wcloser, ok := w.(io.Closer); ok {
+		c.wcloser = wcloser
+	}
 	go c.readLoop()
+	go c.writeLoop()
 	return c
 }
 
@@ -278,15 +310,93 @@ func (c *Conn) reply(id json.RawMessage, result any, rpcErr *RPCError) {
 	if err != nil {
 		return
 	}
-	// Best effort: a failing write means the peer is gone, and the read loop
-	// notices on its own.
-	_ = c.writeFrame(body)
+	// Best effort: a connection that ended has no one left to answer.
+	_ = c.send(body)
 }
 
-func (c *Conn) writeFrame(body []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return WriteMessage(c.w, body)
+// send queues one message for the write loop and returns at once; messages
+// reach the peer in the order send was called. It fails only when the
+// connection already ended — or ends it, when the peer has left
+// maxOutboxBytes of its input unread.
+func (c *Conn) send(body []byte) error {
+	frame := make([]byte, 0, len(body)+32)
+	frame = fmt.Appendf(frame, "Content-Length: %d\r\n\r\n", len(body))
+	frame = append(frame, body...)
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return c.closedError()
+	}
+	if c.outboxBytes+len(frame) > maxOutboxBytes {
+		c.mu.Unlock()
+		c.endStalled(fmt.Errorf("%w: %d MiB of it is waiting", ErrWriteStalled, maxOutboxBytes>>20))
+		return c.closedError()
+	}
+	c.outbox = append(c.outbox, frame)
+	c.outboxBytes += len(frame)
+	c.mu.Unlock()
+	select {
+	case c.wake <- struct{}{}:
+	default: // the write loop is already due to look
+	}
+	return nil
+}
+
+// writeLoop is the connection's only writer. A failed or stalled write ends
+// the connection.
+func (c *Conn) writeLoop() {
+	for {
+		select {
+		case <-c.wake:
+		case <-c.done:
+			return
+		}
+		for {
+			c.mu.Lock()
+			if c.closed || len(c.outbox) == 0 {
+				c.mu.Unlock()
+				break
+			}
+			frame := c.outbox[0]
+			c.outbox[0] = nil
+			c.outbox = c.outbox[1:]
+			c.outboxBytes -= len(frame)
+			c.mu.Unlock()
+			if err := c.writeFrame(frame); err != nil {
+				c.shutdown(fmt.Errorf("jsonrpc: write: %w", err))
+				return
+			}
+		}
+	}
+}
+
+// writeFrame writes one frame in chunks, each of which must reach the peer
+// within the stall timeout. On a stall the connection ends and w is closed,
+// the only thing that unblocks a write the peer will never read (a w that
+// cannot be closed leaves this goroutine parked; nothing else waits on it).
+func (c *Conn) writeFrame(frame []byte) error {
+	for len(frame) > 0 {
+		n := min(len(frame), writeChunkBytes)
+		timer := time.AfterFunc(c.stall, func() {
+			c.endStalled(fmt.Errorf("%w for %s", ErrWriteStalled, c.stall))
+		})
+		_, err := c.w.Write(frame[:n])
+		timer.Stop()
+		if err != nil {
+			return err
+		}
+		frame = frame[n:]
+	}
+	return nil
+}
+
+// endStalled ends the connection because the peer stopped reading, then
+// closes w so a write blocked on it returns.
+func (c *Conn) endStalled(cause error) {
+	c.shutdown(cause)
+	if c.wcloser != nil {
+		_ = c.wcloser.Close()
+	}
 }
 
 // Call sends a request and decodes the result into result (may be nil).
@@ -311,7 +421,7 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 		c.dropPending(id)
 		return err
 	}
-	if err := c.writeFrame(body); err != nil {
+	if err := c.send(body); err != nil {
 		c.dropPending(id)
 		return err
 	}
@@ -335,7 +445,7 @@ func (c *Conn) Call(ctx context.Context, method string, params, result any) erro
 			Method:  "$/cancelRequest",
 			Params:  map[string]any{"id": id},
 		}); err == nil {
-			_ = c.writeFrame(body)
+			_ = c.send(body)
 		}
 		return ctx.Err()
 	case <-c.done:
@@ -349,31 +459,37 @@ func (c *Conn) dropPending(id int64) {
 	c.mu.Unlock()
 }
 
-// Notify sends a notification.
+// Notify queues a notification; it never waits for the peer to read it.
 func (c *Conn) Notify(method string, params any) error {
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
-		return ErrConnClosed
+		return c.closedError()
 	}
 	body, err := json.Marshal(wireNotification{JSONRPC: "2.0", Method: method, Params: params})
 	if err != nil {
 		return err
 	}
-	return c.writeFrame(body)
+	return c.send(body)
 }
 
-// Close stops the connection; pending calls return ErrConnClosed. Idempotent.
+// Close stops the connection; pending calls return ErrConnClosed and
+// unwritten messages are dropped. Idempotent.
 func (c *Conn) Close() error {
 	c.mu.Lock()
-	var closer io.Closer
+	var closer, wcloser io.Closer
 	if !c.userClosed {
 		c.userClosed = true
-		closer = c.closer
+		closer, wcloser = c.closer, c.wcloser
 	}
 	c.mu.Unlock()
 	c.shutdown(nil)
+	if wcloser != nil {
+		// Closing the write side returns a write the peer never read; the
+		// peer sees the end of its input.
+		_ = wcloser.Close()
+	}
 	if closer == nil {
 		return nil
 	}
@@ -383,8 +499,8 @@ func (c *Conn) Close() error {
 }
 
 // shutdown ends the connection exactly once: it records why (nil when Close
-// asked for it), wakes every pending call through done, and cancels the
-// context request handlers saw.
+// asked for it), drops the unwritten messages, wakes every pending call and
+// the write loop through done, and cancels the context request handlers saw.
 func (c *Conn) shutdown(cause error) {
 	c.mu.Lock()
 	if c.closed {
@@ -394,17 +510,19 @@ func (c *Conn) shutdown(cause error) {
 	c.closed = true
 	c.err = cause
 	c.pending = map[int64]chan *wireMessage{}
+	c.outbox, c.outboxBytes = nil, 0
 	c.mu.Unlock()
 	close(c.done)
 	c.cancel()
 }
 
-// Done is closed when the read loop ends (peer closed, protocol error, Close).
+// Done is closed when the connection ends (peer closed, protocol error, a
+// failed or stalled write, Close).
 func (c *Conn) Done() <-chan struct{} {
 	return c.done
 }
 
-// Err reports why the read loop ended (nil after Close).
+// Err reports why the connection ended (nil after Close).
 func (c *Conn) Err() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

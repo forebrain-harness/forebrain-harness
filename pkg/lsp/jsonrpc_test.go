@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -428,5 +429,112 @@ func TestConnCloseFailsPendingCalls(t *testing.T) {
 	}
 	if err := client.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// setWriteStallTimeout shortens the write stall timeout for one test;
+// connections opened after the call use it.
+func setWriteStallTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	previous := writeStallTimeout
+	writeStallTimeout = d
+	t.Cleanup(func() { writeStallTimeout = previous })
+}
+
+// unreadPipe is a peer input nobody reads: a real pipe, so once its buffer
+// is full a write blocks for good — what a hung language server's stdin is.
+func unreadPipe(t *testing.T) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = w.Close()
+		_ = r.Close()
+	})
+	return w
+}
+
+func TestConnSendNeverWaitsOnAStalledPeer(t *testing.T) {
+	setWriteStallTimeout(t, 200*time.Millisecond)
+	peerOut, _ := io.Pipe() // the peer never says anything
+	c := NewConn(peerOut, unreadPipe(t), ConnOptions{})
+	t.Cleanup(func() { c.Close() })
+
+	text := strings.Repeat("x", 1<<20)
+	start := time.Now()
+	for n := 0; n < 3; n++ {
+		if err := c.Notify("textDocument/didChange", map[string]string{"text": text}); err != nil {
+			t.Fatalf("Notify %d: %v", n, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("queuing for a peer that never reads took %s", elapsed)
+	}
+	callErr := make(chan error, 1)
+	go func() { callErr <- c.Call(context.Background(), "test/never", nil, nil) }()
+
+	select {
+	case <-c.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled write did not end the connection")
+	}
+	if err := c.Err(); !errors.Is(err, ErrWriteStalled) {
+		t.Fatalf("Err = %v, want ErrWriteStalled", err)
+	}
+	select {
+	case err := <-callErr:
+		if !errors.Is(err, ErrConnClosed) || !errors.Is(err, ErrWriteStalled) {
+			t.Fatalf("pending Call error = %v, want ErrConnClosed caused by ErrWriteStalled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pending Call did not return after the stall")
+	}
+	if err := c.Notify("test/after", nil); !errors.Is(err, ErrConnClosed) {
+		t.Fatalf("Notify after the stall = %v, want ErrConnClosed", err)
+	}
+}
+
+func TestConnCloseReleasesABlockedWrite(t *testing.T) {
+	// The default stall timeout is far away: Close alone must end it.
+	peerOut, _ := io.Pipe()
+	c := NewConn(peerOut, unreadPipe(t), ConnOptions{})
+	if err := c.Notify("textDocument/didChange", map[string]string{"text": strings.Repeat("x", 1<<20)}); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return while a write was blocked")
+	}
+	if err := c.Err(); err != nil {
+		t.Fatalf("Err after Close = %v, want nil", err)
+	}
+}
+
+func TestConnWriteFailureEndsTheConn(t *testing.T) {
+	peerOut, _ := io.Pipe()
+	peerIn, w := io.Pipe()
+	c := NewConn(peerOut, w, ConnOptions{})
+	t.Cleanup(func() { c.Close() })
+	_ = peerIn.Close() // the peer is gone: every write fails
+
+	callErr := make(chan error, 1)
+	go func() { callErr <- c.Call(context.Background(), "test/echo", nil, nil) }()
+	select {
+	case err := <-callErr:
+		if !errors.Is(err, ErrConnClosed) || !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("Call error = %v, want ErrConnClosed caused by the write error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Call whose request could not be written did not return")
+	}
+	select {
+	case <-c.Done():
+	default:
+		t.Fatal("Done is not closed after a failed write")
 	}
 }

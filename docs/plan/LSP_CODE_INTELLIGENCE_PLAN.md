@@ -458,7 +458,8 @@ notes: ""
 - 报文头 `Content-Length: N`（忽略 `Content-Type` 与未知头，头名大小写不敏感），`\r\n\r\n` 后接 N 字节 JSON。单条消息上限 64 MiB，超限视为协议错误：关闭连接，由 supervisor 按崩溃处理。
 - 请求 id 为递增 int64；待决表 `map[id]chan response`；ctx 取消时发 `$/cancelRequest`，立即返回 `ctx.Err()`，迟到的响应丢弃。
 - 服务器→客户端请求在独立 goroutine 调用处理器，**必须应答**；未注册的方法回错误码 `-32601`。
-- 写端单一互斥，保证同一文档的 `didOpen / didChange / didSave / didClose` 按调用顺序写出。
+- 发送从不等待对端：消息进入发送队列，由连接唯一的写协程按调用顺序写出，同一文档的 `didOpen / didChange / didSave / didClose` 因此保持顺序。
+- 写入停滞即挂死：每段 16 KiB，一段 30 秒写不进去（对端不再读 stdin，如服务器死锁、可执行文件所在的卷被拔掉），或排队超过 64 MiB，关闭连接并关闭 stdin，由 supervisor 按崩溃处理（§7.8）。
 - stderr 写实例日志，不得写终端。
 
 ### 7.2 初始化（任务 05）
@@ -524,7 +525,7 @@ notes: ""
 - Unix：`SysProcAttr.Setpgid = true`。关闭：`shutdown` 请求（`shutdown_timeout`）→ `exit` 通知 → 等 1 秒 → `kill(-pgid, SIGTERM)` → 等 2 秒 → `kill(-pgid, SIGKILL)` → `Wait()`。
 - Windows：启动后立刻把进程加入一个设置了 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 Job Object；关闭时 `TerminateJobObject` 并关闭句柄。
 - forebrain 自身被强杀时的孤儿（所有 Unix）：启动时把 `{pid, pgid, started}` 写入 `<agentWorkspace>/state/lsp/pids.json`（`started` 为 `ps -o lstart= -p <pid>` 的输出），正常退出时删除；下一次创建 Manager 时，对记录里仍存在、且 `started` 与记录一致的进程组发 SIGKILL，然后删除这些记录。另外，服务器收到的 `processId` 让遵守规范的服务器在父进程消失后自行退出。
-- 崩溃：进程意外退出 → 状态 `failed`；`restart_on_crash` 为 true 且 10 分钟内重启次数 < `max_restarts` 时，按 1、2、4 秒退避重启，重新初始化并按打开表重新打开文档；进行中的请求返回错误「server restarted」。超过次数后停在 `failed`，`last_error` 写「crashed N times in 10 minutes」，只有 `/lsp` 重启或配置指纹变化才会再启动。
+- 崩溃：进程意外退出，或活着但不再读取输入（写入停滞，§7.1）→ 杀进程树，状态 `failed`；`restart_on_crash` 为 true 且 10 分钟内重启次数 < `max_restarts` 时，按 1、2、4 秒退避重启，重新初始化并按打开表重新打开文档；进行中的请求返回错误「server restarted」。超过次数后停在 `failed`，`last_error` 写「crashed N times in 10 minutes」，只有 `/lsp` 重启或配置指纹变化才会再启动。
 - 空闲回收：Pool 每 60 秒检查一次，实例无在途请求且 `lastUsed` 早于 `idle_timeout` 即优雅关闭。
 
 ---
@@ -580,6 +581,7 @@ notes: ""
 - **零开销**：没有已启用服务器负责的文件不参与，所有文件都无人负责时 `DidWrite` 立即返回空结果。
 - **等满不算失败**：窗口到期时，已收到的诊断照常报告；没收到的文件在结果末尾写附录 B.3 的 pending 行，并登记为迟到诊断（§8.4）。工具本身永远返回成功。
 - **取消**：工具调用的 ctx 被取消（用户按 Esc）时立即停止等待并返回；已写盘的内容不回滚，诊断转为迟到。
+- **硬上限**：窗口到期或取消后再给 1 秒宽限，仍未返回的服务器组直接放弃，其文件写 pending 行；任何下层阻塞都不能让编辑工具多等超过「窗口 + 1 秒」。
 - **`wait_ms: 0`**：不等待，全部诊断走迟到提醒。
 
 时间线示例：

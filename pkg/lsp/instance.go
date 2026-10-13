@@ -221,6 +221,10 @@ type generation struct {
 	waitDone chan struct{} // closed once cmd.Wait returned
 	mu       sync.Mutex
 	waitErr  error
+	// crashed is set, under Instance.mu, by the first path that saw this
+	// generation die (its exit, or its connection stalling): one death is
+	// one crash.
+	crashed bool
 }
 
 func (g *generation) exitError() error {
@@ -365,6 +369,7 @@ func (i *Instance) launch() (*generation, error) {
 		OnNotify:  i.handleNotify,
 	})
 	go i.supervise(gen)
+	go i.watchStall(gen)
 	if i.spec.PIDFile != "" {
 		recordPID(i.spec.PIDFile, pidRecord{
 			Server: i.spec.ServerID,
@@ -405,8 +410,17 @@ func (i *Instance) initialize(ctx context.Context, gen *generation) error {
 		if errors.Is(err, context.DeadlineExceeded) && initCtx.Err() != nil {
 			return fmt.Errorf("initialize did not complete within %s", timeout)
 		}
+		if errors.Is(err, ErrWriteStalled) {
+			return fmt.Errorf("language server %s stopped reading its input before initializing", i.spec.ServerID)
+		}
 		if errors.Is(err, ErrConnClosed) {
-			<-gen.waitDone
+			// A server that closed its output may still be running: the
+			// startup timeout bounds the wait for its exit.
+			select {
+			case <-gen.waitDone:
+			case <-initCtx.Done():
+				return fmt.Errorf("language server %s closed its connection before initializing", i.spec.ServerID)
+			}
 			return fmt.Errorf("language server %s exited before initializing: %v", i.spec.ServerID, gen.exitError())
 		}
 		return err
@@ -975,28 +989,64 @@ func (i *Instance) supervise(gen *generation) {
 	close(gen.waitDone)
 	gen.mu.Unlock()
 
-	i.mu.Lock()
-	crashed := !i.stopping && i.initialized && i.gen == gen
-	if crashed {
-		reason := fmt.Sprintf("exited: %v", waitErr)
-		if line := i.log.lastLogLine(); line != "" {
-			reason += "; last log: " + line
-		}
-		i.lastError = reason
+	reason := fmt.Sprintf("exited: %v", waitErr)
+	if line := i.log.lastLogLine(); line != "" {
+		reason += "; last log: " + line
 	}
-	i.mu.Unlock()
-	if crashed {
-		go i.handleCrash()
+	if i.claimCrash(gen, reason) {
+		go i.handleCrash(gen)
 	}
 }
 
-// handleCrash runs the restart decision: kill what the crash left, count
-// the crash, and either restart with backoff or fail for good (spec §7.8).
-func (i *Instance) handleCrash() {
+// watchStall turns a connection that ended because the server stopped
+// reading its input into a crash. Such a server is alive but hung — its
+// binary's volume vanished, it deadlocked — so supervise never sees an exit,
+// and without this the instance would stay open on a dead connection.
+func (i *Instance) watchStall(gen *generation) {
+	select {
+	case <-gen.conn.Done():
+	case <-gen.waitDone:
+		return // an exit: supervise owns it
+	}
+	if !errors.Is(gen.conn.Err(), ErrWriteStalled) {
+		return // the process exited or the connection was closed deliberately
+	}
+	reason := "stopped reading its input"
+	if line := i.log.lastLogLine(); line != "" {
+		reason += "; last log: " + line
+	}
+	if i.claimCrash(gen, reason) {
+		go i.handleCrash(gen)
+	}
+}
+
+// claimCrash records gen's death as a crash once: it reports false when a
+// deliberate stop owns the generation, it never finished initializing, it
+// was already replaced, or another path already claimed it.
+func (i *Instance) claimCrash(gen *generation, reason string) bool {
 	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.stopping || !i.initialized || i.gen != gen || gen.crashed {
+		return false
+	}
+	gen.crashed = true
+	i.lastError = reason
+	return true
+}
+
+// handleCrash runs the restart decision for the generation that crashed:
+// kill what the crash left, count the crash, and either restart with backoff
+// or fail for good (spec §7.8).
+func (i *Instance) handleCrash(gen *generation) {
+	i.mu.Lock()
+	if i.gen != gen {
+		// A deliberate stop took the generation over between the claim and
+		// here; it stops the process itself.
+		i.mu.Unlock()
+		return
+	}
 	i.initialized = false
 	i.open = false
-	gen := i.gen
 	i.gen = nil
 	i.pid = 0
 	now := time.Now()

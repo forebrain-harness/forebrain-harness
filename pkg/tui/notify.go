@@ -1018,6 +1018,15 @@ func turnErrorDisplayText(p event.TurnErrorPayload) string {
 	return ""
 }
 
+// runPlanFacts is the run's final checklist state, the facts every way a run
+// ends carries — the same lookup the gateway closes its runs with.
+func (s *ChatSession) runPlanFacts(ctx context.Context, runID string) event.RunPlanFacts {
+	if s == nil || s.runSvc() == nil {
+		return event.RunPlanFacts{}
+	}
+	return turn.LastPlanProgressOfRun(ctx, s.runSvc(), runID).Facts()
+}
+
 // publishTUIRunEvent records one lifecycle transition the terminal surface
 // itself produced (approval recovery and cancellation in particular) on the
 // conversation's event log. Runtime tool hooks perform the same write at their
@@ -1029,6 +1038,16 @@ func (s *ChatSession) publishTUIRunEvent(ctx context.Context, sessionID, runID, 
 	runID = strings.TrimSpace(runID)
 	if runID == "" {
 		return fmt.Errorf("publish TUI run event: run id is required")
+	}
+	// Every way a run ends carries its checklist facts: the worked line closes
+	// every run, and it names the checklist however the run ended.
+	switch ending := payload.(type) {
+	case event.TurnCancelledPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
+	case event.TurnErrorPayload:
+		ending.RunPlanFacts = s.runPlanFacts(ctx, runID)
+		payload = ending
 	}
 	return s.publishRunEvent(ctx, event.NewRunEvent("", runID, strings.TrimSpace(sessionID), eventType, payload, time.Now()))
 }
