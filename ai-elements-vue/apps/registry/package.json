@@ -7,7 +7,7 @@
     "dev": "nitro dev --port 3001"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.24.3",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "shadcn-vue": "^2.4.1",
     "zod": "catalog:"
   },
