@@ -1,18 +1,19 @@
 package config
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 )
 
-// ChannelsSection is one primary agent's delivery channels.
+// ChannelsSection is one project's delivery channels.
 //
-// Channels are tenant data, not process-wide settings: the bot that carries a
-// conversation in from Feishu or Telegram belongs to exactly one primary agent,
-// the same way that agent's workspace, memories, sessions and skills do. They
-// therefore live under agents.definitions.<id>.channels and are reached only
-// through ChannelsForAgent — there is deliberately no Root-level channel
-// configuration for a caller to read without naming an agent.
+// Channels are project data, not agent-level settings: the bot that carries a
+// conversation in from Feishu or Telegram belongs to exactly one project, the
+// same way that project's conversations, memories and skills do. A section is
+// therefore stored per project (in the state database, as this struct's JSON)
+// rather than under agents.definitions.<id>; there is deliberately no
+// agent-level channel configuration for a caller to read.
 type ChannelsSection struct {
 	WeCom         WeCom         `yaml:"wecom,omitempty" json:"wecom,omitempty"`
 	WeComCallback WeComCallback `yaml:"wecom_callback,omitempty" json:"wecom_callback,omitempty"`
@@ -34,31 +35,11 @@ type ChannelsSection struct {
 	QQ            QQ            `yaml:"qq,omitempty" json:"qq,omitempty"`
 }
 
-// ChannelsForAgent returns the channels configured for one primary agent.
-//
-// An agent with no definition, or a definition with no channels, has no
-// channels: the result is the zero section and never another agent's
-// configuration. Falling back to "main" here would restore exactly the global
-// behavior this scoping exists to remove.
-func ChannelsForAgent(r *Root, agentID string) ChannelsSection {
-	if r == nil {
-		return ChannelsSection{}
-	}
-	return r.Agents.Definitions[strings.TrimSpace(agentID)].Channels
-}
-
-// IsZero reports whether an agent declared no channels at all. It is how
-// validation tells "this definition has channels" from "this definition has
-// none", so it must be asked before normalizeChannels fills in any defaults.
-func (c ChannelsSection) IsZero() bool {
-	return reflect.DeepEqual(c, ChannelsSection{})
-}
-
-// normalizeChannels trims every free-form field and fills in the defaults for
-// one agent's channels. Only primary agents are normalized (see normalize):
-// materializing channel defaults onto a subagent definition would write
-// configuration that can never take effect into forebrain.yaml.
-func normalizeChannels(c *ChannelsSection) {
+// NormalizeChannels trims every free-form field and fills in the defaults for
+// one project's channels. A section read back from the state database goes
+// through this so a stored channel is rendered with the same defaults a
+// freshly written one has.
+func NormalizeChannels(c *ChannelsSection) {
 	if c == nil {
 		return
 	}
@@ -108,24 +89,72 @@ func setDefault(dst *string, fallback string) {
 	}
 }
 
-// SetChannelsForAgent writes a section back onto an agent definition. Agent
-// definitions live in a map, so their fields are not addressable and every
-// read-modify-write of a section (first-run setup, external configuration
-// edits, or a Weixin credential merge) has to round-trip through here.
-func SetChannelsForAgent(r *Root, agentID string, ch ChannelsSection) {
-	if r == nil {
+// ParseChannelsSectionJSON reads one project's channel section from the JSON
+// the state database stores: it fills in the kind defaults and resolves the
+// ${VAR} references a secret field carries against the process environment,
+// which the loader has already merged ~/.forebrain/.env into.
+func ParseChannelsSectionJSON(s string) (ChannelsSection, error) {
+	var sec ChannelsSection
+	if raw := strings.TrimSpace(s); raw != "" && raw != "{}" {
+		if err := json.Unmarshal([]byte(raw), &sec); err != nil {
+			return ChannelsSection{}, err
+		}
+	}
+	NormalizeChannels(&sec)
+	ExpandChannelEnvReferences(&sec)
+	return sec, nil
+}
+
+// ParseChannelKindJSON reads one kind's stored config — the JSON of that kind's
+// own struct, which is what a (project, kind) row holds — as a section with
+// that kind filled in. It is the read path for a bound channel.
+func ParseChannelKindJSON(kind, s string) (ChannelsSection, error) {
+	raw := strings.TrimSpace(s)
+	if raw == "" || raw == "{}" {
+		return ChannelsSection{}, nil
+	}
+	return ParseChannelsSectionJSON(`{"` + strings.TrimSpace(kind) + `":` + raw + `}`)
+}
+
+// MarshalChannelsSection renders a section as the JSON the state database
+// stores. Secret fields keep their ${VAR} references, never the value.
+func MarshalChannelsSection(sec ChannelsSection) (string, error) {
+	b, err := json.Marshal(sec)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// ChannelKindDefaults returns one kind's fields as a section with every default
+// filled in, so a surface can render a card for a kind that has nothing stored
+// yet without hard-coding the fields.
+func ChannelKindDefaults(kind string) map[string]any {
+	var sec ChannelsSection
+	NormalizeChannels(&sec)
+	raw, err := json.Marshal(sec)
+	if err != nil {
+		return map[string]any{}
+	}
+	var all map[string]map[string]any
+	if err := json.Unmarshal(raw, &all); err != nil {
+		return map[string]any{}
+	}
+	if m, ok := all[strings.TrimSpace(kind)]; ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+// ExpandChannelEnvReferences replaces the ${VAR} references a channel section
+// carries with the values of the process environment, the same expansion the
+// loader applies to forebrain.yaml. A channel read back from the state
+// database resolves its secrets by this path.
+func ExpandChannelEnvReferences(ch *ChannelsSection) {
+	if ch == nil {
 		return
 	}
-	id := strings.TrimSpace(agentID)
-	if id == "" {
-		return
-	}
-	if r.Agents.Definitions == nil {
-		r.Agents.Definitions = map[string]AgentDefinition{}
-	}
-	def := r.Agents.Definitions[id]
-	def.Channels = ch
-	r.Agents.Definitions[id] = def
+	expandStringEnvReferences(reflect.ValueOf(ch))
 }
 
 type Feishu struct {

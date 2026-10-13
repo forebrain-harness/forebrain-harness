@@ -1931,7 +1931,7 @@ INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated
 INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_at) VALUES('job-p2','main','P2S','schedule','ok',60);
 INSERT INTO fb_projects(id, agent_id, name, root, project_key, archived_at, created_at, updated_at)
  VALUES('prj-arch','main','arch','%[5]s','karch',1700000000,70,70);
-INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at) VALUES('job-orphan','main',NULL,'every 1h',80,80);
+INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at) VALUES('job-orphan','main','','every 1h',80,80);
 INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_at) VALUES('job-orphan','main','','schedule','ok',80);
 `, rootAB, rootC, rootE, dupRoot, archRoot, workshopRoot)
 	if _, err := db.Exec(script); err != nil {

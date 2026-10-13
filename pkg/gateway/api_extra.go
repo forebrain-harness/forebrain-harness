@@ -18,6 +18,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"github.com/forebrain-harness/forebrain-harness/pkg/assembly"
+	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -202,6 +203,19 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
 	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
 
+	// Scheduled tasks and channels belong to a project, so their routes hang
+	// off the project they configure.
+	projects.Get("/:id/cron/jobs", s.handleCronJobs)
+	projects.Post("/:id/cron/jobs", s.handleCronJobs)
+	projects.Post("/:id/cron/preview", s.handleCronPreview)
+	projects.Get("/:id/cron/jobs/:jobId", s.handleCronJob)
+	projects.Put("/:id/cron/jobs/:jobId", s.handleCronJob)
+	projects.Delete("/:id/cron/jobs/:jobId", s.handleCronJob)
+	projects.Post("/:id/cron/jobs/:jobId/run", s.handleCronJobRun)
+	projects.Get("/:id/cron/jobs/:jobId/runs", s.handleCronJobRuns)
+	projects.Get("/:id/channels", s.handleChannels)
+	projects.Put("/:id/channels", s.handleChannels)
+
 	// Project-scoped skill lifecycle: /projects/:id/skills mirrors /skills
 	// operation for operation, scoped to the route's project.
 	projects.Get("/:id/skills", s.handleProjectSkillsList)
@@ -252,16 +266,6 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	files.Post("/:id/parse", s.handleFileParse)
 	files.Get("/:id/text", s.handleFileText)
 
-	cron := api.Group("/cron")
-	cron.Get("/", s.handleCronJobs)
-	cron.Post("/preview", s.handleCronPreview)
-	cron.Post("/", s.handleCronJobs)
-	cron.Get("/:id", s.handleCronJob)
-	cron.Put("/:id", s.handleCronJob)
-	cron.Delete("/:id", s.handleCronJob)
-	cron.Post("/:id/run", s.handleCronJobRun)
-	cron.Get("/:id/runs", s.handleCronJobRuns)
-
 	api.Get("/heartbeats", s.handleHeartbeats)
 	api.Get("/heartbeat", s.handleHeartbeat)
 	api.Put("/heartbeat", s.handleHeartbeat)
@@ -272,8 +276,6 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	api.Get("/config", s.handleConfigFile)
 	api.Put("/config", s.handleConfigFile)
-	api.Get("/channels", s.handleChannels)
-	api.Put("/channels", s.handleChannels)
 	api.Get("/providers", s.handleProviders)
 	api.Put("/providers", s.handleProviders)
 	api.Get("/hooks", s.handleHooks)
@@ -4612,51 +4614,228 @@ func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleChannels reads and writes the active primary agent's channels. They are
-// tenant data: a channel binds an external account to one agent's sessions, so
-// the write lands in that agent's definition and nowhere else.
+// handleChannels reads and writes one project's channels. Channels are project
+// data: a channel binds an external account to one project's conversations, so
+// the write lands in that project's rows and nowhere else. GET returns each
+// kind's stored config with its secret fields masked; PUT writes the kinds the
+// body names, leaving a masked secret untouched.
 func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
-	active, err := s.activePrimarySummary()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	project, agentID, ok := s.projectScope(w, r)
+	if !ok {
+		return
+	}
+	store := s.projectChannelStore(agentID)
+	if store == nil {
+		http.Error(w, "channels unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		cfg, err := s.persistedConfig()
+		rows, err := store.List(r.Context(), project.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		section := config.ChannelsForAgent(&cfg, active.ID)
-		config.RedactSecrets(&section)
-		writeAgentsJSON(w, map[string]any{"agent_id": active.ID, "channels": section})
+		stored := map[string]state.ProjectChannel{}
+		for _, row := range rows {
+			stored[row.Kind] = row
+		}
+		// Every kind the engine can build is offered, so a page can configure a
+		// channel a project has nothing stored for; a kind with no row is
+		// rendered from its own defaults.
+		out := map[string]any{}
+		for _, kind := range channel.ChannelKinds {
+			fields := map[string]any{}
+			if row, ok := stored[kind]; ok {
+				if raw := strings.TrimSpace(row.ConfigJSON); raw != "" && raw != "{}" {
+					if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+						continue
+					}
+				}
+				fields["enabled"] = row.Enabled
+			} else {
+				for k, v := range config.ChannelKindDefaults(kind) {
+					fields[k] = v
+				}
+				fields["enabled"] = false
+			}
+			redactChannelFields(fields)
+			out[kind] = fields
+		}
+		writeAgentsJSON(w, map[string]any{"project_id": project.ID, "kinds": channel.ChannelKinds, "channels": out})
 	case http.MethodPut:
-		var section config.ChannelsSection
+		var section map[string]map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&section); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		config.ClearRedactedSecrets(&section)
-		cfg, err := s.persistedConfig()
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if cfg.Agents.Definitions == nil {
-			cfg.Agents.Definitions = map[string]config.AgentDefinition{}
-		}
-		def := cfg.Agents.Definitions[active.ID]
-		def.Channels = section
-		cfg.Agents.Definitions[active.ID] = def
-		if err := s.saveAndReload(cfg); err != nil {
+		if err := s.saveProjectChannels(r.Context(), store, project.ID, section); err != nil {
+			var taken state.ErrChannelAccountTaken
+			if errors.As(err, &taken) {
+				http.Error(w, taken.Error(), http.StatusConflict)
+				return
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeAgentsJSON(w, configWriteResult{Path: s.configPath(), AgentID: active.ID, Applied: true})
+		// The channels just changed, so the running set is rebound.
+		if active, aerr := s.activePrimarySummary(); aerr == nil {
+			s.bindChannelsTo(r.Context(), active)
+		}
+		writeAgentsJSON(w, map[string]any{"project_id": project.ID, "applied": true})
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
+}
+
+// saveProjectChannels writes the kinds a page submitted and clears the ones it
+// dropped, so the stored set matches what the page showed. A kind whose secret
+// came back masked keeps the stored value under it.
+func (s *Server) saveProjectChannels(ctx context.Context, store *state.ProjectChannelStore, projectID string, section map[string]map[string]any) error {
+	existing, err := store.List(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	kept := map[string]bool{}
+	for kind, fields := range section {
+		kind = strings.TrimSpace(kind)
+		if kind == "" {
+			continue
+		}
+		kept[kind] = true
+		prior, hasPrior := channelRowFor(existing, kind)
+		// A masked secret that came back untouched keeps the stored value: the
+		// page never saw it, so it must not overwrite it with the mask.
+		mergeRedactedChannelFields(fields, prior.ConfigJSON, hasPrior)
+		enabled, _ := fields["enabled"].(bool)
+		delete(fields, "enabled")
+		// Every secret the page typed is moved to ~/.forebrain/.env and left in
+		// the stored config only as a ${VAR} reference, so the state database
+		// carries no plaintext credential.
+		s.storeChannelSecretRefs(projectID, kind, fields)
+		raw, merr := json.Marshal(fields)
+		if merr != nil {
+			return merr
+		}
+		accountKey := channelAccountKey(kind, raw)
+		if err := store.Upsert(ctx, state.ProjectChannel{
+			ProjectID:  projectID,
+			Kind:       kind,
+			Enabled:    enabled,
+			ConfigJSON: string(raw),
+			AccountKey: accountKey,
+		}); err != nil {
+			return err
+		}
+	}
+	for _, row := range existing {
+		if kept[row.Kind] {
+			continue
+		}
+		if err := store.Delete(ctx, projectID, row.Kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func channelRowFor(rows []state.ProjectChannel, kind string) (state.ProjectChannel, bool) {
+	for _, row := range rows {
+		if row.Kind == kind {
+			return row, true
+		}
+	}
+	return state.ProjectChannel{}, false
+}
+
+// redactChannelFields masks every secret field a page reads back. An empty
+// field stays empty: "unset" and "set but hidden" are different facts.
+func redactChannelFields(fields map[string]any) {
+	for k, v := range fields {
+		if !config.IsSecretLikeConfigKey(k) {
+			continue
+		}
+		if s, ok := v.(string); ok && s != "" {
+			fields[k] = config.RedactedSecretPlaceholder
+		}
+	}
+}
+
+// mergeRedactedChannelFields restores the stored value under a secret field the
+// page sent back untouched (its masked placeholder), so a round-tripped form
+// keeps the secret already on disk. A masked field with nothing stored before
+// is dropped rather than saved as the mask.
+func mergeRedactedChannelFields(fields map[string]any, priorJSON string, hasPrior bool) {
+	var prior map[string]any
+	if hasPrior {
+		_ = json.Unmarshal([]byte(strings.TrimSpace(priorJSON)), &prior)
+	}
+	for k, v := range fields {
+		if !config.IsSecretLikeConfigKey(k) {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok || s != config.RedactedSecretPlaceholder {
+			continue
+		}
+		if pv, ok := prior[k].(string); ok && strings.TrimSpace(pv) != "" {
+			fields[k] = pv
+			continue
+		}
+		delete(fields, k)
+	}
+}
+
+// storeChannelSecretRefs moves every plaintext secret a page typed into the
+// home's .env and replaces it in place with the ${VAR} reference the state
+// database stores. A field that already holds a reference is left as it is.
+func (s *Server) storeChannelSecretRefs(projectID, kind string, fields map[string]any) {
+	for k, v := range fields {
+		if !config.IsSecretLikeConfigKey(k) {
+			continue
+		}
+		str, ok := v.(string)
+		if !ok || strings.TrimSpace(str) == "" {
+			continue
+		}
+		ref, err := process.SecretConfigReferenceForOnboard(s.Home, process.ChannelSecretEnvNameForProject(projectID, kind, k), str)
+		if err != nil {
+			continue
+		}
+		fields[k] = ref
+	}
+}
+
+// channelAccountKey computes the account identity a project channel's stored
+// config speaks as, resolving its ${VAR} secrets the way a bind would, so one
+// bot account cannot silently belong to two projects.
+func channelAccountKey(kind string, rawJSON []byte) string {
+	section, err := config.ParseChannelsSectionJSON(`{"` + kind + `":` + string(rawJSON) + `}`)
+	if err != nil {
+		return ""
+	}
+	return channel.AccountKey(kind, section)
+}
+
+// projectScope resolves the project a route's :id names, on behalf of the
+// active primary agent, answering the request itself when either is
+// unavailable.
+func (s *Server) projectScope(w http.ResponseWriter, r *http.Request) (state.Project, string, bool) {
+	active, err := s.activePrimarySummary()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return state.Project{}, "", false
+	}
+	if s.Env == nil || s.Env.SQL == nil {
+		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+		return state.Project{}, "", false
+	}
+	project, err := state.NewProjectStore(s.Env.SQL, active.ID).Get(r.Context(), strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")))
+	if err != nil {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return state.Project{}, "", false
+	}
+	return project, active.ID, true
 }
 
 // handleProviders reads and writes the active agent's model providers. The list
@@ -4976,7 +5155,8 @@ type cronJobRequest struct {
 	Deliver     string `json:"deliver"`
 	Enabled     *bool  `json:"enabled"`
 	RepeatLimit int    `json:"repeat_limit"`
-	// ProjectID binds the job to one project; empty is an agent-wide job.
+	// ProjectID is ignored on the wire: a job belongs to the project the route
+	// names, which the handler supplies.
 	ProjectID string `json:"project_id"`
 }
 
@@ -5010,47 +5190,34 @@ func (s *Server) cronScope(w http.ResponseWriter) (*process.CronService, string,
 }
 
 func (s *Server) handleCronJobs(w http.ResponseWriter, r *http.Request) {
-	svc, agentID, ok := s.cronScope(w)
+	svc := s.cron()
+	if svc == nil {
+		http.Error(w, "cron service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	project, agentID, ok := s.projectScope(w, r)
 	if !ok {
 		return
 	}
 	switch r.Method {
 	case http.MethodGet:
-		jobs, err := svc.ListJobs(r.Context(), agentID)
+		jobs, err := svc.ListJobsForProject(r.Context(), agentID, project.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// The layer split the two cron surfaces ask for: the agent page lists
-		// only agent-wide jobs, a project tab only its own. Either way the
-		// filter is in memory — the standing-job count per agent is small and
-		// the storage interface stays untouched.
-		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
-		if projectID != "" {
-			store := s.projectStore()
-			if store == nil {
-				http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			if _, err := store.Get(r.Context(), projectID); err != nil {
-				http.Error(w, "project not found", http.StatusNotFound)
-				return
-			}
-		}
-		filtered := jobs[:0]
-		for _, job := range jobs {
-			if strings.TrimSpace(job.ProjectID) == projectID {
-				filtered = append(filtered, job)
-			}
-		}
-		writeAgentsJSON(w, map[string]any{"agent_id": agentID, "records": filtered})
+		writeAgentsJSON(w, map[string]any{"agent_id": agentID, "project_id": project.ID, "records": jobs})
 	case http.MethodPost:
 		var req cronJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		job, err := svc.CreateJob(r.Context(), agentID, req.input())
+		in := req.input()
+		// The job belongs to the project the route names, not to anything the
+		// body claims.
+		in.ProjectID = project.ID
+		job, err := svc.CreateJob(r.Context(), agentID, in)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -5062,11 +5229,16 @@ func (s *Server) handleCronJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCronJob(w http.ResponseWriter, r *http.Request) {
-	svc, agentID, ok := s.cronScope(w)
+	svc := s.cron()
+	if svc == nil {
+		http.Error(w, "cron service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	project, agentID, ok := s.projectScope(w, r)
 	if !ok {
 		return
 	}
-	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("jobId"))
 	switch r.Method {
 	case http.MethodGet:
 		job, err := svc.Job(r.Context(), agentID, id)
@@ -5081,7 +5253,9 @@ func (s *Server) handleCronJob(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		job, err := svc.UpdateJob(r.Context(), agentID, id, req.input())
+		in := req.input()
+		in.ProjectID = project.ID
+		job, err := svc.UpdateJob(r.Context(), agentID, id, in)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -5106,11 +5280,16 @@ func (s *Server) handleCronJobRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	svc, agentID, ok := s.cronScope(w)
+	svc := s.cron()
+	if svc == nil {
+		http.Error(w, "cron service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	_, agentID, ok := s.projectScope(w, r)
 	if !ok {
 		return
 	}
-	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("jobId"))
 	if err := svc.RunJobNow(context.Background(), agentID, id); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -5123,11 +5302,16 @@ func (s *Server) handleCronJobRuns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	svc, agentID, ok := s.cronScope(w)
+	svc := s.cron()
+	if svc == nil {
+		http.Error(w, "cron service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	_, agentID, ok := s.projectScope(w, r)
 	if !ok {
 		return
 	}
-	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("jobId"))
 	limit := 50
 	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

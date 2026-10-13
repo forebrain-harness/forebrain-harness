@@ -78,21 +78,25 @@ func TestListHeartbeatsKeepsToOneAgent(t *testing.T) {
 	}
 }
 
-// TestListJobsForProjectReadsUnboundJobsAsNoProject pins that the empty
-// project names the agent's jobs bound to no project, which the table records
-// as NULL rather than as an empty string.
-func TestListJobsForProjectReadsUnboundJobsAsNoProject(t *testing.T) {
+// TestListJobsForProjectReadsOnlyThatProjectsJobs pins that the list is scoped
+// to the project it names: another project's jobs stay out.
+func TestListJobsForProjectReadsOnlyThatProjectsJobs(t *testing.T) {
 	ctx := context.Background()
 	store := &CronStore{DB: openSessionDB(t)}
-	if err := store.InsertJob(ctx, CronJob{ID: "job-free", Ag: "main", Sched: "every 1h"}); err != nil {
-		t.Fatal(err)
+	for _, j := range []CronJob{
+		{ID: "job-a", Ag: "main", ProjectID: "prj-a", Sched: "every 1h"},
+		{ID: "job-b", Ag: "main", ProjectID: "prj-b", Sched: "every 1h"},
+	} {
+		if err := store.InsertJob(ctx, j); err != nil {
+			t.Fatal(err)
+		}
 	}
-	jobs, err := store.ListJobsForProject(ctx, "main", "")
+	jobs, err := store.ListJobsForProject(ctx, "main", "prj-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 1 || jobs[0].ID != "job-free" {
-		t.Fatalf("unbound jobs = %+v, want job-free", jobs)
+	if len(jobs) != 1 || jobs[0].ID != "job-a" {
+		t.Fatalf("project jobs = %+v, want only job-a", jobs)
 	}
 }
 
@@ -134,7 +138,7 @@ func TestFinishRunClosesAFireOnce(t *testing.T) {
 func TestFireDeliveryMarksRecordWhatBecameOfTheAnswer(t *testing.T) {
 	ctx := context.Background()
 	store := &CronStore{DB: openSessionDB(t)}
-	if err := store.InsertJob(ctx, CronJob{ID: "job-1", Ag: "main", Sched: "every 1h"}); err != nil {
+	if err := store.InsertJob(ctx, CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Sched: "every 1h"}); err != nil {
 		t.Fatal(err)
 	}
 	delivered, err := store.StartRun(ctx, CronRun{JobID: "job-1", AgentID: "main", SessionID: "cron-job-1-1", Trigger: "schedule"})

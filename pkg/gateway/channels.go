@@ -9,9 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -19,17 +21,50 @@ import (
 )
 
 // bindChannelsTo switches the running channel set to the given primary agent.
-// P8-6 leaves the gateway only the optional mounting of channel routes, so the
-// build-and-bind operation itself lives on the registry (Registry.BindAgent);
-// all that is left here is naming the agent and reporting a failure, because
-// one misconfigured bot token must not take the gateway down.
+// Channels are project data, so what is bound is the agent's enabled project
+// channels from the state database, each as its own instance carrying the
+// project it serves. The build-and-bind operation itself lives on the registry
+// (Registry.BindProjects); all that is left here is naming the agent and
+// reporting a failure, because one misconfigured bot token must not take the
+// gateway down.
 func (s *Server) bindChannelsTo(ctx context.Context, active config.Summary) {
 	if s == nil || s.Channels == nil {
 		return
 	}
-	if err := s.Channels.BindAgent(ctx, s.liveCfg(), active.ID, active.WorkspaceRoot, s.bus()); err != nil {
+	if err := s.Channels.BindProjects(ctx, active.ID, s.projectChannelBindings(ctx, active), s.bus()); err != nil {
 		slog.Error("channel bind", "agent", active.ID, "err", err)
 	}
+}
+
+// projectChannelBindings reads the active agent's enabled project channels and
+// builds the running channel set from them. A channel whose stored config
+// cannot be read is reported and skipped rather than taking the whole bind
+// down.
+func (s *Server) projectChannelBindings(ctx context.Context, active config.Summary) []channel.BoundChannel {
+	store := s.projectChannelStore(active.ID)
+	if store == nil {
+		return nil
+	}
+	rows, err := store.ListEnabledForAgent(ctx)
+	if err != nil {
+		slog.Error("channel bind: list project channels", "agent", active.ID, "err", err)
+		return nil
+	}
+	configs := make([]channel.ProjectChannelConfig, 0, len(rows))
+	for _, row := range rows {
+		section, perr := config.ParseChannelKindJSON(row.Kind, row.ConfigJSON)
+		if perr != nil {
+			slog.Warn("channel bind: parse channel config", "agent", active.ID, "project", row.ProjectID, "kind", row.Kind, "err", perr)
+			continue
+		}
+		// Weixin keeps its login on disk instead of in the stored section; fold
+		// it in the way the pre-project configuration did.
+		if row.Kind == "weixin" {
+			channel.MergePersistedClawbot(&section, active.WorkspaceRoot)
+		}
+		configs = append(configs, channel.ProjectChannelConfig{ProjectID: row.ProjectID, Kind: row.Kind, Section: section})
+	}
+	return channel.BuildProjectChannels(configs, active.WorkspaceRoot)
 }
 
 // channelHandler mounts the bound channels' inbound endpoints ahead of the
@@ -56,7 +91,7 @@ func (s *Server) channelHandler(inner http.Handler) http.Handler {
 //     error string — and the run was left paused with nobody able to act on it.
 //   - The per-session foreground lock is taken once, by Submit, instead of by
 //     the gateway's own wrapper.
-func (s *Server) submitChannelTurn(ctx context.Context, channelID, sessionID, input, rawInput string, skillName, skillPath string) (turn.TurnOutcome, bool) {
+func (s *Server) submitChannelTurn(ctx context.Context, channelID, projectID, sessionID, input, rawInput string, skillName, skillPath string) (turn.TurnOutcome, bool) {
 	if s == nil || s.Core == nil {
 		return turn.TurnOutcome{}, false
 	}
@@ -65,10 +100,31 @@ func (s *Server) submitChannelTurn(ctx context.Context, channelID, sessionID, in
 	// approval still has it, and it belongs to the run once the run exists.
 	// The run folds a stored trailing message into its own input, so the model
 	// is sent exactly what it was sent before.
+	//
+	// The conversation is born in the project whose channel carried it in: its
+	// directory is the project root and it is filed under that project, so it
+	// runs on the project's own runner. A message whose project cannot be
+	// resolved falls back to the plain birth every ordinary session gets.
 	var userRowID int64
 	if s.Sessions != nil {
+		ensure := true
+		if pid := strings.TrimSpace(projectID); pid != "" {
+			if p, perr := s.projectStore().Get(ctx, pid); perr == nil {
+				birth := state.SessionBirth{Cwd: p.Root, GitBranch: memory.GitBranch(p.Root), ProjectID: p.ID}
+				if eerr := s.Sessions.EnsureAt(ctx, sessionID, sessionID, birth); eerr == nil {
+					if berr := s.bindSessionToProject(ctx, sessionID, p); berr != nil {
+						slog.Error("channel session project bind", "channel", channelID, "session", sessionID, "err", berr)
+					}
+					ensure = false
+				} else {
+					slog.Error("channel session birth", "channel", channelID, "session", sessionID, "err", eerr)
+				}
+			} else {
+				slog.Error("channel session project", "channel", channelID, "project", pid, "err", perr)
+			}
+		}
 		userRowID, _ = turn.PersistUserTurn(ctx, s.Sessions, turn.UserTurn{
-			SessionID: sessionID, ModelInput: input, RawInput: rawInput, EnsureSession: true,
+			SessionID: sessionID, ModelInput: input, RawInput: rawInput, EnsureSession: ensure,
 		})
 	}
 	out, err := s.Core.Submit(ctx, turn.TurnRequest{

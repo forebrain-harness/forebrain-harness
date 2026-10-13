@@ -14,28 +14,22 @@ type Options struct {
 	// main agent, which is what onboarding and `forebrain setup` configure. The
 	// TUI's /connect passes the active primary agent so the session it is
 	// running configures itself rather than main.
-	AgentName      string
-	Provider       string
-	APIKey         string
-	BaseURL        string
-	APIPath        string
-	Model          string
-	ParamsJSON     string
-	UpdateParams   bool
-	UpdateChannels bool
-	EnableWeixin   bool
-	EnableFeishu   bool
-	EnableDingtalk bool
-	EnableQQ       bool
+	AgentName    string
+	Provider     string
+	APIKey       string
+	BaseURL      string
+	APIPath      string
+	Model        string
+	ParamsJSON   string
+	UpdateParams bool
 }
 
 type Report struct {
-	Home         string
-	ConfigPath   string
-	AgentName    string
-	Provider     string
-	Model        string
-	PlatformList []string
+	Home       string
+	ConfigPath string
+	AgentName  string
+	Provider   string
+	Model      string
 }
 
 func Execute(rt Context, opts Options) (Report, error) {
@@ -44,9 +38,8 @@ func Execute(rt Context, opts Options) (Report, error) {
 		ConfigPath: rt.ConfigPath,
 	}
 	logSetupEvent(rt.Home, "setup.execute.start", opts, map[string]any{
-		"config_path":     rt.ConfigPath,
-		"update_params":   opts.UpdateParams,
-		"update_channels": opts.UpdateChannels,
+		"config_path":   rt.ConfigPath,
+		"update_params": opts.UpdateParams,
 	})
 	if strings.TrimSpace(opts.Provider) == "" {
 		logSetupError(rt.Home, "setup.execute.validation_error", opts, "provider required in non-interactive mode")
@@ -63,17 +56,6 @@ func Execute(rt Context, opts Options) (Report, error) {
 	if strings.TrimSpace(opts.BaseURL) == "" {
 		logSetupError(rt.Home, "setup.execute.validation_error", opts, "base_url required in non-interactive mode")
 		return rep, fmt.Errorf("base_url required in non-interactive mode")
-	}
-	// Channels belong to the agent being configured, so the toggles land on
-	// that agent's section and nowhere else.
-	channelAgent := agentNameOrMain(opts.AgentName)
-	if opts.UpdateChannels {
-		channels := appcfg.ChannelsForAgent(&rt.Config, channelAgent)
-		channels.Weixin.Enabled = opts.EnableWeixin
-		channels.Feishu.Enabled = opts.EnableFeishu
-		channels.Dingtalk.Enabled = opts.EnableDingtalk
-		channels.QQ.Enabled = opts.EnableQQ
-		appcfg.SetChannelsForAgent(&rt.Config, channelAgent, channels)
 	}
 	var parsed appcfg.LLMRequestParams
 	if opts.UpdateParams {
@@ -112,19 +94,6 @@ func Execute(rt Context, opts Options) (Report, error) {
 	rep.AgentName = agentName
 	rep.Provider = updated.Provider
 	rep.Model = updated.Model
-	reportChannels := appcfg.ChannelsForAgent(&rt.Config, channelAgent)
-	if reportChannels.Weixin.Enabled {
-		rep.PlatformList = append(rep.PlatformList, "weixin")
-	}
-	if reportChannels.Feishu.Enabled {
-		rep.PlatformList = append(rep.PlatformList, "feishu")
-	}
-	if reportChannels.Dingtalk.Enabled {
-		rep.PlatformList = append(rep.PlatformList, "dingtalk")
-	}
-	if reportChannels.QQ.Enabled {
-		rep.PlatformList = append(rep.PlatformList, "qq")
-	}
 	_ = home.EnsureWorkspace(rt.Home, home.EnsureOptions{})
 	logSetupEvent(rt.Home, "setup.execute.success", opts, map[string]any{
 		"config_path": rt.ConfigPath,

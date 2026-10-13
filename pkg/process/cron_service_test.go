@@ -387,14 +387,14 @@ func TestSettleFireAndFireParkedReachTheBoundScheduler(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	job := state.CronJob{ID: "job-1", Ag: "main", Sched: "every 1h", Prompt: "x", Deliver: "fake", Enabled: true}
+	job := state.CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Deliver: "fake", Enabled: true}
 	if err := turn.ApplySchedule(&job, time.Now().Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := cronStore.InsertJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	parked := state.CronJob{ID: "job-2", Ag: "main", Sched: "every 1h", Prompt: "y", Deliver: "fake", Enabled: true}
+	parked := state.CronJob{ID: "job-2", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "y", Deliver: "fake", Enabled: true}
 	if err := turn.ApplySchedule(&parked, time.Now().Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}

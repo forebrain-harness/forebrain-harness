@@ -90,6 +90,7 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 	if err := runStartupHook(StartupLoadConfig, hooks); err != nil {
 		return Context{}, err
 	}
+	MigrateLegacyChannels(cfgPath)
 	cfg, err := appcfg.Load(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) && cfgPath == homepkg.ConfigPath(home) {

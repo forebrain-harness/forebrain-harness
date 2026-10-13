@@ -60,6 +60,7 @@ const tabs = computed(() => [
   { key: 'lsp', routeName: 'project-lsp', label: t('projects.tabLsp') },
   { key: 'skills', routeName: 'project-skills', label: t('projects.tabSkills') },
   { key: 'cron', routeName: 'project-cron', label: t('projects.tabCron') },
+  { key: 'channels', routeName: 'project-channels', label: t('projects.tabChannels') },
 ])
 
 async function load() {

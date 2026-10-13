@@ -122,7 +122,7 @@ func TestSchedulerFiresDueJobInItsOwnSessionAndReschedules(t *testing.T) {
 	stub := &fireStub{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
 
-	job := state.CronJob{ID: "job-1", Ag: "main", Name: "hourly", Sched: "every 1h", Prompt: "check the queue", Deliver: "telegram", Enabled: true}
+	job := state.CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Name: "hourly", Sched: "every 1h", Prompt: "check the queue", Deliver: "telegram", Enabled: true}
 	if err := ApplySchedule(&job, now.Add(-2*time.Hour)); err != nil {
 		t.Fatalf("ApplySchedule: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestSchedulerConsumesAOneShotJob(t *testing.T) {
 	stub := &fireStub{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
 
-	job := state.CronJob{ID: "job-once", Ag: "main", Sched: "in 1m", Prompt: "remind me", Enabled: true}
+	job := state.CronJob{ID: "job-once", Ag: "main", ProjectID: "prj-1", Sched: "in 1m", Prompt: "remind me", Enabled: true}
 	if err := ApplySchedule(&job, now.Add(-2*time.Minute)); err != nil {
 		t.Fatalf("ApplySchedule: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestSchedulerSeparatesRunFailureFromDeliveryFailure(t *testing.T) {
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
 
 	failing := &fireStub{}
-	job := state.CronJob{ID: "job-fail", Ag: "main", Sched: "every 1h", Prompt: "x", Enabled: true}
+	job := state.CronJob{ID: "job-fail", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Enabled: true}
 	_ = ApplySchedule(&job, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job)
 	s := &Scheduler{Store: store, AgentID: "main", Deps: fireDeps(failing, nil, func() time.Time { return now })}
@@ -252,7 +252,7 @@ func TestSchedulerSeparatesRunFailureFromDeliveryFailure(t *testing.T) {
 	// The work succeeded and only the delivery failed.
 	undeliverable := &recorder{deliverErr: errDelivery{}}
 	undelivered := &fireStub{}
-	job2 := state.CronJob{ID: "job-undeliverable", Ag: "main", Sched: "every 1h", Prompt: "x", Deliver: "slack", Enabled: true}
+	job2 := state.CronJob{ID: "job-undeliverable", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Deliver: "slack", Enabled: true}
 	_ = ApplySchedule(&job2, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job2)
 	s2 := &Scheduler{Store: store, AgentID: "main", Deps: fireDeps(undelivered, undeliverable.deliver, func() time.Time { return now })}
@@ -285,7 +285,7 @@ func TestSchedulerSeparatesRunFailureFromDeliveryFailure(t *testing.T) {
 	// A job told to deliver where no delivery channel is bound at all records
 	// its own code, not the delivery-failed one.
 	channelless := &fireStub{}
-	job3 := state.CronJob{ID: "job-channelless", Ag: "main", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
+	job3 := state.CronJob{ID: "job-channelless", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
 	_ = ApplySchedule(&job3, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job3)
 	s3 := &Scheduler{Store: store, AgentID: "main", Deps: fireDeps(channelless, nil, func() time.Time { return now })}
@@ -320,7 +320,7 @@ func TestSchedulerOnlyFiresItsOwnAgentsJobs(t *testing.T) {
 	stub := &fireStub{}
 	now := time.Now()
 
-	other := state.CronJob{ID: "job-other", Ag: "research", Sched: "every 1h", Prompt: "not yours", Enabled: true}
+	other := state.CronJob{ID: "job-other", Ag: "research", ProjectID: "prj-r", Sched: "every 1h", Prompt: "not yours", Enabled: true}
 	_ = ApplySchedule(&other, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, other)
 
@@ -415,7 +415,7 @@ func TestSchedulerKeepsAPauseMadeWhileAJobRuns(t *testing.T) {
 	store := testStore(t)
 	stub := &fireStub{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
-	job := state.CronJob{ID: "job-pause", Ag: "main", Sched: "every 1h", Prompt: "x", Enabled: true}
+	job := state.CronJob{ID: "job-pause", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Enabled: true}
 	if err := ApplySchedule(&job, now.Add(-2*time.Hour)); err != nil {
 		t.Fatalf("ApplySchedule: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestSchedulerDoesNotResurrectAJobDeletedWhileItRuns(t *testing.T) {
 	stub := &fireStub{}
 	rec := &recorder{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
-	job := state.CronJob{ID: "job-del", Ag: "main", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
+	job := state.CronJob{ID: "job-del", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
 	if err := ApplySchedule(&job, now.Add(-2*time.Hour)); err != nil {
 		t.Fatalf("ApplySchedule: %v", err)
 	}
@@ -520,7 +520,7 @@ func TestTwoSchedulersFireOneDueJobOnce(t *testing.T) {
 	store := testStore(t)
 	stub := &fireStub{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
-	job := state.CronJob{ID: "job-shared", Ag: "main", Sched: "every 1h", Prompt: "x", Enabled: true}
+	job := state.CronJob{ID: "job-shared", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Enabled: true}
 	if err := ApplySchedule(&job, now.Add(-2*time.Hour)); err != nil {
 		t.Fatalf("ApplySchedule: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestClaimDueJobLetsOnlyOneProcessWin(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
-	job := state.CronJob{ID: "job-cas", Ag: "main", Sched: "every 1h", Prompt: "x", Enabled: true}
+	job := state.CronJob{ID: "job-cas", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Enabled: true}
 	if err := ApplySchedule(&job, now.Add(-2*time.Hour)); err != nil {
 		t.Fatalf("ApplySchedule: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestSettleFiresDeliversOnceHoweverOftenItRuns(t *testing.T) {
 	stub := &fireStub{}
 	rec := &recorder{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
-	job := state.CronJob{ID: "job-1", Ag: "main", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
+	job := state.CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
 	_ = ApplySchedule(&job, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job)
 
@@ -683,7 +683,7 @@ func TestSchedulerHoldsAJobWhileItsFireRuns(t *testing.T) {
 	stub := &fireStub{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
 	clock := now
-	job := state.CronJob{ID: "job-1", Ag: "main", Sched: "every 1h", Prompt: "x", Enabled: true}
+	job := state.CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Enabled: true}
 	_ = ApplySchedule(&job, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job)
 
@@ -741,7 +741,7 @@ func TestAStartFireFailureSettlesTheFireAndTheJobFiresAgain(t *testing.T) {
 	stub := &fireStub{startErr: errors.New("no turn runtime")}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
 	clock := now
-	job := state.CronJob{ID: "job-1", Ag: "main", Sched: "every 1h", Prompt: "x", Enabled: true}
+	job := state.CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Enabled: true}
 	_ = ApplySchedule(&job, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job)
 
@@ -780,7 +780,7 @@ func TestSettleFiresLeavesAnotherTenantsFiresAlone(t *testing.T) {
 	stub := &fireStub{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
 
-	other := state.CronJob{ID: "job-other", Ag: "research", Sched: "every 1h", Prompt: "not yours", Deliver: "slack", Enabled: true}
+	other := state.CronJob{ID: "job-other", Ag: "research", ProjectID: "prj-r", Sched: "every 1h", Prompt: "not yours", Deliver: "slack", Enabled: true}
 	_ = ApplySchedule(&other, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, other)
 	if _, err := store.StartRun(ctx, state.CronRun{JobID: "job-other", AgentID: "research", SessionID: "cron-job-other-1", Trigger: "schedule", StartedAt: now.Unix()}); err != nil {
@@ -812,10 +812,10 @@ func TestNotifyFireParkedTellsTheDeliveryTarget(t *testing.T) {
 	stub := &fireStub{}
 	rec := &recorder{}
 	now := time.Date(2026, 3, 15, 8, 0, 0, 0, time.UTC)
-	job := state.CronJob{ID: "job-1", Ag: "main", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
+	job := state.CronJob{ID: "job-1", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "x", Deliver: "telegram", Enabled: true}
 	_ = ApplySchedule(&job, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, job)
-	quiet := state.CronJob{ID: "job-quiet", Ag: "main", Sched: "every 1h", Prompt: "y", Enabled: true}
+	quiet := state.CronJob{ID: "job-quiet", Ag: "main", ProjectID: "prj-1", Sched: "every 1h", Prompt: "y", Enabled: true}
 	_ = ApplySchedule(&quiet, now.Add(-2*time.Hour))
 	_ = store.InsertJob(ctx, quiet)
 
@@ -901,7 +901,7 @@ func waitIdle(t *testing.T, s *Scheduler) {
 func TestRunDueMaintainsAfterSettleFires(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
-	if err := store.InsertJob(ctx, state.CronJob{ID: "job-maint", Ag: "main", Sched: "every 1h"}); err != nil {
+	if err := store.InsertJob(ctx, state.CronJob{ID: "job-maint", Ag: "main", ProjectID: "prj-1", Sched: "every 1h"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.StartRun(ctx, state.CronRun{JobID: "job-maint", AgentID: "main", SessionID: "s-maint", Trigger: "schedule"}); err != nil {

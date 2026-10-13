@@ -98,9 +98,9 @@
 | [027-every-session-runs-on-its-project-runner](027-every-session-runs-on-its-project-runner.md) | 每个会话跑在自己项目的 runner 上、按项目根自己的信任推导沙箱与审批、gateway 启动目录去语义、去掉"受版本控制"门槛、工坊 runner | Bug Fix / Security | DONE（2026-10-11 执行完毕，未提交）| **P1** | L | HIGH |
 | [028-tui-launch-dir-is-the-project](028-tui-launch-dir-is-the-project.md) | TUI 启动目录登记为项目、数据目录内拒绝启动、`/resume` 只列本项目、跨项目 resume 拒绝、粘贴截图存进项目 | Feature | DONE（2026-10-11 执行完毕，未提交）| **P1** | M | MED |
 | [029-web-chat-picks-a-project-first](029-web-chat-picks-a-project-first.md) | web 对话前必须选项目或文件夹：新对话页、项目胶囊、系统式文件夹对话框、信任提示；会话只能带项目创建 | Feature | DONE（2026-10-11 执行完毕，未提交）| **P1** | L | MED |
-| [030-attachments-save-into-the-project](030-attachments-save-into-the-project.md) | web 附件"保存到"项目里选的目录，记住上次目录 | Feature | TODO | P2 | M | LOW–MED |
+| [030-attachments-save-into-the-project](030-attachments-save-into-the-project.md) | web 附件"保存到"项目里选的目录，记住上次目录 | Feature | DONE（2026-10-13 执行完毕：附件保存到项目目录、记住上次目录、`/api/projects/:id/dirs`）| P2 | M | LOW–MED |
 | [033-rewind-to-before-a-message](033-rewind-to-before-a-message.md) | 回到这里：文件工具改动按会话记录、三种恢复方式、可撤销；web 与 TUI `/rewind` 共用；"变更文件"数据源；删 rewind-last | Feature | DONE（2026-10-12 执行完毕，未提交；评审 APPROVE） | **P1** | L | MED |
-| [035-channels-and-cron-belong-to-a-project](035-channels-and-cron-belong-to-a-project.md) | 通道与定时任务属于项目；进来的对话出生在项目根；旧主代理级通道配置迁移时删掉 | Feature | TODO | P2 | L | MED |
+| [035-channels-and-cron-belong-to-a-project](035-channels-and-cron-belong-to-a-project.md) | 通道与定时任务属于项目；进来的对话出生在项目根；旧主代理级通道配置迁移时删掉 | Feature | DONE（2026-10-14 执行完毕并提交 main；`fb_project_channels` v14、`project_id` 必填、`/projects/:id/{cron,channels}` 路由；设置里的"定时任务"（保留天数全局设置）按 STOP-2 保留原地待 owner 决定）| P2 | L | MED |
 | [036-skill-drafts-publish-and-versions](036-skill-drafts-publish-and-versions.md) | 技能草稿 / 发布 / 版本：存储、发布原子、会话按版本加载、正式目录改动自动进草稿、gateway 接口 | Feature | DONE（2026-10-12/13；改动已落地并复跑全绿，评审待补：执行者运行被限额中断，无交付报告） | **P1** | L | MED |
 | [037-tui-skills-panel-publish-and-versions](037-tui-skills-panel-publish-and-versions.md) | TUI `/skills` 面板：状态段、随状态变化的子菜单、发布、查看改动、版本记录（分页）、恢复、拉取更新 | Feature | DONE（2026-10-13 执行完毕，未提交）| **P1** | M | LOW–MED |
 | [032-remove-working-set-tools](032-remove-working-set-tools.md) | 删除 working_set_* 工具与 WorkingSetSource（模型从未调用），连带 TUI 显示、安全白名单、上下文 API 字段与 web 面板区块 | Tech Debt | DONE（2026-10-13 执行完毕，未提交）| P2 | S | LOW |

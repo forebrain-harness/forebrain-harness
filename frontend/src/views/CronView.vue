@@ -1,10 +1,6 @@
 <template>
-  <div :class="scope === 'project' ? '' : 'flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-3 pb-12 pt-6 sm:px-6'">
-    <div :class="scope === 'project' ? 'w-full' : 'mx-auto w-full max-w-3xl'">
-      <PageTopRow
-        :title="t('cron.title')"
-        :description="scope === 'project' ? t('cron.projectDescription') : t('cron.description')"
-      >
+  <div class="w-full">
+      <PageTopRow :title="t('cron.title')" :description="t('cron.projectDescription')">
         <template #actions>
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
             {{ t('common.refresh') }}
@@ -14,17 +10,6 @@
           </button>
         </template>
       </PageTopRow>
-
-      <p
-        v-if="retentionDays !== null"
-        class="mb-4 text-[12px] text-[var(--forebrain-muted-text)]"
-        data-testid="cron-retention-note"
-      >
-        {{ t('cron.retentionNote', { days: retentionDays }) }}
-        <RouterLink to="/settings?tab=cron" class="ml-1 text-[var(--forebrain-brand-1)] hover:underline" data-testid="cron-retention-edit">
-          {{ t('cron.retentionEdit') }}
-        </RouterLink>
-      </p>
 
       <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
@@ -101,7 +86,7 @@
         </label>
 
         <div class="mt-3">
-          <ScheduleBuilder v-model="editorSchedule" @validated="scheduleValid = $event" />
+          <ScheduleBuilder v-model="editorSchedule" :project-id="projectId" @validated="scheduleValid = $event" />
         </div>
 
         <label class="mt-3 block">
@@ -140,29 +125,25 @@
         </div>
       </div>
     </div>
-  </div>
 </template>
 
 <script setup lang="ts">
 /**
- * Standing work on a schedule. The two surfaces share this view: the agent
- * page lists agent-wide jobs, a project tab passes its id and lists its own.
- * Schedules come from the builder — never typed by hand — and the preview
- * under them is the engine's own parse of what will be saved.
+ * A project's standing work on a schedule. Scheduled tasks belong to a
+ * project, so this view is always scoped to one: it lists that project's jobs
+ * and fires them in the project root. Schedules come from the builder — never
+ * typed by hand — and the preview under them is the engine's own parse of what
+ * will be saved.
  */
-import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import PageTopRow from '@/components/common/PageTopRow.vue'
 import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
 import { getErrorMessage, forebrainApi, type CronJobRecord, type CronRunRecord } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'
 import { useI18n } from '@/locales'
 
-const props = defineProps<{
-  /** Empty on the agent page; a project id in the project space tab. */
-  projectId?: string
-  scope?: 'agent' | 'project'
-}>()
+const props = defineProps<{ projectId: string }>()
 
 const { t, locale } = useI18n()
 const router = useRouter()
@@ -184,27 +165,13 @@ const editorDeliver = ref('')
 const editorRepeatLimit = ref(0)
 const editorError = ref('')
 
-// The delivery dropdown lists only the channels this agent has enabled; "no
+// The delivery dropdown lists only the channels this project has enabled; "no
 // delivery" stays an explicit first option rather than a blank input.
 const enabledChannels = ref<string[]>([])
 
-// Retention is the install's, not this agent's, so the note under the header
-// reads the global settings once and links to their tab in the settings page.
-const retentionDays = ref<number | null>(null)
-
-const scope = computed(() => props.scope ?? 'agent')
-
-async function loadRetentionDays() {
-  try {
-    retentionDays.value = (await forebrainApi.cronSettings()).retentionDays
-  } catch {
-    retentionDays.value = null
-  }
-}
-
 async function loadChannels() {
   try {
-    const data = await forebrainApi.channels()
+    const data = await forebrainApi.projectChannels(props.projectId)
     const section = (data.channels ?? {}) as Record<string, unknown>
     enabledChannels.value = Object.entries(section)
       .filter(([, value]) => Boolean((value as { enabled?: boolean } | null)?.enabled))
@@ -254,12 +221,11 @@ async function save() {
       prompt: editorPrompt.value.trim(),
       deliver: editorDeliver.value,
       repeat_limit: editorRepeatLimit.value > 0 ? editorRepeatLimit.value : 0,
-      projectId: props.projectId ?? '',
     }
     if (editingId.value) {
-      await forebrainApi.cronUpdate(editingId.value, body)
+      await forebrainApi.cronUpdate(props.projectId, editingId.value, body)
     } else {
-      await forebrainApi.cronCreate(body)
+      await forebrainApi.cronCreate(props.projectId, body)
     }
     editorOpen.value = false
     await load()
@@ -273,7 +239,7 @@ async function save() {
 async function togglePause(job: CronJobRecord) {
   error.value = ''
   try {
-    await forebrainApi.cronUpdate(job.id, { enabled: !job.enabled })
+    await forebrainApi.cronUpdate(props.projectId, job.id, { enabled: !job.enabled })
     await load()
   } catch (e: unknown) {
     error.value = getErrorMessage(e)
@@ -283,7 +249,7 @@ async function togglePause(job: CronJobRecord) {
 async function runNow(job: CronJobRecord) {
   error.value = ''
   try {
-    await forebrainApi.cronRunNow(job.id)
+    await forebrainApi.cronRunNow(props.projectId, job.id)
     await openRuns(job)
   } catch (e: unknown) {
     error.value = getErrorMessage(e)
@@ -293,7 +259,7 @@ async function runNow(job: CronJobRecord) {
 async function remove(job: CronJobRecord) {
   error.value = ''
   try {
-    await forebrainApi.cronDelete(job.id)
+    await forebrainApi.cronDelete(props.projectId, job.id)
     if (openRunsFor.value === job.id) openRunsFor.value = ''
     await load()
   } catch (e: unknown) {
@@ -308,7 +274,7 @@ async function openRuns(job: CronJobRecord) {
   }
   error.value = ''
   try {
-    runs.value = await forebrainApi.cronRuns(job.id)
+    runs.value = await forebrainApi.cronRuns(props.projectId, job.id)
     openRunsFor.value = job.id
   } catch (e: unknown) {
     error.value = getErrorMessage(e)
@@ -380,6 +346,5 @@ function formatTime(unix?: number): string {
 onMounted(() => {
   void load()
   void loadChannels()
-  void loadRetentionDays()
 })
 </script>

@@ -27,6 +27,30 @@ CREATE TABLE fb_projects (
 CREATE INDEX idx_fb_projects_agent_updated ON fb_projects(agent_id, updated_at DESC);
 CREATE UNIQUE INDEX idx_fb_projects_agent_root_unique ON fb_projects(agent_id, root);
 
+-- One delivery channel a project owns: the bot or webhook account that carries
+-- conversations in for the project and pushes their answers back out. A
+-- channel belongs to a project the way its conversations do, so deleting the
+-- project takes its channels with it.
+--
+-- Credentials never land in this table. A secret field holds a reference like
+-- ${FOREBRAIN_CH_<project>_<FIELD>} whose value lives in ~/.forebrain/.env, the
+-- same mechanism provider API keys use, so the state database and its backups
+-- carry no plaintext secret. account_key is the account's identity (a bot
+-- token's hash, an app id): one account belongs to exactly one project, so it
+-- is unique where it is set — an empty key (a channel with no account yet) is
+-- not constrained.
+CREATE TABLE fb_project_channels (
+  project_id TEXT NOT NULL REFERENCES fb_projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (TRIM(kind) <> ''),
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  account_key TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (project_id, kind)
+) STRICT;
+CREATE UNIQUE INDEX idx_fb_project_channels_account ON fb_project_channels(account_key) WHERE account_key <> '';
+
 -- The compact/context-reset pointers reference fb_messages rows, and
 -- fb_messages references this table back; SQLite checks foreign keys at DML
 -- time, not at create time, so the cycle is declarable.
@@ -356,14 +380,15 @@ CREATE TABLE fb_memory_jobs (
 CREATE INDEX idx_fb_memory_jobs_agent_claim
   ON fb_memory_jobs(agent_id, kind, status, retry_at, lease_until);
 
--- Cron jobs are tenant data: each belongs to one primary agent, and only that
--- agent's jobs run while it is the active one. next_run_at is the scheduler's
+-- Cron jobs are tenant data: each belongs to one primary agent and to one of
+-- that agent's projects — a standing instruction fires in its project's root,
+-- so a job without a project could not run. next_run_at is the scheduler's
 -- only index — a NULL means paused, which is how a paused job stays out of the
 -- due query without a second flag being consulted.
 CREATE TABLE fb_cron_jobs (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL CHECK (TRIM(agent_id) <> ''),
-  project_id TEXT REFERENCES fb_projects(id) ON DELETE SET NULL,
+  project_id TEXT NOT NULL,
   name TEXT NOT NULL DEFAULT '',
   schedule TEXT NOT NULL,
   prompt TEXT NOT NULL DEFAULT '',
@@ -381,7 +406,6 @@ CREATE TABLE fb_cron_jobs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
-CREATE INDEX idx_fb_cron_jobs_agent ON fb_cron_jobs(agent_id, created_at DESC);
 CREATE INDEX idx_fb_cron_jobs_agent_project ON fb_cron_jobs(agent_id, project_id, created_at DESC);
 -- enabled records the user's intent; next_run_at IS NULL means the job is
 -- paused or spent, and it is the only thing the due query looks at.

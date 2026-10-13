@@ -98,6 +98,10 @@ type Environment struct {
 	Foreground    *session.Locker
 	Control       *run.Controller
 	sessionSource string
+	// ChannelMigrationNotes are the channels that were enabled when the retired
+	// primary-agent-level configuration was removed at startup, so the startup
+	// banner can say so once.
+	ChannelMigrationNotes []string
 
 	ConfigPath string
 	reloadMu   sync.Mutex
@@ -266,10 +270,12 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 			return nil, err
 		}
 	}
+	var channelMigrationNotes []string
 	var loaded appcfg.Root
 	if opts.Config != nil {
 		loaded = *opts.Config
 	} else {
+		channelMigrationNotes = MigrateLegacyChannels(cfgPath)
 		var err error
 		loaded, err = appcfg.Load(cfgPath)
 		if err != nil {
@@ -310,10 +316,10 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	if err := safety.NewManager().StartupCheck(cfgRoot); err != nil {
 		return nil, err
 	}
-	// Every per-agent seam below (channels, sessions, memories, the runner's
-	// workspace) hangs off the active primary agent, so resolve it once here.
+	// Every per-agent seam below (sessions, memories, the runner's
+	// workspace, the project channels) hangs off the active primary agent, so
+	// resolve it once here.
 	activeAgent := activePrimaryAgent(root, cfgRoot)
-	mergeAgentClawbotSession(cfgRoot, activeAgent)
 
 	var shutdownTel func(context.Context) error
 	if opts.EnableTelemetry {
@@ -328,7 +334,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	if source == "" {
 		source = memory.SessionSourceWebchat
 	}
-	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel}
+	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes)}
 	env.reload = NewConfigManager(env.Control, env.reloadConfig)
 	// The effective MCP list is resolved once per session and frozen: global
 	// entries stamped with their scope, project entries gated on the frozen
@@ -614,9 +620,6 @@ func activePrimaryAgent(home string, cfg *appcfg.Root) appcfg.Summary {
 	}
 }
 
-// mergeAgentClawbotSession folds persisted Weixin credentials into the active
-// agent's channel. Both the credential file and the channel
-// belong to that agent, so the merge never crosses tenants.
 // ActiveAgentWorkspace resolves the workspace root of the active primary
 // agent using the cached runtime config. Startup prompts that record
 // per-agent decisions before a session opens need it; loading it here rather
@@ -719,13 +722,4 @@ func consentRegisteredRoot(root, cwd string) string {
 			return best
 		}
 	}
-}
-
-func mergeAgentClawbotSession(cfg *appcfg.Root, active appcfg.Summary) {
-	if cfg == nil {
-		return
-	}
-	ch := appcfg.ChannelsForAgent(cfg, active.ID)
-	channel.MergePersistedClawbot(&ch, active.WorkspaceRoot)
-	appcfg.SetChannelsForAgent(cfg, active.ID, ch)
 }

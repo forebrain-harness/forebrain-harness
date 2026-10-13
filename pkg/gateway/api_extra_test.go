@@ -203,11 +203,30 @@ func cronTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	cfg := &appcfg.Root{}
+	// Scheduled work belongs to a project now, so the fixture has one.
+	root := filepath.Join(home, "project")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if _, err := state.NewProjectStore(db, "main").Create(context.Background(), state.CreateProjectInput{Name: "p", Root: root}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
 	return &Server{
 		Home:  home,
 		RunRT: &state.RunStore{DB: db},
 		Env:   &process.Environment{Root: home, SQL: db, Deps: run.Deps{AppCfg: cfg}},
 	}
+}
+
+// cronTestProjectID is the project the cron test server seeded, for routes
+// that name one.
+func cronTestProjectID(t *testing.T, s *Server) string {
+	t.Helper()
+	list, err := state.NewProjectStore(s.Env.SQL, "main").ListProjects(context.Background(), state.ListProjectsOptions{}, 10, 0)
+	if err != nil || len(list) == 0 {
+		t.Fatalf("project lookup: %v (%d)", err, len(list))
+	}
+	return list[0].ID
 }
 
 // seedRun creates the conversation and run rows an event's foreign keys
@@ -235,8 +254,12 @@ func cronRequest(t *testing.T, s *Server, method, target string, body any, handl
 		reader = bytes.NewReader(raw)
 	}
 	req := httptest.NewRequest(method, target, reader)
-	if len(params) == 2 {
-		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{{Key: params[0], Value: params[1]}}))
+	if len(params) >= 2 && len(params)%2 == 0 {
+		pairs := make(Params, 0, len(params)/2)
+		for i := 0; i+1 < len(params); i += 2 {
+			pairs = append(pairs, Param{Key: params[i], Value: params[i+1]})
+		}
+		req = req.WithContext(context.WithValue(req.Context(), ParamsKey, pairs))
 	}
 	rec := httptest.NewRecorder()
 	handler(rec, req)
@@ -244,13 +267,14 @@ func cronRequest(t *testing.T, s *Server, method, target string, body any, handl
 }
 
 // A job is created, listed, edited, fired-history-checked and removed through
-// the API a surface actually calls.
+// the API a surface actually calls. Jobs belong to the project the route names.
 func TestCronJobsRoundTripThroughTheAPI(t *testing.T) {
 	s := cronTestServer(t)
+	pid := cronTestProjectID(t, s)
 
-	created := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+	created := cronRequest(t, s, http.MethodPost, "/api/projects/"+pid+"/cron/jobs", map[string]any{
 		"name": "morning brief", "schedule": "daily at 7am", "prompt": "summarise the inbox", "deliver": "telegram",
-	}, s.handleCronJobs)
+	}, s.handleCronJobs, "id", pid)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create = %d %s", created.Code, created.Body.String())
 	}
@@ -262,7 +286,7 @@ func TestCronJobsRoundTripThroughTheAPI(t *testing.T) {
 		t.Fatalf("a created job must be scheduled: %#v", job)
 	}
 
-	listed := cronRequest(t, s, http.MethodGet, "/api/cron", nil, s.handleCronJobs)
+	listed := cronRequest(t, s, http.MethodGet, "/api/projects/"+pid+"/cron/jobs", nil, s.handleCronJobs, "id", pid)
 	var list struct {
 		AgentID string          `json:"agent_id"`
 		Records []state.CronJob `json:"records"`
@@ -274,9 +298,9 @@ func TestCronJobsRoundTripThroughTheAPI(t *testing.T) {
 		t.Fatalf("list = %#v", list)
 	}
 
-	paused := cronRequest(t, s, http.MethodPut, "/api/cron/"+job.ID, map[string]any{
+	paused := cronRequest(t, s, http.MethodPut, "/api/projects/"+pid+"/cron/jobs/"+job.ID, map[string]any{
 		"schedule": "daily at 7am", "enabled": false,
-	}, s.handleCronJob, "id", job.ID)
+	}, s.handleCronJob, "id", pid, "jobId", job.ID)
 	if paused.Code != http.StatusOK {
 		t.Fatalf("pause = %d %s", paused.Code, paused.Body.String())
 	}
@@ -286,18 +310,18 @@ func TestCronJobsRoundTripThroughTheAPI(t *testing.T) {
 		t.Fatal("a paused job must have no next fire, or the scheduler would still pick it up")
 	}
 
-	resumed := cronRequest(t, s, http.MethodPut, "/api/cron/"+job.ID, map[string]any{"enabled": true}, s.handleCronJob, "id", job.ID)
+	resumed := cronRequest(t, s, http.MethodPut, "/api/projects/"+pid+"/cron/jobs/"+job.ID, map[string]any{"enabled": true}, s.handleCronJob, "id", pid, "jobId", job.ID)
 	var resumedJob state.CronJob
 	_ = json.Unmarshal(resumed.Body.Bytes(), &resumedJob)
 	if resumedJob.NextRunAt == nil {
 		t.Fatal("resuming a job must give it a next fire again")
 	}
 
-	removed := cronRequest(t, s, http.MethodDelete, "/api/cron/"+job.ID, nil, s.handleCronJob, "id", job.ID)
+	removed := cronRequest(t, s, http.MethodDelete, "/api/projects/"+pid+"/cron/jobs/"+job.ID, nil, s.handleCronJob, "id", pid, "jobId", job.ID)
 	if removed.Code != http.StatusOK {
 		t.Fatalf("delete = %d %s", removed.Code, removed.Body.String())
 	}
-	after := cronRequest(t, s, http.MethodGet, "/api/cron", nil, s.handleCronJobs)
+	after := cronRequest(t, s, http.MethodGet, "/api/projects/"+pid+"/cron/jobs", nil, s.handleCronJobs, "id", pid)
 	_ = json.Unmarshal(after.Body.Bytes(), &list)
 	if len(list.Records) != 0 {
 		t.Fatalf("job survived deletion: %#v", list.Records)
@@ -308,14 +332,15 @@ func TestCronJobsRoundTripThroughTheAPI(t *testing.T) {
 // stored as a job that never fires.
 func TestCronJobCreationRefusesAnUnreadableSchedule(t *testing.T) {
 	s := cronTestServer(t)
-	rec := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
+	pid := cronTestProjectID(t, s)
+	rec := cronRequest(t, s, http.MethodPost, "/api/projects/"+pid+"/cron/jobs", map[string]any{
 		"schedule": "whenever", "prompt": "do the thing",
-	}, s.handleCronJobs)
+	}, s.handleCronJobs, "id", pid)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("create with a bad schedule = %d %s", rec.Code, rec.Body.String())
 	}
 
-	noPrompt := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{"schedule": "every 1h"}, s.handleCronJobs)
+	noPrompt := cronRequest(t, s, http.MethodPost, "/api/projects/"+pid+"/cron/jobs", map[string]any{"schedule": "every 1h"}, s.handleCronJobs, "id", pid)
 	if noPrompt.Code != http.StatusBadRequest {
 		t.Fatalf("create with no prompt = %d", noPrompt.Code)
 	}
@@ -324,12 +349,13 @@ func TestCronJobCreationRefusesAnUnreadableSchedule(t *testing.T) {
 // A job belonging to another primary agent is not this tenant's to read.
 func TestCronJobFromAnotherTenantIsNotFound(t *testing.T) {
 	s := cronTestServer(t)
+	pid := cronTestProjectID(t, s)
 	store := &state.CronStore{DB: s.RunRT.DB}
-	foreign := state.CronJob{ID: "job-foreign", Ag: "research", Sched: "every 1h", Prompt: "x", Enabled: true}
+	foreign := state.CronJob{ID: "job-foreign", Ag: "research", ProjectID: pid, Sched: "every 1h", Prompt: "x", Enabled: true}
 	if err := store.InsertJob(context.Background(), foreign); err != nil {
 		t.Fatalf("SaveJob: %v", err)
 	}
-	rec := cronRequest(t, s, http.MethodGet, "/api/cron/job-foreign", nil, s.handleCronJob, "id", "job-foreign")
+	rec := cronRequest(t, s, http.MethodGet, "/api/projects/"+pid+"/cron/jobs/job-foreign", nil, s.handleCronJob, "id", pid, "jobId", "job-foreign")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("another tenant's job = %d %s", rec.Code, rec.Body.String())
 	}
@@ -2189,30 +2215,25 @@ func TestChatSessionCreateRequiresProjectOrFolder(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 }
 
-// TestCronJobBindsOnlyToThisAgentsProject pins that a job's project binding
-// is tenant data: another agent's project, or one that does not exist, is
-// refused as not found instead of binding the job across tenants or failing on
-// the raw foreign-key error.
+// TestCronJobBindsOnlyToThisAgentsProject pins that a job's project is tenant
+// data: a route naming another agent's project, or one that does not exist, is
+// refused as not found instead of binding the job across tenants.
 func TestCronJobBindsOnlyToThisAgentsProject(t *testing.T) {
 	s := cronTestServer(t)
 	ctx := context.Background()
-	active, err := s.activePrimarySummary()
-	require.NoError(t, err)
 	theirs, err := state.NewProjectStore(s.RunRT.DB, "someone-else").Create(ctx, state.CreateProjectInput{Name: "theirs", Root: t.TempDir()})
-	require.NoError(t, err)
-	mine, err := state.NewProjectStore(s.RunRT.DB, active.ID).Create(ctx, state.CreateProjectInput{Name: "mine", Root: t.TempDir()})
 	require.NoError(t, err)
 
 	for _, projectID := range []string{theirs.ID, "prj_missing"} {
-		rec := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
-			"schedule": "every 1h", "prompt": "report", "project_id": projectID,
-		}, s.handleCronJobs)
-		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		require.Contains(t, rec.Body.String(), "project not found")
+		rec := cronRequest(t, s, http.MethodPost, "/api/projects/"+projectID+"/cron/jobs", map[string]any{
+			"schedule": "every 1h", "prompt": "report",
+		}, s.handleCronJobs, "id", projectID)
+		require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	}
-	rec := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
-		"schedule": "every 1h", "prompt": "report", "project_id": mine.ID,
-	}, s.handleCronJobs)
+	mine := cronTestProjectID(t, s)
+	rec := cronRequest(t, s, http.MethodPost, "/api/projects/"+mine+"/cron/jobs", map[string]any{
+		"schedule": "every 1h", "prompt": "report",
+	}, s.handleCronJobs, "id", mine)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -3046,24 +3067,24 @@ func TestCronPreviewInvalidScheduleAnswersEngineMessage(t *testing.T) {
 	require.Equal(t, false, out["valid"])
 }
 
-// The agent page lists agent-wide jobs only; a project tab lists its own. The
-// two listings must never mix.
-func TestCronJobsListSplitsByProject(t *testing.T) {
+// Every job belongs to a project, and a project's listing shows only its own.
+func TestCronJobsListIsPerProject(t *testing.T) {
 	s := cronTestServer(t)
 	db := s.RunRT.DB
-	s.Projects = state.NewProjectStore(db, "main")
-	project, err := s.Projects.Create(context.Background(), state.CreateProjectInput{Name: "cron-e2e", Root: t.TempDir()})
+	store := state.NewProjectStore(db, "main")
+	first := cronTestProjectID(t, s)
+	second, err := store.Create(context.Background(), state.CreateProjectInput{Name: "second", Root: t.TempDir()})
 	require.NoError(t, err)
 
-	created := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
-		"name": "agent-wide", "schedule": "every 2h", "prompt": "agent work",
-	}, s.handleCronJobs)
+	created := cronRequest(t, s, http.MethodPost, "/api/projects/"+first+"/cron/jobs", map[string]any{
+		"name": "first job", "schedule": "every 2h", "prompt": "work",
+	}, s.handleCronJobs, "id", first)
 	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
 
-	projectJob := cronRequest(t, s, http.MethodPost, "/api/cron", map[string]any{
-		"name": "bound", "schedule": "every 3h", "prompt": "project work", "project_id": project.ID,
-	}, s.handleCronJobs)
-	require.Equal(t, http.StatusOK, projectJob.Code, projectJob.Body.String())
+	other := cronRequest(t, s, http.MethodPost, "/api/projects/"+second.ID+"/cron/jobs", map[string]any{
+		"name": "second job", "schedule": "every 3h", "prompt": "work",
+	}, s.handleCronJobs, "id", second.ID)
+	require.Equal(t, http.StatusOK, other.Code, other.Body.String())
 
 	decode := func(rr *httptest.ResponseRecorder) []state.CronJob {
 		var list struct {
@@ -3073,21 +3094,21 @@ func TestCronJobsListSplitsByProject(t *testing.T) {
 		return list.Records
 	}
 
-	agentRows := decode(cronRequest(t, s, http.MethodGet, "/api/cron", nil, s.handleCronJobs))
-	require.Len(t, agentRows, 1)
-	require.Equal(t, "agent-wide", agentRows[0].Name)
-	require.Empty(t, agentRows[0].ProjectID)
+	firstRows := decode(cronRequest(t, s, http.MethodGet, "/api/projects/"+first+"/cron/jobs", nil, s.handleCronJobs, "id", first))
+	require.Len(t, firstRows, 1)
+	require.Equal(t, "first job", firstRows[0].Name)
+	require.Equal(t, first, firstRows[0].ProjectID)
 
-	projectRows := decode(cronRequest(t, s, http.MethodGet, "/api/cron?project_id="+project.ID, nil, s.handleCronJobs))
-	require.Len(t, projectRows, 1)
-	require.Equal(t, "bound", projectRows[0].Name)
-	require.Equal(t, project.ID, projectRows[0].ProjectID)
+	secondRows := decode(cronRequest(t, s, http.MethodGet, "/api/projects/"+second.ID+"/cron/jobs", nil, s.handleCronJobs, "id", second.ID))
+	require.Len(t, secondRows, 1)
+	require.Equal(t, "second job", secondRows[0].Name)
 
-	// Someone else's project is not addressable from this agent.
-	other, err := state.NewProjectStore(db, "someone-else").Create(context.Background(), state.CreateProjectInput{Name: "theirs", Root: t.TempDir()})
+	// Someone else's project, or one that does not exist, is not addressable
+	// from this agent.
+	theirs, err := state.NewProjectStore(db, "someone-else").Create(context.Background(), state.CreateProjectInput{Name: "theirs", Root: t.TempDir()})
 	require.NoError(t, err)
-	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id="+other.ID, nil, s.handleCronJobs).Code)
-	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/cron?project_id=missing", nil, s.handleCronJobs).Code)
+	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/projects/"+theirs.ID+"/cron/jobs", nil, s.handleCronJobs, "id", theirs.ID).Code)
+	require.Equal(t, http.StatusNotFound, cronRequest(t, s, http.MethodGet, "/api/projects/missing/cron/jobs", nil, s.handleCronJobs, "id", "missing").Code)
 }
 
 // A project space's permission tab manages that project's own rules: the

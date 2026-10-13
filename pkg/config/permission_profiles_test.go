@@ -958,7 +958,7 @@ func TestSaveDoesNotPersistRuntimeEnvSecretsLoadedFromDotEnv(t *testing.T) {
 	if strings.Contains(text, "runtime-gateway-token") || strings.Contains(text, "runtime-tavily-key") {
 		t.Fatalf("Save leaked runtime secret: %s", text)
 	}
-	if !strings.Contains(text, "enabled: false") {
+	if !strings.Contains(text, "primary: false") {
 		t.Fatalf("Save did not preserve explicit false: %s", text)
 	}
 }
@@ -977,29 +977,30 @@ func TestGatewayHelpers(t *testing.T) {
 			},
 		},
 		Agents: AgentsSection{Definitions: map[string]AgentDefinition{
-			"main": {Channels: ChannelsSection{
-				Webhook: Webhook{Enabled: true, InboundPath: "/webhook"},
-				Slack:   Slack{Enabled: true, InboundPath: "/slack"},
-				Email:   Email{Enabled: true, InboundPath: "/email"},
-			}},
+			"main": {},
 			"acme": {Primary: true},
 		}},
 	}
-	if !GatewayControlPlaneAuthExemptPath("/health", root, "main") {
+	mainChannels := []ChannelsSection{{
+		Webhook: Webhook{Enabled: true, InboundPath: "/webhook"},
+		Slack:   Slack{Enabled: true, InboundPath: "/slack"},
+		Email:   Email{Enabled: true, InboundPath: "/email"},
+	}}
+	if !GatewayControlPlaneAuthExemptPath("/health", mainChannels) {
 		t.Fatal("health path should be exempt")
 	}
-	if !GatewayControlPlaneAuthExemptPath("/channels/x/health", root, "main") {
+	if !GatewayControlPlaneAuthExemptPath("/channels/x/health", mainChannels) {
 		t.Fatal("channel health path should be exempt")
 	}
-	if !GatewayControlPlaneAuthExemptPath("/webhook", root, "main") {
+	if !GatewayControlPlaneAuthExemptPath("/webhook", mainChannels) {
 		t.Fatal("webhook inbound should be exempt")
 	}
-	if GatewayControlPlaneAuthExemptPath("/other", root, "main") {
+	if GatewayControlPlaneAuthExemptPath("/other", mainChannels) {
 		t.Fatal("unexpected exemption")
 	}
-	// Only the named agent's channels are mounted, so only its inbound paths
+	// Only the active agent's channels are mounted, so only its inbound paths
 	// bypass control-plane auth: another agent's endpoint is not open.
-	if GatewayControlPlaneAuthExemptPath("/webhook", root, "acme") {
+	if GatewayControlPlaneAuthExemptPath("/webhook", nil) {
 		t.Fatal("one agent's inbound path exempted a request while another agent is active")
 	}
 	if GatewayAllowsAnonymousGET("") || GatewayAllowsAnonymousGET("/api/v1") || GatewayAllowsAnonymousGET("/ws/chat") {

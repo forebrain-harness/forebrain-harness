@@ -72,13 +72,11 @@ func restoreInteractiveTerminalStyle(out io.Writer) {
 	_, _ = fmt.Fprint(out, "\x1b[0m\x1b[?25h")
 }
 
-// onboardPages is how many pages the onboarding has: the model setup's, then
-// the channels.
-const onboardPages = llmSetupPages + 1
+// onboardPages is how many pages the onboarding has: the model setup's.
+const onboardPages = llmSetupPages
 
 // run walks the onboarding's pages: the model setup when no model is
-// configured yet, then the channels. Esc on the channels goes back to the
-// model setup's review.
+// configured yet.
 func (w *Wizard) run(ctx context.Context) error {
 	w.out = ensureWriter(w.out)
 	defer restoreInteractiveTerminalStyle(w.out)
@@ -86,12 +84,11 @@ func (w *Wizard) run(ctx context.Context) error {
 		"config_path":     w.rt.ConfigPath,
 		"main_configured": mainLLMConfigured(&w.rt.Config),
 	})
-	var setup *llmSetup
 	if mainLLMConfigured(&w.rt.Config) {
 		w.log("onboard.llm.already_configured", map[string]any{"summary": mainLLMSummary(&w.rt.Config)})
 	} else {
 		w.log("onboard.llm.configure_start", nil)
-		setup = newLLMSetup(PromptConfig{
+		setup := newLLMSetup(PromptConfig{
 			Context:        ctx,
 			Output:         w.out,
 			Selector:       w.selector,
@@ -103,27 +100,12 @@ func (w *Wizard) run(ctx context.Context) error {
 			Onboarding:     true,
 			Pages:          onboardPages,
 		})
-	}
-	for {
-		if setup != nil {
-			if err := w.configureMainLLM(setup); err != nil {
-				return err
-			}
-		}
-		back, err := w.configureChannels(setup != nil)
-		if err != nil {
-			w.log("onboard.error", map[string]any{"stage": "channels", "error": err.Error()})
+		if err := w.configureMainLLM(setup); err != nil {
+			w.log("onboard.error", map[string]any{"stage": "llm", "error": err.Error()})
 			return err
 		}
-		if !back {
-			break
-		}
-		setup.resumeAt(setupPageReview)
 	}
-	w.log("onboard.success", map[string]any{
-		"main_llm":        mainLLMSummary(&w.rt.Config),
-		"channel_summary": w.channelSummary(),
-	})
+	w.log("onboard.success", map[string]any{"main_llm": mainLLMSummary(&w.rt.Config)})
 	return nil
 }
 
@@ -162,114 +144,11 @@ func (w *Wizard) configureMainLLM(setup *llmSetup) error {
 	return nil
 }
 
-// channelsFinish is the channels page's first row, the one that ends the
-// setup.
-const channelsFinish = "Finish setup"
-
-// configureChannels is the onboarding's last page: the chat apps the agent can
-// be reached from, each optional. It reports back=true when the user pressed
-// Esc to return to the model setup, which only happens when canGoBack says
-// there is one to return to; otherwise Esc finishes like channelsFinish.
-func (w *Wizard) configureChannels(canGoBack bool) (back bool, err error) {
-	agentID := w.channelAgentID()
-	chosen := -1 // the channel handled last, so the list shows again on it
-	for {
-		// The page names the agent because a channel is configured for one
-		// primary agent, not for the installation: the same setup run under a
-		// different active agent configures a different set of bots.
-		setSetupPage(w.selector, onboardPages, onboardPages)
-		channels := w.agentChannels(agentID)
-		items := []SelectItem{{Label: channelsFinish, Description: "Start using Forebrain Harness"}}
-		for _, id := range channelOrder {
-			meta := channelMetaByID[id]
-			blurb := strings.TrimSpace(meta.Blurb)
-			if meta.IsConfigured(&channels) {
-				blurb = "Connected · " + blurb
-			}
-			items = append(items, SelectItem{Label: meta.Label, Description: blurb, Category: "Chat apps"})
-		}
-		idx, ok, err := w.selector.SelectRich("Channels\nOptional: let people reach the "+agentID+" agent from their chat apps.", items, chosen)
-		if err != nil {
-			w.log("onboard.channels.cancelled", map[string]any{"error": wizardErr(err)})
-			return false, err
-		}
-		if !ok {
-			return canGoBack, nil
-		}
-		if idx <= 0 || idx >= len(items) {
-			w.log("onboard.channels.finished", nil)
-			return false, nil
-		}
-		chosen = idx
-		id := channelOrder[idx-1]
-		w.log("onboard.channels.choice", map[string]any{"agent": agentID, "channel": id})
-		if err := w.handleChannelChoice(agentID, id); err != nil {
-			return false, err
-		}
-	}
-}
-
-// channelKeep, channelUpdate and channelDisable are what can be done with a
-// channel that is already connected.
-const (
-	channelKeep    = "Keep as is"
-	channelUpdate  = "Update its settings"
-	channelDisable = "Disable it"
-)
-
-func (w *Wizard) handleChannelChoice(agentID string, id string) error {
-	meta, ok := channelMetaByID[id]
-	if !ok {
-		w.log("onboard.channel.unknown", map[string]any{"channel": id})
-		return nil
-	}
-	channels := w.agentChannels(agentID)
-	if meta.IsConfigured(&channels) {
-		action, ok, err := w.selector.Select(
-			meta.Label+"\nAlready connected. What would you like to do?",
-			[]string{channelKeep, channelUpdate, channelDisable},
-			channelKeep,
-		)
-		if err != nil {
-			w.log("onboard.channel.cancelled", map[string]any{"channel": id, "error": wizardErr(err)})
-			return err
-		}
-		w.log("onboard.channel.existing_action", map[string]any{"channel": id, "action": action})
-		switch {
-		case !ok || action == channelKeep:
-			return nil
-		case action == channelDisable:
-			meta.Disable(&channels)
-			appcfg.SetChannelsForAgent(&w.rt.Config, agentID, channels)
-			w.log("onboard.channel.disable", map[string]any{"agent": agentID, "channel": id})
-			return process.SaveConfig(w.rt)
-		}
-	}
-	if err := meta.Configure(w.selector, &channels, w.rt.Home, agentID); err != nil {
-		w.log("onboard.channel.configure_error", map[string]any{"agent": agentID, "channel": id, "error": err.Error()})
-		return err
-	}
-	appcfg.SetChannelsForAgent(&w.rt.Config, agentID, channels)
-	w.log("onboard.channel.save", map[string]any{"agent": agentID, "channel": id})
-	return process.SaveConfig(w.rt)
-}
-
-// channelAgentID is the primary agent whose channels this wizard run
-// configures — the active one, which on a first-time setup is main.
-func (w *Wizard) channelAgentID() string {
-	return appcfg.ActiveID(w.rt.Home, &w.rt.Config)
-}
-
-func (w *Wizard) agentChannels(agentID string) appcfg.ChannelsSection {
-	return appcfg.ChannelsForAgent(&w.rt.Config, agentID)
-}
-
 // printSummary tells the user, once the pages are gone, what the setup left
 // them with.
 func (w *Wizard) printSummary(out io.Writer) {
 	facts := []turn.StatusFact{
 		{Label: "Model", Value: mainLLMSummary(&w.rt.Config)},
-		{Label: "Channels", Value: w.channelSummary()},
 	}
 	b := newPanelBuilder()
 	b.facts(facts, nil)
@@ -336,19 +215,6 @@ func mainLLMAPIPath(cfg *appcfg.Root) string {
 		return ""
 	}
 	return strings.TrimSpace(p.APIPath)
-}
-
-func selectedChannelSummary(ch *appcfg.ChannelsSection) string {
-	selected := configuredChannelLabels(ch)
-	if len(selected) == 0 {
-		return "Skipped."
-	}
-	return strings.Join(selected, ", ")
-}
-
-func (w *Wizard) channelSummary() string {
-	channels := w.agentChannels(w.channelAgentID())
-	return selectedChannelSummary(&channels)
 }
 
 func (w *Wizard) log(event string, fields map[string]any) {

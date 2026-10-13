@@ -27903,52 +27903,6 @@ func (f *wizardSelector) Review(string, []turn.StatusFact, []string, int) (int, 
 	return 0, true, nil
 }
 
-func TestChannelsSkipLeavesChannelsUnchanged(t *testing.T) {
-	cfg := configuredMainLLMTestConfig(t)
-	w := &Wizard{
-		rt: process.Context{
-			Home:   t.TempDir(),
-			Config: cfg,
-		},
-		selector: &wizardSelector{
-			selects: []string{channelsFinish},
-			inputs:  []string{"", "", ""},
-		},
-	}
-	if err := w.run(context.Background()); err != nil {
-		t.Fatalf("run error: %v", err)
-	}
-	mainChannels := appcfg.ChannelsForAgent(&w.rt.Config, "main")
-	if mainChannels.Telegram.Enabled || mainChannels.Slack.Enabled {
-		t.Fatal("expected channels to remain disabled")
-	}
-}
-
-func TestChannelsDoneWithoutSelection(t *testing.T) {
-	var out strings.Builder
-	home := t.TempDir()
-	cfg := configuredMainLLMTestConfig(t)
-	w := &Wizard{
-		rt: process.Context{
-			Home:       home,
-			ConfigPath: filepath.Join(home, "forebrain.yaml"),
-			Config:     cfg,
-		},
-		out: &out,
-		selector: &wizardSelector{
-			selects: []string{channelsFinish},
-			inputs:  []string{"", "", ""},
-		},
-	}
-	if err := w.run(context.Background()); err != nil {
-		t.Fatalf("run error: %v", err)
-	}
-	w.printSummary(&out)
-	if got := stripANSI(out.String()); !strings.Contains(got, "Forebrain Harness is ready") || !strings.Contains(got, "Channels:  Skipped.") {
-		t.Fatalf("expected the summary to say no channel was added, got %q", got)
-	}
-}
-
 func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 	useSetupTestCatalog(t)
 	home := t.TempDir()
@@ -27971,7 +27925,6 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 				"OpenAI",
 				"GPT-5.5 · gpt-5.5",
 				"high",
-				channelsFinish,
 			},
 			inputs: []string{
 				"sk-live-secret",
@@ -27997,7 +27950,7 @@ func TestOnboardConfiguresLLMWhenMissing(t *testing.T) {
 		t.Fatalf("expected LLM configured, missing=%v", v.MissingFields())
 	}
 	w.printSummary(&out)
-	if got := stripANSI(out.String()); !strings.Contains(got, "Model:     openai · gpt-5.5") {
+	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai · gpt-5.5") {
 		t.Fatalf("expected configured LLM summary, got %q", got)
 	}
 }
@@ -28027,7 +27980,7 @@ func TestOnboardShowsConfiguredLLMAsDone(t *testing.T) {
 		},
 		out: &out,
 		selector: &wizardSelector{
-			selects: []string{channelsFinish},
+			selects: []string{},
 			inputs:  []string{"", "", ""},
 		},
 	}
@@ -28035,7 +27988,7 @@ func TestOnboardShowsConfiguredLLMAsDone(t *testing.T) {
 		t.Fatalf("run error: %v", err)
 	}
 	w.printSummary(&out)
-	if got := stripANSI(out.String()); !strings.Contains(got, "Model:     openai · gpt-5.5") {
+	if got := stripANSI(out.String()); !strings.Contains(got, "Model:  openai · gpt-5.5") {
 		t.Fatalf("expected configured LLM summary, got %q", got)
 	}
 }
@@ -28062,31 +28015,6 @@ func TestSelectLLMProviderUsesSelectorLabels(t *testing.T) {
 	}
 	if choice.BaseURL != "https://api.anthropic.com" {
 		t.Fatalf("base_url = %q", choice.BaseURL)
-	}
-}
-
-func TestConfiguredChannelDisable(t *testing.T) {
-	home := t.TempDir()
-	w := &Wizard{
-		rt: process.Context{
-			Home:       home,
-			ConfigPath: filepath.Join(home, "forebrain.yaml"),
-			Config: agentChannelsConfig(appcfg.ChannelsSection{
-				Telegram: appcfg.Telegram{
-					Enabled:  true,
-					BotToken: "${FOREBRAIN_MAIN_TELEGRAM_BOT_TOKEN}",
-				},
-			}),
-		},
-		selector: &wizardSelector{
-			selects: []string{channelDisable},
-		},
-	}
-	if err := w.handleChannelChoice("main", "telegram"); err != nil {
-		t.Fatalf("handleChannelChoice error: %v", err)
-	}
-	if appcfg.ChannelsForAgent(&w.rt.Config, "main").Telegram.Enabled {
-		t.Fatal("expected telegram to be disabled")
 	}
 }
 
@@ -28121,12 +28049,12 @@ func TestOnboardEscGoesBackAPage(t *testing.T) {
 	selector := &backtrackSelector{fakeSelector: fakeSelector{
 		selects: []string{"OpenAI", "GPT-5.5 · gpt-5.5", "high", "GPT-5.5 · gpt-5.5", "low"},
 		inputs:  []string{"sk-live-secret"},
-	}, backAt: map[string]int{"Channels": 1, "Review": 1}}
+	}, backAt: map[string]int{"Review": 1}}
 	w := &Wizard{rt: process.Context{Home: home, ConfigPath: cfgPath}, out: io.Discard, selector: selector}
 	if err := w.run(context.Background()); err != nil {
 		t.Fatalf("run error: %v", err)
 	}
-	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Reasoning effort → Review → Model → Reasoning effort → Review → Channels → Review → Channels" {
+	if got := strings.Join(selector.pages, " → "); got != "Welcome to Forebrain Harness → OpenAI API key → Model → Reasoning effort → Review → Model → Reasoning effort → Review" {
 		t.Fatalf("pages = %s", got)
 	}
 	if got := selector.selectDefaults[3]; got != "GPT-5.5 · gpt-5.5" {
@@ -28222,99 +28150,6 @@ func (s *backtrackSelector) Review(label string, facts []turn.StatusFact, action
 		return -1, false, nil
 	}
 	return 0, true, nil
-}
-
-func TestDingtalkClientIDEnvReferenceIsNotEchoedAndBlankKeepsValue(t *testing.T) {
-	home := t.TempDir()
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	if err := os.WriteFile(cfgPath, []byte("agents: {}\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	fake := &wizardSelector{
-		selects: []string{channelUpdate},
-		inputs:  []string{"", ""},
-	}
-	w := &Wizard{
-		rt: process.Context{
-			Home:       home,
-			ConfigPath: cfgPath,
-			Config: agentChannelsConfig(appcfg.ChannelsSection{
-				Dingtalk: appcfg.Dingtalk{
-					Enabled:      true,
-					ClientID:     "${DINGTALK_CLIENT_ID}",
-					ClientSecret: "${FOREBRAIN_MAIN_DINGTALK_CLIENT_SECRET}",
-				},
-			}),
-		},
-		selector: fake,
-	}
-	if err := w.handleChannelChoice("main", "dingtalk"); err != nil {
-		t.Fatalf("handleChannelChoice error: %v", err)
-	}
-	if len(fake.inputDefaults) < 2 {
-		t.Fatalf("expected captured defaults, got %#v", fake.inputDefaults)
-	}
-	if fake.inputDefaults[0] != "" {
-		t.Fatalf("expected hidden client ID default, got %q", fake.inputDefaults[0])
-	}
-	if fake.inputDefaults[1] != "" {
-		t.Fatalf("expected hidden client secret default, got %q", fake.inputDefaults[1])
-	}
-	dingtalk := appcfg.ChannelsForAgent(&w.rt.Config, "main").Dingtalk
-	if got := dingtalk.ClientID; got != "${DINGTALK_CLIENT_ID}" {
-		t.Fatalf("client ID = %q", got)
-	}
-	if got := dingtalk.ClientSecret; got != "${FOREBRAIN_MAIN_DINGTALK_CLIENT_SECRET}" {
-		t.Fatalf("client secret = %q", got)
-	}
-	if !dingtalk.Enabled {
-		t.Fatal("expected dingtalk to remain enabled")
-	}
-}
-
-// agentChannelsConfig builds a configuration whose main agent owns channels.
-// There is nowhere else to put them: a channel is always some agent's.
-func agentChannelsConfig(channels appcfg.ChannelsSection) appcfg.Root {
-	cfg := appcfg.Root{}
-	appcfg.SetChannelsForAgent(&cfg, "main", channels)
-	return cfg
-}
-
-// Configuring a channel under one primary agent must leave every other agent's
-// channels untouched, and its secret must be stored under an agent-scoped
-// variable so two agents cannot overwrite each other's token.
-func TestChannelConfigurationIsScopedToOnePrimaryAgent(t *testing.T) {
-	home := t.TempDir()
-	cfgPath := filepath.Join(home, "forebrain.yaml")
-	if err := os.WriteFile(cfgPath, []byte("agents: {}\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg := appcfg.Root{}
-	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{
-		"main": {},
-		"acme": {Primary: true},
-	}
-	w := &Wizard{
-		rt: process.Context{Home: home, ConfigPath: cfgPath, Config: cfg},
-		selector: &wizardSelector{
-			inputs: []string{"acme-telegram-token"},
-		},
-	}
-
-	if err := w.handleChannelChoice("acme", "telegram"); err != nil {
-		t.Fatalf("handleChannelChoice error: %v", err)
-	}
-
-	acme := appcfg.ChannelsForAgent(&w.rt.Config, "acme")
-	if !acme.Telegram.Enabled {
-		t.Fatalf("acme telegram not configured: %+v", acme.Telegram)
-	}
-	if got := acme.Telegram.BotToken; got != "${FOREBRAIN_ACME_TELEGRAM_BOT_TOKEN}" {
-		t.Fatalf("acme bot token reference = %q, want an acme-scoped env reference", got)
-	}
-	if main := appcfg.ChannelsForAgent(&w.rt.Config, "main"); main.Telegram.Enabled || main.Telegram.BotToken != "" {
-		t.Fatalf("configuring acme's telegram changed main's: %+v", main.Telegram)
-	}
 }
 
 var _ Selector = (*wizardSelector)(nil)

@@ -52,6 +52,25 @@ export async function seedProjectSession(page: Page, name = 'e2e-seed'): Promise
   return seedSessionInRoot(page, root, name)
 }
 
+/**
+ * Register (or reuse) a project bound to a fresh scratch directory and return
+ * its id. Scheduled tasks and channels belong to a project, so a spec that
+ * drives their project tab calls this before navigating to it.
+ */
+export async function seedProject(page: Page, name = 'e2e-proj'): Promise<string> {
+  const parent = process.env.E2E_PROJECT_PARENT
+  if (!parent) throw new Error('E2E_PROJECT_PARENT must point outside the forebrain home')
+  const root = join(parent, 'e2e-seed', `${name}-${uniqueSuffix()}`)
+  mkdirSync(root, { recursive: true })
+  const res = await page.request.post('/api/v1/projects', { data: { name, root, trust: true } })
+  if (res.status() === 409) {
+    const body = (await res.json()) as { project?: { id?: string } }
+    return String(body.project?.id ?? '')
+  }
+  if (!res.ok()) throw new Error(`seed project at ${root} failed: ${res.status()} ${await res.text()}`)
+  return String(((await res.json()) as { id: string }).id)
+}
+
 /** Sign the page in with E2E_TOKEN through the one-click sign-in link. */
 export async function signIn(page: Page): Promise<void> {
   const token = process.env.E2E_TOKEN

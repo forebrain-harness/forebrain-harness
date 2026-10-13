@@ -2,6 +2,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -16,6 +17,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/telemetry"
 )
 
@@ -157,9 +159,9 @@ func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) ht
 		}
 		cfg := env.Deps.AppCfg
 		path := strings.TrimSpace(r.URL.Path)
-		// The exempt inbound paths are those of the agent whose channels are
-		// mounted, which is the agent the runner is bound to.
-		if appcfg.GatewayControlPlaneAuthExemptPath(path, cfg, envAgentID(env)) {
+		// The exempt inbound paths are those of the agent's project channels,
+		// which is the agent the runner is bound to.
+		if appcfg.GatewayControlPlaneAuthExemptPath(path, controlPlaneChannelSections(env)) {
 			inner.ServeHTTP(w, r)
 			return
 		}
@@ -183,6 +185,28 @@ func ControlPlaneHTTPMiddleware(env *process.Environment, inner http.Handler) ht
 		}
 		inner.ServeHTTP(w, r)
 	})
+}
+
+// controlPlaneChannelSections reads the active agent's enabled project channels
+// as the sections whose inbound webhook paths the middleware exempts from
+// control-plane auth. A store error is not fatal: the request falls through to
+// normal auth.
+func controlPlaneChannelSections(env *process.Environment) []appcfg.ChannelsSection {
+	if env == nil || env.SQL == nil {
+		return nil
+	}
+	rows, err := state.NewProjectChannelStore(env.SQL, envAgentID(env)).ListEnabledForAgent(context.Background())
+	if err != nil {
+		return nil
+	}
+	out := make([]appcfg.ChannelsSection, 0, len(rows))
+	for _, row := range rows {
+		section, perr := appcfg.ParseChannelKindJSON(row.Kind, row.ConfigJSON)
+		if perr == nil {
+			out = append(out, section)
+		}
+	}
+	return out
 }
 
 func ServeHTTPChain(env *process.Environment, gw *Server, inner http.Handler) http.Handler {

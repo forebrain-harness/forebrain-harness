@@ -11,7 +11,7 @@ test('final menu matches the approved order', async ({ page }) => {
   await signIn(page)
   await page.goto('/', { waitUntil: 'networkidle' })
   const hrefs = await page.locator('.forebrain-rail-group a.forebrain-rail-link').evaluateAll((nodes) => nodes.map((n) => (n as HTMLAnchorElement).getAttribute('href')))
-  expect(hrefs).toEqual(['/projects', '/rules', '/skills', '/subagents', '/cron', '/channels', '/providers', '/tools', '/permissions', '/memories'])
+  expect(hrefs).toEqual(['/projects', '/rules', '/skills', '/subagents', '/providers', '/tools', '/permissions', '/memories'])
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-menu.png`, fullPage: true })
 })
 

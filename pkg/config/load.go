@@ -493,7 +493,6 @@ func normalize(r *Root) {
 		mainDef.LLMProviders = []AgentLLMProviderConfig{{}}
 	}
 	NormalizeLLMProviderEntries(&mainDef)
-	normalizeChannels(&mainDef.Channels)
 	r.Agents.Definitions["main"] = mainDef
 	for k := range r.Agents.Definitions {
 		if k == "main" {
@@ -501,12 +500,6 @@ func normalize(r *Root) {
 		}
 		d := r.Agents.Definitions[k]
 		NormalizeLLMProviderEntries(&d)
-		// Only a primary agent can own channels, so only a primary agent's
-		// section gets defaults filled in. Anything else keeps exactly what
-		// was written, which is what validatePrimaryAgents rejects.
-		if IsEffectivePrimaryAgent(k, d) {
-			normalizeChannels(&d.Channels)
-		}
 		r.Agents.Definitions[k] = d
 	}
 	NormalizeMCPServers(r.Agents.Defaults.MCPServers)
@@ -677,17 +670,9 @@ func validatePrimaryAgents(r *Root) error {
 	if r == nil || r.Agents.Definitions == nil {
 		return nil
 	}
-	for id, def := range r.Agents.Definitions {
+	for id := range r.Agents.Definitions {
 		if !primaryAgentIDPattern.MatchString(id) {
 			return fmt.Errorf("agents.definitions.%s: invalid agent id", id)
-		}
-		// A channel binds an external account (a bot, an inbound webhook) to
-		// the sessions of one tenant. Subagents are not tenants: they run
-		// inside whichever primary agent spawned them, so a channel declared
-		// on one could never be delivered to and is rejected rather than
-		// silently ignored.
-		if !IsEffectivePrimaryAgent(id, def) && !def.Channels.IsZero() {
-			return fmt.Errorf("agents.definitions.%s.channels: only primary agents may configure channels", id)
 		}
 	}
 	return nil

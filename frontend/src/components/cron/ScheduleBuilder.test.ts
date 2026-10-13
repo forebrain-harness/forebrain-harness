@@ -11,7 +11,7 @@ describe('ScheduleBuilder', () => {
 
   it('opens a stored schedule as-is instead of rebuilding it from defaults', async () => {
     vi.spyOn(forebrainApi, 'cronPreview').mockResolvedValue({ raw: 'daily at 7am', valid: true, kind: 'cron', next: [] })
-    const wrapper = mount(ScheduleBuilder, { props: { modelValue: 'daily at 7am' } })
+    const wrapper = mount(ScheduleBuilder, { props: { modelValue: 'daily at 7am', projectId: 'p1' } })
     // Editing a job must not change its schedule before the user does.
     expect(wrapper.emitted('update:modelValue')?.[0]?.[0]).toBe('daily at 7am')
     expect((wrapper.find('[data-testid="schedule-mode"]').element as HTMLSelectElement).value).toBe('cron')
@@ -20,7 +20,7 @@ describe('ScheduleBuilder', () => {
 
   it('starts a new schedule from the interval mode', () => {
     vi.spyOn(forebrainApi, 'cronPreview').mockResolvedValue({ raw: 'every 1h', valid: true, kind: 'every', next: [] })
-    const wrapper = mount(ScheduleBuilder, { props: { modelValue: '' } })
+    const wrapper = mount(ScheduleBuilder, { props: { modelValue: '', projectId: 'p1' } })
     expect(wrapper.emitted('update:modelValue')?.[0]?.[0]).toBe('every 1h')
   })
 
@@ -30,7 +30,7 @@ describe('ScheduleBuilder', () => {
     const preview = vi.spyOn(forebrainApi, 'cronPreview')
       .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
       .mockResolvedValueOnce({ raw: 'not a schedule', valid: false, error: 'unrecognized schedule' })
-    const wrapper = mount(ScheduleBuilder, { props: { modelValue: 'every 5m' } })
+    const wrapper = mount(ScheduleBuilder, { props: { modelValue: 'every 5m', projectId: 'p1' } })
     await vi.advanceTimersByTimeAsync(400)
     expect(preview).toHaveBeenCalledTimes(1)
 

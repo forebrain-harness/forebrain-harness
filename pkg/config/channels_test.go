@@ -7,157 +7,56 @@ import (
 	"testing"
 )
 
-// Two primary agents each run their own accounts. Reading one agent's channels
-// must never surface another's, and an agent that configured none has none —
-// there is no shared set to inherit.
-func TestChannelsAreIsolatedBetweenPrimaryAgents(t *testing.T) {
-	cfg := &Root{}
-	SetChannelsForAgent(cfg, "main", ChannelsSection{
-		Telegram: Telegram{Enabled: true, BotToken: "main-token"},
-	})
-	SetChannelsForAgent(cfg, "acme", ChannelsSection{
-		Feishu: Feishu{Enabled: true, AppID: "cli_acme"},
-	})
-	cfg.Agents.Definitions["acme"] = AgentDefinition{
-		Primary:  true,
-		Channels: cfg.Agents.Definitions["acme"].Channels,
-	}
-
-	main := ChannelsForAgent(cfg, "main")
-	acme := ChannelsForAgent(cfg, "acme")
-	if main.Telegram.BotToken != "main-token" || main.Feishu.Enabled {
-		t.Fatalf("main channels = %+v", main)
-	}
-	if acme.Feishu.AppID != "cli_acme" || acme.Telegram.Enabled {
-		t.Fatalf("acme channels = %+v", acme)
-	}
-	if got := ChannelsForAgent(cfg, "unknown"); !got.IsZero() {
-		t.Fatalf("an undefined agent inherited channels: %+v", got)
-	}
-	if got := ChannelsForAgent(nil, "main"); !got.IsZero() {
-		t.Fatalf("nil config produced channels: %+v", got)
-	}
-}
-
-// A channel binds an external account to one tenant's sessions. Subagents are
-// not tenants, so a definition that is not an effective primary agent must be
-// rejected outright rather than carrying configuration that can never run.
-func TestLoadRejectsChannelsOnNonPrimaryAgentDefinition(t *testing.T) {
-	t.Setenv("FOREBRAIN_HOME", t.TempDir())
-	path := filepath.Join(t.TempDir(), "forebrain.yaml")
-	body := `
-agents:
-  definitions:
-    explore:
-      channels:
-        telegram:
-          enabled: true
-`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected a subagent definition with channels to be rejected")
-	}
-	if !strings.Contains(err.Error(), "only primary agents may configure channels") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestLoadAcceptsChannelsOnEveryPrimaryAgent(t *testing.T) {
-	t.Setenv("FOREBRAIN_HOME", t.TempDir())
-	path := filepath.Join(t.TempDir(), "forebrain.yaml")
-	body := `
-agents:
-  definitions:
-    main:
-      channels:
-        slack:
-          enabled: true
-    acme:
-      primary: true
-      channels:
-        slack:
-          enabled: true
-          inbound_path: "/acme/slack"
-`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
+// A stored channel section is read back with its kind defaults filled in, so a
+// channel written by one surface renders the same everywhere.
+func TestParseChannelsSectionJSONFillsDefaults(t *testing.T) {
+	sec, err := ParseChannelsSectionJSON(`{"slack":{"enabled":true,"inbound_path":"/acme/slack"}}`)
 	if err != nil {
-		t.Fatalf("load: %v", err)
+		t.Fatalf("parse: %v", err)
 	}
-	// Defaults are filled in per agent, so each agent's unset fields resolve
-	// on their own rather than borrowing main's.
-	if got := ChannelsForAgent(&cfg, "main").Slack.InboundPath; got != "/channels/slack/inbound" {
-		t.Fatalf("main slack inbound path = %q", got)
+	if !sec.Slack.Enabled || sec.Slack.InboundPath != "/acme/slack" {
+		t.Fatalf("slack = %+v", sec.Slack)
 	}
-	if got := ChannelsForAgent(&cfg, "acme").Slack.InboundPath; got != "/acme/slack" {
-		t.Fatalf("acme slack inbound path = %q", got)
-	}
-}
-
-// Only primary agents get channel defaults materialized. Filling them in on a
-// subagent definition would write configuration into forebrain.yaml that can never
-// take effect, and would defeat the check above by making every definition look
-// like it declared channels.
-func TestNormalizeLeavesSubagentDefinitionChannelsUntouched(t *testing.T) {
-	r := &Root{}
-	r.Agents.Definitions = map[string]AgentDefinition{
-		"main":    {},
-		"explore": {},
-	}
-	normalize(r)
-
-	if got := ChannelsForAgent(r, "main").Slack.InboundPath; got != "/channels/slack/inbound" {
-		t.Fatalf("main did not get channel defaults: %q", got)
-	}
-	if got := ChannelsForAgent(r, "explore"); !got.IsZero() {
-		t.Fatalf("subagent definition got channel defaults: %+v", got)
+	// A kind the section did not name still gets its own defaults, so reading
+	// one channel does not depend on another having been set.
+	if sec.Email.InboundPath != "/channels/email/inbound" {
+		t.Fatalf("email default not filled: %q", sec.Email.InboundPath)
 	}
 }
 
-// Secrets are stored per agent in ~/.forebrain/.env and referenced from the
-// agent's own section, so resolving them must not depend on any shared name.
-func TestEnvReferencesResolveInsideAgentChannels(t *testing.T) {
-	t.Setenv("FOREBRAIN_HOME", t.TempDir())
-	t.Setenv("FOREBRAIN_MAIN_TELEGRAM_BOT_TOKEN", "main-secret")
-	t.Setenv("FOREBRAIN_ACME_TELEGRAM_BOT_TOKEN", "acme-secret")
-	path := filepath.Join(t.TempDir(), "forebrain.yaml")
-	body := `
-agents:
-  definitions:
-    main:
-      channels:
-        telegram:
-          enabled: true
-          bot_token: "${FOREBRAIN_MAIN_TELEGRAM_BOT_TOKEN}"
-    acme:
-      primary: true
-      channels:
-        telegram:
-          enabled: true
-          bot_token: "${FOREBRAIN_ACME_TELEGRAM_BOT_TOKEN}"
-`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(path)
+// A stored section's secret fields hold ${VAR} references; reading it back
+// resolves them from the process environment the loader merged ~/.forebrain/.env
+// into.
+func TestParseChannelsSectionJSONResolvesEnvReferences(t *testing.T) {
+	t.Setenv("FOREBRAIN_CH_ACME_TELEGRAM_BOT_TOKEN", "acme-secret")
+	sec, err := ParseChannelsSectionJSON(`{"telegram":{"enabled":true,"bot_token":"${FOREBRAIN_CH_ACME_TELEGRAM_BOT_TOKEN}"}}`)
 	if err != nil {
-		t.Fatalf("load: %v", err)
+		t.Fatalf("parse: %v", err)
 	}
-	if got := ChannelsForAgent(&cfg, "main").Telegram.BotToken; got != "main-secret" {
-		t.Fatalf("main token = %q", got)
-	}
-	if got := ChannelsForAgent(&cfg, "acme").Telegram.BotToken; got != "acme-secret" {
-		t.Fatalf("acme token = %q", got)
+	if got := sec.Telegram.BotToken; got != "acme-secret" {
+		t.Fatalf("telegram token = %q", got)
 	}
 }
 
-// A plaintext channel secret is rejected wherever it appears, including inside
-// an agent definition: the scan walks keys, not a fixed list of sections.
+// MarshalChannelsSection round-trips a section unchanged, so a channel written
+// from a section read back is the same channel.
+func TestMarshalChannelsSectionRoundTrips(t *testing.T) {
+	in := ChannelsSection{Telegram: Telegram{Enabled: true, BotToken: "plain-token"}}
+	raw, err := MarshalChannelsSection(in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out, err := ParseChannelsSectionJSON(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if out.Telegram.BotToken != "plain-token" || !out.Telegram.Enabled {
+		t.Fatalf("round trip changed the section: %+v", out.Telegram)
+	}
+}
+
+// Load still rejects a plaintext channel secret wherever it appears: the scan
+// walks keys, not a fixed list of sections.
 func TestLoadRejectsPlaintextSecretInsideAgentChannels(t *testing.T) {
 	t.Setenv("FOREBRAIN_HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "forebrain.yaml")
@@ -175,5 +74,107 @@ agents:
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected a plaintext channel secret under an agent to be rejected")
+	}
+}
+
+// A legacy primary-agent-level channels section is stripped from the file, with
+// the original bytes kept in a backup, and the channels that were enabled are
+// reported so the caller can warn that they stopped.
+func TestMigrateLegacyAgentChannelsStripsAndReportsEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forebrain.yaml")
+	body := `agents:
+  definitions:
+    main:
+      channels:
+        telegram:
+          enabled: true
+        slack:
+          enabled: false
+    acme:
+      primary: true
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mig, err := MigrateLegacyAgentChannels(path)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if !mig.Removed {
+		t.Fatal("expected the channels section to be removed")
+	}
+	if len(mig.Enabled) != 1 || mig.Enabled[0] != "telegram" {
+		t.Fatalf("enabled = %v, want [telegram]", mig.Enabled)
+	}
+	if mig.Backup == "" {
+		t.Fatal("expected a backup path")
+	}
+	backup, err := os.ReadFile(mig.Backup)
+	if err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if string(backup) != body {
+		t.Fatalf("backup does not match the original file")
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rewritten), "channels:") {
+		t.Fatalf("channels section survived the rewrite:\n%s", rewritten)
+	}
+
+	// Idempotent: a second run finds nothing to remove.
+	again, err := MigrateLegacyAgentChannels(path)
+	if err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	if again.Removed {
+		t.Fatal("a second run removed something")
+	}
+}
+
+// A configuration with no channels section is left byte for byte as it is.
+func TestMigrateLegacyAgentChannelsLeavesCleanConfigAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forebrain.yaml")
+	body := "agents:\n  definitions:\n    main: {}\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mig, err := MigrateLegacyAgentChannels(path)
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if mig.Removed {
+		t.Fatal("a clean config was reported as removed")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != body {
+		t.Fatalf("a clean config was rewritten:\n%s", after)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak-") {
+			t.Fatalf("a clean config got a backup: %s", e.Name())
+		}
+	}
+}
+
+// A missing configuration is not an error: nothing to migrate.
+func TestMigrateLegacyAgentChannelsMissingFile(t *testing.T) {
+	mig, err := MigrateLegacyAgentChannels(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if mig.Removed {
+		t.Fatal("a missing file reported a removal")
 	}
 }

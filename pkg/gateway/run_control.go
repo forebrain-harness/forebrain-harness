@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -919,25 +920,33 @@ func (s *Server) startCronFire(ctx context.Context, fire turn.CronFire) error {
 	if s == nil || s.Core == nil {
 		return fmt.Errorf("cron: no turn runtime")
 	}
-	birth := state.SessionBirth{Source: state.SessionSourceCron}
-	var project state.Project
-	if pid := strings.TrimSpace(fire.Job.ProjectID); pid != "" {
-		p, err := s.projectStore().Get(ctx, pid)
-		if err != nil {
-			return err
-		}
-		project = p
-		birth.Cwd, birth.GitBranch = p.Root, memory.GitBranch(p.Root)
+	// A fire always runs in its job's project, and a project's directory must
+	// still exist: a fire whose root is gone is recorded as failed with that
+	// reason rather than running somewhere it does not belong.
+	pid := strings.TrimSpace(fire.Job.ProjectID)
+	if pid == "" {
+		return fmt.Errorf("cron: job has no project")
+	}
+	p, err := s.projectStore().Get(ctx, pid)
+	if err != nil {
+		return err
+	}
+	if info, statErr := os.Stat(p.Root); statErr != nil || !info.IsDir() {
+		return fmt.Errorf("project directory no longer exists: %s", p.Root)
+	}
+	birth := state.SessionBirth{
+		Source:    state.SessionSourceCron,
+		Cwd:       p.Root,
+		GitBranch: memory.GitBranch(p.Root),
+		ProjectID: p.ID,
 	}
 	if err := s.Sessions.EnsureAt(ctx, fire.SessionID, fire.Title, birth); err != nil {
 		return err
 	}
-	if strings.TrimSpace(fire.Job.ProjectID) != "" {
-		if err := s.bindSessionToProject(ctx, fire.SessionID, project); err != nil {
-			return err
-		}
+	if err := s.bindSessionToProject(ctx, fire.SessionID, p); err != nil {
+		return err
 	}
-	_, err := s.startDetachedTurn(detachedTurn{
+	_, err = s.startDetachedTurn(detachedTurn{
 		SessionID:    fire.SessionID,
 		Prompt:       fire.Job.Prompt,
 		Trigger:      cronTrigger,
