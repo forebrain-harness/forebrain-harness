@@ -4080,6 +4080,12 @@ func workingStatusFormatter(counterSnapshot func() Counters, agentSnapshot func(
 		if c := formatWorkingCounters(counters); c != "" {
 			title += " · " + c
 		}
+		// How long the model took to start answering this turn, once the
+		// engine has measured it. It is the run's own figure, shown live here
+		// before the "Worked for" line repeats it when the turn ends.
+		if wait := firstTokenLabel(counters.FirstToken); wait != "" {
+			title += " · " + wait
+		}
 		return title
 	}
 }

@@ -2677,6 +2677,20 @@ func TestWorkingStatusFormatterAppendsLatestCounters(t *testing.T) {
 	}
 }
 
+// The live "Working" line reports how long the model took to start answering
+// the turn, once the engine has measured it, so the wait is visible before the
+// turn is over.
+func TestWorkingStatusFormatterAppendsFirstToken(t *testing.T) {
+	t.Setenv("TMUX", "")
+	formatter := workingStatusFormatter(func() Counters {
+		return Counters{PlanDone: 1, PlanTotal: 3, PlanActive: "Writing tests", FirstToken: 1200 * time.Millisecond}
+	}, nil)
+	got := formatter(20*time.Second, 0, "")
+	if got != "| Working (20s • esc to interrupt) · ☑1/3 · Writing tests · first token 1.2s" {
+		t.Fatalf("working status with first token = %q", got)
+	}
+}
+
 // Inside a subagent's view the working line describes that subagent. The two
 // runs agree about nothing — the conversation's turn started earlier and has
 // spent more — so borrowing its figures, as the line used to, told the reader

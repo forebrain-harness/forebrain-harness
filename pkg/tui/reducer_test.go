@@ -151,6 +151,62 @@ func TestReducerAppendsCountersToWorkedStatus(t *testing.T) {
 	}
 }
 
+// The first-token wait the engine measured shows on the run's "Worked for"
+// line, right after the duration, once the turn ends.
+func TestReducerShowsFirstTokenOnWorkedStatus(t *testing.T) {
+	tracker := NewTracker()
+	var r Reducer
+	r.WithTracker(tracker)
+	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
+	_ = r.Reduce(FirstTokenMsg{RunID: "r1", Wait: 1200 * time.Millisecond})
+	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 12 * time.Second})
+	if !strings.HasPrefix(ev.WorkedStatus, "Worked for 12s · first token 1.2s · ") || !workedCompletionSuffix.MatchString(ev.WorkedStatus) {
+		t.Fatalf("worked status = %q, want the measured 1.2s first token after the duration", ev.WorkedStatus)
+	}
+}
+
+// A run that measured no first token says nothing about it rather than
+// claiming "0s".
+func TestReducerOmitsUnknownFirstToken(t *testing.T) {
+	tracker := NewTracker()
+	var r Reducer
+	r.WithTracker(tracker)
+	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
+	ev := r.Reduce(RunEndedMsg{RunID: "r1", WorkedDuration: 2 * time.Second})
+	if strings.Contains(ev.WorkedStatus, "first token") {
+		t.Fatalf("worked status = %q, want no first-token segment", ev.WorkedStatus)
+	}
+}
+
+// The wait is kept once per run: a continuation past an approval reports the
+// same run again with a later, shorter wait, and that must not overwrite the
+// first — the same rule the store applies to the persisted value.
+func TestFirstTokenIsKeptOncePerRun(t *testing.T) {
+	tracker := NewTracker()
+	var r Reducer
+	r.WithTracker(tracker)
+	_ = r.Reduce(RunStartedMsg{RunID: "r1"})
+	_ = r.Reduce(FirstTokenMsg{RunID: "r1", Wait: 1200 * time.Millisecond})
+	_ = r.Reduce(FirstTokenMsg{RunID: "r1", Wait: 300 * time.Millisecond})
+	if got := tracker.SnapshotRun("r1").FirstToken; got != 1200*time.Millisecond {
+		t.Fatalf("first token = %v, want the first measured 1.2s", got)
+	}
+}
+
+// A sub-second wait reads to a tenth of a second; a slow start reads in the
+// worked line's own minutes format; an unmeasured one reads as nothing.
+func TestFirstTokenLabelFormatsTenthsAndMinutes(t *testing.T) {
+	if got := firstTokenLabel(1200 * time.Millisecond); got != "first token 1.2s" {
+		t.Fatalf("firstTokenLabel(1.2s) = %q", got)
+	}
+	if got := firstTokenLabel(90 * time.Second); got != "first token 1m 30s" {
+		t.Fatalf("firstTokenLabel(90s) = %q", got)
+	}
+	if got := firstTokenLabel(0); got != "" {
+		t.Fatalf("firstTokenLabel(0) = %q, want empty", got)
+	}
+}
+
 // A turn the user interrupted still worked for as long as it ran, and its
 // transcript still needs the boundary that says so. The old rule showed the
 // line only for a normally completed turn, which left an interrupted one

@@ -544,10 +544,17 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 }
 
 // replayWorkedFrame is the "Worked for" line that closed a run: how long it
-// took and the minute it finished, read from the run's own clock.
+// took, how long it waited for the model's first output when the run measured
+// that, and the minute it finished, read from the run's own clock.
 func replayWorkedFrame(line turn.RunWorkedLine) Frame {
-	title := workedForLabel(line.Worked) + " · " + workedCompletionTime(line.FinishedAt.Local())
-	return Frame{Kind: FrameStatus, Title: title, RunID: line.RunID, Final: true}
+	parts := []string{workedForLabel(line.Worked)}
+	// A run that measured no first token (it produced no output, or predates
+	// the measurement) drops the segment instead of showing a fake "0s".
+	if wait := firstTokenLabel(line.FirstToken); wait != "" {
+		parts = append(parts, wait)
+	}
+	parts = append(parts, workedCompletionTime(line.FinishedAt.Local()))
+	return Frame{Kind: FrameStatus, Title: strings.Join(parts, " · "), RunID: line.RunID, Final: true}
 }
 
 // replayCompactionMessage rebuilds a compaction's final card from the event
