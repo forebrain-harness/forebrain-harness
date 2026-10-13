@@ -68,6 +68,7 @@ mkdir -p "$HOME_DIR" "$PROJ" "$WEBUI" "$SHOTS"
 #    is served from FOREBRAIN_STATIC_DIST so pkg/gateway/dist (managed by the
 #    release flow) is never touched. A failed branch aborts the run with its
 #    log; `wait` alone would swallow a nonzero exit.
+"$REPO/scripts/fetch-libtokenizers.sh"
 ( cd "$REPO" && CGO_ENABLED=1 go build -tags fts5 -o "$BIN" ./cmd/forebrain ) \
   > "$WORK/go-build.log" 2>&1 &
 GO_BUILD_PID=$!
@@ -77,6 +78,7 @@ UI_BUILD_PID=$!
 wait "$GO_BUILD_PID" || { cat "$WORK/go-build.log" >&2; die "go build failed"; }
 wait "$UI_BUILD_PID" || { cat "$WORK/ui-build.log" >&2; die "frontend build failed"; }
 "$REPO/scripts/install-dictionary.sh" "$WORK"
+"$REPO/scripts/install-assets.sh" "$WORK"
 
 # 3. This run's gateway token. The yaml references it via ${ENV}: plaintext
 #    secrets in config are rejected at startup by design.
@@ -97,6 +99,14 @@ gateway:
     token: \${FOREBRAIN_GATEWAY_TOKEN}
 compact:
   model_auto_compact_token_limit: 200000
+features:
+  # The memory system starts a background pipeline on the first turn and writes
+  # scaffolding into the memory root (extensions/ad_hoc/instructions.md, a .git
+  # repository, …) stamped earlier than anything a spec seeds. The memory
+  # manager specs seed files on disk directly and assert exact listings, so the
+  # whole feature is off for the run. Switching off `generate_memories` alone is
+  # not enough: the startup pipeline is gated on this feature flag.
+  memories: false
 agents:
   # The subagent conversation spec dispatches a general-purpose subagent; the
   # capability is opt-in (agents.defaults.enable_subagent).
@@ -120,6 +130,14 @@ gateway:
     token: \${FOREBRAIN_GATEWAY_TOKEN}
 compact:
   model_auto_compact_token_limit: 200000
+features:
+  # The memory system starts a background pipeline on the first turn and writes
+  # scaffolding into the memory root (extensions/ad_hoc/instructions.md, a .git
+  # repository, …) stamped earlier than anything a spec seeds. The memory
+  # manager specs seed files on disk directly and assert exact listings, so the
+  # whole feature is off for the run. Switching off `generate_memories` alone is
+  # not enough: the startup pipeline is gated on this feature flag.
+  memories: false
 agents:
   defaults:
     enable_subagent: true
@@ -129,6 +147,14 @@ agents:
       llm_providers:
       - provider: deepseek
         model: deepseek-chat
+        api_key: \${FAKE_LLM_KEY}
+        base_url: http://127.0.0.1:$LLM_PORT
+      # A reasoning-capable fallback so the session model chip offers a model
+      # with effort levels (the catalog reports none for deepseek-chat); the
+      # fake provider answers any model identity, and the chain never reaches
+      # the fallback while the first entry works.
+      - provider: zhipuai
+        model: glm-5.3-flash
         api_key: \${FAKE_LLM_KEY}
         base_url: http://127.0.0.1:$LLM_PORT
 YAML

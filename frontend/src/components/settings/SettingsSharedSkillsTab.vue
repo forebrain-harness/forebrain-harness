@@ -26,6 +26,7 @@
         @delete="onDelete"
         @download="onDownload"
         @batch-download="onBatchDownload"
+        @detail="openSkill"
       />
     </div>
 
@@ -58,6 +59,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
 import forebrainApi, {
@@ -65,6 +67,7 @@ import forebrainApi, {
   saveSkillDownload,
   type SkillRecord,
 } from '@/lib/api'
+import { workshopRoute } from '@/lib/workshopTarget'
 import { useI18n } from '@/locales'
 
 /**
@@ -74,6 +77,11 @@ import { useI18n } from '@/locales'
  * takes the complete enabled list — and shows the shared and built-in slice.
  */
 const { t } = useI18n()
+const router = useRouter()
+
+function openSkill(row: SkillRecord) {
+  void router.push(workshopRoute({ scope: 'agent', mode: 'improve', skill: row.name }))
+}
 
 const rows = ref<SkillRecord[]>([])
 const loading = ref(false)

@@ -104,9 +104,10 @@ func (c *Catalog) Len() int {
 	return len(c.byID)
 }
 
-// A fresh home has no models.json until the embedded catalog is seeded into
-// it. Initializing the global catalog seeds it first, so the very first
-// process knows every model's limits instead of reading them all as unknown.
+// A fresh home has no models.json until the catalog beside the binary is
+// seeded into it. Initializing the global catalog seeds it first, so the very
+// first process knows every model's limits instead of reading them all as
+// unknown.
 func TestInitGlobalCatalogSeedsAFreshHome(t *testing.T) {
 	globalCatMu.RLock()
 	previous := globalCat
@@ -114,8 +115,14 @@ func TestInitGlobalCatalogSeedsAFreshHome(t *testing.T) {
 	t.Cleanup(func() { SetGlobalCatalogForTest(previous) })
 	SetGlobalCatalogForTest(nil)
 
+	assets, err := RepoAssetsDirForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(AssetsDirEnv, assets)
+
 	home := t.TempDir()
-	if err := InitGlobalCatalog(home); err != nil {
+	if err := InitGlobalCatalog(home, "(devel)"); err != nil {
 		t.Fatalf("InitGlobalCatalog: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, "models.json")); err != nil {

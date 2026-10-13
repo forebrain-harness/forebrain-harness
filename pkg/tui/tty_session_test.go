@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,47 @@ import (
 
 	"github.com/mattn/go-runewidth"
 )
+
+// TestClipboardImageReaderWritesIntoTheProjectAttachments pins that a pasted
+// image is stored with the project, under <project root>/attachments/, rather
+// than in the system temp directory.
+func TestClipboardImageReaderWritesIntoTheProjectAttachments(t *testing.T) {
+	prev := clipboardWritePNG
+	t.Cleanup(func() { clipboardWritePNG = prev })
+	clipboardWritePNG = func(_ context.Context, path string) error {
+		return os.WriteFile(path, []byte("png-bytes"), 0o600)
+	}
+	root := t.TempDir()
+	att, err := DefaultClipboardImageReader(root).ReadClipboardImage(context.Background())
+	if err != nil {
+		t.Fatalf("ReadClipboardImage: %v", err)
+	}
+	wantDir := filepath.Join(root, "attachments")
+	if dir := filepath.Dir(att.Path); filepath.Clean(dir) != filepath.Clean(wantDir) {
+		t.Fatalf("pasted image landed in %q, want %q", dir, wantDir)
+	}
+	if att.MIMEType != "image/png" {
+		t.Fatalf("mime = %q, want image/png", att.MIMEType)
+	}
+}
+
+// TestClipboardImageReaderFallsBackToTempWithoutAProject pins that a reader
+// with no project root (a test, or a surface with no project) keeps the old
+// temp-directory behavior.
+func TestClipboardImageReaderFallsBackToTempWithoutAProject(t *testing.T) {
+	prev := clipboardWritePNG
+	t.Cleanup(func() { clipboardWritePNG = prev })
+	clipboardWritePNG = func(_ context.Context, path string) error {
+		return os.WriteFile(path, []byte("png-bytes"), 0o600)
+	}
+	att, err := DefaultClipboardImageReader("").ReadClipboardImage(context.Background())
+	if err != nil {
+		t.Fatalf("ReadClipboardImage: %v", err)
+	}
+	if dir := filepath.Dir(att.Path); filepath.Clean(dir) != filepath.Clean(os.TempDir()) {
+		t.Fatalf("pasted image landed in %q, want the temp directory %q", dir, os.TempDir())
+	}
+}
 
 func TestClipboardImageHintLine(t *testing.T) {
 	r := NewRenderer(nil, nil)

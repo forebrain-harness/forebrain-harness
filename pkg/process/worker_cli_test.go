@@ -472,8 +472,12 @@ func TestApprovalResumeDoesNotRewriteTheSubagentPrompt(t *testing.T) {
 		t.Fatalf("err = %v, want a tool approval gate", gateErr)
 	}
 	rows := workerRows(t, env, workerID)
-	if len(rows) != 1 || rows[0].Role != llm.RoleUser || rows[0].TextContent() != "write the file" {
-		t.Fatalf("worker session after the gate = %+v, want exactly the user row", rows)
+	// The engine writes each block as it ends, so the first attempt's assistant
+	// row — the one that issued the call — is already in the worker session when
+	// the gate stops it. The dispatch is not repeated: exactly one user row.
+	if len(rows) != 2 || rows[0].Role != llm.RoleUser || rows[0].TextContent() != "write the file" ||
+		rows[1].Role != llm.RoleAssistant || len(rows[1].ToolCalls) != 1 {
+		t.Fatalf("worker session after the gate = %+v, want the user row and the assistant row that issued the call", rows)
 	}
 
 	// The resumed attempt replays the parked session — the snapshot the gate

@@ -323,7 +323,7 @@ func TestStatusReportsSandboxSettingsLockedByPolicy(t *testing.T) {
 	m := NewManager()
 	cfg := &appcfg.Root{}
 	cfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
-	UpdateManagerWithLocalConfig(m, t.TempDir(), cfg, Snapshot{}, nil)
+	UpdateManagerWithLocalConfig(m, t.TempDir(), cfg, Snapshot{}, nil, t.TempDir())
 	if st := m.Status(cfg); st.SettingsLocked {
 		t.Fatalf("local settings alone must not lock sandbox UI: %+v", st)
 	}
@@ -355,7 +355,7 @@ func TestUpdateConfigAndRefreshConfigCacheRuntimeConfig(t *testing.T) {
 	cfg := &appcfg.Root{}
 	cfg.SandboxWorkspaceWrite.WritableRoots = []string{"./cache"}
 	snap := Snapshot{}
-	rc := UpdateManagerWithLocalConfig(m, home, cfg, snap, nil)
+	rc := UpdateManagerWithLocalConfig(m, home, cfg, snap, nil, home)
 	if len(rc.Filesystem.AllowWrite) == 0 {
 		t.Fatalf("expected allow_write entries, got %+v", rc)
 	}
@@ -371,7 +371,7 @@ func TestStatusUsesCachedConfigWhenNilProvided(t *testing.T) {
 	m := NewManager()
 	cfg := &appcfg.Root{}
 	cfg.SandboxMode = appcfg.SandboxModeWorkspaceWrite
-	UpdateManagerWithLocalConfig(m, t.TempDir(), cfg, Snapshot{}, nil)
+	UpdateManagerWithLocalConfig(m, t.TempDir(), cfg, Snapshot{}, nil, t.TempDir())
 	st := m.Status(nil)
 	if st.Mode != ModeSandboxed {
 		t.Fatalf("expected cached status to report sandboxed mode, got %+v", st)

@@ -33,18 +33,49 @@ type WebFetchConfig struct {
 }
 
 // TokenEstimateConfig controls local token counting for context assembly and tools.
-// The zero value is the out-of-the-box default and is safe to use without YAML: at Runner load,
-// if both Encoding and Model are empty, the first LLM provider model on the active agent is used;
-// if that is also empty, the implementation uses the cl100k_base encoding. The rune/4 fallback is
-// always used when tiktoken init fails (it is not configurable).
 //
-// To use a HuggingFace tokenizer (e.g. for DeepSeek models that use LlamaTokenizerFast),
-// set TokenizerPath to the path of a tokenizer.json file. When set, it takes precedence over
-// Encoding and Model.
+// Local estimation counts tokens with the tokenizer of the model in use, not
+// with one global encoder. The tokenizer files for the mainstream model
+// families ship beside the binary; on first use one is copied into the cache
+// directory ($FOREBRAIN_HOME/cache/tokenizers/<id>/<file>) or extracted from
+// beside the binary, and only when neither has it is it downloaded, from
+// HuggingFace first and ModelScope second (configure the hubs and endpoints
+// below). An enterprise/offline install can run forebrain once on a connected
+// machine and copy the whole cache directory across; the layout is the
+// decompressed original files. The built-in ids and the model names they cover
+// are listed in assets/tokenizers/README.md.
+//
+// The zero value is the out-of-the-box default: the download hubs are
+// HuggingFace then ModelScope, the endpoints are their public URLs, and the
+// default tokenizer is gpt-o200k.
 type TokenEstimateConfig struct {
+	// Hubs is the download order; each entry is "huggingface" or "modelscope".
+	// Empty means both, in that order.
+	Hubs []string `yaml:"hubs,omitempty" json:"hubs,omitempty"`
+	// HuggingFaceEndpoint overrides the HuggingFace base URL ("" → $HF_ENDPOINT
+	// → https://huggingface.co).
+	HuggingFaceEndpoint string `yaml:"huggingface_endpoint,omitempty" json:"huggingface_endpoint,omitempty"`
+	// ModelScopeEndpoint overrides the ModelScope base URL ("" →
+	// https://modelscope.cn).
+	ModelScopeEndpoint string `yaml:"modelscope_endpoint,omitempty" json:"modelscope_endpoint,omitempty"`
+	// DefaultTokenizer is the built-in id used when neither a model prefix nor
+	// a provider maps to one ("" → gpt-o200k).
+	DefaultTokenizer string `yaml:"default_tokenizer,omitempty" json:"default_tokenizer,omitempty"`
+	// Tokenizers maps model-name prefixes to specific tokenizers.
+	Tokenizers []TokenizerOverride `yaml:"tokenizers,omitempty" json:"tokenizers,omitempty"`
+
+	// Deprecated: ignored since the estimator picks a tokenizer per model.
 	Encoding      string `yaml:"encoding,omitempty" json:"encoding,omitempty"`
 	Model         string `yaml:"model,omitempty" json:"model,omitempty"`
 	TokenizerPath string `yaml:"tokenizer_path,omitempty" json:"tokenizer_path,omitempty"`
+}
+
+// TokenizerOverride maps a model-name prefix to a tokenizer: exactly one of
+// Tokenizer (a built-in id) or Path (a local tokenizer.json) is set.
+type TokenizerOverride struct {
+	Model     string `yaml:"model" json:"model"`                             // model-name prefix, case-insensitive
+	Tokenizer string `yaml:"tokenizer,omitempty" json:"tokenizer,omitempty"` // a built-in tokenizer id
+	Path      string `yaml:"path,omitempty" json:"path,omitempty"`           // a local tokenizer.json
 }
 
 type ContextInjectConfig struct {

@@ -101,6 +101,7 @@ func ApplyAgent(deps AgentDeps, active appcfg.Summary) error {
 			deps.Cfg,
 			runner.PermissionSnapshot(),
 			nil,
+			runner.ProjectRoot,
 		)
 		deps.Sandbox.SetIsolatedPeerRoots(siblingWorkspaces(deps.Home, deps.Cfg, active))
 	}

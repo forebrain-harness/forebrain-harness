@@ -1288,9 +1288,13 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 
 func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*ChatSession, error) {
 	env, err := process.Open(ctx, process.OpenOptions{
-		Config:        &cfg,
-		LaunchDir:     cwd,
-		SessionSource: memory.SessionSourceTUI,
+		Config: &cfg,
+		// The TUI's launch directory IS its project root (R2): resolve it as
+		// an exact root so a TUI started in a checkout subdirectory runs as
+		// that subdirectory's project, never the enclosing repository.
+		LaunchDir:       cwd,
+		ExactLaunchRoot: true,
+		SessionSource:   memory.SessionSourceTUI,
 	})
 	if err != nil {
 		return nil, err
@@ -1478,6 +1482,20 @@ type Session interface {
 	CurrentModelReasoningEffort() string
 	ApplySkillSelection(label string) (string, error)
 	ApplySkillEnabledSelection(enabledPaths []string) (string, error)
+	// The skill draft-and-version lifecycle (plan 037) the /skills panel
+	// drives: a skill's version state, and publishing, discarding, restoring
+	// and pulling upstream into its draft. The TUI reaches the same store the
+	// gateway serves over HTTP, in process.
+	SkillVersionState(entry skill.Entry) (skill.SkillVersionState, bool)
+	PublishSkill(entry skill.Entry, note string) (int, error)
+	DiscardSkillDraft(entry skill.Entry) error
+	RestoreSkillVersion(entry skill.Entry, version int, replaceDraft bool) error
+	PullSkillUpdate(entry skill.Entry, replaceDraft bool) error
+	SkillDiff(entry skill.Entry, from, to string) ([]SkillFileDiff, error)
+	// DraftOnlySkills lists the skills that exist only as a draft — never
+	// published, so invisible to discovery — as entries ready to merge into
+	// the panel's list.
+	DraftOnlySkills() []skill.Entry
 	// MemorySkillOptions lists the skills the memory consolidation agent wrote.
 	// They are proposals: nothing there reaches the model until the user
 	// promotes it, which is what PromoteMemorySkills does.

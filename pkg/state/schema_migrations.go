@@ -7,15 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 8
+const stateSchemaVersion = 10
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -44,6 +46,8 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 6, apply: migrateStateV5ToV6},
 	{version: 7, apply: migrateStateV6ToV7},
 	{version: 8, apply: migrateStateV7ToV8},
+	{version: 9, apply: migrateStateV8ToV9},
+	{version: 10, apply: migrateStateV9ToV10},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -295,6 +299,511 @@ WHERE event_type IN ('subagent_spawned', 'subagent_ended')
 		return fmt.Errorf("backfill the send call of legacy subagent events: %w", err)
 	}
 	return nil
+}
+
+// migrateStateV8ToV9 gives every ordinary session a project, makes a project
+// root unique per agent, and removes project archiving (owner 2026-10-11).
+//
+// Old databases hold projectless conversations: this is the migration that
+// binds them. Each remaining ordinary session joins the project of its
+// working directory — the directory itself, canonical, never a git ancestor,
+// so a subdirectory is its own project. A projectless session with no working
+// directory at all cannot be placed and is deleted, together with everything
+// hanging beneath it (its sub-sessions and their transcripts, runs, waits,
+// actions, files and memory jobs). Skill-workshop sessions are left as they
+// are: a primary-agent-level workshop task has no project by design.
+//
+// The migration runs with foreign keys off, so nothing cascades: every child
+// table of a doomed session is emptied by hand, and the final
+// requireNoForeignKeyViolations proves none was missed. Every step tolerates
+// the object already being in its final shape, so a fixture built from the
+// current schema.sql with a lowered user_version — and a second run against
+// the same database — both pass through without changes.
+func migrateStateV8ToV9(ctx context.Context, conn *sql.Conn) error {
+	if err := dropProjectArchiveColumnV9(ctx, conn); err != nil {
+		return err
+	}
+	if err := mergeDuplicateProjectRootsV9(ctx, conn); err != nil {
+		return err
+	}
+	doomed, err := collectDoomedSessionsV9(ctx, conn)
+	if err != nil {
+		return err
+	}
+	deleted, err := deleteDoomedSessionsV9(ctx, conn)
+	if err != nil {
+		return err
+	}
+	created, adopted, err := adoptProjectlessSessionsV9(ctx, conn)
+	if err != nil {
+		return err
+	}
+	cronJobs, err := deleteOrphanCronJobsV9(ctx, conn)
+	if err != nil {
+		return err
+	}
+	slog.Info("state v8→v9 gave every session a project",
+		"doomed_sessions", doomed,
+		"deleted_sessions", deleted,
+		"created_projects", created,
+		"adopted_sessions", adopted,
+		"deleted_cron_jobs", cronJobs)
+	return nil
+}
+
+// fbMessagesDDLV10 is fb_messages exactly as schema.sql declares it, with the
+// 'rewound' visibility the v10 rebuild adds. The rebuild recreates it from
+// this text rather than parsing schema.sql, matching how every migration in
+// this file freezes the shape of its own version.
+const fbMessagesDDLV10 = `
+CREATE TABLE fb_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  run_id TEXT REFERENCES fb_runs(id) ON DELETE SET NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'reasoning', 'system')),
+  visibility TEXT NOT NULL DEFAULT 'visible' CHECK (visibility IN ('visible', 'repaired', 'withdrawn', 'rewound')),
+  content TEXT NOT NULL,
+  parts TEXT NOT NULL DEFAULT '[]',
+  message_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  usage_json TEXT NOT NULL DEFAULT '',
+  tool_step_id TEXT NOT NULL DEFAULT '',
+  tool_meta_json TEXT NOT NULL DEFAULT '',
+  exec_started_at_ms INTEGER,
+  exec_finished_at_ms INTEGER,
+  exec_duration_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  -- Execution timing belongs to the row's own work: a tool call, or a shell
+  -- command the user ran. A run's timing lives on fb_runs.
+  CHECK (exec_started_at_ms IS NULL OR role IN ('tool', 'user')),
+  CHECK ((exec_started_at_ms IS NULL) = (exec_finished_at_ms IS NULL)
+     AND (exec_finished_at_ms IS NULL) = (exec_duration_ms IS NULL))
+) STRICT`
+
+// migrateStateV9ToV10 adds the file-change ledger behind "rewind to before a
+// message" and the workbench's changed-files list, and gives fb_messages a
+// fourth visibility, 'rewound', for the rows a rewind moves aside.
+//
+// The visibility CHECK is a table constraint, so SQLite can only change it by
+// rebuilding fb_messages. The rebuild renames the table aside with
+// legacy_alter_table on — so the two foreign keys fb_sessions holds into it
+// are NOT rewritten to the renamed copy — then creates the final table, copies
+// every row, drops the renamed original and recreates the two indexes by hand.
+// Foreign keys run off, so nothing cascades; requireNoForeignKeyViolations
+// proves fb_sessions still points at rows the new table holds. Every step
+// tolerates the object already being final, so a fixture built from the
+// current schema.sql with a lowered user_version passes through unchanged.
+func migrateStateV9ToV10(ctx context.Context, conn *sql.Conn) error {
+	final, err := tableSQLContains(ctx, conn, "fb_messages", "'rewound'")
+	if err != nil {
+		return err
+	}
+	if !final {
+		if err := rebuildMessagesForRewoundV10(ctx, conn); err != nil {
+			return err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_file_changes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL DEFAULT '',
+  step_id TEXT NOT NULL DEFAULT '',
+  anchor_message_id INTEGER NOT NULL DEFAULT 0,
+  path TEXT NOT NULL,
+  existed_before INTEGER NOT NULL DEFAULT 0 CHECK (existed_before IN (0, 1)),
+  before_snapshot TEXT NOT NULL DEFAULT '',
+  after_sha256 TEXT NOT NULL DEFAULT '',
+  deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+  created_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_file_changes: %w", err)
+	}
+	for _, stmt := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_fb_file_changes_session_anchor ON fb_file_changes(session_id, anchor_message_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_fb_file_changes_session_path ON fb_file_changes(session_id, path)`,
+	} {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("create fb_file_changes index: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_rewinds (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES fb_sessions(id) ON DELETE CASCADE,
+  anchor_message_id INTEGER NOT NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('both', 'chat', 'code')),
+  hidden_event_seq_from INTEGER NOT NULL DEFAULT 0,
+  files_json TEXT NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL CHECK (state IN ('pending', 'fixed')),
+  created_at_ms INTEGER NOT NULL
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_rewinds: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_fb_rewinds_session_state ON fb_rewinds(session_id, state)`); err != nil {
+		return fmt.Errorf("create idx_fb_rewinds_session_state: %w", err)
+	}
+	return nil
+}
+
+// rebuildMessagesForRewoundV10 rebuilds fb_messages to accept the 'rewound'
+// visibility, recreating its two declared indexes. legacy_alter_table is
+// turned on around the rename so fb_sessions' foreign keys keep naming
+// fb_messages, and off again — it is a connection setting, not written to the
+// file.
+func rebuildMessagesForRewoundV10(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `PRAGMA legacy_alter_table = ON`); err != nil {
+		return fmt.Errorf("enable legacy_alter_table: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA legacy_alter_table = OFF`)
+	}()
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_messages RENAME TO legacy_fb_messages`); err != nil {
+		return fmt.Errorf("rename fb_messages aside: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, fbMessagesDDLV10); err != nil {
+		return fmt.Errorf("create new fb_messages: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO fb_messages SELECT * FROM legacy_fb_messages`); err != nil {
+		return fmt.Errorf("copy fb_messages rows: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `DROP TABLE legacy_fb_messages`); err != nil {
+		return fmt.Errorf("drop legacy_fb_messages: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE INDEX idx_fb_messages_session_visibility ON fb_messages(session_id, visibility)`); err != nil {
+		return fmt.Errorf("recreate idx_fb_messages_session_visibility: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`CREATE INDEX idx_fb_messages_run ON fb_messages(run_id) WHERE run_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("recreate idx_fb_messages_run: %w", err)
+	}
+	return nil
+}
+
+// tableSQLContains reports whether the named table's declared SQL contains
+// needle. A missing table reads as false.
+func tableSQLContains(ctx context.Context, conn *sql.Conn, name, needle string) (bool, error) {
+	var ddl sql.NullString
+	err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&ddl)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.Contains(ddl.String, needle), nil
+}
+
+// dropProjectArchiveColumnV9 removes fb_projects.archived_at when a database
+// still carries it. Archiving is gone; a formerly archived project is an
+// ordinary live project. A table built from the current schema.sql lacks the
+// column and skips the DROP.
+func dropProjectArchiveColumnV9(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('fb_projects') WHERE name='archived_at'`).Scan(&present); err != nil {
+		return err
+	}
+	if present == 0 {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE fb_projects DROP COLUMN archived_at`); err != nil {
+		return fmt.Errorf("drop fb_projects.archived_at: %w", err)
+	}
+	return nil
+}
+
+// mergeDuplicateProjectRootsV9 folds projects that share (agent_id, root) into
+// one — the earliest created, ties broken by id — moving their sessions and
+// cron jobs onto the survivor, then installs the unique root index.
+func mergeDuplicateProjectRootsV9(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `DROP TABLE IF EXISTS temp.fb025_dup`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE fb025_dup(drop_id TEXT PRIMARY KEY, keep_id TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO fb025_dup(drop_id, keep_id)
+SELECT p.id,
+       (SELECT q.id FROM fb_projects q
+        WHERE q.agent_id = p.agent_id AND q.root = p.root
+        ORDER BY q.created_at ASC, q.id ASC
+        LIMIT 1)
+FROM fb_projects p`); err != nil {
+		return fmt.Errorf("group duplicate project roots: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_sessions
+SET project_id = (SELECT d.keep_id FROM fb025_dup d WHERE d.drop_id = fb_sessions.project_id)
+WHERE project_id IN (SELECT drop_id FROM fb025_dup WHERE drop_id <> keep_id)`); err != nil {
+		return fmt.Errorf("rebind sessions onto the kept project: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `
+UPDATE fb_cron_jobs
+SET project_id = (SELECT d.keep_id FROM fb025_dup d WHERE d.drop_id = fb_cron_jobs.project_id)
+WHERE project_id IN (SELECT drop_id FROM fb025_dup WHERE drop_id <> keep_id)`); err != nil {
+		return fmt.Errorf("rebind cron jobs onto the kept project: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `DELETE FROM fb_projects WHERE id IN (SELECT drop_id FROM fb025_dup WHERE drop_id <> keep_id)`); err != nil {
+		return fmt.Errorf("drop duplicate project rows: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `DROP TABLE IF EXISTS temp.fb025_dup`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `DROP INDEX IF EXISTS idx_fb_projects_agent_root`); err != nil {
+		return fmt.Errorf("drop the non-unique project root index: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_projects_agent_root_unique ON fb_projects(agent_id, root)`); err != nil {
+		return fmt.Errorf("create the unique project root index: %w", err)
+	}
+	return nil
+}
+
+// collectDoomedSessionsV9 fills temp.fb025_doomed with the sessions to remove:
+// projectless ordinary conversations with no working directory, then every
+// session beneath them, then sessions whose parent row is already gone (and
+// their descendants). It returns the count collected.
+func collectDoomedSessionsV9(ctx context.Context, conn *sql.Conn) (int64, error) {
+	if _, err := conn.ExecContext(ctx, `DROP TABLE IF EXISTS temp.fb025_doomed`); err != nil {
+		return 0, err
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE TEMP TABLE fb025_doomed(id TEXT PRIMARY KEY)`); err != nil {
+		return 0, err
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO fb025_doomed(id)
+SELECT id FROM fb_sessions
+WHERE project_id IS NULL AND source <> 'workshop' AND TRIM(cwd) = ''`); err != nil {
+		return 0, fmt.Errorf("select projectless sessions with no directory: %w", err)
+	}
+	if err := growDoomedDescendantsV9(ctx, conn); err != nil {
+		return 0, err
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO fb025_doomed(id)
+SELECT s.id FROM fb_sessions s
+WHERE s.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM fb_sessions p WHERE p.id = s.parent_session_id)`); err != nil {
+		return 0, fmt.Errorf("select sessions whose parent is gone: %w", err)
+	}
+	if err := growDoomedDescendantsV9(ctx, conn); err != nil {
+		return 0, err
+	}
+	var n int64
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb025_doomed`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// growDoomedDescendantsV9 keeps adding the children of doomed sessions until
+// the set stops growing, so a whole sub-tree follows its root.
+func growDoomedDescendantsV9(ctx context.Context, conn *sql.Conn) error {
+	for {
+		res, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO fb025_doomed(id)
+SELECT s.id FROM fb_sessions s
+JOIN fb025_doomed d ON s.parent_session_id = d.id`)
+		if err != nil {
+			return fmt.Errorf("collect descendants of doomed sessions: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil
+		}
+	}
+}
+
+// deleteDoomedSessionsV9 empties every child table of the doomed sessions in
+// dependency order and then the sessions themselves. The migration runs with
+// foreign keys off, so the explicit order stands in for the cascades the
+// runtime would apply; the caller's foreign_key_check catches an omission.
+func deleteDoomedSessionsV9(ctx context.Context, conn *sql.Conn) (int64, error) {
+	const doomed = `(SELECT id FROM fb025_doomed)`
+	statements := []string{
+		// A wait that outlives its doomed run but names it as its subagent run
+		// loses the pointer (the runtime applies SET NULL; here it is manual).
+		`UPDATE fb_run_waits SET subagent_run_id = NULL WHERE subagent_run_id IN (SELECT id FROM fb_runs WHERE session_id IN ` + doomed + `)`,
+		`DELETE FROM fb_run_waits WHERE run_id IN (SELECT id FROM fb_runs WHERE session_id IN ` + doomed + `) OR action_id IN (SELECT id FROM fb_actions WHERE session_id IN ` + doomed + `)`,
+		`DELETE FROM fb_session_events WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_runs WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_actions WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_files WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_messages WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_session_ui_state WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_session_model_state WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_session_prompt_state WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_heartbeats WHERE session_id IN ` + doomed,
+		`DELETE FROM fb_memory_stage1_outputs WHERE thread_id IN ` + doomed,
+		`DELETE FROM fb_memory_jobs WHERE kind = 'memory_stage1' AND job_key IN ` + doomed,
+		`DELETE FROM fb_cron_runs WHERE session_id IN ` + doomed,
+	}
+	for _, stmt := range statements {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return 0, fmt.Errorf("delete doomed session data: %w", err)
+		}
+	}
+	res, err := conn.ExecContext(ctx, `DELETE FROM fb_sessions WHERE id IN `+doomed)
+	if err != nil {
+		return 0, fmt.Errorf("delete doomed sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// adoptProjectlessSessionsV9 binds each remaining projectless ordinary session
+// to a project. Top-level sessions group by (agent, canonical cwd); a group
+// with no matching project gets one, named for the root's last segment, clocked
+// to its earliest session. Sub-sessions then take their parent's project and
+// directory, chains included, so a whole tree lands in one project. It returns
+// the projects created and the sessions bound.
+func adoptProjectlessSessionsV9(ctx context.Context, conn *sql.Conn) (created int, adopted int, err error) {
+	type topSession struct {
+		id        string
+		agentID   string
+		root      string
+		createdAt int64
+	}
+	rows, err := conn.QueryContext(ctx, `
+SELECT id, agent_id, cwd, created_at FROM fb_sessions
+WHERE project_id IS NULL AND source <> 'workshop' AND parent_session_id IS NULL
+ORDER BY created_at ASC, id ASC`)
+	if err != nil {
+		return 0, 0, err
+	}
+	var tops []topSession
+	for rows.Next() {
+		var t topSession
+		if err := rows.Scan(&t.id, &t.agentID, &t.root, &t.createdAt); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		t.root = canonicalRootForMigrationV9(t.root)
+		tops = append(tops, t)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, err
+	}
+	rows.Close()
+
+	// One project per (agent, root): the earliest session in a group clocks the
+	// project it creates.
+	type rootGroup struct {
+		agentID   string
+		root      string
+		createdAt int64
+	}
+	groups := map[string]rootGroup{}
+	var order []string
+	for _, t := range tops {
+		if strings.TrimSpace(t.root) == "" {
+			continue
+		}
+		key := t.agentID + "\x00" + t.root
+		if _, ok := groups[key]; !ok {
+			groups[key] = rootGroup{agentID: t.agentID, root: t.root, createdAt: t.createdAt}
+			order = append(order, key)
+		}
+	}
+	projectByKey := map[string]string{}
+	for _, key := range order {
+		g := groups[key]
+		projectID, isNew, err := findOrInsertProjectV9(ctx, conn, g.agentID, g.root, g.createdAt)
+		if err != nil {
+			return created, adopted, err
+		}
+		if isNew {
+			created++
+		}
+		projectByKey[key] = projectID
+	}
+	for _, t := range tops {
+		if strings.TrimSpace(t.root) == "" {
+			continue
+		}
+		projectID := projectByKey[t.agentID+"\x00"+t.root]
+		res, err := conn.ExecContext(ctx, `UPDATE fb_sessions SET project_id=?, cwd=? WHERE id=?`, projectID, t.root, t.id)
+		if err != nil {
+			return created, adopted, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			adopted++
+		}
+	}
+	for {
+		res, err := conn.ExecContext(ctx, `
+UPDATE fb_sessions
+SET project_id = (SELECT p.project_id FROM fb_sessions p WHERE p.id = fb_sessions.parent_session_id),
+    cwd        = (SELECT p.cwd        FROM fb_sessions p WHERE p.id = fb_sessions.parent_session_id)
+WHERE project_id IS NULL AND source <> 'workshop' AND parent_session_id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM fb_sessions p WHERE p.id = fb_sessions.parent_session_id AND p.project_id IS NOT NULL)`)
+		if err != nil {
+			return created, adopted, err
+		}
+		n, _ := res.RowsAffected()
+		adopted += int(n)
+		if n == 0 {
+			break
+		}
+	}
+	return created, adopted, nil
+}
+
+// findOrInsertProjectV9 returns the project bound to (agent, root), inserting
+// one when none exists. It reports whether it created the row.
+func findOrInsertProjectV9(ctx context.Context, conn *sql.Conn, agentID, root string, createdAt int64) (string, bool, error) {
+	var existing string
+	err := conn.QueryRowContext(ctx, `SELECT id FROM fb_projects WHERE agent_id=? AND root=? LIMIT 1`, agentID, root).Scan(&existing)
+	if err == nil {
+		return existing, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	if createdAt <= 0 {
+		createdAt = time.Now().Unix()
+	}
+	id := "prj_" + NewID("project")
+	if _, err := conn.ExecContext(ctx, `INSERT INTO fb_projects(
+  id, agent_id, name, icon, description, instructions, root, project_key,
+  memory_scope, resource_access, pinned, created_at, updated_at)
+VALUES(?,?,?,'','','',?,?,'shared',1,0,?,?)`,
+		id, agentID, projectNameForRoot(root), root, ProjectKeyForRoot(root), createdAt, createdAt); err != nil {
+		return "", false, fmt.Errorf("create the project for root %q: %w", root, err)
+	}
+	return id, true, nil
+}
+
+// deleteOrphanCronJobsV9 removes the cron jobs with no project and their fire
+// history: every cron job belongs to a project after this migration (plan 035
+// delivers the picker that creates them that way).
+func deleteOrphanCronJobsV9(ctx context.Context, conn *sql.Conn) (int64, error) {
+	if _, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_runs WHERE job_id IN (SELECT id FROM fb_cron_jobs WHERE project_id IS NULL)`); err != nil {
+		return 0, err
+	}
+	res, err := conn.ExecContext(ctx, `DELETE FROM fb_cron_jobs WHERE project_id IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// canonicalRootForMigrationV9 resolves a session's stored cwd to the root a
+// project is keyed by. A path that will not resolve keeps its cleaned form;
+// the directory need not exist — a project is registered for it regardless.
+func canonicalRootForMigrationV9(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return ""
+	}
+	if canonical, err := canonicalStatePath(root); err == nil && strings.TrimSpace(canonical) != "" {
+		return canonical
+	}
+	return filepath.Clean(root)
 }
 
 // migrateStateSchema brings the database behind db to stateSchemaVersion. The
@@ -786,24 +1295,27 @@ func (e *v1Expr) pick(table, column, v0 string) string {
 	return "(" + v0 + ")"
 }
 
-// migrateV1Projects maps archived_at onto NULL-for-live; a column a still
-// older database lacks takes the default the fresh schema declares.
+// migrateV1Projects maps a project row onto the final project shape. A
+// database old enough to have archived its projects still carries the
+// archived_at column: those rows are copied as ordinary live projects —
+// archiving is gone as of v9 — and the column itself is dropped afterwards by
+// migrateStateV8ToV9. Columns a still older database lacks take the defaults
+// the fresh schema declares.
 func migrateV1Projects(ctx context.Context, conn *sql.Conn) (int64, error) {
 	if ok, err := legacyTableExists(ctx, conn, "legacy_fb_projects"); err != nil || !ok {
 		return 0, err
 	}
 	e := &v1Expr{conn: conn}
-	archived := e.get("legacy_fb_projects", "archived_at", "0")
 	if e.err != nil {
 		return 0, e.err
 	}
 	return execCopy(ctx, conn, fmt.Sprintf(`INSERT INTO fb_projects(
   id, agent_id, name, icon, description, instructions, root, project_key,
-  memory_scope, resource_access, pinned, archived_at, created_at, updated_at)
+  memory_scope, resource_access, pinned, created_at, updated_at)
 SELECT
   id, agent_id, name,
   IFNULL(%s,''), IFNULL(%s,''), IFNULL(%s,''), root, IFNULL(%s,''),
-  IFNULL(%s,'shared'), IFNULL(%s,1), IFNULL(%s,0), NULLIF(%s,0), created_at, updated_at
+  IFNULL(%s,'shared'), IFNULL(%s,1), IFNULL(%s,0), created_at, updated_at
 FROM legacy_fb_projects`,
 		e.get("legacy_fb_projects", "icon", "NULL"),
 		e.get("legacy_fb_projects", "description", "NULL"),
@@ -811,8 +1323,7 @@ FROM legacy_fb_projects`,
 		e.get("legacy_fb_projects", "project_key", "NULL"),
 		e.get("legacy_fb_projects", "memory_scope", "NULL"),
 		e.get("legacy_fb_projects", "resource_access", "NULL"),
-		e.get("legacy_fb_projects", "pinned", "NULL"),
-		archived))
+		e.get("legacy_fb_projects", "pinned", "NULL")))
 }
 
 // migrateV1Runs drops the runs of conversations that did not survive and maps

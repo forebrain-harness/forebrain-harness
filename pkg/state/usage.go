@@ -171,6 +171,13 @@ func TokenCountFromLastAPIResponse(turns []Message) int {
 }
 
 func TokenCountWithEstimation(turns []Message) int {
+	return TokenCountWithEstimationFor(turns, llm.DefaultEstimator())
+}
+
+// TokenCountWithEstimationFor is TokenCountWithEstimation against a specific
+// model's estimator, so a session on a non-default tokenizer counts the
+// installed rows the same way its own compaction decision does.
+func TokenCountWithEstimationFor(turns []Message, e llm.Estimator) int {
 	for i := len(turns) - 1; i >= 0; i-- {
 		usage, ok := usageFromMessage(turns[i])
 		if !ok {
@@ -192,16 +199,23 @@ func TokenCountWithEstimation(turns []Message) int {
 				}
 			}
 		}
-		return usage.TokenCount() + estimateTurns(turns[anchor+1:])
+		return usage.TokenCount() + estimateTurnsWith(e, turns[anchor+1:])
 	}
-	return estimateTurns(turns)
+	return estimateTurnsWith(e, turns)
 }
 
 // BodyAfterPrefixTokenCount The first server-observed request input is the absolute prefix baseline; output
 // from that response and all later growth remain countable. Before any server
 // usage is available, estimatedPrefill is the reconstructed window prefix.
 func BodyAfterPrefixTokenCount(turns []Message, estimatedPrefill int) int {
-	active := TokenCountWithEstimation(turns)
+	return BodyAfterPrefixTokenCountFor(turns, estimatedPrefill, llm.DefaultEstimator())
+}
+
+// BodyAfterPrefixTokenCountFor is BodyAfterPrefixTokenCount against a specific
+// model's estimator, for the same reason as TokenCountWithEstimationFor: the
+// body_after_prefix checkpoint must measure the same suffix the request carries.
+func BodyAfterPrefixTokenCountFor(turns []Message, estimatedPrefill int, e llm.Estimator) int {
+	active := TokenCountWithEstimationFor(turns, e)
 	for _, turn := range turns {
 		usage, ok := usageFromMessage(turn)
 		if !ok {
@@ -259,6 +273,14 @@ func usageFromMessage(msg Message) (TokenUsage, bool) {
 	if !strings.EqualFold(strings.TrimSpace(msg.Role), "assistant") {
 		return TokenUsage{}, false
 	}
+	// Usage anchors occupancy only when forebrain itself sent the request it
+	// measures. A row with no run was imported from another harness (Claude
+	// Code, Codex): its usage counts that harness's system prompt and tools, its
+	// preserved thinking blocks and its tokenizer — none of which forebrain's
+	// next request carries. Such rows are estimated like any other row instead.
+	if strings.TrimSpace(msg.RunID) == "" {
+		return TokenUsage{}, false
+	}
 	raw := strings.TrimSpace(msg.UsageJSON)
 	if raw == "" {
 		return TokenUsage{}, false
@@ -270,16 +292,17 @@ func usageFromMessage(msg Message) (TokenUsage, bool) {
 	return usage, usage.TokenCount() > 0
 }
 
-func estimateTurns(turns []Message) int {
+func estimateTurnsWith(e llm.Estimator, turns []Message) int {
 	total := 0
 	for _, turn := range turns {
-		total += estimateMessage(turn)
+		total += estimateMessageWith(e, turn)
 	}
 	return total
 }
 
-// estimateMessage estimates one stored row at the size the model actually
-// receives it.
+// estimateMessageWith estimates one stored row at the size the model actually
+// receives it, counting with e — the estimator of the model the request is
+// headed for.
 //
 // A row carries parts that exist only for the surfaces — tool_display,
 // memory_citation, the compact-boundary marker — and messagesFromStoredRows
@@ -290,7 +313,7 @@ func estimateTurns(turns []Message) int {
 // mid-turn compaction checkpoints share one threshold, that gap alone decided
 // which checkpoint could ever fire. Project the row the way the request
 // builder does, then estimate the projection.
-func estimateMessage(msg Message) int {
+func estimateMessageWith(e llm.Estimator, msg Message) int {
 	if _, isBoundary := ParseCompactBoundaryPart(msg.PartsJSON); isBoundary {
 		return 0
 	}
@@ -299,7 +322,7 @@ func estimateMessage(msg Message) int {
 		// Not a row the request builder emits, so it occupies no context.
 		return 0
 	}
-	return llm.EstimateMessage(parsed)
+	return llm.EstimateMessageWith(e, parsed)
 }
 
 func nonNegative(n int) int {

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,14 +59,28 @@ type skillListEntry struct {
 	DownloadURL string   `json:"download_url"`
 	Shadows     []string `json:"shadows,omitempty"`
 	ShadowedBy  []string `json:"shadowed_by,omitempty"`
+	// Version is the skill's current published version, 0 when the skill
+	// carries no version history (a cross-tool or built-in layer).
+	Version int `json:"version"`
+	// VersionState is the draft/publish state the row reports: "draft",
+	// "published", "pending", or "" for an unversioned skill.
+	VersionState string `json:"state,omitempty"`
+	// Update is the upstream marker: upstream has moved since the current
+	// version was recorded.
+	Update *skill.SkillUpdate `json:"update,omitempty"`
+	// DraftOnly marks a row that exists only as a draft: nothing is loaded
+	// or runnable until it is published.
+	DraftOnly bool `json:"draft_only,omitempty"`
 }
 
-// decorateSkillList attaches origin, editable, download_url and the shadow
-// annotations to a raw listing. editable answers "does this row belong to the
-// page asking": the owner layer of a project listing is project, of the
-// primary-agent listing agent — every other row is inherited and read-only
-// (decision D9).
-func (s *Server) decorateSkillList(launch safety.ProjectContext, projectID string, svc *skill.Service, list []skill.SkillDTO) []skillListEntry {
+// decorateSkillList attaches origin, editable, download_url, the shadow
+// annotations, and the version state to a raw listing. editable answers "does
+// this row belong to the page asking": the owner layer of a project listing
+// is project, of the primary-agent listing agent — every other row is
+// inherited and read-only (decision D9). Rows for skills that exist only as a
+// draft — invisible to a formal-directory listing — are appended, because the
+// page owes them a row just the same.
+func (s *Server) decorateSkillList(ctx context.Context, launch safety.ProjectContext, projectID string, svc *skill.Service, list []skill.SkillDTO) []skillListEntry {
 	// The route decides the owning layer, not the launch context: the
 	// primary-agent routes run with the gateway's own launch project, which
 	// is a project too, yet the page asking is the agent's.
@@ -81,7 +96,16 @@ func (s *Server) decorateSkillList(launch safety.ProjectContext, projectID strin
 			shadowsByPath[entry.Path] = entry
 		}
 	}
+	// Version states are keyed by the formal directory; a state whose
+	// RootPath is a draft directory belongs to a draft-only row.
+	states := map[string]skill.SkillVersionRow{}
+	if rows, err := svc.ListVersioned(ctx); err == nil {
+		for _, row := range rows {
+			states[skill.CanonicalSkillPath(row.RootPath)] = row
+		}
+	}
 	out := make([]skillListEntry, 0, len(list))
+	listedNames := map[string]struct{}{}
 	for _, item := range list {
 		row := skillListEntry{
 			SkillDTO:    item,
@@ -92,19 +116,52 @@ func (s *Server) decorateSkillList(launch safety.ProjectContext, projectID strin
 			row.Shadows = entry.Shadows
 			row.ShadowedBy = entry.ShadowedBy
 		}
+		if state, ok := states[skill.CanonicalSkillPath(item.RootPath)]; ok {
+			row.Version = state.State.Current
+			row.VersionState = state.State.StateLabel()
+			row.Update = state.State.Update
+		}
+		listedNames[strings.ToLower(strings.TrimSpace(row.Name))] = struct{}{}
 		out = append(out, row)
+	}
+	// Draft-only skills a formal listing cannot see, appended as rows. A
+	// draft-only row's RootPath is its draft directory, and its name is new
+	// to the listing — a formal skill of the same name keeps its own row.
+	for _, state := range states {
+		if state.State.Current > 0 || !state.State.HasDraft {
+			continue
+		}
+		if filepath.Base(filepath.Dir(skill.CanonicalSkillPath(state.RootPath))) != ".drafts" {
+			continue
+		}
+		if _, seen := listedNames[strings.ToLower(strings.TrimSpace(state.Name))]; seen {
+			continue
+		}
+		listedNames[strings.ToLower(strings.TrimSpace(state.Name))] = struct{}{}
+		out = append(out, skillListEntry{
+			SkillDTO: skill.SkillDTO{
+				Name:        state.Name,
+				Description: state.Description,
+				RootPath:    state.RootPath,
+				Origin:      state.Origin,
+				Enabled:     false,
+			},
+			Editable:     string(state.Origin) == owner,
+			VersionState: skill.SkillStateDraft,
+			DraftOnly:    true,
+		})
 	}
 	return out
 }
 
 // decoratedSkillList is the post-write refresh every skill mutation answers
 // with: the same listing shape the pages loaded in the first place.
-func (s *Server) decoratedSkillList(launch safety.ProjectContext, projectID string, svc *skill.Service) ([]skillListEntry, error) {
+func (s *Server) decoratedSkillList(ctx context.Context, launch safety.ProjectContext, projectID string, svc *skill.Service) ([]skillListEntry, error) {
 	list, err := svc.List()
 	if err != nil {
 		return nil, err
 	}
-	return s.decorateSkillList(launch, projectID, svc, list), nil
+	return s.decorateSkillList(ctx, launch, projectID, svc, list), nil
 }
 
 // locateSkill finds the entry a skill name refers to inside the caller's
@@ -402,7 +459,7 @@ func (s *Server) handleSkillDeleteWith(launch safety.ProjectContext, projectID s
 		return
 	}
 	s.publishSkillLifecycleNotify("", "deleted", name, map[string]any{"scope": scope, "path": resolved})
-	list, err := s.decoratedSkillList(launch, projectID, svc)
+	list, err := s.decoratedSkillList(r.Context(), launch, projectID, svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -511,7 +568,7 @@ func (s *Server) handleSkillsInstallUploadWith(launch safety.ProjectContext, pro
 		"file":    strings.TrimSpace(header.Filename),
 		"install": names,
 	})
-	list, err := s.decoratedSkillList(launch, projectID, svc)
+	list, err := s.decoratedSkillList(r.Context(), launch, projectID, svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -589,7 +646,14 @@ func (e *wsSkillError) Error() string { return e.msg }
 
 // workshopSkillDir resolves the skill directory a workshop file request
 // names, using the same unshadowed-entry rule the skill pages list by.
-func (s *Server) workshopSkillDir(launch safety.ProjectContext, name string) (string, *skill.Service, bool) {
+// workshopSkillDir resolves the directory a workshop file operation works
+// on. A versioned skill's workshop view is its DRAFT whenever one exists —
+// the draft is the working copy every change lands in, so the panel that
+// lists and reads the files must show what a write there produced, never a
+// formal directory that stopped being the working copy the day versions
+// landed. forWrite creates the draft when there is none, because a write is
+// what makes one.
+func (s *Server) workshopSkillDir(launch safety.ProjectContext, name string, forWrite bool) (string, *skill.Service, bool) {
 	svc, err := s.skillLifecycleService(launch)
 	if err != nil {
 		return "", nil, false
@@ -598,7 +662,21 @@ func (s *Server) workshopSkillDir(launch safety.ProjectContext, name string) (st
 	if !ok {
 		return "", nil, false
 	}
-	return entry.Path, svc, true
+	dir := entry.Path
+	dirBase := filepath.Base(skill.CanonicalSkillPath(dir))
+	for _, root := range skill.VersionedSkillRoots(svc.Home, svc.Workspace(), svc.ProjectRoot) {
+		if skill.CanonicalSkillPath(filepath.Dir(dir)) != skill.CanonicalSkillPath(root) || dirBase == "" {
+			continue
+		}
+		store := skill.VersionStore{Root: root}
+		if state, stateErr := store.State(dirBase); stateErr == nil && (state.HasDraft || forWrite) {
+			if draft, draftErr := store.EnsureDraft(dirBase); draftErr == nil {
+				return draft, svc, true
+			}
+		}
+		break
+	}
+	return dir, svc, true
 }
 
 type workshopFileRow struct {
@@ -618,7 +696,7 @@ func (s *Server) handleSkillFilesListWith(launch safety.ProjectContext, w http.R
 		return
 	}
 	name := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("name"))
-	dir, _, ok := s.workshopSkillDir(launch, name)
+	dir, _, ok := s.workshopSkillDir(launch, name, false)
 	if !ok {
 		http.Error(w, "skill not found", http.StatusNotFound)
 		return
@@ -687,7 +765,7 @@ func (s *Server) handleSkillFileReadWith(launch safety.ProjectContext, w http.Re
 		return
 	}
 	name := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("name"))
-	dir, _, ok := s.workshopSkillDir(launch, name)
+	dir, _, ok := s.workshopSkillDir(launch, name, false)
 	if !ok {
 		http.Error(w, "skill not found", http.StatusNotFound)
 		return
@@ -744,7 +822,7 @@ func (s *Server) handleSkillFileWriteWith(launch safety.ProjectContext, w http.R
 		return
 	}
 	name := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("name"))
-	dir, svc, ok := s.workshopSkillDir(launch, name)
+	dir, svc, ok := s.workshopSkillDir(launch, name, true)
 	if !ok {
 		http.Error(w, "skill not found", http.StatusNotFound)
 		return

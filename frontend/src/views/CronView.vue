@@ -1,23 +1,19 @@
 <template>
   <div :class="scope === 'project' ? '' : 'flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-3 pb-12 pt-6 sm:px-6'">
     <div :class="scope === 'project' ? 'w-full' : 'mx-auto w-full max-w-3xl'">
-      <header class="mb-5 flex items-end justify-between gap-4">
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('cron.title') }}</h1>
-            <ScopeBadge :type="scope === 'project' ? 'project' : 'agent'" :label="scope === 'project' ? t('scope.project') : t('scope.agent')" />
-          </div>
-          <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ scope === 'project' ? t('cron.projectDescription') : t('cron.description') }}</p>
-        </div>
-        <div class="flex gap-2">
+      <PageTopRow
+        :title="t('cron.title')"
+        :description="scope === 'project' ? t('cron.projectDescription') : t('cron.description')"
+      >
+        <template #actions>
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
             {{ t('common.refresh') }}
           </button>
           <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="cron-new" @click="openEditor()">
             {{ t('cron.newJob') }}
           </button>
-        </div>
-      </header>
+        </template>
+      </PageTopRow>
 
       <p
         v-if="retentionDays !== null"
@@ -156,7 +152,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
 import { getErrorMessage, forebrainApi, type CronJobRecord, type CronRunRecord } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'

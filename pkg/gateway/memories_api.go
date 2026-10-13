@@ -135,7 +135,13 @@ func (s *Server) handleMemoriesReset(w http.ResponseWriter, r *http.Request) {
 	}
 	switch scope {
 	case "session":
-		key := strings.TrimSpace(s.Runner.ProjectKey)
+		// The session scope clears the memory of the conversation that asked,
+		// which is its own project's scope. The gateway process has no launch
+		// project of its own, so the key is resolved from the named session's
+		// project (session_id, the gateway's usual caller-supplied parameter),
+		// never from the base runner.
+		sid := strings.TrimSpace(r.URL.Query().Get("session_id"))
+		key := s.sessionProjectKey(r.Context(), sid)
 		if key == "" {
 			http.Error(w, `this session has no project to reset; use {"scope":"all"}`, http.StatusBadRequest)
 			return
@@ -293,13 +299,32 @@ func (s *Server) resolveMemoriesScope(w http.ResponseWriter, r *http.Request) (m
 	}
 }
 
+// memoryHiddenEntry reports whether a memory-root-relative name is a hidden
+// entry — a single path segment beginning with a dot.
+//
+// A memory root is a git repository by design (pkg/memory/workspace.go), so its
+// `.git` bookkeeping lives inside the root yet is not memory. The agent-side
+// walker in pkg/memory/backend.go skips every dot-prefixed entry under the root;
+// the rule is stated once here so the gateway's listing and path resolution
+// cannot drift from it. When called with a full relative path, only the first
+// segment is examined: a dot-prefixed first segment makes the whole path hidden.
+func memoryHiddenEntry(rel string) bool {
+	if i := strings.IndexByte(rel, '/'); i >= 0 {
+		rel = rel[:i]
+	}
+	return strings.HasPrefix(rel, ".")
+}
+
 // resolveMemoryFilePath pins one relative memory-file path inside its scope's
-// root: cleaned, non-absolute, traversal-free, not a symlink, and resolved
-// within the root.
+// root: cleaned, non-absolute, traversal-free, not a hidden entry, not a
+// symlink, and resolved within the root.
 func resolveMemoryFilePath(root memory.Root, rel string) (string, error) {
 	rel = strings.TrimSpace(rel)
 	if err := tool.ValidateArchiveRelPath(rel); err != nil {
 		return "", err
+	}
+	if memoryHiddenEntry(rel) {
+		return "", tool.ErrPathNotAllowed
 	}
 	target := filepath.Join(root.MemoryRoot, filepath.FromSlash(rel))
 	resolved, err := tool.ResolveWithinRoots(target, []string{root.MemoryRoot})
@@ -313,7 +338,8 @@ func resolveMemoryFilePath(root memory.Root, rel string) (string, error) {
 }
 
 // collectMemoryFiles walks one memory root and returns every regular file,
-// never following a symlink out of it.
+// never descending into a hidden entry (see memoryHiddenEntry) and never
+// following a symlink out of it.
 func collectMemoryFiles(root memory.Root) ([]memoryFileRow, error) {
 	out := []memoryFileRow{}
 	err := filepath.WalkDir(root.MemoryRoot, func(path string, d os.DirEntry, err error) error {
@@ -324,6 +350,12 @@ func collectMemoryFiles(root memory.Root) ([]memoryFileRow, error) {
 			return err
 		}
 		if path == root.MemoryRoot {
+			return nil
+		}
+		if memoryHiddenEntry(d.Name()) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, infoErr := d.Info()

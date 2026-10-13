@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { expectAssistantReply, signIn } from './support'
+import { expectAssistantReply, seedProjectSession, signIn } from './support'
 
 async function openDrawer(page: Page) {
   await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
@@ -62,53 +62,32 @@ test('chat menu opens the drawer and new chat lives there', async ({ page }) => 
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/layout-drawer.png`, fullPage: true })
   await page.click('[data-testid="drawer-new-chat"]')
   await expect(page.locator('[data-testid="chat-drawer"]')).toHaveCount(0)
-  await expect(page).toHaveURL(/session=/)
-  await openDrawer(page)
-  await expect(page.locator('.chat-drawer-row--active')).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(page.locator('[data-testid="chat-drawer"]')).toHaveCount(0)
+  // A new chat opens the new-conversation page (plan 029): no conversation is
+  // created until a project is picked and the first message is sent.
+  await expect(page).not.toHaveURL(/session=/)
+  await expect(page.locator('[data-testid="chat-greeting"]')).toBeVisible()
+  await expect(page.locator('[data-testid="project-pill"]')).toBeVisible()
 })
 
 test('sending a message and switching sessions', async ({ page }) => {
-  // Two full model turns plus drawer round-trips exceed the default minute.
+  // Two full model turns plus navigation exceed the default minute.
   test.info().setTimeout(240_000)
   await signIn(page)
-  await page.goto('/', { waitUntil: 'networkidle' })
-  await openDrawer(page)
-  await page.click('[data-testid="drawer-new-chat"]')
-  await page.waitForURL(/session=/)
+  // Every conversation belongs to a project (plan 029); open two of them.
+  const firstId = await seedProjectSession(page, 'layout-first')
+  await page.goto(`/?session=${firstId}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('textarea')
-  const firstId = new URL(page.url()).searchParams.get('session')
   await page.fill('textarea', 'first-e2e')
   await page.press('textarea', 'Enter')
   await expectAssistantReply(page)
-  // The gateway may hand back the just-touched session when a create races
-  // the previous turn's writes; take another until it is a different one.
-  let secondId = firstId
-  for (let attempt = 0; attempt < 5 && secondId === firstId; attempt++) {
-    await openDrawer(page)
-    await page.click('[data-testid="drawer-new-chat"]')
-    // The click's navigation is async; typing before it lands would send
-    // into the previous conversation. Wait for the id to actually change.
-    await page.waitForFunction(
-      (previous) => {
-        const current = new URL(window.location.href).searchParams.get('session')
-        return current && current !== previous
-      },
-      firstId!,
-      { timeout: 10_000 },
-    )
-    await page.waitForSelector('textarea')
-    secondId = new URL(page.url()).searchParams.get('session')
-  }
-  expect(secondId).not.toBe(firstId)
+
+  const secondId = await seedProjectSession(page, 'layout-second')
+  await page.goto(`/?session=${secondId}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
   await page.fill('textarea', 'second-e2e')
   await page.press('textarea', 'Enter')
   // In suite order the second turn can trail the first by a wide margin on
-  // the shared gateway; wait on the full pair, not just any reply text
-  // (the first turn's reply still matches the same constant).
-  // The second conversation is new, so its own reply — and, with a real
-  // model whose words are unknown, its closing worked line — is the turn.
+  // the shared gateway; wait on the full pair, not just any reply text.
   await page.waitForFunction(
     (realModel) => document.body.innerText.includes('second-e2e')
       && (realModel
@@ -118,38 +97,34 @@ test('sending a message and switching sessions', async ({ page }) => {
     process.env.E2E_REAL_LLM === '1',
     { timeout: 150_000, polling: 500 },
   )
-  await openDrawer(page)
-  await page.locator('.chat-drawer-row', { hasText: 'first' }).first().click()
-  await expect(page).toHaveURL(new RegExp(`session=${firstId}`))
-  // What the user sent in each conversation is the check: a real model's
-  // reply may quote anything, including the other conversation's word.
-  await expect(page.locator('[role=log] .is-user', { hasText: 'first-e2e' })).toHaveCount(1)
+
+  // Each conversation keeps its own history: switching shows only its own.
+  await page.goto(`/?session=${firstId}`, { waitUntil: 'networkidle' })
+  await expect(page.locator('[role=log] .is-user', { hasText: 'first-e2e' })).toHaveCount(1, { timeout: 15_000 })
   await expect(page.locator('[role=log] .is-user', { hasText: 'second-e2e' })).toHaveCount(0)
 
-  // Back to the conversation the last message went into: its history loads
-  // again (a send that finished before the reload is part of what it reads).
-  await openDrawer(page)
-  await page.locator('.chat-drawer-row', { hasText: 'second' }).first().click()
-  await expect(page).toHaveURL(new RegExp(`session=${secondId}`))
+  await page.goto(`/?session=${secondId}`, { waitUntil: 'networkidle' })
   await expect(page.locator('[role=log] .is-user', { hasText: 'second-e2e' })).toHaveCount(1, { timeout: 15_000 })
   await expect(page.locator('[role=log] .is-user', { hasText: 'first-e2e' })).toHaveCount(0)
 })
 
 test('the drawer lists conversations when opened away from the chat page', async ({ page }) => {
   await signIn(page)
-  const created = await page.request.post('/api/chat/sessions', { data: { title: 'drawer-elsewhere-e2e' } })
-  expect(created.ok()).toBeTruthy()
-  // A fresh load on another page: the chat page never mounted to fetch.
+  // A conversation exists; since plan 029 it belongs to a project. The point
+  // of this test is that the drawer loads its own list, off the chat page.
+  await seedProjectSession(page, 'layout-elsewhere')
   await page.goto('/skills', { waitUntil: 'networkidle' })
+  const listed = page.waitForResponse((res) => res.request().method() === 'GET' && res.url().includes('/api/chat/sessions'))
   await openDrawer(page)
-  await expect(page.locator('.chat-drawer-row', { hasText: 'drawer-elsewhere-e2e' }).first()).toBeVisible({ timeout: 10_000 })
+  expect((await listed).ok()).toBe(true)
+  await expect(page.locator('[data-testid="chat-drawer"]')).toBeVisible()
 })
 
 test('heartbeat lives in the conversation header, not the rail or the workbench', async ({ page }) => {
   await signIn(page)
-  await page.goto('/', { waitUntil: 'networkidle' })
-  await openDrawer(page)
-  await page.click('[data-testid="drawer-new-chat"]')
+  const session = await seedProjectSession(page, 'layout-heartbeat')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
   await expect(page.locator('.forebrain-rail')).not.toContainText(/心跳|Heartbeat/)
   await page.click('[data-testid="workbench-toggle"]')
   await expect(page.locator('[data-testid="chat-workbench"]')).not.toContainText(/心跳|Heartbeat/)
@@ -165,10 +140,9 @@ test('heartbeat lives in the conversation header, not the rail or the workbench'
   await expect(popover.locator('[data-testid="heartbeat-schedule"]')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(popover).toHaveCount(0)
-  await openDrawer(page)
-  await expect(page.locator('[data-testid="drawer-heartbeat-indicator"]').first()).toBeVisible()
-  // Removing it from the conversation's header takes the drawer's mark too.
-  await page.keyboard.press('Escape')
+  // The drawer's own heartbeat mark is for a conversation the drawer lists; a
+  // web conversation belongs to a project (plan 029) and is not one of them.
+  // Removing it from the conversation's header clears its status.
   await page.click('[data-testid="heartbeat-toggle"]')
   await page.click('[data-testid="heartbeat-clear"]')
   await expect(page.locator('[data-testid="heartbeat-status"]')).toHaveCount(0)
@@ -209,7 +183,9 @@ test('rail collapses to icons and starts expanded', async ({ page }) => {
 
 test('run closes with the terminal worked line', async ({ page }) => {
   await signIn(page)
-  await page.goto('/', { waitUntil: 'networkidle' })
+  const session = await seedProjectSession(page, 'layout-worked-line')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
   await page.fill('textarea', 'worked-line-e2e')
   await page.press('textarea', 'Enter')
   await expectAssistantReply(page)
@@ -226,11 +202,7 @@ test('run closes with the terminal worked line', async ({ page }) => {
   await expect(page.locator('.chat-shell main')).toContainText('worked-line-e2e', { timeout: 10_000 })
   await expect(lines).toHaveCount(live, { timeout: 10_000 })
   await expect(lines.last()).toContainText(/(已工作|Worked for) (\d+h )?(\d+m )?\d+s/)
-  // The session's workspace panel reads as words: no payload printed raw.
-  // Only the panel's own summary toggles it — nested context-debug details
-  // carry summaries of their own.
-  const workspace = page.locator('[data-testid="session-workspace"]')
-  await workspace.locator('> summary').click()
-  await expect(workspace).toContainText(/(成本摘要|Cost summary)/)
-  await expect(workspace).not.toContainText('{"')
+  // The workspace panel moved off the chat page (plan 016): its content
+  // belongs to the workbench's own tabs, so nothing sits above the composer.
+  await expect(page.locator('[data-testid="session-workspace"]')).toHaveCount(0)
 })

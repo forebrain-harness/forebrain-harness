@@ -13,6 +13,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	"github.com/stretchr/testify/require"
@@ -49,7 +50,10 @@ func newPoolTestEnv(t *testing.T) (*Environment, *state.ProjectStore, *sql.DB) {
 		t.Fatalf("base runner load: %v", err)
 	}
 	sessStore := state.NewSessionStore(db, "main")
-	env := &Environment{Root: home, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}, ConfigPath: cfgPath, Runner: runner, SQL: db}
+	// RawConfig is the underived config project runners derive their own
+	// effective sandbox/approval from; a hand-built Environment must set it the
+	// way Open does.
+	env := &Environment{Root: home, RawConfig: cfg, Deps: run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}, ConfigPath: cfgPath, Runner: runner, SQL: db}
 	projects := state.NewProjectStore(db, "main")
 	return env, projects, db
 }
@@ -100,6 +104,39 @@ func TestRunnerPoolDifferentProjectsGetDifferentRunners(t *testing.T) {
 	// A session with no project runs on the base runner, unchanged behavior.
 	if got := pool.RunnerForSession(ctx, "sess-plain"); got != env.Runner {
 		t.Fatalf("no-project session must use the base runner")
+	}
+}
+
+// TestRunnerPoolEntryRunsSubagents pins that a project runner is wired the way
+// the base runner is: it must carry this environment as its in-process subagent
+// executor and a file-reference resolver. Plan 027 built the pool entry by hand
+// and dropped both, so a gateway session bound to a project could not start a
+// subagent (subagent_run refused every subtype with "subagent requires an
+// in-process executor") and could not resolve file references. This test fails
+// if wireRunner is ever skipped in buildEntryLocked again.
+func TestRunnerPoolEntryRunsSubagents(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	proj, err := projects.Create(ctx, state.CreateProjectInput{Name: "sub", Root: "/tmp/pool-subagents", ProjectKey: "-tmp-pool-subagents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ensurePoolSessions(t, env, "sess-sub")
+	if err := projects.BindSession(ctx, "sess-sub", proj.ID); err != nil {
+		t.Fatal(err)
+	}
+	runner := pool.RunnerForSession(ctx, "sess-sub")
+	if runner == nil {
+		t.Fatal("project runner missing")
+	}
+	if runner.SubagentExecutor == nil {
+		t.Fatal("project runner must carry the environment as its subagent executor")
+	}
+	if runner.FileResolver == nil {
+		t.Fatal("project runner must carry a file-reference resolver")
 	}
 }
 
@@ -734,10 +771,14 @@ func TestRunnerPoolPropagateConfigReachesEveryEntry(t *testing.T) {
 	require.True(t, pinnedBefore.Set)
 
 	next := reorderedPoolConfig(t, env.ConfigPath)
-	require.NoError(t, env.pool.PropagateConfig(ctx, next))
+	before := pooled.AppCfg
+	require.NoError(t, env.pool.PropagateConfig(ctx, *next))
 
-	if pooled.AppCfg != next {
-		t.Fatalf("pooled runner still on the old config pointer")
+	// The pool derives each entry's effective config from the raw config and
+	// that entry's own launch context, so the pointer an entry adopts is a
+	// fresh derivation, not the base runner's config it was handed.
+	if pooled.AppCfg == before || pooled.AppCfg == next {
+		t.Fatalf("pooled runner did not adopt a freshly derived config")
 	}
 	pinned := run.PrimaryModelSelection(pooled)
 	require.True(t, pinned.Set)
@@ -770,7 +811,7 @@ func TestRunnerPoolPropagateConfigKeepsFailingEntryOnOldConfig(t *testing.T) {
 	broken := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
 		"main": {Primary: true},
 	}}}
-	err := env.pool.PropagateConfig(ctx, broken)
+	err := env.pool.PropagateConfig(ctx, *broken)
 	if err == nil {
 		t.Fatal("an entry that cannot adopt the config must be reported")
 	}
@@ -802,7 +843,7 @@ func TestRunnerPoolPropagateConfigSkipsClosedRunners(t *testing.T) {
 	env.poolOnce.Do(func() { env.pool = NewRunnerPool(env, 4) })
 	env.pool.Close()
 	// The pool is empty after Close: propagating is a no-op, not an error.
-	if err := env.pool.PropagateConfig(context.Background(), &appcfg.Root{}); err != nil {
+	if err := env.pool.PropagateConfig(context.Background(), appcfg.Root{}); err != nil {
 		t.Fatalf("empty pool propagation = %v, want nil", err)
 	}
 }
@@ -833,4 +874,70 @@ func TestRunnerPoolRunsARegisteredSubdirectoryAtItsOwnRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, canonicalInner, runner.LaunchProject.Project.Root)
 	require.False(t, runner.LaunchProject.Project.VersionControlled, "the subdirectory has no .git of its own")
+}
+
+// TestProjectRunnerDerivesSandboxFromItsOwnTrust is the defect this plan fixes:
+// a project runner used to carry the base runner's config, whose sandbox was
+// derived from the directory the process happened to be started in. Each
+// project runner must instead derive its own sandbox from its own trust
+// decision — trusted projects writable, undecided ones read-only — regardless
+// of the process's own (here empty, read-only) launch project.
+func TestProjectRunnerDerivesSandboxFromItsOwnTrust(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("FOREBRAIN_POOL_TRUST_KEY", "test-key")
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	// No sandbox_mode or approval policy in the file, so the effective values
+	// are derived per project from its own trust decision.
+	const body = "agents:\n" +
+		"  definitions:\n" +
+		"    main:\n" +
+		"      llm_providers:\n" +
+		"        - provider: openai\n" +
+		"          model: gpt-test\n" +
+		"          api_key: ${FOREBRAIN_POOL_TRUST_KEY}\n" +
+		"          base_url: http://localhost:0/v1\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
+	cfg, err := appcfg.Load(cfgPath)
+	require.NoError(t, err)
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	live := &cfg
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace")}}
+	require.NoError(t, runner.Load())
+	sessStore := state.NewSessionStore(db, "main")
+	// The process serves from no project of its own (the gateway): its empty
+	// launch project derives a read-only sandbox, which must not leak onto any
+	// project runner.
+	env := &Environment{Root: home, RawConfig: cfg, ConfigPath: cfgPath, SQL: db, Runner: runner,
+		Deps: run.Deps{Home: home, AgentName: "main", AppCfg: live, WorkspaceRoot: filepath.Join(home, "workspace"), SessionStore: sessStore}}
+	projects := state.NewProjectStore(db, "main")
+
+	trustedRoot := t.TempDir()
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: trustedRoot}))
+	p1, err := projects.Create(ctx, state.CreateProjectInput{Name: "p1", Root: trustedRoot, ProjectKey: state.ProjectKeyForRoot(trustedRoot)})
+	require.NoError(t, err)
+	undecidedRoot := t.TempDir()
+	p2, err := projects.Create(ctx, state.CreateProjectInput{Name: "p2", Root: undecidedRoot, ProjectKey: state.ProjectKeyForRoot(undecidedRoot)})
+	require.NoError(t, err)
+	require.NoError(t, sessStore.Ensure(ctx, "s-trusted", "s-trusted"))
+	require.NoError(t, projects.BindSession(ctx, "s-trusted", p1.ID))
+	require.NoError(t, sessStore.Ensure(ctx, "s-undecided", "s-undecided"))
+	require.NoError(t, projects.BindSession(ctx, "s-undecided", p2.ID))
+
+	pool := NewRunnerPool(env, 4)
+	defer pool.Close()
+
+	trusted := pool.RunnerForSession(ctx, "s-trusted")
+	require.NotNil(t, trusted)
+	require.NotSame(t, env.Runner, trusted)
+	require.Equal(t, appcfg.SandboxModeWorkspaceWrite, trusted.AppCfg.SandboxMode,
+		"a trusted project runner must be writable, from the project's own trust")
+
+	undecided := pool.RunnerForSession(ctx, "s-undecided")
+	require.NotNil(t, undecided)
+	require.NotSame(t, env.Runner, undecided)
+	require.Equal(t, appcfg.SandboxModeReadOnly, undecided.AppCfg.SandboxMode,
+		"an undecided project runner must stay read-only")
 }

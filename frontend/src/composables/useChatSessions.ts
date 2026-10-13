@@ -44,12 +44,14 @@ async function fetchSessions() {
 
 /**
  * Open a new conversation: create it, refresh the list, and hand back the
- * id. A failure is the caller's to show — nothing here resets silently.
+ * row. A failure is the caller's to show — nothing here resets silently. Since
+ * plan 029 an ordinary conversation is opened into a project, so the caller
+ * names one (`projectId`) or a folder the gateway turns into a project.
  */
-async function createSession(): Promise<string> {
-  const created = await forebrainApi.chatSessionCreate()
+async function createSession(opts: { title?: string; source?: '' | 'workshop'; projectId?: string; folder?: string } = {}) {
+  const created = await forebrainApi.chatSessionCreate(opts)
   await fetchSessions()
-  return created.id
+  return created
 }
 
 export function useChatSessions() {

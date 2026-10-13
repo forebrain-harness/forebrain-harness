@@ -1,103 +1,85 @@
 package llm
 
 import (
-	"fmt"
 	"log/slog"
+	"os"
 	"strings"
-	"sync"
-
-	"github.com/pkoukk/tiktoken-go"
 )
 
-var st struct {
-	mu sync.Mutex
-	tk *tiktoken.Tiktoken
-	// useHF tracks whether an HF tokenizer has been configured. Guarded by mu
-	// like the rest of this struct: Configure runs once per Runner.Load, and
-	// concurrent agents/sessions loading in the same process (a real,
-	// unremarkable scenario for a multi-session TUI or Gateway) call it
-	// concurrently — a plain package-level bool here raced under -race.
-	useHF    bool
-	label    string
-	encoding string
-	heur     bool
-	pending  bool
-	gen      uint64
-}
-
-var (
-	tiktokenGetEncoding      = tiktoken.GetEncoding
-	tiktokenModelToEncoding  = tiktoken.MODEL_TO_ENCODING
-	tiktokenPrefixToEncoding = tiktoken.MODEL_PREFIX_TO_ENCODING
-)
-
-// usingHFTokenizer reports whether the most recent Configure call selected an
-// HF tokenizer.
-func usingHFTokenizer() bool {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.useHF
-}
-
+// TokenEstimateOptions configures local token estimation. It is filled from
+// agents.defaults.token_estimate at Runner load and applied by Configure. When
+// CacheDir is empty (or Configure is never called) every estimator is the
+// rune/4 heuristic, which is the unit tests' expectation.
 type TokenEstimateOptions struct {
-	Encoding      string
-	Model         string
-	TokenizerPath string
+	CacheDir string // $FOREBRAIN_HOME/cache/tokenizers; "" disables model tokenizers
+	// Hubs is the download order. A nil slice means both HuggingFace and
+	// ModelScope, in that order; a non-nil empty slice disables downloading.
+	Hubs                []string
+	HuggingFaceEndpoint string // "" → $HF_ENDPOINT → https://huggingface.co
+	ModelScopeEndpoint  string // "" → https://modelscope.cn
+	DefaultTokenizer    string // "" → gpt-o200k
+	Overrides           []TokenizerOverride
 }
 
+// TokenizerOverride maps a model-name prefix to a specific tokenizer.
+type TokenizerOverride struct {
+	Model     string // model-name prefix, case-insensitive
+	Tokenizer string // a built-in tokenizer id
+	Path      string // a local tokenizer.json
+}
+
+// Configure records the token estimation settings. An unknown hub or an unknown
+// built-in id is warned about and ignored rather than rejected. It never
+// blocks: the startup cache warm-up runs in the background, and a tokenizer is
+// loaded (or downloaded) lazily the first time it is needed. It returns an
+// error to keep the load path's error handling uniform; there is currently no
+// way for it to fail.
 func Configure(c TokenEstimateOptions) error {
-	// If a HuggingFace tokenizer path is configured, use it instead of tiktoken
-	if path := strings.TrimSpace(c.TokenizerPath); path != "" {
-		// Reset tiktoken state so EstimateText falls through to HF
-		st.mu.Lock()
-		st.useHF = true
-		st.tk = nil
-		st.heur = true
-		st.mu.Unlock()
-		return ConfigureHFTokenizer(path)
+	settings := estimatorSettings{
+		cacheDir:   strings.TrimSpace(c.CacheDir),
+		hfEndpoint: firstNonEmpty(strings.TrimSpace(c.HuggingFaceEndpoint), strings.TrimSpace(os.Getenv(hfEndpointEnv)), defaultHFEndpoint),
+		msEndpoint: firstNonEmpty(strings.TrimSpace(c.ModelScopeEndpoint), defaultModelScopeURL),
+		defaultID:  strings.TrimSpace(c.DefaultTokenizer),
 	}
 
-	st.mu.Lock()
-	st.useHF = false
-	target, warnModel, err := configuredEncoding(c)
-	if err != nil {
-		st.tk = nil
-		st.encoding = ""
-		st.pending = false
-		st.label = ""
-		st.heur = true
-		st.mu.Unlock()
-		slog.Error("tokestimate: using rune/4 fallback", "err", err)
-		return nil
+	hubs := c.Hubs
+	if hubs == nil {
+		hubs = []string{hubHuggingFace, hubModelScope}
 	}
-	if st.tk != nil && !st.pending && st.encoding == target {
-		st.label = target
-		st.heur = false
-		st.mu.Unlock()
-		return nil
+	for _, hub := range hubs {
+		switch strings.ToLower(strings.TrimSpace(hub)) {
+		case hubHuggingFace, hubModelScope:
+			settings.hubs = append(settings.hubs, strings.ToLower(strings.TrimSpace(hub)))
+		default:
+			slog.Warn("token_estimate.hubs: unknown hub ignored", "hub", hub)
+		}
 	}
-	st.gen++
-	gen := st.gen
-	st.tk = nil
-	st.encoding = target
-	st.label = target
-	st.heur = false
-	st.pending = true
-	st.mu.Unlock()
-	if warnModel {
-		slog.Info("tokestimate: model has no tiktoken map; using cl100k", "model", strings.TrimSpace(c.Model), "encoding", tiktoken.MODEL_CL100K_BASE)
+
+	if settings.defaultID != "" && !isBuiltinTokenizerID(settings.defaultID) {
+		slog.Warn("token_estimate.default_tokenizer: unknown tokenizer id ignored", "id", settings.defaultID)
+		settings.defaultID = ""
 	}
-	go warmEncoding(gen, target)
+	for _, override := range c.Overrides {
+		if strings.TrimSpace(override.Model) == "" {
+			slog.Warn("token_estimate.tokenizers: entry without a model ignored")
+			continue
+		}
+		if id := strings.TrimSpace(override.Tokenizer); id != "" && !isBuiltinTokenizerID(id) {
+			slog.Warn("token_estimate.tokenizers: unknown tokenizer id ignored", "model", override.Model, "tokenizer", id)
+			continue
+		}
+		settings.overrides = append(settings.overrides, override)
+	}
+
+	estimators.mu.Lock()
+	estimators.settings = settings
+	estimators.configured = true
+	estimators.mu.Unlock()
+
+	if bulkSeedAllowed && settings.cacheDir != "" {
+		go seedCacheFromBundle(settings)
+	}
 	return nil
-}
-
-func activeTiktoken() (tk *tiktoken.Tiktoken, heur bool) {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if st.tk != nil && !st.heur {
-		return st.tk, false
-	}
-	return nil, true
 }
 
 // ImageTokens is the per-image token allowance used when the real dimensions
@@ -106,26 +88,9 @@ func activeTiktoken() (tk *tiktoken.Tiktoken, heur bool) {
 // a budget estimate.
 const ImageTokens = 2000
 
+// EstimateText estimates the tokens of a string with the default estimator.
 func EstimateText(s string) int {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0
-	}
-
-	// If an HF tokenizer is configured, use it
-	if usingHFTokenizer() {
-		if hft := activeHFTokenizer(); hft != nil {
-			return hft.Encode(s)
-		}
-		// HF tokenizer still loading, use heuristic
-		return estimateHeuristicRuneDiv4(s)
-	}
-
-	tk, heur := activeTiktoken()
-	if tk != nil && !heur {
-		return len(tk.EncodeOrdinary(s))
-	}
-	return estimateHeuristicRuneDiv4(s)
+	return EstimateTextWith(DefaultEstimator(), s)
 }
 
 func estimateHeuristicRuneDiv4(s string) int {
@@ -140,58 +105,6 @@ func estimateHeuristicRuneDiv4(s string) int {
 	return t
 }
 
-func configuredEncoding(c TokenEstimateOptions) (string, bool, error) {
-	encName := strings.TrimSpace(c.Encoding)
-	if encName != "" {
-		if !knownEncoding(encName) {
-			return "", false, fmt.Errorf("unknown encoding %q", encName)
-		}
-		return encName, false, nil
-	}
-	mod := strings.TrimSpace(c.Model)
-	if mod == "" {
-		return tiktoken.MODEL_CL100K_BASE, false, nil
-	}
-	if enc, ok := tiktokenModelToEncoding[mod]; ok {
-		return enc, false, nil
-	}
-	for prefix, enc := range tiktokenPrefixToEncoding {
-		if strings.HasPrefix(mod, prefix) {
-			return enc, false, nil
-		}
-	}
-	return tiktoken.MODEL_CL100K_BASE, true, nil
-}
-
-func knownEncoding(name string) bool {
-	switch strings.TrimSpace(name) {
-	case "gpt2", tiktoken.MODEL_O200K_BASE, tiktoken.MODEL_CL100K_BASE, tiktoken.MODEL_P50K_BASE, tiktoken.MODEL_P50K_EDIT, tiktoken.MODEL_R50K_BASE:
-		return true
-	default:
-		return false
-	}
-}
-
-func warmEncoding(gen uint64, encoding string) {
-	tk, err := tiktokenGetEncoding(encoding)
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	if st.gen != gen || st.encoding != encoding {
-		return
-	}
-	st.pending = false
-	if err != nil {
-		st.tk = nil
-		st.heur = true
-		slog.Error("tokestimate: background init failed; using rune/4", "encoding", encoding, "err", err)
-		return
-	}
-	st.tk = tk
-	st.heur = false
-	st.label = encoding
-	slog.Info("tokestimate: ready", "label", st.label)
-}
-
 // EstimateMessages returns the estimated prompt cost of a message slice as the
 // model receives it.
 //
@@ -202,31 +115,15 @@ func warmEncoding(gen uint64, encoding string) {
 // not sent to the model (display blocks kept alongside a persisted row, for
 // instance) must be projected out before it reaches this function.
 func EstimateMessages(msgs []Message) int {
-	total := 0
-	for _, msg := range msgs {
-		total += EstimateMessage(msg)
-	}
-	return total
+	return EstimateMessagesWith(DefaultEstimator(), msgs)
 }
 
-// EstimateMessage estimates one message: its text, the name and arguments of
-// each tool call it carries, replayed compaction/agent content, and a flat
-// allowance per image part plus per-message framing.
+// EstimateMessage estimates one message with the default estimator: its text,
+// the name and arguments of each tool call it carries, replayed
+// compaction/agent content, and a flat allowance per image part plus
+// per-message framing.
 func EstimateMessage(msg Message) int {
-	total := EstimateText(msg.TextContent())
-	for _, tc := range msg.ToolCalls {
-		total += EstimateText(tc.Function.Name + tc.Function.Arguments)
-	}
-	if msg.Compaction != nil {
-		total += EstimateText(msg.Compaction.EncryptedContent)
-	}
-	if msg.AgentMessage != nil {
-		for _, item := range msg.AgentMessage.Content {
-			total += EstimateText(item.Text + item.EncryptedContent)
-		}
-	}
-	total += estimateImageTokens(msg.Parts)
-	return total + 4
+	return EstimateMessageWith(DefaultEstimator(), msg)
 }
 
 // estimateImageTokens accounts for image parts, which carry no text and so

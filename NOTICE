@@ -2,3 +2,18 @@ forebrain
 Copyright 2026 forebrain-harness
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The forebrain binary statically links the following third-party libraries:
+
+- daulet/tokenizers (MIT) — Go bindings for the HuggingFace tokenizers library,
+  https://github.com/daulet/tokenizers
+- HuggingFace tokenizers (Apache License 2.0) — the Rust tokenization library,
+  https://github.com/huggingface/tokenizers
+- tiktoken-rs (MIT) — Rust bindings for OpenAI's tiktoken,
+  https://github.com/zurawiki/tiktoken-rs
+- Oniguruma (BSD 2-Clause) — regular expressions used by tokenizers,
+  https://github.com/kkos/oniguruma
+
+The tokenizer files under assets/tokenizers are third-party works. Each
+directory carries its own LICENSE, and assets/tokenizers/README.md records the
+source repository and license of every file.

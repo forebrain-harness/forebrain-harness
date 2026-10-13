@@ -681,7 +681,10 @@ func TestPackageShape(t *testing.T) {
 			t.Fatal(err)
 		}
 		parts := strings.Split(filepath.ToSlash(rel), "/")
-		if len(parts) > 2 || (len(parts) == 2 && strings.Join(parts, "/") != "llm/anthropic" && strings.Join(parts, "/") != "llm/openai") {
+		// The only depth-2 packages allowed: the provider adapters under
+		// pkg/llm, plus pkg/llm/hftok, the leaf counting package (stdlib + the
+		// tokenizers binding only) that sits in the llm layer.
+		if len(parts) > 2 || (len(parts) == 2 && strings.Join(parts, "/") != "llm/anthropic" && strings.Join(parts, "/") != "llm/openai" && strings.Join(parts, "/") != "llm/hftok") {
 			t.Fatalf("package path %q is deeper than the allowed shape", filepath.ToSlash(rel))
 		}
 		if blacklist[parts[len(parts)-1]] {
@@ -956,7 +959,11 @@ func TestCacheBaselineCoversSupportedProviders(t *testing.T) {
 }
 
 func TestCacheBaselineModelsExistInCatalog(t *testing.T) {
-	cat, err := llm.Parse(llm.EmbeddedModelsJSON())
+	data, err := llm.RepoModelsJSONForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cat, err := llm.Parse(data)
 	if err != nil {
 		t.Fatal(err)
 	}

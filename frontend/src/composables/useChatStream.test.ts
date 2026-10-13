@@ -14,9 +14,12 @@ import {
   formatRuntimeStatusLabel,
   formatToolDuration,
   formatWorkedDurationLabel,
+  hasVisibleBlocks,
+  placeBeforeGateAnchor,
   subagentCallView,
   workedLineText,
   skillCardTitle,
+  thinkingBlockLabel,
   toolStepFromPayload,
   toolStepFromRow,
   type ChatMessage,
@@ -1472,6 +1475,40 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  // A reasoning row carries how long the block was thought, so a reload draws
+  // the same "Thought for Ns" the live view showed.
+  it("reads a reasoning row's stored duration into the thinking block", async () => {
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValueOnce([
+      {
+        id: 'reasoning-1',
+        role: 'reasoning',
+        content: 'line 01\nline 02',
+        partsJson: JSON.stringify([
+          { type: 'text', text: 'line 01\nline 02' },
+          { type: 'reasoning_timing', duration_ms: 12000 },
+        ]),
+      },
+      { id: 'assistant-1', role: 'assistant', content: 'done' },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's1', nextCursor: 0, highWater: 0, hasMore: false, schemaVersion: 1, events: [],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] })
+    try {
+      const stream = useChatStream()
+      await stream.loadMessages('s1')
+
+      expect(stream.messages.value[0]?.blocks).toEqual([
+        { kind: 'thinking', text: 'line 01\nline 02', open: false, startedAt: 0, durationMs: 12000 },
+        { kind: 'assistant', text: 'done', open: false },
+      ])
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
   it('surfaces history load failures and clears them after retry without blanking projected history', async () => {
     const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages')
       .mockRejectedValueOnce(new Error('history offline'))
@@ -2027,14 +2064,17 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
-  it('turns a conversation approval into a block and stamps the printed line on it', withFakeWebSocket(async () => {
+  it('anchors an exit-gate approval and stamps each printed line above it', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-approval', 'run-approval')
 
     runEvent(socket, 'evt-1', 1, 'run-approval', 'live-approval', 'approval_requested', {
       actionId: 'act-1', actionKind: 'exit_plan_mode', toolStepId: 'call-exit',
     })
+    // The gate's wait draws nothing and its pending record draws nothing
+    // either: only the anchor marks where the call sits.
     let host = stream.messages.value.find((message) => message.runId === 'run-approval')
-    expect(host?.blocks?.[0]).toMatchObject({ kind: 'approval', actionId: 'act-1', status: 'pending' })
+    expect(host?.blocks).toHaveLength(1)
+    expect(host?.blocks?.[0]).toMatchObject({ kind: 'gate', stepId: 'call-exit', actionId: 'act-1' })
 
     runEvent(socket, 'evt-2', 2, 'run-approval', 'live-approval', 'approval_resolved', {
       actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'cancelled', toolStepId: 'call-exit',
@@ -2042,7 +2082,7 @@ describe('conversation tool and approval timeline', () => {
     })
 
     host = stream.messages.value.find((message) => message.runId === 'run-approval')
-    expect(host?.blocks).toHaveLength(1)
+    expect(host?.blocks?.map((block) => block.kind)).toEqual(['approval', 'gate'])
     expect(host?.blocks?.[0]).toMatchObject({
       kind: 'approval',
       actionId: 'act-1',
@@ -2053,6 +2093,30 @@ describe('conversation tool and approval timeline', () => {
     await pendingSend
   }))
 
+  it('keeps a shell gate one merged record above the card it held', withFakeWebSocket(async () => {
+    const { stream, socket, pendingSend } = await startLiveStream('live-shell-approval', 'run-shell-approval')
+
+    runEvent(socket, 'evt-1', 1, 'run-shell-approval', 'live-shell-approval', 'tool_call_started', { toolName: 'shell', stepId: 'call-1', summary: 'running ls' })
+    runEvent(socket, 'evt-2', 2, 'run-shell-approval', 'live-shell-approval', 'approval_requested', {
+      actionId: 'act-shell', actionKind: 'shell', toolStepId: 'call-1',
+    })
+    runEvent(socket, 'evt-3', 3, 'run-shell-approval', 'live-shell-approval', 'approval_resolved', {
+      actionId: 'act-shell', actionKind: 'shell', decision: 'approved', toolStepId: 'call-1',
+      confirmation: '✔ You approved forebrain to run ls',
+    })
+
+    // A gate whose call holds a card is unchanged: one record, merged by its
+    // action, directly above the card it held.
+    const host = stream.messages.value.find((message) => message.runId === 'run-shell-approval')
+    expect(host?.blocks?.filter((block) => block.kind === 'approval')).toHaveLength(1)
+    expect(host?.blocks?.map((block) => block.kind)).toEqual(['approval', 'tool'])
+    expect(host?.blocks?.[0]).toMatchObject({
+      kind: 'approval', actionId: 'act-shell', status: 'approved', confirmation: '✔ You approved forebrain to run ls',
+    })
+    endTurn(socket, 'evt-4', 4, 'run-shell-approval', 'live-shell-approval')
+    await pendingSend
+  }))
+
   it('closes a delivered plan review card silently, with no line', withFakeWebSocket(async () => {
     const { stream, socket, pendingSend } = await startLiveStream('live-delivery', 'run-delivery')
 
@@ -2060,8 +2124,8 @@ describe('conversation tool and approval timeline', () => {
       actionId: 'act-1', actionKind: 'exit_plan_mode', toolStepId: 'call-exit',
     })
     // A persisted delivery event replays to a new connection with the
-    // internal handoff key as its line: the card still closes, and the line
-    // is dropped — the handoff was never something to read.
+    // internal handoff key as its line: the delivery was never something to
+    // read, so it draws no record at all — the gate keeps only its anchor.
     runEvent(socket, 'evt-2', 2, 'run-delivery', 'live-delivery', 'approval_resolved', {
       actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'denied', toolStepId: 'call-exit',
       reason: 'plan-review:delivered',
@@ -2069,15 +2133,8 @@ describe('conversation tool and approval timeline', () => {
     })
 
     const host = stream.messages.value.find((message) => message.runId === 'run-delivery')
-    const block = host?.blocks?.[0]
-    expect(block).toMatchObject({
-      kind: 'approval',
-      actionId: 'act-1',
-      status: 'denied',
-    })
-    if (block?.kind === 'approval') {
-      expect(block.confirmation).toBeUndefined()
-    }
+    expect(host?.blocks?.filter((block) => block.kind === 'approval')).toEqual([])
+    expect(host?.blocks?.map((block) => block.kind)).toEqual(['gate'])
     endTurn(socket, 'evt-3', 3, 'run-delivery', 'live-delivery')
     await pendingSend
   }))
@@ -2106,6 +2163,89 @@ describe('conversation tool and approval timeline', () => {
       { id: 't1', rowId: 2, role: 'tool', content: '{}', toolStepId: 'call-exit', partsJson: denialParts('Please split the plan into milestones.') },
     ] as unknown as Parameters<typeof conversationFromTranscript>[0])
     expect(denied.flatMap((message) => (message.blocks ?? []).filter((block) => block.kind === 'tool'))).toHaveLength(1)
+  })
+
+  it('places a gate record after the records already at its anchor, and only a gate draws nothing', () => {
+    const anchor: TimelineBlock = { kind: 'gate', id: 'gate:call-1', stepId: 'call-1', actionId: 'act-1' }
+    const firstLine: Extract<TimelineBlock, { kind: 'approval' }> = {
+      kind: 'approval', id: 'evt-1', actionId: 'act-1', actionKind: 'exit_plan_mode', status: 'cancelled',
+      confirmation: "✗ You canceled forebrain's request to exit plan mode",
+    }
+    const laterLine: Extract<TimelineBlock, { kind: 'approval' }> = {
+      kind: 'approval', id: 'evt-2', actionId: 'act-1', actionKind: 'exit_plan_mode', status: 'approved',
+      confirmation: '✔ You approved forebrain to exit plan mode',
+    }
+    const assistant: TimelineBlock = { kind: 'assistant', text: 'here is the plan', open: false }
+
+    // A record already at the anchor keeps its place and the new one reads
+    // after it, still above the anchor: the order the decisions arrived.
+    const placed = placeBeforeGateAnchor([assistant, firstLine, anchor], 'call-1', 'act-1', laterLine)
+    expect(placed?.map((block) => block.kind)).toEqual(['assistant', 'approval', 'approval', 'gate'])
+    expect(placed?.[1]).toMatchObject({ id: 'evt-1' })
+    expect(placed?.[2]).toMatchObject({ id: 'evt-2' })
+
+    // A record already on the timeline is updated where it stands, not added
+    // twice.
+    const updated = placeBeforeGateAnchor(
+      [assistant, firstLine, anchor], 'call-1', 'act-1',
+      { ...firstLine, confirmation: '✔ You approved forebrain to exit plan mode' },
+    )
+    expect(updated?.map((block) => block.kind)).toEqual(['assistant', 'approval', 'gate'])
+    expect(updated?.[1]).toMatchObject({ id: 'evt-1', confirmation: '✔ You approved forebrain to exit plan mode' })
+
+    // The anchor is found by the action that asked when no call names it.
+    const floatingAnchor: TimelineBlock = { kind: 'gate', id: 'gate-action:act-9', stepId: '', actionId: 'act-9' }
+    expect(placeBeforeGateAnchor([floatingAnchor], '', 'act-9', firstLine)?.map((block) => block.kind)).toEqual(['approval', 'gate'])
+
+    // No anchor for the gate: nothing to place.
+    expect(placeBeforeGateAnchor([assistant], 'call-1', 'act-1', firstLine)).toBeNull()
+
+    // A gate anchor alone draws nothing; anything beside it does.
+    expect(hasVisibleBlocks([anchor])).toBe(false)
+    expect(hasVisibleBlocks(undefined)).toBe(false)
+    expect(hasVisibleBlocks([anchor, assistant])).toBe(true)
+
+    // An approval record with no confirmation line draws nothing either
+    // (ApprovalCard prints nothing for it); one with a line does.
+    const pending: TimelineBlock = { kind: 'approval', id: 'approval-1', actionId: 'act-1', actionKind: 'shell', status: 'pending' }
+    const printed: TimelineBlock = { ...pending, status: 'approved', confirmation: '✔ You approved forebrain to run git status' }
+    expect(hasVisibleBlocks([pending])).toBe(false)
+    expect(hasVisibleBlocks([anchor, pending])).toBe(false)
+    expect(hasVisibleBlocks([printed])).toBe(true)
+  })
+
+  it('anchors every exit gate call on reload, drawing only its settled answers', () => {
+    const gateRow = (status: string, body: string) => ({
+      id: 't1', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-exit',
+      partsJson: JSON.stringify([
+        { type: 'tool_result_meta', tool_call_id: 'call-exit' },
+        { type: 'tool_display', body, summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status }) },
+      ]),
+    })
+    const issuedCall = (name: string) => JSON.stringify([
+      { type: 'text', text: 'here is the plan' },
+      { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name, arguments: '{}' } }] },
+    ])
+    const assistantRow = (partsJson: string) => ({ id: 'a1', rowId: 2, role: 'assistant', content: 'here is the plan', partsJson })
+    const kinds = (rows: unknown[]) => conversationFromTranscript(rows as unknown as Parameters<typeof conversationFromTranscript>[0])
+      .flatMap((message) => (message.blocks ?? []).map((block) => block.kind))
+
+    // A call with no answer at all — the run stopped on the wait.
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode'))])).toEqual(['assistant', 'gate'])
+    // A canceled wait: only the anchor; the line the decision printed comes
+    // from its event.
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('canceled', 'plan review closed the gate')]))
+      .toEqual(['assistant', 'gate'])
+    // A delivered review closed the gate: the handoff row draws nothing.
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('denied', 'Plan review delivered — the planner is revising the plan.')]))
+      .toEqual(['assistant', 'gate'])
+    // A settled answer draws, right after the anchor.
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('denied', 'Please split the plan into milestones.')]))
+      .toEqual(['assistant', 'gate', 'tool'])
+    expect(kinds([assistantRow(issuedCall('exit_plan_mode')), gateRow('completed', 'Exited plan mode.')]))
+      .toEqual(['assistant', 'gate', 'tool'])
+    // A call that draws its own card is untouched.
+    expect(kinds([assistantRow(issuedCall('shell'))])).toEqual(['assistant', 'tool'])
   })
 
   it('drops a canceled gate row whole and still shows the confirmation line', async () => {
@@ -2139,9 +2279,10 @@ describe('conversation tool and approval timeline', () => {
       await stream.loadMessages('cancel-gate-session')
 
       // The walk-away's only record is the confirmation line: no card for a
-      // gate that never answered, the line where its turn ended.
+      // gate that never answered, the line above the anchor that marks where
+      // the call sat.
       const turn = stream.messages.value[1]
-      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'approval'])
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'approval', 'gate'])
       expect(turn?.blocks?.[1]).toMatchObject({
         kind: 'approval',
         status: 'cancelled',
@@ -2179,10 +2320,11 @@ describe('conversation tool and approval timeline', () => {
       stream.sessionId.value = 'deny-gate-session'
       await stream.loadMessages('deny-gate-session')
 
-      // The user's denial is a settled answer: the card stays.
+      // The user's denial is a settled answer: the card stays, right after
+      // the anchor that marks the call.
       const turn = stream.messages.value[1]
-      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'tool'])
-      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-exit', status: 'denied' } })
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'gate', 'tool'])
+      expect(turn?.blocks?.[2]).toMatchObject({ kind: 'tool', step: { stepId: 'call-exit', status: 'denied' } })
     } finally {
       chatMessagesSpy.mockRestore()
       sessionEventsSpy.mockRestore()
@@ -2323,11 +2465,12 @@ describe('conversation tool and approval timeline', () => {
       // And it is the timeline both are supposed to have, not two matching
       // empties: what it thought, what it said, the call it ran, what it said
       // next, and the line the gate printed. The gate itself holds no card on
-      // either path — its prompt is the whole wait — so its record lands above
-      // the turn's last call, where the terminal prints the line.
+      // either path — its prompt is the whole wait — so the line lands at the
+      // exit call's own position, the anchor that marks it, which sits after
+      // everything said before the ask.
       expect(timeline(live.messages.value).map((message) => message.role)).toEqual(['user', 'assistant'])
       expect(timeline(live.messages.value)[1]?.blocks.map((block) => block.kind))
-        .toEqual(['thinking', 'assistant', 'approval', 'tool', 'assistant'])
+        .toEqual(['thinking', 'assistant', 'tool', 'assistant', 'approval', 'gate'])
       expect(timeline(live.messages.value)[1]?.content).toBe('let me check\n\nnow the plan')
     } finally {
       chatMessagesSpy.mockRestore()
@@ -2896,14 +3039,15 @@ describe('approval anchoring on the conversation timeline', () => {
       await stream.loadMessages('anchor-session')
 
       const turn = stream.messages.value[0]
-      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['approval', 'tool'])
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['approval', 'gate', 'tool'])
       expect(turn?.blocks?.[0]).toMatchObject({
         kind: 'approval', actionId: 'act-exit', status: 'cancelled',
         confirmation: '✗ You canceled forebrain\'s request to exit plan mode',
       })
-      // The gate's own card is withheld on every surface; the record lands
-      // above the turn's remaining call, where the terminal prints the line.
-      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'tool', step: { stepId: 'call-shell' } })
+      // The line lands at the exit call's own position, on the anchor that
+      // marks it; the shell call issued afterwards reads below both.
+      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'gate', stepId: 'call-exit' })
+      expect(turn?.blocks?.[2]).toMatchObject({ kind: 'tool', step: { stepId: 'call-shell' } })
     } finally {
       chatMessagesSpy.mockRestore()
       sessionEventsSpy.mockRestore()
@@ -3504,6 +3648,352 @@ describe('subagent_* call cards', () => {
     await finish()
   })
 
+  it('exit gate records follow the terminal through a delivered review', async () => {
+    const { stream, runEvent, finish } = liveStream()
+    runEvent('assistant_delta', { text: 'here is the plan' })
+    runEvent('tool_call_started', {
+      toolName: 'exit_plan_mode', stepId: 'call-a', summary: 'running exit_plan_mode',
+      toolMeta: { tool_name: 'exit_plan_mode', status: 'running' },
+    })
+    runEvent('approval_requested', { actionId: 'act-a', actionKind: 'exit_plan_mode', toolStepId: 'call-a' })
+    runEvent('approval_resolved', {
+      actionId: 'act-a', actionKind: 'exit_plan_mode', decision: 'review_requested', toolStepId: 'call-a',
+      confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan',
+    })
+    runEvent('plan_review_started', { actionId: 'act-a', reviewId: 'rev-1', provider: 'zhipuai', model: 'glm-5.3-flash' })
+    runEvent('plan_reviewed', { actionId: 'act-a', reviewId: 'rev-1', outcome: 'done', text: 'tighten step 2' })
+    // The delivery closes the first gate with no line of its own — the
+    // planner is revising, which is the next answer's business.
+    runEvent('approval_resolved', {
+      actionId: 'act-a', actionKind: 'exit_plan_mode', decision: 'denied', toolStepId: 'call-a',
+      reason: 'plan-review:delivered',
+    })
+    runEvent('assistant_delta', { text: 'revised plan' })
+    runEvent('tool_call_started', {
+      toolName: 'exit_plan_mode', stepId: 'call-b', summary: 'running exit_plan_mode',
+      toolMeta: { tool_name: 'exit_plan_mode', status: 'running' },
+    })
+    runEvent('approval_requested', { actionId: 'act-b', actionKind: 'exit_plan_mode', toolStepId: 'call-b' })
+    runEvent('approval_resolved', {
+      actionId: 'act-b', actionKind: 'exit_plan_mode', decision: 'approved', toolStepId: 'call-b',
+      confirmation: '✔ You approved forebrain to exit plan mode',
+    })
+    runEvent('tool_call_completed', {
+      toolName: 'exit_plan_mode', stepId: 'call-b', summary: 'ran exit_plan_mode', displayBody: 'Exited plan mode.',
+      toolMeta: { tool_name: 'exit_plan_mode', status: 'completed' },
+    })
+
+    const host = stream.messages.value[stream.messages.value.length - 1]
+    expect(host?.blocks?.map((block) => block.kind))
+      .toEqual(['assistant', 'approval', 'subagent', 'gate', 'assistant', 'approval', 'gate', 'tool'])
+    // The line that asked for the review survives the delivery, exactly as
+    // the terminal keeps it; the review card sits right after it.
+    expect(host?.blocks?.[1]).toMatchObject({ kind: 'approval', confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan' })
+    expect(host?.blocks?.[2]).toMatchObject({ kind: 'subagent', id: 'plan-review:rev-1' })
+    await finish()
+  })
+
+  it('a reloaded delivered review reads like the live one', async () => {
+    const assistantParts = (text: string, callId: string) => JSON.stringify([
+      { type: 'text', text },
+      { type: 'tool_calls', tool_calls: [{ id: callId, type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+    const gateRow = (callId: string, status: string, body: string) => ({
+      id: `t-${callId}`, rowId: callId === 'call-a' ? 4 : 6, role: 'tool', content: '{}', toolStepId: callId,
+      partsJson: JSON.stringify([
+        { type: 'tool_result_meta', tool_call_id: callId },
+        { type: 'tool_display', body, summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status }) },
+      ]),
+    })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'dispatch the work' },
+      { id: 'a1', rowId: 3, role: 'assistant', content: 'here is the plan', runId: 'run-1', partsJson: assistantParts('here is the plan', 'call-a') },
+      gateRow('call-a', 'denied', 'Plan review delivered — the planner is revising the plan.'),
+      { id: 'a2', rowId: 5, role: 'assistant', content: 'revised plan', runId: 'run-1', partsJson: assistantParts('revised plan', 'call-b') },
+      gateRow('call-b', 'completed', 'Exited plan mode.'),
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's1', nextCursor: 7, highWater: 7, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'evt-2', sequence: 2, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_requested', payload: { actionId: 'act-a', actionKind: 'exit_plan_mode', toolStepId: 'call-a' } },
+        { id: 'evt-3', sequence: 3, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-a', actionKind: 'exit_plan_mode', decision: 'review_requested', toolStepId: 'call-a', confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan' } },
+        { id: 'evt-4', sequence: 4, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'plan_review_started', payload: { actionId: 'act-a', reviewId: 'rev-1', provider: 'zhipuai', model: 'glm-5.3-flash' } },
+        { id: 'evt-5', sequence: 5, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'plan_reviewed', payload: { actionId: 'act-a', reviewId: 'rev-1', outcome: 'done', text: 'tighten step 2' } },
+        { id: 'evt-6', sequence: 6, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-a', actionKind: 'exit_plan_mode', decision: 'denied', toolStepId: 'call-a', reason: 'plan-review:delivered' } },
+        { id: 'evt-8', sequence: 8, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_requested', payload: { actionId: 'act-b', actionKind: 'exit_plan_mode', toolStepId: 'call-b' } },
+        { id: 'evt-9', sequence: 9, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-b', actionKind: 'exit_plan_mode', decision: 'approved', toolStepId: 'call-b', confirmation: '✔ You approved forebrain to exit plan mode' } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's1'
+      await stream.loadMessages('s1')
+
+      const turn = stream.messages.value[1]
+      expect(turn?.blocks?.map((block) => block.kind))
+        .toEqual(['assistant', 'approval', 'subagent', 'gate', 'assistant', 'approval', 'gate', 'tool'])
+      expect(turn?.blocks?.[1]).toMatchObject({ kind: 'approval', confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan' })
+      expect(turn?.blocks?.[2]).toMatchObject({ kind: 'subagent', id: 'plan-review:rev-1' })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  it('two decisions on one gate are two lines, the review between them', async () => {
+    const { stream, runEvent, finish } = liveStream()
+    runEvent('assistant_delta', { text: 'here is the plan' })
+    runEvent('tool_call_started', {
+      toolName: 'exit_plan_mode', stepId: 'call-exit', summary: 'running exit_plan_mode',
+      toolMeta: { tool_name: 'exit_plan_mode', status: 'running' },
+    })
+    runEvent('approval_requested', { actionId: 'act-1', actionKind: 'exit_plan_mode', toolStepId: 'call-exit' })
+    runEvent('approval_resolved', {
+      actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'review_requested', toolStepId: 'call-exit',
+      confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan',
+    })
+    runEvent('plan_review_started', { actionId: 'act-1', reviewId: 'rev-1', provider: 'zhipuai', model: 'glm-5.3-flash' })
+    runEvent('plan_reviewed', { actionId: 'act-1', reviewId: 'rev-1', outcome: 'failed', error: 'no plan to review' })
+    // The review failed, so the user decided the gate themselves — a second
+    // line on the same gate, after the review that came between.
+    runEvent('approval_resolved', {
+      actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'approved', toolStepId: 'call-exit',
+      confirmation: '✔ You approved forebrain to exit plan mode',
+    })
+    runEvent('tool_call_completed', {
+      toolName: 'exit_plan_mode', stepId: 'call-exit', summary: 'ran exit_plan_mode', displayBody: 'Exited plan mode.',
+      toolMeta: { tool_name: 'exit_plan_mode', status: 'completed' },
+    })
+
+    const host = stream.messages.value[stream.messages.value.length - 1]
+    expect(host?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'approval', 'subagent', 'approval', 'gate', 'tool'])
+    const approvals = host?.blocks?.filter((block) => block.kind === 'approval')
+    expect(approvals?.[0]).toMatchObject({ confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan' })
+    expect(approvals?.[1]).toMatchObject({ confirmation: '✔ You approved forebrain to exit plan mode' })
+    await finish()
+  })
+
+  it('a reloaded review that failed reads like the live one', async () => {
+    const assistantParts = JSON.stringify([
+      { type: 'text', text: 'here is the plan' },
+      { type: 'tool_calls', tool_calls: [{ id: 'call-exit', type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'dispatch the work' },
+      { id: 'a1', rowId: 2, role: 'assistant', content: 'here is the plan', runId: 'run-1', partsJson: assistantParts },
+      {
+        id: 't1', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-exit',
+        partsJson: JSON.stringify([
+          { type: 'tool_result_meta', tool_call_id: 'call-exit' },
+          { type: 'tool_display', body: 'Exited plan mode.', summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'completed' }) },
+        ]),
+      },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's1', nextCursor: 7, highWater: 7, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'evt-2', sequence: 2, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_requested', payload: { actionId: 'act-1', actionKind: 'exit_plan_mode', toolStepId: 'call-exit' } },
+        { id: 'evt-3', sequence: 3, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'review_requested', toolStepId: 'call-exit', confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan' } },
+        { id: 'evt-4', sequence: 4, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'plan_review_started', payload: { actionId: 'act-1', reviewId: 'rev-1', provider: 'zhipuai', model: 'glm-5.3-flash' } },
+        { id: 'evt-5', sequence: 5, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'plan_reviewed', payload: { actionId: 'act-1', reviewId: 'rev-1', outcome: 'failed', error: 'no plan to review' } },
+        { id: 'evt-6', sequence: 6, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-1', actionKind: 'exit_plan_mode', decision: 'approved', toolStepId: 'call-exit', confirmation: '✔ You approved forebrain to exit plan mode' } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] })
+    try {
+      const stream = useChatStream()
+      stream.sessionId.value = 's1'
+      await stream.loadMessages('s1')
+
+      const turn = stream.messages.value[1]
+      expect(turn?.blocks?.map((block) => block.kind)).toEqual(['assistant', 'approval', 'subagent', 'approval', 'gate', 'tool'])
+      const approvals = turn?.blocks?.filter((block) => block.kind === 'approval')
+      expect(approvals?.[0]).toMatchObject({ confirmation: '✔ You asked zhipuai/glm-5.3-flash to review the plan' })
+      expect(approvals?.[1]).toMatchObject({ confirmation: '✔ You approved forebrain to exit plan mode' })
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  // A gate the web decided (rather than the TUI) writes no confirmation line
+  // for its own review-requested resolution, and its resolve events carry no
+  // tool_step_id of their own — gateway only ever names the gated call on
+  // the approval_requested event. So a reload's placement of the review card
+  // relative to the revised answer and the second gate depends entirely on
+  // approval_requested carrying tool_step_id; this is the regression guard
+  // for that.
+  it('a gate the web decided reloads like the live one once its request names the call', async () => {
+    const visible = (blocks: TimelineBlock[] | undefined) =>
+      (blocks ?? [])
+        .filter((b) => b.kind !== 'gate')
+        .map((b) => (b.kind === 'subagent' ? `subagent:${b.id}` : b.kind))
+
+    const { stream, runEvent, finish } = liveStream()
+    runEvent('assistant_delta', { text: 'here is the plan' })
+    runEvent('tool_call_started', { tool_name: 'exit_plan_mode', step_id: 'call-a', tool_meta: { tool_name: 'exit_plan_mode', status: 'running' } })
+    runEvent('tool_call_completed', { tool_name: 'exit_plan_mode', step_id: 'tool:exit_plan_mode', action_id: 'act-a', action_kind: 'exit_plan_mode', output: { requires_action: true }, tool_meta: { tool_name: 'exit_plan_mode', status: 'awaiting approval' } })
+    runEvent('approval_requested', { action_id: 'act-a', action_kind: 'exit_plan_mode', tool_step_id: 'call-a' })
+    runEvent('plan_review_started', { action_id: 'act-a', review_id: 'rev-1', provider: 'zhipuai', model: 'glm-5.3' })
+    runEvent('plan_reviewed', { action_id: 'act-a', review_id: 'rev-1', outcome: 'done', text: 'tighten' })
+    runEvent('approval_resolved', { action_id: 'act-a', action_kind: 'exit_plan_mode', decision: 'denied', reason: 'plan-review:delivered' })
+    runEvent('assistant_delta', { text: 'revised plan' })
+    runEvent('tool_call_started', { tool_name: 'exit_plan_mode', step_id: 'call-b', tool_meta: { tool_name: 'exit_plan_mode', status: 'running' } })
+    runEvent('approval_requested', { action_id: 'act-b', action_kind: 'exit_plan_mode', tool_step_id: 'call-b' })
+    runEvent('approval_resolved', { action_id: 'act-b', action_kind: 'exit_plan_mode', decision: 'approved' })
+    runEvent('tool_call_completed', { tool_name: 'exit_plan_mode', step_id: 'call-b', display_body: 'Exited plan mode.', tool_meta: { tool_name: 'exit_plan_mode', status: 'completed' } })
+
+    const live = stream.messages.value[stream.messages.value.length - 1]
+    expect(visible(live?.blocks)).toEqual(['assistant', 'subagent:plan-review:rev-1', 'assistant', 'tool'])
+    await finish()
+
+    const assistantParts = (text: string, callId: string) => JSON.stringify([
+      { type: 'text', text },
+      { type: 'tool_calls', tool_calls: [{ id: callId, type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+    const gateRow = (callId: string, status: string, body: string) => ({
+      id: `t-${callId}`, rowId: callId === 'call-a' ? 4 : 6, role: 'tool', content: '{}', toolStepId: callId,
+      partsJson: JSON.stringify([
+        { type: 'tool_result_meta', tool_call_id: callId },
+        { type: 'tool_display', body, summary: '', tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status }) },
+      ]),
+    })
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'dispatch the work' },
+      { id: 'a1', rowId: 3, role: 'assistant', content: 'here is the plan', runId: 'run-1', partsJson: assistantParts('here is the plan', 'call-a') },
+      gateRow('call-a', 'denied', 'Plan review delivered — the planner is revising the plan.'),
+      { id: 'a2', rowId: 5, role: 'assistant', content: 'revised plan', runId: 'run-1', partsJson: assistantParts('revised plan', 'call-b') },
+      gateRow('call-b', 'completed', 'Exited plan mode.'),
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's1', nextCursor: 7, highWater: 7, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'evt-2', sequence: 2, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_requested', payload: { actionId: 'act-a', actionKind: 'exit_plan_mode', toolStepId: 'call-a' } },
+        { id: 'evt-3', sequence: 3, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'plan_review_started', payload: { actionId: 'act-a', reviewId: 'rev-1', provider: 'zhipuai', model: 'glm-5.3' } },
+        { id: 'evt-4', sequence: 4, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'plan_reviewed', payload: { actionId: 'act-a', reviewId: 'rev-1', outcome: 'done', text: 'tighten' } },
+        { id: 'evt-5', sequence: 5, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-a', actionKind: 'exit_plan_mode', decision: 'denied', reason: 'plan-review:delivered' } },
+        { id: 'evt-6', sequence: 6, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_requested', payload: { actionId: 'act-b', actionKind: 'exit_plan_mode', toolStepId: 'call-b' } },
+        { id: 'evt-7', sequence: 7, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved', payload: { actionId: 'act-b', actionKind: 'exit_plan_mode', decision: 'approved' } },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] })
+    try {
+      const reload = useChatStream()
+      reload.sessionId.value = 's1'
+      await reload.loadMessages('s1')
+
+      const reloaded = reload.messages.value[1]
+      expect(visible(reloaded?.blocks)).toEqual(['assistant', 'subagent:plan-review:rev-1', 'assistant', 'tool'])
+      expect(visible(reloaded?.blocks)).toEqual(visible(live?.blocks))
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
+  // Contract test for plan 012: the runtime now emits a settled "denied" step
+  // where it injects a refused call's denial result (pkg/run/orchestration_llm.go),
+  // instead of leaving the gate live with no completion event. This test only
+  // pins the web's reading of that event shape — the fix itself lives in the
+  // runtime, not here.
+  it('a refused gate draws its settled card live where the reload draws it', async () => {
+    const { stream, runEvent, finish } = liveStream()
+    runEvent('assistant_delta', { text: 'here is the plan' })
+    runEvent('tool_call_started', {
+      tool_name: 'exit_plan_mode', step_id: 'call-a', summary: 'running exit_plan_mode',
+      tool_meta: { tool_name: 'exit_plan_mode', status: 'running', invocation: 'exit_plan_mode' },
+    })
+    runEvent('approval_requested', { action_id: 'act-a', action_kind: 'exit_plan_mode', tool_step_id: 'call-a' })
+    runEvent('approval_resolved', {
+      action_id: 'act-a', action_kind: 'exit_plan_mode', decision: 'denied', reason: 'split milestones',
+      tool_step_id: 'call-a', confirmation: '✗ You did not approve forebrain to exit plan mode',
+    })
+    // The runtime's own account of the refusal (plan 012): a completed step,
+    // status denied, no summary.
+    runEvent('tool_call_completed', {
+      tool_name: 'exit_plan_mode', step_id: 'call-a', display_body: 'split milestones',
+      tool_meta: { tool_name: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode' },
+    })
+    runEvent('assistant_delta', { text: 'ok, splitting' })
+
+    const live = stream.messages.value[stream.messages.value.length - 1]
+    await finish()
+
+    const assistantParts = (text: string, callId: string) => JSON.stringify([
+      { type: 'text', text },
+      { type: 'tool_calls', tool_calls: [{ id: callId, type: 'function', function: { name: 'exit_plan_mode', arguments: '{}' } }] },
+    ])
+    const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
+      { id: 'u1', rowId: 1, role: 'user', content: 'dispatch the work' },
+      { id: 'a1', rowId: 2, role: 'assistant', content: 'here is the plan', runId: 'run-1', partsJson: assistantParts('here is the plan', 'call-a') },
+      {
+        id: 't-call-a', rowId: 3, role: 'tool', content: '{}', toolStepId: 'call-a',
+        partsJson: JSON.stringify([
+          { type: 'tool_result_meta', tool_call_id: 'call-a' },
+          {
+            type: 'tool_display', body: 'split milestones', summary: '',
+            tool_meta_json: JSON.stringify({ tool_name: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode' }),
+          },
+        ]),
+      },
+      { id: 'a2', rowId: 4, role: 'assistant', content: 'ok, splitting', runId: 'run-1' },
+    ] as never)
+    const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({
+      sessionId: 's1', nextCursor: 4, highWater: 4, hasMore: false, schemaVersion: 1,
+      events: [
+        { id: 'evt-2', sequence: 2, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_requested', payload: { actionId: 'act-a', actionKind: 'exit_plan_mode', toolStepId: 'call-a' } },
+        {
+          id: 'evt-3', sequence: 3, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'approval_resolved',
+          payload: {
+            actionId: 'act-a', actionKind: 'exit_plan_mode', decision: 'denied', reason: 'split milestones',
+            toolStepId: 'call-a', confirmation: '✗ You did not approve forebrain to exit plan mode',
+          },
+        },
+        // The runtime's denied step reaches the log too, camelCase as every
+        // other event does. The reload skips it: the transcript's own tool
+        // row already carries the card (transcriptBackedEventTypes).
+        {
+          id: 'evt-4', sequence: 4, schemaVersion: 1, runId: 'run-1', sessionId: 's1', type: 'tool_call_completed',
+          payload: {
+            toolName: 'exit_plan_mode', stepId: 'call-a', displayBody: 'split milestones',
+            toolMeta: { toolName: 'exit_plan_mode', status: 'denied', invocation: 'exit_plan_mode' },
+          },
+        },
+      ],
+    } as never)
+    const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 's1', records: [] })
+    try {
+      const reload = useChatStream()
+      reload.sessionId.value = 's1'
+      await reload.loadMessages('s1')
+
+      const reloaded = reload.messages.value[1]
+      const wantKinds = ['assistant', 'approval', 'gate', 'tool', 'assistant']
+      expect(live?.blocks?.map((block) => block.kind)).toEqual(wantKinds)
+      expect(reloaded?.blocks?.map((block) => block.kind)).toEqual(wantKinds)
+
+      const pick = (step: SubagentToolStep) => ({
+        stepId: step.stepId, status: step.status, output: step.output, summary: step.summary, toolName: step.toolName,
+      })
+      const liveTool = live?.blocks?.find((block) => block.kind === 'tool')
+      const reloadedTool = reloaded?.blocks?.find((block) => block.kind === 'tool')
+      if (liveTool?.kind !== 'tool' || reloadedTool?.kind !== 'tool') {
+        throw new Error('expected a tool block on both sides')
+      }
+      const want = { stepId: 'call-a', status: 'denied', output: 'split milestones', summary: 'exit_plan_mode', toolName: 'exit_plan_mode' }
+      expect(pick(liveTool.step)).toEqual(want)
+      expect(pick(reloadedTool.step)).toEqual(want)
+    } finally {
+      chatMessagesSpy.mockRestore()
+      sessionEventsSpy.mockRestore()
+      legacySpy.mockRestore()
+    }
+  })
+
   it('keeps a nested dispatch inside the subagent that made it', async () => {
     const { stream, runEvent, finish } = liveStream()
     // The child, dispatched by the primary agent with no call of its own.
@@ -3785,5 +4275,25 @@ describe('a subagent talked to from its own view', () => {
     } finally {
       input.mockRestore(); restore()
     }
+  })
+})
+
+describe('thinkingBlockLabel', () => {
+  const block = (durationMs?: number) => ({ kind: 'thinking' as const, text: 'thinking', open: false, startedAt: 0, durationMs })
+
+  it('names a block by its thinking time when it is at least a second', () => {
+    setLocale('zh')
+    expect(thinkingBlockLabel(block(12000))).toBe('思考了 12 秒')
+    setLocale('en')
+    expect(thinkingBlockLabel(block(12000))).toBe('Thought for 12s')
+  })
+
+  it('falls back to the neutral label below a second or when the time is unknown', () => {
+    setLocale('zh')
+    expect(thinkingBlockLabel(block(500))).toBe('思考过程')
+    expect(thinkingBlockLabel(block())).toBe('思考过程')
+    setLocale('en')
+    expect(thinkingBlockLabel(block(500))).toBe('Thinking')
+    expect(thinkingBlockLabel(block())).toBe('Thinking')
   })
 })

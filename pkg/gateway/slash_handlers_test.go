@@ -482,8 +482,11 @@ func gatewayModelServer(t *testing.T) *Server {
 		Env: &process.Environment{
 			Root:       home,
 			ConfigPath: cfgPath,
-			Deps:       run.Deps{AppCfg: cfg},
-			Runner:     runner,
+			// RawConfig is what project runners derive their own effective
+			// config from; a hand-built Environment must set it as Open does.
+			RawConfig: *cfg,
+			Deps:      run.Deps{AppCfg: cfg},
+			Runner:    runner,
 		},
 	}
 }
@@ -632,9 +635,10 @@ func TestGatewayCatalogAgreesAfterPropagatedReload(t *testing.T) {
 
 	require.NoError(t, s.ReloadModelCatalog(context.Background(), sid))
 
-	// The pooled runner adopted the reloaded config and kept its pin; the
-	// catalog and the marker now describe the same world.
-	require.Same(t, s.Env.Deps.AppCfg, pooled.AppCfg)
+	// The pooled runner re-derived its own effective config from the reloaded
+	// file (its sandbox follows its own trust decision, not the base runner's)
+	// and kept its pin; the catalog and the marker now describe the same world.
+	require.NotSame(t, s.Env.Deps.AppCfg, pooled.AppCfg)
 	sel := run.PrimaryModelSelection(pooled)
 	require.True(t, sel.Set)
 	require.Equal(t, "gpt-b", sel.Model)

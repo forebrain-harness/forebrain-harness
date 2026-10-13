@@ -860,8 +860,9 @@ func ParseNetworkApproval(raw string) (*safety.NetworkApprovalContext, int) {
 	return &context, payload.Port
 }
 
-// RequestPermissionsFromJSON decodes the canonical request_permissions input.
-func RequestPermissionsFromJSON(kind, raw string) *safety.RequestPermissionsResponse {
+// RequestPermissionsFromJSON decodes the canonical request_permissions input,
+// resolving any relative grant paths against the turn's working directory.
+func RequestPermissionsFromJSON(ctx context.Context, kind, raw string) *safety.RequestPermissionsResponse {
 	if !strings.EqualFold(strings.TrimSpace(kind), "request_permissions") {
 		return nil
 	}
@@ -871,10 +872,14 @@ func RequestPermissionsFromJSON(kind, raw string) *safety.RequestPermissionsResp
 	if json.Unmarshal([]byte(strings.TrimSpace(raw)), &payload) != nil {
 		return nil
 	}
-	response, err := safety.NormalizeRequestPermissionsResponse(safety.RequestPermissionsResponse{
+	cwd, err := tool.WorkingDir(ctx)
+	if err != nil {
+		return nil
+	}
+	response, err := safety.NormalizeRequestPermissionsResponseAtCWD(safety.RequestPermissionsResponse{
 		Permissions: payload.Permissions,
 		Scope:       safety.GrantScopeTurn,
-	})
+	}, cwd)
 	if err != nil {
 		return nil
 	}
@@ -1654,7 +1659,7 @@ func (g *PendingApprovalGate) Pending(ctx context.Context, sessionID string) (*T
 	req.RequestedProfile = strings.TrimSpace(wait.RequestedProfile)
 	req.ProfileElevation = wait.ProfileElevation
 	req.AskFormJSON = askFormJSON
-	req.RequestedPermissions = RequestPermissionsFromJSON(actionKind, wait.ToolInputJSON)
+	req.RequestedPermissions = RequestPermissionsFromJSON(ctx, actionKind, wait.ToolInputJSON)
 	// The card the user is looking at is the parked call, so the gate carries
 	// its identity: a surface that records or re-anchors this approval needs
 	// the tool step, and the wait row's snapshot is the only durable source
@@ -1754,6 +1759,21 @@ func PendingApprovalToolStepID(snapshot []llm.Message, toolName string) string {
 		return ""
 	}
 	return strings.TrimSpace(call.ID)
+}
+
+// ApprovalToolStepID names the tool call a gate is holding: the call that
+// raised it when the gate says so, otherwise the pending call of the gated
+// tool in the snapshot the gate carried. Every surface that records a gate
+// names its call through this, so the record anchors to the same call
+// whichever surface wrote it. Empty when nothing names the call.
+func ApprovalToolStepID(rae *tool.RequiresActionError) string {
+	if rae == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(rae.OriginatingToolCallID); id != "" {
+		return id
+	}
+	return PendingApprovalToolStepID(rae.SessionSnapshot, rae.ToolName)
 }
 
 // shellApprovalNarrative pulls the human-facing description and justification

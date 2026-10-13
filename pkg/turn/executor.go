@@ -61,6 +61,13 @@ func Execute(ctx Context, content string) Result {
 		return execNew(ctx)
 	case "resume":
 		return execResume(ctx)
+	case "rewind":
+		// Handled natively by the terminal, whose picker flow runs before the
+		// executor is consulted; reaching here means a surface without it.
+		if ctx.Surface == SurfaceTUI {
+			return Result{Handled: true}
+		}
+		return Result{Handled: true, Reply: "/rewind is only available in the terminal UI."}
 	case "rename":
 		return execRename(ctx, line, toks)
 	case "fork":
@@ -430,9 +437,16 @@ func execPlan(ctx Context, line string, toks []string) Result {
 }
 
 func execInit(ctx Context) Result {
-	wd, err := os.Getwd()
-	if err != nil || strings.TrimSpace(wd) == "" {
-		wd = ctx.stateRoot()
+	// /init seeds the session's own project, not the process directory: the
+	// turn's project root is the directory the session launched in, which a
+	// gateway process serving many projects does not share.
+	wd := strings.TrimSpace(ctx.ProjectRoot)
+	if wd == "" {
+		var err error
+		wd, err = os.Getwd()
+		if err != nil || strings.TrimSpace(wd) == "" {
+			wd = ctx.stateRoot()
+		}
 	}
 	proj := projectRoot(wd)
 	if strings.TrimSpace(proj) == "" {

@@ -40,6 +40,11 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// so expiration can be observed live instead of only changing SQLite.
 		EnableApprovalTTL: false,
 		SessionSource:     "webchat",
+		// The gateway serves sessions in many projects with one process: the
+		// directory it was started in is not a project, so neither its trust
+		// nor its default cwd applies to any session here (R4). Every session
+		// runs on its own project's runner instead.
+		NoLaunchProject: true,
 	})
 	if err != nil {
 		return err
@@ -76,7 +81,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// supplied one, so a channel message arriving while a gate was open
 		// started a second run against that session. submitChannelTurn already
 		// knows how to report the wait to the user.
-		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc)),
+		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc, state.NewProjectStore(h.SQL, runner.AgentName))),
 	)
 	// The pool is built before the first request so project sessions are
 	// served by per-project runners from the start.

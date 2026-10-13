@@ -202,10 +202,11 @@ func (env *Environment) reloadConfig() error {
 	if err != nil {
 		return err
 	}
-	loaded = safety.EffectiveConfig(loaded, env.LaunchProject)
-	next := new(appcfg.Root)
-	*next = loaded
-	safety.ApplyYOLO(next)
+	// The raw configuration is retained before any derivation: pool entries
+	// re-derive their own effective config from it (each project from its own
+	// trust), so the base runner's derived values must not be what they receive.
+	env.RawConfig = loaded
+	next := effectiveFor(loaded, env.LaunchProject)
 	if err := safety.NewManager().StartupCheck(next); err != nil {
 		return err
 	}
@@ -243,7 +244,7 @@ func (env *Environment) reloadConfig() error {
 		env.LSP.Reconcile(next)
 	}
 	if p := env.pool; p != nil {
-		if err := p.PropagateConfig(context.Background(), next); err != nil {
+		if err := p.PropagateConfig(context.Background(), env.RawConfig); err != nil {
 			// The base runner and the environment already adopted next; the
 			// entries named here keep their previous runtime (LoadConfig's own
 			// rollback). Truthful wording matters: this is not a failed reload.
@@ -307,6 +308,17 @@ func (env *Environment) AdoptConfig(next *appcfg.Root) {
 	env.reloadMu.Lock()
 	defer env.reloadMu.Unlock()
 	env.Deps.AppCfg = next
+	// next is already derived (the surface applied EffectiveConfig and YOLO
+	// before handing it here), so it cannot serve as the raw configuration a
+	// project runner derives from. Re-read the file when there is one: the
+	// invariant RawConfig carries — the on-disk form, underived — must hold for
+	// every entry the pool builds from it. A read failure keeps the previous
+	// raw config rather than replacing it with an already-derived one.
+	if path := strings.TrimSpace(env.ConfigPath); path != "" {
+		if raw, err := appcfg.Load(path); err == nil {
+			env.RawConfig = raw
+		}
+	}
 	if env.LSP != nil {
 		env.LSP.Reconcile(next)
 	}
@@ -336,10 +348,12 @@ func (env *Environment) refreshSandboxRuntimeLocked() {
 		env.Sandbox = safety.NewManager()
 	}
 	var snap safety.Snapshot
+	projectRoot := ""
 	if env.Runner != nil {
 		snap = env.Runner.PermissionSnapshot()
+		projectRoot = env.Runner.ProjectRoot
 	}
-	safety.UpdateManagerWithLocalConfig(env.Sandbox, env.Root, env.Deps.AppCfg, snap, nil)
+	safety.UpdateManagerWithLocalConfig(env.Sandbox, env.Root, env.Deps.AppCfg, snap, nil, projectRoot)
 	// Re-apply read isolation to the in-process file tools immediately. The
 	// manager only governs subprocesses; the file tools carry their own copy of
 	// the filesystem policy, so without this a sandbox change lands for shell

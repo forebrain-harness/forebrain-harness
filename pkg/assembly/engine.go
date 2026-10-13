@@ -134,9 +134,8 @@ func (e *Engine) Build(req AssemblyRequest) AssemblyResult {
 	}
 
 	result := AssemblyResult{
-		SessionID:  strings.TrimSpace(req.SessionID),
-		Mode:       strings.TrimSpace(req.Mode),
-		WorkingSet: normalizedSet(req.PinnedSet),
+		SessionID: strings.TrimSpace(req.SessionID),
+		Mode:      strings.TrimSpace(req.Mode),
 		Budget: ContextBudget{
 			LimitTokens: limit,
 			UsedTokens:  used,

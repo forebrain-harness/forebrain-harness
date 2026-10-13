@@ -9,18 +9,6 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
-// mentionRoot is the workspace the web composer picks files from.
-func (s *Server) mentionRoot() string {
-	if s == nil {
-		return ""
-	}
-	root := filepath.Join(strings.TrimSpace(s.Home), "workspace")
-	if active, err := s.activePrimarySummary(); err == nil && strings.TrimSpace(active.WorkspaceRoot) != "" {
-		root = active.WorkspaceRoot
-	}
-	return root
-}
-
 type mentionCandidatePayload struct {
 	Path  string `json:"path"`
 	IsDir bool   `json:"is_dir"`
@@ -28,14 +16,21 @@ type mentionCandidatePayload struct {
 
 // handleMentionSearch answers the web composer's @ typeahead from the same
 // engine the terminal composer uses, so both surfaces rank and cap candidates
-// identically instead of each growing its own file search.
+// identically instead of each growing its own file search. The root is the
+// conversation's project (or the workshop skills directory), named by the
+// request's session_id or, for a conversation not started yet, its project_id.
 func (s *Server) handleMentionSearch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	query := r.URL.Query().Get("q")
-	root := s.mentionRoot()
+	q := r.URL.Query()
+	query := q.Get("q")
+	root, err := s.filesRoot(r.Context(), q.Get("session_id"), q.Get("project_id"))
+	if err != nil {
+		writeFilesRootError(w, err)
+		return
+	}
 	resolver := turn.WorkspaceResolver{Root: root}
 	records := make([]mentionCandidatePayload, 0)
 	for _, cand := range turn.Search(root, query) {
@@ -65,6 +60,8 @@ type mentionAcceptRequest struct {
 	TokenEnd   int    `json:"token_end"`
 	Path       string `json:"path"`
 	IsDir      bool   `json:"is_dir"`
+	SessionID  string `json:"session_id"`
+	ProjectID  string `json:"project_id"`
 }
 
 type mentionAcceptResponse struct {
@@ -90,7 +87,11 @@ func (s *Server) handleMentionAccept(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
 	}
-	root := s.mentionRoot()
+	root, rootErr := s.filesRoot(r.Context(), req.SessionID, req.ProjectID)
+	if rootErr != nil {
+		writeFilesRootError(w, rootErr)
+		return
+	}
 	cand := turn.Candidate{Path: strings.TrimSpace(req.Path), IsDir: req.IsDir}
 	if cand.Path == "" {
 		http.Error(w, "path required", http.StatusBadRequest)

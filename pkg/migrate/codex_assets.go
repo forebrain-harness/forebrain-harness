@@ -654,8 +654,8 @@ func normalizeProjectServerForCompare(srv appcfg.MCPServerConfig) appcfg.MCPServ
 }
 
 // projectUnloaded says why forebrain will not load the project files written
-// into projectPath — they load only in a version-controlled project the user
-// trusts — or "" when it will.
+// into projectPath — they load only in a project the user trusts — or "" when
+// it will.
 func projectUnloaded(home, projectPath string) string {
 	if strings.TrimSpace(home) == "" {
 		return ""
@@ -663,9 +663,6 @@ func projectUnloaded(home, projectPath string) string {
 	project, err := safety.Resolve(projectPath)
 	if err != nil {
 		return "the directory could not be inspected: " + err.Error()
-	}
-	if !project.VersionControlled {
-		return "not a version-controlled project"
 	}
 	trusted, err := safety.IsTrusted(home, project)
 	if err != nil {

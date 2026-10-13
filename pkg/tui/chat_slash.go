@@ -606,9 +606,16 @@ func (s *ChatSession) PrimaryAgents() ([]turn.PrimaryAgent, error) {
 }
 
 // SwitchPrimaryAgent switches to the primary agent picked from /agent.
-func (s *ChatSession) SwitchPrimaryAgent(_ context.Context, id string) (turn.PrimaryAgent, error) {
+func (s *ChatSession) SwitchPrimaryAgent(ctx context.Context, id string) (turn.PrimaryAgent, error) {
 	summary, err := process.SwitchAgent(s.agentSwitchDeps(), id)
 	if err != nil {
+		return turn.PrimaryAgent{}, err
+	}
+	// The project registry is tenant-scoped: the new agent owns its own rows,
+	// so this launch directory's project is found or created under the new
+	// agent and the session re-points at it. Its conversations after the
+	// switch are filed under the new agent's project for the same directory.
+	if err := s.AdoptLaunchProject(ctx); err != nil {
 		return turn.PrimaryAgent{}, err
 	}
 	return turn.PrimaryAgent{ID: summary.ID, WorkspaceRoot: summary.WorkspaceRoot, Active: true}, nil
@@ -1543,6 +1550,10 @@ type skillsOutcome struct {
 	submission ComposerSubmission
 	submitted  bool
 	done       bool
+	// notice, when set, is a success line the /skills list shows at its top
+	// on the next render — the "Published X v3 · new sessions use it" line a
+	// publish leaves behind.
+	notice string
 }
 
 func skillsBack() skillsOutcome { return skillsOutcome{} }
@@ -1550,6 +1561,7 @@ func skillsDone() skillsOutcome { return skillsOutcome{done: true} }
 func skillsSubmit(sub ComposerSubmission) skillsOutcome {
 	return skillsOutcome{submission: sub, submitted: true, done: true}
 }
+func skillsNotice(text string) skillsOutcome { return skillsOutcome{notice: text} }
 
 // handleSkills renders the single /skills turn. It returns a submission
 // when the chosen action is one the model carries out (running a skill, or
@@ -1560,12 +1572,22 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 		return ComposerSubmission{}, false
 	}
 	defaultIdx := 0
+	notice := ""
 	for {
 		entries := c.session.AvailableSkillToggleOptions()
+		entries = append(entries, c.session.DraftOnlySkills()...)
+		statuses := make(map[string]skillStatus, len(entries))
+		for _, entry := range entries {
+			statuses[strings.TrimSpace(entry.Path)] = c.skillEntryStatus(entry)
+		}
 		memorySkills := c.session.MemorySkillOptions()
 		origins := skillOriginsByPath(entries)
-		items, rows := buildSkillsMenu(entries, origins, len(memorySkills) > 0)
-		idx, ok, err := selectRichTabbed(c.selector, "Skills\nRun an installed skill, or add, create, and tune skills", items, TabbedSelectOptions{DefaultIdx: defaultIdx, Uncounted: []string{skillsManageTab}})
+		items, rows := buildSkillsMenu(entries, origins, statuses, len(memorySkills) > 0)
+		label := "Skills\nRun an installed skill, or add, create, and tune skills"
+		if notice != "" {
+			label = "Skills\n" + notice
+		}
+		idx, ok, err := selectRichTabbed(c.selector, label, items, TabbedSelectOptions{DefaultIdx: defaultIdx, Uncounted: []string{skillsManageTab}})
 		if err != nil {
 			c.renderer.PrintError(err)
 			return ComposerSubmission{}, false
@@ -1591,7 +1613,10 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 				outcome = skillsDone()
 			}
 		case skillsActionOpenSkill:
-			outcome = c.handleSkillEntry(row.entry, origins)
+			outcome = c.handleSkillEntry(ctx, row.entry, origins)
+		}
+		if outcome.notice != "" {
+			notice = outcome.notice
 		}
 		if outcome.done {
 			return outcome.submission, outcome.submitted
@@ -1599,11 +1624,22 @@ func (c *commandController) handleSkills(ctx context.Context) (ComposerSubmissio
 	}
 }
 
+// skillEntryStatus resolves one listed skill's version standing for the row
+// and the submenu. The built-in layer never carries versions; a skill the
+// store does not manage (a cross-tool or bundled directory) reports unknown.
+func (c *commandController) skillEntryStatus(entry skill.Entry) skillStatus {
+	if entry.Origin == skill.OriginBuiltin {
+		return skillStatus{known: true, builtin: true}
+	}
+	state, ok := c.session.SkillVersionState(entry)
+	return skillStatusFor(entry, state, ok)
+}
+
 // buildSkillsMenu lays out the whole command as one list: the installed skills
 // first, one tab per layer in load order, then the actions in a Manage tab.
 // Grouping and status live in the row itself so the user never has to open a
 // submenu to learn what is installed or whether it is on.
-func buildSkillsMenu(entries []skill.Entry, origins map[string]skill.Origin, hasMemorySkills bool) ([]SelectItem, []skillsMenuRow) {
+func buildSkillsMenu(entries []skill.Entry, origins map[string]skill.Origin, statuses map[string]skillStatus, hasMemorySkills bool) ([]SelectItem, []skillsMenuRow) {
 	items := make([]SelectItem, 0, len(entries)+5)
 	rows := make([]skillsMenuRow, 0, len(entries)+5)
 	for _, entry := range sortSkillEntries(entries) {
@@ -1613,7 +1649,7 @@ func buildSkillsMenu(entries []skill.Entry, origins map[string]skill.Origin, has
 		}
 		items = append(items, SelectItem{
 			Label:       name,
-			Description: skillRowDescription(entry, origins, true),
+			Description: skillRowDescriptionWithStatus(entry, origins, true, statuses[strings.TrimSpace(entry.Path)]),
 			Category:    skillEntryCategory(entry),
 		})
 		rows = append(rows, skillsMenuRow{action: skillsActionOpenSkill, entry: entry})
@@ -1684,69 +1720,88 @@ func skillOriginsByPath(entries []skill.Entry) map[string]skill.Origin {
 
 // skillRowDescription is a skill's description column: its description,
 // "(off)" before it when withState is set and the skill is disabled, and
-// after it which copy wins when another root offers the same name.
+// after it which copy wins when another root offers the same name. It carries
+// no version status — the panel's own rows call skillRowDescriptionWithStatus
+// with the skill's resolved state.
 func skillRowDescription(entry skill.Entry, origins map[string]skill.Origin, withState bool) string {
-	parts := make([]string, 0, 3)
-	if withState && !entry.Enabled {
-		parts = append(parts, "(off)")
-	}
-	if desc := strings.TrimSpace(entry.Description); desc != "" {
-		parts = append(parts, desc)
-	}
-	switch {
-	case len(entry.ShadowedBy) > 0:
-		parts = append(parts, "· shadowed by the "+origins[entry.ShadowedBy[0]].Label()+" copy")
-	case len(entry.Shadows) == 1:
-		parts = append(parts, "· shadows the "+origins[entry.Shadows[0]].Label()+" copy")
-	case len(entry.Shadows) > 1:
-		parts = append(parts, "· shadows "+strconv.Itoa(len(entry.Shadows))+" other copies")
-	}
-	return strings.Join(parts, " ")
+	return skillRowDescriptionWithStatus(entry, origins, withState, skillStatus{})
 }
 
-// handleSkillEntry is the per-skill sheet: run it, read what it is, flip it
-// on or off, or send it to the workshop for editing — the four things a user
-// wants after picking a skill out of the list.
-func (c *commandController) handleSkillEntry(entry skill.Entry, origins map[string]skill.Origin) skillsOutcome {
-	name := strings.TrimSpace(entry.Name)
-	toggleLabel := "Disable this skill"
-	toggleDesc := "Stop loading it in new sessions"
-	if !entry.Enabled {
-		toggleLabel = "Enable this skill"
-		toggleDesc = "Load it in new sessions"
-	}
-	items := []SelectItem{
-		{Label: "Run it now", Description: "Load " + name + " into this turn and give it a task"},
-		{Label: "Show details", Description: "Source, trust, path, and allowed tools"},
-		{Label: toggleLabel, Description: toggleDesc},
-		{Label: "Improve it", Description: "Hand it to the skill workshop to edit and evaluate"},
-	}
-	title := name + " · " + entry.Origin.Label() + "\n" + skillRowDescription(entry, origins, true)
-	idx, ok, err := c.selector.SelectRich(title, items, 0)
-	if err != nil {
-		c.renderer.PrintError(err)
-		return skillsDone()
-	}
-	if !ok {
-		return skillsBack()
-	}
-	switch idx {
-	case 0:
-		return c.runSkillNow(entry)
-	case 1:
-		msg, applyErr := c.session.ApplySkillSelection(name)
-		if applyErr != nil {
-			c.renderer.PrintError(applyErr)
+// handleSkillEntry is the per-skill sheet. Its items depend on where the
+// skill stands — a draft can be published, a published skill with a draft can
+// have that draft published or dropped, a versioned skill can show its
+// history — and after a toggle the sheet stays open with a status line naming
+// what the toggle did, so one visit can flip it and see the result.
+func (c *commandController) handleSkillEntry(ctx context.Context, entry skill.Entry, origins map[string]skill.Origin) skillsOutcome {
+	_ = ctx
+	banner := ""
+	for {
+		status := c.skillEntryStatus(entry)
+		menu := c.skillEntryMenu(entry, status)
+		items := make([]SelectItem, 0, len(menu))
+		for _, item := range menu {
+			items = append(items, SelectItem{Label: item.label, Description: item.desc})
+		}
+		title := skillEntryTitle(entry, origins, status, banner)
+		idx, ok, err := c.selector.SelectRich(title, items, 0)
+		if err != nil {
+			c.renderer.PrintError(err)
 			return skillsDone()
 		}
-		c.renderFrameForSkills(msg)
-		return skillsDone()
-	case 2:
-		return c.toggleSingleSkill(entry)
-	case 3:
-		return c.improveSkill(entry)
+		if !ok {
+			return skillsBack()
+		}
+		if idx < 0 || idx >= len(menu) {
+			return skillsBack()
+		}
+		switch menu[idx].action {
+		case skillActRun:
+			return c.runSkillNow(entry)
+		case skillActShowDetails:
+			c.showSkillDetails(entry, status)
+		case skillActToggle:
+			toggled, toggleErr := c.applySkillToggle(entry)
+			if toggleErr != nil {
+				c.renderer.PrintError(toggleErr)
+				return skillsDone()
+			}
+			entry = toggled
+			banner = skillToggleStatusLine(entry)
+		case skillActImprove:
+			return c.improveSkill(entry)
+		case skillActPublish:
+			out, leave := c.publishSkillFlow(entry, status)
+			if leave {
+				return out
+			}
+		case skillActShowChanges:
+			c.showSkillChanges(entry, draftBaseRef(status), "draft")
+		case skillActDiscard:
+			out, leave := c.discardDraftFlow(entry, status)
+			if leave {
+				return out
+			}
+		case skillActHistory:
+			out, leave := c.showSkillVersionHistory(entry)
+			if leave {
+				return out
+			}
+		case skillActPull:
+			out, leave := c.pullUpdateFlow(entry, status)
+			if leave {
+				return out
+			}
+		}
 	}
-	return skillsBack()
+}
+
+// skillToggleStatusLine is the status line the sheet shows after a toggle.
+func skillToggleStatusLine(entry skill.Entry) string {
+	name := strings.TrimSpace(entry.Name)
+	if entry.Enabled {
+		return panelOKStyle.Render("Enabled " + name + " · new sessions load it")
+	}
+	return panelWarnStyle.Render("Disabled " + name + " · new sessions skip it")
 }
 
 func (c *commandController) runSkillNow(entry skill.Entry) skillsOutcome {
@@ -1775,11 +1830,12 @@ func (c *commandController) runSkillNow(entry skill.Entry) skillsOutcome {
 	return skillsSubmit(sub)
 }
 
-// toggleSingleSkill flips one skill without making the user walk the whole
+// applySkillToggle flips one skill without making the user walk the whole
 // multi-select list, which is what they came for when they opened a specific
 // skill. The enabled set is written as a whole because that is the shape the
-// store keeps.
-func (c *commandController) toggleSingleSkill(entry skill.Entry) skillsOutcome {
+// store keeps. It returns the entry with its Enabled flag flipped, so the
+// caller can redraw the sheet against the new state.
+func (c *commandController) applySkillToggle(entry skill.Entry) (skill.Entry, error) {
 	target := strings.TrimSpace(entry.Path)
 	enabledPaths := make([]string, 0, 8)
 	for _, item := range c.session.AvailableSkillToggleOptions() {
@@ -1795,13 +1851,11 @@ func (c *commandController) toggleSingleSkill(entry skill.Entry) skillsOutcome {
 			enabledPaths = append(enabledPaths, path)
 		}
 	}
-	msg, err := c.session.ApplySkillEnabledSelection(enabledPaths)
-	if err != nil {
-		c.renderer.PrintError(err)
-		return skillsDone()
+	if _, err := c.session.ApplySkillEnabledSelection(enabledPaths); err != nil {
+		return entry, err
 	}
-	c.renderFrameForSkills(msg)
-	return skillsDone()
+	entry.Enabled = !entry.Enabled
+	return entry, nil
 }
 
 func (c *commandController) handleSkillToggle(entries []skill.Entry) skillsOutcome {

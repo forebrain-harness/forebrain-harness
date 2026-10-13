@@ -26,6 +26,10 @@ async function auditRadii(page: Page): Promise<Offender[]> {
     const offenders: Offender[] = []
     for (const el of Array.from(document.querySelectorAll('*'))) {
       if (!(el instanceof HTMLElement)) continue
+      // The shared modal shell is a 12px container by design (the approved
+      // preview draws every dialog at 12px), so the open-modal stack is out of
+      // this walk the same way the composer textarea is.
+      if (el.closest('.forebrain-modal-mask')) continue
       const cs = getComputedStyle(el)
       if (cs.display === 'none' || cs.visibility === 'hidden') continue
       const rect = el.getBoundingClientRect()
@@ -153,20 +157,13 @@ test('no retired border radius anywhere on the app surface', async ({ page }) =>
     () => page.click('.fixed button:has-text("取消"), .fixed button:has-text("Cancel")'),
   )
 
-  await page.goto('/workshop', { waitUntil: 'networkidle' })
-  await openDialog(
-    'dialog:workshop-new',
-    () => page.click('[data-testid="workshop-new-task"]'),
-    () => page.click('.fixed button:has-text("取消"), .fixed button:has-text("Cancel")'),
-  )
+  // The workshop's own dialogs (publish, compare, case editor) are all built
+  // on the shared modal shell, whose radius is excluded above, so there is
+  // nothing extra to sweep on its route.
 
+  // The provider add form is a shared modal now (its radius is the modal
+  // shell's, excluded above), so nothing extra to sweep on this route.
   await page.goto('/providers', { waitUntil: 'networkidle' })
-  // providers-add appends an inline row (no overlay); sweep it, then remove it.
-  await page.click('[data-testid="providers-add"]')
-  await page.waitForTimeout(200)
-  await sweep('dialog:providers-add')
-  const removeBtn = page.locator('[data-provider-row] button[data-testid^="provider-remove-"]').last()
-  if ((await removeBtn.count()) > 0) await removeBtn.click()
 
   // The memory file editor only exists when a memory file row exists.
   await page.goto('/memories', { waitUntil: 'networkidle' })
@@ -175,7 +172,7 @@ test('no retired border radius anywhere on the app surface', async ({ page }) =>
     await openDialog(
       'dialog:memory-files',
       () => editRow.click(),
-      () => page.click('[data-testid="memories-editor"] button:has-text("取消"), [data-testid="memories-editor"] button:has-text("Cancel")'),
+      () => page.click('.forebrain-modal button:has-text("取消"), .forebrain-modal button:has-text("Cancel")'),
     )
   }
 

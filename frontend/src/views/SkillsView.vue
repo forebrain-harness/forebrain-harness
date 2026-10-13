@@ -1,30 +1,25 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
     <div class="mx-auto w-full max-w-5xl">
-      <div class="flex items-center gap-2">
-        <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('skills.title') }}</h1>
-        <ScopeBadge type="agent" :label="t('scope.agent')" />
-      </div>
-      <p class="mt-1 text-[13px] text-[var(--forebrain-text-2)]">{{ t('skills.agentDescription') }}</p>
-
-      <div class="mt-4 flex flex-wrap items-center gap-2">
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="skills-online-install" @click="onlineOpen = true">
-          {{ t('skills.onlineInstall') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-offline-install" @click="offlineOpen = true">
-          {{ t('skills.offlineInstall') }}
-        </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ loading ? t('common.loading') : t('common.refresh') }}
-        </button>
-        <RouterLink
-          to="/workshop"
-          class="ml-auto text-[12px] text-[var(--forebrain-brand-1)] hover:underline"
-          data-testid="skills-workshop-hint"
-        >
-          {{ t('skills.workshopHint') }}
-        </RouterLink>
-      </div>
+      <PageTopRow :title="t('skills.title')" :description="t('skills.agentDescription')">
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-offline-install" @click="offlineOpen = true">
+            {{ t('skills.offlineInstall') }}
+          </button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-online-install" @click="onlineOpen = true">
+            {{ t('skills.onlineInstall') }}
+          </button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-discover" @click="openWorkshop('discover')">
+            {{ t('skills.discoverInstall') }}
+          </button>
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="skills-create" @click="openWorkshop('create')">
+            {{ t('skills.createSkill') }}
+          </button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+            {{ loading ? t('common.loading') : t('common.refresh') }}
+          </button>
+        </template>
+      </PageTopRow>
 
       <p v-if="error" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
@@ -35,10 +30,12 @@
           :saving="saving"
           :downloading="downloading"
           owner-origin="agent"
+          :hint="t('skills.workshopHint')"
           @toggle="onToggle"
           @delete="onDelete"
           @download="onDownload"
           @batch-download="onBatchDownload"
+          @detail="openSkill"
         />
       </div>
     </div>
@@ -72,8 +69,8 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { RouterLink } from 'vue-router'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import { useRouter } from 'vue-router'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
 import forebrainApi, {
@@ -81,6 +78,7 @@ import forebrainApi, {
   saveSkillDownload,
   type SkillRecord,
 } from '@/lib/api'
+import { workshopRoute } from '@/lib/workshopTarget'
 import { useI18n } from '@/locales'
 
 /**
@@ -90,6 +88,15 @@ import { useI18n } from '@/locales'
  * and managed in the layer that owns it (decision D9).
  */
 const { t } = useI18n()
+const router = useRouter()
+
+function openWorkshop(mode: 'create' | 'discover') {
+  void router.push(workshopRoute({ scope: 'agent', mode }))
+}
+
+function openSkill(row: SkillRecord) {
+  void router.push(workshopRoute({ scope: 'agent', mode: 'improve', skill: row.name }))
+}
 
 const rows = ref<SkillRecord[]>([])
 const loading = ref(false)

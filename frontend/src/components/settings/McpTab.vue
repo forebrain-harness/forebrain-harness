@@ -1,15 +1,13 @@
 <template>
   <div class="pb-6">
     <div class="mx-auto w-full max-w-3xl">
-      <header class="mb-5 flex items-end justify-between gap-4">
-        <div>
-          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('mcp.title') }}</h1>
-          <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('mcp.description') }}</p>
-        </div>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ t('common.refresh') }}
-        </button>
-      </header>
+      <PageTopRow :title="t('mcp.title')" :description="t('mcp.description')">
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+            {{ t('common.refresh') }}
+          </button>
+        </template>
+      </PageTopRow>
 
       <p v-if="!runtimeAvailable && records.length" class="mb-4 text-[12px] text-[var(--forebrain-muted-text)]">
         {{ t('mcp.runtimeUnavailable') }}
@@ -170,6 +168,7 @@
  */
 import { onMounted, ref } from 'vue'
 import CardComponent from '@/components/common/CardComponent.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import {
   getErrorMessage,
   mcpSetServerDisabled,

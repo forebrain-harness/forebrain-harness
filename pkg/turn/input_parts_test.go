@@ -649,8 +649,10 @@ func TestFuzzyRankExcludesNonMatches(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	if cat, err := llm.Parse(llm.EmbeddedModelsJSON()); err == nil {
-		llm.SetGlobalCatalogForTest(cat)
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if cat, err := llm.Parse(data); err == nil {
+			llm.SetGlobalCatalogForTest(cat)
+		}
 	}
 	os.Exit(m.Run())
 }

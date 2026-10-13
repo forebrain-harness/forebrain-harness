@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,9 +20,35 @@ import (
 // LoadedSkill is the internal catalog record for one discovered skill, keyed by
 // skill name. RootDir stays out of anything model-visible so host filesystem
 // paths are not advertised in every request.
+//
+// Version and VersionsRoot are the session's pin: the version the skill was
+// at when this runtime loaded it, and where that version's history lives.
+// Version 0 means the skill carries no version history — a built-in, a
+// cross-tool directory — and its content is read from RootDir as always.
 type LoadedSkill struct {
 	Name    string
 	RootDir string
+	// Version is the published version this session reads, 0 when the skill
+	// is not versioned.
+	Version int
+	// VersionsRoot is <skill root>/.versions/<name> for a versioned skill,
+	// empty otherwise.
+	VersionsRoot string
+}
+
+// PinnedDir is the directory this session reads the skill's content from: the
+// pinned version's own copy for a versioned skill, the formal directory
+// otherwise.
+func (item LoadedSkill) PinnedDir() string {
+	if item.Version > 0 && strings.TrimSpace(item.VersionsRoot) != "" {
+		return filepath.Join(item.VersionsRoot, "v"+strconv.Itoa(item.Version))
+	}
+	return item.RootDir
+}
+
+// PinnedSkillFile is the SKILL.md this session reads for the skill.
+func (item LoadedSkill) PinnedSkillFile() string {
+	return filepath.Join(item.PinnedDir(), "SKILL.md")
 }
 
 // ReplaceLoadedSkillCatalog swaps in the skills discovered for the current
@@ -47,6 +74,10 @@ func normalizedLoadedSkills(skills []LoadedSkill) map[string]LoadedSkill {
 		}
 		item.Name = name
 		item.RootDir = root
+		if item.Version <= 0 {
+			item.Version = 0
+			item.VersionsRoot = ""
+		}
 		next[name] = item
 	}
 	return next
@@ -66,26 +97,36 @@ func (s *State) LoadedSkills() []LoadedSkill {
 	return out
 }
 
+// LoadedSkillRoots lists every directory a loaded skill's content may be read
+// from: the skill's formal root, plus the pinned version directory a
+// versioned session reads instead. The pinned copy is exactly as much "backed
+// by a discovered skill" as the formal directory is.
 func (s *State) LoadedSkillRoots() []string {
 	items := s.LoadedSkills()
-	out := make([]string, 0, len(items))
-	seen := make(map[string]struct{}, len(items))
-	for _, item := range items {
-		root := strings.TrimSpace(item.RootDir)
+	out := make([]string, 0, 2*len(items))
+	seen := make(map[string]struct{}, 2*len(items))
+	add := func(root string) {
+		root = strings.TrimSpace(root)
 		if root == "" {
-			continue
+			return
 		}
 		if _, ok := seen[root]; ok {
-			continue
+			return
 		}
 		seen[root] = struct{}{}
 		out = append(out, root)
+	}
+	for _, item := range items {
+		add(item.RootDir)
+		add(item.PinnedDir())
 	}
 	sort.Strings(out)
 	return out
 }
 
 // LoadedSkillForPath returns the most-specific loaded skill containing path.
+// A path inside the session's pinned version copy addresses the skill just as
+// a path inside its formal directory does.
 func (s *State) LoadedSkillForPath(path string) (LoadedSkill, bool) {
 	if s == nil {
 		return LoadedSkill{}, false
@@ -101,7 +142,11 @@ func (s *State) LoadedSkillForPath(path string) (LoadedSkill, bool) {
 	items := s.LoadedSkills()
 	var matched LoadedSkill
 	for _, item := range items {
-		if !pathWithinRoot(normalized, item.RootDir) && !pathWithinRoot(lexical, item.RootDir) {
+		within := pathWithinRoot(normalized, item.RootDir) || pathWithinRoot(lexical, item.RootDir)
+		if !within && item.Version > 0 {
+			within = pathWithinRoot(normalized, item.PinnedDir()) || pathWithinRoot(lexical, item.PinnedDir())
+		}
+		if !within {
 			continue
 		}
 		if matched.RootDir == "" || len(item.RootDir) > len(matched.RootDir) {
@@ -314,6 +359,131 @@ func (s *State) loadedSkillAddressedByPath(path string) (LoadedSkill, bool) {
 		}
 	}
 	return LoadedSkill{}, false
+}
+
+// SkillDraftTarget is where a write aimed at a skill lands once the skill's
+// version store has redirected it: the draft path, the skill it belongs to,
+// and — when the write addressed the formal directory — the formal path it
+// was aimed at.
+type SkillDraftTarget struct {
+	SkillName string
+	Target    string
+	Source    string
+	// Addressed is the path the write addressed, in its original spelling.
+	// The read tools key their read states by that spelling, and a formal
+	// read is what satisfies a redirected write's read requirement, so the
+	// redirection keeps it beside the canonical source.
+	Addressed string
+}
+
+// SkillDraftResolver settles one write path against the versioned skill
+// roots. handled=false leaves the path to the ordinary write rules; an error
+// is a refusal — the version records are read-only, and a whole skill
+// directory is the skills list's to delete, not a file write's.
+//
+// tool cannot reach the skill package (Layer 2 keeps tool below skill), so
+// the runner injects the implementation; this port is the whole contract.
+type SkillDraftResolver func(path string) (SkillDraftTarget, bool, error)
+
+// SetSkillDraftResolver installs the draft-redirection port. Nil restores the
+// un-redirected behavior, which is what a runtime without versioned skill
+// roots — and every existing test harness — runs with.
+func (s *State) SetSkillDraftResolver(resolve SkillDraftResolver) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.skillDraftResolve = resolve
+	s.mu.Unlock()
+}
+
+func (s *State) draftResolver() SkillDraftResolver {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	resolve := s.skillDraftResolve
+	s.mu.Unlock()
+	return resolve
+}
+
+// resolveSkillDraftWrite settles one write path against the draft resolver:
+// the redirected target when the version store owns the path, and whether any
+// loaded-skill repair happened first, so the caller can attribute the write.
+func (s *State) resolveSkillDraftWrite(requested string) (writePathResolution, bool, error) {
+	resolve := s.draftResolver()
+	if resolve == nil {
+		return writePathResolution{}, false, nil
+	}
+	// The loaded-skill catalog's repair runs first: a shortened catalog path
+	// is repaired into the formal directory it named, and it is that formal
+	// path the draft redirection then answers for.
+	base := strings.TrimSpace(requested)
+	if target, item, ok := s.LoadedSkillWriteTarget(requested); ok {
+		base = target
+		_ = item
+	}
+	draft, handled, err := resolve(base)
+	if err != nil || !handled {
+		return writePathResolution{}, handled, err
+	}
+	draft.Addressed = strings.TrimSpace(requested)
+	out := writePathResolution{Abs: draft.Target}
+	if normalizeRootPath(draft.Source) != normalizeRootPath(draft.Target) && draft.Source != "" {
+		out.Draft = &draft
+	}
+	if cleaned := normalizeRootPath(requested); cleaned != "" && cleaned != normalizeRootPath(draft.Target) && draft.Source == "" {
+		// A write that addressed the draft through a different spelling:
+		// still the same draft, still worth naming where it landed.
+		out.Draft = &draft
+	}
+	return out, true, nil
+}
+
+// SkillDraftWriteTarget reports the draft path a write path redirects to, for
+// callers that need to read or validate what a write will actually touch
+// before the write runs. It answers exactly what the write tools' resolution
+// answers, refusals included.
+func (s *State) SkillDraftWriteTarget(path string) (target string, handled bool, err error) {
+	res, handled, err := s.resolveSkillDraftWrite(path)
+	if err != nil || !handled {
+		return "", handled, err
+	}
+	return res.Abs, true, nil
+}
+
+// draftRedirectReadState answers the read a redirected write still owes. The
+// model read the formal file; the version store seeded the draft from the
+// published version; a read state recorded for the formal path whose content
+// still matches the draft's bytes is a read of exactly those bytes. Anything
+// else — no read at all, or a draft that has already moved on — is not.
+func (s *State) draftRedirectReadState(res writePathResolution, abs string) (ReadState, bool) {
+	if s == nil || res.Draft == nil {
+		return ReadState{}, false
+	}
+	// The formal read is keyed by the spelling the read resolved — the
+	// addressed path, or the canonical source when the write addressed a
+	// repaired or differently-spelled path.
+	var rs ReadState
+	var ok bool
+	for _, key := range []string{res.Draft.Addressed, res.Draft.Source} {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if candidate, found := s.GetReadState(key); found {
+			rs, ok = candidate, true
+			break
+		}
+	}
+	if !ok {
+		return ReadState{}, false
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil || !readStateMatchesContent(rs, raw) {
+		return ReadState{}, false
+	}
+	return rs, true
 }
 
 // LoadedSkillWriteTarget reports the loaded skill a write path addresses and the

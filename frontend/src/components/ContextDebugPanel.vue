@@ -92,23 +92,6 @@
         <section class="context-debug-section">
           <div class="context-debug-section-head">
             <div>
-              <div class="context-debug-section-title">{{ t('chat.contextWorkingSet') }}</div>
-              <div class="context-debug-section-subtitle">{{ t('chat.contextWorkingSetHint') }}</div>
-            </div>
-            <span class="context-debug-count">{{ workingSet.length }}</span>
-          </div>
-          <div v-if="workingSet.length" class="context-debug-chip-row">
-            <span v-for="entry in workingSet" :key="entry" class="context-debug-chip">
-              <FileText class="size-3.5 shrink-0" aria-hidden="true" />
-              <span class="truncate">{{ entry }}</span>
-            </span>
-          </div>
-          <div v-else class="context-debug-muted">{{ t('common.empty') }}</div>
-        </section>
-
-        <section class="context-debug-section">
-          <div class="context-debug-section-head">
-            <div>
               <div class="context-debug-section-title">{{ t('chat.contextRecoveryTimeline') }}</div>
               <div class="context-debug-section-subtitle">{{ t('chat.contextRecoveryHint') }}</div>
             </div>
@@ -221,27 +204,26 @@
         </div>
       </section>
 
-      <details v-if="compactExportJson" class="context-debug-details">
-        <summary class="context-debug-summary">
-          <span class="inline-flex items-center gap-2">
-            <FileText class="size-4 text-[var(--forebrain-brand-1)]" aria-hidden="true" />
-            Compact export
-          </span>
-          <span class="context-debug-count">{{ view.compactAuditAvailable ? 'ready' : t('common.none') }}</span>
-        </summary>
-        <pre class="context-debug-content mt-3">{{ compactExportJson }}</pre>
-      </details>
+      <ContextAccordion
+        v-if="compactExportJson"
+        class="context-debug-details"
+        title="Compact export"
+        :count="view.compactAuditAvailable ? 'ready' : t('common.none')"
+        :open="openState.compact"
+        @toggle="openState.compact = !openState.compact"
+      >
+        <pre class="context-debug-content">{{ compactExportJson }}</pre>
+      </ContextAccordion>
 
       <div class="context-debug-detail-grid">
-        <details class="context-debug-details" open>
-          <summary class="context-debug-summary">
-            <span class="inline-flex items-center gap-2">
-              <Layers class="size-4 text-[var(--forebrain-brand-1)]" aria-hidden="true" />
-              {{ t('chat.contextInjectedItems') }}
-            </span>
-            <span class="context-debug-count">{{ injectedItems.length }}</span>
-          </summary>
-          <ul v-if="injectedItems.length" class="mt-3 space-y-2">
+        <ContextAccordion
+          class="context-debug-details"
+          :title="t('chat.contextInjectedItems')"
+          :count="injectedItems.length"
+          :open="openState.items"
+          @toggle="openState.items = !openState.items"
+        >
+          <ul v-if="injectedItems.length" class="space-y-2">
             <li v-for="(item, idx) in injectedItems" :key="`${item.sourceId ?? 'item'}-${idx}`" class="context-debug-item">
               <div class="context-debug-item-main">
                 <div class="min-w-0">
@@ -258,18 +240,17 @@
               <div v-if="item.content" class="context-debug-content">{{ compactContent(item.content) }}</div>
             </li>
           </ul>
-          <div v-else class="mt-3 context-debug-muted">{{ t('common.empty') }}</div>
-        </details>
+          <div v-else class="context-debug-muted">{{ t('common.empty') }}</div>
+        </ContextAccordion>
 
-        <details class="context-debug-details" :open="evictedItems.length > 0">
-          <summary class="context-debug-summary">
-            <span class="inline-flex items-center gap-2">
-              <ArchiveX class="size-4 text-[var(--forebrain-warning)]" aria-hidden="true" />
-              {{ t('chat.contextEvictionDetails') }}
-            </span>
-            <span class="context-debug-count">{{ evictedItems.length }}</span>
-          </summary>
-          <ul v-if="evictedItems.length" class="mt-3 space-y-2">
+        <ContextAccordion
+          class="context-debug-details"
+          :title="t('chat.contextEvictionDetails')"
+          :count="evictedItems.length"
+          :open="openState.evicted"
+          @toggle="openState.evicted = !openState.evicted"
+        >
+          <ul v-if="evictedItems.length" class="space-y-2">
             <li v-for="(item, idx) in evictedItems" :key="`${item.sourceId ?? 'eviction'}-${idx}`" class="context-debug-item">
               <div class="context-debug-item-main">
                 <span class="truncate text-[12px] font-semibold text-[var(--forebrain-text)]">{{ item.sourceId || 'evicted' }}</span>
@@ -278,27 +259,25 @@
               <div class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]">{{ item.reason || t('common.none') }}</div>
             </li>
           </ul>
-          <div v-else class="mt-3 context-debug-muted">{{ t('common.empty') }}</div>
-        </details>
+          <div v-else class="context-debug-muted">{{ t('common.empty') }}</div>
+        </ContextAccordion>
       </div>
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h } from 'vue'
+import { computed, defineComponent, h, reactive, watch } from 'vue'
 import {
-  ArchiveX,
   CheckCircle2,
   CircleAlert,
-  FileText,
   Gauge,
-  Layers,
   RefreshCw,
   ShieldAlert,
   TriangleAlert,
 } from 'lucide-vue-next'
 
+import ContextAccordion from '@/components/workbench/ContextAccordion.vue'
 import { useI18n } from '@/locales'
 import type { SessionContextDebug } from '@/lib/api'
 import {
@@ -331,9 +310,16 @@ const spillEvidence = computed(() => buildSpillEvidence(props.data))
 const timelineEvidence = computed(() => buildTimelineEvidence(props.data))
 const tokenAttribution = computed(() => buildTokenAttribution(props.data))
 const compactExportJson = computed(() => buildCompactExportJSON(props.data))
-const workingSet = computed(() => props.data?.workingSet ?? [])
 const injectedItems = computed(() => props.data?.topItems ?? props.data?.items ?? [])
 const evictedItems = computed(() => props.data?.topEvictions ?? props.data?.evictionDetails ?? [])
+
+// The disclosure state of the panel's shared accordion sections. Injected
+// items open by default; the eviction list opens itself as soon as there is
+// something evicted.
+const openState = reactive({ compact: false, items: true, evicted: false })
+watch(evictedItems, (items) => {
+  if (items.length > 0) openState.evicted = true
+}, { immediate: true })
 
 const signalLabel = computed(() => {
   if (view.value.signal === 'warn') return t('chat.contextSignalWarn')
@@ -669,8 +655,7 @@ const MetricCell = defineComponent({
   padding: 12px;
 }
 
-.context-debug-section-head,
-.context-debug-summary {
+.context-debug-section-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -834,18 +819,6 @@ const MetricCell = defineComponent({
 
 .context-debug-details {
   padding: 11px 12px 12px;
-}
-
-.context-debug-summary {
-  cursor: pointer;
-  color: var(--forebrain-text);
-  font-size: 12px;
-  font-weight: 700;
-  list-style: none;
-}
-
-.context-debug-summary::-webkit-details-marker {
-  display: none;
 }
 
 .context-debug-item {

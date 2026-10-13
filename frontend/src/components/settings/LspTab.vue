@@ -1,15 +1,13 @@
 <template>
   <div class="pb-6">
     <div class="mx-auto w-full max-w-3xl">
-      <header class="mb-5 flex items-end justify-between gap-4">
-        <div>
-          <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('lsp.title') }}</h1>
-          <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('lsp.description') }}</p>
-        </div>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ t('common.refresh') }}
-        </button>
-      </header>
+      <PageTopRow :title="t('lsp.title')" :description="t('lsp.description')">
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+            {{ t('common.refresh') }}
+          </button>
+        </template>
+      </PageTopRow>
 
       <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
@@ -189,6 +187,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import CardComponent from '@/components/common/CardComponent.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import {
   getErrorMessage,
   lspInstall,

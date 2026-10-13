@@ -2,9 +2,9 @@
 // session runs. Three gates run in order, and an entry that fails any of them
 // is excluded from the effective list and reported with a one-line reason:
 //
-//  1. Project gating — the launch project must be version controlled and
-//     trusted, judged from the session-frozen ProjectContext (never
-//     re-resolved here; safety.TrustedRoot is the pure function of it).
+//  1. Project gating — the launch project must be trusted, judged from the
+//     session-frozen ProjectContext (never re-resolved here; safety.TrustedRoot
+//     is the pure function of it). Version control is not part of the gate (R6).
 //  2. Per-entry consent — each project entry is confirmed once per
 //     fingerprint, per primary agent, per project. Unconfirmed entries fail
 //     closed: they are not loaded, and surfaces show them as awaiting
@@ -77,8 +77,6 @@ func ResolveSessionMCP(home, agentWorkspace string, global []appcfg.MCPServerCon
 		name := strings.TrimSpace(srv.Name)
 		fp := mcp.ServerFingerprint(srv)
 		switch {
-		case !launch.Project.VersionControlled:
-			notApplied = append(notApplied, mcp.MCPNotApplied{Name: name, Reason: "project is not version controlled"})
 		case !gated:
 			notApplied = append(notApplied, mcp.MCPNotApplied{Name: name, Reason: "project is not trusted"})
 		default:

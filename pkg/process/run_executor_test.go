@@ -121,6 +121,48 @@ func envWithFakeLLMForSource(t *testing.T, reply, sessionSource string) *Environ
 	return env
 }
 
+// SessionProjectKey resolves a session's plan/memory key from its own project
+// row, never from the process's launch project: a gateway process has no
+// launch project of its own, so its base runner's ProjectKey is empty while
+// each session runs on a project runner whose key is set. A project-less
+// session keeps "", and a store that cannot be read returns "" rather than
+// failing a read path.
+func TestSessionProjectKeyFollowsTheSessionsProject(t *testing.T) {
+	ctx := context.Background()
+	env := envWithFakeLLM(t, "hello")
+	projects := state.NewProjectStore(env.SQL, env.Deps.AgentName)
+	root := t.TempDir()
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "keyed", Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Deps.SessionStore.Ensure(ctx, "with-project", "with-project"); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "with-project", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Deps.SessionStore.Ensure(ctx, "no-project", "no-project"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := env.SessionProjectKey(ctx, "with-project"), state.ProjectKeyForRoot(root); got != want {
+		t.Fatalf("SessionProjectKey(with-project) = %q, want %q", got, want)
+	}
+	if got := env.SessionProjectKey(ctx, "no-project"); got != "" {
+		t.Fatalf("SessionProjectKey(no-project) = %q, want empty", got)
+	}
+	if got := env.SessionProjectKey(ctx, ""); got != "" {
+		t.Fatalf("SessionProjectKey(\"\") = %q, want empty", got)
+	}
+	// A store that cannot be read is not an error: the project-less key is the
+	// answer, and the turn keeps its own directory.
+	broken := &Environment{Deps: run.Deps{AgentName: "main"}}
+	if got := broken.SessionProjectKey(ctx, "with-project"); got != "" {
+		t.Fatalf("SessionProjectKey(no store) = %q, want empty", got)
+	}
+}
+
 type collectingSink struct {
 	mu  sync.Mutex
 	got []event.RunEvent

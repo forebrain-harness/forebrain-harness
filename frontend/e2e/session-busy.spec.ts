@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { expect, test } from '@playwright/test'
 
-import { expectAssistantReply, signIn } from './support'
+import { expectAssistantReply, seedProjectSession, signIn } from './support'
 
 /**
  * The state database the gateway runs on, located the way an outsider has to:
@@ -41,9 +41,7 @@ test('a busy session refuses a new message until the run owning it is gone', asy
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedProjectSession(page, 'session-busy')
 
   // A run from a process the gateway cannot see drives the conversation; its
   // owner's lease is fresh, so the session counts as busy to everyone.

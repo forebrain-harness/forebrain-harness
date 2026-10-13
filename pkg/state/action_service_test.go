@@ -1389,13 +1389,13 @@ func sessionAgentID(t *testing.T, s *SessionStore, id string) string {
 }
 
 func assistantMessage(messageID, usageJSON string) Message {
-	return Message{Role: "assistant", MessageID: messageID, UsageJSON: usageJSON}
+	return Message{Role: "assistant", MessageID: messageID, RunID: "run-1", UsageJSON: usageJSON}
 }
 
 func TestTokenCountFromLastAPIResponseAndTailEstimate(t *testing.T) {
 	turns := []Message{
 		{Role: "user", Content: "first"},
-		{Role: "assistant", Content: "anchor", MessageID: "msg-1", UsageJSON: `{"input_tokens":1000,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":50}`},
+		{Role: "assistant", Content: "anchor", MessageID: "msg-1", RunID: "run-1", UsageJSON: `{"input_tokens":1000,"cache_creation_input_tokens":200,"cache_read_input_tokens":300,"output_tokens":50}`},
 		{Role: "tool", Content: stringsOfLen(400)},
 		{Role: "user", Content: stringsOfLen(200)},
 	}
@@ -1411,9 +1411,9 @@ func TestTokenCountFromLastAPIResponseAndTailEstimate(t *testing.T) {
 
 func TestTokenCountWithEstimationWalksBackAcrossSplitAssistantResponse(t *testing.T) {
 	turns := []Message{
-		{Role: "assistant", Content: "first split", MessageID: "msg-1", UsageJSON: `{"input_tokens":1000,"output_tokens":10}`},
+		{Role: "assistant", Content: "first split", MessageID: "msg-1", RunID: "run-1", UsageJSON: `{"input_tokens":1000,"output_tokens":10}`},
 		{Role: "tool", Content: stringsOfLen(800), PartsJSON: sessionTestPartsJSON(stringsOfLen(800))},
-		{Role: "assistant", Content: "second split", MessageID: "msg-1", UsageJSON: `{"input_tokens":1100,"output_tokens":20}`},
+		{Role: "assistant", Content: "second split", MessageID: "msg-1", RunID: "run-1", UsageJSON: `{"input_tokens":1100,"output_tokens":20}`},
 		{Role: "user", Content: stringsOfLen(400), PartsJSON: sessionTestPartsJSON(stringsOfLen(400))},
 	}
 
@@ -1430,7 +1430,7 @@ func TestTokenCountWithEstimationWalksBackAcrossSplitAssistantResponse(t *testin
 func TestBodyAfterPrefixUsesFirstServerInputAsBaseline(t *testing.T) {
 	turns := []Message{
 		{Role: "user", Content: stringsOfLen(400)},
-		{Role: "assistant", Content: "answer", UsageJSON: `{"input_tokens":100,"output_tokens":25}`},
+		{Role: "assistant", Content: "answer", RunID: "run-1", UsageJSON: `{"input_tokens":100,"output_tokens":25}`},
 		{Role: "user", Content: stringsOfLen(80)},
 	}
 	// Active usage is 125 plus the estimated 24-token suffix (20 tokens of text

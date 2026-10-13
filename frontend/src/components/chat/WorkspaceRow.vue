@@ -4,21 +4,30 @@
     :aria-level="depth + 1"
     :aria-expanded="node.isDir ? isExpanded : undefined"
   >
-    <button
-      ref="rowRef"
-      type="button"
-      class="workspace-row"
-      :class="{ 'workspace-row--tabbed': tabbed }"
-      :style="{ paddingInlineStart: `${8 + depth * 14}px` }"
-      :title="node.path"
-      :tabindex="tabbed ? 0 : -1"
-      @click="activate"
-      @keydown="keydown"
-    >
-      <ChevronRight v-if="node.isDir" class="workspace-row-caret" :class="{ 'workspace-row-caret--open': expanded }" aria-hidden="true" />
-      <component :is="node.isDir ? (expanded ? FolderOpen : Folder) : FileIcon" class="workspace-row-ic" aria-hidden="true" />
-      <span class="workspace-row-name">{{ node.name }}</span>
-    </button>
+    <div class="workspace-row-line">
+      <button
+        ref="rowRef"
+        type="button"
+        class="workspace-row"
+        :class="{ 'workspace-row--tabbed': tabbed }"
+        :style="{ paddingInlineStart: `${8 + depth * 14}px` }"
+        :title="node.path"
+        :tabindex="tabbed ? 0 : -1"
+        @click="activate"
+        @keydown="keydown"
+      >
+        <ChevronRight v-if="node.isDir" class="workspace-row-caret" :class="{ 'workspace-row-caret--open': expanded }" aria-hidden="true" />
+        <component :is="node.isDir ? (expanded ? FolderOpen : Folder) : FileIcon" class="workspace-row-ic" aria-hidden="true" />
+        <span class="workspace-row-name">{{ node.name }}</span>
+      </button>
+      <TreeNodeActions
+        :is-dir="node.isDir"
+        :name="node.name"
+        @new-file="emit('new-file', handle)"
+        @edit="emit('edit', handle)"
+        @delete="emit('delete', handle)"
+      />
+    </div>
 
     <ul v-if="node.isDir && expanded" role="group" class="workspace-row-group">
       <template v-if="state?.status === 'loaded'">
@@ -28,10 +37,14 @@
           :node="child"
           :depth="depth + 1"
           :tabbed="isTabbed(child.path)"
+          :scope="scope"
           @activate="$emit('activate', $event)"
           @move="forwardMove"
           @toggle="$emit('toggle', $event)"
           @insert="$emit('insert', $event)"
+          @edit="$emit('edit', $event)"
+          @delete="$emit('delete', $event)"
+          @new-file="$emit('new-file', $event)"
         />
         <li v-if="!state.children.length" class="workspace-row-hint">{{ t('workspaceTree.emptyDir') }}</li>
       </template>
@@ -45,35 +58,51 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, toRef } from 'vue'
 import { ChevronRight, File as FileIcon, Folder, FolderOpen } from 'lucide-vue-next'
+import TreeNodeActions from '@/components/workbench/TreeNodeActions.vue'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
-import type { WorkspaceTreeNode } from '@/lib/api'
+import type { WorkspaceScope, WorkspaceTreeNode } from '@/lib/api'
 import { useI18n } from '@/locales'
+
+/** One tree row's identity for the per-node actions the row reports. */
+export interface WorkspaceNodeHandle {
+  path: string
+  name: string
+  isDir: boolean
+}
 
 /**
  * One row of the workspace tree: a directory toggles its lazily loaded
- * children, a file offers itself as an @-reference.
+ * children, a file offers itself as an @-reference, and every row carries its
+ * edit/delete buttons (a directory also a "new file" button). The scope names
+ * the file view the row belongs to, so every level reads the same
+ * conversation's root.
  */
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   node: WorkspaceTreeNode
   depth: number
   tabbed: boolean
-}>()
+  scope?: WorkspaceScope
+}>(), { scope: () => ({}) })
 
 const emit = defineEmits<{
   (e: 'activate', handle: { path: string; isDir: boolean; expanded: boolean }): void
   (e: 'move', from: string, delta: number): void
   (e: 'toggle', path: string): void
   (e: 'insert', path: string): void
+  (e: 'edit', node: WorkspaceNodeHandle): void
+  (e: 'delete', node: WorkspaceNodeHandle): void
+  (e: 'new-file', node: WorkspaceNodeHandle): void
 }>()
 
 const { t } = useI18n()
-const { dirs, expanded, toggle, load } = useWorkspaceTree()
+const { dirs, expanded, toggle, load } = useWorkspaceTree(toRef(props, 'scope'))
 const rowRef = ref<HTMLButtonElement | null>(null)
 
-const state = computed(() => dirs.get(props.node.path))
-const isExpanded = computed(() => expanded.has(props.node.path))
+const handle = computed<WorkspaceNodeHandle>(() => ({ path: props.node.path, name: props.node.name, isDir: props.node.isDir }))
+const state = computed(() => dirs.value.get(props.node.path))
+const isExpanded = computed(() => expanded.value.has(props.node.path))
 
 function isTabbed(path: string): boolean {
   return props.tabbed && path === firstChildPath.value
@@ -129,11 +158,20 @@ function keydown(event: KeyboardEvent) {
 </script>
 
 <style scoped>
+.workspace-row-line {
+  display: flex;
+  align-items: center;
+  border-radius: 5px;
+}
+.workspace-row-line:hover {
+  background: var(--forebrain-bg-alt);
+}
 .workspace-row {
   display: flex;
   align-items: center;
   gap: 5px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   min-height: 22px;
   border-radius: 5px;
   padding-inline-end: 6px;
@@ -141,8 +179,8 @@ function keydown(event: KeyboardEvent) {
   font-size: 12px;
   color: var(--forebrain-text-2);
 }
-.workspace-row:hover {
-  background: var(--forebrain-bg-alt);
+.workspace-row-line:hover .workspace-row {
+  background: transparent;
 }
 .workspace-row:focus-visible {
   outline: 1px solid var(--forebrain-focus-border);

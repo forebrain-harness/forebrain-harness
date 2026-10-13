@@ -225,7 +225,9 @@ func TestPrimaryFooterBudgetIsUnchangedByTheEngineMove(t *testing.T) {
 		Runner:    &run.Runner{Deps: &run.Deps{Home: home, AppCfg: &cfg, SessionStore: store}},
 	}.session()
 	require.NoError(t, store.Ensure(ctx, "s-budget", "s-budget"))
-	require.NoError(t, store.AppendMessageSequence(ctx, "s-budget", []llm.Message{
+	seedRun, err := (&state.RunStore{DB: db}).CreateRun(ctx, "s-budget", "seed")
+	require.NoError(t, err)
+	require.NoError(t, store.AppendMessageSequenceForRun(ctx, "s-budget", seedRun.ID, []llm.Message{
 		llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")}),
 	}, "glm-5.3", `{"input_tokens":150000,"output_tokens":2500}`))
 

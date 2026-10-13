@@ -41,6 +41,22 @@ type OpenOptions struct {
 	LaunchDir     string
 	Config        *appcfg.Root
 	SessionSource string
+	// NoLaunchProject starts a process whose working directory carries no
+	// business meaning (R4): the gateway serves sessions in many projects, so
+	// the directory it happens to be started in is not a project, its trust,
+	// or any session's default cwd. When set, LaunchDir is ignored, the
+	// effective sandbox and approval policy are derived from an empty launch
+	// project (fail closed: read-only, ask on request), and the base runner
+	// carries no ProjectRoot.
+	NoLaunchProject bool
+	// ExactLaunchRoot starts a process whose launch directory IS its project
+	// root (R2, the interactive surface): the directory the TUI was started
+	// in is the project, never walked up to a .git ancestor. When set,
+	// LaunchDir is resolved as a registered root (safety.ResolveRegisteredContext)
+	// instead of a launch directory, so a TUI started in a checkout
+	// subdirectory runs — and records trust and consent — as that
+	// subdirectory's project.
+	ExactLaunchRoot bool
 
 	EnableUploads     bool
 	EnableChannels    bool
@@ -53,7 +69,20 @@ type Environment struct {
 	Root          string
 	LaunchDir     string
 	LaunchProject safety.ProjectContext
-	SQL           *sql.DB
+	// RawConfig is the configuration as loaded from disk, before any
+	// project-scoped derivation (EffectiveConfig) or YOLO override. The base
+	// runner stores the derived form in Deps.AppCfg; this is the one every
+	// project runner is derived from — each project's sandbox and approval
+	// policy come from its own trust decision, not the base runner's.
+	RawConfig appcfg.Root
+	// noLaunchProject records that this process was started with no project of
+	// its own (OpenOptions.NoLaunchProject — the gateway). Such a process
+	// cannot serve a conversation that belongs to no project: it has no runner
+	// to run it on (R4). Every other process (the interactive surface) does
+	// have one, its launch directory, and serves project-less conversations on
+	// its base runner.
+	noLaunchProject bool
+	SQL             *sql.DB
 	// Deps is the single owner of the path/config/store dependencies this
 	// process shares with its primary Runner. Runner.Deps points at this very
 	// field, so there is exactly one place that state lives (R6). It is a value
@@ -181,6 +210,23 @@ func ApprovalTTLFromEnv() time.Duration {
 	return time.Duration(n) * time.Second
 }
 
+// effectiveFor derives the runtime configuration for one launch project from
+// the raw on-disk configuration: EffectiveConfig fills the sandbox mode and
+// approval policy a project left unspecified from its own trust decision, and
+// ApplyYOLO applies the process-wide YOLO override last. The order matches the
+// base runner's own derivation in Open, so a project runner and the base runner
+// see the same configured values, derived for different projects.
+//
+// The raw configuration is passed by value and never mutated: safety.EffectiveConfig
+// returns a copy, and the pointer returned is the caller's to own.
+func effectiveFor(raw appcfg.Root, launch safety.ProjectContext) *appcfg.Root {
+	effective := safety.EffectiveConfig(raw, launch)
+	out := new(appcfg.Root)
+	*out = effective
+	safety.ApplyYOLO(out)
+	return out
+}
+
 func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// Provider clients are Layer 0 and cannot reach pkg/telemetry, so the
 	// composition root installs the observability implementations behind llm's
@@ -235,17 +281,32 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	// the default of <FOREBRAIN_HOME>/auth.json in place.
 	openaiauth.SetCredentialsPath(loaded.Credentials.ChatGPT)
 
-	launchDir := strings.TrimSpace(opts.LaunchDir)
-	if launchDir == "" {
-		launchDir, _ = os.Getwd()
+	// The launch project is resolved only when this process has one. The
+	// gateway sets NoLaunchProject: the directory it is started in is not a
+	// project, so neither its trust decision nor its default cwd apply to any
+	// session it serves (R4). An empty launch project derives a read-only
+	// sandbox and an ask-on-request approval policy.
+	var launchDir string
+	var launchProject safety.ProjectContext
+	if !opts.NoLaunchProject {
+		launchDir = strings.TrimSpace(opts.LaunchDir)
+		if launchDir == "" {
+			launchDir, _ = os.Getwd()
+		}
+		var trustErr error
+		if opts.ExactLaunchRoot {
+			// The launch directory is the project boundary (R2): resolve it
+			// as a registered root so it is never relocated onto an enclosing
+			// checkout's .git.
+			launchProject, trustErr = safety.ResolveRegisteredContext(root, launchDir)
+		} else {
+			launchProject, trustErr = safety.ResolveProjectContext(root, launchDir)
+		}
+		if trustErr != nil {
+			slog.Warn("project trust lookup failed; using read-only sandbox", "err", trustErr)
+		}
 	}
-	effective, launchProject, trustErr := safety.ResolveEffectiveConfig(loaded, root, launchDir)
-	if trustErr != nil {
-		slog.Warn("project trust lookup failed; using read-only sandbox", "err", trustErr)
-	}
-	cfgRoot := new(appcfg.Root)
-	*cfgRoot = effective
-	safety.ApplyYOLO(cfgRoot)
+	cfgRoot := effectiveFor(loaded, launchProject)
 	if err := safety.NewManager().StartupCheck(cfgRoot); err != nil {
 		return nil, err
 	}
@@ -267,7 +328,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	if source == "" {
 		source = memory.SessionSourceWebchat
 	}
-	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel}
+	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel}
 	env.reload = NewConfigManager(env.Control, env.reloadConfig)
 	// The effective MCP list is resolved once per session and frozen: global
 	// entries stamped with their scope, project entries gated on the frozen
@@ -302,14 +363,13 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	memStore := memory.NewStore(sqlDB, activeAgent.ID)
 	env.LSP = lsp.NewPool(cfgRoot)
 	lspOpts := lsp.ManagerOptions{
-		Home:              root,
-		AgentWorkspace:    activeAgent.WorkspaceRoot,
-		ProjectRoot:       launchProject.Project.Root,
-		Trusted:           safety.TrustedRoot(launchProject) != "",
-		VersionControlled: launchProject.Project.VersionControlled,
+		Home:           root,
+		AgentWorkspace: activeAgent.WorkspaceRoot,
+		ProjectRoot:    launchProject.Project.Root,
+		Trusted:        safety.TrustedRoot(launchProject) != "",
 	}
 	if lspOpts.ProjectRoot != "" {
-		lspOpts.ProjectKey = memory.ProjectKey(lspOpts.ProjectRoot)
+		lspOpts.ProjectKey = state.ProjectKeyForRoot(lspOpts.ProjectRoot)
 	}
 	lspOpts.ToolRegistered = lsp.ToolEnabled(cfgRoot, lspOpts)
 	env.lspManager = env.LSP.NewManager(lspOpts)
@@ -352,7 +412,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	publishLSPRecommendations(env.lspManager, runner)
 	if launchProject.Project.Root != "" {
 		runner.ProjectRoot = launchProject.Project.Root
-		runner.ProjectKey = memory.ProjectKey(launchProject.Project.Root)
+		runner.ProjectKey = state.ProjectKeyForRoot(launchProject.Project.Root)
 	}
 	// The session is filed under the directory it was launched in, which is the
 	// same identity the read path uses: memory.ProjectKey resolves launchDir and
@@ -372,7 +432,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		_ = env.LSP.Close()
 		return nil, fmt.Errorf("process agent load: %w", err)
 	}
-	safety.UpdateManagerWithLocalConfig(env.Sandbox, root, cfgRoot, runner.PermissionSnapshot(), nil)
+	safety.UpdateManagerWithLocalConfig(env.Sandbox, root, cfgRoot, runner.PermissionSnapshot(), nil, runner.ProjectRoot)
 	// Deny the other primaries' workspaces before the first turn: the file
 	// tools' boundary was set by runner.Load above, but a shell command only
 	// meets the boundary inside the sandbox.
@@ -398,13 +458,6 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 		RunRT:         runSvc,
 		SkillHub:      skillHub,
 		PrimaryModel:  sessionPrimaryModel(runner, sessStore),
-		PinsProvider: func(sessionID string) []string {
-			tools := runner.Tools()
-			if tools == nil {
-				return nil
-			}
-			return tools.WorkingSetPins(sessionID)
-		},
 		ReadStatesProvider: func() []tool.ReadState {
 			tools := runner.Tools()
 			if tools == nil {
@@ -463,8 +516,7 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	if opts.EnableUploads {
 		env.Files = fileSvc
 	}
-	runner.FileResolver = fileReferenceResolver(fileSvc, runner.AgentName)
-	runner.SubagentExecutor = env
+	env.wireRunner(runner)
 	// The lease is registered only once every failure path is behind us: the
 	// renewal goroutine must not outlive an Open that is about to return an
 	// error. From here the process is live — its runs are vouched for until
@@ -477,6 +529,21 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	}
 	env.ownerLeaseStop = ownerStop
 	return env, nil
+}
+
+// wireRunner attaches the two process-owned services every Runner needs and
+// that a construction site must not have to remember individually: the
+// file-reference resolver (upload IDs first, then absolute paths — see
+// fileReferenceResolver) and this environment as the in-process subagent
+// executor a subagent_run requires. Open wired the base Runner with both by
+// hand; a per-project Runner the pool builds must receive the identical pair,
+// or a gateway session running on its project's Runner loses subagent_run
+// ("subagent requires an in-process executor") and cannot resolve file
+// references. env.Files is nil when uploads are disabled, which
+// fileReferenceResolver tolerates.
+func (env *Environment) wireRunner(r *run.Runner) {
+	r.FileResolver = fileReferenceResolver(env.Files, r.AgentName)
+	r.SubagentExecutor = env
 }
 
 // publishLSPRecommendations hands recommendations from mgr to whichever
@@ -574,20 +641,26 @@ func ActiveAgentWorkspace() (string, error) {
 // prompts speak about: a registered project wins whenever cwd sits inside
 // its root (deepest match), because that is the boundary the runtime gives
 // the project's sessions — the runner pool resolves registered roots through
-// ResolveRegisteredContext, and a launch-style walk to the enclosing .git
-// would record the answer under a checkout the sessions never run as.
-// Anything outside every registered project keeps the launch resolution.
+// ResolveRegisteredContext. Anything outside every registered project is
+// itself the boundary (R2): the launch directory is taken as given rather
+// than walked up to the enclosing .git, because that is the root the runtime
+// freezes the session's consents against. A launch in a checkout
+// subdirectory therefore asks about — and records the answer under — that
+// subdirectory, not the checkout.
 func ResolveConsentProjectContext(root, cwd string) (safety.ProjectContext, error) {
 	root = strings.TrimSpace(root)
-	launch, launchErr := safety.ResolveProjectContext(root, strings.TrimSpace(cwd))
-	registered := consentRegisteredRoot(root, cwd)
-	if registered == "" {
-		return launch, launchErr
+	if registered := consentRegisteredRoot(root, cwd); registered != "" {
+		if registeredCtx, err := safety.ResolveRegisteredContext(root, registered); err == nil {
+			return registeredCtx, nil
+		}
 	}
-	if registeredCtx, err := safety.ResolveRegisteredContext(root, registered); err == nil {
-		return registeredCtx, nil
+	dir := strings.TrimSpace(cwd)
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
 	}
-	return launch, launchErr
+	return safety.ResolveRegisteredContext(root, dir)
 }
 
 // consentRegisteredRoot answers the registered project root containing cwd,

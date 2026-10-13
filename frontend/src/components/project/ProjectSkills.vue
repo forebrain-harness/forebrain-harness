@@ -1,28 +1,26 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-5">
-    <CardComponent>
-      <template #header>
-        <div class="flex w-full flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('skills.projectTitle') }}</div>
-          <ScopeBadge type="project" :label="t('scope.project')" />
-        </div>
-        <div class="flex flex-wrap gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="project-skills-online-install" @click="onlineOpen = true">
-            {{ t('skills.onlineInstall') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="project-skills-offline-install" @click="offlineOpen = true">
-            {{ t('skills.offlineInstall') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-            {{ loading ? t('common.loading') : t('common.refresh') }}
-          </button>
-        </div>
-        </div>
+    <PageTopRow :title="t('skills.projectTitle')" :description="t('skills.projectDescription')">
+      <template #actions>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="project-skills-offline-install" @click="offlineOpen = true">
+          {{ t('skills.offlineInstall') }}
+        </button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="project-skills-online-install" @click="onlineOpen = true">
+          {{ t('skills.onlineInstall') }}
+        </button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="project-skills-discover" @click="openWorkshop('discover')">
+          {{ t('skills.discoverInstall') }}
+        </button>
+        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="project-skills-create" @click="openWorkshop('create')">
+          {{ t('skills.createSkill') }}
+        </button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
+          {{ loading ? t('common.loading') : t('common.refresh') }}
+        </button>
       </template>
-      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.projectDescription') }}</p>
+    </PageTopRow>
 
-      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+    <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
       <!-- Trust gate: until the project is trusted, none of its skills load —
            the same gate the terminal applies. -->
@@ -41,13 +39,14 @@
           :saving="saving"
           :downloading="downloading"
           owner-origin="project"
+          :hint="t('skills.projectOverrides')"
           @toggle="onToggle"
           @delete="onDelete"
           @download="onDownload"
           @batch-download="onBatchDownload"
+          @detail="openSkill"
         />
       </div>
-    </CardComponent>
 
     <InstallDialogs
       v-model:online="onlineOpen"
@@ -79,8 +78,8 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import CardComponent from '@/components/common/CardComponent.vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import { useRouter } from 'vue-router'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
 import forebrainApi, {
@@ -89,6 +88,7 @@ import forebrainApi, {
   type ProjectRecord,
   type SkillRecord,
 } from '@/lib/api'
+import { workshopRoute } from '@/lib/workshopTarget'
 import { useI18n } from '@/locales'
 
 /**
@@ -101,6 +101,15 @@ import { useI18n } from '@/locales'
 const props = defineProps<{ project: ProjectRecord | null; projectId: string }>()
 
 const { t } = useI18n()
+const router = useRouter()
+
+function openWorkshop(mode: 'create' | 'discover') {
+  void router.push(workshopRoute({ scope: 'project', mode, projectId: props.projectId }))
+}
+
+function openSkill(row: SkillRecord) {
+  void router.push(workshopRoute({ scope: 'project', mode: 'improve', skill: row.name, projectId: props.projectId }))
+}
 
 const rows = ref<SkillRecord[]>([])
 const loading = ref(false)

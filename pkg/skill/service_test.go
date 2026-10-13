@@ -517,12 +517,22 @@ func TestProjectSkillUpdateUsesTheProjectRoot(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
+	// The update is a workshop change: it lands in the project skill's own
+	// draft, and the formal copy — the published version sessions read —
+	// keeps what it had until a publish carries the draft.
+	draftRaw, err := os.ReadFile(filepath.Join(project, ".forebrain", "skills", ".drafts", "release-flow", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read the project draft: %v", err)
+	}
+	if !strings.Contains(string(draftRaw), "description: second") {
+		t.Fatalf("update did not land in the project draft: %q", string(draftRaw))
+	}
 	raw, err := os.ReadFile(filepath.Join(project, ".forebrain", "skills", "release-flow", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "description: second") {
-		t.Fatalf("update did not land in the project copy: %q", string(raw))
+	if !strings.Contains(string(raw), "description: first") {
+		t.Fatalf("the update moved the published copy: %q", string(raw))
 	}
 
 	svc.ProjectRoot = ""

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -358,9 +359,33 @@ func TestWorkshopSkillFilesListReadAndWrite(t *testing.T) {
 	req := withNamedParam(httptest.NewRequest(http.MethodPut, "/api/skills/workshop-skill/file?path=evals/evals.json", strings.NewReader(`{"content":"{\"cases\":[{\"id\":\"one\"}]}"}`)), "name", "workshop-skill")
 	s.handleSkillFileWrite(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-	raw, err := os.ReadFile(filepath.Join(agentSkill, "evals", "evals.json"))
+	// A versioned skill's workshop write lands in its draft, seeded from the
+	// current files; the formal directory is the published copy and does not
+	// move until a publish.
+	// The draft lives beside the formal skills of its own layer: the skill root
+	// is the agent workspace's skills directory, so the draft is
+	// <root>/.drafts/<name> — one level up from the skill directory itself,
+	// not two.
+	draft := filepath.Join(filepath.Dir(agentSkill), ".drafts", "workshop-skill")
+	raw, err := os.ReadFile(filepath.Join(draft, "evals", "evals.json"))
 	require.NoError(t, err)
 	require.JSONEq(t, `{"cases":[{"id":"one"}]}`, string(raw))
+	formalRaw, err := os.ReadFile(filepath.Join(agentSkill, "evals", "evals.json"))
+	require.NoError(t, err)
+	require.JSONEq(t, `{"cases":[]}`, string(formalRaw))
+
+	// The workshop read answers from the same draft the write went to. The
+	// response carries the file's text as a JSON string, so the content is
+	// compared decoded — a substring match on the raw body would only ever
+	// see the escaped form.
+	rr = httptest.NewRecorder()
+	s.handleSkillFileRead(rr, withNamedParam(httptest.NewRequest(http.MethodGet, "/api/skills/workshop-skill/file?path=evals/evals.json", nil), "name", "workshop-skill"))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var readBack struct {
+		Content string `json:"content"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &readBack))
+	require.JSONEq(t, `{"cases":[{"id":"one"}]}`, readBack.Content)
 }
 
 func TestWorkshopSkillFileGuards(t *testing.T) {

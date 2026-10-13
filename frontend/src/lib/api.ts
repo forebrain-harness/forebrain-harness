@@ -259,7 +259,6 @@ export interface SessionContextTimelineEntry {
 export interface SessionContextDebug {
   sessionId?: string
   mode?: string
-  workingSet?: string[]
   budget?: SessionContextBudget
   contextPressure?: string
   generatedAt?: string
@@ -586,12 +585,40 @@ export interface ProjectRecord {
   memoryScope: string
   resourceAccess: boolean
   pinned: boolean
-  archivedAt: number
   createdAt: number
   updatedAt: number
   trustRecorded?: boolean
   /** The persisted trust decision for this project's root (the detail read carries it). */
   trusted?: boolean
+  /** The directory's trust decision: 'trusted' | 'untrusted' | 'unknown'. */
+  trustLevel?: TrustLevel
+  /** True when the project root is no longer an existing directory. */
+  missing?: boolean
+}
+
+/** One directory's persisted trust decision, shared by the terminal and the web. */
+export type TrustLevel = 'trusted' | 'untrusted' | 'unknown'
+
+/** One subdirectory in a host-directory listing. */
+export interface HostDirEntry {
+  name: string
+  mtime: number
+  /** The primary agent's project when this directory is exactly a project root. */
+  project?: { id: string; name: string } | null
+  /** True for the forebrain home and anything inside it: not selectable. */
+  blocked: boolean
+}
+
+/** A directory listing for the folder picker, plus its shortcuts and ancestry. */
+export interface HostDirListing {
+  path: string
+  /** The parent directory; empty at the filesystem root. */
+  parent: string
+  /** The directory and each of its ancestors up to the filesystem root. */
+  ancestors: string[]
+  /** The picker's fixed sidebar: home, Desktop, Documents and Downloads. */
+  places: Array<{ name: string; path: string }>
+  entries: HostDirEntry[]
 }
 
 export interface ProjectSessionRecord {
@@ -840,12 +867,13 @@ export interface ChatSessionsResponse {
   records: { id: string; title: string | null; createTime: string; updateTime: string; source?: string }[]
 }
 
-/** One conversation's own facts: its title, and the project it belongs to
- * when it belongs to one. */
+/** One conversation's own facts: its title, the project it belongs to when it
+ *  belongs to one, and — through that project — whether the directory the
+ *  conversation runs in still exists. */
 export interface ChatSessionInfo {
   id: string
   title: string
-  project: { id: string; name: string } | null
+  project: { id: string; name: string; root?: string; missing?: boolean } | null
 }
 
 export interface SessionTodosResponse {
@@ -856,6 +884,27 @@ export interface SessionModeResponse {
   mode: string
   phase?: string
   updatedAt?: number
+}
+
+/** One model the conversation may be switched to, with the reasoning levels
+ *  the shared catalog reports for it (empty when the model cannot reason). */
+export interface SessionModelOption {
+  provider: string
+  model: string
+  label: string
+  efforts: string[]
+}
+
+/** The conversation's effective model choice. An empty effort is the explicit
+ *  "model default" pin. */
+export interface SessionModelSelection {
+  provider: string
+  model: string
+  effort: string
+}
+
+export interface SessionModelResponse extends SessionModelSelection {
+  options: SessionModelOption[]
 }
 
 export interface SlashCommandsResponse {
@@ -927,10 +976,32 @@ export interface RunSubagentsResponse {
   records: SubagentHistoryRecord[]
 }
 
-export interface SessionRewindResult {
-  status: string
-  absPath?: string
-  snapshot?: string
+export interface RewindFile {
+  path: string
+  added: number
+  removed: number
+  changedAfter: boolean
+  created: boolean
+}
+
+export interface RewindPreview {
+  anchorMessageId: number
+  anchorText: string
+  files: RewindFile[]
+}
+
+export interface RewindResult {
+  anchorText: string
+  mode: 'both' | 'chat' | 'code'
+  restored: string[]
+}
+
+/** One file the conversation changed with a file tool (workbench 017 reads it). */
+export interface RewindChangedFile {
+  path: string
+  added: number
+  removed: number
+  created: boolean
 }
 
 export interface SessionMessageSearchRecord {
@@ -953,6 +1024,25 @@ export interface WorkspaceTreeNode {
 export interface WorkspaceTreeResponse {
   path: string
   records: WorkspaceTreeNode[]
+}
+
+/**
+ * The conversation a file-view request belongs to: a session the workbench has
+ * open, or — for a conversation not started yet — the project its composer's
+ * pill has chosen. The tree, snippet and @ picker all resolve their root from
+ * it, so one of the two is always named.
+ */
+export interface WorkspaceScope {
+  sessionId?: string
+  projectId?: string
+}
+
+/** A scope as the wire's query params; a file view names at most one of them. */
+function workspaceScopeParams(scope?: WorkspaceScope): Record<string, string> {
+  const params: Record<string, string> = {}
+  if (scope?.sessionId) params.session_id = scope.sessionId
+  if (scope?.projectId) params.project_id = scope.projectId
+  return params
 }
 
 export interface FileUploadResult {
@@ -982,6 +1072,133 @@ export interface SkillRecord {
   /** Directories offering the same name that this row takes precedence over. */
   shadows?: string[]
   shadowedBy?: string[]
+  /** The current published version, 0 when the row carries no version history. */
+  version?: number
+  /** draft | published | pending, or '' for an unversioned skill. */
+  state?: string
+  /** Upstream has moved since the current version was recorded. */
+  update?: SkillUpdateInfo
+  /** A row that exists only as a draft: nothing loads until it is published. */
+  draftOnly?: boolean
+}
+
+/** One published version's metadata, as the manifest records it. */
+export interface SkillVersionRecord {
+  v: number
+  at: string
+  kind: string
+  source?: string
+  upstreamRev?: string
+  note?: string
+  stat?: { files: number; added: number; removed: number }
+}
+
+/** The upstream marker on a shared skill that has an update to pull. */
+export interface SkillUpdateInfo {
+  rev: string
+  date?: string
+  files?: number
+}
+
+/** One skill's draft/version state. */
+export interface SkillVersionState {
+  name: string
+  current: number
+  versions: SkillVersionRecord[]
+  hasDraft: boolean
+  draftBase?: number
+  draftDir?: string
+  update?: SkillUpdateInfo
+}
+
+/** The version state a skill's lifecycle route answers with. */
+export interface SkillVersionResponse {
+  name: string
+  origin?: SkillOrigin
+  rootPath?: string
+  state: SkillVersionState
+}
+
+/** One file's line-level diff between two snapshots. */
+export interface SkillFileDiff {
+  path: string
+  status: 'added' | 'removed' | 'modified'
+  added: number
+  removed: number
+}
+
+export interface SkillDiffResponse {
+  name: string
+  from: string
+  to: string
+  files: SkillFileDiff[]
+}
+
+/** One evaluation configuration's grading for one case. */
+export interface WorkshopEvalConfig {
+  present: boolean
+  passed: number
+  total: number
+  passRate: number
+  output: string
+  timeSeconds: number
+}
+
+export interface WorkshopEvalCase {
+  id: string
+  name: string
+  prompt: string
+  expected: string
+  runId: string
+  feedback: string
+  configs: Record<string, WorkshopEvalConfig>
+}
+
+export interface WorkshopEvalIteration {
+  name: string
+  order: number
+  modified: number
+  cases: WorkshopEvalCase[]
+}
+
+export interface WorkshopEvalsResponse {
+  name: string
+  workspace: string
+  iterations: WorkshopEvalIteration[]
+}
+
+export interface WorkshopTriggerQuery {
+  query: string
+  shouldTrigger: boolean
+}
+
+export interface WorkshopTriggerResultRow {
+  query: string
+  shouldTrigger: boolean
+  pass: boolean
+  triggerRate?: number
+}
+
+export interface WorkshopTriggerResults {
+  currentDescription?: string
+  currentScore: number
+  bestDescription?: string
+  bestScore: number
+  queries: WorkshopTriggerResultRow[]
+}
+
+export interface WorkshopTriggerResponse {
+  name: string
+  queries: WorkshopTriggerQuery[]
+  results: WorkshopTriggerResults | null
+}
+
+/** One candidate card the discovery flow renders from the model's reply. */
+export interface SkillCandidate {
+  name: string
+  description: string
+  source: string
+  installed: boolean
 }
 
 export interface SkillInspectResponse {
@@ -1247,10 +1464,6 @@ export const forebrainApi = {
     return postJson<PrimaryAgentsResponse, { id: string; name?: string; description?: string; workspaceRoot?: string }>('/agents/primary', body)
   },
 
-  updatePrimaryAgent(id: string, body: { name?: string; description?: string }) {
-    return putRaw<PrimaryAgentsResponse>(`/agents/primary/${encodeURIComponent(id)}`, body)
-  },
-
   deletePrimaryAgent(id: string) {
     return api.delete<PrimaryAgentsResponse>(`/agents/primary/${encodeURIComponent(id)}`).then((res) => res.data)
   },
@@ -1308,10 +1521,24 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
-  chatSessionCreate(title?: string, source?: '' | 'workshop') {
-    return postJson<{ id: string; title: string }, { title: string; source?: string }>('/chat/sessions', {
-      title: title ?? '',
-      ...(source ? { source } : {}),
+  /**
+   * Open a conversation. Since plan 029 every ordinary conversation belongs to
+   * a project: name one by `projectId`, or pass a `folder` and the gateway
+   * creates (or reuses) the project bound to it. A primary-agent-level
+   * skill-workshop task (`source: 'workshop'`) is the one shape that may carry
+   * neither.
+   */
+  chatSessionCreate(
+    opts: { title?: string; source?: '' | 'workshop'; projectId?: string; folder?: string } = {},
+  ) {
+    return postJson<
+      { id: string; title: string; project?: ProjectRecord; created?: boolean },
+      { title: string; source?: string; project_id?: string; folder?: string }
+    >('/chat/sessions', {
+      title: opts.title ?? '',
+      ...(opts.source ? { source: opts.source } : {}),
+      ...(opts.projectId ? { project_id: opts.projectId } : {}),
+      ...(opts.folder ? { folder: opts.folder } : {}),
     })
   },
 
@@ -1354,6 +1581,19 @@ export const forebrainApi = {
     return api.get<SessionModeResponse>(`/chat/sessions/${sessionId}/mode`).then((res) => res.data)
   },
 
+  /** The conversation's own model choice, and the models it may be switched
+   *  to — the same options /model offers, each with the reasoning levels the
+   *  shared catalog reports for it. */
+  sessionModel(sessionId: string) {
+    return api.get<SessionModelResponse>(`/chat/sessions/${encodeURIComponent(sessionId)}/model`).then((res) => res.data)
+  },
+
+  /** Records the conversation's own model choice. An empty effort is the
+   *  explicit "model default" pin; the change rides the next turn. */
+  saveSessionModel(sessionId: string, choice: { provider: string; model: string; effort: string }) {
+    return putRaw<SessionModelSelection>(`/chat/sessions/${encodeURIComponent(sessionId)}/model`, choice)
+  },
+
   slashCommands(surface = 'webchat', q = '', opts?: { duringRun?: boolean; sideConversation?: boolean; subagentView?: boolean }) {
     return api.get<SlashCommandsResponse>('/slash/commands', {
       params: {
@@ -1366,9 +1606,9 @@ export const forebrainApi = {
     }).then((res) => res.data)
   },
 
-  mentionSearch(q = '') {
+  mentionSearch(q = '', scope?: WorkspaceScope) {
     return api
-      .get<MentionSearchResponse>('/workspace/mentions', { params: { q } })
+      .get<MentionSearchResponse>('/workspace/mentions', { params: { q, ...workspaceScopeParams(scope) } })
       .then((res) => res.data)
   },
 
@@ -1378,9 +1618,9 @@ export const forebrainApi = {
     token_end: number
     path: string
     is_dir: boolean
-  }) {
+  }, scope?: WorkspaceScope) {
     return api
-      .post<MentionAcceptResponse>('/workspace/mentions/accept', payload)
+      .post<MentionAcceptResponse>('/workspace/mentions/accept', { ...payload, ...workspaceScopeParams(scope) })
       .then((res) => res.data)
   },
 
@@ -1669,13 +1909,143 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
-  sessionRewindLast(sessionId: string) {
-    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind-last`, {
+  // Drafts and versions. The agent-level methods act on the agent's own layers;
+  // the project ones take a project id and act on that project's route set.
+  // The two families mirror each other operation for operation.
+  skillVersions(name: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return api.get<SkillVersionResponse>(`${base}/${encodeURIComponent(name)}/versions`).then((res) => res.data)
+  },
+
+  skillPublish(name: string, note = '', projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return postJson<{ status: string; version: number }, { note: string }>(
+      `${base}/${encodeURIComponent(name)}/publish`,
+      { note },
+    )
+  },
+
+  skillDiscardDraft(name: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return postJson<{ status: string }, Record<string, never>>(
+      `${base}/${encodeURIComponent(name)}/draft/discard`,
+      {},
+    )
+  },
+
+  skillRestoreVersion(name: string, version: number, replaceDraft = false, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return postJson<{ status: string; version: number }, { replaceDraft: boolean }>(
+      `${base}/${encodeURIComponent(name)}/versions/${version}/restore`,
+      { replaceDraft },
+    )
+  },
+
+  skillPull(name: string, replaceDraft = false, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return postJson<{ status: string }, { replaceDraft: boolean }>(
+      `${base}/${encodeURIComponent(name)}/pull`,
+      { replaceDraft },
+    )
+  },
+
+  skillDiff(name: string, from: string, to: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    const query = new URLSearchParams({ from, to })
+    return api.get<SkillDiffResponse>(`${base}/${encodeURIComponent(name)}/diff?${query.toString()}`).then((res) => res.data)
+  },
+
+  // The URL a version's zip streams from, for a plain anchor/fetch download.
+  skillVersionDownloadUrl(name: string, version: number, projectId?: string) {
+    const base = projectId
+      ? `/api/v1/projects/${encodeURIComponent(projectId)}/skills`
+      : '/api/skills'
+    return `${base}/${encodeURIComponent(name)}/versions/${version}/download`
+  },
+
+  // Workshop artifacts: what an evaluation or trigger run left behind.
+  skillWorkshopEvals(name: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return api.get<WorkshopEvalsResponse>(`${base}/${encodeURIComponent(name)}/workshop/evals`).then((res) => res.data)
+  },
+
+  skillWorkshopFeedback(name: string, iteration: string, runId: string, feedback: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return api
+      .put<{ status: string }>(
+        `${base}/${encodeURIComponent(name)}/workshop/evals/${encodeURIComponent(iteration)}/feedback`,
+        { run_id: runId, feedback },
+      )
+      .then((res) => res.data)
+  },
+
+  skillWorkshopTrigger(name: string, projectId?: string) {
+    const base = projectId ? `/v1/projects/${encodeURIComponent(projectId)}/skills` : '/skills'
+    return api.get<WorkshopTriggerResponse>(`${base}/${encodeURIComponent(name)}/workshop/trigger`).then((res) => res.data)
+  },
+
+  rewindPreview(sessionId: string, messageId: number) {
+    const query = new URLSearchParams({ message_id: String(messageId) })
+    return gatewayFetch(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind-preview?${query.toString()}`,
+    ).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return toCamelCase(await r.json()) as RewindPreview
+    })
+  },
+
+  rewind(sessionId: string, body: { messageId: number; mode: 'both' | 'chat' | 'code'; keepPaths?: string[] }) {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message_id: body.messageId,
+        mode: body.mode,
+        keep_paths: body.keepPaths ?? [],
+      }),
+    }).then(async (r) => {
+      if (r.status === 409) throw new Error('session_busy')
+      if (!r.ok) throw new Error(await r.text())
+      return toCamelCase(await r.json()) as RewindResult
+    })
+  },
+
+  rewindUndo(sessionId: string) {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/rewind/undo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     }).then(async (r) => {
       if (!r.ok) throw new Error(await r.text())
-      return toCamelCase(await r.json()) as SessionRewindResult
+      return toCamelCase(await r.json()) as { status: string }
+    })
+  },
+
+  sessionFileChanges(sessionId: string) {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/file-changes`).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      const data = (await r.json()) as { files?: RewindChangedFile[] }
+      return data.files ?? []
+    })
+  },
+
+  sessionFileChangeDiff(sessionId: string, path: string) {
+    const query = new URLSearchParams({ path })
+    return gatewayFetch(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/file-changes/diff?${query.toString()}`,
+    ).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return (await r.json()) as { path: string; diff: string }
+    })
+  },
+
+  sessionFileChangeRevert(sessionId: string, path: string) {
+    return gatewayFetch(`/api/chat/sessions/${encodeURIComponent(sessionId)}/file-changes/revert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return (await r.json()) as { status: string }
     })
   },
 
@@ -1841,10 +2211,56 @@ export const forebrainApi = {
     })
   },
 
-  workspaceTree(path = '') {
+  workspaceTree(path = '', scope?: WorkspaceScope) {
     return api
-      .get<WorkspaceTreeResponse>('/workspace/tree', { params: path ? { path } : undefined })
+      .get<WorkspaceTreeResponse>('/workspace/tree', {
+        params: { ...(path ? { path } : {}), ...workspaceScopeParams(scope) },
+      })
       .then((res) => res.data)
+  },
+
+  /** Read one text file of a conversation's file view (workbench 017). */
+  workspaceFile(scope: WorkspaceScope, path: string) {
+    const params = new URLSearchParams({ path, ...workspaceScopeParams(scope) })
+    return gatewayFetch(`/api/workspace/file?${params.toString()}`).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return (await r.json()) as { path: string; content: string }
+    })
+  },
+
+  /** Write or create a file; with create, an existing path is refused (409). */
+  workspaceWrite(scope: WorkspaceScope, body: { path: string; content: string; create?: boolean }) {
+    const params = new URLSearchParams(workspaceScopeParams(scope))
+    return gatewayFetch(`/api/workspace/file?${params.toString()}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return (await r.json()) as { ok: boolean; path: string }
+    })
+  },
+
+  /** Rename a file or directory within a file view. */
+  workspaceRename(scope: WorkspaceScope, body: { from: string; to: string }) {
+    const params = new URLSearchParams(workspaceScopeParams(scope))
+    return gatewayFetch(`/api/workspace/rename?${params.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return (await r.json()) as { ok: boolean; path: string }
+    })
+  },
+
+  /** Delete one file, or one directory and everything under it. */
+  workspaceDelete(scope: WorkspaceScope, path: string) {
+    const params = new URLSearchParams({ path, ...workspaceScopeParams(scope) })
+    return gatewayFetch(`/api/workspace/entry?${params.toString()}`, { method: 'DELETE' }).then(async (r) => {
+      if (!r.ok) throw new Error(await r.text())
+      return (await r.json()) as { ok: boolean }
+    })
   },
 
   /** The tool table the active primary agent's runtime actually exposes. */
@@ -1872,7 +2288,31 @@ export const forebrainApi = {
       }))
   },
 
-  projectsList(params?: { search?: string; sort?: string; archived?: boolean; limit?: number; offset?: number }) {
+  /** The subdirectories of a host directory (or the user's home when path is
+   * empty), for the new-chat page's folder picker. */
+  hostDirs(path?: string) {
+    return api
+      .get<HostDirListing>('/host/dirs', { params: path ? { path } : undefined })
+      .then((res) => res.data)
+  },
+
+  /** Create one subdirectory under parent. A name already taken answers 409 {
+   * error: 'exists' }. */
+  hostDirCreate(parent: string, name: string) {
+    return postJson<{ path: string }, { parent: string; name: string }>('/host/dirs', { parent, name })
+  },
+
+  /** One directory's trust decision. */
+  hostTrust(path: string) {
+    return api.get<{ level: TrustLevel }>('/host/trust', { params: { path } }).then((res) => res.data)
+  },
+
+  /** Record a directory's trust decision — the same record the terminal writes. */
+  hostTrustSet(path: string, trusted: boolean) {
+    return postJson<{ ok: boolean; level: TrustLevel }, { path: string; trusted: boolean }>('/host/trust', { path, trusted })
+  },
+
+  projectsList(params?: { search?: string; sort?: string; limit?: number; offset?: number }) {
     return api
       .get<{ projects?: ProjectRecord[] }>('/v1/projects', { params: toSnakeCase(params ?? {}) })
       .then((res) => (Array.isArray(res.data?.projects) ? res.data.projects : []))
@@ -1907,8 +2347,11 @@ export const forebrainApi = {
     return postJson<{ ok: boolean }, { pinned: boolean }>(`/v1/projects/${encodeURIComponent(id)}/pin`, { pinned })
   },
 
-  projectArchive(id: string, archived: boolean) {
-    return postJson<{ ok: boolean }, { archived: boolean }>(`/v1/projects/${encodeURIComponent(id)}/archive`, { archived })
+  /** What deleting this project would take with it: its conversations and cron jobs, and whether a run is in flight. */
+  projectDeletePreview(id: string) {
+    return api
+      .get<{ sessions: number; cron_jobs: number; running: boolean }>(`/v1/projects/${encodeURIComponent(id)}/delete-preview`)
+      .then((res) => res.data)
   },
 
   projectDelete(id: string) {

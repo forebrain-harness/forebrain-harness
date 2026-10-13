@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,6 +68,99 @@ func TestDetachedApprovalResumePublishesToolAndNestedApprovalHistory(t *testing.
 	require.Equal(t, "action-2", approval.ActionID)
 	require.Equal(t, "agent-2", approval.AgentID)
 	require.Equal(t, "explore", approval.SubagentType)
+}
+
+// The detached approval path names the gated call on the event it writes,
+// the same way the socket path does, so a web-initiated session's reload
+// anchors the gate's records at the right call too.
+func TestDetachedApprovalRequestNamesTheGatedCall(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	runs := &state.RunStore{DB: db}
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "conversation-1", "conversation-1"))
+	mustGatewaySession(t, db, "conversation-1")
+	runRecord, err := runs.CreateRun(ctx, "conversation-1", "resume")
+	require.NoError(t, err)
+	s := &Server{RunRT: runs}
+
+	snapshot := []llm.Message{
+		llm.UserMessage(llm.Text("plan")),
+		llm.AssistantMessage(nil,
+			llm.ToolCall{ID: "call-exit-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "exit_plan_mode", Arguments: "{}"}},
+		),
+	}
+	s.publishDetachedGatewayApprovalRequest(ctx, "conversation-1", &tool.RequiresActionError{
+		RunID: runRecord.ID, ActionID: "action-exit", ActionKind: "exit_plan_mode", ToolName: "exit_plan_mode",
+		ToolInput: map[string]any{}, SessionSnapshot: snapshot,
+	})
+
+	page, err := runs.ListSessionEvents(ctx, "conversation-1", 0, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1)
+	require.Equal(t, event.RunEventApprovalReq, page.Events[0].Type)
+	var approval event.ApprovalRequestedPayload
+	require.NoError(t, json.Unmarshal(page.Events[0].Payload, &approval))
+	require.Equal(t, "call-exit-1", approval.ToolStepID)
+	require.Equal(t, "exit_plan_mode", approval.ActionKind)
+}
+
+// A refused call's step reaches the detached path's session event log the
+// same way an executed tool's does — the detached hook and the socket hook
+// both run through pkg/tool's functions, so this never needed a change to
+// gateway source, only this test proves it. Without the denied boundary on
+// the event id, the idempotent log would keep the "awaiting approval"
+// completion and drop the refusal silently.
+func TestDetachedResumePublishesARefusedCall(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	runs := &state.RunStore{DB: db}
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "conversation-1", "conversation-1"))
+	mustGatewaySession(t, db, "conversation-1")
+	runRecord, err := runs.CreateRun(ctx, "conversation-1", "resume")
+	require.NoError(t, err)
+	s := &Server{RunRT: runs}
+
+	runCtx := tool.WithConversationSessionID(tool.WithRunID(ctx, runRecord.ID), "conversation-1")
+	runCtx = s.withDetachedGatewayApprovalHooks(runCtx, "conversation-1", runRecord.ID)
+	stepHook := tool.StepHookFromContext(runCtx, nil)
+	require.NotNil(t, stepHook)
+
+	// The "awaiting approval" completion frame for the exit_plan_mode call.
+	stepHook(runCtx, tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, StepID: "call-exit-1", ToolName: "exit_plan_mode",
+		ActionID: "act-1", ActionKind: "exit_plan_mode",
+		Output: map[string]any{"requires_action": true},
+	})
+	// The runtime's own account of the refusal.
+	stepHook(runCtx, tool.DeniedToolStep("call-exit-1", "exit_plan_mode", map[string]any{}, "split milestones"))
+
+	page, err := runs.ListSessionEvents(ctx, "conversation-1", 0, 0, 10)
+	require.NoError(t, err)
+
+	var completed []state.SessionEvent
+	for _, evt := range page.Events {
+		if evt.Type == event.RunEventToolCompleted {
+			completed = append(completed, evt)
+		}
+	}
+	require.Len(t, completed, 2, "expected one awaiting-approval and one denied completion event")
+	require.NotEqual(t, completed[0].ID, completed[1].ID)
+
+	var denied *state.SessionEvent
+	for i := range completed {
+		if strings.HasSuffix(completed[i].ID, ":denied") {
+			denied = &completed[i]
+		}
+	}
+	require.NotNil(t, denied, "missing the denied completion event")
+	var payload event.ToolCallCompletedPayload
+	require.NoError(t, json.Unmarshal(denied.Payload, &payload))
+	require.Equal(t, "denied", payload.ToolMeta.Status)
+	require.Equal(t, "split milestones", payload.DisplayBody)
 }
 
 func TestHTTPApprovalRejectsWidenedExecPolicyAmendment(t *testing.T) {

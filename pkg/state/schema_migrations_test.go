@@ -398,19 +398,21 @@ SELECT storage_key, storage_bucket, parse_error FROM fb_files WHERE id='f-s3'`).
 	// fire resolvable neither way is dropped; a paused heartbeat is a NULL next
 	// fire, and a beat of a missing session is gone.
 	var liveProject sql.NullString
-	var liveLastRun, danglingLastRun sql.NullInt64
+	var liveLastRun sql.NullInt64
 	if err := migrated.QueryRowContext(ctx, `SELECT project_id, last_run_at FROM fb_cron_jobs WHERE id='job-live'`).Scan(&liveProject, &liveLastRun); err != nil {
 		t.Fatal(err)
 	}
 	if !liveProject.Valid || liveProject.String != "prj-live" || !liveLastRun.Valid || liveLastRun.Int64 != 7100 {
 		t.Fatalf("live job = (%v,%v), want its project and last run", liveProject, liveLastRun)
 	}
-	var danglingProject sql.NullString
-	if err := migrated.QueryRowContext(ctx, `SELECT project_id, last_run_at FROM fb_cron_jobs WHERE id='job-dangling'`).Scan(&danglingProject, &danglingLastRun); err != nil {
+	// A cron job with no project does not survive: every cron job belongs to a
+	// project after v9.
+	var danglingCount int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_jobs WHERE id='job-dangling'`).Scan(&danglingCount); err != nil {
 		t.Fatal(err)
 	}
-	if danglingProject.Valid || danglingLastRun.Valid {
-		t.Fatalf("dangling job = (%v,%v), want a NULL project and no last run", danglingProject, danglingLastRun)
+	if danglingCount != 0 {
+		t.Fatalf("a projectless cron job survived the migration")
 	}
 	var runCount int
 	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_runs`).Scan(&runCount); err != nil {
@@ -525,8 +527,8 @@ func TestStateOpenIsIdempotentAtCurrentVersion(t *testing.T) {
 func TestStateMigrationRepairsPrematureV1Version(t *testing.T) {
 	ctx := context.Background()
 	path := buildLegacyV0StateWith(t, `
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, compact_boundary_id)
-VALUES('s','main','session',10,10,'');
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, compact_boundary_id, cwd)
+VALUES('s','main','session',10,10,'','/repo/s');
 INSERT INTO fb_messages(session_id, role, content, created_at)
 VALUES('s','user','before upgrade',10);`)
 	raw, err := sql.Open("sqlite3", path)
@@ -666,7 +668,7 @@ DELETE FROM fb_cron_runs WHERE started_at=11;`)
 func TestStateMigrationDropsRunsWhoseParentIsGone(t *testing.T) {
 	ctx := context.Background()
 	path := buildLegacyV0StateWith(t, `
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('s','main','s',10,10);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s','main','s',10,10,'/repo/s');
 INSERT INTO fb_runs(id, session_id, input_text, status, parent_run_id, created_at, updated_at) VALUES
  ('top','s','hi','done','',10,10),
  ('child','s','sub','done','top',11,11),
@@ -719,7 +721,7 @@ ALTER TABLE fb_messages DROP COLUMN run_id;
 ALTER TABLE fb_messages DROP COLUMN run_started_at;
 ALTER TABLE fb_messages DROP COLUMN run_finished_at;
 ALTER TABLE fb_messages DROP COLUMN worked_duration_ms;
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('s','main','s',10,10);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s','main','s',10,10,'/repo/s');
 INSERT INTO fb_messages(session_id, role, content, created_at) VALUES('s','user','hello',10),('s','assistant','hi',11);`)
 	db, err := Open(ctx, path, nil)
 	if err != nil {
@@ -742,7 +744,7 @@ INSERT INTO fb_messages(session_id, role, content, created_at) VALUES('s','user'
 func TestStateMigrationDedupesStepsWithinTheirOwnConversation(t *testing.T) {
 	ctx := context.Background()
 	path := buildLegacyV0StateWith(t, `
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('a','main','a',10,10),('b','main','b',10,10);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('a','main','a',10,10,'/repo/a'),('b','main','b',10,10,'/repo/b');
 INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES('run-a','a','hi','done',10,10),('run-b','b','hi','done',10,10);
 INSERT INTO fb_session_events(session_id, event_id, run_id, event_type, payload_json, occurred_at_ms) VALUES
  ('b','evt-b','run-b','tool_call_completed','{"kind":"tool_call_completed","step_id":"call_0","tool_name":"shell"}',10000);
@@ -1111,8 +1113,8 @@ func TestStateV0AndPrematureV1UpgradeThroughV3(t *testing.T) {
 	}
 
 	prematurePath := buildLegacyV0StateWith(t, `
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, compact_boundary_id)
-VALUES('s','main','session',10,10,'');`)
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, compact_boundary_id, cwd)
+VALUES('s','main','session',10,10,'','/repo/s');`)
 	raw, err := sql.Open("sqlite3", prematurePath)
 	if err != nil {
 		t.Fatal(err)
@@ -1156,7 +1158,7 @@ func buildLegacyV2State(t *testing.T) string {
 	}
 	for _, stmt := range []string{
 		`DROP TABLE fb_session_model_state`,
-		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('s','main','session',20,10)`,
+		`INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('s','main','session',20,10,'/repo/s')`,
 		`INSERT INTO fb_session_prompt_state(session_id, key, value, updated_at) VALUES('s','k','v',20)`,
 		`PRAGMA user_version = 2`,
 	} {
@@ -1213,7 +1215,7 @@ func buildV1ShapedState(t *testing.T, rows, alter string) string {
 // key, an action whose session is a column (its payload no longer carries it)
 // and a wait whose continuation crossed its execution fence.
 const v1Rows = `
-INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES('s','main','s',10,10);
+INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES('s','main','s',10,10,'/repo/s');
 INSERT INTO fb_runs(id, session_id, input_text, status, started_at_ms, finished_at_ms, worked_ms, created_at, updated_at)
   VALUES('r','s','hi','waiting_action',1000,2000,1000,10,10);
 INSERT INTO fb_messages(id, session_id, run_id, role, visibility, content, created_at) VALUES
@@ -1335,8 +1337,8 @@ func TestStateV3UpgradesToV4WithSessionsIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "s-v3"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
-		sid, "main", sid, 1, 1); err != nil {
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -1401,8 +1403,8 @@ func TestStateV4UpgradesToV5WithRunsIntact(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "s-v4"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
-		sid, "main", sid, 1, 1); err != nil {
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
@@ -1479,8 +1481,8 @@ func TestStateV5UpgradesToV6MarksFireSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sid := range []string{"s-plain", "cron-job-1-1790000000"} {
-		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
-			sid, "main", sid, 1, 1); err != nil {
+		if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+			sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1563,8 +1565,8 @@ func TestStateV6UpgradesToV7GivesDeniedToolRowsTheirDisplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	const sid = "s-v6"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
-		sid, "main", sid, 1, 1); err != nil {
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
 	insert := func(content, parts string) {
@@ -1666,8 +1668,8 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 		t.Fatal(err)
 	}
 	const sid = "s-v7"
-	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at) VALUES(?,?,?,?,?)`,
-		sid, "main", sid, 1, 1); err != nil {
+	if _, err := db.Exec(`INSERT INTO fb_sessions(id, agent_id, title, created_at, updated_at, cwd) VALUES(?,?,?,?,?,?)`,
+		sid, "main", sid, 1, 1, "/repo/"+sid); err != nil {
 		t.Fatal(err)
 	}
 	payloads := map[string]string{}
@@ -1747,4 +1749,250 @@ func TestStateV7UpgradesToV8BackfillsTheSendCallOfLegacySubagentEvents(t *testin
 	if after := payloadAfter("evt-kept"); after != payloads["evt-kept"] || parentOf(after) != "call-kept" {
 		t.Fatalf("an event that already named its call must be untouched, got %s", after)
 	}
+}
+
+// TestStateV8UpgradesToV9GivesEverySessionAProject builds a database that is
+// really at v8 — fb_projects still carries archived_at and its root index is
+// not unique — holding the shapes the migration must tell apart. Opening it
+// gives every surviving ordinary session a project, merges projects that share
+// a root, drops the archive column and the empty-directory sessions with all
+// their rows, and leaves a foreign-key-clean database at v9.
+func TestStateV8UpgradesToV9GivesEverySessionAProject(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	db, err := sql.Open(sqliteDriverName(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild the v8 shape: the archive column back, the root index non-unique.
+	for _, stmt := range []string{
+		`ALTER TABLE fb_projects ADD COLUMN archived_at INTEGER`,
+		`DROP INDEX idx_fb_projects_agent_root_unique`,
+		`CREATE INDEX idx_fb_projects_agent_root ON fb_projects(agent_id, root)`,
+		`PRAGMA user_version = 8`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+
+	work := t.TempDir()
+	rootAB := filepath.Join(work, "ab")
+	rootC := filepath.Join(work, "c-missing")
+	rootE := filepath.Join(work, "e-child")
+	dupRoot := filepath.Join(work, "dup")
+	archRoot := filepath.Join(work, "archived")
+	workshopRoot := filepath.Join(work, "workshop-skill")
+
+	script := fmt.Sprintf(`
+INSERT INTO fb_sessions(id, agent_id, title, parent_session_id, source, cwd, created_at, updated_at) VALUES
+ ('A','main','A',NULL,'','%[1]s',100,100),
+ ('B','main','B',NULL,'','%[1]s/',200,200),
+ ('C','main','C',NULL,'','%[2]s',300,300),
+ ('D','main','D',NULL,'','',400,400),
+ ('E','main','E','D','','%[3]s',500,500),
+ ('W','main','W',NULL,'workshop','%[6]s',600,600),
+ ('F','main','F','A','subagent','%[1]s',700,700),
+ ('G','main','G','A','','%[1]s',800,800);
+INSERT INTO fb_messages(session_id, role, content, created_at) VALUES('D','user','doomed',410);
+INSERT INTO fb_session_events(session_id, event_id, event_type, payload_json, occurred_at_ms) VALUES('D','evt-d','turn_started','{}',410);
+INSERT INTO fb_runs(id, session_id, input_text, status, created_at, updated_at) VALUES('run-d','D','hi','done',410,410);
+INSERT INTO fb_actions(id, session_id, kind, status, payload_json, created_at, updated_at) VALUES('act-d','D','shell','approved','{}',410,410);
+INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, created_at, updated_at) VALUES('run-d','act-d','shell','{}',410,410);
+INSERT INTO fb_files(id, session_id, original_name, media_type, size_bytes, sha256, storage_backend, storage_key, parse_status, created_at, updated_at)
+ VALUES('file-d','D','a.txt','text/plain',1,'x','local','ab/cd.txt','done',410,410);
+INSERT INTO fb_session_ui_state(session_id, surface, state_json, updated_at) VALUES('D','tui','{}',410);
+INSERT INTO fb_session_model_state(session_id, provider, model, updated_at) VALUES('D','p','m',410);
+INSERT INTO fb_session_prompt_state(session_id, key, value, updated_at) VALUES('D','k','v',410);
+INSERT INTO fb_heartbeats(session_id, interval_seconds, prompt, created_at, updated_at) VALUES('D',300,'beat',410,410);
+INSERT INTO fb_memory_stage1_outputs(thread_id, agent_id, project_key, source_updated_at, raw_memory, rollout_summary, generated_at)
+ VALUES('D','main','dead',410,'r','s',410);
+INSERT INTO fb_memory_jobs(kind, job_key, agent_id, status, retry_remaining) VALUES('memory_stage1','D','main','pending',3);
+INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_at) VALUES('job-x','main','D','schedule','ok',410);
+INSERT INTO fb_projects(id, agent_id, name, root, project_key, created_at, updated_at) VALUES
+ ('prj-p1','main','dup1','%[4]s','kdup',50,50),
+ ('prj-p2','main','dup2','%[4]s','kdup',60,60);
+INSERT INTO fb_sessions(id, agent_id, title, project_id, cwd, created_at, updated_at) VALUES('P2S','main','P2S','prj-p2','%[4]s',60,60);
+INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at) VALUES('job-p2','main','prj-p2','every 1h',60,60);
+INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_at) VALUES('job-p2','main','P2S','schedule','ok',60);
+INSERT INTO fb_projects(id, agent_id, name, root, project_key, archived_at, created_at, updated_at)
+ VALUES('prj-arch','main','arch','%[5]s','karch',1700000000,70,70);
+INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at) VALUES('job-orphan','main',NULL,'every 1h',80,80);
+INSERT INTO fb_cron_runs(job_id, agent_id, session_id, trigger, status, started_at) VALUES('job-orphan','main','','schedule','ok',80);
+`, rootAB, rootC, rootE, dupRoot, archRoot, workshopRoot)
+	if _, err := db.Exec(script); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(ctx, path, nil)
+	if err != nil {
+		t.Fatalf("open v8 database: %v", err)
+	}
+	defer migrated.Close()
+	requireSchemaVersion(ctx, t, migrated, stateSchemaVersion)
+	requireForeignKeysClean(ctx, t, migrated)
+
+	// The archive column is gone and the root index is unique.
+	var archivedCol, uniqueIdx int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fb_projects') WHERE name='archived_at'`).Scan(&archivedCol); err != nil {
+		t.Fatal(err)
+	}
+	if archivedCol != 0 {
+		t.Fatalf("archived_at column still present")
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_fb_projects_agent_root_unique'`).Scan(&uniqueIdx); err != nil {
+		t.Fatal(err)
+	}
+	if uniqueIdx != 1 {
+		t.Fatalf("unique project root index missing")
+	}
+
+	projectOf := func(sid string) (project string, cwd string, hasProject bool) {
+		t.Helper()
+		var pid sql.NullString
+		if err := migrated.QueryRowContext(ctx, `SELECT project_id, cwd FROM fb_sessions WHERE id=?`, sid).Scan(&pid, &cwd); err != nil {
+			t.Fatalf("session %s: %v", sid, err)
+		}
+		return pid.String, cwd, pid.Valid
+	}
+	aProj, aCwd, aOK := projectOf("A")
+	bProj, bCwd, _ := projectOf("B")
+	if !aOK || aProj == "" || aProj != bProj {
+		t.Fatalf("A and B must share one project: A=%q B=%q", aProj, bProj)
+	}
+	var aRoot string
+	if err := migrated.QueryRowContext(ctx, `SELECT root FROM fb_projects WHERE id=?`, aProj).Scan(&aRoot); err != nil {
+		t.Fatal(err)
+	}
+	if aCwd == "" || aCwd != aRoot || bCwd != aCwd || strings.HasSuffix(aCwd, "/") {
+		t.Fatalf("A/B cwd not normalized to the project root: A=%q B=%q root=%q", aCwd, bCwd, aRoot)
+	}
+	if cProj, _, cOK := projectOf("C"); !cOK || cProj == "" {
+		t.Fatalf("a session of a nonexistent directory still gets a project")
+	}
+	fProj, fCwd, fOK := projectOf("F")
+	gProj, gCwd, gOK := projectOf("G")
+	if !fOK || !gOK || fProj != aProj || gProj != aProj || fCwd != aCwd || gCwd != aCwd {
+		t.Fatalf("F/G must join A's project: F=(%q,%q) G=(%q,%q) A=%q", fProj, fCwd, gProj, gCwd, aProj)
+	}
+	if wProj, _, wOK := projectOf("W"); wOK || wProj != "" {
+		t.Fatalf("a skill-workshop session must stay projectless: %q", wProj)
+	}
+
+	// D and its child are gone, every child table with them.
+	var dCount int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE id IN ('D','E')`).Scan(&dCount); err != nil {
+		t.Fatal(err)
+	}
+	if dCount != 0 {
+		t.Fatalf("empty-directory session tree survived")
+	}
+	for _, q := range []struct{ name, sql string }{
+		{"messages", `SELECT COUNT(*) FROM fb_messages WHERE session_id='D'`},
+		{"events", `SELECT COUNT(*) FROM fb_session_events WHERE session_id='D'`},
+		{"runs", `SELECT COUNT(*) FROM fb_runs WHERE session_id='D'`},
+		{"actions", `SELECT COUNT(*) FROM fb_actions WHERE session_id='D'`},
+		{"waits", `SELECT COUNT(*) FROM fb_run_waits WHERE run_id='run-d'`},
+		{"files", `SELECT COUNT(*) FROM fb_files WHERE session_id='D'`},
+		{"ui state", `SELECT COUNT(*) FROM fb_session_ui_state WHERE session_id='D'`},
+		{"model state", `SELECT COUNT(*) FROM fb_session_model_state WHERE session_id='D'`},
+		{"prompt state", `SELECT COUNT(*) FROM fb_session_prompt_state WHERE session_id='D'`},
+		{"heartbeats", `SELECT COUNT(*) FROM fb_heartbeats WHERE session_id='D'`},
+		{"stage1", `SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE thread_id='D'`},
+		{"memory jobs", `SELECT COUNT(*) FROM fb_memory_jobs WHERE job_key='D'`},
+		{"cron runs", `SELECT COUNT(*) FROM fb_cron_runs WHERE session_id='D'`},
+	} {
+		var n int
+		if err := migrated.QueryRowContext(ctx, q.sql).Scan(&n); err != nil {
+			t.Fatalf("%s count: %v", q.name, err)
+		}
+		if n != 0 {
+			t.Fatalf("doomed session's %s survived: %d", q.name, n)
+		}
+	}
+
+	// Duplicate roots merged onto the earlier project.
+	var prjCount int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects WHERE root=?`, dupRoot).Scan(&prjCount); err != nil {
+		t.Fatal(err)
+	}
+	if prjCount != 1 {
+		t.Fatalf("duplicate roots did not merge: %d projects on one root", prjCount)
+	}
+	var keptID, p2sProject, jobProject string
+	if err := migrated.QueryRowContext(ctx, `SELECT id FROM fb_projects WHERE root=?`, dupRoot).Scan(&keptID); err != nil {
+		t.Fatal(err)
+	}
+	if keptID != "prj-p1" {
+		t.Fatalf("merge kept %q, want the earliest project prj-p1", keptID)
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT project_id FROM fb_sessions WHERE id='P2S'`).Scan(&p2sProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT project_id FROM fb_cron_jobs WHERE id='job-p2'`).Scan(&jobProject); err != nil {
+		t.Fatal(err)
+	}
+	if p2sProject != "prj-p1" || jobProject != "prj-p1" {
+		t.Fatalf("merge rebind = session %q job %q, want prj-p1", p2sProject, jobProject)
+	}
+
+	// The archived project survives as an ordinary one.
+	if err := migrated.QueryRowContext(ctx, `SELECT name FROM fb_projects WHERE id='prj-arch'`).Scan(new(string)); err != nil {
+		t.Fatalf("archived project did not survive: %v", err)
+	}
+	// The projectless cron job and its fire are gone.
+	var orphanJobs, orphanRuns int
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_jobs WHERE id='job-orphan'`).Scan(&orphanJobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_runs WHERE job_id='job-orphan'`).Scan(&orphanRuns); err != nil {
+		t.Fatal(err)
+	}
+	if orphanJobs != 0 || orphanRuns != 0 {
+		t.Fatalf("projectless cron job survived: jobs=%d runs=%d", orphanJobs, orphanRuns)
+	}
+
+	// Re-running the migration is a no-op.
+	counts := func() []int {
+		t.Helper()
+		out := make([]int, 0, 4)
+		for _, q := range []string{
+			`SELECT COUNT(*) FROM fb_sessions`,
+			`SELECT COUNT(*) FROM fb_projects`,
+			`SELECT COUNT(*) FROM fb_cron_jobs`,
+			`SELECT COUNT(*) FROM fb_cron_runs`,
+		} {
+			var n int
+			if err := migrated.QueryRowContext(ctx, q).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	before := counts()
+	conn, err := migrated.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateStateV8ToV9(ctx, conn); err != nil {
+		conn.Close()
+		t.Fatalf("re-running the migration: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after := counts()
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatalf("re-running the migration changed the data: %v before, %v after", before, after)
+		}
+	}
+	requireForeignKeysClean(ctx, t, migrated)
 }

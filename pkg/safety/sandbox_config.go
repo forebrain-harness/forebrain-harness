@@ -645,11 +645,15 @@ func LocalConfigSources(home string, cfg *appcfg.Root) []SourceSettings {
 	}}
 }
 
-func UpdateManagerWithLocalConfig(m *Manager, home string, cfg *appcfg.Root, snap Snapshot, additionalDirs []string) RuntimeConfig {
+// UpdateManagerWithLocalConfig installs the local config on m, resolving the
+// filesystem profile against cwd — the session's project root, which the caller
+// supplies. It carries the process-directory fallback no longer: every caller
+// knows which project's turn it is installing for.
+func UpdateManagerWithLocalConfig(m *Manager, home string, cfg *appcfg.Root, snap Snapshot, additionalDirs []string, cwd string) RuntimeConfig {
 	if m == nil {
 		return RuntimeConfig{}
 	}
-	cwd, _ := os.Getwd()
+	cwd = strings.TrimSpace(cwd)
 	tempDir := os.TempDir()
 	return m.UpdateConfig(cfg, LocalConfigSources(home, cfg), snap, cwd, cwd, tempDir, additionalDirs)
 }

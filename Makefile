@@ -1,7 +1,7 @@
 # Forebrain Harness build/release chain.
 #
 #   make ui       build the Vue frontend into the Go embed package
-#   make build    build the forebrain binary (UI embedded) and install its dictionary beside it
+#   make build    build the forebrain binary (UI embedded), then install its dictionary and models.json beside it
 #   make test     run the Go test suite
 #   make hooks    install the repository git hooks (commit title + DCO sign-off)
 #   make docker   build the container image
@@ -14,6 +14,10 @@
 #
 # The word-segmentation dictionary memory search reads is not embedded: it is
 # installed into dict/ beside the binary, which is where forebrain looks for it.
+# The model catalog (models.json) is likewise installed beside the binary.
+# The tokenizers static library the binary links is fetched into
+# third_party/libtokenizers/ by scripts/fetch-libtokenizers.sh (see
+# pkg/llm/hftok); the `libtokenizers` target runs it.
 
 VERSION      := $(shell cat VERSION)
 LDFLAGS      := -s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home.Version=v$(VERSION)
@@ -24,7 +28,7 @@ GOFLAGS      := -trimpath -tags fts5
 BIN          := build/bin/forebrain
 WEBUI_DIST   := pkg/gateway/dist
 
-.PHONY: all ui build test hooks docker release clean
+.PHONY: all ui libtokenizers build test hooks docker release clean
 
 all: build
 
@@ -35,18 +39,25 @@ ui:
 	cd frontend && [ -d node_modules ] || CI=true corepack pnpm install --frozen-lockfile
 	cd frontend && corepack pnpm build
 
+## libtokenizers: fetch the tokenizers static library the binary links
+## (scripts/fetch-libtokenizers.sh; a no-op when it is already at the go.mod
+## version, so this is cheap on every build and test).
+libtokenizers:
+	scripts/fetch-libtokenizers.sh
+
 ## build: compile the binary with the embedded UI, then install the dictionary
-## beside it (build/bin/dict)
+## and models.json beside it (build/bin/dict, build/bin/models.json)
 ## CGO is mandatory on every platform (Windows included): it pulls in the
 ## weixin silk voice decoder, sqlite, and other cgo-backed features.
-build: ui
+build: ui libtokenizers
 	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/forebrain
 	scripts/install-dictionary.sh $(dir $(BIN))
-	@echo "built $(BIN) ($(VERSION)) with embedded UI and its dictionary"
+	scripts/install-assets.sh $(dir $(BIN))
+	@echo "built $(BIN) ($(VERSION)) with embedded UI, its dictionary and models.json"
 
 ## test: run the Go test suite (CGO on so silk_cgo.go is exercised; fts5 so
 ## the memory-search FTS5 tables exist)
-test:
+test: libtokenizers
 	CGO_ENABLED=1 go test -tags fts5 ./... -count=1
 
 ## hooks: point git at this repository's hooks (commit title check + DCO

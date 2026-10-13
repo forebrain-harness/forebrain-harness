@@ -22,6 +22,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/invopop/jsonschema"
 )
 
@@ -79,17 +80,25 @@ type ContextTimelineEntry struct {
 	TotalLines    int       `json:"total_lines,omitempty"`
 }
 
+// FileChangeRecorder records a file tool's write so "rewind to before a
+// message" (pkg/turn) and the workbench's changed-files list can find it. The
+// runner injects the session store's implementation in Load; a state with no
+// recorder records nothing.
+type FileChangeRecorder interface {
+	RecordFileChange(ctx context.Context, c state.FileChange) error
+}
+
 type State struct {
 	mu                      sync.Mutex
 	readFiles               map[string]ReadState
 	toolMetas               map[string]event.ToolMeta
 	loadedSkills            map[string]LoadedSkill
+	skillDraftResolve       SkillDraftResolver
 	contextShots            map[string]json.RawMessage
 	toolSpills              map[string][]ToolResultSpill
 	sessionSpills           map[string][]ToolResultSpill
 	sessionRuntimeModes     map[string]runtimeSessionMode
 	networkSessionDecisions map[string]map[networkSessionKey]bool
-	workingSetPin           map[string][]string
 	// toolMiddlewares wrap every tool this state registers. They belong to the
 	// runtime that built them, which is why they are here and not in a package
 	// variable every runtime in the process would share.
@@ -109,6 +118,7 @@ type State struct {
 	readPolicyCWD                string
 	historyDir                   string
 	toolResultDir                string
+	fileChangeRecorder           FileChangeRecorder
 	runtimeValues                map[string]any
 	actionHook                   func(ctx context.Context, kind string, payload any) (actionID string, ok bool, err error)
 	networkApprovalPromptHook    func(ctx context.Context, actionID string, payload map[string]any, request safety.NetworkApprovalRequest) (safety.NetworkApprovalDecision, error)
@@ -142,6 +152,7 @@ const (
 	ctxKeyToolUseID            ctxKey = "forebrain_tool_use_id"
 	ctxKeyToolStepID           ctxKey = "forebrain_tool_step_id"
 	ctxKeyToolStepStartedAt    ctxKey = "forebrain_tool_step_started_at"
+	ctxKeyTurnAnchorMessageID  ctxKey = "forebrain_turn_anchor_message_id"
 	ctxKeyPolicyApproved       ctxKey = "forebrain_policy_approved"
 	ctxKeySandboxBypass        ctxKey = "forebrain_sandbox_bypass_approved"
 	ctxKeyNetworkAccess        ctxKey = "forebrain_network_access_approved"
@@ -199,6 +210,14 @@ type StepEvent struct {
 	// audit metadata: it is projected into the canonical event payload and the
 	// run ledger, never into ToolMeta, and no rendering layer may read it.
 	Origin string `json:"origin,omitempty"`
+	// Denied marks the completion of a call the user refused. The call never
+	// ran: the runtime answered it with a denial result, and this event is
+	// that answer's card - status "denied", body DeniedToolDisplayBody - so a
+	// surface that only sees events draws exactly what the persisted row
+	// replays.
+	Denied bool `json:"denied,omitempty"`
+	// DenyFeedback is the user's own words from that refusal, if any.
+	DenyFeedback string `json:"deny_feedback,omitempty"`
 }
 
 type ToolCompletionPayload struct {
@@ -501,6 +520,43 @@ func ProjectRootFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(ctxKeyProjectRoot).(string)
 	return strings.TrimSpace(v)
+}
+
+// WorkingDir is the directory a turn's tools act in: the session's project
+// root that the runner put on the context at the turn's entry. A context
+// without one (a test, a command run outside any turn) falls back to the
+// process directory. The result is absolute and cleaned.
+func WorkingDir(ctx context.Context) (string, error) {
+	if root := strings.TrimSpace(ProjectRootFromContext(ctx)); root != "" {
+		if abs, err := filepath.Abs(root); err == nil {
+			return filepath.Clean(abs), nil
+		}
+		return filepath.Clean(root), nil
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if abs, err := filepath.Abs(wd); err == nil {
+		return filepath.Clean(abs), nil
+	}
+	return filepath.Clean(wd), nil
+}
+
+// ResolvePath resolves p against the turn's WorkingDir. An absolute p is
+// cleaned; a relative p is joined to the WorkingDir. It replaces filepath.Abs
+// on a path the model supplied, which would otherwise resolve against the
+// process directory rather than the session's project root.
+func ResolvePath(ctx context.Context, p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p), nil
+	}
+	wd, err := WorkingDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(wd, p), nil
 }
 
 func WithWorkspaceRoot(ctx context.Context, root string) context.Context {
@@ -1025,7 +1081,6 @@ func NewState(allowedRoots ...string) *State {
 		contextShots:    make(map[string]json.RawMessage),
 		toolSpills:      make(map[string][]ToolResultSpill),
 		sessionSpills:   make(map[string][]ToolResultSpill),
-		workingSetPin:   make(map[string][]string),
 		inProgressTools: make(map[string]struct{}),
 		runtimeValues:   make(map[string]any),
 	}
@@ -1192,9 +1247,6 @@ func (s *State) SessionIDs() []string {
 	for sid := range s.networkSessionDecisions {
 		seen[sid] = struct{}{}
 	}
-	for sid := range s.workingSetPin {
-		seen[sid] = struct{}{}
-	}
 	for sid := range seen {
 		if sid = strings.TrimSpace(sid); sid != "" {
 			out = append(out, sid)
@@ -1241,10 +1293,6 @@ func (s *State) DropSessions(sessionIDs []string) int {
 		}
 		if _, ok := s.networkSessionDecisions[sid]; ok {
 			delete(s.networkSessionDecisions, sid)
-			before = true
-		}
-		if _, ok := s.workingSetPin[sid]; ok {
-			delete(s.workingSetPin, sid)
 			before = true
 		}
 		if before {
@@ -1529,77 +1577,6 @@ func estimateTokens(text string) int {
 	return int(math.Max(1, math.Ceil(float64(len(text))/4.0)))
 }
 
-func (s *State) WorkingSetPins(sessionID string) []string {
-	if s == nil {
-		return nil
-	}
-	sid := strings.TrimSpace(sessionID)
-	if sid == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	in := s.workingSetPin[sid]
-	out := make([]string, 0, len(in))
-	seen := make(map[string]struct{}, len(in))
-	for _, x := range in {
-		v := strings.TrimSpace(x)
-		if v == "" {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		out = append(out, v)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func (s *State) UpsertWorkingSetPins(sessionID string, add []string, remove []string) []string {
-	if s == nil {
-		return nil
-	}
-	sid := strings.TrimSpace(sessionID)
-	if sid == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	base := make(map[string]struct{})
-	for _, x := range s.workingSetPin[sid] {
-		v := strings.TrimSpace(x)
-		if v == "" {
-			continue
-		}
-		base[v] = struct{}{}
-	}
-	for _, x := range add {
-		v := strings.TrimSpace(x)
-		if v == "" {
-			continue
-		}
-		base[v] = struct{}{}
-	}
-	for _, x := range remove {
-		v := strings.TrimSpace(x)
-		if v == "" {
-			continue
-		}
-		delete(base, v)
-	}
-	out := make([]string, 0, len(base))
-	for k := range base {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	s.workingSetPin[sid] = out
-	next := make([]string, len(out))
-	copy(next, out)
-	return next
-}
-
 func (s *State) RegisterToolMeta(meta event.ToolMeta) {
 	if s == nil || strings.TrimSpace(meta.Name) == "" {
 		return
@@ -1666,6 +1643,73 @@ func (s *State) SetHistoryDir(dir string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.historyDir = dir
+}
+
+// SetFileChangeRecorder installs the recorder file tools report their writes
+// to. The runner sets it once per Load, from the session store.
+func (s *State) SetFileChangeRecorder(rec FileChangeRecorder) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fileChangeRecorder = rec
+}
+
+// FileChangeRecorder returns the installed recorder, or nil.
+func (s *State) FileChangeRecorder() FileChangeRecorder {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fileChangeRecorder
+}
+
+// recordFileChange reports one file-tool write to the recorder, stamped with
+// the conversation, run, step and anchor message the context carries. A state
+// with no recorder, or a context with no conversation, records nothing. The
+// write itself already landed, so a failed ledger append is not turned into a
+// failed tool call.
+func (s *State) recordFileChange(ctx context.Context, c state.FileChange) {
+	rec := s.FileChangeRecorder()
+	if rec == nil {
+		return
+	}
+	c.SessionID = strings.TrimSpace(ConversationSessionIDFromContext(ctx))
+	if c.SessionID == "" {
+		return
+	}
+	c.RunID = RunIDFromContext(ctx)
+	c.StepID = ToolStepIDFromContext(ctx)
+	c.AnchorMessageID = TurnAnchorMessageIDFromContext(ctx)
+	_ = rec.RecordFileChange(ctx, c)
+}
+
+// sha256Hex is the hex sha256 a file change records for what a tool wrote.
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
+}
+
+// WithTurnAnchorMessageID records the fb_messages row id of the user message
+// the turn under ctx belongs to. File tools stamp it onto every recorded file
+// change so a rewind can restore the files changed at or after that message.
+func WithTurnAnchorMessageID(ctx context.Context, rowID int64) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeyTurnAnchorMessageID, rowID)
+}
+
+// TurnAnchorMessageIDFromContext returns the anchor user message row id
+// recorded by WithTurnAnchorMessageID, or 0 when the turn has none.
+func TurnAnchorMessageIDFromContext(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	v, _ := ctx.Value(ctxKeyTurnAnchorMessageID).(int64)
+	return v
 }
 
 func (s *State) SetToolResultDir(dir string) {
@@ -2420,56 +2464,52 @@ func pathWithinAny(target string, roots []string) bool {
 	return false
 }
 
-func (s *State) SnapshotBeforeWrite(absPath string, content []byte) error {
-	if s == nil {
-		return nil
+// SnapshotBeforeWrite saves content as the pre-write snapshot of absPath and
+// returns the snapshot path. When existed is false the file is new: there is
+// no content to restore, so nothing is written and the path is empty.
+//
+// Snapshots live under a per-conversation directory — the conversation id from
+// ctx, the same source the plan files and file changes use — so a rewind reads
+// only its own conversation's history; a context with no conversation id keeps
+// the flat layout older callers wrote.
+func (s *State) SnapshotBeforeWrite(ctx context.Context, absPath string, content []byte, existed bool) (string, error) {
+	if s == nil || !existed {
+		return "", nil
 	}
 	dir := s.HistoryDir()
 	if dir == "" {
-		return nil
+		return "", nil
+	}
+	if sessionID := ConversationSessionIDFromContext(ctx); sessionID != "" {
+		dir = filepath.Join(dir, snapshotDirComponent(sessionID))
 	}
 	sum := sha256.Sum256([]byte(absPath))
 	key := hex.EncodeToString(sum[:8])
 	targetDir := filepath.Join(dir, key)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return err
+		return "", err
 	}
-	name := fmt.Sprintf("%d.snapshot", time.Now().UnixNano())
-	return os.WriteFile(filepath.Join(targetDir, name), content, 0o600)
+	target := filepath.Join(targetDir, fmt.Sprintf("%d.snapshot", time.Now().UnixNano()))
+	if err := os.WriteFile(target, content, 0o600); err != nil {
+		return "", err
+	}
+	return target, nil
 }
 
-func (s *State) LatestSnapshot(absPath string) (snapPath string, ok bool) {
-	if s == nil {
-		return "", false
-	}
-	dir := s.HistoryDir()
-	if dir == "" {
-		return "", false
-	}
-	sum := sha256.Sum256([]byte(absPath))
-	key := hex.EncodeToString(sum[:8])
-	targetDir := filepath.Join(dir, key)
-	ents, err := os.ReadDir(targetDir)
-	if err != nil {
-		return "", false
-	}
-	var best string
-	for _, e := range ents {
-		if e.IsDir() {
-			continue
+// snapshotDirComponent makes one directory name from a conversation id: every
+// byte that is not a safe filename character becomes '_', so an id carved from
+// an external channel can never escape the history directory.
+func snapshotDirComponent(sessionID string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '-', r == '_', r == '.':
+			return r
+		default:
+			return '_'
 		}
-		n := e.Name()
-		if !strings.HasSuffix(n, ".snapshot") {
-			continue
-		}
-		if best == "" || n > best {
-			best = n
-		}
-	}
-	if best == "" {
-		return "", false
-	}
-	return filepath.Join(targetDir, best), true
+	}, strings.TrimSpace(sessionID))
 }
 
 func (s *State) RememberRead(absPath string, mod time.Time, size int64, content []byte) {

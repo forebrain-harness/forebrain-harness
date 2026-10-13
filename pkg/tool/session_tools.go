@@ -1,4 +1,4 @@
-// Session-scoped tools: todos, working set, and memory tools.
+// Session-scoped tools: todos and memory tools.
 package tool
 
 import (
@@ -40,18 +40,6 @@ func registerSessionAndMemoryTools(a ToolAdder, st *State, rt *AgentToolRuntime)
 		if err != nil {
 			return err
 		}
-		t9, err := newWorkingSetShowTool(st)
-		if err != nil {
-			return err
-		}
-		t10, err := newWorkingSetPinTool(st)
-		if err != nil {
-			return err
-		}
-		t11, err := newWorkingSetDropTool(st)
-		if err != nil {
-			return err
-		}
 		t12, err := NewIntermediateTool(st, stateRoot)
 		if err != nil {
 			return err
@@ -59,16 +47,10 @@ func registerSessionAndMemoryTools(a ToolAdder, st *State, rt *AgentToolRuntime)
 		registerToolMeta(st, t1, "Use when tracking step-by-step execution progress: a structured checklist with per-item status, rewritten in full on every update (for the prose strategy doc write/edit the plan file with write_file/edit_file)", "session", event.ToolMeta{})
 		registerToolMeta(st, t3, "Use when switching the session into plan mode before implementing a non-trivial task", "session", event.ToolMeta{ReadOnly: true})
 		registerToolMeta(st, t3b, "Use when the plan is written and you're ready to leave plan mode for approval", "session", event.ToolMeta{ReadOnly: true})
-		registerToolMeta(st, t9, "Use when reviewing which entries are currently pinned", "context", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
-		registerToolMeta(st, t10, "Use when keeping a file or reference in context across rebuilds", "context", event.ToolMeta{})
-		registerToolMeta(st, t11, "Use when freeing context by unpinning an entry", "context", event.ToolMeta{})
 		registerToolMeta(st, t12, "Use when investigating or reviewing: save, read, or clear session-scoped working notes to synthesize later", "session", event.ToolMeta{})
 		_ = st.Register(a, t1)
 		_ = st.Register(a, t3)
 		_ = st.Register(a, t3b)
-		_ = st.Register(a, t9)
-		_ = st.Register(a, t10)
-		_ = st.Register(a, t11)
 		_ = st.Register(a, t12)
 	}
 	if rt != nil && memory.DedicatedToolsEnabled(rt.Cfg) {
@@ -569,91 +551,6 @@ func newExitPlanModeTool(st *State, stateRoot string, projectKeys ...string) (*l
 					" before reporting back: tick off the completed tasks and append a final '" + state.ImplementationHeading +
 					"' section summarizing what actually landed, any deviations from the plan, what was left out, and how it was verified. The plan file is writable in this mode. This is not optional - a plan is only complete once its implementation status is recorded in it.",
 			})
-			return string(b), nil
-		},
-	)
-}
-
-type workingSetShowInput struct{}
-
-func newWorkingSetShowTool(st *State) (*llm.Tool, error) {
-	return llm.NewTool(
-		"working_set_show",
-		"Use when reviewing which entries are currently pinned in the session working set.",
-		func(ctx context.Context, _ *workingSetShowInput) (string, error) {
-			if st == nil {
-				return "", fmt.Errorf("nil state")
-			}
-			sid, err := sessionKey(ctx)
-			if err != nil {
-				return "", err
-			}
-			pins := st.WorkingSetPins(sid)
-			b, _ := json.MarshalIndent(map[string]any{
-				"session_id": sid,
-				"pins":       pins,
-				"count":      len(pins),
-			}, "", "  ")
-			return string(b), nil
-		},
-	)
-}
-
-type workingSetPinInput struct {
-	Entries []string `json:"entries" jsonschema:"minItems=1" jsonschema_description:"Paths or references to pin into working set."`
-}
-
-func newWorkingSetPinTool(st *State) (*llm.Tool, error) {
-	return llm.NewTool(
-		"working_set_pin",
-		"Use when keeping a file or reference in context across rebuilds: pins it into the session working set.",
-		func(ctx context.Context, in *workingSetPinInput) (string, error) {
-			if st == nil {
-				return "", fmt.Errorf("nil state")
-			}
-			if in == nil {
-				in = &workingSetPinInput{}
-			}
-			sid, err := sessionKey(ctx)
-			if err != nil {
-				return "", err
-			}
-			next := st.UpsertWorkingSetPins(sid, in.Entries, nil)
-			b, _ := json.MarshalIndent(map[string]any{
-				"session_id": sid,
-				"pins":       next,
-				"count":      len(next),
-			}, "", "  ")
-			return string(b), nil
-		},
-	)
-}
-
-type workingSetDropInput struct {
-	Entries []string `json:"entries" jsonschema:"minItems=1" jsonschema_description:"Paths or references to remove from working set."`
-}
-
-func newWorkingSetDropTool(st *State) (*llm.Tool, error) {
-	return llm.NewTool(
-		"working_set_drop",
-		"Use when freeing context by unpinning a file or reference from the session working set.",
-		func(ctx context.Context, in *workingSetDropInput) (string, error) {
-			if st == nil {
-				return "", fmt.Errorf("nil state")
-			}
-			if in == nil {
-				in = &workingSetDropInput{}
-			}
-			sid, err := sessionKey(ctx)
-			if err != nil {
-				return "", err
-			}
-			next := st.UpsertWorkingSetPins(sid, nil, in.Entries)
-			b, _ := json.MarshalIndent(map[string]any{
-				"session_id": sid,
-				"pins":       next,
-				"count":      len(next),
-			}, "", "  ")
 			return string(b), nil
 		},
 	)

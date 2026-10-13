@@ -143,7 +143,7 @@ test('project skills tab: project rows editable, inherited rows read-only', asyn
   await page.getByRole('textbox', { name: /绝对路径|absolute path/i }).fill(root)
   await page.click('button:has-text("创建"), button:has-text("Create")')
   await page.waitForURL(/\/projects\/.+\/overview/, { timeout: 15_000 })
-  await page.click('.project-tab:has-text("技能"), .project-tab:has-text("Skills")')
+  await page.click('.proj-tab:has-text("技能"), .proj-tab:has-text("Skills")')
 
   // Trust gate first — the same one the MCP tab shows.
   await page.click('[data-testid="project-trust"]')

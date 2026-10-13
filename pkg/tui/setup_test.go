@@ -190,8 +190,10 @@ func useSetupTestCatalog(t *testing.T) {
 		t.Fatalf("parse test catalog: %v", err)
 	}
 	llm.SetGlobalCatalogForTest(cat)
-	if embedded, err := llm.Parse(llm.EmbeddedModelsJSON()); err == nil {
-		t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if embedded, err := llm.Parse(data); err == nil {
+			t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+		}
 	}
 }
 
@@ -487,8 +489,10 @@ func TestCatalogModelOptionsListTheWholeCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm.SetGlobalCatalogForTest(cat)
-	if embedded, err := llm.Parse(llm.EmbeddedModelsJSON()); err == nil {
-		t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+	if data, err := llm.RepoModelsJSONForTest(); err == nil {
+		if embedded, err := llm.Parse(data); err == nil {
+			t.Cleanup(func() { llm.SetGlobalCatalogForTest(embedded) })
+		}
 	}
 	if got := len(catalogModelOptions("openai")); got != 45 {
 		t.Fatalf("options = %d, want all 45", got)

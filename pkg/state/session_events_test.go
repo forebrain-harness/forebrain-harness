@@ -548,8 +548,7 @@ func TestListSessionEventsOfTypeReturnsTheNewestOldestFirst(t *testing.T) {
 
 // TestToolAuditReadsWhatTheSurfacesDrew pins the audit readers to the cards
 // the surfaces drew: a permission request and a plan update that succeeded are
-// not tool cards, a plan-emitting call that failed keeps its own card, and a
-// rewind targets the last edit that actually changed a file.
+// not tool cards, and a plan-emitting call that failed keeps its own card.
 func TestToolAuditReadsWhatTheSurfacesDrew(t *testing.T) {
 	ctx := context.Background()
 	db := openSessionDB(t)
@@ -575,10 +574,6 @@ func TestToolAuditReadsWhatTheSurfacesDrew(t *testing.T) {
 	}
 	if total != 4 || byTool["session_todo"] != 1 || byTool["request_permissions"] != 0 || byTool["edit_file"] != 2 {
 		t.Fatalf("audited calls = %v (total %d), want read_file, the failed session_todo and both edits", byTool, total)
-	}
-	path, ok, err := runs.LatestRewindableToolCall(ctx, "s")
-	if err != nil || !ok || path != "/repo/a.go" {
-		t.Fatalf("rewind target = %q, %v, %v; want the edit that changed /repo/a.go", path, ok, err)
 	}
 }
 

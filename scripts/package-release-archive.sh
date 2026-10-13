@@ -6,9 +6,11 @@
 #   <version>  release version without the leading v (e.g. 0.1.0)
 #   <out-dir>  directory the archive is written to (created if missing)
 #
-# The archive contains what the binary needs in place: forebrain[.exe] and the
-# dict/ directory beside it. It is built from npm/dist/@forebrain-harness/<pkg>
-# so the Release asset and the npm platform package carry the same binary.
+# The archive contains what the binary needs in place: forebrain[.exe], the
+# dict/ directory, models.json and the tokenizers/ directory beside it. It is
+# built from
+# npm/dist/@forebrain-harness/<pkg> so the Release asset and the npm platform
+# package carry the same binary.
 set -euo pipefail
 
 target="${1:?usage: package-release-archive.sh <target> <version> <out-dir>}"

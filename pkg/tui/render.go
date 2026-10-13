@@ -1957,10 +1957,10 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		_, _ = fmt.Fprintln(r.out)
 		return
 	case "completed", "failed":
-		projectRoot := strings.TrimSpace(memory.ProjectRoot(r.cwd))
-		if projectRoot == "" {
-			projectRoot = strings.TrimSpace(r.cwd)
-		}
+		// The TUI's process directory is its project root (R2), so the
+		// renderer's cached launch cwd IS the root skill paths shorten
+		// against — no walk up to a .git ancestor.
+		projectRoot := strings.TrimSpace(r.cwd)
 		// No Faint here. formatToolOutputBlock already paints every tool's
 		// output block in one foreground, so a Faint wrapper on top of it made
 		// the skill body the only output in the transcript rendered at two
@@ -2288,12 +2288,6 @@ func failedActionPhrase(toolName string) string {
 		return "enter plan mode"
 	case "exit_plan_mode":
 		return "exit plan mode"
-	case "working_set_show":
-		return "show working set"
-	case "working_set_pin":
-		return "pin"
-	case "working_set_drop":
-		return "drop"
 	case "request_permissions":
 		return "request permissions"
 	case "session_todo":
@@ -2781,36 +2775,6 @@ func toolDisplayParts(f Frame, summary string, cwd string) (action, target, suff
 		// header names it with.
 		target = tool.UserInteractionQuestionsLabel(meta.Input)
 
-	// --- Context ---
-	case lower == "working_set_show":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Showing working set"
-		} else {
-			action = "Working set"
-		}
-
-	case lower == "working_set_pin":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Pinning"
-		} else {
-			action = "Pinned"
-		}
-		target = displayP
-
-	case lower == "working_set_drop":
-		if isFailed {
-			action = "Failed to " + failedActionPhrase(lower)
-		} else if isRunning || isPending {
-			action = "Dropping"
-		} else {
-			action = "Dropped"
-		}
-		target = displayP
-
 	// --- MCP ---
 	case strings.HasPrefix(lower, "mcp__"):
 		action = "MCP"
@@ -3242,12 +3206,6 @@ func formatToolContentWithInput(title, content, cwd string, input map[string]any
 		return mcpToolOutputBody(content)
 	}
 
-	// Working set pin output is Markdown from agentnotify; keep the readable
-	// structure but display paths with the same cwd-relative rule as path tools.
-	if lower == "working_set_pin" {
-		return formatWorkingSetPinOutput(content, cwd)
-	}
-
 	// Bash/shell tools: extract stdout section, keep it readable.
 	if strings.Contains(lower, "bash") || strings.Contains(lower, "shell") ||
 		strings.Contains(lower, "sh") && !strings.Contains(lower, "bashrc") {
@@ -3264,58 +3222,6 @@ func formatToolContentWithInput(title, content, cwd string, input map[string]any
 	}
 
 	return content
-}
-
-func formatWorkingSetPinOutput(content, cwd string) string {
-	payload := content
-	if body := extractAnyFencedBody(content); body != "" {
-		payload = body
-	}
-	var v struct {
-		Count int      `json:"count"`
-		Pins  []string `json:"pins"`
-	}
-	if err := json.Unmarshal([]byte(payload), &v); err == nil {
-		if len(v.Pins) == 0 && v.Count == 0 {
-			return "No working set entries are pinned."
-		}
-		count := v.Count
-		if count == 0 {
-			count = len(v.Pins)
-		}
-		label := "entry"
-		if count != 1 {
-			label = "entries"
-		}
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Pinned %d %s in the working set:", count, label))
-		for _, pin := range v.Pins {
-			pin = strings.TrimSpace(pin)
-			if pin == "" {
-				continue
-			}
-			sb.WriteString("\n- `")
-			sb.WriteString(displayPath(pin, cwd))
-			sb.WriteString("`")
-		}
-		return sb.String()
-	}
-
-	lines := strings.Split(content, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "- `") || !strings.HasSuffix(trimmed, "`") {
-			continue
-		}
-		path := strings.TrimSuffix(strings.TrimPrefix(trimmed, "- `"), "`")
-		path = strings.TrimSpace(path)
-		if path == "" {
-			continue
-		}
-		prefix := line[:strings.Index(line, "-")]
-		lines[i] = prefix + "- `" + displayPath(path, cwd) + "`"
-	}
-	return strings.Join(lines, "\n")
 }
 
 // formatEnterPlanModeOutput extracts and displays the reason field from

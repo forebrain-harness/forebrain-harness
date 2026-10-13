@@ -1862,6 +1862,21 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		if rid := strings.TrimSpace(msg.RunID); rid != "" {
 			runID = rid
 		}
+		// A replayed reasoning row is a whole block already and carries its own
+		// duration: seal it into the final frame now instead of buffering it as
+		// a live delta, which would derive the duration from the row's
+		// second-precision created_at (the same second for every row of a turn,
+		// so it never reads a nonzero elapsed).
+		if msg.Duration > 0 {
+			return append(out, Frame{
+				Kind:     FrameThinking,
+				Content:  strings.TrimSpace(content),
+				RunID:    runID,
+				AgentID:  agentID,
+				Final:    true,
+				Duration: msg.Duration,
+			})
+		}
 		if buf.reasoning.Len() == 0 {
 			buf.reasoningStartedAt = msg.Timestamp
 			if buf.reasoningStartedAt.IsZero() {

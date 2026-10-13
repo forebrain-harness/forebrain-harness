@@ -79,6 +79,9 @@ export interface ChatMessage {
   id?: string
   role: 'user' | 'assistant' | 'notice'
   content: string
+  /** The fb_messages row id this turn starts at, when the server gave one:
+   * "rewind to before this message" targets it (plan 033). */
+  rowId?: number
 	 runId?: string
   /**
    * What this turn said and did, in the order it happened: its prose, its
@@ -110,13 +113,6 @@ export interface ChatMessage {
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
   picked?: string
-  /**
-   * Tool steps this turn's transcript carried whose cards are withheld — the
-   * exit-plan gate holds no card on any surface. An approval record naming
-   * one of these anchors to this turn: the decision it carries is history
-   * even though the wait it held drew nothing.
-   */
-  gateStepIds?: string[]
 }
 
 /**
@@ -295,6 +291,33 @@ export function parseToolDisplayPart(partsJson?: string | null): { body?: string
     }
   }
   return {}
+}
+
+/**
+ * parseReasoningTimingMs reads a reasoning row's own thinking duration from the
+ * `reasoning_timing` part the engine stores on it. A reasoning row is a whole
+ * block, so a reload draws it with the same "Thought for Ns" the live view
+ * showed. Returns undefined for a row without the part (an older row).
+ */
+export function parseReasoningTimingMs(partsJson?: string | null): number | undefined {
+  const raw = String(partsJson ?? '').trim()
+  if (!raw) return undefined
+  let parts: unknown
+  try {
+    parts = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(parts)) return undefined
+  for (const part of parts) {
+    if (!part || typeof part !== 'object') continue
+    const record = part as Record<string, unknown>
+    if (String(record.type ?? '') !== 'reasoning_timing') continue
+    const ms = Number(record.duration_ms)
+    if (Number.isFinite(ms) && ms >= 0) return ms
+    return undefined
+  }
+  return undefined
 }
 
 /**
@@ -550,6 +573,7 @@ export function conversationFromTranscript(
       role: 'assistant',
       content: '',
       blocks: [],
+      rowId: Number(row.rowId) || undefined,
     }
     out.push(turn)
     return turn
@@ -572,6 +596,7 @@ export function conversationFromTranscript(
         id: row.id || (row.rowId ? `message-${row.rowId}` : `user-${index}`),
         role: 'user',
         content: row.content ?? '',
+        rowId: Number(row.rowId) || undefined,
         runId: String(row.runId ?? '').trim() || undefined,
         ...(attachments.length ? { attachments } : {}),
         ...(row.memoryCitation ? { memoryCitation: row.memoryCitation } : {}),
@@ -633,7 +658,10 @@ export function conversationFromTranscript(
     const text = String(row.content ?? '')
     if (role === 'reasoning') {
       if (text.trim()) {
-        current.blocks = [...(current.blocks ?? []), { kind: 'thinking', text, open: false, startedAt: 0 }]
+        // The row carries how long the model spent on the block, so a reload
+        // draws the same "Thought for Ns" the live view showed.
+        const durationMs = parseReasoningTimingMs(row.partsJson)
+        current.blocks = [...(current.blocks ?? []), { kind: 'thinking', text, open: false, startedAt: 0, durationMs }]
       }
       return
     }
@@ -644,18 +672,17 @@ export function conversationFromTranscript(
     for (const call of parseStoredToolCalls(row.partsJson)) {
       if (drawn.has(call.id)) continue
       const answer = toolRowByCall.get(call.id)
-      // A delivered review closed this gate: the answer row's body is the
-      // delivery drop key, so the call draws nothing - the same whole-row
-      // drop an unclaimed row takes above. A canceled gate's settled answer
-      // drops the same way.
-      if (answer && isPlanReviewDeliveredRow(answer)) continue
-      if (answer && isCanceledExitRow(answer)) continue
-      // The exit-plan gate holds no card while it waits, and none when a run
-      // stopped before it resolved: only its settled answers draw. The step
-      // still anchors this turn, because an approval record naming it is
-      // history even though the wait drew nothing.
-      if (!answer && isExitPlanGate(String(call.name ?? ''))) {
-        current.gateStepIds = [...(current.gateStepIds ?? []), String(call.id ?? '').trim()].filter(Boolean)
+      // The exit-plan gate holds no card while it waits, and none once a run
+      // stopped on it or a delivered review closed it: only its settled answers
+      // draw. Its anchor always marks where the call sits, because the records
+      // about it — the lines its decisions printed, the review it asked for —
+      // belong right there, in the order they happened.
+      if (isExitPlanGate(String(call.name ?? ''))) {
+        drawn.add(call.id)
+        current.blocks = [...(current.blocks ?? []), { kind: 'gate', id: gateAnchorId(call.id), stepId: call.id }]
+        if (answer && !isPlanReviewDeliveredRow(answer) && !isCanceledExitRow(answer)) {
+          current.blocks = [...current.blocks, { kind: 'tool', step: toolStepFromRow(answer, call) }]
+        }
         continue
       }
       drawn.add(call.id)
@@ -880,12 +907,53 @@ export function upsertApprovalBlock(
     ? blocks.findIndex((block) => block.kind === 'tool' && block.step.stepId === next.toolStepId)
     : -1
   if (gated >= 0) return [...blocks.slice(0, gated), next, ...blocks.slice(gated)]
-  // A gate whose own card is withheld - the exit-plan gate holds no card -
-  // still lands above the calls of the turn it belongs to, the same place the
-  // terminal prints the line for it.
+  // This fallback only serves a record whose gated card these blocks do not
+  // hold - a call an event named that no transcript row drew. A card-less
+  // gate's records never come here: they anchor to the gate's own mark.
   const lastTool = blocks.map((block) => block.kind === 'tool').lastIndexOf(true)
   if (lastTool >= 0) return [...blocks.slice(0, lastTool), next, ...blocks.slice(lastTool)]
   return [...blocks, next]
+}
+
+/** gateAnchorId is the identity of a card-less call's anchor. */
+export function gateAnchorId(stepId: string, actionId = ''): string {
+  return stepId ? `gate:${stepId}` : `gate-action:${actionId}`
+}
+
+/**
+ * placeBeforeGateAnchor puts one of a card-less gate's records directly above
+ * its anchor, after the records already there, so they read in the order they
+ * arrived. A record already on the timeline is updated where it stands. It
+ * returns null when these blocks hold no anchor for the gate. The anchor is
+ * matched by the call it names or, failing that, the action that asked.
+ */
+export function placeBeforeGateAnchor(
+  blocks: TimelineBlock[],
+  stepId: string,
+  actionId: string,
+  next: Extract<TimelineBlock, { id: string }>,
+): TimelineBlock[] | null {
+  const existing = blocks.findIndex((block) => block.kind === next.kind && block.id === next.id)
+  if (existing >= 0) return blocks.map((block, i) => (i === existing ? { ...block, ...next } as TimelineBlock : block))
+  const anchor = blocks.findIndex((block) => block.kind === 'gate' && (
+    (stepId !== '' && block.stepId === stepId) || (actionId !== '' && block.actionId === actionId)
+  ))
+  if (anchor < 0) return null
+  return [...blocks.slice(0, anchor), next, ...blocks.slice(anchor)]
+}
+
+/**
+ * hasVisibleBlocks reports whether a timeline draws anything. A gate anchor
+ * only marks where a card-less call sits, and an approval record draws only
+ * the line the surface printed for it (ApprovalCard) - one with no line draws
+ * nothing. A turn whose blocks draw nothing shows its text instead.
+ */
+export function hasVisibleBlocks(blocks?: TimelineBlock[]): boolean {
+  return (blocks ?? []).some((block) => {
+    if (block.kind === 'gate') return false
+    if (block.kind === 'approval') return Boolean(String(block.confirmation ?? '').trim())
+    return true
+  })
 }
 
 /**
@@ -948,6 +1016,14 @@ export type TimelineBlock =
    * idempotent across the event deliveries that name it twice.
    */
   | { kind: 'subagent'; id: string; stepId: string; step: SubagentToolStep }
+  /**
+   * Where a call that holds no card sits on the timeline — the exit-plan gate,
+   * whose wait draws nothing. It draws nothing either: it is the position the
+   * gate's records (each line the terminal printed for a decision on it, the
+   * plan review it asked for) are placed at, in the order they arrived, so a
+   * live turn, a reloaded one and the terminal all read the same.
+   */
+  | { kind: 'gate'; id: string; stepId: string; actionId?: string }
 
 /**
  * A subagent's own transcript.
@@ -1515,12 +1591,27 @@ export function formatWorkedDurationLabel(durationMs?: number, tr: TranslateFn =
 }
 
 /**
+ * thinkingBlockLabel is the header a thinking block shows on every surface: how
+ * long the model thought, when that is known, else the neutral label. Live and
+ * reload draw the same string, and the web main view and the subagent view
+ * share it, so a block reads the same wherever it is shown.
+ */
+export function thinkingBlockLabel(
+  block: Extract<TimelineBlock, { kind: 'thinking' }>,
+  tr: TranslateFn = translate,
+): string {
+  if (block.durationMs && block.durationMs >= 1000) {
+    return tr('chat.thoughtFor', { seconds: Math.round(block.durationMs / 1000) })
+  }
+  return tr('chat.thinkingBlock')
+}
+
+/**
  * The worked line that closes an assistant turn: duration, checklist progress
  * when the run had one, then the finish time. Every surface that shows a
  * conversation draws it from this, so a run reads the same wherever it ran.
  */
-export function workedLineOf(
-  msg: Pick<ChatMessage, 'role' | 'workedDurationMs' | 'runFinishedAt' | 'workedPlanDone' | 'workedPlanTotal' | 'workedPlanActive'>,
+export function workedLineOf(  msg: Pick<ChatMessage, 'role' | 'workedDurationMs' | 'runFinishedAt' | 'workedPlanDone' | 'workedPlanTotal' | 'workedPlanActive'>,
   tr: TranslateFn = translate,
 ): WorkedLine {
   if (msg.role !== 'assistant') return { label: '' }
@@ -3355,6 +3446,64 @@ export function useChatStream() {
   }
 
   /**
+   * findGateAnchor names the message holding a card-less gate's anchor.
+   */
+  function findGateAnchor(stepId: string, actionId: string): string | null {
+    for (const message of messages.value) {
+      const holds = (message.blocks ?? []).some((block) => block.kind === 'gate' && (
+        (stepId !== '' && block.stepId === stepId) || (actionId !== '' && block.actionId === actionId)
+      ))
+      if (holds && message.id) return message.id
+    }
+    return null
+  }
+
+  /**
+   * ensureGateAnchor makes sure a card-less gate has its anchor and knows the
+   * action asking about it. A gate first seen here — its call's own step
+   * never arrived — is anchored at the end of the answer it belongs to,
+   * which is where the call was made: the run is parked on it.
+   */
+  function ensureGateAnchor(hostId: string, stepId: string, actionId: string) {
+    const owner = findGateAnchor(stepId, actionId)
+    if (owner) {
+      if (actionId) {
+        updateMessageById(owner, (message) => ({
+          ...message,
+          blocks: (message.blocks ?? []).map((block) => (
+            block.kind === 'gate' && ((stepId !== '' && block.stepId === stepId) || block.actionId === actionId)
+              ? { ...block, actionId }
+              : block
+          )),
+        }))
+      }
+      return
+    }
+    if (!hostId) return
+    updateMessageById(hostId, (message) => ({
+      ...message,
+      blocks: [
+        ...closeStreamedBlocks(message.blocks ?? [], ['assistant', 'thinking']),
+        { kind: 'gate', id: gateAnchorId(stepId, actionId), stepId, ...(actionId ? { actionId } : {}) },
+      ],
+    }))
+  }
+
+  /**
+   * placeBeforeGate puts a record of a card-less gate above its anchor,
+   * wherever that anchor is. False when no anchor names the gate.
+   */
+  function placeBeforeGate(stepId: string, actionId: string, block: Extract<TimelineBlock, { id: string }>): boolean {
+    const owner = findGateAnchor(stepId, actionId)
+    if (!owner) return false
+    updateMessageById(owner, (message) => ({
+      ...message,
+      blocks: placeBeforeGateAnchor(message.blocks ?? [], stepId, actionId, block) ?? message.blocks,
+    }))
+    return true
+  }
+
+  /**
    * upsertConversationApproval records a gate on the timeline, beside the call it
    * gated.
    *
@@ -3372,7 +3521,7 @@ export function useChatStream() {
     const owner = toolStepId
       ? messages.value.find((message) => (message.blocks ?? []).some(
         (existing) => existing.kind === 'tool' && existing.step.stepId === toolStepId,
-      ) || message.gateStepIds?.includes(toolStepId))
+      ))
       : undefined
     if (!owner?.id) {
       updateMessageById(assistantMessageId, (message) => ({
@@ -3409,8 +3558,12 @@ export function useChatStream() {
       `${String(evt.description ?? 'tool')}-${evt.id ?? ''}`,
     )
     // The exit-plan gate's wait paints no card: its approval prompt is the
-    // whole wait (stepHoldsNoCard).
-    if (stepHoldsNoCard(step)) return
+    // whole wait (stepHoldsNoCard). Its anchor still marks where the call was
+    // made, so the gate's records land there.
+    if (stepHoldsNoCard(step)) {
+      ensureGateAnchor(assistantMessageId, step.stepId, '')
+      return
+    }
     rememberSubagentCallStep(step)
     updateMessageById(assistantMessageId, (message) => ({
       ...message,
@@ -3582,7 +3735,7 @@ export function useChatStream() {
       const provider = String(payload.provider ?? '').trim()
       const model = String(payload.model ?? '').trim()
       const label = String(payload.label ?? '').trim() || [provider, model].filter(Boolean).join('/')
-      upsertSubagentExecutionBlock(evt, `plan-review:${reviewId}`, {
+      const step = {
         stepId: reviewId,
         toolName: '',
         summary: label ? `review the plan with ${label}` : 'review the plan',
@@ -3591,7 +3744,17 @@ export function useChatStream() {
           verb: 'review',
           tasks: [{ index: 0, title: 'Plan review', agentType: 'plan-reviewer', status: 'waiting' }],
         },
-      }, assistantMessageId)
+      }
+      const blockId = `plan-review:${reviewId}`
+      const actionId = String(payload.actionId ?? '').trim()
+      const drawn = messages.value.some((message) => (message.blocks ?? []).some((b) => b.kind === 'subagent' && b.id === blockId))
+      // A review asked from the exit-plan gate belongs to that gate's
+      // exchange: right after the line that asked for it, where the
+      // terminal draws it. A review whose gate this client never saw keeps
+      // its place at the end of the answer.
+      if (drawn || !actionId || !placeBeforeGate('', actionId, { kind: 'subagent', id: blockId, stepId: reviewId, step })) {
+        upsertSubagentExecutionBlock(evt, blockId, step, assistantMessageId)
+      }
       // The reviewer's spawned event names the review as its parent tool
       // call, which is how it finds this card.
       subagentCallStepIds.add(reviewId)
@@ -3915,6 +4078,12 @@ export function useChatStream() {
         // all.
         const actionId = String(payload.actionId ?? '').trim()
         if (!actionId) return
+        // The exit-plan gate holds no card and its pending record draws
+        // nothing: the wait is its anchor, which learns the action asking.
+        if (isExitPlanGate(String(payload.actionKind ?? ''))) {
+          ensureGateAnchor(assistantMessageId, String(payload.toolStepId ?? '').trim(), actionId)
+          return
+        }
         upsertConversationApproval(assistantMessageId, String(payload.toolStepId ?? '').trim(), {
           kind: 'approval',
           id: `approval-${actionId}`,
@@ -3936,6 +4105,28 @@ export function useChatStream() {
         const actionId = String(payload.actionId ?? '').trim()
         if (!actionId) return
         const confirmationRaw = String(payload.confirmation ?? '').trim()
+        // Each decision on the exit-plan gate is its own line, exactly as the
+        // terminal printed it — a review asked for and the approval that came
+        // after are two lines, and a later decision never takes an earlier
+        // line away. A decision that printed nothing draws nothing.
+        if (isExitPlanGate(String(payload.actionKind ?? ''))) {
+          const toolStepId = String(payload.toolStepId ?? '').trim()
+          ensureGateAnchor(assistantMessageId, toolStepId, actionId)
+          const decision = normalizeApprovalDecision(String(payload.decision ?? payload.status ?? 'resolved').trim())
+          if (confirmationRaw && confirmationRaw !== PLAN_REVIEW_DELIVERED_KEY) {
+            placeBeforeGate(toolStepId, actionId, {
+              kind: 'approval',
+              id: String(evt.id ?? '').trim() || `approval-${actionId}-${decision}`,
+              actionId,
+              actionKind: String(payload.actionKind ?? '').trim(),
+              status: decision,
+              confirmation: confirmationRaw,
+              message: String(payload.reason ?? '').trim() || undefined,
+              toolStepId: toolStepId || undefined,
+            })
+          }
+          return
+        }
         upsertConversationApproval(assistantMessageId, String(payload.toolStepId ?? '').trim(), {
           kind: 'approval',
           id: `approval-${actionId}`,

@@ -30,11 +30,14 @@ wait_for() { # wait_for <seconds> <grep-pattern> -- polls the rendered screen
 
 cmd_build() {
   mkdir -p "$WORK"
+  "$REPO/scripts/fetch-libtokenizers.sh"
   # CGO and the fts5 tag are both required: the state store is SQLite with
   # full-text search compiled in, and the binary will not build without them.
   ( cd "$REPO" && CGO_ENABLED=1 go build -tags fts5 -o "$BIN" ./cmd/forebrain )
-  # Memory search reads its dictionary from beside the binary.
+  # Memory search reads its dictionary, and the runtime its model catalog,
+  # from beside the binary.
   "$REPO/scripts/install-dictionary.sh" "$(dirname "$BIN")"
+  "$REPO/scripts/install-assets.sh" "$(dirname "$BIN")"
   echo "built $BIN"
 }
 

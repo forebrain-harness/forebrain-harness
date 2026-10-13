@@ -408,6 +408,7 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		// Hidden, and answered with one sentence pointing back to the conversation.
 		"new":    SubagentViewHidden,
 		"resume": SubagentViewHidden,
+		"rewind": SubagentViewHidden,
 		"fork":   SubagentViewHidden,
 		"rename": SubagentViewHidden,
 		"init":   SubagentViewHidden,

@@ -40,37 +40,52 @@ func TestMemoriesResetRequiresStoreAndLeavesFilesUntouched(t *testing.T) {
 
 func TestMemoriesResetClearsStoreAndFiles(t *testing.T) {
 	home := t.TempDir()
-	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	store := memory.NewStore(db, "main")
-	// Memories are per primary agent, so the reset resolves the calling agent's
-	// own root rather than a home-derived one shared by every tenant.
-	const projectKey = "-Test-project"
-	runner := &run.Runner{Deps: &run.Deps{Home: home, WorkspaceRoot: filepath.Join(home, "workspace"), ProjectKey: projectKey}}
+	// The default reset clears the calling conversation's own project, so the
+	// session must be bound to a project: the gateway process has no launch
+	// project of its own to fall back to.
+	projects := state.NewProjectStore(db, "main")
+	projectRoot := t.TempDir()
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "memreset", Root: projectRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.NewSessionStore(db, "main").Ensure(ctx, "s-mem", "s-mem"); err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s-mem", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	key := state.ProjectKeyForRoot(projectRoot)
+
+	runner := &run.Runner{Deps: &run.Deps{Home: home, WorkspaceRoot: filepath.Join(home, "workspace")}}
 	roots, err := memory.ResolveRootsForAgent(runner.StateRoot())
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectRoot := roots.Scope(memory.Scope{Kind: memory.ScopeProject, Key: projectKey})
-	marker := filepath.Join(projectRoot.MemoryRoot, "MEMORY.md")
+	projectRoot2 := roots.Scope(memory.Scope{Kind: memory.ScopeProject, Key: key})
+	marker := filepath.Join(projectRoot2.MemoryRoot, "MEMORY.md")
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(marker, []byte("clear"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{Home: home, MemoryStore: store, Runner: runner}
+	server := &Server{Home: home, MemoryStore: store, Projects: projects, Runner: runner}
 	recorder := httptest.NewRecorder()
 	// The default reset (no ?scope=all) clears only the calling session's own
 	// project — the common "forget what you learned about this repo" ask.
-	server.handleMemoriesReset(recorder, httptest.NewRequest(http.MethodPost, "/memories/reset", nil))
+	server.handleMemoriesReset(recorder, httptest.NewRequest(http.MethodPost, "/memories/reset?session_id=s-mem", nil))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", recorder.Code, recorder.Body.String())
 	}
-	entries, err := os.ReadDir(projectRoot.MemoryRoot)
+	entries, err := os.ReadDir(projectRoot2.MemoryRoot)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("project memory root entries=%#v err=%v", entries, err)
 	}
@@ -188,6 +203,14 @@ func memoriesFilePut(t *testing.T, s *Server, path, body string) *httptest.Respo
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
 	s.handleMemoriesFileWrite(rr, req)
+	return rr
+}
+
+func memoriesFilesDelete(t *testing.T, s *Server, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	s.handleMemoriesFilesDelete(rr, req)
 	return rr
 }
 
@@ -386,4 +409,54 @@ func TestMemoriesResetGlobalAndProjectScopes(t *testing.T) {
 		rr = reset(body)
 		require.Equal(t, http.StatusBadRequest, rr.Code, body)
 	}
+}
+
+// TestMemoriesFilesSkipHiddenEntries pins the rule that a memory root's hidden
+// entries — its own .git bookkeeping above all, since a root is a git
+// repository by design — are not memory: they are neither listed nor readable,
+// writable or deletable through the file manager. The agent-side walker in
+// pkg/memory/backend.go applies the same rule.
+func TestMemoriesFilesSkipHiddenEntries(t *testing.T) {
+	s, global, _, _ := memoriesFilesServer(t)
+	writeMemoryFile(t, global, "MEMORY.md", "# core", time.Time{})
+	writeMemoryFile(t, global, "notes/x.md", "note body", time.Time{})
+	writeMemoryFile(t, global, "extensions/ad_hoc/notes/y.md", "adhoc", time.Time{})
+	// The root's own git metadata, laid out exactly as resetGitBaseline leaves it.
+	writeMemoryFile(t, global, ".git/config", "[core]\n\trepositoryformatversion = 0", time.Time{})
+	writeMemoryFile(t, global, ".git/objects/0a/bcdef", "blob", time.Time{})
+
+	rr := memoriesGet(t, s, "/api/memories/files?scope=global&page_size=50")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	body := rr.Body.String()
+	require.Contains(t, body, `"total":3`)
+	require.Contains(t, body, "MEMORY.md")
+	require.Contains(t, body, "notes/x.md")
+	require.Contains(t, body, "extensions/ad_hoc/notes/y.md")
+	require.NotContains(t, body, ".git")
+
+	// Read and write refuse a hidden path, whether the first segment is the
+	// .git directory or any other dot-named entry.
+	for _, rel := range []string{".git/config", ".git/objects/0a/bcdef"} {
+		rr = memoriesFileGet(t, s, "/api/memories/file?scope=global&path="+rel)
+		require.Equal(t, http.StatusBadRequest, rr.Code, rel)
+		rr = memoriesFilePut(t, s, "/api/memories/file?scope=global&path="+rel, `{"content":"x"}`)
+		require.Equal(t, http.StatusBadRequest, rr.Code, rel)
+	}
+
+	// Delete refuses them too, and the metadata survives untouched.
+	rr = memoriesFilesDelete(t, s, "/api/memories/files/delete?scope=global", `{"paths":[".git/config",".git/objects/0a/bcdef"]}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"deleted":0`)
+	require.FileExists(t, filepath.Join(global.MemoryRoot, ".git", "config"))
+	require.FileExists(t, filepath.Join(global.MemoryRoot, ".git", "objects", "0a", "bcdef"))
+
+	// Ordinary memory files are unaffected: list, read and write still work.
+	rr = memoriesFileGet(t, s, "/api/memories/file?scope=global&path=notes/x.md")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "note body")
+	rr = memoriesFilePut(t, s, "/api/memories/file?scope=global&path=extensions/ad_hoc/notes/y.md", `{"content":"updated"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	raw, err := os.ReadFile(filepath.Join(global.MemoryRoot, "extensions", "ad_hoc", "notes", "y.md"))
+	require.NoError(t, err)
+	require.Equal(t, "updated", string(raw))
 }

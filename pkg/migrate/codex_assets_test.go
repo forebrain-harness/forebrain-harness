@@ -24,8 +24,9 @@ func copyGuangfaFixture(t *testing.T) string {
 // TestGuangfaSampleCodexProjectConfig is the §9.5 step 6 acceptance on the
 // Codex side: .codex/config.toml's [mcp_servers] migrates into
 // .forebrain/mcp_servers.yaml with all seven per-tool approval_mode values
-// preserved verbatim, and the report says the directory is not a git
-// repository so nothing will load until it becomes one.
+// preserved verbatim, and the report says the directory is not yet trusted so
+// nothing will load until the user trusts it (version control is not the gate,
+// R6).
 func TestGuangfaSampleCodexProjectConfig(t *testing.T) {
 	project := copyGuangfaFixture(t)
 	data := &codexData{Root: t.TempDir(), ProjectPaths: []string{project}}
@@ -42,12 +43,12 @@ func TestGuangfaSampleCodexProjectConfig(t *testing.T) {
 	if got := strings.Count(body, "approve"); got < 7 {
 		t.Fatalf("approval_mode values preserved = %d, want the source's seven", got)
 	}
-	if len(projects) != 1 || projects[0].Path != project || projects[0].Unloaded != "not a version-controlled project" {
+	if len(projects) != 1 || projects[0].Path != project || projects[0].Unloaded != "not trusted yet" {
 		t.Fatalf("project writes = %+v", projects)
 	}
 	// What a project write means is said once for all of them, drift included.
 	text := (&Report{Source: KindCodex, Projects: projects}).Text()
-	for _, want := range []string{"Codex keeps reading its originals", project + " — will not load: not a version-controlled project"} {
+	for _, want := range []string{"Codex keeps reading its originals", project + " — will not load: not trusted yet"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("report misses %q:\n%s", want, text)
 		}

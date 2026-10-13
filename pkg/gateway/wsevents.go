@@ -97,6 +97,7 @@ func canonicalRunEventsFromWS(m wsServerMsg) []event.RunEvent {
 			ActionKind:           firstNonEmptyString(stringOr(approvalData["action_kind"]), stringOr(approvalData["kind"])),
 			AgentID:              stringOr(approvalData["agent_id"]),
 			SubagentType:         stringOr(approvalData["subagent_type"]),
+			ToolStepID:           stringOr(approvalData["tool_step_id"]),
 			RequiresAction:       approvalRequiresActionPayload(m.Data),
 			Message:              strings.TrimSpace(m.Message),
 			PermissionSuggestion: approvalPermissionSuggestionPayload(m.Data),

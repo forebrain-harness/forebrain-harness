@@ -303,12 +303,13 @@ func loadCached(path string) (*Catalog, error) {
 }
 
 // InitGlobalCatalog initializes the global catalog from $FOREBRAIN_HOME/models.json,
-// seeding that file from the embedded catalog first when the home has none.
-// Loading and seeding are one step: a fresh home's first process must not
+// seeding that file from the catalog beside the binary first when the home has
+// none. Loading and seeding are one step: a fresh home's first process must not
 // run without the catalog it installs a moment later, reading every model's
-// limits as unknown.
-func InitGlobalCatalog(home string) error {
-	if err := Install(home); err != nil {
+// limits as unknown. version is passed in (llm sits below pkg/home) so a build
+// with no catalog beside it can download its release's copy.
+func InitGlobalCatalog(home, version string) error {
+	if err := Install(home, version); err != nil {
 		return err
 	}
 	cat, err := Resolve(home)
@@ -431,11 +432,13 @@ func ParseProviderModelLabel(label string) (string, string) {
 	return strings.TrimSpace(provider), strings.TrimSpace(model)
 }
 
-// Install seeds $FOREBRAIN_HOME/models.json from the embedded catalog when it
-// does not already exist. Existing files are NEVER overwritten so user
-// customizations are preserved. Errors are non-fatal — callers should log a
-// warning and continue.
-func Install(forebrainHome string) error {
+// Install seeds $FOREBRAIN_HOME/models.json from the catalog beside the binary
+// when the home does not already have one. Existing files are NEVER
+// overwritten so user customizations are preserved. A release build that ships
+// no catalog beside it downloads this version's models.json instead; a source
+// build has neither, and the error names the install script that puts it
+// there. Errors are non-fatal — callers should log a warning and continue.
+func Install(forebrainHome, version string) error {
 	if strings.TrimSpace(forebrainHome) == "" {
 		return fmt.Errorf("modelcatalog: empty forebrainHome")
 	}
@@ -452,7 +455,14 @@ func Install(forebrainHome string) error {
 		return fmt.Errorf("modelcatalog: mkdir %q: %w", forebrainHome, err)
 	}
 
-	if err := os.WriteFile(target, embeddedModelsJSON, 0o644); err != nil {
+	data, err := sourceModelsJSON(version)
+	if err != nil {
+		return err
+	}
+	if _, err := Parse(data); err != nil {
+		return fmt.Errorf("modelcatalog: %w", err)
+	}
+	if err := writeCatalogAtomic(target, data); err != nil {
 		return fmt.Errorf("modelcatalog: write %q: %w", target, err)
 	}
 	return nil

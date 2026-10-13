@@ -35,6 +35,9 @@ jobs:
           sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
       - run: go mod verify
       - run: scripts/check-release-versions.sh
+      # Forebrain links a native tokenizers static library; fetch the one for
+      # this runner before anything compiles.
+      - run: scripts/fetch-libtokenizers.sh
       - run: go vet ./...
       - name: gofmt
         run: test -z "$(gofmt -l cmd pkg third_party)" || { gofmt -l cmd pkg third_party; exit 1; }
@@ -75,6 +78,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: Cache the tokenizers static library
+        uses: actions/cache@v4
+        with:
+          path: third_party/libtokenizers/windows_amd64
+          key: libtokenizers-windows-amd64-${{ hashFiles('go.mod') }}
+      - name: Add the Windows GNU Rust target
+        shell: bash
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Fetch the tokenizers static library
+        shell: bash
+        run: scripts/fetch-libtokenizers.sh windows/amd64
       - name: go test
         env:
           CGO_ENABLED: "1"
@@ -106,6 +120,17 @@ jobs:
       # windows-latest ships mingw-w64 gcc; CGO is mandatory so the weixin silk
       # voice decoder and other cgo features are compiled into the binary.
       - run: go mod verify
+      - name: Cache the tokenizers static library
+        uses: actions/cache@v4
+        with:
+          path: third_party/libtokenizers/windows_amd64
+          key: libtokenizers-windows-amd64-${{ hashFiles('go.mod') }}
+      - name: Add the Windows GNU Rust target
+        shell: bash
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: Fetch the tokenizers static library
+        shell: bash
+        run: scripts/fetch-libtokenizers.sh windows/amd64
       - name: go build (CGO required)
         env:
           CGO_ENABLED: "1"
@@ -126,6 +151,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # The mac runner builds both darwin targets, so fetch both archives.
+      - run: scripts/fetch-libtokenizers.sh darwin/arm64 darwin/amd64
       - run: CGO_ENABLED=1 go build -tags fts5 ./...
       # Prove the Intel mac binary cross-compiles on an arm64 runner; the
       # release workflow builds darwin/amd64 the same way.

@@ -82,8 +82,12 @@ func askWorkspaceTrust(sel trustReviewer, target string) (bool, error) {
 	return ok && idx == workspaceTrustAccept, nil
 }
 
-func workspaceTrustTarget(cwd string) (string, error) {
-	project, err := safety.Resolve(cwd)
+// workspaceTrustTarget resolves the directory the trust prompt speaks about.
+// The directory a launch started in is its project root, so it is taken as
+// given: it never walks up to a .git ancestor, because a subdirectory started
+// on purpose is that subdirectory's project, not the enclosing checkout's.
+func workspaceTrustTarget(root string) (string, error) {
+	project, err := safety.ResolveRegisteredProject(root)
 	if err != nil {
 		return "", err
 	}

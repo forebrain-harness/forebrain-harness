@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.7
-	github.com/dlclark/regexp2 v1.11.5
+	github.com/daulet/tokenizers v1.27.0
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/go-ego/gse v1.1.0
 	github.com/google/uuid v1.6.0
@@ -26,7 +26,6 @@ require (
 	github.com/muesli/termenv v0.16.0
 	github.com/openai/openai-go v1.12.0
 	github.com/openilink/openilink-sdk-go v0.6.0
-	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sashabaranov/go-openai v1.41.2

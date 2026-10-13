@@ -1,49 +1,45 @@
 <template>
   <div class="pb-6">
-    <CardComponent>
-      <template #header>
-        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('approval.title') }}</div>
-      </template>
-      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.description') }}</p>
+    <PageTopRow :title="t('approval.title')" :description="t('approval.description')" />
 
-      <div class="space-y-2">
-        <button
-          v-for="preset in presets"
-          :key="preset.id"
-          type="button"
-          class="approval-card"
-          :class="{ 'approval-card--active': current === preset.id }"
-          role="radio"
-          :aria-checked="current === preset.id"
-          :data-testid="`approval-${preset.id}`"
-          @click="select(preset.id)"
-        >
-          <span class="flex items-center gap-2">
-            <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ preset.label }}</span>
-            <span v-if="current === preset.id" class="rounded-full border border-[var(--forebrain-brand-1)] px-2 py-0.5 text-[10px] text-[var(--forebrain-brand-1)]">{{ t('approval.current') }}</span>
-          </span>
-          <span class="mt-1 block text-left text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">{{ preset.description }}</span>
-        </button>
-      </div>
+    <div class="space-y-2">
+      <button
+        v-for="preset in presets"
+        :key="preset.id"
+        type="button"
+        class="approval-card"
+        :class="{ 'approval-card--active': current === preset.id }"
+        role="radio"
+        :aria-checked="current === preset.id"
+        :data-testid="`approval-${preset.id}`"
+        @click="select(preset.id)"
+      >
+        <span class="flex items-center gap-2">
+          <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ preset.label }}</span>
+          <span v-if="current === preset.id" class="rounded-full border border-[var(--forebrain-brand-1)] px-2 py-0.5 text-[10px] text-[var(--forebrain-brand-1)]">{{ t('approval.current') }}</span>
+        </span>
+        <span class="mt-1 block text-left text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">{{ preset.description }}</span>
+      </button>
+    </div>
 
-      <p v-if="current === null && loaded" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.custom') }}</p>
-      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-if="notice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
-    </CardComponent>
+    <p v-if="current === null && loaded" class="mt-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('approval.custom') }}</p>
+    <p v-if="error" class="mt-2 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+    <p v-if="notice" class="mt-2 text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
+    <p class="mt-3 font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ t('approval.configPathHint') }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
+/**
+ * The global approval default: the same three presets the terminal's
+ * /permissions offers, as one flat group. Selection persists to forebrain.yaml
+ * at once; sessions may override their own view from the composer.
+ */
 import { onMounted, ref } from 'vue'
-import CardComponent from '@/components/common/CardComponent.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'
 
-/**
- * The global approval default: the same three presets the terminal's
- * /permissions offers. Selection persists to forebrain.yaml; sessions may
- * override their own view from the composer.
- */
 const { t } = useI18n()
 
 type Preset = { id: string; label: string; description: string }

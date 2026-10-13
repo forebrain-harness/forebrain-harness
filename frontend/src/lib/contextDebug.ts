@@ -150,8 +150,7 @@ export function buildContextDebugModel(data: SessionContextDebug | null): Contex
         evictionCount > 0 ||
         recoveryCount > 0 ||
         spillCount > 0 ||
-        boundaryCount > 0 ||
-        (data.workingSet?.length ?? 0) > 0),
+        boundaryCount > 0),
     ),
   }
 }

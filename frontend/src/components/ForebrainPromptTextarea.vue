@@ -4,7 +4,7 @@ import { PromptInputAttachment, usePromptInput } from '@repo/elements/prompt-inp
 import { cn } from '@repo/shadcn-vue/lib/utils'
 import { Bot, ChevronLeft, ChevronRight, FileText, Folder, Image as ImageIcon, Paperclip, Slash, X } from 'lucide-vue-next'
 import { computed, nextTick, ref, watch } from 'vue'
-import { forebrainApi, type MentionCandidate, type SlashCommandRecord } from '@/lib/api'
+import { forebrainApi, type MentionCandidate, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { useI18n } from '@/locales'
 
@@ -47,6 +47,16 @@ const props = defineProps<{
    */
   queueVisible?: boolean
   sideConversation?: boolean
+  /** A conversation whose directory is gone cannot continue: the composer
+   *  takes no input until the directory is back. */
+  disabled?: boolean
+  /**
+   * The conversation this composer belongs to: its session, or — for a
+   * conversation not started yet — the project its pill has chosen. The @
+   * picker resolves its candidates and its picks against that conversation's
+   * file view.
+   */
+  scope?: WorkspaceScope
 }>()
 
 const emit = defineEmits<{
@@ -115,7 +125,7 @@ async function insertWorkspacePath(path: string, isDir = false) {
       token_end: runeCursor,
       path,
       is_dir: isDir,
-    })
+    }, props.scope)
   } catch {
     return
   }
@@ -305,7 +315,7 @@ async function fetchFileCandidates(query: string) {
   const seq = ++filesRequestSeq
   filesLoading.value = true
   try {
-    const res = await forebrainApi.mentionSearch(query)
+    const res = await forebrainApi.mentionSearch(query, props.scope)
     if (seq !== filesRequestSeq) return
     fileCandidates.value = Array.isArray(res?.records) ? res.records : []
     if (highlightIndex.value >= fileCandidates.value.length) highlightIndex.value = 0
@@ -345,7 +355,7 @@ async function applyFileCandidate(cand: MentionCandidate) {
       token_end: toRuneOffset(draft, cursor),
       path: cand.path,
       is_dir: cand.isDir,
-    })
+    }, props.scope)
   } catch {
     return
   }
@@ -702,7 +712,7 @@ function onRootRowClick(e: MouseEvent) {
       </li>
     </ul>
     <textarea ref="textareaRef" v-model="modelValue" data-slot="input-group-control" name="message"
-      :placeholder="placeholder" :class="cn(
+      :placeholder="placeholder" :disabled="disabled" :class="cn(
         'max-h-48 min-h-20 w-full min-w-0 flex-1 resize-none overflow-y-auto rounded-none border-0 bg-transparent px-3 py-3 align-top text-base leading-normal shadow-none !outline-none focus:!outline-none focus-visible:!outline-none focus:!ring-0 focus-visible:!ring-0 dark:bg-transparent md:min-h-[5.25rem] md:text-sm placeholder:text-muted-foreground [field-sizing:fixed]',
         props.class,
       )

@@ -5,42 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
-
-type WorkingSetSource struct{}
-
-func (s WorkingSetSource) ID() string { return "working_set_source" }
-
-func (s WorkingSetSource) Collect(req AssemblyRequest) ([]ContextItem, error) {
-	files := normalizedSet(extractAtRefs(req.Query))
-	for _, x := range req.PinnedSet {
-		files = append(files, x)
-	}
-	files = normalizedSet(files)
-	if len(files) == 0 {
-		return nil, nil
-	}
-	show := files
-	if len(show) > 16 {
-		show = show[:16]
-	}
-	return []ContextItem{
-		{
-			SourceID:    s.ID(),
-			Layer:       LayerWorking,
-			Title:       "Task Working Set",
-			Content:     strings.Join(show, "\n"),
-			Priority:    92,
-			Pinned:      len(req.PinnedSet) > 0,
-			DebugReason: "refs + pins",
-		},
-	}, nil
-}
 
 type RecentFilesSource struct {
 	ReadStatesProvider func() []tool.ReadState
@@ -84,24 +53,6 @@ func (s RecentFilesSource) Collect(req AssemblyRequest) ([]ContextItem, error) {
 	}}, nil
 }
 
-var atRefRe = regexp.MustCompile(`@([A-Za-z0-9_./\\-]+)`)
-
-func extractAtRefs(s string) []string {
-	matches := atRefRe.FindAllStringSubmatch(s, -1)
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		if len(m) < 2 {
-			continue
-		}
-		v := strings.TrimSpace(m[1])
-		if v == "" {
-			continue
-		}
-		out = append(out, v)
-	}
-	return normalizedSet(out)
-}
-
 type GitContextSource struct{}
 
 func (GitContextSource) ID() string { return "git_context_source" }
@@ -110,9 +61,13 @@ func (GitContextSource) Collect(req AssemblyRequest) ([]ContextItem, error) {
 	if strings.EqualFold(strings.TrimSpace(req.Mode), "plan") {
 		return nil, nil
 	}
-	wd, err := os.Getwd()
-	if err != nil || strings.TrimSpace(wd) == "" {
-		return nil, nil
+	wd := strings.TrimSpace(req.WorkingDir)
+	if wd == "" {
+		var err error
+		wd, err = os.Getwd()
+		if err != nil || strings.TrimSpace(wd) == "" {
+			return nil, nil
+		}
 	}
 	// Shares one git collection with the prompt-side hook rather than running
 	// its own status/diff pair; only the summarization below differs.

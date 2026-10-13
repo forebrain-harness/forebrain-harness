@@ -1,0 +1,16 @@
+{
+  "name": "plan-gated-bugfix",
+  "current": 1,
+  "versions": [
+    {
+      "v": 1,
+      "at": "2026-09-28T15:38:33Z",
+      "kind": "created",
+      "stat": {
+        "files": 1,
+        "added": 133,
+        "removed": 0
+      }
+    }
+  ]
+}

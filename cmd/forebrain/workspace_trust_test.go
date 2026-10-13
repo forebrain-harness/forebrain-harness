@@ -131,26 +131,30 @@ func TestWorkspaceTrustPageAnswers(t *testing.T) {
 	}
 }
 
-func TestWorkspaceTrustTargetPrefersGitRoot(t *testing.T) {
+// The trust prompt speaks about the directory the TUI started in — the
+// project boundary (R2) — never an enclosing checkout it would otherwise
+// walk up to.
+func TestWorkspaceTrustTargetIsTheLaunchDirectory(t *testing.T) {
 	base := t.TempDir()
 	repo := filepath.Join(base, "repo")
-	if err := os.MkdirAll(filepath.Join(repo, "sub"), 0o755); err != nil {
+	sub := filepath.Join(repo, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	runCmd(t, repo, "git", "init")
-	target, err := workspaceTrustTarget(filepath.Join(repo, "sub"))
+	target, err := workspaceTrustTarget(sub)
 	if err != nil {
 		t.Fatalf("workspaceTrustTarget error: %v", err)
 	}
-	want := filepath.Clean(repo)
+	want := sub
 	if resolved, err := filepath.EvalSymlinks(want); err == nil && strings.TrimSpace(resolved) != "" {
 		want = filepath.Clean(resolved)
 	}
 	if filepath.Clean(target) != want {
-		t.Fatalf("expected repo root target, got %s want %s", target, want)
+		t.Fatalf("expected the launch subdirectory as the trust target, got %s want %s", target, want)
 	}
 }
 

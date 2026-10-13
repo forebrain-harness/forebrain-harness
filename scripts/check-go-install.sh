@@ -7,6 +7,9 @@
 #
 # The module zip is built from the files a clone would contain: tracked files plus untracked
 # files that are not ignored.
+#
+# The tokenizers static library is not part of the module (it is gitignored), so a user's
+# go install needs CGO_LDFLAGS pointing at it; this script fetches it and does the same.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,6 +21,8 @@ PROXY_DIR="$WORK/proxy/$MODULE/@v"
 mkdir -p "$PROXY_DIR" "$WORK/bin" "$WORK/outside"
 
 cd "$ROOT_DIR"
+"$ROOT_DIR/scripts/fetch-libtokenizers.sh"
+LDFLAGS_DIR="$ROOT_DIR/third_party/libtokenizers/$(go env GOOS)_$(go env GOARCH)"
 git ls-files -z --cached --others --exclude-standard > "$WORK/files"
 python3 - "$WORK/files" "$PROXY_DIR/$VERSION.zip" "$MODULE@$VERSION" <<'PY'
 import os, sys, zipfile
@@ -49,6 +54,7 @@ rm -rf "$MODCACHE/$MODULE@$VERSION" \
 
 cd "$WORK/outside"
 env -u GOFLAGS GOWORK=off GOBIN="$WORK/bin" CGO_ENABLED=1 \
+  CGO_LDFLAGS="-L$LDFLAGS_DIR" \
   GOPROXY="file://$WORK/proxy,https://proxy.golang.org,direct" \
   GONOSUMDB="$MODULE" \
   go install -tags fts5 "$MODULE/cmd/forebrain@$VERSION"

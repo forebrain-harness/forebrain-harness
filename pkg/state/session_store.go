@@ -21,6 +21,7 @@ type SessionStore struct {
 	memorySource string
 	cwd          string
 	gitBranch    string
+	projectID    string
 
 	agentMu sync.RWMutex
 	agentID string
@@ -79,6 +80,11 @@ func (s *SessionStore) DB() *sql.DB {
 type SessionBirth struct {
 	Cwd       string
 	GitBranch string
+	// ProjectID is the project the session is filed under; born with it,
+	// never changed by later writes. A child session inherits its parent's
+	// project instead of this value, and an empty id falls back to the
+	// process default set by ConfigureProjectDefault.
+	ProjectID string
 	// Source is what the session is for (SessionSource*); born with it,
 	// never changed by later writes.
 	Source string
@@ -126,6 +132,22 @@ func (s *SessionStore) SetMemoryMode(memoryMode string) {
 	s.defaultsMu.Lock()
 	defer s.defaultsMu.Unlock()
 	s.memoryMode = strings.TrimSpace(memoryMode)
+}
+
+// ConfigureProjectDefault names the project a session is filed under when its
+// creator gave it none of its own. It is the project twin of
+// ConfigureMemoryDefaults and shares its lock: the interactive surface
+// registers its launch directory as a project and points here, so every
+// conversation it starts is bound to that project at birth. An empty id
+// clears the default (a session is then born with no project, or with its
+// parent's).
+func (s *SessionStore) ConfigureProjectDefault(projectID string) {
+	if s == nil {
+		return
+	}
+	s.defaultsMu.Lock()
+	defer s.defaultsMu.Unlock()
+	s.projectID = strings.TrimSpace(projectID)
 }
 
 func (s *SessionStore) Ensure(ctx context.Context, id string, title string) error {
@@ -190,6 +212,7 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	source := strings.TrimSpace(s.memorySource)
 	cwd := strings.TrimSpace(s.cwd)
 	branch := strings.TrimSpace(s.gitBranch)
+	defaultProject := strings.TrimSpace(s.projectID)
 	s.defaultsMu.RUnlock()
 	if mode == "" {
 		mode = "disabled"
@@ -198,10 +221,24 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// that directory's branch too; a session born without one takes both
 	// process defaults — never the given directory with another request's
 	// branch, nor the reverse.
-	if strings.TrimSpace(birth.Cwd) != "" {
-		cwd = strings.TrimSpace(birth.Cwd)
+	birthCwd := strings.TrimSpace(birth.Cwd)
+	if birthCwd != "" {
+		cwd = birthCwd
 		branch = strings.TrimSpace(birth.GitBranch)
 	}
+	parentID := strings.TrimSpace(birth.ParentSessionID)
+	// A child born with no directory of its own falls back to its parent's
+	// directory, but only when the parent is a project's conversation: the
+	// parent's directory is where that project ran. A child born with its own
+	// directory keeps it, so the parent lookup is disabled by a blank id.
+	cwdParent := parentID
+	if birthCwd != "" {
+		cwdParent = ""
+	}
+	// The project a session is born under never changes. A child inherits its
+	// parent's project; otherwise the creator's birth project; otherwise the
+	// process default; otherwise none (NULL).
+	birthProject := strings.TrimSpace(birth.ProjectID)
 	// agent_id is written when the row is created and never afterwards: a
 	// session's owning primary agent is fixed at birth. The conflict clause
 	// updates only rows this agent owns, so touching another agent's
@@ -211,11 +248,17 @@ func (s *SessionStore) ensureSession(ctx context.Context, q dbtx, id string, tit
 	// ParentSessionID is as well: the conversation a session belongs to is
 	// whoever created it, never a later writer.
 	res, err := q.ExecContext(ctx,
-		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id)
-		VALUES(?,?,?,?,?,?,?,?,?,?,NULLIF(?, ''))
+		`INSERT INTO fb_sessions(id, title, updated_at, created_at, memory_mode, memory_source, cwd, git_branch, agent_id, source, parent_session_id, project_id)
+		VALUES(?, ?, ?, ?, ?, ?,
+			COALESCE(NULLIF((SELECT cwd FROM fb_sessions WHERE id=? AND project_id IS NOT NULL), ''), ?),
+			?, ?, ?, NULLIF(?, ''),
+			COALESCE((SELECT project_id FROM fb_sessions WHERE id=?), NULLIF(?, ''), NULLIF(?, '')))
 		ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at
 		WHERE fb_sessions.agent_id=excluded.agent_id`,
-		id, title, now, now, mode, source, cwd, branch, s.AgentID(), strings.TrimSpace(birth.Source), strings.TrimSpace(birth.ParentSessionID))
+		id, title, now, now, mode, source,
+		cwdParent, cwd,
+		branch, s.AgentID(), strings.TrimSpace(birth.Source), parentID,
+		parentID, birthProject, defaultProject)
 	if err != nil {
 		return err
 	}
@@ -1663,6 +1706,16 @@ func (s *SessionStore) appendRowInTx(ctx context.Context, q dbtx, row messageRow
 	if err != nil {
 		return 0, err
 	}
+	if row.Role == "user" && row.Visibility == messageVisible {
+		// A new user message fixes any undoable rewind of the conversation in
+		// place: once the conversation has moved on, the rewind can no longer
+		// be undone. This is the single write every surface's user turn goes
+		// through, so the rule lives here rather than in each surface.
+		if _, err := q.ExecContext(ctx,
+			`UPDATE fb_rewinds SET state='fixed' WHERE session_id=? AND state='pending'`, row.SessionID); err != nil {
+			return 0, err
+		}
+	}
 	if row.Role == "user" && row.Visibility == messageVisible && strings.TrimSpace(row.Content) != "" {
 		if _, err := q.ExecContext(ctx,
 			`UPDATE fb_sessions SET title=?, updated_at=? WHERE id=? AND agent_id=? AND title=id`,
@@ -1799,13 +1852,16 @@ func (s *SessionStore) messageRowOwnershipError(ctx context.Context, q dbtx, row
 
 // Message visibility. Every transcript loader filters on visibility='visible',
 // so any other value hides a row from the display transcript and from the next
-// model request while keeping it on disk for inspection. The two hidden values
-// stay distinct because an audit read has to tell a mechanical transcript
-// repair from a message the user deliberately took back.
+// model request while keeping it on disk for inspection. The three hidden
+// values stay distinct because an audit read has to tell a mechanical
+// transcript repair from a message the user deliberately took back from a row
+// a "rewind to before a message" moved aside. A 'rewound' row returns to
+// 'visible' when its rewind is undone.
 const (
 	messageVisible   = "visible"
 	messageRepaired  = "repaired"
 	messageWithdrawn = "withdrawn"
+	messageRewound   = "rewound"
 )
 
 // setMessageVisibility is the single writer that moves one owned row between

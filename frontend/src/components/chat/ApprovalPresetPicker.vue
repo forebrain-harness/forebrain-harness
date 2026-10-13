@@ -2,15 +2,17 @@
   <div class="relative flex items-center" ref="menuRef">
     <button
       type="button"
-      class="inline-flex h-8 items-center gap-1.5 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface-control)] px-2.5 text-xs font-medium text-[var(--forebrain-text-2)] transition hover:bg-[var(--forebrain-button-alt-bg)]"
+      class="forebrain-chip-btn"
       :disabled="disabled"
       :title="t('approval.pickerTitle')"
+      aria-haspopup="listbox"
+      :aria-expanded="open"
       data-testid="approval-picker"
       @click="open = !open"
     >
       <ShieldCheck class="size-3.5" aria-hidden="true" />
-      <span>{{ currentLabel }}</span>
-      <span class="text-[var(--forebrain-muted-text)]">▾</span>
+      <span>{{ t('chat.approvalChip', { preset: currentLabel }) }}</span>
+      <ChevronDown class="forebrain-chip-caret" aria-hidden="true" />
     </button>
     <p
       v-if="error && !open"
@@ -20,21 +22,21 @@
     >
       {{ error }}
     </p>
-    <div v-if="open" class="absolute bottom-full left-0 z-20 mb-2 w-72 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-1.5 shadow-[var(--forebrain-shadow-pop)]">
+    <div v-if="open" class="forebrain-chip-menu left-0 w-[360px]" role="listbox" :aria-label="t('chat.approvalMenuTitle')">
+      <div class="forebrain-chip-menu-cap">{{ t('chat.approvalMenuTitle') }}</div>
       <button
         v-for="preset in presets"
         :key="preset.id"
         type="button"
-        class="block w-full rounded-lg px-2.5 py-2 text-left transition hover:bg-[var(--forebrain-button-alt-bg)]"
-        :class="{ 'bg-[var(--forebrain-brand-soft)]': preset.id === current }"
+        class="forebrain-chip-menu-opt"
+        :class="{ 'forebrain-chip-menu-opt--on': preset.id === current }"
+        role="option"
+        :aria-selected="preset.id === current"
         :data-testid="`approval-option-${preset.id}`"
         @click="choose(preset.id)"
       >
-        <span class="flex items-center justify-between">
-          <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ preset.label }}</span>
-          <span v-if="preset.id === current" class="text-[var(--forebrain-brand-1)]">✓</span>
-        </span>
-        <span class="mt-0.5 block text-[11px] leading-snug text-[var(--forebrain-muted-text)]">{{ preset.description }}</span>
+        <b><Check v-if="preset.id === current" class="size-3.5" aria-hidden="true" />{{ preset.label }}</b>
+        <span>{{ preset.description }}</span>
       </button>
     </div>
   </div>
@@ -42,7 +44,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ShieldCheck } from 'lucide-vue-next'
+import { Check, ChevronDown, ShieldCheck } from 'lucide-vue-next'
 import { forebrainApi, getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 

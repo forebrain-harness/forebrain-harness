@@ -37,4 +37,9 @@ var (
 	// ErrUnsupportedSource is returned for a reference that is neither a git
 	// URL nor an owner/repo pair.
 	ErrUnsupportedSource = errors.New("the source must be a git URL or an owner/repo pair")
+	// ErrNoUpstreamRevision is the answer when a pull cloned its upstream
+	// successfully but could not read the commit it landed on. A version
+	// record without a revision cannot answer "has upstream moved?", so the
+	// pull fails instead of guessing.
+	ErrNoUpstreamRevision = errors.New("could not read the upstream revision")
 )

@@ -104,6 +104,28 @@ than an unknown author) and the repo's stars. Then present each candidate with
 what it does, its install count and source, the install command, and its
 skills.sh link, and offer to install it.
 
+When you are running in the skill workshop's **discover** mode, the page draws
+the candidates as installable cards, so also emit them as a fenced block the
+page reads. Put one `skill-candidates` block in your reply, containing a JSON
+array — one object per candidate, in the order you recommend them:
+
+````
+```skill-candidates
+[
+  {"name": "go-style-review", "description": "Review Go style and naming against Effective Go, without changing code.", "source": "samber/cc-skills-golang", "installed": false}
+]
+```
+````
+
+- `name`: the skill's install name.
+- `description`: one line, what it does.
+- `source`: the `owner/repo` (or skills.sh link) it installs from.
+- `installed`: `true` when it is already installed, else `false`.
+
+Keep the surrounding prose short; the cards carry the detail. The user clicks
+Install on a card and the page installs it into the layer the workshop was
+opened from — you do not run the installer yourself in that mode.
+
 If nothing relevant exists, say so plainly, offer to do the task directly, and
 mention that a skill for it can be created — which is the next section.
 
@@ -115,6 +137,27 @@ mention that a skill for it can be created — which is the next section.
 `/skill-generator` instead of this track: it reads the session you are in and
 writes the skill into `<project>/.forebrain/skills/`. Come back here when the skill
 is something new rather than something that just happened.
+
+### Where skill writes land: the draft
+
+Every write this track makes goes to a **draft**, never straight to the live
+skill:
+
+- A new skill is written to `<skills-root>/.drafts/<name>/` — for a project
+  skill that is `<project>/.forebrain/skills/.drafts/<name>/`, for the agent's
+  own `<workspace>/skills/.drafts/<name>/`.
+- Editing an existing skill also goes to its draft. Writing the formal path
+  (`<skills-root>/<name>/...`) is redirected there automatically, but write
+  the draft path directly so the two never disagree.
+- A draft is not live: it is not loaded, listed, or runnable until it is
+  published. Publishing creates the next version, writes it to the formal
+  directory, and enables the skill for new sessions — on the web from the
+  skill page's "Publish" button, in the terminal from the `/skills` panel.
+  Never publish on the user's behalf as a side effect; ask or leave it to
+  them.
+- When the draft is saved, tell the user in one line:
+  "Draft <name> saved · it takes effect after publish." That is the only
+  publishing reminder.
 
 ### Capture Intent
 
@@ -345,7 +388,9 @@ The description field in SKILL.md frontmatter is the primary mechanism that dete
 
 ### Step 1: Generate trigger eval queries
 
-Create 20 eval queries — a mix of should-trigger and should-not-trigger. Save as JSON:
+Create 20 eval queries — a mix of should-trigger and should-not-trigger. Save
+them as `evals/trigger_queries.json` **inside the skill's draft**, so the eval
+set travels with the version and the workshop page reads it back:
 
 ```json
 [
@@ -385,22 +430,24 @@ This step matters — bad eval queries lead to bad descriptions.
 
 Tell the user: "This will take some time — I'll run the optimization loop in the background and check on it periodically."
 
-Save the eval set to the workspace, then run in the background:
+Run the loop against the eval set you saved in the draft, pointing at the
+draft skill path, and save the JSON it prints to the workspace beside the
+skill so the workshop page can read the result back:
 
 ```bash
 python -m scripts.run_loop \
-  --eval-set <path-to-trigger-eval.json> \
-  --skill-path <path-to-skill> \
+  --eval-set <skill-draft>/evals/trigger_queries.json \
+  --skill-path <path-to-skill-draft> \
   --model <model-id-powering-this-session> \
   --max-iterations 5 \
-  --verbose
+  --verbose > <skill-name>-workspace/trigger-results.json
 ```
 
 Use the model ID from your system prompt (the one powering the current session) so the triggering test matches what the user actually experiences.
 
 While it runs, periodically tail the output to give the user updates on which iteration it's on and what the scores look like.
 
-This handles the full optimization loop automatically. It splits the eval set into 60% train and 40% held-out test, evaluates the current description (running each query 3 times to get a reliable trigger rate), then calls the model to propose improvements based on what failed. It re-evaluates each new description on both train and test, iterating up to 5 times. When it's done, it opens an HTML report in the browser showing the results per iteration and returns JSON with `best_description` — selected by test score rather than train score to avoid overfitting.
+This handles the full optimization loop automatically. It splits the eval set into 60% train and 40% held-out test, evaluates the current description (running each query 3 times to get a reliable trigger rate), then calls the model to propose improvements based on what failed. It re-evaluates each new description on both train and test, iterating up to 5 times. When it's done, it opens an HTML report in the browser showing the results per iteration and returns JSON with `best_description` — selected by test score rather than train score to avoid overfitting. The workshop page's trigger tab reads that saved JSON: `history[0]` is the current description's scores, `best_description` and `best_score` the suggestion.
 
 ### How skill triggering works
 
@@ -410,7 +457,9 @@ This means your eval queries should be substantive enough that the agent would a
 
 ### Step 4: Apply the result
 
-Take `best_description` from the JSON output and update the skill's SKILL.md frontmatter. Show the user before/after and report the scores.
+Take `best_description` from the JSON output and update the skill's SKILL.md
+frontmatter — in its draft, like every skill write (a publish then carries the
+change into the live skill). Show the user before/after and report the scores.
 
 ---
 

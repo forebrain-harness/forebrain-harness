@@ -553,8 +553,12 @@ func newOfferHarness(t *testing.T) *offerTestHarness {
 }
 
 func (h *offerTestHarness) rewrap() {
+	// Trusted with a project root, and deliberately NOT version controlled: the
+	// VCS gate is gone (R6), so a trusted project needs no .git to receive the
+	// offer. The positive gate tests below therefore also prove the non-VCS
+	// path opens.
 	project := safety.ProjectContext{
-		Project:    safety.Project{Root: h.home, VersionControlled: true},
+		Project:    safety.Project{Root: h.home},
 		TrustLevel: safety.LevelTrusted,
 	}
 	h.wrap = wrapSkillOfferLLM(h.inner, h.cfg, func() *tool.State { return h.state }, h.home, project).(*skillOfferLLM)
@@ -699,10 +703,11 @@ func TestSkillOfferGateOpensOnRecovery(t *testing.T) {
 	}
 }
 
-// TestSkillOfferSuppressedWithoutVersionControlledProject covers suppression
-// 1: without a version-controlled project root the offer would name a command
-// whose output has nowhere to land.
-func TestSkillOfferSuppressedWithoutVersionControlledProject(t *testing.T) {
+// TestSkillOfferSuppressedWithoutAProjectRoot covers suppression 1: without a
+// project root the offer would name a command whose output has nowhere to land.
+// Version control is not the gate (R6) — a trusted project needs no .git; only
+// the absence of a root suppresses the offer.
+func TestSkillOfferSuppressedWithoutAProjectRoot(t *testing.T) {
 	h := newOfferHarness(t)
 	h.wrap.project = safety.ProjectContext{}
 	msgs := runSegment(breadthCalls(8, []string{"shell", "read_file", "write_file"}))
@@ -1256,4 +1261,116 @@ func underAnyRoot(path string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// --- Skill versions: the session's pinned loads, and the prefix's integrity.
+
+// TestSkillToolLoadsTheSessionPinnedVersion pins the session rule: a runtime
+// that discovered a skill at v1 keeps reading v1's own copy after v2 is
+// published, and the loaded context names the version directory it read.
+func TestSkillToolLoadsTheSessionPinnedVersion(t *testing.T) {
+	root := t.TempDir()
+	writeCatalogSkill(t, root, "gateway-ops", "runbook")
+	store := skill.VersionStore{Root: root}
+	if _, err := store.Bootstrap("gateway-ops", skill.VersionRecord{Kind: skill.VersionKindCreated}); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := store.EnsureDraft("gateway-ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(draft, "SKILL.md"), []byte("---\nname: gateway-ops\ndescription: runbook\n---\n\nv2 body\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Publish("gateway-ops", "v2"); err != nil {
+		t.Fatal(err)
+	}
+	// The formal directory now holds v2; this session is pinned to v1.
+	formal, err := os.ReadFile(filepath.Join(root, "gateway-ops", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(formal), "v2 body") {
+		t.Fatalf("formal directory does not hold v2: %q", formal)
+	}
+
+	st := tool.NewState(root)
+	st.ReplaceLoadedSkillCatalog([]tool.LoadedSkill{{
+		Name:         "gateway-ops",
+		RootDir:      filepath.Join(root, "gateway-ops"),
+		Version:      1,
+		VersionsRoot: filepath.Join(root, ".versions", "gateway-ops"),
+	}})
+	collector := &toolCollector{}
+	if err := RegisterSkillTool(collector, st); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := collector.byName("skill").Execute(context.Background(), `{"name":"gateway-ops"}`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	out, _ := exec.Result.(string)
+	if !strings.Contains(out, "body") || strings.Contains(out, "v2 body") {
+		t.Fatalf("session read the wrong version:\n%s", out)
+	}
+	pinnedPath := filepath.Join(root, ".versions", "gateway-ops", "v1", "SKILL.md")
+	if !strings.Contains(out, pinnedPath) {
+		t.Fatalf("loaded context does not name the version directory:\n%s", out)
+	}
+}
+
+// TestSkillToolErrorsWhenPinnedVersionIsGone pins the no-fallback rule: a
+// pinned version directory that has disappeared is an error naming the
+// version, never a silent read of the formal directory.
+func TestSkillToolErrorsWhenPinnedVersionIsGone(t *testing.T) {
+	root := t.TempDir()
+	writeCatalogSkill(t, root, "gateway-ops", "runbook")
+	st := tool.NewState(root)
+	st.ReplaceLoadedSkillCatalog([]tool.LoadedSkill{{
+		Name:         "gateway-ops",
+		RootDir:      filepath.Join(root, "gateway-ops"),
+		Version:      7,
+		VersionsRoot: filepath.Join(root, ".versions", "gateway-ops"),
+	}})
+	collector := &toolCollector{}
+	if err := RegisterSkillTool(collector, st); err != nil {
+		t.Fatal(err)
+	}
+	_, err := collector.byName("skill").Execute(context.Background(), `{"name":"gateway-ops"}`)
+	if err == nil || !strings.Contains(err.Error(), "v7") {
+		t.Fatalf("missing pinned version must error naming it: %v", err)
+	}
+}
+
+// TestSkillCatalogBytesIgnoreVersions is the prompt-cache lock (STOP 2): a
+// skill's version history and drafts never change the catalog's bytes — the
+// catalog is part of the cached prefix, and the prefix may only change
+// between sessions, never by a publish.
+func TestSkillCatalogBytesIgnoreVersions(t *testing.T) {
+	root := t.TempDir()
+	writeCatalogSkill(t, root, "gateway-ops", "runbook")
+	before, err := skill.Catalog([]string{root}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := skill.VersionStore{Root: root}
+	if _, err := store.Bootstrap("gateway-ops", skill.VersionRecord{Kind: skill.VersionKindCreated}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureDraft("gateway-ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Publish("gateway-ops", "a version the session never sees"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := skill.Catalog([]string{root}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("catalog bytes changed across a publish:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if strings.Contains(after, ".versions") || strings.Contains(after, "v1") || strings.Contains(after, ".drafts") {
+		t.Fatalf("catalog leaks version storage:\n%s", after)
+	}
 }

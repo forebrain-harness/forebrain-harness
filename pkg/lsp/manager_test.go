@@ -807,11 +807,10 @@ func runIntegrationCase(t *testing.T, c integrationCase, srv ServerConfig) {
 	pool := NewPool(cfg)
 	t.Cleanup(func() { _ = pool.Close() })
 	m := pool.NewManager(ManagerOptions{
-		Home:              t.TempDir(),
-		AgentWorkspace:    t.TempDir(),
-		ProjectRoot:       dir,
-		Trusted:           true,
-		VersionControlled: true,
+		Home:           t.TempDir(),
+		AgentWorkspace: t.TempDir(),
+		ProjectRoot:    dir,
+		Trusted:        true,
 	})
 
 	ctx := context.Background()

@@ -18,7 +18,7 @@ func Seed(root string) error {
 	if err := skill.Install(root); err != nil {
 		slog.Warn("system skills install failed", "err", err)
 	}
-	if err := llm.InitGlobalCatalog(root); err != nil {
+	if err := llm.InitGlobalCatalog(root, home.Version); err != nil {
 		slog.Warn("model catalog seed failed", "err", err)
 	}
 	return nil

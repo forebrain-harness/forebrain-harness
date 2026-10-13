@@ -170,4 +170,24 @@ describe('ForebrainPromptTextarea', () => {
     await empty.composer.find('textarea').trigger('keydown', { key: 'ArrowLeft', shiftKey: true })
     expect(empty.composer.emitted('edit-last-queued')).toBeUndefined()
   })
+
+  // The @ picker resolves against the conversation's file view, so its scope
+  // rides every candidate request: the composer is told which project or
+  // session it belongs to and passes it straight through.
+  it('resolves the @ picker against the conversation scope', async () => {
+    const search = vi.spyOn(forebrainApi, 'mentionSearch').mockResolvedValue({ query: '', records: [] })
+    try {
+      const { composer } = mountComposer({ scope: { sessionId: 's1' } })
+      const textarea = composer.find('textarea')
+      ;(textarea.element as HTMLTextAreaElement).value = '@'
+      ;(textarea.element as HTMLTextAreaElement).setSelectionRange(1, 1)
+      await textarea.trigger('input')
+      await textarea.trigger('keydown', { key: 'ArrowDown' })
+      await textarea.trigger('keydown', { key: 'Enter' })
+      await vi.waitFor(() => expect(search).toHaveBeenCalled())
+      expect(search).toHaveBeenLastCalledWith('', { sessionId: 's1' })
+    } finally {
+      search.mockRestore()
+    }
+  })
 })

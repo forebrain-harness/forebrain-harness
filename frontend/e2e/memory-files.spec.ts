@@ -90,20 +90,31 @@ test('edit a core file and a regular file', async ({ page }) => {
   await signIn(page)
   await page.goto('/memories', { waitUntil: 'networkidle' })
   await page.click('[data-testid="memories-edit-MEMORY.md"]')
-  await expect(page.locator('[data-testid="memories-editor"]')).toBeVisible()
-  await page.fill('[data-testid="memories-editor-text"]', '# after edit\n')
-  await page.click('[data-testid="memories-editor-save"]')
-  await expect(page.locator('[data-testid="memories-editor"]')).toHaveCount(0, { timeout: 10_000 })
+  const editor = page.locator('[data-testid="memories-editor"]')
+  await expect(editor).toBeVisible()
+  // Markdown opens in the WYSIWYG editor; nothing edited means no save.
+  const prose = editor.locator('.ProseMirror')
+  await expect(prose).toBeVisible({ timeout: 15_000 })
+  await expect(editor.locator('[data-testid="memories-editor-save"]')).toBeDisabled()
+  await prose.click()
+  await page.keyboard.press('ControlOrMeta+A')
+  await page.keyboard.type('改好了')
+  await editor.locator('[data-testid="memories-editor-save"]').click()
+  await expect(editor).toHaveCount(0, { timeout: 15_000 })
 
   // Reopen: the saved bytes are what the editor loads.
   await page.click('[data-testid="memories-edit-MEMORY.md"]')
-  await expect(page.locator('[data-testid="memories-editor-text"]')).toHaveValue('# after edit\n')
+  await expect(page.locator('[data-testid="memories-editor"] .ProseMirror')).toContainText('改好了', { timeout: 15_000 })
   await page.getByRole('button', { name: /取消|Cancel/ }).click()
 
   await page.click('[data-testid="memories-edit-notes/editable.md"]')
-  await page.fill('[data-testid="memories-editor-text"]', 'second version\n')
+  const second = page.locator('[data-testid="memories-editor"] .ProseMirror')
+  await expect(second).toBeVisible({ timeout: 15_000 })
+  await second.click()
+  await page.keyboard.press('ControlOrMeta+A')
+  await page.keyboard.type('second version')
   await page.click('[data-testid="memories-editor-save"]')
-  await expect(page.locator('[data-testid="memories-editor"]')).toHaveCount(0, { timeout: 10_000 })
+  await expect(page.locator('[data-testid="memories-editor"]')).toHaveCount(0, { timeout: 15_000 })
 })
 
 test('delete refuses core files and removes the rest', async ({ page }) => {
@@ -159,12 +170,12 @@ test('clearing the project scope leaves global memory alone', async ({ page }) =
   mkdirSync(projectMemoryRoot, { recursive: true })
   writeFileSync(join(projectMemoryRoot, 'project-note.md'), 'project only\n')
 
-  await page.click('.project-tab:has-text("记忆"), .project-tab:has-text("Memory")')
+  await page.click('.proj-tab:has-text("记忆"), .proj-tab:has-text("Memory")')
   await expect(page.locator('[data-memory-file="project-note.md"]')).toBeVisible({ timeout: 10_000 })
   await shot(page, 'memories-project')
 
   await page.click('[data-testid="memories-clear-all"]')
-  await page.click('[data-testid="memories-clear-confirm-ok"]')
+  await page.click('[data-testid="confirm-ok"]')
   await expect(page.locator('[data-memory-file="project-note.md"]')).toHaveCount(0, { timeout: 10_000 })
 
   // The global scope the agent page lists is untouched by that clear.
@@ -181,7 +192,7 @@ test('clearing the global scope empties the agent page', async ({ page }) => {
   await page.goto('/memories', { waitUntil: 'networkidle' })
   await expect(page.locator('[data-memory-file="MEMORY.md"]')).toBeVisible({ timeout: 10_000 })
   await page.click('[data-testid="memories-clear-all"]')
-  await page.click('[data-testid="memories-clear-confirm-ok"]')
+  await page.click('[data-testid="confirm-ok"]')
   await expect(page.locator('[data-memory-file]')).toHaveCount(0, { timeout: 10_000 })
   await expect(page.getByText(/暂无记忆文件|No memory files yet/)).toBeVisible()
 })

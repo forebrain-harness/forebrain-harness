@@ -100,7 +100,7 @@ func resolveUncachedWithHooks(hooks StartupHooks) (Context, error) {
 	}
 	// Initialize the global model catalog from models.json so that provider
 	// validation and token-limit lookups are available to all downstream code.
-	if err := llm.InitGlobalCatalog(home); err != nil {
+	if err := llm.InitGlobalCatalog(home, homepkg.Version); err != nil {
 		slog.Warn("failed to initialize global model catalog", "err", err)
 	}
 	if err := runStartupHook(StartupMergeConfigEnv, hooks); err != nil {

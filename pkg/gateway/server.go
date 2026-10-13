@@ -90,6 +90,41 @@ func (s *Server) runnerFor(ctx context.Context, sessionID string) *run.Runner {
 	return s.Runner
 }
 
+// runnerForTurn resolves the Runner one conversation's turn must run on. Unlike
+// runnerFor it never falls back to the base runner for a conversation with a
+// project: an unresolvable turn is refused with an error the caller reports.
+func (s *Server) runnerForTurn(ctx context.Context, sessionID string) (*run.Runner, error) {
+	if s == nil {
+		return nil, process.ErrSessionHasNoProject
+	}
+	if s.Env != nil {
+		return s.Env.RunnerForTurn(ctx, strings.TrimSpace(sessionID))
+	}
+	// A server with no environment has no project registry to resolve against
+	// (a bare test fixture). The turn proceeds on the server's own runner; the
+	// session-busy and attachment checks downstream decide whether it can run.
+	return s.Runner, nil
+}
+
+// gatewayTurnRunnerError maps a turn-runner refusal to the stable code and the
+// sentence a client shows. Both refusals are facts about the conversation, not
+// the provider, so they carry a code the page can render in the viewer's own
+// language. The text is the same fixed bilingual sentence in either language.
+func gatewayTurnRunnerError(err error) (code, text string) {
+	var missing process.ErrSessionDirectoryMissing
+	switch {
+	case errors.As(err, &missing):
+		dir := strings.TrimSpace(missing.Dir)
+		return "session_directory_missing",
+			"这个对话所在的目录已不存在：" + dir + "。无法继续。 / This conversation's directory no longer exists: " + dir + ". Cannot continue."
+	case errors.Is(err, process.ErrSessionHasNoProject):
+		return "session_has_no_project",
+			"这个对话不属于任何项目，无法运行。 / This conversation belongs to no project and cannot run."
+	default:
+		return "", err.Error()
+	}
+}
+
 // projectStore lazily builds the project store for the active agent.
 func (s *Server) projectStore() *state.ProjectStore {
 	if s == nil {
@@ -358,16 +393,35 @@ func (s *Server) stateRoot() string {
 	return config.ActiveStateRoot(s.Home, s.liveCfg())
 }
 
-// projectKey returns the runner's launch-project scope. Every context this
-// server builds must use it: plan files live in <stateRoot>/plans/<key>, so a
-// context wired with a different key allows writes to a directory other than
-// the one the plan-mode reminder tells the model to write, and every plan write
-// is rejected.
-func (s *Server) projectKey() string {
-	if s == nil || s.Runner == nil {
+// sessionProjectKey resolves one conversation's project key: the identity its
+// plan files and project memories live under (state.ProjectKeyForRoot of the
+// session's project root), or "" when the conversation belongs to no project.
+//
+// Every gateway context and plan read must resolve its key this way, per
+// session. The gateway process was started with no project of its own
+// (OpenOptions.NoLaunchProject), so its base Runner.ProjectKey is empty while
+// each session runs on a project runner whose key is set; a context wired from
+// the base runner's key would name a plan directory other than the one the
+// session writes to, and every plan write would be rejected.
+func (s *Server) sessionProjectKey(ctx context.Context, sessionID string) string {
+	if s == nil {
 		return ""
 	}
-	return strings.TrimSpace(s.Runner.ProjectKey)
+	return projectKeyForSession(ctx, s.Projects, sessionID)
+}
+
+// projectKeyForSession is the resolution behind sessionProjectKey, over an
+// explicit store so the approval gate built before the Server exists
+// (RunServeBlocking) resolves the same key by the same rule.
+func projectKeyForSession(ctx context.Context, projects *state.ProjectStore, sessionID string) string {
+	if projects == nil {
+		return ""
+	}
+	project, ok, err := projects.ProjectForSession(ctx, strings.TrimSpace(sessionID))
+	if err != nil || !ok {
+		return ""
+	}
+	return state.ProjectKeyForRoot(project.Root)
 }
 
 func (s *Server) bus() channel.Bus {
@@ -1547,6 +1601,26 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			writeMsg(reply)
 			continue
 		}
+		// A turn belongs to a conversation, and every conversation runs on its
+		// project's runner (R1). Resolve that runner before the run row exists:
+		// a conversation whose project directory is gone, or which belongs to no
+		// project, has no runner to start on, and the refusal must not leave a
+		// run behind for a turn that never ran.
+		turnRunner, turnRunnerErr := s.runnerForTurn(r.Context(), sid)
+		if turnRunnerErr != nil {
+			code, message := gatewayTurnRunnerError(turnRunnerErr)
+			refusal := wsServerMsg{
+				Op:        "run_error",
+				RequestID: m.RequestID,
+				SessionID: sid,
+				Message:   code,
+				Error:     message,
+				Data:      map[string]any{"code": code},
+			}
+			writeMsg(refusal)
+			wsRequestCacheSet(requestCache, m.RequestID, refusal, 2*time.Minute, time.Now())
+			continue
+		}
 		runStart := time.Now()
 		currentTraceID.Store("trace-" + strconv.FormatInt(time.Now().UnixNano(), 10))
 		// A client that stops while the conversation is being compacted for
@@ -1670,7 +1744,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		// What the message attaches is made available before its turn exists:
 		// a file that cannot be never leaves the turn half-sent. The message
 		// goes back to the composer whole, with the error that stopped it.
-		turnInput, attachErr := s.prepareWebTurnInput(r.Context(), content, attachments, mentionImages)
+		turnInput, attachErr := s.prepareWebTurnInput(r.Context(), sid, content, attachments, mentionImages)
 		if attachErr != nil {
 			writeMsg(wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: attachErr.Error()})
 			continue
@@ -1748,7 +1822,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		// carries what the user typed, while PartsJSON carries what the model
 		// is sent. The model is sent exactly what the row replays as, so this
 		// request and every later one carry the same message.
-		inputParts := run.UserInputParts(r.Context(), s.runnerFor(r.Context(), sid).FileResolver, turnInput.partsJSON)
+		inputParts := run.UserInputParts(r.Context(), turnRunner.FileResolver, turnInput.partsJSON)
 		if s.Sessions != nil {
 			turn.PersistUserTurn(r.Context(), s.Sessions, turn.UserTurn{
 				SessionID:  sid,
@@ -1778,7 +1852,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			// turn. Re-deriving it here is how this path came to allow writes to
 			// <stateRoot>/plans while the plan-mode reminder pointed the model at
 			// <stateRoot>/plans/<project>, so every plan write was rejected.
-			agCtx = process.AgentContextForProject(agCtx, s.stateRoot(), sid, s.projectKey())
+			agCtx = process.AgentContextForProject(agCtx, s.stateRoot(), sid, s.sessionProjectKey(agCtx, sid))
 		}
 		if s.RunRT != nil && s.Runner != nil {
 			if err := s.Runner.Load(); err == nil {
@@ -1924,7 +1998,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else {
-			res, _, agentErr = run.RunPipeline(agCtx, s.runnerFor(agCtx, sid), s.Hooks, hc, input, inputParts)
+			res, _, agentErr = run.RunPipeline(agCtx, turnRunner, s.Hooks, hc, input, inputParts)
 		}
 		runFinishedAt := time.Now()
 		runElapsed := runFinishedAt.Sub(runStart)
@@ -1945,6 +2019,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 					ActionKind: rae.ActionKind,
 				})
 				approvalData := approvalWSData(s.sessionPermissions(r.Context(), sid), sid, rae.ActionID, rae.ActionKind, rae.ToolName, rae.ToolInput)
+				approvalData = withApprovalToolStepID(approvalData, rae)
 				writeMsg(wsServerMsg{
 					Op:        "step",
 					RequestID: m.RequestID,

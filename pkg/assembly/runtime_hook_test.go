@@ -30,9 +30,6 @@ func TestNewHookWiresSharedRuntimeProviders(t *testing.T) {
 		PrimaryModel: func(string) (string, string) {
 			return "openai", "gpt-5.4"
 		},
-		PinsProvider: func(sessionID string) []string {
-			return []string{"README.md"}
-		},
 		ReadStatesProvider: func() []tool.ReadState {
 			return []tool.ReadState{{AbsPath: "/repo/internal/compact/service.go"}}
 		},
@@ -41,9 +38,6 @@ func TestNewHookWiresSharedRuntimeProviders(t *testing.T) {
 	limits, ok := hook.ModelLimitsProvider("s1")
 	if !ok || limits.Context != 128000 || limits.Output != 16000 {
 		t.Fatalf("ModelLimitsProvider=(%+v,%v)", limits, ok)
-	}
-	if got := hook.PinsProvider("s1"); len(got) != 1 || got[0] != "README.md" {
-		t.Fatalf("PinsProvider=%v", got)
 	}
 	if got := hook.ReadStatesProvider(); len(got) != 1 || got[0].AbsPath != "/repo/internal/compact/service.go" {
 		t.Fatalf("ReadStatesProvider=%v", got)

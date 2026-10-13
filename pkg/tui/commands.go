@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -142,8 +143,10 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	} else if stats := c.session.SurfaceComposerTokenStats(sid, state.TokenCountFromLastAPIResponse(activeTurns)); stats.Active {
 		c.renderer.SetComposerTokenStats("", stats)
 	}
-	if frame := note(len(turns)); frame != nil {
-		c.renderer.RenderFrame(*frame)
+	if note != nil {
+		if frame := note(len(turns)); frame != nil {
+			c.renderer.RenderFrame(*frame)
+		}
 	}
 	if loader, ok := c.session.(interface {
 		LoadSurfaceBrowseState(context.Context, string) (RendererBrowseState, bool, error)
@@ -234,6 +237,16 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 	msg := Message{
 		Kind: kind, Content: content, ToolMeta: meta,
 		AgentID: strings.TrimSpace(meta.AgentID), Timestamp: timestamp,
+	}
+	// A reasoning row is one whole block, not a delta, and the row carries how
+	// long the model spent on it. A duration therefore marks this as the
+	// replayed shape, and the reducer seals it with that duration instead of
+	// deriving one from the row's second-precision created_at (which is the
+	// same second for every row of a turn, and so reads as zero).
+	if kind == MsgKindReasoning {
+		if spent, ok := state.ParseReasoningTiming(turn.PartsJSON); ok {
+			msg.Duration = spent
+		}
 	}
 	renderReplayFrames(renderer, reducer, msg, "", meta, timing)
 }
@@ -1981,8 +1994,164 @@ func (c *commandController) handleMigrate(ctx context.Context, sessionID string)
 	return true
 }
 
-// sessionFastAvailable reports whether the active session supports the /fast
-// command. Gated to Anthropic Opus (the only family with the priority
+// rewindSession is the slice of the active session /rewind needs: the shared
+// rewind engine, built from the conversation store, the run store, and the
+// tool state whose history dir holds the undo snapshots.
+type rewindSession interface {
+	RewindEngine() *turn.RewindStore
+}
+
+// handleRewind drives /rewind: pick a message (or undo the last rewind), pick
+// how much to restore, review the files, then run the shared engine. It
+// returns the anchor text so the caller can put it back in the composer.
+func (c *commandController) handleRewind(ctx context.Context, sessionID string) (anchor string, applied bool) {
+	if c == nil || c.session == nil || c.selector == nil {
+		return "", false
+	}
+	rs, ok := c.session.(rewindSession)
+	if !ok {
+		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "rewind", Content: "rewind: unavailable in this session", Final: true})
+		return "", false
+	}
+	eng := rs.RewindEngine()
+	if eng == nil {
+		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "rewind", Content: "rewind: unavailable", Final: true})
+		return "", false
+	}
+	sid := strings.TrimSpace(sessionID)
+	if eng.Runs != nil {
+		busy, err := eng.Runs.SessionHasLiveRun(ctx, sid)
+		if err != nil {
+			c.renderer.PrintError(err)
+			return "", false
+		}
+		if busy {
+			c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "rewind", Content: "rewind: unavailable while the conversation is running", Final: true})
+			return "", false
+		}
+	}
+	_, hasPending, err := eng.Store.PendingRewind(ctx, sid)
+	if err != nil {
+		c.renderer.PrintError(err)
+		return "", false
+	}
+	msgs, err := eng.Store.ListVisibleUserMessages(ctx, sid, 200)
+	if err != nil {
+		c.renderer.PrintError(err)
+		return "", false
+	}
+	if len(msgs) == 0 && !hasPending {
+		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "rewind", Content: "rewind: no messages to rewind to", Final: true})
+		return "", false
+	}
+	var (
+		items  []SelectItem
+		values []string
+	)
+	if hasPending {
+		items = append(items, SelectItem{Label: "Undo the last rewind", Description: "put the files and the conversation back"})
+		values = append(values, "")
+	}
+	for _, m := range msgs {
+		items = append(items, SelectItem{
+			Label:       truncate(strings.TrimSpace(firstLine(m.Content)), 72),
+			Description: "message " + strconv.FormatInt(m.RowID, 10),
+		})
+		values = append(values, strconv.FormatInt(m.RowID, 10))
+	}
+	idx, okSel, selErr := c.selector.SelectRich(
+		"Rewind\nRestore code and/or the conversation to before a message", items, 0)
+	if selErr != nil {
+		c.renderer.PrintError(selErr)
+		return "", false
+	}
+	if !okSel || idx < 0 || idx >= len(items) {
+		return "", false
+	}
+	if values[idx] == "" {
+		if err := turn.UndoRewind(ctx, eng, sid); err != nil {
+			c.renderer.PrintError(err)
+			return "", false
+		}
+		c.replaySession(sid, nil)
+		c.renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "rewind", Content: "Rewind undone.", Final: true})
+		return "", true
+	}
+	anchorRow, parseErr := strconv.ParseInt(values[idx], 10, 64)
+	if parseErr != nil {
+		return "", false
+	}
+
+	modeIdx, okMode, modeErr := c.selector.SelectRich("Restore\nWhat should go back to before that message?", []SelectItem{
+		{Label: "Code and conversation"},
+		{Label: "Conversation only"},
+		{Label: "Code only"},
+	}, 0)
+	if modeErr != nil {
+		c.renderer.PrintError(modeErr)
+		return "", false
+	}
+	if !okMode {
+		return "", false
+	}
+	mode := []string{turn.RewindModeBoth, turn.RewindModeChat, turn.RewindModeCode}[modeIdx]
+
+	preview, err := turn.PreviewRewind(ctx, eng, sid, anchorRow)
+	if err != nil {
+		c.renderer.PrintError(err)
+		return "", false
+	}
+	var keepPaths []string
+	if (mode == turn.RewindModeBoth || mode == turn.RewindModeCode) && len(preview.Files) > 0 {
+		labels := make([]string, 0, len(preview.Files))
+		for _, f := range preview.Files {
+			label := fmt.Sprintf("%s   +%d −%d", f.Path, f.Added, f.Removed)
+			if f.Created {
+				label += "   (new file)"
+			}
+			if f.ChangedAfter {
+				label += "   (changed since)"
+			}
+			labels = append(labels, label)
+		}
+		kept, okMulti, multiErr := c.selector.MultiSelect(
+			"Files to restore\nUncheck a file to leave it as it is. Terminal command changes are not undone.", labels, labels)
+		if multiErr != nil {
+			c.renderer.PrintError(multiErr)
+			return "", false
+		}
+		if !okMulti {
+			return "", false
+		}
+		keptSet := make(map[string]bool, len(kept))
+		for _, k := range kept {
+			keptSet[k] = true
+		}
+		for i, label := range labels {
+			if !keptSet[label] {
+				keepPaths = append(keepPaths, preview.Files[i].Path)
+			}
+		}
+	}
+
+	res, err := turn.Rewind(ctx, eng, sid, anchorRow, mode, keepPaths)
+	if err != nil {
+		c.renderer.PrintError(err)
+		return "", false
+	}
+	quoted := truncate(strings.TrimSpace(firstLine(res.AnchorText)), 60)
+	var summary string
+	if mode == turn.RewindModeCode {
+		summary = fmt.Sprintf("Rewound %d file(s) to before “%s” · /rewind to undo", len(res.Restored), quoted)
+	} else {
+		summary = fmt.Sprintf("Rewound to before “%s” · restored %d file(s) · /rewind to undo", quoted, len(res.Restored))
+	}
+	c.replaySession(sid, nil)
+	c.renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "rewind", Content: summary, Final: true})
+	return res.AnchorText, true
+}
+
+// sessionFastAvailable reports whether the active session supports the /fast// command. Gated to Anthropic Opus (the only family with the priority
 // service tier surfaced by Forebrain Harness's Anthropic agent LLM). Non-Opus models
 // hide /fast from the tui picker.
 func sessionFastAvailable(session Session) bool {

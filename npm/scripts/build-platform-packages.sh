@@ -4,6 +4,12 @@
 #   vendor/{triple}/bin/forebrain{,.exe}
 #   vendor/{triple}/bin/dict/        (word-segmentation dictionary, read from
 #                                     beside the binary; see scripts/install-dictionary.sh)
+#   vendor/{triple}/bin/models.json  (model catalog, read from beside the
+#                                     binary; see scripts/install-assets.sh)
+#   vendor/{triple}/bin/tokenizers/  (bundled tokenizer files, read/installed
+#                                     from beside the binary; see
+#                                     scripts/install-assets.sh and
+#                                     assets/tokenizers/README.md)
 #   package.json (with os/cpu fields)
 #
 # The web UI is rebuilt here by default (`make ui`) so every platform binary
@@ -16,6 +22,12 @@
 # FOREBRAIN_BUILD_TARGETS (default: only the host triple) so local dev does not
 # need every C toolchain. For windows/amd64 cross-builds install mingw-w64
 # (provides x86_64-w64-mingw32-gcc) or override FOREBRAIN_CC_WINDOWS_AMD64.
+#
+# Every target also links the tokenizers static library, fetched per target by
+# scripts/fetch-libtokenizers.sh (called below). darwin/linux download a pinned
+# prebuilt archive; windows/amd64 is compiled from the pinned Rust source, so a
+# windows/amd64 build needs git, cargo, and the x86_64-pc-windows-gnu Rust
+# target (added by the fetch script when rustup is present).
 #
 # Env:
 #   FOREBRAIN_VERSION            — package version (default: the VERSION file's content)
@@ -132,6 +144,7 @@ build_target() {
   fi
 
   echo "==> building $target ($triple)"
+  "$ROOT_DIR/scripts/fetch-libtokenizers.sh" "$target"
   (
     cd "$ROOT_DIR"
     CC="$cc" CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
@@ -143,9 +156,10 @@ build_target() {
         ./cmd/forebrain
   )
   chmod +x "$pkg_dir/vendor/$triple/bin/forebrain${bin_ext}" || true
-  # The dictionary ships in the same package as the binary, so one install
-  # puts both where forebrain reads them.
+  # The dictionary and the model catalog ship in the same package as the
+  # binary, so one install puts them all where forebrain reads them.
   "$ROOT_DIR/scripts/install-dictionary.sh" "$pkg_dir/vendor/$triple/bin"
+  "$ROOT_DIR/scripts/install-assets.sh" "$pkg_dir/vendor/$triple/bin"
 
   cat >"$pkg_dir/package.json" <<JSON
 {

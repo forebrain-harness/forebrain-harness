@@ -9,9 +9,9 @@ import {
 } from '@repo/elements/code-block'
 
 // Code is painted with one theme across the whole product: the terminal
-// renderer resolves chroma's monokai/monokailight, and every highlighter in the
-// web client must resolve the same pair — a file cannot change colour because
-// it is being shown by a different card or a different client.
+// renderer resolves chroma's monokai/monokailight, and the web client always
+// renders the light sibling — a file does not change colour because the
+// client's colour scheme changed, or because a different card shows it.
 describe('code theme', () => {
   it('names monokai and its light sibling', () => {
     expect(codeThemeDark).toBe('monokai')
@@ -22,10 +22,13 @@ describe('code theme', () => {
     expect(codeThemeInputs).toEqual([codeThemeLight, codeThemeDark])
   })
 
-  it('hands the markdown renderer the same pair', () => {
+  it('hands the markdown renderer the light theme only', () => {
+    // The preload tuple names a bundled theme for both slots (Shiki bundles
+    // no Monokai Light); the pair actually rendered is Monokai Light alone,
+    // so the dark palette never reaches the web.
     expect(markdownShikiOptions.theme).toEqual(['monokai', 'monokai'])
     expect(markdownShikiOptions.codeToTokenOptions).toEqual({
-      themes: { light: codeThemeLight, dark: 'monokai' },
+      themes: { light: codeThemeLight },
     })
   })
 

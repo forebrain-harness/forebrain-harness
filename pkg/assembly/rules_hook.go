@@ -3,7 +3,6 @@ package assembly
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/hook"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
 // RuleSource names one instruction file the merged rules body is built from,
@@ -77,7 +77,7 @@ func (p *PreHook) run(ctx context.Context, phase string, hc hook.HookContext, te
 	if t == "" || strings.HasPrefix(t, "/") {
 		return out, nil
 	}
-	wd, ok := rulesWorkingDir()
+	wd, ok := rulesWorkingDir(ctx)
 	if !ok {
 		return out, nil
 	}
@@ -107,7 +107,7 @@ func (p *PreHook) loadRules(wd string, hc hook.HookContext) string {
 // hook does and shares the cache key with the merged body, so the list always
 // describes exactly the text the hook injects.
 func (p *PreHook) InstructionSources() []RuleSource {
-	wd, ok := rulesWorkingDir()
+	wd, ok := rulesWorkingDir(context.Background())
 	if !ok {
 		return nil
 	}
@@ -115,11 +115,14 @@ func (p *PreHook) InstructionSources() []RuleSource {
 }
 
 // rulesWorkingDir is the directory the rules body is resolved against: the
-// process working directory, the one place both the injection and the report
-// read it from.
-func rulesWorkingDir() (string, bool) {
-	wd, err := os.Getwd()
-	if err != nil || wd == "" {
+// session project root the turn's context carries, so the injection and the
+// report read the same directory. A context without one (the TUI's /status
+// report, which runs outside a turn) falls back to the process directory —
+// which for the TUI is the project root it launched in, the same directory the
+// injection resolves to there.
+func rulesWorkingDir(ctx context.Context) (string, bool) {
+	wd, err := tool.WorkingDir(ctx)
+	if err != nil || strings.TrimSpace(wd) == "" {
 		return "", false
 	}
 	return wd, true

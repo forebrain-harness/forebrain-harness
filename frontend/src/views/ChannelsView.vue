@@ -1,19 +1,12 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-3 pb-12 pt-6 sm:px-6">
     <div class="mx-auto w-full max-w-3xl">
-      <header class="mb-5 flex items-end justify-between gap-4">
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-[1.5rem] font-medium leading-tight text-[var(--forebrain-text)]">{{ t('channels.title') }}</h1>
-            <ScopeBadge type="agent" :label="t('scope.agent')" />
-          </div>
-          <p class="mt-1 text-[13px] leading-relaxed text-[var(--forebrain-text-2)]">{{ t('channels.description') }}</p>
-        </div>
-        <div class="flex gap-2">
+      <PageTopRow :title="t('channels.title')" :description="t('channels.description')">
+        <template #actions>
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">{{ t('common.refresh') }}</button>
           <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" @click="save">{{ t('common.save') }}</button>
-        </div>
-      </header>
+        </template>
+      </PageTopRow>
 
       <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
       <p v-if="notice" class="mb-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
@@ -56,7 +49,7 @@
  * already on disk; typing over it replaces that value.
  */
 import { computed, onMounted, ref } from 'vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'

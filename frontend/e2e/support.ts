@@ -1,3 +1,6 @@
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+
 import type { Page, Response } from '@playwright/test'
 
 /** Save a full-page screenshot into the run's shots directory. */
@@ -5,6 +8,48 @@ export async function shot(page: Page, name: string): Promise<void> {
   const dir = process.env.E2E_SHOTS
   if (!dir) throw new Error('E2E_SHOTS must point at the screenshots directory')
   await page.screenshot({ path: `${dir}/${name}.png`, fullPage: true })
+}
+
+let seedSeq = 0
+
+function uniqueSuffix(): string {
+  return `${Date.now().toString(36)}-${(++seedSeq).toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+/**
+ * Find or create a project bound to root and open a conversation in it,
+ * returning the session id. Used where a test needs the conversation's
+ * directory to be a specific one — the gateway's launch directory, say.
+ */
+export async function seedSessionInRoot(page: Page, root: string, name = 'e2e-root'): Promise<string> {
+  const res = await page.request.post('/api/v1/projects', { data: { name, root, trust: true } })
+  let projectId = ''
+  if (res.status() === 409) {
+    const body = (await res.json()) as { project?: { id?: string } }
+    projectId = String(body.project?.id ?? '')
+  } else if (res.ok()) {
+    projectId = String(((await res.json()) as { id: string }).id)
+  } else {
+    throw new Error(`seed project at root failed: ${res.status()} ${await res.text()}`)
+  }
+  const session = await page.request.post('/api/chat/sessions', { data: { project_id: projectId } })
+  if (!session.ok()) throw new Error(`seed session failed: ${session.status()} ${await session.text()}`)
+  return String(((await session.json()) as { id: string }).id)
+}
+
+/**
+ * Create a project bound to a fresh scratch directory and open a conversation
+ * in it, returning the session id. Since plan 029 every conversation belongs
+ * to a project, so a test that just needs somewhere to send calls this and
+ * navigates to `/?session=<id>`. The scratch tree under E2E_PROJECT_PARENT is
+ * wiped when the acceptance run starts.
+ */
+export async function seedProjectSession(page: Page, name = 'e2e-seed'): Promise<string> {
+  const parent = process.env.E2E_PROJECT_PARENT
+  if (!parent) throw new Error('E2E_PROJECT_PARENT must point outside the forebrain home')
+  const root = join(parent, 'e2e-seed', `${name}-${uniqueSuffix()}`)
+  mkdirSync(root, { recursive: true })
+  return seedSessionInRoot(page, root, name)
 }
 
 /** Sign the page in with E2E_TOKEN through the one-click sign-in link. */

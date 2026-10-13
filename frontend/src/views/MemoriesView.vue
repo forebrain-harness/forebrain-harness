@@ -1,12 +1,8 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
     <div class="mx-auto w-full max-w-5xl">
-      <div class="flex items-center gap-2">
-        <h1 class="text-xl font-medium text-[var(--forebrain-text)]">{{ t('memories.title') }}</h1>
-        <ScopeBadge type="agent" :label="t('scope.agent')" />
-      </div>
-      <p class="mt-1 text-[13px] text-[var(--forebrain-text-2)]">{{ t('memories.filesDescription') }}</p>
-      <p class="mt-1 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.filesHint') }}</p>
+      <PageTopRow :title="t('memories.title')" :description="t('memories.filesDescription')" />
+      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.filesHint') }}</p>
 
       <div class="mt-4">
         <MemoryFilesPanel scope="global" />
@@ -16,7 +12,7 @@
 </template>
 
 <script setup lang="ts">
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import MemoryFilesPanel from '@/components/memory/MemoryFilesPanel.vue'
 import { useI18n } from '@/locales'
 

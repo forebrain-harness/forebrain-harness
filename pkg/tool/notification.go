@@ -127,6 +127,13 @@ func toolStepBoundary(ctx context.Context, evt StepEvent) string {
 	if evt.Attempt > 0 {
 		boundary += ":attempt-" + strconv.Itoa(evt.Attempt)
 	}
+	// A refused call's answer is a completion of its own. Without its own
+	// boundary it would share the id of the completion that reported the
+	// call waiting for approval, and the idempotent event log would keep
+	// that one and drop the refusal.
+	if evt.Denied {
+		boundary += ":denied"
+	}
 	return boundary
 }
 

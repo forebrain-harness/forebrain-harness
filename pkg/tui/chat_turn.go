@@ -275,6 +275,11 @@ func (s *ChatSession) runAuditStepHook(sessionID string, prev func() tool.StepHo
 				}
 				s.notifyUIForSession(sid, PlanUpdatedMsg{Payload: *evt.PlanUpdate})
 			case event.RunEventToolStarted, event.RunEventToolOutputDelta, event.RunEventToolCompleted:
+				if evt.Kind == event.RunEventToolCompleted {
+					if name := skillDraftNameFromStep(evt.Output); name != "" {
+						s.noteSkillDraftSaved(name)
+					}
+				}
 				if strings.TrimSpace(evt.ToolName) == "" || !shouldNotifyToolStep(evt) || tool.ToolStepRendersAsPlan(evt) {
 					break
 				}
@@ -289,6 +294,14 @@ func (s *ChatSession) runAuditStepHook(sessionID string, prev func() tool.StepHo
 				}
 				if canonicalOK {
 					s.persistRunEvent(stepCtx, canonical)
+				}
+				// The terminal drew this refusal when the user answered it
+				// (notifyToolApprovalDenied), in words only it knows - a nested
+				// gate reads as canceled. The runtime's account of the refusal is
+				// recorded for the other surfaces and for resume, and drawn by
+				// nothing here.
+				if evt.Denied {
+					return
 				}
 				s.notifyToolStepHooks(stepCtx, sid, rid, "tui", evt)
 			}
@@ -461,6 +474,10 @@ func (s *ChatSession) prepareTUIAgentBase(sessionID string, agBase context.Conte
 			}})
 		},
 		OnReasoningDone: func() {
+			// The block ended and was written to the transcript as its own row;
+			// drop it from the cancel buffer so a later cancel keeps only what
+			// is still in flight.
+			accum.ResponseReasoningDone()
 			s.notifyUIForSession(sessionID, ReasoningDoneMsg{turn: foreground})
 		},
 		OnResponseCompleted: func() {
@@ -836,6 +853,7 @@ func (s *ChatSession) runResumeTurn(p *chatApprovalResume, actionID string, v re
 			runID = strings.TrimSpace(p.RunID)
 		}
 		_ = s.sessStore().StampRunTiming(context.Background(), runID, state.RunTiming{StartedAt: end.StartedAt, FinishedAt: end.FinishedAt, Worked: end.Duration})
+		s.emitSkillDraftNotes()
 		s.notifyUI(RunEndedMsg{
 			RunID:          runUsage.runID,
 			WorkedDuration: completion.Duration,
@@ -1219,7 +1237,7 @@ func (s *ChatSession) maybeAutoCompactBeforeAppend(ctx context.Context, sessionI
 			if s.ctxHook() == nil {
 				return assembly.AssemblyResult{}, false, nil
 			}
-			return s.ctxHook().Assemble(hc, input)
+			return s.ctxHook().Assemble(ctx, hc, input)
 		},
 		AutoCompact: svc.AutoCompactSession,
 	})

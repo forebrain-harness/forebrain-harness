@@ -1602,12 +1602,12 @@ func TestFileSystemPermissionSpecialPathsAndGlob(t *testing.T) {
 }
 
 func TestNormalizeRequestPermissionsRejectsNonDenyGlob(t *testing.T) {
-	_, err := NormalizeRequestPermissionsResponse(RequestPermissionsResponse{
+	_, err := NormalizeRequestPermissionsResponseAtCWD(RequestPermissionsResponse{
 		Permissions: RequestPermissionProfile{FileSystem: &FileSystemPermissionProfile{Entries: []FileSystemPermissionEntry{{
 			Path:   FileSystemPermissionPath{Type: FileSystemPermissionPathTypeGlobPattern, Pattern: "**/*.env"},
 			Access: FileSystemAccessRead,
 		}}}},
-	})
+	}, t.TempDir())
 	if err == nil {
 		t.Fatal("non-deny glob was accepted")
 	}

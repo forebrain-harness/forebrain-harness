@@ -1,26 +1,21 @@
 <template>
   <div class="mx-auto max-w-4xl space-y-5">
-    <CardComponent>
-      <template #header>
-        <div class="flex w-full flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ t('projects.sessionsTitle') }}</div>
-          <ScopeBadge type="project" :label="t('scope.project')" />
-        </div>
+    <PageTopRow :title="t('projects.sessionsTitle')" :description="t('projects.sessionsDescription')">
+      <template #actions>
         <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="creating" @click="createSession">
           {{ creating ? t('common.loading') : t('projects.newSession') }}
         </button>
-        </div>
       </template>
-      <p class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('projects.sessionsDescription') }}</p>
+    </PageTopRow>
 
-      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+    <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
 
-      <div v-if="loading" class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!sessions.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
-        {{ t('projects.noSessions') }}
-      </div>
-      <ul v-else class="divide-y divide-[var(--forebrain-divider)]">
+    <div v-if="loading" class="text-[13px] text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+    <div v-else-if="!sessions.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-6 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
+      {{ t('projects.noSessions') }}
+    </div>
+    <div v-else class="forebrain-list-boxed">
+      <ul class="divide-y divide-[var(--forebrain-divider)]">
         <li v-for="session in sessions" :key="session.id">
           <button type="button" class="flex w-full items-center justify-between gap-3 py-3 text-left" @click="openSession(session.id)">
             <span class="min-w-0 flex-1 truncate text-[13px] text-[var(--forebrain-text)]">{{ session.title || t('projects.untitledSession') }}</span>
@@ -28,15 +23,14 @@
           </button>
         </li>
       </ul>
-    </CardComponent>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import CardComponent from '@/components/common/CardComponent.vue'
-import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import PageTopRow from '@/components/common/PageTopRow.vue'
 import { getErrorMessage, forebrainApi, type ProjectSessionRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 

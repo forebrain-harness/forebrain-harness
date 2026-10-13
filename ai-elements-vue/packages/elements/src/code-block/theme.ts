@@ -32,9 +32,10 @@ export const codeThemePair = {
 /**
  * Shiki settings for the Markdown renderer, which owns its own highlighter.
  * It preloads only themes it can find in Shiki's bundle, so Monokai is named
- * for both slots there; the pair actually rendered is handed to the tokeniser
- * below, and Shiki registers the light sibling from its registration on first
- * use.
+ * for both slots there — a preload convenience, not a rendered choice. The
+ * Markdown surface renders the light sibling only: the web paints code with
+ * Monokai Light whatever the client's colour scheme is, so the dark palette
+ * is never handed to the tokeniser.
  */
 export const markdownShikiOptions: {
   theme: [BundledTheme, BundledTheme]
@@ -44,7 +45,6 @@ export const markdownShikiOptions: {
   codeToTokenOptions: {
     themes: {
       light: codeThemeLight,
-      dark: codeThemeDark,
     },
   },
 }

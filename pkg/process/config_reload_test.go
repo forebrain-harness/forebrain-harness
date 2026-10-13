@@ -271,8 +271,10 @@ func TestReloadConfigLeavesMCPServersFrozen(t *testing.T) {
 
 // TestReloadConfigPropagatesToPoolEntries pins the pool half of the reload
 // contract: after the base runner adopts a config, every live project runner
-// is offered the same pointer through its own LoadConfig, so a session bound
-// to a project never serves a config the rest of the process has left behind.
+// is offered the reloaded raw config through its own LoadConfig and re-derives
+// its effective form from it, so a session bound to a project never serves a
+// config the rest of the process has left behind — while its sandbox stays the
+// one its own trust decision produced, not the base runner's.
 func TestReloadConfigPropagatesToPoolEntries(t *testing.T) {
 	ctx := context.Background()
 	env, projects, _ := newPoolTestEnv(t)
@@ -312,8 +314,8 @@ func TestReloadConfigPropagatesToPoolEntries(t *testing.T) {
 		t.Fatalf("ReloadConfig: %v", err)
 	}
 
-	if pooled.AppCfg != env.Deps.AppCfg {
-		t.Fatalf("pooled runner did not adopt the reloaded config")
+	if pooled.AppCfg == env.Deps.AppCfg {
+		t.Fatalf("pooled runner shares the base runner's derived config; its sandbox must follow its own trust")
 	}
 	if got := run.PrimaryEndpoint(pooled); got != "http://propagated.test/v1" {
 		t.Fatalf("pooled runner provider details stale: %q", got)

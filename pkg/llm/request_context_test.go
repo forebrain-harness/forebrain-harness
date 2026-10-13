@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -10,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/pkoukk/tiktoken-go"
 )
 
 func TestParseCacheUsage(t *testing.T) {
@@ -142,102 +139,23 @@ func TestWithFastLastValueWins(t *testing.T) {
 	}
 }
 
-func TestConfigureDoesNotBlockOnEncodingLoad(t *testing.T) {
-	resetTokestimateStateForTest()
-	orig := tiktokenGetEncoding
-	defer func() {
-		tiktokenGetEncoding = orig
-		resetTokestimateStateForTest()
-	}()
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	tiktokenGetEncoding = func(name string) (*tiktoken.Tiktoken, error) {
-		started <- struct{}{}
-		<-release
-		return nil, errors.New("boom")
-	}
-	if err := Configure(TokenEstimateOptions{Encoding: tiktoken.MODEL_CL100K_BASE}); err != nil {
-		t.Fatalf("Configure error: %v", err)
-	}
-	select {
-	case <-started:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("background load did not start")
-	}
-	if got := Label(); got != "rune_div4" {
-		t.Fatalf("label during pending=%q", got)
-	}
-	close(release)
-	waitForTokestimateSettled(t)
-	if got := Label(); got != "rune_div4" {
-		t.Fatalf("label after fallback=%q", got)
-	}
-}
-
-func TestConfigurePromotesToTiktokenAfterBackgroundReady(t *testing.T) {
-	resetTokestimateStateForTest()
-	defer resetTokestimateStateForTest()
-	orig := tiktokenGetEncoding
-	defer func() { tiktokenGetEncoding = orig }()
-	tk := &tiktoken.Tiktoken{}
-	tiktokenGetEncoding = func(name string) (*tiktoken.Tiktoken, error) {
-		return tk, nil
-	}
-	if err := Configure(TokenEstimateOptions{Encoding: tiktoken.MODEL_CL100K_BASE}); err != nil {
-		t.Fatalf("Configure error: %v", err)
-	}
-	waitForTokestimateSettled(t)
-	if got := Label(); got != "tiktoken:"+tiktoken.MODEL_CL100K_BASE {
-		t.Fatalf("label after ready=%q", got)
-	}
-	st.mu.Lock()
-	loaded := st.tk == tk && !st.heur
-	st.mu.Unlock()
-	if !loaded {
-		t.Fatal("expected background-loaded tokenizer to become active")
-	}
-}
-
-func waitForTokestimateSettled(t *testing.T) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		st.mu.Lock()
-		pending := st.pending
-		st.mu.Unlock()
-		if !pending {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("tokestimate did not settle")
-}
-
-func resetTokestimateStateForTest() {
-	st.mu.Lock()
-	st.tk = nil
-	st.label = ""
-	st.encoding = ""
-	st.heur = false
-	st.pending = false
-	st.gen = 0
-	st.useHF = false
-	st.mu.Unlock()
-	resetHFStateForTest()
-}
-
 func TestInstall_EmptyHome(t *testing.T) {
-	if err := Install(""); err == nil {
+	if err := Install("", "(devel)"); err == nil {
 		t.Fatal("expected error for empty forebrainHome")
 	}
-	if err := Install("   "); err == nil {
+	if err := Install("   ", "(devel)"); err == nil {
 		t.Fatal("expected error for whitespace-only forebrainHome")
 	}
 }
 
 func TestInstall_SeedsWhenMissing(t *testing.T) {
 	tmp := t.TempDir()
-	if err := Install(tmp); err != nil {
+	assets, err := RepoAssetsDirForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(AssetsDirEnv, assets)
+	if err := Install(tmp, "(devel)"); err != nil {
 		t.Fatalf("Install failed: %v", err)
 	}
 
@@ -250,10 +168,13 @@ func TestInstall_SeedsWhenMissing(t *testing.T) {
 		t.Fatal("models.json is empty")
 	}
 
-	// Content must match the embedded catalog.
-	embedded := EmbeddedModelsJSON()
-	if len(data) != len(embedded) {
-		t.Fatalf("seeded size = %d, want %d", len(data), len(embedded))
+	// Content must match the catalog the build ships beside the binary.
+	shipped, err := RepoModelsJSONForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != len(shipped) {
+		t.Fatalf("seeded size = %d, want %d", len(data), len(shipped))
 	}
 }
 
@@ -267,7 +188,7 @@ func TestInstall_DoesNotOverwriteExisting(t *testing.T) {
 		t.Fatalf("pre-write: %v", err)
 	}
 
-	if err := Install(tmp); err != nil {
+	if err := Install(tmp, "(devel)"); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -282,13 +203,18 @@ func TestInstall_DoesNotOverwriteExisting(t *testing.T) {
 
 func TestInstall_ThenResolve(t *testing.T) {
 	tmp := t.TempDir()
+	assets, err := RepoAssetsDirForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(AssetsDirEnv, assets)
 
 	// Before Install, Resolve should fail (no models.json).
 	if _, err := Resolve(tmp); err == nil {
 		t.Fatal("expected Resolve to fail before Install")
 	}
 
-	if err := Install(tmp); err != nil {
+	if err := Install(tmp, "(devel)"); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -325,9 +251,13 @@ func errLLM(err error) *stubLLM {
 
 func loadTestCatalog(t *testing.T) *Catalog {
 	t.Helper()
-	cat, err := Parse(EmbeddedModelsJSON())
+	data, err := RepoModelsJSONForTest()
 	if err != nil {
-		t.Fatalf("parse embedded models.json: %v", err)
+		t.Fatalf("read repository models.json: %v", err)
+	}
+	cat, err := Parse(data)
+	if err != nil {
+		t.Fatalf("parse repository models.json: %v", err)
 	}
 	return cat
 }

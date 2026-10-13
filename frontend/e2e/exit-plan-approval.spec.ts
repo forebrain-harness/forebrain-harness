@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 
-import { signIn, shot } from './support'
+import { seedSessionInRoot, signIn, shot } from './support'
 
 /**
  * The web's exit-plan approval, proven on the real page: the card the
@@ -92,9 +92,7 @@ test('a parked exit-plan approval shows its plan and choices, not raw ids', asyn
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
   parkExitPlan(session, 'idle')
   // The seeded plan must be the one the gateway itself resolves — the same
   // scope the approval-request read uses — or the card would have no plan to
@@ -129,9 +127,7 @@ test('a review in flight is an event away: the card says so and the reviewer has
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
   const { runId, actionId } = parkExitPlan(session, 'running')
   const now = Math.floor(Date.now() / 1000)
   const reviewId = 'plan-review:e2e-running'
@@ -178,9 +174,7 @@ test('asking for a review hands it to the planner: the card closes silently', as
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
   parkExitPlan(session, 'live')
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
@@ -214,9 +208,7 @@ test('approving with the context cleared says so on the wire and closes the card
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'zh'))
   await signIn(page)
 
-  const created = await page.request.post('/api/chat/sessions', { data: {} })
-  expect(created.ok()).toBeTruthy()
-  const session = String((await created.json()).id)
+  const session = await seedSessionInRoot(page, process.env.E2E_PROJECT_PARENT!, 'e2e-exit-plan')
   parkExitPlan(session, 'approve')
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })

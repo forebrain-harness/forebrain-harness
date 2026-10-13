@@ -1,9 +1,9 @@
 -- Rows pinned for the v0→v1 migration tests, built on legacy_v0_schema.sql.
 -- Later tasks append rows that cover their own per-table transformations; the
 -- shape declared by legacy_v0_schema.sql itself never changes.
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('alpha','main',NULL,2000,1000);
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('beta','main','beta title',3000,2500);
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('gamma','other','gamma title',4000,3500);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('alpha','main',NULL,2000,1000,'/repo/alpha');
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('beta','main','beta title',3000,2500,'/repo/beta');
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('gamma','other','gamma title',4000,3500,'/repo/gamma');
 INSERT INTO fb_messages(session_id, run_id, role, content, created_at, message_id, parts, model, source, tool_step_id, tool_meta_json) VALUES
  ('alpha','','user','alpha question',1010,'m-alpha-1','[]','','transcript','',''),
  ('alpha','','assistant','alpha answer',1020,'m-alpha-2','[]','model-x','transcript','',''),
@@ -20,8 +20,8 @@ INSERT INTO fb_jobs(id) VALUES('stale-job');
 -- delta exercises title normalization, sentinel-to-NULL, origin mapping, the
 -- row-id pointer conversions, and created_at rederivation; its messages give
 -- the rederivation something to find.
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, parent_session_id, project_id, origin, compact_boundary_id, context_reset_row_id) VALUES('delta','main','',3900,0,'ghost','prj-missing','migrated','1',3);
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, origin) VALUES('epsilon','main','   ',4100,4050,'');
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, parent_session_id, project_id, origin, compact_boundary_id, context_reset_row_id, cwd) VALUES('delta','main','',3900,0,'ghost','prj-missing','migrated','1',3,'/repo/delta');
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, origin, cwd) VALUES('epsilon','main','   ',4100,4050,'','/repo/epsilon');
 INSERT INTO fb_messages(session_id, run_id, role, content, created_at, message_id, parts, model, source) VALUES
  ('delta','run-missing','user','delta question',3100,'m-delta-1','[]',NULL,'transcript'),
  ('delta','run-missing','assistant','delta answer',3200,'m-delta-2','[]',NULL,'transcript_repaired'),
@@ -41,7 +41,7 @@ INSERT INTO fb_session_prompt_state(session_id, key, value, updated_at) VALUES
 -- rz-orphan belongs to a session that does not exist; its run and wait drop
 -- together. rz-top carries two waits, so the one-wait-per-run pick is
 -- observable: the long-run switch wins over the newer shell wait.
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('zeta','main','zeta',5000,4500);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('zeta','main','zeta',5000,4500,'/repo/zeta');
 INSERT INTO fb_runs(id, session_id, input_text, status, parent_run_id, created_at, updated_at) VALUES
  ('rz-top','zeta','do things','done','',4500,4900),
  ('rz-sub','zeta','child','done','rz-top',4550,4850),
@@ -69,7 +69,7 @@ INSERT INTO fb_run_waits(run_id, action_id, tool_name, tool_input_json, session_
 -- that a close-out write stamped with the run's window, as real v0 files hold
 -- by the hundred; that window is the run's, not the row's. m-eta-6 is a tool
 -- call that finished inside a millisecond: a zero duration is still a window.
-INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at) VALUES('eta','main','eta',6000,5500);
+INSERT INTO fb_sessions(id, agent_id, title, updated_at, created_at, cwd) VALUES('eta','main','eta',6000,5500,'/repo/eta');
 INSERT INTO fb_messages(session_id, run_id, role, content, created_at, message_id, parts, source, tool_step_id, tool_meta_json, run_started_at, run_finished_at, worked_duration_ms) VALUES
  ('eta','','assistant','eta timed answer',5510,'m-eta-1','[]','transcript','','','2026-09-27T10:00:00Z','2026-09-27T10:01:30Z',90000),
  ('eta','','tool','eta tool result',5520,'m-eta-2','[]','transcript','ts-eta','','2026-09-27T10:00:10Z','2026-09-27T10:00:15Z',5000),

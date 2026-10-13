@@ -118,7 +118,7 @@ partial assistant text persisted.
 ## Run (human path)
 
 ```bash
-CGO_ENABLED=1 go build -tags fts5 -o /tmp/forebrain ./cmd/forebrain && scripts/install-dictionary.sh /tmp && /tmp/forebrain
+scripts/fetch-libtokenizers.sh && CGO_ENABLED=1 go build -tags fts5 -o /tmp/forebrain ./cmd/forebrain && scripts/install-dictionary.sh /tmp && scripts/install-assets.sh /tmp && /tmp/forebrain
 ```
 
 Uses the real `~/.forebrain` config and real providers. Ctrl+C twice to quit.

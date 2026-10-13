@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -624,7 +623,10 @@ func (r *Runner) runPermissionRequestHook(ctx context.Context, kind string, payl
 	}
 	cwd := strings.TrimSpace(tool.ProjectRootFromContext(ctx))
 	if cwd == "" {
-		cwd = r.workspaceRoot()
+		// The turn's context carries the session project root; when it does
+		// not (a hook fired outside a turn), the process directory is nearer
+		// the session's directory than the main agent's workspace root.
+		cwd, _ = tool.WorkingDir(ctx)
 	}
 	permissionMode := string(r.PermissionSnapshotForSession(tool.ConversationSessionIDFromContext(ctx)).ApprovalPolicy.Mode)
 	toolName, toolInput, aliases := permissionRequestHookPayload(kind, payload)
@@ -1070,7 +1072,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	if stateDir == "" {
 		stateDir = filepath.Join(r.workspaceRoot(), "state")
 	}
-	allowedRoots := tool.DefaultAllowedRootsForWorkspace(r.workspaceRoot())
+	allowedRoots := tool.DefaultAllowedRootsForWorkspace(r.ProjectRoot, r.workspaceRoot())
 	if r.tools == nil {
 		r.tools = tool.NewState(allowedRoots...)
 	}
@@ -1086,10 +1088,13 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	r.tools.SetPrimaryWorkspaceBoundary(r.Home, activeWorkspace, siblingWorkspaces)
 	r.tools.SetHistoryDir(filepath.Join(stateDir, "file-history"))
 	r.tools.SetToolResultDir(filepath.Join(stateDir, tool.SpillDir))
-	// Ensure the user's project directory is an allowed root for file and shell tools.
-	if pr := strings.TrimSpace(r.ProjectRoot); pr != "" {
-		r.tools.PrependAllowedRoot(pr)
+	// File tools report every write to the session store's ledger, which backs
+	// "rewind to before a message" and the workbench's changed-files list.
+	if r.SessionStore != nil {
+		r.tools.SetFileChangeRecorder(r.SessionStore)
 	}
+	// The user's project directory is already the first allowed root (see
+	// DefaultAllowedRootsForWorkspace above), so it is not prepended again here.
 	r.tools.ResetToolMiddlewares()
 	hookRT := &hook.Runtime{
 		Home:          r.Home,
@@ -1188,13 +1193,31 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 		r.tools.SetNamedReadObserver("lsp", nil)
 	}
 	te := llm.TokenEstimateOptions{}
+	if strings.TrimSpace(r.Home) != "" {
+		te.CacheDir = filepath.Join(r.Home, "cache", "tokenizers")
+	}
 	if r.AppCfg != nil {
 		cfg := r.AppCfg.Agents.Defaults.TokenEstimate
-		te = llm.TokenEstimateOptions{Encoding: cfg.Encoding, Model: cfg.Model, TokenizerPath: cfg.TokenizerPath}
-	}
-	if strings.TrimSpace(te.Encoding) == "" && strings.TrimSpace(te.Model) == "" {
-		if len(cfg.LLMChain) > 0 && cfg.LLMChain[0] != nil {
-			te.Model = strings.TrimSpace(cfg.LLMChain[0].Model)
+		te.Hubs = cfg.Hubs
+		te.HuggingFaceEndpoint = cfg.HuggingFaceEndpoint
+		te.ModelScopeEndpoint = cfg.ModelScopeEndpoint
+		te.DefaultTokenizer = cfg.DefaultTokenizer
+		for _, override := range cfg.Tokenizers {
+			te.Overrides = append(te.Overrides, llm.TokenizerOverride{
+				Model:     override.Model,
+				Tokenizer: override.Tokenizer,
+				Path:      override.Path,
+			})
+		}
+		for _, deprecated := range []struct{ key, value string }{
+			{"encoding", cfg.Encoding},
+			{"model", cfg.Model},
+			{"tokenizer_path", cfg.TokenizerPath},
+		} {
+			if strings.TrimSpace(deprecated.value) != "" {
+				slog.Warn("agents.defaults.token_estimate."+deprecated.key+
+					" is deprecated and ignored; see token_estimate.tokenizers", "key", deprecated.key)
+			}
 		}
 	}
 	if err := llm.Configure(te); err != nil {
@@ -1217,17 +1240,29 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 		slog.Warn("skill discovery incomplete", "err", skillErr)
 	}
 	nSkill := len(discoveredSkills)
+	// The versioned layers' roots, frozen with the load: the versions this
+	// session pins its skills to are read here once, and every later content
+	// read answers from the pinned copy — a mid-session publish changes the
+	// formal directory without touching what this session loads.
+	versionedRoots := skill.VersionedSkillRoots(r.Home, r.workspaceRoot(), r.launchProjectRoot())
 	loadedSkills := make([]tool.LoadedSkill, 0, len(discoveredSkills))
 	for _, item := range discoveredSkills {
+		version, versionsRoot := skill.CurrentVersionFor(versionedRoots, item.RootDir)
 		loadedSkills = append(loadedSkills, tool.LoadedSkill{
-			Name:    item.Name,
-			RootDir: item.RootDir,
+			Name:         item.Name,
+			RootDir:      item.RootDir,
+			Version:      version,
+			VersionsRoot: versionsRoot,
 		})
 	}
 	// The loaded-skill catalog is the sole source of truth for skill resource
 	// access. Replace it atomically so reloads and primary-agent switches cannot
 	// retain roots from the previous runtime snapshot.
 	r.tools.ReplaceLoadedSkillCatalog(loadedSkills)
+	// Every write aimed at a versioned skill's formal directory lands in that
+	// skill's draft. tool cannot import the skill package (Layer 2 keeps tool
+	// below skill), so the redirection crosses as this injected port.
+	r.tools.SetSkillDraftResolver(skillDraftResolver(versionedRoots))
 	// MCP is the one part of a Load that talks to unbounded external I/O the
 	// operator configured: a package manager downloading, a service that is not
 	// answering. It therefore runs in the background, and r.main is published
@@ -1274,13 +1309,21 @@ func (r *Runner) wrapExecutionLLM(inner llm.LLM, bootstrap bool) llm.LLM {
 		return nil
 	}
 	wrapped := wrapForkCaptureLLM(inner)
-	var orchestrated llm.LLM
+	home := ""
 	if bootstrap {
-		orchestrated = wrapToolOrchestrationLLMWithHome(wrapped, r.tools, r.Home)
-	} else {
-		orchestrated = wrapToolOrchestrationLLM(wrapped, r.tools)
+		home = r.Home
 	}
-	return orchestrated
+	// The run's conversation is written to the transcript as each text block
+	// ends, not only when the turn does. The rows record the model the call in
+	// ctx is routed to, so a subagent's rows carry the subagent's model.
+	var transcript transcriptProgressStore
+	if r.SessionStore != nil {
+		transcript = r.SessionStore
+	}
+	return wrapToolOrchestrationLLMWithProgress(wrapped, r.tools, home, transcript, func(ctx context.Context) string {
+		_, model := r.agentModelFor(ctx)
+		return model
+	})
 }
 
 func (r *Runner) SetUserTracer(t agent.Tracer) {
@@ -1332,6 +1375,27 @@ func (r *Runner) RunContent(ctx context.Context, parts []llm.ContentPart) (*agen
 		ctx = r.injectSessionModelSelection(ctx)
 	}
 	if r != nil {
+		// Every read of the "current directory" this turn makes — tool
+		// execution, relative-path resolution, grant matching, FOREBRAIN.md
+		// rules, git context — must land on this session's project root. The
+		// process directory is meaningless for a gateway process serving many
+		// projects, so the runner stamps its own ProjectRoot onto the turn's
+		// context here, once. A subagent that already set one is left as is.
+		if strings.TrimSpace(tool.ProjectRootFromContext(ctx)) == "" && strings.TrimSpace(r.ProjectRoot) != "" {
+			ctx = tool.WithProjectRoot(ctx, r.ProjectRoot)
+		}
+		// The anchor a file change is recorded against is the user message that
+		// started this turn. The surface stored that row before it started the
+		// run, so the newest visible user row of the conversation is it. A
+		// subagent resolves to its parent conversation, so its writes are
+		// recorded there too.
+		if r.SessionStore != nil {
+			if sid := strings.TrimSpace(tool.ConversationSessionIDFromContext(ctx)); sid != "" {
+				if rowID, err := r.SessionStore.LatestUserMessageRowID(ctx, sid); err == nil && rowID > 0 {
+					ctx = tool.WithTurnAnchorMessageID(ctx, rowID)
+				}
+			}
+		}
 		r.foreground.enter()
 		defer r.foreground.leave()
 	}
@@ -2193,11 +2257,9 @@ func (r *Runner) newMCPLoadLocked(a *agent.Agent) *mcpLoad {
 		started:     time.Now(),
 		agent:       a,
 	}
-	workspaceDir, err := os.Getwd()
-	if err != nil {
-		slog.Error("mcp segment: resolve current workspace", "err", err)
-		workspaceDir = ""
-	}
+	// Project-scope servers run from the session's project root. The process
+	// directory has no meaning for a gateway process serving many projects.
+	workspaceDir := strings.TrimSpace(r.ProjectRoot)
 	for _, entry := range r.MCPServers {
 		srv := entry
 		// Defense in depth for the assembly-time clamp: a project entry that

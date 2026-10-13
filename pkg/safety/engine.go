@@ -404,10 +404,9 @@ func isShellTool(toolName string) bool {
 }
 
 var safeReadOnlyTools = map[string]struct{}{
-	"read_file":        {},
-	"list_directory":   {},
-	"list_files":       {},
-	"working_set_show": {},
+	"read_file":      {},
+	"list_directory": {},
+	"list_files":     {},
 
 	// skill reads one SKILL.md out of the skills this session already
 	// discovered, and nothing else: it takes a skill name, not a path, and
@@ -448,8 +447,6 @@ var safeReadOnlyTools = map[string]struct{}{
 var safeInternalTools = map[string]struct{}{
 	"intermediate_tool": {},
 	"session_todo":      {},
-	"working_set_pin":   {},
-	"working_set_drop":  {},
 	"subagent_run":      {},
 	"subagent_fanout":   {},
 	"subagent_send":     {},
@@ -1040,7 +1037,11 @@ func containsProject(entries []string, root string) bool {
 }
 
 // MarkTrusted persists an exact, canonical trust target. Existing entries are
-// retained, deduplicated, sorted, and written atomically.
+// retained, deduplicated, sorted, and written atomically. A path that was
+// previously recorded as untrusted is dropped from that list: the decision the
+// user just made is the current one, and a stale rejection must not outrank it
+// (TrustLevel checks rejections first, so leaving it would keep the directory
+// untrusted after the user trusted it).
 func MarkTrusted(home string, project Project) error {
 	root := strings.TrimSpace(project.Root)
 	if root == "" {
@@ -1054,6 +1055,7 @@ func MarkTrusted(home string, project Project) error {
 	if err != nil {
 		return err
 	}
+	st.UntrustedDirectories = removeProject(st.UntrustedDirectories, root)
 	seen := make(map[string]struct{}, len(st.TrustedDirectories)+1)
 	for _, raw := range st.TrustedDirectories {
 		path, err := CanonicalPath(raw)
@@ -1068,6 +1070,55 @@ func MarkTrusted(home string, project Project) error {
 	}
 	sort.Strings(st.TrustedDirectories)
 	return save(home, st)
+}
+
+// MarkUntrusted persists an exact, canonical rejection of a directory — the
+// "no" side of the same decision MarkTrusted records. A path previously
+// recorded as trusted is dropped from that list so the two never disagree; the
+// rejection wins in TrustLevel regardless, but carrying both would make the
+// state file say two things about one directory.
+func MarkUntrusted(home string, project Project) error {
+	root := strings.TrimSpace(project.Root)
+	if root == "" {
+		return nil
+	}
+	root, err := CanonicalPath(root)
+	if err != nil {
+		return err
+	}
+	st, err := load(home)
+	if err != nil {
+		return err
+	}
+	st.TrustedDirectories = removeProject(st.TrustedDirectories, root)
+	seen := make(map[string]struct{}, len(st.UntrustedDirectories)+1)
+	for _, raw := range st.UntrustedDirectories {
+		path, err := CanonicalPath(raw)
+		if err == nil && path != "" {
+			seen[path] = struct{}{}
+		}
+	}
+	seen[root] = struct{}{}
+	st.UntrustedDirectories = st.UntrustedDirectories[:0]
+	for path := range seen {
+		st.UntrustedDirectories = append(st.UntrustedDirectories, path)
+	}
+	sort.Strings(st.UntrustedDirectories)
+	return save(home, st)
+}
+
+// removeProject returns entries without the canonical spelling of root;
+// entries that no longer resolve are kept as they are, since they cannot be
+// confused with a different directory.
+func removeProject(entries []string, root string) []string {
+	out := entries[:0]
+	for _, raw := range entries {
+		if candidate, err := CanonicalPath(raw); err == nil && candidate == root {
+			continue
+		}
+		out = append(out, raw)
+	}
+	return out
 }
 
 // CanonicalPath is how forebrain spells one directory: absolute, cleaned, and

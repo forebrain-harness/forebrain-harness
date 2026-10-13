@@ -5,6 +5,8 @@ import WorkspaceTree from './WorkspaceTree.vue'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
 import { forebrainApi, type WorkspaceTreeNode } from '@/lib/api'
 
+const scope = { sessionId: 's1' }
+
 function node(name: string, path: string, isDir: boolean): WorkspaceTreeNode {
   return { name, path, isDir }
 }
@@ -15,6 +17,10 @@ async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
+function mountTree() {
+  return mount(WorkspaceTree, { props: { scope } })
+}
+
 describe('WorkspaceTree', () => {
   beforeEach(() => {
     useWorkspaceTree().reset()
@@ -23,11 +29,12 @@ describe('WorkspaceTree', () => {
   it('renders the root level after loading', async () => {
     const children = [node('docs', 'docs', true), node('readme.md', 'readme.md', false)]
     vi.spyOn(forebrainApi, 'workspaceTree').mockResolvedValue({ path: '', records: children })
-    const wrapper = mount(WorkspaceTree)
+    const wrapper = mountTree()
     await flush()
     expect(wrapper.text()).toContain('docs')
     expect(wrapper.text()).toContain('readme.md')
-    expect(forebrainApi.workspaceTree).toHaveBeenCalledWith('')
+    // The tree reads the conversation's file view, not the agent workspace.
+    expect(forebrainApi.workspaceTree).toHaveBeenCalledWith('', scope)
   })
 
   it('expands a directory on click and shows its children', async () => {
@@ -37,18 +44,18 @@ describe('WorkspaceTree', () => {
         : { path, records: [node('a.md', 'docs/a.md', false)] }
     ))
     vi.spyOn(forebrainApi, 'workspaceTree').mockImplementation(mock)
-    const wrapper = mount(WorkspaceTree)
+    const wrapper = mountTree()
     await flush()
 
     await wrapper.find('[role="treeitem"] button').trigger('click')
     await flush()
-    expect(mock).toHaveBeenCalledWith('docs')
+    expect(mock).toHaveBeenCalledWith('docs', scope)
     expect(wrapper.text()).toContain('a.md')
   })
 
   it('emits insert-ref with the full path when a file is clicked', async () => {
     vi.spyOn(forebrainApi, 'workspaceTree').mockResolvedValue({ path: '', records: [node('top.txt', 'top.txt', false)] })
-    const wrapper = mount(WorkspaceTree)
+    const wrapper = mountTree()
     await flush()
     await wrapper.find('[role="treeitem"] button').trigger('click')
     expect(wrapper.emitted('insert-ref')).toEqual([['top.txt']])
@@ -60,7 +67,7 @@ describe('WorkspaceTree', () => {
       throw new Error('no such file or directory')
     })
     vi.spyOn(forebrainApi, 'workspaceTree').mockImplementation(mock)
-    const wrapper = mount(WorkspaceTree)
+    const wrapper = mountTree()
     await flush()
     await wrapper.find('[role="treeitem"] button').trigger('click')
     await flush()
@@ -78,7 +85,7 @@ describe('WorkspaceTree', () => {
           : { path, records: [node('a.md', 'docs/a.md', false)] }
       ))
       vi.spyOn(forebrainApi, 'workspaceTree').mockImplementation(mock)
-      const wrapper = mount(WorkspaceTree)
+      const wrapper = mountTree()
       await flush()
       const row = wrapper.find('[role="treeitem"] button')
       await row.trigger('keydown', { key: 'ArrowRight' })

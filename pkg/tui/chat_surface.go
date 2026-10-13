@@ -239,6 +239,12 @@ func (s *ChatSession) ListSessionsRecent(ctx context.Context, limit int) ([]stat
 	if s == nil || s.sessStore() == nil {
 		return nil, nil
 	}
+	// A session bound to a project lists only that project's conversations:
+	// /resume continues one in the project this surface is running, never a
+	// conversation from another directory.
+	if projectID := strings.TrimSpace(s.ProjectID); projectID != "" {
+		return s.sessStore().ListSessionsForProject(ctx, projectID, limit, 0)
+	}
 	return s.sessStore().ListSessionsRecent(ctx, limit)
 }
 
@@ -253,10 +259,14 @@ func (s *ChatSession) SessionTitle(ctx context.Context, id string) (string, erro
 
 // ListSessionsRecentPaged backs the /resume picker's lazy browsing: it reads
 // one LIMIT/OFFSET page per call so an arbitrarily long session history can be
-// scrolled without ever loading it whole.
+// scrolled without ever loading it whole. Like ListSessionsRecent it is
+// scoped to the session's own project when it has one.
 func (s *ChatSession) ListSessionsRecentPaged(ctx context.Context, limit, offset int) ([]state.SessionSummary, error) {
 	if s == nil || s.sessStore() == nil {
 		return nil, nil
+	}
+	if projectID := strings.TrimSpace(s.ProjectID); projectID != "" {
+		return s.sessStore().ListSessionsForProject(ctx, projectID, limit, offset)
 	}
 	return s.sessStore().ListSessionsRecentPaged(ctx, limit, offset)
 }

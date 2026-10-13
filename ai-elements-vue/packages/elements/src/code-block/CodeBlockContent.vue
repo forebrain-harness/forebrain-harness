@@ -74,7 +74,7 @@ const lineNumberClasses = cn(
 <template>
   <div class="relative overflow-auto">
     <pre
-      :class="cn('dark:bg-(--shiki-dark-bg)! dark:text-(--shiki-dark)! m-0 p-4 text-sm')"
+      :class="cn('m-0 p-4 text-sm')"
       :style="preStyle"
     ><code
         :class="cn(
@@ -84,7 +84,6 @@ const lineNumberClasses = cn(
       ><template v-for="line in keyedLines" :key="line.key"><!-- Line rendering component --><span :class="showLineNumbers ? lineNumberClasses : 'block'"><template v-if="line.tokens.length === 0">{{ '\n' }}</template><template v-else><!-- Token rendering component --><span
                 v-for="tokenObj in line.tokens"
                 :key="tokenObj.key"
-                class="dark:bg-(--shiki-dark-bg)! dark:text-(--shiki-dark)!"
                 :style="{
                   color: tokenObj.token.color,
                   backgroundColor: tokenObj.token.bgColor,

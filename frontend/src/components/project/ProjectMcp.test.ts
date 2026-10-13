@@ -14,7 +14,6 @@ const projectRecord = (trusted = true): ProjectRecord => ({
   memoryScope: '',
   resourceAccess: false,
   pinned: false,
-  archivedAt: 0,
   createdAt: 0,
   updatedAt: 0,
   trusted,

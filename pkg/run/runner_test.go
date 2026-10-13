@@ -2463,3 +2463,64 @@ func TestLSPToolTableStableAcrossServerChanges(t *testing.T) {
 		t.Fatalf("tool table changed across server/reload events:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
+
+// workingDirTool builds a tool that records the working directory its call
+// context resolves to — the "fake pwd" the working-dir tests run.
+func workingDirTool(t *testing.T, seen *string) *llm.Tool {
+	t.Helper()
+	tl, err := llm.NewTool("echo_tool", "record the working dir", func(ctx context.Context, _ *struct{}) (string, error) {
+		*seen, _ = tool.WorkingDir(ctx)
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("NewTool: %v", err)
+	}
+	return tl
+}
+
+// TestRunContentPutsProjectRootOnContext pins that RunContent stamps the
+// runner's own project root onto the turn's context, so every tool this turn
+// runs resolves the "current directory" to the session's project.
+func TestRunContentPutsProjectRootOnContext(t *testing.T) {
+	project := t.TempDir()
+	var seen string
+	main, err := agent.New(&runnerUsageStubLLM{}, "main", "desc")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := main.AddTool(workingDirTool(t, &seen)); err != nil {
+		t.Fatalf("AddTool: %v", err)
+	}
+	main.SetTracer(agent.Noop)
+	r := &Runner{Deps: &Deps{ProjectRoot: project}, main: main}
+	if _, err := r.RunContent(context.Background(), []llm.ContentPart{llm.Text("hi")}); err != nil {
+		t.Fatalf("RunContent: %v", err)
+	}
+	if filepath.Clean(seen) != filepath.Clean(project) {
+		t.Fatalf("tool saw working dir %q, want the runner project root %q", seen, project)
+	}
+}
+
+// TestRunContentKeepsSubagentProjectRoot pins that a project root a subagent
+// already put on the context is not overwritten by the runner's own.
+func TestRunContentKeepsSubagentProjectRoot(t *testing.T) {
+	runnerRoot := t.TempDir()
+	subagentRoot := t.TempDir()
+	var seen string
+	main, err := agent.New(&runnerUsageStubLLM{}, "main", "desc")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	if err := main.AddTool(workingDirTool(t, &seen)); err != nil {
+		t.Fatalf("AddTool: %v", err)
+	}
+	main.SetTracer(agent.Noop)
+	r := &Runner{Deps: &Deps{ProjectRoot: runnerRoot}, main: main}
+	ctx := tool.WithProjectRoot(context.Background(), subagentRoot)
+	if _, err := r.RunContent(ctx, []llm.ContentPart{llm.Text("hi")}); err != nil {
+		t.Fatalf("RunContent: %v", err)
+	}
+	if filepath.Clean(seen) != filepath.Clean(subagentRoot) {
+		t.Fatalf("tool saw working dir %q, want the subagent root %q", seen, subagentRoot)
+	}
+}
