@@ -136,7 +136,7 @@ importers:
         version: 6.0.2
       katex:
         specifier: ^0.18.2
-        version: 0.18.2
+        version: 0.18.11
       lucide-vue-next:
         specifier: ^0.460.0
         version: 0.460.0(vue@3.5.32(typescript@5.9.3))
@@ -157,7 +157,7 @@ importers:
         version: 4.6.4(vue@3.5.32(typescript@5.9.3))
       vue-stream-markdown:
         specifier: ^0.3.4
-        version: 0.3.4(katex@0.18.2)(shiki@3.23.0)(vue@3.5.32(typescript@5.9.3))
+        version: 0.3.4(katex@0.18.11)(shiki@3.23.0)(vue@3.5.32(typescript@5.9.3))
     devDependencies:
       '@playwright/test':
         specifier: 1.59.1
@@ -2913,8 +2913,9 @@ packages:
     resolution: {integrity: sha512-Eeo8Ys1doU1z+x8AZsPpQu+p/QcZBI5PeOo7QGQdy2x2m0MU/hYagBbGOmXwr5KVbEfVuWv9LpnQWeehogurjg==}
     hasBin: true
 
-  katex@0.18.2:
-    resolution: {integrity: sha512-3snve4y0SXTMequLim1FMiPvLGElySam0blN5xQZBqEY3lOJz1TnuaaiugnBZBqHzlSAGmFTYL7MCQkORuLKCA==}
+  katex@0.18.11:
+    resolution: {integrity: sha512-yvyz/2VMKqoho/35Hat5w37wIEdWJ5ElVMidTAlWrxr5uW4aBGsEpveTmKh18/zw08v/7lGswCPon4OhqmqrTA==}
+    deprecated: Accidentally published with breaking changes. Use 0.19.0 instead.
     hasBin: true
 
   katex@0.19.0:
@@ -7280,9 +7281,9 @@ snapshots:
     dependencies:
       commander: 8.3.0
 
-  katex@0.18.2:
+  katex@0.18.11:
     dependencies:
-      commander: 8.3.0
+      commander: 15.0.0
 
   katex@0.19.0:
     dependencies:
@@ -8733,14 +8734,14 @@ snapshots:
     dependencies:
       vue: 3.5.32(typescript@5.9.3)
 
-  vue-stream-markdown@0.3.4(katex@0.18.2)(shiki@3.23.0)(vue@3.5.32(typescript@5.9.3)):
+  vue-stream-markdown@0.3.4(katex@0.18.11)(shiki@3.23.0)(vue@3.5.32(typescript@5.9.3)):
     dependencies:
       '@floating-ui/dom': 1.7.6
       '@vueuse/core': 14.2.1(vue@3.5.32(typescript@5.9.3))
       marked: 17.0.6
       vue: 3.5.32(typescript@5.9.3)
     optionalDependencies:
-      katex: 0.18.2
+      katex: 0.18.11
       shiki: 3.23.0
 
   vue-stream-markdown@0.3.4(katex@0.19.0)(shiki@3.23.0)(vue@3.5.32(typescript@5.9.3)):
