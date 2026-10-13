@@ -1658,6 +1658,119 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  // Plan 017: a reloaded subagent's words come from its own worker session's
+  // transcript, not from replaying its per-token deltas. The rows the runtime
+  // wrote there are the same blocks the event stream carries, so the view is
+  // identical whichever source the reload reads.
+  describe('a subagent reads its words from its worker transcript', () => {
+    const primaryRows = [
+      { id: 'user-1', role: 'user', content: 'delegate it' },
+      { id: 'assistant-1', role: 'assistant', content: 'done', runId: 'parent-1' },
+    ]
+    const events = [
+      { id: 'spawn-1', sequence: 1, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_spawned', createdAt: '2026-09-06T00:00:01Z', payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', task: 'inspect history', parentRunId: 'parent-1', executionId: 'exec-1', workerSessionId: 'worker-1' } },
+      { id: 'reason-1', sequence: 2, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'reasoning_delta', createdAt: '2026-09-06T00:00:02Z', payload: { agentId: 'agent-1', text: 'checking' } },
+      { id: 'reason-done-1', sequence: 3, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'reasoning_done', createdAt: '2026-09-06T00:00:03Z', payload: { agentId: 'agent-1' } },
+      { id: 'tool-1', sequence: 4, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'tool_call_completed', createdAt: '2026-09-06T00:00:04Z', payload: { stepId: 'read-1', toolName: 'read_file', displayBody: 'source body', toolMeta: { agentId: 'agent-1', status: 'completed' } } },
+      { id: 'answer-1', sequence: 5, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'assistant_delta', createdAt: '2026-09-06T00:00:05Z', payload: { agentId: 'agent-1', text: 'all checks passed' } },
+      { id: 'ended-1', sequence: 6, schemaVersion: 1, sessionId: 'session-1', runId: 'child-1', type: 'subagent_ended', createdAt: '2026-09-06T00:00:06Z', payload: { agentId: 'agent-1', agentType: 'explore', taskId: 'task-1', parentRunId: 'parent-1', executionId: 'exec-1', status: 'ok' } },
+    ]
+    // The same execution as the runtime wrote it into its own worker session:
+    // the dispatching prompt, one thinking block, one answered tool call, the
+    // answer. The prompt is a user row (a message, not a block) and the worked
+    // line is the last row, so neither adds a block the worker path draws.
+    const workerRows = [
+      { id: 'w-user', role: 'user', content: 'inspect history', runId: 'child-1' },
+      { id: 'w-reason', role: 'reasoning', content: 'checking', runId: 'child-1' },
+      { id: 'w-call', role: 'assistant', content: '', runId: 'child-1', partsJson: JSON.stringify([{ type: 'tool_calls', tool_calls: [{ id: 'read-1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] }]) },
+      { id: 'w-tool', role: 'tool', content: 'source body', runId: 'child-1', toolStepId: 'read-1', partsJson: JSON.stringify([{ type: 'tool_display', body: 'source body', tool_meta_json: JSON.stringify({ tool_name: 'read_file', status: 'completed' }) }]) },
+      { id: 'w-answer', role: 'assistant', content: 'all checks passed', runId: 'child-1' },
+      { id: 'w-worked', role: 'worked', content: '', runId: 'child-1' },
+    ]
+
+    const shape = (blocks: TimelineBlock[]): string[] => blocks.map((block) => {
+      switch (block.kind) {
+        case 'prompt':
+        case 'user':
+        case 'assistant':
+        case 'thinking':
+        case 'error':
+          return `${block.kind}:${block.text}`
+        case 'tool':
+          return `${block.kind}:${block.step.stepId}`
+        default:
+          return block.kind
+      }
+    })
+
+    const blocksOf = (stream: ReturnType<typeof useChatStream>) =>
+      shape(stream.subagents.value.find((record) => record.agentId === 'agent-1')?.blocks ?? [])
+
+    const rawBlocks = (stream: ReturnType<typeof useChatStream>): TimelineBlock[] =>
+      stream.subagents.value.find((record) => record.agentId === 'agent-1')?.blocks ?? []
+
+    const reload = async () => {
+      const stream = useChatStream()
+      stream.sessionId.value = 'session-1'
+      await stream.loadMessages('session-1')
+      return stream
+    }
+
+    it('rebuilds the words from the worker rows, matching the event replay', async () => {
+      const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({ sessionId: 'session-1', nextCursor: events.length, highWater: events.length, hasMore: false, schemaVersion: 1, events } as never)
+      const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'session-1', records: [] })
+      const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockImplementation(async (sessionId: string) => (sessionId === 'worker-1' ? workerRows : primaryRows) as never)
+      try {
+        const fromWorker = await reload()
+        // The worker transcript really is the source: the thinking block carries
+        // the reload shape a transcript row rebuilds (startedAt 0), not the live
+        // delta shape the event path streams.
+        expect(chatMessagesSpy).toHaveBeenCalledWith('worker-1', 0)
+        expect(rawBlocks(fromWorker).find((block) => block.kind === 'thinking')).toMatchObject({ startedAt: 0 })
+        // Re-run with the worker session out of reach: the same events alone
+        // must rebuild the same words, which is what the swap has to preserve.
+        chatMessagesSpy.mockImplementation(async () => primaryRows as never)
+        const fromEvents = await reload()
+        expect(rawBlocks(fromEvents).find((block) => block.kind === 'thinking')).toMatchObject({ startedAt: Date.parse('2026-09-06T00:00:02Z') })
+        expect(blocksOf(fromWorker)).toEqual(blocksOf(fromEvents))
+        expect(blocksOf(fromWorker)).toEqual([
+          'prompt:inspect history',
+          'thinking:checking',
+          'tool:read-1',
+          'assistant:all checks passed',
+          'worked',
+        ])
+      } finally {
+        chatMessagesSpy.mockRestore()
+        sessionEventsSpy.mockRestore()
+        legacySpy.mockRestore()
+      }
+    })
+
+    it('falls back to the event replay when the worker session is gone', async () => {
+      const sessionEventsSpy = vi.spyOn(forebrainApi, 'sessionEvents').mockResolvedValue({ sessionId: 'session-1', nextCursor: events.length, highWater: events.length, hasMore: false, schemaVersion: 1, events } as never)
+      const legacySpy = vi.spyOn(forebrainApi, 'sessionSubagentHistory').mockResolvedValue({ sessionId: 'session-1', records: [] })
+      const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockImplementation(async (sessionId: string) => {
+        if (sessionId === 'worker-1') throw new Error('worker session gone')
+        return primaryRows as never
+      })
+      try {
+        const stream = await reload()
+        expect(blocksOf(stream)).toEqual([
+          'prompt:inspect history',
+          'thinking:checking',
+          'tool:read-1',
+          'assistant:all checks passed',
+          'worked',
+        ])
+      } finally {
+        chatMessagesSpy.mockRestore()
+        sessionEventsSpy.mockRestore()
+        legacySpy.mockRestore()
+      }
+    })
+  })
+
   it('replays primary run metadata through the same event projection as live updates', async () => {
     const chatMessagesSpy = vi.spyOn(forebrainApi, 'chatMessages').mockResolvedValue([
       { id: 'user-1', role: 'user', content: 'change it' },

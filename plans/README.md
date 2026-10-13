@@ -85,7 +85,7 @@
 | [014-tui-persists-main-agent-turn-lifecycle](014-tui-persists-main-agent-turn-lifecycle.md) | TUI 主 agent 的 `turn_started`/`turn_completed` 落库（不带回答文字），取消/失败事件带计划进度；计划进度计算下沉到 `pkg/turn` | Bug Fix | TODO | **P1** | S | LOW |
 | [015-first-token-latency-per-turn](015-first-token-latency-per-turn.md) | 首 token 延迟：引擎在 `Submit` 测一次，存 `fb_runs.first_token_ms`（加列+迁移），两端运行中状态行与 Worked 行显示 | Feature | TODO | P2 | M | MED |
 | [016-transcript-written-at-text-block-end](016-transcript-written-at-text-block-end.md) | 回答/思考在文字块结束时写入 transcript（引擎层，两端与 subagent 共用，幂等对账）；每个思考块单独一行并记录耗时 | Bug Fix | TODO | **P1** | M | MED |
-| [017-subagent-views-from-worker-transcript](017-subagent-views-from-worker-transcript.md) | subagent 视图（web 与 TUI）重载/回放时从 worker 会话 transcript 重建文字；worker 会话缺失时退回事件重放 | Bug Fix | TODO | **P1** | L | HIGH |
+| [017-subagent-views-from-worker-transcript](017-subagent-views-from-worker-transcript.md) | subagent 视图（web 与 TUI）重载/回放时从 worker 会话 transcript 重建文字；worker 会话缺失时退回事件重放 | Bug Fix | DONE（2026-10-13 执行完毕） | **P1** | L | HIGH |
 | [018-stream-deltas-pushed-not-persisted](018-stream-deltas-pushed-not-persisted.md) | 回答/思考/工具输出增量只推送不落库；持久化的生命周期事件不带回答文字（cron 改读 transcript）；断线重连与刷新时 gateway 从内存补发在途文字与在途工具输出 | Bug Fix | TODO | **P1** | L | HIGH |
 | [019-migrate-away-stored-stream-deltas](019-migrate-away-stored-stream-deltas.md) | 状态库迁移：先备份，再处理旧增量（含工具输出）——已有完整记录的删除，没有的合并成段；迁移后照框架自动 VACUUM（owner 2026-10-11 撤回"不回收"） | Migration | TODO | P2 | M | HIGH |
 | [020-tui-persists-main-agent-state-events](020-tui-persists-main-agent-state-events.md) | TUI 主 agent 的 turn diff、预算、队列、steer 送达、模式事件落库；gateway 审批续跑补上 turn diff 伴随事件 | Bug Fix | TODO | P2 | M | LOW-MED |

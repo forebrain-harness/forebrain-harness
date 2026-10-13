@@ -158,7 +158,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 46906,
+      "loc": 47163,
       "fan_in": 0,
       "fan_out": 20
     },

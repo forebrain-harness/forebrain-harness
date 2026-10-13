@@ -1307,6 +1307,84 @@ func TestReplaySubagentEventsRestoreClickableCompleteAgentView(t *testing.T) {
 	}
 }
 
+// Plan 017: a resumed subagent reads its words from its own worker session's
+// transcript. The rows the runtime wrote there are the same blocks its events
+// carry, so the replayed frames are identical whether the words come from the
+// worker rows or - a worker session that is gone - from the events.
+func TestReplaySubagentFromWorkerTranscriptMatchesEventReplay(t *testing.T) {
+	now := time.Unix(100, 0)
+	agentID := "task-worker-1"
+	runID := "exec-worker-1"
+	events := []event.RunEvent{
+		event.NewRunEvent("spawn", runID, "session-1", event.RunEventSubagentSpawned, event.SubagentSpawnedPayload{
+			AgentID: agentID, AgentType: "explore", TaskID: agentID, Task: "inspect history",
+			ParentRunID: "parent-1", ParentToolCallID: "fanout-1", TaskIndex: 0, ExecutionID: runID,
+			WorkerSessionID: "worker-1",
+		}, now),
+		event.NewRunEvent("reason", runID, "session-1", event.RunEventReasoningDelta, event.ReasoningDeltaPayload{AgentID: agentID, Text: "checking"}, now.Add(time.Second)),
+		event.NewRunEvent("reason-done", runID, "session-1", event.RunEventReasoningDone, event.ReasoningDonePayload{AgentID: agentID}, now.Add(2*time.Second)),
+		event.NewRunEvent("tool-done", runID, "session-1", event.RunEventToolCompleted, event.ToolCallCompletedPayload{
+			Kind: event.RunEventToolCompleted, StepID: "read-1", ToolName: "read_file", Summary: "read file", DisplayBody: "source body",
+			ToolMeta: event.ToolCallMeta{ToolName: "read_file", Status: "completed", AgentID: agentID},
+		}, now.Add(3*time.Second)),
+		event.NewRunEvent("answer", runID, "session-1", event.RunEventAssistantDelta, event.AssistantDeltaPayload{AgentID: agentID, Text: "all checks passed"}, now.Add(4*time.Second)),
+		event.NewRunEvent("ended", runID, "session-1", event.RunEventSubagentEnded, event.SubagentEndedPayload{
+			AgentID: agentID, AgentType: "explore", TaskID: agentID, Status: "ok",
+			ParentRunID: "parent-1", ParentToolCallID: "fanout-1", TaskIndex: 0, ExecutionID: runID,
+		}, now.Add(5*time.Second)),
+	}
+	// The same execution as the runtime wrote it into its own worker session:
+	// the dispatching prompt, one thinking block, one answered tool call and the
+	// answer. The prompt is a user row and the worked line closes the run, so
+	// neither adds a block the worker path draws.
+	workerRows := []state.Message{
+		{RunID: runID, Role: "user", Content: "inspect history"},
+		{RunID: runID, Role: "reasoning", Content: "checking", PartsJSON: `[{"type":"reasoning_timing","duration_ms":1000}]`},
+		{RunID: runID, Role: "assistant", PartsJSON: state.MessagePartsJSON(llm.AssistantMessage(nil, llm.ToolCall{
+			ID: "read-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "read_file", Arguments: "{}"},
+		}), "")},
+		{RunID: runID, Role: "tool", ToolStepID: "read-1", Content: "source body", PartsJSON: `[{"type":"tool_result_meta","tool_call_id":"read-1"},{"type":"tool_display","body":"source body","summary":"read file","tool_meta_json":"{\"tool_name\":\"read_file\",\"status\":\"completed\"}"}]`},
+		{RunID: runID, Role: "assistant", Content: "all checks passed"},
+	}
+	workerTranscripts := map[string][]state.Message{"worker-1": workerRows}
+
+	frames := func(transcripts map[string][]state.Message) []string {
+		renderer := NewRenderer(nil, nil)
+		renderer.viewportMode = true
+		renderer.composerSuppressed = true
+		replayTimelineWithWorkers(renderer, nil, events, &Reducer{}, nil, transcripts)
+		vm := renderer.perAgentVM[agentID]
+		if vm == nil {
+			t.Fatal("replayed subagent view is empty")
+		}
+		out := make([]string, 0, len(vm.blocks))
+		for _, block := range vm.blocks {
+			out = append(out, strings.Join([]string{
+				string(block.frame.Kind), block.frame.Title, block.frame.Summary, block.frame.Content,
+			}, "|"))
+		}
+		return out
+	}
+
+	fromWorker := frames(workerTranscripts)
+	fromEvents := frames(nil)
+	require.Equal(t, fromEvents, fromWorker, "worker-transcript replay must match the event replay")
+	// The words really are in the view, in order: the prompt it was given, what
+	// it thought, the call it made and its answer.
+	joined := strings.Join(fromWorker, "\n")
+	for _, want := range []string{"inspect history", "checking", "source body", "all checks passed"} {
+		require.Contains(t, joined, want)
+	}
+	// The worker rows really are the source: change them and the replayed words
+	// change with them, rather than falling back to the events.
+	distinct := make([]state.Message, len(workerRows))
+	copy(distinct, workerRows)
+	distinct[4] = state.Message{RunID: runID, Role: "assistant", Content: "answer from the worker transcript"}
+	distinctView := strings.Join(frames(map[string][]state.Message{"worker-1": distinct}), "\n")
+	require.Contains(t, distinctView, "answer from the worker transcript")
+	require.NotContains(t, distinctView, "all checks passed")
+}
+
 // The note-write result carries the stored path; sessions recorded before the
 // tool returned one carry an empty object. Both must replay as the note body.
 func TestReplayMemoryNoteUsesIndexedInputAndLiveFormatter(t *testing.T) {

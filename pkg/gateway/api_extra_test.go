@@ -3668,6 +3668,42 @@ func TestChatMessagesCarriesSubagentCallFacts(t *testing.T) {
 	}
 }
 
+// Plan 017: a reloaded subagent reads its words from its own worker session's
+// transcript, so the messages endpoint must serve a worker session of this
+// agent - and still refuse another agent's conversation.
+func TestChatMessagesReadsOwnAgentSubagentWorkerSession(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.RunRT.DB, "main")
+	// The conversation that dispatched the subagent.
+	if err := s.Sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	// The subagent's own worker session: born from s1, owned by the same agent.
+	if err := s.Sessions.EnsureAt(ctx, "worker-1", "worker", state.SessionBirth{
+		Source: state.SessionSourceSubagent, ParentSessionID: "s1",
+	}); err != nil {
+		t.Fatalf("ensure worker session: %v", err)
+	}
+	if _, err := s.Sessions.AppendStructuredMessage(ctx, "worker-1", "assistant", "the worker's answer", "", "[]", "", "", "", "", state.MessageExecTiming{}); err != nil {
+		t.Fatalf("append worker row: %v", err)
+	}
+	// Another agent's conversation: never reachable through this agent's server.
+	other := state.NewSessionStore(s.RunRT.DB, "other")
+	if err := other.Ensure(ctx, "other-session", "other"); err != nil {
+		t.Fatalf("ensure other session: %v", err)
+	}
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/worker-1/messages", nil, s.handleChatMessages, "id", "worker-1")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("worker messages = %d %s", rec.Code, rec.Body.String())
+	}
+	require.Contains(t, rec.Body.String(), "the worker's answer")
+
+	rec = cronRequest(t, s, http.MethodGet, "/api/chat/sessions/other-session/messages", nil, s.handleChatMessages, "id", "other-session")
+	require.NotEqual(t, http.StatusOK, rec.Code, "another agent's session must not be served")
+}
+
 // exitPlanServer is one gateway with a session parked on an exit-plan
 // approval: the run waits, the action is pending, and the plan file the
 // approval is asking about exists under the server's own state root.

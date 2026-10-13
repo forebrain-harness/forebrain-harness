@@ -701,6 +701,46 @@ export function conversationFromTranscript(
 }
 
 /**
+ * subagentBlocksFromTranscript rebuilds one subagent execution's words from the
+ * rows of its own worker session. A subagent's answer, thinking and tool cards
+ * are written into that worker session exactly as the conversation's are, so
+ * the reload runs them through the same conversion - one turn's rows becoming
+ * one timeline - and keeps only the blocks a subagent view draws from them.
+ *
+ * Only the text-bearing blocks are taken: the run's worked line, a delivered
+ * steer's user row and the goal/compaction cards stay with the lifecycle events
+ * that own them, and the dispatching prompt stays the spawn event's own block.
+ * One worker session holds every execution of that subagent, so the caller
+ * filters to the rows of the execution it is replaying.
+ */
+export function subagentBlocksFromTranscript(rows: ChatMessageRecord[]): TimelineBlock[] {
+  const out: TimelineBlock[] = []
+  for (const message of conversationFromTranscript(rows)) {
+    for (const block of message.blocks ?? []) {
+      if (block.kind === 'assistant' || block.kind === 'thinking' || block.kind === 'tool') out.push(block)
+    }
+  }
+  return out
+}
+
+/**
+ * WorkerBody walks one execution's rebuilt blocks as its delta events replay.
+ * The run's events describe the same blocks in the same order, grouped the way
+ * a block is written (a thinking block is its run of reasoning deltas, a tool
+ * card is one call's start/completion, an answer is its run of text deltas), so
+ * a reload spends one block at each group boundary and skips the rest of the
+ * deltas. `cursor` is the next block; `group`/`stepId` name the group the last
+ * delta belonged to.
+ */
+interface WorkerBody {
+  agentId: string
+  blocks: TimelineBlock[]
+  cursor: number
+  group: 'thinking' | 'assistant' | 'tool' | ''
+  stepId: string
+}
+
+/**
  * applyTranscriptRowMetadata folds one assistant row's per-turn metadata onto
  * the turn it belongs to. The runtime writes these on whichever row it finished
  * on, and the turn is one message, so the last row carrying a value owns it -
@@ -2068,6 +2108,13 @@ export function useChatStream() {
   const queryRowsByExecution = new Map<string, { stepId: string; index: number }[]>()
   const subagentNow = ref(Date.now())
   let subagentClockTimer: ReturnType<typeof setInterval> | null = null
+  // One subagent execution's words, rebuilt from its own worker session's
+  // transcript (plan 017): the assistant/thinking/tool blocks the runtime wrote
+  // there, in the order it wrote them. A reload feeds them into that subagent's
+  // view as its own delta events replay - the lifecycle, approvals and plan
+  // cards still come from the events - so the text has one home. Keyed by the
+  // execution's run id, the id every one of its events carries.
+  const replayWorkerBodies = new Map<string, WorkerBody>()
 
   function syncSubagentClock() {
     let anyRunning = false
@@ -2096,6 +2143,7 @@ export function useChatStream() {
     subagentCallStepIds.clear()
     endedSubagentExecutions.clear()
     queryRowsByExecution.clear()
+    replayWorkerBodies.clear()
     syncSubagentClock()
   }
 
@@ -2827,6 +2875,99 @@ export function useChatStream() {
   }
 
   /**
+   * appendWorkerBlock draws one rebuilt worker block on the subagent's view.
+   * The block was finalised at write time, so it is appended whole - the live
+   * blocks a block delta would have streamed are not the source here.
+   */
+  function appendWorkerBlock(agentId: string, block: TimelineBlock) {
+    updateSubagent(agentId, (entry) => ({ ...entry, blocks: [...entry.blocks, block] }))
+  }
+
+  /**
+   * applyWorkerBackedDelta consumes one delta event of an execution whose words
+   * live in its worker transcript. A block is written when it ends, so the
+   * deltas only mark where one begins: the first delta of a group spends the
+   * next rebuilt block, every later delta of that group is dropped. Events that
+   * are not part of a block - an approval, a plan card, the lifecycle - fall
+   * through to the ordinary routing, so they keep the place among the blocks
+   * that live drew them at.
+   *
+   * It reports whether the event was consumed as a block delta.
+   */
+  function applyWorkerBackedDelta(agentId: string, evt: ForebrainRunEvent, payload: Record<string, unknown>, body: WorkerBody): boolean {
+    const startGroup = (group: WorkerBody['group'], stepId: string) => {
+      body.group = group
+      body.stepId = stepId
+      const block = body.blocks[body.cursor++]
+      if (block) appendWorkerBlock(agentId, block)
+    }
+    switch (evt.type) {
+      case 'reasoning_delta':
+        if (body.group !== 'thinking') startGroup('thinking', '')
+        return true
+      case 'reasoning_done':
+        body.group = ''
+        return true
+      case 'assistant_delta':
+        if (body.group !== 'assistant') startGroup('assistant', '')
+        return true
+      case 'tool_call_started':
+      case 'tool_call_completed': {
+        const stepId = String(payload.stepId ?? '').trim()
+        if (body.group !== 'tool' || body.stepId !== stepId) startGroup('tool', stepId)
+        return true
+      }
+      case 'tool_output_delta':
+        return true
+      default:
+        return false
+    }
+  }
+
+  /**
+   * loadReplayWorkerBodies reads, once, the worker sessions a reloaded
+   * conversation's subagent spawns name, and rebuilds each execution's words
+   * from the rows of its own run. A spawn with no worker session id, a worker
+   * session the reader can no longer see, and an execution with no rows in its
+   * worker session all leave that execution on the event path - the fallback
+   * until the rows recorded before the transcript contract are migrated.
+   */
+  async function loadReplayWorkerBodies(events: ForebrainRunEvent[]): Promise<void> {
+    const spawns: { runId: string; agentId: string; workerSessionId: string }[] = []
+    const sessionIds = new Set<string>()
+    for (const evt of events) {
+      if (evt.type !== 'subagent_spawned') continue
+      const payload = evt.payload ?? {}
+      const workerSessionId = String(payload.workerSessionId ?? '').trim()
+      const runId = String(evt.runId ?? '').trim()
+      if (!workerSessionId || !runId) continue
+      spawns.push({ runId, agentId: String(payload.agentId ?? '').trim(), workerSessionId })
+      sessionIds.add(workerSessionId)
+    }
+    if (!spawns.length) return
+    const rowsBySession = new Map<string, ChatMessageRecord[]>()
+    await Promise.all([...sessionIds].map(async (workerSessionId) => {
+      try {
+        const rows = await forebrainApi.chatMessages(workerSessionId, 0)
+        if (Array.isArray(rows)) rowsBySession.set(workerSessionId, rows)
+      } catch {
+        // A worker session the reader cannot see stays on the event path.
+      }
+    }))
+    for (const spawn of spawns) {
+      const rows = rowsBySession.get(spawn.workerSessionId)
+      if (!rows?.length) continue
+      // Execution id and run id are the same child run, so the rows of this
+      // execution are the ones carrying it.
+      const execRows = rows.filter((row) => String(row.runId ?? '').trim() === spawn.runId)
+      if (!execRows.length) continue
+      const blocks = subagentBlocksFromTranscript(execRows)
+      if (!blocks.length) continue
+      replayWorkerBodies.set(spawn.runId, { agentId: spawn.agentId, blocks, cursor: 0, group: '', stepId: '' })
+    }
+  }
+
+  /**
    * routeSubagentEvent keeps everything a subagent produces on the subagent's
    * own transcript. Without it the child's answer would be appended to the
    * primary assistant message and its tool calls mixed into the main step list,
@@ -2834,6 +2975,8 @@ export function useChatStream() {
    * said.
    */
   function routeSubagentEvent(agentId: string, evt: ForebrainRunEvent, payload: Record<string, unknown>): boolean {
+    const workerBody = replayWorkerBodies.get(String(evt.runId ?? '').trim())
+    if (workerBody && applyWorkerBackedDelta(agentId, evt, payload, workerBody)) return true
     switch (evt.type) {
       case 'context_compacting':
       case 'context_compact_progress':
@@ -4871,6 +5014,10 @@ export function useChatStream() {
 		  if (block.kind === 'tool') rememberSubagentCallStep(block.step)
 		}
 	  }
+	  // A subagent's words are rebuilt from its own worker session's transcript
+	  // (plan 017), so the workers are read before their events replay. An
+	  // execution whose worker session is gone keeps the event path below.
+	  await loadReplayWorkerBodies(events)
 	  for (const evt of events.sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0))) {
 		applyObservedEvent(evt, true)
 	  }

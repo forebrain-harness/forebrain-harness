@@ -122,9 +122,15 @@ func (c *commandController) replaySession(sessionID string, note func(messages i
 	if len(turns) == 0 && len(events) == 0 {
 		return
 	}
+	// A subagent's words are rebuilt from its own worker session's transcript
+	// (plan 017): the rows the runtime wrote there are read the same way this
+	// conversation's own are, and the replay feeds them into the subagent's view
+	// in place of its delta events. A worker session that is gone falls back to
+	// the events.
+	workerTranscripts := c.loadSubagentWorkerTranscripts(events)
 	c.renderer.BeginBatch()
 	reducer := &Reducer{}
-	replayTimelineWithReducer(c.renderer, turns, events, reducer, planUpdates)
+	replayTimelineWithWorkers(c.renderer, turns, events, reducer, planUpdates, workerTranscripts)
 	flushReplayReducer(c.renderer, reducer)
 	// The cards the replay built are the ones on screen now; the live reducer
 	// takes them over so the events that still arrive for them settle them in
@@ -166,6 +172,44 @@ func primaryTranscriptTurns(turns []state.Message) []state.Message {
 			continue
 		}
 		out = append(out, turn)
+	}
+	return out
+}
+
+// loadSubagentWorkerTranscripts reads, once, the worker session of every
+// subagent this conversation dispatched and still has rows for (plan 017). The
+// rows are read the same way this conversation's own transcript is, so a
+// subagent's view rebuilds from them exactly as the main conversation does. A
+// spawn with no worker session id, and a worker session the reader can no longer
+// see, are left out - the execution then replays from its events.
+func (c *commandController) loadSubagentWorkerTranscripts(events []event.RunEvent) map[string][]state.Message {
+	if c == nil || c.session == nil || len(events) == 0 {
+		return nil
+	}
+	out := make(map[string][]state.Message)
+	for i := range events {
+		if events[i].Type != event.RunEventSubagentSpawned {
+			continue
+		}
+		var p event.SubagentSpawnedPayload
+		if json.Unmarshal(events[i].Payload, &p) != nil {
+			continue
+		}
+		workerSessionID := strings.TrimSpace(p.WorkerSessionID)
+		if workerSessionID == "" {
+			continue
+		}
+		if _, done := out[workerSessionID]; done {
+			continue
+		}
+		rows, err := c.session.SurfaceTranscriptMessages(context.Background(), workerSessionID)
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+		out[workerSessionID] = rows
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -278,9 +322,45 @@ func replayTurnWithReducer(renderer *Renderer, reducer *Reducer, turn state.Mess
 // (heldGateCallsByRow), so the response that follows the gate is a block of
 // its own rather than an extension of the one before it.
 func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events []event.RunEvent, reducer *Reducer, planUpdates []event.PlanUpdatedPayload) int {
+	return replayTimelineWithWorkers(renderer, turns, events, reducer, planUpdates, nil)
+}
+
+// replayTimelineWithWorkers merges the compact-independent primary transcript
+// and the canonical subagent event log before reducing them. Live delivery is
+// interleaved; replaying the two sources in separate batches moved every child
+// card after the final parent answer and could not reproduce the live VM.
+//
+// workerTranscripts carries each subagent worker session's rows, keyed by its
+// session id (plan 017): a child execution whose rows are here has its words
+// rebuilt from them instead of from its per-token deltas, and the events still
+// supply everything else about it.
+//
+// Both sources are ordered structurally, never by wall clock. A run writes all
+// of its transcript rows when it ends, so an entire turn shares one
+// second-precision created_at while the subagent events that happened during
+// that turn carry earlier millisecond stamps. Ordering the merged stream by
+// time therefore shuffled whole turns - every user row of a turn was hoisted
+// above the answers it followed - and pushed each subagent card ahead of the
+// message that spawned it. RowID is the transcript's own insertion order and is
+// authoritative, so the stored order is replayed as-is; a subagent's events are
+// anchored to the parent tool call that dispatched it, and a nested subagent
+// inherits its parent's anchor through its parent run.
+//
+// Approval records anchor by the tool call they name, and the canceled card for
+// a call that never ran is drawn at the same position and first, so the
+// confirmation line the user read lands above the card it answers - exactly
+// where it was live.
+//
+// A gate whose wait holds no card is the exception on both counts: its records
+// anchor right after the row that issued the call, and that row's response is
+// sealed before them by the same running step live fed the reducer
+// (heldGateCallsByRow), so the response that follows the gate is a block of
+// its own rather than an extension of the one before it.
+func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events []event.RunEvent, reducer *Reducer, planUpdates []event.PlanUpdatedPayload, workerTranscripts map[string][]state.Message) int {
 	if renderer == nil || reducer == nil {
 		return 0
 	}
+	workerBodies := buildReplayWorkerBodies(events, workerTranscripts)
 	anchors := subagentEventAnchors(turns, events)
 	// The card facts of every subagent_* call the transcript answered, derived
 	// the way the live path derived them, so a row recorded before the card
@@ -366,6 +446,21 @@ func replayTimelineWithReducer(renderer *Renderer, turns []state.Message, events
 		sequence := evt.Sequence
 		if sequence == 0 {
 			sequence = int64(i + 1)
+		}
+		// An execution whose words are in its worker transcript is rebuilt from
+		// them: its block deltas spend the rebuilt messages one group at a time
+		// and are otherwise dropped, while everything that is not a block delta -
+		// an approval, a plan card, the lifecycle - keeps the place the events
+		// drew it at. One worker session's executions share its run id, so the
+		// bodies are left in place across a `subagent_ended`; a later execution
+		// of the same subagent keeps consuming the same body.
+		if body := workerBodies[strings.TrimSpace(evt.RunID)]; body != nil {
+			if injected, consumed := body.consume(evt); consumed {
+				if injected != nil {
+					pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: injected})
+				}
+				continue
+			}
 		}
 		pending[pos] = append(pending[pos], replayEventItem{sequence: sequence, message: msg, frames: frames})
 	}
@@ -1133,6 +1228,168 @@ func replayToolEventSkipped(meta event.ToolCallMeta) bool {
 		return false
 	}
 	return !strings.EqualFold(strings.TrimSpace(meta.Category), "skill")
+}
+
+// replayWorkerBody walks one subagent execution's rebuilt messages as its delta
+// events replay (plan 017). A message is one block - a thinking block, one tool
+// card, or a run of answer text - and its events name the same blocks in the
+// same order, so a reload spends one message at each block boundary and drops
+// the rest of that block's deltas.
+type replayWorkerBody struct {
+	messages []any
+	cursor   int
+	group    string
+	stepID   string
+}
+
+// next returns the following rebuilt message, or nil when the body is spent.
+func (b *replayWorkerBody) next() any {
+	if b == nil || b.cursor >= len(b.messages) {
+		return nil
+	}
+	message := b.messages[b.cursor]
+	b.cursor++
+	return message
+}
+
+// consume drops one delta event of a worker-backed execution, returning the
+// rebuilt message a new block group starts with - nil when the delta continues
+// the open group. It reports false for events that are not block deltas, which
+// the caller routes as usual.
+func (b *replayWorkerBody) consume(evt event.RunEvent) (any, bool) {
+	switch evt.Type {
+	case event.RunEventReasoningDelta:
+		if b.group != "thinking" {
+			b.group = "thinking"
+			return b.next(), true
+		}
+		return nil, true
+	case event.RunEventReasoningDone:
+		b.group = ""
+		return nil, true
+	case event.RunEventAssistantDelta:
+		if b.group != "assistant" {
+			b.group = "assistant"
+			return b.next(), true
+		}
+		return nil, true
+	case event.RunEventToolStarted:
+		var p event.ToolCallStartedPayload
+		_ = json.Unmarshal(evt.Payload, &p)
+		return b.startTool(p.StepID), true
+	case event.RunEventToolCompleted:
+		var p event.ToolCallCompletedPayload
+		_ = json.Unmarshal(evt.Payload, &p)
+		return b.startTool(p.StepID), true
+	case event.RunEventToolOutputDelta:
+		return nil, true
+	default:
+		return nil, false
+	}
+}
+
+func (b *replayWorkerBody) startTool(stepID string) any {
+	stepID = strings.TrimSpace(stepID)
+	if b.group != "tool" || b.stepID != stepID {
+		b.group = "tool"
+		b.stepID = stepID
+		return b.next()
+	}
+	return nil
+}
+
+// buildReplayWorkerBodies rebuilds, per execution, the messages a subagent's
+// view draws from its own worker transcript. A spawn with no worker session id,
+// a worker session whose rows are absent, and an execution with no rows of its
+// own all leave that execution on the event path.
+func buildReplayWorkerBodies(events []event.RunEvent, workerTranscripts map[string][]state.Message) map[string]*replayWorkerBody {
+	if len(workerTranscripts) == 0 {
+		return nil
+	}
+	out := make(map[string]*replayWorkerBody)
+	for i := range events {
+		if events[i].Type != event.RunEventSubagentSpawned {
+			continue
+		}
+		var p event.SubagentSpawnedPayload
+		if json.Unmarshal(events[i].Payload, &p) != nil {
+			continue
+		}
+		workerSessionID := strings.TrimSpace(p.WorkerSessionID)
+		runID := strings.TrimSpace(events[i].RunID)
+		if workerSessionID == "" || runID == "" {
+			continue
+		}
+		if _, done := out[runID]; done {
+			continue
+		}
+		rows := workerTranscripts[workerSessionID]
+		if len(rows) == 0 {
+			continue
+		}
+		// Execution id and run id are the same child run, so the rows of this
+		// execution are the ones carrying it.
+		execRows := make([]state.Message, 0, len(rows))
+		for _, row := range rows {
+			if strings.TrimSpace(row.RunID) == runID {
+				execRows = append(execRows, row)
+			}
+		}
+		if len(execRows) == 0 {
+			continue
+		}
+		messages := replayWorkerMessages(execRows, strings.TrimSpace(p.AgentID))
+		if len(messages) == 0 {
+			continue
+		}
+		out[runID] = &replayWorkerBody{messages: messages}
+	}
+	return out
+}
+
+// replayWorkerMessages converts one worker execution's rows into the reducer
+// messages a subagent's view draws: its thinking (sealed with the duration the
+// row recorded), its answer, and its tool cards, each tagged with the subagent's
+// roster key. The dispatching prompt, a delivered steer's user row and the run's
+// worked line stay with the events that own them, so they are skipped here.
+func replayWorkerMessages(turns []state.Message, agentID string) []any {
+	callIndex, _ := buildToolCallIndex(turns)
+	subagentCalls := turn.SubagentCallsInTranscript(turns)
+	out := make([]any, 0, len(turns))
+	for i := range turns {
+		turn := turns[i]
+		if strings.EqualFold(strings.TrimSpace(turn.Role), "system") {
+			continue
+		}
+		meta := transcriptToolMeta(turn)
+		meta.AgentID = strings.TrimSpace(agentID)
+		switch msgKindFromRole(turn.Role) {
+		case MsgKindAssistant:
+			content := strings.TrimSpace(turn.Content)
+			if content == "" {
+				continue
+			}
+			out = append(out, NewMessageMsg{Msg: Message{Kind: MsgKindAssistant, Content: content, AgentID: agentID}})
+		case MsgKindReasoning:
+			content := strings.TrimSpace(turn.Content)
+			if content == "" {
+				continue
+			}
+			msg := Message{Kind: MsgKindReasoning, Content: content, AgentID: agentID, ToolMeta: meta}
+			if spent, ok := state.ParseReasoningTiming(turn.PartsJSON); ok {
+				msg.Duration = spent
+			}
+			out = append(out, NewMessageMsg{Msg: msg})
+		case MsgKindTool:
+			msg, _, ok := replayToolMessage(turn, meta, callIndex, subagentCalls)
+			if !ok {
+				continue
+			}
+			msg.AgentID = strings.TrimSpace(agentID)
+			out = append(out, NewMessageMsg{Msg: msg})
+		}
+	}
+	return out
 }
 
 func replayApprovalMessage(evt event.RunEvent, agentID, actionID, actionKind, status, body string) NewMessageMsg {
