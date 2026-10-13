@@ -40,6 +40,15 @@
 33. "主代理维度和项目维度的记忆页面必须展示记忆文件分页列表，支持分页查询、按创建或更新时间升降序、记忆内容关键词搜索、单条查看和编辑、单条删除和多选批量删除以及重置/清空全部"
 34. "左侧菜单栏加上主代理的规则指令和对应页面，UI与项目空间的规则指令保持一致，并且主代理和项目空间的规则指令页的规则文件都必须支持创建和编辑，只能创建forebrain harness支持的规则文件，显示下拉框让用户选择要创建的规则文件"
 35. "设计技能工坊，skill-workshop"
+36. "规则指令、模型服务、权限、设置-主代理、设置-MCP、设置-钩子等这几个页面都改成列表+列表上方按钮+弹窗的UI和UX"（2026-10-11）
+37. "技能工坊页面的功能过于简单，必须改成会话页面的超集，复用会话页面的composer，并在会话页面的工作台基础上增加"文件"、"测试用例"、"评测"、"触发描述"和"版本""（2026-10-11）
+38. "web端文件编辑必须使用支持markdown的富文本编辑器"；"我需要的富文本编辑器必须是可以编辑代码的，有代码高亮的"；"必须使用成熟稳定MIT/apache 2等开源可商用的富文本组件库"（2026-10-11；选型见 `vendor/README.md`）
+39. "代码高亮使用monokai/monokai-light主题，与tui保持一致"；"web端不论主题色是什么，代码高亮统一使用monokai-light主题"（2026-10-11）
+40. "不需要每个页面都显示主代理 · main，左侧菜单栏的主代理选择器已经可以看到当前选择的是哪个主代理了，把每个页面上方显示的主代理 · main都删掉"（2026-10-11）
+41. "技能页面嵌套太多层了……把列表卡片整体移到上一层，去掉第二层"；"所有页面的页面标题层都去掉，太多余"；"模型服务页跟技能页问题一样，也是嵌套太多，检查所有页面，都要减少层级"（2026-10-11）
+42. "会话页面和技能工坊页面的工作台的文件标签拆分出两个标签："工作目录"和"变更文件"……工作目录树里的节点……右侧都必须加上编辑按钮和删除按钮……目录节点多加一个加号图标，可以新建文件。变更文件就是现在的技能文件，删掉+新建文件按钮……每一份文件右侧多加一个撤销变更的按钮"（2026-10-11）；技能正式目录的改动自动进草稿（2026-10-11 拍板）
+43. "新建主代理弹窗只需要设置名称即可，其他表单项都删掉"；"设置页的主代理页直接删掉，把新建主代理按钮移到顶部导航条，新建主代理后，自动切换当前主代理为新建的主代理"（2026-10-11；删除主代理放进菜单栏顶部的主代理下拉，main 与当前主代理不能删）
+44. 主代理工作区路径固定：main 为 `~/.forebrain/workspace`，其余为 `~/.forebrain/workspaces/<名称>`（`pkg/config/primary_agent.go:304-306`，不可配置；owner 2026-10-11 指出设计稿写错）
 
 ## 方案预览
 
@@ -84,11 +93,19 @@
 | [012](012-memory-files.md) | 记忆文件管理：主代理 global 与项目 scope 的分页列表（创建/更新时间升降序）、关键词搜索、查看编辑、单删批删、清空全部；核心文件 MEMORY.md / memory_summary.md 不可删；清空/重置统一走扩展后的 `POST /api/memories/reset`（body 显式 scope，决策 D10） | P1 | L | 007、008 | **DONE**（2026-10-02：`pkg/gateway/memories_files_api.go`（files 列表分页/排序/关键词、file 读写 2MiB 上限+pathguard 防线+新建 .md/.txt/.json 白名单、批量删除核心文件 403 逐条结果）+ darwin/other birth time 平台文件；`handleMemoriesReset` 改 body 形态（空 body=session 原语义，新增 global/project 分支，删 `?scope=` 查询参数，响应带 scope）；MemoryFilesPanel 公共面板 + MemoriesView 重写（设置开关已在设置页，删重复卡）+ ProjectMemory 替换占位（无 projectKey 空态）；e2e memory-files 7 用例（E2E_HOME 导出）。设计偏差一处：列表搜索用字面内容/文件名匹配而非 FTS——引擎 MinIndexRelevance 是为真实规模库校准的召回阈值，小库用户关键词会被整批滤空，字面匹配才是文件管理的正确语义（已在计划维护说明补充）） |
 | [013](013-cron-schedule-builder.md) | 定时任务计划编辑器：七种自定义模式（一次/相对/间隔/每天/工作日/每周多选/Cron）、服务端预览 API（ParseSchedule+Next，引擎零改动）、主代理与项目任务分离、投递通道下拉 | P1 | M | 007、008 | **DONE**（2026-10-02：`pkg/gateway/cron_preview.go`（POST /api/cron/preview：引擎 ParseSchedule+Next×3，valid:false 走 200+error，raw 原样回显）；handleCronJobs GET 支持 `?project_id=`（归属校验 404 + 内存分层过滤——CronService 未暴露项目列表方法且范围禁改 pkg/process，过滤等价）；ScheduleBuilder 七模式（周多选>1 生成 cron dow 列表、=1 用 every <day> 文法、12 小时制 clock、防抖 400ms 服务端预览）；CronView 重写（编辑器弹层/启用暂停/立即执行/执行记录/投递通道下拉=已启用通道+只记录选项/次数上限，projectId+scope props 使项目标签直接复用同一视图）；ProjectCron 替换占位；e2e cron-builder 6 用例。引擎与存储零改动已验证） |
 | [014](014-provider-keys-and-models.md) | 模型服务：API Key 密码框输入（明文转 `${ENV}` 引用写 `.env`，空 = 保留旧值，永不明文回显）、多模型逗号标签输入、模型目录快速加入、服务排序 | P1 | M | 007 | **DONE**（2026-10-02：handleProviders 重写为 DTO 往返（GET 折叠相邻同签名条目为多模型行 + api_key_set/hint（引用经 .env 解析末 4 位，短 key/未解析引用全遮）；PUT 展开models 为每模型一条（yaml 无 model 列表序列化，展开即引擎持久形态）、api_key_plain→${ENV}、空=旧值回填、显式 api_key 引用透传，删 [REDACTED] 往返）；ModelChipsInput（逗号即时切 chip/失焦/Enter/去重/删除 + 目录建议）+ 组件 7 测试；ProvidersView 重写（主用/回退徽标、上下移、keyEdit 更换交互、password+autocomplete=new-password、高级折叠、datalist 目录）。**owner 拍板**：pkg/process 加导出包装 ProviderAPIKeyConfigReference（照 SecretConfigReferenceForOnboard 先例）。**顺带根因修复**：ProviderKeyEnvMap 对连字符 provider 生成非法 env 名（E2E-SVC_API_KEY）致 .env 整文件解析失败、热载崩——`-`→`_` 清洗（与 ChannelSecretEnvName 同法）+ 回归测试。e2e providers-keys 5 用例（yaml/${ENV}/0600/轮换/排序）） |
+| [015](015-shell-flat-pages-and-shared-modal.md) | 外壳与页面结构：去掉页面标题层与主代理标识、共用弹窗/确认框/标题行、菜单栏底部一行、顶栏“新建主代理”（只填名称、建好即切换）、下拉里删除主代理、设置去掉“主代理”标签、代码高亮一律 monokai-light | P1 | L | — | DONE（2026-10-11 执行完毕，未提交；评审 APPROVE，全量 e2e 95 passed/0 failed）|
+| [016](016-chat-composer-and-thread.md) | 对话页：对话按钮进顶栏、输入框（＋菜单/模式/审批/上下文圆环/模型/推理强度）、消息流（思考、Worked 行、MCP 提示、另一端运行中、目录缺失）、去掉输入框上方诊断面板；会话模型接口；**审批进消息流（owner 2026-10-12 裁决）** | P1 | L | 015 | DONE（2026-10-12；plans/015/016/021 未做：首 token、思考耗时标签、另一端归属按"数据缺失不显示"处理；**真模型验收**：FOREBRAIN_E2E_REAL_LLM=1 全量 e2e 113 passed/1 skipped/0 failed） |
+| [017](017-workbench-tabs-tree-actions-changed-files.md) | 工作台四个标签：概览、上下文、工作目录（节点编辑/删除/新建文件，后端文件操作接口）、变更文件（对比/编辑/撤销变更） | P1 | L | 015、019、plans/022、plans/033、plans/036 | DONE（执行完毕，未提交：`ChatWorkbench` 四标签 + 标签记忆；`components/workbench/{OverviewTab,ContextTab,WorkingDirTab,ChangedFilesTab,TreeNodeActions,FileEditDialog}`；`WorkspaceTree`/`WorkspaceRow` 每行编辑/删除、目录新建；`ContextDebugPanel` 复用 `ContextAccordion`；后端 `pkg/gateway/files_write.go` 四个接口，根经 `filesRoot`、越界用 `ResolveWithinRoots`、技能正式目录经 `ResolveDraftTarget` 转草稿；e2e 116 passed/2 skipped/0 failed（新增工作台用例）。**偏差**：变更文件 e2e 未能造出"模型改文件"（假 provider 不产生文件工具调用，真模型档被 owner 验收规则禁用）；计划里的 `ResolveSkillDraftTarget` 实际名为 `ResolveDraftTarget`；未跑 `make ui`(会脏化 dist)，改用临时 outDir 构建验证） |
+
+| [018](018-list-and-modal-pages.md) | 列表 + 上方按钮 + 弹窗：规则指令、模型服务、权限、MCP、钩子、设置各标签、项目（新建/删除弹窗）、记忆、项目空间各标签 | P1 | L | 015、019、plans/025（浏览用 plans/029） | DONE（2026-10-13 执行完毕，未提交：规则指令（主代理/项目）、模型服务、权限（主代理/项目）、钩子、项目、记忆查看/编辑、设置-审批默认/记忆开关/配置文件均改为「列表 + 列表上方按钮 + 弹窗」；删除 `RulesFileEditor.vue`；`FolderDialog` 提层到 body 以便从弹窗内使用；全量 e2e 119 passed/2 skipped/0 failed。**偏差**：MCP（全局/项目）的新增/编辑是 STOP 条件 2——网关只有 `GET /v1/mcp/servers` 与 enable/disable、项目 consent，没有新增/编辑端点，故未做「添加 MCP 服务」弹窗（计划/原型有此按钮）。见计划执行报告） |
+| [019](019-file-editor-crepe-and-codemirror.md) | 文件编辑器：Milkdown Crepe（MIT）所见即所得 + 源码切换、代码块可编辑带高亮；CodeMirror 6（MIT）编辑代码文件；monokai-light 调色板共用 | P1 | M | 015 | DONE（2026-10-12 执行完毕，未提交：`@milkdown/crepe` 7.22.3 + CodeMirror 6 组件 `FileEditor`/`FrontmatterFields`，monokai-light 调色板由 `@repo/elements/code-block` 与编辑器共用；替换记忆/工坊/配置三处文本框；评审侧复跑全量 e2e 110 passed/2 skipped/0 failed；Crepe 打开 Markdown 会重排未触碰内容（未改动不写盘，保存按钮在无改动时禁用；详见计划执行报告） |
+| [020](020-skills-pages-and-workshop-as-chat-superset.md) | 技能页版本与状态、发布/对比/恢复/丢弃/拉取弹窗；工坊页改为会话页超集，工作台加测试用例、评测、触发描述、版本；发现并安装的候选卡片 | P1 | XL | 015–017、019、plans/029、plans/036 | DONE（2026-10-13 执行完毕，未提交：四处技能列表改为「搜索/来源筛选 + 表格」，显示版本徽标、草稿（无开关）、有未发布的修改/有更新徽标与「详情」；`WorkshopView` 重写为会话页超集，复用 `useChatStream`/`useTopbar`/`useWorkbench`/`PromptInput` 全套 composer/`ChatWorkbench`，删除 `WorkshopSkillPanel`；新增 `components/workshop/{WorkshopTopbar,ChangesTab,CasesTab,EvalsTab,TriggerTab,VersionsTab,PublishDialog,CompareDialog,CaseEditDialog,EvalCaseDialog}`，`ChatWorkbench` 接受额外标签并对 changes 开槽；网关新增 `pkg/gateway/skill_workshop.go`（`/:name/workshop/evals`、`/:name/workshop/evals/:iteration/feedback`、`/:name/workshop/trigger` 及项目级镜像）；`skill-workshop/SKILL.md` 改触发评测集落草稿 `evals/trigger_queries.json`、结果落 `<名称>-workspace/trigger-results.json`，并约定发现模式输出 `skill-candidates` 结构化块；菜单栏去掉独立工坊入口，`/workshop` 按 `?scope=` 高亮「技能」或「项目」；全量 e2e 119 passed/2 skipped/0 failed。**偏差**：对比弹窗只到文件级增删行数（版本引擎的 diff 接口不含行内容，未新增单文件内容接口）；工坊会话从标题里的技能名关联「最近的会话」；发现模式卡片由前端解析模型回复的 `skill-candidates` 块渲染。见计划执行报告） |
 
 状态取值：TODO | IN PROGRESS | DONE | BLOCKED（附一句原因）。
 
 ## 依赖说明
 
+- **015–020（2026-10-11）**：015 先做（共用组件），019 次之（编辑器），然后 016 → 017 → 018 → 020；017 另需 `plans/022`、`plans/033`、`plans/036`；018 另需 `plans/025`，新建项目的“浏览…”用 `plans/029`；020 另需 `plans/029`、`plans/036`。每份都以“与 app-preview.html 并排截图对照”为完成标准之一，合起来即 `plans/README.md` 偏差清单第 14 条的全量对照。
 - 001 必须最先做：它消除 401，并建立 `scripts/acceptance/web_e2e.sh` 真机验证脚手架；后面每个计划都往这套脚手架里追加用例，并以它通过作为完成标准。
 - 002 依赖 001：路由表里要出现 001 新增的 `POST /api/auth/session`，一键登录链接指向 001 新增的 `/login` 页面。
 - 003 先于 004、005：004 的 logo 和 005 的新菜单栏都直接使用 003 定义的色值变量；在旧变量上先做布局再换色会返工。
@@ -116,7 +133,7 @@
 7. **修根因，不打补丁。** 不为掩盖问题添加兜底、重试或空值保护；受信任边界之外的输入（浏览器请求头、Cookie、Origin）才需要校验。
 8. **死代码彻底删除。** 改动后没有生产调用者的函数、类型、CSS 变量、配置字段一并删除，连同只测试它们的测试。
 9. **包依赖图。** 如果改动了 `pkg/...` 之间的 import，运行 `scripts/package-graph.sh` 重新生成 `pkg/architecture/testdata/graph.json`。本期计划的设计刻意不引入新的包间依赖，正常情况下该文件不应变化。
-10. **禁止粉色/品红。** 任何新增颜色都不得落在粉色、品红色相。
+10. **禁止粉色/品红。** 任何新增颜色都不得落在粉色、品红色相。例外：代码高亮按 owner 要求（第 39 条）用 monokai-light 原色，其中的 `#f92672` 照用。
 11. **多计划共享文件按"每次重读后追加"的方式改。** 下面这些文件被多份计划写，执行者动它们之前必须重新读一遍当前内容（别人的计划可能已经改过），并且**只追加自己那一项，不重排、不顺手清理别人的改动**：
     - `frontend/src/locales/index.ts`（13 份计划都加文案键：只在自己的区块里加键，zh/en 两表成对）；
     - `frontend/src/App.vue` 的菜单数组（007 建数组，009/010/011 各追加一项，008/012/013/014 只用不排）；

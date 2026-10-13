@@ -625,3 +625,20 @@ pnpm build
   review 卡退回追加到末尾。
 - 评审重点：`ensureGateAnchor` 只在首次建锚时关闭流式块；`placeBeforeGateAnchor` 的幂等（同一事件经请求 socket 与会话观察者
   两路到达时由 `appliedEventIDs` 去重，这里再兜一层）。
+
+## 验收记录
+
+**跨端对照（2026-10-10，008+011+012+013 并回主树工作区之后，基于 `005c1a8`，主树已含 007+009）**：
+在主树构建 driver 二进制，用隔离 home（`$TMPDIR/fb-x008`，fake provider `toolcall` 模式）跑了两段真实 TUI 会话。随后在同一个 home 上起
+`forebrain gateway start`（token 鉴权，端口 8815），用 `GET /api/chat/sessions/<sid>/messages` 与 `/events` 取到 web 重载要用的数据，
+经 `toCamelCase` 喂给主树前端的 `loadMessages`（scratchpad 副本里的探针），与 TUI 的 live 和 `resume` 回放逐行对比（gate 锚点不可见，不计入）：
+
+| 会话 | TUI live = TUI 回放 | web 重载 |
+|---|---|---|
+| F 拒绝带反馈 | `● calling exit_plan_mode` → `✗ You did not approve …` → `◆ Kept planning └ 先拆分里程碑` | `● calling exit_plan_mode` → `✗ You did not approve …` → `exit_plan_mode [denied] 先拆分里程碑` → 回答 |
+| E review 失败后批准 | `● calling exit_plan_mode` → `✔ You asked deepseek / deepseek-chat to review the plan` → `● Failed to start 1 plan-reviewer task` → `✔ You approved …` → `◆ Exited plan mode` | `● calling exit_plan_mode` → `✔ You asked …` → review 卡 `[failed]` → `✔ You approved …` → `exit_plan_mode [completed]` → 回答 |
+
+两端顺序一致。F 会话的事件日志里有 012 发出的 `…:tool_call_completed:denied`。同一串持久化事件按 live 方式喂进请求 socket，
+记录与卡片的相对顺序与重载相同；但 TUI 会话本来就不落主 agent 的 `assistant_delta`（文字由 transcript 承载），所以这种模拟看不到文字的位置，
+文字位置由 `useChatStream.test.ts` 的 live/重载对照用例覆盖。gateway 托管会话（web 发起）的真机路径没有跑（driver 不驱动浏览器），
+由 011 的单测与前端回归用例覆盖。临时目录与 gateway 进程已清理。

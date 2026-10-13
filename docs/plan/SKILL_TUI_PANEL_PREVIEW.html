@@ -1,0 +1,528 @@
+<title>Forebrain 终端技能面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --bg: #f3f4f6; --card: #ffffff; --text: #151a22; --text-2: #4a5361; --muted: #6b7380; --line: #dfe3e9; --chip: #e9ecf1; --chip-on: #1f2a38; --chip-on-text: #ffffff; --accent: #335f8a;
+    --ui: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    /* terminal: one dark look, the TUI's own 256-colour palette */
+    --t-bg: #15171b; --t-bar: #22252b; --t-fg: #d0d0d0; --t-acc: #87afd7; --t-ok: #5faf00; --t-warn: #ffaf00; --t-fail: #ff5f5f; --t-glyph: #8a8a8a; --t-hint: #6f747c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { color-scheme: dark; --bg: #0f1114; --card: #171a1f; --text: #e8ebf0; --text-2: #b3bac6; --muted: #8b93a1; --line: #2a2f37; --chip: #232830; --chip-on: #e8ebf0; --chip-on-text: #0f1114; --accent: #87afd7; }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; --bg: #0f1114; --card: #171a1f; --text: #e8ebf0; --text-2: #b3bac6; --muted: #8b93a1; --line: #2a2f37; --chip: #232830; --chip-on: #e8ebf0; --chip-on-text: #0f1114; --accent: #87afd7; }
+  body { background: var(--bg); color: var(--text); font-family: var(--ui); font-size: 14px; line-height: 1.6; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding-inline: 16px; padding-block: 24px 48px; display: grid; gap: 16px; }
+  header h1 { margin: 0; font-size: 22px; line-height: 1.3; font-weight: 650; text-wrap: balance; }
+  header p { margin: 6px 0 0; color: var(--text-2); max-width: 72ch; }
+  .main { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; align-items: start; }
+  nav.screens { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: grid; gap: 2px; position: sticky; top: env(safe-area-inset-top, 0px); }
+  nav.screens .grp { font-size: 11.5px; color: var(--muted); letter-spacing: 0.06em; padding: 10px 8px 4px; }
+  nav.screens .grp:first-child { padding-top: 2px; }
+  nav.screens button { font: inherit; font-size: 13px; text-align: left; border: 0; background: transparent; color: var(--text-2); padding: 5px 8px; border-radius: 6px; cursor: pointer; }
+  nav.screens button:hover { background: var(--chip); color: var(--text); }
+  nav.screens button[aria-current="true"] { background: var(--chip-on); color: var(--chip-on-text); }
+  nav.screens button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .stage { display: grid; gap: 12px; min-width: 0; }
+  .term-wrap { overflow-x: auto; border-radius: 12px; }
+  .term { width: max-content; min-width: 100%; background: var(--t-bg); border-radius: 12px; border: 1px solid #2a2d33; box-shadow: 0 10px 28px rgba(10, 14, 20, 0.22); }
+  .term:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .term .bar { height: 30px; display: flex; align-items: center; gap: 7px; padding: 0 12px; background: var(--t-bar); border-radius: 12px 12px 0 0; }
+  .term .bar i { width: 11px; height: 11px; border-radius: 50%; background: #3b3f46; display: block; }
+  .term .bar span { margin-left: 10px; font-family: var(--mono); font-size: 11.5px; color: var(--t-glyph); }
+  .screen { font-family: var(--mono); font-size: 13px; line-height: 1.5; color: var(--t-fg); padding: 12px 14px 14px; height: 600px; display: flex; flex-direction: column; justify-content: flex-end; white-space: pre; overflow: hidden; }
+  .screen .ln { min-height: 1.5em; }
+  .screen .ln[data-row] { cursor: pointer; }
+  .screen .ln[data-row]:hover { background: rgba(135, 175, 215, 0.07); }
+  .panel { border-top: 1px solid #2a2d33; margin-top: 8px; padding-top: 6px; }
+  .acc { color: var(--t-acc); } .accb { color: var(--t-acc); font-weight: 700; } .tab { color: var(--t-acc); font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+  .ok { color: var(--t-ok); } .warn { color: var(--t-warn); } .fail { color: var(--t-fail); } .glyph { color: var(--t-glyph); } .hint { color: var(--t-hint); } .b { font-weight: 700; }
+  .caret { background: var(--t-fg); color: var(--t-bg); }
+  @media (prefers-reduced-motion: no-preference) { .caret { animation: blink 1.1s steps(1) infinite; } }
+  @keyframes blink { 50% { background: transparent; } }
+  .keys { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .keys span { font-size: 12px; color: var(--muted); margin-right: 4px; }
+  .keys button { font-family: var(--mono); font-size: 12px; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 6px; padding: 3px 9px; cursor: pointer; }
+  .keys button:hover { border-color: var(--muted); }
+  .keys button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .keys .reset { margin-left: auto; font-family: var(--ui); }
+  .caption { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; display: grid; gap: 4px; }
+  .caption h2 { margin: 0; font-size: 14.5px; font-weight: 600; }
+  .caption p { margin: 0; color: var(--text-2); max-width: 80ch; }
+  @media (max-width: 860px) {
+    .main { grid-template-columns: 1fr; }
+    nav.screens { position: static; display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 4px; }
+    nav.screens .grp { display: none; }
+    nav.screens button { white-space: nowrap; flex: none; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>终端 /skills 面板：草稿、发布与版本</h1>
+    <p>终端里的技能面板设计稿。界面文字沿用终端的英文，颜色与符号照现有面板。点终端后可用键盘操作：↑/↓ 选择，Enter 确认，Esc 返回，Tab 切换标签，n/p 在改动页切换文件；也可以直接点行。左侧可跳到任一屏。</p>
+  </header>
+  <div class="main">
+    <nav class="screens" id="screens" aria-label="屏幕"></nav>
+    <div class="stage">
+      <div class="term-wrap">
+        <div class="term" id="term" tabindex="0" role="application" aria-label="终端预览">
+          <div class="bar"><i></i><i></i><i></i><span>forebrain — ~/workspace/forebrain-harness</span></div>
+          <div class="screen" id="screen"></div>
+        </div>
+      </div>
+      <div class="keys" aria-label="按键">
+        <span>按键</span>
+        <button type="button" data-key="ArrowUp">↑</button><button type="button" data-key="ArrowDown">↓</button>
+        <button type="button" data-key="Enter">Enter</button><button type="button" data-key="Escape">Esc</button>
+        <button type="button" data-key="Tab">Tab</button><button type="button" data-key="n">n</button><button type="button" data-key="p">p</button>
+        <button type="button" class="reset" id="reset">重置演示数据</button>
+      </div>
+      <section class="caption" id="caption" aria-live="polite"></section>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var W = 92;
+  function makeData() {
+    return {
+      'gateway-5xx': { layer: 'Agent', desc: 'Gateway 5xx triage and recovery', on: false, cur: 0, vers: [], draft: { base: 0, files: [['SKILL.md', 28, 0], ['references/runbook.md', 15, 0], ['scripts/check-health.sh', 9, 0]] }, source: 'Created in the skill workshop', path: '~/.forebrain/workspace/skills/.drafts/gateway-5xx', tools: 'Bash(kubectl:*), Bash(curl:*)' },
+      'gateway-ops': { layer: 'Agent', desc: "Runbook for this agent's gateway: health checks, restarts, and where to look first when it misbehaves", on: true, cur: 3, vers: [[3, 'Oct 9 18:20', 'Published', 'Tighten the trigger', 12, 3], [2, 'Sep 30 10:02', 'Published', 'Add the health-check script', 40, 0], [1, 'Sep 12 09:15', 'Created', 'First version', 86, 0]], draft: { base: 3, files: [['SKILL.md', 6, 2], ['references/runbook.md', 3, 0]] }, source: 'Created in the skill workshop', path: '~/.forebrain/workspace/skills/gateway-ops', tools: 'Bash(kubectl:*), Bash(curl:*), Read' },
+      'incident-review': { layer: 'Agent', desc: 'Incident review template and steps', on: false, cur: 1, vers: [[1, 'Sep 20 14:03', 'Created', 'First version', 52, 0]], source: 'Created in the skill workshop', path: '~/.forebrain/workspace/skills/incident-review', tools: '(all by default)' },
+      'improve': { layer: 'Project', desc: 'Write implementation plans an executor can follow', on: true, cur: 4, vers: [[4, 'Oct 8 21:30', 'Published', 'Add STOP conditions to the template', 14, 6], [3, 'Oct 2 10:05', 'Published', '', 5, 1], [2, 'Sep 28 16:40', 'Published', '', 22, 8], [1, 'Sep 20 09:00', 'Created', 'First version', 210, 0]], source: 'Created in the skill workshop', path: '.forebrain/skills/improve', tools: '(all by default)' },
+      'release-check': { layer: 'Project', desc: 'Pre-release checklist', on: false, cur: 0, vers: [], draft: { base: 0, files: [['SKILL.md', 19, 0]] }, source: 'Created with skill-generator', path: '.forebrain/skills/.drafts/release-check', tools: '(all by default)' },
+      'run-forebrain': { layer: 'Project', desc: 'Drive the TUI in an isolated home for live checks', on: true, cur: 2, vers: [[2, 'Oct 5 19:10', 'Published', 'Add the gateway mode', 31, 4], [1, 'Sep 29 08:30', 'Created', 'First version', 120, 0]], source: 'Created in the skill workshop', path: '.forebrain/skills/run-forebrain', tools: 'Bash(tmux:*)' },
+      'golang-testing': { layer: 'Shared', desc: 'Go testing conventions and best practices', on: true, cur: 2, vers: [[2, 'Oct 1 08:40', 'Updated from samber/cc-skills-golang', 'abc1234', 8, 5], [1, 'Sep 3 11:12', 'Installed from samber/cc-skills-golang', '9f0e2d1', 120, 0]], update: { rev: 'd41c8e0', date: 'Oct 10', source: 'samber/cc-skills-golang', files: [['SKILL.md', 3, 1], ['references/patterns.md', 18, 0]] }, source: 'Installed from samber/cc-skills-golang', path: '~/.forebrain/skills/golang-testing', tools: '(all by default)' },
+      'pdf': { layer: 'Shared', desc: 'Read and generate PDFs', on: false, cur: 1, vers: [[1, 'Aug 28 10:00', 'Installed from anthropics/skills', '5be21a0', 140, 0]], source: 'Installed from anthropics/skills', path: '~/.forebrain/skills/pdf', tools: 'Bash(python3:*)' },
+      'skill-workshop': { layer: 'Built-in', builtin: true, desc: 'Create, improve, and evaluate skills', on: true, cur: 0, vers: [], source: 'Built into Forebrain Harness v0.3.0', path: '(built in)', tools: '(all by default)' },
+      'skill-generator': { layer: 'Built-in', builtin: true, desc: 'Turn steps you just ran into a skill', on: true, cur: 0, vers: [], source: 'Built into Forebrain Harness v0.3.0', path: '(built in)', tools: '(all by default)' },
+      'memory-recall': { layer: 'Built-in', builtin: true, desc: 'Search what the memory agent kept', on: true, cur: 0, vers: [], source: 'Built into Forebrain Harness v0.3.0', path: '(built in)', tools: 'memories_search' }
+    };
+  }
+  var TABS = ['Project', 'Agent', 'Shared', 'Built-in', 'Manage'];
+  var MANAGE = [['Add a skill', 'Install from the catalog, a GitHub repo, or a local folder', 'add'], ['Create a skill', 'Design and test a new skill with the skill workshop', 'create'], ['Improve a skill', 'Edit, benchmark, and tune an installed skill', 'improveAny'], ['Enable / disable skills', 'Choose which skills load in new sessions', 'toggleMany']];
+  var D, S;
+  function baseTranscript() {
+    return [
+      [['● ', 'acc'], ['Read', 'b'], [' pkg/gateway/controlplane.go', '']],
+      [['  func ControlPlaneTokenFromRequest(r *http.Request, q string) string {', 'glyph']],
+      [['  The browser never receives a token, so Authorization is always empty.', '']],
+      [['─ Worked for 1m 12s · first token 1.2s · 09:41 ', 'glyph'], ['─'.repeat(40), 'glyph']],
+      [],
+      [['› ', 'acc'], ['/skills', '']]
+    ];
+  }
+  function reset() {
+    D = makeData();
+    S = { screen: 'list', tab: 'Agent', cur: { Project: 0, Agent: 1, Shared: 0, 'Built-in': 0, Manage: 0 }, name: 'gateway-ops', idx: 0, input: '', toast: null, stack: [], diff: null, ver: 0, closed: false, transcript: baseTranscript(), jump: 'list' };
+  }
+
+  /* ---------- text helpers ---------- */
+  function pad(t, n) { return t + ' '.repeat(Math.max(0, n - t.length)); }
+  function wrapFirst(text, firstW, restW) {
+    var words = String(text || '').split(' '), lines = [], line = '', w = firstW;
+    words.forEach(function (wd) {
+      if (!line.length) line = wd;
+      else if ((line + ' ' + wd).length <= w) line += ' ' + wd;
+      else { lines.push(line); line = wd; w = restW; }
+    });
+    lines.push(line);
+    return lines;
+  }
+  function segLen(segs) { return segs.reduce(function (n, s) { return n + s[0].length; }, 0); }
+  function twoCol(rows, sel, minName) {
+    var nameW = Math.min(24, Math.max(minName || 0, rows.reduce(function (m, r) { return Math.max(m, r.label.length); }, 0) + 3));
+    var out = [];
+    rows.forEach(function (r, i) {
+      var prefix = r.prefix || [], avail = W - 2 - nameW, pl = segLen(prefix);
+      var parts = wrapFirst(r.text, Math.max(8, avail - pl), avail);
+      var line = [[i === sel ? '❯ ' : '  ', 'acc'], [pad(r.label, nameW), i === sel ? 'b' : (r.labelCls || '')]].concat(prefix).concat([[parts[0], r.textCls || '']]);
+      line.row = i;
+      out.push(line);
+      for (var k = 1; k < parts.length; k++) { var l2 = [[' '.repeat(2 + nameW), ''], [parts[k], r.textCls || '']]; l2.row = i; out.push(l2); }
+    });
+    return out;
+  }
+  function hintLine(t) { return [['  ' + t, 'hint']]; }
+  function toastLines() { return S.toast ? [[[S.toast[0], S.toast[1] || 'ok']], []] : []; }
+
+  /* ---------- skill state ---------- */
+  function skillsIn(tab) { return Object.keys(D).filter(function (n) { return D[n].layer === tab; }).sort(); }
+  function statusSegs(sk) {
+    if (sk.builtin) return [['Built-in', 'glyph'], [' · ', 'glyph']].concat(sk.on ? [] : [['(off) ', 'glyph']]);
+    if (sk.cur === 0) return [['Draft', 'warn'], [' · ', 'glyph']];
+    var s = [['v' + sk.cur, 'glyph']];
+    if (sk.draft) s.push([' · ', 'glyph'], ['unpublished changes', 'warn']);
+    if (sk.update) s.push([' · ', 'glyph'], ['update available', 'acc']);
+    s.push([' · ', 'glyph']);
+    if (!sk.on) s.push(['(off) ', 'glyph']);
+    return s;
+  }
+  function menuItems(name) {
+    var sk = D[name], n = sk.cur, it = [];
+    var toggle = sk.on ? ['Disable this skill', 'Stop loading it in new sessions', 'toggle'] : ['Enable this skill', 'Load it in new sessions', 'toggle'];
+    if (sk.builtin) return [['Run it now', 'Load it into this turn and give it a task', 'run'], toggle, ['Show details', 'Source, path, and allowed tools', 'details']];
+    if (n === 0) return [['Publish v1', 'Load it in new sessions, enabled', 'publish'], ['Show changes', sk.draft.files.length + ' files', 'changes'], ['Continue in workshop', 'Pick up where the workshop left off', 'continue'], ['Discard draft', 'Delete the draft', 'discard']];
+    if (sk.update) it.push(['Pull the update into a draft', sk.update.rev + ' · ' + sk.update.date + ' · ' + sk.update.files.length + ' files', 'pull']);
+    if (sk.draft) it.push(['Publish v' + (n + 1), sk.draft.files.length + ' files changed since v' + n, 'publish'], ['Show changes', 'Compare the draft with v' + n, 'changes'], ['Discard draft', 'Keep v' + n + ', drop the unpublished changes', 'discard']);
+    it.push(['Run it now', 'Load v' + n + ' into this turn and give it a task', 'run']);
+    if (sk.layer !== 'Shared') it.push(['Improve it', sk.draft ? 'Continue the draft in the skill workshop' : 'Edit it in the skill workshop; changes go to a draft', 'improve']);
+    it.push(['Version history', sk.vers.length === 1 ? '1 version' : sk.vers.length + ' versions · compare or restore', 'history'], toggle, ['Show details', 'Version, source, path, and allowed tools', 'details']);
+    return it;
+  }
+  function diffBody(file) {
+    if (file === 'SKILL.md') return [['c', '## When to use'], ['d', 'Any gateway endpoint returns 5xx.'], ['a', 'A gateway endpoint returns 5xx and no deploy or config'], ['a', 'change caused it.'], ['c', ''], ['c', '## Steps'], ['a', '0. Check that nothing was deployed in the last 30 minutes.'], ['c', '1. kubectl get pods -n gateway'], ['c', '2. curl -fsS $GW/healthz']];
+    if (file === 'references/runbook.md') return [['c', '## Upstream timeouts'], ['a', 'Raise proxy_read_timeout only after the upstream is healthy;'], ['a', 'a longer timeout hides a dead backend.'], ['a', '']];
+    if (file === 'references/patterns.md') return [['a', '# Table-driven tests'], ['a', ''], ['a', 'Name each case; run them with t.Run so a failure names the case.']];
+    if (file === 'scripts/check-health.sh') return [['a', '#!/bin/sh'], ['a', 'curl -fsS "$GW/healthz" || exit 1']];
+    return [['c', '…']];
+  }
+
+  /* ---------- screens ---------- */
+  var R = {};
+  R.list = function () {
+    var L = toastLines();
+    L.push([['  Skills', 'accb']], [['  Run an installed skill, or add, create, and tune skills', '']]);
+    var tl = [['  ', '']];
+    TABS.forEach(function (t, i) {
+      var cnt = t === 'Manage' ? '' : ' ' + (t === 'Built-in' ? 18 : skillsIn(t).length);
+      tl.push([t + cnt, t === S.tab ? 'tab' : 'glyph']); if (i < TABS.length - 1) tl.push(['   ', '']);
+    });
+    L.push(tl, [['› ', 'acc'], ['Type to filter', 'hint']], []);
+    var sel = S.cur[S.tab];
+    if (S.tab === 'Manage') L = L.concat(twoCol(MANAGE.map(function (m) { return { label: m[0], text: m[1] }; }), sel, 20));
+    else {
+      var names = skillsIn(S.tab);
+      L = L.concat(twoCol(names.map(function (n) { return { label: n, prefix: statusSegs(D[n]), text: D[n].desc }; }), sel, 20));
+      if (S.tab === 'Built-in') L.push([], [['  ↓ 15 more', 'hint']]);
+    }
+    L.push([], hintLine('Tab to switch · ↑/↓ to navigate · Enter to confirm · Esc to cancel'));
+    return L;
+  };
+  R.menu = function () {
+    var sk = D[S.name], L = toastLines(), items = menuItems(S.name);
+    L.push([['  ' + S.name + ' · ' + sk.layer, 'accb']]);
+    var pre = statusSegs(sk), parts = wrapFirst(sk.desc, W - 2 - segLen(pre), W - 2);
+    L.push([['  ', '']].concat(pre).concat([[parts[0], '']]));
+    for (var k = 1; k < parts.length; k++) L.push([['  ' + parts[k], '']]);
+    L.push([]);
+    L = L.concat(twoCol(items.map(function (m) { return { label: m[0], text: m[1], labelCls: m[2] === 'discard' ? 'fail' : '' }; }), S.idx, 22));
+    L.push([], hintLine('↑/↓ to navigate · Enter to confirm · Esc to go back'));
+    return L;
+  };
+  function review(title, bodies, heading, files, actions, defaultNote) {
+    var L = [[['  ' + title, 'accb']]];
+    bodies.forEach(function (b) { L.push([['  ' + b[0], b[1] || '']]); });
+    if (files && files.length) {
+      L.push([], [['  ' + heading, 'acc']]);
+      files.forEach(function (f) { L.push([['    ' + pad(f[0], 30), ''], ['+' + f[1], 'ok'], [' ', ''], ['−' + f[2], 'fail']]); });
+    }
+    L.push([]);
+    actions.forEach(function (a, i) { var l = [[i === S.idx ? '❯ ' : '  ', 'acc'], [a[0], i === S.idx ? 'b' : (a[1] || '')]]; l.row = i; L.push(l); });
+    L.push([], hintLine('↑/↓ to navigate · Enter to confirm · Esc to go back'));
+    return L;
+  }
+  function pubActions() { var n = D[S.name].cur; return [['Publish v' + (n + 1)], ['Show changes'], ['Cancel']]; }
+  R.pubReview = function () {
+    var sk = D[S.name], n = sk.cur;
+    return review('Publish ' + S.name + ' v' + (n + 1) + '?', [n ? ['New sessions use v' + (n + 1) + '; sessions already running keep v' + n + '.'] : ['New sessions load it, enabled.']], n ? 'Changes since v' + n : 'Files', sk.draft.files, pubActions());
+  };
+  function inputScreen(prompt, hint) {
+    return [[['  ' + prompt, 'accb']], [['› ', 'acc'], [S.input, ''], [' ', 'caret']], [], hintLine(hint)];
+  }
+  R.pubNote = function () { return inputScreen('Release note for v' + (D[S.name].cur + 1) + ' (optional)', 'Enter to publish · Esc to go back'); };
+  R.runInput = function () { return inputScreen('What should ' + S.name + ' do? (leave empty to just follow its instructions)', 'Enter to confirm · Esc to go back'); };
+  R.improveInput = function () { return inputScreen('What should change about ' + S.name + '? (leave empty to have it evaluated first)', 'Enter to confirm · Esc to go back'); };
+  R.continueInput = function () { return inputScreen('Anything to add before the workshop continues? (optional)', 'Enter to confirm · Esc to go back'); };
+  R.createInput = function () { return inputScreen('What should the new skill do? (a sentence is enough)', 'Enter to confirm · Esc to go back'); };
+  R.diff = function () {
+    var d = S.diff, f = d.files[d.file], L = [[['  ' + d.name + ' · ' + (d.from === 'empty' ? 'draft' : d.from + ' → ' + d.to), 'accb']]];
+    var left = '  ' + f[0] + '   ', right = (d.file + 1) + ' of ' + d.files.length;
+    var stat = '+' + f[1] + ' −' + f[2];
+    L.push([[left, 'b'], ['+' + f[1], 'ok'], [' ', ''], ['−' + f[2], 'fail'], [' '.repeat(Math.max(1, W - left.length - stat.length - right.length - 2)), ''], [right, 'glyph']]);
+    L.push([['  ' + '─'.repeat(W - 4), 'glyph']]);
+    diffBody(f[0]).forEach(function (x) { L.push(x[0] === 'a' ? [['  + ' + x[1], 'ok']] : x[0] === 'd' ? [['  - ' + x[1], 'fail']] : [['    ' + x[1], '']]); });
+    L.push([], hintLine('n/p next/previous file · ↑/↓ scroll · Esc to go back'));
+    return L;
+  };
+  function discardActions() { var n = D[S.name].cur; return [['Cancel'], [n ? 'Discard draft' : 'Delete draft', 'fail']]; }
+  R.discardConfirm = function () {
+    var n = D[S.name].cur;
+    return review(n ? 'Discard the draft of ' + S.name + '?' : 'Delete the draft ' + S.name + '?', [n ? ['Unpublished changes are lost; v' + n + ' stays current.'] : ['Nothing was published; the draft is deleted.']], '', [], discardActions());
+  };
+  R.details = function () {
+    var sk = D[S.name], n = sk.cur, L = [[['  ' + S.name + ' · details', 'accb']], []];
+    var facts = [['Version', sk.builtin ? 'Ships with Forebrain Harness' : n ? 'v' + n + (sk.draft ? ' · unpublished changes' : '') : 'Draft · not published'], ['Status', sk.on ? 'Enabled' : 'Off'], ['Layer', sk.layer], ['Source', sk.source], ['Path', sk.path], ['Allowed tools', sk.tools], ['Published', n ? sk.vers[0][1] : '—'], ['Description', sk.desc]];
+    facts.forEach(function (f) {
+      var parts = wrapFirst(f[1], W - 20, W - 20);
+      L.push([['  ' + pad(f[0], 16), 'acc'], [parts[0], f[0] === 'Version' && sk.draft ? 'warn' : '']]);
+      for (var k = 1; k < parts.length; k++) L.push([[' '.repeat(18) + parts[k], '']]);
+    });
+    L.push([], hintLine('Esc to go back'));
+    return L;
+  };
+  function historyRows() {
+    var sk = D[S.name], rows = [];
+    if (sk.draft) rows.push({ kind: 'draft', label: 'Draft', labelCls: 'warn', text: (sk.draft.base ? 'Based on v' + sk.draft.base : 'Not published') + ' · ' + sk.draft.files.length + ' files changed' + (sk.draft.from ? ' · restored from ' + sk.draft.from : '') });
+    sk.vers.forEach(function (v) { rows.push({ kind: 'ver', k: v[0], label: 'v' + v[0], prefix: v[0] === sk.cur ? [['Current', 'ok'], [' · ', 'glyph']] : [], text: v[1] + ' · ' + v[2] + (v[3] ? ' · ' + v[3] : '') + ' · +' + v[4] + ' −' + v[5] }); });
+    return rows;
+  }
+  R.history = function () {
+    var sk = D[S.name], L = toastLines();
+    L.push([['  ' + S.name + ' · versions', 'accb']], [['  ' + (sk.cur ? 'v' + sk.cur + ' is current' : 'Not published yet'), '']], []);
+    L = L.concat(twoCol(historyRows(), S.idx, 12));
+    L.push([], hintLine('↑/↓ to navigate · Enter to confirm · Esc to go back'));
+    return L;
+  };
+  function verItems() {
+    var sk = D[S.name], k = S.ver;
+    if (k === sk.cur) return (k > 1 ? [['Compare with v' + (k - 1), 'What changed in this version', 'cmpPrev']] : []).concat([['Back', '', 'back']]);
+    return [['Compare with v' + sk.cur, 'The current version', 'cmpCur'], ['Restore as a draft', 'Publish it to make it current', 'restore'], ['Back', '', 'back']];
+  }
+  R.verMenu = function () {
+    var sk = D[S.name], v = sk.vers.filter(function (x) { return x[0] === S.ver; })[0];
+    var L = [[['  ' + S.name + ' · v' + S.ver, 'accb']], [['  ' + v[1] + ' · ' + v[2] + (v[3] ? ' · ' + v[3] : ''), '']], []];
+    L = L.concat(twoCol(verItems().map(function (m) { return { label: m[0], text: m[1] }; }), S.idx, 22));
+    L.push([], hintLine('↑/↓ to navigate · Enter to confirm · Esc to go back'));
+    return L;
+  };
+  function restoreActions() { return [['Restore as a draft'], ['Cancel']]; }
+  R.restoreConfirm = function () {
+    var sk = D[S.name], b = [["The draft becomes v" + S.ver + "'s content; publish it to make it current."]];
+    if (sk.draft) b.push(['The current draft will be replaced.', 'warn']);
+    return review('Restore v' + S.ver + ' as a draft?', b, '', [], restoreActions());
+  };
+  function pullActions() { return [['Pull into a draft'], ['Show changes'], ['Cancel']]; }
+  R.pullReview = function () {
+    var sk = D[S.name], u = sk.update;
+    return review('Pull the update into a draft?', [[S.name + ' · ' + u.rev + ' from ' + u.source + ' · ' + u.date], ['v' + sk.cur + ' stays current until you publish.']], 'Changes', u.files, pullActions());
+  };
+  R.closed = function () { return []; };
+
+  /* ---------- actions ---------- */
+  function go(screen, idx) { S.stack.push({ screen: S.screen, idx: S.idx }); S.screen = screen; S.idx = idx || 0; S.input = ''; }
+  function back() {
+    S.toast = null;
+    if (!S.stack.length) { if (S.screen === 'list') closePanel([]); return; }
+    var p = S.stack.pop(); S.screen = p.screen; S.idx = p.idx; S.input = '';
+  }
+  function toMenu(toast) { S.stack = [{ screen: 'list', idx: 0 }]; S.screen = 'menu'; S.idx = 0; S.toast = toast || null; }
+  function toList(toast, name) {
+    S.stack = []; S.screen = 'list'; S.toast = toast || null;
+    if (name && D[name]) { S.tab = D[name].layer; S.cur[S.tab] = skillsIn(S.tab).indexOf(name); }
+    else S.cur[S.tab] = Math.min(S.cur[S.tab], Math.max(0, skillsIn(S.tab).length - 1));
+  }
+  function closePanel(lines) { S.closed = true; S.transcript = S.transcript.concat(lines); S.screen = 'closed'; S.stack = []; S.toast = null; }
+  function openDiff(name, from, to, files) { go('diff'); S.diff = { name: name, from: from, to: to, files: files, file: 0 }; }
+  function publish(note) {
+    var sk = D[S.name], n = sk.cur, adds = 0, dels = 0;
+    sk.draft.files.forEach(function (f) { adds += f[1]; dels += f[2]; });
+    sk.vers.unshift([n + 1, 'just now', n ? 'Published' : 'Created', note, adds, dels]);
+    sk.cur = n + 1; sk.draft = null; if (n === 0) { sk.on = true; sk.path = sk.path.replace('.drafts/', ''); }
+    toList(['✓ Published ' + S.name + ' v' + (n + 1) + ' · new sessions use it'], S.name);
+  }
+  function activate() {
+    var sk = D[S.name];
+    switch (S.screen) {
+      case 'list':
+        if (S.tab === 'Manage') {
+          var m = MANAGE[S.cur.Manage][2];
+          if (m === 'create') go('createInput'); else S.toast = ['Same as today.', 'glyph'];
+          return;
+        }
+        var names = skillsIn(S.tab); if (!names.length) return;
+        S.name = names[S.cur[S.tab]]; S.toast = null; go('menu'); return;
+      case 'menu':
+        var a = menuItems(S.name)[S.idx][2]; S.toast = null;
+        if (a === 'publish') go('pubReview');
+        else if (a === 'changes') openDiff(S.name, sk.cur ? 'v' + sk.cur : 'empty', 'draft', sk.draft.files);
+        else if (a === 'discard') go('discardConfirm');
+        else if (a === 'run') go('runInput');
+        else if (a === 'improve') go('improveInput');
+        else if (a === 'continue') go('continueInput');
+        else if (a === 'history') go('history');
+        else if (a === 'details') go('details');
+        else if (a === 'pull') go('pullReview');
+        else if (a === 'toggle') { sk.on = !sk.on; S.toast = sk.on ? ['✓ Enabled · new sessions load it'] : ['✓ Disabled · new sessions won’t load it']; }
+        return;
+      case 'pubReview':
+        if (S.idx === 0) go('pubNote'); else if (S.idx === 1) openDiff(S.name, sk.cur ? 'v' + sk.cur : 'empty', 'draft', sk.draft.files); else back();
+        return;
+      case 'pubNote': publish(S.input.trim()); return;
+      case 'discardConfirm':
+        if (S.idx === 0) { back(); return; }
+        if (sk.cur === 0) { delete D[S.name]; toList(['✓ Deleted the draft ' + S.name]); }
+        else { sk.draft = null; toMenu(['✓ Discarded the draft · v' + sk.cur + ' stays current']); }
+        return;
+      case 'runInput':
+        closePanel([[], [['› ', 'acc'], ['/skills ' + S.name + (S.input ? ' ' + S.input : ''), '']], [['● ', 'ok'], ['Skill', 'b'], [' ' + S.name + (sk.cur ? ' v' + sk.cur : ''), ''], [' loaded', 'glyph']], [['  Working…', 'glyph']]]);
+        return;
+      case 'improveInput': case 'continueInput':
+        if (!sk.draft) sk.draft = { base: sk.cur, files: [['SKILL.md', 4, 1]] };
+        closePanel([[], [['› ', 'acc'], ['/skills ' + (S.screen === 'improveInput' ? 'improve ' : 'continue ') + S.name + (S.input ? ' ' + S.input : ''), '']], [['● ', 'ok'], ['Skill', 'b'], [' skill-workshop', ''], [' loaded', 'glyph']], [["  I'll edit the draft and test it before you publish.", '']], [['  …', 'glyph']], [['✓ ', 'ok'], ['Draft ' + S.name + ' saved', ''], [' · /skills to publish', 'hint']]]);
+        return;
+      case 'createInput':
+        D['pr-review'] = { layer: 'Project', desc: S.input || 'Review pull requests against the project rules', on: false, cur: 0, vers: [], draft: { base: 0, files: [['SKILL.md', 24, 0]] }, source: 'Created in the skill workshop', path: '.forebrain/skills/.drafts/pr-review', tools: '(all by default)' };
+        closePanel([[], [['› ', 'acc'], ['/skills create' + (S.input ? ' ' + S.input : ''), '']], [['● ', 'ok'], ['Skill', 'b'], [' skill-workshop', ''], [' loaded', 'glyph']], [['  …', 'glyph']], [['✓ ', 'ok'], ['Draft pr-review saved', ''], [' · /skills to publish', 'hint']]]);
+        S.name = 'pr-review';
+        return;
+      case 'history':
+        var row = historyRows()[S.idx];
+        if (row.kind === 'draft') openDiff(S.name, sk.draft.base ? 'v' + sk.draft.base : 'empty', 'draft', sk.draft.files);
+        else { S.ver = row.k; go('verMenu'); }
+        return;
+      case 'verMenu':
+        var va = verItems()[S.idx][2];
+        if (va === 'cmpCur') openDiff(S.name, 'v' + S.ver, 'v' + sk.cur, [['SKILL.md', 6, 2], ['scripts/check-health.sh', 4, 1]]);
+        else if (va === 'cmpPrev') openDiff(S.name, 'v' + (S.ver - 1), 'v' + S.ver, [['SKILL.md', 6, 2]]);
+        else if (va === 'restore') go('restoreConfirm', sk.draft ? 1 : 0);
+        else back();
+        return;
+      case 'restoreConfirm':
+        if (S.idx === 1) { back(); return; }
+        sk.draft = { base: sk.cur, from: 'v' + S.ver, files: [['SKILL.md', 2, 6], ['scripts/check-health.sh', 0, 4]] };
+        toMenu(['✓ Restored v' + S.ver + ' as a draft · publish to make it current']);
+        return;
+      case 'pullReview':
+        if (S.idx === 0) { sk.draft = { base: sk.cur, files: sk.update.files }; var rev = sk.update.rev; sk.update = null; toMenu(['✓ Pulled ' + rev + ' into a draft · publish to use it']); }
+        else if (S.idx === 1) openDiff(S.name, 'v' + sk.cur, sk.update.rev, sk.update.files);
+        else back();
+        return;
+      case 'closed':
+        S.closed = false; S.transcript = S.transcript.concat([[], [['› ', 'acc'], ['/skills', '']]]); toList(null, S.name); return;
+    }
+  }
+  function count() {
+    switch (S.screen) {
+      case 'list': return S.tab === 'Manage' ? MANAGE.length : skillsIn(S.tab).length;
+      case 'menu': return menuItems(S.name).length;
+      case 'pubReview': return 3; case 'discardConfirm': return 2; case 'restoreConfirm': return 2; case 'pullReview': return 3;
+      case 'history': return historyRows().length; case 'verMenu': return verItems().length;
+    }
+    return 0;
+  }
+  function isInput() { return /Input$|pubNote/.test(S.screen); }
+  function key(k, shift) {
+    if (S.screen === 'diff') {
+      if (k === 'n' || k === 'ArrowRight') S.diff.file = (S.diff.file + 1) % S.diff.files.length;
+      else if (k === 'p' || k === 'ArrowLeft') S.diff.file = (S.diff.file + S.diff.files.length - 1) % S.diff.files.length;
+      else if (k === 'Escape') back();
+      render(); return true;
+    }
+    if (k === 'Escape') { back(); render(); return true; }
+    if (k === 'Enter') { activate(); render(); return true; }
+    if (k === 'Tab' && S.screen === 'list') { var i = TABS.indexOf(S.tab); S.tab = TABS[(i + (shift ? TABS.length - 1 : 1)) % TABS.length]; S.toast = null; render(); return true; }
+    if (k === 'ArrowUp' || k === 'ArrowDown') {
+      var n = count(); if (!n) return true;
+      var d = k === 'ArrowUp' ? -1 : 1;
+      if (S.screen === 'list') S.cur[S.tab] = (S.cur[S.tab] + d + n) % n; else S.idx = (S.idx + d + n) % n;
+      render(); return true;
+    }
+    if (isInput()) {
+      if (k === 'Backspace') { S.input = S.input.slice(0, -1); render(); return true; }
+      if (k.length === 1) { S.input += k; render(); return true; }
+    }
+    return false;
+  }
+
+  /* ---------- captions ---------- */
+  function caption() {
+    var sk = D[S.name] || {}, st = !sk.cur && !sk.builtin ? 'draft' : sk.builtin ? 'builtin' : sk.update ? 'update' : sk.draft ? 'pending' : 'pub';
+    var c = {
+      list: ['主列表', S.toast && /Published/.test(S.toast[0]) ? '发布完成后回到列表，顶部留一行结果；版本号随之变化，首次发布的技能同时启用。' : '状态写在说明列开头：Draft（警告色）、版本号（暗色）、unpublished changes（警告色）、update available（强调色）、(off)。草稿与已发布的技能放在同一个层级标签下。Manage 标签里只有 Create a skill 与本次设计有关。'],
+      menu: ['技能子菜单', S.toast && /abled/.test(S.toast[0]) ? 'Enable / Disable：立即生效于新会话，留在子菜单，顶部一行结果，菜单项文字随之切换（今天是关掉面板打印一段文字）。' : {
+        pending: '有未发布的修改：Publish、Show changes、Discard draft 排在最前；Run it now 跑的是当前已发布版本 v' + sk.cur + '；Improve it 接着改同一份草稿。',
+        draft: '从没发布过的草稿：只有 Publish v1、Show changes、Continue in workshop、Discard draft 四项；草稿不能运行、不能启用。',
+        pub: '已发布、没有草稿：Run it now、Improve it、Version history、启停、Show details。Improve it 的改动写进新草稿，当前版本照常使用。',
+        update: '上游有更新：第一项是 Pull the update into a draft；共享技能没有技能工坊，所以没有 Improve it。',
+        builtin: '内置技能随 Forebrain Harness 发布，没有草稿与版本，只有 Run it now、启停、Show details。'
+      }[st]],
+      pubReview: ['Publish · 确认页', '写明新会话用新版本、进行中的会话继续用原版本，列出相对当前版本改了哪些文件。默认停在 Publish；Show changes 进入改动页，Esc 回到这里。'],
+      pubNote: ['Publish · 发布说明', '可以留空，Enter 直接发布；Esc 回到确认页。说明会写进版本记录。'],
+      diff: ['Show changes · 改动页', '按文件翻看：n/p 切换文件，右上角是第几个文件；增删行配色与对话里的 diff 卡相同；Esc 回到进入前的那一屏。'],
+      discardConfirm: ['Discard draft · 确认', '默认停在 Cancel。已发布过的技能：只丢弃草稿，回到子菜单，当前版本不变。从没发布过的草稿：整个删除，回到列表。'],
+      runInput: ['Run it now', '与今天相同：问一句要做什么，可留空；Enter 后面板关闭，在对话里加载当前已发布的版本。'],
+      improveInput: ['Improve it', '问一句要改什么，可留空（先评估）；Enter 后交给技能工坊，在当前对话里改，改动只写进草稿。'],
+      continueInput: ['Continue in workshop', '草稿接着做：可补一句，Enter 后技能工坊在当前对话继续，写进同一份草稿。'],
+      createInput: ['Manage · Create a skill', '与今天相同交给技能工坊；结果是项目层的草稿，不会被加载，在 /skills 里发布。'],
+      details: ['Show details · 详情页', '改为面板内的详情页（今天是关掉面板打印一段文字）：版本、状态、层级、来源、路径、允许的工具、发布时间、说明。Esc 回到子菜单。'],
+      history: ['Version history · 版本记录', '子菜单里只写版本个数，不列版本号。列表新的在上、草稿在最上面，当前版本标 Current；每条有时间、来源、说明、增删行数。版本多时一次显示 20 条，往下翻自动加载更早的。Enter 进入草稿看改动，或进入某个版本。'],
+      verMenu: ['版本子菜单', '旧版本：Compare with 当前版本、Restore as a draft。当前版本：看它相对上一版改了什么。'],
+      restoreConfirm: ['Restore as a draft · 确认', '把这个版本的内容复制成草稿，发布后才生效；已有草稿时多一行警告并默认停在 Cancel。恢复后回到子菜单，状态变成 unpublished changes。'],
+      pullReview: ['Pull the update · 确认', '列出上游这次改了哪些文件；拉取后进入草稿，当前版本不变，发布后才生效。'],
+      closed: ['回到对话', /saved/.test(JSON.stringify(S.transcript.slice(-1))) ? '技能工坊写完草稿、这一轮结束后，在对话里只留一行 “Draft … saved · /skills to publish”，不自动弹出面板。Enter 重新打开 /skills。' : '面板关闭后回到对话。Enter 重新打开 /skills。']
+    }[S.screen];
+    document.getElementById('caption').innerHTML = '<h2>' + c[0] + '</h2><p>' + c[1] + '</p>';
+  }
+
+  /* ---------- render ---------- */
+  function esc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function lineHtml(l) {
+    var inner = l.length ? l.map(function (s) { return s[1] ? '<span class="' + s[1] + '">' + esc(s[0]) + '</span>' : esc(s[0]); }).join('') : ' ';
+    return '<div class="ln"' + (l.row !== undefined ? ' data-row="' + l.row + '"' : '') + '>' + inner + '</div>';
+  }
+  function render() {
+    var panel = R[S.screen](), html = '';
+    var tr = S.transcript;
+    if (S.closed) html = tr.map(lineHtml).join('') + lineHtml([]) + lineHtml([['› ', 'acc'], [' ', 'caret']]) + lineHtml([['  Enter to reopen /skills', 'hint']]);
+    else html = tr.map(lineHtml).join('') + '<div class="panel">' + panel.map(lineHtml).join('') + '</div>';
+    document.getElementById('screen').innerHTML = html;
+    caption();
+    document.querySelectorAll('#screens button').forEach(function (b) { b.setAttribute('aria-current', String(b.getAttribute('data-j') === S.jump)); });
+  }
+
+  /* ---------- screen index ---------- */
+  var JUMPS = [
+    ['列表与子菜单', [['list', '主列表'], ['m-pending', '子菜单 · 有未发布的修改'], ['m-draft', '子菜单 · 草稿'], ['m-pub', '子菜单 · 已发布'], ['m-update', '子菜单 · 有更新'], ['m-builtin', '子菜单 · 内置']]],
+    ['子菜单各项', [['run', 'Run it now'], ['improve', 'Improve it'], ['continue', 'Continue in workshop'], ['details', 'Show details'], ['toggle', 'Disable / Enable'], ['changes', 'Show changes'], ['discard', 'Discard draft'], ['history', 'Version history'], ['vermenu', '版本子菜单'], ['restore', 'Restore as a draft'], ['pull', 'Pull the update']]],
+    ['发布', [['pub1', '确认页'], ['pub2', '发布说明'], ['pub3', '发布完成']]],
+    ['其他', [['saved', '工坊结束后的提示'], ['create', 'Manage · Create a skill']]]
+  ];
+  function jump(j) {
+    reset(); S.jump = j;
+    var menuOf = function (name) { S.name = name; S.tab = D[name].layer; S.cur[S.tab] = skillsIn(S.tab).indexOf(name); S.stack = [{ screen: 'list', idx: 0 }]; S.screen = 'menu'; S.idx = 0; };
+    var pick = function (action) { var items = menuItems(S.name); for (var i = 0; i < items.length; i++) if (items[i][2] === action) { S.idx = i; return; } };
+    if (j === 'list') return;
+    if (j === 'm-pending') menuOf('gateway-ops');
+    else if (j === 'm-draft') menuOf('gateway-5xx');
+    else if (j === 'm-pub') menuOf('incident-review');
+    else if (j === 'm-update') menuOf('golang-testing');
+    else if (j === 'm-builtin') menuOf('skill-workshop');
+    else if (j === 'run') { menuOf('gateway-ops'); pick('run'); activate(); S.input = 'check the staging pods'; }
+    else if (j === 'improve') { menuOf('incident-review'); pick('improve'); activate(); S.input = 'add a timeline section'; }
+    else if (j === 'continue') { menuOf('gateway-5xx'); pick('continue'); activate(); }
+    else if (j === 'details') { menuOf('gateway-ops'); pick('details'); activate(); }
+    else if (j === 'toggle') { menuOf('incident-review'); pick('toggle'); activate(); }
+    else if (j === 'changes') { menuOf('gateway-ops'); pick('changes'); activate(); }
+    else if (j === 'discard') { menuOf('gateway-ops'); pick('discard'); activate(); }
+    else if (j === 'history') { menuOf('gateway-ops'); pick('history'); activate(); }
+    else if (j === 'vermenu') { menuOf('gateway-ops'); pick('history'); activate(); S.idx = 2; activate(); }
+    else if (j === 'restore') { menuOf('gateway-ops'); pick('history'); activate(); S.idx = 2; activate(); S.idx = 1; activate(); }
+    else if (j === 'pull') { menuOf('golang-testing'); pick('pull'); activate(); }
+    else if (j === 'pub1') { menuOf('gateway-ops'); pick('publish'); activate(); }
+    else if (j === 'pub2') { menuOf('gateway-ops'); pick('publish'); activate(); activate(); S.input = 'Tighten the trigger description'; }
+    else if (j === 'pub3') { menuOf('gateway-ops'); pick('publish'); activate(); activate(); S.input = 'Tighten the trigger description'; activate(); }
+    else if (j === 'saved') { menuOf('incident-review'); pick('improve'); activate(); S.input = 'add a timeline section'; activate(); }
+    else if (j === 'create') { S.tab = 'Manage'; S.cur.Manage = 1; activate(); S.input = 'review pull requests against our rules'; }
+  }
+  document.getElementById('screens').innerHTML = JUMPS.map(function (g) { return '<div class="grp">' + g[0] + '</div>' + g[1].map(function (x) { return '<button type="button" data-j="' + x[0] + '">' + x[1] + '</button>'; }).join(''); }).join('');
+  document.getElementById('screens').addEventListener('click', function (ev) { var b = ev.target.closest('button'); if (!b) return; jump(b.getAttribute('data-j')); render(); document.getElementById('term').focus({ preventScroll: true }); });
+  document.querySelector('.keys').addEventListener('click', function (ev) { var b = ev.target.closest('button[data-key]'); if (!b) return; key(b.getAttribute('data-key'), false); });
+  document.getElementById('reset').addEventListener('click', function () { reset(); render(); });
+  var term = document.getElementById('term');
+  term.addEventListener('keydown', function (ev) { if (ev.metaKey || ev.ctrlKey || ev.altKey) return; if (key(ev.key, ev.shiftKey)) ev.preventDefault(); });
+  document.getElementById('screen').addEventListener('click', function (ev) {
+    var l = ev.target.closest('[data-row]'); term.focus({ preventScroll: true });
+    if (!l) return;
+    var i = Number(l.getAttribute('data-row'));
+    if (S.screen === 'list') S.cur[S.tab] = i; else S.idx = i;
+    activate(); render();
+  });
+  reset(); render();
+})();
+</script>
