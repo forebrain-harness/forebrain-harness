@@ -1067,7 +1067,7 @@ func (s *ChatSession) persistRunTurnError(sessionID, runID, text string) {
 		return
 	}
 	s.persistRunEvent(context.Background(), event.NewRunEvent("", runID, sessionID, event.RunEventTurnError,
-		event.TurnErrorPayload{Error: text, Message: text}, time.Now()))
+		event.TurnErrorPayload{Error: text, Message: text, RunPlanFacts: s.runPlanFacts(context.Background(), runID)}, time.Now()))
 }
 
 // persistRunEvent stores one canonical event in the conversation's log without

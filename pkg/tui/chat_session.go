@@ -2053,6 +2053,10 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 		if err := s.sessStore().BindMessageToRun(durable, sessionID, userRowID, runID); err != nil && s.chatLog != nil {
 			s.chatLog.Errorf("forebrain chat bind user row session=%s row_id=%d run=%s failed: %v", sessionID, userRowID, runID, err)
 		}
+		// The run's start, in the log both surfaces read: the gateway records
+		// its own turns the same way. The fixed id keeps a continuation past an
+		// approval — the same run — from recording a second start.
+		s.persistRunEvent(agentCtx, event.NewRunEvent("turn-started:"+runID, runID, sessionID, event.RunEventTurnStarted, event.TurnStartedPayload{}, time.Now()))
 		s.notifyUI(RunStartedMsg{RunID: runID, turn: foreground})
 		return nil
 	}
