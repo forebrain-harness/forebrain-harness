@@ -1,0 +1,57 @@
+package tui
+
+// TEMPORARY - copied in by .claude/skills/run-forebrain/paint_dump.sh, which
+// deletes it again. It records the viewport painter's real bytes, one file per
+// step, for term_replay.py. Edit the scene and the steps to fit the bug.
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
+)
+
+func TestZZPaintDump(t *testing.T) {
+	dir := os.Getenv("FB_PAINT_DUMP")
+	if dir == "" {
+		t.Skip("FB_PAINT_DUMP not set")
+	}
+	forceColorProfile(t)                // real SGR colours, as on a TTY
+	r := newComposerRenderer(t, 80, 24) // must match term_replay.py's rows/cols
+	out := r.out.(*bytes.Buffer)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "", Cursor: &cursor})
+
+	// The scene: shell cards whose long command wraps under a "│" border.
+	for i := 0; i < 4; i++ {
+		r.RenderFrame(Frame{Kind: FrameAssistant, Content: fmt.Sprintf("step %d", i), Final: true})
+		r.RenderFrame(Frame{Kind: FrameTool, Title: "shell", Content: "ok", Final: true,
+			ToolMeta: tool.ToolMeta{Input: map[string]any{"command": longShellCommand}}})
+	}
+
+	step := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name+".bin"), out.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		out.Reset()
+	}
+	r.ForceRepaint()
+	step("000") // everything written so far, ending in a full paint
+
+	// The steps: one wheel notch up each. The forced repaint stands in for
+	// whatever makes Terminal.app redraw neighbouring rows together (in the
+	// live app: the status line ticking under the transcript).
+	for i := 1; i <= 20; i++ {
+		r.ViewportScroll(-1)
+		if i == 3 {
+			r.ForceRepaint()
+		}
+		step(fmt.Sprintf("%03d", i))
+	}
+
+	r.ForceRepaint()
+	step("ref") // a fresh full paint of the final state, to diff against
+}

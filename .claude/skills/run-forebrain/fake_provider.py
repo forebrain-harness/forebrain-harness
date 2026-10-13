@@ -251,6 +251,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # byte-for-byte prefix of the next -- can be read back afterwards.
         dump_dir = os.environ.get("FAKE_DUMP_DIR")
         if dump_dir:
+            # A missing directory used to raise here and drop the request, so
+            # the turn sat in Working forever.
+            os.makedirs(dump_dir, exist_ok=True)
             with open(os.path.join(dump_dir, "request-%04d.json" % next(DUMPS)), "wb") as f:
                 f.write(body)
 
