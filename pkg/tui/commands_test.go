@@ -3236,6 +3236,25 @@ func TestReplayWorkedLinePerRun(t *testing.T) {
 	}
 }
 
+// A run that measured its first token closes its replayed "Worked for" line
+// with the same figure the live line showed, right after the duration; a run
+// that measured none drops the segment rather than showing "0s".
+func TestReplayWorkedLineCarriesFirstToken(t *testing.T) {
+	line := turn.RunWorkedLine{
+		RunID:      "run-1",
+		FinishedAt: time.UnixMilli(1790503290000),
+		Worked:     12 * time.Second,
+		FirstToken: 1200 * time.Millisecond,
+	}
+	if got := replayWorkedFrame(line).Title; !strings.HasPrefix(got, "Worked for 12s · first token 1.2s · ") {
+		t.Fatalf("replayed worked title = %q, want the first-token segment after the duration", got)
+	}
+	line.FirstToken = 0
+	if got := replayWorkedFrame(line).Title; strings.Contains(got, "first token") {
+		t.Fatalf("replayed worked title = %q, want no first-token segment for an unmeasured run", got)
+	}
+}
+
 // A run that failed before it said anything still closed live: its error, then
 // its "Worked for" line. The user's message is the run's only row, and replay
 // closes the run after it in that same order.

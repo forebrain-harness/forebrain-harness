@@ -890,3 +890,40 @@ func TestPublishRunEventLSPRecommendationNotifies(t *testing.T) {
 		t.Fatalf("a repeat of %s was shown again: %+v", rec.ID, shown)
 	}
 }
+
+// captureFirstTokenStore stands in for the state store the engine writes to,
+// recording what it was asked to keep.
+type captureFirstTokenStore struct {
+	runID string
+	wait  time.Duration
+	calls int
+}
+
+func (c *captureFirstTokenStore) StampRunFirstToken(_ context.Context, runID string, wait time.Duration) error {
+	c.calls++
+	c.runID = runID
+	c.wait = wait
+	return nil
+}
+
+// The TUI's first-token store writes the wait through to the state store and
+// forwards the very same value to the UI, so the live "Working" line shows
+// what the run persisted — no surface measures the wait a second time.
+func TestTUIFirstTokenStoreForwardsToStoreAndUI(t *testing.T) {
+	delegate := &captureFirstTokenStore{}
+	var gotRunID string
+	var gotWait time.Duration
+	store := tuiFirstTokenStore{
+		store:  delegate,
+		notify: func(runID string, wait time.Duration) { gotRunID, gotWait = runID, wait },
+	}
+	if err := store.StampRunFirstToken(context.Background(), "run-7", 1200*time.Millisecond); err != nil {
+		t.Fatalf("StampRunFirstToken error: %v", err)
+	}
+	if delegate.calls != 1 || delegate.runID != "run-7" || delegate.wait != 1200*time.Millisecond {
+		t.Fatalf("delegate = %+v, want the wait passed through unchanged", delegate)
+	}
+	if gotRunID != "run-7" || gotWait != 1200*time.Millisecond {
+		t.Fatalf("notify = (%q, %v), want the same value the store kept", gotRunID, gotWait)
+	}
+}

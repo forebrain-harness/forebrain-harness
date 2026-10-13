@@ -144,6 +144,10 @@ type Counters struct {
 	GoalRound int
 	// GoalChecking is set while the goal's check reads the workspace.
 	GoalChecking bool
+	// FirstToken is how long the run waited for the model's first output, 0
+	// while it has not arrived and for a run that never measured one. Read by
+	// the live "Working" line and, once the run ends, the "Worked for" line.
+	FirstToken time.Duration
 }
 
 type EventResult struct {
@@ -1202,6 +1206,14 @@ func (r *Reducer) Reduce(msg any) EventResult {
 			buf.reasoning.Reset()
 		}
 		return EventResult{}
+	case FirstTokenMsg:
+		// The run's one first-token wait, measured by the engine. Held on the
+		// run so the live "Working" line can show it without waiting for the
+		// turn to end; the "Worked for" line reads it back from the same run.
+		if r.tracker != nil {
+			r.tracker.ObserveFirstToken(strings.TrimSpace(m.RunID), m.Wait)
+		}
+		return EventResult{}
 	case NewMessageMsg:
 		if m.turn.isWithdrawn() {
 			return EventResult{}
@@ -1729,7 +1741,14 @@ func (r *Reducer) updateSubagentStatus(agentID, status string) {
 func (r *Reducer) formatWorkedStatusTitle(workDuration time.Duration, runID string) string {
 	parts := []string{workedForLabel(workDuration)}
 	if r != nil && r.tracker != nil {
-		if counters := formatWorkingCounters(r.tracker.SnapshotRun(runID)); counters != "" {
+		snapshot := r.tracker.SnapshotRun(runID)
+		// How long the model took to start answering sits right after the
+		// run's duration: both describe the wait the user felt, and the
+		// first-token figure is what started it.
+		if firstToken := firstTokenLabel(snapshot.FirstToken); firstToken != "" {
+			parts = append(parts, firstToken)
+		}
+		if counters := formatWorkingCounters(snapshot); counters != "" {
 			parts = append(parts, counters)
 		}
 	}
@@ -1763,6 +1782,28 @@ func shortestActiveTaskTitle(items []event.PlanUpdateItem, fallback string) stri
 // a transcript.
 func workedForLabel(elapsed time.Duration) string {
 	return "Worked for " + formatElapsedDuration(elapsed)
+}
+
+// firstTokenLabel renders how long a run waited for the model's first output,
+// e.g. "first token 1.2s". Empty when the run measured none — it produced no
+// output, or it was stored before turns kept this — so the segment is left out
+// rather than shown as "0s". The live "Working" line and both the live and
+// replayed "Worked for" lines share it, so they read the same.
+func firstTokenLabel(wait time.Duration) string {
+	if wait <= 0 {
+		return ""
+	}
+	return "first token " + formatFirstTokenDuration(wait)
+}
+
+// formatFirstTokenDuration renders a first-token wait to a tenth of a second
+// ("1.2s"). A minute or longer reuses the worked-line's minutes format, so a
+// slow start reads the way the run's own duration would.
+func formatFirstTokenDuration(wait time.Duration) string {
+	if wait >= time.Minute {
+		return formatElapsedDuration(wait)
+	}
+	return strconv.FormatFloat(wait.Seconds(), 'f', 1, 64) + "s"
 }
 
 // formatThoughtDurationLabel renders the elapsed thinking time for the "Thought"
@@ -6923,6 +6964,27 @@ func (t *Tracker) SnapshotActiveRun() Counters {
 	c.GoalRound = t.goalRound
 	c.GoalChecking = t.goalChecking
 	return c
+}
+
+// ObserveFirstToken records how long a run waited for the model's first
+// output. It is written once: a continuation past an approval is the same run
+// and keeps the wait its first answer had, the same rule the store applies to
+// the persisted value, so the live line and the reloaded line never disagree.
+func (t *Tracker) ObserveFirstToken(runID string, wait time.Duration) {
+	if t == nil || wait <= 0 {
+		return
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return
+	}
+	t.mu.Lock()
+	c := t.runUsage[runID]
+	if c.FirstToken == 0 {
+		c.FirstToken = wait
+		t.runUsage[runID] = c
+	}
+	t.mu.Unlock()
 }
 
 // ObserveGoalRound records the round a running /goal is in; 0 when it ended.

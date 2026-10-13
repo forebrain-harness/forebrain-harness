@@ -88,6 +88,16 @@ type RunStartedMsg struct {
 	RunID string
 	turn  *foregroundTurn
 }
+
+// FirstTokenMsg reports how long the run waited for the model's first output,
+// the one wait the engine measured once for that run. The reducer holds it on
+// the run so the live "Working" line can show it before the turn is over; the
+// run's own "Worked for" line carries it too, read from the same value, once
+// the turn ends.
+type FirstTokenMsg struct {
+	RunID string
+	Wait  time.Duration
+}
 type RunEndedMsg struct {
 	turn           *foregroundTurn
 	RunID          string
@@ -1312,6 +1322,24 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 	}}
 }
 
+// tuiFirstTokenStore records each run's one first-token wait through the state
+// store and shows it live. The engine calls it once per run, at the model's
+// first output, with the wait measured from the turn's start; forwarding that
+// same value to the UI keeps the live "Working" line and the stored "Worked
+// for" line in agreement — no surface measures the wait a second time.
+type tuiFirstTokenStore struct {
+	store  turn.FirstTokenStore
+	notify func(runID string, wait time.Duration)
+}
+
+func (s tuiFirstTokenStore) StampRunFirstToken(ctx context.Context, runID string, wait time.Duration) error {
+	err := s.store.StampRunFirstToken(ctx, runID, wait)
+	if s.notify != nil {
+		s.notify(runID, wait)
+	}
+	return err
+}
+
 func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*ChatSession, error) {
 	env, err := process.Open(ctx, process.OpenOptions{
 		Config: &cfg,
@@ -1360,6 +1388,14 @@ func openProcessChatSession(ctx context.Context, cfg config.Root, cwd string) (*
 		// semaphore, not a reentrant mutex, so configuring one here too would
 		// deadlock the second acquisition against the first.
 		turn.WithSessionSource(memory.SessionSourceTUI),
+		// The engine measures the run's one first-token wait; the store keeps
+		// it and, through the wrapper, the surface shows it live. Every turn
+		// this session submits — a fresh one and a continuation past an
+		// approval alike — goes through Submit and so reports here.
+		turn.WithFirstTokenStore(tuiFirstTokenStore{
+			store:  env.Deps.SessionStore,
+			notify: func(runID string, wait time.Duration) { s.notifyUI(FirstTokenMsg{RunID: runID, Wait: wait}) },
+		}),
 		// A turn stopped by a spent usage allowance continues by itself once
 		// the allowance returns. The engine keeps the wait and the terminal
 		// shows it: the lifecycle arrives through the same event path as every
