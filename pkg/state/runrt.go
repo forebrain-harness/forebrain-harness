@@ -43,6 +43,12 @@ var (
 	ErrSessionRunning = sessionBusyError{"This conversation is already running a turn; send again when it finishes."}
 	// ErrSessionAwaitingApproval: a run in it is parked on an approval.
 	ErrSessionAwaitingApproval = sessionBusyError{"This conversation is waiting for an approval; answer it before sending another message."}
+	// ErrSessionRunningElsewhere: the live run driving the conversation belongs
+	// to another process — the other surface, or another window of this one.
+	ErrSessionRunningElsewhere = sessionBusyError{"This conversation is running on another surface (the terminal or the web); send again when it finishes there."}
+	// ErrSessionAwaitingApprovalElsewhere: a run parked on an approval that
+	// another process is holding.
+	ErrSessionAwaitingApprovalElsewhere = sessionBusyError{"This conversation is waiting for an approval on another surface (the terminal or the web); answer it there before sending another message."}
 )
 
 // SessionBusyCode is the stable wire code of a session-busy refusal, "" for
@@ -50,6 +56,10 @@ var (
 // off the code, not the English text.
 func SessionBusyCode(err error) string {
 	switch {
+	case errors.Is(err, ErrSessionAwaitingApprovalElsewhere):
+		return "session_awaiting_approval_elsewhere"
+	case errors.Is(err, ErrSessionRunningElsewhere):
+		return "session_running_elsewhere"
 	case errors.Is(err, ErrSessionAwaitingApproval):
 		return "session_awaiting_approval"
 	case errors.Is(err, ErrSessionRunning):
@@ -248,17 +258,41 @@ WHERE NOT EXISTS (
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		// Nothing was inserted: name the blocker for the person who asked.
-		var parked int
-		if err := s.DB.QueryRowContext(ctx, `
-SELECT EXISTS(SELECT 1 FROM fb_runs WHERE session_id=? AND parent_run_id IS NULL AND status=?)`,
-			r.SessionID, string(RunStatusWaitingAction)).Scan(&parked); err != nil {
+		// Nothing was inserted: name the blocker for the person who asked —
+		// parked or running, and whether this process is the one holding it.
+		// A running blocker counts as live only while its owner renews its
+		// lease (livePrimaryRunCondition), so a running row found here is
+		// always another live surface's; a parked one blocks whatever its
+		// owner's lease says, so the lease is read too, to tell a surface
+		// that is still there from one that is gone. No live row at all means
+		// the blocker ended between the two statements: say the plain
+		// sentence and let the asker resend rather than blame a surface that
+		// is no longer there.
+		var status, owner string
+		var ownerLive int
+		err := s.DB.QueryRowContext(ctx, `
+SELECT r.status, r.owner,
+  EXISTS(SELECT 1 FROM fb_run_owners o WHERE o.owner = r.owner AND o.heartbeat_at_ms >= ?)
+FROM fb_runs r
+WHERE r.session_id = ? AND r.parent_run_id IS NULL AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`
+ORDER BY r.updated_at DESC LIMIT 1`,
+			append([]any{now.UnixMilli() - RunOwnerLease.Milliseconds(), r.SessionID}, liveRunArgs(now)...)...).Scan(&status, &owner, &ownerLive)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		if parked != 0 {
+		elsewhere := strings.TrimSpace(s.Owner) != "" &&
+			ownerLive != 0 &&
+			strings.TrimSpace(owner) != strings.TrimSpace(s.Owner)
+		switch {
+		case status == string(RunStatusWaitingAction) && elsewhere:
+			return nil, ErrSessionAwaitingApprovalElsewhere
+		case status == string(RunStatusWaitingAction):
 			return nil, ErrSessionAwaitingApproval
+		case elsewhere:
+			return nil, ErrSessionRunningElsewhere
+		default:
+			return nil, ErrSessionRunning
 		}
-		return nil, ErrSessionRunning
 	}
 	return r, nil
 }
