@@ -14,8 +14,8 @@ import (
 )
 
 // TestClipboardImageReaderWritesIntoTheProjectAttachments pins that a pasted
-// image is stored with the project, under <project root>/attachments/, rather
-// than in the system temp directory.
+// image is stored with the project, under <project root>/.forebrain/attachments/,
+// rather than in the system temp directory or loose in the project root.
 func TestClipboardImageReaderWritesIntoTheProjectAttachments(t *testing.T) {
 	prev := clipboardWritePNG
 	t.Cleanup(func() { clipboardWritePNG = prev })
@@ -27,7 +27,7 @@ func TestClipboardImageReaderWritesIntoTheProjectAttachments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadClipboardImage: %v", err)
 	}
-	wantDir := filepath.Join(root, "attachments")
+	wantDir := filepath.Join(root, ".forebrain", "attachments")
 	if dir := filepath.Dir(att.Path); filepath.Clean(dir) != filepath.Clean(wantDir) {
 		t.Fatalf("pasted image landed in %q, want %q", dir, wantDir)
 	}
