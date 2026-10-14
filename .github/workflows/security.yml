@@ -18,5 +18,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # govulncheck loads every package, including pkg/pdf, whose cgo needs the
+      # PDFium library the go-pdfium binding reaches through pkg-config.
+      - name: Install pkg-config and fetch PDFium
+        run: |
+          sudo apt-get update && sudo apt-get install -y pkg-config
+          scripts/fetch-pdfium.sh
+          echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

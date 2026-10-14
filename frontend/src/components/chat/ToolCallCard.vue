@@ -6,6 +6,24 @@
   >
     <ToolHeader type="tool-function_call" :state="toolState" :title="title" />
     <ToolContent>
+      <!-- An image step's pixels live behind a URL, never in the step payload:
+           the thumbnail fetches them from the workspace raw endpoint, and a
+           click opens the full image in a new tab. -->
+      <a
+        v-if="previewUrl"
+        :href="previewUrl"
+        :title="t('chat.toolImageOpen')"
+        target="_blank"
+        rel="noopener"
+        class="mb-2 block w-fit"
+      >
+        <img
+          :src="previewUrl"
+          :alt="previewAlt"
+          loading="lazy"
+          class="max-h-40 w-auto rounded-md border border-border object-contain"
+        />
+      </a>
       <!-- A skill card's display_body is the whole user-facing text ("Loaded
            from …" / "Failed to load from …" plus the raw error), so the
            separate error line would repeat what the body already says. -->
@@ -27,15 +45,23 @@
 import { computed } from 'vue'
 import { Tool, ToolHeader, ToolContent, ToolOutput } from '@repo/elements/tool'
 import { t } from '@/locales'
+import { forebrainApi, type WorkspaceScope } from '@/lib/api'
 import { skillCardTitle, type SubagentToolStep } from '@/composables/useChatStream'
 
 const props = withDefaults(defineProps<{
   step: SubagentToolStep
   open?: boolean
   defaultOpen?: boolean
+  /**
+   * The file view an image step's pixels are fetched from. Absent (or empty)
+   * leaves the image step's text body showing with no thumbnail — the raw
+   * endpoint resolves the root from exactly this scope.
+   */
+  scope?: WorkspaceScope
 }>(), {
   open: undefined,
   defaultOpen: false,
+  scope: undefined,
 })
 
 const emit = defineEmits<{
@@ -48,6 +74,33 @@ const emit = defineEmits<{
  * separate error line would repeat what the body already says.
  */
 const isSkill = computed(() => String(props.step.category ?? '').trim().toLowerCase() === 'skill')
+
+/**
+ * previewUrl is the image step's pixel URL, built from the same file view every
+ * other workspace read uses. Empty for a non-image step, a step with no path,
+ * or a caller that passed no scope — the card then shows the text body alone.
+ */
+const previewUrl = computed(() => {
+  if (String(props.step.previewKind ?? '').trim() !== 'image') return ''
+  const path = String(props.step.previewPath ?? '').trim()
+  if (!path) return ''
+  const scope = props.scope ?? {}
+  if (!scope.sessionId && !scope.projectId) return ''
+  return forebrainApi.workspaceFileRawUrl(scope, path)
+})
+
+/**
+ * previewAlt names the image for assistive tech and for the moment before it
+ * loads: its file name and pixel size.
+ */
+const previewAlt = computed(() => {
+  const name = String(props.step.previewPath ?? '').trim().split('/').pop() || 'image'
+  return t('chat.toolImageAlt', {
+    name,
+    width: props.step.previewWidth ?? 0,
+    height: props.step.previewHeight ?? 0,
+  })
+})
 
 /**
  * toolState maps the runtime's own status onto the badge states the card

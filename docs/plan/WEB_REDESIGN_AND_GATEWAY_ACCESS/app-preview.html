@@ -440,6 +440,21 @@
   .modal-b p { margin: 0; }
   .modal-f { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
   .modal-f .sel-path { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* MCP 服务弹窗：高级折叠区、键值行、测试连接结果 */
+  .adv { border-top: 1px solid var(--line); padding-top: 10px; }
+  .adv > summary { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--text-2); cursor: pointer; list-style: none; }
+  .adv > summary::-webkit-details-marker { display: none; }
+  .adv > summary svg.lucide { width: 13px; height: 13px; color: var(--muted); transition: transform 120ms ease; }
+  .adv[open] > summary { color: var(--text); }
+  .adv[open] > summary svg.lucide { transform: rotate(90deg); }
+  .adv > .body { display: grid; gap: 10px; padding-top: 10px; }
+  .kvrows { display: grid; gap: 6px; }
+  .kvrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) 30px; gap: 6px; align-items: center; }
+  .key { font-family: var(--mono); font-size: 11.5px; font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .mcp-test { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .mcp-test .raw { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mcp-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+  .mcp-tools span { background: var(--soft); border-radius: 4px; padding: 2px 7px; font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
   .crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
   .crumbs button { border: 0; background: transparent; color: var(--brand); padding: 0 2px; cursor: pointer; font-family: var(--mono); font-size: 12px; }
   .crumbs span { color: var(--muted); font-family: var(--mono); font-size: 12px; }
@@ -683,7 +698,19 @@
   </header>
 
   <section class="iter" aria-label="本轮迭代">
-    <h2>本轮迭代（2026-10-11）：每个对话都属于一个项目</h2>
+    <h2>本轮迭代（2026-10-14）：MCP 三层作用域与全字段弹窗</h2>
+    <ul>
+      <li>菜单栏新增「MCP」页：本主代理的有效列表，与技能页同一套界面（标题行 + 搜索行 + 表格）。多出「来源」一列（全局 / 主代理 / 项目），自己的行可启停、编辑、删除，继承来的行只读并直接跳到能改的地方。</li>
+      <li>三层：全局（设置 · MCP，所有主代理共享）→ 主代理（菜单栏 MCP，本主代理专有）→ 项目（项目空间 · MCP，需信任 + 逐条同意）。不同名叠加，同名整条覆盖，不做字段级混合。</li>
+      <li>设置 · MCP 与项目 · MCP 改为同一套列表 + 弹窗；被主代理覆盖的全局条目在它自己那一层标「未运行 · 被主代理 main 覆盖」。</li>
+      <li>弹窗编辑整条：名称、类型、命令或地址、必需、启用、连接超时（秒）、请求超时（秒），高级里按类型给请求头 / 环境变量 / OAuth / SSE / SHA256 校验 / 默认审批模式；密钥值预填 <span class="mono">[REDACTED]</span>。</li>
+      <li>底栏「测试连接」用当前表单值试连（不写配置、不关弹窗），结果显示已连接的工具数与耗时，连不上就显示服务端原文；保存中禁用、400/409 原文显示在弹窗里。</li>
+      <li>新状态词：已连接 · N 个工具 / 已允许 · N 个工具 / 待确认 / 已禁用（界面，下个会话起）/ 配置里已禁用（enabled: false）/ 连接失败。</li>
+    </ul>
+  </section>
+
+  <section class="iter" aria-label="上一轮迭代">
+    <h2>上一轮迭代（2026-10-11）：每个对话都属于一个项目</h2>
     <ul>
       <li>新聊天页参考 ZCode：问候语 + 居中输入框，左上角项目胶囊；必须选了项目或文件夹才能发送，新文件夹自动建项目。</li>
       <li>文件夹选择改为系统原生式对话框：后退 / 前进 / 上一层、位置侧栏、单击选中、双击进入。</li>
@@ -2160,15 +2187,15 @@
     tree: {}, treeLoading: {}, ref: '', toolOpen: 'shell', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false,
     pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
     attach: false, attachShot: false, attachDir: 'attachments', lastAttachDir: 'attachments', attNew: false, atree: {}, atts: [], demo: 'normal', dproj: '全部项目', projRoot: '',
-    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
+    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
   };
   var nav = [
     ['chat', '对话', 'message-square'], ['projects', '项目', 'folder-git-2'], ['rules', '规则指令', 'scroll-text'], ['skills', '技能', 'sparkles'],
-    ['subagents', '子代理', 'users'],
+    ['mcp', 'MCP', 'plug'], ['subagents', '子代理', 'users'],
     ['providers', '模型服务', 'boxes'], ['tools', '工具', 'wrench'], ['permissions', '权限', 'shield-check'], ['memories', '记忆', 'brain']
   ];
-  var titles = { chat: '对话', projects: '项目', project: '项目空间', rules: '规则指令', skills: '技能', workshop: '技能工坊', subagents: '子代理', cron: '定时任务', channels: '通道', providers: '模型服务', tools: '工具', permissions: '权限', memories: '记忆', settings: '设置' };
-  var jump = [['chat', '对话'], ['projects', '项目'], ['project', '项目空间'], ['rules', '规则指令'], ['skills', '技能'], ['subagents', '子代理'], ['providers', '模型服务'], ['tools', '工具'], ['permissions', '权限'], ['memories', '记忆'], ['settings', '设置']];
+  var titles = { chat: '对话', projects: '项目', project: '项目空间', rules: '规则指令', skills: '技能', workshop: '技能工坊', mcp: 'MCP', subagents: '子代理', cron: '定时任务', channels: '通道', providers: '模型服务', tools: '工具', permissions: '权限', memories: '记忆', settings: '设置' };
+  var jump = [['chat', '对话'], ['projects', '项目'], ['project', '项目空间'], ['rules', '规则指令'], ['skills', '技能'], ['mcp', 'MCP'], ['subagents', '子代理'], ['providers', '模型服务'], ['tools', '工具'], ['permissions', '权限'], ['memories', '记忆'], ['settings', '设置']];
   var presets = [
     ['readonly', 'Read Only', '只读', '可以读取当前工作区的文件；编辑文件前需要你审批。沙箱中的命令不能访问网络。'],
     ['default', 'Default', '默认', '可以读写当前工作区的文件并运行命令；编辑工作区以外的文件前需要你审批。沙箱中的命令不能访问网络。'],
@@ -2198,16 +2225,17 @@
   var captions = {
     chat: ['对话 · 主代理', ['对话抽屉：新聊天、搜索、按项目筛选；会话标题下方是所属项目。', '新聊天：问候语 + 居中输入框 + 快捷入口；左上角项目胶囊默认选中上次用的项目，点开可搜索、选项目或“打开文件夹…”。没有“不在项目中工作”。', '选的文件夹还没有项目时，胶囊显示“新项目”，第一条消息发出时创建；只看文件夹本身，不看上级目录。', '项目或文件夹未判断过信任时，发送前先问一次（与终端同一句，共用记录）。', '打开文件夹：系统原生式对话框——后退 / 前进 / 上一层（⌫）、当前位置下拉、位置与项目侧栏；单击选中、双击或回车进入；“选择”取选中项，未选中则取当前文件夹。~/.forebrain 不可选。', '“＋”菜单：附件、目标，下方列出可用技能；底部提示 @ 与 / 的用法。附件和粘贴的截图先选“保存到”项目里的目录，记住上次的选择。', '输入框底栏：左“＋”、模式（Agent / 计划）、审批模式；右上下文圆环（超过 80% 变警告色，点开工作台“上下文”）、模型、推理强度、发送。模式与推理强度只作用于本会话。', '用户消息悬停出现“回到这里”：选恢复代码和对话、只恢复对话或只恢复代码；列出将恢复的文件，标出之后被改过的；终端命令的改动不撤回。恢复后对话里留一行，可撤销。', '思考块上方“思考了 N 秒”；结束行“已工作 · 首 token · 完成/总数 · 时间”。', '另一端运行中：发送被拒绝，消息放回输入框。目录已不存在：只能查看。', 'MCP 只在开对话时启动一次，失败提示放在对话开头，原始错误收在“查看详情”。', '工作台：概览（运行中的代理、待办、计划、MCP、用量）、上下文（占用与明细）、工作目录（每个节点可编辑、删除，目录可新建文件）、变更文件（本会话改过的文件，可对比、编辑、撤销变更）。工具调用、思考、用户消息都在消息窗口里实时显示，与终端一致。', '顶栏右侧依次是心跳、工作台、语言。', '审批模式只对本会话生效：Read Only / Default / Full Access；全局默认在“设置 → 审批默认”。', '心跳只作用于当前对话：未设置是普通按钮，运行中高亮并显示“每 N 分钟”，暂停显示“已暂停”。弹层里可暂停、改间隔与内容、删除，底部列出其他对话的心跳。', '菜单栏可折叠成图标栏（64px），悬停显示名称。']],
     projects: ['项目 · 主代理', ['本主代理的项目；进入项目空间读写它的规则、会话、记忆、权限、MCP、技能、定时任务。', '列表操作：新建、置顶、删除（去掉了归档，不常用的按修改时间沉底）。', '“新建项目”打开弹窗：先选目录（可“浏览…”），项目名默认取目录名；目录已是项目时提示并可打开。项目根就是所选目录，代码仓库、普通文件夹都可以；终端启动目录、对话里选的新文件夹也会自动成为项目。', '删除项目会同时删除它的对话和定时任务，需输入项目名确认；目录里的文件不动。目录已不存在的项目标“目录不存在”。']],
-    project: ['项目空间 · 项目', ['顶部一行：面包屑（项目 › 名称）、目录、信任状态，下面是标签页；没有单独的标题层。', '标签页：概览、规则指令、会话、记忆、权限、MCP、技能、定时任务、通道（定时任务与通道从菜单栏移到这里）。', '技能标签与主代理技能页同一套：离线安装、在线安装、发现并安装、新建技能、详情。定时任务、通道默认属于本项目；新建定时任务在弹窗里。', '项目级权限、MCP、技能只要求项目已信任，不要求是 git 仓库。', '点面包屑“项目”回到列表。']],
+    project: ['项目空间 · 项目', ['顶部一行：面包屑（项目 › 名称）、目录、信任状态，下面是标签页；没有单独的标题层。', '标签页：概览、规则指令、会话、记忆、权限、MCP、技能、定时任务、通道（定时任务与通道从菜单栏移到这里）。', '技能标签与主代理技能页同一套：离线安装、在线安装、发现并安装、新建技能、详情。定时任务、通道默认属于本项目；新建定时任务在弹窗里。', '项目级权限、MCP、技能只要求项目已信任，不要求是 git 仓库。', 'MCP 标签列出三层：本项目自己的行可编辑、删除；从主代理和全局继承来的行只读，操作列指向能改的页面；项目里新加、还没同意的行给“允许 / 拒绝”。', '点面包屑“项目”回到列表。']],
     rules: ['规则指令 · 主代理', ['本主代理的规则文件：AGENTS.md（行为准则）、SOUL.md（性格与做事方式）、USER.md（关于你），位于主代理工作区根目录。', '列表 + 上方按钮 + 弹窗：点“编辑”在弹窗里改；“新建规则文件”弹窗只列出支持、且还没创建的文件。与项目空间的“规则指令”标签同一套。', '文件都在同一个编辑器里改：.md 用 Milkdown Crepe（MIT）所见即所得，代码块可编辑、选语言、带高亮，输入 / 插入块，底部可切到源码；源码和其他文件用 CodeMirror 6（MIT），带行号和高亮。', '保存后从新会话开始生效，不打断正在进行的会话。']],
     workshop: ['技能工坊', ['会话页的超集：同样的消息流、输入框（加号、Agent/计划、审批、模型、推理强度）、回到这里、心跳和工作台；顶部多了版本与“发布 vN”。', '从主代理技能页或项目技能页进入（新建技能、详情、发现并安装），左上角返回来源页。主代理入口的工作目录是主代理技能目录，项目入口是项目根目录。', '工作台：会话页的概览、上下文、工作目录、变更文件，加上测试用例、评测、触发描述、版本；还没有技能时后四个不可用。变更文件列出草稿相对当前版本改过的文件，每个都能对比、编辑、撤销变更。', '新建、编辑都在弹窗里；所有改动写进草稿，发布才生成新版本。“详情”接着这个技能最近的工坊会话；右上角可开新会话。', '发现并安装：候选直接列在回复里，安装后即 v1，工作台随之可用。']],
     skills: ['技能 · 主代理', ['本主代理能用的全部技能：本主代理的 + 共享 + 内置。页面只有一层：标题行（说明文案在“技能”右侧，按钮依次是离线安装、在线安装、发现并安装、新建技能、刷新）、搜索行、列表。', '列表上方：离线安装、在线安装（弹窗）、发现并安装、新建技能；本主代理的技能可启停、删除，点“详情”进技能工坊改进。状态列显示当前版本号；草稿不能启用；已发布但有改动的标“有未发布的修改”，上游有新版本的标“有更新”。（本轮改动）', '设置里的共享技能库没有工坊，只有离线安装与在线安装。']],
     subagents: ['子代理 · 主代理', ['本主代理所有会话里正在运行的子代理；可以跳到所在会话、停止单个或全部停止。']],
+    mcp: ['MCP · 主代理 / 全局 / 项目', ['三层继承：全局（所有主代理共享，在“设置 → MCP”）→ 主代理（本主代理专有，就是这一页）→ 项目（项目空间里，要求项目已信任并逐条同意）。不同名叠加，同名高层整条覆盖（项目 > 主代理 > 全局），不做字段级混合——与技能的分层规则同一套。', '本页是本主代理的有效列表，与技能页同一套界面：标题行（说明 + 添加 MCP 服务 + 刷新）、搜索行、表格（MCP 服务 / 来源 / 命令或地址 / 类型 / 状态 / 操作）。自己的行可启停、编辑、删除；全局与项目行只读，操作列直接跳到能改的地方。设置 · MCP 里被主代理覆盖的全局条目显示“未运行 · 被主代理 … 覆盖”。', '状态列：已连接 · N 个工具 / 已允许 · N 个工具 / 待确认 / 已禁用（界面，下个会话起）/ 配置里已禁用（enabled: false）/ 连接失败（带服务端原文）。', '弹窗编辑整条：名称、类型、命令或地址、必需、启用、连接超时、请求超时（都按秒；connectionTimeoutMs 这类外来拼写不做别名，也不读）。高级按类型给请求头或环境变量、OAuth、SSE、SHA256 校验、默认工具审批模式。底栏“测试连接”用当前表单值试连，不写配置、不关弹窗；保存失败（400/409）的原文就显示在弹窗里。', '生效列表在新会话启动时冻结，任何改动都是“新会话生效”。']],
     providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。列表上方“添加模型服务”，每行“编辑”都在弹窗里。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。']],
     tools: ['工具 · 主代理', ['本主代理运行时实际暴露给模型的工具表；可筛选，标出只读/有副作用，展开看入参说明（表格）。']],
     permissions: ['权限 · 主代理', ['本主代理已记住的授权规则（保存在主代理工作区）。', '列表上方两个按钮：“判定验证”和“添加规则”，都在弹窗里；每行可编辑、删除。动作、工具是选择框，只有规则内容需要输入。项目空间的权限标签同一套。', '全局默认审批模式在“设置 → 审批默认”，项目规则在项目空间，会话内的临时切换在对话输入框旁。']],
     memories: ['记忆 · 主代理', ['本主代理的记忆文件分页列表：按内容关键词搜索，按创建或更新时间升/降序，分页。', '每个文件点“查看/编辑”在弹窗里打开（本轮改动），可以单个删除或多选批量删除，也可以重置全部。核心文件 MEMORY.md、memory_summary.md 只能编辑或清空，不能删除。', '项目空间的“记忆”标签是同一套界面，只列本项目的记忆文件。']],
-    settings: ['设置 · 全局', ['只放全局、不属于某个主代理的配置：外观、审批默认、MCP、钩子、记忆开关、共享技能、配置文件、运行状态。', '切换当前主代理只能用菜单栏顶部的下拉选择器；设置里没有“主代理”标签：新建在顶栏“新建主代理”（只填名称，建好自动切换过去；工作区固定在 ~/.forebrain/workspaces/<名称>，模型服务在“模型服务”页配置），删除在菜单栏顶部的主代理下拉里（main 与当前主代理不能删）。', 'MCP、钩子两个标签都是列表 + 上方按钮 + 弹窗，新建、编辑在弹窗里。项目空间的 MCP 标签同一套。']]
+    settings: ['设置 · 全局', ['只放全局、不属于某个主代理的配置：外观、审批默认、MCP、钩子、记忆开关、共享技能、配置文件、运行状态。', '切换当前主代理只能用菜单栏顶部的下拉选择器；设置里没有“主代理”标签：新建在顶栏“新建主代理”（只填名称，建好自动切换过去；工作区固定在 ~/.forebrain/workspaces/<名称>，模型服务在“模型服务”页配置），删除在菜单栏顶部的主代理下拉里（main 与当前主代理不能删）。', 'MCP、钩子两个标签都是列表 + 上方按钮 + 弹窗，新建、编辑在弹窗里。这里的 MCP 是全局共享层：所有主代理都能用，同名条目被主代理或项目整条覆盖；行操作是编辑、禁用/启用、删除。主代理自己的 MCP 在菜单栏“MCP”，项目层在项目空间。']]
   };
 
   /* ---------- 2026-10-11: every conversation belongs to a project ---------- */
@@ -2270,7 +2298,7 @@
     var last = projects.filter(function (p) { return p.last; })[0];
     S.pick = { mode: 'project', proj: last ? last.n : '', folder: '' };
   }
-  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
+  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
 
   var starters = [['file-text', '生成 FOREBRAIN.md', '/init'], ['map', '先出计划再动手', '@plan'], ['hammer', '做一个技能', '@workshop'], ['clock', '设一个定时任务', '@cron']];
   function pjPop() {
@@ -2499,7 +2527,7 @@
   var iterJumps = [['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
     ['thread', '思考耗时 · 首 token'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['drawer', '对话抽屉 · 按项目'],
     ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'],
-    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 查看/编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
+    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 查看/编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 有效列表'], ['mcpproj', '项目 · MCP 三层'], ['mcpnew', 'MCP 弹窗 · 添加'], ['mcpstdio', 'MCP 弹窗 · 高级（环境变量）'], ['mcpadv', 'MCP 弹窗 · 高级（请求头与 OAuth）'], ['mcptest', 'MCP 弹窗 · 测试连接'], ['mcpfail', 'MCP 弹窗 · 连接失败'], ['mcp409', 'MCP 弹窗 · 名称重复'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
   function iterJump(k) {
     resetModal(); S.tenant = 'main'; S.bench = false;
     var chat0 = function () { S.page = 'chat'; S.projectSession = ''; S.session = 0; };
@@ -2559,6 +2587,14 @@
     else if (k === 'agentnew') { S.fm = { kind: 'agentnew', a: '', b: '' }; }
     else if (k === 'agentdel') { S.tmenu = true; S.fm = { kind: 'agentdel', a: 'review', b: '' }; }
     else if (k === 'mcpp') { S.page = 'settings'; S.settingsTab = 'mcp'; }
+    else if (k === 'mcpagent') { S.page = 'mcp'; }
+    else if (k === 'mcpproj') { S.page = 'project'; S.projTab = 'mcp'; }
+    else if (k === 'mcpnew') { S.page = 'mcp'; S.fm = { kind: 'mcpnew', a: 'agent', b: '' }; S.fmType = 'stdio'; }
+    else if (k === 'mcpstdio') { S.page = 'mcp'; S.fm = { kind: 'mcpedit', a: 'agent', b: 'codegraph' }; S.fmType = 'stdio'; S.mcpAdv = true; }
+    else if (k === 'mcpadv') { S.page = 'mcp'; S.fm = { kind: 'mcpedit', a: 'project', b: 'github' }; S.fmType = 'http'; S.mcpAdv = true; }
+    else if (k === 'mcptest') { S.page = 'mcp'; S.fm = { kind: 'mcpedit', a: 'agent', b: 'codegraph' }; S.fmType = 'stdio'; S.mcpTest = 'ok'; S.mcpTools = true; }
+    else if (k === 'mcpfail') { S.page = 'settings'; S.settingsTab = 'mcp'; S.fm = { kind: 'mcpedit', a: 'global', b: 'sentry' }; S.fmType = 'http'; S.mcpTest = 'fail'; }
+    else if (k === 'mcp409') { S.page = 'mcp'; S.fm = { kind: 'mcpnew', a: 'agent', b: 'codegraph' }; S.fmType = 'stdio'; S.mcpErr = true; }
     else if (k === 'hooksp') { S.page = 'settings'; S.settingsTab = 'hooks'; }
     else if (k === 'memedit') { S.page = 'memories'; S.memEdit = 'agent:2'; }
     else if (k === 'focus') { S.page = 'project'; S.projTab = 'rules'; S.focusId = 'proj-instr'; }
@@ -2581,7 +2617,35 @@
     if (d.act === 'plus') { var pp = !S.plusPop; closePops(); S.plusPop = pp; return true; }
     if (d.plus) { S.plusPop = false; if (d.plus === 'attach') { S.attach = true; S.attachShot = false; S.attachDir = S.lastAttachDir; S.attNew = false; } else S.draft = d.plus; return true; }
     if (d.mdemode) { var mp = d.mdemode.split(':'), lv = window.__mdeLive && window.__mdeLive[mp[0]]; if (lv) S.mdeDoc[mp[0]] = lv.get(); S.mdeMode[mp[0]] = mp[1]; return true; }
-    if (d.fm) { var fp = d.fm.split(':'); S.fm = { kind: fp[0], a: fp[1] || '', b: fp.slice(2).join(':') }; S.fmResult = false; return true; }
+    if (d.fm) {
+      var fp = d.fm.split(':'); S.fm = { kind: fp[0], a: fp[1] || '', b: fp.slice(2).join(':') }; S.fmResult = false;
+      var mr = S.fm.kind === 'mcpedit' ? mcpRowOf(S.fm.a, S.fm.b) : null;
+      S.fmType = mr ? mr.ty : 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = '';
+      return true;
+    }
+    if (d.act === 'mcptest') {
+      var tn = (document.getElementById('mcp-name') || {}).value || '';
+      S.mcpTestName = tn; S.mcpTest = 'run'; S.mcpTools = false;
+      setTimeout(function () { S.mcpTest = /sentry/.test(tn) ? 'fail' : 'ok'; render(); }, 800);
+      return true;
+    }
+    if (d.act === 'mcptools') { S.mcpTools = !S.mcpTools; return true; }
+    if (d.act === 'mcpsave') {
+      var sn = ((document.getElementById('mcp-name') || {}).value || '').trim(), sc = S.fm.a || 'agent';
+      S.mcpSaveName = sn;
+      if (S.fm.kind === 'mcpnew' && mcpRowOf(sc, sn)) { S.mcpErr = true; return true; }
+      S.mcpErr = false; S.mcpSaving = true;
+      setTimeout(function () { S.mcpSaving = false; S.fm = null; render(); }, 700);
+      return true;
+    }
+    if (d.gomcp) {
+      S.page = d.gomcp === 'project' ? 'project' : d.gomcp === 'global' ? 'settings' : 'mcp';
+      if (d.gomcp === 'project') S.projTab = 'mcp';
+      if (d.gomcp === 'global') S.settingsTab = 'mcp';
+      return true;
+    }
+    if (d.mcpallow) { S.mcpAllow = true; S.mcpDeny = false; return true; }
+    if (d.mcpdeny) { S.mcpDeny = true; S.mcpAllow = false; return true; }
     if (d.act === 'fmclose') { S.fm = null; return true; }
     if (d.act === 'fmok' && S.fm.kind === 'treenew') { var tn = ((document.getElementById('tree-new-name') || {}).value || '').trim() || 'untitled.md', tp = S.fm.a.split('|'); S.fm = { kind: 'treeedit', a: tp[0] + '|' + (tp[1] ? tp[1] + '/' : '') + tn, b: '' }; return true; }
     if (d.act === 'fmok' && S.fm.kind === 'agentnew') {
@@ -2853,18 +2917,168 @@
   }
   var agentRules = [['允许', 'shell', 'git status'], ['允许', 'shell', 'npm run build'], ['询问', 'web_fetch', 'domain:internal.example.com']];
   var projRules = [['允许', 'shell', 'go test:*'], ['允许', 'shell', 'make build'], ['询问', 'shell', 'git push:*'], ['拒绝', 'read_file', '**/.env']];
-  function mcpBlock(scope) {
-    var g = scope === 'global';
-    var rows = g ? [['codegraph', 'codegraph mcp', 'stdio · 必需', 'on', '1 个工具'], ['context7', 'https://mcp.context7.com/mcp', 'http', 'off', '2 个工具']]
-      : [['github', 'https://api.githubcopilot.com/mcp/', 'http · OAuth', 'allowed', '38 个工具'], ['playwright', 'npx @playwright/mcp@latest', 'stdio', 'pending', '']];
-    var badge = { on: '<span class="badge ok">已连接 · ', off: '<span class="badge gray">已禁用', allowed: '<span class="badge ok">已允许 · ', pending: '<span class="badge warn">待确认' };
-    return '<div class="flat">' + fh(g ? '全局 MCP 服务' : '项目 MCP 服务', g ? '对所有主代理生效，新会话起作用。' : '项目已信任时生效，新会话起作用。', '<button type="button" class="btn sm pri" data-fm="mcpnew:' + scope + '">' + ic('plus') + '添加 MCP 服务</button>') +
-      '<div class="tb-wrap"><table class="tb"><thead><tr><th>名称</th><th>命令或地址</th><th>类型</th><th>状态</th><th style="text-align:right;width:170px">操作</th></tr></thead><tbody>' +
+  /* ---------- MCP 服务：三层作用域（全局 / 主代理 / 项目），与技能页同一套列表 + 弹窗 ---------- */
+  var mcpServers = {
+    global: [
+      { n: 'codegraph', t: 'codegraph mcp', ty: 'stdio', req: true, st: 'on', tools: '1 个工具', co: 30, over: 'main' },
+      { n: 'context7', t: 'https://mcp.context7.com/mcp', ty: 'http', st: 'on', tools: '2 个工具', co: 10, rq: 30 },
+      { n: 'smart-doc', t: 'http://192.168.73.51:8112/mcp', ty: 'http', hdr: [['Authorization', '[REDACTED]']], st: 'cfg', co: 10, rq: 30 },
+      { n: 'sentry', t: 'https://mcp.sentry.dev/mcp', ty: 'http', oauth: true, st: 'fail', co: 30, err: 'streamable-http: Post "https://mcp.sentry.dev/mcp": dial tcp 10.0.0.7:443: i/o timeout' }
+    ],
+    agent: [
+      { n: 'codegraph', t: 'codegraph mcp', ty: 'stdio', req: true, st: 'on', tools: '1 个工具', co: 30, env: [['CODEGRAPH_HOME', '/Users/doudou/.codegraph']] }
+    ],
+    project: [
+      { n: 'github', t: 'https://api.githubcopilot.com/mcp/', ty: 'http', oauth: true, hdr: [['Authorization', 'Bearer ${GITHUB_TOKEN}']], st: 'allowed', tools: '38 个工具', co: 15, rq: 60, oauthId: 'Iv1.b4c2e9a71f3d' },
+      { n: 'playwright', t: 'npx @playwright/mcp@latest', ty: 'stdio', st: 'pending', co: 60 }
+    ]
+  };
+  function mcpCopy(scope, r) { var o = {}, k; for (k in r) o[k] = r[k]; o.scope = scope; return o; }
+  function mcpRows(scope) {
+    return (mcpServers[scope] || []).map(function (r) {
+      var o = mcpCopy(scope, r);
+      if (o.n === 'playwright') {
+        if (S.mcpDeny) return null;
+        if (S.mcpAllow && o.st === 'pending') { o.st = 'allowed'; o.tools = '21 个工具'; }
+      }
+      return o;
+    }).filter(function (r) { return !!r; });
+  }
+  // 有效列表：不同名叠加、同名高层整条覆盖（项目 > 主代理 > 全局）；顺序与 TUI 面板和引擎一致：全局 → 主代理 → 项目
+  function mcpEffective() {
+    var order = ['global', 'agent', 'project'], out = [];
+    for (var i = 0; i < order.length; i++) {
+      var higher = [];
+      for (var j = i + 1; j < order.length; j++) mcpRows(order[j]).forEach(function (r) { if (higher.indexOf(r.n) < 0) higher.push(r.n); });
+      mcpRows(order[i]).forEach(function (r) { if (higher.indexOf(r.n) < 0) out.push(r); });
+    }
+    return out;
+  }
+  function mcpRowOf(scope, name) {
+    var hit = null;
+    mcpRows(scope).forEach(function (r) { if (r.n === name) hit = r; });
+    return hit;
+  }
+  function mcpSrc(kind) {
+    if (kind === 'project') return '<span class="scope project">项目</span>';
+    if (kind === 'agent') return '<span class="scope agent">主代理 ' + S.tenant + '</span>';
+    return '<span class="scope global">全局</span>';
+  }
+  function mcpType(r) {
+    var t = r.ty === 'stdio' ? 'stdio（本地命令）' : 'http（远程地址）';
+    if (r.oauth) t += ' · OAuth';
+    else if (r.hdr) t += ' · 请求头';
+    return t;
+  }
+  function mcpState(r) {
+    if (r.st === 'on' || r.st === 'allowed') return ['ok', r.st === 'on' ? '已连接' : '已允许', r.tools ? ' · ' + r.tools : ''];
+    if (r.st === 'cfg') return ['gray', '配置里已禁用', ''];
+    if (r.st === 'off') return ['gray', '已禁用', ''];
+    if (r.st === 'fail') return ['err', '连接失败', ''];
+    return ['warn', '待确认', ''];
+  }
+  function mcpStatusCell(r, mine) {
+    var s = mcpState(r), badge = '<span class="badge ' + s[0] + '">' + s[1] + s[2] + '</span>';
+    if (r.st === 'pending') return badge;
+    var note = r.over ? '<span class="hint">未运行 · 被主代理 ' + r.over + ' 覆盖</span>'
+      : r.st === 'fail' ? '<span class="hint mono" title="' + esc(r.err) + '">' + esc(r.err) + '</span>'
+        : r.st === 'cfg' ? '<span class="key">enabled: false</span>' : '';
+    var rest = mine
+      ? '<button type="button" class="sw" role="switch" aria-checked="' + (r.st === 'on' || r.st === 'allowed') + '" aria-label="启用 ' + r.n + '" style="vertical-align:middle"' +
+        (r.st === 'cfg' ? ' disabled title="配置里是 enabled: false：先在弹窗里打开“启用”"' : '') + '></button>'
+      : ic('lock', 'lk');
+    return badge + (note ? ' ' + note : '') + ' ' + rest;
+  }
+  function mcpActions(r, mine) {
+    if (r.st === 'pending') return '<button type="button" class="btn sm pri" data-mcpallow="1">允许</button> <button type="button" class="btn sm" data-mcpdeny="1">拒绝</button>';
+    if (mine) return '<button type="button" class="btn sm" data-fm="mcpedit:' + r.scope + ':' + r.n + '">编辑</button><button type="button" class="icon-btn" style="display:inline-grid;color:var(--danger)" aria-label="删除 ' + r.n + '" title="删除">' + ic('trash-2') + '</button>';
+    var go = r.scope === 'project' ? ['project', '在项目空间修改'] : r.scope === 'global' ? ['global', '在 设置 · MCP 修改'] : ['agent', '在菜单栏 MCP 修改'];
+    return '<button type="button" class="btn link" data-gomcp="' + go[0] + '">' + go[1] + '</button>';
+  }
+  function mcpBlock(scope, title, rows, own, where, desc) {
+    return '<div class="flat">' + fh(title, desc, '<button type="button" class="btn sm pri" data-fm="mcpnew:' + scope + '">' + ic('plus') + '添加 MCP 服务</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+      '<div class="row"><input class="field" id="mcp-q-' + scope + '" placeholder="搜索 MCP 服务" style="max-width:240px">' + sel(['全部来源', '全局', '主代理', '项目'], '全部来源', 'width:110px') +
+      '<span style="flex:1"></span><span class="hint">共 ' + rows.length + ' 条</span></div>' +
+      '<div class="tb-wrap"><table class="tb"><thead><tr><th>MCP 服务</th><th>来源</th><th>命令或地址</th><th>类型</th><th style="text-align:right">状态</th><th style="text-align:right;width:190px">操作</th></tr></thead><tbody>' +
       rows.map(function (r) {
-        var acts = r[3] === 'pending' ? '<button type="button" class="btn sm pri">允许</button> <button type="button" class="btn sm">拒绝</button>'
-          : '<button type="button" class="btn sm" data-fm="mcpedit:' + scope + ':' + r[0] + '">编辑</button> ' + (g ? '<button type="button" class="btn sm">' + (r[3] === 'on' ? '禁用' : '启用') + '</button>' : '<button type="button" class="btn sm dgr">删除</button>');
-        return '<tr><td><b>' + r[0] + '</b></td><td class="mono hint">' + r[1] + '</td><td>' + r[2] + '</td><td>' + badge[r[3]] + (r[3] === 'on' || r[3] === 'allowed' ? r[4] : '') + '</span></td><td style="text-align:right">' + acts + '</td></tr>';
-      }).join('') + '</tbody></table></div><span class="hint mono">' + (g ? '~/.forebrain/forebrain.yaml' : '.forebrain/mcp_servers.yaml') + '</span></div>';
+        var mine = own.indexOf(r.scope) >= 0;
+        return '<tr><td><b class="mono">' + r.n + '</b>' + (r.req ? ' <span class="badge gray" style="height:18px">必需</span>' : '') + '</td>' +
+          '<td>' + mcpSrc(r.scope) + '</td><td class="mono hint">' + esc(r.t) + '</td><td>' + mcpType(r) + '</td>' +
+          '<td style="text-align:right">' + mcpStatusCell(r, mine) + '</td><td style="text-align:right">' + mcpActions(r, mine) + '</td></tr>';
+      }).join('') + '</tbody></table></div><span class="hint">' + where + '</span></div>';
+  }
+  function mcpKV(rows, add) {
+    var h = '<div class="kvrows">';
+    (rows || []).forEach(function (k) {
+      h += '<div class="kvrow"><input class="field mono" value="' + esc(k[0]) + '" aria-label="键"><input class="field mono" value="' + esc(k[1]) + '" aria-label="值">' +
+        '<button type="button" class="icon-btn" style="color:var(--danger)" aria-label="删除这一项" title="删除">' + ic('trash-2') + '</button></div>';
+    });
+    return h + '</div><button type="button" class="btn sm">' + ic('plus') + add + '</button>';
+  }
+  function mcpLabel(text, key) { return '<span class="lb"><span>' + text + '<span class="key">' + key + '</span></span></span>'; }
+  function mcpRawPath(scope) {
+    return scope === 'project' ? '.forebrain/mcp_servers.yaml' : scope === 'agent' ? 'agents.definitions.' + S.tenant + '.mcp_servers' : 'agents.defaults.mcp_servers';
+  }
+  function mcpWhere(scope) {
+    if (scope === 'project') return '写入 .forebrain/mcp_servers.yaml（项目根），项目已信任并同意后新会话生效。';
+    return '写入 ~/.forebrain/forebrain.yaml · ' + mcpRawPath(scope) + '，新会话生效。';
+  }
+  function mcpStdioAdv(row) {
+    return mcpLabel('环境变量', 'env') + mcpKV(row && row.env, '添加环境变量') +
+      '<div class="row"><button type="button" class="sw" role="switch" aria-checked="false" aria-label="继承父进程环境"></button>继承父进程环境<span class="key">inherit_parent_env</span></div>' +
+      '<label class="lb"><span>命令 SHA256 校验<span class="key">expected_command_sha256</span></span><input class="field mono" value="" placeholder="留空 = 不校验命令文件"></label>';
+  }
+  function mcpHTTPAdv(row) {
+    return mcpLabel('请求头', 'headers') + mcpKV(row && row.hdr, '添加请求头') +
+      '<div class="row"><button type="button" class="sw" role="switch" aria-checked="false" aria-label="禁用独立 SSE"></button>禁用独立 SSE<span class="key">disable_standalone_sse</span></div>' +
+      mcpLabel('OAuth', 'oauth') +
+      '<label class="lb"><span>模式<span class="key">mode</span></span>' + sel(['不启用（留空）', 'static（静态令牌）', 'client_credentials（客户端凭据）', 'refresh（刷新令牌）'], row && row.oauth ? 'refresh（刷新令牌）' : '不启用（留空）') + '</label>' +
+      '<div class="grid2"><label class="lb"><span>授权地址<span class="key">authorization_url</span></span><input class="field mono" value="" placeholder="https://…/authorize"></label>' +
+      '<label class="lb"><span>令牌地址<span class="key">token_url</span></span><input class="field mono" value="" placeholder="https://…/token"></label></div>' +
+      '<div class="grid2"><label class="lb"><span>client_id</span><input class="field mono" value="' + esc(row && row.oauthId ? row.oauthId : '') + '"></label>' +
+      '<label class="lb"><span>client_secret</span><input class="field mono" value="' + (row && row.oauth ? '[REDACTED]' : '') + '"></label></div>' +
+      '<div class="grid2"><label class="lb"><span>scopes</span><input class="field mono" value="" placeholder="空格分隔"></label>' +
+      '<label class="lb"><span>redirect_url</span><input class="field mono" value="" placeholder="回调地址"></label></div>' +
+      '<span class="hint">授权码（PKCE）向导仍走 <span class="mono">POST /v1/mcp/oauth/pkce/start</span>，这一轮弹窗只编辑上面这几项。</span>';
+  }
+  function mcpModalBody(f) {
+    var scope = f.a || 'agent', row = f.kind === 'mcpedit' ? mcpRowOf(scope, f.b) : null;
+    var ty = S.fmType || (row && row.ty) || 'stdio';
+    var h = '<div class="grid2"><label class="lb"><span>名称<span class="key">name</span></span><input class="field mono" id="mcp-name" value="' + esc(row ? row.n : (f.b || '')) + '" placeholder="如 codegraph" autocomplete="off"></label>' +
+      '<label class="lb"><span>类型<span class="key">transport</span></span><select class="field" id="mcp-type" data-mcptype="1">' +
+      '<option value="stdio"' + (ty === 'stdio' ? ' selected' : '') + '>stdio（本地命令）</option><option value="http"' + (ty === 'http' ? ' selected' : '') + '>http（远程地址）</option></select></label></div>' +
+      '<label class="lb"><span>命令或地址</span><input class="field mono" id="mcp-target" value="' + esc(row ? row.t : '') + '" placeholder="' +
+      (ty === 'stdio' ? '如 npx @playwright/mcp@latest；参数按空格拆分，含空格的参数加引号' : '如 https://mcp.example.com/mcp') + '"></label>' +
+      '<div class="grid2"><div class="row"><button type="button" class="sw" role="switch" aria-checked="' + (!!(row && row.req)) + '" aria-label="必需"></button>必需</div>' +
+      '<div class="row"><button type="button" class="sw" role="switch" aria-checked="' + !(row && row.st === 'cfg') + '" aria-label="启用"></button>启用</div></div>' +
+      '<span class="hint">必需 = 连接失败时本会话不启动；关闭“启用” = 配置里写 <span class="mono">enabled: false</span>，条目保留、不进新会话。</span>' +
+      '<div class="grid2"><label class="lb"><span>连接超时（秒）<span class="key">startup_timeout</span></span><input class="field mono" id="mcp-co" value="' + (row && row.co ? row.co : '') + '" placeholder="留空 = 用默认值"></label>' +
+      '<label class="lb"><span>请求超时（秒）<span class="key">request_timeout</span></span><input class="field mono" id="mcp-rq" value="' + (row && row.rq ? row.rq : '') + '" placeholder="留空 = 不限制单次调用"></label></div>' +
+      '<span class="hint">连接超时管启动并列出工具，请求超时管单次工具调用；都按秒，<span class="mono">connectionTimeoutMs</span> 这类外来拼写不做别名。</span>' +
+      '<details class="adv"' + (S.mcpAdv ? ' open' : '') + '><summary>' + ic('chevron-right') +
+      (ty === 'stdio' ? '高级 · 环境变量、进程环境、命令校验、审批模式' : '高级 · 请求头、SSE、OAuth、审批模式') + '</summary><div class="body">' +
+      (ty === 'stdio' ? mcpStdioAdv(row) : mcpHTTPAdv(row)) +
+      '<label class="lb"><span>默认工具审批模式<span class="key">default_tools_approval_mode</span></span>' +
+      sel(['跟随全局（留空）', 'auto（自动）', 'prompt（每次询问）', 'writes（写操作询问）', 'approve（全部询问）'], '跟随全局（留空）') + '</label>' +
+      '<span class="hint">单工具的覆盖表（<span class="mono">tools</span>）这一轮不做界面，不提交就不会动它。</span>' +
+      '<span class="hint">密钥值：[REDACTED] = 不修改；清空 = 删除这一项；密钥类键请写 <span class="mono">${ENV}</span>。</span>' +
+      '</div></details><span class="hint mono">' + mcpWhere(scope) + '</span>';
+    if (S.mcpErr) h += '<div class="err-block"><div><b>没有保存：</b>本层已有同名条目。<span class="s mono">mcp: server "' + esc(S.mcpSaveName || (row ? row.n : (f.b || ''))) + '" already exists in ' + mcpRawPath(scope) + '</span></div></div>';
+    return h;
+  }
+  function mcpTestBar() {
+    var nm = S.mcpTestName || S.fm.b || '', row = mcpRowOf(S.fm.a || 'agent', nm);
+    var h = '<button type="button" class="btn" data-act="mcptest">' + ic('plug-zap') + '测试连接</button>';
+    if (S.mcpTest === 'run') h += '<span class="hint">测试中…</span>';
+    else if (S.mcpTest === 'ok') {
+      h += '<span class="badge ok">✓ 已连接</span><span class="hint">' + (row && row.tools ? row.tools.replace(' 个工具', '') : '12') + ' 个工具 · 1.3 s</span>' +
+        '<button type="button" class="btn link" data-act="mcptools">' + (S.mcpTools ? '收起工具' : '工具列表') + '</button>';
+      if (S.mcpTools) h += '<span class="mcp-tools" style="flex-basis:100%">' + ['create_pull_request', 'get_issue', 'list_issues', 'search_code'].map(function (t) { return '<span>' + t + '</span>'; }).join('') + '</span>';
+    } else if (S.mcpTest === 'fail') {
+      var raw = row && row.err ? row.err : 'Post "' + nm + '": dial tcp 10.0.0.7:443: i/o timeout';
+      h += '<span class="badge err">✗ 连接失败</span><span class="hint mono" style="flex-basis:100%;word-break:break-all">' + esc(raw) + '</span>';
+    }
+    return '<span class="mcp-test">' + h + '</span>';
   }
   var hookRows = [['PreToolUse', 'shell', 'scripts/guard-shell.sh'], ['PostToolUse', '匹配全部工具', 'gofmt -l ./pkg']];
   function fmModal() {
@@ -2903,12 +3117,10 @@
       title = '删除主代理 ' + f.a + '？'; ok = '删除'; danger = true;
       body = '<p>删除后不能恢复；工作区目录里的文件不会删除。</p>';
     } else if (k === 'mcpnew' || k === 'mcpedit') {
-      var g = f.a === 'global';
-      title = k === 'mcpnew' ? '添加 MCP 服务' : '编辑 MCP 服务 · ' + f.b; ok = k === 'mcpnew' ? '添加' : '保存'; wide = true;
-      body = '<div class="grid2"><label class="lb">名称<input class="field" id="mcp-name" value="' + (f.b || '') + '"></label><label class="lb">类型' + sel(['stdio（本地命令）', 'http（远程地址）'], 'stdio（本地命令）') + '</label></div>' +
-        '<label class="lb">命令或地址<input class="field mono" id="mcp-cmd" placeholder="如 npx @playwright/mcp@latest 或 https://…"></label>' +
-        '<div class="row"><button type="button" class="sw" role="switch" aria-checked="false" aria-label="必需"></button>必需（连接失败时' + (g ? '' : '本项目') + '会话不启动）</div>' +
-        '<span class="hint">' + (g ? '写入 forebrain.yaml，对所有主代理的新会话生效。' : '写入 .forebrain/mcp_servers.yaml，新会话生效。') + '</span>';
+      var mscope = f.a || 'agent';
+      var where = mscope === 'project' ? '项目' : mscope === 'agent' ? '主代理 ' + S.tenant : '全局';
+      title = (k === 'mcpnew' ? '添加 MCP 服务 · ' : '编辑 MCP 服务 · ') + (k === 'mcpnew' ? where : f.b); ok = k === 'mcpnew' ? '添加' : '保存'; okAct = 'mcpsave'; wide = true; xl = true;
+      body = mcpModalBody(f);
     } else if (k === 'hooknew' || k === 'hookedit') {
       var hr = k === 'hookedit' ? hookRows[Number(f.a)] : ['PreToolUse', 'shell', ''];
       title = k === 'hooknew' ? '新增钩子' : '编辑钩子'; ok = k === 'hooknew' ? '添加' : '保存';
@@ -2916,8 +3128,9 @@
     }
     if (k.indexOf('tree') === 0 || k.indexOf('chg') === 0) { var tf = treeForm(f); title = tf[0]; body = tf[1]; ok = tf[2]; wide = tf[3]; xl = !!tf[4]; danger = !!tf[5]; }
     if (k.indexOf('ws') === 0) { var wf = wsForm(f); title = wf[0]; body = wf[1]; ok = wf[2]; wide = wf[3]; xl = !!wf[4]; }
-    return '<div class="mask"><div class="modal' + (wide ? '' : ' sm') + '"' + (xl ? ' style="width:860px;max-height:780px"' : '') + ' role="dialog" aria-label="' + title.replace(/<[^>]+>/g, '') + '"><div class="modal-h"><b>' + title + '</b><button type="button" class="icon-btn" data-act="fmclose" aria-label="关闭">' + ic('x') + '</button></div><div class="modal-b">' + body + '</div>' +
-      '<div class="modal-f"><span style="flex:1"></span><button type="button" class="btn" data-act="fmclose">' + (k === 'verify' ? '关闭' : '取消') + '</button><button type="button" class="btn pri" data-act="' + okAct + '"' + (danger ? ' style="background:var(--danger);border-color:var(--danger)"' : '') + '>' + ok + '</button></div></div></div>';
+    var mcpModal = k === 'mcpnew' || k === 'mcpedit', saving = mcpModal && S.mcpSaving;
+    return '<div class="mask"><div class="modal' + (wide ? '' : ' sm') + '"' + (mcpModal ? ' style="width:680px;max-height:760px"' : xl ? ' style="width:860px;max-height:780px"' : '') + ' role="dialog" aria-label="' + title.replace(/<[^>]+>/g, '') + '"><div class="modal-h"><b>' + title + '</b><button type="button" class="icon-btn" data-act="fmclose" aria-label="关闭">' + ic('x') + '</button></div><div class="modal-b">' + body + '</div>' +
+      '<div class="modal-f">' + (mcpModal ? mcpTestBar() : '') + '<span style="flex:1"></span><button type="button" class="btn" data-act="fmclose">' + (k === 'verify' ? '关闭' : '取消') + '</button><button type="button" class="btn pri" data-act="' + okAct + '"' + (danger ? ' style="background:var(--danger);border-color:var(--danger)"' : '') + (saving ? ' disabled' : '') + '>' + (saving ? '保存中…' : ok) + '</button></div></div></div>';
   }
   function projSkill(name, desc, dir, on) { return '<tr><td><b class="mono">' + name + '</b><div class="hint">' + desc + '</div></td><td class="mono hint">' + dir + '</td><td style="text-align:right"><button type="button" class="btn sm">编辑</button> <button type="button" class="btn sm dgr">删除</button></td><td style="text-align:right"><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></td></tr>'; }
   function skillRow(name, desc, src, on) { return '<tr><td><b class="mono">' + name + '</b><div class="hint">' + desc + '</div></td><td><span class="badge gray">' + src + '</span></td><td style="text-align:right"><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></td></tr>'; }
@@ -3342,7 +3555,7 @@
         h += '<div class="flat">' + fh('项目权限规则', '项目已信任时生效。', '<button type="button" class="btn sm" data-fm="verify:project">规则匹配测试</button><button type="button" class="btn sm pri" data-fm="ruleadd:project">' + ic('plus') + '添加规则</button>') +
           ruleTable(projRules, 'project') + '<span class="hint mono">.forebrain/safety.json</span></div>';
       } else if (t === 'mcp') {
-        h += mcpBlock('project');
+        h += mcpBlock('project', '项目 MCP 服务', mcpEffective(), ['project'], '同名时按 项目 → 主代理 → 全局 覆盖；只有项目 MCP 可在这里修改，继承来的条目在它自己那一层改。', '本项目实际能加载的全部 MCP 服务：本项目的，加上主代理与全局的。');
       } else if (t === 'skills') {
         h += skillsBlock('project', '技能', projectSkills, ['project'], '同名时按 项目 → 主代理 → 共享 → 内置 覆盖；只有项目技能可在这里修改。', '本项目实际能加载的全部技能。');
       } else if (t === 'channels') {
@@ -3355,6 +3568,10 @@
     skills: function () {
       return '<div class="pg" style="max-width:1080px">' +
         skillsBlock('agent', '技能', agentSkills, ['agent'], '共享与内置技能在这里只读，启停在“设置 → 共享技能”。增删与启停在新会话生效。', '本主代理能使用的全部技能：本主代理自己的，加上共享与内置技能。') + '</div>';
+    },
+    mcp: function () {
+      return '<div class="pg" style="max-width:1080px">' +
+        mcpBlock('agent', 'MCP', mcpEffective(), ['agent'], '生效列表在新会话启动时冻结；全局条目在“设置 → MCP”修改，项目条目在项目空间修改，增删与启停在新会话生效。', '本主代理能使用的全部 MCP 服务。生效顺序：项目 → 主代理 → 全局，同名整条覆盖。') + '</div>';
     },
     rules: function () {
       return '<div class="pg" style="max-width:1080px">' + rulesBlock('agent', '本主代理的规则文件，每个会话开头注入。') + '</div>';
@@ -3414,7 +3631,7 @@
           presets.map(function (x) { return '<button type="button" class="rc col" role="radio" aria-checked="' + (x[0] === 'default') + '"><b>' + x[2] + ' · ' + x[1] + '</b><span>' + x[3] + '</span></button>'; }).join('') +
           '</div><span class="hint mono">forebrain.yaml · approval_policy + sandbox_mode</span></div>';
       } else if (t === 'mcp') {
-        h += mcpBlock('global');
+        h += mcpBlock('global', 'MCP 服务', mcpRows('global'), ['global'], '~/.forebrain/forebrain.yaml · agents.defaults.mcp_servers；改动对新会话生效。', '对所有主代理生效，新会话起作用。同名条目被主代理或项目整条覆盖。');
       } else if (t === 'hooks') {
         h += '<div class="flat">' + fh('钩子', '对所有主代理生效。', '<button type="button" class="btn sm pri" data-fm="hooknew">' + ic('plus') + '新增钩子</button>') +
           '<div class="tb-wrap"><table class="tb"><thead><tr><th>事件</th><th>匹配</th><th>命令</th><th style="text-align:right;width:130px">操作</th></tr></thead><tbody>' +
@@ -3492,11 +3709,12 @@
     });
   });
 
-  function closeTopModal() { if (S.fbNew || S.attNew) { S.fbNew = false; S.attNew = false; S.newDirErr = false; return; } if (S.fb) { S.fb = false; S.fbNew = false; S.fbMenu = false; } else if (S.trust) S.trust = false; else if (S.attach) S.attach = false; else if (S.rw) S.rw = false; else if (S.projDel) S.projDel = ''; else if (S.memEdit) S.memEdit = ''; else if (S.cronModal) S.cronModal = false; else if (S.inst) S.inst = null; else if (S.fm) S.fm = null; else if (S.vcM) S.vcM = null; else if (S.cmpM) S.cmpM = ''; else if (S.pubM) S.pubM = ''; else if (S.projectForm) S.projectForm = false; }
+  function closeTopModal() { if (S.fbNew || S.attNew) { S.fbNew = false; S.attNew = false; S.newDirErr = false; return; } if (S.fb) { S.fb = false; S.fbNew = false; S.fbMenu = false; } else if (S.trust) S.trust = false; else if (S.attach) S.attach = false; else if (S.rw) S.rw = false; else if (S.projDel) S.projDel = ''; else if (S.memEdit) S.memEdit = ''; else if (S.cronModal) S.cronModal = false; else if (S.inst) S.inst = null; else if (S.fm) { S.fm = null; S.mcpTest = ''; S.mcpErr = ''; S.mcpTools = false; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; } else if (S.vcM) S.vcM = null; else if (S.cmpM) S.cmpM = ''; else if (S.pubM) S.pubM = ''; else if (S.projectForm) S.projectForm = false; }
   function closePops() { S.hb = false; S.tmenu = false; S.presetMenu = false; S.pjPop = false; S.plusPop = false; S.effortMenu = false; S.modeMenu = false; }
   document.getElementById('app').addEventListener('change', function (ev) {
     var el = ev.target;
     if (el.dataset.cronsel) { S.cronCustom = el.value === '自定义…'; render(); }
+    else if (el.dataset.mcptype) { S.fmType = el.value; render(); }
     else if (el.dataset.dproj) { S.dproj = el.value; render(); }
     else if (el.dataset.sel) { S.sel[el.dataset.sel] = el.checked; render(); }
     else if (el.dataset.selall) { for (var i = 0; i < Number(el.dataset.n); i++) S.sel[el.dataset.selall + ':' + i] = el.checked; render(); }

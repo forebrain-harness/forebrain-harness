@@ -683,10 +683,31 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 		case llm.RoleTool:
 			content := msg.TextContent()
 			callID := strings.TrimSpace(msg.ToolCallID)
-			if content == "" || callID == "" {
+			// A tool result that carries no callID answers no call and is not
+			// projected at all; that is the one case where the text item and the
+			// image item are skipped together.
+			if callID == "" {
 				continue
 			}
-			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(callID, content))
+			if content != "" {
+				input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(callID, content))
+			}
+			// A tool result may carry pixels — a read_file image, an MCP screenshot,
+			// a PDF page image — whose parts function_call_output cannot hold: it is
+			// text-only, so those parts would be dropped silently and the model would
+			// get the note and no image. Project the image parts as a following user
+			// message (the shape the Responses API requires for image input),
+			// matching the compat and Anthropic paths, which already carry them.
+			//
+			// A text-only tool result emits nothing here, so its projection is
+			// byte-for-byte what it was before and no existing session's prompt
+			// prefix shifts.
+			if imageParts := toolResultImageParts(msg.Parts); len(imageParts) > 0 {
+				userParts := append([]llm.ContentPart{llm.Text("image read from tool result")}, imageParts...)
+				if projected := openAIResponsesUserContent(userParts); len(projected) > 0 {
+					input = append(input, responses.ResponseInputItemParamOfMessage(projected, responses.EasyInputMessageRoleUser))
+				}
+			}
 		default:
 			content := openAIResponsesUserContent(msg.Parts)
 			if len(content) == 0 {
@@ -1177,6 +1198,19 @@ func (c *openAIResponsesLLM) executeSync(ctx context.Context, params responses.R
 		), result.Usage)
 	}
 	return result, nil
+}
+
+// toolResultImageParts returns the non-text parts of a message: a tool
+// result's pixels, which function_call_output cannot carry. It is what tells a
+// tool-result projection apart from a plain one.
+func toolResultImageParts(parts []llm.ContentPart) []llm.ContentPart {
+	var imageParts []llm.ContentPart
+	for _, part := range parts {
+		if part.Type != llm.ContentTypeText {
+			imageParts = append(imageParts, part)
+		}
+	}
+	return imageParts
 }
 
 func openAIResponsesUserContent(parts []llm.ContentPart) responses.ResponseInputMessageContentListParam {

@@ -176,7 +176,14 @@ var fanOutBudgets = map[string]fanOutBudget{
 	"telemetry": {current: 8, target: 8},
 	"channel":   {current: 8, target: 8},
 
-	"tool":   {current: 8, target: 8},
+	// The tool layer gained pkg/pdf as a deliberate direct dependency: read_file
+	// hands the model the pixels of a PDF's pages, so the renderer is an
+	// enumerated Layer-2 dependency of the tool layer rather than something
+	// injected. The owner relaxed this one ceiling on 2026-10-15; the injection
+	// alternative has no host package with budget headroom (run, process, tui
+	// and gateway all sit at their measured maxima). It may not grow again
+	// without the owner.
+	"tool":   {current: 9, target: 8},
 	"hook":   {current: 8, target: 8},
 	"mcp":    {current: 8, target: 8},
 	"event":  {current: 8, target: 8},
@@ -357,7 +364,10 @@ func checkOnlyStdlibImports(t *testing.T, root string) {
 var packageLayer = map[string]int{
 	"agent": 0, "llm": 0,
 	"state": 1, "config": 1, "home": 1, "telemetry": 1, "channel": 1,
-	"tool": 2, "hook": 2, "mcp": 2, "event": 2, "assembly": 2, "safety": 2, "skill": 2, "memory": 2, "migrate": 2, "lsp": 2,
+	// pkg/pdf renders PDF pages to images for the tool layer to hand the model.
+	// It imports no other in-module package, and the tool layer imports it
+	// directly (see fanOutBudgets["tool"] and sameLayerEdges["tool"]).
+	"tool": 2, "pdf": 2, "hook": 2, "mcp": 2, "event": 2, "assembly": 2, "safety": 2, "skill": 2, "memory": 2, "migrate": 2, "lsp": 2,
 	"session": 3, "turn": 3, "run": 3,
 	"process": 4,
 	"tui":     5, "gateway": 5,
@@ -563,7 +573,11 @@ var sameLayerEdges = map[string][]string{
 	// task that removes it by moving the product tools out of tool. It is
 	// listed so this test passes today, not because it is approved — when
 	// P9-11a lands, delete it here and the ratchet below keeps it gone.
-	"tool": {"event", "memory", "safety"},
+	// tool -> pdf is a second edge added to the tool layer's closure: read_file
+	// hands the model the pages of a PDF, so the renderer is a Layer-2
+	// capability the tool layer depends on directly. The owner relaxed the
+	// ratchet for it on 2026-10-15 (see fanOutBudgets["tool"]).
+	"tool": {"event", "memory", "pdf", "safety"},
 
 	// Layer 3 has zero edges by design: session, turn and run connect only
 	// through injected interfaces. TestLayer3PackagesDoNotImportEachOther
@@ -843,6 +857,12 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // one Runner field instead of two, and a literal-constructed Runner stays
 // usable.
 //
+// 40 methods (was 39): the image-input gate (ImageInputRefusal) is the
+// session-model capability check read_file consults before handing the model
+// pixels — it belongs to the Runner because only the Runner knows the
+// session's model, and it must ride the same session selection every other
+// model decision does.
+//
 // 39 methods (was 36): SetPrimaryModel, ResetPrimaryModel and LoadConfig are
 // the transactional model/config operations every surface funnels through —
 // the runner owns the config-pointer swap and the rollback, which callers
@@ -850,7 +870,7 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // half-mutated runtime).
 const (
 	runnerFields  = 25
-	runnerMethods = 39
+	runnerMethods = 40
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {

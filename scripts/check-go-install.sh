@@ -10,6 +10,11 @@
 #
 # The tokenizers static library is not part of the module (it is gitignored), so a user's
 # go install needs CGO_LDFLAGS pointing at it; this script fetches it and does the same.
+#
+# The PDFium native library pkg/pdf links is the same kind of external
+# dependency: it is gitignored, and go-pdfium reaches it through
+# `// #cgo pkg-config: pdfium`, so the install needs a pdfium.pc on
+# PKG_CONFIG_PATH (and pkg-config itself installed).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,6 +28,8 @@ mkdir -p "$PROXY_DIR" "$WORK/bin" "$WORK/outside"
 cd "$ROOT_DIR"
 "$ROOT_DIR/scripts/fetch-libtokenizers.sh"
 LDFLAGS_DIR="$ROOT_DIR/third_party/libtokenizers/$(go env GOOS)_$(go env GOARCH)"
+"$ROOT_DIR/scripts/fetch-pdfium.sh"
+PDFIUM_DIR="$ROOT_DIR/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)"
 git ls-files -z --cached --others --exclude-standard > "$WORK/files"
 python3 - "$WORK/files" "$PROXY_DIR/$VERSION.zip" "$MODULE@$VERSION" <<'PY'
 import os, sys, zipfile
@@ -55,6 +62,7 @@ rm -rf "$MODCACHE/$MODULE@$VERSION" \
 cd "$WORK/outside"
 env -u GOFLAGS GOWORK=off GOBIN="$WORK/bin" CGO_ENABLED=1 \
   CGO_LDFLAGS="-L$LDFLAGS_DIR" \
+  PKG_CONFIG_PATH="$PDFIUM_DIR" \
   GOPROXY="file://$WORK/proxy,https://proxy.golang.org,direct" \
   GONOSUMDB="$MODULE" \
   go install -tags fts5 "$MODULE/cmd/forebrain@$VERSION"

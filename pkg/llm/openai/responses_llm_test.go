@@ -1589,6 +1589,133 @@ func redirectTo(target string) http.RoundTripper {
 	})
 }
 
+// captureResponsesRequestMessages runs one Execute with the given messages
+// against a stub and returns the JSON body that was sent. It is the
+// message-parameterized form of captureResponsesRequest, for tests that need a
+// specific transcript.
+func captureResponsesRequestMessages(t *testing.T, messages []llm.Message) map[string]any {
+	t.Helper()
+	body := map[string]any{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, syncResponsesBody("ok"))
+	}))
+	t.Cleanup(srv.Close)
+	client := NewResponsesLLMWithCache("sk-test", srv.URL+"/v1", "gpt-test", 16, []byte(`{"stream":false}`), false)
+	_, _ = client.Execute(context.Background(), messages, nil)
+	return body
+}
+
+// TestResponsesToolResultImageProjectsAsFollowingUserMessage pins the fix for
+// the one provider that dropped a tool result's pixels: the Responses API's
+// function_call_output is text-only, so an image part used to vanish silently
+// (plan 053 Step 6, conclusion A / finding on responses_llm.go). A tool result
+// carrying an image must project to TWO input items — the function_call_output
+// and a following user message holding the image — while a text-only tool
+// result keeps projecting to exactly one item, so no existing session's prompt
+// prefix shifts.
+func TestResponsesToolResultImageProjectsAsFollowingUserMessage(t *testing.T) {
+	t.Run("image tool result projects two items", func(t *testing.T) {
+		messages := []llm.Message{
+			llm.UserMessage(llm.Text("read the image")),
+			llm.AssistantMessage(nil, llm.ToolCall{ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "read_file", Arguments: "{}"}}),
+			llm.ToolResultMessage("call-1", llm.Text("image 4x4"), llm.ImageBase64("image/png", "iVBORw0KGgo=")),
+		}
+		items := responsesInputItems(t, captureResponsesRequestMessages(t, messages))
+		// user, assistant(function_call), function_call_output, user(image)
+		if len(items) != 4 {
+			t.Fatalf("input items = %d, want 4: %#v", len(items), items)
+		}
+		last := responsesItemMap(t, items[len(items)-1])
+		// The easy-input user message serializes without a "type" field: it is
+		// identified by role + content, exactly the default branch's shape.
+		if got := testString(last["role"]); got != "user" {
+			t.Fatalf("last item = %#v, want a user message", last)
+		}
+		if _, isOutput := last["call_id"]; isOutput {
+			t.Fatalf("last item is a function_call_output, not the image message: %#v", last)
+		}
+		content, _ := last["content"].([]any)
+		if !itemContentHasImage(t, content) {
+			t.Fatalf("the trailing user message carries no image: %#v", content)
+		}
+		// The image message leads with the shared note text.
+		if len(content) < 2 || testString(responsesItemMap(t, content[0])["text"]) != "image read from tool result" {
+			t.Fatalf("the image message does not lead with the note text: %#v", content)
+		}
+		// The item before it is the text-only function_call_output.
+		prev := responsesItemMap(t, items[len(items)-2])
+		if got := testString(prev["type"]); got != "function_call_output" {
+			t.Fatalf("the item before the image = %q, want function_call_output", got)
+		}
+	})
+
+	t.Run("text-only tool result projects one item", func(t *testing.T) {
+		messages := []llm.Message{
+			llm.UserMessage(llm.Text("read the file")),
+			llm.AssistantMessage(nil, llm.ToolCall{ID: "call-1", Type: "function", Function: llm.FunctionCall{Name: "read_file", Arguments: "{}"}}),
+			llm.ToolResultMessage("call-1", llm.Text("a line of text")),
+		}
+		items := responsesInputItems(t, captureResponsesRequestMessages(t, messages))
+		// user, assistant(function_call), function_call_output — no trailing user message.
+		if len(items) != 3 {
+			t.Fatalf("input items = %d, want 3 (no trailing user message): %#v", len(items), items)
+		}
+		last := responsesItemMap(t, items[len(items)-1])
+		if got := testString(last["type"]); got != "function_call_output" {
+			t.Fatalf("last item = %q, want function_call_output", got)
+		}
+	})
+}
+
+// responsesInputItems returns the request's input array as decoded items.
+func responsesInputItems(t *testing.T, body map[string]any) []any {
+	t.Helper()
+	items, ok := body["input"].([]any)
+	if !ok {
+		t.Fatalf("input is not an array: %#v", body["input"])
+	}
+	return items
+}
+
+// responsesItemMap casts one decoded input item to a map.
+func responsesItemMap(t *testing.T, item any) map[string]any {
+	t.Helper()
+	m, ok := item.(map[string]any)
+	if !ok {
+		t.Fatalf("input item is not an object: %#v", item)
+	}
+	return m
+}
+
+// itemContentHasImage reports whether a projected message content list holds an
+// input_image entry carrying base64 image data.
+func itemContentHasImage(t *testing.T, content []any) bool {
+	t.Helper()
+	for _, raw := range content {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if testString(entry["type"]) != "input_image" {
+			continue
+		}
+		if strings.HasPrefix(testString(entry["image_url"]), "data:image/") {
+			return true
+		}
+	}
+	return false
+}
+
+// testString reads a JSON string field, tolerating a missing or non-string one.
+func testString(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}
+
 // The helpers below were production functions that only the tests in this
 // package ever called. They live here so the production files carry no
 // unused code while the tests keep exercising the live code underneath.

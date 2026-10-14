@@ -495,6 +495,13 @@ func toolCallMetaFromWS(top map[string]any, nested map[string]any) event.ToolCal
 		meta.AgentKind = strings.TrimSpace(stringOr(metaMap["agent_kind"]))
 		meta.ResultLines = int(float64OrZero(metaMap["result_lines"]))
 		meta.ResultOffset = int(float64OrZero(metaMap["result_offset"]))
+		meta.PreviewKind = strings.TrimSpace(stringOr(metaMap["preview_kind"]))
+		meta.PreviewPath = strings.TrimSpace(stringOr(metaMap["preview_path"]))
+		meta.PreviewMIME = strings.TrimSpace(stringOr(metaMap["preview_mime"]))
+		meta.PreviewWidth = int(float64OrZero(metaMap["preview_width"]))
+		meta.PreviewHeight = int(float64OrZero(metaMap["preview_height"]))
+		meta.PreviewBytes = int(float64OrZero(metaMap["preview_bytes"]))
+		meta.PreviewScaled = boolField(metaMap, "preview_scaled")
 		meta.StartedAtMs = int64(float64OrZero(metaMap["started_at_ms"]))
 		// The subagent_* card facts (plan 012) ride the same tool_meta; the
 		// conversion rebuilds the meta field by field, so they are decoded

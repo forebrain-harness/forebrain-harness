@@ -131,13 +131,23 @@ func newMCPDiscoveryTool(def mcpDiscoveryTool, serverName string, call mcpDiscov
 // Resolving late is what lets a reload replay the cached tool definitions
 // without contacting the server, and it keeps a replayed tool callable after
 // the connection was replaced underneath it.
-func mcpToolCaller(reg *mcp.Registry, serverName string) func(context.Context, string, json.RawMessage) (string, error) {
-	return func(ctx context.Context, toolName string, arguments json.RawMessage) (string, error) {
+//
+// The result is content parts, not a string: an MCP tool that returns an image
+// must hand the model pixels, and the session path renders the result through
+// Session.CallToolContent. imageRefusal is this runtime's image-input gate
+// (Runner.ImageInputRefusal), evaluated per call so a text-only session model
+// gets the actionable text envelope instead of a 400.
+func mcpToolCaller(reg *mcp.Registry, serverName string, imageRefusal func(context.Context) string) func(context.Context, string, json.RawMessage) (any, error) {
+	return func(ctx context.Context, toolName string, arguments json.RawMessage) (any, error) {
 		sess, ok := reg.GetSession(serverName)
 		if !ok {
 			return "", fmt.Errorf("mcp server %q is not connected", serverName)
 		}
-		return sess.CallToolJSON(ctx, toolName, arguments)
+		refusal := ""
+		if imageRefusal != nil {
+			refusal = imageRefusal(ctx)
+		}
+		return sess.CallToolContent(ctx, toolName, arguments, refusal)
 	}
 }
 

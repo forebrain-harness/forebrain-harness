@@ -154,6 +154,15 @@ func TestInstallAssetsCopiesEntries(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tokenizerDir, "tokenizer.json.gz"), gz, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// ... and the fonts/ directory PDFium's CJK fallback needs.
+	font := []byte("stand-in otf bytes")
+	fontsDir := filepath.Join(src, "fonts")
+	if err := os.MkdirAll(fontsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fontsDir, "NotoSansSC-Regular.otf"), font, 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	bin := t.TempDir()
 	if err := InstallAssets(src, bin); err != nil {
@@ -172,6 +181,13 @@ func TestInstallAssetsCopiesEntries(t *testing.T) {
 	}
 	if !bytes.Equal(gotGz, gz) {
 		t.Fatal("installed tokenizers/ differs from the source")
+	}
+	gotFont, err := os.ReadFile(filepath.Join(bin, "fonts", "NotoSansSC-Regular.otf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotFont, font) {
+		t.Fatal("installed fonts/ differs from the source")
 	}
 
 	if err := InstallAssets(t.TempDir(), t.TempDir()); err == nil {

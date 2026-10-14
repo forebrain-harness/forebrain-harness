@@ -34,6 +34,9 @@ func RunEventFromStep(ctx context.Context, sessionID, runID, channel string, evt
 		AgentType: meta.AgentType, AgentKind: meta.AgentKind, Category: meta.Category,
 		SkillName: meta.SkillName, SkillPath: meta.SkillPath,
 		ResultLines: meta.ResultLines, ResultOffset: meta.ResultOffset,
+		PreviewKind: meta.PreviewKind, PreviewPath: meta.PreviewPath, PreviewMIME: meta.PreviewMIME,
+		PreviewWidth: meta.PreviewWidth, PreviewHeight: meta.PreviewHeight,
+		PreviewBytes: meta.PreviewBytes, PreviewScaled: meta.PreviewScaled,
 		StartedAtMs: meta.StartedAtMs,
 		// Origin is audit metadata; it rides on the canonical payload but never
 		// on ToolMeta, so no renderer can branch on it.
@@ -306,6 +309,20 @@ type ToolMeta struct {
 	// inflate them.
 	ResultLines  int `json:"result_lines,omitempty"`
 	ResultOffset int `json:"result_offset,omitempty"`
+	// PreviewKind marks a step whose result is a previewable artifact rather
+	// than text — currently only an image read ("image"), from read_file or an
+	// MCP tool. A surface that can show it draws a thumbnail whose pixels it
+	// fetches by PreviewPath; a surface that cannot still shows the text body.
+	// The facts ride ToolMeta (which is persisted and replayed) so live and
+	// replay agree, and they are never base64: PreviewPath is a path under the
+	// same root resolution as every file view.
+	PreviewKind   string `json:"preview_kind,omitempty"`
+	PreviewPath   string `json:"preview_path,omitempty"`
+	PreviewMIME   string `json:"preview_mime,omitempty"`
+	PreviewWidth  int    `json:"preview_width,omitempty"`
+	PreviewHeight int    `json:"preview_height,omitempty"`
+	PreviewBytes  int    `json:"preview_bytes,omitempty"`
+	PreviewScaled bool   `json:"preview_scaled,omitempty"`
 	// StartedAtMs is when a still-executing call began, in Unix milliseconds;
 	// zero once the call has settled or when the engine did not observe the
 	// start. Every surface derives "running for N seconds" from it.

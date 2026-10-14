@@ -92,7 +92,7 @@ func ImageFile(path string) (ContentPart, error) {
 		return ContentPart{}, fmt.Errorf("ImageFile: read %q: %w", path, err)
 	}
 
-	mimeType := detectImageMIMEType(data, path)
+	mimeType := ImageMIMEType(path, data)
 	switch mimeType {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// accepted
@@ -104,20 +104,32 @@ func ImageFile(path string) (ContentPart, error) {
 	return ImageBase64(mimeType, b64), nil
 }
 
-// detectImageMIMEType sniffs the MIME type from the first 512 bytes, then
-// falls back to the file extension.
-func detectImageMIMEType(data []byte, path string) string {
+// ImageMIMEType sniffs the MIME type of image bytes from the first 512 bytes,
+// then falls back to the file extension. It returns "" when neither the
+// sniffed bytes nor the extension name a known image type.
+func ImageMIMEType(path string, data []byte) string {
 	sniff := data
 	if len(sniff) > 512 {
 		sniff = sniff[:512]
 	}
-	mt := http.DetectContentType(sniff)
-	// http.DetectContentType returns "image/jpeg", "image/png", "image/gif",
-	// "image/webp" for the respective formats.
-	if strings.HasPrefix(mt, "image/") {
-		return mt
+	sniffed := http.DetectContentType(sniff)
+	// Only the four formats every provider accepts are named; anything else
+	// reports "" so a caller can tell "an image we can send" from "not one of
+	// ours".
+	switch sniffed {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return sniffed
 	}
-	// Fall back to extension.
+	// The bytes name some other image type (bmp, tiff, icns…). The sniff is
+	// authoritative: report "" rather than letting the extension relabel these
+	// bytes as a format they are not, so a caller gives its "convert it" error
+	// instead of sending, say, BMP bytes under an image/png MIME because the
+	// file happens to be named .png.
+	if strings.HasPrefix(sniffed, "image/") {
+		return ""
+	}
+	// Non-image bytes (or a sniff we do not recognize): fall back to the
+	// extension, as before.
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".jpg", ".jpeg":
 		return "image/jpeg"
@@ -128,7 +140,7 @@ func detectImageMIMEType(data []byte, path string) string {
 	case ".webp":
 		return "image/webp"
 	}
-	return mt
+	return ""
 }
 
 // FunctionCall holds the name and JSON-encoded arguments of a tool invocation.

@@ -18,6 +18,19 @@
 # The tokenizers static library the binary links is fetched into
 # third_party/libtokenizers/ by scripts/fetch-libtokenizers.sh (see
 # pkg/llm/hftok); the `libtokenizers` target runs it.
+#
+# The PDFium native library pkg/pdf links is fetched into
+# third_party/pdfium/<goos>_<goarch>/ by scripts/fetch-pdfium.sh, which also
+# generates a pdfium.pc beside it; the `pdfium` target runs it. go-pdfium's C
+# files link through `// #cgo pkg-config: pdfium`, so the only wiring is
+# PKG_CONFIG_PATH pointing at that directory (exported below) — pkg-config
+# itself must be installed. CGO_CFLAGS/CGO_LDFLAGS are exported as well for
+# environments where a pkg-config shim is unreliable.
+#
+# The CJK fallback fonts PDFium needs for an unembedded standard CJK font are
+# fetched into assets/fonts/ by scripts/fetch-pdfium-fonts.sh (the `pdfium-fonts`
+# target). install-assets.sh ships them beside the binary as the "fonts" asset
+# and the runtime seeds them into $FOREBRAIN_HOME/fonts at startup.
 
 VERSION      := $(shell cat VERSION)
 LDFLAGS      := -s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home.Version=v$(VERSION)
@@ -27,8 +40,14 @@ LDFLAGS      := -s -w -X github.com/forebrain-harness/forebrain-harness/pkg/home
 GOFLAGS      := -trimpath -tags fts5
 BIN          := build/bin/forebrain
 WEBUI_DIST   := pkg/gateway/dist
+# PDFium is per-target; use the host triple. pkg-config finds pdfium.pc here.
+PDFIUM_TRIPLE := $(shell go env GOOS)_$(shell go env GOARCH)
+PDFIUM_DIR    := $(CURDIR)/third_party/pdfium/$(PDFIUM_TRIPLE)
+export PKG_CONFIG_PATH := $(PDFIUM_DIR):$(PKG_CONFIG_PATH)
+export CGO_CFLAGS := -I$(PDFIUM_DIR)/include $(CGO_CFLAGS)
+export CGO_LDFLAGS := -L$(PDFIUM_DIR)/lib -lpdfium $(CGO_LDFLAGS)
 
-.PHONY: all ui libtokenizers build test hooks docker release clean
+.PHONY: all ui libtokenizers pdfium pdfium-fonts build test hooks docker release clean
 
 all: build
 
@@ -45,11 +64,25 @@ ui:
 libtokenizers:
 	scripts/fetch-libtokenizers.sh
 
+## pdfium: fetch the PDFium native library pkg/pdf links
+## (scripts/fetch-pdfium.sh; a no-op when the host triple is already at the
+## pinned release, so this is cheap on every build and test).
+pdfium:
+	scripts/fetch-pdfium.sh $(PDFIUM_TRIPLE)
+
+## pdfium-fonts: fetch the Noto Sans SC/TC fallback fonts PDFium renders an
+## unembedded standard CJK font (STSong-Light, SimSun, ...) with
+## (scripts/fetch-pdfium-fonts.sh; a no-op when the pinned files are present).
+## They ride beside the binary as the "fonts" asset (llm.assetEntries) and
+## pkg/process seeds them into the home at startup.
+pdfium-fonts:
+	scripts/fetch-pdfium-fonts.sh
+
 ## build: compile the binary with the embedded UI, then install the dictionary
 ## and models.json beside it (build/bin/dict, build/bin/models.json)
 ## CGO is mandatory on every platform (Windows included): it pulls in the
 ## weixin silk voice decoder, sqlite, and other cgo-backed features.
-build: ui libtokenizers
+build: ui libtokenizers pdfium pdfium-fonts
 	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/forebrain
 	scripts/install-dictionary.sh $(dir $(BIN))
 	scripts/install-assets.sh $(dir $(BIN))
@@ -57,7 +90,7 @@ build: ui libtokenizers
 
 ## test: run the Go test suite (CGO on so silk_cgo.go is exercised; fts5 so
 ## the memory-search FTS5 tables exist)
-test: libtokenizers
+test: libtokenizers pdfium pdfium-fonts
 	CGO_ENABLED=1 go test -tags fts5 ./... -count=1
 
 ## hooks: point git at this repository's hooks (commit title check + DCO

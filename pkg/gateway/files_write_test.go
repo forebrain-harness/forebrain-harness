@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +16,120 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
 )
+
+// tinyPNG is a valid 1x1 PNG, generated here so no binary fixture is committed.
+func tinyPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{G: 255, A: 255})
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// TestWorkspaceFileRawServesImageBytes pins the pixel channel the thumbnail
+// uses: an image inside the file view is served as bytes with its own content
+// type, and a non-image is refused (415) so the endpoint never becomes a
+// general file dump. An out-of-root path is refused (400).
+func TestWorkspaceFileRawServesImageBytes(t *testing.T) {
+	s, root := workspaceWriteServer(t)
+	image := tinyPNG(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "shot.png"), image, 0o644))
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleWorkspaceFileRaw(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/file/raw?session_id=S1&path="+path, nil))
+		return rec
+	}
+
+	rec := get("shot.png")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "image/png", rec.Header().Get("Content-Type"))
+	require.Equal(t, "private, max-age=60", rec.Header().Get("Cache-Control"))
+	require.Equal(t, image, rec.Body.Bytes())
+
+	// A tool step records the ABSOLUTE path, so the pixel request arrives
+	// absolute: the same root resolver must take it and still serve the bytes.
+	absRec := get(filepath.Join(root, "shot.png"))
+	require.Equal(t, http.StatusOK, absRec.Code, absRec.Body.String())
+	require.Equal(t, image, absRec.Body.Bytes())
+
+	// A non-image refuses with 415.
+	require.Equal(t, http.StatusUnsupportedMediaType, get("notes/seed.md").Code)
+	// A traversal out of the file view root refuses with 400.
+	require.Equal(t, http.StatusBadRequest, get("../../outside.png").Code)
+	// An absolute path outside every served root refuses too.
+	require.Equal(t, http.StatusBadRequest, get(filepath.Join(t.TempDir(), "outside.png")).Code)
+}
+
+// TestWorkspaceFileRawServesAgentWorkspaceImage is the case Step 5b exists to
+// serve: an MCP screenshot (or any tool artifact) lives under the PRIMARY AGENT
+// WORKSPACE, which is a different root from the conversation's file view (the
+// project). Its absolute path — the shape a tool step records — must be served,
+// or the web thumbnail is broken for exactly the flagship case. A PNG outside
+// BOTH roots is still refused.
+func TestWorkspaceFileRawServesAgentWorkspaceImage(t *testing.T) {
+	s, projectRoot := workspaceWriteServer(t)
+	image := tinyPNG(t)
+	agentResults := filepath.Join(s.Home, "workspace", "state", "mcp-results")
+	require.NoError(t, os.MkdirAll(agentResults, 0o700))
+	agentImage := filepath.Join(agentResults, "mcp-shots-shot-1.png")
+	require.NoError(t, os.WriteFile(agentImage, image, 0o644))
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleWorkspaceFileRaw(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/file/raw?session_id=S1&path="+path, nil))
+		return rec
+	}
+
+	// The agent workspace is a distinct root from the file view.
+	require.NotEqual(t, projectRoot, filepath.Join(s.Home, "workspace"))
+
+	// An absolute path into the agent workspace serves the bytes...
+	rec := get(agentImage)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "image/png", rec.Header().Get("Content-Type"))
+	require.Equal(t, image, rec.Body.Bytes())
+
+	// ...while a PNG outside BOTH roots is still refused.
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	require.NoError(t, os.WriteFile(outside, image, 0o644))
+	require.Equal(t, http.StatusBadRequest, get(outside).Code)
+
+	// A *relative* path is still joined to the file view, never to the agent
+	// workspace: "state/mcp-results/…" is not a file-view path, so the file only
+	// in the agent workspace is not found (404), not served.
+	require.Equal(t, http.StatusNotFound, get(filepath.ToSlash(filepath.Join("state", "mcp-results", "mcp-shots-shot-1.png"))).Code)
+}
+
+// TestWorkspaceFileRawServesAgentWorkspaceImageWithoutFileView covers a session
+// with no file view at all (no project): the file view root cannot be named, so
+// every relative path is refused, but an ABSOLUTE path — the shape a tool step
+// records — is still served from the agent workspace. Before this, the endpoint
+// refused every image in such a session.
+func TestWorkspaceFileRawServesAgentWorkspaceImageWithoutFileView(t *testing.T) {
+	home := t.TempDir()
+	agentResults := filepath.Join(home, "workspace", "state", "mcp-results")
+	require.NoError(t, os.MkdirAll(agentResults, 0o700))
+	image := tinyPNG(t)
+	agentImage := filepath.Join(agentResults, "mcp-shots-shot-1.png")
+	require.NoError(t, os.WriteFile(agentImage, image, 0o644))
+
+	// No Sessions/Projects: filesRoot answers errFilesNotFound.
+	s := &Server{Home: home}
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleWorkspaceFileRaw(rec, httptest.NewRequest(http.MethodGet, "/api/workspace/file/raw?session_id=s1&path="+path, nil))
+		return rec
+	}
+
+	rec := get(agentImage)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, image, rec.Body.Bytes())
+	// A relative path has no file view to join to: refused (404), not silently
+	// resolved against the agent workspace.
+	require.Equal(t, http.StatusNotFound, get("shot.png").Code)
+}
 
 // workspaceWriteServer builds a gateway whose file view is one project's root,
 // with one conversation filed under it. The agent's own workspace is a

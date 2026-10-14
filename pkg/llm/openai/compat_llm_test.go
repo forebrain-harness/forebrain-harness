@@ -3,11 +3,16 @@ package openai
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -882,5 +887,87 @@ func TestToolsSerializationIsDeterministicAndOrderSensitive(t *testing.T) {
 	}
 	if string(ja) != string(jb) {
 		t.Fatalf("equal schemas serialized differently (map order leaked):\n%s\n%s", ja, jb)
+	}
+}
+
+// redSquarePNG is a 64x64 all-red PNG, generated here so the test commits no
+// binary fixture.
+func redSquarePNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			img.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestCompatToolResultImage answers one question and reads its answer: can a
+// tool-result message carry an image on the DeepSeek chat-completions endpoint?
+// This is the empirical evidence for the catalog data fix (Step 4c): the owner
+// confirmed on 2026-10-14 that the endpoint routes deepseek-v4-flash to
+// deepseek-flash, which understands images. Subcase a probes that model (the
+// owner's real default); subcase b cross-checks the same request shape against
+// deepseek-v4-flash-vision-exp, a sibling entry the catalog already marks
+// multimodal.
+//
+// Gated on FOREBRAIN_E2E_DEEPSEEK_KEY (never printed). Only the operator runs
+// it against the live API; the three possible conclusions are recorded in the
+// plan: A both accept (expected — the data fix stands), B only vision-exp
+// accepts (contradicts the owner's note: stop and report), C both are rejected
+// (translate the projection in the provider layer only).
+//
+// It lives in this file rather than one named after the plan (which used an
+// "_integration_" segment) because pkg/architecture forbids a test file whose
+// name has more than two underscores or that has no production file beside it;
+// this file covers compat_llm.go, the client the test exercises.
+func TestCompatToolResultImage(t *testing.T) {
+	key := strings.TrimSpace(os.Getenv("FOREBRAIN_E2E_DEEPSEEK_KEY"))
+	if key == "" {
+		t.Skip("FOREBRAIN_E2E_DEEPSEEK_KEY not set")
+	}
+
+	cases := []struct {
+		name  string
+		model string
+	}{
+		{name: "owner-default-flash", model: "deepseek-v4-flash"},
+		{name: "vision-exp-crosscheck", model: "deepseek-v4-flash-vision-exp"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewCompatLLMWithPromptCaching(key, "https://api.deepseek.com", tc.model, 0, 256, "", nil, false)
+
+			toolCall := llm.ToolCall{
+				ID:       "call-1",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "read_file", Arguments: `{"file_path":"/tmp/red.png"}`},
+			}
+			imagePart := llm.ImageBase64("image/png", base64.StdEncoding.EncodeToString(redSquarePNG(t)))
+			messages := []llm.Message{
+				llm.UserMessage(llm.Text("Read /tmp/red.png.")),
+				llm.AssistantMessage(nil, toolCall),
+				llm.ToolResultMessage("call-1", llm.Text("image 64x64"), imagePart),
+				llm.UserMessage(llm.Text("What colour is the shape in that image? Answer with one word.")),
+			}
+
+			res, err := client.Execute(context.Background(), messages, nil)
+			if err != nil {
+				// The error carries the provider's own status and body, which
+				// is exactly the raw response the operator needs for conclusion
+				// B or C. The key is never part of it.
+				t.Fatalf("model %s rejected the tool-result image request: %v", tc.model, err)
+			}
+			answer := strings.ToLower(strings.TrimSpace(res.Message.TextContent()))
+			if !strings.Contains(answer, "red") && !strings.Contains(answer, "红") {
+				t.Fatalf("model %s did not name the colour %q in its answer: %q", tc.model, "red", answer)
+			}
+		})
 	}
 }

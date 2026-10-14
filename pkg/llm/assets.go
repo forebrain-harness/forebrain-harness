@@ -32,8 +32,11 @@ import (
 const AssetsDirEnv = "FOREBRAIN_ASSETS_DIR"
 
 // assetEntries lists every file (or directory) InstallAssets places beside the
-// binary and the runtime reads from there. Plan 041 appends "tokenizers".
-var assetEntries = []string{"models.json", "tokenizers"}
+// binary and the runtime reads from there. "tokenizers" arrived with plan 041;
+// "fonts" is the PDF renderer's CJK fallback set, seeded into $FOREBRAIN_HOME/
+// fonts by pkg/process at startup (scripts/fetch-pdfium-fonts.sh fetches it,
+// assets/fonts/README.md records its source and licence).
+var assetEntries = []string{"models.json", "tokenizers", "fonts"}
 
 // AssetsDir is the directory holding the runtime assets beside the running
 // binary. FOREBRAIN_ASSETS_DIR overrides it; otherwise the assets live next to

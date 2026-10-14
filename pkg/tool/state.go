@@ -125,6 +125,10 @@ type State struct {
 	subagentApprovalHook         SubagentApprovalHook
 	stepHook                     func(ctx context.Context, evt StepEvent)
 	readObservers                map[string]func(ctx context.Context, absPath string, content []byte)
+	// imageInputGate answers whether this session's model may be handed
+	// pixels. It is nil unless a runtime installs one; a nil gate allows
+	// every image (see ImageInputRefusal).
+	imageInputGate func(ctx context.Context) string
 }
 
 // runtimeSessionMode is a mode transition a tool performed during a run, held
@@ -1891,6 +1895,35 @@ func (s *State) SetReadObserver(h func(ctx context.Context, absPath string, cont
 	s.SetNamedReadObserver("", h)
 }
 
+// SetImageInputGate installs — or, for a nil h, removes — the predicate that
+// decides whether this session's model may be handed image pixels. It is the
+// tool layer's view of the runner's ImageInputRefusal: a non-empty return is
+// the reason the image is refused, "" allows it.
+func (s *State) SetImageInputGate(h func(ctx context.Context) string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.imageInputGate = h
+}
+
+// ImageInputRefusal returns the reason this session's model may not be handed
+// an image, or "" when it may. No gate installed means every image is allowed:
+// an embedder that never sets one is not silently blocked from reading images.
+func (s *State) ImageInputRefusal(ctx context.Context) string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	gate := s.imageInputGate
+	s.mu.Unlock()
+	if gate == nil {
+		return ""
+	}
+	return gate(ctx)
+}
+
 // SetNamedReadObserver installs — or, for a nil h, removes — one named read
 // observer. Reads fan out to every installed observer, so the language-server
 // runtime and any other consumer can watch the same reads without knowing
@@ -2106,6 +2139,20 @@ func (s *State) PathInsidePrimaryHome(path string) bool {
 	home := s.primaryHomeRoot
 	s.mu.Unlock()
 	return home != "" && pathWithinRoot(path, home)
+}
+
+// PrimaryHome returns the primary agent's FOREBRAIN_HOME, the tree holding its
+// configuration, state, skills and seeded assets, or "" when no boundary has
+// been recorded. Tools that resolve assets by home (the PDF renderer's CJK
+// fonts) read it here rather than from the process environment, so a --home
+// override reaches them.
+func (s *State) PrimaryHome() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.primaryHomeRoot
 }
 
 func (s *State) PathOverlapsSiblingPrimaryWorkspace(path string) bool {

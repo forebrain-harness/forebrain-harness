@@ -31,13 +31,23 @@ jobs:
         # lifted for this runner. ripgrep is what the shell tool's read-only
         # code search invokes.
         run: |
-          sudo apt-get update && sudo apt-get install -y build-essential bubblewrap ripgrep
+          sudo apt-get update && sudo apt-get install -y build-essential bubblewrap ripgrep pkg-config
           sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
       - run: go mod verify
       - run: scripts/check-release-versions.sh
       # Forebrain links a native tokenizers static library; fetch the one for
       # this runner before anything compiles.
       - run: scripts/fetch-libtokenizers.sh
+      # pkg/tool imports pkg/pdf, which links PDFium through
+      # `// #cgo pkg-config: pdfium`, so vet/build/test all need the fetched
+      # library on PKG_CONFIG_PATH (installed with build-essential above). The
+      # CJK fallback fonts are what make pkg/pdf's non-tofu test meaningful on a
+      # runner with no CJK system font.
+      - name: Fetch PDFium and the CJK fonts
+        run: |
+          scripts/fetch-pdfium.sh
+          scripts/fetch-pdfium-fonts.sh
+          echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
       - run: go vet ./...
       - name: gofmt
         run: test -z "$(gofmt -l cmd pkg third_party)" || { gofmt -l cmd pkg third_party; exit 1; }
@@ -89,6 +99,19 @@ jobs:
       - name: Fetch the tokenizers static library
         shell: bash
         run: scripts/fetch-libtokenizers.sh windows/amd64
+      # pkg/pdf links PDFium through `// #cgo pkg-config: pdfium`; the runner
+      # image ships no pkg-config, so install one, fetch the Windows library,
+      # and point pkg-config at it for the rest of the job.
+      - name: Install pkg-config
+        run: if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) { choco install pkgconfiglite -y --no-progress }
+      - name: Fetch PDFium and the CJK fonts
+        shell: bash
+        run: |
+          scripts/fetch-pdfium.sh windows/amd64
+          scripts/fetch-pdfium-fonts.sh
+          dir="$PWD/third_party/pdfium/windows_amd64"
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -w "$dir")"; fi
+          echo "PKG_CONFIG_PATH=$dir" >> "$GITHUB_ENV"
       - name: go test
         env:
           CGO_ENABLED: "1"
@@ -104,7 +127,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Install CGO deps
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
       - run: scripts/check-go-install.sh
 
   windows:
@@ -131,6 +154,18 @@ jobs:
       - name: Fetch the tokenizers static library
         shell: bash
         run: scripts/fetch-libtokenizers.sh windows/amd64
+      # pkg/pdf links PDFium through `// #cgo pkg-config: pdfium`; the runner
+      # image ships no pkg-config, so install one, fetch the Windows library,
+      # and point pkg-config at it. See the windows-tests job for the same steps.
+      - name: Install pkg-config
+        run: if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) { choco install pkgconfiglite -y --no-progress }
+      - name: Fetch PDFium
+        shell: bash
+        run: |
+          scripts/fetch-pdfium.sh windows/amd64
+          dir="$PWD/third_party/pdfium/windows_amd64"
+          if command -v cygpath >/dev/null 2>&1; then dir="$(cygpath -w "$dir")"; fi
+          echo "PKG_CONFIG_PATH=$dir" >> "$GITHUB_ENV"
       - name: go build (CGO required)
         env:
           CGO_ENABLED: "1"
@@ -153,10 +188,15 @@ jobs:
           cache-dependency-path: go.sum
       # The mac runner builds both darwin targets, so fetch both archives.
       - run: scripts/fetch-libtokenizers.sh darwin/arm64 darwin/amd64
-      - run: CGO_ENABLED=1 go build -tags fts5 ./...
+      # pkg/pdf links PDFium through `// #cgo pkg-config: pdfium`; fetch both
+      # triples (the Intel build below links the amd64 library) and make sure
+      # pkg-config itself is present.
+      - run: command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
+      - run: scripts/fetch-pdfium.sh darwin/arm64 darwin/amd64
+      - run: CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/third_party/pdfium/darwin_arm64" go build -tags fts5 ./...
       # Prove the Intel mac binary cross-compiles on an arm64 runner; the
       # release workflow builds darwin/amd64 the same way.
-      - run: CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" go build -tags fts5 -o /dev/null ./cmd/forebrain
+      - run: CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" PKG_CONFIG_PATH="$PWD/third_party/pdfium/darwin_amd64" go build -tags fts5 -o /dev/null ./cmd/forebrain
 
   frontend:
     name: Frontend install build

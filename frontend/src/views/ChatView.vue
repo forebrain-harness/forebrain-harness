@@ -53,6 +53,7 @@
                   :fold-state="browseStateFor(activeSubagent.agentId).folds"
                   :call-tasks="subagentCallTasks"
                   :now="subagentNow"
+                  :scope="workbenchScope"
                   @back="openAgentView('')"
                   @open-agent="openAgentView"
                   @fold-change="updateAgentFold(activeSubagent.agentId, $event)"
@@ -218,6 +219,7 @@
                             v-else-if="block.kind === 'tool' && !block.step.subagentCall"
                             class="my-2"
                             :step="block.step"
+                            :scope="workbenchScope"
                             :default-open="false"
                           />
                           <!-- A subagent_* call is one card: the call's own

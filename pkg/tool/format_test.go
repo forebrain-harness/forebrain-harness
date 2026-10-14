@@ -2535,3 +2535,93 @@ func TestToolStepHoldsNoCard(t *testing.T) {
 		}
 	}
 }
+
+func TestSummarizeToolStepNamesAReadImage(t *testing.T) {
+	t.Parallel()
+	got := SummarizeToolStep(StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": "/tmp/shots/shot.png"},
+		Output: map[string]any{
+			"preview_kind": "image",
+			"abs_path":     "/tmp/shots/shot.png",
+			"image_bytes":  1536,
+			"image_width":  12,
+			"image_height": 8,
+			"result_lines": 0,
+		},
+	})
+	if !strings.Contains(got, "image") {
+		t.Fatalf("summary=%q want it to name the image", got)
+	}
+	if !strings.Contains(got, "1.5 KB") {
+		t.Fatalf("summary=%q want the encoded byte count", got)
+	}
+	if strings.Contains(got, "lines") {
+		t.Fatalf("summary=%q must not claim a line range for an image", got)
+	}
+}
+
+func TestSummarizeToolStepNamesAReadPDF(t *testing.T) {
+	t.Parallel()
+	got := SummarizeToolStep(StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": "/tmp/docs/report.pdf"},
+		Output: map[string]any{
+			"preview_kind":   "image",
+			"abs_path":       "/tmp/state/tool-outputs/pdf-call-1-p1.png",
+			"file_path":      "/tmp/docs/report.pdf",
+			"image_bytes":    1536,
+			"image_width":    1240,
+			"image_height":   1754,
+			"pdf_page_count": 12,
+			"pdf_rendered":   5,
+			"pdf_pages":      []int{1, 2, 3, 4, 5},
+			"result_lines":   0,
+		},
+	})
+	for _, want := range []string{"report.pdf", "PDF 12 页", "渲染 1-5 页"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary=%q want it to name %q", got, want)
+		}
+	}
+	if strings.Contains(got, "image ") {
+		t.Fatalf("summary=%q must name the PDF, not the fixed image wording", got)
+	}
+}
+
+func TestFormatToolStepResultImageBodyHasNoJSONDump(t *testing.T) {
+	t.Parallel()
+	evt := StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": "/tmp/shots/shot.png"},
+		Output: map[string]any{
+			"preview_kind": "image",
+			"abs_path":     "/tmp/shots/shot.png",
+			"file_path":    "/tmp/shots/shot.png",
+			"image_bytes":  1536,
+			"image_width":  12,
+			"image_height": 8,
+			"image_scaled": true,
+			"result_lines": 0,
+		},
+	}
+	got, trunc := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if trunc {
+		t.Fatal("unexpected truncation")
+	}
+	if !strings.Contains(got, "/tmp/shots/shot.png") {
+		t.Fatalf("body=%q want the path", got)
+	}
+	if !strings.Contains(got, "12x8") {
+		t.Fatalf("body=%q want the pixel dimensions", got)
+	}
+	if !strings.Contains(got, "scaled") {
+		t.Fatalf("body=%q want the scaled marker", got)
+	}
+	if strings.Contains(got, "preview_kind") {
+		t.Fatalf("body=%q must be a one-liner, not a JSON dump", got)
+	}
+}

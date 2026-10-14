@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/pdf"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
@@ -50,8 +51,8 @@ type FileReadInput struct {
 func NewFileReadTool(st *State) (*llm.Tool, error) {
 	return llm.NewTool(
 		"read_file",
-		"Use when you need a file's contents, or before any write/edit (required first). Read a text file with a 0-based offset and limit. Read the smallest useful span.",
-		func(ctx context.Context, in *FileReadInput) (string, error) {
+		"Use when you need a file's contents, or before any write/edit (required first). Read a text file with a 0-based offset and limit, or an image (png/jpeg/gif/webp) as an image, or a PDF as page images. Read the smallest useful span.",
+		func(ctx context.Context, in *FileReadInput) (any, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")
 			}
@@ -75,6 +76,66 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			if err != nil {
 				return "", missingSkillFileError(st, in.FilePath, err)
 			}
+			// An image is not text: it has its own channel — the pixels go
+			// straight to the model and the text carries a one-line note. An
+			// image is never entered in the read ledger nor handed to the read
+			// observers (those back "you can now edit this text" and the
+			// language-server index). A session model that cannot take image
+			// input is refused here, before the pixels are sent (see Step 4's
+			// State.ImageInputRefusal); when no gate is installed this returns
+			// "" and the read proceeds.
+			imageByName := isImageFileExtension(strings.ToLower(filepath.Ext(abs)))
+			if mime := llm.ImageMIMEType(abs, raw); mime != "" || imageByName {
+				if refusal := st.ImageInputRefusal(ctx); refusal != "" {
+					return nil, errors.New(refusal)
+				}
+			}
+			part, res, err := imageReadPart(abs, raw, llm.DefaultMaxImageBytes)
+			if err != nil {
+				return nil, err
+			}
+			if res.MIMEType != "" {
+				CaptureToolOutput(ctx, ImageReadOutput(abs, in.FilePath, res))
+				return []llm.ContentPart{llm.Text(imageReadNote(abs, res)), part}, nil
+			}
+			// A PDF is not text either. Its pages are rendered to images and
+			// handed back the way a read image is: a note naming the document and
+			// the pages shown, then one pixel part per rendered page. The page
+			// PNGs are written beside the other tool-result spills so a surface
+			// can fetch them by path (the raw endpoint serves images only, and a
+			// rendered page lives only in memory). A session model that cannot
+			// take image input is refused here, before anything is rendered — the
+			// same gate the image branch above consults.
+			if strings.EqualFold(filepath.Ext(abs), ".pdf") {
+				if refusal := st.ImageInputRefusal(ctx); refusal != "" {
+					return nil, fmt.Errorf("read_file cannot read PDF %q: %s", abs, refusal)
+				}
+				// The fonts PDFium falls back to for an unembedded CJK font are
+				// seeded under this tool's own home; passing the home explicitly
+				// keeps the default and a --home override both working, which
+				// reading FOREBRAIN_HOME from the environment would not.
+				res, err := pdf.RenderFile(abs, 0, pdf.Options{FontDirs: pdf.FontDirs(st.PrimaryHome())})
+				if err != nil {
+					return nil, err
+				}
+				pagePaths, err := storePDFPages(ctx, st, res.Pages)
+				if err != nil {
+					return nil, err
+				}
+				parts := make([]llm.ContentPart, 0, len(res.Pages)+1)
+				parts = append(parts, llm.Text(pdfReadNote(abs, res)))
+				for i := range res.Pages {
+					pagePart, _, err := llm.ImagePartWithin(pagePaths[i], "image/png", res.Pages[i].PNG, llm.DefaultMaxImageBytes)
+					if err != nil {
+						return nil, fmt.Errorf("render pdf page %d: %w", res.Pages[i].Number, err)
+					}
+					parts = append(parts, pagePart)
+				}
+				CaptureToolOutput(ctx, pdfReadOutput(in.FilePath, res, pagePaths[0], len(raw)))
+				return parts, nil
+			}
+			// res.MIMEType == "": not an image, continue down the unchanged
+			// text path.
 			if err := validateTextReadableFile(abs, raw); err != nil {
 				return "", err
 			}
@@ -239,12 +300,10 @@ func isBlockedReadDevicePath(filePath string) bool {
 
 func validateTextReadableFile(abs string, raw []byte) error {
 	ext := strings.ToLower(filepath.Ext(abs))
-	if ext == ".pdf" {
-		return fmt.Errorf("read_file cannot read PDF files as text")
-	}
-	if isImageFileExtension(ext) {
-		return fmt.Errorf("read_file cannot read image files as text")
-	}
+	// Images are handled upstream (see NewFileReadTool): a supported one
+	// becomes a pixel part, an unsupported one an actionable error. By the
+	// time a text read reaches here the file is known not to be an image, so
+	// there is no image branch left to take.
 	if isBinaryFileExtension(ext) || looksLikeBinaryContent(raw) {
 		if ext == "" {
 			return fmt.Errorf("read_file cannot read binary files")
@@ -252,6 +311,126 @@ func validateTextReadableFile(abs string, raw []byte) error {
 		return fmt.Errorf("read_file cannot read binary %s files", ext)
 	}
 	return nil
+}
+
+// imageReadPart decides what read_file does with a file that might be an image.
+//
+//   - a supported image (png/jpeg/gif/webp) is encoded within budget by
+//     llm.ImagePartWithin, whose error is returned as-is;
+//   - an image extension we cannot decode (bmp/tiff/heic/…) yields an
+//     actionable "convert it" error, never a fall-back to reading it as text;
+//   - anything else returns the zero ImageReadResult (MIMEType == ""), the
+//     signal that this is not an image and the text path should run.
+func imageReadPart(abs string, raw []byte, budget int) (llm.ContentPart, llm.ImageReadResult, error) {
+	mime := llm.ImageMIMEType(abs, raw)
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return llm.ImagePartWithin(abs, mime, raw, budget)
+	}
+	if ext := strings.ToLower(filepath.Ext(abs)); isImageFileExtension(ext) {
+		return llm.ContentPart{}, llm.ImageReadResult{SourceBytes: len(raw)}, fmt.Errorf(
+			"read_file cannot decode %s images; convert it to png or jpeg first (macOS: sips -s format png <path>)",
+			strings.TrimPrefix(ext, "."))
+	}
+	return llm.ContentPart{}, llm.ImageReadResult{}, nil
+}
+
+// imageReadNote is the one line the model reads in place of the pixels. It
+// names the absolute path and the pixel dimensions so the model can reason
+// about coordinates, and says when the image was downscaled to fit.
+func imageReadNote(abs string, res llm.ImageReadResult) string {
+	note := fmt.Sprintf("%s\nimage %dx%d", abs, res.Width, res.Height)
+	if res.Scaled {
+		note += fmt.Sprintf(" (scaled 1/%d to fit %s)", res.Scale, formatBytes(res.SentBytes))
+	}
+	return note
+}
+
+// ImageReadOutput is the surface-facing map for an image read. It never
+// carries base64: a surface fetches the pixels by path (the same root
+// resolution as every file view). Output must stay JSON-serializable because
+// it becomes the tool step event. MCP results reuse it so an image from an MCP
+// tool carries the same shape as one read by read_file.
+func ImageReadOutput(abs, filePath string, res llm.ImageReadResult) map[string]any {
+	return map[string]any{
+		"preview_kind":       "image",
+		"preview_text":       "",
+		"abs_path":           abs,
+		"file_path":          filePath,
+		"image_mime":         res.MIMEType,
+		"image_bytes":        res.SentBytes,
+		"image_source_bytes": res.SourceBytes,
+		"image_width":        res.Width,
+		"image_height":       res.Height,
+		"image_scaled":       res.Scaled,
+		"result_lines":       0,
+	}
+}
+
+// pdfReadNote is the one line the model reads beside a PDF's page images: the
+// document, its page count, and the range of pages rendered (at the DPI the
+// renderer used). It states how many pages were left out so the model knows it
+// has not seen the whole document.
+func pdfReadNote(abs string, res pdf.RenderResult) string {
+	rendered := len(res.Pages)
+	note := fmt.Sprintf("pdf %s: %d pages, rendered pages 1-%d at %d dpi",
+		abs, res.PageCount, rendered, int(pdf.DefaultDPI))
+	if missing := res.PageCount - rendered; missing > 0 {
+		note += fmt.Sprintf(" (%d not rendered)", missing)
+	}
+	return note
+}
+
+// pdfReadOutput is the surface-facing map for a PDF read. It reuses the image
+// read's shape — preview_kind=image, the pixels fetched by path, never base64 —
+// and adds the document's page facts, so the same card draws a PDF read without
+// a second render path. previewPath is the FIRST page's PNG: the file a surface
+// fetches and the marker describes. The note beside the pixels (pdfReadNote)
+// still names the PDF; sourceBytes is the document's own size.
+func pdfReadOutput(filePath string, res pdf.RenderResult, previewPath string, sourceBytes int) map[string]any {
+	first := res.Pages[0]
+	out := ImageReadOutput(previewPath, filePath, llm.ImageReadResult{
+		MIMEType:    "image/png",
+		SourceBytes: sourceBytes,
+		SentBytes:   len(first.PNG),
+		Width:       first.Width,
+		Height:      first.Height,
+	})
+	pages := make([]int, len(res.Pages))
+	for i := range res.Pages {
+		pages[i] = res.Pages[i].Number
+	}
+	out["pdf_page_count"] = res.PageCount
+	out["pdf_rendered"] = len(res.Pages)
+	out["pdf_pages"] = pages
+	return out
+}
+
+// storePDFPages writes each rendered page's PNG beside the other tool-result
+// spills and returns their paths. It is the same directory web_fetch pages its
+// own output into (st.ToolResultDir). A surface fetches a page's pixels by
+// path, and the endpoint that serves them accepts images only, so the page is
+// written rather than the PDF being pointed at. With no result directory there
+// is no preview we could honestly offer, so it is an error, not a marker.
+func storePDFPages(ctx context.Context, st *State, pages []pdf.Page) ([]string, error) {
+	dir := strings.TrimSpace(st.ToolResultDir())
+	if dir == "" {
+		return nil, errors.New("read_file cannot show PDF pages: no tool result directory is configured")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("read_file cannot show PDF pages: %w", err)
+	}
+	callID := sanitize(strings.TrimSpace(ToolUseIDFromContext(ctx)))
+	stamp := time.Now().UnixMilli()
+	paths := make([]string, len(pages))
+	for i := range pages {
+		path := filepath.Join(dir, fmt.Sprintf("pdf-%s-%d-p%d.png", callID, stamp, pages[i].Number))
+		if err := os.WriteFile(path, pages[i].PNG, 0o644); err != nil {
+			return nil, fmt.Errorf("read_file cannot show PDF pages: %w", err)
+		}
+		paths[i] = path
+	}
+	return paths, nil
 }
 
 func isImageFileExtension(ext string) bool {

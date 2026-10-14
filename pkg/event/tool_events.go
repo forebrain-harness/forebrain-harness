@@ -78,6 +78,18 @@ type ToolCallMeta struct {
 	// rendered rows. Absent on non-paging tools.
 	ResultLines  int `json:"result_lines,omitempty"`
 	ResultOffset int `json:"result_offset,omitempty"`
+	// PreviewKind marks a step whose result is a previewable artifact rather
+	// than text (currently only "image"); PreviewPath is the absolute path a
+	// surface fetches the pixels from. All Preview* fields are facts, never
+	// base64, and mirror tool.ToolMeta so the live web path and a replayed row
+	// draw the same thumbnail.
+	PreviewKind   string `json:"preview_kind,omitempty"`
+	PreviewPath   string `json:"preview_path,omitempty"`
+	PreviewMIME   string `json:"preview_mime,omitempty"`
+	PreviewWidth  int    `json:"preview_width,omitempty"`
+	PreviewHeight int    `json:"preview_height,omitempty"`
+	PreviewBytes  int    `json:"preview_bytes,omitempty"`
+	PreviewScaled bool   `json:"preview_scaled,omitempty"`
 	// StartedAtMs is when a still-executing call began (Unix milliseconds);
 	// surfaces show "running for N s" from it. Absent once the call settles.
 	StartedAtMs int64 `json:"started_at_ms,omitempty"`

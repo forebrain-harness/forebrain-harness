@@ -1025,7 +1025,7 @@
         "name": "DeepSeek V4 Flash",
         "description": "Fast DeepSeek V4 lane for economical reasoning, coding, and long-context work",
         "family": "deepseek-flash",
-        "attachment": false,
+        "attachment": true,
         "reasoning": true,
         "tool_call": true,
         "structured_output": true,
@@ -1035,7 +1035,8 @@
         "last_updated": "2026-04-24",
         "modalities": {
             "input": [
-                "text"
+                "text",
+                "image"
             ],
             "output": [
                 "text"

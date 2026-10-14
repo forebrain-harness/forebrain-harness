@@ -1938,6 +1938,15 @@ func (r *Renderer) renderCompactFrame(f Frame, fallbackTitle string, color strin
 		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(line, "  │ "))
 	}
 
+	if f.Kind == FrameTool && strings.EqualFold(strings.TrimSpace(f.ToolMeta.PreviewKind), "image") {
+		// An image step has no text body: one marker line naming the file, its
+		// pixel and encoded sizes, and the key that opens it. It never falls
+		// through to a JSON dump — the facts are already the one line.
+		_, _ = fmt.Fprintln(r.out, formatToolOutputBlock(imagePreviewFrameLine(f.ToolMeta)))
+		_, _ = fmt.Fprintln(r.out)
+		return
+	}
+
 	if f.Kind == FrameTool && isMCPToolTitle(title) && toolStatusPending(f) {
 		// MCP start notifications carry the call arguments in Content so the
 		// header can summarize them. They are not tool output; while the call is

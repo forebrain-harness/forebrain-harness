@@ -97,7 +97,14 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod, cache-dependency-path: go.sum }
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config jq
+      # pkg/pdf links PDFium through `// #cgo pkg-config: pdfium`; the packaging
+      # script fetches the library, but pkg-config itself has to be installed.
+      - if: runner.os == 'macOS'
+        run: command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) { choco install pkgconfiglite -y --no-progress }
       - run: test -f pkg/gateway/dist/index.html
       - run: scripts/check-release-versions.sh
       # darwin/linux targets download a prebuilt tokenizers archive inside
