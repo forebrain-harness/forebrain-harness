@@ -22,6 +22,9 @@ go vet ./...
 CGO_ENABLED=1 go test -tags fts5 ./... -count=1
 CGO_ENABLED=1 go test -tags fts5 ./pkg/turn -run TestName   # single package/test
 
+# In an agent session, run the suite against a scratch home (see House rules):
+FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./... -count=1
+
 # Frontend (Node 22, pnpm 10):
 cd frontend && pnpm install && pnpm build
 ```
@@ -72,6 +75,7 @@ Design and task plans: `docs/plan/LSP_CODE_INTELLIGENCE_PLAN.md` and `docs/plan/
 ## House rules
 
 - **CGO is mandatory on every platform** (Windows included): silk voice decoder, sqlite, fts5. Always build/test with `CGO_ENABLED=1`; CI also uses `-tags fts5`.
+- **Run the full suite with an explicit scratch home** — `FOREBRAIN_HOME="$(mktemp -d)" CGO_ENABLED=1 go test -tags fts5 ./... -count=1`. An agent session exports `FOREBRAIN_HOME` pointing at the real install, and a test that opens the state database migrates it: `cmd/forebrain` (pinned by its own `TestMain`) and `pkg/tui` drive the real terminal entrypoint, so an unpinned home writes a multi-gigabyte pre-migration backup into `~/.forebrain/state/backups/` and then blocks for the ten-minute test timeout on the write lock of the forebrain the user has open. Tests in packages that open state should pin their own home (`t.Setenv`); a package `TestMain` that pins one **must override an inherited value**, not only fill in an unset one.
 - **Keep the package graph green**: CI runs `scripts/package-graph.sh` and fails if `pkg/architecture/testdata/graph.json` changes. After adding/removing packages or changing `pkg/...` imports, regenerate and commit the graph.
 - **TUI must not import core runtime internals** — enforced by `pkg/architecture` test (`pkg/tui` may not import gateway/agentrun/clifacade/forkagent/supervisorrun). Communicate through events/types instead.
 - **LLM-facing prompt text must be provider-neutral and byte-stable**: system-prompt constants (see `pkg/agent/scope_discipline.go`) contain no model/tool/vendor names and are compile-time constants so the cached prompt prefix never shifts.
