@@ -1,0 +1,145 @@
+package pdf
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"image/png"
+	"os"
+
+	pdfium_errors "github.com/klippa-app/go-pdfium/errors"
+	"github.com/klippa-app/go-pdfium/requests"
+)
+
+// Rendering budgets. A page rendered at DefaultDPI is about 1240x1754 pixels
+// and 200-400 KiB of PNG; DefaultMaxPages bounds how much of a long document
+// reaches the model in one read. Both are cost knobs: change them through
+// Options rather than at a call site.
+const (
+	// DefaultMaxPages is the number of pages RenderFile renders when a caller
+	// passes maxPages <= 0.
+	DefaultMaxPages = 5
+	// DefaultDPI is the resolution RenderFile renders at when Options.DPI is
+	// unset.
+	DefaultDPI = 150
+)
+
+// Page is one rendered page. Number is 1-based. Rendered is false only for a
+// page that was within the document but beyond the render cap, which is
+// reported by count rather than as an entry here, so a Page obtained from a
+// RenderResult always has its image.
+type Page struct {
+	Number   int    // 1-based page number
+	PNG      []byte // the page rendered as PNG
+	Width    int    // image width in pixels
+	Height   int    // image height in pixels
+	Rendered bool   // false = the page exceeded the cap and was not rendered
+}
+
+// RenderResult is the outcome of rendering a document.
+type RenderResult struct {
+	PageCount   int    // total pages in the document
+	Pages       []Page // the pages that were rendered, in order
+	RenderedMax int    // the cap this call used
+}
+
+// Options tunes one RenderFile call.
+type Options struct {
+	// DPI is the render resolution; <= 0 means DefaultDPI.
+	DPI float64
+	// FontDirs are the directories handed to PDFium's font loader. nil means
+	// FontDirs($FOREBRAIN_HOME); an empty non-nil slice means no directories
+	// (let PDFium use its platform defaults). PDFium is initialised once per
+	// process, so only the first call's value takes effect.
+	FontDirs []string
+}
+
+// RenderFile renders the first maxPages pages of the PDF at path (maxPages <= 0
+// means DefaultMaxPages) and returns them encoded as PNG with the document's
+// page count. A password-protected, damaged or empty document returns an error
+// the model can act on.
+func RenderFile(path string, maxPages int, opts Options) (RenderResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return RenderResult{}, fmt.Errorf("pdf: read %q: %w", path, err)
+	}
+	if maxPages <= 0 {
+		maxPages = DefaultMaxPages
+	}
+	dpi := opts.DPI
+	if dpi <= 0 {
+		dpi = DefaultDPI
+	}
+	dirs := opts.FontDirs
+	if dirs == nil {
+		dirs = FontDirs(os.Getenv("FOREBRAIN_HOME"))
+	}
+
+	instance, err := renderPool(dirs).GetInstance(GetInstanceTimeout)
+	if err != nil {
+		return RenderResult{}, fmt.Errorf("pdf: get pdfium instance: %w", err)
+	}
+	defer instance.Close()
+
+	document, err := instance.OpenDocument(&requests.OpenDocument{File: &data})
+	if err != nil {
+		return RenderResult{}, openError(err)
+	}
+	defer instance.FPDF_CloseDocument(&requests.FPDF_CloseDocument{Document: document.Document})
+
+	count, err := instance.FPDF_GetPageCount(&requests.FPDF_GetPageCount{Document: document.Document})
+	if err != nil {
+		return RenderResult{}, fmt.Errorf("pdf: page count: %w", err)
+	}
+	if count.PageCount == 0 {
+		return RenderResult{}, errors.New("this PDF has no pages")
+	}
+
+	result := RenderResult{PageCount: count.PageCount, RenderedMax: maxPages}
+	limit := count.PageCount
+	if limit > maxPages {
+		limit = maxPages
+	}
+	for index := 0; index < limit; index++ {
+		rendered, err := instance.RenderPageInDPI(&requests.RenderPageInDPI{
+			DPI:  int(dpi),
+			Page: requests.Page{ByIndex: &requests.PageByIndex{Document: document.Document, Index: index}},
+		})
+		if err != nil {
+			return RenderResult{}, fmt.Errorf("pdf: render page %d: %w", index+1, err)
+		}
+		img := rendered.Result.RenderedImage
+		if img == nil {
+			img = rendered.Result.Image
+		}
+		if img == nil {
+			return RenderResult{}, fmt.Errorf("pdf: page %d produced no image", index+1)
+		}
+		var encoded bytes.Buffer
+		if err := png.Encode(&encoded, img); err != nil {
+			return RenderResult{}, fmt.Errorf("pdf: encode page %d: %w", index+1, err)
+		}
+		bounds := img.Bounds()
+		result.Pages = append(result.Pages, Page{
+			Number:   index + 1,
+			PNG:      encoded.Bytes(),
+			Width:    bounds.Dx(),
+			Height:   bounds.Dy(),
+			Rendered: true,
+		})
+	}
+	return result, nil
+}
+
+// openError turns a PDFium open failure into a message the model can act on:
+// unlocking a password-protected file, or giving up on a damaged one.
+func openError(err error) error {
+	switch {
+	case errors.Is(err, pdfium_errors.ErrPassword):
+		return errors.New("this PDF is password-protected; unlock it first")
+	case errors.Is(err, pdfium_errors.ErrFormat):
+		return fmt.Errorf("this PDF could not be parsed (%v)", err)
+	default:
+		return fmt.Errorf("this PDF could not be opened (%v)", err)
+	}
+}

@@ -177,6 +177,17 @@ export interface SubagentToolStep {
   skillName?: string
   skillPath?: string
   /**
+   * Image preview facts. When previewKind is 'image' the call's result is a
+   * picture the card draws as a thumbnail, fetched by absolute path from the
+   * workspace raw endpoint — never base64, which never leaves the engine.
+   */
+  previewKind?: string
+  previewPath?: string
+  previewMIME?: string
+  previewWidth?: number
+  previewHeight?: number
+  previewBytes?: number
+  /**
    * A subagent_* call's card facts, as the engine derived them once. A call
    * that carries them draws the subagent card — its prompt, its result and
    * its stored display body stay out of the conversation.
@@ -345,6 +356,33 @@ function metaString(meta: Record<string, unknown>, key: string): string {
   return String(meta[key] ?? meta[camel] ?? '').trim()
 }
 
+function metaNumber(meta: Record<string, unknown>, key: string): number | undefined {
+  const camel = key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+  const value = Number(meta[key] ?? meta[camel])
+  return Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+/**
+ * previewFieldsFromMeta reads the image-preview facts a step's tool meta
+ * carries (preview_kind plus the path, MIME and pixel/byte sizes). They are the
+ * same facts for a live step and a replayed row, so the card draws the identical
+ * thumbnail either way. Absent for every non-image call.
+ */
+function previewFieldsFromMeta(meta: Record<string, unknown>): Pick<
+  SubagentToolStep,
+  'previewKind' | 'previewPath' | 'previewMIME' | 'previewWidth' | 'previewHeight' | 'previewBytes'
+> {
+  if (metaString(meta, 'preview_kind') !== 'image') return {}
+  return {
+    previewKind: 'image',
+    previewPath: metaString(meta, 'preview_path') || undefined,
+    previewMIME: metaString(meta, 'preview_mime') || undefined,
+    previewWidth: metaNumber(meta, 'preview_width'),
+    previewHeight: metaNumber(meta, 'preview_height'),
+    previewBytes: metaNumber(meta, 'preview_bytes'),
+  }
+}
+
 /**
  * toolCallTarget names what a call was aimed at, from the arguments the model
  * supplied. It is one value, never the argument document: a plan-mode call
@@ -482,6 +520,7 @@ export function toolStepFromPayload(
     category: metaString(meta, 'category') || undefined,
     skillName: metaString(meta, 'skill_name') || undefined,
     skillPath: metaString(meta, 'skill_path') || undefined,
+    ...previewFieldsFromMeta(meta),
     subagentCall: subagentCallFromMeta(meta),
     durationSeconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : undefined,
   }
@@ -528,6 +567,7 @@ export function toolStepFromRow(row: { toolStepId?: string | null; toolMetaJson?
     category: metaString(meta, 'category') || undefined,
     skillName: metaString(meta, 'skill_name') || undefined,
     skillPath: metaString(meta, 'skill_path') || undefined,
+    ...previewFieldsFromMeta(meta),
     subagentCall: row.subagentCall ?? undefined,
   }
 }

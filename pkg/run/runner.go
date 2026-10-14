@@ -342,7 +342,7 @@ func normalizeMCPSchemaValue(value any, depth int) any {
 	}
 }
 
-func newMCPDelegatingTool(toolName, description string, inputSchema any, call func(context.Context, json.RawMessage) (string, error)) (*llm.Tool, error) {
+func newMCPDelegatingTool(toolName, description string, inputSchema any, call func(context.Context, json.RawMessage) (any, error)) (*llm.Tool, error) {
 	schema := normalizeMCPDelegatingInputSchema(inputSchema)
 	tool, err := llm.NewRawTool(toolName, description, schema, func(ctx context.Context, arguments string) (any, error) {
 		arguments = strings.TrimSpace(arguments)
@@ -1088,6 +1088,10 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	r.tools.SetPrimaryWorkspaceBoundary(r.Home, activeWorkspace, siblingWorkspaces)
 	r.tools.SetHistoryDir(filepath.Join(stateDir, "file-history"))
 	r.tools.SetToolResultDir(filepath.Join(stateDir, tool.SpillDir))
+	// The image-input gate answers from the session's model, so reads of an
+	// image on a text-only model refuse with an actionable sentence instead of
+	// sending pixels the provider will reject.
+	r.tools.SetImageInputGate(r.ImageInputRefusal)
 	// File tools report every write to the session store's ledger, which backs
 	// "rewind to before a message" and the workbench's changed-files list.
 	if r.SessionStore != nil {
@@ -2355,6 +2359,13 @@ func (ld *mcpLoad) runTask(t *mcpLoadTask) {
 	// tools use, so both kinds share one retrieval-id namespace and one savings
 	// report.
 	cli.SetStateRoot(ld.r.StateRoot())
+	// Results (saved images, resource blobs and offloaded large outputs) land
+	// in the primary agent workspace's state/mcp-results — a read-exempt root —
+	// so the model can read a screenshot an MCP server returned without an
+	// approval. All three MCP scopes (global, primary, project) share this
+	// directory; the project root is the server's working directory, not where
+	// its results belong.
+	cli.SetResultsDir(filepath.Join(ld.r.StateRoot(), "state", "mcp-results"))
 	tools, err := cli.ListToolMetas(ctx)
 	if err != nil {
 		// Failure path: the process is signalled before the close, so the
@@ -2531,7 +2542,7 @@ func (r *Runner) buildMCPSegmentServer(reg *mcp.Registry, a *agent.Agent, t *mcp
 		return cached, 0
 	}
 	cached.discovery = mcpDiscoveryToolsFor(t.caps)
-	call := mcpToolCaller(reg, t.name)
+	call := mcpToolCaller(reg, t.name, r.ImageInputRefusal)
 	registered := 0
 	for _, tm := range t.rawTools {
 		tn, _ := tm["name"].(string)
@@ -2542,7 +2553,7 @@ func (r *Runner) buildMCPSegmentServer(reg *mcp.Registry, a *agent.Agent, t *mcp
 		desc, _ := tm["description"].(string)
 		toolName := mcp.BuildToolName(t.name, tn)
 		desc = mcp.CapDescription(desc)
-		tt, err := newMCPDelegatingTool(toolName, desc+" (MCP "+t.name+")", tm["inputSchema"], func(ctx context.Context, arguments json.RawMessage) (string, error) {
+		tt, err := newMCPDelegatingTool(toolName, desc+" (MCP "+t.name+")", tm["inputSchema"], func(ctx context.Context, arguments json.RawMessage) (any, error) {
 			return call(ctx, toolLocal, arguments)
 		})
 		if err != nil {

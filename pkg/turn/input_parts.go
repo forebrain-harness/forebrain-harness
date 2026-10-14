@@ -1,6 +1,7 @@
 package turn
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,19 @@ import (
 // DisplayTextOrUserText's doc comment): the caller uses the returned
 // display text to compute the actual model input too, so the marker
 // reaches both the persisted transcript and the model's own context.
-func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment) ([]llm.ContentPart, string, error) {
+//
+// imageRefusal is the runtime's image-input gate (Runner.ImageInputRefusal):
+// when non-empty and the message carries an image, the whole message is refused
+// with that same one-step-recoverable sentence, so a text-only session model
+// never sends a request the provider would reject with a 400. An empty refusal
+// (a model the catalog knows accepts images, or an unknown model — fail-open)
+// attaches as before.
+func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment, imageRefusal string) ([]llm.ContentPart, string, error) {
+	if len(attachments) > 0 {
+		if refusal := strings.TrimSpace(imageRefusal); refusal != "" {
+			return nil, "", errors.New(refusal)
+		}
+	}
 	text := strings.TrimSpace(userText)
 	if text == "" {
 		text = "Please analyze the attached image."

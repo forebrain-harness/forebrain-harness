@@ -29,6 +29,16 @@
 # windows/amd64 build needs git, cargo, and the x86_64-pc-windows-gnu Rust
 # target (added by the fetch script when rustup is present).
 #
+# Every target also links the PDFium native library (pkg/pdf), fetched per
+# target by scripts/fetch-pdfium.sh (called below) and found at build time
+# through PKG_CONFIG_PATH — so the build host needs pkg-config (the release
+# matrix installs it; see .github/workflows/release.yml). The shared library
+# (libpdfium.{dylib,so} / pdfium.dll) is copied into the package beside the
+# binary and the binary is linked with an rpath that reaches it there
+# (@loader_path on darwin, $ORIGIN on linux; Windows finds a DLL next to the
+# .exe). The CJK fallback fonts are fetched once by
+# scripts/fetch-pdfium-fonts.sh and ship as the "fonts" asset.
+#
 # Env:
 #   FOREBRAIN_VERSION            — package version (default: the VERSION file's content)
 #   FOREBRAIN_BUILD_TARGETS      — space-separated targets (e.g. "darwin/arm64 linux/amd64 windows/amd64"); default = host
@@ -64,6 +74,10 @@ fi
 DIST_DIR="$NPM_DIR/dist"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
+
+# The CJK fallback fonts are one target-independent set; fetch them once so
+# install-assets.sh (per target, below) ships them as the "fonts" asset.
+"$ROOT_DIR/scripts/fetch-pdfium-fonts.sh"
 
 triple_for() {
   case "$1" in
@@ -145,9 +159,23 @@ build_target() {
 
   echo "==> building $target ($triple)"
   "$ROOT_DIR/scripts/fetch-libtokenizers.sh" "$target"
+  # PDFium links through `// #cgo pkg-config: pdfium`, so the build needs the
+  # target's pdfium.pc on PKG_CONFIG_PATH. The shared library also ships beside
+  # the binary; an rpath that reaches the binary's own directory makes the
+  # package work wherever it is unpacked.
+  "$ROOT_DIR/scripts/fetch-pdfium.sh" "$target"
+  local pdfium_dir="$ROOT_DIR/third_party/pdfium/${goos}_${goarch}"
+  local pdfium_rpath= pdfium_lib_glob=
+  case "$goos" in
+    darwin) pdfium_rpath='-Wl,-rpath,@loader_path'; pdfium_lib_glob="libpdfium.dylib" ;;
+    linux)  pdfium_rpath='-Wl,-rpath,$ORIGIN';      pdfium_lib_glob="libpdfium.so" ;;
+    windows) pdfium_lib_glob="pdfium.dll" ;;
+  esac
   (
     cd "$ROOT_DIR"
     CC="$cc" CGO_ENABLED=1 GOOS="$goos" GOARCH="$goarch" \
+      PKG_CONFIG_PATH="$pdfium_dir" \
+      CGO_LDFLAGS="$pdfium_rpath" \
       go build \
         -trimpath \
         -tags fts5 \
@@ -156,8 +184,14 @@ build_target() {
         ./cmd/forebrain
   )
   chmod +x "$pkg_dir/vendor/$triple/bin/forebrain${bin_ext}" || true
-  # The dictionary and the model catalog ship in the same package as the
-  # binary, so one install puts them all where forebrain reads them.
+  # The PDFium shared library rides beside the binary (darwin/linux in lib/,
+  # windows in bin/), which is where the rpath above — or the Windows loader —
+  # looks for it.
+  local pdfium_src="$pdfium_dir/lib/$pdfium_lib_glob"
+  [ "$goos" = "windows" ] && pdfium_src="$pdfium_dir/bin/$pdfium_lib_glob"
+  cp "$pdfium_src" "$pkg_dir/vendor/$triple/bin/"
+  # The dictionary, the model catalog and the CJK fonts ship in the same package
+  # as the binary, so one install puts them all where forebrain reads them.
   "$ROOT_DIR/scripts/install-dictionary.sh" "$pkg_dir/vendor/$triple/bin"
   "$ROOT_DIR/scripts/install-assets.sh" "$pkg_dir/vendor/$triple/bin"
   # A package that cannot search memory is a package to reject here, not a

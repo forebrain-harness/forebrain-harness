@@ -31,11 +31,17 @@ jobs:
           node-version: "22"
       - name: Install language servers
         run: |
-          sudo apt-get update && sudo apt-get install -y build-essential clangd
+          sudo apt-get update && sudo apt-get install -y build-essential clangd pkg-config
           go install golang.org/x/tools/gopls@latest
           npm install -g pyright typescript-language-server typescript
           rustup component add rust-analyzer
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # pkg/lsp imports pkg/tool, which imports pkg/pdf: the test binary links
+      # PDFium, so fetch it and put it on PKG_CONFIG_PATH first.
+      - name: Fetch the PDFium native library
+        run: |
+          scripts/fetch-pdfium.sh
+          echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
       - name: Integration tests
         env:
           CGO_ENABLED: "1"
@@ -75,7 +81,7 @@ jobs:
       - name: Install language servers
         run: |
           set -euxo pipefail
-          sudo apt-get update && sudo apt-get install -y python3
+          sudo apt-get update && sudo apt-get install -y python3 pkg-config
           mkdir -p "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           # jdtls: the archive unpacks bin/jdtls (a python launcher).
@@ -92,6 +98,12 @@ jobs:
           /tmp/cs install --bin-dir "$HOME/.local/bin" "metals:$METALS_VERSION"
           npm install -g intelephense
           dotnet tool install --global csharp-ls
+      # pkg/lsp imports pkg/tool, which imports pkg/pdf: the test binary links
+      # PDFium, so fetch it and put it on PKG_CONFIG_PATH first.
+      - name: Fetch the PDFium native library
+        run: |
+          scripts/fetch-pdfium.sh
+          echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
       - name: Integration tests
         env:
           CGO_ENABLED: "1"
@@ -111,6 +123,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      # pkg/lsp imports pkg/tool, which imports pkg/pdf: the test binary links
+      # PDFium, so fetch it and put it on PKG_CONFIG_PATH first.
+      - run: command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
+      - name: Fetch the PDFium native library
+        run: |
+          scripts/fetch-pdfium.sh
+          echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
       - name: Integration tests
         env:
           CGO_ENABLED: "1"

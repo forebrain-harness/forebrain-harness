@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
@@ -320,5 +321,121 @@ func TestWebTurnInputWithNothingTyped(t *testing.T) {
 	}
 	if in.text != "[Image #1]" || in.display != "[Image #1]" {
 		t.Fatalf("text = %q, display = %q", in.text, in.display)
+	}
+}
+
+// TestWebImageUploadUsesFileReferencePart guards the image branch of the
+// upload path: an image/* upload must be stored as a file_reference part, so
+// the turn and every replay re-read it as pixels; a non-image upload stays a
+// name-only attachment. This channel already worked — the test pins it.
+func TestWebImageUploadUsesFileReferencePart(t *testing.T) {
+	home, workspace := newMentionWorkspace(t)
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	files := &state.FileStore{DB: db, Home: home, WorkspaceRoot: workspace, Cfg: state.Config{FilesDirRel: "files", FilesTextDirRel: "files-text", TmpDirRel: "tmp"}}
+	sessions := state.NewSessionStore(db, "main")
+	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "workspace", Root: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s1", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := files.CreateFromReader(ctx, "s1", "report.pdf", strings.NewReader("%PDF-1.4"), 8, "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestHeader), int64(len(pngTestHeader)), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects}
+
+	in, err := s.prepareWebTurnInput(ctx, "s1", "look", []string{report.ID, photo.ID}, nil)
+	if err != nil {
+		t.Fatalf("prepareWebTurnInput: %v", err)
+	}
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(in.partsJSON), &parts); err != nil {
+		t.Fatalf("unmarshal parts: %v", err)
+	}
+	byLabel := map[string]string{}
+	for _, p := range parts {
+		if label, _ := p["label"].(string); label != "" {
+			ptype, _ := p["type"].(string)
+			byLabel[label] = ptype
+		}
+	}
+	if byLabel["photo.png"] != state.PartTypeFileReference {
+		t.Fatalf("photo.png part type = %q, want %q", byLabel["photo.png"], state.PartTypeFileReference)
+	}
+	if byLabel["report.pdf"] != state.PartTypeAttachment {
+		t.Fatalf("report.pdf part type = %q, want %q", byLabel["report.pdf"], state.PartTypeAttachment)
+	}
+}
+
+// TestWebImageUploadRefusedOnTextOnlyModel pins the web half of the attachment
+// gate: an image upload on a session whose model the catalog marks text-only is
+// refused with the same one-step-recoverable sentence read_file gives, before
+// any pixels are sent, rather than reaching the provider as a 400. A non-image
+// upload is not touched by the image gate.
+func TestWebImageUploadRefusedOnTextOnlyModel(t *testing.T) {
+	home, workspace := newMentionWorkspace(t)
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	files := &state.FileStore{DB: db, Home: home, WorkspaceRoot: workspace, Cfg: state.Config{FilesDirRel: "files", FilesTextDirRel: "files-text", TmpDirRel: "tmp"}}
+	sessions := state.NewSessionStore(db, "main")
+	if err := sessions.Ensure(ctx, "s1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "workspace", Root: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projects.BindSession(ctx, "s1", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	report, err := files.CreateFromReader(ctx, "s1", "report.pdf", strings.NewReader("%PDF-1.4"), 8, "application/pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	photo, err := files.CreateFromReader(ctx, "s1", "photo.png", bytes.NewReader(pngTestHeader), int64(len(pngTestHeader)), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A runner whose configured session model is the text-only deepseek-v4-pro
+	// (owner-confirmed). TestMain installs the repository catalog, so the gate
+	// resolves it.
+	cfg := &appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
+		Primary:      true,
+		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro"}},
+	}}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg}}
+	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects, Runner: runner}
+
+	if _, err := s.prepareWebTurnInput(ctx, "s1", "look", []string{photo.ID}, nil); err == nil {
+		t.Fatal("expected an image upload to be refused on a text-only model")
+	} else if !strings.Contains(err.Error(), "deepseek-v4-pro") || !strings.Contains(err.Error(), "/model") {
+		t.Fatalf("refusal = %q, want it to name the model and point at /model", err)
+	}
+
+	// A non-image upload is not the image gate's business: it still attaches.
+	if _, err := s.prepareWebTurnInput(ctx, "s1", "look", []string{report.ID}, nil); err != nil {
+		t.Fatalf("non-image upload must not be refused by the image gate: %v", err)
 	}
 }

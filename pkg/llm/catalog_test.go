@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -131,5 +132,77 @@ func TestInitGlobalCatalogSeedsAFreshHome(t *testing.T) {
 	hit, ok := Lookup("deepseek", "deepseek-chat")
 	if !ok || hit.ContextWindow <= 0 {
 		t.Fatalf("Lookup after a fresh init = %+v, %v", hit, ok)
+	}
+}
+
+// catalogEntry mirrors the parts of a models.json entry the capability gate
+// reads: whether it takes attachments, and which input modalities it names.
+type catalogEntry struct {
+	Attachment bool `json:"attachment"`
+	Modalities struct {
+		Input []string `json:"input"`
+	} `json:"modalities"`
+}
+
+func readCatalogEntry(t *testing.T, id string) catalogEntry {
+	t.Helper()
+	data, err := RepoModelsJSONForTest()
+	if err != nil {
+		t.Fatalf("read repo models.json: %v", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse models.json: %v", err)
+	}
+	body, ok := raw[id]
+	if !ok {
+		t.Fatalf("models.json has no entry %q", id)
+	}
+	var entry catalogEntry
+	if err := json.Unmarshal(body, &entry); err != nil {
+		t.Fatalf("parse entry %q: %v", id, err)
+	}
+	return entry
+}
+
+func hasModality(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCatalogMarksTheOwnerDefaultAsMultimodal pins the catalog data fix owner
+// confirmed on 2026-10-14: the DeepSeek endpoint routes deepseek-v4-flash to
+// deepseek-flash, which accepts image input, so this entry must be multimodal.
+// The product docs and the owner's default config both treat it as such, and
+// the capability gate (pkg/run.ImageInputRefusal) reads exactly this field —
+// a lagging table would make reading an image refuse on the owner's own model.
+func TestCatalogMarksTheOwnerDefaultAsMultimodal(t *testing.T) {
+	entry := readCatalogEntry(t, "deepseek/deepseek-v4-flash")
+	if !entry.Attachment {
+		t.Fatalf("deepseek/deepseek-v4-flash attachment=false; owner confirmed it accepts image input")
+	}
+	if !hasModality(entry.Modalities.Input, "image") {
+		t.Fatalf("deepseek/deepseek-v4-flash modalities.input=%v; want it to include image", entry.Modalities.Input)
+	}
+}
+
+// TestCatalogKeepsTextOnlyDeepseekModelsAsTextOnly pins the same-provider,
+// same-family text-only entries. The deepseek-flash family holds both a
+// multimodal member (deepseek-v4-flash) and a text-only one
+// (deepseek-v4-flash-0731), so capability is per model and must never be
+// inferred from a family — the gate relies on these staying false.
+func TestCatalogKeepsTextOnlyDeepseekModelsAsTextOnly(t *testing.T) {
+	for _, id := range []string{"deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-flash-0731"} {
+		entry := readCatalogEntry(t, id)
+		if entry.Attachment {
+			t.Fatalf("%s attachment=true; owner confirmed it is a text-only model", id)
+		}
+		if hasModality(entry.Modalities.Input, "image") {
+			t.Fatalf("%s modalities.input=%v; a text-only model must not name image", id, entry.Modalities.Input)
+		}
 	}
 }

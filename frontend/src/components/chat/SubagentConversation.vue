@@ -73,6 +73,7 @@
         <ToolCallCard
           v-else-if="block.kind === 'tool' && !block.step.subagentCall"
           :step="block.step"
+          :scope="scope"
           :open="foldOpen(blockFoldId(block, idx), false)"
           @update:open="updateFold(blockFoldId(block, idx), $event)"
         />
@@ -187,6 +188,7 @@ import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import { formatRuntimeDuration, formatWorkedDurationLabel, thinkingBlockLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
+import type { WorkspaceScope } from '@/lib/api'
 import { t } from '@/locales'
 
 const props = withDefaults(defineProps<{
@@ -196,10 +198,13 @@ const props = withDefaults(defineProps<{
   callTasks?: ReadonlyMap<string, ReadonlyMap<number, SubagentCallTaskLive>>
   /** The stream's shared clock, so the cards' walking rows tick with it. */
   now?: number
+  /** The file view an image step's thumbnail is fetched from, if any. */
+  scope?: WorkspaceScope
 }>(), {
   foldState: () => ({}),
   callTasks: undefined,
   now: undefined,
+  scope: undefined,
 })
 const emit = defineEmits<{
   (e: 'back'): void

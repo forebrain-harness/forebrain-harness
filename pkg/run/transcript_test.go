@@ -304,3 +304,32 @@ func TestChainResolverTakesTheFirstResolverThatAnswers(t *testing.T) {
 		t.Fatalf("chain resolved to %q, want /first", got)
 	}
 }
+
+// TestUserInputPartsRehydratesFileReferenceToImage pins the @/upload replay
+// channel: a user row stored with a file_reference for an image is handed to
+// the model as a real image part, not the bare name text placeholder. This
+// channel already worked — the test keeps it from regressing.
+func TestUserInputPartsRehydratesFileReferenceToImage(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "clip.png")
+	raw, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(img, raw, 0o600))
+
+	userText := "explain this image"
+	partsJSON := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
+	partsJSON = state.AppendRawPartJSON(partsJSON, state.FileReferencePartJSON(img, "clip.png", "image/png"))
+
+	sent := UserInputParts(context.Background(), PathResolver{}, partsJSON)
+	images := 0
+	for _, part := range sent {
+		if part.Type == llm.ContentTypeImageBase64 {
+			images++
+			if part.MIMEType != "image/png" {
+				t.Fatalf("image mime = %q want image/png", part.MIMEType)
+			}
+		}
+	}
+	require.Equal(t, 1, images)
+	require.NotEmpty(t, sent)
+	require.Equal(t, userText, sent[0].Text)
+}

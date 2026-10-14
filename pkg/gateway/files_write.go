@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -63,6 +65,108 @@ func (s *Server) handleWorkspaceFileRead(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, map[string]any{"path": rel, "content": string(raw)})
+}
+
+// workspaceFileRawMaxBytes bounds the image the raw endpoint serves: the
+// largest a single read_file image part may be (llm.DefaultMaxImageBytes) times
+// two, the headroom the encoder keeps between a source image and its scaled
+// form. A larger file is refused rather than streamed — a thumbnail is a
+// preview, and the file's own summary in the transcript is the way to read it.
+const workspaceFileRawMaxBytes = 2 * llm.DefaultMaxImageBytes
+
+// handleWorkspaceFileRaw answers GET /api/workspace/file/raw: the bytes of one
+// image, for a surface thumbnail. It is the pixel channel a surface uses — no
+// event or JSON response ever carries base64 — and it serves only images, so it
+// never becomes a general file dump.
+//
+// It serves images from TWO legitimate roots, because an image the model read
+// can live in either: the conversation's file view (the project root) and the
+// primary agent workspace (where tool output such as an MCP screenshot is
+// written). Both are resolved through the single containment primitive
+// tool.ResolveWithinRoots; the root that applies to a relative path is still
+// the file view (relative paths join to it as everywhere else), and an absolute
+// path — which is what a tool step records — is matched against both.
+func (s *Server) handleWorkspaceFileRaw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	rel := strings.TrimSpace(q.Get("path"))
+	if rel == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	full, err := s.resolveRawImagePath(r.Context(), q.Get("session_id"), q.Get("project_id"), rel)
+	if err != nil {
+		writeWorkspacePathError(w, err)
+		return
+	}
+	st, statErr := os.Lstat(full)
+	if statErr != nil {
+		http.Error(w, statErr.Error(), http.StatusNotFound)
+		return
+	}
+	if st.IsDir() {
+		http.Error(w, "not a file", http.StatusBadRequest)
+		return
+	}
+	if st.Size() > workspaceFileRawMaxBytes {
+		http.Error(w, "image exceeds the raw preview limit; read the file's summary in the transcript instead", http.StatusRequestEntityTooLarge)
+		return
+	}
+	raw, readErr := os.ReadFile(full)
+	if readErr != nil {
+		http.Error(w, readErr.Error(), http.StatusNotFound)
+		return
+	}
+	mime := llm.ImageMIMEType(full, raw)
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+	default:
+		http.Error(w, "not an image", http.StatusUnsupportedMediaType)
+		return
+	}
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+// resolveRawImagePath pins a thumbnail request to the image it names, which may
+// live in the conversation's file view (the project root) or in the primary
+// agent workspace (an MCP result or another tool artifact). Both roots are
+// handed to tool.ResolveWithinRoots in ONE call, so containment is checked by
+// the same primitive everywhere.
+//
+// A relative path is joined to the file view root, exactly as the other file
+// endpoints join it; a session with no file view at all (no project) has no
+// root to join to and refuses a relative path, but still serves an absolute
+// path — the shape a tool step records — from the agent workspace.
+func (s *Server) resolveRawImagePath(ctx context.Context, sessionID, projectID, rel string) (string, error) {
+	var fileViewRoot string
+	if root, err := s.filesRoot(ctx, sessionID, projectID); err == nil {
+		fileViewRoot = strings.TrimSpace(root)
+	} else if !errors.Is(err, errFilesNotFound) {
+		return "", err
+	}
+	var roots []string
+	for _, root := range []string{fileViewRoot, strings.TrimSpace(s.activeWorkspaceRoot())} {
+		if root != "" {
+			roots = append(roots, root)
+		}
+	}
+	if len(roots) == 0 {
+		return "", errFilesNotFound
+	}
+	target := filepath.FromSlash(rel)
+	if !filepath.IsAbs(target) {
+		if fileViewRoot == "" {
+			return "", errFilesNotFound
+		}
+		target = filepath.Join(fileViewRoot, target)
+	}
+	return tool.ResolveWithinRoots(target, roots)
 }
 
 // handleWorkspaceFileWrite answers PUT /api/workspace/file: it writes a file

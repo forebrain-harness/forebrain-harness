@@ -115,7 +115,7 @@ func TestNewMCPDelegatingToolAcceptsOpenRemoteSchemas(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			tool, err := newMCPDelegatingTool("srv__tool", "desc", test.schema, func(context.Context, json.RawMessage) (string, error) {
+			tool, err := newMCPDelegatingTool("srv__tool", "desc", test.schema, func(context.Context, json.RawMessage) (any, error) {
 				return "ok", nil
 			})
 			if err != nil {
@@ -157,7 +157,7 @@ func TestNewMCPDelegatingToolUsesRemoteSchemaAndPassesArgumentsThrough(t *testin
 	}
 
 	var captured json.RawMessage
-	tool, err := newMCPDelegatingTool("mcp__codegraph__codegraph_explore", "desc", inputSchema, func(_ context.Context, arguments json.RawMessage) (string, error) {
+	tool, err := newMCPDelegatingTool("mcp__codegraph__codegraph_explore", "desc", inputSchema, func(_ context.Context, arguments json.RawMessage) (any, error) {
 		captured = append(json.RawMessage(nil), arguments...)
 		return "ok", nil
 	})

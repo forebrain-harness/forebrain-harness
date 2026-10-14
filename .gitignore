@@ -13,6 +13,14 @@ build
 # scripts/fetch-libtokenizers.sh places it at third_party/libtokenizers/<goos>_<goarch>/
 # (fixed version + sha256). See pkg/llm/hftok.
 third_party/libtokenizers/
+# The PDFium native library is fetched, not committed:
+# scripts/fetch-pdfium.sh places it at third_party/pdfium/<goos>_<goarch>/
+# (pinned release + sha256, plus a generated pdfium.pc). See pkg/pdf.
+third_party/pdfium/
+# The CJK fallback fonts are fetched, not committed:
+# scripts/fetch-pdfium-fonts.sh places them at assets/fonts/*.otf
+# (pinned npm package + sha256, OFL-1.1). See assets/fonts/README.md.
+assets/fonts/*.otf
 .idea
 .cursor
 .DS_Store

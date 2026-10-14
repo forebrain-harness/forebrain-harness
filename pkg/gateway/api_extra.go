@@ -135,6 +135,9 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	// ResolveWithinRoots. A path inside a versioned skill's formal directory
 	// is redirected into that skill's draft.
 	workspace.Get("/file", s.handleWorkspaceFileRead)
+	// The image pixel channel: the same file view, served as bytes so a surface
+	// can draw a thumbnail by path (never base64 in an event or JSON response).
+	workspace.Get("/file/raw", s.handleWorkspaceFileRaw)
 	workspace.Put("/file", s.handleWorkspaceFileWrite)
 	workspace.Post("/rename", s.handleWorkspaceRename)
 	workspace.Delete("/entry", s.handleWorkspaceEntryDelete)

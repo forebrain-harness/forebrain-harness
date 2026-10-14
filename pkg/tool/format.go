@@ -183,6 +183,18 @@ func BuildToolMeta(evt StepEvent) ToolMeta {
 		meta.ResultLines = n
 		meta.ResultOffset = intFromAny(evt.Output["offset"])
 	}
+	// An image read (read_file or an MCP tool result) reports its artifact as
+	// facts a surface derives from: the path to fetch, the pixel size, the byte
+	// count. The map carries no base64 — a surface reads the pixels by path.
+	if kind, _ := evt.Output["preview_kind"].(string); strings.EqualFold(strings.TrimSpace(kind), "image") {
+		meta.PreviewKind = "image"
+		meta.PreviewPath = strings.TrimSpace(stringFromAny(evt.Output["abs_path"]))
+		meta.PreviewMIME = strings.TrimSpace(stringFromAny(evt.Output["image_mime"]))
+		meta.PreviewWidth = intFromAny(evt.Output["image_width"])
+		meta.PreviewHeight = intFromAny(evt.Output["image_height"])
+		meta.PreviewBytes = intFromAny(evt.Output["image_bytes"])
+		meta.PreviewScaled = boolFromAny(evt.Output["image_scaled"])
+	}
 	if meta.Status == "running" && !evt.StartedAt.IsZero() {
 		meta.StartedAtMs = evt.StartedAt.UnixMilli()
 	}
@@ -331,6 +343,16 @@ func SummarizeToolStep(evt StepEvent) string {
 		summary := strings.TrimSpace(stringFromAny(evt.Output["summary"]))
 		if summary != "" {
 			return truncateSummary(summary)
+		}
+		// An image read has no line range to name; it gets its own summary
+		// naming the file and its encoded size. A PDF read draws the same card
+		// (preview_kind=image, one page rendered) but names the document, its
+		// page count and the pages shown.
+		if toolName == "read_file" && isImageReadStep(evt) {
+			if isPdfReadStep(evt) {
+				return readPdfStepSummary(evt)
+			}
+			return readImageStepSummary(evt)
 		}
 		// read_file / read: show line range (e.g. "lines 586-610") instead of
 		// a raw line count ("42 lines"), since the caller passes offset+limit.
@@ -507,6 +529,12 @@ func requestPermissionsCompletionSummary(evt StepEvent, invocation string) strin
 }
 
 func formatReadFileStep(evt StepEvent, maxBytes int) (string, bool) {
+	// An image read has no body to show: one line naming the file, its pixel
+	// size and its encoded size. It must never fall through to the JSON dump
+	// below, whose only content would be the same metadata in a worse shape.
+	if isImageReadStep(evt) {
+		return clampBody(readImageStepLine(evt), maxBytes)
+	}
 	pathHint := readFilePathHint(evt)
 	lang := "text"
 	if pathHint != "" {
@@ -537,6 +565,62 @@ func formatReadFileStep(evt StepEvent, maxBytes int) (string, bool) {
 	}
 	out := fmt.Sprintf("path: `%s`\n\n```%s\n%s\n```", pathHint, lang, body)
 	return clampBody(out, maxBytes)
+}
+
+// readImageStepSummary names a read image the way a one-line tool summary
+// does: the file it read and its encoded size.
+func readImageStepSummary(evt StepEvent) string {
+	label := strings.TrimSpace(pathBaseOrPath(readFilePathHint(evt)))
+	if label == "" {
+		label = "image"
+	}
+	return "Read " + label + " · image " + formatBytes(intFromAny(evt.Output["image_bytes"]))
+}
+
+// isImageReadStep reports whether a read_file step handed back an image. Its
+// surface output is marked preview_kind=image and carries no text body.
+func isImageReadStep(evt StepEvent) bool {
+	return evt.Output != nil && strings.TrimSpace(stringFromAny(evt.Output["preview_kind"])) == "image"
+}
+
+// readImageStepLine is the one-line body for an image read: the absolute path,
+// the pixel dimensions, and the encoded size (with a note when it was
+// downscaled to fit). It never carries base64.
+func readImageStepLine(evt StepEvent) string {
+	path := strings.TrimSpace(stringFromAny(evt.Output["abs_path"]))
+	if path == "" {
+		path = readFilePathHint(evt)
+	}
+	width := intFromAny(evt.Output["image_width"])
+	height := intFromAny(evt.Output["image_height"])
+	line := fmt.Sprintf("path: `%s` · image %dx%d · %s", path, width, height, formatBytes(intFromAny(evt.Output["image_bytes"])))
+	if boolFromAny(evt.Output["image_scaled"]) {
+		line += " · scaled"
+	}
+	return line
+}
+
+// isPdfReadStep reports whether a read_file step is a PDF read: an image step
+// that additionally carries the document's page facts. The page facts are what
+// distinguish it from a plain image read while both share one card.
+func isPdfReadStep(evt StepEvent) bool {
+	return isImageReadStep(evt) && evt.Output != nil && intFromAny(evt.Output["pdf_page_count"]) > 0
+}
+
+// readPdfStepSummary names a read PDF the way a one-line tool summary does: the
+// document and its page count, and, when only some pages were rendered, the
+// page range shown.
+func readPdfStepSummary(evt StepEvent) string {
+	label := strings.TrimSpace(pathBaseOrPath(readFilePathHint(evt)))
+	if label == "" {
+		label = "pdf"
+	}
+	pageCount := intFromAny(evt.Output["pdf_page_count"])
+	summary := "Read " + label + " · PDF " + strconv.Itoa(pageCount) + " 页"
+	if rendered := intFromAny(evt.Output["pdf_rendered"]); rendered > 0 && rendered < pageCount {
+		summary += " · 渲染 1-" + strconv.Itoa(rendered) + " 页"
+	}
+	return summary
 }
 
 func readFilePathHint(evt StepEvent) string {

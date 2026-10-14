@@ -2250,6 +2250,17 @@ export const forebrainApi = {
     })
   },
 
+  /**
+   * The URL an image's bytes are fetched from: the same file view, served as
+   * pixels. A surface puts it straight in an <img src>, so the image never
+   * travels through an event or a JSON response as base64. The endpoint serves
+   * only images; a non-image path is refused (415).
+   */
+  workspaceFileRawUrl(scope: WorkspaceScope, path: string): string {
+    const params = new URLSearchParams({ path, ...workspaceScopeParams(scope) })
+    return `/api/workspace/file/raw?${params.toString()}`
+  },
+
   /** Write or create a file; with create, an existing path is refused (409). */
   workspaceWrite(scope: WorkspaceScope, body: { path: string; content: string; create?: boolean }) {
     const params = new URLSearchParams(workspaceScopeParams(scope))

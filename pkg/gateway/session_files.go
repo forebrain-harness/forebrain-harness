@@ -120,13 +120,22 @@ func (s *Server) sessionSource(ctx context.Context, sessionID string) (string, e
 // files root, resolving symlinks, and rejects anything that lands outside it.
 // The root is the project root (or the workshop skills directory): a link
 // pointing elsewhere is not part of this view.
+//
+// A path already spelled absolutely is taken as the full path (and still
+// containment-checked) instead of being joined under the root. The image raw
+// endpoint needs this: a tool step records an image's ABSOLUTE path, so its
+// pixel request arrives absolute while the file editor speaks relative paths.
+// Relative paths — every other caller — resolve exactly as before.
 func (s *Server) resolveFilesPath(ctx context.Context, sessionID, projectID, rel string) (root, full string, err error) {
 	root, err = s.filesRoot(ctx, sessionID, projectID)
 	if err != nil {
 		return "", "", err
 	}
-	joined := filepath.Join(root, filepath.FromSlash(rel))
-	resolved, resolveErr := tool.ResolveWithinRoots(joined, []string{root})
+	target := filepath.FromSlash(rel)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root, target)
+	}
+	resolved, resolveErr := tool.ResolveWithinRoots(target, []string{root})
 	if resolveErr != nil {
 		if errors.Is(resolveErr, tool.ErrPathNotAllowed) {
 			return root, "", tool.ErrPathNotAllowed

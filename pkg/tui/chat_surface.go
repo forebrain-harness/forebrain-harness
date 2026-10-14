@@ -139,7 +139,14 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	displayText := strings.TrimSpace(submission.DisplayText)
 	if len(submission.Attachments) > 0 {
 		var err error
-		parts, displayText, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments)
+		// The same gate read_file and the web upload path apply: a text-only
+		// session model refuses the attached image with the one actionable
+		// sentence instead of sending a request the provider would reject.
+		imageRefusal := ""
+		if r := s.runner(); r != nil {
+			imageRefusal = r.ImageInputRefusal(ctx)
+		}
+		parts, displayText, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments, imageRefusal)
 		if err != nil {
 			return err
 		}

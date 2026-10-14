@@ -67,7 +67,7 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 		t.Fatalf("write png: %v", err)
 	}
 
-	parts, display, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
+	parts, display, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}}, "")
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
 	}
@@ -76,6 +76,30 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 	}
 	if !strings.Contains(display, "[Image #1]") {
 		t.Fatalf("display text missing attachment marker: %q", display)
+	}
+}
+
+// TestSurfaceTurnContentPartsRefusesImageOnTextOnlyModel pins the attachment
+// gate: the same one-step-recoverable refusal read_file gives is what an
+// attached image meets on a text-only session model, so the message never
+// reaches the provider as a request it would reject.
+func TestSurfaceTurnContentPartsRefusesImageOnTextOnlyModel(t *testing.T) {
+	img := filepath.Join(t.TempDir(), "clip.png")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatalf("decode png: %v", err)
+	}
+	if err := os.WriteFile(img, data, 0o600); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+
+	refusal := "the session model x/y does not accept image input; switch model with /model"
+	parts, _, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, Label: "clip.png"}}, refusal)
+	if err == nil || err.Error() != refusal {
+		t.Fatalf("err = %v, want the gate's sentence verbatim", err)
+	}
+	if parts != nil {
+		t.Fatalf("refused message still produced parts: %#v", parts)
 	}
 }
 

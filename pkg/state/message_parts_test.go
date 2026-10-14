@@ -244,3 +244,26 @@ func TestReasoningRowStaysOutOfTheModelTranscript(t *testing.T) {
 		t.Fatalf("reasoning rows on disk = %d, want 1", reasoningRows)
 	}
 }
+
+// TestMessagePartsRoundTripToolResultImage pins that an image carried by a
+// tool-result message (a read_file that handed the model pixels) survives a
+// full serialize -> parse round-trip with its base64 payload and MIME type
+// intact, and keeps the tool_call_id that correlates it to the call.
+func TestMessagePartsRoundTripToolResultImage(t *testing.T) {
+	original := llm.ToolResultMessage("call-1", llm.Text("image 4x4"), llm.ImageBase64("image/png", "iVBORw0KGgo="))
+	partsJSON := MessagePartsJSON(original, original.TextContent())
+	parsed, ok := ParseMessage(llm.RoleTool, original.TextContent(), partsJSON)
+	if !ok {
+		t.Fatalf("ParseMessage failed")
+	}
+	if parsed.ToolCallID != "call-1" {
+		t.Fatalf("ToolCallID=%q want call-1", parsed.ToolCallID)
+	}
+	img, ok := findImageBase64Part(parsed.Parts)
+	if !ok {
+		t.Fatalf("no ContentTypeImageBase64 part after round-trip; parts=%v", parsed.Parts)
+	}
+	if img.ImageBase64 != "iVBORw0KGgo=" || img.MIMEType != "image/png" {
+		t.Fatalf("image part = %#v, want the original data and mime", img)
+	}
+}

@@ -498,6 +498,14 @@ type webTurnInput struct {
 // stopped it: a turn never starts without a file the user attached.
 func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content string, uploads, mentionImages []string) (webTurnInput, error) {
 	text := strings.TrimSpace(content)
+	// The image-input gate (Runner.ImageInputRefusal) is read once for the
+	// whole message: an image upload or an @-picked image on a text-only
+	// session model is refused with the same actionable sentence read_file
+	// gives, rather than sending pixels the provider would reject with a 400.
+	imageRefusal := ""
+	if s.Runner != nil {
+		imageRefusal = s.Runner.ImageInputRefusal(ctx)
+	}
 	var blocks, markers, parts []string
 	for _, fid := range uploads {
 		fid = strings.TrimSpace(fid)
@@ -515,6 +523,9 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 		if rec != nil {
 			label = firstNonBlank(rec.OriginalName, fid)
 			mimeType = strings.TrimSpace(rec.MediaType)
+		}
+		if strings.HasPrefix(mimeType, "image/") && strings.TrimSpace(imageRefusal) != "" {
+			return webTurnInput{}, errors.New(strings.TrimSpace(imageRefusal))
 		}
 		named := label
 		if mimeType != "" {
@@ -559,6 +570,9 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 			continue
 		}
 		seen[abs] = true
+		if strings.TrimSpace(imageRefusal) != "" {
+			return webTurnInput{}, errors.New(strings.TrimSpace(imageRefusal))
+		}
 		// Read now, so an image the model cannot be shown stops the message
 		// here rather than reaching the model as a bare name.
 		image, err := llm.ImageFile(abs)

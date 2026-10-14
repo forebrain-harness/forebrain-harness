@@ -34,7 +34,14 @@ type Session struct {
 	// resolve, or MCP records would land in a different history database and
 	// retrieve_output could never find their ids. Empty disables accounting.
 	stateRoot string
-	reconnect func(context.Context) (*Session, error)
+	// resultsDir is the directory MCP tool results are written under: saved
+	// image and resource blobs and offloaded large outputs. It is the primary
+	// agent workspace's state/mcp-results, NOT home — living inside the
+	// read-exempt workspace root is what lets the model read its own tool
+	// output without an approval. Empty falls back to <home>/state/mcp-results
+	// for embedders that never set it; the production path always sets it.
+	resultsDir string
+	reconnect  func(context.Context) (*Session, error)
 	// baseCtx is the session's own lifetime, derived from the context the
 	// process was started with. A reconnect rebuilds its transport under this
 	// context rather than under the tool call that discovered the expiry: the
@@ -77,6 +84,40 @@ func (s *Session) SetStateRoot(stateRoot string) {
 	s.mu.Lock()
 	s.stateRoot = strings.TrimSpace(stateRoot)
 	s.mu.Unlock()
+}
+
+// SetResultsDir points MCP result persistence at the directory results are
+// written into — the primary agent workspace's state/mcp-results. Callers pass
+// a directory inside the read-exempt workspace root, not home, so the model can
+// read its own tool output without an approval. Empty restores the historical
+// <home>/state/mcp-results fallback (see resultsRootValue).
+func (s *Session) SetResultsDir(dir string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.resultsDir = strings.TrimSpace(dir)
+	s.mu.Unlock()
+}
+
+// resultsRootValue is the directory results are written into: the injected
+// resultsDir, or, when none was set, the historical <home>/state/mcp-results
+// for embedders that do not go through the Runner. It is the ONE place the
+// "state/mcp-results" segment is joined; persistMCPResult uses the returned
+// value as the directory itself.
+func (s *Session) resultsRootValue() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if dir := strings.TrimSpace(s.resultsDir); dir != "" {
+		return dir
+	}
+	if home := strings.TrimSpace(s.home); home != "" {
+		return filepath.Join(home, "state", "mcp-results")
+	}
+	return ""
 }
 
 // liveSession returns the current connection. Nil when the session was never
@@ -137,13 +178,13 @@ func (s *Session) isClosed() bool {
 
 // accounting returns the immutable half of a session: the target the response
 // compression reports against, and the identity the record carries.
-func (s *Session) accounting() (stateRoot, home, serverName string) {
+func (s *Session) accounting() (stateRoot, serverName string) {
 	if s == nil {
-		return "", "", ""
+		return "", ""
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.stateRoot, s.home, s.serverName
+	return s.stateRoot, s.serverName
 }
 
 // requestTimeoutValue is the per-call bound this session applies, zero when the
@@ -995,6 +1036,38 @@ func (s *Session) CallToolJSON(ctx context.Context, toolName string, arguments j
 	)
 }
 
+// CallToolContent is CallToolJSON for the new session path: the same call, but
+// its result is returned as the content the model receives — a text envelope
+// plus one image part per image block — instead of a plain string. The
+// reconnect, timeout and error semantics are identical to CallToolJSON's; only
+// the final rendering of the result differs.
+//
+// imageRefusal, when non-empty, is the reason this session's model may not be
+// handed pixels (see Runner.ImageInputRefusal): the image parts are dropped so
+// a text-only model gets the actionable text envelope instead of a 400.
+func (s *Session) CallToolContent(ctx context.Context, toolName string, arguments json.RawMessage, imageRefusal string) ([]llm.ContentPart, error) {
+	var args any = map[string]any{}
+	if len(arguments) > 0 {
+		if err := json.Unmarshal(arguments, &args); err != nil {
+			return nil, err
+		}
+	}
+	call := func() ([]llm.ContentPart, error) {
+		return s.callToolContentAttempt(ctx, toolName, args, imageRefusal)
+	}
+	parts, err := call()
+	if !IsSessionExpired(err) {
+		return parts, err
+	}
+	if s.reconnectFactory() == nil {
+		return parts, err
+	}
+	if rerr := s.reconnectSession(); rerr != nil {
+		return parts, rerr
+	}
+	return call()
+}
+
 // callToolAttempt performs one call against whatever connection this session
 // holds right now.
 //
@@ -1012,7 +1085,7 @@ func (s *Session) callToolAttempt(ctx context.Context, toolName string, args any
 	if err != nil {
 		return "", err
 	}
-	stateRoot, home, serverName := s.accounting()
+	stateRoot, serverName := s.accounting()
 	if timeout := s.requestTimeoutValue(); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -1026,17 +1099,69 @@ func (s *Session) callToolAttempt(ctx context.Context, toolName string, args any
 	if err != nil {
 		return "", err
 	}
-	out, err := processToolResultJSON(home, serverName, toolName, string(b), accounting{
+	out, err := processToolResultJSON(s.resultsRootValue(), serverName, toolName, string(b), accounting{
 		stateRoot: stateRoot,
 		sessionID: llm.AgentSessionIDFromContext(ctx),
 	})
 	if err != nil {
 		return "", err
 	}
-	if res != nil && res.IsError {
-		return out, fmt.Errorf("%s", out)
+	if err := toolResultError(res, out); err != nil {
+		return out, err
 	}
 	return out, nil
+}
+
+// callToolContentAttempt is callToolAttempt for a result that may carry pixels:
+// the same connection resolution, deadline and error semantics, but the result
+// is rendered as content parts (an image part per image block) instead of a
+// plain string. imageRefusal suppresses the image parts without failing the
+// call, so a text-only model still receives the text envelope.
+func (s *Session) callToolContentAttempt(ctx context.Context, toolName string, args any, imageRefusal string) ([]llm.ContentPart, error) {
+	sess, err := s.ensureSession()
+	if err != nil {
+		return nil, err
+	}
+	stateRoot, serverName := s.accounting()
+	if timeout := s.requestTimeoutValue(); timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: toolName, Arguments: args})
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		return nil, err
+	}
+	parts, err := ToolResultContent(ctx, s.resultsRootValue(), serverName, toolName, string(b), accounting{
+		stateRoot: stateRoot,
+		sessionID: llm.AgentSessionIDFromContext(ctx),
+	}, imageRefusal)
+	if err != nil {
+		return nil, err
+	}
+	if res != nil && res.IsError {
+		// Match callToolAttempt: a failed call is reported as an error whose
+		// text is exactly what the model would have read, so a failure never
+		// degrades into a result that looks successful.
+		return parts, toolResultError(res, llm.TextContent(parts...))
+	}
+	return parts, nil
+}
+
+// toolResultError maps an MCP tool result to the error a failed call reports.
+// A result with IsError set is a failure the model must see as an error, not a
+// success whose text happens to describe a problem. text is the message the
+// model would have read — the same rule both callToolAttempt and
+// callToolContentAttempt apply, so the two paths never diverge on a failure.
+func toolResultError(res *mcp.CallToolResult, text string) error {
+	if res != nil && res.IsError {
+		return fmt.Errorf("%s", text)
+	}
+	return nil
 }
 
 func (s *Session) reconnectFactory() func(context.Context) (*Session, error) {

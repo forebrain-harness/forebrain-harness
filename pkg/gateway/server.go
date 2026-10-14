@@ -349,6 +349,30 @@ func gatewayToolMetaPayload(meta tool.ToolMeta) map[string]any {
 	if v := strings.TrimSpace(meta.SkillPath); v != "" {
 		out["skill_path"] = v
 	}
+	// Image preview facts ride the same meta the history rows carry, so a live
+	// step draws the same thumbnail a replayed row draws. Never base64: only
+	// the path and its facts.
+	if v := strings.TrimSpace(meta.PreviewKind); v != "" {
+		out["preview_kind"] = v
+	}
+	if v := strings.TrimSpace(meta.PreviewPath); v != "" {
+		out["preview_path"] = v
+	}
+	if v := strings.TrimSpace(meta.PreviewMIME); v != "" {
+		out["preview_mime"] = v
+	}
+	if meta.PreviewWidth > 0 {
+		out["preview_width"] = meta.PreviewWidth
+	}
+	if meta.PreviewHeight > 0 {
+		out["preview_height"] = meta.PreviewHeight
+	}
+	if meta.PreviewBytes > 0 {
+		out["preview_bytes"] = meta.PreviewBytes
+	}
+	if meta.PreviewScaled {
+		out["preview_scaled"] = true
+	}
 	if meta.StartedAtMs > 0 {
 		out["started_at_ms"] = meta.StartedAtMs
 	}

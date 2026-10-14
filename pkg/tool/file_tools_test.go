@@ -1,10 +1,19 @@
 package tool
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/rc4"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -246,23 +255,6 @@ func TestFileReadRejectsBinaryContentBeforeCachingRead(t *testing.T) {
 	}
 	if _, ok := st.GetReadState(p); ok {
 		t.Fatalf("binary content should not be remembered as read")
-	}
-}
-
-func TestFileReadRejectsPDFWithSpecificMessage(t *testing.T) {
-	tmp := t.TempDir()
-	p := filepath.Join(tmp, "paper.pdf")
-	if err := os.WriteFile(p, []byte("%PDF-1.7\n"), 0o644); err != nil {
-		t.Fatalf("write pdf: %v", err)
-	}
-	tool, err := NewFileReadTool(NewState(tmp))
-	if err != nil {
-		t.Fatalf("NewFileReadTool: %v", err)
-	}
-
-	_, err = tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`"}`)
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "pdf") {
-		t.Fatalf("err=%v want pdf refusal", err)
 	}
 }
 
@@ -1368,4 +1360,608 @@ func TestFileToolsRecordChangesForRewind(t *testing.T) {
 	if created.SessionID != "parent" {
 		t.Fatalf("a subagent's write recorded under session %q, want the parent conversation", created.SessionID)
 	}
+}
+
+// writeTestPNG writes a small, real PNG (the given size) to a temp file and
+// returns its path and bytes.
+func writeTestPNG(t *testing.T, dir string, w, h int) (string, []byte) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(x * 40), G: uint8(y * 40), B: 0x20, A: 0xff})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	path := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+	return path, buf.Bytes()
+}
+
+// TestFileReadReturnsImagePartsForImageFile pins that read_file hands the
+// model a text note plus a real image part, and that the image part is the
+// file's own bytes (base64, image/png).
+func TestFileReadReturnsImagePartsForImageFile(t *testing.T) {
+	tmp := t.TempDir()
+	path, raw := writeTestPNG(t, tmp, 4, 4)
+	tool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	got, err := tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(path)+`"}`)
+	if err != nil {
+		t.Fatalf("read image: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts=%d want 2 (note + image)", len(parts))
+	}
+	if parts[0].Type != llm.ContentTypeText || !strings.Contains(parts[0].Text, "image 4x4") {
+		t.Fatalf("first part = %#v, want a note naming the 4x4 image", parts[0])
+	}
+	if parts[1].Type != llm.ContentTypeImageBase64 || parts[1].MIMEType != "image/png" {
+		t.Fatalf("image part = %#v, want image/png image_base64", parts[1])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(parts[1].ImageBase64)
+	if err != nil {
+		t.Fatalf("decode image base64: %v", err)
+	}
+	if !bytes.Equal(decoded, raw) {
+		t.Fatal("image part bytes differ from the file")
+	}
+}
+
+// TestFileReadImageDoesNotEnterReadLedger pins that an image read is not
+// remembered as text (nothing may then edit it) and does not reach the read
+// observers (the language-server index is for source files).
+func TestFileReadImageDoesNotEnterReadLedger(t *testing.T) {
+	tmp := t.TempDir()
+	path, _ := writeTestPNG(t, tmp, 4, 4)
+	st := NewState(tmp)
+	observed := false
+	st.SetReadObserver(func(context.Context, string, []byte) { observed = true })
+	tool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	if _, err := tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(path)+`"}`); err != nil {
+		t.Fatalf("read image: %v", err)
+	}
+	if _, ok := st.GetReadState(path); ok {
+		t.Fatal("an image read must not be remembered as read")
+	}
+	if observed {
+		t.Fatal("an image read must not notify the read observer")
+	}
+}
+
+// TestFileReadImageCapturesSurfaceOutputWithoutPixels pins the surface map: it
+// carries the marker, dimensions and byte counts, and never base64.
+func TestFileReadImageCapturesSurfaceOutputWithoutPixels(t *testing.T) {
+	tmp := t.TempDir()
+	path, _ := writeTestPNG(t, tmp, 8, 6)
+	st := NewState(tmp)
+	tool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+	if _, err := tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(path)+`"}`); err != nil {
+		t.Fatalf("read image: %v", err)
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if completion.Output["preview_kind"] != "image" {
+		t.Fatalf("preview_kind=%#v want image", completion.Output["preview_kind"])
+	}
+	if completion.Output["image_width"] != 8 || completion.Output["image_height"] != 6 {
+		t.Fatalf("dims = %vx%v want 8x6", completion.Output["image_width"], completion.Output["image_height"])
+	}
+	if n, _ := completion.Output["image_bytes"].(int); n <= 0 {
+		t.Fatalf("image_bytes=%#v want > 0", completion.Output["image_bytes"])
+	}
+	encoded, err := json.Marshal(completion.Output)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if bytes.Contains(encoded, []byte("iVBOR")) {
+		t.Fatal("surface output must not carry image base64")
+	}
+}
+
+// TestFileReadUndecodableImageExtensionIsActionable pins that an image
+// extension we cannot decode gets a one-step "convert it" error rather than a
+// blind binary refusal.
+func TestFileReadUndecodableImageExtensionIsActionable(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "old.bmp")
+	if err := os.WriteFile(path, []byte("BM\x00\x00\x00\x00binary-ish"), 0o644); err != nil {
+		t.Fatalf("write bmp: %v", err)
+	}
+	tool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	_, err = tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(path)+`"}`)
+	if err == nil {
+		t.Fatal("expected an actionable error for a .bmp read")
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "png") || !strings.Contains(msg, "convert") {
+		t.Fatalf("err=%q want a convert-to-png hint", err)
+	}
+}
+
+// TestFileReadRefusesImageWhenGateRefuses pins the image-input gate's effect
+// on read_file: a session model that cannot take image input gets the
+// actionable refusal sentence, not pixels, and a text read is untouched.
+func TestFileReadRefusesImageWhenGateRefuses(t *testing.T) {
+	tmp := t.TempDir()
+	imgPath, _ := writeTestPNG(t, tmp, 4, 4)
+	txtPath := filepath.Join(tmp, "note.txt")
+	if err := os.WriteFile(txtPath, []byte("alpha\n"), 0o644); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	st := NewState(tmp)
+	st.SetImageInputGate(func(context.Context) string {
+		return "the session model text-only does not accept image input; switch model with /model, then read the image again"
+	})
+	tool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	_, err = tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(imgPath)+`"}`)
+	if err == nil || !strings.Contains(err.Error(), "does not accept image input") {
+		t.Fatalf("err=%v want the gate's refusal sentence", err)
+	}
+
+	if _, err := tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(txtPath)+`"}`); err != nil {
+		t.Fatalf("a text read must not be gated: %v", err)
+	}
+}
+
+// readMCPResultFixture builds a State whose allowed roots are one project, with
+// the primary agent workspace set as a distinct read-exempt boundary — the
+// production shape of a project session (Step 5b). It writes one result file
+// under the agent workspace's state/mcp-results and returns its path.
+func readMCPResultFixture(t *testing.T, siblings []string) (st *State, resultsPath string, home string) {
+	t.Helper()
+	home = t.TempDir()
+	agentWS := filepath.Join(home, "workspace")
+	projectRoot := t.TempDir()
+	resultsDir := filepath.Join(agentWS, "state", "mcp-results")
+	if err := os.MkdirAll(resultsDir, 0o700); err != nil {
+		t.Fatalf("mkdir results dir: %v", err)
+	}
+	resultsPath = filepath.Join(resultsDir, "mcp-shots-shot-1.json")
+	if err := os.WriteFile(resultsPath, []byte("{\"ok\":true}\n"), 0o600); err != nil {
+		t.Fatalf("write result file: %v", err)
+	}
+	st = NewState(projectRoot)
+	st.SetPrimaryWorkspaceBoundary(home, agentWS, siblings)
+	return st, resultsPath, home
+}
+
+// TestFileReadMCPResultsNeedsNoApproval pins Step 5b: an MCP tool's result file
+// lives under the primary agent workspace's state/mcp-results, a read-exempt
+// root, so the model reading back its own screenshot needs no approval — even
+// though that directory sits outside the project's allowed roots. The approval
+// hook is armed to fail the test if it is ever consulted.
+func TestFileReadMCPResultsNeedsNoApproval(t *testing.T) {
+	st, resultsPath, _ := readMCPResultFixture(t, nil)
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		t.Error("reading the agent workspace's own mcp-results must not ask for approval")
+		return "", false, nil
+	})
+	fileRead, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	out, err := fileRead.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(resultsPath)+`"}`)
+	if err != nil {
+		t.Fatalf("read mcp-results: %v", err)
+	}
+	if !strings.Contains(fmt.Sprint(out), "ok") {
+		t.Fatalf("unexpected output %q", out)
+	}
+}
+
+// TestFileReadStillAsksInsideHomeOutsideWorkspace proves Step 5b did not widen
+// the FOREBRAIN_HOME protection: a path in home but NOT under the primary
+// workspace (the credentials and the state database) still raises the approval
+// action.
+func TestFileReadStillAsksInsideHomeOutsideWorkspace(t *testing.T) {
+	st, _, home := readMCPResultFixture(t, nil)
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		return "act-1", true, nil
+	})
+	fileRead, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	for _, rel := range []string{"auth.json", filepath.Join("state", "forebrain.state.sqlite")} {
+		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(p, []byte("secret\n"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+		_, err := fileRead.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`"}`)
+		var req *RequiresActionError
+		if !errors.As(err, &req) {
+			t.Fatalf("%s: err = %v, want RequiresActionError", rel, err)
+		}
+	}
+}
+
+// TestFileReadMCPResultsNeedsNoApprovalInProjectSession is the machine-checkable
+// proof of the load-bearing claim in Step 5b: a PROJECT session's active
+// workspace is still the primary agent workspace, so an mcp-results file there
+// is read-exempt even when the session also has its own project root and the
+// boundary carries sibling workspaces. All three MCP scopes share this one
+// directory, so this is what makes "global / primary / project results need no
+// approval" true.
+func TestFileReadMCPResultsNeedsNoApprovalInProjectSession(t *testing.T) {
+	sibling := filepath.Join(t.TempDir(), "review-agent-workspace")
+	st, resultsPath, _ := readMCPResultFixture(t, []string{sibling})
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		t.Error("a project session's own mcp-results under the primary workspace must not ask for approval")
+		return "", false, nil
+	})
+	fileRead, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	if _, err := fileRead.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(resultsPath)+`"}`); err != nil {
+		t.Fatalf("read mcp-results in a project session: %v", err)
+	}
+}
+
+// TestFileReadRendersPDFPages pins the PDF branch: a PDF is not read as text,
+// it is rendered page by page and handed to the model the way an image is — a
+// note naming the document and the pages shown, then one pixel part per page.
+// The surface output reuses the image read's shape and its preview path points
+// at a written PNG (never the PDF, which the image endpoint cannot serve).
+func TestFileReadRendersPDFPages(t *testing.T) {
+	tmp := t.TempDir()
+	pdfPath := filepath.Join(tmp, "report.pdf")
+	if err := os.WriteFile(pdfPath, newTestPDF(3), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	st := NewState(tmp)
+	resultDir := filepath.Join(tmp, "state", "tool-outputs")
+	st.SetToolResultDir(resultDir)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(pdfPath)+`"}`)
+	if err != nil {
+		t.Fatalf("read pdf: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	if len(parts) != 4 {
+		t.Fatalf("parts=%d want 4 (note + 3 pages)", len(parts))
+	}
+	note := parts[0]
+	if note.Type != llm.ContentTypeText {
+		t.Fatalf("first part = %#v, want a text note", note)
+	}
+	for _, want := range []string{pdfPath, "3 pages", "rendered pages 1-3"} {
+		if !strings.Contains(note.Text, want) {
+			t.Fatalf("note %q does not name %q", note.Text, want)
+		}
+	}
+	for i := 1; i < len(parts); i++ {
+		if parts[i].Type != llm.ContentTypeImageBase64 || parts[i].MIMEType != "image/png" {
+			t.Fatalf("page part %d = %#v, want image/png image_base64", i, parts[i])
+		}
+	}
+
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if completion.Output["preview_kind"] != "image" {
+		t.Fatalf("preview_kind=%#v want image", completion.Output["preview_kind"])
+	}
+	if got, _ := completion.Output["pdf_page_count"].(int); got != 3 {
+		t.Fatalf("pdf_page_count=%#v want 3", completion.Output["pdf_page_count"])
+	}
+	if got, _ := completion.Output["pdf_rendered"].(int); got != 3 {
+		t.Fatalf("pdf_rendered=%#v want 3", completion.Output["pdf_rendered"])
+	}
+	preview, _ := completion.Output["abs_path"].(string)
+	if !strings.HasSuffix(preview, ".png") || preview == pdfPath {
+		t.Fatalf("preview path %q must be a written PNG, not the PDF", preview)
+	}
+	if _, err := os.Stat(preview); err != nil {
+		t.Fatalf("preview PNG was not written: %v", err)
+	}
+	encoded, err := json.Marshal(completion.Output)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if bytes.Contains(encoded, []byte("iVBOR")) {
+		t.Fatal("surface output must not carry image base64")
+	}
+}
+
+// TestFileReadPDFNamesThePagesItDidNotRender pins that a document longer than
+// the render cap still reports its true length and says how many pages the
+// model has not seen.
+func TestFileReadPDFNamesThePagesItDidNotRender(t *testing.T) {
+	tmp := t.TempDir()
+	pdfPath := filepath.Join(tmp, "long.pdf")
+	if err := os.WriteFile(pdfPath, newTestPDF(12), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	st := NewState(tmp)
+	st.SetToolResultDir(filepath.Join(tmp, "state", "tool-outputs"))
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(pdfPath)+`"}`)
+	if err != nil {
+		t.Fatalf("read pdf: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	note := parts[0].Text
+	for _, want := range []string{"12 pages", "rendered pages 1-5", "7 not rendered"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q does not name %q", note, want)
+		}
+	}
+	completion, _ := ToolCompletionFromContext(ctx)
+	if got, _ := completion.Output["pdf_rendered"].(int); got != 5 {
+		t.Fatalf("pdf_rendered=%#v want 5", completion.Output["pdf_rendered"])
+	}
+}
+
+// TestFileReadPDFActionableErrors pins that a PDF the renderer cannot turn into
+// pages fails with a message the model can act on, not a bare error code.
+func TestFileReadPDFActionableErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{name: "damaged", data: []byte("%PDF-1.7\nthis is not a real pdf body\n"), want: "could not be"},
+		{name: "password", data: newEncryptedTestPDF("hunter2"), want: "password-protected"},
+		{name: "no pages", data: newTestPDF(0), want: "no pages"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			pdfPath := filepath.Join(tmp, "file.pdf")
+			if err := os.WriteFile(pdfPath, tc.data, 0o644); err != nil {
+				t.Fatalf("write pdf: %v", err)
+			}
+			st := NewState(tmp)
+			st.SetToolResultDir(filepath.Join(tmp, "state", "tool-outputs"))
+			readTool, err := NewFileReadTool(st)
+			if err != nil {
+				t.Fatalf("NewFileReadTool: %v", err)
+			}
+			_, err = readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(pdfPath)+`"}`)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestFileReadRefusesPDFWhenGateRefuses pins that a session model which cannot
+// take image input gets the gate's sentence for a PDF, and no page is rendered
+// (the gate is consulted before the renderer runs).
+func TestFileReadRefusesPDFWhenGateRefuses(t *testing.T) {
+	tmp := t.TempDir()
+	pdfPath := filepath.Join(tmp, "report.pdf")
+	if err := os.WriteFile(pdfPath, newTestPDF(3), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	st := NewState(tmp)
+	resultDir := filepath.Join(tmp, "state", "tool-outputs")
+	st.SetToolResultDir(resultDir)
+	st.SetImageInputGate(func(context.Context) string {
+		return "the session model text-only does not accept image input; switch model with /model, then read the file again"
+	})
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	_, err = readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(pdfPath)+`"}`)
+	if err == nil || !strings.Contains(err.Error(), "does not accept image input") {
+		t.Fatalf("err=%v want the gate's refusal sentence", err)
+	}
+	if pngs := countPNGs(t, resultDir); pngs != 0 {
+		t.Fatalf("a gated PDF read must render nothing, but wrote %d PNG(s)", pngs)
+	}
+}
+
+// countPNGs counts the .png files under dir, treating a missing dir as zero.
+func countPNGs(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".png") {
+			count++
+		}
+	}
+	return count
+}
+
+// The PDF builders below are this package's own: pkg/pdf writes its fixtures in
+// its own tests, and a committed binary fixture is reserved for pkg/pdf/testdata
+// (the only exception in the repository). They produce small, valid PDFs so the
+// tool-layer tests can render real pages without depending on those fixtures.
+
+// newTestPDF builds an unencrypted PDF with the given number of pages, each
+// carrying a short Helvetica caption.
+func newTestPDF(pages int) []byte {
+	var objects []string
+	add := func(body string) int {
+		objects = append(objects, body)
+		return len(objects)
+	}
+	catalog := add("")
+	pagesNum := add("")
+	font := add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+	var kids []string
+	for i := 1; i <= pages; i++ {
+		content := fmt.Sprintf("BT /F1 24 Tf 72 700 Td (Page %d) Tj ET", i)
+		contentNum := add(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+		pageNum := add(fmt.Sprintf(
+			"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
+			pagesNum, font, contentNum))
+		kids = append(kids, fmt.Sprintf("%d 0 R", pageNum))
+	}
+	objects[catalog-1] = fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesNum)
+	objects[pagesNum-1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), pages)
+	return assembleTestPDF(objects, fmt.Sprintf("%d 0 R", catalog), "")
+}
+
+// assembleTestPDF serialises objects (1-based) into a PDF, with extra appended
+// to the trailer dictionary.
+func assembleTestPDF(objects []string, root, extra string) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
+	offsets := make([]int, len(objects)+1)
+	for i, body := range objects {
+		offsets[i+1] = buf.Len()
+		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", i+1, body)
+	}
+	xref := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 %d\n", len(objects)+1)
+	buf.WriteString("0000000000 65535 f \n")
+	for i := 1; i <= len(objects); i++ {
+		fmt.Fprintf(&buf, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root %s%s >>\nstartxref\n%d\n%%%%EOF\n",
+		len(objects)+1, root, extra, xref)
+	return buf.Bytes()
+}
+
+// testPasswordPad is the fixed 32-byte string the standard security handler
+// appends to a password (PDF 1.7, algorithm 2).
+var testPasswordPad = []byte{
+	0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08,
+	0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
+}
+
+// newEncryptedTestPDF builds a one-page PDF protected by the standard security
+// handler, revision 2 (40-bit RC4), with the given user password, so opening it
+// without a password fails.
+func newEncryptedTestPDF(userPassword string) []byte {
+	const ownerPassword = "forebrain-owner"
+	permissions := int32(-3904)
+	id0 := []byte("0123456789abcdef")
+
+	paddedUser := testPadPassword(userPassword)
+	paddedOwner := testPadPassword(ownerPassword)
+
+	ownerKey := testMD5Sum(paddedOwner)[:5]
+	o := testRC4Crypt(ownerKey, paddedUser)
+
+	h := md5.New()
+	h.Write(paddedUser)
+	h.Write(o)
+	var pbuf [4]byte
+	binary.LittleEndian.PutUint32(pbuf[:], uint32(permissions))
+	h.Write(pbuf[:])
+	h.Write(id0)
+	fileKey := h.Sum(nil)[:5]
+
+	u := testRC4Crypt(fileKey, testPasswordPad)
+
+	var objects []string
+	add := func(body string) int {
+		objects = append(objects, body)
+		return len(objects)
+	}
+	catalog := add("")
+	pagesNum := add("")
+	font := add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+	content := "BT /F1 24 Tf 72 700 Td (Secret) Tj ET"
+	// The content stream is encrypted with this object's key.
+	contentNum := len(objects) + 1
+	encrypted := testRC4Crypt(testObjectKey(fileKey, contentNum, 0), []byte(content))
+	add(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(encrypted), encrypted))
+	pageNum := add(fmt.Sprintf(
+		"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
+		pagesNum, font, contentNum))
+	objects[catalog-1] = fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesNum)
+	objects[pagesNum-1] = fmt.Sprintf("<< /Type /Pages /Kids [%d 0 R] /Count 1 >>", pageNum)
+
+	encrypt := add(fmt.Sprintf(
+		"<< /Filter /Standard /V 1 /R 2 /Length 40 /O <%s> /U <%s> /P %d >>",
+		hex.EncodeToString(o), hex.EncodeToString(u), permissions))
+
+	extra := fmt.Sprintf(" /Encrypt %d 0 R /ID [<%s> <%s>]",
+		encrypt, hex.EncodeToString(id0), hex.EncodeToString(id0))
+	return assembleTestPDF(objects, fmt.Sprintf("%d 0 R", catalog), extra)
+}
+
+func testPadPassword(password string) []byte {
+	out := make([]byte, 32)
+	n := copy(out, password)
+	copy(out[n:], testPasswordPad)
+	return out
+}
+
+func testObjectKey(fileKey []byte, num, gen int) []byte {
+	h := md5.New()
+	h.Write(fileKey)
+	h.Write([]byte{byte(num), byte(num >> 8), byte(num >> 16), byte(gen), byte(gen >> 8)})
+	limit := len(fileKey) + 5
+	if limit > 16 {
+		limit = 16
+	}
+	return h.Sum(nil)[:limit]
+}
+
+func testMD5Sum(data []byte) []byte {
+	sum := md5.Sum(data)
+	return sum[:]
+}
+
+func testRC4Crypt(key, data []byte) []byte {
+	cipher, err := rc4.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]byte, len(data))
+	cipher.XORKeyStream(out, data)
+	return out
 }
