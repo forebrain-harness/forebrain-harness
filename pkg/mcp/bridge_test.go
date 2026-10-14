@@ -45,6 +45,10 @@ const (
 	fixtureModeBadProtocol = "bad-protocol"
 	fixtureModeSilent      = "silent"
 	fixtureModeToolsFail   = "tools-fail"
+	// fixtureModeHangingCall answers the handshake and the tool listing and
+	// then never answers a tools/call, which is the one server shape a
+	// per-call deadline can be observed against.
+	fixtureModeHangingCall = "call-hangs"
 )
 
 func TestStdioSessionCloseReapsTheChildProcess(t *testing.T) {
@@ -469,7 +473,7 @@ func main() {
 	writeMarker(os.Getenv("FOREBRAIN_TEST_MCP_FIXTURE_PID_FILE"), fmt.Sprint(os.Getpid()))
 	defer writeMarker(os.Getenv("FOREBRAIN_TEST_MCP_FIXTURE_EXIT_FILE"), "done")
 	switch os.Getenv("FOREBRAIN_TEST_MCP_FIXTURE_MODE") {
-	case "bad-protocol", "silent", "tools-fail":
+	case "bad-protocol", "silent", "tools-fail", "call-hangs":
 		serveRaw(os.Getenv("FOREBRAIN_TEST_MCP_FIXTURE_MODE"))
 	default:
 		serveSDK()
@@ -531,7 +535,22 @@ func serveRaw(mode string) {
 				writeMessage(out, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "tools/list is disabled here"}})
 				continue
 			}
-			writeMessage(out, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": []any{}}})
+			tools := []any{}
+			if mode == "call-hangs" {
+				tools = []any{map[string]any{
+					"name":        "hang",
+					"description": "never answers",
+					"inputSchema": map[string]any{"type": "object"},
+				}}
+			}
+			writeMessage(out, map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": tools}})
+		case "tools/call":
+			// The hanging mode is the point of this branch: a server that
+			// accepts the request and answers nothing.
+			if mode == "call-hangs" {
+				continue
+			}
+			writeMessage(out, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "method not found"}})
 		default:
 			writeMessage(out, map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32601, "message": "method not found"}})
 		}

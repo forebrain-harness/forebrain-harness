@@ -44,6 +44,13 @@ func globalList() []appcfg.MCPServerConfig {
 	}
 }
 
+// resolveMCPGlobal runs the resolution the way these tests were written: one
+// shared list, no servers of any primary agent's own.
+func resolveMCPGlobal(home, ws string, global []appcfg.MCPServerConfig, launch safety.ProjectContext) MCPResolution {
+	agents := appcfg.AgentsSection{Defaults: appcfg.AgentDefaults{MCPServers: global}}
+	return ResolveSessionMCP(home, ws, agents, "", launch)
+}
+
 func TestResolveSessionMCPTrustedConfirmedIncludesProject(t *testing.T) {
 	home := t.TempDir()
 	ws := t.TempDir()
@@ -54,7 +61,7 @@ func TestResolveSessionMCPTrustedConfirmedIncludesProject(t *testing.T) {
 	if err := DecideProjectMCPConsents(ws, launch, []string{"projtool"}); err != nil {
 		t.Fatal(err)
 	}
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	names := serverNames(res.Servers)
 	if len(names) != 2 || !containsFold(names, "codegraph") || !containsFold(names, "projtool") {
 		t.Fatalf("servers=%v", names)
@@ -77,7 +84,7 @@ func TestResolveSessionMCPUnconfirmedFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	launch := trustedVCSProject(t, home, dir)
 	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	names := serverNames(res.Servers)
 	if len(names) != 1 || !strings.EqualFold(names[0], "codegraph") {
 		t.Fatalf("unconfirmed entry must not load: %v", names)
@@ -100,7 +107,7 @@ func TestResolveSessionMCPDeniedExcluded(t *testing.T) {
 	if err := DecideProjectMCPConsents(ws, launch, nil); err != nil {
 		t.Fatal(err)
 	}
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(res.Servers); len(names) != 1 {
 		t.Fatalf("denied entry must not load: %v", names)
 	}
@@ -118,7 +125,7 @@ func TestResolveSessionMCPUntrustedProjectExcludesEntries(t *testing.T) {
 	}
 	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}}
 	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(res.Servers); len(names) != 1 {
 		t.Fatalf("untrusted project entries must not load: %v", names)
 	}
@@ -140,7 +147,7 @@ func TestResolveSessionMCPTrustedNonVCSProjectLoadsEntries(t *testing.T) {
 
 	// Unconfirmed: the entry is not loaded yet, and the reason is consent,
 	// never a missing .git.
-	pending := ResolveSessionMCP(home, ws, globalList(), launch)
+	pending := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(pending.Servers); len(names) != 1 {
 		t.Fatalf("unconfirmed project entry must not load yet: %v", names)
 	}
@@ -151,7 +158,7 @@ func TestResolveSessionMCPTrustedNonVCSProjectLoadsEntries(t *testing.T) {
 	if err := DecideProjectMCPConsents(ws, launch, []string{"projtool"}); err != nil {
 		t.Fatal(err)
 	}
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(res.Servers); len(names) != 2 {
 		t.Fatalf("a trusted non-VCS project must load its confirmed entries: %v", names)
 	}
@@ -166,7 +173,7 @@ func TestResolveSessionMCPSameNameOverridesGlobal(t *testing.T) {
 	if err := DecideProjectMCPConsents(ws, launch, []string{"CODEGRAPH"}); err != nil {
 		t.Fatal(err)
 	}
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if len(res.Servers) != 1 {
 		t.Fatalf("override must replace, not append: %+v", res.Servers)
 	}
@@ -187,7 +194,7 @@ func TestInspectProjectMCPReportsDrift(t *testing.T) {
 	if err := DecideProjectMCPConsents(ws, launch, []string{"projtool"}); err != nil {
 		t.Fatal(err)
 	}
-	frozen := ResolveSessionMCP(home, ws, globalList(), launch)
+	frozen := resolveMCPGlobal(home, ws, globalList(), launch)
 	summary := InspectProjectMCP(ws, frozen.Servers, launch)
 	if summary.PendingReload {
 		t.Fatalf("no drift yet: %+v", summary)
@@ -216,7 +223,7 @@ func TestResolveSessionMCPNoProjectFilesMatchesGlobal(t *testing.T) {
 	dir := t.TempDir()
 	launch := trustedVCSProject(t, home, dir)
 	global := globalList()
-	res := ResolveSessionMCP(home, ws, global, launch)
+	res := resolveMCPGlobal(home, ws, global, launch)
 	if len(res.Servers) != len(global) {
 		t.Fatalf("servers=%+v", res.Servers)
 	}
@@ -234,7 +241,7 @@ func TestResolveSessionMCPSecretRejectionNote(t *testing.T) {
 	dir := t.TempDir()
 	launch := trustedVCSProject(t, home, dir)
 	writeProjectMCP(t, dir, "mcp_servers:\n  - name: leaky\n    transport: stdio\n    command: /bin/x\n    env:\n      API_KEY: abc\n")
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(res.Servers); len(names) != 1 {
 		t.Fatalf("secret-bearing file must not load: %v", names)
 	}
@@ -258,11 +265,11 @@ func TestConsentsArePerAgentWorkspace(t *testing.T) {
 	if err := DecideProjectMCPConsents(wsA, launch, []string{"projtool"}); err != nil {
 		t.Fatal(err)
 	}
-	resA := ResolveSessionMCP(home, wsA, globalList(), launch)
+	resA := resolveMCPGlobal(home, wsA, globalList(), launch)
 	if names := serverNames(resA.Servers); len(names) != 2 {
 		t.Fatalf("workspace A confirmed the entry: %v", names)
 	}
-	resB := ResolveSessionMCP(home, wsB, globalList(), launch)
+	resB := resolveMCPGlobal(home, wsB, globalList(), launch)
 	if names := serverNames(resB.Servers); len(names) != 1 {
 		t.Fatalf("workspace B must fail closed without its own consent: %v", names)
 	}
@@ -279,7 +286,7 @@ func TestFingerprintChangeReasks(t *testing.T) {
 	}
 	// Change the command: the recorded fingerprint no longer applies.
 	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt-v2\n")
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(res.Servers); len(names) != 1 {
 		t.Fatalf("changed fingerprint must re-ask: %v", names)
 	}
@@ -318,7 +325,7 @@ func TestResolveSessionMCPLeavesDisabledServersOutOfANewSession(t *testing.T) {
 	if err := DecideProjectMCPConsents(ws, launch, []string{"projtool"}); err != nil {
 		t.Fatal(err)
 	}
-	before := ResolveSessionMCP(home, ws, globalList(), launch)
+	before := resolveMCPGlobal(home, ws, globalList(), launch)
 	var projtool appcfg.MCPServerConfig
 	for _, srv := range before.Servers {
 		if strings.EqualFold(srv.Name, "projtool") {
@@ -328,7 +335,7 @@ func TestResolveSessionMCPLeavesDisabledServersOutOfANewSession(t *testing.T) {
 	if err := mcp.SetServerDisabled(ws, projtool, true); err != nil {
 		t.Fatal(err)
 	}
-	res := ResolveSessionMCP(home, ws, globalList(), launch)
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
 	if names := serverNames(res.Servers); len(names) != 1 || !containsFold(names, "codegraph") {
 		t.Fatalf("servers=%v, want projtool left out", names)
 	}
@@ -375,5 +382,96 @@ func TestProjectLSPConsentsNeedTrust(t *testing.T) {
 	launch.TrustLevel = safety.LevelTrusted
 	if pending := PendingProjectLSPConsents(ws, launch); len(pending) != 1 || pending[0].ID != "s" {
 		t.Fatalf("pending = %+v", pending)
+	}
+}
+
+// TestResolveSessionMCPLayersTheAgentsOwnList pins the three-layer resolution end
+// to end: an agent's own entry shadows a same-named shared one, a different name
+// adds to it, another agent still sees the shared list, and the stamps say which
+// layer each effective entry came from.
+func TestResolveSessionMCPLayersTheAgentsOwnList(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	launch := trustedVCSProject(t, home, t.TempDir())
+	agents := appcfg.AgentsSection{
+		Defaults: appcfg.AgentDefaults{MCPServers: []appcfg.MCPServerConfig{
+			{Name: "codegraph", Transport: "stdio", Command: "/bin/shared-cg"},
+			{Name: "shared-only", Transport: "stdio", Command: "/bin/so"},
+		}},
+		Definitions: map[string]appcfg.AgentDefinition{
+			"alice": {
+				Primary: true,
+				MCPServers: []appcfg.MCPServerConfig{
+					{Name: "codegraph", Transport: "stdio", Command: "/bin/alice-cg", Required: true},
+				},
+			},
+		},
+	}
+
+	res := ResolveSessionMCP(home, ws, agents, "alice", launch)
+	names := serverNames(res.Servers)
+	if len(names) != 2 || !containsFold(names, "codegraph") || !containsFold(names, "shared-only") {
+		t.Fatalf("alice's effective list = %v", names)
+	}
+	for _, srv := range res.Servers {
+		if !mcp.SameServerName(srv.Name, "codegraph") {
+			continue
+		}
+		if srv.Command != "/bin/alice-cg" || srv.Scope != appcfg.MCPServerScopeAgent || srv.AgentKey != "alice" {
+			t.Fatalf("the agent's entry must win and be stamped: %+v", srv)
+		}
+		// A primary agent's own list is the operator's, so it is not clamped.
+		if !srv.Required {
+			t.Fatalf("an agent's own entry keeps its required flag: %+v", srv)
+		}
+	}
+	if len(res.Summary.OverriddenGlobal) != 1 || res.Summary.OverriddenGlobal[0] != "codegraph" {
+		t.Fatalf("overridden = %v", res.Summary.OverriddenGlobal)
+	}
+
+	// Another primary agent owns nothing of its own and inherits the shared
+	// entry unchanged.
+	other := ResolveSessionMCP(home, ws, agents, "bob", launch)
+	for _, srv := range other.Servers {
+		if mcp.SameServerName(srv.Name, "codegraph") {
+			if srv.Command != "/bin/shared-cg" || srv.Scope != appcfg.MCPServerScopeGlobal {
+				t.Fatalf("bob's codegraph = %+v", srv)
+			}
+		}
+	}
+	if len(other.Summary.OverriddenGlobal) != 0 {
+		t.Fatalf("nothing is overridden for bob: %v", other.Summary.OverriddenGlobal)
+	}
+}
+
+// TestResolveSessionMCPHonoursTheConfigSwitchAndTheAgentLayerTogether pins that
+// an entry the agent's own list switched off is kept out of the session, is
+// reported as the thing that will not start, and still carries its scope so a
+// surface can point at the right file.
+func TestResolveSessionMCPHonoursTheConfigSwitchAndTheAgentLayerTogether(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	launch := trustedVCSProject(t, home, t.TempDir())
+	off := false
+	agents := appcfg.AgentsSection{
+		Definitions: map[string]appcfg.AgentDefinition{
+			"alice": {
+				Primary: true,
+				MCPServers: []appcfg.MCPServerConfig{
+					{Name: "paused", Transport: "stdio", Command: "/bin/p", Enabled: &off},
+					{Name: "live", Transport: "stdio", Command: "/bin/l"},
+				},
+			},
+		},
+	}
+	res := ResolveSessionMCP(home, ws, agents, "alice", launch)
+	if got := serverNames(res.Servers); len(got) != 1 || !containsFold(got, "live") {
+		t.Fatalf("effective = %v", got)
+	}
+	if len(res.Disabled) != 1 || res.Disabled[0].Name != "paused" {
+		t.Fatalf("disabled = %v", serverNames(res.Disabled))
+	}
+	if res.Disabled[0].Scope != appcfg.MCPServerScopeAgent || appcfg.ServerEnabled(res.Disabled[0]) {
+		t.Fatalf("the disabled entry keeps its layer and its switch: %+v", res.Disabled[0])
 	}
 }

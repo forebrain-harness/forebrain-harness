@@ -14,17 +14,33 @@ import (
 )
 
 // TestMain puts the segmentation dictionary beside the test binary, which is
-// where a search looks for it.
+// where a search looks for it, and pins the forebrain home to a throwaway
+// directory. The home is overwritten on purpose: a developer running `go test`
+// with the variable already pointing at their real install must still be
+// isolated here, or the tests would seed and search inside it.
 func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp("", "forebrain-memory-test-home-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create test home:", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("FOREBRAIN_HOME", root); err != nil {
+		fmt.Fprintln(os.Stderr, "point the home at the test directory:", err)
+		os.RemoveAll(root)
+		os.Exit(1)
+	}
 	executable, err := os.Executable()
 	if err == nil {
 		err = InstallDictionary(filepath.Dir(executable))
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "install segmentation dictionary:", err)
+		os.RemoveAll(root)
 		os.Exit(1)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(root)
+	os.Exit(code)
 }
 
 // filler is text sharing no term with any test query. An index is only able to

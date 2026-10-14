@@ -357,3 +357,68 @@ func TestRenderLSPInventoryMarkdown(t *testing.T) {
 		t.Fatalf("empty = %q", got)
 	}
 }
+
+// TestBuildMCPInventorySeparatesTheThreeLayers pins the third scope: a primary
+// agent's own servers are their own group, named after the layer and pointing at
+// the file that holds them, so a reader can tell which list to edit.
+func TestBuildMCPInventorySeparatesTheThreeLayers(t *testing.T) {
+	inv := BuildMCPInventory(MCPInventorySource{
+		Servers: []appcfg.MCPServerConfig{
+			{Name: "shared", Command: "shared", Scope: appcfg.MCPServerScopeGlobal},
+			{Name: "smart-doc", URL: "https://docs.test/mcp", Scope: appcfg.MCPServerScopeAgent, AgentKey: "alice"},
+			{Name: "projtool", Command: "projtool", Scope: appcfg.MCPServerScopeProject, ProjectKey: "pk"},
+		},
+		GlobalSource:  "/home/u/.forebrain/forebrain.yaml",
+		ProjectSource: "/proj/.forebrain/mcp_servers.yaml",
+	})
+	if len(inv.Groups) != 3 {
+		t.Fatalf("groups = %+v", inv.Groups)
+	}
+	wantLabels := []string{"Global MCPs", "Agent MCPs", "Project MCPs"}
+	for i, want := range wantLabels {
+		if inv.Groups[i].Label != want {
+			t.Fatalf("group[%d] = %q, want %q (all: %+v)", i, inv.Groups[i].Label, want, inv.Groups)
+		}
+	}
+	if inv.Groups[1].Source != "/home/u/.forebrain/forebrain.yaml" {
+		t.Fatalf("the agent layer lives in the same file as the shared one: %+v", inv.Groups[1])
+	}
+	entry := inv.Entry("smart-doc")
+	if entry == nil || entry.Scope != "agent" {
+		t.Fatalf("entry = %+v", entry)
+	}
+	rendered := RenderMCPInventoryMarkdown(inv)
+	if !strings.Contains(rendered, "Agent MCPs (/home/u/.forebrain/forebrain.yaml)") {
+		t.Fatalf("rendered:\n%s", rendered)
+	}
+}
+
+// TestMCPServerStatusLabelDistinguishesTheTwoDisabledReasons pins the wording a
+// reader acts on. "Disabled from next session" is a local toggle they can undo;
+// "disabled in config (enabled: false)" is the file, and telling them the first
+// when the second is true sends them to the wrong switch.
+func TestMCPServerStatusLabelDistinguishesTheTwoDisabledReasons(t *testing.T) {
+	off := false
+	byName := BuildMCPInventory(MCPInventorySource{
+		Disabled: []appcfg.MCPServerConfig{
+			{Name: "paused", Command: "paused"},
+			{Name: "switched-off", Command: "switched-off", Enabled: &off},
+		},
+		DisabledNext: func(srv appcfg.MCPServerConfig) bool { return srv.Name == "paused" },
+	})
+
+	paused := MCPServerStatusLabel(*byName.Entry("paused"))
+	if paused != "○ disabled" {
+		t.Fatalf("a store-disabled entry = %q", paused)
+	}
+	switchedOff := MCPServerStatusLabel(*byName.Entry("switched-off"))
+	if !strings.Contains(switchedOff, "disabled in config (enabled: false)") {
+		t.Fatalf("a config-disabled entry = %q", switchedOff)
+	}
+	if strings.Contains(switchedOff, "next session") {
+		t.Fatalf("a config-disabled entry must not promise a local toggle: %q", switchedOff)
+	}
+	if !byName.Entry("switched-off").DisabledByConfig {
+		t.Fatalf("the inventory must say which reason it is: %+v", byName.Entry("switched-off"))
+	}
+}

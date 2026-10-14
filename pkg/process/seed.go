@@ -6,6 +6,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
 )
 
@@ -20,6 +21,14 @@ func Seed(root string) error {
 	}
 	if err := llm.InitGlobalCatalog(root, home.Version); err != nil {
 		slog.Warn("model catalog seed failed", "err", err)
+	}
+	// The dictionaries are a home-level install like models.json: seeding them
+	// from the copy beside this binary at startup means a search — in this
+	// process or any other forebrain sharing the home — finds them before its
+	// first Chinese or Japanese query, with no window where a search would fail
+	// because the home had not been prepared yet.
+	if err := memory.Seed(root, home.Version); err != nil {
+		slog.Warn("memory search dictionary seed failed", "err", err)
 	}
 	return nil
 }

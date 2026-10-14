@@ -115,11 +115,16 @@ type MCPServerEntry struct {
 	// running server it is a change still to come; on one that is not running
 	// it is the choice this session was assembled with.
 	DisabledNext bool
-	ToolCount    int
+	// DisabledByConfig reports that the server's own entry is switched off
+	// (enabled: false), which is a different fact from DisabledNext: the
+	// configuration keeps it out until the file changes, and no local toggle
+	// can bring it back.
+	DisabledByConfig bool
+	ToolCount        int
 	// Error is the server's own failure text, verbatim and complete — the
 	// only copy of the reason the operator can reach from the panel.
 	Error      string
-	Scope      string // "project" | "global"
+	Scope      string // "project" | "agent" | "global"
 	Source     string // the config file the entry came from
 	Transport  string
 	Command    string // stdio target, joined with args
@@ -224,7 +229,9 @@ type MCPInventorySource struct {
 	Servers  []appcfg.MCPServerConfig
 	Disabled []appcfg.MCPServerConfig
 	// DisabledNext reports whether a new session would leave a server out; nil
-	// means nothing is marked.
+	// means nothing is marked. A server switched off in the configuration is
+	// not reported here: its own entry says so (see MCPServerEntry.
+	// DisabledByConfig), which every caller reads without being asked.
 	DisabledNext func(appcfg.MCPServerConfig) bool
 	// DisableStoreError is the store's read error, shown verbatim.
 	DisableStoreError string
@@ -380,8 +387,13 @@ func BuildMCPInventory(src MCPInventorySource) MCPInventory {
 	}
 	add := func(srv appcfg.MCPServerConfig, running bool) {
 		label, source := "Global MCPs", src.GlobalSource
-		if mcp.IsProjectScope(srv) {
+		switch {
+		case mcp.IsProjectScope(srv):
 			label, source = "Project MCPs", src.ProjectSource
+		case mcp.IsAgentScope(srv):
+			// The agent's own servers live in forebrain.yaml too, so the
+			// group names the section a reader edits rather than a file.
+			label, source = "Agent MCPs", src.GlobalSource
 		}
 		entry := buildMCPServerEntry(src, srv, records, toolsByServer, running, source)
 		inv.Total++
@@ -429,8 +441,11 @@ func buildMCPServerEntry(src MCPInventorySource, srv appcfg.MCPServerConfig, rec
 		Auth:      string(mcp.AuthStatusNone),
 		URL:       SanitizeEndpoint(srv.URL),
 	}
-	if mcp.IsProjectScope(srv) {
+	switch {
+	case mcp.IsProjectScope(srv):
 		entry.Scope = "project"
+	case mcp.IsAgentScope(srv):
+		entry.Scope = "agent"
 	}
 	if entry.Transport == "" {
 		if strings.TrimSpace(srv.URL) != "" {
@@ -453,6 +468,7 @@ func buildMCPServerEntry(src MCPInventorySource, srv appcfg.MCPServerConfig, rec
 	if src.DisabledNext != nil {
 		entry.DisabledNext = src.DisabledNext(srv)
 	}
+	entry.DisabledByConfig = !appcfg.ServerEnabled(srv)
 	if !running {
 		// Never started: nothing live to report.
 		entry.Status = MCPStatusDisabled
@@ -523,6 +539,12 @@ func MCPServerStatusLabel(e MCPServerEntry) string {
 	case MCPStatusSkipped:
 		label = "– skipped"
 	case MCPStatusDisabled:
+		if e.DisabledByConfig {
+			// The configuration switch is not the store's mark: no local
+			// toggle can bring this one back, so "enabled from next session"
+			// would send the reader looking in the wrong place.
+			return "○ disabled in config (enabled: false)"
+		}
 		label = "○ disabled"
 		if !e.DisabledNext {
 			return label + " · enabled from next session"
@@ -533,6 +555,9 @@ func MCPServerStatusLabel(e MCPServerEntry) string {
 	}
 	if e.DisabledNext {
 		label += " · disabled from next session"
+	}
+	if e.DisabledByConfig {
+		label += " · disabled in config (enabled: false)"
 	}
 	return label
 }

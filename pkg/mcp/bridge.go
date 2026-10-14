@@ -45,6 +45,10 @@ type Session struct {
 	// reconnectTimeout bounds one reconnect's handshake, so a server that
 	// answers nothing cannot hold the tool call forever.
 	reconnectTimeout time.Duration
+	// requestTimeout bounds one tools/call, from the entry's request_timeout.
+	// Zero means no bound: the call runs until its caller's context ends, which
+	// is what an entry that says nothing about it has always asked for.
+	requestTimeout time.Duration
 	// reconnectMu serializes connection replacement. reconnectSession and
 	// Release are the two writers that swap the connection wholesale, and each
 	// finishes before the other starts — a reconnect interleaved with a
@@ -140,6 +144,17 @@ func (s *Session) accounting() (stateRoot, home, serverName string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.stateRoot, s.home, s.serverName
+}
+
+// requestTimeoutValue is the per-call bound this session applies, zero when the
+// entry set none.
+func (s *Session) requestTimeoutValue() time.Duration {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.requestTimeout
 }
 
 // Close shuts the session down gracefully and then releases the process it owns.
@@ -523,6 +538,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		sess.proc = proc
 		sess.baseCtx = procCtx
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
+		sess.requestTimeout = RequestTimeoutFor(srv)
 		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
 		return sess, nil
 	case "streamable_http":
@@ -561,6 +577,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		// that outlives the call that discovered the expiry.
 		sess.baseCtx = context.WithoutCancel(ctx)
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
+		sess.requestTimeout = RequestTimeoutFor(srv)
 		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
 		return sess, nil
 	case "sse":
@@ -590,6 +607,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		// that outlives the call that discovered the expiry.
 		sess.baseCtx = context.WithoutCancel(ctx)
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
+		sess.requestTimeout = RequestTimeoutFor(srv)
 		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
 		return sess, nil
 	case "websocket":
@@ -618,6 +636,7 @@ func Start(ctx context.Context, home string, workspaceDir string, srv appcfg.MCP
 		// that outlives the call that discovered the expiry.
 		sess.baseCtx = context.WithoutCancel(ctx)
 		sess.reconnectTimeout = StartupTimeoutFor(srv)
+		sess.requestTimeout = RequestTimeoutFor(srv)
 		sess.reconnect = func(ctx context.Context) (*Session, error) { return Start(ctx, home, workspaceDir, srv) }
 		return sess, nil
 	default:
@@ -983,12 +1002,22 @@ func (s *Session) CallToolJSON(ctx context.Context, toolName string, arguments j
 // after a reconnect replaced it, and an attempt bound to the connection the
 // first try used would send the retry down the socket that just expired — which
 // is exactly the failure the reconnect exists to recover from.
+//
+// The call gets its own deadline when the entry configured one, so a server
+// that accepts a request and never answers reports a timeout instead of holding
+// the turn open until its caller gives up. An entry that configured none runs
+// on the caller's context, exactly as before.
 func (s *Session) callToolAttempt(ctx context.Context, toolName string, args any) (string, error) {
 	sess, err := s.ensureSession()
 	if err != nil {
 		return "", err
 	}
 	stateRoot, home, serverName := s.accounting()
+	if timeout := s.requestTimeoutValue(); timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	res, err := sess.CallTool(ctx, &mcp.CallToolParams{Name: toolName, Arguments: args})
 	if err != nil {
 		return "", err

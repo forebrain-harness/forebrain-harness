@@ -272,9 +272,10 @@ func recordCompactionAdoption(ctx context.Context, messages []llm.Message) {
 // a steer rolled back after a failed call is sent again, so folding it in would
 // send it twice.
 type provisionalTail struct {
-	sent  int             // length of the message slice the call was handed
-	count int             // how many of its trailing messages are provisional
-	outer context.Context // the orchestration context, without the call's retraction abort
+	sent    int             // length of the message slice the call was handed
+	count   int             // how many of its trailing messages are provisional
+	history string          // the history this tail belongs to (see historyKey)
+	outer   context.Context // the orchestration context, without the call's retraction abort
 }
 
 type provisionalTailKey struct{}
@@ -288,21 +289,32 @@ func withProvisionalTail(ctx, outer context.Context, sent, count int) context.Co
 	if count <= 0 || count > sent {
 		return ctx
 	}
-	return context.WithValue(ctx, provisionalTailKey{}, provisionalTail{sent: sent, count: count, outer: outer})
+	return context.WithValue(ctx, provisionalTailKey{}, provisionalTail{
+		sent: sent, count: count, history: historyKey(outer), outer: outer,
+	})
 }
 
-// provisionalTailLen is how many trailing messages of a sent slice are
-// provisional — zero unless ctx describes exactly this slice, so a nested call
-// that inherits the context with other messages compacts them whole, as before.
-func provisionalTailLen(ctx context.Context, sent int) int {
+// provisionalTailLen reports how many trailing messages of a sent slice are
+// provisional, and whether they can be told apart at all. A call that carries no
+// tail of its own has none: a context with no recorded tail says (0, true), and
+// so does a tail recorded for another history — a subagent dispatched during a
+// steered call inherits that call's context and is exactly that case, and it
+// compacts its own history as it always did. A tail recorded for this very
+// history whose length no longer matches the slice in hand was reshaped on the
+// way from the orchestration loop: its provisional messages are somewhere in it,
+// but no longer at a known place, so a checkpoint must not be taken from it.
+func provisionalTailLen(ctx context.Context, sent int) (int, bool) {
 	if ctx == nil {
-		return 0
+		return 0, true
 	}
 	pt, ok := ctx.Value(provisionalTailKey{}).(provisionalTail)
-	if !ok || pt.sent != sent {
-		return 0
+	if !ok || pt.history != historyKey(ctx) {
+		return 0, true
 	}
-	return pt.count
+	if pt.sent != sent {
+		return 0, false
+	}
+	return pt.count, true
 }
 
 // compactionContext is ctx minus the call's retraction abort: it keeps every

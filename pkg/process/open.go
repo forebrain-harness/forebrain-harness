@@ -336,12 +336,13 @@ func Open(ctx context.Context, options ...OpenOptions) (*Environment, error) {
 	}
 	env := &Environment{Root: root, LaunchDir: launchDir, LaunchProject: launchProject, RawConfig: loaded, noLaunchProject: opts.NoLaunchProject, SQL: sqlDB, Sandbox: safety.NewManager(), Foreground: session.NewLocker(), Control: run.NewController(), sessionSource: source, telShutdown: shutdownTel, ChannelMigrationNotes: channelMigrationBannerNotes(channelMigrationNotes)}
 	env.reload = NewConfigManager(env.Control, env.reloadConfig)
-	// The effective MCP list is resolved once per session and frozen: global
-	// entries stamped with their scope, project entries gated on the frozen
-	// launch project (trust + VCS) and their recorded per-entry consents.
-	// Nothing later in this process may recompute it — a mid-session change
-	// would rebuild the tool table and the prompt prefix derived from it.
-	mcpRes := ResolveSessionMCP(root, activeAgent.WorkspaceRoot, cfgRoot.Agents.Defaults.MCPServers, launchProject)
+	// The effective MCP list is resolved once per session and frozen: shared
+	// entries stamped with their scope, this primary agent's own entries, and
+	// project entries gated on the frozen launch project (trust) and their
+	// recorded per-entry consents. Nothing later in this process may recompute
+	// it — a mid-session change would rebuild the tool table and the prompt
+	// prefix derived from it.
+	mcpRes := ResolveSessionMCP(root, activeAgent.WorkspaceRoot, cfgRoot.Agents, activeAgent.ID, launchProject)
 	frozenMCP := mcpRes.Servers
 	// The whole frozen list, disabled entries included, is what the drift
 	// check compares against the disk: a disable toggle is not drift.

@@ -8,6 +8,7 @@ rationale. Modes: hang, stream, reply, drip, toolcall.
 import http.server
 import itertools
 import json
+import os
 import socketserver
 import sys
 import time
@@ -21,6 +22,11 @@ TOOL_SCRIPT = [
     ("enter_plan_mode", '{"reason":"drive the approval overlay"}'),
     ("exit_plan_mode", "{}"),
 ]
+# FAKE_TOOL_NAME / FAKE_TOOL_ARGS replace the default script when set, so a case
+# can drive one named tool of its own without a new provider. The defaults above
+# are unchanged for every existing caller.
+if os.environ.get("FAKE_TOOL_NAME"):
+    TOOL_SCRIPT = [(os.environ["FAKE_TOOL_NAME"], os.environ.get("FAKE_TOOL_ARGS", "{}"))]
 REQUESTS = itertools.count()
 
 

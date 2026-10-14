@@ -52,9 +52,14 @@ type MCPResolution struct {
 //
 // home and agentWorkspace locate the two stores involved: the credential
 // overlays (per scope, under home) and the consent records (per primary
-// agent, under its workspace). global is the operator-controlled list from
-// forebrain.yaml; launch is the frozen launch-project context.
-func ResolveSessionMCP(home, agentWorkspace string, global []appcfg.MCPServerConfig, launch safety.ProjectContext) MCPResolution {
+// agent, under its workspace). agents is the operator-controlled configuration
+// both MCP layers live in — the shared list every primary agent inherits and
+// the list agentName owns — and launch is the frozen launch-project context.
+// Taking the section rather than two slices means the agent's list and the key
+// its stamps need cannot come from different agents.
+func ResolveSessionMCP(home, agentWorkspace string, agents appcfg.AgentsSection, agentName string, launch safety.ProjectContext) MCPResolution {
+	global := agents.Defaults.MCPServers
+	agent := agents.MCPServersFor(agentName)
 	projectRoot := strings.TrimSpace(launch.Project.Root)
 	entries, notes := mcp.LoadProjectMCPServers(projectRoot)
 	gated := safety.TrustedRoot(launch) != ""
@@ -97,7 +102,7 @@ func ResolveSessionMCP(home, agentWorkspace string, global []appcfg.MCPServerCon
 		}
 	}
 
-	merged := mcp.MergeSessionServers(global, included, projectKey)
+	merged := mcp.MergeSessionServers(global, agent, included, strings.ToLower(strings.TrimSpace(agentName)), projectKey)
 	// Disabled servers (the agent's state/mcp/disabled.json) drop out of every
 	// NEW session here, after the merge: the user's YAML is never rewritten and
 	// a running session's frozen list is untouched, so nothing mid-session
@@ -130,23 +135,25 @@ func ResolveSessionMCP(home, agentWorkspace string, global []appcfg.MCPServerCon
 // the disk side is compared the same way: a disable toggle is not a change to
 // the configuration on disk, and must not read as one.
 func InspectProjectMCP(agentWorkspace string, frozen []appcfg.MCPServerConfig, launch safety.ProjectContext) mcp.ProjectMCPScopeSummary {
-	res := ResolveSessionMCP("", agentWorkspace, nil, launch)
+	// The disk side is resolved with no configured lists at all: project
+	// entries are the only thing this comparison is about, and the agent layer
+	// has nothing to say about what a file on disk contains.
+	res := ResolveSessionMCP("", agentWorkspace, appcfg.AgentsSection{}, "", launch)
 	onDisk := append(append([]appcfg.MCPServerConfig(nil), res.Servers...), res.Disabled...)
 	summary := res.Summary
 	summary.OverriddenGlobal = nil
-	// Overridden globals belong to the frozen list's merge, not the disk
+	// Overridden entries belong to the frozen list's merge, not the disk
 	// state; recompute them from the frozen view so the section reports what
 	// the running session actually replaced.
-	var frozenProject, diskProject []appcfg.MCPServerConfig
+	var frozenGlobal, frozenAgent, frozenProject, diskProject []appcfg.MCPServerConfig
 	for _, srv := range frozen {
-		if mcp.IsProjectScope(srv) {
+		switch {
+		case mcp.IsProjectScope(srv):
 			frozenProject = append(frozenProject, srv)
-		}
-	}
-	global := make([]appcfg.MCPServerConfig, 0, len(frozen))
-	for _, srv := range frozen {
-		if !mcp.IsProjectScope(srv) {
-			global = append(global, srv)
+		case mcp.IsAgentScope(srv):
+			frozenAgent = append(frozenAgent, srv)
+		default:
+			frozenGlobal = append(frozenGlobal, srv)
 		}
 	}
 	for _, srv := range onDisk {
@@ -154,7 +161,7 @@ func InspectProjectMCP(agentWorkspace string, frozen []appcfg.MCPServerConfig, l
 			diskProject = append(diskProject, srv)
 		}
 	}
-	remerged := mcp.MergeSessionServers(global, diskProject, "")
+	remerged := mcp.MergeSessionServers(frozenGlobal, frozenAgent, diskProject, "", "")
 	summary.OverriddenGlobal = remerged.OverriddenGlobal
 	summary.PendingReload = !mcp.SameProjectEntry(frozenProject, diskProject)
 	return summary

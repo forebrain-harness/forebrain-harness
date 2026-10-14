@@ -3068,17 +3068,21 @@ func (e *steerableSubagentExecutor) SubagentExecutionEnded(context.Context, Suba
 // next scripted text. It stands in for the model in the persistence and
 // continuation tests, which compare whole requests, not answers.
 type scriptedRequestsLLM struct {
-	mu        sync.Mutex
-	requests  [][]llm.Message
-	tools     [][]*llm.Tool
+	mu       sync.Mutex
+	requests [][]llm.Message
+	tools    [][]*llm.Tool
+	// contexts records the context each request was made under: a run's
+	// identity lives there, so a test can assert which run a request spoke for.
+	contexts  []context.Context
 	responses []string
 }
 
-func (m *scriptedRequestsLLM) Execute(_ context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+func (m *scriptedRequestsLLM) Execute(ctx context.Context, msgs []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
 	cp := deepCloneMessages(msgs)
 	m.mu.Lock()
 	m.requests = append(m.requests, cp)
 	m.tools = append(m.tools, tools)
+	m.contexts = append(m.contexts, ctx)
 	text := ""
 	if len(m.responses) > 0 {
 		idx := len(m.requests) - 1
@@ -3102,6 +3106,12 @@ func (m *scriptedRequestsLLM) gotTools() [][]*llm.Tool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([][]*llm.Tool(nil), m.tools...)
+}
+
+func (m *scriptedRequestsLLM) gotContexts() []context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]context.Context(nil), m.contexts...)
 }
 
 // persistingSubagentExecutor mirrors what the composition root's executor
@@ -5329,5 +5339,60 @@ func TestWithdrawnUserExecutionPublishesItsEndSoTheSurfaceRetiresIt(t *testing.T
 	}
 	if ended.ParentToolCallID != "" {
 		t.Fatalf("withdrawn end named a dispatching call %q, want none", ended.ParentToolCallID)
+	}
+}
+
+// A fork's continuation drives its own run the way its first execution did: the
+// request it sends speaks for the fork's run, not for the run that dispatched
+// the continuation. The dispatcher's run id must not travel into the child's
+// requests, or the child's compaction guard and its approvals are filed under
+// the parent's run.
+func TestForkContinuationSpeaksUnderItsOwnRun(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system", "continuing")
+	workerID := "main:conv-ownrun:worker:11111111-2222-3333-4444-555555555555"
+	fix.seedWorker(t, "conv-ownrun", workerID, []llm.Message{
+		llm.UserMessage(llm.Text("forked directive")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("fork finding")}),
+	})
+	if _, _, err := fix.store.FreezeSessionPromptState(context.Background(), workerID, forkSystemPromptKey, "frozen fork system"); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.AppendHistory(fix.fac.subagentScopeRoot(), agent.HistoryEntry{
+		TaskID:          "task-ownrun",
+		AgentID:         "fork-ownrun-agent",
+		RunID:           "child-own-run",
+		ParentRunID:     "parent-1",
+		SessionID:       "conv-ownrun",
+		WorkerSessionID: workerID,
+		Task:            "forked directive",
+		Status:          agent.StatusOK,
+		Output:          "fork finding",
+		AgentType:       "fork",
+		AgentKind:       "fork",
+		RuntimeKind:     "fork_subagent",
+		Continuable:     true,
+		StartedAt:       10,
+		UpdatedAt:       20,
+		FinishedAt:      20,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The continuation is dispatched during the parent's turn: the ctx carries
+	// the parent's run id, exactly as production's dispatching turn does.
+	ctx := toolpkg.WithToolUseID(toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "conv-ownrun"), "parent-1"), "call-1")
+	if _, err := continueSubagentExecution(ctx, fix.fac, &SubagentContinueInput{TaskID: "task-ownrun", Message: "go on"}); err != nil {
+		t.Fatalf("continueSubagentExecution: %v", err)
+	}
+	contexts := fix.llm.gotContexts()
+	if len(contexts) == 0 {
+		t.Fatal("the continuation sent no request")
+	}
+	for i, reqCtx := range contexts {
+		if got := toolpkg.RunIDFromContext(reqCtx); got != "child-own-run" {
+			t.Fatalf("request %d spoke for run %q, want the fork's own run %q", i, got, "child-own-run")
+		}
+		if got := llm.AgentSessionIDFromContext(reqCtx); got != workerID {
+			t.Fatalf("request %d carried agent session %q, want the worker session %q", i, got, workerID)
+		}
 	}
 }

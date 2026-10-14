@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -503,15 +504,46 @@ func normalize(r *Root) {
 		r.Agents.Definitions[k] = d
 	}
 	NormalizeMCPServers(r.Agents.Defaults.MCPServers)
+	for k := range r.Agents.Definitions {
+		d := r.Agents.Definitions[k]
+		NormalizeMCPServers(d.MCPServers)
+		r.Agents.Definitions[k] = d
+	}
 	normalizeSandboxConfig(r)
 	normalizeLSPSection(&r.LSP)
 }
 
+// validateMCPToolApprovalModes validates every MCP server list the
+// configuration holds: the shared one and each primary agent's own. The source
+// named in the message is the section a reader can find in forebrain.yaml, so
+// an entry that is wrong in an agent's list does not send them to the shared
+// one.
 func validateMCPToolApprovalModes(r *Root) error {
 	if r == nil {
 		return nil
 	}
-	return ValidateMCPServers("agents.defaults.mcp_servers", r.Agents.Defaults.MCPServers)
+	if err := ValidateMCPServers("agents.defaults.mcp_servers", r.Agents.Defaults.MCPServers); err != nil {
+		return err
+	}
+	for _, id := range sortedDefinitionIDs(r.Agents.Definitions) {
+		def := r.Agents.Definitions[id]
+		if err := ValidateMCPServers("agents.definitions."+id+".mcp_servers", def.MCPServers); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sortedDefinitionIDs lists the agent definition keys in ascending order, so a
+// validation error names the same agent on every load rather than whichever
+// one a map iteration happened to reach first.
+func sortedDefinitionIDs(defs map[string]AgentDefinition) []string {
+	ids := make([]string, 0, len(defs))
+	for id := range defs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // validateTokenEstimate checks the agents.defaults.token_estimate section: the
@@ -554,17 +586,28 @@ func NormalizeMCPServers(servers []MCPServerConfig) {
 	}
 }
 
-// ValidateMCPServers checks approval modes and reports the first problem with
-// source naming the list it came from ("agents.defaults.mcp_servers" for the
-// global file, the project file path for a project one) so the message points
-// the user at the file they need to fix.
+// ValidateMCPServers checks one MCP server list and reports the first problem
+// with source naming the list it came from ("agents.defaults.mcp_servers" or
+// "agents.definitions.<id>.mcp_servers" for the shared and per-agent lists in
+// forebrain.yaml, the project file path for a project one) so the message
+// points the user at the section they need to fix.
 func ValidateMCPServers(source string, servers []MCPServerConfig) error {
 	for i, server := range servers {
 		if !server.DefaultToolsApprovalMode.Valid() {
 			return fmt.Errorf("%s[%d].default_tools_approval_mode must be auto, prompt, writes, or approve", source, i)
 		}
-		if err := ValidateMCPStartupTimeout(server.StartupTimeout); err != nil {
+		if err := ValidateMCPTimeout(server.StartupTimeout); err != nil {
 			return fmt.Errorf("%s[%d].startup_timeout %w", source, i, err)
+		}
+		if err := ValidateMCPTimeout(server.RequestTimeout); err != nil {
+			return fmt.Errorf("%s[%d].request_timeout %w", source, i, err)
+		}
+		// A server that is both switched off and required is a contradiction:
+		// nothing can start it, so any run that cannot do without it can never
+		// succeed. Rejecting it here says so once, at the file, instead of
+		// failing the first unattended run that needed it.
+		if !ServerEnabled(server) && server.Required {
+			return fmt.Errorf("%s[%d].required is true while enabled is false; a required server must be enabled", source, i)
 		}
 		for name, tool := range server.Tools {
 			if !tool.ApprovalMode.Valid() {

@@ -85,6 +85,12 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	agents.Put("/primary/:id", s.handlePrimaryAgentUpdate)
 	agents.Delete("/primary/:id", s.handlePrimaryAgentDelete)
 	agents.Post("/primary/switch", s.handlePrimaryAgentSwitch)
+	// One primary agent's own MCP servers (agents.definitions.<id>.mcp_servers),
+	// managed from the web on the same terms as the shared list.
+	agents.Post("/primary/:id/mcp/servers", s.handleMCPAgentServersWrite)
+	agents.Post("/primary/:id/mcp/servers/test", s.handleMCPAgentServersTest)
+	agents.Put("/primary/:id/mcp/servers/:name", s.handleMCPAgentServersWrite)
+	agents.Delete("/primary/:id/mcp/servers/:name", s.handleMCPAgentServersWrite)
 	agents.Get("/roster", s.handleAgentRoster)
 	agents.Post("/cancel-all", s.handleAgentCancelAll)
 	agents.Post("/:agentId/cancel", s.handlePrimaryAgentCancel)
@@ -200,6 +206,12 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	projects.Post("/:id/sessions", s.handleProjectSessionsCreate)
 	projects.Get("/:id/mcp", s.handleProjectMCPPreview)
 	projects.Post("/:id/mcp/consent", s.handleProjectMCPConsent)
+	// The project's own MCP file, edited from the web: create, update, delete,
+	// and a connection test that writes nothing.
+	projects.Post("/:id/mcp/servers", s.handleProjectMCPServersWrite)
+	projects.Post("/:id/mcp/servers/test", s.handleProjectMCPServersTest)
+	projects.Put("/:id/mcp/servers/:name", s.handleProjectMCPServersWrite)
+	projects.Delete("/:id/mcp/servers/:name", s.handleProjectMCPServersWrite)
 	projects.Get("/:id/lsp", s.handleProjectLSPPreview)
 	projects.Post("/:id/lsp/consent", s.handleProjectLSPConsent)
 
@@ -245,6 +257,12 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	mcp := api.Group("/v1/mcp")
 	mcp.Get("/servers", s.handleMCPServersV1)
+	// The shared MCP list in forebrain.yaml: create, update, delete, and a
+	// connection test that writes nothing.
+	mcp.Post("/servers", s.handleMCPGlobalServersWrite)
+	mcp.Post("/servers/test", s.handleMCPServersTest)
+	mcp.Put("/servers/:name", s.handleMCPGlobalServersWrite)
+	mcp.Delete("/servers/:name", s.handleMCPGlobalServersWrite)
 	mcp.Post("/servers/disable", s.handleMCPServerDisableV1)
 	mcp.Post("/servers/enable", s.handleMCPServerEnableV1)
 	mcp.Post("/oauth/pkce/start", s.handleMCPOAuthPKCEStart)

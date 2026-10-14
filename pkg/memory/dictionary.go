@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -85,11 +86,23 @@ func dictionaryBundleURL(version string) (string, bool) {
 	return releaseDownloadURL + "/" + version + "/" + dictionaryBundle, true
 }
 
-// dictionaryPath is where the named dictionary file is read from: under
-// DictionaryDir, beside the binary that is running. A binary that did not come
-// with dictionaries — one installed with `go install` — downloads them on this
-// first need.
-func dictionaryPath(name string) (string, error) {
+// dictionaryHomeDir is the home-level dictionary directory, <FOREBRAIN_HOME>/dict:
+// the same name a binary's own copy uses, and the location every forebrain
+// sharing that home reads.
+func dictionaryHomeDir() (string, error) {
+	root, err := home.Root()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, DictionaryDir), nil
+}
+
+// dictionaryShippedDir is the dictionary directory beside the running binary,
+// which is where a packaged install puts it — make build, the npm packages, the
+// container image, the test drivers. It is read through symlinks so a linked
+// launcher (the npm bin shim, /usr/local/bin) finds the directory holding the
+// real binary.
+func dictionaryShippedDir() (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -98,15 +111,160 @@ func dictionaryPath(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dictDir := filepath.Join(filepath.Dir(executable), DictionaryDir)
-	dictionary := filepath.Join(dictDir, filepath.FromSlash(name))
-	if _, err := os.Stat(dictionary); err == nil {
-		return dictionary, nil
-	}
-	if err := installMissingDictionaries(dictDir); err != nil {
+	return filepath.Join(filepath.Dir(executable), DictionaryDir), nil
+}
+
+// dictionaryPath is where the named dictionary file is read from. The home-level
+// copy is read first — seeded from the copy beside the binary, so one install
+// serves every forebrain sharing the home — then the copy beside the binary,
+// then this version's release bundle. A binary that came with dictionaries
+// therefore searches out of the box; one that did not (a `go install` build)
+// downloads them on this first need.
+func dictionaryPath(name string) (string, error) {
+	homeDir, err := dictionaryHomeDir()
+	if err != nil {
 		return "", err
 	}
-	return dictionary, nil
+	shippedDir, err := dictionaryShippedDir()
+	if err != nil {
+		return "", err
+	}
+	return resolveDictionaryFile(homeDir, shippedDir, name, DictionaryFiles)
+}
+
+// resolveDictionaryFile returns the path of one dictionary file to read from.
+// The home copy wins when it holds the bytes this binary declares. Otherwise
+// the copy beside the binary is used, and the home is seeded with it so every
+// binary sharing that home reads one install — Seed, called at startup,
+// normally does this first; this is the fallback for a home that appeared
+// later. A home that cannot be written is not a failure: the shipped copy is
+// read where it stands, because an install that came with its dictionaries must
+// search out of the box. Only when neither holds the declared bytes is this
+// version's release bundle downloaded. A copy that does not match the declared
+// checksum is never read: the index and the query must be cut by the bytes this
+// binary declared, or the two sides spell terms differently.
+func resolveDictionaryFile(homeDir, shippedDir, name string, files []DictionaryFile) (string, error) {
+	installed := filepath.Join(homeDir, filepath.FromSlash(name))
+	if dictionaryBytesMatch(installed, name, files) {
+		return installed, nil
+	}
+	shipped := filepath.Join(shippedDir, filepath.FromSlash(name))
+	if dictionaryBytesMatch(shipped, name, files) {
+		if err := seedDictionaryFile(homeDir, shipped, name); err != nil {
+			slog.Warn("memory search dictionary: keep reading the copy beside the binary",
+				"source", shipped, "err", err)
+			return shipped, nil
+		}
+		return installed, nil
+	}
+	if err := installMissingDictionaries(homeDir); err != nil {
+		return "", err
+	}
+	if !dictionaryBytesMatch(installed, name, files) {
+		return "", fmt.Errorf("memory search dictionaries are missing from %s", homeDir)
+	}
+	return installed, nil
+}
+
+// dictionaryBytesMatch reports whether path holds exactly the bytes this binary
+// declares for the named dictionary file — the one rule by which any copy, from
+// any of the three places, is adopted. A copy that fails the compiled-in
+// checksum is never read.
+func dictionaryBytesMatch(path, name string, files []DictionaryFile) bool {
+	declared, known := DictionaryFile{}, false
+	for _, file := range files {
+		if file.Name == name {
+			declared, known = file, true
+			break
+		}
+	}
+	if !known {
+		return false
+	}
+	source, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer source.Close()
+	checksum := sha256.New()
+	if _, err := io.Copy(checksum, source); err != nil {
+		return false
+	}
+	return hex.EncodeToString(checksum.Sum(nil)) == declared.SHA256
+}
+
+// dictionarySetMatches reports whether dir holds the declared bytes of every
+// file: the condition under which a seed or a download can be skipped.
+func dictionarySetMatches(dir string, files []DictionaryFile) bool {
+	for _, file := range files {
+		if !dictionaryBytesMatch(filepath.Join(dir, filepath.FromSlash(file.Name)), file.Name, files) {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckDictionaryFile reports whether path holds the bytes this binary declares
+// for the named dictionary file. The packaging step runs it so a package missing
+// a dictionary — or carrying a stale one — is rejected at build time rather than
+// failing the user's first memory search. name must be one of DictionaryFiles.
+func CheckDictionaryFile(path, name string) error {
+	if dictionaryBytesMatch(path, name, DictionaryFiles) {
+		return nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("dictionary %s is missing", path)
+	}
+	return fmt.Errorf("dictionary %s does not match the checksum this binary declares", path)
+}
+
+// seedDictionaryFile copies one dictionary file from source into homeDir under
+// the same name, through a temporary file in the destination directory so a
+// crash never leaves a half-written dictionary and a reader sees either the old
+// file or the complete new one. It is how a copy beside the binary — or a
+// developer's assets directory — becomes the home-level copy every binary
+// sharing the home reads.
+func seedDictionaryFile(homeDir, source, name string) error {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(homeDir, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	return writeDictionaryAtomic(target, data)
+}
+
+// writeDictionaryAtomic writes data to path through a temporary file in the
+// same directory, so a crash never leaves a half-written file.
+func writeDictionaryAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".dict-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// dictionariesMissingError is the message for a build that found the declared
+// bytes in none of the places a search reads and cannot download them either. It
+// names both places it looked and the product command that puts a copy in them.
+func dictionariesMissingError(homeDir, shippedDir string) error {
+	return fmt.Errorf(
+		"memory search dictionaries are missing from %s and beside %s; install them with `forebrain assets install`",
+		homeDir, shippedDir)
 }
 
 // dictionaryInstallOnce makes the process attempt the download at most once:
@@ -118,19 +276,98 @@ var (
 )
 
 // installMissingDictionaries downloads this version's dictionary bundle into
-// dictDir. A build that is not a release version has no release to download
-// from — its dictionaries come from the install script instead.
+// dictDir, the home-level dictionary directory. A build that is not a release
+// version has no release to download from — its message names the product
+// command that puts a copy in place.
 func installMissingDictionaries(dictDir string) error {
 	dictionaryInstallOnce.Do(func() {
 		url, ok := dictionaryBundleURL(home.Version)
 		if !ok {
-			dictionaryInstallErr = fmt.Errorf("memory search dictionaries are missing from %s; install them with scripts/install-dictionary.sh %s", dictDir, filepath.Dir(dictDir))
+			shippedDir, _ := dictionaryShippedDir()
+			dictionaryInstallErr = dictionariesMissingError(dictDir, shippedDir)
 			return
 		}
 		client := &http.Client{Timeout: 5 * time.Minute}
 		dictionaryInstallErr = downloadDictionaries(context.Background(), client, url, dictDir, DictionaryFiles)
 	})
 	return dictionaryInstallErr
+}
+
+// Seed ensures $FOREBRAIN_HOME/dict holds every dictionary file this binary
+// declares, so every forebrain sharing that home searches Chinese and Japanese
+// text — including binaries that ship no dictionaries of their own. The bytes
+// come from the copy beside this binary when it matches the declared checksums
+// (the packaged installs: make build, the npm packages, the container image),
+// and only otherwise from this version's release bundle. A home copy that
+// already matches is left alone; a home copy that does not is replaced. A build
+// that is not a release version and has no usable copy beside it reports the
+// install that fixes it instead of downloading. Errors are non-fatal — callers
+// should log a warning and continue.
+func Seed(forebrainHome, version string) error {
+	if strings.TrimSpace(forebrainHome) == "" {
+		return fmt.Errorf("memory search dictionary seed: empty forebrain home")
+	}
+	shippedDir, err := dictionaryShippedDir()
+	if err != nil {
+		return err
+	}
+	return seedDictionaries(filepath.Join(forebrainHome, DictionaryDir), shippedDir, version, DictionaryFiles)
+}
+
+// seedDictionaries fills dictDir with every file this binary declares, taking
+// the bytes from the copy beside the binary (shippedDir) when it holds them and
+// only otherwise from this version's release bundle. A home copy that already
+// matches is left alone. It never reaches the network while shippedDir holds
+// every declared file, so a packaged install seeds its home offline.
+func seedDictionaries(dictDir, shippedDir, version string, files []DictionaryFile) error {
+	if dictionarySetMatches(dictDir, files) {
+		return nil
+	}
+	if dictionarySetMatches(shippedDir, files) {
+		for _, file := range files {
+			installed := filepath.Join(dictDir, filepath.FromSlash(file.Name))
+			if dictionaryBytesMatch(installed, file.Name, files) {
+				continue
+			}
+			source := filepath.Join(shippedDir, filepath.FromSlash(file.Name))
+			if err := seedDictionaryFile(dictDir, source, file.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	url, ok := dictionaryBundleURL(version)
+	if !ok {
+		return dictionariesMissingError(dictDir, shippedDir)
+	}
+	client := &http.Client{Timeout: 5 * time.Minute}
+	return downloadDictionaries(context.Background(), client, url, dictDir, files)
+}
+
+// DictionaryStatus is one declared dictionary file and where this binary reads
+// it from. Err is set when the file could not be resolved at all.
+type DictionaryStatus struct {
+	File DictionaryFile
+	Path string
+	Err  error
+}
+
+// DictionariesStatus resolves every declared dictionary file for forebrainHome,
+// reading exactly as a search does — the home copy first, then sourceDir (the
+// copy beside the binary for the CLI, or a developer's FOREBRAIN_ASSETS_DIR),
+// then this version's release bundle — and reports each file's read path. It is
+// for the `assets` command: because resolving seeds the home and may download,
+// asking for status is also a repair. One entry per declared file is returned,
+// in DictionaryFiles order, so a caller can report each and fail only if some
+// could not be resolved.
+func DictionariesStatus(forebrainHome, sourceDir string) []DictionaryStatus {
+	homeDir := filepath.Join(forebrainHome, DictionaryDir)
+	statuses := make([]DictionaryStatus, 0, len(DictionaryFiles))
+	for _, file := range DictionaryFiles {
+		path, err := resolveDictionaryFile(homeDir, sourceDir, file.Name, DictionaryFiles)
+		statuses = append(statuses, DictionaryStatus{File: file, Path: path, Err: err})
+	}
+	return statuses
 }
 
 // downloadDictionaries downloads the dictionary bundle at url, checks every

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 )
 
 // TestDictionaryFilesDeclareTheBytesTheirModulesShip guards the compiled
@@ -261,5 +263,210 @@ func TestReleasedDictionaryBundleMatchesDictionaryFiles(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	if err := downloadDictionaries(context.Background(), client, url, filepath.Join(bin, DictionaryDir), DictionaryFiles); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// writeDictionaryFile puts content at path, creating the parent directories, so
+// a resolution test can stand up a copy at one of the places a search reads.
+func writeDictionaryFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The dictionaries are a home-level install: a binary that came with a copy
+// beside it seeds the home, and every later read — in this process or any other
+// binary sharing the home — reads the home copy.
+func TestDictionaryResolutionSeedsTheHomeFromTheCopyBesideTheBinary(t *testing.T) {
+	files := fakeDictionaries(t, "words\n", "dict\n")
+	homeDir := filepath.Join(t.TempDir(), DictionaryDir)
+	shippedDir := filepath.Join(t.TempDir(), DictionaryDir)
+	writeDictionaryFile(t, filepath.Join(shippedDir, filepath.FromSlash(files[0].Name)), "words\n")
+
+	got, err := resolveDictionaryFile(homeDir, shippedDir, files[0].Name, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(homeDir, filepath.FromSlash(files[0].Name))
+	if got != want {
+		t.Fatalf("read from %s, want the home copy %s", got, want)
+	}
+	if data, err := os.ReadFile(want); err != nil || string(data) != "words\n" {
+		t.Fatalf("home copy = %q err=%v, want the seeded bytes", data, err)
+	}
+}
+
+// A copy that does not match the checksum this binary declares is never
+// adopted: the index and the query must be cut by the bytes this binary
+// declared, or the two sides spell terms differently.
+func TestDictionaryResolutionRefusesAnUndeclaredCopy(t *testing.T) {
+	original := home.Version
+	t.Cleanup(func() { home.Version = original })
+	// No release version to download from, so a checksum that fails can only
+	// end in the missing-install error, never in a silent download.
+	home.Version = "(devel)"
+
+	files := fakeDictionaries(t, "words\n", "dict\n")
+	homeDir := filepath.Join(t.TempDir(), DictionaryDir)
+	shippedDir := filepath.Join(t.TempDir(), DictionaryDir)
+	writeDictionaryFile(t, filepath.Join(homeDir, filepath.FromSlash(files[0].Name)), "tampered\n")
+
+	// No usable copy anywhere and no release to download from: the call reports
+	// the missing install instead of reading undeclared bytes.
+	if _, err := resolveDictionaryFile(homeDir, shippedDir, files[0].Name, files); err == nil {
+		t.Fatal("a copy that fails its declared checksum was adopted")
+	}
+
+	// A home copy whose bytes do match the declaration is adopted, and its path
+	// is what a search reads from.
+	writeDictionaryFile(t, filepath.Join(homeDir, filepath.FromSlash(files[0].Name)), "words\n")
+	got, err := resolveDictionaryFile(homeDir, shippedDir, files[0].Name, files)
+	if err != nil || got == "" {
+		t.Fatalf("a declared home copy was refused: %q %v", got, err)
+	}
+	if want := filepath.Join(homeDir, filepath.FromSlash(files[0].Name)); got != want {
+		t.Fatalf("read from %s, want the home copy %s", got, want)
+	}
+}
+
+// Seeding must never be a requirement: a home that cannot be written still
+// searches from the copy beside the binary.
+func TestDictionaryResolutionReadsTheShippedCopyWhenTheHomeIsUnwritable(t *testing.T) {
+	files := fakeDictionaries(t, "words\n", "dict\n")
+	// A regular file where the home's dict directory would be: the seeding
+	// write cannot create anything under it, so the write fails.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	homeDir := filepath.Join(blocker, DictionaryDir)
+	shippedDir := filepath.Join(t.TempDir(), DictionaryDir)
+	writeDictionaryFile(t, filepath.Join(shippedDir, filepath.FromSlash(files[0].Name)), "words\n")
+
+	got, err := resolveDictionaryFile(homeDir, shippedDir, files[0].Name, files)
+	if err != nil {
+		t.Fatalf("an unwritable home must still read the shipped copy: %v", err)
+	}
+	want := filepath.Join(shippedDir, filepath.FromSlash(files[0].Name))
+	if got != want {
+		t.Fatalf("read from %s, want the shipped copy %s", got, want)
+	}
+}
+
+// seedFixture stands up the fake dictionaries beside the binary and returns the
+// two directories the seed acts on, plus each file's content.
+func seedFixture(t *testing.T, shipped, installed bool) (dictDir, shippedDir string, contents map[string]string) {
+	t.Helper()
+	files := fakeDictionaries(t, "words\n", "dict\n")
+	contents = map[string]string{files[0].Name: "words\n", files[1].Name: "dict\n"}
+	dictDir = filepath.Join(t.TempDir(), DictionaryDir)
+	shippedDir = filepath.Join(t.TempDir(), DictionaryDir)
+	if shipped {
+		for name, body := range contents {
+			writeDictionaryFile(t, filepath.Join(shippedDir, filepath.FromSlash(name)), body)
+		}
+	}
+	if installed {
+		for name, body := range contents {
+			writeDictionaryFile(t, filepath.Join(dictDir, filepath.FromSlash(name)), body)
+		}
+	}
+	return dictDir, shippedDir, contents
+}
+
+func seededFiles(t *testing.T, dir string, contents map[string]string) {
+	t.Helper()
+	for name, body := range contents {
+		got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatalf("%s was not seeded: %v", name, err)
+		}
+		if string(got) != body {
+			t.Errorf("%s seeded %q, want %q", name, got, body)
+		}
+	}
+}
+
+// The startup seed fills the home from the copy beside the binary and stays
+// offline: "(devel)" has no release to download from, so a nil error proves the
+// seed never reached for the network.
+func TestDictionarySeedFromTheShippedCopyStaysOffline(t *testing.T) {
+	dictDir, shippedDir, contents := seedFixture(t, true, false)
+	if err := seedDictionaries(dictDir, shippedDir, "(devel)", fakeDictionaries(t, "words\n", "dict\n")); err != nil {
+		t.Fatal(err)
+	}
+	seededFiles(t, dictDir, contents)
+}
+
+// A home copy that already matches is left exactly as it was — not rewritten
+// under a running reader. The old modification time is the proof.
+func TestDictionarySeedKeepsAnAlreadyMatchingHomeCopy(t *testing.T) {
+	dictDir, shippedDir, contents := seedFixture(t, false, true)
+	past := time.Unix(1_000_000, 0)
+	for name := range contents {
+		path := filepath.Join(dictDir, filepath.FromSlash(name))
+		if err := os.Chtimes(path, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := seedDictionaries(dictDir, shippedDir, "(devel)", fakeDictionaries(t, "words\n", "dict\n")); err != nil {
+		t.Fatal(err)
+	}
+	for name := range contents {
+		info, err := os.Stat(filepath.Join(dictDir, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(past) {
+			t.Errorf("%s was rewritten even though it already matched", name)
+		}
+	}
+}
+
+// A home copy whose bytes do not match is replaced by the copy beside the
+// binary, so the index and the query cannot end up cut differently.
+func TestDictionarySeedReplacesAMismatchedHomeCopy(t *testing.T) {
+	files := fakeDictionaries(t, "words\n", "dict\n")
+	dictDir, shippedDir, contents := seedFixture(t, true, false)
+	writeDictionaryFile(t, filepath.Join(dictDir, filepath.FromSlash(files[0].Name)), "tampered\n")
+	if err := seedDictionaries(dictDir, shippedDir, "(devel)", files); err != nil {
+		t.Fatal(err)
+	}
+	seededFiles(t, dictDir, contents)
+}
+
+// With no copy beside the binary and no release to download from, the seed
+// reports the product command that fixes it and leaves no half-written home.
+func TestDictionarySeedWithoutASourceReportsTheInstallCommand(t *testing.T) {
+	files := fakeDictionaries(t, "words\n", "dict\n")
+	dictDir := filepath.Join(t.TempDir(), DictionaryDir)
+	shippedDir := filepath.Join(t.TempDir(), DictionaryDir)
+	err := seedDictionaries(dictDir, shippedDir, "(devel)", files)
+	if err == nil {
+		t.Fatal("a seed with no source at all succeeded")
+	}
+	if !strings.Contains(err.Error(), "forebrain assets install") {
+		t.Errorf("error %v does not name the install command", err)
+	}
+	if entries, listErr := os.ReadDir(dictDir); listErr == nil && len(entries) > 0 {
+		t.Errorf("a failed seed left files in %s: %v", dictDir, entries)
+	}
+}
+
+// Seed is the startup entry point: with the real dictionaries installed beside
+// the test binary (TestMain does that), a fresh home ends up holding them all.
+func TestSeedInstallsTheDeclaredDictionariesIntoTheHome(t *testing.T) {
+	home := t.TempDir()
+	if err := Seed(home, "(devel)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range DictionaryFiles {
+		if _, err := os.Stat(filepath.Join(home, DictionaryDir, filepath.FromSlash(file.Name))); err != nil {
+			t.Errorf("%s was not seeded into the home: %v", file.Name, err)
+		}
 	}
 }

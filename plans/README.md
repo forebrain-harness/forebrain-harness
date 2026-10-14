@@ -4,6 +4,26 @@
 
 ## 最新审核信息
 
+- **2026-10-14 迁移完成后的复评（结论：048 撤回、049/050 驳回、051 保留执行、新增 052）**。
+  - **实测完成数据**（owner 的库自己跑完了 v10→v14）：备份 13:31:43 → v11 汇总 **15:05:15**（93 分 32 秒）→ v14 完成 + `freed_pages=961977` **15:06:09**（尾巴含 3.9 GB 回收共 **54 秒**）。库文件 5.58 GB → **1.60 GB**，`-wal` 随最后一个连接关闭被清理，可用空间回到 22 GiB。
+  - **被推翻的判断**：`main_agent_rows_deleted=0` —— 048 认定的「平方级主清理」在这台库上一行都没匹配；93 分钟几乎全在 **subagent 阶段**（删 1,025,186 行 + 按连续块合并掉 6,493,409 行 / 233 个执行体）。「工具输出每 step 全表扫描 = 天数级」的量级也估算错了：该阶段在 subagent 阶段之后跑，事件表已缩小到可忽略，实测零头都算不上。
+  - **因此**：048 的两项查询计划改动（单调游标 + 两条迁移局部表达式索引）**撤回**（SUPERSEDED，保留部分见 052）；049（迁移连接 cache/WAL PRAGMA + 2.2× 预检）与 050（VACUUM 阈值 + 备份保留）**驳回**——实测下 1.1× 预检够用、WAL 在连接关闭时自行清理、回收本身只要几十秒、遗留备份 owner 已手动删除。**唯一保留的是 052**：v11 每阶段的进度日志（93 分钟零输出正是这次被误判为「卡死」的直接原因）；**owner 随后裁决 052 也不做**（理由见「已考虑并拒绝的发现」），本批次至此无待执行项。
+  - **051 已执行完毕并已并回主工作区（DONE，未提交）**：运行期正确性缺陷，与迁移无关。首轮派发因**计划夹具缺陷** STOP（`RewindEventStart` 对无事件的 run 返回 0，零范围 rewind 在修复前后都不隐藏任何行 → 测试假通过；执行者自己在模拟库里复现了跨会话隐藏，确认谓词缺陷真实）；计划修正后（先给 `r-rwd` 插一条事件 + `require.Greater(start, 0)` 护栏）执行者完成并提交：`pkg/state/rewind.go`（模板+工厂 → 引用外层表的常量）、`session_events.go`（7 个调用点）、`rewind_test.go`（跨会话回归）。**owner 随即要求并回主树**：以 `git apply` 落成主工作区的未提交改动（未在 main 上产生提交），主树复核全部通过——`pkg/state` 全套 `ok`、修复前 FAIL（`another conversation's rewind hid this session's events`）→ 修复后 PASS、谓词正文除两处表名限定外与旧模板逐字一致、EXPLAIN 由 `SCAN rw` 变为 `SEARCH rw USING INDEX idx_fb_rewinds_session_state`。分支 `advisor/051-rewind-predicate`（commit `39c1a5c`）保留作复核记录；执行者的 worktree `/tmp/fb-adv-051` 已清理。
+- **2026-10-14 schema 与数据迁移性能审计（focus: schema + data migration perf；产出 048–051）**。
+  - **起因**：owner 的 TUI 启动卡在「database schema migration」超过 1.5 小时。取证结论：**不是 VACUUM**——另一个连接读到已提交快照的 `PRAGMA user_version` 仍是 10（事务未提交），主库文件 mtime 停在 13:27（原地 VACUUM 会重写主文件），`-wal` 3.1 GB 仍在增长，进程 96% CPU 全在 `sqlite3_step`。真正卡住的是 **v10→v11 的两段清理语句**：主代理清理每批 50k 行都从表头重扫（平方级），工具输出清理对每个 tool step 各做一次全表扫描（`COALESCE(run_id,'') = ?` 让 `idx_fb_session_events_run_type` 失效、没有索引以 `event_type` 打头）。该库实测 7,691,906 行事件里 7,565,584 行（98%）是流式增量。
+  - **实证数字**：`EXPLAIN QUERY PLAN` 在本仓库 schema 上确认三条语句均为 `SCAN fb_session_events`；加上局部表达式索引后全部变成 `SEARCH ... USING INDEX v11_tool_*`；主清理改单调游标后为 `SEARCH ... USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)`。
+  - **产出**：048（P1，清理线性化 + 局部索引 + 进度日志）、049（P2，迁移连接 PRAGMA + 空间预检）、050（P2，VACUUM 阈值 + 备份保留）、051（P1，**本轮审计的副产物**：rewind 可见性谓词 `rw.session_id = session_id` 是恒真式，导致一个会话的 rewind 隐藏其它会话的事件；不在性能范围内但已立计划）。
+  - **两处被评估后拒绝的「优化」**：VACUUM INTO 替换原地 VACUUM、`foreign_key_check` 按表收窄——理由见「已考虑并拒绝的发现」。
+  - **未计划但已记录**：`pkg/state` 之外的运行期性能发现（memory FTS 重建整库持写锁、`message_sync` 每回合重读 5000 行、gateway 历史接口无上限读全量消息等）逐条列在「已审核但未计划的发现」。
+- **2026-10-14 执行批次（044 / 045 / 046 / 047 全部落地，改动留工作区未提交，批次完成）**。
+  - **四份全部 DONE**（044、045 由执行者实施；046 因 `subagent_run` 从工具集中消失，改由评审方在主线程按计划实施并自证；047 由执行者实施）。
+  - **047 补充**：验收脚本只认 `FOREBRAIN_ACCEPT_HOME`，永不读环境里的 `FOREBRAIN_HOME`。
+  - **全量闸门（主线程，`FOREBRAIN_HOME=$(mktemp -d)`）**：29 个包 `ok`；唯一失败 `pkg/mcp` 的 `TestStartStdioConnectsRealMCPServerProcess` 已用 **HEAD 的纯净导出**证明是**既有失败**（与本期四份改动无关：fixture 的协议版本 2026-07-28 拒绝在请求中发 `roots/list`，属依赖升级引入，待单独立项）。`go vet` / `gofmt` 干净。
+- **2026-10-14 执行批次（044 / 045 / 047 已落地，046 未开始，批次因一起真实 home 事故中止）**。
+  - **已落地并独立复验**：**044** DONE、**045** DONE、**047** DONE（改动全部留工作区，未 commit）。主线程独立复跑：`pkg/run`、`pkg/memory`、`pkg/process`、`pkg/llm`、`cmd/forebrain` 五包 `ok`；三个新回归（`TestForkContinuationSpeaksUnderItsOwnRun`、`TestCompactionGuardKeepsAHistorysCheckpointToItself`、`TestCompactionGuardCachesNothingWithoutARunID`）PASS；047 的三条验收链路（打包二进制启动播种 → 旁无字典的二进制读 home → home 不可写回落到二进制旁）我逐条复跑，全部 `memories search: PASS`。
+  - **046 未执行**：依赖 045 已满足、随时可派发；本批次在 047 执行结束时被中止（原因见下）。
+  - ⚠️ **事故（047 执行者，本机真实 home）**：验收脚本第一版用环境变量 `FOREBRAIN_HOME` 决定被测 home，而该变量在 agent 会话里指向**真实** `~/.forebrain`，于是三轮验收把 owner 的真实 home 当成了被测 home：① `~/.forebrain/forebrain.yaml` 被 258 字节的测试配置覆盖，执行者用 `forebrain.yaml.bak-20260921T045702Z`（**09-21** 的旧备份）还原——**10-14 10:26 之后写在里面的改动（当时 5238 字节）已无副本可找回**；② 真实库被两个 5.3GB/5.4GB 的「迁移前备份」残留占进 `~/.forebrain/state/backups/`（`user_version` 仍是 10，迁移没有执行，库本身未被改写）；③ 真实 home 的 `skills/.system`、`dict/`、`workspace_trust.json` 被启动播种/信任流程touch。**脚本已改为只认 `FOREBRAIN_ACCEPT_HOME`、永不读环境里的 `FOREBRAIN_HOME`**，之后三轮验收不再触碰真实 home。教训写入 047 的 Maintenance notes：**任何验收/测试脚手架都不得继承环境里的 home 变量**。
+- **2026-10-14 owner 拍板：006 排查结论落成三项修复，另加一个 P1 缺陷（044–047）**。006 的决策闸门判定「可达」（fork 续跑 `subagent_continue` 不装自己的 run ID，沿用编排 run ID，经主/fork 共享的 `recoverableLLM` 把主链 checkpoint 拼进续跑请求）。owner 当场把三件一起排进本期：**044**（fork 续跑在自己的 run 身份下发请求）、**045**（`compactRunGuard` 按 (run ID, worker 会话) 多槽）、**046**（分不清暂定尾巴的调用不压缩 ＋ 尾巴归属按历史判定，依赖 045）。006 本身闭环（排查交付完成），索引状态改 SUPERSEDED。同日 owner 报告 `memories_search` 工具失败（`memory search dictionaries are missing from /Users/doudou/go/bin/dict`，P1；根因：字典是唯一只按「可执行文件旁」解析的运行时资产，且下载只认严格 release 版本，本机跑的是 `v0.1.2-…+dirty` 的 GOBIN 构建），拍板修法「home 级位置＋自愈」，并追加两条硬性要求：**本地开发只用 `npm/scripts/build-platform-packages.sh` ＋ `cd npm && npm link` 后 `memory_search` 必须可用**、**`npm install` 装出来的 forebrain 必须开箱即用（不许手工脚本）**，落成 **047**。**owner 追加边界（同日）**：安装脚本**不写 `$FOREBRAIN_HOME`、不写 GOBIN**——home 里的字典由**产品在启动时自己播种**（`pkg/process/seed.go` 里紧跟 `llm.InitGlobalCatalog` 调 `memory.Seed`，与 models.json 同一条路径、同样只 `slog.Warn`），来源是「运行中二进制旁那一份」，打包脚本只做一件事：校验打包产物带全了字典（缺一条即构建失败）。代价：**不含本计划的旧二进制必须先被替换（重建或改走 npm 包）**，否则它既不会读 home 也不会播种。四份计划都未执行。
 - **2026-10-13 阻塞：执行者额度用尽**。子代理派发返回 `429 您已达到每周/每月使用上限，限额将在 2026-10-15 15:19:57 重置`，并行执行通道暂时关闭；评审方改在主线程接手。**剩余计划（根 001/006/014–021/024/030/035/037/038–042 与 web 017/018/020）在额度恢复前无法派发。**
   - **036 落地情况**：一次派发在运行中被中断，但它已把 Step 1–6 基本写完（`pkg/skill/versions.go` 1026 行 + 9 个测试含发布原子性故障注入、`service.go` 的 bootstrap/安装即 v1、`git_install.go` 上游记录、两个内置 SKILL.md 改写、`LoadedSkill.Version/VersionsRoot`、工具侧草稿重定向、gateway 主代理层与项目层各 7 条版本路由）。评审方复核时发现两点并**根因修掉**：一是 `TestWorkshopSkillFilesListReadAndWrite` 的草稿路径多退了一级（代码按计划用 `<技能根>/.drafts/<名称>`，测试写成 `<工作区>/.drafts/…`）；二是同一测试的读回断言用子串匹配 JSON 转义后的响应体，改为解码后 `JSONEq`。修后**全量 Go 测试 29 包全 ok、前端 397 用例 + vue-tsc 干净、fake 全量 e2e 114 passed/2 skipped/0 failed**。
   - **待复核（评审缺执行者报告）**：STOP 条件 2 的提示缓存证明（`Version` 字段是否只进会话私有状态、不动冻结前缀）、STOP 3/4 的判定、上游更新检测与 `PullUpdate`、`pkg/turn/skills.go:52` 那处读取是否也应走版本目录（现用于斜杠命令发现，读正式副本）。
@@ -75,7 +95,7 @@
 | [003-recall-in-flight-steer](003-recall-in-flight-steer.md) | 队列里显示的 steer 在模型开始回答前随时能撤回、清空时一并撤走，web/gateway 与 TUI 一致 | Bug Fix | DONE | **P1** | L | MED |
 | [004-session-scoped-plan-files](004-session-scoped-plan-files.md) | 计划文件按会话隔离：多个 TUI / 会话同时在 plan 模式时 exit_plan_mode 审批不再显示别人的计划 | Bug Fix | DONE | **P1** | M | MED |
 | [005-serialize-run-queue-hook-and-drop-retract-last-steer](005-serialize-run-queue-hook-and-drop-retract-last-steer.md) | gateway 的 run 队列 hook 一次只发一个变化；删掉已无人使用的 `RetractLastSteer` | Bug Fix / Tech Debt | DONE | P3 | S | LOW |
-| [006-shared-compaction-guard-and-unseparable-provisional-tail](006-shared-compaction-guard-and-unseparable-provisional-tail.md) | 排查 Runner 共享的压缩 guard 会否被同 run ID 的另一段历史覆盖；不可达则让分不清暂定尾巴的调用不压缩。**BLOCKED（2026-10-13）：Q1 可达——fork 续跑（`subagent_continue`）不带自己的 run ID，沿用编排 run ID，经主/fork 共享的 `recoverableLLM` 把主链 checkpoint 拼进续跑请求（探针 C 实证）；Step 5 小修与共享 guard 的修法独立，交 owner 拍板** | Investigation | BLOCKED | P3 | S | LOW |
+| [006-shared-compaction-guard-and-unseparable-provisional-tail](006-shared-compaction-guard-and-unseparable-provisional-tail.md) | 排查 Runner 共享的压缩 guard 会否被同 run ID 的另一段历史覆盖；不可达则让分不清暂定尾巴的调用不压缩。**SUPERSEDED（2026-10-14）：排查已交付、决策闸门判定「可达」；修复拆为 044（fork 续跑的 run 身份）、045（guard 按历史多槽）、046（分不清尾巴就不压缩，承接本计划的 Step 5–7）** | Investigation | SUPERSEDED | P3 | S | LOW |
 | [007-exit-gate-live-card-and-cardless-anchoring](007-exit-gate-live-card-and-cardless-anchoring.md) | exit_plan_mode 审批期间不再画假 "Exited plan mode" 卡、取消后不再多 "Canceled" 卡；无卡 gate 的确认行与 review 卡按真实顺序落位（live 与回放一致） | Bug Fix | DONE | **P1** | M | MED |
 | [008-web-cardless-exit-gate-anchoring](008-web-cardless-exit-gate-anchoring.md) | web 端 exit gate 的决定行逐条显示、按真实顺序落在 gate 调用处，review 卡跟在请求它的行之后；live 与重载一致（对齐 007 后的 TUI） | Bug Fix | DONE | P2 | M | MED |
 | [009-replay-seals-response-before-cardless-gate](009-replay-seals-response-before-cardless-gate.md) | 回放在发出无卡 exit gate 调用的行之后补喂 running 步骤、封存那段回答（修 review 交付流程回放文本重复 / 粘连）；收紧 007 test 8；勘误段放回原位 | Bug Fix | DONE | **P1** | S | LOW |
@@ -110,6 +130,16 @@
 | [040-link-hf-tokenizers-library](040-link-hf-tokenizers-library.md) | 所有平台强制链接 daulet/tokenizers v1.27.0（`fetch-libtokenizers.sh`，Windows 用 Rust 现编），建 `pkg/llm/hftok` 包装 | Dependency / Build | DONE（2026-10-13 执行完毕，未提交）| **P1** | L | HIGH |
 | [041-tokenizer-assets-and-per-model-estimator](041-tokenizer-assets-and-per-model-estimator.md) | 10 个家族的分词器文件随包分发、缓存优先、缺失按 HF→ModelScope 下载；按模型选分词器；删除 `hftokenizer.go` 与 tiktoken-go | Feature / Tech Debt | DONE（2026-10-13 执行完毕，未提交）| **P1** | L | MED |
 | [042-compaction-estimates-with-session-model-tokenizer](042-compaction-estimates-with-session-model-tokenizer.md) | 轮前 / 轮中压缩判定与用量观测按本次调用所用模型的分词器估算（同口径）；glm-5.3 真机验收 | Bug Fix | DONE（2026-10-13 执行完毕）| P2 | M | MED |
+| [044-fork-continuation-owns-its-run](044-fork-continuation-owns-its-run.md) | fork 续跑（`subagent_continue`）在自己的 run 身份下发请求：补上首跑已有、续跑漏掉的 run ID，压缩 guard / 审批队列 / 等待行不再落到派发者的 run 上（006 闸门后的修复之一） | Bug Fix | DONE（2026-10-14 执行完毕，未提交；主线程独立复验：五包 ok + 新回归 PASS） | P2 | S | LOW |
+| [045-compaction-guard-per-history](045-compaction-guard-per-history.md) | 压缩 guard 按 (run ID, worker 会话) 多槽：一段历史的 checkpoint 只属于它自己（探针 A 的跨历史拼接、`body_after_prefix` 基线互相清空） | Bug Fix | DONE（2026-10-14 执行完毕，未提交；主线程独立复验） | P2 | S | MED |
+| [046-unseparable-provisional-tail](046-unseparable-provisional-tail.md) | 分不清暂定尾巴的调用不压缩（fail-closed），且尾巴归属按历史判定（子代理继承父调用尾巴时照常压缩）；依赖 045 | Bug Fix | DONE（2026-10-14 执行完毕，未提交。**执行者通道不可用（`subagent_run` 从本轮工具集中消失），改由评审方在主线程按计划实施**；证据：新回归修复前 FAIL（`compaction 0 folded the provisional steer into its checkpoint`）→ 修复后 PASS，护栏测试前后均 PASS，`grep -c "compaction skipped: provisional"` = 1，`pkg/run -race` ok，gofmt/vet 干净） | P2 | S | LOW |
+| [047-dictionaries-are-a-home-install](047-dictionaries-are-a-home-install.md) | 分词字典成为 home 级安装件：产品**启动时播种**进 `$FOREBRAIN_HOME/dict`（与 models.json 同路），本地开发（打包＋npm link）与 `npm install` 两条路径都开箱即用 memory search；安装脚本不写 home / GOBIN，打包脚本只校验产物带全字典 | Bug Fix / Packaging | DONE（2026-10-14 执行完毕，未提交；三条验收链路主线程独立复跑 PASS；**执行期发生真实 home 事故，见本文件顶部审核信息**） | **P1** | L | MED |
+
+| [048-v11-purge-is-linear-and-indexed](048-v11-purge-is-linear-and-indexed.md) | 状态库 v10→v11 清理线性化 + 迁移局部表达式索引 + 分步进度日志（修「大库启动卡死数小时」；主批游标单调前进、工具输出语句全部走索引；语义与计数逐字不变） | Perf / Migration | **SUPERSEDED**（2026-10-14 复评：实测 `main_agent_rows_deleted=0`、迁移自行在 93 分钟内跑完，「平方级/天数级」量级估算被推翻；保留的部分拆为 052） | ~~P1~~ | M | MED |
+| [049-migration-connection-pragmas-and-space-preflight](049-migration-connection-pragmas-and-space-preflight.md) | 迁移连接带上 128MiB 页缓存与 64MiB WAL 限额（结束即还原），预检按「备份 + WAL」= 库大小 2.2× 计算并在拒绝前记录空间快照 | Perf / Migration | **REJECTED**（2026-10-14 复评：实测 1.1× 预检够用、`-wal` 随连接关闭自行清理、迁移瓶颈是行级删除而非缓存/IO；理由见「已考虑并拒绝的发现」） | ~~P2~~ | S | LOW |
+| [050-reclaim-and-backup-retention-policy](050-reclaim-and-backup-retention-policy.md) | 只有回收量 ≥ 64MiB 或 ≥ 页数 10% 才跑尾部 VACUUM（跳过时记日志）；迁移成功后同一来源版本的旧备份只留最新一份（严格模式匹配，不碰用户文件） | Perf / Migration | **REJECTED**（2026-10-14 复评：回收实测 54 秒内完成、库已缩到 1.6GB、遗留备份已被 owner 清掉，阈值与保留策略失去标的） | ~~P2~~ | S–M | LOW–MED |
+| [051-rewind-visibility-predicate-names-the-session](051-rewind-visibility-predicate-names-the-session.md) | rewind 可见性谓词的会话项限定为外层表（今天是 `rw.session_id = session_id` 恒真式 → 一个会话的 rewind 隐藏所有会话 sequence 更大的事件；附带让 `idx_fb_rewinds_session_state` 重新可用）**（本轮审计副产物，非性能范围）** | Bug Fix | DONE（2026-10-14 执行完毕，并**已按 owner 要求并回主工作区**——`git apply`，**未提交**，仓库惯例；分支 `advisor/051-rewind-predicate`（commit `39c1a5c`）保留作复核记录。并回后主树复核：3 个文件 +78/−25、`pkg/state` 全套 `ok`、两个 rewind 测试 PASS、vet/gofmt 干净；EXPLAIN 由 `SCAN rw` 变为 `SEARCH rw USING INDEX idx_fb_rewinds_session_state`） | **P1** | S | LOW |
+| [052-v11-migration-progress-logs](052-v11-migration-progress-logs.md) | v10→v11 每个阶段留进度日志（起始 + 主清理每批 + 每 25 个执行体 + 每 200 个 step）：93 分钟零输出不再被当成卡死。只加日志，清理语义不动 | DX / Perf | **REJECTED**（owner 2026-10-14 裁决不做：价值只在「下一个大库」的首次升级上，而迁移已在唯一已知的受影响库上完成。方案原样保留在本文件，路径若再次被走到可直接复活） | ~~P3~~ | S | LOW |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -179,7 +209,20 @@ web 015 → 019 → 016 → 017（另需 022、033、036）→ 018（另需 025�
 040-link-hf-tokenizers-library (独立；与 039 都改 Makefile/Dockerfile/npm 脚本/acceptance 脚本/README，串行执行，039 先)
 041-tokenizer-assets-and-per-model-estimator (依赖 039、040)
 042-compaction-estimates-with-session-model-tokenizer (依赖 038、041；含 glm-5.3 真机验收)
+--- 006 排查结论落成的三项修复 + 字典可达性（2026-10-14 owner 拍板）---
+044-fork-continuation-owns-its-run (独立，只改 pkg/run/subagent.go 与其测试；可与 045 并行)
+045-compaction-guard-per-history (独立，只改 pkg/run/llm_middleware.go 与其测试；可与 044 并行)
+046-unseparable-provisional-tail (依赖 045：复用 historyKey，且与 045 改同一个函数 applyRunScopedCompact，必须串行)
+047-dictionaries-are-a-home-install (独立于 044–046，改 pkg/memory / cmd/forebrain / cmd/installdict / npm 打包脚本 / 验收脚本；可与上面任一并行；验收要真跑 memory search)
+--- 状态库 schema 与迁移性能（2026-10-14 审计；产出 048–052，同日复评后仅 051/052 保留）---
+051-rewind-visibility-predicate-names-the-session (可执行：P1 正确性；只碰 pkg/state 读取路径与其测试，与其它计划无交集)
+052-v11-migration-progress-logs (可选：只加日志；无依赖，随时可做)
+048-v11-purge-is-linear-and-indexed (SUPERSEDED —— 保留部分见 052；不要执行)
+049-migration-connection-pragmas-and-space-preflight (REJECTED —— 不要执行)
+050-reclaim-and-backup-retention-policy (REJECTED —— 不要执行)
 ```
+
+**同一批次说明（2026-10-14 复评后）**：048/049/050 已撤回或驳回（理由见顶部复评与「已考虑并拒绝的发现」），**不再派发**。051 与 052 都只改 `pkg/state`，但文件不重叠（051：`rewind.go` / `session_events.go`；052：`schema_migrations.go`），可并行。
 
 **同一批次的执行约束（2026-10-11 追加）**：025、030、033、035、036 中涉及状态库结构的（025、030、033、035）都改 `pkg/state/schema.sql` 与迁移，**按 025 → 030 → 033 → 035 串行**，迁移版本号依次顺延；026、027、028 都改 `pkg/process`、`pkg/tool`、`pkg/tui` 的同一批文件，**按序串行**；web 015–020 都改 `ChatView.vue` / `App.vue` 等，**按上面的顺序串行**。
 
@@ -313,6 +356,24 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 
 ## 已审核但未计划的发现
 
+### 2026-10-14 schema / 迁移性能审计（已逐条核实、本期不立计划）
+
+- **v11 真正的成本中心是 subagent 增量合并**（`pkg/state/schema_migrations.go:913-985`）：实测 93 分钟里几乎全部耗在此处——233 个执行体，按连续块 `UPDATE ... json_set(payload_json,'$.text',<合并文本>)` 加 `DELETE ... WHERE sequence IN (<成百上千个字面量>)`，合计删掉/折掉 7.5M 行，速率约 1,340 行/秒。若要再优化，方向是「按 sequence 区间分批删除代替逐块拼 IN 列表」与「减少 Go 侧全量物化」；但这是**每个库一辈子一次**的迁移（owner 的库已完成），收益仅是把别人的一次等待从 90 分钟压到几十分钟——除非用户量值得投入，否则不建议立计划。
+
+- **memory FTS 重建整库持写锁**（`pkg/memory/ftsindex.go:78-96`）：`sync` 在一个事务里对每个变更文件做 `replaceFileRows`（按 rowid 区间删旧行 + 逐行插新行），`TermsRevision` 变更时全库重索引；状态库每个事务都是 `BEGIN IMMEDIATE` + 5s busy_timeout（`pkg/state/db.go:154`），于是升级后第一次 `memories_search` 会数秒到数分钟地挡住所有写方。分批提交需要先落一个持久化的 next-rowid 计数器（`ftsindex.go:60-76` 的注释说明 rowid 区间预留依赖「同一事务内读 MAX(rowid)」，并发同 root 的两个搜索会互相覆盖），属 M 级设计改动。
+- **v0→v1 事件重建把整个旧日志读进内存再逐行插入**（`pkg/state/schema_migrations.go:2209-2247`、`:2278-2388`）：Go 侧累积全部行 + 每行一次 `ExecContext`，在 7.7M 行的旧库上有 OOM 与分钟级耗时风险。只影响 v0（很老的）库；改造必须保持「cursor A 顺序为准、cursor B 按时间戳归并」的既有语义，M–L / MED。
+- **v7→v8 回填一次全表扫描**（`pkg/state/schema_migrations.go:296-309`）：`UPDATE ... WHERE event_type IN ('subagent_spawned','subagent_ended')` 没有可用索引（无任何索引以 `event_type` 打头），5.6GB 库上为几百行更新扫全表；可照 048 的「迁移内建局部索引再 drop」手法。只影响 v7 库，收益有限。
+- **v8→v9 按会话 UPDATE 循环**（`pkg/state/schema_migrations.go:1354-1365`）与 **v0→v1 逐回合语句循环**（`:2927-2963`）：O(N) 条语句而非 O(N²)，但 N 为会话/回合数；可用临时表 + 一次 `UPDATE ... FROM` 收敛。低优先。
+- **运行期（非 schema/迁移）性能发现**（本轮顺手扫到，仅登记，未核实到行级时序）：
+  - `pkg/state/message_sync.go:46-55`：每次 transcript 落盘前在写事务里读最近 5000 行并逐行 JSON 解析（读取在 `pkg/state/session_store.go:1090`、`:1288`），长会话每回合都付。
+  - `pkg/gateway/api_extra.go:1650-1651`：历史接口先 `ListAllMessages(ctx, sid, 0)`（0 = 无 LIMIT）再按 `limit` 截断；`historyLimit` 只用在另一个分支。
+  - `pkg/memory/backend.go:504-529`：每次 `memories_search` 走遍整个 memory 根并读每个文件；`pkg/memory/pipeline.go:87-94` 每回合做一次 O(全部已提取会话) 的 prune / 版本读取 / 证据目录遍历（`pkg/memory/evidence.go:190-217`）。
+  - `pkg/state/session_store.go:2215-2252`：`ForkInto` 全量读入内存后逐行 `insertMessage`（`:1713` 每次重新解析、未 Prepare）。
+  - `pkg/tool/loaded_skills.go:631-649`：`output_records` 无索引、无保留策略，`/context` 三次全表扫描（`pkg/turn/context.go:241`、`:255`）。
+  - `pkg/state/action_service.go:136-165`：`/api/actions` 的 `ORDER BY a.updated_at DESC` 要 temp b-tree 排序整个 agent 的历史。
+  - `pkg/state/db.go:35` 与 `pkg/tool/loaded_skills.go:611`：连接池无 `SetMaxOpenConns`。
+  - 测试套件：`OpenStateForTest` 每个测试新建并迁移一个库（全仓 297 处），可「一次建模板 + 每测试拷文件」提速（`pkg/state/session_events_test.go:71-126` 已是 10 万行级夹具，但不是平方级）。
+
 - ~~web 端无卡 exit gate 的审批记录落位错位~~ → 已立计划 008（2026-10-10，owner 要求另写 web 同步计划）。
 
 - **会话内容落在磁盘文件里，而非只在 SQLite**（owner 2026-10-09 定方向："所有会话消息无论是 primary agent
@@ -329,6 +390,24 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
     state 库在 home 级，导入旧 jsonl 只能在运行期做，不能放进纯 SQL 的 schema 迁移）。
 
 ## 已考虑并拒绝的发现
+
+### 2026-10-14 复评新增的驳回（依据是迁移自己跑完的实测数据）
+
+- **048 的两项查询计划改动（主清理单调游标 + 两条迁移局部表达式索引）——撤回，保留部分见 052**。依据：`main_agent_rows_deleted=0`，主清理在这台库上一行都没删（一次扫描即返回）；「平方级」只在「主代理自己写过海量增量」的库上成立，而这台库的 7.5M 增量全部来自 subagent。工具输出阶段在 subagent 阶段之后运行，那时事件表已从 7.7M 行缩到可忽略，逐 step 全表扫描的实际成本是零头。对一个**已跑完的一次性迁移**，改删数据路径的收益不抵风险。
+- **049：迁移连接的 `cache_size` / `journal_size_limit`**。依据：93 分钟是行级删除与合并（≈1,340 行/秒，含每行最多 4 棵 b-tree 的维护与多 GB WAL 写入），不是缺缓存；`-wal` 在最后一个连接关闭时已由 SQLite 清理（复评时 `~/.forebrain/state/` 里已无 WAL 文件），限额针对的是一段临时占用而非泄漏。
+- **049：预检从 1.1× 提到 2.2×**。依据：实测全程只需「5.6 GB 备份 + 约 4 GB WAL」，现有 1.1×（6.2 GB）在 16 GiB 可用空间下放行了整段迁移且未失败；2.2× 会把「空间其实够」的用户挡在门外。若将来真出现「跑到一半空间不足」的事故，再按当时数据定阈值。
+- **050：VACUUM 阈值（≥64MiB 或 ≥10% 页数）**。依据：`freed_pages=961977`（≈3.9 GB）那次回收，从 v11 结束到 v14 完成总共 **54 秒**（15:05:15 → 15:06:09）；阈值只为未来的小步升级省下「1.6 GB 文件重写」的十几秒。
+- **050：备份保留（同版本只留最新）**。依据：owner 已手动删除那份 5.6 GB 备份，`backups/` 目录当前不存在；且备份函数有 `version >= stateSchemaVersion` 的门（`schema_migrations.go:1466-1468`），v11 之后不再写新备份——保护的是一组不会再增长的文件。
+- **052：v11 各阶段的进度日志（owner 2026-10-14 裁决不做）**。依据：本计划的价值只落在「下一个大库的首次 v10→v11 升级」上，而这次迁移已在唯一已知的受影响库上完成；为一个不会再回来的一次性路径改迁移代码不划算。方案完整保留在 `plans/052-v11-migration-progress-logs.md`，将来真有第二个大库要走 v11 时可直接复活。
+
+### 2026-10-14 schema / 迁移性能审计的拒绝项（owner 可复核）
+
+- **用 `VACUUM INTO` + 文件替换取代尾部原地 VACUUM**（owner 2026-10-14 提议；实测后拒绝）：(1) WAL 模式下原地 VACUUM **不会**撑大 WAL——源码路径 `sqlite3RunVacuum` → `sqlite3BtreeCopyFile` 把 ATTACH 的临时库整页拷回主库文件（scratch 库实测 WAL 保持 64KB，且 `BTREE_USER_VERSION` / `BTREE_APPLICATION_ID` 保留）；(2) 换 inode 会绕过 SQLite 自己的锁协调——迁移特意用一个 `BEGIN IMMEDIATE` 事务让其它进程等到提交后看到新版本，把主库文件换掉会让正在等待的进程继续看向旧文件，`-wal`/`-shm` 也要一并作废；(3) 真正需要回收时（v11 清理）幸存数据只有百分之几，VACUUM 的临时文件与拷回量都很小。→ 改为「只在回收量可观时跑」（050）。
+- **`PRAGMA foreign_key_check` 按「动过的表」收窄**：它是重建类迁移的安全闸门（`schema_migrations.go:1642-1644`、`:1693-1719`），收窄需要 14 个迁移各自申报涉及的表——在删数据的迁移路径上，把「无条件验证」换成「各自声明」不划算；且清理后的事件表已很小，成本是秒级。
+- **删掉 `idx_fb_session_events_session`**（与 `UNIQUE (session_id, event_id)` 的自动索引前缀重复，`schema.sql:283`/`:285`）：确实冗余，但属运行期写入收益，需要新迁移版本号 + `schema.sql` 改动；v11 之后事件表写入频率大幅下降，收益不抵一次 schema 版本升级（若将来有 v15 可顺手合并）。
+- **迁移连接 `temp_store = MEMORY`**：大 GROUP BY 的排序会从文件变内存驻留，7.7M 行分组可能吃掉数 GB RSS；缓存已由 049 的 `cache_size = -131072` 有界提升，不动 `temp_store`（`mmap_size` 同理，构建上限不明）。
+- **把迁移拆成多个事务 / 让删除断点续跑**：单事务是刻意的崩溃安全设计（另一进程靠写锁等到提交后看到完整结果）。拆分要连同「可恢复 + 版本号推进」协议重做，属独立立项；本批用 049 的空间预检替代「跑到一半失败」。
+- **迁移后跑 `PRAGMA optimize` / `ANALYZE`**：审计过的运行期查询都是等值 seek，统计信息不改计划；ANALYZE 本身要扫大表。不做。
 
 - **web 实时观看 TUI 会话 / TUI 实时显示 web 的 turn（跨进程实时推送）**（2026-10-10）：owner 先要求"必须实现"，随后撤回，改为"只要数据互通，刷新或重新进入能看到最新即可"。
   若将来重启：gateway 需要跟随数据库里其他进程写入的事件（总线目前只转发本进程发布的事件）。
@@ -383,8 +462,7 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 - **删会话时清理它的计划目录**：owner 2026-10-09 裁决删会话不碰计划目录，计划作为历史保留（004 只在 `RemoveSessionStateFiles` 注释里写明）。
 
 - **在途 steer 一被取走就移出队列预览（显示为「发送中」）**：能让「显示即可撤回」字面成立，但 owner 要的是能撤回；
-  且 `SteerDelivery` 的设计本意就是失败时把 steer 留在队列里由边界重发，提前移出会重新引入「显示已发送、实际没人回答」的问题。
-- **「checkpoint 落库即视为送达」处理压缩窗口**：改动小，但 PostCompact hook 执行期间撤回存在竞态，已撤回的话可能残留在
+  且 `SteerDelivery` 的设计本意就是失败时把 steer 留在队列里由边界重发，提前移出会重新引入「显示已发送、实际没人回答」的问题。- **「checkpoint 落库即视为送达」处理压缩窗口**：改动小，但 PostCompact hook 执行期间撤回存在竞态，已撤回的话可能残留在
   checkpoint 里，且压缩中撤回会白做一次压缩、重跑 PreCompact hook。owner 2026-10-09 选择了「压缩不吞未送达 steer」。
 
 - **"只在裸终端复现、终端排水阻塞 paint 写入"**（a7151f5 asyncPaintWriter，已于 2026-10-09 回滚）：不是本卡死的根因——
@@ -394,13 +472,21 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 - **给 `agent.ListHistory` 加 mtime 缓存/增量解析**：账本在每次 subagent 执行开始和结束都追加，缓存频繁失效；
   且 owner 已定迁库方向。002 让热路径根本不读账本，更彻底。
 
+- **把「尾巴长度对不上」一律当成「分不清」**（046 的第一版，即 006 Step 5 的原样）：能堵住探针 B（撤回把 checkpoint 裁掉），但暂定尾巴的标记装在 callCtx 上，父 turn 有在途 steer 时它派发的每个子代理都继承该标记——于是子代理在整个执行期间都不会压缩，且只在日志里静默出现 `compaction skipped: provisional messages cannot be told apart`（006 的计数校验恰好是 1，发现不了）。046 改为按历史归属三分支，并加一条护栏测试钉住「继承别人尾巴时照常压缩」。
+- **字典缺失时让 memory search 退化成不切词/只按 ASCII 切**（047 起草时讨论）：FTS 索引里的词条就是同一套切词规则产生的，用另一套规则查询只会返回错误结果（命中错、漏命中都是错的）。宁可让工具报错并给出修复动作，也不给错答案。
+- **只为开发构建放开「非 release 版本也能下载字典」**（047 的方案 C）：能自愈 owner 本机的二进制，但字典仍只属于某一个二进制目录，换二进制、重装、多二进制共用 home 都会继续踩；owner 选了「home 级位置＋补种」。
+- **以 `make build` / `scripts/install-dictionary.sh` 为本地联调流程的修法**（047 的方案 B）：owner 明确「本地开发联调只使用 `npm/scripts/build-platform-packages.sh` 和 `cd npm && npm link`，从来不用 make build / scripts/install-dictionary.sh」；047 的安装侧按这条唯一流程设计。
+- **安装脚本替用户铺 home（打包脚本种 `$FOREBRAIN_HOME/dict` 与本机 GOBIN 的 `dict`）**（047 的第一版 Step 6，已按 owner 裁决删除）：当时理由是「让 owner 正在运行的那个老二进制不用重建就恢复」，但 owner 明确不要安装脚本写用户的 home / GOBIN。047 改为**产品启动时自己播种**（`process.Seed` → `memory.Seed`，与 `models.json` 完全同款）：打包/`npm install` 出来的二进制第一次启动就把「自己旁边那份」搬进 home，安装脚本只剩一行 `installdict -verify` 校验产物完整。被否掉的第三条路是「不播种、只靠第一次中文搜索时补种」——那样 home 在「先跑的是不带字典的二进制」时仍是空的，也没有离线可测的启动保证。代价一致：**旧二进制必须先被替换**。
+- **把字典并入 assets 资产族（提交进仓库 `assets/dict/`，+19MB）**（047 的方案 D）：能让 `FOREBRAIN_ASSETS_DIR` 的覆盖一并生效、全族一套解析，但仓库增重，且「字典字节与依赖模块的漂移校验」（`TestDictionaryFilesDeclareTheBytesTheirModulesShip`）要改成对仓库副本；owner 选了 home 级位置方案。
+
 ## 下一步
 
+0. **schema / 迁移性能批次已收口，无待执行项**：051 已并回主工作区（未提交）；048 撤回，049 / 050 / 052 驳回（依据见顶部复评与「已考虑并拒绝的发现」）。不要派发这四份。
 1. **owner 确认**：本轮写完的计划（022、024 改写版，025–030、033、035–037；web 015–020）。035 的通道凭据存储已定（方案 A）。
 2. 确认后按"执行顺序"里的分组派发：先 025，再 026 → 027，然后 028 / 029 并行；web 先 015、019。
-3. 仍为 TODO 的早期计划（001 设计规范、006 排查、007/008 系列之外的 014–021、032、034）照旧可独立执行，与上面不冲突的可穿插。
+3. 仍为 TODO 的早期计划（001 设计规范、007/008 系列之外的 014–021、032、034）照旧可独立执行，与上面不冲突的可穿插。
 
 ---
 
-**索引更新时间**：2026-10-11
+**索引更新时间**：2026-10-14（新增 048–051 与本次 schema/迁移性能审计记录）
 **Improve Skill 版本**：按 improve skill 模板生成

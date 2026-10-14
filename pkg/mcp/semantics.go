@@ -19,6 +19,14 @@ const (
 	// that is not answering — so the bound is the difference between a first
 	// turn that waits and a first turn that never arrives.
 	DefaultStartupTimeout = 30 * time.Second
+
+	// DefaultRequestTimeout is how long one tool call may take when its entry
+	// does not say, and zero is deliberately the value: an unconfigured call
+	// keeps the behaviour it has always had — it runs until its caller's own
+	// context ends. A server that needs a bound asks for one in its entry;
+	// installing one here would cut off a long-running tool nobody complained
+	// about.
+	DefaultRequestTimeout = 0
 )
 
 // ResolveStartupTimeout converts a configured startup_timeout in seconds into
@@ -26,7 +34,7 @@ const (
 // is an error rather than a silent substituted bound, so a typo cannot look
 // like a working configuration.
 func ResolveStartupTimeout(seconds float64) (time.Duration, error) {
-	if err := appcfg.ValidateMCPStartupTimeout(seconds); err != nil {
+	if err := appcfg.ValidateMCPTimeout(seconds); err != nil {
 		return 0, err
 	}
 	if seconds == 0 {
@@ -42,6 +50,33 @@ func StartupTimeoutFor(srv appcfg.MCPServerConfig) time.Duration {
 	timeout, err := ResolveStartupTimeout(srv.StartupTimeout)
 	if err != nil || timeout <= 0 {
 		return DefaultStartupTimeout
+	}
+	return timeout
+}
+
+// ResolveRequestTimeout converts a configured request_timeout in seconds into
+// the bound one tool call gets. Zero means the default (no bound); an unusable
+// value is an error rather than a silent substituted bound, so a typo cannot
+// look like a working configuration.
+func ResolveRequestTimeout(seconds float64) (time.Duration, error) {
+	if err := appcfg.ValidateMCPTimeout(seconds); err != nil {
+		return 0, err
+	}
+	if seconds == 0 {
+		return DefaultRequestTimeout, nil
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+// RequestTimeoutFor is ResolveRequestTimeout for the places that must not fail:
+// an entry that reached a live session has already been validated at load, so a
+// rejected value here can only mean a caller built the config struct by hand. A
+// zero result means "no bound", which callers apply by reusing the calling
+// context rather than deriving one that expires.
+func RequestTimeoutFor(srv appcfg.MCPServerConfig) time.Duration {
+	timeout, err := ResolveRequestTimeout(srv.RequestTimeout)
+	if err != nil || timeout <= 0 {
+		return DefaultRequestTimeout
 	}
 	return timeout
 }

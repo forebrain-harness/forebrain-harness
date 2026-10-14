@@ -880,7 +880,7 @@ func (p *RunnerPool) buildEntryLocked(ctx context.Context, project state.Project
 	if strings.TrimSpace(agentWorkspace) == "" {
 		agentWorkspace = workspaceRootFor(env)
 	}
-	mcpRes := ResolveSessionMCP(env.Root, agentWorkspace, baseDeps.AppCfg.Agents.Defaults.MCPServers, launch)
+	mcpRes := ResolveSessionMCP(env.Root, agentWorkspace, baseDeps.AppCfg.Agents, baseDeps.AgentName, launch)
 	frozenProject := project
 	frozenServers := mcpRes.Servers
 	// The whole frozen list, disabled entries included, is what the drift

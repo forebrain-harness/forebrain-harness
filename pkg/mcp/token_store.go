@@ -39,13 +39,20 @@ func oauthOverlayPath(home, projectKey, serverName string) string {
 }
 
 // OverlayProjectKey returns the credential namespace a server's tokens belong
-// to: the project key for project-scope entries, empty (the shared global
-// store) otherwise. Every load/save call site derives its namespace from the
-// server entry itself, so a project entry can never be handed a global
-// server's token by sharing its name.
+// to: the project key for project-scope entries, "agent:<id>" for an entry one
+// primary agent owns, empty (the shared global store) otherwise. Every
+// load/save call site derives its namespace from the server entry itself, so
+// an entry can never be handed another's token by sharing its name — two
+// primary agents that configure the same MCP server each hold their own
+// credential.
 func OverlayProjectKey(srv appcfg.MCPServerConfig) string {
-	if IsProjectScope(srv) {
+	switch {
+	case IsProjectScope(srv):
 		return strings.TrimSpace(srv.ProjectKey)
+	case IsAgentScope(srv):
+		if id := strings.TrimSpace(srv.AgentKey); id != "" {
+			return "agent:" + id
+		}
 	}
 	return ""
 }

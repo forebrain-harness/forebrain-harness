@@ -572,3 +572,10 @@ grep -n "provisionalTailLen(" pkg/run/*.go
 - **共享 guard 是更大的问题**：若将来出现与编排循环同 run ID、但历史不同的调用经过同一个 `recoverableLLM`（Step 3 的 Q1），即使有本计划的守卫，
   父请求也会被拼成「别人的 checkpoint + 自己历史的后半段」（探针 A）。届时按 Step 4 列的三种修法之一处理，并补一个以探针 A 为蓝本的回归测试。
 - 审阅时重点看：`applyRunScopedCompact` 在 `!separable` 时返回的是**拼接后**的 `messages`（与改动前「不压缩时返回拼接结果」一致），以及 `forceCompact` 的 `tail < 0` 早退。
+
+## Outcome（2026-10-14，owner 拍板后收口）
+
+- **决策闸门结论：Q1「可达」**。探针 A / 探针 B 在隔离环境复现（输出见本文件 "Current state"），并且用探针 C 定位到生产路径：fork 续跑（`subagent_continue` → `continueForkSubagent`）从不把子代理自己的 run ID 装进上下文（首跑 `runForkSubagent` 装了，续跑漏了），于是续跑的请求经主/fork 共享的 `recoverableLLM` 被拼上主链的 checkpoint。
+- **Step 5–7（分不清暂定尾巴就不压缩）由 `plans/046-unseparable-provisional-tail.md` 承接**，并做了一处修订：暂定尾巴的标记装在 callCtx 上，父 turn 有在途 steer 时子代理会继承它，若把「长度对不上」一律判成「分不清」，子代理会整天不压缩；046 因此把尾巴的归属也按历史（run ID ＋ 会话）判定，并加一条护栏测试（继承别人尾巴时照常压缩）。
+- **Step 4 列出的共享 guard / run ID 修法分别落成**：`plans/044-fork-continuation-owns-its-run.md`（fork 续跑在自己的 run 身份下发请求）与 `plans/045-compaction-guard-per-history.md`（`compactRunGuard` 按 (run ID, worker 会话) 多槽；顺带消掉 Q3 的 `prefillTokens` 交错清空）。
+- 本计划不再执行（Step 1–4 的产物即上面的结论与三份后继计划），索引状态为 SUPERSEDED。

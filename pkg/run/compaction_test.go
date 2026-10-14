@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -568,5 +569,159 @@ func TestObservedEstimateMatchesDecisionEstimator(t *testing.T) {
 		t.Fatal("fixture: the model estimator must differ from the global one")
 	} else if obs.Overhead == real-global {
 		t.Fatal("Overhead was measured against the global estimator, not the decision estimator")
+	}
+}
+
+// One run identity does not name one history: a fork dispatched while its
+// dispatcher has no run row of its own runs under the dispatching run's id
+// (pkg/run/subagent.go:1326-1341), and its history is its own worker session's.
+// Each history keeps its own checkpoint, so neither request is spliced with the
+// other's.
+func TestCompactionGuardKeepsAHistorysCheckpointToItself(t *testing.T) {
+	inner := &steerCompactLLM{}
+	compactions := 0
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
+		ExplicitLimit: 500,
+		TryCompact: func(_ context.Context, _ []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compactions++
+			return []llm.Message{llm.UserMessage(llm.Text(fmt.Sprintf("checkpoint-%d", compactions)))}, true, nil
+		},
+	})
+	child := []llm.Message{
+		llm.UserMessage(llm.Text("child task")),
+		llm.UserMessage(llm.Text(strings.Repeat("large child history\n", 300))),
+	}
+	childCtx := llm.WithAgentSessionID(tool.WithRunID(context.Background(), "shared-run"), "worker-child")
+	if _, err := recoverable.Execute(childCtx, child, nil); err != nil {
+		t.Fatal(err)
+	}
+	parent := []llm.Message{
+		llm.UserMessage(llm.Text("parent start")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("parent answer")}),
+	}
+	parentCtx := llm.WithAgentSessionID(tool.WithRunID(context.Background(), "shared-run"), "conversation-parent")
+	if _, err := recoverable.Execute(parentCtx, parent, nil); err != nil {
+		t.Fatal(err)
+	}
+	last := inner.calls[len(inner.calls)-1]
+	if len(last) != 2 || last[0].TextContent() != "parent start" {
+		t.Fatalf("parent request = %v: another history's checkpoint replaced the parent's", roles(last))
+	}
+}
+
+// A call that names no run caches nothing, exactly as before: the guard is
+// keyed by the history a run identifies, and a call without one has nothing to
+// cache under. Its slice is compacted whole, never spliced with a stale base.
+func TestCompactionGuardCachesNothingWithoutARunID(t *testing.T) {
+	inner := &steerCompactLLM{}
+	var compacted [][]llm.Message
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
+		ExplicitLimit: 500,
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compacted = append(compacted, append([]llm.Message(nil), messages...))
+			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
+		},
+	})
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("first")),
+		llm.UserMessage(llm.Text("second")),
+		llm.UserMessage(llm.Text(strings.Repeat("large history\n", 300))),
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := recoverable.Execute(context.Background(), history, nil); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if len(compacted) != 2 {
+		t.Fatalf("compactions=%d want 2", len(compacted))
+	}
+	for i, input := range compacted {
+		if len(input) != len(history) || input[0].TextContent() != "first" {
+			t.Fatalf("compaction %d saw %v, want the sent slice unchanged", i, roles(input))
+		}
+	}
+}
+
+// reshapingLLM stands in for a wrapper between the orchestration loop and
+// recoverableLLM that changes the message slice, so the provisional tail the
+// loop described no longer matches what recoverableLLM is handed.
+type reshapingLLM struct{ inner llm.LLM }
+
+func (w reshapingLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
+	extra := llm.UserMessage(llm.Text("reshaped"))
+	return w.inner.Execute(ctx, append(append([]llm.Message(nil), messages...), extra), tools)
+}
+
+// A call whose provisional steers can no longer be told apart from settled
+// history is not compacted at all: a checkpoint never folds in a steer the user
+// can still take back, and the steer reaches the model verbatim.
+func TestCompactionSkipsACallWhoseProvisionalTailCannotBeHonored(t *testing.T) {
+	st, readTool, _, rt := steerCompactFixture(t, "also check the tests")
+	var compacted [][]llm.Message
+	inner := &steerCompactLLM{}
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
+		ExplicitLimit: 500,
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compacted = append(compacted, append([]llm.Message(nil), messages...))
+			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
+		},
+	})
+	ctx := WithTurnInputRuntime(tool.WithRunID(context.Background(), "steer-tail-reshaped"), rt)
+	if _, err := wrapToolOrchestrationLLM(reshapingLLM{inner: recoverable}, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("start"))}, []*llm.Tool{readTool}); err != nil {
+		t.Fatal(err)
+	}
+	for i, input := range compacted {
+		for _, msg := range input {
+			if strings.Contains(msg.TextContent(), "also check the tests") {
+				t.Fatalf("compaction %d folded the provisional steer into its checkpoint: %v", i, roles(input))
+			}
+		}
+	}
+	if len(inner.calls) != 2 {
+		t.Fatalf("requests = %d want 2", len(inner.calls))
+	}
+	carried := false
+	for _, msg := range inner.calls[1] {
+		if msg.TextContent() == "also check the tests" {
+			carried = true
+		}
+	}
+	if !carried {
+		t.Fatalf("the steer did not reach the model verbatim: %v", roles(inner.calls[1]))
+	}
+}
+
+// A call that inherits a tail recorded for another history — a subagent
+// dispatched during a steered call runs under the dispatching call's context —
+// carries no provisional messages of its own, so it compacts as usual. Reading
+// that as "cannot be told apart" would stop every child of a steered turn from
+// compacting for the whole execution.
+func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
+	inner := &steerCompactLLM{}
+	var compacted [][]llm.Message
+	recoverable := WrapRecoverableLLM(inner, nil, &CompactChainDeps{
+		ExplicitLimit: 500,
+		TryCompact: func(_ context.Context, messages []llm.Message, _ []*llm.Tool, _ bool) ([]llm.Message, bool, error) {
+			compacted = append(compacted, append([]llm.Message(nil), messages...))
+			return []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, true, nil
+		},
+	})
+	history := []llm.Message{
+		llm.UserMessage(llm.Text("start")),
+		llm.UserMessage(llm.Text(strings.Repeat("large history\n", 300))),
+	}
+	parentCtx := llm.WithAgentSessionID(tool.WithRunID(context.Background(), "steered-run"), "conversation-parent")
+	// The dispatching call's context: a provisional tail of one message, marked
+	// for the parent's history.
+	parentCall := withProvisionalTail(parentCtx, parentCtx, len(history)+1, 1)
+	// The child's own history: the same run (that is what its calls inherit),
+	// its own worker session, its own messages.
+	childCtx := llm.WithAgentSessionID(parentCall, "worker-child")
+	if _, err := recoverable.Execute(childCtx, history, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(compacted) != 1 || len(compacted[0]) != len(history) {
+		t.Fatalf("compactions=%d, first input=%v; want the child's own history compacted whole", len(compacted), roles(compacted[0]))
 	}
 }
