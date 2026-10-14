@@ -450,8 +450,10 @@ var errClipboardNoImage = errors.New("clipboard does not contain an image")
 
 type systemClipboardImageReader struct {
 	// projectRoot is the launch directory's project root. When set, a pasted
-	// image is written under <projectRoot>/attachments/ so it lives with the
-	// project rather than in the system temp directory. Empty (a test, or a
+	// image is written under <projectRoot>/.forebrain/attachments/ so it lives
+	// with the project rather than in the system temp directory — inside the
+	// project's own metadata directory, where the rest of its forebrain state
+	// lives, so a paste never litters the project root. Empty (a test, or a
 	// surface with no project) keeps the temp-directory behavior.
 	projectRoot string
 }
@@ -468,7 +470,7 @@ func DefaultClipboardImageReader(projectRoot string) ClipboardImageReader {
 func (r systemClipboardImageReader) ReadClipboardImage(ctx context.Context) (InputAttachment, error) {
 	dir := os.TempDir()
 	if root := strings.TrimSpace(r.projectRoot); root != "" {
-		attachments := filepath.Join(root, "attachments")
+		attachments := filepath.Join(root, ".forebrain", "attachments")
 		if err := os.MkdirAll(attachments, 0o755); err != nil {
 			return InputAttachment{}, err
 		}
