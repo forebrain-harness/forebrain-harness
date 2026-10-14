@@ -1916,8 +1916,20 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	var runUsage runUsageCarrier
 	var completion turnCompletion
 	emitRunEnded := true
+	// runStarted records that this dispatch handed a run to the engine. The
+	// turnBeforeAgent hook below is called once the run row exists and at no
+	// other time, so it is the one place that can say so.
+	//
+	// A dispatch that returns before that — the session refused because another
+	// live process owns its turn, a run already parked on an approval, a
+	// context that was cancelled before the turn began — owns no run and owes
+	// no run-end notification. Emitting one closes a turn that never started
+	// with a "Worked for" line, and the only number it could report is the time
+	// the refusal took to come back: the reader is told a turn they never got
+	// cost them three seconds.
+	runStarted := false
 	defer func() {
-		if !emitRunEnded {
+		if !emitRunEnded || !runStarted {
 			return
 		}
 		s.emitSkillDraftNotes()
@@ -2057,6 +2069,9 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	defer cleanup()
 	var runIDOut string
 	s.turnBeforeAgent = func(agentCtx context.Context, runID string) error {
+		// The run exists from here on: this dispatch owes it a run-end
+		// notification, and the line that closes it is the turn's own.
+		runStarted = true
 		// Set the reducer/tracker active run before any tool or usage event for
 		// this run can reach it, so per-run counters (the "Worked for" tools/
 		// tokens line) key off the real run ID instead of falling back to "".

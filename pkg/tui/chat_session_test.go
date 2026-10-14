@@ -5852,6 +5852,40 @@ func (r *notifiedRecorder) awaitStable(t *testing.T) []any {
 	}
 }
 
+// A turn the database refuses because another live process owns the session
+// never had a run of its own, so nothing may close one: the run-end
+// notification is what draws the "Worked for" line, and the only number this
+// turn could report is the time the refusal itself took to come back. The
+// reader ends up told that a turn they never got cost them those seconds, on
+// the line above the sentence explaining that it was refused.
+func TestRefusedBusyTurnDrawsNoWorkedLine(t *testing.T) {
+	ctx := context.Background()
+	s := newCharacterizationSession(t, scriptedLLM{text: "never reached"})
+	const sessionID = "busy-refused"
+	require.NoError(t, s.Env.Deps.SessionStore.Ensure(ctx, sessionID, sessionID))
+
+	rec := &notifiedRecorder{}
+	s.PrependUINotify(rec.record)
+
+	// Another process owns the conversation — it holds a live lease and the
+	// run — which is what makes this turn's own CreateRun refuse.
+	other := &state.RunStore{DB: s.Env.SQL, Owner: "another-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	_, err = other.CreateRun(ctx, sessionID, "the other surface's turn")
+	require.NoError(t, err)
+
+	err = s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{SessionID: sessionID, Channel: "tui", UserText: "hello"})
+	require.ErrorIs(t, err, state.ErrSessionBusy)
+
+	for _, msg := range rec.awaitStable(t) {
+		if ended, ok := msg.(RunEndedMsg); ok {
+			t.Fatalf("a refused turn was closed as if it had run: %#v", ended)
+		}
+	}
+}
+
 // captureCharacterization runs CaptureScenario against the session's real
 // stores, the same collection P0-6 specifies (Messages/Runs/Steps/Actions/
 // Waits/Events).
