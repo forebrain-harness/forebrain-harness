@@ -17,7 +17,7 @@ func TestRootCommandExposesItsSubcommands(t *testing.T) {
 		}
 	}
 	sort.Strings(names)
-	if want := []string{"gateway", "lsp", "resume"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"assets", "gateway", "lsp", "resume"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("visible commands=%v want=%v", names, want)
 	}
 	var gatewayNames []string

@@ -13,10 +13,29 @@ type AgentsSection struct {
 	Definitions map[string]AgentDefinition `yaml:"definitions,omitempty" json:"definitions,omitempty"`
 }
 
+// MCPServersFor returns the MCP servers one primary agent owns, in
+// configuration order. An unknown agent owns none: callers fall back to the
+// shared list rather than the agent's own, which is what "this agent has no
+// entries of its own" means everywhere else.
+func (a AgentsSection) MCPServersFor(agentID string) []MCPServerConfig {
+	// Definition keys are validated as lower-case ids (primaryAgentIDPattern),
+	// so lowering the caller's id is the whole of the case-insensitivity here.
+	def, ok := a.Definitions[strings.ToLower(strings.TrimSpace(agentID))]
+	if !ok {
+		return nil
+	}
+	return def.MCPServers
+}
+
 type AgentDefinition struct {
-	Primary      bool                     `yaml:"primary" json:"primary"`
-	DisplayName  string                   `yaml:"display_name,omitempty" json:"display_name,omitempty"`
-	Description  string                   `yaml:"description,omitempty" json:"description,omitempty"`
+	Primary     bool   `yaml:"primary" json:"primary"`
+	DisplayName string `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	// MCPServers are the MCP servers this primary agent owns. They are added
+	// to the shared list (agents.defaults.mcp_servers) rather than replacing
+	// it — an agent without its own entries uses every shared one — and a
+	// same-named entry here replaces the shared one whole.
+	MCPServers   []MCPServerConfig        `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 	LLMProviders []AgentLLMProviderConfig `yaml:"llm_providers,omitempty" json:"llm_providers,omitempty"`
 }
 
@@ -146,39 +165,65 @@ type MCPServerConfig struct {
 	// consent was granted for, and a local patience dial must not read as "this
 	// is a different server now, ask again".
 	StartupTimeout float64 `yaml:"startup_timeout,omitempty" json:"startup_timeout,omitempty"`
+	// RequestTimeout bounds one tool call against this server, in seconds:
+	// the answer to a server that accepts a request and then never replies.
+	// Zero means no bound — the call runs for as long as its caller allows,
+	// which is what every entry does today. Like StartupTimeout it is not part
+	// of ServerFingerprint; it is local patience, not identity.
+	RequestTimeout float64 `yaml:"request_timeout,omitempty" json:"request_timeout,omitempty"`
+	// Enabled is this entry's own switch, for a server a user wants to keep
+	// described but out of every new session. Absent means enabled; false
+	// keeps the entry in the configuration, out of the effective list, and
+	// visible in the panel with the reason. It is not part of
+	// ServerFingerprint for the same reason StartupTimeout is not: toggling a
+	// server off must not read as "this is a different server, ask again".
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Required marks a server whose tools a run cannot do without. A required
 	// server's failure is a hard failure for a non-interactive run, and an
 	// interactive one may not skip it while it waits for the rest to settle.
 	Required bool `yaml:"required,omitempty" json:"required,omitempty"`
 
-	// Scope and ProjectKey are runtime stamps, never configuration. They
-	// record which source produced this effective entry ("global" from
-	// forebrain.yaml, "project" from a project-level file) and which project a
-	// project entry belongs to, so credential storage and approval clamping
-	// can tell the two apart. Serialization ignores them for the same reason
+	// Scope, ProjectKey and AgentKey are runtime stamps, never configuration.
+	// They record which source produced this effective entry ("global" from
+	// forebrain.yaml's shared list, "agent" from one primary agent's own list,
+	// "project" from a project-level file), which project a project entry
+	// belongs to, and which primary agent an agent entry belongs to, so
+	// credential storage, disable keys and approval clamping can tell the
+	// three apart. Serialization ignores them for the same reason
 	// AgentLLMProviderConfig.Models does: a runtime stamp that round-tripped
 	// through yaml would leak into files users edit by hand. Callers must set
 	// them on a deep copy, never on a config struct shared with AppCfg.
 	Scope      string `yaml:"-" json:"-"`
 	ProjectKey string `yaml:"-" json:"-"`
+	AgentKey   string `yaml:"-" json:"-"`
 }
 
 // MCPServerScope values for MCPServerConfig.Scope.
 const (
 	MCPServerScopeGlobal  = "global"
+	MCPServerScopeAgent   = "agent"
 	MCPServerScopeProject = "project"
 )
 
-// MaxMCPStartupTimeoutSeconds is the largest startup_timeout the runtime can
+// ServerEnabled reports whether this entry is switched on in the
+// configuration. Absent means yes: a configuration written before the switch
+// existed describes servers that all run.
+func ServerEnabled(srv MCPServerConfig) bool {
+	return srv.Enabled == nil || *srv.Enabled
+}
+
+// MaxMCPTimeoutSeconds is the largest timeout in seconds the runtime can
 // represent as a duration (about 31 years). Anything above it would overflow
 // time.Duration, so it is rejected at load instead of silently wrapping into a
 // negative deadline that expires immediately.
-const MaxMCPStartupTimeoutSeconds = 1e9
+const MaxMCPTimeoutSeconds = 1e9
 
-// ValidateMCPStartupTimeout rejects a startup_timeout the runtime cannot honor.
-// It lives beside the field it validates so the rule has one definition: the
-// runtime's resolver calls it rather than repeating it.
-func ValidateMCPStartupTimeout(seconds float64) error {
+// ValidateMCPTimeout rejects a timeout in seconds the runtime cannot honor.
+// Startup and per-call bounds share one rule because they share one
+// conversion: both become a time.Duration. It lives beside the fields it
+// validates so the rule has one definition, and the runtime's resolvers call
+// it rather than repeating it.
+func ValidateMCPTimeout(seconds float64) error {
 	switch {
 	case math.IsNaN(seconds):
 		return errors.New("must be a number of seconds")
@@ -186,8 +231,8 @@ func ValidateMCPStartupTimeout(seconds float64) error {
 		return errors.New("must be a finite number of seconds")
 	case seconds < 0:
 		return errors.New("must not be negative")
-	case seconds > MaxMCPStartupTimeoutSeconds:
-		return fmt.Errorf("must not exceed %g seconds", float64(MaxMCPStartupTimeoutSeconds))
+	case seconds > MaxMCPTimeoutSeconds:
+		return fmt.Errorf("must not exceed %g seconds", float64(MaxMCPTimeoutSeconds))
 	}
 	return nil
 }

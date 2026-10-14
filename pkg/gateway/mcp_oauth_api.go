@@ -98,7 +98,6 @@ func (s *Server) handleMCPServersV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var rows []map[string]any
-	officialRegistry, officialRegistryConfigured, _ := mcp.LoadOfficialRegistryFromEnv(s.Home)
 	// The runtime source is the session\'s Runner when the caller named one, so a
 	// project session reports the servers its own generation started.
 	//
@@ -134,76 +133,31 @@ func (s *Server) handleMCPServersV1(w http.ResponseWriter, r *http.Request) {
 	// frozen list and the servers its agent's disable store kept out of it.
 	// Only a Server assembled without any Runner falls back to the config
 	// file's list, with no runtime to report.
-	var inv turn.MCPInventory
+	rc := s.mcpRowsContext(lc, runtimeRunner)
+	// ?scope=global|agent lists one configuration layer as a client edits it,
+	// which is not the same question as "what is running": an entry a higher
+	// layer shadows is still configured and still editable.
+	if scope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))); scope == appcfg.MCPServerScopeGlobal || scope == appcfg.MCPServerScopeAgent {
+		s.handleMCPLayerList(w, lc, rc, scope)
+		return
+	}
 	configs := map[string]appcfg.MCPServerConfig{}
 	if runtimeRunner != nil {
-		inv = turn.BuildMCPInventory(s.mcpInventorySource(runtimeRunner, lc))
 		for _, list := range [][]appcfg.MCPServerConfig{runtimeRunner.MCPServers, runtimeRunner.MCPDisabled} {
 			for _, srv := range list {
 				configs[strings.ToLower(strings.TrimSpace(srv.Name))] = srv
 			}
 		}
 	} else {
-		inv = turn.BuildMCPInventory(turn.MCPInventorySource{Servers: lc.Agents.Defaults.MCPServers})
 		for _, srv := range lc.Agents.Defaults.MCPServers {
 			configs[strings.ToLower(strings.TrimSpace(srv.Name))] = srv
 		}
 	}
-	runtimeByName := map[string]mcp.ServerRecord{}
-	if runtime != nil {
-		for _, rec := range runtime.Servers {
-			runtimeByName[strings.ToLower(strings.TrimSpace(rec.Name))] = rec
-		}
-	}
-	for _, group := range inv.Groups {
-		for _, entry := range group.Entries {
+	for _, group := range rc.inv.Groups {
+		for i := range group.Entries {
+			entry := group.Entries[i]
 			srv := configs[strings.ToLower(entry.Name)]
-			ms := mcp.MergeMCPServerOAuth(s.Home, srv)
-			hasOverlay := false
-			if _, ok, e := mcp.LoadOAuthOverlay(s.Home, mcp.OverlayProjectKey(ms), ms.Name); e == nil {
-				hasOverlay = ok
-			}
-			row := map[string]any{
-				"name":                  entry.Name,
-				"transport":             entry.Transport,
-				"url_set":               strings.TrimSpace(ms.URL) != "",
-				"scope":                 entry.Scope,
-				"source":                entry.Source,
-				"oauth_configured":      entry.CanAuth,
-				"oauth_overlay":         hasOverlay,
-				"required":              entry.Required,
-				"running":               entry.Running,
-				"disabled_next_session": entry.DisabledNext,
-				"auth_status":           entry.Auth,
-			}
-			// The runtime projection. A server that failed keeps its place in
-			// the list, with its error text: an entry that vanished from the
-			// list would read as "not configured", which is the opposite of
-			// what happened.
-			if runtime != nil && entry.Running {
-				rec, ok := runtimeByName[strings.ToLower(entry.Name)]
-				connStatus := "unknown"
-				if ok {
-					connStatus = string(rec.ConnStatus)
-				}
-				row["conn_status"] = connStatus
-				row["tool_count"] = entry.ToolCount
-				row["generation"] = runtime.Generation
-				row["pending"] = runtime.Pending
-				if entry.Error != "" {
-					row["error"] = entry.Error
-				}
-			}
-			// The session's own frozen tool table, attributed by the
-			// mcp__<server>__<tool> contract: what the model actually sees,
-			// with each tool's parameter table.
-			if len(entry.Tools) > 0 {
-				row["tools"] = entry.Tools
-			}
-			if officialRegistryConfigured {
-				row["official_url"] = officialRegistry != nil && officialRegistry.IsOfficialURL(ms.URL)
-			}
-			rows = append(rows, row)
+			rows = append(rows, s.mcpServerRow(rc, srv, entry.Scope, entry.Source, entry.Running, &entry))
 		}
 	}
 	projectBlock := map[string]any{}
@@ -350,9 +304,11 @@ func (s *Server) handleMCPOAuthPKCEFinish(w http.ResponseWriter, r *http.Request
 }
 
 // handleProjectMCPPreview resolves the project-level MCP view for a project
-// without a session: which servers would load, which are pending consent,
-// which globals they override. The web MCP view uses it so the confirmation
-// entry can stand on its own.
+// without a session: which servers would load, which are pending consent, which
+// higher-layer entries they override, and what each effective entry is. The web
+// MCP view uses it so the confirmation entry can stand on its own, and each row
+// carries the whole entry (secrets masked) so the same row can be opened in the
+// edit modal.
 func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -374,26 +330,30 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	workspace := ""
+	agents := appcfg.AgentsSection{}
+	agentName := ""
+	if cfg := s.liveCfg(); cfg != nil {
+		agents = cfg.Agents
+	}
 	if s.Runner != nil {
 		workspace = s.Runner.WorkspaceRoot
+		agentName = s.Runner.AgentName
 	}
-	var global []appcfg.MCPServerConfig
-	if cfg := s.liveCfg(); cfg != nil {
-		global = cfg.Agents.Defaults.MCPServers
-	}
-	res := process.ResolveSessionMCP(s.Home, workspace, global, launch)
+	res := process.ResolveSessionMCP(s.Home, workspace, agents, agentName, launch)
 	servers := make([]map[string]any, 0, len(res.Servers))
 	for _, srv := range res.Servers {
-		scope := "global"
-		if mcp.IsProjectScope(srv) {
-			scope = "project"
+		scope := appcfg.MCPServerScopeGlobal
+		switch {
+		case mcp.IsProjectScope(srv):
+			scope = appcfg.MCPServerScopeProject
+		case mcp.IsAgentScope(srv):
+			scope = appcfg.MCPServerScopeAgent
 		}
-		servers = append(servers, map[string]any{
-			"name":      strings.TrimSpace(srv.Name),
-			"transport": strings.TrimSpace(srv.Transport),
-			"url_set":   strings.TrimSpace(srv.URL) != "",
-			"scope":     scope,
-		})
+		row := readMCPServerWrite(srv)
+		row["scope"] = scope
+		row["url_set"] = strings.TrimSpace(srv.URL) != ""
+		row["running"] = true
+		servers = append(servers, row)
 	}
 	notApplied := make([]map[string]string, 0, len(res.Summary.NotApplied))
 	for _, item := range res.Summary.NotApplied {

@@ -347,18 +347,22 @@ WHERE e.session_id=? AND TRIM(IFNULL(e.run_id,'')) <> ''
 	return seq, nil
 }
 
-// rewindHiddenEventsPredicateTemplate excludes the events one or more rewinds
-// hide from a conversation. sessionExpr and seqExpr are the enclosing query's
-// SQL expressions for an event's session_id and sequence columns. The range a
-// pending rewind hides runs from its first hidden event to the end of the
-// conversation; a fixed rewind's range ends at the first event of the first
-// new user message that followed it.
-const rewindHiddenEventsPredicateTemplate = `NOT EXISTS (
+// rewindVisibleEventsPredicate excludes the events a conversation's rewinds
+// hide. Every reader of fb_session_events composes it against that table
+// unaliased, and the session term carries the table name for a reason: inside
+// the NOT EXISTS subquery the FROM list is fb_rewinds, which has a session_id
+// of its own, and SQLite resolves an unqualified name in the innermost scope
+// first. A bare `session_id` would compare the rewinds row with itself — every
+// rewind would then hide events of every conversation, and
+// idx_fb_rewinds_session_state could not answer the subquery. A constant, not
+// a function of caller-supplied expressions, so there is nothing left to pass
+// wrong; a caller that needs an alias has to revisit this.
+const rewindVisibleEventsPredicate = `NOT EXISTS (
   SELECT 1 FROM fb_rewinds rw
-  WHERE rw.session_id = %[1]s
+  WHERE rw.session_id = fb_session_events.session_id
     AND rw.hidden_event_seq_from > 0
-    AND %[2]s >= rw.hidden_event_seq_from
-    AND (rw.state = 'pending' OR %[2]s < IFNULL((
+    AND fb_session_events.sequence >= rw.hidden_event_seq_from
+    AND (rw.state = 'pending' OR fb_session_events.sequence < IFNULL((
           SELECT MIN(e2.sequence)
           FROM fb_session_events e2
           JOIN fb_messages m2 ON m2.run_id = e2.run_id AND m2.session_id = e2.session_id
@@ -369,11 +373,3 @@ const rewindHiddenEventsPredicateTemplate = `NOT EXISTS (
             AND TRIM(IFNULL(m2.run_id,'')) <> ''
         ), 9223372036854775807))
 )`
-
-// RewindEventsPredicate returns the SQL predicate that excludes events hidden
-// by a conversation's rewinds, for the enclosing query's session_id and
-// sequence expressions. Every reader of fb_session_events composes it, so the
-// rule lives in one place.
-func RewindEventsPredicate(sessionExpr, seqExpr string) string {
-	return fmt.Sprintf(rewindHiddenEventsPredicateTemplate, sessionExpr, seqExpr)
-}

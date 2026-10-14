@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -117,42 +118,73 @@ type recoverableLLM struct {
 }
 
 // compactRunGuard caches the latest checkpoint and prefix token baseline for
-// an agent run. The orchestration loop adopts each replacement through the
+// one model history. The orchestration loop adopts each replacement through the
 // compaction sink. Later calls still check the growing history and may compact
 // again when the next threshold is reached.
+//
+// One entry per history: a Runner's single recoverableLLM serves many histories
+// at once, and a run identity is not one of them, so keying by run id alone let
+// one history's checkpoint be spliced into another's request. The map is
+// bounded; when it is full the oldest entry is dropped, which costs that
+// history only its cached base until its next compaction.
 type compactRunGuard struct {
-	mu            sync.Mutex
-	runID         string
+	mu      sync.Mutex
+	entries map[string]compactRunGuardEntry
+	order   []string
+}
+
+type compactRunGuardEntry struct {
 	compactedBase []llm.Message
 	baseLen       int
 	prefillTokens int
 	prefillSet    bool
 }
 
+// compactRunGuardCap bounds the number of histories one Runner's guard
+// remembers. A Runner serves its primary conversation plus the subagents
+// running on it; the cap is far above that, and a dropped entry is harmless.
+const compactRunGuardCap = 64
+
 func newCompactRunGuard() *compactRunGuard {
-	return &compactRunGuard{}
+	return &compactRunGuard{entries: make(map[string]compactRunGuardEntry)}
 }
 
-// get returns the cached compacted base for the given run ID, along with the
+// historyKey names the model history a call is carrying: the run it belongs to
+// and the conversation whose history it is. A run identity alone does not name
+// one history — one Runner serves the primary chain, the fork chains and every
+// typed child with a single recoverableLLM (see Runner.Load), and a child
+// dispatched without a run row of its own borrows the dispatching run's id — so
+// the guard's key carries the same conversation identity compaction itself is
+// scoped to. Empty when the call names no run: such a call caches nothing, as
+// before.
+func historyKey(ctx context.Context) string {
+	runID := strings.TrimSpace(tool.RunIDFromContext(ctx))
+	if runID == "" {
+		return ""
+	}
+	return runID + "\x00" + strings.TrimSpace(llm.AgentSessionIDFromContext(ctx))
+}
+
+// get returns the cached compacted base for the given history, along with the
 // original message-count at compaction time. Returns ok=false when no
-// compaction has been cached for this run (or when runID is empty).
-func (g *compactRunGuard) get(runID string) (base []llm.Message, baseLen int, ok bool) {
-	if g == nil || runID == "" {
+// compaction has been cached for this history (or when the key is empty).
+func (g *compactRunGuard) get(key string) (base []llm.Message, baseLen int, ok bool) {
+	if g == nil || key == "" {
 		return nil, 0, false
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.runID != runID || len(g.compactedBase) == 0 {
+	entry, ok := g.entries[key]
+	if !ok || len(entry.compactedBase) == 0 {
 		return nil, 0, false
 	}
-	return g.compactedBase, g.baseLen, true
+	return entry.compactedBase, entry.baseLen, true
 }
 
-// set caches the compacted base for the given run ID, replacing any previous
-// entry (which would be from a different run). prefillTokens is the compacted
-// base's token count, computed by the caller with the session's own model's
-// estimator so this prefix baseline shares the unit of the compaction decision
-// and the observed overhead.
+// set caches the compacted base for the given history. prefillTokens is the
+// compacted base's token count, computed by the caller with the session's own
+// model's estimator so this prefix baseline shares the unit of the compaction
+// decision and the observed overhead.
 //
 // baseLen is stored as the compacted length because the orchestration loop
 // adopts the compacted history (see compactionAdoptionSink): the next call's
@@ -160,36 +192,54 @@ func (g *compactRunGuard) get(runID string) (base []llm.Message, baseLen int, ok
 // base + messages[baseLen:] is an identity that appends only genuinely-new
 // messages. Anchoring on the pre-compaction length instead would, on an
 // unusually long turn, slice past newly produced messages and drop them.
-func (g *compactRunGuard) set(runID string, compacted []llm.Message, prefillTokens int) {
-	if g == nil || runID == "" || len(compacted) == 0 {
+func (g *compactRunGuard) set(key string, compacted []llm.Message, prefillTokens int) {
+	if g == nil || key == "" || len(compacted) == 0 {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.runID = runID
-	g.compactedBase = compacted
-	g.baseLen = len(compacted)
-	g.prefillTokens = max(0, prefillTokens)
-	g.prefillSet = true
+	if _, exists := g.entries[key]; !exists {
+		g.order = append(g.order, key)
+		for len(g.order) > compactRunGuardCap {
+			oldest := g.order[0]
+			g.order = g.order[1:]
+			delete(g.entries, oldest)
+		}
+	}
+	g.entries[key] = compactRunGuardEntry{
+		compactedBase: compacted,
+		baseLen:       len(compacted),
+		prefillTokens: max(0, prefillTokens),
+		prefillSet:    true,
+	}
 }
 
-func (g *compactRunGuard) prefill(runID string, currentTokens int) int {
-	if g == nil || runID == "" {
+// prefill returns the prefix token baseline recorded for this history's last
+// checkpoint, recording the current size on the first call. A history that has
+// never compacted answers -1, which tells the caller to derive the baseline
+// from the slice it is holding.
+func (g *compactRunGuard) prefill(key string, currentTokens int) int {
+	if g == nil || key == "" {
 		return -1
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.runID != runID {
-		g.runID = runID
-		g.compactedBase = nil
-		g.baseLen = 0
-		g.prefillSet = false
+	entry, ok := g.entries[key]
+	if !ok {
+		entry = compactRunGuardEntry{}
+		g.order = append(g.order, key)
+		for len(g.order) > compactRunGuardCap {
+			oldest := g.order[0]
+			g.order = g.order[1:]
+			delete(g.entries, oldest)
+		}
 	}
-	if !g.prefillSet {
-		g.prefillTokens = max(0, currentTokens)
-		g.prefillSet = true
+	if !entry.prefillSet {
+		entry.prefillTokens = max(0, currentTokens)
+		entry.prefillSet = true
+		g.entries[key] = entry
 	}
-	return g.prefillTokens
+	return entry.prefillTokens
 }
 
 func WrapRecoverableLLM(
@@ -308,28 +358,41 @@ func blankOutputError(err error) error {
 	)
 }
 
-// applyRunScopedCompact keeps a compacted checkpoint as the base for later LLM
-// calls in the same run, then appends messages produced after that checkpoint.
-// It reports whether a new compaction happened on this call so the caller can
-// propagate the replacement history to the orchestration loop, and how many
-// trailing messages are provisional (see provisionalTail): those stay out of
-// the checkpoint and follow it verbatim.
+// applyRunScopedCompact keeps the checkpoint this history's later calls start
+// from as the base for the model context, then appends messages produced after
+// that checkpoint. It reports whether a new compaction happened on this call so
+// the caller can propagate the replacement history to the orchestration loop,
+// and how many trailing messages are provisional (see provisionalTail): those
+// stay out of the checkpoint and follow it verbatim. A negative tail means the
+// provisional messages cannot be told apart, and the call must not be compacted
+// at all.
 func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, int, bool) {
-	runID := strings.TrimSpace(tool.RunIDFromContext(ctx))
-	prefillTokens := r.runGuard.prefill(runID, llm.EstimateMessagesWith(est, messages))
-	tail := provisionalTailLen(ctx, len(messages))
-	if base, baseLen, ok := r.runGuard.get(runID); ok && baseLen <= len(messages) {
+	key := historyKey(ctx)
+	prefillTokens := r.runGuard.prefill(key, llm.EstimateMessagesWith(est, messages))
+	tail, separable := provisionalTailLen(ctx, len(messages))
+	if base, baseLen, ok := r.runGuard.get(key); ok && baseLen <= len(messages) {
 		newMsgs := messages[baseLen:]
 		if tail > len(newMsgs) {
 			// A cached base reaching into the provisional messages is not the
-			// history the orchestration loop described; compact the slice whole,
-			// as before.
-			tail = 0
+			// history the orchestration loop described.
+			separable = false
 		}
 		combined := make([]llm.Message, 0, len(base)+len(newMsgs))
 		combined = append(combined, base...)
 		combined = append(combined, newMsgs...)
 		messages = combined
+	}
+	if !separable {
+		// A checkpoint is durable, and a steer riding on this call is still the
+		// user's to take back: once its tail cannot be told apart from settled
+		// history, compacting would fold it in. This call goes out uncompacted —
+		// its provisional messages settle with it, and the next call compacts as
+		// usual. A negative tail also tells the overflow path not to compact
+		// (see forceCompact): the same call must not fold the steer in through
+		// the reactive route either.
+		slog.Warn("compaction skipped: provisional messages cannot be told apart",
+			"run_id", strings.TrimSpace(tool.RunIDFromContext(ctx)), "messages", len(messages))
+		return messages, -1, false
 	}
 	head, provisional := messages[:len(messages)-tail], messages[len(messages)-tail:]
 	var snapshotRaw json.RawMessage
@@ -344,7 +407,7 @@ func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []ll
 	if !compacted {
 		return messages, tail, false
 	}
-	r.runGuard.set(runID, head, llm.EstimateMessagesWith(est, head))
+	r.runGuard.set(key, head, llm.EstimateMessagesWith(est, head))
 	return joinProvisionalTail(head, provisional), tail, true
 }
 
@@ -373,6 +436,9 @@ func (r recoverableLLM) observeOverflow(ctx context.Context, err error, estimate
 }
 
 func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message, tail int, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, bool) {
+	if tail < 0 {
+		return messages, false
+	}
 	head, provisional := messages[:len(messages)-tail], messages[len(messages)-tail:]
 	compactCtx, release := compactionContext(ctx)
 	compacted, ok := r.compactDeps.tryCompact(compactCtx, head, tools, true)
@@ -380,7 +446,7 @@ func (r recoverableLLM) forceCompact(ctx context.Context, messages []llm.Message
 	if !ok {
 		return messages, false
 	}
-	r.runGuard.set(strings.TrimSpace(tool.RunIDFromContext(ctx)), compacted, llm.EstimateMessagesWith(est, compacted))
+	r.runGuard.set(historyKey(ctx), compacted, llm.EstimateMessagesWith(est, compacted))
 	return joinProvisionalTail(compacted, provisional), true
 }
 

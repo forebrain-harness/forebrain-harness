@@ -27,6 +27,28 @@ func RejectPlaintextConfigSecrets(path string, b []byte) error {
 	return rejectPlaintextConfigSecrets(path, b)
 }
 
+// RejectPlaintextMCPSecrets runs the plaintext-secret rule over MCP entries
+// that are about to be written to a configuration file. A write path calls it
+// for the same reason the loader calls it while reading: a secret-like key
+// holds a ${ENV_NAME} reference or nothing, and a value that is neither must not
+// reach the file — the loader would then refuse to read it, leaving the user
+// with a configuration the next process cannot start from.
+//
+// path names the file in the returned error, and the key path inside it is the
+// one a reader sees there ("mcp_servers[0].headers.x-api-key").
+func RejectPlaintextMCPSecrets(path string, servers []MCPServerConfig) error {
+	if len(servers) == 0 {
+		return nil
+	}
+	b, err := yaml.Marshal(struct {
+		Servers []MCPServerConfig `yaml:"mcp_servers"`
+	}{Servers: servers})
+	if err != nil {
+		return err
+	}
+	return rejectPlaintextConfigSecrets(path, b)
+}
+
 func scanPlaintextConfigSecrets(path string, keyPath []string, v interface{}) error {
 	switch x := v.(type) {
 	case map[interface{}]interface{}:

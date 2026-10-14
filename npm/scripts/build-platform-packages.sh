@@ -160,6 +160,11 @@ build_target() {
   # binary, so one install puts them all where forebrain reads them.
   "$ROOT_DIR/scripts/install-dictionary.sh" "$pkg_dir/vendor/$triple/bin"
   "$ROOT_DIR/scripts/install-assets.sh" "$pkg_dir/vendor/$triple/bin"
+  # A package that cannot search memory is a package to reject here, not a
+  # failure for the user to discover later. The dictionaries ship beside the
+  # binary (above); the runtime seeds them into the forebrain home on first
+  # need, which is what makes every later binary sharing that home search.
+  ( cd "$ROOT_DIR" && go run ./cmd/installdict -verify "$pkg_dir/vendor/$triple/bin" )
 
   cat >"$pkg_dir/package.json" <<JSON
 {

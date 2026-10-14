@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	llmopenai "github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/mcp"
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -1107,6 +1109,23 @@ func (s *Server) ServeHTTPForTest(w http.ResponseWriter, r *http.Request) {
 	host.Post("/dirs", s.handleHostDirs)
 	host.Get("/trust", s.handleHostTrust)
 	host.Post("/trust", s.handleHostTrust)
+	// The MCP write surface, mirroring the production routes: three layers,
+	// each with create, update, delete and a connection test.
+	mcpRoutes := rest.Group("/api/v1/mcp")
+	mcpRoutes.Get("/servers", s.handleMCPServersV1)
+	mcpRoutes.Post("/servers", s.handleMCPGlobalServersWrite)
+	mcpRoutes.Post("/servers/test", s.handleMCPServersTest)
+	mcpRoutes.Put("/servers/:name", s.handleMCPGlobalServersWrite)
+	mcpRoutes.Delete("/servers/:name", s.handleMCPGlobalServersWrite)
+	agentRoutes := rest.Group("/api/v1/agents")
+	agentRoutes.Post("/primary/:id/mcp/servers", s.handleMCPAgentServersWrite)
+	agentRoutes.Post("/primary/:id/mcp/servers/test", s.handleMCPAgentServersTest)
+	agentRoutes.Put("/primary/:id/mcp/servers/:name", s.handleMCPAgentServersWrite)
+	agentRoutes.Delete("/primary/:id/mcp/servers/:name", s.handleMCPAgentServersWrite)
+	projects.Post("/:id/mcp/servers", s.handleProjectMCPServersWrite)
+	projects.Post("/:id/mcp/servers/test", s.handleProjectMCPServersTest)
+	projects.Put("/:id/mcp/servers/:name", s.handleProjectMCPServersWrite)
+	projects.Delete("/:id/mcp/servers/:name", s.handleProjectMCPServersWrite)
 	rest.Handler.ServeHTTP(w, r)
 }
 
@@ -4553,4 +4572,673 @@ func TestRewindRoutes(t *testing.T) {
 
 	rec = do(http.MethodPost, "/api/chat/sessions/s1/file-changes/revert", map[string]any{"path": gone})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// mcpWriteFixture is one gateway server over a real forebrain.yaml: the write
+// endpoints edit a file, so the file has to exist and be reloadable.
+type mcpWriteFixture struct {
+	server    *Server
+	cfgPath   string
+	home      string
+	agentName string
+	projects  *state.ProjectStore
+}
+
+// mcpWriteProvider is the minimum a gateway configuration needs: every write
+// reloads the configuration onto the serving runner, and a runner without a
+// provider is not a runtime.
+func mcpWriteProvider() []appcfg.AgentLLMProviderConfig {
+	return []appcfg.AgentLLMProviderConfig{{
+		Provider: "openai",
+		Model:    "gpt-main",
+		APIKey:   "${FOREBRAIN_MCP_WRITE_TEST_KEY}",
+		BaseURL:  "http://127.0.0.1:9/v1",
+	}}
+}
+
+// newMCPWriteFixture builds a gateway server over a real forebrain.yaml. The file
+// is written through config.Save from the caller's own configuration, so the
+// fixture stays a configuration rather than a string to keep valid by hand.
+func newMCPWriteFixture(t *testing.T, mutate func(*appcfg.Root), agentName string, effective []appcfg.MCPServerConfig) *mcpWriteFixture {
+	t.Helper()
+	t.Setenv("FOREBRAIN_MCP_WRITE_TEST_KEY", "test-key")
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	root := appcfg.Root{ApprovalsReviewer: "user"}
+	root.Agents.Definitions = map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: mcpWriteProvider()},
+	}
+	if mutate != nil {
+		mutate(&root)
+	}
+	if err := appcfg.Save(cfgPath, root); err != nil {
+		t.Fatalf("save fixture config: %v", err)
+	}
+	cfg, err := appcfg.LoadPersisted(cfgPath)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ws := filepath.Join(home, "workspace")
+	runner := &run.Runner{Deps: &run.Deps{
+		Home:          home,
+		AgentName:     agentName,
+		WorkspaceRoot: ws,
+		ProjectRoot:   home,
+		MCPServers:    effective,
+		AppCfg:        &cfg,
+	}}
+	env := &process.Environment{
+		Root:       home,
+		ConfigPath: cfgPath,
+		RawConfig:  cfg,
+		Deps:       run.Deps{Home: home, AgentName: agentName, AppCfg: &cfg, WorkspaceRoot: ws},
+		Runner:     runner,
+	}
+	s := &Server{Home: home, Runner: runner, Env: env, Projects: state.NewProjectStore(db, agentName)}
+	if err := env.ReloadConfig(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	return &mcpWriteFixture{server: s, cfgPath: cfgPath, home: home, agentName: agentName, projects: s.Projects}
+}
+
+// sharedMCPFixture is the configuration most of these tests start from: one
+// shared entry with a literal credential in a header, which is the value the read
+// side has to mask.
+func sharedMCPFixture(root *appcfg.Root) {
+	root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+		Name:           "shared-doc",
+		Transport:      "streamable_http",
+		URL:            "https://docs.test/mcp",
+		Headers:        map[string]string{"Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9"},
+		RequestTimeout: 30,
+	}}
+}
+
+func (f *mcpWriteFixture) config(t *testing.T) appcfg.Root {
+	t.Helper()
+	cfg, err := appcfg.LoadPersisted(f.cfgPath)
+	if err != nil {
+		t.Fatalf("read back %s: %v", f.cfgPath, err)
+	}
+	return cfg
+}
+
+func (f *mcpWriteFixture) shared(t *testing.T) []appcfg.MCPServerConfig {
+	t.Helper()
+	return f.config(t).Agents.Defaults.MCPServers
+}
+
+func findServer(t *testing.T, servers []appcfg.MCPServerConfig, name string) appcfg.MCPServerConfig {
+	t.Helper()
+	for _, srv := range servers {
+		if mcp.SameServerName(srv.Name, name) {
+			return srv
+		}
+	}
+	t.Fatalf("no entry named %q in %+v", name, servers)
+	return appcfg.MCPServerConfig{}
+}
+
+// TestMCPSharedListWriteCreatesUpdatesAndDeletes pins the lifecycle of one entry
+// in the shared list: it lands in forebrain.yaml, an update leaves every field it
+// did not mention alone, and a delete removes it.
+func TestMCPSharedListWriteCreatesUpdatesAndDeletes(t *testing.T) {
+	f := newMCPWriteFixture(t, sharedMCPFixture, "main", nil)
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/mcp/servers", map[string]any{
+		"name":            "smart-doc",
+		"transport":       "streamable_http",
+		"target":          "http://192.168.73.51:8112/mcp",
+		"enabled":         true,
+		"startup_timeout": 10,
+		"request_timeout": 30,
+		"headers":         map[string]string{"Authorization": "Bearer ${SMART_DOC_TOKEN}"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	saved := findServer(t, f.shared(t), "smart-doc")
+	if saved.URL != "http://192.168.73.51:8112/mcp" || saved.StartupTimeout != 10 || saved.RequestTimeout != 30 {
+		t.Fatalf("saved = %+v", saved)
+	}
+	if got := saved.Headers["Authorization"]; got != "Bearer ${SMART_DOC_TOKEN}" {
+		t.Fatalf("headers = %+v", saved.Headers)
+	}
+	if !appcfg.ServerEnabled(saved) {
+		t.Fatalf("enabled: true must be stored: %+v", saved.Enabled)
+	}
+
+	// A field the client did not send is left alone: switching one entry off
+	// must not disturb the two entries around it.
+	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/smart-doc", map[string]any{"enabled": false})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	saved = findServer(t, f.shared(t), "smart-doc")
+	if appcfg.ServerEnabled(saved) {
+		t.Fatalf("enabled: false must be stored: %+v", saved.Enabled)
+	}
+	if saved.URL != "http://192.168.73.51:8112/mcp" || saved.RequestTimeout != 30 || saved.StartupTimeout != 10 {
+		t.Fatalf("an unmentioned field must survive: %+v", saved)
+	}
+	untouched := findServer(t, f.shared(t), "shared-doc")
+	if untouched.URL != "https://docs.test/mcp" || untouched.RequestTimeout != 30 {
+		t.Fatalf("the other entry must be untouched: %+v", untouched)
+	}
+
+	rec = doJSON(t, f.server, http.MethodDelete, "/api/v1/mcp/servers/smart-doc", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(f.shared(t)) != 1 {
+		t.Fatalf("shared list = %+v", f.shared(t))
+	}
+	if rec := doJSON(t, f.server, http.MethodDelete, "/api/v1/mcp/servers/smart-doc", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("deleting a missing entry: %d %s, want 404", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMCPServerWriteValidationAndConflicts pins the status each refusal reports:
+// a bad field is 400, a name that already exists is 409, an entry that is not
+// there is 404 — and a refused write changes nothing.
+func TestMCPServerWriteValidationAndConflicts(t *testing.T) {
+	f := newMCPWriteFixture(t, sharedMCPFixture, "main", nil)
+	before := f.shared(t)
+
+	cases := []struct {
+		name   string
+		method string
+		target string
+		body   map[string]any
+		want   int
+		text   string
+	}{
+		{
+			name: "duplicate name", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "shared-doc", "transport": "stdio", "target": "/bin/x"},
+			want: http.StatusConflict, text: "already configured",
+		},
+		{
+			name: "unknown transport", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "new", "transport": "carrier-pigeon", "target": "/bin/x"},
+			want: http.StatusBadRequest, text: "stdio or streamable_http",
+		},
+		{
+			name: "no transport", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "new", "target": "/bin/x"},
+			want: http.StatusBadRequest, text: "transport is required",
+		},
+		{
+			name: "name with whitespace", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "two words", "transport": "stdio", "target": "/bin/x"},
+			want: http.StatusBadRequest, text: "whitespace",
+		},
+		{
+			name: "unclosed quote in the command", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "new", "transport": "stdio", "target": `/bin/x --root "/tmp/a b`},
+			want: http.StatusBadRequest, text: "unclosed",
+		},
+		{
+			name: "http target that is not a URL", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "new", "transport": "streamable_http", "target": "/tmp/not-a-url"},
+			want: http.StatusBadRequest, text: "http(s) URL",
+		},
+		{
+			name: "switched off and required", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "new", "transport": "stdio", "target": "/bin/x", "enabled": false, "required": true},
+			want: http.StatusBadRequest, text: "required server must be enabled",
+		},
+		{
+			name: "negative request timeout", method: http.MethodPost, target: "/api/v1/mcp/servers",
+			body: map[string]any{"name": "new", "transport": "stdio", "target": "/bin/x", "request_timeout": -1},
+			want: http.StatusBadRequest, text: "request_timeout",
+		},
+		{
+			name: "unknown entry", method: http.MethodPut, target: "/api/v1/mcp/servers/ghost",
+			body: map[string]any{"enabled": false},
+			want: http.StatusNotFound, text: "no MCP server named",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, f.server, tc.method, tc.target, tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d %s, want %d", rec.Code, rec.Body.String(), tc.want)
+			}
+			if !strings.Contains(rec.Body.String(), tc.text) {
+				t.Fatalf("body = %q, want %q in it", rec.Body.String(), tc.text)
+			}
+		})
+	}
+	after := f.shared(t)
+	if len(after) != len(before) {
+		t.Fatalf("a refused write must change nothing: %+v -> %+v", before, after)
+	}
+}
+
+// TestMCPServerWriteKeepsUntouchedFieldsAndTargets pins the round trip a modal
+// depends on: the target line comes back exactly as it was rendered, sending it
+// back changes nothing, and the fields with no editor of their own (the per-tool
+// approval table) survive.
+func TestMCPServerWriteKeepsUntouchedFieldsAndTargets(t *testing.T) {
+	entries := []appcfg.MCPServerConfig{
+		{
+			Name:      "quoted",
+			Transport: "stdio",
+			Command:   "mcp-server",
+			Args:      []string{"--root", "/tmp/a b"},
+			Tools:     map[string]appcfg.MCPServerToolConfig{"search": {ApprovalMode: appcfg.MCPToolApprovalApprove}},
+		},
+		{
+			Name:      "queried",
+			Transport: "streamable_http",
+			URL:       "https://user:pw@docs.test/mcp?token=x",
+		},
+	}
+	// The session froze exactly these entries, which is what the list reports.
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		root.Agents.Defaults.MCPServers = entries
+	}, "main", entries)
+
+	// The list renders the stdio target as one line and the URL without its
+	// userinfo and query.
+	listed := decodeMCPServersBody(t, func() *httptest.ResponseRecorder {
+		rec := doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+		}
+		return rec
+	}())
+	rendered := listed["servers"].([]any)[0].(map[string]any)
+	target, _ := rendered["target"].(string)
+	if target != `mcp-server --root "/tmp/a b"` {
+		t.Fatalf("rendered target = %q", target)
+	}
+	queried := mcpServerRow(t, listed, "queried")
+	if got, _ := queried["target"].(string); got != "https://docs.test/mcp" {
+		t.Fatalf("a listed URL must be sanitized: %q", got)
+	}
+
+	// Sending the rendered values straight back — what a form that always
+	// submits every field does — changes neither the command nor the URL.
+	rec := doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/quoted", map[string]any{
+		"target":  target,
+		"enabled": false,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/queried", map[string]any{
+		"target": "https://docs.test/mcp",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	saved := findServer(t, f.shared(t), "quoted")
+	if saved.Command != "mcp-server" || len(saved.Args) != 2 || saved.Args[1] != "/tmp/a b" {
+		t.Fatalf("the command must be byte-for-byte unchanged: %+v", saved)
+	}
+	if appcfg.ServerEnabled(saved) {
+		t.Fatalf("the field that did change must have changed: %+v", saved.Enabled)
+	}
+	if got := saved.Tools["search"].ApprovalMode; got != appcfg.MCPToolApprovalApprove {
+		t.Fatalf("a field with no editor must be preserved: %+v", saved.Tools)
+	}
+	queriedSaved := findServer(t, f.shared(t), "queried")
+	if queriedSaved.URL != "https://user:pw@docs.test/mcp?token=x" {
+		t.Fatalf("the masked URL must not be written over the real one: %q", queriedSaved.URL)
+	}
+
+	// A target that really changed replaces the command line.
+	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/quoted", map[string]any{
+		"target": `other-server --flag "value with spaces"`,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	saved = findServer(t, f.shared(t), "quoted")
+	if saved.Command != "other-server" || len(saved.Args) != 2 || saved.Args[1] != "value with spaces" {
+		t.Fatalf("a new target must be parsed: %+v", saved)
+	}
+}
+
+// TestMCPServerWriteNeverReturnsAStoredSecret pins the direction that matters: a
+// credential the surface is not allowed to read comes back as the placeholder,
+// sending the placeholder back keeps the stored value, and a plaintext secret
+// written by hand is refused rather than saved into a file the loader would then
+// refuse to read.
+func TestMCPServerWriteNeverReturnsAStoredSecret(t *testing.T) {
+	entry := appcfg.MCPServerConfig{
+		Name:      "secretive",
+		Transport: "streamable_http",
+		URL:       "https://docs.test/mcp",
+		Headers: map[string]string{
+			"Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9",
+			"x-api-key":     "${DOCS_API_KEY}",
+		},
+		OAuth: appcfg.MCPOAuthConfig{ClientSecret: "${DOCS_OAUTH_SECRET}"},
+	}
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{entry}
+	}, "main", []appcfg.MCPServerConfig{entry})
+	// A live token in the credential store must not travel with the
+	// configuration either: the list describes what is configured.
+	if err := mcp.SaveOAuthOverlayMerge(f.home, "", "secretive", appcfg.MCPOAuthConfig{AccessToken: "real-access-token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "eyJhbGciOiJSUzI1NiJ9") {
+		t.Fatalf("the header literal must not come back: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "real-access-token") {
+		t.Fatalf("a stored token must not come back: %s", rec.Body.String())
+	}
+	row := mcpServerRow(t, decodeMCPServersBody(t, rec), "secretive")
+	headers := row["headers"].(map[string]any)
+	if headers["Authorization"] != appcfg.RedactedSecretPlaceholder {
+		t.Fatalf("headers = %+v", headers)
+	}
+	if headers["x-api-key"] != "${DOCS_API_KEY}" {
+		t.Fatalf("a reference is a pointer, not a secret: %+v", headers)
+	}
+	oauth := row["oauth"].(map[string]any)
+	if oauth["client_secret"] != "${DOCS_OAUTH_SECRET}" {
+		t.Fatalf("oauth = %+v", oauth)
+	}
+	if oauth["access_token"] != "" {
+		t.Fatalf("the config has no access token to show: %+v", oauth)
+	}
+	if row["oauth_overlay"] != true {
+		t.Fatalf("the list must say a stored credential exists: %+v", row)
+	}
+
+	// Sending the placeholder back leaves the stored literal alone.
+	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
+		"headers": map[string]string{"Authorization": appcfg.RedactedSecretPlaceholder},
+		"oauth":   map[string]any{"client_secret": appcfg.RedactedSecretPlaceholder},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	saved := findServer(t, f.shared(t), "secretive")
+	if saved.Headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
+		t.Fatalf("headers = %+v", saved.Headers)
+	}
+	if saved.OAuth.ClientSecret != "${DOCS_OAUTH_SECRET}" {
+		t.Fatalf("oauth = %+v", saved.OAuth)
+	}
+	if saved.Headers["x-api-key"] != "${DOCS_API_KEY}" {
+		t.Fatalf("a header the update did not mention must survive: %+v", saved.Headers)
+	}
+
+	// An empty value is how the form removes one key, and it removes only that
+	// one.
+	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
+		"headers": map[string]string{"x-api-key": ""},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body.String())
+	}
+	saved = findServer(t, f.shared(t), "secretive")
+	if _, ok := saved.Headers["x-api-key"]; ok {
+		t.Fatalf("an empty value must remove the key: %+v", saved.Headers)
+	}
+	if saved.Headers["Authorization"] != "Bearer eyJhbGciOiJSUzI1NiJ9" {
+		t.Fatalf("removing one key must not touch the others: %+v", saved.Headers)
+	}
+
+	// A secret-like key written as a literal is refused: the loader would not
+	// read the file back.
+	before := mustRead(t, f.cfgPath)
+	rec = doJSON(t, f.server, http.MethodPut, "/api/v1/mcp/servers/secretive", map[string]any{
+		"headers": map[string]string{"x-api-key": "sk-live-plaintext"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "plaintext secret") {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+	if mustRead(t, f.cfgPath) != before {
+		t.Fatal("a refused write must change nothing")
+	}
+}
+
+// TestMCPWriteAddressesTheLayerTheRouteNames pins that the same payload lands in
+// the three different places, and that a layer the route cannot address is
+// refused before anything is written.
+func TestMCPWriteAddressesTheLayerTheRouteNames(t *testing.T) {
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		root.Agents.Definitions["alice"] = appcfg.AgentDefinition{Primary: true}
+	}, "main", nil)
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/agents/primary/alice/mcp/servers", map[string]any{
+		"name": "agent-doc", "transport": "stdio", "target": "/bin/alice-doc",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agent create: %d %s", rec.Code, rec.Body.String())
+	}
+	cfg := f.config(t)
+	own := cfg.Agents.MCPServersFor("alice")
+	if len(own) != 1 || own[0].Command != "/bin/alice-doc" {
+		t.Fatalf("alice's own list = %+v", own)
+	}
+	if len(cfg.Agents.Defaults.MCPServers) != 0 {
+		t.Fatalf("the shared list must not be touched: %+v", cfg.Agents.Defaults.MCPServers)
+	}
+	// The other agents, and the fields of alice's definition, are untouched.
+	aliceDef := cfg.Agents.Definitions["alice"]
+	if !aliceDef.Primary {
+		t.Fatalf("only the MCP list may change: %+v", aliceDef)
+	}
+
+	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/agents/primary/nobody/mcp/servers", map[string]any{
+		"name": "x", "transport": "stdio", "target": "/bin/x",
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown agent: %d %s, want 404", rec.Code, rec.Body.String())
+	}
+
+	// The project layer writes the project's own file, and a project that is not
+	// trusted is refused — with no file created.
+	root := t.TempDir()
+	p, err := f.projects.Create(context.Background(), state.CreateProjectInput{Name: "p", Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := "/api/v1/projects/" + p.ID + "/mcp/servers"
+	rec = doJSON(t, f.server, http.MethodPost, target, map[string]any{
+		"name": "projtool", "transport": "stdio", "target": "/bin/pt",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("untrusted project: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".forebrain", "mcp_servers.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("an untrusted project must not get a file: %v", err)
+	}
+	if err := safety.MarkTrusted(f.home, safety.Project{Root: root}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, f.server, http.MethodPost, target, map[string]any{
+		"name": "projtool", "transport": "stdio", "target": "/bin/pt",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("project create: %d %s", rec.Code, rec.Body.String())
+	}
+	projectFile := filepath.Join(root, ".forebrain", "mcp_servers.yaml")
+	raw, err := os.ReadFile(projectFile)
+	if err != nil {
+		t.Fatalf("the project file must exist: %v", err)
+	}
+	if !strings.Contains(string(raw), "projtool") {
+		t.Fatalf("project file:\n%s", raw)
+	}
+	// And it is the project file, not forebrain.yaml.
+	if strings.Contains(string(mustRead(t, f.cfgPath)), "projtool") {
+		t.Fatalf("forebrain.yaml must not carry the project's entry:\n%s", mustRead(t, f.cfgPath))
+	}
+}
+
+// TestMCPLayerListingReportsOneLayerAndWhatItIsDoing pins the read side the
+// settings screens work from: ?scope lists the configured entries of that layer,
+// including one a higher layer shadows — which is reported as not running rather
+// than hidden, because it is still the entry the user came to edit.
+func TestMCPLayerListingReportsOneLayerAndWhatItIsDoing(t *testing.T) {
+	// The agent layer redefines codegraph, so the shared entry is not the one
+	// running.
+	effective := []appcfg.MCPServerConfig{{
+		Name:      "codegraph",
+		Transport: "stdio",
+		Command:   "/bin/agent-cg",
+		Scope:     appcfg.MCPServerScopeAgent,
+		AgentKey:  "main",
+	}}
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{{
+			Name:      "codegraph",
+			Transport: "stdio",
+			Command:   "/bin/shared-cg",
+		}}
+	}, "main", effective)
+
+	rec := doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("global layer: %d %s", rec.Code, rec.Body.String())
+	}
+	globalBody := decodeMCPServersBody(t, rec)
+	if globalBody["scope"] != "global" {
+		t.Fatalf("body = %+v", globalBody)
+	}
+	rows, _ := globalBody["servers"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("the layer holds exactly its own entry: %+v", rows)
+	}
+	row := rows[0].(map[string]any)
+	if row["name"] != "codegraph" || row["running"] != false {
+		t.Fatalf("a shadowed shared entry is configured and not running: %+v", row)
+	}
+	if row["command"] != nil {
+		t.Fatalf("the row carries the entry's fields, not a summary: %+v", row)
+	}
+	if row["target"] != "/bin/shared-cg" {
+		t.Fatalf("the configured entry is the one listed: %+v", row)
+	}
+	// The runtime the session reports belongs to the agent entry, so it must not
+	// be attached to the shared one.
+	if _, ok := row["conn_status"]; ok {
+		t.Fatalf("a shadowed entry has no runtime of its own: %+v", row)
+	}
+
+	rec = doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=agent", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agent layer: %d %s", rec.Code, rec.Body.String())
+	}
+	agentBody := decodeMCPServersBody(t, rec)
+	agentRows, _ := agentBody["servers"].([]any)
+	if len(agentRows) != 0 {
+		t.Fatalf("main owns nothing of its own here: %+v", agentRows)
+	}
+
+	// The unscoped listing is still the effective list.
+	rec = doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, scope := decodeMCPServersBody(t, rec)["scope"]; scope {
+		t.Fatalf("the effective listing is not a layer listing: %s", rec.Body.String())
+	}
+}
+
+// TestMCPTestEndpointTriesTheEntryWithoutWritingIt pins the button's contract:
+// the entry is really started and really lists tools, the file is untouched
+// afterwards, and a server that will not start is reported as a result rather
+// than as a request failure.
+func TestMCPTestEndpointTriesTheEntryWithoutWritingIt(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not installed")
+	}
+	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "acceptance", "fake_mcp_stdio.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(script); err != nil {
+		t.Skipf("fixture missing: %v", err)
+	}
+	f := newMCPWriteFixture(t, sharedMCPFixture, "main", nil)
+	before := mustRead(t, f.cfgPath)
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/mcp/servers/test", map[string]any{
+		"name":      "fake",
+		"transport": "stdio",
+		"target":    mcp.FormatStdioTarget(python, []string{script, "echo"}),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test: %d %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		OK        bool `json:"ok"`
+		ToolCount int  `json:"tool_count"`
+		Tools     []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if !res.OK || res.ToolCount < 1 {
+		t.Fatalf("result = %+v (%s)", res, rec.Body.String())
+	}
+	if res.Tools[0].Name != "echo" {
+		t.Fatalf("tools = %+v", res.Tools)
+	}
+	if mustRead(t, f.cfgPath) != before {
+		t.Fatal("testing a connection must not write the configuration")
+	}
+
+	// A server that cannot start is an answer to show the user, not an error.
+	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/mcp/servers/test", map[string]any{
+		"name":      "broken",
+		"transport": "stdio",
+		"target":    filepath.Join(t.TempDir(), "not-a-command"),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.OK || strings.TrimSpace(res.Error) == "" {
+		t.Fatalf("result = %+v", res)
+	}
+
+	// An entry that is not a connection at all is the caller's to fix.
+	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/mcp/servers/test", map[string]any{
+		"name": "emptiness", "transport": "stdio",
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d %s, want 400", rec.Code, rec.Body.String())
+	}
+	if mustRead(t, f.cfgPath) != before {
+		t.Fatal("no refused test may write the configuration")
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

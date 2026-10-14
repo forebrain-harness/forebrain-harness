@@ -2456,6 +2456,14 @@ func continueForkSubagent(ctx context.Context, fac Factory, record agent.History
 	model := forkAgentModel(own, preparedSubagent{sessionID: record.SessionID})
 	started := time.Now()
 	agentCtx := ctx
+	// The continuation drives the fork's own run, so its requests speak for
+	// that run: the compaction guard, the approval queue and the durable wait
+	// row of every tool this execution runs all resolve their identity from the
+	// run id in this context, and the dispatching turn's run id belongs to a
+	// different history.
+	if runID := strings.TrimSpace(record.RunID); runID != "" {
+		agentCtx = tool.WithRunID(agentCtx, runID)
+	}
 	capture := NewPartialSessionCapture()
 	agentCtx = WithPartialSessionCapture(agentCtx, capture)
 	outcome, runErr := RunFork(agentCtx, RunParams{

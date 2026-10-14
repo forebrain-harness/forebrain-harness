@@ -241,3 +241,60 @@ func TestStateV9UpgradesToV10AddsRewindLedger(t *testing.T) {
 func stripWhitespace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
+
+// A rewind hides its own conversation's events, and only its own. Sequences
+// are global, so a session that keeps writing after another session's rewind
+// holds events past that rewind's hidden range; an unqualified session term
+// inside the subquery would bind to fb_rewinds itself and hide them too.
+func TestRewindHidesNothingInAnotherSession(t *testing.T) {
+	ctx := context.Background()
+	db := openSessionDB(t)
+	store := NewSessionStore(db, "main")
+	runs := &RunStore{DB: db}
+	require.NoError(t, store.Ensure(ctx, "s-rwd", "s-rwd"))
+	require.NoError(t, store.Ensure(ctx, "s-other", "s-other"))
+	insertRun(t, db, "r-rwd", "s-rwd")
+	insertRun(t, db, "r-other", "s-other")
+
+	// Give r-rwd one event before asking where its hidden range starts:
+	// RewindEventStart answers 0 for a run with no events, and a rewind whose
+	// range starts at 0 is inert under both the buggy and the fixed predicate
+	// — the fixture would pass before the fix and prove nothing.
+	_, err := runs.AppendSessionEvent(ctx, SessionEvent{
+		ID: "evt-rwd", SessionID: "s-rwd", RunID: "r-rwd", Type: "tool_call_completed",
+		Payload: json.RawMessage(`{"tool_name":"read_file"}`),
+	})
+	require.NoError(t, err)
+
+	// s-rwd rewinds to before its first user message (pending, never fixed).
+	anchor, err := store.AppendMessageForRun(ctx, "s-rwd", "r-rwd", "user", "q", "", "", MessageExecTiming{})
+	require.NoError(t, err)
+	start, err := store.RewindEventStart(ctx, "s-rwd", anchor)
+	require.NoError(t, err)
+	require.Greater(t, start, int64(0), "a rewind with a zero range hides nothing, in any session")
+	require.NoError(t, store.InsertRewind(ctx, RewindRecord{
+		ID: "rw-cross", SessionID: "s-rwd", AnchorMessageID: anchor, Mode: "both",
+		HiddenEventSeqFrom: start, State: "pending", CreatedAtMs: 1,
+	}))
+
+	// s-other writes after that, so its event's sequence is past the range.
+	evt, err := runs.AppendSessionEvent(ctx, SessionEvent{
+		ID: "evt-other", SessionID: "s-other", RunID: "r-other", Type: "tool_call_completed",
+		Payload: json.RawMessage(`{"tool_name":"read_file"}`),
+	})
+	require.NoError(t, err)
+
+	page, err := runs.ListSessionEvents(ctx, "s-other", 0, 0, 50)
+	require.NoError(t, err)
+	require.Len(t, page.Events, 1, "another conversation's rewind hid this session's events")
+	require.Equal(t, evt.Sequence, page.Events[0].Sequence)
+
+	high, err := runs.SessionEventHighWater(ctx, "s-other")
+	require.NoError(t, err)
+	require.Equal(t, evt.Sequence, high, "the high-water cursor must count this session's own events")
+
+	byTool, total, err := runs.CountSessionToolCalls(ctx, "s-other")
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Equal(t, 1, byTool["read_file"])
+}
