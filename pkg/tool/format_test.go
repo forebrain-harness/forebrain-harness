@@ -2581,7 +2581,7 @@ func TestSummarizeToolStepNamesAReadPDF(t *testing.T) {
 			"result_lines":   0,
 		},
 	})
-	for _, want := range []string{"report.pdf", "PDF 12 页", "渲染 1-5 页"} {
+	for _, want := range []string{"report.pdf", "PDF 12 pages", "rendered pages 1-5"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary=%q want it to name %q", got, want)
 		}
@@ -2612,7 +2612,7 @@ func TestSummarizePdfStepNamesRealRange(t *testing.T) {
 			"result_lines":   0,
 		},
 	})
-	for _, want := range []string{"report.pdf", "PDF 12 页", "渲染 9-11 页"} {
+	for _, want := range []string{"report.pdf", "PDF 12 pages", "rendered pages 9-11"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary=%q want it to name %q", got, want)
 		}
@@ -2637,12 +2637,12 @@ func TestSummarizePdfEmptyReadHasNoRenderSegment(t *testing.T) {
 			"result_lines":   0,
 		},
 	})
-	for _, want := range []string{"report.pdf", "PDF 12 页"} {
+	for _, want := range []string{"report.pdf", "PDF 12 pages"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("summary=%q want it to name %q", got, want)
 		}
 	}
-	if strings.Contains(got, "渲染") {
+	if strings.Contains(got, "rendered") {
 		t.Fatalf("summary=%q must not claim a render segment for an empty read", got)
 	}
 }
