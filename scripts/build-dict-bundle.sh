@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the forebrain-dict.tar.gz release asset: every memory.DictionaryFiles
-# entry, laid out as under dict/ beside a binary. A binary installed with
-# `go install` downloads it on first need (pkg/memory/dictionary.go).
+# entry, laid out as under dict/ beside a binary. A build that ships no
+# dictionaries beside the binary downloads it on first need
+# (pkg/memory/dictionary.go).
 set -euo pipefail
 
 [ "$#" -eq 1 ] || { echo "usage: $0 <out-dir>" >&2; exit 2; }

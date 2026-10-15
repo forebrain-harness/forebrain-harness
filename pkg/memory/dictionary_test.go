@@ -21,7 +21,8 @@ import (
 // TestDictionaryFilesDeclareTheBytesTheirModulesShip guards the compiled
 // checksums against dependency drift: when an upgrade of a dictionary's module
 // changes its bytes, the checksum in DictionaryFiles must be recomputed with
-// it, or a `go install` binary would refuse its own release bundle.
+// it, or cmd/installdict -verify (the npm packaging self-check) and
+// forebrain assets install would reject this tree's own files.
 func TestDictionaryFilesDeclareTheBytesTheirModulesShip(t *testing.T) {
 	bin := t.TempDir()
 	if err := InstallDictionary(bin); err != nil {

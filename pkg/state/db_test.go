@@ -273,11 +273,10 @@ func TestSQLiteBuildServesTheStateSchema(t *testing.T) {
 
 // TestSQLiteBuildErrorIsOneSentenceWithTheInstallCommand pins the user-facing
 // contract of a build that cannot open its state: one sentence that names the
-// cause and the exact reinstall command. The dots inside the module path are
-// part of the path, not sentence ends.
+// cause and the exact reinstall command.
 func TestSQLiteBuildErrorIsOneSentenceWithTheInstallCommand(t *testing.T) {
 	msg := errSQLiteBuild.Error()
-	const install = "CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest"
+	const install = "npm install -g @forebrain-harness/forebrain"
 	if !strings.Contains(msg, install) {
 		t.Fatalf("error %q does not carry the reinstall command %q", msg, install)
 	}

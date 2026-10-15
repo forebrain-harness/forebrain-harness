@@ -219,30 +219,3 @@ jobs:
           }
           for dir in artifacts/build-*/npm/dist/@forebrain-harness/*/; do publish "$dir"; done
           publish npm
-
-  # Installing the release exactly the way a user does also makes
-  # proxy.golang.org and sum.golang.org record this version.
-  go-install:
-    needs: [release-please, github-assets]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod }
-      - run: sudo apt-get update && sudo apt-get install -y build-essential
-      # The tokenizers archive is not part of the module, so it is fetched from
-      # this checkout (the tagged source) and go install is pointed at it.
-      - name: Fetch the tokenizers static library
-        run: scripts/fetch-libtokenizers.sh linux/amd64
-      - name: Install the release the way a user does
-        env:
-          TAG: ${{ needs.release-please.outputs.tag_name }}
-          CGO_LDFLAGS: -L${{ github.workspace }}/third_party/libtokenizers/linux_amd64
-        run: |
-          cd "$RUNNER_TEMP"
-          env -u GOFLAGS GOWORK=off CGO_ENABLED=1 GOBIN="$RUNNER_TEMP/bin" \
-            go install -tags fts5 "github.com/forebrain-harness/forebrain-harness/cmd/forebrain@$TAG"
-          got="$("$RUNNER_TEMP/bin/forebrain" --version)"
-          [ "$got" = "$TAG" ] || { echo "go-installed forebrain reports $got, want $TAG"; exit 1; }

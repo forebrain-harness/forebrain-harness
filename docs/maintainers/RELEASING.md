@@ -29,10 +29,7 @@ Releases are fully automated; nobody runs `npm publish` or
      Release, and verifies the published dictionary bundle is exactly what
      this version reads;
    - publishes the five platform npm packages and then the launcher
-     `@forebrain-harness/forebrain` (environment `npm`, with provenance);
-   - runs `go-install`, which installs the just-tagged version the way a user
-     does — this is also what makes proxy.golang.org and sum.golang.org
-     record the version.
+     `@forebrain-harness/forebrain` (environment `npm`, with provenance).
 
 Merging the release PR is the only manual step, and it belongs to the owner.
 
@@ -47,8 +44,7 @@ changes bump the **minor** version only.
 Reaching 2.0.0 has a cost specific to Go: from v2 on, the module path must
 carry a `/v2` suffix (`github.com/forebrain-harness/forebrain-harness/v2`),
 and every import — in this repository and in every user's code — must change
-with it. Until the module path is moved, `go install …@latest` cannot even
-see a v2 tag. So do not step into 1.0 → 2.0 lightly: stay on 0.x while the
+with it. So do not step into 1.0 → 2.0 lightly: stay on 0.x while the
 CLI and configuration still move, and treat the move to v2 as a deliberate,
 documented migration.
 
@@ -140,9 +136,9 @@ approval. Raise the count to 1 when a second maintainer joins.
   `gh release upload … --clobber`, so re-running it overwrites existing
   assets with the rebuilt ones.
 - **A released version is broken.** Never delete or move an already
-  published tag: the Go checksum database has recorded it, and rewriting the
-  tag breaks `go install` for everyone who already fetched it. Fix forward
-  with a new version (`fix: …` or `Release-As:` as needed).
+  published tag: the Go module proxy and checksum database have recorded the
+  version, and the archives and npm packages are already published against
+  it. Fix forward with a new version (`fix: …` or `Release-As:` as needed).
 
 ## 7. First go-live checklist
 
@@ -181,13 +177,10 @@ positive; once the owner marks it as such via the link in the push error:
 - Release page: expected five platform archives, `forebrain-dict.tar.gz` and
   `SHA256SUMS` attached to the 0.1.0 Release.
 - npm: expected all six packages at 0.1.0, each with a provenance badge.
-- The `go-install` job passes — proxy.golang.org and sum.golang.org now
-  serve the version.
-- On your own machine: `CGO_ENABLED=1 go install -tags fts5
-  github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest`, then
+- On your own machine: `npm install -g @forebrain-harness/forebrain`, then
   `forebrain --version` prints `v0.1.0`.
 - Start a session with Chinese content and let it retrieve a memory:
-  expected the dictionaries downloaded to `$(go env GOPATH)/bin/dict/`, and
+  expected the dictionaries seeded into `$FOREBRAIN_HOME/dict`, and
   the session works offline afterwards.
 - Docs site: the install page (S2 of the docs-site plan) is published, and
   its two install commands match `README.md` verbatim.

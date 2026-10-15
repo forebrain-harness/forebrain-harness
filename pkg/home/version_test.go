@@ -21,7 +21,7 @@ func TestResolveVersion(t *testing.T) {
 			want:   "v1.2.3",
 		},
 		{
-			name:   "go install build reports the recorded module version",
+			name:   "module build reports the recorded module version",
 			linked: "",
 			info:   &debug.BuildInfo{Main: debug.Module{Version: "v0.4.0"}},
 			ok:     true,
