@@ -4,7 +4,7 @@
   "private": true,
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
-    "@tanstack/vue-table": "^8.21.3",
+    "@tanstack/vue-table": "^9.2.8",
     "@unovis/ts": "^1.7.1",
     "@unovis/vue": "^1.7.1",
     "@vee-validate/zod": "^4.15.1",
