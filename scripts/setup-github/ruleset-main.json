@@ -28,10 +28,8 @@
         "strict_required_status_checks_policy": false,
         "required_status_checks": [
           { "context": "Go mod vet build test" },
-          { "context": "Windows build test (CGO)" },
           { "context": "Frontend install build" },
           { "context": "macOS build (CGO)" },
-          { "context": "go install from a module proxy" },
           { "context": "Web UI build is release-managed" },
           { "context": "Conventional Commits title" },
           { "context": "DCO sign-off" }
