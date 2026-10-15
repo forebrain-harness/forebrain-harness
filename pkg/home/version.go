@@ -5,9 +5,9 @@ import "runtime/debug"
 // Version is this build's version, spelled like its git tag ("v0.3.1").
 //
 // Release builds (make build, the npm packages, the container image) set it at
-// link time with -ldflags "-X .../pkg/home.Version=vX.Y.Z". A `go install
-// module/cmd/forebrain@vX.Y.Z` build has no link flags, so the version is the
-// module version the go command recorded in the binary. A build from a
+// link time with -ldflags "-X .../pkg/home.Version=vX.Y.Z". A build of the
+// module has no link flags, so the version is the module version the go
+// command recorded in the binary. A build from a
 // checkout gets whatever the go command stamped for it — a pseudo-version, or
 // "(devel)".
 var Version = ""

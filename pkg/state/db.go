@@ -94,7 +94,7 @@ func sqliteDriverName() string {
 // errSQLiteBuild is what a forebrain built without cgo or without SQLite's
 // FTS5 module reports: memory search declares an FTS5 table, so such a build
 // cannot open its state at all, and the way out is to rebuild it.
-var errSQLiteBuild = errors.New("this forebrain was built without cgo or SQLite FTS5; reinstall it with: CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest")
+var errSQLiteBuild = errors.New("this forebrain was built without cgo or SQLite FTS5; reinstall it with: npm install -g @forebrain-harness/forebrain")
 
 var (
 	sqliteBuildOnce sync.Once

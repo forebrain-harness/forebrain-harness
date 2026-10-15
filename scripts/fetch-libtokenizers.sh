@@ -12,8 +12,8 @@
 # The location is fixed and committed-adjacent (the archive itself is
 # gitignored); pkg/llm/hftok/link.go points the cgo linker at it with ${SRCDIR},
 # so any `go build` / `go test` in this checkout links with no environment
-# variable. `go install` builds from the module cache, where the archive is
-# absent: see README for the CGO_LDFLAGS a user passing that archive must set.
+# variable. A build outside this checkout (the module cache carries no
+# archive) must point CGO_LDFLAGS at a copy of the archive itself.
 #
 # Usage:
 #   scripts/fetch-libtokenizers.sh [goos/goarch ...]

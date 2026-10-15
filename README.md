@@ -78,32 +78,6 @@ Install with npm (Node.js 18+; macOS arm64/x64, Linux x64/arm64, Windows x64):
 npm install -g @forebrain-harness/forebrain
 ```
 
-Or with Go (Go 1.26+ and a C compiler):
-
-```bash
-CGO_ENABLED=1 go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest
-```
-
-forebrain links a native tokenizers static library that is not part of the Go
-module, so a `go install` build needs `CGO_LDFLAGS` pointing at it. Get
-`libtokenizers.a` for your platform (macOS/Linux: unpack
-`libtokenizers.<os>-<arch>.tar.gz` from the
-[daulet/tokenizers releases](https://github.com/daulet/tokenizers/releases);
-Windows: build it with Rust — `scripts/fetch-libtokenizers.sh` automates both)
-and point `CGO_LDFLAGS` at its directory:
-
-```bash
-CGO_ENABLED=1 CGO_LDFLAGS="-L/path/to/libtokenizers" \
-  go install -tags fts5 github.com/forebrain-harness/forebrain-harness/cmd/forebrain@latest
-```
-
-Easier is to clone the repository and run `make build`, which fetches the
-library first.
-
-A `go install` build downloads the tokenization dictionaries used for Chinese
-and Japanese memory search, and the model catalog (models.json), automatically
-on first use, and works offline afterwards.
-
 Prebuilt archives for every platform are attached to each
 [GitHub release](https://github.com/forebrain-harness/forebrain-harness/releases).
 
