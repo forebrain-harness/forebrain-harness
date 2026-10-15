@@ -43,8 +43,8 @@ catalogs:
       specifier: ^2.5.1
       version: 2.5.1
     '@vueuse/core':
-      specifier: ^14.1.0
-      version: 14.2.1
+      specifier: ^15.0.0
+      version: 15.0.0
     ai:
       specifier: ^6.0.49
       version: 6.0.159
@@ -212,7 +212,7 @@ importers:
         version: 1.1.1(@vue-flow/core@1.48.2(vue@3.5.43(typescript@5.9.3)))(vue@3.5.43(typescript@5.9.3))
       '@vueuse/core':
         specifier: 'catalog:'
-        version: 14.2.1(vue@3.5.43(typescript@5.9.3))
+        version: 15.0.0(vue@3.5.43(typescript@5.9.3))
       ai:
         specifier: 'catalog:'
         version: 6.0.159(zod@4.6.5)
@@ -224,7 +224,7 @@ importers:
         version: 0.555.0(vue@3.5.43(typescript@5.9.3))
       motion-v:
         specifier: ^1.7.4
-        version: 1.10.3(@vueuse/core@14.2.1(vue@3.5.43(typescript@5.9.3)))(vue@3.5.43(typescript@5.9.3))
+        version: 1.10.3(@vueuse/core@15.0.0(vue@3.5.43(typescript@5.9.3)))(vue@3.5.43(typescript@5.9.3))
       shiki:
         specifier: 'catalog:'
         version: 3.23.0
@@ -291,7 +291,7 @@ importers:
         version: 4.15.1(vue@3.5.43(typescript@5.9.3))(zod@4.6.5)
       '@vueuse/core':
         specifier: 'catalog:'
-        version: 14.2.1(vue@3.5.43(typescript@5.9.3))
+        version: 15.0.0(vue@3.5.43(typescript@5.9.3))
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -708,12 +708,6 @@ packages:
     resolution: {integrity: sha512-gA0Bx759+7Jve03K1S0vkOu5Lg/85dou3EseOGUes8flVOGxbhDDh/iZaoek11Y8mtyKPGF3vP8XhnkDEAmzeg==}
     engines: {node: '>=18'}
     cpu: [arm64]
-    os: [freebsd]
-
-  '@esbuild/freebsd-x64@0.25.12':
-    resolution: {integrity: sha512-TGbO26Yw2xsHzxtbVFGEXBFH0FRAP7gtcPE7P5yP7wGy7cXK2oO7RyOhL5NLiqTlBh47XhmIUXuGciXEqYFfBQ==}
-    engines: {node: '>=18'}
-    cpu: [x64]
     os: [freebsd]
 
   '@esbuild/linux-arm64@0.25.12':
@@ -1875,11 +1869,21 @@ packages:
     peerDependencies:
       vue: ^3.5.0
 
+  '@vueuse/core@15.0.0':
+    resolution: {integrity: sha512-Zv67h5mrk7YHDJsRObx+DXaCBz6RKBUpxqLesJ+3xZNPG6yuQs7ja7kg3veFrrouYLWAqydQ7CwGEbLVxB43Ng==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      vue: ^3.5.0
+
   '@vueuse/metadata@10.11.1':
     resolution: {integrity: sha512-IGa5FXd003Ug1qAZmyE8wF3sJ81xGLSqTqtQ6jaVfkeZ4i5kS2mwQF61yhVqojRnenVew5PldLyRgvdl4YYuSw==}
 
   '@vueuse/metadata@14.2.1':
     resolution: {integrity: sha512-1ButlVtj5Sb/HDtIy1HFr1VqCP4G6Ypqt5MAo0lCgjokrk2mvQKsK2uuy0vqu/Ks+sHfuHo0B9Y9jn9xKdjZsw==}
+
+  '@vueuse/metadata@15.0.0':
+    resolution: {integrity: sha512-sfWE5LADAKJ0KnjtGliMdSN8Ij/L7uP6rXIZlgPloAI4zvvefbw6H5Lt7KJA6RqQOYgVqWF5Guj50HHMIzygBg==}
+    engines: {node: '>=22'}
 
   '@vueuse/shared@10.11.1':
     resolution: {integrity: sha512-LHpC8711VFZlDaYUXEBbFBCQ7GS3dVU9mjOhhMhXP6txTV4EhYQg/KGnQuvt/sPAtoUKq7VVUnL6mVtFoL42sA==}
@@ -1891,6 +1895,12 @@ packages:
 
   '@vueuse/shared@14.4.0':
     resolution: {integrity: sha512-JRgY90Sz8DDtPMsaDflvPMp9xYk69JZAmbuDvAquUVXKr2gEjqtzGNTTthLfckH0BzBqvnu31gb4a8TGLRe79g==}
+    peerDependencies:
+      vue: ^3.5.0
+
+  '@vueuse/shared@15.0.0':
+    resolution: {integrity: sha512-vbNXhGrbV53xPOMSyOzMHQRvhMgZf7oNDw2RChUetVxwTIEkInQ1joZ9JbT0G3z2n2AJNjvmCWeM9ySYrnvogA==}
+    engines: {node: '>=22'}
     peerDependencies:
       vue: ^3.5.0
 
@@ -4493,9 +4503,6 @@ snapshots:
   '@esbuild/freebsd-arm64@0.25.12':
     optional: true
 
-  '@esbuild/freebsd-x64@0.25.12':
-    optional: true
-
   '@esbuild/linux-arm64@0.25.12':
     optional: true
 
@@ -6007,9 +6014,18 @@ snapshots:
       '@vueuse/shared': 14.2.1(vue@3.5.43(typescript@5.9.3))
       vue: 3.5.43(typescript@5.9.3)
 
+  '@vueuse/core@15.0.0(vue@3.5.43(typescript@5.9.3))':
+    dependencies:
+      '@types/web-bluetooth': 0.0.21
+      '@vueuse/metadata': 15.0.0
+      '@vueuse/shared': 15.0.0(vue@3.5.43(typescript@5.9.3))
+      vue: 3.5.43(typescript@5.9.3)
+
   '@vueuse/metadata@10.11.1': {}
 
   '@vueuse/metadata@14.2.1': {}
+
+  '@vueuse/metadata@15.0.0': {}
 
   '@vueuse/shared@10.11.1(vue@3.5.43(typescript@5.9.3))':
     dependencies:
@@ -6023,6 +6039,10 @@ snapshots:
       vue: 3.5.43(typescript@5.9.3)
 
   '@vueuse/shared@14.4.0(vue@3.5.43(typescript@5.9.3))':
+    dependencies:
+      vue: 3.5.43(typescript@5.9.3)
+
+  '@vueuse/shared@15.0.0(vue@3.5.43(typescript@5.9.3))':
     dependencies:
       vue: 3.5.43(typescript@5.9.3)
 
@@ -6570,7 +6590,6 @@ snapshots:
       '@esbuild/darwin-arm64': 0.25.12
       '@esbuild/darwin-x64': 0.25.12
       '@esbuild/freebsd-arm64': 0.25.12
-      '@esbuild/freebsd-x64': 0.25.12
       '@esbuild/linux-arm': 0.25.12
       '@esbuild/linux-arm64': 0.25.12
       '@esbuild/linux-ia32': 0.25.12
@@ -7357,9 +7376,9 @@ snapshots:
 
   motion-utils@12.36.0: {}
 
-  motion-v@1.10.3(@vueuse/core@14.2.1(vue@3.5.43(typescript@5.9.3)))(vue@3.5.43(typescript@5.9.3)):
+  motion-v@1.10.3(@vueuse/core@15.0.0(vue@3.5.43(typescript@5.9.3)))(vue@3.5.43(typescript@5.9.3)):
     dependencies:
-      '@vueuse/core': 14.2.1(vue@3.5.43(typescript@5.9.3))
+      '@vueuse/core': 15.0.0(vue@3.5.43(typescript@5.9.3))
       framer-motion: 12.38.0
       hey-listen: 1.0.8
       motion-dom: 12.38.0
