@@ -1488,6 +1488,74 @@ func TestFileReadReturnsImagePartsForImageFile(t *testing.T) {
 	}
 }
 
+// testLossyWebpHex is a real 7×3 lossy WebP file, its dimensions read back from
+// the encoded bytes with macOS `sips -g pixelWidth -g pixelHeight`.
+const testLossyWebpHex = "52494646300000005745425056503820240000005001009d012a07000300" +
+	"01402625004e802ea000fefb2e4bc5dd88e327875553d7dfa000"
+
+// writeTestWebP writes the 7×3 lossy WebP fixture into dir.
+func writeTestWebP(t *testing.T, dir string) (string, []byte) {
+	t.Helper()
+	raw, err := hex.DecodeString(testLossyWebpHex)
+	if err != nil {
+		t.Fatalf("fixture is not valid hex: %v", err)
+	}
+	path := filepath.Join(dir, "shot.webp")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write webp: %v", err)
+	}
+	return path, raw
+}
+
+// TestFileReadStatesTheRealSizeOfAWebp pins the fix for a WebP read reporting
+// "image 0x0". Go has no WebP decoder, and a WebP is sent to a provider
+// verbatim, so its dimensions have to come from the file's own header — both
+// the model note and the surface event state a WebP's real size, because 0×0
+// was a false fact on both.
+func TestFileReadStatesTheRealSizeOfAWebp(t *testing.T) {
+	tmp := t.TempDir()
+	path, raw := writeTestWebP(t, tmp)
+	st := NewState(tmp)
+	tool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := tool.Handle(ctx, `{"file_path":"`+escapeJSONPath(path)+`"}`)
+	if err != nil {
+		t.Fatalf("read webp: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts=%d want 2 (note + image)", len(parts))
+	}
+	if parts[0].Type != llm.ContentTypeText || !strings.Contains(parts[0].Text, "image 7x3") {
+		t.Fatalf("first part = %#v, want a note naming the 7x3 webp", parts[0])
+	}
+	if parts[1].Type != llm.ContentTypeImageBase64 || parts[1].MIMEType != "image/webp" {
+		t.Fatalf("image part = %#v, want image/webp image_base64", parts[1])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(parts[1].ImageBase64)
+	if err != nil {
+		t.Fatalf("decode image base64: %v", err)
+	}
+	if !bytes.Equal(decoded, raw) {
+		t.Fatal("image part bytes differ from the file")
+	}
+
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	if completion.Output["image_width"] != 7 || completion.Output["image_height"] != 3 {
+		t.Fatalf("dims = %vx%v want 7x3", completion.Output["image_width"], completion.Output["image_height"])
+	}
+}
+
 // TestFileReadImageDoesNotEnterReadLedger pins that an image read is not
 // remembered as text (nothing may then edit it) and does not reach the read
 // observers (the language-server index is for source files).
