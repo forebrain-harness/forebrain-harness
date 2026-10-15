@@ -621,10 +621,10 @@ func readPdfStepSummary(evt StepEvent) string {
 		label = "pdf"
 	}
 	pageCount := intFromAny(evt.Output["pdf_page_count"])
-	summary := "Read " + label + " · PDF " + strconv.Itoa(pageCount) + " 页"
+	summary := "Read " + label + " · PDF " + strconv.Itoa(pageCount) + " pages"
 	if rendered := intFromAny(evt.Output["pdf_rendered"]); rendered > 0 && rendered < pageCount {
 		pages := intsFromAny(evt.Output["pdf_pages"])
-		summary += " · 渲染 " + strconv.Itoa(pages[0]) + "-" + strconv.Itoa(pages[len(pages)-1]) + " 页"
+		summary += " · rendered pages " + strconv.Itoa(pages[0]) + "-" + strconv.Itoa(pages[len(pages)-1])
 	}
 	return summary
 }
