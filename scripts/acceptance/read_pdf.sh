@@ -9,9 +9,9 @@
 # pane — so a previous phase's marker still on screen can never satisfy it.
 #   1. (TUI) the read_file step renders as an image-style step — the terminal's
 #      own header ("● Read <path>") and its image marker line
-#      ("└ ▤ …-p1.png · …×… · … · Ctrl+O 打开"). The "Read … · PDF n 页 ·
-#      渲染 a-b 页" string is a surface SUMMARY (SummarizeToolStep) the TUI never
-#      shows, so it is asserted by pkg/tool's unit test, not here.
+#      ("└ ▤ …-p1.png · …×… · … · click to open"). The "Read … · PDF n pages ·
+#      rendered a-b pages" string is a surface SUMMARY (SummarizeToolStep) the TUI
+#      never shows, so it is asserted by pkg/tool's unit test, not here.
 #   2. (DB) the FINAL ANSWER reproduces the page's Chinese text VERBATIM
 #      (中文渲染测试：甲乙丙丁戊己庚辛壬癸) — impossible if the pages rendered
 #      as tofu, so this is the end-to-end proof that CJK rendering works;
@@ -229,8 +229,8 @@ assert_no_card() { # assert_no_card <description> <pane text>
 # --- one phase: read a PDF, then assert on its step, row and answer --------
 # Every assertion below names the SURFACE it observes: the TUI pane (what the
 # terminal draws), or the DB (what the model actually received). The step
-# SUMMARY string ("Read … · PDF n 页 · 渲染 a-b 页") is a surface-level string
-# that reaches the web card via SummarizeToolStep; the TUI draws its own header
+# SUMMARY string ("Read … · PDF n pages · rendered a-b pages") is a surface-level
+# string that reaches the web card via SummarizeToolStep; the TUI draws its own header
 # and never shows it, so it is asserted nowhere here — it is pinned by
 # pkg/tool's TestSummarizeToolStepNamesAReadPDF instead.
 run_phase() { # run_phase <evidence-label> <pdf path>
@@ -249,8 +249,8 @@ run_phase() { # run_phase <evidence-label> <pdf path>
   # names $base. The pane is not consulted for the signal at all, so nothing a
   # previous phase left on screen can satisfy it early — the 053 lesson applied:
   # the DB is the signal, the pane is evidence. (The earlier version waited on a
-  # bare "Ctrl+O" marker, which a previous phase's still-visible marker matched;
-  # that is the race this ordering removes.)
+  # bare marker-line substring, which a previous phase's still-visible marker
+  # matched; that is the race this ordering removes.)
   row=""
   for ((i = 0; i < 600; i++)); do
     row="$(db_pdf_row_since "$before_tool" "$base")"
@@ -265,7 +265,7 @@ run_phase() { # run_phase <evidence-label> <pdf path>
   # phase's step and not whatever a previous phase left on screen. The wait is on
   # "Read <full path>" — the capital-R header line, which the echoed composer
   # prompt ("read_file <path>") does not match and a previous phase's different
-  # path does not match either. A bare "Ctrl+O" wait is deliberately NOT used.
+  # path does not match either. A bare marker-line wait is deliberately NOT used.
   p=""
   if ! p="$(wait_capture 60 "Read $pdf")"; then
     p="$(pane)"
@@ -274,11 +274,11 @@ run_phase() { # run_phase <evidence-label> <pdf path>
   pane > "$EVIDENCE/$label-pane.txt"
   # The phase's own header and marker lines, saved beside the pane so a reviewer
   # can see the capture belongs to this phase (and not a stale one).
-  printf '%s\n' "$p" | grep -nE "Read .*${base}|▤ .*Ctrl\+O" > "$EVIDENCE/$label-marker.txt" || true
+  printf '%s\n' "$p" | grep -nE "Read .*${base}|▤ .*click to open" > "$EVIDENCE/$label-marker.txt" || true
 
   # (TUI) the terminal's own rendering of THIS phase's step.
   check "$label: the TUI header names the read PDF" "Read .*${base}" "$p"
-  check "$label: the TUI draws the image step marker" '▤ .*Ctrl\+O' "$p"
+  check "$label: the TUI draws the image step marker" '▤ .*click to open' "$p"
   if printf '%s' "$p" | grep -q '"preview_kind"'; then
     mark_fail "$label: the read_file step fell through to a JSON dump"
   fi
@@ -338,10 +338,10 @@ run_range_phase() {
     mark_fail "$label: the TUI never drew this phase's step header"
   fi
   pane > "$EVIDENCE/$label-pane.txt"
-  printf '%s\n' "$p" | grep -nE "Read .*${base}|▤ .*Ctrl\+O" > "$EVIDENCE/$label-marker.txt" || true
+  printf '%s\n' "$p" | grep -nE "Read .*${base}|▤ .*click to open" > "$EVIDENCE/$label-marker.txt" || true
 
   check "$label: the TUI header names the range-read PDF" "Read .*${base}" "$p"
-  check "$label: the TUI draws the image step marker" '▤ .*Ctrl\+O' "$p"
+  check "$label: the TUI draws the image step marker" '▤ .*click to open' "$p"
   assert_no_card "$label: the range read" "$p"
   check "$label: the tool row carries an image block" '"type"[[:space:]]*:[[:space:]]*"image"' "$row"
   check "$label: the note names rendered pages 7-8" 'rendered pages 7-8' "$row"

@@ -1,13 +1,11 @@
 package tui
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
@@ -20,12 +18,29 @@ var imagePreviewOpener = openWithSystemViewer
 // openWithSystemViewer opens path with the platform's default application.
 // Starting rather than waiting is deliberate: the viewer owns the screen until
 // the user closes it, and the terminal must stay interactive behind it.
-func openWithSystemViewer(ctx context.Context, path string) error {
+func openWithSystemViewer(path string) error {
 	name, args := imageViewerCommand(path)
 	if name == "" {
 		return fmt.Errorf("no system viewer is available on this platform")
 	}
-	return exec.CommandContext(ctx, name, args...).Start()
+	return startDetached(name, args...)
+}
+
+// startDetached starts a program that has to outlive its caller: Start returns
+// as soon as the process is running and a goroutine reaps it, so it is never
+// left as a zombie. It deliberately takes no context — a cancelable command
+// context kills the child the moment the caller returns, and a launcher's whole
+// job (handing the file to the platform) happens after that. That was the bug
+// behind "open image does nothing": the handler cancelled its own timeout
+// context a moment after Start, SIGKILLing a viewer that had not opened the
+// file yet.
+func startDetached(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // imageViewerCommand is the platform's "open this file" command.
@@ -40,72 +55,47 @@ func imageViewerCommand(path string) (string, []string) {
 	}
 }
 
-// LatestImagePreview returns the absolute path and display label of the most
-// recent image step drawn in the active view, or ("", "") when the view holds
-// none. The terminal has no notion of a selected step, so "open the image"
-// means the newest one — the screenshot the user just watched the model read.
-func (r *Renderer) LatestImagePreview() (path, label string) {
-	if r == nil {
-		return "", ""
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	vm := r.activeVMLocked()
-	if vm == nil {
-		return "", ""
-	}
-	for i := len(vm.blocks) - 1; i >= 0; i-- {
-		b := vm.blocks[i]
-		if b == nil || b.frame.Kind != FrameTool {
-			continue
-		}
-		meta := b.frame.ToolMeta
-		if !strings.EqualFold(strings.TrimSpace(meta.PreviewKind), "image") {
-			continue
-		}
-		p := strings.TrimSpace(meta.PreviewPath)
-		if p == "" {
-			continue
-		}
-		return p, imagePreviewLabel(meta)
-	}
-	return "", ""
-}
-
-// openLatestImagePreview is the Ctrl+O handler: it opens the most recent image
-// step of the active view with the system viewer, or, when the view holds no
-// image step, prints one line and spawns nothing.
-func openLatestImagePreview(renderer *Renderer, state *streamState) {
+// clickImagePreviewRow handles a completed mouse click at a 0-based screen cell:
+// it ends the gesture and, when that cell was an image step's marker row, opens
+// the file the row names.
+//
+// The target is resolved BEFORE the gesture ends, on the render the click landed
+// on. Ending it may fold or expand the card under the row, and that repaint
+// shifts every row below the click — resolving afterwards would name a different
+// row than the one the user pressed (clicking the "··· N more lines" hint used to
+// expand the card and then open a file the expansion had just revealed).
+func clickImagePreviewRow(renderer *Renderer, col, row int) {
 	if renderer == nil {
 		return
 	}
-	path, label := renderer.LatestImagePreview()
-	if strings.TrimSpace(path) == "" {
-		renderer.RenderFrame(Frame{
-			Kind:    FrameStatus,
-			Title:   "open image",
-			Content: "no image to open yet",
-			Final:   true,
-		})
+	path, label, isMarker := renderer.ImagePreviewAtScreenRow(row)
+	if renderer.ViewportSelectEnd(col, row) && isMarker {
+		openImagePreview(renderer, path, label)
+	}
+}
+
+// openImagePreview hands one already-resolved image step to the system viewer.
+// A miss is not an error worth a status line: the marker line is the affordance,
+// so nothing at all happens when no file was named.
+func openImagePreview(renderer *Renderer, path, label string) {
+	if renderer == nil || strings.TrimSpace(path) == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := imagePreviewOpener(ctx, path); err != nil {
+	if err := imagePreviewOpener(path); err != nil {
 		renderer.PrintError(fmt.Errorf("open %s: %w", label, err))
 	}
 }
 
 // imagePreviewFrameLine is the one-line marker an image step shows in place of
-// a text body: the file, its pixel size, its encoded size, and the key that
-// opens it. It never carries base64.
+// a text body: the file, its pixel size, its encoded size, and the affordance
+// that opens it. It never carries base64.
 func imagePreviewFrameLine(meta tool.ToolMeta) string {
 	line := fmt.Sprintf("▤ %s · %d×%d · %s",
 		imagePreviewLabel(meta), meta.PreviewWidth, meta.PreviewHeight, humanBytesLabel(meta.PreviewBytes))
 	if meta.PreviewScaled {
 		line += " · scaled"
 	}
-	return line + " · Ctrl+O 打开"
+	return line + " · click to open"
 }
 
 // imagePreviewLabel names an image for a one-line marker: its file name, or,

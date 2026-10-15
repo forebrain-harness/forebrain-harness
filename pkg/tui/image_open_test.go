@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +20,7 @@ func stubImageOpener(t *testing.T) *[]string {
 	t.Helper()
 	prev := imagePreviewOpener
 	var opened []string
-	imagePreviewOpener = func(_ context.Context, path string) error {
+	imagePreviewOpener = func(path string) error {
 		opened = append(opened, path)
 		return nil
 	}
@@ -28,7 +30,7 @@ func stubImageOpener(t *testing.T) *[]string {
 
 // TestImageStepRendersMarkerLine pins the terminal marker for an image step: a
 // single line naming the file, its pixel size and its encoded size, with the
-// key that opens it — never a JSON dump of the metadata.
+// affordance that opens it — never a JSON dump of the metadata.
 func TestImageStepRendersMarkerLine(t *testing.T) {
 	meta := tool.ToolMeta{
 		ToolName: "read_file", Status: "completed",
@@ -38,7 +40,7 @@ func TestImageStepRendersMarkerLine(t *testing.T) {
 	plain := stripANSI(strings.Join(renderFrameLines(
 		Frame{Kind: FrameTool, Title: "read_file", ToolMeta: meta, Final: true}, 120, DiffThemeDark, 0), "\n"))
 
-	for _, want := range []string{"▤", "mcp-shots-screenshot-1.png", "1200×600", "1.4 MB", "Ctrl+O"} {
+	for _, want := range []string{"▤", "mcp-shots-screenshot-1.png", "1200×600", "1.4 MB", "click to open"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("image marker line missing %q:\n%s", want, plain)
 		}
@@ -46,73 +48,281 @@ func TestImageStepRendersMarkerLine(t *testing.T) {
 	if strings.Contains(plain, `"preview_kind"`) {
 		t.Fatalf("image marker fell through to a JSON dump:\n%s", plain)
 	}
-}
-
-// TestLatestImagePreviewFindsTheNewestImageStep pins the lookup Ctrl+O uses: it
-// returns the most recent image step of the active view, and nothing once a
-// later text step is the newest block that is not an image.
-func TestLatestImagePreviewFindsTheNewestImageStep(t *testing.T) {
-	r := NewRenderer(io.Discard, io.Discard)
-	r.RenderFrame(Frame{Kind: FrameTool, Title: "read_file", Content: "text", Final: true})
-	imageMeta := tool.ToolMeta{ToolName: "read_file", PreviewKind: "image", PreviewPath: "/tmp/one.png", PreviewBytes: 100}
-	r.RenderFrame(Frame{Kind: FrameTool, Title: "read_file", ToolMeta: imageMeta, Final: true})
-
-	if path, label := r.LatestImagePreview(); path != "/tmp/one.png" || label != "one.png" {
-		t.Fatalf("LatestImagePreview = (%q, %q), want (/tmp/one.png, one.png)", path, label)
-	}
-
-	second := tool.ToolMeta{ToolName: "read_file", PreviewKind: "image", PreviewPath: "/tmp/two.jpg", PreviewBytes: 200}
-	r.RenderFrame(Frame{Kind: FrameTool, Title: "read_file", ToolMeta: second, Final: true})
-	if path, _ := r.LatestImagePreview(); path != "/tmp/two.jpg" {
-		t.Fatalf("LatestImagePreview = %q, want the newest image step", path)
+	// The key binding is gone: the line must not still advertise it.
+	if strings.Contains(strings.ToLower(plain), "ctrl+o") {
+		t.Fatalf("image marker still advertises the retired Ctrl+O binding:\n%s", plain)
 	}
 }
 
-// TestOpenImageHotkeyWithoutImageSpawnsNothing pins the Ctrl+O behaviour with
-// no image step: it prints one hint line and never launches a viewer.
-func TestOpenImageHotkeyWithoutImageSpawnsNothing(t *testing.T) {
+// imageStepFrame is a completed image tool step for path, as the engine reports
+// it: PreviewKind "image" is what makes the terminal draw the marker line.
+func imageStepFrame(path string) Frame {
+	return Frame{Kind: FrameTool, Title: "read_file", Final: true, ToolMeta: tool.ToolMeta{
+		ToolName: "read_file", Status: "completed",
+		PreviewKind: "image", PreviewPath: path, PreviewWidth: 640, PreviewHeight: 480, PreviewBytes: 1000,
+	}}
+}
+
+// markerRowOf returns the 0-based screen row of the marker line naming name, or
+// -1 when no painted row shows it.
+func markerRowOf(lines []string, name string) int {
+	for i, line := range lines {
+		if strings.HasPrefix(stripANSI(line), "  └ ▤ "+name) {
+			return i
+		}
+	}
+	return -1
+}
+
+// firstRowWithPrefix returns the 0-based screen row of the first painted line
+// whose style-stripped text opens on prefix, or -1. The marker's first row is
+// the only body row that opens on "  └ ▤ " — a wrapped file name is cut by the
+// row width, so the full name cannot be matched there.
+func firstRowWithPrefix(lines []string, prefix string) int {
+	for i, line := range lines {
+		if strings.HasPrefix(stripANSI(line), prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestImageMarkerHitTestOpensTheClickedStep pins what replaced Ctrl+O: the row
+// the click landed on decides which file opens. Two image steps sit in the view
+// with a text step between them, and hitting the FIRST marker must answer with
+// the first file — the old "open the most recent image" lookup would have said
+// two.jpg no matter which row was clicked.
+func TestImageMarkerHitTestOpensTheClickedStep(t *testing.T) {
+	vm := viewModel{}
+	vm.append(imageStepFrame("/tmp/one.png"))
+	vm.append(Frame{Kind: FrameTool, Title: "read_file", Content: "1|package main", Summary: "read lines.txt", Final: true})
+	vm.append(imageStepFrame("/tmp/two.jpg"))
+
+	vr := renderViewport(&vm, 80, 20, 0, DiffThemeDark)
+	row := markerRowOf(vr.lines, "one.png")
+	if row < 0 {
+		t.Fatalf("no marker row for one.png in:\n%s", stripANSI(strings.Join(vr.lines, "\n")))
+	}
+
+	path, label, ok := vm.imageMarkerAtScreenRow(vr, row)
+	if !ok || path != "/tmp/one.png" || label != "one.png" {
+		t.Fatalf("imageMarkerAtScreenRow(row %d) = (%q, %q, %v), want (/tmp/one.png, one.png, true)", row, path, label, ok)
+	}
+	// The same release must not also fold the card: an image step whose marker
+	// fits one row has no fold, so opening and toggling cannot both fire.
+	if vm.toggleAtScreenRow(vr, row) {
+		t.Fatal("clicking the image marker row must not toggle the block")
+	}
+
+	if row := markerRowOf(vr.lines, "two.jpg"); row < 0 {
+		t.Fatal("no marker row for two.jpg")
+	} else if path, _, ok := vm.imageMarkerAtScreenRow(vr, row); !ok || path != "/tmp/two.jpg" {
+		t.Fatalf("imageMarkerAtScreenRow(two.jpg row) = (%q, %v), want (/tmp/two.jpg, true)", path, ok)
+	}
+}
+
+// TestImageMarkerHitTestIgnoresEverythingButTheMarkerRow pins the boundaries of
+// the click target: the card's own title (which also names the file), another
+// step's body and an empty separator row all answer nothing, so only the marker
+// line is a button.
+func TestImageMarkerHitTestIgnoresEverythingButTheMarkerRow(t *testing.T) {
+	vm := viewModel{}
+	vm.append(imageStepFrame("/tmp/one.png"))
+	vm.append(Frame{Kind: FrameTool, Title: "read_file", Content: "1|package main", Summary: "read lines.txt", Final: true})
+
+	vr := renderViewport(&vm, 80, 20, 0, DiffThemeDark)
+	if len(vr.spans) != 2 {
+		t.Fatalf("expected two spans, got %d", len(vr.spans))
+	}
+	titleRow := vr.spans[0].startRow - vr.firstRow
+	if row := markerRowOf(vr.lines, "one.png"); row < 0 || row == titleRow {
+		t.Fatalf("expected the marker row below the title row, got marker=%d title=%d", row, titleRow)
+	}
+
+	textRow, blankRow := -1, -1
+	for i, line := range vr.lines {
+		plain := stripANSI(line)
+		if textRow < 0 && strings.Contains(plain, "package main") {
+			textRow = i
+		}
+		if blankRow < 0 && i > 0 && strings.TrimSpace(plain) == "" {
+			blankRow = i
+		}
+	}
+	if textRow < 0 || blankRow < 0 {
+		t.Fatalf("fixture did not paint a text body row (%d) and a separator row (%d):\n%s", textRow, blankRow, stripANSI(strings.Join(vr.lines, "\n")))
+	}
+
+	for name, row := range map[string]int{"title": titleRow, "text body": textRow, "separator": blankRow} {
+		if path, label, ok := vm.imageMarkerAtScreenRow(vr, row); ok {
+			t.Fatalf("the %s row (%d) must not open anything, got (%q, %q)", name, row, path, label)
+		}
+	}
+}
+
+// TestImageMarkerRowPredicateSkipsEveryHintRow pins the row predicate directly.
+// The body prefix it keys on ("  └ " and its "    " continuations) is shared by
+// two summary rows the fold code synthesises, so those are excluded by their
+// leading ellipsis — otherwise clicking "… 3 earlier lines" or "··· 12 more
+// lines (click to expand)" would launch a viewer on top of toggling the block.
+func TestImageMarkerRowPredicateSkipsEveryHintRow(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"marker line", "  └ ▤ shot.png · 640×480 · 602.7 KB · click to open", true},
+		{"wrapped marker continuation", "    4 KB · click to open", true},
+		{"streaming hint", "    … 3 earlier lines", false},
+		{"fold hint", "    ··· 12 more lines (click to expand)", false},
+		{"card title", "● Read shot.png <0.1s", false},
+		{"empty row", "", false},
+		// A text read's body row carries the same prefix; only the block type
+		// distinguishes it, which the vm-level test above covers.
+		{"text body row", "  └ 1|package main", true},
+	}
+	for _, tc := range cases {
+		if got := isImageMarkerRow(tc.line); got != tc.want {
+			t.Errorf("isImageMarkerRow(%q) = %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
+
+// clickRow drives one mouse release through the production handler and reports
+// what the row resolved to.
+func clickRow(t *testing.T, r *Renderer, row int) (path string, isMarker bool) {
+	t.Helper()
+	path, _, isMarker = r.ImagePreviewAtScreenRow(row)
+	clickImagePreviewRow(r, 0, row)
+	return path, isMarker
+}
+
+// TestClickingTheImageMarkerRowLaunchesTheClickedFile pins the launch from a
+// real renderer: the marker row hands its absolute path to the opener, while
+// the title row and a row past the transcript window (the composer's) hand over
+// nothing at all.
+func TestClickingTheImageMarkerRowLaunchesTheClickedFile(t *testing.T) {
 	opened := stubImageOpener(t)
 	r := NewRenderer(io.Discard, io.Discard)
-	// A plain text step: nothing in the view is an image.
-	r.RenderFrame(Frame{Kind: FrameTool, Title: "read_file", Content: "1  package main", Final: true})
+	r.viewportMode = true
+	r.composerSuppressed = true
+	r.vm.append(imageStepFrame("/tmp/shot.png"))
+	r.vpHeight = 10
+	r.vpBodyHeight = 10
+	r.vpLastRender = renderViewport(&r.vm, 80, 10, 0, DiffThemeDark)
 
-	if path, _ := r.LatestImagePreview(); path != "" {
-		t.Fatalf("LatestImagePreview = %q, want empty", path)
+	row := markerRowOf(r.vpLastRender.lines, "shot.png")
+	if row < 0 {
+		t.Fatalf("no marker row painted:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
 	}
-	openLatestImagePreview(r, &streamState{})
-	if len(*opened) != 0 {
-		t.Fatalf("Ctrl+O spawned a viewer with no image step: %v", *opened)
+	if _, isMarker := clickRow(t, r, row); !isMarker {
+		t.Fatalf("the marker row (%d) did not resolve to an image step", row)
 	}
-
-	blocks := r.vm.blocks
-	if len(blocks) == 0 {
-		t.Fatal("expected a hint frame")
-	}
-	last := blocks[len(blocks)-1].frame
-	if last.Kind != FrameStatus || !strings.Contains(strings.ToLower(last.Content), "no image") {
-		t.Fatalf("expected a one-line hint, got %#v", last)
-	}
-}
-
-// TestOpenImageHotkeyOpensThePath pins the positive path: with an image step in
-// the view, Ctrl+O hands its absolute path to the opener.
-func TestOpenImageHotkeyOpensThePath(t *testing.T) {
-	opened := stubImageOpener(t)
-	r := NewRenderer(io.Discard, io.Discard)
-	r.RenderFrame(Frame{Kind: FrameTool, Title: "read_file",
-		ToolMeta: tool.ToolMeta{ToolName: "read_file", PreviewKind: "image", PreviewPath: "/tmp/shot.png", PreviewBytes: 10}, Final: true})
-
-	openLatestImagePreview(r, &streamState{})
 	if len(*opened) != 1 || (*opened)[0] != "/tmp/shot.png" {
 		t.Fatalf("opened = %v, want [/tmp/shot.png]", *opened)
 	}
+
+	titleRow := r.vpLastRender.spans[0].startRow - r.vpLastRender.firstRow
+	if _, isMarker := clickRow(t, r, titleRow); isMarker {
+		t.Fatal("the card title must not resolve to the marker row")
+	}
+	if len(*opened) != 1 {
+		t.Fatalf("clicking the title row opened %v", *opened)
+	}
+
+	if _, isMarker := clickRow(t, r, r.vpBodyHeight); isMarker {
+		t.Fatal("a row below the transcript body must not resolve to a marker row")
+	}
+	if len(*opened) != 1 {
+		t.Fatalf("a click below the transcript body opened %v", *opened)
+	}
+
+	// Nothing painted at all: a click must not invent a target.
+	openImagePreview(NewRenderer(io.Discard, io.Discard), "/tmp/shot.png", "shot.png")
+	if len(*opened) != 2 {
+		t.Fatalf("openImagePreview on a bare renderer opened %v", *opened)
+	}
 }
 
-// TestCtrlOIsNotABareLetterKey pins the key binding: Ctrl+O (0x0f) produces the
-// open-image hotkey, and a bare 'o' typed into the composer does not — a bare
-// letter would fire the image viewer on every 'o'. This is the regression the
-// review called out.
-func TestCtrlOIsNotABareLetterKey(t *testing.T) {
+// wrappedImageStepFrame is an image step whose file name is long enough to wrap
+// its marker line past the fold budget, which is what makes an image card
+// collapsible (and draws the "··· N more lines" hint under it).
+func wrappedImageStepFrame(name string) Frame {
+	return imageStepFrame("/tmp/" + name)
+}
+
+// TestClickingTheFoldHintOnAnImageCardExpandsWithoutOpening is a regression
+// guard for a real misfire: the release used to be applied before it was
+// resolved, so clicking the fold hint expanded the card and THEN resolved the
+// same row number against the repainted render — where it named a marker
+// continuation row the expansion had just revealed — and opened that file.
+// Opening must come from the render the click landed on, and a hint row is a
+// fold target, not a button. The paint is the real one (paintViewportLocked), so
+// the row shift this guards against actually happens here.
+func TestClickingTheFoldHintOnAnImageCardExpandsWithoutOpening(t *testing.T) {
+	opened := stubImageOpener(t)
+	forcedTermWidth, forcedTermHeight = 40, 30
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+
+	name := strings.Repeat("c", 200) + ".png"
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.vm.append(wrappedImageStepFrame(name))
+	r.paintViewportLocked()
+
+	hintRow := -1
+	for i, line := range r.vpLastRender.lines {
+		if strings.Contains(stripANSI(line), "more lines (click to expand)") {
+			hintRow = i
+		}
+	}
+	if hintRow < 0 {
+		t.Fatalf("fixture is not folded — no truncation hint:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	}
+	if _, _, isMarker := r.ImagePreviewAtScreenRow(hintRow); isMarker {
+		t.Fatalf("the fold hint row (%d) must not resolve to an image marker", hintRow)
+	}
+
+	clickRow(t, r, hintRow)
+	if len(*opened) != 0 {
+		t.Fatalf("clicking the fold hint opened %v, want nothing", *opened)
+	}
+	if !r.vm.blocks[0].expanded {
+		t.Fatal("clicking the fold hint must expand the card")
+	}
+
+	// And a marker row of that same folded card opens the file. It remains a
+	// fold target as well — the whole preview area of a collapsible card is one,
+	// and on a wrapped image card those rows are the only way back from
+	// expanded — so the card does flip here; the hint row above is the one that
+	// must never open anything.
+	r.vm.blocks[0].expanded = false
+	r.paintViewportLocked()
+	markerRow := firstRowWithPrefix(r.vpLastRender.lines, "  └ ▤ ")
+	if markerRow < 0 {
+		t.Fatalf("no marker row painted on the folded card:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	}
+	path, isMarker := clickRow(t, r, markerRow)
+	if !isMarker || path == "" {
+		t.Fatalf("the folded card's marker row (%d) did not resolve to a file", markerRow)
+	}
+	if want := "/tmp/" + name; path != want {
+		t.Fatalf("the marker row resolved to %q, want %q", path, want)
+	}
+	if len(*opened) != 1 || (*opened)[0] != path {
+		t.Fatalf("opened = %v, want [%s]", *opened, path)
+	}
+	if !r.vm.blocks[0].expanded {
+		t.Fatal("a wrapped image card is collapsible: its body rows must still toggle")
+	}
+}
+
+// TestCtrlOIsUnboundAndNeverEntersTheComposer pins the retirement of the
+// open-image hotkey. Ctrl+O (0x0f) is now an ordinary C0 byte the reader drops:
+// it must produce no hotkey and reach neither the composer draft nor a
+// submitted line. A bare 'o' still types an 'o' — that half of the old
+// regression guard is what keeps the key from being re-bound to a letter.
+func TestCtrlOIsUnboundAndNeverEntersTheComposer(t *testing.T) {
 	collect := func(write func(w io.Writer)) []inputEvent {
 		t.Helper()
 		drainInteractiveInputSeedQueue()
@@ -139,20 +349,26 @@ func TestCtrlOIsNotABareLetterKey(t *testing.T) {
 		return got
 	}
 
-	for _, ev := range collect(func(w io.Writer) { _, _ = w.Write([]byte("o")) }) {
-		if ev.kind == inputEventHotkey && ev.hotkey == hotkeyOpenImage {
-			t.Fatal("a bare 'o' must not produce the open-image hotkey")
+	for _, ev := range collect(func(w io.Writer) { _, _ = w.Write([]byte{0x0f}) }) {
+		switch ev.kind {
+		case inputEventHotkey:
+			t.Fatalf("Ctrl+O is unbound but produced hotkey %q", ev.hotkey)
+		case inputEventDraft, inputEventLine:
+			t.Fatalf("Ctrl+O must not reach the composer, got %+v", ev)
 		}
 	}
 
-	found := false
-	for _, ev := range collect(func(w io.Writer) { _, _ = w.Write([]byte{0x0f}) }) {
-		if ev.kind == inputEventHotkey && ev.hotkey == hotkeyOpenImage {
-			found = true
+	drafted := false
+	for _, ev := range collect(func(w io.Writer) { _, _ = w.Write([]byte("o")) }) {
+		switch ev.kind {
+		case inputEventHotkey:
+			t.Fatalf("a bare 'o' must not produce a hotkey, got %q", ev.hotkey)
+		case inputEventDraft, inputEventLine:
+			drafted = true
 		}
 	}
-	if !found {
-		t.Fatal("Ctrl+O (0x0f) did not produce the open-image hotkey")
+	if !drafted {
+		t.Fatal("a bare 'o' must still be typed into the composer")
 	}
 }
 
@@ -166,4 +382,41 @@ func TestImageViewerCommandIsPlatformSpecific(t *testing.T) {
 	if !bytes.Contains([]byte(strings.Join(args, " ")), []byte("/tmp/x.png")) {
 		t.Fatalf("viewer args %v do not name the file", args)
 	}
+}
+
+// TestOpenWithSystemViewerLetsTheViewerOutliveTheHandler pins the root cause of
+// "open image does nothing": the launcher hands the path to the platform and
+// exits on its own schedule, so a launcher killed the moment the handler
+// returns never opens anything. A fake viewer is put on PATH: it sleeps past
+// the handler's return and then records that it finished.
+func TestOpenWithSystemViewerLetsTheViewerOutliveTheHandler(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the viewer program is cmd.exe on Windows")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "opened")
+	program, _ := imageViewerCommand("x.webp") // "open" (darwin) / "xdg-open"
+	// The fake shadows the platform's program by name. An absolute path from
+	// imageViewerCommand would silently stop intercepting and launch the real
+	// viewer instead, so refuse to run rather than pass for the wrong reason.
+	if program == "" || program != filepath.Base(program) {
+		t.Skipf("imageViewerCommand resolved %q; this test needs a bare program name", program)
+	}
+	script := filepath.Join(dir, program)
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 0.3\n: > \"$FB_VIEWER_MARKER\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FB_VIEWER_MARKER", marker)
+
+	if err := openWithSystemViewer(filepath.Join(dir, "shot.webp")); err != nil {
+		t.Fatalf("launch: %v", err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("the viewer process did not survive the handler: nothing was opened")
 }

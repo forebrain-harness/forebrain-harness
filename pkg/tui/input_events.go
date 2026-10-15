@@ -71,7 +71,6 @@ const (
 	hotkeyRosterStop         inputHotkey = "roster_stop"
 	hotkeyJumpToBottom       inputHotkey = "jump_to_bottom"
 	hotkeyRedraw             inputHotkey = "redraw"
-	hotkeyOpenImage          inputHotkey = "open_image"
 )
 
 // slashOverlayActive gates whether arrow keys route to slash-overlay nav
@@ -1359,13 +1358,6 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						// terminal that redrew itself) this re-aligns it.
 						flushBeforeHotkey()
 						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyRedraw}
-					case 0x0f:
-						// Ctrl+O: open the most recent image step with the
-						// system viewer. A control key, never a bare letter —
-						// a bare 'o' would fire on every 'o' typed into the
-						// composer.
-						flushBeforeHotkey()
-						ch <- inputEvent{kind: inputEventHotkey, hotkey: hotkeyOpenImage}
 					case 0x09:
 						if pasted := pasteBurst.flushBeforeModifiedInput(); pasted != "" {
 							previous := cloneRunes(line)
