@@ -153,7 +153,13 @@ func resolveImageBudget(maxBytes int) int {
 // failure is not an error here. It never decodes pixels; callers use it to
 // state file facts about an image that was not sent (a refused or degraded
 // block), where the dimensions are metadata, not something to pay for.
+//
+// A WebP is read by webpDimensions, which costs nothing for the formats the
+// standard library does handle: the magic number decides first.
 func DecodeImageConfig(data []byte) (int, int) {
+	if w, h, ok := webpDimensions(data); ok {
+		return w, h
+	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return 0, 0
