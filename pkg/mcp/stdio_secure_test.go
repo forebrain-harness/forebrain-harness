@@ -210,11 +210,13 @@ func main() {
 		return nil, echoOutput{Text: wd}, nil
 	})
 	mcp.AddTool(server, &mcp.Tool{Name: "roots", Description: "report client roots"}, func(ctx context.Context, req *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, any, error) {
-		res, err := req.Session.ListRoots(ctx, nil)
-		if err != nil {
-			return nil, nil, err
+		if len(req.Params.InputResponses) == 0 {
+			return &mcp.CallToolResult{
+				InputRequests: mcp.InputRequestMap{"roots": &mcp.ListRootsParams{}},
+			}, nil, nil
 		}
-		return nil, map[string]any{"roots": res.Roots}, nil
+		rootList := req.Params.InputResponses["roots"].(*mcp.ListRootsResult)
+		return nil, map[string]any{"roots": rootList.Roots}, nil
 	})
 	server.AddResource(&mcp.Resource{URI: "file:///fixture/readme.md", Name: "readme"}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: req.Params.URI, Text: "hello"}}}, nil
