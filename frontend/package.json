@@ -34,7 +34,7 @@
     "clsx": "^2.1.1",
     "codemirror": "catalog:",
     "katex": "^0.18.2",
-    "lucide-vue-next": "^0.460.0",
+    "lucide-vue-next": "^1.0.0",
     "nanoid": "^5.1.6",
     "snakecase-keys": "^9.0.2",
     "tailwind-merge": "^3.5.0",
