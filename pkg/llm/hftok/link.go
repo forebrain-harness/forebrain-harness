@@ -5,6 +5,6 @@ package hftok
 #cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/libtokenizers/darwin_amd64
 #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/libtokenizers/linux_amd64
 #cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../../third_party/libtokenizers/linux_arm64
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/libtokenizers/windows_amd64
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../../third_party/libtokenizers/windows_amd64 -lntdll
 */
 import "C"
