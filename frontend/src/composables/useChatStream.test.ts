@@ -15,7 +15,9 @@ import {
   formatToolDuration,
   formatWorkedDurationLabel,
   hasVisibleBlocks,
+  imageBytesLabel,
   placeBeforeGateAnchor,
+  previewFieldsFromMeta,
   subagentCallView,
   workedLineOf,
   workedLineText,
@@ -4459,6 +4461,46 @@ describe('a subagent talked to from its own view', () => {
     } finally {
       input.mockRestore(); restore()
     }
+  })
+})
+
+describe('image preview meta', () => {
+  it('reads preview_scaled alongside the other preview facts', () => {
+    const meta = {
+      preview_kind: 'image',
+      preview_path: '/ws/state/mcp-results/shot.png',
+      preview_mime: 'image/png',
+      preview_width: 800,
+      preview_height: 600,
+      preview_bytes: 1_450_000,
+      preview_scaled: true,
+    }
+    expect(previewFieldsFromMeta(meta)).toEqual({
+      previewKind: 'image',
+      previewPath: '/ws/state/mcp-results/shot.png',
+      previewMIME: 'image/png',
+      previewWidth: 800,
+      previewHeight: 600,
+      previewBytes: 1_450_000,
+      previewScaled: true,
+    })
+  })
+
+  it('reports previewScaled false when the meta never carried it', () => {
+    expect(previewFieldsFromMeta({ preview_kind: 'image', preview_path: '/ws/a.png' })).toMatchObject({
+      previewKind: 'image',
+      previewScaled: false,
+    })
+  })
+
+  it('returns nothing for a non-image call', () => {
+    expect(previewFieldsFromMeta({ preview_kind: 'file' })).toEqual({})
+  })
+
+  it('formats byte counts the way the TUI marker does', () => {
+    expect(imageBytesLabel(512)).toBe('512 bytes')
+    expect(imageBytesLabel(2048)).toBe('2.0 KB')
+    expect(imageBytesLabel(1_450_000)).toBe('1.4 MB')
   })
 })
 

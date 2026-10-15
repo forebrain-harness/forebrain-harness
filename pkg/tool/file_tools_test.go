@@ -25,6 +25,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/pdf"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
 
@@ -1418,6 +1419,36 @@ func writeTestPNG(t *testing.T, dir string, w, h int) (string, []byte) {
 		t.Fatalf("write png: %v", err)
 	}
 	return path, buf.Bytes()
+}
+
+// TestAppendPDFPagePartDegradesUnsendablePage pins the read_file PDF sibling
+// of the MCP image-block fix: a page whose part cannot be built (here 4 MiB of
+// non-decodable bytes over the per-part budget) becomes a text line naming
+// the stored PNG and the reason, so one bad page never costs the note or the
+// pages that did encode.
+func TestAppendPDFPagePartDegradesUnsendablePage(t *testing.T) {
+	tmp := t.TempDir()
+	_, goodPNG := writeTestPNG(t, tmp, 2, 2)
+
+	var parts []llm.ContentPart
+	parts = appendPDFPagePart(parts, filepath.Join(tmp, "page-1.png"), pdf.Page{Number: 1, PNG: goodPNG, Width: 2, Height: 2})
+	if len(parts) != 1 || parts[0].Type != llm.ContentTypeImageBase64 {
+		t.Fatalf("good page did not produce an image part: %#v", parts)
+	}
+
+	// Over the 3 MiB budget, so the downscale path runs and image.Decode
+	// rejects the bytes — the decode-branch failure of ImagePartWithin.
+	badPath := filepath.Join(tmp, "page-2.png")
+	parts = appendPDFPagePart(parts, badPath, pdf.Page{Number: 2, PNG: bytes.Repeat([]byte{0x00}, 4<<20), Width: 64, Height: 64})
+	if len(parts) != 2 {
+		t.Fatalf("bad page dropped the good page's part: %#v", parts)
+	}
+	if parts[1].Type != llm.ContentTypeText {
+		t.Fatalf("bad page did not degrade to a text part: %#v", parts)
+	}
+	if !strings.Contains(parts[1].Text, "was not sent as an image") || !strings.Contains(parts[1].Text, badPath) {
+		t.Fatalf("degraded page line missing path/reason: %q", parts[1].Text)
+	}
 }
 
 // TestFileReadReturnsImagePartsForImageFile pins that read_file hands the

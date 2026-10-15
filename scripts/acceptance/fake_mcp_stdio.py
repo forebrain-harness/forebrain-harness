@@ -6,10 +6,19 @@ connect, list one tool, and call it: initialize -> initialized -> tools/list ->
 tools/call. Used only by local acceptance runs.
 
 Args: <tool-name> [server-name] [mode]
+  mode "text" (default) echoes the input as a plain text block.
   mode "image" makes tools/call answer with an MCP image content block (the
-  shape resultJSONContainsImage/containsImageBlock recognize), instead of the
-  plain text echo. The acceptance run uses it to prove an MCP screenshot reaches
-  the model as pixels and lands under the primary agent workspace.
+    shape resultJSONContainsImage/containsImageBlock recognize). The acceptance
+    run uses it to prove an MCP screenshot reaches the model as pixels and
+    lands under the primary agent workspace.
+  mode "image_mixed" answers with a text block, an image/webp block above the
+    per-part budget (no standard-library decoder could downscale it, so the
+    part build must fail), and a good 64x64 PNG — proving one unsendable block
+    degrades to a line instead of failing the whole call.
+  mode "image_oversize" answers with a text block, an image/png block whose
+    decoded size exceeds the 48 MiB per-block limit, and a good PNG — proving
+    the pre-decode guard refuses the block without touching disk and the good
+    block still reaches the model.
 """
 import base64
 import json
@@ -76,6 +85,31 @@ IMAGE_PNG = solid_png(64, 64, (220, 30, 30))
 IMAGE_B64 = base64.b64encode(IMAGE_PNG).decode("ascii")
 assert png_is_valid(IMAGE_PNG), "fixture image is not a structurally valid PNG"
 
+# The hostile payloads are built lazily (a 48 MiB block is only worth
+# materialising when the mode actually answers with it).
+_PAYLOADS = {}
+
+
+def mixed_webp_b64():
+    """A RIFF/WEBP container above the 3 MiB per-part budget.
+
+    The bytes need not decode as a real webp: ImagePartWithin refuses an
+    over-budget webp before any decode (no standard-library webp decoder
+    exists), which is exactly the branch under test.
+    """
+    if "webp" not in _PAYLOADS:
+        body = b"WEBP" + b"\x00" * (4 << 20)
+        webp = b"RIFF" + struct.pack("<I", len(body)) + body
+        _PAYLOADS["webp"] = base64.b64encode(webp).decode("ascii")
+    return _PAYLOADS["webp"]
+
+
+def oversize_png_b64():
+    """Deterministic zero bytes whose decoded size is just over the 48 MiB limit."""
+    if "oversize" not in _PAYLOADS:
+        _PAYLOADS["oversize"] = base64.b64encode(b"\x00" * ((48 << 20) + 1)).decode("ascii")
+    return _PAYLOADS["oversize"]
+
 
 
 def send(msg):
@@ -117,6 +151,18 @@ def handle(req):
         text = args.get("text", "")
         if MODE == "image":
             content = [{"type": "image", "data": IMAGE_B64, "mimeType": "image/png"}]
+        elif MODE == "image_mixed":
+            content = [
+                {"type": "text", "text": "mixed shot"},
+                {"type": "image", "data": mixed_webp_b64(), "mimeType": "image/webp"},
+                {"type": "image", "data": IMAGE_B64, "mimeType": "image/png"},
+            ]
+        elif MODE == "image_oversize":
+            content = [
+                {"type": "text", "text": "oversize shot"},
+                {"type": "image", "data": oversize_png_b64(), "mimeType": "image/png"},
+                {"type": "image", "data": IMAGE_B64, "mimeType": "image/png"},
+            ]
         else:
             content = [{"type": "text", "text": "echo: " + str(text)}]
         send({

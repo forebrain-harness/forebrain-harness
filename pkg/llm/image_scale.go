@@ -70,7 +70,7 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 	}
 
 	if len(data) <= budget {
-		w, h := decodeImageConfig(data)
+		w, h := DecodeImageConfig(data)
 		res.SourceWidth, res.SourceHeight = w, h
 		res.Width, res.Height = w, h
 		res.Scale = 1
@@ -148,9 +148,12 @@ func resolveImageBudget(maxBytes int) int {
 	return DefaultMaxImageBytes
 }
 
-// decodeImageConfig returns the pixel dimensions of encoded image data, or
-// (0, 0) when the header cannot be read — a failure is not an error here.
-func decodeImageConfig(data []byte) (int, int) {
+// DecodeImageConfig returns the pixel dimensions of encoded image data by
+// reading only its header, or (0, 0) when the header cannot be read — a
+// failure is not an error here. It never decodes pixels; callers use it to
+// state file facts about an image that was not sent (a refused or degraded
+// block), where the dimensions are metadata, not something to pay for.
+func DecodeImageConfig(data []byte) (int, int) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
 		return 0, 0

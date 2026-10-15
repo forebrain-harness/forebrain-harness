@@ -24,6 +24,14 @@
           class="max-h-40 w-auto rounded-md border border-border object-contain"
         />
       </a>
+      <!-- The thumbnail's facts, mirroring the TUI's ▤ line (width×height,
+           encoded size, scaled). Each segment is honest per block kind: a sent
+           image reports its encoded bytes, a refused or degraded one the
+           on-disk size; unknown segments are omitted rather than shown as 0. -->
+      <div
+        v-if="previewUrl && imageMetaLine"
+        class="mb-2 text-xs text-[var(--forebrain-muted-text)]"
+      >{{ imageMetaLine }}</div>
       <!-- A skill card's display_body is the whole user-facing text ("Loaded
            from …" / "Failed to load from …" plus the raw error), so the
            separate error line would repeat what the body already says. -->
@@ -46,7 +54,7 @@ import { computed } from 'vue'
 import { Tool, ToolHeader, ToolContent, ToolOutput } from '@repo/elements/tool'
 import { t } from '@/locales'
 import { forebrainApi, type WorkspaceScope } from '@/lib/api'
-import { skillCardTitle, type SubagentToolStep } from '@/composables/useChatStream'
+import { skillCardTitle, imageBytesLabel, type SubagentToolStep } from '@/composables/useChatStream'
 
 const props = withDefaults(defineProps<{
   step: SubagentToolStep
@@ -91,15 +99,35 @@ const previewUrl = computed(() => {
 
 /**
  * previewAlt names the image for assistive tech and for the moment before it
- * loads: its file name and pixel size.
+ * loads: its file name and, when the meta carried them, its pixel size. A
+ * block whose header did not parse (or a surface that never learned the size)
+ * falls back to the size-free variant rather than announcing 0×0.
  */
 const previewAlt = computed(() => {
   const name = String(props.step.previewPath ?? '').trim().split('/').pop() || 'image'
-  return t('chat.toolImageAlt', {
-    name,
-    width: props.step.previewWidth ?? 0,
-    height: props.step.previewHeight ?? 0,
-  })
+  const width = props.step.previewWidth ?? 0
+  const height = props.step.previewHeight ?? 0
+  if (!width || !height) return t('chat.toolImageAltNoDims', { name })
+  return t('chat.toolImageAlt', { name, width, height })
+})
+
+/**
+ * imageMetaLine is the muted caption under the thumbnail, aligned with the
+ * TUI's "▤ name · WxH · bytes · scaled": every segment that is known appears,
+ * every unknown one is omitted, and "scaled" only ever names a downscale the
+ * engine actually ran.
+ */
+const imageMetaLine = computed(() => {
+  if (String(props.step.previewKind ?? '').trim() !== 'image') return ''
+  const segments: string[] = []
+  const width = props.step.previewWidth ?? 0
+  const height = props.step.previewHeight ?? 0
+  if (width > 0 && height > 0) segments.push(`${width}×${height}`)
+  if ((props.step.previewBytes ?? 0) > 0) {
+    segments.push(imageBytesLabel(props.step.previewBytes ?? 0))
+  }
+  if (props.step.previewScaled) segments.push('scaled')
+  return segments.join(' · ')
 })
 
 /**

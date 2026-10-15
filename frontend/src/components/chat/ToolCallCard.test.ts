@@ -67,4 +67,58 @@ describe('ToolCallCard', () => {
     })
     expect(wrapper.find('img').exists()).toBe(false)
   })
+
+  it('captions the thumbnail with dimensions, bytes and scaled, omitting unknowns', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        scope: { sessionId: 's1' },
+        step: stepOf({
+          previewKind: 'image',
+          previewPath: '/proj/shot.png',
+          previewWidth: 1200,
+          previewHeight: 600,
+          previewBytes: 1_450_000,
+          previewScaled: true,
+        }),
+      },
+    })
+    // Aligned with the TUI's ▤ line: WxH · bytes · scaled.
+    expect(wrapper.text()).toContain('1200×600')
+    expect(wrapper.text()).toContain('1.4 MB')
+    expect(wrapper.text()).toContain('scaled')
+
+    const partial = mount(ToolCallCard, {
+      props: {
+        open: true,
+        scope: { sessionId: 's1' },
+        // A refused or degraded block: dimensions parsed, no bytes, no scale.
+        // The summary says no size either, so a stray byte count can only come
+        // from the caption.
+        step: stepOf({
+          summary: 'Read shot.png (saved, not sent)',
+          previewKind: 'image',
+          previewPath: '/proj/shot.png',
+          previewWidth: 1200,
+          previewHeight: 600,
+        }),
+      },
+    })
+    expect(partial.text()).toContain('1200×600')
+    expect(partial.text()).not.toContain('scaled')
+    expect(partial.text()).not.toMatch(/\d+(\.\d+)? (KB|MB)/)
+  })
+
+  it('never announces 0×0 for an image whose dimensions are unknown', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        scope: { sessionId: 's1' },
+        step: stepOf({ previewKind: 'image', previewPath: '/proj/shot.webp' }),
+      },
+    })
+    const alt = wrapper.find('img').attributes('alt')
+    expect(alt).toContain('shot.webp')
+    expect(alt).not.toContain('0×0')
+  })
 })

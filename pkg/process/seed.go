@@ -1,8 +1,8 @@
 package process
 
 import (
+	"bytes"
 	"errors"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -49,9 +49,18 @@ func Seed(root string) error {
 
 // seedFonts copies the CJK fallback fonts shipped beside this binary (or named
 // by FOREBRAIN_ASSETS_DIR) into $FOREBRAIN_HOME/fonts, where pkg/pdf's
-// FontDirs looks for them. A file already seeded is left alone; a build that
-// ships no fonts seeds nothing and does not fail. Errors are non-fatal —
-// callers log a warning and continue.
+// FontDirs looks for them. Per file, exactly one of four cases holds:
+//
+//   - the home copy is missing: it is written atomically (temp file + rename),
+//     so an interrupted seed never leaves a half-written font behind;
+//   - it is identical to the shipped bytes: skipped, mtime untouched;
+//   - it is a true prefix of the shipped bytes: a write WE interrupted — the
+//     only signature our own crash can leave — atomically rewritten;
+//   - it differs in any other way: the user replaced it, a legitimate custom
+//     override that is never touched and never warned about.
+//
+// A build that ships no fonts seeds nothing and does not fail. Errors are
+// non-fatal — callers log a warning and continue.
 func seedFonts(root string) error {
 	assets, err := llm.AssetsDir()
 	if err != nil {
@@ -71,34 +80,54 @@ func seedFonts(root string) error {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(name), ".otf") {
 			continue
 		}
+		srcBytes, err := os.ReadFile(filepath.Join(source, name))
+		if err != nil {
+			return err
+		}
 		out := filepath.Join(dest, name)
-		if _, err := os.Stat(out); err == nil {
+		dstBytes, err := os.ReadFile(out)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			// missing: fall through to the write
+		case err != nil:
+			return err
+		case bytes.Equal(dstBytes, srcBytes):
+			continue
+		case len(dstBytes) < len(srcBytes) && bytes.Equal(dstBytes, srcBytes[:len(dstBytes)]):
+			// our own interrupted write: fall through to the rewrite
+		default:
+			// the user's custom override: never touched
 			continue
 		}
 		if err := os.MkdirAll(dest, 0o755); err != nil {
 			return err
 		}
-		if err := copyFont(filepath.Join(source, name), out); err != nil {
+		if err := writeFontAtomic(out, srcBytes); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// copyFont writes src's bytes to dst, replacing nothing: callers stat dst first.
-func copyFont(src, dst string) error {
-	in, err := os.Open(src)
+// writeFontAtomic writes data to path through a temporary file in the same
+// directory, so a seed interrupted mid-write leaves nothing behind rather than
+// a truncated font a later start would have to detect.
+func writeFontAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".font-*")
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return out.Close()
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

@@ -36,7 +36,7 @@
                       @install="installCandidate"
                     />
                   </template>
-                  <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :default-open="false" />
+                  <ToolCallCard v-else-if="block.kind === 'tool'" class="my-2" :step="block.step" :scope="workbenchScope" :default-open="false" />
                   <ApprovalCard v-else-if="block.kind === 'approval'" class="my-2" :block="block" />
                   <RunErrorBlock v-else-if="block.kind === 'error'" class="my-2" :text="block.text" :detail="block.detail" />
                 </template>

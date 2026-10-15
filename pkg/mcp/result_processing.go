@@ -25,6 +25,29 @@ type accounting struct {
 	sessionID string
 }
 
+// maxDecodedBlockBytes is the largest single MCP block we materialise; the
+// image ceiling matches llm.MaxImageDecodeBytes, the largest image we decode.
+const maxDecodedBlockBytes = llm.MaxImageDecodeBytes
+
+// decodedSizeWithin reports whether encoded (base64) decodes within the
+// per-block ceiling, without decoding it. Honesty note: raw itself is already
+// buffered in memory by the MCP transport — that is the SDK's domain. What
+// this guard removes is the decode copy (which doubles the footprint) and an
+// unbounded write to state/mcp-results.
+func decodedSizeWithin(encoded string) bool {
+	return base64.StdEncoding.DecodedLen(len(encoded)) <= maxDecodedBlockBytes
+}
+
+// oversizeBlockLine is the envelope replacement for a block we refused to
+// materialise. The size is the base64 DecodedLen estimate — the exact decoded
+// size is known only after decoding, which is exactly what we avoid.
+func oversizeBlockLine(encoded string) string {
+	return fmt.Sprintf(
+		"Binary content (about %d MiB) exceeds the %d MiB per-block limit and was not saved.",
+		base64.StdEncoding.DecodedLen(len(encoded))>>20, maxDecodedBlockBytes>>20,
+	)
+}
+
 // ToolResultContent turns one raw MCP tool result into the content the model
 // receives: the text envelope processToolResultJSON produces (image blocks
 // replaced by a saved-path line, large outputs offloaded or truncated) plus one
@@ -34,8 +57,10 @@ type accounting struct {
 // workspace's state/mcp-results, injected by Session.SetResultsDir; it is NOT
 // home (see Session.resultsRootValue). imageRefusal, when non-empty, is the
 // reason this session's model may not be handed pixels: the image parts are
-// dropped and only the text envelope is returned, so a text-only model gets an
-// actionable line instead of a 400.
+// never built (no downscale or encode work either) and only the text envelope
+// is returned, so a text-only model gets an actionable line instead of a 400 —
+// and a refused session is never failed by an image block it would not have
+// received anyway.
 //
 // The pixels are handed over as ContentParts because the whole point of the
 // change is that a screenshot an MCP server returned reaches the model as an
@@ -45,15 +70,13 @@ type accounting struct {
 // is captured onto ctx as the tool step's Output, so both surfaces can draw a
 // thumbnail by path.
 func ToolResultContent(ctx context.Context, resultsDir, serverName, toolName, raw string, acct accounting, imageRefusal string) ([]llm.ContentPart, error) {
-	stripped, imageParts, surface, err := extractResultImageParts(resultsDir, serverName, raw)
+	wantParts := strings.TrimSpace(imageRefusal) == ""
+	stripped, imageParts, surface, err := extractResultImageParts(resultsDir, serverName, raw, wantParts)
 	if err != nil {
 		return nil, err
 	}
 	if len(surface) > 0 {
 		tool.CaptureToolOutput(ctx, surface)
-	}
-	if strings.TrimSpace(imageRefusal) != "" {
-		imageParts = nil
 	}
 	text, err := processToolResultJSON(resultsDir, serverName, toolName, stripped, acct)
 	if err != nil {
@@ -67,14 +90,22 @@ func ToolResultContent(ctx context.Context, resultsDir, serverName, toolName, ra
 
 // extractResultImageParts persists every image block in an MCP tool result and
 // returns the result JSON with each block replaced by a saved-path text line,
-// one image part per block, and the surface-facing map of the first image (nil
-// when the result has none).
+// one image part per sendable block, and the surface-facing map of the first
+// image (nil when the result has none).
 //
 // The replacement keeps the text envelope free of base64 — a block's data is
 // hundreds of kilobytes that must never reach the model as text nor a surface
 // event — while the part carries the pixels. A block whose MIME is not one of
 // the four a provider accepts is still persisted and named, but yields no part.
-func extractResultImageParts(resultsDir, serverName, raw string) (string, []llm.ContentPart, map[string]any, error) {
+//
+// wantParts=false is the image-refusal gate, applied BEFORE any part is built:
+// no decode-to-downscale work runs and no part can fail the call, so a refused
+// session gets its envelope no matter how hostile an image block is. A block
+// whose part cannot be built even when wanted (oversized, undownscalable webp,
+// exhausted reduction ladder) is degraded to a text line naming the saved file
+// and the reason — one bad block never costs the call its text envelope or the
+// other blocks' pixels.
+func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool) (string, []llm.ContentPart, map[string]any, error) {
 	if strings.TrimSpace(resultsDir) == "" {
 		return raw, nil, nil, nil
 	}
@@ -101,6 +132,14 @@ func extractResultImageParts(resultsDir, serverName, raw string) (string, []llm.
 		if strings.TrimSpace(data) == "" {
 			continue
 		}
+		if !decodedSizeWithin(data) {
+			content[i] = map[string]any{
+				"type": "text",
+				"text": oversizeBlockLine(data),
+			}
+			changed = true
+			continue
+		}
 		decoded, err := base64.StdEncoding.DecodeString(data)
 		if err != nil {
 			continue
@@ -124,11 +163,32 @@ func extractResultImageParts(resultsDir, serverName, raw string) (string, []llm.
 			"text": fmt.Sprintf("Binary content saved to %s (%s, %d bytes).", path, fallbackUnknown(mimeType), len(decoded)),
 		}
 		changed = true
+		if !wantParts {
+			// Refused session model: the saved-path line above is the
+			// whole story for the model; the surface still gets the
+			// file facts, header dimensions included when they parsed.
+			if surface == nil {
+				w, h := llm.DecodeImageConfig(decoded)
+				surface = tool.ImageFileOutput(path, path, mimeType, w, h, len(decoded))
+			}
+			continue
+		}
 		switch mimeType {
 		case "image/jpeg", "image/png", "image/gif", "image/webp":
 			part, res, err := llm.ImagePartWithin(path, mimeType, decoded, llm.DefaultMaxImageBytes)
 			if err != nil {
-				return "", nil, nil, err
+				// Degrade, don't fail: the file is saved and named,
+				// the reason is actionable, and the remaining blocks
+				// still deserve their pixels.
+				content[i] = map[string]any{
+					"type": "text",
+					"text": fmt.Sprintf("Binary content saved to %s (%s, %d bytes) but was not sent as an image: %v.", path, fallbackUnknown(mimeType), len(decoded), err),
+				}
+				if surface == nil {
+					w, h := llm.DecodeImageConfig(decoded)
+					surface = tool.ImageFileOutput(path, path, mimeType, w, h, len(decoded))
+				}
+				continue
 			}
 			parts = append(parts, part)
 			if surface == nil {
@@ -272,6 +332,14 @@ func persistBinaryResourceContent(resultsDir, serverName, raw string) (string, e
 		}
 		blob, _ := resource["blob"].(string)
 		if strings.TrimSpace(blob) == "" {
+			continue
+		}
+		if !decodedSizeWithin(blob) {
+			content[i] = map[string]any{
+				"type": "text",
+				"text": oversizeBlockLine(blob),
+			}
+			changed = true
 			continue
 		}
 		bytes, err := base64.StdEncoding.DecodeString(blob)

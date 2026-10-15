@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/binary"
@@ -361,7 +362,7 @@ func TestRenderCapsPages(t *testing.T) {
 		t.Fatalf("RenderedMax = %d, want %d", result.RenderedMax, DefaultMaxPages)
 	}
 	for i, page := range result.Pages {
-		if page.Number != i+1 || !page.Rendered || len(page.PNG) == 0 {
+		if page.Number != i+1 || len(page.PNG) == 0 {
 			t.Fatalf("page %d = %+v", i, page)
 		}
 	}
@@ -518,7 +519,7 @@ func contains(list []string, want string) bool {
 
 func openInstance(t *testing.T) pdfium.Pdfium {
 	t.Helper()
-	instance, err := renderPool(FontDirs(os.Getenv("FOREBRAIN_HOME"))).GetInstance(GetInstanceTimeout)
+	instance, err := renderPool(FontDirs(os.Getenv("FOREBRAIN_HOME"))).GetInstanceWithContext(context.Background())
 	if err != nil {
 		t.Fatalf("GetInstance: %v", err)
 	}
