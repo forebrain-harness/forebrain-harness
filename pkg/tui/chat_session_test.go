@@ -7182,7 +7182,13 @@ func TestCharacterizationCancelDuringLLMCall(t *testing.T) {
 func TestCharacterizationCancelDuringToolCall(t *testing.T) {
 	s := newCharacterizationSession(t, nil)
 	s.runner().ProjectRoot = s.home()
-	toolArgs, err := json.Marshal(map[string]string{"command": "sleep 5", "description": "slow"})
+	// The scripted command outlives every observation window in this test by a
+	// wide margin: the dispatch-return deadline below must never race the
+	// command's own natural completion (it did on loaded shared runners, where
+	// a 5s sleep and a 5s deadline dead-heated). If cancellation ever breaks,
+	// the deadline fires long before sleep finishes; if it works, dispatch
+	// returns as soon as the killed process is reaped.
+	toolArgs, err := json.Marshal(map[string]string{"command": "sleep 30", "description": "slow"})
 	if err != nil {
 		t.Fatalf("marshal tool args: %v", err)
 	}
@@ -7242,7 +7248,7 @@ func TestCharacterizationCancelDuringToolCall(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for DispatchSurfaceTurn to return after cancel")
 	}
 	if dispatchErr != nil {

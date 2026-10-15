@@ -1,6 +1,6 @@
 module github.com/forebrain-harness/forebrain-harness
 
-go 1.26.6
+go 1.26.9
 
 require (
 	github.com/alecthomas/chroma/v2 v2.27.0
