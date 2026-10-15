@@ -16,6 +16,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -375,6 +376,42 @@ func TestFileReadSchemaOnlyRequiresFilePath(t *testing.T) {
 	required, _ := tool.InputSchema()["required"].([]any)
 	if len(required) != 1 || required[0] != "file_path" {
 		t.Fatalf("read_file required = %v, want [file_path]", required)
+	}
+}
+
+// TestFileReadSchemaDocumentsClamping pins that the clamping contract lives in
+// the schema the model sees, not only in the notes it gets afterwards: the cap,
+// the end-clamped-to-last-page rule and the start-past-end empty read must all
+// be knowable before the first call.
+func TestFileReadSchemaDocumentsClamping(t *testing.T) {
+	tool, err := NewFileReadTool(NewState(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	properties, _ := tool.InputSchema()["properties"].(map[string]any)
+	if properties == nil {
+		t.Fatalf("read_file schema has no properties: %#v", tool.InputSchema())
+	}
+	field := func(name string) string {
+		t.Helper()
+		prop, _ := properties[name].(map[string]any)
+		desc, _ := prop["description"].(string)
+		if desc == "" {
+			t.Fatalf("schema property %q has no description: %#v", name, prop)
+		}
+		return desc
+	}
+	pages := field("pages")
+	for _, want := range []string{"returns through the last page", "at most 5 pages", "returns no pages and names the document's page count"} {
+		if !strings.Contains(pages, want) {
+			t.Fatalf("pages description %q does not document %q", pages, want)
+		}
+	}
+	if limit := field("limit"); !strings.Contains(limit, "returns through the last line") {
+		t.Fatalf("limit description %q does not document the EOF clamp", limit)
+	}
+	if offset := field("offset"); !strings.Contains(offset, "names the file's line count") {
+		t.Fatalf("offset description %q does not document the empty read", offset)
 	}
 }
 
@@ -1803,6 +1840,255 @@ func TestFileReadRefusesPDFWhenGateRefuses(t *testing.T) {
 	}
 	if pngs := countPNGs(t, resultDir); pngs != 0 {
 		t.Fatalf("a gated PDF read must render nothing, but wrote %d PNG(s)", pngs)
+	}
+}
+
+// The PDF page-range tests below pin the pages argument end to end: parse,
+// cap-before-everything, renderer clamping, empty reads and the note wording
+// the model navigates by. They all build their PDFs with newTestPDF so the
+// rendered pages are distinguishable by their captions.
+
+// readPDFWithPages is the shared driver: write pages PDF, read it with the
+// given raw arguments, and return the parts, the note text and the completion.
+func readPDFWithPages(t *testing.T, pageCount int, args string) ([]llm.ContentPart, string, ToolCompletionPayload) {
+	t.Helper()
+	tmp := t.TempDir()
+	pdfPath := filepath.Join(tmp, "doc.pdf")
+	if err := os.WriteFile(pdfPath, newTestPDF(pageCount), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	st := NewState(tmp)
+	st.SetToolResultDir(filepath.Join(tmp, "state", "tool-outputs"))
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(pdfPath)+`"`+args+`}`)
+	if err != nil {
+		t.Fatalf("read pdf: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	if len(parts) == 0 || parts[0].Type != llm.ContentTypeText {
+		t.Fatalf("first part = %#v, want the text note", parts[0])
+	}
+	completion, ok := ToolCompletionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected tool completion capture")
+	}
+	return parts, parts[0].Text, completion
+}
+
+// TestFileReadPDFPagesRange pins an in-bounds range read: only the requested
+// pages are rendered, the note names them, the surface output lists their real
+// numbers, and the written PNGs are named after them.
+func TestFileReadPDFPagesRange(t *testing.T) {
+	parts, note, completion := readPDFWithPages(t, 12, `, "pages":"9-11"`)
+	if !strings.Contains(note, "rendered pages 9-11") {
+		t.Fatalf("note %q does not name rendered pages 9-11", note)
+	}
+	if len(parts) != 4 {
+		t.Fatalf("parts=%d want 4 (note + 3 pages)", len(parts))
+	}
+	for i := 1; i < len(parts); i++ {
+		if parts[i].Type != llm.ContentTypeImageBase64 || parts[i].MIMEType != "image/png" {
+			t.Fatalf("page part %d = %#v, want image/png image_base64", i, parts[i])
+		}
+	}
+	if got, _ := completion.Output["pdf_pages"].([]int); len(got) != 3 || got[0] != 9 || got[2] != 11 {
+		t.Fatalf("pdf_pages=%v want [9 10 11]", got)
+	}
+	preview, _ := completion.Output["abs_path"].(string)
+	dir := filepath.Dir(preview)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read result dir: %v", err)
+	}
+	foundP9 := false
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "-p9.png") {
+			foundP9 = true
+		}
+	}
+	if !foundP9 {
+		t.Fatalf("no PNG named -p9 was written under %s", dir)
+	}
+}
+
+// TestFileReadPDFPagesSinglePage pins the one-page syntax: pages="7" renders
+// exactly page 7.
+func TestFileReadPDFPagesSinglePage(t *testing.T) {
+	parts, note, _ := readPDFWithPages(t, 12, `, "pages":"7"`)
+	if !strings.Contains(note, "rendered pages 7-7") {
+		t.Fatalf("note %q does not name rendered pages 7-7", note)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts=%d want 2 (note + 1 page)", len(parts))
+	}
+}
+
+// TestFileReadPDFPagesCapsAtFiveAndPointsToNext pins the iron rule: the cap
+// applies before anything else — a whole-document request renders the first 5
+// pages, and the note points at the range that continues the read.
+func TestFileReadPDFPagesCapsAtFiveAndPointsToNext(t *testing.T) {
+	t.Run("whole document", func(t *testing.T) {
+		parts, note, completion := readPDFWithPages(t, 50, `, "pages":"1-50"`)
+		if len(parts) != 6 {
+			t.Fatalf("parts=%d want 6 (note + 5 pages)", len(parts))
+		}
+		if !strings.Contains(note, "rendered pages 1-5") || !strings.Contains(note, `pass pages="6-10"`) {
+			t.Fatalf("note %q must name rendered pages 1-5 and the continuation range", note)
+		}
+		if got, _ := completion.Output["pdf_rendered"].(int); got != 5 {
+			t.Fatalf("pdf_rendered=%d want 5", got)
+		}
+	})
+	t.Run("range window", func(t *testing.T) {
+		_, note, _ := readPDFWithPages(t, 12, `, "pages":"2-9"`)
+		if !strings.Contains(note, "rendered pages 2-6") || !strings.Contains(note, `pass pages="7-11"`) {
+			t.Fatalf("note %q must name rendered pages 2-6 and the continuation range", note)
+		}
+	})
+}
+
+// TestFileReadPDFPagesClampsEndToLastPage pins that an end past the last page
+// is clamped silently — the model asked for pages that exist and got them, so
+// the note carries no explanation suffix at all.
+func TestFileReadPDFPagesClampsEndToLastPage(t *testing.T) {
+	parts, note, _ := readPDFWithPages(t, 12, `, "pages":"10-20"`)
+	if !strings.Contains(note, "rendered pages 10-12") {
+		t.Fatalf("note %q does not name rendered pages 10-12", note)
+	}
+	for _, banned := range []string{"ends at", "do not exist", "not rendered", "capped"} {
+		if strings.Contains(note, banned) {
+			t.Fatalf("note %q must not carry a suffix about %q", note, banned)
+		}
+	}
+	if len(parts) != 4 {
+		t.Fatalf("parts=%d want 4 (note + 3 pages)", len(parts))
+	}
+}
+
+// TestFileReadPDFPagesBeyondEndIsEmptyRead pins the empty read: a start past
+// the last page renders nothing, writes nothing, and hands back the note plus
+// a completion map with no image preview keys — the pixel dereferences happen
+// only on the has-pages path. This mirrors the text path's "No content at
+// offset N: file has M line(s).".
+func TestFileReadPDFPagesBeyondEndIsEmptyRead(t *testing.T) {
+	tmp := t.TempDir()
+	pdfPath := filepath.Join(tmp, "doc.pdf")
+	if err := os.WriteFile(pdfPath, newTestPDF(12), 0o644); err != nil {
+		t.Fatalf("write pdf: %v", err)
+	}
+	st := NewState(tmp)
+	resultDir := filepath.Join(tmp, "state", "tool-outputs")
+	st.SetToolResultDir(resultDir)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	ctx := WithToolCompletionCapture(context.Background())
+	got, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(pdfPath)+`", "pages":"20-24"}`)
+	if err != nil {
+		t.Fatalf("read pdf: %v", err)
+	}
+	parts, ok := got.([]llm.ContentPart)
+	if !ok {
+		t.Fatalf("read_file returned %T, want []llm.ContentPart", got)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("parts=%d want exactly 1 (the note, no images)", len(parts))
+	}
+	note := parts[0].Text
+	for _, want := range []string{"no pages at 20-24", "the document has 12 pages"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q does not name %q", note, want)
+		}
+	}
+	if pngs := countPNGs(t, resultDir); pngs != 0 {
+		t.Fatalf("an empty read must write no PNG, but wrote %d", pngs)
+	}
+	completion, _ := ToolCompletionFromContext(ctx)
+	if got, _ := completion.Output["pdf_rendered"].(int); got != 0 {
+		t.Fatalf("pdf_rendered=%d want 0", got)
+	}
+	if pages, _ := completion.Output["pdf_pages"].([]int); len(pages) != 0 {
+		t.Fatalf("pdf_pages=%v want empty", pages)
+	}
+	preview, _ := completion.Output["preview_text"].(string)
+	if preview != note {
+		t.Fatalf("preview_text=%q must exactly match returned note %q", preview, note)
+	}
+	for _, banned := range []string{"preview_kind", "abs_path"} {
+		if _, ok := completion.Output[banned]; ok {
+			t.Fatalf("empty read output must not carry %q", banned)
+		}
+	}
+	for key := range completion.Output {
+		if strings.HasPrefix(key, "image_") {
+			t.Fatalf("empty read output must not carry image key %q", key)
+		}
+	}
+}
+
+// TestFileReadPDFPagesRejectsBadSpec pins that a malformed pages value is an
+// actionable error naming the syntax, never a silent default.
+func TestFileReadPDFPagesRejectsBadSpec(t *testing.T) {
+	for _, spec := range []string{"5-2", "abc", "0", "+7", "7-", "-3", "0-3"} {
+		t.Run(spec, func(t *testing.T) {
+			tmp := t.TempDir()
+			pdfPath := filepath.Join(tmp, "doc.pdf")
+			if err := os.WriteFile(pdfPath, newTestPDF(12), 0o644); err != nil {
+				t.Fatalf("write pdf: %v", err)
+			}
+			st := NewState(tmp)
+			st.SetToolResultDir(filepath.Join(tmp, "state", "tool-outputs"))
+			readTool, err := NewFileReadTool(st)
+			if err != nil {
+				t.Fatalf("NewFileReadTool: %v", err)
+			}
+			_, err = readTool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(pdfPath)+`", "pages":"`+spec+`"}`)
+			if err == nil || !strings.Contains(err.Error(), "pages must be") {
+				t.Fatalf("pages=%q err=%v, want an error naming the pages syntax", spec, err)
+			}
+		})
+	}
+}
+
+// TestFileReadTextIgnoresPages pins that the text path never looks at pages:
+// passing it alongside a text read changes nothing.
+func TestFileReadTextIgnoresPages(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "a.txt")
+	if err := os.WriteFile(p, []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	st := NewState(tmp)
+	readTool, err := NewFileReadTool(st)
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+	plainCtx := WithToolCompletionCapture(context.Background())
+	plain, err := readTool.Handle(plainCtx, `{"file_path":"`+escapeJSONPath(p)+`"}`)
+	if err != nil {
+		t.Fatalf("read without pages: %v", err)
+	}
+	pagesCtx := WithToolCompletionCapture(context.Background())
+	withPages, err := readTool.Handle(pagesCtx, `{"file_path":"`+escapeJSONPath(p)+`", "pages":"3-5"}`)
+	if err != nil {
+		t.Fatalf("read with pages: %v", err)
+	}
+	if plain != withPages {
+		t.Fatalf("text read changed by pages:\nplain=%v\nwithPages=%v", plain, withPages)
+	}
+	plainDone, _ := ToolCompletionFromContext(plainCtx)
+	pagesDone, _ := ToolCompletionFromContext(pagesCtx)
+	if !reflect.DeepEqual(plainDone.Output, pagesDone.Output) {
+		t.Fatalf("text output map changed by pages:\nplain=%v\nwithPages=%v", plainDone.Output, pagesDone.Output)
 	}
 }
 

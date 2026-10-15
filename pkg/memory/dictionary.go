@@ -27,8 +27,8 @@ import (
 //
 // They are tens of megabytes of word lists, so they are not compiled into the
 // binary: every package that installs forebrain puts them in DictionaryDir beside
-// it, and they are read from there. A `go install` build ships no dictionaries,
-// so the first need downloads them from that version's GitHub release.
+// it, and they are read from there. A build that ships no dictionaries beside
+// the binary downloads them from that version's GitHub release on first need.
 // DictionaryFiles is the one list of them — what the search reads, what the
 // release installs and what the download verifies are the same entries, so the
 // three cannot drift apart.
@@ -118,8 +118,8 @@ func dictionaryShippedDir() (string, error) {
 // copy is read first — seeded from the copy beside the binary, so one install
 // serves every forebrain sharing the home — then the copy beside the binary,
 // then this version's release bundle. A binary that came with dictionaries
-// therefore searches out of the box; one that did not (a `go install` build)
-// downloads them on this first need.
+// therefore searches out of the box; one that did not downloads them on this
+// first need.
 func dictionaryPath(name string) (string, error) {
 	homeDir, err := dictionaryHomeDir()
 	if err != nil {

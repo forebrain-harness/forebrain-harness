@@ -2591,6 +2591,62 @@ func TestSummarizeToolStepNamesAReadPDF(t *testing.T) {
 	}
 }
 
+// TestSummarizePdfStepNamesRealRange pins that the card summary reads the real
+// page numbers from pdf_pages instead of assuming the window starts at page 1.
+func TestSummarizePdfStepNamesRealRange(t *testing.T) {
+	t.Parallel()
+	got := SummarizeToolStep(StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": "/tmp/docs/report.pdf"},
+		Output: map[string]any{
+			"preview_kind":   "image",
+			"abs_path":       "/tmp/state/tool-outputs/pdf-call-1-p9.png",
+			"file_path":      "/tmp/docs/report.pdf",
+			"image_bytes":    1536,
+			"image_width":    1240,
+			"image_height":   1754,
+			"pdf_page_count": 12,
+			"pdf_rendered":   3,
+			"pdf_pages":      []int{9, 10, 11},
+			"result_lines":   0,
+		},
+	})
+	for _, want := range []string{"report.pdf", "PDF 12 页", "渲染 9-11 页"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary=%q want it to name %q", got, want)
+		}
+	}
+}
+
+// TestSummarizePdfEmptyReadHasNoRenderSegment pins the empty-read card: a PDF
+// read that rendered nothing carries no image preview keys, and its summary is
+// just the document and its true page count — no render segment.
+func TestSummarizePdfEmptyReadHasNoRenderSegment(t *testing.T) {
+	t.Parallel()
+	got := SummarizeToolStep(StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": "/tmp/docs/report.pdf"},
+		Output: map[string]any{
+			"file_path":      "/tmp/docs/report.pdf",
+			"preview_text":   "pdf /tmp/docs/report.pdf: no pages at 20-24 (the document has 12 pages)",
+			"pdf_page_count": 12,
+			"pdf_rendered":   0,
+			"pdf_pages":      []int{},
+			"result_lines":   0,
+		},
+	})
+	for _, want := range []string{"report.pdf", "PDF 12 页"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary=%q want it to name %q", got, want)
+		}
+	}
+	if strings.Contains(got, "渲染") {
+		t.Fatalf("summary=%q must not claim a render segment for an empty read", got)
+	}
+}
+
 func TestFormatToolStepResultImageBodyHasNoJSONDump(t *testing.T) {
 	t.Parallel()
 	evt := StepEvent{

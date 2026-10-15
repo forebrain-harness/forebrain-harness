@@ -347,8 +347,10 @@ func SummarizeToolStep(evt StepEvent) string {
 		// An image read has no line range to name; it gets its own summary
 		// naming the file and its encoded size. A PDF read draws the same card
 		// (preview_kind=image, one page rendered) but names the document, its
-		// page count and the pages shown.
-		if toolName == "read_file" && isImageReadStep(evt) {
+		// page count and the pages shown. A PDF read that rendered no pages
+		// (a start past the last page) carries no image keys at all, so the
+		// gate admits it through its page facts instead.
+		if toolName == "read_file" && (isImageReadStep(evt) || isPdfReadStep(evt)) {
 			if isPdfReadStep(evt) {
 				return readPdfStepSummary(evt)
 			}
@@ -600,16 +602,19 @@ func readImageStepLine(evt StepEvent) string {
 	return line
 }
 
-// isPdfReadStep reports whether a read_file step is a PDF read: an image step
-// that additionally carries the document's page facts. The page facts are what
-// distinguish it from a plain image read while both share one card.
+// isPdfReadStep reports whether a read_file step is a PDF read: a step that
+// carries the document's page facts. The page facts are what distinguish it
+// from a plain image read while both share one card, and they are the only
+// marker an empty PDF read (no image keys, nothing rendered) has.
 func isPdfReadStep(evt StepEvent) bool {
-	return isImageReadStep(evt) && evt.Output != nil && intFromAny(evt.Output["pdf_page_count"]) > 0
+	return evt.Output != nil && intFromAny(evt.Output["pdf_page_count"]) > 0
 }
 
 // readPdfStepSummary names a read PDF the way a one-line tool summary does: the
 // document and its page count, and, when only some pages were rendered, the
-// page range shown.
+// page range shown — the real page numbers from pdf_pages, not a window that
+// assumes page 1. pdf_pages and pdf_page_count are written by the same
+// pdfReadOutput call, so a step that passes the gate always has both.
 func readPdfStepSummary(evt StepEvent) string {
 	label := strings.TrimSpace(pathBaseOrPath(readFilePathHint(evt)))
 	if label == "" {
@@ -618,7 +623,8 @@ func readPdfStepSummary(evt StepEvent) string {
 	pageCount := intFromAny(evt.Output["pdf_page_count"])
 	summary := "Read " + label + " · PDF " + strconv.Itoa(pageCount) + " 页"
 	if rendered := intFromAny(evt.Output["pdf_rendered"]); rendered > 0 && rendered < pageCount {
-		summary += " · 渲染 1-" + strconv.Itoa(rendered) + " 页"
+		pages := intsFromAny(evt.Output["pdf_pages"])
+		summary += " · 渲染 " + strconv.Itoa(pages[0]) + "-" + strconv.Itoa(pages[len(pages)-1]) + " 页"
 	}
 	return summary
 }
@@ -3480,6 +3486,25 @@ func stringFromAny(v any) string {
 		return s
 	}
 	return ""
+}
+
+// intsFromAny coerces a tool output value into the int slice it was written
+// as, tolerating the wider numeric types a JSON round-trip can produce. It
+// returns nil when the value is not an int slice; callers gate on the key's
+// presence first, so no fallback is invented here.
+func intsFromAny(v any) []int {
+	switch x := v.(type) {
+	case []int:
+		return x
+	case []any:
+		out := make([]int, 0, len(x))
+		for _, item := range x {
+			out = append(out, intFromAny(item))
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func clampBody(s string, maxBytes int) (string, bool) {

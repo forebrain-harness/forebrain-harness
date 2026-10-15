@@ -54,14 +54,22 @@ type Options struct {
 	FontDirs []string
 }
 
-// RenderFile renders the first maxPages pages of the PDF at path (maxPages <= 0
-// means DefaultMaxPages) and returns them encoded as PNG with the document's
-// page count. A password-protected, damaged or empty document returns an error
-// the model can act on.
-func RenderFile(path string, maxPages int, opts Options) (RenderResult, error) {
+// RenderFile renders up to maxPages pages of the PDF at path, starting at the
+// 1-based page `start`. start <= 0 means page 1; maxPages <= 0 means
+// DefaultMaxPages. The END of the range is clamped into the document (a
+// requested page past the last one is simply not rendered); a START past the
+// last page renders nothing — Pages is empty and PageCount still names the
+// document's length, mirroring how a text read past EOF returns no lines.
+// Callers that index Pages[0] must check len(Pages) > 0 first. A
+// password-protected, damaged or empty document returns an error the model can
+// act on.
+func RenderFile(path string, start, maxPages int, opts Options) (RenderResult, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return RenderResult{}, fmt.Errorf("pdf: read %q: %w", path, err)
+	}
+	if start < 1 {
+		start = 1
 	}
 	if maxPages <= 0 {
 		maxPages = DefaultMaxPages
@@ -96,11 +104,12 @@ func RenderFile(path string, maxPages int, opts Options) (RenderResult, error) {
 	}
 
 	result := RenderResult{PageCount: count.PageCount, RenderedMax: maxPages}
-	limit := count.PageCount
-	if limit > maxPages {
-		limit = maxPages
+	if start > count.PageCount {
+		// A start past the last page is an empty read, not an error: the
+		// caller still learns the document's true length from PageCount.
+		return result, nil
 	}
-	for index := 0; index < limit; index++ {
+	for index := start - 1; index < start-1+maxPages && index < count.PageCount; index++ {
 		rendered, err := instance.RenderPageInDPI(&requests.RenderPageInDPI{
 			DPI:  int(dpi),
 			Page: requests.Page{ByIndex: &requests.PageByIndex{Document: document.Document, Index: index}},

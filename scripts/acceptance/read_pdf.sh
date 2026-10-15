@@ -17,8 +17,8 @@
 #      as tofu, so this is the end-to-end proof that CJK rendering works;
 #   3. (DB) the tool row stores a "type":"image" block — the model, not a prompt
 #      hack, saw the rendered pixels — and its note names the PDF and its page
-#      count. The extra pdf_* keys are NOT persisted, so the note's own text is
-#      what carries the page count here.
+#      count. The canonical session event also retains the completed output, so
+#      the page-range phase can assert the exact pdf_pages array independently.
 #   4. the SAME holds for the not-embedded fixture (STSong-Light, no embedded
 #      font), which is exactly the case that needs the fallback font, and for
 #      the embedded one (the control).
@@ -44,6 +44,8 @@ BIN="$WORK/forebrain"
 CREDS="$WORK/creds.env"
 PDF_NE="$WORK/zh-notembedded.pdf"
 PDF_EM="$WORK/zh-embedded.pdf"
+RANGE_DIR="$WORK/range"
+PDF_RANGE="$RANGE_DIR/zh-notembedded.pdf"
 SESSION="${FOREBRAIN_ACCEPT_SESSION:-forebrain-read-pdf}"
 MODEL="${FOREBRAIN_E2E_MODEL:-deepseek-v4-flash}"
 PROVIDER="deepseek"
@@ -182,6 +184,7 @@ dbq() { sqlite3 "$(echo "$HOME_DIR"/state/*.sqlite)" "$1" 2>/dev/null || true; }
 # phase's, nor the reasoning paragraph (role='reasoning') — a separate row.
 db_last_assistant_since() { dbq "SELECT content FROM fb_messages WHERE role='assistant' AND id > $1 ORDER BY id DESC LIMIT 1;"; }
 db_max_tool_id() { local v; v="$(dbq "SELECT COALESCE(MAX(id),0) FROM fb_messages WHERE role='tool';")"; printf '%s' "${v:-0}"; }
+db_max_event_sequence() { local v; v="$(dbq "SELECT COALESCE(MAX(sequence),0) FROM fb_session_events;")"; printf '%s' "${v:-0}"; }
 # db_pdf_row_since prints the newest role='tool' row newer than <baseline-id>
 # that carries an image block AND names <basename> — THIS phase's read, as the
 # model received it. The basename ties the row to one fixture, so a previous
@@ -194,6 +197,9 @@ db_max_tool_id() { local v; v="$(dbq "SELECT COALESCE(MAX(id),0) FROM fb_message
 # concatenated because the note and the image block live in different columns.
 db_pdf_row_since() { # <baseline-id> <basename>
   dbq "SELECT COALESCE(content,'') || ' ' || COALESCE(parts,'') FROM fb_messages WHERE role='tool' AND id > $1 AND COALESCE(parts,'') LIKE '%\"image\"%' AND (COALESCE(content,'') LIKE '%$2%' OR COALESCE(parts,'') LIKE '%$2%') ORDER BY id DESC LIMIT 1;"
+}
+db_pdf_pages_event_since() { # <baseline-sequence>
+  dbq "SELECT payload_json FROM fb_session_events WHERE sequence > $1 AND event_type='tool_call_completed' AND json_extract(payload_json, '$.tool_name')='read_file' AND json_extract(payload_json, '$.output.pdf_pages[0]')=7 AND json_extract(payload_json, '$.output.pdf_pages[1]')=8 AND json_array_length(json_extract(payload_json, '$.output.pdf_pages'))=2 ORDER BY sequence DESC LIMIT 1;"
 }
 
 check() { # check <description> <grep -E pattern> <text>
@@ -297,12 +303,72 @@ run_phase() { # run_phase <evidence-label> <pdf path>
   check "$label: the final answer reproduces the page's Chinese text verbatim" "$PAGE_IDEOGRAPHS" "$answer"
 }
 
+# --- page-range phase: ask for pages 7-8 of a nine-page PDF -----------------
+run_range_phase() {
+  local label="03-page-range" pdf="$1" base before_tool before_event p row event answer i
+  base="$(basename "$pdf")"
+  before_tool="$(db_max_tool_id)"
+  before_event="$(db_max_event_sequence)"
+
+  submit "read_file $pdf pages=\"7-8\" 然后逐字念出第 7 页页脚的页码，必须原样输出第 7 页页脚，不要执行任何 shell 命令。"
+
+  row=""
+  for ((i = 0; i < 600; i++)); do
+    row="$(db_pdf_row_since "$before_tool" "$base")"
+    [ -n "$row" ] && break
+    sleep 0.2
+  done
+  if [ -z "$row" ]; then
+    mark_fail "$label: this phase's read row never landed (no image-block tool row naming $base within 120s)"
+  fi
+
+  event=""
+  for ((i = 0; i < 600; i++)); do
+    event="$(db_pdf_pages_event_since "$before_event")"
+    [ -n "$event" ] && break
+    sleep 0.2
+  done
+  if [ -z "$event" ]; then
+    mark_fail "$label: canonical event never recorded pdf_pages=[7,8] within 120s"
+  fi
+
+  p=""
+  if ! p="$(wait_capture 60 "Read $pdf")"; then
+    p="$(pane)"
+    mark_fail "$label: the TUI never drew this phase's step header"
+  fi
+  pane > "$EVIDENCE/$label-pane.txt"
+  printf '%s\n' "$p" | grep -nE "Read .*${base}|▤ .*Ctrl\+O" > "$EVIDENCE/$label-marker.txt" || true
+
+  check "$label: the TUI header names the range-read PDF" "Read .*${base}" "$p"
+  check "$label: the TUI draws the image step marker" '▤ .*Ctrl\+O' "$p"
+  assert_no_card "$label: the range read" "$p"
+  check "$label: the tool row carries an image block" '"type"[[:space:]]*:[[:space:]]*"image"' "$row"
+  check "$label: the note names rendered pages 7-8" 'rendered pages 7-8' "$row"
+  check "$label: the canonical event stores page 7" '"pdf_pages"[[:space:]]*:[[:space:]]*\[[[:space:]]*7' "$event"
+  check "$label: the canonical event stores page 8" '"pdf_pages"[[:space:]]*:[^]]*8' "$event"
+
+  answer=""
+  for ((i = 0; i < 900; i++)); do
+    answer="$(db_last_assistant_since "$before_tool")"
+    printf '%s' "$answer" | grep -qF "第 7 页" && break
+    sleep 0.2
+  done
+  check "$label: the final answer names page 7" '第 7 页' "$answer"
+}
+
 # --- Phase 1: the not-embedded fixture (needs the fallback font) ----------
 start_tui "$MODEL"
 run_phase "01-notembedded" "$PDF_NE"
 
 # --- Phase 2: the embedded fixture (the control) --------------------------
 run_phase "02-embedded" "$PDF_EM"
+
+# --- Phase 3: a nine-page fixture makes the requested page observable -------
+mkdir -p "$RANGE_DIR"
+python3 "$REPO/scripts/acceptance/make_zh_pdf.py" --out "$RANGE_DIR" --no-embed --pages 9
+[ -f "$PDF_RANGE" ] || die "make_zh_pdf.py did not write the range fixture"
+run_range_phase "$PDF_RANGE"
 
 # --- Evidence: the rendered page PNGs, for a human to look at -------------
 rendered="$(find "$HOME_DIR" -path '*tool-outputs*' -name '*.png' 2>/dev/null | sort || true)"
