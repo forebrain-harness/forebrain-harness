@@ -6,8 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	pdfium "github.com/klippa-app/go-pdfium"
 	"github.com/klippa-app/go-pdfium/single_threaded"
 )
@@ -18,11 +18,6 @@ import (
 //
 //	FOREBRAIN_PDF_FONT_DIRS=$PWD/assets/fonts go run ./cmd/forebrain
 const FontDirsEnv = "FOREBRAIN_PDF_FONT_DIRS"
-
-// GetInstanceTimeout bounds how long RenderFile waits for a PDFium instance.
-// The single-threaded pool runs one action at a time, so a concurrent render
-// waits here rather than starting a second native library.
-const GetInstanceTimeout = 30 * time.Second
 
 var (
 	poolOnce sync.Once
@@ -50,13 +45,28 @@ func renderPool(dirs []string) pdfium.Pool {
 //
 // Resolution order (see fontDirs): FOREBRAIN_PDF_FONT_DIRS, then
 // $home/fonts (where pkg/process seeds this repository's Noto CJK fonts), then
-// the assets/fonts directory beside the binary. When none of those is present
-// it returns nil, so PDFium keeps its platform defaults. When one is present
-// the platform font directories are appended on Linux, because setting
-// UserFontPaths replaces PDFium's default font scan — without them a document
-// that relies on a system font (any Latin text, not just CJK) would break.
+// the fonts directory beside the binary — llm.AssetsDir, the one location
+// every packaged asset lives in (FOREBRAIN_ASSETS_DIR overrides it), so a
+// packaged install's fonts are found. When none of those is present it returns
+// nil, so PDFium keeps its platform defaults. When one is present the platform
+// font directories are appended on Linux, because setting UserFontPaths
+// replaces PDFium's default font scan — without them a document that relies on
+// a system font (any Latin text, not just CJK) would break.
 func FontDirs(home string) []string {
-	return fontDirs(runtime.GOOS, home, os.Getenv, assetsFontsDir())
+	assets, err := llm.AssetsDir()
+	if err != nil {
+		assets = ""
+	}
+	return fontDirs(runtime.GOOS, home, os.Getenv, joinFonts(assets))
+}
+
+// joinFonts is the fonts subdirectory of the assets dir, or "" when there is
+// no assets dir to name (ownFontDirs treats "" as "no candidate").
+func joinFonts(assets string) string {
+	if assets == "" {
+		return ""
+	}
+	return filepath.Join(assets, "fonts")
 }
 
 func fontDirs(goos, home string, getenv func(string) string, assetsFonts string) []string {
@@ -119,24 +129,6 @@ func platformFontDirs(goos string, getenv func(string) string) []string {
 		}
 	}
 	return dirs
-}
-
-// assetsFontsDir is the assets/fonts directory beside the running binary, where
-// scripts/install-assets.sh copies it. FOREBRAIN_ASSETS_DIR overrides the
-// assets location (the same knob pkg/llm's asset loader honours).
-func assetsFontsDir() string {
-	if dir := strings.TrimSpace(os.Getenv("FOREBRAIN_ASSETS_DIR")); dir != "" {
-		return filepath.Join(dir, "fonts")
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	executable, err = filepath.EvalSymlinks(executable)
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(executable), "assets", "fonts")
 }
 
 func isDir(path string) bool {

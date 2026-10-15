@@ -143,7 +143,7 @@ func findRepoRoot(t *testing.T) string {
 // fanOutBudget is §3.7's fan-out table expressed as a ratchet, in the same
 // spirit as TestRunnerOnlyShrinks.
 //
-// Four packages are over their §3.7 target today, and that is not a surprise:
+// Five packages are over their §3.7 target today, and that is not a surprise:
 // tui and gateway may only import process, turn, event, config, llm and
 // channel (six), and they currently reach eighteen packages each because the
 // P4–P7 decomposition that would pull that logic down into turn/session/run
@@ -183,12 +183,18 @@ var fanOutBudgets = map[string]fanOutBudget{
 	// alternative has no host package with budget headroom (run, process, tui
 	// and gateway all sit at their measured maxima). It may not grow again
 	// without the owner.
-	"tool":   {current: 9, target: 8},
+	"tool":   {current: 9, target: 8}, // over by one
 	"hook":   {current: 8, target: 8},
 	"mcp":    {current: 8, target: 8},
 	"event":  {current: 8, target: 8},
 	"safety": {current: 8, target: 8},
 	"skill":  {current: 8, target: 8},
+	// pdf is the tool layer's enumerated rendering dependency (read_file
+	// hands the model a PDF's page pixels). Its single in-module import is
+	// pkg/llm — the shared asset-location contract (llm.AssetsDir) the
+	// packaged-fonts fallback reads through — which sits in a strictly lower
+	// layer, so it stays well under the Layer-2 target.
+	"pdf": {current: 1, target: 8},
 	// lsp's four are config, home, event, tool — home arrives with task 05;
 	// until then the skeleton sits under the same ceiling.
 	"lsp":    {current: 4, target: 4},
@@ -365,8 +371,10 @@ var packageLayer = map[string]int{
 	"agent": 0, "llm": 0,
 	"state": 1, "config": 1, "home": 1, "telemetry": 1, "channel": 1,
 	// pkg/pdf renders PDF pages to images for the tool layer to hand the model.
-	// It imports no other in-module package, and the tool layer imports it
-	// directly (see fanOutBudgets["tool"] and sameLayerEdges["tool"]).
+	// It imports pkg/llm for the shared asset-location contract (llm.AssetsDir)
+	// that resolves the packaged fonts' fallback directory, and the tool layer
+	// imports it directly (see fanOutBudgets["tool"] and
+	// sameLayerEdges["tool"]).
 	"tool": 2, "pdf": 2, "hook": 2, "mcp": 2, "event": 2, "assembly": 2, "safety": 2, "skill": 2, "memory": 2, "migrate": 2, "lsp": 2,
 	"session": 3, "turn": 3, "run": 3,
 	"process": 4,

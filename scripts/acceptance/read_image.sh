@@ -11,9 +11,16 @@
 #      bound; the key-guard itself is pinned by pkg/tui's unit test);
 #   4. an MCP server's image result lands under the PRIMARY AGENT WORKSPACE's
 #      state/mcp-results, not the home's, with NO approval card anywhere in the
-#      phase, and reading the saved path needs no approval;
+#      phase, and reading the saved path needs no approval — and the MCP tool
+#      row's own parts carry the image block (the model, not the disk, saw it);
 #   5. the capability gate refuses an image on a text-only session model with
-#      the one-step-recoverable sentence (not a provider 400).
+#      the one-step-recoverable sentence (not a provider 400), and an MCP image
+#      on that same session still delivers its text envelope (the refusal gate
+#      runs before any part is built, so no unsendable block can fail the call);
+#   6. one unsendable MCP image block (an over-budget webp) degrades to a
+#      "saved but not sent" line — the envelope and the good PNG block survive;
+#   7. a block whose decoded size exceeds the 48 MiB per-block limit is neither
+#      decoded nor written to disk, and the good PNG block still arrives.
 #
 # The provider key is read from FOREBRAIN_E2E_DEEPSEEK_KEY (already exported,
 # never printed) and written to a 0600 file the launched TUI sources, so it is
@@ -42,6 +49,10 @@ BASE_URL="https://api.deepseek.com"
 MCP_SERVER="fake-shots"
 MCP_TOOL="shot"
 MCP_TOOL_NAME="mcp__${MCP_SERVER}__${MCP_TOOL}"
+MCP_SERVER_MIXED="fake-shots-mixed"
+MCP_TOOL_NAME_MIXED="mcp__${MCP_SERVER_MIXED}__${MCP_TOOL}"
+MCP_SERVER_OVERSIZE="fake-shots-oversize"
+MCP_TOOL_NAME_OVERSIZE="mcp__${MCP_SERVER_OVERSIZE}__${MCP_TOOL}"
 MCP_RESULTS="$HOME_DIR/workspace/state/mcp-results"
 
 fail=0
@@ -141,6 +152,16 @@ agents:
         args: ["${REPO}/scripts/acceptance/fake_mcp_stdio.py", "${MCP_TOOL}", "${MCP_SERVER}", "image"]
         default_tools_approval_mode: approve
         enabled: true
+      - name: ${MCP_SERVER_MIXED}
+        command: python3
+        args: ["${REPO}/scripts/acceptance/fake_mcp_stdio.py", "${MCP_TOOL}", "${MCP_SERVER_MIXED}", "image_mixed"]
+        default_tools_approval_mode: approve
+        enabled: true
+      - name: ${MCP_SERVER_OVERSIZE}
+        command: python3
+        args: ["${REPO}/scripts/acceptance/fake_mcp_stdio.py", "${MCP_TOOL}", "${MCP_SERVER_OVERSIZE}", "image_oversize"]
+        default_tools_approval_mode: approve
+        enabled: true
   definitions:
     main:
       primary: true
@@ -154,9 +175,6 @@ YAML
 
 # --- tmux + DB helpers ----------------------------------------------------
 pane() { tmux capture-pane -t "$SESSION" -p 2>/dev/null || true; }
-# pane_all also asks for scrollback, so a marker that scrolled off the screen is
-# still visible to a grep where the terminal keeps it.
-pane_all() { tmux capture-pane -t "$SESSION" -p -S -5000 2>/dev/null || true; }
 
 wait_for() { # wait_for <seconds> <fixed-substring>  (visible pane)
   local secs="$1" pat="$2" i
@@ -208,6 +226,54 @@ db_new_tool_content_since() { dbq "SELECT COALESCE(content,'') || ' ' || COALESC
 # <id>, so a signal any one of them left (a path or an image block) is
 # searchable in a single value.
 db_tool_blob_since() { dbq "SELECT group_concat(COALESCE(content,'') || ' ' || COALESCE(parts,''), char(10)) FROM fb_messages WHERE role='tool' AND id > $1;"; }
+# db_row_content / db_row_parts read one tool row by id — the row the phase
+# under test produced, so an unrelated later call can never masquerade as it.
+db_row_content() { dbq "SELECT COALESCE(content,'') FROM fb_messages WHERE role='tool' AND id = $1;"; }
+db_row_parts() { dbq "SELECT COALESCE(parts,'') FROM fb_messages WHERE role='tool' AND id = $1;"; }
+# image_block_count counts the image blocks in a parts JSON by a
+# whitespace-tolerant regex: the exact spelling (key order, spacing) is not a
+# contract, the block's presence is. The `|| true` inside the pipeline is
+# load-bearing: a parts value with NO image block makes grep exit 1, and under
+# this script's `set -euo pipefail` an assignment fed by that pipeline would
+# kill the whole run silently (the count is 0, not an error).
+image_block_count() { printf '%s' "$1" | { grep -oE '"type"[[:space:]]*:[[:space:]]*"image"' || true; } | wc -l | tr -d '[:space:]'; }
+# db_mcp_row_id finds an MCP call's OWN tool row by the invocation label its
+# display part carries ("<server>.<tool> · args"). The turn's LAST tool row is
+# not the MCP call's row: the model routinely runs its own shell commands
+# around the call, so anchoring on "the newest tool row" selects the wrong
+# row whenever it does.
+db_mcp_row_id() { # db_mcp_row_id <before_id> <server.tool>
+  dbq "SELECT id FROM fb_messages WHERE role='tool' AND id > $1 AND parts LIKE '%$2%' ORDER BY id DESC LIMIT 1;"
+}
+# wait_mcp_row waits until the phase's MCP tool row has landed (the call ran
+# and returned — the row is written when it does), exporting mcp_row_id (0
+# when it never appears). Row identity, not turn timing, is the anchor: a
+# submission queued while the model keeps investigating lands late, and the
+# row is the one thing that still identifies the call.
+wait_mcp_row() { # wait_mcp_row <before_id> <server.tool>
+  local before="$1" inv="$2" i
+  mcp_row_id=0
+  for ((i = 0; i < 450; i++)); do
+    if [ -n "$(db_mcp_row_id "$before" "$inv")" ]; then
+      mcp_row_id="$(db_mcp_row_id "$before" "$inv")"
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+# wait_assistant_after waits until an assistant row is newer than <id> — the
+# turn has closed, so the next submission is delivered instead of queued.
+wait_assistant_after() { # wait_assistant_after <tool_row_id>
+  local i
+  for ((i = 0; i < 450; i++)); do
+    if [ "$(db_max_assistant_id)" -gt "$1" ]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
 
 check() { # check <description> <grep -E pattern> <text>
   local desc="$1" pat="$2" text="$3"
@@ -219,14 +285,18 @@ check() { # check <description> <grep -E pattern> <text>
   fi
 }
 
-# assert_no_approval_card fails the run if an approval overlay is visible
-# anywhere. Phase 1 (a workspace read) and phase 4 (a gate refusal) never raise
-# one, so any occurrence during the MCP phase is the MCP call asking.
-assert_no_approval_card() { # assert_no_approval_card <phase description>
-  if pane_all | grep -Eq 'Tool approval|Yes, proceed|批准|是否允许'; then
-    mark_fail "$1 showed an approval card — the MCP call asked for approval; the scratch config's default_tools_approval_mode/hint wiring is wrong (see pkg/run/runner.go mcpToolRequiresApproval)"
+# assert_no_card fails the run when a capture shows an approval overlay. It is
+# handed a capture taken AT THE MOMENT UNDER TEST on purpose: the model's own
+# earlier shell commands may have raised (and dismissed) an approval card that
+# is still in the scrollback, and a whole-scrollback grep would misreport that
+# as this phase asking. A card up in the phase's own completion capture is the
+# phase asking, and fails it.
+assert_no_card() { # assert_no_card <phase description> <pane text>
+  local desc="$1" text="$2"
+  if printf '%s' "$text" | grep -Eq 'Tool approval|Yes, proceed|批准|是否允许'; then
+    mark_fail "$desc showed an approval card — the MCP call asked for approval; the scratch config's default_tools_approval_mode/hint wiring is wrong (see pkg/run/runner.go mcpToolRequiresApproval)"
   else
-    note "PASS: $1 raised no approval card"
+    note "PASS: $desc raised no approval card"
   fi
 }
 
@@ -240,9 +310,13 @@ submit "read_file $SHAPE 然后告诉我图里有哪些图形、颜色、各自�
 if ! wait_for 150 "Ctrl+O"; then
   mark_fail "the image step never rendered (no Ctrl+O marker line within 150s)"
 fi
-wait_for 90 "Worked for" || true
+# Capture the pane the moment the marker is on screen: a long final answer
+# streams afterwards and can push the marker off the visible pane, and the
+# marker line is exactly what this phase asserts. The moment under test is
+# the marker's appearance, not the answer's end.
 pane > "$EVIDENCE/01-read-image.txt"
 p1="$(pane)"
+wait_for 90 "Worked for" || true
 
 # The step line, not the reasoning: "Ctrl+O" lives only in the image marker.
 check "read_file of an image renders the step marker line" 'Ctrl\+O' "$p1"
@@ -324,25 +398,38 @@ for ((i = 0; i < 600; i++)); do
   sleep 0.2
 done
 
-# Wait for the whole MCP turn to close: a tool row has landed (the call ran) AND
-# an assistant row is newer than it (the model finished its answer). Anchoring
-# on the turn's LAST tool row means the read-back rows are strictly newer, so
-# an `ls` the model ran in between cannot masquerade as the read-back.
-mcp_turn_done=0
-mcp_tool_id="$mcp_before_tool"
-for ((i = 0; i < 450; i++)); do
-  mcp_tool_id="$(db_max_tool_id)"
-  if [ "$mcp_tool_id" -gt "$mcp_before_tool" ] && [ "$(db_max_assistant_id)" -gt "$mcp_tool_id" ]; then
-    mcp_turn_done=1
-    break
-  fi
-  sleep 0.2
-done
+# Wait for the call's OWN row (identified by its invocation label — the model
+# may run its own commands in the same turn) and then for the turn to close,
+# so the read-back is submitted after the model finished, not queued mid-turn.
+wait_mcp_row "$mcp_before_tool" "${MCP_SERVER}.${MCP_TOOL}" || true
+if [ "$mcp_row_id" -gt 0 ]; then
+  wait_assistant_after "$mcp_row_id" || true
+fi
 pane > "$EVIDENCE/04-mcp-image.txt"
 
-assert_no_approval_card "the MCP call phase"
-if [ "$mcp_turn_done" != 1 ]; then
-  mark_fail "the MCP turn never closed (no assistant row after tool row $mcp_tool_id); the read-back would be lost, so it was not submitted"
+assert_no_card "the MCP call phase" "$(cat "$EVIDENCE/04-mcp-image.txt")"
+if [ "$mcp_row_id" -eq 0 ]; then
+  mark_fail "the MCP call never produced its tool row (no '${MCP_SERVER}.${MCP_TOOL}' row after id $mcp_before_tool); the read-back would be lost, so it was not submitted"
+fi
+
+# The pixels reached the MODEL, not just the disk: the MCP tool row's own parts
+# must carry exactly one image block. The file-on-disk check below stays as the
+# location proof, but it is not the truth about what the model saw — a block
+# that was saved and then failed to become a part would still pass it.
+if [ "$mcp_row_id" -gt 0 ]; then
+  mcp_parts="$(db_row_parts "$mcp_row_id")"
+  mcp_images="$(image_block_count "$mcp_parts")"
+  if printf '%s' "$mcp_parts" | grep -Eq '"type"[[:space:]]*:[[:space:]]*"image"' && [ "$mcp_images" -eq 1 ]; then
+    note "PASS: the MCP tool row's parts carry one image block (the model saw pixels)"
+  else
+    mark_fail "the MCP tool row ($mcp_row_id) carries $mcp_images image blocks, want exactly 1; parts head: $(printf '%s' "$mcp_parts" | head -c 300)"
+  fi
+  mcp_row_content="$(db_row_content "$mcp_row_id")"
+  if printf '%s' "$mcp_row_content" | grep -qF "Error executing tool"; then
+    mark_fail "the MCP call failed as a whole (Error executing tool on row $mcp_row_id): $(printf '%s' "$mcp_row_content" | head -c 300)"
+  else
+    note "PASS: the MCP call delivered its envelope (no Error executing tool)"
+  fi
 fi
 
 ws_saved="$(ls -1 "$MCP_RESULTS"/*.png 2>/dev/null | head -1 || true)"
@@ -359,17 +446,18 @@ else
 fi
 
 # Reading the saved path must need no approval (it is inside the read-exempt
-# agent workspace). Only when the MCP turn has actually closed is the read-back
-# submitted; the fresh signal is a NEW tool row (id > the MCP turn's last tool
-# row) whose content names the saved file's basename or whose parts carry an
-# image block.
-if [ -n "$ws_saved" ] && [ "$mcp_turn_done" = 1 ]; then
+# agent workspace). Only when the call's row has landed and the turn closed is
+# the read-back submitted; the fresh signal is a NEW tool row (newer than
+# everything before the read-back, the model's own commands included) whose
+# content names the saved file's basename or whose parts carry an image block.
+if [ -n "$ws_saved" ] && [ "$mcp_row_id" -gt 0 ]; then
   base="$(basename "$ws_saved")"
+  readback_before="$(db_max_tool_id)"
   submit "read_file $ws_saved"
   readback_ok=0
   blob=""
   for ((i = 0; i < 450; i++)); do
-    blob="$(db_tool_blob_since "$mcp_tool_id")"
+    blob="$(db_tool_blob_since "$readback_before")"
     if printf '%s' "$blob" | grep -qF "$base" || printf '%s' "$blob" | grep -Eq '"type"[[:space:]]*:[[:space:]]*"image"'; then
       readback_ok=1
       break
@@ -377,12 +465,98 @@ if [ -n "$ws_saved" ] && [ "$mcp_turn_done" = 1 ]; then
     sleep 0.2
   done
   pane > "$EVIDENCE/05-read-mcp-image.txt"
-  assert_no_approval_card "reading the saved MCP image"
+  assert_no_card "reading the saved MCP image" "$(cat "$EVIDENCE/05-read-mcp-image.txt")"
   if [ "$readback_ok" = 1 ]; then
     note "PASS: reading the saved MCP image completed with no approval"
     check "the read-back step names the saved file" 'image [0-9]+x[0-9]+' "$blob"
   else
     mark_fail "reading the saved MCP image produced no tool row naming it; newest tool rows' parts heads were: $(db_recent_tool_parts_heads | tr '\n' ' | ' | head -c 400)"
+  fi
+fi
+
+# --- Phase 3b: one unsendable webp block degrades, not fails ----------------
+# The mixed server answers [text, over-budget webp, good PNG]. The webp is
+# saved to disk but cannot become a part (no standard-library webp decoder may
+# downscale it); the call must still deliver its envelope plus the good PNG's
+# part — the whole-result error this used to become is the regression under
+# test.
+mixed_before_tool="$(db_max_tool_id)"
+submit "Call the tool ${MCP_TOOL_NAME_MIXED} with text \"shot\"."
+wait_mcp_row "$mixed_before_tool" "${MCP_SERVER_MIXED}.${MCP_TOOL}" || true
+if [ "$mcp_row_id" -gt 0 ]; then
+  wait_assistant_after "$mcp_row_id" || true
+fi
+pane > "$EVIDENCE/04b-mcp-mixed.txt"
+assert_no_card "the mixed MCP call phase" "$(cat "$EVIDENCE/04b-mcp-mixed.txt")"
+if [ "$mcp_row_id" -eq 0 ]; then
+  mark_fail "the mixed MCP call never produced its tool row (no '${MCP_SERVER_MIXED}.${MCP_TOOL}' row after id $mixed_before_tool)"
+else
+  mixed_content="$(db_row_content "$mcp_row_id")"
+  mixed_parts="$(db_row_parts "$mcp_row_id")"
+  mixed_images="$(image_block_count "$mixed_parts")"
+  if printf '%s' "$mixed_content" | grep -qF "Error executing tool"; then
+    mark_fail "one unsendable webp block failed the whole MCP call: $(printf '%s' "$mixed_content" | head -c 300)"
+  else
+    note "PASS: the mixed MCP call delivered its envelope (no Error executing tool)"
+  fi
+  check "the mixed call's row names the saved-but-not-sent webp" 'was not sent as an image' "$mixed_content"
+  if [ "$mixed_images" -eq 1 ]; then
+    note "PASS: the mixed call still handed the model the good PNG (exactly one image part)"
+  else
+    mark_fail "the mixed call's row ($mcp_row_id) carries $mixed_images image blocks, want exactly 1; parts head: $(printf '%s' "$mixed_parts" | head -c 300)"
+  fi
+  if [ -n "$(ls -1 "$MCP_RESULTS"/*.webp 2>/dev/null | head -1)" ]; then
+    note "PASS: the unsendable webp was persisted (its line names a real file): $(ls -1 "$MCP_RESULTS"/*.webp | head -1)"
+  else
+    mark_fail "the unsendable webp was not persisted under $MCP_RESULTS"
+  fi
+fi
+
+# --- Phase 3c: an over-limit block is refused before decode or disk --------
+# The oversize server answers [text, a png whose decoded size exceeds the
+# 48 MiB per-block limit, good PNG]. NOTE: the go-sdk stdio transport caps a
+# single inbound JSON-RPC frame at 16 MiB (DefaultMaxLineLength), so over
+# stdio this 64 MiB frame can be rejected by the TRANSPORT before the guard
+# ever runs. Both outcomes are asserted honestly: (a) the frame gets through
+# (websocket transport, or a raised cap): the guard's limit line, exactly one
+# image part, nothing oversized on disk; (b) the transport refuses the frame:
+# the call fails with the frame-length error and NOTHING is written — the
+# guard itself is proven by pkg/mcp TestToolResultContentRefusesOversizedBlock
+# on both the image-block and resource-blob paths.
+oversize_before_tool="$(db_max_tool_id)"
+submit "Call the tool ${MCP_TOOL_NAME_OVERSIZE} with text \"shot\"."
+wait_mcp_row "$oversize_before_tool" "${MCP_SERVER_OVERSIZE}.${MCP_TOOL}" || true
+if [ "$mcp_row_id" -gt 0 ]; then
+  wait_assistant_after "$mcp_row_id" || true
+fi
+pane > "$EVIDENCE/04c-mcp-oversize.txt"
+assert_no_card "the oversize MCP call phase" "$(cat "$EVIDENCE/04c-mcp-oversize.txt")"
+if [ "$mcp_row_id" -eq 0 ]; then
+  mark_fail "the oversize MCP call never produced its tool row (no '${MCP_SERVER_OVERSIZE}.${MCP_TOOL}' row after id $oversize_before_tool)"
+else
+  oversize_content="$(db_row_content "$mcp_row_id")"
+  oversize_parts="$(db_row_parts "$mcp_row_id")"
+  oversize_images="$(image_block_count "$oversize_parts")"
+  # The disk invariant holds in EITHER outcome: the guard refuses before the
+  # write, and a transport-refused frame never reaches the write at all.
+  huge_saved="$(find "$MCP_RESULTS" -type f -size +8M -print -quit 2>/dev/null || true)"
+  if [ -n "$huge_saved" ]; then
+    mark_fail "an over-limit block reached the disk: $huge_saved"
+  else
+    note "PASS: no oversized file was written under $MCP_RESULTS"
+  fi
+  if printf '%s' "$oversize_content" | grep -qF "exceeded the configured maximum line length"; then
+    note "SKIP: the stdio transport refused the 64 MiB frame itself (16 MiB frame cap) before the decode guard ran; the guard is proven by pkg/mcp TestToolResultContentRefusesOversizedBlock — a real-machine delivery of this payload needs the websocket transport or a raised frame cap"
+  elif printf '%s' "$oversize_content" | grep -qF "Error executing tool"; then
+    mark_fail "the oversize block failed the whole MCP call: $(printf '%s' "$oversize_content" | head -c 300)"
+  else
+    note "PASS: the oversize MCP call delivered its envelope (no Error executing tool)"
+    check "the oversize call's row names the per-block limit" 'exceeds the 48 MiB per-block limit' "$oversize_content"
+    if [ "$oversize_images" -eq 1 ]; then
+      note "PASS: the oversize call still handed the model the good PNG (exactly one image part)"
+    else
+      mark_fail "the oversize call's row ($mcp_row_id) carries $oversize_images image blocks, want exactly 1; parts head: $(printf '%s' "$oversize_parts" | head -c 300)"
+    fi
   fi
 fi
 
@@ -406,6 +580,38 @@ if printf '%s' "$gate_row" | grep -Eq 'status 400|Bad Request|invalid_request_er
   mark_fail "the model got a provider error instead of the actionable refusal"
 else
   note "PASS: no provider error; the gate answered with its own sentence"
+fi
+
+# --- Phase 5b: an MCP image on the text-only session still delivers ---------
+# The refusal gate runs BEFORE any part is built, so the same session calling
+# an image-returning MCP tool must get the envelope (the saved-path line) with
+# no image part and no provider error — the end-to-end proof that an image
+# block can no longer fail a call the model would never have seen anyway.
+mcp_text_before_tool="$(db_max_tool_id)"
+submit "Call the tool ${MCP_TOOL_NAME} with text \"shot\"."
+wait_mcp_row "$mcp_text_before_tool" "${MCP_SERVER}.${MCP_TOOL}" || true
+if [ "$mcp_row_id" -gt 0 ]; then
+  wait_assistant_after "$mcp_row_id" || true
+fi
+pane > "$EVIDENCE/07-mcp-image-text-only.txt"
+assert_no_card "the text-only MCP image phase" "$(cat "$EVIDENCE/07-mcp-image-text-only.txt")"
+if [ "$mcp_row_id" -eq 0 ]; then
+  mark_fail "the text-only MCP call never produced its tool row (no '${MCP_SERVER}.${MCP_TOOL}' row after id $mcp_text_before_tool)"
+else
+  refused_content="$(db_row_content "$mcp_row_id")"
+  refused_parts="$(db_row_parts "$mcp_row_id")"
+  if printf '%s' "$refused_content" | grep -Eq 'status 400|Bad Request|invalid_request_error|422|Error executing tool'; then
+    mark_fail "the refused MCP image became an error instead of the envelope: $(printf '%s' "$refused_content" | head -c 300)"
+  else
+    note "PASS: the refused MCP image delivered its envelope with no provider error"
+  fi
+  check "the refused row names the saved path" 'Binary content saved to' "$refused_content"
+  refused_images="$(image_block_count "$refused_parts")"
+  if [ "$refused_images" -eq 0 ]; then
+    note "PASS: the refused MCP row carries no image part (pixels never sent)"
+  else
+    mark_fail "the refused MCP row ($mcp_row_id) carries $refused_images image blocks, want 0"
+  fi
 fi
 
 # --- Verdict ---------------------------------------------------------------

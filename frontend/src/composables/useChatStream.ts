@@ -188,6 +188,11 @@ export interface SubagentToolStep {
   previewHeight?: number
   previewBytes?: number
   /**
+   * True when the engine downscaled the image before sending it — the same
+   * fact the TUI's ▤ marker shows as a trailing "scaled".
+   */
+  previewScaled?: boolean
+  /**
    * A subagent_* call's card facts, as the engine derived them once. A call
    * that carries them draws the subagent card — its prompt, its result and
    * its stored display body stay out of the conversation.
@@ -362,15 +367,21 @@ function metaNumber(meta: Record<string, unknown>, key: string): number | undefi
   return Number.isFinite(value) && value > 0 ? value : undefined
 }
 
+function metaBool(meta: Record<string, unknown>, key: string): boolean {
+  const camel = key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())
+  return meta[key] === true || meta[camel] === true
+}
+
 /**
  * previewFieldsFromMeta reads the image-preview facts a step's tool meta
- * carries (preview_kind plus the path, MIME and pixel/byte sizes). They are the
- * same facts for a live step and a replayed row, so the card draws the identical
- * thumbnail either way. Absent for every non-image call.
+ * carries (preview_kind plus the path, MIME, pixel/byte sizes and whether the
+ * engine downscaled the image). They are the same facts for a live step and a
+ * replayed row, so the card draws the identical thumbnail either way. Absent
+ * for every non-image call.
  */
-function previewFieldsFromMeta(meta: Record<string, unknown>): Pick<
+export function previewFieldsFromMeta(meta: Record<string, unknown>): Pick<
   SubagentToolStep,
-  'previewKind' | 'previewPath' | 'previewMIME' | 'previewWidth' | 'previewHeight' | 'previewBytes'
+  'previewKind' | 'previewPath' | 'previewMIME' | 'previewWidth' | 'previewHeight' | 'previewBytes' | 'previewScaled'
 > {
   if (metaString(meta, 'preview_kind') !== 'image') return {}
   return {
@@ -380,7 +391,20 @@ function previewFieldsFromMeta(meta: Record<string, unknown>): Pick<
     previewWidth: metaNumber(meta, 'preview_width'),
     previewHeight: metaNumber(meta, 'preview_height'),
     previewBytes: metaNumber(meta, 'preview_bytes'),
+    previewScaled: metaBool(meta, 'preview_scaled'),
   }
+}
+
+/**
+ * imageBytesLabel formats a byte count the way the TUI's ▤ image marker does:
+ * plain bytes under one KiB, then KB and MB with one decimal — so the web
+ * card's metadata line and the TUI's line say the same thing about the same
+ * image.
+ */
+export function imageBytesLabel(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /**

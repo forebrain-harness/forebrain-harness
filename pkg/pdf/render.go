@@ -2,6 +2,7 @@ package pdf
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"image/png"
@@ -24,16 +25,15 @@ const (
 	DefaultDPI = 150
 )
 
-// Page is one rendered page. Number is 1-based. Rendered is false only for a
-// page that was within the document but beyond the render cap, which is
-// reported by count rather than as an entry here, so a Page obtained from a
-// RenderResult always has its image.
+// Page is one rendered page. Number is 1-based. Only pages that rendered
+// successfully appear in RenderResult.Pages; a page beyond the render cap is
+// reported by RenderResult.PageCount, never as an entry here, so a Page
+// obtained from a RenderResult always has its image.
 type Page struct {
-	Number   int    // 1-based page number
-	PNG      []byte // the page rendered as PNG
-	Width    int    // image width in pixels
-	Height   int    // image height in pixels
-	Rendered bool   // false = the page exceeded the cap and was not rendered
+	Number int    // 1-based page number
+	PNG    []byte // the page rendered as PNG
+	Width  int    // image width in pixels
+	Height int    // image height in pixels
 }
 
 // RenderResult is the outcome of rendering a document.
@@ -43,14 +43,17 @@ type RenderResult struct {
 	RenderedMax int    // the cap this call used
 }
 
-// Options tunes one RenderFile call.
+// Options tunes one RenderFile call. DPI is per call; FontDirs is process
+// wide — see its field comment for why.
 type Options struct {
-	// DPI is the render resolution; <= 0 means DefaultDPI.
+	// DPI is the render resolution of this call; <= 0 means DefaultDPI.
 	DPI float64
 	// FontDirs are the directories handed to PDFium's font loader. nil means
 	// FontDirs($FOREBRAIN_HOME); an empty non-nil slice means no directories
 	// (let PDFium use its platform defaults). PDFium is initialised once per
-	// process, so only the first call's value takes effect.
+	// process, so this takes effect on the FIRST render only — a later call
+	// with a different set is a no-op; it is per-call input to a process-wide
+	// initialisation, not a per-call knob.
 	FontDirs []string
 }
 
@@ -83,7 +86,14 @@ func RenderFile(path string, start, maxPages int, opts Options) (RenderResult, e
 		dirs = FontDirs(os.Getenv("FOREBRAIN_HOME"))
 	}
 
-	instance, err := renderPool(dirs).GetInstance(GetInstanceTimeout)
+	// Instance acquisition does not wait: the single-threaded pool hands one
+	// out immediately, and page rendering itself is serialised by PDFium's
+	// process-level mutex and CANNOT be cancelled — a cgo call cannot be
+	// interrupted by a context. A pathological PDF therefore blocks every PDF
+	// read in this process until its page finishes; that is a library
+	// property, recorded here honestly rather than papered over with a
+	// timeout that never fired.
+	instance, err := renderPool(dirs).GetInstanceWithContext(context.Background())
 	if err != nil {
 		return RenderResult{}, fmt.Errorf("pdf: get pdfium instance: %w", err)
 	}
@@ -130,11 +140,10 @@ func RenderFile(path string, start, maxPages int, opts Options) (RenderResult, e
 		}
 		bounds := img.Bounds()
 		result.Pages = append(result.Pages, Page{
-			Number:   index + 1,
-			PNG:      encoded.Bytes(),
-			Width:    bounds.Dx(),
-			Height:   bounds.Dy(),
-			Rendered: true,
+			Number: index + 1,
+			PNG:    encoded.Bytes(),
+			Width:  bounds.Dx(),
+			Height: bounds.Dy(),
 		})
 	}
 	return result, nil

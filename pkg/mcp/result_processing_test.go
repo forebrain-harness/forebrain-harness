@@ -221,6 +221,187 @@ func TestToolResultContentRefusalReturnsTextOnly(t *testing.T) {
 	}
 }
 
+// TestToolResultContentDegradesUnsendableImageBlock pins the #3 fix: a block
+// whose part cannot be built (here a webp over budget, which no standard-
+// library decoder could downscale) is degraded to a text line naming the
+// saved file and the reason. The text envelope survives, the good PNG block
+// still yields its image part, and the surface states file facts instead of
+// pretending the block was sent.
+func TestToolResultContentDegradesUnsendableImageBlock(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	webp := make([]byte, 4<<20)
+	copy(webp, "RIFF\x00\x00\x00\x00WEBP")
+	raw := `{"content":[{"type":"text","text":"mixed shot"},` +
+		`{"type":"image","mimeType":"image/webp","data":"` + base64.StdEncoding.EncodeToString(webp) + `"},` +
+		`{"type":"image","mimeType":"image/png","data":"` + base64.StdEncoding.EncodeToString(onePixelPNG(t)) + `"}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	parts, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	images := 0
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			images++
+		}
+	}
+	if images != 1 {
+		t.Fatalf("expected exactly the PNG part (1 image), got %d in %#v", images, parts)
+	}
+	text := llm.TextContent(parts...)
+	if !strings.Contains(text, "mixed shot") {
+		t.Fatalf("text block was lost with the degraded image block: %q", text)
+	}
+	if !strings.Contains(text, "was not sent as an image") || !strings.Contains(text, "webp cannot be downscaled") {
+		t.Fatalf("degraded block line missing reason: %q", text)
+	}
+	if !strings.Contains(text, dir) {
+		t.Fatalf("degraded line does not name the saved path: %q", text)
+	}
+	// The webp was persisted before the part was attempted — the degraded
+	// line must point at a file that exists.
+	webpFiles, err := filepath.Glob(filepath.Join(dir, "*.webp"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(webpFiles) != 1 {
+		t.Fatalf("expected the webp persisted, got %v", webpFiles)
+	}
+	captured, ok := tool.ToolCompletionFromContext(ctx)
+	if !ok || captured.Output == nil {
+		t.Fatalf("surface output not captured onto ctx")
+	}
+	if got := captured.Output["image_bytes"]; got != len(webp) {
+		t.Fatalf("surface image_bytes = %v, want the on-disk size %d", got, len(webp))
+	}
+	if got := captured.Output["image_scaled"]; got != false {
+		t.Fatalf("surface image_scaled = %v, want false (no scale ran)", got)
+	}
+	if got := captured.Output["image_width"]; got != 0 {
+		t.Fatalf("surface image_width = %v, want 0 (fake webp header does not parse)", got)
+	}
+}
+
+// TestToolResultContentRefusalNeverFails pins the #4 fix end to end at this
+// layer: a session whose model refuses images gets the text envelope for a
+// result that even contains an unsendable block — the gate runs before any
+// part is built, so no ImagePartWithin failure can fail a refused call.
+func TestToolResultContentRefusalNeverFails(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	webp := make([]byte, 4<<20)
+	copy(webp, "RIFF\x00\x00\x00\x00WEBP")
+	raw := `{"content":[{"type":"image","mimeType":"image/webp","data":"` + base64.StdEncoding.EncodeToString(webp) + `"}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	parts, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "session model does not accept image input")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			t.Fatalf("refused result still carried an image part: %#v", parts)
+		}
+	}
+	if !strings.Contains(llm.TextContent(parts...), "Binary content saved to") {
+		t.Fatalf("refused result lost its saved-path line: %q", llm.TextContent(parts...))
+	}
+	captured, ok := tool.ToolCompletionFromContext(ctx)
+	if !ok || captured.Output == nil {
+		t.Fatalf("surface output not captured onto ctx")
+	}
+	if got := captured.Output["image_width"]; got != 0 {
+		t.Fatalf("surface image_width = %v, want 0 for an unparseable fake webp header", got)
+	}
+}
+
+// TestToolResultContentRefusalParsesHeaderForSurface proves the refused path
+// states real file facts rather than zeros by convention: the header
+// dimensions of a valid PNG appear on the surface even though no part was
+// built.
+func TestToolResultContentRefusalParsesHeaderForSurface(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	png := onePixelPNG(t)
+	raw := `{"content":[{"type":"image","mimeType":"image/png","data":"` + base64.StdEncoding.EncodeToString(png) + `"}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	_, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "session model does not accept image input")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	captured, ok := tool.ToolCompletionFromContext(ctx)
+	if !ok || captured.Output == nil {
+		t.Fatalf("surface output not captured onto ctx")
+	}
+	if got := captured.Output["image_width"]; got != 1 {
+		t.Fatalf("surface image_width = %v, want the parsed header width 1", got)
+	}
+	if got := captured.Output["image_height"]; got != 1 {
+		t.Fatalf("surface image_height = %v, want the parsed header height 1", got)
+	}
+	if got := captured.Output["image_bytes"]; got != len(png) {
+		t.Fatalf("surface image_bytes = %v, want the on-disk size %d", got, len(png))
+	}
+}
+
+// TestToolResultContentRefusesOversizedBlock pins the decode-limit guard on
+// both block kinds: a block whose decoded size exceeds the per-block ceiling
+// is neither decoded nor written to disk — the envelope gets the limit line
+// instead, and the blob/resource path behaves the same.
+func TestToolResultContentRefusesOversizedBlock(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	// (64<<20)+4 base64 chars decode to 48 MiB+3 bytes — just over the limit.
+	huge := strings.Repeat("A", (64<<20)+4)
+	raw := `{"content":[{"type":"text","text":"before"},` +
+		`{"type":"image","mimeType":"image/png","data":"` + huge + `"}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	parts, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			t.Fatalf("oversized block still produced an image part: %#v", parts)
+		}
+	}
+	if !strings.Contains(llm.TextContent(parts...), "exceeds the 48 MiB per-block limit and was not saved") {
+		t.Fatalf("envelope missing the per-block limit line: %q", llm.TextContent(parts...))
+	}
+	if !strings.Contains(llm.TextContent(parts...), "before") {
+		t.Fatalf("text block lost with the refused block: %q", llm.TextContent(parts...))
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("oversized block must not be written to disk, got %v", files)
+	}
+
+	// Same-shaped case on the embedded-resource blob path.
+	dir2 := resultsDirFor(t.TempDir())
+	blobRaw := `{"content":[{"type":"resource","resource":{"uri":"file://big.bin","mimeType":"application/octet-stream","blob":"` + huge + `"}}]}`
+	got, err := ProcessToolResultJSON(dir2, "files", "read", blobRaw)
+	if err != nil {
+		t.Fatalf("ProcessToolResultJSON error: %v", err)
+	}
+	if !strings.Contains(got, "exceeds the 48 MiB per-block limit and was not saved") {
+		t.Fatalf("blob path missing the per-block limit line: %s", got)
+	}
+	files2, err := filepath.Glob(filepath.Join(dir2, "*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files2) != 0 {
+		t.Fatalf("oversized blob must not be written to disk, got %v", files2)
+	}
+}
+
 // TestToolResultErrorMapsIsErrorToFailure pins parity with callToolAttempt: an
 // isError result is reported as an error, not a success whose text happens to
 // describe a problem.

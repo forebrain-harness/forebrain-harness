@@ -156,11 +156,7 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 				parts := make([]llm.ContentPart, 0, len(res.Pages)+1)
 				parts = append(parts, llm.Text(pdfReadNote(abs, reqStart, reqEnd, res)))
 				for i := range res.Pages {
-					pagePart, _, err := llm.ImagePartWithin(pagePaths[i], "image/png", res.Pages[i].PNG, llm.DefaultMaxImageBytes)
-					if err != nil {
-						return nil, fmt.Errorf("render pdf page %d: %w", res.Pages[i].Number, err)
-					}
-					parts = append(parts, pagePart)
+					parts = appendPDFPagePart(parts, pagePaths[i], res.Pages[i])
 				}
 				CaptureToolOutput(ctx, pdfReadOutput(in.FilePath, res, pagePaths[0], len(raw)))
 				return parts, nil
@@ -398,6 +394,30 @@ func ImageReadOutput(abs, filePath string, res llm.ImageReadResult) map[string]a
 	}
 }
 
+// ImageFileOutput is the surface-facing map for an image file that was saved
+// but not sent as a part: a refused or degraded block. It states file facts
+// only — the on-disk size and the header dimensions when they parsed — and
+// claims neither a send nor a scale. The keys are the surface contract
+// (event → gateway → TUI/web all read them); the values are what is honest:
+// image_bytes/image_source_bytes are the saved file's size, image_scaled is
+// false because no downscale ran, and dimensions are (0, 0) when the header
+// did not parse (a surface omits them rather than showing 0×0).
+func ImageFileOutput(abs, filePath, mime string, width, height, size int) map[string]any {
+	return map[string]any{
+		"preview_kind":       "image",
+		"preview_text":       "",
+		"abs_path":           abs,
+		"file_path":          filePath,
+		"image_mime":         mime,
+		"image_bytes":        size,
+		"image_source_bytes": size,
+		"image_width":        width,
+		"image_height":       height,
+		"image_scaled":       false,
+		"result_lines":       0,
+	}
+}
+
 // parsePDFPages parses the pages argument: "" (default first pages), "7" (one
 // page) or "9-11" (inclusive range), all 1-based. It returns the requested
 // range unchanged — capping and clamping are the caller's job. A malformed
@@ -519,6 +539,19 @@ func pdfReadOutput(filePath string, res pdf.RenderResult, previewPath string, so
 	out["pdf_rendered"] = len(res.Pages)
 	out["pdf_pages"] = pages
 	return out
+}
+
+// appendPDFPagePart appends page's image part, or — when the part cannot be
+// sent — a text line naming the stored PNG and the reason, so one bad page
+// never costs the note or the pages that did encode. The page's PNG is
+// already on disk by the time this runs (storePDFPages wrote it), so the
+// degraded line points at a retrievable file, not an orphan.
+func appendPDFPagePart(parts []llm.ContentPart, path string, page pdf.Page) []llm.ContentPart {
+	part, _, err := llm.ImagePartWithin(path, "image/png", page.PNG, llm.DefaultMaxImageBytes)
+	if err != nil {
+		return append(parts, llm.Text(fmt.Sprintf("Page %d was rendered to %s but was not sent as an image: %v.", page.Number, path, err)))
+	}
+	return append(parts, part)
 }
 
 // storePDFPages writes each rendered page's PNG beside the other tool-result
