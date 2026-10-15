@@ -43,6 +43,8 @@
 #   scripts/acceptance/make_zh_pdf.py --no-embed      # only zh-notembedded.pdf
 #   scripts/acceptance/make_zh_pdf.py --out DIR       # write somewhere else
 #   scripts/acceptance/make_zh_pdf.py --font PATH     # override the embedded OTF
+#   scripts/acceptance/make_zh_pdf.py --pages 9 --out DIR --no-embed
+#                                                  # numbered multi-page PDF
 #
 # Exit status is non-zero when the embedded font is missing (it is fetched by
 # scripts/fetch-pdfium-fonts.sh), so a checkout that forgot the fetch fails
@@ -361,15 +363,26 @@ def subset_font(data, text):
     return buf.getvalue()
 
 
-def build_embedded(font):
+def fixture_text(page_count):
+    text = TEXT
+    if page_count > 1:
+        text += "".join(footer(number, page_count) for number in range(1, page_count + 1))
+    return text
+
+
+def footer(number, page_count):
+    return "第 %d 页 / 共 %d 页" % (number, page_count)
+
+
+def build_embedded(font, page_count=1):
     pdf = PDF()
     catalog = pdf.reserve()
 
     # Glyph ids and their widths for the line's characters.
-    cids = [font.cid(c) for c in TEXT]
-    text_hex = "".join("%04X" % c for c in cids)
+    text = "".join(dict.fromkeys(fixture_text(page_count)))
+    cids = [font.cid(c) for c in text]
     widths = {}
-    for c in TEXT:
+    for c in text:
         widths[font.cid(c)] = font.scaled(font.width(c))
 
     w_array = " ".join("%d [%d]" % (cid, widths[cid]) for cid in sorted(widths))
@@ -410,7 +423,7 @@ def build_embedded(font):
         )
         % (escape_name(font.postscript_name), descriptor, w_array.encode("ascii"))
     )
-    tounicode = pdf.add(stream(b"", _tounicode_cmap(cids, TEXT)))
+    tounicode = pdf.add(stream(b"", _tounicode_cmap(cids, text)))
     fontobj = pdf.add(
         (
             b"<< /Type /Font /Subtype /Type0 /BaseFont /%s"
@@ -419,22 +432,21 @@ def build_embedded(font):
         % (escape_name(font.postscript_name), descendant, tounicode)
     )
 
-    content = ("BT /F1 %d Tf %g %g Td <%s> Tj ET" % (TEXT_EM, TEXT_X, TEXT_Y, text_hex)).encode(
-        "ascii"
+    pages = _pages(
+        pdf, fontobj, page_count, lambda line: "".join("%04X" % font.cid(c) for c in line)
     )
-    page, pages = _one_page(pdf, fontobj, content)
     pdf.put(catalog, b"<< /Type /Catalog /Pages %d 0 R >>" % pages)
     return pdf.build(catalog)
 
 
-def build_not_embedded():
+def build_not_embedded(page_count=1):
     pdf = PDF()
     catalog = pdf.reserve()
 
     # UniGB-UCS2-H maps a UCS-2 code straight to an Adobe-GB1 CID; the font is
     # named but not embedded, so rendering needs a fallback family.
-    codes = "".join("%04X" % ord(c) for c in TEXT)
-    tounicode = pdf.add(stream(b"", _tounicode_cmap([ord(c) for c in TEXT], TEXT)))
+    text = "".join(dict.fromkeys(fixture_text(page_count)))
+    tounicode = pdf.add(stream(b"", _tounicode_cmap([ord(c) for c in text], text)))
     descendant = pdf.add(
         (
             b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light"
@@ -451,10 +463,9 @@ def build_not_embedded():
         )
         % (descendant, tounicode)
     )
-    content = ("BT /F1 %d Tf %g %g Td <%s> Tj ET" % (TEXT_EM, TEXT_X, TEXT_Y, codes)).encode(
-        "ascii"
+    pages = _pages(
+        pdf, fontobj, page_count, lambda line: "".join("%04X" % ord(c) for c in line)
     )
-    page, pages = _one_page(pdf, fontobj, content)
     pdf.put(catalog, b"<< /Type /Catalog /Pages %d 0 R >>" % pages)
     return pdf.build(catalog)
 
@@ -475,18 +486,28 @@ def _tounicode_cmap(codes, text):
     return body.encode("ascii")
 
 
-def _one_page(pdf, fontobj, content):
+def _pages(pdf, fontobj, page_count, encode):
     pages = pdf.reserve()
-    contents = pdf.add(stream(b"", content))
-    page = pdf.add(
-        (
-            b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %g %g]"
-            b" /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+    kids = []
+    for number in range(1, page_count + 1):
+        content = "BT /F1 %d Tf %g %g Td <%s> Tj ET" % (
+            TEXT_EM, TEXT_X, TEXT_Y, encode(TEXT)
         )
-        % (pages, PAGE_W, PAGE_H, fontobj, contents)
+        if page_count > 1:
+            content += "\nBT /F1 18 Tf 72 72 Td <%s> Tj ET" % encode(footer(number, page_count))
+        contents = pdf.add(stream(b"", content.encode("ascii")))
+        page = pdf.add(
+            (
+                b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %g %g]"
+                b" /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>"
+            )
+            % (pages, PAGE_W, PAGE_H, fontobj, contents)
+        )
+        kids.append(b"%d 0 R" % page)
+    pdf.put(
+        pages, b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(kids), page_count)
     )
-    pdf.put(pages, b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % page)
-    return page, pages
+    return pages
 
 
 def default_font(repo_root):
@@ -500,7 +521,10 @@ def main(argv):
     ap.add_argument("--font", default=default_font(repo_root))
     ap.add_argument("--embed", action="store_true", help="write only zh-embedded.pdf")
     ap.add_argument("--no-embed", action="store_true", help="write only zh-notembedded.pdf")
+    ap.add_argument("--pages", type=int, default=1, help="number of pages (default: 1)")
     args = ap.parse_args(argv)
+    if args.pages < 1:
+        ap.error("--pages must be at least 1")
 
     os.makedirs(args.out, exist_ok=True)
     want_embed = args.embed or not args.no_embed
@@ -512,16 +536,16 @@ def main(argv):
                 "embedded font not found: %s\nrun scripts/fetch-pdfium-fonts.sh first" % args.font
             )
         with open(args.font, "rb") as fh:
-            font = Font(subset_font(fh.read(), TEXT))
+            font = Font(subset_font(fh.read(), fixture_text(args.pages)))
         path = os.path.join(args.out, "zh-embedded.pdf")
         with open(path, "wb") as fh:
-            fh.write(build_embedded(font))
+            fh.write(build_embedded(font, args.pages))
         print("wrote %s (%d bytes)" % (path, os.path.getsize(path)))
 
     if want_no_embed:
         path = os.path.join(args.out, "zh-notembedded.pdf")
         with open(path, "wb") as fh:
-            fh.write(build_not_embedded())
+            fh.write(build_not_embedded(args.pages))
         print("wrote %s (%d bytes)" % (path, os.path.getsize(path)))
 
 

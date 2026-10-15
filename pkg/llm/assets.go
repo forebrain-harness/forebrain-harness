@@ -18,8 +18,9 @@ import (
 // models.json — the built-in model catalog — is a data file, so like the
 // word-segmentation dictionaries memory search reads it is not embedded: every
 // build that produces a binary someone runs installs it beside the binary, and
-// the runtime reads it from there. A `go install` build ships no assets, so
-// the first need downloads models.json from that version's GitHub release.
+// the runtime reads it from there. A build that ships no assets beside the
+// binary downloads models.json from that version's GitHub release on first
+// need.
 // Plan 041 adds the tokenizer files here; assetEntries is the one list of
 // them, and the installer, the release packaging and the runtime read all
 // follow it, so they cannot drift apart.

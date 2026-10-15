@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,11 +42,14 @@ var blockedReadDevicePaths = map[string]struct{}{
 // Offset and Limit are optional: resolveReadFileRange treats zero as "not
 // given" (start of file / DefaultPageLimit). Tagging them `omitempty` keeps the
 // schema honest about that instead of forcing the model to invent a page window
-// for a file whose length it has not seen.
+// for a file whose length it has not seen. Pages is the PDF analogue: "" means
+// the first DefaultMaxPages pages, and parsePDFPages rejects anything the model
+// could not correct in one step.
 type FileReadInput struct {
 	FilePath string `json:"file_path" jsonschema:"description=Absolute or workspace-relative file path."`
-	Offset   int    `json:"offset,omitempty" jsonschema:"minimum=0" jsonschema_description:"Start line offset (0-based). Omit to start at the first line."`
-	Limit    int    `json:"limit,omitempty" jsonschema:"minimum=1" jsonschema_description:"Max lines to return (capped at 200). Omit for the default page size."`
+	Offset   int    `json:"offset,omitempty" jsonschema:"minimum=0" jsonschema_description:"Text reads: start line offset (0-based); omit to start at the first line. An offset past the end of file returns no content and names the file's line count."`
+	Limit    int    `json:"limit,omitempty" jsonschema:"minimum=1" jsonschema_description:"Text reads: max lines to return (capped at 200; a window extending past the end of file returns through the last line). Ignored for PDFs — use pages."`
+	Pages    string `json:"pages,omitempty" jsonschema_description:"PDF only: 1-based page or range to render (\"7\" or \"9-11\"), at most 5 pages per call; a range longer than 5 pages returns the first 5. An end past the last page returns through the last page (asking to 500 on a 490-page document returns through page 490, the last page); a start past the last page returns no pages and names the document's page count. Ignored for text files. Omit to read the first 5 pages."`
 }
 
 func NewFileReadTool(st *State) (*llm.Tool, error) {
@@ -110,20 +114,47 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 				if refusal := st.ImageInputRefusal(ctx); refusal != "" {
 					return nil, fmt.Errorf("read_file cannot read PDF %q: %s", abs, refusal)
 				}
+				// The pages argument picks where rendering starts. The cap is
+				// applied BEFORE anything else — pages="1-1000" is the first 5
+				// pages, not the whole document — and only then does the
+				// renderer clamp the range's end into the document. reqStart and
+				// reqEnd keep the model's own request: the note says "capped"
+				// only when the request actually exceeded the cap, which the
+				// post-cap range can no longer tell.
+				start, end, err := parsePDFPages(in.Pages)
+				if err != nil {
+					return nil, err
+				}
+				reqStart, reqEnd := start, end
+				if end == 0 {
+					end = start + pdf.DefaultMaxPages - 1
+				}
+				if end-start+1 > pdf.DefaultMaxPages {
+					end = start + pdf.DefaultMaxPages - 1
+				}
 				// The fonts PDFium falls back to for an unembedded CJK font are
 				// seeded under this tool's own home; passing the home explicitly
 				// keeps the default and a --home override both working, which
 				// reading FOREBRAIN_HOME from the environment would not.
-				res, err := pdf.RenderFile(abs, 0, pdf.Options{FontDirs: pdf.FontDirs(st.PrimaryHome())})
+				res, err := pdf.RenderFile(abs, start, end-start+1, pdf.Options{FontDirs: pdf.FontDirs(st.PrimaryHome())})
 				if err != nil {
 					return nil, err
+				}
+				if len(res.Pages) == 0 {
+					// A start past the last page reads nothing, the way a text
+					// offset past EOF does: a note naming the document's real
+					// length, no pixels, and a completion map with no image
+					// preview keys (there is no image to fetch).
+					note := pdfReadNote(abs, reqStart, reqEnd, res)
+					CaptureToolOutput(ctx, pdfEmptyReadOutput(in.FilePath, note, res))
+					return []llm.ContentPart{llm.Text(note)}, nil
 				}
 				pagePaths, err := storePDFPages(ctx, st, res.Pages)
 				if err != nil {
 					return nil, err
 				}
 				parts := make([]llm.ContentPart, 0, len(res.Pages)+1)
-				parts = append(parts, llm.Text(pdfReadNote(abs, res)))
+				parts = append(parts, llm.Text(pdfReadNote(abs, reqStart, reqEnd, res)))
 				for i := range res.Pages {
 					pagePart, _, err := llm.ImagePartWithin(pagePaths[i], "image/png", res.Pages[i].PNG, llm.DefaultMaxImageBytes)
 					if err != nil {
@@ -367,18 +398,102 @@ func ImageReadOutput(abs, filePath string, res llm.ImageReadResult) map[string]a
 	}
 }
 
-// pdfReadNote is the one line the model reads beside a PDF's page images: the
-// document, its page count, and the range of pages rendered (at the DPI the
-// renderer used). It states how many pages were left out so the model knows it
-// has not seen the whole document.
-func pdfReadNote(abs string, res pdf.RenderResult) string {
-	rendered := len(res.Pages)
-	note := fmt.Sprintf("pdf %s: %d pages, rendered pages 1-%d at %d dpi",
-		abs, res.PageCount, rendered, int(pdf.DefaultDPI))
-	if missing := res.PageCount - rendered; missing > 0 {
-		note += fmt.Sprintf(" (%d not rendered)", missing)
+// parsePDFPages parses the pages argument: "" (default first pages), "7" (one
+// page) or "9-11" (inclusive range), all 1-based. It returns the requested
+// range unchanged — capping and clamping are the caller's job. A malformed
+// value returns an actionable error naming the syntax; the model must be able
+// to correct a typo in one step, not guess why nothing rendered.
+func parsePDFPages(spec string) (start, end int, err error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return 0, 0, nil
+	}
+	lo, hi, hasDash := strings.Cut(spec, "-")
+	if !hasDash {
+		hi = lo
+	}
+	if !isPDFPageNumber(lo) || !isPDFPageNumber(hi) {
+		return 0, 0, badPDFPagesError(spec)
+	}
+	start, err = strconv.Atoi(lo)
+	if err != nil {
+		return 0, 0, badPDFPagesError(spec)
+	}
+	end, err = strconv.Atoi(hi)
+	if err != nil {
+		return 0, 0, badPDFPagesError(spec)
+	}
+	if start < 1 || end < start {
+		return 0, 0, badPDFPagesError(spec)
+	}
+	return start, end, nil
+}
+
+func isPDFPageNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func badPDFPagesError(spec string) error {
+	return fmt.Errorf("read_file pages must be %q or %q (1-based), got %q", "N", "N-M", spec)
+}
+
+// pdfReadNote is the one line the model reads beside a PDF's page images — or
+// alone, when no page was rendered. It names the document, its page count and
+// the pages actually rendered (never the request: the renderer owns where the
+// range really ended). When the cap or the document cut the request short, it
+// says so and points at the page range that continues the read, the way the
+// text path's next_offset does.
+func pdfReadNote(abs string, reqStart, reqEnd int, res pdf.RenderResult) string {
+	if len(res.Pages) == 0 {
+		return fmt.Sprintf("pdf %s: no pages at %d-%d (the document has %d pages)",
+			abs, reqStart, reqEnd, res.PageCount)
+	}
+	first := res.Pages[0].Number
+	last := res.Pages[len(res.Pages)-1].Number
+	note := fmt.Sprintf("pdf %s: %d pages, rendered pages %d-%d at %d dpi",
+		abs, res.PageCount, first, last, int(pdf.DefaultDPI))
+	continueAt := fmt.Sprintf(`pass pages="%d-%d" to continue`, last+1, last+pdf.DefaultMaxPages)
+	switch {
+	case reqStart == 0:
+		// Default read (no pages argument): the 054 wording, plus the range
+		// that continues the read.
+		if missing := res.PageCount - len(res.Pages); missing > 0 {
+			note += fmt.Sprintf(" (%d not rendered; %s)", missing, continueAt)
+		}
+	case reqEnd-reqStart+1 > pdf.DefaultMaxPages && last < res.PageCount:
+		// The request itself exceeded the cap. No "N not rendered" here: for
+		// a range request N is ambiguous (rest of the document, or rest of
+		// the request?), and the continuation range already says what to do
+		// next. When the renderer instead clamped the end into the document
+		// (last == PageCount), the model has seen through the final page and
+		// nothing continues.
+		note += fmt.Sprintf(" (capped at %d pages per call; %s)", pdf.DefaultMaxPages, continueAt)
 	}
 	return note
+}
+
+// pdfEmptyReadOutput is the surface-facing map for a PDF read that rendered no
+// pages (a start past the last page). There is no image to fetch, so it
+// carries none of the image preview keys — surfaces draw no image marker for
+// it — and the note text is the body. pdf_page_count still names the
+// document's true length, mirroring the text path's empty read.
+func pdfEmptyReadOutput(filePath, note string, res pdf.RenderResult) map[string]any {
+	return map[string]any{
+		"file_path":      filePath,
+		"preview_text":   note,
+		"pdf_page_count": res.PageCount,
+		"pdf_rendered":   0,
+		"pdf_pages":      []int{},
+		"result_lines":   0,
+	}
 }
 
 // pdfReadOutput is the surface-facing map for a PDF read. It reuses the image

@@ -347,7 +347,7 @@ func TestRenderCapsPages(t *testing.T) {
 	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := RenderFile(path, 0, Options{})
+	result, err := RenderFile(path, 0, 0, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestEncryptedPDFIsActionable(t *testing.T) {
 	if err := os.WriteFile(path, encryptedPDF("hunter2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := RenderFile(path, 0, Options{})
+	_, err := RenderFile(path, 0, 0, Options{})
 	if err == nil {
 		t.Fatal("RenderFile on an encrypted PDF returned no error")
 	}
@@ -390,7 +390,7 @@ func TestEmptyPDFIsActionable(t *testing.T) {
 	if err := os.WriteFile(path, simplePDF(0), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := RenderFile(path, 0, Options{})
+	_, err := RenderFile(path, 0, 0, Options{})
 	if err == nil {
 		t.Fatal("RenderFile on a zero-page PDF returned no error")
 	}
@@ -406,8 +406,102 @@ func TestRenderFileWithoutFontDirsDoesNotPanic(t *testing.T) {
 			t.Fatalf("RenderFile panicked: %v", r)
 		}
 	}()
-	if _, err := RenderFile(testdata(t, "zh-notembedded.pdf"), 0, Options{}); err != nil {
+	if _, err := RenderFile(testdata(t, "zh-notembedded.pdf"), 0, 0, Options{}); err != nil {
 		t.Logf("RenderFile returned an error (acceptable): %v", err)
+	}
+}
+
+// TestRenderRange pins that a start page selects where rendering begins while
+// the cap stays a count: start=7 on a ten-page document renders pages 7-10
+// (four pages, the document's tail) under the default cap.
+func TestRenderRange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ten.pdf")
+	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RenderFile(path, 7, 0, Options{})
+	if err != nil {
+		t.Fatalf("RenderFile: %v", err)
+	}
+	if result.PageCount != 10 {
+		t.Fatalf("PageCount = %d, want 10", result.PageCount)
+	}
+	if len(result.Pages) != 4 {
+		t.Fatalf("rendered %d pages, want 4", len(result.Pages))
+	}
+	if result.RenderedMax != DefaultMaxPages {
+		t.Fatalf("RenderedMax = %d, want %d", result.RenderedMax, DefaultMaxPages)
+	}
+	for i, page := range result.Pages {
+		if want := 7 + i; page.Number != want {
+			t.Fatalf("page %d number = %d, want %d", i, page.Number, want)
+		}
+	}
+}
+
+// TestRenderClampsEndIntoDocument pins that a range whose end runs past the
+// last page is clamped, not an error: start=8, maxPages=10 on a ten-page
+// document renders exactly pages 8-10.
+func TestRenderClampsEndIntoDocument(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ten.pdf")
+	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RenderFile(path, 8, 10, Options{})
+	if err != nil {
+		t.Fatalf("RenderFile: %v", err)
+	}
+	if len(result.Pages) != 3 {
+		t.Fatalf("rendered %d pages, want 3", len(result.Pages))
+	}
+	if first, last := result.Pages[0].Number, result.Pages[len(result.Pages)-1].Number; first != 8 || last != 10 {
+		t.Fatalf("rendered pages %d-%d, want 8-10", first, last)
+	}
+}
+
+// TestRenderStartBeyondEndIsEmpty pins that a start past the last page renders
+// nothing — an empty read that still reports the document's true page count,
+// the way a text read past EOF returns no lines.
+func TestRenderStartBeyondEndIsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ten.pdf")
+	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RenderFile(path, 99, 0, Options{})
+	if err != nil {
+		t.Fatalf("RenderFile: %v", err)
+	}
+	if result.PageCount != 10 {
+		t.Fatalf("PageCount = %d, want 10", result.PageCount)
+	}
+	if len(result.Pages) != 0 {
+		t.Fatalf("rendered %d pages, want 0", len(result.Pages))
+	}
+}
+
+// TestRenderNormalizesStart pins that start <= 0 means page 1: a caller
+// passing 0 gets exactly what a caller passing 1 gets.
+func TestRenderNormalizesStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ten.pdf")
+	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fromZero, err := RenderFile(path, 0, 0, Options{})
+	if err != nil {
+		t.Fatalf("RenderFile(start=0): %v", err)
+	}
+	fromOne, err := RenderFile(path, 1, 0, Options{})
+	if err != nil {
+		t.Fatalf("RenderFile(start=1): %v", err)
+	}
+	if len(fromZero.Pages) != len(fromOne.Pages) || len(fromOne.Pages) == 0 {
+		t.Fatalf("start=0 rendered %d pages, start=1 rendered %d", len(fromZero.Pages), len(fromOne.Pages))
+	}
+	for i := range fromZero.Pages {
+		if fromZero.Pages[i].Number != fromOne.Pages[i].Number {
+			t.Fatalf("page %d: start=0 gave page %d, start=1 gave page %d",
+				i, fromZero.Pages[i].Number, fromOne.Pages[i].Number)
+		}
 	}
 }
 
