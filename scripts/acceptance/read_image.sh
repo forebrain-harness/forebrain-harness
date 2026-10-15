@@ -7,8 +7,9 @@
 #      and the model's FINAL ANSWER names the shapes/colours and their sides;
 #   2. the pixels are stored on the tool row (parts contains a "type":"image"
 #      block) — the model, not a prompt hack, saw them;
-#   3. the step marker line names the Ctrl+O opener (a bare letter is never
-#      bound; the key-guard itself is pinned by pkg/tui's unit test);
+#   3. the step marker line is the affordance that opens the file
+#      ("· click to open"), and clicking that row launches the file's absolute
+#      path (pinned from the pane: the click must not crash the TUI);
 #   4. an MCP server's image result lands under the PRIMARY AGENT WORKSPACE's
 #      state/mcp-results, not the home's, with NO approval card anywhere in the
 #      phase, and reading the saved path needs no approval — and the MCP tool
@@ -29,7 +30,7 @@
 #
 #   FOREBRAIN_E2E_DEEPSEEK_KEY=<key> scripts/acceptance/read_image.sh
 #   FOREBRAIN_E2E_MODEL=deepseek-v4-flash            # override the model under test
-#   FOREBRAIN_ACCEPT_NO_OPEN=1                        # skip the Ctrl+O keystroke
+#   FOREBRAIN_ACCEPT_NO_OPEN=1                        # skip the click that opens a file
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -186,6 +187,14 @@ wait_for() { # wait_for <seconds> <fixed-substring>  (visible pane)
 }
 
 submit() { tmux send-keys -t "$SESSION" -l "$*"; sleep 0.4; tmux send-keys -t "$SESSION" Enter; }
+# click <col> <row> — one mouse click at 1-based screen coordinates, sent as the
+# SGR press+release pair the TUI's mouse reporting reads. tmux forwards both
+# sequences verbatim, so the TUI sees a click exactly where a terminal would
+# send one; the row is what this plan's hit test resolves.
+click() {
+  tmux send-keys -t "$SESSION" -l "$(printf '\033[<0;%s;%sM' "$1" "$2")"
+  tmux send-keys -t "$SESSION" -l "$(printf '\033[<0;%s;%sm' "$1" "$2")"
+}
 
 start_tui() { # start_tui <model>
   kill_stale
@@ -304,11 +313,12 @@ assert_no_card() { # assert_no_card <phase description> <pane text>
 start_tui "$MODEL"
 submit "read_file $SHAPE 然后告诉我图里有哪些图形、颜色、各自在左右哪边"
 
-# Wait on a STEP-ONLY signal: the image marker line ("Ctrl+O"), which reasoning
-# text can never contain. Reasoning that merely says "I should read an image"
-# must not satisfy this.
-if ! wait_for 150 "Ctrl+O"; then
-  mark_fail "the image step never rendered (no Ctrl+O marker line within 150s)"
+# Wait on a STEP-ONLY signal: the image marker line ("click to open"), which
+# reasoning text can never contain. Reasoning that merely says "I should read an
+# image" must not satisfy this. The fold hint reads "click to expand", so this
+# substring cannot match anything but the marker.
+if ! wait_for 150 "click to open"; then
+  mark_fail "the image step never rendered (no image marker line within 150s)"
 fi
 # Capture the pane the moment the marker is on screen: a long final answer
 # streams afterwards and can push the marker off the visible pane, and the
@@ -318,8 +328,8 @@ pane > "$EVIDENCE/01-read-image.txt"
 p1="$(pane)"
 wait_for 90 "Worked for" || true
 
-# The step line, not the reasoning: "Ctrl+O" lives only in the image marker.
-check "read_file of an image renders the step marker line" 'Ctrl\+O' "$p1"
+# The step line, not the reasoning: "click to open" lives only in the image marker.
+check "read_file of an image renders the step marker line" '▤ .*click to open' "$p1"
 check "the step line names the pixel size" '[0-9]+×[0-9]+' "$p1"
 if printf '%s' "$p1" | grep -q '"preview_kind"'; then
   mark_fail "the read_file step fell through to a JSON dump"
@@ -359,26 +369,34 @@ else
   mark_fail "no tool row carries an image block; the newest tool rows' parts heads were: $(db_recent_tool_parts_heads | tr '\n' ' | ' | head -c 400)"
 fi
 
-# --- Phase 2: the step marker names Ctrl+O (the bare-letter guard) ---------
-# The keyboard guard itself (a bare 'o' does not open an image) is pinned by
-# pkg/tui TestCtrlOIsNotABareLetterKey. Here we assert the marker the user reads
-# names the actual key. We do NOT type a bare letter: it would dirty the
-# composer and corrupt the next submission (the previous script's bug), and the
-# clear key's effect cannot be asserted from a captured pane deterministically.
-check "the image marker names the Ctrl+O key" 'Ctrl\+O' "$p1"
+# --- Phase 2: the marker line is the button that opens the file ------------
+# The hit test itself (which row opens which file) is pinned by pkg/tui's
+# TestImageMarkerHitTestOpensTheClickedStep and
+# TestOpenImagePreviewAtLaunchesTheClickedFile. Here we prove the real binary
+# acts on a real click: the pane carries the marker, we click that row's cell,
+# and the TUI must survive it (it launches the OS viewer, which on this machine
+# is left to the caller).
+check "the image marker names the click affordance" '▤ .*click to open' "$p1"
 
-# Ctrl+O with an image present must not crash the TUI (it launches the OS
-# viewer). Skipped only when the caller asks, since it opens a window.
 if [ "${FOREBRAIN_ACCEPT_NO_OPEN:-0}" = "1" ]; then
-  note "SKIP: Ctrl+O keystroke (FOREBRAIN_ACCEPT_NO_OPEN=1)"
+  note "SKIP: marker-line click (FOREBRAIN_ACCEPT_NO_OPEN=1)"
 else
-  tmux send-keys -t "$SESSION" C-o
-  sleep 1
-  pane > "$EVIDENCE/02-ctrl-o.txt"
-  if pane | grep -q "panic\|goroutine"; then
-    mark_fail "the TUI crashed after Ctrl+O"
+  # 1-based screen row of the marker as this pane painted it. Clicking the row
+  # is what opens the file, so the row number is the whole input.
+  click_row="$(pane | grep -nE '▤ .*click to open' | head -1 | cut -d: -f1)"
+  if [ -z "$click_row" ]; then
+    mark_fail "no image marker line in the pane to click"
   else
-    note "PASS: Ctrl+O did not crash the TUI (the system viewer may have opened)"
+    click 20 "$click_row"
+    sleep 1
+    pane > "$EVIDENCE/02-click-marker.txt"
+    if pane | grep -q "panic\|goroutine"; then
+      mark_fail "the TUI crashed after clicking the image marker line"
+    elif ! pane | grep -qE '▤ .*click to open'; then
+      mark_fail "the marker line is gone after the click — the card was disturbed"
+    else
+      note "PASS: clicking the marker line did not crash the TUI (the system viewer may have opened)"
+    fi
   fi
 fi
 

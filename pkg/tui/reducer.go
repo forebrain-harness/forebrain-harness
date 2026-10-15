@@ -2568,6 +2568,57 @@ func (m *viewModel) agentAtScreenRow(vr viewportRender, screenRow int) (string, 
 	return "", false
 }
 
+// imageMarkerAtScreenRow resolves a 0-based screen row to the image step whose
+// marker row it is. Only the marker row answers: the card's own header (its
+// title, which also names the file) and the block's separator row stay inert,
+// so a click on the title keeps meaning what it meant before — nothing.
+func (m *viewModel) imageMarkerAtScreenRow(vr viewportRender, screenRow int) (path, label string, ok bool) {
+	blockID, _ := vr.blockAtRow(screenRow)
+	if blockID < 0 {
+		return "", "", false
+	}
+	b := m.blockByID(blockID)
+	if b == nil || b.frame.Kind != FrameTool {
+		return "", "", false
+	}
+	meta := b.frame.ToolMeta
+	if !strings.EqualFold(strings.TrimSpace(meta.PreviewKind), "image") {
+		return "", "", false
+	}
+	p := strings.TrimSpace(meta.PreviewPath)
+	if p == "" {
+		return "", "", false
+	}
+	abs := vr.firstRow + screenRow
+	if abs < 0 || abs >= len(vr.allLines) || !isImageMarkerRow(vr.allLines[abs]) {
+		return "", "", false
+	}
+	return p, imagePreviewLabel(meta), true
+}
+
+// isImageMarkerRow reports whether a painted row is an image step's marker line:
+// the body row that opens on the body prefix "  └ " (and its wrapped
+// continuations, indented under it). The card title opens on "● " and the
+// block's separator row is blank, so neither matches. The block must already be
+// an image step for this to be consulted, and such a block's body is exactly
+// this one marker line (plus the rows it wraps into when the name is long) —
+// renderCompactFrame writes it and returns.
+//
+// Two summary rows share the body's four-space indent and are NOT the marker
+// line: the streaming hint "    … N earlier lines" (foldBlock) and the fold
+// hint "    ··· N more lines (click to expand)" (truncationHint). They stay what
+// they always were — a toggle target — so they are excluded by their leading
+// ellipsis. The fold hint is reachable on an image step: a file name long
+// enough to wrap the marker past the three-row budget makes the block foldable
+// like any other tool card.
+func isImageMarkerRow(line string) bool {
+	plain := sgrPattern.ReplaceAllString(line, "")
+	if strings.HasPrefix(plain, "    …") || strings.HasPrefix(plain, "    ···") {
+		return false
+	}
+	return strings.HasPrefix(plain, "  └ ") || strings.HasPrefix(plain, "    ")
+}
+
 // agentAtLocalRow resolves a screen row to the subagent owning that row within
 // this block. Only multi-agent blocks (fanout) carry the per-line map; blocks
 // without one report nothing.
@@ -5540,6 +5591,32 @@ func (r *Renderer) ViewportClickToggle(col, row int) bool {
 		return true
 	}
 	return false
+}
+
+// ImagePreviewAtScreenRow reports the image step whose marker row sits at the
+// given 0-based screen row of the last paint, or ok=false when that row is
+// anything else (another step, a blank row, the composer area, a scrolled-away
+// position). The caller launches the viewer: starting a process is not a paint.
+//
+// The row guard is the transcript window, not the terminal height: the painter
+// sets vpHeight and vpBodyHeight to the same body height on every paint, and
+// rows at or past vpBodyHeight belong to the composer, where a transcript row
+// is not on screen at all. If those two ever diverge, this must follow the
+// transcript window.
+func (r *Renderer) ImagePreviewAtScreenRow(row int) (path, label string, ok bool) {
+	if r == nil {
+		return "", "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.viewportMode || row < 0 || row >= r.vpBodyHeight {
+		return "", "", false
+	}
+	vm := r.activeVMLocked()
+	if vm == nil {
+		return "", "", false
+	}
+	return vm.imageMarkerAtScreenRow(r.vpLastRender, row)
 }
 
 // ViewportHover records the 0-based screen row under the mouse cursor so the

@@ -730,7 +730,7 @@ func Run(ctx context.Context, opts Options) error {
 				continue
 			}
 			if ev.kind == inputEventMouseRelease {
-				renderer.ViewportSelectEnd(ev.mouseCol, ev.mouseRow)
+				clickImagePreviewRow(renderer, ev.mouseCol, ev.mouseRow)
 				continue
 			}
 			if ev.kind == inputEventMouseMove {
@@ -1361,7 +1361,7 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 	case inputEventMouseDrag:
 		renderer.ViewportSelectDrag(ev.mouseCol, ev.mouseRow)
 	case inputEventMouseRelease:
-		renderer.ViewportSelectEnd(ev.mouseCol, ev.mouseRow)
+		clickImagePreviewRow(renderer, ev.mouseCol, ev.mouseRow)
 	case inputEventMouseMove:
 		renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
 	case inputEventMouseWheel:
@@ -1399,8 +1399,6 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 			renderer.ViewportJumpToBottom()
 		case hotkeyRedraw:
 			renderer.ForceRepaint()
-		case hotkeyOpenImage:
-			openLatestImagePreview(renderer, state)
 		}
 	}
 	return false
@@ -4156,7 +4154,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	case inputEventMouseDrag:
 		renderer.ViewportSelectDrag(ev.mouseCol, ev.mouseRow)
 	case inputEventMouseRelease:
-		renderer.ViewportSelectEnd(ev.mouseCol, ev.mouseRow)
+		clickImagePreviewRow(renderer, ev.mouseCol, ev.mouseRow)
 	case inputEventMouseMove:
 		renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
 	case inputEventMouseWheel:
@@ -4638,11 +4636,6 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		// Also reached mid-run: the active-run hotkey chain falls through to
 		// here for every hotkey it does not consume itself.
 		renderer.ForceRepaint()
-		return true
-	case hotkeyOpenImage:
-		// Opens the most recent image step; a no-op (one hint line) when the
-		// view holds none.
-		openLatestImagePreview(renderer, state)
 		return true
 	case hotkeyEscapeInterrupt:
 		// In a subagent's view, Esc takes back / interrupts-to-send / returns to
