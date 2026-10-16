@@ -128,11 +128,15 @@ fetch_build_windows() { # fetch_build_windows <dest>
     || die "git clone of $MODULE@$version failed"
   # On Windows (Git Bash) cargo may not find a C/C++ compiler for the GNU
   # target unless it is named; mingw's gcc/g++ satisfy it.
+  # `case` because `[` does no glob matching, so a `[ ... = <glob> ]` test
+  # never matches Git Bash's uname. `${arr[@]+"${arr[@]}"}` because bash 3.2
+  # (macOS /bin/bash) treats an empty array as unbound under `set -u`, which
+  # would abort a cross-fetch of the Windows archive from macOS.
   local extra_env=()
-  if [ "$(uname -s)" = "MINGW"* ] || [ "$(uname -s)" = "MSYS"* ]; then
-    extra_env=(CC_x86_64_pc_windows_gnu=gcc CXX_x86_64_pc_windows_gnu=g++)
-  fi
-  ( cd "$tmp/src" && env "${extra_env[@]}" cargo build --release --locked -p tokenizers-ffi --target "$triple" ) \
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) extra_env=(CC_x86_64_pc_windows_gnu=gcc CXX_x86_64_pc_windows_gnu=g++) ;;
+  esac
+  ( cd "$tmp/src" && env ${extra_env[@]+"${extra_env[@]}"} cargo build --release --locked -p tokenizers-ffi --target "$triple" ) \
     || die "cargo build for $triple failed"
   mv -f "$tmp/src/target/$triple/release/libtokenizers_ffi.a" "$dest"
 }

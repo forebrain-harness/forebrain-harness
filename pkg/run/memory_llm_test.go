@@ -668,3 +668,53 @@ func TestBackgroundMemoryRequestGivesUpWaitingEventually(t *testing.T) {
 		t.Fatal("the request never went out")
 	}
 }
+
+// ---- migrated from memory_workspace_test.go (tests for this file's production code) ----
+
+// memory_workspace_test.go pins the runner mirror of the workspace-only
+// consolidation entry: the same nil / disabled / pipeline-unavailable
+// contract as ConsolidateMemoriesNow, and — when a pipeline can be built —
+// the workspace pass runs instead of the full pipeline.
+
+func TestConsolidateMemoryWorkspaceMirrorsTheNowContract(t *testing.T) {
+	ctx := context.Background()
+
+	// A nil runner is an error, never a silent success.
+	var nilRunner *Runner
+	if err := nilRunner.ConsolidateMemoryWorkspace(ctx); err == nil {
+		t.Fatal("nil runner consolidated")
+	}
+
+	// Memories switched off is the feature's answer, verbatim.
+	disabled := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{Features: appcfg.FeaturesSection{Memories: boolPtr(false)}}}}
+	if err := disabled.ConsolidateMemoryWorkspace(ctx); err != ErrMemoriesDisabled {
+		t.Fatalf("disabled error = %v", err)
+	}
+
+	// A pipeline that cannot be built is an error the caller can report.
+	unbuilt := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
+	if err := unbuilt.ConsolidateMemoryWorkspace(ctx); err == nil {
+		t.Fatal("unbuildable pipeline reported success")
+	}
+
+	// With a real store and roots the workspace pass completes: an empty
+	// workspace has nothing to consolidate, so the pass succeeds without a
+	// consolidator — the wiring, not the LLM, is what this asserts.
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	roots, err := memory.ResolveRootsForAgent(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &Runner{Deps: &Deps{AppCfg: &appcfg.Root{}}}
+	runner.memPipeline.Get(func() *memory.Pipeline {
+		return &memory.Pipeline{Store: memory.NewStore(db, "main"), Roots: roots, Cfg: &appcfg.Root{}}
+	})
+	if err := runner.ConsolidateMemoryWorkspace(ctx); err != nil {
+		t.Fatalf("workspace consolidation failed: %v", err)
+	}
+}

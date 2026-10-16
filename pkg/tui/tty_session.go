@@ -1229,7 +1229,7 @@ func (m *viewModel) endsOnError(content string) bool {
 func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 	if f.StepID != "" {
 		switch f.Kind {
-		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall:
+		case FrameFanout, FrameTool, FrameMemoryCompact, FrameSkillInstall, FrameMigration:
 			for _, b := range m.blocks {
 				if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
 					b.frame = f

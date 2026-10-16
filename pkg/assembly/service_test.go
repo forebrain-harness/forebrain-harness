@@ -183,7 +183,7 @@ func TestLocalCompactShrinksHistoryUntilItFits(t *testing.T) {
 	full := llm.EstimateMessages(history)
 	model := &retryingCompactTestLLM{tokenBudget: full / 4}
 	svc := Service{}
-	replacement, summary, err := svc.localCompact(context.Background(), model, history, nil)
+	replacement, summary, err := svc.localCompact(context.Background(), model, history, nil, llm.DefaultEstimator())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +710,7 @@ func TestLocalCompactOnRealisticOverflowHistory(t *testing.T) {
 	full := llm.EstimateMessages(history)
 	model := &providerLikeLLM{limitTokens: full / 8}
 	svc := Service{}
-	replacement, summary, err := svc.localCompact(context.Background(), model, history, nil)
+	replacement, summary, err := svc.localCompact(context.Background(), model, history, nil, llm.DefaultEstimator())
 	t.Logf("calls=%d lastErr=%q err=%v", model.calls, model.lastErr, err)
 	if err != nil {
 		t.Fatalf("localCompact failed: %v (calls=%d, lastErr=%s)", err, model.calls, model.lastErr)
@@ -737,7 +737,7 @@ func TestTrimLadderIsAlwaysStructurallyValid(t *testing.T) {
 	history := realisticAgentHistory(40)
 	full := llm.EstimateMessages(history)
 	for budget := full; budget > 0; budget /= 2 {
-		trimmed := trimHistoryToFit(history, budget)
+		trimmed := trimHistoryToFit(history, budget, llm.DefaultEstimator())
 		if len(trimmed) == 0 {
 			continue
 		}
@@ -745,5 +745,107 @@ func TestTrimLadderIsAlwaysStructurallyValid(t *testing.T) {
 		if _, err := model.Execute(context.Background(), trimmed, nil); err != nil {
 			t.Fatalf("budget=%d produced invalid history: %v", budget, err)
 		}
+	}
+}
+
+// tenfoldEstimator counts ten times what the default estimator counts, so a
+// test can make the session model's estimator disagree with the default one.
+type tenfoldEstimator struct{}
+
+func (tenfoldEstimator) Count(text string) int { return 10 * llm.DefaultEstimator().Count(text) }
+func (tenfoldEstimator) Name() string          { return "tenfold" }
+
+// recordingSummaryLLM answers every request with a summary and records how
+// many messages each request carried.
+type recordingSummaryLLM struct{ sizes []int }
+
+func (r *recordingSummaryLLM) Execute(_ context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	r.sizes = append(r.sizes, len(messages))
+	msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("summary of the trimmed history")})
+	return &llm.Result{Message: &msg}, nil
+}
+
+// Whether the history fits the summary request is judged with the session
+// model's estimator. A history that fits by the default estimate but not by
+// the model's own is not sent as the conversation's request; it is trimmed to
+// the budget and summarized on its own.
+func TestLocalCompactBudgetsWithSessionEstimator(t *testing.T) {
+	llm.ResetObservedForTest()
+	t.Cleanup(llm.ResetObservedForTest)
+	const provider, model = "test-provider", "budget-model"
+	// The model is not in the catalog; an accepted 100k-token prompt gives it a
+	// known window, and so a summary budget.
+	llm.RecordSuccess(provider, model, 100_000, 0)
+	ctx := context.Background()
+	svc := Service{PrimaryModel: func(context.Context) (string, string) { return provider, model }}
+	budget := svc.summaryInputBudget(ctx, nil)
+	if budget <= 0 {
+		t.Fatalf("fixture: %s/%s has no summary budget", provider, model)
+	}
+
+	// A short opening request, then 50 turns sized so the default estimate is
+	// about half the budget and the tenfold one about five times it.
+	const turns = 50
+	history := []llm.Message{llm.SystemMessage("system prompt"), llm.UserMessage(llm.Text("user request"))}
+	body := budget * 4 / 2 / turns // bytes: rune/4 makes each turn budget/(2*turns) tokens
+	for i := 0; i < turns; i++ {
+		text := fmt.Sprintf("turn %d ", i) + strings.Repeat("x", body)
+		if i%2 == 0 {
+			history = append(history, llm.AssistantMessage([]llm.ContentPart{llm.Text(text)}))
+		} else {
+			history = append(history, llm.UserMessage(llm.Text(text)))
+		}
+	}
+	if size := llm.EstimateMessagesWith(llm.DefaultEstimator(), history); size > budget {
+		t.Fatalf("fixture: default estimate %d must fit the budget %d", size, budget)
+	}
+	tenfold := llm.EstimateMessagesWith(tenfoldEstimator{}, history)
+	if tenfold <= budget {
+		t.Fatalf("fixture: tenfold estimate %d must exceed the budget %d", tenfold, budget)
+	}
+
+	t.Cleanup(llm.SetEstimatorForTest(provider, model, tenfoldEstimator{}))
+	conversationCalls := 0
+	conversation := func(context.Context, llm.Message) (*llm.Result, error) {
+		conversationCalls++
+		msg := llm.AssistantMessage([]llm.ContentPart{llm.Text("conversation summary")})
+		return &llm.Result{Message: &msg}, nil
+	}
+	client := &recordingSummaryLLM{}
+	replacement, result, err := svc.compactMessages(ctx, history, nil, "s1", "auto", "", client, conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversationCalls != 0 {
+		t.Fatalf("the conversation's request was used %d times for a history that does not fit by the session estimator", conversationCalls)
+	}
+	if len(client.sizes) != 1 || client.sizes[0]-1 >= len(history) {
+		t.Fatalf("summary requests carried %v messages (prompt included), want one request trimmed below the %d-message history", client.sizes, len(history))
+	}
+	if result.Summary != "summary of the trimmed history" || len(replacement) == 0 {
+		t.Fatalf("result = %+v, replacement %d messages; want the trimmed request's summary", result, len(replacement))
+	}
+	// The card's numbers are in the same unit.
+	if result.TokensBefore != tenfold {
+		t.Fatalf("TokensBefore = %d, want the session estimator's %d", result.TokensBefore, tenfold)
+	}
+	if want := llm.EstimateMessagesWith(tenfoldEstimator{}, replacement); result.TokensAfter != want {
+		t.Fatalf("TokensAfter = %d, want the session estimator's %d", result.TokensAfter, want)
+	}
+}
+
+// trimHistoryToFit sizes the history with the estimator it is given: under an
+// estimator that counts more, fewer groups fit the same budget.
+func TestTrimHistoryToFitUsesGivenEstimator(t *testing.T) {
+	history := realisticAgentHistory(40)
+	budget := llm.EstimateMessagesWith(llm.DefaultEstimator(), history) / 2
+	byDefault := trimHistoryToFit(history, budget, llm.DefaultEstimator())
+	byTenfold := trimHistoryToFit(history, budget, tenfoldEstimator{})
+	if len(byTenfold) == 0 || len(byTenfold) >= len(byDefault) {
+		t.Fatalf("kept %d messages under the tenfold estimator and %d under the default, want 0 < tenfold < default",
+			len(byTenfold), len(byDefault))
+	}
+	if size := llm.EstimateMessagesWith(tenfoldEstimator{}, byTenfold); size > budget {
+		t.Fatalf("tenfold trim measures %d by its own estimator, over the budget %d", size, budget)
 	}
 }

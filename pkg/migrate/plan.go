@@ -13,7 +13,7 @@ type Report struct {
 	DryRun bool
 	Source Kind
 	// SourceRoot is the source directory this run actually read (the picker
-	// input or --home, resolved); the report and preview both carry it so
+	// input, resolved); the report and preview both carry it so
 	// "which directory was this" stays answerable after the fact.
 	SourceRoot string
 	Sessions   []SessionOutcome
@@ -62,14 +62,40 @@ func (r *Report) SessionCounts() (migrated, skipped, failed, owned int) {
 			failed++
 		case StatusOwned:
 			owned++
-		case StatusRebound:
-			// Healed by this run, not skipped: Text() counts it
-			// separately so no bucket double-reports the same rows.
+		case StatusRebound, StatusUpdated:
+			// Both are counted separately: rebound is healed-not-skipped,
+			// updated is an increment with its own report line, so no bucket
+			// double-reports the same rows.
 		default:
 			skipped++
 		}
 	}
 	return
+}
+
+// countUpdated tallies the conversations whose transcripts grew and this run
+// (or, on a dry run, would) append to, with the new message rows among them.
+func (r *Report) countUpdated() (units, messages int) {
+	for _, outcome := range r.Sessions {
+		if outcome.Status == StatusUpdated {
+			units++
+			messages += outcome.Messages
+		}
+	}
+	return
+}
+
+// writtenMemoryCount reports how many notes this run actually wrote — the
+// only honest trigger for the post-import memory pass. Outcome rows count
+// nothing: a rerun that skipped every note must not pay for a consolidation
+// pass, and a global-instruction note that was rewritten counts exactly as
+// the one note it is.
+func (r *Report) writtenMemoryCount() int {
+	written := 0
+	for _, memory := range r.Memories {
+		written += len(memory.Written)
+	}
+	return written
 }
 
 // Plan is the dry-run preview the confirm dialog shows.
@@ -78,6 +104,10 @@ type Plan struct {
 	SourceRoot string
 	Sessions   int
 	Subagents  int
+	// Updated counts conversations already imported whose transcripts grew;
+	// UpdatedMessages, the rows a run would append to them.
+	Updated         int
+	UpdatedMessages int
 	// AlreadyHere counts conversations a previous import (or this agent)
 	// already has; Refused, the ones that cannot be imported.
 	AlreadyHere  int
@@ -183,6 +213,9 @@ func reportToPlan(report *Report) *Plan {
 			plan.Subagents++
 		case outcome.Status == StatusMigrated:
 			plan.Sessions++
+		case outcome.Status == StatusUpdated:
+			plan.Updated++
+			plan.UpdatedMessages += outcome.Messages
 		case outcome.Status == StatusRebound:
 			// Already here — the run would only rebind it to its project,
 			// which is processing, not refusal.
@@ -228,6 +261,10 @@ func (p *Plan) Text() string {
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "  Conversations: %s, plus %s subagent transcripts · %s messages",
 		formatCount(int64(p.Sessions)), formatCount(int64(p.Subagents)), formatCount(int64(p.MessageRows)))
+	if p.Updated > 0 {
+		fmt.Fprintf(&b, " · %s to update (%s new messages)",
+			formatCount(int64(p.Updated)), formatCount(int64(p.UpdatedMessages)))
+	}
 	if p.AlreadyHere > 0 {
 		fmt.Fprintf(&b, " · %s already here", formatCount(int64(p.AlreadyHere)))
 	}
@@ -329,6 +366,7 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 	if root == "" {
 		return nil, fmt.Errorf("Claude Code's data directory (~/.claude or $CLAUDE_HOME) was not found")
 	}
+	progress = withPercentProgress(progress, claudeStageOrder(opts))
 	if progress != nil {
 		progress(Progress{Stage: "discovering", Detail: root})
 	}
@@ -344,7 +382,8 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 	}
 
 	if opts.wants("sessions") {
-		sessions, rows, bytes := importSessions(ctx, data, opts, progress)
+		ledger := newUnitLedger(ctx, opts, string(KindClaude))
+		sessions, rows, bytes := importSessions(ctx, data, opts, progress, ledger)
 		report.Sessions = sessions
 		report.MessageRows = rows
 		report.SourceBytes = bytes
@@ -356,9 +395,6 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 			report.Notices = append(report.Notices, "memory import stopped early: "+err.Error())
 		} else {
 			report.Memories = memories
-		}
-		if !opts.DryRun && len(report.Memories) > 0 {
-			report.Consolidation = consolidateNow(ctx, opts, progress)
 		}
 	}
 	if opts.wants("skills") {
@@ -398,6 +434,16 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 	// sources implement the same branch.
 	if opts.wants("memories") {
 		report.Memories = append(report.Memories, importClaudeGlobalInstructions(data, opts))
+		// The consolidation gate sits after every memory-category write,
+		// global instructions included, and opens only when something was
+		// actually written — a rerun that skipped every note owes no pass.
+		if !opts.DryRun {
+			if report.writtenMemoryCount() > 0 {
+				report.Consolidation = consolidateNow(ctx, opts, progress)
+			} else {
+				report.Consolidation = "not run — no new notes"
+			}
+		}
 	}
 	reportOrphanedMigratedSessions(ctx, opts, report)
 	return report, nil
@@ -414,6 +460,7 @@ func RunCodex(ctx context.Context, opts *Options, progress func(Progress)) (*Rep
 	if root == "" {
 		return nil, fmt.Errorf("Codex's data directory (~/.codex or $CODEX_HOME) was not found")
 	}
+	progress = withPercentProgress(progress, codexStageOrder(opts))
 	if progress != nil {
 		progress(Progress{Stage: "discovering", Detail: root})
 	}
@@ -430,13 +477,17 @@ func RunCodex(ctx context.Context, opts *Options, progress func(Progress)) (*Rep
 	report.Notices = append(report.Notices, data.Degraded...)
 
 	// Sessions and plans share one parse (§4.10): the plan extraction reads
-	// the same parsed sessions the importer wrote.
+	// the same parsed sessions the importer wrote. The ledger makes the
+	// shared parse incremental too — an unchanged rollout with intact plans
+	// is neither parsed again nor re-extracted.
 	var parsed map[string]*parsedSession
+	var ledger *unitLedger
 	if opts.wants("sessions") || opts.wants("plans") {
 		units := codexUnits(data, opts)
 		if opts.wants("sessions") {
+			ledger = newUnitLedger(ctx, opts, string(KindCodex))
 			parsed = map[string]*parsedSession{}
-			sessions, rows, bytes, captured := importUnitsCapture(ctx, units, parseCodexRollout, opts, progress, parsed)
+			sessions, rows, bytes, captured := importUnitsCapture(ctx, units, parseCodexRollout, opts, progress, parsed, ledger)
 			report.Sessions = sessions
 			report.MessageRows = rows
 			report.SourceBytes = bytes
@@ -460,8 +511,14 @@ func RunCodex(ctx context.Context, opts *Options, progress func(Progress)) (*Rep
 			report.Memories = memories
 		}
 		report.Memories = append(report.Memories, importCodexGlobalInstructions(data, opts))
-		if !opts.DryRun && len(report.Memories) > 0 {
-			report.Consolidation = consolidateNow(ctx, opts, progress)
+		if !opts.DryRun {
+			// Same gate as the Claude side, and for the same reason: only
+			// notes this run actually wrote owe a consolidation pass.
+			if report.writtenMemoryCount() > 0 {
+				report.Consolidation = consolidateNow(ctx, opts, progress)
+			} else {
+				report.Consolidation = "not run — no new notes"
+			}
 		}
 	}
 	if opts.wants("skills") {
@@ -470,7 +527,7 @@ func RunCodex(ctx context.Context, opts *Options, progress func(Progress)) (*Rep
 		})
 	}
 	if opts.wants("plans") {
-		report.Plans = extractCodexPlans(parsed, opts, progress)
+		report.Plans = extractCodexPlans(parsed, opts, progress, ledger)
 	}
 	if opts.wants("mcp") {
 		userOutcomes, userNotices, err := importCodexUserMCP(data, opts)
@@ -556,11 +613,19 @@ func (r *Report) Text() string {
 
 	migrated, skipped, failed, owned := r.SessionCounts()
 	rebound := countRebound(r.Sessions)
+	updated, updatedMessages := r.countUpdated()
 	imported := "imported"
 	if r.DryRun {
 		imported = "to import"
 	}
 	fmt.Fprintf(&b, "  Conversations: %d %s", migrated, imported)
+	if updated > 0 {
+		updatedWord := "updated"
+		if r.DryRun {
+			updatedWord = "to update"
+		}
+		fmt.Fprintf(&b, " · %d %s (%d new messages)", updated, updatedWord, updatedMessages)
+	}
 	if rebound > 0 {
 		fmt.Fprintf(&b, " · %d rebound", rebound)
 	}

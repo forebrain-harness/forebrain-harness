@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -26,11 +27,18 @@ import (
 // embedded — the same scheme models.json uses (see assets.go). On first use an
 // id's files are copied out of the cache if they are there, otherwise extracted
 // from beside the binary, and only when neither has them are they downloaded,
-// from HuggingFace first and ModelScope second. Enterprise/offline installs can
-// copy the cache directory across machines; the cache holds the decompressed
-// original files in a fixed, human-readable layout:
+// from HuggingFace first and ModelScope second, unless downloads are disabled
+// (TokenEstimateOptions.DisableDownload). Enterprise/offline installs can copy
+// the cache directory across machines; the cache holds the decompressed files
+// in a fixed, human-readable layout:
 //
 //	<FOREBRAIN_HOME>/cache/tokenizers/<id>/<file>
+//
+// The byte-level BPE ids that convert faithfully (an entry with a Source) are
+// bundled and cached as tiktoken files, which load into a fraction of the
+// memory their tokenizer.json takes (see tiktoken_convert.go). The hubs only
+// carry the source tokenizer.json, so their download fallback fetches that,
+// converts it locally and caches the converted files.
 //
 // builtinTokenizers is the one list of ids, files, checksums and matching rules;
 // assets/tokenizers/README.md mirrors it and TestBundledTokenizerFilesMatchTable
@@ -56,7 +64,10 @@ type TokenizerFile struct {
 	Size   int64
 }
 
-// BuiltinTokenizer is one bundled tokenizer and the models it serves.
+// BuiltinTokenizer is one bundled tokenizer and the models it serves. A
+// converted id (Source set) is bundled and cached as the tiktoken Files, while
+// the hubs only hold its Source tokenizer.json: the download fallback fetches
+// Source and converts it locally with ConvertTokenizerJSONToTiktoken.
 type BuiltinTokenizer struct {
 	ID    string
 	Files []TokenizerFile // Files[0] is the model; a tiktoken model's Files[1] is its tokenizer_config.json
@@ -64,8 +75,9 @@ type BuiltinTokenizer struct {
 	// otherwise Files[0] is loaded with hftok.FromFile.
 	Tiktoken      bool
 	Pattern       string
-	HuggingFace   string // repo id on HuggingFace, "" when absent
-	ModelScope    string // repo id on ModelScope, "" when absent
+	Source        *TokenizerFile // the hub file the Files are converted from; nil when Files are downloaded as-is
+	HuggingFace   string         // repo id on HuggingFace, "" when absent
+	ModelScope    string         // repo id on ModelScope, "" when absent
 	ModelPrefixes []string
 	Providers     []string
 }
@@ -76,8 +88,14 @@ type BuiltinTokenizer struct {
 // prefix: matching is first-match in this order.
 var builtinTokenizers = []BuiltinTokenizer{
 	{
-		ID:            "qwen-3.8",
-		Files:         []TokenizerFile{{Name: "tokenizer.json", SHA256: "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3", Size: 12809320}},
+		ID: "qwen-3.8",
+		Files: []TokenizerFile{
+			{Name: "tiktoken.model", SHA256: "8dde380a6405e935f5de16a99eb61c824f3f814dd1ed298784c72babb7a03cdd", Size: 4579414},
+			{Name: "tokenizer_config.json", SHA256: "600986e338cd22803b092bf870e6d892f6f75f8937d8bd991d79f300bc0870b3", Size: 4500},
+		},
+		Tiktoken:      true,
+		Pattern:       qwenPattern,
+		Source:        &TokenizerFile{Name: "tokenizer.json", SHA256: "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3", Size: 12809320},
 		HuggingFace:   "Qwen/Qwen3.8-27B",
 		ModelScope:    "Qwen/Qwen3.8-27B",
 		ModelPrefixes: []string{"qwen", "qwq", "deepseek-r1-distill-qwen"},
@@ -92,16 +110,28 @@ var builtinTokenizers = []BuiltinTokenizer{
 		Providers:     []string{"deepseek"},
 	},
 	{
-		ID:            "glm-5",
-		Files:         []TokenizerFile{{Name: "tokenizer.json", SHA256: "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d", Size: 20217442}},
+		ID: "glm-5",
+		Files: []TokenizerFile{
+			{Name: "tiktoken.model", SHA256: "d2a312b6d9fa24fc27bdea3387e65477c427214e2fb2372e5f3ae980ffaa3e1d", Size: 2668918},
+			{Name: "tokenizer_config.json", SHA256: "8194ce3f0a41cda2f33d6f42edd0624d749479ad7232999e2e32a8cc7f415eaf", Size: 4828},
+		},
+		Tiktoken:      true,
+		Pattern:       glmPattern,
+		Source:        &TokenizerFile{Name: "tokenizer.json", SHA256: "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d", Size: 20217442},
 		HuggingFace:   "zai-org/GLM-5.3",
 		ModelScope:    "ZhipuAI/GLM-5.3",
 		ModelPrefixes: []string{"glm"},
 		Providers:     []string{"zhipuai", "zai"},
 	},
 	{
-		ID:            "gpt-o200k",
-		Files:         []TokenizerFile{{Name: "tokenizer.json", SHA256: "0614fe83cadab421296e664e1f48f4261fa8fef6e03e63bb75c20f38e37d07d3", Size: 27868174}},
+		ID: "gpt-o200k",
+		Files: []TokenizerFile{
+			{Name: "tiktoken.model", SHA256: "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d", Size: 3613922},
+			{Name: "tokenizer_config.json", SHA256: "de20240e59ed07d81101b31e4fb8217fc9d51f3f9995b239e3c345b9532603b6", Size: 2970},
+		},
+		Tiktoken:      true,
+		Pattern:       o200kPattern,
+		Source:        &TokenizerFile{Name: "tokenizer.json", SHA256: "0614fe83cadab421296e664e1f48f4261fa8fef6e03e63bb75c20f38e37d07d3", Size: 27868174},
 		HuggingFace:   "openai/gpt-oss-120b",
 		ModelScope:    "openai-mirror/gpt-oss-120b",
 		ModelPrefixes: []string{"gpt", "chatgpt", "o1", "o3", "o4", "codex"},
@@ -121,16 +151,28 @@ var builtinTokenizers = []BuiltinTokenizer{
 		Providers:     []string{"moonshotai"},
 	},
 	{
-		ID:            "minimax-m2",
-		Files:         []TokenizerFile{{Name: "tokenizer.json", SHA256: "757622126525aeeb131756849d93298070ff3f0319c455ec8c5bb0f6b1cebbe8", Size: 9730160}},
+		ID: "minimax-m2",
+		Files: []TokenizerFile{
+			{Name: "tiktoken.model", SHA256: "9b423908eab5445f88a72b26a283d848da80884fde9e0b8e5e7a4fe495313f1e", Size: 3557010},
+			{Name: "tokenizer_config.json", SHA256: "49033b681c5c96f618b21424e4f44b43f3332a73559134df0378497493b95d9a", Size: 7158},
+		},
+		Tiktoken:      true,
+		Pattern:       o200kPattern,
+		Source:        &TokenizerFile{Name: "tokenizer.json", SHA256: "757622126525aeeb131756849d93298070ff3f0319c455ec8c5bb0f6b1cebbe8", Size: 9730160},
 		HuggingFace:   "MiniMaxAI/MiniMax-M2",
 		ModelScope:    "MiniMax/MiniMax-M2",
 		ModelPrefixes: []string{"minimax"},
 		Providers:     []string{"minimax"},
 	},
 	{
-		ID:            "mimo-v2.5",
-		Files:         []TokenizerFile{{Name: "tokenizer.json", SHA256: "633518aad78f9f61bae2ae420d621215754a4424c918b052cd8c22a3b59e99d2", Size: 7033572}},
+		ID: "mimo-v2.5",
+		Files: []TokenizerFile{
+			{Name: "tiktoken.model", SHA256: "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186", Size: 2561218},
+			{Name: "tokenizer_config.json", SHA256: "27ede6bfed52a9c749977b9859c1394b339bae2f0ea6661958c92ad47a771504", Size: 4390},
+		},
+		Tiktoken:      true,
+		Pattern:       grokPattern,
+		Source:        &TokenizerFile{Name: "tokenizer.json", SHA256: "633518aad78f9f61bae2ae420d621215754a4424c918b052cd8c22a3b59e99d2", Size: 7033572},
 		HuggingFace:   "XiaomiMiMo/MiMo-V2.5",
 		ModelScope:    "XiaomiMiMo/MiMo-V2.5",
 		ModelPrefixes: []string{"mimo"},
@@ -153,8 +195,14 @@ var builtinTokenizers = []BuiltinTokenizer{
 		Providers:     []string{"anthropic"},
 	},
 	{
-		ID:            "grok-2",
-		Files:         []TokenizerFile{{Name: "tokenizer.json", SHA256: "63e538a53de71acf0585603a7f1f62cc66c5e6fa5763d753d10ad071f5c5d4fe", Size: 17963143}},
+		ID: "grok-2",
+		Files: []TokenizerFile{
+			{Name: "tiktoken.model", SHA256: "fa70b860aeca864eab97639d1f9912025a3868cf848185032d4b1c83deae5b92", Size: 2208402},
+			{Name: "tokenizer_config.json", SHA256: "e287a7330cc08821c42e05c2c54b9309ea624febccbeb3633c6917234001cd3d", Size: 16434},
+		},
+		Tiktoken:      true,
+		Pattern:       grokPattern,
+		Source:        &TokenizerFile{Name: "tokenizer.json", SHA256: "63e538a53de71acf0585603a7f1f62cc66c5e6fa5763d753d10ad071f5c5d4fe", Size: 17963143},
 		HuggingFace:   "alvarobartt/grok-2-tokenizer",
 		ModelPrefixes: []string{"grok"},
 		Providers:     []string{"xai"},
@@ -173,6 +221,19 @@ const kimiPattern = `[\p{Han}]+|` +
 	`\s+(?!\S)|` +
 	`\s+`
 
+// The split regexes of the converted ids, each the Split pattern of the source
+// tokenizer.json verbatim (cmd/tokenizer2tiktoken prints it).
+const (
+	// o200kPattern is gpt-o200k's and minimax-m2's.
+	o200kPattern = `[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+	// glmPattern is glm-5's.
+	glmPattern = `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+	// grokPattern is grok-2's and mimo-v2.5's.
+	grokPattern = `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+	// qwenPattern is qwen-3.8's.
+	qwenPattern = `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`
+)
+
 // Estimator counts the tokens of a piece of text.
 type Estimator interface {
 	// Count returns the number of tokens in text; text is used as given.
@@ -188,14 +249,68 @@ type heuristicEstimator struct{}
 func (heuristicEstimator) Count(text string) int { return estimateHeuristicRuneDiv4(text) }
 func (heuristicEstimator) Name() string          { return "rune_div4" }
 
-// tokenizerEstimator wraps a loaded HuggingFace/tiktoken tokenizer.
+// tokenizerEstimator wraps a loaded HuggingFace/tiktoken tokenizer, and
+// remembers the counts of long texts it has seen (see Count).
 type tokenizerEstimator struct {
 	id string
 	tk *hftok.Tokenizer
+
+	mu     sync.Mutex
+	counts map[countKey]int // nil until the first remembered count
 }
 
-func (e *tokenizerEstimator) Count(text string) int { return e.tk.Count(text) }
-func (e *tokenizerEstimator) Name() string          { return e.id }
+// countCacheMinBytes is the shortest text whose count is remembered; a shorter
+// one is tokenized again, which costs about what hashing it would.
+const countCacheMinBytes = 256
+
+// countCacheCap bounds the remembered counts per estimator. When the table is
+// full it is dropped and rebuilt rather than evicted entry by entry (no LRU):
+// what repeats is a session's history, which every model call re-counts nearly
+// whole, so one call after a reset refills the entries that are still live and
+// the rest were going to age out anyway.
+const countCacheCap = 1 << 16
+
+// countKey identifies a text by its 64-bit FNV-1a hash and its byte length.
+// Two distinct texts of the same length colliding on 64 bits is negligibly
+// unlikely (about n²/2⁶⁵ for n texts of that length — about 10⁻¹⁰ at the cap),
+// and a collision would only skew an estimate, never a request.
+type countKey struct {
+	sum uint64
+	n   int
+}
+
+func countKeyOf(text string) countKey {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(text))
+	return countKey{sum: h.Sum64(), n: len(text)}
+}
+
+// Count returns text's token count. The count of a text of countCacheMinBytes
+// or more is remembered by content, so the history every model call re-counts
+// costs a hash per message instead of a tokenization: Count is a pure function
+// of text for one loaded tokenizer.
+func (e *tokenizerEstimator) Count(text string) int {
+	if len(text) < countCacheMinBytes {
+		return e.tk.Count(text)
+	}
+	key := countKeyOf(text)
+	e.mu.Lock()
+	n, ok := e.counts[key]
+	e.mu.Unlock()
+	if ok {
+		return n
+	}
+	n = e.tk.Count(text)
+	e.mu.Lock()
+	if e.counts == nil || len(e.counts) >= countCacheCap {
+		e.counts = make(map[countKey]int)
+	}
+	e.counts[key] = n
+	e.mu.Unlock()
+	return n
+}
+
+func (e *tokenizerEstimator) Name() string { return e.id }
 
 // TokenizerIDFor returns the built-in tokenizer id that serves a model, in
 // order: a configured override whose model prefix matches; a built-in model
@@ -345,6 +460,7 @@ func ResetTokenizersForTest() {
 	slotRegistry.mu.Lock()
 	slotRegistry.slots = map[string]*tokenizerSlot{}
 	slotRegistry.mu.Unlock()
+	downloadDisabledNoted.Clear()
 }
 
 // tokenizerFilesAllowed gates every tokenizer file read and download. It is
@@ -359,12 +475,13 @@ var (
 
 // estimatorSettings is the resolved configuration, recorded by Configure.
 type estimatorSettings struct {
-	cacheDir   string
-	hubs       []string
-	hfEndpoint string
-	msEndpoint string
-	defaultID  string
-	overrides  []TokenizerOverride
+	cacheDir        string
+	hubs            []string
+	hfEndpoint      string
+	msEndpoint      string
+	defaultID       string
+	overrides       []TokenizerOverride
+	disableDownload bool
 }
 
 func (s estimatorSettings) defaultIDOrDefault() string {
@@ -381,13 +498,16 @@ var estimators struct {
 	overrides  map[string]Estimator // test-injected, keyed by overrideKey
 }
 
-// tokenizerSlot is the once-per-process resolution state for one tokenizer id
-// (or one local override path). A loaded *hftok.Tokenizer is reused for the
-// life of the process and never Closed.
+// tokenizerSlot is the resolution state for one tokenizer id (or one local
+// override path). A loaded *hftok.Tokenizer is reused for the life of the
+// process and never Closed; a failed resolution lasts until the next Configure
+// (see forgetFailedResolutions). downloading is true while the background
+// download started for the slot runs.
 type tokenizerSlot struct {
 	mu           sync.Mutex
 	resolved     bool
 	est          Estimator
+	downloading  bool
 	downloadOnce sync.Once
 }
 
@@ -395,6 +515,32 @@ var slotRegistry struct {
 	mu    sync.Mutex
 	slots map[string]*tokenizerSlot
 }
+
+// forgetFailedResolutions drops every slot that resolved to nothing and has no
+// download in flight — a built-in id that was neither cached nor bundled (nor
+// downloaded), or an override path that did not load — keeping the loaded
+// tokenizers. Configure calls it after recording new settings: once the
+// configuration is reloaded (downloads turned back on, a hub or path changed)
+// or an operator has copied the files into the cache, the next need for that
+// tokenizer scans the cache and the bundle again and, when allowed, downloads
+// it, instead of the failure lasting until the process restarts.
+func forgetFailedResolutions() {
+	slotRegistry.mu.Lock()
+	defer slotRegistry.mu.Unlock()
+	for key, slot := range slotRegistry.slots {
+		slot.mu.Lock()
+		failed := slot.resolved && slot.est == nil && !slot.downloading
+		slot.mu.Unlock()
+		if failed {
+			delete(slotRegistry.slots, key)
+		}
+	}
+}
+
+// downloadDisabledNoted records the ids already reported as missing with
+// downloads disabled, so the note is logged once per id per process even when
+// a reload makes the id be looked for again.
+var downloadDisabledNoted sync.Map
 
 func currentSettings() (estimatorSettings, bool) {
 	estimators.mu.Lock()
@@ -507,8 +653,8 @@ func slotFor(key string) *tokenizerSlot {
 }
 
 // resolveTokenizer loads id's estimator from the cache or the bundled assets,
-// starting (once) a background download when neither has it. It never blocks on
-// the network.
+// starting (once) a background download when neither has it and downloads are
+// not disabled. It never blocks on the network.
 func resolveTokenizer(settings estimatorSettings, id string) (Estimator, bool) {
 	bt, ok := builtinTokenizerByID(id)
 	if !ok {
@@ -530,9 +676,20 @@ func resolveTokenizer(settings estimatorSettings, id string) (Estimator, bool) {
 		return est, true
 	}
 	// Unavailable locally: record that (so the filesystem is not rescanned on
-	// every call) and start one background download for this id and process.
+	// every call) and, unless downloads are disabled, start one background
+	// download for this slot. downloading is set before the slot is unlocked so
+	// a concurrent Configure never takes the slot for a finished failure.
 	slot.resolved = true
 	slot.est = nil
+	if settings.disableDownload {
+		slot.mu.Unlock()
+		if _, noted := downloadDisabledNoted.LoadOrStore(id, true); !noted {
+			slog.Info("tokenizer "+id+" is neither in the cache nor beside the binary and downloads are disabled; estimating with the default tokenizer or rune/4",
+				"id", id, "cache_dir", filepath.Join(settings.cacheDir, id))
+		}
+		return nil, false
+	}
+	slot.downloading = true
 	slot.mu.Unlock()
 	slot.downloadOnce.Do(func() {
 		go downloadAndLoad(settings, bt, slot)
@@ -564,6 +721,7 @@ func resolveLocalPath(path string) (Estimator, bool) {
 // cache, extracting any that are missing from beside the binary. It returns the
 // source ("cache" or "bundle") on success.
 func loadBundledOrCache(settings estimatorSettings, bt BuiltinTokenizer) (Estimator, string, error) {
+	removeStaleSource(settings.cacheDir, bt)
 	cacheDir := filepath.Join(settings.cacheDir, bt.ID)
 	paths := make([]string, len(bt.Files))
 	source := "cache"
@@ -594,6 +752,25 @@ func fileMatches(path string, file TokenizerFile) bool {
 	}
 	slog.Warn("tokenizer cache file failed verification; re-extracting", "path", path)
 	return false
+}
+
+// removeStaleSource deletes the source tokenizer.json an older version cached
+// for a converted id (Source != nil): the id is cached as its tiktoken Files
+// now, and the 7–28 MB source file would only take up space. A failed removal
+// is not an error.
+func removeStaleSource(cacheDir string, bt BuiltinTokenizer) {
+	if bt.Source == nil {
+		return
+	}
+	for _, file := range bt.Files {
+		if file.Name == bt.Source.Name {
+			return
+		}
+	}
+	path := filepath.Join(cacheDir, bt.ID, bt.Source.Name)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Debug("stale tokenizer file could not be removed", "path", path, "err", err)
+	}
 }
 
 // cacheFilePresentBySize reports whether path exists with file's expected
@@ -677,12 +854,18 @@ func loadFromPaths(bt BuiltinTokenizer, paths []string, source string) (Estimato
 	return &tokenizerEstimator{id: bt.ID, tk: tk}, source, nil
 }
 
-// downloadAndLoad downloads bt's files (once per id, per process) and, on
-// success, installs the loaded estimator into slot so the next EstimatorFor
-// call uses it. It never runs in a test binary.
+// downloadAndLoad downloads bt's files (once per slot) and, on success,
+// installs the loaded estimator into slot so the next EstimatorFor call uses
+// it. It clears slot.downloading when it returns. It never runs in a test
+// binary unless the test opts in (tokenizerFilesAllowed).
 func downloadAndLoad(settings estimatorSettings, bt BuiltinTokenizer, slot *tokenizerSlot) {
+	defer func() {
+		slot.mu.Lock()
+		slot.downloading = false
+		slot.mu.Unlock()
+	}()
 	if err := downloadTokenizerFiles(settings, bt); err != nil {
-		slog.Warn("tokenizer download failed; using the rune/4 estimate",
+		slog.Warn("tokenizer download failed; estimating with the default tokenizer or rune/4",
 			"id", bt.ID, "err", err, "cache_dir", filepath.Join(settings.cacheDir, bt.ID))
 		return
 	}
@@ -723,15 +906,50 @@ func downloadTokenizerFiles(settings estimatorSettings, bt BuiltinTokenizer) err
 	return fmt.Errorf("no hub served %s: %s", bt.ID, strings.Join(errs, "; "))
 }
 
+// downloadFromHub fetches bt's files from one hub into the cache. A converted
+// id (Source set) fetches only its source tokenizer.json and converts it;
+// otherwise every file of bt.Files is fetched as-is.
 func downloadFromHub(settings estimatorSettings, bt BuiltinTokenizer, base, repo, ref string) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
 	cacheDir := filepath.Join(settings.cacheDir, bt.ID)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return err
 	}
+	hubURL := func(name string) string {
+		return strings.TrimRight(base, "/") + "/" + repo + "/resolve/" + ref + "/" + name
+	}
+	if bt.Source != nil {
+		return downloadAndConvert(client, hubURL(bt.Source.Name), bt, cacheDir)
+	}
 	for _, file := range bt.Files {
-		url := strings.TrimRight(base, "/") + "/" + repo + "/resolve/" + ref + "/" + file.Name
-		if err := downloadOne(client, url, filepath.Join(cacheDir, file.Name), file); err != nil {
+		if err := downloadOne(client, hubURL(file.Name), filepath.Join(cacheDir, file.Name), file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// downloadAndConvert fetches bt's source tokenizer.json from url, converts it
+// to the tiktoken files and writes them into cacheDir — only once the source
+// and every converted file have matched the table's size and checksum.
+func downloadAndConvert(client *http.Client, url string, bt BuiltinTokenizer, cacheDir string) error {
+	data, err := fetchVerified(client, url, *bt.Source)
+	if err != nil {
+		return err
+	}
+	model, config, _, err := ConvertTokenizerJSONToTiktoken(data)
+	if err != nil {
+		return fmt.Errorf("convert %s: %w", url, err)
+	}
+	converted := map[string][]byte{"tiktoken.model": model, "tokenizer_config.json": config}
+	for _, file := range bt.Files {
+		out, ok := converted[file.Name]
+		if !ok || int64(len(out)) != file.Size || sha256Hex(out) != file.SHA256 {
+			return fmt.Errorf("convert %s: %s does not match the expected size and checksum", url, file.Name)
+		}
+	}
+	for _, file := range bt.Files {
+		if err := writeFileAtomic(filepath.Join(cacheDir, file.Name), converted[file.Name]); err != nil {
 			return err
 		}
 	}
@@ -739,22 +957,32 @@ func downloadFromHub(settings estimatorSettings, bt BuiltinTokenizer, base, repo
 }
 
 func downloadOne(client *http.Client, url, dest string, file TokenizerFile) error {
-	response, err := client.Get(url)
+	data, err := fetchVerified(client, url, file)
 	if err != nil {
 		return err
+	}
+	return writeFileAtomic(dest, data)
+}
+
+// fetchVerified GETs url and returns its body once it matches file's size and
+// checksum.
+func fetchVerified(client *http.Client, url string, file TokenizerFile) ([]byte, error) {
+	response, err := client.Get(url)
+	if err != nil {
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, response.Status)
+		return nil, fmt.Errorf("GET %s: %s", url, response.Status)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, file.Size+1))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if int64(len(data)) != file.Size || sha256Hex(data) != file.SHA256 {
-		return fmt.Errorf("GET %s: content does not match the expected size and checksum", url)
+		return nil, fmt.Errorf("GET %s: content does not match the expected size and checksum", url)
 	}
-	return writeFileAtomic(dest, data)
+	return data, nil
 }
 
 // writeFileAtomic writes data to dest through a temporary file in the same
@@ -789,9 +1017,11 @@ func sha256Hex(data []byte) string {
 // seedCacheFromBundle extracts every built-in tokenizer that is not already in
 // the cache from beside the binary. It is a best-effort startup warm-up: it
 // never downloads and never loads a tokenizer, and a missing bundle is left for
-// a later need to download.
+// a later need to download. It also removes the source tokenizer.json an older
+// version cached for a converted id.
 func seedCacheFromBundle(settings estimatorSettings) {
 	for _, bt := range builtinTokenizers {
+		removeStaleSource(settings.cacheDir, bt)
 		for _, file := range bt.Files {
 			cachePath := filepath.Join(settings.cacheDir, bt.ID, file.Name)
 			if cacheFilePresentBySize(cachePath, file) {

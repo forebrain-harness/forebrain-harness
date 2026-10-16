@@ -36,6 +36,7 @@ func codexUnits(data *codexData, opts *Options) []sessionUnit {
 			Path:      rollout.Path,
 			TargetID:  codexSessionTarget(rollout.ThreadID),
 			Bytes:     rollout.Bytes,
+			MtimeMs:   rollout.MtimeMs,
 			Title:     meta.Title,
 			Cwd:       firstNonEmptyStr(meta.Cwd, rollout.Cwd),
 			GitBranch: meta.GitBranch,
@@ -389,50 +390,81 @@ func codexSystemSkillNotes(root string) []SkillOutcome {
 
 // extractCodexPlans pulls <proposed_plan> blocks out of the imported
 // assistant text and writes each as a plan document (§4.10). It reads the
-// same parse the session import used — no second pass over the files.
-func extractCodexPlans(parsed map[string]*parsedSession, opts *Options, progress func(Progress)) []PlanOutcome {
+// same parse the session import used — no second pass over the files. Units
+// the ledger settled without parsing contribute their recorded outcomes as
+// verified up-to-date, so an incremental run's plan report stays as complete
+// as the first run's; and every unit that was parsed this run has its plan
+// records written back to the ledger, settling the dependency the next run
+// verifies.
+func extractCodexPlans(parsed map[string]*parsedSession, opts *Options, progress func(Progress), ledger *unitLedger) []PlanOutcome {
 	out := []PlanOutcome{}
 	workspace := strings.TrimSpace(opts.AgentWorkspace)
 	if workspace == "" {
 		return out
 	}
 	used := map[string]string{} // filename → owning thread, for collision suffixes
-	// Deterministic order: by target id.
-	targets := make([]string, 0, len(parsed))
+	// Deterministic order: by target id, over the parsed and the
+	// ledger-settled targets together.
+	targetSet := map[string]bool{}
 	for target := range parsed {
+		targetSet[target] = true
+	}
+	if ledger != nil {
+		for target := range ledger.plans {
+			targetSet[target] = true
+		}
+	}
+	targets := make([]string, 0, len(targetSet))
+	for target := range targetSet {
 		targets = append(targets, target)
 	}
 	sort.Strings(targets)
 	for _, target := range targets {
+		if ledger != nil {
+			if synthetic, ok := ledger.plans[target]; ok {
+				out = append(out, synthetic...)
+				continue
+			}
+		}
 		session := parsed[target]
-		blocks := proposedPlanBlocks(sessionText(session))
-		if len(blocks) == 0 {
+		if session == nil {
 			continue
 		}
-		threadID := strings.TrimPrefix(target, "cli-")
-		if progress != nil {
-			progress(Progress{Stage: "plans", Detail: threadID})
-		}
-		slug := planFileSlug(session.Title)
-		if slug == "" {
-			slug = sanitizeSlug(threadID)
-		}
-		projectKey := ""
-		if cwd := strings.TrimSpace(session.Cwd); cwd != "" {
-			projectKey = memory.ProjectKey(memory.ProjectRoot(cwd))
-		}
-		for i, block := range blocks {
-			name := slug
-			if i > 0 {
-				name = fmt.Sprintf("%s-%d", slug, i+1)
+		var records []ledgerPlanRecord
+		blocks := proposedPlanBlocks(sessionText(session))
+		if len(blocks) > 0 {
+			threadID := strings.TrimPrefix(target, "cli-")
+			if progress != nil {
+				progress(Progress{Stage: "plans", Detail: threadID})
 			}
-			if owner, taken := used[name]; taken && owner != threadID {
-				name = fmt.Sprintf("%s-%s", name, threadIDSuffix(threadID))
+			slug := planFileSlug(session.Title)
+			if slug == "" {
+				slug = sanitizeSlug(threadID)
 			}
-			used[name] = threadID
-			body := strings.TrimRight(block, "\n") + "\n\n---\norigin: codex plan mode (thread " + threadID + ")\n"
-			outcome := writeExtractedPlan(workspace, projectKey, target, name, body, opts.DryRun)
-			out = append(out, outcome)
+			projectKey := ""
+			if cwd := strings.TrimSpace(session.Cwd); cwd != "" {
+				projectKey = memory.ProjectKey(memory.ProjectRoot(cwd))
+			}
+			for i, block := range blocks {
+				name := slug
+				if i > 0 {
+					name = fmt.Sprintf("%s-%d", slug, i+1)
+				}
+				if owner, taken := used[name]; taken && owner != threadID {
+					name = fmt.Sprintf("%s-%s", name, threadIDSuffix(threadID))
+				}
+				used[name] = threadID
+				body := strings.TrimRight(block, "\n") + "\n\n---\norigin: codex plan mode (thread " + threadID + ")\n"
+				outcome, record := writeExtractedPlan(workspace, projectKey, target, name, body, opts.DryRun)
+				out = append(out, outcome)
+				records = append(records, record)
+			}
+		}
+		if ledger != nil && !ledger.dryRun {
+			// Settle the ledger row's plan list — an empty list when the
+			// transcript holds no blocks, so the dependency is recorded as
+			// satisfied rather than left pending.
+			_ = recordUnitPlans(context.Background(), ledger.db, ledger.agent, ledger.source, target, records)
 		}
 	}
 	return out
@@ -485,7 +517,9 @@ func threadIDSuffix(threadID string) string {
 // directory writeExtractedPlan's callers used before per-conversation plans
 // when it does not. The same three-state idempotency as the file-copy
 // importer: identical → up-to-date, differing → diverged and left alone.
-func writeExtractedPlan(workspace, projectKey, sessionID, name, body string, dryRun bool) PlanOutcome {
+// The returned record carries the destination and the sha256 of the body the
+// source would write, for the migration ledger to verify on a later run.
+func writeExtractedPlan(workspace, projectKey, sessionID, name, body string, dryRun bool) (PlanOutcome, ledgerPlanRecord) {
 	scope := "the unscoped plans root"
 	destDir := state.PlanDirForProject(workspace, projectKey)
 	if sessionID != "" {
@@ -499,22 +533,23 @@ func writeExtractedPlan(workspace, projectKey, sessionID, name, body string, dry
 		scope = "project " + projectKey
 	}
 	dest := filepath.Join(destDir, name+".md")
+	record := ledgerPlanRecord{Name: name, Path: dest, BodySha256: hashBytes([]byte(body))}
 	if existing, err := os.ReadFile(dest); err == nil {
 		if planContentEqual(existing, []byte(body)) {
-			return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "up-to-date"}
+			return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "up-to-date"}, record
 		}
-		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "diverged", Detail: "a plan with this name already differs in " + scope + "; not overwritten"}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "diverged", Detail: "a plan with this name already differs in " + scope + "; not overwritten"}, record
 	}
 	if dryRun {
-		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "installed", Detail: "planned for " + scope}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "installed", Detail: "planned for " + scope}, record
 	}
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "skipped", Detail: err.Error()}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "skipped", Detail: err.Error()}, record
 	}
 	if err := os.WriteFile(dest, []byte(body), 0o600); err != nil {
-		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "skipped", Detail: err.Error()}
+		return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "skipped", Detail: err.Error()}, record
 	}
-	return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "installed", Detail: "written to " + scope}
+	return PlanOutcome{Name: name, ProjectKey: projectKey, SessionID: sessionID, Status: "installed", Detail: "written to " + scope}, record
 }
 
 // importCodexProjectConfig migrates every discovered project root's

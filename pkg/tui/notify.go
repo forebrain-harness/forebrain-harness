@@ -212,12 +212,14 @@ type QuitRequestedMsg struct {
 }
 
 // MigrationProgressMsg is one throttled checkpoint of a running import. It
-// renders as the transient status line, never as transcript history.
+// paints the migration progress card above the composer — never as ordinary
+// transcript history — carrying the whole-run percent the bar fills to.
 type MigrationProgressMsg struct {
-	Stage  string
-	Done   int
-	Total  int
-	Detail string
+	Stage   string
+	Done    int
+	Total   int
+	Detail  string
+	Percent int
 }
 
 // MigrationPreviewMsg carries a finished dry run. The surface shows the plan

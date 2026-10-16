@@ -115,7 +115,7 @@ func (s Service) ManualCompactSession(ctx context.Context, sessionID, trigger st
 	if err != nil {
 		return Result{}, err
 	}
-	ctx, run := s.beginCompaction(ctx, sid, trigger, llm.EstimateMessages(messages))
+	ctx, run := s.beginCompaction(ctx, sid, trigger, llm.EstimateMessagesWith(s.estimator(ctx), messages))
 	res, err := s.compactSession(ctx, sid, messages, trigger, "", "")
 	if err != nil {
 		run.fail(err)
@@ -301,7 +301,7 @@ func (s Service) TryCompactOnMessages(ctx context.Context, messages []llm.Messag
 	if s.Sessions == nil || s.CompactLLM == nil || strings.TrimSpace(sessionID) == "" || len(messages) == 0 {
 		return nil, false, nil
 	}
-	ctx, run := s.beginCompaction(ctx, sessionID, "auto", llm.EstimateMessages(messages))
+	ctx, run := s.beginCompaction(ctx, sessionID, "auto", llm.EstimateMessagesWith(s.estimator(ctx), messages))
 	replacement, result, err := s.compactLiveMessages(ctx, messages, sessionID, reactive, conversation)
 	if err != nil {
 		run.fail(err)
@@ -345,7 +345,10 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 	if client == nil {
 		return nil, Result{}, errors.New("compact: current model unavailable")
 	}
-	before := llm.EstimateMessages(messages)
+	// One estimator for every size this compaction states or budgets with:
+	// the card's numbers, the summary request's fit and its trimming.
+	est := s.estimator(ctx)
+	before := llm.EstimateMessagesWith(est, messages)
 	var replacement []llm.Message
 	var summary, strategy, source string
 	if remote, ok := client.(llm.ContextCompactor); ok && s.RemoteCompaction {
@@ -376,7 +379,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 			}
 		}
 		if err != nil {
-			if fallback, fallbackSummary, fallbackErr := s.localFallbackAfterRemoteFailure(ctx, client, messages, conversation, err); fallbackErr == nil {
+			if fallback, fallbackSummary, fallbackErr := s.localFallbackAfterRemoteFailure(ctx, client, messages, conversation, err, est); fallbackErr == nil {
 				replacement, summary = fallback, fallbackSummary
 				strategy, source = "local", "model_summary"
 			} else {
@@ -391,7 +394,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		}
 	} else {
 		var err error
-		replacement, summary, err = s.localCompact(ctx, client, messages, conversation)
+		replacement, summary, err = s.localCompact(ctx, client, messages, conversation, est)
 		if err != nil {
 			return nil, Result{}, err
 		}
@@ -413,7 +416,7 @@ func (s Service) compactMessages(ctx context.Context, messages []llm.Message, to
 		Summary:       summary,
 		ReplacedTurns: max(0, len(stripInitialContext(messages))-len(replacement)),
 		TokensBefore:  before,
-		TokensAfter:   llm.EstimateMessages(replacement),
+		TokensAfter:   llm.EstimateMessagesWith(est, replacement),
 	}
 	return replacement, result, nil
 }
@@ -431,7 +434,7 @@ func (w executeOnlyLLM) Execute(ctx context.Context, messages []llm.Message, too
 	return w.inner.Execute(ctx, messages, tools)
 }
 
-func (s Service) localFallbackAfterRemoteFailure(ctx context.Context, client llm.LLM, messages []llm.Message, conversation ConversationSummarizer, remoteErr error) ([]llm.Message, string, error) {
+func (s Service) localFallbackAfterRemoteFailure(ctx context.Context, client llm.LLM, messages []llm.Message, conversation ConversationSummarizer, remoteErr error, est llm.Estimator) ([]llm.Message, string, error) {
 	if remoteErr == nil {
 		return nil, "", errors.New("compact: remote compaction failed")
 	}
@@ -441,7 +444,7 @@ func (s Service) localFallbackAfterRemoteFailure(ctx context.Context, client llm
 	if !shouldRetryWithCurrentModel(remoteErr) {
 		return nil, "", remoteErr
 	}
-	fallback, summary, localErr := s.localCompact(ctx, executeOnlyLLM{inner: client}, messages, conversation)
+	fallback, summary, localErr := s.localCompact(ctx, executeOnlyLLM{inner: client}, messages, conversation, est)
 	if localErr == nil {
 		return fallback, summary, nil
 	}
@@ -461,7 +464,10 @@ func (s Service) localFallbackAfterRemoteFailure(ctx context.Context, client llm
 // conversation's cached prefix. The trimmed, stand-alone request below is for
 // a history that does not fit, and for a model that answered the
 // conversation's request with a tool call instead of the summary.
-func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm.Message, conversation ConversationSummarizer) ([]llm.Message, string, error) {
+//
+// est sizes the history against the budget — the session model's estimator,
+// so "it fits" is judged in the unit the model's own tokenizer counts.
+func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm.Message, conversation ConversationSummarizer, est llm.Estimator) ([]llm.Message, string, error) {
 	prompt := strings.TrimSpace(s.Prompt)
 	if prompt == "" {
 		prompt = DefaultPrompt
@@ -474,14 +480,15 @@ func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm
 	attempted := false
 	// One observed context for every attempt, so a retry's output continues
 	// the progress instead of restarting it.
-	summaryCtx, stopReading := withSummaryProgress(ctx, llm.EstimateMessages(messages))
+	size := llm.EstimateMessagesWith(est, messages)
+	summaryCtx, stopReading := withSummaryProgress(ctx, size)
 	defer stopReading()
-	if conversation != nil && (budget <= 0 || llm.EstimateMessages(messages) <= budget) {
+	if conversation != nil && (budget <= 0 || size <= budget) {
 		res, err := conversation(summaryCtx, promptMsg)
 		switch {
 		case err == nil && res != nil && res.Message != nil && strings.TrimSpace(res.Message.TextContent()) != "":
 			summary := strings.TrimSpace(res.Message.TextContent())
-			retained := retainedRealUserMessages(messages, localUserHistoryTokenBudget)
+			retained := retainedRealUserMessages(messages, localUserHistoryTokenBudget, est)
 			return append(retained, llm.UserMessage(llm.Text(SummaryPrefix+"\n"+summary))), summary, nil
 		case err == nil:
 			// Answered with a tool call, or with nothing: ask on its own below.
@@ -499,7 +506,7 @@ func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm
 		}
 		input := messages
 		if budget > 0 {
-			input = trimHistoryToFit(messages, budget)
+			input = trimHistoryToFit(messages, budget, est)
 		}
 		if len(input) == 0 {
 			// Nothing fits at this budget; keep halving rather than giving up, so
@@ -517,7 +524,7 @@ func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm
 				return nil, "", errors.New("compact: model returned empty summary")
 			}
 			summary := strings.TrimSpace(res.Message.TextContent())
-			retained := retainedRealUserMessages(messages, localUserHistoryTokenBudget)
+			retained := retainedRealUserMessages(messages, localUserHistoryTokenBudget, est)
 			retained = append(retained, llm.UserMessage(llm.Text(SummaryPrefix+"\n"+summary)))
 			return retained, summary, nil
 		}
@@ -531,7 +538,7 @@ func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm
 		if budget <= 0 {
 			// First attempt used the full history because the window was unknown.
 			// The rejection reveals its size, so start halving from there.
-			budget = llm.EstimateMessages(input)
+			budget = llm.EstimateMessagesWith(est, input)
 		}
 		budget /= 2
 	}
@@ -540,7 +547,7 @@ func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm
 	// without the model: the user's own recent turns. This keeps the session
 	// alive and preserves verbatim what the user actually asked for.
 	if attempted && lastErr != nil {
-		if retained := retainedRealUserMessages(messages, localUserHistoryTokenBudget); len(retained) > 0 {
+		if retained := retainedRealUserMessages(messages, localUserHistoryTokenBudget, est); len(retained) > 0 {
 			summary := digestWithoutModel(messages)
 			out := append(retained, llm.UserMessage(llm.Text(SummaryPrefix+"\n"+summary)))
 			return out, summary, nil
@@ -550,6 +557,17 @@ func (s Service) localCompact(ctx context.Context, model llm.LLM, messages []llm
 		return nil, "", fmt.Errorf("compact: unable to fit history in context window: %w", lastErr)
 	}
 	return nil, "", errors.New("compact: unable to fit history in context window")
+}
+
+// estimator returns the estimator of the model the conversation being
+// compacted runs on (PrimaryModel) — the one the compaction decisions count
+// with — or the default estimator when no model is named. Every size a
+// compaction budgets with or reports comes from it.
+func (s Service) estimator(ctx context.Context) llm.Estimator {
+	if s.PrimaryModel == nil {
+		return llm.DefaultEstimator()
+	}
+	return llm.EstimatorFor(s.PrimaryModel(ctx))
 }
 
 // summaryInputBudget returns the token budget for a summarization request,
@@ -658,7 +676,10 @@ func (s Service) persistCheckpoint(ctx context.Context, sessionID string, replac
 	return result, nil
 }
 
-func retainedRealUserMessages(messages []llm.Message, budget int) []llm.Message {
+// retainedRealUserMessages keeps the newest real user turns verbatim, oldest
+// first, within budget as e counts them; the turn that crosses the budget is
+// kept truncated.
+func retainedRealUserMessages(messages []llm.Message, budget int, e llm.Estimator) []llm.Message {
 	selected := make([]llm.Message, 0, 8)
 	remaining := budget
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -670,7 +691,7 @@ func retainedRealUserMessages(messages []llm.Message, budget int) []llm.Message 
 			break
 		}
 		text := msg.TextContent()
-		cost := llm.EstimateText(text)
+		cost := llm.EstimateTextWith(e, text)
 		if cost > remaining {
 			selected = append(selected, llm.UserMessage(llm.Text(truncateTextToTokenBudget(text, remaining))))
 			break

@@ -553,22 +553,66 @@ func TestObservedEstimateMatchesDecisionEstimator(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	obs, ok := llm.Get(provider, model)
-	if !ok {
+	if _, ok := llm.Get(provider, model); !ok {
 		t.Fatal("no observation recorded for the active model")
 	}
 	est := scaledEstimator{}
 	sent := llm.EstimateMessagesWith(est, msgs) + estimateToolsTokens(est, tools)
 	want := real - sent
-	if obs.Overhead != want {
-		t.Fatalf("Overhead=%d want %d (real %d - decision-estimator estimate %d)", obs.Overhead, want, real, sent)
+	// The overhead is learned under the decision estimator's name; read it
+	// back the way the decision projects with it.
+	const probe = 1000
+	overhead := llm.ProjectFor(provider, model, est.Name(), probe) - probe
+	if overhead != want {
+		t.Fatalf("Overhead=%d want %d (real %d - decision-estimator estimate %d)", overhead, want, real, sent)
 	}
 	// Guard the test itself: the global estimator must size the same request
 	// differently, or the assertion above proves nothing.
 	if global := llm.EstimateMessages(msgs) + estimateToolsTokens(llm.DefaultEstimator(), tools); global == sent {
 		t.Fatal("fixture: the model estimator must differ from the global one")
-	} else if obs.Overhead == real-global {
+	} else if overhead == real-global {
 		t.Fatal("Overhead was measured against the global estimator, not the decision estimator")
+	}
+}
+
+// fakeNamedEstimator counts 3 tokens per byte under the name "fake".
+type fakeNamedEstimator struct{}
+
+func (fakeNamedEstimator) Count(text string) int { return len(text) * 3 }
+func (fakeNamedEstimator) Name() string          { return "fake" }
+
+// An accepted call's overhead is filed under the estimator that sized the
+// request — the active model's — and not under the unnamed estimator, whose
+// projection stays the bare estimate.
+func TestObservationRecordedUnderActiveEstimator(t *testing.T) {
+	llm.ResetObservedForTest()
+	t.Cleanup(llm.ResetObservedForTest)
+
+	const provider, model = "test-provider", "observed-fake"
+	const real = 90000
+	t.Cleanup(llm.SetEstimatorForTest(provider, model, fakeNamedEstimator{}))
+
+	msgs := []llm.Message{llm.UserMessage(llm.Text(strings.Repeat("z", 2000)))}
+	recoverable := WrapRecoverableLLM(&observedUsageLLM{input: real}, nil, &CompactChainDeps{
+		ActiveModel: func(context.Context) (string, string) { return provider, model },
+	})
+	if _, err := recoverable.Execute(context.Background(), msgs, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	sent := llm.EstimateMessagesWith(fakeNamedEstimator{}, msgs)
+	if sent <= 0 || sent >= real {
+		t.Fatalf("fixture: fake estimate %d must be positive and below the real %d", sent, real)
+	}
+	const x = 1000
+	if got := llm.ProjectFor(provider, model, "fake", x) - x; got != real-sent {
+		t.Fatalf("overhead under \"fake\" = %d, want %d (real %d - fake estimate %d)", got, real-sent, real, sent)
+	}
+	if got := llm.ProjectFor(provider, model, "", x) - x; got != 0 {
+		t.Fatalf("overhead under the unnamed estimator = %d, want 0", got)
+	}
+	if got := llm.ProjectFor(provider, model, llm.DefaultEstimator().Name(), x) - x; got != 0 {
+		t.Fatalf("overhead under the default estimator (%s) = %d, want 0", llm.DefaultEstimator().Name(), got)
 	}
 }
 
@@ -723,5 +767,44 @@ func TestCompactionOfAHistoryThatCarriesAnotherHistorysTail(t *testing.T) {
 	}
 	if len(compacted) != 1 || len(compacted[0]) != len(history) {
 		t.Fatalf("compactions=%d, first input=%v; want the child's own history compacted whole", len(compacted), roles(compacted[0]))
+	}
+}
+
+// The prefill baseline counts the history only when the guard has none for it:
+// a later call on the same history, or one after a checkpoint was set, reuses
+// the recorded value without counting again.
+func TestPrefillEstimateIsLazy(t *testing.T) {
+	guard := newCompactRunGuard()
+	calls := 0
+	count := func(n int) func() int {
+		return func() int {
+			calls++
+			return n
+		}
+	}
+
+	if got := guard.prefill("run\x00a", count(120)); got != 120 {
+		t.Fatalf("first prefill = %d, want 120", got)
+	}
+	if got := guard.prefill("run\x00a", count(999)); got != 120 {
+		t.Fatalf("second prefill = %d, want the recorded 120", got)
+	}
+	if calls != 1 {
+		t.Fatalf("count ran %d times for two prefills of one history, want 1", calls)
+	}
+
+	guard.set("run\x00b", []llm.Message{llm.UserMessage(llm.Text("checkpoint"))}, 42)
+	if got := guard.prefill("run\x00b", count(999)); got != 42 {
+		t.Fatalf("prefill after set = %d, want the checkpoint's 42", got)
+	}
+	if got := guard.prefill("", count(999)); got != -1 {
+		t.Fatalf("prefill without a history key = %d, want -1", got)
+	}
+	var nilGuard *compactRunGuard
+	if got := nilGuard.prefill("run\x00c", count(999)); got != -1 {
+		t.Fatalf("prefill on a nil guard = %d, want -1", got)
+	}
+	if calls != 1 {
+		t.Fatalf("count ran %d times, want only the first history's one", calls)
 	}
 }

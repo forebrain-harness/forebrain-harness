@@ -3,9 +3,7 @@ package llm
 import "testing"
 
 func resetObserved() {
-	observedMu.Lock()
-	observed = map[string]*Observation{}
-	observedMu.Unlock()
+	ResetObservedForTest()
 }
 
 func TestSuccessProvesLowerBoundAndProjectsEstimate(t *testing.T) {
@@ -152,5 +150,53 @@ func TestObservationsAreNotSharedByCallersThatNameNoModel(t *testing.T) {
 	}
 	if got := Project("openai", "gpt-x", 100); got != 300 {
 		t.Fatalf("projected = %d, want 300 from the overhead this model itself demonstrated", got)
+	}
+}
+
+// The overhead is "provider count minus local estimate", so it belongs to the
+// estimator that made the estimate: a gap learned while the model was counted
+// with one estimator is not added to another's estimate. The window bounds are
+// facts about the model and are shared.
+func TestOverheadIsPerEstimator(t *testing.T) {
+	resetObserved()
+	RecordSuccessFor("zai", "glm-5.3", "rune_div4", 150_000, 100_000) // a 50k gap
+	RecordSuccessFor("zai", "glm-5.3", "glm-5", 104_000, 100_000)     // a 4k gap
+
+	if got := ProjectFor("zai", "glm-5.3", "rune_div4", 200_000); got != 250_000 {
+		t.Fatalf("rune_div4 projection = %d, want 250000", got)
+	}
+	if got := ProjectFor("zai", "glm-5.3", "glm-5", 200_000); got != 204_000 {
+		t.Fatalf("glm-5 projection = %d, want 204000 (its own overhead only)", got)
+	}
+	if got := ProjectFor("zai", "glm-5.3", "kimi-k3", 200_000); got != 200_000 {
+		t.Fatalf("projection for an estimator with no observation = %d, want the estimate unchanged", got)
+	}
+	if got := Project("zai", "glm-5.3", 200_000); got != 200_000 {
+		t.Fatalf("unnamed-estimator projection = %d, want the estimate unchanged", got)
+	}
+	if obs, ok := Get("zai", "glm-5.3"); !ok || obs.Overhead != 0 {
+		t.Fatalf("Get = %+v, %v; want an observation whose unnamed-estimator overhead is 0", obs, ok)
+	}
+
+	// ProvenInput is shared across estimators: either accepted size proves the
+	// window, and the larger one wins.
+	if got := EffectiveWindow("zai", "glm-5.3", 128_000); got != 150_000 {
+		t.Fatalf("window = %d, want 150000 proven under rune_div4", got)
+	}
+	RecordSuccessFor("zai", "glm-5.3", "glm-5", 180_000, 170_000)
+	if got := EffectiveWindow("zai", "glm-5.3", 128_000); got != 180_000 {
+		t.Fatalf("window = %d, want 180000 proven under glm-5", got)
+	}
+	// glm-5's overhead grew to 10k; rune_div4's is untouched.
+	if got := ProjectFor("zai", "glm-5.3", "glm-5", 200_000); got != 210_000 {
+		t.Fatalf("glm-5 projection = %d, want 210000", got)
+	}
+	if got := ProjectFor("zai", "glm-5.3", "rune_div4", 200_000); got != 250_000 {
+		t.Fatalf("rune_div4 projection = %d, want 250000", got)
+	}
+
+	ResetObservedForTest()
+	if got := ProjectFor("zai", "glm-5.3", "rune_div4", 200_000); got != 200_000 {
+		t.Fatalf("projection after ResetObservedForTest = %d, want the estimate unchanged", got)
 	}
 }

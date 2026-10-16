@@ -1032,7 +1032,7 @@ func importPlans(data *claudeData, opts *Options, progress func(Progress)) []Pla
 		normalized := string(bytes.TrimRight(body, "\n")) + "\n"
 		sessions := slugSessions[plan.Name]
 		if len(sessions) == 0 {
-			outcome := writeExtractedPlan(workspace, "", "", plan.Name, normalized, opts.DryRun)
+			outcome, _ := writeExtractedPlan(workspace, "", "", plan.Name, normalized, opts.DryRun)
 			if outcome.Status == "installed" {
 				outcome.Detail += " (no conversation matched this plan's slug)"
 			}
@@ -1041,7 +1041,8 @@ func importPlans(data *claudeData, opts *Options, progress func(Progress)) []Pla
 		}
 		for _, session := range sessions {
 			projectKey := memory.ProjectKey(session.Cwd)
-			out = append(out, writeExtractedPlan(workspace, projectKey, claudeSessionTarget(session.SessionID), plan.Name, normalized, opts.DryRun))
+			outcome, _ := writeExtractedPlan(workspace, projectKey, claudeSessionTarget(session.SessionID), plan.Name, normalized, opts.DryRun)
+			out = append(out, outcome)
 		}
 	}
 	return out

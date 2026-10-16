@@ -388,6 +388,9 @@ agents:
       # Default: empty means huggingface then modelscope, in that order.
       # Example: download order when a tokenizer is neither cached nor beside the binary.
       hubs: []
+      # Default: true.
+      # Example: download: false never downloads a missing tokenizer (offline or intranet installs).
+      download: true
       # Default: empty uses $HF_ENDPOINT, then https://huggingface.co.
       # Example: a HuggingFace mirror endpoint.
       huggingface_endpoint: ""
@@ -398,12 +401,12 @@ agents:
       # Example: the built-in tokenizer id used when no model prefix or provider matches.
       default_tokenizer: ""
       # Default: none.
-      # Example: map a model-name prefix to a built-in tokenizer id or a local tokenizer.json.
+      # Example: map a model-name prefix to a built-in tokenizer id or the absolute path of a local tokenizer.json.
       # tokenizers:
       #   - model: "my-model-prefix"
       #     tokenizer: "qwen-3.8"
       #   - model: "another-prefix"
-      #     path: "/path/to/tokenizer.json"
+      #     path: "/opt/tokenizers/my-model/tokenizer.json"
       tokenizers: []
     # Default: none.
     # Example: web search provider settings.

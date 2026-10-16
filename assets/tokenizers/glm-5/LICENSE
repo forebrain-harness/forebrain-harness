@@ -1,3 +1,5 @@
+The files here are converted to the tiktoken format by cmd/tokenizer2tiktoken from zai-org/GLM-5.3's tokenizer.json (sha256 19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d); the license below applies to them.
+
 GLM-5.3 License
 
 Copyright (c) 2026 Z.AI

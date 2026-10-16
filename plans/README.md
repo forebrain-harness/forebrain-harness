@@ -122,6 +122,7 @@
   - ⑤ **口径**：观测开销不分估算器；压缩内部与上下文面板仍用默认估算器（069）。
   
   另见（不在 038–042 范围，未立计划）：`pkg/state` 的 `TestLastActiveByIDs` 在 `-race` 下偶发失败（时间戳只精确到秒）。
+  **执行结果（2026-10-16）**：065–069 全部 APPROVE，经执行者在基于 dev 的 worktree 中实施，评审方逐个复跑完成标准后以 `git apply` 并回主树工作区（dev `7155be9`，未提交；`graph.json` 每次在主树重新生成）。worktree 起初误从 main（`bd2b8b8`）建出，已切到 dev；owner 要求今后一律从 dev 建 worktree。065 计划误把计数差异归因于 merges 顺序，实为 tokenizer.json 把正文里的 added token 字面量当单个 token（量级不变）。
 
   035 的通道凭据存储 D-035-1：owner 已选方案 A（状态库新表 + `.env` 引用）。
 - **上上轮（004）**：多 TUI 进程 plan 模式计划文件串台
@@ -195,11 +196,11 @@
 | [062-docs-reality-alignment](062-docs-reality-alignment.md) | 文档对齐 pdfium 现实：README/CONTRIBUTING 的 Requirements 补 `pkg-config`+`jq`、day-to-day 裸 `go build`/vet 块补 `make pdfium pdfium-fonts` 与 `PKG_CONFIG_PATH`；Makefile `PKG_CONFIG_PATH` 未设时的尾随空 entry；归档脚本头注释补 fonts/libpdfium；plans/README:16「check-go-install 均已接线」改如实陈述；RELEASING re-tag 段不再断言"proxy 已记录"（go-install 管线已删）；6d1730e（主题"…"）的"go install 下架"决定写成 PR 描述补记文案 | DX / Docs | **DONE**（2026-10-16；附根因修复：make pdfium 在 HEAD 因下划线三元组必败，已改裸脚本调用） | **P2** | S | LOW |
 | [063-attachment-image-budget](063-attachment-image-budget.md) | 用户附件/粘贴路径统一走图片预算（owner 2026-10-16 拍板：附件与工具结果同契约）：`llm.ImageFile` 内部改走 `ImagePartWithin(…, 0)`——≤预算（默认 3 MiB，`FOREBRAIN_IMAGE_MAX_BYTES` 可调）**逐字节直发**、超预算走既有确定性阶梯、>48 MiB 可执行拒绝；live 与 rehydrate 同函数保证 resume 后 part 逐字节一致；存量超大附件会话升级后有一次缓存前缀位移（如实记录，不做兼容开关） | Correctness / Cost | **DONE**（2026-10-16；遗留：存量超大附件会话升级后一次缓存前缀位移，如实记录不修） | **P2** | S/M | MED |
 | [064-windows-ntdll-link-order](064-windows-ntdll-link-order.md) | **执行期新发现**（056 容器复现暴露）：`pkg/llm/hftok/link.go` 的 `-lntdll` 先于 daulet 模块的 `-ltokenizers`，Rust≥1.87 构建的 libtokenizers.a 引用 7 个 NT 符号（NtCreateFile…），GNU ld 左到右解析 → Windows 链接必失败（此前被 `cannot find -lpdfium` 掩盖，056 修好后必然浮出）。修复：windows LDFLAGS 改 `--start-group/-ltokenizers -lntdll …/--end-group` 分组包裹；darwin/linux 旗标逐字节不动 | Build / Correctness | **DONE**（2026-10-16 执行+评审 APPROVE，未提交；容器红/绿 + objdump 双 DLL import + 评审侧挂宿主模块缓存独立复验；**Windows CI 变绿前提＝056+064**） | **P1** | S/M | MED |
-| [065-tokenizers-as-tiktoken](065-tokenizers-as-tiktoken.md) | gpt-o200k、glm-5、grok-2、qwen-3.8、minimax-m2、mimo-v2.5 改以 tiktoken 格式随包分发与加载（常驻内存降到约 1/5、计数快约 3 倍）；下载回退取源 tokenizer.json 本地转换；清理旧缓存文件 | Perf / Resource | TODO | **P1** | M | MED |
-| [066-memoize-token-counts](066-memoize-token-counts.md) | 估算器按内容记忆计数；prefill 基线只在需要时才算（长会话每次 LLM 调用省约 1s CPU） | Perf | TODO | **P1** | S | LOW |
-| [067-token-estimate-config-semantics](067-token-estimate-config-semantics.md) | `hubs` 为空即默认、`download: false` 关闭下载、覆盖路径必须绝对、日志如实、废弃键只告警一次、失败可在重载后重试 | Bug Fix / Config | TODO | **P1** | S | LOW |
-| [068-fetch-libtokenizers-shell-fixes](068-fetch-libtokenizers-shell-fixes.md) | `fetch-libtokenizers.sh` 在 bash 3.2 下空数组不再退出；Windows 编译器提示的 `MINGW` 判断真正生效 | Bug Fix / Build | TODO | P3 | S | LOW |
-| [069-estimator-consistency-in-compaction](069-estimator-consistency-in-compaction.md) | 观测开销按估算器分开；压缩内部（摘要预算、裁剪、卡片数字）与上下文面板用会话模型的估算器 | Correctness | TODO | P2 | M | LOW–MED |
+| [065-tokenizers-as-tiktoken](065-tokenizers-as-tiktoken.md) | gpt-o200k、glm-5、grok-2、qwen-3.8、minimax-m2、mimo-v2.5 改以 tiktoken 格式随包分发与加载（常驻内存降到约 1/5、计数快约 3 倍）；下载回退取源 tokenizer.json 本地转换；清理旧缓存文件 | Perf / Resource | DONE（2026-10-16 执行完毕，评审 APPROVE；worktree `.claude/worktrees/agent-a757f0d0c2c046bc0`（detached 于 dev `fa4af8a`）；**已与 066 一起 `git apply` 并回主树工作区（dev `7155be9`），未提交**，主树复跑 10 个包全绿、`graph.json` 按主树重新生成。端到端实测 glm 会话 + 默认估算器常驻约 520MB→约 170MB；STOP 4 系语料混入新测试文件的特殊 token 字面量所致，原始语料与计划表一致；计划把差异原因误写为 merges 顺序，实为 tokenizer.json 把正文里的 added token 字面量当单个 token，已在代码注释与 assets README 改正）| **P1** | M | MED |
+| [066-memoize-token-counts](066-memoize-token-counts.md) | 估算器按内容记忆计数；prefill 基线只在需要时才算（长会话每次 LLM 调用省约 1s CPU） | Perf | DONE（2026-10-16 执行完毕，评审 APPROVE；基准 2.36MB 历史首遍 91ms→第二遍 2.9ms；**已与 065 一起并回主树工作区，未提交**）| **P1** | S | LOW |
+| [067-token-estimate-config-semantics](067-token-estimate-config-semantics.md) | `hubs` 为空即默认、`download: false` 关闭下载、覆盖路径必须绝对、日志如实、废弃键只告警一次、失败可在重载后重试 | Bug Fix / Config | DONE（2026-10-16 执行完毕，评审 APPROVE；**已并回主树工作区（dev `7155be9`），未提交**；偏差：新增 `pkg/run/runner_test.go`、映射提为 `tokenEstimateOptions`，均接受）| **P1** | S | LOW |
+| [068-fetch-libtokenizers-shell-fixes](068-fetch-libtokenizers-shell-fixes.md) | `fetch-libtokenizers.sh` 在 bash 3.2 下空数组不再退出；Windows 编译器提示的 `MINGW` 判断真正生效 | Bug Fix / Build | DONE（2026-10-16 执行完毕，评审 APPROVE；worktree `.claude/worktrees/agent-aacb0c98b12b26520`（detached 于 dev `fa4af8a`）；**已按 owner 2026-10-16 指示 `git apply` 并回主树工作区（dev `7155be9`），未提交**）| P3 | S | LOW |
+| [069-estimator-consistency-in-compaction](069-estimator-consistency-in-compaction.md) | 观测开销按估算器分开；压缩内部（摘要预算、裁剪、卡片数字）与上下文面板用会话模型的估算器 | Correctness | DONE（2026-10-16 执行完毕，评审 APPROVE；**已并回主树工作区（dev `7155be9`），未提交**；新增 `pkg/assembly/hook_test.go`，旧测试改读 `ProjectFor`，均接受）| P2 | M | LOW–MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 

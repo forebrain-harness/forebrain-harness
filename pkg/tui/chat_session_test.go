@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -25577,15 +25578,20 @@ func TestSelectionHighlightWideRunesAligned(t *testing.T) {
 	if !strings.Contains(highlighted, "\x1b[48;5;24m") {
 		t.Fatalf("expected selection background applied, got %q", highlighted)
 	}
-	// The highlight must end (via \x1b[49m) before the first unselected rune
-	// '世'. i.e. the reset escape must precede "世界".
-	idxReset := strings.Index(highlighted, "\x1b[49m")
+	// The highlight must end before the first unselected rune '世'. The leave
+	// marker is now \x1b[0m plus a replay of the row's own ops (here: none)
+	// instead of a bare \x1b[49m — leaving the selection must restore the row's
+	// state, not reset the background to the terminal default.
+	idxLeave := strings.Index(highlighted, "\x1b[0m")
 	idxUnsel := strings.Index(highlighted, "世界")
-	if idxReset < 0 {
-		t.Fatalf("expected a \\x1b[49m reset in highlighted output, got %q", highlighted)
+	if idxLeave < 0 {
+		t.Fatalf("expected a \\x1b[0m leave marker in highlighted output, got %q", highlighted)
 	}
-	if idxUnsel < 0 || idxReset >= idxUnsel {
-		t.Fatalf("selection background should reset before '世界', got reset@%d unsel@%d: %q", idxReset, idxUnsel, highlighted)
+	if strings.Contains(highlighted, "\x1b[49m") {
+		t.Fatalf("leaving the selection must not emit a bare \\x1b[49m, got %q", highlighted)
+	}
+	if idxUnsel < 0 || idxLeave >= idxUnsel {
+		t.Fatalf("selection background should be restored before '世界', got leave@%d unsel@%d: %q", idxLeave, idxUnsel, highlighted)
 	}
 }
 
@@ -25608,6 +25614,166 @@ func TestSelectionRowOnFullWidthFooterKeepsLastCell(t *testing.T) {
 	plain := stripANSI(row)
 	if !strings.HasSuffix(plain, "M") {
 		t.Fatalf("the footer's last painted character must survive the selection layer: %q (plain %q)", row, plain)
+	}
+}
+
+// rowCellBackgrounds walks one painted row with a single SGR state machine and
+// returns the active background sequence of every visible cell. Assertions on
+// selection and hover decoration are about what the terminal ends up showing
+// per cell, which reading the raw escape soup cannot establish.
+func rowCellBackgrounds(line string) []string {
+	bg := ""
+	var cells []string
+	for i := 0; i < len(line); {
+		if line[i] == '\x1b' {
+			j := escapeSeqEnd(line, i)
+			seq := line[i:j]
+			switch {
+			case sgrIsFullReset(seq), seq == "\x1b[49m":
+				bg = ""
+			case sgrSetsBackground(seq):
+				bg = seq
+			}
+			i = j
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(line[i:])
+		w := lipgloss.Width(string(r))
+		for k := 0; k < w && w > 0; k++ {
+			cells = append(cells, bg)
+		}
+		i += size
+	}
+	return cells
+}
+
+// TestSelectionLeaveRestoresUnderlyingStyle pins the exit half of the selection
+// decoration: leaving the selection must replay the row's own SGR ops rather
+// than resetting the background to the terminal default. The player was a bare
+// \x1b[49m, which unpainted every cell after the release point until the row's
+// next background op — for a composer row released inside the pad, the whole
+// rest of the line.
+func TestSelectionLeaveRestoresUnderlyingStyle(t *testing.T) {
+	const (
+		cardBg = "\x1b[38;5;252;48;5;238m"
+		selBg  = "\x1b[48;5;24m"
+		codeFg = "\x1b[38;5;203m"
+	)
+	// A composer text row: the card's combined fg+bg opener, a code-coloured
+	// segment, then the pad boundary re-opening the card background — the shape
+	// renderSharedBlockPromptLine produces.
+	line := cardBg + "ab" + codeFg + "cd" + cardBg + "    "
+	painted := applySelectionHighlight(line, selBg, 1, 3)
+	if strings.Contains(painted, "\x1b[49m") {
+		t.Fatalf("leaving the selection must not emit a bare \\x1b[49m: %q", painted)
+	}
+	// The leave point replays the row's state as it was there: the card
+	// background and the foreground of the segment the release landed in.
+	if !strings.Contains(painted, "\x1b[0m"+cardBg+codeFg) {
+		t.Fatalf("leaving the selection must reset and replay the row's own ops: %q", painted)
+	}
+	cells := rowCellBackgrounds(painted)
+	if len(cells) != 8 {
+		t.Fatalf("expected 8 cells, got %d: %q", len(cells), painted)
+	}
+	if cells[0] != cardBg {
+		t.Fatalf("cell 0 before the selection must keep the card background, got %q", cells[0])
+	}
+	for _, c := range []int{1, 2} {
+		if cells[c] != selBg {
+			t.Fatalf("cell %d must carry the selection background, got %q: %q", c, cells[c], painted)
+		}
+	}
+	for _, c := range []int{3, 4, 5, 6, 7} {
+		if cells[c] != cardBg {
+			t.Fatalf("cell %d after the selection must keep the card background, got %q: %q", c, cells[c], painted)
+		}
+	}
+}
+
+// TestSelectionCoversStyledPadRunes pins the entry half: a background-setting SGR
+// inside the selection (the card's pad-boundary re-opener) must not knock the
+// highlight out, so a drag that overshoots the text keeps highlighting the pad.
+func TestSelectionCoversStyledPadRunes(t *testing.T) {
+	const (
+		cardBg = "\x1b[38;5;252;48;5;238m"
+		selBg  = "\x1b[48;5;24m"
+	)
+	line := cardBg + "ab" + cardBg + strings.Repeat(" ", 10)
+	painted := applySelectionHighlight(line, selBg, 1, 8)
+	cells := rowCellBackgrounds(painted)
+	if len(cells) != 12 {
+		t.Fatalf("expected 12 cells, got %d: %q", len(cells), painted)
+	}
+	for c := 1; c < 8; c++ {
+		if cells[c] != selBg {
+			t.Fatalf("cell %d inside the selection must be highlighted across the pad boundary, got %q: %q", c, cells[c], painted)
+		}
+	}
+	for c := 0; c < 1; c++ {
+		if cells[c] != cardBg {
+			t.Fatalf("cell %d before the selection must keep the card background, got %q", c, cells[c])
+		}
+	}
+	for c := 8; c < 12; c++ {
+		if cells[c] != cardBg {
+			t.Fatalf("cell %d after the selection must return to the card background, got %q: %q", c, cells[c], painted)
+		}
+	}
+}
+
+// TestSelectionHighlightsImageChipBackground is the chip regression: the
+// composer's "[Image #1]" placeholder carries its own fg15/bg27, so a selection
+// covering it must re-assert the selection background after that chip's own
+// background op — and restore the chip's background where the chip continues
+// past the release point.
+func TestSelectionHighlightsImageChipBackground(t *testing.T) {
+	forceColorProfile(t)
+	const selBg = "\x1b[48;5;24m"
+	chip := renderComposerImagePlaceholder(0)
+	chipBg := rowCellBackgrounds(chip)[0]
+	if chipBg == "" {
+		t.Fatalf("fixture: the image chip must carry its own background, got %q", chip)
+	}
+	line := chip + "look"
+	cells := rowCellBackgrounds(applySelectionHighlight(line, selBg, 2, 6))
+	if len(cells) != len(rowCellBackgrounds(line)) {
+		t.Fatalf("the decoration must not change the row's width: %q", line)
+	}
+	if cells[0] != chipBg || cells[1] != chipBg {
+		t.Fatalf("cells before the selection must keep the chip background, got %q/%q", cells[0], cells[1])
+	}
+	for c := 2; c < 6; c++ {
+		if cells[c] != selBg {
+			t.Fatalf("cell %d inside the chip must carry the selection background, got %q", c, cells[c])
+		}
+	}
+	for c := 6; c < 10; c++ {
+		if cells[c] != chipBg {
+			t.Fatalf("cell %d after the selection must be restored to the chip background, got %q", c, cells[c])
+		}
+	}
+}
+
+// TestSelectionAbsentLeavesRowBytesUnchanged is the no-selection red line: when
+// no cell is selected the decorator is a pass-through, byte for byte. Everything
+// else about the painter may change shape; this may not.
+func TestSelectionAbsentLeavesRowBytesUnchanged(t *testing.T) {
+	forceColorProfile(t)
+	rows := []string{
+		"plain text",
+		"\x1b[38;5;252;48;5;238m› text\x1b[38;5;252;48;5;238m   \x1b[0m",
+		renderComposerImagePlaceholder(0) + "look at this",
+		"\x1b[2m" + layoutComposerFooter("glm · high", "100%/1M", 40) + "\x1b[0m",
+		"\x1b[1;93m•\x1b[0m \x1b[1;93mRan\x1b[0m echo\x1b[0m",
+	}
+	for _, row := range rows {
+		for _, span := range [][2]int{{0, 0}, {4, 4}, {len(row), len(row)}} {
+			got := applySelectionHighlight(row, "\x1b[48;5;24m", span[0], span[1])
+			if got != row {
+				t.Fatalf("an empty selection [%d,%d) must leave the row unchanged:\n got %q\nwant %q", span[0], span[1], got, row)
+			}
+		}
 	}
 }
 
@@ -27416,6 +27582,35 @@ func TestViewportHoverBackgroundReappliedAfterReset(t *testing.T) {
 	// "•\x1b[0m\x1b[48;5;236m " — the space after bullet has the background.
 	if !strings.Contains(painted, "\x1b[0m"+hoverBgSeq+" \x1b[1;93mRan") {
 		t.Fatalf("background not re-applied before 'Ran' segment:\n%q", painted)
+	}
+}
+
+// TestHoverBackgroundSurvivesRowBackgroundOps is the hover half of the same
+// defect: the hover background must be re-asserted after every sequence that
+// takes the background away — not only after a full reset. A clickable row that
+// carries a card background (bg238) or an inline chip (bg27) otherwise loses the
+// hover fill at that boundary, exactly where the selection used to lose its own
+// highlight.
+func TestHoverBackgroundSurvivesRowBackgroundOps(t *testing.T) {
+	forceColorProfile(t)
+	const (
+		hoverBgSeq = "\x1b[48;5;236m"
+		cardBg     = "\x1b[38;5;252;48;5;238m"
+		width      = 40
+	)
+	line := cardBg + "ab" + "\x1b[38;5;203m" + "cd" + renderComposerImagePlaceholder(0) + " tail\x1b[0m"
+	painted := applyHoverHighlight(line, width, hoverBgSeq)
+	if strings.Contains(painted, "\x1b[K") {
+		t.Fatalf("hover row must not rely on \\x1b[K for the edge fill:\n%q", painted)
+	}
+	cells := rowCellBackgrounds(painted)
+	if len(cells) != width {
+		t.Fatalf("hover row spans %d cells, want the full %d: %q", len(cells), width, painted)
+	}
+	for i, bg := range cells {
+		if bg != hoverBgSeq {
+			t.Fatalf("cell %d lost the hover background to %q: %q", i, bg, painted)
+		}
 	}
 }
 

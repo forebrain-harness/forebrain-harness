@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 )
@@ -672,7 +674,10 @@ func TestReimportRebindsProjectlessMigratedConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, outcome := range third.Sessions {
-		if outcome.Status != StatusSkipped || outcome.Reason != "already migrated" {
+		// The second run healed the rows and wrote the ledger fingerprints
+		// for them, so the third run settles each unit on the fast path:
+		// skipped as unchanged rather than re-parsed "already migrated".
+		if outcome.Status != StatusSkipped || outcome.Reason != reasonUnchangedSinceLastRun {
 			t.Fatalf("third run is not the idempotent skip: %+v", outcome)
 		}
 	}
@@ -1049,9 +1054,10 @@ func TestRealDataImportIntoIsolatedHome(t *testing.T) {
 	if failed != 0 || owned != 0 {
 		t.Fatalf("real import: failed=%d owned=%d", failed, owned)
 	}
-	if plan.Sessions+plan.Subagents != migrated+skipped {
-		t.Fatalf("plan offered %d+%d, run migrated %d skipped %d — arithmetic broken",
-			plan.Sessions, plan.Subagents, migrated, skipped)
+	updatedUnits, _ := report.countUpdated()
+	if plan.Sessions+plan.Subagents+plan.Updated != migrated+skipped+updatedUnits {
+		t.Fatalf("plan offered %d+%d+%d updated, run migrated %d skipped %d updated %d — arithmetic broken",
+			plan.Sessions, plan.Subagents, plan.Updated, migrated, skipped, updatedUnits)
 	}
 	if migrated == 0 {
 		t.Fatal("nothing migrated on a first run over real data")
@@ -1201,5 +1207,477 @@ func TestDiscoverClaudeReadsOnlyTheChosenHomesConfig(t *testing.T) {
 	}
 	if _, ok := data.UserMCP["from-this-machine"]; ok || len(data.JSONProjectPaths) != 0 {
 		t.Fatalf("this machine's ~/.claude.json leaked into another home: %+v %v", data.UserMCP, data.JSONProjectPaths)
+	}
+}
+
+// ---- migrated from incremental_test.go (tests for this file's production code) ----
+
+// incremental_test.go pins the incremental-migration contract: an unchanged
+// transcript is never parsed again (proven by corrupting a file in place,
+// keeping its size and mtime — a run that re-parsed it would fail), a
+// transcript that grew appends only the new rows, a first sighting of an
+// already-migrated conversation keeps today's semantics while backfilling
+// the ledger, and a Codex unit's extracted plans survive the fast path with
+// their three-state idempotency intact.
+
+// rewriteKeepingStat overwrites a file with same-length garbage while
+// preserving its size and mtime, so the ledger fingerprint still matches and
+// only a run that actually re-parses the file can notice.
+func rewriteKeepingStat(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	garbage := strings.Repeat("x", len(body))
+	if err := os.WriteFile(path, []byte(garbage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != info.Size() || after.ModTime() != info.ModTime() {
+		t.Fatalf("stat drifted: size %d→%d mtime %v→%v", info.Size(), after.Size(), info.ModTime(), after.ModTime())
+	}
+}
+
+// appendSessionRecords appends transcript records to a session file and moves
+// its mtime forward, the shape of a source conversation that kept running
+// after the last import.
+func appendSessionRecords(t *testing.T, path, cwd string, records []string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if _, err := file.WriteString(record + "\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(path, later, later); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// claudeDeltaRecords is two new messages plus a later AI title, the tail a
+// grown Claude conversation appends.
+func claudeDeltaRecords(cwd string) []string {
+	return []string{
+		fmt.Sprintf(`{"type":"user","uuid":"u-delta1","timestamp":"2026-09-02T10:00:00Z","cwd":%q,"gitBranch":"main","sessionId":"s-fix","message":{"role":"user","content":"a question asked after the import"}}`, cwd),
+		fmt.Sprintf(`{"type":"assistant","uuid":"u-delta2","timestamp":"2026-09-02T10:00:05Z","cwd":%q,"gitBranch":"main","sessionId":"s-fix","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"an answer given after the import"}]}}`, cwd),
+		`{"type":"ai-title","sessionId":"s-fix","aiTitle":"Grown Title"}`,
+	}
+}
+
+func messageCount(t *testing.T, ctx context.Context, opts *Options, sessionID string) int {
+	t.Helper()
+	var n int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages WHERE session_id=?`, sessionID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestUnchangedTranscriptIsNotParsedAgain is the black-box proof of the
+// incremental contract: after a successful import, a transcript replaced with
+// same-size, same-mtime garbage still reports as imported-and-unchanged,
+// which is only possible if the run never parsed it.
+func TestUnchangedTranscriptIsNotParsedAgain(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := messageCount(t, ctx, opts, "cli-s-fix")
+	if rows == 0 {
+		t.Fatal("first run imported nothing")
+	}
+	rewriteKeepingStat(t, filepath.Join(fixture.projectDir, "s-fix.jsonl"))
+
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range second.Sessions {
+		if outcome.TargetID != "cli-s-fix" {
+			continue
+		}
+		if outcome.Status != StatusSkipped || outcome.Reason != reasonUnchangedSinceLastRun {
+			t.Fatalf("unchanged transcript was parsed again: %+v", outcome)
+		}
+	}
+	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != rows {
+		t.Fatalf("second run changed the row count: %d → %d", rows, after)
+	}
+}
+
+// TestGrownTranscriptAppendsOnlyNewRows pins the owner ruling that the
+// incremental semantics include a migrated conversation gaining messages: the
+// second run appends exactly the new records, moves updated_at and the title,
+// and the third run settles onto the unchanged fast path.
+func TestGrownTranscriptAppendsOnlyNewRows(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	base := messageCount(t, ctx, opts, "cli-s-fix")
+	var updatedAtBefore int64
+	if err := opts.DB.QueryRowContext(ctx, `SELECT updated_at FROM fb_sessions WHERE id='cli-s-fix'`).Scan(&updatedAtBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	appendSessionRecords(t, filepath.Join(fixture.projectDir, "s-fix.jsonl"), fixture.projectPath, claudeDeltaRecords(fixture.projectPath))
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated *SessionOutcome
+	for i := range second.Sessions {
+		if second.Sessions[i].TargetID == "cli-s-fix" {
+			updated = &second.Sessions[i]
+		}
+	}
+	if updated == nil || updated.Status != StatusUpdated {
+		t.Fatalf("grown transcript not updated: %+v", second.Sessions)
+	}
+	if updated.Messages != 2 {
+		t.Fatalf("appended %d rows, want the 2 new ones", updated.Messages)
+	}
+	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != base+2 {
+		t.Fatalf("rows %d → %d, want %d", base, after, base+2)
+	}
+	var updatedAtAfter int64
+	var title string
+	if err := opts.DB.QueryRowContext(ctx, `SELECT updated_at, title FROM fb_sessions WHERE id='cli-s-fix'`).Scan(&updatedAtAfter, &title); err != nil {
+		t.Fatal(err)
+	}
+	if updatedAtAfter <= updatedAtBefore {
+		t.Fatalf("updated_at did not advance: %d → %d", updatedAtBefore, updatedAtAfter)
+	}
+	if title != "Grown Title" {
+		t.Fatalf("title = %q, want the grown transcript's later AI title", title)
+	}
+	units, messages := second.countUpdated()
+	if units != 1 || messages != 2 {
+		t.Fatalf("countUpdated = %d units %d messages, want 1/2", units, messages)
+	}
+	if text := second.Text(); !strings.Contains(text, "1 updated (2 new messages)") {
+		t.Fatalf("report text lost the updated line:\n%s", text)
+	}
+
+	// Third run: the fingerprint recorded by the append settles everything
+	// onto the fast path, and nothing is written again.
+	third, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range third.Sessions {
+		if outcome.Status != StatusSkipped || outcome.Reason != reasonUnchangedSinceLastRun {
+			t.Fatalf("third run did not settle: %+v", outcome)
+		}
+	}
+	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != base+2 {
+		t.Fatalf("third run changed the row count: %d", after)
+	}
+}
+
+// TestNewTranscriptImportsOnIncrementalRun pins that a conversation the
+// ledger has never seen takes today's full-import path even when every other
+// unit is skipped.
+func TestNewTranscriptImportsOnIncrementalRun(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(fixture.projectDir, "s-new.jsonl")
+	body := fmt.Sprintf(`{"type":"user","uuid":"un-1","timestamp":"2026-09-03T10:00:00Z","cwd":%q,"gitBranch":"main","sessionId":"s-new","message":{"role":"user","content":"a brand new conversation"}}
+{"type":"assistant","uuid":"un-2","timestamp":"2026-09-03T10:00:05Z","cwd":%q,"gitBranch":"main","sessionId":"s-new","message":{"role":"assistant","model":"claude-sonnet-5","content":[{"type":"text","text":"its first answer"}]}}
+`, fixture.projectPath, fixture.projectPath)
+	if err := os.WriteFile(fresh, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migrated *SessionOutcome
+	for i := range second.Sessions {
+		if second.Sessions[i].TargetID == "cli-s-new" {
+			migrated = &second.Sessions[i]
+		}
+	}
+	if migrated == nil || migrated.Status != StatusMigrated {
+		t.Fatalf("new conversation not imported: %+v", second.Sessions)
+	}
+	if got := messageCount(t, ctx, opts, "cli-s-new"); got != 2 {
+		t.Fatalf("new conversation rows = %d, want 2", got)
+	}
+}
+
+// TestLedgerBackfillKeepsUpgradeSemantics pins the upgrade ruling: a
+// conversation migrated before the ledger existed is skipped with today's
+// reason on its first sighting, the fingerprint is backfilled from the file
+// as it now stands, and the tail the file grew before the upgrade stays out —
+// exactly the pre-upgrade behavior, zero semantics change.
+func TestLedgerBackfillKeepsUpgradeSemantics(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	base := messageCount(t, ctx, opts, "cli-s-fix")
+	if _, err := opts.DB.ExecContext(ctx, `DELETE FROM fb_migration_units`); err != nil {
+		t.Fatal(err)
+	}
+
+	appendSessionRecords(t, filepath.Join(fixture.projectDir, "s-fix.jsonl"), fixture.projectPath, claudeDeltaRecords(fixture.projectPath))
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range second.Sessions {
+		if outcome.TargetID != "cli-s-fix" {
+			continue
+		}
+		if outcome.Status != StatusSkipped || outcome.Reason != "already migrated" {
+			t.Fatalf("first sighting after an upgrade must keep today's semantics: %+v", outcome)
+		}
+	}
+	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != base {
+		t.Fatalf("backfill imported the pre-upgrade tail: %d → %d", base, after)
+	}
+	var ledgerRows int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&ledgerRows); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerRows != 1 {
+		t.Fatalf("ledger rows for cli-s-fix = %d, want the backfill", ledgerRows)
+	}
+
+	// The backfilled fingerprint now covers the grown file: the next run
+	// takes the fast path, and the tail is still out.
+	third, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range third.Sessions {
+		if outcome.TargetID == "cli-s-fix" && (outcome.Status != StatusSkipped || outcome.Reason != reasonUnchangedSinceLastRun) {
+			t.Fatalf("run after backfill did not take the fast path: %+v", outcome)
+		}
+	}
+	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != base {
+		t.Fatalf("post-backfill run changed the row count: %d → %d", base, after)
+	}
+}
+
+// TestDryRunReportsUpdatesAndWritesNothing pins the preview half: a dry run
+// takes the same fast path, reports the would-be append, and writes neither
+// rows nor ledger fingerprints.
+func TestDryRunReportsUpdatesAndWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	base := messageCount(t, ctx, opts, "cli-s-fix")
+	appendSessionRecords(t, filepath.Join(fixture.projectDir, "s-fix.jsonl"), fixture.projectPath, claudeDeltaRecords(fixture.projectPath))
+	var ledgerBefore string
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT source_path || ':' || source_bytes || ':' || source_mtime_ms FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&ledgerBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	dryOpts := *opts
+	dryOpts.DryRun = true
+	plan, report, err := PlanClaude(ctx, &dryOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Updated != 1 || plan.UpdatedMessages != 2 {
+		t.Fatalf("plan updated = %d/%d, want 1 unit 2 messages", plan.Updated, plan.UpdatedMessages)
+	}
+	if plan.MessageRows != 2 {
+		t.Fatalf("plan message rows = %d, want only the 2 delta rows", plan.MessageRows)
+	}
+	if text := plan.Text(); !strings.Contains(text, "to update") {
+		t.Fatalf("plan text lost the update wording:\n%s", text)
+	}
+	if text := report.Text(); !strings.Contains(text, "to update (2 new messages)") {
+		t.Fatalf("report text lost the update wording:\n%s", text)
+	}
+	if after := messageCount(t, ctx, opts, "cli-s-fix"); after != base {
+		t.Fatalf("dry run wrote rows: %d → %d", base, after)
+	}
+	var ledgerAfter string
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT source_path || ':' || source_bytes || ':' || source_mtime_ms FROM fb_migration_units WHERE target_id='cli-s-fix'`).Scan(&ledgerAfter); err != nil {
+		t.Fatal(err)
+	}
+	if ledgerAfter != ledgerBefore {
+		t.Fatalf("dry run moved the ledger: %q → %q", ledgerBefore, ledgerAfter)
+	}
+}
+
+// ledgerPlanPaths decodes the plan records a target's ledger row carries.
+func ledgerPlanPaths(t *testing.T, ctx context.Context, opts *Options, target string) []ledgerPlanRecord {
+	t.Helper()
+	var plansJSON sql.NullString
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT plans_json FROM fb_migration_units WHERE target_id=?`, target).Scan(&plansJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !plansJSON.Valid || plansJSON.String == "" {
+		t.Fatalf("target %s has no settled plan records", target)
+	}
+	var records []ledgerPlanRecord
+	if err := json.Unmarshal([]byte(plansJSON.String), &records); err != nil {
+		t.Fatal(err)
+	}
+	return records
+}
+
+// TestCodexPlansSurviveTheFastPath pins the capture dependency the fast path
+// must not break: a second run reports the unit's plan as up-to-date without
+// parsing, a deleted plan file forces the parse that re-extracts it, and a
+// hand-edited plan file is reported diverged and never overwritten.
+func TestCodexPlansSurviveTheFastPath(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureCodexHome(t)
+	opts := fixture.options(t, false)
+	opts.Consolidate = func(context.Context, string) error { return nil }
+
+	first, err := RunCodex(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Plans) != 1 || first.Plans[0].Status != "installed" {
+		t.Fatalf("first run plans = %+v", first.Plans)
+	}
+	records := ledgerPlanPaths(t, ctx, opts, "cli-t-codex-main")
+	if len(records) != 1 {
+		t.Fatalf("ledger plan records = %+v", records)
+	}
+	planFile := records[0].Path
+	if body, err := os.ReadFile(planFile); err != nil || len(body) == 0 {
+		t.Fatalf("plan file missing after first run: %v", err)
+	}
+
+	// Second run: unchanged rollout with intact plan — parsed by nobody, and
+	// the plan still reports (as up-to-date, the state a third run of the
+	// old code would have printed after re-extracting it).
+	second, err := RunCodex(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range second.Sessions {
+		if outcome.Status != StatusSkipped || outcome.Reason != reasonUnchangedSinceLastRun {
+			t.Fatalf("unchanged rollout was parsed again: %+v", outcome)
+		}
+	}
+	if len(second.Plans) != 1 || second.Plans[0].Status != "up-to-date" || second.Plans[0].Name != first.Plans[0].Name {
+		t.Fatalf("second run plans = %+v, want the same plan up-to-date", second.Plans)
+	}
+
+	// Delete the plan file: the fast path must refuse, the transcript must
+	// be parsed again, and the extraction must heal the file.
+	if err := os.Remove(planFile); err != nil {
+		t.Fatal(err)
+	}
+	third, err := RunCodex(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Plans) != 1 || third.Plans[0].Status != "installed" {
+		t.Fatalf("deleted plan not healed: %+v", third.Plans)
+	}
+	if body, err := os.ReadFile(planFile); err != nil || len(body) == 0 {
+		t.Fatalf("plan file not rewritten: %v", err)
+	}
+
+	// Hand-edit the plan file: the hash mismatch forces the parse, and the
+	// extraction reports diverged without overwriting the user's version.
+	edited := []byte("# my own notes now\n")
+	if err := os.WriteFile(planFile, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := RunCodex(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fourth.Plans) != 1 || fourth.Plans[0].Status != "diverged" {
+		t.Fatalf("diverged plan not reported: %+v", fourth.Plans)
+	}
+	if body, err := os.ReadFile(planFile); err != nil || string(body) != string(edited) {
+		t.Fatalf("diverged plan was overwritten: %v", err)
+	}
+}
+
+// TestCodexGrownRolloutAppendsOnlyNewRows is the Codex side of the growth
+// ruling, and pins that the parse's message ids — including the synthetic
+// ones — are stable: re-parsing the whole grown rollout appends exactly the
+// two new records, never a duplicate of the rows it already wrote.
+func TestCodexGrownRolloutAppendsOnlyNewRows(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureCodexHome(t)
+	opts := fixture.options(t, false)
+	opts.Consolidate = func(context.Context, string) error { return nil }
+
+	if _, err := RunCodex(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	base := messageCount(t, ctx, opts, "cli-t-codex-main")
+	rollout := filepath.Join(fixture.root, "sessions", "2026", "09", "17", "rollout-2026-09-17T01-00-00-t-codex-main.jsonl")
+	delta := []string{
+		`{"timestamp":"2026-09-17T03:00:00.000Z","type":"response_item","payload":{"type":"message","id":"msg_delta_u1","role":"user","content":[{"type":"input_text","text":"a later question"}]}}`,
+		`{"timestamp":"2026-09-17T03:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg_delta_a1","role":"assistant","content":[{"type":"output_text","text":"a later answer"}]}}`,
+	}
+	appendSessionRecords(t, rollout, fixture.projectPath, delta)
+
+	second, err := RunCodex(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated *SessionOutcome
+	for i := range second.Sessions {
+		if second.Sessions[i].TargetID == "cli-t-codex-main" {
+			updated = &second.Sessions[i]
+		}
+	}
+	if updated == nil || updated.Status != StatusUpdated || updated.Messages != 2 {
+		t.Fatalf("grown rollout not appended: %+v", second.Sessions)
+	}
+	if after := messageCount(t, ctx, opts, "cli-t-codex-main"); after != base+2 {
+		t.Fatalf("rows %d → %d, want %d (stable ids, no duplicates)", base, after, base+2)
 	}
 }

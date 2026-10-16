@@ -1,3 +1,5 @@
+The files here are converted to the tiktoken format by cmd/tokenizer2tiktoken from MiniMaxAI/MiniMax-M2's tokenizer.json (sha256 757622126525aeeb131756849d93298070ff3f0319c455ec8c5bb0f6b1cebbe8); the license below applies to them.
+
 MIT License
 
 Copyright 2025 MiniMax AI.

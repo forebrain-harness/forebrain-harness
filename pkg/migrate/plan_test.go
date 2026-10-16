@@ -35,9 +35,13 @@ func TestPlanMatchesRun(t *testing.T) {
 	if failed != 0 || owned != 0 {
 		t.Fatalf("run failed=%d owned=%d", failed, owned)
 	}
-	if plan.Sessions+plan.Subagents != migrated+skipped {
-		t.Fatalf("plan offers %d+%d, run migrated %d and skipped %d",
-			plan.Sessions, plan.Subagents, migrated, skipped)
+	updatedUnits, updatedMessages := report.countUpdated()
+	if plan.Sessions+plan.Subagents+plan.Updated != migrated+skipped+updatedUnits {
+		t.Fatalf("plan offers %d+%d+%d updated, run migrated %d skipped %d updated %d",
+			plan.Sessions, plan.Subagents, plan.Updated, migrated, skipped, updatedUnits)
+	}
+	if plan.UpdatedMessages != updatedMessages {
+		t.Fatalf("plan updated messages %d != run %d", plan.UpdatedMessages, updatedMessages)
 	}
 	if plan.MessageRows != report.MessageRows {
 		t.Fatalf("plan rows %d != run rows %d", plan.MessageRows, report.MessageRows)
@@ -236,5 +240,116 @@ func TestPlanAndReportTextOmitLanguageServersWithoutPlugins(t *testing.T) {
 	}
 	if strings.Contains(plan.Text(), "Language servers") || strings.Contains(report.Text(), "Language servers") {
 		t.Fatalf("plan text =\n%s\nreport text =\n%s", plan.Text(), report.Text())
+	}
+}
+
+// ---- migrated from consolidation_gate_test.go (tests for this file's production code) ----
+
+// consolidation_gate_test.go pins the third hard requirement: the
+// post-import memory consolidation runs only for data the import actually
+// wrote. A rerun that wrote nothing pays no pass, a new note pays exactly
+// one, and — the gate-move fix — a run whose only new write is the changed
+// global instruction file still pays its one pass.
+
+// countingConsolidate returns a callback that counts its calls.
+func countingConsolidate(calls *int) func(context.Context, string) error {
+	return func(context.Context, string) error {
+		*calls++
+		return nil
+	}
+}
+
+func TestConsolidationRunsOnlyForNewNotes(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	var calls int
+	opts.Consolidate = countingConsolidate(&calls)
+
+	// First run: the fixture's memory note is written, so one pass is owed
+	// and taken.
+	first, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Consolidation != "consolidated" || calls != 1 {
+		t.Fatalf("first run consolidation = %q calls = %d, want consolidated/1", first.Consolidation, calls)
+	}
+
+	// Second run over unchanged sources: nothing written, no pass — the
+	// call count from the first run stands still.
+	afterFirst := calls
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != afterFirst {
+		t.Fatalf("zero-new-note rerun consolidated again: %d → %d calls", afterFirst, calls)
+	}
+	if second.Consolidation != "not run — no new notes" {
+		t.Fatalf("second run consolidation = %q", second.Consolidation)
+	}
+	if text := second.Text(); !strings.Contains(text, "Memory consolidation: not run") {
+		t.Fatalf("report hid the not-run decision:\n%s", text)
+	}
+
+	// A new memory note pays exactly one pass.
+	newNote := "---\nname: later-note\ndescription: added after the import\nmetadata:\n  modified: \"2026-09-05T03:04:05Z\"\n  originSessionId: s-fix\n---\n\nA note the source gained later.\n"
+	if err := os.WriteFile(filepath.Join(fixture.projectDir, "memory", "later-note.md"), []byte(newNote), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	third, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != afterFirst+1 || third.Consolidation != "consolidated" {
+		t.Fatalf("new-note run: calls = %d consolidation = %q", calls, third.Consolidation)
+	}
+}
+
+// TestConsolidationTriggersOnGlobalInstructionsAlone pins the gate-move fix:
+// the global instruction note lands after the project memories in the run,
+// and the gate sits after it — a run whose only new write is a changed
+// CLAUDE.md still consolidates exactly once.
+func TestConsolidationTriggersOnGlobalInstructionsAlone(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+
+	var calls int
+	opts.Consolidate = countingConsolidate(&calls)
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("first run calls = %d, want 1", calls)
+	}
+
+	// The only change in the source home is CLAUDE.md appearing.
+	if err := os.WriteFile(filepath.Join(fixture.root, "CLAUDE.md"), []byte("Always answer in Chinese.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(fixture.root, "CLAUDE.md"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || second.Consolidation != "consolidated" {
+		t.Fatalf("CLAUDE.md-only run: calls = %d consolidation = %q, want 2 total/consolidated", calls, second.Consolidation)
+	}
+
+	// And a third run with it untouched owes nothing again.
+	third, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || third.Consolidation != "not run — no new notes" {
+		t.Fatalf("settled CLAUDE.md run: calls = %d consolidation = %q", calls, third.Consolidation)
 	}
 }

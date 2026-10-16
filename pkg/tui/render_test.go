@@ -719,3 +719,146 @@ func TestSummaryToolBodyKeepsFirstLineIndent(t *testing.T) {
 		t.Fatalf("summaryToolBody dropped the first line's indent: %q", got)
 	}
 }
+
+// ---- migrated from migration_card_test.go (tests for this file's production code) ----
+
+// migration_card_test.go pins the /migrate progress card: the compact card's
+// exact bar bytes, the one-block lifecycle (preview opens it, later
+// checkpoints refresh it, the report replaces it in place), the animation
+// ticker that keeps the bar alive, and the replay side's StepID-less frame.
+
+func useMigrationCardTerminal(t *testing.T) (*Renderer, *strings.Builder) {
+	t.Helper()
+	forcedTermWidth = 80
+	forcedTermHeight = 24
+	t.Cleanup(func() {
+		forcedTermWidth = 0
+		forcedTermHeight = 0
+	})
+	out := &strings.Builder{}
+	r := NewRenderer(out, out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+	return r, out
+}
+
+// barLine picks the line that carries the progress bar out of a frame's
+// rendered lines, ANSI bytes included.
+func barLine(t *testing.T, lines []string) string {
+	t.Helper()
+	for _, line := range lines {
+		if strings.Contains(stripAllANSI(line), "━") {
+			return line
+		}
+	}
+	t.Fatalf("no bar line in %q", lines)
+	return ""
+}
+
+// TestMigrationCardDrawsTheCompactBarExactly pins the owner requirement that
+// the migration bar is the compact bar: at the same percent, phase and width
+// the two cards' bar lines are byte-identical, colors included.
+func TestMigrationCardDrawsTheCompactBarExactly(t *testing.T) {
+	useMigrationCardTerminal(t)
+	migrationLines, _ := renderFrameLinesWithAgents(Frame{
+		Kind: FrameMigration, StepID: migrationStepID,
+		Title: migrationTitleMigrating, Summary: "sessions 3/12", Progress: 42,
+	}, 80, DiffThemeDark, 4)
+	compactLines, _ := renderFrameLinesWithAgents(Frame{
+		Kind: FrameMemoryCompact, StepID: "c", Title: compactTitleRunning, Progress: 42,
+	}, 80, DiffThemeDark, 4)
+	if got, want := barLine(t, migrationLines), barLine(t, compactLines); got != want {
+		t.Fatalf("migration bar ≠ compact bar:\nmigration: %q\ncompact:   %q", got, want)
+	}
+	if painted := stripAllANSI(strings.Join(migrationLines, "\n")); !strings.Contains(painted, " 42%") {
+		t.Fatalf("bar lost its percentage:\n%s", painted)
+	}
+}
+
+// TestMigrationCardIsOneBlockFromPreviewToReport pins the card's lifecycle:
+// the running frame opens one block, further checkpoints refresh it without
+// stacking, the animation ticker runs while it is live, and the final report
+// replaces the same block and stops the ticker.
+func TestMigrationCardIsOneBlockFromPreviewToReport(t *testing.T) {
+	r, out := useMigrationCardTerminal(t)
+	r.RenderFrame(Frame{
+		Kind: FrameMigration, StepID: migrationStepID,
+		Title: migrationTitlePreviewing, Summary: "discovering", Progress: 0,
+	})
+	r.RenderFrame(Frame{
+		Kind: FrameMigration, StepID: migrationStepID,
+		Title: migrationTitleMigrating, Summary: "sessions 5/12 · s-fix.jsonl", Progress: 41,
+	})
+	r.mu.Lock()
+	blocks := len(r.vm.blocks)
+	ticker := r.compactAnimationTicker
+	r.mu.Unlock()
+	painted := stripAllANSI(out.String())
+	if blocks != 1 {
+		t.Fatalf("migration card stacked %d blocks, want one", blocks)
+	}
+	if ticker == nil {
+		t.Fatal("migration animation ticker was not started")
+	}
+	if !strings.Contains(painted, migrationTitleMigrating) || !strings.Contains(painted, " 41%") {
+		t.Fatalf("running migration card not painted:\n%s", painted)
+	}
+
+	r.RenderFrame(migrationLiveReportFrame(migrationTitleDone, "Migrated from Claude Code\n  Conversations: 1 imported"))
+	r.mu.Lock()
+	blocks = len(r.vm.blocks)
+	ticker = r.compactAnimationTicker
+	r.mu.Unlock()
+	painted = stripAllANSI(out.String())
+	if blocks != 1 {
+		t.Fatalf("final report did not replace the progress card: %d blocks", blocks)
+	}
+	if ticker != nil {
+		t.Fatal("migration animation ticker was not stopped by the final frame")
+	}
+	if !strings.Contains(painted, migrationTitleDone) || !strings.Contains(painted, "1 imported") {
+		t.Fatalf("final report not painted:\n%s", painted)
+	}
+}
+
+// TestMigrationFailureReplacesTheProgressBarInPlace pins that a failed run's
+// error text lands on the progress card's own block — the bar never dangles
+// at its last percent while an error card stacks under it.
+func TestMigrationFailureReplacesTheProgressBarInPlace(t *testing.T) {
+	r, out := useMigrationCardTerminal(t)
+	r.RenderFrame(Frame{
+		Kind: FrameMigration, StepID: migrationStepID,
+		Title: migrationTitleMigrating, Summary: "sessions 5/12", Progress: 41,
+	})
+	r.RenderFrame(Frame{
+		Kind: FrameMigration, StepID: migrationStepID, Final: true,
+		Title: migrationTitleFailed, Content: "state database unavailable",
+	})
+	r.mu.Lock()
+	blocks := len(r.vm.blocks)
+	r.mu.Unlock()
+	painted := stripAllANSI(out.String())
+	if blocks != 1 {
+		t.Fatalf("failure stacked a second block: %d", blocks)
+	}
+	if !strings.Contains(painted, migrationTitleFailed) || !strings.Contains(painted, "state database unavailable") {
+		t.Fatalf("failure card not painted:\n%s", painted)
+	}
+}
+
+// TestMigrationReplayFrameCarriesNoStepID pins the replay side: the report a
+// resume rebuilds is a plain system card with no StepID, so two migrations in
+// one session each keep their own block — and it never collides with the
+// live card's id.
+func TestMigrationReplayFrameCarriesNoStepID(t *testing.T) {
+	frame := migrationReportFrame("Migration complete", "the report")
+	if frame.Kind != FrameSystem || frame.StepID != "" || !frame.Final {
+		t.Fatalf("replay frame = %+v, want a StepID-less final system card", frame)
+	}
+	if frame.Title != "Migration complete" || frame.Content != "the report" {
+		t.Fatalf("replay frame lost its report: %+v", frame)
+	}
+	if migrationReportFrame("  ", "x").Title != "Migration complete" {
+		t.Fatal("replay frame must default its title")
+	}
+}

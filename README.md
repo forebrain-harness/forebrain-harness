@@ -204,15 +204,17 @@ A tokenizer file is looked up in this order:
 2. beside the binary, `<binary dir>/tokenizers/<id>/<file>.gz`;
 3. downloaded, from HuggingFace first and ModelScope second.
 
-`agents.defaults.token_estimate` configures it: `hubs` (the download order),
-`huggingface_endpoint` and `modelscope_endpoint` (for a mirror or an internal hub),
-and `default_tokenizer` and `tokenizers` (per-model selection).
+`agents.defaults.token_estimate` configures it: `hubs` (the download order; empty
+means HuggingFace then ModelScope), `download` (set `download: false` to never reach
+the network), `huggingface_endpoint` and `modelscope_endpoint` (for a mirror or an
+internal hub), and `default_tokenizer` and `tokenizers` (per-model selection; a
+`path` must be absolute).
 
 **In an intranet or offline environment**, run forebrain once on a machine with
 internet access — or unzip the release archive's `tokenizers/*.gz` and `gzip -d` each
 file — then copy the whole `cache/tokenizers` directory to the same location on the
-offline machine. The cache holds the decompressed original files, so it is copied
-as-is.
+offline machine, and set `download: false` there. The cache holds the decompressed
+files exactly as they ship, so it is copied as-is.
 
 ## Build from source
 

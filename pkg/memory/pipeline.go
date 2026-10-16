@@ -73,15 +73,9 @@ func (p *Pipeline) Run(ctx context.Context, currentThreadID string) error {
 	if p == nil || p.Store == nil || !Enabled(p.Cfg) {
 		return nil
 	}
-	scopes := p.phase2Scopes()
-	for _, scope := range scopes {
-		root := p.Roots.Scope(scope)
-		if err := os.MkdirAll(root.MemoryRoot, 0o755); err != nil {
-			return fmt.Errorf("create memories root: %w", err)
-		}
-		if err := seedAdHocInstructions(root.MemoryRoot); err != nil {
-			slog.Warn("seed memory extension instructions", "scope", scope.ID(), "error", err)
-		}
+	scopes, err := p.prepareScopes(ctx)
+	if err != nil {
+		return err
 	}
 	settings := p.Cfg.EffectiveMemories()
 	if _, err := p.Store.PruneStage1Outputs(ctx, settings.MaxUnusedDays, stage1PruneBatchSize); err != nil {
@@ -92,7 +86,7 @@ func (p *Pipeline) Run(ctx context.Context, currentThreadID string) error {
 	} else {
 		slog.Warn("prune rollout evidence", "error", err)
 	}
-	if p.RateLimitGuard != nil && !p.RateLimitGuard(ctx, settings.MinRateLimitRemainingPercent) {
+	if !p.acquireRateLimit(ctx, settings) {
 		return nil
 	}
 	claims, err := p.Store.ClaimStage1JobsForStartup(ctx, currentThreadID,
@@ -101,12 +95,67 @@ func (p *Pipeline) Run(ctx context.Context, currentThreadID string) error {
 		return fmt.Errorf("claim stage-one jobs: %w", err)
 	}
 	p.runStage1Jobs(ctx, claims)
+	p.runPhase2Scopes(ctx, scopes, settings)
+	return nil
+}
+
+// ConsolidateWorkspace runs only the workspace consolidation pass (stage 2)
+// over this pipeline's scopes. It is the entry a migration injects: the
+// migration has just written notes into the memory workspace, and what it
+// owes is the integration of exactly those files — the git-diff mechanism of
+// stage 2 makes the pass incremental over whatever changed since the last
+// baseline. It deliberately skips the prune and the stage-1 claims of Run:
+// neither is the migration's data, and running them would charge this import
+// for native rollouts it never touched. Scope preparation and the rate-limit
+// guard stay: the workspace must exist before it can be consolidated, and
+// the guard is an account-level protection, not a stage-1 concern.
+func (p *Pipeline) ConsolidateWorkspace(ctx context.Context) error {
+	if p == nil || p.Store == nil || !Enabled(p.Cfg) {
+		return nil
+	}
+	scopes, err := p.prepareScopes(ctx)
+	if err != nil {
+		return err
+	}
+	settings := p.Cfg.EffectiveMemories()
+	if !p.acquireRateLimit(ctx, settings) {
+		return nil
+	}
+	p.runPhase2Scopes(ctx, scopes, settings)
+	return nil
+}
+
+// prepareScopes makes sure every phase-2 scope's memory root exists and
+// carries the extension instructions a fresh workspace seeds.
+func (p *Pipeline) prepareScopes(ctx context.Context) ([]Scope, error) {
+	scopes := p.phase2Scopes()
+	for _, scope := range scopes {
+		root := p.Roots.Scope(scope)
+		if err := os.MkdirAll(root.MemoryRoot, 0o755); err != nil {
+			return scopes, fmt.Errorf("create memories root: %w", err)
+		}
+		if err := seedAdHocInstructions(root.MemoryRoot); err != nil {
+			slog.Warn("seed memory extension instructions", "scope", scope.ID(), "error", err)
+		}
+	}
+	return scopes, nil
+}
+
+// acquireRateLimit reports whether this pass may spend LLM budget.
+func (p *Pipeline) acquireRateLimit(ctx context.Context, settings appcfg.MemoriesConfig) bool {
+	return p.RateLimitGuard == nil || p.RateLimitGuard(ctx, settings.MinRateLimitRemainingPercent)
+}
+
+// runPhase2Scopes consolidates each scope's workspace. Its inputs are the
+// store and the workspace files, never this pass's in-memory state, so any
+// caller that runs after the notes are on disk consolidates exactly what
+// landed there.
+func (p *Pipeline) runPhase2Scopes(ctx context.Context, scopes []Scope, settings appcfg.MemoriesConfig) {
 	for _, scope := range scopes {
 		if err := p.runStage2(ctx, scope, settings); err != nil {
 			slog.Debug("memory consolidation ended", "scope", scope.ID(), "error", err)
 		}
 	}
-	return nil
 }
 
 func (p *Pipeline) runStage1Jobs(ctx context.Context, claims []Stage1JobClaim) {

@@ -12,38 +12,43 @@ import (
 // rune/4 heuristic, which is the unit tests' expectation.
 type TokenEstimateOptions struct {
 	CacheDir string // $FOREBRAIN_HOME/cache/tokenizers; "" disables model tokenizers
-	// Hubs is the download order. A nil slice means both HuggingFace and
-	// ModelScope, in that order; a non-nil empty slice disables downloading.
+	// Hubs is the download order. Empty (nil or not) means HuggingFace then
+	// ModelScope; it only orders the hubs — DisableDownload turns downloading
+	// off.
 	Hubs                []string
 	HuggingFaceEndpoint string // "" → $HF_ENDPOINT → https://huggingface.co
 	ModelScopeEndpoint  string // "" → https://modelscope.cn
 	DefaultTokenizer    string // "" → gpt-o200k
 	Overrides           []TokenizerOverride
+	DisableDownload     bool // never download a missing tokenizer (offline/intranet)
 }
 
 // TokenizerOverride maps a model-name prefix to a specific tokenizer.
 type TokenizerOverride struct {
 	Model     string // model-name prefix, case-insensitive
 	Tokenizer string // a built-in tokenizer id
-	Path      string // a local tokenizer.json
+	Path      string // an absolute path to a local tokenizer.json
 }
 
 // Configure records the token estimation settings. An unknown hub or an unknown
 // built-in id is warned about and ignored rather than rejected. It never
 // blocks: the startup cache warm-up runs in the background, and a tokenizer is
-// loaded (or downloaded) lazily the first time it is needed. It returns an
-// error to keep the load path's error handling uniform; there is currently no
-// way for it to fail.
+// loaded (or downloaded) lazily the first time it is needed. A tokenizer that
+// could not be resolved under the previous settings is looked for again the
+// next time it is needed (see forgetFailedResolutions). It returns an error to
+// keep the load path's error handling uniform; there is currently no way for it
+// to fail.
 func Configure(c TokenEstimateOptions) error {
 	settings := estimatorSettings{
-		cacheDir:   strings.TrimSpace(c.CacheDir),
-		hfEndpoint: firstNonEmpty(strings.TrimSpace(c.HuggingFaceEndpoint), strings.TrimSpace(os.Getenv(hfEndpointEnv)), defaultHFEndpoint),
-		msEndpoint: firstNonEmpty(strings.TrimSpace(c.ModelScopeEndpoint), defaultModelScopeURL),
-		defaultID:  strings.TrimSpace(c.DefaultTokenizer),
+		cacheDir:        strings.TrimSpace(c.CacheDir),
+		hfEndpoint:      firstNonEmpty(strings.TrimSpace(c.HuggingFaceEndpoint), strings.TrimSpace(os.Getenv(hfEndpointEnv)), defaultHFEndpoint),
+		msEndpoint:      firstNonEmpty(strings.TrimSpace(c.ModelScopeEndpoint), defaultModelScopeURL),
+		defaultID:       strings.TrimSpace(c.DefaultTokenizer),
+		disableDownload: c.DisableDownload,
 	}
 
 	hubs := c.Hubs
-	if hubs == nil {
+	if len(hubs) == 0 {
 		hubs = []string{hubHuggingFace, hubModelScope}
 	}
 	for _, hub := range hubs {
@@ -75,6 +80,7 @@ func Configure(c TokenEstimateOptions) error {
 	estimators.settings = settings
 	estimators.configured = true
 	estimators.mu.Unlock()
+	forgetFailedResolutions()
 
 	if bulkSeedAllowed && settings.cacheDir != "" {
 		go seedCacheFromBundle(settings)

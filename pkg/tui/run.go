@@ -245,6 +245,11 @@ func Run(ctx context.Context, opts Options) error {
 	// that says "0s" for the thirty seconds a server takes to answer is worse
 	// than one that says nothing.
 	mcpLine := &mcpStatusLine{}
+	// Whether the migration card currently tracks the real import (true) or
+	// the preview dry run (false): preview and run share one card, and this
+	// is what titles it — the run's first checkpoint morphs the preview card
+	// in place instead of opening a second one.
+	migrationRunLive := false
 	processUINotification := func(m any) {
 		switch msg := m.(type) {
 		case PanelCloseMsg:
@@ -460,21 +465,29 @@ func Run(ctx context.Context, opts Options) error {
 			state.quitRequested = true
 		}
 		// Migration runs on its own goroutine and speaks through these
-		// three notifications only. Progress paints the transient status
-		// line; the preview asks for confirmation; the done notice renders
-		// the report the session already persisted (shown implies recorded).
+		// three notifications only. Preview and run share one progress
+		// card above the composer — the compact card's bar, refreshed in
+		// place — which the preview opens, the run's first checkpoint
+		// retitles, and the done notice finally replaces with the report
+		// the session already persisted (shown implies recorded).
 		switch migration := m.(type) {
 		case MigrationProgressMsg:
-			line := migration.Stage
+			title := migrationTitlePreviewing
+			if migrationRunLive {
+				title = migrationTitleMigrating
+			}
+			summary := migration.Stage
 			if migration.Total > 0 {
-				line = fmt.Sprintf("%s %d/%d", migration.Stage, migration.Done, migration.Total)
+				summary = fmt.Sprintf("%s %d/%d", migration.Stage, migration.Done, migration.Total)
 			}
 			if detail := strings.TrimSpace(migration.Detail); detail != "" {
-				line += " · " + detail
+				summary += " · " + detail
 			}
-			renderer.RenderTransientStatus(transientSourceMigrate, "migrate: "+line)
+			renderer.RenderFrame(Frame{
+				Kind: FrameMigration, StepID: migrationStepID,
+				Title: title, Summary: summary, Progress: migration.Percent,
+			})
 		case MigrationPreviewMsg:
-			renderer.FinishTransientStatus(transientSourceMigrate)
 			planText := strings.TrimSpace(migration.Plan)
 			var confirm bool
 			var err error
@@ -488,21 +501,32 @@ func Run(ctx context.Context, opts Options) error {
 			case err != nil:
 				renderer.PrintError(err)
 			case !confirm || migration.Run == nil:
-				renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "migrate", Content: "Migration cancelled; nothing was imported.", Final: true})
+				// Declined at the preview: the card the dry run opened
+				// closes itself, in place, with the answer.
+				renderer.RenderFrame(Frame{
+					Kind: FrameMigration, StepID: migrationStepID, Final: true,
+					Title: migrationTitleCancelled, Content: "Migration cancelled; nothing was imported.",
+				})
 			default:
-				renderer.RenderTransientStatus(transientSourceMigrate, "migrate: importing…")
+				migrationRunLive = true
 				migration.Run()
 			}
 		case MigrationDoneMsg:
+			migrationRunLive = false
 			// The report stays in the conversation, exactly as /resume
 			// replays it: a modal would take it away with the next key.
-			renderer.FinishTransientStatus(transientSourceMigrate)
 			title := strings.TrimSpace(migration.Title)
 			if migration.Err != nil {
-				renderer.RenderFrame(Frame{Kind: FrameError, Title: title, Content: migration.Err.Error(), Final: true})
+				if title == "" {
+					title = migrationTitleFailed
+				}
+				renderer.RenderFrame(Frame{
+					Kind: FrameMigration, StepID: migrationStepID, Final: true,
+					Title: title, Content: strings.TrimSpace(migration.Err.Error()),
+				})
 				return
 			}
-			renderer.RenderFrame(migrationReportFrame(title, migration.Report))
+			renderer.RenderFrame(migrationLiveReportFrame(title, migration.Report))
 		}
 		// A language-server recommendation is a modal like the migration
 		// preview: it can open mid-turn, the agent keeps working, and queued

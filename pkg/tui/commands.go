@@ -625,12 +625,31 @@ func replayMigrationEventFrames(evt event.RunEvent) []Frame {
 }
 
 // migrationReportFrame is a finished import's report as the conversation
-// shows it, live and on replay alike.
+// shows it on replay: a plain system card, no StepID, so two migrations in
+// one session each keep their own block.
 func migrationReportFrame(title, report string) Frame {
 	if title = strings.TrimSpace(title); title == "" {
 		title = "Migration complete"
 	}
 	return Frame{Kind: FrameSystem, Title: title, Content: strings.TrimSpace(report), Final: true}
+}
+
+// migrationStepID is the one block a live migration owns: the preview dry
+// run opens it, the run's first checkpoint retitles it, and the finished
+// report replaces it in place — one card for the whole operation.
+const migrationStepID = "migrate-progress"
+
+// migrationLiveReportFrame is the live side's finished report: the same body
+// the replay frame carries, delivered onto the progress card's own block so
+// the bar the user watched becomes the report it was measuring.
+func migrationLiveReportFrame(title, report string) Frame {
+	if title = strings.TrimSpace(title); title == "" {
+		title = migrationTitleDone
+	}
+	return Frame{
+		Kind: FrameMigration, StepID: migrationStepID, Final: true,
+		Title: title, Content: strings.TrimSpace(report),
+	}
 }
 
 // replayEventItem is one replayed item parked at a transcript position. A
@@ -2246,7 +2265,6 @@ func (c *commandController) handleMigrate(ctx context.Context, sessionID string)
 		return true
 	}
 	opts.Source = chosen.Kind
-	c.renderer.RenderTransientStatus(transientSourceMigrate, "migrate: planning the import — reading "+sourceRoot+"…")
 	session.PreviewMigrationAsync(ctx, opts, func() {
 		runOpts := session.BuildMigrateOptions(onlyProject, strings.TrimSpace(sessionID), sourceRoot)
 		if runOpts == nil {
