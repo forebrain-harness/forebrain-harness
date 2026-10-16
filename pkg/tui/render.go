@@ -229,10 +229,6 @@ type Renderer struct {
 	// planMode is whether the conversation is in Plan mode; the footer says so
 	// for as long as it lasts.
 	planMode bool
-	// autoContinueNotices are the warning lines under the composer while a view
-	// waits to continue itself after a usage limit, keyed by the view they
-	// belong to ("" is the conversation's own, a roster key is that subagent's).
-	autoContinueNotices map[string]string
 	// composerTokens is the footer's token budget, keyed by the view it
 	// belongs to: "" is the conversation's own, a roster key is that
 	// subagent's (each subagent's view answers "how much context is left for
@@ -4055,41 +4051,6 @@ func (r *Renderer) SetPlanMode(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.planMode = on
-}
-
-// SetAutoContinueNotice sets the warning line drawn under the composer for one
-// view ("" for the conversation's own, a roster key for a subagent's) while it
-// waits to continue by itself; "" removes it. The caller repaints the composer.
-func (r *Renderer) SetAutoContinueNotice(view, text string) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	view = strings.TrimSpace(view)
-	text = strings.TrimSpace(text)
-	if text == "" {
-		delete(r.autoContinueNotices, view)
-		return
-	}
-	if r.autoContinueNotices == nil {
-		r.autoContinueNotices = map[string]string{}
-	}
-	r.autoContinueNotices[view] = text
-}
-
-// autoContinueNoticeLineLocked renders the auto-continue notice of the view on
-// screen for a termWidth-wide row, or "" when there is none. Caller holds r.mu.
-func (r *Renderer) autoContinueNoticeLineLocked(termWidth int) string {
-	notice := r.autoContinueNotices[strings.TrimSpace(r.activeView)]
-	if notice == "" {
-		return ""
-	}
-	width := termWidth - sharedBlockFooterTruncateExtraRoom
-	if width <= 0 {
-		return ""
-	}
-	return autoContinueNoticeStyle + runewidth.Truncate(autoContinueNoticeGlyph+notice, width, "…") + sharedBlockReset
 }
 
 // planModeFooterLabel is the footer's Plan-mode segment, which also says how

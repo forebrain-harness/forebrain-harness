@@ -1780,7 +1780,7 @@ func switchStreamSession(ctx context.Context, state *streamState, renderer *Rend
 	// A continuation waiting on a usage limit belongs to the conversation
 	// being left. It is cancelled rather than carried along: it would resume a
 	// conversation the reader is no longer looking at.
-	state.leaveAutoContinue(renderer)
+	state.leaveAutoContinue()
 	state.sessionID = next
 	// The event funnel gates painting on the conversation being looked at,
 	// so the switch has to re-point it together with the surface.
