@@ -1,3 +1,5 @@
+The files here are converted to the tiktoken format by cmd/tokenizer2tiktoken from Qwen/Qwen3.8-27B's tokenizer.json (sha256 0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3); the license below applies to them.
+
 
                                  Apache License
                            Version 2.0, January 2004

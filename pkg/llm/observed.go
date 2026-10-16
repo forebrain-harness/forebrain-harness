@@ -34,6 +34,16 @@ import (
 // over and over, each time starting a fresh prompt-cache generation. An
 // overhead in tokens cannot do that: it is re-measured on every response and
 // stays the size of the thing it stands for.
+//
+// The overhead is kept per estimator, while the window bounds are not. The
+// bounds are facts about the model's real window, whichever tokenizer sized the
+// request. The overhead is "provider count minus local estimate", and the
+// estimate depends on the estimator: one process can count a model first with
+// the default tokenizer or rune/4 (its own tokenizer not yet downloaded) and
+// later with its own, or switch on a config reload. A gap learned under one
+// estimator is not the same quantity under another, and since the overhead only
+// ever grows, mixing them would add a stale gap to every later estimate and
+// compact early.
 
 // Observation is the learned state for one provider/model pair.
 type Observation struct {
@@ -48,12 +58,18 @@ type Observation struct {
 	// negative: a provider count below the estimate leaves it untouched, because
 	// shrinking the projection would move the compaction threshold further away
 	// and re-introduce the overflow this store exists to prevent.
+	//
+	// It is the overhead learned under the unnamed estimator (RecordSuccess);
+	// the overhead under a named one is read with ProjectFor.
 	Overhead int
 }
 
 var (
 	observedMu sync.RWMutex
 	observed   = map[string]*Observation{}
+	// overheads holds the learned overhead per observation key and estimator
+	// name (see overheadKey); guarded by observedMu.
+	overheads = map[string]int{}
 )
 
 // ResetObservedForTest clears all recorded observations. Tests that record
@@ -61,7 +77,14 @@ var (
 func ResetObservedForTest() {
 	observedMu.Lock()
 	observed = map[string]*Observation{}
+	overheads = map[string]int{}
 	observedMu.Unlock()
+}
+
+// overheadKey identifies the overhead learned for one provider/model pair (its
+// observationKey) under one estimator.
+func overheadKey(key, estimator string) string {
+	return key + "\x00" + estimator
 }
 
 // observationKey identifies the provider/model pair an observation belongs to.
@@ -83,8 +106,18 @@ func observationKey(provider, model string) (string, bool) {
 }
 
 // RecordSuccess records that the provider accepted a prompt of realInput
-// tokens, which the local estimator had sized at estimated tokens.
+// tokens, which an unnamed local estimator had sized at estimated tokens. It is
+// for callers that have no estimator name; production callers use the For
+// variants (RecordSuccessFor, ProjectFor).
 func RecordSuccess(provider, model string, realInput, estimated int) {
+	RecordSuccessFor(provider, model, "", realInput, estimated)
+}
+
+// RecordSuccessFor records that the provider accepted a prompt of realInput
+// tokens, which the local estimator named estimator (Estimator.Name) had sized
+// at estimated tokens. The accepted size is a fact about the model; the
+// overhead is learned for that estimator only.
+func RecordSuccessFor(provider, model, estimator string, realInput, estimated int) {
 	if realInput <= 0 {
 		return
 	}
@@ -109,8 +142,9 @@ func RecordSuccess(provider, model string, realInput, estimated int) {
 		obs.RejectedInput = 0
 	}
 	if estimated > 0 {
-		if gap := realInput - estimated; gap > obs.Overhead {
-			obs.Overhead = gap
+		ok := overheadKey(key, estimator)
+		if gap := realInput - estimated; gap > overheads[ok] {
+			overheads[ok] = gap
 		}
 	}
 }
@@ -159,21 +193,38 @@ func Get(provider, model string) (Observation, bool) {
 	if !ok || obs == nil {
 		return Observation{}, false
 	}
-	return *obs, true
+	result := *obs
+	result.Overhead = overheads[overheadKey(key, "")]
+	return result, true
 }
 
-// Project converts a local estimate into what the provider will actually count
-// for that request, by adding the learned overhead. Returns the estimate
-// unchanged when nothing is known yet.
+// Project converts an unnamed estimator's local estimate into what the
+// provider will actually count for that request, by adding the overhead learned
+// under that estimator. It is for callers that have no estimator name;
+// production callers use ProjectFor.
 func Project(provider, model string, estimated int) int {
+	return ProjectFor(provider, model, "", estimated)
+}
+
+// ProjectFor converts a local estimate made by the estimator named estimator
+// into what the provider will actually count for that request, by adding the
+// overhead learned under that same estimator. Returns the estimate unchanged
+// when nothing is known for it yet.
+func ProjectFor(provider, model, estimator string, estimated int) int {
 	if estimated <= 0 {
 		return 0
 	}
-	obs, ok := Get(provider, model)
-	if !ok || obs.Overhead <= 0 {
+	key, named := observationKey(provider, model)
+	if !named {
 		return estimated
 	}
-	return estimated + obs.Overhead
+	observedMu.RLock()
+	overhead := overheads[overheadKey(key, estimator)]
+	observedMu.RUnlock()
+	if overhead <= 0 {
+		return estimated
+	}
+	return estimated + overhead
 }
 
 // EffectiveWindow reconciles the catalog window with what the provider has

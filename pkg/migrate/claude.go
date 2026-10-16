@@ -62,6 +62,10 @@ type claudeSession struct {
 	Path      string
 	SessionID string // uuid stem of the file name
 	Bytes     int64
+	// MtimeMs is the file's modification time at discovery, the second half
+	// of the incremental fingerprint (with Bytes) that says whether the
+	// transcript changed since the last import.
+	MtimeMs int64
 	// Cwd and Slug come from the file's head records: cwd is the second
 	// authority for resolving a project path (B5), and slug attributes a
 	// plan file to the conversation that produced it.
@@ -74,6 +78,8 @@ type claudeSubagent struct {
 	Path     string
 	AgentID  string // file stem, e.g. "agent-a24507f8e84e85e77"
 	MetaPath string
+	Bytes    int64
+	MtimeMs  int64
 }
 
 type claudeHistoryEntry struct {
@@ -155,6 +161,7 @@ func discoverClaude(root string) (*claudeData, error) {
 						Path:      filepath.Join(dir, file.Name()),
 						SessionID: stem,
 						Bytes:     info.Size(),
+						MtimeMs:   info.ModTime().UnixMilli(),
 					}
 					session.Cwd, session.Slug = scanSessionHead(session.Path)
 					session.Subagents = discoverSubagents(dir, stem)
@@ -270,10 +277,16 @@ func discoverSubagents(projectDir, sessionID string) []claudeSubagent {
 		if _, err := os.Stat(meta); err != nil {
 			meta = ""
 		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
 		out = append(out, claudeSubagent{
 			Path:     filepath.Join(subDir, entry.Name()),
 			AgentID:  stem,
 			MetaPath: meta,
+			Bytes:    info.Size(),
+			MtimeMs:  info.ModTime().UnixMilli(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AgentID < out[j].AgentID })

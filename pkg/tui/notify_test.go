@@ -438,30 +438,31 @@ func TestTransientStatusSourcesDoNotClearEachOther(t *testing.T) {
 		t.Fatalf("finishing the working line cleared the MCP line:\n%s", got)
 	}
 
-	// A migration outranks the working line but not the MCP startup. The MCP
-	// source has to be finished first, or it is still the line on screen.
+	// A language-server install outranks the working line but not the MCP
+	// startup. The MCP source has to be finished first, or it is still the
+	// line on screen.
 	r.FinishTransientStatus(transientSourceMCP)
 	r.RenderTransientStatus(transientSourceWorking, "Working (9s • esc to interrupt)")
-	r.RenderTransientStatus(transientSourceMigrate, "migrate: importing…")
+	r.RenderTransientStatus(transientSourceLSP, "lsp: installing rust-analyzer · fetching")
 	got = painted()
-	if !strings.Contains(got, "migrate:") || strings.Contains(got, "Working (9s") {
-		t.Fatalf("migrate must outrank the working line while MCP is quiet:\n%s", got)
+	if !strings.Contains(got, "lsp: installing") || strings.Contains(got, "Working (9s") {
+		t.Fatalf("the lsp line must outrank the working line while MCP is quiet:\n%s", got)
 	}
 	r.RenderTransientStatus(transientSourceMCP, "mcp 1/2 · connecting slow")
 	got = painted()
-	if !strings.Contains(got, "mcp 1/2") || strings.Contains(got, "migrate:") {
-		t.Fatalf("the MCP line must outrank a migration:\n%s", got)
+	if !strings.Contains(got, "mcp 1/2") || strings.Contains(got, "lsp: installing") {
+		t.Fatalf("the MCP line must outrank the lsp install:\n%s", got)
 	}
 
 	// Finishing one source leaves the others, and the session-switch clear takes
 	// them all.
-	r.FinishTransientStatus(transientSourceMigrate)
+	r.FinishTransientStatus(transientSourceLSP)
 	if got := painted(); !strings.Contains(got, "mcp 1/2") {
-		t.Fatalf("finishing the migration cleared the MCP line:\n%s", got)
+		t.Fatalf("finishing the lsp install cleared the MCP line:\n%s", got)
 	}
 	r.FinishAllTransientStatus()
 	got = painted()
-	if strings.Contains(got, "mcp 1/2") || strings.Contains(got, "Working (") || strings.Contains(got, "migrate:") {
+	if strings.Contains(got, "mcp 1/2") || strings.Contains(got, "Working (") || strings.Contains(got, "lsp: installing") {
 		t.Fatalf("FinishAllTransientStatus left lines behind:\n%s", got)
 	}
 }

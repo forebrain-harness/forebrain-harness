@@ -1,3 +1,5 @@
+The files here are converted to the tiktoken format by cmd/tokenizer2tiktoken from XiaomiMiMo/MiMo-V2.5's tokenizer.json (sha256 633518aad78f9f61bae2ae420d621215754a4424c918b052cd8c22a3b59e99d2); the license below applies to them.
+
 Source: https://huggingface.co/XiaomiMiMo/MiMo-V2.5 (tokenizer.json)
 
 This repository ships no LICENSE file. Its model card declares `license: mit`

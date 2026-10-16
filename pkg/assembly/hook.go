@@ -25,6 +25,10 @@ type Hook struct {
 	ModeProvider        func(sessionID string) (mode string, phase string)
 	SnapshotWriter      func(sessionID string, snapshot AssemblyResult)
 	ModelLimitsProvider func(sessionID string) (llm.Limits, bool)
+	// EstimatorProvider returns the estimator of the model one session runs
+	// on, so the context panel counts the conversation in the unit the
+	// compaction decision does. Nil counts with the default estimator.
+	EstimatorProvider func(sessionID string) llm.Estimator
 }
 
 func NewHook(cfg *appcfg.Root, store *state.SessionStore) *Hook {
@@ -123,10 +127,15 @@ func (h *Hook) Assemble(ctx context.Context, hc hook.HookContext, text string) (
 		// reads and writes included) plus its output, then a local estimate of
 		// what was appended since — or of everything, before any usage came
 		// back. Read from the session's own messages, the same input the
-		// composer footer's gauge uses, so the two cannot disagree.
+		// composer footer's gauge uses, and estimated with the session model's
+		// estimator as the compaction decision is, so the numbers agree.
 		if h.Store != nil {
 			if turns, err := h.Store.ListRecentMessages(context.Background(), sid, 400); err == nil {
-				res.ConversationTokens = state.TokenCountWithEstimation(turns)
+				if h.EstimatorProvider != nil {
+					res.ConversationTokens = state.TokenCountWithEstimationFor(turns, h.EstimatorProvider(sid))
+				} else {
+					res.ConversationTokens = state.TokenCountWithEstimation(turns)
+				}
 			}
 		}
 		if effInput > 0 {

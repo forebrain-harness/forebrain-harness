@@ -1196,35 +1196,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	} else {
 		r.tools.SetNamedReadObserver("lsp", nil)
 	}
-	te := llm.TokenEstimateOptions{}
-	if strings.TrimSpace(r.Home) != "" {
-		te.CacheDir = filepath.Join(r.Home, "cache", "tokenizers")
-	}
-	if r.AppCfg != nil {
-		cfg := r.AppCfg.Agents.Defaults.TokenEstimate
-		te.Hubs = cfg.Hubs
-		te.HuggingFaceEndpoint = cfg.HuggingFaceEndpoint
-		te.ModelScopeEndpoint = cfg.ModelScopeEndpoint
-		te.DefaultTokenizer = cfg.DefaultTokenizer
-		for _, override := range cfg.Tokenizers {
-			te.Overrides = append(te.Overrides, llm.TokenizerOverride{
-				Model:     override.Model,
-				Tokenizer: override.Tokenizer,
-				Path:      override.Path,
-			})
-		}
-		for _, deprecated := range []struct{ key, value string }{
-			{"encoding", cfg.Encoding},
-			{"model", cfg.Model},
-			{"tokenizer_path", cfg.TokenizerPath},
-		} {
-			if strings.TrimSpace(deprecated.value) != "" {
-				slog.Warn("agents.defaults.token_estimate."+deprecated.key+
-					" is deprecated and ignored; see token_estimate.tokenizers", "key", deprecated.key)
-			}
-		}
-	}
-	if err := llm.Configure(te); err != nil {
+	if err := llm.Configure(tokenEstimateOptions(r.Home, r.AppCfg)); err != nil {
 		return err
 	}
 	_ = tool.RegisterDefaultTools(a, r.tools, rt)
@@ -1296,6 +1268,52 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	r.memPipeline.Reset()
 	return nil
 }
+
+// tokenEstimateOptions maps agents.defaults.token_estimate onto the estimator
+// options, with the tokenizer cache under home. Downloading is off only when
+// the config says download: false; hubs only orders the hubs. A deprecated key
+// that is still set is warned about once per process, not on every Load.
+func tokenEstimateOptions(home string, root *appcfg.Root) llm.TokenEstimateOptions {
+	te := llm.TokenEstimateOptions{}
+	if strings.TrimSpace(home) != "" {
+		te.CacheDir = filepath.Join(home, "cache", "tokenizers")
+	}
+	if root == nil {
+		return te
+	}
+	cfg := root.Agents.Defaults.TokenEstimate
+	te.Hubs = cfg.Hubs
+	te.DisableDownload = cfg.Download != nil && !*cfg.Download
+	te.HuggingFaceEndpoint = cfg.HuggingFaceEndpoint
+	te.ModelScopeEndpoint = cfg.ModelScopeEndpoint
+	te.DefaultTokenizer = cfg.DefaultTokenizer
+	for _, override := range cfg.Tokenizers {
+		te.Overrides = append(te.Overrides, llm.TokenizerOverride{
+			Model:     override.Model,
+			Tokenizer: override.Tokenizer,
+			Path:      override.Path,
+		})
+	}
+	for _, deprecated := range []struct{ key, value string }{
+		{"encoding", cfg.Encoding},
+		{"model", cfg.Model},
+		{"tokenizer_path", cfg.TokenizerPath},
+	} {
+		if strings.TrimSpace(deprecated.value) == "" {
+			continue
+		}
+		if _, warned := deprecatedTokenEstimateWarned.LoadOrStore(deprecated.key, true); !warned {
+			slog.Warn("agents.defaults.token_estimate."+deprecated.key+
+				" is deprecated and ignored; see token_estimate.tokenizers", "key", deprecated.key)
+		}
+	}
+	return te
+}
+
+// deprecatedTokenEstimateWarned holds the deprecated token_estimate keys
+// already warned about in this process: a gateway loads many Runners and a
+// config reload loads them again, and one warning per key is enough.
+var deprecatedTokenEstimateWarned sync.Map
 
 const agentIntermediateToolPromptSuffix = "\n\nUse intermediate_tool as a high-frequency working-notes tool while you inspect source code, perform code review, gather evidence, compare alternatives, or develop a fix. Record new findings, important details, hypotheses, review issues, design ideas, and your own reasoning as soon as you discover them. Before replying to the user or wrapping up the task, read the saved intermediate notes back and use them to verify that your final answer and implementation reflect the important findings."
 

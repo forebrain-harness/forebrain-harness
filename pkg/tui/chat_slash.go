@@ -917,7 +917,10 @@ func (s *ChatSession) buildMigrateOptions(onlyProject bool, sessionID string, so
 		InputHistoryPath:   filepath.Join(workspace, "state", "cli-input-history.txt"),
 		Consolidate: func(ctx context.Context, sid string) error {
 			if runner := s.runner(); runner != nil {
-				return runner.ConsolidateMemoriesNow(ctx, sid)
+				// The migration's own notes only: the workspace pass
+				// integrates what this import wrote and leaves the native
+				// rollouts' stage-1 extraction to the background pipeline.
+				return runner.ConsolidateMemoryWorkspace(ctx)
 			}
 			return errors.New("runner unavailable")
 		},
@@ -982,6 +985,7 @@ func (s *ChatSession) migrateProgressSink() func(migrate.Progress) {
 		mu.Unlock()
 		s.notifyUI(MigrationProgressMsg{
 			Stage: progress.Stage, Done: progress.Done, Total: progress.Total, Detail: progress.Detail,
+			Percent: progress.Percent,
 		})
 	}
 }

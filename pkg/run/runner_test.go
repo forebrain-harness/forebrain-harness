@@ -2524,3 +2524,40 @@ func TestRunContentKeepsSubagentProjectRoot(t *testing.T) {
 		t.Fatalf("tool saw working dir %q, want the subagent root %q", seen, subagentRoot)
 	}
 }
+
+// Only download: false turns downloading off; hubs: [] keeps it on.
+func TestTokenEstimateOptionsMapsDownload(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home) // keep Load away from the real ~/.forebrain/.env
+	for _, tc := range []struct {
+		name, tokenEstimate string
+		wantDisabled        bool
+	}{
+		{name: "download false", tokenEstimate: "      download: false\n", wantDisabled: true},
+		{name: "download true", tokenEstimate: "      download: true\n"},
+		{name: "empty hubs", tokenEstimate: "      hubs: []\n"},
+		{name: "hubs and download false", tokenEstimate: "      hubs: [\"modelscope\"]\n      download: false\n", wantDisabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "forebrain.yaml")
+			body := "agents:\n  defaults:\n    token_estimate:\n" + tc.tokenEstimate
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root, err := appcfg.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			te := tokenEstimateOptions(home, &root)
+			if te.DisableDownload != tc.wantDisabled {
+				t.Fatalf("DisableDownload = %v, want %v", te.DisableDownload, tc.wantDisabled)
+			}
+			if want := filepath.Join(home, "cache", "tokenizers"); te.CacheDir != want {
+				t.Fatalf("CacheDir = %q, want %q", te.CacheDir, want)
+			}
+		})
+	}
+	if te := tokenEstimateOptions("", nil); te.DisableDownload || te.CacheDir != "" {
+		t.Fatalf("no home and no config = %+v, want the zero options", te)
+	}
+}

@@ -40,6 +40,12 @@ func NewRuntimeHook(params HookParams) *Hook {
 			}
 		}
 	}
+	if params.PrimaryModel != nil {
+		hook.EstimatorProvider = func(sessionID string) llm.Estimator {
+			provider, model := params.PrimaryModel(sessionID)
+			return llm.EstimatorFor(provider, model)
+		}
+	}
 	hook.ModeProvider = StoredModeProvider(modeStateRoot(hook.Home, hook.WorkspaceRoot))
 	hook.ReadStatesProvider = params.ReadStatesProvider
 	hook.SnapshotWriter = params.SnapshotWriter

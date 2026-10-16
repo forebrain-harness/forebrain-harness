@@ -18,7 +18,7 @@ import (
 // stateSchemaVersion is the shape schema.sql declares. A database at a lower
 // version is carried forward by the migrations below; one at a higher version
 // was written by a newer binary.
-const stateSchemaVersion = 14
+const stateSchemaVersion = 15
 
 var (
 	// ErrStateSchemaNewer is returned when the file was written by a newer
@@ -53,6 +53,7 @@ var stateSchemaMigrations = []schemaMigration{
 	{version: 12, apply: migrateStateV11ToV12},
 	{version: 13, apply: migrateStateV12ToV13},
 	{version: 14, apply: migrateStateV13ToV14},
+	{version: 15, apply: migrateStateV14ToV15},
 }
 
 // migrateStateV3ToV4 adds the session-purpose column. SQLite allows ADD
@@ -690,6 +691,30 @@ FROM fb_cron_jobs_v13`); err != nil {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("create fb_cron_jobs index: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateStateV14ToV15 adds the migration ledger (fb_migration_units), the
+// fingerprint table /migrate consults to skip re-parsing unchanged source
+// transcripts on incremental runs. It is a single CREATE TABLE IF NOT EXISTS —
+// purely additive, no existing row is read or rewritten — so an empty database
+// and a v14 database both land in the same shape.
+func migrateStateV14ToV15(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS fb_migration_units (
+  agent_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  source_bytes INTEGER NOT NULL,
+  source_mtime_ms INTEGER NOT NULL,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  plans_json TEXT,
+  imported_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(agent_id, target_id)
+) STRICT`); err != nil {
+		return fmt.Errorf("create fb_migration_units: %w", err)
 	}
 	return nil
 }

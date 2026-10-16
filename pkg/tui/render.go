@@ -808,21 +808,18 @@ func (r *Renderer) finalizePendingToolsVM(vm *viewModel) bool {
 }
 
 // Transient status sources, highest priority first. A readiness wait is the
-// most urgent thing on screen because it is what the reader is waiting on; a
-// migration outranks the ordinary working line because it is a foreground
-// operation the user started and cannot see otherwise; an install the user
-// confirmed from a language-server recommendation sits with it for the same
-// reason.
+// most urgent thing on screen because it is what the reader is waiting on;
+// an install the user confirmed from a language-server recommendation
+// outranks the ordinary working line for the same reason: it is a foreground
+// operation the user started.
 const (
 	transientSourceMCP     = "mcp"
-	transientSourceMigrate = "migrate"
 	transientSourceLSP     = "lsp"
 	transientSourceWorking = "working"
 )
 
 var transientSourcePriority = []string{
 	transientSourceMCP,
-	transientSourceMigrate,
 	transientSourceLSP,
 	transientSourceWorking,
 }
@@ -5662,6 +5659,70 @@ func (r *Renderer) renderMemoryCompact(f Frame) {
 	}
 	_, _ = fmt.Fprintln(r.out, prefixLines(body, "  └ ", "    "))
 	_, _ = fmt.Fprintln(r.out)
+}
+
+// A migration card's title names its state, exactly as the compact card's
+// titles do for compaction.
+const (
+	migrationTitlePreviewing = "Previewing migration"
+	migrationTitleMigrating  = "Migrating"
+	migrationTitleDone       = "Migration complete"
+	migrationTitleFailed     = "Migration failed"
+	migrationTitleCancelled  = "Migration cancelled"
+)
+
+// renderMigration draws the migration progress card: the compact card's exact
+// two-line layout while the import runs (a spinning header line, then the
+// same bar renderCompactProgressBar draws for compaction), and the finished
+// report as its content body once the run reports back. The bar and its
+// percentage are byte-identical to the compact card's by construction — the
+// same function draws both.
+func (r *Renderer) renderMigration(f Frame) {
+	header := migrationHeaderLine(f, r.spinnerPhase)
+	if !f.Final {
+		_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "   "))
+		_, _ = fmt.Fprintln(r.out, "  "+renderCompactProgressBar(f.Progress, r.spinnerPhase, compactProgressBarWidth(termWidthOrDefault())))
+		return
+	}
+	_, _ = fmt.Fprintln(r.out, wrapToolDisplayLine(header, "  │ "))
+	content := strings.TrimSpace(f.Content)
+	if content == "" {
+		_, _ = fmt.Fprintln(r.out)
+		return
+	}
+	contentWidth := maxCardContentWidth() - 2
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+	body := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(wrapCardContent(content, contentWidth))
+	_, _ = fmt.Fprintln(r.out, prefixLines(body, "  └ ", "    "))
+	_, _ = fmt.Fprintln(r.out)
+}
+
+// migrationHeaderLine is a migration card's first line: a marker that spins
+// while the import runs, the state in bold, and the stage · count · detail
+// summary after it — the compact header's structure with the migration's own
+// state names.
+func migrationHeaderLine(f Frame, spinnerPhase int) string {
+	title := strings.TrimSpace(f.Title)
+	if title == "" {
+		title = migrationTitleMigrating
+	}
+	marker, color := "✓", "78"
+	switch {
+	case !f.Final:
+		marker, color = spinnerGlyphs[spinnerPhase%len(spinnerGlyphs)], "75"
+	case title == migrationTitleFailed:
+		marker, color = "✗", "203"
+	case title == migrationTitleCancelled:
+		marker, color = "○", "250"
+	}
+	line := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(marker) +
+		" " + lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true).Render(title)
+	if detail := strings.TrimSpace(f.Summary); detail != "" {
+		line += lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(" · " + detail)
+	}
+	return line
 }
 
 // renderGoal draws one of a /goal's lines: a marker and title in the goal's

@@ -865,6 +865,11 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // one Runner field instead of two, and a literal-constructed Runner stays
 // usable.
 //
+// 41 methods (was 40): ConsolidateMemoryWorkspace is the migration's
+// workspace-only consolidation entry — the mirror of ConsolidateMemoriesNow
+// that skips the prune and the native-rollout stage-1 claims, so an import
+// pays for exactly the notes it wrote.
+//
 // 40 methods (was 39): the image-input gate (ImageInputRefusal) is the
 // session-model capability check read_file consults before handing the model
 // pixels — it belongs to the Runner because only the Runner knows the
@@ -878,7 +883,7 @@ func TestEveryPackageHasDocGo(t *testing.T) {
 // half-mutated runtime).
 const (
 	runnerFields  = 25
-	runnerMethods = 40
+	runnerMethods = 41
 )
 
 func TestRunnerOnlyShrinks(t *testing.T) {

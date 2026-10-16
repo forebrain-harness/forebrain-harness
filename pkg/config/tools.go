@@ -41,17 +41,21 @@ type WebFetchConfig struct {
 // beside the binary, and only when neither has it is it downloaded, from
 // HuggingFace first and ModelScope second (configure the hubs and endpoints
 // below). An enterprise/offline install can run forebrain once on a connected
-// machine and copy the whole cache directory across; the layout is the
-// decompressed original files. The built-in ids and the model names they cover
+// machine and copy the whole cache directory across, and set download: false so
+// a tokenizer missing there is never fetched; the layout is the decompressed
+// files exactly as they ship. The built-in ids and the model names they cover
 // are listed in assets/tokenizers/README.md.
 //
-// The zero value is the out-of-the-box default: the download hubs are
-// HuggingFace then ModelScope, the endpoints are their public URLs, and the
-// default tokenizer is gpt-o200k.
+// The zero value is the out-of-the-box default: a missing tokenizer is
+// downloaded, the download hubs are HuggingFace then ModelScope, the endpoints
+// are their public URLs, and the default tokenizer is gpt-o200k.
 type TokenEstimateConfig struct {
 	// Hubs is the download order; each entry is "huggingface" or "modelscope".
-	// Empty means both, in that order.
+	// Empty means both, in that order — use Download: false to never download.
 	Hubs []string `yaml:"hubs,omitempty" json:"hubs,omitempty"`
+	// Download: nil or true downloads a missing tokenizer; false never does
+	// (offline/intranet installs).
+	Download *bool `yaml:"download,omitempty" json:"download,omitempty"`
 	// HuggingFaceEndpoint overrides the HuggingFace base URL ("" → $HF_ENDPOINT
 	// → https://huggingface.co).
 	HuggingFaceEndpoint string `yaml:"huggingface_endpoint,omitempty" json:"huggingface_endpoint,omitempty"`
@@ -71,11 +75,12 @@ type TokenEstimateConfig struct {
 }
 
 // TokenizerOverride maps a model-name prefix to a tokenizer: exactly one of
-// Tokenizer (a built-in id) or Path (a local tokenizer.json) is set.
+// Tokenizer (a built-in id) or Path (the absolute path of a local
+// tokenizer.json) is set.
 type TokenizerOverride struct {
 	Model     string `yaml:"model" json:"model"`                             // model-name prefix, case-insensitive
 	Tokenizer string `yaml:"tokenizer,omitempty" json:"tokenizer,omitempty"` // a built-in tokenizer id
-	Path      string `yaml:"path,omitempty" json:"path,omitempty"`           // a local tokenizer.json
+	Path      string `yaml:"path,omitempty" json:"path,omitempty"`           // an absolute path to a local tokenizer.json
 }
 
 type ContextInjectConfig struct {

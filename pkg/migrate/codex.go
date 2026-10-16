@@ -58,6 +58,9 @@ type codexRollout struct {
 	Path     string
 	ThreadID string
 	Bytes    int64
+	// MtimeMs is the file's modification time at discovery, the second half
+	// of the incremental fingerprint (with Bytes).
+	MtimeMs int64
 	// Cwd and FirstSeen come from the file's head session_meta.
 	Cwd       string
 	FirstSeen int64
@@ -176,7 +179,8 @@ func discoverCodexRollouts(sessionsDir string) []codexRollout {
 		}
 		out = append(out, codexRollout{
 			Path: path, ThreadID: threadID, Bytes: info.Size(),
-			Cwd: cwd, FirstSeen: firstSeen,
+			MtimeMs: info.ModTime().UnixMilli(),
+			Cwd:     cwd, FirstSeen: firstSeen,
 		})
 		return nil
 	})

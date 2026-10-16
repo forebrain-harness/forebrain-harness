@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
@@ -373,5 +374,132 @@ func TestConsolidationInstructionIsIdenticalAcrossProjects(t *testing.T) {
 		if !strings.Contains(second.Context, filepath.Join(projectB, extensionsDir)) {
 			t.Fatalf("scope %s: memory extensions never reached the run context: %q", scope.Kind, second.Context)
 		}
+	}
+}
+
+// ---- migrated from pipeline_workspace_test.go (tests for this file's production code) ----
+
+// pipeline_workspace_test.go pins what ConsolidateWorkspace is: the
+// workspace-consolidation entry a migration injects. It prepares the scopes
+// and honors the rate-limit guard, consolidates the workspace's own input,
+// and neither prunes stage-1 outputs nor claims native rollouts for
+// extraction — those are the background pipeline's data, not the
+// migration's.
+
+type recordingConsolidator struct {
+	mu    sync.Mutex
+	roots []Root
+}
+
+func (r *recordingConsolidator) RunMemoryConsolidation(_ context.Context, root Root, _ ConsolidationPrompt) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.roots = append(r.roots, root)
+	return nil
+}
+
+func (r *recordingConsolidator) calls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.roots)
+}
+
+// TestConsolidateWorkspaceIntegratesOnlyTheWorkspace runs the workspace pass
+// over a store that holds everything the full pipeline would touch: a
+// claimable native rollout and a stale stage-1 output. The pass consolidates
+// the ad-hoc note the migration just wrote (the recording consolidator sees
+// the global scope) and leaves both stage-1 concerns untouched.
+func TestConsolidateWorkspaceIntegratesOnlyTheWorkspace(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := time.Now().Unix()
+
+	// A native rollout the full Run would claim for stage-1 extraction:
+	// memory enabled, TUI-sourced, idle long enough. The extraction LLM is
+	// wired and working, so a pass that claimed it would leave a stage-1
+	// output row behind.
+	insertMemoryThread(t, store, "thread-claimable", ThreadMemoryEnabled, SessionSourceTUI, now-72*3600)
+	message := llm.AssistantMessage([]llm.ContentPart{llm.Text(`{"raw_memory":"raw","rollout_summary":"summary","rollout_slug":"work"}`)})
+	extract := &structuredTestLLM{result: &llm.Result{Message: &message}}
+
+	// A stage-1 output old and unused enough that the full Run's prune would
+	// delete it (last touched months past the 30-day window).
+	insertMemoryThread(t, store, "thread-stale", ThreadMemoryEnabled, SessionSourceTUI, now-400*24*3600)
+	if err := store.UpsertStage1Output(ctx, Stage1Output{
+		ThreadID: "thread-stale", ProjectKey: testProjectKey,
+		SourceUpdatedAt: now - 400*24*3600, RawMemory: "stale", RolloutSummary: "stale",
+		GeneratedAt: now - 400*24*3600,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	roots := testRoots(t)
+	consolidator := &recordingConsolidator{}
+	pipeline := &Pipeline{
+		Store: store, Roots: roots, ExtractLLM: extract, Consolidator: consolidator,
+		Cfg: &appcfg.Root{}, SessionProjectKey: "",
+	}
+
+	// The migration's own write: an ad-hoc note in the global workspace.
+	globalRoot := roots.Scope(GlobalScope())
+	notesDir := filepath.Join(globalRoot.MemoryRoot, "extensions", "ad_hoc", "notes")
+	if err := os.MkdirAll(notesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(notesDir, "2026-09-01T00-00-00-migrated.md"), []byte("a note the migration wrote\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := pipeline.ConsolidateWorkspace(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if consolidator.calls() != 1 {
+		t.Fatalf("consolidator calls = %d, want exactly the global scope's pass", consolidator.calls())
+	}
+	if consolidator.roots[0].MemoryRoot != globalRoot.MemoryRoot {
+		t.Fatalf("consolidated %q, want the global scope", consolidator.roots[0].MemoryRoot)
+	}
+
+	// The claimable rollout was never extracted.
+	var claimableRows int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE thread_id='thread-claimable'`).Scan(&claimableRows); err != nil {
+		t.Fatal(err)
+	}
+	if claimableRows != 0 {
+		t.Fatalf("workspace pass claimed a native rollout: %d stage-1 rows", claimableRows)
+	}
+	// The stale output was not pruned.
+	var staleRows int
+	if err := store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM fb_memory_stage1_outputs WHERE thread_id='thread-stale'`).Scan(&staleRows); err != nil {
+		t.Fatal(err)
+	}
+	if staleRows != 1 {
+		t.Fatalf("workspace pass pruned stage-1 outputs: %d rows", staleRows)
+	}
+	// Scope preparation ran even for a pass that skips claims.
+	if info, err := os.Stat(filepath.Join(globalRoot.MemoryRoot, "extensions", "ad_hoc", "instructions.md")); err != nil || info.IsDir() {
+		t.Fatalf("global scope was not prepared: %v", err)
+	}
+}
+
+// TestConsolidateWorkspaceHonorsRateLimitGuard pins that the guard still
+// gates the workspace pass: an account out of budget spends nothing.
+func TestConsolidateWorkspaceHonorsRateLimitGuard(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	roots := testRoots(t)
+	consolidator := &recordingConsolidator{}
+	guarded := 0
+	pipeline := &Pipeline{
+		Store: store, Roots: roots, Consolidator: consolidator, Cfg: &appcfg.Root{},
+		RateLimitGuard: func(context.Context, int) bool { guarded++; return false },
+	}
+	if err := pipeline.ConsolidateWorkspace(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if guarded != 1 || consolidator.calls() != 0 {
+		t.Fatalf("guard calls = %d consolidator calls = %d, want the guard to stop the pass", guarded, consolidator.calls())
 	}
 }

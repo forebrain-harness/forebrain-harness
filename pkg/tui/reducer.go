@@ -41,6 +41,10 @@ const (
 	FramePlan          FrameKind = "plan"
 	FrameStatus        FrameKind = "status"
 	FrameMemoryCompact FrameKind = "memory_compact"
+	// FrameMigration is the /migrate progress card: one block above the
+	// composer that carries the compact-style percentage bar while the
+	// import runs and becomes the finished report when it reports back.
+	FrameMigration FrameKind = "migration"
 	// FrameSkillInstall is the live card a background skill install owns: one
 	// block that reports the phase while the package is fetched and becomes
 	// the install's result when it finishes.
@@ -3030,7 +3034,8 @@ func renderBlockFull(b *viewBlock, width int, theme DiffTheme, spinnerPhase int,
 	c := &b.cache
 	animated := (toolStatusRunning(b.frame) && !toolStatusAwaitingApproval(b.frame)) ||
 		(b.frame.Kind == FrameMemoryCompact && !b.frame.Final) ||
-		(b.frame.Kind == FrameSkillInstall && !b.frame.Final)
+		(b.frame.Kind == FrameSkillInstall && !b.frame.Final) ||
+		(b.frame.Kind == FrameMigration && !b.frame.Final)
 	// A subagent card with a running task clock depends on the second, not the
 	// spinner phase: the clock walks once a second, so keying it on the tick
 	// would re-render the whole card ten times for one visible change.
@@ -3130,6 +3135,8 @@ func renderFrameLinesWithAgents(f Frame, width int, theme DiffTheme, spinnerPhas
 		sr.renderFanout(f)
 	case FrameMemoryCompact:
 		sr.renderMemoryCompact(f)
+	case FrameMigration:
+		sr.renderMigration(f)
 	case FrameSkillInstall:
 		sr.renderSkillInstall(f)
 	case FrameGoal:
@@ -3877,6 +3884,8 @@ func (r *Renderer) hasLiveBlockLocked() bool {
 	for _, block := range vm.blocks {
 		switch {
 		case block.frame.Kind == FrameMemoryCompact && !block.frame.Final:
+			return true
+		case block.frame.Kind == FrameMigration && !block.frame.Final:
 			return true
 		case block.frame.Kind == FrameFanout && fanoutHasLiveClock(block.frame):
 			return true
@@ -5135,12 +5144,13 @@ func (r *Renderer) retainFrameLocked(f Frame) bool {
 		}
 		return r.activeView == f.AgentID
 	}
-	// Tool, fanout, memory-compact and skill-install frames replace the
-	// previous block with the same StepID (compact running → compact ran,
-	// installing → installed).
-	if f.Kind == FrameFanout || f.Kind == FrameTool || f.Kind == FrameMemoryCompact || f.Kind == FrameSkillInstall {
+	// Tool, fanout, memory-compact, skill-install and migration frames
+	// replace the previous block with the same StepID (compact running →
+	// compact ran, installing → installed, previewing → migrating →
+	// migrated).
+	if f.Kind == FrameFanout || f.Kind == FrameTool || f.Kind == FrameMemoryCompact || f.Kind == FrameSkillInstall || f.Kind == FrameMigration {
 		r.vm.replaceOrAppendBlock(f)
-		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout {
+		if f.Kind == FrameMemoryCompact || f.Kind == FrameFanout || f.Kind == FrameMigration {
 			r.syncLiveBlockAnimationLocked()
 		}
 	} else if f.Kind == FrameStatus && f.InsertBeforeLastTool {
@@ -5740,47 +5750,173 @@ func extractColumnRange(plain string, startCol, endCol int) string {
 	return result.String()
 }
 
-// applyHoverHighlight repaints one transcript row under the hover background.
-// lipgloss emits \x1b[0m after each styled segment; the background is
-// re-applied after every reset so the whole row stays highlighted. The fill to
-// the right edge is a run of explicit spaces rather than \x1b[K: terminals
-// without back-color-erase (macOS Terminal.app) erase to the default
-// background, which would stop the highlight after the text.
-func applyHoverHighlight(line string, width int, hoverBgSeq string) string {
-	highlighted := strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+hoverBgSeq)
-	pad := strings.Repeat(" ", max(width-lipgloss.Width(line), 0))
-	return hoverBgSeq + highlighted + pad + "\x1b[0m"
+// escapeSeqEnd returns the index just past the escape sequence starting at
+// line[i], which must be an ESC byte. It is the renderer's own scanner: a CSI
+// sequence runs to its final byte, any other escape to 'm', BEL or a
+// backslash.
+func escapeSeqEnd(line string, i int) int {
+	j := i + 1
+	if j < len(line) && line[j] == '[' {
+		for j < len(line) && !((line[j] >= 'A' && line[j] <= 'Z') || (line[j] >= 'a' && line[j] <= 'z')) {
+			j++
+		}
+	} else {
+		for j < len(line) && line[j] != 'm' && line[j] != '\x07' && line[j] != '\\' {
+			j++
+		}
+	}
+	if j < len(line) {
+		j++
+	}
+	return j
 }
 
+// sgrIsFullReset reports whether a sequence resets every attribute. Everything
+// a row emitted before such a sequence is gone from the terminal, so a
+// decoration that replays the row's own state must not replay across it.
+func sgrIsFullReset(seq string) bool {
+	if len(seq) < 3 || seq[0] != '\x1b' || seq[1] != '[' || seq[len(seq)-1] != 'm' {
+		return false
+	}
+	params := seq[2 : len(seq)-1]
+	return params == "" || params == "0"
+}
+
+// sgrSetsBackground reports whether an SGR sequence changes the background,
+// including a full reset, which clears it to the terminal default.
+//
+// A row decoration (the selection background, the hover background) is painted
+// over a row that carries its own SGR state, so it must re-assert its own
+// background after every sequence that would take the background away — the
+// card's fg+bg opener at a pad boundary, a chip's fg15/bg27, a bare \x1b[49m —
+// otherwise the decoration stops mid-row. A foreground-only sequence leaves the
+// background alone and is copied as-is.
+func sgrSetsBackground(seq string) bool {
+	if len(seq) < 3 || seq[0] != '\x1b' || seq[1] != '[' || seq[len(seq)-1] != 'm' {
+		return false
+	}
+	params := seq[2 : len(seq)-1]
+	if params == "" {
+		return true
+	}
+	parts := strings.Split(params, ";")
+	for i := 0; i < len(parts); i++ {
+		v, err := strconv.Atoi(parts[i])
+		if err != nil {
+			continue
+		}
+		switch {
+		case v == 0, v == 49:
+			return true
+		case v >= 40 && v <= 47, v >= 100 && v <= 107:
+			// Basic and bright background colours (the chip termenv emits on a
+			// 16-colour profile is \x1b[97;104m: bright fg + bright bg).
+			return true
+		case v == 38, v == 48:
+			// Extended colour: ...;5;n or ...;2;r;g;b. Step over the colour's
+			// arguments so a foreground colour's components are never read as
+			// background codes.
+			if i+1 < len(parts) {
+				switch parts[i+1] {
+				case "5":
+					i += 2
+				case "2":
+					i += 4
+				}
+			}
+			if v == 48 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// trackRowSGR appends one SGR op to the ordered list a row has emitted since
+// its last full reset — the state a decoration restores when it stops. The list
+// is deliberately not deduplicated the way selfContainedRows dedups open
+// attributes: this is a sequence of ops to replay in order, and a repeated
+// opener after a conflicting closer is a different state, not a duplicate.
+func trackRowSGR(ops []string, seq string) []string {
+	if len(seq) < 3 || seq[0] != '\x1b' || seq[1] != '[' || seq[len(seq)-1] != 'm' {
+		return ops
+	}
+	if sgrIsFullReset(seq) {
+		return ops[:0]
+	}
+	return append(ops, seq)
+}
+
+// applyHoverHighlight repaints one transcript row under the hover background.
+//
+// The row carries its own SGR state — lipgloss emits \x1b[0m after each styled
+// segment, and a card row opens with its own background — so the hover
+// background cannot be a fixed colour painted at the start and after \x1b[0m
+// alone: any sequence that changes the background would take it away and stop
+// the highlight mid-row. Each such sequence is therefore copied with the hover
+// background re-asserted right after it; foreground-only sequences are copied
+// verbatim. The fill to the right edge is a run of explicit spaces rather than
+// \x1b[K: terminals without back-color-erase (macOS Terminal.app) erase to the
+// default background, which would stop the highlight after the text.
+func applyHoverHighlight(line string, width int, hoverBgSeq string) string {
+	var b strings.Builder
+	b.Grow(len(line) + 16)
+	for i := 0; i < len(line); {
+		if line[i] != '\x1b' {
+			b.WriteByte(line[i])
+			i++
+			continue
+		}
+		j := escapeSeqEnd(line, i)
+		seq := line[i:j]
+		b.WriteString(seq)
+		if sgrSetsBackground(seq) {
+			b.WriteString(hoverBgSeq)
+		}
+		i = j
+	}
+	pad := strings.Repeat(" ", max(width-lipgloss.Width(line), 0))
+	return hoverBgSeq + b.String() + pad + "\x1b[0m"
+}
+
+// applySelectionHighlight paints the selection background over the cells in
+// [startCol, endCol) of one rendered row.
+//
+// A rendered row carries its own SGR state (the card background, per-token
+// foregrounds, full resets), so the highlight is not a plain background colour
+// stamped at the selection's edges — it has to track the row's own ops:
+//
+//   - entering the selection writes the selection background;
+//   - inside the selection, a sequence that would take the background away (a
+//     full reset, a bare \x1b[49m, the card's fg+bg opener at a pad boundary, a
+//     chip's bg) is copied and the selection background re-asserted right after
+//     it, so the highlight stays continuous across a chip or the card's pad; a
+//     foreground-only sequence is copied verbatim and needs no re-assertion;
+//   - leaving the selection restores the row's own state by replaying, in
+//     order, the ops the row emitted since its last full reset. A bare \x1b[49m
+//     there would instead reset the background to the terminal default and
+//     leave the rest of the row — the card's pad, a chip's background —
+//     unpainted, which is the bug this replaces.
+//
+// Replay is deliberately used only on exit, never inside the selection: inside,
+// replaying the row's list would overwrite the foreground of a token copied
+// after it.
 func applySelectionHighlight(line, selectBgSeq string, startCol, endCol int) string {
 	if startCol < 0 {
 		startCol = 0
 	}
 	var result strings.Builder
+	var rowOps []string
 	visualCol := 0
 	inSelection := false
 	i := 0
 	for i < len(line) {
 		if line[i] == '\x1b' {
-			j := i + 1
-			if j < len(line) && line[j] == '[' {
-				for j < len(line) && !((line[j] >= 'A' && line[j] <= 'Z') || (line[j] >= 'a' && line[j] <= 'z')) {
-					j++
-				}
-				if j < len(line) {
-					j++
-				}
-			} else {
-				for j < len(line) && line[j] != 'm' && line[j] != '\x07' && line[j] != '\\' {
-					j++
-				}
-				if j < len(line) {
-					j++
-				}
-			}
+			j := escapeSeqEnd(line, i)
 			code := line[i:j]
+			rowOps = trackRowSGR(rowOps, code)
 			result.WriteString(code)
-			if code == "\x1b[0m" && inSelection {
+			if inSelection && sgrSetsBackground(code) {
 				result.WriteString(selectBgSeq)
 			}
 			i = j
@@ -5803,7 +5939,10 @@ func applySelectionHighlight(line, selectBgSeq string, startCol, endCol int) str
 			result.WriteString(selectBgSeq)
 			inSelection = true
 		} else if !wantSel && inSelection {
-			result.WriteString("\x1b[49m")
+			result.WriteString("\x1b[0m")
+			for _, op := range rowOps {
+				result.WriteString(op)
+			}
 			inSelection = false
 		}
 		result.WriteRune(r)

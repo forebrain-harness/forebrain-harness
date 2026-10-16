@@ -552,7 +552,7 @@ func sortedDefinitionIDs(defs map[string]AgentDefinition) []string {
 func validateTokenEstimate(c TokenEstimateConfig) error {
 	for _, hub := range c.Hubs {
 		switch strings.ToLower(strings.TrimSpace(hub)) {
-		case "", "huggingface", "modelscope":
+		case "huggingface", "modelscope":
 		default:
 			return fmt.Errorf("agents.defaults.token_estimate.hubs: unknown hub %q (want huggingface or modelscope)", hub)
 		}
@@ -565,6 +565,11 @@ func validateTokenEstimate(c TokenEstimateConfig) error {
 		hasPath := strings.TrimSpace(override.Path) != ""
 		if hasTokenizer == hasPath {
 			return fmt.Errorf("agents.defaults.token_estimate.tokenizers[%d] (%s): exactly one of tokenizer or path must be set", i, override.Model)
+		}
+		// One process serves several projects (the gateway), so a relative
+		// path would resolve against whatever its working directory is.
+		if hasPath && !filepath.IsAbs(strings.TrimSpace(override.Path)) {
+			return fmt.Errorf("agents.defaults.token_estimate.tokenizers[%d] (%s): path must be absolute", i, override.Model)
 		}
 	}
 	return nil

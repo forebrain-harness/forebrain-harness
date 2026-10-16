@@ -384,6 +384,27 @@ func (r *Runner) ConsolidateMemoriesNow(ctx context.Context, sessionID string) e
 	return p.Run(ctx, strings.TrimSpace(sessionID))
 }
 
+// ConsolidateMemoryWorkspace runs only the workspace-consolidation pass
+// (stage 2) of this runner's pipeline, for the caller that just wrote notes
+// into the memory workspace itself — the migration importer. Unlike
+// ConsolidateMemoriesNow it neither prunes nor claims native rollouts for
+// stage-1 extraction: those are not the caller's data, and the pass owes
+// exactly the integration of the files that just landed. The same nil /
+// disabled / pipeline-unavailable contract as ConsolidateMemoriesNow.
+func (r *Runner) ConsolidateMemoryWorkspace(ctx context.Context) error {
+	if r == nil {
+		return errors.New("runner unavailable")
+	}
+	if !memory.Enabled(r.AppCfg) {
+		return ErrMemoriesDisabled
+	}
+	p := r.memPipeline.Get(r.buildMemoryPipeline)
+	if p == nil {
+		return errors.New("memory pipeline unavailable")
+	}
+	return p.ConsolidateWorkspace(ctx)
+}
+
 // memoryInstructionLLM injects the per-turn memory instruction: what the store
 // already knows and how to use it, plus which user instructions this turn must
 // be written back as new memory.

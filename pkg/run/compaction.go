@@ -139,7 +139,7 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 	// This mid-turn checkpoint must count with the session's own model's
 	// estimator, the same one the pre-turn checkpoint
 	// (assembly.autoCompactDecision) and the observed overhead
-	// (RecordSuccess/RecordOverflow) use. The overhead is server-real minus
+	// (RecordSuccessFor/RecordOverflow) use. The overhead is server-real minus
 	// local-estimate; if the decision counted with a different tokenizer than
 	// the observation measured against, the learned overhead would be added to
 	// the wrong base and the two checkpoints would fire at different real sizes.
@@ -149,7 +149,7 @@ func shouldCompactMessages(messages []llm.Message, modelLimit int, deps *Compact
 	// truth and the threshold never fires. The rest of what this layer cannot
 	// see -- the prefix the inner wrappers prepend, the provider's own framing
 	// -- is added back as the token overhead those same providers have reported.
-	total := llm.Project(provider, model, llm.EstimateMessagesWith(est, messages)+estimateToolsTokens(est, tools))
+	total := llm.ProjectFor(provider, model, est.Name(), llm.EstimateMessagesWith(est, messages)+estimateToolsTokens(est, tools))
 	if total >= modelLimit {
 		return true
 	}

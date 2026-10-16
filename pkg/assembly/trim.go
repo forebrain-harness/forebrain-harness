@@ -24,8 +24,9 @@ type messageGroup struct {
 	tokens   int
 }
 
-// groupHistory splits messages into leading system prefix and atomic groups.
-func groupHistory(messages []llm.Message) (prefix []llm.Message, groups []messageGroup) {
+// groupHistory splits messages into leading system prefix and atomic groups,
+// sizing each group with e (the session model's estimator, Service.estimator).
+func groupHistory(messages []llm.Message, e llm.Estimator) (prefix []llm.Message, groups []messageGroup) {
 	i := 0
 	for ; i < len(messages); i++ {
 		if messages[i].Role != llm.RoleSystem {
@@ -35,7 +36,7 @@ func groupHistory(messages []llm.Message) (prefix []llm.Message, groups []messag
 	}
 	for i < len(messages) {
 		msg := messages[i]
-		group := messageGroup{messages: []llm.Message{msg}, tokens: llm.EstimateMessage(msg)}
+		group := messageGroup{messages: []llm.Message{msg}, tokens: llm.EstimateMessageWith(e, msg)}
 		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
 			open := make(map[string]bool, len(msg.ToolCalls))
 			for _, tc := range msg.ToolCalls {
@@ -48,7 +49,7 @@ func groupHistory(messages []llm.Message) (prefix []llm.Message, groups []messag
 					break
 				}
 				group.messages = append(group.messages, messages[j])
-				group.tokens += llm.EstimateMessage(messages[j])
+				group.tokens += llm.EstimateMessageWith(e, messages[j])
 			}
 			i = j
 		} else {
@@ -59,9 +60,9 @@ func groupHistory(messages []llm.Message) (prefix []llm.Message, groups []messag
 	return prefix, groups
 }
 
-// trimHistoryToFit returns a structurally valid history that fits budget,
-// composed of the system prefix, the oldest user turn, and the newest groups
-// that still fit. Returns nil when not even that much fits.
+// trimHistoryToFit returns a structurally valid history that fits budget as e
+// counts it, composed of the system prefix, the oldest user turn, and the
+// newest groups that still fit. Returns nil when not even that much fits.
 //
 // The oldest user turn is kept as an anchor for two reasons. It is the original
 // request, which is the single most valuable message for a summarizer to see;
@@ -70,14 +71,14 @@ func groupHistory(messages []llm.Message) (prefix []llm.Message, groups []messag
 // Ordering is preserved: groups are selected newest-first but emitted in their
 // original order. Skipping the middle is fine — providers require valid pairing
 // and a valid opening role, not contiguity.
-func trimHistoryToFit(messages []llm.Message, budget int) []llm.Message {
+func trimHistoryToFit(messages []llm.Message, budget int, e llm.Estimator) []llm.Message {
 	if len(messages) == 0 || budget <= 0 {
 		return nil
 	}
-	prefix, groups := groupHistory(messages)
+	prefix, groups := groupHistory(messages, e)
 	remaining := budget
 	for _, msg := range prefix {
-		remaining -= llm.EstimateMessage(msg)
+		remaining -= llm.EstimateMessageWith(e, msg)
 	}
 	if remaining <= 0 {
 		return nil

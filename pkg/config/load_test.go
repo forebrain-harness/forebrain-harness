@@ -219,6 +219,16 @@ func TestLoadRejectsInvalidTokenEstimate(t *testing.T) {
 			body: "agents:\n  defaults:\n    token_estimate:\n      tokenizers:\n        - tokenizer: \"qwen-3.8\"\n",
 			want: "model is required",
 		},
+		{
+			name: "empty hub",
+			body: "agents:\n  defaults:\n    token_estimate:\n      hubs: [\"\"]\n",
+			want: "unknown hub",
+		},
+		{
+			name: "relative path",
+			body: "agents:\n  defaults:\n    token_estimate:\n      tokenizers:\n        - model: \"x\"\n          path: \"relative/tokenizer.json\"\n",
+			want: "path must be absolute",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,7 +251,10 @@ func TestLoadRejectsInvalidTokenEstimate(t *testing.T) {
 func TestLoadAcceptsValidTokenEstimate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "forebrain.yaml")
-	body := "agents:\n  defaults:\n    token_estimate:\n      hubs: [\"modelscope\"]\n      default_tokenizer: \"kimi-k3\"\n      tokenizers:\n        - model: \"my-\"\n          tokenizer: \"qwen-3.8\"\n        - model: \"other-\"\n          path: \"/tmp/tokenizer.json\"\n"
+	// An absolute path on every OS; single-quoted so a Windows path's
+	// backslashes stay literal.
+	tokenizerPath := filepath.Join(dir, "tokenizer.json")
+	body := "agents:\n  defaults:\n    token_estimate:\n      hubs: [\"modelscope\"]\n      default_tokenizer: \"kimi-k3\"\n      tokenizers:\n        - model: \"my-\"\n          tokenizer: \"qwen-3.8\"\n        - model: \"other-\"\n          path: '" + tokenizerPath + "'\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -255,4 +268,64 @@ func TestLoadAcceptsValidTokenEstimate(t *testing.T) {
 	if got := len(r.Agents.Defaults.TokenEstimate.Tokenizers); got != 2 {
 		t.Fatalf("tokenizers = %d entries, want 2", got)
 	}
+	if got := r.Agents.Defaults.TokenEstimate.Tokenizers[1].Path; got != tokenizerPath {
+		t.Fatalf("path = %q, want %q", got, tokenizerPath)
+	}
+}
+
+// download: false is the one way to turn downloading off, and it survives a
+// Save; hubs: [] means the default hubs with downloading on, before and after a
+// Save (which drops the empty list).
+func TestTokenEstimateDownloadAndEmptyHubsSurviveSave(t *testing.T) {
+	// Load then Save back to the same file, the way the config editor does.
+	load := func(t *testing.T, body string) (TokenEstimateConfig, string) {
+		t.Helper()
+		dir := t.TempDir()
+		// Isolate the data-dir home so Load does not merge the real
+		// ~/.forebrain/.env (see TestSavePreservesSecretEnvRefs).
+		t.Setenv("FOREBRAIN_HOME", dir)
+		path := filepath.Join(dir, "forebrain.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		r, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if err := Save(path, r); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		return r.Agents.Defaults.TokenEstimate, path
+	}
+	reload := func(t *testing.T, path string) TokenEstimateConfig {
+		t.Helper()
+		r, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load after Save: %v", err)
+		}
+		return r.Agents.Defaults.TokenEstimate
+	}
+
+	t.Run("download false", func(t *testing.T) {
+		first, saved := load(t, "agents:\n  defaults:\n    token_estimate:\n      download: false\n")
+		if raw, err := os.ReadFile(saved); err != nil || !strings.Contains(string(raw), "download: false") {
+			t.Fatalf("saved file lost download: false (err=%v):\n%s", err, raw)
+		}
+		for name, cfg := range map[string]TokenEstimateConfig{"loaded": first, "saved and reloaded": reload(t, saved)} {
+			if cfg.Download == nil || *cfg.Download {
+				t.Fatalf("%s: download = %v, want a non-nil false", name, cfg.Download)
+			}
+		}
+	})
+	t.Run("empty hubs", func(t *testing.T) {
+		first, saved := load(t, "agents:\n  defaults:\n    token_estimate:\n      hubs: []\n")
+		for name, cfg := range map[string]TokenEstimateConfig{"loaded": first, "saved and reloaded": reload(t, saved)} {
+			if cfg.Download != nil && !*cfg.Download {
+				t.Fatalf("%s: download turned off by hubs: []", name)
+			}
+			if len(cfg.Hubs) != 0 {
+				t.Fatalf("%s: hubs = %v, want empty (the default order)", name, cfg.Hubs)
+			}
+		}
+	})
 }

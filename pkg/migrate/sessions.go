@@ -24,7 +24,16 @@ const (
 	// project-scoped surfaces (/resume, the web project list) can see it
 	// again. It is a healed state, not a failure.
 	StatusRebound = "rebound"
+	// StatusUpdated marks a conversation whose source transcript grew since
+	// the last import: this run appended the new rows (owner decision
+	// 2026-10-16 — "增量" includes a migrated session gaining messages).
+	StatusUpdated = "updated"
 )
+
+// reasonUnchangedSinceLastRun is the fast path's skip reason: the migration
+// ledger's fingerprint says the source transcript has not moved since the
+// import that wrote this conversation, so it was not parsed again.
+const reasonUnchangedSinceLastRun = "already imported; unchanged since last run"
 
 // reasonSourceTranscriptGone names a migrated conversation whose source
 // transcript is no longer on disk: this run cannot discover it, so nothing
@@ -55,6 +64,9 @@ type sessionUnit struct {
 	ParentID string
 	IsChild  bool
 	Bytes    int64
+	// MtimeMs is the source file's modification time at discovery; with
+	// Bytes it is the incremental fingerprint the migration ledger compares.
+	MtimeMs int64
 	// Title, when set, is the source index's authoritative title; it wins
 	// over the transcript's own first-user-message fallback.
 	Title string
@@ -94,8 +106,8 @@ func (u sessionUnit) applyDefaults(parsed *parsedSession) {
 
 // importUnits parses and writes every unit via importUnitsCapture without
 // keeping the parsed sessions.
-func importUnits(ctx context.Context, units []sessionUnit, parse sessionParser, opts *Options, progress func(Progress)) ([]SessionOutcome, int, int64) {
-	outcomes, rows, bytes, _ := importUnitsCapture(ctx, units, parse, opts, progress, nil)
+func importUnits(ctx context.Context, units []sessionUnit, parse sessionParser, opts *Options, progress func(Progress), ledger *unitLedger) ([]SessionOutcome, int, int64) {
+	outcomes, rows, bytes, _ := importUnitsCapture(ctx, units, parse, opts, progress, nil, ledger)
 	return outcomes, rows, bytes
 }
 
@@ -104,7 +116,14 @@ func importUnits(ctx context.Context, units []sessionUnit, parse sessionParser, 
 // extraction reads the capture instead of re-reading the files (§4.10).
 // Each conversation is its own transaction: a failure rolls that
 // conversation back, lands in the report, and never touches the others (§6).
-func importUnitsCapture(ctx context.Context, units []sessionUnit, parse sessionParser, opts *Options, progress func(Progress), capture map[string]*parsedSession) ([]SessionOutcome, int, int64, map[string]*parsedSession) {
+//
+// The migration ledger makes this incremental. A unit whose recorded
+// fingerprint matches its file — and whose conversation row is still this
+// agent's, bound, with every plan it owns intact — is not parsed at all.
+// A unit whose file grew has the new rows appended; a unit the ledger has
+// never seen keeps today's semantics, with the fingerprint backfilled so
+// the next run takes the fast path.
+func importUnitsCapture(ctx context.Context, units []sessionUnit, parse sessionParser, opts *Options, progress func(Progress), capture map[string]*parsedSession, ledger *unitLedger) ([]SessionOutcome, int, int64, map[string]*parsedSession) {
 	out := []SessionOutcome{}
 	rowsWritten := 0
 	var sourceBytes int64
@@ -119,6 +138,14 @@ func importUnitsCapture(ctx context.Context, units []sessionUnit, parse sessionP
 	for _, unit := range units {
 		if ctx.Err() != nil {
 			break
+		}
+		if ledger != nil {
+			fast, ok := fastPathOutcome(ctx, ledger, opts, unit)
+			if ok {
+				out = append(out, fast)
+				reportProgress(fast.Title)
+				continue
+			}
 		}
 		parsed, err := parse(ctx, unit.Path, strings.TrimPrefix(unit.TargetID, "cli-"), nil)
 		if err != nil {
@@ -149,20 +176,102 @@ func importUnitsCapture(ctx context.Context, units []sessionUnit, parse sessionP
 				outcome.Messages = len(parsed.Rows)
 				rowsWritten += len(parsed.Rows)
 				sourceBytes += unit.Bytes
+			} else if outcome.Reason == "already migrated" {
+				if _, hit := ledger.lookup(unit.TargetID); hit {
+					// The ledger knows this unit and the file grew: the run
+					// would append exactly these rows. A ledger miss is the
+					// upgrade path — today's semantics, no append.
+					if delta := countSessionDelta(ctx, opts, unit.TargetID, parsed); delta > 0 {
+						outcome.Status = StatusUpdated
+						outcome.Messages = delta
+						rowsWritten += delta
+					}
+				}
 			}
 			out = append(out, outcome)
 			reportProgress(parsed.Title)
 			continue
 		}
-		outcome, inserted := importOneSession(ctx, opts, unit.Path, unit.TargetID, unit.ParentID, parsed)
+		_, hit := ledger.lookup(unit.TargetID)
+		if hit {
+			// The ledger knows this unit, so "already migrated" is an
+			// increment, not a first sighting: append what grew, or refresh
+			// the fingerprint when nothing did.
+			if outcome, pending := sessionOutcomeFor(ctx, opts, unit.Path, unit.TargetID, parsed, unit.IsChild); !pending && outcome.Reason == "already migrated" {
+				outcome, inserted := appendSessionDelta(ctx, opts, ledger, unit, parsed)
+				out = append(out, outcome)
+				rowsWritten += inserted
+				reportProgress(parsed.Title)
+				continue
+			}
+		}
+		outcome, inserted := importOneSession(ctx, opts, unit, parsed, ledger)
+		if !hit && outcome.Status == StatusSkipped && outcome.Reason == "already migrated" {
+			// The conversation was migrated before the ledger existed
+			// (upgrade path): today's semantics already skipped it, and the
+			// fingerprint is backfilled from the file as it stands now — the
+			// tail it grew before the upgrade stays out, exactly as before
+			// (owner decision 2026-10-16: pure backfill, zero semantics
+			// change). Codex plan records settle from this run's parse.
+			_ = recordUnit(ctx, opts.DB, strings.TrimSpace(opts.AgentID), ledger.source, unit, len(parsed.Rows), ledger.settledPlans(), opts.now())
+		}
 		out = append(out, outcome)
 		rowsWritten += inserted
 		if outcome.Status == StatusMigrated {
 			sourceBytes += unit.Bytes
+		} else if hit && (outcome.Status == StatusOwned ||
+			outcome.Status == StatusSkipped && outcome.Reason == "a native session with this id already exists") {
+			// The row this fingerprint described is no longer this agent's
+			// migrated conversation; keeping the fingerprint would force a
+			// parse on every later run for a unit that never settles.
+			_ = dropUnit(ctx, opts.DB, strings.TrimSpace(opts.AgentID), unit.TargetID)
 		}
 		reportProgress(parsed.Title)
 	}
 	return out, rowsWritten, sourceBytes, capture
+}
+
+// fastPathOutcome settles a unit whose recorded fingerprint matches its file
+// without parsing it. It applies only when the conversation row is still this
+// agent's, migrated and project-bound, and — for a Codex run consuming plans
+// — every plan document the unit owns is still on disk byte for byte; any
+// other state falls through to the parse path and heals itself there. The
+// second return value reports whether the fast path settled the unit.
+func fastPathOutcome(ctx context.Context, ledger *unitLedger, opts *Options, unit sessionUnit) (SessionOutcome, bool) {
+	fingerprint, hit := ledger.lookup(unit.TargetID)
+	if !hit || !fingerprint.matches(unit.Bytes, unit.MtimeMs) {
+		return SessionOutcome{}, false
+	}
+	if ledger.source == string(KindCodex) && ledger.wantsPlans && !ledger.plansSatisfied(fingerprint) {
+		return SessionOutcome{}, false
+	}
+	owner, origin, projectID, err := sessionOwner(ctx, opts.DB, unit.TargetID)
+	if err != nil ||
+		!strings.EqualFold(strings.TrimSpace(owner), strings.TrimSpace(opts.AgentID)) ||
+		strings.TrimSpace(origin) != "migrated" ||
+		strings.TrimSpace(projectID) == "" {
+		return SessionOutcome{}, false
+	}
+	outcome := SessionOutcome{
+		SourcePath: unit.Path,
+		TargetID:   unit.TargetID,
+		Title:      ledger.title(unit.TargetID),
+		Status:     StatusSkipped,
+		Reason:     reasonUnchangedSinceLastRun,
+		IsChild:    unit.IsChild,
+	}
+	if ledger.source == string(KindCodex) && ledger.wantsPlans && len(fingerprint.Plans) > 0 {
+		// Keep the run's plan report as complete as the first run's: every
+		// recorded plan is verified present, so each reports up-to-date.
+		synthetic := make([]PlanOutcome, 0, len(fingerprint.Plans))
+		for _, record := range fingerprint.Plans {
+			synthetic = append(synthetic, PlanOutcome{
+				Name: record.Name, SessionID: unit.TargetID, Status: "up-to-date",
+			})
+		}
+		ledger.plans[unit.TargetID] = synthetic
+	}
+	return outcome, true
 }
 
 // sessionParser is the source-specific transcript reader importUnits calls.
@@ -170,8 +279,8 @@ type sessionParser func(ctx context.Context, path, sessionID string, onBadLine f
 
 // importSessions parses and writes every discovered Claude conversation via
 // the shared unit importer (§7.1: the walk is source-agnostic).
-func importSessions(ctx context.Context, data *claudeData, opts *Options, progress func(Progress)) ([]SessionOutcome, int, int64) {
-	return importUnits(ctx, claudeUnits(data, opts), parseSessionFile, opts, progress)
+func importSessions(ctx context.Context, data *claudeData, opts *Options, progress func(Progress), ledger *unitLedger) ([]SessionOutcome, int, int64) {
+	return importUnits(ctx, claudeUnits(data, opts), parseSessionFile, opts, progress, ledger)
 }
 
 // claudeUnits expands the discovered Claude projects into import units in
@@ -202,6 +311,7 @@ func claudeUnits(data *claudeData, opts *Options) []sessionUnit {
 				Path:     session.Path,
 				TargetID: claudeSessionTarget(session.SessionID),
 				Bytes:    session.Bytes,
+				MtimeMs:  session.MtimeMs,
 				Cwd:      firstNonEmptyStr(session.Cwd, roots[project.Dir]),
 			}
 			units = append(units, parent)
@@ -212,7 +322,8 @@ func claudeUnits(data *claudeData, opts *Options) []sessionUnit {
 					TargetID: claudeSubagentTarget(session.SessionID, sub.AgentID),
 					ParentID: parent.TargetID,
 					IsChild:  true,
-					Bytes:    subagentBytes(sub),
+					Bytes:    sub.Bytes,
+					MtimeMs:  sub.MtimeMs,
 					Title:    title,
 					// The child inherits the parent's effective cwd,
 					// project-level fallback included: it ran where its
@@ -258,13 +369,6 @@ func claudeSubagentTarget(sessionID, agentID string) string {
 // session identity in the source, and their rows are keyed by the child
 // target id instead.
 func (s claudeSubagent) SessionIDOf(parent string) string { return parent }
-
-func subagentBytes(sub claudeSubagent) int64 {
-	if info, err := os.Stat(sub.Path); err == nil {
-		return info.Size()
-	}
-	return 0
-}
 
 // codexSessionTarget builds the durable id of an imported Codex thread:
 // the thread id under forebrain's native cli- prefix (same shape as Claude's).
@@ -385,8 +489,10 @@ func importProjectRoot(opts *Options, cwd string) string {
 // this agent already has is skipped as already imported — the per-session
 // transaction means a previous run either wrote all of it or none. A session
 // an earlier run imported without a project is rebound instead (see
-// rebindMigrated).
-func importOneSession(ctx context.Context, opts *Options, sourcePath, targetID, parentID string, parsed *parsedSession) (SessionOutcome, int) {
+// rebindMigrated). A successful write also records the unit's fingerprint in
+// the same transaction, so the next run can skip reparsing the file.
+func importOneSession(ctx context.Context, opts *Options, unit sessionUnit, parsed *parsedSession, ledger *unitLedger) (SessionOutcome, int) {
+	sourcePath, targetID, parentID := unit.Path, unit.TargetID, unit.ParentID
 	outcome, pending := sessionOutcomeFor(ctx, opts, sourcePath, targetID, parsed, parentID != "")
 	if !pending {
 		if outcome.Status == StatusRebound {
@@ -423,6 +529,12 @@ func importOneSession(ctx context.Context, opts *Options, sourcePath, targetID, 
 	if err := insertSession(ctx, tx, opts, targetID, parentID, parsed, project); err == nil {
 		var inserted int
 		inserted, err = insertRows(ctx, tx, targetID, parsed)
+		if err == nil && ledger != nil {
+			// Codex plan records are not known yet — the extraction that
+			// produces them runs after the session import — so the row is
+			// written with the plans list pending (see recordUnitPlans).
+			err = recordUnit(ctx, tx, strings.TrimSpace(opts.AgentID), ledger.source, unit, inserted, ledger.settledPlans(), opts.now())
+		}
 		if err == nil {
 			err = tx.Commit()
 		}
@@ -435,6 +547,113 @@ func importOneSession(ctx context.Context, opts *Options, sourcePath, targetID, 
 	outcome.Status = StatusFailed
 	outcome.Reason = err.Error()
 	return outcome, 0
+}
+
+// countSessionDelta reports how many of a parsed transcript's rows are not
+// yet in the conversation: the rows a run would append to one that grew.
+func countSessionDelta(ctx context.Context, opts *Options, targetID string, parsed *parsedSession) int {
+	existing := make(map[string]bool, len(parsed.Rows))
+	if rows, err := opts.DB.QueryContext(ctx,
+		`SELECT DISTINCT message_id FROM fb_messages WHERE session_id=? AND message_id<>''`, targetID); err == nil {
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				existing[id] = true
+			}
+		}
+		_ = rows.Close()
+	}
+	delta := 0
+	for _, row := range parsed.Rows {
+		if row.MessageID != "" && !existing[row.MessageID] {
+			delta++
+		}
+	}
+	return delta
+}
+
+// appendSessionDelta extends an already-migrated conversation with the rows
+// its transcript gained since the import (owner decision 2026-10-16: the
+// incremental semantics include a migrated session being appended to). Rows
+// are keyed by source message id: a row already present is not written twice,
+// so re-running against the same grown file appends nothing. Nothing is ever
+// deleted — records removed from the source stay in the database, which is
+// the only honest reading of an append-only transcript.
+//
+// The caller has verified the conversation is this agent's, migrated and
+// project-bound, and that the ledger knows the unit. When the parse yields no
+// new rows the conversation is untouched and only the fingerprint moves — a
+// rewritten-but-equivalent file converges onto the fast path instead of
+// re-parsing on every later run.
+func appendSessionDelta(ctx context.Context, opts *Options, ledger *unitLedger, unit sessionUnit, parsed *parsedSession) (SessionOutcome, int) {
+	outcome := SessionOutcome{
+		SourcePath: unit.Path, TargetID: unit.TargetID,
+		Title: parsed.Title, Status: StatusSkipped, Reason: reasonUnchangedSinceLastRun, IsChild: unit.IsChild,
+	}
+	existing := make(map[string]bool, len(parsed.Rows))
+	if rows, err := opts.DB.QueryContext(ctx,
+		`SELECT DISTINCT message_id FROM fb_messages WHERE session_id=? AND message_id<>''`, unit.TargetID); err == nil {
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				existing[id] = true
+			}
+		}
+		_ = rows.Close()
+	}
+	newRows := make([]parsedRow, 0, len(parsed.Rows))
+	for _, row := range parsed.Rows {
+		if row.MessageID != "" && !existing[row.MessageID] {
+			newRows = append(newRows, row)
+		}
+	}
+	if len(newRows) == 0 {
+		// Nothing grew that maps to a new row; refresh the fingerprint on
+		// its own so the next run takes the fast path.
+		if !ledger.dryRun {
+			_ = recordUnit(ctx, opts.DB, strings.TrimSpace(opts.AgentID), ledger.source, unit, len(parsed.Rows), ledger.settledPlans(), opts.now())
+		}
+		return outcome, 0
+	}
+	if opts.DryRun {
+		outcome.Status = StatusUpdated
+		outcome.Messages = len(newRows)
+		outcome.Reason = ""
+		return outcome, len(newRows)
+	}
+	tx, err := opts.DB.BeginTx(ctx, nil)
+	if err != nil {
+		outcome.Status = StatusFailed
+		outcome.Reason = err.Error()
+		return outcome, 0
+	}
+	defer func() { _ = tx.Rollback() }()
+	inserted, err := insertRowsFiltered(ctx, tx, unit.TargetID, newRows)
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `
+UPDATE fb_sessions
+SET updated_at = max(updated_at, ?),
+    title = CASE WHEN TRIM(?) <> '' AND title <> TRIM(?) THEN TRIM(?) ELSE title END
+WHERE id=? AND agent_id=? AND origin='migrated'`,
+			parsed.LastSeen, parsed.Title, parsed.Title, parsed.Title, unit.TargetID, strings.TrimSpace(opts.AgentID))
+	}
+	if err == nil {
+		err = recordUnit(ctx, tx, strings.TrimSpace(opts.AgentID), ledger.source, unit, len(parsed.Rows), ledger.settledPlans(), opts.now())
+	}
+	if err != nil {
+		outcome.Status = StatusFailed
+		outcome.Reason = err.Error()
+		return outcome, 0
+	}
+	if err := tx.Commit(); err != nil {
+		outcome.Status = StatusFailed
+		outcome.Reason = err.Error()
+		return outcome, 0
+	}
+	outcome.Status = StatusUpdated
+	outcome.Reason = ""
+	outcome.Messages = inserted
+	return outcome, inserted
 }
 
 // rebindMigrated heals a conversation an earlier import wrote before sessions
@@ -556,6 +775,14 @@ func nonZeroTime(v, fallback int64) int64 {
 // insertRows appends the mapped rows in transcript order and reports the last
 // boundary row id for the session's compact boundary pointer.
 func insertRows(ctx context.Context, tx *sql.Tx, targetID string, parsed *parsedSession) (int, error) {
+	return insertRowsFiltered(ctx, tx, targetID, parsed.Rows)
+}
+
+// insertRowsFiltered appends the given mapped rows and tracks the last
+// boundary among them. The full import passes every row; a delta append
+// passes only the rows the transcript gained, so a boundary the conversation
+// already has never moves the pointer and one the delta brings does.
+func insertRowsFiltered(ctx context.Context, tx *sql.Tx, targetID string, rows []parsedRow) (int, error) {
 	stmt, err := tx.PrepareContext(ctx, `
 INSERT INTO fb_messages(
   session_id, role, content, created_at, message_id, parts, model,
@@ -568,7 +795,7 @@ INSERT INTO fb_messages(
 
 	inserted := 0
 	var boundaryRowID int64
-	for _, row := range parsed.Rows {
+	for _, row := range rows {
 		res, err := stmt.ExecContext(ctx,
 			targetID, row.Role, row.Content, row.CreatedAt, row.MessageID, row.PartsJSON, row.Model,
 			row.UsageJSON, row.ToolStepID, row.ToolMetaJSON)

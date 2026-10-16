@@ -488,3 +488,29 @@ CREATE VIRTUAL TABLE fb_memory_fts USING fts5(
   line_no UNINDEXED,
   tokenize = 'unicode61 remove_diacritics 2'
 );
+
+-- The migration ledger: one row per import unit a /migrate run already carried
+-- into the state database, keyed by the session it landed in. It is the
+-- incremental-update fingerprint — source_bytes + source_mtime_ms together say
+-- whether the source transcript changed since the last import, so an unchanged
+-- file is never parsed again and a file that grew appends only the new rows.
+-- message_count is the report-facing count at import time; plans_json is the
+-- JSON list of plan documents this unit extracts, each with its destination
+-- path and the sha256 of the body the source would write (empty for Claude
+-- units; for Codex units NULL until the plan extraction of the importing run
+-- fills it in — NULL means "not yet known" and forces one more parse, so a
+-- crash between the session import and the plan extraction cannot silently
+-- strand the plan dependency). Rows are written in the same transaction as
+-- the session import, so a rolled-back import leaves no fingerprint behind.
+CREATE TABLE fb_migration_units (
+  agent_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  source_bytes INTEGER NOT NULL,
+  source_mtime_ms INTEGER NOT NULL,
+  message_count INTEGER NOT NULL DEFAULT 0,
+  plans_json TEXT,
+  imported_at_ms INTEGER NOT NULL,
+  PRIMARY KEY(agent_id, target_id)
+) STRICT;

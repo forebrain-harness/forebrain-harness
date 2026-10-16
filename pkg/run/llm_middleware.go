@@ -218,10 +218,22 @@ func (g *compactRunGuard) set(key string, compacted []llm.Message, prefillTokens
 // checkpoint, recording the current size on the first call. A history that has
 // never compacted answers -1, which tells the caller to derive the baseline
 // from the slice it is holding.
-func (g *compactRunGuard) prefill(key string, currentTokens int) int {
+//
+// current counts the current size. It runs only when no baseline is recorded
+// yet — counting a whole history is the expensive part of a model call — and
+// outside the lock, so other histories sharing the guard are not held up.
+func (g *compactRunGuard) prefill(key string, current func() int) int {
 	if g == nil || key == "" {
 		return -1
 	}
+	g.mu.Lock()
+	if entry, ok := g.entries[key]; ok && entry.prefillSet {
+		g.mu.Unlock()
+		return entry.prefillTokens
+	}
+	g.mu.Unlock()
+	currentTokens := current()
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	entry, ok := g.entries[key]
@@ -296,7 +308,7 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 	sent := llm.EstimateMessagesWith(est, messages) + estimateToolsTokens(est, tools)
 	res, err := r.inner.Execute(ctx, messages, tools)
 	if err == nil {
-		r.observeSuccess(ctx, res, sent)
+		r.observeSuccess(ctx, res, est, sent)
 		return res, nil
 	}
 	if errors.Is(err, context.Canceled) {
@@ -315,7 +327,7 @@ func (r recoverableLLM) Execute(ctx context.Context, messages []llm.Message, too
 		if compacted, ok := r.forceCompact(ctx, messages, tail, tools, est); ok {
 			recordCompactionAdoption(ctx, compacted)
 			if res2, err2 := r.inner.Execute(ctx, compacted, tools); err2 == nil {
-				r.observeSuccess(ctx, res2, llm.EstimateMessagesWith(est, compacted)+estimateToolsTokens(est, tools))
+				r.observeSuccess(ctx, res2, est, llm.EstimateMessagesWith(est, compacted)+estimateToolsTokens(est, tools))
 				return res2, nil
 			} else {
 				lastErr = err2
@@ -368,7 +380,8 @@ func blankOutputError(err error) error {
 // at all.
 func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []llm.Message, tools []*llm.Tool, est llm.Estimator) ([]llm.Message, int, bool) {
 	key := historyKey(ctx)
-	prefillTokens := r.runGuard.prefill(key, llm.EstimateMessagesWith(est, messages))
+	history := messages
+	prefillTokens := r.runGuard.prefill(key, func() int { return llm.EstimateMessagesWith(est, history) })
 	tail, separable := provisionalTailLen(ctx, len(messages))
 	if base, baseLen, ok := r.runGuard.get(key); ok && baseLen <= len(messages) {
 		newMsgs := messages[baseLen:]
@@ -413,14 +426,16 @@ func (r recoverableLLM) applyRunScopedCompact(ctx context.Context, messages []ll
 
 // observeSuccess records the provider's own prompt size for an accepted call.
 // This is the ground truth the local estimator is calibrated against, and it
-// proves a lower bound on the real window.
-func (r recoverableLLM) observeSuccess(ctx context.Context, res *llm.Result, estimated int) {
+// proves a lower bound on the real window. estimated is est's size of the
+// request, and the overhead is learned under est's name — the estimator the
+// compaction decision projects with (shouldCompactMessages).
+func (r recoverableLLM) observeSuccess(ctx context.Context, res *llm.Result, est llm.Estimator, estimated int) {
 	if res == nil || res.Usage == nil {
 		return
 	}
 	provider, model := r.compactDeps.activeModel(ctx)
 	realInput := res.Usage.InputTokens + res.Usage.CacheReadInputTokens + res.Usage.CacheCreationInputTokens
-	llm.RecordSuccess(provider, model, realInput, estimated)
+	llm.RecordSuccessFor(provider, model, est.Name(), realInput, estimated)
 }
 
 // observeOverflow records a rejected prompt size as an upper bound on the real

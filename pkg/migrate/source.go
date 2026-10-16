@@ -204,8 +204,8 @@ var codexRootOverride string
 // when it is absent.
 
 // claudeRootAt resolves the Claude Code home: an explicit directory (already
-// validated by the picker or --home) wins, then the test override, then
-// $CLAUDE_HOME or ~/.claude.
+// validated by the picker) wins, then the test override, then $CLAUDE_HOME or
+// ~/.claude.
 func claudeRootAt(explicit string) string {
 	if root := expandSourceRoot(explicit); root != "" {
 		if info, err := os.Stat(root); err == nil && info.IsDir() {
@@ -257,6 +257,10 @@ type Options struct {
 	DryRun bool
 	// Only restricts the import to these categories (any of "sessions",
 	// "memories", "skills", "plans", "mcp", "lsp", "history"). Empty means all.
+	//
+	// No surface sets it, and none will: /migrate is a picker flow and its
+	// slash command takes no inline arguments (SupportsInlineArgs is false),
+	// so a production import always runs every category.
 	Only []string
 	// CurrentProjectRoot, when non-empty together with OnlyProject, limits
 	// session and memory import to that project directory.
@@ -271,8 +275,8 @@ type Options struct {
 	Source Kind
 	// SourceRoot is the source application's home directory. Empty means the
 	// source's default root ($CLAUDE_HOME or ~/.claude; $CODEX_HOME or
-	// ~/.codex). Set by the picker's directory input or /migrate's --home;
-	// both validate through ValidateSourceRoot before an import runs.
+	// ~/.codex). Set by the picker's directory input, which validates through
+	// ValidateSourceRoot before an import runs.
 	SourceRoot string
 
 	// Home is this install's FOREBRAIN_HOME.
@@ -335,4 +339,8 @@ type Progress struct {
 	Done, Total int
 	// Detail is one line describing the latest unit.
 	Detail string
+	// Percent is the whole-run completion the surface's progress bar fills
+	// to, derived from the stage slicing in progress.go (0–99; a finished
+	// run is expressed by the terminal frame, never by the bar).
+	Percent int
 }
