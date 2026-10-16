@@ -1311,7 +1311,22 @@ func subagentToolStepMsg(evt event.RunEvent, stepID, toolName, summary string, m
 			SkillPath:    strings.TrimSpace(meta.SkillPath),
 			ResultLines:  meta.ResultLines,
 			ResultOffset: meta.ResultOffset,
-			StartedAtMs:  meta.StartedAtMs,
+			// The preview facts are what make this card the same card the
+			// conversation draws. Dropping them left a child agent's image
+			// step below the renderer's preview gate (render.go), so it
+			// painted the preformatted "path: … · image W×H · bytes" body
+			// instead of the ▤ marker line — and, with no preview path on the
+			// meta, the marker row stopped being a click target
+			// (imageMarkerAtScreenRow). Every other mirror of these facts
+			// (RunEventFromStep, the web surface's decoder) carries them.
+			PreviewKind:   strings.TrimSpace(meta.PreviewKind),
+			PreviewPath:   strings.TrimSpace(meta.PreviewPath),
+			PreviewMIME:   strings.TrimSpace(meta.PreviewMIME),
+			PreviewWidth:  meta.PreviewWidth,
+			PreviewHeight: meta.PreviewHeight,
+			PreviewBytes:  meta.PreviewBytes,
+			PreviewScaled: meta.PreviewScaled,
+			StartedAtMs:   meta.StartedAtMs,
 			// A subagent's own subagent_* call reaches the surface through
 			// this mirror; without its card facts the nested dispatch would
 			// fall back to a generic tool card instead of its own card.

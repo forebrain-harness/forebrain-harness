@@ -3,14 +3,17 @@ package tui
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 )
 
@@ -411,6 +414,100 @@ func TestCtrlOIsUnboundAndNeverEntersTheComposer(t *testing.T) {
 	}
 	if !drafted {
 		t.Fatal("a bare 'o' must still be typed into the composer")
+	}
+}
+
+// TestSubagentViewDrawsTheConversationImageCard pins that a child agent's image
+// step draws the card the conversation draws. Every step a subagent runs
+// reaches the terminal as a canonical run event — the StepHook publishes a
+// child's step instead of drawing it — so the view is rebuilt from
+// event.ToolCallMeta by subagentToolStepMsg, the one door between the event and
+// the card. A preview fact dropped at that door is not a lost detail: the frame
+// fails the renderer's preview gate, so the card falls back to the preformatted
+// "path: … · image W×H · bytes" body and the marker row stops being the row
+// that opens the file.
+func TestSubagentViewDrawsTheConversationImageCard(t *testing.T) {
+	const agentID = "task-explore-1"
+	const absPath = "/tmp/ws/.forebrain/attachments/shot.png"
+	opened := stubImageOpener(t)
+
+	// One image read as the engine reports it: the artifact is facts — kind,
+	// path, pixels, encoded size — and never base64.
+	ctx := tool.WithHookAgentID(context.Background(), agentID)
+	step := tool.StepEvent{
+		Kind:     event.RunEventToolCompleted,
+		StepID:   "step-1",
+		ToolName: "read_file",
+		Input:    map[string]any{"file_path": absPath},
+		Duration: 90 * time.Millisecond,
+		Output: map[string]any{
+			"preview_kind": "image",
+			"abs_path":     absPath,
+			"image_mime":   "image/png",
+			"image_bytes":  1000,
+			"image_width":  640,
+			"image_height": 480,
+			"result_lines": 0,
+		},
+	}
+	canonical, ok := tool.RunEventFromStep(ctx, "sess-1", "run-1", "tui", step)
+	if !ok {
+		t.Fatal("an image read must reach the surfaces as a canonical run event")
+	}
+	var payload event.ToolCallCompletedPayload
+	if err := json.Unmarshal(canonical.Payload, &payload); err != nil {
+		t.Fatalf("decode the published payload: %v", err)
+	}
+
+	// What the surface consumes off the event stream and paints on that
+	// agent's own view.
+	msg := subagentToolStepMsg(canonical, payload.StepID, payload.ToolName, payload.Summary, payload.ToolMeta, canonical.Type)
+	msg.Msg.Content = payload.DisplayBody
+
+	// The mirror must rebuild, field for field, the meta the conversation's
+	// own StepHook path builds for the same step: same facts in, same card
+	// out.
+	want := tool.EnrichToolMeta(ctx, tool.BuildToolMeta(step))
+	if got := msg.Msg.ToolMeta; !reflect.DeepEqual(got, want) {
+		t.Fatalf("the event mirror rebuilt a different meta:\n got %+v\nwant %+v", got, want)
+	}
+
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.composerSuppressed = true
+	var red Reducer
+	for _, f := range red.Reduce(msg).Frames {
+		r.RenderFrame(f)
+	}
+	vm := r.perAgentVM[agentID]
+	if vm == nil {
+		t.Fatalf("a subagent's tool step must land in that agent's own view: %v", r.perAgentVM)
+	}
+	vr := renderViewport(vm, 100, 40, 0, DiffThemeDark)
+	plain := stripANSI(strings.Join(vr.lines, "\n"))
+	for _, seg := range []string{"▤ shot.png", "640×480", "1000 bytes", "click to open"} {
+		if !strings.Contains(plain, seg) {
+			t.Fatalf("the subagent's image card is missing %q:\n%s", seg, plain)
+		}
+	}
+	if strings.Contains(plain, "path: `") {
+		t.Fatalf("the subagent's image card fell through to the text body the marker line replaces:\n%s", plain)
+	}
+
+	// The marker row is the card's one button in either view: clicking it in
+	// the subagent's view opens the file it names.
+	row := markerRowOf(vr.lines, "shot.png")
+	if row < 0 {
+		t.Fatalf("no image marker row in the subagent's view:\n%s", plain)
+	}
+	r.SetActiveView(agentID)
+	r.vpHeight, r.vpBodyHeight = 40, 40
+	r.vpLastRender = vr
+	if path, isMarker := clickRow(t, r, row); !isMarker || path != absPath {
+		t.Fatalf("the subagent's marker row (%d) resolved to (%q, %v), want (%q, true)", row, path, isMarker, absPath)
+	}
+	if len(*opened) != 1 || (*opened)[0] != absPath {
+		t.Fatalf("opened = %v, want [%s]", *opened, absPath)
 	}
 }
 
