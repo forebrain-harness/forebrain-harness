@@ -130,6 +130,9 @@ jobs:
           # webui-into-release-pr job; this job has no Node/pnpm (and Windows
           # runners have no make), so the packaging script must not rebuild it.
           FOREBRAIN_SKIP_UI_BUILD: "1"
+          # Lifts the PDFium release fetch (run inside the packaging script)
+          # off the anonymous api.github.com rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
         run: npm/scripts/build-platform-packages.sh
       - if: matrix.native
         name: Smoke test

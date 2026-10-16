@@ -8,12 +8,14 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -402,6 +404,129 @@ func TestToolResultContentRefusesOversizedBlock(t *testing.T) {
 	}
 }
 
+// TestToolResultContentDegradesUndecodableImageBlock pins the 060 fix on the
+// tool-result path: an image block whose data is not valid base64 is degraded
+// to a text line naming the declared MIME — never left in the envelope — so no
+// image part is built, nothing lands on disk, and the truncation path
+// resultJSONContainsImage would force never triggers because the repacked
+// result has no image block left.
+func TestToolResultContentDegradesUndecodableImageBlock(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	raw := `{"content":[{"type":"image","mimeType":"image/png","data":"!!!!not-base64!!!!"}]}`
+
+	parts, err := ToolResultContent(context.Background(), dir, "shots", "screenshot", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			t.Fatalf("undecodable block produced an image part: %#v", parts)
+		}
+	}
+	text := llm.TextContent(parts...)
+	if !strings.Contains(text, "Binary content (image/png, 18 characters) could not be base64-decoded and was not sent.") {
+		t.Fatalf("envelope missing the decode-failure line: %q", text)
+	}
+	if strings.Contains(text, "!!!!not-base64!!!!") {
+		t.Fatalf("raw undecodable data reached the model as text: %q", text)
+	}
+	if strings.Contains(text, `"type":"image"`) {
+		t.Fatalf("repacked envelope still carries an image block: %q", text)
+	}
+	if strings.Contains(text, "OUTPUT TRUNCATED") {
+		t.Fatalf("decode failure forced the truncation path: %q", text)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("undecodable block must not be written to disk, got %v", files)
+	}
+
+	// Same-shaped case on the embedded-resource blob path (its twin fix).
+	dir2 := resultsDirFor(t.TempDir())
+	blobRaw := `{"content":[{"type":"resource","resource":{"uri":"file://x.bin","mimeType":"application/octet-stream","blob":"!!!!not-base64!!!!"}}]}`
+	got, err := ProcessToolResultJSON(dir2, "files", "read", blobRaw)
+	if err != nil {
+		t.Fatalf("ProcessToolResultJSON error: %v", err)
+	}
+	if !strings.Contains(got, "Binary content (application/octet-stream, 18 characters) could not be base64-decoded and was not sent.") {
+		t.Fatalf("blob path missing the decode-failure line: %s", got)
+	}
+	if strings.Contains(got, "!!!!not-base64!!!!") {
+		t.Fatalf("blob path leaked raw undecodable data: %s", got)
+	}
+}
+
+// TestToolResultContentDegradesUndecodableImageBlockAmongGoodOnes is the
+// one-bad-block extension: the good block still lands on disk and yields its
+// image part, the bad block degrades to its line, and the envelope keeps the
+// plain text block — a hostile block never costs the call.
+func TestToolResultContentDegradesUndecodableImageBlockAmongGoodOnes(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	png := onePixelPNG(t)
+	raw := `{"content":[{"type":"text","text":"mixed shot"},` +
+		`{"type":"image","mimeType":"image/png","data":"!!!!not-base64!!!!"},` +
+		`{"type":"image","mimeType":"image/png","data":"` + base64.StdEncoding.EncodeToString(png) + `"}]}`
+
+	parts, err := ToolResultContent(context.Background(), dir, "shots", "screenshot", raw, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	images := 0
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			images++
+		}
+	}
+	if images != 1 {
+		t.Fatalf("expected exactly the good block's part (1 image), got %d in %#v", images, parts)
+	}
+	text := llm.TextContent(parts...)
+	if !strings.Contains(text, "mixed shot") {
+		t.Fatalf("text block was lost with the degraded block: %q", text)
+	}
+	if !strings.Contains(text, "could not be base64-decoded") {
+		t.Fatalf("envelope missing the decode-failure line: %q", text)
+	}
+	if !strings.Contains(text, "Binary content saved to") {
+		t.Fatalf("good block lost its saved-path line: %q", text)
+	}
+	if strings.Contains(text, "!!!!not-base64!!!!") {
+		t.Fatalf("raw undecodable data reached the model as text: %q", text)
+	}
+}
+
+// TestToolResultContentRefusalDegradesUndecodableImageBlock pins the gate's
+// interaction with the fix: a refused session model gets the decode-failure
+// line like any other, and because nothing could be persisted, no surface
+// facts are captured for the block.
+func TestToolResultContentRefusalDegradesUndecodableImageBlock(t *testing.T) {
+	home := t.TempDir()
+	dir := resultsDirFor(home)
+	raw := `{"content":[{"type":"image","mimeType":"image/png","data":"!!!!not-base64!!!!"}]}`
+
+	ctx := tool.WithToolCompletionCapture(context.Background())
+	parts, err := ToolResultContent(ctx, dir, "shots", "screenshot", raw, accounting{}, "session model does not accept image input")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			t.Fatalf("refused result still carried an image part: %#v", parts)
+		}
+	}
+	if !strings.Contains(llm.TextContent(parts...), "could not be base64-decoded") {
+		t.Fatalf("refused result lost the decode-failure line: %q", llm.TextContent(parts...))
+	}
+	if _, ok := tool.ToolCompletionFromContext(ctx); ok {
+		t.Fatalf("surface facts captured for a block that never produced a file")
+	}
+}
+
 // TestToolResultErrorMapsIsErrorToFailure pins parity with callToolAttempt: an
 // isError result is reported as an error, not a success whose text happens to
 // describe a problem.
@@ -443,4 +568,96 @@ func TestSessionResultsRootFallsBackToHome(t *testing.T) {
 
 func ProcessToolResultJSON(resultsDir, serverName, toolName, raw string) (string, error) {
 	return processToolResultJSON(resultsDir, serverName, toolName, raw, accounting{})
+}
+
+// noisePNG returns an incompressible w×h PNG: random pixels keep the encoded
+// size at essentially the raw size, so a test can put an image over the
+// default 3 MiB part budget without committing a binary fixture. A fixed seed
+// keeps it deterministic.
+func noisePNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	rng := rand.New(rand.NewSource(1))
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(rng.Intn(256)), G: uint8(rng.Intn(256)), B: uint8(rng.Intn(256)), A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode noise png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestToolResultImageRoundTripsThroughFileReference pins the replay/live 1:1
+// contract for an MCP image block end to end: the block is persisted to the
+// results dir, the live part is budgeted through the ImagePartWithin ladder,
+// the transcript row records a file_reference (never base64), and the reload
+// seam re-derives — from the persisted file, with the persisted MIME — the
+// exact part the live turn sent, so a replayed request is byte-identical.
+func TestToolResultImageRoundTripsThroughFileReference(t *testing.T) {
+	dir := resultsDirFor(t.TempDir())
+	raw := noisePNG(t, 1024, 1024)
+	payload := base64.StdEncoding.EncodeToString(raw)
+	block := `{"content":[{"type":"image","mimeType":"image/png","data":"` + payload + `"}]}`
+
+	// Live: what the session holds in memory after the tool call.
+	parts, err := ToolResultContent(context.Background(), dir, "shots", "screenshot", block, accounting{}, "")
+	if err != nil {
+		t.Fatalf("ToolResultContent: %v", err)
+	}
+	var live llm.ContentPart
+	for _, p := range parts {
+		if p.Type == llm.ContentTypeImageBase64 {
+			live = p
+		}
+	}
+	if live.ImageBase64 == "" {
+		t.Fatalf("no image part in %#v", parts)
+	}
+	if live.ImageBase64 == payload {
+		t.Fatal("live part carried the verbatim bytes; the ladder did not run")
+	}
+	if live.SourcePath == "" || !strings.HasPrefix(live.SourcePath, dir) {
+		t.Fatalf("live part source path = %q, want one under %q", live.SourcePath, dir)
+	}
+
+	// Persist through the same seam message_sync uses, then reload through the
+	// load seam: file refs out of the row, placeholder into the parts.
+	liveMsg := llm.ToolResultMessage("call-1", parts...)
+	partsJSON := state.MessagePartsJSON(liveMsg, "")
+	if strings.Contains(partsJSON, "base64") {
+		t.Fatalf("persisted parts_json carries base64: %s", previewOf(partsJSON))
+	}
+	if !strings.Contains(partsJSON, `"file_reference"`) {
+		t.Fatalf("persisted parts_json lacks file_reference: %s", previewOf(partsJSON))
+	}
+	refs := state.ExtractFileRefInfos(partsJSON)
+	if len(refs) != 1 || refs[0].FileID != live.SourcePath || refs[0].MIMEType != live.MIMEType {
+		t.Fatalf("file refs = %#v, want the live part's source path and MIME", refs)
+	}
+
+	// Rehydrate with the tool-row semantics pkg/run applies (run.
+	// rehydrateMessageImages: os.ReadFile + ImagePartWithin(path, persisted
+	// MIME, bytes, 0)) and require the exact live part back.
+	data, err := os.ReadFile(refs[0].FileID)
+	if err != nil {
+		t.Fatalf("read persisted result: %v", err)
+	}
+	rebuilt, _, err := llm.ImagePartWithin(refs[0].FileID, refs[0].MIMEType, data, 0)
+	if err != nil {
+		t.Fatalf("re-derive part: %v", err)
+	}
+	if rebuilt != live {
+		t.Fatalf("rehydrated part != live part:\nlive    = MIME %q, %d bytes of base64, source %q\nrebuilt = MIME %q, %d bytes of base64, source %q",
+			live.MIMEType, len(live.ImageBase64), live.SourcePath, rebuilt.MIMEType, len(rebuilt.ImageBase64), rebuilt.SourcePath)
+	}
+}
+
+func previewOf(s string) string {
+	if len(s) > 160 {
+		return s[:160] + "…"
+	}
+	return s
 }

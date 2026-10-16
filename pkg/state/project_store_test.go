@@ -154,8 +154,14 @@ func TestProjectDeleteBusyWhileRunInFlight(t *testing.T) {
 	}
 }
 
-// TestProjectDeletePreviewCounts pins the counts the confirmation dialog shows:
-// the project's own conversations (sub-sessions excluded) and its cron jobs.
+// TestProjectDeletePreviewCounts pins the counts the confirmation dialog
+// shows: DeletePreview counts exactly the conversations the project's
+// sessions tab lists (ListSessionsForProject's predicate), so a
+// message-holding subagent child counts and an empty shell does not — the
+// empty shells are deleted with the project too, but they were never
+// conversations to the person reading the count. A scheduled task's fire
+// holds messages yet is not a conversation, and its job is counted on its
+// own line.
 func TestProjectDeletePreviewCounts(t *testing.T) {
 	ctx := context.Background()
 	a, sessions := newProjectStoreForTest(t, "main")
@@ -163,23 +169,50 @@ func TestProjectDeletePreviewCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sid := range []string{"s1", "s2", "s2-child"} {
-		if err := sessions.Ensure(ctx, sid, "t"); err != nil {
+	bind := func(id string) {
+		t.Helper()
+		if err := sessions.Ensure(ctx, id, "t"); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.BindSession(ctx, sid, p.ID); err != nil {
+		if err := a.BindSession(ctx, id, p.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := sessions.SetParentSessionID(ctx, "s2-child", "s2"); err != nil {
+	// Two conversations the list shows: a main one and its subagent child.
+	for _, id := range []string{"s1", "s2-child"} {
+		bind(id)
+		if _, err := sessions.Append(ctx, id, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sessions.SetParentSessionID(ctx, "s2-child", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	// Three empty shells: rows the surfaces ensure before a conversation
+	// says anything. Deleted with the project, never counted.
+	for _, id := range []string{"e1", "e2", "e3"} {
+		bind(id)
+	}
+	// A scheduled task's fire: it holds messages, but the sessions tab
+	// reaches it from the task's run record, not the conversation list.
+	bind("fire")
+	if _, err := sessions.Append(ctx, "fire", "user", "tick"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetSessionSource(ctx, "fire", SessionSourceCron); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`INSERT INTO fb_cron_jobs(id, agent_id, project_id, schedule, created_at, updated_at)
+		 VALUES('job-1','main',?,'every 1h',1,1)`, p.ID); err != nil {
 		t.Fatal(err)
 	}
 	sessionCount, cronJobs, running, err := a.DeletePreview(ctx, p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sessionCount != 2 || cronJobs != 0 || running {
-		t.Fatalf("preview = %d sessions, %d jobs, running=%v; want 2, 0, false", sessionCount, cronJobs, running)
+	if sessionCount != 2 || cronJobs != 1 || running {
+		t.Fatalf("preview = %d sessions, %d jobs, running=%v; want 2, 1, false", sessionCount, cronJobs, running)
 	}
 }
 
@@ -265,6 +298,11 @@ func TestListSessionsForProjectPages(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		sid := "sess-p" + string(rune('0'+i))
 		if err := sessions.Ensure(ctx, sid, "t"); err != nil {
+			t.Fatal(err)
+		}
+		// Both of the paged project's sessions hold a message: the list is of
+		// conversations, and a row with no message is not one.
+		if _, err := sessions.Append(ctx, sid, "user", "hello"); err != nil {
 			t.Fatal(err)
 		}
 	}

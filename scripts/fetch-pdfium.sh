@@ -48,6 +48,16 @@ PDFIUM_VERSION="157.0.8100.0"
 RELEASES_API="https://api.github.com/repos/bblanchon/pdfium-binaries"
 ASSETS_API="$RELEASES_API/releases/assets"
 
+# api.github.com is rate-limited hard for anonymous callers (60/h per IP); CI
+# runs several fetches per push. Use the workflow token when the environment
+# provides one; local fetches stay anonymous.
+gh_curl_opts=()
+if [ -n "${GITHUB_TOKEN:-}${GH_TOKEN:-}" ]; then
+  tok="${GITHUB_TOKEN:-}"
+  [ -n "$tok" ] || tok="$GH_TOKEN"
+  gh_curl_opts=(-H "Authorization: Bearer $tok")
+fi
+
 die() { echo "fetch-pdfium: $*" >&2; exit 1; }
 log() { echo "==> $*" >&2; }
 
@@ -97,12 +107,29 @@ Cflags: -I\${includedir}
 EOF
 }
 
+# GNU ld (MinGW) searches -lpdfium as libpdfium.dll.a pdfium.dll.a libpdfium.a
+# pdfium.lib libpdfium.lib cygpdfium.dll libpdfium.dll pdfium.dll — never the
+# MSVC short-import name the archive ships (lib/pdfium.dll.lib). pdfium.lib,
+# which the sequence does try, is the same archive, so alias it. Both the
+# fresh-extract and the idempotent short-circuit paths run this: a cache hit
+# must not leave a windows dir un-aliased by an older script version.
+ensure_windows_alias() { # ensure_windows_alias <dir>
+  local dir="$1"
+  if [ -f "$dir/lib/pdfium.dll.lib" ] && [ ! -f "$dir/lib/pdfium.lib" ]; then
+    cp "$dir/lib/pdfium.dll.lib" "$dir/lib/pdfium.lib"
+  fi
+  [ -f "$dir/lib/pdfium.lib" ] || die "windows archive has no import library (lib/pdfium.dll.lib)"
+}
+
 fetch_one() { # fetch_one <goos>/<goarch> <release-json>
   local target="$1" json="$2"
   local goos="${target%%/*}" goarch="${target##*/}"
   local dir="$DEST_ROOT/${goos}_${goarch}"
   local verfile="$dir/.version"
   if [ -f "$verfile" ] && [ "$(cat "$verfile")" = "$RELEASE_TAG" ] && [ -d "$dir/lib" ]; then
+    if [ "$goos" = "windows" ]; then
+      ensure_windows_alias "$dir"
+    fi
     log "$target already at $RELEASE_TAG"
     return 0
   fi
@@ -119,6 +146,7 @@ fetch_one() { # fetch_one <goos>/<goarch> <release-json>
   trap "rm -rf '$tmp'" RETURN
   log "downloading $asset ($RELEASE_TAG)"
   curl -fsSL --retry 3 --retry-all-errors \
+    ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
     -H 'Accept: application/octet-stream' \
     -o "$tmp/$asset" "$ASSETS_API/$id" \
     || die "download failed: $ASSETS_API/$id"
@@ -149,7 +177,15 @@ fetch_one() { # fetch_one <goos>/<goarch> <release-json>
     windows)
       # An MSVC/MinGW link uses the import library in lib/ and loads
       # bin/pdfium.dll at run time.
-      write_pc "$dir" lib ""
+      ensure_windows_alias "$dir"
+      # pkgconfiglite is a native Windows pkg-config: hand it a Windows
+      # prefix, not the POSIX path Git Bash computes (PKG_CONFIG_PATH was
+      # already cygpath-converted by CI; the .pc contents must match).
+      if command -v cygpath >/dev/null 2>&1; then
+        write_pc "$(cygpath -w "$dir")" lib ""
+      else
+        write_pc "$dir" lib ""
+      fi
       ;;
   esac
 
@@ -173,7 +209,9 @@ fi
 # Fetch the pinned release's asset list once; every target resolves its id here.
 release_json="$(mktemp)"
 trap 'rm -f "$release_json"' EXIT
-curl -fsSL "$RELEASES_API/releases/tags/$RELEASE_TAG_ENCODED" -o "$release_json" \
+curl -fsSL --retry 3 --retry-all-errors \
+  ${gh_curl_opts[@]+"${gh_curl_opts[@]}"} \
+  "$RELEASES_API/releases/tags/$RELEASE_TAG_ENCODED" -o "$release_json" \
   || die "could not read release $RELEASE_TAG"
 
 for target in "${targets[@]}"; do

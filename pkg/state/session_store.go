@@ -733,9 +733,21 @@ func (s *SessionStore) ListChildSessionsRecent(ctx context.Context, parentSessio
 	return out, rows.Err()
 }
 
+// conversationHoldsAMessage is the condition every conversation list carries:
+// a session is a conversation once it holds a message. A row exists as soon as
+// a surface needs the session's identity — /new, /model, /migrate, the web's
+// create endpoint all ensure it before the conversation has said anything — so
+// listing rows would offer a person conversations with nothing to resume.
+//
+// Any message row counts, whatever its visibility: a conversation the user
+// rewound to before its first message still holds its rows, and its own view is
+// the only place the rewind can be undone.
+const conversationHoldsAMessage = `EXISTS (SELECT 1 FROM fb_messages m WHERE m.session_id = fb_sessions.id)`
+
 // ListSessionsRecent is what a person may want back, newest first: every
 // purpose but a scheduled task's fire, which is reached from its task's run
-// record instead (decision D3).
+// record instead (decision D3). A session with no message is not a
+// conversation and is never listed: see conversationHoldsAMessage.
 func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -752,6 +764,7 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
 		 FROM fb_sessions
 		 WHERE agent_id = ? AND source NOT IN (?, ?)
+		   AND `+conversationHoldsAMessage+`
 		 ORDER BY updated_at DESC
 		 LIMIT ?`,
 		s.AgentID(), SessionSourceCron, SessionSourceSubagent, limit)
@@ -772,7 +785,9 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 
 // ListSessionsOfSource returns the agent's own sessions — not bound to a
 // project — that are for one purpose, newest first. The filter is in the
-// query, so sessions of another purpose never take a row of the limit.
+// query, so sessions of another purpose never take a row of the limit. A
+// session with no message is not a conversation and is never listed: see
+// conversationHoldsAMessage.
 func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, limit int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -788,6 +803,7 @@ func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, 
 		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
 		 WHERE agent_id = ? AND project_id IS NULL AND source = ?
+		   AND `+conversationHoldsAMessage+`
 		 ORDER BY updated_at DESC, id ASC
 		 LIMIT ?`,
 		s.AgentID(), source, limit)
@@ -810,7 +826,8 @@ func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, 
 // project, newest first. Paged for the same reason every session list is: a
 // long history must not be loaded whole. Only conversations are listed: a
 // project's scheduled-task fires are reached from the project's
-// scheduled-tasks tab.
+// scheduled-tasks tab, and a session with no message is not a conversation
+// (see conversationHoldsAMessage).
 func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID string, limit, offset int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -832,6 +849,7 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 		`SELECT id, title, updated_at, project_id
 		 FROM fb_sessions
 		 WHERE agent_id = ? AND project_id = ? AND source = ?
+		   AND `+conversationHoldsAMessage+`
 		 ORDER BY updated_at DESC, id
 		 LIMIT ? OFFSET ?`,
 		s.AgentID(), projectID, SessionSourceConversation, limit, offset)
@@ -857,7 +875,8 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 // deterministic tie-breaker so equal updated_at values cannot shuffle rows
 // between pages. The list is what a person may want back, like
 // ListSessionsRecent: a scheduled task's fire is reached from its task's run
-// record instead (decision D3).
+// record instead (decision D3), and a session with no message is not a
+// conversation and is never listed: see conversationHoldsAMessage.
 func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offset int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -875,6 +894,7 @@ func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offse
 		`SELECT id, title, updated_at, source
 		 FROM fb_sessions
 		 WHERE agent_id = ? AND source NOT IN (?, ?)
+		   AND `+conversationHoldsAMessage+`
 		 ORDER BY updated_at DESC, id ASC
 		 LIMIT ? OFFSET ?`,
 		s.AgentID(), SessionSourceCron, SessionSourceSubagent, limit, offset)

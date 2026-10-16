@@ -4,6 +4,7 @@ package state
 import (
 	"encoding/json"
 	"math"
+	"path/filepath"
 	"strings"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -100,6 +101,18 @@ func contentBlocksJSON(parts []llm.ContentPart, fallbackText string) []map[strin
 				})
 			}
 		case llm.ContentTypeImageBase64:
+			if src := strings.TrimSpace(part.SourcePath); src != "" {
+				// A part that knows its file is stored by reference: the bytes stay
+				// on disk (the tool already wrote them there), the row and the API
+				// stay base64-free, and a reload re-derives the same part.
+				blocks = append(blocks, map[string]any{
+					"type":      PartTypeFileReference,
+					"file_id":   src,
+					"label":     filepath.Base(src),
+					"mime_type": strings.TrimSpace(part.MIMEType),
+				})
+				break
+			}
 			if strings.TrimSpace(part.ImageBase64) != "" || strings.TrimSpace(part.MIMEType) != "" {
 				blocks = append(blocks, map[string]any{
 					"type": "image",

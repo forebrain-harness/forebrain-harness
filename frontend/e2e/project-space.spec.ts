@@ -74,14 +74,28 @@ test('project settings persist scope and resource access', async ({ page }) => {
 })
 
 test('project sessions live only in the project space', async ({ page }) => {
+  // One full model turn names the session, which is what lists it.
+  test.info().setTimeout(150_000)
   await signIn(page)
   await createProject(page, 'e2e-alpha')
   const projectUrl = page.url().replace(/\/overview$/, '')
   await page.click('.proj-tab:has-text("会话"), .proj-tab:has-text("Sessions")')
   await page.click('button:has-text("新的项目会话"), button:has-text("New session")')
   await page.waitForURL((url) => url.pathname === '/' && url.searchParams.has('session'), { timeout: 15_000 })
+  const sessionUrl = page.url()
+  // A conversation with no message is not a conversation: the project's list
+  // shows its empty state until the first message lands.
   await page.goto(projectUrl + '/sessions', { waitUntil: 'networkidle' })
-  await expect(page.getByRole('button', { name: /未命名会话|Untitled session/ }).first()).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByRole('button', { name: /未命名会话|Untitled session/ })).toHaveCount(0)
+  await expect(page.getByText(/该项目还没有会话|No sessions in this project yet/)).toBeVisible()
+  // Send the first message; the conversation becomes listable under its title.
+  await page.goto(sessionUrl, { waitUntil: 'networkidle' })
+  await page.waitForSelector('textarea')
+  await page.fill('textarea', 'project-space-e2e')
+  await page.press('textarea', 'Enter')
+  await expectAssistantReply(page)
+  await page.goto(projectUrl + '/sessions', { waitUntil: 'networkidle' })
+  await expect(page.getByRole('button', { name: /project-space-e2e/ }).first()).toBeVisible({ timeout: 15_000 })
   // The drawer must not list the project session.
   await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
   await expect(page.locator('[data-testid="chat-drawer"]')).toBeVisible()

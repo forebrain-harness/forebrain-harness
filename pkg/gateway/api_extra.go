@@ -1817,8 +1817,13 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 				CreatedAt:     t.CreatedAt,
 				RunID:         strings.TrimSpace(t.RunID),
 			}
-			for _, ref := range state.MessageAttachments(t.PartsJSON) {
-				m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
+			// Attachments are what a user row attached. A tool row's image
+			// file_reference is the pixels the model was sent, not something the
+			// composer pinned, so it must not surface as an attachment.
+			if strings.EqualFold(strings.TrimSpace(t.Role), "user") {
+				for _, ref := range state.MessageAttachments(t.PartsJSON) {
+					m.Attachments = append(m.Attachments, chatAttachmentOf(ref))
+				}
 			}
 			m.Origin = state.MessageOrigin(t.PartsJSON)
 			if citation, found := state.ParseMemoryCitationPart(t.PartsJSON); found {

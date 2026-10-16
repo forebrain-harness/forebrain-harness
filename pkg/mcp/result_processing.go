@@ -101,10 +101,11 @@ func ToolResultContent(ctx context.Context, resultsDir, serverName, toolName, ra
 // wantParts=false is the image-refusal gate, applied BEFORE any part is built:
 // no decode-to-downscale work runs and no part can fail the call, so a refused
 // session gets its envelope no matter how hostile an image block is. A block
-// whose part cannot be built even when wanted (oversized, undownscalable webp,
-// exhausted reduction ladder) is degraded to a text line naming the saved file
-// and the reason — one bad block never costs the call its text envelope or the
-// other blocks' pixels.
+// whose data does not decode, or whose part cannot be built even when wanted
+// (oversized, undownscalable webp, exhausted reduction ladder), is degraded to
+// a text line naming the saved file — or, when nothing could be decoded to
+// save, the declared MIME — and the reason: one bad block never costs the call
+// its text envelope or the other blocks' pixels.
 func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool) (string, []llm.ContentPart, map[string]any, error) {
 	if strings.TrimSpace(resultsDir) == "" {
 		return raw, nil, nil, nil
@@ -140,12 +141,23 @@ func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool)
 			changed = true
 			continue
 		}
-		decoded, err := base64.StdEncoding.DecodeString(data)
-		if err != nil {
-			continue
-		}
+		// The declared MIME is read before the decode so the decode-failure
+		// degrade below can name it.
 		mimeType, _ := m["mimeType"].(string)
 		mimeType = strings.TrimSpace(mimeType)
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			// The block can be neither persisted nor sent; degrade to the
+			// same kind of text line the other failure paths leave, so the
+			// envelope never carries the block's raw data as text (the
+			// truncated-JSON path resultJSONContainsImage forces would).
+			content[i] = map[string]any{
+				"type": "text",
+				"text": fmt.Sprintf("Binary content (%s, %d characters) could not be base64-decoded and was not sent.", fallbackUnknown(mimeType), len(data)),
+			}
+			changed = true
+			continue
+		}
 		if mimeType == "" {
 			mimeType = llm.ImageMIMEType("", decoded)
 		}
@@ -175,7 +187,10 @@ func extractResultImageParts(resultsDir, serverName, raw string, wantParts bool)
 		}
 		switch mimeType {
 		case "image/jpeg", "image/png", "image/gif", "image/webp":
-			part, res, err := llm.ImagePartWithin(path, mimeType, decoded, llm.DefaultMaxImageBytes)
+			// 0 = DefaultMaxImageBytes + $FOREBRAIN_IMAGE_MAX_BYTES, the
+			// documented operator knob (llm.resolveImageBudget), so an MCP
+			// image block follows the same budget as a read_file image.
+			part, res, err := llm.ImagePartWithin(path, mimeType, decoded, 0)
 			if err != nil {
 				// Degrade, don't fail: the file is saved and named,
 				// the reason is actionable, and the remaining blocks
@@ -342,11 +357,19 @@ func persistBinaryResourceContent(resultsDir, serverName, raw string) (string, e
 			changed = true
 			continue
 		}
+		mimeType, _ := resource["mimeType"].(string)
 		bytes, err := base64.StdEncoding.DecodeString(blob)
 		if err != nil {
+			// Twin of the image-block path: a blob that cannot be decoded is
+			// degraded to a text line instead of riding in the envelope as
+			// raw base64.
+			content[i] = map[string]any{
+				"type": "text",
+				"text": fmt.Sprintf("Binary content (%s, %d characters) could not be base64-decoded and was not sent.", fallbackUnknown(mimeType), len(blob)),
+			}
+			changed = true
 			continue
 		}
-		mimeType, _ := resource["mimeType"].(string)
 		ext := extensionForMIME(mimeType)
 		path, err := persistMCPResult(resultsDir, serverName, "blob", ext, bytes)
 		if err != nil {

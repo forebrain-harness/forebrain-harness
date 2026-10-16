@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,7 +95,10 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 					return nil, errors.New(refusal)
 				}
 			}
-			part, res, err := imageReadPart(abs, raw, llm.DefaultMaxImageBytes)
+			// 0 = DefaultMaxImageBytes + $FOREBRAIN_IMAGE_MAX_BYTES, the
+			// documented operator knob (llm.resolveImageBudget), not a
+			// frozen constant.
+			part, res, err := imageReadPart(abs, raw, 0)
 			if err != nil {
 				return nil, err
 			}
@@ -113,6 +117,14 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 			if strings.EqualFold(filepath.Ext(abs), ".pdf") {
 				if refusal := st.ImageInputRefusal(ctx); refusal != "" {
 					return nil, fmt.Errorf("read_file cannot read PDF %q: %s", abs, refusal)
+				}
+				// The input cap is judged before anything is parsed: PDFium keeps
+				// its own parse copy beside these bytes, so an oversized document
+				// would cost multiples of its size before the 5-page cap limits
+				// anything. The renderer consumes the bytes we already read —
+				// the file is not read a second time.
+				if err := pdfInputLimitError(len(raw)); err != nil {
+					return nil, err
 				}
 				// The pages argument picks where rendering starts. The cap is
 				// applied BEFORE anything else — pages="1-1000" is the first 5
@@ -136,7 +148,7 @@ func NewFileReadTool(st *State) (*llm.Tool, error) {
 				// seeded under this tool's own home; passing the home explicitly
 				// keeps the default and a --home override both working, which
 				// reading FOREBRAIN_HOME from the environment would not.
-				res, err := pdf.RenderFile(abs, start, end-start+1, pdf.Options{FontDirs: pdf.FontDirs(st.PrimaryHome())})
+				res, err := pdf.RenderFile(abs, raw, start, end-start+1, pdf.Options{FontDirs: pdf.FontDirs(st.PrimaryHome())})
 				if err != nil {
 					return nil, err
 				}
@@ -343,9 +355,15 @@ func validateTextReadableFile(abs string, raw []byte) error {
 // imageReadPart decides what read_file does with a file that might be an image.
 //
 //   - a supported image (png/jpeg/gif/webp) is encoded within budget by
-//     llm.ImagePartWithin, whose error is returned as-is;
-//   - an image extension we cannot decode (bmp/tiff/heic/…) yields an
-//     actionable "convert it" error, never a fall-back to reading it as text;
+//     llm.ImagePartWithin, whose error is returned as-is; budget follows that
+//     function's resolution — production callers pass 0 for the default plus
+//     $FOREBRAIN_IMAGE_MAX_BYTES override;
+//   - an image extension whose bytes are another image type (bmp/tiff/heic/…)
+//     yields an actionable "convert it" error, never a fall-back to reading it
+//     as text;
+//   - an image extension whose bytes are not an image at all names the real
+//     problem — the file is misnamed or corrupted — rather than a conversion
+//     hint those bytes cannot take;
 //   - anything else returns the zero ImageReadResult (MIMEType == ""), the
 //     signal that this is not an image and the text path should run.
 func imageReadPart(abs string, raw []byte, budget int) (llm.ContentPart, llm.ImageReadResult, error) {
@@ -355,11 +373,31 @@ func imageReadPart(abs string, raw []byte, budget int) (llm.ContentPart, llm.Ima
 		return llm.ImagePartWithin(abs, mime, raw, budget)
 	}
 	if ext := strings.ToLower(filepath.Ext(abs)); isImageFileExtension(ext) {
+		// The extension promised an image and the bytes did not hold one the
+		// providers take. Which refusal fits depends on what the bytes are:
+		// another image type can be converted; bytes that are not an image
+		// at all mean the file is misnamed or corrupted.
+		if sniffedIsImage(raw) {
+			return llm.ContentPart{}, llm.ImageReadResult{SourceBytes: len(raw)}, fmt.Errorf(
+				"read_file cannot decode %s images; convert it to png or jpeg first (macOS: sips -s format png <path>)",
+				strings.TrimPrefix(ext, "."))
+		}
 		return llm.ContentPart{}, llm.ImageReadResult{SourceBytes: len(raw)}, fmt.Errorf(
-			"read_file cannot decode %s images; convert it to png or jpeg first (macOS: sips -s format png <path>)",
-			strings.TrimPrefix(ext, "."))
+			"read_file cannot send %s: the bytes are not a %s image the providers accept; the file may be misnamed or corrupted",
+			abs, strings.TrimPrefix(ext, "."))
 	}
 	return llm.ContentPart{}, llm.ImageReadResult{}, nil
+}
+
+// sniffedIsImage reports whether the same 512-byte window llm.ImageMIMEType
+// judges names any image type at all — the line between "an image format we
+// cannot send" (convert it) and "not an image" (misnamed or corrupted).
+func sniffedIsImage(raw []byte) bool {
+	sniff := raw
+	if len(sniff) > 512 {
+		sniff = sniff[:512]
+	}
+	return strings.HasPrefix(http.DetectContentType(sniff), "image/")
 }
 
 // imageReadNote is the one line the model reads in place of the pixels. It
@@ -541,13 +579,29 @@ func pdfReadOutput(filePath string, res pdf.RenderResult, previewPath string, so
 	return out
 }
 
+// pdfInputLimitError reports the actionable refusal for a PDF whose byte size
+// exceeds pdf.MaxPDFInputBytes — PDFium keeps its own parse copy beside the
+// caller's bytes, so an unbounded input costs multiples of the file size
+// before the page cap limits anything — or nil when the size is fine. It is a
+// function of the size alone so the boundary is testable without building a
+// 128 MiB document.
+func pdfInputLimitError(size int) error {
+	if size <= pdf.MaxPDFInputBytes {
+		return nil
+	}
+	return fmt.Errorf(
+		"PDF is %d MiB; the input limit is %d MiB — split it or extract the pages you need",
+		size>>20, pdf.MaxPDFInputBytes>>20)
+}
+
 // appendPDFPagePart appends page's image part, or — when the part cannot be
 // sent — a text line naming the stored PNG and the reason, so one bad page
 // never costs the note or the pages that did encode. The page's PNG is
 // already on disk by the time this runs (storePDFPages wrote it), so the
 // degraded line points at a retrievable file, not an orphan.
 func appendPDFPagePart(parts []llm.ContentPart, path string, page pdf.Page) []llm.ContentPart {
-	part, _, err := llm.ImagePartWithin(path, "image/png", page.PNG, llm.DefaultMaxImageBytes)
+	// 0 = DefaultMaxImageBytes + $FOREBRAIN_IMAGE_MAX_BYTES (see imageReadPart).
+	part, _, err := llm.ImagePartWithin(path, "image/png", page.PNG, 0)
 	if err != nil {
 		return append(parts, llm.Text(fmt.Sprintf("Page %d was rendered to %s but was not sent as an image: %v.", page.Number, path, err)))
 	}

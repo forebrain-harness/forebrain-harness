@@ -1,8 +1,10 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,11 +205,538 @@ func TestRunClaudeDryRunWritesNothing(t *testing.T) {
 	if rows != 0 {
 		t.Fatalf("dry run wrote %d message rows", rows)
 	}
+	// The project binding resolves rows through FindOrCreateByRoot, which
+	// inserts; a dry run must not create project rows either.
+	var projects int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects`).Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if projects != 0 {
+		t.Fatalf("dry run created %d project rows", projects)
+	}
 	if _, err := os.Stat(opts.InputHistoryPath); !os.IsNotExist(err) {
 		t.Fatal("dry run wrote the input history file")
 	}
 	if report.DryRun != true {
 		t.Fatal("report not flagged as dry run")
+	}
+}
+
+// TestImportBindsConversationsToAProject pins the fix this repo shipped for
+// projectless imports: a conversation lands with its project_id and the
+// project's canonical root as cwd, and the real /resume query path
+// (ListSessionsForProject) lists both the main conversation and its imported
+// subagent child.
+func TestImportBindsConversationsToAProject(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	project, _, err := state.NewProjectStore(opts.DB, "main").FindOrCreateByRoot(ctx, fixture.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
+		var projectID, cwd string
+		if err := opts.DB.QueryRowContext(ctx,
+			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != project.ID {
+			t.Fatalf("%s: project_id=%q want %q", id, projectID, project.ID)
+		}
+		if cwd != project.Root {
+			t.Fatalf("%s: cwd=%q want the canonical root %q", id, cwd, project.Root)
+		}
+	}
+	listed, err := state.NewSessionStore(opts.DB, "main").ListSessionsForProject(ctx, project.ID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, summary := range listed {
+		got[summary.ID] = true
+	}
+	if !got["cli-s-fix"] || !got["cli-s-fix-agent-deadbeef"] {
+		t.Fatalf("project listing = %+v, want the imported main conversation and its subagent child", listed)
+	}
+}
+
+// TestImportScopedToProjectBindsToItsRoot pins the OnlyProject binding rule:
+// a conversation recorded in a subdirectory of the launch project binds to
+// the launch project's root, matching the matcher that let it in.
+func TestImportScopedToProjectBindsToItsRoot(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	// A checkout at the project root makes ProjectRoot(subdir) walk up to
+	// it, so the OnlyProject matcher accepts the subdirectory session; the
+	// subdirectory itself exists because a recorded working directory is a
+	// real directory (symlink evaluation must see it to spell both roots
+	// the same way).
+	if err := os.MkdirAll(filepath.Join(fixture.projectPath, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subdir := filepath.Join(fixture.projectPath, "deep", "sub")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(fixture.projectDir, "s-fix.jsonl"),
+		filepath.Join(fixture.projectDir, "s-fix", "subagents", "agent-deadbeef.jsonl"),
+	} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, bytes.ReplaceAll(body, []byte(fixture.projectPath), []byte(subdir)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := fixture.options(t, false)
+	opts.OnlyProject = true
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	project, _, err := state.NewProjectStore(opts.DB, "main").FindOrCreateByRoot(ctx, fixture.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
+		var projectID, cwd string
+		if err := opts.DB.QueryRowContext(ctx,
+			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != project.ID {
+			t.Fatalf("%s: project_id=%q want the launch project %q", id, projectID, project.ID)
+		}
+		if cwd != project.Root {
+			t.Fatalf("%s: cwd=%q want the project root %q", id, cwd, project.Root)
+		}
+	}
+}
+
+// TestImportBindsChildToParentsProject pins the #9 fix: a subagent
+// transcript that records a cwd of its own still binds to its parent's
+// project (the v9 precedent — children inherit the parent's project and
+// directory), in All-projects mode and under OnlyProject alike.
+func TestImportBindsChildToParentsProject(t *testing.T) {
+	ctx := context.Background()
+	newElsewhere := func() string {
+		dir := filepath.Join(t.TempDir(), "subtask-elsewhere")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	// All-projects: the child's own cwd must not split it from its parent.
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	elsewhere := newElsewhere()
+	sub := filepath.Join(fixture.projectDir, "s-fix", "subagents", "agent-deadbeef.jsonl")
+	body, err := os.ReadFile(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sub, bytes.ReplaceAll(body, []byte(fixture.projectPath), []byte(elsewhere)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := fixture.options(t, false)
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	project, _, err := state.NewProjectStore(opts.DB, "main").FindOrCreateByRoot(ctx, fixture.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
+		var projectID string
+		if err := opts.DB.QueryRowContext(ctx,
+			`SELECT project_id FROM fb_sessions WHERE id=?`, id).Scan(&projectID); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != project.ID {
+			t.Fatalf("%s: project_id=%q want the parent's project %q", id, projectID, project.ID)
+		}
+	}
+	var projects int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects`).Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if projects != 1 {
+		t.Fatalf("fb_projects rows = %d, want only the parent's project (the child's own cwd must not create one)", projects)
+	}
+
+	// OnlyProject: the same fixture still binds to the launch project.
+	scoped := buildFixtureHome(t)
+	stubClaudeRoot(t, scoped)
+	scopedElsewhere := newElsewhere()
+	scopedSub := filepath.Join(scoped.projectDir, "s-fix", "subagents", "agent-deadbeef.jsonl")
+	scopedBody, err := os.ReadFile(scopedSub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scopedSub, bytes.ReplaceAll(scopedBody, []byte(scoped.projectPath), []byte(scopedElsewhere)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scopedOpts := scoped.options(t, false)
+	scopedOpts.OnlyProject = true
+	if _, err := RunClaude(ctx, scopedOpts, nil); err != nil {
+		t.Fatal(err)
+	}
+	launch, _, err := state.NewProjectStore(scopedOpts.DB, "main").FindOrCreateByRoot(ctx, scoped.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
+		var projectID, cwd string
+		if err := scopedOpts.DB.QueryRowContext(ctx,
+			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != launch.ID || cwd != launch.Root {
+			t.Fatalf("%s: project_id=%q cwd=%q, want the launch project %q / %q", id, projectID, cwd, launch.ID, launch.Root)
+		}
+	}
+}
+
+// TestImportFallsBackToTheSourceProjectPathAndSkipsOnlyWithoutAny pins the
+// empty-cwd rule: a transcript that records no directory falls back to the
+// source's own project resolution (B5), and only a conversation with no
+// directory from any source is refused — never written with a NULL project.
+func TestImportFallsBackToTheSourceProjectPathAndSkipsOnlyWithoutAny(t *testing.T) {
+	ctx := context.Background()
+
+	// Level-1 fallback: the projects map of ~/.claude.json resolves the
+	// encoded directory, and the conversation binds there.
+	fallback := buildFixtureHome(t)
+	stubClaudeRoot(t, fallback)
+	claudeJSON := fmt.Sprintf(`{"projects": {%q: {}}}`, fallback.projectPath)
+	if err := os.WriteFile(filepath.Join(fallback.root, ".claude.json"), []byte(claudeJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stripCwd := func(path string) {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaced := bytes.ReplaceAll(body,
+			[]byte(`"cwd":"`+fallback.projectPath+`"`), []byte(`"cwd":""`))
+		if err := os.WriteFile(path, replaced, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stripCwd(filepath.Join(fallback.projectDir, "s-fix.jsonl"))
+	stripCwd(filepath.Join(fallback.projectDir, "s-fix", "subagents", "agent-deadbeef.jsonl"))
+	fallbackOpts := fallback.options(t, false)
+	fallbackOpts.Only = []string{"sessions"}
+	if _, err := RunClaude(ctx, fallbackOpts, nil); err != nil {
+		t.Fatal(err)
+	}
+	project, _, err := state.NewProjectStore(fallbackOpts.DB, "main").FindOrCreateByRoot(ctx, fallback.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
+		var projectID string
+		if err := fallbackOpts.DB.QueryRowContext(ctx,
+			`SELECT project_id FROM fb_sessions WHERE id=?`, id).Scan(&projectID); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != project.ID {
+			t.Fatalf("%s: project_id=%q want the resolved project %q", id, projectID, project.ID)
+		}
+	}
+
+	// No directory from any source: refused in the dry run and the run
+	// alike, with the reason stated and no row written.
+	goneHome := t.TempDir()
+	gone := "/definitely/not/here/gone"
+	encoded := encodeProjectPath(gone)
+	goneDir := filepath.Join(goneHome, "projects", encoded)
+	if err := os.MkdirAll(goneDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join("testdata", "session.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(goneDir, "s-gone.jsonl"),
+		bytes.ReplaceAll(body, []byte(`"cwd":"/tmp/source-proj"`), []byte(`"cwd":""`)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	previous := claudeRootOverride
+	claudeRootOverride = goneHome
+	t.Cleanup(func() { claudeRootOverride = previous })
+	for _, dryRun := range []bool{true, false} {
+		goneOpts := fallback.options(t, dryRun)
+		goneOpts.Only = []string{"sessions"}
+		report, err := RunClaude(ctx, goneOpts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Sessions) != 1 || report.Sessions[0].Status != StatusSkipped ||
+			report.Sessions[0].Reason != "no working directory: a conversation must belong to a project" {
+			t.Fatalf("dry=%v outcomes = %+v", dryRun, report.Sessions)
+		}
+	}
+	var sessions, projects int
+	if err := fallbackOpts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := fallbackOpts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects`).Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 2 || projects != 1 { // only the fallback import above wrote rows
+		t.Fatalf("gone-project run left sessions=%d projects=%d", sessions, projects)
+	}
+}
+
+// dumpTable renders every row of one table (all columns, rowid order) as a
+// deterministic string so a before/after pair can be compared byte for
+// byte — the read-only pin a dry-run test needs.
+func dumpTable(t *testing.T, ctx context.Context, db *sql.DB, table string) string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `SELECT * FROM `+table+` ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for rows.Next() {
+		values := make([]any, len(columns))
+		ptrs := make([]any, len(columns))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+		for i, v := range values {
+			switch typed := v.(type) {
+			case nil:
+				fmt.Fprintf(&b, "%s=NULL|", columns[i])
+			case []byte:
+				fmt.Fprintf(&b, "%s=%s|", columns[i], string(typed))
+			default:
+				fmt.Fprintf(&b, "%s=%v|", columns[i], typed)
+			}
+		}
+		b.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// TestReimportRebindsProjectlessMigratedConversations pins the存量 repair:
+// rerunning /migrate over rows an earlier version wrote without a project
+// rebinds them (status rebound) without touching updated_at, source, or any
+// native row, and a third run is the plain idempotent skip again.
+func TestReimportRebindsProjectlessMigratedConversations(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A native row proves the rebind never leaves the migrated boundary.
+	if err := state.NewSessionStore(opts.DB, "main").Ensure(ctx, "native-keep", "native title"); err != nil {
+		t.Fatal(err)
+	}
+	var nativeBefore struct {
+		projectID sql.NullString
+		cwd       sql.NullString
+	}
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT project_id, cwd FROM fb_sessions WHERE id='native-keep'`).
+		Scan(&nativeBefore.projectID, &nativeBefore.cwd); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the pre-binding import's row shape: project NULL and a
+	// non-canonical cwd spelling.
+	var updatedAtBefore int64
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT updated_at FROM fb_sessions WHERE id='cli-s-fix'`).Scan(&updatedAtBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := opts.DB.ExecContext(ctx,
+		`UPDATE fb_sessions SET project_id=NULL, cwd=? WHERE origin='migrated'`, "/tmp/old-spelling"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A dry run over the same rows settles them read-only: it reports what
+	// it would bind and leaves both tables byte-identical (#20c).
+	sessionsBefore := dumpTable(t, ctx, opts.DB, "fb_sessions")
+	projectsBefore := dumpTable(t, ctx, opts.DB, "fb_projects")
+	dryOpts := *opts
+	dryOpts.DryRun = true
+	dryReport, err := RunClaude(ctx, &dryOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reboundDry := 0
+	for _, outcome := range dryReport.Sessions {
+		if outcome.Status == StatusRebound {
+			reboundDry++
+			if outcome.Reason != "would bind to its project" {
+				t.Fatalf("dry-run rebound reason = %q", outcome.Reason)
+			}
+		}
+	}
+	if reboundDry != 2 {
+		t.Fatalf("dry run rebound = %d, want both rebind candidates; outcomes = %+v", reboundDry, dryReport.Sessions)
+	}
+	if after := dumpTable(t, ctx, opts.DB, "fb_sessions"); after != sessionsBefore {
+		t.Fatalf("dry run changed fb_sessions:\nbefore:\n%s\nafter:\n%s", sessionsBefore, after)
+	}
+	if after := dumpTable(t, ctx, opts.DB, "fb_projects"); after != projectsBefore {
+		t.Fatalf("dry run changed fb_projects:\nbefore:\n%s\nafter:\n%s", projectsBefore, after)
+	}
+
+	second, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebound := 0
+	for _, outcome := range second.Sessions {
+		if outcome.Status == StatusRebound {
+			rebound++
+		}
+	}
+	if rebound != 2 {
+		t.Fatalf("rebound = %d, want both the main conversation and its child; outcomes = %+v", rebound, second.Sessions)
+	}
+	project, _, err := state.NewProjectStore(opts.DB, "main").FindOrCreateByRoot(ctx, fixture.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-s-fix", "cli-s-fix-agent-deadbeef"} {
+		var projectID, cwd, source string
+		if err := opts.DB.QueryRowContext(ctx,
+			`SELECT project_id, cwd, COALESCE(source,'') FROM fb_sessions WHERE id=?`, id).
+			Scan(&projectID, &cwd, &source); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != project.ID || cwd != project.Root {
+			t.Fatalf("%s: project_id=%q cwd=%q, want %q / %q", id, projectID, cwd, project.ID, project.Root)
+		}
+		if source != "" {
+			t.Fatalf("%s: source=%q, rebound must not touch it", id, source)
+		}
+	}
+	var updatedAtAfter int64
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT updated_at FROM fb_sessions WHERE id='cli-s-fix'`).Scan(&updatedAtAfter); err != nil {
+		t.Fatal(err)
+	}
+	if updatedAtAfter != updatedAtBefore {
+		t.Fatalf("rebound moved updated_at: %d -> %d", updatedAtBefore, updatedAtAfter)
+	}
+	var nativeAfter struct {
+		projectID sql.NullString
+		cwd       sql.NullString
+	}
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT project_id, cwd FROM fb_sessions WHERE id='native-keep'`).
+		Scan(&nativeAfter.projectID, &nativeAfter.cwd); err != nil {
+		t.Fatal(err)
+	}
+	if nativeAfter.projectID != nativeBefore.projectID || nativeAfter.cwd != nativeBefore.cwd {
+		t.Fatalf("native row moved: %+v -> %+v", nativeBefore, nativeAfter)
+	}
+	if text := second.Text(); !strings.Contains(text, "Rebound conversations") || !strings.Contains(text, "· 2 rebound") {
+		t.Fatalf("report text =\n%s", text)
+	}
+	listed, err := state.NewSessionStore(opts.DB, "main").ListSessionsForProject(ctx, project.ID, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) == 0 {
+		t.Fatal("rebound conversations are still invisible to the /resume query")
+	}
+
+	third, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, outcome := range third.Sessions {
+		if outcome.Status != StatusSkipped || outcome.Reason != "already migrated" {
+			t.Fatalf("third run is not the idempotent skip: %+v", outcome)
+		}
+	}
+}
+
+// TestRerunNamesMigratedRowsWhoseSourceIsGone pins the #20b fix: a row an
+// earlier import wrote without a project whose source transcript is no
+// longer on disk can never be discovered again, so no rerun can bind it.
+// The rerun ends with a read-only inventory that names the row in the
+// report instead of leaving a silently projectless row behind — and writes
+// nothing.
+func TestRerunNamesMigratedRowsWhoseSourceIsGone(t *testing.T) {
+	ctx := context.Background()
+	fixture := buildFixtureHome(t)
+	stubClaudeRoot(t, fixture)
+	opts := fixture.options(t, false)
+	if _, err := RunClaude(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the pre-binding import's row shape, then remove its source
+	// transcript: this run cannot discover the row anymore.
+	if _, err := opts.DB.ExecContext(ctx,
+		`UPDATE fb_sessions SET project_id=NULL WHERE id='cli-s-fix'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.projectDir, "s-fix.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	var messagesBefore int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages`).Scan(&messagesBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RunClaude(ctx, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, outcome := range report.Sessions {
+		if outcome.TargetID != "cli-s-fix" {
+			continue
+		}
+		found = true
+		if outcome.Status != StatusSkipped || outcome.Reason != reasonSourceTranscriptGone {
+			t.Fatalf("orphan outcome = %+v, want skipped with the source-gone reason", outcome)
+		}
+	}
+	if !found {
+		t.Fatal("the orphaned migrated row is not named in the report")
+	}
+	var projectID sql.NullString
+	if err := opts.DB.QueryRowContext(ctx,
+		`SELECT project_id FROM fb_sessions WHERE id='cli-s-fix'`).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if projectID.Valid {
+		t.Fatalf("the orphaned row was written: project_id=%v", projectID.String)
+	}
+	var messagesAfter int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_messages`).Scan(&messagesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if messagesAfter != messagesBefore {
+		t.Fatalf("the rerun wrote message rows: %d -> %d", messagesBefore, messagesAfter)
 	}
 }
 

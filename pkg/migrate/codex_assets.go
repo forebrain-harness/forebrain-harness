@@ -59,7 +59,11 @@ func codexUnits(data *codexData, opts *Options) []sessionUnit {
 		}
 		child.ParentID = parent.TargetID
 		child.IsChild = true
-		if strings.TrimSpace(child.Cwd) == "" {
+		if strings.TrimSpace(parent.Cwd) != "" {
+			// A spawned thread belongs to its parent's project (the v9
+			// precedent: children inherit the parent's project and
+			// directory); the parent's cwd is authoritative, not a fallback
+			// for a child that recorded none of its own.
 			child.Cwd = parent.Cwd
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"os"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	pdfium_errors "github.com/klippa-app/go-pdfium/errors"
 	"github.com/klippa-app/go-pdfium/requests"
 )
@@ -23,6 +24,10 @@ const (
 	// DefaultDPI is the resolution RenderFile renders at when Options.DPI is
 	// unset.
 	DefaultDPI = 150
+	// MaxPDFInputBytes is the largest PDF read_file will open. PDFium keeps its
+	// own parse copy beside the caller's bytes, so an unbounded input costs
+	// multiples of the file size before the 5-page cap limits anything.
+	MaxPDFInputBytes = 128 << 20
 )
 
 // Page is one rendered page. Number is 1-based. Only pages that rendered
@@ -57,7 +62,9 @@ type Options struct {
 	FontDirs []string
 }
 
-// RenderFile renders up to maxPages pages of the PDF at path, starting at the
+// RenderFile renders up to maxPages pages of the PDF whose bytes are data
+// (path names the file in error messages; the caller reads it once and hands
+// the bytes here, so the file is not read a second time), starting at the
 // 1-based page `start`. start <= 0 means page 1; maxPages <= 0 means
 // DefaultMaxPages. The END of the range is clamped into the document (a
 // requested page past the last one is simply not rendered); a START past the
@@ -66,11 +73,7 @@ type Options struct {
 // Callers that index Pages[0] must check len(Pages) > 0 first. A
 // password-protected, damaged or empty document returns an error the model can
 // act on.
-func RenderFile(path string, start, maxPages int, opts Options) (RenderResult, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return RenderResult{}, fmt.Errorf("pdf: read %q: %w", path, err)
-	}
+func RenderFile(path string, data []byte, start, maxPages int, opts Options) (RenderResult, error) {
 	if start < 1 {
 		start = 1
 	}
@@ -120,6 +123,33 @@ func RenderFile(path string, start, maxPages int, opts Options) (RenderResult, e
 		return result, nil
 	}
 	for index := start - 1; index < start-1+maxPages && index < count.PageCount; index++ {
+		// The render below allocates its bitmap in Go from the page's point
+		// size (pt * dpi / 72), so the pixel budget must be judged from the
+		// page's declared size before PDFium allocates: a page at PDF's own
+		// 14400 pt limit would cost 3.6 GB at DefaultDPI otherwise. The
+		// single budget is llm.MaxImageDecodePixels — one ceiling for every
+		// pixel allocation the agent makes, so the two cannot drift apart.
+		// Refuse rather than silently lower the DPI: the refusal is
+		// predictable and says what to do instead.
+		size, err := instance.FPDF_GetPageSizeByIndex(&requests.FPDF_GetPageSizeByIndex{
+			Document: document.Document,
+			Index:    index,
+		})
+		if err != nil {
+			return RenderResult{}, fmt.Errorf("pdf: page size %d: %w", index+1, err)
+		}
+		// The comparison stays in float64 on purpose: PDFium reports a page
+		// size up to 2^32 pt for a plain-integer MediaBox (anything larger or
+		// exponent-form falls back to 612x792), and at 150 dpi two such sides
+		// rasterize to ~8.9e9 pixels each — an int64 pixel product would
+		// overflow and could wrap negative, past the guard.
+		wPx := size.Width * dpi / 72
+		hPx := size.Height * dpi / 72
+		if wPx*hPx > float64(llm.MaxImageDecodePixels) {
+			return RenderResult{}, fmt.Errorf(
+				"pdf: page %d is %.0fx%.0f pt; at %d dpi it would rasterize to %.0fx%.0f pixels (over the %d MP limit) — open this page in a viewer instead",
+				index+1, size.Width, size.Height, int(dpi), wPx, hPx, llm.MaxImageDecodePixels>>20)
+		}
 		rendered, err := instance.RenderPageInDPI(&requests.RenderPageInDPI{
 			DPI:  int(dpi),
 			Page: requests.Page{ByIndex: &requests.PageByIndex{Document: document.Document, Index: index}},

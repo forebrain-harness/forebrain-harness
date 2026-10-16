@@ -89,9 +89,17 @@ func openImagePreview(renderer *Renderer, path, label string) {
 // imagePreviewFrameLine is the one-line marker an image step shows in place of
 // a text body: the file, its pixel size, its encoded size, and the affordance
 // that opens it. It never carries base64.
+//
+// The pixel size appears only when both dimensions are known: a surface omits
+// them rather than showing 0×0 — an image whose header could not be parsed
+// behind sniffable magic bytes, or an MCP degrade path, reports no size. The
+// web card (ToolCallCard.vue) omits the segment the same way.
 func imagePreviewFrameLine(meta tool.ToolMeta) string {
-	line := fmt.Sprintf("▤ %s · %d×%d · %s",
-		imagePreviewLabel(meta), meta.PreviewWidth, meta.PreviewHeight, humanBytesLabel(meta.PreviewBytes))
+	dims := ""
+	if meta.PreviewWidth > 0 && meta.PreviewHeight > 0 {
+		dims = fmt.Sprintf("%d×%d · ", meta.PreviewWidth, meta.PreviewHeight)
+	}
+	line := fmt.Sprintf("▤ %s · %s%s", imagePreviewLabel(meta), dims, humanBytesLabel(meta.PreviewBytes))
 	if meta.PreviewScaled {
 		line += " · scaled"
 	}

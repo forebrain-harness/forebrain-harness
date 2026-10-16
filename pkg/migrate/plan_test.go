@@ -137,6 +137,34 @@ func TestOnlyProjectFilterRestrictsSessions(t *testing.T) {
 	}
 }
 
+// TestOnlyProjectWithoutARootIsRefusedAtTheEntry pins the #20a fix: an
+// import scoped to the current project with no project root is refused at
+// the Run entry for both sources alike, instead of claude silently importing
+// everything while codex skips every rollout for having "no working
+// directory".
+func TestOnlyProjectWithoutARootIsRefusedAtTheEntry(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		kind Kind
+		run  func(*Options) error
+	}{
+		{KindClaude, func(o *Options) error {
+			_, err := RunClaude(ctx, o, nil)
+			return err
+		}},
+		{KindCodex, func(o *Options) error {
+			_, err := RunCodex(ctx, o, nil)
+			return err
+		}},
+	} {
+		opts := &Options{OnlyProject: true, AgentID: "main"}
+		err := tc.run(opts)
+		if err == nil || !strings.Contains(err.Error(), "current project root is empty") {
+			t.Fatalf("%s: err = %v, want the empty-root refusal", tc.kind, err)
+		}
+	}
+}
+
 // A preview over a home that was already imported says so: it offers only
 // what a run would write, and counts the rest as already here.
 func TestPlanAfterAnImportCountsWhatIsAlreadyHere(t *testing.T) {

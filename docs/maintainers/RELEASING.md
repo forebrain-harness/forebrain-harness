@@ -136,9 +136,11 @@ approval. Raise the count to 1 when a second maintainer joins.
   `gh release upload … --clobber`, so re-running it overwrites existing
   assets with the rebuilt ones.
 - **A released version is broken.** Never delete or move an already
-  published tag: the Go module proxy and checksum database have recorded the
-  version, and the archives and npm packages are already published against
-  it. Fix forward with a new version (`fix: …` or `Release-As:` as needed).
+  published tag: once **any** user has fetched the module (or the archives
+  and npm packages were published against it), the Go module proxy and
+  checksum database may have recorded the version, and re-pointing it serves
+  different bytes to different people. Fix forward with a new version
+  (`fix: …` or `Release-As:` as needed).
 
 ## 7. First go-live checklist
 

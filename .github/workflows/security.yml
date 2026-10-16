@@ -21,6 +21,8 @@ jobs:
       # govulncheck loads every package, including pkg/pdf, whose cgo needs the
       # PDFium library the go-pdfium binding reaches through pkg-config.
       - name: Install pkg-config and fetch PDFium
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update && sudo apt-get install -y pkg-config
           scripts/fetch-pdfium.sh

@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,6 +167,133 @@ func TestRunCodexImportsEverythingAndIsIdempotent(t *testing.T) {
 	}
 	if rows2 != rows || sessions2 != sessions {
 		t.Fatalf("second run changed the database: rows %d→%d sessions %d→%d", rows, rows2, sessions, sessions2)
+	}
+}
+
+// writeCodexChildRollout adds a spawned thread's rollout to the fixture
+// home whose session_meta records a cwd of its own, away from the parent's
+// project — the shape the #9 fix must override.
+func writeCodexChildRollout(t *testing.T, root, elsewhere string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"timestamp":"2026-09-17T02:00:00.000Z","type":"session_meta","payload":{"session_id":"t-codex-sub","id":"t-codex-sub","timestamp":"2026-09-17T02:00:00.000Z","cwd":%q,"originator":"codex-tui","cli_version":"0.153.4","source":"cli","thread_source":"subagent","model_provider":"openai","history_mode":"legacy","context_window":{"window_id":"w-sub-0001"},"git":{"commit_hash":"abc","branch":"main","repository_url":""}}}
+{"timestamp":"2026-09-17T02:00:01.000Z","type":"response_item","payload":{"type":"message","id":"msg_sub_u1","role":"user","content":[{"type":"input_text","text":"subtask"}]}}
+{"timestamp":"2026-09-17T02:00:02.000Z","type":"response_item","payload":{"type":"message","id":"msg_sub_a1","role":"assistant","content":[{"type":"output_text","text":"subtask done"}]}}
+`, elsewhere)
+	path := filepath.Join(root, "sessions", "2026", "09", "17", "rollout-2026-09-17T02-00-00-t-codex-sub.jsonl")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeCodexSpawnEdgeState adds the state_5 snapshot carrying the thread
+// index and the spawn edge that makes t-codex-sub a child of t-codex-main.
+// The child's thread row records the away cwd too, so both authorities a
+// real home offers agree it ran elsewhere.
+func writeCodexSpawnEdgeState(t *testing.T, ctx context.Context, root, project, elsewhere string) {
+	t.Helper()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(root, "state_5.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stmt := range []string{
+		`CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, git_branch TEXT, archived INTEGER)`,
+		`CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT, status TEXT)`,
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []struct{ id, cwd, title string }{
+		{"t-codex-main", project, "main thread"},
+		{"t-codex-sub", elsewhere, "sub thread"},
+	} {
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO threads (id, cwd, title, git_branch, archived) VALUES (?,?,?, 'main', 0)`,
+			row.id, row.cwd, row.title); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status) VALUES ('t-codex-main','t-codex-sub','')`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestImportBindsCodexChildToParentsProject pins the #9 fix on the Codex
+// side: a spawned thread that records a cwd of its own (rollout head and
+// thread index alike) still binds to its parent's project — the v9
+// precedent, children inherit the parent's project and directory — in
+// All-projects mode and under OnlyProject alike.
+func TestImportBindsCodexChildToParentsProject(t *testing.T) {
+	ctx := context.Background()
+	newElsewhere := func() string {
+		dir := filepath.Join(t.TempDir(), "subtask-elsewhere")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	withChild := func() *fixtureCodexHome {
+		fixture := buildFixtureCodexHome(t)
+		elsewhere := newElsewhere()
+		writeCodexChildRollout(t, fixture.root, elsewhere)
+		writeCodexSpawnEdgeState(t, ctx, fixture.root, fixture.projectPath, elsewhere)
+		return fixture
+	}
+
+	// All-projects: the child's own cwd must not split it from its parent.
+	fixture := withChild()
+	opts := fixture.options(t, false)
+	if _, err := RunCodex(ctx, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	project, _, err := state.NewProjectStore(opts.DB, "main").FindOrCreateByRoot(ctx, fixture.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-t-codex-main", "cli-t-codex-sub"} {
+		var projectID, cwd, parentID sql.NullString
+		if err := opts.DB.QueryRowContext(ctx,
+			`SELECT project_id, cwd, parent_session_id FROM fb_sessions WHERE id=?`, id).
+			Scan(&projectID, &cwd, &parentID); err != nil {
+			t.Fatal(err)
+		}
+		if projectID.String != project.ID || cwd.String != project.Root {
+			t.Fatalf("%s: project_id=%q cwd=%q, want the parent's project %q / %q", id, projectID.String, cwd.String, project.ID, project.Root)
+		}
+		if id == "cli-t-codex-sub" && (!parentID.Valid || parentID.String != "cli-t-codex-main") {
+			t.Fatalf("child parent_session_id = %v, want the imported parent", parentID)
+		}
+	}
+	var projects int
+	if err := opts.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects`).Scan(&projects); err != nil {
+		t.Fatal(err)
+	}
+	if projects != 1 {
+		t.Fatalf("fb_projects rows = %d, want only the parent's project (the child's own cwd must not create one)", projects)
+	}
+
+	// OnlyProject: the same fixture still binds to the launch project.
+	scoped := withChild()
+	scopedOpts := scoped.options(t, false)
+	scopedOpts.OnlyProject = true
+	if _, err := RunCodex(ctx, scopedOpts, nil); err != nil {
+		t.Fatal(err)
+	}
+	launch, _, err := state.NewProjectStore(scopedOpts.DB, "main").FindOrCreateByRoot(ctx, scoped.projectPath, state.CreateProjectInput{ResourceAccess: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cli-t-codex-main", "cli-t-codex-sub"} {
+		var projectID, cwd string
+		if err := scopedOpts.DB.QueryRowContext(ctx,
+			`SELECT project_id, cwd FROM fb_sessions WHERE id=?`, id).Scan(&projectID, &cwd); err != nil {
+			t.Fatal(err)
+		}
+		if projectID != launch.ID || cwd != launch.Root {
+			t.Fatalf("%s: project_id=%q cwd=%q, want the launch project %q / %q", id, projectID, cwd, launch.ID, launch.Root)
+		}
 	}
 }
 

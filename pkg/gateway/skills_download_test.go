@@ -461,6 +461,14 @@ func TestChatSessionSourceWhitelistAndEcho(t *testing.T) {
 	}
 	rr := create(`{"title":"w","source":"workshop"}`)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	var created struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &created))
+	// The created session is listed below only once it holds a message: a row
+	// with no message is not a conversation.
+	_, err := s.Sessions.Append(context.Background(), created.ID, "user", "hello")
+	require.NoError(t, err)
 
 	rr = create(`{"source":"secret"}`)
 	require.Equal(t, http.StatusBadRequest, rr.Code)

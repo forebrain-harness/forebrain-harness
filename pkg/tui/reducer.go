@@ -2606,11 +2606,12 @@ func (m *viewModel) imageMarkerAtScreenRow(vr viewportRender, screenRow int) (pa
 //
 // Two summary rows share the body's four-space indent and are NOT the marker
 // line: the streaming hint "    … N earlier lines" (foldBlock) and the fold
-// hint "    ··· N more lines (click to expand)" (truncationHint). They stay what
-// they always were — a toggle target — so they are excluded by their leading
-// ellipsis. The fold hint is reachable on an image step: a file name long
-// enough to wrap the marker past the three-row budget makes the block foldable
-// like any other tool card.
+// hint "    ··· N more lines (click to expand)" (truncationHint). On the text
+// cards that paint them they are a toggle target, not a button, so they are
+// excluded by their leading ellipsis. An image card draws neither anymore —
+// it never folds (see frameCollapsible), so it has nothing to expand — but
+// the exclusion stays: the predicate reads the row's text alone and must keep
+// answering "not a marker" for both hint shapes.
 func isImageMarkerRow(line string) bool {
 	plain := sgrPattern.ReplaceAllString(line, "")
 	if strings.HasPrefix(plain, "    …") || strings.HasPrefix(plain, "    ···") {

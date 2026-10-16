@@ -1,8 +1,13 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"image"
+	"image/color"
+	"image/png"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -332,4 +337,148 @@ func TestUserInputPartsRehydratesFileReferenceToImage(t *testing.T) {
 	require.Equal(t, 1, images)
 	require.NotEmpty(t, sent)
 	require.Equal(t, userText, sent[0].Text)
+}
+
+// noisePNG returns an incompressible w×h PNG: random pixels keep the encoded
+// size at essentially the raw size, so a test can put an image over the
+// default 3 MiB part budget without committing a binary fixture. A fixed seed
+// keeps it deterministic.
+func noisePNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	rng := rand.New(rand.NewSource(1))
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(rng.Intn(256)), G: uint8(rng.Intn(256)), B: uint8(rng.Intn(256)), A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode noise png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestToolImageRowPersistsAsReferenceAndRehydratesIdentically pins 057's core
+// invariant end to end through the production seams: a tool result's image
+// part knows the file it was built from, so the transcript stores a
+// file_reference (no base64 in the row), and a reload re-derives — through the
+// same ImagePartWithin ladder, from the same file — a part byte-identical to
+// the one the live turn sent. That identity is what keeps a resumed request's
+// prefix the one the provider already cached.
+func TestToolImageRowPersistsAsReferenceAndRehydratesIdentically(t *testing.T) {
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	ctx := context.Background()
+	require.NoError(t, sess.Ensure(ctx, "s1", "s1"))
+
+	// The file every production path (read_file, PDF page, MCP block) has on
+	// disk before the part is built. Over the default budget so the ladder
+	// downscales it: the live part is a re-encoding, not the raw bytes.
+	imgPath := filepath.Join(t.TempDir(), "shot.png")
+	raw := noisePNG(t, 1024, 1024)
+	require.NoError(t, os.WriteFile(imgPath, raw, 0o600))
+	live, res, err := llm.ImagePartWithin(imgPath, "image/png", raw, 0)
+	require.NoError(t, err)
+	require.True(t, res.Scaled, "the test image must exercise the downscale ladder")
+	require.Equal(t, imgPath, live.SourcePath)
+
+	// Persist exactly as message_sync does for a tool result.
+	toolMsg := llm.ToolResultMessage("call-1", llm.Text("saved"), live)
+	require.NoError(t, sess.AppendMessageSequence(ctx, "s1", []llm.Message{toolMsg}, "", ""))
+
+	// (a) The stored row carries a file_reference, never the base64.
+	rows, err := sess.ListAllMessages(ctx, "s1", 0)
+	require.NoError(t, err)
+	stored := ""
+	for _, row := range rows {
+		if strings.EqualFold(strings.TrimSpace(row.Role), llm.RoleTool) {
+			stored = row.PartsJSON
+		}
+	}
+	require.NotEmpty(t, stored, "tool row not persisted")
+	require.NotContains(t, stored, "base64")
+	require.Contains(t, stored, "file_reference")
+	require.Contains(t, stored, imgPath)
+
+	// (b) Reload + rehydrate reproduces the live part field for field,
+	// base64 string and MIME included.
+	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
+	require.NoError(t, err)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	var rehydrated *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleTool {
+			rehydrated = &msgs[i]
+		}
+	}
+	require.NotNil(t, rehydrated, "tool message missing after reload")
+	require.Equal(t, "call-1", rehydrated.ToolCallID)
+	require.Equal(t, []llm.ContentPart{llm.Text("saved"), live}, rehydrated.Parts)
+
+	// (c) With the file gone, rehydration is best-effort: the placeholder
+	// stays, nothing errors.
+	require.NoError(t, os.Remove(imgPath))
+	entries, err = sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
+	require.NoError(t, err)
+	msgs = rehydrateImageReferences(ctx, PathResolver{}, entries)
+	for i := range msgs {
+		if msgs[i].Role != llm.RoleTool {
+			continue
+		}
+		require.Len(t, msgs[i].Parts, 2)
+		require.Equal(t, "[attachment] shot.png (image/png)", msgs[i].Parts[1].Text)
+	}
+}
+
+// TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile pins the user
+// half of the budget contract end to end: an over-budget attachment the live
+// turn sent through llm.ImageFile rehydrates from its file_reference through
+// the same function, and the deterministic ladder makes the reload
+// byte-identical to the first send — so a resumed request's prefix stays the
+// one the provider already cached.
+func TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile(t *testing.T) {
+	t.Setenv(llm.ImageMaxBytesEnv, "") // the default budget, not a stray env value
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	ctx := context.Background()
+	require.NoError(t, sess.Ensure(ctx, "s1", "s1"))
+
+	// Over the default budget so ImageFile downscales: the live part is a
+	// re-encoding, not the raw bytes.
+	imgPath := filepath.Join(t.TempDir(), "shot.png")
+	raw := noisePNG(t, 1024, 1024)
+	require.NoError(t, os.WriteFile(imgPath, raw, 0o600))
+	live, err := llm.ImageFile(imgPath)
+	require.NoError(t, err)
+	sent, err := base64.StdEncoding.DecodeString(live.ImageBase64)
+	require.NoError(t, err)
+	if len(sent) >= len(raw) {
+		t.Fatalf("the test image must exercise the downscale ladder: sent %d of %d bytes", len(sent), len(raw))
+	}
+
+	// Persist exactly as BuildSurfaceUserPartsJSON does for a user turn:
+	// text + file_reference by path, never the base64.
+	userText := "explain this image"
+	rawParts := state.MessagePartsJSON(llm.UserMessage(llm.Text(userText)), userText)
+	rawParts = state.AppendRawPartJSON(rawParts, state.FileReferencePartJSON(imgPath, "shot.png", "image/png"))
+	_, err = sess.AppendStructuredMessage(ctx, "s1", "user", userText, "", rawParts, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	// Reload + rehydrate reproduces the live part field for field.
+	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
+	require.NoError(t, err)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	var rehydrated *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleUser {
+			rehydrated = &msgs[i]
+		}
+	}
+	require.NotNil(t, rehydrated, "user message missing after reload")
+	require.Equal(t, []llm.ContentPart{llm.Text(userText), live}, rehydrated.Parts)
 }

@@ -1144,7 +1144,7 @@ func (m *viewModel) append(f Frame) *viewBlock {
 	b := &viewBlock{
 		id:          m.nextID,
 		frame:       f,
-		collapsible: collapsibleKind(f.Kind),
+		collapsible: frameCollapsible(f),
 	}
 	m.nextID++
 	m.blocks = append(m.blocks, b)
@@ -1201,7 +1201,7 @@ func (m *viewModel) insertBeforeLast(match func(Frame) bool, f Frame) *viewBlock
 			b := &viewBlock{
 				id:          m.nextID,
 				frame:       f,
-				collapsible: collapsibleKind(f.Kind),
+				collapsible: frameCollapsible(f),
 			}
 			m.nextID++
 			m.blocks = append(m.blocks[:i], append([]*viewBlock{b}, m.blocks[i:]...)...)
@@ -1233,6 +1233,11 @@ func (m *viewModel) replaceOrAppendBlock(f Frame) *viewBlock {
 			for _, b := range m.blocks {
 				if b.frame.Kind == f.Kind && b.frame.StepID == f.StepID && !b.frame.RetainAsHistory {
 					b.frame = f
+					// Fold eligibility follows the frame: a read starts as an
+					// ordinary running tool card and only learns it holds an
+					// image when the result arrives, and that card must stop
+					// folding.
+					b.collapsible = frameCollapsible(f)
 					b.cache.valid = false
 					return b
 				}
@@ -1256,6 +1261,21 @@ func collapsibleKind(kind FrameKind) bool {
 	default:
 		return false
 	}
+}
+
+// frameCollapsible reports whether the block a frame becomes participates in
+// click-to-expand: collapsibleKind for the kind, with one exception the owner
+// settled on 2026-10-16 — an image preview tool card never folds. Its output
+// area is exactly the marker line naming the file, the rows a long name wraps
+// into included, which is the card's complete form: there are no "more lines"
+// to hide, so it always renders in full and never draws a fold hint.
+func frameCollapsible(f Frame) bool {
+	if f.Kind == FrameTool &&
+		strings.EqualFold(strings.TrimSpace(f.ToolMeta.PreviewKind), "image") &&
+		strings.TrimSpace(f.ToolMeta.PreviewPath) != "" {
+		return false
+	}
+	return collapsibleKind(f.Kind)
 }
 
 func tuiReadLine(ctx context.Context, in io.Reader) func(context.Context) (string, error) {

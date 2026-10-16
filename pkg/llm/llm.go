@@ -16,11 +16,9 @@ package llm
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -49,6 +47,12 @@ type ContentPart struct {
 	ImageBase64 string
 	// MIMEType is the MIME type of the image (e.g. "image/png") when Type is ContentTypeImageBase64.
 	MIMEType string
+	// SourcePath names the file whose bytes this image part was built from, when
+	// there is one. It is metadata for persistence: a part that knows its source
+	// is stored as a file_reference to that path instead of as base64, and a
+	// reload re-derives the exact same part from the file. It never reaches a
+	// provider — every projection switches on Type and ignores it.
+	SourcePath string
 }
 
 // CompactionState is an opaque server-generated Responses API compaction item.
@@ -79,66 +83,42 @@ func ImageBase64(mimeType, data string) ContentPart {
 	return ContentPart{Type: ContentTypeImageBase64, MIMEType: mimeType, ImageBase64: data}
 }
 
-// ImageFile reads the image at path and returns a ContentPart with its
-// base64-encoded content.
-//
-// The MIME type is detected from the file contents (falling back to the file
-// extension when detection is ambiguous). Supported types are the same as
-// those accepted by OpenAI and Anthropic: image/jpeg, image/png, image/gif,
-// and image/webp.
+// ImageFile reads path and returns it as an image ContentPart under the same
+// budget the tool paths use: a file within FOREBRAIN_IMAGE_MAX_BYTES (default
+// 3 MiB) is sent byte-for-byte; a larger one is downscaled by the fixed
+// ladder; one over the decode ceiling is refused with an actionable error.
+// Attachments are user-authored, so the ladder's verbatim-first step is what
+// keeps ordinary pastes and screenshots bit-identical to before.
 func ImageFile(path string) (ContentPart, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ContentPart{}, fmt.Errorf("ImageFile: read %q: %w", path, err)
 	}
-
 	mimeType := ImageMIMEType(path, data)
-	switch mimeType {
-	case "image/jpeg", "image/png", "image/gif", "image/webp":
-		// accepted
-	default:
-		return ContentPart{}, fmt.Errorf("ImageFile: unsupported image type %q for %q", mimeType, path)
+	if mimeType == "" {
+		return ContentPart{}, fmt.Errorf("ImageFile: unsupported image type for %q; convert it to png or jpeg first", path)
 	}
-
-	b64 := base64.StdEncoding.EncodeToString(data)
-	return ImageBase64(mimeType, b64), nil
+	part, _, err := ImagePartWithin(path, mimeType, data, 0)
+	return part, err
 }
 
-// ImageMIMEType sniffs the MIME type of image bytes from the first 512 bytes,
-// then falls back to the file extension. It returns "" when neither the
-// sniffed bytes nor the extension name a known image type.
+// ImageMIMEType names the MIME type of image bytes by sniffing the first 512
+// bytes. Only the four formats every provider accepts are named; bytes that
+// are a different image type (bmp, tiff…) or not an image at all report "",
+// so a caller can tell "an image we can send" from everything else. The
+// sniff is authoritative — a valid file of these formats always names itself
+// by its magic bytes — and the file extension is never consulted: a fallback
+// could only ever relabel bytes that are not that image (text named .png, a
+// truncated header), sending junk to a provider or past an image-only gate.
+// path is not read; it stays in the signature for the callers that have one.
 func ImageMIMEType(path string, data []byte) string {
 	sniff := data
 	if len(sniff) > 512 {
 		sniff = sniff[:512]
 	}
-	sniffed := http.DetectContentType(sniff)
-	// Only the four formats every provider accepts are named; anything else
-	// reports "" so a caller can tell "an image we can send" from "not one of
-	// ours".
-	switch sniffed {
+	switch sniffed := http.DetectContentType(sniff); sniffed {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		return sniffed
-	}
-	// The bytes name some other image type (bmp, tiff, icns…). The sniff is
-	// authoritative: report "" rather than letting the extension relabel these
-	// bytes as a format they are not, so a caller gives its "convert it" error
-	// instead of sending, say, BMP bytes under an image/png MIME because the
-	// file happens to be named .png.
-	if strings.HasPrefix(sniffed, "image/") {
-		return ""
-	}
-	// Non-image bytes (or a sniff we do not recognize): fall back to the
-	// extension, as before.
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
 	}
 	return ""
 }
