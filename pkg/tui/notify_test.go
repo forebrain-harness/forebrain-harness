@@ -544,10 +544,26 @@ func scheduledMsg(at time.Time) AutoContinueScheduledMsg {
 
 // statusLines is the transcript's status frames, in order.
 func statusLines(r *Renderer) string {
+	return statusLinesFor(r, "")
+}
+
+// statusLinesFor is the status frames of one view's transcript ("" is the
+// conversation's own, a roster key that subagent's), in order. A subagent's
+// frames are retained in its own transcript, not the conversation's.
+func statusLinesFor(r *Renderer, view string) string {
+	if r == nil {
+		return ""
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	vm := &r.vm
+	if key := strings.TrimSpace(view); key != "" {
+		if vm = r.perAgentVM[key]; vm == nil {
+			return ""
+		}
+	}
 	lines := []string{}
-	for _, block := range r.vm.blocks {
+	for _, block := range vm.blocks {
 		if block.frame.Kind == FrameStatus {
 			lines = append(lines, block.frame.Title)
 		}
@@ -560,7 +576,7 @@ func composerText(r *Renderer) string {
 	return stripANSI(strings.Join(r.buildComposerBlock(ComposerRenderState{Cursor: &cursor}, 120).lines, "\n"))
 }
 
-func TestAutoContinueNoticeAndTranscriptLine(t *testing.T) {
+func TestAutoContinueTranscriptLine(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
 	state := &streamState{sessionID: "s1", session: &cancellingSession{fakeSession: &fakeSession{}}}
 	at := time.Now().Add(3 * time.Hour)
@@ -576,8 +592,10 @@ func TestAutoContinueNoticeAndTranscriptLine(t *testing.T) {
 	if want := "Usage limit reached · continuing automatically at " + clock + " · esc or type to cancel"; !strings.Contains(transcript, want) {
 		t.Fatalf("transcript = %q, want %q", transcript, want)
 	}
-	if want := "⚠ Usage limit reached · continuing automatically at " + clock + " · esc to cancel"; !strings.Contains(composerText(renderer), want) {
-		t.Fatalf("composer = %q, want the notice %q", composerText(renderer), want)
+	// The wait is announced in the transcript and nowhere else: the composer
+	// footer carries no second copy of it.
+	if strings.Contains(composerText(renderer), "continuing automatically") {
+		t.Fatalf("composer repeats the notice: %q", composerText(renderer))
 	}
 }
 
@@ -617,13 +635,10 @@ func TestAutoContinueEscapeCancelsThroughTheEngine(t *testing.T) {
 	if len(session.cancelled) != 1 || session.cancelled[0] != "s1" {
 		t.Fatalf("engine cancels = %v", session.cancelled)
 	}
-	// The engine's own cancellation event is what clears the notice.
+	// The engine's own cancellation event is what clears the wait.
 	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", Reason: turn.AutoContinueCancelledByUser})
 	if state.autoContinueFor("") != nil {
 		t.Fatal("still pending after the cancellation event")
-	}
-	if strings.Contains(composerText(renderer), "continuing automatically") {
-		t.Fatal("notice still under the composer")
 	}
 	if !strings.Contains(statusLines(renderer), "Auto-continue cancelled") {
 		t.Fatalf("transcript does not say the continuation was cancelled: %q", statusLines(renderer))
@@ -662,8 +677,8 @@ func TestAutoContinueDueBecomesTheNextSubmission(t *testing.T) {
 	if _, again := state.takeAutoContinueDue(); again {
 		t.Fatal("the continuation was handed out twice")
 	}
-	if state.autoContinueFor("") != nil || strings.Contains(composerText(renderer), "continuing automatically") {
-		t.Fatal("notice outlived the continuation")
+	if state.autoContinueFor("") != nil {
+		t.Fatal("the wait outlived the continuation")
 	}
 }
 
@@ -688,16 +703,21 @@ func TestAutoContinueLeftBehindOnSessionSwitch(t *testing.T) {
 	session := &cancellingSession{fakeSession: &fakeSession{}, pending: true}
 	state := &streamState{sessionID: "s1", session: session}
 	handleAutoContinueNotification(renderer, state, scheduledMsg(time.Now().Add(time.Hour)))
-	state.leaveAutoContinue(renderer)
+	state.leaveAutoContinue()
 	if len(session.cancelled) != 1 || state.autoContinueFor("") != nil || state.autoContinueWake() {
 		t.Fatalf("cancels %v, pending %+v", session.cancelled, state.autoContinueFor(""))
 	}
 }
 
-// A subagent's continuation belongs to that subagent's view: its notice shows
-// there and nowhere else, typing or Esc in that view cancels only it, and the
-// conversation's own wait is never touched (README rule 9).
-func TestAutoContinueNoticeBelongsToTheViewOfItsAgent(t *testing.T) {
+// A subagent's continuation belongs to that subagent's view: its transcript
+// line shows there and nowhere else, typing or Esc in that view cancels only
+// it, and the conversation's own wait is never touched (README rule 9).
+//
+// The per-view composer notice this test used to read was removed by owner
+// decision (a second copy of the wait, under the composer, with its own
+// wording); the view a wait belongs to is now carried by the transcript frame's
+// AgentID alone.
+func TestAutoContinueLineBelongsToTheViewOfItsAgent(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
 	renderer.EnableViewportMode()
 	t.Cleanup(renderer.DisableViewportMode)
@@ -711,12 +731,12 @@ func TestAutoContinueNoticeBelongsToTheViewOfItsAgent(t *testing.T) {
 	if state.autoContinueFor("") == nil || state.autoContinueFor("task-a") == nil {
 		t.Fatalf("both waits must be held: %+v", state.autoContinue)
 	}
-	if !strings.Contains(composerText(renderer), "continuing automatically") {
-		t.Fatalf("the conversation's notice is missing: %q", composerText(renderer))
+	if !strings.Contains(statusLinesFor(renderer, ""), "continuing automatically") {
+		t.Fatalf("the conversation's transcript line is missing: %q", statusLinesFor(renderer, ""))
 	}
 	renderer.SetActiveView("task-a")
-	if !strings.Contains(composerText(renderer), "continuing automatically") {
-		t.Fatalf("the subagent's notice is missing: %q", composerText(renderer))
+	if !strings.Contains(statusLinesFor(renderer, "task-a"), "continuing automatically") {
+		t.Fatalf("the subagent's transcript line is missing: %q", statusLinesFor(renderer, "task-a"))
 	}
 	// Esc in the subagent's view cancels only its wait.
 	if !state.cancelAutoContinue(renderer) {
@@ -728,7 +748,7 @@ func TestAutoContinueNoticeBelongsToTheViewOfItsAgent(t *testing.T) {
 	if len(session.cancelled) != 0 {
 		t.Fatalf("the conversation's wait was cancelled too: %v", session.cancelled)
 	}
-	// The engine's own cancellation clears that view's notice only.
+	// The engine's own cancellation ends that view's wait only.
 	handleAutoContinueNotification(renderer, state, AutoContinueCancelledMsg{SessionID: "s1", AgentID: "task-a", Reason: turn.AutoContinueCancelledByUser})
 	if state.autoContinueFor("task-a") != nil {
 		t.Fatal("the subagent's wait survived its cancellation event")
@@ -737,15 +757,15 @@ func TestAutoContinueNoticeBelongsToTheViewOfItsAgent(t *testing.T) {
 		t.Fatal("the conversation's wait was dropped by the subagent's cancel")
 	}
 	renderer.SetActiveView("")
-	if !strings.Contains(composerText(renderer), "continuing automatically") {
-		t.Fatalf("the conversation's notice was lost: %q", composerText(renderer))
+	if !strings.Contains(statusLinesFor(renderer, ""), "continuing automatically") {
+		t.Fatalf("the conversation's transcript line was lost: %q", statusLinesFor(renderer, ""))
 	}
 }
 
 // A subagent's due continuation is delivered to that subagent, and only while
-// its wait is still shown: a reader who pressed Esc as the timer fired has
+// its wait still stands: a reader who pressed Esc as the timer fired has
 // cleared it, and the racing continuation is dropped.
-func TestTUIContinuesASubagentOnlyWhileItsNoticeIsShown(t *testing.T) {
+func TestTUIContinuesASubagentOnlyWhileItsWaitStands(t *testing.T) {
 	renderer := NewRenderer(nil, nil)
 	renderer.EnableViewportMode()
 	t.Cleanup(renderer.DisableViewportMode)
@@ -755,7 +775,7 @@ func TestTUIContinuesASubagentOnlyWhileItsNoticeIsShown(t *testing.T) {
 
 	handleAutoContinueNotification(renderer, state, AutoContinueScheduledMsg{SessionID: "s1", AgentID: "task-a", ContinueAt: time.Now().Add(time.Hour), Code: string(llm.ExplainRateLimitQuota), Attempt: 1})
 	if !state.cancelAutoContinue(renderer) {
-		t.Fatal("Esc must be consumed while the notice is up")
+		t.Fatal("Esc must be consumed while the wait is up")
 	}
 	handleAutoContinueNotification(renderer, state, AutoContinueDueMsg{SessionID: "s1", AgentKey: "task-a", Prompt: turn.AutoContinuePrompt})
 	if len(session.continuedSubagent) != 0 {
@@ -768,7 +788,7 @@ func TestTUIContinuesASubagentOnlyWhileItsNoticeIsShown(t *testing.T) {
 		t.Fatalf("continued = %v", session.continuedSubagent)
 	}
 	if state.autoContinueFor("task-a") != nil {
-		t.Fatal("the notice outlived the continuation")
+		t.Fatal("the wait outlived the continuation")
 	}
 }
 
@@ -794,9 +814,9 @@ func TestAutoContinueUIMessageFromEvents(t *testing.T) {
 
 func TestAutoContinueHeadlineNamesAThrottle(t *testing.T) {
 	now := time.Date(2026, 9, 29, 23, 0, 0, 0, time.UTC)
-	got := autoContinueFooterText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now)
-	if got != "Rate limited · continuing automatically at 11:02pm · esc to cancel" {
-		t.Fatalf("footer = %q", got)
+	got := autoContinueTranscriptText(string(llm.ExplainRateLimitThrottle), now.Add(2*time.Minute), now)
+	if got != "Rate limited · continuing automatically at 11:02pm · esc or type to cancel" {
+		t.Fatalf("transcript line = %q", got)
 	}
 }
 

@@ -1876,18 +1876,11 @@ type MCPResourcesMsg struct {
 	Err    string
 }
 
-// Auto-continue in the terminal: the notice while a conversation stopped by a
-// usage limit waits, Esc or typing to cancel it, and the continuation turn when
-// the wait ends. The waiting itself is the turn engine's; this section only
-// shows it and hands the engine's continuation to the event loop.
-
-// autoContinueNoticeStyle and autoContinueNoticeGlyph draw the notice under
-// the composer as a warning: it announces something that will happen without
-// the reader doing anything, which is exactly what they must be able to notice.
-const (
-	autoContinueNoticeStyle = "\x1b[38;5;214m"
-	autoContinueNoticeGlyph = "⚠ "
-)
+// Auto-continue in the terminal: the transcript line while a conversation
+// stopped by a usage limit waits, Esc or typing to cancel it, and the
+// continuation turn when the wait ends. The waiting itself is the turn
+// engine's; this section only shows it and hands the engine's continuation to
+// the event loop.
 
 // AutoContinueScheduledMsg reports a continuation armed by the engine: the view
 // it belongs to will resume by itself at ContinueAt. AgentID is the roster key
@@ -2034,7 +2027,6 @@ func handleAutoContinueNotification(renderer *Renderer, state *streamState, m an
 			return true
 		}
 		state.setAutoContinue(view, &autoContinueView{sessionID: msg.SessionID, agentKey: view, continueAt: msg.ContinueAt, code: msg.Code})
-		renderer.SetAutoContinueNotice(view, autoContinueFooterText(msg.Code, msg.ContinueAt, time.Now()))
 		if state.activeForeground == nil {
 			state.announceAutoContinue(renderer)
 		}
@@ -2049,7 +2041,7 @@ func handleAutoContinueNotification(renderer *Renderer, state *streamState, m an
 		if entry == nil || !sameSessionID(msg.SessionID, entry.sessionID) {
 			return true
 		}
-		state.clearAutoContinue(renderer, view)
+		state.clearAutoContinue(view)
 		// A turn the reader sent is its own explanation; anything else ending
 		// the wait is said, so the notice already in scrollback is not left
 		// promising a continuation that will never come.
@@ -2074,7 +2066,7 @@ func handleAutoContinueNotification(renderer *Renderer, state *streamState, m an
 		if entry == nil || !sameSessionID(msg.SessionID, entry.sessionID) {
 			return true
 		}
-		state.clearAutoContinue(renderer, view)
+		state.clearAutoContinue(view)
 		prompt := strings.TrimSpace(msg.Prompt)
 		if prompt == "" {
 			return true
@@ -2157,8 +2149,8 @@ func (s *streamState) cancelAutoContinue(renderer *Renderer) bool {
 	}
 	if view == "" {
 		if canceller, ok := s.session.(autoContinueCanceller); ok && canceller.CancelAutoContinue(entry.sessionID) {
-			// The engine's cancellation event clears the notice and says so in
-			// the transcript, the same way a cancel from any other surface does.
+			// The engine's cancellation event ends the wait and says so in the
+			// transcript, the same way a cancel from any other surface does.
 			return true
 		}
 	} else if canceller, ok := s.session.(subagentAutoContinueCanceller); ok && canceller.CancelSubagentAutoContinue(entry.sessionID, view) {
@@ -2167,7 +2159,7 @@ func (s *streamState) cancelAutoContinue(renderer *Renderer) bool {
 	// Nothing left to cancel in the engine: the timer fired as the key was
 	// pressed. Clearing here is what makes the racing continuation drop.
 	announced := entry.announced
-	s.clearAutoContinue(renderer, view)
+	s.clearAutoContinue(view)
 	if announced {
 		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "Auto-continue cancelled", AgentID: view, Final: true})
 	}
@@ -2176,7 +2168,7 @@ func (s *streamState) cancelAutoContinue(renderer *Renderer) bool {
 
 // leaveAutoContinue drops the pending or due continuations of the conversation
 // being switched away from, each in its own view.
-func (s *streamState) leaveAutoContinue(renderer *Renderer) {
+func (s *streamState) leaveAutoContinue() {
 	if s == nil {
 		return
 	}
@@ -2193,23 +2185,16 @@ func (s *streamState) leaveAutoContinue(renderer *Renderer) {
 		} else if canceller, ok := s.session.(subagentAutoContinueCanceller); ok {
 			canceller.CancelSubagentAutoContinue(entry.sessionID, key)
 		}
-		if renderer != nil {
-			renderer.SetAutoContinueNotice(key, "")
-		}
 	}
 	s.autoContinue = nil
 }
 
-// clearAutoContinue drops one view's pending continuation and its notice.
-func (s *streamState) clearAutoContinue(renderer *Renderer, view string) {
+// clearAutoContinue drops one view's pending continuation.
+func (s *streamState) clearAutoContinue(view string) {
 	if s == nil {
 		return
 	}
-	view = strings.TrimSpace(view)
-	delete(s.autoContinue, view)
-	if renderer != nil {
-		renderer.SetAutoContinueNotice(view, "")
-	}
+	delete(s.autoContinue, strings.TrimSpace(view))
 }
 
 // takeAutoContinueDue hands the loop a continuation that is due, once.
@@ -2243,11 +2228,6 @@ func autoContinueHeadline(code string) string {
 // autoContinueTranscriptText is the line the transcript keeps.
 func autoContinueTranscriptText(code string, at, now time.Time) string {
 	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + " · esc or type to cancel"
-}
-
-// autoContinueFooterText is the live notice under the composer.
-func autoContinueFooterText(code string, at, now time.Time) string {
-	return autoContinueHeadline(code) + " · continuing automatically at " + autoContinueClock(at, now) + " · esc to cancel"
 }
 
 func autoContinueUnavailableText(detail string) string {
