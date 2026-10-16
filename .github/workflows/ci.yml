@@ -43,7 +43,15 @@ jobs:
       # library on PKG_CONFIG_PATH (installed with build-essential above). The
       # CJK fallback fonts are what make pkg/pdf's non-tofu test meaningful on a
       # runner with no CJK system font.
+      # A cache hit makes the .version-guarded PDFium fetch a no-op; the key
+      # rolls with the script so a changed pin or layout re-downloads.
+      - uses: actions/cache@v4
+        with:
+          path: third_party/pdfium
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/fetch-pdfium.sh') }}
       - name: Fetch PDFium and the CJK fonts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           scripts/fetch-pdfium.sh
           scripts/fetch-pdfium-fonts.sh
@@ -106,6 +114,8 @@ jobs:
         run: if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) { choco install pkgconfiglite -y --no-progress }
       - name: Fetch PDFium and the CJK fonts
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           scripts/fetch-pdfium.sh windows/amd64
           scripts/fetch-pdfium-fonts.sh
@@ -148,6 +158,8 @@ jobs:
         run: if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) { choco install pkgconfiglite -y --no-progress }
       - name: Fetch PDFium
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           scripts/fetch-pdfium.sh windows/amd64
           dir="$PWD/third_party/pdfium/windows_amd64"
@@ -180,6 +192,8 @@ jobs:
       # pkg-config itself is present.
       - run: command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
       - run: scripts/fetch-pdfium.sh darwin/arm64 darwin/amd64
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/third_party/pdfium/darwin_arm64" go build -tags fts5 ./...
       # Prove the Intel mac binary cross-compiles on an arm64 runner; the
       # release workflow builds darwin/amd64 the same way.

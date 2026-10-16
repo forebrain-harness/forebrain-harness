@@ -131,6 +131,48 @@ func TestWorkspaceFileRawServesAgentWorkspaceImageWithoutFileView(t *testing.T) 
 	require.Equal(t, http.StatusNotFound, get("shot.png").Code)
 }
 
+// TestWorkspaceFileRawRefusesForeignSession pins the ownership gate every
+// other file endpoint already has: a session id this agent does not own must
+// be refused (404) rather than falling through to the agent workspace root,
+// which is where a tool-recorded absolute path would otherwise be served.
+// An owned session with no file view keeps that legitimate service, and the
+// sniff-authoritative MIME gate holds even for a file whose extension
+// promises an image.
+func TestWorkspaceFileRawRefusesForeignSession(t *testing.T) {
+	s, _ := workspaceWriteServer(t)
+	image := tinyPNG(t)
+	agentResults := filepath.Join(s.Home, "workspace", "state", "mcp-results")
+	require.NoError(t, os.MkdirAll(agentResults, 0o700))
+	agentImage := filepath.Join(agentResults, "mcp-shots-shot-1.png")
+	require.NoError(t, os.WriteFile(agentImage, image, 0o644))
+
+	get := func(session, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		s.handleWorkspaceFileRaw(rec, httptest.NewRequest(http.MethodGet,
+			"/api/workspace/file/raw?session_id="+session+"&path="+path, nil))
+		return rec
+	}
+
+	// A session this agent does not own — forged or another agent's — is
+	// refused the way every other file endpoint refuses it: 404, never the
+	// agent workspace root.
+	require.Equal(t, http.StatusNotFound, get("S-FOREIGN", agentImage).Code)
+
+	// An owned session with no file view (no project) still serves the
+	// tool-recorded absolute path from the agent workspace: the legitimate
+	// case the gate must not break.
+	require.NoError(t, s.Sessions.Ensure(context.Background(), "S2", "S2"))
+	rec := get("S2", agentImage)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, image, rec.Body.Bytes())
+
+	// Text bytes named .png are refused by the MIME gate (415): the
+	// extension no longer vouches for the bytes.
+	fake := filepath.Join(agentResults, "fake.png")
+	require.NoError(t, os.WriteFile(fake, []byte("this is not an image"), 0o644))
+	require.Equal(t, http.StatusUnsupportedMediaType, get("S2", fake).Code)
+}
+
 // workspaceWriteServer builds a gateway whose file view is one project's root,
 // with one conversation filed under it. The agent's own workspace is a
 // sibling, reachable only through the versioned skill roots, exactly as in

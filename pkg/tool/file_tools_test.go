@@ -14,10 +14,12 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1421,6 +1423,34 @@ func writeTestPNG(t *testing.T, dir string, w, h int) (string, []byte) {
 	return path, buf.Bytes()
 }
 
+// writeNoiseTestPNG writes a deterministic incompressible PNG (random pixels
+// barely compress, so the file is roughly w*h*4 bytes) — the fixture that
+// forces the downscale path once a budget below the file size applies.
+func writeNoiseTestPNG(t *testing.T, dir string, w, h int) (string, []byte) {
+	t.Helper()
+	rng := rand.New(rand.NewSource(1))
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	buf := make([]byte, 4*w*h)
+	if _, err := rng.Read(buf); err != nil {
+		t.Fatalf("noise: %v", err)
+	}
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			i := 4 * (y*w + x)
+			img.Set(x, y, color.RGBA{R: buf[i], G: buf[i+1], B: buf[i+2], A: 0xff})
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	path := filepath.Join(dir, "noise.png")
+	if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
+		t.Fatalf("write png: %v", err)
+	}
+	return path, out.Bytes()
+}
+
 // TestAppendPDFPagePartDegradesUnsendablePage pins the read_file PDF sibling
 // of the MCP image-block fix: a page whose part cannot be built (here 4 MiB of
 // non-decodable bytes over the per-part budget) becomes a text line naming
@@ -1556,6 +1586,72 @@ func TestFileReadStatesTheRealSizeOfAWebp(t *testing.T) {
 	}
 }
 
+// TestFileReadImageBudgetEnvVar pins that $FOREBRAIN_IMAGE_MAX_BYTES is live in
+// read_file (it was a dead knob while the caller passed a positive constant):
+// the same noise PNG — over a 1 MiB env budget, under the 3 MiB default — is
+// downscaled when the env names 1 MiB and sent verbatim when it does not.
+func TestFileReadImageBudgetEnvVar(t *testing.T) {
+	tmp := t.TempDir()
+	path, raw := writeNoiseTestPNG(t, tmp, 730, 730)
+	if len(raw) <= 1<<20 || len(raw) > llm.DefaultMaxImageBytes {
+		t.Fatalf("noise PNG is %d bytes; need it over the 1 MiB env budget and within the %d default",
+			len(raw), llm.DefaultMaxImageBytes)
+	}
+
+	t.Run("env budget downscales", func(t *testing.T) {
+		t.Setenv("FOREBRAIN_IMAGE_MAX_BYTES", strconv.Itoa(1<<20))
+		st := NewState(tmp)
+		readTool, err := NewFileReadTool(st)
+		if err != nil {
+			t.Fatalf("NewFileReadTool: %v", err)
+		}
+		ctx := WithToolCompletionCapture(context.Background())
+		got, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(path)+`"}`)
+		if err != nil {
+			t.Fatalf("read image: %v", err)
+		}
+		parts, ok := got.([]llm.ContentPart)
+		if !ok || len(parts) != 2 {
+			t.Fatalf("read_file returned %#v, want note + image part", got)
+		}
+		completion, _ := ToolCompletionFromContext(ctx)
+		if completion.Output["image_scaled"] != true {
+			t.Fatalf("image_scaled=%#v want true under a 1 MiB env budget", completion.Output["image_scaled"])
+		}
+		if completion.Output["image_source_bytes"] != len(raw) {
+			t.Fatalf("image_source_bytes=%#v want %d", completion.Output["image_source_bytes"], len(raw))
+		}
+	})
+
+	t.Run("default budget sends verbatim", func(t *testing.T) {
+		st := NewState(tmp)
+		readTool, err := NewFileReadTool(st)
+		if err != nil {
+			t.Fatalf("NewFileReadTool: %v", err)
+		}
+		ctx := WithToolCompletionCapture(context.Background())
+		got, err := readTool.Handle(ctx, `{"file_path":"`+escapeJSONPath(path)+`"}`)
+		if err != nil {
+			t.Fatalf("read image: %v", err)
+		}
+		parts, ok := got.([]llm.ContentPart)
+		if !ok || len(parts) != 2 {
+			t.Fatalf("read_file returned %#v, want note + image part", got)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(parts[1].ImageBase64)
+		if err != nil {
+			t.Fatalf("decode image base64: %v", err)
+		}
+		if !bytes.Equal(decoded, raw) {
+			t.Fatal("within the default budget the image must be sent verbatim")
+		}
+		completion, _ := ToolCompletionFromContext(ctx)
+		if completion.Output["image_scaled"] != false {
+			t.Fatalf("image_scaled=%#v want false under the default budget", completion.Output["image_scaled"])
+		}
+	})
+}
+
 // TestFileReadImageDoesNotEnterReadLedger pins that an image read is not
 // remembered as text (nothing may then edit it) and does not reach the read
 // observers (the language-server index is for source files).
@@ -1638,6 +1734,35 @@ func TestFileReadUndecodableImageExtensionIsActionable(t *testing.T) {
 	msg := strings.ToLower(err.Error())
 	if !strings.Contains(msg, "png") || !strings.Contains(msg, "convert") {
 		t.Fatalf("err=%q want a convert-to-png hint", err)
+	}
+}
+
+// TestFileReadMisnamedImageBytesIsActionable pins the read side of the
+// sniff-authoritative gate: text bytes named .png are refused with the error
+// that names the real problem — the bytes are not the image the extension
+// promises — not a "convert it" hint those bytes cannot take, and never an
+// image part sent to the provider.
+func TestFileReadMisnamedImageBytesIsActionable(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "fake.png")
+	if err := os.WriteFile(path, []byte("this is not an image at all, just words"), 0o644); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	tool, err := NewFileReadTool(NewState(tmp))
+	if err != nil {
+		t.Fatalf("NewFileReadTool: %v", err)
+	}
+
+	out, err := tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(path)+`"}`)
+	if err == nil {
+		t.Fatalf("expected a misnamed-bytes error, got output %#v", out)
+	}
+	msg := strings.ToLower(err.Error())
+	if !strings.Contains(msg, "misnamed") || !strings.Contains(msg, "corrupted") {
+		t.Fatalf("err=%q want a misnamed-or-corrupted refusal", err)
+	}
+	if strings.Contains(msg, "convert it to png") {
+		t.Fatalf("err=%q must not offer a conversion the bytes cannot take", err)
 	}
 }
 
@@ -1910,6 +2035,27 @@ func TestFileReadPDFActionableErrors(t *testing.T) {
 				t.Fatalf("err=%v want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestFileReadPDFInputLimit pins the input cap on read_file's PDF branch: a
+// document over pdf.MaxPDFInputBytes is refused with an actionable error
+// before anything is parsed (PDFium keeps its own parse copy beside the
+// caller's bytes, so an unbounded input costs multiples of the file size).
+// The decision is a function of the size alone, so the boundary is exercised
+// without building a 128 MiB document; exactly at the limit is accepted.
+func TestFileReadPDFInputLimit(t *testing.T) {
+	if err := pdfInputLimitError(pdf.MaxPDFInputBytes); err != nil {
+		t.Fatalf("a document exactly at the limit must be accepted: %v", err)
+	}
+	err := pdfInputLimitError(pdf.MaxPDFInputBytes + 1)
+	if err == nil {
+		t.Fatal("a document over the input limit was accepted")
+	}
+	for _, want := range []string{"input limit", "split it"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q want it to mention %q", err, want)
+		}
 	}
 }
 

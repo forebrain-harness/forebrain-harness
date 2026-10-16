@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -280,6 +281,13 @@ func TestListSessionsRecentPaged(t *testing.T) {
 		if err := acme.Ensure(ctx, id, "session "+id); err != nil {
 			t.Fatal(err)
 		}
+		// Each listed session holds a message: a row with no message is not a
+		// conversation and no list returns it. The append must come before
+		// the timestamp is pinned, because it bumps updated_at through the
+		// upsert every write path runs.
+		if _, err := acme.Append(ctx, id, "user", "hello "+id); err != nil {
+			t.Fatal(err)
+		}
 		// Distinct, descending timestamps so the newest-first order is
 		// deterministic: s-00 is the most recent session.
 		if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(10_000-i), id); err != nil {
@@ -350,6 +358,10 @@ func TestConversationListsAreFilteredInTheQuery(t *testing.T) {
 	if err := store.Ensure(ctx, "ordinary", "the conversation"); err != nil {
 		t.Fatal(err)
 	}
+	// It is a conversation because it holds a message.
+	if _, err := store.Append(ctx, "ordinary", "user", "the conversation"); err != nil {
+		t.Fatal(err)
+	}
 	// The ordinary conversation is the oldest row of all.
 	if _, err := db.Exec("UPDATE fb_sessions SET updated_at = 1 WHERE id = 'ordinary'"); err != nil {
 		t.Fatal(err)
@@ -412,6 +424,168 @@ func TestConversationListsAreFilteredInTheQuery(t *testing.T) {
 			t.Fatalf("%s lost the ordinary conversation under newer rows", name)
 		}
 	}
+}
+
+// TestConversationListsHideSessionsWithoutAMessage pins what a conversation
+// list means by "a conversation": the session holds a message. A row exists
+// from the moment a surface needs the session's identity — /new, /model,
+// /migrate and the web's create endpoint all ensure it before the
+// conversation has said anything — so a list that went by rows would offer a
+// person conversations with nothing to resume, newest first.
+func TestConversationListsHideSessionsWithoutAMessage(t *testing.T) {
+	ctx := context.Background()
+	ids := func(rows []SessionSummary) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+
+	t.Run("every list hides a row that holds no message", func(t *testing.T) {
+		db := openStateDB(t)
+		store := NewSessionStore(db, "main")
+		projects := NewProjectStore(db, "main")
+		p, err := projects.Create(ctx, CreateProjectInput{Name: "proj", Root: "/tmp/proj"})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := store.Ensure(ctx, "empty", "empty"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, "talked", "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		// The project's own pair: a row that never said anything, and a
+		// conversation.
+		if err := store.Ensure(ctx, "proj-empty", "proj-empty"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Append(ctx, "proj-talk", "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"proj-empty", "proj-talk"} {
+			if err := projects.BindSession(ctx, id, p.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A conversation the user rewound to before its first message keeps
+		// its rows, and therefore stays listed: the only place that rewind
+		// can be undone is the conversation's own view.
+		row, err := store.Append(ctx, "rewound", "user", "the wrong thing")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.WithdrawUserTurn(ctx, "rewound", row); err != nil {
+			t.Fatal(err)
+		}
+
+		recent, err := store.ListSessionsRecent(ctx, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paged, err := store.ListSessionsRecentPaged(ctx, 50, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own, err := store.ListSessionsOfSource(ctx, SessionSourceConversation, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inProject, err := store.ListSessionsForProject(ctx, p.ID, 50, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Both agent-wide lists hold every conversation of this agent,
+		// project-bound or not; ListSessionsOfSource holds the ones with no
+		// project; the project's list holds its own.
+		for name, list := range map[string][]SessionSummary{
+			"ListSessionsRecent":      recent,
+			"ListSessionsRecentPaged": paged,
+		} {
+			got := ids(list)
+			for _, want := range []string{"talked", "rewound", "proj-talk"} {
+				if !slices.Contains(got, want) {
+					t.Fatalf("%s lost %q: %v", name, want, got)
+				}
+			}
+			for _, unwanted := range []string{"empty", "proj-empty"} {
+				if slices.Contains(got, unwanted) {
+					t.Fatalf("%s listed %q, a session with no message: %v", name, unwanted, got)
+				}
+			}
+		}
+		if got := ids(own); len(got) != 2 || !slices.Contains(got, "talked") || !slices.Contains(got, "rewound") {
+			t.Fatalf("purpose-filtered list = %v, want the agent's own conversations only", got)
+		}
+		if got := ids(inProject); !slices.Equal(got, []string{"proj-talk"}) {
+			t.Fatalf("project list = %v, want only the project's conversation", got)
+		}
+	})
+
+	t.Run("pages are not hollowed out by empty rows", func(t *testing.T) {
+		db := openStateDB(t)
+		store := NewSessionStore(db, "main")
+		// Five empty rows among three conversations: the page sequence is the
+		// conversations alone, in the list's own newest-first order, because
+		// the filter runs inside the query and not over a fetched page.
+		for i := 0; i < 8; i++ {
+			id := fmt.Sprintf("s-%d", i)
+			if err := store.Ensure(ctx, id, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, id := range []string{"s-1", "s-4", "s-6"} {
+			if _, err := store.Append(ctx, id, "user", "hello "+id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for i := 0; i < 8; i++ {
+			if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(100-i), fmt.Sprintf("s-%d", i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		var got []string
+		for offset := 0; ; offset++ {
+			page, err := store.ListSessionsRecentPaged(ctx, 1, offset)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page) == 0 {
+				break
+			}
+			got = append(got, ids(page)...)
+		}
+		if want := []string{"s-1", "s-4", "s-6"}; !slices.Equal(got, want) {
+			t.Fatalf("paged ids = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("another primary agent does not see them", func(t *testing.T) {
+		db := openStateDB(t)
+		if _, err := NewSessionStore(db, "main").Append(ctx, "mine", "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		theirs := NewSessionStore(db, "other")
+		recent, err := theirs.ListSessionsRecent(ctx, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		paged, err := theirs.ListSessionsRecentPaged(ctx, 50, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own, err := theirs.ListSessionsOfSource(ctx, SessionSourceConversation, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recent)+len(paged)+len(own) != 0 {
+			t.Fatalf("another agent's lists = %v %v %v, want nothing", recent, paged, own)
+		}
+	})
 }
 
 // TestSubagentSessionsAreBornHiddenFromEveryList pins what a subagent's
@@ -483,6 +657,9 @@ func TestProjectSessionListListsOnlyConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := sessions.Ensure(ctx, "talk", "a conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.Append(ctx, "talk", "user", "hello"); err != nil {
 		t.Fatal(err)
 	}
 	if err := sessions.Ensure(ctx, "fire", "one fire"); err != nil {

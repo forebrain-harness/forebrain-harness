@@ -560,9 +560,11 @@ WHERE s.project_id = ? AND s.agent_id = ? AND r.status IN ('running', 'waiting_a
 	return tx.Commit()
 }
 
-// DeletePreview reports what Delete would remove: the project's own
-// conversations (sub-sessions excluded, so the count matches the list the
-// user sees), its cron jobs, and whether a run is in flight.
+// DeletePreview reports what Delete would remove: the conversations the
+// project's sessions tab lists — the same predicate ListSessionsForProject
+// applies, so an imported subagent child counts and an empty shell does not
+// (empty shells are deleted too but not counted) — its cron jobs, and
+// whether a run is in flight.
 func (s *ProjectStore) DeletePreview(ctx context.Context, id string) (sessions int, cronJobs int, running bool, err error) {
 	if s == nil || s.db == nil {
 		return 0, 0, false, ErrProjectNotFound
@@ -571,7 +573,10 @@ func (s *ProjectStore) DeletePreview(ctx context.Context, id string) (sessions i
 	if _, err = s.Get(ctx, id); err != nil {
 		return 0, 0, false, err
 	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE project_id=? AND agent_id=? AND parent_session_id IS NULL`, id, s.agentID).Scan(&sessions); err != nil {
+	if err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM fb_sessions
+		 WHERE project_id=? AND agent_id=? AND source=? AND `+conversationHoldsAMessage,
+		id, s.agentID, SessionSourceConversation).Scan(&sessions); err != nil {
 		return 0, 0, false, err
 	}
 	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_jobs WHERE project_id=? AND agent_id=?`, id, s.agentID).Scan(&cronJobs); err != nil {

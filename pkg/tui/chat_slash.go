@@ -989,9 +989,11 @@ func (s *ChatSession) migrateProgressSink() func(migrate.Progress) {
 // persistMigrationReport writes the report the user is about to see as a
 // session event BEFORE displaying it, so quitting the moment it appears
 // still leaves it replayable (shown implies recorded). The session row is
-// ensured first: a conversation that has only ever run slash commands has
-// no transcript row yet, and an event against a session id that owns no row
-// is invisible to /resume — the report would be durable but unreachable.
+// ensured first: fb_session_events.session_id is a foreign
+// key, so an event against a session id that owns no row could not be stored at
+// all. A conversation that has only ever run slash commands is not listed by
+// /resume (it holds no message), so the report's durable copy is read back when
+// the session itself is opened — by id, or while it is the open conversation.
 func (s *ChatSession) persistMigrationReport(sessionID, source, title string, report *migrate.Report) {
 	if s == nil || s.runSvc() == nil || strings.TrimSpace(sessionID) == "" {
 		return

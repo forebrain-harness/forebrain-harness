@@ -7,8 +7,9 @@
 #   <out-dir>  directory the archive is written to (created if missing)
 #
 # The archive contains what the binary needs in place: forebrain[.exe], the
-# dict/ directory, models.json and the tokenizers/ directory beside it. It is
-# built from
+# PDFium shared library (libpdfium.{dylib,so} / pdfium.dll), the dict/
+# directory, models.json, the tokenizers/ directory and the fonts/ CJK
+# fallback set beside it. It is built from
 # npm/dist/@forebrain-harness/<pkg> so the Release asset and the npm platform
 # package carry the same binary.
 set -euo pipefail

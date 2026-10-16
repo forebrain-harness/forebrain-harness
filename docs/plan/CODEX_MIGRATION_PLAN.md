@@ -555,6 +555,15 @@ Codex 有 plan 语义、没有 plan 文件（C8）：Plan Mode 的产物是助�
 - **进度**：每完成一个会话回调一次（`i/N` + 累计行数），TUI 节流 200 ms；迁移在后台 goroutine 跑，不阻塞事件循环。
 - **失败分类**：坏行 → 跳过并计数；整会话失败 → 报告文件路径 + 错误原文；配置写入失败 → 中止 MCP 部分但保留会话结果。
 
+### 8.1 会话绑定项目（Session project binding，2026-10-15 补记）
+
+与 Claude 侧同一条共享路径（`importUnits` → `importOneSession` → `insertSession`），随 `docs/plan/MIGRATE_RESUME_PROJECT_BINDING_PLAN.md` 一并修复，绑定语义与 schema migration v9 归一：
+
+- OnlyProject 模式绑定 `CurrentProjectRoot`；All projects 模式按会话自身 canonical cwd（`firstNonEmptyStr(meta.Cwd, rollout.Cwd)`；子 rollout 继承父）归属，经 `FindOrCreateByRoot` canonical 化并幂等取行。
+- Codex 无 encoded-project 目录结构，无项目级路径兜底源：兜底后仍无 cwd 的会话 → `skipped`，Reason="no working directory: a conversation must belong to a project"，不落库（不写 `project_id IS NULL`）。
+- 重跑回填：已迁移但无绑定的行 → `StatusRebound`，UPDATE 限定 `agent_id` 与 `origin='migrated'`，不动 `updated_at`、不动 `source`；dry-run 不建 fb_projects 行。
+- 迁移的历史子会话保持 `source=''`（可 resume、可读），与运行时 subagent worker 的 `source='subagent'` 是两种身份。
+
 ---
 
 ## 9. 测试与验收

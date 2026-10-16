@@ -344,11 +344,12 @@ func TestFontDirsIncludePlatformDefaults(t *testing.T) {
 // TestRenderCapsPages renders a ten-page document and checks only the cap is
 // rendered while the full page count is reported.
 func TestRenderCapsPages(t *testing.T) {
+	data := simplePDF(10)
 	path := filepath.Join(t.TempDir(), "ten.pdf")
-	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := RenderFile(path, 0, 0, Options{})
+	result, err := RenderFile(path, data, 0, 0, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile: %v", err)
 	}
@@ -368,14 +369,66 @@ func TestRenderCapsPages(t *testing.T) {
 	}
 }
 
+// TestRenderRefusesOversizePage pins the pixel budget on the render loop: a
+// page whose point size rasterizes beyond llm.MaxImageDecodePixels at the
+// render DPI (14400 pt — PDF's own maximum — at the default 150 dpi would be
+// 30000×30000 pixels, ~3.6 GB of bitmap) is refused with an actionable error
+// before any bitmap is allocated. A letter-size page built from the same
+// template renders normally, proving the refusal is the budget, not the
+// document construction.
+func TestRenderRefusesOversizePage(t *testing.T) {
+	dir := t.TempDir()
+	hugePath := filepath.Join(dir, "huge.pdf")
+	huge := mediaBoxPDF(1, 14400, 14400)
+	if err := os.WriteFile(hugePath, huge, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := RenderFile(hugePath, huge, 0, 0, Options{})
+	if err == nil {
+		t.Fatal("a 14400x14400 pt page was rendered despite the pixel budget")
+	}
+	if !strings.Contains(err.Error(), "over the") || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("err=%q want it to name the pixel limit", err)
+	}
+
+	// A plain-integer MediaBox at uint32 max is parsed (PDFium reports 2^32
+	// pt per side; anything larger falls back to 612x792). At 150 dpi the
+	// pixel product (~8e19) overflows int64, so this case pins that the
+	// budget comparison stays in float64: a wrap-negative product would slip
+	// past an int64 guard.
+	u32Path := filepath.Join(dir, "u32.pdf")
+	u32 := mediaBoxPDF(1, 4294967295, 4294967295)
+	if err := os.WriteFile(u32Path, u32, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = RenderFile(u32Path, u32, 0, 0, Options{})
+	if err == nil || !strings.Contains(err.Error(), "over the") {
+		t.Fatalf("err=%v want the uint32-max page refused by the pixel limit", err)
+	}
+
+	letterPath := filepath.Join(dir, "letter.pdf")
+	letter := mediaBoxPDF(1, 612, 792)
+	if err := os.WriteFile(letterPath, letter, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := RenderFile(letterPath, letter, 0, 0, Options{})
+	if err != nil {
+		t.Fatalf("control letter-size page failed to render: %v", err)
+	}
+	if len(result.Pages) != 1 || len(result.Pages[0].PNG) == 0 {
+		t.Fatalf("control page produced no PNG: %+v", result)
+	}
+}
+
 // TestEncryptedPDFIsActionable checks a password-protected document fails with
 // a message the model can act on, not a bare PDFium error code.
 func TestEncryptedPDFIsActionable(t *testing.T) {
+	data := encryptedPDF("hunter2")
 	path := filepath.Join(t.TempDir(), "locked.pdf")
-	if err := os.WriteFile(path, encryptedPDF("hunter2"), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := RenderFile(path, 0, 0, Options{})
+	_, err := RenderFile(path, data, 0, 0, Options{})
 	if err == nil {
 		t.Fatal("RenderFile on an encrypted PDF returned no error")
 	}
@@ -387,11 +440,12 @@ func TestEncryptedPDFIsActionable(t *testing.T) {
 // TestEmptyPDFIsActionable checks a zero-page document fails with a message
 // the model can act on rather than an empty result.
 func TestEmptyPDFIsActionable(t *testing.T) {
+	data := simplePDF(0)
 	path := filepath.Join(t.TempDir(), "empty.pdf")
-	if err := os.WriteFile(path, simplePDF(0), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := RenderFile(path, 0, 0, Options{})
+	_, err := RenderFile(path, data, 0, 0, Options{})
 	if err == nil {
 		t.Fatal("RenderFile on a zero-page PDF returned no error")
 	}
@@ -407,7 +461,12 @@ func TestRenderFileWithoutFontDirsDoesNotPanic(t *testing.T) {
 			t.Fatalf("RenderFile panicked: %v", r)
 		}
 	}()
-	if _, err := RenderFile(testdata(t, "zh-notembedded.pdf"), 0, 0, Options{}); err != nil {
+	path := testdata(t, "zh-notembedded.pdf")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if _, err := RenderFile(path, data, 0, 0, Options{}); err != nil {
 		t.Logf("RenderFile returned an error (acceptable): %v", err)
 	}
 }
@@ -416,11 +475,12 @@ func TestRenderFileWithoutFontDirsDoesNotPanic(t *testing.T) {
 // the cap stays a count: start=7 on a ten-page document renders pages 7-10
 // (four pages, the document's tail) under the default cap.
 func TestRenderRange(t *testing.T) {
+	data := simplePDF(10)
 	path := filepath.Join(t.TempDir(), "ten.pdf")
-	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := RenderFile(path, 7, 0, Options{})
+	result, err := RenderFile(path, data, 7, 0, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile: %v", err)
 	}
@@ -444,11 +504,12 @@ func TestRenderRange(t *testing.T) {
 // last page is clamped, not an error: start=8, maxPages=10 on a ten-page
 // document renders exactly pages 8-10.
 func TestRenderClampsEndIntoDocument(t *testing.T) {
+	data := simplePDF(10)
 	path := filepath.Join(t.TempDir(), "ten.pdf")
-	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := RenderFile(path, 8, 10, Options{})
+	result, err := RenderFile(path, data, 8, 10, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile: %v", err)
 	}
@@ -464,11 +525,12 @@ func TestRenderClampsEndIntoDocument(t *testing.T) {
 // nothing — an empty read that still reports the document's true page count,
 // the way a text read past EOF returns no lines.
 func TestRenderStartBeyondEndIsEmpty(t *testing.T) {
+	data := simplePDF(10)
 	path := filepath.Join(t.TempDir(), "ten.pdf")
-	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	result, err := RenderFile(path, 99, 0, Options{})
+	result, err := RenderFile(path, data, 99, 0, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile: %v", err)
 	}
@@ -483,15 +545,16 @@ func TestRenderStartBeyondEndIsEmpty(t *testing.T) {
 // TestRenderNormalizesStart pins that start <= 0 means page 1: a caller
 // passing 0 gets exactly what a caller passing 1 gets.
 func TestRenderNormalizesStart(t *testing.T) {
+	data := simplePDF(10)
 	path := filepath.Join(t.TempDir(), "ten.pdf")
-	if err := os.WriteFile(path, simplePDF(10), 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fromZero, err := RenderFile(path, 0, 0, Options{})
+	fromZero, err := RenderFile(path, data, 0, 0, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile(start=0): %v", err)
 	}
-	fromOne, err := RenderFile(path, 1, 0, Options{})
+	fromOne, err := RenderFile(path, data, 1, 0, Options{})
 	if err != nil {
 		t.Fatalf("RenderFile(start=1): %v", err)
 	}
@@ -604,6 +667,12 @@ func inkedPixel(img image.Image, x, y int) bool {
 // simplePDF builds an unencrypted PDF with the given number of pages, each
 // carrying a short Helvetica caption.
 func simplePDF(pages int) []byte {
+	return mediaBoxPDF(pages, 595, 842)
+}
+
+// mediaBoxPDF builds an unencrypted PDF with the given number of pages, each
+// carrying a short Helvetica caption on a w×h-point page box.
+func mediaBoxPDF(pages, w, h int) []byte {
 	var objects []string
 	add := func(body string) int {
 		objects = append(objects, body)
@@ -617,8 +686,8 @@ func simplePDF(pages int) []byte {
 		content := fmt.Sprintf("BT /F1 24 Tf 72 700 Td (Page %d) Tj ET", i)
 		contentNum := add(fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
 		pageNum := add(fmt.Sprintf(
-			"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
-			pagesNum, font, contentNum))
+			"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %d %d] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
+			pagesNum, w, h, font, contentNum))
 		kids = append(kids, fmt.Sprintf("%d 0 R", pageNum))
 	}
 	objects[catalog-1] = fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesNum)

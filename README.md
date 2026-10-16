@@ -219,7 +219,8 @@ as-is.
 Requirements: Go 1.26 with CGO enabled (a C toolchain), and Node.js 22 with pnpm
 10 for the web UI. The first build runs `scripts/fetch-libtokenizers.sh` to
 download the tokenizers static library the binary links (Windows builds it from
-source with Rust).
+source with Rust), and `scripts/fetch-pdfium.sh` (run by `make build`) fetches
+the PDFium library the PDF reader links; it needs `pkg-config` and `jq`.
 
 ```bash
 git clone https://github.com/forebrain-harness/forebrain-harness.git
@@ -232,7 +233,9 @@ For day-to-day Go work, skip the UI rebuild:
 
 ```bash
 scripts/fetch-libtokenizers.sh               # the tokenizers static library the binary links
-CGO_ENABLED=1 go build -tags fts5 -o ./build/bin/forebrain ./cmd/forebrain
+make pdfium pdfium-fonts                     # PDFium + CJK fonts; exports PKG_CONFIG_PATH for the shell only inside make
+CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" \
+  go build -tags fts5 -o ./build/bin/forebrain ./cmd/forebrain
 scripts/install-dictionary.sh ./build/bin   # memory search reads dict/ beside the binary
 scripts/install-assets.sh ./build/bin       # models.json beside the binary
 ```
@@ -264,7 +267,7 @@ npm i -g forebrain-harness-forebrain-<version>.tgz
 
 | Scenario                            | Use                                                             |
 | ----------------------------------- | --------------------------------------------------------------- |
-| Iterating on Go code                | `go build` + `scripts/install-dictionary.sh` + `scripts/install-assets.sh` |
+| Iterating on Go code                | `make pdfium pdfium-fonts` once + the `PKG_CONFIG_PATH`-prefixed `go build -tags fts5` (see the day-to-day block above) + `scripts/install-dictionary.sh` + `scripts/install-assets.sh` |
 | Iterating on the launcher / package | `build-platform-packages.sh` + `npm link`                       |
 | Verifying a release before publish  | `npm pack` + global install                                     |
 | Publishing                          | `build-platform-packages.sh` for every target + `npm publish`   |

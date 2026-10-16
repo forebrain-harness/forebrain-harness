@@ -780,6 +780,11 @@ func TestProjectDeletePreviewReturnsCounts(t *testing.T) {
 		if err := s.Sessions.Ensure(ctx, sid, "t"); err != nil {
 			t.Fatal(err)
 		}
+		// The count follows the sessions tab's predicate: only a session
+		// that holds a message is a conversation.
+		if _, err := s.Sessions.Append(ctx, sid, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
 		if err := store.BindSession(ctx, sid, id); err != nil {
 			t.Fatal(err)
 		}
@@ -869,7 +874,12 @@ func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
 	if err != nil || !ok || project.ID != id {
 		t.Fatalf("session not bound: %v %v %+v", err, ok, project)
 	}
-	// The session list for the project contains it.
+	// The session list for the project contains it — once it holds a
+	// message, because a row with no message is not a conversation.
+	_, err = s.Sessions.Append(context.Background(), session.ID, "user", "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects/"+id+"/sessions", nil)
 	var list struct {
 		Sessions []map[string]any `json:"sessions"`
@@ -920,6 +930,14 @@ func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
 	ensure("task", "a workshop task")
 	if err := s.Sessions.SetSessionSource(ctx, "task", state.SessionSourceWorkshop); err != nil {
 		t.Fatal(err)
+	}
+	// Both hold a message: what this test pins is the query's purpose filter,
+	// and a session with no message is not a conversation, so neither list
+	// would return it.
+	for _, id := range []string{"talk", "task"} {
+		if _, err := s.Sessions.Append(ctx, id, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// 250 scheduled-task fires, all newer than the conversation.
 	for i := 0; i < 250; i++ {
@@ -1402,6 +1420,77 @@ func TestChatMessagesReportsWhoWroteEachUserRow(t *testing.T) {
 	if raw[1]["role"] != "user" || raw[1]["content"] != "anything new?" || raw[1]["origin"] != "heartbeat" {
 		t.Fatalf("heartbeat row = %#v", raw[1])
 	}
+}
+
+// TestChatMessagesToolImageRowCarriesNoBase64 pins 057's API face: a tool
+// result whose image part knows its file is served as a file_reference, so the
+// /messages row (and the whole response) stays base64-free and bounded in
+// size, and the row does not grow an attachments field — that field is what
+// the user pinned, while a tool row's reference is the pixels the model was
+// sent. A user row's real attachment keeps surfacing exactly as before.
+func TestChatMessagesToolImageRowCarriesNoBase64(t *testing.T) {
+	ctx := context.Background()
+	s := cronTestServer(t)
+	s.Sessions = state.NewSessionStore(s.Env.SQL, "main")
+	require.NoError(t, s.Sessions.Ensure(ctx, "s1", "s1"))
+
+	// A user row with a real attachment: the attachments field keeps it.
+	userParts := state.MessagePartsJSON(llm.UserMessage(llm.Text("look")), "look")
+	userParts = state.AppendRawPartJSON(userParts, state.FileReferencePartJSON("/tmp/clip.png", "clip.png", "image/png"))
+	_, err := s.Sessions.AppendStructuredMessage(ctx, "s1", "user", "look", "", userParts, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	// A tool row whose image part was built from a file on disk, exactly as
+	// every image-producing tool does.
+	imgPath := filepath.Join(t.TempDir(), "shot.png")
+	pngBytes := tinyPNG(t)
+	require.NoError(t, os.WriteFile(imgPath, pngBytes, 0o600))
+	part, _, err := llm.ImagePartWithin(imgPath, "image/png", pngBytes, 0)
+	require.NoError(t, err)
+	require.Equal(t, imgPath, part.SourcePath)
+	call := llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "read_file", Arguments: "{}"}}
+	toolMsg := llm.ToolResultMessage("call-1", llm.Text("saved"), part)
+	require.NoError(t, s.Sessions.AppendMessageSequence(ctx, "s1", []llm.Message{llm.AssistantMessage(nil, call), toolMsg}, "", ""))
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/messages", nil, s.handleChatMessages, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "base64", "no row may carry image base64")
+
+	type chatAttachmentRow struct {
+		Name      string `json:"name"`
+		MediaType string `json:"media_type,omitempty"`
+	}
+	var rows []struct {
+		Role        string              `json:"role"`
+		PartsJSON   string              `json:"parts_json"`
+		Attachments []chatAttachmentRow `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+
+	var tool, user *struct {
+		Role        string              `json:"role"`
+		PartsJSON   string              `json:"parts_json"`
+		Attachments []chatAttachmentRow `json:"attachments"`
+	}
+	for i := range rows {
+		switch rows[i].Role {
+		case "tool":
+			tool = &rows[i]
+		case "user":
+			user = &rows[i]
+		}
+	}
+	require.NotNil(t, tool, "tool row missing: %s", rec.Body.String())
+	require.NotNil(t, user, "user row missing: %s", rec.Body.String())
+
+	require.Contains(t, tool.PartsJSON, `"file_reference"`)
+	require.Contains(t, tool.PartsJSON, imgPath)
+	require.Less(t, len(tool.PartsJSON), 2048, "tool row parts_json must stay small")
+	require.Empty(t, tool.Attachments, "a tool row must not surface attachments")
+
+	require.Len(t, user.Attachments, 1)
+	require.Equal(t, "clip.png", user.Attachments[0].Name)
+	require.Equal(t, "image/png", user.Attachments[0].MediaType)
 }
 
 // TestChatMessagesPlacesEachCompactionAsItsOwnRow pins the web history's

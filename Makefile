@@ -43,7 +43,15 @@ WEBUI_DIST   := pkg/gateway/dist
 # PDFium is per-target; use the host triple. pkg-config finds pdfium.pc here.
 PDFIUM_TRIPLE := $(shell go env GOOS)_$(shell go env GOARCH)
 PDFIUM_DIR    := $(CURDIR)/third_party/pdfium/$(PDFIUM_TRIPLE)
+# Prepend the fetched pdfium.pc dir. When PKG_CONFIG_PATH is unset, a plain
+# `$(PDFIUM_DIR):$(PKG_CONFIG_PATH)` would export a trailing empty entry
+# (`dir:`), which pkg-config reads as the current directory — so keep the
+# concatenation conditional.
+ifdef PKG_CONFIG_PATH
 export PKG_CONFIG_PATH := $(PDFIUM_DIR):$(PKG_CONFIG_PATH)
+else
+export PKG_CONFIG_PATH := $(PDFIUM_DIR)
+endif
 export CGO_CFLAGS := -I$(PDFIUM_DIR)/include $(CGO_CFLAGS)
 export CGO_LDFLAGS := -L$(PDFIUM_DIR)/lib -lpdfium $(CGO_LDFLAGS)
 
@@ -68,7 +76,7 @@ libtokenizers:
 ## (scripts/fetch-pdfium.sh; a no-op when the host triple is already at the
 ## pinned release, so this is cheap on every build and test).
 pdfium:
-	scripts/fetch-pdfium.sh $(PDFIUM_TRIPLE)
+	scripts/fetch-pdfium.sh
 
 ## pdfium-fonts: fetch the Noto Sans SC/TC fallback fonts PDFium renders an
 ## unembedded standard CJK font (STSong-Light, SimSun, ...) with

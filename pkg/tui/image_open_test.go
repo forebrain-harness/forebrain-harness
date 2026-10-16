@@ -54,6 +54,31 @@ func TestImageStepRendersMarkerLine(t *testing.T) {
 	}
 }
 
+// TestImageMarkerLineOmitsUnknownPixelSize pins the surface contract shared
+// with the web card: a surface omits the W×H segment rather than showing 0×0.
+// An image whose size was never learned — a corrupt header behind sniffable
+// magic bytes, or an MCP degrade path reporting w,h=0 — still gets its marker,
+// with the size simply absent, and a size that IS known still shows.
+func TestImageMarkerLineOmitsUnknownPixelSize(t *testing.T) {
+	zero := imagePreviewFrameLine(tool.ToolMeta{
+		PreviewKind: "image", PreviewPath: "/x/a.png", PreviewBytes: 123,
+	})
+	if want := "▤ a.png · 123 bytes · click to open"; zero != want {
+		t.Fatalf("zero-dims marker = %q, want %q", zero, want)
+	}
+	if strings.Contains(zero, "0×0") {
+		t.Fatalf("zero-dims marker must not print 0×0: %q", zero)
+	}
+
+	known := imagePreviewFrameLine(tool.ToolMeta{
+		PreviewKind: "image", PreviewPath: "/x/a.png",
+		PreviewWidth: 7, PreviewHeight: 3, PreviewBytes: 123,
+	})
+	if want := "▤ a.png · 7×3 · 123 bytes · click to open"; known != want {
+		t.Fatalf("known-dims marker = %q, want %q", known, want)
+	}
+}
+
 // imageStepFrame is a completed image tool step for path, as the engine reports
 // it: PreviewKind "image" is what makes the terminal draw the marker line.
 func imageStepFrame(path string) Frame {
@@ -244,22 +269,23 @@ func TestClickingTheImageMarkerRowLaunchesTheClickedFile(t *testing.T) {
 	}
 }
 
-// wrappedImageStepFrame is an image step whose file name is long enough to wrap
-// its marker line past the fold budget, which is what makes an image card
-// collapsible (and draws the "··· N more lines" hint under it).
+// wrappedImageStepFrame is an image step whose file name is long enough to
+// wrap its marker line past the fold budget — the shape that used to make an
+// image card collapsible. Since the owner's 2026-10-16 ruling it no longer
+// does: the card never folds, so the wrap only makes the card taller.
 func wrappedImageStepFrame(name string) Frame {
 	return imageStepFrame("/tmp/" + name)
 }
 
-// TestClickingTheFoldHintOnAnImageCardExpandsWithoutOpening is a regression
-// guard for a real misfire: the release used to be applied before it was
-// resolved, so clicking the fold hint expanded the card and THEN resolved the
-// same row number against the repainted render — where it named a marker
-// continuation row the expansion had just revealed — and opened that file.
-// Opening must come from the render the click landed on, and a hint row is a
-// fold target, not a button. The paint is the real one (paintViewportLocked), so
-// the row shift this guards against actually happens here.
-func TestClickingTheFoldHintOnAnImageCardExpandsWithoutOpening(t *testing.T) {
+// TestImageCardIsNeverCollapsibleAndItsMarkerOpensTheFile pins the owner's
+// 2026-10-16 ruling: an image preview card's output area is never collapsible
+// and is always shown in full. The card's whole output is its marker line —
+// every row a long file name wraps it into — so there are no "more lines" to
+// hide: no fold hint is painted, no row of the card toggles it, and clicking
+// the marker means exactly one thing, opening the file. (The design this
+// replaced deliberately folded a wrapped image card like any other tool card
+// and treated its marker rows as the only mouse path back from expanded.)
+func TestImageCardIsNeverCollapsibleAndItsMarkerOpensTheFile(t *testing.T) {
 	opened := stubImageOpener(t)
 	forcedTermWidth, forcedTermHeight = 40, 30
 	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
@@ -270,50 +296,66 @@ func TestClickingTheFoldHintOnAnImageCardExpandsWithoutOpening(t *testing.T) {
 	r.vm.append(wrappedImageStepFrame(name))
 	r.paintViewportLocked()
 
-	hintRow := -1
-	for i, line := range r.vpLastRender.lines {
-		if strings.Contains(stripANSI(line), "more lines (click to expand)") {
-			hintRow = i
-		}
+	plain := stripANSI(strings.Join(r.vpLastRender.lines, "\n"))
+	if block := r.vm.blocks[0]; block == nil || block.collapsible {
+		t.Fatal("an image preview card must never be collapsible")
 	}
-	if hintRow < 0 {
-		t.Fatalf("fixture is not folded — no truncation hint:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	if strings.Contains(plain, "more lines (click to expand)") {
+		t.Fatalf("an image card must not draw a fold hint:\n%s", plain)
 	}
-	if _, _, isMarker := r.ImagePreviewAtScreenRow(hintRow); isMarker {
-		t.Fatalf("the fold hint row (%d) must not resolve to an image marker", hintRow)
-	}
-
-	clickRow(t, r, hintRow)
-	if len(*opened) != 0 {
-		t.Fatalf("clicking the fold hint opened %v, want nothing", *opened)
-	}
-	if !r.vm.blocks[0].expanded {
-		t.Fatal("clicking the fold hint must expand the card")
+	// Fully shown means the marker's late segments are on screen: the pixel
+	// and byte sizes sit many rows past the fold budget, so a folded preview
+	// would have cut them. ("click to open" itself is too weak a probe — the
+	// wrap can split it across rows.)
+	if !strings.Contains(plain, "640×480") || !strings.Contains(plain, "1000 bytes") {
+		t.Fatalf("the wrapped marker is not shown in full:\n%s", plain)
 	}
 
-	// And a marker row of that same folded card opens the file. It remains a
-	// fold target as well — the whole preview area of a collapsible card is one,
-	// and on a wrapped image card those rows are the only way back from
-	// expanded — so the card does flip here; the hint row above is the one that
-	// must never open anything.
-	r.vm.blocks[0].expanded = false
-	r.paintViewportLocked()
+	// Clicking the marker's first row opens the file and flips nothing: the
+	// click is resolved against the render it landed on, and with no fold
+	// there is no toggle to ride along.
 	markerRow := firstRowWithPrefix(r.vpLastRender.lines, "  └ ▤ ")
 	if markerRow < 0 {
-		t.Fatalf("no marker row painted on the folded card:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+		t.Fatalf("no marker row painted:\n%s", plain)
 	}
 	path, isMarker := clickRow(t, r, markerRow)
-	if !isMarker || path == "" {
-		t.Fatalf("the folded card's marker row (%d) did not resolve to a file", markerRow)
-	}
-	if want := "/tmp/" + name; path != want {
-		t.Fatalf("the marker row resolved to %q, want %q", path, want)
+	if !isMarker || path != "/tmp/"+name {
+		t.Fatalf("the marker row (%d) resolved to (%q, %v), want (%q, true)", markerRow, path, isMarker, "/tmp/"+name)
 	}
 	if len(*opened) != 1 || (*opened)[0] != path {
 		t.Fatalf("opened = %v, want [%s]", *opened, path)
 	}
-	if !r.vm.blocks[0].expanded {
-		t.Fatal("a wrapped image card is collapsible: its body rows must still toggle")
+	if r.vm.blocks[0].expanded {
+		t.Fatal("opening the file must not change the card's fold state")
+	}
+
+	// The wrapped tail of the marker line is still the marker: clicking it
+	// opens the same file, never folds.
+	tailRow := -1
+	for i, line := range r.vpLastRender.lines {
+		if strings.Contains(stripANSI(line), "1000 bytes") {
+			tailRow = i
+		}
+	}
+	if tailRow < 0 || tailRow == markerRow {
+		t.Fatalf("expected a wrapped continuation row past the marker's first row, got tail=%d marker=%d", tailRow, markerRow)
+	}
+	if path, isMarker := clickRow(t, r, tailRow); !isMarker || path != "/tmp/"+name {
+		t.Fatalf("the marker's wrapped row (%d) resolved to (%q, %v), want (%q, true)", tailRow, path, isMarker, "/tmp/"+name)
+	}
+	if len(*opened) != 2 || (*opened)[1] != "/tmp/"+name {
+		t.Fatalf("opened = %v, want two opens of %s", *opened, "/tmp/"+name)
+	}
+
+	// No row of the card folds it — not the title, not any body row.
+	titleRow := r.vpLastRender.spans[0].startRow - r.vpLastRender.firstRow
+	for rowName, row := range map[string]int{"title": titleRow, "marker": markerRow, "marker tail": tailRow} {
+		if r.vm.toggleAtScreenRow(r.vpLastRender, row) {
+			t.Fatalf("clicking the %s row (%d) must not toggle an image card", rowName, row)
+		}
+	}
+	if r.vm.blocks[0].expanded {
+		t.Fatal("no click on the image card may change its fold state")
 	}
 }
 

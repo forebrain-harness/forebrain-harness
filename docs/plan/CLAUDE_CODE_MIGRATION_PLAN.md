@@ -359,6 +359,16 @@ forebrain 的压缩不是「一条 system 分隔行 + 后面继续接旧行」�
 - **进度**：每完成一个会话回调一次（`i/N` + 累计行数），TUI 节流 200 ms 刷新；迁移在后台 goroutine 跑，经既有 notify 通道回传，不阻塞事件循环。
 - **失败分类**：坏行 → 跳过并计数；整会话失败 → 报告文件路径 + 错误；配置写入失败 → 中止 MCP 部分但保留会话结果（各部分独立提交）。
 
+### 6.1 会话绑定项目（Session project binding，2026-10-15 补记）
+
+项目模型（schema migration v9）落地后，/resume 只列"当前项目"的会话（`ListSessionsForProject`），而导入器最初落库不写 `project_id`，导致迁移会话在 /resume 与 web 项目列表全部不可见、显式 resume 被拒。修复（`docs/plan/MIGRATE_RESUME_PROJECT_BINDING_PLAN.md`）把绑定规则并入导入器，与 v9 的 `adoptProjectlessSessionsV9` 归一为同一语义：
+
+- **绑定 root**：OnlyProject 模式绑定 `CurrentProjectRoot`（matcher 用 `memory.ProjectRoot` 宽匹配放行了子目录会话，绑定必须落在同一根）；All projects 模式按会话自身 canonical cwd 归属（v9 语义：源历史里每个不同目录得到一个 project 行，这是预期行为不是缺陷）。root 经 `state.NewProjectStore(...).FindOrCreateByRoot` canonical 化并幂等取行，参数对齐 TUI 的 `AdoptLaunchProject`（`ResourceAccess: true`）。
+- **Cwd 兜底**：会话头无 cwd 时回退 `resolveProjectPath` 的项目级解析（B5：~/.claude.json projects map → 同目录会话 cwd → 文件系统探测），**两种模式都做**；子单元继承主会话兜底后的 Cwd（子随父，同一 project 行）。
+- **空目录拒绝**：兜底后仍无任何目录 → `skipped`，Reason="no working directory: a conversation must belong to a project"，不落库（对齐 v9 把无目录无项目会话列为 doomed 的裁决；不允许再造 `project_id IS NULL` 的落库状态）。
+- **存量回填**：重跑时已迁移但 `project_id` 为空的行 → 新状态 `StatusRebound`：UPDATE `project_id/cwd`（限定 `agent_id` 与 `origin='migrated'`，不动 `updated_at`、不动 `source`）；无目录可绑的存量行保持原状、报告给出原因，无静默 NULL。dry-run 与真跑对 scope 判定一致，且不创建任何 fb_projects 行。
+- **source 保持 ''**：迁移的历史子会话是"可 resume、可读"的普通会话（§4.4 契约），与运行时 subagent worker 的 `source='subagent'`（worker 标记，一切列表排除）是两种身份，导入器不写 source。
+
 ---
 
 ## 7. 风险与对策

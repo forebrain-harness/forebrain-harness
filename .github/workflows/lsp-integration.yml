@@ -39,6 +39,8 @@ jobs:
       # pkg/lsp imports pkg/tool, which imports pkg/pdf: the test binary links
       # PDFium, so fetch it and put it on PKG_CONFIG_PATH first.
       - name: Fetch the PDFium native library
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           scripts/fetch-pdfium.sh
           echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
@@ -101,6 +103,8 @@ jobs:
       # pkg/lsp imports pkg/tool, which imports pkg/pdf: the test binary links
       # PDFium, so fetch it and put it on PKG_CONFIG_PATH first.
       - name: Fetch the PDFium native library
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           scripts/fetch-pdfium.sh
           echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"
@@ -127,6 +131,8 @@ jobs:
       # PDFium, so fetch it and put it on PKG_CONFIG_PATH first.
       - run: command -v pkg-config >/dev/null 2>&1 || brew install pkg-config
       - name: Fetch the PDFium native library
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           scripts/fetch-pdfium.sh
           echo "PKG_CONFIG_PATH=$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" >> "$GITHUB_ENV"

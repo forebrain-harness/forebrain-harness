@@ -2173,6 +2173,12 @@ func TestResumeListsOnlyTheSessionsProject(t *testing.T) {
 	sessions := s.sessStore()
 	require.NoError(t, sessions.Ensure(ctx, "cur", "cur")) // born under the launch project
 	require.NoError(t, sessions.Ensure(ctx, "oth", "oth"))
+	// Both are conversations because they hold a message; a session with no
+	// message is not listed by any list.
+	_, err = sessions.Append(ctx, "cur", "user", "hello")
+	require.NoError(t, err)
+	_, err = sessions.Append(ctx, "oth", "user", "hello")
+	require.NoError(t, err)
 	require.NoError(t, projects.BindSession(ctx, "oth", other.ID))
 
 	recent, err := s.ListSessionsRecent(ctx, 50)
@@ -2184,6 +2190,38 @@ func TestResumeListsOnlyTheSessionsProject(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, sessionIDsOf(paged), "cur")
 	require.NotContains(t, sessionIDsOf(paged), "oth")
+}
+
+// TestResumeListsOnlyConversationsWithMessages pins the panel's contract at
+// the surface: /resume lists what the store returns, and a session that has
+// not said anything yet is not something a person can resume — /new, /model
+// and /migrate all create the row before the conversation exists.
+func TestResumeListsOnlyConversationsWithMessages(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	launch := t.TempDir()
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), launch)
+	require.NoError(t, err)
+	defer s.Close()
+
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+
+	sessions := s.sessStore()
+	require.NoError(t, sessions.Ensure(ctx, "empty", "empty"))
+	require.NoError(t, sessions.Ensure(ctx, "talked", "talked"))
+	_, err = sessions.Append(ctx, "talked", "user", "hello")
+	require.NoError(t, err)
+
+	recent, err := s.ListSessionsRecent(ctx, 50)
+	require.NoError(t, err)
+	require.Contains(t, sessionIDsOf(recent), "talked")
+	require.NotContains(t, sessionIDsOf(recent), "empty")
+
+	paged, err := s.ListSessionsRecentPaged(ctx, 50, 0)
+	require.NoError(t, err)
+	require.Contains(t, sessionIDsOf(paged), "talked")
+	require.NotContains(t, sessionIDsOf(paged), "empty")
 }
 
 // TestResumeOnLaunchProjectRefusals pins the launch-time resume checks: a

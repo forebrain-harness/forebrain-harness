@@ -137,13 +137,29 @@ func (s *Server) handleWorkspaceFileRaw(w http.ResponseWriter, r *http.Request) 
 // live in the conversation's file view (the project root) or in the primary
 // agent workspace (an MCP result or another tool artifact). Both roots are
 // handed to tool.ResolveWithinRoots in ONE call, so containment is checked by
-// the same primitive everywhere.
+// the same primitive everywhere. A named session must be this agent's own
+// before any root is named: a foreign session id is refused here rather than
+// widening into the agent workspace.
 //
 // A relative path is joined to the file view root, exactly as the other file
 // endpoints join it; a session with no file view at all (no project) has no
 // root to join to and refuses a relative path, but still serves an absolute
 // path — the shape a tool step records — from the agent workspace.
 func (s *Server) resolveRawImagePath(ctx context.Context, sessionID, projectID, rel string) (string, error) {
+	// A named session must be this agent's own before any root is resolved.
+	// Every other file endpoint refuses a foreign session inside filesRoot;
+	// this endpoint must refuse it too, not let the same errFilesNotFound
+	// widen into the agent workspace the way a project-less session of our
+	// own legitimately does.
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+		owned, err := s.sessionOwned(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		if !owned {
+			return "", errFilesNotFound
+		}
+	}
 	var fileViewRoot string
 	if root, err := s.filesRoot(ctx, sessionID, projectID); err == nil {
 		fileViewRoot = strings.TrimSpace(root)

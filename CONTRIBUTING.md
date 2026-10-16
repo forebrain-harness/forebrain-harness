@@ -33,7 +33,9 @@ For day-to-day Go work, skip the UI rebuild:
 
 ```bash
 scripts/fetch-libtokenizers.sh              # the tokenizers static library the binary links
-CGO_ENABLED=1 go build -tags fts5 -o ./build/bin/forebrain ./cmd/forebrain
+make pdfium pdfium-fonts                    # PDFium + CJK fonts; exports PKG_CONFIG_PATH for the shell only inside make
+CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" \
+  go build -tags fts5 -o ./build/bin/forebrain ./cmd/forebrain
 scripts/install-dictionary.sh ./build/bin   # memory search reads dict/ beside the binary
 scripts/install-assets.sh ./build/bin       # models.json beside the binary
 ```
@@ -50,7 +52,8 @@ make hooks
 Run these before opening a pull request — CI runs the same set:
 
 ```bash
-go vet ./...
+CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)" \
+  go vet -tags fts5 ./...
 make test                                            # CGO_ENABLED=1 go test -tags fts5 ./... -count=1
 scripts/package-graph.sh                             # when you change imports between packages: graph.json must be updated
 cd frontend && pnpm install && pnpm test && pnpm build   # when you touch the web UI

@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -61,6 +62,9 @@ func (r *Report) SessionCounts() (migrated, skipped, failed, owned int) {
 			failed++
 		case StatusOwned:
 			owned++
+		case StatusRebound:
+			// Healed by this run, not skipped: Text() counts it
+			// separately so no bucket double-reports the same rows.
 		default:
 			skipped++
 		}
@@ -179,6 +183,10 @@ func reportToPlan(report *Report) *Plan {
 			plan.Subagents++
 		case outcome.Status == StatusMigrated:
 			plan.Sessions++
+		case outcome.Status == StatusRebound:
+			// Already here — the run would only rebind it to its project,
+			// which is processing, not refusal.
+			plan.AlreadyHere++
 		case outcome.Status == StatusSkipped:
 			plan.AlreadyHere++
 		default:
@@ -298,10 +306,25 @@ func humanBytes(v int64) string {
 	return fmt.Sprintf("%.1f PB", amount/unit)
 }
 
+// validate refuses options no import can honor. Both Run entries check here,
+// so claude and codex fail the same misconfiguration the same way: an import
+// scoped to the current project with no project root would otherwise widen
+// claude to everything while codex skips every rollout for having "no working
+// directory" — one misconfiguration, two contradictory silent behaviors.
+func (opts *Options) validate() error {
+	if opts.OnlyProject && strings.TrimSpace(opts.CurrentProjectRoot) == "" {
+		return errors.New("current project root is empty: scoping the import to the current project requires a project root")
+	}
+	return nil
+}
+
 // RunClaude imports Claude Code's on-disk history under these options. It
 // never fails wholesale: category errors land in the report and the run
 // moves on, and every session writes in its own transaction (§6).
 func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Report, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
 	root := claudeRootAt(opts.SourceRoot)
 	if root == "" {
 		return nil, fmt.Errorf("Claude Code's data directory (~/.claude or $CLAUDE_HOME) was not found")
@@ -376,6 +399,7 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 	if opts.wants("memories") {
 		report.Memories = append(report.Memories, importClaudeGlobalInstructions(data, opts))
 	}
+	reportOrphanedMigratedSessions(ctx, opts, report)
 	return report, nil
 }
 
@@ -383,6 +407,9 @@ func RunClaude(ctx context.Context, opts *Options, progress func(Progress)) (*Re
 // fails wholesale: category errors land in the report and the run moves on,
 // and every session writes in its own transaction (§6).
 func RunCodex(ctx context.Context, opts *Options, progress func(Progress)) (*Report, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
 	root := codexRootAt(opts.SourceRoot)
 	if root == "" {
 		return nil, fmt.Errorf("Codex's data directory (~/.codex or $CODEX_HOME) was not found")
@@ -492,6 +519,7 @@ func RunCodex(ctx context.Context, opts *Options, progress func(Progress)) (*Rep
 		report.Notices = append(report.Notices,
 			"imported skills take effect in new sessions only — the current session's tool table is frozen")
 	}
+	reportOrphanedMigratedSessions(ctx, opts, report)
 	return report, nil
 }
 
@@ -527,11 +555,16 @@ func (r *Report) Text() string {
 	b.WriteString("\n")
 
 	migrated, skipped, failed, owned := r.SessionCounts()
+	rebound := countRebound(r.Sessions)
 	imported := "imported"
 	if r.DryRun {
 		imported = "to import"
 	}
-	fmt.Fprintf(&b, "  Conversations: %d %s · %d already here · %d failed · %d belong to another agent\n", migrated, imported, skipped, failed, owned)
+	fmt.Fprintf(&b, "  Conversations: %d %s", migrated, imported)
+	if rebound > 0 {
+		fmt.Fprintf(&b, " · %d rebound", rebound)
+	}
+	fmt.Fprintf(&b, " · %d already here · %d failed · %d belong to another agent\n", skipped, failed, owned)
 	fmt.Fprintf(&b, "  Messages: %s\n", formatCount(int64(r.MessageRows)))
 	if len(r.Memories) > 0 {
 		written, skippedNotes := 0, 0
@@ -607,6 +640,29 @@ func (r *Report) Text() string {
 			}
 		}
 	}
+	if rebound > 0 && !r.DryRun {
+		b.WriteString("\nRebound conversations — imported earlier, now bound to their projects\n")
+		for _, outcome := range r.Sessions {
+			if outcome.Status != StatusRebound {
+				continue
+			}
+			prefix := "  "
+			if outcome.IsChild {
+				prefix = "    ↳ "
+			}
+			if title := strings.TrimSpace(outcome.Title); title != "" {
+				fmt.Fprintf(&b, "%s%s · %s\n", prefix, title, outcome.TargetID)
+			} else {
+				fmt.Fprintf(&b, "%s%s\n", prefix, outcome.TargetID)
+			}
+		}
+	}
+	if orphans := orphanedSourceGone(r.Sessions); len(orphans) > 0 {
+		b.WriteString("\nConversations whose source transcripts are gone — they cannot be bound\n")
+		for _, outcome := range orphans {
+			fmt.Fprintf(&b, "  %s · %s\n", outcome.TargetID, outcome.Reason)
+		}
+	}
 	if len(r.Memories) > 0 {
 		b.WriteString("\nMemories\n")
 		for _, memory := range r.Memories {
@@ -645,6 +701,18 @@ func (r *Report) Text() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// orphanedSourceGone picks the read-only outcomes the closing inventory
+// appended: migrated rows with no project whose source transcript is gone.
+func orphanedSourceGone(outcomes []SessionOutcome) []SessionOutcome {
+	var out []SessionOutcome
+	for _, outcome := range outcomes {
+		if outcome.Status == StatusSkipped && outcome.Reason == reasonSourceTranscriptGone {
+			out = append(out, outcome)
+		}
+	}
+	return out
+}
+
 // outcomeLine is one item of a category: its name, what happened to it, and
 // why when there is more to say.
 func outcomeLine(name, status, detail string) string {
@@ -653,6 +721,19 @@ func outcomeLine(name, status, detail string) string {
 		line += ": " + detail
 	}
 	return line
+}
+
+// countRebound tallies the conversations this run bound to their projects.
+// StatusRebound sits outside SessionCounts' four buckets, so the summary line
+// states it separately without double-reporting into "already here".
+func countRebound(outcomes []SessionOutcome) int {
+	n := 0
+	for _, outcome := range outcomes {
+		if outcome.Status == StatusRebound {
+			n++
+		}
+	}
+	return n
 }
 
 func countStatus(outcomes []MCPOutcome, status string) int {

@@ -4,6 +4,7 @@ package run
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -276,8 +277,9 @@ func (r FilertResolver) ResolveFilePath(ctx context.Context, fileID string) (str
 
 // rehydrateImageReferences scans transcript entries and replaces image-typed
 // file_reference text placeholders with real ImageBase64 parts. The file_id
-// from each reference is resolved via the given resolver and read+encoded
-// via llm.ImageFile.
+// from each reference is resolved via the given resolver; a user row's image is
+// read and sent as-is, while a tool row's image is re-derived through the
+// ImagePartWithin ladder so the reload is byte-identical to the live turn.
 //
 // Rehydration is best-effort: any failure (missing resolver, unresolved path,
 // unreadable file, unsupported format) leaves the original text placeholder
@@ -302,10 +304,12 @@ func UserInputParts(ctx context.Context, resolver FileReferenceResolver, partsJS
 }
 
 // rehydrateMessageImages replaces the text placeholder ParseMessageParts
-// leaves for each image-typed file_reference of a user message with the image
-// itself, read through resolver.
+// leaves for each image-typed file_reference with the image itself, read
+// through resolver. User rows send the file's bytes as-is; tool rows re-run
+// the ImagePartWithin ladder, because a tool image was budgeted and possibly
+// downscaled when the live turn sent it.
 func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver, msg llm.Message, refs []state.FileRefInfo) llm.Message {
-	if resolver == nil || len(refs) == 0 || msg.Role != llm.RoleUser {
+	if resolver == nil || len(refs) == 0 || (msg.Role != llm.RoleUser && msg.Role != llm.RoleTool) {
 		return msg
 	}
 	// Clone the parts slice so we can replace in place.
@@ -321,7 +325,22 @@ func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver,
 			slog.Debug("rehydrate: cannot resolve file_id", "file_id", ref.FileID, "mime", mime)
 			continue
 		}
-		imgPart, err := llm.ImageFile(absPath)
+		var imgPart llm.ContentPart
+		var err error
+		if msg.Role == llm.RoleTool {
+			// A tool row's image was budgeted and possibly downscaled when it
+			// was sent; re-derive the identical part from the file instead of
+			// sending the raw bytes (deterministic ladder => byte-identical to
+			// the live turn, so the replayed prefix stays the cached one).
+			data, rerr := os.ReadFile(absPath)
+			if rerr != nil {
+				err = rerr
+			} else {
+				imgPart, _, err = llm.ImagePartWithin(absPath, mime, data, 0)
+			}
+		} else {
+			imgPart, err = llm.ImageFile(absPath)
+		}
 		if err != nil {
 			slog.Debug("rehydrate: image file read failed", "path", absPath, "err", err)
 			continue

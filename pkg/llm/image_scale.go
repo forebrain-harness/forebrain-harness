@@ -25,6 +25,12 @@ const (
 	DefaultMaxImageBytes = 3 << 20
 	// MaxImageDecodeBytes is the largest original we will decode to downscale.
 	MaxImageDecodeBytes = 48 << 20
+	// MaxImageDecodePixels is the pixel ceiling on any image we decode to
+	// downscale: decode allocates w*h*4 bytes from the header's claim before
+	// validating pixel data, so an encoded-size cap alone cannot stop a
+	// crafted header from allocating gigabytes. ~64 megapixels (256 MiB of
+	// RGBA) is far above any real photo, and far below the bombs.
+	MaxImageDecodePixels = 64 << 20
 	// ImageMaxBytesEnv overrides the per-image budget with a decimal byte
 	// count. An unset, non-numeric or non-positive value falls back to
 	// DefaultMaxImageBytes.
@@ -75,13 +81,25 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 		res.Width, res.Height = w, h
 		res.Scale = 1
 		res.SentBytes = len(data)
-		return ImageBase64(mime, base64.StdEncoding.EncodeToString(data)), res, nil
+		return withSourcePath(ImageBase64(mime, base64.StdEncoding.EncodeToString(data)), path), res, nil
 	}
 
 	// Standard-library Go has no webp decoder, so a webp over budget cannot be
 	// downscaled here; say so instead of failing to decode it later.
 	if mime == "image/webp" {
 		return ContentPart{}, res, fmt.Errorf("image is %d MiB and webp cannot be downscaled here; convert it to png first", len(data)>>20)
+	}
+
+	// The decode below allocates from the header's dimensions before it
+	// validates pixel data, so the pixel budget must be judged from the
+	// header, before decode: a crafted IHDR claiming 60000x60000 would
+	// otherwise allocate gigabytes before the decoder ever fails. A header
+	// that does not parse (w or h 0) falls through and fails at decode with
+	// the decoder's own reason.
+	if w, h := DecodeImageConfig(data); w > 0 && h > 0 && w*h > MaxImageDecodePixels {
+		return ContentPart{}, res, fmt.Errorf(
+			"image is %dx%d (%d MP); the decode limit is %d MP — crop or resize it first",
+			w, h, w*h>>20, MaxImageDecodePixels>>20)
 	}
 
 	src, _, err := image.Decode(bytes.NewReader(data))
@@ -112,7 +130,7 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 		candidate.Scale = s
 		candidate.SentBytes = len(encoded)
 		if len(encoded) <= budget {
-			return ImageBase64(scaleMime, base64.StdEncoding.EncodeToString(encoded)), candidate, nil
+			return withSourcePath(ImageBase64(scaleMime, base64.StdEncoding.EncodeToString(encoded)), path), candidate, nil
 		}
 	}
 
@@ -127,11 +145,21 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 			candidate.Scale = 8
 			candidate.SentBytes = len(encoded)
 			if len(encoded) <= budget {
-				return ImageBase64("image/jpeg", base64.StdEncoding.EncodeToString(encoded)), candidate, nil
+				return withSourcePath(ImageBase64("image/jpeg", base64.StdEncoding.EncodeToString(encoded)), path), candidate, nil
 			}
 		}
 	}
 	return ContentPart{}, res, fmt.Errorf("image is %d MiB and cannot be reduced below %d MiB; crop or resize it first", len(data)>>20, budget>>20)
+}
+
+// withSourcePath stamps the on-disk origin onto an image part so persistence
+// can store a file_reference instead of the bytes (see ContentPart.SourcePath).
+// A part built without a path keeps its zero value.
+func withSourcePath(part ContentPart, path string) ContentPart {
+	if path != "" {
+		part.SourcePath = path
+	}
+	return part
 }
 
 // resolveImageBudget is the budget for one image part: an explicit maxBytes,

@@ -1471,6 +1471,11 @@ func TestStateV3UpgradesToV4WithSessionsIntact(t *testing.T) {
 	}
 	// The column reads as writable through the store's own setter.
 	store := NewSessionStore(migrated, "main")
+	// The migrated session holds a message, so the list below returns it: a
+	// row with no message is not a conversation.
+	if _, err := store.Append(ctx, sid, "user", "hello"); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
 	if err := store.SetSessionSource(ctx, sid, "workshop"); err != nil {
 		t.Fatalf("set source: %v", err)
 	}
