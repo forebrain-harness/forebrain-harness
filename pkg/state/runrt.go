@@ -258,43 +258,79 @@ WHERE NOT EXISTS (
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		// Nothing was inserted: name the blocker for the person who asked —
-		// parked or running, and whether this process is the one holding it.
-		// A running blocker counts as live only while its owner renews its
-		// lease (livePrimaryRunCondition), so a running row found here is
-		// always another live surface's; a parked one blocks whatever its
-		// owner's lease says, so the lease is read too, to tell a surface
-		// that is still there from one that is gone. No live row at all means
-		// the blocker ended between the two statements: say the plain
-		// sentence and let the asker resend rather than blame a surface that
-		// is no longer there.
-		var status, owner string
-		var ownerLive int
-		err := s.DB.QueryRowContext(ctx, `
+		// Nothing was inserted: name the blocker for the person who asked.
+		// No live row left at all means the blocker ended between the two
+		// statements: say the plain sentence and let the asker resend rather
+		// than blame a surface that is no longer there.
+		refusal, err := s.liveRunRefusal(ctx, r.SessionID, now)
+		if err != nil {
+			return nil, err
+		}
+		if refusal != nil {
+			return nil, refusal
+		}
+		return nil, ErrSessionRunning
+	}
+	return r, nil
+}
+
+// liveRunRefusal names the live primary run blocking a new turn of the
+// session, as one of the ErrSessionBusy family; nil when there is none.
+func (s *RunStore) liveRunRefusal(ctx context.Context, sessionID string, now time.Time) (refusal error, err error) {
+	// Parked or running, and whether this process is the one holding it. A
+	// running blocker counts as live only while its owner renews its lease
+	// (livePrimaryRunCondition), so a running row found here is always another
+	// live surface's; a parked one blocks whatever its owner's lease says, so
+	// the lease is read too, to tell a surface that is still there from one
+	// that is gone.
+	var status, owner string
+	var ownerLive int
+	err = s.DB.QueryRowContext(ctx, `
 SELECT r.status, r.owner,
   EXISTS(SELECT 1 FROM fb_run_owners o WHERE o.owner = r.owner AND o.heartbeat_at_ms >= ?)
 FROM fb_runs r
 WHERE r.session_id = ? AND r.parent_run_id IS NULL AND `+fmt.Sprintf(livePrimaryRunCondition, "r")+`
 ORDER BY r.updated_at DESC LIMIT 1`,
-			append([]any{now.UnixMilli() - RunOwnerLease.Milliseconds(), r.SessionID}, liveRunArgs(now)...)...).Scan(&status, &owner, &ownerLive)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
-		}
-		elsewhere := strings.TrimSpace(s.Owner) != "" &&
-			ownerLive != 0 &&
-			strings.TrimSpace(owner) != strings.TrimSpace(s.Owner)
-		switch {
-		case status == string(RunStatusWaitingAction) && elsewhere:
-			return nil, ErrSessionAwaitingApprovalElsewhere
-		case status == string(RunStatusWaitingAction):
-			return nil, ErrSessionAwaitingApproval
-		case elsewhere:
-			return nil, ErrSessionRunningElsewhere
-		default:
-			return nil, ErrSessionRunning
-		}
+		append([]any{now.UnixMilli() - RunOwnerLease.Milliseconds(), strings.TrimSpace(sessionID)}, liveRunArgs(now)...)...).Scan(&status, &owner, &ownerLive)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	return r, nil
+	if err != nil {
+		return nil, err
+	}
+	elsewhere := strings.TrimSpace(s.Owner) != "" &&
+		ownerLive != 0 &&
+		strings.TrimSpace(owner) != strings.TrimSpace(s.Owner)
+	switch {
+	case status == string(RunStatusWaitingAction) && elsewhere:
+		return ErrSessionAwaitingApprovalElsewhere, nil
+	case status == string(RunStatusWaitingAction):
+		return ErrSessionAwaitingApproval, nil
+	case elsewhere:
+		return ErrSessionRunningElsewhere, nil
+	default:
+		return ErrSessionRunning, nil
+	}
+}
+
+// SessionBusy reports, without creating anything, whether a new turn of the
+// session would be refused right now: the same refusal CreateRun returns, or
+// nil when the session is free. A surface that keeps a message without
+// starting a run (an image refusal) asks this first, so the message never
+// lands in a conversation another surface is running.
+func (s *RunStore) SessionBusy(ctx context.Context, sessionID string) error {
+	if s == nil || s.DB == nil {
+		return nil
+	}
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return nil
+	}
+	refusal, err := s.liveRunRefusal(ctx, sid, time.Now())
+	if err != nil {
+		return err
+	}
+	return refusal
 }
 
 func (s *RunStore) CreateSubagentRun(ctx context.Context, parentRunID, sessionID, inputPreview string) (*Run, error) {

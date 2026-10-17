@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -2610,13 +2611,56 @@ func (o *SlashOverlay) lookupExactOrSinglePrefix(name string) *turn.Command {
 	return match
 }
 
+// leadingSlashName reads a draft the composer shows as a slash command — its
+// first visible character is "/" — against the caret at rune offset cursor.
+// While the caret is on the command's name, name is the part of it before the
+// caret and editing is true: the user is still typing it, and the picker lists
+// what it may become. Once the caret has moved past the first word, name is
+// that word and the rest of the draft is its arguments. restAt is the rune
+// offset in draft of the text after the name being typed, which a completed
+// name is spliced in front of.
+//
+// A command is often typed in front of a message already in the composer, so
+// what follows the caret is never part of the name being typed: "/fr" typed
+// in front of "commit 1527" is the name "fr", not "frcommit", and the message
+// is not the arguments of a command the user has not finished naming. A caret
+// before the "/" is not on the name at all; the draft is then read as written,
+// as if the caret were at its end.
+//
+// The draft is read as the composer draws it, so the leading newlines the card
+// hides cannot make this disagree with the screen.
+func leadingSlashName(draft string, cursor int) (name string, editing bool, restAt int, ok bool) {
+	display := []rune(composerDisplayText(draft))
+	if len(display) == 0 || display[0] != '/' {
+		return "", false, 0, false
+	}
+	runes := []rune(draft)
+	restAt = composerCursorClampRunes(runes, cursor)
+	end := len(display)
+	for i := 1; i < len(display); i++ {
+		if unicode.IsSpace(display[i]) {
+			end = i
+			break
+		}
+	}
+	caret := len([]rune(composerDisplayText(string(runes[:restAt]))))
+	if caret == 0 {
+		caret, restAt = len(display), len(runes)
+	}
+	if caret <= end {
+		return string(display[1:caret]), true, restAt, true
+	}
+	return string(display[1:end]), false, restAt, true
+}
+
 // UpdateFromDraft transitions the overlay state in response to a new
 // composer.DraftText value at the given cursor. Two modes:
 //
-//   - A leading "/" (the whole composer is a slash command) keeps the original
-//     contract: "/foo" (no space) narrows Visible; "/foo " (with space) tries
-//     to lock the command via lookupExactOrSinglePrefix — Active=false with
-//     HintCommand on a hit, still Active with a "no match" footer otherwise.
+//   - A leading "/" (the whole composer is a slash command), read by
+//     leadingSlashName: while the caret is on the name, the name typed so far
+//     narrows Visible; once it has moved on to the arguments, the command is
+//     locked via lookupExactOrSinglePrefix — Active=false with HintCommand on
+//     a hit, still Active with a "no match" footer otherwise.
 //   - A "/" anywhere else (Inline) is a skill reference: the token under the
 //     cursor is recomputed and Visible narrows to skills only.
 //
@@ -2626,22 +2670,19 @@ func (o *SlashOverlay) UpdateFromDraft(draft string, cursor int, session Session
 	if o == nil {
 		return false
 	}
-	// Read the buffer as the composer draws it, so the leading newlines the
-	// card hides cannot make this disagree with the screen.
-	if display := composerDisplayText(draft); strings.HasPrefix(display, "/") {
+	if name, editing, _, ok := leadingSlashName(draft, cursor); ok {
 		o.Inline = false
 		o.TokenStart = 0
-		spaceIdx := strings.IndexByte(display, ' ')
-		if spaceIdx == -1 {
+		if editing {
 			// "/foo" — filtering mode.
 			o.Active = true
 			o.HintCommand = nil
-			o.FilterText = strings.ToLower(display[1:])
+			o.FilterText = strings.ToLower(name)
 			o.rebuildFiltered(session)
 			return true
 		}
 		// "/foo " or "/foo bar" — try to lock the command.
-		cmdName := strings.ToLower(display[1:spaceIdx])
+		cmdName := strings.ToLower(name)
 		// Visible may have been narrowed to a stale filter (or never populated
 		// when UpdateFromDraft is called on a fresh overlay). Rebuild against the
 		// full registry before locking so exact-name resolution always works.
@@ -2676,10 +2717,12 @@ func (o *SlashOverlay) UpdateFromDraft(draft string, cursor int, session Session
 // AcceptSlashSelection completes the currently selected slash command,
 // returning the new draft and the cursor offset just past what was inserted.
 //
-// A leading command replaces the whole draft with "/<command> " (trailing space
-// so UpdateFromDraft locks HintCommand and shows the argument hint). An inline
-// skill reference replaces only its token [TokenStart, Cursor), leaving the rest
-// of the message intact. ok is false when nothing is selected.
+// The completed "/<command> " replaces only what was typed of it: a leading
+// command everything up to the caret (leadingSlashName's restAt), an inline
+// skill reference its token [TokenStart, Cursor). turn.AcceptSlash, which the
+// web composer shares, keeps the rest of the message and puts the caret on it,
+// so UpdateFromDraft locks HintCommand and shows the argument hint. ok is
+// false when nothing is selected.
 func (c *ComposerState) AcceptSlashSelection() (draft string, cursor int, ok bool) {
 	if c == nil || c.SlashOverlay == nil || !c.SlashOverlay.Active || len(c.SlashOverlay.Visible) == 0 {
 		return "", 0, false
@@ -2689,24 +2732,42 @@ func (c *ComposerState) AcceptSlashSelection() (draft string, cursor int, ok boo
 	if idx < 0 || idx >= len(o.Visible) {
 		idx = 0
 	}
-	insert := "/" + o.Visible[idx].Name + " "
-	if !o.Inline {
-		return insert, len([]rune(insert)), true
+	// A leading command also drops the newlines the card hides in front of it.
+	start, end := 0, -1
+	if o.Inline {
+		start, end = o.TokenStart, c.Cursor
+	} else if _, _, restAt, ok := leadingSlashName(c.DraftText, c.Cursor); ok {
+		end = restAt
 	}
-	runes := []rune(c.DraftText)
-	start := o.TokenStart
-	if start < 0 {
-		start = 0
+	draft, cursor = turn.AcceptSlash(c.DraftText, start, end, o.Visible[idx].Name)
+	return draft, cursor, true
+}
+
+// SlashPickerSubmitLine is the line Enter submits while the leading command
+// picker is open: the highlighted command in place of the name being typed,
+// with the message after it kept as its arguments — AcceptSlashSelection's
+// draft. A line that is not the draft the picker read keeps everything after
+// its first word instead.
+func (c *ComposerState) SlashPickerSubmitLine(line string) string {
+	if line == c.DraftText {
+		if draft, _, ok := c.AcceptSlashSelection(); ok {
+			return strings.TrimRight(draft, " ")
+		}
 	}
-	if start > len(runes) {
-		start = len(runes)
+	o := c.SlashOverlay
+	if o == nil || len(o.Visible) == 0 {
+		return line
 	}
-	end := c.Cursor
-	if end < start || end > len(runes) {
-		end = len(runes)
+	idx := o.SelectedIdx
+	if idx < 0 || idx >= len(o.Visible) {
+		idx = 0
 	}
-	rebuilt := string(runes[:start]) + insert + string(runes[end:])
-	return rebuilt, start + len([]rune(insert)), true
+	command := "/" + o.Visible[idx].Name
+	trimmed := strings.TrimSpace(line)
+	if i := strings.IndexFunc(trimmed, unicode.IsSpace); i >= 0 {
+		return command + trimmed[i:]
+	}
+	return command
 }
 
 // showArgumentHint reports whether the dim ArgumentHint should be rendered

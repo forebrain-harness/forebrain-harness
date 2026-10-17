@@ -117,6 +117,10 @@ export interface ChatMessage {
   picker?: SlashPicker
   /** The value picked from it; a picked notice offers nothing more. */
   picked?: string
+  /** A message the session model could not take: the notice under it says
+   * which model refused it. Live only — a reload draws the message alone,
+   * the way the terminal does (the refusal is not stored). */
+  imageRefusal?: { provider: string; model: string }
 }
 
 /**
@@ -4784,6 +4788,27 @@ export function useChatStream() {
           if (activeRunId) legacyMirroredRunIDs.delete(activeRunId)
           return
         }
+        if (op === 'turn_refused') {
+          // The session model cannot take an image this turn would carry, so
+          // only the request was withheld: the message stays in the
+          // conversation (it is stored) and the placeholder becomes the notice
+          // saying which model refused it. Nothing goes back to the composer.
+          const data = payload.data && typeof payload.data === 'object' ? payload.data as Record<string, unknown> : {}
+          updateMessageById(assistantMessageId, () => ({
+            id: assistantMessageId,
+            role: 'notice' as const,
+            content: '',
+            imageRefusal: {
+              provider: String(data.provider ?? '').trim(),
+              model: String(data.model ?? '').trim(),
+            },
+          }))
+          eventState.completedNormally = true
+          if (streamAbortController === myController) {
+            isStreaming.value = false
+          }
+          return { terminal: true }
+        }
         if (op === 'turn_withdrawn') {
           // The message never became a turn: the user stopped the compaction
           // it was waiting on (whose card stays to say it was cancelled), or
@@ -5024,6 +5049,7 @@ export function useChatStream() {
       const currentAssistant = messages.value.find((message) => message.id === answerId())
       const hasAssistantData = Boolean(eventState.fullAnswer) ||
 		Boolean(currentAssistant?.picker) ||
+		Boolean(currentAssistant?.imageRefusal) ||
 		Boolean(currentAssistant?.blocks?.length) ||
         planBlocksAccumulator.length > 0 ||
 		Boolean(currentAssistant?.planUpdates?.length)

@@ -261,6 +261,21 @@ func (c ChainResolver) ResolveFilePath(ctx context.Context, fileID string) (stri
 	return "", false
 }
 
+// runnerFileResolver resolves through the resolver the runner holds when a
+// request is built, not the one it held at Load. The composition root wires
+// FileResolver after the first Load (process.Environment.wireRunner), so a
+// copy taken at Load is nil for the life of the process and every stored image
+// — an attachment, an upload, an image a tool read — replays to the model as
+// its name only.
+type runnerFileResolver struct{ r *Runner }
+
+func (l runnerFileResolver) ResolveFilePath(ctx context.Context, fileID string) (string, bool) {
+	if l.r == nil || l.r.FileResolver == nil {
+		return "", false
+	}
+	return l.r.FileResolver.ResolveFilePath(ctx, fileID)
+}
+
 // FilertResolver wraps a file-service resolution function that maps a file_id
 // (upload ID) to an absolute filesystem path. It is used by the gateway to
 // resolve uploaded file references.
@@ -316,8 +331,12 @@ func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver,
 	parts := make([]llm.ContentPart, len(msg.Parts))
 	copy(parts, msg.Parts)
 	for _, ref := range refs {
+		// A reference stored without its type is still an image when its
+		// bytes say so: an image the terminal attached with @ was recorded by
+		// bare path before the type was, and dropping it here would replay
+		// that message to the model as a name with no picture.
 		mime := strings.TrimSpace(ref.MIMEType)
-		if !strings.HasPrefix(mime, "image/") {
+		if mime != "" && !strings.HasPrefix(mime, "image/") {
 			continue
 		}
 		absPath, ok := resolver.ResolveFilePath(ctx, ref.FileID)
@@ -336,6 +355,9 @@ func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver,
 			if rerr != nil {
 				err = rerr
 			} else {
+				if mime == "" {
+					mime = llm.ImageMIMEType(absPath, data)
+				}
 				imgPart, _, err = llm.ImagePartWithin(absPath, mime, data, 0)
 			}
 		} else {

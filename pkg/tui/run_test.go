@@ -1570,14 +1570,22 @@ func TestBuildComposerDisplayTextColorsImagePlaceholder(t *testing.T) {
 	}
 }
 
-func TestBuildComposerDisplayTextRestoresComposerBackgroundAfterImagePlaceholder(t *testing.T) {
+// TestComposerCardKeepsItsBackgroundAfterAnImageChip: the chip ends in a full
+// reset, so it is the card row that must put the card's background back under
+// the text typed after it.
+func TestComposerCardKeepsItsBackgroundAfterAnImageChip(t *testing.T) {
 	got := buildComposerDisplayText("[Image #1]这张图片", nil, []InputAttachment{{Path: "/tmp/a.png"}})
-	want := sharedBlockTextStyle + "这张图片"
-	if !strings.Contains(got, want) {
-		t.Fatalf("expected composer text style restored after image placeholder, got %q", got)
-	}
 	if !strings.Contains(stripANSI(got), "[Image #1]这张图片") {
 		t.Fatalf("expected readable display text, got %q", got)
+	}
+	row := strings.TrimSuffix(renderSharedBlockPromptLine(got, 40), "\r\n")
+	cells := rowCellBackgrounds(row)
+	card := cells[len(cells)-1] // the pad, which is the card by construction
+	chip := displayLineWidth("› [Image #1]")
+	for c := chip; c < len(cells); c++ {
+		if cells[c] != card {
+			t.Fatalf("cell %d after the chip must be on the card background %q, got %q: %q", c, card, cells[c], row)
+		}
 	}
 }
 

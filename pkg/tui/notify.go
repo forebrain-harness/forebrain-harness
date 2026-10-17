@@ -1764,17 +1764,16 @@ type ComposerState struct {
 }
 
 // HandleDraftUpdate is the single entry point for applying a new DraftText
-// value coming out of input_events. It owns the SlashOverlay invariants:
-// activate on "/", update via SlashOverlay.UpdateFromDraft, clear when the
-// draft drops the leading slash. Mid-line slashes (e.g. "hello /co") never
-// activate the overlay because the activation guard requires the composer to
-// show nothing but "/" to *start* a session; subsequent updates flow through
-// UpdateFromDraft which also rejects non-"/" prefixes.
+// value coming out of input_events. It owns the SlashOverlay invariants: the
+// overlay opens, updates and closes on SlashOverlay.UpdateFromDraft's reading
+// of the draft at the caret — a leading command, or a skill reference under
+// the caret — and is cleared once the draft holds neither.
 //
-// Both guards read the draft through composerDisplayText, the same view the
+// The leading command is read through composerDisplayText, the same view the
 // composer card is drawn from, so the picker opens exactly when the user can
-// see a bare slash. The mention overlay is deliberately left on the raw draft:
-// it addresses a token by byte offsets that are spliced back into that buffer.
+// see a leading slash. The mention overlay is deliberately left on the raw
+// draft: it addresses a token by byte offsets that are spliced back into that
+// buffer.
 func (c *ComposerState) HandleDraftUpdate(draft string, session Session) {
 	if c == nil {
 		return
@@ -1782,21 +1781,14 @@ func (c *ComposerState) HandleDraftUpdate(draft string, session Session) {
 	c.DraftText = draft
 	c.Cursor = composerCursorClamp(draft, c.Cursor)
 	if c.SlashOverlay == nil {
-		if strings.HasPrefix(composerDisplayText(draft), "/") {
-			// The whole composer is a slash command: the full command list
-			// (built-in commands and skills).
-			c.SlashOverlay = newSlashOverlay()
-			c.SlashOverlay.SubagentView = c.SubagentView
-			c.SlashOverlay.rebuildFiltered(session)
-		} else if start, query, _, ok := turn.SlashTokenAtCursor(draft, c.Cursor); ok {
-			// A "/" anywhere else is a skill reference: the inline picker
-			// lists skills only.
-			c.SlashOverlay = newSlashOverlay()
-			c.SlashOverlay.SubagentView = c.SubagentView
-			c.SlashOverlay.Inline = true
-			c.SlashOverlay.TokenStart = start
-			c.SlashOverlay.FilterText = strings.ToLower(query)
-			c.SlashOverlay.rebuildFiltered(session)
+		// A draft the composer shows as a slash command opens the full command
+		// list (built-in commands and skills); a "/" anywhere else is a skill
+		// reference, and the inline picker lists skills only. UpdateFromDraft
+		// tells the two apart, the same reading every later keystroke gets.
+		overlay := newSlashOverlay()
+		overlay.SubagentView = c.SubagentView
+		if overlay.UpdateFromDraft(draft, c.Cursor, session) {
+			c.SlashOverlay = overlay
 		}
 	} else if !c.SlashOverlay.UpdateFromDraft(draft, c.Cursor, session) {
 		c.SlashOverlay = nil

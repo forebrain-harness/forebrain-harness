@@ -3807,6 +3807,10 @@ func (r *Renderer) startCursorBlinkLocked() {
 					return
 				}
 				r.cursorBlinkVisible = !r.cursorBlinkVisible
+				// The tick is also the repair of last resort for rows an
+				// input method shifted without telling anyone; see
+				// imeRepairStart.
+				r.vpIMERepairDue = true
 				r.paintViewportLocked()
 				r.mu.Unlock()
 			}
@@ -4021,6 +4025,48 @@ func (r *Renderer) dropPaintShadowLocked() {
 	r.vpPainted = nil
 	r.vpPaintedWidth, r.vpPaintedHeight = 0, 0
 	r.vpCursor = paintedCursor{row: -1}
+	r.vpIMEAnchor = -1
+}
+
+// imeRepairStart returns the first 0-based screen row the painter must
+// rewrite in place because an input method's marked text may have shifted it,
+// or -1 when no row needs it. anchor is the row the hardware cursor rested on
+// after the last paint, painted the shadow, rows the frame about to be
+// written, and due that the caret-blink tick asks for a repair.
+//
+// macOS Terminal.app draws the marked text of an input method (the pinyin
+// being composed, before a candidate is chosen) by inserting it into its own
+// screen at the hardware cursor: the rest of the row moves right, cells pushed
+// past the right edge are dropped, and marked text that reaches the edge goes
+// on into the next rows, shifting each of them the same way. Committing or
+// cancelling the composition removes it and moves the rows back left, so
+// every row it touched ends in blank cells on the terminal's default
+// background — on the composer card, a square bitten out of its right edge.
+// Nothing about this reaches the painter: a cancelled composition sends no
+// byte at all, and a commit sends only the chosen text.
+//
+// So every row from the anchor down is suspect, and the repair rewrites all
+// of them, over themselves and without an erase, whenever:
+//
+//   - one of them changed — what a commit always does, since the chosen text
+//     lands at the caret and everything after it moves; the rows below that
+//     did not change are exactly the ones that would keep the bite;
+//   - the caret blinks — the only signal left once a composition was
+//     cancelled, which leaves at most one blink interval with the bite on
+//     screen.
+//
+// A caret that only moves rewrites nothing: an arrow key commits no text.
+func imeRepairStart(anchor int, painted, rows []string, due bool) int {
+	if anchor < 0 || anchor >= len(rows) || painted == nil {
+		return -1
+	}
+	for i := anchor; i < len(rows) && !due; i++ {
+		due = i >= len(painted) || painted[i] != rows[i]
+	}
+	if !due {
+		return -1
+	}
+	return anchor
 }
 
 // fitPaintRow forces one synthesized row into the one form the canvas can
@@ -4043,8 +4089,30 @@ func (r *Renderer) dropPaintShadowLocked() {
 // This is not a fallback: damage tracking only repaints rows whose bytes
 // changed, and its correctness rests entirely on one synthesized row being one
 // physical row. This function enforces that invariant at the two points where
-// a source row enters the canvas.
+// a source row enters the canvas (through canvasRow).
 func fitPaintRow(line string, width int) string {
+	row, _ := fitRow(line, width)
+	return row
+}
+
+// canvasRow is fitPaintRow for a row entering the canvas, closed with a reset
+// when it ends with an attribute still in effect. Which row the painter writes
+// after it depends on what changed, and an erase there fills with whatever
+// background is left in effect: a slash command typed after an image chip left
+// the card background on, and the footer under it came out on the card's grey.
+// Captured rows go through fitPaintRow alone, because a style left open there
+// is carried onto the next row by selfContainedRows rather than lost.
+func canvasRow(line string, width int) string {
+	row, open := fitRow(line, width)
+	if open {
+		row += "\x1b[0m"
+	}
+	return row
+}
+
+// fitRow is fitPaintRow, also reporting whether the row ends with an SGR
+// attribute still in effect.
+func fitRow(line string, width int) (string, bool) {
 	if width < 1 {
 		width = 1
 	}
@@ -4058,13 +4126,14 @@ func fitPaintRow(line string, width int) string {
 		}
 	}
 	if !dirty && runewidth.StringWidth(line) <= width {
-		return line
+		return line, false
 	}
 
 	var b strings.Builder
 	b.Grow(len(line))
 	col := 0
 	cut := false
+	open := false // an SGR attribute is still in effect
 	for i := 0; i < len(line); {
 		if line[i] == 0x1b {
 			seq, n := paintEscapeSequence(line[i:])
@@ -4075,6 +4144,9 @@ func fitPaintRow(line string, width int) string {
 			}
 			if paintKeepsSequence(seq) {
 				b.WriteString(seq)
+				if seq[len(seq)-1] == 'm' {
+					open = seq != "\x1b[m" && seq != "\x1b[0m"
+				}
 			}
 			i += n
 			continue
@@ -4104,8 +4176,9 @@ func fitPaintRow(line string, width int) string {
 		// Whatever SGR the kept prefix left open must not bleed into the row
 		// painted after this one; the cut already cost this row its tail.
 		b.WriteString("\x1b[0m")
+		open = false
 	}
-	return b.String()
+	return b.String(), open
 }
 
 // paintTabStop is the tab interval terminals expand \t against by default.
@@ -4412,7 +4485,7 @@ func (r *Renderer) paintViewportLocked() {
 		if row >= len(vr.lines) {
 			continue
 		}
-		line := fitPaintRow(vr.lines[row], width)
+		line := canvasRow(vr.lines[row], width)
 		// Selection anchors are in absolute transcript-row space; map this
 		// screen row to its absolute row to test membership.
 		absRow := vr.firstRow + row
@@ -4469,7 +4542,7 @@ func (r *Renderer) paintViewportLocked() {
 		// Fit before decorating: the selection and hover layers only add SGR
 		// and EL, and the jump-to-bottom CUP lands on body rows painted above,
 		// so a composer row enters the canvas right here, already single-row.
-		composerLine := fitPaintRow(composer.lines[i], width)
+		composerLine := canvasRow(composer.lines[i], width)
 		inSelection := selecting && unifiedRow >= selStartRow && unifiedRow <= selEndRow
 		if inSelection {
 			startCol := 0
@@ -4557,6 +4630,15 @@ func (r *Renderer) paintViewportLocked() {
 			}
 		}
 	}
+	// The rows an input method's marked text may have shifted are right in the
+	// shadow and wrong on screen; rewriting them in place puts back the cells
+	// the terminal dropped. See imeRepairStart.
+	if from := imeRepairStart(r.vpIMEAnchor, r.vpPainted, rows, r.vpIMERepairDue); from >= 0 {
+		for i := from; i < len(rows); i++ {
+			overdrawn[i] = true
+		}
+	}
+	r.vpIMERepairDue = false
 	repainted := make([]bool, len(rows))
 	for i, content := range rows {
 		if i < len(r.vpPainted) && r.vpPainted[i] == content {
@@ -4666,6 +4748,19 @@ func (r *Renderer) paintViewportLocked() {
 			r.cursorScreenRow = 0
 			r.cursorScreenCol = 0
 		}
+	}
+	// The cell the hardware cursor rests on is where an input method draws
+	// its marked text, so it is recorded as the anchor the next paint repairs
+	// from. With no caret the write above leaves the cursor wherever its last
+	// byte did — the right edge of the full-width footer, say, where marked
+	// text overflows the bottom row and scrolls the whole screen. It is
+	// parked at the start of the last row instead: a line of marked text fits
+	// there, and the one row it can shift is the one the repair rewrites.
+	if wantShown {
+		r.vpIMEAnchor = desiredRow - 1
+	} else if b.Len() > 0 {
+		fmt.Fprintf(&b, "\x1b[%d;1H", len(rows))
+		r.vpIMEAnchor = len(rows) - 1
 	}
 
 	if b.Len() == 0 {
@@ -5851,8 +5946,9 @@ func trackRowSGR(ops []string, seq string) []string {
 // the highlight mid-row. Each such sequence is therefore copied with the hover
 // background re-asserted right after it; foreground-only sequences are copied
 // verbatim. The fill to the right edge is a run of explicit spaces rather than
-// \x1b[K: terminals without back-color-erase (macOS Terminal.app) erase to the
-// default background, which would stop the highlight after the text.
+// \x1b[K: a terminal without back-color-erase erases to the default
+// background, which would stop the highlight after the text (see
+// sharedCardPad).
 func applyHoverHighlight(line string, width int, hoverBgSeq string) string {
 	var b strings.Builder
 	b.Grow(len(line) + 16)

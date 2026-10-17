@@ -323,6 +323,77 @@ describe('ChatView conversation bubbles', () => {
     })
     wrapper.unmount()
   })
+
+  it('keeps the bubble to the user’s words: actions and attachments are not inside its chrome', async () => {
+    setLocale('en')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      {
+        id: 'u1',
+        role: 'user',
+        content: '这个 401 是哪一步报的？',
+        attachments: [{ path: 'shot.png', name: 'shot.png', mediaType: 'image/png' }],
+      },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+
+    // The bubble is `.u` alone. The hover actions sit under it on the page (a
+    // hidden 24px strip inside the bubble is what made every user message read
+    // looser than the design), and what the message attached sits in it.
+    const bubble = wrapper.find('.u-wrap .u')
+    expect(bubble.exists()).toBe(true)
+    expect(bubble.text()).toContain('这个 401 是哪一步报的？')
+    expect(bubble.find('ul.u-atts').exists()).toBe(true)
+    expect(bubble.find('[data-testid="message-copy"]').exists()).toBe(false)
+    expect(wrapper.find('.u-wrap > .u-acts [data-testid="message-copy"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('draws an image refusal under its message and opens the model menu from it', async () => {
+    setLocale('en')
+    const sessionModel = vi.spyOn(forebrainApi, 'sessionModel').mockResolvedValue({
+      provider: 'deepseek',
+      model: 'deepseek-v4-pro',
+      effort: '',
+      options: [
+        { provider: 'deepseek', model: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', efforts: [], supportsImages: false },
+        { provider: 'deepseek', model: 'deepseek-chat', label: 'DeepSeek Chat', efforts: [], supportsImages: true },
+      ],
+    })
+    try {
+      ;(fake as { messages: { value: unknown[] } }).messages.value = [
+        {
+          id: 'u1',
+          role: 'user',
+          content: '这个 401 是哪一步报的？\n[Image #1]',
+          attachments: [{ path: 'shot.png', name: 'shot.png', mediaType: 'image/png' }],
+        },
+        { id: 'n1', role: 'notice', content: '', imageRefusal: { provider: 'deepseek', model: 'deepseek-v4-pro' } },
+      ]
+      const wrapper = await mountView()
+      await flushPromises()
+
+      const notice = wrapper.find('[data-testid="image-refused-notice"]')
+      expect(notice.exists()).toBe(true)
+      // The model name is bold and outside the sentence, exactly as the
+      // design draws the block; the sentence itself is the viewer's language.
+      expect(notice.find('b').text()).toBe('deepseek-v4-pro')
+      expect(notice.text()).toContain('does not accept images. The message is kept and was not sent.')
+      expect(notice.text()).toContain('This conversation has images. Switch to a model that accepts images, then continue.')
+      // The message it refused is still in the thread with its picture.
+      expect(wrapper.text()).toContain('这个 401 是哪一步报的？')
+      expect(wrapper.text()).toContain('shot.png')
+
+      // The way out is the composer's own model menu, opened from here.
+      expect(wrapper.find('[data-testid="model-option-deepseek-chat"]').exists()).toBe(false)
+      await wrapper.find('[data-testid="image-refused-switch"]').trigger('click')
+      await nextTick()
+      expect(wrapper.find('[data-testid="model-option-deepseek-chat"]').exists()).toBe(true)
+      wrapper.unmount()
+    } finally {
+      sessionModel.mockRestore()
+    }
+  })
 })
 
 /**

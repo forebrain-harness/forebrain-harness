@@ -508,6 +508,69 @@ func TestCreateRunIgnoresARunWhoseOwnerIsGone(t *testing.T) {
 	}
 }
 
+// TestSessionBusyMatchesCreateRunWithoutCreating pins the query-only form of
+// the busy rule: a surface that keeps a message without starting a run (a
+// refused image turn) must hear exactly what CreateRun would tell it, and must
+// not leave a run row behind just to find out.
+func TestSessionBusyMatchesCreateRunWithoutCreating(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s1", "s2", "s3")
+	for _, s := range []*RunStore{a, b} {
+		stop, err := s.HoldOwnerLease(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stop()
+	}
+
+	countRuns := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM fb_runs`).Scan(&n); err != nil {
+			t.Fatalf("count fb_runs: %v", err)
+		}
+		return n
+	}
+	if err := b.SessionBusy(ctx, "s1"); err != nil {
+		t.Fatalf("a free session must report not busy, got %v", err)
+	}
+
+	// Another live surface is running the conversation.
+	if _, err := a.CreateRun(ctx, "s2", "occupied by a"); err != nil {
+		t.Fatal(err)
+	}
+	before := countRuns()
+	if err := b.SessionBusy(ctx, "s2"); !errors.Is(err, ErrSessionRunningElsewhere) {
+		t.Fatalf("SessionBusy = %v, want ErrSessionRunningElsewhere", err)
+	}
+	if after := countRuns(); after != before {
+		t.Fatalf("fb_runs went from %d to %d rows: SessionBusy must not create one", before, after)
+	}
+
+	// This process parked its own run on an approval.
+	parked, err := b.CreateRun(ctx, "s1", "parked by b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWaitAction(t, db, "s1", "act-busy")
+	if err := b.SetWaitingAction(ctx, parked.ID, Wait{ActionID: "act-busy", ToolName: "shell", ToolInputJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SessionBusy(ctx, "s1"); !errors.Is(err, ErrSessionAwaitingApproval) {
+		t.Fatalf("SessionBusy = %v, want ErrSessionAwaitingApproval", err)
+	}
+
+	// A running row whose owner's lease lapsed blocks nothing: the reaper is on
+	// its way to end it.
+	if _, err := a.CreateRun(ctx, "s3", "running under a lease that lapses"); err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, db, "owner-a")
+	if err := b.SessionBusy(ctx, "s3"); err != nil {
+		t.Fatalf("a run whose owner's lease lapsed must not report busy, got %v", err)
+	}
+}
+
 func TestCreateRunIsAtomicAcrossStores(t *testing.T) {
 	ctx := context.Background()
 	const attempts = 50

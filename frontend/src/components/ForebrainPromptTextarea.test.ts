@@ -201,6 +201,32 @@ describe('ForebrainPromptTextarea', () => {
     }
   })
 
+  // A command typed in front of a message already in the composer completes in
+  // place: the message stays, as the command's arguments.
+  it('keeps the message a leading command was typed in front of', async () => {
+    const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
+      records: [{
+        canonicalName: 'plan', name: 'plan', description: 'plan does its thing', category: 'mode',
+        argumentHint: '', actionKind: 'local', allowedModes: [], supportsInlineArgs: false,
+        availableDuringRun: true, availableInSideConversation: true, visibility: 'public',
+      } as SlashCommandRecord],
+    } as Awaited<ReturnType<typeof forebrainApi.slashCommands>>)
+    try {
+      const { composer, context } = mountComposer()
+      const textarea = composer.find('textarea')
+      ;(textarea.element as HTMLTextAreaElement).value = '/pl commit 1527'
+      ;(textarea.element as HTMLTextAreaElement).setSelectionRange(3, 3)
+      await textarea.trigger('input')
+      await vi.waitFor(() => expect(composer.findAll('[role="menuitem"]')).toHaveLength(1))
+      expect(list).toHaveBeenLastCalledWith('webchat', 'pl', expect.anything())
+      await textarea.trigger('keydown', { key: 'Tab' })
+      await nextTick()
+      expect(context().textInput.value).toBe('/plan commit 1527')
+    } finally {
+      list.mockRestore()
+    }
+  })
+
   // A mid-word "@" (foo@bar) is not a mention: neither picker opens.
   it('ignores a mid-word @', async () => {
     const search = vi.spyOn(forebrainApi, 'mentionSearch').mockResolvedValue({ query: '', records: [] })

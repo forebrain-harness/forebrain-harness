@@ -342,7 +342,8 @@ type Renderer struct {
 	// but not yet compared. paintViewportLocked composes every row of the new
 	// frame the same way and addresses ONLY the rows whose bytes differ, so a
 	// row that did not change is never erased, and is rewritten in place only
-	// when a changed neighbour's glyphs drew over it (glyphsCrossRowEdge).
+	// when a changed neighbour's glyphs drew over it (glyphsCrossRowEdge) or
+	// an input method's marked text may have shifted it (imeRepairStart).
 	//
 	// Without this the painter re-emitted "\x1b[<row>;1H\x1b[2K<content>" for
 	// every row of every frame. Repaints are frequent — one per streamed delta,
@@ -363,7 +364,14 @@ type Renderer struct {
 	// vpCursor is the software caret currently on screen, tracked separately
 	// from vpPainted because the caret owns a single cell of a row rather than
 	// the row: blinking it or moving it must not disturb the line being typed.
-	vpCursor            paintedCursor
+	vpCursor paintedCursor
+	// vpIMEAnchor is the 0-based screen row the hardware cursor rested on
+	// after the last paint (-1 unknown): an input method draws its marked text
+	// there, which in Terminal.app shifts that row and the ones below behind
+	// the shadow's back. vpIMERepairDue is the caret-blink tick asking the
+	// next paint to rewrite them anyway. See imeRepairStart.
+	vpIMEAnchor         int
+	vpIMERepairDue      bool
 	overlayScrollOffset int // rows scrolled within the overlay composer area
 	// overlayPanel is the slash panel the overlay area shows, laid out at
 	// every paint; nil while a modal's own lines own the area. Its scroll is
@@ -4727,10 +4735,12 @@ func (r *Renderer) renderComposerStatusLine(text string, termWidth int) string {
 
 // sharedCardPad returns the spaces that carry a shared-card row up to the full
 // terminal width, emitted while the card background is the active SGR so every
-// cell to the right edge is painted explicitly. The fill must be explicit
-// because \x1b[K cannot do this job portably: terminals without
-// back-color-erase (macOS Terminal.app) erase to the default background and
-// leave a gap at the card's right edge.
+// cell to the right edge is painted by the row's own bytes. An \x1b[K fill
+// cannot do this job portably. It paints in the card's colour only on a
+// terminal with back-color-erase. macOS Terminal.app has it, but not every
+// terminal does: GNU screen, for one, erases to the default background unless
+// its bce is turned on. And even there an erase takes whatever background is
+// in effect when it runs, which a row cannot vouch for on its own.
 func sharedCardPad(row string, termWidth int) string {
 	return strings.Repeat(" ", max(termWidth-lipgloss.Width(row), 0))
 }
@@ -4740,10 +4750,9 @@ func sharedCardPad(row string, termWidth int) string {
 // own background (bg 238). The visible ─ glyphs are one column shorter than
 // the card so they never reach the terminal's autowrap threshold; the final
 // column is one explicit space on the card background rather than an \x1b[K
-// fill, which would depend on back-color-erase (absent on macOS Terminal.app)
-// and leave the edge unpainted. The rule color matches the forebrain banner logo
-// (#87c3ea dark / #0d6e9c light) so the card frame visually ties back to the
-// startup banner.
+// fill, for the reason sharedCardPad gives. The rule color matches the
+// forebrain banner logo (#87c3ea dark / #0d6e9c light) so the card frame
+// visually ties back to the startup banner.
 func renderSharedBlockBorderLine(width int) string {
 	if width < 2 {
 		width = 1
@@ -4754,13 +4763,20 @@ func renderSharedBlockBorderLine(width int) string {
 }
 
 func renderSharedBlockPromptLine(content string, termWidth int) string {
-	row := composerPromptStyle + composerPromptMarker + sharedBlockTextStyle + content
+	row := composerPromptStyle + composerPromptMarker + sharedBlockTextStyle + cardContent(content)
 	return row + sharedBlockTextStyle + sharedCardPad(row, termWidth) + sharedBlockReset + "\r\n"
 }
 
 func renderSharedBlockContinuationLine(content string, termWidth int) string {
-	row := sharedBlockTextStyle + "  " + content
+	row := sharedBlockTextStyle + "  " + cardContent(content)
 	return row + sharedCardPad(row, termWidth) + sharedBlockReset + "\r\n"
+}
+
+// cardContent puts the card's text style back after every full reset inside
+// a row's content. An inline chip or an argument hint ends in a reset, which
+// would otherwise leave the rest of the row on the terminal's background.
+func cardContent(content string) string {
+	return strings.ReplaceAll(content, sharedBlockReset, sharedBlockReset+sharedBlockTextStyle)
 }
 
 func (r *Renderer) writeSharedBlockPromptLine(content string, termWidth int) {

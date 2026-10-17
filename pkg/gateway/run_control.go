@@ -490,6 +490,32 @@ type webTurnInput struct {
 	display string
 }
 
+// webMessageAttachesImage reports whether the message shows the model an
+// image of its own: an image the @ picker attached, or an upload stored as an
+// image. It only reads what the uploads were recorded as; a file that cannot
+// be made available is prepareWebTurnInput's to report.
+func (s *Server) webMessageAttachesImage(ctx context.Context, uploads, mentionImages []string) bool {
+	for _, picked := range mentionImages {
+		if strings.TrimSpace(picked) != "" {
+			return true
+		}
+	}
+	if s.Files == nil || s.Sessions == nil {
+		return false
+	}
+	for _, fid := range uploads {
+		fid = strings.TrimSpace(fid)
+		if fid == "" {
+			continue
+		}
+		if rec, err := s.Files.Get(ctx, s.Sessions.AgentID(), fid); err == nil && rec != nil &&
+			strings.HasPrefix(strings.TrimSpace(rec.MediaType), "image/") {
+			return true
+		}
+	}
+	return false
+}
+
 // prepareWebTurnInput makes everything a message attaches available to the
 // agent before its turn exists. An upload is saved into the workspace and
 // named in the text by the path it was saved at; an image upload and every
@@ -498,14 +524,6 @@ type webTurnInput struct {
 // stopped it: a turn never starts without a file the user attached.
 func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content string, uploads, mentionImages []string) (webTurnInput, error) {
 	text := strings.TrimSpace(content)
-	// The image-input gate (Runner.ImageInputRefusal) is read once for the
-	// whole message: an image upload or an @-picked image on a text-only
-	// session model is refused with the same actionable sentence read_file
-	// gives, rather than sending pixels the provider would reject with a 400.
-	imageRefusal := ""
-	if s.Runner != nil {
-		imageRefusal = s.Runner.ImageInputRefusal(ctx)
-	}
 	var blocks, markers, parts []string
 	for _, fid := range uploads {
 		fid = strings.TrimSpace(fid)
@@ -523,9 +541,6 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 		if rec != nil {
 			label = firstNonBlank(rec.OriginalName, fid)
 			mimeType = strings.TrimSpace(rec.MediaType)
-		}
-		if strings.HasPrefix(mimeType, "image/") && strings.TrimSpace(imageRefusal) != "" {
-			return webTurnInput{}, errors.New(strings.TrimSpace(imageRefusal))
 		}
 		named := label
 		if mimeType != "" {
@@ -570,9 +585,6 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 			continue
 		}
 		seen[abs] = true
-		if strings.TrimSpace(imageRefusal) != "" {
-			return webTurnInput{}, errors.New(strings.TrimSpace(imageRefusal))
-		}
 		// Read now, so an image the model cannot be shown stops the message
 		// here rather than reaching the model as a bare name.
 		image, err := llm.ImageFile(abs)

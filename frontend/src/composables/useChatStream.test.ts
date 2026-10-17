@@ -692,6 +692,44 @@ describe('useChatStream helpers', () => {
     }
   })
 
+  it('keeps a message the model cannot take and draws the refusal under it', async () => {
+    FakeChatWebSocket.instances = []
+    const originalWebSocket = globalThis.WebSocket
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: FakeChatWebSocket })
+    try {
+      const stream = useChatStream()
+      const attached = { attachments: [{ fileId: 'file-img', filename: 'shot.png', mediaType: 'image/png' }], mentionImages: [] }
+      const pendingSend = stream.send('这个 401 是哪一步报的？', { attached })
+      const socket = FakeChatWebSocket.instances[0]!
+      socket.open()
+      const sent = JSON.parse(socket.sent[0] ?? '{}') as { request_id: string }
+      socket.message({ op: 'session_bound', request_id: sent.request_id, session_id: 's-img' })
+
+      // The session's model is text-only: the gateway stored the message and
+      // withheld only the request, so the bubble and its attachment stay and
+      // the refusal becomes a notice underneath them.
+      socket.message({
+        op: 'turn_refused',
+        request_id: sent.request_id,
+        session_id: 's-img',
+        error: 'the session model deepseek/deepseek-v4-pro does not accept image input and this conversation contains images; the message is kept, switch model with /model and continue',
+        data: { code: 'image_input_unsupported', provider: 'deepseek', model: 'deepseek-v4-pro' },
+      })
+      await pendingSend
+
+      const userMessage = stream.messages.value.find((message) => message.role === 'user')
+      expect(userMessage).toBeTruthy()
+      expect(userMessage?.attachments).toEqual([{ fileId: 'file-img', name: 'shot.png', mediaType: 'image/png' }])
+      const notice = stream.messages.value[stream.messages.value.length - 1]!
+      expect(notice).toMatchObject({ role: 'notice', imageRefusal: { provider: 'deepseek', model: 'deepseek-v4-pro' } })
+      // Nothing went back to the composer: the message is in the thread.
+      expect(stream.takeReturnedDraft()).toBeNull()
+      expect(stream.isStreaming.value).toBe(false)
+    } finally {
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, writable: true, value: originalWebSocket })
+    }
+  })
+
   it('names what a stored message attached', () => {
     const conversation = conversationFromTranscript([
       { role: 'user', content: 'look at these', attachments: [

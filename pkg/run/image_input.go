@@ -8,6 +8,27 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 )
 
+// ImageInputRefusedCode is the stable wire code of a turn refused because the
+// session model cannot take an image the request would carry. A surface that
+// renders the refusal in the viewer's language keys off it.
+const ImageInputRefusedCode = "image_input_unsupported"
+
+// ImageInputRefusedError is a turn refusal: the session model (Provider/Model)
+// does not accept image input and the request would carry an image. The
+// message it refused is kept; only the request is withheld.
+type ImageInputRefusedError struct {
+	Provider string
+	Model    string
+}
+
+func (e *ImageInputRefusedError) Error() string {
+	name := e.Model
+	if e.Provider != "" {
+		name = e.Provider + "/" + e.Model
+	}
+	return fmt.Sprintf("the session model %s does not accept image input and this conversation contains images; the message is kept, switch model with /model and continue", name)
+}
+
 // ImageInputRefusal returns the reason this session's model may not be handed
 // an image, or "" when it may.
 //
@@ -24,27 +45,8 @@ import (
 // predicate; the refusal itself is written to be one step recoverable (it
 // names the model and points at /model).
 func (r *Runner) ImageInputRefusal(ctx context.Context) string {
-	if r == nil {
-		return ""
-	}
-	// The turn carries the conversation's own model choice when it has a
-	// stored row; outside a turn, or for a session with no row yet, fall back
-	// to the runner's current selection.
-	sel, ok := SessionModelSelectionFromContext(ctx)
-	if !ok {
-		sel = PrimaryModelSelection(r)
-	}
-	provider := strings.TrimSpace(sel.Provider)
-	model := strings.TrimSpace(sel.Model)
-	if model == "" {
-		return ""
-	}
-	hit, ok := llm.Lookup(provider, model)
-	if !ok {
-		// Unknown model: fail open.
-		return ""
-	}
-	if hit.SupportsAttachments {
+	provider, model, refused := imageInputRefusedModel(ctx, r)
+	if !refused {
 		return ""
 	}
 	name := model
@@ -52,4 +54,76 @@ func (r *Runner) ImageInputRefusal(ctx context.Context) string {
 		name = provider + "/" + model
 	}
 	return fmt.Sprintf("the session model %s does not accept image input; switch model with /model, then read the image again", name)
+}
+
+// ImageTurnRefusal is the image-input gate for a whole user turn. It returns
+// *ImageInputRefusedError when this session's model does not accept image
+// input and the request would carry an image — one the message attaches, or
+// one already in the conversation, whether the user attached it or a tool read
+// it — and nil when the turn may proceed.
+//
+// The image is never dropped to let a text-only model answer, and the
+// refusal is not a lost message: the caller still stores the message and only
+// withholds the request, so after /model the conversation continues with every
+// image in it. The judgement is the same fail-open catalog check as
+// ImageInputRefusal; a stored image whose file can no longer be read is not
+// counted, since no request would carry it.
+func ImageTurnRefusal(ctx context.Context, r *Runner, sessionID string, attachesImage bool) error {
+	sid := strings.TrimSpace(sessionID)
+	if sid != "" && strings.TrimSpace(llm.AgentSessionIDFromContext(ctx)) == "" {
+		ctx = llm.WithAgentSessionID(ctx, sid)
+	}
+	provider, model, refused := imageInputRefusedModel(ctx, r)
+	if !refused {
+		return nil
+	}
+	if !attachesImage && !sessionHistoryCarriesImage(ctx, r, sid) {
+		return nil
+	}
+	return &ImageInputRefusedError{Provider: provider, Model: model}
+}
+
+// sessionHistoryCarriesImage reports whether the next request of the session
+// would replay an image: its history is rebuilt exactly as the request builds
+// it (transcriptSession.history) and searched for image parts.
+func sessionHistoryCarriesImage(ctx context.Context, r *Runner, sessionID string) bool {
+	sid := strings.TrimSpace(sessionID)
+	if r == nil || r.Deps == nil || r.SessionStore == nil || sid == "" {
+		return false
+	}
+	entries, err := r.SessionStore.ListTranscriptMessagesWithRefs(ctx, sid, 5000)
+	if err != nil {
+		return false
+	}
+	for _, msg := range rehydrateImageReferences(ctx, r.FileResolver, entries) {
+		for _, part := range msg.Parts {
+			if part.Type == llm.ContentTypeImageBase64 || part.Type == llm.ContentTypeImageURL {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// imageInputRefusedModel names this session's model when the catalog says it
+// does not accept image input, and reports refused=false when it does, when
+// the catalog does not know it, or when there is no model to judge.
+func imageInputRefusedModel(ctx context.Context, r *Runner) (provider, model string, refused bool) {
+	if r == nil {
+		return "", "", false
+	}
+	// The turn carries the conversation's own model choice; outside a turn the
+	// session's stored row decides (a web session may run on a model other
+	// than the runner's default), then the runner's current selection.
+	provider, model = r.effectiveModelFor(ctx)
+	provider, model = strings.TrimSpace(provider), strings.TrimSpace(model)
+	if model == "" {
+		return "", "", false
+	}
+	hit, ok := llm.Lookup(provider, model)
+	if !ok || hit.SupportsAttachments {
+		// Unknown model: fail open.
+		return "", "", false
+	}
+	return provider, model, true
 }

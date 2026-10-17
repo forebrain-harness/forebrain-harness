@@ -1165,7 +1165,7 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	if r.Deps == nil {
 		instructionsFor = nil
 	}
-	r.transcript = transcriptSession{store: r.SessionStore, systemPrompt: desc, resolver: r.FileResolver, projectInstructions: instructionsFor}
+	r.transcript = transcriptSession{store: r.SessionStore, systemPrompt: desc, resolver: runnerFileResolver{r}, projectInstructions: instructionsFor}
 	a.SetSessionBuilder(r.transcript.build)
 	// The permission runtime is rebuilt on every load regardless of the action
 	// service: the rules on disk belong to this agent's workspace, so a load

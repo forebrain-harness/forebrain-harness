@@ -915,6 +915,9 @@ export interface SessionModelOption {
   model: string
   label: string
   efforts: string[]
+  /** True when the catalog knows this model takes image input; an unknown
+   *  model reports false, so a picker marks only what it knows. */
+  supportsImages?: boolean
 }
 
 /** The conversation's effective model choice. An empty effort is the explicit

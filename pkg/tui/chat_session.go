@@ -1899,7 +1899,7 @@ func (s *ChatSession) persistCancelledTurnOutcome(sessionID, runID string, compl
 	})
 }
 
-func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, callerRendersReturnedError bool, out io.Writer) (retErr error) {
+func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, channel, input string, rawInput string, inputParts []llm.ContentPart, userPartsJSON string, imageRefusal error, goalObjective string, skillName string, skillPath string, skills []turn.SkillSelection, callerRendersReturnedError bool, out io.Writer) (retErr error) {
 	s.dispatchTurnMu.Lock()
 	defer s.dispatchTurnMu.Unlock()
 	foreground := foregroundTurnFrom(ctx)
@@ -2002,8 +2002,12 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	// along with the turn it was making room for. Stopping it cannot leave
 	// half a rewrite behind — the checkpoint commits in one transaction or not
 	// at all — and the history stays as it was until the next turn compacts.
-	if cerr := s.maybeAutoCompactBeforeAppend(ctx, sessionID, channel, input, rawInput); cerr != nil && s.chatLog != nil {
-		s.chatLog.Debugf("forebrain chat auto compact skipped session=%s err=%v", sessionID, cerr)
+	// A message whose image the session model refuses sends no request, so
+	// there is nothing to make room for; the next turn compacts as usual.
+	if imageRefusal == nil {
+		if cerr := s.maybeAutoCompactBeforeAppend(ctx, sessionID, channel, input, rawInput); cerr != nil && s.chatLog != nil {
+			s.chatLog.Debugf("forebrain chat auto compact skipped session=%s err=%v", sessionID, cerr)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -2048,6 +2052,15 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	// the row's content field is display-only for user turns. Store the raw
 	// command there so resume replay shows what the user actually typed, while
 	// PartsJSON keeps carrying the expanded prompt for the model.
+	if imageRefusal != nil && s.runSvc() != nil {
+		// A refused message is kept without starting a run, so the run row's
+		// own busy check never sees it: ask the store first, and refuse the
+		// message the way a busy session refuses any message rather than write
+		// it into a conversation another surface is running.
+		if err := s.runSvc().SessionBusy(durable, sessionID); err != nil {
+			return err
+		}
+	}
 	userRowID, persistErr = turn.PersistUserTurn(durable, s.sessStore(), turn.UserTurn{
 		SessionID:  sessionID,
 		ModelInput: input,
@@ -2057,6 +2070,14 @@ func (s *ChatSession) dispatchUserTurnContent(ctx context.Context, sessionID, ch
 	})
 	if persistErr != nil {
 		return persistErr
+	}
+	if imageRefusal != nil {
+		// The session model cannot take an image this request would carry,
+		// attached now or already in the conversation. The message stays in
+		// the conversation — it is what the user said, and after /model a
+		// "continue" shows every image to a model that can see it — but no run
+		// starts for it, so no request the provider would reject is sent.
+		return imageRefusal
 	}
 	// From here the turn is cancellable again: agBase carries this dispatch's
 	// context so a withdrawal decided before the run is registered still stops it.

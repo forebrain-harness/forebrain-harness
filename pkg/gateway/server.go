@@ -1721,6 +1721,12 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			wsRequestCacheSet(requestCache, m.RequestID, refusal, 2*time.Minute, time.Now())
 			continue
 		}
+		// The same gate the terminal applies (run.ImageTurnRefusal), judged on
+		// this conversation's own runner and model: a text-only model refuses a
+		// turn whose request would carry an image, attached now or already in
+		// the conversation. The message is still kept; only the request is
+		// withheld.
+		imageRefusal := run.ImageTurnRefusal(r.Context(), turnRunner, sid, s.webMessageAttachesImage(r.Context(), attachments, mentionImages))
 		runStart := time.Now()
 		currentTraceID.Store("trace-" + strconv.FormatInt(time.Now().UnixNano(), 10))
 		// A client that stops while the conversation is being compacted for
@@ -1739,7 +1745,12 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 			case <-preflightCtx.Done():
 			}
 		}()
-		cerr := s.autoCompactBeforeUserAppend(preflightCtx, sid, "webchat", content, rawContentForRetrieval)
+		var cerr error
+		if imageRefusal == nil {
+			// A refused message sends no request, so there is nothing to make
+			// room for; the next turn compacts as usual.
+			cerr = s.autoCompactBeforeUserAppend(preflightCtx, sid, "webchat", content, rawContentForRetrieval)
+		}
 		withdrawn := preflightCtx.Err() != nil
 		commandMu.Lock()
 		commandCancel = nil
@@ -1847,6 +1858,40 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 		turnInput, attachErr := s.prepareWebTurnInput(r.Context(), sid, content, attachments, mentionImages)
 		if attachErr != nil {
 			writeMsg(wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: attachErr.Error()})
+			continue
+		}
+		if imageRefusal != nil {
+			// A refused message is kept without a run, so the run row's busy
+			// check never sees it: a session another surface is running refuses
+			// it the way it refuses any message, back to the composer.
+			if s.RunRT != nil {
+				if busy := s.RunRT.SessionBusy(r.Context(), sid); busy != nil {
+					withdrawn := wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: busy.Error()}
+					if code := state.SessionBusyCode(busy); code != "" {
+						withdrawn.Data = map[string]any{"code": code}
+					}
+					writeMsg(withdrawn)
+					continue
+				}
+			}
+			if s.Sessions != nil {
+				if _, err := turn.PersistUserTurn(r.Context(), s.Sessions, turn.UserTurn{
+					SessionID:  sid,
+					ModelInput: turnInput.text,
+					RawInput:   firstNonBlank(rawContentForRetrieval, turnInput.display),
+					PartsJSON:  turnInput.partsJSON,
+				}); err != nil {
+					writeMsg(wsServerMsg{Op: "turn_withdrawn", RequestID: m.RequestID, SessionID: sid, Error: err.Error()})
+					continue
+				}
+			}
+			refused := wsServerMsg{Op: "turn_refused", RequestID: m.RequestID, SessionID: sid, Error: imageRefusal.Error()}
+			var detail *run.ImageInputRefusedError
+			if errors.As(imageRefusal, &detail) {
+				refused.Data = map[string]any{"code": run.ImageInputRefusedCode, "provider": detail.Provider, "model": detail.Model}
+			}
+			writeMsg(refused)
+			wsRequestCacheSet(requestCache, m.RequestID, refused, 2*time.Minute, time.Now())
 			continue
 		}
 		// With a run store the turn is its run row, and a run that could not be

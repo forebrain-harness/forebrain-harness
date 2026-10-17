@@ -18539,10 +18539,10 @@ func TestSharedBlockBackgroundStandsOutOnDarkTerminal(t *testing.T) {
 }
 
 // TestSharedCardRowsPaintEveryCellToTheEdge pins the terminal-independent
-// contract behind the Terminal.app fix: the card rows must reach the right
-// edge with explicitly painted cells instead of an \x1b[K fill. Terminal.app
-// has no back-color-erase, so an EL would erase to the default background and
-// leave a gap after the card's last glyph.
+// contract: the card rows must reach the right edge with explicitly painted
+// cells instead of an \x1b[K fill. On a terminal without back-color-erase an
+// EL erases to the default background and leaves a gap after the card's last
+// glyph (see sharedCardPad).
 func TestSharedCardRowsPaintEveryCellToTheEdge(t *testing.T) {
 	const termWidth = 20
 	rows := map[string]string{
@@ -22090,6 +22090,97 @@ func TestHandleDraftUpdate_OpensInlineSkillPicker(t *testing.T) {
 	}
 	if want := len([]rune("看下 /improve ")); cursor != want {
 		t.Fatalf("inline accept cursor = %d, want %d", cursor, want)
+	}
+}
+
+// A command typed in front of a message already in the composer is read up to
+// the caret: the message after it is not part of the name being typed, nor
+// the arguments of a command the user has not finished naming. Both ways of
+// typing it in front keep the picker open on the name typed so far.
+func TestHandleDraftUpdate_SlashTypedBeforeAMessageFiltersUpToTheCaret(t *testing.T) {
+	registerTUISkill(t, "frontend-design")
+	for _, tc := range []struct {
+		name    string
+		message string
+	}{
+		{"against the first word", "commit 1527c467 /Users/doudou/x"},
+		{"before a space", " commit 1527c467 /Users/doudou/x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &ComposerState{}
+			c.HandleDraftUpdate(tc.message, nil)
+			typed := ""
+			for _, r := range "/fron" {
+				typed += string(r)
+				c.Cursor = len([]rune(typed))
+				c.HandleDraftUpdate(typed+tc.message, nil)
+				o := c.SlashOverlay
+				if o == nil || !o.Active || o.Inline {
+					t.Fatalf("after typing %q the leading picker must be open, got %#v", typed, o)
+				}
+				if want := strings.TrimPrefix(typed, "/"); o.FilterText != want {
+					t.Fatalf("after typing %q FilterText = %q, want %q", typed, o.FilterText, want)
+				}
+			}
+			if v := c.SlashOverlay.Visible; len(v) == 0 || v[0].Name != "frontend-design" {
+				t.Fatalf("/fron lists %v, want frontend-design first", v)
+			}
+		})
+	}
+}
+
+// Completing a command typed in front of a message replaces only the name
+// being typed: the message stays, as the command's arguments.
+func TestAcceptSlashSelection_KeepsTheMessageAfterTheCommand(t *testing.T) {
+	registerTUISkill(t, "frontend-design")
+	for _, tc := range []struct {
+		name, draft, want string
+	}{
+		{"against the first word", "/froncommit 1527", "/frontend-design commit 1527"},
+		{"before a space", "/fron commit 1527", "/frontend-design commit 1527"},
+		{"behind a hidden newline", "\n/fron commit 1527", "/frontend-design commit 1527"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &ComposerState{}
+			c.Cursor = strings.Index(tc.draft, "/fron") + len("/fron")
+			c.HandleDraftUpdate(tc.draft, nil)
+			if c.SlashOverlay == nil || !c.SlashOverlay.Active {
+				t.Fatalf("setup: picker did not open on %q", tc.draft)
+			}
+			draft, cursor, ok := c.AcceptSlashSelection()
+			if !ok || draft != tc.want {
+				t.Fatalf("accept = %q (ok=%v), want %q", draft, ok, tc.want)
+			}
+			if want := len([]rune("/frontend-design ")); cursor != want {
+				t.Fatalf("accept cursor = %d, want %d", cursor, want)
+			}
+			// The caret lands past the name, on its arguments, so the command
+			// locks and the picker closes the way it does for "/frontend-design ".
+			c.Cursor = cursor
+			c.HandleDraftUpdate(draft, nil)
+			if o := c.SlashOverlay; o == nil || o.Active || o.HintCommand == nil || o.HintCommand.Name != "frontend-design" {
+				t.Fatalf("accepted draft must lock frontend-design, got %#v", o)
+			}
+		})
+	}
+}
+
+// Enter on the open picker runs the highlighted command, with the message the
+// command was typed in front of as its arguments rather than dropped.
+func TestSlashPickerSubmitLine_KeepsTheMessage(t *testing.T) {
+	registerTUISkill(t, "frontend-design")
+	c := &ComposerState{}
+	draft := "/fron commit 1527"
+	c.Cursor = len([]rune("/fron"))
+	c.HandleDraftUpdate(draft, nil)
+	if got := c.SlashPickerSubmitLine(draft); got != "/frontend-design commit 1527" {
+		t.Fatalf("submitted line = %q, want %q", got, "/frontend-design commit 1527")
+	}
+	c = &ComposerState{}
+	c.Cursor = len([]rune("/fron"))
+	c.HandleDraftUpdate("/fron", nil)
+	if got := c.SlashPickerSubmitLine("/fron"); got != "/frontend-design" {
+		t.Fatalf("submitted line = %q, want %q", got, "/frontend-design")
 	}
 }
 
@@ -27540,7 +27631,7 @@ func TestViewportIsClickableRow(t *testing.T) {
 // background, only the first segment would be highlighted. It also pins the
 // fill-to-the-edge contract: the highlight must reach the full width with
 // explicitly painted spaces, because terminals without back-color-erase
-// (macOS Terminal.app) would stop an \x1b[K fill right after the text.
+// would stop an \x1b[K fill right after the text.
 func TestViewportHoverBackgroundReappliedAfterReset(t *testing.T) {
 	// Simulate a lipgloss-rendered tool header line: multiple styled segments
 	// each terminated by \x1b[0m, exactly as lipgloss produces.
