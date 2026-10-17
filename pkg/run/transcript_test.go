@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
@@ -481,4 +482,93 @@ func TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile(t *testing.T) {
 	}
 	require.NotNil(t, rehydrated, "user message missing after reload")
 	require.Equal(t, []llm.ContentPart{llm.Text(userText), live}, rehydrated.Parts)
+}
+
+// A terminal image picked with @ was stored by bare path with no type. Such a
+// reference is still the image its bytes name: replay must send the picture,
+// not the "[attachment] name" placeholder, or the model loses the image the
+// user attached from the second request on — and a message whose image was
+// refused on a text-only model never shows it at all.
+func TestHistoryRehydratesAnUntypedImageReference(t *testing.T) {
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	ctx := llm.WithAgentSessionID(context.Background(), "s1")
+	require.NoError(t, sess.Ensure(ctx, "s1", "s1"))
+
+	img := filepath.Join(t.TempDir(), "clip.png")
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(img, png, 0o600))
+
+	text := "what is this\n[Image #1]"
+	parts := state.MessagePartsJSON(llm.UserMessage(llm.Text(text)), text)
+	parts = state.AppendRawPartJSON(parts, state.FileReferencePartJSON(img, "clip.png", ""))
+	_, err = sess.AppendStructuredMessage(ctx, "s1", "user", text, "", parts, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	history, err := transcriptSession{store: sess, systemPrompt: "sys", resolver: PathResolver{}}.history(ctx, "s1")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	var images int
+	for _, part := range history[0].Parts {
+		require.NotEqual(t, "[attachment] clip.png", strings.TrimSpace(part.Text), "the image was replayed as its name")
+		if part.Type == llm.ContentTypeImageBase64 {
+			require.Equal(t, "image/png", part.MIMEType)
+			images++
+		}
+	}
+	require.Equal(t, 1, images)
+}
+
+// The composition root loads the Runner first and wires its FileResolver
+// afterwards (process.Environment.wireRunner). A history that captured the
+// resolver at Load therefore had none for the life of the process, and every
+// stored image replayed to the model as its name: the picture a message
+// attached reached the model once, live, and was gone from the next request
+// on — and a message whose image was refused on a text-only model never
+// showed it at all, even after /model switched to one that can see.
+func TestHistoryUsesTheFileResolverWiredAfterLoad(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessions := state.NewSessionStore(db, "main")
+	const sid = "cli-image-replay"
+	require.NoError(t, sessions.Ensure(ctx, sid, sid))
+
+	img := filepath.Join(t.TempDir(), "clip.png")
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(img, png, 0o600))
+	text := "what is this\n[Image #1]"
+	parts := state.MessagePartsJSON(llm.UserMessage(llm.Text(text)), text)
+	parts = state.AppendRawPartJSON(parts, state.FileReferencePartJSON(img, "clip.png", "image/png"))
+	_, err = sessions.AppendStructuredMessage(ctx, sid, "user", text, "", parts, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+
+	model := &recordingTextLLM{}
+	restore := SetLLMOverrideForTest(model)
+	defer restore()
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "openai", Model: "gpt-main", APIKey: "k", BaseURL: "http://127.0.0.1:9/v1"}}},
+	}}}
+	r := &Runner{Deps: &Deps{Home: home, AgentName: "main", AppCfg: cfg, SessionStore: sessions}}
+	require.NoError(t, r.Load())
+	r.FileResolver = PathResolver{}
+
+	_, err = RunText(r, llm.WithAgentSessionID(ctx, sid), "continue")
+	require.NoError(t, err)
+	require.NotEmpty(t, model.requests)
+	images := 0
+	for _, msg := range model.requests[0] {
+		for _, part := range msg.Parts {
+			if part.Type == llm.ContentTypeImageBase64 {
+				images++
+			}
+		}
+	}
+	require.Equal(t, 1, images, "the stored image must replay as pixels, not its name")
 }

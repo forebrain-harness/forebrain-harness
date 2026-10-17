@@ -327,6 +327,9 @@ type ModelChoice struct {
 	// Name is the catalog's display name for the model, "" when it has none.
 	Name      string
 	CanReason bool
+	// SupportsImages reports that the catalog knows this model accepts image
+	// input. Unknown models report false: a picker marks only what it knows.
+	SupportsImages bool
 }
 
 // ReasoningEffortLevels are the reasoning efforts /model offers for a model
@@ -361,6 +364,7 @@ func ModelChoices(cfg *appcfg.Root, agentName string) []ModelChoice {
 				choice.Label += " - " + name
 			}
 			choice.CanReason = hit.CanReason
+			choice.SupportsImages = hit.SupportsAttachments
 		}
 		out = append(out, choice)
 	}

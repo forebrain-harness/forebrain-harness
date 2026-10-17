@@ -4506,6 +4506,7 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 		"main": {LLMProviders: []appcfg.AgentLLMProviderConfig{
 			{Provider: "zhipuai", Model: "glm-5.3-flash", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://a.test/v1"},
 			{Provider: "deepseek", Model: "deepseek-chat", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://b.test/v1"},
+			{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "${FOREBRAIN_WEB_MODEL_TEST_KEY}", BaseURL: "http://c.test/v1"},
 		}},
 	}}}
 	require.NoError(t, appcfg.Save(cfgPath, cfg))
@@ -4551,17 +4552,23 @@ func TestChatSessionModelEndpoints(t *testing.T) {
 		Model    string `json:"model"`
 		Effort   string `json:"effort"`
 		Options  []struct {
-			Provider string   `json:"provider"`
-			Model    string   `json:"model"`
-			Efforts  []string `json:"efforts"`
+			Provider       string   `json:"provider"`
+			Model          string   `json:"model"`
+			Efforts        []string `json:"efforts"`
+			SupportsImages bool     `json:"supports_images"`
 		} `json:"options"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Equal(t, "zhipuai", got.Provider)
 	require.Equal(t, "glm-5.3-flash", got.Model)
-	require.Len(t, got.Options, 2)
+	require.Len(t, got.Options, 3)
 	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, got.Options[0].Efforts)
 	require.Empty(t, got.Options[1].Efforts)
+	// The chip marks the models the catalog knows take images: glm-5.3-flash
+	// and deepseek-chat do, deepseek-v4-pro does not.
+	require.Equal(t, []bool{true, true, false},
+		[]bool{got.Options[0].SupportsImages, got.Options[1].SupportsImages, got.Options[2].SupportsImages})
+	require.Equal(t, []string{"low", "medium", "high", "xhigh"}, got.Options[2].Efforts)
 	publishedBefore := run.PrimaryModelSelection(runner)
 
 	// A pair the agent is not configured with is refused before any write.

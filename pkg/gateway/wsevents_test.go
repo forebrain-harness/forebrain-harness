@@ -1,13 +1,16 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1409,6 +1412,168 @@ func TestHandleChatWSSessionBusyWithdrawsTheMessage(t *testing.T) {
 	rows, err := sessions.ListAllMessages(ctx, "session-ws", 0)
 	require.NoError(t, err)
 	require.Empty(t, rows, "no user row may be written for a turn that never started")
+}
+
+// seedWebImageConversation gives one conversation a user row that carries an
+// image, written the way the composer writes one, so the turn gate sees an
+// image the next request would replay.
+func seedWebImageConversation(t *testing.T, ctx context.Context, sessions *state.SessionStore, sid string) {
+	t.Helper()
+	dir := t.TempDir()
+	img := filepath.Join(dir, "clip.png")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(img, data, 0o600))
+	text := "这个 401 是哪一步报的？\n[Image #1]"
+	parts := state.MessagePartsJSON(llm.UserMessage(llm.Text(text)), text)
+	parts = state.AppendRawPartJSON(parts, state.FileReferencePartJSON(img, "clip.png", "image/png"))
+	_, err = sessions.AppendStructuredMessage(ctx, sid, "user", text, "", parts, "", "", "", "", state.MessageExecTiming{})
+	require.NoError(t, err)
+}
+
+// refuseWebTurn drives one message through the chat socket and returns the
+// reply that ended it, failing on any reply that says a run started.
+func refuseWebTurn(t *testing.T, conn *websocket.Conn, requestID, content string) wsServerMsg {
+	t.Helper()
+	var send wsClientMsg
+	send.RequestID = requestID
+	send.SessionID = "session-ws"
+	send.Message.Content = content
+	require.NoError(t, conn.WriteJSON(send))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	for {
+		var msg wsServerMsg
+		require.NoError(t, conn.ReadJSON(&msg))
+		require.NotContains(t, []string{"run_started", "run_error", "run_completed"}, msg.Op,
+			"a refused message must not start a run: %+v", msg)
+		if msg.Op == "turn_refused" || msg.Op == "turn_withdrawn" {
+			return msg
+		}
+	}
+}
+
+// TestHandleChatWSKeepsAMessageTheModelCannotTakeAndRefusesIt pins the web's
+// side of the terminal's rule: a message whose request would carry an image
+// into a text-only session model is what the user said, so it is stored and
+// kept — only the request is withheld. The reply names the model and its
+// stable code; no run exists for it; and a resend under the same request id is
+// the cached reply, not a second row.
+func TestHandleChatWSKeepsAMessageTheModelCannotTakeAndRefusesIt(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	seedWebImageConversation(t, ctx, sessions, "session-ws")
+
+	cfg := appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
+		Primary:      true,
+		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
+	}}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessions}, FileResolver: run.PathResolver{}}
+	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+
+	refused := refuseWebTurn(t, conn, "req-refused", "continue")
+	require.Equal(t, "turn_refused", refused.Op)
+	require.Equal(t, map[string]any{"code": "image_input_unsupported", "provider": "deepseek", "model": "deepseek-v4-pro"}, refused.Data)
+	require.Contains(t, refused.Error, "does not accept image input")
+
+	rows, err := sessions.ListAllMessages(ctx, "session-ws", 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "the refused message must be kept: %+v", rows)
+	require.Equal(t, "continue", rows[1].Content)
+	var runCount int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM fb_runs`).Scan(&runCount))
+	require.Zero(t, runCount, "a refused message starts no run")
+
+	// The same request id again is the cached reply, and writes nothing.
+	again := refuseWebTurn(t, conn, "req-refused", "continue")
+	require.Equal(t, "turn_refused", again.Op)
+	rows, err = sessions.ListAllMessages(ctx, "session-ws", 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "a resent request id must not store the message twice")
+}
+
+// TestHandleChatWSRefusedImageMessageInABusySessionIsWithdrawn pins that a
+// refused message still cannot land in a conversation another surface is
+// running: the keep-without-a-run path asks the store first, and withdraws the
+// message instead of writing it into someone else's turn.
+func TestHandleChatWSRefusedImageMessageInABusySessionIsWithdrawn(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	seedWebImageConversation(t, ctx, sessions, "session-ws")
+	other := &state.RunStore{DB: db, Owner: "other-process"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	_, err = other.CreateRun(ctx, "session-ws", "in flight")
+	require.NoError(t, err)
+
+	cfg := appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {
+		Primary:      true,
+		LLMProviders: []appcfg.AgentLLMProviderConfig{{Provider: "deepseek", Model: "deepseek-v4-pro", APIKey: "test-key", BaseURL: "http://model.invalid/v1"}},
+	}}
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessions}, FileResolver: run.PathResolver{}}
+	s := &Server{Home: home, Sessions: sessions, Runner: runner, RunRT: &state.RunStore{DB: db, Owner: "gateway-test"}}
+	server := httptest.NewServer(http.HandlerFunc(s.HandleChatWS))
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	var connected wsServerMsg
+	require.NoError(t, conn.ReadJSON(&connected))
+
+	withdrawn := refuseWebTurn(t, conn, "req-busy", "continue")
+	require.Equal(t, "turn_withdrawn", withdrawn.Op)
+	require.Equal(t, map[string]any{"code": "session_running_elsewhere"}, withdrawn.Data)
+	rows, err := sessions.ListAllMessages(ctx, "session-ws", 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the busy session must not keep the refused message: %+v", rows)
+}
+
+// TestWebMessageAttachesImage pins what the turn gate reads before the turn
+// exists: an @-picked image, or an upload recorded as an image, is an image
+// the request would carry; a document is not, and an upload that cannot be
+// read is not this predicate's to report.
+func TestWebMessageAttachesImage(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	sessions := state.NewSessionStore(db, "main")
+	require.NoError(t, sessions.Ensure(ctx, "session-ws", "session-ws"))
+	s := &Server{Sessions: sessions, Files: &state.FileStore{DB: db, Home: t.TempDir(), Cfg: state.LoadConfigFromEnv()}}
+
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	shot, err := s.Files.CreateFromReader(ctx, "session-ws", "shot.png", bytes.NewReader(png), int64(len(png)), "image/png")
+	require.NoError(t, err)
+	report, err := s.Files.CreateFromReader(ctx, "session-ws", "report.pdf", strings.NewReader("%PDF-1.4"), 8, "application/pdf")
+	require.NoError(t, err)
+
+	require.True(t, s.webMessageAttachesImage(ctx, nil, []string{"notes/picture.png"}), "an @-picked image")
+	require.True(t, s.webMessageAttachesImage(ctx, []string{shot.ID}, nil), "an upload stored as an image")
+	require.False(t, s.webMessageAttachesImage(ctx, []string{report.ID}, nil), "a document shows the model no image")
+	require.False(t, s.webMessageAttachesImage(ctx, []string{"missing-file-id"}, nil), "an upload that cannot be read")
+	require.False(t, s.webMessageAttachesImage(ctx, nil, nil), "a message that attaches nothing")
 }
 
 // TestHandleChatWSEstablishesANamedSessionBeforeItsSlashCommand pins that a

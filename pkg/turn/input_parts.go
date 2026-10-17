@@ -1,8 +1,9 @@
 package turn
 
 import (
-	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -18,18 +19,10 @@ import (
 // display text to compute the actual model input too, so the marker
 // reaches both the persisted transcript and the model's own context.
 //
-// imageRefusal is the runtime's image-input gate (Runner.ImageInputRefusal):
-// when non-empty and the message carries an image, the whole message is refused
-// with that same one-step-recoverable sentence, so a text-only session model
-// never sends a request the provider would reject with a 400. An empty refusal
-// (a model the catalog knows accepts images, or an unknown model — fail-open)
-// attaches as before.
-func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment, imageRefusal string) ([]llm.ContentPart, string, error) {
-	if len(attachments) > 0 {
-		if refusal := strings.TrimSpace(imageRefusal); refusal != "" {
-			return nil, "", errors.New(refusal)
-		}
-	}
+// It does not apply the image-input gate: a message refused for a text-only
+// session model is still kept in the conversation, so the caller needs its
+// display text and stored parts either way and refuses only the request.
+func SurfaceTurnContentParts(userText string, displayText string, attachments []InputAttachment) ([]llm.ContentPart, string, error) {
 	text := strings.TrimSpace(userText)
 	if text == "" {
 		text = "Please analyze the attached image."
@@ -85,6 +78,12 @@ func BuildSurfaceUserPartsJSON(userText string, attachments []InputAttachment) s
 			label = path
 		}
 		mimeType := strings.TrimSpace(att.MIMEType)
+		if mimeType == "" {
+			// An image picked with @ arrives as a bare path. Replay shows the
+			// model a file_reference as the image only when it is typed as one,
+			// so the type its bytes name is recorded with it.
+			mimeType = sniffImageMIMEType(path)
+		}
 		fileRef := state.FileReferencePartJSON(path, label, mimeType)
 		if strings.TrimSpace(fileRef) != "" {
 			partsJSON = state.AppendRawPartJSON(partsJSON, fileRef)
@@ -101,6 +100,19 @@ func BuildSurfaceUserPartsJSON(userText string, attachments []InputAttachment) s
 		// reaching here is an image.
 	}
 	return partsJSON
+}
+
+// sniffImageMIMEType names the image type of the file at path from its leading
+// bytes, or "" when it cannot be read or is not an image a provider accepts.
+func sniffImageMIMEType(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	return llm.ImageMIMEType(path, head[:n])
 }
 
 // DisplayTextOrUserText resolves the model input for a turn: displayText

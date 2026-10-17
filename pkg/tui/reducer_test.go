@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -3280,6 +3281,158 @@ func TestViewportTypingLeavesTheComposerRulesAndTranscriptAlone(t *testing.T) {
 	}
 }
 
+// addressedRows lists the 1-based screen rows a paint moved the cursor to the
+// start of: every row it erased and rewrote, and every row it rewrote in place.
+func addressedRows(paint string) map[int]bool {
+	rows := map[int]bool{}
+	for _, m := range regexp.MustCompile(`\x1b\[(\d+);1H`).FindAllStringSubmatch(paint, -1) {
+		n, _ := strconv.Atoi(m[1])
+		rows[n] = true
+	}
+	return rows
+}
+
+// TestIMECommitRewritesTheRowsItsMarkedTextShifted is the square bitten out of
+// the composer card's bottom-right corner. In Terminal.app, pinyin typed with
+// the caret near the right edge is inserted into the terminal's own screen at
+// the caret and runs on into the bottom rule, pushing the rule's last cells
+// off the edge; choosing a candidate takes it out again and leaves those
+// cells blank. The paint that follows the commit only knew to rewrite rows
+// whose bytes changed, and the bottom rule had not changed.
+func TestIMECommitRewritesTheRowsItsMarkedTextShifted(t *testing.T) {
+	const height = 12
+	r := newComposerRenderer(t, 40, height)
+	out := r.out.(*bytes.Buffer)
+	// 17 wide runes fill 34 of the 36 text columns, so the caret, and the
+	// marked text drawn at it, sit two columns short of the right edge.
+	text := strings.Repeat("中", 17)
+	cursor := utf8.RuneCountInString(text)
+	r.RenderComposerState(ComposerRenderState{Text: text, Cursor: &cursor})
+	anchor := composerTextRowScreen(r, 0) + 1
+	rule := anchor + 1
+	r.mu.Lock()
+	ruleBefore := r.vpPainted[rule-1]
+	r.mu.Unlock()
+
+	// The candidate is chosen: two runes that no longer fit, so the composer
+	// grows a row upwards and the rule stays where it was, unchanged.
+	committed := text + "修复"
+	cursor = utf8.RuneCountInString(committed)
+	out.Reset()
+	r.RenderComposerState(ComposerRenderState{Text: committed, Cursor: &cursor})
+	paint := out.String()
+	r.mu.Lock()
+	ruleAfter := r.vpPainted[rule-1]
+	r.mu.Unlock()
+	if ruleAfter != ruleBefore {
+		t.Fatalf("the bottom rule should not have moved: row %d was %q, now %q", rule, ruleBefore, ruleAfter)
+	}
+
+	addressed := addressedRows(paint)
+	for row := anchor; row <= height; row++ {
+		if !addressed[row] {
+			t.Fatalf("row %d is below the caret the marked text sat at (row %d) and must be rewritten, got %q", row, anchor, paint)
+		}
+	}
+	if slices.Contains(erasedRows(paint), rule) {
+		t.Fatalf("the unchanged bottom rule must be rewritten in place, not erased, got %q", paint)
+	}
+}
+
+// TestIMECancelledCompositionIsRepairedOnTheNextBlink covers the composition
+// that ends without a commit: Terminal.app sends nothing at all when pinyin
+// is cancelled, so the caret-blink tick is the only paint left to put the
+// shifted rows back.
+func TestIMECancelledCompositionIsRepairedOnTheNextBlink(t *testing.T) {
+	const height = 12
+	r := newComposerRenderer(t, 40, height)
+	out := r.out.(*bytes.Buffer)
+	cursor := len("hello")
+	r.RenderComposerState(ComposerRenderState{Text: "hello", Cursor: &cursor})
+	anchor := composerTextRowScreen(r, 0) + 1
+
+	if rows := addressedRows(paintFrame(t, r, out)); len(rows) != 0 {
+		t.Fatalf("a repaint with nothing changed must not rewrite any row, rewrote %v", rows)
+	}
+
+	r.mu.Lock()
+	r.vpIMERepairDue = true
+	r.mu.Unlock()
+	paint := paintFrame(t, r, out)
+	addressed := addressedRows(paint)
+	for row := 1; row <= height; row++ {
+		if want := row >= anchor; addressed[row] != want {
+			t.Fatalf("the blink repair must rewrite exactly rows %d..%d; row %d rewritten=%v\npaint: %q",
+				anchor, height, row, addressed[row], paint)
+		}
+	}
+	if rows := erasedRows(paint); len(rows) != 0 {
+		t.Fatalf("the blink repair must not erase a row, erased %v", rows)
+	}
+
+	if rows := addressedRows(paintFrame(t, r, out)); len(rows) != 0 {
+		t.Fatalf("the repair is one paint, but the next repaint rewrote %v", rows)
+	}
+}
+
+// TestIMEAnchorWithoutACaretIsTheStartOfTheLastRow covers the screens with no
+// caret, an approval among them. The hardware cursor used to stay where the
+// paint's last byte left it, at the right edge of the full-width footer, and
+// pinyin typed there ran past the bottom row and scrolled the whole screen.
+func TestIMEAnchorWithoutACaretIsTheStartOfTheLastRow(t *testing.T) {
+	const height = 24
+	r := newComposerRenderer(t, 80, height)
+	out := r.out.(*bytes.Buffer)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hi", Cursor: &cursor})
+
+	out.Reset()
+	req := turn.ToolApprovalRequest{ToolName: "Bash", ToolInputJSON: `{"command":"ls"}`}
+	overlay := newApprovalOverlay(context.Background(), out, newRawSelector(nil, r), req, nil)
+	overlay.renderViewport()
+	paint := out.String()
+
+	// The park is the frame's last act: the last row is itself written from
+	// its first column, so only what follows the final write counts.
+	if !strings.HasSuffix(strings.TrimSuffix(paint, "\x1b[?2026l"), fmt.Sprintf("\x1b[%d;1H", height)) {
+		t.Fatalf("a frame without a caret must leave the hardware cursor at the start of row %d, got %q", height, paint)
+	}
+	r.mu.Lock()
+	anchor := r.vpIMEAnchor
+	r.mu.Unlock()
+	if anchor != height-1 {
+		t.Fatalf("the repair anchor should be the last row (%d), got %d", height-1, anchor)
+	}
+}
+
+func TestIMERepairStart(t *testing.T) {
+	painted := []string{"a", "b", "c", "d"}
+	cases := []struct {
+		name   string
+		anchor int
+		rows   []string
+		due    bool
+		want   int
+	}{
+		{"nothing changed", 1, []string{"a", "b", "c", "d"}, false, -1},
+		{"a row above the anchor changed", 2, []string{"A", "b", "c", "d"}, false, -1},
+		{"the anchor row changed", 1, []string{"a", "B", "c", "d"}, false, 1},
+		{"a row below the anchor changed", 1, []string{"a", "b", "c", "D"}, false, 1},
+		{"the frame grew past the shadow", 3, []string{"a", "b", "c", "d", "e"}, false, 3},
+		{"the blink asks for it", 2, []string{"a", "b", "c", "d"}, true, 2},
+		{"unknown anchor", -1, []string{"a", "b", "c", "D"}, true, -1},
+		{"anchor past the frame", 4, []string{"a", "b", "c", "d"}, true, -1},
+	}
+	for _, tc := range cases {
+		if got := imeRepairStart(tc.anchor, painted, tc.rows, tc.due); got != tc.want {
+			t.Errorf("%s: imeRepairStart = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if got := imeRepairStart(0, nil, painted, true); got != -1 {
+		t.Errorf("with no shadow the whole frame is written anyway, want -1, got %d", got)
+	}
+}
+
 func TestViewportStreamingScrollsTheTranscriptInsteadOfRewritingIt(t *testing.T) {
 	r := newComposerRenderer(t, 80, 24)
 	out := r.out.(*bytes.Buffer)
@@ -3404,6 +3557,55 @@ func TestViewportPaintedRowsAreSelfContained(t *testing.T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	assertRowsDrawIndependently(t, r.vpPainted)
+}
+
+// TestSlashComposerChipLeavesTheCardBackgroundOff is the slash command typed
+// around an image chip: the chip used to put the composer card's style back
+// after itself, so on the slash row, which has no card, everything typed after
+// it came out on the card's grey, and the row ended with that background in
+// effect for the footer painted right after it.
+func TestSlashComposerChipLeavesTheCardBackgroundOff(t *testing.T) {
+	forceColorProfile(t)
+	r := newComposerRenderer(t, 80, 12)
+	display := buildComposerDisplayText("/improve [Image #1] 如截图所示", nil, []InputAttachment{{Path: "/tmp/a.png"}})
+	cursor := utf8.RuneCountInString(display)
+	r.RenderComposerState(ComposerRenderState{Text: display, Cursor: &cursor})
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	row := r.vpPainted[paintedRowContaining(t, r.vpPainted, "/improve")]
+	cells := rowCellBackgrounds(row)
+	for c := displayLineWidth("› /improve [Image #1]"); c < len(cells); c++ {
+		if cells[c] != "" {
+			t.Fatalf("cell %d after the chip must be on the terminal background, got %q: %q", c, cells[c], row)
+		}
+	}
+	assertRowsDrawIndependently(t, r.vpPainted)
+	for i, row := range r.vpPainted {
+		if state := sgrStateAfter(row); state != "" {
+			t.Fatalf("screen row %d leaves SGR %q in effect for the row painted after it: %q", i+1, state, row)
+		}
+	}
+}
+
+// TestCanvasRowClosesTheStyleARowLeavesOpen: which row the painter writes
+// next depends on what changed, and an erase there fills with whatever
+// background is still in effect, so a row on the canvas never hands its style
+// on. Capture cleaning keeps it open for selfContainedRows to carry.
+func TestCanvasRowClosesTheStyleARowLeavesOpen(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"\x1b[38;5;252;48;5;238mafter the chip", "\x1b[38;5;252;48;5;238mafter the chip\x1b[0m"},
+		{"\x1b[1mbold\x1b[0m tail", "\x1b[1mbold\x1b[0m tail"},
+		{"\x1b[1mbold\x1b[m", "\x1b[1mbold\x1b[m"},
+		{"plain", "plain"},
+	} {
+		if got := canvasRow(tc.in, 40); got != tc.want {
+			t.Errorf("canvasRow(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if open := "\x1b[1mcarried"; fitPaintRow(open, 40) != open {
+		t.Errorf("capture cleaning must leave the style open for the next row, got %q", fitPaintRow(open, 40))
+	}
 }
 
 // longShellCommand is long enough that its coloured header span must wrap

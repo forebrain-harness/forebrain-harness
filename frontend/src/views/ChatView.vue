@@ -112,10 +112,29 @@
             <template v-else>
               <div class="space-y-6">
                 <template v-for="(msg, idx) in messages" :key="msg.id ?? idx">
+                  <!-- A message the session model could not take: it stays in
+                       the thread and only the request was withheld, so the
+                       notice under it names the model and points at the way
+                       out it shares with the terminal — /model. -->
+                  <div
+                    v-if="msg.role === 'notice' && msg.imageRefusal"
+                    class="forebrain-err-block"
+                    role="alert"
+                    data-testid="image-refused-notice"
+                  >
+                    <ImageOff class="size-3.5" aria-hidden="true" />
+                    <div>
+                      <b>{{ msg.imageRefusal.model || sessionModelData?.model || '' }}</b> {{ t('chat.imageRefusedLine') }}
+                      <span class="forebrain-err-s">
+                        {{ t('chat.imageRefusedRecover') }}
+                        <button type="button" class="rewind-undo" data-testid="image-refused-switch" @click="modelChipRef?.openMenu()">{{ t('chat.imageRefusedSwitch') }}</button>
+                      </span>
+                    </div>
+                  </div>
                   <!-- A slash command's reply: UI output only, never part of the
                        transcript, so it is a notice card, not a message. -->
                   <div
-                    v-if="msg.role === 'notice'"
+                    v-else-if="msg.role === 'notice'"
                     class="mx-auto max-w-3xl rounded-lg border border-border bg-card px-4 py-3 text-sm text-card-foreground whitespace-pre-wrap break-words"
                   ><template v-if="msg.content">{{ msg.content }}</template><SlashPickerCard
                       v-if="msg.picker"
@@ -273,11 +292,26 @@
                            the terminal shows it: never reinterpreted as Markdown.
                            A message the runtime sent on their behalf says who
                            sent it, above the words. -->
-                      <div v-else-if="msg.role === 'user' && String(msg.content ?? '').trim()" class="u-wrap">
+                      <div v-else-if="msg.role === 'user' && (String(msg.content ?? '').trim() || msg.attachments?.length)" class="u-wrap">
                         <div class="u">
                           <p v-if="originLabel(msg.origin)" data-testid="message-origin"
                             class="mb-1 text-[11px] font-medium text-[var(--forebrain-muted-text)]">{{ originLabel(msg.origin) }}</p>
-                          <div class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
+                          <div v-if="String(msg.content ?? '').trim()" class="whitespace-pre-wrap break-words">{{ msg.content }}</div>
+                          <!-- The prototype's .u-atts: what the message attached sits in
+                               the bubble, under the words, as the terminal shows it. -->
+                          <ul v-if="msg.attachments?.length" class="u-atts" :aria-label="t('chat.messageAttachments')">
+                            <li v-for="(attachment, index) in msg.attachments" :key="attachment.fileId ?? attachment.path ?? index">
+                              <component :is="attachment.fileId ? 'a' : 'span'"
+                                v-bind="attachment.fileId ? { href: attachmentUrl(attachment.fileId), target: '_blank', rel: 'noopener noreferrer' } : {}"
+                                class="inline-flex min-h-[26px] max-w-[260px] items-center gap-1.5 rounded-md border border-border bg-background px-1.5 py-0.5 text-[11.5px] font-medium text-foreground"
+                                :class="attachment.fileId ? 'group hover:bg-accent hover:text-accent-foreground' : ''"
+                                :title="attachment.path ?? attachment.name">
+                                <ImageIcon v-if="isImageAttachment(attachment)" class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
+                                <Paperclip v-else class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
+                                <span class="min-w-0 break-all">{{ attachment.name || t('chat.attachment') }}</span>
+                              </component>
+                            </li>
+                          </ul>
                         </div>
                         <!-- The prototype's .u-acts: on hover (or keyboard focus) the
                              two actions the message offers — rewind to here and copy. -->
@@ -317,20 +351,6 @@
                         />
                       </div>
                       <RunWorkedLine :line="workedLineOf(msg, t)" />
-                      <ul v-if="msg.role === 'user' && msg.attachments?.length" class="mt-2 flex flex-wrap gap-2"
-                        :aria-label="t('chat.messageAttachments')">
-                        <li v-for="(attachment, index) in msg.attachments" :key="attachment.fileId ?? attachment.path ?? index">
-                          <component :is="attachment.fileId ? 'a' : 'span'"
-                            v-bind="attachment.fileId ? { href: attachmentUrl(attachment.fileId), target: '_blank', rel: 'noopener noreferrer' } : {}"
-                            class="inline-flex min-h-7 max-w-[260px] items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground"
-                            :class="attachment.fileId ? 'group hover:bg-accent hover:text-accent-foreground' : ''"
-                            :title="attachment.path ?? attachment.name">
-                            <ImageIcon v-if="isImageAttachment(attachment)" class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
-                            <Paperclip v-else class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
-                            <span class="min-w-0 break-all">{{ attachment.name || t('chat.attachment') }}</span>
-                          </component>
-                        </li>
-                      </ul>
                     </MessageContent>
                     <Avatar v-if="msg.role === 'user'" class="size-8 shrink-0 ring-1 ring-border">
                       <AvatarFallback class="bg-muted">
@@ -452,6 +472,7 @@
                       @open="workbench.toggle()"
                     />
                     <ModelChip
+                      ref="modelChipRef"
                       v-if="sessionModelData"
                       :session-id="sessionId ?? ''"
                       :selection="sessionModelData"
@@ -540,7 +561,7 @@
 <script setup lang="ts">
 import { h, ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, Paperclip, PanelRight, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
+import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import AgentViewTabs from '@/components/chat/AgentViewTabs.vue'
@@ -1223,6 +1244,8 @@ const { refresh: workspaceTreeRefresh } = useWorkspaceTree(workbenchScope)
  * effort chip reads the levels the catalog offers for the model in force.
  */
 const sessionModelData = ref<SessionModelResponse | null>(null)
+/** The composer's model chip, so a refusal in the thread can open its menu. */
+const modelChipRef = ref<InstanceType<typeof ModelChip> | null>(null)
 let sessionModelGeneration = 0
 
 async function loadSessionModel(sid: string | null) {
@@ -1710,7 +1733,14 @@ function messageClass(role: string): string | undefined {
 }
 
 function messageContentClass(role: string): string | undefined {
-  if (role === 'user') return undefined
+  if (role === 'user') {
+    // The design draws the user's bubble as `.u`, inside a `.u-wrap` that also
+    // holds the hover actions: the message column itself carries no chrome.
+    // Otherwise the column's own background and padding swallow the actions
+    // row (an invisible 24px strip under the words) and the attachment list,
+    // and every bubble reads looser than the design.
+    return 'gap-0 group-[.is-user]:rounded-none group-[.is-user]:bg-transparent group-[.is-user]:px-0 group-[.is-user]:py-0'
+  }
   return 'w-full min-w-0 max-w-full overflow-visible break-words [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto'
 }
 
@@ -2153,12 +2183,27 @@ onUnmounted(() => {
   padding: 4px 0;
 }
 
-/* The prototype's .u-wrap / .u-acts (plan 033): a user message's actions sit
-   under its bubble, right-aligned, and appear on hover or keyboard focus. */
+/* The prototype's .u-wrap / .u / .u-acts (plan 033): the user's own words are
+   the bubble and nothing else — the actions sit under it on the page, and what
+   the message attached sits in it. */
 .u-wrap {
   display: grid;
   justify-items: end;
   gap: 2px;
+}
+.u {
+  justify-self: end;
+  /* No width of its own: the grid sizes the bubble to the words and wraps them
+     at the row's cap, so a long message stays inside the row. */
+  background: var(--forebrain-brand-soft);
+  border-radius: 10px;
+  padding: 9px 13px;
+}
+.u-atts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
 }
 .u-acts {
   display: flex;

@@ -2133,18 +2133,26 @@ func imageAttachmentPlaceholder(index int) string {
 	return fmt.Sprintf("[Image #%d]", index+1)
 }
 
+// renderComposerImagePlaceholder draws an attachment's chip and ends in a full
+// reset: what the text after it looks like is the surface's business, not the
+// chip's. The composer card puts its own style back after every reset
+// (cardContent); the slash composer has no card, and a chip that restored the
+// card's style itself painted the card background under everything typed
+// after it there, and into the row painted next.
 func renderComposerImagePlaceholder(index int) string {
 	return termenv.ANSI.String(imageAttachmentPlaceholder(index)).
 		Foreground(termenv.ANSI.Color("15")).
 		Background(termenv.ANSI.Color("27")).
-		String() + sharedBlockTextStyle
+		String()
 }
 
+// renderComposerPastePlaceholder draws a long paste's chip, ending in a full
+// reset for the same reason as renderComposerImagePlaceholder.
 func renderComposerPastePlaceholder(placeholder string) string {
 	return termenv.ANSI.String(placeholder).
 		Foreground(termenv.ANSI.Color("15")).
 		Background(termenv.ANSI.Color("27")).
-		String() + sharedBlockTextStyle
+		String()
 }
 
 func buildComposerText(text string, pastes []PendingPaste, attachments []InputAttachment) string {

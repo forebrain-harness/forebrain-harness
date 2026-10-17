@@ -28,7 +28,7 @@
         :disabled="switching"
         @click="choose(option)"
       >
-        <b><Check v-if="isCurrent(option)" class="size-3.5" aria-hidden="true" />{{ option.model }}</b>
+        <b><Check v-if="isCurrent(option)" class="size-3.5" aria-hidden="true" />{{ option.model }}<span v-if="option.supportsImages" class="forebrain-chip-menu-badge" data-testid="model-supports-images">{{ t('chat.modelAcceptsImages') }}</span></b>
         <span>{{ option.provider }}</span>
       </button>
     </div>
@@ -106,4 +106,30 @@ function onDocPointerDown(event: PointerEvent) {
 
 onMounted(() => document.addEventListener('pointerdown', onDocPointerDown))
 onUnmounted(() => document.removeEventListener('pointerdown', onDocPointerDown))
+
+// A refusal notice under a message points the reader here: it opens the menu
+// from its own click, which lands after the pointerdown that would close it.
+function openMenu() {
+  if (!props.disabled && !switching.value) open.value = true
+}
+
+defineExpose({ openMenu })
 </script>
+
+<style scoped>
+/* The design's `.badge.ok` inside the model menu: the option's `<b>` is a flex
+   row, so `margin-left: auto` pins the badge to the option's right edge. */
+.forebrain-chip-menu-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: var(--forebrain-success-soft);
+  color: var(--forebrain-success);
+}
+</style>

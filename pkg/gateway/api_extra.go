@@ -1450,12 +1450,14 @@ func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 
 // sessionModelOption is one model this conversation's primary agent is
 // configured with, as the session's model chip offers it: the configured pair
-// plus the reasoning levels the shared catalog reports for it.
+// plus the reasoning levels and image support the shared catalog reports for
+// it.
 type sessionModelOption struct {
-	Provider string   `json:"provider"`
-	Model    string   `json:"model"`
-	Label    string   `json:"label"`
-	Efforts  []string `json:"efforts"`
+	Provider       string   `json:"provider"`
+	Model          string   `json:"model"`
+	Label          string   `json:"label"`
+	Efforts        []string `json:"efforts"`
+	SupportsImages bool     `json:"supports_images"`
 }
 
 // sessionModelEfforts names the reasoning levels one model offers: the
@@ -1484,6 +1486,20 @@ func sessionModelEfforts(records []turn.ModelRecord, canReason bool, provider, m
 	return nil
 }
 
+// sessionModelSupportsImages reports whether one configured option accepts
+// image input: the shared catalog listing's record for it when there is one
+// (models.json, or the ChatGPT account's input modalities), else the
+// configured choice's own catalog entry.
+func sessionModelSupportsImages(records []turn.ModelRecord, choice turn.ModelChoice) bool {
+	model := strings.TrimSpace(choice.Model)
+	for _, rec := range records {
+		if strings.EqualFold(strings.TrimSpace(rec.Provider), strings.TrimSpace(choice.Provider)) && strings.TrimSpace(rec.APIModel) == model {
+			return rec.SupportsAttachments
+		}
+	}
+	return choice.SupportsImages
+}
+
 // sessionModelOptions lists the models this conversation's agent is configured
 // with — the same list /model offers — each carrying its reasoning levels.
 func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessionModelOption {
@@ -1495,10 +1511,11 @@ func (s *Server) sessionModelOptions(cfg *config.Root, agentName string) []sessi
 	options := make([]sessionModelOption, 0, len(choices))
 	for _, choice := range choices {
 		options = append(options, sessionModelOption{
-			Provider: choice.Provider,
-			Model:    choice.Model,
-			Label:    choice.Label,
-			Efforts:  sessionModelEfforts(records, choice.CanReason, choice.Provider, choice.Model),
+			Provider:       choice.Provider,
+			Model:          choice.Model,
+			Label:          choice.Label,
+			Efforts:        sessionModelEfforts(records, choice.CanReason, choice.Provider, choice.Model),
+			SupportsImages: sessionModelSupportsImages(records, choice),
 		})
 	}
 	return options

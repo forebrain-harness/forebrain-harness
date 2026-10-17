@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseMention, parseSlash } from './composerTokens'
+import { acceptSlash, parseMention, parseSlash } from './composerTokens'
 // The same table the Go engine resolves against, asserted by
 // pkg/turn/composer_tokens_test.go (TestComposerTokenTable). Reading that one
 // file here is what makes the two surfaces one contract instead of two
 // implementations that happen to agree today.
 import tokenCases from '../../../pkg/turn/testdata/composer_tokens.json'
+// What completing a slash command does to the draft, asserted against
+// turn.AcceptSlash by TestSlashAcceptTable.
+import slashAcceptCases from '../../../pkg/turn/testdata/composer_slash_accept.json'
 
 type TokenCase = {
   draft: string
@@ -42,5 +45,27 @@ describe('composer token table', () => {
 
   it('does not treat a mid-word @ as a mention', () => {
     expect(parseMention('foo@bar', 7)).toBeNull()
+  })
+})
+
+type SlashAcceptCase = {
+  draft: string
+  start: number
+  end: number
+  name: string
+  want: string
+  cursor: number
+}
+
+describe('slash accept table', () => {
+  it('completes every case the way the engine does', () => {
+    const accepts = slashAcceptCases as SlashAcceptCase[]
+    expect(accepts.length).toBeGreaterThanOrEqual(8)
+    for (const tc of accepts) {
+      expect(acceptSlash(tc.draft, tc.start, tc.end, tc.name), `accept ${JSON.stringify(tc.draft)}`).toEqual({
+        text: tc.want,
+        cursor: tc.cursor,
+      })
+    }
   })
 })

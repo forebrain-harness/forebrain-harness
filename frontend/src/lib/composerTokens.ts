@@ -60,6 +60,23 @@ export function parseSlash(text: string, cursor: number): SlashToken | null {
 }
 
 /**
+ * Completes a "/" token with the command name, mirroring turn.AcceptSlash:
+ * [start, end) of text — what was typed of the command — becomes "/name ", and
+ * the rest of the text is kept, so a command typed in front of a message takes
+ * the message as its arguments. A rest that already starts with a space shares
+ * it rather than gaining a second. cursor is the caret just past the inserted
+ * space; an end before start reads as the end of the text.
+ */
+export function acceptSlash(text: string, start: number, end: number, name: string): { text: string; cursor: number } {
+  const from = Math.min(Math.max(start, 0), text.length)
+  const to = end < from || end > text.length ? text.length : end
+  const insert = `/${name} `
+  let rest = text.slice(to)
+  if (rest.startsWith(' ')) rest = rest.slice(1)
+  return { text: text.slice(0, from) + insert + rest, cursor: from + insert.length }
+}
+
+/**
  * The "@" (or full-width "＄") token the cursor sits in, mirroring
  * turn.TokenAtCursor: the sigil only starts a token at the start of the draft
  * or after whitespace, a mid-word "@" (user@host) is not a mention, and a

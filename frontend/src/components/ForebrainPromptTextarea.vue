@@ -5,7 +5,7 @@ import { cn } from '@repo/shadcn-vue/lib/utils'
 import { Bot, ChevronLeft, ChevronRight, FileText, Folder, Image as ImageIcon, Paperclip, Slash, X } from 'lucide-vue-next'
 import { computed, nextTick, ref, watch } from 'vue'
 import { forebrainApi, type MentionCandidate, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
-import { parseMention, parseSlash } from '@/lib/composerTokens'
+import { acceptSlash, parseMention, parseSlash } from '@/lib/composerTokens'
 import { mergeSubmissions, type ComposerSubmission, type PickedFile, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { useI18n } from '@/locales'
 
@@ -498,25 +498,13 @@ function applySlashCommand(cmd: SlashCommandRecord) {
   const cursor = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length
   const parsed = parseSlash(el.value, cursor)
   if (!parsed) return
-  const name = cmd.canonicalName || cmd.name
-  const insert = cmd.supportsInlineArgs ? `/${name} ` : `/${name}`
-  if (parsed.atStart) {
-    setTextInput(insert)
-    slashOpen.value = false
-    nextTick(() => {
-      const pos = insert.length
-      el.focus()
-      el.setSelectionRange(pos, pos)
-    })
-    return
-  }
-  // A mid-sentence reference replaces only its token, leaving the rest of the
-  // message — and the text after the cursor — intact.
-  const before = el.value.slice(0, parsed.start)
-  const after = el.value.slice(cursor)
-  setTextInput(before + insert + after)
+  // Only what was typed of the command is replaced, at the start of the
+  // message or in the middle of it: the text after the cursor is the message
+  // it was typed into, and stays.
+  const accepted = acceptSlash(el.value, parsed.start, cursor, cmd.canonicalName || cmd.name)
+  setTextInput(accepted.text)
   slashOpen.value = false
-  const pos = before.length + insert.length
+  const pos = accepted.cursor
   nextTick(() => {
     el.focus()
     el.setSelectionRange(pos, pos)

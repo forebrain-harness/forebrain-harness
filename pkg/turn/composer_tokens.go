@@ -55,3 +55,30 @@ func firstNonSpaceRune(runes []rune) int {
 	}
 	return -1
 }
+
+// AcceptSlash completes a "/" token with the command name: the runes
+// [start, end) of draft — what was typed of the command — become "/name ", and
+// the rest of the draft is kept. It returns the new draft and the caret just
+// past the inserted space.
+//
+// What follows the token is the message the command was typed into, never
+// part of the command, so it survives the completion: a command typed in front
+// of a message takes the message as its arguments. The trailing space puts the
+// caret on those arguments; a rest that already starts with a space shares it
+// rather than gaining a second.
+//
+// Offsets are in runes and are clamped to the draft, an end before start
+// reading as the end of the draft.
+func AcceptSlash(draft string, start, end int, name string) (string, int) {
+	runes := []rune(draft)
+	start = min(max(start, 0), len(runes))
+	if end < start || end > len(runes) {
+		end = len(runes)
+	}
+	insert := "/" + name + " "
+	rest := runes[end:]
+	if len(rest) > 0 && rest[0] == ' ' {
+		rest = rest[1:]
+	}
+	return string(runes[:start]) + insert + string(rest), start + len([]rune(insert))
+}

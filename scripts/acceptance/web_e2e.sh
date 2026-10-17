@@ -157,6 +157,12 @@ agents:
         model: glm-5.3-flash
         api_key: \${FAKE_LLM_KEY}
         base_url: http://127.0.0.1:$LLM_PORT
+      # A text-only model (catalog attachment: false) for the image-refusal
+      # spec; the chain never reaches it while the first entry works.
+      - provider: deepseek
+        model: deepseek-v4-pro
+        api_key: \${FAKE_LLM_KEY}
+        base_url: http://127.0.0.1:$LLM_PORT
 YAML
 fi
 

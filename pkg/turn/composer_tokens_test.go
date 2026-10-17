@@ -71,3 +71,39 @@ func TestComposerTokenTable(t *testing.T) {
 		})
 	}
 }
+
+// slashAcceptCase is one row of the shared table of slash completions: the
+// draft, the token range an accept replaces, the command name, and the draft
+// and caret that result. Like composer_tokens.json, the same file drives the
+// web composer's acceptSlash (frontend/src/lib/composerTokens.test.ts).
+type slashAcceptCase struct {
+	Draft  string `json:"draft"`
+	Start  int    `json:"start"`
+	End    int    `json:"end"`
+	Name   string `json:"name"`
+	Want   string `json:"want"`
+	Cursor int    `json:"cursor"`
+}
+
+// TestSlashAcceptTable is the contract for what completing a slash command
+// does to the draft, on both composers.
+func TestSlashAcceptTable(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "composer_slash_accept.json"))
+	if err != nil {
+		t.Fatalf("read slash accept table: %v", err)
+	}
+	var cases []slashAcceptCase
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatalf("parse slash accept table: %v", err)
+	}
+	if len(cases) < 8 {
+		t.Fatalf("slash accept table holds %d cases, want at least 8", len(cases))
+	}
+	for _, tc := range cases {
+		got, cursor := AcceptSlash(tc.Draft, tc.Start, tc.End, tc.Name)
+		if got != tc.Want || cursor != tc.Cursor {
+			t.Errorf("AcceptSlash(%q, %d, %d, %q) = (%q, %d), want (%q, %d)",
+				tc.Draft, tc.Start, tc.End, tc.Name, got, cursor, tc.Want, tc.Cursor)
+		}
+	}
+}

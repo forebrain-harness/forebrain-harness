@@ -139,14 +139,7 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	displayText := strings.TrimSpace(submission.DisplayText)
 	if len(submission.Attachments) > 0 {
 		var err error
-		// The same gate read_file and the web upload path apply: a text-only
-		// session model refuses the attached image with the one actionable
-		// sentence instead of sending a request the provider would reject.
-		imageRefusal := ""
-		if r := s.runner(); r != nil {
-			imageRefusal = r.ImageInputRefusal(ctx)
-		}
-		parts, displayText, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments, imageRefusal)
+		parts, displayText, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments)
 		if err != nil {
 			return err
 		}
@@ -169,7 +162,14 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 		}
 	}
 	defer unlock()
-	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, goalObjective, skillName, skillPath, skills, submission.CallerRendersReturnedError, io.Discard); err != nil {
+	// The same gate read_file applies: a text-only session model refuses a
+	// turn whose request would carry an image — attached now or already in
+	// the conversation — with one actionable sentence, instead of sending a
+	// request the provider would reject or dropping the image. Only the
+	// request is refused: the message is still stored, so after /model the
+	// conversation continues with every image in it.
+	imageRefusal := run.ImageTurnRefusal(ctx, s.runner(), sessionID, len(submission.Attachments) > 0)
+	if err := s.dispatchUserTurnContent(ctx, sessionID, ch, modelInput, rawInput, parts, userPartsJSON, imageRefusal, goalObjective, skillName, skillPath, skills, submission.CallerRendersReturnedError, io.Discard); err != nil {
 		return err
 	}
 	sink := s.toolApprovalSinkGet()

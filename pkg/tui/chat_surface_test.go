@@ -379,6 +379,128 @@ func TestDispatchSurfaceTurnPassesResolvedMentionsThroughVerbatim(t *testing.T) 
 	require.Contains(t, llm.TextContent(msgs[0].Parts...), "[attachment]")
 }
 
+// A message whose image the session model cannot take is refused, but it is
+// what the user said: it must stay in the conversation, image included. While
+// the model is still text-only every later turn is refused the same way (the
+// image is never dropped so the model can answer) and each of those messages
+// is kept too; once /model picks a model that takes images, a plain
+// "continue" sends the model the very image the refused message attached.
+func TestDispatchSurfaceTurnKeepsImageMessageRefusedByTextOnlyModel(t *testing.T) {
+	previous, err := llm.RepoModelsJSONForTest()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if restored, err := llm.Parse(previous); err == nil {
+			llm.SetGlobalCatalogForTest(restored)
+		}
+	})
+	setAttachment := func(accepts bool) {
+		flag := "false"
+		if accepts {
+			flag = "true"
+		}
+		cat, err := llm.Parse([]byte(`{"openai/gpt-main":{"id":"openai/gpt-main","attachment":` + flag + `,"limit":{"context":200000,"output":8000}}}`))
+		require.NoError(t, err)
+		llm.SetGlobalCatalogForTest(cat)
+	}
+	setAttachment(false)
+
+	model := &capturingLLM{text: "It is a red square."}
+	s := newCharacterizationSession(t, model)
+	ctx := context.Background()
+	sid := "image-refused"
+	img := newTestPNG(t)
+
+	err = s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{
+		SessionID: sid,
+		UserText:  "what color is this?",
+		// The shape the @ picker submits: a bare path, no type.
+		Attachments: []turn.InputAttachment{{Path: img, Label: "probe.png"}},
+	})
+	require.Error(t, err)
+	var refused *run.ImageInputRefusedError
+	require.ErrorAs(t, err, &refused)
+	require.Contains(t, err.Error(), "does not accept image input")
+	require.Contains(t, err.Error(), "/model")
+	require.Empty(t, model.lastReceived(), "a refused turn must not send a request")
+
+	rows := captureCharacterization(t, s, sid).Messages
+	require.Len(t, rows, 1)
+	require.Equal(t, "user", rows[0].Role)
+	require.Equal(t, "what color is this?\n[Image #1]", rows[0].Content)
+	require.Contains(t, rows[0].PartsJSON, state.PartTypeFileReference)
+	require.Contains(t, rows[0].PartsJSON, img)
+	require.Contains(t, rows[0].PartsJSON, `"mime_type":"image/png"`)
+
+	err = s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{SessionID: sid, UserText: "continue"})
+	require.Error(t, err, "the conversation still holds an image the model cannot take")
+	require.Contains(t, err.Error(), "does not accept image input")
+	require.Empty(t, model.lastReceived())
+	rows = captureCharacterization(t, s, sid).Messages
+	require.Len(t, rows, 2, "the refused follow-up is kept as well")
+	require.Equal(t, "continue", rows[1].Content)
+
+	setAttachment(true)
+	require.NoError(t, s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{SessionID: sid, UserText: "continue"}))
+	var imageMsg *llm.Message
+	received := model.lastReceived()
+	for i := range received {
+		if received[i].Role == llm.RoleUser && strings.Contains(received[i].TextContent(), "what color is this?") {
+			imageMsg = &received[i]
+			break
+		}
+	}
+	require.NotNil(t, imageMsg, "the refused message must reach the model once it can see images: %+v", received)
+	sawImage := false
+	for _, part := range imageMsg.Parts {
+		if part.Type == llm.ContentTypeImageBase64 && strings.TrimSpace(part.ImageBase64) != "" {
+			sawImage = true
+		}
+	}
+	require.True(t, sawImage, "the refused message's image must be sent, not its placeholder: %+v", imageMsg.Parts)
+}
+
+// A refused message is kept without starting a run, so nothing downstream
+// would ever discover that another surface is running this conversation: the
+// refusal must ask the store first and withdraw the message the way a busy
+// session withdraws any message, instead of writing it into a conversation
+// someone else is mid-turn in.
+func TestDispatchSurfaceTurnDoesNotKeepARefusedMessageInABusySession(t *testing.T) {
+	previous, err := llm.RepoModelsJSONForTest()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if restored, err := llm.Parse(previous); err == nil {
+			llm.SetGlobalCatalogForTest(restored)
+		}
+	})
+	cat, err := llm.Parse([]byte(`{"openai/gpt-main":{"id":"openai/gpt-main","attachment":false,"limit":{"context":200000,"output":8000}}}`))
+	require.NoError(t, err)
+	llm.SetGlobalCatalogForTest(cat)
+
+	model := &capturingLLM{text: "It is a red square."}
+	s := newCharacterizationSession(t, model)
+	ctx := context.Background()
+	sid := "image-refused-busy"
+	require.NoError(t, s.sessStore().Ensure(ctx, sid, sid))
+
+	// Another surface is mid-turn in this conversation and still renews its
+	// lease, which is what makes its run live.
+	other := &state.RunStore{DB: s.sqlDB(), Owner: "other-surface"}
+	stop, err := other.HoldOwnerLease(ctx)
+	require.NoError(t, err)
+	defer stop()
+	_, err = other.CreateRun(ctx, sid, "running elsewhere")
+	require.NoError(t, err)
+
+	err = s.DispatchSurfaceTurn(ctx, turn.TurnSubmission{
+		SessionID:   sid,
+		UserText:    "what color is this?",
+		Attachments: []turn.InputAttachment{{Path: newTestPNG(t), Label: "probe.png"}},
+	})
+	require.ErrorIs(t, err, state.ErrSessionBusy)
+	require.Empty(t, captureCharacterization(t, s, sid).Messages, "a busy session must not keep the refused message")
+	require.Empty(t, model.lastReceived())
+}
+
 // TestBuildSurfaceUserPartsJSONPersistsCanonicalAttachmentParts moved to
 // pkg/turn/input_parts_test.go (P5-2): it exercises turn.BuildSurfaceUserPartsJSON
 // directly and has no ChatSession dependency.

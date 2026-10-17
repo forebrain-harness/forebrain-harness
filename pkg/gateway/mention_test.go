@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -382,12 +383,13 @@ func TestWebImageUploadUsesFileReferencePart(t *testing.T) {
 	}
 }
 
-// TestWebImageUploadRefusedOnTextOnlyModel pins the web half of the attachment
-// gate: an image upload on a session whose model the catalog marks text-only is
-// refused with the same one-step-recoverable sentence read_file gives, before
-// any pixels are sent, rather than reaching the provider as a 400. A non-image
-// upload is not touched by the image gate.
-func TestWebImageUploadRefusedOnTextOnlyModel(t *testing.T) {
+// TestWebImageGateRefusesTheTurnNotTheAttachment pins the split the web now
+// shares with the terminal: preparing a message attaches an image upload
+// whatever the model is — the row it becomes keeps the picture, so switching
+// model later still sends it — and the turn gate refuses only the request,
+// naming the model and pointing at /model. A non-image upload is not the
+// image gate's business.
+func TestWebImageGateRefusesTheTurnNotTheAttachment(t *testing.T) {
 	home, workspace := newMentionWorkspace(t)
 	ctx := context.Background()
 	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.db"))
@@ -428,14 +430,34 @@ func TestWebImageUploadRefusedOnTextOnlyModel(t *testing.T) {
 	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: cfg}}
 	s := &Server{Home: home, Files: files, Sessions: sessions, Projects: projects, Runner: runner}
 
-	if _, err := s.prepareWebTurnInput(ctx, "s1", "look", []string{photo.ID}, nil); err == nil {
-		t.Fatal("expected an image upload to be refused on a text-only model")
-	} else if !strings.Contains(err.Error(), "deepseek-v4-pro") || !strings.Contains(err.Error(), "/model") {
-		t.Fatalf("refusal = %q, want it to name the model and point at /model", err)
+	// The attachment step no longer judges the model: the picture is attached
+	// and recorded as the reference a later request replays.
+	prepared, err := s.prepareWebTurnInput(ctx, "s1", "look", []string{photo.ID}, nil)
+	if err != nil {
+		t.Fatalf("an image upload must still attach on a text-only model: %v", err)
+	}
+	if !strings.Contains(prepared.partsJSON, state.PartTypeFileReference) || !strings.Contains(prepared.partsJSON, "image/png") {
+		t.Fatalf("prepared parts = %q, want the image kept as a file reference with its MIME type", prepared.partsJSON)
 	}
 
-	// A non-image upload is not the image gate's business: it still attaches.
+	// The turn gate refuses the request, not the message.
+	refusal := run.ImageTurnRefusal(ctx, runner, "s1", s.webMessageAttachesImage(ctx, []string{photo.ID}, nil))
+	if refusal == nil {
+		t.Fatal("expected the turn gate to refuse an image upload on a text-only model")
+	}
+	if !strings.Contains(refusal.Error(), "deepseek-v4-pro") || !strings.Contains(refusal.Error(), "/model") {
+		t.Fatalf("refusal = %q, want it to name the model and point at /model", refusal)
+	}
+	var detail *run.ImageInputRefusedError
+	if !errors.As(refusal, &detail) || detail.Provider != "deepseek" || detail.Model != "deepseek-v4-pro" {
+		t.Fatalf("refusal = %#v, want the typed refusal naming deepseek/deepseek-v4-pro", refusal)
+	}
+
+	// A non-image upload attaches and is not the image gate's business.
 	if _, err := s.prepareWebTurnInput(ctx, "s1", "look", []string{report.ID}, nil); err != nil {
-		t.Fatalf("non-image upload must not be refused by the image gate: %v", err)
+		t.Fatalf("non-image upload must not be refused: %v", err)
+	}
+	if run.ImageTurnRefusal(ctx, runner, "s1", s.webMessageAttachesImage(ctx, []string{report.ID}, nil)) != nil {
+		t.Fatal("a message carrying no image must not be refused by the image gate")
 	}
 }

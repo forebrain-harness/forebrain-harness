@@ -41,7 +41,11 @@ cmd_build() {
   echo "built $BIN"
 }
 
-cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+# serve [mode] [answer-text] [drip-delay] -- everything start does except
+# launching the TUI: the isolated home, its config and the fake provider. It is
+# the half term_live.py needs, which runs the TUI in a Terminal.app window of its
+# own instead of in tmux.
+cmd_serve() {
   local mode="${1:-hang}" text="${2:-FAKE_ANSWER}" delay="${3:-0.6}"
   cmd_stop >/dev/null 2>&1 || true
   [ -x "$BIN" ] || cmd_build
@@ -85,6 +89,12 @@ YAML
     sleep 0.1
   done
   grep -q LISTENING "$WORK/provider.log" || die "fake provider ($mode) never bound port $PORT"
+  echo "serving: provider=$mode port=$PORT home=$HOME_DIR"
+}
+
+cmd_start() { # start [hang|stream|reply|usage|drip|toolcall|ask|shell|tool|limit|subagent-net|subagent-limit] [answer-text] [drip-delay]
+  local mode="${1:-hang}"
+  cmd_serve "$@"
 
   # RESUME_ID reopens an existing session instead of starting a new one, which
   # is the only way to check what a resume replays. It deliberately does NOT
@@ -159,7 +169,7 @@ cmd_stop() {
 cmd_reset() { cmd_stop >/dev/null 2>&1 || true; rm -rf "$HOME_DIR" "$PROJ"; echo "reset $WORK"; }
 
 case "${1:-}" in
-  build|start|send|key|submit|click|wheel|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
+  build|serve|start|send|key|submit|click|wheel|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
   provider-log) shift; cmd_provider_log ;;
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
@@ -189,6 +199,9 @@ usage: driver.sh <command>
                          starting a new one (does not reset the home)
                          ENABLE_SUBAGENT=1 enables the subagent tools
                          (subagent_run, subagent_fanout, ...) for the session
+  serve [mode] [answer-text] [drip-delay]
+                         start's home, config and fake provider without the
+                         TUI, for term_live.py to run it in Terminal.app
   submit <text>          type <text> and press Enter
   send <text>            type <text> without pressing Enter
   key <key...>           send keys (Enter, Escape, C-c, Down, ...)

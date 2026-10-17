@@ -908,15 +908,13 @@ func Run(ctx context.Context, opts Options) error {
 			renderComposerWithState(renderer, &state)
 			continue
 		}
-		// Enter on Active overlay substitutes line with /<selected-cmd>. The
-		// user typed "/" or "/prefix" and pressed Enter; pick the highlighted
-		// row from Visible and dispatch that command.
+		// Enter on Active overlay substitutes the highlighted row from Visible
+		// for the "/" or "/prefix" the user typed and dispatches that command,
+		// keeping any message the prefix was typed in front of as its
+		// arguments.
 		if overlay := state.composer.SlashOverlay; overlay != nil && overlay.Active && !overlay.Inline &&
 			len(overlay.Visible) > 0 && strings.HasPrefix(strings.TrimSpace(line), "/") {
-			idx := overlay.SelectedIdx
-			if idx >= 0 && idx < len(overlay.Visible) {
-				line = "/" + overlay.Visible[idx].Name
-			}
+			line = state.composer.SlashPickerSubmitLine(line)
 		}
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if lower == "exit" || lower == "quit" {

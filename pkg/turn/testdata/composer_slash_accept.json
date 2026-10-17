@@ -1,0 +1,11 @@
+[
+  {"draft": "/", "start": 0, "end": 1, "name": "plan", "want": "/plan ", "cursor": 6},
+  {"draft": "/pl", "start": 0, "end": 3, "name": "plan", "want": "/plan ", "cursor": 6},
+  {"draft": "/pl commit 1527", "start": 0, "end": 3, "name": "plan", "want": "/plan commit 1527", "cursor": 6},
+  {"draft": "/plcommit 1527", "start": 0, "end": 3, "name": "plan", "want": "/plan commit 1527", "cursor": 6},
+  {"draft": "/pl\ncommit", "start": 0, "end": 3, "name": "plan", "want": "/plan \ncommit", "cursor": 6},
+  {"draft": "  /pl x", "start": 2, "end": 5, "name": "plan", "want": "  /plan x", "cursor": 8},
+  {"draft": "看下 /imp", "start": 3, "end": 7, "name": "improve", "want": "看下 /improve ", "cursor": 12},
+  {"draft": "看下 /imp 这个", "start": 3, "end": 7, "name": "improve", "want": "看下 /improve 这个", "cursor": 12},
+  {"draft": "/pl", "start": 0, "end": -1, "name": "plan", "want": "/plan ", "cursor": 6}
+]

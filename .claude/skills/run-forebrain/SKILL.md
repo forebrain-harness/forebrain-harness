@@ -1,6 +1,6 @@
 ---
 name: run-forebrain
-description: Build, launch, drive and screenshot the forebrain TUI for real - send keys, read the rendered screen, and check the state DB; and replay the viewport painter in macOS Terminal.app to screenshot pixel-level rendering (stray dots, residue after scrolling, glyphs drawing past their row). Use when asked to run, start, or screenshot forebrain, to confirm an interactive change (Esc/Ctrl+C handling, composer, approvals, cancellation, viewport) works in the actual app rather than only in tests, or to reproduce/verify a visual rendering artifact in the TUI.
+description: Build, launch, drive and screenshot the forebrain TUI for real - send keys, read the rendered screen, and check the state DB; replay the viewport painter in macOS Terminal.app to screenshot pixel-level rendering (stray dots, residue after scrolling, glyphs drawing past their row); and run it live in a Terminal.app window with real key presses through an input method (pinyin marked text). Use when asked to run, start, or screenshot forebrain, to confirm an interactive change (Esc/Ctrl+C handling, composer, approvals, cancellation, viewport) works in the actual app rather than only in tests, or to reproduce/verify a visual rendering artifact in the TUI, including one that only appears while typing Chinese.
 ---
 
 forebrain is a Go terminal UI. It takes over the terminal, so an agent drives it
@@ -13,6 +13,11 @@ scroll, a glyph reaching into the next row — never shows in `driver.sh screen`
 For those, `paint_dump.sh` records the painter's real bytes and `term_replay.py`
 plays them in a real Terminal.app window and screenshots every step (see
 [Run: pixel-level rendering](#run-pixel-level-rendering-in-terminalapp)).
+Neither ever sees an input method: pinyin being composed lives between the
+keyboard and Terminal.app, and the program gets only the committed text, or
+nothing at all. For those, `term_live.py` runs forebrain in a Terminal.app
+window of its own and presses real keys in it (see
+[Run: live in Terminal.app](#run-live-in-terminalapp-with-a-real-input-method)).
 
 The reason for the fake provider is not offline convenience: most of forebrain's
 interactive behaviour is defined **relative to the model's first output-bearing
@@ -163,6 +168,88 @@ zoomed crop of 020: .../fb-paint-old/020-vs-ref.png
   where `b` is bare background — something a fresh paint does not draw) and
   other differences, and saves a 2× crop around them. Read the crop.
 
+## Run: live in Terminal.app with a real input method
+
+For bugs that need the real terminal *and* the real keyboard path — above all
+an input method's marked text. macOS only; the owner types with Sogou pinyin.
+`driver.sh serve` sets up the same isolated home, config and fake provider as
+`start` (same modes and arguments) without launching the TUI in tmux, and
+`term_live.py open` runs it in a new Terminal.app window instead. Read
+[the live gotchas](#live-terminalapp-and-input-methods) before the first
+`keys`: it needs two permissions, and the input method in its Chinese mode.
+
+```bash
+R=.claude/skills/run-forebrain
+D=$TMPDIR/fb-live
+$R/driver.sh serve reply ok                        # home, config, fake provider; no tmux
+python3 $R/term_live.py open $D/fb 131 30          # forebrain in its own window, 131x30
+python3 $R/term_live.py send $D/fb ' 如forebrain harness tui的composer截图所示，鼠标拖拽选中某一区间会导致后面的直到终端最右边的区域都露出终端背景色，请定位根因并'
+python3 $R/term_live.py keys $D/fb xiufu           # Sogou composes xiu'fu at the caret
+python3 $R/term_live.py keys $D/fb space           # and commits 修复
+python3 $R/term_live.py contents $D/fb | tail -3   # Terminal.app's own screen
+python3 $R/term_live.py close $D/fb
+$R/driver.sh stop
+```
+
+Observed (the bite out of the composer card's bottom-right corner, fixed by
+`imeRepairStart`) — the caret sat 3 columns from the right edge, the marked text
+ran on into the bottom rule, and the rule kept 3 blank cells after the commit:
+
+```
+before                                      after
+ 131|  修复                                   131|  修复
+ 128|─────────────────────────…               131|─────────────────────────…
+ 131|deepseek/deepseek-chat …                 131|deepseek/deepseek-chat …
+```
+
+What Terminal.app itself does, with no forebrain involved — `probe` paints a
+40×12 screen of lettered rows, parks the cursor and never writes again:
+
+```bash
+python3 $R/term_live.py probe $D/probe 6 20        # cursor parked at row 6, column 20
+python3 $R/term_live.py keys $D/probe xiufu
+python3 $R/term_live.py contents $D/probe | sed -n 6p
+python3 $R/term_live.py keys $D/probe esc          # cancels the composition
+python3 $R/term_live.py contents $D/probe | sed -n 6p
+cat $D/probe/in.log                                # what reached the program
+python3 $R/term_live.py close $D/probe
+```
+
+```
+  40|FFFFFFFFFFFFFFFFFFFxiu'fuFFFFFFFFFFFFFFF
+  34|FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+size 40x12 cursor 6;20
+```
+
+The marked text is *inserted* into Terminal.app's screen; cancelling it shifts
+the row back and leaves 6 blank cells at its end, and the program is sent
+nothing at all.
+
+- `open <dir> [cols] [rows]` (default 141×30) runs `$FOREBRAIN_RUN_WORK/forebrain`
+  in the driver's home and project inside a transparent pty proxy: every byte
+  passes through unchanged both ways, the program's output is kept in
+  `<dir>/out.bin` with one `offset time` line per write in `out.idx`, and every
+  input byte in `in.log`, marked `kbd` (the keyboard) or `send`. It answers the
+  trust page and returns once the composer is drawn.
+- `send <dir> <text>` writes bytes straight to the program, with Python escapes
+  (`'\x16'` is ctrl+v, `'\x1b'` Esc, `'\x1b[200~…\x1b[201~'` a bracketed paste).
+  No input method sees them: use it to set up text, never to test typing.
+- `keys <dir> <key>...` presses real keys through System Events, which the
+  input method does see. A key is a word of lowercase letters (`xiufu` presses
+  x, i, u, f, u), a name (`space esc return tab delete shift`) or a raw macOS
+  key code.
+- `contents <dir>` prints Terminal.app's own screen, each line with its display
+  width. Compared with what `bytes <dir> [seconds]` shows the program wrote,
+  it tells a terminal's own change from the program's.
+- `shot <dir> <png>` screenshots the window; `close <dir>` quits and the window
+  closes by itself.
+- `probe <dir> <row> <col> [cols] [rows]` and `paint <dir> fill|row R|cup R C`
+  isolate the terminal: the probe repaints only when told to.
+- For the "before" run, build the old commit in a throwaway `git worktree` into
+  a second `FOREBRAIN_RUN_WORK` and symlink `dict`, `fonts`, `models.json` and
+  `tokenizers` beside it from the current one; never revert the fix in the
+  shared tree.
+
 ## Run (human path)
 
 ```bash
@@ -247,6 +334,39 @@ sessions.
   neighbour. Record every step and compare the last one against `ref`, which is
   how a fresh paint of the same state looks.
 
+### Live Terminal.app and input methods
+
+- **Two permissions, both the owner's to grant.** The first `keys` asks
+  "Terminal wants to control System Events"; until it is answered every
+  osascript call to System Events hangs, which `term_live.py` reports as a
+  timeout. Pressing keys also needs Terminal under System Settings → Privacy &
+  Security → Accessibility, or osascript fails with error 1002. Ask the owner;
+  never click either yourself.
+- **`keystroke "text"` bypasses the input method**: the letters reach the
+  program as they are. Only `key code` presses — what `keys` sends — go through
+  it.
+- **The input method must be composing.** If `in.log` shows the letters arriving
+  as `kbd b'x'`, Sogou is in its English mode: `keys <dir> shift` toggles it
+  (`keys` presses Shift in a System Events call of its own, because pressed in
+  the same call as the keys after it, it shifts them). Put it back the way you found it when you are done.
+- **`keys` takes the focus.** It brings its own window to the front, by the id
+  `do script` returned, and checks that window is in front before every press;
+  the owner's window loses the focus meanwhile, so keep the run short.
+- **Terminal.app inserts marked text into its screen at the hardware cursor**,
+  even a hidden one: the rest of the row moves right, cells pushed past the
+  edge are dropped, and text that reaches the edge carries on into the next
+  rows. Committing or cancelling shifts every touched row back and leaves blank
+  cells, on the default background, at the end of each. Marked text that runs
+  past the last row scrolls the whole alt screen. A cancel sends the program
+  nothing. This is why the painter rewrites the rows from the hardware cursor
+  down and parks the cursor when no caret is shown (`imeRepairStart`).
+- **`contents` joins soft-wrapped rows into one line**, and marked text that
+  wraps leaves the rows it crossed marked as wrapped: after an input-method run
+  two screen rows may come back as one line.
+- **Terminal.app erases with the background in effect.** `\x1b[2K` and `\x1b[K`
+  fill with whatever background the last SGR left on, so a row that ends with
+  a background still set paints the next row the painter erases.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -258,6 +378,11 @@ sessions.
 | Turn never leaves `Working` in `reply` mode | Expected in `hang`/`stream` mode. In `reply` mode check `$D provider-log` for a `REQUEST` line — no line means the request never left forebrain. A `REQUEST` line followed by a Python traceback means the fake provider crashed on that request; the traceback names why. |
 | `$D messages` / `$D title` print nothing after Esc in `hang` mode | Not an error: a turn withdrawn before the first output writes nothing. |
 | `no matches found: …/fb-paint/*` from zsh | zsh fails a glob that matches nothing. `paint_dump.sh` clears its out-dir itself; don't `rm` its contents with a glob. |
+| `term_live: nothing listens on port …` | Run `driver.sh serve <mode>` first, with the same `FOREBRAIN_RUN_WORK` and `FOREBRAIN_RUN_PORT`. |
+| `term_live: osascript timed out` | A permission dialog is waiting on screen; see the live gotchas. |
+| `osascript failed: … (1002)` on `keys` | Terminal lacks Accessibility; see the live gotchas. |
+| `keys` letters land in the composer as plain text | The input method is in its English mode, or not selected; see the live gotchas. |
+| `term_live: forebrain never reached the composer` | Read `<dir>/out.bin` and `<dir>/proxy.err`; a config failure prints there before the TUI paints. |
 
 ## Test suite
 
