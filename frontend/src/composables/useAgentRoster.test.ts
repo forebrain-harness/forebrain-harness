@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { useAgentRoster, agentRosterViewTarget } from './useAgentRoster'
+import { useAgentRoster, agentRosterConversationTarget, agentRosterViewTarget } from './useAgentRoster'
 import { forebrainApi, type AgentRosterRow } from '@/lib/api'
 
 describe('useAgentRoster', () => {
@@ -78,6 +78,37 @@ describe('useAgentRoster', () => {
 
     expect(agentRosterViewTarget({
       id: 'child-1',
+      kind: 'subagent',
+      label: 'child',
+      status: 'running',
+    })).toBeNull()
+  })
+
+  it('points a subagent at the conversation it ran in, not at its worker session', () => {
+    // 所在会话 is the dialogue the subagent belongs to; its own worker session is
+    // a separate conversation the operator never opened.
+    expect(agentRosterConversationTarget({
+      id: 'child-1',
+      kind: 'subagent',
+      label: 'child',
+      status: 'running',
+      sessionId: 'worker-1',
+      parentSessionId: 'parent-1',
+    })).toEqual({ path: '/', query: { session: 'parent-1' } })
+  })
+
+  it('falls back to the row’s own session when it carries no parent', () => {
+    // A primary agent is its own conversation.
+    expect(agentRosterConversationTarget({
+      id: 'review',
+      kind: 'primary',
+      label: 'review',
+      status: 'running',
+      sessionId: 'session-1',
+    })).toEqual({ path: '/', query: { session: 'session-1' } })
+
+    expect(agentRosterConversationTarget({
+      id: 'child-2',
       kind: 'subagent',
       label: 'child',
       status: 'running',

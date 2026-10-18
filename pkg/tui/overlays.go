@@ -2611,7 +2611,14 @@ func (o *questionOverlay) renderOptionRow(c *qlineCollector, i int, opt state.As
 	c.writeLinef("%s", row)
 	if desc := strings.TrimSpace(opt.Description); desc != "" {
 		pad := strings.Repeat(" ", idxWidth+4)
-		c.writeLinef("%s\x1b[2m%s\x1b[0m", pad, truncate(desc, 200))
+		// Descriptions are model-written prose of arbitrary length: show them
+		// whole and let the viewport soft-wrap. Any literal newline inside the
+		// description gets the same indent so continuation lines stay in the
+		// description column instead of falling back to column 0.
+		desc = strings.ReplaceAll(desc, "\r\n", "\n")
+		for _, line := range strings.Split(desc, "\n") {
+			c.writeLinef("%s\x1b[2m%s\x1b[0m", pad, line)
+		}
 	}
 }
 

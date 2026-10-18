@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { config, flushPromises, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 const hostDirs = vi.fn()
 const hostDirCreate = vi.fn()
@@ -15,6 +16,10 @@ vi.mock('@/lib/api', () => ({
 import { setLocale } from '@/locales'
 import type { HostDirEntry } from '@/lib/api'
 import FolderDialog from './FolderDialog.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 function listing(path: string, entries: HostDirEntry[], extra: { parent?: string; places?: Array<{ name: string; path: string }> } = {}) {
   return {

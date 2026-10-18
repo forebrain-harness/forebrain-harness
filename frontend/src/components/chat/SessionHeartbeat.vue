@@ -80,7 +80,7 @@
             <button
               type="button"
               class="heartbeat-other-open"
-              :title="t('heartbeat.openConversation')"
+              v-tip:top="t('heartbeat.openConversation')"
               @click="openConversation(beat.sessionId)"
             >
               <Activity
@@ -96,7 +96,7 @@
               class="heartbeat-other-action"
               :disabled="busy"
               :aria-label="beat.paused ? t('heartbeat.resume') : t('heartbeat.pause')"
-              :title="beat.paused ? t('heartbeat.resume') : t('heartbeat.pause')"
+              v-tip:top="beat.paused ? t('heartbeat.resume') : t('heartbeat.pause')"
               @click="setRunning(beat, beat.paused)"
             >
               <Play v-if="beat.paused" class="size-3" aria-hidden="true" />

@@ -364,10 +364,13 @@ func (c *CronService) pruneExpiredFires(ctx context.Context, now time.Time) erro
 // CronJobInput is what a surface supplies to create or edit a job. The pointer
 // fields are the ones an edit may leave alone.
 type CronJobInput struct {
-	Name        string
-	Schedule    string
-	Prompt      string
-	Deliver     string
+	Name     string
+	Schedule string
+	Prompt   string
+	Deliver  string
+	// DeliverSet says the surface named a delivery target; without it an edit
+	// keeps the job's own (pausing a job must not clear where it posts).
+	DeliverSet  bool
 	Enabled     *bool
 	RepeatLimit int
 	// ProjectID is the project the job fires in; a job always belongs to one.
@@ -471,7 +474,9 @@ func (c *CronService) UpdateJob(ctx context.Context, agentID, jobID string, in C
 	if v := strings.TrimSpace(in.Schedule); v != "" {
 		job.Sched = v
 	}
-	job.Deliver = strings.TrimSpace(in.Deliver)
+	if in.DeliverSet {
+		job.Deliver = strings.TrimSpace(in.Deliver)
+	}
 	if in.Enabled != nil {
 		job.Enabled = *in.Enabled
 	}
@@ -517,6 +522,17 @@ func (c *CronService) JobRuns(ctx context.Context, agentID, jobID string, limit 
 		return nil, err
 	}
 	return c.store().ListRuns(ctx, job.ID, limit)
+}
+
+// JobRunsPage returns one page of a job's fires and how many fires it has in
+// all. The ownership check is the one JobRuns makes: another agent's job is
+// not found, so its history is not readable either.
+func (c *CronService) JobRunsPage(ctx context.Context, agentID, jobID string, limit, offset int) ([]state.CronRun, int, error) {
+	job, err := c.Job(ctx, agentID, jobID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return c.store().ListRunsPage(ctx, job.ID, limit, offset)
 }
 
 func (c *CronService) Heartbeat(ctx context.Context, sessionID string) (*state.Heartbeat, error) {

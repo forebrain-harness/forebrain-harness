@@ -198,6 +198,12 @@ export function sessionTitleFromContent(content: string): string
 菜单栏折叠按钮位置、深浅色按钮位置、语言箭头、顶栏模型名、项目标签文字 `项目 · `、抽屉标题 `对话 · 主代理`、工坊返回箭头、根路径自动回到上次会话、新对话问候语底部对齐。
 其它原因的失败 → STOP。
 
+### 执行后复核（2026-10-18）
+
+本计划已执行（工作区未提交）。冷读 + 对照工作区代码确认一处遗留：`main.css` 的 `.forebrain-topbar > :not(.forebrain-topbar-title):not(.forebrain-topbar-name):not(.forebrain-topbar-spacer) { flex: none }` 会命中技能工坊 leading 的根 `div`，
+面包屑叶子 `.forebrain-topbar-name` 因此不能缩短，长技能名不截断。**修正已并入 plan 075 Step 3**（新增 `.forebrain-topbar-crumb/-meta` 并把工坊 leading 根元素改用 `forebrain-topbar-crumb`），这里不再单独处理。
+另：`App.vue` 主代理下拉里删除图标按钮仍有原生 `:title`，由 plan 076 Step 6 的全站扫描处理。
+
 ## Test plan
 
 Step 3、5 的单测；Step 8 的 e2e；Step 9 全套回归。另附 4 张截图（`$TMPDIR/072-*.png`）：新对话首页、普通对话顶栏、超长标题顶栏、折叠菜单栏，并与原型对应状态并排对照。

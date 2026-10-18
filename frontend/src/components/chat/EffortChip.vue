@@ -4,7 +4,7 @@
       type="button"
       class="forebrain-chip-btn"
       :disabled="disabled"
-      :title="t('chat.effortChipTitle')"
+      v-tip:top="t('chat.effortChipTitle')"
       aria-haspopup="listbox"
       :aria-expanded="open"
       data-testid="effort-chip"

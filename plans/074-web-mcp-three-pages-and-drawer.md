@@ -80,6 +80,9 @@ owner 2026-10-18 裁决：所有列表服务端分页；原型没画的现有功
 - `components/project/ProjectMcp.vue`：标题行 + 信任门（未信任时只有“信任此项目”按钮，保留）+ 待同意列表（允许/拒绝文字按钮）+ 有效列表；**没有新增/编辑/删除/测试**。
 - `App.vue:519-531` 菜单栏 `navItems` 没有 MCP；`router/index.ts` 没有 `/mcp`。
 - `lib/api.ts:453-460` `mcpSetServerDisabled`；`:2308-2318` `mcpServers` / `mcpServersWithStatus`（`GET /v1/mcp/servers`）。
+- `lib/api.ts:1408-1411` 响应拦截器把**所有**响应深层转成 camelCase（`lib/case.ts`），`env`/`headers` 这种**用户自定义键**的对象也会被改名——MCP 读写必须绕开它（Step 2）。
+- `pkg/process/mcp.go:205-226` `DecideProjectMCPConsents`：把所有未决定的项目条目一次决定完（不在 `allowed` 里的记拒绝）；现有项目 MCP 页的 `consent(name, allow)`（`ProjectMcp.vue:132-144`）就是 `projectMcpConsent(id, allow ? [name] : [])`，所以点一行会顺带拒绝其它待确认行。
+- `pkg/mcp/registry.go:15-26` 连接状态取值：`unknown/connecting/connected/disconnected/error/cancelled`。`mcp_write_api.go:988` 行字段 `pending` = 本代 MCP 启动尚未完成（不是“待同意”）。
 
 ## Commands you will need
 
@@ -94,88 +97,131 @@ owner 2026-10-18 裁决：所有列表服务端分页；原型没画的现有功
 
 ## Scope
 
-**In scope**：`pkg/gateway/mcp_oauth_api.go`、`pkg/gateway/mcp_write_api.go`（只加读的分支/辅助，不改写入语义）、对应测试；
+**In scope**：`pkg/gateway/mcp_oauth_api.go`、`pkg/gateway/mcp_write_api.go`（只加读的分支/辅助，不改写入语义）、`pkg/gateway/mcp_read_api_test.go`（新建）、`pkg/process/mcp.go`（只加 `DecideProjectMCPConsentsFor`）与 `pkg/process/mcp_test.go`；
 `frontend/src/components/mcp/`（新建目录：`McpServersTable.vue`、`McpServerDrawer.vue`、`McpKeyValueRows.vue`、`mcpRows.ts` + 测试）、`frontend/src/views/McpView.vue`（新建）、
 `frontend/src/router/index.ts`（加 `/mcp`）、`frontend/src/App.vue`（`navItems` 加 MCP，位置在“技能”之后、“子代理”之前，图标 `Plug`）、
 `frontend/src/components/settings/McpTab.vue`（整体换成 `McpServersTable view="global"`）、`frontend/src/components/project/ProjectMcp.vue`（信任门保留，其下换成 `McpServersTable view="project"`）、
-`frontend/src/lib/api.ts`（MCP 读写方法）、`frontend/src/locales/index.ts`、`frontend/e2e/mcp-pages.spec.ts`（新建）及因旧 MCP 界面断言而必须更新的既有 e2e（只改断言）。
+`frontend/src/lib/api.ts`（MCP 读写方法；`projectMcpConsent` 加可选 `decide`）与 `frontend/src/lib/api.test.ts`、`frontend/src/locales/index.ts`、`frontend/e2e/mcp-pages.spec.ts`（新建）及因旧 MCP 界面断言而必须更新的既有 e2e（只改断言）。
 
 **Out of scope**：MCP 的写入语义、连接测试实现、PKCE 授权向导的后端（只在抽屉里保留一个“授权”入口，见 Step 6）；单工具审批覆盖表（`tools`，设计稿明确这一轮不做界面）；工作台概览里的 MCP 状态（`OverviewTab.vue`）。
 
 ## Steps
 
-### Step 1：后端——三个读视图 + 服务端分页
+### Step 1：后端——三个读视图 + 服务端分页 + 只决定一条的同意
 
-在 `handleMCPServersV1` 里新增两种读法，项目预览加分页（都遵守 071：**不带 `page` 原样回答**；带 `page` 时 `q`（名称、命令/地址）→ `source`（逗号分隔：`project,agent,global`）→ 固定顺序 → 切页，保留 `servers` 键 + `total/page/page_size`）：
+三个读视图都遵守 071：**不带 `page` 原样回答**；带 `page` 时 `q`（名称、命令/地址，不分大小写包含）→ `layer` 筛选 → 固定顺序 → 切页，保留 `servers` 键 + `total/page/page_size`。
+**按层筛选的参数叫 `layer`**（逗号分隔，取值 `project,agent,global`），按**行的 `scope` 字段**过滤——注意行里本来就有一个 `source` 字段（配置来源路径，`mcp_write_api.go:948`），不要拿它过滤，也不要把查询参数叫 `source`。
 1. `GET /api/v1/mcp/servers?scope=global&page=…`：现有 `handleMCPLayerList` 的结果切页（设置页用）。顺序 = 配置文件里的顺序。
+   每行**新增** `shadowed_by`：`rc.inv.Entry(name)` 存在且其 `Scope` 不等于本层时取那个 `Scope`（`agent` 或 `project`），否则空串（原型设置页“未运行 · 被覆盖”要用）。
 2. `GET /api/v1/mcp/servers?view=agent&page=…`（**新**，菜单栏 MCP 页用）：主 runner 的 `lc.Agents.MCPServersFor(agent)`（主代理层）与 `lc.Agents.Defaults.MCPServers`（全局层）合并：
    **同名时只留主代理层**；顺序 = 主代理层（配置顺序）在前、全局层在后；每行用现有 `mcpServerRow(rc, srv, scope, source, running, entry)` 渲染（`entry` 取 `rc.inv.Entry(name)` 且 `eff.Scope == scope` 时才给），所以运行状态与设置页一致。
 3. `GET /api/v1/projects/:id/mcp?page=…`（项目预览加分页）：`servers` 改为**固定顺序** 项目 → 主代理 → 全局（同名已由 `ResolveSessionMCP` 去重）；
-   把 `pending_consent` 里的每一项也作为一行并入（`scope: "project"`、`pending: true`、`summary`、`name`，其余字段取项目配置文件里该条目的 `readMCPServerWrite`，取不到就只带名字），排在项目层**最前面**；
-   带 `page` 时 `total` 计入这些待同意行；`overridden_global`、`not_applied`、`pending_consent` 三个原字段照旧返回（顶层 extra）。
-   项目层行的状态：已同意 → `allowed: true`；主代理/全局层行的运行状态取主 runner 的 `rc`（与菜单栏 MCP 页同口径）。
-测试（`api_extra_test.go` 或新建 `mcp_read_api_test.go`，照现有 MCP 测试的配置造法）：
+   把 `pending_consent` 里的每一项也作为一行并入，键 **`consent_pending: true`**（**不要用 `pending`**——`mcpServerRow` 已用 `pending` 表示“这一代 MCP 启动尚未完成”，`mcp_write_api.go:988`）+ `scope: "project"`、`summary`、`name`，其余字段取项目配置文件里该条目的 `readMCPServerWrite`（取不到就只带名字），排在项目层**最前面**；
+   带 `page` 时 `total` 计入这些待同意行；`overridden_global`、`not_applied`、`pending_consent` 三个原字段照旧返回（顶层）。
+   项目层已同意的行加 `consent_allowed: true`；主代理/全局层行的运行状态取主 runner 的 `rc`（与菜单栏 MCP 页同口径）。
+4. **同意接口改成可以只决定一条**（**owner 2026-10-18 待确认，见 README**）：现状 `pkg/process/mcp.go:205-226` `DecideProjectMCPConsents(workspace, launch, allowed)` 会把**所有**未决定的条目都记下来——不在 `allowed` 里的一律记成拒绝，
+   所以在网页上点某一行“允许”会把其它待确认行一起拒掉。改法：`POST /v1/projects/:id/mcp/consent` 的 body 增加可选 `decide: ["name", …]`；**有 `decide` 时只处理这些名字**（在 `allow` 里 → 允许，否则拒绝），其余待确认条目保持未决定；没有 `decide` 时行为不变（终端启动提示仍是“一次决定全部”）。
+   在 `pkg/process/mcp.go` 加 `DecideProjectMCPConsentsFor(workspace, launch, decide, allowed []string) error`（只遍历 `decide` 里的名字），`handleProjectMCPConsent` 按 body 选择调用哪个。
+测试（新建 `pkg/gateway/mcp_read_api_test.go`，配置造法照 `api_extra_test.go` 里现有 MCP 写接口测试；同意的测试放 `pkg/process/mcp_test.go`）：
 - `TestMCPAgentViewHidesShadowedGlobalAndListsAgentFirst`：全局 a、b，主代理 b、c → 行顺序 b(agent) c(agent) a(global)，没有全局 b。
-- `TestMCPLayerListPagesWithTotal`：全局 12 条，`page=2&page_size=10` → 2 行、`total=12`；`q` 只匹配名称/命令。
-- `TestProjectMCPPreviewOrdersProjectAgentGlobalAndIncludesPending`：项目 1 条已同意 + 1 条待同意、主代理 1 条、全局 1 条 → 顺序 待同意、项目、主代理、全局；`source=global` 只剩全局行。
+- `TestMCPLayerListPagesWithTotalAndShadowedBy`：全局 12 条（其中 1 条被主代理同名覆盖），`page=2&page_size=10` → 2 行、`total=12`；被覆盖那行 `shadowed_by=agent`；`q` 只匹配名称/命令。
+- `TestProjectMCPPreviewOrdersProjectAgentGlobalAndIncludesPending`：项目 1 条已同意 + 1 条待同意、主代理 1 条、全局 1 条 → 顺序 待同意、项目、主代理、全局；待同意行 `consent_pending=true` 且**没有** `pending` 键被误设；`layer=global` 只剩全局行。
 - `TestProjectMCPPreviewWithoutPageKeepsOldFields`：不带 page 时 `overridden_global`/`not_applied`/`pending_consent` 仍在。
+- `TestDecideProjectMCPConsentsForLeavesOthersUndecided`：两条待确认，只决定第一条 → 第二条仍在 `PendingProjectMCPConsents` 里。
 
-**Verify**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/gateway -run 'MCP' -count=1` ok；`gofmt -l pkg/gateway` 无输出。
+**Verify**：`CGO_ENABLED=1 go test -tags fts5 ./pkg/gateway -run 'MCP' -count=1` ok；`CGO_ENABLED=1 go test -tags fts5 ./pkg/process -run 'Consent' -count=1` ok；`gofmt -l pkg` 无输出。
 
-### Step 2：前端 API
+### Step 2：前端 API——MCP 的读写**不走**驼峰转换
 
-`lib/api.ts` 新增（类型照 `mcpServerRow`/`readMCPServerWrite` 的字段，camelCase）：
-- `McpServerRow`（`name, transport, target, required, enabled, startupTimeout, requestTimeout, headers, env, inheritParentEnv, expectedCommandSha256, disableStandaloneSse, oauth, defaultToolsApprovalMode, scope, source, running, disabledByConfig, disabledNextSession, authStatus, tools, officialUrl, connStatus, toolCount, error, pending?, summary?, allowed?`——以 `readMCPServerWrite` 实际输出为准，先打印一次真实响应核对键名，**以真实响应为准**）。
-- `mcpPage(view: 'global' | 'agent' | 'project', query: ListQuery & { projectId?: string; source?: string })` → `{ rows, total, page, pageSize }`（`global` → `GET /v1/mcp/servers?scope=global`，`agent` → `?view=agent`，`project` → `GET /v1/projects/:id/mcp`）。
-- 写：`mcpCreate(scope, projectIdOrAgentId, body)`、`mcpUpdate(scope, id, name, body)`、`mcpDelete(scope, id, name)`、`mcpTest(scope, id, body)`——三层分别打到全局 / `/agents/primary/:id/...` / `/v1/projects/:id/...`；载荷字段 snake_case，**只送用户改过的字段 + 必要的 name/transport**（后端“没送的字段不动”）。
-- 已有 `mcpSetServerDisabled`（启用开关用）、项目同意 `POST /v1/projects/:id/mcp/consent`（找现有方法名复用）。
+**关键**：`lib/api.ts:1408-1411` 的响应拦截器对所有响应做**深层** camelCase（`lib/case.ts` `camelcaseKeys(…, { deep: true })`），会把 `env`/`headers` 里的**用户自己的键**改掉（`CODEGRAPH_HOME` → `codegraphHome`、`Authorization` → `authorization`），保存时再 snake 回去就写坏用户配置。
+所以 MCP 的读写方法**全部用 `gatewayFetch`**（`api.ts` 内的模块函数，带会话 cookie 与 401 处理）读写**原始 JSON**：
+- 读：`JSON.parse` 后用手写的 `toMcpRow(raw)` 把**行的顶层字段**逐个映射成 camelCase（`name, transport, target, required, enabled, startup_timeout→startupTimeout, request_timeout→requestTimeout, headers, env, inherit_parent_env, expected_command_sha256, disable_standalone_sse, oauth, default_tools_approval_mode, scope, source, running, disabled_by_config, disabled_next_session, auth_status, tools, official_url, conn_status, tool_count, error, shadowed_by, consent_pending, consent_allowed, summary`），
+  **`env` 与 `headers` 原样复制，`oauth` 只把它自己的顶层键映射**；先 `console.log` 一次真实响应核对键名，**以真实响应为准**。`total/page/page_size` 照 071 的 `ListPageMeta` 映射。
+- 写：载荷**手写 snake_case**，`env`/`headers` 原样发送，不经过 `toSnakeCase`。
+- 方法：`mcpPage(view: 'global' | 'agent' | 'project', query: ListQuery & { projectId?: string })`（`layer` 走 `query` 的筛选参数）→ `{ rows, total, page, pageSize }`（`global` → `GET /api/v1/mcp/servers?scope=global`，`agent` → `?view=agent`，`project` → `GET /api/v1/projects/:id/mcp`）；
+  `mcpCreate(scope, ownerId, body)`、`mcpUpdate(scope, ownerId, name, body)`、`mcpDelete(scope, ownerId, name)`、`mcpTest(scope, ownerId, body)`——`ownerId` 在全局时忽略、主代理时是主代理 id（打到 `/api/agents/primary/:id/mcp/servers…`）、项目时是项目 id（`/api/v1/projects/:id/mcp/servers…`）。
+- 已有方法复用：启用开关 `mcpSetServerDisabled(name, disabled, sessionId?)`（`api.ts:453`）；项目同意 `projectMcpConsent(id, allow)`（`api.ts:2429`）——**加第三个可选参数 `decide?: string[]`** 透传 Step 1.4 的新字段。
+
+**Verify**：`lib/api.test.ts` 加一条用例：mock 一个含 `env: { CODEGRAPH_HOME: 'x' }`、`headers: { Authorization: 'y' }` 的响应，`mcpPage` 读出后键名不变；`mcpUpdate` 发出的 body 里键名也不变。`cd frontend && pnpm test -- src/lib/api.test.ts` 通过。
 
 ### Step 3：`components/mcp/mcpRows.ts`（纯函数，带单测）
 
-- `mcpStatus(row)` → `{ tone: 'ok'|'warn'|'gray'|'err', label: string, tip: string }`，规则（与原型 `mcpState`/`mcpStatusCell` 一致）：
-  `pending` → 待确认(warn)；`disabledByConfig` → 配置里已禁用(gray, tip `enabled: false`)；`disabledNextSession` → 已禁用(gray, tip `下个会话起不加载`)；
-  `connStatus === 'failed'` 或有 `error` → 连接失败(err, tip = 原文)；项目层已同意 → `已允许 · N 个工具`(ok)；`running` → `已连接 · N 个工具`(ok；N 取 `toolCount`，为 0 或未知时不带后缀)；其余 → 未运行(gray)。
-  OAuth：`authStatus` 为 `needs-auth`/`failed` 时把 `OAuth 需要授权` / `OAuth 授权失败` 追加进 tip（+，保留现有功能）。
-- `mcpTypeLabel(row)` → `{ main: 'stdio' | 'http', sub: 'OAuth' | '请求头' | '' }`。
+- `mcpStatus(row)` → `{ tone: 'ok'|'warn'|'gray'|'err', label: string, tip: string }`，按顺序判定（与原型 `mcpState`/`mcpStatusCell` 一致）：
+  1. `consentPending` → `待确认`(warn)；
+  2. `shadowedBy` 非空 → `未运行 · 被覆盖`(gray)，tip `被{主代理/项目}覆盖，未运行`；
+  3. `disabledByConfig` → `配置里已禁用`(gray)，tip `enabled: false`；
+  4. `disabledNextSession` → `已禁用`(gray)，tip `下个会话起不加载`；
+  5. `connStatus === 'error'` 或有 `error` → `连接失败`(err)，tip = 原文；
+  6. `consentAllowed` → `已允许 · N 个工具`(ok)；
+  7. `connStatus === 'connecting'` → `连接中`(warn)；
+  8. `running` 且 `connStatus === 'connected'`（或运行中但还没有状态）→ `已连接 · N 个工具`(ok；N 取 `toolCount`，0 或未知时不带 ` · N 个工具`)；
+  9. 其余（`unknown`、`disconnected`、`cancelled`、未运行）→ `未运行`(gray)。
+  连接状态的全部取值见 `pkg/mcp/registry.go:15-26`：`unknown/connecting/connected/disconnected/error/cancelled`（**没有** `failed`）。
+  OAuth：`authStatus` 为 `needs-auth`/`failed` 时在 tip 末尾追加 `；OAuth 需要授权` / `；OAuth 授权失败`（+，保留现有功能）。
+- `mcpTypeLabel(row)` → `{ main: 'stdio' | 'http', sub: 'OAuth' | '请求头' | '' }`（`transport === 'streamable_http'` 显示 `http`；有 oauth 模式 → `OAuth`，否则有 headers → `请求头`）。
 - `mcpEditPlace(scope)` → `{ to, label }`：项目 → 项目空间 MCP 标签 `在项目空间修改`；全局 → `/settings?tab=mcp` `在“设置 → MCP”修改`；主代理 → `/mcp` `在菜单栏“MCP”修改`。
-- `mcpWritePayload(original, form)` → 只含变化字段的载荷（新增时全量）；KV（env/headers）按键合并：值未动的密钥键送 `[REDACTED]`、删除的键送空串。
+- `mcpWritePayload(original | null, form)` → 写载荷（snake_case），规则：
+  - 新增：全量。编辑：只放变化的标量字段 + 路由要求的 `name`/`transport`。
+  - `transport`：下拉的 value 用 `stdio` / `streamable_http`（文案 `stdio（本地命令）` / `http（远程地址）`）。
+  - 超时输入框**清空 → 发 `0`**（后端 0 = 用默认/不限制；不发 = 不改）。
+  - `default_tools_approval_mode`：`跟随全局（留空）` → 发空串。
+  - `env`/`headers`（KV）：按键合并——值没动的**密钥**键发 `[REDACTED]`、被删的键发空串、新键/改过的键发新值；键名原样。
+  - `oauth`：后端是**整块替换**（`mcp_write_api.go:114`、`:409-422`），所以只要 OAuth 区任何字段改了，就发**完整** `oauth` 对象：表单没显示的字段（`access_token`、`token_type`、`refresh_token`）从原值回填，密钥字段未改时回填 `[REDACTED]`；`scopes` 输入框按空白拆成数组；模式 `不启用（留空）` 发空串 `mode`。OAuth 区没改动就**不发** `oauth`。
+
+**Verify**：`mcpRows.test.ts` 覆盖上面 9 种状态各一例、`streamable_http` 显示 `http`、超时清空发 0、OAuth 改一个字段时整块回填、大写 env 键往返不变；`cd frontend && pnpm test -- src/components/mcp` 通过。
 
 ### Step 4：`McpServersTable.vue`
 
 props：`view: 'global' | 'agent' | 'project'`、`projectId?: string`、`agentId: string`（当前主代理 id，主代理层写接口要用）。
 - `layers` = global → `['global']`；agent → `['agent','global']`；project → `['project','agent','global']`（显示顺序，高层在前）；`own` = 本页可改的层（global→global，agent→agent，project→project）。
-- 数据 `useServerList((q) => mcpPage(view, { ...q, projectId, source }))`；来源筛选只在多层页面出现。
-- 表格结构、列宽、单元格、操作按钮完全照“设计稿 · 表格”。启用开关调用 `mcpSetServerDisabled(name, !on)` 后 `reload()`；允许/拒绝调用项目同意接口后 `reload()`；删除先弹 `ConfirmDialog`（`删除 MCP 服务 {name}？`，危险样式）再调 `mcpDelete`。
-- 打开抽屉：`查看`/`编辑`/`添加 MCP 服务` → `McpServerDrawer`（`mode`、`scope`、`row`）。保存成功后关抽屉并 `reload()`。
-- 工具栏、分页器、表下说明用 071 的件；说明文案按 view 取（见设计稿）。
+- 数据 `useServerList((q) => mcpPage(view, { ...q, projectId }), { filters: { layer: '' } })`——来源下拉绑 `filters.layer`（换来源会回到第 1 页）；来源下拉只在多层页面出现，选项按 `layers` 顺序（`全部来源` + 中文层名）。
+- 工具栏、表格、分页器、表下说明的写法**照 073 已落地的 `frontend/src/views/ProjectsView.vue`**（`ListToolbar` + 搜索框 `forebrain-field h-[34px]`、`max-width: 240px`（原型 `.field` 34px；073 落地的 `h-8` 是 32px，按 073 Step 7 统一改）+ 右侧按钮；`TablePager`；`ListNote`）；说明文案按 view 取（见设计稿）。
+- 表格结构、列宽、单元格、操作按钮完全照“设计稿 · 表格”，状态列用 `mcpStatus`（徽标 + `v-tip:top` = tip，tip 为空不加）。
+- 启用开关：`checked = !row.disabledNextSession && !row.disabledByConfig`；`disabledByConfig` 的行开关 `disabled` 并 `v-tip:top="配置里是 enabled: false：在编辑里打开“启用”"`；`consentPending` 的行不画开关；只读行写 `—`。
+  切换：`await mcpSetServerDisabled(row.name, !nextChecked)` 后 `reload()`。
+- 允许/拒绝（只在 `consentPending` 的行）：允许 `projectMcpConsent(projectId, [name], [name])`、拒绝 `projectMcpConsent(projectId, [], [name])`（第三个参数是 Step 1.4 的 `decide`）；完成后 `reload()`。
+- 删除：先弹 `ConfirmDialog`（标题 `删除 MCP 服务 {name}？`，`danger`）再调 `mcpDelete`，完成后 `reload()`。
+- 打开抽屉：`查看`/`编辑`/`添加 MCP 服务` → `McpServerDrawer`（`mode`、`scope`、`row`、`ownerId`）。保存成功后关抽屉并 `reload()`。
+
+**Verify**：`McpServersTable.test.ts`：三种 view 的表头（单层没有“来源”列）；自有行操作是 编辑/删除、他层行是 查看+空位、`consentPending` 行是 允许/拒绝；`disabledByConfig` 行开关禁用；`pnpm test -- src/components/mcp` 通过。
 
 ### Step 5：`McpServerDrawer.vue` + `McpKeyValueRows.vue`
 
-- 外壳用 `ForebrainDrawer`（`:readonly="mode === 'view'"`）。正文照“设计稿 · 抽屉”逐项实现（字段顺序、键名小字 `.key` 灰色等宽、帮助文字逐字）。
+- 外壳用 071 的 `ForebrainDrawer`（`:readonly="mode === 'view'"`）。正文照“设计稿 · 抽屉”逐项实现（字段顺序、键名小字 `.key` 灰色等宽、帮助文字逐字）；类型下拉 value `stdio`/`streamable_http`。
 - `McpKeyValueRows`：一行一对（键、值两个等宽输入 + 删除图标按钮 `v-tip:top="删除"`），下方 `添加环境变量` / `添加请求头` 按钮（`justify-self: start`，不要撑满）；只读时没有删除与添加，空时写 `未设置`。
 - 类型下拉切换 stdio/http 时，高级区跟着换（原型 `data-mcptype`）。
-- “测试连接”：调用 `mcpTest(scope, id, 当前表单载荷)`；显示 `测试中…` → 成功 `✓ 已连接` 绿徽标 + `N 个工具 · x.x s` + `工具列表`/`收起工具` 链接（展开为等宽小标签列表）；失败 `✗ 连接失败` 红徽标 + 原文（等宽、可折行）。测试不写配置、不关抽屉。
-- 保存：新增 `mcpCreate`、编辑 `mcpUpdate`；按钮 `保存中…`；失败时表单底部错误块：`没有保存：` + 服务端原文（409 同名、400 校验）。
-- 只读时状态框下方多出（+）：OAuth 授权状态、官方标记、工具列表（可折叠）、“下个会话起不加载”；OAuth 授权状态只显示文字（`需要授权` / `授权失败` / `已授权`）：**现状核实，前端没有任何 PKCE 调用**（`grep -rln pkce frontend/src` 为空），本计划不新做授权向导，报告里写明。
+- “测试连接”：调用 `mcpTest(scope, ownerId, mcpWritePayload(null, 当前表单))`（测试用全量）；显示 `测试中…` → 成功 `✓ 已连接` 绿徽标 + `N 个工具 · x.x s` + `工具列表`/`收起工具` 链接（展开为等宽小标签列表）；失败 `✗ 连接失败` 红徽标 + 原文（等宽、可折行）。测试不写配置、不关抽屉。
+- 保存：新增 `mcpCreate`、编辑 `mcpUpdate`（载荷 `mcpWritePayload(原行, 表单)`）；按钮 `保存中…`；失败时表单底部错误块：`没有保存：` + 服务端原文（409 同名、400 校验）。
+- 状态框（编辑/查看时）：来源、状态（`mcpStatus`）、失败原因；（+）OAuth 授权状态文字（`需要授权` / `授权失败` / `已授权`）、官方标记、工具列表（可折叠）、“下个会话起不加载”、被覆盖时 `被{主代理/项目}覆盖`。
+  **现状核实：前端没有任何 PKCE 调用**（`grep -rln pkce frontend/src` 为空），本计划不新做授权向导，报告里写明。
 - 关闭：Esc、点遮罩、`取消`、右上 X；保存中不允许关闭。
+
+**Verify**：`McpServerDrawer.test.ts`：只读时没有可编辑的 `input`/`select`（全部 `readonly`/`disabled`）、底部只有 `取消`；保存 409 时显示 `没有保存：` 错误块且抽屉不关；测试连接三态；`pnpm test -- src/components/mcp` 通过。
 
 ### Step 6：三处页面接上
 
-- `McpTab.vue`：整体替换为 `<McpServersTable view="global" :agent-id />`（标题行删除；设置页其它布局留给 076）。
-- 新建 `views/McpView.vue`：`<McpServersTable view="agent" :agent-id="activePrimaryId" />`，外层滚动容器与其它菜单栏页面一致（`max-w-5xl` 一类，照 `ProjectsView.vue` 的外层）。
-  `router/index.ts` 加 `{ path: '/mcp', name: 'mcp', component: () => import('@/views/McpView.vue'), meta: { title: () => t('routes.mcpTitle') } }`；`App.vue` `navItems` 在技能后插 `{ to: '/mcp', label: L.mcp, icon: Plug, scope: 'agent' }`（`locales/index.ts:2814` 的 `navLabels()` 加 `mcp: 'MCP'`，`routes.mcpTitle` 也加）。
-- `ProjectMcp.vue`：保留信任门（未信任时只显示信任提示与按钮）；已信任时显示 `<McpServersTable view="project" :project-id :agent-id />`；删掉旧的待同意列表与有效列表（已并入表格）与标题行。
+当前主代理 id 一律用 `const { activePrimaryId } = usePrimaryAgents()`（`composables/usePrimaryAgents.ts`，`App.vue:357-365` 同样这样取），模板里写 `:agent-id="activePrimaryId"`。
+- `McpTab.vue`：整体替换为 `<McpServersTable view="global" :agent-id="activePrimaryId" />`（标题行删除；设置页其它布局留给 076）。
+- 新建 `views/McpView.vue`：`<McpServersTable view="agent" :agent-id="activePrimaryId" />`，外层滚动容器照 `ProjectsView.vue` 的外层写法。
+  `router/index.ts` 加 `{ path: '/mcp', name: 'mcp', component: () => import('@/views/McpView.vue'), meta: { title: () => t('routes.mcpTitle') } }`；`App.vue` `navItems` 在技能后插 `{ to: '/mcp', label: L.mcp, icon: Plug, scope: 'agent' }`。
+  **文案键已存在，直接用、不要重复添加**：`'nav.mcp'`（`locales/index.ts:183`，en `:1562`）、`'routes.mcpTitle'`（`:190`，en `:1569`）、`navLabels()` 里的 `mcp: t('nav.mcp')`（`:2828`）。
+- `ProjectMcp.vue`：保留信任门（未信任时只显示信任提示与按钮）；已信任时显示 `<McpServersTable view="project" :project-id="projectId" :agent-id="activePrimaryId" />`；删掉旧的待同意列表与有效列表（已并入表格）与标题行。
+
+**Verify**：`pnpm test` 全绿；`npx vue-tsc --noEmit -p tsconfig.json` exit 0（重复键会在这里报 TS1117）；`grep -n "path: '/mcp'" frontend/src/router/index.ts` 有一行。
 
 ### Step 7：e2e `frontend/e2e/mcp-pages.spec.ts`（新建）+ 回归
 
-造配置：全局 `a`、`b`，主代理 `b`、`c`，项目 `d`（已同意）、`e`（待同意）。断言：
-1. 设置 · MCP：只有全局两行（`a`、`b`），没有来源列；`编辑 b` 打开抽屉、标题 `编辑 MCP 服务 · b`、底部 `取消`+`保存`；改请求超时保存后列表刷新。
+造配置：全局 `a`、`b`，主代理 `b`、`c`，项目 `d`（已同意）、`e` 与 `f`（待同意）。断言：
+1. 设置 · MCP：全局两行（`a`、`b`），没有来源列；`b` 的状态是 `未运行 · 被覆盖`；`编辑 a` 打开抽屉、标题 `编辑 MCP 服务 · a`、底部 `取消`+`保存`；改请求超时保存后列表刷新。
 2. 菜单栏出现 `MCP`；页面行顺序 `b(主代理) c(主代理) a(全局)`；全局行操作只有 `查看`，抽屉只读（没有可编辑的 input、底部只有 `取消`）、有 `在“设置 → MCP”修改` 链接。
-3. 项目 MCP 标签：顺序 `e(待确认) d(项目) b c(主代理) a(全局)`；`e` 行操作是 `允许`/`拒绝`；点 `允许` 后状态变 `已允许`。
+3. 项目 MCP 标签：顺序 `e f(待确认) d(项目) b c(主代理) a(全局)`；`e` 行操作是 `允许`/`拒绝`；点 `e` 的 `允许` 后 `e` 状态变 `已允许`、**`f` 仍是 `待确认`**。
 4. `添加 MCP 服务`（项目）→ 抽屉标题 `添加 MCP 服务 · 项目`；名称填已存在的 `d` 保存 → 抽屉不关、底部错误块含 `没有保存：`。
 5. 测试连接：对一个本地不存在的 http 地址测试 → 出现 `✗ 连接失败` 与原文。
-6. 每页都有分页器；全局造 12 条后设置页显示 `共 12 条`、2 个页码。
+6. 编辑一个带 `env: { CODEGRAPH_HOME: … }` 的条目只改超时并保存 → 配置文件里 env 键仍是 `CODEGRAPH_HOME`。
+7. 每页都有分页器；全局造 12 条后设置页显示 `共 12 条`、2 个页码。
 全套回归：旧用例只允许因“旧 MCP 卡片/文字按钮/标题行”改断言，逐条列在报告里。
+
+**Verify**：`FOREBRAIN_E2E_SPEC=e2e/mcp-pages.spec.ts scripts/acceptance/web_e2e.sh` 末行 `web e2e: PASS`；全套 `scripts/acceptance/web_e2e.sh` 末行 `web e2e: PASS`。
 
 ## Test plan
 
@@ -188,7 +234,7 @@ Step 1 的 Go 用例；`mcpRows.test.ts`（状态、类型、载荷差分）；`
 - [ ] `pnpm test` 全绿、`vue-tsc` exit 0
 - [ ] `mcp-pages.spec.ts` 与全套 `web_e2e.sh` → `web e2e: PASS`
 - [ ] `grep -n 'PageTopRow' frontend/src/components/settings/McpTab.vue frontend/src/components/project/ProjectMcp.vue` 无输出
-- [ ] `git status` 只出现 Scope 列出的文件
+- [ ] 与开工前相比（开工时先 `git status --short > $TMPDIR/074-before.txt`），新增或修改的文件都在 Scope 内（`git status --short | diff $TMPDIR/074-before.txt -` 里出现的路径逐个核对）
 
 ## STOP conditions
 
@@ -197,6 +243,7 @@ Step 1 的 Go 用例；`mcpRows.test.ts`（状态、类型、载荷差分）；`
 - 主代理层写接口要求的 `:id` 不是当前主代理 id（或切换主代理后写到了别的主代理）。
 - 项目预览里拿不到待同意条目的配置内容，且没有它们表格就无法显示命令/类型——报告后再定是否只显示名称。
 - 需要改写入语义（`mcpServerWrite` 的合并规则）才能让表单保存成功。
+- owner 否决了 Step 1.4（同意只决定一条）——那就保留“一次决定全部”，并在待确认行的“允许/拒绝”旁用提示说明会一起决定其它待确认项，报告后再定。
 
 ## Maintenance notes
 

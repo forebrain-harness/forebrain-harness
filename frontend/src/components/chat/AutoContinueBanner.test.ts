@@ -1,8 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { config, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import { setLocale } from '@/locales'
 import AutoContinueBanner from './AutoContinueBanner.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 describe('AutoContinueBanner', () => {
   beforeAll(() => setLocale('en'))

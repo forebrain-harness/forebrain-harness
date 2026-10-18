@@ -1,50 +1,75 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
-    <div class="mx-auto w-full max-w-5xl">
-      <PageTopRow :title="t('skills.title')" :description="t('skills.agentDescription')">
+    <div class="mx-auto flex w-full max-w-5xl flex-col gap-4">
+      <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+
+      <ListToolbar>
+        <template #left>
+          <input
+            v-model="q"
+            type="search"
+            :placeholder="t('skills.searchPlaceholder')"
+            class="forebrain-field h-[34px]"
+            style="max-width: 240px"
+            data-testid="skills-search"
+          />
+          <select v-model="origin" class="forebrain-field h-[34px]" style="width: 110px" :aria-label="t('skills.colSource')" data-testid="skills-source-filter">
+            <option value="">{{ t('skills.sourceAll') }}</option>
+            <option value="agent">{{ t('skills.originAgent') }}</option>
+            <option value="shared">{{ t('skills.originShared') }}</option>
+            <option value="builtin">{{ t('skills.originBuiltin') }}</option>
+          </select>
+        </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-offline-install" @click="offlineOpen = true">
-            {{ t('skills.offlineInstall') }}
+          <span v-if="selected.size" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('skills.selectedCount', { count: selected.size }) }}</span>
+          <button
+            type="button"
+            class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs"
+            :disabled="!selected.size || downloading"
+            data-testid="skills-batch-download"
+            @click="batchDownload"
+          >
+            <Download class="size-3.5" aria-hidden="true" />{{ t('skills.batchDownload') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-online-install" @click="onlineOpen = true">
-            {{ t('skills.onlineInstall') }}
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="skills-offline-install" @click="offlineOpen = true">
+            <Upload class="size-3.5" aria-hidden="true" />{{ t('skills.offlineInstall') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="skills-discover" @click="openWorkshop('discover')">
-            {{ t('skills.discoverInstall') }}
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="skills-online-install" @click="onlineOpen = true">
+            <Globe class="size-3.5" aria-hidden="true" />{{ t('skills.onlineInstall') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="skills-create" @click="openWorkshop('create')">
-            {{ t('skills.createSkill') }}
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" data-testid="skills-discover" @click="openWorkshop('discover')">
+            <Search class="size-3.5" aria-hidden="true" />{{ t('skills.discoverInstall') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-            {{ loading ? t('common.loading') : t('common.refresh') }}
+          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="skills-create" @click="openWorkshop('create')">
+            <Plus class="size-3.5" aria-hidden="true" />{{ t('skills.createSkill') }}
+          </button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+            <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
           </button>
         </template>
-      </PageTopRow>
+      </ListToolbar>
 
-      <p v-if="error" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+      <SkillsTable
+        v-model:selected="selected"
+        :rows="rows"
+        :loading="loading"
+        :saving="saving"
+        scope="agent"
+        @toggle="onToggle"
+        @delete="onDelete"
+        @download="onDownload"
+        @detail="openSkill"
+      />
 
-      <div class="mt-4">
-        <SkillsTable
-          :rows="rows"
-          :loading="loading"
-          :saving="saving"
-          :downloading="downloading"
-          owner-origin="agent"
-          :hint="t('skills.workshopHint')"
-          @toggle="onToggle"
-          @delete="onDelete"
-          @download="onDownload"
-          @batch-download="onBatchDownload"
-          @detail="openSkill"
-        />
-      </div>
+      <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      <ListNote>{{ t('skills.note') }}</ListNote>
     </div>
 
     <InstallDialogs
       v-model:online="onlineOpen"
       v-model:offline="offlineOpen"
       dest="workspace"
-      @installed="load"
+      @installed="refresh"
     />
 
     <div
@@ -68,11 +93,15 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { Download, Globe, Plus, RotateCw, Search, Upload } from 'lucide-vue-next'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import TablePager from '@/components/common/TablePager.vue'
 import InstallDialogs from '@/components/skills/InstallDialogs.vue'
 import SkillsTable from '@/components/skills/SkillsTable.vue'
+import { useServerList } from '@/composables/useServerList'
 import forebrainApi, {
   getErrorMessage,
   saveSkillDownload,
@@ -86,9 +115,38 @@ import { useI18n } from '@/locales'
  * load — its own skills plus the shared, built-in and cross-tool layers it
  * inherits. Only agent rows carry controls; every inherited row is read-only
  * and managed in the layer that owns it (decision D9).
+ *
+ * The table is the server's (plan 073): the search and the layer filter narrow
+ * it there, and the pager under it says how many skills the layer holds. The
+ * source filter offers only the layers this page can actually contain. A
+ * toggle still submits the whole enabled set the endpoint expects, which is a
+ * fact of the listing rather than of the page on screen.
  */
 const { t } = useI18n()
 const router = useRouter()
+
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  q,
+  filters,
+  loading,
+  error: listError,
+  reload,
+} = useServerList<SkillRecord>(forebrainApi.skillsPage, { pageSize: 10, filters: { origin: '' } })
+
+const actionError = ref('')
+const error = computed(() => actionError.value || listError.value)
+
+/** The layer filter, read and written through the list's own filters. */
+const origin = computed({
+  get: () => String(filters.value.origin ?? ''),
+  set: (value: string) => {
+    filters.value = { ...filters.value, origin: value }
+  },
+})
 
 function openWorkshop(mode: 'create' | 'discover') {
   void router.push(workshopRoute({ scope: 'agent', mode }))
@@ -98,40 +156,32 @@ function openSkill(row: SkillRecord) {
   void router.push(workshopRoute({ scope: 'agent', mode: 'improve', skill: row.name }))
 }
 
-const rows = ref<SkillRecord[]>([])
-const loading = ref(false)
 const saving = ref(false)
 const downloading = ref(false)
-const error = ref('')
 const onlineOpen = ref(false)
 const offlineOpen = ref(false)
 const confirmDelete = ref<SkillRecord | null>(null)
+/** The rows ticked for a bulk download, by name. */
+const selected = ref(new Set<string>())
 
-async function load() {
-  loading.value = true
-  error.value = ''
-  try {
-    const data = await forebrainApi.skillsOverview()
-    rows.value = data.installed
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
-  }
+function refresh(): void {
+  void reload()
 }
 
 // Toggles keep the full-set semantics the endpoint has: every enabled row is
 // submitted — inherited rows included, unchanged — so disabling one skill
-// never silently disables another.
+// never silently disables another. The page holds one page of rows, so the
+// whole set is read back before it is sent.
 async function onToggle(row: SkillRecord, enabled: boolean) {
   saving.value = true
-  error.value = ''
+  actionError.value = ''
   try {
-    const next = rows.value.map((item) => (item === row ? { ...item, enabled } : item))
-    const res = await forebrainApi.skillsToggle(next.filter((item) => item.enabled).map((item) => item.rootPath || ''))
-    rows.value = res.skills
+    const whole = await forebrainApi.skillsOverview()
+    const next = whole.installed.map((item) => (item.name === row.name ? { ...item, enabled } : item))
+    await forebrainApi.skillsToggle(next.filter((item) => item.enabled).map((item) => item.rootPath || ''))
+    await reload()
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    actionError.value = getErrorMessage(e)
   } finally {
     saving.value = false
   }
@@ -140,24 +190,25 @@ async function onToggle(row: SkillRecord, enabled: boolean) {
 async function onDownload(row: SkillRecord) {
   if (!row.downloadUrl) return
   downloading.value = true
-  error.value = ''
+  actionError.value = ''
   try {
     saveSkillDownload(await forebrainApi.skillDownload(row.downloadUrl))
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    actionError.value = getErrorMessage(e)
   } finally {
     downloading.value = false
   }
 }
 
-async function onBatchDownload(names: string[]) {
+async function batchDownload() {
+  const names = [...selected.value]
   if (!names.length) return
   downloading.value = true
-  error.value = ''
+  actionError.value = ''
   try {
     saveSkillDownload(await forebrainApi.skillDownloadBatch(names))
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    actionError.value = getErrorMessage(e)
   } finally {
     downloading.value = false
   }
@@ -172,17 +223,20 @@ async function doDelete() {
   const row = confirmDelete.value
   if (!row) return
   saving.value = true
-  error.value = ''
+  actionError.value = ''
   try {
-    const res = await forebrainApi.skillDelete(row.name, 'agent')
-    rows.value = res.skills
+    await forebrainApi.skillDelete(row.name, 'agent')
     confirmDelete.value = null
+    selected.value = new Set()
+    await reload()
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    actionError.value = getErrorMessage(e)
   } finally {
     saving.value = false
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void reload()
+})
 </script>

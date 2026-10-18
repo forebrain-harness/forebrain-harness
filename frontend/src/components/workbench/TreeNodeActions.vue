@@ -4,7 +4,7 @@
       v-if="isDir"
       type="button"
       class="tn-act"
-      :title="t('chat.treeActionNewFile')"
+      v-tip:top="t('chat.treeActionNewFile')"
       :aria-label="`${t('chat.treeActionNewFile')} · ${name}`"
       data-testid="tree-node-new"
       @click.stop="emit('new-file')"
@@ -14,7 +14,7 @@
     <button
       type="button"
       class="tn-act"
-      :title="isDir ? t('chat.treeActionRename') : t('chat.treeActionEdit')"
+      v-tip:top="isDir ? t('chat.treeActionRename') : t('chat.treeActionEdit')"
       :aria-label="`${isDir ? t('chat.treeActionRename') : t('chat.treeActionEdit')} · ${name}`"
       data-testid="tree-node-edit"
       @click.stop="emit('edit')"
@@ -24,7 +24,7 @@
     <button
       type="button"
       class="tn-act tn-act--del"
-      :title="t('chat.treeActionDelete')"
+      v-tip:top="t('chat.treeActionDelete')"
       :aria-label="`${t('chat.treeActionDelete')} · ${name}`"
       data-testid="tree-node-delete"
       @click.stop="emit('delete')"

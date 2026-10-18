@@ -5,7 +5,7 @@
       class="forebrain-chip-btn"
       :class="mode === 'plan' ? 'forebrain-chip-btn--plan' : ''"
       :disabled="disabled"
-      :title="t('chat.modeTitle')"
+      v-tip:top="t('chat.modeTitle')"
       aria-haspopup="listbox"
       :aria-expanded="open"
       data-testid="mode-chip"

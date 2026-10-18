@@ -1,48 +1,63 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
-import { forebrainApi, type ProjectLspRecord, type ProjectRecord } from '@/lib/api'
+import { hideTip, useTooltipState } from '@/composables/useTooltip'
+import tip from '@/directives/tip'
+import { forebrainApi, type ProjectLspRow, type ProjectRecord } from '@/lib/api'
+import { setLocale } from '@/locales'
 import ProjectLsp from './ProjectLsp.vue'
 
-const projectRecord = (trusted = true): ProjectRecord => ({
-  id: 'p1',
-  name: 'proj',
-  icon: '',
-  description: '',
-  instructions: '',
-  root: '/tmp/proj',
-  projectKey: 'proj',
-  memoryScope: '',
-  resourceAccess: false,
-  pinned: false,
-  createdAt: 0,
-  updatedAt: 0,
-  trusted,
-})
+/**
+ * The project space's language-server tab (plan 075): one table in which a
+ * pending entry, an allowed one and a declined one are rows, the decision in the
+ * pending row's own action column, above the pager and the tab's note.
+ */
+function project(trusted = true): ProjectRecord {
+  return {
+    id: 'p1',
+    name: 'proj',
+    icon: '',
+    description: '',
+    instructions: '',
+    root: '/tmp/proj',
+    projectKey: 'proj',
+    memoryScope: '',
+    resourceAccess: false,
+    pinned: false,
+    createdAt: 0,
+    updatedAt: 0,
+    trusted,
+  }
+}
 
-const recordOf = (overrides: Partial<ProjectLspRecord> = {}): ProjectLspRecord => ({
-  trusted: true,
-  pending: [
-    { id: 'projectls', summary: 'projectls: runs `/bin/projectls`' },
-    { id: 'gopls', summary: 'gopls: changes settings of the built-in gopls server' },
-  ],
-  allowed: [],
-  denied: [],
-  notes: ['gopls: env_passthrough and priority are ignored in project files'],
-  ...overrides,
-})
+function lspRows(): ProjectLspRow[] {
+  return [
+    { id: 'projectls', summary: 'projectls: runs `/bin/projectls`', status: 'pending' },
+    { id: 'gopls', summary: '', status: 'allowed' },
+    { id: 'rust-analyzer', summary: '', status: 'denied' },
+  ]
+}
 
-async function mountTab(record: ProjectLspRecord, trusted = true) {
-  vi.mocked(forebrainApi.projectLsp).mockResolvedValue(record)
+async function mountTab(trusted = true) {
   const wrapper = mount(ProjectLsp, {
-    props: { project: projectRecord(trusted), projectId: 'p1' },
+    props: { project: project(trusted), projectId: 'p1' },
+    global: { directives: { tip } },
   })
   await flushPromises()
   return wrapper
 }
 
 describe('ProjectLsp', () => {
+  beforeAll(() => setLocale('zh'))
+
   beforeEach(() => {
-    vi.spyOn(forebrainApi, 'projectLsp').mockResolvedValue(recordOf())
+    vi.spyOn(forebrainApi, 'projectLspPage').mockResolvedValue({
+      rows: lspRows(),
+      trusted: true,
+      notes: [],
+      total: 3,
+      page: 1,
+      pageSize: 10,
+    })
     vi.spyOn(forebrainApi, 'projectLspConsent').mockResolvedValue({ ok: true, allowed: [] })
   })
 
@@ -50,36 +65,87 @@ describe('ProjectLsp', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders the pending entries with their summaries and the notes', async () => {
-    const wrapper = await mountTab(recordOf())
-    expect(wrapper.find('[data-testid="project-lsp-pending"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('projectls')
-    expect(wrapper.text()).toContain('projectls: runs `/bin/projectls`')
-    expect(wrapper.text()).toContain('gopls: changes settings of the built-in gopls server')
-    expect(wrapper.text()).toContain('env_passthrough and priority are ignored in project files')
+  it('draws one table under the tab toolbar, with the pager and the note', async () => {
+    const wrapper = await mountTab()
+
+    expect(wrapper.find('.forebrain-list-toolbar input[type="search"]').exists()).toBe(true)
+    expect(wrapper.find('.forebrain-table-wrap table.forebrain-table--fixed').exists()).toBe(true)
+    expect(wrapper.findAll('[data-lsp-row]')).toHaveLength(3)
+    expect(wrapper.find('[data-testid="table-pager"]').text()).toContain('共 3 条')
+    expect(wrapper.find('p.forebrain-list-note').text()).toContain('lsp_servers.yaml')
+  })
+
+  it('names each row status and shows a summary only where there is one', async () => {
+    const wrapper = await mountTab()
+
+    const pending = wrapper.find('[data-lsp-row="projectls"]')
+    expect(pending.text()).toContain('projectls: runs `/bin/projectls`')
+    expect(pending.text()).toContain('待确认')
+
+    const allowed = wrapper.find('[data-lsp-row="gopls"]')
+    expect(allowed.text()).toContain('已允许')
+    expect(allowed.text()).toContain('—')
+
+    const denied = wrapper.find('[data-lsp-row="rust-analyzer"]')
+    expect(denied.text()).toContain('已拒绝')
+  })
+
+  it('offers allow and decline only on a pending row', async () => {
+    const wrapper = await mountTab()
+
+    expect(wrapper.findAll('[data-lsp-row="projectls"] .forebrain-row-action')).toHaveLength(2)
+    // A declined row keeps one action — the way back — and one hole.
+    expect(wrapper.findAll('[data-lsp-row="rust-analyzer"] .forebrain-row-action')).toHaveLength(1)
+    expect(wrapper.findAll('[data-lsp-row="rust-analyzer"] .forebrain-icon-slot')).toHaveLength(1)
+    // A decided and allowed row keeps the action column's holes, so the icons
+    // stay aligned.
+    expect(wrapper.find('[data-lsp-row="gopls"] .forebrain-row-action').exists()).toBe(false)
+    expect(wrapper.findAll('[data-lsp-row="gopls"] .forebrain-icon-slot')).toHaveLength(2)
   })
 
   it('records an allow through projectLspConsent and reloads', async () => {
-    const wrapper = await mountTab(recordOf())
+    const wrapper = await mountTab()
     await wrapper.find('[data-testid="lsp-allow-projectls"]').trigger('click')
     await flushPromises()
-    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['projectls'])
-    // The reload after the decision ran.
-    expect(forebrainApi.projectLsp).toHaveBeenCalledTimes(2)
+
+    // The request names the one entry the click decides, so the project's other
+    // entries keep whatever decision they have.
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['projectls'], ['projectls'])
+    expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
   })
 
   it('records a decline with an empty allow list', async () => {
-    const wrapper = await mountTab(recordOf())
-    await wrapper.find('[data-testid="lsp-decline-gopls"]').trigger('click')
+    const wrapper = await mountTab()
+    await wrapper.find('[data-testid="lsp-decline-projectls"]').trigger('click')
     await flushPromises()
-    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', [])
+
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', [], ['projectls'])
   })
 
-  it('shows the allowed and denied lists after decisions exist', async () => {
-    const wrapper = await mountTab(recordOf({ pending: [], allowed: ['projectls'], denied: ['gopls'] }))
-    expect(wrapper.find('[data-testid="project-lsp-pending"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('projectls')
-    // The denied id renders too, once it has a decision.
-    expect(wrapper.text()).toContain('gopls')
+  it('allows a declined entry again, which is the only way back', async () => {
+    const wrapper = await mountTab()
+
+    const undo = wrapper.find('[data-testid="lsp-undecline-rust-analyzer"]')
+    expect(undo.exists()).toBe(true)
+    expect(wrapper.find('[data-testid="lsp-decline-rust-analyzer"]').exists()).toBe(false)
+
+    // The badge says how the decision is taken back.
+    hideTip()
+    await wrapper.find('[data-lsp-row="rust-analyzer"] .forebrain-badge').trigger('mouseenter')
+    expect(useTooltipState().text).toBe('不会启用；点“允许”撤回')
+
+    await undo.trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['rust-analyzer'], ['rust-analyzer'])
+    expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the trust gate in front of the table', async () => {
+    const wrapper = await mountTab(false)
+
+    expect(wrapper.find('[data-testid="project-trust"]').exists()).toBe(true)
+    expect(wrapper.find('.forebrain-table-wrap').exists()).toBe(false)
+    expect(wrapper.find('p.forebrain-list-note').exists()).toBe(false)
   })
 })

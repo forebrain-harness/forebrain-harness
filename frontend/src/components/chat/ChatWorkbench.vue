@@ -20,7 +20,7 @@
         class="bench-tab-btn"
         :aria-selected="active === tab.key"
         :disabled="tab.disabled"
-        :title="tab.disabled ? t('workshop.tabNeedsSkill') : undefined"
+        v-tip:top="tab.disabled ? t('workshop.tabNeedsSkill') : ''"
         :data-testid="`bench-tab-${tab.key}`"
         @click="select(tab.key)"
       >

@@ -14,7 +14,10 @@ test('chat page opens with the rail and the conversation only', async ({ page })
   await expect(page.locator('.chat-shell main')).toBeVisible()
   await expect(page.locator('[data-testid="chat-workbench"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="chat-drawer"]')).toHaveCount(0)
-  await expect(page.locator('[data-testid="workbench-toggle"]')).toHaveAttribute('aria-pressed', 'false')
+  // A new chat is the page itself (plan 072): no third column, and no toggle
+  // for one either.
+  await expect(page.locator('[data-testid="workbench-toggle"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="chat-greeting"]')).toBeVisible()
   const body = await page.evaluate(() => document.body.innerText)
   expect(body).not.toContain('管控')
   expect(body).not.toContain('工作区')
@@ -25,7 +28,9 @@ test('chat page opens with the rail and the conversation only', async ({ page })
 
 test('workbench opens as the third column and closes again', async ({ page }) => {
   await signIn(page)
-  await page.goto('/', { waitUntil: 'networkidle' })
+  // The column belongs to a conversation, so the page opens one.
+  const session = await seedProjectSession(page, 'layout-bench')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.waitForSelector('[data-testid="workbench-toggle"]')
   await page.click('[data-testid="workbench-toggle"]')
   await expect(page.locator('[data-testid="chat-workbench"]')).toBeVisible({ timeout: 10_000 })
@@ -42,10 +47,11 @@ test('workbench opens as the third column and closes again', async ({ page }) =>
   // Stays open across pages within the tab, resets on reload.
   await page.click('[data-testid="workbench-toggle"]')
   // Cross-page persistence is the SPA's own navigation; page.goto is a full
-  // load and resets by design.
+  // load and resets by design. The way back is history, not a load: the home
+  // link now leads to the new chat, which closes the column on purpose.
   await page.click('.forebrain-rail a[href="/subagents"]')
   await page.waitForURL(/subagents/)
-  await page.click('.forebrain-rail a[href="/"]')
+  await page.goBack()
   await page.waitForURL((url) => url.pathname === '/')
   await expect(page.locator('[data-testid="chat-workbench"]')).toBeVisible()
   await page.reload({ waitUntil: 'networkidle' })
@@ -150,7 +156,8 @@ test('heartbeat lives in the conversation header, not the rail or the workbench'
 
 test('empty live agents card is hidden', async ({ page }) => {
   await signIn(page)
-  await page.goto('/', { waitUntil: 'networkidle' })
+  const session = await seedProjectSession(page, 'layout-bench-empty')
+  await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
   await page.click('[data-testid="workbench-toggle"]')
   const benchText = await page.locator('[data-testid="chat-workbench"]').innerText()
   expect(benchText).not.toContain('运行中的代理')

@@ -868,6 +868,172 @@ func (s *SessionStore) ListSessionsForProject(ctx context.Context, projectID str
 	return out, rows.Err()
 }
 
+// ProjectSessionsQuery is one project conversation table's request: its search
+// box, and which time its rows are ordered by.
+type ProjectSessionsQuery struct {
+	// Search matches the conversation's title.
+	Search string
+	// Sort is "created" or "updated"; anything else, "" included, reads as
+	// "updated" — the time a conversation last said something.
+	Sort string
+	// Desc orders newest first.
+	Desc bool
+}
+
+// ProjectSessionRow is one row of a project's conversation table: the
+// conversation's own facts, plus the two the table derives — the model it last
+// ran with and how many messages it shows.
+type ProjectSessionRow struct {
+	ID        string
+	Title     string
+	CreatedAt int64
+	UpdatedAt int64
+	// Model is the session's own stored model choice, empty when the session
+	// never pinned one (it then runs on whatever the agent defaults to).
+	Model string
+	// MessageCount counts the messages a person exchanged in the
+	// conversation: the visible user and assistant rows. See
+	// projectSessionMessageCount for what that excludes.
+	MessageCount int
+}
+
+// projectSessionMessageCount is the conversation table's "messages" column: the
+// rows a person actually exchanged. Tool and reasoning rows are the work of an
+// answer rather than something said in it, and a repaired, withdrawn or rewound
+// row is hidden from the transcript — the same set the transcript shows, without
+// the runtime-authored rows that no surface draws (they are recognisable only by
+// a marker inside their parts JSON, never by a column here).
+//
+// It is a correlated count by session, so it rides
+// idx_fb_messages_session_visibility instead of reading the table.
+const projectSessionMessageCount = `(SELECT COUNT(*) FROM fb_messages m
+	 WHERE m.session_id = fb_sessions.id AND m.visibility = 'visible'
+	   AND m.role IN ('user', 'assistant'))`
+
+// projectSessionsWhere is the predicate every read of a project's conversation
+// table carries: this agent's conversations, bound to the project, that hold a
+// message (the same rows ListSessionsForProject lists), optionally narrowed to
+// the ones whose title matches the search box.
+func (s *SessionStore) projectSessionsWhere(projectID, search string) (string, []any) {
+	where := `fb_sessions.agent_id = ? AND fb_sessions.project_id = ? AND fb_sessions.source = ? AND ` + conversationHoldsAMessage
+	args := []any{s.AgentID(), projectID, SessionSourceConversation}
+	if search = strings.TrimSpace(search); search != "" {
+		where += ` AND fb_sessions.title LIKE ?`
+		args = append(args, "%"+search+"%")
+	}
+	return where, args
+}
+
+// projectSessionsOrder puts the rows in the order the table asked for: the
+// chosen time, newest or oldest first, and the id as a tie-breaker so equal
+// timestamps cannot shuffle rows between pages.
+func projectSessionsOrder(opts ProjectSessionsQuery) string {
+	order := "fb_sessions.updated_at"
+	if strings.EqualFold(strings.TrimSpace(opts.Sort), "created") {
+		order = "fb_sessions.created_at"
+	}
+	direction := "ASC"
+	if opts.Desc {
+		direction = "DESC"
+	}
+	return order + " " + direction + ", fb_sessions.id"
+}
+
+// projectSessionsPageSQL is one page's query, with its arguments. It is a named
+// function so the test that pins the query plan can run EXPLAIN over the very
+// text the store executes — the plan cannot drift away from the query it
+// describes.
+func (s *SessionStore) projectSessionsPageSQL(projectID string, opts ProjectSessionsQuery, limit, offset int) (string, []any) {
+	where, args := s.projectSessionsWhere(projectID, opts.Search)
+	query := `SELECT fb_sessions.id, fb_sessions.title, fb_sessions.created_at, fb_sessions.updated_at,
+	        COALESCE(model_state.model, ''),
+	        ` + projectSessionMessageCount + `
+	 FROM fb_sessions
+	 LEFT JOIN fb_session_model_state model_state ON model_state.session_id = fb_sessions.id
+	 WHERE ` + where + `
+	 ORDER BY ` + projectSessionsOrder(opts) + `
+	 LIMIT ? OFFSET ?`
+	return query, append(args, limit, offset)
+}
+
+// ListSessionsForProjectPage returns one page of a project's conversation
+// table and how many rows the same search matches, so the page and its pager
+// come from one round trip. The rows are the ones ListSessionsForProject
+// lists — this agent's conversations bound to the project that hold a message —
+// searched by title and ordered by the chosen time, newest first.
+func (s *SessionStore) ListSessionsForProjectPage(ctx context.Context, projectID string, opts ProjectSessionsQuery, limit, offset int) ([]ProjectSessionRow, int, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return []ProjectSessionRow{}, 0, nil
+	}
+	limit, offset = projectPageWindow(limit, offset)
+	where, countArgs := s.projectSessionsWhere(projectID, opts.Search)
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE `+where, countArgs...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	// An offset past the end reads the last page rather than an empty one: a
+	// delete that empties the last page lands on the page before it.
+	if offset >= total {
+		offset = max(total-1, 0) / limit * limit
+	}
+	query, args := s.projectSessionsPageSQL(projectID, opts, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []ProjectSessionRow{}
+	for rows.Next() {
+		var item ProjectSessionRow
+		if err := rows.Scan(&item.ID, &item.Title, &item.CreatedAt, &item.UpdatedAt, &item.Model, &item.MessageCount); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, item)
+	}
+	return out, total, rows.Err()
+}
+
+// ConversationCountsByProject counts each named project's conversations in
+// one query: the same predicate ListSessionsForProject lists by (this agent's
+// conversations that hold a message), grouped by project, so a project table
+// can draw a conversation count per row without a lookup per row. A project
+// with no conversation is absent from the map, which is the same thing as
+// counting zero.
+func (s *SessionStore) ConversationCountsByProject(ctx context.Context, projectIDs []string) (map[string]int, error) {
+	counts := map[string]int{}
+	if s == nil || s.db == nil || len(projectIDs) == 0 {
+		return counts, nil
+	}
+	args := make([]any, 0, len(projectIDs)+2)
+	args = append(args, s.AgentID(), SessionSourceConversation)
+	for _, id := range projectIDs {
+		args = append(args, id)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(projectIDs)), ",")
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT project_id, COUNT(*) FROM fb_sessions
+		 WHERE agent_id = ? AND source = ? AND project_id IN (`+placeholders+`)
+		   AND `+conversationHoldsAMessage+`
+		 GROUP BY project_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var projectID string
+		var count int
+		if err := rows.Scan(&projectID, &count); err != nil {
+			return nil, err
+		}
+		counts[projectID] = count
+	}
+	return counts, rows.Err()
+}
+
 // ListSessionsRecentPaged returns one page of the agent's sessions ordered by
 // most recently updated. Callers browsing a long history must page through
 // with limit/offset instead of requesting the whole list: the picker keeps

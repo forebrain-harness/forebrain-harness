@@ -3,18 +3,21 @@
     <div class="mx-auto max-w-6xl space-y-6">
       <div class="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
         <nav class="settings-tabs" :aria-label="t('settings.title')" data-testid="settings-tabs">
-          <button
-            v-for="tab in tabs"
-            :key="tab.key"
-            type="button"
-            class="settings-tab"
-            :class="{ 'settings-tab--active': tab.key === activeTab }"
-            :aria-selected="tab.key === activeTab"
-            role="tab"
-            @click="activeTab = tab.key"
-          >
-            {{ tab.label }}
-          </button>
+          <template v-for="group in tabGroups" :key="group.key">
+            <div class="settings-group" :data-group="group.key">{{ group.label }}</div>
+            <button
+              v-for="tab in group.tabs"
+              :key="tab.key"
+              type="button"
+              class="settings-tab"
+              :class="{ 'settings-tab--active': tab.key === activeTab }"
+              :aria-selected="tab.key === activeTab"
+              role="tab"
+              @click="activeTab = tab.key"
+            >
+              {{ tab.label }}
+            </button>
+          </template>
         </nav>
 
         <section class="min-w-0">
@@ -51,26 +54,48 @@ import { useI18n } from '@/locales'
 
 /**
  * Settings is the global scope: everything that is not bound to a primary
- * agent or a project lives behind these tabs. Later plans append tabs (009
- * approval defaults, 010 shared skills) by adding to the array. The 007
- * skills tab was the temporary surface; 010 replaced it with shared-skills.
+ * agent or a project lives behind these tabs. The tabs are grouped (owner
+ * 2026-10-18, after the design's sub-navigation): what every visitor tunes,
+ * the services that run for every primary agent, and the expert surfaces.
+ * Later plans append a tab by adding it to its group; `?tab=<key>` is the
+ * key of the tab, not its position.
  */
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 
-const tabs = computed(() => [
-  { key: 'appearance', label: t('settings.tabAppearance') },
-  { key: 'approval', label: t('settings.tabApproval') },
-  { key: 'mcp', label: t('settings.tabMcp') },
-  { key: 'lsp', label: t('settings.tabLsp') },
-  { key: 'hooks', label: t('settings.tabHooks') },
-  { key: 'cron', label: t('settings.tabCron') },
-  { key: 'memory', label: t('settings.tabMemory') },
-  { key: 'config', label: t('settings.tabConfig') },
-  { key: 'runtime', label: t('settings.tabRuntime') },
-  { key: 'shared-skills', label: t('settings.tabSharedSkills') },
+const tabGroups = computed(() => [
+  {
+    key: 'general',
+    label: t('settings.groupGeneral'),
+    tabs: [
+      { key: 'appearance', label: t('settings.tabAppearance') },
+      { key: 'approval', label: t('settings.tabApproval') },
+    ],
+  },
+  {
+    key: 'services',
+    label: t('settings.groupServices'),
+    tabs: [
+      { key: 'mcp', label: t('settings.tabMcp') },
+      { key: 'lsp', label: t('settings.tabLsp') },
+      { key: 'hooks', label: t('settings.tabHooks') },
+      { key: 'cron', label: t('settings.tabCron') },
+      { key: 'memory', label: t('settings.tabMemory') },
+      { key: 'shared-skills', label: t('settings.tabSharedSkills') },
+    ],
+  },
+  {
+    key: 'advanced',
+    label: t('settings.groupAdvanced'),
+    tabs: [
+      { key: 'config', label: t('settings.tabConfig') },
+      { key: 'runtime', label: t('settings.tabRuntime') },
+    ],
+  },
 ])
+
+const tabs = computed(() => tabGroups.value.flatMap((group) => group.tabs))
 
 // The tab lives in ?tab=<key> so other pages can link straight to one. The
 // appearance tab is the default: it is the one thing every visitor can act
@@ -118,5 +143,13 @@ watch(activeTab, (tab) => {
   background: var(--forebrain-brand-soft);
   color: var(--forebrain-brand-1);
   font-weight: 500;
+}
+/* The group's small heading, above the tabs it holds (the design's
+   `.subnav .grp`): quieter and tighter than a tab, and not clickable. */
+.settings-group {
+  padding: 10px 10px 4px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--forebrain-muted-text);
 }
 </style>

@@ -4,6 +4,41 @@
 
 ## 最新审核信息
 
+- **2026-10-18 owner 新需求 → 新增 078（子代理会话改到右侧抽屉）**：
+  - 子代理的会话，无论实时还是回放，都在右侧抽屉的标签页里看（参照 Codex 桌面版右侧面板），一个子代理一个标签。
+  - 标签底部有子代理自己的输入框：owner 明确要求支持 @ 引用文件，且支持粘贴、拖入附件就必须有“＋”（附件、技能；不含“目标”）；同时保留 / 命令、停止。
+  - 原型 v58–v61 已画，owner 同意 4 点：抽屉与工作台一次只开一个；保留子代理输入框；去掉对话顶部的子代理切换条；抽屉打开时主输入框变紧凑。另外同意：子代理页去掉“打开会话”、Esc 第三层收起抽屉、升级后抽屉先收起（旧的子代理视图记录不迁移）。
+  - 对话里的子代理卡片沿用现有组件（与终端同一套信息），原型已按它对齐；在抽屉里打开的那一行高亮。
+  - 078 依赖 077 Step 8（花名册的 `parent_session_id`、`agentRosterConversationTarget`），077 已执行，前置满足。
+  - 078 会去掉子代理页操作栏的“打开会话”（原型只有“停止”）；077 里“打开会话保持 worker 会话”的做法由 078 取代。
+  - owner 追加：子代理的模型名称、思考强度、上下文窗口预算与百分比要优雅展示 → 原型 v62 放进输入框底栏的“模型与上下文”胶囊和卡片（078 Step 5a）。
+  - owner 追加：运行中的“工作中”与终端一致，放在输入框正上方；子代理标签与主对话都要（主对话这一行此前 web 根本没画）→ 078 Step 5 / 7b，原型 v64–v65。
+  - 复核时确认的现状缺口：子代理视图的 / 菜单一直列的是主对话的命令（输入框没传 `subagentView`），078 一并修好。
+- **2026-10-18 复核已执行的 071–076 → 新增 077 补丁计划**：
+  - **计划文件**：16:06 前后 071–076 计划文件被还原成 `7e11f9a` 的版本，冷读复审的修订一度丢失。owner 用别的会话恢复后，评审方把当时的 9 条修改脚本在 `7e11f9a` 版本上重放，与恢复后的 072–076、README 逐字节比较，**完全一致**（071 复审时本来就没改）。唯一没写进去的是 08:32 那次“074 Step 1.4 owner 已同意”的记录（当时文件已被还原，脚本断言失败），现在记在本条与 077 里。
+  - **代码现状**：071–076 都已执行，改动留在工作区，未提交。`vue-tsc` exit 0；vitest 116 文件 745 例全过；`go test ./pkg/gateway ./pkg/process ./pkg/lsp ./cmd/forebrain ./pkg/state ./pkg/config` 全 ok（需按 Makefile 导出 pdfium 的 `PKG_CONFIG_PATH`，否则编译失败）；`go vet`、`gofmt` 无输出。
+  - **已修好**：073 Step 7 的①工具入参（改用原始 JSON）与③搜索框 34px；072 遗留的工坊面包屑截断（`.forebrain-topbar-crumb`）；`App.vue` 的原生 `title`；075 的通道整表写回、`secret_hints`、执行记录分页、保存后刷新；076 的钩子整表写回、`/api/runtime`、`PageTopRow` 已删。
+  - **仍有缺口，写成 077**：
+    - ①项目 MCP / LSP 的允许/拒绝仍会把其它待确认项一并拒绝（074 执行时只加了一句提示 `mcp.consentAllTip`）；
+    - ②拒绝无法撤回，项目 MCP 表里根本不显示已拒绝的条目；
+    - ③终端答 N 打印 `skipped — confirm later…`，与“已记为拒绝、不再问”的行为不符；
+    - ④设置 · MCP 缺“未运行 · 被覆盖”；
+    - ⑤`connecting/disconnected/cancelled` 被显示成“已连接”；
+    - ⑥子代理“所在会话”仍指向 worker 会话（073 Step 7.2 未执行）。
+  - **owner 2026-10-18 裁定**（记忆 `project-consent-decline-semantics`）：网页每行的允许/拒绝**只决定这一条**；终端 N = 拒绝（记下、不再问）但**可撤回**，网页项目空间的 MCP / LSP 标签显示“已拒绝”行并给“允许”；项目 MCP 与项目 LSP 同一规则。原型 v57 已画。
+  - **复核时决定不改**（不值得）：
+    - 按层筛选参数仍叫 `source`：能正确按行的 `scope` 过滤；
+    - 待确认行仍复用 `pending` 键：前端用 `scope === 'project' && allowed !== true` 区分；077 的已拒绝用独立的 `declined` 键；
+    - 其余原生 `title` 都是组件 prop，不是 HTML 属性。
+  - **owner 选择**：评审已执行代码、出补丁计划，**不回改** 071–076 的计划文件。
+- **2026-10-18 `/improve review-plan`（冷读复审 071–076）**：派一个没看过上下文的子代理以执行者身份冷读六份计划（逐条对照 `4888d76` 代码与原型），共报约 70 条（歧义、缺信息、引用错误、跨计划不一致、验证不可执行）；评审方逐条复核后改计划。
+  **复审时发现 071–073 已被执行、留在工作区未提交**（`RailTooltip.vue` 已删、`list_page.go`/共用组件/`agent-tables.spec.ts`/`shell-chrome.spec.ts` 已在；当时没有别的会话在跑）。对已执行的三份，逐条对照工作区代码：大部分风险执行者已避开（模型服务与技能写前先取全量、`RowAction` 语气类名、26px 按钮最小高度、记忆接口老行为），
+  **确认三处偏差**并写成 **073 Step 7 补丁**：①工具入参经 axios 深层驼峰转换后参数名变驼峰、带下划线的参数“必填”全判错；②子代理“所在会话”取的是 worker 会话而非父对话；③工具栏搜索框 32px（原型 34px）。072 遗留的“工坊面包屑不能截断”并入 075 Step 3。
+  **074–076 已按复审重写/补全**：每一步都有 **Verify**；Go `-run '…\|…'` 假通过的写法全部改掉；“`git status` 只出现 Scope 文件”改为“与开工前快照比较”（不提交的前提下原写法必然失败）；
+  074：待同意行改用 `consent_pending`（`pending` 已表示“启动未完成”）、按层筛选参数改名 `layer`、全局层补 `shadowed_by`（“未运行 · 被覆盖”）、MCP 读写绕开驼峰拦截器（否则 `env`/`headers` 的用户键被改名写坏配置）、OAuth 整块写入与超时清空发 0、连接状态按真实取值、已存在的 i18n 键不重复加；
+  075：通道写前取全量（PUT 会清掉未提交的 kind）、密钥摘要用后端新 `secret_hints`（同 `providerKeyHint`）、执行记录存储层补 `ListRunsPage`、抽 `ProjectDeleteDialog` 把 `ProjectsView.vue` 纳入 Scope、项目设置保存后通知父组件刷新、显示名表单一数据源 `frontend/src/lib/channelLabels.json`；
+  076：运行状态的版本/地址由前端提供（不改启动流程）、钩子分页行结构与写前取全量、`title` 扫描只动原生元素且区分“截断全文 / 说明文字”、全站检查排除嵌套表与对话页。
+  **（已裁定，见上方 2026-10-18 复核条目：只决定这一条 + 拒绝可撤回，落在 077）** 原文：项目 MCP 的“允许/拒绝”现在会把**其它待确认条目一并拒绝**（`DecideProjectMCPConsents` 一次决定全部，现有网页就是这样调用的）；计划按原型改成“只决定这一条”（同意接口加可选 `decide`，终端启动提示不受影响）。owner 否决则走 074 STOP 里的备选。
 - **2026-10-18 owner：“原型没问题了，请生成完整详细的实施计划” → 新增 071–076（web 设计稿 2026-10-17/18 全部迭代的实施，设计稿 `docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/app-preview.html` / 原型 v56）**：
   覆盖 070 之后设计稿的全部改动——表格化（项目、工具、项目会话、定时任务、通道）、操作栏统一图标按钮 + 紧凑悬停提示、表头排序、每个表格的分页器、所有页面与标签去掉内容标题（工具栏左搜索右按钮、表下说明）、
   MCP 三处页面（设置只管全局、菜单栏新增 MCP 页、项目三层；右侧抽屉查看/编辑/新增）、项目空间面包屑进顶栏与“项目设置”标签（项目指令、记忆作用域并入，打平表单，删除项目在保存右侧）、设置页分组与表单打平、
@@ -212,12 +247,14 @@
 | [068-fetch-libtokenizers-shell-fixes](068-fetch-libtokenizers-shell-fixes.md) | `fetch-libtokenizers.sh` 在 bash 3.2 下空数组不再退出；Windows 编译器提示的 `MINGW` 判断真正生效 | Bug Fix / Build | DONE（2026-10-16 执行完毕，评审 APPROVE；worktree `.claude/worktrees/agent-aacb0c98b12b26520`（detached 于 dev `fa4af8a`）；**已按 owner 2026-10-16 指示 `git apply` 并回主树工作区（dev `7155be9`），未提交**）| P3 | S | LOW |
 | [069-estimator-consistency-in-compaction](069-estimator-consistency-in-compaction.md) | 观测开销按估算器分开；压缩内部（摘要预算、裁剪、卡片数字）与上下文面板用会话模型的估算器 | Correctness | DONE（2026-10-16 执行完毕，评审 APPROVE；**已并回主树工作区（dev `7155be9`），未提交**；新增 `pkg/assembly/hook_test.go`，旧测试改读 `ProjectFor`，均接受）| P2 | M | LOW–MED |
 | [070-web-keeps-image-refused-messages](070-web-keeps-image-refused-messages.md) | web 与终端同一语义：当前模型不支持图片时（本条消息带图，或对话历史里有图），消息保留落库、只拒绝请求（WS 新 op `turn_refused`，提示不落库）；门禁按会话自己的模型与项目 runner 判断；被拒前先查跨进程“会话忙”（终端一并补上）；会话模型菜单标“支持图片” | Bug Fix / 语义统一 | DONE（2026-10-17 执行完毕，评审 APPROVE；**改动留主树工作区（dev `1e5866a`），未提交**；设计稿 1:1 已用真 gateway 截图核对。执行期补 Scope：`pkg/gateway/mention_test.go`（旧用例钉住被删的门禁，按新语义重写为 `TestWebImageGateRefusesTheTurnNotTheAttachment`） | **P1** | L | MED |
-| [071-web-list-foundation](071-web-list-foundation.md) | web 表格与表单的共用底座：服务端分页约定（`list_page.go`，只有带 `page` 才分页）、工具栏/表下说明/分页器/表头排序/行图标按钮、紧凑提示条（`v-tip`，取代 `RailTooltip`）、单选组、右侧抽屉、`useServerList` | Direction / Infra | TODO | **P1** | L | LOW–MED |
-| [072-web-shell-and-chat-chrome](072-web-shell-and-chat-chrome.md) | 外壳与对话页：深浅色切换进顶栏、折叠按钮到菜单栏底部、顶栏 30px 与标题截断（360px）、无模型名、项目标签只写名称、抽屉标题“对话”、首页即新对话、新对话垂直居中且无标题/无工作台、首条消息后标题按引擎规则、工坊顶栏同规则 | Direction | TODO | **P1** | M | MED |
-| [073-web-agent-pages-as-tables](073-web-agent-pages-as-tables.md) | 菜单栏主代理 8 页（项目、规则指令、技能、子代理、模型服务、工具、权限、记忆）无标题 + 工具栏 + 表格 + 分页 + 说明；对应接口服务端分页；项目对话数、子代理会话标题、工具分类/入参表 | Direction | TODO | **P1** | L | MED |
-| [074-web-mcp-three-pages-and-drawer](074-web-mcp-three-pages-and-drawer.md) | MCP 三处页面（设置全局、菜单栏新增 MCP 页全局+主代理、项目三层）：统一表格、右侧抽屉查看/编辑/新增、测试连接、允许/拒绝；三个读视图服务端分页（写接口已存在） | Direction | TODO | **P1** | L | MED |
-| [075-web-project-space](075-web-project-space.md) | 项目空间：面包屑进顶栏、“项目设置”打平表单（项目指令/记忆作用域并入、删除项目）、各标签无标题 + 搜索 + 表格 + 分页；会话/定时任务/通道表格化；会话模型/消息数/心跳与通道“已配置”后端补字段 | Direction | TODO | **P1** | L | MED |
-| [076-web-settings-tabs](076-web-settings-tabs.md) | 设置页：分组子导航、表单标签打平（标准单选组、底部保存）、表格标签（LSP/钩子/共享技能）服务端分页、配置文件工具栏、运行状态平铺（新 `/api/runtime`）；全站图标按钮提示统一；删 `PageTopRow` | Direction | TODO | **P1** | M | LOW–MED |
+| [071-web-list-foundation](071-web-list-foundation.md) | web 表格与表单的共用底座：服务端分页约定（`list_page.go`，只有带 `page` 才分页）、工具栏/表下说明/分页器/表头排序/行图标按钮、紧凑提示条（`v-tip`，取代 `RailTooltip`）、单选组、右侧抽屉、`useServerList` | Direction / Infra | 已执行（工作区未提交）；2026-10-18 复核通过 | **P1** | L | LOW–MED |
+| [072-web-shell-and-chat-chrome](072-web-shell-and-chat-chrome.md) | 外壳与对话页：深浅色切换进顶栏、折叠按钮到菜单栏底部、顶栏 30px 与标题截断（360px）、无模型名、项目标签只写名称、抽屉标题“对话”、首页即新对话、新对话垂直居中且无标题/无工作台、首条消息后标题按引擎规则、工坊顶栏同规则 | Direction | 已执行（工作区未提交）；2026-10-18 复核通过（工坊面包屑截断已随 075 修好） | **P1** | M | MED |
+| [073-web-agent-pages-as-tables](073-web-agent-pages-as-tables.md) | 菜单栏主代理 8 页（项目、规则指令、技能、子代理、模型服务、工具、权限、记忆）无标题 + 工具栏 + 表格 + 分页 + 说明；对应接口服务端分页；项目对话数、子代理会话标题、工具分类/入参表 | Direction | 已执行（工作区未提交）；Step 7 的①③已修好，②子代理父对话未做 → 并入 077 Step 8 | **P1** | L | MED |
+| [074-web-mcp-three-pages-and-drawer](074-web-mcp-three-pages-and-drawer.md) | MCP 三处页面（设置全局、菜单栏新增 MCP 页全局+主代理、项目三层）：统一表格、右侧抽屉查看/编辑/新增、测试连接、允许/拒绝；三个读视图服务端分页（写接口已存在） | Direction | 已执行（按复审前的原稿，工作区未提交）；逐条确认、已拒绝可撤回、被覆盖、连接状态 → 077 | **P1** | L | MED |
+| [075-web-project-space](075-web-project-space.md) | 项目空间：面包屑进顶栏、“项目设置”打平表单（项目指令/记忆作用域并入、删除项目）、各标签无标题 + 搜索 + 表格 + 分页；会话/定时任务/通道表格化；会话模型/消息数/心跳与通道“已配置”后端补字段 | Direction | 已执行（工作区未提交）；2026-10-18 复核通过（项目 LSP 逐条确认与撤回 → 077） | **P1** | L | MED |
+| [076-web-settings-tabs](076-web-settings-tabs.md) | 设置页：分组子导航、表单标签打平（标准单选组、底部保存）、表格标签（LSP/钩子/共享技能）服务端分页、配置文件工具栏、运行状态平铺（新 `/api/runtime`）；全站图标按钮提示统一；删 `PageTopRow` | Direction | 已执行（工作区未提交）；2026-10-18 复核通过 | **P1** | M | LOW–MED |
+| [077-web-batch-review-fixes](077-web-batch-review-fixes.md) | 071–076 执行后复核补丁：项目 MCP/LSP 每行只决定这一条、“已拒绝”行可点“允许”撤回（同意接口加 `decide`，新增 `DecideProjectMCPConsentsFor`/`DeclinedProjectMCPConsents`/`DecideProjectServersFor`）；终端 N 的文案改成“已拒绝、去项目页撤回”；设置 · MCP“未运行 · 被覆盖”（`shadowed_by`）；连接状态六种取值；子代理“所在会话”指向父对话 | Correctness / Direction | 已执行（工作区未提交）；2026-10-18 评审复核 APPROVE：Go 五包 `ok`、`vet`/`gofmt` 空、`pnpm test` 116 文件 758 例、`vue-tsc` exit 0、e2e 单文件 8/8 与全套 155 passed；新测试逐条核过断言 | **P1** | M | MED |
+| [078-web-subagent-drawer](078-web-subagent-drawer.md) | 子代理会话（实时与回放）改到右侧抽屉，一个子代理一个标签：任务卡默认折叠、工作中 / 已工作；输入框底栏的“模型与上下文”胶囊（圆环 + 百分比 | 模型 · 思考强度，点开看窗口、已用、用量）；标签自带输入框（＋ 附件与技能、/ 命令、@ 引用文件、粘贴拖入附件、停止）；抽屉与工作台互斥；顶栏“子代理 N”；去掉对话顶部切换条；子代理页“所在会话”直接打开标签；主对话与子代理的运行状态行（工作中 · 待办进度 · 首 token）放在输入框正上方，与终端一致 | Direction | TODO | **P1** | L | MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -246,12 +283,9 @@
 
 ```
 --- 2026-10-18 web 设计稿 2026-10-17/18 迭代的实施（owner：原型没问题了）---
-071-web-list-foundation (先做：共用件 + 服务端分页约定；只动 common 组件、main.css、App.vue 的提示条、memories_api.go 的解析)
-072-web-shell-and-chat-chrome (依赖 071；与 073–076 不改同一批页面，可与 073/074 并行)
-073-web-agent-pages-as-tables (依赖 071；改 SkillsTable / MemoryFilesPanel 的共用接口，075/076 依赖它)
-074-web-mcp-three-pages-and-drawer (依赖 071；与 073 不重叠，可并行)
-075-web-project-space (依赖 071、073、074)
-076-web-settings-tabs (最后：依赖 071、073、074、075；收尾删 PageTopRow、全站图标提示统一)
+071–076 (均已执行，工作区未提交；2026-10-18 复核)
+077-web-batch-review-fixes (已执行，工作区未提交；2026-10-18 评审复核 APPROVE)
+078-web-subagent-drawer (下一步：依赖 077 Step 8，已满足；改 ChatView / locales / 子代理组件，不要与其它 web 计划并行)
 --- 2026-10-17 图片被拒消息保留（终端已在工作区修好，web 对齐）---
 070-web-keeps-image-refused-messages (独立；前置是工作区里未提交的终端侧修复；含真 gateway 浏览器验收 web_e2e.sh)
 003-recall-in-flight-steer (独立，无依赖，owner 报告的严重 bug，优先)

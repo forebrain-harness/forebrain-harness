@@ -46,7 +46,15 @@
             <td><BadgeComponent :variant="passed(item, 'without_skill') ? 'success' : 'error'">{{ passed(item, 'without_skill') ? t('workshop.evalPass') : t('workshop.evalFail') }}</BadgeComponent></td>
             <td><MessageSquareText v-if="item.feedback" class="h-3.5 w-3.5 text-[var(--forebrain-brand-1)]" aria-hidden="true" /><span v-else class="text-[var(--forebrain-muted-text)]">—</span></td>
             <td class="text-right">
-              <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :data-testid="`workshop-eval-view-${index}`" @click="open(index)">{{ t('workshop.view') }}</button>
+              <RowActions>
+                <RowAction
+                  :icon="Eye"
+                  :label="t('workshop.view')"
+                  :name="`${t('workshop.evalColCase')} ${index + 1}`"
+                  :data-testid="`workshop-eval-view-${index}`"
+                  @click="open(index)"
+                />
+              </RowActions>
             </td>
           </tr>
         </tbody>
@@ -74,8 +82,10 @@
  * model's job — the tab fills the composer and sends, it never runs a script.
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { MessageSquareText } from 'lucide-vue-next'
+import { Eye, MessageSquareText } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
 import EvalCaseDialog from './EvalCaseDialog.vue'
 import forebrainApi, { getErrorMessage, type WorkshopEvalCase, type WorkshopEvalIteration } from '@/lib/api'
 import { useI18n } from '@/locales'

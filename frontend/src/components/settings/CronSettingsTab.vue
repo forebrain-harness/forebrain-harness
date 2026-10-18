@@ -1,61 +1,59 @@
 <template>
-  <div class="pb-6">
+  <!-- The install's retention setting, flat in its tab (owner 2026-10-18):
+       the one number, what it means, and the two buttons that write it. -->
+  <div class="grid gap-3">
     <p
       v-if="errorText"
       data-testid="cron-retention-error"
-      class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]"
+      class="text-[12px] text-[var(--forebrain-danger)]"
     >{{ errorText }}</p>
-    <p v-if="notice" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
+    <p v-if="notice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
 
-    <CardComponent class="mt-3">
-      <template #header>
-        <p class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('cronSettings.retentionTitle') }}</p>
-      </template>
-      <p class="text-[12px] leading-relaxed text-[var(--forebrain-muted-text)]">{{ t('cronSettings.retentionDescription') }}</p>
-
-      <label class="block">
+    <div class="grid gap-1.5">
+      <label class="forebrain-form-field w-32">
+        <span>{{ t('cronSettings.retentionLabel') }}</span>
         <input
           v-model.number="draft"
           type="number"
           :min="settings?.minDays"
           :max="settings?.maxDays"
           step="1"
-          class="forebrain-field h-9 w-32"
+          class="forebrain-field h-[34px] w-full"
           data-testid="cron-retention-days"
           :disabled="loading || saving || resetting"
         />
-        <span v-if="settings && !settings.configured" class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">
-          {{ t('cronSettings.defaultHint', { days: settings.defaultDays }) }}
-        </span>
       </label>
+      <p class="forebrain-list-note">{{ t('cronSettings.retentionDescription') }}</p>
+      <p v-if="settings && !settings.configured" class="forebrain-list-note">
+        {{ t('cronSettings.defaultHint', { days: settings.defaultDays }) }}
+      </p>
+    </div>
 
-      <div class="flex gap-2">
-        <button
-          type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
-          data-testid="cron-retention-save"
-          :disabled="loading || saving || !changed"
-          @click="save"
-        >
-          {{ saving ? t('common.loading') : t('common.save') }}
-        </button>
-        <button
-          type="button"
-          class="forebrain-btn forebrain-btn-ghost text-xs"
-          data-testid="cron-retention-reset"
-          :disabled="loading || resetting"
-          @click="restoreDefault"
-        >
-          {{ resetting ? t('common.loading') : t('cronSettings.reset') }}
-        </button>
-      </div>
-    </CardComponent>
+    <div class="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        class="forebrain-btn forebrain-btn-primary text-xs"
+        data-testid="cron-retention-save"
+        :disabled="loading || saving || !changed"
+        @click="save"
+      >
+        {{ saving ? t('common.loading') : t('common.save') }}
+      </button>
+      <button
+        type="button"
+        class="forebrain-btn forebrain-btn-ghost text-xs"
+        data-testid="cron-retention-reset"
+        :disabled="loading || resetting"
+        @click="restoreDefault"
+      >
+        {{ resetting ? t('common.loading') : t('cronSettings.reset') }}
+      </button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import CardComponent from '@/components/common/CardComponent.vue'
 import forebrainApi, { type CronSettings, GatewayHttpError, getErrorMessage } from '@/lib/api'
 import { useI18n } from '@/locales'
 

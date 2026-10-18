@@ -137,7 +137,7 @@ func (m *Manager) Snapshot() event.LSPSnapshot {
 			DisplayName: id,
 			Scope:       "project",
 			State:       event.LSPStateBlocked,
-			Note:        "project entry declined; it asks again when .forebrain/lsp_servers.yaml changes",
+			Note:        "project entry declined; allow it on the project page's LSP tab, or it asks again when .forebrain/lsp_servers.yaml changes",
 		})
 	}
 	// Enabled servers first, then by id.

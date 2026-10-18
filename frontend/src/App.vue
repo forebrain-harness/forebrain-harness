@@ -11,33 +11,7 @@
             <span class="forebrain-rail-version">{{ appVersion }}</span>
           </span>
         </RouterLink>
-        <button
-          v-if="!railCollapsed"
-          type="button"
-          class="forebrain-rail-fold"
-          data-testid="rail-collapse"
-          :aria-label="t('rail.collapse')"
-          :aria-expanded="true"
-          @click="collapseRail()"
-        >
-          <PanelLeftClose class="size-4" aria-hidden="true" />
-        </button>
       </div>
-      <button
-        v-if="railCollapsed"
-        type="button"
-        class="forebrain-rail-expand"
-        data-testid="rail-collapse"
-        :aria-label="t('rail.expand')"
-        :aria-expanded="false"
-        @mouseenter="hoverTooltip($event.currentTarget as HTMLElement, t('rail.expand'))"
-        @mouseleave="clearTooltip"
-        @focus="hoverTooltip($event.currentTarget as HTMLElement, t('rail.expand'))"
-        @blur="clearTooltip"
-        @click="expandRail()"
-      >
-        <PanelLeftOpen class="size-[18px]" aria-hidden="true" />
-      </button>
 
       <!-- The tenant selector: the one switch point for primary agents. -->
       <div class="forebrain-tenant" ref="tenantMenuRef">
@@ -62,13 +36,9 @@
           type="button"
           class="forebrain-tenant-tile"
           :aria-label="tenantTileLabel"
-          :title="tenantTileLabel"
           aria-haspopup="listbox"
           :aria-expanded="tenantMenuOpen"
-          @mouseenter="hoverTooltip($event.currentTarget as HTMLElement, tenantTileLabel)"
-          @mouseleave="clearTooltip"
-          @focus="hoverTooltip($event.currentTarget as HTMLElement, tenantTileLabel)"
-          @blur="clearTooltip"
+          v-tip:right="tenantTileLabel"
           @click="tenantMenuOpen = !tenantMenuOpen"
         >
           {{ tenantInitial }}
@@ -101,7 +71,7 @@
                 type="button"
                 class="forebrain-tenant-option-del"
                 :aria-label="t('agents.deleteAria', { id: agent.id })"
-                :title="t('agents.deleteButton')"
+                v-tip:right="t('agents.deleteButton')"
                 @click.stop="askDeleteAgent(agent.id)"
               >
                 <Trash2 class="forebrain-tenant-option-del-ic" aria-hidden="true" />
@@ -119,10 +89,7 @@
           class="forebrain-rail-link"
           :class="{ 'forebrain-rail-link--active': isActive('/') }"
           :aria-label="L.chat"
-          @mouseenter="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, L.chat)"
-          @mouseleave="clearTooltip"
-          @focus="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, L.chat)"
-          @blur="clearTooltip"
+          v-tip:right="railCollapsed ? L.chat : ''"
           @click="toggleChatDrawer"
         >
           <MessageSquare class="forebrain-rail-ic" aria-hidden="true" />
@@ -136,10 +103,7 @@
           class="forebrain-rail-link"
           :class="{ 'forebrain-rail-link--active': isActive(item.to) }"
           :aria-label="item.label"
-          @mouseenter="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, item.label)"
-          @mouseleave="clearTooltip"
-          @focus="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, item.label)"
-          @blur="clearTooltip"
+          v-tip:right="railCollapsed ? item.label : ''"
         >
           <component :is="item.icon" class="forebrain-rail-ic" aria-hidden="true" />
           <span>{{ item.label }}</span>
@@ -152,27 +116,24 @@
           class="forebrain-rail-link"
           :class="{ 'forebrain-rail-link--active': isActive('/settings') }"
           :aria-label="L.settings"
-          @mouseenter="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, L.settings)"
-          @mouseleave="clearTooltip"
-          @focus="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, L.settings)"
-          @blur="clearTooltip"
+          v-tip:right="railCollapsed ? L.settings : ''"
         >
           <Settings class="forebrain-rail-ic" aria-hidden="true" />
           <span>{{ L.settings }}</span>
         </RouterLink>
+        <!-- Collapsing the rail sits at the foot's right edge — under 设置 once
+             the rail is icons only (owner 2026-10-18). -->
         <button
           type="button"
-          class="forebrain-rail-theme"
-          :aria-label="themeToggleLabel"
-          :title="themeToggleLabel"
-          @mouseenter="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, themeToggleLabel)"
-          @mouseleave="clearTooltip"
-          @focus="railCollapsed && hoverTooltip($event.currentTarget as HTMLElement, themeToggleLabel)"
-          @blur="clearTooltip"
-          @click="toggleRailTheme"
+          class="forebrain-rail-collapse"
+          data-testid="rail-collapse"
+          :aria-label="railCollapsed ? t('rail.expand') : t('rail.collapse')"
+          :aria-expanded="!railCollapsed"
+          v-tip:right="railCollapsed ? t('rail.expand') : t('rail.collapse')"
+          @click="railCollapsed ? expandRail() : collapseRail()"
         >
-          <Sun v-if="isDarkTheme" class="forebrain-rail-ic" aria-hidden="true" />
-          <Moon v-else class="forebrain-rail-ic" aria-hidden="true" />
+          <PanelLeftOpen v-if="railCollapsed" class="forebrain-rail-ic" aria-hidden="true" />
+          <PanelLeftClose v-else class="forebrain-rail-ic" aria-hidden="true" />
         </button>
       </div>
     </aside>
@@ -180,13 +141,13 @@
     <ChatDrawer
       :open="chatDrawerOpen"
       :rail-width="railWidth"
-      :agent-name="activePrimary?.id || ''"
       :active-session-id="chatSessionId"
       @close="chatDrawerOpen = false"
       @select="(id) => { chatDrawerOpen = false; openSession(id) }"
       @new="newChat"
     />
-    <RailTooltip :anchor="tooltipAnchor" :text="tooltipText" />
+    <!-- The app's one tip, painted where the collapsed rail's hint used to be. -->
+    <AppTooltip />
 
     <div class="forebrain-work">
       <header class="forebrain-topbar">
@@ -197,7 +158,7 @@
         <template v-if="topbarContent?.leading">
           <component :is="renderTopbar" :render="topbarContent.leading" />
         </template>
-        <span v-else class="forebrain-topbar-title">{{ pageTitle }}</span>
+        <span v-else class="forebrain-topbar-title" v-tip:bottom.trunc="pageTitle">{{ pageTitle }}</span>
         <span class="forebrain-topbar-spacer" />
         <component
           :is="renderTopbar"
@@ -206,25 +167,24 @@
         />
         <button
           type="button"
-          class="forebrain-topbar-action"
+          class="forebrain-chip-btn"
           data-testid="new-agent"
           @click="openNewAgent"
         >
-          <Plus class="forebrain-topbar-action-ic" aria-hidden="true" />
+          <Plus aria-hidden="true" />
           <span>{{ t('agents.newButton') }}</span>
         </button>
         <div class="forebrain-language-menu" ref="languageMenuRef">
           <button
             type="button"
-            class="forebrain-language-trigger"
+            class="forebrain-chip-btn forebrain-language-trigger"
             :aria-label="t('language.label')"
-            :title="t('language.label')"
             :aria-expanded="languageMenuOpen"
+            v-tip:bottom="t('language.label')"
             @click="languageMenuOpen = !languageMenuOpen"
           >
             <Languages class="forebrain-language-ic" aria-hidden="true" />
             <span class="forebrain-language-text">{{ currentLanguageLabel }}</span>
-            <ChevronDown class="forebrain-language-caret" aria-hidden="true" />
           </button>
           <div v-if="languageMenuOpen" class="forebrain-language-popover">
             <button
@@ -240,6 +200,19 @@
             </button>
           </div>
         </div>
+        <!-- The rail's light/dark switch, last on the right: the shell's one
+             theme control lives here now, not in the rail's foot. -->
+        <button
+          type="button"
+          class="forebrain-chip-btn forebrain-chip-btn--sq"
+          data-testid="theme-toggle"
+          :aria-label="themeToggleLabel"
+          v-tip:bottom="themeToggleLabel"
+          @click="toggleRailTheme"
+        >
+          <Sun v-if="isDarkTheme" aria-hidden="true" />
+          <Moon v-else aria-hidden="true" />
+        </button>
       </header>
       <main class="forebrain-main">
         <router-view v-slot="{ Component }">
@@ -313,6 +286,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   Plus,
   Settings,
   ShieldCheck,
@@ -324,7 +298,7 @@ import {
 import { computed, defineComponent, nextTick, onMounted, onUnmounted, ref, watch, type VNode } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ChatDrawer from '@/components/ChatDrawer.vue'
-import RailTooltip from '@/components/RailTooltip.vue'
+import AppTooltip from '@/components/common/AppTooltip.vue'
 import BrandMark from '@/components/BrandMark.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
@@ -372,8 +346,6 @@ const languageMenuRef = ref<HTMLElement | null>(null)
 const tenantMenuOpen = ref(false)
 const tenantMenuRef = ref<HTMLElement | null>(null)
 const chatDrawerOpen = ref(false)
-const tooltipAnchor = ref<HTMLElement | null>(null)
-const tooltipText = ref('')
 
 // The top bar's "new primary agent" dialog, and the tenant dropdown's delete
 // confirmation. The two live in the shell because both act on the tenant list
@@ -398,15 +370,9 @@ const chatSessionId = computed(() => {
   return route.path === '/' && sid ? sid : null
 })
 
-function hoverTooltip(anchor: HTMLElement, text: string) {
-  tooltipAnchor.value = anchor
-  tooltipText.value = text
-}
-
-function clearTooltip() {
-  tooltipAnchor.value = null
-  tooltipText.value = ''
-}
+/** The collapsed rail names its entries on hover and on focus: every rail
+ *  control binds `v-tip:right` to its own label, so the tip appears beside it
+ *  only while the rail is icons only (an empty label shows nothing). */
 
 function toggleChatDrawer() {
   chatDrawerOpen.value = !chatDrawerOpen.value
@@ -522,6 +488,7 @@ const navItems = computed(() => {
     { to: '/projects', label: L.projects, icon: FolderGit2, scope: 'project' as const },
     { to: '/rules', label: L.rules, icon: ScrollText, scope: 'agent' as const },
     { to: '/skills', label: L.skills, icon: Sparkles, scope: 'agent' as const },
+    { to: '/mcp', label: L.mcp, icon: Plug, scope: 'agent' as const },
     { to: '/subagents', label: L.subagents, icon: Users, scope: 'agent' as const },
     { to: '/providers', label: L.providers, icon: Boxes, scope: 'agent' as const },
     { to: '/tools', label: L.tools, icon: Wrench, scope: 'agent' as const },

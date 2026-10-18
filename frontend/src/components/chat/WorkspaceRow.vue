@@ -11,7 +11,7 @@
         class="workspace-row"
         :class="{ 'workspace-row--tabbed': tabbed }"
         :style="{ paddingInlineStart: `${8 + depth * 14}px` }"
-        :title="node.path"
+        v-tip:top="node.path"
         :tabindex="tabbed ? 0 : -1"
         @click="activate"
         @keydown="keydown"

@@ -1,11 +1,14 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { config, flushPromises, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import { nextTick } from 'vue'
 
 import { setLocale } from '@/locales'
 import { forebrainApi, type ProjectRecord } from '@/lib/api'
 import { useTopbarContent } from '@/composables/useTopbar'
+import { persistLastSessionId } from '@/composables/useLastSession'
+import { useWorkbench } from '@/composables/useWorkbench'
 
 // The stream the component talks to, filled in by the module mock below and
 // driven by the test. useChatStream is the only module replaced: the
@@ -29,6 +32,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     takeSubagentReturnedDraft: unknown
     autoContinueForView: unknown
     cancelAutoContinue: unknown
+    resetForNewChat: unknown
     send: unknown
   }
   f.sessionId = ref('s1')
@@ -45,6 +49,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
   f.takeSubagentReturnedDraft = vi.fn(() => null)
   f.autoContinueForView = vi.fn(() => null)
   f.cancelAutoContinue = vi.fn()
+  f.resetForNewChat = vi.fn()
   return {
     ...actual,
     useChatStream: () => ({
@@ -91,12 +96,17 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       sendPendingSteersAfterInterrupt: vi.fn(),
       loadMessages: vi.fn(),
       switchToSession: vi.fn(),
+      resetForNewChat: f.resetForNewChat,
       formatRuntimeStatusLabel: actual.formatRuntimeStatusLabel,
     }),
   }
 })
 
 import ChatView from './ChatView.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 function makeRouter() {
   return createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div />' } }] })
@@ -123,9 +133,8 @@ beforeAll(() => {
   })
 })
 
-async function mountView(extraStubs: Record<string, unknown> = {}) {
-  const router = makeRouter()
-  router.push('/')
+async function mountView(extraStubs: Record<string, unknown> = {}, router = makeRouter(), location = '/') {
+  router.push(location)
   await router.isReady()
   return mount(ChatView, {
     global: {
@@ -166,9 +175,7 @@ describe('ChatView subagent view', () => {
   })
 
   function openSubagentView(wrapper: Awaited<ReturnType<typeof mountView>>, agentId: string) {
-    const tab = wrapper.findAll('.forebrain-agent-tab')
-      .find((node) => (node.attributes('title') ?? '') === agentId)
-    tab?.trigger('click')
+    void wrapper.find(`[data-testid="agent-tab-${agentId}"]`).trigger('click')
   }
 
   function seedSubagent() {
@@ -549,15 +556,81 @@ describe('ChatView fills the shell top bar', () => {
     wrapper.unmount()
   })
 
-  it('carries no heartbeat for a conversation that does not exist yet', async () => {
+  it('names an untitled conversation the way the engine will', async () => {
+    // The server has not written the title yet: the bar already reads what the
+    // first message will name it — first line, at most 50 characters (plan 072).
+    sessionIdRef().value = 's1'
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: `${'a'.repeat(60)}\nsecond line` },
+    ]
+    const wrapper = await mountView()
+    const title = (useTopbarContent().value?.leading?.() ?? [])
+      .find((node) => node.props?.['data-testid'] === 'chat-session-title')
+    expect(title?.children).toBe(`${'a'.repeat(50)}...`)
+    wrapper.unmount()
+  })
+
+  it('carries nothing for a conversation that does not exist yet', async () => {
+    // A new chat names nothing and has no third column to open: its top bar
+    // starts empty and fills on the first message (plan 072).
     sessionIdRef().value = null
     ;(fake as { messages: { value: unknown[] } }).messages.value = []
     const wrapper = await mountView()
-    const nodes = topbarNodes()
-    expect(nodes.some((node) => node.props?.['data-testid'] === 'chat-session-title')).toBe(true)
-    expect(nodes.some(isHeartbeat)).toBe(false)
+    expect(useTopbarContent().value?.leading?.() ?? []).toEqual([])
+    expect(topbarNodes()).toEqual([])
     wrapper.unmount()
     sessionIdRef().value = 's1'
+  })
+})
+
+describe('ChatView opens on the new-conversation page', () => {
+  const sessionIdRef = () => (fake as { sessionId: { value: string | null } }).sessionId
+  const resetSpy = () => (fake as { resetForNewChat: ReturnType<typeof vi.fn> }).resetForNewChat
+
+  beforeEach(() => resetSpy().mockClear())
+
+  afterEach(() => {
+    persistLastSessionId(null)
+    sessionIdRef().value = 's1'
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+  })
+
+  it('stays on the new chat at the root path instead of reopening the last conversation', async () => {
+    // The browser remembers a conversation from an earlier visit; the home
+    // page is the new-conversation page now, so nothing navigates away from it
+    // (plan 072).
+    persistLastSessionId('s-last')
+    sessionIdRef().value = null
+    const router = makeRouter()
+    const replace = vi.spyOn(router, 'replace')
+    const wrapper = await mountView({}, router)
+    await flushPromises()
+    expect(replace).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="chat-greeting"]').exists()).toBe(true)
+    // Nothing was open, so nothing is cleared.
+    expect(resetSpy()).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('closes the workbench when the address bar loses its conversation', async () => {
+    const workbench = useWorkbench()
+    sessionIdRef().value = 's1'
+    const router = makeRouter()
+    const wrapper = await mountView({}, router, '/?session=s1')
+    await flushPromises()
+    const hasToggle = () => (useTopbarContent().value?.trailing?.() ?? [])
+      .some((node) => node.props?.['data-testid'] === 'workbench-toggle')
+    // The third column is open on a conversation…
+    workbench.open.value = true
+    expect(hasToggle()).toBe(true)
+    // …and asking for a new chat leaves it behind with the conversation.
+    await router.replace({ query: { session: undefined } })
+    await flushPromises()
+    expect(workbench.open.value).toBe(false)
+    // The thread goes with it: the new-chat page is the page itself, so the
+    // conversation that was on screen must not stay there (plan 072).
+    expect(resetSpy()).toHaveBeenCalled()
+    wrapper.unmount()
   })
 })
 

@@ -145,7 +145,7 @@ function showResult(line: string) {
         <button
           type="button"
           class="shrink-0 rounded-md p-1 text-[var(--forebrain-muted-text)] hover:text-[var(--forebrain-text)]"
-          :title="t('lsp.recommendation.close')"
+          v-tip:top="t('lsp.recommendation.close')"
           data-testid="lsp-rec-close"
           @click="decideNotNow"
         >

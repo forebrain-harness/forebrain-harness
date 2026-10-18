@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
+	"github.com/forebrain-harness/forebrain-harness/pkg/channel"
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -512,6 +513,127 @@ func TestHooksEndpointPublishesTheKnownEventsAndTypes(t *testing.T) {
 	}
 }
 
+// A paged read of /api/hooks answers one page of the flattened table — one
+// row per command, with the indices an edit or a delete needs to find it in
+// the stored map — and the search reads the three columns the table shows.
+// Without "page" the endpoint keeps the whole-map answer it always gave, which
+// is what a write reads first.
+func TestHooksEndpointPagesTheFlattenedTable(t *testing.T) {
+	s := cronTestServer(t)
+	s.Env.ConfigPath = filepath.Join(s.Home, "forebrain.yaml")
+	yaml := "hooks:\n" +
+		"  PostToolUse:\n" +
+		"    - matcher: Bash\n" +
+		"      hooks:\n" +
+		"        - type: command\n" +
+		"          command: echo first\n" +
+		"    - hooks:\n" +
+		"        - type: command\n" +
+		"          command: echo second\n" +
+		"  Stop:\n" +
+		"    - hooks:\n" +
+		"        - type: prompt\n" +
+		"          prompt: summarise what happened\n"
+	if err := os.WriteFile(s.Env.ConfigPath, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	type hookAnswer struct {
+		Rows       []hookRow `json:"rows"`
+		KnownTypes []string  `json:"known_types"`
+		Events     []string  `json:"events"`
+		Total      int       `json:"total"`
+		Page       int       `json:"page"`
+		PageSize   int       `json:"page_size"`
+	}
+	read := func(target string) hookAnswer {
+		t.Helper()
+		rec := cronRequest(t, s, http.MethodGet, target, nil, s.handleHooks)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var answer hookAnswer
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &answer))
+		return answer
+	}
+
+	first := read("/api/hooks?page=1&page_size=2")
+	require.Equal(t, 3, first.Total)
+	require.Equal(t, 1, first.Page)
+	require.Equal(t, 2, first.PageSize)
+	require.Len(t, first.Rows, 2)
+	// Events in name order, then each event's matchers and commands in the
+	// order they are written; the two indices locate the row in the map.
+	require.Equal(t, hookRow{Event: "PostToolUse", Matcher: "Bash", Command: "echo first", MatcherIdx: 0, CommandIdx: 0}, first.Rows[0])
+	require.Equal(t, hookRow{Event: "PostToolUse", Matcher: "", Command: "echo second", MatcherIdx: 1, CommandIdx: 0}, first.Rows[1])
+	// The offer lists answer beside the page, from the same lists the
+	// validator enforces.
+	require.NotEmpty(t, first.KnownTypes)
+	require.NotEmpty(t, first.Events)
+
+	second := read("/api/hooks?page=2&page_size=2")
+	require.Equal(t, 3, second.Total)
+	require.Equal(t, 2, second.Page)
+	require.Len(t, second.Rows, 1)
+	// A prompt hook's prompt is what its command column shows: it is what the
+	// hook does.
+	require.Equal(t, hookRow{Event: "Stop", Matcher: "", Command: "summarise what happened", MatcherIdx: 0, CommandIdx: 0}, second.Rows[0])
+
+	// The search reads event, matcher and command alike.
+	require.Equal(t, 2, read("/api/hooks?page=1&q=ECHO").Total)
+	require.Equal(t, 1, read("/api/hooks?page=1&q=bash").Total)
+	require.Equal(t, 1, read("/api/hooks?page=1&q=Stop").Total)
+
+	// Without "page" the answer is the whole stored map, exactly as before.
+	rec := cronRequest(t, s, http.MethodGet, "/api/hooks", nil, s.handleHooks)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var whole struct {
+		Hooks      appcfg.HooksSettings `json:"hooks"`
+		KnownTypes []string             `json:"known_types"`
+		Events     []string             `json:"events"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &whole))
+	require.Len(t, whole.Hooks, 2)
+	require.Len(t, whole.Hooks["PostToolUse"], 2)
+	require.NotEmpty(t, whole.Events)
+	require.NotContains(t, rec.Body.String(), `"rows"`)
+}
+
+// GET /api/runtime names the state, the auth mode, the primary-agent count and
+// the three directories the settings page's runtime tab lists; the version and
+// the address are the browser's own and are not repeated here.
+func TestRuntimeInfoReportsHomeAndDirs(t *testing.T) {
+	s := cronTestServer(t)
+	rec := cronRequest(t, s, http.MethodGet, "/api/runtime", nil, s.handleRuntimeInfo)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got struct {
+		Status   string `json:"status"`
+		Auth     string `json:"auth"`
+		Agents   int    `json:"agents"`
+		Home     string `json:"home"`
+		LogsDir  string `json:"logs_dir"`
+		StateDir string `json:"state_dir"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Equal(t, "ok", got.Status)
+	// cronTestServer binds a configuration with the default auth mode.
+	require.Equal(t, "token", got.Auth)
+	require.Equal(t, 1, got.Agents)
+	require.Equal(t, s.Home, got.Home)
+	require.Equal(t, filepath.Join(s.Home, "logs"), got.LogsDir)
+	require.Equal(t, filepath.Join(s.Home, "state"), got.StateDir)
+	require.NotContains(t, rec.Body.String(), "version")
+	require.NotContains(t, rec.Body.String(), "listen")
+
+	// A gateway with no configuration bound has no auth mode to name, so the
+	// key is left out rather than answered with a mode it is not running.
+	bare := &Server{Home: t.TempDir()}
+	rec = cronRequest(t, bare, http.MethodGet, "/api/runtime", nil, bare.handleRuntimeInfo)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), `"auth"`)
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/runtime", nil, s.handleRuntimeInfo)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
 func newProjectsTestServer(t *testing.T) (*Server, *state.ProjectStore, string) {
 	t.Helper()
 	home := t.TempDir()
@@ -719,6 +841,159 @@ func TestProjectsCRUDPinDelete(t *testing.T) {
 	}
 	if _, err := store.Get(context.Background(), id); err == nil {
 		t.Fatalf("deleted project still present")
+	}
+}
+
+// TestProjectsListPagesWithTotalAndSessionCount pins the project table's
+// answer: a page-bearing request is filtered, ordered and sliced on the
+// server, counts every matching row, carries each project's conversation
+// count, and a page past the end serves the last page.
+func TestProjectsListPagesWithTotalAndSessionCount(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	ids := make([]string, 0, 3)
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		p, err := store.Create(ctx, state.CreateProjectInput{Name: name, Root: filepath.Join(t.TempDir(), name)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, p.ID)
+	}
+	// alpha holds two conversations; beta holds a session that never said
+	// anything, which is not a conversation; gamma holds none.
+	for _, sid := range []string{"conv-1", "conv-2"} {
+		if _, err := s.Sessions.Append(ctx, sid, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.BindSession(ctx, sid, ids[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Sessions.Ensure(ctx, "conv-empty", "empty"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindSession(ctx, "conv-empty", ids[1]); err != nil {
+		t.Fatal(err)
+	}
+
+	decode := func(raw []byte) (struct {
+		Projects []map[string]any `json:"projects"`
+		Total    int              `json:"total"`
+		Page     int              `json:"page"`
+		PageSize int              `json:"page_size"`
+	}, map[string]map[string]any) {
+		t.Helper()
+		var answer struct {
+			Projects []map[string]any `json:"projects"`
+			Total    int              `json:"total"`
+			Page     int              `json:"page"`
+			PageSize int              `json:"page_size"`
+		}
+		if err := json.Unmarshal(raw, &answer); err != nil {
+			t.Fatalf("decode: %v (%s)", err, raw)
+		}
+		byID := map[string]map[string]any{}
+		for _, row := range answer.Projects {
+			if id, ok := row["id"].(string); ok {
+				byID[id] = row
+			}
+		}
+		return answer, byID
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects?page=1&page_size=2", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 1: %d %s", rec.Code, rec.Body.String())
+	}
+	first, rows := decode(rec.Body.Bytes())
+	if first.Total != 3 || first.Page != 1 || first.PageSize != 2 || len(first.Projects) != 2 {
+		t.Fatalf("page 1 = %d rows, total %d, page %d, size %d; want 2 of 3 on page 1",
+			len(first.Projects), first.Total, first.Page, first.PageSize)
+	}
+	for id, row := range rows {
+		if _, ok := row["session_count"]; !ok {
+			t.Fatalf("every row carries its conversation count: %s = %v", id, row)
+		}
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?page=2&page_size=2", nil)
+	second, _ := decode(rec.Body.Bytes())
+	if second.Total != 3 || second.Page != 2 || len(second.Projects) != 1 {
+		t.Fatalf("page 2 = %d rows, total %d, page %d; want the last 1 of 3",
+			len(second.Projects), second.Total, second.Page)
+	}
+
+	// A page past the end serves the last page, not an empty table.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?page=9&page_size=2", nil)
+	past, _ := decode(rec.Body.Bytes())
+	if past.Total != 3 || past.Page != 2 || len(past.Projects) != 1 {
+		t.Fatalf("page past the end = %d rows, total %d, page %d; want page 2 of 3",
+			len(past.Projects), past.Total, past.Page)
+	}
+
+	// The search box decides the page and the total together, and the row it
+	// finds carries its own conversation count.
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?page=1&page_size=10&q=alp", nil)
+	searched, found := decode(rec.Body.Bytes())
+	if searched.Total != 1 || len(searched.Projects) != 1 || searched.Projects[0]["id"] != ids[0] {
+		t.Fatalf("search = %+v total %d, want only alpha", searched.Projects, searched.Total)
+	}
+	if got := found[ids[0]]["session_count"]; got != float64(2) {
+		t.Fatalf("alpha's session_count = %v, want 2", got)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?page=1&page_size=10&q=bet", nil)
+	_, quiet := decode(rec.Body.Bytes())
+	if got, seen := quiet[ids[1]]["session_count"]; !seen || got != float64(0) {
+		t.Fatalf("beta holds no conversation, session_count = %v (present %v)", got, seen)
+	}
+}
+
+// TestProjectsListWithoutPageKeepsTheOldAnswer pins that the callers which
+// read this list without a page — the chat project picker and the folder
+// dialog — still get the whole list under "projects", with no paging fields
+// beside it. Every row gained the conversation count, and their own
+// search/limit/offset arguments still work.
+func TestProjectsListWithoutPageKeepsTheOldAnswer(t *testing.T) {
+	s, store, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	for _, name := range []string{"alpha", "beta"} {
+		if _, err := store.Create(ctx, state.CreateProjectInput{Name: name, Root: filepath.Join(t.TempDir(), name)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := doJSON(t, s, http.MethodGet, "/api/v1/projects", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var answer map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatal(err)
+	}
+	projects, _ := answer["projects"].([]any)
+	if len(projects) != 2 {
+		t.Fatalf("unpaged list = %v, want both projects", answer)
+	}
+	for _, field := range []string{"total", "page", "page_size"} {
+		if _, seen := answer[field]; seen {
+			t.Fatalf("%q must only appear on a paged answer: %v", field, answer)
+		}
+	}
+	for _, raw := range projects {
+		row, _ := raw.(map[string]any)
+		if _, ok := row["session_count"]; !ok {
+			t.Fatalf("every row carries the conversation count: %v", row)
+		}
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/api/v1/projects?search=alp&limit=1", nil)
+	answer = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+		t.Fatal(err)
+	}
+	projects, _ = answer["projects"].([]any)
+	if len(projects) != 1 || projects[0].(map[string]any)["name"] != "alpha" {
+		t.Fatalf("the picker's own search/limit = %v", answer)
 	}
 }
 
@@ -3376,6 +3651,74 @@ func TestLSPSnapshotEndpoint(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "language servers are not available")
 }
 
+// A paged read of /api/v1/lsp answers one page of the servers with the count,
+// the search reads the id and the languages, and the snapshot's own fields
+// stay on top; without "page" the endpoint keeps the whole-snapshot answer it
+// always gave.
+func TestLSPSnapshotPagesTheServers(t *testing.T) {
+	ctl := &lspControlDouble{snapshot: event.LSPSnapshot{
+		ProjectRoot:    "/proj",
+		Trusted:        true,
+		FeatureEnabled: true,
+		ProjectNotes:   []string{"project file ignored"},
+		Servers: []event.LSPServerStatus{
+			{ID: "gopls", Languages: []string{"go"}, State: event.LSPStateReady},
+			{ID: "pyright", Languages: []string{"python"}, State: event.LSPStateReady},
+			{ID: "tsls", Languages: []string{"typescript", "javascript"}, State: event.LSPStateReady},
+		},
+	}}
+	s := &Server{Runner: &run.Runner{Deps: &run.Deps{CodeIntelControl: ctl}}}
+
+	type pageAnswer struct {
+		ProjectRoot  string                  `json:"project_root"`
+		Trusted      bool                    `json:"trusted"`
+		FeatureState bool                    `json:"feature_enabled"`
+		ProjectNotes []string                `json:"project_notes"`
+		Servers      []event.LSPServerStatus `json:"servers"`
+		Total        int                     `json:"total"`
+		Page         int                     `json:"page"`
+		PageSize     int                     `json:"page_size"`
+	}
+	read := func(target string) pageAnswer {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleLSPSnapshot(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var answer pageAnswer
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &answer))
+		return answer
+	}
+
+	second := read("/api/v1/lsp?page=2&page_size=2")
+	require.Equal(t, 3, second.Total)
+	require.Equal(t, 2, second.Page)
+	require.Equal(t, 2, second.PageSize)
+	// The snapshot's own fields answer on top of the page, so a surface that
+	// read them before still reads them.
+	require.Equal(t, "/proj", second.ProjectRoot)
+	require.True(t, second.Trusted)
+	require.True(t, second.FeatureState)
+	require.Equal(t, []string{"project file ignored"}, second.ProjectNotes)
+	require.Len(t, second.Servers, 1)
+	require.Equal(t, "tsls", second.Servers[0].ID)
+
+	// The search reads the languages the table lists, not just the id.
+	byLanguage := read("/api/v1/lsp?page=1&q=PYTHON")
+	require.Equal(t, 1, byLanguage.Total)
+	require.Len(t, byLanguage.Servers, 1)
+	require.Equal(t, "pyright", byLanguage.Servers[0].ID)
+
+	// Without "page" the answer is the whole snapshot, exactly as before: no
+	// count, no page, every server, whatever the search says.
+	rec := httptest.NewRecorder()
+	s.handleLSPSnapshot(rec, httptest.NewRequest(http.MethodGet, "/api/v1/lsp?q=python", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var whole event.LSPSnapshot
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &whole))
+	require.Len(t, whole.Servers, 3)
+	require.NotContains(t, rec.Body.String(), "total")
+}
+
 // The /v1/lsp server actions share the terminal panel's control plane:
 // enable/disable/restart answer 200, install answers 202 and really starts,
 // a missing id answers 400, a control-plane refusal answers 409, and no
@@ -3593,6 +3936,41 @@ func TestProjectLSPPreviewAndConsentEndpoint(t *testing.T) {
 	if len(preview.Pending) != 0 {
 		t.Fatalf("nothing should be pending: %+v", preview.Pending)
 	}
+}
+
+// TestProjectLSPConsentDecideOnlyTouchesNamedEntries pins the project page's
+// per-row decision for language servers: the named entry is decided, the other
+// one keeps awaiting its own, and the same call with the other answer takes a
+// denied entry back.
+func TestProjectLSPConsentDecideOnlyTouchesNamedEntries(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(p.Root, ".forebrain", "lsp_servers.yaml"), []byte(
+		"servers:\n"+
+			"  first: {command: /bin/first}\n"+
+			"  second: {command: /bin/second}\n"), 0o644))
+
+	statuses := func() map[string]string {
+		t.Helper()
+		rec := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=10", nil,
+			s.handleProjectLSPPreview, "id", p.ID)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		out := map[string]string{}
+		for _, item := range decodeBody(t, rec.Body.Bytes())["rows"].([]any) {
+			row := item.(map[string]any)
+			out[fmt.Sprint(row["id"])] = fmt.Sprint(row["status"])
+		}
+		return out
+	}
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
+		map[string]any{"allow": []string{}, "decide": []string{"first"}}, s.handleProjectLSPConsent, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, map[string]string{"first": "denied", "second": "pending"}, statuses())
+
+	rec = cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
+		map[string]any{"allow": []string{"first"}, "decide": []string{"first"}}, s.handleProjectLSPConsent, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, map[string]string{"first": "allowed", "second": "pending"}, statuses())
 }
 
 // The cron settings endpoint is the structured surface of
@@ -5337,4 +5715,1220 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestAgentRuleFilesPagesWithSearchAndTotal pins the rule-file table's answer:
+// a page-bearing request is searched and sliced on the server and counts every
+// matching row.
+func TestAgentRuleFilesPagesWithSearchAndTotal(t *testing.T) {
+	s, _, workspace := rulesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("hello"), 0o644))
+
+	rr := httptest.NewRecorder()
+	s.handleAgentRuleFiles(rr, httptest.NewRequest(http.MethodGet, "/api/rules/agent?page=1&page_size=1", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var paged struct {
+		Files    []ruleFileRow `json:"files"`
+		Total    int           `json:"total"`
+		Page     int           `json:"page"`
+		PageSize int           `json:"page_size"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &paged))
+	require.Equal(t, 3, paged.Total)
+	require.Equal(t, 1, paged.Page)
+	require.Equal(t, 1, paged.PageSize)
+	require.Len(t, paged.Files, 1)
+	require.Equal(t, "AGENTS.md", paged.Files[0].Name)
+
+	rr = httptest.NewRecorder()
+	s.handleAgentRuleFiles(rr, httptest.NewRequest(http.MethodGet, "/api/rules/agent?page=1&page_size=10&q=soul", nil))
+	paged = struct {
+		Files    []ruleFileRow `json:"files"`
+		Total    int           `json:"total"`
+		Page     int           `json:"page"`
+		PageSize int           `json:"page_size"`
+	}{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &paged))
+	require.Equal(t, 1, paged.Total)
+	require.Len(t, paged.Files, 1)
+	require.Equal(t, "SOUL.md", paged.Files[0].Name)
+}
+
+// TestAgentRuleFilesWithoutPageKeepsTheOldAnswer pins that the drawer reading
+// this list without a page still gets every file and no paging fields.
+func TestAgentRuleFilesWithoutPageKeepsTheOldAnswer(t *testing.T) {
+	s, _, _ := rulesServer(t)
+	rr := httptest.NewRecorder()
+	s.handleAgentRuleFiles(rr, httptest.NewRequest(http.MethodGet, "/api/rules/agent", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var answer map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &answer))
+	files, _ := answer["files"].([]any)
+	require.Len(t, files, 3)
+	for _, field := range []string{"total", "page", "page_size"} {
+		_, seen := answer[field]
+		require.False(t, seen, "%q must only appear on a paged answer", field)
+	}
+}
+
+// TestSkillsListPagesWithSearchAndOrigin pins the skill table's answer: the
+// search reads name and description, the origin filter takes several layers at
+// once, every matching row is counted, and the actions the page offers stay on
+// the answer.
+func TestSkillsListPagesWithSearchAndOrigin(t *testing.T) {
+	home := t.TempDir()
+	s, skillsRoot := newSkillVersionsServer(t, home)
+	writeSkill := func(root, name, description string) {
+		t.Helper()
+		dir := filepath.Join(root, name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"),
+			[]byte("---\nname: "+name+"\ndescription: "+description+"\n---\n\nbody\n"), 0o644))
+	}
+	writeSkill(skillsRoot, "agent-ops", "agent runbook")
+	writeSkill(filepath.Join(home, "skills"), "shared-ops", "shared runbook")
+	writeSkill(filepath.Join(home, "skills", ".system"), "builtin-ops", "builtin runbook")
+
+	type answer struct {
+		Installed []skillListEntry `json:"installed"`
+		Actions   []string         `json:"actions"`
+		Total     int              `json:"total"`
+		Page      int              `json:"page"`
+		PageSize  int              `json:"page_size"`
+	}
+	list := func(target string) answer {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		s.handleSkillsList(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out answer
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	// One page, three rows: the total is every match, not the page's length.
+	page := list("/api/skills?page=1&page_size=2")
+	require.Equal(t, 3, page.Total)
+	require.Equal(t, 1, page.Page)
+	require.Equal(t, 2, page.PageSize)
+	require.Len(t, page.Installed, 2)
+
+	// The shared library's own page asks for two layers at once.
+	shared := list("/api/skills?page=1&page_size=10&origin=shared,builtin")
+	require.Equal(t, 2, shared.Total)
+	origins := []string{}
+	for _, row := range shared.Installed {
+		origins = append(origins, string(row.Origin))
+	}
+	require.ElementsMatch(t, []string{"shared", "builtin"}, origins)
+
+	searched := list("/api/skills?page=1&page_size=10&q=builtin+runbook")
+	require.Equal(t, 1, searched.Total)
+	require.Len(t, searched.Installed, 1)
+	require.Equal(t, "builtin-ops", searched.Installed[0].Name)
+}
+
+// TestSkillsListWithoutPageKeepsTheOldAnswer pins that a caller without a page
+// still gets the whole listing under "installed".
+func TestSkillsListWithoutPageKeepsTheOldAnswer(t *testing.T) {
+	home := t.TempDir()
+	s, skillsRoot := newSkillVersionsServer(t, home)
+	dir := filepath.Join(skillsRoot, "agent-ops")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"),
+		[]byte("---\nname: agent-ops\ndescription: agent runbook\n---\n\nbody\n"), 0o644))
+
+	rr := httptest.NewRecorder()
+	s.handleSkillsList(rr, httptest.NewRequest(http.MethodGet, "/api/skills", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var answer map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &answer))
+	installed, _ := answer["installed"].([]any)
+	require.Len(t, installed, 1)
+	for _, field := range []string{"total", "page", "page_size"} {
+		_, seen := answer[field]
+		require.False(t, seen, "%q must only appear on a paged answer", field)
+	}
+}
+
+// toolsPageServer builds a server whose runtime exposes four tools across
+// three categories, two of them read-only.
+func toolsPageServer(t *testing.T) *Server {
+	t.Helper()
+	home := t.TempDir()
+	runner := &run.Runner{Deps: &run.Deps{Home: home}}
+	tools := tool.NewState(home)
+	for _, meta := range []event.ToolMeta{
+		{Name: "read_file", Description: "read a file from disk", Category: "filesystem", ReadOnly: true},
+		{Name: "write_file", Description: "write a file to disk", Category: "filesystem"},
+		{Name: "shell", Description: "run a command", Category: "shell", Destructive: true},
+		{Name: "web_fetch", Description: "fetch a web page", Category: "web", ReadOnly: true},
+	} {
+		tools.RegisterToolMeta(meta)
+	}
+	setRunnerToolsForTest(runner, tools)
+	return &Server{Home: home, Runner: runner, Env: &process.Environment{Deps: run.Deps{Home: home}, Runner: runner}}
+}
+
+// TestToolsListPagesWithFiltersCategoriesAndTotal pins the tool table's
+// answer: name and description are searched, the category and type filters
+// apply on the server, the rows come back A→Z, the category list is every
+// category the runtime exposes whatever the filters leave, and the count is
+// every matching row.
+func TestToolsListPagesWithFiltersCategoriesAndTotal(t *testing.T) {
+	s := toolsPageServer(t)
+	type answer struct {
+		Tools      []event.ToolMeta `json:"tools"`
+		Categories []string         `json:"categories"`
+		Total      int              `json:"total"`
+		Page       int              `json:"page"`
+		PageSize   int              `json:"page_size"`
+	}
+	list := func(target string) answer {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		s.handleToolsList(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out answer
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	page := list("/api/tools?page=1&page_size=2")
+	require.Equal(t, 4, page.Total)
+	require.Equal(t, 1, page.Page)
+	require.Equal(t, 2, page.PageSize)
+	require.Len(t, page.Tools, 2)
+	// A→Z: read_file before shell before web_fetch before write_file.
+	require.Equal(t, "read_file", page.Tools[0].Name)
+	require.Equal(t, "shell", page.Tools[1].Name)
+	// The dropdown keeps every category, including the ones this page does
+	// not show.
+	require.Equal(t, []string{"filesystem", "shell", "web"}, page.Categories)
+
+	readOnly := list("/api/tools?page=1&page_size=10&type=readonly")
+	require.Equal(t, 2, readOnly.Total)
+	require.Equal(t, []string{"filesystem", "shell", "web"}, readOnly.Categories)
+	for _, row := range readOnly.Tools {
+		require.True(t, row.ReadOnly, "%s is not read-only", row.Name)
+	}
+
+	category := list("/api/tools?page=1&page_size=10&category=filesystem")
+	require.Equal(t, 2, category.Total)
+
+	searched := list("/api/tools?page=1&page_size=10&q=command")
+	require.Equal(t, 1, searched.Total)
+	require.Equal(t, "shell", searched.Tools[0].Name)
+
+	// A page past the end serves the last page.
+	past := list("/api/tools?page=9&page_size=3")
+	require.Equal(t, 4, past.Total)
+	require.Equal(t, 2, past.Page)
+	require.Len(t, past.Tools, 1)
+	require.Equal(t, "write_file", past.Tools[0].Name)
+}
+
+// TestToolsListWithoutPageStaysABareArray pins the old answer of the endpoint:
+// the tool drawer reads it whole, as a bare array with no paging fields.
+func TestToolsListWithoutPageStaysABareArray(t *testing.T) {
+	s := toolsPageServer(t)
+	rr := httptest.NewRecorder()
+	s.handleToolsList(rr, httptest.NewRequest(http.MethodGet, "/api/tools", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var rows []event.ToolMeta
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rows))
+	require.Len(t, rows, 4)
+}
+
+// permissionRulesPageServer builds a server whose agent holds three local
+// permission rules.
+func permissionRulesPageServer(t *testing.T) *Server {
+	t.Helper()
+	s, home, _ := rulesServer(t)
+	dir := filepath.Join(home, "workspace", "state", "permissions")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "local_settings.json"), []byte(`{"rules":{
+		"allow":[{"tool_name":"read_file"},{"tool_name":"shell","rule_content":"git status:*"}],
+		"deny":[{"tool_name":"shell","rule_content":"rm -rf /"}]}}`), 0o600))
+	return s
+}
+
+// TestPermissionRulesPagesWithSearchAndMode pins the permission table's
+// answer: the tool and the rule text are searched on the server, every match
+// is counted, and the approval mode stays on the answer beside the page.
+func TestPermissionRulesPagesWithSearchAndMode(t *testing.T) {
+	s := permissionRulesPageServer(t)
+	type answer struct {
+		Mode     string              `json:"mode"`
+		Rules    []permissionRuleRow `json:"rules"`
+		Total    int                 `json:"total"`
+		Page     int                 `json:"page"`
+		PageSize int                 `json:"page_size"`
+	}
+	list := func(target string) answer {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		s.handlePermissionRules(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out answer
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	page := list("/api/permissions/rules?page=1&page_size=2")
+	require.Equal(t, 3, page.Total)
+	require.Equal(t, 1, page.Page)
+	require.Equal(t, 2, page.PageSize)
+	require.Len(t, page.Rules, 2)
+	require.NotEmpty(t, page.Mode)
+
+	searched := list("/api/permissions/rules?page=1&page_size=10&q=git+status")
+	require.Equal(t, 1, searched.Total)
+	require.Len(t, searched.Rules, 1)
+	require.Equal(t, "shell", searched.Rules[0].ToolName)
+	require.Equal(t, safety.BehaviorAllow, searched.Rules[0].Behavior)
+
+	denied := list("/api/permissions/rules?page=1&page_size=10&q=rm+-rf")
+	require.Equal(t, 1, denied.Total)
+	require.Equal(t, safety.BehaviorDeny, denied.Rules[0].Behavior)
+}
+
+// TestPermissionRulesWithoutPageKeepTheOldAnswer pins that the page-less
+// answer still carries the whole rule list and the mode, with no paging
+// fields beside them.
+func TestPermissionRulesWithoutPageKeepTheOldAnswer(t *testing.T) {
+	s := permissionRulesPageServer(t)
+	rr := httptest.NewRecorder()
+	s.handlePermissionRules(rr, httptest.NewRequest(http.MethodGet, "/api/permissions/rules", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var answer map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &answer))
+	rules, _ := answer["rules"].([]any)
+	require.Len(t, rules, 3)
+	require.NotEmpty(t, answer["mode"])
+	for _, field := range []string{"total", "page", "page_size"} {
+		_, seen := answer[field]
+		require.False(t, seen, "%q must only appear on a paged answer", field)
+	}
+}
+
+// mcpReadRowNames lists one answer's row names in the order the server sent
+// them: the order is part of the answer (a layer in the order its file writes
+// it, a project before the layers it overrides), so it is asserted directly.
+func mcpReadRowNames(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	rows, ok := body["servers"].([]any)
+	require.True(t, ok, "servers is a list: %#v", body["servers"])
+	names := make([]string, 0, len(rows))
+	for _, item := range rows {
+		row, ok := item.(map[string]any)
+		require.True(t, ok, "row is an object: %#v", item)
+		name, _ := row["name"].(string)
+		names = append(names, name)
+	}
+	return names
+}
+
+// mcpReadRowScopes lists the layers an answer's rows report, in the same order.
+func mcpReadRowScopes(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	rows, _ := body["servers"].([]any)
+	scopes := make([]string, 0, len(rows))
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		scope, _ := row["scope"].(string)
+		scopes = append(scopes, scope)
+	}
+	return scopes
+}
+
+// TestMCPAgentViewHidesShadowedGlobalAndListsAgentFirst pins the menu bar's MCP
+// page: the primary agent's own entries, then the shared ones it inherits, and a
+// shared entry whose name the agent redefines is not listed at all. One name,
+// one row — the row that is the entry actually configured for this agent, not
+// the shared one it replaced.
+func TestMCPAgentViewHidesShadowedGlobalAndListsAgentFirst(t *testing.T) {
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		main := root.Agents.Definitions["main"]
+		main.MCPServers = []appcfg.MCPServerConfig{
+			{Name: "b", Transport: "stdio", Command: "/bin/agent-b"},
+			{Name: "c", Transport: "stdio", Command: "/bin/agent-c"},
+		}
+		root.Agents.Definitions["main"] = main
+		root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{
+			{Name: "a", Transport: "stdio", Command: "/bin/shared-a"},
+			{Name: "b", Transport: "stdio", Command: "/bin/shared-b"},
+		}
+	}, "main", nil)
+
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?view=agent", nil))
+	require.Equal(t, []string{"b", "c", "a"}, mcpReadRowNames(t, body))
+	require.Equal(t, []string{appcfg.MCPServerScopeAgent, appcfg.MCPServerScopeAgent, appcfg.MCPServerScopeGlobal}, mcpReadRowScopes(t, body))
+	require.Equal(t, "agent", body["view"])
+	// The b that is listed is the agent's own entry, not the shared one it
+	// replaced: showing the shared command would describe a server that never
+	// runs.
+	require.Equal(t, "/bin/agent-b", mcpServerRow(t, body, "b")["target"])
+	// Without "page" the view answers the whole list, and none of the paging
+	// fields are invented.
+	require.NotContains(t, body, "total")
+	require.NotContains(t, body, "page")
+
+	// With "page" the same order is sliced on the server and counted.
+	paged := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?view=agent&page=1&page_size=2", nil))
+	require.Equal(t, []string{"b", "c"}, mcpReadRowNames(t, paged))
+	require.EqualValues(t, 3, paged["total"])
+	require.EqualValues(t, 1, paged["page"])
+	require.EqualValues(t, 2, paged["page_size"])
+}
+
+// TestMCPLayerListMarksSharedEntriesShadowedByAgent pins the settings page's
+// shared listing: an entry a same-named entry of the primary agent's own list
+// replaces is listed there — that is the page it is edited on — and the row
+// names the layer that covers it, so "not running" has a reason beside it.
+func TestMCPLayerListMarksSharedEntriesShadowedByAgent(t *testing.T) {
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		main := root.Agents.Definitions["main"]
+		main.MCPServers = []appcfg.MCPServerConfig{
+			{Name: "b", Transport: "stdio", Command: "/bin/agent-b"},
+			{Name: "c", Transport: "stdio", Command: "/bin/agent-c"},
+		}
+		root.Agents.Definitions["main"] = main
+		root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{
+			{Name: "a", Transport: "stdio", Command: "/bin/shared-a"},
+			{Name: "b", Transport: "stdio", Command: "/bin/shared-b"},
+		}
+	}, "main", nil)
+
+	shared := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global", nil))
+	require.Equal(t, []string{"a", "b"}, mcpReadRowNames(t, shared))
+	shadowed := mcpServerRow(t, shared, "b")
+	require.Equal(t, appcfg.MCPServerScopeAgent, shadowed["shadowed_by"])
+	require.Equal(t, "main", shadowed["shadowed_by_name"])
+	// The entry nothing replaces carries the fields not at all, so a client
+	// can tell "covered" from "reported empty".
+	own := mcpServerRow(t, shared, "a")
+	require.NotContains(t, own, "shadowed_by")
+	require.NotContains(t, own, "shadowed_by_name")
+
+	ownLayer := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=agent", nil))
+	require.Equal(t, []string{"b", "c"}, mcpReadRowNames(t, ownLayer))
+	for _, name := range []string{"b", "c"} {
+		row := mcpServerRow(t, ownLayer, name)
+		require.NotContains(t, row, "shadowed_by")
+		require.NotContains(t, row, "shadowed_by_name")
+	}
+}
+
+// TestMCPLayerListPagesWithTotal pins the settings page's listing: one layer in
+// the order its file writes it, searched over the name and the command or
+// address, filtered by layer, sliced on the server with the total beside it —
+// and unchanged for a request that carries no page.
+func TestMCPLayerListPagesWithTotal(t *testing.T) {
+	servers := make([]appcfg.MCPServerConfig, 0, 12)
+	for i := range 12 {
+		name := fmt.Sprintf("tool-%c", 'a'+i)
+		servers = append(servers, appcfg.MCPServerConfig{
+			Name:      name,
+			Transport: "stdio",
+			Command:   "/bin/run-" + name,
+		})
+	}
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		root.Agents.Defaults.MCPServers = servers
+	}, "main", nil)
+
+	// No page: the whole layer under "servers", with the fields it always had.
+	all := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global", nil))
+	require.Len(t, mcpReadRowNames(t, all), 12)
+	require.Equal(t, "global", all["scope"])
+	require.NotContains(t, all, "total")
+	require.NotContains(t, all, "page")
+
+	// Second page of ten: two rows, and the total is the whole layer's.
+	second := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global&page=2&page_size=10", nil))
+	require.Equal(t, []string{"tool-k", "tool-l"}, mcpReadRowNames(t, second))
+	require.EqualValues(t, 12, second["total"])
+	require.EqualValues(t, 2, second["page"])
+	require.EqualValues(t, 10, second["page_size"])
+	require.Equal(t, "global", second["scope"])
+
+	// A page past the end serves the last page rather than an empty table.
+	past := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global&page=9&page_size=10", nil))
+	require.Len(t, mcpReadRowNames(t, past), 2)
+	require.EqualValues(t, 2, past["page"])
+
+	// The search reads the name and the command, and nothing else: the
+	// transport a row reports is not a thing anyone searches a server by.
+	byName := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global&q=tool-c&page=1&page_size=10", nil))
+	require.Equal(t, []string{"tool-c"}, mcpReadRowNames(t, byName))
+	require.EqualValues(t, 1, byName["total"])
+	byCommand := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global&q=run-tool-e&page=1&page_size=10", nil))
+	require.Equal(t, []string{"tool-e"}, mcpReadRowNames(t, byCommand))
+	byOtherField := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/mcp/servers?scope=global&q=stdio&page=1&page_size=10", nil))
+	require.Empty(t, mcpReadRowNames(t, byOtherField))
+	require.EqualValues(t, 0, byOtherField["total"])
+
+	// The layer filter keeps the rows of the layers it names. This view holds
+	// one layer, so its own comes back and any other leaves nothing.
+	require.Len(t, mcpReadRowNames(t, decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/mcp/servers?scope=global&page=1&page_size=20&source=global,agent", nil))), 12)
+	require.Empty(t, mcpReadRowNames(t, decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/mcp/servers?scope=global&page=1&page_size=10&source=agent", nil))))
+}
+
+// mcpPreviewFixture is a gateway over a trusted project whose MCP file holds one
+// confirmed entry and one still awaiting a decision, below an agent layer of one
+// entry and a shared layer of one: the three layers a project view shows.
+type mcpPreviewFixture struct {
+	*mcpWriteFixture
+	root string
+	// projectID is the registered project's id.
+	projectID string
+}
+
+func newMCPPreviewFixture(t *testing.T) *mcpPreviewFixture {
+	t.Helper()
+	f := newMCPWriteFixture(t, func(root *appcfg.Root) {
+		main := root.Agents.Definitions["main"]
+		main.MCPServers = []appcfg.MCPServerConfig{
+			{Name: "b", Transport: "stdio", Command: "/bin/agent-b"},
+		}
+		root.Agents.Definitions["main"] = main
+		root.Agents.Defaults.MCPServers = []appcfg.MCPServerConfig{
+			{Name: "a", Transport: "stdio", Command: "/bin/shared-a"},
+		}
+	}, "main", nil)
+
+	root := projectTempRoot(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, safety.MarkTrusted(f.home, safety.Project{Root: root}))
+	file := filepath.Join(root, ".forebrain", "mcp_servers.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+	require.NoError(t, os.WriteFile(file, []byte(
+		"mcp_servers:\n"+
+			"  - name: d\n    transport: stdio\n    command: /bin/project-d\n"+
+			"  - name: e\n    transport: stdio\n    command: /bin/project-e\n"), 0o644))
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/projects", map[string]any{"name": "mcpview", "root": root, "trust": true})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	id, _ := created["id"].(string)
+	require.NotEmpty(t, id, rec.Body.String())
+
+	// d is confirmed and e is not. The confirmation goes to the store the
+	// project resolution reads rather than through the endpoint, because that
+	// endpoint also records every other pending entry as declined.
+	allowProjectMCPEntry(t, f.server.Runner.WorkspaceRoot, root, "d")
+	return &mcpPreviewFixture{mcpWriteFixture: f, root: root, projectID: id}
+}
+
+// allowProjectMCPEntry records the operator's yes for one project entry, the way
+// the startup prompt does.
+func allowProjectMCPEntry(t *testing.T, workspace, root, name string) {
+	t.Helper()
+	entries, _ := mcp.LoadProjectMCPServers(root)
+	consents, err := mcp.LoadProjectConsents(workspace)
+	require.NoError(t, err)
+	found := false
+	for _, srv := range entries {
+		if srv.Name != name {
+			continue
+		}
+		consents.Decide(memory.ProjectKey(root), srv.Name, mcp.ServerFingerprint(srv), mcp.ProjectConsentAllow, time.Now())
+		found = true
+	}
+	require.True(t, found, "no entry %q in %s", name, root)
+	require.NoError(t, mcp.SaveProjectConsents(workspace, consents))
+}
+
+// TestProjectMCPPreviewOrdersProjectAgentGlobalAndIncludesPending pins the
+// project space's MCP table: the entries the page does not own are shown too,
+// ordered project → agent → global, and an entry still awaiting a decision is a
+// row of its own at the top — that is where 允许 / 拒绝 is offered and where the
+// total has to count it.
+func TestProjectMCPPreviewOrdersProjectAgentGlobalAndIncludesPending(t *testing.T) {
+	f := newMCPPreviewFixture(t)
+
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=10", nil))
+	require.Equal(t, []string{"e", "d", "b", "a"}, mcpReadRowNames(t, body))
+	require.Equal(t, []string{
+		appcfg.MCPServerScopeProject,
+		appcfg.MCPServerScopeProject,
+		appcfg.MCPServerScopeAgent,
+		appcfg.MCPServerScopeGlobal,
+	}, mcpReadRowScopes(t, body))
+	// The total counts the pending row, so the pager and the "共 N 条" line
+	// agree with what the table shows.
+	require.EqualValues(t, 4, body["total"])
+
+	pending := mcpServerRow(t, body, "e")
+	require.Equal(t, true, pending["pending"])
+	require.Equal(t, false, pending["running"])
+	// A pending row carries the entry's own fields, so the drawer can show the
+	// command being asked for instead of a bare name.
+	require.Equal(t, "/bin/project-e", pending["target"])
+	require.NotEmpty(t, pending["summary"])
+
+	allowed := mcpServerRow(t, body, "d")
+	require.Equal(t, true, allowed["allowed"])
+	require.NotContains(t, allowed, "pending")
+
+	// The three project notes ride the paged answer too: they are the same
+	// question whether or not a table is asking.
+	require.Contains(t, body, "overridden_global")
+	require.Contains(t, body, "not_applied")
+	require.Contains(t, body, "pending_consent")
+
+	// The layer filter keeps only the layers it names.
+	onlyShared := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=10&source=global", nil))
+	require.Equal(t, []string{"a"}, mcpReadRowNames(t, onlyShared))
+	require.EqualValues(t, 1, onlyShared["total"])
+	onlyProject := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=10&source=project", nil))
+	require.Equal(t, []string{"e", "d"}, mcpReadRowNames(t, onlyProject))
+
+	// The search reads the name and the command.
+	searched := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=10&q=project-e", nil))
+	require.Equal(t, []string{"e"}, mcpReadRowNames(t, searched))
+}
+
+// TestProjectMCPConsentDecideOnlyTouchesNamedEntries pins the project page's
+// per-row decision: the entries the request names are decided, everything else
+// keeps the state it had, a declined entry stays a row that can be allowed
+// again, and the note under the table repeats neither the pending nor the
+// declined rows.
+func TestProjectMCPConsentDecideOnlyTouchesNamedEntries(t *testing.T) {
+	f := newMCPPreviewFixture(t)
+	// A second unconfirmed entry, so a decision for one of them can be shown
+	// to leave the other alone.
+	file := filepath.Join(f.root, ".forebrain", "mcp_servers.yaml")
+	raw, err := os.ReadFile(file)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(file, append(raw,
+		[]byte("  - name: f\n    transport: stdio\n    command: /bin/project-f\n")...), 0o644))
+
+	previewNames := func() []string {
+		t.Helper()
+		body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+			"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+		return mcpReadRowNames(t, body)
+	}
+	notAppliedNames := func(body map[string]any) []string {
+		t.Helper()
+		items, _ := body["not_applied"].([]any)
+		names := make([]string, 0, len(items))
+		for _, item := range items {
+			row, _ := item.(map[string]any)
+			names = append(names, fmt.Sprint(row["name"]))
+		}
+		return names
+	}
+
+	// Decline e through the endpoint, deciding nothing else.
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{}, "decide": []string{"e"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// The table's project block in the order a decision moves an entry
+	// through: still to decide, allowed, declined.
+	require.Equal(t, []string{"f", "d", "e", "b", "a"}, previewNames())
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	declined := mcpServerRow(t, body, "e")
+	require.Equal(t, true, declined["declined"])
+	require.NotContains(t, declined, "pending")
+	require.Equal(t, false, declined["running"])
+	require.Equal(t, "/bin/project-e", declined["target"])
+	// f was not named, so it is still awaiting its own decision.
+	pending := body["pending_consent"].([]any)
+	require.Len(t, pending, 1)
+	require.Equal(t, "f", pending[0].(map[string]any)["name"])
+	// The rows already say what happened to e and f, so the note under the
+	// table does not repeat them.
+	require.Empty(t, notAppliedNames(body))
+
+	// Allowing a declined entry takes it back: the same call, the other answer.
+	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{"e"}, "decide": []string{"e"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body = decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	allowed := mcpServerRow(t, body, "e")
+	require.Equal(t, true, allowed["allowed"])
+	require.NotContains(t, allowed, "declined")
+	require.Len(t, body["pending_consent"].([]any), 1)
+
+	// A request that decides no entry changes no entry.
+	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{}, "decide": []string{}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body = decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	require.Len(t, body["pending_consent"].([]any), 1)
+	require.Equal(t, "f", body["pending_consent"].([]any)[0].(map[string]any)["name"])
+}
+
+// TestProjectMCPConsentWithoutDecideKeepsDecidingAll pins the semantics the
+// startup prompt and every pre-existing caller use: a request that names no
+// entries answers for the whole batch, so an entry left out of allow is
+// recorded as declined rather than left pending.
+func TestProjectMCPConsentWithoutDecideKeepsDecidingAll(t *testing.T) {
+	f := newMCPPreviewFixture(t)
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	// e is now declined and stays in the table; d keeps its allow.
+	require.Equal(t, []string{"d", "e", "b", "a"}, mcpReadRowNames(t, body))
+	declined := mcpServerRow(t, body, "e")
+	require.Equal(t, true, declined["declined"])
+	require.NotContains(t, declined, "pending")
+	require.Equal(t, true, mcpServerRow(t, body, "d")["allowed"])
+	require.Empty(t, body["pending_consent"].([]any))
+}
+
+// TestProjectMCPPreviewWithoutPageKeepsOldFields pins the backward half of the
+// paging contract: a caller that sends no page still gets the answer this
+// endpoint always gave — the effective list in the merge's own order with the
+// unconfirmed entries in pending_consent alone, and the three project notes —
+// because other callers read it that way and must not suddenly receive a
+// table.
+func TestProjectMCPPreviewWithoutPageKeepsOldFields(t *testing.T) {
+	f := newMCPPreviewFixture(t)
+
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet, "/api/v1/projects/"+f.projectID+"/mcp", nil))
+	// Merge order, not the table's: the shared layer first, then the agent's,
+	// then the project's own — and no pending row.
+	require.Equal(t, []string{"a", "b", "d"}, mcpReadRowNames(t, body))
+	require.NotContains(t, body, "total")
+	require.NotContains(t, body, "page")
+	require.NotContains(t, body, "page_size")
+	require.NotContains(t, body, "pageSize")
+
+	overridden, ok := body["overridden_global"]
+	require.True(t, ok, "the project notes stay: %#v", body)
+	require.Nil(t, overridden)
+	require.NotNil(t, body["not_applied"])
+	pending, ok := body["pending_consent"].([]any)
+	require.True(t, ok, "pending_consent stays a list: %#v", body["pending_consent"])
+	require.Len(t, pending, 1)
+	item, _ := pending[0].(map[string]any)
+	require.Equal(t, "e", item["name"])
+	require.NotEmpty(t, item["summary"])
+}
+
+// project_pages_test.go covers the paged reads of a project space (plan 075):
+// the conversation, rule-file, permission, language-server, scheduled-task and
+// channel tables. Each endpoint keeps the answer it always gave when the request
+// carries no "page" — non-table callers read them too — and answers one server
+// page, with the total, when it does.
+
+// projectPagesServer is one project space's server: a trusted, version-controlled
+// project, its session store, and the cron service the session list reads its
+// heartbeats from.
+func projectPagesServer(t *testing.T) (*Server, state.Project, string) {
+	t.Helper()
+	ctx := context.Background()
+	home := t.TempDir()
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("agents:\n  definitions:\n    main:\n      primary: true\n"), 0o600))
+	cfg := &appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {Primary: true}}
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	workspace := filepath.Join(home, "workspace")
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", WorkspaceRoot: workspace}}
+	env := &process.Environment{Root: home, SQL: db, Runner: runner, Deps: run.Deps{Home: home, AppCfg: cfg}}
+	env.ConfigPath = cfgPath
+	root := filepath.Join(home, "proj")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".forebrain"), 0o755))
+	require.NoError(t, safety.MarkTrusted(home, safety.Project{Root: root}))
+	projects := state.NewProjectStore(db, "main")
+	p, err := projects.Create(ctx, state.CreateProjectInput{Name: "proj", Root: root})
+	require.NoError(t, err)
+	return &Server{
+		Home:     home,
+		Runner:   runner,
+		Env:      env,
+		Projects: projects,
+		Sessions: state.NewSessionStore(db, "main"),
+	}, p, workspace
+}
+
+// seedProjectConversation creates one conversation of the project holding the
+// given messages, at the given creation and update times.
+func seedProjectConversation(t *testing.T, s *Server, p state.Project, id, title string, createdAt, updatedAt int64, messages ...[2]string) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, s.Sessions.Ensure(ctx, id, title))
+	require.NoError(t, s.Projects.BindSession(ctx, id, p.ID))
+	for _, message := range messages {
+		_, err := s.Env.SQL.Exec(
+			`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`,
+			id, message[0], message[1], "text", 1)
+		require.NoError(t, err)
+	}
+	_, err := s.Env.SQL.Exec(`UPDATE fb_sessions SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, updatedAt, id)
+	require.NoError(t, err)
+}
+
+// decodeBody reads one list answer into a generic map.
+func decodeBody(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(body, &out))
+	return out
+}
+
+// TestProjectSessionsListPagedCarriesModelCountAndHeartbeat pins the conversation
+// table's rows: the model the session pinned, the messages a person exchanged,
+// when it was created, and its heartbeat.
+func TestProjectSessionsListPagedCarriesModelCountAndHeartbeat(t *testing.T) {
+	ctx := context.Background()
+	s, p, _ := projectPagesServer(t)
+	seedProjectConversation(t, s, p, "sess-a", "First", 100, 400,
+		[2]string{"user", "visible"}, [2]string{"assistant", "visible"}, [2]string{"tool", "visible"})
+	seedProjectConversation(t, s, p, "sess-b", "Second", 200, 300, [2]string{"user", "visible"})
+	_, err := s.Sessions.SaveSessionModelSelection(ctx, "sess-a", state.SessionModelSelection{Provider: "anthropic", Model: "claude-sonnet-4"})
+	require.NoError(t, err)
+	_, err = s.cron().SetHeartbeat(ctx, state.Heartbeat{SessionID: "sess-b", IntervalSec: 600, Prompt: "check the build"}, false)
+	require.NoError(t, err)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/sessions?page=1&page_size=10", nil, s.handleProjectSessionsList, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	answer := decodeBody(t, rec.Body.Bytes())
+	require.Equal(t, float64(2), answer["total"])
+	require.Equal(t, float64(1), answer["page"])
+	require.Equal(t, float64(10), answer["page_size"])
+	rows, ok := answer["sessions"].([]any)
+	require.True(t, ok)
+	require.Len(t, rows, 2)
+
+	first := rows[0].(map[string]any)
+	require.Equal(t, "sess-a", first["id"])
+	require.Equal(t, "First", first["title"])
+	require.Equal(t, float64(100), first["created_at"])
+	require.Equal(t, float64(400), first["updated_at"])
+	require.Equal(t, "claude-sonnet-4", first["model"])
+	// Two assistant/user rows: the tool row is work, not a message.
+	require.Equal(t, float64(2), first["message_count"])
+	require.NotContains(t, first, "heartbeat")
+
+	second := rows[1].(map[string]any)
+	// A session that never pinned a model answers an empty name rather than the
+	// agent's default.
+	require.Equal(t, "", second["model"])
+	require.Equal(t, float64(1), second["message_count"])
+	beat, ok := second["heartbeat"].(map[string]any)
+	require.True(t, ok, "a conversation with a heartbeat must carry it: %v", second)
+	require.Equal(t, float64(600), beat["interval_seconds"])
+	require.Equal(t, false, beat["paused"])
+
+	// The table's own sort: by creation time, newest first when asked.
+	sorted := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/sessions?page=1&page_size=10&sort=created&order=asc", nil, s.handleProjectSessionsList, "id", p.ID)
+	require.Equal(t, http.StatusOK, sorted.Code, sorted.Body.String())
+	sortedRows := decodeBody(t, sorted.Body.Bytes())["sessions"].([]any)
+	require.Equal(t, "sess-a", sortedRows[0].(map[string]any)["id"])
+}
+
+// TestProjectSessionsListWithoutPageKeepsTheOldAnswer pins the 071 contract: a
+// request with no "page" gets exactly the answer it always got — the old fields,
+// no derived ones and no pager.
+func TestProjectSessionsListWithoutPageKeepsTheOldAnswer(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	seedProjectConversation(t, s, p, "sess-old", "Old answer", 100, 400, [2]string{"user", "visible"})
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/sessions", nil, s.handleProjectSessionsList, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, `{"sessions":[{"id":"sess-old","title":"Old answer","updated_at":400}]}`+"\n", rec.Body.String())
+}
+
+// channelSeed writes one channel row as the form would have saved it.
+func channelSeed(t *testing.T, s *Server, projectID, kind, configJSON string, enabled bool) {
+	t.Helper()
+	require.NoError(t, state.NewProjectChannelStore(s.Env.SQL, "main").Upsert(context.Background(), state.ProjectChannel{
+		ProjectID:  projectID,
+		Kind:       kind,
+		Enabled:    enabled,
+		ConfigJSON: configJSON,
+	}))
+}
+
+// channelRows reads a paged channel answer into a map by kind.
+func channelRows(t *testing.T, body []byte) map[string]map[string]any {
+	t.Helper()
+	answer := decodeBody(t, body)
+	rows, ok := answer["rows"].([]any)
+	require.True(t, ok, "a paged channel answer carries rows: %s", body)
+	out := map[string]map[string]any{}
+	for _, row := range rows {
+		item := row.(map[string]any)
+		out[item["kind"].(string)] = item
+	}
+	return out
+}
+
+// TestChannelsReportConfiguredOnlyForSavedKinds pins what "configured" means: a
+// kind holds a configuration once the form saved one. A row the engine defaults
+// the fields from, and a row saved empty, are both unconfigured.
+func TestChannelsReportConfiguredOnlyForSavedKinds(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	channelSeed(t, s, p.ID, "feishu", `{"app_id":"cli_123","app_secret":"plain-secret-9876"}`, true)
+	channelSeed(t, s, p.ID, "telegram", `{}`, false)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/channels?page=1&page_size=40", nil, s.handleChannels, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows := channelRows(t, rec.Body.Bytes())
+	// Every kind the engine can build is offered, so a kind with nothing stored
+	// can still be configured.
+	require.Len(t, rows, 18)
+	require.Equal(t, true, rows["feishu"]["configured"])
+	require.Equal(t, true, rows["feishu"]["enabled"])
+	require.Equal(t, false, rows["telegram"]["configured"], "a row saved empty holds no configuration")
+	require.Equal(t, false, rows["slack"]["configured"], "a kind with no row is unconfigured")
+	require.Equal(t, "飞书", rows["feishu"]["label_zh"])
+	require.Equal(t, "Feishu", rows["feishu"]["label_en"])
+	require.Equal(t, false, rows["slack"]["enabled"])
+	// An unconfigured kind still offers every field its configuration
+	// declares, or the edit form would have nothing to type into.
+	fields, _ := rows["slack"]["fields"].(map[string]any)
+	require.Equal(t, "", fields["bot_token"], "an unset field is empty, not missing")
+	require.Contains(t, fields, "bot_token")
+	require.Contains(t, fields, "secret")
+}
+
+// TestChannelsPagedRowsCarrySecretHints pins the masked hint a page shows for a
+// stored secret: the mask and the last four characters, read from the stored
+// value, never the value itself.
+func TestChannelsPagedRowsCarrySecretHints(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(s.Home, ".env"), []byte("FEISHU_APP_SECRET=plain-secret-9876\n"), 0o600))
+	// A secret the page typed is stored as a ${VAR} reference, which is what the
+	// hint has to resolve through the home's .env.
+	channelSeed(t, s, p.ID, "feishu", `{"app_id":"cli_123","app_secret":"${FEISHU_APP_SECRET}"}`, true)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/channels?page=1&page_size=40", nil, s.handleChannels, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "plain-secret-9876", "a stored secret must never travel")
+
+	feishu := channelRows(t, rec.Body.Bytes())["feishu"]
+	keys, ok := feishu["secret_keys"].([]any)
+	require.True(t, ok)
+	require.Contains(t, keys, "app_secret")
+	hints, ok := feishu["secret_hints"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "\u2022\u2022\u2022\u20229876", hints["app_secret"])
+	fields, ok := feishu["fields"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "cli_123", fields["app_id"])
+	require.Equal(t, "[REDACTED]", fields["app_secret"])
+
+	// The search box finds a kind by either of its names.
+	searched := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/channels?page=1&page_size=40&q=飞书", nil, s.handleChannels, "id", p.ID)
+	require.Equal(t, http.StatusOK, searched.Code, searched.Body.String())
+	require.Len(t, channelRows(t, searched.Body.Bytes()), 1)
+
+	// Without "page" the answer is the one the page always read: the whole map of
+	// kind → fields, and no rows.
+	whole := cronRequest(t, s, http.MethodGet, "/api/projects/"+p.ID+"/channels", nil, s.handleChannels, "id", p.ID)
+	require.Equal(t, http.StatusOK, whole.Code, whole.Body.String())
+	answer := decodeBody(t, whole.Body.Bytes())
+	require.NotContains(t, answer, "rows")
+	require.NotContains(t, answer, "total")
+	kinds, ok := answer["kinds"].([]any)
+	require.True(t, ok)
+	require.Len(t, kinds, 18)
+	channels, ok := answer["channels"].(map[string]any)
+	require.True(t, ok)
+	feishuFields := channels["feishu"].(map[string]any)
+	require.Equal(t, "cli_123", feishuFields["app_id"])
+	require.Equal(t, "[REDACTED]", feishuFields["app_secret"])
+	require.Equal(t, true, feishuFields["enabled"])
+}
+
+// TestProjectRuleFilesPagedAndWhole pins the rule-file table: searched by file
+// path, paged on the server, with the layers that hold no file still offered to
+// the create dialog.
+func TestProjectRuleFilesPagedAndWhole(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(p.Root, projectRuleFile), []byte("root rules"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(p.Root, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(p.Root, "docs", projectRuleFile), []byte("docs rules"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(p.Root, "internal"), 0o755))
+
+	whole := cronRequest(t, s, http.MethodGet, "/api/rules/project/"+p.ID, nil, s.handleProjectRuleFiles, "projectId", p.ID)
+	require.Equal(t, http.StatusOK, whole.Code, whole.Body.String())
+	wholeAnswer := decodeBody(t, whole.Body.Bytes())
+	require.NotContains(t, wholeAnswer, "total")
+	require.Len(t, wholeAnswer["files"].([]any), 2)
+	require.Equal(t, []any{".forebrain", "internal"}, wholeAnswer["create"])
+
+	paged := cronRequest(t, s, http.MethodGet, "/api/rules/project/"+p.ID+"?page=1&page_size=1", nil, s.handleProjectRuleFiles, "projectId", p.ID)
+	require.Equal(t, http.StatusOK, paged.Code, paged.Body.String())
+	pagedAnswer := decodeBody(t, paged.Body.Bytes())
+	require.Equal(t, float64(2), pagedAnswer["total"])
+	require.Len(t, pagedAnswer["files"].([]any), 1)
+	require.Equal(t, "", pagedAnswer["files"].([]any)[0].(map[string]any)["dir"], "the root layer lists first")
+	// The create list is not a page: the dialog offers every layer that has no
+	// file, whatever the search or the page leaves.
+	require.Equal(t, []any{".forebrain", "internal"}, pagedAnswer["create"])
+
+	searched := cronRequest(t, s, http.MethodGet, "/api/rules/project/"+p.ID+"?page=1&page_size=10&q=docs", nil, s.handleProjectRuleFiles, "projectId", p.ID)
+	require.Equal(t, http.StatusOK, searched.Code, searched.Body.String())
+	searchedAnswer := decodeBody(t, searched.Body.Bytes())
+	require.Equal(t, float64(1), searchedAnswer["total"])
+	require.Equal(t, "docs", searchedAnswer["files"].([]any)[0].(map[string]any)["dir"])
+}
+
+// TestProjectPermissionRulesPagedAndWhole pins the project permission table: the
+// project's own rules, searched over the tool and the rule's text, with "applies"
+// beside the page.
+func TestProjectPermissionRulesPagedAndWhole(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	update := cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/permissions/updates",
+		map[string]any{
+			"type":     "addRules",
+			"behavior": "deny",
+			"rules": []map[string]any{
+				{"tool_name": "Bash", "rule_content": "git push:*"},
+				{"tool_name": "Bash", "rule_content": "rm -rf:*"},
+			},
+		}, s.handleProjectPermissionUpdate, "id", p.ID)
+	require.Equal(t, http.StatusOK, update.Code, update.Body.String())
+
+	whole := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/permissions/rules", nil, s.handleProjectPermissionRules, "id", p.ID)
+	require.Equal(t, http.StatusOK, whole.Code, whole.Body.String())
+	wholeAnswer := decodeBody(t, whole.Body.Bytes())
+	require.Equal(t, true, wholeAnswer["applies"])
+	require.NotContains(t, wholeAnswer, "total")
+	require.Len(t, wholeAnswer["rules"].([]any), 2)
+
+	paged := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/permissions/rules?page=1&page_size=1", nil, s.handleProjectPermissionRules, "id", p.ID)
+	require.Equal(t, http.StatusOK, paged.Code, paged.Body.String())
+	pagedAnswer := decodeBody(t, paged.Body.Bytes())
+	require.Equal(t, true, pagedAnswer["applies"])
+	require.Equal(t, float64(2), pagedAnswer["total"])
+	require.Len(t, pagedAnswer["rules"].([]any), 1)
+
+	searched := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/permissions/rules?page=1&page_size=10&q=git+push", nil, s.handleProjectPermissionRules, "id", p.ID)
+	require.Equal(t, http.StatusOK, searched.Code, searched.Body.String())
+	searchedAnswer := decodeBody(t, searched.Body.Bytes())
+	require.Equal(t, float64(1), searchedAnswer["total"])
+	require.Contains(t, searchedAnswer["rules"].([]any)[0].(map[string]any)["rule_content"], "git push")
+}
+
+// TestProjectLSPPreviewPagedAndWhole pins the language-server table: pending,
+// allowed and denied entries as one list in that order, searched by id and
+// summary, while the old answer keeps its three separate lists.
+func TestProjectLSPPreviewPagedAndWhole(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	serversPath := filepath.Join(p.Root, ".forebrain", "lsp_servers.yaml")
+	writeServers := func(body string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(serversPath, []byte(body), 0o644))
+	}
+	writeServers("servers:\n" +
+		"  als: {command: /bin/als, extension_to_language: {\".al\": als}}\n" +
+		"  bls: {command: /bin/bls, extension_to_language: {\".bl\": bls}}\n" +
+		"  cls: {command: /bin/cls, extension_to_language: {\".cl\": cls}}\n")
+
+	consent := cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
+		map[string]any{"allow": []string{"als"}}, s.handleProjectLSPConsent, "id", p.ID)
+	require.Equal(t, http.StatusOK, consent.Code, consent.Body.String())
+	// One entry still awaits confirmation, so all three decisions are on the table.
+	writeServers("servers:\n" +
+		"  als: {command: /bin/als, extension_to_language: {\".al\": als}}\n" +
+		"  bls: {command: /bin/bls, extension_to_language: {\".bl\": bls}}\n" +
+		"  cls: {command: /bin/cls, extension_to_language: {\".cl\": cls}}\n" +
+		"  dls: {command: /bin/dls, extension_to_language: {\".dl\": dls}}\n")
+
+	whole := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp", nil, s.handleProjectLSPPreview, "id", p.ID)
+	require.Equal(t, http.StatusOK, whole.Code, whole.Body.String())
+	wholeAnswer := decodeBody(t, whole.Body.Bytes())
+	require.Equal(t, true, wholeAnswer["trusted"])
+	require.NotContains(t, wholeAnswer, "total")
+	require.Len(t, wholeAnswer["pending"].([]any), 1)
+	require.Equal(t, []any{"als"}, wholeAnswer["allowed"])
+	require.Equal(t, []any{"bls", "cls"}, wholeAnswer["denied"])
+
+	paged := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=2", nil, s.handleProjectLSPPreview, "id", p.ID)
+	require.Equal(t, http.StatusOK, paged.Code, paged.Body.String())
+	pagedAnswer := decodeBody(t, paged.Body.Bytes())
+	require.Equal(t, true, pagedAnswer["trusted"])
+	require.Equal(t, float64(4), pagedAnswer["total"])
+	firstPage := pagedAnswer["rows"].([]any)
+	require.Len(t, firstPage, 2)
+	// Waiting for confirmation leads; what was decided follows.
+	require.Equal(t, "dls", firstPage[0].(map[string]any)["id"])
+	require.Equal(t, "pending", firstPage[0].(map[string]any)["status"])
+	require.Contains(t, firstPage[0].(map[string]any)["summary"], "/bin/dls")
+	require.Equal(t, "als", firstPage[1].(map[string]any)["id"])
+	require.Equal(t, "allowed", firstPage[1].(map[string]any)["status"])
+	// The consent store keeps a decided entry by id, so it has no summary.
+	require.Equal(t, "", firstPage[1].(map[string]any)["summary"])
+
+	searched := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=10&q=cls", nil, s.handleProjectLSPPreview, "id", p.ID)
+	require.Equal(t, http.StatusOK, searched.Code, searched.Body.String())
+	searchedAnswer := decodeBody(t, searched.Body.Bytes())
+	require.Equal(t, float64(1), searchedAnswer["total"])
+	require.Equal(t, "cls", searchedAnswer["rows"].([]any)[0].(map[string]any)["id"])
+	require.Equal(t, "denied", searchedAnswer["rows"].([]any)[0].(map[string]any)["status"])
+}
+
+// TestCronJobsPagedAndWhole pins the scheduled-task table: searched over the name
+// and the prompt, paged on the server, while the old answer keeps its whole list.
+func TestCronJobsPagedAndWhole(t *testing.T) {
+	ctx := context.Background()
+	s, p, _ := projectPagesServer(t)
+	for _, job := range []struct{ name, prompt string }{
+		{"morning brief", "summarise the inbox"},
+		{"nightly sweep", "look for stale issues"},
+	} {
+		_, err := s.cron().CreateJob(ctx, "main", process.CronJobInput{
+			ProjectID: p.ID,
+			Name:      job.name,
+			Schedule:  "every 1h",
+			Prompt:    job.prompt,
+		})
+		require.NoError(t, err)
+	}
+
+	whole := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/cron/jobs", nil, s.handleCronJobs, "id", p.ID)
+	require.Equal(t, http.StatusOK, whole.Code, whole.Body.String())
+	wholeAnswer := decodeBody(t, whole.Body.Bytes())
+	require.Equal(t, p.ID, wholeAnswer["project_id"])
+	require.NotContains(t, wholeAnswer, "total")
+	require.Len(t, wholeAnswer["records"].([]any), 2)
+
+	paged := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/cron/jobs?page=1&page_size=1", nil, s.handleCronJobs, "id", p.ID)
+	require.Equal(t, http.StatusOK, paged.Code, paged.Body.String())
+	pagedAnswer := decodeBody(t, paged.Body.Bytes())
+	require.Equal(t, float64(2), pagedAnswer["total"])
+	require.Len(t, pagedAnswer["records"].([]any), 1)
+
+	searched := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/cron/jobs?page=1&page_size=10&q=stale", nil, s.handleCronJobs, "id", p.ID)
+	require.Equal(t, http.StatusOK, searched.Code, searched.Body.String())
+	searchedAnswer := decodeBody(t, searched.Body.Bytes())
+	require.Equal(t, float64(1), searchedAnswer["total"])
+	require.Equal(t, "nightly sweep", searchedAnswer["records"].([]any)[0].(map[string]any)["name"])
+}
+
+// TestCronJobRunsPagedAndWhole pins the run-history read: a page with its total
+// when the request pages, the old limited list when it does not.
+func TestCronJobRunsPagedAndWhole(t *testing.T) {
+	ctx := context.Background()
+	s, p, _ := projectPagesServer(t)
+	job, err := s.cron().CreateJob(ctx, "main", process.CronJobInput{
+		ProjectID: p.ID,
+		Name:      "morning brief",
+		Schedule:  "every 1h",
+		Prompt:    "summarise the inbox",
+	})
+	require.NoError(t, err)
+	store := &state.CronStore{DB: s.Env.SQL}
+	for _, startedAt := range []int64{100, 200, 300} {
+		_, err := store.StartRun(ctx, state.CronRun{JobID: job.ID, AgentID: "main", Trigger: "schedule", StartedAt: startedAt})
+		require.NoError(t, err)
+	}
+
+	whole := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/cron/jobs/"+job.ID+"/runs?limit=1", nil, s.handleCronJobRuns, "id", p.ID, "jobId", job.ID)
+	require.Equal(t, http.StatusOK, whole.Code, whole.Body.String())
+	wholeAnswer := decodeBody(t, whole.Body.Bytes())
+	require.Equal(t, job.ID, wholeAnswer["job_id"])
+	require.NotContains(t, wholeAnswer, "total")
+	require.Len(t, wholeAnswer["records"].([]any), 1)
+
+	paged := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/cron/jobs/"+job.ID+"/runs?page=1&page_size=2", nil, s.handleCronJobRuns, "id", p.ID, "jobId", job.ID)
+	require.Equal(t, http.StatusOK, paged.Code, paged.Body.String())
+	pagedAnswer := decodeBody(t, paged.Body.Bytes())
+	require.Equal(t, float64(3), pagedAnswer["total"])
+	require.Equal(t, job.ID, pagedAnswer["job_id"])
+	runs := pagedAnswer["runs"].([]any)
+	require.Len(t, runs, 2)
+	// History reads newest first.
+	require.Equal(t, float64(300), runs[0].(map[string]any)["started_at"])
+	require.Equal(t, float64(200), runs[1].(map[string]any)["started_at"])
+
+	last := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/cron/jobs/"+job.ID+"/runs?page=9&page_size=2", nil, s.handleCronJobRuns, "id", p.ID, "jobId", job.ID)
+	require.Equal(t, http.StatusOK, last.Code, last.Body.String())
+	lastAnswer := decodeBody(t, last.Body.Bytes())
+	require.Equal(t, float64(2), lastAnswer["page"], "a page past the end serves the last page")
+	require.Len(t, lastAnswer["runs"].([]any), 1)
+}
+
+// TestChannelLabelsMatchFrontendJSON holds the two copies of the channel display
+// names together: the frontend's JSON is the one source, this package mirrors it
+// so the table can be searched by what the page shows.
+func TestChannelLabelsMatchFrontendJSON(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "frontend", "src", "lib", "channelLabels.json"))
+	require.NoError(t, err)
+	var frontend map[string][]string
+	require.NoError(t, json.Unmarshal(raw, &frontend))
+
+	require.Len(t, frontend, len(channelLabels), "the two tables name a different number of kinds")
+	for kind, names := range frontend {
+		require.Len(t, names, 2, "%s: the JSON entry must be [中文, English]", kind)
+		zh, en := channelLabel(kind)
+		require.Equal(t, names[0], zh, "%s: 中文名字", kind)
+		require.Equal(t, names[1], en, "%s: English name", kind)
+	}
+	for _, kind := range channel.ChannelKinds {
+		require.Contains(t, frontend, kind, "every channel kind the engine builds needs a display name")
+	}
+	// A kind the table does not name reads as itself.
+	zh, en := channelLabel("not-a-kind")
+	require.Equal(t, "not-a-kind", zh)
+	require.Equal(t, "not-a-kind", en)
+}
+
+// TestCronJobEditWithoutDeliverKeepsTheJobsTarget pins the pause switch: it sends
+// only {"enabled": …}, and pausing a job must not make it stop posting where it
+// posted before.
+func TestCronJobEditWithoutDeliverKeepsTheJobsTarget(t *testing.T) {
+	ctx := context.Background()
+	s, p, _ := projectPagesServer(t)
+	deliver := "feishu"
+	job, err := s.cron().CreateJob(ctx, "main", process.CronJobInput{
+		ProjectID:  p.ID,
+		Name:       "morning brief",
+		Schedule:   "every 1h",
+		Prompt:     "summarise the inbox",
+		Deliver:    deliver,
+		DeliverSet: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, deliver, job.Deliver)
+
+	paused := cronRequest(t, s, http.MethodPut, "/api/v1/projects/"+p.ID+"/cron/jobs/"+job.ID,
+		map[string]any{"enabled": false}, s.handleCronJob, "id", p.ID, "jobId", job.ID)
+	require.Equal(t, http.StatusOK, paused.Code, paused.Body.String())
+	pausedJob, err := s.cron().Job(ctx, "main", job.ID)
+	require.NoError(t, err)
+	require.False(t, pausedJob.Enabled)
+	require.Equal(t, deliver, pausedJob.Deliver, "pausing kept the delivery target")
+
+	// An edit that does name one still changes it, and one that names none
+	// clears it: the pointer is what tells the two apart.
+	switched := cronRequest(t, s, http.MethodPut, "/api/v1/projects/"+p.ID+"/cron/jobs/"+job.ID,
+		map[string]any{"deliver": "telegram"}, s.handleCronJob, "id", p.ID, "jobId", job.ID)
+	require.Equal(t, http.StatusOK, switched.Code, switched.Body.String())
+	switchedJob, err := s.cron().Job(ctx, "main", job.ID)
+	require.NoError(t, err)
+	require.Equal(t, "telegram", switchedJob.Deliver)
+
+	cleared := cronRequest(t, s, http.MethodPut, "/api/v1/projects/"+p.ID+"/cron/jobs/"+job.ID,
+		map[string]any{"deliver": ""}, s.handleCronJob, "id", p.ID, "jobId", job.ID)
+	require.Equal(t, http.StatusOK, cleared.Code, cleared.Body.String())
+	clearedJob, err := s.cron().Job(ctx, "main", job.ID)
+	require.NoError(t, err)
+	require.Equal(t, "", clearedJob.Deliver)
 }

@@ -15,6 +15,7 @@ import (
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/stretchr/testify/require"
 )
 
@@ -109,6 +110,114 @@ func TestAgentRosterIncludesPrimaryAndLiveSubagent(t *testing.T) {
 	require.Contains(t, rr.Body.String(), `"kind":"subagent"`)
 	require.Contains(t, rr.Body.String(), `"id":"agent-1"`)
 	require.Contains(t, rr.Body.String(), `"run_id":"run-1"`)
+}
+
+// TestAgentRosterPagesRunningRowsWithSessionTitles pins the subagent page's
+// answer: the running-only filter and the search run on the server, the
+// longest-running subagent leads, each row names the conversation it ran in —
+// the dispatcher's session, whose title it carries — and a page-bearing
+// request counts every matching row.
+func TestAgentRosterPagesRunningRowsWithSessionTitles(t *testing.T) {
+	home := t.TempDir()
+	cfg := &appcfg.Root{}
+	cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {}}
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s := &Server{
+		Home:     home,
+		Env:      &process.Environment{Deps: run.Deps{Home: home, AppCfg: cfg}},
+		Sessions: state.NewSessionStore(db, "main"),
+	}
+	now := time.Now().Unix()
+	for _, entry := range []agent.HistoryEntry{
+		{
+			AgentID: "agent-long", RunID: "run-long", SessionID: "parent-long", WorkerSessionID: "ws-long",
+			AgentType: "verification", Title: "review the API",
+			Status: agent.StatusRunning, StartedAt: now - 300, UpdatedAt: now,
+		},
+		{
+			AgentID: "agent-short", RunID: "run-short", SessionID: "parent-short", WorkerSessionID: "ws-short",
+			AgentType: "explore", Title: "read the logs",
+			Status: agent.StatusRunning, StartedAt: now - 60, UpdatedAt: now,
+		},
+	} {
+		cancel := func() {}
+		handle := agent.RegistryFor(s.stateRoot()).Start(entry, cancel)
+		t.Cleanup(func() {
+			handle.Finish(agent.HistoryEntry{
+				AgentID: entry.AgentID, RunID: entry.RunID,
+				Status: agent.StatusCancelled, UpdatedAt: time.Now().Unix(),
+			})
+		})
+	}
+	// The conversation each subagent ran in, titled differently from the
+	// worker session it was given: the row's title must be the parent's.
+	require.NoError(t, s.Sessions.Ensure(context.Background(), "parent-long", "Review thread"))
+	require.NoError(t, s.Sessions.Ensure(context.Background(), "parent-short", "Log thread"))
+	require.NoError(t, s.Sessions.Ensure(context.Background(), "ws-long", "Plan review"))
+	require.NoError(t, s.Sessions.Ensure(context.Background(), "ws-short", "Log triage"))
+
+	type answer struct {
+		Records []struct {
+			ID              string `json:"id"`
+			Kind            string `json:"kind"`
+			Label           string `json:"label"`
+			SessionID       string `json:"session_id"`
+			ParentSessionID string `json:"parent_session_id"`
+			SessionTitle    string `json:"session_title"`
+			ElapsedSeconds  int    `json:"elapsed_seconds"`
+		} `json:"records"`
+		Total    int `json:"total"`
+		Page     int `json:"page"`
+		PageSize int `json:"page_size"`
+	}
+	list := func(target string) answer {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		s.handleAgentRoster(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out answer
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		return out
+	}
+
+	// The primary agent is not at work here, so the running rows are the two
+	// subagents; the one that started first has been at work longest and
+	// leads.
+	first := list("/api/agents/roster?page=1&page_size=1&running=1")
+	require.Equal(t, 2, first.Total)
+	require.Equal(t, 1, first.Page)
+	require.Equal(t, 1, first.PageSize)
+	require.Len(t, first.Records, 1)
+	require.Equal(t, "agent-long", first.Records[0].ID)
+	require.Equal(t, "ws-long", first.Records[0].SessionID)
+	require.Equal(t, "parent-long", first.Records[0].ParentSessionID)
+	require.Equal(t, "Review thread", first.Records[0].SessionTitle)
+	require.Greater(t, first.Records[0].ElapsedSeconds, 100)
+
+	second := list("/api/agents/roster?page=2&page_size=1&running=1")
+	require.Equal(t, 2, second.Page)
+	require.Len(t, second.Records, 1)
+	require.Equal(t, "agent-short", second.Records[0].ID)
+	require.Equal(t, "parent-short", second.Records[0].ParentSessionID)
+	require.Equal(t, "Log thread", second.Records[0].SessionTitle)
+
+	// The search box reads the label and the task's short name.
+	searched := list("/api/agents/roster?page=1&page_size=10&running=1&q=logs")
+	require.Equal(t, 1, searched.Total)
+	require.Equal(t, "agent-short", searched.Records[0].ID)
+
+	// Without a page the whole roster is still there, primary agent included,
+	// and no paging fields beside it.
+	whole := list("/api/agents/roster")
+	require.Len(t, whole.Records, 3)
+	require.Equal(t, 0, whole.Total)
+	kinds := []string{}
+	for _, row := range whole.Records {
+		kinds = append(kinds, row.Kind)
+	}
+	require.Equal(t, []string{"primary", "subagent", "subagent"}, kinds)
 }
 
 func TestAgentAPICancelsLiveSubagentByStableID(t *testing.T) {

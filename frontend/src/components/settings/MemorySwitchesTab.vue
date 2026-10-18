@@ -1,33 +1,42 @@
 <template>
-  <div class="pb-6">
-    <PageTopRow :title="t('memories.featureTitle')" :description="t('memories.switchesDescription')">
-      <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!changed || saving" data-testid="memory-switches-save" @click="saveSettings">
-          {{ saving ? t('common.loading') : t('common.save') }}
-        </button>
-      </template>
-    </PageTopRow>
+  <!-- The memory switches, flat in their tab (owner 2026-10-18): one row per
+       switch, the help that says what they cover, and the save that writes
+       them. -->
+  <div class="grid gap-3">
+    <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+    <p v-if="notice" class="text-[12px] text-[var(--forebrain-text-2)]">{{ notice }}</p>
 
-    <p v-if="error" class="mb-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-    <p v-if="notice" class="mb-3 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
-
-    <div class="forebrain-list-boxed">
-      <label v-for="row in switches" :key="row.key" class="flex items-start justify-between gap-4 py-3">
-        <span class="min-w-0">
-          <span class="block text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.title }}</span>
-          <span class="mt-0.5 block text-[12px] text-[var(--forebrain-muted-text)]">{{ row.description }}</span>
-        </span>
-        <SwitchComponent
-          :model-value="draft[row.key]"
-          :disabled="loading || saving"
-          class="mt-0.5"
-          @update:model-value="draft[row.key] = $event"
-        />
-      </label>
+    <div class="grid">
+      <SwitchRow
+        v-for="row in switches"
+        :key="row.key"
+        v-model="draft[row.key]"
+        :title="row.title"
+        :hint="row.description"
+        :disabled="loading || saving"
+        :data-testid="`memory-switch-${row.key}`"
+      />
     </div>
 
-    <div class="mt-3">
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs text-[var(--forebrain-danger)]" :disabled="resetting" @click="resetMemories">
+    <p class="forebrain-list-note">{{ t('memories.switchesDescription') }}</p>
+
+    <div class="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        class="forebrain-btn forebrain-btn-primary text-xs"
+        :disabled="!changed || saving"
+        data-testid="memory-switches-save"
+        @click="saveSettings"
+      >
+        {{ saving ? t('common.loading') : t('common.save') }}
+      </button>
+      <button
+        type="button"
+        class="forebrain-btn forebrain-btn--danger text-xs"
+        :disabled="resetting"
+        data-testid="memory-switches-reset"
+        @click="resetMemories"
+      >
         {{ resetting ? t('common.loading') : t('memories.reset') }}
       </button>
     </div>
@@ -41,8 +50,7 @@
  * the memory file list.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
-import SwitchComponent from '@/components/common/SwitchComponent.vue'
+import SwitchRow from '@/components/common/SwitchRow.vue'
 import forebrainApi, { type MemorySettings } from '@/lib/api'
 import { useI18n } from '@/locales'
 

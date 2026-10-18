@@ -12,13 +12,13 @@
       class="chat-drawer"
       data-testid="chat-drawer"
       role="dialog"
-      :aria-label="t('chatDrawer.title', { agent: agentName })"
+      :aria-label="t('chatDrawer.title')"
       :style="{ left: `${railWidth}px` }"
       tabindex="-1"
       @keydown.escape="emit('close')"
     >
       <header class="chat-drawer-head">
-        <span class="chat-drawer-title">{{ t('chatDrawer.title', { agent: agentName }) }}</span>
+        <span class="chat-drawer-title">{{ t('chatDrawer.title') }}</span>
         <button type="button" class="chat-drawer-close" :aria-label="t('common.close')" @click="emit('close')">
           <X class="size-4" aria-hidden="true" />
         </button>
@@ -56,7 +56,7 @@
             v-if="beatOf(row.id)"
             class="chat-drawer-heart"
             :class="{ 'chat-drawer-heart--paused': beatOf(row.id)?.paused }"
-            :title="heartbeatLabel(row.id)"
+            v-tip:top="heartbeatLabel(row.id)"
             :aria-label="heartbeatLabel(row.id)"
             role="img"
             data-testid="drawer-heartbeat-indicator"
@@ -86,7 +86,6 @@ import { useI18n } from '@/locales'
 const props = defineProps<{
   open: boolean
   railWidth: number
-  agentName: string
   activeSessionId: string | null
 }>()
 

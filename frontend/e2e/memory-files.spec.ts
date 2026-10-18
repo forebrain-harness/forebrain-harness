@@ -25,7 +25,7 @@ function seedGlobalFile(name: string, content: string, ageSeconds?: number): voi
   }
 }
 
-test('memory page lists files with the core lock', async ({ page }) => {
+test('memory page lists files with the core badge', async ({ page }) => {
   test.skip(!globalRoot, 'E2E_HOME missing')
   seedGlobalFile('MEMORY.md', '# e2e memory\n\n- remembers the layout\n')
   seedGlobalFile('notes/habit.md', 'prefers short answers\n')
@@ -33,7 +33,8 @@ test('memory page lists files with the core lock', async ({ page }) => {
   await signIn(page)
   await page.goto('/memories', { waitUntil: 'networkidle' })
   await expect(page.locator('[data-memory-file="MEMORY.md"]')).toBeVisible({ timeout: 10_000 })
-  await expect(page.locator('[data-memory-file="MEMORY.md"] svg')).toBeVisible()
+  // A core file is named by a badge now, not by the padlock the old list drew.
+  await expect(page.locator('[data-memory-file="MEMORY.md"] .forebrain-badge', { hasText: /核心|Core/ })).toBeVisible()
   await expect(page.locator('[data-testid="memories-delete-MEMORY.md"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="memories-delete-notes/habit.md"]')).toBeVisible()
   await shot(page, 'memories-list')
@@ -51,18 +52,24 @@ test('sorting and paging across a seeded store', async ({ page }) => {
   await page.goto('/memories', { waitUntil: 'networkidle' })
   const firstPageLead = await page.locator('[data-memory-file]').first().getAttribute('data-memory-file')
   expect(firstPageLead).toBeTruthy()
-  await expect(page.locator('[data-memory-file]')).toHaveCount(20, { timeout: 10_000 })
+  // Default order is updated-desc (the freshest seed leads), and the table
+  // draws one page of ten with the pager saying how many files there are.
+  await expect(page.locator('[data-memory-file]').first()).toHaveAttribute('data-memory-file', 'notes/z-latest.md', { timeout: 10_000 })
+  await expect(page.locator('[data-memory-file]')).toHaveCount(10)
+  await expect(page.locator('[data-testid="pager-total"]')).toHaveText(/共 \d+ 条|items/)
 
   // The second page is a different slice, not the first one again.
-  await page.click('[data-testid="memories-next-page"]')
-  await expect(page.locator('[data-testid="memories-page"]')).toHaveText(/^2 /, { timeout: 10_000 })
+  await page.click('[data-testid="pager-next"]')
+  await expect(page.locator('[data-testid="pager-page-2"]')).toHaveAttribute('aria-current', 'page', { timeout: 10_000 })
   await expect(page.locator('[data-memory-file]').first()).not.toHaveAttribute('data-memory-file', firstPageLead ?? '')
 
-  // Default order is updated-desc (the freshest seed leads). Under
-  // created-asc the bulk-00 file — explicitly stamped the oldest — leads.
-  await page.click('[data-testid="memories-prev-page"]')
-  await expect(page.locator('[data-memory-file]').first()).toHaveAttribute('data-memory-file', 'notes/z-latest.md', { timeout: 10_000 })
-  await page.selectOption('[data-testid="memories-sort"]', 'created-asc')
+  // A header click orders the whole list on the server and lands on page one.
+  // It is 更新时间 asc now, so the bulk-00 seed — stamped the furthest back —
+  // leads.
+  const updated = page.locator('th.forebrain-sortable', { hasText: /更新时间|Updated/ })
+  await updated.locator('button').click()
+  await expect(updated).toHaveAttribute('aria-sort', 'ascending', { timeout: 10_000 })
+  await expect(page.locator('[data-testid="pager-page-1"]')).toHaveAttribute('aria-current', 'page')
   await expect(page.locator('[data-memory-file]').first()).toHaveAttribute('data-memory-file', 'notes/bulk-00.md', { timeout: 10_000 })
 })
 
@@ -174,7 +181,7 @@ test('clearing the project scope leaves global memory alone', async ({ page }) =
   await expect(page.locator('[data-memory-file="project-note.md"]')).toBeVisible({ timeout: 10_000 })
   await shot(page, 'memories-project')
 
-  await page.click('[data-testid="memories-clear-all"]')
+  await page.click('[data-testid="project-memories-reset-all"]')
   await page.click('[data-testid="confirm-ok"]')
   await expect(page.locator('[data-memory-file="project-note.md"]')).toHaveCount(0, { timeout: 10_000 })
 
@@ -191,7 +198,7 @@ test('clearing the global scope empties the agent page', async ({ page }) => {
   await signIn(page)
   await page.goto('/memories', { waitUntil: 'networkidle' })
   await expect(page.locator('[data-memory-file="MEMORY.md"]')).toBeVisible({ timeout: 10_000 })
-  await page.click('[data-testid="memories-clear-all"]')
+  await page.click('[data-testid="memories-reset-all"]')
   await page.click('[data-testid="confirm-ok"]')
   await expect(page.locator('[data-memory-file]')).toHaveCount(0, { timeout: 10_000 })
   await expect(page.getByText(/暂无记忆文件|No memory files yet/)).toBeVisible()

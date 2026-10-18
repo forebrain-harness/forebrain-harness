@@ -297,6 +297,10 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 
 	api.Get("/config", s.handleConfigFile)
 	api.Put("/config", s.handleConfigFile)
+	// What the settings page's runtime tab shows: the facts only the gateway
+	// knows. The version and the address the browser reached are the
+	// browser's own.
+	api.Get("/runtime", s.handleRuntimeInfo)
 	api.Get("/providers", s.handleProviders)
 	api.Put("/providers", s.handleProviders)
 	api.Get("/hooks", s.handleHooks)
@@ -602,17 +606,76 @@ func parseBoolQuery(r *http.Request, key string) bool {
 	}
 }
 
+// toolMetas is the tool table the active primary agent's runtime exposes, or
+// nothing when there is no runtime to read it from.
+func (s *Server) toolMetas() []event.ToolMeta {
+	if s.Runner == nil || s.Env.Tools() == nil {
+		return []event.ToolMeta{}
+	}
+	return s.Env.Tools().ToolMetas()
+}
+
+// toolMetaMatches is the tool table's search box: it reads the tool's own name
+// and the description the model is given.
+func toolMetaMatches(meta event.ToolMeta, q string) bool {
+	needle := strings.ToLower(q)
+	return strings.Contains(strings.ToLower(meta.Name), needle) ||
+		strings.Contains(strings.ToLower(meta.Description), needle)
+}
+
 func (s *Server) handleToolsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.Runner == nil || s.Env.Tools() == nil {
-		_ = json.NewEncoder(w).Encode([]any{})
+	metas := s.toolMetas()
+	q := readListQuery(r)
+	if !q.Paged {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(metas)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.Env.Tools().ToolMetas())
+	// The category dropdown offers every category the runtime exposes, not
+	// only the ones the current filters leave: a filter that could hide the
+	// choice that undoes it would be a trap.
+	categories := []string{}
+	seen := map[string]bool{}
+	for _, meta := range metas {
+		category := strings.TrimSpace(meta.Category)
+		if category == "" || seen[category] {
+			continue
+		}
+		seen[category] = true
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	categoryFilter := strings.TrimSpace(r.URL.Query().Get("category"))
+	typeFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+	matched := make([]event.ToolMeta, 0, len(metas))
+	for _, meta := range metas {
+		if categoryFilter != "" && !strings.EqualFold(strings.TrimSpace(meta.Category), categoryFilter) {
+			continue
+		}
+		switch typeFilter {
+		case "readonly":
+			if !meta.ReadOnly {
+				continue
+			}
+		case "write":
+			if meta.ReadOnly {
+				continue
+			}
+		}
+		if q.Q != "" && !toolMetaMatches(meta, q.Q) {
+			continue
+		}
+		matched = append(matched, meta)
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		return strings.ToLower(matched[i].Name) < strings.ToLower(matched[j].Name)
+	})
+	page, servedPage := pageOf(matched, q)
+	writeListPage(w, "tools", page, len(matched), servedPage, q, map[string]any{"categories": categories})
 }
 
 // permissionRuleRow is one rule as the permission pages list it.
@@ -692,11 +755,28 @@ func (s *Server) handlePermissionRules(w http.ResponseWriter, r *http.Request) {
 		snap = scope.rt.Snapshot(scope.cfg)
 	}
 	rules := permissionRuleRows(snap, srcFilter, behaviorFilter)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"mode":  snap.Mode,
-		"rules": rules,
-	})
+	q := readListQuery(r)
+	if !q.Paged {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"mode":  snap.Mode,
+			"rules": rules,
+		})
+		return
+	}
+	// The search box reads the tool the rule names and the rule's own text.
+	needle := strings.ToLower(q.Q)
+	matched := make([]permissionRuleRow, 0, len(rules))
+	for _, rule := range rules {
+		if q.Q != "" &&
+			!strings.Contains(strings.ToLower(rule.ToolName), needle) &&
+			!strings.Contains(strings.ToLower(rule.RuleContent), needle) {
+			continue
+		}
+		matched = append(matched, rule)
+	}
+	page, servedPage := pageOf(matched, q)
+	writeListPage(w, "rules", page, len(matched), servedPage, q, map[string]any{"mode": snap.Mode})
 }
 
 func (s *Server) handlePermissionEvaluate(w http.ResponseWriter, r *http.Request) {
@@ -1647,7 +1727,13 @@ func (s *Server) handleChatSessionModelPut(w http.ResponseWriter, r *http.Reques
 // stored titled with its own id; that is not a name, so it reads as none and
 // the client draws its own placeholder, the way the store's SessionTitle does.
 func sessionDisplayTitle(sum state.SessionSummary) string {
-	if title := strings.TrimSpace(sum.Title); title != strings.TrimSpace(sum.ID) {
+	return sessionTitleOrEmpty(sum.ID, sum.Title)
+}
+
+// sessionTitleOrEmpty is the rule sessionDisplayTitle applies, for the lists
+// whose rows are not a SessionSummary.
+func sessionTitleOrEmpty(id, title string) string {
+	if title := strings.TrimSpace(title); title != strings.TrimSpace(id) {
 		return title
 	}
 	return ""
@@ -3949,11 +4035,37 @@ func (s *Server) handleSkillsListWith(launch safety.ProjectContext, projectID st
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"installed": s.decorateSkillList(r.Context(), launch, projectID, svc, overview.Installed),
-		"actions":   overview.Actions,
-	})
+	installed := s.decorateSkillList(r.Context(), launch, projectID, svc, overview.Installed)
+	q := readListQuery(r)
+	if !q.Paged {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"installed": installed,
+			"actions":   overview.Actions,
+		})
+		return
+	}
+	// origin is the layer filter: one layer, or several as a comma-separated
+	// list (the shared library page asks for "shared,builtin"). A row's layer
+	// is what the listing already classified it as, never a second rule.
+	origins := map[string]bool{}
+	for _, part := range strings.Split(r.URL.Query().Get("origin"), ",") {
+		if layer := strings.ToLower(strings.TrimSpace(part)); layer != "" {
+			origins[layer] = true
+		}
+	}
+	matched := make([]skillListEntry, 0, len(installed))
+	for _, row := range installed {
+		if len(origins) > 0 && !origins[string(row.Origin)] {
+			continue
+		}
+		if q.Q != "" && !strings.Contains(strings.ToLower(row.Name+" "+row.Description), strings.ToLower(q.Q)) {
+			continue
+		}
+		matched = append(matched, row)
+	}
+	page, servedPage := pageOf(matched, q)
+	writeListPage(w, "installed", page, len(matched), servedPage, q, map[string]any{"actions": overview.Actions})
 }
 func (s *Server) handleSkillsCreate(w http.ResponseWriter, r *http.Request) {
 	s.handleSkillsCreateWith(agentSkillScope(), w, r)
@@ -4686,26 +4798,58 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 		// Every kind the engine can build is offered, so a page can configure a
 		// channel a project has nothing stored for; a kind with no row is
 		// rendered from its own defaults.
+		q := readListQuery(r)
 		out := map[string]any{}
+		table := make([]projectChannelRow, 0, len(channel.ChannelKinds))
 		for _, kind := range channel.ChannelKinds {
-			fields := map[string]any{}
-			if row, ok := stored[kind]; ok {
-				if raw := strings.TrimSpace(row.ConfigJSON); raw != "" && raw != "{}" {
-					if err := json.Unmarshal([]byte(raw), &fields); err != nil {
-						continue
-					}
-				}
-				fields["enabled"] = row.Enabled
-			} else {
-				for k, v := range config.ChannelKindDefaults(kind) {
-					fields[k] = v
-				}
-				fields["enabled"] = false
+			row, saved := stored[kind]
+			fields, configured, ok := projectChannelFields(kind, row, saved)
+			if !ok {
+				// A saved configuration that does not parse is left out of both
+				// answers: there is nothing trustworthy to show or to edit.
+				continue
 			}
+			if !q.Paged {
+				redactChannelFields(fields)
+				out[kind] = fields
+				continue
+			}
+			// The hints are read from the stored values, so they are taken
+			// before the fields are masked.
+			secretKeys, hints := projectChannelSecrets(s.Home, fields)
 			redactChannelFields(fields)
-			out[kind] = fields
+			enabled, _ := fields["enabled"].(bool)
+			labelZh, labelEn := channelLabel(kind)
+			table = append(table, projectChannelRow{
+				Kind:        kind,
+				LabelZh:     labelZh,
+				LabelEn:     labelEn,
+				Enabled:     enabled,
+				Configured:  configured,
+				Fields:      fields,
+				SecretKeys:  secretKeys,
+				SecretHints: hints,
+			})
 		}
-		writeAgentsJSON(w, map[string]any{"project_id": project.ID, "kinds": channel.ChannelKinds, "channels": out})
+		if !q.Paged {
+			writeAgentsJSON(w, map[string]any{"project_id": project.ID, "kinds": channel.ChannelKinds, "channels": out})
+			return
+		}
+		// The search box reads the kind and either of its names, which is what
+		// the table shows.
+		needle := strings.ToLower(q.Q)
+		matched := make([]projectChannelRow, 0, len(table))
+		for _, row := range table {
+			if q.Q != "" &&
+				!strings.Contains(strings.ToLower(row.Kind), needle) &&
+				!strings.Contains(strings.ToLower(row.LabelZh), needle) &&
+				!strings.Contains(strings.ToLower(row.LabelEn), needle) {
+				continue
+			}
+			matched = append(matched, row)
+		}
+		page, servedPage := pageOf(matched, q)
+		writeListPage(w, "rows", page, len(matched), servedPage, q, nil)
 	case http.MethodPut:
 		var section map[string]map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&section); err != nil {
@@ -4729,6 +4873,82 @@ func (s *Server) handleChannels(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
+}
+
+// projectChannelRow is one row of a project's channel table: the kind named the
+// way the page names it, whether a configuration is saved for it, and the fields
+// the editor fills in.
+type projectChannelRow struct {
+	Kind    string `json:"kind"`
+	LabelZh string `json:"label_zh"`
+	LabelEn string `json:"label_en"`
+	Enabled bool   `json:"enabled"`
+	// Configured says a configuration is really saved — a stored row whose JSON
+	// is blank or `{}` holds nothing the person filled in, so its switches and
+	// editors are not offered as though it did.
+	Configured  bool              `json:"configured"`
+	Fields      map[string]any    `json:"fields"`
+	SecretKeys  []string          `json:"secret_keys"`
+	SecretHints map[string]string `json:"secret_hints"`
+}
+
+// projectChannelFields renders one kind's field map the way a page reads it: the
+// saved configuration when there is one, the kind's own defaults otherwise, with
+// "enabled" beside them. ok is false for a saved configuration that does not
+// parse; the kind is then left out of the answer entirely.
+func projectChannelFields(kind string, row state.ProjectChannel, saved bool) (fields map[string]any, configured bool, ok bool) {
+	fields = map[string]any{}
+	if !saved {
+		// Every field the kind declares, not only the ones that carry a
+		// default: a form for a channel nobody configured yet still has to
+		// offer its inputs.
+		for key, value := range config.ChannelKindFields(kind) {
+			fields[key] = value
+		}
+		fields["enabled"] = false
+		return fields, false, true
+	}
+	if raw := strings.TrimSpace(row.ConfigJSON); raw != "" && raw != "{}" {
+		if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+			return nil, false, false
+		}
+		configured = true
+	}
+	fields["enabled"] = row.Enabled
+	return fields, configured, true
+}
+
+// projectChannelSecrets names the secret fields of one kind's configuration and
+// the hint a page shows for each one that holds a value. It reads the stored
+// values, so it runs before the fields are masked.
+func projectChannelSecrets(home string, fields map[string]any) ([]string, map[string]string) {
+	keys := make([]string, 0, 2)
+	hints := map[string]string{}
+	for key, value := range fields {
+		if !config.IsSecretLikeConfigKey(key) {
+			continue
+		}
+		keys = append(keys, key)
+		text, _ := value.(string)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		hints[key] = channelSecretHint(home, text)
+	}
+	sort.Strings(keys)
+	return keys, hints
+}
+
+// channelSecretHint is the hint a page shows for one stored secret: `••••` and
+// the value's last four characters, or the mask alone when the value cannot be
+// read back (a short one, or a ${VAR} reference with nothing behind it). It is
+// the model-service page's hint with its mask, so the two read alike.
+func channelSecretHint(home, value string) string {
+	hint := providerKeyHint(home, value)
+	if hint == providerSecretMask {
+		return providerSecretMask
+	}
+	return providerSecretMask + hint
 }
 
 // saveProjectChannels writes the kinds a page submitted and clears the ones it
@@ -4904,6 +5124,27 @@ type providerRowDTO struct {
 	APIKeyHint string   `json:"api_key_hint,omitempty"`
 }
 
+// providerListRow is one row of the model-services table: the stored row plus
+// its position in the whole fallback order. The table pages, but "move up"
+// acts on the order the person keeps in the config, so a row's position is a
+// fact of the list rather than of the page showing it.
+type providerListRow struct {
+	providerRowDTO
+	Index int `json:"index"`
+}
+
+// providerRowMatches is the model-services search box: it reads the service
+// name, the models it serves and the endpoint they are reached at.
+func providerRowMatches(row providerRowDTO, q string) bool {
+	needle := strings.ToLower(q)
+	for _, value := range append([]string{row.Provider, row.BaseURL}, row.Models...) {
+		if strings.Contains(strings.ToLower(value), needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // providerPutRow is one row of the PUT. params decodes through the engine's
 // own type, so anything but a JSON object is refused here rather than
 // written into a config the loader would then reject.
@@ -4968,6 +5209,9 @@ func providerRowsFor(home string, entries []config.AgentLLMProviderConfig) []pro
 	return rows
 }
 
+// providerSecretMask is what a page shows instead of a secret it may not read.
+const providerSecretMask = "\u2022\u2022\u2022\u2022"
+
 // providerKeyHint is the last four characters of the key the config refers
 // to. A stored ${ENV} reference is resolved through the home's .env — the
 // hint is meant for the user who typed the key, and "KEY}" would be noise. A
@@ -4979,11 +5223,11 @@ func providerKeyHint(home string, key string) string {
 		if env, err := godotenv.Read(filepath.Join(strings.TrimSpace(home), ".env")); err == nil {
 			key = strings.TrimSpace(env[envName])
 		} else {
-			return "\u2022\u2022\u2022\u2022"
+			return providerSecretMask
 		}
 	}
 	if key == "" || len(key) <= 4 {
-		return "\u2022\u2022\u2022\u2022"
+		return providerSecretMask
 	}
 	return key[len(key)-4:]
 }
@@ -5002,10 +5246,27 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		def := cfg.Agents.Definitions[active.ID]
-		writeAgentsJSON(w, map[string]any{
-			"agent_id":  active.ID,
-			"providers": providerRowsFor(strings.TrimSpace(s.Home), def.LLMProviders),
-		})
+		providers := providerRowsFor(strings.TrimSpace(s.Home), def.LLMProviders)
+		q := readListQuery(r)
+		if !q.Paged {
+			writeAgentsJSON(w, map[string]any{
+				"agent_id":  active.ID,
+				"providers": providers,
+			})
+			return
+		}
+		matched := make([]providerListRow, 0, len(providers))
+		for index, row := range providers {
+			if q.Q != "" && !providerRowMatches(row, q.Q) {
+				continue
+			}
+			matched = append(matched, providerListRow{providerRowDTO: row, Index: index})
+		}
+		// The order is the fallback order and never changes here: the table
+		// pages through it as it stands, and every row carries its position
+		// in the whole list so a move-up acts on the order, not on the page.
+		page, servedPage := pageOf(matched, q)
+		writeListPage(w, "providers", page, len(matched), servedPage, q, map[string]any{"agent_id": active.ID})
 	case http.MethodPut:
 		var req struct {
 			Providers []providerPutRow `json:"providers"`
@@ -5092,9 +5353,59 @@ func (s *Server) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// hookRow is one row of the settings page's hooks table: one command under one
+// matcher of one event. The two indices locate it inside HooksSettings, which
+// is what an edit or a delete addresses — both write the whole table back.
+type hookRow struct {
+	Event      string `json:"event"`
+	Matcher    string `json:"matcher"`
+	Command    string `json:"command"`
+	MatcherIdx int    `json:"matcher_idx"`
+	CommandIdx int    `json:"command_idx"`
+}
+
+// hookTable flattens the stored map into the table's rows: events in name
+// order, then each event's matchers and their commands in the order they are
+// written, so the same configuration always renders the same table. The
+// command column reads whichever field the hook's kind carries, which is what
+// a reader looks for there.
+func hookTable(hooks config.HooksSettings) []hookRow {
+	events := make([]string, 0, len(hooks))
+	for event := range hooks {
+		events = append(events, event)
+	}
+	sort.Strings(events)
+	rows := make([]hookRow, 0, len(events))
+	for _, event := range events {
+		for matcherIdx, matcher := range hooks[event] {
+			for commandIdx, cmd := range matcher.Hooks {
+				command := cmd.Command
+				if command == "" {
+					command = cmd.Prompt
+				}
+				if command == "" {
+					command = cmd.URL
+				}
+				rows = append(rows, hookRow{
+					Event:      event,
+					Matcher:    matcher.Matcher,
+					Command:    command,
+					MatcherIdx: matcherIdx,
+					CommandIdx: commandIdx,
+				})
+			}
+		}
+	}
+	return rows
+}
+
 // handleHooks reads and writes the hook table. Hooks run commands, so the write
 // is validated against the hook schema before it is persisted rather than
 // failing later at the moment a hook was supposed to fire.
+//
+// A read with "page" answers one page of the flattened table (hooks are stored
+// as a map of events, which a table cannot page directly); an edit or a delete
+// still writes the whole map back, so it reads the unpaged answer first.
 func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -5103,8 +5414,30 @@ func (s *Server) handleHooks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeAgentsJSON(w, map[string]any{
-			"hooks":       cfg.Hooks,
+		q := readListQuery(r)
+		if !q.Paged {
+			writeAgentsJSON(w, map[string]any{
+				"hooks":       cfg.Hooks,
+				"known_types": config.PersistentHookTypes(),
+				"events":      config.HookEventNames(),
+			})
+			return
+		}
+		table := hookTable(cfg.Hooks)
+		// The search reads the three columns the table shows.
+		needle := strings.ToLower(q.Q)
+		matched := make([]hookRow, 0, len(table))
+		for _, row := range table {
+			if q.Q != "" &&
+				!strings.Contains(strings.ToLower(row.Event), needle) &&
+				!strings.Contains(strings.ToLower(row.Matcher), needle) &&
+				!strings.Contains(strings.ToLower(row.Command), needle) {
+				continue
+			}
+			matched = append(matched, row)
+		}
+		page, servedPage := pageOf(matched, q)
+		writeListPage(w, "rows", page, len(matched), servedPage, q, map[string]any{
 			"known_types": config.PersistentHookTypes(),
 			"events":      config.HookEventNames(),
 		})
@@ -5184,6 +5517,38 @@ func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleRuntimeInfo answers GET /api/runtime: the install facts the settings
+// page's runtime tab shows that only the gateway knows — the state it is in,
+// the auth mode it reads requests under, how many primary agents are
+// configured, and the three directories that hold its data. The version and
+// the address the browser reached are the browser's own, so they are not
+// repeated here.
+func (s *Server) handleRuntimeInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	agents := 0
+	if resolver, err := s.primaryAgentResolver(); err == nil {
+		agents = len(resolver.All())
+	}
+	payload := map[string]any{
+		"status": "ok",
+		"agents": agents,
+		"home":   s.Home,
+		// The data directory's own spelling, beside "state" below: the
+		// gateway does not import the bootstrap package for two names.
+		"logs_dir":  filepath.Join(s.Home, "logs"),
+		"state_dir": filepath.Join(s.Home, "state"),
+	}
+	// A gateway started without a configuration has no auth mode to name; the
+	// key is left out rather than answered with a mode it is not running.
+	if cfg := s.liveCfg(); cfg != nil {
+		payload["auth"] = gatewayAuthMode(cfg)
+	}
+	writeJSON(w, payload)
+}
+
 // --- Cron jobs and heartbeats ---------------------------------------------
 //
 // A cron job is a standing instruction for the active primary agent: it fires
@@ -5192,27 +5557,34 @@ func (s *Server) handleCronSettings(w http.ResponseWriter, r *http.Request) {
 // a recurring prompt that fires into that session while it is idle.
 
 type cronJobRequest struct {
-	Name        string `json:"name"`
-	Schedule    string `json:"schedule"`
-	Prompt      string `json:"prompt"`
-	Deliver     string `json:"deliver"`
-	Enabled     *bool  `json:"enabled"`
-	RepeatLimit int    `json:"repeat_limit"`
+	Name     string `json:"name"`
+	Schedule string `json:"schedule"`
+	Prompt   string `json:"prompt"`
+	// Deliver is a pointer so an edit that does not name a delivery target
+	// leaves the job's own alone: the table's pause switch sends only
+	// {"enabled": …}, and a job must not lose where it posts when it is paused.
+	Deliver     *string `json:"deliver"`
+	Enabled     *bool   `json:"enabled"`
+	RepeatLimit int     `json:"repeat_limit"`
 	// ProjectID is ignored on the wire: a job belongs to the project the route
 	// names, which the handler supplies.
 	ProjectID string `json:"project_id"`
 }
 
 func (r cronJobRequest) input() process.CronJobInput {
-	return process.CronJobInput{
+	in := process.CronJobInput{
 		Name:        r.Name,
 		Schedule:    r.Schedule,
 		Prompt:      r.Prompt,
-		Deliver:     r.Deliver,
 		Enabled:     r.Enabled,
 		RepeatLimit: r.RepeatLimit,
 		ProjectID:   r.ProjectID,
 	}
+	if r.Deliver != nil {
+		in.Deliver = *r.Deliver
+		in.DeliverSet = true
+	}
+	return in
 }
 
 // cronScope resolves the tenant a standing-work request belongs to. Jobs are
@@ -5249,7 +5621,28 @@ func (s *Server) handleCronJobs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeAgentsJSON(w, map[string]any{"agent_id": agentID, "project_id": project.ID, "records": jobs})
+		q := readListQuery(r)
+		if !q.Paged {
+			writeAgentsJSON(w, map[string]any{"agent_id": agentID, "project_id": project.ID, "records": jobs})
+			return
+		}
+		// The search box reads the task's name and what it is asked to do, the
+		// two things a person recognises a task by.
+		needle := strings.ToLower(q.Q)
+		matched := make([]state.CronJob, 0, len(jobs))
+		for _, job := range jobs {
+			if q.Q != "" &&
+				!strings.Contains(strings.ToLower(job.Name), needle) &&
+				!strings.Contains(strings.ToLower(job.Prompt), needle) {
+				continue
+			}
+			matched = append(matched, job)
+		}
+		page, servedPage := pageOf(matched, q)
+		writeListPage(w, "records", page, len(matched), servedPage, q, map[string]any{
+			"agent_id":   agentID,
+			"project_id": project.ID,
+		})
 	case http.MethodPost:
 		var req cronJobRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -5355,6 +5748,19 @@ func (s *Server) handleCronJobRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("jobId"))
+	q := readListQuery(r)
+	if q.Paged {
+		// A table's page replaces the old "limit": the window is page and
+		// page_size, and the answer says how many fires the job has in all.
+		runs, total, err := svc.JobRunsPage(r.Context(), agentID, id, q.PageSize, (q.Page-1)*q.PageSize)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		servedPage := min(q.Page, max((total+q.PageSize-1)/q.PageSize, 1))
+		writeListPage(w, "runs", runs, total, servedPage, q, map[string]any{"job_id": id})
+		return
+	}
 	limit := 50
 	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -5555,6 +5961,31 @@ func (s *Server) projectRow(p state.Project) map[string]any {
 	}
 }
 
+// projectRows answers a project page's rows: the stored project, the facts a
+// table draws beside it (a trust decision, a missing root) and the count of
+// the project's conversations — one grouped query for the whole page, not one
+// per row.
+func (s *Server) projectRows(ctx context.Context, projects []state.Project) ([]map[string]any, error) {
+	ids := make([]string, 0, len(projects))
+	for _, p := range projects {
+		ids = append(ids, p.ID)
+	}
+	counts := map[string]int{}
+	if s.Sessions != nil {
+		var err error
+		if counts, err = s.Sessions.ConversationCountsByProject(ctx, ids); err != nil {
+			return nil, err
+		}
+	}
+	rows := make([]map[string]any, 0, len(projects))
+	for _, p := range projects {
+		row := s.projectRow(p)
+		row["session_count"] = counts[p.ID]
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
 func (s *Server) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -5565,23 +5996,55 @@ func (s *Server) handleProjectsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	q := r.URL.Query()
-	limit := intFromQuery(q.Get("limit"), 50)
-	offset := intFromQuery(q.Get("offset"), 0)
-	projects, err := store.ListProjects(r.Context(), state.ListProjectsOptions{
-		Search: strings.TrimSpace(q.Get("search")),
-		Sort:   strings.TrimSpace(q.Get("sort")),
-	}, limit, offset)
+	q := readListQuery(r)
+	if !q.Paged {
+		// The chat project picker and the folder dialog read this list whole,
+		// windowed by their own limit/offset: only a table pages it.
+		query := r.URL.Query()
+		limit := intFromQuery(query.Get("limit"), 50)
+		offset := intFromQuery(query.Get("offset"), 0)
+		projects, err := store.ListProjects(r.Context(), state.ListProjectsOptions{
+			Search: strings.TrimSpace(query.Get("search")),
+			Sort:   strings.TrimSpace(query.Get("sort")),
+		}, limit, offset)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rows, err := s.projectRows(r.Context(), projects)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"projects": rows})
+		return
+	}
+	// "q" is the table's search box; "search" is the picker's, and a request
+	// carrying only that must still filter.
+	search := q.Q
+	if search == "" {
+		search = strings.TrimSpace(r.URL.Query().Get("search"))
+	}
+	opts := state.ListProjectsOptions{Search: search, Sort: q.Sort}
+	if q.Order != "" {
+		desc := q.Order == "desc"
+		opts.Desc = &desc
+	}
+	projects, total, err := store.ListProjectsPage(r.Context(), opts, q.PageSize, (q.Page-1)*q.PageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rows := make([]map[string]any, 0, len(projects))
-	for _, p := range projects {
-		rows = append(rows, s.projectRow(p))
+	rows, err := s.projectRows(r.Context(), projects)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"projects": rows})
+	// The store read the last page when the request asked past it; the answer
+	// names the page it actually served.
+	servedPage := min(q.Page, max((total+q.PageSize-1)/q.PageSize, 1))
+	writeListPage(w, "projects", rows, total, servedPage, q, nil)
 }
 
 // handleProjectsCreate creates a project. The trust flag must be an explicit
@@ -5859,18 +6322,84 @@ func (s *Server) handleProjectSessionsList(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "sessions disabled", http.StatusServiceUnavailable)
 		return
 	}
-	q := r.URL.Query()
-	sessions, err := s.Sessions.ListSessionsForProject(r.Context(), strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")), intFromQuery(q.Get("limit"), 50), intFromQuery(q.Get("offset"), 0))
+	q := readListQuery(r)
+	if !q.Paged {
+		query := r.URL.Query()
+		sessions, err := s.Sessions.ListSessionsForProject(r.Context(), strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id")), intFromQuery(query.Get("limit"), 50), intFromQuery(query.Get("offset"), 0))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		rows := make([]map[string]any, 0, len(sessions))
+		for _, item := range sessions {
+			rows = append(rows, map[string]any{"id": item.ID, "title": sessionDisplayTitle(item), "updated_at": item.UpdatedAt})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"sessions": rows})
+		return
+	}
+	projectID := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	sessions, total, err := s.Sessions.ListSessionsForProjectPage(r.Context(), projectID, state.ProjectSessionsQuery{
+		Search: q.Q,
+		Sort:   q.Sort,
+		Desc:   q.desc(true),
+	}, q.PageSize, (q.Page-1)*q.PageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Every heartbeat of the agent is read once for the whole page: a project's
+	// conversations are a handful, and one query beats one per row.
+	beats := s.activeHeartbeatRows(r.Context())
 	rows := make([]map[string]any, 0, len(sessions))
 	for _, item := range sessions {
-		rows = append(rows, map[string]any{"id": item.ID, "title": sessionDisplayTitle(item), "updated_at": item.UpdatedAt})
+		row := map[string]any{
+			"id":         item.ID,
+			"title":      sessionTitleOrEmpty(item.ID, item.Title),
+			"created_at": item.CreatedAt,
+			"updated_at": item.UpdatedAt,
+			// A session that never pinned a model answers an empty name — never
+			// the agent's default — and the table draws its own placeholder.
+			"model":         item.Model,
+			"message_count": item.MessageCount,
+		}
+		if beat, ok := beats[item.ID]; ok {
+			row["heartbeat"] = beat
+		}
+		rows = append(rows, row)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": rows})
+	servedPage := min(q.Page, max((total+q.PageSize-1)/q.PageSize, 1))
+	writeListPage(w, "sessions", rows, total, servedPage, q, nil)
+}
+
+// activeHeartbeatRows reads every heartbeat on the active primary agent's
+// conversations once, keyed by session, so a conversation table can draw its
+// heartbeat column without a lookup per row. A missing cron service or primary
+// agent answers an empty map: the column is then simply not drawn, and the list
+// still answers. It never writes to the response — a caller that cannot read
+// heartbeats must still get its rows.
+func (s *Server) activeHeartbeatRows(ctx context.Context) map[string]map[string]any {
+	beats := map[string]map[string]any{}
+	svc := s.cron()
+	if svc == nil {
+		return beats
+	}
+	active, err := s.activePrimarySummary()
+	if err != nil {
+		return beats
+	}
+	list, err := svc.ListHeartbeats(ctx, active.ID)
+	if err != nil {
+		return beats
+	}
+	for i := range list {
+		full := heartbeatResponse(&list[i])
+		beats[list[i].SessionID] = map[string]any{
+			"interval_seconds": full["interval_seconds"],
+			"paused":           full["paused"],
+		}
+	}
+	return beats
 }
 
 // The cron schedule preview: a pure function over the engine's own parser, so
@@ -5971,7 +6500,22 @@ func (s *Server) handleAgentRuleFiles(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, row)
 	}
-	writeJSON(w, map[string]any{"files": rows})
+	q := readListQuery(r)
+	if !q.Paged {
+		writeJSON(w, map[string]any{"files": rows})
+		return
+	}
+	// The purpose column is a locale string the page derives from the file
+	// name, so the name is the only text the server holds to search.
+	matched := make([]ruleFileRow, 0, len(rows))
+	for _, row := range rows {
+		if q.Q != "" && !strings.Contains(strings.ToLower(row.Name), strings.ToLower(q.Q)) {
+			continue
+		}
+		matched = append(matched, row)
+	}
+	page, servedPage := pageOf(matched, q)
+	writeListPage(w, "files", page, len(matched), servedPage, q, nil)
 }
 
 func (s *Server) handleAgentRuleFile(w http.ResponseWriter, r *http.Request) {
@@ -6112,7 +6656,26 @@ func (s *Server) handleProjectRuleFiles(w http.ResponseWriter, r *http.Request) 
 			creatable = append(creatable, dir)
 		}
 	}
-	writeJSON(w, map[string]any{"files": rows, "create": creatable})
+	q := readListQuery(r)
+	if !q.Paged {
+		writeJSON(w, map[string]any{"files": rows, "create": creatable})
+		return
+	}
+	// The file column reads `dir/FOREBRAIN.md`, and the name is the same for
+	// every row, so the directory is the only text worth searching.
+	needle := strings.ToLower(q.Q)
+	matched := make([]row, 0, len(rows))
+	for _, item := range rows {
+		if q.Q != "" && !strings.Contains(strings.ToLower(item.Dir), needle) {
+			continue
+		}
+		matched = append(matched, item)
+	}
+	page, servedPage := pageOf(matched, q)
+	// The layers with no file yet are not a list the table pages through: they
+	// are what the create dialog offers, and they stay whole whatever the search
+	// leaves.
+	writeListPage(w, "files", page, len(matched), servedPage, q, map[string]any{"create": creatable})
 }
 
 func (s *Server) handleProjectRuleFile(w http.ResponseWriter, r *http.Request) {
@@ -6355,10 +6918,31 @@ func (s *Server) handleProjectPermissionRules(w http.ResponseWriter, r *http.Req
 		return
 	}
 	_, applies := safety.ProjectSettingsPath(scope.paths)
-	writeJSON(w, map[string]any{
-		"applies": applies,
-		"rules":   permissionRuleRows(scope.rt.Snapshot(scope.cfg), string(safety.SourceProjectSettings), ""),
-	})
+	rules := permissionRuleRows(scope.rt.Snapshot(scope.cfg), string(safety.SourceProjectSettings), "")
+	q := readListQuery(r)
+	if !q.Paged {
+		writeJSON(w, map[string]any{
+			"applies": applies,
+			"rules":   rules,
+		})
+		return
+	}
+	// The search box reads the tool the rule names and the rule's own text, the
+	// same two fields the agent's permission table searches.
+	needle := strings.ToLower(q.Q)
+	matched := make([]permissionRuleRow, 0, len(rules))
+	for _, rule := range rules {
+		if q.Q != "" &&
+			!strings.Contains(strings.ToLower(rule.ToolName), needle) &&
+			!strings.Contains(strings.ToLower(rule.RuleContent), needle) {
+			continue
+		}
+		matched = append(matched, rule)
+	}
+	page, servedPage := pageOf(matched, q)
+	// applies travels with the page: it is why an empty table is empty, and it
+	// is not a row of the table.
+	writeListPage(w, "rules", page, len(matched), servedPage, q, map[string]any{"applies": applies})
 }
 
 // handleProjectPermissionUpdate adds, replaces or removes rules in the
@@ -6473,8 +7057,22 @@ func (s *Server) lspControlFor(r *http.Request, sessionID string) (tool.CodeInte
 	return runner.CodeIntelControl, true
 }
 
+// lspServerPage is one page of the settings page's language-server table: the
+// snapshot's own fields (the project, the switches, the notes) stay on top and
+// its servers become the page — the same answer, cut, so a surface that reads
+// the whole snapshot still finds everything it read before.
+type lspServerPage struct {
+	event.LSPSnapshot
+	Servers  []event.LSPServerStatus `json:"servers"`
+	Total    int                     `json:"total"`
+	Page     int                     `json:"page"`
+	PageSize int                     `json:"page_size"`
+}
+
 // handleLSPSnapshot answers GET /api/v1/lsp?session_id=… with the same
 // snapshot the terminal's /lsp panel and the web chat's text fallback render.
+// A request carrying "page" answers one page of the servers, searched over the
+// id and the languages the table lists.
 func (s *Server) handleLSPSnapshot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -6485,7 +7083,42 @@ func (s *Server) handleLSPSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "language servers are not available", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, ctl.Snapshot())
+	snap := ctl.Snapshot()
+	q := readListQuery(r)
+	if !q.Paged {
+		writeJSON(w, snap)
+		return
+	}
+	needle := strings.ToLower(q.Q)
+	matched := make([]event.LSPServerStatus, 0, len(snap.Servers))
+	for _, server := range snap.Servers {
+		if q.Q != "" && !lspServerMatches(server, needle) {
+			continue
+		}
+		matched = append(matched, server)
+	}
+	page, servedPage := pageOf(matched, q)
+	writeJSON(w, lspServerPage{
+		LSPSnapshot: snap,
+		Servers:     page,
+		Total:       len(matched),
+		Page:        servedPage,
+		PageSize:    q.PageSize,
+	})
+}
+
+// lspServerMatches reports whether the search term is in the two columns the
+// language-server table searches: the id and the languages it serves.
+func lspServerMatches(server event.LSPServerStatus, needle string) bool {
+	if strings.Contains(strings.ToLower(server.ID), needle) {
+		return true
+	}
+	for _, language := range server.Languages {
+		if strings.Contains(strings.ToLower(language), needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleLSPServerEnable clears the server's disabled mark.
@@ -6665,21 +7298,72 @@ func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request)
 		workspace = s.Runner.WorkspaceRoot
 	}
 	trusted, pending, allowed, denied, notes := process.InspectProjectLSP(workspace, launch)
-	rows := make([]map[string]string, 0, len(pending))
-	for _, item := range pending {
-		rows = append(rows, map[string]string{"id": item.ID, "summary": item.Summary})
+	q := readListQuery(r)
+	if !q.Paged {
+		rows := make([]map[string]string, 0, len(pending))
+		for _, item := range pending {
+			rows = append(rows, map[string]string{"id": item.ID, "summary": item.Summary})
+		}
+		writeJSON(w, map[string]any{
+			"trusted": trusted,
+			"pending": rows,
+			"allowed": allowed,
+			"denied":  denied,
+			"notes":   notes,
+		})
+		return
 	}
-	writeJSON(w, map[string]any{
+	// The table is one list of entries: the ones awaiting confirmation first,
+	// then the allowed ones, then the denied ones — each group in the order its
+	// own reader gives. Only a pending entry carries a summary: the consent store
+	// records the others by id alone.
+	type lspRow struct {
+		ID      string `json:"id"`
+		Summary string `json:"summary"`
+		Status  string `json:"status"`
+	}
+	all := make([]lspRow, 0, len(pending)+len(allowed)+len(denied))
+	for _, item := range pending {
+		all = append(all, lspRow{ID: item.ID, Summary: item.Summary, Status: lspStatusPending})
+	}
+	for _, id := range allowed {
+		all = append(all, lspRow{ID: id, Status: lspStatusAllowed})
+	}
+	for _, id := range denied {
+		all = append(all, lspRow{ID: id, Status: lspStatusDenied})
+	}
+	needle := strings.ToLower(q.Q)
+	matched := make([]lspRow, 0, len(all))
+	for _, row := range all {
+		if q.Q != "" &&
+			!strings.Contains(strings.ToLower(row.ID), needle) &&
+			!strings.Contains(strings.ToLower(row.Summary), needle) {
+			continue
+		}
+		matched = append(matched, row)
+	}
+	page, servedPage := pageOf(matched, q)
+	writeListPage(w, "rows", page, len(matched), servedPage, q, map[string]any{
 		"trusted": trusted,
-		"pending": rows,
-		"allowed": allowed,
-		"denied":  denied,
 		"notes":   notes,
 	})
 }
 
+// The three decisions a project's language-server entry can be in, as the web
+// table words them.
+const (
+	lspStatusPending = "pending"
+	lspStatusAllowed = "allowed"
+	lspStatusDenied  = "denied"
+)
+
 // handleProjectLSPConsent is the web confirmation entry for project-level
-// language servers: the same decision the terminal's startup prompt records.
+// language servers. Body: {"allow": [...], "decide": [...]}. decide names the
+// entries the request decides — allow the ones also in allow, deny the rest —
+// and is what the project page's per-row buttons send, so a row decides only
+// itself and a denied entry is allowed again by deciding it once more. Without
+// decide the call is the startup prompt's batch answer: every pending entry
+// not in allow is recorded as denied.
 func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -6697,6 +7381,11 @@ func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request)
 	}
 	var body struct {
 		Allow []string `json:"allow"`
+		// Decide names the entries this request is a decision for. Absent
+		// means the caller speaks for the whole batch, the way the startup
+		// prompt does: everything not allowed is recorded as denied. An
+		// empty list decides nothing.
+		Decide *[]string `json:"decide"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -6711,7 +7400,12 @@ func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request)
 	if s.Runner != nil {
 		workspace = s.Runner.WorkspaceRoot
 	}
-	if err := process.DecideProjectLSPConsents(workspace, launch, body.Allow); err != nil {
+	if body.Decide != nil {
+		err = process.DecideProjectLSPConsentsFor(workspace, launch, *body.Decide, body.Allow)
+	} else {
+		err = process.DecideProjectLSPConsents(workspace, launch, body.Allow)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

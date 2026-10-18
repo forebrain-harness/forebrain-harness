@@ -116,17 +116,17 @@ test('a fire is a conversation its record opens, and not one the drawer lists', 
   const record = await waitForRunRecord(page, projectId, job!.id, /^ok$/)
   expect(record.session_id, 'a fire that finished has its conversation').toBeTruthy()
 
-  // The history panel "Run now" opened was filled before the run settled;
-  // toggling it re-fetches, so the row shows what landed. The button is the
-  // anchor: the plan's 30s wait is on it, then its own row carries the status.
+  // A task's history is a modal now (plan 075): it reads the run history when
+  // it opens, and the run has already settled, so its row carries the status
+  // and the door into the conversation the fire became.
   const jobRow = page.locator('[data-cron-job="fire brief"]')
-  const history = jobRow.getByRole('button', { name: /执行记录|History/ })
-  await history.click()
-  await history.click()
-  const openBtn = jobRow.getByTestId('cron-run-open')
+  await jobRow.getByRole('button', { name: /执行记录|History/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  const runRow = dialog.locator('[data-cron-run]').first()
+  await expect(runRow).toContainText(/成功|ok/, { timeout: 30_000 })
+  const openBtn = runRow.getByTestId('cron-run-open')
   await expect(openBtn).toBeVisible({ timeout: 30_000 })
-  const runRow = openBtn.locator('xpath=ancestor::li[1]')
-  await expect(runRow).toContainText(/成功|ok/)
   await openBtn.click()
   await page.waitForURL((url) => url.pathname === '/' && url.searchParams.get('session') === record.session_id)
 
@@ -178,9 +178,14 @@ test('a delivery that no channel takes is said in the viewer\'s language, quotin
   await page.goto(`/projects/${projectId}/cron`, { waitUntil: 'networkidle' })
   await expect(page.locator('[data-cron-job="fire undelivered"]')).toBeVisible({ timeout: 15_000 })
   await page.locator('[data-cron-job="fire undelivered"]').getByRole('button', { name: /执行记录|History/ }).click()
+  // The history is a modal and a fire's output stays folded under its own row
+  // until it is asked for (plan 075); the error is inside that fold.
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.locator('[data-cron-run]')).toHaveCount(1, { timeout: 20_000 })
+  await dialog.locator('[data-testid^="cron-run-output-"]').first().click()
   // The sentence is the viewer's; the channel's own words follow on the line
   // below it, as stored.
-  const error = page.locator('[data-cron-job="fire undelivered"] [data-testid="cron-run-error"]')
+  const error = dialog.locator('[data-testid="cron-run-error"]')
   await expect(error).toBeVisible({ timeout: 10_000 })
   await expect(error).toContainText(/答复没能投递到渠道。|The answer could not be delivered to the channel\./)
   await expect(error).toContainText('channel: no bound handler for channel id')

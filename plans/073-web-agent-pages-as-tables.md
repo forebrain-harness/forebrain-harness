@@ -131,7 +131,7 @@ owner 2026-10-18 裁决：**所有列表服务端分页**（搜索/筛选/排序
 
 | 用途 | 命令 | 成功预期 |
 |------|------|----------|
-| state 包 | `CGO_ENABLED=1 go test -tags fts5 ./pkg/state -run 'ListProjects\|SessionCount' -count=1` | ok |
+| state 包 | `CGO_ENABLED=1 go test -tags fts5 ./pkg/state -run 'ListProjects|ConversationCounts' -count=1` | ok |
 | gateway 包 | `CGO_ENABLED=1 go test -tags fts5 ./pkg/gateway -count=1` | ok |
 | vet / fmt | `go vet ./pkg/... ./cmd/...` ；`gofmt -l cmd pkg` | 无输出 |
 | 前端单测 / 类型 | `cd frontend && pnpm test` ；`npx vue-tsc --noEmit -p tsconfig.json` | 全绿 / exit 0 |
@@ -224,6 +224,22 @@ owner 2026-10-18 裁决：**所有列表服务端分页**（搜索/筛选/排序
 5. 每页表格操作列里**没有**文字按钮（`button` 都带 `forebrain-row-action` 类），悬停任一图标出现 `role=tooltip`。
 6. 技能（主代理）来源筛选只有 `全部来源/主代理/共享/内置`；操作列有 `查看` 眼睛图标、没有“详情”文字。
 然后跑全套 `web_e2e.sh`；旧用例只允许因“标题行、文字按钮、排序下拉、卡片列表、`查看入参`文字按钮、`详情`文字”等旧设计改断言，逐条列在报告里；其它失败 → STOP。
+
+### Step 7（2026-10-18 执行后复核补丁）：修正冷读与实测确认的三处偏差
+
+> 本计划已执行（工作区未提交）。2026-10-18 用一个没看过上下文的子代理冷读计划、再逐条对照工作区代码，**确认**下面三处与设计稿或数据不符，按这一步修正（其余冷读意见执行者已避开：模型服务与技能的写操作都先取全量、`RowAction` 的语气类名、`forebrain-btn--sm` 的最小高度均已正确）。
+
+1. **工具入参名被改写、必填判断失效**：`lib/api.ts` 的 `toolsPage`（搜 `toolsPage(query: ListQuery)`）走 axios 实例，响应拦截器（搜 `response.data = toCamelCase(response.data)`）把 `input_schema.properties` 的**键**深层转成驼峰（`file_path` → `filePath`），而 `required` 数组里的**值**不变（仍是 `file_path`），
+   所以入参表显示 `filePath`、且所有带下划线的参数被判成“否”。改法：`toolsPage` 改用模块内的 `gatewayFetch` 取原始 JSON（`JSON.parse`），**只手动映射每个工具的顶层字段**（`name`、`description`、`category`、`read_only→readOnly`、`destructive`、`input_schema→inputSchema`——后者**原样**保留，不做任何转换；键名以 `pkg/event/tools.go` 的 json tag 为准），
+   `categories/total/page/page_size` 照旧映射。`toolSchema.test.ts` 加一条：属性 `file_path`、`old_string` + `required: ['file_path']` → 参数名原样、`file_path` 必填为“是”。
+2. **子代理“所在会话”指错了会话**：`pkg/gateway/agents_api.go` 组装子代理行时 `SessionID: strings.TrimSpace(entry.WorkerSessionID)`（子代理自己的 worker 会话），`session_title` 也按它取（`handleAgentRoster` 里 `s.Sessions.SessionTitle(r.Context(), record.SessionID)`）。
+   原型的“所在会话”是**子代理运行所在的那条对话**（父对话，`pkg/agent/subagent_history.go` 的 `SessionID`）。改法：`config.RosterRow`（`pkg/config/primary_agent.go`）加字段 `ParentSessionID`（类型 `string`，json tag `parent_session_id,omitempty`），组装时取 `entry.SessionID`；`session_title` 改为按 `ParentSessionID` 取（为空再退回 `SessionID`）。
+   前端：标题链接打开**父对话**（`parentSessionId`）；操作栏 `打开会话`（`message-square`）保持现有逻辑打开 worker 会话。Go 测试补一条断言 `session_title` 是父对话标题。
+3. **搜索框高度**：原型 `.field` 34px，073 落地的 11 个工具栏搜索框都是 `class="forebrain-field h-8"`（32px）。全部改成 `forebrain-field h-[34px]`（`grep -rn 'type="search"' -A3 frontend/src/views frontend/src/components | grep 'h-8'` 找全）；074–076 的计划已写 `h-[34px]`。
+
+Scope 追加：`frontend/src/lib/api.ts`、`frontend/src/lib/toolSchema.test.ts`、`pkg/gateway/agents_api.go`、`pkg/gateway/agents_api_test.go`、`pkg/config/primary_agent.go`、`frontend/src/views/SubagentsView.vue`、含搜索框的 11 个 `.vue`。
+
+**Verify**：`cd frontend && pnpm test -- src/lib/toolSchema.test.ts` 通过；`CGO_ENABLED=1 go test -tags fts5 ./pkg/gateway -run 'Roster' -count=1` ok；`grep -rn 'type="search"' -A3 frontend/src | grep -c 'h-8'` 输出 `0`；`FOREBRAIN_E2E_SPEC=e2e/agent-tables.spec.ts scripts/acceptance/web_e2e.sh` → `web e2e: PASS`。
 
 ## Test plan
 

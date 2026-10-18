@@ -354,6 +354,9 @@
   .cell-name .badge { flex: none; height: 20px; }
   /* a row without a delete action keeps the slot, so every 编辑 button lines up */
   .acts-r .icon-slot { width: 28px; flex: none; }
+  .acts-r .sw-slot { width: 32px; height: 18px; flex: none; }
+  .acts-r .sw { margin-right: 6px; }
+  .acts-r .sw-slot { margin-right: 6px; }
   /* table row actions: icon buttons of one size, named by a hover tip + aria-label (owner 2026-10-17) */
   .acts-r { gap: 2px; }
   .row-act.dgr { color: var(--danger); }
@@ -633,6 +636,7 @@
   .tb.mcp-tb th, .tb.mcp-tb td { vertical-align: middle; white-space: nowrap; }
   .tb.mcp-tb td { padding-top: 10px; padding-bottom: 10px; }
   .tb th.r, .tb td.r { text-align: right; }
+  .tb th.c { text-align: center; } /* 操作 column header (owner 2026-10-18) */
   .tb.mcp-tb .badge { height: 20px; flex: none; }
   .mcp-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .mcp-name b { overflow: hidden; text-overflow: ellipsis; }
@@ -791,6 +795,149 @@
   .sheet b { font-size: 13.5px; font-weight: 600; }
   .sheet .err { color: var(--danger); font-size: 12px; }
   .sheet .acts { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* ---------- Subagents: a card in the thread, opened in a right-hand drawer, one tab each (owner 2026-10-18) ---------- */
+  @keyframes sa-spin { to { transform: rotate(360deg); } }
+  .app svg.spin { animation: sa-spin 1s linear infinite; }
+  .sa-tsw { display: inline-flex; align-items: center; gap: 8px; margin-right: 6px; font-size: 13px; white-space: nowrap; }
+  .sa-tsw b { font-weight: 500; }
+  .sa-tsw .hint { font-size: 12px; }
+  .sa-tsw .btn.link { font-size: 12px; }
+  .sa-nm { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .sa-nm .badge { height: 18px; }
+  .sa-ds { margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+  .sa-pick { display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .sa-pick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 12px; }
+  .sa-pick-grid .chk { display: flex; align-items: center; gap: 6px; font-size: 12.5px; min-width: 0; }
+  .sa-pick-grid .chk span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sa-pick-grid input { width: 15px; height: 15px; accent-color: var(--brand); flex: none; }
+  .sa-plab { display: flex; align-items: center; gap: 8px; }
+  .sa-plab .badge { height: 18px; }
+  .sa-plab .btn.link { font-size: 12px; margin-left: auto; }
+  .sa-prompt { min-height: 240px; resize: vertical; line-height: 1.6; font-size: 12.5px; white-space: pre-wrap; }
+  .sa-card { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--page); }
+  .sa-hd { display: flex; align-items: center; gap: 9px; padding: 8px 12px; font-size: 13px; }
+  .sa-hd b { font-weight: 600; flex: 1; min-width: 0; }
+  .sa-hd .d { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .sa-hd svg { width: 16px; height: 16px; flex: none; color: var(--brand); }
+  .sa-row { display: flex; align-items: flex-start; gap: 9px; width: 100%; padding: 8px 12px; border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+  .sa-row:hover { background: var(--subtle); }
+  .sa-row[aria-current="true"] { background: var(--brand-soft); box-shadow: inset 2px 0 0 var(--brand); }
+  .sa-row > svg { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+  .sa-row > svg.run { color: var(--brand); } .sa-row > svg.ok { color: var(--success); }
+  .sa-rt { flex: 1; min-width: 0; display: grid; gap: 1px; }
+  .sa-l1 { display: flex; min-width: 0; font-size: 13px; }
+  .sa-l1 .sa-ti { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sa-l1 .sa-ck { flex: none; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  .sa-l2 { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sa-open { flex: none; align-self: center; font-size: 12px; color: var(--brand); }
+  .sa-cards { display: grid; gap: 6px; }
+
+  .sad { width: 440px; flex: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; position: relative; background: var(--page); }
+  .sad-h { display: flex; align-items: center; gap: 2px; height: 44px; padding: 0 8px; border-bottom: 1px solid var(--line); flex: none; position: relative; }
+  .sad-tabs { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
+  .sad-tab { display: flex; align-items: center; min-width: 0; max-width: 200px; height: 30px; border-radius: 7px; padding: 0 2px 0 8px; color: var(--text-2); }
+  .sad-tab.on { background: var(--soft); color: var(--text); }
+  .sad-tab .t { display: inline-flex; align-items: center; gap: 6px; min-width: 0; border: 0; background: transparent; color: inherit; font-size: 12.5px; cursor: pointer; padding: 0; height: 30px; }
+  .sad-tab .t .lb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sad-tab .t svg { width: 14px; height: 14px; flex: none; }
+  .sad-tab .t svg.run { color: var(--brand); } .sad-tab .t svg.ok { color: var(--success); } .sad-tab .t svg.bad { color: var(--danger); }
+  .sad-tab .new { width: 6px; height: 6px; border-radius: 50%; background: var(--brand); flex: none; }
+  .sad-tab .x { width: 22px; height: 22px; margin-left: 2px; flex: none; }
+  .sad-tab .x svg { width: 13px; height: 13px; }
+  .sad-h .grow { flex: 1; }
+  .sa-menu { position: absolute; top: 40px; left: 8px; width: 320px; background: var(--page); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--pop); padding: 6px; z-index: 5; display: grid; gap: 2px; }
+  .sa-menu .cap { font-size: 11.5px; color: var(--muted); padding: 4px 8px 2px; }
+  .sa-menu button { display: flex; align-items: center; gap: 8px; height: 32px; border: 0; background: transparent; border-radius: 6px; padding: 0 8px; font-size: 12.5px; color: var(--text); cursor: pointer; text-align: left; }
+  .sa-menu button:hover { background: var(--soft); }
+  .sa-menu button svg { width: 14px; height: 14px; flex: none; }
+  .sa-menu button svg.run { color: var(--brand); } .sa-menu button svg.ok { color: var(--success); }
+  .sa-menu button .lb { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sa-menu button .d { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); flex: none; }
+  .sad-b { flex: 1; min-height: 0; overflow: auto; padding: 16px 18px 12px; display: grid; gap: 12px; align-content: start; }
+  .sa-task { position: relative; border: 1px solid var(--line); border-radius: 10px; background: var(--subtle); padding: 10px 12px; font-size: 12.5px; color: var(--text-2); }
+  .sa-task .cap { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .sa-task p { margin: 0; white-space: pre-wrap; }
+  .sa-task:not(.open) p { max-height: 76px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+  .sa-task .more { position: absolute; left: 50%; bottom: -12px; margin-left: -12px; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line); background: var(--page); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+  .sa-task .more svg { width: 14px; height: 14px; }
+  .sa-sep { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .sa-sep::before, .sa-sep::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .run-line { flex: none; width: min(760px, 100% - 48px); margin: 6px auto 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); min-width: 0; }
+  .run-line > svg { width: 13px; height: 13px; color: var(--brand); flex: none; }
+  .run-line > span { white-space: nowrap; }
+  .run-line .w, .run-line .pp, .run-line .ft { font-family: var(--mono); }
+  .run-line .pp { display: inline-flex; align-items: center; gap: 2px; }
+  .run-line .pp::before, .run-line .pa::before, .run-line .ft::before { content: "·"; margin-right: 6px; color: var(--muted); font-family: var(--ui); }
+  .app .run-line svg.pc { width: 12px; height: 12px; color: var(--success); stroke-width: 2.25; }
+  .run-line .pa { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sa-run { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 18px 6px; font-size: 12px; color: var(--muted); min-width: 0; }
+  .sa-run > svg { width: 13px; height: 13px; color: var(--brand); flex: none; }
+  .sa-run > span { font-family: var(--mono); white-space: nowrap; }
+  .sa-run .pp { display: inline-flex; align-items: center; gap: 2px; }
+  .sa-run .pp::before, .sa-run .pa::before { content: "·"; margin-right: 6px; color: var(--muted); font-family: var(--ui); }
+  .app .sa-run svg.pc { width: 12px; height: 12px; color: var(--success); stroke-width: 2.25; }
+  .sa-run .pa { font-family: var(--ui); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sad-b .tool.min .tool-h { border-bottom: 0; }
+  .sad-b .tool-h .run { margin-left: auto; color: var(--brand); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+  .sad-b .tool-h .run svg { width: 12px; height: 12px; }
+  .sad-b .a { gap: 10px; }
+  .sad-b .tool-h code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sad-b .tool-h b, .sad-b .tool-h svg, .sad-b .tool-h .ok, .sad-b .tool-h .run { flex: none; white-space: nowrap; }
+  /* with the drawer open the conversation is narrower: the composer keeps every control, the model chip drops its icon */
+  .chat.narrow .composer { width: calc(100% - 32px); }
+  .chat.narrow .composer [data-act="modelmenu"] > svg:first-child { display: none; }
+  .agent-row.btn-row { border: 0; background: transparent; width: 100%; padding: 2px 0; color: inherit; font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+  .agent-row.btn-row:hover { color: var(--brand); }
+  .sa-down { position: absolute; left: 50%; bottom: 128px; margin-left: -15px; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--line); background: var(--page); box-shadow: var(--pop); color: var(--text-2); display: grid; place-items: center; cursor: pointer; z-index: 2; }
+  .sa-down svg { width: 15px; height: 15px; }
+  .sa-comp { flex: none; margin: 0 12px 12px; border: 1px solid var(--line-2); border-radius: 10px; display: grid; gap: 6px; padding: 10px 8px 8px 12px; }
+  .sa-comp .ph { min-width: 0; min-height: 22px; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sa-comp .bar { display: flex; align-items: center; gap: 6px; margin-left: -4px; }
+  .sa-comp .bar .grow { flex: 1; }
+  .sa-info { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 9px 0 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--page); color: var(--text-2); font-size: 12px; cursor: pointer; min-width: 0; }
+  .sa-info:hover, .sa-info[aria-expanded="true"] { background: var(--subtle); border-color: var(--line-2); }
+  .sa-info .pc { font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; color: var(--text); }
+  .sa-info.warn .pc { color: var(--warning); }
+  .sa-info .dv { width: 1px; height: 12px; background: var(--line-2); flex: none; }
+  .sa-info .m { font-family: var(--mono); font-size: 11.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+  .sa-info .e { color: var(--muted); flex: none; }
+  .sa-infocard { position: absolute; right: 0; bottom: calc(100% + 6px); width: 300px; background: var(--page); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--pop); padding: 14px; z-index: 6; display: grid; gap: 10px; text-align: left; }
+  .sa-infocard .ic-h { display: flex; align-items: center; gap: 12px; }
+  .sa-infocard .ic-h > div { display: grid; gap: 1px; }
+  .sa-infocard .ic-h b { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; }
+  .sa-infocard .ic-h b.warn { color: var(--warning); }
+  .sa-infocard .ic-h span { font-size: 12px; color: var(--muted); font-family: var(--mono); }
+  .sa-infocard .meter { height: 6px; border-radius: 999px; background: var(--soft-2); overflow: hidden; }
+  .sa-infocard .meter i { display: block; height: 100%; background: var(--brand); border-radius: 999px; }
+  .sa-infocard .meter.warn i { background: var(--warning); }
+  .sa-infocard .ic-warn { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--warning); background: var(--warning-soft); border-radius: 6px; padding: 5px 8px; }
+  .sa-infocard .ic-warn svg { width: 13px; height: 13px; flex: none; }
+  .sa-infocard .ic-kv { display: grid; grid-template-columns: 76px 1fr; gap: 6px 10px; margin: 0; font-size: 12.5px; }
+  .sa-infocard .ic-kv dt { color: var(--muted); }
+  .sa-infocard .ic-kv dd { margin: 0; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+  .sa-infocard .ic-kv dd.mono { font-family: var(--mono); font-size: 12px; }
+  .sa-infocard .ic-f { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding-top: 9px; }
+  .sa-infocard .ic-f .hint { font-size: 11.5px; }
+  .sa-infocard .ic-f .btn.link { font-size: 12px; }
+  .sa-comp .stop { width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line); background: var(--page); color: var(--danger); display: grid; place-items: center; cursor: pointer; }
+  .sa-comp .stop svg { width: 13px; height: 13px; }
+  .sa-comp .send { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; background: var(--brand); color: var(--on-brand); border: 0; cursor: pointer; }
+  .sa-comp .send svg { width: 15px; height: 15px; }
+  .sa-comp { position: relative; }
+  .sa-comp .sa-plus { width: 28px; height: 28px; border-radius: 7px; border: 1px solid var(--line); background: var(--page); color: var(--text-2); display: grid; place-items: center; cursor: pointer; flex: none; }
+  .sa-comp .sa-plus[aria-expanded="true"] { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+  .sa-comp .sa-plus svg { width: 15px; height: 15px; }
+  .sa-comp .plus-pop { left: 0; right: 0; }
+  .sa-comp .ph { border: 0; background: transparent; padding: 0; text-align: left; cursor: text; font: inherit; font-size: 12.5px; display: flex; align-items: center; gap: 4px; }
+  .sa-comp .ph.typed { color: var(--text); }
+  .sa-comp .ref { display: inline-flex; align-items: center; height: 22px; padding: 0 7px; border-radius: 5px; background: var(--brand-soft); color: var(--brand); font-family: var(--mono); font-size: 12px; flex: none; }
+  .sa-at { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); background: var(--page); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--pop); padding: 6px; z-index: 5; display: grid; gap: 2px; }
+  .sa-at .cap { font-size: 11.5px; color: var(--muted); padding: 4px 8px 2px; }
+  .sa-at button { display: flex; align-items: center; gap: 8px; height: 30px; border: 0; background: transparent; border-radius: 6px; padding: 0 8px; font-size: 12.5px; font-family: var(--mono); color: var(--text); cursor: pointer; text-align: left; }
+  .sa-at button.on, .sa-at button:hover { background: var(--soft); }
+  .sa-at button svg { width: 14px; height: 14px; flex: none; color: var(--muted); }
+  .sa-at button mark { background: transparent; color: var(--brand); font-weight: 600; }
 </style>
 
 <div class="wrap">
@@ -809,8 +956,8 @@
       <li>提示不落库：刷新后只剩消息本身，和终端一样。</li>
       <li>修正 MCP 页面范围（10-14 那版的主代理 MCP 页混进了项目级）：设置 · MCP 只增删改全局；主代理 MCP 页只看全局 + 主代理，只增删改主代理；项目空间 MCP 标签看全局 + 主代理 + 项目，只增删改项目。</li>
       <li>MCP 三处页面不再用弹窗：只能查看的行，操作栏只有“查看”，从右侧弹出抽屉，以只读表单展示全部字段，底部只有“取消”；能改的行点“编辑”、以及“添加 MCP 服务”，都从右侧抽屉打开可编辑表单，底部“取消 / 保存”。“测试连接”移到表单底部。</li>
-      <li>MCP 表格固定列宽、每格一行：类型只写 stdio / http（附 OAuth、请求头），状态只留徽标（失败原文、enabled: false 在悬停提示与抽屉里），来源写“全局 / 主代理 / 项目”，启用开关单独一列，去掉锁图标。</li>
-      <li>所有表格形式的列表下方都有分页：共 N 条、每页条数（与翻页按钮同尺寸）、上一页、页码按钮（点击跳到该页，当前页高亮，页数多时中间省略）、下一页；到头的翻页按钮置灰。</li>
+      <li>MCP 表格固定列宽、每格一行：类型只写 stdio / http（附 OAuth、请求头），状态只留徽标（失败原文、enabled: false 在悬停提示与抽屉里），来源写“全局 / 主代理 / 项目”，启用开关放在操作列最前面（owner 2026-10-18，不再单独一列），去掉锁图标。</li>
+      <li>所有表格形式的列表下方都有分页，每页默认 10 条（owner 2026-10-18）：共 N 条、每页条数（与翻页按钮同尺寸）、上一页、页码按钮（点击跳到该页，当前页高亮，页数多时中间省略）、下一页；到头的翻页按钮置灰。</li>
       <li>MCP 列表高层在前：主代理 MCP 页先主代理、后全局；项目空间 MCP 标签依次是项目、主代理、全局。同名覆盖规则不变。</li>
       <li>记忆列表去掉排序下拉框，改为表头排序（参照开源组件库的表格）：“创建时间”“更新时间”列头带上下箭头，当前排序列与方向高亮；点未排序的列按新→旧，再点切换；默认更新时间新→旧，换排序回到第 1 页。时间列不再折行。</li>
       <li>表格操作栏统一为同尺寸的图标按钮：查看（眼睛，技能页原“详情”）、编辑（铅笔）、下载、删除（红色）、允许 / 拒绝、上移、停止；缺某个动作的行留占位，图标上下对齐。所有图标按钮鼠标悬停（或键盘聚焦）时在上方显示文字提示。</li>
@@ -826,6 +973,11 @@
       <li>菜单栏深浅色切换按钮从菜单栏底部移到顶栏最右侧（“中文”右边），悬停提示显示在按钮下方；菜单栏的折叠 / 展开按钮从顶部 logo 旁移到它原来的位置（底部“设置”右侧，折叠后在“设置”下面）。</li>
       <li>设置也照此改：MCP、钩子、共享技能三个表格去掉标题，搜索在左、按钮在右，说明在表格下方（钩子补上搜索框）；外观、审批默认、记忆三个表单不套框、不加标题，单选都改成标准单选组（主题色带色块，审批模式竖排带说明），审批默认与记忆的“保存”在表单底部；配置文件把路径和按钮放在编辑器上方；运行状态合成一张列表。</li>
       <li>项目空间的“概览”标签改名“项目设置”，表单直接铺在标签页里（不套框、不加表单标题）：去掉统计卡片（各标签里都看得到数量）和“危险操作”卡片，“删除项目”移到“保存”右侧。</li>
+      <li>子代理（owner 2026-10-18）：对话里的子代理卡片沿用现有样式（一句概要 + 每个任务一行：任务名 · 用时、最近一次工具调用、查看），点任务行在右侧抽屉的标签页里显示——运行中实时更新，完成后回放记录。每个子代理一个标签，可关闭；“＋”列出本对话的全部子代理；没看过的新结果在标签上带圆点。在抽屉里打开的那一行高亮。标签里依次是交给它的任务（默认折叠）、思考与工具调用、回答；运行中在输入框正上方显示“工作中（41s）· ☑1/3 · 当前任务”（与终端一致，不在会话记录里；结束后消失，由“已工作 …”收尾），并有回到底部按钮。底部输入框直接给这个子代理发消息（保留现有能力），/ 命令可用，输入 @ 引用文件——与主输入框同一个选择器，列出本对话所在项目的文件和目录，选中后成为 @路径 标签；左侧“＋”：附件（与主输入框同一个“保存到”弹窗，也可直接粘贴、拖入）与技能（目标属于整个对话，不在这里）；运行中可停止它。输入框底栏右侧是这个子代理的“模型与上下文”胶囊：上下文圆环 + 百分比（一直写出，≥80% 变警告色）| 模型 · 思考强度；点开是一张卡片：大号百分比、已用 / 窗口、进度条、模型（服务商/模型）、思考强度、上下文窗口、本次输入 / 输出用量；快满时提示可输入 /compact。模型与思考强度在派发时确定，只读。抽屉与工作台共用右侧，同一时间只开一个；顶栏“子代理”按钮在对话派过子代理后出现，数字是运行中的个数（原来在工作台按钮上）。对话顶部原来的“主对话 / 子代理”切换条去掉。工作台概览里的运行中代理、子代理页的“所在会话”都直接打开对应标签。窄屏时抽屉盖在对话上。</li>
+      <li>对话运行时的状态行（owner 2026-10-18，与终端一致）：输入框正上方一行“工作中（1m 12s · Esc 中断）· ☑3/5 · 当前任务 · 首 token 1.2s”，排队的消息在它下面、输入框上面；结束后消失，由“已工作 …”收尾。其他写法同终端：等待后台终端、正在重新连接… N/5、目标的“正在推进目标 · 第 N 轮”“正在检查目标是否达成”。</li>
+      <li>输入框的审批按钮去掉“审批：”前缀，只写档位（默认 / 只读 / 完全访问），悬停提示“本会话的审批模式”（owner 2026-10-18）。</li>
+      <li>菜单栏“子代理”页改为当前主代理的子代理配置（owner 2026-10-18）：列出 harness 内置的 10 个（4 个可派发 + 6 个系统）与自定义的；自定义可新建、编辑、删除（存 forebrain.yaml；新建、编辑、查看都在右侧抽屉，删除用确认框），内置可改模型 / 思考强度 / 停用 / 改写提示词，系统的只能查看；表格上方右侧（“新建子代理”左边）是这个主代理的子代理功能开关，没改过时跟随全局、切换只对这个主代理生效，并与“启用”列联动（关闭 / 开启时把所有子代理批量改为禁用 / 启用）；全局总开关在“设置 → 子代理”（agents.defaults.enable_subagent）。运行中的子代理不再在这一页列出。</li>
+      <li>项目 MCP 的确认（owner 2026-10-18）：每行的“允许 / 拒绝”只决定这一行；拒绝过的条目（含终端启动时答 N 的）不再从表里消失，显示“已拒绝”，操作栏给“允许”可以撤回。项目 LSP 按同一规则。</li>
       <li>项目空间的会话标签改成表格：标题（点开即进入会话）、模型、消息数、心跳（每 N 分钟 / 已暂停）、创建时间、更新时间；两个时间列头排序，默认更新时间新→旧；下方分页。操作栏只有图标按钮“打开”。</li>
       <li>提示条改紧凑：单行约 20px 高，上下不留白。</li>
       <li>主代理工具页改成表格：工具、说明、分类、类型（只读 / 有副作用），可搜索、按分类与类型筛选，下方分页。操作栏只有一个图标按钮“查看入参”，在该行下方展开入参表（参数、类型、必填、说明），再点即“收起”。</li>
@@ -2323,9 +2475,10 @@
     tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', drawer: false, tmenu: false,
     bench: false, hb: false, preset: 'default', presetMenu: false, settingsTab: 'appearance', projTab: 'overview',
     tree: {}, treeLoading: {}, ref: '', toolOpen: '', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false,
+    sa: { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false },
     pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
     attach: false, attachShot: false, attachDir: 'attachments', lastAttachDir: 'attachments', attNew: false, atree: {}, atts: [], demo: 'normal', dproj: '全部项目', projRoot: '',
-    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, model: '', modelMenu: false, img: null, mdw: null, pg: {}, pgSize: {}, memSort: {}, pinned: { 'forebrain-harness': true }, chanOn: { 0: true, 1: true }, cronOff: { 2: true }, memScope: 'shared', approvalDef: 'default', mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
+    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, mcpUndecline: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, model: '', modelMenu: false, img: null, mdw: null, pg: {}, pgSize: {}, memSort: {}, pinned: { 'forebrain-harness': true }, chanOn: { 0: true, 1: true }, cronOff: { 2: true }, memScope: 'shared', approvalDef: 'default', mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
   };
   var nav = [
     ['chat', '对话', 'message-square'], ['projects', '项目', 'folder-git-2'], ['rules', '规则指令', 'scroll-text'], ['skills', '技能', 'sparkles'],
@@ -2361,19 +2514,19 @@
   // files this chat session changed with file tools (the same set "回到这里" restores)
   var chatChanges = [['pkg/gateway/controlplane.go', '+12 −3'], ['pkg/gateway/http_server.go', '+4 −0'], ['frontend/src/lib/gatewaySession.ts', '+9 −2'], ['pkg/gateway/session_cookie.go', '新增']];
   var captions = {
-    chat: ['对话 · 主代理', ['登录后首页就是新对话页；新对话还没有标题，顶栏左侧不写“未命名对话”，也没有“工作台”按钮，发出第一条消息后才出现。', '对话抽屉：新聊天、搜索、按项目筛选；会话标题下方是所属项目。', '新聊天：问候语 + 居中输入框 + 快捷入口；左上角项目胶囊默认选中上次用的项目，点开可搜索、选项目或“打开文件夹…”。没有“不在项目中工作”。', '选的文件夹还没有项目时，胶囊显示“新项目”，第一条消息发出时创建；只看文件夹本身，不看上级目录。', '项目或文件夹未判断过信任时，发送前先问一次（与终端同一句，共用记录）。', '打开文件夹：系统原生式对话框——后退 / 前进 / 上一层（⌫）、当前位置下拉、位置与项目侧栏；单击选中、双击或回车进入；“选择”取选中项，未选中则取当前文件夹。~/.forebrain 不可选。', '“＋”菜单：附件、目标，下方列出可用技能；底部提示 @ 与 / 的用法。附件和粘贴的截图先选“保存到”项目里的目录，记住上次的选择。', '输入框底栏：左“＋”、模式（Agent / 计划）、审批模式；右上下文圆环（超过 80% 变警告色，点开工作台“上下文”）、模型、推理强度、发送。模式、模型与推理强度只作用于本会话。', '模型不支持图片时（本轮新增）：带图消息照常留在对话里，下方提示“消息已保留，未发送”；对话里还有图片时，换模型前每条新消息都这样。模型菜单里支持图片的模型标“支持图片”，换好后发“继续”，模型能看到原图。提示不落库，刷新后只剩消息。', '用户消息悬停出现“回到这里”：选恢复代码和对话、只恢复对话或只恢复代码；列出将恢复的文件，标出之后被改过的；终端命令的改动不撤回。恢复后对话里留一行，可撤销。', '思考块上方“思考了 N 秒”；结束行“已工作 · 首 token · 完成/总数 · 时间”。', '另一端运行中：发送被拒绝，消息放回输入框。目录已不存在：只能查看。', 'MCP 只在开对话时启动一次，失败提示放在对话开头，原始错误收在“查看详情”。', '工作台：概览（运行中的代理、待办、计划、MCP、用量）、上下文（占用与明细）、工作目录（每个节点可编辑、删除，目录可新建文件）、变更文件（本会话改过的文件，可对比、编辑、撤销变更）。工具调用、思考、用户消息都在消息窗口里实时显示，与终端一致。', '顶栏右侧依次是心跳、工作台、语言。', '审批模式只对本会话生效：Read Only / Default / Full Access；全局默认在“设置 → 审批默认”。', '心跳只作用于当前对话：未设置是普通按钮，运行中高亮并显示“每 N 分钟”，暂停显示“已暂停”。弹层里可暂停、改间隔与内容、删除，底部列出其他对话的心跳。', '菜单栏可折叠成图标栏（64px），悬停显示名称。']],
+    chat: ['对话 · 主代理', ['登录后首页就是新对话页；新对话还没有标题，顶栏左侧不写“未命名对话”，也没有“工作台”按钮，发出第一条消息后才出现。', '对话抽屉：新聊天、搜索、按项目筛选；会话标题下方是所属项目。', '新聊天：问候语 + 居中输入框 + 快捷入口；左上角项目胶囊默认选中上次用的项目，点开可搜索、选项目或“打开文件夹…”。没有“不在项目中工作”。', '选的文件夹还没有项目时，胶囊显示“新项目”，第一条消息发出时创建；只看文件夹本身，不看上级目录。', '项目或文件夹未判断过信任时，发送前先问一次（与终端同一句，共用记录）。', '打开文件夹：系统原生式对话框——后退 / 前进 / 上一层（⌫）、当前位置下拉、位置与项目侧栏；单击选中、双击或回车进入；“选择”取选中项，未选中则取当前文件夹。~/.forebrain 不可选。', '“＋”菜单：附件、目标，下方列出可用技能；底部提示 @ 与 / 的用法。附件和粘贴的截图先选“保存到”项目里的目录，记住上次的选择。', '输入框底栏：左“＋”、模式（Agent / 计划）、审批模式；右上下文圆环（超过 80% 变警告色，点开工作台“上下文”）、模型、推理强度、发送。模式、模型与推理强度只作用于本会话。', '模型不支持图片时（本轮新增）：带图消息照常留在对话里，下方提示“消息已保留，未发送”；对话里还有图片时，换模型前每条新消息都这样。模型菜单里支持图片的模型标“支持图片”，换好后发“继续”，模型能看到原图。提示不落库，刷新后只剩消息。', '用户消息悬停出现“回到这里”：选恢复代码和对话、只恢复对话或只恢复代码；列出将恢复的文件，标出之后被改过的；终端命令的改动不撤回。恢复后对话里留一行，可撤销。', '思考块上方“思考了 N 秒”；结束行“已工作 · 首 token · 完成/总数 · 时间”。运行中输入框正上方是状态行“工作中（时长 · Esc 中断）· 待办进度 · 首 token”，与终端一致。', '另一端运行中：发送被拒绝，消息放回输入框。目录已不存在：只能查看。', 'MCP 只在开对话时启动一次，失败提示放在对话开头，原始错误收在“查看详情”。', '工作台：概览（运行中的代理、待办、计划、MCP、用量）、上下文（占用与明细）、工作目录（每个节点可编辑、删除，目录可新建文件）、变更文件（本会话改过的文件，可对比、编辑、撤销变更）。工具调用、思考、用户消息都在消息窗口里实时显示，与终端一致。', '子代理：对话里每个子代理是一张卡片，点开在右侧抽屉的标签页里看——运行中实时、完成后回放；每个子代理一个标签，“＋”列出本对话的全部子代理，底部输入框直接给它发消息，支持 / 命令、@ 引用文件（本对话项目里的文件）和“＋”（附件、技能；也可粘贴、拖入附件）。抽屉与工作台共用右侧，一次只开一个。', '顶栏右侧依次是心跳、子代理（派过子代理才出现，数字是运行中的个数）、工作台、语言。', '审批模式只对本会话生效：Read Only / Default / Full Access；全局默认在“设置 → 审批默认”。', '心跳只作用于当前对话：未设置是普通按钮，运行中高亮并显示“每 N 分钟”，暂停显示“已暂停”。弹层里可暂停、改间隔与内容、删除，底部列出其他对话的心跳。', '菜单栏可折叠成图标栏（64px），悬停显示名称。']],
     projects: ['项目 · 主代理', ['本主代理的项目；进入项目空间读写它的规则、会话、记忆、权限、MCP、技能、定时任务。', '表格：项目（名称可点进项目空间，旁边标置顶 / 未信任 / 目录不存在）、路径、说明、对话数、更新时间；“项目”“更新时间”列头排序，置顶的始终在最上面；下方分页。操作栏图标按钮：进入项目空间、置顶 / 取消置顶、删除。', '“新建项目”打开弹窗：先选目录（可“浏览…”），项目名默认取目录名；目录已是项目时提示并可打开。项目根就是所选目录，代码仓库、普通文件夹都可以；终端启动目录、对话里选的新文件夹也会自动成为项目。', '删除项目会同时删除它的对话和定时任务，需输入项目名确认；目录里的文件不动。目录已不存在的项目标“目录不存在”。']],
-    project: ['项目空间 · 项目', ['顶栏是面包屑（项目 › 名称）、目录、信任状态，与技能工坊的面包屑一致；顶栏下面直接是标签页，没有单独的标题层。', '标签页：项目设置、规则指令、会话、记忆、权限、MCP、技能、定时任务、通道（定时任务与通道从菜单栏移到这里）。', '技能标签与主代理技能页同一套：离线安装、在线安装、发现并安装、新建技能、查看。定时任务、通道默认属于本项目，都是表格：定时任务的启用开关即暂停 / 恢复，操作栏是立即执行、执行记录、删除，新建在弹窗里；通道操作栏只有编辑（弹窗填该通道的配置项），没配置的通道不能启用。', '各标签没有标题：按钮在表格上方工具栏的右侧，说明写在表格下方。', '项目设置标签（原“概览”）直接是表单，没有外框和表单标题：项目名、目录、说明、项目指令、记忆作用域（共享 / 仅本项目）、信任与目录外读取开关；底部“保存”右侧是“删除项目”。规则指令标签只放规则文件列表，记忆标签只放项目记忆列表。', '项目级权限、MCP、技能只要求项目已信任，不要求是 git 仓库。', 'MCP 标签依次列出本项目、主代理、全局的 MCP，只增删改本项目的：全局与主代理的行只读，操作列指向能改的页面；项目里新加、还没同意的行给“允许 / 拒绝”。', '点面包屑“项目”回到列表。']],
+    project: ['项目空间 · 项目', ['顶栏是面包屑（项目 › 名称）、目录、信任状态，与技能工坊的面包屑一致；顶栏下面直接是标签页，没有单独的标题层。', '标签页：项目设置、规则指令、会话、记忆、权限、MCP、技能、定时任务、通道（定时任务与通道从菜单栏移到这里）。', '技能标签与主代理技能页同一套：离线安装、在线安装、发现并安装、新建技能、查看。定时任务、通道默认属于本项目，都是表格：定时任务的启用开关即暂停 / 恢复，操作栏是立即执行、执行记录、删除，新建在弹窗里；通道操作栏只有编辑（弹窗填该通道的配置项），没配置的通道不能启用。', '各标签没有标题：按钮在表格上方工具栏的右侧，说明写在表格下方。', '项目设置标签（原“概览”）直接是表单，没有外框和表单标题：项目名、目录、说明、项目指令、记忆作用域（共享 / 仅本项目）、信任与目录外读取开关；底部“保存”右侧是“删除项目”。规则指令标签只放规则文件列表，记忆标签只放项目记忆列表。', '项目级权限、MCP、技能只要求项目已信任，不要求是 git 仓库。', 'MCP 标签依次列出本项目、主代理、全局的 MCP，只增删改本项目的：全局与主代理的行只读，操作列指向能改的页面；项目里新加、还没同意的行给“允许 / 拒绝”（只决定这一行）；拒绝过的行（含终端启动时答 N 的）留在表里显示“已拒绝”，给“允许”撤回。', '点面包屑“项目”回到列表。']],
     rules: ['规则指令 · 主代理', ['本主代理的规则文件：AGENTS.md（行为准则）、SOUL.md（性格与做事方式）、USER.md（关于你），位于主代理工作区根目录。', '列表 + 上方按钮 + 弹窗：点“编辑”在弹窗里改；“新建规则文件”弹窗只列出支持、且还没创建的文件。与项目空间的“规则指令”标签同一套。', '文件都在同一个编辑器里改：.md 用 Milkdown Crepe（MIT）所见即所得，代码块可编辑、选语言、带高亮，输入 / 插入块，底部可切到源码；源码和其他文件用 CodeMirror 6（MIT），带行号和高亮。', '保存后从新会话开始生效，不打断正在进行的会话。']],
     workshop: ['技能工坊', ['会话页的超集：同样的消息流、输入框（加号、Agent/计划、审批、模型、推理强度）、回到这里、心跳和工作台；顶部多了版本与“发布 vN”。', '从主代理技能页或项目技能页进入（新建技能、查看、发现并安装），左上角返回来源页。主代理入口的工作目录是主代理技能目录，项目入口是项目根目录。', '工作台：会话页的概览、上下文、工作目录、变更文件，加上测试用例、评测、触发描述、版本；还没有技能时后四个不可用。变更文件列出草稿相对当前版本改过的文件，每个都能对比、编辑、撤销变更。', '新建、编辑都在弹窗里；所有改动写进草稿，发布才生成新版本。“查看”接着这个技能最近的工坊会话；右上角可开新会话。', '发现并安装：候选直接列在回复里，安装后即 v1，工作台随之可用。']],
     skills: ['技能 · 主代理', ['本主代理能用的全部技能：本主代理的 + 共享 + 内置。页面只有一层：标题行（说明文案在“技能”右侧，按钮依次是离线安装、在线安装、发现并安装、新建技能、刷新）、搜索行、列表。', '列表上方：离线安装、在线安装（弹窗）、发现并安装、新建技能；本主代理的技能可启停、删除，点“查看”（眼睛图标）进技能工坊改进。状态列显示当前版本号；草稿不能启用；已发布但有改动的标“有未发布的修改”，上游有新版本的标“有更新”。（本轮改动）', '设置里的共享技能库没有工坊，只有离线安装与在线安装。']],
-    subagents: ['子代理 · 主代理', ['本主代理所有会话里正在运行的子代理；可以跳到所在会话、停止单个或全部停止。']],
-    mcp: ['MCP · 主代理', ['三层，每页只增删改自己那一层：设置 · MCP 只看、只改全局；本页先列本主代理的、再列全局的，只增删改主代理的，不列项目 MCP；项目空间的 MCP 标签依次列出项目、主代理、全局的，只增删改项目的。不同名叠加，同名高层整条覆盖（项目 > 主代理 > 全局），不做字段级混合。', '与技能页同一套界面：标题行（说明 + 添加 MCP 服务 + 刷新）、搜索行、表格（MCP 服务 / 来源 / 命令或地址 / 类型 / 状态 / 操作）。主代理的行可启停、编辑、删除；全局行只读，操作列跳到“设置 → MCP”。被主代理覆盖的全局条目不在本页出现，在设置 · MCP 里标“未运行 · 被主代理 … 覆盖”。', '表格固定列宽、每格一行，下方是分页。状态列只放徽标：已连接 · N 个工具 / 已允许 · N 个工具 / 待确认 / 已禁用（界面，下个会话起）/ 配置里已禁用 / 连接失败 / 未运行 · 被覆盖；失败原文与 enabled: false 在悬停提示和抽屉里。启用开关单独一列，只对能改的行出现。', '编辑、添加都在右侧抽屉里，表单含全部字段：名称、类型、命令或地址、必需、启用、连接超时、请求超时（都按秒；connectionTimeoutMs 这类外来拼写不做别名，也不读）。高级按类型给请求头或环境变量、OAuth、SSE、SHA256 校验、默认工具审批模式。表单底部“测试连接”用当前表单值试连，不写配置、不关抽屉；保存失败（400/409）的原文显示在抽屉里；抽屉底部是“取消 / 保存”。', '只能查看的行操作栏只有“查看”：同一个抽屉以只读表单展示全部字段（含来源、状态与失败原文），底部只有“取消”，表单下方有一个跳到能改它的页面的链接。', '生效列表在新会话启动时冻结，任何改动都是“新会话生效”。']],
+    subagents: ['子代理 · 主代理', ['当前主代理的子代理配置（owner 2026-10-18）：harness 内置的 10 个 + 你给它自定义的；不再是运行中的子代理列表（运行中的看对话里的卡片、右侧抽屉与工作台概览）。', '表格上方右侧、“新建子代理”左边是当前主代理的“子代理功能”开关：没改过时跟随全局设置（设置 → 子代理），在这里切换只对这个主代理生效。它只和各行的启用开关联动：关闭时把所有子代理的启用改为禁用，开启时全部改为启用；单独打开某一行会把开关打开，最后一行被关掉时开关随之关闭。表格本身不变灰。', '表格：子代理（名称、说明，提示词改写过的标“已改写”）、类型（内置 / 自定义 / 系统）、模型（跟随主代理或指定的模型 · 思考强度）、工具（只读 / 可编辑 / 指定 N 个）、操作（启用开关在最前，然后是编辑 / 删除或查看；没有状态列）。顺序：自定义 → 内置 → 系统（owner 2026-10-18）。', '自定义：新建 / 编辑在右侧抽屉里（与 MCP 一样），删除用确认框；抽屉里填名称、模型、思考强度、运行方式（可继续对话 / 完成即结束）、说明（主代理靠它决定何时派发）、工具权限三档（只读 / 可编辑 / 指定工具）、系统提示词。保存在 forebrain.yaml 的主代理下。', '内置（可派发）：不能删；可以为当前主代理指定模型与思考强度、停用、改写提示词（标“已改写”，可恢复默认）；工具权限固定。', '系统：计划审阅、/goal 目标检查、自动审批、caveman 技能的 3 个，只能查看（右侧抽屉，标“只读”）。']],
+    mcp: ['MCP · 主代理', ['三层，每页只增删改自己那一层：设置 · MCP 只看、只改全局；本页先列本主代理的、再列全局的，只增删改主代理的，不列项目 MCP；项目空间的 MCP 标签依次列出项目、主代理、全局的，只增删改项目的。不同名叠加，同名高层整条覆盖（项目 > 主代理 > 全局），不做字段级混合。', '与技能页同一套界面：标题行（说明 + 添加 MCP 服务 + 刷新）、搜索行、表格（MCP 服务 / 来源 / 命令或地址 / 类型 / 状态 / 操作）。主代理的行可启停、编辑、删除；全局行只读，操作列跳到“设置 → MCP”。被主代理覆盖的全局条目不在本页出现，在设置 · MCP 里标“未运行 · 被主代理 … 覆盖”。', '表格固定列宽、每格一行，下方是分页。状态列只放徽标：已连接 · N 个工具 / 已允许 · N 个工具 / 待确认 / 已禁用（界面，下个会话起）/ 配置里已禁用 / 连接失败 / 未运行 · 被覆盖；失败原文与 enabled: false 在悬停提示和抽屉里。启用开关在操作列最前面，只对能改的行出现（其他行留出同样宽度，图标对齐）。', '编辑、添加都在右侧抽屉里，表单含全部字段：名称、类型、命令或地址、必需、启用、连接超时、请求超时（都按秒；connectionTimeoutMs 这类外来拼写不做别名，也不读）。高级按类型给请求头或环境变量、OAuth、SSE、SHA256 校验、默认工具审批模式。表单底部“测试连接”用当前表单值试连，不写配置、不关抽屉；保存失败（400/409）的原文显示在抽屉里；抽屉底部是“取消 / 保存”。', '只能查看的行操作栏只有“查看”：同一个抽屉以只读表单展示全部字段（含来源、状态与失败原文），底部只有“取消”，表单下方有一个跳到能改它的页面的链接。', '生效列表在新会话启动时冻结，任何改动都是“新会话生效”。']],
     providers: ['模型服务 · 主代理', ['按顺序尝试的模型服务：第一条主用，其余回退。列表上方“添加模型服务”，每行“编辑”都在弹窗里。', '模型框可以填多个模型 ID：输入英文逗号即生成一个标签，也可以点下方该服务商的模型快速加入。', 'API Key 可以直接输入或粘贴，每输入一个字符立即显示为圆点；已保存的只显示后四位，点“更换”重新输入。']],
     tools: ['工具 · 主代理', ['本主代理运行时实际暴露给模型的工具，表格列出名称、说明、分类、只读 / 有副作用，可筛选、分页；操作栏的图标按钮“查看入参”在该行下方展开入参表，再点“收起”。']],
     permissions: ['权限 · 主代理', ['本主代理已记住的授权规则（保存在主代理工作区）。', '列表上方两个按钮：“判定验证”和“添加规则”，都在弹窗里；每行可编辑、删除。动作、工具是选择框，只有规则内容需要输入。项目空间的权限标签同一套。', '全局默认审批模式在“设置 → 审批默认”，项目规则在项目空间，会话内的临时切换在对话输入框旁。']],
     memories: ['记忆 · 主代理', ['本主代理的记忆文件分页列表：按内容关键词搜索；点“创建时间”“更新时间”列头排序——当前排序列的箭头高亮，再点切换新→旧 / 旧→新，默认按更新时间新→旧。', '每个文件点“编辑”在弹窗里打开（本轮改动），可以单个删除或多选批量删除，也可以重置全部。核心文件 MEMORY.md、memory_summary.md 只能编辑或清空，不能删除。', '项目空间的“记忆”标签是同一套界面，只列本项目的记忆文件。']],
-    settings: ['设置 · 全局', ['只放全局、不属于某个主代理的配置：外观、审批默认、MCP、钩子、记忆开关、共享技能、配置文件、运行状态。', '切换当前主代理只能用菜单栏顶部的下拉选择器；设置里没有“主代理”标签：新建在顶栏“新建主代理”（只填名称，建好自动切换过去；工作区固定在 ~/.forebrain/workspaces/<名称>，模型服务在“模型服务”页配置），删除在菜单栏顶部的主代理下拉里（main 与当前主代理不能删）。', '钩子是列表 + 上方按钮 + 弹窗；MCP 的查看、编辑、添加在右侧抽屉里。这里的 MCP 只列、只增删改全局层：所有主代理都能用，同名条目被主代理或项目整条覆盖；行操作是编辑、禁用/启用、删除。主代理自己的 MCP 在菜单栏“MCP”，项目层在项目空间。']]
+    settings: ['设置 · 全局', ['只放全局、不属于某个主代理的配置：外观、审批默认、子代理（全局总开关 agents.defaults.enable_subagent，主代理可在自己的子代理页覆盖）、MCP、钩子、记忆开关、共享技能、配置文件、运行状态。', '切换当前主代理只能用菜单栏顶部的下拉选择器；设置里没有“主代理”标签：新建在顶栏“新建主代理”（只填名称，建好自动切换过去；工作区固定在 ~/.forebrain/workspaces/<名称>，模型服务在“模型服务”页配置），删除在菜单栏顶部的主代理下拉里（main 与当前主代理不能删）。', '钩子是列表 + 上方按钮 + 弹窗；MCP 的查看、编辑、添加在右侧抽屉里。这里的 MCP 只列、只增删改全局层：所有主代理都能用，同名条目被主代理或项目整条覆盖；行操作是编辑、禁用/启用、删除。主代理自己的 MCP 在菜单栏“MCP”，项目层在项目空间。']]
   };
 
   /* ---------- 2026-10-11: every conversation belongs to a project ---------- */
@@ -2436,7 +2589,7 @@
     var last = projects.filter(function (p) { return p.last; })[0];
     S.pick = { mode: 'project', proj: last ? last.n : '', folder: '' };
   }
-  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.img = null; S.model = ''; S.modelMenu = false; S.mdw = null; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
+  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.mcpUndecline = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.img = null; S.model = ''; S.modelMenu = false; S.mdw = null; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
 
   var starters = [['file-text', '生成 FOREBRAIN.md', '/init'], ['map', '先出计划再动手', '@plan'], ['hammer', '做一个技能', '@workshop'], ['clock', '设一个定时任务', '@cron']];
   function pjPop() {
@@ -2538,7 +2691,7 @@
       (S.atts.length ? '<div class="atts">' + S.atts.map(function (a, i) { return '<span class="att">' + ic(/\.png$/.test(a) ? 'image' : 'file') + a + '<button type="button" data-rmatt="' + i + '" aria-label="移除 ' + a + '">' + ic('x') + '</button></span>'; }).join('') + '</div>' : '') +
       '<div class="ph-t' + (typed ? ' typed' : '') + '">' + (S.ref ? '<span class="ref">@' + S.ref + '</span>' : '') + (o.missing ? '目录不存在，不能继续' : (typed || '输入消息，/ 调出命令，@ 引用文件')) + '</div>' +
       '<div class="bar"><button type="button" class="icon-btn" data-act="plus" title="添加" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.plusPop + '"' + (off ? ' disabled' : '') + '>' + ic('plus') + '</button>' + modeChip() +
-      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '">' + ic('shield') + '审批：' + p[2] + ic('chevron-down') + '</button><span class="grow"></span>' +
+      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '" data-tip="本会话的审批模式" data-tip-pos="top">' + ic('shield') + p[2] + ic('chevron-down') + '</button><span class="grow"></span>' +
       (o.fresh ? '' : ring(ctxPct())) + modelChip() + effortChip() +
       '<button type="button" class="send" aria-label="发送" data-act="send"' + (off ? ' disabled' : '') + '>' + ic('arrow-up') + '</button></div>';
     if (S.presetMenu) {
@@ -2569,6 +2722,7 @@
       '<pre><div><span class="ln">15</span><span>func ControlPlaneTokenFromRequest(r *http.Request, q string) string {</span></div><div><span class="ln">19</span><span>  auth := strings.TrimSpace(r.Header.Get("Authorization"))</span></div><div><span class="ln">20</span><span>  // 浏览器页面从未拿到 token，这里永远是空串</span></div></pre></div>' +
       '<p>根因是网页端没有任何途径取得 gateway token：请求头里的 <code class="inl">Authorization</code> 始终为空。修复方向是用一次性登录换取 HttpOnly 会话 Cookie。</p><div class="worked"><span>已工作 1m 12s · 首 token 1.2s · <span class="plan-prog" aria-label="任务清单完成 3/5">' + ic('square-check', 'pc') + '3/5</span> · 09:41</span></div></div>';
     if (rw === 'code') h += '<div class="sys-line" style="color:var(--text-2)">' + ic('history') + '已把 3 个文件恢复到“浏览器访问 /api 全部 401…”之前<button type="button" class="btn link" data-act="rwundo">撤销</button></div>';
+    if (hasSubs()) h += saTurn();
     if (S.demo === 'img' && S.img) h += imgTurns();
     if (S.demo === 'busy') h += '<div class="err-block">' + ic('circle-alert') + '<div>这个对话正在另一端运行（终端或网页），等它结束后再发送。<span class="s">消息已放回输入框。</span></div></div>';
     return h + '</div></div>';
@@ -2682,7 +2836,7 @@
     var todos = ws ? [['确认使用场景与权限', 'done'], ['写 SKILL.md 初稿', 'done'], ['写测试用例', 'done'], ['跑评测', S.evalRun ? 'doing' : 'done'], ['收紧触发描述', S.evalRun ? 'wait' : 'doing']] : [['读控制面鉴权中间件', 'done'], ['确认浏览器缺的是哪种凭据', 'done'], ['设计一次性登录换 Cookie', 'done'], ['改中间件并补测试', 'doing'], ['真机验证 /api 不再 401', 'wait']];
     var mcpBad = S.demo === 'mcp';
     var agents = ws ? (S.evalRun ? '<div class="agent-row"><span class="dot"></span>eval · 用例 2 · 使用技能<span class="d">00:32</span></div><div class="agent-row"><span class="dot"></span>eval · 用例 2 · 不用技能<span class="d">00:29</span></div>' : '<div class="hint">没有运行中的代理</div>')
-      : '<div class="agent-row"><span class="dot"></span>explore · 扫描鉴权调用点<span class="d">00:41</span></div><div class="agent-row"><span class="dot"></span>review · 审阅中间件改动<span class="d">00:12</span></div>';
+      : hasSubs() ? saRunning().map(function (id) { return '<button type="button" class="agent-row btn-row" data-saopen="' + id + '" data-tip="在右侧打开" data-tip-pos="top"><span class="dot"></span>' + saLabel(id) + '<span class="d">' + subs[id].el + '</span></button>'; }).join('') : '<div class="hint">没有运行中的代理</div>';
     if (ws && !wsName()) todos = [];
     return benchCard('users', '运行中的代理', ws && !S.evalRun ? '' : '<button type="button" class="btn sm">全部停止</button>', agents) +
       (todos.length ? benchCard('list-checks', '待办', '<span class="sub">' + todos.filter(function (x) { return x[1] === 'done'; }).length + '/' + todos.length + '</span>', todos.map(function (t) { return '<div class="todo ' + t[1] + '">' + ic(t[1] === 'done' ? 'square-check' : t[1] === 'doing' ? 'circle-dot' : 'square') + '<span>' + t[0] + '</span></div>'; }).join('')) : '') +
@@ -2711,11 +2865,11 @@
     return h;
   }
   var iterJumps = [['home', '登录后首页（新对话）'], ['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
-    ['thread', '思考耗时 · 首 token'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
-    ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'],
-    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
+    ['thread', '思考耗时 · 首 token'], ['mainrun', '对话 · 运行中（状态行）'], ['subcfg', '子代理 · 配置列表'], ['subcfgoff', '子代理 · 功能关闭'], ['setsub', '设置 · 子代理（全局开关）'], ['subcfgnew', '子代理 · 新建'], ['subcfgpick', '子代理 · 指定工具'], ['subcfgbuiltin', '子代理 · 编辑内置'], ['subcfgsys', '子代理 · 查看系统'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
+    ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'], ['sublive', '子代理 · 实时（右侧抽屉）'], ['subreplay', '子代理 · 回放'], ['submenu', '子代理 · 打开其他子代理'], ['subat', '子代理 · @ 引用文件'], ['subplus', '子代理 · 加号菜单'], ['subinfo', '子代理 · 模型与上下文'], ['subinfowarn', '子代理 · 上下文快满'],
+    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpdecline', '项目 · MCP 已拒绝可撤回'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
   function iterJump(k) {
-    resetModal(); S.tenant = 'main'; S.bench = false;
+    resetModal(); S.tenant = 'main'; S.bench = false; S.sa = { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false };
     var chat0 = function () { S.page = 'chat'; S.projectSession = ''; S.session = 0; };
     if (k === 'home') freshNew();
     else if (k === 'newproj') { freshNew(); S.pjPop = true; }
@@ -2726,6 +2880,16 @@
     else if (k === 'thread') chat0();
     else if (k === 'longtitle') { chat0(); S.projectSession = '排查 gateway 在高并发下偶发 502：上游连接池耗尽、重试风暴与超时配置不一致的根因'; }
     else if (k === 'busy') { chat0(); S.demo = 'busy'; }
+    else if (k === 'mainrun') { chat0(); S.demo = 'mainrun'; }
+    else if (k === 'setsub') { S.page = 'settings'; S.settingsTab = 'subagents'; S.subGlobal = true; }
+    else if (k === 'subcfg' || k === 'subcfgoff' || k === 'subcfgnew' || k === 'subcfgpick' || k === 'subcfgbuiltin' || k === 'subcfgsys') {
+      S.page = 'subagents'; S.subGlobal = true; S.subOver = k === 'subcfgoff' ? false : null; S.subKind = ''; S.fmTools = ''; subDefs = JSON.parse(subDefsInit);
+      if (k === 'subcfgoff') subDefs.forEach(function (x) { if (x.k !== 'sys') x.on = false; });
+      if (k === 'subcfgnew') S.fm = { kind: 'subnew', a: '', b: '' };
+      if (k === 'subcfgpick') S.fm = { kind: 'subedit', a: 'doc-writer', b: '' };
+      if (k === 'subcfgbuiltin') S.fm = { kind: 'subedit', a: 'plan', b: '' };
+      if (k === 'subcfgsys') S.fm = { kind: 'subview', a: 'plan-reviewer', b: '' };
+    }
     else if (k === 'missing') { S.page = 'chat'; S.projectSession = ''; S.session = sessionsOf().indexOf('改写 tulkun 的 README'); }
     else if (k === 'mcp') { chat0(); S.demo = 'mcp'; }
     else if (k === 'imgno' || k === 'imgagain' || k === 'imgmodel' || k === 'imgok') { chat0(); imgDemo(['imgno', 'imgagain', 'imgmodel', 'imgok'].indexOf(k)); }
@@ -2736,6 +2900,14 @@
     else if (k === 'wstree') { wsEnter({ mode: 'improve', scope: 'agent', skill: 'gateway-ops' }); S.benchTab = 'tree'; S.tree['ag|.drafts'] = S.tree['_l_ag|.drafts'] = true; S.tree['ag|.drafts/gateway-ops'] = S.tree['_l_ag|.drafts/gateway-ops'] = true; }
     else if (k === 'wschg') { wsEnter({ mode: 'improve', scope: 'agent', skill: 'gateway-ops' }); S.benchTab = 'changes'; }
     else if (k === 'benchctx') { chat0(); S.bench = true; S.benchTab = 'context'; }
+    // explore is live; plan finished while it was being watched, so its tab carries the new-output dot
+    else if (k === 'sublive') { chat0(); S.sa = { open: true, tabs: ['explore', 'plan'], active: 'explore', menu: false, task: {}, seen: { explore: true }, at: false, ref: '' }; }
+    else if (k === 'subreplay') { chat0(); S.sa = { open: true, tabs: ['explore', 'plan'], active: 'plan', menu: false, task: { plan: true }, seen: { explore: true, plan: true }, at: false, ref: '' }; }
+    else if (k === 'subinfo') { chat0(); S.sa = { open: true, tabs: ['explore', 'review'], active: 'explore', menu: false, task: {}, seen: { explore: true, review: true }, at: false, ref: '', plus: false, draft: '', info: true }; }
+    else if (k === 'subinfowarn') { chat0(); S.sa = { open: true, tabs: ['explore', 'review'], active: 'review', menu: false, task: {}, seen: { explore: true, review: true }, at: false, ref: '', plus: false, draft: '', info: true }; }
+    else if (k === 'subplus') { chat0(); S.sa = { open: true, tabs: ['explore', 'plan'], active: 'explore', menu: false, task: {}, seen: { explore: true }, at: false, ref: '', plus: true, draft: '' }; }
+    else if (k === 'subat') { chat0(); S.sa = { open: true, tabs: ['explore', 'plan'], active: 'explore', menu: false, task: {}, seen: { explore: true }, at: true, ref: '' }; }
+    else if (k === 'submenu') { chat0(); S.sa = { open: true, tabs: ['explore'], active: 'explore', menu: true, task: {}, seen: { explore: true }, at: false, ref: '' }; }
     else if (k === 'benchwarn') { chat0(); S.ctxWarn = true; S.bench = true; S.benchTab = 'context'; }
     else if (k === 'plus') { chat0(); S.plusPop = true; }
     else if (k === 'effort') { chat0(); S.effortMenu = true; }
@@ -2781,6 +2953,7 @@
     else if (k === 'mcpp') { S.page = 'settings'; S.settingsTab = 'mcp'; }
     else if (k === 'mcpagent') { S.page = 'mcp'; }
     else if (k === 'mcpproj') { S.page = 'project'; S.projTab = 'mcp'; }
+    else if (k === 'mcpdecline') { S.page = 'project'; S.projTab = 'mcp'; S.mcpDeny = true; }
     else if (k === 'mcpview') { S.page = 'mcp'; mcpOpen('view', 'global', 'sentry'); }
     else if (k === 'mcpnew') { S.page = 'mcp'; mcpOpen('new', 'agent', ''); }
     else if (k === 'mcpstdio') { S.page = 'mcp'; mcpOpen('edit', 'agent', 'codegraph'); S.mcpAdv = true; }
@@ -2802,7 +2975,7 @@
     if (d.act === 'pjpop') { S.pjPop = !S.pjPop; return true; }
     if (d.pickproj) { S.pick = { mode: 'project', proj: d.pickproj, folder: '' }; S.pjPop = false; return true; }
     if (d.starter) { if (d.starter === '@plan') { S.mode = 'plan'; } else if (d.starter === '@workshop') { wsEnter({ mode: 'create', scope: 'project', skill: '', fresh: true }); } else if (d.starter === '@cron') { S.page = 'project'; S.projTab = 'cron'; S.cronModal = true; S.cronCustom = false; } else { S.draft = d.starter; } return true; }
-    if (d.act === 'ctxring') { S.bench = true; S.benchTab = 'context'; return true; }
+    if (d.act === 'ctxring') { S.bench = true; S.benchTab = 'context'; S.sa.open = false; return true; }
     if (d.act === 'browse') { S.pjPop = false; fbOpen(S.pick.folder || '~/workspace', 'chat'); return true; }
     if (d.act === 'browseproj') { fbOpen('~/workspace', 'projform'); return true; }
     if (d.fbgo) { fbGo(d.fbgo); return true; }
@@ -2848,7 +3021,30 @@
     }
     if (d.mcpallow) { S.mcpAllow = true; S.mcpDeny = false; return true; }
     if (d.mcpdeny) { S.mcpDeny = true; S.mcpAllow = false; return true; }
-    if (d.act === 'fmclose') { S.fm = null; return true; }
+    if (d.mcpundecline) { if (d.mcpundecline === 'playwright') { S.mcpDeny = false; S.mcpAllow = true; } else S.mcpUndecline = true; return true; }
+    if (d.act === 'fmclose') { S.fm = null; S.fmTools = ''; return true; }
+    if (d.act === 'fmnop') { return true; }
+    if (d.act === 'suboff') {
+      var glb = S.subGlobal !== false, cur = (S.subOver === true || S.subOver === false) ? S.subOver : glb;
+      S.subOver = !cur;
+      // off disables every subagent in the table, on enables every one (system ones have no switch)
+      subDefs.forEach(function (x) { if (x.k !== 'sys') x.on = S.subOver; });
+      return true;
+    }
+    if (d.act === 'subglobal') { S.subGlobal = S.subGlobal === false; return true; }
+    if (d.subon) {
+      var so = subOf(d.subon); so.on = !so.on;
+      // a row switched on needs the feature on; the last row switched off turns it off
+      var anyOn = subDefs.some(function (x) { return x.k !== 'sys' && x.on; }), glb2 = S.subGlobal !== false, cur2 = (S.subOver === true || S.subOver === false) ? S.subOver : glb2;
+      if (so.on && !cur2) S.subOver = true;
+      if (!anyOn && cur2) S.subOver = false;
+      return true;
+    }
+    if (d.act === 'fmok' && (S.fm.kind === 'subnew' || S.fm.kind === 'subedit' || S.fm.kind === 'subdel')) {
+      if (S.fm.kind === 'subdel') subDefs = subDefs.filter(function (x) { return x.n !== S.fm.a; });
+      if (S.fm.kind === 'subnew') { var nn = ((document.getElementById('sa-name') || {}).value || '').trim() || 'my-subagent'; subDefs.splice(0, 0, { n: nn, k: 'custom', d: ((document.getElementById('sa-desc') || {}).value || '').trim() || '（未写说明）', tools: S.fmTools || 'ro', cont: true, model: '', eff: '', on: true }); }
+      S.fm = null; S.fmTools = ''; return true;
+    }
     if (d.act === 'fmok' && S.fm.kind === 'treenew') { var tn = ((document.getElementById('tree-new-name') || {}).value || '').trim() || 'untitled.md', tp = S.fm.a.split('|'); S.fm = { kind: 'treeedit', a: tp[0] + '|' + (tp[1] ? tp[1] + '/' : '') + tn, b: '' }; return true; }
     if (d.act === 'fmok' && S.fm.kind === 'agentnew') {
       var an = ((document.getElementById('ag-name') || {}).value || '').trim().toLowerCase() || 'docs';
@@ -2911,7 +3107,7 @@
     if (d.btab) { S.benchTab = d.btab; return true; }
     if (d.acc) { S.ctxOpen[d.acc] = !S.ctxOpen[d.acc]; return true; }
     if (d.audit !== undefined) { S.auditOpen = S.auditOpen === Number(d.audit) ? -1 : Number(d.audit); return true; }
-    if (d.act === 'ctxwarn') { S.bench = true; S.benchTab = 'context'; return true; }
+    if (d.act === 'ctxwarn') { S.bench = true; S.benchTab = 'context'; S.sa.open = false; return true; }
     if (d.act === 'mcpdetail') { S.mcpDetail = !S.mcpDetail; return true; }
     if (d.projdel) { S.projDel = d.projdel; S.projDelBusy = false; return true; }
     if (d.projpin) { S.pinned[d.projpin] = !S.pinned[d.projpin]; return true; }
@@ -3032,7 +3228,9 @@
     if (S.page === 'chat') { var cp = curProject(); if (cp) h += '<button type="button" class="scope project" data-go="project" data-tip="进入项目空间" data-tip-pos="bottom" style="border:0;cursor:pointer">' + ic(cp.git === false ? 'folder' : 'folder-git-2') + cp.n + '</button>'; }
     h += '<span class="sp"></span>';
     if (S.page === 'chat' && curTitle() !== '未命名对话') h += hbChip();
-    if (S.page === 'chat' && !freshChat) h += '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台' + (S.newProj ? '' : '<span class="badge-n">2</span>') + '</button>';
+    // 子代理 appears once the conversation has dispatched one; its count is the running ones (it used to ride 工作台)
+    if (S.page === 'chat' && !freshChat && hasSubs()) { var nRun = saRunning().length; h += '<button type="button" class="chip-btn" data-act="sadrawer" aria-pressed="' + S.sa.open + '">' + ic('bot') + '子代理' + (nRun ? '<span class="badge-n">' + nRun + '</span>' : '') + '</button>'; }
+    if (S.page === 'chat' && !freshChat) h += '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台</button>';
     return h + topRight() + '</header>';
   }
 
@@ -3068,6 +3266,185 @@
     }).join('') + '</div><span class="hint">本会话用文件工具改过的文件。</span>');
   }
 
+  // The 子代理 page (owner 2026-10-18): the current primary agent's subagent configuration, not a list of running ones.
+  // k: pub = built-in the model may dispatch; custom = this agent's own (forebrain.yaml); sys = built-in the system calls in its own places (view only).
+  // tools: ro 只读 / edit 可编辑 / pick 指定工具 / none 无工具. over: the built-in prompt is rewritten for this agent.
+  var subDefs = [
+    { n: 'db-migrator', k: 'custom', d: '编写并校验数据库迁移脚本，跑一遍升级与回滚', tools: 'edit', cont: true, model: 'deepseek/deepseek-v4', eff: '高', on: true },
+    { n: 'doc-writer', k: 'custom', d: '按项目文档风格补全中文说明', tools: 'pick', pick: ['read_file', 'grep', 'write_file', 'edit_file'], cont: false, model: '', eff: '', on: true },
+    { n: 'general-purpose', k: 'pub', d: '独立完成实现类任务的通用子代理', tools: 'edit', cont: true, model: '', eff: '', on: true },
+    { n: 'explore', k: 'pub', d: '只读调查：快速搜索代码，找文件与调用点', tools: 'ro', cont: false, model: 'deepseek/deepseek-v4-flash', eff: '低', on: true },
+    { n: 'plan', k: 'pub', d: '只做实施设计，产出分阶段计划，不改文件', tools: 'ro', cont: false, model: '', eff: '', on: true, over: true },
+    { n: 'verification', k: 'pub', d: '设法证伪实现：跑检查、找反例，给出结论', tools: 'ro', cont: true, model: '', eff: '', on: false },
+    { n: 'plan-reviewer', k: 'sys', d: '计划待批准时的第二意见', when: '计划审批时点“请另一个模型审阅”', tools: 'ro', model: '审批时选择' },
+    { n: 'goal-evaluator', k: 'sys', d: '查看工作区，判断 /goal 的目标是否达成', when: '/goal 每轮结束后', tools: 'ro', model: '' },
+    { n: 'guardian', k: 'sys', d: '自动审批里的独立审查，只给出允许或拒绝', when: '审批模式开启自动审查时', tools: 'none', model: '' },
+    { n: 'cavecrew-investigator', k: 'sys', d: '只读定位代码，压缩输出', when: 'caveman 技能调用时', tools: 'ro', model: '' },
+    { n: 'cavecrew-builder', k: 'sys', d: '一两个文件的小改动，压缩输出', when: 'caveman 技能调用时', tools: 'edit', model: '' },
+    { n: 'cavecrew-reviewer', k: 'sys', d: '审阅改动，逐条给出问题，压缩输出', when: 'caveman 技能调用时', tools: 'ro', model: '' }
+  ];
+  var subDefsInit = JSON.stringify(subDefs);
+  var subPrompts = {
+    plan: '你是 plan 子代理，专做实施设计。只读：不改文件，不运行会改动的命令。\n先读相关代码，找出约束，再给出分阶段计划：每阶段写清改哪些文件、风险、顺序和验证方法。\n计划用中文写，面向会照着执行的人。',
+    'db-migrator': '你负责为本项目编写数据库迁移。\n1. 先读 schema.sql 与已有迁移，确认当前版本。\n2. 新迁移必须可回滚，写在 migrations/ 下，按日期编号。\n3. 在临时库上跑一遍升级与回滚，贴出两次的输出。\n不要改业务代码。',
+    'doc-writer': '你按项目已有文档的风格补全中文说明：先读同目录的文档，用同样的标题层级与术语；不确定的事实写成待确认，不要编造。'
+  };
+  function subOf(n) { return subDefs.filter(function (x) { return x.n === n; })[0]; }
+  function subKindBadge(x) { return x.k === 'custom' ? '<span class="badge">自定义</span>' : x.k === 'sys' ? '<span class="badge gray">系统</span>' : '<span class="badge ok">内置</span>'; }
+  function subToolsLabel(x) { return x.tools === 'ro' ? '只读' : x.tools === 'edit' ? '可编辑' : x.tools === 'none' ? '无工具' : '指定 ' + (x.pick || []).length + ' 个'; }
+  function subModelCell(x) {
+    if (x.k === 'sys') return '<span class="hint">' + (x.model || '跟随主代理') + '</span>';
+    return x.model ? '<span class="mono">' + x.model + '</span>' + (x.eff ? '<span class="hint"> · ' + x.eff + '</span>' : '') : '<span class="hint">跟随主代理</span>';
+  }
+  var subModelOpts = ['跟随主代理（deepseek/deepseek-v4）', 'deepseek/deepseek-v4', 'deepseek/deepseek-v4-flash', 'openai/gpt-5.4'];
+  var subEffOpts = ['跟随模型默认', '低', '中', '高', '最高'];
+  function subForm(f) {
+    var k = f.kind, x = k === 'subnew' ? { n: '', k: 'custom', d: '', tools: S.fmTools || 'ro', cont: true, model: '', eff: '' } : subOf(f.a);
+    var tools = k === 'subnew' || k === 'subedit' ? (S.fmTools || x.tools) : x.tools, ro = k === 'subview';
+    var prompt = subPrompts[x.n] || (x.k === 'custom' ? '' : '（内置提示词，见代码 pkg/agent/subagent_defs.go）');
+    var title = k === 'subnew' ? '新建子代理' : k === 'subview' ? '查看系统子代理 · ' + x.n : (x.k === 'pub' ? '编辑内置子代理 · ' : '编辑子代理 · ') + x.n;
+    var modelSel = ro ? '<input class="field" value="' + (x.model || '跟随主代理') + '" disabled>' : sel(subModelOpts, x.model || subModelOpts[0]);
+    var effSel = ro ? '<input class="field" value="' + (x.eff || '跟随模型默认') + '" disabled>' : sel(subEffOpts, x.eff || subEffOpts[0]);
+    var body = '<div class="grid2"><label class="lb">名称<input class="field mono" id="sa-name" value="' + x.n + '"' + (k === 'subnew' ? ' placeholder="小写字母、数字与短横线，如 db-migrator"' : ' disabled') + ' autocomplete="off"></label>' +
+      '<label class="lb">模型' + modelSel + '</label></div>' +
+      '<div class="grid2"><label class="lb">思考强度' + effSel + '</label><label class="lb">运行方式' + (ro || x.k === 'pub' ? '<input class="field" value="' + (x.cont ? '可继续对话' : '完成即结束') + '" disabled>' : sel(['可继续对话', '完成即结束'], x.cont ? '可继续对话' : '完成即结束')) + '</label></div>' +
+      '<label class="lb">说明<input class="field" id="sa-desc" value="' + x.d + '"' + (x.k === 'custom' ? ' placeholder="主代理靠这句话决定什么时候派它，写清用途"' : ' disabled') + '></label>' +
+      (x.k === 'sys' ? '<label class="lb">何时调用<input class="field" value="' + x.when + '" disabled></label>' : '');
+    if (x.k === 'custom') {
+      body += radioField('工具权限', 'sa-tools', [['ro', '只读', '', '读文件、搜索、只读命令'], ['edit', '可编辑', '', '全部工具，但不能再派子代理'], ['pick', '指定工具', '', '只用下面勾选的工具']], tools, '', true);
+      if (tools === 'pick') {
+        var picked = x.pick || ['read_file', 'grep'];
+        body += '<div class="sa-pick"><input class="field" placeholder="搜索工具" style="max-width:220px"><div class="sa-pick-grid">' + toolNames.map(function (t) { return '<label class="chk"><input type="checkbox"' + (picked.indexOf(t) >= 0 ? ' checked' : '') + '><span class="mono">' + t + '</span></label>'; }).join('') + '</div><span class="hint">已选 ' + picked.length + ' 个。subagent_* 不在可选范围内：子代理不能再派子代理。</span></div>';
+      }
+    } else {
+      body += '<label class="lb">工具权限<input class="field" value="' + subToolsLabel(x) + '（内置，不能改）" disabled></label>';
+    }
+    body += '<label class="lb"><span class="sa-plab">系统提示词' + (x.over ? '<span class="badge warn">已改写</span><button type="button" class="btn link" data-act="fmnop">恢复默认</button>' : '') + '</span>' +
+      '<textarea class="field mono sa-prompt"' + (ro ? ' disabled' : '') + (x.k === 'custom' && !prompt ? ' placeholder="这个子代理的角色、做事方式和交付格式"' : '') + '>' + esc(prompt) + '</textarea></label>' +
+      '<span class="hint">' + (ro ? '系统子代理只能查看。' : x.k === 'pub' ? '只影响当前主代理 main；保存在 forebrain.yaml，新会话生效。' : '保存在 forebrain.yaml 的主代理 main 下，新会话生效。') + '</span>';
+    return [title, body, k === 'subnew' ? '创建' : '保存', true, true, ro];
+  }
+  // Subagents (owner 2026-10-18): each one the conversation dispatched is a card in the thread; opening it puts the subagent in a tab of the
+  // right-hand drawer — live while it runs, replayed from the record once it is done. The drawer and 工作台 share the right side, one at a time.
+  var subs = {
+    plan: { ty: 'plan', ti: '拆出修复步骤', st: 'done', el: '38.2s', prov: 'deepseek', model: 'deepseek-v4', eff: '高', pct: 9, used: '11.5K', win: '128K', tin: '10.9K', tout: '612', last: 'read_file pkg/gateway/http_server.go',
+      task: '根因：网页端拿不到 gateway token，请求头里的 Authorization 始终为空。\n按这个根因拆出修复网页端 /api 全部 401 的步骤，每步写清改哪里、怎么验证。只读，不要改代码。' },
+    explore: { ty: 'explore', ti: '扫描鉴权调用点', st: 'run', el: '41s', plan: [1, 3, '确认握手是否认 Cookie'], prov: 'deepseek', model: 'deepseek-v4', eff: '中', pct: 12, used: '15.4K', win: '128K', tin: '14.8K', tout: '410', last: 'read_file pkg/gateway/ws.go',
+      task: '在 pkg/ 与 cmd/ 下找出所有读取鉴权凭据的位置（Authorization 请求头、?token= 查询参数、Cookie），按文件列出调用点与用途。只读，不要改代码。\n完成后给出：\n1）每个调用点的文件与行号；\n2）它读的是哪种凭据；\n3）浏览器发出的请求能不能走到它。' },
+    review: { ty: 'review', ti: '审阅中间件改动', st: 'run', el: '12s', prov: 'zhipuai', model: 'glm-5.3-flash', eff: '高', pct: 84, used: '840K', win: '1M', tin: '836K', tout: '2.1K', last: 'read_file pkg/gateway/session_cookie.go',
+      task: '审阅 pkg/gateway/session_cookie.go 与 controlplane.go 的改动：Cookie 是否 HttpOnly + SameSite=Strict，过期与轮换是否正确，Cookie 与 Bearer 同时存在时以谁为准。只读，给出需要改的地方。' }
+  };
+  var subOrder = ['plan', 'explore', 'review'];
+  // the thread that dispatched them: 重构 gateway 鉴权中间件 (session 0), unless it was rewound past that turn
+  function hasSubs() { return S.page === 'chat' && S.tenant === 'main' && !S.projectSession && S.session === 0 && !S.newProj && (!S.rewound || S.rewound === 'code'); }
+  function saLabel(id) { return subs[id].ty + ' · ' + subs[id].ti; }
+  function saIcon(s) { return s.st === 'run' ? ic('loader-circle', 'spin run') : s.st === 'fail' ? ic('circle-x', 'bad') : ic('circle-check', 'ok'); }
+  function saRunning() { return subOrder.filter(function (id) { return subs[id].st === 'run'; }); }
+  function saOpen(id) {
+    if (S.sa.tabs.indexOf(id) < 0) S.sa.tabs.push(id);
+    S.sa.active = id; S.sa.open = true; S.sa.menu = false; S.sa.at = false; S.sa.plus = false; S.sa.info = false; S.sa.seen[id] = true; S.bench = false;
+  }
+  function saClose(id) {
+    var i = S.sa.tabs.indexOf(id);
+    if (i < 0) return;
+    S.sa.tabs.splice(i, 1); S.sa.menu = false;
+    if (!S.sa.tabs.length) { S.sa.open = false; S.sa.active = ''; return; }
+    if (S.sa.active === id) { S.sa.active = S.sa.tabs[Math.min(i, S.sa.tabs.length - 1)]; S.sa.seen[S.sa.active] = true; }
+  }
+  function saRow(id) {
+    var s = subs[id], on = S.sa.open && S.sa.active === id;
+    return '<button type="button" class="sa-row" data-saopen="' + id + '" aria-current="' + on + '">' + (s.st === 'run' ? ic('loader-circle', 'spin run') : ic('circle-check', 'ok')) +
+      '<span class="sa-rt"><span class="sa-l1"><span class="sa-ti">' + s.ti + '</span><span class="sa-ck"> · ' + s.el + '</span></span><span class="sa-l2">最近：' + s.last + '</span></span><span class="sa-open">查看</span></button>';
+  }
+  function saCallCard(ids, head, dur, run) {
+    return '<div class="sa-card"><div class="sa-hd">' + (run ? ic('loader-circle', 'spin run') : ic('bot')) + '<b>' + head + '</b>' + (dur ? '<span class="d">' + dur + '</span>' : '') + '</div>' + ids.map(saRow).join('') + '</div>';
+  }
+  function saTurn() {
+    return '<div class="u-wrap"><div class="u">按这个方向修。先派个子代理拆一下步骤，再并行查调用点、审阅改动。</div></div>' +
+      '<div class="a">' + saCallCard(['plan'], '已运行 1 个 plan 任务', '38.2s') + '<p>步骤拆好了，共 3 步（见工作台“计划”）。下面两件事并行查，回来后一起改：</p>' +
+      saCallCard(['explore', 'review'], '正在运行 2 个任务…', '', true) + '</div>';
+  }
+  function saTool(icon, name, arg, run) {
+    return '<div class="tool min"><div class="tool-h">' + ic(icon) + '<b>' + name + '</b><code>' + esc(arg) + '</code>' + (run ? '<span class="run">' + ic('loader-circle', 'spin') + '运行中</span>' : '<span class="ok">完成</span>') + '</div></div>';
+  }
+  function saBody(id) {
+    var s = subs[id], open = !!S.sa.task[id];
+    var h = '<div class="sa-task' + (open ? ' open' : '') + '"><div class="cap">交给它的任务</div><p>' + esc(s.task) + '</p><button type="button" class="more" data-satask="' + id + '" aria-label="' + (open ? '收起任务' : '展开任务') + '" aria-expanded="' + open + '">' + ic(open ? 'chevron-up' : 'chevron-down') + '</button></div>';
+    if (id === 'plan') {
+      return h + '<div class="a"><div class="think"><span class="think-l">思考了 4 秒</span><p>先确认中间件现在只认 Bearer，再决定 Cookie 从哪里签发。</p></div>' +
+        saTool('file-text', 'read_file', 'pkg/gateway/controlplane.go') + saTool('file-text', 'read_file', 'pkg/gateway/http_server.go') +
+        '<p>修复分 3 步：</p><ol style="margin:0;padding-left:20px;display:grid;gap:4px"><li>gateway 增加一次性登录，签发 HttpOnly 会话 Cookie（<code class="inl">http_server.go</code>）；验证：登录后响应带 <code class="inl">Set-Cookie</code>。</li><li>控制面中间件同时接受 Cookie 与 Bearer（<code class="inl">controlplane.go</code>）；验证：只带 Cookie 的请求不再 401。</li><li>前端去掉手填 token 的入口；验证：浏览器直接打开页面即可调用 /api。</li></ol>' +
+        '<div class="worked"><span>已工作 38.2s · 首 token 1.1s · 09:43</span></div></div>';
+    }
+    if (id === 'explore') {
+      return h + '<div class="a">' +
+        '<div class="think"><span class="think-l">思考了 3 秒</span><p>先全局搜请求头与查询参数里读 token 的地方，再逐个看调用链。</p></div>' +
+        saTool('terminal', 'shell', 'rg -n "Authorization|access_token|token=" pkg cmd') +
+        '<p>找到 6 处：控制面中间件与 WebSocket 握手各读一次 Authorization 头，WebSocket 另外接受 <code class="inl">?token=</code> 查询参数，其余 3 处在 CLI 的远程连接。</p>' +
+        '<div class="think"><span class="think-l">思考了 2 秒</span><p>浏览器的 WebSocket 不能自定义请求头，?token= 是它唯一的入口；要确认握手时是否也认 Cookie。</p></div>' +
+        saTool('file-text', 'read_file', 'pkg/gateway/ws.go', true) + '</div>';
+    }
+    return h + '<div class="a">' +
+      '<div class="think"><span class="think-l">思考了 2 秒</span><p>先看 Cookie 的属性与过期，再看中间件里两种凭据的先后。</p></div>' +
+      saTool('file-text', 'read_file', 'pkg/gateway/session_cookie.go', true) + '</div>';
+  }
+  // The subagent's run facts, read-only (its spawn fixed the model and the effort): one quiet pill in the composer's bar — its own context
+  // ring with the percentage always written, then model · effort — and a card above it with the whole reading.
+  function saRing(p, size) {
+    var c = 2 * Math.PI * 7, warn = p >= 80;
+    return '<svg class="ctx-ring" viewBox="0 0 18 18" style="width:' + size + 'px;height:' + size + 'px" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="var(--line-2)" stroke-width="2.2"></circle><circle cx="9" cy="9" r="7" fill="none" stroke="' + (warn ? 'var(--warning)' : 'var(--brand)') + '" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="' + (c * p / 100).toFixed(1) + ' ' + c.toFixed(1) + '" transform="rotate(-90 9 9)"></circle></svg>';
+  }
+  function saInfoPill(s) {
+    var warn = s.pct >= 80;
+    return '<button type="button" class="sa-info' + (warn ? ' warn' : '') + '" data-act="sainfo" aria-haspopup="dialog" aria-expanded="' + !!S.sa.info + '" aria-label="这个子代理的模型与上下文" data-tip="模型与上下文" data-tip-pos="top">' +
+      saRing(s.pct, 16) + '<span class="pc">' + s.pct + '%</span><span class="dv"></span><span class="m">' + s.model + '</span><span class="e">· ' + s.eff + '</span></button>';
+  }
+  function saInfoCard(s) {
+    var warn = s.pct >= 80;
+    return '<div class="sa-infocard" role="dialog" aria-label="这个子代理的模型与上下文">' +
+      '<div class="ic-h">' + saRing(s.pct, 34) + '<div><b class="' + (warn ? 'warn' : '') + '">' + s.pct + '%</b><span>上下文已用 ' + s.used + ' / ' + s.win + '</span></div></div>' +
+      '<div class="meter' + (warn ? ' warn' : '') + '" aria-hidden="true"><i style="width:' + s.pct + '%"></i></div>' +
+      (warn ? '<div class="ic-warn">' + ic('triangle-alert') + '快满了，可在下面输入 /compact 压缩它</div>' : '') +
+      '<dl class="ic-kv"><dt>模型</dt><dd class="mono">' + s.prov + '/' + s.model + '</dd><dt>思考强度</dt><dd>' + s.eff + '</dd><dt>上下文窗口</dt><dd class="mono">' + s.win + '</dd><dt>本次用量</dt><dd class="mono">输入 ' + s.tin + ' · 输出 ' + s.tout + '</dd></dl>' +
+      '<div class="ic-f"><span class="hint">模型与思考强度在派发时确定</span></div></div>';
+  }
+  function saMenu() {
+    return '<div class="sa-menu" role="menu"><div class="cap">本对话的子代理 · ' + subOrder.length + '</div>' + subOrder.map(function (id) {
+      var x = subs[id], open = S.sa.tabs.indexOf(id) >= 0;
+      return '<button type="button" role="menuitem" data-saopen="' + id + '">' + saIcon(x) + '<span class="lb">' + saLabel(id) + '</span><span class="d">' + (open ? '已打开' : x.st === 'run' ? x.el : '已完成') + '</span></button>';
+    }).join('') + '</div>';
+  }
+  function saDrawer() {
+    var a = S.sa.active, s = subs[a];
+    var h = '<aside class="sad" aria-label="子代理"><div class="sad-h"><div class="sad-tabs" role="tablist" aria-label="打开的子代理">' +
+      S.sa.tabs.map(function (id) {
+        var x = subs[id], on = id === a, unseen = !on && x.st !== 'run' && !S.sa.seen[id];
+        return '<div class="sad-tab' + (on ? ' on' : '') + '"><button type="button" class="t" role="tab" aria-selected="' + on + '" data-satab="' + id + '">' + saIcon(x) +
+          '<span class="lb" data-tip="' + esc(saLabel(id)) + '" data-tip-pos="bottom" data-tip-trunc="1">' + saLabel(id) + '</span>' + (unseen ? '<span class="new" aria-label="有新内容"></span>' : '') + '</button>' +
+          '<button type="button" class="icon-btn x" data-saclose="' + id + '" aria-label="关闭 ' + saLabel(id) + '" data-tip="关闭" data-tip-pos="bottom">' + ic('x') + '</button></div>';
+      }).join('') + '</div>' +
+      '<button type="button" class="icon-btn" data-act="samenu" aria-haspopup="menu" aria-expanded="' + S.sa.menu + '" aria-label="打开其他子代理" data-tip="打开其他子代理" data-tip-pos="bottom">' + ic('plus') + '</button><span class="grow"></span>' +
+      '<button type="button" class="icon-btn" data-act="sadrawer" aria-label="收起" data-tip="收起" data-tip-pos="bottom">' + ic('panel-right-close') + '</button>' +
+      (S.sa.menu ? saMenu() : '') + '</div>' +
+      '<div class="sad-b" role="tabpanel" aria-label="' + esc(saLabel(a)) + '">' + saBody(a) + '</div>';
+    if (s.st === 'run') h += '<button type="button" class="sa-down" aria-label="回到底部" data-tip="回到底部">' + ic('arrow-down') + '</button>' +
+      '<div class="sa-run" role="status">' + ic('loader-circle', 'spin') + '<span>工作中（' + s.el + '）</span>' + (s.plan ? '<span class="pp">' + ic('square-check', 'pc') + s.plan[0] + '/' + s.plan[1] + '</span><span class="pa">' + s.plan[2] + '</span>' : '') + '</div>';
+    var atRows = [['file', 'pkg/gateway/', 'ws', '.go'], ['file', 'pkg/gateway/', 'ws', '_test.go'], ['file', 'frontend/src/lib/', 'ws', 'Client.ts'], ['folder', 'pkg/gateway/', 'ws', 'proxy/']];
+    var at = S.sa.at ? '<div class="sa-at" role="listbox" aria-label="引用文件"><div class="cap">引用文件 · forebrain-harness</div>' + atRows.map(function (r, i) {
+      var path = r[1] + r[2] + r[3];
+      return '<button type="button" role="option" aria-selected="' + (i === 0) + '" class="' + (i === 0 ? 'on' : '') + '" data-saref="' + path + '">' + ic(r[0]) + '<span>' + r[1] + '<mark>' + r[2] + '</mark>' + r[3] + '</span></button>';
+    }).join('') + '</div>' : '';
+    var ph = S.sa.at ? '<span>@ws</span>' : S.sa.draft ? '<span>' + esc(S.sa.draft) + '</span>' : (S.sa.ref ? '' : '给这个子代理发消息，/ 调出命令，@ 引用文件');
+    var plus = S.sa.plus ? '<div class="plus-pop" role="menu" aria-label="添加"><div class="pp-cap">添加</div><button type="button" class="pp-opt" role="menuitem" data-saplus="attach">' + ic('paperclip') + '<b>附件</b></button>' +
+      '<div class="pp-cap">技能</div><div class="pp-skills">' + projectSkills.map(function (k) { return '<button type="button" class="pp-opt" role="menuitem" data-saplus="/' + k.n + ' ">' + ic('sparkles') + '<b class="mono">' + k.n + '</b><span>' + k.d + '</span></button>'; }).join('') + '</div>' +
+      '<div class="pp-foot"><span><kbd>@</kbd>引用文件</span><span><kbd>/</kbd>命令与技能</span><span>' + ic('info') + '输入以搜索</span></div></div>' : '';
+    return h + '<div class="sa-comp">' + at + plus + (S.sa.info ? saInfoCard(s) : '') +
+      '<button type="button" class="ph' + (S.sa.at || S.sa.draft ? ' typed' : '') + '" data-act="saat" aria-label="给这个子代理发消息">' + (S.sa.ref ? '<span class="ref">@' + S.sa.ref + '</span>' : '') + ph + '</button>' +
+      '<div class="bar"><button type="button" class="sa-plus" data-act="saplus" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.sa.plus + '" data-tip="添加">' + ic('plus') + '</button><span class="grow"></span>' + saInfoPill(s) +
+      (s.st === 'run' ? '<button type="button" class="stop" aria-label="停止这个子代理" data-tip="停止这个子代理">' + ic('square') + '</button>' : '') +
+      '<button type="button" class="send" aria-label="发送">' + ic('arrow-up') + '</button></div></div></aside>';
+  }
+
   function chat() {
     var title = curTitle(), proj = curProject(), missing = !!(proj && proj.missing), fresh = title === '未命名对话' && !S.newProj;
     if (fresh) {
@@ -3076,7 +3453,8 @@
     }
     var body = title === '未命名对话' ? newThread() : threadHtml(missing);
     var typed = !missing && S.demo === 'busy' && title !== '未命名对话' ? '再跑一遍 go test ./pkg/gateway/...' : '';
-    return '<div class="chat">' + body + composerHtml({ missing: missing, typed: typed, ready: true }) + '</div>';
+    var run = S.demo === 'mainrun' ? '<div class="run-line" role="status">' + ic('loader-circle', 'spin') + '<span class="w">工作中（1m 12s · Esc 中断）</span><span class="pp">' + ic('square-check', 'pc') + '3/5</span><span class="pa">改中间件并补测试</span><span class="ft">首 token 1.2s</span></div>' : '';
+    return '<div class="chat' + (S.sa.open && hasSubs() ? ' narrow' : '') + '">' + body + run + composerHtml({ missing: missing, typed: typed, ready: true }) + '</div>';
   }
 
   function bench(ws) {
@@ -3143,7 +3521,7 @@
   window.__mde = { get: function (id) { return S.mdeDoc[id] || ''; }, set: function (id, v) { S.mdeDoc[id] = v; }, dirty: mdeDirty };
   function kvList(rows) { return '<dl class="kv">' + rows.map(function (r) { return '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>'; }).join('') + '</dl>'; }
   function ruleTable(rows, scope) {
-    return '<div class="tb-wrap"><table class="tb"><thead><tr><th>动作</th><th>工具</th><th>规则内容</th><th class="r" style="width:88px">操作</th></tr></thead><tbody>' + rows.map(function (r, i) {
+    return '<div class="tb-wrap"><table class="tb"><thead><tr><th>动作</th><th>工具</th><th>规则内容</th><th class="c" style="width:88px">操作</th></tr></thead><tbody>' + rows.map(function (r, i) {
       var cls = r[0] === '允许' ? 'ok' : r[0] === '询问' ? 'warn' : 'err';
       return '<tr><td><span class="badge ' + cls + '">' + r[0] + '</span></td><td class="mono">' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="r">' + rowActs([act('pencil', '编辑', 'data-fm="ruleedit2:' + scope + ':' + i + '"', '', r[2]), act('trash-2', '删除', '', 'dgr', r[2])]) + '</td></tr>';
     }).join('') + '</tbody></table></div>' + pager(rows.length, 10, 'rules-' + scope);
@@ -3162,18 +3540,21 @@
       { n: 'codegraph', t: 'codegraph mcp', ty: 'stdio', req: true, st: 'on', tools: '1 个工具', co: 30, env: [['CODEGRAPH_HOME', '/Users/doudou/.codegraph']] }
     ],
     project: [
+      { n: 'playwright', t: 'npx @playwright/mcp@latest', ty: 'stdio', st: 'pending', co: 60 },
       { n: 'github', t: 'https://api.githubcopilot.com/mcp/', ty: 'http', oauth: true, hdr: [['Authorization', 'Bearer ${GITHUB_TOKEN}']], st: 'allowed', tools: '38 个工具', co: 15, rq: 60, oauthId: 'Iv1.b4c2e9a71f3d' },
-      { n: 'playwright', t: 'npx @playwright/mcp@latest', ty: 'stdio', st: 'pending', co: 60 }
+      { n: 'filesystem', t: 'npx @modelcontextprotocol/server-filesystem .', ty: 'stdio', st: 'declined', co: 30 }
     ]
   };
   function mcpCopy(scope, r) { var o = {}, k; for (k in r) o[k] = r[k]; o.scope = scope; return o; }
   function mcpRows(scope) {
     return (mcpServers[scope] || []).map(function (r) {
       var o = mcpCopy(scope, r);
+      // owner 2026-10-18: 拒绝 records a decision but keeps the row (已拒绝), and 允许 there takes it back — the terminal's N is the same 拒绝
       if (o.n === 'playwright') {
-        if (S.mcpDeny) return null;
+        if (S.mcpDeny) o.st = 'declined';
         if (S.mcpAllow && o.st === 'pending') { o.st = 'allowed'; o.tools = '21 个工具'; }
       }
+      if (o.n === 'filesystem' && S.mcpUndecline) { o.st = 'allowed'; o.tools = '11 个工具'; }
       return o;
     }).filter(function (r) { return !!r; });
   }
@@ -3224,6 +3605,8 @@
     return '<button type="button" class="icon-btn row-act' + (tone ? ' ' + tone : '') + '" data-tip="' + label + '" data-tip-pos="top" aria-label="' + label + (name ? ' ' + name : '') + '"' + (attrs ? ' ' + attrs : '') + '>' + ic(icon) + '</button>';
   }
   function actSlot() { return '<span class="icon-slot" aria-hidden="true"></span>'; }
+  // the enable switch lives in the 操作 column, first (owner 2026-10-18); rows without one keep its width
+  function swSlot() { return '<span class="sw-slot" aria-hidden="true"></span>'; }
   // named rowActs, not acts: skillsBlock keeps its header buttons in a local `acts`
   function rowActs(list) { return '<div class="acts-r">' + list.join('') + '</div>'; }
   function mcpSrc(kind) {
@@ -3241,23 +3624,30 @@
     if (r.st === 'cfg') return ['gray', '配置里已禁用', ''];
     if (r.st === 'off') return ['gray', '已禁用', ''];
     if (r.st === 'fail') return ['err', '连接失败', ''];
+    if (r.st === 'declined') return ['gray', '已拒绝', ''];
     return ['warn', '待确认', ''];
   }
   // one badge per row; the raw failure, enabled: false and an override ride its tooltip and the drawer
   function mcpStatusCell(r) {
     if (r.over) return '<span class="badge gray" title="被主代理 ' + r.over + ' 覆盖，未运行">未运行 · 被覆盖</span>';
-    var s = mcpState(r), tip = r.st === 'fail' ? r.err : r.st === 'cfg' ? 'enabled: false' : '';
+    var s = mcpState(r), tip = r.st === 'fail' ? r.err : r.st === 'cfg' ? 'enabled: false' : r.st === 'declined' ? '不会加载；点“允许”撤回' : '';
     return '<span class="badge ' + s[0] + '"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + s[1] + s[2] + '</span>';
+  }
+  function mcpSwCell(r, mine) {
+    if (!mine || r.st === 'pending' || r.st === 'declined') return swSlot();
+    return '<button type="button" class="sw" role="switch" aria-checked="' + (r.st === 'on' || r.st === 'allowed') + '" aria-label="启用 ' + r.n + '" data-tip="' + (r.st === 'cfg' ? '配置里是 enabled: false：在编辑里打开“启用”' : (r.st === 'on' || r.st === 'allowed') ? '停用' : '启用') + '" data-tip-pos="top"' +
+      (r.st === 'cfg' ? ' disabled' : '') + '></button>';
   }
   function mcpEnableCell(r, mine) {
     if (!mine) return '<span class="hint">—</span>';
-    if (r.st === 'pending') return '';
+    if (r.st === 'pending' || r.st === 'declined') return '';
     return '<button type="button" class="sw" role="switch" aria-checked="' + (r.st === 'on' || r.st === 'allowed') + '" aria-label="启用 ' + r.n + '"' +
       (r.st === 'cfg' ? ' disabled title="配置里是 enabled: false：在编辑里打开“启用”"' : '') + '></button>';
   }
   // rows this page owns: 编辑 + 删除; rows of another layer: 查看 only (a read-only drawer)
   function mcpActions(r, mine) {
     if (r.st === 'pending') return rowActs([act('check', '允许', 'data-mcpallow="1"', 'ok', r.n), act('x', '拒绝', 'data-mcpdeny="1"', 'dgr', r.n)]);
+    if (r.st === 'declined') return rowActs([act('check', '允许', 'data-mcpundecline="' + r.n + '"', 'ok', r.n), actSlot()]);
     if (mine) return rowActs([act('pencil', '编辑', 'data-mdw="edit:' + r.scope + ':' + r.n + '"', '', r.n), act('trash-2', '删除', '', 'dgr', r.n)]);
     return rowActs([act('eye', '查看', 'data-mdw="view:' + r.scope + ':' + r.n + '"', '', r.n), actSlot()]);
   }
@@ -3267,14 +3657,14 @@
     var btns = '<button type="button" class="btn sm pri" data-mdw="new:' + scope + '">' + ic('plus') + '添加 MCP 服务</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>';
     var filters = '<input class="field" id="mcp-q-' + scope + '" placeholder="搜索 MCP 服务" style="max-width:240px">' + (multi ? sel(['全部来源'].concat(layers.slice().reverse().map(function (l) { return names[l]; })), '全部来源', 'width:110px') : '');
     return '<div class="flat">' + tabTools(filters, btns) +
-      '<div class="tb-wrap"><table class="tb mcp-tb"><colgroup><col style="width:168px">' + (multi ? '<col style="width:84px">' : '') + '<col><col style="width:108px"><col style="width:148px"><col style="width:56px"><col style="width:88px"></colgroup>' +
-      '<thead><tr><th>MCP 服务</th>' + (multi ? '<th>来源</th>' : '') + '<th>命令或地址</th><th>类型</th><th>状态</th><th>启用</th><th class="r">操作</th></tr></thead><tbody>' +
+      '<div class="tb-wrap"><table class="tb mcp-tb"><colgroup><col style="width:168px">' + (multi ? '<col style="width:84px">' : '') + '<col><col style="width:108px"><col style="width:148px"><col style="width:132px"></colgroup>' +
+      '<thead><tr><th>MCP 服务</th>' + (multi ? '<th>来源</th>' : '') + '<th>命令或地址</th><th>类型</th><th>状态</th><th class="c">操作</th></tr></thead><tbody>' +
       rows.map(function (r) {
         var mine = own.indexOf(r.scope) >= 0;
         return '<tr><td><div class="mcp-name"><b class="mono" title="' + r.n + '">' + r.n + '</b>' + (r.req ? '<span class="badge gray">必需</span>' : '') + '</div></td>' +
           (multi ? '<td>' + mcpSrc(r.scope) + '</td>' : '') +
           '<td><span class="mcp-target mono" title="' + esc(r.t) + '">' + esc(r.t) + '</span></td><td>' + mcpType(r) + '</td>' +
-          '<td>' + mcpStatusCell(r) + '</td><td>' + mcpEnableCell(r, mine) + '</td><td class="r">' + mcpActions(r, mine) + '</td></tr>';
+          '<td>' + mcpStatusCell(r) + '</td><td class="r">' + mcpActions(r, mine).replace('<div class="acts-r">', '<div class="acts-r">' + mcpSwCell(r, mine)) + '</td></tr>';
       }).join('') + '</tbody></table></div>' + pager(rows.length, 10, 'mcp-' + scope) + tabNote(desc, where) + '</div>';
   }
   function mcpKV(rows, add, ro) {
@@ -3434,8 +3824,16 @@
     }
     if (k.indexOf('tree') === 0 || k.indexOf('chg') === 0) { var tf = treeForm(f); title = tf[0]; body = tf[1]; ok = tf[2]; wide = tf[3]; xl = !!tf[4]; danger = !!tf[5]; }
     if (k.indexOf('ws') === 0) { var wf = wsForm(f); title = wf[0]; body = wf[1]; ok = wf[2]; wide = wf[3]; xl = !!wf[4]; }
+    var viewOnly = false;
+    if (k === 'subnew' || k === 'subedit' || k === 'subview') {
+      var sf = subForm(f);
+      return '<div class="mask dw-mask"><aside class="dw" role="dialog" aria-label="' + sf[0] + '"><div class="dw-h"><b>' + sf[0] + '</b>' + (sf[5] ? '<span class="badge gray">只读</span>' : '') +
+        '<button type="button" class="icon-btn" data-act="fmclose" aria-label="关闭">' + ic('x') + '</button></div><div class="dw-b">' + sf[1] + '</div>' +
+        '<div class="dw-f"><span style="flex:1"></span><button type="button" class="btn" data-act="fmclose">' + (sf[5] ? '关闭' : '取消') + '</button>' + (sf[5] ? '' : '<button type="button" class="btn pri" data-act="fmok">' + sf[2] + '</button>') + '</div></aside></div>';
+    }
+    if (k === 'subdel') { title = '删除子代理 ' + f.a + '？'; ok = '删除'; danger = true; body = '<p>从 forebrain.yaml 里删除它的配置；进行中的派发不受影响，之后模型不能再派它。</p>'; }
     return '<div class="mask"><div class="modal' + (wide ? '' : ' sm') + '"' + (xl ? ' style="width:860px;max-height:780px"' : '') + ' role="dialog" aria-label="' + title.replace(/<[^>]+>/g, '') + '"><div class="modal-h"><b>' + title + '</b><button type="button" class="icon-btn" data-act="fmclose" aria-label="关闭">' + ic('x') + '</button></div><div class="modal-b">' + body + '</div>' +
-      '<div class="modal-f"><span style="flex:1"></span><button type="button" class="btn" data-act="fmclose">' + (k === 'verify' ? '关闭' : '取消') + '</button><button type="button" class="btn pri" data-act="' + okAct + '"' + (danger ? ' style="background:var(--danger);border-color:var(--danger)"' : '') + '>' + ok + '</button></div></div></div>';
+      '<div class="modal-f"><span style="flex:1"></span><button type="button" class="btn" data-act="fmclose">' + (k === 'verify' || viewOnly ? '关闭' : '取消') + '</button>' + (viewOnly ? '' : '<button type="button" class="btn pri" data-act="' + okAct + '"' + (danger ? ' style="background:var(--danger);border-color:var(--danger)"' : '') + '>' + ok + '</button>') + '</div></div></div>';
   }
   function projSkill(name, desc, dir, on) { return '<tr><td><b class="mono">' + name + '</b><div class="hint">' + desc + '</div></td><td class="mono hint">' + dir + '</td><td style="text-align:right"><button type="button" class="btn sm">编辑</button> <button type="button" class="btn sm dgr">删除</button></td><td style="text-align:right"><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></td></tr>'; }
   function skillRow(name, desc, src, on) { return '<tr><td><b class="mono">' + name + '</b><div class="hint">' + desc + '</div></td><td><span class="badge gray">' + src + '</span></td><td style="text-align:right"><button type="button" class="sw" role="switch" aria-checked="' + on + '"></button></td></tr>'; }
@@ -3490,7 +3888,7 @@
     var refresh = '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>';
     var h = '<div class="flat"><div class="row"><input class="field" id="sk-q-' + scope + '" placeholder="搜索技能" style="max-width:240px">' + sel(['全部来源'].concat(scope === 'project' ? ['项目', '主代理'] : scope === 'agent' ? ['主代理'] : []).concat(['共享', '内置']), '全部来源', 'width:110px') + '<span style="flex:1"></span>' +
       (count ? '<span class="hint">已选 ' + count + ' 个</span>' : '') + '<button type="button" class="btn sm"' + (count ? '' : ' disabled') + '>' + ic('download') + '下载所选</button>' + acts + refresh + '</div>' +
-      '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:30px"><input type="checkbox" aria-label="全选" data-selall="' + scope + '" data-n="' + rows.length + '"' + (count === rows.length ? ' checked' : '') + '></th><th>技能</th><th>来源</th><th style="text-align:right">状态</th><th class="r" style="width:110px">操作</th></tr></thead><tbody>';
+      '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:30px"><input type="checkbox" aria-label="全选" data-selall="' + scope + '" data-n="' + rows.length + '"' + (count === rows.length ? ' checked' : '') + '></th><th>技能</th><th>来源</th><th style="text-align:right">状态</th><th class="c" style="width:110px">操作</th></tr></thead><tbody>';
     rows.forEach(function (r, i) {
       var mine = own.indexOf(r.src) >= 0;
       var vs = verState(r.n), vv = verOf(r.n), isDraft = vs === 'draft', isPending = vs === 'pending';
@@ -3598,7 +3996,7 @@
       '<button type="button" class="btn sm dgr"' + (count ? '' : ' disabled') + '>' + ic('trash-2') + '删除所选</button><button type="button" class="btn sm dgr">重置全部</button></div>' +
       '<div class="tb-wrap"><table class="tb mem-tb"><colgroup><col style="width:40px"><col style="width:300px"><col><col style="width:150px"><col style="width:150px"><col style="width:88px"></colgroup>' +
       '<thead><tr><th><input type="checkbox" aria-label="全选" data-selall="mem' + scope + '" data-n="' + files.length + '"' + (count === files.length ? ' checked' : '') + '></th><th>记忆文件</th><th>内容</th>' +
-      sortTh(scope, 'created', '创建时间') + sortTh(scope, 'updated', '更新时间') + '<th class="r">操作</th></tr></thead><tbody>';
+      sortTh(scope, 'created', '创建时间') + sortTh(scope, 'updated', '更新时间') + '<th class="c">操作</th></tr></thead><tbody>';
     rows.forEach(function (x) {
       var f = x[0], i = x[1];
       h += '<tr><td><input type="checkbox" aria-label="选择 ' + f[0] + '" data-sel="mem' + scope + ':' + i + '"' + (S.sel['mem' + scope + ':' + i] ? ' checked' : '') + '></td>' +
@@ -3606,7 +4004,7 @@
         '<td><span class="one hint" title="' + esc(f[1]) + '">' + f[1] + '</span></td><td class="t mono hint">' + f[2] + '</td><td class="t mono hint">' + f[3] + '</td>' +
         '<td class="r">' + rowActs([act('pencil', '编辑', 'data-memedit="' + scope + ':' + i + '"', '', f[0]), f[4] ? actSlot() : act('trash-2', '删除', '', 'dgr', f[0])]) + '</td></tr>';
     });
-    h += '</tbody></table></div>' + pager(scope === 'agent' ? 28 : 11, 6, 'mem-' + scope) +
+    h += '</tbody></table></div>' + pager(scope === 'agent' ? 28 : 11, 10, 'mem-' + scope) +
       tabNote(desc, '核心文件（MEMORY.md、memory_summary.md）可以编辑、清空内容，但不能删除；每次保存或删除都会在记忆目录里留下一个版本。') + '</div>';
     return h;
   }
@@ -3619,7 +4017,7 @@
     var times = { 'AGENTS.md': '10月8日 21:10', 'SOUL.md': '9月30日 09:12', 'FOREBRAIN.md': '今天 08:30', 'pkg/gateway/FOREBRAIN.md': '10月5日 16:02' };
     var nb = '<button type="button" class="btn sm pri" data-fm="rulenew:' + scope + '">' + ic('plus') + '新建规则文件</button>';
     return '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索规则文件">', nb) +
-      '<div class="tb-wrap"><table class="tb"><thead><tr><th>文件</th><th>作用</th><th>更新时间</th><th class="r" style="width:64px">操作</th></tr></thead><tbody>' +
+      '<div class="tb-wrap"><table class="tb"><thead><tr><th>文件</th><th>作用</th><th>更新时间</th><th class="c" style="width:64px">操作</th></tr></thead><tbody>' +
       files.map(function (f) { return '<tr><td class="mono">' + f[0] + '</td><td class="hint">' + f[1] + '</td><td class="mono hint">' + (times[f[0]] || '—') + '</td><td class="r">' + rowActs([act('pencil', '编辑', 'data-fm="ruleedit:' + scope + ':' + f[0] + '"', '', f[0])]) + '</td></tr>'; }).join('') +
       '</tbody></table></div>' + pager(files.length, 10, 'rulefiles-' + scope) + tabNote(desc) + '</div>';
   }
@@ -3745,7 +4143,7 @@
     var rounds = r2 ? ['第 2 轮 · 10:20', '第 1 轮 · 09:50'] : ['第 1 轮 · 10:15'];
     return benchCard('flask-conical', '评测', '<div class="row" style="gap:6px">' + sel(rounds, rounds[0], 'width:130px;height:28px;font-size:12px') + '<button type="button" class="btn sm pri" data-act="evalrun">运行评测</button></div>',
       '<div class="row" style="gap:6px"><span class="badge ok">使用技能 ' + withN + '/' + res.length + '</span><span class="badge gray">不用技能 ' + woN + '/' + res.length + '</span><span class="hint">用时 2m 40s</span></div>' +
-      '<div class="tb-wrap"><table class="tb ev-tb"><thead><tr><th>用例</th><th>使用技能</th><th>不用技能</th><th>反馈</th><th class="r">操作</th></tr></thead><tbody>' +
+      '<div class="tb-wrap"><table class="tb ev-tb"><thead><tr><th>用例</th><th>使用技能</th><th>不用技能</th><th>反馈</th><th class="c">操作</th></tr></thead><tbody>' +
       res.map(function (x, i) { return '<tr><td>' + (i + 1) + '</td><td><span class="badge ' + (x[0] ? 'ok">通过' : 'err">未通过') + '</span></td><td><span class="badge ' + (x[1] ? 'ok">通过' : 'err">未通过') + '</span></td><td>' + (x[2] ? ic('message-square-text') : '<span class="hint">—</span>') + '</td><td class="r">' + rowActs([act('eye', '查看', 'data-fm="wseval:' + n + ':' + i + '"', '', '用例 ' + (i + 1))]) + '</td></tr>'; }).join('') +
       '</tbody></table></div><div class="row"><button type="button" class="btn sm" data-act="evalfix">按反馈再改一轮</button></div>');
   }
@@ -3813,7 +4211,7 @@
   function channelsBlock() {
     return '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索通道">', '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
       '<div class="tb-wrap"><table class="tb fix-tb"><colgroup><col style="width:130px"><col style="width:230px"><col><col style="width:56px"><col style="width:56px"></colgroup>' +
-      '<thead><tr><th>通道</th><th>投递标识</th><th>配置</th><th>启用</th><th class="r">操作</th></tr></thead><tbody>' +
+      '<thead><tr><th>通道</th><th>投递标识</th><th>配置</th><th>启用</th><th class="c">操作</th></tr></thead><tbody>' +
       projChannels.map(function (c, i) {
         var set = chanSet(c), on = set && !!S.chanOn[i];
         var sum = set ? c[3].filter(function (f) { return f[2]; }).map(function (f) { return f[0] + ' <span class="mono">' + (f[3] ? '••' + f[2].slice(-4) : f[2]) + '</span>'; }).join(' · ') : '<span class="hint">未配置</span>';
@@ -3828,7 +4226,7 @@
   function cronBlock() {
     return '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索任务">', '<button type="button" class="btn pri sm" data-act="cronnew">' + ic('plus') + '新建</button>') +
       '<div class="tb-wrap"><table class="tb fix-tb"><colgroup><col><col style="width:140px"><col style="width:200px"><col style="width:110px"><col style="width:64px"><col style="width:56px"><col style="width:112px"></colgroup>' +
-      '<thead><tr><th>名称</th><th>计划</th><th>投递至</th><th>下次执行</th><th class="r">已执行</th><th>启用</th><th class="r">操作</th></tr></thead><tbody>' +
+      '<thead><tr><th>名称</th><th>计划</th><th>投递至</th><th>下次执行</th><th class="r">已执行</th><th>启用</th><th class="c">操作</th></tr></thead><tbody>' +
       cronTasks.map(function (c, i) {
         var on = !S.cronOff[i];
         return '<tr><td><b class="cell-1" title="' + c[0] + '">' + c[0] + '</b></td><td><span class="cell-1 mono" title="' + c[1] + '">' + c[1] + '</span></td><td><span class="cell-1' + (c[2] === '只记录' ? ' hint' : ' mono') + '" title="' + c[2] + '">' + c[2] + '</span></td>' +
@@ -3882,7 +4280,7 @@
       });
       return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索名称或路径">', '<button type="button" class="btn sm pri" data-act="projform">' + ic('plus') + '新建项目</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
         '<div class="tb-wrap"><table class="tb fix-tb proj-tb"><colgroup><col style="width:210px"><col><col style="width:200px"><col style="width:64px"><col style="width:150px"><col style="width:112px"></colgroup>' +
-        '<thead><tr>' + sortTh('projects', 'name', '项目', 'asc') + '<th>路径</th><th>说明</th><th class="r">对话</th>' + sortTh('projects', 'updated', '更新时间') + '<th class="r">操作</th></tr></thead><tbody>' +
+        '<thead><tr>' + sortTh('projects', 'name', '项目', 'asc') + '<th>路径</th><th>说明</th><th class="r">对话</th>' + sortTh('projects', 'updated', '更新时间') + '<th class="c">操作</th></tr></thead><tbody>' +
         rows.map(function (p) {
           var pin = !!S.pinned[p.n], m = meta[p.n];
           return '<tr><td><div class="cell-name"><button type="button" class="btn link proj-link" data-go="project">' + p.n + '</button>' + (pin ? '<span class="badge">置顶</span>' : '') +
@@ -3920,7 +4318,7 @@
         ps.sort(function (a, b) { var c = a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0; return so.dir === 'desc' ? -c : c; });
         h += '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索会话标题">', '<button type="button" class="btn pri sm" data-psession="新的项目会话">' + ic('plus') + '新建项目会话</button>') +
           '<div class="tb-wrap"><table class="tb fix-tb"><colgroup><col><col style="width:150px"><col style="width:64px"><col style="width:100px"><col style="width:150px"><col style="width:150px"><col style="width:56px"></colgroup>' +
-          '<thead><tr><th>标题</th><th>模型</th><th class="r">消息</th><th>心跳</th>' + sortTh('psessions', 'created', '创建时间') + sortTh('psessions', 'updated', '更新时间') + '<th class="r">操作</th></tr></thead><tbody>' +
+          '<thead><tr><th>标题</th><th>模型</th><th class="r">消息</th><th>心跳</th>' + sortTh('psessions', 'created', '创建时间') + sortTh('psessions', 'updated', '更新时间') + '<th class="c">操作</th></tr></thead><tbody>' +
           ps.map(function (x) {
             var b = beats[x[0]];
             return '<tr><td><button type="button" class="btn link proj-link" data-psession="' + x[0] + '" title="' + x[0] + '">' + x[0] + '</button></td><td class="mono">' + x[1] + '</td><td class="r num">' + x[2] + '</td>' +
@@ -3959,17 +4357,27 @@
       return wsView();
     },
     subagents: function () {
-      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索子代理或任务">', '<button type="button" class="btn sm dgr">全部停止</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
-        '<div class="tb-wrap"><table class="tb"><thead><tr><th>子代理</th><th>任务</th><th>所在会话</th><th>已运行</th><th class="r">操作</th></tr></thead><tbody>' +
-        '<tr><td class="mono">explore</td><td>扫描鉴权调用点</td><td><button type="button" class="btn link" data-session="0">重构 gateway 鉴权中间件</button></td><td class="mono">00:41</td><td class="r">' + rowActs([act('circle-stop', '停止', '', 'dgr', 'explore')]) + '</td></tr>' +
-        '<tr><td class="mono">review</td><td>审阅中间件改动</td><td><button type="button" class="btn link" data-session="0">重构 gateway 鉴权中间件</button></td><td class="mono">00:12</td><td class="r">' + rowActs([act('circle-stop', '停止', '', 'dgr', 'review')]) + '</td></tr>' +
-        '</tbody></table></div>' + pager(2, 10, 'subagents') + tabNote('本主代理所有会话里正在运行的子代理。') + '</div>';
+      var glob = S.subGlobal !== false, over = S.subOver === true || S.subOver === false, on = over ? S.subOver : glob, q = S.subKind || '全部类型';
+      var rows = subDefs.filter(function (x) { return q === '全部类型' || (q === '内置' && x.k === 'pub') || (q === '自定义' && x.k === 'custom') || (q === '系统' && x.k === 'sys'); });
+      // this agent's own switch, in the toolbar left of 新建子代理: it follows the global default (设置 → 子代理) until switched here
+      var sw = '<span class="sa-tsw"><button type="button" class="sw" role="switch" aria-checked="' + on + '" aria-label="子代理功能" data-act="suboff" data-tip="' + (on ? '关闭会把下面所有子代理设为禁用' : '开启会把下面所有子代理设为启用') + '" data-tip-pos="top"></button><b>子代理功能</b></span>';
+      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索子代理">' + sel(['全部类型', '内置', '自定义', '系统'], q, 'width:120px'), sw + '<button type="button" class="btn sm pri" data-fm="subnew">' + ic('plus') + '新建子代理</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+        '<div class="tb-wrap"><table class="tb"><thead><tr><th>子代理</th><th style="width:76px">类型</th><th style="width:220px">模型</th><th style="width:92px">工具</th><th class="c" style="width:128px">操作</th></tr></thead><tbody>' +
+        rows.slice((Math.min(S.pg.subagents || 1, Math.max(1, Math.ceil(rows.length / (S.pgSize.subagents || 10)))) - 1) * (S.pgSize.subagents || 10)).slice(0, S.pgSize.subagents || 10).map(function (x) {
+          var swc = x.k === 'sys' ? swSlot() : '<button type="button" class="sw" role="switch" aria-checked="' + !!x.on + '" aria-label="启用 ' + x.n + '" data-subon="' + x.n + '" data-tip="' + (x.on ? '停用' : '启用') + '" data-tip-pos="top"></button>';
+          var acts = x.k === 'custom' ? rowActs([swc, act('pencil', '编辑', 'data-fm="subedit:' + x.n + '"', '', x.n), act('trash-2', '删除', 'data-fm="subdel:' + x.n + '"', 'dgr', x.n)])
+            : x.k === 'pub' ? rowActs([swc, act('pencil', '编辑', 'data-fm="subedit:' + x.n + '"', '', x.n), actSlot()])
+            : rowActs([swc, act('eye', '查看', 'data-fm="subview:' + x.n + '"', '', x.n), actSlot()]);
+          return '<tr><td><div class="sa-nm"><b class="mono">' + x.n + '</b>' + (x.over ? '<span class="badge warn" data-tip="提示词已为当前主代理改写" data-tip-pos="top">已改写</span>' : '') + '</div><div class="hint sa-ds">' + x.d + '</div></td><td>' + subKindBadge(x) + '</td><td>' + subModelCell(x) + '</td><td>' + subToolsLabel(x) + '</td>' +
+            '<td class="r">' + acts + '</td></tr>';
+        }).join('') +
+        '</tbody></table></div>' + pager(rows.length, 10, 'subagents') + tabNote('“内置”与“自定义”的子代理启用后由模型按说明派发；“系统”子代理在计划审阅、/goal、自动审批等场合由系统调用，只能查看。保存在 forebrain.yaml，新会话生效。') + '</div>';
     },
     providers: function () {
       var p = tenants[S.tenant].provider;
       var rows = [['主用', p[0], S.models[0].join('、'), p[0] === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1', '<span class="badge ok">已保存 ••••3f9a</span>'], ['回退 1', 'openai', S.models[1].join('、'), 'https://api.openai.com/v1', '<span class="badge warn">未设置</span>']];
       return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索服务商或模型">', '<button type="button" class="btn sm pri" data-fm="provnew">' + ic('plus') + '添加模型服务</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
-        '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:70px">顺序</th><th>服务商</th><th>模型</th><th>Base URL</th><th>API Key</th><th class="r" style="width:110px">操作</th></tr></thead><tbody>' +
+        '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:70px">顺序</th><th>服务商</th><th>模型</th><th>Base URL</th><th>API Key</th><th class="c" style="width:110px">操作</th></tr></thead><tbody>' +
         rows.map(function (r, i) { return '<tr><td><span class="badge' + (i ? ' gray' : '') + '">' + r[0] + '</span></td><td>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="mono hint">' + r[3] + '</td><td>' + r[4] + '</td><td class="r">' + rowActs([i ? act('arrow-up', '上移', '', '', r[1]) : actSlot(), act('pencil', '编辑', 'data-fm="provedit:' + i + '"', '', r[1]), act('trash-2', '删除', '', 'dgr', r[1])]) + '</td></tr>'; }).join('') +
         '</tbody></table></div>' + pager(rows.length, 10, 'providers') + tabNote('按顺序尝试：第一条主用，其余回退。') + '</div>';
     },
@@ -3999,7 +4407,7 @@
       var size = S.pgSize.tools || 10, pages = Math.max(1, Math.ceil(tools.length / size)), cur = Math.min(S.pg.tools || 1, pages);
       var h = '<div class="pg">' + tabTools('<input class="field" placeholder="搜索工具名或说明" style="max-width:240px">' + sel(['全部分类', '文件', '命令', '代码', '网络', '记忆', '会话', '权限', 'MCP'], '全部分类', 'width:110px') + sel(['全部类型', '只读', '有副作用'], '全部类型', 'width:110px'), '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
         '<div class="tb-wrap"><table class="tb fix-tb tool-tb"><colgroup><col style="width:280px"><col><col style="width:136px"><col style="width:96px"><col style="width:56px"></colgroup>' +
-        '<thead><tr><th>工具</th><th>说明</th><th>分类</th><th>类型</th><th class="r">操作</th></tr></thead><tbody>';
+        '<thead><tr><th>工具</th><th>说明</th><th>分类</th><th>类型</th><th class="c">操作</th></tr></thead><tbody>';
       // 查看入参 / 收起 is the row's one icon action (owner 2026-10-18): it opens the inputs right under the row, inside the table
       tools.slice((cur - 1) * size, cur * size).forEach(function (t) {
         var open = S.toolOpen === t[0];
@@ -4020,7 +4428,7 @@
         memBlock('agent', '本主代理的通用记忆文件（不属于任何项目），可以查看、编辑、删除过时或错误的记忆；记忆功能的开关在“设置 → 记忆”，项目记忆在各项目空间。') + '</div>';
     },
     settings: function () {
-      var groups = [['常规', [['appearance', '外观'], ['approval', '审批默认']]], ['全局服务', [['mcp', 'MCP'], ['hooks', '钩子'], ['memory', '记忆'], ['sharedskills', '共享技能']]], ['高级', [['config', '配置文件'], ['status', '运行状态']]]];
+      var groups = [['常规', [['appearance', '外观'], ['approval', '审批默认'], ['subagents', '子代理']]], ['全局服务', [['mcp', 'MCP'], ['hooks', '钩子'], ['memory', '记忆'], ['sharedskills', '共享技能']]], ['高级', [['config', '配置文件'], ['status', '运行状态']]]];
       var h = '<div class="pg" style="max-width:1100px"><div class="subnav-wrap"><nav class="subnav" role="tablist">';
       groups.forEach(function (g) { h += '<div class="grp">' + g[0] + '</div>' + g[1].map(function (t) { return '<button type="button" role="tab" aria-selected="' + (S.settingsTab === t[0]) + '" data-stab="' + t[0] + '">' + t[1] + '</button>'; }).join(''); });
       h += '</nav><div style="display:grid;gap:16px;min-width:0">';
@@ -4035,11 +4443,14 @@
         h += '<div class="flat">' + radioField('默认审批模式', 'approval', presets.map(function (x) { return [x[0], x[2] + ' · ' + x[1], '', x[3]]; }), S.approvalDef,
           '对所有主代理的新会话生效；单个会话可在输入框旁临时切换。写在 <span class="mono">forebrain.yaml · approval_policy + sandbox_mode</span>。', true) +
           '<div class="row"><button type="button" class="btn pri">保存</button></div></div>';
+      } else if (t === 'subagents') {
+        h += '<div class="flat"><div class="list"><div class="it"><div class="main"><b>启用子代理功能</b><span class="s">允许模型派发子代理。对所有主代理生效；单个主代理可在它的“子代理”页覆盖。</span></div><button type="button" class="sw" role="switch" aria-checked="' + (S.subGlobal !== false) + '" aria-label="启用子代理功能" data-act="subglobal"></button></div></div>' +
+          tabNote('写在 <span class="mono">forebrain.yaml · agents.defaults.enable_subagent</span>；新会话生效。') + '<div class="row"><button type="button" class="btn pri">保存</button></div></div>';
       } else if (t === 'mcp') {
         h += mcpBlock('global', 'MCP 服务', mcpRows('global'), ['global'], '~/.forebrain/forebrain.yaml · agents.defaults.mcp_servers；改动对新会话生效。', '对所有主代理生效，新会话起作用。同名条目被主代理或项目整条覆盖。', ['global']);
       } else if (t === 'hooks') {
         h += '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索事件或命令">', '<button type="button" class="btn sm pri" data-fm="hooknew">' + ic('plus') + '新增钩子</button>') +
-          '<div class="tb-wrap"><table class="tb"><thead><tr><th>事件</th><th>匹配</th><th>命令</th><th class="r" style="width:88px">操作</th></tr></thead><tbody>' +
+          '<div class="tb-wrap"><table class="tb"><thead><tr><th>事件</th><th>匹配</th><th>命令</th><th class="c" style="width:88px">操作</th></tr></thead><tbody>' +
           hookRows.map(function (r, i) { return '<tr><td class="mono">' + r[0] + '</td><td' + (r[1] === '匹配全部工具' ? '' : ' class="mono"') + '>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="r">' + rowActs([act('pencil', '编辑', 'data-fm="hookedit:' + i + '"', '', r[0]), act('trash-2', '删除', '', 'dgr', r[0])]) + '</td></tr>'; }).join('') +
           '</tbody></table></div>' + pager(hookRows.length, 10, 'hooks') + tabNote('对所有主代理生效。') + '</div>';
       } else if (t === 'memory') {
@@ -4063,7 +4474,7 @@
     var app = document.getElementById('app');
     app.setAttribute('data-brand', S.brand); app.setAttribute('data-rail', S.rail); app.setAttribute('data-rc', S.rc ? '1' : '0');
     var content = S.page === 'chat' ? chat() : pages[S.page]();
-    app.innerHTML = rail() + pops() + (S.drawer ? drawer() : '') + '<div class="work">' + topbar() + '<div class="body"><div class="content">' + content + '</div>' + (S.page === 'chat' && S.bench && !isFreshChat() ? bench() : S.page === 'workshop' && S.bench ? bench(true) : '') + '</div></div>' + (S.fb && S.fbFor !== 'projform' ? fbModal() : '') + (S.trust ? trustModal() : '') + (S.attach ? attachModal() : '') + (S.projDel ? delModal() : '') + (S.rw ? rewindModal() : '') + (S.page === 'projects' && S.projectForm ? projFormModal() : '') + (S.memEdit ? memEditModal() : '') + (S.cronModal ? cronModal() : '') + (S.inst ? instModal() : '') + (S.fm ? fmModal() : '') + (S.mdw ? mcpDrawer() : '') + (S.pubM ? pubModal() : '') + (S.cmpM ? cmpModal() : '') + (S.vcM ? verConfirmModal() : '') + (S.fb && S.fbFor === 'projform' ? fbModal() : '');
+    app.innerHTML = rail() + pops() + (S.drawer ? drawer() : '') + '<div class="work">' + topbar() + '<div class="body"><div class="content">' + content + '</div>' + (S.page === 'chat' && S.sa.open && hasSubs() && !isFreshChat() ? saDrawer() : S.page === 'chat' && S.bench && !isFreshChat() ? bench() : S.page === 'workshop' && S.bench ? bench(true) : '') + '</div></div>' + (S.fb && S.fbFor !== 'projform' ? fbModal() : '') + (S.trust ? trustModal() : '') + (S.attach ? attachModal() : '') + (S.projDel ? delModal() : '') + (S.rw ? rewindModal() : '') + (S.page === 'projects' && S.projectForm ? projFormModal() : '') + (S.memEdit ? memEditModal() : '') + (S.cronModal ? cronModal() : '') + (S.inst ? instModal() : '') + (S.fm ? fmModal() : '') + (S.mdw ? mcpDrawer() : '') + (S.pubM ? pubModal() : '') + (S.cmpM ? cmpModal() : '') + (S.vcM ? verConfirmModal() : '') + (S.fb && S.fbFor === 'projform' ? fbModal() : '');
     var cap = captions[S.page];
     document.getElementById('caption').innerHTML = '<h2>当前页面：' + cap[0] + '</h2><ul>' + cap[1].map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ul>';
     document.querySelectorAll('.seg[data-ctl]').forEach(function (seg) {
@@ -4139,11 +4550,13 @@
   });
 
   function closeTopModal() { if (S.fbNew || S.attNew) { S.fbNew = false; S.attNew = false; S.newDirErr = false; return; } if (S.fb) { S.fb = false; S.fbNew = false; S.fbMenu = false; } else if (S.trust) S.trust = false; else if (S.attach) S.attach = false; else if (S.rw) S.rw = false; else if (S.projDel) S.projDel = ''; else if (S.memEdit) S.memEdit = ''; else if (S.cronModal) S.cronModal = false; else if (S.inst) S.inst = null; else if (S.fm) { S.fm = null; S.mcpTest = ''; S.mcpErr = ''; S.mcpTools = false; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; } else if (S.vcM) S.vcM = null; else if (S.cmpM) S.cmpM = ''; else if (S.pubM) S.pubM = ''; else if (S.projectForm) S.projectForm = false; else if (S.mdw) S.mdw = null; }
-  function closePops() { S.hb = false; S.tmenu = false; S.presetMenu = false; S.pjPop = false; S.plusPop = false; S.effortMenu = false; S.modeMenu = false; S.modelMenu = false; }
+  function closePops() { if (S.sa) S.sa.menu = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.pjPop = false; S.plusPop = false; S.effortMenu = false; S.modeMenu = false; S.modelMenu = false; }
   document.getElementById('app').addEventListener('change', function (ev) {
     var el = ev.target;
     if (el.dataset.cronsel) { S.cronCustom = el.value === '自定义…'; render(); }
     else if (el.dataset.mcptype) { S.fmType = el.value; render(); }
+    else if (el.name === 'sa-tools') { S.fmTools = el.value; render(); }
+    else if (el.closest && el.closest('.pg') && S.page === 'subagents' && el.tagName === 'SELECT') { S.subKind = el.value; render(); }
     else if (el.dataset.dproj) { S.dproj = el.value; render(); }
     else if (el.name === 'memscope') { S.memScope = el.value; render(); }
     else if (el.name === 'brand') { S.brand = el.value; render(); }
@@ -4193,7 +4606,23 @@
     else if (d.rmmodel) { var mm = d.rmmodel.split(':'); S.models[+mm[0]].splice(+mm[1], 1); }
     else if (d.addmodel) { var am = d.addmodel.split(':'); S.models[+am[0]].push(am[1]); }
     else if (d.wstask !== undefined) { S.wsTask = Number(d.wstask); }
-    else if (d.act === 'bench') { S.bench = !S.bench; }
+    else if (d.act === 'bench') { S.bench = !S.bench; if (S.bench) { S.sa.open = false; S.sa.menu = false; } }
+    else if (d.saopen) { closePops(); saOpen(d.saopen); }
+    else if (d.satab) { S.sa.active = d.satab; S.sa.seen[d.satab] = true; S.sa.menu = false; S.sa.info = false; }
+    else if (d.saclose) { saClose(d.saclose); }
+    else if (d.satask) { S.sa.task[d.satask] = !S.sa.task[d.satask]; }
+    else if (d.sasess) { closePops(); S.page = 'chat'; S.projectSession = ''; S.session = 0; S.drawer = false; S.ref = ''; saOpen(d.sasess); }
+    else if (d.act === 'samenu') { S.sa.menu = !S.sa.menu; S.sa.at = false; S.sa.plus = false; }
+    else if (d.act === 'saat') { S.sa.at = !S.sa.at; S.sa.menu = false; S.sa.plus = false; S.sa.info = false; }
+    else if (d.act === 'saplus') { S.sa.plus = !S.sa.plus; S.sa.at = false; S.sa.menu = false; S.sa.info = false; }
+    else if (d.act === 'sainfo') { S.sa.info = !S.sa.info; S.sa.plus = false; S.sa.at = false; S.sa.menu = false; }
+    else if (d.saplus) { S.sa.plus = false; if (d.saplus === 'attach') { S.attach = true; S.attachShot = false; S.attachDir = S.lastAttachDir; S.attNew = false; } else S.sa.draft = d.saplus; }
+    else if (d.saref) { S.sa.ref = d.saref; S.sa.at = false; }
+    else if (d.act === 'sadrawer') {
+      if (S.sa.open) { S.sa.open = false; S.sa.menu = false; }
+      else if (S.sa.tabs.length) { S.sa.open = true; S.bench = false; }
+      else saOpen(saRunning()[0] || subOrder[0]);
+    }
     else if (d.act === 'hb') { var hb = !S.hb; closePops(); S.hb = hb; }
     else if (d.act === 'hbsw') { var sb = beatsOf()[curTitle()]; sb.paused = !sb.paused; sb.next = sb.paused ? '' : '约 ' + sb.min + ' 分钟后'; }
     else if (d.act === 'hbsave') {

@@ -599,6 +599,52 @@ type ListProjectsOptions struct {
 	Search string
 	// Sort is "updated" (default, newest first) or "name" (ascending).
 	Sort string
+	// Desc is the direction of Sort. Nil keeps the sort key's own default: a
+	// time reads newest first, a name A→Z — which is what a table's first
+	// click on a column header means.
+	Desc *bool
+}
+
+// projectListWhere is the filter both list reads apply, so the page a table
+// draws and the total it pages through always count the same rows.
+func (s *ProjectStore) projectListWhere(opts ListProjectsOptions) (string, []any) {
+	where := "agent_id=?"
+	args := []any{s.agentID}
+	if q := strings.TrimSpace(opts.Search); q != "" {
+		where += " AND (name LIKE ? OR root LIKE ?)"
+		like := "%" + q + "%"
+		args = append(args, like, like)
+	}
+	return where, args
+}
+
+// projectListOrder puts the pinned projects first whatever the key and the
+// direction are: the pin is the person's own ordering of the list, not a
+// value of any column.
+func projectListOrder(opts ListProjectsOptions) string {
+	byName := strings.EqualFold(strings.TrimSpace(opts.Sort), "name")
+	desc := !byName
+	if opts.Desc != nil {
+		desc = *opts.Desc
+	}
+	direction := "ASC"
+	if desc {
+		direction = "DESC"
+	}
+	if byName {
+		return "pinned DESC, name COLLATE NOCASE " + direction + ", id"
+	}
+	return "pinned DESC, updated_at " + direction + ", id"
+}
+
+// projectPageWindow clamps a requested window the way every project read
+// does: a nonsensical limit or offset reads the first rows instead of
+// failing.
+func projectPageWindow(limit, offset int) (int, int) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return min(limit, 500), max(offset, 0)
 }
 
 // ListProjects returns the agent's projects. Pinned ones lead within the
@@ -607,29 +653,42 @@ func (s *ProjectStore) ListProjects(ctx context.Context, opts ListProjectsOption
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
-	if limit <= 0 {
-		limit = 50
+	limit, offset = projectPageWindow(limit, offset)
+	return s.projectPageRows(ctx, opts, limit, offset)
+}
+
+// ListProjectsPage returns one page of the agent's projects and how many rows
+// the same search matches, so a table can draw a page and its pager in one
+// round trip. An offset past the end reads the last page rather than an empty
+// one — a delete that empties the last page lands on the page before it, the
+// paging contract every list endpoint follows.
+func (s *ProjectStore) ListProjectsPage(ctx context.Context, opts ListProjectsOptions, limit, offset int) ([]Project, int, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, nil
 	}
-	if limit > 500 {
-		limit = 500
+	limit, offset = projectPageWindow(limit, offset)
+	where, args := s.projectListWhere(opts)
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_projects WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
-	if offset < 0 {
-		offset = 0
+	if offset >= total {
+		offset = max(total-1, 0) / limit * limit
 	}
-	where := "agent_id=?"
-	args := []any{s.agentID}
-	if q := strings.TrimSpace(opts.Search); q != "" {
-		where += " AND (name LIKE ? OR root LIKE ?)"
-		like := "%" + q + "%"
-		args = append(args, like, like)
+	rows, err := s.projectPageRows(ctx, opts, limit, offset)
+	if err != nil {
+		return nil, 0, err
 	}
-	order := "pinned DESC, updated_at DESC, id"
-	if strings.EqualFold(strings.TrimSpace(opts.Sort), "name") {
-		order = "pinned DESC, name COLLATE NOCASE ASC, id"
-	}
-	query := `SELECT ` + projectColumns + ` FROM fb_projects WHERE ` + where + ` ORDER BY ` + order + ` LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	return rows, total, nil
+}
+
+// projectPageRows reads one window of the agent's projects. The window is
+// already clamped by projectPageWindow.
+func (s *ProjectStore) projectPageRows(ctx context.Context, opts ListProjectsOptions, limit, offset int) ([]Project, error) {
+	where, args := s.projectListWhere(opts)
+	query := `SELECT ` + projectColumns + ` FROM fb_projects WHERE ` + where +
+		` ORDER BY ` + projectListOrder(opts) + ` LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(ctx, query, append(args, limit, offset)...)
 	if err != nil {
 		return nil, err
 	}

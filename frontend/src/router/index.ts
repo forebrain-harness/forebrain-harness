@@ -30,6 +30,12 @@ const router = createRouter({
       meta: { title: () => t('routes.rulesTitle') },
     },
     {
+      path: '/mcp',
+      name: 'mcp',
+      component: () => import('@/views/McpView.vue'),
+      meta: { title: () => t('routes.mcpTitle') },
+    },
+    {
       path: '/subagents',
       name: 'subagents',
       component: () => import('@/views/SubagentsView.vue'),

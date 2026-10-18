@@ -6,7 +6,7 @@
         <button
           type="button"
           class="bench-icon-btn"
-          :title="t('chat.benchRootNewFile')"
+          v-tip:top="t('chat.benchRootNewFile')"
           :aria-label="t('chat.benchRootNewFile')"
           data-testid="tree-new-root"
           @click="openNewFile('')"
@@ -24,7 +24,7 @@
         </button>
       </div>
     </div>
-    <div v-if="rootPath" class="wd-root font-mono" :title="rootPath">{{ rootPath }}</div>
+    <div v-if="rootPath" class="wd-root font-mono" v-tip:top.trunc="rootPath">{{ rootPath }}</div>
     <WorkspaceTree
       :scope="scope"
       @insert-ref="emit('insert-ref', $event)"

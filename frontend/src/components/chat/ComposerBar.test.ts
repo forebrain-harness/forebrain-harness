@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { config, flushPromises, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 import { h } from 'vue'
 
 import { PromptInputProvider } from '@repo/elements/prompt-input'
@@ -11,6 +12,10 @@ import EffortChip from './EffortChip.vue'
 import ContextRing from './ContextRing.vue'
 import McpNotice from './McpNotice.vue'
 import ApprovalCard from './ApprovalCard.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 /**
  * The composer's new bottom bar, one test per rule the plan sets: the "+"

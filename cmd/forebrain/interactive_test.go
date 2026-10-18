@@ -399,7 +399,7 @@ func TestEnsureProjectLSPConsentPrompt(t *testing.T) {
 		"second: runs `/bin/second`",
 		"Allow it? [y/N] ",
 		"  confirmed — it applies from now on",
-		"  skipped — confirm later on the project page or at the next start",
+		"  declined — it won't apply; allow it later on the project page's LSP tab",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("prompt output missing %q:\n%s", want, got)
@@ -417,6 +417,67 @@ func TestEnsureProjectLSPConsentPrompt(t *testing.T) {
 	}
 	if len(denied) != 1 || denied[0] != "second" {
 		t.Fatalf("denied = %v", denied)
+	}
+}
+
+// TestEnsureProjectMCPConsentPrompt pins the MCP prompt's two answers: y loads
+// the entry for this session, and anything else is a decline — the message
+// says so and names where the decision is taken back, and the store agrees:
+// only the declined entry is on record as declined.
+func TestEnsureProjectMCPConsentPrompt(t *testing.T) {
+	t.Setenv("FOREBRAIN_HOME", t.TempDir())
+	process.ResetResolve()
+	t.Cleanup(process.ResetResolve)
+	home, err := home.Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := safety.MarkTrusted(home, safety.Project{Root: project}); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(project, ".forebrain", "mcp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "mcp_servers:\n" +
+		"  - name: first\n    transport: stdio\n    command: /bin/first\n" +
+		"  - name: second\n    transport: stdio\n    command: /bin/second\n"
+	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureProjectMCPConsent(strings.NewReader("y\nn\n"), &out, home, project); err != nil {
+		t.Fatalf("ensureProjectMCPConsent: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"This project declares MCP servers. Confirm each one before it runs in this session.",
+		"first: runs `/bin/first`",
+		"second: runs `/bin/second`",
+		"Run it? [y/N] ",
+		"  confirmed — it loads this session",
+		"  declined — it won't load; allow it later on the project page's MCP tab",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("prompt output missing %q:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "Run it? [y/N] "); n != 2 {
+		t.Fatalf("asked %d times, want 2:\n%s", n, got)
+	}
+
+	launch, err := process.ResolveConsentProjectContext(home, project)
+	if err != nil {
+		t.Fatalf("ResolveConsentProjectContext: %v", err)
+	}
+	declined := process.DeclinedProjectMCPConsents(activeWorkspace(t), launch)
+	if len(declined) != 1 || declined[0].Name != "second" {
+		t.Fatalf("declined = %+v, want only the entry answered with N", declined)
 	}
 }
 

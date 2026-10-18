@@ -859,15 +859,16 @@ func (s *Server) testMCPServer(w http.ResponseWriter, r *http.Request, resolve m
 	writeAgentsJSON(w, res)
 }
 
-// --- listing one layer ------------------------------------------------------
+// --- listing configuration layers -------------------------------------------
 
 // handleMCPLayerList serves GET /v1/mcp/servers?scope=global|agent: one
 // configuration layer as a client edits it, whether or not its entries are in
 // the session's effective list. An entry a higher layer shadows is still
 // configured and still editable, so it is listed and reported as not running
 // rather than hidden — which is what "why is my server not in the list" needs
-// to find.
-func (s *Server) handleMCPLayerList(w http.ResponseWriter, lc *appcfg.Root, rc mcpRowContext, scope string) {
+// to find. A shared entry the primary agent's layer replaces carries
+// shadowed_by/shadowed_by_name, so the row can say what keeps it from running.
+func (s *Server) handleMCPLayerList(w http.ResponseWriter, r *http.Request, lc *appcfg.Root, rc mcpRowContext, scope string) {
 	runtimeRunner := s.Runner
 	var rows []appcfg.MCPServerConfig
 	source := ""
@@ -881,20 +882,156 @@ func (s *Server) handleMCPLayerList(w http.ResponseWriter, lc *appcfg.Root, rc m
 		rows = lc.Agents.Defaults.MCPServers
 	}
 	source = turn.GlobalMCPSource(lc)
+	// A shared entry a same-named entry of the primary agent's own list
+	// replaces never runs. It is still listed here — this is the page it is
+	// edited on — and the row says which entry covers it, so "why is my
+	// server not running" has an answer other than the bare not-running
+	// state.
+	shadowed := make(map[string]bool)
+	shadowedBy := ""
+	if scope == appcfg.MCPServerScopeGlobal && runtimeRunner != nil {
+		for _, srv := range lc.Agents.MCPServersFor(runtimeRunner.AgentName) {
+			shadowed[strings.ToLower(strings.TrimSpace(srv.Name))] = true
+		}
+		shadowedBy = runtimeRunner.AgentName
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, srv := range rows {
-		// This layer's entry is only running when the session's effective list
-		// for the name is this same layer's: a higher layer's same-named entry
-		// (or the disable store) means the configured entry is not the one
-		// that started, and borrowing its state would describe a different
-		// server.
-		var entry *turn.MCPServerEntry
-		if eff := rc.inv.Entry(srv.Name); eff != nil && eff.Scope == scope && eff.Running {
-			entry = eff
+		entry := mcpLayerEntry(rc, srv, scope)
+		row := s.mcpServerRow(rc, srv, scope, source, entry != nil, entry)
+		if shadowed[strings.ToLower(strings.TrimSpace(srv.Name))] {
+			row["shadowed_by"] = appcfg.MCPServerScopeAgent
+			row["shadowed_by_name"] = shadowedBy
 		}
-		out = append(out, s.mcpServerRow(rc, srv, scope, source, entry != nil, entry))
+		out = append(out, row)
 	}
-	writeAgentsJSON(w, map[string]any{"servers": out, "scope": scope, "source": source})
+	// The order is the configuration file's own: a layer is listed the way it
+	// is written, so a row does not move between two reads of the same file.
+	writeMCPRows(w, readListQuery(r), mcpLayerFilter(r.URL.Query().Get("source")), out,
+		map[string]any{"scope": scope, "source": source})
+}
+
+// handleMCPAgentView serves GET /v1/mcp/servers?view=agent: the menu bar's MCP
+// page, which shows the primary agent's own layer and the shared list it
+// inherits.
+//
+// A name the agent layer defines hides the shared entry of the same name — the
+// agent's entry replaces it whole — so a page that listed both would show a
+// server twice, only one of which runs. The settings page keeps listing the
+// shared layer including its overridden entries (?scope=global), because that
+// is where they are edited; this page shows what one agent loads, its own rows
+// first.
+func (s *Server) handleMCPAgentView(w http.ResponseWriter, r *http.Request, lc *appcfg.Root, rc mcpRowContext) {
+	var own []appcfg.MCPServerConfig
+	if runtimeRunner := s.Runner; runtimeRunner != nil {
+		own = lc.Agents.MCPServersFor(runtimeRunner.AgentName)
+	}
+	// Without a Runner the agent layer cannot be named at all, so only the
+	// shared layer is listed rather than inventing an empty agent layer.
+	source := turn.GlobalMCPSource(lc)
+	out := make([]map[string]any, 0, len(own)+len(lc.Agents.Defaults.MCPServers))
+	shadowed := make(map[string]bool, len(own))
+	for _, srv := range own {
+		shadowed[strings.ToLower(strings.TrimSpace(srv.Name))] = true
+		entry := mcpLayerEntry(rc, srv, appcfg.MCPServerScopeAgent)
+		out = append(out, s.mcpServerRow(rc, srv, appcfg.MCPServerScopeAgent, source, entry != nil, entry))
+	}
+	for _, srv := range lc.Agents.Defaults.MCPServers {
+		if shadowed[strings.ToLower(strings.TrimSpace(srv.Name))] {
+			continue
+		}
+		entry := mcpLayerEntry(rc, srv, appcfg.MCPServerScopeGlobal)
+		out = append(out, s.mcpServerRow(rc, srv, appcfg.MCPServerScopeGlobal, source, entry != nil, entry))
+	}
+	writeMCPRows(w, readListQuery(r), mcpLayerFilter(r.URL.Query().Get("source")), out,
+		map[string]any{"view": "agent"})
+}
+
+// mcpLayerEntry is the runtime record a configured entry of one layer can
+// claim: the session's entry for the name only when it is this same layer's and
+// actually running. A higher layer's same-named entry (or the disable store)
+// means the configured entry is not the one that started, and borrowing that
+// state would describe a different server.
+func mcpLayerEntry(rc mcpRowContext, srv appcfg.MCPServerConfig, scope string) *turn.MCPServerEntry {
+	if eff := rc.inv.Entry(srv.Name); eff != nil && eff.Scope == scope && eff.Running {
+		return eff
+	}
+	return nil
+}
+
+// writeMCPRows answers one MCP read view under the paging contract every list
+// endpoint follows: without "page" the view keeps the answer it always gave
+// (rows under "servers" plus the caller's own top-level fields); with it, the
+// search and the layer filter are applied, then the order the caller built, then
+// the slice — and the answer keeps the same "servers" key, the caller's fields,
+// and total/page/page_size beside them.
+func writeMCPRows(w http.ResponseWriter, q listQuery, layers map[string]bool, rows []map[string]any, extra map[string]any) {
+	if !q.Paged {
+		payload := make(map[string]any, len(extra)+1)
+		for field, value := range extra {
+			payload[field] = value
+		}
+		payload["servers"] = rows
+		writeAgentsJSON(w, payload)
+		return
+	}
+	matched := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		if mcpRowMatches(row, q.Q, layers) {
+			matched = append(matched, row)
+		}
+	}
+	page, served := pageOf(matched, q)
+	writeListPage(w, "servers", page, len(matched), served, q, extra)
+}
+
+// mcpRowMatches reports whether one rendered row survives a read view's search
+// and layer filter. The search reads the two things a person looks a server up
+// by — its name and its command or address; the layer filter reads the row's
+// scope, which every view stamps.
+func mcpRowMatches(row map[string]any, q string, layers map[string]bool) bool {
+	if len(layers) > 0 {
+		scope, _ := row["scope"].(string)
+		if !layers[strings.ToLower(strings.TrimSpace(scope))] {
+			return false
+		}
+	}
+	if q == "" {
+		return true
+	}
+	name, _ := row["name"].(string)
+	target, _ := row["target"].(string)
+	needle := strings.ToLower(q)
+	return strings.Contains(strings.ToLower(name), needle) || strings.Contains(strings.ToLower(target), needle)
+}
+
+// mcpLayerFilter reads a view's "source" filter: the layers to keep, as a
+// comma-separated list of project/agent/global. An empty or unrecognized value
+// filters nothing, which is what the table's "all sources" option means.
+func mcpLayerFilter(raw string) map[string]bool {
+	var layers map[string]bool
+	for _, part := range strings.Split(raw, ",") {
+		switch layer := strings.ToLower(strings.TrimSpace(part)); layer {
+		case appcfg.MCPServerScopeProject, appcfg.MCPServerScopeAgent, appcfg.MCPServerScopeGlobal:
+			if layers == nil {
+				layers = make(map[string]bool, 3)
+			}
+			layers[layer] = true
+		}
+	}
+	return layers
+}
+
+// mcpServerScopeOf is the layer an entry came from: the merge in
+// process.ResolveSessionMCP stamps it, and an unstamped entry is the shared one.
+func mcpServerScopeOf(srv appcfg.MCPServerConfig) string {
+	switch {
+	case mcp.IsProjectScope(srv):
+		return appcfg.MCPServerScopeProject
+	case mcp.IsAgentScope(srv):
+		return appcfg.MCPServerScopeAgent
+	}
+	return appcfg.MCPServerScopeGlobal
 }
 
 // mcpRowContext is what one row's rendering reads: the session's effective list

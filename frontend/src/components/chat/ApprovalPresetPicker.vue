@@ -4,7 +4,7 @@
       type="button"
       class="forebrain-chip-btn"
       :disabled="disabled"
-      :title="t('approval.pickerTitle')"
+      v-tip:top="t('approval.pickerTitle')"
       aria-haspopup="listbox"
       :aria-expanded="open"
       data-testid="approval-picker"

@@ -48,7 +48,7 @@ const notice = computed(() => (props.state ? formatAutoContinueNotice(props.stat
     <button
       type="button"
       class="forebrain-btn forebrain-btn-ghost h-7 shrink-0 px-3 text-[12px]"
-      :title="t('autoContinue.cancelHint')"
+      v-tip:top="t('autoContinue.cancelHint')"
       data-testid="auto-continue-cancel"
       @click="emit('cancel')"
     >

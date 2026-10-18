@@ -1,23 +1,45 @@
 <template>
-  <div class="pb-6">
-    <PageTopRow :title="t('hooks.title')" :description="t('hooks.description')">
+  <div class="flex flex-col gap-4 pb-6">
+    <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]" data-testid="hooks-error">{{ error }}</p>
+    <p v-if="notice" class="text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
+
+    <ListToolbar>
+      <template #left>
+        <input
+          v-model="q"
+          type="search"
+          :placeholder="t('hooks.searchPlaceholder')"
+          class="forebrain-field h-[34px]"
+          style="max-width: 240px"
+          data-testid="hooks-search"
+        />
+      </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !events.length" data-testid="hooks-add" @click="openAdd">
-          {{ t('hooks.addTitle') }}
+        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="saving" data-testid="hooks-add" @click="openAdd">
+          <Plus class="size-3.5" aria-hidden="true" />{{ t('hooks.addTitle') }}
         </button>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ t('common.refresh') }}
+        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="hooks-refresh" @click="reload">
+          <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
         </button>
       </template>
-    </PageTopRow>
-
-    <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-    <p v-if="notice" class="mb-4 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
+    </ListToolbar>
 
     <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-    <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('hooks.empty') }}</div>
+    <div
+      v-else-if="!rows.length"
+      class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]"
+      data-testid="hooks-empty"
+    >
+      {{ t('hooks.empty') }}
+    </div>
     <div v-else class="forebrain-table-wrap">
-      <table class="forebrain-table">
+      <table class="forebrain-table forebrain-table--fixed">
+        <colgroup>
+          <col style="width: 160px" />
+          <col style="width: 160px" />
+          <col />
+          <col style="width: 88px" />
+        </colgroup>
         <thead>
           <tr>
             <th>{{ t('hooks.eventLabel') }}</th>
@@ -27,22 +49,42 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, index) in rows" :key="`${row.event}-${row.matcherIdx}-${row.commandIdx}`" data-testid="hook-row">
+          <tr v-for="row in rows" :key="`${row.event}-${row.matcherIdx}-${row.commandIdx}`" data-testid="hook-row">
             <td class="font-mono">{{ row.event }}</td>
-            <td :class="row.matcher ? 'font-mono' : 'text-[var(--forebrain-text-2)]'">{{ row.matcher || t('hooks.anyTool') }}</td>
-            <td class="font-mono">{{ row.command }}</td>
+            <!-- A hook that matches every tool says so in words; a matcher is
+                 a tool name and reads as one. -->
+            <td :class="row.matcher ? 'font-mono' : ''">{{ row.matcher || t('hooks.matcherAllTools') }}</td>
+            <td>
+              <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="row.command">{{ row.command }}</span>
+            </td>
             <td class="text-right">
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :disabled="saving" data-testid="hook-edit" @click="openEdit(row)">
-                {{ t('hooks.edit') }}
-              </button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px] text-[var(--forebrain-danger)]" :disabled="saving" data-testid="hook-remove" @click="askRemove(index)">
-                {{ t('common.delete') }}
-              </button>
+              <RowActions>
+                <RowAction
+                  :icon="Pencil"
+                  :label="t('hooks.edit')"
+                  :name="row.event"
+                  :disabled="saving"
+                  data-testid="hook-edit"
+                  @click="openEdit(row)"
+                />
+                <RowAction
+                  :icon="Trash2"
+                  :label="t('common.delete')"
+                  :name="row.event"
+                  tone="danger"
+                  :disabled="saving"
+                  data-testid="hook-remove"
+                  @click="removeRow = row"
+                />
+              </RowActions>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+
+    <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+    <ListNote data-testid="hooks-note">{{ t('hooks.description') }}</ListNote>
 
     <ForebrainModal :open="modalOpen" size="md" :title="editing ? t('hooks.editModalTitle') : t('hooks.addModalTitle')" @close="modalOpen = false">
       <div class="grid gap-3 sm:grid-cols-2">
@@ -79,12 +121,12 @@
     </ForebrainModal>
 
     <ConfirmDialog
-      :open="removeIndex >= 0"
+      :open="!!removeRow"
       :title="t('hooks.deleteTitle')"
       :message="t('hooks.deleteMessage')"
       :confirm-label="t('common.delete')"
       danger
-      @cancel="removeIndex = -1"
+      @cancel="removeRow = null"
       @confirm="confirmRemove"
     />
   </div>
@@ -92,59 +134,90 @@
 
 <script setup lang="ts">
 /**
- * Hooks run commands at points in a turn, as a list with its buttons above it;
+ * Hooks run commands at points in a turn, as a table with its buttons above it;
  * adding and editing happen in a modal and write the whole table back. The
  * events and kinds offered here are the ones the runtime accepts — the lists
  * come from the server rather than being written down twice — so a hook that
  * is offered is a hook that will load.
+ *
+ * The list is the server's (plan 076): it answers one row per command, searched
+ * over the event, the matcher and the command. The store is still one map, so
+ * an edit or a delete reads the whole map back first, changes its one entry by
+ * the two indices the row carries, and writes the map.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
-import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import { Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
-import { getErrorMessage, forebrainApi, type HookMatcherRecord, type HooksSettingsRecord } from '@/lib/api'
+import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import TablePager from '@/components/common/TablePager.vue'
+import { useServerList } from '@/composables/useServerList'
+import {
+  getErrorMessage,
+  forebrainApi,
+  type HookCommandRecord,
+  type HookRowRecord,
+  type HooksSettingsRecord,
+  type ListQuery,
+} from '@/lib/api'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()
 
-type HookRow = { event: string; matcher: string; type: string; command: string; matcherIdx: number; commandIdx: number }
-
-const hooks = ref<HooksSettingsRecord>({})
 const events = ref<string[]>([])
 const knownTypes = ref<string[]>([])
 const tools = ref<string[]>([])
-const loading = ref(false)
 const saving = ref(false)
-const error = ref('')
 const notice = ref('')
+const actionError = ref('')
+
+async function fetchHooks(query: ListQuery) {
+  const answer = await forebrainApi.hooksPage(query)
+  events.value = answer.events
+  knownTypes.value = answer.knownTypes
+  return answer
+}
+
+const {
+  rows,
+  total,
+  page,
+  pageSize,
+  q,
+  loading,
+  error: listError,
+  reload,
+} = useServerList<HookRowRecord>(fetchHooks, { pageSize: 10 })
+
+const error = computed(() => listError.value || actionError.value)
 
 const modalOpen = ref(false)
-const editing = ref<HookRow | null>(null)
-const removeIndex = ref(-1)
+const editing = ref<HookRowRecord | null>(null)
+const removeRow = ref<HookRowRecord | null>(null)
 const form = reactive({ event: '', type: 'command', matcher: '', command: '' })
 
-const rows = computed<HookRow[]>(() => {
-  const out: HookRow[] = []
-  for (const event of Object.keys(hooks.value).sort()) {
-    ;(hooks.value[event] ?? []).forEach((matcher, matcherIdx) => {
-      ;(matcher.hooks ?? []).forEach((cmd, commandIdx) => {
-        out.push({
-          event,
-          matcher: matcher.matcher ?? '',
-          type: cmd.type ?? 'command',
-          command: cmd.command ?? cmd.prompt ?? cmd.url ?? '',
-          matcherIdx,
-          commandIdx,
-        })
-      })
-    })
-  }
-  return out
-})
+/**
+ * wholeMap reads the store as it is — the map an edit or a delete changes and
+ * writes back. It also refreshes the two lists the modal offers.
+ */
+async function wholeMap(): Promise<HooksSettingsRecord> {
+  const res = await forebrainApi.hooks()
+  if (res.events?.length) events.value = res.events
+  if (res.knownTypes?.length) knownTypes.value = res.knownTypes
+  return res.hooks ?? {}
+}
+
+/** commandAt finds the one command a row stands for, inside the whole map. */
+function commandAt(map: HooksSettingsRecord, row: HookRowRecord): HookCommandRecord | undefined {
+  return map[row.event]?.[row.matcherIdx]?.hooks?.[row.commandIdx]
+}
 
 function removeCommand(map: HooksSettingsRecord, event: string, matcherIdx: number, commandIdx: number): HooksSettingsRecord {
   const list = [...(map[event] ?? [])]
-  const matcher: HookMatcherRecord = { ...list[matcherIdx] }
+  const matcher = { ...list[matcherIdx] }
   matcher.hooks = (matcher.hooks ?? []).filter((_, i) => i !== commandIdx)
   if (matcher.hooks.length === 0) list.splice(matcherIdx, 1)
   else list[matcherIdx] = matcher
@@ -165,22 +238,6 @@ function addCommand(map: HooksSettingsRecord, event: string, matcher: string, ty
   return { ...map, [event]: list }
 }
 
-async function load() {
-  loading.value = true
-  error.value = ''
-  notice.value = ''
-  try {
-    const res = await forebrainApi.hooks()
-    hooks.value = res.hooks ?? {}
-    events.value = res.events ?? []
-    knownTypes.value = res.knownTypes ?? []
-  } catch (e) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
-  }
-}
-
 async function loadTools() {
   try {
     const res = await forebrainApi.toolsList()
@@ -196,50 +253,66 @@ function openAdd() {
   modalOpen.value = true
 }
 
-function openEdit(row: HookRow) {
-  editing.value = row
-  Object.assign(form, { event: row.event, type: row.type, matcher: row.matcher, command: row.command })
-  modalOpen.value = true
+/** Editing opens on the whole map, so the row's own kind comes with it. */
+async function openEdit(row: HookRowRecord) {
+  actionError.value = ''
+  try {
+    const cmd = commandAt(await wholeMap(), row)
+    editing.value = row
+    Object.assign(form, {
+      event: row.event,
+      type: cmd?.type ?? 'command',
+      matcher: row.matcher,
+      command: row.command,
+    })
+    modalOpen.value = true
+  } catch (e) {
+    actionError.value = getErrorMessage(e)
+  }
 }
 
 async function saveModal() {
   const { event, type, matcher, command } = form
   if (!event || !command.trim()) return
-  let map = { ...hooks.value }
-  if (editing.value) map = removeCommand(map, editing.value.event, editing.value.matcherIdx, editing.value.commandIdx)
-  map = addCommand(map, event, matcher, type, command.trim())
-  modalOpen.value = false
-  await persist(map)
-}
-
-function askRemove(index: number) {
-  removeIndex.value = index
+  saving.value = true
+  actionError.value = ''
+  notice.value = ''
+  try {
+    let map = await wholeMap()
+    if (editing.value) map = removeCommand(map, editing.value.event, editing.value.matcherIdx, editing.value.commandIdx)
+    map = addCommand(map, event, matcher, type, command.trim())
+    modalOpen.value = false
+    await forebrainApi.saveHooks(map)
+    notice.value = t('hooks.saved')
+    await reload()
+  } catch (e) {
+    actionError.value = getErrorMessage(e)
+  } finally {
+    saving.value = false
+  }
 }
 
 async function confirmRemove() {
-  const row = rows.value[removeIndex.value]
-  removeIndex.value = -1
+  const row = removeRow.value
+  removeRow.value = null
   if (!row) return
-  await persist(removeCommand(hooks.value, row.event, row.matcherIdx, row.commandIdx))
-}
-
-async function persist(map: HooksSettingsRecord) {
   saving.value = true
-  error.value = ''
+  actionError.value = ''
   notice.value = ''
   try {
-    await forebrainApi.saveHooks(map)
+    const map = await wholeMap()
+    await forebrainApi.saveHooks(removeCommand(map, row.event, row.matcherIdx, row.commandIdx))
     notice.value = t('hooks.saved')
-    await load()
+    await reload()
   } catch (e) {
-    error.value = getErrorMessage(e)
+    actionError.value = getErrorMessage(e)
   } finally {
     saving.value = false
   }
 }
 
 onMounted(() => {
-  void load()
+  void reload()
   void loadTools()
 })
 </script>

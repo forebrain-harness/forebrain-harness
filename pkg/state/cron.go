@@ -409,6 +409,41 @@ WHERE job_id = ? ORDER BY started_at DESC, id DESC LIMIT ?`,
 	return scanCronRuns(rows)
 }
 
+// ListRunsPage returns one page of a job's fires, newest first, and how many
+// fires it has in all — so a run-history table and its pager come from one
+// round trip. An offset past the end reads the last page rather than an empty
+// one, the paging contract every list endpoint follows.
+func (s *CronStore) ListRunsPage(ctx context.Context, jobID string, limit, offset int) ([]CronRun, int, error) {
+	if !s.ok() {
+		return nil, 0, fmt.Errorf("cron store unavailable")
+	}
+	jobID = strings.TrimSpace(jobID)
+	if limit <= 0 {
+		limit = 20
+	}
+	limit = min(limit, 100)
+	offset = max(offset, 0)
+	var total int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_cron_runs WHERE job_id = ?`, jobID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if offset >= total {
+		offset = max(total-1, 0) / limit * limit
+	}
+	rows, err := s.DB.QueryContext(ctx, cronRunSelect+`
+WHERE job_id = ? ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
+		jobID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	runs, err := scanCronRuns(rows)
+	if err != nil {
+		return nil, 0, err
+	}
+	return runs, total, nil
+}
+
 // ExpiredFire is one fire past the retention: its record, and its session
 // when that session is still a scheduled-task conversation.
 type ExpiredFire struct {

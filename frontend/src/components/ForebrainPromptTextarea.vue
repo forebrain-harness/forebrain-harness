@@ -724,11 +724,10 @@ function onRootRowClick(e: MouseEvent) {
         <PromptInputAttachment :file="file" />
       </li>
       <li v-for="attachment in uploadedAttachments" :key="attachment.fileId"
-        class="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border pl-1.5 pr-1 text-sm font-medium"
-        :title="uploadedAttachmentLabel(attachment)">
+        class="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border pl-1.5 pr-1 text-sm font-medium">
         <ImageIcon v-if="attachment.mediaType.startsWith('image/')" class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         <Paperclip v-else class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <span class="min-w-0 truncate">{{ uploadedAttachmentLabel(attachment) }}</span>
+        <span class="min-w-0 truncate" v-tip:top.trunc="uploadedAttachmentLabel(attachment)">{{ uploadedAttachmentLabel(attachment) }}</span>
         <button type="button"
           class="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           :aria-label="t('prompt.removeAttached', { name: uploadedAttachmentLabel(attachment) })"
@@ -737,10 +736,9 @@ function onRootRowClick(e: MouseEvent) {
         </button>
       </li>
       <li v-for="path in mentionImages" :key="path"
-        class="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border pl-1.5 pr-1 text-sm font-medium"
-        :title="path">
+        class="inline-flex h-8 max-w-[220px] items-center gap-1.5 rounded-md border border-border pl-1.5 pr-1 text-sm font-medium">
         <ImageIcon class="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-        <span class="min-w-0 truncate">{{ mentionImageLabel(path) }}</span>
+        <span class="min-w-0 truncate" v-tip:top.trunc="path">{{ mentionImageLabel(path) }}</span>
         <button type="button"
           class="inline-flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
           :aria-label="t('prompt.removeAttached', { name: mentionImageLabel(path) })"

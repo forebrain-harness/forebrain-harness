@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -263,6 +264,48 @@ func TestMemoriesFilesListSearchByContentAndName(t *testing.T) {
 	rr = memoriesGet(t, s, "/api/memories/files?scope=global&q=zebra-named")
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.Contains(t, rr.Body.String(), "notes/zebra-named.md")
+}
+
+// The table's 内容 column is the server's own read-only field: the first
+// non-empty line, cut to a cell, and only for the rows on the page.
+func TestMemoriesFilesListCarriesTheOpeningLineOfThePage(t *testing.T) {
+	s, global, _, _ := memoriesFilesServer(t)
+	writeMemoryFile(t, global, "notes/habit.md", "\n\nprefers short answers\nsecond line", time.Time{})
+	writeMemoryFile(t, global, "notes/empty.md", "", time.Time{})
+	writeMemoryFile(t, global, "notes/long.md", strings.Repeat("九", memoryFilePreviewRunes+10), time.Time{})
+
+	previews := func(body string) map[string]string {
+		var answer struct {
+			Files []struct {
+				Path    string `json:"path"`
+				Preview string `json:"preview"`
+			} `json:"files"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(body), &answer))
+		out := map[string]string{}
+		for _, file := range answer.Files {
+			out[file.Path] = file.Preview
+		}
+		return out
+	}
+
+	rr := memoriesGet(t, s, "/api/memories/files?scope=global&page_size=50")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	all := previews(rr.Body.String())
+	require.Equal(t, "prefers short answers", all["notes/habit.md"])
+	require.Equal(t, strings.Repeat("九", memoryFilePreviewRunes)+"…", all["notes/long.md"])
+	require.Equal(t, "", all["notes/empty.md"])
+
+	// Only the served page pays for a read: the rows on the other page carry
+	// no line at all.
+	rr = memoriesGet(t, s, "/api/memories/files?scope=global&page_size=1&sort=updated&order=desc")
+	require.Equal(t, http.StatusOK, rr.Code)
+	one := previews(rr.Body.String())
+	require.Len(t, one, 1)
+	for path, preview := range one {
+		require.NotEqual(t, "notes/habit.md", path)
+		require.Empty(t, preview)
+	}
 }
 
 func TestMemoriesFileReadGuards(t *testing.T) {

@@ -11,13 +11,16 @@ test('final menu matches the approved order', async ({ page }) => {
   await signIn(page)
   await page.goto('/', { waitUntil: 'networkidle' })
   const hrefs = await page.locator('.forebrain-rail-group a.forebrain-rail-link').evaluateAll((nodes) => nodes.map((n) => (n as HTMLAnchorElement).getAttribute('href')))
-  expect(hrefs).toEqual(['/projects', '/rules', '/skills', '/subagents', '/providers', '/tools', '/permissions', '/memories'])
+  // MCP joined the menu (plan 074) between 技能 and 子代理: the shared list is
+  // edited in the settings tab, a primary agent's own list on its own page.
+  expect(hrefs).toEqual(['/projects', '/rules', '/skills', '/mcp', '/subagents', '/providers', '/tools', '/permissions', '/memories'])
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-menu.png`, fullPage: true })
 })
 
 test('removed routes fall back to the router and stay out of the menu', async ({ page }) => {
   await signIn(page)
-  for (const path of ['/agents', '/mcp', '/hooks', '/config']) {
+  // /mcp has a page of its own since plan 074, so it is no longer one of these.
+  for (const path of ['/agents', '/hooks', '/config']) {
     await page.goto(path, { waitUntil: 'networkidle' })
     const menuText = await page.locator('.forebrain-rail').innerText()
     expect(menuText).not.toContain('/' + path.slice(1))
@@ -108,16 +111,23 @@ test('switching the tenant leaves the previous agent\'s conversation behind', as
   }
 })
 
-test('the rail foot is one row: settings plus a square theme toggle', async ({ page }) => {
+test('the rail foot is one row: settings plus the collapse control', async ({ page }) => {
   await signIn(page)
   await page.goto('/', { waitUntil: 'networkidle' })
   const foot = page.locator('.forebrain-rail-foot')
   await expect(foot.locator('.forebrain-rail-link')).toContainText(/设置|Settings/)
-  const theme = foot.locator('.forebrain-rail-theme')
+  const collapse = foot.locator('[data-testid="rail-collapse"]')
+  await expect(collapse).toBeVisible()
+  // The control is an icon button: its label is the icon and the aria-label,
+  // never a text run — and it sits right of 设置 (owner 2026-10-18).
+  expect((await collapse.innerText()).trim()).toBe('')
+  await expect(collapse).toHaveAttribute('aria-label', /折叠菜单栏|Collapse the menu bar/)
+  const settings = await foot.locator('.forebrain-rail-link').boundingBox()
+  const button = await collapse.boundingBox()
+  expect((button?.x ?? 0)).toBeGreaterThan((settings?.x ?? 0) + (settings?.width ?? 0) - 1)
+  // The light/dark switch moved to the top bar's right end.
+  const theme = page.locator('[data-testid="theme-toggle"]')
   await expect(theme).toBeVisible()
-  // The toggle is a square icon button; its label is the icon and the
-  // aria-label, never a text run.
-  expect((await theme.innerText()).trim()).toBe('')
   await expect(theme).toHaveAttribute('aria-label', /菜单栏切换为|Switch the rail to/)
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-rail-foot.png` })
 })
@@ -135,9 +145,10 @@ test('subagents page shows its empty state without a title layer', async ({ page
     await page.locator('.forebrain-tenant-option', { hasText: 'e2e-sub-empty' }).click()
     await expect(page.locator('.forebrain-tenant-trigger')).toContainText('e2e-sub-empty', { timeout: 15_000 })
     await page.goto('/subagents', { waitUntil: 'networkidle' })
-    // The page opens with its one top row, not a second heading and no scope
-    // badge (the selector already names the agent).
-    await expect(page.locator('.forebrain-page-top-title')).toHaveText(/子代理|Subagents/)
+    // The page opens with no title layer of its own (plan 073): the shell's top
+    // bar names it, and no scope badge is drawn (the selector names the agent).
+    await expect(page.locator('.forebrain-topbar-title')).toHaveText(/子代理|Subagents/)
+    await expect(page.locator('main h1, main h2')).toHaveCount(0)
     await expect(page.locator('[data-testid="scope-badge"]')).toHaveCount(0)
     const empty = await page.locator('main').innerText()
     expect(empty).toMatch(/没有正在运行的子代理|No subagents running/)

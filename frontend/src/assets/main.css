@@ -536,42 +536,110 @@
   background: var(--forebrain-page-bg);
 }
 
+/* The shell's one top row (prototype .top): every control in it is 30px tall,
+   border included, and the row itself is 48px. */
 .forebrain-topbar {
   display: flex;
   align-items: center;
   gap: 10px;
+  height: 48px;
+  box-sizing: border-box;
   border-bottom: 1px solid var(--forebrain-divider);
-  padding: 10px 16px;
+  padding: 0 20px;
+}
+
+/* Nothing to the right of the title shrinks: a long title is what gives way.
+   A breadcrumb and the path beside it give way first — they own the shrink. */
+.forebrain-topbar > :not(.forebrain-topbar-title):not(.forebrain-topbar-name):not(.forebrain-topbar-spacer):not(.forebrain-topbar-crumb):not(.forebrain-topbar-meta) {
+  flex: none;
 }
 
 .forebrain-topbar-title {
   font-family: var(--forebrain-ui-font);
-  font-size: 13px;
-  color: var(--forebrain-text-2);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--forebrain-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 360px;
 }
 
-/* The model this conversation runs on, named beside its title (prototype
-   .top .meta). */
-.forebrain-topbar-model {
-  font-size: 12px;
-  color: var(--forebrain-muted-text);
+/* A breadcrumb's leaf in the top bar (the workshop's skill name): the same cap
+   and the same ellipsis as the title. */
+.forebrain-topbar-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* A project conversation's tag, drawn in the top bar the conversation
-   filled: the project band's dark ground, as a chip. */
-.chat-project-tag {
-  flex-shrink: 0;
-  border-radius: 9999px;
-  padding: 2px 8px;
-  font-size: 11px;
-  line-height: 16px;
-  background: #0f1d38;
-  color: #ffffff;
+/* The project space's breadcrumb in the top bar (prototype .top .crumb): the
+   layer it returns to, the chevron, and the project's own name with the same
+   360px cap and ellipsis as a title. Being 0 1 auto is what lets a long name
+   give way while the shell's buttons keep their size. */
+.forebrain-topbar-crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.forebrain-topbar-crumb > * {
+  flex: none;
+}
+.forebrain-topbar-crumb > .forebrain-topbar-name {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+/* The workshop's crumb carries its name inside the nav beside the layer's
+   button, so the nav is what has to give way there. */
+.forebrain-topbar-crumb > nav {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
-.chat-project-tag:hover {
-  text-decoration: underline;
+/* The project's directory beside its breadcrumb (prototype .top .meta): one
+   line of monospace grey that is cut before anything else is. */
+.forebrain-topbar-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+}
+
+/* A project conversation's tag, drawn in the top bar the conversation
+   filled: the prototype's .scope.project — the page's ink, a folder and the
+   project's name. */
+.chat-project-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--forebrain-text);
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.chat-project-tag svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
 }
 
 .forebrain-topbar-spacer {
@@ -751,41 +819,24 @@
   position: relative;
 }
 
-.forebrain-language-trigger,
-.forebrain-theme-toggle,
-.forebrain-topbar-action {
-  display: inline-flex;
-  font-family: var(--forebrain-ui-font);
-  align-items: center;
-  gap: 6px;
+/* The shell's own controls are the composer's chip (.forebrain-chip-btn), so
+   the whole bar reads as one set: 30px, a 6px radius, a hairline border. The
+   square variant carries an icon alone (the rail's light/dark switch). A
+   full-width button in the bar (the workshop's publish) is 30px too. */
+.forebrain-chip-btn--sq {
+  width: 30px;
+  padding: 0;
+  justify-content: center;
+}
+
+.forebrain-topbar .forebrain-btn {
+  min-height: 30px;
   height: 30px;
-  border: 1px solid var(--forebrain-divider);
-  border-radius: 8px;
-  background: var(--forebrain-surface);
-  padding: 0 8px;
-  font-size: 12px;
-  color: var(--forebrain-text-2);
-  transition: color 140ms ease, border-color 140ms ease;
 }
 
-.forebrain-language-trigger:hover,
-.forebrain-theme-toggle:hover,
-.forebrain-topbar-action:hover {
-  color: var(--forebrain-text);
-  border-color: var(--forebrain-divider-strong);
-}
-
-.forebrain-language-ic,
-.forebrain-theme-toggle-ic,
-.forebrain-topbar-action-ic {
+.forebrain-language-ic {
   width: 14px;
   height: 14px;
-}
-
-.forebrain-language-caret {
-  width: 12px;
-  height: 12px;
-  color: var(--forebrain-muted-text);
 }
 
 .forebrain-language-popover {
@@ -960,26 +1011,24 @@ textarea.forebrain-field {
   flex: 1;
   min-width: 0;
 }
-.forebrain-rail-fold,
-.forebrain-rail-expand {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+/* The rail's collapse control (owner 2026-10-18): it sits where the light/dark
+   switch used to — at the foot's right edge, under 设置 once the rail is icons
+   only. The switch itself moved to the top bar's right end. */
+.forebrain-rail-collapse {
+  display: grid;
+  place-items: center;
   width: 28px;
   height: 28px;
   flex: none;
-  border-radius: 8px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: var(--rail-fg-2);
 }
-.forebrain-rail-fold:hover,
-.forebrain-rail-expand:hover {
+.forebrain-rail-collapse:hover {
   background: var(--rail-hover);
   color: var(--rail-fg);
-}
-.forebrain-rail-expand {
-  width: 40px;
-  height: 40px;
-  border-radius: 6px;
 }
 .forebrain-rail-caret {
   width: 14px;
@@ -1003,24 +1052,6 @@ textarea.forebrain-field {
 .forebrain-rail-foot .forebrain-rail-link {
   padding: 6px 10px;
   font-size: 12px;
-}
-/* The rail scheme toggle: a square icon button at the foot's right edge. */
-.forebrain-rail-theme {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  margin-left: auto;
-  border: 1px solid var(--rail-line);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--rail-fg-2);
-}
-.forebrain-rail-theme:hover {
-  background: var(--rail-hover);
-  color: var(--rail-fg);
 }
 .forebrain-tenant-tile {
   display: inline-flex;
@@ -1096,8 +1127,10 @@ textarea.forebrain-field {
   justify-content: center;
   padding: 7px 0;
 }
-.forebrain-rail--collapsed .forebrain-rail-theme {
+.forebrain-rail--collapsed .forebrain-rail-collapse {
   margin-left: 0;
+  width: 40px;
+  height: 32px;
 }
 @media (prefers-reduced-motion: reduce) {
   .forebrain-rail--collapsed {
@@ -1105,38 +1138,9 @@ textarea.forebrain-field {
   }
 }
 
-/* ---- Page structure: one top row, flat lists and tables (plan 015) ----
-   The top bar already names the page, so a page's first line is its title,
-   a one-line description and its buttons — never a second title layer. A
-   page that is a single list or table shows it bare; a page with several
-   groups gives each one level. */
-.forebrain-page-top {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 1.25rem;
-}
-.forebrain-page-top-title {
-  margin: 0;
-  font-family: var(--forebrain-ui-font);
-  font-size: 18px;
-  line-height: 1.3;
-  font-weight: 650;
-  color: var(--forebrain-text);
-}
-.forebrain-page-top-desc {
-  font-size: 13px;
-  color: var(--forebrain-text-2);
-}
-.forebrain-page-top-actions {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
+/* ---- Page structure: flat lists and tables ----
+   The top bar already names the page, so a page's first line is its toolbar,
+   a bare list or table, and the note under it — never a second title layer. */
 /* A boxed list: one hairline container, its rows separated by their own
    padding rather than nested cards. */
 .forebrain-list-boxed {
@@ -1176,5 +1180,470 @@ textarea.forebrain-field {
 }
 .forebrain-table tr:last-child td {
   border-bottom: 0;
+}
+
+/* 2026-10-18 shared list/table/form pieces (plan 071): every table list reads
+   as one thing — a fixed-layout table with one-line cells and an icon-button
+   action column, a sortable header, a toolbar above it, and a note plus a pager
+   below it — and the forms that feed those lists share one radio group and one
+   right-hand drawer. Values are the design prototype's
+   (docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/app-preview.html). */
+
+/* A fixed-width table: the columns keep their width, every cell stays on one
+   line and ends in an ellipsis, and a numeric column lines its digits up. */
+.forebrain-table--fixed {
+  table-layout: fixed;
+}
+.forebrain-table--fixed > thead > tr > th,
+.forebrain-table--fixed > tbody > tr > td {
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.forebrain-cell-1 {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.forebrain-table--fixed td.forebrain-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A row that carries icon buttons is centered as a whole, so a button never
+   sits at the top of a tall row. */
+.forebrain-table tr:has(> td > .forebrain-row-actions) > td {
+  vertical-align: middle;
+}
+
+/* The action column's buttons: a 28×28 icon, the soft fill on hover. */
+.forebrain-icon-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--forebrain-muted-text);
+  cursor: pointer;
+}
+.forebrain-icon-btn:hover {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
+}
+.forebrain-icon-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.forebrain-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+}
+/* A row that lacks one of the actions keeps its 28px hole, so the icons stay
+   aligned down the column. */
+.forebrain-icon-slot {
+  width: 28px;
+  flex: none;
+}
+.forebrain-row-action--danger {
+  color: var(--forebrain-danger);
+}
+.forebrain-row-action--danger:hover {
+  color: var(--forebrain-danger);
+  background: var(--forebrain-button-alt-bg);
+}
+.forebrain-row-action--ok:hover {
+  color: var(--forebrain-success);
+}
+
+/* A sortable header: the label plus the stacked carets, the column sorted now
+   and its direction in brand. */
+.forebrain-table th.forebrain-sortable {
+  padding: 0;
+}
+.forebrain-th-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.forebrain-table th.forebrain-sortable:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+.forebrain-table th.forebrain-sortable.is-on {
+  color: var(--forebrain-text);
+}
+.forebrain-th-sort:focus-visible {
+  outline: 2px solid var(--forebrain-brand-1);
+  outline-offset: -2px;
+}
+.forebrain-sort-ic {
+  width: 8px;
+  height: 12px;
+  flex: none;
+}
+.forebrain-sort-ic path {
+  fill: var(--forebrain-divider-strong);
+}
+.forebrain-table th.forebrain-sortable:hover .forebrain-sort-ic path {
+  fill: var(--forebrain-muted-text);
+}
+.forebrain-sort-ic path.is-act {
+  fill: var(--forebrain-brand-1);
+}
+
+/* The pager under every table: 共 N 条 on the left, then the page size and the
+   page numbers, all 26px tall. */
+.forebrain-pager {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.forebrain-pager-size {
+  position: relative;
+  display: inline-flex;
+}
+.forebrain-pager-size select {
+  height: 26px;
+  padding: 0 24px 0 9px;
+  border: 1px solid var(--forebrain-divider-strong);
+  border-radius: 6px;
+  background: var(--forebrain-surface);
+  color: var(--forebrain-text);
+  font-family: var(--forebrain-ui-font);
+  font-size: 12px;
+  font-weight: 500;
+  appearance: none;
+  cursor: pointer;
+}
+.forebrain-pager-size > svg {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  margin-top: -6.5px;
+  color: var(--forebrain-muted-text);
+  pointer-events: none;
+}
+.forebrain-pg-num {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--forebrain-divider-strong);
+  border-radius: 6px;
+  background: var(--forebrain-surface);
+  color: var(--forebrain-text);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.forebrain-pg-num:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+.forebrain-pg-num.is-on {
+  background: var(--forebrain-brand-1);
+  border-color: var(--forebrain-brand-1);
+  color: var(--forebrain-on-brand);
+  cursor: default;
+}
+.forebrain-pg-gap {
+  min-width: 18px;
+  text-align: center;
+  color: var(--forebrain-muted-text);
+  font-size: 12px;
+}
+/* The pager's own 26px buttons (上一页 / 下一页), smaller than the app-wide
+   .forebrain-btn and used nowhere else. */
+.forebrain-btn--sm {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+/* A button that is neither the brand fill nor the soft grey one: the
+   prototype's .btn — the surface with the strong divider, so it reads as a
+   control beside the page numbers rather than as a filled one. */
+.forebrain-btn--outline {
+  gap: 6px;
+  border-color: var(--forebrain-divider-strong);
+  background: var(--forebrain-surface);
+  color: var(--forebrain-text);
+}
+.forebrain-btn--outline:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+/* A destructive button (the prototype's .btn.dgr): the plain surface shape
+   with its rule and its label in the danger ink, so it reads as dangerous
+   without shouting like a filled one. */
+.forebrain-btn--danger {
+  border-color: var(--forebrain-danger);
+  color: var(--forebrain-danger);
+}
+.forebrain-btn--danger:hover {
+  background: var(--forebrain-button-alt-bg);
+}
+
+/* A radio group: the options on one line, vertical when each carries a
+   description, the checked dot in brand. */
+.forebrain-radios {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 24px;
+  min-height: 34px;
+}
+.forebrain-radios.is-vertical {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.forebrain-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--forebrain-text);
+  cursor: pointer;
+}
+.forebrain-radio.has-desc {
+  align-items: flex-start;
+}
+.forebrain-radio.has-desc input {
+  margin-top: 2px;
+}
+.forebrain-radio input {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  border: 1px solid var(--forebrain-divider-strong);
+  border-radius: 50%;
+  background: var(--forebrain-surface);
+  display: grid;
+  place-content: center;
+  cursor: pointer;
+  transition: border-color 120ms;
+}
+.forebrain-radio input::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--forebrain-brand-1);
+  transform: scale(0);
+  transition: transform 120ms;
+}
+.forebrain-radio input:checked,
+.forebrain-radio:hover input {
+  border-color: var(--forebrain-brand-1);
+}
+.forebrain-radio input:checked::before {
+  transform: scale(1);
+}
+.forebrain-radio input:focus-visible {
+  outline: 2px solid var(--forebrain-brand-1);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .forebrain-radio input,
+  .forebrain-radio input::before {
+    transition: none;
+  }
+}
+.forebrain-radio-desc {
+  display: grid;
+  gap: 2px;
+}
+.forebrain-radio-desc b {
+  font-weight: 500;
+}
+.forebrain-radio-desc span {
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+  line-height: 1.5;
+}
+/* The colour swatch a brand radio carries. */
+.forebrain-radio-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  flex: none;
+  display: block;
+}
+
+/* The right-hand drawer: the modal's overlay, its panel against the right
+   edge. Same layer as a modal (z-index 50), so a tip (70) stays visible over
+   it. */
+.forebrain-drawer-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+  align-items: stretch;
+  background: color-mix(in srgb, var(--forebrain-text) 32%, transparent);
+}
+.forebrain-drawer {
+  width: 560px;
+  max-width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--forebrain-divider);
+  background: var(--forebrain-surface);
+  box-shadow: -8px 0 24px rgba(16, 24, 40, 0.08);
+  animation: forebrain-drawer-in 160ms ease-out;
+}
+@keyframes forebrain-drawer-in {
+  from {
+    transform: translateX(32px);
+    opacity: 0.6;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .forebrain-drawer {
+    animation: none;
+  }
+}
+.forebrain-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--forebrain-divider);
+}
+.forebrain-drawer-head b {
+  font-size: 14px;
+  font-weight: 600;
+}
+/* The close button (X) sits in the head's far corner. */
+.forebrain-drawer-head .forebrain-icon-btn {
+  margin-left: auto;
+}
+.forebrain-drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px 18px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+.forebrain-drawer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--forebrain-divider);
+}
+/* A read-only field in a drawer reads as text, not as something to type in. */
+.forebrain-drawer .forebrain-field[readonly],
+.forebrain-drawer select.forebrain-field:disabled {
+  background: var(--forebrain-bg-alt);
+  color: var(--forebrain-text-2);
+}
+
+/* The one compact tip (about 20px tall): 12px text on #101828, an arrow
+   pointing at what it describes. Fixed, so a rail or a table's overflow cannot
+   clip it, and above the modal and drawer overlay (z-index 50). */
+.forebrain-tip {
+  position: fixed;
+  z-index: 70;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #101828;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--forebrain-shadow-pop);
+}
+.forebrain-tip::before {
+  content: "";
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  background: #101828;
+  transform: rotate(45deg);
+}
+/* Right of the anchor: the arrow is on the tip's left edge. */
+.forebrain-tip--right::before {
+  left: -3px;
+  top: 50%;
+  margin-top: -3px;
+}
+/* Above the anchor: the arrow is under the tip, at the anchor's centre
+   (--tip-x, set by the caller). */
+.forebrain-tip--above::before {
+  left: var(--tip-x, 50%);
+  bottom: -3px;
+  margin-left: -3px;
+}
+/* Below the anchor: the arrow is on top, at the anchor's centre. */
+.forebrain-tip--below::before {
+  left: var(--tip-x, 50%);
+  top: -3px;
+  margin-left: -3px;
+}
+
+/* The row above a table: the search on the left, the page's buttons on the
+   right. */
+.forebrain-list-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* The note under a table (and under its pager). */
+.forebrain-list-note {
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+}
+
+/* A flat key-value list (the prototype's `.kv`, plan 076): the fact's name in
+   a fixed 110px column, its value beside it, no frame and no heading. */
+.forebrain-kv {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 12px;
+  font-size: 12.5px;
+}
+.forebrain-kv dt {
+  color: var(--forebrain-muted-text);
+}
+.forebrain-kv dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--forebrain-text);
+}
+
+/* One labelled form field: the label above its control, the same 12px
+   second-level text every form in the app labels a control with. */
+.forebrain-form-field {
+  display: grid;
+  gap: 6px;
+}
+.forebrain-form-field > span:first-child {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--forebrain-text-2);
 }
 

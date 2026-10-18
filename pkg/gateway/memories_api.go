@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -243,6 +242,11 @@ type memoryFileRow struct {
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
 	Core      bool   `json:"core"`
+	// Preview is the first non-empty line of the file, cut to a table cell: the
+	// file table draws one line of what a memory says without asking for the
+	// file again. Only the rows of the served page carry one — the list never
+	// reads a whole scope's worth of bodies.
+	Preview string `json:"preview,omitempty"`
 }
 
 // memoriesScopeTarget is one resolved memory scope: the root every file
@@ -393,6 +397,38 @@ func collectMemoryFiles(root memory.Root) ([]memoryFileRow, error) {
 	return out, nil
 }
 
+// memoryFilePreviewRunes is how much of a memory file's first line a table cell
+// shows; anything longer is cut with an ellipsis.
+const memoryFilePreviewRunes = 160
+
+// memoryFilePreview reads the first non-empty line of one memory file: what the
+// file table's 内容 column draws. It reads a bounded prefix (a memory body is a
+// document, not a log), so one page of rows costs one small read each, and a
+// file it cannot read simply previews as empty.
+func memoryFilePreview(abs string) string {
+	file, err := os.Open(abs)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	head, err := io.ReadAll(io.LimitReader(file, 32<<10))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(head), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		runes := []rune(line)
+		if len(runes) > memoryFilePreviewRunes {
+			return string(runes[:memoryFilePreviewRunes]) + "…"
+		}
+		return line
+	}
+	return ""
+}
+
 // memoryFileMatches reports whether one file answers the listing's keyword:
 // the keyword appears in the file's bytes or in its own name. This is a file
 // manager's literal lookup, not the model's recall — the FTS recall path ranks
@@ -425,36 +461,29 @@ func (s *Server) handleMemoriesFilesList(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	query := r.URL.Query()
-	page, err := strconv.Atoi(strings.TrimSpace(query.Get("page")))
-	if err != nil || page < 1 {
-		page = 1
+	q := readListQuery(r)
+	// The file manager keeps its own page size defaults (a table of files
+	// reads 20 at a time, never more than memoryListMaxPage): its callers
+	// have always been served a window, so it pages even without "page".
+	if r.URL.Query().Get("page_size") == "" {
+		q.PageSize = 20
 	}
-	pageSize, err := strconv.Atoi(strings.TrimSpace(query.Get("page_size")))
-	if err != nil || pageSize < 1 {
-		pageSize = 20
-	}
-	if pageSize > memoryListMaxPage {
-		pageSize = memoryListMaxPage
-	}
-	sortKey := strings.TrimSpace(query.Get("sort"))
+	q.PageSize = min(q.PageSize, memoryListMaxPage)
+	sortKey := q.Sort
 	if sortKey != "created" {
 		sortKey = "updated"
 	}
-	sortDesc := true
-	if strings.TrimSpace(query.Get("order")) == "asc" {
-		sortDesc = false
-	}
+	sortDesc := q.desc(true)
 
 	files, err := collectMemoryFiles(target.Root)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if q := strings.TrimSpace(query.Get("q")); q != "" {
+	if q.Q != "" {
 		filtered := files[:0]
 		for _, file := range files {
-			if memoryFileMatches(target, file, q) {
+			if memoryFileMatches(target, file, q.Q) {
 				filtered = append(filtered, file)
 			}
 		}
@@ -476,21 +505,13 @@ func (s *Server) handleMemoriesFilesList(w http.ResponseWriter, r *http.Request)
 		return a < b
 	})
 	total := len(files)
-	start := (page - 1) * pageSize
-	if start > total {
-		start = total
+	page, servedPage := pageOf(files, q)
+	// Only the served page carries a preview: the table shows ten lines of
+	// content, so the listing reads ten bodies, never the whole scope's.
+	for i := range page {
+		page[i].Preview = memoryFilePreview(filepath.Join(target.Root.MemoryRoot, filepath.FromSlash(page[i].Path)))
 	}
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-		"files":     files[start:end],
-	})
+	writeListPage(w, "files", page, total, servedPage, q, nil)
 }
 
 func (s *Server) handleMemoriesFileRead(w http.ResponseWriter, r *http.Request) {

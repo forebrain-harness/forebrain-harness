@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -90,6 +91,22 @@ func (s *Server) handlePrimaryAgentSwitch(w http.ResponseWriter, r *http.Request
 	writeAgentsJSON(w, primaryAgentsResponse{ActiveID: active.ID, Records: resolver.All()})
 }
 
+// rosterRow is one roster row as the subagents page reads it: the row itself
+// plus the title of the session it names, so the page can label the
+// conversation without a second request per row.
+type rosterRow struct {
+	config.RosterRow
+	SessionTitle string `json:"session_title"`
+}
+
+// rosterRowMatches is the subagent page's search box: it reads the subagent's
+// label and the short name of what it was dispatched to do.
+func rosterRowMatches(row config.RosterRow, q string) bool {
+	needle := strings.ToLower(q)
+	return strings.Contains(strings.ToLower(row.Label), needle) ||
+		strings.Contains(strings.ToLower(row.Title), needle)
+}
+
 func (s *Server) handleAgentRoster(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 	roster, err := s.activeAgentRoster(r.Context(), sessionID)
@@ -97,7 +114,45 @@ func (s *Server) handleAgentRoster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	writeAgentsJSON(w, roster)
+	q := readListQuery(r)
+	// The page lists the subagents at work; "running=1" is that filter on the
+	// server, so a paged answer counts and pages the running ones alone.
+	runningOnly := parseBoolQuery(r, "running")
+	rows := make([]rosterRow, 0, len(roster.Records))
+	for _, record := range roster.Records {
+		if runningOnly && !strings.EqualFold(record.Status, string(state.RunStatusRunning)) {
+			continue
+		}
+		if q.Q != "" && !rosterRowMatches(record, q.Q) {
+			continue
+		}
+		// A subagent's row names the conversation it ran in — its dispatcher's
+		// session — so the title is that session's. A primary agent has no
+		// parent and keeps its own.
+		titleSession := strings.TrimSpace(record.ParentSessionID)
+		if titleSession == "" {
+			titleSession = record.SessionID
+		}
+		title := ""
+		if s.Sessions != nil {
+			if title, err = s.Sessions.SessionTitle(r.Context(), titleSession); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		rows = append(rows, rosterRow{RosterRow: record, SessionTitle: title})
+	}
+	if !q.Paged {
+		writeAgentsJSON(w, map[string]any{"records": rows})
+		return
+	}
+	// Longest-running first: the subagent that started earliest has been at
+	// work the longest, so its elapsed time is the biggest.
+	sort.SliceStable(rows, func(i, j int) bool {
+		return rows[i].ElapsedSeconds > rows[j].ElapsedSeconds
+	})
+	page, servedPage := pageOf(rows, q)
+	writeListPage(w, "records", page, len(rows), servedPage, q, nil)
 }
 
 func (s *Server) handlePrimaryAgentCancel(w http.ResponseWriter, r *http.Request) {
@@ -399,15 +454,16 @@ func subagentRosterRow(entry agent.HistoryEntry) config.RosterRow {
 		status = "running"
 	}
 	return config.RosterRow{
-		ID:             id,
-		Kind:           "subagent",
-		Label:          label,
-		Status:         status,
-		Title:          strings.TrimSpace(entry.Title),
-		Task:           strings.TrimSpace(entry.Task),
-		SessionID:      strings.TrimSpace(entry.WorkerSessionID),
-		RunID:          strings.TrimSpace(entry.RunID),
-		ElapsedSeconds: elapsedSeconds(entry.StartedAt, entry.UpdatedAt),
+		ID:              id,
+		Kind:            "subagent",
+		Label:           label,
+		Status:          status,
+		Title:           strings.TrimSpace(entry.Title),
+		Task:            strings.TrimSpace(entry.Task),
+		SessionID:       strings.TrimSpace(entry.WorkerSessionID),
+		ParentSessionID: strings.TrimSpace(entry.SessionID),
+		RunID:           strings.TrimSpace(entry.RunID),
+		ElapsedSeconds:  elapsedSeconds(entry.StartedAt, entry.UpdatedAt),
 	}
 }
 

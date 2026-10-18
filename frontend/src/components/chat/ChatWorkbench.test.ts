@@ -1,9 +1,14 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { mount, type VueWrapper } from '@vue/test-utils'
+import { config, mount, type VueWrapper } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import ChatWorkbench from './ChatWorkbench.vue'
 import { forebrainApi } from '@/lib/api'
 import { setLocale } from '@/locales'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 setLocale('zh')
 

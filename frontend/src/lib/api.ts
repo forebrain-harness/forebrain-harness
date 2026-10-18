@@ -26,6 +26,49 @@ export function getErrorMessage(error: unknown): string {
 
 const API_BASE = '/api'
 
+/**
+ * One page of a server-paged list (plan 071): every list endpoint the web
+ * pages page through applies the search, the filters and the order on the
+ * server and answers its own list key plus these three fields. `page` is the
+ * page actually served, which is the last one when the request asked past it.
+ */
+export interface ListPageMeta {
+  total: number
+  page: number
+  pageSize: number
+}
+
+/** One list request: the search, the order and the page a table is on. */
+export interface ListQuery {
+  q?: string
+  sort?: string
+  order?: 'asc' | 'desc'
+  page: number
+  pageSize: number
+  /** The endpoint's own filters, camelCased here and snake_cased on the wire. */
+  [filter: string]: unknown
+}
+
+/**
+ * The query string every list endpoint reads: `q`, `sort`, `order`, `page`,
+ * `page_size` and the endpoint's own filters (snake_cased). Unset values are
+ * left out, so an untouched filter never reaches the server as "undefined".
+ */
+export function listParams(query: ListQuery): URLSearchParams {
+  const { q, sort, order, page, pageSize, ...rest } = query
+  const params = new URLSearchParams()
+  if (q) params.set('q', q)
+  if (sort) params.set('sort', sort)
+  if (order) params.set('order', order)
+  if (page) params.set('page', String(page))
+  if (pageSize) params.set('page_size', String(pageSize))
+  for (const [key, value] of Object.entries(toSnakeCase(rest) as Record<string, unknown>)) {
+    if (value === undefined || value === null || value === '') continue
+    params.set(key, String(value))
+  }
+  return params
+}
+
 /** A request the gateway answered with an error status. */
 export class GatewayHttpError extends Error {
   constructor(readonly status: number, body: string) {
@@ -449,6 +492,125 @@ export interface McpToolSummary {
   params?: McpToolParam[]
 }
 
+/**
+ * The three layers an MCP entry can live in — the shared list every primary
+ * agent inherits, one primary agent's own list, and a project's file. A higher
+ * layer replaces a same-named entry whole.
+ */
+export type McpLayer = 'global' | 'agent' | 'project'
+
+/** One entry's OAuth block as the read side answers it: a credential the
+ * surface may not read comes back as `[REDACTED]`, and sending that placeholder
+ * back means "leave it alone". */
+export interface McpServerOAuthRecord {
+  mode: string
+  accessToken: string
+  tokenType: string
+  clientId: string
+  clientSecret: string
+  tokenUrl: string
+  authorizationUrl: string
+  redirectUrl: string
+  refreshToken: string
+  scopes: string[]
+}
+
+/**
+ * One MCP entry as a list or a drawer shows it: the whole entry as a client
+ * edits it (`readMCPServerWrite`'s fields, so a row can be sent straight back),
+ * plus the layer it came from and, when the answering view knows them, what the
+ * runtime is doing with it.
+ *
+ * The runtime half is absent rather than false when a view has no runtime to
+ * ask: "we could not ask" and "nothing is running" are different facts.
+ */
+/** One entry of a project's MCP file that could not be applied, and why. */
+export interface McpNotAppliedRow {
+  name: string
+  reason: string
+}
+
+export interface McpServerRow {
+  name: string
+  /** `stdio` or `streamable_http` — the configured spelling, not the short one
+   * a table shows. */
+  transport: string
+  /** The command line for a stdio entry, the URL for an http one. */
+  target: string
+  required: boolean
+  enabled: boolean
+  startupTimeout: number
+  requestTimeout: number
+  /** Key names travel, values are `[REDACTED]` unless they are a single
+   * `${ENV_NAME}` reference. */
+  headers: Record<string, string>
+  env: Record<string, string>
+  inheritParentEnv: boolean
+  disableStandaloneSse: boolean
+  expectedCommandSha256: string
+  defaultToolsApprovalMode: string
+  oauth: McpServerOAuthRecord
+  scope: McpLayer
+  /** The config file the entry came from. */
+  source?: string
+  urlSet?: boolean
+  /** An OAuth block this entry has; the exact rule is the runtime's
+   * `oauthConfigured`, and this is its answer. */
+  oauthConfigured?: boolean
+  /** A stored credential overlay exists for this entry. */
+  oauthOverlay?: boolean
+  /** False for an entry that is configured but not in this session's list: a
+   * higher layer shadows it, or the disable store kept it out. */
+  running?: boolean
+  /** `enabled: false` in the configuration: no session loads it until the file
+   * changes, which no local switch can do. */
+  disabledByConfig?: boolean
+  /** The agent's disable store keeps it out of a new session. */
+  disabledNextSession?: boolean
+  authStatus?: string
+  tools?: McpToolSummary[]
+  officialUrl?: boolean
+  connStatus?: McpConnStatus | (string & {})
+  toolCount?: number
+  generation?: string
+  pending?: boolean
+  error?: string
+  /** Project view: the entry's confirmation was recorded. */
+  allowed?: boolean
+  /** Project view: this project declined the entry. It does not load, and the
+   * row keeps a way back — allowing it records a new decision. */
+  declined?: boolean
+  /** Shared layer: the layer whose same-named entry overrides this one, so this
+   * entry does not run. Only `agent` is reported today. */
+  shadowedBy?: string
+  /** The primary agent that overrides this entry, when `shadowedBy` is
+   * `agent`. */
+  shadowedByName?: string
+  /** Project view: the one-line summary of an entry awaiting confirmation. */
+  summary?: string
+}
+
+/** What a create or an update answers: the entry as it now reads on disk. */
+export interface McpServerWriteResult {
+  ok: boolean
+  /** The file that was written. */
+  path: string
+  scope: McpLayer
+  applied: boolean
+  removed: boolean
+  server: McpServerRow
+}
+
+/** What one connection test found. A server that would not connect is a
+ * result, not an error: `error` is its own text, verbatim. */
+export interface McpTestResult {
+  ok: boolean
+  toolCount: number
+  tools?: Array<{ name: string; description?: string }>
+  error?: string
+  elapsedMs: number
+}
+
 /** Disable (or enable) a server for the next session; the YAML is untouched. */
 export async function mcpSetServerDisabled(name: string, disabled: boolean, sessionId?: string) {
   const payload = toSnakeCase({ name, sessionId: sessionId ?? '' })
@@ -501,6 +663,14 @@ export interface LspSnapshot {
   servers: LspServerStatus[]
 }
 
+/**
+ * One page of the language-server table plus the snapshot's own fields: the
+ * same answer the snapshot carries, with the servers cut to the page.
+ */
+export interface LspSnapshotPage extends ListPageMeta, Omit<LspSnapshot, 'servers'> {
+  rows: LspServerStatus[]
+}
+
 /** The language-server snapshot the /lsp surfaces render. */
 export async function lspSnapshot(sessionId?: string): Promise<LspSnapshot> {
   const params = sessionId ? { sessionId } : undefined
@@ -508,6 +678,32 @@ export async function lspSnapshot(sessionId?: string): Promise<LspSnapshot> {
   const snap = toCamelCase(data.data) as unknown as LspSnapshot
   if (!Array.isArray(snap.servers)) snap.servers = []
   return snap
+}
+
+/**
+ * One page of the settings page's language-server table: searched over the id
+ * and the languages the table lists, counted on the server. The snapshot's own
+ * fields — the project, the switches, the project-file notes — answer on top of
+ * the page, so a caller that showed them still can.
+ */
+export async function lspPage(query: ListQuery): Promise<LspSnapshotPage> {
+  const res = await api.get<Record<string, unknown>>('/v1/lsp', { params: listParams(query) })
+  const snap = toCamelCase(res.data) as unknown as Omit<LspSnapshot, 'servers'> & ListPageMeta & {
+    servers?: LspServerStatus[]
+  }
+  return {
+    rows: Array.isArray(snap.servers) ? snap.servers : [],
+    total: Number(snap.total ?? 0),
+    page: Number(snap.page ?? 1),
+    pageSize: Number(snap.pageSize ?? query.pageSize),
+    projectRoot: snap.projectRoot,
+    trusted: Boolean(snap.trusted),
+    featureEnabled: Boolean(snap.featureEnabled),
+    toolRegistered: Boolean(snap.toolRegistered),
+    recommendationsDisabled: Boolean(snap.recommendationsDisabled),
+    recommendationsDisabledReason: snap.recommendationsDisabledReason,
+    projectNotes: Array.isArray(snap.projectNotes) ? snap.projectNotes : [],
+  }
 }
 
 /** Enable or disable one server; its instances in this project follow. */
@@ -602,6 +798,8 @@ export interface ProjectRecord {
   trustLevel?: TrustLevel
   /** True when the project root is no longer an existing directory. */
   missing?: boolean
+  /** How many conversations this project holds; the project table's 对话 column. */
+  sessionCount?: number
 }
 
 /** One directory's persisted trust decision, shared by the terminal and the web. */
@@ -648,6 +846,71 @@ export interface ProjectSessionRecord {
   title: string
   updatedAt: number
 }
+
+/**
+ * One row of a project's conversation table (plan 075): the conversation plus
+ * the two facts the table derives — the model it last ran with and how many
+ * messages it holds.
+ */
+export interface ProjectSessionRow {
+  id: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  /** Empty when the session never pinned a model; the table draws "—". */
+  model: string
+  /** The visible user and assistant messages, counted on the server. */
+  messageCount: number
+  /** The conversation's heartbeat, absent when it has none. */
+  heartbeat?: { intervalSeconds: number; paused: boolean }
+}
+
+/** One row of a project's rule-file table: the directory layer, whose
+ * `FOREBRAIN.md` is the file ('' is the project root). */
+export interface ProjectRuleFileRow {
+  dir: string
+  exists: boolean
+  sizeBytes?: number
+  updatedAt?: number
+}
+
+/** One row of a project's permission table: the rule the project's own
+ * settings hold, in the shape the agent's permission page shows. */
+export type ProjectPermissionRuleRow = PermissionRuleRecord
+
+/** One row of a project's language-server table: pending, allowed and denied
+ * entries in one list, since they are one table on the page. */
+export interface ProjectLspRow {
+  id: string
+  /** What the entry would do; empty for an allowed or denied one, which the
+   * server only knows by id. */
+  summary: string
+  status: 'pending' | 'allowed' | 'denied'
+}
+
+/** One row of a project's channel table. */
+export interface ProjectChannelRow {
+  kind: string
+  labelZh: string
+  labelEn: string
+  enabled: boolean
+  /** A configuration is saved for this kind — the form was filled in once. */
+  configured: boolean
+  /** The saved fields, keys in the channel's own snake_case spelling and
+   * secrets masked with the placeholder. */
+  fields: Record<string, unknown>
+  /** Which of those keys carry a secret. */
+  secretKeys: string[]
+  /** `••••` plus the last four characters, per secret key that has a value. */
+  secretHints: Record<string, string>
+}
+
+/** One row of a project's scheduled-task table: the job as the engine stores
+ * it, with what became of its last fire. */
+export type CronJobRow = CronJobRecord
+
+/** One row of a scheduled task's run history. */
+export type CronRunRow = CronRunRecord
 
 export interface ProjectMcpRecord {
   servers: Array<{ name: string; transport: string; urlSet: boolean; scope: string }>
@@ -780,6 +1043,32 @@ export interface HookMatcherRecord {
 
 export type HooksSettingsRecord = Record<string, HookMatcherRecord[]>
 
+/**
+ * One row of the hooks table (plan 076): one command under one matcher of one
+ * event. The two indices locate it inside HooksSettings, which is what an edit
+ * or a delete addresses — both write the whole table back.
+ */
+export interface HookRowRecord {
+  event: string
+  matcher: string
+  /** The hook's command, or its prompt or URL, whichever its kind carries. */
+  command: string
+  matcherIdx: number
+  commandIdx: number
+}
+
+/** What the gateway knows about itself for the settings page's runtime tab. */
+export interface RuntimeInfo {
+  status: string
+  /** The control plane's auth mode; absent when no configuration is bound. */
+  auth?: string
+  /** How many primary agents are configured. */
+  agents: number
+  home: string
+  logsDir: string
+  stateDir: string
+}
+
 /** One model-service row as the web surface edits it. The key never travels
  * back: apiKeySet says whether one is stored and apiKeyHint is its masked
  * tail; a save carries a key only when the user typed one. */
@@ -792,6 +1081,11 @@ export interface ProviderRecord {
   params?: string
   apiKeySet?: boolean
   apiKeyHint?: string
+  /**
+   * The row's position in the whole fallback order (0 is the primary). A paged
+   * table holds one page, so "move up" acts on this and never on the page.
+   */
+  index?: number
 }
 
 /** The PUT shape: apiKeyPlain is a freshly typed key (stored as an ${ENV}
@@ -1096,7 +1390,6 @@ export interface SkillRecord {
   downloadUrl?: string
   /** Directories offering the same name that this row takes precedence over. */
   shadows?: string[]
-  shadowedBy?: string[]
   /** The current published version, 0 when the row carries no version history. */
   version?: number
   /** draft | published | pending, or '' for an unversioned skill. */
@@ -1283,6 +1576,14 @@ export interface RuleFileSaveResponse {
   warning?: string
 }
 
+/** One row of the rule-file table: the file's name and what is on disk. */
+export interface RuleFileSummary {
+  name: string
+  exists: boolean
+  sizeBytes?: number
+  updatedAt?: number
+}
+
 export interface SkillUploadResponse {
   status: string
   installed: string[]
@@ -1302,6 +1603,8 @@ export interface MemoryFileRecord {
   createdAt: number
   updatedAt: number
   core: boolean
+  /** The first non-empty line, cut by the server to one table cell. */
+  preview?: string
 }
 
 export interface MemoryFilesResponse {
@@ -1383,7 +1686,14 @@ export type AgentRosterRow = {
   /** The full dispatch prompt, kept for the agent's own view. */
   task?: string
   sessionId?: string
+  /** The conversation a subagent ran in — its parent. A primary agent row has
+   * none: its own session is the conversation. The client's camel-case
+   * interceptor turns the wire's `parent_session_id` into this. */
+  parentSessionId?: string
   runId?: string
+  /** The title of the conversation this row ran in — a subagent's parent, a
+   * primary agent's own session; '' when there is none. */
+  sessionTitle?: string
   elapsedSeconds?: number
   tokenCount?: number
   toolCount?: number
@@ -1476,6 +1786,144 @@ function putRaw<TResponse>(url: string, body: unknown) {
   return api.put<TResponse>(url, body).then((res) => res.data)
 }
 
+// Sent as-is for the same reason putRaw is: an MCP entry's env and header maps
+// carry the operator's own key spellings, and a key rewrite (X-Api-Key →
+// x_api_key) would rename a request header.
+function postRaw<TResponse>(url: string, body: unknown) {
+  return api.post<TResponse>(url, body).then((res) => res.data)
+}
+
+/**
+ * A GET whose JSON keeps the gateway's own spelling all the way down. The
+ * shared interceptor camelCases every key, which is right for a field name and
+ * wrong for user data: an MCP entry's `env` and `headers` maps are keyed by the
+ * user's own variable names, and renaming `CODEGRAPH_HOME` to `codegraphHome`
+ * would send a bogus key back on the next save.
+ */
+async function getRawJSON<T>(url: string, params: URLSearchParams): Promise<T> {
+  const query = params.toString()
+  const res = await gatewayFetch(`${API_BASE}${url}${query ? `?${query}` : ''}`)
+  if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+  return (await res.json()) as T
+}
+
+/** One tool read through `getRawJSON`. The tool table reads raw because its
+ * `input_schema` is not a field name but a document: a parameter called
+ * `file_path` has to stay `file_path`, or the required list stops matching the
+ * properties and every underscore-named parameter reads as optional. */
+function toolMetaFromWire(wire: Record<string, unknown>): ToolMetaRecord {
+  const row: ToolMetaRecord = {
+    name: String(wire.name ?? ''),
+    description: String(wire.description ?? ''),
+    category: String(wire.category ?? ''),
+    readOnly: wire.read_only === true,
+    destructive: wire.destructive === true,
+    concurrencySafe: wire.concurrency_safe === true,
+    interruptBehavior: String(wire.interrupt_behavior ?? ''),
+    alwaysLoad: wire.always_load === true,
+  }
+  if (wire.input_schema !== undefined) row.inputSchema = wire.input_schema
+  if (wire.mcp_server !== undefined) row.mcpServer = String(wire.mcp_server)
+  return row
+}
+
+/** One MCP row read through `getRawJSON`: the wire's snake_case field names,
+ * translated here and only here, with the user-keyed maps (`env`, `headers`)
+ * passed through untouched. */
+function mcpRowFromWire(wire: Record<string, unknown>): McpServerRow {
+  const text = (key: string): string => String(wire[key] ?? '')
+  const flag = (key: string): boolean => wire[key] === true
+  const record = (key: string): Record<string, string> => {
+    const value = wire[key]
+    if (!value || typeof value !== 'object') return {}
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, entry]) => [name, String(entry ?? '')]))
+  }
+  const oauth = (wire.oauth ?? {}) as Record<string, unknown>
+  const row: McpServerRow = {
+    name: text('name'),
+    transport: text('transport'),
+    target: text('target'),
+    required: flag('required'),
+    enabled: flag('enabled'),
+    startupTimeout: Number(wire.startup_timeout ?? 0),
+    requestTimeout: Number(wire.request_timeout ?? 0),
+    headers: record('headers'),
+    env: record('env'),
+    inheritParentEnv: flag('inherit_parent_env'),
+    disableStandaloneSse: flag('disable_standalone_sse'),
+    expectedCommandSha256: text('expected_command_sha256'),
+    defaultToolsApprovalMode: text('default_tools_approval_mode'),
+    oauth: {
+      mode: String(oauth.mode ?? ''),
+      accessToken: String(oauth.access_token ?? ''),
+      tokenType: String(oauth.token_type ?? ''),
+      clientId: String(oauth.client_id ?? ''),
+      clientSecret: String(oauth.client_secret ?? ''),
+      tokenUrl: String(oauth.token_url ?? ''),
+      authorizationUrl: String(oauth.authorization_url ?? ''),
+      redirectUrl: String(oauth.redirect_url ?? ''),
+      refreshToken: String(oauth.refresh_token ?? ''),
+      scopes: Array.isArray(oauth.scopes) ? oauth.scopes.map(String) : [],
+    },
+    scope: text('scope') as McpLayer,
+  }
+  // The runtime half exists only on a view that could ask a runner; a field
+  // the answer never carried stays absent rather than false.
+  if ('source' in wire) row.source = text('source')
+  if ('url_set' in wire) row.urlSet = flag('url_set')
+  if ('oauth_configured' in wire) row.oauthConfigured = flag('oauth_configured')
+  if ('oauth_overlay' in wire) row.oauthOverlay = flag('oauth_overlay')
+  if ('running' in wire) row.running = flag('running')
+  if ('disabled_by_config' in wire) row.disabledByConfig = flag('disabled_by_config')
+  if ('disabled_next_session' in wire) row.disabledNextSession = flag('disabled_next_session')
+  if ('auth_status' in wire) row.authStatus = text('auth_status')
+  if (Array.isArray(wire.tools)) row.tools = wire.tools as McpToolSummary[]
+  if ('official_url' in wire) row.officialUrl = flag('official_url')
+  if ('conn_status' in wire) row.connStatus = text('conn_status')
+  if ('tool_count' in wire) row.toolCount = Number(wire.tool_count ?? 0)
+  if ('generation' in wire) row.generation = text('generation')
+  if ('pending' in wire) row.pending = flag('pending')
+  if ('error' in wire) row.error = text('error')
+  if ('allowed' in wire) row.allowed = flag('allowed')
+  if ('declined' in wire) row.declined = flag('declined')
+  if ('shadowed_by' in wire) row.shadowedBy = text('shadowed_by')
+  if ('shadowed_by_name' in wire) row.shadowedByName = text('shadowed_by_name')
+  if ('summary' in wire) row.summary = text('summary')
+  return row
+}
+
+/** One channel row read through `getRawJSON`: the wire's snake_case field
+ * names, translated here and only here, with the `fields` map passed through
+ * untouched because its keys are the channel's own (`app_id`, `app_secret`). */
+function projectChannelRowFromWire(wire: Record<string, unknown>): ProjectChannelRow {
+  const fields = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {}
+  const hints: Record<string, string> = {}
+  for (const [key, value] of Object.entries(fields(wire.secret_hints))) {
+    hints[key] = String(value ?? '')
+  }
+  return {
+    kind: String(wire.kind ?? ''),
+    labelZh: String(wire.label_zh ?? ''),
+    labelEn: String(wire.label_en ?? ''),
+    enabled: wire.enabled === true,
+    configured: wire.configured === true,
+    fields: fields(wire.fields),
+    secretKeys: Array.isArray(wire.secret_keys) ? wire.secret_keys.map(String) : [],
+    secretHints: hints,
+  }
+}
+
+/**
+ * The route set one MCP layer's writes land on: the shared layer's routes carry
+ * no id, a primary agent's carry its id, a project's carry the project's.
+ */
+function mcpScopedPath(scope: McpLayer, id: string, tail: string): string {
+  if (scope === 'agent') return `/agents/primary/${encodeURIComponent(id)}/mcp/${tail}`
+  if (scope === 'project') return `/v1/projects/${encodeURIComponent(id)}/mcp/${tail}`
+  return `/v1/mcp/${tail}`
+}
+
 export const forebrainApi = {
   primaryAgents() {
     return api.get<PrimaryAgentsResponse>('/agents/primary').then((res) => res.data)
@@ -1495,6 +1943,20 @@ export const forebrainApi = {
 
   agentRoster() {
     return api.get<AgentRosterResponse>('/agents/roster').then((res) => res.data)
+  },
+
+  /** One page of the subagent table: filtered (`running`), searched and
+   * ordered longest-running first on the server. Each row names the session it
+   * runs in. */
+  agentRosterPage(query: ListQuery) {
+    return api
+      .get<{ records?: AgentRosterRow[] } & ListPageMeta>('/agents/roster', { params: listParams(query) })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.records) ? res.data.records : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   primaryAgentCancel(agentId: string) {
@@ -1761,6 +2223,22 @@ export const forebrainApi = {
     }))
   },
 
+  /** One page of the permission table: searched by tool and rule text, counted
+   * on the server. The approval mode stays on every answer. */
+  permissionsRulesPage(query: ListQuery) {
+    return api
+      .get<{ rules?: PermissionRuleRecord[]; mode?: string } & ListPageMeta>('/permissions/rules', {
+        params: listParams(query),
+      })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.rules) ? res.data.rules : [],
+        mode: String(res.data?.mode ?? 'on-request'),
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
   permissionsEvaluate(body: { toolName: string; input?: string }) {
     return postJson<PermissionDecision, { toolName: string; input?: string }>('/permissions/evaluate', body)
   },
@@ -1774,6 +2252,21 @@ export const forebrainApi = {
       installed: Array.isArray(res.data?.installed) ? res.data.installed : [],
       actions: Array.isArray(res.data?.actions) ? res.data.actions : [],
     }))
+  },
+
+  /** One page of the agent's skill table: searched by name and description,
+   * filtered by layer (`origin`), counted on the server. The actions the page
+   * offers come along on every answer. */
+  skillsPage(query: ListQuery) {
+    return api
+      .get<{ installed?: SkillRecord[]; actions?: string[] } & ListPageMeta>('/skills', { params: listParams(query) })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.installed) ? res.data.installed : [],
+        actions: Array.isArray(res.data?.actions) ? res.data.actions : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   skillInspect(name: string) {
@@ -1803,6 +2296,23 @@ export const forebrainApi = {
       installed: Array.isArray(res.data?.installed) ? res.data.installed : [],
       actions: Array.isArray(res.data?.actions) ? res.data.actions : [],
     }))
+  },
+
+  /** One page of a project space's skill table, paged the same way the
+   * agent's own table is. */
+  projectSkillsPage(projectId: string, query: ListQuery) {
+    return api
+      .get<{ installed?: SkillRecord[]; actions?: string[] } & ListPageMeta>(
+        `/v1/projects/${encodeURIComponent(projectId)}/skills`,
+        { params: listParams(query) },
+      )
+      .then((res) => ({
+        rows: Array.isArray(res.data?.installed) ? res.data.installed : [],
+        actions: Array.isArray(res.data?.actions) ? res.data.actions : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   projectSkillInspect(projectId: string, name: string) {
@@ -2130,6 +2640,18 @@ export const forebrainApi = {
     return api.get<MemoryFilesResponse>(`/memories/files?${params.toString()}`).then((res) => res.data)
   },
 
+  /** One page of the memory file table, in the shape every table's list takes
+   * (plan 071/073): the search, the time column ordered by and the page are the
+   * server's. `scope` — and `projectId` for a project scope — ride the query. */
+  memoryFilesPage(query: ListQuery) {
+    return api.get<MemoryFilesResponse>('/memories/files', { params: listParams(query) }).then((res) => ({
+      rows: Array.isArray(res.data?.files) ? res.data.files : [],
+      total: Number(res.data?.total ?? 0),
+      page: Number(res.data?.page ?? 1),
+      pageSize: Number(res.data?.pageSize ?? query.pageSize),
+    }))
+  },
+
   memoryFileRead(scope: 'global' | 'project', path: string, projectId?: string) {
     const params = new URLSearchParams({ scope, path })
     if (projectId) params.set('project_id', projectId)
@@ -2304,6 +2826,23 @@ export const forebrainApi = {
     return api.get<ToolMetaRecord[]>('/tools').then((res) => (Array.isArray(res.data) ? res.data : []))
   },
 
+  /** One page of the tool table: searched by name and description, filtered by
+   * category and type, ordered A→Z on the server. `categories` lists every
+   * category the runtime exposes whatever the filters leave, so the dropdown
+   * can always offer the way back. */
+  toolsPage(query: ListQuery) {
+    return getRawJSON<{ tools?: Record<string, unknown>[]; categories?: string[]; total?: number; page?: number; page_size?: number }>(
+      '/tools',
+      listParams(query),
+    ).then((answer) => ({
+      rows: Array.isArray(answer.tools) ? answer.tools.map(toolMetaFromWire) : [],
+      categories: Array.isArray(answer.categories) ? answer.categories.map(String) : [],
+      total: Number(answer.total ?? 0),
+      page: Number(answer.page ?? 1),
+      pageSize: Number(answer.page_size ?? query.pageSize),
+    }))
+  },
+
   /** The MCP servers configured for the active primary agent. */
   mcpServers(params?: { sessionId?: string }) {
     return api
@@ -2322,6 +2861,57 @@ export const forebrainApi = {
         generation: res.data?.generation,
         pending: res.data?.pending ?? false,
       }))
+  },
+
+  /**
+   * One page of an MCP table. `view` names which layers the page shows and is
+   * what the server answers with — one layer for 设置, the agent's on top of the
+   * shared one for the menu bar's page, all three for a project space — so the
+   * search, the `source` layer filter, the order and the slice are all the
+   * server's, and each row says which layer it came from.
+   */
+  mcpPage(view: McpLayer, query: ListQuery & { projectId?: string; source?: string }) {
+    const { projectId, ...rest } = query
+    const params = listParams(rest)
+    if (view === 'global') params.set('scope', 'global')
+    if (view === 'agent') params.set('view', 'agent')
+    const path = view === 'project' ? `/v1/projects/${encodeURIComponent(projectId ?? '')}/mcp` : '/v1/mcp/servers'
+    return getRawJSON<{ servers?: Record<string, unknown>[]; not_applied?: McpNotAppliedRow[]; total?: number; page?: number; page_size?: number }>(path, params).then((answer) => ({
+      rows: Array.isArray(answer.servers) ? answer.servers.map(mcpRowFromWire) : [],
+      total: Number(answer.total ?? 0),
+      page: Number(answer.page ?? 1),
+      pageSize: Number(answer.page_size ?? query.pageSize),
+      // A project file's entries that did not apply: the preview reported them
+      // beside the list, and the table says so under it (the old tab did).
+      notApplied: Array.isArray(answer.not_applied) ? answer.not_applied : [],
+    }))
+  },
+
+  /**
+   * Create one MCP server in one layer. `id` is the primary agent's id for the
+   * agent layer and the project's id for a project; the global layer has none.
+   * `body` is `mcpWritePayload`'s answer, already in the wire's own spelling.
+   */
+  mcpCreate(scope: McpLayer, id: string, body: Record<string, unknown>) {
+    return postRaw<McpServerWriteResult>(mcpScopedPath(scope, id, 'servers'), body)
+  },
+
+  /** Update one entry. The name is the entry's identity and comes from the
+   * route; an update never renames. Fields the body omits are left alone. */
+  mcpUpdate(scope: McpLayer, id: string, name: string, body: Record<string, unknown>) {
+    return putRaw<McpServerWriteResult>(`${mcpScopedPath(scope, id, 'servers')}/${encodeURIComponent(name)}`, body)
+  },
+
+  mcpDelete(scope: McpLayer, id: string, name: string) {
+    return api
+      .delete<McpServerWriteResult>(`${mcpScopedPath(scope, id, 'servers')}/${encodeURIComponent(name)}`)
+      .then((res) => res.data)
+  },
+
+  /** Try one entry without saving it: the same start a new session would make,
+   * so "the test passed" and "a session can connect" are the same statement. */
+  mcpTest(scope: McpLayer, id: string, body: Record<string, unknown>) {
+    return postRaw<McpTestResult>(`${mcpScopedPath(scope, id, 'servers')}/test`, body)
   },
 
   /** The subdirectories of a host directory (or the user's home when path is
@@ -2372,6 +2962,19 @@ export const forebrainApi = {
       .then((res) => (Array.isArray(res.data?.projects) ? res.data.projects : []))
   },
 
+  /** One page of the project table: searched, ordered (the pinned ones first,
+   * then the sort key) and counted on the server. */
+  projectsPage(query: ListQuery) {
+    return api
+      .get<{ projects?: ProjectRecord[] } & ListPageMeta>('/v1/projects', { params: listParams(query) })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.projects) ? res.data.projects : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
   projectCreate(body: {
     name: string
     root: string
@@ -2418,6 +3021,22 @@ export const forebrainApi = {
       .then((res) => (Array.isArray(res.data?.sessions) ? res.data.sessions : []))
   },
 
+  /** One page of the project's conversation table: searched by title, ordered
+   * by creation or update time on the server, with each row's model, message
+   * count and heartbeat. */
+  projectSessionsPage(id: string, query: ListQuery) {
+    return api
+      .get<{ sessions?: ProjectSessionRow[] } & ListPageMeta>(`/v1/projects/${encodeURIComponent(id)}/sessions`, {
+        params: listParams(query),
+      })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.sessions) ? res.data.sessions : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
   projectSessionCreate(id: string, title: string) {
     return postJson<{ id: string; title: string }, { title: string }>(`/v1/projects/${encodeURIComponent(id)}/sessions`, { title })
   },
@@ -2426,20 +3045,62 @@ export const forebrainApi = {
     return api.get<ProjectMcpRecord>(`/v1/projects/${encodeURIComponent(id)}/mcp`).then((res) => res.data)
   },
 
-  projectMcpConsent(id: string, allow: string[]) {
-    return postJson<{ ok: boolean }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/mcp/consent`, { allow })
+  /** Record the decision for the project entries named in `decide` — allow when
+   * the name is also in `allow`, decline otherwise — and leave every other
+   * entry as it was; this is also how a declined entry is allowed again. Without
+   * `decide` the endpoint decides the whole undecided set, which is what the
+   * terminal's startup prompt does. */
+  projectMcpConsent(id: string, allow: string[], decide?: string[]) {
+    const body: { allow: string[]; decide?: string[] } = decide ? { allow, decide } : { allow }
+    return postJson<{ ok: boolean }, typeof body>(`/v1/projects/${encodeURIComponent(id)}/mcp/consent`, body)
   },
 
   projectLsp(id: string) {
     return api.get<ProjectLspRecord>(`/v1/projects/${encodeURIComponent(id)}/lsp`).then((res) => res.data)
   },
 
-  projectLspConsent(id: string, allow: string[]) {
-    return postJson<{ ok: boolean; allowed: string[] }, { allow: string[] }>(`/v1/projects/${encodeURIComponent(id)}/lsp/consent`, { allow })
+  /** One page of the project's language-server table: pending, allowed and
+   * denied entries as one list (a pending entry first), searched by id and
+   * summary on the server. A pending entry is the only one the server has a
+   * summary for. */
+  projectLspPage(id: string, query: ListQuery) {
+    return api
+      .get<{ rows?: ProjectLspRow[]; trusted?: boolean; notes?: string[] } & ListPageMeta>(
+        `/v1/projects/${encodeURIComponent(id)}/lsp`,
+        { params: listParams(query) },
+      )
+      .then((res) => ({
+        rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
+        trusted: Boolean(res.data?.trusted),
+        notes: Array.isArray(res.data?.notes) ? res.data.notes : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
+  /** Same two shapes as the MCP consent above: `decide` names the one entry
+   * this click decides, and a declined entry has no other way back. */
+  projectLspConsent(id: string, allow: string[], decide?: string[]) {
+    const body: { allow: string[]; decide?: string[] } = decide ? { allow, decide } : { allow }
+    return postJson<{ ok: boolean; allowed: string[] }, typeof body>(`/v1/projects/${encodeURIComponent(id)}/lsp/consent`, body)
   },
 
   agentRuleFiles() {
     return api.get<{ files: Array<{ name: string; exists: boolean; sizeBytes?: number; updatedAt?: number }> }>('/rules/agent').then((res) => res.data)
+  },
+
+  /** One page of the rule-file table: searched by file name and counted on
+   * the server. */
+  agentRuleFilesPage(query: ListQuery) {
+    return api
+      .get<{ files?: RuleFileSummary[] } & ListPageMeta>('/rules/agent', { params: listParams(query) })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.files) ? res.data.files : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   // Rule files travel as their raw text on save; a read always answers one
@@ -2457,6 +3118,25 @@ export const forebrainApi = {
 
   projectRuleFiles(projectId: string) {
     return api.get<{ files: Array<{ dir: string; exists: boolean; sizeBytes?: number; updatedAt?: number }>; create: string[] }>(`/rules/project/${encodeURIComponent(projectId)}`).then((res) => res.data)
+  },
+
+  /** One page of the project's rule-file table: searched by file path and
+   * counted on the server. `create` still names the directory layers that hold
+   * no file yet, so the create dialog can offer them whatever the search
+   * leaves. */
+  projectRuleFilesPage(projectId: string, query: ListQuery) {
+    return api
+      .get<{ files?: ProjectRuleFileRow[]; create?: string[] } & ListPageMeta>(
+        `/rules/project/${encodeURIComponent(projectId)}`,
+        { params: listParams(query) },
+      )
+      .then((res) => ({
+        rows: Array.isArray(res.data?.files) ? res.data.files : [],
+        create: Array.isArray(res.data?.create) ? res.data.create : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   projectRuleFile(projectId: string, dir: string) {
@@ -2480,6 +3160,23 @@ export const forebrainApi = {
     return api
       .get<{ applies: boolean; rules: PermissionRuleRecord[] }>(`/v1/projects/${encodeURIComponent(projectId)}/permissions/rules`)
       .then((res) => ({ applies: Boolean(res.data?.applies), rules: Array.isArray(res.data?.rules) ? res.data.rules : [] }))
+  },
+
+  /** One page of the project's permission table: searched over the tool a rule
+   * names and the rule's own text, counted on the server. */
+  projectPermissionRulesPage(projectId: string, query: ListQuery) {
+    return api
+      .get<{ rules?: ProjectPermissionRuleRow[]; applies?: boolean } & ListPageMeta>(
+        `/v1/projects/${encodeURIComponent(projectId)}/permissions/rules`,
+        { params: listParams(query) },
+      )
+      .then((res) => ({
+        rows: Array.isArray(res.data?.rules) ? res.data.rules : [],
+        applies: Boolean(res.data?.applies),
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   projectPermissionUpdate(projectId: string, body: Omit<PermissionUpdateBody, 'destination'>) {
@@ -2531,6 +3228,43 @@ export const forebrainApi = {
     ).then((res) => res.data)
   },
 
+  /**
+   * Every channel kind of the project as the server stores it, read through
+   * `getRawJSON`: the keys of a channel's field map are the channel's own
+   * (`app_id`, `app_secret`) and the camelCase interceptor would rename them
+   * into keys the channel driver never reads. Writing one channel back means
+   * sending the whole map, so this is the read a save starts from.
+   */
+  async projectChannelsRaw(projectId: string) {
+    const answer = await getRawJSON<{ kinds?: string[]; channels?: Record<string, Record<string, unknown>> }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/channels`,
+      new URLSearchParams(),
+    )
+    return {
+      kinds: Array.isArray(answer.kinds) ? answer.kinds.map(String) : [],
+      channels: answer.channels && typeof answer.channels === 'object' ? answer.channels : {},
+    }
+  },
+
+  /**
+   * One page of the project's channel table. Raw for the same reason
+   * `projectChannelsRaw` is: each row's `fields` map is keyed by the channel's
+   * own spelling, so the camelCase interceptor would rename the values a user
+   * typed.
+   */
+  async projectChannelsPage(projectId: string, query: ListQuery) {
+    const answer = await getRawJSON<{ rows?: Record<string, unknown>[]; total?: number; page?: number; page_size?: number }>(
+      `/v1/projects/${encodeURIComponent(projectId)}/channels`,
+      listParams(query),
+    )
+    return {
+      rows: Array.isArray(answer.rows) ? answer.rows.map(projectChannelRowFromWire) : [],
+      total: Number(answer.total ?? 0),
+      page: Number(answer.page ?? 1),
+      pageSize: Number(answer.page_size ?? query.pageSize),
+    }
+  },
+
   saveProjectChannels(projectId: string, channels: Record<string, unknown>) {
     return api.put<{ applied: boolean }>(
       `/v1/projects/${encodeURIComponent(projectId)}/channels`,
@@ -2543,6 +3277,22 @@ export const forebrainApi = {
       .then((res) => (Array.isArray(res.data?.providers) ? res.data.providers : []))
   },
 
+  /** One page of the model-services table: searched over service, models and
+   * endpoint, in the stored fallback order, counted on the server. Each row
+   * keeps its position in the whole order. */
+  providersPage(query: ListQuery) {
+    return api
+      .get<{ providers?: ProviderRecord[]; agentId?: string } & ListPageMeta>('/providers', {
+        params: listParams(query),
+      })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.providers) ? res.data.providers : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
   saveProviders(providers: Array<Record<string, unknown>>) {
     return putRaw<{ applied: boolean }>('/providers', { providers })
   },
@@ -2552,8 +3302,35 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
+  /** One page of the hooks table: the stored map flattened to one row per
+   * command, searched over event, matcher and command. An edit or a delete
+   * writes the whole map back, so it reads `hooks()` first and locates its row
+   * by the two indices this page carries. */
+  hooksPage(query: ListQuery) {
+    return api
+      .get<{ rows?: HookRowRecord[]; knownTypes?: string[]; events?: string[] } & ListPageMeta>('/hooks', {
+        params: listParams(query),
+      })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
+        knownTypes: Array.isArray(res.data?.knownTypes) ? res.data.knownTypes : [],
+        events: Array.isArray(res.data?.events) ? res.data.events : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
+  },
+
   saveHooks(hooks: HooksSettingsRecord) {
     return api.put<{ applied: boolean }>('/hooks', toSnakeCase({ hooks })).then((res) => res.data)
+  },
+
+  /** What the gateway knows about itself for the settings page's runtime tab:
+   * its state, the auth mode it reads requests under, how many primary agents
+   * are configured and where its data lives. The version and the address the
+   * browser reached are the browser's own. */
+  runtimeInfo() {
+    return api.get<RuntimeInfo>('/runtime').then((res) => res.data)
   },
 
   // Retention is the install's configuration, so it lives apart from the
@@ -2572,6 +3349,21 @@ export const forebrainApi = {
     return api.get<{ agentId?: string; records: CronJobRecord[] }>(
       `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs`,
     ).then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
+  },
+
+  /** One page of the project's scheduled-task table: searched over the name
+   * and the prompt, in the order the server keeps them. */
+  cronJobsPage(projectId: string, query: ListQuery) {
+    return api
+      .get<{ records?: CronJobRow[] } & ListPageMeta>(`/v1/projects/${encodeURIComponent(projectId)}/cron/jobs`, {
+        params: listParams(query),
+      })
+      .then((res) => ({
+        rows: Array.isArray(res.data?.records) ? res.data.records : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   // The schedule preview is the engine's own parse, so what the builder shows
@@ -2615,6 +3407,22 @@ export const forebrainApi = {
       `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs/${encodeURIComponent(id)}/runs`,
       { params: { limit } },
     ).then((res) => (Array.isArray(res.data?.records) ? res.data.records : []))
+  },
+
+  /** One page of a scheduled task's run history, newest fire first, counted on
+   * the server. */
+  cronRunsPage(projectId: string, id: string, query: ListQuery) {
+    return api
+      .get<{ runs?: CronRunRow[] } & ListPageMeta>(
+        `/v1/projects/${encodeURIComponent(projectId)}/cron/jobs/${encodeURIComponent(id)}/runs`,
+        { params: listParams(query) },
+      )
+      .then((res) => ({
+        rows: Array.isArray(res.data?.runs) ? res.data.runs : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+      }))
   },
 
   /** Every heartbeat on the active agent's conversations, newest set up first. */
