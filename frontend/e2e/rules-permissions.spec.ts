@@ -130,14 +130,18 @@ test('settings approval tab persists the preset', async ({ page }) => {
   await signIn(page)
   await page.goto('/settings', { waitUntil: 'networkidle' })
   await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批默认|Approval default/ }).click()
-  await page.click('[data-testid="approval-full-access"]')
+  // The presets are one standard radio group and the write is the save at the
+  // bottom of the tab (plan 076), not a click on the choice itself.
+  await page.locator('[data-testid="approval-default"] input[value="full-access"]').check()
+  await page.locator('[data-testid="approval-save"]').click()
   await expect(page.getByText(/已保存为全局默认|Saved as the global default/).first()).toBeVisible({ timeout: 10_000 })
   // Reopening keeps the selection.
   await page.reload({ waitUntil: 'networkidle' })
   await page.locator('[data-testid="settings-tabs"] button', { hasText: /审批默认|Approval default/ }).click()
-  await expect(page.locator('[data-testid="approval-full-access"]').first()).toHaveAttribute('aria-checked', 'true', { timeout: 10_000 })
+  await expect(page.locator('[data-testid="approval-default"] input[value="full-access"]')).toBeChecked({ timeout: 10_000 })
   // Restore the safe default.
-  await page.click('[data-testid="approval-auto"]')
+  await page.locator('[data-testid="approval-default"] input[value="auto"]').check()
+  await page.locator('[data-testid="approval-save"]').click()
   await expect(page.getByText(/已保存为全局默认|Saved as the global default/).first()).toBeVisible({ timeout: 10_000 })
 })
 

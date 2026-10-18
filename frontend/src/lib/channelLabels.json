@@ -1,0 +1,20 @@
+{
+  "telegram": ["Telegram", "Telegram"],
+  "discord": ["Discord", "Discord"],
+  "slack": ["Slack", "Slack"],
+  "whatsapp": ["WhatsApp", "WhatsApp"],
+  "signal": ["Signal", "Signal"],
+  "mattermost": ["Mattermost", "Mattermost"],
+  "matrix": ["Matrix", "Matrix"],
+  "homeassistant": ["Home Assistant", "Home Assistant"],
+  "email": ["邮件", "Email"],
+  "sms": ["短信", "SMS"],
+  "webhook": ["Webhook", "Webhook"],
+  "bluebubbles": ["BlueBubbles", "BlueBubbles"],
+  "wecom": ["企业微信", "WeCom"],
+  "wecom_callback": ["企业微信（回调）", "WeCom callback"],
+  "weixin": ["微信", "WeChat"],
+  "feishu": ["飞书", "Feishu"],
+  "dingtalk": ["钉钉", "DingTalk"],
+  "qq": ["QQ", "QQ"]
+}

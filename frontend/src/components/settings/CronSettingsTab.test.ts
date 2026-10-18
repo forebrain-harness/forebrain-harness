@@ -28,6 +28,19 @@ describe('CronSettingsTab', () => {
     vi.restoreAllMocks()
   })
 
+  it('is a flat form: no title row, no card, the buttons at the bottom', async () => {
+    const wrapper = await mountTab(unset)
+    expect(wrapper.find('h2').exists()).toBe(false)
+    expect(wrapper.find('h3').exists()).toBe(false)
+    expect(wrapper.find('.forebrain-card').exists()).toBe(false)
+    // The number field is labelled like every other field, at 128px.
+    expect(wrapper.find('.forebrain-form-field > span').text()).toBe('Days to keep run records')
+    expect(wrapper.find('.forebrain-form-field label, label.forebrain-form-field').classes()).toContain('w-32')
+    // Save is the primary action; restoring the default sits beside it.
+    expect(wrapper.find('[data-testid="cron-retention-save"]').classes()).toContain('forebrain-btn-primary')
+    expect(wrapper.find('[data-testid="cron-retention-reset"]').classes()).toContain('forebrain-btn-ghost')
+  })
+
   it('shows the value in force, with the default hint when none is set', async () => {
     const wrapper = await mountTab(unset)
     expect((daysInput(wrapper).element as HTMLInputElement).value).toBe('30')

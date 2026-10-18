@@ -68,6 +68,7 @@ const ROUTES = [
   '/',
   '/workshop',
   '/skills',
+  '/mcp',
   '/rules',
   '/subagents',
   '/permissions',

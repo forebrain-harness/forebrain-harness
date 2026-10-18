@@ -138,7 +138,15 @@ func (s *Server) handleMCPServersV1(w http.ResponseWriter, r *http.Request) {
 	// which is not the same question as "what is running": an entry a higher
 	// layer shadows is still configured and still editable.
 	if scope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope"))); scope == appcfg.MCPServerScopeGlobal || scope == appcfg.MCPServerScopeAgent {
-		s.handleMCPLayerList(w, lc, rc, scope)
+		s.handleMCPLayerList(w, r, lc, rc, scope)
+		return
+	}
+	// ?view=agent is the menu bar's MCP page: the primary agent's own layer on
+	// top of the shared one, the agent's rows first and a same-named shared
+	// entry hidden behind it. It is neither "what is running" (that is this
+	// listing) nor one layer alone (that is ?scope).
+	if view := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("view"))); view == "agent" {
+		s.handleMCPAgentView(w, r, lc, rc)
 		return
 	}
 	configs := map[string]appcfg.MCPServerConfig{}
@@ -342,18 +350,7 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 	res := process.ResolveSessionMCP(s.Home, workspace, agents, agentName, launch)
 	servers := make([]map[string]any, 0, len(res.Servers))
 	for _, srv := range res.Servers {
-		scope := appcfg.MCPServerScopeGlobal
-		switch {
-		case mcp.IsProjectScope(srv):
-			scope = appcfg.MCPServerScopeProject
-		case mcp.IsAgentScope(srv):
-			scope = appcfg.MCPServerScopeAgent
-		}
-		row := readMCPServerWrite(srv)
-		row["scope"] = scope
-		row["url_set"] = strings.TrimSpace(srv.URL) != ""
-		row["running"] = true
-		servers = append(servers, row)
+		servers = append(servers, mcpPreviewRow(srv))
 	}
 	notApplied := make([]map[string]string, 0, len(res.Summary.NotApplied))
 	for _, item := range res.Summary.NotApplied {
@@ -364,6 +361,69 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 	for _, item := range pending {
 		pendingRows = append(pendingRows, map[string]string{"name": item.Name, "summary": item.Summary})
 	}
+	// A declined entry does not load, but it is still on record and can be
+	// allowed again, so the paged view lists it as a row of its own.
+	declined := process.DeclinedProjectMCPConsents(workspace, launch)
+	// The three notes above ride every answer: they say what the project's file
+	// asks for and did not get, which is the same question whether or not the
+	// caller is paging a table. not_applied repeats neither the pending nor the
+	// declined entries: a paged answer lists those as rows, and the note under
+	// the table says what the table cannot show.
+	listed := make(map[string]struct{}, len(pending)+len(declined))
+	for _, item := range pending {
+		listed[strings.ToLower(strings.TrimSpace(item.Name))] = struct{}{}
+	}
+	for _, item := range declined {
+		listed[strings.ToLower(strings.TrimSpace(item.Name))] = struct{}{}
+	}
+	unlisted := make([]map[string]string, 0, len(notApplied))
+	for _, item := range notApplied {
+		if _, ok := listed[strings.ToLower(strings.TrimSpace(item["name"]))]; ok {
+			continue
+		}
+		unlisted = append(unlisted, item)
+	}
+	extra := map[string]any{
+		"overridden_global": res.Summary.OverriddenGlobal,
+		"not_applied":       unlisted,
+		"pending_consent":   pendingRows,
+	}
+	if q := readListQuery(r); q.Paged {
+		// A table's order is its own, and it follows the project entry's own
+		// lifecycle: the entries this page still has to decide (the
+		// unconfirmed ones first, so the decisions sit at the top), then the
+		// ones it allowed, then the ones it turned down and can take back.
+		// The unconfirmed and declined entries are rows here — the table is
+		// where "允许 / 拒绝" is offered — while the unpaged answer keeps them
+		// in pending_consent alone.
+		rows := make([]map[string]any, 0, len(res.Servers)+len(pending)+len(declined))
+		lc := s.liveCfg()
+		rc := s.mcpRowsContext(lc, s.Runner)
+		source := turn.GlobalMCPSource(lc)
+		for _, row := range mcpConsentPreviewRows(pending, launch, "pending") {
+			rows = append(rows, row)
+		}
+		for _, srv := range res.Servers {
+			if mcpServerScopeOf(srv) != appcfg.MCPServerScopeProject {
+				continue
+			}
+			row := mcpPreviewRow(srv)
+			row["allowed"] = true
+			rows = append(rows, row)
+		}
+		rows = append(rows, mcpConsentPreviewRows(declined, launch, "declined")...)
+		for _, scope := range []string{appcfg.MCPServerScopeAgent, appcfg.MCPServerScopeGlobal} {
+			for _, srv := range res.Servers {
+				if mcpServerScopeOf(srv) != scope {
+					continue
+				}
+				entry := mcpLayerEntry(rc, srv, scope)
+				rows = append(rows, s.mcpServerRow(rc, srv, scope, source, entry != nil, entry))
+			}
+		}
+		writeMCPRows(w, q, mcpLayerFilter(r.URL.Query().Get("source")), rows, extra)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"servers":           servers,
@@ -373,8 +433,58 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// mcpPreviewRow renders one entry of a project view's effective list: the whole
+// entry as a client edits it, plus the layer it resolved from. Being in this
+// list means a session would load it.
+func mcpPreviewRow(srv appcfg.MCPServerConfig) map[string]any {
+	row := readMCPServerWrite(srv)
+	row["scope"] = mcpServerScopeOf(srv)
+	row["url_set"] = strings.TrimSpace(srv.URL) != ""
+	row["running"] = true
+	return row
+}
+
+// mcpConsentPreviewRows renders the project entries that are configured but
+// not allowed, as table rows: the entry's own fields from the project's file
+// (secrets masked, the same rendering every other row uses) and the one-line
+// summary the confirmation prompt shows. flag names the state the rows are in
+// — "pending" for an entry no one decided yet, "declined" for one that was
+// turned down and can still be allowed. An entry the file no longer parses is
+// still a row — it is listed by name, because something is asking to load it.
+func mcpConsentPreviewRows(items []mcp.PendingProjectConsent, launch safety.ProjectContext, flag string) []map[string]any {
+	entries, _ := mcp.LoadProjectMCPServers(strings.TrimSpace(launch.Project.Root))
+	byName := make(map[string]appcfg.MCPServerConfig, len(entries))
+	for _, srv := range entries {
+		byName[strings.ToLower(strings.TrimSpace(srv.Name))] = srv
+	}
+	rows := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		srv, ok := byName[strings.ToLower(strings.TrimSpace(item.Name))]
+		var row map[string]any
+		if ok {
+			row = mcpPreviewRow(srv)
+		} else {
+			row = map[string]any{"name": strings.TrimSpace(item.Name)}
+		}
+		// An entry read straight from the project's file carries no layer
+		// stamp (the merge stamps what it resolves), and it is this project's
+		// own entry either way.
+		row["scope"] = appcfg.MCPServerScopeProject
+		row[flag] = true
+		row["running"] = false
+		row["summary"] = item.Summary
+		rows = append(rows, row)
+	}
+	return rows
+}
+
 // handleProjectMCPConsent is the web confirmation entry for project-level MCP
-// servers: the same decision the terminal's startup prompt records.
+// servers. Body: {"allow": [...], "decide": [...]}. decide names the entries
+// the request decides — allow the ones also in allow, deny the rest — and is
+// what the project page's per-row buttons send, so a row decides only itself
+// and a declined entry is allowed again by deciding it once more. Without
+// decide the call is the startup prompt's batch answer: every pending entry
+// not in allow is recorded as declined.
 func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -392,6 +502,11 @@ func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request)
 	}
 	var body struct {
 		Allow []string `json:"allow"`
+		// Decide names the entries this request is a decision for. Absent
+		// means the caller speaks for the whole batch, the way the startup
+		// prompt does: everything not allowed is recorded as declined. An
+		// empty list decides nothing.
+		Decide *[]string `json:"decide"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -406,7 +521,15 @@ func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request)
 	if s.Runner != nil {
 		workspace = s.Runner.WorkspaceRoot
 	}
-	if err := process.DecideProjectMCPConsents(workspace, launch, body.Allow); err != nil {
+	// A table row decides its own entry, and a declined entry is allowed
+	// again by deciding it once more; the startup prompt's batch semantics
+	// stay behind the callers that send no decide.
+	if body.Decide != nil {
+		err = process.DecideProjectMCPConsentsFor(workspace, launch, *body.Decide, body.Allow)
+	} else {
+		err = process.DecideProjectMCPConsents(workspace, launch, body.Allow)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -408,3 +408,41 @@ func DecideProjectServers(agentWorkspace, projectRoot, projectKey string, allowe
 	}
 	return SaveProjectConsents(agentWorkspace, consents)
 }
+
+// DecideProjectServersFor records a decision for the named entries only —
+// allow when the id is also in allowed, deny otherwise — and leaves every
+// other entry exactly as it was. Unlike DecideProjectServers it overwrites a
+// decision a named entry already has: that is how a denied entry is allowed
+// again.
+func DecideProjectServersFor(agentWorkspace, projectRoot, projectKey string, decide, allowed []string) error {
+	if strings.TrimSpace(projectRoot) == "" {
+		return nil
+	}
+	entries, _ := LoadProjectServers(projectRoot)
+	consents, err := LoadProjectConsents(agentWorkspace)
+	if err != nil {
+		// An unreadable store is not an empty one: saving a single decision
+		// over it would drop every confirmation recorded before.
+		return err
+	}
+	decideSet := make(map[string]struct{}, len(decide))
+	for _, id := range decide {
+		decideSet[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, id := range allowed {
+		allowedSet[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	for _, id := range sortedServerIDs(entries) {
+		name := strings.ToLower(strings.TrimSpace(id))
+		if _, named := decideSet[name]; !named {
+			continue
+		}
+		decision := ProjectConsentDeny
+		if _, ok := allowedSet[name]; ok {
+			decision = ProjectConsentAllow
+		}
+		consents.Decide(projectKey, id, ProjectServerFingerprint(entries[id]), decision, time.Now())
+	}
+	return SaveProjectConsents(agentWorkspace, consents)
+}

@@ -5,7 +5,7 @@
       class="forebrain-chip-btn !h-7 !w-7 !justify-center !px-0"
       :class="{ 'forebrain-chip-btn--pressed': open }"
       :disabled="disabled"
-      :title="t('chat.plusAdd')"
+      v-tip:top="t('chat.plusAdd')"
       :aria-label="t('chat.plusAdd')"
       aria-haspopup="menu"
       :aria-expanded="open"

@@ -560,7 +560,6 @@ function backToSource() {
   void router.push({ name: 'skills' })
 }
 
-const modelLabel = computed(() => sessionModelData.value?.model ?? '')
 const topbarLeading = () => [
   h(WorkshopTopbar, {
     part: 'leading',
@@ -570,7 +569,6 @@ const topbarLeading = () => [
     state: activeState.value,
     scope: scope.value,
     projectName: projectName.value,
-    model: modelLabel.value,
     workbenchOpen: workbench.open.value,
     publishVersion: publishVersion.value,
     canPublish: canPublish.value,

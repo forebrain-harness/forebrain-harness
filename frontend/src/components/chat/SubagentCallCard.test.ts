@@ -1,10 +1,15 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { config, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 import { nextTick } from 'vue'
 
 import { setLocale } from '@/locales'
 import SubagentCallCard from './SubagentCallCard.vue'
 import { subagentCallView, type SubagentToolStep } from '@/composables/useChatStream'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 function stepOf(overrides: Partial<SubagentToolStep> = {}): SubagentToolStep {
   return {

@@ -20,7 +20,7 @@
           type="button"
           class="context-debug-refresh"
           :disabled="loading"
-          :title="t('common.refresh')"
+          v-tip:top="t('common.refresh')"
           @click="$emit('refresh')"
         >
           <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" aria-hidden="true" />
@@ -136,7 +136,7 @@
                   <span class="truncate text-[12px] font-semibold text-[var(--forebrain-text)]">{{ item.toolName }}</span>
                   <span v-if="item.callId" class="context-debug-mini-pill">{{ item.callId }}</span>
                 </div>
-                <div class="mt-1 min-w-0 truncate font-mono text-[11px] text-[var(--forebrain-muted-text)]" :title="item.path">
+                <div class="mt-1 min-w-0 truncate font-mono text-[11px] text-[var(--forebrain-muted-text)]" v-tip:top.trunc="item.path">
                   {{ item.pathLabel || item.path }}
                 </div>
               </div>

@@ -34,7 +34,7 @@
         role="option"
         :aria-selected="p.id === selected?.projectId"
         :disabled="p.missing"
-        :title="p.missing ? t('chat.dirMissing') : undefined"
+        v-tip:top="p.missing ? t('chat.dirMissing') : ''"
         @click="emit('select', targetFromProject(p))"
       >
         <FolderGit2 v-if="!p.missing" class="ic" aria-hidden="true" />
@@ -106,7 +106,9 @@ onMounted(() => {
 .pj-pop {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 6px);
+  /* It opens downwards (prototype .pj-pop): the new-chat pill sits in the
+     middle of the pane now, so the room it has is below it, not above. */
+  top: calc(100% + 6px);
   width: 400px;
   background: var(--forebrain-surface);
   border: 1px solid var(--forebrain-divider);

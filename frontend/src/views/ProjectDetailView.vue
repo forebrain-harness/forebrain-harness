@@ -1,16 +1,9 @@
 <template>
-  <!-- The project space shell: a breadcrumb names the project layer and its
-       directory, and the tab bar below addresses one project's own
-       configuration surfaces. -->
+  <!-- The project space shell: the breadcrumb that names the project and its
+       directory sits in the shell's top bar, like the workshop's, and the tab
+       row below it addresses one project's own configuration surfaces. -->
   <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
     <div class="proj-head">
-      <div class="crumb">
-        <RouterLink to="/projects" class="crumb-link">{{ t('projects.title') }}</RouterLink>
-        <ChevronRight class="crumb-ic" aria-hidden="true" />
-        <b>{{ project?.name || project?.id }}</b>
-        <span v-if="project?.root" class="crumb-path">{{ project.root }}</span>
-        <span v-if="project?.trusted" class="crumb-badge">{{ t('projects.trusted') }}</span>
-      </div>
       <nav class="proj-tabs" :aria-label="t('projects.title')">
         <RouterLink
           v-for="tab in tabs"
@@ -26,16 +19,19 @@
 
     <div class="min-h-0 flex-1 overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
       <div v-if="error" class="mx-auto max-w-4xl rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</div>
-      <RouterView v-else :project="project" :project-id="projectId" />
+      <RouterView v-else :project="project" :project-id="projectId" @saved="load()" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, h, onMounted, ref, watch, withDirectives } from 'vue'
 import { useRoute } from 'vue-router'
 import { RouterLink, RouterView } from 'vue-router'
 import { ChevronRight } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import { useTopbar } from '@/composables/useTopbar'
+import tip from '@/directives/tip'
 import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
 import { setActiveProject } from '@/composables/useTenantScope'
 import { useI18n } from '@/locales'
@@ -63,6 +59,45 @@ const tabs = computed(() => [
   { key: 'channels', routeName: 'project-channels', label: t('projects.tabChannels') },
 ])
 
+/**
+ * The project's own row in the shell's top bar (owner 2026-10-18): the layer
+ * it returns to, the project's name — capped and cut like a title — the
+ * directory it is bound to, and whether that directory is trusted. The
+ * factory runs inside the shell's render, so saving the project's settings
+ * (which reloads it) moves the badge without the page re-registering.
+ */
+const { set: setTopbar } = useTopbar()
+
+setTopbar({
+  leading: () => {
+    const current = project.value
+    const name = current?.name || current?.id || ''
+    return [
+      h('div', { class: 'forebrain-topbar-crumb' }, [
+        h(RouterLink, {
+          to: '/projects',
+          class: 'font-medium text-[var(--forebrain-brand-1)] hover:underline',
+          'data-testid': 'project-crumb-back',
+        }, { default: () => t('projects.title') }),
+        h(ChevronRight, { class: 'size-3.5 text-[var(--forebrain-muted-text)]', 'aria-hidden': 'true' }),
+        withDirectives(
+          h('span', { class: 'forebrain-topbar-name', 'data-testid': 'project-crumb-name' }, name),
+          [[tip, name, 'bottom', { trunc: true }]],
+        ),
+      ]),
+      ...(current?.root
+        ? [h('span', { class: 'forebrain-topbar-meta font-mono', 'data-testid': 'project-crumb-root' }, current.root)]
+        : []),
+      ...(current
+        ? [h(BadgeComponent, {
+          variant: current.trusted ? 'success' : 'gray',
+          'data-testid': 'project-crumb-trust',
+        }, { default: () => (current.trusted ? t('projects.trusted') : t('projects.untrusted')) })]
+        : []),
+    ]
+  },
+})
+
 async function load() {
   error.value = ''
   try {
@@ -88,49 +123,12 @@ watch(projectId, () => {
 </script>
 
 <style scoped>
+/* The tab row is all the page keeps above its content (prototype .proj-head
+   after the breadcrumb moved into the top bar): the tabs and the rule that
+   closes them. */
 .proj-head {
-  display: grid;
-  gap: 6px;
   border-bottom: 1px solid var(--forebrain-divider);
-  padding: 14px 28px 0;
-}
-.crumb {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  font-size: 13px;
-  color: var(--forebrain-muted-text);
-}
-.crumb-link {
-  color: var(--forebrain-brand-1);
-  text-decoration: none;
-}
-.crumb-link:hover {
-  text-decoration: underline;
-}
-.crumb-ic {
-  width: 14px;
-  height: 14px;
-  color: var(--forebrain-muted-text);
-}
-.crumb b {
-  color: var(--forebrain-text);
-  font-weight: 650;
-  font-size: 15px;
-}
-.crumb-path {
-  font-family: var(--forebrain-mono-font);
-  font-size: 12px;
-}
-.crumb-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 11px;
-  background: var(--forebrain-success-soft);
-  color: var(--forebrain-success);
+  padding: 4px 28px 0;
 }
 .proj-tabs {
   display: flex;

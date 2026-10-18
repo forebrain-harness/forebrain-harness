@@ -178,3 +178,36 @@ func TestMigrateLegacyAgentChannelsMissingFile(t *testing.T) {
 		t.Fatal("a missing file reported a removal")
 	}
 }
+
+// A form for a channel nobody configured yet still has to offer its inputs:
+// the field set is every key the kind declares, not only the ones that carry a
+// default (which marshals with omitempty).
+func TestChannelKindFieldsCarryEveryDeclaredKey(t *testing.T) {
+	feishu := ChannelKindFields("feishu")
+	for _, key := range []string{"enabled", "app_id", "app_secret", "domain", "connection_mode", "group_policy", "group_allow_from"} {
+		if _, ok := feishu[key]; !ok {
+			t.Fatalf("feishu fields are missing %q: %#v", key, feishu)
+		}
+	}
+	// The defaults a kind carries survive beside the empty ones.
+	if feishu["connection_mode"] == "" {
+		t.Fatalf("feishu lost its default connection mode: %#v", feishu)
+	}
+	if _, ok := feishu["app_id"].(string); !ok {
+		t.Fatalf("an unset text field is an empty string, got %#v", feishu["app_id"])
+	}
+	// Every kind in the set answers, and none of them answers with only
+	// "enabled".
+	kinds := []string{"telegram", "discord", "slack", "whatsapp", "signal", "mattermost", "matrix",
+		"homeassistant", "email", "sms", "webhook", "bluebubbles", "wecom", "wecom_callback",
+		"weixin", "feishu", "dingtalk", "qq"}
+	for _, kind := range kinds {
+		fields := ChannelKindFields(kind)
+		if len(fields) < 2 {
+			t.Fatalf("%s answers %#v, which a form cannot fill in", kind, fields)
+		}
+	}
+	if len(ChannelKindFields("not-a-kind")) != 0 {
+		t.Fatal("an unknown kind has no fields")
+	}
+}

@@ -1050,7 +1050,7 @@ func TestSnapshotShowsPendingProjectEntry(t *testing.T) {
 	if denied == nil || denied.State != event.LSPStateBlocked {
 		t.Fatalf("declined row = %+v", denied)
 	}
-	if want := "project entry declined; it asks again when .forebrain/lsp_servers.yaml changes"; denied.Note != want {
+	if want := "project entry declined; allow it on the project page's LSP tab, or it asks again when .forebrain/lsp_servers.yaml changes"; denied.Note != want {
 		t.Fatalf("declined note = %q", denied.Note)
 	}
 	// gopls keeps its plain row once the override was declined.

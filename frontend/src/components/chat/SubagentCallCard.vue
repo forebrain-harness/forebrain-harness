@@ -30,7 +30,7 @@
         <CircleDashed v-else class="mt-0.5 size-4 shrink-0 text-[var(--forebrain-muted-text)]" aria-hidden="true" />
         <span class="min-w-0 flex-1">
           <span class="flex min-w-0 items-baseline gap-1.5">
-            <span class="min-w-0 truncate text-[13px] text-[var(--forebrain-text)]" :title="row.title || t('subagentCard.emptyTask')">{{ row.title || t('subagentCard.emptyTask') }}</span>
+            <span class="min-w-0 truncate text-[13px] text-[var(--forebrain-text)]" v-tip:top.trunc="row.title || t('subagentCard.emptyTask')">{{ row.title || t('subagentCard.emptyTask') }}</span>
             <span v-if="row.clock" data-testid="subagent-row-clock" class="shrink-0 text-xs tabular-nums text-[var(--forebrain-muted-text)]"> · {{ row.clock.label }}</span>
           </span>
           <span v-if="detailOf(row)" class="mt-0.5 block truncate text-xs text-[var(--forebrain-muted-text)]">{{ detailOf(row) }}</span>

@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -235,6 +236,92 @@ func TestProjectListSortPinAndSearch(t *testing.T) {
 	list, _ = a.ListProjects(ctx, ListProjectsOptions{Search: "/tmp/beta"}, 50, 0)
 	if len(list) != 1 || list[0].ID != second.ID {
 		t.Fatalf("search by root: %+v", list)
+	}
+}
+
+// TestListProjectsPageKeepsPinnedFirstAndCountsTotal pins the paging contract
+// the project table relies on: the pinned project leads whatever the sort key
+// and direction are, the same search decides both the page and the total, and
+// a page past the end reads the last page instead of an empty one.
+func TestListProjectsPageKeepsPinnedFirstAndCountsTotal(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newProjectStoreForTest(t, "main")
+	alpha, err := store.Create(ctx, CreateProjectInput{Name: "alpha", Root: "/tmp/page-alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beta, err := store.Create(ctx, CreateProjectInput{Name: "beta", Root: "/tmp/page-beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gamma, err := store.Create(ctx, CreateProjectInput{Name: "gamma", Root: "/tmp/page-gamma"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stamp := range []struct {
+		id      string
+		updated int64
+	}{{alpha.ID, 300}, {beta.ID, 100}, {gamma.ID, 200}} {
+		if _, err := store.db.ExecContext(ctx, `UPDATE fb_projects SET updated_at=? WHERE id=?`, stamp.updated, stamp.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetPinned(ctx, gamma.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	asc, desc := false, true
+	for _, tc := range []struct {
+		name string
+		sort string
+		desc *bool
+		want []string
+	}{
+		{"name ascending", "name", &asc, []string{gamma.ID, alpha.ID, beta.ID}},
+		{"name descending", "name", &desc, []string{gamma.ID, beta.ID, alpha.ID}},
+		{"updated defaults to newest first", "", nil, []string{gamma.ID, alpha.ID, beta.ID}},
+		{"updated oldest first", "updated", &asc, []string{gamma.ID, beta.ID, alpha.ID}},
+	} {
+		rows, total, err := store.ListProjectsPage(ctx, ListProjectsOptions{Sort: tc.sort, Desc: tc.desc}, 10, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if total != 3 {
+			t.Fatalf("%s: total = %d, want 3", tc.name, total)
+		}
+		got := make([]string, 0, len(rows))
+		for _, row := range rows {
+			got = append(got, row.ID)
+		}
+		if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Fatalf("%s: order = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+
+	// The search narrows the page and the total together.
+	rows, total, err := store.ListProjectsPage(ctx, ListProjectsOptions{Search: "alp"}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(rows) != 1 || rows[0].ID != alpha.ID {
+		t.Fatalf("search page = %+v total %d, want only alpha", rows, total)
+	}
+
+	// A window smaller than the list counts every row, and an offset past the
+	// end reads the last page.
+	rows, total, err = store.ListProjectsPage(ctx, ListProjectsOptions{}, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || len(rows) != 2 {
+		t.Fatalf("first window = %d rows, total %d; want 2 of 3", len(rows), total)
+	}
+	rows, total, err = store.ListProjectsPage(ctx, ListProjectsOptions{}, 2, 400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || len(rows) != 1 || rows[0].ID != beta.ID {
+		t.Fatalf("offset past the end = %+v total %d, want the last page", rows, total)
 	}
 }
 

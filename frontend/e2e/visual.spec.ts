@@ -88,16 +88,13 @@ test('every page is flat and white under both rail themes', async ({ page }) => 
   }
 })
 
-const SCHEME_RADIOS: Record<string, string> = {
-  // Playwright's Chrome may run in either locale; pick the radio by its
-  // swatch's data-scheme instead of its translated label.
-  navy: '海军蓝 / Navy',
-  teal: '松石青 / Teal',
-  graphite: '石墨黑 / Graphite',
-}
-
+/**
+ * The three schemes are one standard radio group (plan 076): each input's
+ * value is the scheme, so Playwright's Chrome locale cannot stand in the way of
+ * picking one by its translated label.
+ */
 async function pickScheme(page: import('@playwright/test').Page, scheme: 'navy' | 'teal' | 'graphite') {
-  await page.locator(`.brand-swatch[data-scheme="${scheme}"]`).click()
+  await page.locator(`[data-testid="appearance-brand"] input[value="${scheme}"]`).check()
 }
 
 test('brand scheme switch recolours the app and persists', async ({ page }) => {
@@ -115,8 +112,9 @@ test('brand scheme switch recolours the app and persists', async ({ page }) => {
     await pickScheme(page, c.brand)
     await expect(page.locator('html')).toHaveAttribute('data-brand', c.brand)
     const swatchBg = await page.evaluate((scheme) => {
-      const el = document.querySelector(`.brand-swatch[data-scheme="${scheme}"]`) as HTMLElement | null
-      return el ? getComputedStyle(el).backgroundColor : null
+      const input = document.querySelector(`[data-testid="appearance-brand"] input[value="${scheme}"]`)
+      const swatch = input?.closest('label')?.querySelector('.forebrain-radio-swatch')
+      return swatch ? getComputedStyle(swatch).backgroundColor : null
     }, c.brand)
     expect(swatchBg).toBe(c.btn)
     await page.goto('/', { waitUntil: 'networkidle' })

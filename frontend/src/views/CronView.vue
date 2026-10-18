@@ -1,130 +1,196 @@
 <template>
-  <div class="w-full">
-      <PageTopRow :title="t('cron.title')" :description="t('cron.projectDescription')">
-        <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-            {{ t('common.refresh') }}
-          </button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="cron-new" @click="openEditor()">
-            {{ t('cron.newJob') }}
-          </button>
-        </template>
-      </PageTopRow>
+  <div class="w-full space-y-4">
+    <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
 
-      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+    <ListToolbar>
+      <template #left>
+        <input
+          v-model="q"
+          type="search"
+          :placeholder="t('cron.searchPlaceholder')"
+          class="forebrain-field h-[34px]"
+          style="max-width: 240px"
+          data-testid="cron-search"
+        />
+      </template>
+      <template #actions>
+        <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="cron-new" @click="openEditor()">
+          <Plus class="size-3.5" aria-hidden="true" />{{ t('cron.new') }}
+        </button>
+      </template>
+    </ListToolbar>
 
-      <div v-if="loading && !jobs.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <ul v-else-if="jobs.length" class="space-y-2">
-        <li v-for="job in jobs" :key="job.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3" :data-cron-job="job.name || job.id">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ job.name || t('cron.untitled') }}</span>
-                <span class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ job.schedule }}</span>
-                <span v-if="job.lastStatus" class="rounded-full border px-2 py-0.5 text-[11px]" :class="statusClass(job.lastStatus)">{{ statusLabel(job.lastStatus) }}</span>
-              </div>
-              <p class="mt-1 line-clamp-2 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">{{ job.prompt }}</p>
-              <p class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]">
-                {{ job.enabled ? nextRunLabel(job) : t('cron.paused') }}
-                <span> · {{ job.deliver ? t('cron.deliversTo', { target: job.deliver }) : t('cron.recordOnly') }}</span>
-                <span v-if="job.runCount"> · {{ t('cron.runCount', { count: job.runCount }) }}</span>
-              </p>
-              <p v-if="job.lastError" class="mt-1 text-[11px] text-[var(--forebrain-danger)]">{{ jobErrorText(job) }}</p>
-            </div>
-            <div class="flex shrink-0 flex-col items-end gap-1">
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="runNow(job)">{{ t('cron.runNow') }}</button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="togglePause(job)">
-                {{ job.enabled ? t('cron.pause') : t('cron.resume') }}
-              </button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="openEditor(job)">{{ t('common.edit') }}</button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="openRuns(job)">{{ t('cron.history') }}</button>
-              <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px] text-[var(--forebrain-danger)]" @click="remove(job)">{{ t('common.delete') }}</button>
-            </div>
-          </div>
-          <div v-if="openRunsFor === job.id" class="mt-3 border-t border-[var(--forebrain-divider)] pt-2">
-            <p v-if="!runs.length" class="text-[12px] text-[var(--forebrain-muted-text)]">{{ t('cron.noRuns') }}</p>
-            <ul v-else class="space-y-1">
-              <li v-for="row in runs" :key="row.id" class="rounded-lg px-2 py-1.5 text-[12px] odd:bg-[var(--forebrain-surface)]">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="statusClass(row.status)">{{ statusLabel(row.status) }}</span>
-                  <span class="text-[var(--forebrain-muted-text)]">{{ formatTime(row.startedAt) }}</span>
-                  <span v-if="row.trigger" class="text-[var(--forebrain-muted-text)]">· {{ row.trigger }}</span>
-                  <span v-if="row.deliveredTo" class="text-[var(--forebrain-muted-text)]">· {{ row.deliveredTo }}</span>
-                  <button
-                    v-if="row.sessionId && row.hasConversation"
-                    type="button"
-                    class="forebrain-btn forebrain-btn-ghost h-6 px-2 text-[11px]"
-                    data-testid="cron-run-open"
-                    @click="openConversation(row)"
-                  >{{ t('cron.openConversation') }}</button>
-                </div>
-                <p v-if="row.output" class="mt-1 whitespace-pre-wrap text-[12px] text-[var(--forebrain-text-2)]">{{ row.output }}</p>
-                <p v-if="row.error" data-testid="cron-run-error" class="mt-1 whitespace-pre-wrap text-[11px] text-[var(--forebrain-danger)]">{{ runErrorText(row) }}</p>
-              </li>
-            </ul>
-          </div>
-        </li>
-      </ul>
-      <p v-else class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
-        {{ t('cron.empty') }}
-      </p>
+    <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+    <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      {{ t('cron.empty') }}
+    </div>
+    <div v-else class="forebrain-table-wrap">
+      <table class="forebrain-table forebrain-table--fixed">
+        <colgroup>
+          <col />
+          <col style="width: 140px" />
+          <col style="width: 200px" />
+          <col style="width: 110px" />
+          <col style="width: 96px" />
+          <col style="width: 64px" />
+          <col style="width: 56px" />
+          <col style="width: 140px" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>{{ t('cron.colName') }}</th>
+            <th>{{ t('cron.colSchedule') }}</th>
+            <th>{{ t('cron.colDeliver') }}</th>
+            <th>{{ t('cron.colNext') }}</th>
+            <th>{{ t('cron.colLast') }}</th>
+            <th class="text-right">{{ t('cron.colRuns') }}</th>
+            <th>{{ t('cron.colEnabled') }}</th>
+            <th class="text-right">{{ t('projects.colActions') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="job in rows" :key="job.id" :data-cron-job="job.name || job.id">
+            <td>
+              <span class="forebrain-cell-1 font-medium" v-tip:top.trunc="nameOf(job)">{{ nameOf(job) }}</span>
+            </td>
+            <td>
+              <span class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]" v-tip:top.trunc="job.schedule">{{ job.schedule }}</span>
+            </td>
+            <td>
+              <span
+                v-if="job.deliver"
+                class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
+                v-tip:top.trunc="job.deliver"
+              >{{ job.deliver }}</span>
+              <span v-else class="text-[var(--forebrain-muted-text)]">{{ t('cron.recordOnlyShort') }}</span>
+            </td>
+            <td class="forebrain-num">
+              <BadgeComponent v-if="!job.enabled" variant="warning">{{ t('cron.paused') }}</BadgeComponent>
+              <span v-else class="text-[var(--forebrain-text-2)]">{{ formatMonthDayTime(job.nextRunAt) }}</span>
+            </td>
+            <td>
+              <BadgeComponent
+                v-if="job.lastStatus"
+                :variant="lastStateOf(job).variant"
+                v-tip:top="jobErrorText(job)"
+              >{{ lastStateOf(job).label }}</BadgeComponent>
+              <span v-else class="text-[var(--forebrain-text-2)]">—</span>
+            </td>
+            <td class="forebrain-num text-right">{{ t('cron.times', { count: job.runCount ?? 0 }) }}</td>
+            <td>
+              <SwitchComponent
+                :model-value="job.enabled"
+                :aria-label="t('cron.switchLabel', { name: nameOf(job) })"
+                :data-testid="`cron-toggle-${job.id}`"
+                @update:model-value="togglePause(job)"
+              />
+            </td>
+            <td class="text-right">
+              <RowActions>
+                <RowAction
+                  :icon="Play"
+                  :label="t('cron.runNow')"
+                  :name="nameOf(job)"
+                  :data-testid="`cron-run-${job.id}`"
+                  @click="runNow(job)"
+                />
+                <RowAction
+                  :icon="Pencil"
+                  :label="t('common.edit')"
+                  :name="nameOf(job)"
+                  :data-testid="`cron-edit-${job.id}`"
+                  @click="openEditor(job)"
+                />
+                <RowAction
+                  :icon="History"
+                  :label="t('cron.history')"
+                  :name="nameOf(job)"
+                  :data-testid="`cron-history-${job.id}`"
+                  @click="openRuns(job)"
+                />
+                <RowAction
+                  :icon="Trash2"
+                  :label="t('common.delete')"
+                  :name="nameOf(job)"
+                  tone="danger"
+                  :data-testid="`cron-delete-${job.id}`"
+                  @click="remove(job)"
+                />
+              </RowActions>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
-    <!-- Job editor -->
-    <div
-      v-if="editorOpen"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
-      data-testid="cron-editor"
-      @click.self="closeEditor"
-    >
-      <div class="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
-        <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ editingId ? t('cron.editJob') : t('cron.newJob') }}</div>
+    <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+    <ListNote>{{ t('cron.projectNote') }}</ListNote>
+  </div>
 
-        <label class="mt-3 block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.namePlaceholder') }}</span>
-          <input v-model="editorName" type="text" class="forebrain-field h-9" data-testid="cron-name" />
+  <!-- A task's fires are a history of their own: a modal over the table, so the
+       list underneath stays where it was. -->
+  <CronRunsDialog
+    v-if="runsJob"
+    :project-id="projectId"
+    :job="runsJob"
+    @close="runsJob = null"
+  />
+
+  <!-- Job editor -->
+  <div
+    v-if="editorOpen"
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4"
+    data-testid="cron-editor"
+    @click.self="closeEditor"
+  >
+    <div class="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] p-5 shadow-lg">
+      <div class="text-[14px] font-medium text-[var(--forebrain-text)]">{{ editingId ? t('cron.editJob') : t('cron.newJob') }}</div>
+
+      <label class="mt-3 block">
+        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.namePlaceholder') }}</span>
+        <input v-model="editorName" type="text" class="forebrain-field h-9" data-testid="cron-name" />
+      </label>
+
+      <div class="mt-3">
+        <ScheduleBuilder v-model="editorSchedule" :project-id="projectId" @validated="scheduleValid = $event" />
+      </div>
+
+      <label class="mt-3 block">
+        <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.promptPlaceholder') }}</span>
+        <textarea v-model="editorPrompt" rows="3" class="forebrain-field w-full" data-testid="cron-prompt" />
+      </label>
+
+      <div class="mt-3 grid gap-3 sm:grid-cols-2">
+        <label class="block">
+          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.deliverLabel') }}</span>
+          <select v-model="editorDeliver" class="forebrain-field h-9" data-testid="cron-deliver">
+            <option value="">{{ t('cron.recordOnly') }}</option>
+            <option v-for="channel in enabledChannels" :key="channel" :value="channel">{{ channel }}</option>
+          </select>
         </label>
-
-        <div class="mt-3">
-          <ScheduleBuilder v-model="editorSchedule" :project-id="projectId" @validated="scheduleValid = $event" />
-        </div>
-
-        <label class="mt-3 block">
-          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.promptPlaceholder') }}</span>
-          <textarea v-model="editorPrompt" rows="3" class="forebrain-field w-full" data-testid="cron-prompt" />
+        <label class="block">
+          <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.repeatLimitLabel') }}</span>
+          <input v-model.number="editorRepeatLimit" type="number" min="0" class="forebrain-field h-9" data-testid="cron-repeat-limit" />
+          <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('cron.repeatLimitHint') }}</span>
         </label>
+      </div>
 
-        <div class="mt-3 grid gap-3 sm:grid-cols-2">
-          <label class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.deliverLabel') }}</span>
-            <select v-model="editorDeliver" class="forebrain-field h-9" data-testid="cron-deliver">
-              <option value="">{{ t('cron.recordOnly') }}</option>
-              <option v-for="channel in enabledChannels" :key="channel" :value="channel">{{ channel }}</option>
-            </select>
-          </label>
-          <label class="block">
-            <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('cron.repeatLimitLabel') }}</span>
-            <input v-model.number="editorRepeatLimit" type="number" min="0" class="forebrain-field h-9" data-testid="cron-repeat-limit" />
-            <span class="mt-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ t('cron.repeatLimitHint') }}</span>
-          </label>
-        </div>
+      <p v-if="editorError" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ editorError }}</p>
 
-        <p v-if="editorError" class="mt-3 text-[12px] text-[var(--forebrain-danger)]">{{ editorError }}</p>
-
-        <div class="mt-4 flex justify-end gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeEditor">{{ t('common.cancel') }}</button>
-          <button
-            type="button"
-            class="forebrain-btn forebrain-btn-primary text-xs"
-            :disabled="saving || !scheduleValid || !editorPrompt.trim()"
-            data-testid="cron-save"
-            @click="save"
-          >
-            {{ saving ? t('common.loading') : t('common.save') }}
-          </button>
-        </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="closeEditor">{{ t('common.cancel') }}</button>
+        <button
+          type="button"
+          class="forebrain-btn forebrain-btn-primary text-xs"
+          :disabled="saving || !scheduleValid || !editorPrompt.trim()"
+          data-testid="cron-save"
+          @click="save"
+        >
+          {{ saving ? t('common.loading') : t('common.save') }}
+        </button>
       </div>
     </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -134,26 +200,44 @@
  * and fires them in the project root. Schedules come from the builder — never
  * typed by hand — and the preview under them is the engine's own parse of what
  * will be saved.
+ *
+ * The list is a server-paged table (plan 075): the search narrows it on the
+ * server, the enabled switch is the pause/resume it replaced, and what became
+ * of the last fire sits in its own column — the failure's own sentence is that
+ * cell's tip. A job's history is a modal (`CronRunsDialog`), and editing opens
+ * the builder over the table.
  */
-import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { computed, onMounted, ref } from 'vue'
+import { History, Pencil, Play, Plus, Trash2 } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import SwitchComponent from '@/components/common/SwitchComponent.vue'
+import TablePager from '@/components/common/TablePager.vue'
+import CronRunsDialog from '@/components/cron/CronRunsDialog.vue'
 import ScheduleBuilder from '@/components/cron/ScheduleBuilder.vue'
-import { getErrorMessage, forebrainApi, type CronJobRecord, type CronRunRecord } from '@/lib/api'
+import { useServerList } from '@/composables/useServerList'
+import { getErrorMessage, forebrainApi, type CronJobRow } from '@/lib/api'
 import { formatProviderError } from '@/lib/providerError'
+import { formatMonthDayTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{ projectId: string }>()
 
 const { t, locale } = useI18n()
-const router = useRouter()
 
-const jobs = ref<CronJobRecord[]>([])
-const runs = ref<CronRunRecord[]>([])
-const openRunsFor = ref('')
-const loading = ref(false)
+const { rows, total, page, pageSize, q, loading, error: listError, reload } = useServerList<CronJobRow>(
+  (query) => forebrainApi.cronJobsPage(props.projectId, query),
+  { pageSize: 10 },
+)
+
+const writeError = ref('')
+const error = computed(() => listError.value || writeError.value)
+
+const runsJob = ref<CronJobRow | null>(null)
 const saving = ref(false)
-const error = ref('')
 
 const editorOpen = ref(false)
 const editingId = ref('')
@@ -166,34 +250,27 @@ const editorRepeatLimit = ref(0)
 const editorError = ref('')
 
 // The delivery dropdown lists only the channels this project has enabled; "no
-// delivery" stays an explicit first option rather than a blank input.
+// delivery" stays an explicit first option rather than a blank input. The
+// channel map is read raw — a kind is the delivery value itself (`wecom_callback`
+// is not `wecomCallback`), and the camelCase interceptor would rename it.
 const enabledChannels = ref<string[]>([])
 
 async function loadChannels() {
   try {
-    const data = await forebrainApi.projectChannels(props.projectId)
-    const section = (data.channels ?? {}) as Record<string, unknown>
-    enabledChannels.value = Object.entries(section)
+    const data = await forebrainApi.projectChannelsRaw(props.projectId)
+    enabledChannels.value = Object.entries(data.channels ?? {})
       .filter(([, value]) => Boolean((value as { enabled?: boolean } | null)?.enabled))
-      .map(([key]) => key)
+      .map(([kind]) => kind)
   } catch {
     enabledChannels.value = []
   }
 }
 
-async function load() {
-  loading.value = true
-  error.value = ''
-  try {
-    jobs.value = await forebrainApi.cronJobs(props.projectId)
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
-  }
+function nameOf(job: CronJobRow): string {
+  return job.name || t('cron.untitled')
 }
 
-function openEditor(job?: CronJobRecord) {
+function openEditor(job?: CronJobRow) {
   editingId.value = job?.id ?? ''
   editorName.value = job?.name ?? ''
   // Editing an existing job starts from its stored expression; the builder's
@@ -228,7 +305,7 @@ async function save() {
       await forebrainApi.cronCreate(props.projectId, body)
     }
     editorOpen.value = false
-    await load()
+    await reload()
   } catch (e: unknown) {
     editorError.value = getErrorMessage(e)
   } finally {
@@ -236,115 +313,78 @@ async function save() {
   }
 }
 
-async function togglePause(job: CronJobRecord) {
-  error.value = ''
+// The switch in the 启用 column is the pause and the resume the buttons used to
+// be: a paused job keeps its schedule and stops firing.
+async function togglePause(job: CronJobRow) {
+  writeError.value = ''
   try {
     await forebrainApi.cronUpdate(props.projectId, job.id, { enabled: !job.enabled })
-    await load()
+    await reload()
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    writeError.value = getErrorMessage(e)
   }
 }
 
-async function runNow(job: CronJobRecord) {
-  error.value = ''
+// A fire starts now; the reload is what moves the row's own last-run column.
+async function runNow(job: CronJobRow) {
+  writeError.value = ''
   try {
     await forebrainApi.cronRunNow(props.projectId, job.id)
-    await openRuns(job)
+    await reload()
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    writeError.value = getErrorMessage(e)
   }
 }
 
-async function remove(job: CronJobRecord) {
-  error.value = ''
+async function remove(job: CronJobRow) {
+  writeError.value = ''
   try {
     await forebrainApi.cronDelete(props.projectId, job.id)
-    if (openRunsFor.value === job.id) openRunsFor.value = ''
-    await load()
+    if (runsJob.value?.id === job.id) runsJob.value = null
+    await reload()
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
+    writeError.value = getErrorMessage(e)
   }
 }
 
-async function openRuns(job: CronJobRecord) {
-  if (openRunsFor.value === job.id) {
-    openRunsFor.value = ''
-    return
-  }
-  error.value = ''
-  try {
-    runs.value = await forebrainApi.cronRuns(props.projectId, job.id)
-    openRunsFor.value = job.id
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  }
+function openRuns(job: CronJobRow) {
+  runsJob.value = job
 }
 
-// A fire is a conversation of its own; its record is the door to it. Only a
-// record whose session holds a transcript has one to open.
-function openConversation(row: CronRunRecord) {
-  if (!row.sessionId) return
-  void router.push({ path: '/', query: { session: row.sessionId } })
+// The statuses the engine writes, named in the viewer's language and toned the
+// way the badge palette reads: a success is green, a failure red, a fire still
+// running brand. The name is asked for on each render, so a language switched
+// while the table is on screen moves with it.
+type BadgeVariant = 'default' | 'gray' | 'success' | 'warning' | 'error'
+
+function lastStateOf(job: CronJobRow): { label: string; variant: BadgeVariant } {
+  switch (job.lastStatus) {
+    case 'ok':
+      return { label: t('cron.statusOk'), variant: 'success' }
+    case 'failed':
+      return { label: t('cron.statusFailed'), variant: 'error' }
+    case 'delivery_failed':
+      return { label: t('cron.statusDeliveryFailed'), variant: 'error' }
+    case 'running':
+      return { label: t('cron.statusRunning'), variant: 'default' }
+    default:
+      return { label: job.lastStatus ?? '—', variant: 'gray' }
+  }
 }
 
 // The runtime stores an error code beside the English sentence it kept; the
 // sentence is written here in the viewer's language — following a switch made
 // while the record is on screen — and the stored one shows only when the code
 // is not one this build knows.
-function runErrorText(row: CronRunRecord): string {
-  const shown = row.error
-    ? formatProviderError({ code: row.errorCode ?? '', providerMessage: row.error }, locale.value)
-    : null
-  return shown ?? row.error ?? ''
-}
-
-function jobErrorText(job: CronJobRecord): string {
+function jobErrorText(job: CronJobRow): string {
   const shown = job.lastError
     ? formatProviderError({ code: job.lastErrorCode ?? '', providerMessage: job.lastError }, locale.value)
     : null
   return shown ?? job.lastError ?? ''
 }
 
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'ok':
-      return t('cron.statusOk')
-    case 'failed':
-      return t('cron.statusFailed')
-    case 'delivery_failed':
-      return t('cron.statusDeliveryFailed')
-    case 'running':
-      return t('cron.statusRunning')
-    default:
-      return status
-  }
-}
-
-function statusClass(status: string): string {
-  switch (status) {
-    case 'ok':
-      return 'border-[var(--forebrain-brand-border-strong)] text-[var(--forebrain-brand-1)]'
-    case 'failed':
-    case 'delivery_failed':
-      return 'border-[var(--forebrain-danger)] text-[var(--forebrain-danger)]'
-    default:
-      return 'border-[var(--forebrain-divider)] text-[var(--forebrain-text-2)]'
-  }
-}
-
-function nextRunLabel(job: CronJobRecord): string {
-  if (!job.nextRunAt) return t('cron.paused')
-  return t('cron.nextRun', { time: formatTime(job.nextRunAt) })
-}
-
-function formatTime(unix?: number): string {
-  if (!unix) return '—'
-  return new Date(unix * 1000).toLocaleString(locale.value === 'zh' ? 'zh-CN' : 'en-US')
-}
-
 onMounted(() => {
-  void load()
+  void reload()
   void loadChannels()
 })
 </script>

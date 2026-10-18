@@ -6,7 +6,7 @@
   <button
     type="button"
     class="forebrain-ctx-ring-btn"
-    :title="t('chat.ctxRingTitle', { percent })"
+    v-tip:top="t('chat.ctxRingTitle', { percent })"
     :aria-label="t('chat.ctxRingTitle', { percent })"
     data-testid="context-ring"
     @click="emit('open')"

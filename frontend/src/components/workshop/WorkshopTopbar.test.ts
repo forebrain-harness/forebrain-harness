@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 
+import { hideTip, useTooltipState } from '@/composables/useTooltip'
+import tip from '@/directives/tip'
 import WorkshopTopbar from './WorkshopTopbar.vue'
 import { setLocale } from '@/locales'
 
@@ -20,16 +22,22 @@ function mountTopbar(props: Record<string, unknown>) {
       canPublish: true,
       ...props,
     },
-    global: { stubs: { SessionHeartbeat: true, Teleport: true } },
+    global: { stubs: { SessionHeartbeat: true, Teleport: true }, directives: { tip } },
   })
 }
 
 describe('WorkshopTopbar', () => {
-  it('disables publish when there is nothing to publish', async () => {
+  beforeEach(() => hideTip())
+
+  it('disables publish when there is nothing to publish, and says why on hover', () => {
     const wrapper = mountTopbar({ part: 'trailing', canPublish: false })
     const publish = wrapper.find('[data-testid="workshop-publish"]')
     expect(publish.attributes('disabled')).toBeDefined()
-    expect(publish.attributes('title')).toBe('没有未发布的修改')
+    // The reason is the app's tip, not a native title. A disabled button
+    // dispatches nothing through `trigger`, so the event is sent directly.
+    expect(publish.attributes('title')).toBeUndefined()
+    publish.element.dispatchEvent(new MouseEvent('mouseenter'))
+    expect(useTooltipState().text).toBe('没有未发布的修改')
   })
 
   it('enables publish with the next version when the draft differs', async () => {

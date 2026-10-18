@@ -3,7 +3,10 @@
        of it, so the composer stays pinned without guessing the chrome's size. -->
   <div class="chat-shell flex h-full min-h-0 w-full flex-1 overflow-hidden">
     <div class="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden bg-[var(--forebrain-surface)]">
-      <main class="mx-auto flex h-full min-h-0 w-full max-w-[880px] flex-1 flex-col overflow-hidden px-3 sm:px-5">
+      <main
+        class="mx-auto flex h-full min-h-0 w-full max-w-[880px] flex-1 flex-col overflow-hidden px-3 sm:px-5"
+        :class="{ 'chat-col--fresh': isFreshChat }"
+      >
         <AgentViewTabs
           :records="agentTabRecords"
           :active="activeAgentView"
@@ -11,14 +14,11 @@
           @select="openAgentView"
         />
         <div class="min-h-0 flex-1 overflow-hidden">
-          <!-- The new-conversation page: a greeting above the composer, the
-               project pill and quick starts around it. It sits bottom-aligned
-               so nothing the pill's chooser opens can be clipped. -->
-          <div
-            v-if="isFreshChat"
-            class="flex h-full flex-col items-center justify-end px-6 pb-2"
-            data-testid="chat-greeting"
-          >
+          <!-- The new-conversation page: the greeting above the composer, and
+               both centred in the pane with the quick starts under them
+               (prototype .nc) — nothing above the composer to clip what the
+               project pill's chooser opens. -->
+          <div v-if="isFreshChat" data-testid="chat-greeting">
             <h2 class="chat-greeting">{{ t('chat.greeting') }}</h2>
           </div>
           <Conversation
@@ -305,7 +305,7 @@
                                 v-bind="attachment.fileId ? { href: attachmentUrl(attachment.fileId), target: '_blank', rel: 'noopener noreferrer' } : {}"
                                 class="inline-flex min-h-[26px] max-w-[260px] items-center gap-1.5 rounded-md border border-border bg-background px-1.5 py-0.5 text-[11.5px] font-medium text-foreground"
                                 :class="attachment.fileId ? 'group hover:bg-accent hover:text-accent-foreground' : ''"
-                                :title="attachment.path ?? attachment.name">
+                                v-tip:top="attachment.path ?? attachment.name">
                                 <ImageIcon v-if="isImageAttachment(attachment)" class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
                                 <Paperclip v-else class="size-3.5 shrink-0 text-muted-foreground group-hover:text-accent-foreground/80" aria-hidden="true" />
                                 <span class="min-w-0 break-all">{{ attachment.name || t('chat.attachment') }}</span>
@@ -319,7 +319,7 @@
                           <button
                             type="button"
                             class="icon-btn"
-                            :title="isStreaming ? t('chat.rewindBusy') : t('chat.rewind')"
+                            v-tip:top="isStreaming ? t('chat.rewindBusy') : t('chat.rewind')"
                             :aria-label="t('chat.rewindAria')"
                             :disabled="isStreaming"
                             data-testid="message-rewind"
@@ -330,7 +330,7 @@
                           <button
                             type="button"
                             class="icon-btn"
-                            :title="t('chat.copyMessage')"
+                            v-tip:top="t('chat.copyMessage')"
                             :aria-label="t('chat.copyMessage')"
                             data-testid="message-copy"
                             @click="copyMessage(msg)"
@@ -405,7 +405,10 @@
         </div>
 
 
-        <div class="z-10 shrink-0 border-t border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-4 sm:px-5">
+        <div
+          class="z-10 shrink-0 bg-[var(--forebrain-surface)]"
+          :class="isFreshChat ? 'chat-composer-fresh' : 'border-t border-[var(--forebrain-divider)] px-3 py-4 sm:px-5'"
+        >
           <!-- The new-conversation composer: the project pill sits at its
                top-left, naming (and choosing) where the conversation runs. -->
           <div v-if="isFreshChat" class="ctop">
@@ -511,7 +514,7 @@
         </div>
       </main>
       <ChatWorkbench
-        v-if="workbench.open.value"
+        v-if="workbench.open.value && !isFreshChat"
         :records="runningRoster"
         :loading="rosterLoading"
         :error="rosterError"
@@ -559,9 +562,9 @@
 </template>
 
 <script setup lang="ts">
-import { h, ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectives } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
+import { MessageSquare, CheckCircle, CircleAlert, Bot, User, Image as ImageIcon, ImageOff, Paperclip, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
 import AgentViewTabs from '@/components/chat/AgentViewTabs.vue'
@@ -640,6 +643,8 @@ import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/p
 import { formatProviderError } from '@/lib/providerError'
 import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
 import AttachSaveDialog, { type AttachFileRow } from '@/components/chat/AttachSaveDialog.vue'
+import tip from '@/directives/tip'
+import { sessionTitleFromContent } from '@/lib/sessionTitle'
 import { useI18n } from '@/locales'
 import type { I18nKey } from '@/locales'
 const { lastSessionId } = useLastSession()
@@ -664,8 +669,23 @@ const { sessionInfo, loadSessionInfo } = useSessionInfo()
 /** The project the open conversation belongs to, when it belongs to one. */
 const sessionProject = computed(() => sessionInfo.value?.project ?? null)
 
-/** The conversation's name, read from the session itself. */
-const sessionTitle = computed(() => sessionHeaderTitle(sessionInfo.value, t('nav.chat')))
+/** The words of the thread's first user message: what the engine names a
+ *  session after, and therefore what the top bar calls it until it has. */
+const firstUserText = computed(() => {
+  const first = messages.value.find((message) => message.role === 'user')
+  return first ? String(first.content ?? '') : ''
+})
+
+/** The conversation's name, read from the session itself. A session the server
+ *  has not titled yet is named by what the engine will name it after: its first
+ *  user message, first line, at most 50 characters (plan 072). */
+const sessionTitle = computed(() => {
+  const info = sessionInfo.value
+  // A title equal to the session id is the placeholder a fresh row carries.
+  const titled = info && info.title && info.title !== sessionId.value ? info : null
+  const temporary = sessionTitleFromContent(firstUserText.value)
+  return sessionHeaderTitle(titled, temporary || t('nav.chat'))
+})
 const { t, locale } = useI18n()
 const router = useRouter()
 
@@ -685,33 +705,34 @@ const busyNoticeText = computed(() => busyNotice.value
   : '')
 
 // The factories run inside the shell's render, so the row tracks this
-// conversation's own state — title, project, model, heartbeat, roster —
-// without the page re-registering anything.
+// conversation's own state — title, project, heartbeat, roster — without the
+// page re-registering anything.
 setTopbar({
-  leading: () => [
-    h('span', {
-      class: 'truncate text-[13px] font-semibold text-[var(--forebrain-text)]',
+  // A new conversation names nothing yet: its top bar starts empty, and the
+  // workbench waits for the first message (owner 2026-10-18).
+  leading: () => (isFreshChat.value ? [] : [
+    withDirectives(h('span', {
+      class: 'forebrain-topbar-title',
       'data-testid': 'chat-session-title',
-    }, sessionTitle.value),
-    // A project's conversation says whose it is and leads back to that
-    // project's space, where its sessions are listed.
-    ...(sessionProject.value ? [(() => {
-      const project = sessionProject.value!
-      return h(RouterLink, {
-        to: `/projects/${encodeURIComponent(project.id)}/overview`,
-        class: 'chat-project-tag',
-        'data-testid': 'chat-project-tag',
-      }, { default: () => t('chat.projectTag', { name: project.name }) })
-    })()] : []),
-    // The model this conversation runs on, in the secondary colour.
-    ...(sessionModelData.value ? [h('span', { class: 'forebrain-topbar-model' }, sessionModelData.value.model)] : []),
-  ],
+    }, sessionTitle.value), [[tip, sessionTitle.value, 'bottom', { trunc: true }]]),
+  // A project's conversation says whose it is and leads back to that
+  // project's space, where its sessions are listed.
+  ...(sessionProject.value ? [(() => {
+    const project = sessionProject.value!
+    return withDirectives(h(RouterLink, {
+      to: `/projects/${encodeURIComponent(project.id)}/overview`,
+      class: 'chat-project-tag',
+      'data-testid': 'chat-project-tag',
+    }, { default: () => [h(FolderGit2, { 'aria-hidden': 'true' }), project.name] }), [[tip, t('chat.openProjectSpace'), 'bottom']])
+  })()] : []),
+  ]),
   trailing: () => [
     // The heartbeat is this conversation's, so its control sits in the
     // conversation's row; without a conversation there is nothing for it to
     // ask again.
     ...(sessionId.value ? [h(SessionHeartbeat, { sessionId: sessionId.value })] : []),
-    h('button', {
+    // The third column belongs to a conversation: a new chat has none yet.
+    ...(isFreshChat.value ? [] : [h('button', {
       type: 'button',
       class: 'forebrain-chip-btn',
       'aria-pressed': String(workbench.open.value),
@@ -722,7 +743,7 @@ setTopbar({
       h('span', {}, t('chat.workbench')),
       // Only agents actually running reach the toggle's badge.
       ...(runningRoster.value.length ? [h('span', { class: 'forebrain-chip-count' }, String(runningRoster.value.length))] : []),
-    ]),
+    ])]),
   ],
 })
 
@@ -1221,6 +1242,7 @@ const {
   sendPendingSteersAfterInterrupt,
   loadMessages,
   switchToSession,
+  resetForNewChat,
 } = useChatStream()
 
 /**
@@ -1978,17 +2000,6 @@ onMounted(async () => {
   void (async () => {
     target.value = await defaultTarget()
   })()
-  const qSid = String(route.query.session ?? '').trim()
-  // `new=1` asks for the new-conversation page: it must not jump back to the
-  // last-used conversation.
-  if (!qSid && route.query.new) return
-  if (!qSid) {
-    const lid = lastSessionId.value
-    if (lid && lid.trim()) {
-      void router.replace({ query: { ...route.query, session: lid } })
-      return
-    }
-  }
 })
 
 // The address bar is the one source of which session is open: every entry
@@ -2000,6 +2011,14 @@ watch(() => route.query.session, (value) => {
   if (sid !== String(sessionId.value ?? '').trim()) {
     createdLine.value = null
     busyNotice.value = false
+  }
+  // A new conversation is the page itself: the workbench column belongs to a
+  // conversation, so asking for one closes it rather than leaving it behind —
+  // and so does the thread, which would otherwise stay on screen under an
+  // address that names no session (and keep taking the composer's messages).
+  if (!sid) {
+    workbench.close()
+    if (sessionId.value) resetForNewChat()
   }
   if (sid && sid !== sessionId.value) switchToSession(sid)
 }, { immediate: true })
@@ -2137,6 +2156,29 @@ onUnmounted(() => {
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--forebrain-text);
+}
+
+/* The new-conversation page is one centred column (prototype .nc, owner
+   2026-10-18): greeting, composer and quick starts centred as a group, 22px
+   apart, inside a 24px inset — so the pane's top and bottom insets match
+   whatever the group's height is. */
+.chat-col--fresh {
+  justify-content: center;
+  align-items: center;
+  gap: 22px;
+  padding: 24px;
+}
+
+.chat-col--fresh > * {
+  flex: none;
+}
+
+.chat-composer-fresh {
+  width: min(760px, 100%);
+}
+
+.chat-col--fresh .starters {
+  padding-top: 22px;
 }
 
 .ctop {

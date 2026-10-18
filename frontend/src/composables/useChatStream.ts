@@ -1345,6 +1345,10 @@ type SessionResetOptions = {
   sid: string | null
   loadMessages?: boolean
   loadMode?: boolean
+  /** Leave the remembered last conversation alone: the reset only takes a
+   *  conversation off the screen (opening a new chat), it does not claim none
+   *  was ever open — the new-chat page still preselects its project. */
+  keepLastSession?: boolean
 }
 
 export function emptyPendingInputPreview(): PendingInputPreview {
@@ -2946,7 +2950,7 @@ export function useChatStream() {
 	  subagentAutoContinue.value = {}
 	  lspRecommendation.value = null
     const generation = historyGeneration
-    persistLastSessionId(sid || null)
+    if (!options.keepLastSession) persistLastSessionId(sid || null)
     messages.value = []
 	historyLoading.value = Boolean(sid && options.loadMessages)
 	historyError.value = null
@@ -5377,7 +5381,9 @@ export function useChatStream() {
   }
 
   function resetForNewChat() {
-    applySessionReset({ sid: null, loadMessages: false, loadMode: false })
+    // The conversation leaves the screen; it stays the one the browser
+    // remembers, so the new-chat page still opens on its project (plan 029).
+    applySessionReset({ sid: null, loadMessages: false, loadMode: false, keepLastSession: true })
   }
 
   // Returns the full listing, provider status included: a ChatGPT discovery

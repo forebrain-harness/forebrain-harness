@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { config, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import WorkingDirTab from './WorkingDirTab.vue'
 import { forebrainApi } from '@/lib/api'
@@ -7,6 +8,10 @@ import { setLocale } from '@/locales'
 
 setLocale('zh')
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 async function flush() {
   await Promise.resolve()

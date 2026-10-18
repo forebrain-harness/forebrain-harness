@@ -3,6 +3,7 @@ import { mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { PromptInputProvider, usePromptInput, type PromptInputContext } from '@repo/elements/prompt-input'
 
+import tip from '@/directives/tip'
 import { forebrainApi, type SlashCommandRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
 import ForebrainPromptTextarea from './ForebrainPromptTextarea.vue'
@@ -32,6 +33,7 @@ describe('ForebrainPromptTextarea', () => {
     const wrapper = mount(PromptInputProvider, {
       props: { maxFiles: 5, accept: 'image/*,application/pdf' },
       slots: { default: () => [h(ForebrainPromptTextarea, props), h(Probe)] },
+      global: { directives: { tip } },
     })
     const composer = wrapper.findComponent(ForebrainPromptTextarea)
     return { wrapper, composer, context: () => context }
@@ -58,7 +60,7 @@ describe('ForebrainPromptTextarea', () => {
     // still to upload, the uploads it came back with, and its @ images.
     const chips = composer.findAll('li')
     expect(chips.map((chip) => chip.text().replace(/^Remove/, ''))).toEqual(['unsent.pdf', 'later.png', 'spec.pdf', 'diagram.png'])
-    expect(chips[3].attributes('title')).toBe('shots/diagram.png')
+    expect(chips[3].attributes('title')).toBeUndefined()
     expect(composer.vm.hasAttached()).toBe(true)
   })
 

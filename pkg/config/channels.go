@@ -146,6 +146,55 @@ func ChannelKindDefaults(kind string) map[string]any {
 	return map[string]any{}
 }
 
+// ChannelKindFields returns one kind's whole field set — every key its
+// configuration struct declares, with the kind's defaults where there are any
+// and an empty value otherwise. ChannelKindDefaults alone is not enough to fill
+// in a form: it marshals with `omitempty`, so a kind nobody has configured yet
+// answers with only the fields that carry a default (usually just `enabled`),
+// and a page asked to edit it would have nothing to type into.
+func ChannelKindFields(kind string) map[string]any {
+	fields := ChannelKindDefaults(kind)
+	target := strings.TrimSpace(kind)
+	section := reflect.TypeOf(ChannelsSection{})
+	for i := 0; i < section.NumField(); i++ {
+		field := section.Field(i)
+		if jsonName, _, _ := strings.Cut(field.Tag.Get("json"), ","); jsonName != target {
+			continue
+		}
+		kindType := field.Type
+		for j := 0; j < kindType.NumField(); j++ {
+			inner := kindType.Field(j)
+			jsonName, _, _ := strings.Cut(inner.Tag.Get("json"), ",")
+			if jsonName == "" || jsonName == "-" {
+				continue
+			}
+			if _, ok := fields[jsonName]; ok {
+				continue
+			}
+			fields[jsonName] = zeroChannelField(inner.Type)
+		}
+		return fields
+	}
+	return fields
+}
+
+// zeroChannelField is the value a form shows for a field that has none: an
+// empty string for text, an empty list for a list, and the zero for whatever
+// else the struct declares.
+func zeroChannelField(t reflect.Type) any {
+	switch t.Kind() {
+	case reflect.Slice:
+		return []any{}
+	case reflect.Bool:
+		return false
+	case reflect.Int, reflect.Int64:
+		return 0
+	case reflect.Ptr:
+		return nil
+	}
+	return ""
+}
+
 // ExpandChannelEnvReferences replaces the ${VAR} references a channel section
 // carries with the values of the process environment, the same expansion the
 // loader applies to forebrain.yaml. A channel read back from the state

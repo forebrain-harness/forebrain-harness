@@ -147,6 +147,9 @@ test('project skills tab: project rows editable, inherited rows read-only', asyn
 
   // Trust gate first — the same one the MCP tab shows.
   await page.click('[data-testid="project-trust"]')
+  // The tab pages its rows (plan 073), so the layer filter is what brings the
+  // project's own skill onto the page.
+  await page.selectOption('[data-testid="project-skills-source-filter"]', 'project')
   await expect(page.locator('[data-skill-row="proj-skill"][data-skill-origin="project"]')).toBeVisible({ timeout: 10_000 })
   await expect(page.locator('[data-testid="skill-toggle-proj-skill"]')).toBeVisible()
   // Inherited layers load with the project but stay read-only here.

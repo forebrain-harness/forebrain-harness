@@ -227,6 +227,76 @@ func DecideProjectMCPConsents(agentWorkspace string, launch safety.ProjectContex
 	return mcp.SaveProjectConsents(agentWorkspace, consents)
 }
 
+// DecideProjectMCPConsentsFor records a decision for the named project
+// entries only — allow when the name is also in allowed, deny otherwise —
+// and leaves every other entry exactly as it was. Unlike the startup prompt's
+// DecideProjectMCPConsents it overwrites a decision a named entry already
+// has: that is how a declined entry is allowed again.
+func DecideProjectMCPConsentsFor(agentWorkspace string, launch safety.ProjectContext, decide, allowed []string) error {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	projectKey := memory.ProjectKey(root)
+	entries, _ := mcp.LoadProjectMCPServers(root)
+	consents, err := mcp.LoadProjectConsents(agentWorkspace)
+	if err != nil {
+		// An unreadable store is not an empty one: saving a single decision
+		// over it would drop every confirmation recorded before.
+		return err
+	}
+	decideSet := make(map[string]struct{}, len(decide))
+	for _, name := range decide {
+		decideSet[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	for _, srv := range entries {
+		name := strings.ToLower(strings.TrimSpace(srv.Name))
+		if _, named := decideSet[name]; !named {
+			continue
+		}
+		decision := mcp.ProjectConsentDeny
+		if _, ok := allowedSet[name]; ok {
+			decision = mcp.ProjectConsentAllow
+		}
+		consents.Decide(projectKey, srv.Name, mcp.ServerFingerprint(srv), decision, time.Now())
+	}
+	return mcp.SaveProjectConsents(agentWorkspace, consents)
+}
+
+// DeclinedProjectMCPConsents lists the project entries whose current
+// fingerprint carries a recorded denial: the ones the startup prompt or the
+// project page turned down. They do not load, but they stay on record so a
+// denial can be taken back.
+func DeclinedProjectMCPConsents(agentWorkspace string, launch safety.ProjectContext) []mcp.PendingProjectConsent {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	projectKey := memory.ProjectKey(root)
+	entries, _ := mcp.LoadProjectMCPServers(root)
+	consents, err := mcp.LoadProjectConsents(agentWorkspace)
+	if err != nil {
+		return nil
+	}
+	var declined []mcp.PendingProjectConsent
+	for _, srv := range entries {
+		fp := mcp.ServerFingerprint(srv)
+		if decision, decided := consents.Decision(projectKey, srv.Name, fp); !decided || decision != mcp.ProjectConsentDeny {
+			continue
+		}
+		declined = append(declined, mcp.PendingProjectConsent{
+			Name:        strings.TrimSpace(srv.Name),
+			Fingerprint: fp,
+			Summary:     mcp.ConsentSummary(srv),
+		})
+	}
+	return declined
+}
+
 // PendingProjectLSPConsents lists the project language-server entries that
 // would apply but have no recorded decision. The interactive startup prompt
 // shows exactly these; a nil/empty result means there is nothing to ask about.
@@ -248,6 +318,17 @@ func DecideProjectLSPConsents(agentWorkspace string, launch safety.ProjectContex
 		return nil
 	}
 	return lsp.DecideProjectServers(agentWorkspace, root, memory.ProjectKey(root), allowed)
+}
+
+// DecideProjectLSPConsentsFor is DecideProjectMCPConsentsFor for language
+// servers: it decides the named entries only and may overwrite a decision one
+// of them already has.
+func DecideProjectLSPConsentsFor(agentWorkspace string, launch safety.ProjectContext, decide, allowed []string) error {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	return lsp.DecideProjectServersFor(agentWorkspace, root, memory.ProjectKey(root), decide, allowed)
 }
 
 // InspectProjectLSP is the project language-server view the gateway's project

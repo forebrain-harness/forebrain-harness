@@ -1,128 +1,99 @@
 <template>
-  <div class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)]">
-    <div class="flex flex-wrap items-center gap-2 border-b border-[var(--forebrain-divider)] px-4 py-3">
-      <input
-        v-model="searchDraft"
-        type="search"
-        class="min-w-[180px] flex-1 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[13px] text-[var(--forebrain-text)] outline-none focus:ring-2 focus:ring-[var(--forebrain-ring-soft)]"
-        :placeholder="t('memories.searchPlaceholder')"
-        data-testid="memories-search"
-      />
-      <select
-        v-model="sortKey"
-        class="rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text)] outline-none"
-        data-testid="memories-sort"
-      >
-        <option value="updated-desc">{{ t('memories.sortUpdatedDesc') }}</option>
-        <option value="updated-asc">{{ t('memories.sortUpdatedAsc') }}</option>
-        <option value="created-desc">{{ t('memories.sortCreatedDesc') }}</option>
-        <option value="created-asc">{{ t('memories.sortCreatedAsc') }}</option>
-      </select>
-      <select
-        v-model.number="pageSize"
-        class="rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-text)] outline-none"
-      >
-        <option :value="20">20</option>
-        <option :value="50">50</option>
-      </select>
-      <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-        {{ loading ? t('common.loading') : t('common.refresh') }}
-      </button>
-      <button
-        type="button"
-        class="rounded-md border border-[var(--forebrain-danger)] px-3 py-2 text-[12px] font-medium text-[var(--forebrain-danger)] hover:bg-[var(--forebrain-input-hover-bg)]"
-        data-testid="memories-clear-all"
-        @click="confirmClear = true"
-      >
-        {{ t('memories.clearAll') }}
-      </button>
-    </div>
-
-    <p v-if="error" class="px-4 pt-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-    <p v-else-if="notice" class="px-4 pt-3 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
-
-    <div v-if="loading" class="px-4 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
-      {{ t('common.loading') }}
-    </div>
-    <div v-else-if="!files.length" class="px-4 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
-      {{ t('memories.emptyFiles') }}
-    </div>
-    <template v-else>
-      <div v-if="selected.size" class="flex items-center justify-between border-b border-[var(--forebrain-divider)] bg-[var(--forebrain-brand-soft)] px-4 py-2">
-        <span class="text-[12px] text-[var(--forebrain-brand-1)]">{{ t('memories.selectedCount', { count: selected.size }) }}</span>
-        <button
-          type="button"
-          class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2.5 py-1 text-[11px] text-[var(--forebrain-danger)]"
-          data-testid="memories-delete-selected"
-          @click="deleteSelected"
-        >
-          {{ t('memories.deleteSelected', { count: selected.size }) }}
-        </button>
-      </div>
-      <ul class="divide-y divide-[var(--forebrain-divider)]">
-        <li
-          v-for="file in files"
-          :key="file.path"
-          class="flex flex-wrap items-center gap-3 px-4 py-2.5"
-          :data-memory-file="file.path"
-        >
-          <label class="flex shrink-0 cursor-pointer items-center">
-            <input
-              type="checkbox"
-              class="h-4 w-4 rounded border-[var(--forebrain-divider-strong)] text-[var(--forebrain-brand-1)] focus:ring-[var(--forebrain-brand-1)]"
-              :checked="selected.has(file.path)"
-              @change="toggleSelect(file.path, ($event.target as HTMLInputElement).checked)"
-            />
-            <span class="sr-only">{{ t('memories.selectFile', { path: file.path }) }}</span>
-          </label>
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-mono text-[12px] break-all text-[var(--forebrain-text)]">{{ file.path }}</span>
-              <LockIcon
-                v-if="file.core"
-                class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]"
-                :title="t('memories.coreFileHint')"
-                :aria-label="t('memories.coreFileHint')"
+  <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+  <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+    {{ t('memories.emptyFiles') }}
+  </div>
+  <template v-else>
+    <div class="forebrain-table-wrap">
+      <table class="forebrain-table forebrain-table--fixed">
+        <colgroup>
+          <col style="width: 40px" />
+          <col style="width: 300px" />
+          <col />
+          <col style="width: 150px" />
+          <col style="width: 150px" />
+          <col style="width: 88px" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>
+              <input
+                type="checkbox"
+                :checked="allSelected"
+                :aria-label="t('memories.selectAll')"
+                data-testid="memories-select-all"
+                @change="toggleAll(($event.target as HTMLInputElement).checked)"
               />
-            </div>
-            <div class="mt-0.5 text-[11px] text-[var(--forebrain-muted-text)]">
-              {{ t('memories.fileMeta', { size: file.sizeBytes, created: formatTime(file.createdAt), updated: formatTime(file.updatedAt) }) }}
-            </div>
-          </div>
-          <div class="flex shrink-0 gap-2">
-            <button
-              type="button"
-              class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2.5 py-1 text-[11px] text-[var(--forebrain-text)] hover:bg-[var(--forebrain-surface)]"
-              :data-testid="`memories-edit-${file.path}`"
-              @click="openEditor(file)"
-            >
-              {{ t('common.view') }} / {{ t('common.edit') }}
-            </button>
-            <button
-              v-if="!file.core"
-              type="button"
-              class="rounded-lg border border-[var(--forebrain-divider)] px-2.5 py-1 text-[11px] text-[var(--forebrain-danger)] hover:bg-[var(--forebrain-input-hover-bg)]"
-              :data-testid="`memories-delete-${file.path}`"
-              @click="deleteOne(file)"
-            >
-              {{ t('common.delete') }}
-            </button>
-          </div>
-        </li>
-      </ul>
-      <div class="flex items-center justify-between border-t border-[var(--forebrain-divider)] px-4 py-2 text-[12px] text-[var(--forebrain-muted-text)]">
-        <span>{{ t('memories.totalCount', { count: total }) }}</span>
-        <div class="flex items-center gap-2">
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="page <= 1 || loading" data-testid="memories-prev-page" @click="page--; load()">
-            {{ t('memories.prevPage') }}
-          </button>
-          <span data-testid="memories-page">{{ page }} / {{ totalPages }}</span>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="page >= totalPages || loading" data-testid="memories-next-page" @click="page++; load()">
-            {{ t('memories.nextPage') }}
-          </button>
-        </div>
-      </div>
-    </template>
+            </th>
+            <th>{{ t('memories.colFile') }}</th>
+            <th>{{ t('memories.colContent') }}</th>
+            <SortHeader
+              :label="t('memories.colCreated')"
+              sort-key="created"
+              :active="sort === 'created'"
+              :order="order"
+              first="desc"
+              @sort="sortBy"
+            />
+            <SortHeader
+              :label="t('memories.colUpdated')"
+              sort-key="updated"
+              :active="sort === 'updated'"
+              :order="order"
+              first="desc"
+              @sort="sortBy"
+            />
+            <th class="text-right">{{ t('memories.colActions') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="file in rows" :key="file.path" :data-memory-file="file.path">
+            <td>
+              <input
+                type="checkbox"
+                :checked="selected.has(file.path)"
+                :aria-label="t('memories.selectFile', { path: file.path })"
+                @change="toggleSelect(file.path, ($event.target as HTMLInputElement).checked)"
+              />
+            </td>
+            <td>
+              <div class="flex min-w-0 items-center gap-1.5">
+                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="file.path">{{ file.path }}</span>
+                <BadgeComponent v-if="file.core" variant="gray" class="shrink-0" v-tip:top="t('memories.coreFileHint')">
+                  {{ t('memories.coreBadge') }}
+                </BadgeComponent>
+              </div>
+            </td>
+            <td class="text-[var(--forebrain-text-2)]">
+              <span class="forebrain-cell-1" v-tip:top.trunc="previewOf(file)">{{ previewOf(file) }}</span>
+            </td>
+            <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.createdAt) }}</td>
+            <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.updatedAt) }}</td>
+            <td class="text-right">
+              <RowActions>
+                <RowAction
+                  :icon="Pencil"
+                  :label="t('common.edit')"
+                  :name="file.path"
+                  :data-testid="`memories-edit-${file.path}`"
+                  @click="openEditor(file)"
+                />
+                <RowAction
+                  v-if="!file.core"
+                  :icon="Trash2"
+                  :label="t('common.delete')"
+                  :name="file.path"
+                  tone="danger"
+                  :data-testid="`memories-delete-${file.path}`"
+                  @click="deleteOne(file)"
+                />
+                <RowActionSlot v-else />
+              </RowActions>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <!-- Editor -->
     <ForebrainModal :open="editing !== null" size="xl" @close="closeEditor">
@@ -130,7 +101,7 @@
         <span class="font-mono">{{ editing?.path }}</span>
       </template>
       <div data-testid="memories-editor">
-        <p class="mb-2 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('memories.updatedAtLabel', { time: formatTime(editing?.updatedAt ?? 0) }) }}</p>
+        <p class="mb-2 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('memories.updatedAtLabel', { time: formatDateTime(editing?.updatedAt ?? 0) }) }}</p>
         <p v-if="editing?.core" class="mb-2 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('memories.coreFileHint') }}</p>
         <FileEditor
           v-if="!loadingEditor"
@@ -156,143 +127,102 @@
         </div>
       </div>
     </ForebrainModal>
-
-    <!-- Clear-all confirm -->
-    <ConfirmDialog
-      :open="confirmClear"
-      :title="t('memories.clearAllTitle')"
-      :message="scope === 'global' ? t('memories.clearGlobalHint') : t('memories.clearProjectHint')"
-      :confirm-label="t('memories.clearAllConfirm')"
-      danger
-      @cancel="confirmClear = false"
-      @confirm="clearAll"
-    />
-  </div>
+  </template>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { LockIcon } from 'lucide-vue-next'
+import { computed, defineAsyncComponent, ref } from 'vue'
+import { Pencil, Trash2 } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
-import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import RowActionSlot from '@/components/common/RowActionSlot.vue'
+import SortHeader from '@/components/common/SortHeader.vue'
 import forebrainApi, { getErrorMessage, type MemoryFileRecord } from '@/lib/api'
+import { formatDateTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 
 const FileEditor = defineAsyncComponent(() => import('@/components/editor/FileEditor.vue'))
 
 /**
- * The memory file panel both memory surfaces share: the primary agent's page
- * (scope=global) and the project space tab (scope=project). Core files are
- * editable but never deletable; clearing goes through the one reset endpoint
- * (decision D10) with the scope this panel was opened for.
+ * The memory file table both memory surfaces share: the primary agent's page
+ * (scope=global) and the project space tab (scope=project). It draws one page
+ * of rows and nothing else — the search box, the bulk buttons and the pager
+ * belong to the page, because the two surfaces word and place them their own
+ * way.
+ *
+ * Core files are editable but never deletable (the row keeps its hole so the
+ * icons line up), and the row's 删除 acts at once: clearing a core file's
+ * content and deleting a file both leave a version behind, so the page is told
+ * to reload rather than the row being dropped from a list this table does not
+ * own.
  */
 const props = defineProps<{
   scope: 'global' | 'project'
   projectId?: string
+  /** The rows of the page this table draws. */
+  rows: MemoryFileRecord[]
+  loading: boolean
+  /** The column the server ordered by, and that column's direction. */
+  sort: string
+  order: 'asc' | 'desc'
+  /** The paths ticked for a bulk delete; the page owns the set. */
+  selected: Set<string>
 }>()
 
-const { t, locale } = useI18n()
+const emit = defineEmits<{
+  sort: [key: string, order: 'asc' | 'desc']
+  'update:selected': [selected: Set<string>]
+  /** After an edit or a delete the list the page holds is one row out of date. */
+  reload: []
+  /** What the write just did, for the page's one notice line. */
+  notice: [text: string]
+  error: [text: string]
+}>()
 
-const files = ref<MemoryFileRecord[]>([])
-const total = ref(0)
-const page = ref(1)
-const pageSize = ref(20)
-const sortKey = ref('updated-desc')
-const searchDraft = ref('')
-const search = ref('')
-const loading = ref(false)
+const { t } = useI18n()
+
 const saving = ref(false)
-const clearing = ref(false)
-const error = ref('')
-const notice = ref('')
-const selected = ref(new Set<string>())
 const editing = ref<MemoryFileRecord | null>(null)
 const draft = ref('')
 // The editor stays read-only until the file's current bytes arrive: editing
 // into a stale draft would silently save the old content over the user's.
 const loadingEditor = ref(false)
 const editorError = ref('')
-const confirmClear = ref(false)
 // True once the open file differs from the bytes it was loaded with; saving is
 // refused otherwise, so an untouched file is never rewritten.
 const dirty = ref(false)
 // Remounting the editor re-baselines it for each newly opened file.
 const editorKey = ref(0)
 
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
+const allSelected = computed(() => props.rows.length > 0 && props.rows.every((file) => props.selected.has(file.path)))
 
-let searchDebounce: ReturnType<typeof setTimeout> | null = null
-watch(searchDraft, (value) => {
-  if (searchDebounce) clearTimeout(searchDebounce)
-  searchDebounce = setTimeout(() => {
-    search.value = value.trim()
-    page.value = 1
-    void load()
-  }, 300)
-})
-onBeforeUnmount(() => {
-  if (searchDebounce) clearTimeout(searchDebounce)
-})
-
-watch([sortKey, pageSize], () => {
-  page.value = 1
-  void load()
-})
-
-async function load() {
-  loading.value = true
-  error.value = ''
-  try {
-    const [sort, order] = sortKey.value.split('-') as ['created' | 'updated', 'asc' | 'desc']
-    const data = await forebrainApi.memoryFilesList({
-      scope: props.scope,
-      projectId: props.projectId,
-      page: page.value,
-      pageSize: pageSize.value,
-      sort,
-      order,
-      q: search.value || undefined,
-    })
-    files.value = data.files
-    total.value = data.total
-    // A page that no longer exists (after deletes) falls back to the last
-    // live one instead of showing an empty listing.
-    if (!data.files.length && data.page > 1 && data.total > 0) {
-      page.value = Math.ceil(data.total / data.pageSize)
-      return load()
-    }
-    const live = new Set(data.files.map((file) => file.path))
-    const next = new Set<string>()
-    for (const path of selected.value) {
-      if (live.has(path)) next.add(path)
-    }
-    selected.value = next
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
-  }
+/**
+ * The grey 内容 line: the listing answers each file's first non-empty line
+ * beside its name and times (plan 073), so the table never asks for a body of
+ * its own.
+ */
+function previewOf(file: MemoryFileRecord): string {
+  return file.preview?.trim() || '—'
 }
 
-function formatTime(unix: number): string {
-  if (!unix) return '—'
-  return new Date(unix * 1000).toLocaleString(locale.value === 'zh' ? 'zh-CN' : 'en-US', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+function sortBy(key: string, order: 'asc' | 'desc'): void {
+  emit('sort', key, order)
 }
 
-function toggleSelect(path: string, checked: boolean) {
-  const next = new Set(selected.value)
+function toggleSelect(path: string, checked: boolean): void {
+  const next = new Set(props.selected)
   if (checked) {
     next.add(path)
   } else {
     next.delete(path)
   }
-  selected.value = next
+  emit('update:selected', next)
+}
+
+function toggleAll(checked: boolean): void {
+  emit('update:selected', checked ? new Set(props.rows.map((file) => file.path)) : new Set<string>())
 }
 
 async function openEditor(file: MemoryFileRecord) {
@@ -323,9 +253,9 @@ async function saveEditor() {
   editorError.value = ''
   try {
     await forebrainApi.memoryFileWrite(props.scope, file.path, draft.value, props.projectId)
-    notice.value = t('memories.savedFile', { path: file.path })
+    emit('notice', t('memories.savedFile', { path: file.path }))
     closeEditor()
-    await load()
+    emit('reload')
   } catch (e: unknown) {
     editorError.value = getErrorMessage(e)
   } finally {
@@ -342,16 +272,19 @@ async function deleteFromEditor() {
     if (file.core) {
       // A core file can be cleared but never removed.
       await forebrainApi.memoryFileWrite(props.scope, file.path, '', props.projectId)
-      notice.value = t('memories.emptiedFile', { path: file.path })
+      emit('notice', t('memories.emptiedFile', { path: file.path }))
     } else {
       const res = await forebrainApi.memoryFilesDelete(props.scope, [file.path], props.projectId)
       const refused = res.results.filter((row) => !row.ok)
-      notice.value = refused.length
-        ? refused.map((row) => `${row.path}: ${row.error ?? ''}`).join('; ')
-        : t('memories.deletedFile', { path: file.path })
+      emit(
+        'notice',
+        refused.length
+          ? refused.map((row) => `${row.path}: ${row.error ?? ''}`).join('; ')
+          : t('memories.deletedFile', { path: file.path }),
+      )
     }
     closeEditor()
-    await load()
+    emit('reload')
   } catch (e: unknown) {
     editorError.value = getErrorMessage(e)
   } finally {
@@ -360,54 +293,18 @@ async function deleteFromEditor() {
 }
 
 async function deleteOne(file: MemoryFileRecord) {
-  error.value = ''
   try {
     const res = await forebrainApi.memoryFilesDelete(props.scope, [file.path], props.projectId)
     const refused = res.results.filter((row) => !row.ok)
-    if (refused.length) {
-      notice.value = refused.map((row) => `${row.path}: ${row.error ?? ''}`).join('; ')
-    } else {
-      notice.value = t('memories.deletedFile', { path: file.path })
-    }
-    await load()
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  }
-}
-
-async function deleteSelected() {
-  const paths = Array.from(selected.value)
-  if (!paths.length) return
-  error.value = ''
-  try {
-    const res = await forebrainApi.memoryFilesDelete(props.scope, paths, props.projectId)
-    const refused = res.results.filter((row) => !row.ok)
-    notice.value = refused.length
-      ? t('memories.deletedWithRefusal', { deleted: res.deleted, refused: refused.length })
-      : t('memories.deletedSelected', { count: res.deleted })
-    await load()
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  }
-}
-
-async function clearAll() {
-  clearing.value = true
-  error.value = ''
-  try {
-    await forebrainApi.resetMemories(
-      props.scope === 'global' ? { scope: 'global' } : { scope: 'project', projectId: props.projectId },
+    emit(
+      'notice',
+      refused.length
+        ? refused.map((row) => `${row.path}: ${row.error ?? ''}`).join('; ')
+        : t('memories.deletedFile', { path: file.path }),
     )
-    notice.value = t('memories.cleared')
-    confirmClear.value = false
-    page.value = 1
-    await load()
+    emit('reload')
   } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  } finally {
-    clearing.value = false
+    emit('error', getErrorMessage(e))
   }
 }
-
-onMounted(load)
 </script>

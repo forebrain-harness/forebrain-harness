@@ -2,8 +2,11 @@
 //
 // The effective MCP list is frozen for the session, so startup — right after
 // the workspace-trust prompt — is the one moment the operator can be asked
-// about project entries. Anything not confirmed here fails closed: it stays
-// out of the session and /mcp shows it as awaiting confirmation.
+// about project entries. An answer of N, or a bare Enter, records a decline:
+// the entry stays out of the session, and it is not asked about again until it
+// is allowed on the project page's MCP tab or its configuration changes. An
+// entry whose prompt was interrupted before an answer was read is not recorded
+// at all, so the next start asks about it again.
 package main
 
 import (
@@ -62,7 +65,7 @@ func ensureProjectMCPConsent(in io.Reader, out io.Writer, home, cwd string) erro
 			allowed = append(allowed, entry.Name)
 			_, _ = fmt.Fprintln(out, "  confirmed — it loads this session")
 		default:
-			_, _ = fmt.Fprintln(out, "  skipped — confirm later to load it")
+			_, _ = fmt.Fprintln(out, "  declined — it won't load; allow it later on the project page's MCP tab")
 		}
 	}
 	_, _ = fmt.Fprintln(out, "")
@@ -71,8 +74,9 @@ func ensureProjectMCPConsent(in io.Reader, out io.Writer, home, cwd string) erro
 
 // ensureProjectLSPConsent is the language-server twin of the MCP prompt: the
 // project file's entries apply only entry by entry, and startup is the moment
-// to ask about them. Anything not confirmed here stays out until it is
-// confirmed on the project page or at the next start.
+// to ask about them. An answer of N, or a bare Enter, records a decline: the
+// entry does not apply, and it is not asked about again until it is allowed on
+// the project page's LSP tab or its configuration changes.
 func ensureProjectLSPConsent(in io.Reader, out io.Writer, home, cwd string) error {
 	if in == nil {
 		in = os.Stdin
@@ -118,7 +122,7 @@ func ensureProjectLSPConsent(in io.Reader, out io.Writer, home, cwd string) erro
 			allowed = append(allowed, entry.ID)
 			_, _ = fmt.Fprintln(out, "  confirmed — it applies from now on")
 		default:
-			_, _ = fmt.Fprintln(out, "  skipped — confirm later on the project page or at the next start")
+			_, _ = fmt.Fprintln(out, "  declined — it won't apply; allow it later on the project page's LSP tab")
 		}
 	}
 	_, _ = fmt.Fprintln(out, "")

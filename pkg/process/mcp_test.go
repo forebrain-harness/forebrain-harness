@@ -116,6 +116,76 @@ func TestResolveSessionMCPDeniedExcluded(t *testing.T) {
 	}
 }
 
+// A per-entry decision from the web records the named entries alone: the
+// entries it did not name keep whatever decision they had, and an entry with
+// none stays pending instead of being read as declined.
+func TestDecideProjectMCPConsentsForLeavesOthersUndecided(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if pending := PendingProjectMCPConsents(ws, launch); len(pending) != 1 || pending[0].Name != "two" {
+		t.Fatalf("pending = %+v, want only the entry the decision did not name", pending)
+	}
+	declined := DeclinedProjectMCPConsents(ws, launch)
+	if len(declined) != 1 || declined[0].Name != "one" || declined[0].Summary == "" {
+		t.Fatalf("declined = %+v", declined)
+	}
+}
+
+// A named decision overwrites the one an entry already has, so a declined
+// entry can be allowed from the project page without touching the file.
+func TestDecideProjectMCPConsentsForAllowsADeclinedEntry(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
+	// The startup prompt's answer: nothing allowed, so both entries are
+	// recorded as declined.
+	if err := DecideProjectMCPConsents(ws, launch, nil); err != nil {
+		t.Fatal(err)
+	}
+	if declined := DeclinedProjectMCPConsents(ws, launch); len(declined) != 2 {
+		t.Fatalf("declined = %+v", declined)
+	}
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, []string{"one"}); err != nil {
+		t.Fatal(err)
+	}
+	res := resolveMCPGlobal(home, ws, globalList(), launch)
+	if names := serverNames(res.Servers); !containsFold(names, "one") {
+		t.Fatalf("the allowed entry must load: %v", names)
+	}
+	if declined := DeclinedProjectMCPConsents(ws, launch); len(declined) != 1 || declined[0].Name != "two" {
+		t.Fatalf("declined = %+v", declined)
+	}
+}
+
+// Without trust the project's file is not even read, so there is nothing to
+// report as declined.
+func TestDeclinedProjectMCPConsentsNeedTrust(t *testing.T) {
+	ws := t.TempDir()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: projtool\n    transport: stdio\n    command: /bin/pt\n")
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}}
+	if declined := DeclinedProjectMCPConsents(ws, launch); len(declined) != 0 {
+		t.Fatalf("untrusted launch must have no declined entries: %+v", declined)
+	}
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"projtool"}, nil); err != nil {
+		t.Fatalf("decide on an untrusted launch: %v", err)
+	}
+	if _, err := os.Stat(mcp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("an untrusted decide must not write a consent store: %v", err)
+	}
+}
+
 func TestResolveSessionMCPUntrustedProjectExcludesEntries(t *testing.T) {
 	home := t.TempDir()
 	ws := t.TempDir()
@@ -382,6 +452,40 @@ func TestProjectLSPConsentsNeedTrust(t *testing.T) {
 	launch.TrustLevel = safety.LevelTrusted
 	if pending := PendingProjectLSPConsents(ws, launch); len(pending) != 1 || pending[0].ID != "s" {
 		t.Fatalf("pending = %+v", pending)
+	}
+}
+
+// The language-server twin: a named allow overwrites the denial the startup
+// prompt recorded, so the entry applies again.
+func TestDecideProjectLSPConsentsForAllowsADeniedEntry(t *testing.T) {
+	ws := t.TempDir()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("servers:\n  one: {command: /bin/one}\n  two: {command: /bin/two}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}, TrustLevel: safety.LevelTrusted}
+	if err := DecideProjectLSPConsents(ws, launch, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, allowed, denied, _ := InspectProjectLSP(ws, launch); len(allowed) != 0 || len(denied) != 2 {
+		t.Fatalf("allowed = %v denied = %v", allowed, denied)
+	}
+	if err := DecideProjectLSPConsentsFor(ws, launch, []string{"one"}, []string{"one"}); err != nil {
+		t.Fatal(err)
+	}
+	_, pending, allowed, denied, _ := InspectProjectLSP(ws, launch)
+	if len(allowed) != 1 || allowed[0] != "one" {
+		t.Fatalf("allowed = %v", allowed)
+	}
+	if len(denied) != 1 || denied[0] != "two" || len(pending) != 0 {
+		t.Fatalf("denied = %v pending = %+v", denied, pending)
 	}
 }
 

@@ -12,7 +12,7 @@
       <a
         v-if="previewUrl"
         :href="previewUrl"
-        :title="t('chat.toolImageOpen')"
+        v-tip:top="t('chat.toolImageOpen')"
         target="_blank"
         rel="noopener"
         class="mb-2 block w-fit"

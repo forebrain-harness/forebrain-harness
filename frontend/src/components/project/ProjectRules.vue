@@ -1,5 +1,5 @@
 <template>
-  <div class="mx-auto max-w-4xl space-y-6">
+  <div class="mx-auto max-w-4xl space-y-4">
     <!-- Trust gate: project rules only load for a trusted project. -->
     <div v-if="!trusted" class="rounded-lg border border-[var(--forebrain-brand-border)] bg-[var(--forebrain-brand-soft)] p-4">
       <div class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ t('projects.trustTitle') }}</div>
@@ -10,62 +10,75 @@
     </div>
 
     <template v-else>
-      <section>
-        <PageTopRow :title="t('rules.projectInstrTitle')" :description="t('rules.projectInstrDesc')">
-          <template #actions>
-            <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!instrDirty || savingInstr" data-testid="project-instructions-save" @click="saveInstructions">
-              {{ savingInstr ? t('common.loading') : t('common.save') }}
-            </button>
-          </template>
-        </PageTopRow>
-        <p v-if="instrError" class="mb-2 text-[12px] text-[var(--forebrain-danger)]">{{ instrError }}</p>
-        <p v-if="instrNotice" class="mb-2 text-[12px] text-[var(--forebrain-brand-1)]">{{ instrNotice }}</p>
-        <textarea v-model="instructions" rows="3" class="forebrain-field w-full" data-testid="project-instructions" />
-      </section>
+      <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="notice" class="text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
 
-      <section>
-        <PageTopRow :title="t('rules.projectFilesTitle')" :description="t('rules.projectFilesDesc')">
-          <template #actions>
-            <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="rules-create" @click="openCreate">
-              {{ t('rules.newFile') }}
-            </button>
-          </template>
-        </PageTopRow>
+      <ListToolbar>
+        <template #left>
+          <input
+            v-model="q"
+            type="search"
+            :placeholder="t('rules.searchPlaceholder')"
+            class="forebrain-field h-[34px]"
+            style="max-width: 240px"
+            data-testid="rules-search"
+          />
+        </template>
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="rules-create" @click="openCreate">
+            <Plus class="size-3.5" aria-hidden="true" />{{ t('rules.newFile') }}
+          </button>
+        </template>
+      </ListToolbar>
 
-        <p v-if="error" class="mb-3 text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>
-        <p v-if="notice" class="mb-3 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
+      <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+      <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('rules.empty') }}</div>
+      <div v-else class="forebrain-table-wrap">
+        <table class="forebrain-table forebrain-table--fixed">
+          <colgroup>
+            <col />
+            <col style="width: 220px" />
+            <col style="width: 150px" />
+            <col style="width: 56px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>{{ t('rules.colFile') }}</th>
+              <th>{{ t('rules.colPurpose') }}</th>
+              <th>{{ t('rules.colUpdated') }}</th>
+              <th class="text-right">{{ t('rules.colActions') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="file in rows" :key="file.dir || '__root__'" data-testid="rule-file-row" :data-rule-file="label(file.dir)">
+              <td>
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="label(file.dir)">{{ label(file.dir) }}</span>
+                  <BadgeComponent v-if="!file.exists" variant="gray" class="shrink-0">{{ t('rules.notCreated') }}</BadgeComponent>
+                </div>
+              </td>
+              <td class="text-[var(--forebrain-text-2)]">
+                <span class="forebrain-cell-1" v-tip:top.trunc="purposeFor(file.dir)">{{ purposeFor(file.dir) }}</span>
+              </td>
+              <td class="forebrain-num font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.updatedAt) }}</td>
+              <td class="text-right">
+                <RowActions>
+                  <RowAction
+                    :icon="Pencil"
+                    :label="t('rules.editFile')"
+                    :name="label(file.dir)"
+                    :data-testid="`rule-edit-${label(file.dir)}`"
+                    @click="openEdit(file.dir)"
+                  />
+                </RowActions>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
 
-        <div v-if="loading && !files.length" class="py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-        <div v-else-if="!files.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('rules.empty') }}</div>
-        <div v-else class="forebrain-table-wrap">
-          <table class="forebrain-table">
-            <thead>
-              <tr>
-                <th>{{ t('rules.colFile') }}</th>
-                <th>{{ t('rules.colPurpose') }}</th>
-                <th>{{ t('rules.colUpdated') }}</th>
-                <th class="text-right">{{ t('rules.colActions') }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="file in files" :key="file.dir || '__root__'" data-testid="rule-file-row" :data-rule-file="label(file.dir)">
-                <td class="font-mono">
-                  {{ label(file.dir) }}
-                  <span v-if="!file.exists" class="ml-1 rounded-full border border-[var(--forebrain-divider)] px-1.5 py-0.5 text-[10px] text-[var(--forebrain-muted-text)]">{{ t('rules.notCreated') }}</span>
-                </td>
-                <td class="text-[var(--forebrain-text-2)]">{{ file.dir ? t('rules.purposeSubdir') : t('rules.purposeRoot') }}</td>
-                <td class="font-mono text-[var(--forebrain-text-2)]">{{ formatTime(file.updatedAt) }}</td>
-                <td class="text-right">
-                  <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :data-testid="`rule-edit-${label(file.dir)}`" @click="openEdit(file.dir)">
-                    {{ t('rules.editFile') }}
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="mt-3 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('rules.projectWhere') }}；{{ t('rules.applyShort') }}</p>
-      </section>
+      <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      <ListNote>{{ t('rules.projectNote') }}</ListNote>
     </template>
 
     <ForebrainModal :open="creating" size="sm" :title="t('rules.createModalTitle')" @close="creating = false">
@@ -106,33 +119,41 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { Pencil, Plus } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
-import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import TablePager from '@/components/common/TablePager.vue'
+import { useServerList } from '@/composables/useServerList'
+import { getErrorMessage, forebrainApi, type ListQuery, type ProjectRecord, type ProjectRuleFileRow } from '@/lib/api'
+import { formatDateTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 
 const FileEditor = defineAsyncComponent(() => import('@/components/editor/FileEditor.vue'))
 
 /**
- * This project's rules tab: the project instructions every session in it is
- * told up front, over the FOREBRAIN.md chain — one file per directory layer,
- * root first. Both are lists-and-buttons; editing happens in modals. Only the
- * project's own files appear — the chain is assembled from its root, never
- * from anything inherited.
+ * This project's rules tab: the FOREBRAIN.md chain over its own directories —
+ * one file per directory layer, root first. Editing happens in modals, and the
+ * project instructions every session is told up front live in 项目设置, not
+ * here. Only the project's own files appear — the chain is assembled from its
+ * root, never from anything inherited.
+ *
+ * The table is the server's (plan 075): the search narrows it there, and the
+ * create modal still offers every layer without a file yet, which is a fact of
+ * the whole list rather than of the page on screen.
  */
 const props = defineProps<{ project: ProjectRecord | null; projectId: string }>()
 
 const { t } = useI18n()
 
-type FileRow = { dir: string; exists: boolean; sizeBytes?: number; updatedAt?: number }
-
 const trusted = ref(false)
 const trusting = ref(false)
 
-const files = ref<FileRow[]>([])
+/** The layers with no FOREBRAIN.md yet: what the create modal may offer. */
 const creatable = ref<string[]>([])
-const loading = ref(false)
-const error = ref('')
 const notice = ref('')
 const creating = ref(false)
 const createDir = ref('')
@@ -144,73 +165,41 @@ const dirty = ref(false)
 const saving = ref(false)
 const warning = ref(false)
 
-const instructions = ref('')
-const savedInstructions = ref('')
-const savingInstr = ref(false)
-const instrError = ref('')
-const instrNotice = ref('')
-const instrDirty = computed(() => instructions.value !== savedInstructions.value)
+async function fetchFiles(query: ListQuery) {
+  const answer = await forebrainApi.projectRuleFilesPage(props.projectId, query)
+  creatable.value = answer.create
+  return answer
+}
+
+const { rows, total, page, pageSize, q, loading, error: listError, reload } = useServerList<ProjectRuleFileRow>(fetchFiles, { pageSize: 10 })
+
+const writeError = ref('')
+const error = computed(() => listError.value || writeError.value)
 
 function label(dir: string): string {
   return dir ? `${dir}/FOREBRAIN.md` : 'FOREBRAIN.md'
 }
 
-function formatTime(unix?: number): string {
-  if (!unix) return '—'
-  return new Date(unix * 1000).toLocaleString()
+function purposeFor(dir: string): string {
+  return dir ? t('rules.purposeSubdir') : t('rules.purposeRoot')
 }
 
 watch(() => props.project?.trusted, (value) => {
   trusted.value = Boolean(value)
 }, { immediate: true })
 
-watch(() => props.project?.instructions, (value) => {
-  instructions.value = value ?? ''
-  savedInstructions.value = value ?? ''
-}, { immediate: true })
-
-async function loadList() {
-  loading.value = true
-  error.value = ''
-  try {
-    const res = await forebrainApi.projectRuleFiles(props.projectId)
-    files.value = res.files ?? []
-    creatable.value = res.create ?? []
-  } catch (cause) {
-    error.value = getErrorMessage(cause)
-  } finally {
-    loading.value = false
-  }
-}
-
 async function trust() {
   if (trusting.value) return
   trusting.value = true
-  error.value = ''
+  writeError.value = ''
   try {
     await forebrainApi.projectUpdate(props.projectId, { trust: true })
+    // The gate's own watcher reloads the table once trust moves.
     trusted.value = true
-    await loadList()
   } catch (cause) {
-    error.value = getErrorMessage(cause)
+    writeError.value = getErrorMessage(cause)
   } finally {
     trusting.value = false
-  }
-}
-
-async function saveInstructions() {
-  if (savingInstr.value || !instrDirty.value) return
-  savingInstr.value = true
-  instrError.value = ''
-  instrNotice.value = ''
-  try {
-    await forebrainApi.projectUpdate(props.projectId, { instructions: instructions.value })
-    savedInstructions.value = instructions.value
-    instrNotice.value = t('projects.saved')
-  } catch (cause) {
-    instrError.value = getErrorMessage(cause)
-  } finally {
-    savingInstr.value = false
   }
 }
 
@@ -236,7 +225,7 @@ async function openEdit(dir: string) {
     // A layer without a file yet reads as empty; saving it creates it.
     draft.value = file.content
   } catch (cause) {
-    error.value = getErrorMessage(cause)
+    writeError.value = getErrorMessage(cause)
   } finally {
     loaded.value = true
   }
@@ -251,7 +240,7 @@ function closeEdit() {
 async function save() {
   if (saving.value || !dirty.value || editing.value === null) return
   saving.value = true
-  error.value = ''
+  writeError.value = ''
   notice.value = ''
   warning.value = false
   try {
@@ -260,15 +249,17 @@ async function save() {
     notice.value = t('rules.savedNotice')
     dirty.value = false
     closeEdit()
-    await loadList()
+    await reload()
   } catch (cause) {
-    error.value = getErrorMessage(cause)
+    writeError.value = getErrorMessage(cause)
   } finally {
     saving.value = false
   }
 }
 
+// The listing is only asked once the project is trusted: its files live in the
+// project's own directory.
 watch(trusted, (value) => {
-  if (value) void loadList()
+  if (value) void reload()
 }, { immediate: true })
 </script>

@@ -104,7 +104,7 @@ features:
   # scaffolding into the memory root (extensions/ad_hoc/instructions.md, a .git
   # repository, …) stamped earlier than anything a spec seeds. The memory
   # manager specs seed files on disk directly and assert exact listings, so the
-  # whole feature is off for the run. Switching off `generate_memories` alone is
+  # whole feature is off for the run. Switching off generate_memories alone is
   # not enough: the startup pipeline is gated on this feature flag.
   memories: false
 agents:
@@ -135,7 +135,7 @@ features:
   # scaffolding into the memory root (extensions/ad_hoc/instructions.md, a .git
   # repository, …) stamped earlier than anything a spec seeds. The memory
   # manager specs seed files on disk directly and assert exact listings, so the
-  # whole feature is off for the run. Switching off `generate_memories` alone is
+  # whole feature is off for the run. Switching off generate_memories alone is
   # not enough: the startup pipeline is gated on this feature flag.
   memories: false
 agents:

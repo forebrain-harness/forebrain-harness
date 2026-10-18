@@ -1,10 +1,15 @@
 import { beforeAll, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { config, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import { setLocale } from '@/locales'
 import type { ProjectRecord } from '@/lib/api'
 import type { ProjectTarget } from '@/lib/projectTarget'
 import ProjectPopover from './ProjectPopover.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 function project(over: Partial<ProjectRecord>): ProjectRecord {
   return {

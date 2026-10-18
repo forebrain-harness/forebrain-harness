@@ -1,24 +1,40 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
-    <div class="mx-auto w-full max-w-5xl">
-      <PageTopRow :title="t('rules.title')" :description="t('rules.agentDescription')">
+    <div class="mx-auto flex w-full max-w-5xl flex-col gap-4">
+      <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      <p v-if="notice" class="text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
+
+      <ListToolbar>
+        <template #left>
+          <input
+            v-model="q"
+            type="search"
+            :placeholder="t('rules.searchPlaceholder')"
+            class="forebrain-field h-[34px]"
+            style="max-width: 240px"
+            data-testid="rules-search"
+          />
+        </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="rules-create" @click="openCreate">
-            {{ t('rules.newFile') }}
+          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="rules-create" @click="openCreate">
+            <Plus class="size-3.5" aria-hidden="true" />{{ t('rules.newFile') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="loadList">
-            {{ t('common.refresh') }}
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+            <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
           </button>
         </template>
-      </PageTopRow>
+      </ListToolbar>
 
-      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-      <p v-if="notice" class="mb-4 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
-
-      <div v-if="loading && !files.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!files.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('rules.empty') }}</div>
+      <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+      <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('rules.empty') }}</div>
       <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table">
+        <table class="forebrain-table forebrain-table--fixed">
+          <colgroup>
+            <col />
+            <col />
+            <col />
+            <col style="width: 64px" />
+          </colgroup>
           <thead>
             <tr>
               <th>{{ t('rules.colFile') }}</th>
@@ -28,23 +44,35 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="file in files" :key="file.name" data-testid="rule-file-row" :data-rule-file="file.name">
-              <td class="font-mono">
-                {{ file.name }}
-                <span v-if="!file.exists" class="ml-1 rounded-full border border-[var(--forebrain-divider)] px-1.5 py-0.5 text-[10px] text-[var(--forebrain-muted-text)]">{{ t('rules.notCreated') }}</span>
+            <tr v-for="file in rows" :key="file.name" data-testid="rule-file-row" :data-rule-file="file.name">
+              <td>
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span class="min-w-0 truncate font-mono">{{ file.name }}</span>
+                  <BadgeComponent v-if="!file.exists" variant="gray" class="shrink-0">{{ t('rules.notCreated') }}</BadgeComponent>
+                </div>
               </td>
-              <td class="text-[var(--forebrain-text-2)]">{{ purposeFor(file.name) }}</td>
-              <td class="font-mono text-[var(--forebrain-text-2)]">{{ formatTime(file.updatedAt) }}</td>
+              <td class="text-[var(--forebrain-text-2)]">
+                <span class="forebrain-cell-1" v-tip:top.trunc="purposeFor(file.name)">{{ purposeFor(file.name) }}</span>
+              </td>
+              <td class="font-mono text-[var(--forebrain-text-2)]">{{ formatDateTime(file.updatedAt) }}</td>
               <td class="text-right">
-                <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :data-testid="`rule-edit-${file.name}`" @click="openEdit(file.name)">
-                  {{ t('rules.editFile') }}
-                </button>
+                <RowActions>
+                  <RowAction
+                    :icon="Pencil"
+                    :label="t('rules.editFile')"
+                    :name="file.name"
+                    :data-testid="`rule-edit-${file.name}`"
+                    @click="openEdit(file.name)"
+                  />
+                </RowActions>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
-      <p class="mt-3 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('rules.agentWhere') }}；{{ t('rules.applyShort') }}</p>
+
+      <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      <ListNote>{{ t('rules.note') }}</ListNote>
     </div>
 
     <ForebrainModal :open="creating" size="sm" :title="t('rules.createModalTitle')" @close="creating = false">
@@ -79,10 +107,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { defineAsyncComponent, onMounted, ref } from 'vue'
+import { Pencil, Plus, RotateCw } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
-import { getErrorMessage, forebrainApi } from '@/lib/api'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import TablePager from '@/components/common/TablePager.vue'
+import { useServerList } from '@/composables/useServerList'
+import { forebrainApi, getErrorMessage, type RuleFileSummary } from '@/lib/api'
+import { formatDateTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 
 const FileEditor = defineAsyncComponent(() => import('@/components/editor/FileEditor.vue'))
@@ -93,25 +129,29 @@ const FileEditor = defineAsyncComponent(() => import('@/components/editor/FileEd
  * happen in modals, so the page never grows an inline form. Editing them is
  * editing what every session of this tenant is told before its first word;
  * changes start with the next session, never mid-run.
+ *
+ * The table is server-paged (plan 073): the search narrows it there, and the
+ * create modal still offers every file that does not exist yet, which is a fact
+ * of the whole list rather than of the page on screen.
  */
 const { t } = useI18n()
 
-type FileRow = { name: string; exists: boolean; sizeBytes?: number; updatedAt?: number }
+const { rows, total, page, pageSize, q, loading, error, reload } = useServerList<RuleFileSummary>(
+  forebrainApi.agentRuleFilesPage,
+  { pageSize: 10 },
+)
 
-const files = ref<FileRow[]>([])
-const loading = ref(false)
-const error = ref('')
 const notice = ref('')
 const creating = ref(false)
 const createName = ref('')
+/** What the create modal may offer: the files that do not exist yet. */
+const creatable = ref<string[]>([])
 const editing = ref('')
 const loaded = ref(false)
 const draft = ref('')
 const dirty = ref(false)
 const saving = ref(false)
 const warning = ref(false)
-
-const creatable = computed(() => files.value.filter((file) => !file.exists).map((file) => file.name))
 
 const purposes: Record<string, () => string> = {
   'AGENTS.md': () => t('rules.purposeAgents'),
@@ -123,27 +163,22 @@ function purposeFor(name: string): string {
   return purposes[name] ? purposes[name]() : ''
 }
 
-function formatTime(unix?: number): string {
-  if (!unix) return '—'
-  return new Date(unix * 1000).toLocaleString()
+function refresh(): void {
+  void reload()
 }
 
-async function loadList() {
-  loading.value = true
+async function openCreate() {
   error.value = ''
+  creatable.value = []
+  createName.value = ''
+  creating.value = true
   try {
-    const res = await forebrainApi.agentRuleFiles()
-    files.value = res.files ?? []
+    const whole = await forebrainApi.agentRuleFiles()
+    creatable.value = (whole.files ?? []).filter((file) => !file.exists).map((file) => file.name)
   } catch (cause) {
     error.value = getErrorMessage(cause)
-  } finally {
-    loading.value = false
   }
-}
-
-function openCreate() {
   createName.value = creatable.value[0] ?? ''
-  creating.value = true
 }
 
 function confirmCreate() {
@@ -188,7 +223,7 @@ async function save() {
     notice.value = t('rules.savedNotice')
     dirty.value = false
     closeEdit()
-    await loadList()
+    await reload()
   } catch (cause) {
     error.value = getErrorMessage(cause)
   } finally {
@@ -196,5 +231,7 @@ async function save() {
   }
 }
 
-onMounted(loadList)
+onMounted(() => {
+  void reload()
+})
 </script>

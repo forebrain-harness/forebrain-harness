@@ -95,18 +95,36 @@ test('edit switches delivery to record-only', async ({ page }) => {
 })
 
 test('run now shows up in the run history', async ({ page }) => {
+  test.info().setTimeout(120_000)
   await signIn(page)
   await openNewJob(page, 'runnow brief')
   await page.selectOption('[data-testid="schedule-mode"]', 'once-in')
   await page.fill('[data-testid="schedule-in-count"]', '30')
   await saveAndExpectRow(page, 'runnow brief', 'in 30m')
 
-  await page.locator('[data-cron-job="runnow brief"]').getByRole('button', { name: /立即执行|Run now/ }).click()
-  // The fake provider answers within seconds; the history panel the run
-  // button opens shows the row it produced.
-  await expect(
-    page.locator('[data-cron-job="runnow brief"]'),
-  ).toContainText(/成功|ok|执行中|running|失败|failed/i, { timeout: 30_000 })
+  const row = page.locator('[data-cron-job="runnow brief"]')
+  const projectId = page.url().match(/\/projects\/([^/]+)\/cron/)![1]
+  const history = row.locator('[data-testid^="cron-history-"]')
+  const jobId = String(await history.getAttribute('data-testid')).replace('cron-history-', '')
+
+  await row.getByRole('button', { name: /立即执行|Run now/ }).click()
+  // The fire is asynchronous: the record lands in the history the dialog
+  // reads, so wait for the store before opening it (plan 075 moved the
+  // history out of the card and into its own dialog).
+  await expect
+    .poll(async () => {
+      const answer = await page.request.get(`/api/v1/projects/${projectId}/cron/jobs/${jobId}/runs?limit=10`)
+      const body = (await answer.json()) as { records?: Array<{ status?: string }> }
+      return (body.records ?? []).length
+    }, { timeout: 60_000, message: 'the fire to reach the run history' })
+    .toBeGreaterThan(0)
+
+  await history.click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.locator('[data-cron-run]').first()).toContainText(
+    /成功|ok|执行中|running|失败|failed/i,
+    { timeout: 30_000 },
+  )
 })
 
 test('project cron jobs stay in their project tab', async ({ page }) => {

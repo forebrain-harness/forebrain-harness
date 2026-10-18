@@ -1,23 +1,41 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
-    <div class="mx-auto w-full max-w-5xl">
-      <PageTopRow :title="t('providers.title')" :description="t('providers.description')">
+    <div class="mx-auto flex w-full max-w-5xl flex-col gap-4">
+      <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+
+      <ListToolbar>
+        <template #left>
+          <input
+            v-model="q"
+            type="search"
+            :placeholder="t('providers.searchPlaceholder')"
+            class="forebrain-field h-[34px]"
+            style="max-width: 240px"
+            data-testid="providers-search"
+          />
+        </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving" data-testid="providers-add" @click="openAdd">
-            {{ t('providers.add') }}
+          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="saving" data-testid="providers-add" @click="openAdd">
+            <Plus class="size-3.5" aria-hidden="true" />{{ t('providers.add') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-            {{ t('common.refresh') }}
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+            <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
           </button>
         </template>
-      </PageTopRow>
-
-      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+      </ListToolbar>
 
       <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
       <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('providers.empty') }}</div>
       <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table">
+        <table class="forebrain-table forebrain-table--fixed">
+          <colgroup>
+            <col style="width: 70px" />
+            <col style="width: 140px" />
+            <col />
+            <col style="width: 220px" />
+            <col style="width: 150px" />
+            <col style="width: 110px" />
+          </colgroup>
           <thead>
             <tr>
               <th>{{ t('providers.colOrder') }}</th>
@@ -29,42 +47,67 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(row, index) in rows" :key="index" :data-provider-row="row.provider || ''">
+            <tr v-for="row in rows" :key="entryKey(row)" :data-provider-row="row.provider || ''">
               <td>
-                <span
-                  class="rounded-full px-2 py-0.5 text-[11px]"
-                  :class="index === 0 ? 'bg-[var(--forebrain-brand-soft)] text-[var(--forebrain-brand-1)]' : 'border border-[var(--forebrain-divider)] text-[var(--forebrain-muted-text)]'"
-                >{{ index === 0 ? t('providers.primary') : t('providers.fallback', { n: index }) }}</span>
+                <BadgeComponent v-if="rowIndex(row) === 0">{{ t('providers.primary') }}</BadgeComponent>
+                <BadgeComponent v-else variant="gray">{{ t('providers.fallback', { n: rowIndex(row) }) }}</BadgeComponent>
               </td>
-              <td>{{ row.provider }}</td>
-              <td class="font-mono">{{ row.models.join('、') }}</td>
-              <td class="font-mono text-[var(--forebrain-text-2)]">{{ row.baseUrl }}</td>
               <td>
-                <span v-if="row.apiKeySet" class="rounded-full border border-[var(--forebrain-divider)] bg-[var(--forebrain-input-bg)] px-2 py-0.5 font-mono text-[11px] text-[var(--forebrain-text-2)]" :data-testid="`provider-key-saved-${index}`">
-                  {{ t('providers.keySaved', { hint: row.apiKeyHint ?? '' }) }}
-                </span>
-                <span v-else class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[11px] text-[var(--forebrain-muted-text)]" :data-testid="`provider-key-unset-${index}`">
-                  {{ t('providers.unsetKey') }}
-                </span>
+                <span class="forebrain-cell-1" v-tip:top.trunc="row.provider">{{ row.provider }}</span>
+              </td>
+              <td class="font-mono">
+                <span class="forebrain-cell-1" v-tip:top.trunc="row.models.join('、')">{{ row.models.join('、') }}</span>
+              </td>
+              <td class="font-mono text-[var(--forebrain-text-2)]">
+                <span class="forebrain-cell-1" v-tip:top.trunc="row.baseUrl || ''">{{ row.baseUrl }}</span>
+              </td>
+              <td>
+                <BadgeComponent v-if="row.apiKeySet" variant="success" :data-testid="`provider-key-saved-${rowIndex(row)}`">
+                  {{ t('providers.keySavedBadge', { hint: row.apiKeyHint ?? '' }) }}
+                </BadgeComponent>
+                <BadgeComponent v-else variant="warning" :data-testid="`provider-key-unset-${rowIndex(row)}`">{{ t('providers.unsetKey') }}</BadgeComponent>
               </td>
               <td class="text-right">
-                <button v-if="index > 0" type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :disabled="saving" :data-testid="`provider-up-${index}`" @click="move(index, -1)">
-                  {{ t('providers.moveUp') }}
-                </button>
-                <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :disabled="saving" :data-testid="`provider-edit-${index}`" @click="openEdit(index)">
-                  {{ t('providers.edit') }}
-                </button>
-                <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px] text-[var(--forebrain-danger)]" :disabled="saving" :data-testid="`provider-remove-${index}`" @click="askRemove(index)">
-                  {{ t('common.delete') }}
-                </button>
+                <RowActions>
+                  <RowActionSlot v-if="rowIndex(row) === 0" />
+                  <RowAction
+                    v-else
+                    :icon="ArrowUp"
+                    :label="t('providers.moveUp')"
+                    :name="row.provider"
+                    :disabled="saving"
+                    :data-testid="`provider-up-${rowIndex(row)}`"
+                    @click="moveUp(row)"
+                  />
+                  <RowAction
+                    :icon="Pencil"
+                    :label="t('providers.edit')"
+                    :name="row.provider"
+                    :disabled="saving"
+                    :data-testid="`provider-edit-${rowIndex(row)}`"
+                    @click="openEdit(row)"
+                  />
+                  <RowAction
+                    :icon="Trash2"
+                    :label="t('common.delete')"
+                    :name="row.provider"
+                    tone="danger"
+                    :disabled="saving"
+                    :data-testid="`provider-remove-${rowIndex(row)}`"
+                    @click="askRemove(row)"
+                  />
+                </RowActions>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      <ListNote>{{ t('providers.description') }}</ListNote>
     </div>
 
-    <ForebrainModal :open="modalOpen" :size="'md'" :title="editingIndex >= 0 ? t('providers.editModalTitle') : t('providers.addModalTitle')" @close="modalOpen = false">
+    <ForebrainModal :open="modalOpen" :size="'md'" :title="editingKey !== null ? t('providers.editModalTitle') : t('providers.addModalTitle')" @close="modalOpen = false">
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="block">
           <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('providers.providerLabel') }}</span>
@@ -129,12 +172,12 @@
     </ForebrainModal>
 
     <ConfirmDialog
-      :open="removeIndex >= 0"
+      :open="removeKey !== null"
       :title="t('providers.deleteTitle')"
       :message="t('providers.deleteMessage')"
       :confirm-label="t('common.delete')"
       danger
-      @cancel="removeIndex = -1"
+      @cancel="removeKey = null"
       @confirm="confirmRemove"
     />
   </div>
@@ -148,18 +191,32 @@
  * the whole ordered list back in one round trip (the interface is whole-table).
  * The API key is typed once, masked as typed, stored as an ${ENV} reference by
  * the server and never echoed back — only its masked tail says one exists.
+ *
+ * The table is paged by the server (plan 073) but the order it pages through is
+ * the whole fallback order, so each row carries its position in that order and
+ * 上移 swaps with the row before it there — never with the row above it on the
+ * page. A write therefore reads the whole list back, changes it, and saves it.
  */
 import { onMounted, reactive, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
-import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import { ArrowUp, Pencil, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import RowActionSlot from '@/components/common/RowActionSlot.vue'
+import TablePager from '@/components/common/TablePager.vue'
 import ModelChipsInput from '@/components/providers/ModelChipsInput.vue'
-import { getErrorMessage, forebrainApi, type ProviderRecord } from '@/lib/api'
+import { useServerList } from '@/composables/useServerList'
+import { forebrainApi, getErrorMessage, type ProviderRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()
 
-type ProviderRow = {
+/** What the add/edit modal edits. */
+type ProviderDraft = {
   provider: string
   baseUrl: string
   apiPath: string
@@ -171,23 +228,44 @@ type ProviderRow = {
   apiKeyPlain: string
 }
 
-const rows = ref<ProviderRow[]>([])
-const loading = ref(false)
+/** One entry of the whole ordered list as this page writes it back. */
+type ProviderEntry = ProviderRecord & { apiKeyPlain?: string }
+
+const { rows, total, page, pageSize, q, loading, error, reload } = useServerList<ProviderRecord>(forebrainApi.providersPage, {
+  pageSize: 10,
+})
+
 const saving = ref(false)
-const error = ref('')
 const catalogProviders = ref<string[]>([])
 const catalogModels = ref<Record<string, string[]>>({})
 
 const modalOpen = ref(false)
-const editingIndex = ref(-1)
-const removeIndex = ref(-1)
-const form = reactive<ProviderRow>(blankRow())
+// The entry a dialog acts on, named by what it is rather than by where it sat
+// when the dialog opened.
+const editingKey = ref<string | null>(null)
+const removeKey = ref<string | null>(null)
+const form = reactive<ProviderDraft>(blankDraft())
 
-function blankRow(): ProviderRow {
+function blankDraft(): ProviderDraft {
   return { provider: '', baseUrl: '', apiPath: '', paramsText: '', models: [], apiKeySet: false, keyEdit: true, apiKeyPlain: '' }
 }
 
-function toRow(record: ProviderRecord): ProviderRow {
+/** A row's position in the whole order, as the list draws it (主用 / 回退 N). */
+function rowIndex(row: ProviderRecord): number {
+  return row.index ?? 0
+}
+
+/**
+ * What a provider entry *is*: its own fields, not its place in the order. A
+ * write that acted on a position read before another write landed would move
+ * (or delete) a neighbour instead — two quick clicks on 上移 would cancel out,
+ * and a 删除 right after one could take the wrong row with it.
+ */
+function entryKey(entry: ProviderRecord): string {
+  return [String(entry.provider ?? '').trim(), String(entry.baseUrl ?? '').trim(), [...(entry.models ?? [])].join('|')].join('\u0000')
+}
+
+function toDraft(record: ProviderRecord): ProviderDraft {
   return {
     provider: record.provider ?? '',
     baseUrl: record.baseUrl ?? '',
@@ -201,16 +279,55 @@ function toRow(record: ProviderRecord): ProviderRow {
   }
 }
 
-async function load() {
-  loading.value = true
-  error.value = ''
-  try {
-    rows.value = (await forebrainApi.providers()).map(toRow)
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
+/** One entry of the list as the PUT takes it. */
+function toBody(entry: ProviderEntry): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    provider: String(entry.provider ?? '').trim(),
+    models: [...(entry.models ?? [])],
+    base_url: String(entry.baseUrl ?? '').trim(),
+    api_path: String(entry.apiPath ?? '').trim(),
   }
+  const params = typeof entry.params === 'string' ? entry.params.trim() : entry.params ? JSON.stringify(entry.params) : ''
+  if (params) body.params = JSON.parse(params)
+  // The key travels only when the user typed one; an untouched key is the
+  // server's to keep.
+  if (entry.apiKeyPlain?.trim()) body.api_key_plain = entry.apiKeyPlain.trim()
+  return body
+}
+
+/**
+ * The list is whole-table on the wire, so a change reads the whole order back,
+ * applies itself to it, and saves it: writing the page alone would delete every
+ * row the page does not show. Writes run one after another — each reads the
+ * order the previous one wrote — so two quick clicks move a row two places
+ * instead of both working from the same stale snapshot and undoing each other.
+ */
+let pendingWrites = 0
+let lastWrite: Promise<void> = Promise.resolve()
+
+function writeWholeOrder(change: (all: ProviderEntry[]) => void): Promise<void> {
+  pendingWrites += 1
+  saving.value = true
+  const write = lastWrite.then(async () => {
+    error.value = ''
+    try {
+      const all: ProviderEntry[] = await forebrainApi.providers()
+      change(all)
+      await forebrainApi.saveProviders(all.map(toBody))
+      await reload()
+    } catch (cause) {
+      error.value = getErrorMessage(cause)
+    } finally {
+      pendingWrites -= 1
+      if (pendingWrites === 0) saving.value = false
+    }
+  })
+  lastWrite = write
+  return write
+}
+
+function refresh(): void {
+  void reload()
 }
 
 async function loadCatalog() {
@@ -240,73 +357,61 @@ function suggestionsFor(provider: string): string[] {
 }
 
 function openAdd() {
-  editingIndex.value = -1
-  Object.assign(form, blankRow())
+  editingKey.value = null
+  Object.assign(form, blankDraft())
   modalOpen.value = true
 }
 
-function openEdit(index: number) {
-  editingIndex.value = index
-  Object.assign(form, { ...rows.value[index], apiKeyPlain: '', keyEdit: false })
+function openEdit(row: ProviderRecord) {
+  editingKey.value = entryKey(row)
+  Object.assign(form, toDraft(row))
   modalOpen.value = true
 }
 
 async function modalSave() {
-  const row: ProviderRow = { ...form, models: [...form.models] }
-  if (editingIndex.value >= 0) rows.value[editingIndex.value] = row
-  else rows.value.push(row)
+  const key = editingKey.value
+  const entry: ProviderEntry = {
+    provider: form.provider.trim(),
+    baseUrl: form.baseUrl.trim(),
+    apiPath: form.apiPath.trim(),
+    params: form.paramsText.trim(),
+    models: [...form.models],
+    apiKeyPlain: form.apiKeyPlain,
+  }
   modalOpen.value = false
-  await persist()
+  await writeWholeOrder((all) => {
+    const at = key === null ? -1 : all.findIndex((candidate) => entryKey(candidate) === key)
+    if (at >= 0) all[at] = { ...all[at], ...entry }
+    else all.push(entry)
+  })
 }
 
-function move(index: number, delta: number) {
-  const target = index + delta
-  if (target < 0 || target >= rows.value.length) return
-  const next = [...rows.value]
-  ;[next[index], next[target]] = [next[target], next[index]]
-  rows.value = next
-  void persist()
+function moveUp(row: ProviderRecord) {
+  const key = entryKey(row)
+  void writeWholeOrder((all) => {
+    const at = all.findIndex((candidate) => entryKey(candidate) === key)
+    if (at <= 0) return
+    ;[all[at - 1], all[at]] = [all[at], all[at - 1]]
+  })
 }
 
-function askRemove(index: number) {
-  removeIndex.value = index
+function askRemove(row: ProviderRecord) {
+  removeKey.value = entryKey(row)
 }
 
 function confirmRemove() {
-  if (removeIndex.value >= 0) rows.value.splice(removeIndex.value, 1)
-  removeIndex.value = -1
-  void persist()
-}
-
-async function persist() {
-  saving.value = true
-  error.value = ''
-  try {
-    await forebrainApi.saveProviders(
-      rows.value.map((row) => {
-        const body: Record<string, unknown> = {
-          provider: row.provider.trim(),
-          models: row.models,
-          base_url: row.baseUrl.trim(),
-          api_path: row.apiPath.trim(),
-        }
-        if (row.paramsText.trim()) body.params = JSON.parse(row.paramsText)
-        // The key travels only when the user typed one; an untouched key is
-        // the server's to keep.
-        if (row.apiKeyPlain.trim()) body.api_key_plain = row.apiKeyPlain.trim()
-        return body
-      }),
-    )
-    await load()
-  } catch (e: unknown) {
-    error.value = getErrorMessage(e)
-  } finally {
-    saving.value = false
-  }
+  const key = removeKey.value
+  removeKey.value = null
+  if (key === null) return
+  void writeWholeOrder((all) => {
+    const at = all.findIndex((candidate) => entryKey(candidate) === key)
+    if (at < 0) return
+    all.splice(at, 1)
+  })
 }
 
 onMounted(() => {
-  void load()
+  void reload()
   void loadCatalog()
 })
 </script>

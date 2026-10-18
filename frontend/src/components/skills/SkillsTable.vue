@@ -1,61 +1,37 @@
 <template>
-  <div>
-    <div class="flex flex-wrap items-center gap-2">
-      <input
-        v-model="query"
-        type="search"
-        class="forebrain-field h-8 max-w-[240px]"
-        :placeholder="t('skills.searchPlaceholder')"
-        data-testid="skills-search"
-      />
-      <select v-model="sourceFilter" class="forebrain-field h-8 w-[120px]" data-testid="skills-source-filter">
-        <option value="all">{{ t('skills.sourceAll') }}</option>
-        <option value="project">{{ t('skills.originProject') }}</option>
-        <option value="agent">{{ t('skills.originAgent') }}</option>
-        <option value="shared">{{ t('skills.originShared') }}</option>
-        <option value="builtin">{{ t('skills.originBuiltin') }}</option>
-      </select>
-      <span class="flex-1" />
-      <span v-if="selectedNames.length" class="text-[12px] text-[var(--forebrain-muted-text)]">
-        {{ t('skills.selectedCount', { count: selectedNames.length }) }}
-      </span>
-      <button
-        type="button"
-        class="forebrain-btn forebrain-btn-ghost text-xs"
-        :disabled="!selectedNames.length || downloading"
-        data-testid="skills-batch-download"
-        @click="emit('batchDownload', selectedNames)"
-      >
-        {{ downloading ? t('common.loading') : t('skills.batchDownload', { count: selectedNames.length }) }}
-      </button>
-    </div>
-
-    <div v-if="loading" class="px-4 py-8 text-center text-[13px] text-[var(--forebrain-muted-text)]">
-      {{ t('common.loading') }}
-    </div>
-    <div v-else-if="!visibleRows.length" class="px-4 py-10 text-center text-[13px] text-[var(--forebrain-muted-text)]">
-      {{ t('skills.empty') }}
-    </div>
-    <table v-else class="forebrain-table mt-3 w-full">
+  <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+  <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+    {{ t('skills.empty') }}
+  </div>
+  <div v-else class="forebrain-table-wrap">
+    <table class="forebrain-table forebrain-table--fixed">
+      <colgroup>
+        <col style="width: 30px" />
+        <col />
+        <col style="width: 110px" />
+        <col style="width: 190px" />
+        <col style="width: 110px" />
+      </colgroup>
       <thead>
         <tr>
-          <th class="w-8">
+          <th>
             <input
               type="checkbox"
               :checked="allSelected"
               :aria-label="t('skills.selectAll')"
+              data-testid="skills-select-all"
               @change="toggleAll(($event.target as HTMLInputElement).checked)"
             />
           </th>
           <th>{{ t('skills.colSkill') }}</th>
-          <th class="w-[110px]">{{ t('skills.colSource') }}</th>
-          <th class="w-[190px] text-right">{{ t('skills.colStatus') }}</th>
-          <th class="w-[170px] text-right">{{ t('skills.colActions') }}</th>
+          <th>{{ t('skills.colSource') }}</th>
+          <th class="text-right">{{ t('skills.colStatus') }}</th>
+          <th class="text-right">{{ t('skills.colActions') }}</th>
         </tr>
       </thead>
       <tbody>
         <tr
-          v-for="row in visibleRows"
+          v-for="row in rows"
           :key="row.rootPath || row.name"
           :data-skill-row="row.name"
           :data-skill-origin="row.origin"
@@ -63,35 +39,33 @@
           <td>
             <input
               type="checkbox"
-              :checked="selected.has(selectKey(row))"
+              :checked="selected.has(row.name)"
               :aria-label="t('skills.selectForDownload', { name: row.name })"
               @change="toggleSelect(row, ($event.target as HTMLInputElement).checked)"
             />
           </td>
           <td>
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-mono text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
-              <BadgeComponent v-if="row.state === 'pending'" variant="warning">{{ t('skills.unpublished') }}</BadgeComponent>
-              <BadgeComponent v-if="row.update" variant="default">{{ t('skills.hasUpdate') }}</BadgeComponent>
+            <div class="flex min-w-0 items-center gap-1.5">
+              <span class="min-w-0 truncate font-mono text-[13px] font-medium text-[var(--forebrain-text)]">{{ row.name }}</span>
+              <BadgeComponent v-if="row.state === 'pending'" variant="warning" class="shrink-0">{{ t('skills.unpublished') }}</BadgeComponent>
+              <BadgeComponent v-if="row.update" class="shrink-0">{{ t('skills.hasUpdate') }}</BadgeComponent>
             </div>
-            <div class="mt-0.5 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">
-              {{ row.description || '—' }}
-              <span v-if="row.rootPath" class="font-mono text-[11px] text-[var(--forebrain-muted-text)]"> · {{ row.rootPath }}</span>
+            <div class="mt-0.5 text-[12px] text-[var(--forebrain-text-2)]">
+              <span class="forebrain-cell-1" v-tip:top.trunc="descriptionLine(row)">{{ descriptionLine(row) }}</span>
             </div>
           </td>
           <td>
             <BadgeComponent variant="gray">{{ originLabel(row.origin) }}</BadgeComponent>
           </td>
           <td class="text-right">
-            <div class="inline-flex items-center gap-2">
+            <span class="inline-flex items-center gap-2">
               <BadgeComponent v-if="row.state === 'draft'" variant="warning">{{ t('skills.draft') }}</BadgeComponent>
-              <BadgeComponent v-else-if="row.version" variant="gray">{{ `v${row.version}` }}</BadgeComponent>
+              <BadgeComponent v-else-if="row.version" variant="gray" class="font-mono">{{ `v${row.version}` }}</BadgeComponent>
               <SwitchComponent
                 v-if="isOwned(row) && !isDraft(row)"
                 :model-value="row.enabled"
                 :disabled="saving"
                 :data-testid="`skill-toggle-${row.name}`"
-                :title="t('skills.toggleHint')"
                 :aria-label="t('skills.toggleHint')"
                 @update:model-value="emit('toggle', row, $event)"
               />
@@ -99,103 +73,116 @@
                 <BadgeComponent :variant="row.enabled ? 'success' : 'gray'">
                   {{ row.enabled ? t('skills.enabled') : t('skills.disabled') }}
                 </BadgeComponent>
-                <LockIcon class="h-3.5 w-3.5 text-[var(--forebrain-muted-text)]" :title="t('skills.inheritedReadOnly')" :aria-label="t('skills.inheritedReadOnly')" />
+                <LockIcon class="size-3.5 text-[var(--forebrain-muted-text)]" v-tip:top="t('skills.inheritedReadOnly')" :aria-label="t('skills.inheritedReadOnly')" />
               </template>
-            </div>
+            </span>
           </td>
           <td class="text-right">
-            <div class="inline-flex items-center gap-1">
-              <button
-                v-if="(isOwned(row) && ownerOrigin !== 'shared') || row.update"
-                type="button"
-                class="forebrain-btn forebrain-btn-ghost text-xs"
+            <RowActions>
+              <RowAction
+                v-if="showsView(row)"
+                :icon="Eye"
+                :label="t('skills.view')"
+                :name="row.name"
                 :data-testid="`skill-detail-${row.name}`"
                 @click="emit('detail', row)"
-              >
-                {{ t('skills.detail') }}
-              </button>
-              <button
+              />
+              <RowActionSlot v-else />
+              <RowAction
                 v-if="row.downloadUrl"
-                type="button"
-                class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]"
-                :title="t('skills.download')"
-                :aria-label="t('skills.download')"
+                :icon="Download"
+                :label="t('skills.downloadZip')"
+                :name="row.name"
                 :data-testid="`skill-download-${row.name}`"
                 @click="emit('download', row)"
-              >
-                <Download class="h-4 w-4" aria-hidden="true" />
-              </button>
-              <button
+              />
+              <RowActionSlot v-else />
+              <RowAction
                 v-if="isOwned(row) && row.origin !== 'builtin'"
-                type="button"
-                class="skill-row-danger inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-[var(--forebrain-input-hover-bg)]"
-                :title="t('common.delete')"
-                :aria-label="t('common.delete')"
+                :icon="Trash2"
+                :label="t('common.delete')"
+                :name="row.name"
+                tone="danger"
                 :data-testid="`skill-delete-${row.name}`"
                 @click="emit('delete', row)"
-              >
-                <Trash2 class="h-4 w-4" aria-hidden="true" />
-              </button>
-            </div>
+              />
+              <RowActionSlot v-else />
+            </RowActions>
           </td>
         </tr>
       </tbody>
     </table>
-    <span v-if="hint" class="mt-2 block text-[11px] text-[var(--forebrain-muted-text)]">{{ hint }}</span>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
-import { Download, Lock as LockIcon, Trash2 } from 'lucide-vue-next'
+/**
+ * The skill table every skill page draws (plan 073): the rows of one page, the
+ * boxes ticked for a bulk download, and the row's actions — nothing else. The
+ * search box, the layer filter, the buttons above and the pager below belong to
+ * the page, because the three pages that use this table (the primary agent's,
+ * a project space's, the shared library) offer different ones.
+ *
+ * A row is the layer's own only where the listing says so: inherited rows are
+ * toggled and deleted in the layer that owns them (decision D9). Every action
+ * is an icon button that names itself and the row it belongs to, and a row
+ * missing one of them keeps its hole so the icons line up down the column.
+ */
+import { computed } from 'vue'
+import { Download, Eye, Lock as LockIcon, Trash2 } from 'lucide-vue-next'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import RowActionSlot from '@/components/common/RowActionSlot.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import type { SkillRecord } from '@/lib/api'
 import { useI18n } from '@/locales'
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   rows: SkillRecord[]
   loading: boolean
   saving: boolean
-  downloading: boolean
   /** The layer this page owns: rows of any other origin are read-only. */
-  ownerOrigin: 'agent' | 'shared' | 'project'
-  /** The trailing path line under the table. */
-  hint?: string
-}>(), { hint: '' })
+  scope: 'agent' | 'shared' | 'project'
+  /** The names ticked for a bulk download; the page owns the set. */
+  selected: Set<string>
+}>()
 
 const emit = defineEmits<{
   toggle: [row: SkillRecord, enabled: boolean]
   delete: [row: SkillRecord]
   download: [row: SkillRecord]
-  batchDownload: [names: string[]]
   detail: [row: SkillRecord]
+  'update:selected': [selected: Set<string>]
 }>()
 
 const { t } = useI18n()
 
-const query = ref('')
-const sourceFilter = ref('all')
-
-const visibleRows = computed(() => {
-  const q = query.value.trim().toLowerCase()
-  return props.rows.filter((row) => {
-    if (sourceFilter.value !== 'all' && row.origin !== sourceFilter.value) return false
-    if (!q) return true
-    return row.name.toLowerCase().includes(q) || (row.description ?? '').toLowerCase().includes(q)
-  })
-})
+const allSelected = computed(() => props.rows.length > 0 && props.rows.every((row) => props.selected.has(row.name)))
 
 // Inherited rows carry no controls at all (decision D9): a skill is toggled
 // and deleted only in the layer that owns it.
 function isOwned(row: SkillRecord) {
-  return row.origin === props.ownerOrigin
+  return row.origin === props.scope
 }
 
 // A draft-only row has no published version to enable, so it never grows a
 // switch: the badge says 草稿 instead.
 function isDraft(row: SkillRecord) {
   return row.state === 'draft' || row.draftOnly === true
+}
+
+// 查看 opens the skill in the workshop: the layer's own rows have something to
+// improve, and a row with an upstream update has something to look at.
+function showsView(row: SkillRecord) {
+  return (isOwned(row) && props.scope !== 'shared') || Boolean(row.update)
+}
+
+/** The grey second line under a name: what it does, and where it lives. */
+function descriptionLine(row: SkillRecord): string {
+  const parts = [row.description || '—']
+  if (row.rootPath) parts.push(row.rootPath)
+  return parts.join(' · ')
 }
 
 function originLabel(origin: SkillRecord['origin']) {
@@ -209,52 +196,21 @@ function originLabel(origin: SkillRecord['origin']) {
   }
 }
 
-function selectKey(row: SkillRecord) {
-  return row.rootPath || row.name
-}
-
-const selected = ref(new Set<string>())
-
-const selectedNames = computed(() =>
-  props.rows.filter((row) => selected.value.has(selectKey(row))).map((row) => row.name),
-)
-
-const allSelected = computed(() =>
-  visibleRows.value.length > 0 && visibleRows.value.every((row) => selected.value.has(selectKey(row))),
-)
-
 function toggleSelect(row: SkillRecord, checked: boolean) {
-  const next = new Set(selected.value)
-  if (checked) next.add(selectKey(row))
-  else next.delete(selectKey(row))
-  selected.value = next
+  const next = new Set(props.selected)
+  if (checked) next.add(row.name)
+  else next.delete(row.name)
+  emit('update:selected', next)
 }
 
+// 全选 works on the page on screen: a server-paged table has no other rows to
+// tick, and the count above it says how many that is.
 function toggleAll(checked: boolean) {
-  const next = new Set(selected.value)
-  for (const row of visibleRows.value) {
-    if (checked) next.add(selectKey(row))
-    else next.delete(selectKey(row))
+  const next = new Set(props.selected)
+  for (const row of props.rows) {
+    if (checked) next.add(row.name)
+    else next.delete(row.name)
   }
-  selected.value = next
+  emit('update:selected', next)
 }
-
-// A refreshed list may rename paths; stale selections must not survive it.
-watch(
-  () => props.rows,
-  () => {
-    const live = new Set(props.rows.map(selectKey))
-    const next = new Set<string>()
-    for (const key of selected.value) {
-      if (live.has(key)) next.add(key)
-    }
-    selected.value = next
-  },
-)
 </script>
-
-<style scoped>
-.skill-row-danger {
-  color: var(--forebrain-danger);
-}
-</style>

@@ -460,19 +460,23 @@ func cloneSummary(sum Summary) Summary {
 }
 
 type RosterRow struct {
-	ID             string `json:"id"`
-	Kind           string `json:"kind"`
-	ParentID       string `json:"parent_id,omitempty"`
-	Label          string `json:"label"`
-	Status         string `json:"status"`
-	Title          string `json:"title,omitempty"`
-	Task           string `json:"task,omitempty"`
-	SessionID      string `json:"session_id,omitempty"`
-	RunID          string `json:"run_id,omitempty"`
-	ElapsedSeconds int    `json:"elapsed_seconds,omitempty"`
-	TokenCount     int    `json:"token_count,omitempty"`
-	ToolCount      int    `json:"tool_count,omitempty"`
-	FileCount      int    `json:"file_count,omitempty"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	ParentID  string `json:"parent_id,omitempty"`
+	Label     string `json:"label"`
+	Status    string `json:"status"`
+	Title     string `json:"title,omitempty"`
+	Task      string `json:"task,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	// ParentSessionID is the conversation a subagent ran in — its dispatcher's
+	// session, which is what a roster row's "所在会话" column names. A primary
+	// agent has no parent and leaves it empty.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	RunID           string `json:"run_id,omitempty"`
+	ElapsedSeconds  int    `json:"elapsed_seconds,omitempty"`
+	TokenCount      int    `json:"token_count,omitempty"`
+	ToolCount       int    `json:"tool_count,omitempty"`
+	FileCount       int    `json:"file_count,omitempty"`
 }
 
 type Roster struct {

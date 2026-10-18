@@ -35,7 +35,7 @@
               <BadgeComponent v-if="v.v === state.current" variant="success">{{ t('workshop.current') }}</BadgeComponent>
               <button v-if="v.v > 1" type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="emit('compare', { from: `v${prev(v.v)}`, to: `v${v.v}` })">{{ t('workshop.compare') }}</button>
               <button v-if="v.v !== state.current" type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable || busy" @click="askRestore(v.v)">{{ t('workshop.restoreAsDraft') }}</button>
-              <button type="button" class="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]" :title="t('workshop.downloadVersion', { v: v.v })" @click="downloadVersion(v.v)">
+              <button type="button" class="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--forebrain-text-2)] hover:bg-[var(--forebrain-input-hover-bg)]" v-tip:top="t('workshop.downloadVersion', { v: v.v })" @click="downloadVersion(v.v)">
                 <Download class="h-3.5 w-3.5" aria-hidden="true" />
               </button>
             </span>

@@ -48,16 +48,6 @@
     </section>
 
     <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
-      <h2 class="text-[15px] font-medium">PageTopRow 页面首行</h2>
-      <PageTopRow title="技能" description="本主代理能使用的全部技能。">
-        <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs">在线安装</button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs">刷新</button>
-        </template>
-      </PageTopRow>
-    </section>
-
-    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
       <h2 class="text-[15px] font-medium">ForebrainModal 弹窗</h2>
       <div class="flex flex-wrap gap-2">
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="modalSmOpen = true">小弹窗 sm</button>
@@ -111,6 +101,108 @@
         @cancel="typedOpen = false"
       />
     </section>
+
+    <section class="space-y-3 rounded-lg border border-[var(--forebrain-divider)] p-4">
+      <h2 class="text-[15px] font-medium">列表与表单（plan 071）</h2>
+      <p class="text-[12px] text-[var(--forebrain-text-2)]">
+        表格 + 上方工具栏 + 下方说明 + 分页器；行操作为同尺寸图标按钮（悬停出紧凑提示），可排序列在表头排序。
+      </p>
+
+      <ListToolbar>
+        <template #left>
+          <input v-model="search" class="forebrain-field h-[34px] w-[240px]" placeholder="搜索名称" />
+        </template>
+        <template #actions>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="drawerOpen = true">查看入参</button>
+          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" @click="drawerOpen = true">添加 MCP 服务</button>
+        </template>
+      </ListToolbar>
+
+      <table class="forebrain-table forebrain-table--fixed w-full">
+        <thead>
+          <tr>
+            <SortHeader
+              label="名称"
+              sort-key="name"
+              first="asc"
+              :active="sort === 'name'"
+              :order="order"
+              class="w-[38%]"
+              @sort="onSort"
+            />
+            <SortHeader
+              label="更新时间"
+              sort-key="updated"
+              first="desc"
+              :active="sort === 'updated'"
+              :order="order"
+              class="w-[30%]"
+              @sort="onSort"
+            />
+            <th class="text-right">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in galleryRows" :key="row.name">
+            <td>
+              <span v-tip.trunc="row.name" class="forebrain-cell-1">{{ row.name }}</span>
+            </td>
+            <td class="forebrain-num">{{ row.updated }}</td>
+            <td>
+              <RowActions>
+                <RowAction :icon="Eye" label="查看" :name="row.name" @click="drawerOpen = true" />
+                <RowAction :icon="Pencil" label="编辑" :name="row.name" />
+                <RowAction v-if="row.removable" :icon="Trash2" label="删除" :name="row.name" tone="danger" />
+                <RowActionSlot v-else />
+              </RowActions>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <ListNote>共 3 条示例；翻页、排序与搜索都由服务端完成（q / sort / order / page / page_size）。</ListNote>
+
+      <TablePager
+        :total="196"
+        :page="page"
+        :page-size="pageSize"
+        @update:page="page = $event"
+        @update:page-size="pageSize = $event"
+      />
+
+      <div class="grid gap-5 border-t border-[var(--forebrain-divider)] pt-4">
+        <RadioField
+          v-model="density"
+          label="列表密度"
+          name="density"
+          :options="densityOptions"
+          :hint="`当前：${density}，一行的高度随之变化`"
+        />
+        <RadioField
+          v-model="brand"
+          label="品牌色"
+          name="brand"
+          vertical
+          :options="brandOptions"
+          hint="竖排用于每个选项都带说明；色块显示选项本身的颜色"
+        />
+      </div>
+    </section>
+
+    <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="drawerOpen = true">打开抽屉（只读）</button>
+    <ForebrainDrawer :open="drawerOpen" title="MCP 服务 · github" readonly @close="drawerOpen = false">
+      <label class="forebrain-form-field">
+        <span>名称</span>
+        <input class="forebrain-field h-[34px]" value="github" readonly />
+      </label>
+      <label class="forebrain-form-field">
+        <span>命令</span>
+        <input class="forebrain-field h-[34px]" value="npx -y @modelcontextprotocol/server-github" readonly />
+      </label>
+      <template #footer>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="drawerOpen = false">取消</button>
+      </template>
+    </ForebrainDrawer>
   </main>
 </template>
 
@@ -120,14 +212,23 @@
  * of them is visible here without going through a product page. It is not part
  * of the built UI (nothing links to it and it is not a build entry).
  */
+import { Eye, Pencil, Trash2 } from 'lucide-vue-next'
 import { ref } from 'vue'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import CardComponent from '@/components/common/CardComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RadioField from '@/components/common/RadioField.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActionSlot from '@/components/common/RowActionSlot.vue'
+import RowActions from '@/components/common/RowActions.vue'
 import ScopeBadge from '@/components/common/ScopeBadge.vue'
+import SortHeader from '@/components/common/SortHeader.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
+import TablePager from '@/components/common/TablePager.vue'
 
 const off = ref(false)
 const on = ref(true)
@@ -137,4 +238,41 @@ const modalMdOpen = ref(false)
 const modalXlOpen = ref(false)
 const confirmOpen = ref(false)
 const typedOpen = ref(false)
+
+// The list and form pieces (plan 071): a three-column table with a cut-off
+// name, a row without its delete action keeping the 28px hole, and the pager
+// the product pages will use — 196 items, so the page numbers elide the way
+// they do in a long list.
+const search = ref('')
+const sort = ref('updated')
+const order = ref<'asc' | 'desc'>('desc')
+const page = ref(10)
+const pageSize = ref(10)
+const drawerOpen = ref(false)
+const density = ref('standard')
+const brand = ref('teal')
+
+const galleryRows = [
+  { name: 'github', updated: '2026-10-18 09:12', removable: true },
+  { name: 'playwright', updated: '2026-10-17 21:40', removable: true },
+  { name: 'a very long server name that does not fit in its column and ends in an ellipsis', updated: '2026-10-16 08:03', removable: false },
+]
+
+const densityOptions = [
+  { value: 'compact', label: '紧凑' },
+  { value: 'standard', label: '标准' },
+  { value: 'loose', label: '宽松' },
+]
+
+const brandOptions = [
+  { value: 'teal', label: '青', swatch: '#0D91B0', description: '默认品牌色，用于主按钮与当前项' },
+  { value: 'ink', label: '墨', swatch: '#101828', description: '深色品牌，用于强调说明文字' },
+  { value: 'mint', label: '薄荷', swatch: '#6CE6E8', description: '运行中状态的颜色' },
+]
+
+/** The headers only announce what a server-paged table would be asked for. */
+function onSort(key: string, next: 'asc' | 'desc') {
+  sort.value = key
+  order.value = next
+}
 </script>

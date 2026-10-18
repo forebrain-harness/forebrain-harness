@@ -1,9 +1,14 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { config, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import WorkspaceTree from './WorkspaceTree.vue'
 import { useWorkspaceTree } from '@/composables/useWorkspaceTree'
 import { forebrainApi, type WorkspaceTreeNode } from '@/lib/api'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 const scope = { sessionId: 's1' }
 

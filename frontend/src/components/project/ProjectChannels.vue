@@ -1,52 +1,111 @@
 <template>
-  <div class="w-full">
-    <PageTopRow :title="t('channels.title')" :description="t('channels.description')">
+  <div class="mx-auto max-w-4xl space-y-4">
+    <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+    <p v-if="notice" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
+
+    <ListToolbar>
+      <template #left>
+        <input
+          v-model="q"
+          type="search"
+          :placeholder="t('channels.searchPlaceholder')"
+          class="forebrain-field h-[34px]"
+          style="max-width: 240px"
+          data-testid="channels-search"
+        />
+      </template>
       <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-          {{ t('common.refresh') }}
-        </button>
-        <button
-          type="button"
-          class="forebrain-btn forebrain-btn-primary text-xs"
-          :disabled="saving || !dirty"
-          data-testid="channels-save"
-          @click="save"
-        >
-          {{ t('common.save') }}
+        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="channels-refresh" @click="reload()">
+          <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
         </button>
       </template>
-    </PageTopRow>
+    </ListToolbar>
 
-    <p class="mb-3 text-[12px] text-[var(--forebrain-muted-text)]">{{ t('channels.secretNotice') }}</p>
-    <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-    <p v-if="notice" class="mb-4 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3 text-sm text-[var(--forebrain-text)]">{{ notice }}</p>
+    <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+    <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">
+      {{ t('common.empty') }}
+    </div>
+    <div v-else class="forebrain-table-wrap">
+      <table class="forebrain-table forebrain-table--fixed">
+        <colgroup>
+          <col style="width: 130px" />
+          <col style="width: 230px" />
+          <col />
+          <col style="width: 56px" />
+          <col style="width: 56px" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>{{ t('channels.colChannel') }}</th>
+            <th>{{ t('channels.colIdentity') }}</th>
+            <th>{{ t('channels.colConfig') }}</th>
+            <th>{{ t('channels.enabled') }}</th>
+            <th class="text-right">{{ t('projects.colActions') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in rows" :key="row.kind" :data-channel-row="row.kind">
+            <td>
+              <span class="forebrain-cell-1 font-medium" v-tip:top.trunc="channelLabel(row.kind)">{{ channelLabel(row.kind) }}</span>
+            </td>
+            <!-- The identity a scheduled task delivers to is the channel kind
+                 itself; a channel nobody filled in has none yet. -->
+            <td>
+              <span
+                v-if="row.configured"
+                class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]"
+                v-tip:top.trunc="row.kind"
+              >{{ row.kind }}</span>
+              <span v-else class="text-[var(--forebrain-muted-text)]">—</span>
+            </td>
+            <td>
+              <span v-if="!row.configured" class="text-[var(--forebrain-muted-text)]">{{ t('channels.unconfigured') }}</span>
+              <span v-else class="forebrain-cell-1">
+                <template v-for="(part, index) in summaryOf(row)" :key="part.key">
+                  <span v-if="index" class="text-[var(--forebrain-muted-text)]"> · </span>{{ part.key }}
+                  <span class="font-mono text-[var(--forebrain-text-2)]">{{ part.value }}</span>
+                </template>
+              </span>
+            </td>
+            <td>
+              <!-- A channel that holds no configuration cannot be switched on:
+                 there is nothing behind the switch yet. -->
+              <span :data-testid="`channel-switch-${row.kind}`" v-tip:top="row.configured ? '' : t('channels.configureFirst')" class="inline-flex">
+                <SwitchComponent
+                  :model-value="row.enabled"
+                  :disabled="!row.configured || busy"
+                  :aria-label="t('channels.switchLabel', { name: channelLabel(row.kind) })"
+                  :data-testid="`channel-toggle-${row.kind}`"
+                  @update:model-value="setEnabled(row, $event)"
+                />
+              </span>
+            </td>
+            <td class="text-right">
+              <RowActions>
+                <RowAction
+                  :icon="Pencil"
+                  :label="t('common.edit')"
+                  :name="channelLabel(row.kind)"
+                  :data-testid="`channel-edit-${row.kind}`"
+                  @click="editing = row"
+                />
+              </RowActions>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
-    <div v-if="loading && !kinds.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-    <ul v-else class="space-y-2">
-      <li
-        v-for="kind in kinds"
-        :key="kind"
-        class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-4 py-3"
-      >
-        <div class="flex items-center justify-between gap-3">
-          <span class="font-mono text-[13px] text-[var(--forebrain-text)]">{{ kind }}</span>
-          <label class="flex items-center gap-2 text-[12px] text-[var(--forebrain-text-2)]">
-            {{ t('channels.enabled') }}
-            <SwitchComponent :model-value="isEnabled(kind)" @update:model-value="setEnabled(kind, $event)" />
-          </label>
-        </div>
-        <div v-if="isEnabled(kind)" class="mt-2 grid gap-2 sm:grid-cols-2">
-          <label v-for="field in fieldsOf(kind)" :key="field" class="block">
-            <span class="mb-1 block text-[11px] text-[var(--forebrain-muted-text)]">{{ field }}</span>
-            <input
-              class="forebrain-field w-full font-mono"
-              :value="fieldValue(kind, field)"
-              @input="setField(kind, field, ($event.target as HTMLInputElement).value)"
-            />
-          </label>
-        </div>
-      </li>
-    </ul>
+    <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+    <ListNote>{{ t('channels.projectNote') }}</ListNote>
+
+    <ChannelEditDialog
+      v-if="editing"
+      :project-id="projectId"
+      :row="editing"
+      @cancel="editing = null"
+      @saved="onSaved"
+    />
   </div>
 </template>
 
@@ -57,81 +116,85 @@
  * named in the breadcrumb and to no other: the same bot cannot be configured
  * for two projects.
  *
- * Secrets come back masked. Leaving a masked field untouched keeps the value
- * already stored; typing over it replaces that value.
+ * The table is the server's (plan 075): the search and the page are applied
+ * there, the 配置 column says in the channel's own keys what was filled in, and
+ * a secret shows the hint the server hands back. There is no page-level save —
+ * the switch and the editor each write on their own, and both write the whole
+ * channel map, because a PUT that drops a kind clears it.
  */
-import { onMounted, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { computed, onMounted, ref } from 'vue'
+import { Pencil, RotateCw } from 'lucide-vue-next'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
-import { getErrorMessage, forebrainApi } from '@/lib/api'
+import TablePager from '@/components/common/TablePager.vue'
+import ChannelEditDialog from '@/components/project/ChannelEditDialog.vue'
+import { useServerList } from '@/composables/useServerList'
+import { forebrainApi, getErrorMessage, type ProjectChannelRow } from '@/lib/api'
+import { channelLabel } from '@/lib/channelLabels'
 import { useI18n } from '@/locales'
-
-type ChannelMap = Record<string, Record<string, unknown>>
 
 const props = defineProps<{ project: unknown; projectId: string }>()
 
 const { t } = useI18n()
-const channels = ref<ChannelMap>({})
-const kinds = ref<string[]>([])
-const loading = ref(false)
-const saving = ref(false)
-const dirty = ref(false)
-const error = ref('')
+
+const { rows, total, page, pageSize, q, loading, error: listError, reload } = useServerList<ProjectChannelRow>(
+  (query) => forebrainApi.projectChannelsPage(props.projectId, query),
+  { pageSize: 10 },
+)
+
+const writeError = ref('')
+const error = computed(() => listError.value || writeError.value)
 const notice = ref('')
+const busy = ref(false)
+/** The row whose editor is open; a kind, never a position. */
+const editing = ref<ProjectChannelRow | null>(null)
 
-function fieldsOf(kind: string): string[] {
-  return Object.keys(channels.value[kind] ?? {}).filter((field) => field !== 'enabled').sort()
+/** One non-empty field of a configured channel: its own key and what it holds.
+ * A secret shows the hint the server sent instead of a value nobody has. */
+function summaryOf(row: ProjectChannelRow): Array<{ key: string; value: string }> {
+  return Object.keys(row.fields)
+    .filter((key) => key !== 'enabled')
+    .sort()
+    .filter((key) => String(row.fields[key] ?? '').trim() !== '')
+    .map((key) => ({
+      key,
+      value: row.secretKeys.includes(key) ? (row.secretHints[key] || String(row.fields[key] ?? '')) : String(row.fields[key] ?? ''),
+    }))
 }
 
-function isEnabled(kind: string): boolean {
-  return Boolean((channels.value[kind] ?? {}).enabled)
-}
-
-function setEnabled(kind: string, value: boolean) {
-  channels.value = { ...channels.value, [kind]: { ...(channels.value[kind] ?? {}), enabled: value } }
-  dirty.value = true
-}
-
-function fieldValue(kind: string, field: string): string {
-  const raw = (channels.value[kind] ?? {})[field]
-  return raw == null ? '' : String(raw)
-}
-
-function setField(kind: string, field: string, value: string) {
-  channels.value = { ...channels.value, [kind]: { ...(channels.value[kind] ?? {}), [field]: value } }
-  dirty.value = true
-}
-
-async function load() {
-  loading.value = true
-  error.value = ''
+// The switch writes at once: the whole map goes back — the PUT clears the kinds
+// a page drops — with only this kind's `enabled` moved, so every other channel
+// and every stored secret stays exactly as the server handed them over.
+async function setEnabled(row: ProjectChannelRow, value: boolean) {
+  if (!row.configured || busy.value) return
+  busy.value = true
+  writeError.value = ''
   notice.value = ''
   try {
-    const res = await forebrainApi.projectChannels(props.projectId)
-    channels.value = (res.channels ?? {}) as ChannelMap
-    kinds.value = Array.isArray(res.kinds) && res.kinds.length ? res.kinds : Object.keys(channels.value).sort()
-    dirty.value = false
-  } catch (e) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
-  }
-}
-
-async function save() {
-  saving.value = true
-  error.value = ''
-  notice.value = ''
-  try {
-    await forebrainApi.saveProjectChannels(props.projectId, channels.value)
+    const raw = await forebrainApi.projectChannelsRaw(props.projectId)
+    const channels: Record<string, Record<string, unknown>> = { ...raw.channels }
+    channels[row.kind] = { ...(channels[row.kind] ?? {}), enabled: value }
+    await forebrainApi.saveProjectChannels(props.projectId, channels)
     notice.value = t('channels.saved')
-    await load()
-  } catch (e) {
-    error.value = getErrorMessage(e)
+    await reload()
+  } catch (e: unknown) {
+    writeError.value = getErrorMessage(e)
   } finally {
-    saving.value = false
+    busy.value = false
   }
 }
 
-onMounted(load)
+/** The editor wrote the kind it owns; the table behind it is now stale. */
+async function onSaved() {
+  editing.value = null
+  notice.value = t('channels.saved')
+  await reload()
+}
+
+onMounted(() => {
+  void reload()
+})
 </script>

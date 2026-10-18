@@ -14,7 +14,7 @@
         <button v-if="base" type="button" class="forebrain-btn forebrain-btn-ghost ml-1 text-xs" @click="emit('compare', { from: `v${base}`, to: 'draft' })">{{ t('workshop.compare') }}</button>
       </div>
     </div>
-    <span class="block truncate font-mono text-[11px] text-[var(--forebrain-muted-text)]" :title="draftDir">{{ draftDir }}</span>
+    <span class="block truncate font-mono text-[11px] text-[var(--forebrain-muted-text)]" v-tip:top.trunc="draftDir">{{ draftDir }}</span>
   </div>
 </template>
 

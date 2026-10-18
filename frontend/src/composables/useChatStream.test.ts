@@ -2,6 +2,7 @@ import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest'
 
 import { setLocale, t } from '@/locales'
 import { forebrainApi } from '@/lib/api'
+import { lastSessionIdValue, persistLastSessionId } from '@/composables/useLastSession'
 import {
   applyAssistantRunEventMetadata,
   applyCompactionUpdate,
@@ -346,6 +347,25 @@ describe('useChatStream helpers', () => {
       chatMessagesSpy.mockRestore()
       sessionModeSpy.mockRestore()
     }
+  })
+
+  it('takes a conversation off the screen without forgetting it', () => {
+    // A new chat is the page itself: the thread and the session id go, but the
+    // conversation the browser remembers stays, because the new-chat page
+    // preselects its project (plan 029 / plan 072).
+    const stream = useChatStream()
+    stream.switchToSession('left-behind')
+    expect(lastSessionIdValue()).toBe('left-behind')
+    stream.messages.value = [{ id: 'u1', role: 'user', content: 'old question' }]
+    stream.isStreaming.value = true
+
+    stream.resetForNewChat()
+
+    expect(stream.sessionId.value).toBeNull()
+    expect(stream.messages.value).toEqual([])
+    expect(stream.isStreaming.value).toBe(false)
+    expect(lastSessionIdValue()).toBe('left-behind')
+    persistLastSessionId(null)
   })
 
   it('resets and completes a websocket send when slash switches session', async () => {

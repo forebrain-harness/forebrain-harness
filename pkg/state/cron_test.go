@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -253,6 +254,59 @@ func TestOpenFireQueriesFindOnlyThisTenantsOpenFires(t *testing.T) {
 	}
 	if got, err := store.LatestOpenFire(ctx, "job-1"); err != nil || got != nil {
 		t.Fatalf("latest open fire after closing = %v (%v)", got, err)
+	}
+}
+
+// TestListRunsPageCountsAndPagesOneJobsFires pins the run-history table's read:
+// the fires come back in the order a person reads history (newest first), one
+// page at a time, with the job's whole count beside the page, and a page past the
+// end lands on the last one instead of an empty table.
+func TestListRunsPageCountsAndPagesOneJobsFires(t *testing.T) {
+	ctx := context.Background()
+	store := &CronStore{DB: openSessionDB(t)}
+	for i, startedAt := range []int64{100, 200, 300, 400, 500} {
+		_, err := store.StartRun(ctx, CronRun{
+			JobID:     "job-1",
+			AgentID:   "main",
+			SessionID: fmt.Sprintf("cron-job-1-%d", i),
+			Trigger:   "schedule",
+			StartedAt: startedAt,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Another job's fires are not this job's history.
+	if _, err := store.StartRun(ctx, CronRun{JobID: "job-2", AgentID: "main", SessionID: "cron-job-2-0", Trigger: "schedule", StartedAt: 900}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, total, err := store.ListRunsPage(ctx, "job-1", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 5 {
+		t.Fatalf("total = %d, want the job's five fires", total)
+	}
+	if len(first) != 2 || first[0].StartedAt != 500 || first[1].StartedAt != 400 {
+		t.Fatalf("first page = %+v, want the two newest fires", first)
+	}
+
+	second, _, err := store.ListRunsPage(ctx, "job-1", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 2 || second[0].StartedAt != 300 || second[1].StartedAt != 200 {
+		t.Fatalf("second page = %+v, want the middle two fires", second)
+	}
+
+	// A window past the end reads the last page rather than nothing.
+	last, _, err := store.ListRunsPage(ctx, "job-1", 2, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 1 || last[0].StartedAt != 100 {
+		t.Fatalf("page past the end = %+v, want the oldest fire", last)
 	}
 }
 

@@ -588,6 +588,74 @@ func TestConversationListsHideSessionsWithoutAMessage(t *testing.T) {
 	})
 }
 
+// TestConversationCountsByProjectCountsOnlyConversationsWithMessages pins the
+// count a project table draws per row: it is the same predicate
+// ListSessionsForProject lists by, so a row that never said anything and a
+// scheduled task's fire are not conversations, and a project with none is
+// simply absent from the answer.
+func TestConversationCountsByProjectCountsOnlyConversationsWithMessages(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	projects := NewProjectStore(db, "main")
+	talked, err := projects.Create(ctx, CreateProjectInput{Name: "talked", Root: "/tmp/count-talked"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet, err := projects.Create(ctx, CreateProjectInput{Name: "quiet", Root: "/tmp/count-quiet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"c1", "c2", "c-shell", "c-fire"} {
+		if err := store.Ensure(ctx, id, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := projects.BindSession(ctx, id, talked.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"c1", "c2", "c-fire"} {
+		if _, err := store.Append(ctx, id, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A scheduled task's fire holds messages, but its project's sessions tab
+	// reaches it through the task, not the conversation list.
+	if err := store.SetSessionSource(ctx, "c-fire", SessionSourceCron); err != nil {
+		t.Fatal(err)
+	}
+	// A workshop task is the primary agent's own, never a project's.
+	if err := store.Ensure(ctx, "workshop-1", "workshop-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(ctx, "workshop-1", "user", "make a skill"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSessionSource(ctx, "workshop-1", SessionSourceWorkshop); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := store.ConversationCountsByProject(ctx, []string{talked.ID, quiet.ID, "no-such-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := counts[talked.ID]; got != 2 {
+		t.Fatalf("count = %d, want the project's 2 conversations: %v", got, counts)
+	}
+	for _, id := range []string{quiet.ID, "no-such-project"} {
+		if got, seen := counts[id]; seen {
+			t.Fatalf("project with no conversation must be absent, got %d for %q", got, id)
+		}
+	}
+	empty, err := store.ConversationCountsByProject(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("no project ids must count nothing, got %v", empty)
+	}
+}
+
 // TestSubagentSessionsAreBornHiddenFromEveryList pins what a subagent's
 // worker session is at birth: a private conversation of one subagent, whose
 // row carries its conversation's id in parent_session_id and source
@@ -680,6 +748,155 @@ func TestProjectSessionListListsOnlyConversations(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "talk" {
 		t.Fatalf("project session list = %+v, want only the conversation", got)
+	}
+}
+
+// TestListSessionsForProjectPageSortsCountsAndSearches pins the project
+// conversation table: the rows the old list gives, searched by title, ordered by
+// the time the table asked for, each carrying its own model if it pinned one and
+// the number of messages a person actually exchanged in it.
+func TestListSessionsForProjectPageSortsCountsAndSearches(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	projects := NewProjectStore(db, "main")
+	sessions := NewSessionStore(db, "main")
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "proj", Root: "/tmp/proj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "talked" is the newer conversation by update time and the older one by
+	// creation time, so the two orders must differ.
+	for _, ids := range []string{"talked", "quiet-then-loud"} {
+		if err := sessions.Ensure(ctx, ids, ids); err != nil {
+			t.Fatal(err)
+		}
+		if err := projects.BindSession(ctx, ids, p.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed := func(sessionID, role, visibility, content string) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO fb_messages(session_id, role, visibility, content, created_at) VALUES(?,?,?,?,?)`,
+			sessionID, role, visibility, content, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("talked", "user", "visible", "hello")
+	seed("talked", "assistant", "visible", "hi there")
+	// Work, not conversation: neither tool nor reasoning rows are messages a
+	// person exchanged.
+	seed("talked", "tool", "visible", "a tool result")
+	seed("talked", "reasoning", "visible", "thinking")
+	// A hidden row is not shown in the transcript either, so it is not counted.
+	seed("talked", "user", "withdrawn", "never mind")
+	seed("quiet-then-loud", "user", "visible", "the only thing said")
+	if _, err := sessions.SaveSessionModelSelection(ctx, "talked", SessionModelSelection{Provider: "anthropic", Model: "claude-sonnet-4"}); err != nil {
+		t.Fatal(err)
+	}
+	for id, times := range map[string][2]int64{
+		"talked":          {100, 300},
+		"quiet-then-loud": {200, 200},
+	} {
+		if _, err := db.Exec(`UPDATE fb_sessions SET created_at = ?, updated_at = ? WHERE id = ?`, times[0], times[1], id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids := func(rows []ProjectSessionRow) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+
+	newestFirst, total, err := sessions.ListSessionsForProjectPage(ctx, p.ID, ProjectSessionsQuery{Desc: true}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want both conversations", total)
+	}
+	if got := ids(newestFirst); !slices.Equal(got, []string{"talked", "quiet-then-loud"}) {
+		t.Fatalf("default order = %v, want newest update first", got)
+	}
+	byID := map[string]ProjectSessionRow{}
+	for _, row := range newestFirst {
+		byID[row.ID] = row
+	}
+	if talked := byID["talked"]; talked.MessageCount != 2 {
+		t.Fatalf("message count = %d, want the two visible user/assistant rows", talked.MessageCount)
+	}
+	if talked := byID["talked"]; talked.Model != "claude-sonnet-4" {
+		t.Fatalf("model = %q, want the session's own choice", talked.Model)
+	}
+	if pinned := byID["quiet-then-loud"]; pinned.Model != "" {
+		t.Fatalf("a session that never pinned a model reports %q", pinned.Model)
+	}
+	if pinned := byID["quiet-then-loud"]; pinned.MessageCount != 1 {
+		t.Fatalf("message count = %d, want the one visible user row", pinned.MessageCount)
+	}
+
+	byCreated, _, err := sessions.ListSessionsForProjectPage(ctx, p.ID, ProjectSessionsQuery{Sort: "created", Desc: true}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(byCreated); !slices.Equal(got, []string{"quiet-then-loud", "talked"}) {
+		t.Fatalf("order by creation time = %v, want the newer row first", got)
+	}
+
+	// The search box narrows the list, and the total is the count of matches.
+	found, total, err := sessions.ListSessionsForProjectPage(ctx, p.ID, ProjectSessionsQuery{Search: "loud"}, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(found); !slices.Equal(got, []string{"quiet-then-loud"}) || total != 1 {
+		t.Fatalf("search = %v (total %d), want only the matching conversation", got, total)
+	}
+
+	// A page past the end reads the last page rather than an empty one.
+	last, _, err := sessions.ListSessionsForProjectPage(ctx, p.ID, ProjectSessionsQuery{Desc: true}, 1, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(last); !slices.Equal(got, []string{"quiet-then-loud"}) {
+		t.Fatalf("page past the end = %v, want the last page", got)
+	}
+
+	// Counting messages must ride the session's own index, never read the whole
+	// message table: the column is drawn for every row of every page.
+	query, args := sessions.projectSessionsPageSQL(p.ID, ProjectSessionsQuery{Desc: true}, 10, 0)
+	planRows, err := db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer planRows.Close()
+	var plan []string
+	for planRows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := planRows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := planRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	searchedCount := false
+	for _, detail := range plan {
+		parts := strings.Fields(detail)
+		if len(parts) >= 2 && parts[0] == "SCAN" && (parts[1] == "m" || parts[1] == "fb_messages") {
+			t.Fatalf("the message count reads the whole table: %q\nplan: %v", detail, plan)
+		}
+		// The count is the subquery that also narrows on visibility; the bare
+		// EXISTS beside it only narrows on the session.
+		if strings.Contains(detail, "idx_fb_messages_session_visibility") && strings.Contains(detail, "visibility=?") {
+			searchedCount = true
+		}
+	}
+	if !searchedCount {
+		t.Fatalf("the message count does not narrow on idx_fb_messages_session_visibility: %v", plan)
 	}
 }
 

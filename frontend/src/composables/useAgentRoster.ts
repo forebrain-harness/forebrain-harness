@@ -8,6 +8,14 @@ export function agentRosterViewTarget(row: AgentRosterRow): RouteLocationRaw | n
   return { path: '/', query: { session: sessionId } }
 }
 
+/** The conversation a row ran in: a subagent's parent conversation, or the
+ * row's own session for a primary agent. */
+export function agentRosterConversationTarget(row: AgentRosterRow): RouteLocationRaw | null {
+  const sessionId = String(row.parentSessionId ?? row.sessionId ?? '').trim()
+  if (!sessionId) return null
+  return { path: '/', query: { session: sessionId } }
+}
+
 export function useAgentRoster() {
   const records = ref<AgentRosterRow[]>([])
   const loading = ref(false)

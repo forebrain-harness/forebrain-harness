@@ -1,9 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { config, flushPromises, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import { decideLspRecommendation, lspSnapshot, type LspSnapshot } from '@/lib/api'
 import { setLocale } from '@/locales'
 import LspRecommendationCard from './LspRecommendationCard.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()

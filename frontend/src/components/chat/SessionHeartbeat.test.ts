@@ -1,11 +1,16 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { config, flushPromises, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import SessionHeartbeat from './SessionHeartbeat.vue'
 import { resetTenantScope } from '@/composables/useTenantScope'
 import { forebrainApi, type HeartbeatRecord } from '@/lib/api'
 import { setLocale } from '@/locales'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 function beat(sessionId: string, extra: Partial<HeartbeatRecord> = {}): HeartbeatRecord {
   return { sessionId, intervalSeconds: 600, prompt: 'anything new?', paused: false, ...extra }

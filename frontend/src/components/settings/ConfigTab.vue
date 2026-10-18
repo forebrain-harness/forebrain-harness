@@ -1,17 +1,25 @@
 <template>
-  <div class="pb-6">
-    <PageTopRow :title="'forebrain.yaml'" :description="t('config.description')">
-      <template #actions>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">{{ t('common.refresh') }}</button>
-        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" data-testid="config-apply" @click="save">{{ t('config.apply') }}</button>
+  <div class="flex flex-col gap-4 pb-6">
+    <ListToolbar>
+      <template #left>
+        <span class="font-mono text-[12px] text-[var(--forebrain-muted-text)]" data-testid="config-path">{{ path }}</span>
       </template>
-    </PageTopRow>
+      <template #actions>
+        <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="saving || !dirty" data-testid="config-apply" @click="save">
+          {{ saving ? t('common.loading') : t('config.apply') }}
+        </button>
+        <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" data-testid="config-refresh" @click="load">
+          <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
+        </button>
+      </template>
+    </ListToolbar>
 
-    <p class="mb-3 font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ path }}</p>
-    <p v-if="error" class="mb-4 whitespace-pre-wrap rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-    <p v-if="notice" class="mb-4 text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
+    <p v-if="error" class="whitespace-pre-wrap rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+    <p v-if="notice" class="text-[12px] text-[var(--forebrain-brand-1)]">{{ notice }}</p>
 
     <FileEditor :key="editorKey" :path="path || 'forebrain.yaml'" v-model="yaml" @dirty="dirty = $event" />
+
+    <ListNote data-testid="config-note">{{ t('config.description') }}</ListNote>
   </div>
 </template>
 
@@ -21,9 +29,14 @@
  * written, so a mistake is reported here rather than at the next start; the
  * running process picks up the change immediately. The editor is the shared
  * FileEditor in code mode — YAML is not Markdown, so there is no WYSIWYG pane.
+ *
+ * The file's own path sits in the toolbar's left (plan 076), as the prototype
+ * puts it, so the reader knows which file the button below it saves.
  */
 import { defineAsyncComponent, onMounted, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { RotateCw } from 'lucide-vue-next'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
 import { getErrorMessage, forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'
 
@@ -63,8 +76,11 @@ async function save() {
   notice.value = ''
   try {
     await forebrainApi.saveConfigFile(yaml.value)
-    notice.value = t('config.applied')
+    // The reload clears what was said last, so the applied notice is what the
+    // reader is left with once the file on screen is the one just saved.
+    const applied = t('config.applied')
     await load()
+    notice.value = applied
   } catch (e) {
     error.value = getErrorMessage(e)
   } finally {

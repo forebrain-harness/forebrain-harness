@@ -21,11 +21,11 @@
       class="forebrain-agent-tab"
       :class="active === entry.agentId ? 'is-active' : ''"
       :aria-current="active === entry.agentId ? 'page' : undefined"
-      :title="entry.title || entry.agentId"
+      :data-testid="`agent-tab-${entry.agentId}`"
       @click="$emit('select', entry.agentId)"
     >
       <span class="forebrain-agent-dot" :class="dotClass(entry)" />
-      <span class="truncate">{{ tabLabel(entry) }}</span>
+      <span class="truncate" v-tip:top.trunc="entry.title || entry.agentId">{{ tabLabel(entry) }}</span>
       <span
         v-if="unseen(entry)"
         class="forebrain-agent-badge"

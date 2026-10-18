@@ -14421,6 +14421,100 @@ func TestQuestionOverlayDescriptionRendering(t *testing.T) {
 	}
 }
 
+func TestQuestionOverlayDescriptionNotTruncated(t *testing.T) {
+	// 300 CJK cells: comfortably past the old 200-cell cap.
+	description := strings.Repeat("说明文字", 75)
+	if strings.Contains(description, "...") {
+		t.Fatal("test fixture must not itself contain an ellipsis")
+	}
+	if w := displayLineWidth(description); w <= 200 {
+		t.Fatalf("fixture must exceed the former 200-cell cap: %d", w)
+	}
+	form := sampleForm()
+	form.Questions[0].Options[0].Description = description
+
+	o := newTestOverlay(form)
+	buf := o.out.(*bytes.Buffer)
+	o.render()
+	if !strings.Contains(buf.String(), description) {
+		t.Fatalf("non-viewport render truncated the description:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "...") {
+		t.Fatalf("render still emits an ellipsis:\n%s", buf.String())
+	}
+}
+
+func TestQuestionOverlayDescriptionSoftWrapsInFullAtViewportWidth(t *testing.T) {
+	forcedTermWidth = 44
+	forcedTermHeight = 200
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+
+	description := strings.Repeat("说明文字", 75)
+	form := sampleForm()
+	form.Questions[0].Options[0].Description = description
+
+	var out bytes.Buffer
+	r := NewRenderer(&out, &out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	o := newTestOverlay(form)
+	o.out = &out
+	o.rs = newRawSelector(nil, r)
+	o.render()
+
+	lines := r.vpLastComposer.lines
+	for i, line := range lines {
+		if got := displayLineWidth(line); got > forcedTermWidth-viewportRightPadding {
+			t.Fatalf("overlay row %d exceeds viewport width: got=%d max=%d line=%q", i, got, forcedTermWidth-viewportRightPadding, stripANSI(line))
+		}
+	}
+	plain := strings.Join(strings.Fields(stripANSI(strings.Join(lines, "\n"))), "")
+	if want := strings.Join(strings.Fields(description), ""); !strings.Contains(plain, want) {
+		t.Fatalf("soft-wrapped overlay lost part of the description:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
+func TestQuestionOverlayDescriptionNewlinesKeepIndent(t *testing.T) {
+	form := sampleForm()
+	form.Questions[0].Options[0].Description = "第一行说明\n第二行说明"
+	o := newTestOverlay(form)
+	buf := o.out.(*bytes.Buffer)
+	o.render()
+
+	// idxWidth=1 for the 2-option form (Other is option 3), pad = idxWidth+4.
+	pad := strings.Repeat(" ", 5)
+	sawContinuation := false
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if !strings.Contains(line, "行说明") {
+			continue
+		}
+		if !strings.HasPrefix(line, pad) {
+			t.Fatalf("description line is not indented to the description column: %q", line)
+		}
+		if strings.Contains(line, "第二行") {
+			sawContinuation = true
+		}
+	}
+	if !sawContinuation {
+		t.Fatalf("continuation line missing from render:\n%s", buf.String())
+	}
+}
+
+func TestQuestionOverlayDescriptionCRLFIsNormalized(t *testing.T) {
+	form := sampleForm()
+	form.Questions[0].Options[0].Description = "第一行说明\r\n第二行说明"
+	o := newTestOverlay(form)
+	buf := o.out.(*bytes.Buffer)
+	o.render()
+	if strings.Contains(buf.String(), "\r") {
+		t.Fatalf("render leaked a carriage return:\n%q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "第二行说明") {
+		t.Fatalf("continuation line missing from render:\n%q", buf.String())
+	}
+}
+
 func TestQuestionOverlayLongTextSoftWrapsAtViewportWidthAndReflowsOnResize(t *testing.T) {
 	forcedTermWidth = 44
 	forcedTermHeight = 200

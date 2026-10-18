@@ -1,55 +1,118 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
-    <div class="mx-auto w-full max-w-5xl">
-      <PageTopRow :title="t('projects.title')" :description="t('projects.description')">
+    <div class="mx-auto flex w-full max-w-5xl flex-col gap-4">
+      <p v-if="error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
+
+      <ListToolbar>
+        <template #left>
+          <input
+            v-model="q"
+            type="search"
+            :placeholder="t('projects.searchPlaceholder')"
+            class="forebrain-field h-[34px]"
+            style="max-width: 240px"
+            data-testid="projects-search"
+          />
+        </template>
         <template #actions>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" data-testid="projects-new" @click="openCreate">
-            {{ t('projects.newProject') }}
+          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" data-testid="projects-new" @click="openCreate">
+            <Plus class="size-3.5" aria-hidden="true" />{{ t('projects.newProject') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="loading" @click="load">
-            {{ t('common.refresh') }}
+          <button type="button" class="forebrain-btn forebrain-btn-ghost gap-1.5 text-xs" :disabled="loading" @click="refresh">
+            <RotateCw class="size-3.5" aria-hidden="true" />{{ t('common.refresh') }}
           </button>
         </template>
-      </PageTopRow>
+      </ListToolbar>
 
-      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-
-      <div class="mb-4 flex flex-wrap items-center gap-2">
-        <input
-          v-model="search"
-          :placeholder="t('projects.searchPlaceholder')"
-          class="forebrain-field h-9 flex-1 min-w-40 text-[12px]"
-          @keydown.enter.prevent="load"
-        />
-        <select v-model="sort" class="forebrain-field h-9 w-36 text-[12px]" @change="load">
-          <option value="updated">{{ t('projects.sortUpdated') }}</option>
-          <option value="name">{{ t('projects.sortName') }}</option>
-        </select>
+      <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+      <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('projects.empty') }}</div>
+      <div v-else class="forebrain-table-wrap">
+        <table class="forebrain-table forebrain-table--fixed">
+          <colgroup>
+            <col style="width: 210px" />
+            <col />
+            <col style="width: 200px" />
+            <col style="width: 64px" />
+            <col style="width: 150px" />
+            <col style="width: 112px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <SortHeader
+                :label="t('projects.colName')"
+                sort-key="name"
+                :active="sort === 'name'"
+                :order="order"
+                first="asc"
+                @sort="sortBy"
+              />
+              <th>{{ t('projects.colRoot') }}</th>
+              <th>{{ t('projects.colDesc') }}</th>
+              <th class="text-right">{{ t('projects.colSessions') }}</th>
+              <SortHeader
+                :label="t('projects.colUpdated')"
+                sort-key="updated"
+                :active="sort === 'updated'"
+                :order="order"
+                first="desc"
+                @sort="sortBy"
+              />
+              <th class="text-right">{{ t('projects.colActions') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="project in rows" :key="project.id" :data-project-row="project.name">
+              <td>
+                <div class="flex min-w-0 items-center gap-1.5">
+                  <span v-if="project.icon" class="shrink-0 text-[15px]">{{ project.icon }}</span>
+                  <button
+                    type="button"
+                    class="min-w-0 truncate text-[var(--forebrain-brand-1)] hover:underline"
+                    :data-testid="`project-open-${project.name}`"
+                    @click="openDetail(project.id)"
+                  >
+                    {{ project.name }}
+                  </button>
+                  <BadgeComponent v-if="project.pinned" class="shrink-0">{{ t('projects.pinned') }}</BadgeComponent>
+                  <BadgeComponent v-if="project.trustLevel !== 'trusted'" variant="gray" class="shrink-0">{{ t('projects.untrusted') }}</BadgeComponent>
+                  <BadgeComponent v-if="project.missing" variant="error" class="shrink-0">{{ t('projects.dirMissing') }}</BadgeComponent>
+                  <BadgeComponent v-if="project.memoryScope === 'project_only'" variant="gray" class="shrink-0">{{ t('projects.memoryProjectOnlyBadge') }}</BadgeComponent>
+                </div>
+              </td>
+              <td class="font-mono text-[var(--forebrain-text-2)]">
+                <span class="forebrain-cell-1" v-tip:top.trunc="project.root">{{ project.root }}</span>
+              </td>
+              <td>
+                <span class="forebrain-cell-1" v-tip:top.trunc="project.description">{{ project.description }}</span>
+              </td>
+              <td class="forebrain-num text-right">{{ project.sessionCount ?? 0 }}</td>
+              <td class="text-[var(--forebrain-text-2)]">{{ formatDateTime(project.updatedAt) }}</td>
+              <td class="text-right">
+                <RowActions>
+                  <RowAction :icon="FolderOpen" :label="t('projects.openSpace')" :name="project.name" @click="openDetail(project.id)" />
+                  <RowAction
+                    :icon="project.pinned ? PinOff : Pin"
+                    :label="project.pinned ? t('projects.unpin') : t('projects.pin')"
+                    :name="project.name"
+                    @click="togglePin(project)"
+                  />
+                  <RowAction
+                    :icon="Trash2"
+                    :label="t('common.delete')"
+                    :name="project.name"
+                    tone="danger"
+                    :data-testid="`project-delete-${project.name}`"
+                    @click="askDelete(project)"
+                  />
+                </RowActions>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
-      <div v-if="loading && !projects.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!projects.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('projects.empty') }}</div>
-      <div v-else class="forebrain-list-boxed">
-        <div v-for="project in projects" :key="project.id" class="flex flex-wrap items-start justify-between gap-3 py-3" :data-project-row="project.name">
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <span v-if="project.icon" class="text-[15px]">{{ project.icon }}</span>
-              <span class="text-[13px] font-medium text-[var(--forebrain-text)]">{{ project.name }}</span>
-              <span v-if="project.pinned" class="rounded-full border border-[var(--forebrain-brand-1)] px-2 py-0.5 text-[10px] text-[var(--forebrain-brand-1)]">{{ t('projects.pinned') }}</span>
-              <span v-if="project.memoryScope === 'project_only'" class="rounded-full border border-[var(--forebrain-divider)] px-2 py-0.5 text-[10px] text-[var(--forebrain-muted-text)]">{{ t('projects.memoryProjectOnly') }}</span>
-            </div>
-            <p v-if="project.description" class="mt-1 line-clamp-2 text-[12px] leading-relaxed text-[var(--forebrain-text-2)]">{{ project.description }}</p>
-            <p class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]"><span class="font-mono">{{ project.root }}</span> · {{ t('projects.updatedAt', { time: formatTime(project.updatedAt) }) }}</p>
-          </div>
-          <div class="flex shrink-0 flex-wrap items-center gap-1">
-            <button type="button" class="forebrain-btn forebrain-btn-primary h-7 px-2 text-[11px]" @click="openDetail(project.id)">{{ t('projects.open') }}</button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" @click="togglePin(project)">
-              {{ project.pinned ? t('projects.unpin') : t('projects.pin') }}
-            </button>
-            <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px] text-[var(--forebrain-danger)]" :data-testid="`project-delete-${project.name}`" @click="askDelete(project)">{{ t('common.delete') }}</button>
-          </div>
-        </div>
-      </div>
+      <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      <ListNote>{{ t('projects.description') }}</ListNote>
     </div>
 
     <ForebrainModal :open="createOpen" size="sm" :title="t('projects.createTitle')" @close="closeCreate">
@@ -57,7 +120,7 @@
         <span class="mb-1 block text-[12px] text-[var(--forebrain-text-2)]">{{ t('projects.dirLabel') }}</span>
         <div class="flex gap-2">
           <input v-model="draft.root" class="forebrain-field h-9 flex-1 font-mono text-[12px]" :placeholder="t('projects.rootPlaceholder')" data-testid="project-root" />
-          <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" @click="folderOpen = true">{{ t('projects.browse') }}</button>
+          <button type="button" class="forebrain-btn forebrain-btn-ghost h-9 px-3 text-xs" @click="browse">{{ t('projects.browse') }}</button>
         </div>
       </div>
       <label class="block">
@@ -78,26 +141,15 @@
       </template>
     </ForebrainModal>
 
-    <ConfirmDialog
-      v-if="deleteTarget && deletePreview && !deletePreview.running"
-      :open="true"
-      :title="t('projects.deleteModalTitle', { name: deleteTarget.name })"
-      :message="deleteMessage"
-      :confirm-label="t('projects.deleteConfirmButton')"
-      danger
-      :typed-confirm="deleteTarget.name"
-      @cancel="deleteTarget = null"
-      @confirm="confirmDelete"
+    <ProjectDeleteDialog
+      v-if="deleteTarget"
+      :project="deleteTarget"
+      @cancel="closeDelete"
+      @deleted="confirmDelete"
     />
-    <ForebrainModal v-else-if="deleteTarget" :open="true" size="sm" :title="t('projects.deleteModalTitle', { name: deleteTarget.name })" @close="deleteTarget = null">
-      <p class="text-[13px] text-[var(--forebrain-text-2)]">{{ t('projects.deleteBusy') }}</p>
-      <template #footer>
-        <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" @click="deleteTarget = null">{{ t('common.close') }}</button>
-      </template>
-    </ForebrainModal>
 
     <Teleport to="body">
-      <FolderDialog v-if="folderOpen" :projects="projects" @select="pickFolder" @cancel="folderOpen = false" />
+      <FolderDialog v-if="folderOpen" :projects="folderProjects" @select="pickFolder" @cancel="folderOpen = false" />
     </Teleport>
   </div>
 </template>
@@ -109,25 +161,44 @@
  * its sessions and configuration live. Creating is a modal (a directory and a
  * name), and deleting is a modal that first says what it would take with it and
  * asks for the project's name.
+ *
+ * The list is a server-paged table (plan 073): the search, the order and the
+ * page are the server's — the pinned projects stay on top there, before the
+ * sort key — and the pager under the table says how many there are.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import PageTopRow from '@/components/common/PageTopRow.vue'
+import { FolderOpen, Pin, PinOff, Plus, RotateCw, Trash2 } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
-import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import SortHeader from '@/components/common/SortHeader.vue'
+import TablePager from '@/components/common/TablePager.vue'
 import FolderDialog from '@/components/chat/FolderDialog.vue'
-import { getErrorMessage, forebrainApi, type ProjectRecord } from '@/lib/api'
+import ProjectDeleteDialog from '@/components/project/ProjectDeleteDialog.vue'
+import { useServerList } from '@/composables/useServerList'
+import { forebrainApi, getErrorMessage, type ProjectRecord } from '@/lib/api'
+import { formatDateTime } from '@/lib/time'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()
 const router = useRouter()
-const projects = ref<ProjectRecord[]>([])
-const loading = ref(false)
+
+const { rows, total, page, pageSize, q, sort, order, loading, error: listError, reload } = useServerList<ProjectRecord>(
+  forebrainApi.projectsPage,
+  { pageSize: 10, sort: 'updated', order: 'desc' },
+)
+
+const writeError = ref('')
+const error = computed(() => listError.value || writeError.value)
+
 const submitting = ref(false)
 const folderOpen = ref(false)
-const error = ref('')
-const search = ref('')
-const sort = ref('updated')
+/** The dialog's sidebar lists every project, not the page the table shows. */
+const folderProjects = ref<ProjectRecord[]>([])
 
 const createOpen = ref(false)
 const createError = ref('')
@@ -135,32 +206,22 @@ const taken = ref<{ id: string; name: string } | null>(null)
 const draft = reactive({ name: '', root: '' })
 
 const deleteTarget = ref<ProjectRecord | null>(null)
-const deletePreview = ref<{ sessions: number; cronJobs: number; running: boolean } | null>(null)
 const deleting = ref(false)
 
-const deleteMessage = computed(() => {
-  const p = deletePreview.value
-  const sessions = p?.sessions ?? 0
-  const jobs = p?.cronJobs ?? 0
-  const head = jobs
-    ? t('projects.deletePreviewWithJobs', { sessions, jobs })
-    : t('projects.deletePreview', { sessions })
-  return `${head}\n${t('projects.deleteModalDir')}：${deleteTarget.value?.root ?? ''}\n${t('projects.deleteModalHint')}`
-})
+/** A header click: the composable turns the new order into page 1 and reloads. */
+function sortBy(key: string, direction: 'asc' | 'desc'): void {
+  sort.value = key
+  order.value = direction
+}
 
-async function load() {
-  loading.value = true
-  error.value = ''
-  try {
-    projects.value = await forebrainApi.projectsList({
-      search: search.value.trim() || undefined,
-      sort: sort.value,
-    })
-  } catch (e) {
-    error.value = getErrorMessage(e)
-  } finally {
-    loading.value = false
-  }
+/** Load the page, and forget the last write's failure: the list is the truth. */
+async function load(): Promise<void> {
+  writeError.value = ''
+  await reload()
+}
+
+function refresh(): void {
+  void load()
 }
 
 function openCreate() {
@@ -178,6 +239,16 @@ function closeCreate() {
 }
 
 /** The new-project form's folder picker: the picked directory is the root. */
+async function browse() {
+  folderOpen.value = true
+  try {
+    folderProjects.value = await forebrainApi.projectsList({})
+  } catch {
+    // The picker still works without the markers of what is already a project.
+    folderProjects.value = rows.value
+  }
+}
+
 function pickFolder(path: string) {
   draft.root = path
   if (!draft.name.trim()) draft.name = path.replace(/\/+$/, '').split('/').filter(Boolean).pop() ?? ''
@@ -210,39 +281,37 @@ function openDetail(id: string) {
 }
 
 async function togglePin(project: ProjectRecord) {
-  error.value = ''
+  writeError.value = ''
   try {
     await forebrainApi.projectPin(project.id, !project.pinned)
     await load()
   } catch (e) {
-    error.value = getErrorMessage(e)
+    writeError.value = getErrorMessage(e)
   }
 }
 
-async function askDelete(project: ProjectRecord) {
+/** The row's delete action opens the shared dialog, which asks the preview itself. */
+function askDelete(project: ProjectRecord) {
   deleteTarget.value = project
-  deletePreview.value = null
-  try {
-    const preview = await forebrainApi.projectDeletePreview(project.id)
-    deletePreview.value = { sessions: preview.sessions, cronJobs: preview.cron_jobs, running: preview.running }
-  } catch (e) {
-    error.value = getErrorMessage(e)
-    deleteTarget.value = null
-  }
+}
+
+/** The dialog closed without deleting; a preview that could not be read says why. */
+function closeDelete(error?: string) {
+  if (error) writeError.value = error
+  deleteTarget.value = null
 }
 
 async function confirmDelete() {
   const project = deleteTarget.value
   if (!project || deleting.value) return
   deleting.value = true
-  error.value = ''
+  writeError.value = ''
   try {
     await forebrainApi.projectDelete(project.id)
     deleteTarget.value = null
-    deletePreview.value = null
     await load()
   } catch (e) {
-    error.value = isProjectBusy(e) ? t('projects.deleteBusy') : getErrorMessage(e)
+    writeError.value = isProjectBusy(e) ? t('projects.deleteBusy') : getErrorMessage(e)
   } finally {
     deleting.value = false
   }
@@ -254,10 +323,7 @@ function isProjectBusy(cause: unknown): boolean {
   return response?.status === 409 && response.data?.error === 'project_busy'
 }
 
-function formatTime(unixSeconds: number): string {
-  if (!unixSeconds) return ''
-  return new Date(unixSeconds * 1000).toLocaleString()
-}
-
-onMounted(load)
+onMounted(() => {
+  void load()
+})
 </script>

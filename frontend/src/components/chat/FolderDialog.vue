@@ -9,7 +9,7 @@
           <button type="button" class="icon-btn" :aria-label="t('chat.folderForward')" :disabled="idx >= history.length - 1" @click="forward">
             <ChevronRight class="ic" aria-hidden="true" />
           </button>
-          <button type="button" class="icon-btn" :title="t('chat.folderUp')" :aria-label="t('chat.folderUp')" :disabled="!parent" @click="up">
+          <button type="button" class="icon-btn" v-tip:top="t('chat.folderUp')" :aria-label="t('chat.folderUp')" :disabled="!parent" @click="up">
             <ArrowUp class="ic" aria-hidden="true" />
           </button>
         </div>

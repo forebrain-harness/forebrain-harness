@@ -1,9 +1,14 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { config, mount } from '@vue/test-utils'
+import tip from '@/directives/tip'
 
 import type { SessionModelOption } from '@/lib/api'
 import { setLocale } from '@/locales'
 import ModelChip from './ModelChip.vue'
+
+// The app registers `tip` once (main.ts); mounting here does the same, so an
+// element that names itself with it resolves instead of warning.
+config.global.directives = { tip }
 
 /**
  * The model menu's "accepts images" badge (the design's `.model-menu .badge.ok`)

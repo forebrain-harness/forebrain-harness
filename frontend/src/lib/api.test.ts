@@ -170,6 +170,38 @@ describe('mcp server status', () => {
 })
 
 /**
+ * A decision on the project page names the one entry the click is about, and
+ * the endpoint records a decision for that entry alone. Without `decide` the
+ * request keeps the old shape — the whole undecided set — which is what the
+ * terminal's startup prompt still sends.
+ */
+describe('project consent requests', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('names the entry a click decides, and sends no decide key when it decides a whole batch', async () => {
+    const post = vi.spyOn(__apiClient, 'post').mockResolvedValue({ data: { ok: true, allowed: [] } })
+
+    await forebrainApi.projectMcpConsent('p', ['x'], ['x'])
+    await forebrainApi.projectMcpConsent('p', ['x'])
+
+    expect(post).toHaveBeenNthCalledWith(1, '/v1/projects/p/mcp/consent', { allow: ['x'], decide: ['x'] })
+    expect(post).toHaveBeenNthCalledWith(2, '/v1/projects/p/mcp/consent', { allow: ['x'] })
+  })
+
+  it('carries the decision on the language servers’ endpoint too', async () => {
+    const post = vi.spyOn(__apiClient, 'post').mockResolvedValue({ data: { ok: true, allowed: ['x'] } })
+
+    await forebrainApi.projectLspConsent('p', ['x'], ['x'])
+    await forebrainApi.projectLspConsent('p', [])
+
+    expect(post).toHaveBeenNthCalledWith(1, '/v1/projects/p/lsp/consent', { allow: ['x'], decide: ['x'] })
+    expect(post).toHaveBeenNthCalledWith(2, '/v1/projects/p/lsp/consent', { allow: [] })
+  })
+})
+
+/**
  * Every JSON response goes through the client's camel-case interceptor, so the
  * mention types must name fields as the client delivers them. They were once
  * typed in the server's snake case: every picked image was read as missing and
@@ -207,5 +239,103 @@ describe('getErrorMessage', () => {
   it('still reads the message field other backends use', () => {
     const error = { response: { data: { message: 'quota exceeded' } } }
     expect(getErrorMessage(error)).toBe('quota exceeded')
+  })
+})
+
+describe('mcp pages (plan 074)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps the user\'s own env and header names when it reads an entry', async () => {
+    // The shared axios interceptor camelCases every key, which would rename
+    // CODEGRAPH_HOME to codegraphHome and write a bogus variable back on the
+    // next save. The MCP list reads the wire's own spelling.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        servers: [
+          {
+            name: 'codegraph',
+            transport: 'stdio',
+            target: 'codegraph serve',
+            required: false,
+            enabled: true,
+            startup_timeout: 30,
+            request_timeout: 0,
+            env: { CODEGRAPH_HOME: '${CG_HOME}', X_API_KEY: '[REDACTED]' },
+            headers: { 'X-Api-Key': '[REDACTED]' },
+            inherit_parent_env: true,
+            disable_standalone_sse: false,
+            expected_command_sha256: '',
+            default_tools_approval_mode: '',
+            oauth: { mode: 'none', client_id: 'cid', token_url: 'https://t' },
+            scope: 'global',
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 10,
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const answer = await forebrainApi.mcpPage('global', { page: 1, pageSize: 10 })
+
+    const entry = answer.rows[0]
+    expect(entry.env).toEqual({ CODEGRAPH_HOME: '${CG_HOME}', X_API_KEY: '[REDACTED]' })
+    expect(entry.headers).toEqual({ 'X-Api-Key': '[REDACTED]' })
+    expect(entry.inheritParentEnv).toBe(true)
+    expect(entry.startupTimeout).toBe(30)
+    expect(entry.oauth.clientId).toBe('cid')
+    expect(entry.name).toBe('codegraph')
+    expect(answer.total).toBe(1)
+  })
+})
+
+describe('the tool table (plan 073)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('keeps a parameter name as the schema spelled it', async () => {
+    // The shared interceptor camelCases every key; an input schema's property
+    // names are the model's parameter names, and `file_path` becoming
+    // `filePath` would leave the required list pointing at nothing.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        tools: [
+          {
+            name: 'read_file',
+            description: 'Read one file',
+            category: 'filesystem',
+            read_only: true,
+            input_schema: {
+              type: 'object',
+              properties: { file_path: { type: 'string' }, 'max-bytes': { type: 'number' } },
+              required: ['file_path'],
+            },
+          },
+        ],
+        categories: ['filesystem'],
+        total: 1,
+        page: 1,
+        page_size: 10,
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const answer = await forebrainApi.toolsPage({ page: 1, pageSize: 10 })
+
+    const schema = answer.rows[0].inputSchema as { properties: Record<string, unknown>; required: string[] }
+    expect(Object.keys(schema.properties)).toEqual(['file_path', 'max-bytes'])
+    expect(schema.required).toEqual(['file_path'])
+    expect(answer.rows[0].readOnly).toBe(true)
+    expect(answer.categories).toEqual(['filesystem'])
   })
 })

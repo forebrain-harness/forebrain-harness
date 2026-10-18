@@ -257,6 +257,62 @@ func mustLoadProjectEntry(t *testing.T, root, id string) appcfg.LSPServerConfig 
 	return srv
 }
 
+// DecideProjectServersFor decides the ids it is given and nothing else: an
+// entry it does not name keeps its own state, pending included.
+func TestDecideProjectServersForOnlyTouchesNamed(t *testing.T) {
+	root := t.TempDir()
+	writeProjectLSP(t, root, `servers:
+  one:
+    command: /bin/one
+  two:
+    command: /bin/two
+`)
+	ws := t.TempDir()
+	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, nil); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	state := ResolveProjectServers(ws, root, "proj", true)
+	if len(state.Denied) != 1 || state.Denied[0] != "one" {
+		t.Fatalf("denied=%v", state.Denied)
+	}
+	if len(state.Pending) != 1 || state.Pending[0].ID != "two" {
+		t.Fatalf("pending=%+v, want the unnamed entry still awaiting a decision", state.Pending)
+	}
+	if len(state.Allowed) != 0 {
+		t.Fatalf("allowed=%v", state.Allowed)
+	}
+}
+
+// A named decision overwrites the one an entry already has, so a denied entry
+// can be allowed again without changing the file.
+func TestDecideProjectServersForAllowsADeniedEntry(t *testing.T) {
+	root := t.TempDir()
+	writeProjectLSP(t, root, `servers:
+  one:
+    command: /bin/one
+  two:
+    command: /bin/two
+`)
+	ws := t.TempDir()
+	// The startup prompt's answer: nothing allowed, so both are denied.
+	if err := DecideProjectServers(ws, root, "proj", nil); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Denied) != 2 {
+		t.Fatalf("denied=%v", state.Denied)
+	}
+	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	state := ResolveProjectServers(ws, root, "proj", true)
+	if len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/one" {
+		t.Fatalf("allowed=%v", state.Allowed)
+	}
+	if len(state.Denied) != 1 || state.Denied[0] != "two" {
+		t.Fatalf("denied=%v", state.Denied)
+	}
+}
+
 func TestDecideProjectServers(t *testing.T) {
 	root := t.TempDir()
 	writeProjectLSP(t, root, `servers:

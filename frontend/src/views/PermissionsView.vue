@@ -1,23 +1,41 @@
 <template>
   <div class="flex flex-1 flex-col overflow-y-auto bg-[var(--forebrain-bg)] px-4 pb-10 pt-5 sm:px-6">
-    <div class="mx-auto w-full max-w-4xl">
-      <PageTopRow :title="t('permissions.title')" :description="t('permissions.description')">
+    <div class="mx-auto flex w-full max-w-4xl flex-col gap-4">
+      <p v-if="pageError || error" class="rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">
+        {{ pageError || error }}
+      </p>
+
+      <ListToolbar>
+        <template #left>
+          <input
+            v-model="q"
+            type="search"
+            :placeholder="t('permissions.searchPlaceholder')"
+            class="forebrain-field h-[34px]"
+            style="max-width: 240px"
+            data-testid="permissions-search"
+          />
+        </template>
         <template #actions>
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" data-testid="permissions-verify" @click="openVerify">
             {{ t('permissions.verifyTitle') }}
           </button>
-          <button type="button" class="forebrain-btn forebrain-btn-primary text-xs" :disabled="!tools.length" data-testid="add-rule" @click="openAdd">
-            {{ t('permissions.addRuleButton') }}
+          <button type="button" class="forebrain-btn forebrain-btn-primary gap-1.5 text-xs" :disabled="!tools.length" data-testid="add-rule" @click="openAdd">
+            <Plus class="size-3.5" aria-hidden="true" />{{ t('permissions.addRuleButton') }}
           </button>
         </template>
-      </PageTopRow>
+      </ListToolbar>
 
-      <p v-if="error" class="mb-4 rounded-lg border border-[var(--forebrain-danger)] bg-[var(--forebrain-bg-alt)] px-4 py-3 text-sm text-[var(--forebrain-danger)]">{{ error }}</p>
-
-      <div v-if="loading" class="py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
-      <div v-else-if="!rules.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.empty') }}</div>
+      <div v-if="loading && !rows.length" class="py-10 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.loading') }}</div>
+      <div v-else-if="!rows.length" class="rounded-lg border border-dashed border-[var(--forebrain-divider)] px-4 py-8 text-center text-sm text-[var(--forebrain-muted-text)]">{{ t('common.empty') }}</div>
       <div v-else class="forebrain-table-wrap">
-        <table class="forebrain-table">
+        <table class="forebrain-table forebrain-table--fixed">
+          <colgroup>
+            <col style="width: 88px" />
+            <col style="width: 200px" />
+            <col />
+            <col style="width: 88px" />
+          </colgroup>
           <thead>
             <tr>
               <th>{{ t('permissions.behavior') }}</th>
@@ -27,27 +45,44 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(rule, idx) in rules" :key="`${rule.behavior}-${rule.toolName}-${rule.ruleContent}-${idx}`" data-testid="agent-rule">
+            <tr v-for="(rule, idx) in rows" :key="`${rule.behavior}-${rule.toolName}-${rule.ruleContent}-${idx}`" data-testid="agent-rule">
               <td>
-                <span class="rounded-full border px-2 py-0.5 text-[11px]" :class="permissionBehaviorClass(rule.behavior)">{{ permissionBehaviorLabel(rule.behavior) }}</span>
+                <BadgeComponent :variant="behaviorVariant(rule.behavior)">{{ permissionBehaviorLabel(rule.behavior) }}</BadgeComponent>
               </td>
-              <td class="font-mono">{{ rule.toolName || '*' }}</td>
-              <td class="font-mono text-[var(--forebrain-text-2)]">{{ rule.ruleContent }}</td>
+              <td>
+                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="rule.toolName || '*'">{{ rule.toolName || '*' }}</span>
+              </td>
+              <td>
+                <span class="forebrain-cell-1 font-mono" v-tip:top.trunc="rule.ruleContent ?? ''">{{ rule.ruleContent }}</span>
+              </td>
               <td class="text-right">
-                <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px]" :disabled="busy" data-testid="edit-rule" @click="openEdit(rule)">
-                  {{ t('permissions.editRule') }}
-                </button>
-                <button type="button" class="forebrain-btn forebrain-btn-ghost h-7 px-2 text-[11px] text-[var(--forebrain-danger)]" :disabled="busy" data-testid="remove-rule" @click="askRemove(rule)">
-                  {{ t('common.delete') }}
-                </button>
+                <RowActions>
+                  <RowAction
+                    :icon="Pencil"
+                    :label="t('common.edit')"
+                    :name="rule.ruleContent ?? ''"
+                    :disabled="busy"
+                    data-testid="edit-rule"
+                    @click="openEdit(rule)"
+                  />
+                  <RowAction
+                    :icon="Trash2"
+                    :label="t('common.delete')"
+                    :name="rule.ruleContent ?? ''"
+                    tone="danger"
+                    :disabled="busy"
+                    data-testid="remove-rule"
+                    @click="askRemove(rule)"
+                  />
+                </RowActions>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
 
-      <p class="mt-3 font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ t('permissions.storageHint') }}</p>
-      <p class="mt-1 text-[11px] text-[var(--forebrain-muted-text)]">{{ t('permissions.modeHint') }}</p>
+      <TablePager :total="total" :page="page" :page-size="pageSize" @update:page="page = $event" @update:page-size="pageSize = $event" />
+      <ListNote>{{ noteParts[0] }}<span class="font-mono">state/permissions/local_settings.json</span>{{ noteParts[1] }}</ListNote>
     </div>
 
     <ForebrainModal :open="modalOpen" size="md" :title="editing ? t('permissions.editRule') : t('permissions.addRuleButton')" @close="modalOpen = false">
@@ -117,22 +152,31 @@
  * its buttons above it. Adding, editing and the decision probe all happen in
  * modals. Reading the rules says what is configured; the probe says what will
  * actually happen, which is the part worth trusting.
+ *
+ * The table is the server's (plan 073): the search and the page are applied
+ * there, and a new or changed rule reloads the page it was written from.
  */
-import { onMounted, reactive, ref } from 'vue'
-import PageTopRow from '@/components/common/PageTopRow.vue'
-import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { Pencil, Plus, Trash2 } from 'lucide-vue-next'
+import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import ForebrainModal from '@/components/common/ForebrainModal.vue'
+import ListNote from '@/components/common/ListNote.vue'
+import ListToolbar from '@/components/common/ListToolbar.vue'
+import RowAction from '@/components/common/RowAction.vue'
+import RowActions from '@/components/common/RowActions.vue'
+import TablePager from '@/components/common/TablePager.vue'
 import PermissionExplainResult from '@/components/permissions/PermissionExplainResult.vue'
+import { useServerList } from '@/composables/useServerList'
 import { getErrorMessage, forebrainApi, type PermissionExplainResponse, type PermissionRuleRecord } from '@/lib/api'
-import { permissionBehaviorClass, permissionBehaviorLabel } from '@/lib/permissionLabels'
+import { permissionBehaviorLabel } from '@/lib/permissionLabels'
 import { useI18n } from '@/locales'
 
 const { t } = useI18n()
-const rules = ref<PermissionRuleRecord[]>([])
+
 const tools = ref<string[]>([])
-const loading = ref(false)
 const busy = ref(false)
-const error = ref('')
+const pageError = ref('')
 const ruleError = ref('')
 
 const modalOpen = ref(false)
@@ -145,6 +189,30 @@ const probe = reactive({ toolName: '', input: '' })
 const explain = ref<PermissionExplainResponse | null>(null)
 const verifying = ref(false)
 
+// The page is the agent's own: only its local rules are listed here, a
+// project's live in that project's space and a conversation's in the chat.
+const { rows, total, page, pageSize, q, loading, error, reload } = useServerList<PermissionRuleRecord>(
+  forebrainApi.permissionsRulesPage,
+  { pageSize: 10, filters: { source: 'localSettings' } },
+)
+
+/** What a rule does, as the badge's colour: allow green, ask yellow, deny red. */
+function behaviorVariant(behavior?: string): 'success' | 'warning' | 'error' | 'gray' {
+  switch (behavior) {
+    case 'allow':
+      return 'success'
+    case 'ask':
+      return 'warning'
+    case 'deny':
+      return 'error'
+    default:
+      return 'gray'
+  }
+}
+
+/** The note names the rules file in monospace, so it is split around it. */
+const noteParts = computed(() => t('permissions.note').split('{path}'))
+
 async function loadTools() {
   try {
     const res = await forebrainApi.toolsList()
@@ -152,22 +220,6 @@ async function loadTools() {
     if (tools.value.length && !probe.toolName) probe.toolName = tools.value[0]
   } catch {
     tools.value = []
-  }
-}
-
-// The page is the agent's own: only its local rules are listed here, a
-// project's live in that project's space and a conversation's in the chat.
-async function loadRules() {
-  loading.value = true
-  error.value = ''
-  try {
-    const res = await forebrainApi.permissionsRules({ source: 'localSettings' })
-    rules.value = res.rules
-  } catch (e) {
-    error.value = getErrorMessage(e)
-    rules.value = []
-  } finally {
-    loading.value = false
   }
 }
 
@@ -208,7 +260,7 @@ async function saveRule() {
       rules: [{ toolName: form.toolName, ruleContent: form.ruleContent.trim() }],
     })
     modalOpen.value = false
-    await loadRules()
+    await reload()
   } catch (cause) {
     ruleError.value = getErrorMessage(cause)
   } finally {
@@ -225,7 +277,7 @@ async function confirmRemove() {
   removing.value = null
   if (!rule) return
   busy.value = true
-  error.value = ''
+  pageError.value = ''
   try {
     await forebrainApi.permissionsUpdate({
       type: 'removeRules',
@@ -233,9 +285,9 @@ async function confirmRemove() {
       behavior: rule.behavior,
       rules: [rule.rule],
     })
-    await loadRules()
+    await reload()
   } catch (cause) {
-    error.value = getErrorMessage(cause)
+    pageError.value = getErrorMessage(cause)
   } finally {
     busy.value = false
   }
@@ -251,11 +303,11 @@ async function runVerify() {
   const toolName = probe.toolName.trim()
   if (!toolName || verifying.value) return
   verifying.value = true
-  error.value = ''
+  pageError.value = ''
   try {
     explain.value = await forebrainApi.permissionsExplain({ toolName, input: probe.input.trim() })
   } catch (e) {
-    error.value = getErrorMessage(e)
+    pageError.value = getErrorMessage(e)
     explain.value = null
   } finally {
     verifying.value = false
@@ -263,7 +315,7 @@ async function runVerify() {
 }
 
 onMounted(() => {
-  void loadRules()
+  void reload()
   // Tool names come from the runtime's own registry, so the dropdowns never
   // list a tool the engine does not expose.
   void loadTools()
