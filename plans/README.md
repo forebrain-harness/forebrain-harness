@@ -4,6 +4,14 @@
 
 ## 最新审核信息
 
+- **2026-10-18 owner：“原型没问题了，请生成完整详细的实施计划” → 新增 071–076（web 设计稿 2026-10-17/18 全部迭代的实施，设计稿 `docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/app-preview.html` / 原型 v56）**：
+  覆盖 070 之后设计稿的全部改动——表格化（项目、工具、项目会话、定时任务、通道）、操作栏统一图标按钮 + 紧凑悬停提示、表头排序、每个表格的分页器、所有页面与标签去掉内容标题（工具栏左搜索右按钮、表下说明）、
+  MCP 三处页面（设置只管全局、菜单栏新增 MCP 页、项目三层；右侧抽屉查看/编辑/新增）、项目空间面包屑进顶栏与“项目设置”标签（项目指令、记忆作用域并入，打平表单，删除项目在保存右侧）、设置页分组与表单打平、
+  外壳（深浅色切换进顶栏、折叠按钮到菜单栏底部、顶栏 30px、标题截断、无模型名、项目标签只写名称、首页即新对话、新对话居中且无标题/无工作台、发首条消息后标题按引擎命名规则）。
+  **owner 当日三项裁决（写进每份计划）**：①原型没画、现有 web 已有的功能一律保留并按同一套规则摆放（定时任务编辑/最近状态/执行记录、项目与设置的 LSP 标签、设置的定时任务标签、18 种通道、工具“破坏性”、MCP OAuth 状态）；
+  ②**所有表格列表服务端分页**（搜索/筛选/排序后切页、带总数；接口“只有带 `page` 才分页”，非表格调用方不受影响——约定在 071 的 `pkg/gateway/list_page.go`）；③原型需要而后端没有的列由后端补只读字段（项目对话数、会话模型/消息数/创建时间/心跳、通道是否已配置、子代理所在会话标题、运行状态接口）。
+  调研时核实的事实：MCP 三层的**写接口与连接测试后端早已存在**（`1527c46`），前端从未接上；前端没有任何 PKCE 调用（074 只显示授权状态）；e2e 没有截图基线；`useLastSession` 的“根路径回到上次会话”与“首页即新对话”冲突（072 删掉这次跳转，预选项目保留）。
+  依赖：071 → 其余；073 → 075 → 076；074 → 075、076；072 只依赖 071。执行均不提交、不建 worktree（照 070 的执行者须知）。
 - **2026-10-17 070 执行完毕（DONE，评审 APPROVE，未提交）**：分两次派执行者完成 Step 1–5（Go：引擎 typed 拒绝错误 + 门禁改按会话自己的模型、`RunStore.SessionBusy` 只查不建、终端跟上错误类型并在落库前查跨进程忙、会话模型选项带 `supports_images`、gateway 被拒分支落库发新 op `turn_refused` 不建 run）与 Step 6–8（前端徽标/提示块/`turn_refused` 处理 + 浏览器验收）。**执行期计划漏项（已补进 070 Scope 与 Step 5.4）**：`pkg/gateway/mention_test.go` 的 `TestWebImageUploadRefusedOnTextOnlyModel` 钉住被删的旧门禁，按新语义重写为 `TestWebImageGateRefusesTheTurnNotTheAttachment`。**owner 2026-10-17 重申“设计稿必须 1:1”后**，评审侧把 Step 6/7 收紧到设计稿细节并落进计划：徽标 = `.badge.ok` 底色（`--forebrain-success-soft`/`--forebrain-success`）+ `margin-left:auto; height:18px; font-weight:500`（样式写进 `ModelChip.vue` scoped，`main.css` 不在 Scope）；提示块 = 现成 `.forebrain-err-block` + **加粗模型名（不进 i18n 字符串）** + `.forebrain-err-s` 行内 `.rewind-undo` 链接。**评审侧亲跑闸门**：整树 `FOREBRAIN_HOME=$(mktemp -d) CGO_ENABLED=1 go test -tags fts5 ./... -count=1` 零 FAIL（31 包 ok）、`go vet ./pkg/... ./cmd/...` 0、`gofmt -l cmd pkg` 空、`pkg/architecture` ok、`pkg/gateway` 整包 ok（含新用例）、前端 `pnpm test` 71 文件/472 用例全绿、`vue-tsc` exit 0、`FOREBRAIN_E2E_SPEC=e2e/image-refusal.spec.ts web_e2e.sh` 与全套 `web_e2e.sh`（121 passed / 2 skipped）均 `web e2e: PASS`；截图 `$TMPDIR/forebrain-web-e2e/shots/070-*.png` 四态与设计稿一致（`imgRefused` 的加粗模型名、灰字恢复行、`换模型` 链接；`modelChip` 的右对齐绿色「支持图片」徽标只出现在支持图片的模型上）。
 - **2026-10-17 `/improve plan` → 新增 070**：owner 报告终端里“当前模型不支持图片时用户消息完全丢失、换模型后无法续聊”。终端侧已在本日修好并留在工作区（未提交）：根因三处——① TUI 先过图片门禁再落库，被拒即 return，消息从未写入；② `process.Open` 先 `runner.Load()` 后 `wireRunner` 设 `FileResolver`，`Load` 时把 nil 解析器拷进 transcript，**所有存下的图片回放给模型时都只剩 `[attachment] 名称` 文字**（含正常支持图片的会话从第二轮起）；③ `@` 选图落库不带 `mime_type`，回放跳过。owner 随后裁定语义：**消息任何情况下不能丢；纯文本模型下只要对话里有图就继续报错，只有换到支持图片的模型才能续聊，且图片不能丢**；web 统一到终端语义（先出原型，已确认）：**标“支持图片”、文案照原型、提示不落库**。070 落 web 侧，并补终端拒绝路径缺的跨进程忙检查、门禁改按会话自己的模型判断。
 - **2026-10-16 批次执行（055–064，全部 APPROVE，未提交）**：按建议顺序由独立执行者实施 + 评审侧逐 diff 复核、亲跑闸门（整树 `FOREBRAIN_HOME=$(mktemp -d) CGO_ENABLED=1 go test -tags fts5 ./... -count=1` 零 FAIL、vet 0、gofmt 空、前端 vue-tsc + 465 测试全绿）。**执行期新发现并同批根因修复**：① **064**（056 容器复现暴露的既有 Windows 链接序缺陷——`-lntdll` 先于 `-ltokenizers`，Rust≥1.87 的 libtokenizers.a 引用 7 个 NT 符号，GNU ld 左到右解析必失败，此前被 `cannot find -lpdfium` 掩盖；`pkg/llm/hftok/link.go` 改 `--start-group` 分组包裹，容器红/绿 + objdump import 表含 pdfium.dll 与 ntdll.dll 双证据，评审侧挂宿主模块缓存独立复验通过；**Windows CI 变绿前提＝056 别名 + 064 分组，056 Step 4 推分支后由 owner 观察**）；② 062 执行者发现 `make pdfium` 在 HEAD 因下划线三元组（`darwin_arm64`）传给要求斜杠的脚本而确定性失败（CI 直呼脚本所以从未暴露），已改裸脚本调用并实测 no-op 通过。**两处评审裁定（均有 owner 事前批准的语义背书，明示备查）**：058 的 STOP-2（钉住缺陷的用例 `text content, png ext` 期望改 ""、测试改名 SniffIsAuthoritative）；061 Step 1 因既有测试注释记载**有意设计**（标记行是展开态 wrapped 图片卡唯一的鼠标收拢路径）而**留给 owner 裁决**——Step 2（0×0）已完成。**遗留（owner 需知）**：057 存量工具行 base64 保持原样读取（新行落 file_reference）；063 存量超大附件会话升级后有一次缓存前缀位移；gateway 三个测试的 `t.TempDir` 清理竞态（既有 flake，053 期已报未修，本轮再次复现并附机理证据）；`fetch-pdfium.sh` 幂等短路前仍会发一次匿名元数据请求（403 时需 gh 凭据，非阻断）。**PR 描述必须补记（提交 6d1730e 主题为 "…"、无 body）**：本分支包含"go install 自 PDFium 原生依赖起不再是受支持的安装方式"的决定——`go install` 无法携带/定位 `third_party/pdfium` 的库与字体，因此 ci.yml/release.yml 的 go-install job、`scripts/check-go-install.sh`、README/RELEASING/bug_report 的相应段落一并移除；安装走 Release 档案 / npm 包 / `make build`。
@@ -204,6 +212,12 @@
 | [068-fetch-libtokenizers-shell-fixes](068-fetch-libtokenizers-shell-fixes.md) | `fetch-libtokenizers.sh` 在 bash 3.2 下空数组不再退出；Windows 编译器提示的 `MINGW` 判断真正生效 | Bug Fix / Build | DONE（2026-10-16 执行完毕，评审 APPROVE；worktree `.claude/worktrees/agent-aacb0c98b12b26520`（detached 于 dev `fa4af8a`）；**已按 owner 2026-10-16 指示 `git apply` 并回主树工作区（dev `7155be9`），未提交**）| P3 | S | LOW |
 | [069-estimator-consistency-in-compaction](069-estimator-consistency-in-compaction.md) | 观测开销按估算器分开；压缩内部（摘要预算、裁剪、卡片数字）与上下文面板用会话模型的估算器 | Correctness | DONE（2026-10-16 执行完毕，评审 APPROVE；**已并回主树工作区（dev `7155be9`），未提交**；新增 `pkg/assembly/hook_test.go`，旧测试改读 `ProjectFor`，均接受）| P2 | M | LOW–MED |
 | [070-web-keeps-image-refused-messages](070-web-keeps-image-refused-messages.md) | web 与终端同一语义：当前模型不支持图片时（本条消息带图，或对话历史里有图），消息保留落库、只拒绝请求（WS 新 op `turn_refused`，提示不落库）；门禁按会话自己的模型与项目 runner 判断；被拒前先查跨进程“会话忙”（终端一并补上）；会话模型菜单标“支持图片” | Bug Fix / 语义统一 | DONE（2026-10-17 执行完毕，评审 APPROVE；**改动留主树工作区（dev `1e5866a`），未提交**；设计稿 1:1 已用真 gateway 截图核对。执行期补 Scope：`pkg/gateway/mention_test.go`（旧用例钉住被删的门禁，按新语义重写为 `TestWebImageGateRefusesTheTurnNotTheAttachment`） | **P1** | L | MED |
+| [071-web-list-foundation](071-web-list-foundation.md) | web 表格与表单的共用底座：服务端分页约定（`list_page.go`，只有带 `page` 才分页）、工具栏/表下说明/分页器/表头排序/行图标按钮、紧凑提示条（`v-tip`，取代 `RailTooltip`）、单选组、右侧抽屉、`useServerList` | Direction / Infra | TODO | **P1** | L | LOW–MED |
+| [072-web-shell-and-chat-chrome](072-web-shell-and-chat-chrome.md) | 外壳与对话页：深浅色切换进顶栏、折叠按钮到菜单栏底部、顶栏 30px 与标题截断（360px）、无模型名、项目标签只写名称、抽屉标题“对话”、首页即新对话、新对话垂直居中且无标题/无工作台、首条消息后标题按引擎规则、工坊顶栏同规则 | Direction | TODO | **P1** | M | MED |
+| [073-web-agent-pages-as-tables](073-web-agent-pages-as-tables.md) | 菜单栏主代理 8 页（项目、规则指令、技能、子代理、模型服务、工具、权限、记忆）无标题 + 工具栏 + 表格 + 分页 + 说明；对应接口服务端分页；项目对话数、子代理会话标题、工具分类/入参表 | Direction | TODO | **P1** | L | MED |
+| [074-web-mcp-three-pages-and-drawer](074-web-mcp-three-pages-and-drawer.md) | MCP 三处页面（设置全局、菜单栏新增 MCP 页全局+主代理、项目三层）：统一表格、右侧抽屉查看/编辑/新增、测试连接、允许/拒绝；三个读视图服务端分页（写接口已存在） | Direction | TODO | **P1** | L | MED |
+| [075-web-project-space](075-web-project-space.md) | 项目空间：面包屑进顶栏、“项目设置”打平表单（项目指令/记忆作用域并入、删除项目）、各标签无标题 + 搜索 + 表格 + 分页；会话/定时任务/通道表格化；会话模型/消息数/心跳与通道“已配置”后端补字段 | Direction | TODO | **P1** | L | MED |
+| [076-web-settings-tabs](076-web-settings-tabs.md) | 设置页：分组子导航、表单标签打平（标准单选组、底部保存）、表格标签（LSP/钩子/共享技能）服务端分页、配置文件工具栏、运行状态平铺（新 `/api/runtime`）；全站图标按钮提示统一；删 `PageTopRow` | Direction | TODO | **P1** | M | LOW–MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -231,6 +245,13 @@
 推荐按以下顺序执行：
 
 ```
+--- 2026-10-18 web 设计稿 2026-10-17/18 迭代的实施（owner：原型没问题了）---
+071-web-list-foundation (先做：共用件 + 服务端分页约定；只动 common 组件、main.css、App.vue 的提示条、memories_api.go 的解析)
+072-web-shell-and-chat-chrome (依赖 071；与 073–076 不改同一批页面，可与 073/074 并行)
+073-web-agent-pages-as-tables (依赖 071；改 SkillsTable / MemoryFilesPanel 的共用接口，075/076 依赖它)
+074-web-mcp-three-pages-and-drawer (依赖 071；与 073 不重叠，可并行)
+075-web-project-space (依赖 071、073、074)
+076-web-settings-tabs (最后：依赖 071、073、074、075；收尾删 PageTopRow、全站图标提示统一)
 --- 2026-10-17 图片被拒消息保留（终端已在工作区修好，web 对齐）---
 070-web-keeps-image-refused-messages (独立；前置是工作区里未提交的终端侧修复；含真 gateway 浏览器验收 web_e2e.sh)
 003-recall-in-flight-steer (独立，无依赖，owner 报告的严重 bug，优先)

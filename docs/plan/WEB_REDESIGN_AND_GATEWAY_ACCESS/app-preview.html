@@ -86,7 +86,6 @@
   .r-foot .fl { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; color: var(--r-fg2); font-size: 12.5px; border: 0; background: transparent; cursor: pointer; }
   .r-foot .fl:hover { background: var(--r-hover); color: var(--r-fg); }
   .r-foot .fl.on { background: var(--r-active); color: var(--r-active-fg); }
-  .r-foot .theme { margin-left: auto; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--r-line); color: var(--r-fg2); background: transparent; cursor: pointer; }
   .hb-anchor { position: relative; display: inline-flex; }
   .chip-btn.hb-chip.on { border-color: var(--brand-border); background: var(--brand-soft); color: var(--brand); }
   .chip-btn.hb-chip .hb-meta { color: var(--muted); }
@@ -120,11 +119,19 @@
   /* work area */
   .work { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .top { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); flex: none; }
-  .top .t { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* 2026-10-18: the title stops at 360px (less on a narrow bar) with an ellipsis; nothing to its right shrinks or gets pushed out of view */
+  .top .t { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; max-width: 360px; }
+  .top > :not(.t):not(.crumb):not(.meta):not(.sp) { flex: none; }
+  .top .meta { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .top .meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .top .sp { flex: 1; }
   .chip-btn { display: inline-flex; align-items: center; gap: 6px; height: 30px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; font-size: 12px; color: var(--text-2); background: var(--page); cursor: pointer; position: relative; }
   .chip-btn:hover { border-color: var(--line-2); color: var(--text); }
+  .chip-btn.sq { width: 30px; padding: 0; justify-content: center; }
+  /* every control in the top bar is 30px tall, border included (owner 2026-10-18) */
+  .chip-btn { box-sizing: border-box; }
+  .top > .icon-btn { width: 30px; height: 30px; }
+  .top > .btn.sm { height: 30px; }
   .chip-btn[aria-pressed="true"] { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
   .chip-btn .badge-n { min-width: 16px; height: 16px; border-radius: 999px; background: var(--brand); color: var(--on-brand); font-size: 10.5px; line-height: 16px; text-align: center; padding: 0 4px; font-weight: 600; }
   .body { flex: 1; min-height: 0; display: flex; }
@@ -162,7 +169,21 @@
   textarea.field { height: auto; padding: 8px 10px; line-height: 1.55; resize: vertical; }
   .field.mono { font-family: var(--mono); font-size: 12px; }
   select.field { appearance: none; background-image: none; }
-  label.lb { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); font-weight: 500; }
+  /* 2026-10-18: form radio group (after Ant Design Radio.Group / Element Plus el-radio): a 16px circle and its label, options inline */
+  .radios { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; min-height: 34px; }
+  .radio { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 400; color: var(--text); cursor: pointer; }
+  .radio input { appearance: none; -webkit-appearance: none; width: 16px; height: 16px; margin: 0; flex: none; border: 1px solid var(--line-2); border-radius: 50%; background: var(--page); display: grid; place-content: center; cursor: pointer; transition: border-color 120ms; }
+  .radio input::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--brand); transform: scale(0); transition: transform 120ms; }
+  .radio input:checked, .radio:hover input { border-color: var(--brand); }
+  .radio input:checked::before { transform: scale(1); }
+  .radio input:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { .radio input, .radio input::before { transition: none; } }
+  .radios.v { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .radio.desc { align-items: flex-start; }
+  .radio.desc input { margin-top: 2px; }
+  .radio .rd { display: grid; gap: 2px; } .radio .rd b { font-weight: 500; } .radio .rd span { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .radio .swc { width: 14px; height: 14px; border-radius: 3px; flex: none; display: block; }
+  label.lb, div.lb { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); font-weight: 500; }
   .hint { font-size: 12px; color: var(--muted); }
   .badge { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 500; background: var(--brand-soft); color: var(--brand); white-space: nowrap; }
   .badge.gray { background: var(--soft); color: var(--text-2); }
@@ -274,7 +295,7 @@
   .r-brand { position: relative; }
   .r-collapse { margin-left: auto; width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--r-fg2); cursor: pointer; flex: none; }
   .r-collapse:hover { background: var(--r-hover); color: var(--r-fg); }
-  .r-expand { margin: 0 auto; width: 40px; }
+  .app[data-rc="1"] .r-foot .r-collapse { margin-left: 0; width: 40px; height: 32px; }
   .r-tenant-mini { width: 40px; height: 40px; margin: 0 auto; border-radius: 8px; border: 1px solid var(--r-line); background: transparent; color: var(--r-fg); font-weight: 650; font-size: 15px; cursor: pointer; }
   .r-tenant-mini:hover { background: var(--r-hover); }
   .app[data-rc="1"] .rail { width: 64px; padding: 14px 10px 10px; }
@@ -283,7 +304,6 @@
   .app[data-rc="1"] .r-link { justify-content: center; padding: 9px 0; }
   .app[data-rc="1"] .r-foot { flex-direction: column; align-items: center; gap: 4px; }
   .app[data-rc="1"] .r-foot .fl { width: 40px; justify-content: center; padding: 7px 0; }
-  .app[data-rc="1"] .r-foot .theme { margin-left: 0; }
   @media (prefers-reduced-motion: reduce) { .rail { transition: none; } }
   .drop { display: grid; justify-items: center; gap: 4px; text-align: center; border: 1px dashed var(--line-2); border-radius: 8px; padding: 18px 12px; cursor: pointer; background: var(--subtle); }
   .drop:hover { border-color: var(--brand); }
@@ -346,6 +366,8 @@
   .rail-tip::before { content: ""; position: absolute; left: -3px; top: 50%; margin-top: -3px; width: 6px; height: 6px; background: #101828; transform: rotate(45deg); }
   /* the same tip above an icon-only button, its arrow under the button's centre; not `.top`, which is the top bar's class */
   .rail-tip.tip-above::before { left: var(--tip-x, 50%); top: auto; bottom: -3px; margin-top: 0; margin-left: -3px; }
+  /* below a button with no room above it (the top bar); the arrow points up at it */
+  .rail-tip.tip-below::before { left: var(--tip-x, 50%); top: -3px; margin-top: 0; margin-left: -3px; }
   .r-tenant:hover { background: var(--r-hover); }
   .t-menu { position: absolute; left: 12px; right: 12px; top: 128px; background: var(--r-pop); color: var(--r-fg); border: 1px solid var(--r-line); border-radius: 8px; box-shadow: var(--pop); padding: 4px; z-index: 6; display: grid; gap: 2px; }
   .t-opt { display: grid; gap: 1px; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 7px 9px; cursor: pointer; color: var(--r-fg); }
@@ -369,8 +391,9 @@
   .drawer-h b { font-size: 14px; font-weight: 600; }
   .drawer-h span { font-size: 12px; color: var(--muted); margin-left: 6px; font-weight: 400; }
   .drawer-b { padding: 0 12px 12px; display: grid; gap: 10px; min-height: 0; flex: 1; grid-template-rows: auto auto auto 1fr auto; }
-  .d-new { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 8px; padding: 8px 10px; font-size: 13px; font-weight: 600; background: var(--brand); color: var(--on-brand); cursor: pointer; }
-  .d-new:hover { background: var(--brand-hover); }
+  /* `.drawer .d-new`, not `.d-new`: `.app button { color: inherit }` outranks a bare class and turned the label dark */
+  .drawer .d-new { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 8px; padding: 8px 10px; font-size: 13px; font-weight: 600; background: var(--brand); color: var(--on-brand); cursor: pointer; }
+  .drawer .d-new:hover { background: var(--brand-hover); }
   .d-search { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 9px; color: var(--muted); font-size: 12.5px; }
   .d-cap { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; padding: 0 4px; }
   .d-list { list-style: none; margin: 0; padding: 0; overflow: auto; display: grid; gap: 1px; align-content: start; }
@@ -393,11 +416,7 @@
   .scope.global { background: var(--soft); color: var(--text-2); }
   .scope.project { background: var(--text); color: #ffffff; }
   .scope svg.lucide { width: 12px; height: 12px; }
-  .proj-head { border-bottom: 1px solid var(--line); padding: 14px 28px 0; display: grid; gap: 6px; }
-  .proj-head .crumb { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .proj-head .crumb b { color: var(--text); font-weight: 650; font-size: 15px; }
-  .proj-head .crumb .mono { font-size: 12px; }
-  .proj-head .crumb button { border: 0; background: transparent; color: var(--brand); cursor: pointer; padding: 0; font-size: 13px; }
+  .proj-head { border-bottom: 1px solid var(--line); padding: 4px 28px 0; display: grid; gap: 6px; }
   .proj-head h1 { margin: 0; font-size: 20px; font-weight: 650; display: flex; align-items: center; gap: 10px; }
   .proj-head .meta { font-size: 12px; color: var(--text-2); display: flex; gap: 12px; flex-wrap: wrap; }
   .proj-head .tabs { border-bottom: 0; margin-top: 4px; }
@@ -409,8 +428,9 @@
   .preset-opt.on b { color: var(--brand); }
   .preset-cap { font-size: 11px; color: var(--muted); padding: 4px 10px 2px; }
   .composer { position: relative; }
-  .rc.col { flex-direction: column; align-items: flex-start; gap: 6px; }
-  .rc.col span { font-size: 12px; color: var(--text-2); line-height: 1.5; }
+  /* stacked radio card (title over text); not `.col`, which is the chat column's class */
+  .rc.stack { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .rc.stack span { font-size: 12px; color: var(--text-2); line-height: 1.5; }
 </style>
 
 <style>
@@ -554,7 +574,8 @@
   .audit-err { color: var(--danger); font-size: 12px; white-space: pre-wrap; font-family: var(--mono); }
   @media (prefers-reduced-motion: reduce) { .acc-h svg.ch { transition: none; } }
   /* new chat, after ZCode's layout: greeting + centred composer with a project pill */
-  .nc { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 0 24px 56px; }
+  /* the empty chat: greeting, composer and starters sit in the middle of the pane (owner 2026-10-18); the first message moves the composer to the bottom */
+  .nc { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 24px; }
   .nc h2 { margin: 0; font-size: 26px; line-height: 1.3; font-weight: 650; color: var(--text); text-align: center; }
   .nc .composer { margin: 0; width: min(760px, 100%); }
   .composer .ctop { display: flex; align-items: center; gap: 10px; padding: 8px 10px 0; position: relative; }
@@ -588,7 +609,6 @@
   .starter { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--page); color: var(--text-2); font-size: 12.5px; cursor: pointer; }
   .starter:hover { border-color: var(--line-2); color: var(--text); }
   .app .starter svg.lucide { width: 14px; height: 14px; }
-  .nc { justify-content: flex-end; padding-bottom: 96px; }
   .pj-pop { top: auto; bottom: calc(100% + 6px); }
   .composer .icon-btn[aria-expanded="true"] { background: var(--soft); color: var(--text); }
   .plus-pop { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); background: var(--page); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--pop); z-index: 6; padding: 6px; display: grid; gap: 1px; text-align: left; }
@@ -620,10 +640,15 @@
   .mcp-ty .sub { color: var(--muted); }
   .mcp-ty .sub::before { content: " · "; }
   .acts-r { display: flex; justify-content: flex-end; align-items: center; gap: 4px; }
+  /* a row with icon actions centres every cell on them, so text, badges and switches line up with the icons */
+  .tb tr:has(> td > .acts-r) > td { vertical-align: middle; }
   /* 2026-10-18: tools table — fixed columns, one line per cell; 查看入参 expands the row in place, its inputs in a nested table */
   .tb.fix-tb { table-layout: fixed; }
   .tb.fix-tb > thead > tr > th, .tb.fix-tb > tbody > tr > td { vertical-align: middle; white-space: nowrap; }
   .cell-1 { display: block; overflow: hidden; text-overflow: ellipsis; }
+  /* 2026-10-18: projects table — the name opens the project space; badges (置顶 / 未信任 / 目录不存在) sit beside it */
+  .proj-link { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tb.fix-tb td.t, .tb.fix-tb td.num { font-variant-numeric: tabular-nums; }
   .tb.tool-tb > tbody > tr.open > td { border-bottom-color: transparent; background: var(--subtle); }
   .tb.tool-tb > tbody > tr.tool-sub > td { padding: 0 10px 12px; background: var(--subtle); white-space: normal; }
   .tb.sub-tb { table-layout: fixed; background: var(--page); border: 1px solid var(--line); border-collapse: separate; border-spacing: 0; border-radius: 6px; }
@@ -703,7 +728,9 @@
   .composer .preset-menu { left: 128px; }
   .chip-btn.mode-plan { border-color: var(--brand-border); color: var(--brand); background: var(--brand-soft); }
   .modal { position: relative; }
-  .top .crumb { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; white-space: nowrap; min-width: 0; }
+  .top .crumb { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+  .top .crumb > * { flex: none; }
+  .top .crumb > .t-name { flex: 0 1 auto; min-width: 0; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
   .top .crumb .btn.link { font-size: 14px; font-weight: 500; }
   .app .top .crumb svg.lucide { width: 14px; height: 14px; color: var(--muted); }
   .bench.ws { width: 420px; }
@@ -769,7 +796,7 @@
 <div class="wrap">
   <header>
     <h1>Forebrain Harness 全站预览</h1>
-    <p>菜单栏只放当前主代理（租户）的页面，全局配置只在“设置”，项目的配置在独立的“项目空间”。页面没有单独的标题层：顶栏写页面名，内容第一行是标题、一句说明和按钮。设置是全局配置，项目空间顶部是“项目 › 名称”；其余页面都属于菜单栏顶部选中的主代理。菜单栏每一项都能点击；顶部下拉可以切换主代理，下方说明随当前页面变化。示意按 1320 × 800 绘制，窄屏可横向滚动。</p>
+    <p>菜单栏只放当前主代理（租户）的页面，全局配置只在“设置”，项目的配置在独立的“项目空间”。页面没有单独的标题层：顶栏写页面名；主代理页面、项目空间标签和设置的内容里也不再写标题：表格上方左侧是搜索、右侧是按钮，说明在表格下方；表单直接铺在标签页里。设置是全局配置，项目空间顶部是“项目 › 名称”；其余页面都属于菜单栏顶部选中的主代理。菜单栏每一项都能点击；顶部下拉可以切换主代理，下方说明随当前页面变化。示意按 1320 × 800 绘制，窄屏可横向滚动。</p>
   </header>
 
   <section class="iter" aria-label="本轮迭代">
@@ -787,8 +814,24 @@
       <li>MCP 列表高层在前：主代理 MCP 页先主代理、后全局；项目空间 MCP 标签依次是项目、主代理、全局。同名覆盖规则不变。</li>
       <li>记忆列表去掉排序下拉框，改为表头排序（参照开源组件库的表格）：“创建时间”“更新时间”列头带上下箭头，当前排序列与方向高亮；点未排序的列按新→旧，再点切换；默认更新时间新→旧，换排序回到第 1 页。时间列不再折行。</li>
       <li>表格操作栏统一为同尺寸的图标按钮：查看（眼睛，技能页原“详情”）、编辑（铅笔）、下载、删除（红色）、允许 / 拒绝、上移、停止；缺某个动作的行留占位，图标上下对齐。所有图标按钮鼠标悬停（或键盘聚焦）时在上方显示文字提示。</li>
+      <li>技能表格的来源列写“主代理”，不再带主代理名（与 MCP 表格一致；当前主代理已在菜单栏顶部）。</li>
+      <li>技能工坊顶栏去掉面包屑左侧的返回箭头，点面包屑“技能”返回。</li>
+      <li>项目空间的面包屑（项目 › 名称、目录、信任状态）移到顶栏，取代原来的“项目空间”标题，与技能工坊一致；顶栏下面直接是标签页。</li>
+      <li>项目空间各标签去掉标题：原标题右侧的按钮移到表格上方的工具栏（搜索、筛选之后，靠右），说明文字移到表格下方，与其他提示合成一行。主代理级页面不变。每个标签的表格上方左侧都有搜索框（规则指令、权限、通道补上）。</li>
+      <li>菜单栏里主代理的页面（项目、规则指令、技能、MCP、子代理、模型服务、工具、权限、记忆）照同样的要求改：去掉标题，按钮移到表格上方右侧，左侧是搜索框（子代理、模型服务、权限补上），说明移到表格下方。</li>
+      <li>顶栏不再显示模型名（对话页、技能工坊）；当前模型只在输入框的模型选择器里。顶栏的项目标签只写项目名（去掉“项目 ·”），悬停提示“进入项目空间”。对话抽屉标题只写“对话”，不带“主代理 main”；MCP 添加抽屉标题、判定验证的命中位置也只写“主代理”。</li>
+      <li>顶栏的会话标题最长 360px（窄屏时更短），超出截断加省略号，悬停显示全文；标题右侧的项目标签、心跳、工作台和右侧按钮都不缩小、不被挤出；项目空间、技能工坊面包屑里的名称同样处理。</li>
+      <li>登录 web 端后首页就是新对话页（设计稿打开即是这一页）；新对话页顶栏不再显示“未命名对话”，也不显示“工作台”按钮，发出第一条消息后才出现；发出第一条消息后顶栏标题就是这条消息的第一行（最多 50 字，与引擎的会话命名规则一致）。</li>
+      <li>新聊天（还没有消息）时，问候语、输入框和快捷入口一起在对话区垂直居中（技能工坊的空白新建同样）；发出第一条消息后输入框在底部。</li>
+      <li>菜单栏深浅色切换按钮从菜单栏底部移到顶栏最右侧（“中文”右边），悬停提示显示在按钮下方；菜单栏的折叠 / 展开按钮从顶部 logo 旁移到它原来的位置（底部“设置”右侧，折叠后在“设置”下面）。</li>
+      <li>设置也照此改：MCP、钩子、共享技能三个表格去掉标题，搜索在左、按钮在右，说明在表格下方（钩子补上搜索框）；外观、审批默认、记忆三个表单不套框、不加标题，单选都改成标准单选组（主题色带色块，审批模式竖排带说明），审批默认与记忆的“保存”在表单底部；配置文件把路径和按钮放在编辑器上方；运行状态合成一张列表。</li>
+      <li>项目空间的“概览”标签改名“项目设置”，表单直接铺在标签页里（不套框、不加表单标题）：去掉统计卡片（各标签里都看得到数量）和“危险操作”卡片，“删除项目”移到“保存”右侧。</li>
+      <li>项目空间的会话标签改成表格：标题（点开即进入会话）、模型、消息数、心跳（每 N 分钟 / 已暂停）、创建时间、更新时间；两个时间列头排序，默认更新时间新→旧；下方分页。操作栏只有图标按钮“打开”。</li>
       <li>提示条改紧凑：单行约 20px 高，上下不留白。</li>
       <li>主代理工具页改成表格：工具、说明、分类、类型（只读 / 有副作用），可搜索、按分类与类型筛选，下方分页。操作栏只有一个图标按钮“查看入参”，在该行下方展开入参表（参数、类型、必填、说明），再点即“收起”。</li>
+      <li>项目页改成表格：项目、路径、说明、对话数、更新时间；“项目”“更新时间”列头排序（去掉排序下拉框），置顶的始终在最上面；下方分页。名称可直接点进项目空间；操作栏为图标按钮：进入项目空间、置顶 / 取消置顶、删除。</li>
+      <li>项目空间的定时任务、通道改成表格，下方分页。定时任务：名称、计划、投递至、下次执行、已执行次数、启用（即原来的暂停 / 恢复）；操作栏为立即执行、执行记录、删除。通道：通道、投递标识、配置（密钥只显示末 4 位）、启用；操作栏只有编辑，在弹窗里填该通道的配置项，去掉了页面级“保存”；没配置的通道不能启用。</li>
+      <li>项目指令（原在规则指令标签）、记忆作用域（共享 / 仅本项目，原在记忆标签）移到项目设置标签，和其他项目设置一起用底部“保存”；两个标签只剩各自的列表。记忆作用域改为表单里常见的单选组（参照开源组件库：圆形单选 + 文字，横排），放在项目指令下面，说明随选项变化。</li>
     </ul>
   </section>
 
@@ -2282,7 +2325,7 @@
     tree: {}, treeLoading: {}, ref: '', toolOpen: '', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false,
     pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
     attach: false, attachShot: false, attachDir: 'attachments', lastAttachDir: 'attachments', attNew: false, atree: {}, atts: [], demo: 'normal', dproj: '全部项目', projRoot: '',
-    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, model: '', modelMenu: false, img: null, mdw: null, pg: {}, pgSize: {}, memSort: {}, mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
+    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, model: '', modelMenu: false, img: null, mdw: null, pg: {}, pgSize: {}, memSort: {}, pinned: { 'forebrain-harness': true }, chanOn: { 0: true, 1: true }, cronOff: { 2: true }, memScope: 'shared', approvalDef: 'default', mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
   };
   var nav = [
     ['chat', '对话', 'message-square'], ['projects', '项目', 'folder-git-2'], ['rules', '规则指令', 'scroll-text'], ['skills', '技能', 'sparkles'],
@@ -2318,9 +2361,9 @@
   // files this chat session changed with file tools (the same set "回到这里" restores)
   var chatChanges = [['pkg/gateway/controlplane.go', '+12 −3'], ['pkg/gateway/http_server.go', '+4 −0'], ['frontend/src/lib/gatewaySession.ts', '+9 −2'], ['pkg/gateway/session_cookie.go', '新增']];
   var captions = {
-    chat: ['对话 · 主代理', ['对话抽屉：新聊天、搜索、按项目筛选；会话标题下方是所属项目。', '新聊天：问候语 + 居中输入框 + 快捷入口；左上角项目胶囊默认选中上次用的项目，点开可搜索、选项目或“打开文件夹…”。没有“不在项目中工作”。', '选的文件夹还没有项目时，胶囊显示“新项目”，第一条消息发出时创建；只看文件夹本身，不看上级目录。', '项目或文件夹未判断过信任时，发送前先问一次（与终端同一句，共用记录）。', '打开文件夹：系统原生式对话框——后退 / 前进 / 上一层（⌫）、当前位置下拉、位置与项目侧栏；单击选中、双击或回车进入；“选择”取选中项，未选中则取当前文件夹。~/.forebrain 不可选。', '“＋”菜单：附件、目标，下方列出可用技能；底部提示 @ 与 / 的用法。附件和粘贴的截图先选“保存到”项目里的目录，记住上次的选择。', '输入框底栏：左“＋”、模式（Agent / 计划）、审批模式；右上下文圆环（超过 80% 变警告色，点开工作台“上下文”）、模型、推理强度、发送。模式、模型与推理强度只作用于本会话。', '模型不支持图片时（本轮新增）：带图消息照常留在对话里，下方提示“消息已保留，未发送”；对话里还有图片时，换模型前每条新消息都这样。模型菜单里支持图片的模型标“支持图片”，换好后发“继续”，模型能看到原图。提示不落库，刷新后只剩消息。', '用户消息悬停出现“回到这里”：选恢复代码和对话、只恢复对话或只恢复代码；列出将恢复的文件，标出之后被改过的；终端命令的改动不撤回。恢复后对话里留一行，可撤销。', '思考块上方“思考了 N 秒”；结束行“已工作 · 首 token · 完成/总数 · 时间”。', '另一端运行中：发送被拒绝，消息放回输入框。目录已不存在：只能查看。', 'MCP 只在开对话时启动一次，失败提示放在对话开头，原始错误收在“查看详情”。', '工作台：概览（运行中的代理、待办、计划、MCP、用量）、上下文（占用与明细）、工作目录（每个节点可编辑、删除，目录可新建文件）、变更文件（本会话改过的文件，可对比、编辑、撤销变更）。工具调用、思考、用户消息都在消息窗口里实时显示，与终端一致。', '顶栏右侧依次是心跳、工作台、语言。', '审批模式只对本会话生效：Read Only / Default / Full Access；全局默认在“设置 → 审批默认”。', '心跳只作用于当前对话：未设置是普通按钮，运行中高亮并显示“每 N 分钟”，暂停显示“已暂停”。弹层里可暂停、改间隔与内容、删除，底部列出其他对话的心跳。', '菜单栏可折叠成图标栏（64px），悬停显示名称。']],
-    projects: ['项目 · 主代理', ['本主代理的项目；进入项目空间读写它的规则、会话、记忆、权限、MCP、技能、定时任务。', '列表操作：新建、置顶、删除（去掉了归档，不常用的按修改时间沉底）。', '“新建项目”打开弹窗：先选目录（可“浏览…”），项目名默认取目录名；目录已是项目时提示并可打开。项目根就是所选目录，代码仓库、普通文件夹都可以；终端启动目录、对话里选的新文件夹也会自动成为项目。', '删除项目会同时删除它的对话和定时任务，需输入项目名确认；目录里的文件不动。目录已不存在的项目标“目录不存在”。']],
-    project: ['项目空间 · 项目', ['顶部一行：面包屑（项目 › 名称）、目录、信任状态，下面是标签页；没有单独的标题层。', '标签页：概览、规则指令、会话、记忆、权限、MCP、技能、定时任务、通道（定时任务与通道从菜单栏移到这里）。', '技能标签与主代理技能页同一套：离线安装、在线安装、发现并安装、新建技能、查看。定时任务、通道默认属于本项目；新建定时任务在弹窗里。', '项目级权限、MCP、技能只要求项目已信任，不要求是 git 仓库。', 'MCP 标签依次列出本项目、主代理、全局的 MCP，只增删改本项目的：全局与主代理的行只读，操作列指向能改的页面；项目里新加、还没同意的行给“允许 / 拒绝”。', '点面包屑“项目”回到列表。']],
+    chat: ['对话 · 主代理', ['登录后首页就是新对话页；新对话还没有标题，顶栏左侧不写“未命名对话”，也没有“工作台”按钮，发出第一条消息后才出现。', '对话抽屉：新聊天、搜索、按项目筛选；会话标题下方是所属项目。', '新聊天：问候语 + 居中输入框 + 快捷入口；左上角项目胶囊默认选中上次用的项目，点开可搜索、选项目或“打开文件夹…”。没有“不在项目中工作”。', '选的文件夹还没有项目时，胶囊显示“新项目”，第一条消息发出时创建；只看文件夹本身，不看上级目录。', '项目或文件夹未判断过信任时，发送前先问一次（与终端同一句，共用记录）。', '打开文件夹：系统原生式对话框——后退 / 前进 / 上一层（⌫）、当前位置下拉、位置与项目侧栏；单击选中、双击或回车进入；“选择”取选中项，未选中则取当前文件夹。~/.forebrain 不可选。', '“＋”菜单：附件、目标，下方列出可用技能；底部提示 @ 与 / 的用法。附件和粘贴的截图先选“保存到”项目里的目录，记住上次的选择。', '输入框底栏：左“＋”、模式（Agent / 计划）、审批模式；右上下文圆环（超过 80% 变警告色，点开工作台“上下文”）、模型、推理强度、发送。模式、模型与推理强度只作用于本会话。', '模型不支持图片时（本轮新增）：带图消息照常留在对话里，下方提示“消息已保留，未发送”；对话里还有图片时，换模型前每条新消息都这样。模型菜单里支持图片的模型标“支持图片”，换好后发“继续”，模型能看到原图。提示不落库，刷新后只剩消息。', '用户消息悬停出现“回到这里”：选恢复代码和对话、只恢复对话或只恢复代码；列出将恢复的文件，标出之后被改过的；终端命令的改动不撤回。恢复后对话里留一行，可撤销。', '思考块上方“思考了 N 秒”；结束行“已工作 · 首 token · 完成/总数 · 时间”。', '另一端运行中：发送被拒绝，消息放回输入框。目录已不存在：只能查看。', 'MCP 只在开对话时启动一次，失败提示放在对话开头，原始错误收在“查看详情”。', '工作台：概览（运行中的代理、待办、计划、MCP、用量）、上下文（占用与明细）、工作目录（每个节点可编辑、删除，目录可新建文件）、变更文件（本会话改过的文件，可对比、编辑、撤销变更）。工具调用、思考、用户消息都在消息窗口里实时显示，与终端一致。', '顶栏右侧依次是心跳、工作台、语言。', '审批模式只对本会话生效：Read Only / Default / Full Access；全局默认在“设置 → 审批默认”。', '心跳只作用于当前对话：未设置是普通按钮，运行中高亮并显示“每 N 分钟”，暂停显示“已暂停”。弹层里可暂停、改间隔与内容、删除，底部列出其他对话的心跳。', '菜单栏可折叠成图标栏（64px），悬停显示名称。']],
+    projects: ['项目 · 主代理', ['本主代理的项目；进入项目空间读写它的规则、会话、记忆、权限、MCP、技能、定时任务。', '表格：项目（名称可点进项目空间，旁边标置顶 / 未信任 / 目录不存在）、路径、说明、对话数、更新时间；“项目”“更新时间”列头排序，置顶的始终在最上面；下方分页。操作栏图标按钮：进入项目空间、置顶 / 取消置顶、删除。', '“新建项目”打开弹窗：先选目录（可“浏览…”），项目名默认取目录名；目录已是项目时提示并可打开。项目根就是所选目录，代码仓库、普通文件夹都可以；终端启动目录、对话里选的新文件夹也会自动成为项目。', '删除项目会同时删除它的对话和定时任务，需输入项目名确认；目录里的文件不动。目录已不存在的项目标“目录不存在”。']],
+    project: ['项目空间 · 项目', ['顶栏是面包屑（项目 › 名称）、目录、信任状态，与技能工坊的面包屑一致；顶栏下面直接是标签页，没有单独的标题层。', '标签页：项目设置、规则指令、会话、记忆、权限、MCP、技能、定时任务、通道（定时任务与通道从菜单栏移到这里）。', '技能标签与主代理技能页同一套：离线安装、在线安装、发现并安装、新建技能、查看。定时任务、通道默认属于本项目，都是表格：定时任务的启用开关即暂停 / 恢复，操作栏是立即执行、执行记录、删除，新建在弹窗里；通道操作栏只有编辑（弹窗填该通道的配置项），没配置的通道不能启用。', '各标签没有标题：按钮在表格上方工具栏的右侧，说明写在表格下方。', '项目设置标签（原“概览”）直接是表单，没有外框和表单标题：项目名、目录、说明、项目指令、记忆作用域（共享 / 仅本项目）、信任与目录外读取开关；底部“保存”右侧是“删除项目”。规则指令标签只放规则文件列表，记忆标签只放项目记忆列表。', '项目级权限、MCP、技能只要求项目已信任，不要求是 git 仓库。', 'MCP 标签依次列出本项目、主代理、全局的 MCP，只增删改本项目的：全局与主代理的行只读，操作列指向能改的页面；项目里新加、还没同意的行给“允许 / 拒绝”。', '点面包屑“项目”回到列表。']],
     rules: ['规则指令 · 主代理', ['本主代理的规则文件：AGENTS.md（行为准则）、SOUL.md（性格与做事方式）、USER.md（关于你），位于主代理工作区根目录。', '列表 + 上方按钮 + 弹窗：点“编辑”在弹窗里改；“新建规则文件”弹窗只列出支持、且还没创建的文件。与项目空间的“规则指令”标签同一套。', '文件都在同一个编辑器里改：.md 用 Milkdown Crepe（MIT）所见即所得，代码块可编辑、选语言、带高亮，输入 / 插入块，底部可切到源码；源码和其他文件用 CodeMirror 6（MIT），带行号和高亮。', '保存后从新会话开始生效，不打断正在进行的会话。']],
     workshop: ['技能工坊', ['会话页的超集：同样的消息流、输入框（加号、Agent/计划、审批、模型、推理强度）、回到这里、心跳和工作台；顶部多了版本与“发布 vN”。', '从主代理技能页或项目技能页进入（新建技能、查看、发现并安装），左上角返回来源页。主代理入口的工作目录是主代理技能目录，项目入口是项目根目录。', '工作台：会话页的概览、上下文、工作目录、变更文件，加上测试用例、评测、触发描述、版本；还没有技能时后四个不可用。变更文件列出草稿相对当前版本改过的文件，每个都能对比、编辑、撤销变更。', '新建、编辑都在弹窗里；所有改动写进草稿，发布才生成新版本。“查看”接着这个技能最近的工坊会话；右上角可开新会话。', '发现并安装：候选直接列在回复里，安装后即 v1，工作台随之可用。']],
     skills: ['技能 · 主代理', ['本主代理能用的全部技能：本主代理的 + 共享 + 内置。页面只有一层：标题行（说明文案在“技能”右侧，按钮依次是离线安装、在线安装、发现并安装、新建技能、刷新）、搜索行、列表。', '列表上方：离线安装、在线安装（弹窗）、发现并安装、新建技能；本主代理的技能可启停、删除，点“查看”（眼睛图标）进技能工坊改进。状态列显示当前版本号；草稿不能启用；已发布但有改动的标“有未发布的修改”，上游有新版本的标“有更新”。（本轮改动）', '设置里的共享技能库没有工坊，只有离线安装与在线安装。']],
@@ -2389,7 +2432,7 @@
     S.newProj = t.name; S.newCreated = t.isNew;
   }
   function freshNew() {
-    S.page = 'chat'; S.projectSession = ''; S.session = sessionsOf().length - 1; S.newProj = ''; S.newCreated = false; S.atts = [];
+    S.page = 'chat'; S.projectSession = ''; S.session = sessionsOf().length - 1; S.newProj = ''; S.newCreated = false; S.atts = []; S.bench = false;
     var last = projects.filter(function (p) { return p.last; })[0];
     S.pick = { mode: 'project', proj: last ? last.n : '', folder: '' };
   }
@@ -2667,19 +2710,21 @@
       acc('spill', '大工具输出', '1', kvs('shell · go test ./pkg/...', '412 KB') + '<span class="hint mono">完整输出：state/tool-output/run_8f2c/7.txt</span>') + '</div>';
     return h;
   }
-  var iterJumps = [['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
-    ['thread', '思考耗时 · 首 token'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
+  var iterJumps = [['home', '登录后首页（新对话）'], ['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
+    ['thread', '思考耗时 · 首 token'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
     ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'],
-    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
+    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
   function iterJump(k) {
     resetModal(); S.tenant = 'main'; S.bench = false;
     var chat0 = function () { S.page = 'chat'; S.projectSession = ''; S.session = 0; };
-    if (k === 'newproj') { freshNew(); S.pjPop = true; }
+    if (k === 'home') freshNew();
+    else if (k === 'newproj') { freshNew(); S.pjPop = true; }
     else if (k === 'newfolder') { freshNew(); S.pick.mode = 'folder'; S.pick.folder = '~/photo'; }
     else if (k === 'browser') { freshNew(); fbOpen('~/workspace', 'chat'); }
     else if (k === 'trust') { freshNew(); S.pick.mode = 'folder'; S.pick.folder = '~/photo'; S.trust = true; S.trustFor = { name: 'photo', path: '~/photo', isNew: true, trust: 'unknown' }; }
     else if (k === 'attach' || k === 'paste') { chat0(); S.attach = true; S.attachShot = k === 'paste'; S.attachDir = S.lastAttachDir; }
     else if (k === 'thread') chat0();
+    else if (k === 'longtitle') { chat0(); S.projectSession = '排查 gateway 在高并发下偶发 502：上游连接池耗尽、重试风暴与超时配置不一致的根因'; }
     else if (k === 'busy') { chat0(); S.demo = 'busy'; }
     else if (k === 'missing') { S.page = 'chat'; S.projectSession = ''; S.session = sessionsOf().indexOf('改写 tulkun 的 README'); }
     else if (k === 'mcp') { chat0(); S.demo = 'mcp'; }
@@ -2716,6 +2761,9 @@
     else if (k === 'wsdisc') wsEnter({ mode: 'discover', scope: 'agent', skill: '' });
     else if (k === 'wsproj') wsEnter({ mode: 'create', scope: 'project', skill: '' });
     else if (k === 'pskills') { S.page = 'project'; S.projTab = 'skills'; }
+    else if (k === 'pchanedit') { S.page = 'project'; S.projTab = 'channels'; S.fm = { kind: 'chanedit', a: '1', b: '' }; }
+    else if (k === 'psessions') { S.page = 'project'; S.projTab = 'sessions'; S.memSort.psessions = null; }
+    else if (k === 'poverview') { S.page = 'project'; S.projTab = 'overview'; }
     else if (k === 'pcron' || k === 'pchannels' || k === 'pcronnew') { S.page = 'project'; S.projTab = k === 'pchannels' ? 'channels' : 'cron'; if (k === 'pcronnew') { S.cronModal = true; S.cronCustom = false; } }
     else if (k === 'projform') { S.page = 'projects'; S.projectForm = true; }
     else if (k === 'rulesp') S.page = 'rules';
@@ -2742,10 +2790,11 @@
     else if (k === 'mcp409') { S.page = 'mcp'; mcpOpen('new', 'agent', ''); S.mcpErr = true; S.mcpSaveName = 'codegraph'; }
     else if (k === 'pager') { S.page = 'memories'; S.memSort = {}; }
     else if (k === 'memsort') { S.page = 'memories'; S.memSort = { agent: { key: 'created', dir: 'asc' } }; }
+    else if (k === 'projectsp') { S.page = 'projects'; S.memSort.projects = null; S.pinned = { 'forebrain-harness': true }; }
     else if (k === 'toolsp' || k === 'toolargs') { S.page = 'tools'; S.pg.tools = 1; S.toolOpen = k === 'toolargs' ? 'shell' : ''; }
     else if (k === 'hooksp') { S.page = 'settings'; S.settingsTab = 'hooks'; }
     else if (k === 'memedit') { S.page = 'memories'; S.memEdit = 'agent:2'; }
-    else if (k === 'focus') { S.page = 'project'; S.projTab = 'rules'; S.focusId = 'proj-instr'; }
+    else if (k === 'focus') { S.page = 'project'; S.projTab = 'overview'; S.focusId = 'proj-instr'; }
     else if (k === 'projdel') { S.page = 'projects'; S.projDel = 'docs-site'; S.projDelBusy = false; }
   }
   function handleIter(d) {
@@ -2771,8 +2820,8 @@
     if (d.pg) { var pq = d.pg.split(':'); S.pg[pq[0]] = Number(pq[1]); return true; }
     if (d.memsort) {
       var ms = d.memsort.split(':'), cur = memSortOf(ms[0]);
-      S.memSort[ms[0]] = cur.key === ms[1] ? { key: ms[1], dir: cur.dir === 'desc' ? 'asc' : 'desc' } : { key: ms[1], dir: 'desc' };
-      S.pg['mem-' + ms[0]] = 1;
+      S.memSort[ms[0]] = cur.key === ms[1] ? { key: ms[1], dir: cur.dir === 'desc' ? 'asc' : 'desc' } : { key: ms[1], dir: ms[2] || 'desc' };
+      S.pg['mem-' + ms[0]] = 1; S.pg[ms[0]] = 1;
       return true;
     }
     if (d.act === 'mcptest') {
@@ -2865,6 +2914,9 @@
     if (d.act === 'ctxwarn') { S.bench = true; S.benchTab = 'context'; return true; }
     if (d.act === 'mcpdetail') { S.mcpDetail = !S.mcpDetail; return true; }
     if (d.projdel) { S.projDel = d.projdel; S.projDelBusy = false; return true; }
+    if (d.projpin) { S.pinned[d.projpin] = !S.pinned[d.projpin]; return true; }
+    if (d.chansw) { S.chanOn[d.chansw] = !S.chanOn[d.chansw]; return true; }
+    if (d.cronsw) { S.cronOff[d.cronsw] = !S.cronOff[d.cronsw]; return true; }
     if (d.act === 'delclose') { S.projDel = ''; return true; }
     if (d.act === 'delok') { S.projDel = ''; return true; }
     return false;
@@ -2872,7 +2924,7 @@
 
   function ic(name, cls) { return '<i data-lucide="' + name + '"' + (cls ? ' class="' + cls + '"' : '') + '></i>'; }
   function mark(size) { return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 32 32" aria-hidden="true"><rect class="mk-fill" width="32" height="32" rx="7"/><path class="mk-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="mk-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg>'; }
-  function scope(kind) { return kind === 'agent' ? '<span class="scope agent">' + ic('user-round') + '主代理 · ' + S.tenant + '</span>' : kind === 'project' ? '<span class="scope project">' + ic('folder-git-2') + '项目</span>' : '<span class="scope global">' + ic('globe') + '全局</span>'; }
+  function scope(kind) { return kind === 'agent' ? '<span class="scope agent">' + ic('user-round') + '主代理</span>' : kind === 'project' ? '<span class="scope project">' + ic('folder-git-2') + '项目</span>' : '<span class="scope global">' + ic('globe') + '全局</span>'; }
   function sel(opts, val, style) { return '<select class="field"' + (style ? ' style="' + style + '"' : '') + '>' + opts.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>'; }
   function sessionsOf() { return tenants[S.tenant].sessions; }
 
@@ -2880,9 +2932,7 @@
   function rail() {
     var rc = S.rc;
     var h = '<aside class="rail" aria-label="菜单栏">' +
-      '<div class="r-brand">' + mark(28) + '<div class="wm"><b>Forebrain</b> Harness<small>v0.3.0</small></div>' +
-      (rc ? '' : '<button type="button" class="r-collapse" data-act="rc" title="折叠菜单栏" aria-label="折叠菜单栏" aria-expanded="true">' + ic('panel-left-close') + '</button>') + '</div>' +
-      (rc ? '<button type="button" class="r-collapse r-expand" data-act="rc" data-tip="展开菜单栏" aria-label="展开菜单栏" aria-expanded="false">' + ic('panel-left-open') + '</button>' : '');
+      '<div class="r-brand">' + mark(28) + '<div class="wm"><b>Forebrain</b> Harness<small>v0.3.0</small></div></div>';
     if (rc) {
       h += '<button type="button" class="r-tenant-mini" data-act="tmenu" aria-haspopup="listbox" aria-expanded="' + S.tmenu + '" data-tip="当前主代理：' + S.tenant + '" aria-label="当前主代理：' + S.tenant + '">' + S.tenant.charAt(0).toUpperCase() + '</button>';
     } else {
@@ -2896,7 +2946,8 @@
     });
     h += '</nav><div class="r-foot">' +
       '<button type="button" class="fl' + (S.page === 'settings' ? ' on' : '') + '" data-go="settings"' + (rc ? ' data-tip="设置" aria-label="设置"' : '') + '>' + ic('settings') + '<span class="lbl">设置</span></button>' +
-      '<button type="button" class="theme" data-act="railtheme"' + (rc ? ' data-tip="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '"' : ' title="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '"') + ' aria-label="菜单栏切换为' + (S.rail === 'dark' ? '浅色' : '深色') + '">' + ic(S.rail === 'dark' ? 'sun' : 'moon') + '</button></div>';
+      // 2026-10-18: collapse / expand sits where the light-dark switch was, at the right of 设置 (under it when collapsed)
+      '<button type="button" class="r-collapse" data-act="rc" data-tip="' + (rc ? '展开菜单栏' : '折叠菜单栏') + '" aria-label="' + (rc ? '展开菜单栏' : '折叠菜单栏') + '" aria-expanded="' + !rc + '">' + ic(rc ? 'panel-left-open' : 'panel-left-close') + '</button></div>';
     return h + '</aside>';
   }
 
@@ -2915,6 +2966,11 @@
   }
 
   function curTitle() { return S.projectSession || sessionsOf()[S.session]; }
+  // what the top bar shows: a new chat that has sent its first message is named after it — first line, at most 50 characters
+  function shownTitle() { var t = curTitle(); return t === '未命名对话' && S.newProj ? sessionTitleOf('先看一下这个目录里有什么。') : t; }
+  function sessionTitleOf(msg) { var line = msg.trim().split(/\r?\n/)[0], r = Array.from(line); return r.length > 50 ? r.slice(0, 50).join('') + '...' : line; }
+  // the chat page before its first message: no title, no 工作台
+  function isFreshChat() { return S.page === 'chat' && curTitle() === '未命名对话' && !S.newProj; }
   function beatsOf() { return tenants[S.tenant].beats; }
   function beatStatus(b) { return b.paused ? '已暂停' : '每 ' + b.min + ' 分钟'; }
   function hbChip() {
@@ -2946,7 +3002,7 @@
   }
 
   function drawer() {
-    var h = '<aside class="drawer" aria-label="对话抽屉" style="left:' + railW() + 'px"><div class="drawer-h"><b>对话<span>主代理 ' + S.tenant + '</span></b><button type="button" class="icon-btn" data-act="drawer" aria-label="收起">' + ic('x') + '</button></div>' +
+    var h = '<aside class="drawer" aria-label="对话抽屉" style="left:' + railW() + 'px"><div class="drawer-h"><b>对话</b><button type="button" class="icon-btn" data-act="drawer" aria-label="收起">' + ic('x') + '</button></div>' +
       '<div class="drawer-b" style="grid-template-rows:auto auto auto auto 1fr auto"><button type="button" class="d-new" data-act="newchat">' + ic('plus') + '新聊天</button>' +
       '<div class="d-search">' + ic('search') + '搜索会话</div><div class="d-filter">' + '<select class="field" data-dproj="1" aria-label="按项目筛选">' + ['全部项目'].concat(projects.map(function (p) { return p.n; })).map(function (o) { return '<option' + (o === S.dproj ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select></div><div class="d-cap">会话</div><ul class="d-list">';
     sessionsOf().forEach(function (s, i) {
@@ -2958,15 +3014,26 @@
     return h + '</ul><div class="d-foot">每个对话都属于一个项目；项目空间里也列出该项目的对话。</div></div></aside>';
   }
 
+  // the top bar's right end on every page; the rail's light/dark switch sits last (owner 2026-10-18, moved from the rail foot)
+  function topRight() {
+    var to = S.rail === 'dark' ? '浅色' : '深色';
+    return '<button type="button" class="chip-btn" data-fm="agentnew">' + ic('plus') + '新建主代理</button><button type="button" class="chip-btn">' + ic('languages') + '中文</button>' +
+      '<button type="button" class="chip-btn sq" data-act="railtheme" data-tip="菜单栏切换为' + to + '" data-tip-pos="bottom" aria-label="菜单栏切换为' + to + '">' + ic(S.rail === 'dark' ? 'sun' : 'moon') + '</button>';
+  }
   function topbar() {
     if (S.page === 'workshop' && S.ws) return wsTopbar();
-    var t = S.page === 'chat' ? (S.projectSession || sessionsOf()[S.session]) : titles[S.page];
-    var h = '<header class="top"><span class="t">' + t + '</span>';
-    if (S.page === 'chat') { var cp = curProject(); if (cp) h += '<button type="button" class="scope project" data-go="project" style="border:0;cursor:pointer">' + ic(cp.git === false ? 'folder' : 'folder-git-2') + '项目 · ' + cp.n + '</button>'; h += '<span class="meta">' + curModel() + '</span>'; }
+    var t = S.page === 'chat' ? shownTitle() : titles[S.page];
+    // 2026-10-18: the project space names itself with the breadcrumb in the top bar, as the workshop does; the tabs sit right under it
+    // a new chat has no title yet (owner 2026-10-18): its top bar starts with nothing on the left, and 工作台 waits for the first message
+    var freshChat = isFreshChat();
+    var h = S.page === 'project'
+      ? '<header class="top"><div class="crumb"><button type="button" class="btn link" data-nav="projects">项目</button>' + ic('chevron-right') + '<span class="t-name" data-tip="forebrain-harness" data-tip-pos="bottom" data-tip-trunc="1">forebrain-harness</span></div><span class="meta mono">~/workspace/forebrain-harness</span><span class="badge ok">已信任</span>'
+      : '<header class="top">' + (freshChat ? '' : '<span class="t" data-tip="' + esc(t) + '" data-tip-pos="bottom" data-tip-trunc="1">' + t + '</span>');
+    if (S.page === 'chat') { var cp = curProject(); if (cp) h += '<button type="button" class="scope project" data-go="project" data-tip="进入项目空间" data-tip-pos="bottom" style="border:0;cursor:pointer">' + ic(cp.git === false ? 'folder' : 'folder-git-2') + cp.n + '</button>'; }
     h += '<span class="sp"></span>';
     if (S.page === 'chat' && curTitle() !== '未命名对话') h += hbChip();
-    if (S.page === 'chat') h += '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台<span class="badge-n">2</span></button>';
-    return h + '<button type="button" class="chip-btn" data-fm="agentnew">' + ic('plus') + '新建主代理</button>' + '<span class="chip-btn">' + ic('languages') + '中文</span></header>';
+    if (S.page === 'chat' && !freshChat) h += '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台' + (S.newProj ? '' : '<span class="badge-n">2</span>') + '</button>';
+    return h + topRight() + '</header>';
   }
 
   function tnActs(key, isDir, name) {
@@ -3031,7 +3098,17 @@
   }
 
   // the page's only top row: title, one-line description, then the page's buttons (no separate page-title layer)
-  function fh(title, desc, acts) { return '<div class="flat-h"><h2>' + title + '</h2>' + (desc ? '<span class="desc">' + desc + '</span>' : '') + (acts ? '<div class="row">' + acts + '</div>' : '') + '</div>'; }
+  // No page or tab draws a title of its own (owner 2026-10-18: the project space, the main agent's pages, 设置): the top bar or the
+  // tab name says it. Buttons join the toolbar above the table, right of the search and filters; the description sits under the
+  // table with the page's other notes; a form lies flat in its tab.
+  function tabTools(left, acts) { return '<div class="row">' + (left || '') + '<span style="flex:1"></span>' + (acts || '') + '</div>'; }
+  function tabNote() { var t = Array.prototype.slice.call(arguments).filter(Boolean).join(''); return t ? '<span class="hint">' + t + '</span>' : ''; }
+  // a labelled radio group, the form kits' way (owner 2026-10-18); opts: [value, label, swatch colour, description]
+  function radioField(label, name, opts, cur, hint, vertical) {
+    return '<div class="lb" role="radiogroup" aria-labelledby="rg-' + name + '"><span id="rg-' + name + '">' + label + '</span><div class="radios' + (vertical ? ' v' : '') + '">' +
+      opts.map(function (o) { return '<label class="radio' + (o[3] ? ' desc' : '') + '"><input type="radio" name="' + name + '" value="' + o[0] + '"' + (cur === o[0] ? ' checked' : '') + '>' + (o[2] ? '<i class="swc" style="background:' + o[2] + '"></i>' : '') + (o[3] ? '<span class="rd"><b>' + o[1] + '</b><span>' + o[3] + '</span></span>' : o[1]) + '</label>'; }).join('') +
+      '</div>' + (hint ? '<span class="hint">' + hint + '</span>' : '') + '</div>';
+  }
   function ph(title, desc, kind, acts) {
     // agent pages carry no badge: the rail's agent selector already says which agent this is
     return '<div class="ph"><div>' + (kind === 'agent' ? '' : '<div class="row" style="margin-bottom:4px">' + scope(kind) + '</div>') + '<h1>' + title + '</h1><p>' + desc + '</p></div><div class="acts">' + (acts === undefined ? '<button type="button" class="btn">' + ic('rotate-cw') + '刷新</button>' : acts) + '</div></div>';
@@ -3187,8 +3264,9 @@
   // layers: the scopes this page shows. A page with one layer (设置 · MCP) has no source column and no source filter.
   function mcpBlock(scope, title, rows, own, where, desc, layers) {
     var names = { global: '全局', agent: '主代理', project: '项目' }, multi = layers.length > 1;
-    return '<div class="flat">' + fh(title, desc, '<button type="button" class="btn sm pri" data-mdw="new:' + scope + '">' + ic('plus') + '添加 MCP 服务</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
-      '<div class="row"><input class="field" id="mcp-q-' + scope + '" placeholder="搜索 MCP 服务" style="max-width:240px">' + (multi ? sel(['全部来源'].concat(layers.slice().reverse().map(function (l) { return names[l]; })), '全部来源', 'width:110px') : '') + '</div>' +
+    var btns = '<button type="button" class="btn sm pri" data-mdw="new:' + scope + '">' + ic('plus') + '添加 MCP 服务</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>';
+    var filters = '<input class="field" id="mcp-q-' + scope + '" placeholder="搜索 MCP 服务" style="max-width:240px">' + (multi ? sel(['全部来源'].concat(layers.slice().reverse().map(function (l) { return names[l]; })), '全部来源', 'width:110px') : '');
+    return '<div class="flat">' + tabTools(filters, btns) +
       '<div class="tb-wrap"><table class="tb mcp-tb"><colgroup><col style="width:168px">' + (multi ? '<col style="width:84px">' : '') + '<col><col style="width:108px"><col style="width:148px"><col style="width:56px"><col style="width:88px"></colgroup>' +
       '<thead><tr><th>MCP 服务</th>' + (multi ? '<th>来源</th>' : '') + '<th>命令或地址</th><th>类型</th><th>状态</th><th>启用</th><th class="r">操作</th></tr></thead><tbody>' +
       rows.map(function (r) {
@@ -3197,7 +3275,7 @@
           (multi ? '<td>' + mcpSrc(r.scope) + '</td>' : '') +
           '<td><span class="mcp-target mono" title="' + esc(r.t) + '">' + esc(r.t) + '</span></td><td>' + mcpType(r) + '</td>' +
           '<td>' + mcpStatusCell(r) + '</td><td>' + mcpEnableCell(r, mine) + '</td><td class="r">' + mcpActions(r, mine) + '</td></tr>';
-      }).join('') + '</tbody></table></div>' + pager(rows.length, 10, 'mcp-' + scope) + '<span class="hint">' + where + '</span></div>';
+      }).join('') + '</tbody></table></div>' + pager(rows.length, 10, 'mcp-' + scope) + tabNote(desc, where) + '</div>';
   }
   function mcpKV(rows, add, ro) {
     if (ro && !(rows || []).length) return '<span class="hint">未设置</span>';
@@ -3287,7 +3365,7 @@
   }
   function mcpDrawer() {
     var w = S.mdw, row = w.name ? mcpRowOf(w.scope, w.name) : null, saving = S.mcpSaving;
-    var where = w.scope === 'project' ? '项目' : w.scope === 'agent' ? '主代理 ' + S.tenant : '全局';
+    var where = w.scope === 'project' ? '项目' : w.scope === 'agent' ? '主代理' : '全局';
     var title = w.mode === 'new' ? '添加 MCP 服务 · ' + where : (w.mode === 'edit' ? '编辑 MCP 服务 · ' : 'MCP 服务 · ') + w.name;
     return '<div class="mask dw-mask"><aside class="dw" role="dialog" aria-label="' + title + '"><div class="dw-h"><b>' + title + '</b>' + (w.mode === 'view' ? '<span class="badge gray">只读</span>' : '') +
       '<button type="button" class="icon-btn" data-act="mdwclose" aria-label="关闭">' + ic('x') + '</button></div><div class="dw-b">' + mcpFormBody(w, row) + '</div>' +
@@ -3312,7 +3390,12 @@
   function fmModal() {
     var f = S.fm, k = f.kind, title = '', body = '', ok = '保存', wide = false, xl = false, danger = false, okAct = 'fmok';
     var hookEvents = ['PreToolUse', 'PostToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStop', 'PreCompact', 'PostCompact'];
-    if (k === 'rulenew') {
+    if (k === 'chanedit') {
+      var ch = projChannels[Number(f.a)], hasSecret = ch[3].some(function (x) { return x[3] && x[2]; });
+      title = '编辑通道 · ' + ch[0];
+      body = '<div class="grid2">' + ch[3].map(function (x) { return '<label class="lb"><span>' + x[0] + '<span class="key">' + x[1] + '</span></span><input class="field mono" value="' + x[2] + '"' + (x[3] && !x[2] ? ' type="password"' : '') + ' autocomplete="off"></label>'; }).join('') + '</div>' +
+        (hasSecret ? '<span class="hint">密钥已脱敏，不修改即保留原值。</span>' : '');
+    } else if (k === 'rulenew') {
       title = '新建规则文件'; ok = '创建';
       body = f.a === 'agent'
         ? '<label class="lb">文件' + sel(['USER.md — 关于你：称呼、时区、沟通偏好'], 'USER.md — 关于你：称呼、时区、沟通偏好') + '</label><span class="hint">只列出会被读取、且还没创建的文件。</span>'
@@ -3337,7 +3420,7 @@
     } else if (k === 'verify') {
       var po = f.a === 'project'; title = po ? '规则匹配测试' : '判定验证'; ok = '验证'; okAct = 'fmverify'; wide = true;
       body = '<div class="row">' + sel(toolNames, 'shell', 'width:200px') + '<input class="field mono" id="verify-input" style="flex:1" value="git push origin main"></div>' +
-        (S.fmResult ? kvList([['判定', '<span class="badge warn">需要审批</span>'], ['命中规则', '<span class="mono">shell · git push:*（询问）</span>'], ['命中位置', po ? '本项目规则' : '主代理 ' + S.tenant]]) : '<span class="hint">' + (po ? '只按本项目的规则匹配。' : '按本主代理已记住的规则与当前审批模式判定。') + '</span>');
+        (S.fmResult ? kvList([['判定', '<span class="badge warn">需要审批</span>'], ['命中规则', '<span class="mono">shell · git push:*（询问）</span>'], ['命中位置', po ? '本项目规则' : '主代理规则']]) : '<span class="hint">' + (po ? '只按本项目的规则匹配。' : '按本主代理已记住的规则与当前审批模式判定。') + '</span>');
     } else if (k === 'agentnew') {
       title = '新建主代理'; ok = '创建';
       body = '<label class="lb">名称<input class="field mono" id="ag-name" placeholder="小写字母、数字与短横线，如 docs" autocomplete="off"></label><span class="hint">创建后切换到这个主代理。</span>';
@@ -3391,7 +3474,7 @@
   function verState(n) { var v = verOf(n); return v.cur === 0 ? 'draft' : v.draft ? 'pending' : 'pub'; }
   function srcBadge(src) {
     if (src === 'project') return '<span class="scope project">项目</span>';
-    if (src === 'agent') return '<span class="scope agent">主代理 ' + S.tenant + '</span>';
+    if (src === 'agent') return '<span class="scope agent">主代理</span>';
     if (src === 'shared' || src === 'sharedown') return '<span class="scope global">共享</span>';
     return '<span class="scope global">内置</span>';
   }
@@ -3404,10 +3487,9 @@
       '<button type="button" class="btn sm" data-instmodal="online:' + scope + '">' + ic('globe') + '在线安装</button>' +
       (scope === 'shared' ? ''
         : '<button type="button" class="btn sm" data-wsopen="discover:' + scope + '">' + ic('search') + '发现并安装</button><button type="button" class="btn sm pri" data-wsopen="create:' + scope + '">' + ic('plus') + '新建技能</button>');
-    var h = (desc ? '<div class="flat">' + fh(title, desc, acts + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>')
-      : '<div class="card"><div class="card-h"><h3>' + title + '</h3><div class="row">' + acts + '</div></div>') +
-      '<div class="row"><input class="field" id="sk-q-' + scope + '" placeholder="搜索技能" style="max-width:240px">' + sel(['全部来源', '项目', '主代理', '共享', '内置'], '全部来源', 'width:110px') + '<span style="flex:1"></span>' +
-      (count ? '<span class="hint">已选 ' + count + ' 个</span>' : '') + '<button type="button" class="btn sm"' + (count ? '' : ' disabled') + '>' + ic('download') + '下载所选</button></div>' +
+    var refresh = '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>';
+    var h = '<div class="flat"><div class="row"><input class="field" id="sk-q-' + scope + '" placeholder="搜索技能" style="max-width:240px">' + sel(['全部来源'].concat(scope === 'project' ? ['项目', '主代理'] : scope === 'agent' ? ['主代理'] : []).concat(['共享', '内置']), '全部来源', 'width:110px') + '<span style="flex:1"></span>' +
+      (count ? '<span class="hint">已选 ' + count + ' 个</span>' : '') + '<button type="button" class="btn sm"' + (count ? '' : ' disabled') + '>' + ic('download') + '下载所选</button>' + acts + refresh + '</div>' +
       '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:30px"><input type="checkbox" aria-label="全选" data-selall="' + scope + '" data-n="' + rows.length + '"' + (count === rows.length ? ' checked' : '') + '></th><th>技能</th><th>来源</th><th style="text-align:right">状态</th><th class="r" style="width:110px">操作</th></tr></thead><tbody>';
     rows.forEach(function (r, i) {
       var mine = own.indexOf(r.src) >= 0;
@@ -3422,7 +3504,7 @@
           mine && r.src !== 'builtin' ? act('trash-2', '删除', '', 'dgr', r.n) : actSlot()
         ]) + '</td></tr>';
     });
-    return h + '</tbody></table></div>' + pager(rows.length, 10, 'skills-' + scope) + '<span class="hint">' + where + '</span></div>';
+    return h + '</tbody></table></div>' + pager(rows.length, 10, 'skills-' + scope) + tabNote(desc, where) + '</div>';
   }
   function verChip(n) {
     var st = verState(n), v = verOf(n);
@@ -3493,11 +3575,14 @@
   // Sortable time headers (owner 2026-10-17, after the open-source table kits): the column sorted now shows its direction in the
   // stacked carets; clicking an unsorted column sorts it newest first, clicking the sorted one flips the order. Default: 更新时间, newest first.
   function memSortOf(scope) { return S.memSort[scope] || { key: 'updated', dir: 'desc' }; }
-  function sortTh(scope, key, label) {
+  // first: the order a click on an unsorted column starts with — 'desc' (newest first) for a time, 'asc' (A→Z) for a name
+  function sortTh(scope, key, label, first) {
+    first = first || 'desc';
     var s = memSortOf(scope), on = s.key === key, dir = on ? s.dir : '';
-    var tip = !on ? '点击按' + label + '排序（新→旧）' : dir === 'desc' ? '点击升序（旧→新）' : '点击降序（新→旧）';
+    var word = function (d) { return first === 'asc' ? (d === 'asc' ? 'A→Z' : 'Z→A') : (d === 'desc' ? '新→旧' : '旧→新'); };
+    var tip = !on ? '点击按' + label + '排序（' + word(first) + '）' : dir === 'desc' ? '点击升序（' + word('asc') + '）' : '点击降序（' + word('desc') + '）';
     return '<th class="sortable' + (on ? ' on' : '') + '" aria-sort="' + (on ? (dir === 'desc' ? 'descending' : 'ascending') : 'none') + '">' +
-      '<button type="button" class="th-sort" data-memsort="' + scope + ':' + key + '" title="' + tip + '">' + label +
+      '<button type="button" class="th-sort" data-memsort="' + scope + ':' + key + ':' + first + '" title="' + tip + '">' + label +
       '<svg class="sort-ic" viewBox="0 0 8 12" aria-hidden="true"><path class="' + (dir === 'asc' ? 'act' : '') + '" d="M4 1 7.5 5h-7z"/><path class="' + (dir === 'desc' ? 'act' : '') + '" d="M4 11 .5 7h7z"/></svg></button></th>';
   }
   function memBlock(scope, desc, title) {
@@ -3508,7 +3593,7 @@
       var c = a[0][col] < b[0][col] ? -1 : a[0][col] > b[0][col] ? 1 : 0;
       return s.dir === 'desc' ? -c : c;
     });
-    var h = (desc ? '<div class="flat">' + fh(title || '记忆', desc, '') : '<div class="card">') + '<div class="row"><input class="field" style="max-width:280px" placeholder="搜索记忆内容关键词">' +
+    var h = '<div class="flat"><div class="row"><input class="field" style="max-width:240px" placeholder="搜索记忆内容关键词">' +
       '<span class="sp" style="flex:1"></span>' + (count ? '<span class="hint">已选 ' + count + ' 个</span>' : '') +
       '<button type="button" class="btn sm dgr"' + (count ? '' : ' disabled') + '>' + ic('trash-2') + '删除所选</button><button type="button" class="btn sm dgr">重置全部</button></div>' +
       '<div class="tb-wrap"><table class="tb mem-tb"><colgroup><col style="width:40px"><col style="width:300px"><col><col style="width:150px"><col style="width:150px"><col style="width:88px"></colgroup>' +
@@ -3522,7 +3607,7 @@
         '<td class="r">' + rowActs([act('pencil', '编辑', 'data-memedit="' + scope + ':' + i + '"', '', f[0]), f[4] ? actSlot() : act('trash-2', '删除', '', 'dgr', f[0])]) + '</td></tr>';
     });
     h += '</tbody></table></div>' + pager(scope === 'agent' ? 28 : 11, 6, 'mem-' + scope) +
-      '<span class="hint">核心文件（MEMORY.md、memory_summary.md）可以编辑、清空内容，但不能删除；每次保存或删除都会在记忆目录里留下一个版本。</span></div>';
+      tabNote(desc, '核心文件（MEMORY.md、memory_summary.md）可以编辑、清空内容，但不能删除；每次保存或删除都会在记忆目录里留下一个版本。') + '</div>';
     return h;
   }
   var ruleDefs = {
@@ -3533,10 +3618,10 @@
     var d = ruleDefs[scope], files = d.files.filter(function (f) { return f[2]; });
     var times = { 'AGENTS.md': '10月8日 21:10', 'SOUL.md': '9月30日 09:12', 'FOREBRAIN.md': '今天 08:30', 'pkg/gateway/FOREBRAIN.md': '10月5日 16:02' };
     var nb = '<button type="button" class="btn sm pri" data-fm="rulenew:' + scope + '">' + ic('plus') + '新建规则文件</button>';
-    return (desc ? '<div class="flat">' + fh(title || '规则指令', desc, nb) : '<div class="card"><div class="card-h"><h3>规则文件</h3>' + nb + '</div>') +
+    return '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索规则文件">', nb) +
       '<div class="tb-wrap"><table class="tb"><thead><tr><th>文件</th><th>作用</th><th>更新时间</th><th class="r" style="width:64px">操作</th></tr></thead><tbody>' +
       files.map(function (f) { return '<tr><td class="mono">' + f[0] + '</td><td class="hint">' + f[1] + '</td><td class="mono hint">' + (times[f[0]] || '—') + '</td><td class="r">' + rowActs([act('pencil', '编辑', 'data-fm="ruleedit:' + scope + ':' + f[0] + '"', '', f[0])]) + '</td></tr>'; }).join('') +
-      '</tbody></table></div>' + pager(files.length, 10, 'rulefiles-' + scope) + '<span class="hint">' + d.where + '；保存后新会话生效。</span></div>';
+      '</tbody></table></div>' + pager(files.length, 10, 'rulefiles-' + scope) + tabNote(desc) + '</div>';
   }
   function modelsField(idx, catalog) {
     var chips = S.models[idx].map(function (m, j) { return '<span class="chip">' + m + '<button type="button" aria-label="移除 ' + m + '" data-rmmodel="' + idx + ':' + j + '">' + ic('x') + '</button></span>'; }).join('');
@@ -3568,15 +3653,14 @@
   function wsTopbar() {
     var w = S.ws, n = wsName(), proj = w.scope === 'project', st = n ? verState(n) : '', v = n ? verOf(n) : null;
     var label = n || (w.mode === 'discover' ? '发现并安装' : '新建技能');
-    var h = '<header class="top"><button type="button" class="icon-btn" data-act="wsback" aria-label="返回技能" title="返回技能">' + ic('arrow-left') + '</button>' +
-      '<div class="crumb"><button type="button" class="btn link" data-act="wsback">技能</button>' + ic('chevron-right') + '<span class="' + (n ? 'mono' : '') + '">' + label + '</span></div>' + (n ? verChip(n) : '') +
-      (proj ? '<button type="button" class="scope project" data-go="project" style="border:0;cursor:pointer">' + ic('folder-git-2') + '项目 · forebrain-harness</button>' : '') +
-      '<span class="meta">' + curModel() + '</span><span class="sp"></span>' +
+    var h = '<header class="top"><div class="crumb"><button type="button" class="btn link" data-act="wsback">技能</button>' + ic('chevron-right') + '<span class="t-name' + (n ? ' mono' : '') + '" data-tip="' + esc(label) + '" data-tip-pos="bottom" data-tip-trunc="1">' + label + '</span></div>' + (n ? verChip(n) : '') +
+      (proj ? '<button type="button" class="scope project" data-go="project" data-tip="进入项目空间" data-tip-pos="bottom" style="border:0;cursor:pointer">' + ic('folder-git-2') + 'forebrain-harness</button>' : '') +
+      '<span class="sp"></span>' +
       '<span class="hb-anchor"><button type="button" class="chip-btn hb-chip" data-act="hb" aria-haspopup="dialog" aria-expanded="' + S.hb + '">' + ic('activity') + '心跳</button>' + (S.hb ? hbPop(undefined) : '') + '</span>' +
       '<button type="button" class="icon-btn" data-act="wsnewsess" title="新会话" aria-label="新会话">' + ic('message-square-plus') + '</button>' +
       '<button type="button" class="chip-btn" data-act="bench" aria-pressed="' + S.bench + '">' + ic('panel-right') + '工作台' + (S.evalRun ? '<span class="badge-n">2</span>' : '') + '</button>' +
       (n ? '<button type="button" class="btn sm pri" data-pubopen="' + n + '"' + (st === 'pub' ? ' disabled title="没有未发布的修改"' : '') + '>发布 v' + (v.cur + (st === 'pub' ? 0 : 1)) + '</button>' : '');
-    return h + '<button type="button" class="chip-btn" data-fm="agentnew">' + ic('plus') + '新建主代理</button>' + '<span class="chip-btn">' + ic('languages') + '中文</span></header>';
+    return h + topRight() + '</header>';
   }
   function wsView() {
     var w = S.ws, n = wsName(), st = wsStory();
@@ -3716,20 +3800,42 @@
     if (k === 'wstq') return ['添加提问', '<label class="lb">提问<input class="field" placeholder="如 前端构建报 500"></label><label class="lb">这条提问' + sel(['应触发', '不应触发'], '不应触发') + '</label>', '添加', false];
     return ['', '', '确定', false];
   }
-  var projChannels = [['Telegram', true, 'telegram:forebrain-harness', '<label class="lb">Bot Token<input class="field mono" value="••••••••••••3f9a"></label><label class="lb">允许的 Chat ID<input class="field mono" value="10293847, 55667788"></label>'],
-    ['飞书', true, '飞书：研发群', '<label class="lb">App ID<input class="field mono" value="cli_a1b2c3d4"></label><label class="lb">App Secret<input class="field mono" value="••••••••••••8c21"></label>'],
-    ['Slack', false, '', ''], ['企业微信', false, '', ''], ['钉钉', false, '', '']];
+  // name, enabled, delivery id, config fields [label, key, value, secret] — the keys are the channel's own config fields
+  var projChannels = [
+    ['Telegram', true, 'telegram:forebrain-harness', [['Bot Token', 'bot_token', '••••••••••••3f9a', 1]]],
+    ['飞书', true, '飞书：研发群', [['App ID', 'app_id', 'cli_a1b2c3d4'], ['App Secret', 'app_secret', '••••••••••••8c21', 1]]],
+    ['Slack', false, '', [['Bot Token', 'bot_token', '', 1], ['Signing Secret', 'secret', '', 1], ['出站地址', 'outbound_url', '']]],
+    ['企业微信', false, '', [['Corp ID', 'corp_id', ''], ['Corp Secret', 'corp_secret', '', 1], ['Agent ID', 'agent_id', ''], ['Token', 'token', '', 1], ['EncodingAESKey', 'encoding_aes_key', '', 1]]],
+    ['钉钉', false, '', [['Client ID', 'client_id', ''], ['Client Secret', 'client_secret', '', 1]]]
+  ];
+  function chanSet(c) { return c[3].some(function (f) { return f[2]; }); }
+  // 2026-10-18: channels are a table; 编辑 opens the channel's fields in a modal, 启用 is its own column (a channel not set up yet cannot be switched on)
   function channelsBlock() {
-    return '<div class="row" style="justify-content:space-between"><span class="hint">密钥已脱敏，不修改即保留原值。</span><div class="row"><button type="button" class="btn">' + ic('rotate-cw') + '刷新</button><button type="button" class="btn pri">保存</button></div></div>' +
-      projChannels.map(function (c) { return '<div class="card"><div class="card-h"><h3>' + c[0] + '</h3><button type="button" class="sw" role="switch" aria-checked="' + c[1] + '"></button></div>' + (c[1] ? '<div class="grid2">' + c[3] + '</div>' : '') + '</div>'; }).join('');
+    return '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索通道">', '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+      '<div class="tb-wrap"><table class="tb fix-tb"><colgroup><col style="width:130px"><col style="width:230px"><col><col style="width:56px"><col style="width:56px"></colgroup>' +
+      '<thead><tr><th>通道</th><th>投递标识</th><th>配置</th><th>启用</th><th class="r">操作</th></tr></thead><tbody>' +
+      projChannels.map(function (c, i) {
+        var set = chanSet(c), on = set && !!S.chanOn[i];
+        var sum = set ? c[3].filter(function (f) { return f[2]; }).map(function (f) { return f[0] + ' <span class="mono">' + (f[3] ? '••' + f[2].slice(-4) : f[2]) + '</span>'; }).join(' · ') : '<span class="hint">未配置</span>';
+        return '<tr><td><b>' + c[0] + '</b></td><td>' + (c[2] ? '<span class="cell-1 mono" title="' + c[2] + '">' + c[2] + '</span>' : '<span class="hint">—</span>') + '</td><td><span class="cell-1">' + sum + '</span></td>' +
+          '<td><button type="button" class="sw" role="switch" aria-checked="' + on + '" aria-label="启用 ' + c[0] + '"' + (set ? ' data-chansw="' + i + '"' : ' disabled title="先编辑，填好配置"') + '></button></td>' +
+          '<td class="r">' + rowActs([act('pencil', '编辑', 'data-fm="chanedit:' + i + '"', '', c[0])]) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' + pager(projChannels.length, 10, 'channels') + tabNote('本项目的消息通道；定时任务可投递到已启用的通道。') + '</div>';
   }
+  // name, schedule as saved, delivered to, next run, runs so far
+  var cronTasks = [['每晚跑一遍全量测试', 'daily at 11pm', 'telegram:forebrain-harness', '10-18 23:00', 6], ['依赖漏洞巡检', 'weekdays at 9am', '飞书：研发群', '10-19 09:00', 30], ['清理临时分支', 'every monday 9am', '只记录', '10-19 09:00', 4]];
+  // 2026-10-18: scheduled tasks are a table; 暂停 / 恢复 became the 启用 switch, the rest are icon actions
   function cronBlock() {
-    function task(name, sched, target, count, paused) {
-      return '<div class="it"><div class="main"><div class="row"><b>' + name + '</b><span class="badge gray mono">' + sched + '</span>' + (paused ? '<span class="badge warn">已暂停</span>' : '') + '</div><span class="s">投递至 ' + target + ' · 已执行 ' + count + ' 次</span></div>' +
-        '<div class="row"><button type="button" class="btn sm">立即执行</button><button type="button" class="btn sm">' + (paused ? '恢复' : '暂停') + '</button><button type="button" class="btn sm">执行记录</button><button type="button" class="btn sm dgr">删除</button></div></div>';
-    }
-    return '<div class="flat">' + fh('定时任务', '属于本项目，在项目根目录执行。', '<button type="button" class="btn pri sm" data-act="cronnew">' + ic('plus') + '新建</button>') + '<div class="list boxed">' +
-      task('每晚跑一遍全量测试', 'daily at 11pm', 'telegram:forebrain-harness', 6, false) + task('依赖漏洞巡检', 'weekdays at 9am', '飞书：研发群', 30, false) + task('清理临时分支', 'every monday 9am', '只记录', 4, true) + '</div></div>';
+    return '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索任务">', '<button type="button" class="btn pri sm" data-act="cronnew">' + ic('plus') + '新建</button>') +
+      '<div class="tb-wrap"><table class="tb fix-tb"><colgroup><col><col style="width:140px"><col style="width:200px"><col style="width:110px"><col style="width:64px"><col style="width:56px"><col style="width:112px"></colgroup>' +
+      '<thead><tr><th>名称</th><th>计划</th><th>投递至</th><th>下次执行</th><th class="r">已执行</th><th>启用</th><th class="r">操作</th></tr></thead><tbody>' +
+      cronTasks.map(function (c, i) {
+        var on = !S.cronOff[i];
+        return '<tr><td><b class="cell-1" title="' + c[0] + '">' + c[0] + '</b></td><td><span class="cell-1 mono" title="' + c[1] + '">' + c[1] + '</span></td><td><span class="cell-1' + (c[2] === '只记录' ? ' hint' : ' mono') + '" title="' + c[2] + '">' + c[2] + '</span></td>' +
+          '<td class="num">' + (on ? c[3] : '<span class="badge warn">已暂停</span>') + '</td><td class="r num">' + c[4] + ' 次</td>' +
+          '<td><button type="button" class="sw" role="switch" aria-checked="' + on + '" aria-label="启用 ' + c[0] + '" data-cronsw="' + i + '"></button></td>' +
+          '<td class="r">' + rowActs([act('play', '立即执行', '', '', c[0]), act('history', '执行记录', '', '', c[0]), act('trash-2', '删除', '', 'dgr', c[0])]) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' + pager(cronTasks.length, 10, 'cron') + tabNote('定时任务属于本项目，在项目根目录执行。') + '</div>';
   }
   function cronModal() {
     var opts = ['每天 7:00（daily at 7am）', '工作日 9:00（weekdays at 9am）', '每周一 9:00（every monday 9am）', '每 2 小时（every 2h）', '自定义…'];
@@ -3765,38 +3871,67 @@
 
   var pages = {
     projects: function () {
-      function proj(name, path, desc, meta, pinned, missing) {
-        return '<div class="it"><div class="main"><div class="row"><b>' + name + '</b>' + (pinned ? '<span class="badge">置顶</span>' : '') + (missing ? '<span class="badge err">目录不存在</span>' : '') + '</div><span class="s">' + desc + '</span><span class="p">' + path + ' · ' + meta + '</span></div>' +
-          '<div class="row"><button type="button" class="btn sm pri" data-go="project">进入项目空间</button><button type="button" class="btn sm">' + (pinned ? '取消置顶' : '置顶') + '</button><button type="button" class="btn sm dgr" data-projdel="' + name + '">删除</button></div></div>';
-      }
-      return '<div class="pg">' + fh('项目', '每个项目有独立的项目空间，项目的配置和数据都在那里查看和修改。', '<button type="button" class="btn sm pri" data-act="projform">' + ic('plus') + '新建项目</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
-        '<div class="row"><input class="field" style="max-width:320px" placeholder="搜索名称或路径">' + sel(['按修改时间', '按名称'], '按修改时间', 'width:140px') + '</div>' +
-        '<div class="card"><div class="list">' + proj('forebrain-harness', '~/workspace/forebrain-harness', 'Forebrain Harness 主仓库', '更新于 10 分钟前', true) + proj('docs-site', '~/workspace/forebrain-harness.github.io', '文档站', '更新于 昨天', false) + proj('infra', '~/workspace/infra', '部署与运维脚本', '更新于 3 天前', false) + proj('季度汇报', '~/Documents/季度汇报', '季度汇报材料与交付物（普通文件夹）', '更新于 2 天前', false) + proj('tulkun', '~/workspace/unionj-cloud/tulkun', '终端里用过的目录，现已删除；对话只能查看', '更新于 9月18日', false, true) + '</div></div></div>';
+      // pinned rows stay on top; inside each group the sorted header decides (default 更新时间, newest first)
+      var meta = { 'forebrain-harness': ['Forebrain Harness 主仓库', '2026-10-18 09:52'], 'docs-site': ['文档站', '2026-10-17 16:20'], 'infra': ['部署与运维脚本', '2026-10-15 18:40'], '季度汇报': ['季度汇报材料与交付物（普通文件夹）', '2026-10-16 11:05'], 'tulkun': ['终端里用过的目录，现已删除；对话只能查看', '2026-09-18 14:12'] };
+      var so = memSortOf('projects');
+      var rows = projects.slice().sort(function (a, b) {
+        var pa = !!S.pinned[a.n], pb = !!S.pinned[b.n];
+        if (pa !== pb) return pa ? -1 : 1;
+        var c = so.key === 'name' ? a.n.localeCompare(b.n, 'en', { sensitivity: 'base' }) : (meta[a.n][1] < meta[b.n][1] ? -1 : meta[a.n][1] > meta[b.n][1] ? 1 : 0);
+        return so.dir === 'desc' ? -c : c;
+      });
+      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索名称或路径">', '<button type="button" class="btn sm pri" data-act="projform">' + ic('plus') + '新建项目</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+        '<div class="tb-wrap"><table class="tb fix-tb proj-tb"><colgroup><col style="width:210px"><col><col style="width:200px"><col style="width:64px"><col style="width:150px"><col style="width:112px"></colgroup>' +
+        '<thead><tr>' + sortTh('projects', 'name', '项目', 'asc') + '<th>路径</th><th>说明</th><th class="r">对话</th>' + sortTh('projects', 'updated', '更新时间') + '<th class="r">操作</th></tr></thead><tbody>' +
+        rows.map(function (p) {
+          var pin = !!S.pinned[p.n], m = meta[p.n];
+          return '<tr><td><div class="cell-name"><button type="button" class="btn link proj-link" data-go="project">' + p.n + '</button>' + (pin ? '<span class="badge">置顶</span>' : '') +
+            (p.trust === 'unknown' ? '<span class="badge gray">未信任</span>' : '') + (p.missing ? '<span class="badge err">目录不存在</span>' : '') + '</div></td>' +
+            '<td><span class="cell-1 mono hint" title="' + p.p + '">' + p.p + '</span></td><td><span class="cell-1" title="' + m[0] + '">' + m[0] + '</span></td>' +
+            '<td class="r num">' + (projCounts[p.n] || [0])[0] + '</td><td class="t">' + m[1] + '</td>' +
+            '<td class="r">' + rowActs([act('folder-open', '进入项目空间', 'data-go="project"', '', p.n), act(pin ? 'pin-off' : 'pin', pin ? '取消置顶' : '置顶', 'data-projpin="' + p.n + '"', '', p.n), act('trash-2', '删除', 'data-projdel="' + p.n + '"', 'dgr', p.n)]) + '</td></tr>';
+        }).join('') + '</tbody></table></div>' + pager(rows.length, 10, 'projects') + tabNote('每个项目有独立的项目空间，项目的配置和数据都在那里查看和修改。') + '</div>';
     },
     project: function () {
-      var tabs = [['overview', '概览'], ['rules', '规则指令'], ['sessions', '会话'], ['memory', '记忆'], ['perm', '权限'], ['mcp', 'MCP'], ['skills', '技能'], ['cron', '定时任务'], ['channels', '通道']];
-      var h = '<div class="proj-head"><div class="crumb"><button type="button" data-nav="projects">项目</button>' + ic('chevron-right') + '<b>forebrain-harness</b><span class="mono">~/workspace/forebrain-harness</span><span class="badge ok">已信任</span></div>' +
-        '<div class="tabs" role="tablist">' + tabs.map(function (t) { return '<button type="button" role="tab" aria-selected="' + (S.projTab === t[0]) + '" data-ptab="' + t[0] + '">' + t[1] + '</button>'; }).join('') + '</div></div><div class="pg" style="max-width:1040px">';
+      var tabs = [['overview', '项目设置'], ['rules', '规则指令'], ['sessions', '会话'], ['memory', '记忆'], ['perm', '权限'], ['mcp', 'MCP'], ['skills', '技能'], ['cron', '定时任务'], ['channels', '通道']];
+      var h = '<div class="proj-head"><div class="tabs" role="tablist">' + tabs.map(function (t) { return '<button type="button" role="tab" aria-selected="' + (S.projTab === t[0]) + '" data-ptab="' + t[0] + '">' + t[1] + '</button>'; }).join('') + '</div></div><div class="pg" style="max-width:1040px">';
       var t = S.projTab;
       if (t === 'overview') {
-        h += '<div class="card"><div class="card-h"><h3>项目设置</h3></div><div class="grid2"><label class="lb">项目名<input class="field" value="forebrain-harness"></label><label class="lb">绑定的工作目录<input class="field mono" value="/Users/doudou/workspace/forebrain-harness" readonly></label></div>' +
+        // 2026-10-18: the tab is 项目设置 itself — the form lies flat in it, no frame and no form title; 删除项目 sits beside 保存
+        h += '<div class="flat"><div class="grid2"><label class="lb">项目名<input class="field" value="forebrain-harness"></label><label class="lb">绑定的工作目录<input class="field mono" value="/Users/doudou/workspace/forebrain-harness" readonly></label></div>' +
           '<label class="lb">说明<input class="field" value="Forebrain Harness 主仓库"></label>' +
+          // 2026-10-18: 项目指令 moved here from the 规则指令 tab, saved with the other project settings
+          '<label class="lb">项目指令<textarea class="field" id="proj-instr" rows="3">改代码前先写计划并等 owner 审批；不要提交代码。\n修 bug 必须修根因，禁止防御性补丁。</textarea><span class="hint">注入本项目每个会话的开头，新会话生效。</span></label>' +
+          // 2026-10-18: the memory scope (moved here from the 记忆 tab) is a plain radio group like the open-source form kits; the chosen option's meaning is its help text
+          radioField('记忆作用域', 'memscope', [['shared', '共享（可跨项目召回）'], ['project', '仅本项目']], S.memScope, (S.memScope === 'project' ? '只召回本项目自己的记忆' : '本项目的会话也能召回其他记忆') + '；修改只在新会话生效。') +
           '<div class="list"><div class="it"><div class="main"><b>信任此目录</b><span class="s">信任后才会加载项目里的技能、MCP 与权限规则。</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div>' +
-          '<div class="it"><div class="main"><b>允许读取项目目录之外的资料</b><span class="s">关闭后，本项目会话不能读取文件库与跨项目记忆。</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div></div><div><button type="button" class="btn pri">保存</button></div></div>' +
-          '<div class="grid2"><div class="card">' + kvList([['会话', '12 个'], ['项目记忆', '38 条'], ['项目规则', '4 条'], ['项目 MCP', '2 个（1 个待确认）'], ['项目技能', '3 个'], ['定时任务', '1 个']]) + '</div>' +
-          '<div class="card"><div class="card-h"><h3>危险操作</h3></div><div class="row"><button type="button" class="btn dgr" data-projdel="forebrain-harness">删除项目</button></div><span class="hint">删除项目会一起删除它的全部对话和定时任务；目录里的文件不会删除。</span></div></div>';
+          '<div class="it"><div class="main"><b>允许读取项目目录之外的资料</b><span class="s">关闭后，本项目会话不能读取文件库与跨项目记忆。</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div></div>' +
+          '<div class="row"><button type="button" class="btn pri">保存</button><button type="button" class="btn dgr" data-projdel="forebrain-harness">删除项目</button></div></div>';
       } else if (t === 'rules') {
-        h += '<div class="flat">' + fh('项目指令', '注入本项目每个会话的开头，新会话生效。', '<button type="button" class="btn sm pri">保存</button>') + '<textarea class="field" id="proj-instr" rows="3">改代码前先写计划并等 owner 审批；不要提交代码。\n修 bug 必须修根因，禁止防御性补丁。</textarea></div>' + rulesBlock('project', '项目目录里的规则文件，新会话生效。', '规则文件');
+        h += rulesBlock('project', '项目目录里的规则文件，保存后新会话生效。', '规则文件');
       } else if (t === 'sessions') {
-        h += '<div class="flat">' + fh('项目会话', '在项目根目录运行。', '<button type="button" class="btn pri sm" data-psession="新的项目会话">' + ic('plus') + '新建项目会话</button>') + '<div class="list boxed">' +
-          ['修复目录树懒加载', '补 FOREBRAIN.md 的测试章节', '排查 fts5 构建失败'].map(function (s, i) { return '<div class="it"><div class="main"><b>' + s + '</b><span class="s">' + ['10 分钟前', '2 小时前', '昨天'][i] + '</span></div><button type="button" class="btn sm" data-psession="' + s + '">打开</button></div>'; }).join('') + '</div></div>';
+        // 2026-10-18: the project's sessions are a table — the title opens the session; both times sort from the header (default 更新时间, newest first)
+        var ps = [['重构 gateway 鉴权中间件', 'deepseek-v4', 46, '2026-10-12 10:20', '2026-10-18 09:52'], ['修复目录树懒加载', 'deepseek-v4', 18, '2026-10-17 15:02', '2026-10-18 09:40'],
+          ['梳理 web 端 MCP 页面范围', 'deepseek-v4', 38, '2026-10-17 09:30', '2026-10-17 21:10'], ['排查 MCP 启动超时', 'deepseek-v4', 31, '2026-10-16 14:11', '2026-10-17 18:25'],
+          ['补 FOREBRAIN.md 的测试章节', 'deepseek-v4-flash', 12, '2026-10-17 11:30', '2026-10-17 11:58'], ['发布 v0.3.0 的 release notes', 'gpt-5.4', 9, '2026-10-15 16:40', '2026-10-16 10:05'],
+          ['排查 fts5 构建失败', 'deepseek-v4', 22, '2026-10-14 09:15', '2026-10-15 20:31'], ['记忆检索补充日文分词', 'deepseek-v4', 27, '2026-10-10 13:02', '2026-10-13 17:44'],
+          ['补 lsp 工具的超时处理', 'deepseek-v4', 15, '2026-10-08 10:00', '2026-10-09 12:20']];
+        var so = memSortOf('psessions'), col = so.key === 'created' ? 3 : 4, beats = beatsOf();
+        ps.sort(function (a, b) { var c = a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0; return so.dir === 'desc' ? -c : c; });
+        h += '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索会话标题">', '<button type="button" class="btn pri sm" data-psession="新的项目会话">' + ic('plus') + '新建项目会话</button>') +
+          '<div class="tb-wrap"><table class="tb fix-tb"><colgroup><col><col style="width:150px"><col style="width:64px"><col style="width:100px"><col style="width:150px"><col style="width:150px"><col style="width:56px"></colgroup>' +
+          '<thead><tr><th>标题</th><th>模型</th><th class="r">消息</th><th>心跳</th>' + sortTh('psessions', 'created', '创建时间') + sortTh('psessions', 'updated', '更新时间') + '<th class="r">操作</th></tr></thead><tbody>' +
+          ps.map(function (x) {
+            var b = beats[x[0]];
+            return '<tr><td><button type="button" class="btn link proj-link" data-psession="' + x[0] + '" title="' + x[0] + '">' + x[0] + '</button></td><td class="mono">' + x[1] + '</td><td class="r num">' + x[2] + '</td>' +
+              '<td>' + (!b ? '<span class="hint">—</span>' : b.paused ? '<span class="badge gray">已暂停</span>' : '<span class="badge">每 ' + b.min + ' 分钟</span>') + '</td>' +
+              '<td class="t">' + x[3] + '</td><td class="t">' + x[4] + '</td><td class="r">' + rowActs([act('message-square', '打开', 'data-psession="' + x[0] + '"', '', x[0])]) + '</td></tr>';
+          }).join('') + '</tbody></table></div>' + pager(ps.length, 10, 'psessions') + tabNote('项目会话都在项目根目录运行。') + '</div>';
       } else if (t === 'memory') {
-        h += '<div class="flat">' + fh('记忆作用域', '修改只在新会话生效。', '') + '<div class="radio-cards" style="grid-template-columns:1fr 1fr">' +
-          '<button type="button" class="rc col" role="radio" aria-checked="true"><b>共享（可跨项目召回）</b><span>本项目的会话也能召回其他记忆。</span></button>' +
-          '<button type="button" class="rc col" role="radio" aria-checked="false"><b>仅本项目</b><span>只召回本项目自己的记忆。</span></button></div></div>' + memBlock('project', '可以查看、编辑、删除过时或错误的记忆。', '项目记忆');
+        h += memBlock('project', '可以查看、编辑、删除过时或错误的记忆。', '项目记忆');
       } else if (t === 'perm') {
-        h += '<div class="flat">' + fh('项目权限规则', '项目已信任时生效。', '<button type="button" class="btn sm" data-fm="verify:project">规则匹配测试</button><button type="button" class="btn sm pri" data-fm="ruleadd:project">' + ic('plus') + '添加规则</button>') +
-          ruleTable(projRules, 'project') + '<span class="hint mono">.forebrain/safety.json</span></div>';
+        h += '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索规则内容">', '<button type="button" class="btn sm" data-fm="verify:project">规则匹配测试</button><button type="button" class="btn sm pri" data-fm="ruleadd:project">' + ic('plus') + '添加规则</button>') +
+          ruleTable(projRules, 'project') + tabNote('项目已信任时生效；规则写在 <span class="mono">.forebrain/safety.json</span>。') + '</div>';
       } else if (t === 'mcp') {
         h += mcpBlock('project', '项目 MCP 服务', mcpEffective(['global', 'agent', 'project']), ['project'], '同名时按 项目 → 主代理 → 全局 覆盖；这里只增删改项目 MCP，全局与主代理的在各自页面改。', '本项目能加载的 MCP 服务，依次是本项目、主代理、全局的。', ['global', 'agent', 'project']);
       } else if (t === 'skills') {
@@ -3817,26 +3952,26 @@
         mcpBlock('agent', 'MCP', mcpEffective(['global', 'agent']), ['agent'], '全局 MCP 在“设置 → MCP”修改，项目 MCP 在各项目空间；改动在新会话生效。', '本主代理与全局的 MCP 服务，主代理的排在前面；同名时主代理覆盖全局。', ['global', 'agent']) + '</div>';
     },
     rules: function () {
-      return '<div class="pg" style="max-width:1080px">' + rulesBlock('agent', '本主代理的规则文件，每个会话开头注入。') + '</div>';
+      return '<div class="pg" style="max-width:1080px">' + rulesBlock('agent', '本主代理的规则文件，在主代理工作区根目录，每个会话开头注入；保存后新会话生效。') + '</div>';
     },
     workshop: function () {
       if (!S.ws) S.ws = { mode: 'create', scope: 'agent', skill: '', fresh: true };
       return wsView();
     },
     subagents: function () {
-      return '<div class="pg">' + fh('子代理', '本主代理所有会话里正在运行的子代理。', '<button type="button" class="btn sm dgr">全部停止</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索子代理或任务">', '<button type="button" class="btn sm dgr">全部停止</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
         '<div class="tb-wrap"><table class="tb"><thead><tr><th>子代理</th><th>任务</th><th>所在会话</th><th>已运行</th><th class="r">操作</th></tr></thead><tbody>' +
         '<tr><td class="mono">explore</td><td>扫描鉴权调用点</td><td><button type="button" class="btn link" data-session="0">重构 gateway 鉴权中间件</button></td><td class="mono">00:41</td><td class="r">' + rowActs([act('circle-stop', '停止', '', 'dgr', 'explore')]) + '</td></tr>' +
         '<tr><td class="mono">review</td><td>审阅中间件改动</td><td><button type="button" class="btn link" data-session="0">重构 gateway 鉴权中间件</button></td><td class="mono">00:12</td><td class="r">' + rowActs([act('circle-stop', '停止', '', 'dgr', 'review')]) + '</td></tr>' +
-        '</tbody></table></div>' + pager(2, 10, 'subagents') + '</div>';
+        '</tbody></table></div>' + pager(2, 10, 'subagents') + tabNote('本主代理所有会话里正在运行的子代理。') + '</div>';
     },
     providers: function () {
       var p = tenants[S.tenant].provider;
       var rows = [['主用', p[0], S.models[0].join('、'), p[0] === 'deepseek' ? 'https://api.deepseek.com' : 'https://api.openai.com/v1', '<span class="badge ok">已保存 ••••3f9a</span>'], ['回退 1', 'openai', S.models[1].join('、'), 'https://api.openai.com/v1', '<span class="badge warn">未设置</span>']];
-      return '<div class="pg">' + fh('模型服务', '按顺序尝试：第一条主用，其余回退。', '<button type="button" class="btn sm pri" data-fm="provnew">' + ic('plus') + '添加模型服务</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索服务商或模型">', '<button type="button" class="btn sm pri" data-fm="provnew">' + ic('plus') + '添加模型服务</button>' + '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
         '<div class="tb-wrap"><table class="tb"><thead><tr><th style="width:70px">顺序</th><th>服务商</th><th>模型</th><th>Base URL</th><th>API Key</th><th class="r" style="width:110px">操作</th></tr></thead><tbody>' +
         rows.map(function (r, i) { return '<tr><td><span class="badge' + (i ? ' gray' : '') + '">' + r[0] + '</span></td><td>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="mono hint">' + r[3] + '</td><td>' + r[4] + '</td><td class="r">' + rowActs([i ? act('arrow-up', '上移', '', '', r[1]) : actSlot(), act('pencil', '编辑', 'data-fm="provedit:' + i + '"', '', r[1]), act('trash-2', '删除', '', 'dgr', r[1])]) + '</td></tr>'; }).join('') +
-        '</tbody></table></div>' + pager(rows.length, 10, 'providers') + '</div>';
+        '</tbody></table></div>' + pager(rows.length, 10, 'providers') + tabNote('按顺序尝试：第一条主用，其余回退。') + '</div>';
     },
     tools: function () {
       // the runtime tool table as the engine registers it: name, what it does, category, read-only, inputs [name, type, required, meaning]
@@ -3862,8 +3997,7 @@
         ['mcp__github__create_pull_request', '创建 GitHub PR', 'MCP · github', 0, [['owner', 'string', 1, '仓库所有者'], ['repo', 'string', 1, '仓库名'], ['title', 'string', 1, 'PR 标题'], ['head', 'string', 1, '源分支'], ['base', 'string', 1, '目标分支'], ['body', 'string', 0, 'PR 描述']]]
       ];
       var size = S.pgSize.tools || 10, pages = Math.max(1, Math.ceil(tools.length / size)), cur = Math.min(S.pg.tools || 1, pages);
-      var h = '<div class="pg">' + fh('工具', '本主代理运行时实际暴露给模型的工具。', '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
-        '<div class="row"><input class="field" placeholder="搜索工具名或说明" style="max-width:240px">' + sel(['全部分类', '文件', '命令', '代码', '网络', '记忆', '会话', '权限', 'MCP'], '全部分类', 'width:110px') + sel(['全部类型', '只读', '有副作用'], '全部类型', 'width:110px') + '</div>' +
+      var h = '<div class="pg">' + tabTools('<input class="field" placeholder="搜索工具名或说明" style="max-width:240px">' + sel(['全部分类', '文件', '命令', '代码', '网络', '记忆', '会话', '权限', 'MCP'], '全部分类', 'width:110px') + sel(['全部类型', '只读', '有副作用'], '全部类型', 'width:110px'), '<button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
         '<div class="tb-wrap"><table class="tb fix-tb tool-tb"><colgroup><col style="width:280px"><col><col style="width:136px"><col style="width:96px"><col style="width:56px"></colgroup>' +
         '<thead><tr><th>工具</th><th>说明</th><th>分类</th><th>类型</th><th class="r">操作</th></tr></thead><tbody>';
       // 查看入参 / 收起 is the row's one icon action (owner 2026-10-18): it opens the inputs right under the row, inside the table
@@ -3875,16 +4009,15 @@
         if (open) h += '<tr class="tool-sub"><td colspan="5">' + (t[4].length ? '<table class="tb sub-tb"><colgroup><col style="width:180px"><col style="width:96px"><col style="width:60px"><col></colgroup><thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead><tbody>' +
           t[4].map(function (p) { return '<tr><td class="mono">' + p[0] + '</td><td class="mono">' + p[1] + '</td><td>' + (p[2] ? '是' : '否') + '</td><td>' + p[3] + '</td></tr>'; }).join('') + '</tbody></table>' : '<span class="hint">无入参</span>') + '</td></tr>';
       });
-      return h + '</tbody></table></div>' + pager(tools.length, 10, 'tools') + '</div>';
+      return h + '</tbody></table></div>' + pager(tools.length, 10, 'tools') + tabNote('本主代理运行时实际暴露给模型的工具。') + '</div>';
     },
     permissions: function () {
-      return '<div class="pg">' + fh('权限', '本主代理已记住的授权规则。', '<button type="button" class="btn sm" data-fm="verify:agent">判定验证</button><button type="button" class="btn sm pri" data-fm="ruleadd:agent">' + ic('plus') + '添加规则</button>') +
-        ruleTable(agentRules, 'agent') + '<span class="hint mono">' + tenants[S.tenant].path + '/state/permissions/local_settings.json</span>' +
-        '<div class="hint">默认审批模式在“设置 → 审批默认”；项目规则在各项目空间；单个会话可在输入框旁临时切换。</div></div>';
+      return '<div class="pg">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索规则内容">', '<button type="button" class="btn sm" data-fm="verify:agent">判定验证</button><button type="button" class="btn sm pri" data-fm="ruleadd:agent">' + ic('plus') + '添加规则</button>') +
+        ruleTable(agentRules, 'agent') + tabNote('本主代理已记住的授权规则，写在 <span class="mono">' + tenants[S.tenant].path + '/state/permissions/local_settings.json</span>。默认审批模式在“设置 → 审批默认”；项目规则在各项目空间；单个会话可在输入框旁临时切换。') + '</div>';
     },
     memories: function () {
       return '<div class="pg" style="max-width:1080px">' +
-        memBlock('agent', '本主代理的通用记忆文件（不属于任何项目）：可以查看、编辑、删除过时或错误的记忆。') + '<div class="hint">记忆功能的开关是全局的，在“设置 → 记忆”；项目记忆在各项目空间。</div></div>';
+        memBlock('agent', '本主代理的通用记忆文件（不属于任何项目），可以查看、编辑、删除过时或错误的记忆；记忆功能的开关在“设置 → 记忆”，项目记忆在各项目空间。') + '</div>';
     },
     settings: function () {
       var groups = [['常规', [['appearance', '外观'], ['approval', '审批默认']]], ['全局服务', [['mcp', 'MCP'], ['hooks', '钩子'], ['memory', '记忆'], ['sharedskills', '共享技能']]], ['高级', [['config', '配置文件'], ['status', '运行状态']]]];
@@ -3892,34 +4025,35 @@
       groups.forEach(function (g) { h += '<div class="grp">' + g[0] + '</div>' + g[1].map(function (t) { return '<button type="button" role="tab" aria-selected="' + (S.settingsTab === t[0]) + '" data-stab="' + t[0] + '">' + t[1] + '</button>'; }).join(''); });
       h += '</nav><div style="display:grid;gap:16px;min-width:0">';
       var t = S.settingsTab;
+      // 2026-10-18: the settings tabs follow the agent pages — no titles; tables get the search + buttons toolbar, forms lie flat
       if (t === 'appearance') {
-        h += '<div class="card"><div class="card-h"><h3>主题色</h3><span class="sub">只保存在当前浏览器</span></div><div class="radio-cards">' +
-          [['navy', '海军蓝', '#1f4a9e', '默认'], ['teal', '松石青', '#0e6e7e', ''], ['graphite', '石墨黑', '#1c1c1f', '']].map(function (x) { return '<button type="button" class="rc" role="radio" aria-checked="' + (S.brand === x[0]) + '" data-brand="' + x[0] + '"><i class="swc" style="background:' + x[2] + '"></i><div><b>' + x[1] + '</b><span>' + (x[3] || '&nbsp;') + '</span></div></button>'; }).join('') + '</div></div>' +
-          '<div class="grid2"><div class="card"><div class="card-h"><h3>菜单栏</h3></div><div class="row"><button type="button" class="btn' + (S.rail === 'dark' ? ' pri' : '') + '" data-rail="dark">深色</button><button type="button" class="btn' + (S.rail === 'light' ? ' pri' : '') + '" data-rail="light">浅色</button></div><span class="hint">内容区始终白底，深浅只作用于菜单栏。</span></div>' +
-          '<div class="card"><div class="card-h"><h3>语言</h3></div>' + sel(['中文', 'English'], '中文', 'width:160px') + '</div></div>';
+        h += '<div class="flat">' +
+          radioField('主题色', 'brand', [['navy', '海军蓝（默认）', '#1f4a9e'], ['teal', '松石青', '#0e6e7e'], ['graphite', '石墨黑', '#1c1c1f']], S.brand, '只保存在当前浏览器。') +
+          radioField('菜单栏', 'rail', [['dark', '深色'], ['light', '浅色']], S.rail, '内容区始终白底，深浅只作用于菜单栏。') +
+          '<label class="lb">语言' + sel(['中文', 'English'], '中文', 'width:160px') + '</label></div>';
       } else if (t === 'approval') {
-        h += '<div class="flat">' + fh('默认审批模式', '对所有主代理的新会话生效；单个会话可在输入框旁临时切换。', '<button type="button" class="btn pri sm">保存</button>') + '<div class="radio-cards" style="grid-template-columns:1fr">' +
-          presets.map(function (x) { return '<button type="button" class="rc col" role="radio" aria-checked="' + (x[0] === 'default') + '"><b>' + x[2] + ' · ' + x[1] + '</b><span>' + x[3] + '</span></button>'; }).join('') +
-          '</div><span class="hint mono">forebrain.yaml · approval_policy + sandbox_mode</span></div>';
+        h += '<div class="flat">' + radioField('默认审批模式', 'approval', presets.map(function (x) { return [x[0], x[2] + ' · ' + x[1], '', x[3]]; }), S.approvalDef,
+          '对所有主代理的新会话生效；单个会话可在输入框旁临时切换。写在 <span class="mono">forebrain.yaml · approval_policy + sandbox_mode</span>。', true) +
+          '<div class="row"><button type="button" class="btn pri">保存</button></div></div>';
       } else if (t === 'mcp') {
         h += mcpBlock('global', 'MCP 服务', mcpRows('global'), ['global'], '~/.forebrain/forebrain.yaml · agents.defaults.mcp_servers；改动对新会话生效。', '对所有主代理生效，新会话起作用。同名条目被主代理或项目整条覆盖。', ['global']);
       } else if (t === 'hooks') {
-        h += '<div class="flat">' + fh('钩子', '对所有主代理生效。', '<button type="button" class="btn sm pri" data-fm="hooknew">' + ic('plus') + '新增钩子</button>') +
+        h += '<div class="flat">' + tabTools('<input class="field" style="max-width:240px" placeholder="搜索事件或命令">', '<button type="button" class="btn sm pri" data-fm="hooknew">' + ic('plus') + '新增钩子</button>') +
           '<div class="tb-wrap"><table class="tb"><thead><tr><th>事件</th><th>匹配</th><th>命令</th><th class="r" style="width:88px">操作</th></tr></thead><tbody>' +
           hookRows.map(function (r, i) { return '<tr><td class="mono">' + r[0] + '</td><td' + (r[1] === '匹配全部工具' ? '' : ' class="mono"') + '>' + r[1] + '</td><td class="mono">' + r[2] + '</td><td class="r">' + rowActs([act('pencil', '编辑', 'data-fm="hookedit:' + i + '"', '', r[0]), act('trash-2', '删除', '', 'dgr', r[0])]) + '</td></tr>'; }).join('') +
-          '</tbody></table></div>' + pager(hookRows.length, 10, 'hooks') + '</div>';
+          '</tbody></table></div>' + pager(hookRows.length, 10, 'hooks') + tabNote('对所有主代理生效。') + '</div>';
       } else if (t === 'memory') {
-        h += '<div class="flat">' + fh('记忆功能', '对所有主代理生效；各主代理的记忆在菜单栏“记忆”，项目记忆在项目空间。', '<button type="button" class="btn pri sm">保存</button>') + '<div class="list boxed">' +
+        h += '<div class="flat"><div class="list">' +
           [['启用记忆功能', '开启记忆基础能力。启用后，新对话才能使用记忆。'], ['使用记忆', '允许新对话读取已生成的记忆。'], ['生成记忆', '允许对话参与记忆生成。']].map(function (x) { return '<div class="it"><div class="main"><b>' + x[0] + '</b><span class="s">' + x[1] + '</span></div><button type="button" class="sw" role="switch" aria-checked="true"></button></div>'; }).join('') +
-          '</div></div>';
+          '</div>' + tabNote('对所有主代理生效；各主代理的记忆在菜单栏“记忆”，项目记忆在项目空间。') + '<div class="row"><button type="button" class="btn pri">保存</button></div></div>';
       } else if (t === 'sharedskills') {
         h += skillsBlock('shared', '共享技能库', sharedSkills, ['sharedown'], '内置技能只读。', '对所有主代理生效。');
       } else if (t === 'config') {
-        h += '<div class="flat">' + fh('forebrain.yaml', '保存前按运行时的规则校验，通过后立即生效；密钥已脱敏，保持原样即保留原值。', '<button type="button" class="btn sm pri">保存并生效</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') + '<span class="hint mono">~/.forebrain/forebrain.yaml</span>' +
-          mdeHtml({ id: 'cfg', path: 'forebrain.yaml', src: mdeFiles['forebrain.yaml'] }) + '</div>';
+        h += '<div class="flat">' + tabTools('<span class="hint mono">~/.forebrain/forebrain.yaml</span>', '<button type="button" class="btn sm pri">保存并生效</button><button type="button" class="btn sm">' + ic('rotate-cw') + '刷新</button>') +
+          mdeHtml({ id: 'cfg', path: 'forebrain.yaml', src: mdeFiles['forebrain.yaml'] }) + tabNote('保存前按运行时的规则校验，通过后立即生效；密钥已脱敏，保持原样即保留原值。') + '</div>';
       } else {
-        h += '<div class="grid2"><div class="card"><div class="card-h"><h3>运行状态</h3><span class="badge ok">正常</span></div>' + kvList([['版本', 'v0.3.0'], ['监听地址', '<span class="mono">127.0.0.1:6060</span>'], ['鉴权', 'token'], ['主代理', '3 个']]) + '</div>' +
-          '<div class="card"><div class="card-h"><h3>数据目录</h3></div>' + kvList([['主目录', '<span class="mono">~/.forebrain</span>'], ['日志', '<span class="mono">~/.forebrain/logs</span>'], ['状态库', '<span class="mono">~/.forebrain/state</span>']]) + '</div></div>';
+        h += '<div class="flat">' + kvList([['状态', '<span class="badge ok">正常</span>'], ['版本', 'v0.3.0'], ['监听地址', '<span class="mono">127.0.0.1:6060</span>'], ['鉴权', 'token'], ['主代理', '3 个'],
+          ['主目录', '<span class="mono">~/.forebrain</span>'], ['日志', '<span class="mono">~/.forebrain/logs</span>'], ['状态库', '<span class="mono">~/.forebrain/state</span>']]) + '</div>';
       }
       return h + '</div></div></div>';
     }
@@ -3929,7 +4063,7 @@
     var app = document.getElementById('app');
     app.setAttribute('data-brand', S.brand); app.setAttribute('data-rail', S.rail); app.setAttribute('data-rc', S.rc ? '1' : '0');
     var content = S.page === 'chat' ? chat() : pages[S.page]();
-    app.innerHTML = rail() + pops() + (S.drawer ? drawer() : '') + '<div class="work">' + topbar() + '<div class="body"><div class="content">' + content + '</div>' + (S.page === 'chat' && S.bench ? bench() : S.page === 'workshop' && S.bench ? bench(true) : '') + '</div></div>' + (S.fb && S.fbFor !== 'projform' ? fbModal() : '') + (S.trust ? trustModal() : '') + (S.attach ? attachModal() : '') + (S.projDel ? delModal() : '') + (S.rw ? rewindModal() : '') + (S.page === 'projects' && S.projectForm ? projFormModal() : '') + (S.memEdit ? memEditModal() : '') + (S.cronModal ? cronModal() : '') + (S.inst ? instModal() : '') + (S.fm ? fmModal() : '') + (S.mdw ? mcpDrawer() : '') + (S.pubM ? pubModal() : '') + (S.cmpM ? cmpModal() : '') + (S.vcM ? verConfirmModal() : '') + (S.fb && S.fbFor === 'projform' ? fbModal() : '');
+    app.innerHTML = rail() + pops() + (S.drawer ? drawer() : '') + '<div class="work">' + topbar() + '<div class="body"><div class="content">' + content + '</div>' + (S.page === 'chat' && S.bench && !isFreshChat() ? bench() : S.page === 'workshop' && S.bench ? bench(true) : '') + '</div></div>' + (S.fb && S.fbFor !== 'projform' ? fbModal() : '') + (S.trust ? trustModal() : '') + (S.attach ? attachModal() : '') + (S.projDel ? delModal() : '') + (S.rw ? rewindModal() : '') + (S.page === 'projects' && S.projectForm ? projFormModal() : '') + (S.memEdit ? memEditModal() : '') + (S.cronModal ? cronModal() : '') + (S.inst ? instModal() : '') + (S.fm ? fmModal() : '') + (S.mdw ? mcpDrawer() : '') + (S.pubM ? pubModal() : '') + (S.cmpM ? cmpModal() : '') + (S.vcM ? verConfirmModal() : '') + (S.fb && S.fbFor === 'projform' ? fbModal() : '');
     var cap = captions[S.page];
     document.getElementById('caption').innerHTML = '<h2>当前页面：' + cap[0] + '</h2><ul>' + cap[1].map(function (x) { return '<li>' + x + '</li>'; }).join('') + '</ul>';
     document.querySelectorAll('.seg[data-ctl]').forEach(function (seg) {
@@ -3950,15 +4084,17 @@
   function showTip(el) {
     var app = document.getElementById('app'), tip = document.getElementById('rail-tip');
     if (!tip || !el) return;
+    if (el.hasAttribute('data-tip-trunc') && el.scrollWidth <= el.clientWidth) { tip.hidden = true; return; }
     tip.textContent = el.getAttribute('data-tip');
     tip.hidden = false;
-    var a = app.getBoundingClientRect(), r = el.getBoundingClientRect(), above = el.getAttribute('data-tip-pos') === 'top';
-    tip.classList.toggle('tip-above', above);
-    if (above) {
+    var a = app.getBoundingClientRect(), r = el.getBoundingClientRect(), pos = el.getAttribute('data-tip-pos');
+    var below = pos === 'bottom' || (pos === 'top' && r.top - a.top < tip.offsetHeight + 10), above = pos === 'top' && !below;
+    tip.classList.toggle('tip-above', above); tip.classList.toggle('tip-below', below);
+    if (above || below) {
       // centred over the button, kept inside the frame; the arrow still points at the button
       var left = Math.max(4, Math.min(r.left - a.left + r.width / 2 - tip.offsetWidth / 2, a.width - tip.offsetWidth - 4));
       tip.style.left = left + 'px';
-      tip.style.top = (r.top - a.top - tip.offsetHeight - 6) + 'px';
+      tip.style.top = (above ? r.top - a.top - tip.offsetHeight - 6 : r.bottom - a.top + 6) + 'px';
       tip.style.setProperty('--tip-x', (r.left - a.left + r.width / 2 - left) + 'px');
     } else {
       tip.style.left = (r.right - a.left + 8) + 'px';
@@ -4009,6 +4145,10 @@
     if (el.dataset.cronsel) { S.cronCustom = el.value === '自定义…'; render(); }
     else if (el.dataset.mcptype) { S.fmType = el.value; render(); }
     else if (el.dataset.dproj) { S.dproj = el.value; render(); }
+    else if (el.name === 'memscope') { S.memScope = el.value; render(); }
+    else if (el.name === 'brand') { S.brand = el.value; render(); }
+    else if (el.name === 'rail') { S.rail = el.value; render(); }
+    else if (el.name === 'approval') { S.approvalDef = el.value; render(); }
     else if (el.dataset.pgsize) { S.pgSize[el.dataset.pgsize] = Number(el.value); S.pg[el.dataset.pgsize] = 1; render(); }
     else if (el.dataset.sel) { S.sel[el.dataset.sel] = el.checked; render(); }
     else if (el.dataset.selall) { for (var i = 0; i < Number(el.dataset.n); i++) S.sel[el.dataset.selall + ':' + i] = el.checked; render(); }
@@ -4039,7 +4179,7 @@
     if (d.nav === 'chat') { closePops(); S.drawer = !S.drawer; }
     else if (d.nav) { closePops(); S.drawer = false; S.page = d.nav; }
     else if (d.go) { closePops(); S.drawer = false; S.projectForm = false; S.page = d.go; }
-    else if (d.session !== undefined) { closePops(); S.page = 'chat'; S.projectSession = ''; S.session = Number(d.session); S.drawer = false; S.ref = ''; }
+    else if (d.session !== undefined) { closePops(); S.page = 'chat'; S.projectSession = ''; S.session = Number(d.session); S.drawer = false; S.ref = ''; if (isFreshChat()) S.bench = false; }
     else if (d.psession) { closePops(); S.page = 'chat'; S.projectSession = d.psession; S.ref = ''; }
     else if (d.tenant) { S.tenant = d.tenant; S.tmenu = false; S.session = 0; S.projectSession = ''; }
     else if (d.act === 'tmenu') { var o = !S.tmenu; closePops(); S.tmenu = o; }
@@ -4101,6 +4241,8 @@
     if (S.fbNew || S.attNew || S.fb || S.trust || S.attach || S.projDel || S.rw || S.memEdit || S.cronModal || S.inst || S.fm || S.pubM || S.cmpM || S.vcM || S.projectForm || S.mdw) { closeTopModal(); render(); return; }
     if (S.hb) { S.hb = false; render(); }
   });
+  // after login the web opens on a new chat (owner 2026-10-18)
+  freshNew();
   render();
 })();
 </script>
