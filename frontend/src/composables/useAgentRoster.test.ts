@@ -86,7 +86,8 @@ describe('useAgentRoster', () => {
 
   it('points a subagent at the conversation it ran in, not at its worker session', () => {
     // 所在会话 is the dialogue the subagent belongs to; its own worker session is
-    // a separate conversation the operator never opened.
+    // a separate conversation the operator never opened. The row's own id
+    // names the tab to open once there.
     expect(agentRosterConversationTarget({
       id: 'child-1',
       kind: 'subagent',
@@ -94,11 +95,11 @@ describe('useAgentRoster', () => {
       status: 'running',
       sessionId: 'worker-1',
       parentSessionId: 'parent-1',
-    })).toEqual({ path: '/', query: { session: 'parent-1' } })
+    })).toEqual({ path: '/', query: { session: 'parent-1', agent: 'child-1' } })
   })
 
-  it('falls back to the row’s own session when it carries no parent', () => {
-    // A primary agent is its own conversation.
+  it('names no tab for a primary agent', () => {
+    // A primary agent is its own conversation, opened as the whole thread.
     expect(agentRosterConversationTarget({
       id: 'review',
       kind: 'primary',
@@ -106,7 +107,10 @@ describe('useAgentRoster', () => {
       status: 'running',
       sessionId: 'session-1',
     })).toEqual({ path: '/', query: { session: 'session-1' } })
+  })
 
+  it('names nothing for a row that carries no session', () => {
+    // A row with no session at all names no conversation to open.
     expect(agentRosterConversationTarget({
       id: 'child-2',
       kind: 'subagent',

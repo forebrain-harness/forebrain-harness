@@ -396,11 +396,6 @@ type Renderer struct {
 	// background highlight to clickable rows under the cursor. -1 means no
 	// hover (e.g. cursor left the window or first move not yet received).
 	vpHoverRow int
-	// vpJumpToBottomPressed tracks a left-button press on the floating
-	// "Jump to bottom" control until its matching release. Keeping this
-	// separate from transcript selection prevents a button click from briefly
-	// selecting the content row underneath the control.
-	vpJumpToBottomPressed bool
 	// vpNewMessages counts transcript messages that arrived in the visible view
 	// while the user was scrolled away from the bottom, i.e. the ones they have
 	// not seen. The floating control announces them ("1 new message (ctrl+End)
@@ -453,14 +448,29 @@ type Renderer struct {
 	// background while the composer cursor stays visible, matching a native
 	// terminal. Reset to false on release and in selectClearLocked.
 	selectDragging bool
-	lastClickTime  time.Time
-	lastClickCol   int
-	lastClickRow   int
+	// vpScreens keeps the screens the last paints wrote (a ring; vpScreensNext
+	// is the slot the next paint fills), so a mouse event is resolved against
+	// the screen the user acted on rather than one painted while the event
+	// waited (see shownScreen).
+	vpScreens     [shownScreensKept]shownScreen
+	vpScreensNext int
+	// vpPress is the gesture the left button is holding, from its press to its
+	// release: a click acts on the press's screen, not the release's. A press
+	// on the floating "Jump to bottom" control is held here too, apart from
+	// transcript selection, so a button click never selects the row under it.
+	vpPress       viewportPress
+	lastClickTime time.Time
+	lastClickCol  int
+	lastClickRow  int
 	// clickCount tracks rapid same-cell presses to distinguish single (1),
 	// double (2, select word) and triple (3, select line) clicks. It cycles
 	// 1->2->3->1 when consecutive presses land on the same cell within
-	// doubleClickThreshold; any other press resets it to 1.
+	// doubleClickThreshold; any other press resets it to 1. vpClickSeq is the
+	// screen the sequence's first press landed on: the word or line a double
+	// or triple click selects is the one that press pointed at, even when
+	// streamed rows moved it off the cell before the next press.
 	clickCount int
+	vpClickSeq shownScreen
 
 	// Auto-scroll while drag-selecting past a viewport edge. autoScrollDir is
 	// -1 (up), +1 (down), or 0 (idle); autoScrollStop signals the running

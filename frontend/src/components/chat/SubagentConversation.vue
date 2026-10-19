@@ -1,51 +1,30 @@
 <template>
   <section class="space-y-4" :aria-label="t('chat.subagentViewAria')">
-    <header class="flex items-start justify-between gap-3 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2">
-      <div class="min-w-0">
-        <div class="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            class="forebrain-btn forebrain-btn-ghost h-7 shrink-0 gap-1 px-2 text-xs"
-            @click="$emit('back')"
-          >
-            <ArrowLeft class="size-3.5" />
-            {{ t('chat.agentViewBack') }}
-          </button>
-          <span class="truncate text-sm font-medium text-[var(--forebrain-text)]">
-            {{ record.title || record.agentType || t('agents.subagent') }}
-          </span>
-          <span
-            class="shrink-0 rounded-full border px-2 py-0.5 text-[11px]"
-            :class="statusClass"
-          >
-            {{ statusLabel }}
-          </span>
-        </div>
-        <div class="mt-1 truncate text-[11px] text-[var(--forebrain-muted-text)]">{{ record.agentId }}</div>
-      </div>
-      <div class="flex shrink-0 items-center gap-3 text-[11px] text-[var(--forebrain-muted-text)]">
-        <span v-if="modelLabel">{{ modelLabel }}</span>
-        <!-- This subagent's own context window, the terminal's footer gauge for
-             its view: how much of the window it runs on is used. -->
-        <span v-if="budgetLabel" data-testid="subagent-budget">{{ budgetLabel }}</span>
-        <span v-if="record.inputTokens || record.outputTokens">
-          {{ t('chat.subagentTokens', { input: record.inputTokens, output: record.outputTokens }) }}
-        </span>
-      </div>
-    </header>
-
     <div class="space-y-4">
 	  <template v-for="(block, idx) in record.blocks" :key="block.id || (block.kind === 'tool' ? block.step.stepId : `${record.agentId}-block-${idx}`)">
-        <!-- The prompt the dispatching agent gave it, which opens the
-             transcript exactly as it does in the terminal. -->
-        <Message v-if="block.kind === 'prompt'" from="user">
-          <MessageContent class="whitespace-pre-wrap">{{ block.text }}</MessageContent>
-          <Avatar class="size-8 shrink-0 ring-1 ring-border">
-            <AvatarFallback class="bg-muted">
-              <Bot class="size-4 text-muted-foreground" />
-            </AvatarFallback>
-          </Avatar>
-        </Message>
+        <!-- The prompt the dispatching agent gave it, collapsed to a card the
+             reader can open — it is the frame around everything below, not a
+             message someone typed here. -->
+        <div
+          v-if="block.kind === 'prompt'"
+          class="subagent-task"
+          :class="{ 'is-open': taskOpen(block, idx) }"
+          data-testid="subagent-task-card"
+        >
+          <div class="subagent-task-cap">{{ t('chat.subagentTaskCap') }}</div>
+          <p class="subagent-task-body">{{ block.text }}</p>
+          <button
+            type="button"
+            class="subagent-task-more"
+            :aria-expanded="taskOpen(block, idx)"
+            :aria-label="taskOpen(block, idx) ? t('chat.subagentTaskCollapse') : t('chat.subagentTaskExpand')"
+            data-testid="subagent-task-toggle"
+            @click="toggleTask(block, idx)"
+          >
+            <ChevronUp v-if="taskOpen(block, idx)" aria-hidden="true" />
+            <ChevronDown v-else aria-hidden="true" />
+          </button>
+        </div>
 
         <!-- A message the user sent this subagent from its own view: the user's
              own message, not the dispatching agent's instruction. -->
@@ -86,6 +65,7 @@
           :step="block.step"
           :live="callTasks?.get(block.step.stepId)"
           :now="now"
+          :active-agent-id="activeAgentId"
           @open="emit('open-agent', $event)"
         />
 
@@ -94,6 +74,7 @@
           :step="block.step"
           :live="callTasks?.get(block.stepId)"
           :now="now"
+          :active-agent-id="activeAgentId"
           @open="emit('open-agent', $event)"
         />
 
@@ -140,16 +121,8 @@
         </Message>
       </template>
 
-      <div
-		v-if="isRunning"
-        class="flex items-center gap-2 px-1 text-[12px] text-[var(--forebrain-muted-text)]"
-      >
-        <span class="forebrain-working-dot" />
-        {{ t('chat.subagentWorking', { duration: workingDuration }) }}
-        <PlanProgressSegments :plan="record.plan" />
-      </div>
       <p
-        v-else-if="!hasAnswer"
+        v-if="!isRunning && !hasAnswer"
         class="px-1 text-[13px] text-[var(--forebrain-muted-text)]"
       >
         {{ t('chat.subagentNoAnswer') }}
@@ -167,17 +140,21 @@
 <script setup lang="ts">
 /**
  * One subagent's conversation, drawn with the same message primitives as the
- * main thread so switching between them feels like changing channel rather than
- * opening a debug panel. The blocks arrive in the order the subagent produced
- * them — its thinking, its text, and the calls it made, interleaved — which is
- * the same record the terminal keeps on that subagent's own screen.
+ * main thread so its tab reads like a channel rather than a debug panel. The
+ * blocks arrive in the order the subagent produced them — its thinking, its
+ * text, and the calls it made, interleaved — which is the same record the
+ * terminal keeps on that subagent's own screen.
+ *
+ * It draws the transcript and nothing about the execution's state: the task it
+ * was handed opens it as a collapsed card, and the model, the context budget,
+ * the clock and the checklist all live in the composer bar of the tab that
+ * holds it (SubagentTab).
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { ArrowLeft, Bot, CircleAlert, User } from 'lucide-vue-next'
+import { computed } from 'vue'
+import { Bot, ChevronDown, ChevronUp, CircleAlert, User } from 'lucide-vue-next'
 import { Message, MessageContent, MessageResponse } from '@repo/elements/message'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Avatar, AvatarFallback } from '@repo/shadcn-vue/components/ui/avatar'
-import PlanProgressSegments from '@/components/chat/PlanProgressSegments.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import PlanUpdateCard from '@/components/chat/PlanUpdateCard.vue'
 import CompactionCard from '@/components/chat/CompactionCard.vue'
@@ -186,8 +163,8 @@ import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
-import { formatRuntimeDuration, formatWorkedDurationLabel, thinkingBlockLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
-import { formatTokenCount } from '@/lib/forebrainGatewayRuntime'
+import { formatWorkedDurationLabel, thinkingBlockLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
+import { subagentPhase } from '@/lib/subagentStatus'
 import type { WorkspaceScope } from '@/lib/api'
 import { t } from '@/locales'
 
@@ -200,70 +177,23 @@ const props = withDefaults(defineProps<{
   now?: number
   /** The file view an image step's thumbnail is fetched from, if any. */
   scope?: WorkspaceScope
+  /** The tab the drawer has in front, so a nested dispatch opens there marked. */
+  activeAgentId?: string
 }>(), {
   foldState: () => ({}),
   callTasks: undefined,
   now: undefined,
   scope: undefined,
+  activeAgentId: '',
 })
 const emit = defineEmits<{
-  (e: 'back'): void
   (e: 'fold-change', value: { id: string; open: boolean }): void
   (e: 'open-agent', agentId: string): void
 }>()
 
 const hasAnswer = computed(() => props.record.blocks.some((block) => block.kind === 'assistant'))
 
-const isRunning = computed(() =>
-  props.record.status === 'running' || props.record.status === 'waiting_approval' || props.record.status === 'waiting_input')
-
-// The model this execution's spawn announced — never derived from the agent's
-// type, and absent means the spawn named none, which names none here too.
-const modelLabel = computed(() => {
-  const model = [props.record.modelProvider, props.record.model]
-    .map((part) => String(part ?? '').trim())
-    .filter(Boolean)
-    .join('/')
-  const effort = String(props.record.reasoningEffort ?? '').trim()
-  return [model, effort].filter(Boolean).join(' · ')
-})
-
-// The subagent's own context gauge, the terminal's footer reading for its view:
-// the used percentage and the window it is measured against.
-const budgetLabel = computed(() => {
-  const budget = props.record.tokenBudget
-  const percentLeft = budget?.percentLeft
-  if (typeof percentLeft !== 'number' || !Number.isFinite(percentLeft)) return ''
-  const window = formatTokenCount(budget?.contextWindow)
-  return `${Math.round(100 - percentLeft)}%${window ? `/${window}` : ''}`
-})
-
-// The working line's clock is this execution's own: it counts from the spawn
-// the engine recorded, a second at a time, and stops the moment the run ends.
-const nowMs = ref(Date.now())
-let workingTimer: ReturnType<typeof setInterval> | null = null
-watch(isRunning, (running) => {
-  if (running && workingTimer == null) {
-    workingTimer = setInterval(() => {
-      nowMs.value = Date.now()
-    }, 1_000)
-  } else if (!running && workingTimer != null) {
-    clearInterval(workingTimer)
-    workingTimer = null
-  }
-}, { immediate: true })
-onBeforeUnmount(() => {
-  if (workingTimer != null) {
-    clearInterval(workingTimer)
-    workingTimer = null
-  }
-})
-
-const workingDuration = computed(() => {
-  const start = props.record.startedAt ? Date.parse(props.record.startedAt) : NaN
-  if (!Number.isFinite(start)) return ''
-  return formatRuntimeDuration(Math.max(0, nowMs.value - start))
-})
+const isRunning = computed(() => subagentPhase(props.record.status) === 'active')
 
 function blockFoldId(block: TimelineBlock, index: number): string {
   if (block.id) return `${block.kind}:${block.id}`
@@ -285,58 +215,69 @@ function updateNativeFold(id: string, event: Event) {
   updateFold(id, Boolean((event.currentTarget as HTMLDetailsElement | null)?.open))
 }
 
-const statusLabel = computed(() => {
-  switch (props.record.status) {
-    case 'done':
-      return t('chat.subagentDone')
-    case 'failed':
-      return t('chat.subagentFailed')
-	case 'cancelled':
-	case 'interrupted':
-	case 'waiting_approval':
-	case 'waiting_input':
-	  return props.record.status.replace(/_/g, ' ')
-    default:
-      return t('chat.subagentRunning')
-  }
-})
+/** The task card starts collapsed — its frame is what matters, not the whole brief. */
+function taskOpen(block: TimelineBlock, index: number): boolean {
+  return foldOpen(blockFoldId(block, index), false)
+}
 
-const statusClass = computed(() => {
-  switch (props.record.status) {
-    case 'done':
-      return 'border-[var(--forebrain-divider)] text-[var(--forebrain-brand-1)]'
-    case 'failed':
-	case 'cancelled':
-	case 'interrupted':
-      return 'border-[var(--forebrain-danger)] text-[var(--forebrain-danger)]'
-    default:
-      return 'border-[var(--forebrain-divider)] text-[var(--forebrain-muted-text)]'
-  }
-})
+function toggleTask(block: TimelineBlock, index: number) {
+  updateFold(blockFoldId(block, index), !taskOpen(block, index))
+}
 </script>
 
 <style scoped>
-.forebrain-working-dot {
-  height: 0.4rem;
-  width: 0.4rem;
-  border-radius: 9999px;
-  background: var(--forebrain-brand-1);
-  animation: forebrain-working-pulse 1.6s ease-in-out infinite;
+/* The prototype's .sa-task: the frame around the transcript, cut to a few
+   lines with a fade until the reader opens it. */
+.subagent-task {
+  position: relative;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 10px;
+  background: var(--forebrain-bg-alt);
+  padding: 10px 12px;
+  font-size: 12.5px;
+  color: var(--forebrain-text-2);
 }
 
-@keyframes forebrain-working-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
+.subagent-task-cap {
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
+  margin-bottom: 4px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .forebrain-working-dot {
-    animation: none;
-  }
+.subagent-task-body {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.subagent-task:not(.is-open) .subagent-task-body {
+  max-height: 76px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(#000 55%, transparent);
+  mask-image: linear-gradient(#000 55%, transparent);
+}
+
+.subagent-task-more {
+  position: absolute;
+  left: 50%;
+  bottom: -12px;
+  margin-left: -12px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--forebrain-divider);
+  background: var(--forebrain-surface);
+  color: var(--forebrain-muted-text);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.subagent-task-more:hover {
+  color: var(--forebrain-text);
+}
+
+.subagent-task-more svg {
+  width: 14px;
+  height: 14px;
 }
 </style>

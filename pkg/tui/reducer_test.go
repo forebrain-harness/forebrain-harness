@@ -3029,10 +3029,10 @@ func TestOverlayClickPositionResolvesRowsAndColumns(t *testing.T) {
 	r.SetOverlayComposer([]string{"first line", "second line", "third line"}, -1, 0)
 
 	// Row 0 of the painted block is the pinned separator.
-	if _, _, ok := r.OverlayClickPosition(3, r.vpBodyHeight); ok {
+	if _, _, ok := r.liveScreenLocked().overlayPosition(3, r.vpBodyHeight); ok {
 		t.Fatal("the separator row is not part of the overlay's own lines")
 	}
-	line, col, ok := r.OverlayClickPosition(4, r.vpBodyHeight+2)
+	line, col, ok := r.liveScreenLocked().overlayPosition(4, r.vpBodyHeight+2)
 	if !ok || line != 1 || col != 4 {
 		t.Fatalf("expected line 1 column 4, got line %d column %d ok=%v", line, col, ok)
 	}
@@ -3059,7 +3059,7 @@ func TestOverlayClickPositionThroughSoftWrap(t *testing.T) {
 		t.Fatalf("expected the long line to wrap, got %d rows", len(rows))
 	}
 	ref := r.vpOverlayRefs[rows[1]]
-	line, col, ok := r.OverlayClickPosition(2, r.vpBodyHeight+1+rows[1])
+	line, col, ok := r.liveScreenLocked().overlayPosition(2, r.vpBodyHeight+1+rows[1])
 	if !ok || line != 1 {
 		t.Fatalf("expected the wrapped row to resolve to logical line 1, got %d ok=%v", line, ok)
 	}
@@ -3101,6 +3101,57 @@ func TestComposerClickLandsTheCaretOnTheClickedCell(t *testing.T) {
 	want := fmt.Sprintf("\x1b[%d;%dH", row+1, col+1)
 	if !strings.Contains(out.String(), want) {
 		t.Fatalf("expected the caret to be repainted at the clicked cell %q, output:\n%q", want, out.String())
+	}
+}
+
+// TestComposerClickActsOnTheScreenItsPressLandedOn pins the composer half of
+// "a click acts on its press": while a turn runs the composer block changes
+// height — a subagent's roster row joins it under the footer and lifts the card
+// — so between press and release the text row the user pressed moves off the
+// pointer's row. Resolved at release, the click read the row that moved under
+// the pointer and placed no caret at all.
+func TestComposerClickActsOnTheScreenItsPressLandedOn(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := len("hello world")
+	r.RenderComposerState(ComposerRenderState{Text: "hello world", Cursor: &cursor})
+
+	row := composerTextRowScreen(r, 0)
+	col := r.vpLastComposer.text.rows[0].prefixWidth + 6 // the "w" of "world"
+	drainCaretRequest()
+	r.ViewportSelectStart(col, row)
+	r.RenderComposerState(ComposerRenderState{Text: "hello world", Cursor: &cursor, AgentRoster: AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "primary", Kind: "primary", Label: "primary", Status: "running"},
+		{ID: "sub-1", Kind: "subagent", Label: "review", Status: "running", Title: "working"},
+	}}})
+	if composerTextRowScreen(r, 0) == row {
+		t.Fatalf("the roster did not move the composer text off row %d; the fixture proves nothing", row)
+	}
+	r.ViewportSelectEnd(col, row)
+	if got := drainCaretRequest(); got != 6 {
+		t.Fatalf("the click must place the caret where its press landed (6), got %d", got)
+	}
+}
+
+// TestJumpControlClickSurvivesARelabel pins the jump control's half: a message
+// that arrives while the user is scrolled away relabels the control ("1 new
+// message"), which changes its width and re-centres it, so the cell the press
+// landed on can fall just outside the control's new bounds. The release is
+// judged against the control as pressed, and still jumps.
+func TestJumpControlClickSurvivesARelabel(t *testing.T) {
+	r, _ := newScrolledJumpToBottomRenderer(t)
+	_, startCol, _, row := jumpToBottomButtonLayout(forcedTermWidth, r.vpBodyHeight, r.vpNewMessages)
+
+	r.ViewportSelectStart(startCol, row)
+	r.RenderFrame(Frame{Kind: FrameSystem, Title: "note", Content: "a message arrives", Final: true})
+	if r.vpNewMessages == 0 {
+		t.Fatal("the message was not counted as unseen; the fixture proves nothing")
+	}
+	if r.liveScreenLocked().jumpButton.contains(startCol, row) {
+		t.Fatalf("the relabelled control still covers column %d; the fixture proves nothing", startCol)
+	}
+	r.ViewportSelectEnd(startCol, row)
+	if !r.vpFollow {
+		t.Fatal("a release on the control as it was pressed must jump to the bottom")
 	}
 }
 

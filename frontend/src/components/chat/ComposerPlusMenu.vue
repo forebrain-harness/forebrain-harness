@@ -1,5 +1,9 @@
 <template>
-  <div class="relative" ref="rootRef">
+  <!-- Deliberately not a positioning context: the sheet below is absolute with
+       left/right anchors, so its containing block must be the composer that
+       mounts this menu (the prototype's `.plus-pop` sits in the composer, not
+       in the "+" button), and it must be as wide as the input area. -->
+  <div ref="rootRef">
     <button
       type="button"
       class="forebrain-chip-btn !h-7 !w-7 !justify-center !px-0"
@@ -20,7 +24,7 @@
         <Paperclip class="size-3.5 shrink-0" aria-hidden="true" />
         <b>{{ t('chat.plusAttach') }}</b>
       </button>
-      <button type="button" class="forebrain-plus-opt" role="menuitem" data-testid="plus-goal" @click="insert('/goal ')">
+      <button v-if="!subagentView" type="button" class="forebrain-plus-opt" role="menuitem" data-testid="plus-goal" @click="insert('/goal ')">
         <Target class="size-3.5 shrink-0" aria-hidden="true" />
         <b>{{ t('chat.plusGoal') }}</b>
       </button>
@@ -62,7 +66,14 @@ import { usePromptInput } from '@repo/elements/prompt-input'
 import { forebrainApi } from '@/lib/api'
 import { useI18n } from '@/locales'
 
-defineProps<{ disabled?: boolean }>()
+const props = defineProps<{
+  disabled?: boolean
+  /**
+   * This is a subagent tab's "+": the goal belongs to the whole conversation,
+   * so it is not offered here, and the skills are the ones that view may run.
+   */
+  subagentView?: boolean
+}>()
 
 const emit = defineEmits<{ (e: 'insert', text: string): void }>()
 
@@ -75,7 +86,7 @@ const skills = ref<{ name: string; description: string }[]>([])
 
 async function loadSkills() {
   try {
-    const res = await forebrainApi.slashCommands('webchat', '', {})
+    const res = await forebrainApi.slashCommands('webchat', '', props.subagentView ? { subagentView: true } : {})
     skills.value = (Array.isArray(res.records) ? res.records : [])
       .filter((row) => row.category === 'skill' && row.name)
       .map((row) => ({ name: row.name, description: row.description ?? '' }))
@@ -107,7 +118,9 @@ onUnmounted(() => document.removeEventListener('pointerdown', onDocPointerDown))
 
 <style scoped>
 /* The prototype's .plus-pop: a sheet as wide as the composer, opening above
-   it, with the add entries, the session's skills, and the @// hints. */
+   it, with the add entries, the session's skills, and the @// hints. Its
+   width comes from the composer, so every host must be the positioning
+   context (see the template's first comment). */
 .forebrain-plus-pop {
   position: absolute;
   left: 0;

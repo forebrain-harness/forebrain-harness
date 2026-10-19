@@ -5,13 +5,14 @@
       class="forebrain-chip-btn"
       :disabled="disabled"
       v-tip:top="t('approval.pickerTitle')"
+      :aria-label="t('approval.pickerTitle')"
       aria-haspopup="listbox"
       :aria-expanded="open"
       data-testid="approval-picker"
       @click="open = !open"
     >
       <ShieldCheck class="size-3.5" aria-hidden="true" />
-      <span>{{ t('chat.approvalChip', { preset: currentLabel }) }}</span>
+      <span>{{ currentLabel }}</span>
       <ChevronDown class="forebrain-chip-caret" aria-hidden="true" />
     </button>
     <p

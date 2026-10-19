@@ -2499,6 +2499,23 @@ func (vr viewportRender) blockAtRow(screenRow int) (blockID int, isHeader bool) 
 	return -1, false
 }
 
+// onScreen returns the render cut down to the window it showed: the visible
+// rows and the spans of the blocks they belong to. Every screen-row hit test
+// reads only those, so a kept screen answers clicks exactly like the full
+// render while holding none of the off-screen transcript; allLines is nil.
+func (vr viewportRender) onScreen() viewportRender {
+	end := vr.firstRow + len(vr.lines)
+	spans := make([]lineSpan, 0, 8)
+	for _, s := range vr.spans {
+		if s.startRow < end && s.startRow+s.rowCount > vr.firstRow {
+			spans = append(spans, s)
+		}
+	}
+	vr.spans = spans
+	vr.allLines = nil
+	return vr
+}
+
 // maxScrollOffset is the largest valid scrollOffset for this render (top of the
 // transcript's last full screen). Used to clamp wheel / follow scrolling.
 func (vr viewportRender) maxScrollOffset() int {
@@ -2593,8 +2610,7 @@ func (m *viewModel) imageMarkerAtScreenRow(vr viewportRender, screenRow int) (pa
 	if p == "" {
 		return "", "", false
 	}
-	abs := vr.firstRow + screenRow
-	if abs < 0 || abs >= len(vr.allLines) || !isImageMarkerRow(vr.allLines[abs]) {
+	if screenRow >= len(vr.lines) || !isImageMarkerRow(vr.lines[screenRow]) {
 		return "", "", false
 	}
 	return p, imagePreviewLabel(meta), true
@@ -4530,7 +4546,6 @@ func (r *Renderer) paintViewportLocked() {
 	} else {
 		// Following (or nothing to scroll): the newest rows are on screen, so
 		// there is nothing unseen left to announce.
-		r.vpJumpToBottomPressed = false
 		r.vpNewMessages = 0
 	}
 	for i := 0; i < composerHeight; i++ {
@@ -4763,15 +4778,18 @@ func (r *Renderer) paintViewportLocked() {
 		r.vpIMEAnchor = len(rows) - 1
 	}
 
-	if b.Len() == 0 {
-		// Nothing on screen differs from the frame we were asked to paint.
-		return
+	// An empty write means nothing on screen differs from the frame we were
+	// asked to paint. Otherwise frame the whole write in synchronized output
+	// (DEC private mode 2026) so a terminal that supports it presents the
+	// changed rows in one step instead of sampling the screen somewhere between
+	// a row's erase and its rewrite. Terminals that do not support it ignore
+	// the unknown private mode.
+	if b.Len() > 0 {
+		_, _ = fmt.Fprint(r.out, "\x1b[?2026h"+b.String()+"\x1b[?2026l")
 	}
-	// Frame the whole write in synchronized output (DEC private mode 2026) so a
-	// terminal that supports it presents the changed rows in one step instead of
-	// sampling the screen somewhere between a row's erase and its rewrite.
-	// Terminals that do not support it ignore the unknown private mode.
-	_, _ = fmt.Fprint(r.out, "\x1b[?2026h"+b.String()+"\x1b[?2026l")
+	// Either way this frame is what the terminal now shows; mouse events read
+	// from here on are resolved against it.
+	r.recordScreenLocked()
 }
 
 // overlaySeparatorLine returns the horizontal rule painted above a modal
@@ -4980,12 +4998,12 @@ func (r *Renderer) setActiveViewLocked(agentID string) {
 }
 
 // openAgentViewAtRowLocked switches to the subagent view for the card at this
-// screen row. It is what keeps a finished subagent reachable: its roster row is
-// gone, but its card is still in the transcript and its transcript is still in
-// memory, so clicking the card reopens the conversation it had. Caller holds
-// r.mu.
-func (r *Renderer) openAgentViewAtRowLocked(row int) bool {
-	agentID, ok := r.activeVMLocked().agentAtScreenRow(r.vpLastRender, row)
+// screen row of vr. It is what keeps a finished subagent reachable: its roster
+// row is gone, but its card is still in the transcript and its transcript is
+// still in memory, so clicking the card reopens the conversation it had. Caller
+// holds r.mu.
+func (r *Renderer) openAgentViewAtRowLocked(vr viewportRender, row int) bool {
+	agentID, ok := r.activeVMLocked().agentAtScreenRow(vr, row)
 	if !ok || agentID == r.activeView {
 		return false
 	}
@@ -5314,10 +5332,20 @@ func (r *Renderer) ViewportScrollAt(delta, col, row int) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.viewportScrollAtLocked(delta, col, row, time.Time{})
+}
+
+// viewportScrollAtLocked is ViewportScrollAt for a notch read at `at`: which
+// region the pointer was over is answered by the screen showing then, since
+// the composer's height — and so the row the transcript ends on — changes
+// while a turn runs. Caller holds r.mu.
+func (r *Renderer) viewportScrollAtLocked(delta, col, row int, at time.Time) {
 	if !r.viewportMode {
 		return
 	}
-	if r.overlayActive && row >= r.vpBodyHeight {
+	_ = col
+	bodyHeight := r.screenAtLocked(at).bodyHeight
+	if r.overlayActive && row >= bodyHeight {
 		if r.overlayCanScrollLocked(delta) {
 			r.scrollViewportLocked(delta, true)
 			return
@@ -5325,7 +5353,7 @@ func (r *Renderer) ViewportScrollAt(delta, col, row int) {
 		r.scrollViewportLocked(delta, false)
 		return
 	}
-	if row >= r.vpBodyHeight && r.vpLastComposer.fullLines != nil {
+	if row >= bodyHeight && r.vpLastComposer.fullLines != nil {
 		r.scrollComposerLocked(delta)
 		return
 	}
@@ -5483,38 +5511,6 @@ func overlaySoftWrapRefs(logical string, rows []string, lineIdx int) []overlayRo
 	return refs
 }
 
-// OverlayClickPosition maps 0-based screen coordinates to a position inside the
-// modal overlay currently on screen: the index of the line the overlay
-// installed and the display column within that line. It is what lets a modal
-// place its own text caret where the user clicked — the overlay knows which of
-// its lines is an input field and what precedes the text on it, and this
-// answers where in that line the click landed.
-func (r *Renderer) OverlayClickPosition(col, row int) (line, column int, ok bool) {
-	if r == nil {
-		return 0, 0, false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.viewportMode || !r.overlayActive {
-		return 0, 0, false
-	}
-	// The block is bottom-pinned and its first row is the pinned separator.
-	idx := row - r.vpBodyHeight - 1
-	if idx < 0 {
-		return 0, 0, false
-	}
-	idx += r.vpOverlayFirstRow
-	if idx >= len(r.vpOverlayRefs) {
-		return 0, 0, false
-	}
-	ref := r.vpOverlayRefs[idx]
-	column = ref.logicalCol + col - ref.rowCol
-	if column < ref.logicalCol {
-		column = ref.logicalCol
-	}
-	return ref.line, column, true
-}
-
 func softWrapOverlayLine(line string, width int) []string {
 	if width < 1 {
 		return []string{line}
@@ -5658,66 +5654,91 @@ func (r *Renderer) scrollComposerLocked(delta int) {
 	r.paintViewportLocked()
 }
 
-// ViewportClickToggle hit-tests a mouse click at the given 0-based screen
-// coordinates against the last paint. When it lands on a collapsible block's
-// header it toggles that block's expand state and repaints, returning true.
-func (r *Renderer) ViewportClickToggle(col, row int) bool {
+// HandleMouse routes one decoded pointer event to the viewport and reports how
+// a release ended (viewportClick). Every surface that reads mouse reports — the
+// idle loop, a running turn, a blocking slash command, a modal overlay — goes
+// through it, so a gesture means the same thing in all of them. ev.at, the
+// moment the reader decoded the report, picks the screen the event is resolved
+// against (shownScreen); an event without one resolves against the live state.
+func (r *Renderer) HandleMouse(ev inputEvent) viewportClick {
 	if r == nil {
-		return false
+		return viewportClick{}
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.viewportMode {
-		return false
+	switch ev.kind {
+	case inputEventMouseClick:
+		r.viewportClickToggleAt(ev.mouseCol, ev.mouseRow, ev.at)
+	case inputEventMousePress:
+		r.mu.Lock()
+		r.viewportPressLocked(ev.mouseCol, ev.mouseRow, ev.at)
+		r.mu.Unlock()
+	case inputEventMouseDrag:
+		r.mu.Lock()
+		r.viewportDragLocked(ev.mouseCol, ev.mouseRow, ev.at)
+		r.mu.Unlock()
+	case inputEventMouseRelease:
+		return r.viewportRelease(ev.mouseCol, ev.mouseRow, ev.at)
+	case inputEventMouseMove:
+		r.ViewportHover(ev.mouseCol, ev.mouseRow)
+	case inputEventMouseWheel:
+		r.mu.Lock()
+		r.viewportScrollAtLocked(ev.wheelDelta, ev.mouseCol, ev.mouseRow, ev.at)
+		r.mu.Unlock()
 	}
-	if row < 0 || row >= r.vpHeight {
-		return false
-	}
-	if r.jumpToBottomButtonHitLocked(col, row) {
-		r.jumpToBottomLocked()
-		return true
-	}
-	activeVM := &r.vm
-	if r.activeView != "" {
-		if vm := r.perAgentVM[r.activeView]; vm != nil {
-			activeVM = vm
-		}
-	}
-	r.selectClearLocked()
-	if r.openAgentViewAtRowLocked(row) {
-		return true
-	}
-	if activeVM.toggleAtScreenRow(r.vpLastRender, row) {
-		r.paintViewportLocked()
-		return true
-	}
-	return false
+	return viewportClick{}
 }
 
-// ImagePreviewAtScreenRow reports the image step whose marker row sits at the
-// given 0-based screen row of the last paint, or ok=false when that row is
-// anything else (another step, a blank row, the composer area, a scrolled-away
-// position). The caller launches the viewer: starting a process is not a paint.
-//
-// The row guard is the transcript window, not the terminal height: the painter
-// sets vpHeight and vpBodyHeight to the same body height on every paint, and
-// rows at or past vpBodyHeight belong to the composer, where a transcript row
-// is not on screen at all. If those two ever diverge, this must follow the
-// transcript window.
-func (r *Renderer) ImagePreviewAtScreenRow(row int) (path, label string, ok bool) {
+// ViewportClickToggle handles a click reported as one event at the given
+// 0-based screen coordinates, resolved against the live state: the jump
+// control jumps, and a transcript row does what a plain click on it does
+// (transcriptClickLocked). It reports whether the click changed the view.
+func (r *Renderer) ViewportClickToggle(col, row int) bool {
+	return r.viewportClickToggleAt(col, row, time.Time{})
+}
+
+func (r *Renderer) viewportClickToggleAt(col, row int, at time.Time) bool {
 	if r == nil {
-		return "", "", false
+		return false
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.viewportMode || row < 0 || row >= r.vpBodyHeight {
-		return "", "", false
+	if !r.viewportMode {
+		r.mu.Unlock()
+		return false
+	}
+	s := r.screenAtLocked(at)
+	if s.jumpButton.contains(col, row) {
+		r.jumpToBottomLocked()
+		r.mu.Unlock()
+		return true
+	}
+	r.selectClearLocked()
+	changed, imagePath, imageLabel := r.transcriptClickLocked(s, row)
+	r.mu.Unlock()
+	openImagePreview(r, imagePath, imageLabel)
+	return changed
+}
+
+// transcriptClickLocked does what a plain click on screen row row of s does to
+// the transcript: it opens the subagent view of the card under it, or folds or
+// expands the block, and names the image to open when the row is an image
+// step's marker line. The image is resolved before the fold toggle, which
+// repaints and can shift every row below the click; the caller starts the
+// viewer once r.mu is released, as starting a process is not a paint. A row
+// outside the transcript, or a screen of a view since left, does nothing.
+// Caller holds r.mu.
+func (r *Renderer) transcriptClickLocked(s shownScreen, row int) (changed bool, imagePath, imageLabel string) {
+	if row < 0 || row >= s.bodyHeight || s.view != r.activeView {
+		return false, "", ""
 	}
 	vm := r.activeVMLocked()
-	if vm == nil {
-		return "", "", false
+	imagePath, imageLabel, _ = vm.imageMarkerAtScreenRow(s.render, row)
+	if r.openAgentViewAtRowLocked(s.render, row) {
+		return true, imagePath, imageLabel
 	}
-	return vm.imageMarkerAtScreenRow(r.vpLastRender, row)
+	if vm.toggleAtScreenRow(s.render, row) {
+		r.paintViewportLocked()
+		return true, imagePath, imageLabel
+	}
+	return false, imagePath, imageLabel
 }
 
 // ViewportHover records the 0-based screen row under the mouse cursor so the
@@ -6045,6 +6066,193 @@ func applySelectionHighlight(line, selectBgSeq string, startCol, endCol int) str
 
 const doubleClickThreshold = 400 * time.Millisecond
 
+// shownScreen is what one paint put on the terminal, as far as a mouse event
+// needs it: the transcript window, the bottom-pinned composer or modal overlay
+// under it, and the floating jump-to-bottom control.
+//
+// A mouse event names a screen cell, and what the cell meant depends on which
+// paint was showing when the user acted. While a turn runs the screen moves
+// under a stationary pointer all the time: in follow mode every streamed row
+// scrolls the transcript up one; a status line, queue preview or roster row
+// coming or going changes the composer's height and with it where every row
+// sits; a new message relabels the jump control and re-centres it; and a main
+// loop busy painting reads a press only after a paint the user never saw.
+// Resolving an event against the renderer's latest state hits whatever moved
+// under the cell instead — the image marker the user pressed has slid up, the
+// release resolves the row below it, and "click to open" opens nothing. So the
+// renderer keeps the screens it last painted, every event is resolved against
+// the one on the terminal when the event was read (screenAtLocked), and a click
+// acts on the screen its press landed on, never on the one current at release.
+type shownScreen struct {
+	at              time.Time // when the paint was written; zero for the live state
+	view            string    // activeView the paint showed
+	render          viewportRender
+	bodyHeight      int // transcript rows; the composer or overlay takes the rest
+	composer        composerBlock
+	overlayActive   bool
+	overlayRefs     []overlayRowRef
+	overlayFirstRow int
+	jumpButton      screenSpan // the floating jump-to-bottom control
+}
+
+// shownScreensKept is how many past paints the renderer keeps for resolving
+// mouse events. An event waits for at most the paint in progress when it was
+// read plus whatever the loop was already doing, so a handful is plenty; the
+// rest is headroom for a burst of streamed deltas.
+const shownScreensKept = 16
+
+// screenSpan is the run of cells [startCol, endCol) on one screen row; a row
+// below zero means nothing is there.
+type screenSpan struct{ row, startCol, endCol int }
+
+func (s screenSpan) contains(col, row int) bool {
+	return s.row >= 0 && row == s.row && col >= s.startCol && col < s.endCol
+}
+
+// absRow maps a 0-based screen row of s to the coordinate space selection
+// anchors are stored in: the absolute transcript row for body rows,
+// composerRowBase-offset for composer rows.
+func (s shownScreen) absRow(row int) int {
+	if row < s.bodyHeight {
+		return s.render.firstRow + row
+	}
+	return composerRowBase + (row - s.bodyHeight) + s.composer.scrollOffset
+}
+
+// lineAt returns the row of s painted at a 0-based screen row, or "".
+func (s shownScreen) lineAt(row int) string {
+	if row < 0 {
+		return ""
+	}
+	if row < s.bodyHeight {
+		if row < len(s.render.lines) {
+			return s.render.lines[row]
+		}
+		return ""
+	}
+	if ci := row - s.bodyHeight; ci < len(s.composer.lines) {
+		return s.composer.lines[ci]
+	}
+	return ""
+}
+
+// composerCaret maps a screen cell of s to a caret position in the composer
+// buffer, or false when the cell shows something other than the composer's own
+// text. The composer block is bottom-pinned, so its first row is the one just
+// below the transcript body; a vertically scrolled composer adds its scroll
+// offset to reach the row's index in the full block.
+func (s shownScreen) composerCaret(col, row int) (int, bool) {
+	if s.overlayActive || row < s.bodyHeight {
+		return 0, false
+	}
+	return s.composer.text.caretAt(row-s.bodyHeight+s.composer.scrollOffset, col)
+}
+
+// overlayPosition maps a screen cell of s to a position inside the modal
+// overlay it showed: the index of the line the overlay installed and the
+// display column within that line. It is what lets a modal place its own text
+// caret where the user clicked — the overlay knows which of its lines is an
+// input field and what precedes the text on it, and this answers where in that
+// line the click landed.
+func (s shownScreen) overlayPosition(col, row int) (line, column int, ok bool) {
+	if !s.overlayActive {
+		return 0, 0, false
+	}
+	// The block is bottom-pinned and its first row is the pinned separator.
+	idx := row - s.bodyHeight - 1
+	if idx < 0 {
+		return 0, 0, false
+	}
+	idx += s.overlayFirstRow
+	if idx >= len(s.overlayRefs) {
+		return 0, 0, false
+	}
+	ref := s.overlayRefs[idx]
+	column = ref.logicalCol + col - ref.rowCol
+	if column < ref.logicalCol {
+		column = ref.logicalCol
+	}
+	return ref.line, column, true
+}
+
+// liveScreenLocked is the renderer's current hit-testing state as a screen:
+// what a call with no read time — a direct call from a test, say — and a
+// renderer that has not painted yet resolve against. Caller holds r.mu.
+func (r *Renderer) liveScreenLocked() shownScreen {
+	return shownScreen{
+		view:            r.activeView,
+		render:          r.vpLastRender,
+		bodyHeight:      r.vpBodyHeight,
+		composer:        r.vpLastComposer,
+		overlayActive:   r.overlayActive,
+		overlayRefs:     r.vpOverlayRefs,
+		overlayFirstRow: r.vpOverlayFirstRow,
+		jumpButton:      r.jumpButtonSpanLocked(),
+	}
+}
+
+// recordScreenLocked keeps the screen the paint just written, trimmed to what
+// was on it: the off-screen transcript is what makes a render large, and no
+// event can land there. Caller holds r.mu.
+func (r *Renderer) recordScreenLocked() {
+	s := r.liveScreenLocked()
+	s.at = time.Now()
+	s.render = s.render.onScreen()
+	r.vpScreens[r.vpScreensNext] = s
+	r.vpScreensNext = (r.vpScreensNext + 1) % len(r.vpScreens)
+}
+
+// screenAtLocked returns the screen that was on the terminal at `at`: the
+// newest paint written no later than it. An event read before every kept paint
+// gets the oldest kept, the closest there is to what was on screen; a zero time
+// or a renderer with nothing painted gets the live state. Caller holds r.mu.
+func (r *Renderer) screenAtLocked(at time.Time) shownScreen {
+	if at.IsZero() {
+		return r.liveScreenLocked()
+	}
+	best, oldest := -1, -1
+	for i := range r.vpScreens {
+		s := &r.vpScreens[i]
+		if s.at.IsZero() {
+			continue
+		}
+		if !s.at.After(at) && (best < 0 || s.at.After(r.vpScreens[best].at)) {
+			best = i
+		}
+		if oldest < 0 || s.at.Before(r.vpScreens[oldest].at) {
+			oldest = i
+		}
+	}
+	switch {
+	case best >= 0:
+		return r.vpScreens[best]
+	case oldest >= 0:
+		return r.vpScreens[oldest]
+	}
+	return r.liveScreenLocked()
+}
+
+// viewportPress is the gesture the left button is holding: the cell it went
+// down on and the screen that showed it. A plain click acts on this screen at
+// this cell (viewportReleaseLocked), and a press on the jump control keeps that
+// control's bounds, so the release is judged against the button the user
+// pressed even after a new message relabelled and re-centred it.
+type viewportPress struct {
+	armed        bool
+	onJumpButton bool
+	col, row     int // 0-based screen cell of the press
+	screen       shownScreen
+}
+
+// viewportClick is how a gesture ended: as a plain click or not, and, for a
+// click that landed on a modal overlay's rows, where in the overlay.
+type viewportClick struct {
+	plain       bool
+	overlay     bool
+	overlayLine int
+	overlayCol  int
+}
+
 // composerRowBase encodes composer-block rows in a sentinel space above any
 // possible transcript row. Selection anchors in the transcript are stored in
 // absolute transcript-row coordinates (stable across scrolling); composer rows
@@ -6094,18 +6302,22 @@ func jumpToBottomButtonLayout(width, bodyHeight, newMessages int) (label string,
 	return label, startCol, startCol + buttonWidth, bodyHeight - 1
 }
 
-// jumpToBottomButtonHitLocked reports whether a screen coordinate lands on
-// the floating control from the last viewport paint. Caller holds r.mu.
-func (r *Renderer) jumpToBottomButtonHitLocked(col, row int) bool {
+// jumpButtonSpanLocked returns where the floating control sits as the
+// renderer's current state lays it out — the cells paintViewportLocked draws it
+// on — or a span on no row while it is not shown. Caller holds r.mu.
+func (r *Renderer) jumpButtonSpanLocked() screenSpan {
 	if r.vpFollow || r.vpLastRender.maxScrollOffset() <= 0 {
-		return false
+		return screenSpan{row: -1}
 	}
 	width := termWidthOrDefault()
 	if width < 1 {
 		width = 80
 	}
-	_, startCol, endCol, buttonRow := jumpToBottomButtonLayout(width, r.vpBodyHeight, r.vpNewMessages)
-	return row == buttonRow && col >= startCol && col < endCol
+	label, startCol, endCol, buttonRow := jumpToBottomButtonLayout(width, r.vpBodyHeight, r.vpNewMessages)
+	if label == "" || buttonRow < 0 || buttonRow >= r.vpBodyHeight {
+		return screenSpan{row: -1}
+	}
+	return screenSpan{row: buttonRow, startCol: startCol, endCol: endCol}
 }
 
 // jumpToBottomLocked restores follow mode and repaints with the newest
@@ -6114,7 +6326,6 @@ func (r *Renderer) jumpToBottomLocked() {
 	r.vpScrollOffset = r.vpLastRender.maxScrollOffset()
 	r.vpFollow = true
 	r.vpHoverRow = -1
-	r.vpJumpToBottomPressed = false
 	r.vpNewMessages = 0
 	r.selectClearLocked()
 	r.paintViewportLocked()
@@ -6132,16 +6343,6 @@ func (r *Renderer) ViewportJumpToBottom() {
 		return
 	}
 	r.jumpToBottomLocked()
-}
-
-// absRowForScreenRow maps a 0-based screen row to the coordinate space
-// selection anchors are stored in: absolute transcript row for body rows,
-// composerRowBase-offset for composer rows. Caller holds r.mu.
-func (r *Renderer) absRowForScreenRow(row int) int {
-	if row < r.vpBodyHeight {
-		return r.vpLastRender.firstRow + row
-	}
-	return composerRowBase + (row - r.vpBodyHeight) + r.vpLastComposer.scrollOffset
 }
 
 // lineForAbsRow returns the rendered line at the given absolute selection row.
@@ -6167,34 +6368,48 @@ func (r *Renderer) lineForAbsRow(row int) string {
 	return ""
 }
 
+// ViewportSelectStart presses the left button at a 0-based screen cell,
+// resolved against the live state. See viewportPressLocked.
 func (r *Renderer) ViewportSelectStart(col, row int) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.viewportPressLocked(col, row, time.Time{})
+}
+
+// viewportPressLocked starts a gesture at a screen cell of the screen shown at
+// `at`: on the jump control it holds the control; otherwise it anchors a
+// selection there and records the press, which is what a plain click acts on
+// when it is released (viewportReleaseLocked). Caller holds r.mu.
+func (r *Renderer) viewportPressLocked(col, row int, at time.Time) {
 	if !r.viewportMode {
 		return
 	}
-	totalHeight := r.vpBodyHeight + len(r.vpLastComposer.lines)
-	if row < 0 || row >= totalHeight {
+	r.vpPress = viewportPress{}
+	s := r.screenAtLocked(at)
+	if row < 0 || row >= s.bodyHeight+len(s.composer.lines) {
 		return
 	}
-	if r.jumpToBottomButtonHitLocked(col, row) {
-		r.stopAutoScrollLocked()
+	r.stopAutoScrollLocked()
+	if s.jumpButton.contains(col, row) {
 		r.selectClearLocked()
 		r.selectDragging = false
-		r.vpJumpToBottomPressed = true
+		r.vpPress = viewportPress{armed: true, onJumpButton: true, col: col, row: row, screen: s}
 		return
 	}
-	r.vpJumpToBottomPressed = false
-	r.stopAutoScrollLocked()
 	r.selectDragging = true
-	now := time.Now()
+	now := at
+	if now.IsZero() {
+		now = time.Now()
+	}
 	// Multi-click detection: consecutive presses on the same cell within the
 	// threshold advance the click count 1->2->3->1. Position match is exact-cell
 	// (matching the prior double-click behavior). Click 2 selects a word, click 3
-	// selects the whole line; click 1 starts a fresh char-range selection.
+	// selects the whole line; click 1 starts a fresh char-range selection. The
+	// word and the line are read off the screen the sequence's first press
+	// landed on, which is what the user was pointing at.
 	continuing := !r.lastClickTime.IsZero() &&
 		now.Sub(r.lastClickTime) <= doubleClickThreshold &&
 		r.lastClickCol == col && r.lastClickRow == row
@@ -6209,17 +6424,21 @@ func (r *Renderer) ViewportSelectStart(col, row int) {
 	} else {
 		r.clickCount = 1
 	}
+	if r.clickCount == 1 {
+		r.vpClickSeq = s
+	}
 
 	switch r.clickCount {
 	case 2:
-		r.selectWordAtLocked(col, row)
+		r.selectWordAtLocked(r.vpClickSeq, col, row)
 		return
 	case 3:
-		r.selectLineAtLocked(col, row)
+		r.selectLineAtLocked(r.vpClickSeq, col, row)
 		return
 	}
 
-	abs := r.absRowForScreenRow(row)
+	r.vpPress = viewportPress{armed: true, col: col, row: row, screen: s}
+	abs := s.absRow(row)
 	r.selectStartCol = col
 	r.selectStartRow = abs
 	r.selectEndCol = col
@@ -6229,29 +6448,46 @@ func (r *Renderer) ViewportSelectStart(col, row int) {
 	r.paintViewportLocked()
 }
 
+// ViewportSelectDrag reports left-button motion to a 0-based screen cell,
+// resolved against the live state. See viewportDragLocked.
 func (r *Renderer) ViewportSelectDrag(col, row int) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.viewportDragLocked(col, row, time.Time{})
+}
+
+// viewportDragLocked extends the selection to a cell of the screen shown at
+// `at` — the content under the pointer when it got there. Caller holds r.mu.
+func (r *Renderer) viewportDragLocked(col, row int, at time.Time) {
 	if !r.viewportMode {
 		return
 	}
-	if r.vpJumpToBottomPressed {
+	if r.vpPress.onJumpButton {
 		// Keep consuming motion until release so a drag that started on the
 		// button cannot become a transcript selection/toggle underneath it. The
 		// release coordinate decides whether the click still activates.
 		return
 	}
 	// A drag extends only the END anchor; the START is fixed at the press
-	// position (set in ViewportSelectStart). Ignore motion that arrives with no
+	// position (set in viewportPressLocked). Ignore motion that arrives with no
 	// active press (selectStartRow<0) - e.g. a stray motion report before the
 	// press event, which would otherwise seed a selection from the wrong cell.
 	if r.selectStartRow < 0 {
 		return
 	}
-	totalHeight := r.vpBodyHeight + len(r.vpLastComposer.lines)
+	// A drag is the pointer leaving the cell it pressed. A report naming the
+	// press cell itself is no motion, even when streamed rows have scrolled the
+	// transcript under it since: the end anchor is an absolute row, so taking
+	// that report would read the scroll as a one-row drag and turn the click
+	// into a selection.
+	if !r.selectDidDrag && r.vpPress.armed && col == r.vpPress.col && row == r.vpPress.row {
+		return
+	}
+	s := r.screenAtLocked(at)
+	totalHeight := s.bodyHeight + len(s.composer.lines)
 	if row < 0 {
 		row = 0
 	}
@@ -6265,22 +6501,22 @@ func (r *Renderer) ViewportSelectDrag(col, row int) {
 	// mouse having to keep moving. Drags inside the body interior or over the
 	// composer stop the ticker.
 	switch {
-	case r.vpBodyHeight > 0 && row <= 0:
+	case s.bodyHeight > 0 && row <= 0:
 		r.startAutoScrollLocked(-1, col)
-	case r.vpBodyHeight > 0 && row == r.vpBodyHeight-1:
+	case s.bodyHeight > 0 && row == s.bodyHeight-1:
 		r.startAutoScrollLocked(1, col)
 	default:
 		r.stopAutoScrollLocked()
 	}
 
-	r.updateSelectEndLocked(col, row)
+	r.updateSelectEndLocked(s, col, row)
 }
 
-// updateSelectEndLocked moves the selection's end anchor to the given screen
-// coordinate (converted to absolute row space) and repaints if it changed.
-// Caller holds r.mu.
-func (r *Renderer) updateSelectEndLocked(col, row int) {
-	abs := r.absRowForScreenRow(row)
+// updateSelectEndLocked moves the selection's end anchor to a screen cell of s
+// (converted to absolute row space) and repaints if it changed. Caller holds
+// r.mu.
+func (r *Renderer) updateSelectEndLocked(s shownScreen, col, row int) {
+	abs := s.absRow(row)
 	if r.selectEndCol == col && r.selectEndRow == abs {
 		return
 	}
@@ -6373,48 +6609,61 @@ func (r *Renderer) autoScrollStepLocked(dir int) {
 	r.paintViewportLocked()
 }
 
-// ViewportSelectEnd completes a mouse gesture. It reports whether the gesture
-// was a plain click — a press and release with no drag between them — so the
-// modal overlay that owns the screen can place its own text caret at the cell
-// the user clicked. A click that lands on the composer's text moves the
-// composer caret here, since the renderer is what knows where each rune of the
-// buffer was painted.
+// ViewportSelectEnd releases the left button at a 0-based screen cell and
+// reports whether the gesture was a plain click — a press and release with no
+// drag between them. See viewportRelease.
 func (r *Renderer) ViewportSelectEnd(col, row int) bool {
+	return r.viewportRelease(col, row, time.Time{}).plain
+}
+
+// viewportRelease completes a mouse gesture released at a screen cell at `at`.
+//
+// A press held on the jump control jumps when the release lands on the control
+// as it was when pressed. A plain click acts on the cell its press landed on,
+// against the screen the press was resolved on: on the transcript it does what
+// transcriptClickLocked says — opening an image step's file among them; on the
+// composer's text it moves the composer caret, which is requested rather than
+// written since the raw input reader owns the buffer; on a modal overlay it
+// reports where in the overlay it landed, so the modal can place its own caret
+// there. A click whose press was made in a view since left does nothing, and a
+// release with no press on record is taken at its own cell on the screen shown
+// at `at`. A drag copies the selection.
+func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 	if r == nil {
-		return false
+		return viewportClick{}
 	}
 	r.mu.Lock()
 	if !r.viewportMode {
 		r.mu.Unlock()
-		return false
+		return viewportClick{}
 	}
+	press := r.vpPress
+	r.vpPress = viewportPress{}
 	r.stopAutoScrollLocked()
 	r.selectDragging = false
-	if r.vpJumpToBottomPressed {
-		r.vpJumpToBottomPressed = false
-		if r.jumpToBottomButtonHitLocked(col, row) {
+	if press.onJumpButton {
+		if press.screen.jumpButton.contains(col, row) {
 			r.jumpToBottomLocked()
 		}
 		r.mu.Unlock()
-		return false
+		return viewportClick{}
 	}
 	if !r.selectDidDrag {
 		r.selectClearLocked()
 		r.vpHoverRow = -1
-		caret, placeCaret := r.composerCaretAtLocked(col, row)
-		if row >= 0 && row < r.vpHeight {
-			activeVM := &r.vm
-			if r.activeView != "" {
-				if vm := r.perAgentVM[r.activeView]; vm != nil {
-					activeVM = vm
-				}
-			}
-			if !r.openAgentViewAtRowLocked(row) {
-				if toggled := activeVM.toggleAtScreenRow(r.vpLastRender, row); toggled {
-					r.paintViewportLocked()
-				}
-			}
+		click := viewportClick{plain: true}
+		s, clickCol, clickRow := r.screenAtLocked(at), col, row
+		if press.armed {
+			s, clickCol, clickRow = press.screen, press.col, press.row
 		}
+		if s.view != r.activeView {
+			r.mu.Unlock()
+			return click
+		}
+		caret, placeCaret := s.composerCaret(clickCol, clickRow)
+		placeCaret = placeCaret && !r.composerSuppressed
+		click.overlayLine, click.overlayCol, click.overlay = s.overlayPosition(clickCol, clickRow)
+		_, imagePath, imageLabel := r.transcriptClickLocked(s, clickRow)
 		r.mu.Unlock()
 		if placeCaret {
 			// The raw input reader owns the buffer, so the caret is requested
@@ -6422,7 +6671,8 @@ func (r *Renderer) ViewportSelectEnd(col, row int) bool {
 			// repaints the card with the caret on the clicked cell.
 			requestComposerCaret(caret)
 		}
-		return true
+		openImagePreview(r, imagePath, imageLabel)
+		return click
 	}
 	text := r.extractSelectedTextLocked()
 	// Persist the selection: keep the anchors so the highlight stays after the
@@ -6442,7 +6692,7 @@ func (r *Renderer) ViewportSelectEnd(col, row int) bool {
 	r.mu.Unlock()
 
 	if text == "" {
-		return false
+		return viewportClick{}
 	}
 	go func() {
 		clipErr := writeTextToClipboard(context.Background(), text)
@@ -6452,23 +6702,7 @@ func (r *Renderer) ViewportSelectEnd(col, row int) bool {
 			r.mu.Unlock()
 		}
 	}()
-	return false
-}
-
-// composerCaretAtLocked maps 0-based screen coordinates to a caret position in
-// the composer buffer, or false when the cell shows something other than the
-// composer's own text. The composer block is bottom-pinned, so its first row is
-// the one just below the transcript body; a vertically scrolled composer adds
-// its scroll offset to reach the row's index in the full block. Caller holds
-// r.mu.
-func (r *Renderer) composerCaretAtLocked(col, row int) (int, bool) {
-	if r.overlayActive || r.composerSuppressed {
-		return 0, false
-	}
-	if row < r.vpBodyHeight {
-		return 0, false
-	}
-	return r.vpLastComposer.text.caretAt(row-r.vpBodyHeight+r.vpLastComposer.scrollOffset, col)
+	return viewportClick{}
 }
 
 func (r *Renderer) ViewportSelectClear() {
@@ -6483,7 +6717,6 @@ func (r *Renderer) ViewportSelectClear() {
 func (r *Renderer) selectClearLocked() {
 	r.selectDidDrag = false
 	r.selectDragging = false
-	r.vpJumpToBottomPressed = false
 	r.selectStartRow = -1
 	r.selectEndRow = -1
 	r.selectStartCol = -1
@@ -6610,19 +6843,12 @@ func runesHavePrefixAt(source []rune, pos int, prefix []rune) bool {
 	return true
 }
 
-func (r *Renderer) selectWordAtLocked(col, row int) {
-	var line string
-	if row < r.vpBodyHeight {
-		if row < len(r.vpLastRender.lines) {
-			line = r.vpLastRender.lines[row]
-		}
-	} else {
-		ci := row - r.vpBodyHeight
-		if ci < len(r.vpLastComposer.lines) {
-			line = r.vpLastComposer.lines[ci]
-		}
-	}
-	plain := stripAnsi(line)
+// selectWordAtLocked selects the word at a screen cell of s, used for a
+// double-click: s is the screen the click sequence began on, so the word is the
+// one the user pointed at even if the transcript moved before the second press.
+// Caller holds r.mu.
+func (r *Renderer) selectWordAtLocked(s shownScreen, col, row int) {
+	plain := stripAnsi(s.lineAt(row))
 	runes := []rune(plain)
 	if len(runes) == 0 {
 		return
@@ -6665,7 +6891,7 @@ func (r *Renderer) selectWordAtLocked(col, row int) {
 		endIdx++
 	}
 
-	abs := r.absRowForScreenRow(row)
+	abs := s.absRow(row)
 	r.selectStartRow = abs
 	// Store visual columns (not rune indices) so extractColumnRange and
 	// applySelectionHighlight - which operate in screen-cell space - extract
@@ -6678,33 +6904,23 @@ func (r *Renderer) selectWordAtLocked(col, row int) {
 	r.paintViewportLocked()
 }
 
-// selectLineAtLocked selects the entire visual row at (col, row), used for a
-// triple-click. It covers the whole rendered line content: startCol=0 and
+// selectLineAtLocked selects the entire visual row at (col, row) of s — the
+// screen the click sequence began on — used for a triple-click. It covers the whole rendered line content: startCol=0 and
 // endCol=full visual width, which both extractColumnRange and
 // applySelectionHighlight honor as "through the end of the line". Like
 // selectWordAtLocked it sets selectDidDrag so the subsequent release copies the
 // line and persists the highlight. The transcript stores wrapped visual rows
 // separately, so this selects a single visual row (not the wrapped logical
 // line).
-func (r *Renderer) selectLineAtLocked(col, row int) {
+func (r *Renderer) selectLineAtLocked(s shownScreen, col, row int) {
 	_ = col
-	var line string
-	if row < r.vpBodyHeight {
-		if row < len(r.vpLastRender.lines) {
-			line = r.vpLastRender.lines[row]
-		}
-	} else {
-		ci := row - r.vpBodyHeight
-		if ci < len(r.vpLastComposer.lines) {
-			line = r.vpLastComposer.lines[ci]
-		}
-	}
+	line := s.lineAt(row)
 	// endCol is the visual width of the line content so the selection is an
 	// explicit [0, width) range that captures every rune (wide runes counted at
 	// their real cell width). An empty line yields width 0 -> zero-length
 	// anchor, which still copies "" and releases cleanly.
 	endCol := visualColAtRuneIndex([]rune(stripAnsi(line)), len([]rune(stripAnsi(line))))
-	abs := r.absRowForScreenRow(row)
+	abs := s.absRow(row)
 	r.selectStartRow = abs
 	r.selectStartCol = 0
 	r.selectEndRow = abs

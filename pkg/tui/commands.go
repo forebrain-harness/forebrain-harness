@@ -384,9 +384,13 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 		closingRuns[line.RunID] = struct{}{}
 	}
 	runEndFrames := make(map[string][]Frame)
+	supersededAbandons := supersededAbandonedErrors(events)
 	eventCount := 0
 	for i := range events {
 		evt := events[i]
+		if _, superseded := supersededAbandons[i]; superseded {
+			continue
+		}
 		if turnErrorFrames := replayTurnErrorEventFrames(evt); len(turnErrorFrames) > 0 {
 			if _, closes := closingRuns[strings.TrimSpace(evt.RunID)]; closes {
 				runEndFrames[strings.TrimSpace(evt.RunID)] = append(runEndFrames[strings.TrimSpace(evt.RunID)], turnErrorFrames...)
@@ -542,6 +546,48 @@ func replayTimelineWithWorkers(renderer *Renderer, turns []state.Message, events
 	}
 	flush(len(turns))
 	return eventCount
+}
+
+// supersededAbandonedErrors finds the "process stopped" errors a run also has a
+// real ending for. A run reaped as abandoned while its process was in fact
+// still alive (a machine that slept past the lease) goes on to report how it
+// really ended; the reap's sentence is then the guess and the real error is the
+// fact, so only the fact is drawn. A run whose only error is the reap's keeps it.
+func supersededAbandonedErrors(events []event.RunEvent) map[int]struct{} {
+	real := make(map[string]struct{})
+	for i := range events {
+		evt := events[i]
+		if evt.Type != event.RunEventTurnError || strings.TrimSpace(evt.RunID) == "" {
+			continue
+		}
+		var p event.TurnErrorPayload
+		if json.Unmarshal(evt.Payload, &p) != nil || isAbandonedRunError(p) {
+			continue
+		}
+		real[strings.TrimSpace(evt.RunID)] = struct{}{}
+	}
+	if len(real) == 0 {
+		return nil
+	}
+	out := make(map[int]struct{})
+	for i := range events {
+		evt := events[i]
+		if evt.Type != event.RunEventTurnError {
+			continue
+		}
+		if _, has := real[strings.TrimSpace(evt.RunID)]; !has {
+			continue
+		}
+		var p event.TurnErrorPayload
+		if json.Unmarshal(evt.Payload, &p) == nil && isAbandonedRunError(p) {
+			out[i] = struct{}{}
+		}
+	}
+	return out
+}
+
+func isAbandonedRunError(p event.TurnErrorPayload) bool {
+	return p.Detail != nil && p.Detail.Code == "run_abandoned"
 }
 
 // replayWorkedFrame is the "Worked for" line that closed a run: how long it

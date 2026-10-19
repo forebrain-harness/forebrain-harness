@@ -67,7 +67,9 @@
         <div class="z-10 shrink-0 border-t border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-4 sm:px-5">
           <p v-if="notice" class="mb-2 rounded-lg bg-[var(--forebrain-input-bg)] px-3 py-2 text-[12px] text-[var(--forebrain-danger)]" data-testid="workshop-notice">{{ notice }}</p>
           <PromptInputProvider :max-files="4" accept="image/*,application/pdf" @submit="handleSubmit">
-            <div class="w-full" data-testid="workshop-composer">
+            <!-- Relative, so the composer's "+" sheet hangs off the input area
+                 rather than off its own 28px button. -->
+            <div class="relative w-full" data-testid="workshop-composer">
             <PromptInput multiple global-drop class="w-full">
               <PromptInputBody>
                 <ForebrainPromptTextarea

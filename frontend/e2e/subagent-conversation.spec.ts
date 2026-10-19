@@ -5,12 +5,12 @@ import { expect, test } from '@playwright/test'
 import { seedSessionInRoot, signIn, shot } from './support'
 
 /**
- * A subagent's own view, proven on the real page: the composer there talks to
- * that subagent (never to the conversation), the view opens with its own
- * context window, a message the user sends it is drawn as the user's own, a
- * command that belongs to the conversation answers with one sentence, and
- * Escape returns to the conversation — the same semantics the terminal's
- * subagent view has.
+ * A subagent's own conversation, proven on the real page: it opens in the
+ * conversation's right-hand drawer, the composer there talks to that subagent
+ * (never to the conversation), its tab names the model and the context it runs
+ * on, a message the user sends it is drawn as the user's own, a command that
+ * belongs to the conversation answers with one sentence, and Escape collapses
+ * the drawer — the same semantics the terminal's subagent view has.
  */
 
 const realLLM = process.env.E2E_REAL_LLM === '1'
@@ -62,56 +62,64 @@ test('a subagent view talks to its own subagent', async ({ page }) => {
   await page.fill('textarea', 'delegate the probe [[e2e:subagent-net]]')
   await page.press('textarea', 'Enter')
 
-  // The main agent dispatched the probe; its card is the way into its view.
+  // The main agent dispatched the probe; its card's task row is the way into
+  // that subagent's own conversation, which opens in the drawer beside the
+  // conversation rather than in place of it.
   await page.waitForSelector('[data-testid="subagent-call-card"]', { timeout: 90_000 })
   await shot(page, 'subagent-conversation-card')
+  await page.locator('[data-testid="subagent-task-row"]').first().click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
 
-  // Open the subagent's own view from the tab strip it appears in.
-  const subagentTab = page.locator('.forebrain-agent-tab').nth(1)
-  await subagentTab.click()
-  // The view opens with this subagent's own context window: N%/window.
-  const budget = page.locator('[data-testid="subagent-budget"]')
+  // The tab's composer bar says which context window this subagent runs on:
+  // the percentage alone, in the model-and-context pill.
+  const budget = drawer.locator('[data-testid="subagent-budget"]')
   await expect(budget).toBeVisible({ timeout: 30_000 })
-  await expect(budget).toHaveText(/^\d+%\/\S+$/)
+  await expect(budget).toHaveText(/^\d+%$/)
   await shot(page, 'subagent-conversation-view')
 
-  // A message sent from this view reaches the subagent, and only the subagent.
+  // A message sent from this tab reaches the subagent, and only the subagent.
   const reply = process.env.E2E_REPLY_OK ?? 'E2E_REPLY_OK'
-  await page.fill('textarea', 'continue')
-  await page.press('textarea', 'Enter')
-  await expect(page.locator('.chat-shell main')).toContainText(reply, { timeout: 90_000 })
-  await expect(page.locator('[data-testid="subagent-user-message"]').last()).toContainText('continue')
+  const tabInput = drawer.locator('textarea')
+  await tabInput.fill('continue')
+  await tabInput.press('Enter')
+  await expect(drawer).toContainText(reply, { timeout: 90_000 })
+  await expect(drawer.locator('[data-testid="subagent-user-message"]').last()).toContainText('continue')
+  // Nothing that happened in the drawer leaked into the conversation.
+  await expect(page.locator('.chat-shell main')).not.toContainText(reply)
   await shot(page, 'subagent-conversation-continued')
 
-  // A command hidden in a subagent's view answers with one sentence, and no
+  // A command hidden in a subagent's tab answers with one sentence, and no
   // request leaves the page. The slash menu owns Enter while it is open (it
   // picks a command), so a slash line is submitted with the submit button.
-  await page.fill('textarea', '/new')
-  await page.locator('button[aria-label="Submit"]').click()
-  await expect(page.locator('.chat-shell main')).toContainText('Run this from the main view')
+  await tabInput.fill('/new')
+  await drawer.locator('button[aria-label="Submit"]').click()
+  await expect(drawer).toContainText('Run this from the main view')
   await shot(page, 'subagent-conversation-hidden-command')
 
-  // /compact acts on the subagent, and its own card is drawn in its view.
-  await page.fill('textarea', '/compact')
-  await page.locator('button[aria-label="Submit"]').click()
-  await expect(page.locator('.compaction-card').first()).toBeVisible({ timeout: 90_000 })
+  // /compact acts on the subagent, and its own card is drawn in its tab.
+  await tabInput.fill('/compact')
+  await drawer.locator('button[aria-label="Submit"]').click()
+  await expect(drawer.locator('.compaction-card').first()).toBeVisible({ timeout: 90_000 })
   await shot(page, 'subagent-conversation-compacted')
 
-  // Escape returns to the conversation, and the subagent's answer is not there.
-  await page.keyboard.press('Escape')
-  await expect(page.locator('[data-testid="subagent-budget"]')).toHaveCount(0)
+  // Escape in the drawer collapses it, and the subagent's answer is not in the
+  // conversation it shares the page with.
+  await tabInput.click()
+  await tabInput.press('Escape')
+  await expect(page.locator('[data-testid="subagent-drawer"]')).toHaveCount(0)
   await expect(page.locator('.chat-shell main')).not.toContainText(reply)
   await shot(page, 'subagent-conversation-back')
 })
 
 /**
- * The real-model counterpart of the view test above: the provider is reached
+ * The real-model counterpart of the drawer test above: the provider is reached
  * through the flaky proxy, so the test can cut the subagent's own request
  * mid-stream (a live provider will not do that on request) and then continue
- * it from its own view. It needs a real provider behind the proxy, so it skips
+ * it from its own tab. It needs a real provider behind the proxy, so it skips
  * in fake mode — the CI gate, where no proxy is running.
  */
-test('a subagent that lost the network is continued from its own view', async ({ page }) => {
+test('a subagent that lost the network is continued from its own tab', async ({ page }) => {
   test.skip(!realLLM || !flakyControl, 'needs a real provider cut mid-stream through the flaky proxy')
   test.info().setTimeout(300_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
@@ -122,7 +130,7 @@ test('a subagent that lost the network is continued from its own view', async ({
   await page.waitForSelector('textarea')
 
   // The main agent dispatches a general-purpose subagent and waits for it; the
-  // dispatch's card is the way into its view.
+  // dispatch's card is the way into its tab.
   await page.fill(
     'textarea',
     'Dispatch one general-purpose subagent to read README.md and summarize it in three sentences, then wait for its result.',
@@ -137,37 +145,41 @@ test('a subagent that lost the network is continued from its own view', async ({
   await expect(failedCard).toBeVisible({ timeout: 180_000 })
   await shot(page, 'subagent-conversation-net-failed')
 
-  // The network is back; the subagent's own view is where it is continued.
+  // The network is back; the subagent's own tab is where it is continued.
   setProxyPolicy('pass')
-  await page.locator('.forebrain-agent-tab').nth(1).click()
-  await expect(page.locator('[data-testid="subagent-budget"]')).toBeVisible({ timeout: 30_000 })
+  await page.locator('[data-testid="subagent-task-row"]').first().click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  await expect(drawer.locator('[data-testid="subagent-run-pill"]')).toBeVisible({ timeout: 30_000 })
 
-  const answers = page.locator('.chat-shell main .is-assistant')
+  const answers = drawer.locator('[role="log"] .is-assistant')
   const before = await answers.allInnerTexts()
-  await page.fill('textarea', 'continue')
-  await page.press('textarea', 'Enter')
+  const tabInput = drawer.locator('textarea')
+  await tabInput.fill('continue')
+  await tabInput.press('Enter')
 
   // A real model's words are unknown, so the answer's text is not asserted —
-  // but where it lands is. Wait for a fresh non-empty reply in THIS view,
+  // but where it lands is. Wait for a fresh non-empty reply in THIS tab,
   // remember it, then prove the same text never reaches the conversation.
   await expect
     .poll(async () => (await answers.allInnerTexts()).slice(before.length).map((text) => text.trim()).filter(Boolean).join('\n'), {
       timeout: 180_000,
     })
     .not.toBe('')
-  await expect(page.locator('[data-testid="subagent-user-message"]').last()).toContainText('continue')
+  await expect(drawer.locator('[data-testid="subagent-user-message"]').last()).toContainText('continue')
   const answer = (await answers.allInnerTexts()).slice(before.length).map((text) => text.trim()).filter(Boolean).join('\n')
   expect(answer.length).toBeGreaterThan(0)
   await shot(page, 'subagent-conversation-net-continued')
 
-  // Escape returns to the conversation, and the subagent's answer is not there.
-  await page.keyboard.press('Escape')
-  await expect(page.locator('[data-testid="subagent-budget"]')).toHaveCount(0)
+  // Escape collapses the drawer, and the subagent's answer is not there.
+  await tabInput.click()
+  await tabInput.press('Escape')
+  await expect(page.locator('[data-testid="subagent-drawer"]')).toHaveCount(0)
   await expect(page.locator('.chat-shell main')).not.toContainText(answer)
   await shot(page, 'subagent-conversation-net-back')
 })
 
-test('a plan-reviewer view opens with its own review model and budget', async ({ page }) => {
+test('a plan-reviewer tab opens with its own review model and budget', async ({ page }) => {
   test.info().setTimeout(120_000)
   await page.addInitScript(() => localStorage.setItem('forebrain-locale', 'en'))
   await signIn(page)
@@ -188,13 +200,22 @@ test('a plan-reviewer view opens with its own review model and budget', async ({
   `)
 
   await page.goto(`/?session=${session}`, { waitUntil: 'networkidle' })
-  await page.waitForSelector('.forebrain-agent-tab')
-  await page.locator('.forebrain-agent-tab').nth(1).click()
+  // The conversation has no call card for a review it did not draw: the top
+  // bar's subagent control is the way in.
+  const toggle = page.locator('[data-testid="subagent-drawer-toggle"]')
+  await expect(toggle).toBeVisible({ timeout: 30_000 })
+  await toggle.click()
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer.locator('[data-testid="subagent-tab-plan-reviewer-e2e"]')).toBeVisible()
+
+  // The percentage is the pill's own; the window and the model are in the card
+  // it opens, read from the spawn — not the conversation's.
   const budget = page.locator('[data-testid="subagent-budget"]')
   await expect(budget).toBeVisible({ timeout: 30_000 })
-  await expect(budget).toHaveText('65%/1M')
-  // The header names the review model, read from the spawn — not the
-  // conversation's.
-  await expect(page.locator('.chat-shell main')).toContainText('zhipuai/glm-5.3-flash')
+  await expect(budget).toHaveText('65%')
+  await page.locator('[data-testid="subagent-run-pill"]').click()
+  const card = page.locator('[data-testid="subagent-run-card"]')
+  await expect(card).toContainText('zhipuai/glm-5.3-flash')
+  await expect(card.locator('[data-testid="subagent-context-window"]')).toHaveText('1M')
   await shot(page, 'subagent-conversation-plan-reviewer')
 })

@@ -741,24 +741,8 @@ func Run(ctx context.Context, opts Options) error {
 			if state.updateTerminalFocus(ev) {
 				continue
 			}
-			if ev.kind == inputEventMouseClick {
-				renderer.ViewportClickToggle(ev.mouseCol, ev.mouseRow)
-				continue
-			}
-			if ev.kind == inputEventMousePress {
-				renderer.ViewportSelectStart(ev.mouseCol, ev.mouseRow)
-				continue
-			}
-			if ev.kind == inputEventMouseDrag {
-				renderer.ViewportSelectDrag(ev.mouseCol, ev.mouseRow)
-				continue
-			}
-			if ev.kind == inputEventMouseRelease {
-				clickImagePreviewRow(renderer, ev.mouseCol, ev.mouseRow)
-				continue
-			}
-			if ev.kind == inputEventMouseMove {
-				renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
+			if isMouseInputEvent(ev) && ev.kind != inputEventMouseWheel {
+				renderer.HandleMouse(ev)
 				continue
 			}
 			if ev.kind == inputEventMouseWheel {
@@ -769,14 +753,13 @@ func Run(ctx context.Context, opts Options) error {
 				// wheel events (buffer 8) causes 8 full renders, blocking the
 				// input pipeline. With coalescing, only one render runs per
 				// idle-loop iteration.
-				delta := ev.wheelDelta
-				col, row := ev.mouseCol, ev.mouseRow
+				wheel := ev
 				for {
 					select {
 					case ev2 := <-events:
 						if ev2.kind == inputEventMouseWheel {
-							delta += ev2.wheelDelta
-							col, row = ev2.mouseCol, ev2.mouseRow
+							ev2.wheelDelta += wheel.wheelDelta
+							wheel = ev2
 							continue
 						}
 						pendingNonWheel = ev2
@@ -785,7 +768,7 @@ func Run(ctx context.Context, opts Options) error {
 					}
 					break
 				}
-				renderer.ViewportScrollAt(delta, col, row)
+				renderer.HandleMouse(wheel)
 				continue
 			}
 			if state.panel != nil {
@@ -1376,18 +1359,9 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 		return false
 	}
 	switch ev.kind {
-	case inputEventMouseClick:
-		renderer.ViewportClickToggle(ev.mouseCol, ev.mouseRow)
-	case inputEventMousePress:
-		renderer.ViewportSelectStart(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseDrag:
-		renderer.ViewportSelectDrag(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseRelease:
-		clickImagePreviewRow(renderer, ev.mouseCol, ev.mouseRow)
-	case inputEventMouseMove:
-		renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseWheel:
-		renderer.ViewportScrollAt(ev.wheelDelta, ev.mouseCol, ev.mouseRow)
+	case inputEventMouseClick, inputEventMousePress, inputEventMouseDrag,
+		inputEventMouseRelease, inputEventMouseMove, inputEventMouseWheel:
+		renderer.HandleMouse(ev)
 	case inputEventDraft:
 		draft, cursor := sanitizeTerminalDraft(ev.draft, ev.cursor)
 		state.prepareHistoryDraft(ev, draft)
@@ -3817,10 +3791,9 @@ func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyC
 			if ev.kind == inputEventMouseWheel {
 				// Coalesce consecutive wheel events so a fast scroll burst
 				// triggers one viewport repaint instead of one per event.
-				delta := ev.wheelDelta
-				col, row := ev.mouseCol, ev.mouseRow
+				wheel := ev
 				flush := func() {
-					handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, inputEvent{kind: inputEventMouseWheel, wheelDelta: delta, mouseCol: col, mouseRow: row}, cmds)
+					handleActiveRunInput(ctx, session, renderer, tracker, state, clipboard, wheel, cmds)
 				}
 			coalesceWheel:
 				for {
@@ -3831,8 +3804,8 @@ func drainActiveRunEvents(ctx context.Context, events <-chan inputEvent, notifyC
 							return nil
 						}
 						if ev2.kind == inputEventMouseWheel {
-							delta += ev2.wheelDelta
-							col, row = ev2.mouseCol, ev2.mouseRow
+							ev2.wheelDelta += wheel.wheelDelta
+							wheel = ev2
 							continue
 						}
 						flush()
@@ -4169,18 +4142,9 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	// Shift+Left is decoded by the raw reader; bare Up remains history
 	// navigation.
 	switch ev.kind {
-	case inputEventMouseClick:
-		renderer.ViewportClickToggle(ev.mouseCol, ev.mouseRow)
-	case inputEventMousePress:
-		renderer.ViewportSelectStart(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseDrag:
-		renderer.ViewportSelectDrag(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseRelease:
-		clickImagePreviewRow(renderer, ev.mouseCol, ev.mouseRow)
-	case inputEventMouseMove:
-		renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseWheel:
-		renderer.ViewportScrollAt(ev.wheelDelta, ev.mouseCol, ev.mouseRow)
+	case inputEventMouseClick, inputEventMousePress, inputEventMouseDrag,
+		inputEventMouseRelease, inputEventMouseMove, inputEventMouseWheel:
+		renderer.HandleMouse(ev)
 	case inputEventDraft:
 		state.resetActiveRunCtrlCSequence()
 		draft, cursor := sanitizeTerminalDraft(ev.draft, ev.cursor)

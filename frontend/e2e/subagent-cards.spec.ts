@@ -146,15 +146,18 @@ test('a fanout card carries its tasks, their clocks, and nothing raw', async ({ 
   expect(text).not.toMatch(/^\s*\+?\d*\s*tool uses?\s*$/m)
   await shot(page, 'subagent-cards-fanout')
 
-  // The row is the way into that subagent's own view.
+  // The row is the way into that subagent's own view — which opens beside the
+  // conversation, in its drawer, never in place of it.
   await rows.nth(0).click()
-  await expect(page.getByRole('button', { name: '返回' })).toBeVisible()
-  await expect(page.locator('.chat-shell main')).toContainText('run the migration')
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  await expect(drawer).toContainText('run the migration')
   await shot(page, 'subagent-cards-view')
-  // Back to the conversation before the reload; the agent view would
-  // otherwise come back restored and keep the conversation hidden. The wait
-  // covers the view state's debounced persistence.
-  await page.getByRole('button', { name: '返回' }).click()
+  // Back to the conversation before the reload; the drawer's shape would
+  // otherwise come back restored and keep the conversation narrower. The wait
+  // covers the drawer state's debounced persistence.
+  await page.locator('[data-testid="subagent-drawer-collapse"]').click()
+  await expect(page.locator('[data-testid="subagent-drawer"]')).toHaveCount(0)
   await expect(page.locator('[data-testid="subagent-call-card"]').first()).toBeVisible()
   await page.waitForTimeout(300)
 

@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -12,18 +15,32 @@ import (
 
 // imagePreviewOpener launches a file with the operating system's viewer. It is
 // a variable so a test can inject a fake and assert whether (and what) it was
-// asked to open; production uses the platform's own handler.
+// asked to open; production uses the platform's own handler. An error it
+// returns is a launch that never happened; failed is called, from another
+// goroutine, when a launch that did start ends unsuccessfully.
 var imagePreviewOpener = openWithSystemViewer
 
 // openWithSystemViewer opens path with the platform's default application.
 // Starting rather than waiting is deliberate: the viewer owns the screen until
 // the user closes it, and the terminal must stay interactive behind it.
-func openWithSystemViewer(path string) error {
+//
+// The file is checked first. A marker line outlives its file — a command the
+// agent is running may be rebuilding the very directory it was read from — and
+// the platform launcher reports a missing file only through its exit status
+// (macOS `open` prints "The file … does not exist." and exits 1), which a
+// click that only started it never saw: the click did nothing at all.
+func openWithSystemViewer(path string, failed func(error)) error {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return errors.New("file no longer exists")
+		}
+		return err
+	}
 	name, args := imageViewerCommand(path)
 	if name == "" {
 		return fmt.Errorf("no system viewer is available on this platform")
 	}
-	return startDetached(name, args...)
+	return startDetached(failed, name, args...)
 }
 
 // startDetached starts a program that has to outlive its caller: Start returns
@@ -34,13 +51,43 @@ func openWithSystemViewer(path string) error {
 // behind "open image does nothing": the handler cancelled its own timeout
 // context a moment after Start, SIGKILLing a viewer that had not opened the
 // file yet.
-func startDetached(name string, args ...string) error {
+//
+// A launcher checks what it was handed only once it is running — the file,
+// a handler for its type — so how it ended is part of the answer: an
+// unsuccessful exit goes to failed, with what the launcher said on stderr.
+func startDetached(failed func(error), name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	stderr := &headBuffer{max: 2048}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	go func() { _ = cmd.Wait() }()
+	go func() {
+		err := cmd.Wait()
+		if err == nil || failed == nil {
+			return
+		}
+		if said := strings.TrimSpace(string(stderr.buf)); said != "" {
+			err = errors.New(said)
+		}
+		failed(err)
+	}()
 	return nil
+}
+
+// headBuffer keeps the first max bytes written to it and drops the rest, so a
+// launcher that hands the file to a viewer inheriting its stderr cannot grow it
+// without bound.
+type headBuffer struct {
+	buf []byte
+	max int
+}
+
+func (h *headBuffer) Write(p []byte) (int, error) {
+	if room := h.max - len(h.buf); room > 0 {
+		h.buf = append(h.buf, p[:min(room, len(p))]...)
+	}
+	return len(p), nil
 }
 
 // imageViewerCommand is the platform's "open this file" command.
@@ -55,34 +102,21 @@ func imageViewerCommand(path string) (string, []string) {
 	}
 }
 
-// clickImagePreviewRow handles a completed mouse click at a 0-based screen cell:
-// it ends the gesture and, when that cell was an image step's marker row, opens
-// the file the row names.
-//
-// The target is resolved BEFORE the gesture ends, on the render the click landed
-// on. Ending it may fold or expand the card under the row, and that repaint
-// shifts every row below the click — resolving afterwards would name a different
-// row than the one the user pressed (clicking the "··· N more lines" hint used to
-// expand the card and then open a file the expansion had just revealed).
-func clickImagePreviewRow(renderer *Renderer, col, row int) {
-	if renderer == nil {
-		return
-	}
-	path, label, isMarker := renderer.ImagePreviewAtScreenRow(row)
-	if renderer.ViewportSelectEnd(col, row) && isMarker {
-		openImagePreview(renderer, path, label)
-	}
-}
-
 // openImagePreview hands one already-resolved image step to the system viewer.
-// A miss is not an error worth a status line: the marker line is the affordance,
-// so nothing at all happens when no file was named.
+// A click resolves it on the screen its press landed on (viewportRelease). A
+// miss is not an error worth a status line: the marker line is the affordance,
+// so nothing at all happens when no file was named. A file that was named and
+// could not be opened is said, whether the launch failed to start or the
+// launcher refused it afterwards.
 func openImagePreview(renderer *Renderer, path, label string) {
 	if renderer == nil || strings.TrimSpace(path) == "" {
 		return
 	}
-	if err := imagePreviewOpener(path); err != nil {
+	report := func(err error) {
 		renderer.PrintError(fmt.Errorf("open %s: %w", label, err))
+	}
+	if err := imagePreviewOpener(path, report); err != nil {
+		report(err)
 	}
 }
 

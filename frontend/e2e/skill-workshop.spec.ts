@@ -36,6 +36,19 @@ test('the workshop opens as the chat page: greeting, composer, workbench', async
   await expect(page.locator('[data-testid="workshop-greeting"]')).toHaveText(/想做一个什么技能|What skill do you want to build/)
   await expect(page.locator('[data-testid="workshop-composer"] textarea')).toBeVisible()
 
+  // The composer's "+" opens one sheet across the whole input area, exactly as
+  // it does on the chat page and in a subagent's tab: the composer is the
+  // sheet's anchor, not the 28px button that opens it.
+  const plus = page.locator('[data-testid="workshop-composer"] [data-testid="composer-plus"]')
+  await plus.click()
+  const sheet = page.locator('[data-testid="workshop-composer"] .forebrain-plus-pop')
+  await expect(sheet).toBeVisible()
+  const sheetBox = await sheet.boundingBox()
+  const composerBox = await page.locator('[data-testid="workshop-composer"] [data-slot="input-group"]').boundingBox()
+  expect(Math.abs((sheetBox?.width ?? 0) - (composerBox?.width ?? 0))).toBeLessThanOrEqual(2)
+  await plus.click()
+  await expect(sheet).toHaveCount(0)
+
   // The workbench carries the four skill tabs, disabled until a skill is chosen.
   await page.click('[data-testid="workshop-workbench-toggle"]')
   await expect(page.locator('[data-testid="chat-workbench"]')).toBeVisible()

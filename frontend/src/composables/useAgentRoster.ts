@@ -9,11 +9,14 @@ export function agentRosterViewTarget(row: AgentRosterRow): RouteLocationRaw | n
 }
 
 /** The conversation a row ran in: a subagent's parent conversation, or the
- * row's own session for a primary agent. */
+ * row's own session for a primary agent. A subagent also names the tab to open
+ * there, so the jump lands on that subagent rather than on the conversation
+ * alone. */
 export function agentRosterConversationTarget(row: AgentRosterRow): RouteLocationRaw | null {
   const sessionId = String(row.parentSessionId ?? row.sessionId ?? '').trim()
   if (!sessionId) return null
-  return { path: '/', query: { session: sessionId } }
+  const agent = row.kind === 'subagent' ? String(row.id ?? '').trim() : ''
+  return { path: '/', query: agent ? { session: sessionId, agent } : { session: sessionId } }
 }
 
 export function useAgentRoster() {

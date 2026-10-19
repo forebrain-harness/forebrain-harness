@@ -121,7 +121,11 @@ type inputEvent struct {
 	mouseCol   int
 	mouseRow   int
 	wheelDelta int
-	err        error
+	// at is when the reader decoded a mouse report. The renderer resolves the
+	// event against the screen that was on the terminal then (shownScreen),
+	// not against one painted while the event waited for the loop to read it.
+	at  time.Time
+	err error
 	// historyNavigation distinguishes an arrow-key recall from an ordinary
 	// edit. The structured entry restores folded paste bodies and image paths
 	// that are absent from the visible placeholder text.
@@ -1089,6 +1093,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 								pendingEscape = pendingEscape[:0]
 								if mev, ok := parseSGRMouse(seq); ok {
 									if mouseEv, ok := mouseEventFromSGR(mev); ok {
+										mouseEv.at = time.Now()
 										ch <- mouseEv
 									}
 								}

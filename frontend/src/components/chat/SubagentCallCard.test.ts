@@ -109,8 +109,27 @@ describe('SubagentCallCard', () => {
     expect(wrapper.emitted('open')).toHaveLength(1)
   })
 
-  it('says the header in the viewer\'s language', async () => {
-    const wrapper = mount(SubagentCallCard, { props: { step: fanoutStep } })
+  it('marks the one row whose tab the drawer already has in front', () => {
+    const twoTasks = stepOf({
+      subagentCall: {
+        verb: 'run',
+        tasks: [
+          { index: 0, key: 'subagent-8c5c', title: '任务16 migrate 导入', agentType: 'general-purpose', status: 'running' },
+          { index: 1, key: 'subagent-9d7e', title: '任务17 扩展目录', agentType: 'general-purpose', status: 'running' },
+        ],
+      },
+    })
+    const wrapper = mount(SubagentCallCard, { props: { step: twoTasks, activeAgentId: 'subagent-9d7e' } })
+    const rows = wrapper.findAll('[data-testid="subagent-task-row"]')
+    expect(rows.map((row) => row.attributes('aria-current'))).toEqual([undefined, 'true'])
+
+    // With no tab in front, no row claims to be the one being read.
+    const idle = mount(SubagentCallCard, { props: { step: twoTasks } })
+    expect(idle.findAll('[data-testid="subagent-task-row"]').map((row) => row.attributes('aria-current')))
+      .toEqual([undefined, undefined])
+  })
+
+  it('says the header in the viewer\'s language', async () => {    const wrapper = mount(SubagentCallCard, { props: { step: fanoutStep } })
     expect(wrapper.text()).toContain('Ran 2 general-purpose tasks')
     setLocale('zh')
     await nextTick()

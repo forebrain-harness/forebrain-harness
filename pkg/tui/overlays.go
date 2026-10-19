@@ -2949,26 +2949,14 @@ func (s *rawSelector) dispatchMouse(mev sgrMouseEvent) {
 	if !ok {
 		return
 	}
-	switch ev.kind {
-	case inputEventMouseClick:
-		s.renderer.ViewportClickToggle(ev.mouseCol, ev.mouseRow)
-	case inputEventMousePress:
-		s.renderer.ViewportSelectStart(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseDrag:
-		s.renderer.ViewportSelectDrag(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseRelease:
-		// A release that ended a drag copied a selection; only a plain click
-		// moves the caret, which is what the modal's placeCaret does with the
-		// overlay-relative position of the cell that was clicked.
-		if click := s.renderer.ViewportSelectEnd(ev.mouseCol, ev.mouseRow); click && s.placeCaret != nil {
-			if line, col, ok := s.renderer.OverlayClickPosition(ev.mouseCol, ev.mouseRow); ok {
-				s.placeCaret(line, col)
-			}
-		}
-	case inputEventMouseMove:
-		s.renderer.ViewportHover(ev.mouseCol, ev.mouseRow)
-	case inputEventMouseWheel:
-		s.renderer.ViewportScrollAt(ev.wheelDelta, ev.mouseCol, ev.mouseRow)
+	// Stamped before the renderer's lock is taken: a paint in progress on the
+	// main loop must not decide which screen this report is resolved against.
+	ev.at = time.Now()
+	// A release that ended a drag copied a selection; only a plain click moves
+	// the caret, which is what the modal's placeCaret does with the
+	// overlay-relative position of the cell that was clicked.
+	if click := s.renderer.HandleMouse(ev); click.overlay && s.placeCaret != nil {
+		s.placeCaret(click.overlayLine, click.overlayCol)
 	}
 }
 
