@@ -409,12 +409,30 @@ func DecideProjectServers(agentWorkspace, projectRoot, projectKey string, allowe
 	return SaveProjectConsents(agentWorkspace, consents)
 }
 
+// StaleConsentError refuses a per-entry decision whose entry is no longer what
+// the operator was shown: the project file changed (or lost the entry) between
+// the page listing it and the click. Nothing is recorded when it is returned.
+type StaleConsentError struct{ Names []string }
+
+func (e *StaleConsentError) Error() string {
+	return "language-server entries changed since they were listed: " + strings.Join(e.Names, ", ")
+}
+
+// StaleNames lists the entries whose fingerprint no longer matches.
+func (e *StaleConsentError) StaleNames() []string { return e.Names }
+
 // DecideProjectServersFor records a decision for the named entries only —
 // allow when the id is also in allowed, deny otherwise — and leaves every
 // other entry exactly as it was. Unlike DecideProjectServers it overwrites a
 // decision a named entry already has: that is how a denied entry is allowed
 // again.
-func DecideProjectServersFor(agentWorkspace, projectRoot, projectKey string, decide, allowed []string) error {
+//
+// fingerprints is what the surface showed for each named id. A non-nil map
+// binds the decision to exactly those entries: any id the file no longer
+// has, or whose fingerprint moved, makes the whole call fail with
+// *StaleConsentError before a single decision is recorded. nil keeps the old
+// behavior of deciding whatever the file says now.
+func DecideProjectServersFor(agentWorkspace, projectRoot, projectKey string, decide, allowed []string, fingerprints map[string]string) error {
 	if strings.TrimSpace(projectRoot) == "" {
 		return nil
 	}
@@ -432,6 +450,32 @@ func DecideProjectServersFor(agentWorkspace, projectRoot, projectKey string, dec
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, id := range allowed {
 		allowedSet[strings.ToLower(strings.TrimSpace(id))] = struct{}{}
+	}
+	// The check and the recording below share this one read of the file: what
+	// was verified is exactly what gets recorded.
+	if fingerprints != nil {
+		entryFPs := make(map[string]string, len(entries))
+		for id, srv := range entries {
+			entryFPs[strings.ToLower(strings.TrimSpace(id))] = ProjectServerFingerprint(srv)
+		}
+		var stale []string
+		seen := make(map[string]struct{}, len(decide))
+		for _, id := range decide {
+			key := strings.ToLower(strings.TrimSpace(id))
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			// Missing from the file and a moved fingerprint are the same
+			// refusal: the operator confirmed an entry this file no longer
+			// holds as shown.
+			if fp, ok := entryFPs[key]; !ok || fp != fingerprints[key] {
+				stale = append(stale, key)
+			}
+		}
+		if len(stale) > 0 {
+			return &StaleConsentError{Names: stale}
+		}
 	}
 	for _, id := range sortedServerIDs(entries) {
 		name := strings.ToLower(strings.TrimSpace(id))

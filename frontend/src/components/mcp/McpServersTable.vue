@@ -59,8 +59,7 @@
           <col />
           <col style="width: 108px" />
           <col style="width: 148px" />
-          <col style="width: 56px" />
-          <col style="width: 88px" />
+          <col style="width: 132px" />
         </colgroup>
         <thead>
           <tr>
@@ -69,8 +68,7 @@
             <th>{{ t('mcp.colTarget') }}</th>
             <th>{{ t('mcp.colType') }}</th>
             <th>{{ t('mcp.colStatus') }}</th>
-            <th>{{ t('mcp.colEnabled') }}</th>
-            <th class="text-right">{{ t('mcp.colActions') }}</th>
+            <th class="text-center">{{ t('mcp.colActions') }}</th>
           </tr>
         </thead>
         <tbody>
@@ -91,10 +89,7 @@
               <span class="forebrain-cell-1 font-mono text-[var(--forebrain-text-2)]" v-tip:top.trunc="entry.row.target">{{ entry.row.target }}</span>
             </td>
             <td>
-              <span class="mcp-ty">
-                <span class="font-mono">{{ entry.type.main }}</span>
-                <span v-if="entry.type.sub" class="mcp-ty-sub">{{ entry.type.sub }}</span>
-              </span>
+              <span class="mcp-ty font-mono">{{ entry.type }}</span>
             </td>
             <!-- One badge, and the words behind it — a failure in its own
                  text, why an entry is off, which layer overrides it, or how a
@@ -102,24 +97,27 @@
             <td>
               <BadgeComponent :variant="statusVariant(entry.status.tone)" v-tip:top="entry.status.tip">{{ entry.status.label }}</BadgeComponent>
             </td>
-            <td>
-              <span v-if="!entry.own" class="text-[var(--forebrain-muted-text)]">—</span>
-              <!-- A row awaiting a decision has nothing to switch yet: the
-                   buttons in the action column are the decision. A declined
-                   row has no switch either — it does not load until 允许 takes
-                   the decision back. -->
-              <SwitchComponent
-                v-else-if="!entry.pending && !entry.declined"
-                :model-value="enabledNow(entry.row)"
-                :disabled="entry.row.disabledByConfig === true"
-                :aria-label="t('mcp.enableAria', { name: entry.row.name })"
-                v-tip:top="entry.row.disabledByConfig ? t('mcp.enabledByConfigTip') : ''"
-                :data-testid="`mcp-enable-${entry.key}`"
-                @update:model-value="toggleEnabled(entry.row, $event)"
-              />
-            </td>
             <td class="text-right">
               <RowActions>
+                <!-- The switch that writes the next session's list opens the
+                     action column, where the prototype puts it (`mcpSwCell`):
+                     a row awaiting a decision has nothing to switch yet — the
+                     buttons after it are the decision — and a declined row has
+                     no switch either, it does not load until 允许 takes the
+                     decision back. -->
+                <SwitchComponent
+                  v-if="entry.own && !entry.pending && !entry.declined"
+                  :model-value="enabledNow(entry.row)"
+                  :disabled="entry.row.disabledByConfig === true"
+                  :aria-label="t('mcp.enableAria', { name: entry.row.name })"
+                  v-tip:top="entry.row.disabledByConfig ? t('mcp.enabledByConfigTip') : ''"
+                  :data-testid="`mcp-enable-${entry.key}`"
+                  @update:model-value="toggleEnabled(entry.row, $event)"
+                />
+                <!-- A row with no switch keeps its width, so the icons line up
+                     down the column: a row this page does not own is not its to
+                     switch. -->
+                <RowActionSlot v-else class="mcp-sw-slot" />
                 <template v-if="entry.pending">
                   <RowAction
                     :icon="Check"
@@ -231,10 +229,10 @@
  *     options are exactly that page's layers, highest first;
  *   - the status column carries one badge; the failure's own text, the reason
  *     an entry is off, and the OAuth state ride its hover tip (`mcpStatus`);
- *   - the enable switch is the next session's switch, is disabled for an entry
- *     the configuration has turned off, is absent for a row awaiting a decision
- *     and for one this project declined, and is a dash for a row this page does
- *     not own;
+ *   - the enable switch is the next session's switch, opens the action column,
+ *     is disabled for an entry the configuration has turned off, and is absent —
+ *     its width kept by an empty slot — for a row awaiting a decision, one this
+ *     project declined, and a row this page does not own;
  *   - a row awaiting a decision offers 允许 / 拒绝 first; a declined one offers
  *     允许 alone, which takes the decision back; this page's own rows offer
  *     编辑 / 删除; every other layer's rows offer 查看 only, opening the
@@ -245,6 +243,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { Check, Eye, Pencil, Plus, RotateCw, Trash2, X } from 'lucide-vue-next'
+import type { AxiosError } from 'axios'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -269,7 +268,7 @@ import {
 import { useI18n } from '@/locales'
 
 import McpServerDrawer from './McpServerDrawer.vue'
-import { mcpStatus, mcpTypeLabel, type McpStatus, type McpTypeLabel, type McpTone } from './mcpRows'
+import { mcpStatus, mcpTypeLabel, type McpStatus, type McpTone, type McpTransportName } from './mcpRows'
 
 /** The three pages this one table draws, named by the layer each may write. */
 type McpView = 'global' | 'agent' | 'project'
@@ -343,7 +342,7 @@ interface TableRow {
   key: string
   row: McpServerRow
   status: McpStatus
-  type: McpTypeLabel
+  type: McpTransportName
   /** This page owns the row's layer: 编辑 / 删除 and the enable switch. */
   own: boolean
   /** A project entry nobody has decided on yet: 允许 / 拒绝, no switch. */
@@ -444,18 +443,24 @@ async function toggleEnabled(row: McpServerRow, next: boolean): Promise<void> {
 }
 
 /** 允许 / 拒绝 on a project entry. The request names the one entry this click is
- * about (`decide`), and the endpoint changes that entry's decision and nothing
- * else — which is also how a declined entry is allowed again. */
+ * about (`decide`) together with the fingerprint the row was rendered from, and
+ * the endpoint changes that entry's decision and nothing else — which is also
+ * how a declined entry is allowed again. A 409 means the file moved under the
+ * page: nothing was recorded, the server text stays up, and the rows reload so
+ * the entry reappears with its new summary and fingerprint. */
 async function decide(row: McpServerRow, allow: boolean): Promise<void> {
   const projectId = props.projectId ?? ''
   if (!projectId || busy.value !== '') return
   busy.value = rowKey(row)
   writeError.value = ''
   try {
-    await forebrainApi.projectMcpConsent(projectId, allow ? [row.name] : [], [row.name])
+    await forebrainApi.projectMcpConsent(projectId, allow ? [row.name] : [], [row.name], [
+      { name: row.name, fingerprint: row.fingerprint ?? '' },
+    ])
     await load()
   } catch (cause) {
     writeError.value = getErrorMessage(cause)
+    if ((cause as AxiosError)?.response?.status === 409) await reload()
   } finally {
     busy.value = ''
   }
@@ -526,16 +531,14 @@ onMounted(() => {
   gap: 6px;
   min-width: 0;
 }
-/* The transport names itself in its short form; what it carries — an OAuth
-   flow or its own headers — follows in the same grey the design uses. */
+/* The type column says only the transport, in its short form. */
 .mcp-ty {
   display: inline-flex;
   align-items: baseline;
 }
-.mcp-ty-sub {
-  color: var(--forebrain-muted-text);
-}
-.mcp-ty-sub::before {
-  content: ' · ';
+/* A row with no switch to offer keeps the switch's 32px, so the icons stay
+   aligned down the column. */
+.mcp-sw-slot {
+  width: 32px;
 }
 </style>

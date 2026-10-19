@@ -579,11 +579,19 @@ func webFetchBlockedRedirectResult(resp *http.Response, target string) map[strin
 // so the governor spilled it and left the model with truncated, unparseable
 // JSON.
 func marshalWebToolOutput(out map[string]any) string {
+	return marshalWebToolValue(out)
+}
+
+// marshalWebToolValue encodes any tool payload value without HTML escaping, for
+// the same reason as marshalWebToolOutput: the encoded size decides how much of
+// the provider response fits in the budget, so needless escapes would throw
+// results away.
+func marshalWebToolValue(value any) string {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(out); err != nil {
-		b, _ := json.Marshal(out)
+	if err := enc.Encode(value); err != nil {
+		b, _ := json.Marshal(value)
 		return string(b)
 	}
 	return strings.TrimRight(buf.String(), "\n")
@@ -649,8 +657,6 @@ type WebSearchInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema_description:"Max results hint (default 5, max 10)."`
 }
 
-const webSearchMaxOutputBytes = 20000
-
 func NormalizeWebSearchLimit(limit int) int {
 	if limit <= 0 {
 		return 5
@@ -669,8 +675,183 @@ func WebSearchPermissionPayload(query string) map[string]any {
 	}
 }
 
-func trimWebSearchOutput(s string) (string, bool) {
-	return trimTextToUTF8Bytes(s, webSearchMaxOutputBytes)
+// webSearchMaxEnvelopeBytes is the marshalled size the search envelope stays
+// under: the same headroom below the governor's spill threshold that web_fetch
+// keeps. Past the threshold the governor trims the payload, and a trimmed JSON
+// document no longer parses, so the tool has to fit itself.
+const webSearchMaxEnvelopeBytes = SpillThresholdBytes - 2048
+
+// webSearchEnvelope wraps a provider response the way the tool returns it. The
+// body stays the provider's own JSON text; `truncated` reports that results were
+// dropped from its tail to fit the budget.
+func webSearchEnvelope(status int, contentType string, limit int, ruleContent, bodyText string, truncated bool) string {
+	return marshalWebToolOutput(map[string]any{
+		"status":       status,
+		"content_type": contentType,
+		"limit":        limit,
+		"body":         bodyText,
+		"truncated":    truncated,
+		"rule_content": ruleContent,
+	})
+}
+
+// governWebSearchBody fits a provider response into webSearchMaxEnvelopeBytes
+// without ever breaking its JSON. A response that overflows loses the results at
+// its tail — the ones a ranked result list already puts last — and, only when a
+// single result alone still overflows, the longest string values left in it are
+// shortened. Cutting the raw response at a byte offset instead would hand the
+// model invalid JSON: neither readable nor parseable, and the lost results
+// invisible.
+func governWebSearchBody(body []byte, build func(bodyText string, truncated bool) string) string {
+	raw := string(body)
+	if whole := build(raw, false); len(whole) <= webSearchMaxEnvelopeBytes {
+		return whole
+	}
+	root, ok := decodeWebSearchPayload(raw)
+	if !ok {
+		// An HTML error page or a plain-text notice carries no JSON to keep
+		// parseable, so capping its bytes costs nothing.
+		return build(capWebSearchText(raw, build), true)
+	}
+	dropTrailingWebSearchResults(root, build)
+	fitWebSearchStrings(root, func() int { return len(build(marshalWebToolValue(root), true)) })
+	return build(marshalWebToolValue(root), true)
+}
+
+// dropTrailingWebSearchResults drops the fewest results the budget allows,
+// keeping the leading results — the ones the provider ranked first — whole.
+func dropTrailingWebSearchResults(root any, build func(bodyText string, truncated bool) string) {
+	parent, key, found := webSearchItemsContainer(root, 0)
+	if !found {
+		return
+	}
+	items, ok := parent[key].([]any)
+	if !ok {
+		return
+	}
+	keep := len(items)
+	for keep > 1 && len(build(marshalWebToolValue(root), true)) > webSearchMaxEnvelopeBytes {
+		keep--
+		parent[key] = items[:keep]
+	}
+}
+
+// fitWebSearchStrings shortens the payload's own longest string values until it
+// fits, which is what a single result bigger than the whole budget leaves to do.
+// Each value is cut to the longest prefix the budget allows, so nothing is
+// dropped beyond what the limit demands.
+func fitWebSearchStrings(root any, size func() int) {
+	for range 4 {
+		if size() <= webSearchMaxEnvelopeBytes {
+			return
+		}
+		apply, length := webSearchStringSlot(root)
+		if apply == nil || length == 0 {
+			return
+		}
+		low, high := 0, length
+		for low < high {
+			middle := (low + high + 1) / 2
+			apply(middle)
+			if size() <= webSearchMaxEnvelopeBytes {
+				low = middle
+			} else {
+				high = middle - 1
+			}
+		}
+		apply(low)
+	}
+}
+
+// capWebSearchText trims plain text until its envelope fits, respecting UTF-8
+// boundaries so a rune is never split.
+func capWebSearchText(text string, build func(bodyText string, truncated bool) string) string {
+	for range 8 {
+		overflow := len(build(text, true)) - webSearchMaxEnvelopeBytes
+		if overflow <= 0 {
+			return text
+		}
+		if overflow >= len(text) {
+			return ""
+		}
+		text, _ = trimTextToUTF8Bytes(text, len(text)-overflow)
+	}
+	return text
+}
+
+// decodeWebSearchPayload parses a provider response, keeping numbers as the
+// literal text the provider wrote so re-encoding cannot round or reformat them.
+func decodeWebSearchPayload(raw string) (any, bool) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var root any
+	if err := decoder.Decode(&root); err != nil {
+		return nil, false
+	}
+	return root, true
+}
+
+// webSearchItemsContainer locates the array a provider keeps its results in and
+// returns the object that owns it, so results can be dropped in place. It walks
+// the same keys and depth limit as webSearchResultItems.
+func webSearchItemsContainer(payload any, depth int) (map[string]any, string, bool) {
+	object, ok := payload.(map[string]any)
+	if !ok || depth >= maxWebSearchEnvelopeDepth {
+		return nil, "", false
+	}
+	for _, key := range webSearchItemKeys {
+		if _, ok := object[key].([]any); ok {
+			return object, key, true
+		}
+	}
+	for _, key := range webSearchNestedItemKeys {
+		if parent, itemsKey, found := webSearchItemsContainer(object[key], depth+1); found {
+			return parent, itemsKey, found
+		}
+	}
+	return nil, "", false
+}
+
+// webSearchStringSlot returns the payload's longest string value as a setter that
+// trims it to a byte length, together with that length. Values keep their UTF-8
+// boundaries, so the re-encoded JSON stays valid.
+func webSearchStringSlot(payload any) (func(int), int) {
+	var (
+		apply  func(int)
+		length int
+	)
+	consider := func(candidate func(int), size int) {
+		if size > length {
+			apply, length = candidate, size
+		}
+	}
+	trimTo := func(text string, set func(string)) func(int) {
+		return func(size int) {
+			trimmed, _ := trimTextToUTF8Bytes(text, size)
+			set(trimmed)
+		}
+	}
+	switch typed := payload.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			key, value := key, value
+			if text, ok := value.(string); ok {
+				consider(trimTo(text, func(trimmed string) { typed[key] = trimmed }), len(text))
+				continue
+			}
+			consider(webSearchStringSlot(value))
+		}
+	case []any:
+		for i, value := range typed {
+			i, value := i, value
+			if text, ok := value.(string); ok {
+				consider(trimTo(text, func(trimmed string) { typed[i] = trimmed }), len(text))
+				continue
+			}
+			consider(webSearchStringSlot(value))
+		}
+	}
+	return apply, length
 }
 
 func NewWebSearchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
@@ -714,16 +895,10 @@ func NewWebSearchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if err != nil {
 				return "", err
 			}
-			bodyText, truncated := trimWebSearchOutput(string(body))
-			out := map[string]any{
-				"status":       status,
-				"content_type": ct,
-				"limit":        limit,
-				"body":         bodyText,
-				"truncated":    truncated,
-				"rule_content": WebSearchPermissionPayload(q)["rule_content"],
-			}
-			return marshalWebToolOutput(out), nil
+			ruleContent := "query:" + q
+			return governWebSearchBody(body, func(bodyText string, truncated bool) string {
+				return webSearchEnvelope(status, ct, limit, ruleContent, bodyText, truncated)
+			}), nil
 		},
 	)
 }

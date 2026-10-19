@@ -5413,21 +5413,18 @@ func agentRosterIndexForView(snapshot AgentRosterSnapshot, activeView string) in
 	return -1
 }
 
-// agentRosterMarkedIndex is the row the cursor points at. While the user is
-// moving through the roster that is the row they are on — the one Enter would
-// open — and otherwise it is the agent whose transcript is on screen.
+// agentRosterMarkedIndex is the row carrying the ❯: the row the user is on —
+// the one Enter would open — while they are moving through the roster, and none
+// otherwise. The marker is the keyboard's place, exactly as in a picker: with
+// the keyboard in the composer the composer shows its caret and the roster
+// shows no ❯, never both.
 //
-// The cursor and the view are both the renderer's — keyed the same way — and
-// every change of the view carries the cursor onto it, so under focus the two
-// differ only while the user is actually walking the roster with Up/Down.
-// cursorIndex is where the renderer's cursor resolves in these rows; the view
-// is only consulted when the roster does not hold the keyboard focus.
-func agentRosterMarkedIndex(snapshot AgentRosterSnapshot, focused bool, cursorIndex int, activeView string) int {
-	if len(snapshot.Rows) == 0 {
+// Every change of the view carries the roster's cursor onto it, so the first
+// Down lands on the agent whose transcript is on screen. cursorIndex is where
+// the renderer's cursor resolves in these rows.
+func agentRosterMarkedIndex(snapshot AgentRosterSnapshot, focused bool, cursorIndex int) int {
+	if len(snapshot.Rows) == 0 || !focused {
 		return -1
-	}
-	if !focused {
-		return agentRosterIndexForView(snapshot, activeView)
 	}
 	if cursorIndex < 0 {
 		return 0
@@ -5499,8 +5496,8 @@ func (r *Renderer) RosterCursorRow(snapshot AgentRosterSnapshot) (AgentRosterRow
 
 // formatAgentRosterLines paints the roster. marked is the row the cursor points
 // at, as agentRosterMarkedIndex resolves it; -1 (or any index outside the rows)
-// marks none, which is what the reader should see while the transcript on
-// screen belongs to no listed agent.
+// marks none, which is what the reader sees while the keyboard is in the
+// composer.
 func formatAgentRosterLines(snapshot AgentRosterSnapshot, focused bool, marked int, termWidth int) []string {
 	if len(snapshot.Rows) == 0 {
 		return nil
@@ -5516,8 +5513,8 @@ func formatAgentRosterLines(snapshot AgentRosterSnapshot, focused bool, marked i
 	lines := make([]string, 0, len(snapshot.Rows)+1)
 	for i, row := range snapshot.Rows {
 		isMarked := i == marked
-		// The same cursor the pickers use, pointing at the row whose agent is
-		// on screen. Unmarked rows keep its column so the names stay aligned.
+		// The same cursor the pickers use, on the row the keyboard is on.
+		// Unmarked rows keep its column so the names stay aligned.
 		glyph := " "
 		if isMarked {
 			glyph = selectorCursorGlyph
@@ -7274,27 +7271,107 @@ func (l panelLine) rows(width int) []string {
 // panelField is the one-line text field that can close a panel's head — a
 // picker's filter, a form's answer — with the caret inside it. An empty field
 // shows its placeholder.
+//
+// It is drawn as a bar on the composer card's own background, from the panel's
+// margin to its right edge, with its glyph in front: a bar rather than a
+// prompt marker, so the field never reads as one more row of the list under
+// it. It has no side rules — the composer card has none either. The bar
+// brightens while the keyboard is in it and sinks back while the keyboard is on
+// the list, which is the only place the ❯ then stands.
 type panelField struct {
 	text        []rune
 	cursor      int
 	placeholder string
+	// glyph stands in front of the text; empty means the answer glyph.
+	glyph string
+	// blurred is set while the keyboard is on the list under the field: the
+	// caret is hidden and the bar dims, so a picker shows its ❯ or its caret,
+	// never both.
+	blurred bool
 }
 
-// panelFieldLead is what precedes a field's text: the composer's own prompt
-// marker, so everything the user types into looks the same.
-const panelFieldLead = composerPromptMarker
+const (
+	// panelFilterGlyph fronts a picker's filter: a magnifier, which cannot be
+	// mistaken for the ❯ on a row the way the composer's › was.
+	panelFilterGlyph = "⌕"
+	// panelAnswerGlyph fronts the answer of a form, which has no list under it
+	// to be confused with: the composer's own prompt marker.
+	panelAnswerGlyph = "›"
 
-func (f panelField) row() string {
-	if len(f.text) == 0 && f.placeholder != "" {
-		return panelAccentStyle.Render(panelFieldLead) + panelHintStyle.Render(f.placeholder)
+	// The field's bar: the composer card's background while it holds the
+	// keyboard, the shade just above the terminal's own while it does not.
+	panelFieldFocusedBg = "\x1b[48;5;" + sharedBlockBackgroundColor + "m"
+	panelFieldBlurredBg = "\x1b[48;5;236m"
+	// Foregrounds: the glyph in the accent colour while focused and grey while
+	// not, the text at the card's brightness (a notch dimmer while blurred), the
+	// placeholder dim in both.
+	panelFieldGlyphFocused = "\x1b[38;5;110m"
+	panelFieldGlyphBlurred = "\x1b[38;5;245m"
+	panelFieldTextFocused  = "\x1b[38;5;252m"
+	panelFieldTextBlurred  = "\x1b[38;5;249m"
+	panelFieldPlaceholder  = "\x1b[38;5;244m"
+)
+
+func (f panelField) glyphText() string {
+	if f.glyph != "" {
+		return f.glyph
 	}
-	return panelAccentStyle.Render(panelFieldLead) + string(f.text)
+	return panelAnswerGlyph
+}
+
+const (
+	// panelFieldPad is the bar's inner margin before the glyph, and
+	// panelFieldGap the space between the glyph and the text: generous on
+	// purpose, so the text sits in the bar rather than against its edge.
+	panelFieldPad = "  "
+	panelFieldGap = "  "
+	// panelFieldRoomyBodyRows is how many rows of the body a panel must keep for
+	// its field to take the roomy form — a blank row above the bar and a padded
+	// row above and below its text. A terminal too short to keep that many
+	// shows the one-row bar instead, so the list is never squeezed out by it.
+	panelFieldRoomyBodyRows = 6
+)
+
+// textCol is the display column the field's text starts at: the panel's
+// margin, the bar's inner margin, the glyph and the gap after it.
+func (f panelField) textCol() int {
+	return displayLineWidth(panelIndent + panelFieldPad + f.glyphText() + panelFieldGap)
+}
+
+func (f panelField) colours() (bg, glyph, text string) {
+	if f.blurred {
+		return panelFieldBlurredBg, panelFieldGlyphBlurred, panelFieldTextBlurred
+	}
+	return panelFieldFocusedBg, panelFieldGlyphFocused, panelFieldTextFocused
+}
+
+// row draws the field's text row at width columns: the margin, then the bar
+// running to the right edge. The cells after the text are real spaces on the
+// bar's background, not an erase, so the software caret has a cell of its own at
+// the end of the text.
+func (f panelField) row(width int) string {
+	bg, glyphStyle, textStyle := f.colours()
+	body := textStyle + string(f.text)
+	shown := displayLineWidth(string(f.text))
+	if len(f.text) == 0 && f.placeholder != "" {
+		body = panelFieldPlaceholder + f.placeholder
+		shown = displayLineWidth(f.placeholder)
+	}
+	pad := strings.Repeat(" ", maxInt(0, width-f.textCol()-shown))
+	return panelIndent + bg + panelFieldPad + glyphStyle + f.glyphText() + panelFieldGap + body + pad + sharedBlockReset
+}
+
+// padRow is a row of the bar with nothing on it, the air above and below the
+// text of the roomy form.
+func (f panelField) padRow(width int) string {
+	bg, _, _ := f.colours()
+	return panelIndent + bg + strings.Repeat(" ", maxInt(0, width-displayLineWidth(panelIndent))) + sharedBlockReset
 }
 
 // caretCol is the display column the caret stands at on the field's row.
 func (f panelField) caretCol() int {
 	cursor := composerCursorClampRunes(f.text, f.cursor)
-	return displayLineWidth(panelFieldLead) + runewidth.StringWidth(string(f.text[:cursor]))
+	return f.textCol() + runewidth.StringWidth(string(f.text[:cursor]))
 }
 
 // slashPanel is one panel's content.
@@ -7319,16 +7396,65 @@ type panelLayout struct {
 	top, maxTop int
 }
 
-// fieldRow is the row the panel's field sits on at width, -1 without one.
-func (p slashPanel) fieldRow(width int) int {
+// headRows is how many screen rows the panel's head takes at width.
+func (p slashPanel) headRows(width int) int {
+	n := 0
+	for _, l := range p.head {
+		n += len(l.rows(width))
+	}
+	return n
+}
+
+// hintRows is how many screen rows the key hint takes at width.
+func (p slashPanel) hintRows(width int) int {
+	if p.hint == "" {
+		return 0
+	}
+	return len(panelLine{lead: panelIndent, text: p.hint, style: &panelHintStyle}.rows(width))
+}
+
+// fieldRoomy reports whether the field takes its roomy form in rows screen rows
+// at width: a blank row above the bar and a padded row on each side of its text,
+// three rows taller than the plain bar. It does so only while the body keeps
+// panelFieldRoomyBodyRows rows after them, and always when the panel is not
+// pinned in a fixed height (rows <= 0).
+func (p slashPanel) fieldRoomy(width, rows int) bool {
+	if p.field == nil {
+		return false
+	}
+	if rows <= 0 {
+		return true
+	}
+	// The plain frame: head, the bar's one row, the blank under it, the scroll
+	// note and the hint; the roomy form adds three rows to it.
+	room := rows - p.headRows(width) - 1 - 1 - 1 - p.hintRows(width)
+	return room-3 >= panelFieldRoomyBodyRows
+}
+
+// fieldRow is the row the field's text sits on at width in rows screen rows
+// (see layout), -1 without a field.
+func (p slashPanel) fieldRow(width, rows int) int {
 	if p.field == nil {
 		return -1
 	}
-	row := 0
-	for _, l := range p.head {
-		row += len(l.rows(width))
+	row := p.headRows(width)
+	if p.fieldRoomy(width, rows) {
+		row += 2 // the blank row and the bar's padded row above the text
 	}
 	return row
+}
+
+// fieldBar is the first and last row of the field's bar, a click anywhere on it
+// being a click on the field; -1, -1 without a field.
+func (p slashPanel) fieldBar(width, rows int) (first, last int) {
+	text := p.fieldRow(width, rows)
+	if text < 0 {
+		return -1, -1
+	}
+	if p.fieldRoomy(width, rows) {
+		return text - 1, text + 1
+	}
+	return text, text
 }
 
 // layout lays the panel out at width in rows screen rows: the head, a blank
@@ -7342,8 +7468,18 @@ func (p slashPanel) layout(width, rows, top int, follow bool) panelLayout {
 		out.lines = append(out.lines, l.rows(width)...)
 	}
 	if p.field != nil {
-		out.caretRow, out.caretCol = len(out.lines), p.field.caretCol()
-		out.lines = append(out.lines, p.field.row())
+		roomy := p.fieldRoomy(width, rows)
+		if roomy {
+			// Air between the head and the bar, then the bar's own padding.
+			out.lines = append(out.lines, "", p.field.padRow(width))
+		}
+		if !p.field.blurred {
+			out.caretRow, out.caretCol = len(out.lines), p.field.caretCol()
+		}
+		out.lines = append(out.lines, p.field.row(width))
+		if roomy {
+			out.lines = append(out.lines, p.field.padRow(width))
+		}
 	}
 	out.lines = append(out.lines, "")
 
@@ -7448,6 +7584,10 @@ type panelBuilder struct {
 	// heading is the body line of the open group's heading, -1 before the
 	// first group; grouped counts the selectable rows added under it.
 	heading, grouped int
+	// unmarked leaves the selected row without its ❯ while the keyboard is
+	// elsewhere (a picker's filter). The row still takes the focus, so the
+	// body keeps its scroll.
+	unmarked bool
 }
 
 func newPanelBuilder() *panelBuilder { return &panelBuilder{heading: -1} }
@@ -7558,7 +7698,9 @@ func (b *panelBuilder) addSelectable(selected bool, line panelLine) {
 		if b.heading >= 0 && b.grouped == 0 {
 			b.focusStart = b.heading
 		}
-		margin = panelCursor
+		if !b.unmarked {
+			margin = panelCursor
+		}
 	}
 	line.lead = margin + line.lead
 	b.body = append(b.body, line)

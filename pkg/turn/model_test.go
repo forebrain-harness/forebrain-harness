@@ -373,9 +373,17 @@ func TestChooseModelReportsPartialDefaultSaveFailure(t *testing.T) {
 	label := f.choiceLabel(t, "deepseek", "deepseek-chat")
 	// A read-only config file fails the default write only: reads still
 	// work, so the live apply succeeds and only the file save is reported
-	// failed.
+	// failed. The directory must be read-only as well: the atomic save
+	// writes a sibling temp file and renames it over the target, which
+	// ignores the target's read-only bit. With the directory read-only the
+	// temp file cannot be created and the in-place fallback is refused by
+	// the read-only file. Defers restore the directory first so both
+	// chmods can succeed (LIFO: registered last, runs first).
+	dir := filepath.Dir(f.cfgPath)
 	require.NoError(t, os.Chmod(f.cfgPath, 0o400))
 	defer func() { _ = os.Chmod(f.cfgPath, 0o600) }()
+	require.NoError(t, os.Chmod(dir, 0o500))
+	defer func() { _ = os.Chmod(dir, 0o700) }()
 	res := Choose(f.ctx, SlashChoice{Command: "model", Value: label})
 	require.True(t, res.Handled)
 	require.Contains(t, res.Reply, "Switched to deepseek / deepseek-chat.")

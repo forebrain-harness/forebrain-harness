@@ -955,12 +955,17 @@ func (r *Runner) loadLocked(candidate *appcfg.AgentLLMProviderConfig) error {
 	// the cached prefix is model-agnostic.
 	llmClient = wrapSessionModelLLM(llmClient, r.sessionModelClient)
 	llmClient = wrapTypedSubagentProviderLLM(llmClient, typeLLMs)
-	// A run may pin its own model (plan review lets the user pick the reviewer),
-	// which outranks both the per-type provider above and the main agent's model.
+	// A run may pin its own model (plan review lets the user pick the reviewer,
+	// a configured subagent pins its own), which outranks both the per-type
+	// provider above and the main agent's model.
 	llmClient = wrapSubagentModelOverrideLLM(llmClient, func(override SubagentModelOverride) (llm.LLM, error) {
-		return ConfiguredModelClient(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model)
+		return ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model, override.Effort)
 	})
-	llmClient = wrapTypedSubagentPromptLLM(llmClient)
+	// The prompt a typed run reaches the model with is this primary agent's
+	// answer: its rewrite of a built-in, or a custom subagent's own text.
+	llmClient = wrapTypedSubagentPromptLLM(llmClient, func(subtype string) (string, bool) {
+		return SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Prompt(subtype)
+	})
 	llmClient = wrapCodegraphPromptLLM(llmClient)
 	// The skill roots are resolved once per load, from this runtime's frozen
 	// launch project: the same roots feed the catalog in the prompt prefix and
@@ -1661,17 +1666,21 @@ func PrimaryEndpoint(r *Runner) string {
 // when it has none.
 //
 // It answers exactly the question the runtime answers when it routes a child's
-// call: the typed client map above is built from agent.PublicTypeNames() and
-// only for a type whose definition resolves to at least one provider, and
-// typedSubagentProviderLLM falls through to the primary agent's client for
-// every other type. A surface that draws "which model is this subagent on"
-// must come through here rather than re-reading the config, so the display
-// cannot claim a model the runtime is not using; false means "whatever the
-// primary agent is on", which the surface already knows.
+// call: a type this primary agent pins a model to runs on it (custom subagents,
+// and built-ins the agent override names a model for), the typed client map
+// above covers a built-in with a chain of its own, and typedSubagentProviderLLM
+// falls through to the primary agent's client for every other type. A surface
+// that draws "which model is this subagent on" must come through here rather
+// than re-reading the config, so the display cannot claim a model the runtime
+// is not using; false means "whatever the primary agent is on", which the
+// surface already knows.
 func SubagentOwnModel(r *Runner, agentType string) (provider, model, effort string, ok bool) {
 	agentType = strings.TrimSpace(agentType)
 	if r == nil || r.AppCfg == nil || agentType == "" {
 		return "", "", "", false
+	}
+	if provider, model, effort, ok := SubagentCatalogFor(r.AppCfg, r.activeAgentNameForModel()).Model(agentType); ok {
+		return provider, model, effort, true
 	}
 	if !slices.Contains(agent.PublicTypeNames(), agentType) {
 		return "", "", "", false

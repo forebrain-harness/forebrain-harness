@@ -77,6 +77,8 @@ type tabbedPickerState struct {
 	cursor    int   // index into visible
 	nameWidth int   // widest label of all items, at most panelNameColumnMax
 	filter    filterField
+	inFilter  bool // the keyboard is in the filter, not on the rows
+	noFilter  bool // too few rows to need a filter: none is shown
 	multi     bool
 	checked   map[int]bool // indices into items (multi-select only)
 	esc       string
@@ -102,7 +104,11 @@ func newTabbedPickerState(items []SelectItem, opts TabbedSelectOptions, multi bo
 	}
 	tabIndex := make(map[string]int, len(items))
 	p.tabOf = make([]int, len(items))
+	selectable := 0
 	for i, item := range items {
+		if !item.Disabled {
+			selectable++
+		}
 		if _, ok := tabIndex[item.Category]; !ok {
 			tabIndex[item.Category] = len(p.tabs)
 			p.tabs = append(p.tabs, item.Category)
@@ -113,6 +119,8 @@ func newTabbedPickerState(items []SelectItem, opts TabbedSelectOptions, multi bo
 		}
 	}
 	p.nameWidth = min(p.nameWidth, panelNameColumnMax)
+	// The rows of every tab count: the filter reaches across tabs.
+	p.noFilter = !pickerShowsFilter(selectable)
 	p.rebuild()
 	p.focus(opts.DefaultIdx)
 	return p
@@ -251,6 +259,7 @@ func (p *tabbedPickerState) checkedIndices() []int {
 // shown tab's rows in two columns, and the keys.
 func (p *tabbedPickerState) panel(label string) slashPanel {
 	b := newPanelBuilder()
+	b.unmarked = p.inFilter
 	pickerHead(b, label)
 	if len(p.tabs) > 1 {
 		b.tabs(p.tabChips())
@@ -270,7 +279,9 @@ func (p *tabbedPickerState) panel(label string) slashPanel {
 	}
 	b.hint(tabbedFooterHint(len(p.tabs) > 1, p.multi, p.esc))
 	panel := b.panel()
-	panel.field = p.filter.panelField()
+	if !p.noFilter {
+		panel.field = p.filter.pickerField(p.inFilter)
+	}
 	return panel
 }
 
@@ -349,6 +360,7 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 	s.showPanel(p.panel(label))
 	defer s.withCaretPlacer(func(line, col int) {
 		if s.placeFieldCaret(p.panel(label), &p.filter, line, col) {
+			p.inFilter = true
 			s.showPanel(p.panel(label))
 		}
 	})()
@@ -358,6 +370,9 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 		if err != nil {
 			return nil, false, err
 		}
+		if p.noFilter && editsFilter(key.kind) {
+			continue
+		}
 		switch key.kind {
 		case rawKeyNone:
 			continue
@@ -365,13 +380,9 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 			s.dispatchMouse(key.mouse)
 			continue
 		case rawKeyUp:
-			if p.cursor > 0 {
-				p.cursor--
-			}
+			navigatePicker(&p.inFilter, &p.cursor, len(p.visible), -1, !p.noFilter)
 		case rawKeyDown:
-			if p.cursor < len(p.visible)-1 {
-				p.cursor++
-			}
+			navigatePicker(&p.inFilter, &p.cursor, len(p.visible), 1, !p.noFilter)
 		case rawKeyTab:
 			p.switchTab(1)
 		case rawKeyShiftTab:
@@ -387,27 +398,50 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 		case rawKeyEscape, rawKeyCtrlC:
 			return nil, false, s.dismissed(key.kind)
 		case rawKeyBackspace:
+			if !p.inFilter && p.filter.text == "" {
+				continue
+			}
+			p.inFilter = true
 			if p.filter.backspace() {
 				p.rebuild()
 			}
 		case rawKeyLeft:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.move(-1)
 		case rawKeyRight:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.move(1)
 		case rawKeyHome:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.moveTo(0)
 		case rawKeyEnd:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.moveTo(len(p.filter.runes()))
 		case rawKeyPaste:
+			p.inFilter = true
 			p.filter.insert(strings.ReplaceAll(key.text, "\n", " "))
 			p.rebuild()
 		case rawKeyRune:
+			p.inFilter = true
 			p.filter.insert(string(key.r))
 			p.rebuild()
 		case rawKeySpace:
-			if multi {
+			// A space is text while the keyboard is in the filter; on the rows
+			// a multi-select reads it as the toggle, a single select as text.
+			if multi && !p.inFilter {
 				p.toggle()
+			} else if p.noFilter {
+				continue
 			} else {
+				p.inFilter = true
 				p.filter.insert(" ")
 				p.rebuild()
 			}

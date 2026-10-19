@@ -1270,3 +1270,75 @@ func TestPathGrantedMatchesRelativeGrantAgainstWorkingDir(t *testing.T) {
 		t.Fatalf("relative grant must not match a path under a different dir")
 	}
 }
+
+// shellSandboxProfile decides the shell's filesystem boundary, and a custom
+// subagent's "read only" is configuration rather than a type name: without the
+// policy on its context, one `sed -i` would edit the project the policy exists
+// to protect.
+func TestShellSandboxProfileKeepsACustomReadOnlySubagentReadOnly(t *testing.T) {
+	ctx := WithSubagentType(context.Background(), "db-inspector")
+	ctx = WithSubagentToolPolicy(ctx, SubagentToolPolicy{Mode: appcfg.SubagentToolsReadOnly})
+
+	profile, approved := shellSandboxProfile(ctx)
+	if profile != safety.ProfileReadOnly || approved {
+		t.Fatalf("profile = %v approved = %v, want a read-only shell without an approval", profile, approved)
+	}
+}
+
+func TestShellSandboxProfileAllowsWritesForACustomEditingSubagent(t *testing.T) {
+	ctx := WithSubagentType(context.Background(), "db-inspector")
+	ctx = WithSubagentToolPolicy(ctx, SubagentToolPolicy{Mode: appcfg.SubagentToolsEdit})
+
+	profile, approved := shellSandboxProfile(ctx)
+	if profile != safety.ProfileWorkspaceWrite || approved {
+		t.Fatalf("profile = %v approved = %v, want a workspace-write shell", profile, approved)
+	}
+}
+
+// A pick policy is read-only exactly when the chosen set leaves write_file out:
+// the shell follows the same policy the file tools already obey.
+func TestShellSandboxProfileFollowsAPickPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		allowed []string
+		want    safety.Profile
+	}{
+		{name: "pick without write_file", allowed: []string{"read_file", "shell"}, want: safety.ProfileReadOnly},
+		{name: "pick with write_file", allowed: []string{"read_file", "write_file", "shell"}, want: safety.ProfileWorkspaceWrite},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			allowed := make(map[string]struct{}, len(tt.allowed))
+			for _, name := range tt.allowed {
+				allowed[name] = struct{}{}
+			}
+			ctx := WithSubagentType(context.Background(), "db-inspector")
+			ctx = WithSubagentToolPolicy(ctx, SubagentToolPolicy{Mode: appcfg.SubagentToolsPick, Allowed: allowed})
+
+			if profile, _ := shellSandboxProfile(ctx); profile != tt.want {
+				t.Fatalf("profile = %v, want %v", profile, tt.want)
+			}
+		})
+	}
+}
+
+// The policy check above must not move the built-in types: their boundary still
+// comes from the static table, and a context that carries no policy keeps
+// answering exactly as it did before custom subagents existed.
+func TestShellSandboxProfilePinsBuiltInTypes(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		subtype string
+		want    safety.Profile
+	}{
+		{name: "explore", subtype: "explore", want: safety.ProfileReadOnly},
+		{name: "plan", subtype: "plan", want: safety.ProfileReadOnly},
+		{name: "general-purpose", subtype: "general-purpose", want: safety.ProfileWorkspaceWrite},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := WithSubagentType(context.Background(), tt.subtype)
+			if profile, _ := shellSandboxProfile(ctx); profile != tt.want {
+				t.Fatalf("profile = %v, want %v", profile, tt.want)
+			}
+		})
+	}
+}

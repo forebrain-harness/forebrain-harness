@@ -182,27 +182,14 @@ describe('mcpStatus', () => {
 })
 
 describe('mcpTypeLabel', () => {
-  it('names the transport short and adds the one thing a reader looks for', () => {
-    expect(mcpTypeLabel(row())).toEqual({ main: 'stdio', sub: '' })
-    expect(mcpTypeLabel(row({ transport: 'streamable_http' }))).toEqual({ main: 'http', sub: '' })
-    expect(mcpTypeLabel(row({ transport: 'streamable_http', headers: { Authorization: MCP_REDACTED } }))).toEqual({
-      main: 'http',
-      sub: '请求头',
-    })
-  })
-
-  it('prefers OAuth over the headers a client-credentials flow also carries', () => {
-    expect(mcpTypeLabel(row({ oauthConfigured: true, headers: { 'X-Api-Key': 'k' } })).sub).toBe('OAuth')
-    expect(mcpTypeLabel(row({ oauth: { ...row().oauth, mode: 'refresh' } })).sub).toBe('OAuth')
-    // A mode of "none" is an OAuth block turned off, not an OAuth server.
-    expect(mcpTypeLabel(row({ oauth: { ...row().oauth, mode: 'none' }, headers: { A: 'b' } })).sub).toBe('请求头')
-    // Without a mode, a stored token or a client id with an endpoint is enough —
-    // the same rule the runtime's own oauthConfigured applies.
-    expect(mcpTypeLabel(row({ oauth: { ...row().oauth, refreshToken: MCP_REDACTED } })).sub).toBe('OAuth')
-    expect(
-      mcpTypeLabel(row({ oauth: { ...row().oauth, clientId: 'id', tokenUrl: 'https://t' } })).sub,
-    ).toBe('OAuth')
-    expect(mcpTypeLabel(row({ oauth: { ...row().oauth, clientId: 'id' } })).sub).toBe('')
+  it('names only the transport, and nothing it carries', () => {
+    // The 类型 column says which transport an entry uses; the OAuth flow and the
+    // headers it carries are the drawer's (`plan 079`).
+    expect(mcpTypeLabel(row())).toBe('stdio')
+    expect(mcpTypeLabel(row({ transport: 'streamable_http' }))).toBe('http')
+    expect(mcpTypeLabel(row({ headers: { Authorization: MCP_REDACTED } }))).toBe('stdio')
+    expect(mcpTypeLabel(row({ oauthConfigured: true, headers: { 'X-Api-Key': 'k' } }))).toBe('stdio')
+    expect(mcpTypeLabel(row({ transport: 'streamable_http', oauth: { ...row().oauth, mode: 'refresh' } }))).toBe('http')
   })
 })
 

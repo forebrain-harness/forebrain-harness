@@ -116,42 +116,14 @@ function withOAuth(row: McpServerRow, base = ''): string {
   return [base, oauthNote(row)].filter((part) => part !== '').join(' · ')
 }
 
-/** One row's transport as the table names it: the short form, plus the one
- * thing about it a reader looks for — an OAuth flow or its own headers. */
-export interface McpTypeLabel {
-  main: 'stdio' | 'http'
-  sub: string
-}
-
-/** mcpHasOAuth mirrors the runtime's own `oauthConfigured`: a mode that says
- * "none" is off, any other mode is on, and without a mode a stored token or a
- * client id with an endpoint is enough. A row that carries the runtime's answer
- * is believed over this. */
-export function mcpHasOAuth(row: McpServerRow): boolean {
-  if (row.oauthConfigured === true) return true
-  const oauth = row.oauth
-  if (!oauth) return false
-  const filled = (value?: string): boolean => (value ?? '').trim() !== ''
-  const mode = (oauth.mode ?? '').trim()
-  if (mode.toLowerCase() === 'none') return false
-  if (mode !== '') return true
-  if (filled(oauth.accessToken) || filled(oauth.refreshToken)) return true
-  if (filled(oauth.clientId) && filled(oauth.tokenUrl)) return true
-  return filled(oauth.authorizationUrl) && filled(oauth.clientId)
-}
+/** One row's transport, in the short form the table's 类型 column shows: the
+ * column says only which transport an entry uses, and everything else about it
+ * — its OAuth flow, its headers — is the drawer's to show. */
+export type McpTransportName = 'stdio' | 'http'
 
 /** mcpTypeLabel names the transport the table column shows. */
-export function mcpTypeLabel(row: McpServerRow): McpTypeLabel {
-  const main: McpTypeLabel['main'] = row.transport === 'streamable_http' ? 'http' : 'stdio'
-  return { main, sub: mcpSubLabel(row) }
-}
-
-/** The grey words after the transport: the OAuth flow an entry runs, or the
- * headers it carries. OAuth wins — a client-credentials flow sends headers too,
- * and the flow is the thing a reader is looking for. */
-function mcpSubLabel(row: McpServerRow): string {
-  if (mcpHasOAuth(row)) return 'OAuth'
-  return Object.keys(row.headers ?? {}).length > 0 ? t('mcp.type.headers') : ''
+export function mcpTypeLabel(row: McpServerRow): McpTransportName {
+  return row.transport === 'streamable_http' ? 'http' : 'stdio'
 }
 
 /** Where a row that belongs to another layer is edited: the page's own route and

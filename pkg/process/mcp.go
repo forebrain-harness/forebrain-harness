@@ -227,12 +227,30 @@ func DecideProjectMCPConsents(agentWorkspace string, launch safety.ProjectContex
 	return mcp.SaveProjectConsents(agentWorkspace, consents)
 }
 
+// StaleConsentError refuses a per-entry decision whose entry is no longer what
+// the operator was shown: the project file changed (or lost the entry) between
+// the page listing it and the click. Nothing is recorded when it is returned.
+type StaleConsentError struct{ Names []string }
+
+func (e *StaleConsentError) Error() string {
+	return "project entries changed since they were listed: " + strings.Join(e.Names, ", ")
+}
+
+// StaleNames lists the entries whose fingerprint no longer matches.
+func (e *StaleConsentError) StaleNames() []string { return e.Names }
+
 // DecideProjectMCPConsentsFor records a decision for the named project
 // entries only — allow when the name is also in allowed, deny otherwise —
 // and leaves every other entry exactly as it was. Unlike the startup prompt's
 // DecideProjectMCPConsents it overwrites a decision a named entry already
 // has: that is how a declined entry is allowed again.
-func DecideProjectMCPConsentsFor(agentWorkspace string, launch safety.ProjectContext, decide, allowed []string) error {
+//
+// fingerprints is what the surface showed for each named entry. A non-nil map
+// binds the decision to exactly those entries: any entry the file no longer
+// has, or whose fingerprint moved, makes the whole call fail with
+// *StaleConsentError before a single decision is recorded. nil keeps the old
+// behavior of deciding whatever the file says now.
+func DecideProjectMCPConsentsFor(agentWorkspace string, launch safety.ProjectContext, decide, allowed []string, fingerprints map[string]string) error {
 	root := safety.TrustedRoot(launch)
 	if root == "" {
 		return nil
@@ -252,6 +270,32 @@ func DecideProjectMCPConsentsFor(agentWorkspace string, launch safety.ProjectCon
 	allowedSet := make(map[string]struct{}, len(allowed))
 	for _, name := range allowed {
 		allowedSet[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	// The check and the recording below share this one read of the file: what
+	// was verified is exactly what gets recorded.
+	if fingerprints != nil {
+		entryFPs := make(map[string]string, len(entries))
+		for _, srv := range entries {
+			entryFPs[strings.ToLower(strings.TrimSpace(srv.Name))] = mcp.ServerFingerprint(srv)
+		}
+		var stale []string
+		seen := make(map[string]struct{}, len(decide))
+		for _, name := range decide {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			// Missing from the file and a moved fingerprint are the same
+			// refusal: the operator confirmed an entry this file no longer
+			// holds as shown.
+			if fp, ok := entryFPs[key]; !ok || fp != fingerprints[key] {
+				stale = append(stale, key)
+			}
+		}
+		if len(stale) > 0 {
+			return &StaleConsentError{Names: stale}
+		}
 	}
 	for _, srv := range entries {
 		name := strings.ToLower(strings.TrimSpace(srv.Name))
@@ -322,13 +366,31 @@ func DecideProjectLSPConsents(agentWorkspace string, launch safety.ProjectContex
 
 // DecideProjectLSPConsentsFor is DecideProjectMCPConsentsFor for language
 // servers: it decides the named entries only and may overwrite a decision one
-// of them already has.
-func DecideProjectLSPConsentsFor(agentWorkspace string, launch safety.ProjectContext, decide, allowed []string) error {
+// of them already has. fingerprints carries what the surface showed per id and
+// is enforced the same way (nil skips the check).
+func DecideProjectLSPConsentsFor(agentWorkspace string, launch safety.ProjectContext, decide, allowed []string, fingerprints map[string]string) error {
 	root := safety.TrustedRoot(launch)
 	if root == "" {
 		return nil
 	}
-	return lsp.DecideProjectServersFor(agentWorkspace, root, memory.ProjectKey(root), decide, allowed)
+	return lsp.DecideProjectServersFor(agentWorkspace, root, memory.ProjectKey(root), decide, allowed, fingerprints)
+}
+
+// ProjectLSPFingerprints maps every project language-server entry's id — the
+// same ids InspectProjectLSP lists — to the entry's current fingerprint, so a
+// surface can hand back exactly what it showed. An untrusted launch has no
+// project entries at all and yields nil.
+func ProjectLSPFingerprints(agentWorkspace string, launch safety.ProjectContext) map[string]string {
+	root := safety.TrustedRoot(launch)
+	if root == "" {
+		return nil
+	}
+	entries, _ := lsp.LoadProjectServers(root)
+	fingerprints := make(map[string]string, len(entries))
+	for id, srv := range entries {
+		fingerprints[id] = lsp.ProjectServerFingerprint(srv)
+	}
+	return fingerprints
 }
 
 // InspectProjectLSP is the project language-server view the gateway's project

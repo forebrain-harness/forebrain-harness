@@ -54,7 +54,7 @@
               <th>{{ t('permissions.behavior') }}</th>
               <th>{{ t('permissions.tool') }}</th>
               <th>{{ t('permissions.rulesTitle') }}</th>
-              <th class="text-right">{{ t('permissions.colActions') }}</th>
+              <th class="text-center">{{ t('permissions.colActions') }}</th>
             </tr>
           </thead>
           <tbody>

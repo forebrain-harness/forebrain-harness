@@ -106,6 +106,44 @@ describe('forebrain api primary agents', () => {
   })
 })
 
+/**
+ * A subagent write lands in forebrain.yaml, whose fields are snake_case. The
+ * page's own spelling would be stored as unknown fields and lost, so the body
+ * the request carries is the file's — and the values inside it, a prompt and a
+ * tool name among them, stay exactly as the form typed them.
+ */
+describe('subagent configuration writes', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('writes a subagent in the file\'s own spelling', async () => {
+    const put = vi.spyOn(__apiClient, 'put').mockResolvedValueOnce({ data: { name: 'db-migrator' } })
+
+    await forebrainApi.updateSubagentConfig('review', 'db-migrator', {
+      description: 'Writes and checks migrations',
+      model: 'deepseek/deepseek-v4',
+      reasoningEffort: 'high',
+      systemPrompt: 'You write migrations.',
+      tools: 'pick',
+      allowedTools: ['read_file', 'edit_file'],
+      continuable: true,
+      resetPrompt: true,
+    })
+
+    expect(put).toHaveBeenCalledWith('/agents/primary/review/subagents/db-migrator', {
+      description: 'Writes and checks migrations',
+      model: 'deepseek/deepseek-v4',
+      reasoning_effort: 'high',
+      system_prompt: 'You write migrations.',
+      tools: 'pick',
+      allowed_tools: ['read_file', 'edit_file'],
+      continuable: true,
+      reset_prompt: true,
+    })
+  })
+})
+
 describe('mcp server status', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -180,23 +218,34 @@ describe('project consent requests', () => {
     vi.restoreAllMocks()
   })
 
-  it('names the entry a click decides, and sends no decide key when it decides a whole batch', async () => {
+  it('names the entry a click decides with its fingerprint untouched, and sends no decide key when it decides a whole batch', async () => {
     const post = vi.spyOn(__apiClient, 'post').mockResolvedValue({ data: { ok: true, allowed: [] } })
 
-    await forebrainApi.projectMcpConsent('p', ['x'], ['x'])
+    await forebrainApi.projectMcpConsent('p', ['my-Server'], ['my-Server'], [{ name: 'my-Server', fingerprint: 'fp-1' }])
     await forebrainApi.projectMcpConsent('p', ['x'])
 
-    expect(post).toHaveBeenNthCalledWith(1, '/v1/projects/p/mcp/consent', { allow: ['x'], decide: ['x'] })
+    // The fingerprint travels as an array: postJson snake-cases object keys,
+    // so an object keyed by the entry name would corrupt `my-Server` into
+    // `my_server` before it left the page.
+    expect(post).toHaveBeenNthCalledWith(1, '/v1/projects/p/mcp/consent', {
+      allow: ['my-Server'],
+      decide: ['my-Server'],
+      fingerprints: [{ name: 'my-Server', fingerprint: 'fp-1' }],
+    })
     expect(post).toHaveBeenNthCalledWith(2, '/v1/projects/p/mcp/consent', { allow: ['x'] })
   })
 
   it('carries the decision on the language servers’ endpoint too', async () => {
     const post = vi.spyOn(__apiClient, 'post').mockResolvedValue({ data: { ok: true, allowed: ['x'] } })
 
-    await forebrainApi.projectLspConsent('p', ['x'], ['x'])
+    await forebrainApi.projectLspConsent('p', ['gopls'], ['gopls'], [{ name: 'gopls', fingerprint: 'fp-2' }])
     await forebrainApi.projectLspConsent('p', [])
 
-    expect(post).toHaveBeenNthCalledWith(1, '/v1/projects/p/lsp/consent', { allow: ['x'], decide: ['x'] })
+    expect(post).toHaveBeenNthCalledWith(1, '/v1/projects/p/lsp/consent', {
+      allow: ['gopls'],
+      decide: ['gopls'],
+      fingerprints: [{ name: 'gopls', fingerprint: 'fp-2' }],
+    })
     expect(post).toHaveBeenNthCalledWith(2, '/v1/projects/p/lsp/consent', { allow: [] })
   })
 })

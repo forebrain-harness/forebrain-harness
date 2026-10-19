@@ -1673,6 +1673,141 @@ func TestHistoryBrowseDownRestoresOriginalDraftMetadata(t *testing.T) {
 	}
 }
 
+// applyDraftEvent feeds one draft event through the same steps the event loop
+// takes: history bookkeeping first, then the draft update that decides whether a
+// picker opens.
+func applyDraftEvent(state *streamState, ev inputEvent) {
+	state.prepareHistoryDraft(ev, ev.draft)
+	state.composer.Cursor = composerCursorClamp(ev.draft, ev.cursor)
+	state.composer.HandleDraftUpdate(ev.draft, nil)
+}
+
+func historyRecallEvent(index int, text string) inputEvent {
+	return inputEvent{
+		kind:              inputEventDraft,
+		draft:             text,
+		cursor:            len([]rune(text)),
+		historyNavigation: true,
+		historyIndex:      index,
+		historyEntry:      rawInputHistoryEntry{Text: text},
+	}
+}
+
+// A recalled "/command" or "@file" must not open its picker: an open picker
+// takes Up and Down for its own rows (the raw reader routes arrows by
+// slashOverlayActive / mentionOverlayActive), so the user could not walk on to
+// the next history entry.
+func TestHistoryRecallDoesNotOpenPickers(t *testing.T) {
+	for _, recalled := range []string{"/model", "/mo", "/", "/resume abc", "look at @pkg/tu"} {
+		t.Run(recalled, func(t *testing.T) {
+			state := &streamState{}
+			applyDraftEvent(state, historyRecallEvent(0, recalled))
+			if state.composer.SlashOverlay != nil || state.composer.MentionOverlay != nil {
+				t.Fatalf("recalling %q opened a picker: slash=%+v mention=%+v", recalled, state.composer.SlashOverlay, state.composer.MentionOverlay)
+			}
+			// Walking on to an older entry keeps the pickers closed.
+			applyDraftEvent(state, historyRecallEvent(1, "/status"))
+			if state.composer.SlashOverlay != nil {
+				t.Fatalf("second recall opened the slash picker: %+v", state.composer.SlashOverlay)
+			}
+			// A caret move is not an edit and does not leave history browsing.
+			moved := historyRecallEvent(1, "/status")
+			moved.historyNavigation = false
+			moved.cursor = 2
+			applyDraftEvent(state, moved)
+			if state.composer.SlashOverlay != nil || !state.composer.HistoryBrowsing {
+				t.Fatalf("caret move reopened the picker or left history browsing: %+v", state.composer)
+			}
+		})
+	}
+}
+
+// Editing a recalled draft is typing again, so the picker opens as usual; and
+// Down back to the user's own draft re-reads that draft.
+func TestHistoryRecallEditAndReturnReopenPickers(t *testing.T) {
+	state := &streamState{}
+	applyDraftEvent(state, historyRecallEvent(0, "/model"))
+	if state.composer.SlashOverlay != nil {
+		t.Fatal("recall opened the slash picker")
+	}
+	applyDraftEvent(state, inputEvent{kind: inputEventDraft, draft: "/mode", cursor: 5})
+	if state.composer.HistoryBrowsing {
+		t.Fatal("editing the recalled draft must leave history browsing")
+	}
+	if state.composer.SlashOverlay == nil || !state.composer.SlashOverlay.Active {
+		t.Fatalf("editing a recalled command must reopen the picker, got %+v", state.composer.SlashOverlay)
+	}
+
+	state = &streamState{}
+	applyDraftEvent(state, historyRecallEvent(0, "/model"))
+	applyDraftEvent(state, inputEvent{kind: inputEventDraft, draft: "/st", cursor: 3, historyNavigation: true, historyIndex: -1})
+	if state.composer.HistoryBrowsing {
+		t.Fatal("Down to the original draft must leave history browsing")
+	}
+	if state.composer.SlashOverlay == nil || state.composer.SlashOverlay.FilterText != "st" {
+		t.Fatalf("returning to a typed '/st' must reopen the picker on it, got %+v", state.composer.SlashOverlay)
+	}
+}
+
+// Switching to another view while a recall is on screen ends the browse: the
+// raw reader's history position is reset by the reseed, and the incoming view's
+// draft is its own, so its pickers must work from the first keystroke.
+func TestApplyComposerDraftEndsHistoryBrowse(t *testing.T) {
+	state := &streamState{composer: ComposerState{
+		DraftText:   "old [Image #1]",
+		Attachments: []InputAttachment{{Path: "/tmp/original.png", MIMEType: "image/png"}},
+	}}
+	applyDraftEvent(state, historyRecallEvent(0, "/model"))
+	if !state.composer.HistoryBrowsing {
+		t.Fatal("setup: recall must start a history browse")
+	}
+
+	state.applyComposerDraft(composerDraft{DraftText: "/st", Cursor: 3})
+	if state.composer.HistoryBrowsing || state.historyDraftAttachments != nil || state.historyDraftPastes != nil {
+		t.Fatalf("view switch left the history browse running: %+v", state.composer)
+	}
+	state.composer.HandleDraftUpdate("/st", nil)
+	if state.composer.SlashOverlay == nil || state.composer.SlashOverlay.FilterText != "st" {
+		t.Fatalf("the incoming view's '/st' must open the picker, got %+v", state.composer.SlashOverlay)
+	}
+}
+
+// A paste or an image attached over a recall reseeds the raw reader, which then
+// forgets its history position, so the browse ends with it. The draft event the
+// reseed sends back carries the same text the composer already holds, which is
+// why the browse cannot be left to end on "the draft changed".
+func TestReseedingTheReaderEndsHistoryBrowse(t *testing.T) {
+	actions := map[string]func(*streamState){
+		"inline paste": func(s *streamState) { s.appendPaste("x") },
+		"folded paste": func(s *streamState) { s.appendPaste(strings.Repeat("y", largePasteCharThreshold+1)) },
+		"image": func(s *streamState) {
+			s.appendImageAttachment(InputAttachment{Path: "/tmp/a.png", MIMEType: "image/png"})
+		},
+	}
+	for name, act := range actions {
+		t.Run(name, func(t *testing.T) {
+			state := &streamState{composer: ComposerState{
+				DraftText:   "my draft [Image #1]",
+				Attachments: []InputAttachment{{Path: "/tmp/original.png", MIMEType: "image/png"}},
+			}}
+			applyDraftEvent(state, historyRecallEvent(0, "/model"))
+			if !state.composer.HistoryBrowsing {
+				t.Fatal("setup: recall must start a history browse")
+			}
+
+			act(state)
+			if state.composer.HistoryBrowsing || state.historyDraftAttachments != nil || state.historyDraftPastes != nil {
+				t.Fatalf("reseeding the reader left the history browse running: %+v", state.composer)
+			}
+			// The reseed's own draft event: same text as the composer holds.
+			state.composer.HandleDraftUpdate(state.composer.DraftText, nil)
+			if state.composer.SlashOverlay == nil {
+				t.Fatalf("a '/' draft after the reseed must open the picker, draft %q", state.composer.DraftText)
+			}
+		})
+	}
+}
+
 func TestStreamStateAppendPasteMatchesLargePasteThreshold(t *testing.T) {
 	var state streamState
 	exact := strings.Repeat("x", largePasteCharThreshold)
@@ -5999,4 +6134,157 @@ func mustReadFile(t *testing.T, path string) string {
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return string(b)
+}
+
+// The keyboard returns from the roster to the composer when the composer is
+// edited: the roster focus hides the composer's caret, so an edit that kept the
+// focus would type where nothing shows. The empty draft the reader sends after
+// a submitted line edits nothing and leaves the focus where Enter put it.
+func TestRosterFocusReturnsToTheComposerWhenItIsEdited(t *testing.T) {
+	st := &streamState{agentRosterFocused: true}
+	st.releaseRosterFocusForEdit("", 0)
+	if !st.agentRosterFocused {
+		t.Fatal("the empty draft after Enter must not take the focus off the roster")
+	}
+	st.releaseRosterFocusForEdit("a", 1)
+	if st.agentRosterFocused {
+		t.Fatal("typing must hand the keyboard back to the composer")
+	}
+
+	st = &streamState{agentRosterFocused: true}
+	st.composer.DraftText, st.composer.Cursor = "abc", 3
+	st.releaseRosterFocusForEdit("abc", 3)
+	if !st.agentRosterFocused {
+		t.Fatal("a draft that changes nothing must leave the focus alone")
+	}
+	st.releaseRosterFocusForEdit("abc", 1)
+	if st.agentRosterFocused {
+		t.Fatal("moving the composer's caret must hand the keyboard back")
+	}
+
+	st = &streamState{agentRosterFocused: true}
+	st.appendPaste("pasted")
+	if st.agentRosterFocused {
+		t.Fatal("a paste must hand the keyboard back to the composer")
+	}
+}
+
+func rosterFocusFixture() AgentRosterSnapshot {
+	return AgentRosterSnapshot{Rows: []AgentRosterRow{
+		{ID: "main", Kind: "primary", Label: "main", Status: "running"},
+		{ID: "task-a", Kind: "subagent", Label: "explore", Status: "running", Title: "map the approval flow"},
+		{ID: "task-b", Kind: "subagent", Label: "explore", Status: "running", Title: "check the sandbox profile"},
+	}}
+}
+
+// Entering a subagent's view — whichever way — puts the keyboard on that
+// agent's row of the roster: the ❯ on it, its hint beside it, and no caret in
+// the composer. Leaving for the conversation, or entering a view whose row has
+// left the roster, forces nothing.
+func TestEnteringASubagentViewPutsTheKeyboardOnItsRosterRow(t *testing.T) {
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.ensurePerAgentVM("task-a").append(Frame{Kind: FrameAssistant, Content: "a", AgentID: "task-a", Final: true})
+	r.ensurePerAgentVM("finished").append(Frame{Kind: FrameAssistant, Content: "f", AgentID: "finished", Final: true})
+	roster := rosterFocusFixture()
+	st := &streamState{session: &fakeSession{}, sessionID: "s1", agentRoster: roster}
+
+	st.syncComposerToView(r)
+	if st.agentRosterFocused {
+		t.Fatal("the conversation's own view must leave the keyboard in the composer")
+	}
+
+	r.SetActiveView("task-a")
+	st.syncComposerToView(r)
+	if !st.agentRosterFocused {
+		t.Fatal("entering a subagent's view must put the keyboard on the roster")
+	}
+	if row, ok := r.RosterCursorRow(roster); !ok || row.ID != "task-a" {
+		t.Fatalf("the roster cursor is on %#v, want the subagent whose view is open", row)
+	}
+	block := r.buildComposerBlock(ComposerRenderState{Text: "", Cursor: ptrInt(0), AgentRoster: roster, RosterFocused: st.agentRosterFocused}, 100)
+	painted := stripANSI(strings.Join(block.lines, "\n"))
+	if !strings.Contains(painted, "❯ explore") || !strings.Contains(painted, agentRosterSubagentHint) {
+		t.Fatalf("the focused row must carry the ❯ and its hint:\n%s", painted)
+	}
+	if block.cursorRow >= 0 {
+		t.Fatalf("the composer shows a caret (row %d) while the roster holds the keyboard", block.cursorRow)
+	}
+
+	// Back in the conversation the focus is not forced either way.
+	st.agentRosterFocused = false
+	r.SetActiveView("")
+	st.syncComposerToView(r)
+	if st.agentRosterFocused {
+		t.Fatal("returning to the conversation must not take the keyboard to the roster")
+	}
+
+	// A finished subagent's view, opened from its card, has no row to hold it.
+	r.SetActiveView("finished")
+	st.syncComposerToView(r)
+	if st.agentRosterFocused {
+		t.Fatal("a view with no roster row must leave the keyboard in the composer")
+	}
+}
+
+// The path the user takes: a click on a subagent's card in the conversation.
+// The click only reaches the renderer, which carries the roster cursor onto the
+// view; the keyboard follows it in the same step, with the composer repainted
+// for the new view, instead of waiting for a ↓ or the next key.
+func TestClickingASubagentCardPutsTheKeyboardOnItsRosterRow(t *testing.T) {
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.SetComposerFooter(ComposerFooter{Model: "m", Directory: "d"})
+	r.retainFrameLocked(fanoutFrameForTest())
+	for _, agentID := range []string{"task-a", "task-b"} {
+		r.ensurePerAgentVM(agentID).append(Frame{
+			Kind: FrameAssistant, Content: "transcript of " + agentID, AgentID: agentID, Final: true,
+		})
+	}
+	r.vpBodyHeight = 30
+	r.vpHeight = 30
+	r.vpLastRender = renderViewport(&r.vm, 100, 30, 0, DiffThemeDark)
+	roster := rosterFocusFixture()
+	st := &streamState{session: &fakeSession{}, sessionID: "s1", agentRoster: roster}
+	st.syncComposerToView(r)
+
+	st.handleMouse(r, inputEvent{kind: inputEventMouseClick, mouseRow: rowOfPrimaryText(t, r, "check the sandbox profile")})
+	if got := r.ActiveView(); got != "task-b" {
+		t.Fatalf("active view = %q, want the clicked task's subagent", got)
+	}
+	if !st.agentRosterFocused {
+		t.Fatal("the click opened the subagent's view but left the keyboard in the composer")
+	}
+	r.mu.Lock()
+	repainted := r.composerState.RosterFocused
+	r.mu.Unlock()
+	if !repainted {
+		t.Fatal("the composer was not repainted with the roster focused after the click")
+	}
+
+	// A click that does not change the view leaves the keyboard where it is.
+	st.agentRosterFocused = false
+	st.handleMouse(r, inputEvent{kind: inputEventMouseMove, mouseCol: 3, mouseRow: 3})
+	if st.agentRosterFocused {
+		t.Fatal("a mouse move must not move the keyboard")
+	}
+}
+
+// With the keyboard on the roster only an empty Enter (open the row) and "x"
+// (stop it) are the roster's; anything else submitted is a message for the view
+// on screen. That matters on entering a subagent's view, where the draft the
+// view kept is seeded into the reader and Enter sends it with the roster focused.
+func TestRosterOwnsOnlyEmptyEnterAndX(t *testing.T) {
+	st := &streamState{agentRosterFocused: true}
+	for line, want := range map[string]bool{"": true, "  ": true, "x": true, " X ": true, "hello": false, "x-ray": false, "xx": false} {
+		if got := st.rosterOwnsLine(line); got != want {
+			t.Errorf("focused, line %q: roster owns it = %v, want %v", line, got, want)
+		}
+	}
+	st.agentRosterFocused = false
+	for _, line := range []string{"", "x", "hello"} {
+		if st.rosterOwnsLine(line) {
+			t.Errorf("unfocused, line %q: the roster must own nothing", line)
+		}
+	}
 }

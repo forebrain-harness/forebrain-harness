@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { expect, test, type Page } from '@playwright/test'
 
-import { seedSessionInRoot, shot, signIn } from './support'
+import { revealTab, seedSessionInRoot, shot, signIn } from './support'
 
 /**
  * The workbench's four tabs (plan 017) and its working-directory operations,
@@ -42,6 +42,7 @@ test('the workbench opens on overview and switches to the four tabs', async ({ p
   await shot(page, 'p017-2-context')
   await page.click('[data-testid="bench-tab-tree"]')
   await expect(page.locator('[data-testid="tree-new-root"]')).toBeVisible()
+  await revealTab(page, 'changes')
   await page.click('[data-testid="bench-tab-changes"]')
   await expect(page.locator('[data-testid="bench-tab-changes"]')).toHaveAttribute('aria-selected', 'true')
   await shot(page, 'p017-1-tabs')

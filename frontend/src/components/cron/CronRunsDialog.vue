@@ -21,7 +21,7 @@
             <th>{{ t('cron.colStarted') }}</th>
             <th>{{ t('cron.colTrigger') }}</th>
             <th>{{ t('cron.colDeliver') }}</th>
-            <th class="text-right">{{ t('projects.colActions') }}</th>
+            <th class="text-center">{{ t('projects.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

@@ -15,6 +15,16 @@ type Definition struct {
 	SystemPrompt string
 }
 
+// PublicSubagentNames are the built-in subagents a model may dispatch, in the
+// order the subagent page lists them.
+var PublicSubagentNames = []string{"general-purpose", "explore", "plan", "verification"}
+
+// SystemSubagentNames are the built-in subagents the system itself dispatches
+// (plan review, /goal checks, automatic approval, the caveman skill); their
+// configuration is not the user's to set, so the subagent page shows them
+// read-only.
+var SystemSubagentNames = []string{"plan-reviewer", "goal-evaluator", "guardian", "cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"}
+
 var builtins = map[string]Definition{
 	"general-purpose": {
 		Name:         "general-purpose",
@@ -199,7 +209,7 @@ func ActiveTypeNames() []string {
 }
 
 func PublicTypeNames() []string {
-	return []string{"general-purpose", "explore", "plan", "verification"}
+	return append([]string(nil), PublicSubagentNames...)
 }
 
 func SystemPromptForSubtype(name string) (string, bool) {

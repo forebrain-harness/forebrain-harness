@@ -50,6 +50,42 @@ func TestSystemPromptForSubtype(t *testing.T) {
 	}
 }
 
+// Every built-in belongs to exactly one of the two lists the configuration and
+// the subagent page work from. A new built-in that lands in neither would be
+// invisible to both, and one listed in both would be offered to the model as
+// configurable while the system owns it.
+func TestSubagentNameListsCoverEveryBuiltin(t *testing.T) {
+	seen := map[string]string{}
+	for _, name := range PublicSubagentNames {
+		if prev, dup := seen[name]; dup {
+			t.Fatalf("%q is listed twice (in %s and PublicSubagentNames)", name, prev)
+		}
+		seen[name] = "PublicSubagentNames"
+	}
+	for _, name := range SystemSubagentNames {
+		if prev, dup := seen[name]; dup {
+			t.Fatalf("%q is listed twice (in %s and SystemSubagentNames)", name, prev)
+		}
+		seen[name] = "SystemSubagentNames"
+	}
+	active := ActiveTypeNames()
+	for _, name := range active {
+		if _, ok := seen[name]; !ok {
+			t.Fatalf("built-in %q is in neither PublicSubagentNames nor SystemSubagentNames", name)
+		}
+	}
+	if len(active) != len(seen) {
+		t.Fatalf("the two lists name %d types, but %d built-ins exist: %#v", len(seen), len(active), seen)
+	}
+	// PublicTypeNames is the model's dispatchable set, so it has to be the
+	// public list and not a slice of the shared backing array.
+	names := PublicTypeNames()
+	names[0] = "mutated"
+	if PublicTypeNames()[0] != PublicSubagentNames[0] {
+		t.Fatalf("PublicTypeNames shares its backing array with PublicSubagentNames")
+	}
+}
+
 func TestPublicAndCavecrewPrivateTypeNamesAreSeparated(t *testing.T) {
 	if got, want := PublicTypeNames(), []string{"general-purpose", "explore", "plan", "verification"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("PublicTypeNames = %#v, want %#v", got, want)

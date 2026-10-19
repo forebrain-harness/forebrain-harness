@@ -1,7 +1,7 @@
 <template>
   <div class="space-y-3" data-testid="workshop-cases">
-    <div class="flex items-center justify-between">
-      <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabCases') }}</span>
+    <div class="flex flex-wrap items-center justify-between gap-y-1.5">
+      <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabCases') }}</span>
       <button
         type="button"
         class="forebrain-btn forebrain-btn-primary text-xs"

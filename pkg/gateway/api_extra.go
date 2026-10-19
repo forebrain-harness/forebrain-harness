@@ -91,6 +91,21 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	agents.Post("/primary/:id/mcp/servers/test", s.handleMCPAgentServersTest)
 	agents.Put("/primary/:id/mcp/servers/:name", s.handleMCPAgentServersWrite)
 	agents.Delete("/primary/:id/mcp/servers/:name", s.handleMCPAgentServersWrite)
+	// One primary agent's subagent configuration (plan 079): the built-ins its
+	// model may dispatch, switched off or repointed one by one, and the custom
+	// subagents it defines. The defaults endpoints carry the global switch the
+	// settings page owns; the model options are the same list the conversation's
+	// model menu offers, for the drawer's model picker.
+	agents.Get("/defaults/subagents", s.handleSubagentsDefaultGet)
+	agents.Put("/defaults/subagents", s.handleSubagentsDefaultPut)
+	agents.Get("/primary/:id/model-options", s.handleAgentModelOptions)
+	agents.Get("/primary/:id/subagents", s.handleAgentSubagentsList)
+	agents.Post("/primary/:id/subagents", s.handleAgentSubagentCreate)
+	agents.Put("/primary/:id/subagent-switch", s.handleAgentSubagentSwitch)
+	agents.Get("/primary/:id/subagents/:name", s.handleAgentSubagentGet)
+	agents.Put("/primary/:id/subagents/:name", s.handleAgentSubagentUpdate)
+	agents.Delete("/primary/:id/subagents/:name", s.handleAgentSubagentDelete)
+	agents.Put("/primary/:id/subagents/:name/enabled", s.handleAgentSubagentEnabled)
 	agents.Get("/roster", s.handleAgentRoster)
 	agents.Post("/cancel-all", s.handleAgentCancelAll)
 	agents.Post("/:agentId/cancel", s.handlePrimaryAgentCancel)
@@ -4762,6 +4777,16 @@ func (s *Server) saveAndReload(cfg config.Root) error {
 	return s.Env.ReloadConfig()
 }
 
+// withConfigWrite runs one read-modify-write of forebrain.yaml with every
+// other such write in this process held off. fn must read the file (via
+// persistedConfig) inside the call, not before it, and must not call
+// withConfigWrite itself.
+func (s *Server) withConfigWrite(fn func() error) error {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
+	return fn()
+}
+
 func (s *Server) handleConfigFile(w http.ResponseWriter, r *http.Request) {
 	path := s.configPath()
 	switch r.Method {
@@ -7354,21 +7379,26 @@ func (s *Server) handleProjectLSPPreview(w http.ResponseWriter, r *http.Request)
 	// The table is one list of entries: the ones awaiting confirmation first,
 	// then the allowed ones, then the denied ones — each group in the order its
 	// own reader gives. Only a pending entry carries a summary: the consent store
-	// records the others by id alone.
+	// records the others by id alone. Every row carries the entry's current
+	// fingerprint from one shared read, so the per-row decision the page sends
+	// back can be bound to exactly the entry that was shown (all three groups
+	// from the same map keeps the wording consistent).
+	fps := process.ProjectLSPFingerprints(workspace, launch)
 	type lspRow struct {
-		ID      string `json:"id"`
-		Summary string `json:"summary"`
-		Status  string `json:"status"`
+		ID          string `json:"id"`
+		Summary     string `json:"summary"`
+		Status      string `json:"status"`
+		Fingerprint string `json:"fingerprint"`
 	}
 	all := make([]lspRow, 0, len(pending)+len(allowed)+len(denied))
 	for _, item := range pending {
-		all = append(all, lspRow{ID: item.ID, Summary: item.Summary, Status: lspStatusPending})
+		all = append(all, lspRow{ID: item.ID, Summary: item.Summary, Status: lspStatusPending, Fingerprint: fps[item.ID]})
 	}
 	for _, id := range allowed {
-		all = append(all, lspRow{ID: id, Status: lspStatusAllowed})
+		all = append(all, lspRow{ID: id, Status: lspStatusAllowed, Fingerprint: fps[id]})
 	}
 	for _, id := range denied {
-		all = append(all, lspRow{ID: id, Status: lspStatusDenied})
+		all = append(all, lspRow{ID: id, Status: lspStatusDenied, Fingerprint: fps[id]})
 	}
 	needle := strings.ToLower(q.Q)
 	matched := make([]lspRow, 0, len(all))
@@ -7396,12 +7426,15 @@ const (
 )
 
 // handleProjectLSPConsent is the web confirmation entry for project-level
-// language servers. Body: {"allow": [...], "decide": [...]}. decide names the
-// entries the request decides — allow the ones also in allow, deny the rest —
-// and is what the project page's per-row buttons send, so a row decides only
-// itself and a denied entry is allowed again by deciding it once more. Without
-// decide the call is the startup prompt's batch answer: every pending entry
-// not in allow is recorded as denied.
+// language servers. Body: {"allow": [...], "decide": [...], "fingerprints":
+// [{name, fingerprint}]}. decide names the entries the request decides —
+// allow the ones also in allow, deny the rest — and is what the project
+// page's per-row buttons send, so a row decides only itself and a denied
+// entry is allowed again by deciding it once more. fingerprints carries what
+// the page showed for each decided entry; any entry that no longer matches
+// it fails the whole request with 409 and records nothing. Without decide
+// the call is the startup prompt's batch answer: every pending entry not in
+// allow is recorded as denied.
 func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -7424,6 +7457,11 @@ func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request)
 		// prompt does: everything not allowed is recorded as denied. An
 		// empty list decides nothing.
 		Decide *[]string `json:"decide"`
+		// Fingerprints carries the per-entry fingerprints the page showed
+		// (keyed by id in Name), and is required whenever decide is present:
+		// the decision is recorded only against entries that still match
+		// them.
+		Fingerprints []consentFingerprint `json:"fingerprints"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -7439,11 +7477,21 @@ func (s *Server) handleProjectLSPConsent(w http.ResponseWriter, r *http.Request)
 		workspace = s.Runner.WorkspaceRoot
 	}
 	if body.Decide != nil {
-		err = process.DecideProjectLSPConsentsFor(workspace, launch, *body.Decide, body.Allow)
+		fps, missing, ok := consentFingerprintMap(*body.Decide, body.Fingerprints)
+		if !ok {
+			http.Error(w, fmt.Sprintf("fingerprint required for %q", missing), http.StatusBadRequest)
+			return
+		}
+		err = process.DecideProjectLSPConsentsFor(workspace, launch, *body.Decide, body.Allow, fps)
 	} else {
 		err = process.DecideProjectLSPConsents(workspace, launch, body.Allow)
 	}
 	if err != nil {
+		var stale interface{ StaleNames() []string }
+		if errors.As(err, &stale) {
+			writeStaleConsent(w, stale)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

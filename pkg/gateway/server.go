@@ -62,6 +62,11 @@ type Server struct {
 	StaticDist string
 	StaticFS   fs.FS
 
+	// configWriteMu serialises the read-modify-write of forebrain.yaml across
+	// request goroutines: persistedConfig → change → saveAndReload would
+	// otherwise let the later write overwrite the earlier one's change.
+	configWriteMu sync.Mutex
+
 	runControlMu     sync.Mutex
 	runControl       *run.Controller
 	runStartedAt     sync.Map

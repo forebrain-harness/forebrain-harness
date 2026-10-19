@@ -3961,16 +3961,134 @@ func TestProjectLSPConsentDecideOnlyTouchesNamedEntries(t *testing.T) {
 		}
 		return out
 	}
+	// The fingerprint a row carries is the one a decide request must send
+	// back, so the two read each other here: read from the row, returned for
+	// the click.
+	rowFingerprint := func(id string) string {
+		t.Helper()
+		rec := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=10", nil,
+			s.handleProjectLSPPreview, "id", p.ID)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		for _, item := range decodeBody(t, rec.Body.Bytes())["rows"].([]any) {
+			row := item.(map[string]any)
+			if fmt.Sprint(row["id"]) == id {
+				fp := fmt.Sprint(row["fingerprint"])
+				require.NotEmpty(t, fp, "row %q carries no fingerprint", id)
+				return fp
+			}
+		}
+		t.Fatalf("no row for %q", id)
+		return ""
+	}
 
 	rec := cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
-		map[string]any{"allow": []string{}, "decide": []string{"first"}}, s.handleProjectLSPConsent, "id", p.ID)
+		map[string]any{"allow": []string{}, "decide": []string{"first"},
+			"fingerprints": []any{map[string]any{"name": "first", "fingerprint": rowFingerprint("first")}}},
+		s.handleProjectLSPConsent, "id", p.ID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Equal(t, map[string]string{"first": "denied", "second": "pending"}, statuses())
 
 	rec = cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
-		map[string]any{"allow": []string{"first"}, "decide": []string{"first"}}, s.handleProjectLSPConsent, "id", p.ID)
+		map[string]any{"allow": []string{"first"}, "decide": []string{"first"},
+			"fingerprints": []any{map[string]any{"name": "first", "fingerprint": rowFingerprint("first")}}},
+		s.handleProjectLSPConsent, "id", p.ID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Equal(t, map[string]string{"first": "allowed", "second": "pending"}, statuses())
+}
+
+// TestProjectLSPConsentDecideRefusesAStaleFingerprint is the language-server
+// twin of the MCP one: the fingerprint travels with the row, a click against
+// one the file no longer matches is refused whole — 409, nothing recorded,
+// the entry still pending — and the refreshed fingerprint goes through.
+func TestProjectLSPConsentDecideRefusesAStaleFingerprint(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	serversPath := filepath.Join(p.Root, ".forebrain", "lsp_servers.yaml")
+	writeServers := func(body string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(serversPath, []byte(body), 0o644))
+	}
+	writeServers("servers:\n  first: {command: /bin/first}\n  second: {command: /bin/second}\n")
+
+	rowFingerprint := func(id string) string {
+		t.Helper()
+		rec := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=10", nil,
+			s.handleProjectLSPPreview, "id", p.ID)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		for _, item := range decodeBody(t, rec.Body.Bytes())["rows"].([]any) {
+			row := item.(map[string]any)
+			if fmt.Sprint(row["id"]) == id {
+				return fmt.Sprint(row["fingerprint"])
+			}
+		}
+		t.Fatalf("no row for %q", id)
+		return ""
+	}
+	statuses := func() map[string]string {
+		t.Helper()
+		rec := cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=10", nil,
+			s.handleProjectLSPPreview, "id", p.ID)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		out := map[string]string{}
+		for _, item := range decodeBody(t, rec.Body.Bytes())["rows"].([]any) {
+			row := item.(map[string]any)
+			out[fmt.Sprint(row["id"])] = fmt.Sprint(row["status"])
+		}
+		return out
+	}
+
+	// The page read first; the file moves under it before the click.
+	shown := rowFingerprint("first")
+	require.NotEmpty(t, shown)
+	writeServers("servers:\n  first: {command: /bin/rewritten}\n  second: {command: /bin/second}\n")
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
+		map[string]any{"allow": []string{"first"}, "decide": []string{"first"},
+			"fingerprints": []any{map[string]any{"name": "first", "fingerprint": shown}}},
+		s.handleProjectLSPConsent, "id", p.ID)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var refused struct {
+		Error string   `json:"error"`
+		Code  string   `json:"code"`
+		Stale []string `json:"stale"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &refused))
+	require.Equal(t, "consent_stale", refused.Code)
+	require.Equal(t, []string{"first"}, refused.Stale)
+	require.NotEmpty(t, refused.Error)
+	// Nothing was recorded: first is still awaiting its decision.
+	require.Equal(t, map[string]string{"first": "pending", "second": "pending"}, statuses())
+
+	// The page's own recovery: reload the rows, send the fingerprint they now
+	// carry, and the same click goes through.
+	refreshed := rowFingerprint("first")
+	require.NotEqual(t, shown, refreshed)
+	rec = cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
+		map[string]any{"allow": []string{"first"}, "decide": []string{"first"},
+			"fingerprints": []any{map[string]any{"name": "first", "fingerprint": refreshed}}},
+		s.handleProjectLSPConsent, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, map[string]string{"first": "allowed", "second": "pending"}, statuses())
+}
+
+// TestProjectLSPConsentDecideRequiresFingerprints: a request that decides
+// named entries without saying what it was shown for them decides nothing.
+func TestProjectLSPConsentDecideRequiresFingerprints(t *testing.T) {
+	s, p, _ := projectPagesServer(t)
+	require.NoError(t, os.WriteFile(filepath.Join(p.Root, ".forebrain", "lsp_servers.yaml"), []byte(
+		"servers:\n  first: {command: /bin/first}\n"), 0o644))
+
+	rec := cronRequest(t, s, http.MethodPost, "/api/v1/projects/"+p.ID+"/lsp/consent",
+		map[string]any{"allow": []string{"first"}, "decide": []string{"first"}}, s.handleProjectLSPConsent, "id", p.ID)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `fingerprint required for "first"`)
+
+	// Nothing was recorded: first is still awaiting its decision.
+	rec = cronRequest(t, s, http.MethodGet, "/api/v1/projects/"+p.ID+"/lsp?page=1&page_size=10", nil,
+		s.handleProjectLSPPreview, "id", p.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rows := decodeBody(t, rec.Body.Bytes())["rows"].([]any)
+	require.Len(t, rows, 1)
+	require.Equal(t, "pending", fmt.Sprint(rows[0].(map[string]any)["status"]))
 }
 
 // The cron settings endpoint is the structured surface of
@@ -6317,6 +6435,17 @@ func TestProjectMCPConsentDecideOnlyTouchesNamedEntries(t *testing.T) {
 			"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
 		return mcpReadRowNames(t, body)
 	}
+	// The fingerprint a row carries is the one a decide request must send
+	// back, so the two read each other here: read from the row, returned for
+	// the click.
+	rowFingerprint := func(name string) string {
+		t.Helper()
+		body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+			"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+		fp, ok := mcpServerRow(t, body, name)["fingerprint"].(string)
+		require.True(t, ok && fp != "", "row %q carries no fingerprint", name)
+		return fp
+	}
 	notAppliedNames := func(body map[string]any) []string {
 		t.Helper()
 		items, _ := body["not_applied"].([]any)
@@ -6330,7 +6459,8 @@ func TestProjectMCPConsentDecideOnlyTouchesNamedEntries(t *testing.T) {
 
 	// Decline e through the endpoint, deciding nothing else.
 	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
-		map[string]any{"allow": []string{}, "decide": []string{"e"}})
+		map[string]any{"allow": []string{}, "decide": []string{"e"},
+			"fingerprints": []any{map[string]any{"name": "e", "fingerprint": rowFingerprint("e")}}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	// The table's project block in the order a decision moves an entry
@@ -6353,7 +6483,8 @@ func TestProjectMCPConsentDecideOnlyTouchesNamedEntries(t *testing.T) {
 
 	// Allowing a declined entry takes it back: the same call, the other answer.
 	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
-		map[string]any{"allow": []string{"e"}, "decide": []string{"e"}})
+		map[string]any{"allow": []string{"e"}, "decide": []string{"e"},
+			"fingerprints": []any{map[string]any{"name": "e", "fingerprint": rowFingerprint("e")}}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	body = decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
 		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
@@ -6392,6 +6523,83 @@ func TestProjectMCPConsentWithoutDecideKeepsDecidingAll(t *testing.T) {
 	require.NotContains(t, declined, "pending")
 	require.Equal(t, true, mcpServerRow(t, body, "d")["allowed"])
 	require.Empty(t, body["pending_consent"].([]any))
+}
+
+// TestProjectMCPConsentDecideRefusesAStaleFingerprint pins the binding the
+// per-row decision now carries: the fingerprint travels with the row, and a
+// click against a fingerprint the file no longer matches is refused whole —
+// 409, nothing recorded, the entry still pending — until the page reloads and
+// the operator confirms the entry the file now holds.
+func TestProjectMCPConsentDecideRefusesAStaleFingerprint(t *testing.T) {
+	f := newMCPPreviewFixture(t)
+
+	rowFingerprint := func(name string) string {
+		t.Helper()
+		body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+			"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+		fp, ok := mcpServerRow(t, body, name)["fingerprint"].(string)
+		require.True(t, ok && fp != "", "row %q carries no fingerprint", name)
+		return fp
+	}
+	// The page read e; the file moves under it before the click.
+	shown := rowFingerprint("e")
+	file := filepath.Join(f.root, ".forebrain", "mcp_servers.yaml")
+	require.NoError(t, os.WriteFile(file, []byte(
+		"mcp_servers:\n"+
+			"  - name: d\n    transport: stdio\n    command: /bin/project-d\n"+
+			"  - name: e\n    transport: stdio\n    command: /bin/project-e-rewritten\n"), 0o644))
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{"e"}, "decide": []string{"e"},
+			"fingerprints": []any{map[string]any{"name": "e", "fingerprint": shown}}})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var refused struct {
+		Error string   `json:"error"`
+		Code  string   `json:"code"`
+		Stale []string `json:"stale"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &refused))
+	require.Equal(t, "consent_stale", refused.Code)
+	require.Equal(t, []string{"e"}, refused.Stale)
+	require.NotEmpty(t, refused.Error)
+
+	// Nothing was recorded: e is exactly as pending as before, under the
+	// fingerprint the file now has.
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	row := mcpServerRow(t, body, "e")
+	require.NotContains(t, row, "allowed")
+	require.NotContains(t, row, "declined")
+	require.Equal(t, true, row["pending"])
+	require.Equal(t, "/bin/project-e-rewritten", row["target"])
+
+	// The page's own recovery: reload the rows, send the fingerprint they now
+	// carry, and the same click goes through.
+	refreshed := rowFingerprint("e")
+	require.NotEqual(t, shown, refreshed)
+	rec = doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{"e"}, "decide": []string{"e"},
+			"fingerprints": []any{map[string]any{"name": "e", "fingerprint": refreshed}}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body = decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	require.Equal(t, true, mcpServerRow(t, body, "e")["allowed"])
+}
+
+// TestProjectMCPConsentDecideRequiresFingerprints: a request that decides
+// named entries without saying what it was shown for them decides nothing.
+func TestProjectMCPConsentDecideRequiresFingerprints(t *testing.T) {
+	f := newMCPPreviewFixture(t)
+
+	rec := doJSON(t, f.server, http.MethodPost, "/api/v1/projects/"+f.projectID+"/mcp/consent",
+		map[string]any{"allow": []string{"e"}, "decide": []string{"e"}})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `fingerprint required for "e"`)
+
+	// Nothing was recorded: e is still awaiting its decision.
+	body := decodeMCPServersBody(t, doJSON(t, f.server, http.MethodGet,
+		"/api/v1/projects/"+f.projectID+"/mcp?page=1&page_size=20", nil))
+	require.Equal(t, true, mcpServerRow(t, body, "e")["pending"])
 }
 
 // TestProjectMCPPreviewWithoutPageKeepsOldFields pins the backward half of the
@@ -6931,4 +7139,44 @@ func TestCronJobEditWithoutDeliverKeepsTheJobsTarget(t *testing.T) {
 	clearedJob, err := s.cron().Job(ctx, "main", job.ID)
 	require.NoError(t, err)
 	require.Equal(t, "", clearedJob.Deliver)
+}
+
+// TestWithConfigWriteSerialisesWriters pins the guarantee the config write
+// paths lean on: only one read-modify-write of forebrain.yaml runs at a time,
+// so a save that started from a stale file cannot overwrite another's change.
+func TestWithConfigWriteSerialisesWriters(t *testing.T) {
+	s := &Server{}
+
+	var mu sync.Mutex
+	inside, peak, ran := 0, 0, 0
+	errs := make([]error, 8)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.withConfigWrite(func() error {
+				mu.Lock()
+				inside++
+				ran++
+				if inside > peak {
+					peak = inside
+				}
+				mu.Unlock()
+				time.Sleep(5 * time.Millisecond)
+				mu.Lock()
+				inside--
+				mu.Unlock()
+				return nil
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "writer %d", i)
+	}
+	require.Equal(t, 1, peak, "writers must never overlap")
+	require.Equal(t, 8, ran, "every writer must have run")
+	require.Equal(t, 0, inside)
 }

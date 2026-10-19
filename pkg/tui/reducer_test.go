@@ -4503,7 +4503,8 @@ func TestClosedOverlayCaretIsNotRestoredAfterAScroll(t *testing.T) {
 	r.EnableSoftwareCursor()
 
 	r.BeginComposerOverlay()
-	picker := &selectState{options: []string{"low", "medium", "high"}, label: "Reasoning effort"}
+	// The caret shows only while the keyboard is in the filter.
+	picker := &selectState{options: []string{"low", "medium", "high"}, label: "Reasoning effort", inFilter: true}
 	picker.applyFilter()
 	r.SetOverlayPanel(picker.panel(), true, true)
 	r.mu.Lock()

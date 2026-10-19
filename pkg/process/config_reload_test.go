@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/run"
@@ -323,5 +325,33 @@ func TestReloadConfigPropagatesToPoolEntries(t *testing.T) {
 	// The ordinary pinned reload kept its published selection.
 	if sel := run.PrimaryModelSelection(pooled); !sel.Set || sel.Model != "gpt-test" {
 		t.Fatalf("pooled runner selection after propagation = %+v", sel)
+	}
+}
+
+// TestHotReloadSeesAnAtomicSave pins the watcher's compatibility with the
+// atomic config save: Save writes a sibling temp file (a different name, which
+// the filename filter ignores) and renames it over the target, landing as a
+// Create/Rename event on the watched name. A reload must still fire — this is
+// what keeps "save from one surface, the others follow" true now that every
+// Save replaces the file instead of rewriting it in place.
+func TestHotReloadSeesAnAtomicSave(t *testing.T) {
+	var calls atomic.Int32
+	env := &Environment{ConfigPath: filepath.Join(t.TempDir(), "forebrain.yaml")}
+	env.reload = NewConfigManager(nil, func() error {
+		calls.Add(1)
+		return nil
+	})
+	StartConfigHotReload(context.Background(), env)
+	t.Cleanup(env.stopConfigHotReload)
+
+	if err := appcfg.Save(env.ConfigPath, appcfg.Root{}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for calls.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if calls.Load() < 1 {
+		t.Fatal("no config reload within 3s of an atomic save; the watcher missed the rename")
 	}
 }

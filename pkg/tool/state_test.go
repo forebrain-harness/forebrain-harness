@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
 
@@ -369,5 +370,31 @@ func TestNamedReadObservers(t *testing.T) {
 	st.SetReadObserver(nil)
 	if st.ReadObserver() != nil {
 		t.Fatal("legacy nil must remove the observer")
+	}
+}
+
+// A typed run whose definition is custom — configuration, not a type name — has
+// its tool policy on the context. One that carries the source without the
+// policy is a run that lost it, and the static per-type table knows nothing
+// about a custom name, so it must be recognised and refused.
+func TestCustomSubagentPolicyMissing(t *testing.T) {
+	typed := WithSubagentType(context.Background(), "repo-scout")
+	custom := WithSubagentDefinitionSource(typed, SubagentDefinitionSourceCustom)
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want bool
+	}{
+		{"not a subagent", context.Background(), false},
+		{"built-in typed run", WithSubagentDefinitionSource(WithSubagentType(context.Background(), "explore"), "built-in"), false},
+		{"typed run, no source", typed, false},
+		{"custom source, no type", WithSubagentDefinitionSource(context.Background(), SubagentDefinitionSourceCustom), false},
+		{"custom source, no policy", custom, true},
+		{"custom source with policy", WithSubagentToolPolicy(custom, SubagentToolPolicy{Mode: appcfg.SubagentToolsReadOnly}), false},
+	}
+	for _, tc := range cases {
+		if got := CustomSubagentPolicyMissing(tc.ctx); got != tc.want {
+			t.Errorf("%s: CustomSubagentPolicyMissing = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

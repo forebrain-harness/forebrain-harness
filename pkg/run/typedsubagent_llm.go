@@ -52,13 +52,18 @@ func (w typedSubagentProviderLLM) Execute(ctx context.Context, messages []llm.Me
 
 type typedSubagentPromptLLM struct {
 	inner llm.LLM
+	// prompt answers the system prompt a type runs under. The runtime passes
+	// the dispatching primary agent's catalog, so a rewritten built-in or a
+	// custom subagent is what actually reaches the model; a nil prompt keeps
+	// the built-in definitions.
+	prompt func(subtype string) (string, bool)
 }
 
-func wrapTypedSubagentPromptLLM(inner llm.LLM) llm.LLM {
+func wrapTypedSubagentPromptLLM(inner llm.LLM, prompt func(subtype string) (string, bool)) llm.LLM {
 	if inner == nil {
 		return nil
 	}
-	return typedSubagentPromptLLM{inner: inner}
+	return typedSubagentPromptLLM{inner: inner, prompt: prompt}
 }
 
 func (w typedSubagentPromptLLM) Execute(ctx context.Context, messages []llm.Message, tools []*llm.Tool) (*llm.Result, error) {
@@ -67,7 +72,7 @@ func (w typedSubagentPromptLLM) Execute(ctx context.Context, messages []llm.Mess
 	}
 	subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx))
 	if subtype != "" {
-		if prompt, ok := agent.SystemPromptForSubtype(subtype); ok {
+		if prompt, ok := w.promptFor(subtype); ok {
 			// State the file access scope when both roots are known.
 			if projectRoot := tool.ProjectRootFromContext(ctx); projectRoot != "" {
 				if wsRoot := tool.WorkspaceRootFromContext(ctx); wsRoot != "" {
@@ -78,6 +83,15 @@ func (w typedSubagentPromptLLM) Execute(ctx context.Context, messages []llm.Mess
 		}
 	}
 	return w.inner.Execute(ctx, messages, tools)
+}
+
+// promptFor answers the system prompt one type runs under: the dispatcher's
+// catalog when the wrapper was given one, else the built-in definition.
+func (w typedSubagentPromptLLM) promptFor(subtype string) (string, bool) {
+	if w.prompt != nil {
+		return w.prompt(subtype)
+	}
+	return agent.SystemPromptForSubtype(subtype)
 }
 
 func explicitMainThreadQuerySource(source string) bool {
@@ -114,13 +128,16 @@ func (w typedSubagentToolFilterLLM) Execute(ctx context.Context, messages []llm.
 	}
 	subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx))
 	if subtype != "" {
-		tools = filterToolsForSubagentSubtype(subtype, tools)
+		tools = filterToolsForSubagentSubtype(ctx, subtype, tools)
 	}
 	return w.inner.Execute(ctx, messages, tools)
 }
 
-func filterToolsForSubagentSubtype(subtype string, tools []*llm.Tool) []*llm.Tool {
+func filterToolsForSubagentSubtype(ctx context.Context, subtype string, tools []*llm.Tool) []*llm.Tool {
 	if len(tools) == 0 {
+		return nil
+	}
+	if tool.CustomSubagentPolicyMissing(ctx) {
 		return nil
 	}
 	normalized := strings.ToLower(strings.TrimSpace(subtype))
@@ -137,7 +154,18 @@ func filterToolsForSubagentSubtype(subtype string, tools []*llm.Tool) []*llm.Too
 		inputNames = append(inputNames, name)
 		toolByName[name] = tool
 	}
-	visible := tool.VisibleToolsForSubagentSubtype(normalized, inputNames)
+	var visible []string
+	if policy, ok := tool.SubagentToolPolicyFromContext(ctx); ok {
+		// A custom subagent's set is configuration: offer exactly what its
+		// policy admits, which never includes the subagent_* family.
+		for _, name := range inputNames {
+			if !policy.Blocks(name) {
+				visible = append(visible, name)
+			}
+		}
+	} else {
+		visible = tool.VisibleToolsForSubagentSubtype(normalized, inputNames)
+	}
 	out := make([]*llm.Tool, 0, len(tools))
 	for _, name := range visible {
 		if tool := toolByName[name]; tool != nil {

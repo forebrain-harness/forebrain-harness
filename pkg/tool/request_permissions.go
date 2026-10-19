@@ -129,7 +129,7 @@ func normalizeRequestPermissionsInput(ctx context.Context, st *State, in *Reques
 		// read-only type into a writing one behind a prompt that only says a
 		// path was requested. Read and deny entries are untouched: asking to
 		// read a directory outside the project is what this tool is for.
-		readOnlyType := TypedSubagentBlocksFileWrites(SubagentTypeFromContext(ctx))
+		readOnlyType := SubagentBlocksFileWrites(ctx)
 		fs := *out.Permissions.FileSystem
 		entries := make([]safety.FileSystemPermissionEntry, 0, len(fs.Read)+len(fs.Write)+len(fs.Entries))
 		for _, p := range fs.Read {

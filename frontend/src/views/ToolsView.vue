@@ -47,7 +47,7 @@
               <th>{{ t('tools.colDesc') }}</th>
               <th>{{ t('tools.colCategory') }}</th>
               <th>{{ t('tools.colType') }}</th>
-              <th class="text-right">{{ t('tools.colActions') }}</th>
+              <th class="text-center">{{ t('tools.colActions') }}</th>
             </tr>
           </thead>
           <tbody>

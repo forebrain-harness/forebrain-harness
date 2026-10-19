@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
@@ -149,6 +150,7 @@ const (
 	ctxKeyAllowedPlanPath      ctxKey = "forebrain_allowed_plan_path"
 	ctxKeyForkChild            ctxKey = "forebrain_subagent_fork_child"
 	ctxKeySubagentType         ctxKey = "forebrain_subagent_type"
+	ctxKeySubagentPolicy       ctxKey = "forebrain_subagent_tool_policy"
 	ctxKeySubagentDefSrc       ctxKey = "forebrain_subagent_definition_source"
 	ctxKeyProjectRoot          ctxKey = "forebrain_project_root"
 	ctxKeyWorkspaceRoot        ctxKey = "forebrain_workspace_root"
@@ -494,6 +496,88 @@ func SubagentTypeFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(ctxKeySubagentType).(string)
 	return strings.TrimSpace(v)
+}
+
+// SubagentToolPolicy is a custom subagent's tool policy, carried on its run's
+// context. A built-in type's policy stays the static table in
+// typedSubagentDisallowedTools, so a context without a policy behaves exactly
+// as before custom subagents existed.
+type SubagentToolPolicy struct {
+	// Mode is config.SubagentToolsReadOnly, SubagentToolsEdit or
+	// SubagentToolsPick.
+	Mode string
+	// Allowed is the chosen tool set when Mode is pick.
+	Allowed map[string]struct{}
+}
+
+func WithSubagentToolPolicy(ctx context.Context, p SubagentToolPolicy) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, ctxKeySubagentPolicy, p)
+}
+
+func SubagentToolPolicyFromContext(ctx context.Context) (SubagentToolPolicy, bool) {
+	if ctx == nil {
+		return SubagentToolPolicy{}, false
+	}
+	p, ok := ctx.Value(ctxKeySubagentPolicy).(SubagentToolPolicy)
+	return p, ok
+}
+
+// SubagentDefinitionSourceCustom is the definition source of a subagent a
+// primary agent defines in its own configuration. Its tool policy is that
+// configuration, carried on the run's context (see SubagentToolPolicy); no
+// static table says anything about its name.
+const SubagentDefinitionSourceCustom = "custom"
+
+// CustomSubagentPolicyMissing reports a typed run whose definition is custom
+// but whose tool policy never reached the context. Such a run is not a
+// built-in the static table describes and not a custom one the policy
+// describes: nothing says what it may call, so it may call nothing. Every entry
+// point rebuilds the policy from the agent's configuration, which is exactly
+// what is gone when the definition has been deleted; this is the net under any
+// entry point that forgets to check first.
+func CustomSubagentPolicyMissing(ctx context.Context) bool {
+	if SubagentTypeFromContext(ctx) == "" || SubagentDefinitionSourceFromContext(ctx) != SubagentDefinitionSourceCustom {
+		return false
+	}
+	_, ok := SubagentToolPolicyFromContext(ctx)
+	return !ok
+}
+
+// Blocks reports whether this policy keeps the named tool from ever being
+// called. Every mode refuses subagent_*: a subagent that could dispatch
+// subagents turns one delegated task into an unbounded tree of them.
+func (p SubagentToolPolicy) Blocks(toolName string) bool {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if strings.HasPrefix(name, "subagent_") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Mode)) {
+	case appcfg.SubagentToolsReadOnly:
+		return name == "write_file" || name == "edit_file"
+	case appcfg.SubagentToolsPick:
+		_, ok := p.Allowed[name]
+		return !ok
+	default:
+		return false
+	}
+}
+
+// SubagentBlocksFileWrites reports whether the run in ctx may not write files
+// at all: the policy a custom subagent carries on its context, else the static
+// table for its built-in type.
+//
+// It is TypedSubagentBlocksFileWrites for a run whose policy is configuration
+// rather than a type name, and the two questions it answers — does this worker
+// inherit the parent's plan mode, and may it be granted write access — are
+// asked by readers that hold only the context.
+func SubagentBlocksFileWrites(ctx context.Context) bool {
+	if policy, ok := SubagentToolPolicyFromContext(ctx); ok {
+		return policy.Blocks("write_file") && policy.Blocks("edit_file")
+	}
+	return TypedSubagentBlocksFileWrites(SubagentTypeFromContext(ctx))
 }
 
 func WithSubagentDefinitionSource(ctx context.Context, source string) context.Context {

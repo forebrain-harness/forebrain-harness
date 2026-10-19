@@ -1,7 +1,7 @@
 <template>
   <div class="space-y-2" data-testid="workshop-changes">
-    <div class="flex items-center justify-between">
-      <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('chat.benchTabChanges') }}</span>
+    <div class="flex flex-wrap items-center justify-between gap-y-1.5">
+      <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('chat.benchTabChanges') }}</span>
       <span v-if="hasDraft && base" class="text-[11px] text-[var(--forebrain-muted-text)]">{{ base ? t('workshop.changesSince', { v: base }) : '' }}</span>
     </div>
     <p v-if="error" class="text-[12px] text-[var(--forebrain-danger)]">{{ error }}</p>

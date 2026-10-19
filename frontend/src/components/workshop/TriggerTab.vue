@@ -2,8 +2,8 @@
   <div class="space-y-3" data-testid="workshop-trigger">
     <!-- 触发描述 -->
     <div class="rounded-lg border border-[var(--forebrain-divider)] p-3">
-      <div class="flex items-center justify-between">
-        <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.triggerDescTitle') }}</span>
+      <div class="flex flex-wrap items-center justify-between gap-y-1.5">
+        <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.triggerDescTitle') }}</span>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable" data-testid="workshop-trigger-desc-edit" @click="openDescEdit">{{ t('common.edit') }}</button>
       </div>
       <div class="mt-2 rounded-md bg-[var(--forebrain-input-bg)] p-2 text-[12px] text-[var(--forebrain-text)]">{{ description || '—' }}</div>
@@ -12,9 +12,9 @@
 
     <!-- 触发测试 -->
     <div class="rounded-lg border border-[var(--forebrain-divider)] p-3">
-      <div class="flex items-center justify-between gap-2">
-        <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.triggerTestTitle') }}</span>
-        <div class="flex gap-1">
+      <div class="flex flex-wrap items-center justify-between gap-2 gap-y-1.5">
+        <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.triggerTestTitle') }}</span>
+        <div class="flex shrink-0 gap-1">
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!editable" data-testid="workshop-trigger-add" @click="openQueryAdd">{{ t('workshop.addQuery') }}</button>
           <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!skillName" data-testid="workshop-trigger-retest" @click="emit('send', t('workshop.retestMessage'))">{{ t('workshop.retest') }}</button>
         </div>
@@ -51,8 +51,8 @@
 
     <!-- 建议描述 -->
     <div v-if="results && results.bestDescription && !applied" class="rounded-lg border border-[var(--forebrain-divider)] p-3" data-testid="workshop-trigger-suggest">
-      <div class="flex items-center justify-between">
-        <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.suggestedTitle') }}</span>
+      <div class="flex flex-wrap items-center justify-between gap-y-1.5">
+        <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.suggestedTitle') }}</span>
         <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!skillName" @click="emit('send', t('workshop.regenerateMessage'))">{{ t('workshop.regenerate') }}</button>
       </div>
       <div class="mt-2 rounded-md bg-[var(--forebrain-input-bg)] p-2 text-[12px] text-[var(--forebrain-text)]">{{ results.bestDescription }}</div>

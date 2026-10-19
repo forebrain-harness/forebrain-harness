@@ -15932,10 +15932,9 @@ func TestRawSelectorSelectRendersPanel(t *testing.T) {
 	for _, line := range st.panel().layout(40, 0, 0, false).lines {
 		plain = append(plain, stripANSI(line))
 	}
-	want := []string{
+	want := withFilterBar(2, []string{
 		"  pick",
 		"  Choose one",
-		"› Type to filter",
 		"",
 		"❯ one",
 		"  two",
@@ -15943,7 +15942,7 @@ func TestRawSelectorSelectRendersPanel(t *testing.T) {
 		"",
 		"  ↑/↓ to navigate · Enter to confirm ·",
 		"  Esc to cancel",
-	}
+	}, filterBarPlain(40, "⌕", "Type to filter"))
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
 	}
@@ -15965,7 +15964,12 @@ func TestRawSelectorSelectFilter(t *testing.T) {
 		w.Write([]byte{'\r'})
 	}()
 
-	got, ok, err := sel.Select("pick", []string{"one", "two", "three"}, "")
+	// A list long enough to show the filter it is typed into.
+	options := []string{"one", "two", "three"}
+	for i := len(options); i < pickerFilterMinRows; i++ {
+		options = append(options, fmt.Sprintf("filler-%d", i))
+	}
+	got, ok, err := sel.Select("pick", options, "")
 	if err != nil {
 		t.Fatalf("Select error: %v", err)
 	}
@@ -16266,12 +16270,15 @@ func TestInputPanelShowsQuestionFieldAndKeys(t *testing.T) {
 	for _, line := range layout.lines {
 		plain = append(plain, stripANSI(line))
 	}
-	want := []string{"  Base URL", "› A界B", "", "", "  Enter to confirm · Esc to cancel"}
+	want := withFilterBar(1, []string{"  Base URL", "", "", "  Enter to confirm · Esc to cancel"}, filterBarPlain(60, "›", "A界B"))
 	if strings.Join(plain, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("panel = %q, want %q", plain, want)
 	}
-	if layout.caretRow != 1 || layout.caretCol != 5 {
-		t.Fatalf("field row %d, cursor column %d; want 1, 5", layout.caretRow, layout.caretCol)
+	// The text row is the title, the air above the bar and its padded row down;
+	// the text starts after the margin, the padding, the glyph and its gap — 7
+	// columns — and the caret is after "A界", 3 cells in.
+	if layout.caretRow != 3 || layout.caretCol != 10 {
+		t.Fatalf("field row %d, cursor column %d; want 3, 10", layout.caretRow, layout.caretCol)
 	}
 }
 
@@ -16288,14 +16295,16 @@ func TestStandalonePromptPaintsASetupPage(t *testing.T) {
 	sel.showPanel(inputPanel("URL", []rune("A界B"), 2, false, sel.escHint()))
 
 	got := out.String()
-	for _, want := range []string{"Forebrain Harness", "Step 2 of 5", "━", "  URL", "› A界B", "Esc to go back"} {
+	for _, want := range []string{"Forebrain Harness", "Step 2 of 5", "━", "  URL", "›  A界B", "Esc to go back"} {
 		if !strings.Contains(stripANSI(got), want) {
 			t.Fatalf("page is missing %q:\n%s", want, stripANSI(got))
 		}
 	}
-	// Four rows of page chrome, then the title: the field is on row 6, its
-	// caret after "› A界" at column 5, one-based in the escape.
-	if want := "\x1b[6;6H\x1b[?25h"; !strings.HasSuffix(got, want) {
+	// Four rows of page chrome, then the title: a page this short keeps the
+	// one-row bar, so the field is on row 6, its caret after the 7 columns of
+	// margin, padding, glyph and gap and the 3 cells of "A界" — column 10,
+	// one-based 11 in the escape.
+	if want := "\x1b[6;11H\x1b[?25h"; !strings.HasSuffix(got, want) {
 		t.Fatalf("page = %q, want the caret placed with %q", got, want)
 	}
 }
@@ -16309,8 +16318,8 @@ func TestSecretFieldIsMasked(t *testing.T) {
 		{"sk-proj-abcdef1234", "••••••••••••••1234"},
 	} {
 		layout := inputPanel("OpenAI API key", []rune(tc.value), len(tc.value), true, "Esc to go back").layout(60, 0, 0, false)
-		if got := stripANSI(layout.lines[layout.caretRow]); got != "› "+tc.want {
-			t.Fatalf("secret %q shows %q, want %q", tc.value, got, "› "+tc.want)
+		if got := strings.TrimRight(stripANSI(layout.lines[layout.caretRow]), " "); got != "    ›  "+tc.want {
+			t.Fatalf("secret %q shows %q, want %q", tc.value, got, "    ›  "+tc.want)
 		}
 	}
 }
@@ -23328,7 +23337,9 @@ func TestClickingAFanoutTaskRowOpensThatTasksView(t *testing.T) {
 // user got there. Opening a subagent by clicking its card in the conversation
 // is one of those ways, and the roster used to keep its own selection — written
 // only by Up/Down — so the arrow stayed on the primary row while the screen
-// showed the subagent.
+// showed the subagent. The ❯ shows only while the roster holds the keyboard,
+// so the cursor is read with the roster focused; without the focus the roster
+// marks no row, the caret in the composer being where the keyboard is.
 func TestRosterCursorFollowsTheViewOpenedByClickingACard(t *testing.T) {
 	r := NewRenderer(nil, nil)
 	r.viewportMode = true
@@ -23347,10 +23358,23 @@ func TestRosterCursorFollowsTheViewOpenedByClickingACard(t *testing.T) {
 		{ID: "task-a", Kind: "subagent", Label: "explore", Status: "running", Title: "map the approval flow"},
 		{ID: "task-b", Kind: "subagent", Label: "explore", Status: "running", Title: "check the sandbox profile"},
 	}}
+	rosterBlock := func(focused bool) composerBlock {
+		r.composerState = ComposerRenderState{Text: "", Cursor: ptrInt(0), AgentRoster: roster, RosterFocused: focused}
+		return r.buildComposerBlock(r.composerState, 100)
+	}
 	rosterLines := func() string {
-		r.composerState = ComposerRenderState{Text: "", Cursor: ptrInt(0), AgentRoster: roster}
-		block := r.buildComposerBlock(r.composerState, 100)
-		return stripANSI(strings.Join(block.lines, "\n"))
+		return stripANSI(strings.Join(rosterBlock(true).lines, "\n"))
+	}
+
+	// The keyboard is in the composer: the composer shows its caret and the
+	// roster no ❯. With it on the roster the roster shows the ❯ and the
+	// composer no caret.
+	free := rosterBlock(false)
+	if strings.Contains(stripANSI(strings.Join(free.lines, "\n")), "❯") || free.cursorRow < 0 {
+		t.Fatalf("with the keyboard in the composer: caret row %d, roster:\n%s", free.cursorRow, stripANSI(strings.Join(free.lines, "\n")))
+	}
+	if held := rosterBlock(true); held.cursorRow >= 0 || !strings.Contains(stripANSI(strings.Join(held.lines, "\n")), "❯") {
+		t.Fatalf("with the keyboard on the roster: caret row %d, roster:\n%s", held.cursorRow, stripANSI(strings.Join(held.lines, "\n")))
 	}
 
 	// The conversation is on screen: the cursor is on the primary row.
@@ -30125,6 +30149,75 @@ func TestNewSessionResetsModelToConfigDefault(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, switched)
 	requireRunnerModel(t, s, "openai", "gpt-main", "")
+}
+
+// TestNewSessionFooterFollowsTheResetModel pins what the composer footer says
+// after /new: the model and effort the new session's next request carries —
+// the file's default entry — never the ones the outgoing session ran on.
+//
+// The two only differ while the live runtime and the file's default have
+// drifted apart, which is the state this test builds: sess-a chose the second
+// provider, and the file's llm_providers[0] is the first one again. The live
+// runtime survives that reordering (a pinned reload keeps a selection the file
+// still lists), so the footer has to change here even though the runtime does
+// not move until /new resets it.
+func TestNewSessionFooterFollowsTheResetModel(t *testing.T) {
+	s := newModelSelectionTestSession(t)
+	ctx := context.Background()
+
+	// sess-a runs the entry that does not sit at the file's default position.
+	main := s.cfg().Agents.Definitions["main"]
+	for i := range main.LLMProviders {
+		if main.LLMProviders[i].Model == "gpt-main" {
+			main.LLMProviders[i].Params = appcfg.LLMRequestParams(`{"reasoning":{"effort":"low"}}`)
+		}
+	}
+	s.cfg().Agents.Definitions["main"] = main
+	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
+	require.NoError(t, s.reloadConfigFromDisk())
+	require.NoError(t, s.SelectModel(ctx, "sess-a", turn.ModelChoice{Provider: "openai", Model: "gpt-other", CanReason: true}, nil))
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+
+	// /model promotes the chosen entry to llm_providers[0] and writes it.
+	main = s.cfg().Agents.Definitions["main"]
+	require.Equal(t, "gpt-main", main.LLMProviders[0].Model)
+	main.LLMProviders[0], main.LLMProviders[1] = main.LLMProviders[1], main.LLMProviders[0]
+	s.cfg().Agents.Definitions["main"] = main
+	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
+	require.NoError(t, s.reloadConfigFromDisk())
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+
+	// The file's default then moved back to the first entry — the drift the
+	// owner's file had — and the reload must leave this session on its own
+	// model all the same.
+	main = s.cfg().Agents.Definitions["main"]
+	require.Equal(t, "gpt-other", main.LLMProviders[0].Model)
+	main.LLMProviders[0], main.LLMProviders[1] = main.LLMProviders[1], main.LLMProviders[0]
+	s.cfg().Agents.Definitions["main"] = main
+	require.NoError(t, appcfg.Save(filepath.Join(s.home(), "forebrain.yaml"), *s.cfg()))
+	require.NoError(t, s.reloadConfigFromDisk())
+	requireRunnerModel(t, s, "openai", "gpt-other", "high")
+	require.Equal(t, "gpt-main", s.cfg().Agents.Definitions["main"].LLMProviders[0].Model)
+
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	state := newSwitchState(s, "sess-a")
+
+	res, ok := s.ExecuteSurfaceSlash(ctx, "sess-a", "/new")
+	require.True(t, ok)
+	require.True(t, res.SessionSwitched)
+	switched, _, err := switchStreamSession(ctx, state, renderer, nil, res.SessionID)
+	require.NoError(t, err)
+	require.True(t, switched)
+
+	// The reset selection is what both the runtime and the footer name.
+	sel := run.PrimaryModelSelection(s.runner())
+	require.True(t, sel.Set)
+	require.Equal(t, "openai", sel.Provider)
+	require.Equal(t, "gpt-main", sel.Model)
+	require.Equal(t, "low", sel.Effort)
+	require.Equal(t, "openai/gpt-main", renderer.footer.Model)
+	require.Equal(t, "low", renderer.footer.ReasoningEffort)
 }
 
 func TestForkCopiesSessionModelSelection(t *testing.T) {

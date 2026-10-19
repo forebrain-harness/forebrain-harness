@@ -308,7 +308,7 @@ func containsName(in []string, want string) bool {
 
 func TestTypedSubagentPromptReplacesSystemPrompt(t *testing.T) {
 	inner := &captureLLM{}
-	wrapped := wrapTypedSubagentPromptLLM(inner)
+	wrapped := wrapTypedSubagentPromptLLM(inner, nil)
 	ctx := toolpkg.WithSubagentType(context.Background(), "plan")
 	_, err := wrapped.Execute(ctx, []llm.Message{
 		llm.SystemMessage("default system"),
@@ -328,7 +328,7 @@ func TestTypedSubagentPromptReplacesSystemPrompt(t *testing.T) {
 
 func TestTypedSubagentPromptNoopForMainContext(t *testing.T) {
 	inner := &captureLLM{}
-	wrapped := wrapTypedSubagentPromptLLM(inner)
+	wrapped := wrapTypedSubagentPromptLLM(inner, nil)
 	_, err := wrapped.Execute(WithQuerySource(context.Background(), "repl_main_thread"), []llm.Message{
 		llm.SystemMessage("default system"),
 		llm.UserMessage(llm.Text("work")),
@@ -343,7 +343,7 @@ func TestTypedSubagentPromptNoopForMainContext(t *testing.T) {
 
 func TestTypedSubagentPromptDoesNotOverrideMainThreadPrompt(t *testing.T) {
 	inner := &captureLLM{}
-	wrapped := wrapTypedSubagentPromptLLM(inner)
+	wrapped := wrapTypedSubagentPromptLLM(inner, nil)
 	ctx := WithQuerySource(context.Background(), "repl_main_thread")
 	ctx = toolpkg.WithSubagentType(ctx, "plan")
 	_, err := wrapped.Execute(ctx, []llm.Message{
@@ -399,5 +399,118 @@ func TestSubagentOwnModelMatchesWhatTheRuntimeRoutes(t *testing.T) {
 	}
 	if _, _, _, ok := SubagentOwnModel(nil, "explore"); ok {
 		t.Fatal("a nil runner has no model of its own")
+	}
+}
+
+// typedPromptTestContext is a typed run's context with both roots known, so the
+// prompt wrapper appends the file access scope the way a real run does.
+func typedPromptTestContext(subtype string) context.Context {
+	ctx := toolpkg.WithSubagentType(context.Background(), subtype)
+	ctx = toolpkg.WithProjectRoot(ctx, "/work/project")
+	return toolpkg.WithWorkspaceRoot(ctx, "/home/user/.forebrain/workspace")
+}
+
+// A rewrite of a built-in subagent's prompt is what the model actually receives:
+// it replaces the built-in text whole, and the engine still appends the file
+// access scope after it.
+func TestTypedSubagentPromptUsesTheAgentsRewrite(t *testing.T) {
+	inner := &captureLLM{}
+	wrapped := wrapTypedSubagentPromptLLM(inner, SubagentCatalogFor(catalogTestConfig(), "main").Prompt)
+	_, err := wrapped.Execute(typedPromptTestContext("explore"), []llm.Message{
+		llm.SystemMessage("default system"),
+		llm.UserMessage(llm.Text("find x")),
+	}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(inner.messages) == 0 {
+		t.Fatal("no messages captured")
+	}
+	got := inner.messages[0].TextContent()
+	if !strings.HasPrefix(got, "Search only what the task names.") {
+		t.Fatalf("the rewrite did not reach the model: %q", got)
+	}
+	if !strings.Contains(got, "FILE ACCESS SCOPE") {
+		t.Fatalf("the file access scope was dropped from the rewritten prompt: %q", got)
+	}
+}
+
+// A custom subagent's own prompt is the one it runs under, by the same path.
+func TestTypedSubagentPromptUsesCustomPrompt(t *testing.T) {
+	inner := &captureLLM{}
+	wrapped := wrapTypedSubagentPromptLLM(inner, SubagentCatalogFor(catalogTestConfig(), "main").Prompt)
+	_, err := wrapped.Execute(typedPromptTestContext("repo-scout"), []llm.Message{
+		llm.SystemMessage("default system"),
+		llm.UserMessage(llm.Text("find the files")),
+	}, nil)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(inner.messages) == 0 {
+		t.Fatal("no messages captured")
+	}
+	got := inner.messages[0].TextContent()
+	if !strings.HasPrefix(got, "You are repo-scout.") {
+		t.Fatalf("the custom prompt did not reach the model: %q", got)
+	}
+	if !strings.Contains(got, "FILE ACCESS SCOPE") {
+		t.Fatalf("the file access scope was dropped from the custom prompt: %q", got)
+	}
+}
+
+// A read-only custom subagent is held to its policy on both paths that matter:
+// the write tools are refused when something calls them anyway, and they are
+// never offered to the model in the first place.
+func TestCustomReadOnlySubagentCannotWrite(t *testing.T) {
+	st := toolpkg.NewState(t.TempDir())
+	ctx := toolpkg.WithSubagentType(context.Background(), "repo-scout")
+	ctx = toolpkg.WithSubagentToolPolicy(ctx, toolpkg.SubagentToolPolicy{Mode: appcfg.SubagentToolsReadOnly})
+
+	err := st.GuardTool(ctx, "write_file")
+	if err == nil {
+		t.Fatal("a read-only custom subagent may call write_file")
+	}
+	if !strings.Contains(err.Error(), "blocked by policy") {
+		t.Fatalf("refusal = %v", err)
+	}
+	if err := st.GuardTool(ctx, "read_file"); err != nil {
+		t.Fatalf("read_file refused: %v", err)
+	}
+	tools := []*llm.Tool{testTool(t, "read_file"), testTool(t, "write_file"), testTool(t, "edit_file")}
+	for _, candidate := range filterToolsForSubagentSubtype(ctx, "repo-scout", tools) {
+		if name := candidate.Name(); name == "write_file" || name == "edit_file" {
+			t.Fatalf("%s was offered to a read-only custom subagent", name)
+		}
+	}
+}
+
+// A pick-mode custom subagent sees exactly the tools it was configured with, and
+// the subagent_* family is never one of them: a delegated task must not become a
+// tree of them.
+func TestCustomPickSubagentSeesOnlyChosenTools(t *testing.T) {
+	ctx := toolpkg.WithSubagentType(context.Background(), "repo-scout")
+	ctx = toolpkg.WithSubagentToolPolicy(ctx, toolpkg.SubagentToolPolicy{
+		Mode:    appcfg.SubagentToolsPick,
+		Allowed: map[string]struct{}{"read_file": {}, "code_search": {}},
+	})
+	tools := []*llm.Tool{
+		testTool(t, "read_file"), testTool(t, "code_search"), testTool(t, "write_file"), testTool(t, "subagent_run"),
+	}
+	var names []string
+	for _, candidate := range filterToolsForSubagentSubtype(ctx, "repo-scout", tools) {
+		names = append(names, candidate.Name())
+	}
+	if got := strings.Join(names, ","); got != "read_file,code_search" {
+		t.Fatalf("visible tools = %q, want the chosen two", got)
+	}
+}
+
+// A custom run that lost its policy is offered no tool at all.
+func TestCustomSubagentWithoutPolicySeesNoTools(t *testing.T) {
+	ctx := toolpkg.WithSubagentType(context.Background(), "repo-scout")
+	ctx = toolpkg.WithSubagentDefinitionSource(ctx, toolpkg.SubagentDefinitionSourceCustom)
+	tools := []*llm.Tool{testTool(t, "read_file"), testTool(t, "write_file"), testTool(t, "subagent_run")}
+	if got := filterToolsForSubagentSubtype(ctx, "repo-scout", tools); len(got) != 0 {
+		t.Fatalf("a custom subagent with no policy was offered %d tools", len(got))
 	}
 }

@@ -5396,3 +5396,409 @@ func TestForkContinuationSpeaksUnderItsOwnRun(t *testing.T) {
 		}
 	}
 }
+
+// subagentSwitchTestConfig is one primary agent with an explicit subagent
+// switch of its own, under a global switch it may or may not share.
+func subagentSwitchTestConfig(global, own *bool) *appcfg.Root {
+	return &appcfg.Root{Agents: appcfg.AgentsSection{
+		Defaults: appcfg.AgentDefaults{EnableSubagent: global},
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {Primary: true, EnableSubagent: own},
+		},
+	}}
+}
+
+// Subagent capability has two switches — agents.defaults.enable_subagent and
+// the primary agent's own enable_subagent — and the agent's own wins in both
+// directions. The tool surface is the first thing either governs.
+func TestRegisterSubagentToolHonoursThePrimaryAgentSwitch(t *testing.T) {
+	register := func(t *testing.T, cfg *appcfg.Root) bool {
+		t.Helper()
+		a, err := agent.New(noopLLM{}, "main", "main")
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		fac := Factory{
+			AgentName: "main",
+			Home:      t.TempDir(),
+			Tools:     toolpkg.NewState(t.TempDir()),
+			AppCfg:    cfg,
+			Owner:     &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+		}
+		if err := RegisterSubagentTool(a, fac); err != nil {
+			t.Fatalf("RegisterSubagentTool: %v", err)
+		}
+		_, ok := aToolByName(a, "subagent_run")
+		return ok
+	}
+
+	if register(t, subagentSwitchTestConfig(boolPtr(true), boolPtr(false))) {
+		t.Fatal("an agent that switched subagents off was still handed subagent_run")
+	}
+	if !register(t, subagentSwitchTestConfig(boolPtr(false), boolPtr(true))) {
+		t.Fatal("an agent that switched subagents on was not handed subagent_run")
+	}
+	if !register(t, subagentSwitchTestConfig(boolPtr(true), nil)) {
+		t.Fatal("an agent that never touched the switch did not follow the global one")
+	}
+}
+
+// subagentCustomConfig is one primary agent with a custom read-only subagent
+// and a second one it disabled, which is what the enum it is prompted with has
+// to reflect.
+func subagentCustomConfig() *appcfg.Root {
+	return &appcfg.Root{Agents: appcfg.AgentsSection{
+		Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)},
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {
+				Primary: true,
+				Subagents: []appcfg.SubagentConfig{
+					{Name: "verification", Enabled: boolPtr(false)},
+					{
+						Name:            "repo-scout",
+						Description:     "Finds the files a task touches",
+						SystemPrompt:    "You are repo-scout.",
+						Model:           "deepseek/deepseek-v4-flash",
+						ReasoningEffort: "low",
+						Tools:           appcfg.SubagentToolsReadOnly,
+					},
+				},
+			},
+		},
+	}}
+}
+
+// The subagent_type field the model reads is this agent's catalog: its own
+// custom subagents are offered with the description that tells the model when
+// to pick them, and a built-in it disabled is not offered at all.
+func TestSubagentTypeEnumListsCustomAndHidesDisabled(t *testing.T) {
+	cfg := subagentCustomConfig()
+	a, err := agent.New(noopLLM{}, "main", "main")
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	fac := Factory{
+		AgentName: "main",
+		Home:      t.TempDir(),
+		Tools:     toolpkg.NewState(t.TempDir()),
+		AppCfg:    cfg,
+		Owner:     &Runner{Deps: &Deps{AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "ok"}},
+	}
+	if err := RegisterSubagentTool(a, fac); err != nil {
+		t.Fatalf("RegisterSubagentTool: %v", err)
+	}
+	registered, ok := aToolByName(a, "subagent_run")
+	if !ok {
+		t.Fatal("subagent_run was not registered while the family is enabled")
+	}
+	props, _ := registered.InputSchema()["properties"].(map[string]any)
+	field, _ := props["subagent_type"].(map[string]any)
+	if field == nil {
+		t.Fatalf("subagent_type schema missing: %#v", registered.InputSchema())
+	}
+	var names []string
+	if list, ok := field["enum"].([]any); ok {
+		for _, name := range list {
+			names = append(names, fmt.Sprint(name))
+		}
+	}
+	enum := strings.Join(names, ",")
+	if !strings.Contains(enum, "repo-scout") {
+		t.Fatalf("enum %q does not offer the agent's own subagent", enum)
+	}
+	if strings.Contains(enum, "verification") {
+		t.Fatalf("enum %q offers a subagent this agent disabled", enum)
+	}
+	description := fmt.Sprint(field["description"])
+	if !strings.Contains(description, "Finds the files a task touches") {
+		t.Fatalf("description %q does not describe the custom subagent", description)
+	}
+}
+
+// The model and reasoning effort the primary agent configures for a subagent
+// are what the execution runs on: recorded with the entry, pinned on the run's
+// context the routing wrapper reads, and announced when it starts.
+func TestCustomSubagentModelAndEffortReachTheEntry(t *testing.T) {
+	cfg := subagentCustomConfig()
+	probe := &dispatchProbe{}
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
+
+	var pinned SubagentModelOverride
+	var pinnedSet bool
+	prep, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+		taskID:  "task-custom-model",
+		task:    "scout the repo",
+		subtype: "repo-scout",
+		resolve: SubagentCatalogFor(cfg, "main").ResolvePublic,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			pinned, pinnedSet = SubagentModelOverrideFromContext(prep.ctx)
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if prep.entry.ModelProvider != "deepseek" || prep.entry.Model != "deepseek-v4-flash" {
+		t.Fatalf("entry model = %q/%q, want the configured one", prep.entry.ModelProvider, prep.entry.Model)
+	}
+	if prep.entry.ReasoningEffort != "low" {
+		t.Fatalf("entry effort = %q, want the configured one", prep.entry.ReasoningEffort)
+	}
+	if !pinnedSet || pinned.Model != "deepseek-v4-flash" || pinned.Effort != "low" {
+		t.Fatalf("the run's context pinned %#v (set=%v), want the configured model and effort", pinned, pinnedSet)
+	}
+	if len(probe.spawned) != 1 {
+		t.Fatalf("spawn notifications = %#v", probe.spawned)
+	}
+	if got := probe.spawned[0]; got.Model != "deepseek-v4-flash" || got.Effort != "low" {
+		t.Fatalf("spawn announced %q/%q effort %q, want the configured model and effort", got.Provider, got.Model, got.Effort)
+	}
+}
+
+// A model chosen at dispatch time is the user's decision and outranks what the
+// primary agent configured for the type.
+func TestDispatchOverrideOutranksAgentSubagentModel(t *testing.T) {
+	cfg := subagentCustomConfig()
+	probe := &dispatchProbe{}
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
+
+	ctx := WithSubagentModelOverride(dispatchTestCtx(), SubagentModelOverride{
+		Provider: "openai", Model: "gpt-4o", Effort: "high",
+	})
+	prep, _, err := dispatchSubagent(ctx, fac, subagentDispatch{
+		taskID:  "task-override",
+		task:    "scout the repo",
+		subtype: "repo-scout",
+		resolve: SubagentCatalogFor(cfg, "main").ResolvePublic,
+		run: func(context.Context, Factory, preparedSubagent) (string, error) {
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if prep.entry.ModelProvider != "openai" || prep.entry.Model != "gpt-4o" || prep.entry.ReasoningEffort != "high" {
+		t.Fatalf("entry = %q/%q effort %q, want the dispatch-time choice", prep.entry.ModelProvider, prep.entry.Model, prep.entry.ReasoningEffort)
+	}
+	if len(probe.spawned) != 1 || probe.spawned[0].Model != "gpt-4o" {
+		t.Fatalf("spawn notifications = %#v", probe.spawned)
+	}
+}
+
+// A custom subagent is configuration, so its record can outlive its type: the
+// agent deleted it since. Continuing that record says so rather than running the
+// follow-up under some other definition.
+func TestContinueAfterCustomSubagentDeletedSaysSo(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)}}}
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{
+		AgentName:     "main",
+		Home:          home,
+		WorkspaceRoot: filepath.Join(home, "workspaces", "acme"),
+		AppCfg:        cfg,
+		Owner:         owner,
+	}
+	root := fac.subagentScopeRoot()
+	if root == "" {
+		t.Fatal("the test factory has no ledger root")
+	}
+	if err := agent.AppendHistory(root, agent.HistoryEntry{
+		TaskID:      "custom-gone",
+		SessionID:   "session-1",
+		AgentKind:   "typed",
+		AgentType:   "repo-scout",
+		DefSource:   SubagentSourceCustom,
+		Continuable: true,
+		Task:        "scout the repo",
+		Status:      agent.StatusOK,
+		Output:      "scouted",
+		UpdatedAt:   1,
+	}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	_, err := continueSubagentExecution(dispatchTestCtx(), fac, &SubagentContinueInput{
+		TaskID: "custom-gone", Message: "keep going",
+	})
+	if err == nil {
+		t.Fatal("a continuation of a deleted custom subagent ran")
+	}
+	if !strings.Contains(err.Error(), `subagent type "repo-scout" no longer exists for this agent`) {
+		t.Fatalf("refusal = %v", err)
+	}
+}
+
+// Disabling a custom subagent is not deleting it: the type is still in this
+// agent's configuration, so a continuation of its record has to say it is
+// disabled rather than tell the model the type no longer exists.
+func TestContinueAfterCustomSubagentDisabledSaysDisabled(t *testing.T) {
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{
+		Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)},
+		Definitions: map[string]appcfg.AgentDefinition{
+			"main": {
+				Primary: true,
+				Subagents: []appcfg.SubagentConfig{
+					{Name: "repo-scout", Description: "Finds the files a task touches", Enabled: boolPtr(false)},
+				},
+			},
+		},
+	}}
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{
+		AgentName:     "main",
+		Home:          home,
+		WorkspaceRoot: filepath.Join(home, "workspaces", "acme"),
+		AppCfg:        cfg,
+		Owner:         owner,
+	}
+	root := fac.subagentScopeRoot()
+	if root == "" {
+		t.Fatal("the test factory has no ledger root")
+	}
+	if err := agent.AppendHistory(root, agent.HistoryEntry{
+		TaskID:      "custom-off",
+		SessionID:   "session-1",
+		AgentKind:   "typed",
+		AgentType:   "repo-scout",
+		DefSource:   SubagentSourceCustom,
+		Continuable: true,
+		Task:        "scout the repo",
+		Status:      agent.StatusOK,
+		Output:      "scouted",
+		UpdatedAt:   1,
+	}); err != nil {
+		t.Fatalf("AppendHistory: %v", err)
+	}
+
+	_, err := continueSubagentExecution(dispatchTestCtx(), fac, &SubagentContinueInput{
+		TaskID: "custom-off", Message: "keep going",
+	})
+	if err == nil {
+		t.Fatal("a continuation of a disabled custom subagent ran")
+	}
+	if !strings.Contains(err.Error(), `subagent_type "repo-scout" is disabled for this agent`) {
+		t.Fatalf("refusal = %v", err)
+	}
+	if strings.Contains(err.Error(), "no longer exists") {
+		t.Fatalf("refusal = %v claims the disabled type was deleted", err)
+	}
+}
+
+// customSubagentSend is a finished custom-subagent record ("repo-scout", typed,
+// DefSource custom) in a conversation, owned by a runner whose primary agent
+// "main" is configured with subagents. A nil subagents slice leaves the agent
+// with no definition at all, which is the "deleted since" state.
+type customSubagentSend struct {
+	owner *Runner
+	ex    *channelTestExecutor
+	fac   Factory
+	conv  string
+}
+
+func newCustomSubagentSend(t *testing.T, subagents []appcfg.SubagentConfig) customSubagentSend {
+	t.Helper()
+	fix := newPersistenceFixture(t, "worker system", "model answer")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	owner.AgentName = "main"
+	cfg := &appcfg.Root{Agents: appcfg.AgentsSection{Defaults: appcfg.AgentDefaults{EnableSubagent: boolPtr(true)}}}
+	if subagents != nil {
+		cfg.Agents.Definitions = map[string]appcfg.AgentDefinition{"main": {Primary: true, Subagents: subagents}}
+	}
+	owner.AppCfg = cfg
+	conv := "conv-custom-send"
+	worker := "main:conv-custom-send:worker:00000000-0000-0000-0000-0000000000aa"
+	fix.seedWorker(t, conv, worker, []llm.Message{llm.UserMessage(llm.Text("seed"))})
+	seedChannelRecord(t, fix.fac, agent.HistoryEntry{
+		TaskID: "task-x", RunID: "seed-run", ParentRunID: "parent-1", SessionID: conv, WorkerSessionID: worker,
+		Task: "scout", Status: agent.StatusOK, AgentType: "repo-scout", AgentKind: "typed", DefSource: SubagentSourceCustom,
+		RuntimeKind: "typed_subagent", Continuable: true, StartedAt: 10, UpdatedAt: 20, FinishedAt: 20,
+	})
+	ex := &channelTestExecutor{store: fix.store, answer: "ok", started: make(chan struct{}, 1)}
+	owner.SubagentExecutor = ex
+	return customSubagentSend{owner: owner, ex: ex, fac: fix.fac, conv: conv}
+}
+
+// startedContext sends one user message and returns the context the execution
+// ran under.
+func (s customSubagentSend) startedContext(t *testing.T) context.Context {
+	t.Helper()
+	delivery, err := SendToSubagent(context.Background(), s.owner, SubagentSurface{}, s.conv, "task-x", Input{Text: "hello"}, TurnInputModeSteer)
+	if err != nil || delivery != SubagentDeliveryStarted {
+		t.Fatalf("SendToSubagent = %q, %v; want started", delivery, err)
+	}
+	select {
+	case <-s.ex.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the execution never started")
+	}
+	waitSubagentIdle(t, s.owner, s.conv, "task-x")
+	return s.ex.contextSeen()
+}
+
+// A message addressed to a custom subagent its agent no longer defines is
+// refused before anything runs: the type's tool policy was configuration, and
+// there is no longer any to hold the run to.
+func TestUserMessageToDeletedCustomSubagentIsRefused(t *testing.T) {
+	s := newCustomSubagentSend(t, nil)
+	delivery, err := SendToSubagent(context.Background(), s.owner, SubagentSurface{}, s.conv, "task-x", Input{Text: "hello"}, TurnInputModeSteer)
+	if err == nil {
+		t.Fatalf("SendToSubagent = %q, nil; want a refusal", delivery)
+	}
+	if !strings.Contains(err.Error(), `subagent type "repo-scout" no longer exists for this agent`) {
+		t.Fatalf("refusal = %v", err)
+	}
+	if delivery != "" {
+		t.Fatalf("delivery = %q, want none", delivery)
+	}
+	select {
+	case <-s.ex.started:
+		t.Fatal("a refused message started an execution")
+	default:
+	}
+	record, ok, gerr := agent.GetMerged(s.fac.subagentScopeRoot(), agent.Query{SessionID: s.conv, TaskID: "task-x"})
+	if gerr != nil || !ok || record.Status != agent.StatusOK {
+		t.Fatalf("the record changed: %+v ok=%v err=%v", record, ok, gerr)
+	}
+}
+
+// A configured custom subagent keeps running under its own policy when the user
+// writes to it — the regression this pins is the policy riding the user-driven
+// path's context.
+func TestUserMessageToConfiguredCustomSubagentRunsUnderItsPolicy(t *testing.T) {
+	s := newCustomSubagentSend(t, []appcfg.SubagentConfig{
+		{Name: "repo-scout", Description: "d", SystemPrompt: "p", Tools: appcfg.SubagentToolsReadOnly},
+	})
+	ctx := s.startedContext(t)
+	if _, ok := toolpkg.SubagentToolPolicyFromContext(ctx); !ok {
+		t.Fatal("the user-driven execution carries no tool policy")
+	}
+	st := toolpkg.NewState(t.TempDir())
+	for _, name := range []string{"write_file", "edit_file", "subagent_run"} {
+		if err := st.GuardTool(ctx, name); err == nil {
+			t.Errorf("a read-only custom subagent may call %s", name)
+		}
+	}
+	if err := st.GuardTool(ctx, "read_file"); err != nil {
+		t.Fatalf("read_file refused: %v", err)
+	}
+}
+
+// Disabling is not deleting: the user may still talk to a subagent they
+// switched off (only the model is kept from dispatching it), and it still runs
+// under its policy.
+func TestUserMessageToDisabledCustomSubagentStillRuns(t *testing.T) {
+	s := newCustomSubagentSend(t, []appcfg.SubagentConfig{
+		{Name: "repo-scout", Description: "d", SystemPrompt: "p", Tools: appcfg.SubagentToolsReadOnly, Enabled: boolPtr(false)},
+	})
+	ctx := s.startedContext(t)
+	if _, ok := toolpkg.SubagentToolPolicyFromContext(ctx); !ok {
+		t.Fatal("a disabled custom subagent lost its policy")
+	}
+}

@@ -123,8 +123,8 @@ type SubagentTask struct {
 	SubagentType string `json:"subagent_type,omitempty" jsonschema:"description=Optional subtype for this task."`
 }
 
-func subagentTypeEnumValues() []any {
-	names := agent.PublicTypeNames()
+func subagentTypeEnumValues(cat SubagentCatalog) []any {
+	names := cat.publicNames()
 	out := make([]any, 0, len(names))
 	for _, name := range names {
 		out = append(out, name)
@@ -132,13 +132,13 @@ func subagentTypeEnumValues() []any {
 	return out
 }
 
-func patchSubagentTypeEnum(schema map[string]any, fieldPath []string) error {
+func patchSubagentTypeEnum(cat SubagentCatalog, schema map[string]any, fieldPath []string) error {
 	prop, err := schemaObjectAt(schema, fieldPath...)
 	if err != nil {
 		return err
 	}
-	prop["enum"] = subagentTypeEnumValues()
-	prop["description"] = "Optional public typed subagent. general-purpose: bounded independent implementation or general delegated work. explore: read-only investigation and locating facts. plan: read-only implementation design, sequencing, risks, and verification planning. verification: falsify or verify an implementation with concrete checks. Omit subagent_type to fork the current agent. Fork inherits the parent conversation context, runs in the background, and keeps intermediate tool output out of the main context."
+	prop["enum"] = subagentTypeEnumValues(cat)
+	prop["description"] = cat.EnumDescription()
 	removeRequiredAtPath(schema, ownerPathForFieldPath(fieldPath), "subagent_type")
 	return nil
 }
@@ -227,13 +227,13 @@ func removeRequiredAtPath(schema map[string]any, ownerPath []string, field strin
 	owner["required"] = next
 }
 
-func subagentSchemaRaw(t reflect.Type, fieldPath []string) json.RawMessage {
+func subagentSchemaRaw(cat SubagentCatalog, t reflect.Type, fieldPath []string) json.RawMessage {
 	raw := tool.SchemaForInputType(t)
 	var schema map[string]any
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		return raw
 	}
-	if err := patchSubagentTypeEnum(schema, fieldPath); err != nil {
+	if err := patchSubagentTypeEnum(cat, schema, fieldPath); err != nil {
 		return raw
 	}
 	out, err := json.Marshal(schema)
@@ -243,7 +243,7 @@ func subagentSchemaRaw(t reflect.Type, fieldPath []string) json.RawMessage {
 	return out
 }
 
-func applySubagentTypeEnumToTool(t *llm.Tool, fieldPath []string) error {
+func applySubagentTypeEnumToTool(t *llm.Tool, cat SubagentCatalog, fieldPath []string) error {
 	if t == nil {
 		return nil
 	}
@@ -255,7 +255,7 @@ func applySubagentTypeEnumToTool(t *llm.Tool, fieldPath []string) error {
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		return err
 	}
-	if err := patchSubagentTypeEnum(schema, fieldPath); err != nil {
+	if err := patchSubagentTypeEnum(cat, schema, fieldPath); err != nil {
 		return err
 	}
 	if err := t.SetInputSchema(schema); err != nil {
@@ -265,9 +265,9 @@ func applySubagentTypeEnumToTool(t *llm.Tool, fieldPath []string) error {
 	return nil
 }
 
-func lifecycleToolInputSchema(name string, t reflect.Type) json.RawMessage {
+func lifecycleToolInputSchema(cat SubagentCatalog, name string, t reflect.Type) json.RawMessage {
 	if name == "subagent_send" {
-		return subagentSchemaRaw(t, []string{"properties", "subagent_type"})
+		return subagentSchemaRaw(cat, t, []string{"properties", "subagent_type"})
 	}
 	return tool.SchemaForInputType(t)
 }
@@ -328,12 +328,16 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 	if a == nil {
 		return nil
 	}
-	// agents.defaults.enable_subagent is the switch for subagent capability,
-	// and the tool surface is the first thing it governs: with subagents off
-	// the subagent_* family is never registered, so the model is never offered
-	// a tool whose only outcome would be a refusal, and the tool table it is
-	// prompted with matches what the session can actually do.
-	if !appcfg.SubagentsEnabled(fac.appConfig()) {
+	// Subagent capability is the primary agent's own switch when it has one,
+	// and agents.defaults.enable_subagent otherwise. The tool surface is the
+	// first thing it governs: with subagents off the subagent_* family is never
+	// registered, so the model is never offered a tool whose only outcome would
+	// be a refusal, and the tool table it is prompted with matches what the
+	// session can actually do. A catalog with nothing dispatchable left — every
+	// type this agent may dispatch is disabled — is the same case: there is no
+	// type to offer, so the family is not offered either.
+	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName)
+	if !appcfg.SubagentsEnabledFor(fac.appConfig(), fac.AgentName) || len(cat.Public()) == 0 {
 		return nil
 	}
 	t, err := llm.NewTool(
@@ -383,7 +387,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			oneShot := false
 			continuable := true
 			if subType != "" {
-				def, derr := agent.ResolvePublicSubtype(subType)
+				def, derr := cat.ResolvePublic(subType)
 				if derr != nil {
 					return "", derr
 				}
@@ -418,7 +422,7 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 	if err != nil {
 		return err
 	}
-	if err := applySubagentTypeEnumToTool(t, []string{"properties", "subagent_type"}); err != nil {
+	if err := applySubagentTypeEnumToTool(t, cat, []string{"properties", "subagent_type"}); err != nil {
 		return err
 	}
 	if err := fac.Tools.Register(a, t); err != nil {
@@ -433,10 +437,10 @@ func RegisterSubagentTool(a *agent.Agent, fac Factory) error {
 			// Each call runs its own isolated agent, so several calls of one
 			// answer start together — the model's parallel dispatch.
 			ConcurrencySafe: true,
-			InputSchema:     subagentSchemaRaw(reflect.TypeOf(SubagentInput{}), []string{"properties", "subagent_type"}),
+			InputSchema:     subagentSchemaRaw(cat, reflect.TypeOf(SubagentInput{}), []string{"properties", "subagent_type"}),
 		})
 	}
-	return registerFanoutTool(a, fac)
+	return registerFanoutTool(a, fac, cat)
 }
 
 func subagentToolName(name string) bool {
@@ -1316,6 +1320,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	if rawSubtype != "" && own.SubagentExecutor == nil {
 		return preparedSubagent{}, fmt.Errorf("subagent requires an in-process executor")
 	}
+	cat := SubagentCatalogFor(fac.appConfig(), fac.AgentName)
 	parent := strings.TrimSpace(tool.RunIDFromContext(baseCtx))
 	sid := strings.TrimSpace(llm.AgentSessionIDFromContext(baseCtx))
 	if sid == "" {
@@ -1385,7 +1390,13 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		oneShot = def.OneShot
 		continuable = def.Continuable
 		defSource = def.Source
-
+		// A custom subagent's tool policy belongs to the run, not to a table
+		// keyed by type name, so it travels on the execution's context: every
+		// context derived from it — the exec context, the model calls, an
+		// approval resume — answers GuardTool and the tool filter the same way.
+		if policy, hasPolicy := cat.ToolPolicy(agentType); hasPolicy {
+			cctx = tool.WithSubagentToolPolicy(cctx, policy)
+		}
 	}
 	// Register the child's run against its worker session — the session whose
 	// queue is this subagent's input channel — so the controller and the
@@ -1410,7 +1421,7 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 	// bridge reads ~/.forebrain/workspace/state/modes, and the child silently runs
 	// in agent mode.
 	if tool.ModeFromContext(baseCtx) == string(state.ModePlan) &&
-		!tool.TypedSubagentBlocksFileWrites(rawSubtype) {
+		!subagentDispatchBlocksFileWrites(cat, rawSubtype) {
 		_ = state.Set(fac.workspaceRoot(), workerSessionID, state.State{
 			Mode:          state.ModePlan,
 			Phase:         "plan",
@@ -1442,13 +1453,23 @@ func prepareSubagentExecutionResolved(baseCtx context.Context, fac Factory, d su
 		Continuable:      continuable,
 		DefSource:        defSource,
 	}
-	// The model a dispatch-time override pinned this run to is a property of
-	// the execution: recorded with the entry, so its spawned event and every
-	// surface reading that event name the model the run actually uses instead
-	// of deriving one from the agent's type.
+	// The model this run is pinned to is a property of the execution: recorded
+	// with the entry, so its spawned event and every surface reading that event
+	// name the model the run actually uses instead of deriving one from the
+	// agent's type. A dispatch-time choice (plan review) comes first — the user
+	// picked it — then the model this primary agent configures for the type,
+	// then the type's global chain and the conversation, which the routing
+	// wrappers below resolve. A configured model also has to be pinned on the
+	// execution's context: that is what the routing wrapper reads.
 	if override, ok := SubagentModelOverrideFromContext(baseCtx); ok {
 		entry.ModelProvider = override.Provider
 		entry.Model = override.Model
+		entry.ReasoningEffort = override.Effort
+	} else if provider, model, effort, ok := cat.Model(agentType); ok {
+		entry.ModelProvider = provider
+		entry.Model = model
+		entry.ReasoningEffort = effort
+		cctx = WithSubagentModelOverride(cctx, SubagentModelOverride{Provider: provider, Model: model, Effort: effort})
 	}
 	// The worker session is born before anything can reference it. Its row is
 	// what turns "a string in the ledger" into a session: every message row
@@ -1582,7 +1603,7 @@ func execGeneralSubagent(ctx context.Context, fac Factory, taskID, title, task, 
 		title:      title,
 		task:       task,
 		subtype:    subagentType,
-		resolve:    agent.ResolvePublicSubtype,
+		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ResolvePublic,
 		governTool: "subagent_run",
 		run: func(runCtx context.Context, fac Factory, prep preparedSubagent) (string, error) {
 			// A gate this child hits is answered in place, while its run and its
@@ -1635,7 +1656,7 @@ func spawnAsyncSubagent(ctx context.Context, fac Factory, taskID, title, task, s
 		title:      title,
 		task:       task,
 		subtype:    subagentType,
-		resolve:    agent.ResolvePublicSubtype,
+		resolve:    SubagentCatalogFor(fac.appConfig(), fac.AgentName).ResolvePublic,
 		governTool: "subagent_run",
 	}
 	prep, handle, err := startSubagent(ctx, fac, d)
@@ -1796,7 +1817,17 @@ func subagentRecordContext(ctx context.Context, fac Factory, record agent.Histor
 	// continuation runs on the same model the user picked for it, not on the
 	// conversation's default.
 	if strings.TrimSpace(record.Model) != "" {
-		hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{Provider: record.ModelProvider, Model: record.Model})
+		hostCtx = WithSubagentModelOverride(hostCtx, SubagentModelOverride{
+			Provider: record.ModelProvider, Model: record.Model, Effort: record.ReasoningEffort,
+		})
+	}
+	if strings.TrimSpace(record.AgentKind) == "typed" {
+		// The policy a custom subagent ran under on its first execution, for the
+		// same reason: it is configuration, and the record's execution has to
+		// answer to it again.
+		if policy, ok := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ToolPolicy(record.AgentType); ok {
+			hostCtx = tool.WithSubagentToolPolicy(hostCtx, policy)
+		}
 	}
 	hostCtx = tool.WithHookAgentID(hostCtx, subagentRosterKey(record))
 	// The permission layer scopes to the conversation, the model context to
@@ -1940,6 +1971,9 @@ const (
 func SendToSubagent(ctx context.Context, r *Runner, surface SubagentSurface, conversationSessionID, agentKey string, in Input, mode TurnInputMode) (SubagentDelivery, error) {
 	ch, record, err := subagentChannelForConversation(r, conversationSessionID, agentKey)
 	if err != nil {
+		return "", err
+	}
+	if err := refuseGoneCustomSubagent(r.subagentFactory(), record); err != nil {
 		return "", err
 	}
 	ch.setSurface(surface)
@@ -2263,6 +2297,23 @@ func publishSubagentContextBudget(fac Factory, record agent.HistoryEntry) {
 	publishEvent(context.Background(), own.Events, record.RunID, record.SessionID, event.CompactEventBudgetUpdated, payload)
 }
 
+// refuseGoneCustomSubagent answers a message addressed to a custom subagent
+// whose definition this primary agent no longer has. A custom subagent is the
+// agent's configuration, so its record can outlive its type; with the entry
+// gone nothing can rebuild the tool policy the run was held to, and a run
+// without one must not start. A type that is merely disabled still has a
+// definition and is not refused here — switching it off keeps the model from
+// dispatching it, not the user from talking to it.
+func refuseGoneCustomSubagent(fac Factory, record agent.HistoryEntry) error {
+	if strings.TrimSpace(record.DefSource) != SubagentSourceCustom {
+		return nil
+	}
+	if SubagentCatalogFor(fac.appConfig(), fac.AgentName).configures(record.AgentType) {
+		return nil
+	}
+	return fmt.Errorf("subagent type %q no longer exists for this agent", strings.TrimSpace(record.AgentType))
+}
+
 func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentContinueInput) (agent.HistoryEntry, error) {
 	msg := ""
 	if in != nil {
@@ -2285,6 +2336,14 @@ func continueSubagentExecution(ctx context.Context, fac Factory, in *SubagentCon
 	}
 	if record.OneShot && !record.Continuable {
 		return agent.HistoryEntry{}, fmt.Errorf("subagent_type %q is one-shot and cannot continue", strings.TrimSpace(record.AgentType))
+	}
+	if strings.TrimSpace(record.DefSource) == SubagentSourceCustom {
+		if err := refuseGoneCustomSubagent(fac, record); err != nil {
+			return agent.HistoryEntry{}, err
+		}
+		if _, rerr := SubagentCatalogFor(fac.appConfig(), fac.AgentName).ResolvePublic(record.AgentType); rerr != nil {
+			return agent.HistoryEntry{}, rerr // disabled: the catalog's own reason
+		}
 	}
 	// The subagent's conversation lives in its worker session now. When the
 	// session holds history — every subagent this runtime births — the
@@ -2521,7 +2580,7 @@ func mergeContinuationOutput(previous, next string) string {
 	}
 }
 
-func registerFanoutTool(a *agent.Agent, fac Factory) error {
+func registerFanoutTool(a *agent.Agent, fac Factory, cat SubagentCatalog) error {
 	t, err := llm.NewTool(
 		"subagent_fanout",
 		"Run multiple subtasks concurrently in isolated agents and aggregate results. Returns a JSON array of results.",
@@ -2646,7 +2705,7 @@ func registerFanoutTool(a *agent.Agent, fac Factory) error {
 	if err != nil {
 		return err
 	}
-	if err := applySubagentTypeEnumToTool(t, []string{"properties", "tasks", "items", "properties", "subagent_type"}); err != nil {
+	if err := applySubagentTypeEnumToTool(t, cat, []string{"properties", "tasks", "items", "properties", "subagent_type"}); err != nil {
 		return err
 	}
 	if err := fac.Tools.Register(a, t); err != nil {
@@ -2659,18 +2718,18 @@ func registerFanoutTool(a *agent.Agent, fac Factory) error {
 			Category:        "subagent",
 			ReadOnly:        true,
 			ConcurrencySafe: true,
-			InputSchema:     subagentSchemaRaw(reflect.TypeOf(FanoutInput{}), []string{"properties", "tasks", "items", "properties", "subagent_type"}),
+			InputSchema:     subagentSchemaRaw(cat, reflect.TypeOf(FanoutInput{}), []string{"properties", "tasks", "items", "properties", "subagent_type"}),
 		})
 	}
-	return registerSubagentLifecycleTools(a, fac)
+	return registerSubagentLifecycleTools(a, fac, cat)
 }
 
 func maxParallelSubagentsFromFactory(fac Factory) int {
 	return maxParallelSubagentsFromAppConfig(fac.appConfig())
 }
 
-func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
-	if err := addSubagentLifecycleTool(a, fac, "subagent_send",
+func registerSubagentLifecycleTools(a *agent.Agent, fac Factory, cat SubagentCatalog) error {
+	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_send",
 		"Use when starting a subagent fire-and-forget so you can keep working: launches an asynchronous isolated subagent and returns immediately with task and run identifiers for later wait/status/close.",
 		func(ctx context.Context, in *SubagentSendInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_send"); err != nil {
@@ -2737,7 +2796,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
 	); err != nil {
 		return err
 	}
-	if err := addSubagentLifecycleTool(a, fac, "subagent_list",
+	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_list",
 		"List recent subagents scoped to the current session and parent run when available.",
 		func(ctx context.Context, in *SubagentListInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_list"); err != nil {
@@ -2764,7 +2823,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
 	); err != nil {
 		return err
 	}
-	if err := addSubagentLifecycleTool(a, fac, "subagent_status",
+	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_status",
 		"Use when polling a sent subagent without blocking: gets its latest status by task_id or run_id. If both are empty, returns the latest scoped subagent.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_status"); err != nil {
@@ -2786,7 +2845,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
 	); err != nil {
 		return err
 	}
-	if err := addSubagentLifecycleTool(a, fac, "subagent_wait",
+	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_wait",
 		"Use when blocking until a previously-sent subagent finishes: waits by task_id or run_id. Returns the latest status even when the wait times out.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_wait"); err != nil {
@@ -2826,7 +2885,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
 	); err != nil {
 		return err
 	}
-	if err := addSubagentLifecycleTool(a, fac, "subagent_continue",
+	if err := addSubagentLifecycleTool(a, fac, cat, "subagent_continue",
 		"Use when giving an existing async subagent follow-up instructions: continues it by task_id or run_id with a self-contained brief.",
 		func(ctx context.Context, in *SubagentContinueInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_continue"); err != nil {
@@ -2845,7 +2904,7 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
 	); err != nil {
 		return err
 	}
-	return addSubagentLifecycleTool(a, fac, "subagent_close",
+	return addSubagentLifecycleTool(a, fac, cat, "subagent_close",
 		"Use when cancelling a running async subagent you no longer need: closes it by task_id or run_id (one is required — unlike status/wait there is no latest-scoped fallback). Returns not-found if the subagent has already finished.",
 		func(ctx context.Context, in *SubagentLookupInput) (string, error) {
 			if err := guardSubagentTool(ctx, fac, "subagent_close"); err != nil {
@@ -2872,13 +2931,13 @@ func registerSubagentLifecycleTools(a *agent.Agent, fac Factory) error {
 	)
 }
 
-func addSubagentLifecycleTool[T any](a *agent.Agent, fac Factory, name, desc string, fn func(context.Context, *T) (string, error)) error {
+func addSubagentLifecycleTool[T any](a *agent.Agent, fac Factory, cat SubagentCatalog, name, desc string, fn func(context.Context, *T) (string, error)) error {
 	t, err := llm.NewTool(name, desc, fn)
 	if err != nil {
 		return err
 	}
 	if name == "subagent_send" {
-		if err := applySubagentTypeEnumToTool(t, []string{"properties", "subagent_type"}); err != nil {
+		if err := applySubagentTypeEnumToTool(t, cat, []string{"properties", "subagent_type"}); err != nil {
 			return err
 		}
 	}
@@ -2892,7 +2951,7 @@ func addSubagentLifecycleTool[T any](a *agent.Agent, fac Factory, name, desc str
 			Description: desc,
 			Category:    "subagent",
 			ReadOnly:    true,
-			InputSchema: lifecycleToolInputSchema(name, reflect.TypeOf(zero)),
+			InputSchema: lifecycleToolInputSchema(cat, name, reflect.TypeOf(zero)),
 		})
 	}
 	return nil
@@ -3097,6 +3156,17 @@ func dispatchSubagent(
 	return prep, final.Output, nil
 }
 
+// subagentDispatchBlocksFileWrites answers, for a dispatch, whether the type it
+// names can already not write files: a custom subagent's read-only policy, or a
+// built-in whose static policy forbids both writing tools. Plan-mode
+// inheritance keys off it, and a dispatch has no run context yet to ask.
+func subagentDispatchBlocksFileWrites(cat SubagentCatalog, subagentType string) bool {
+	if policy, ok := cat.ToolPolicy(subagentType); ok {
+		return strings.EqualFold(strings.TrimSpace(policy.Mode), appcfg.SubagentToolsReadOnly)
+	}
+	return tool.TypedSubagentBlocksFileWrites(subagentType)
+}
+
 // typedSubagentExecContext tags a prepared subagent's context the way every
 // typed run needs it: the subtype and its definition source drive the system
 // prompt and tool policy, and the roster key routes the run's frames into that
@@ -3107,14 +3177,15 @@ func typedSubagentExecContext(prep preparedSubagent) context.Context {
 	return tool.WithHookAgentID(hostCtx, subagentRosterKey(prep.entry))
 }
 
-// SubagentModelOverride names the model one subagent run must use, chosen at
-// dispatch time rather than from configuration. Plan review is the caller that
-// needs it: the user picks the reviewing model in the approval overlay, so the
-// choice cannot come from agents.definitions[<type>].llm_providers the way a
-// typed subagent's dedicated provider does.
+// SubagentModelOverride names the model one subagent run must use: chosen at
+// dispatch time (plan review lets the user pick the reviewing model in the
+// approval overlay) or configured for the type by the primary agent that owns
+// it. Effort is the reasoning effort that model runs at, empty when the model's
+// own configuration decides.
 type SubagentModelOverride struct {
 	Provider string
 	Model    string
+	Effort   string
 }
 
 func (o SubagentModelOverride) valid() bool {
@@ -3215,15 +3286,35 @@ func subagentModelDisplay(override SubagentModelOverride) string {
 // agent: a model the session holds no credentials for is an error, never a
 // silent fallback to a different model — the user picked this one on purpose.
 func ConfiguredModelClient(cfg *appcfg.Root, agentType, provider, model string) (llm.LLM, error) {
+	return ConfiguredModelClientWithEffort(cfg, agentType, provider, model, "")
+}
+
+// ConfiguredModelClientWithEffort is ConfiguredModelClient with the reasoning
+// effort the pin also names, overlaid the way a session's own selection
+// overlays it. An empty effort leaves the effort the chain entry configures for
+// that model in place: a pin that names only a model is a statement about the
+// model, not about how hard it should think.
+func ConfiguredModelClientWithEffort(cfg *appcfg.Root, agentType, provider, model, effort string) (llm.LLM, error) {
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("a model is required")
 	}
-	_, client, err := resolveAgentLLM(cfg, agentType, modelSelector{provider: provider, model: model})
+	entry, err := resolveAgentProvider(cfg, agentType, modelSelector{provider: provider, model: model})
 	if errors.Is(err, errModelNotConfigured) {
 		return nil, fmt.Errorf("model %s is not configured for this session",
 			subagentModelDisplay(SubagentModelOverride{Provider: provider, Model: model}))
 	}
-	return client, err
+	if err != nil {
+		return nil, err
+	}
+	if effort = strings.TrimSpace(effort); effort != "" {
+		entry.Params = appcfg.WithReasoningEffort(entry.Params, effort)
+	}
+	chain := llmYAMLsFromResolved([]appcfg.AgentLLMProviderConfig{entry})
+	if len(chain) == 0 || chain[0] == nil {
+		return nil, fmt.Errorf("model %s is not configured for this session",
+			subagentModelDisplay(SubagentModelOverride{Provider: provider, Model: model}))
+	}
+	return NewLLMFromYAML(chain[0])
 }
 
 func governSubagentOutput(fac Factory, toolName, callID, output string) tool.GovernedOutput {

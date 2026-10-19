@@ -137,9 +137,10 @@ test('settings · MCP lists the shared layer only, and edits one entry in the dr
   try {
     await page.goto('/settings?tab=mcp', { waitUntil: 'networkidle' })
 
-    // One layer, so no 来源 column: the six columns this page owns.
+    // One layer, so no 来源 column: the five columns this page owns. There is no
+    // 启用 column — the switch opens the action column instead (plan 079).
     const headers = (await page.locator('main thead th').allInnerTexts()).map((text) => text.trim())
-    expect(headers).toEqual(['MCP 服务', '命令或地址', '类型', '状态', '启用', '操作'])
+    expect(headers).toEqual(['MCP 服务', '命令或地址', '类型', '状态', '操作'])
 
     // Only the shared entries, in the file's own order, under a pager.
     await expect.poll(() => rowKeys(page), { timeout: 15_000 }).toEqual(['global:a', 'global:b'])

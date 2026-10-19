@@ -23,6 +23,7 @@
         <section class="min-w-0">
           <AppearanceTab v-if="activeTab === 'appearance'" />
           <SettingsApprovalTab v-else-if="activeTab === 'approval'" />
+          <SettingsSubagentsTab v-else-if="activeTab === 'subagents'" />
           <McpTab v-else-if="activeTab === 'mcp'" />
           <LspTab v-else-if="activeTab === 'lsp'" />
           <HooksTab v-else-if="activeTab === 'hooks'" />
@@ -50,6 +51,7 @@ import LspTab from '@/components/settings/LspTab.vue'
 import MemorySwitchesTab from '@/components/settings/MemorySwitchesTab.vue'
 import RuntimeStatusTab from '@/components/settings/RuntimeStatusTab.vue'
 import SettingsSharedSkillsTab from '@/components/settings/SettingsSharedSkillsTab.vue'
+import SettingsSubagentsTab from '@/components/settings/SettingsSubagentsTab.vue'
 import { useI18n } from '@/locales'
 
 /**
@@ -71,6 +73,7 @@ const tabGroups = computed(() => [
     tabs: [
       { key: 'appearance', label: t('settings.tabAppearance') },
       { key: 'approval', label: t('settings.tabApproval') },
+      { key: 'subagents', label: t('settings.tabSubagents') },
     ],
   },
   {

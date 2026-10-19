@@ -604,7 +604,7 @@ func effectiveToolsForContext(ctx context.Context, tools []*llm.Tool) []*llm.Too
 	}
 	out := tools
 	if subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); subtype != "" {
-		return filterToolsForSubagentSubtype(subtype, out)
+		return filterToolsForSubagentSubtype(ctx, subtype, out)
 	}
 	return out
 }
