@@ -104,11 +104,14 @@ test('project sessions live only in the project space', async ({ page }) => {
   await page.goto(projectUrl + '/sessions', { waitUntil: 'networkidle' })
   // The list is a table now: a row's title is the link that opens it.
   await expect(page.getByRole('link', { name: /project-space-e2e/ }).first()).toBeVisible({ timeout: 15_000 })
-  // The drawer must not list the project session.
+  // The drawer lists the project's conversation too — every conversation
+  // belongs to a project now, and the drawer is the one list that spans
+  // them all — carrying the project's name on its row.
   await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
   await expect(page.locator('[data-testid="chat-drawer"]')).toBeVisible()
   const drawerText = await page.locator('[data-testid="chat-drawer"]').innerText()
-  expect(drawerText).not.toContain('e2e-alpha')
+  expect(drawerText).toContain('project-space-e2e')
+  expect(drawerText).toContain('e2e-alpha')
 })
 
 test('the chat page names a project session by its own title', async ({ page }) => {
@@ -126,7 +129,8 @@ test('the chat page names a project session by its own title', async ({ page }) 
   await page.press('textarea', 'Enter')
   await expectAssistantReply(page)
   // The first message named the session; the header now reads that title
-  // from the session itself — the drawer's list never carried it.
+  // from the session itself — the drawer's list carries it too now, but the
+  // header reads the session, not the list.
   await expect(page.locator('[data-testid="chat-session-title"]')).toContainText('project-title-e2e', { timeout: 15_000 })
 })
 

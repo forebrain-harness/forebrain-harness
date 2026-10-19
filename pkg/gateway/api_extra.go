@@ -1457,6 +1457,14 @@ func (s *Server) handleChatSessionTitle(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": sid, "title": strings.TrimSpace(body.Title)})
 }
 
+// handleChatSessions serves the two chat session lists the web reads. The
+// drawer's (an empty source) is every conversation the agent may reopen —
+// ordinary conversations across every project plus the primary agent's
+// project-less skill-workshop tasks, with the project-less ordinary rows of
+// pre-project versions left out — searched and paged on the server the way
+// every list endpoint is. The workshop page's list (source=workshop) stays
+// the primary agent's own tasks, served exactly as it always was: whole,
+// unpaged, unsearched.
 func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -1475,32 +1483,107 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"records": []any{}})
 		return
 	}
-	summaries, err := s.Sessions.ListSessionsOfSource(r.Context(), source, 200)
+	if source == state.SessionSourceWorkshop {
+		summaries, err := s.Sessions.ListSessionsOfSource(r.Context(), source, 200)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// The workshop list's answer keeps the shape it always had; its rows
+		// are project-less by definition, so they carry no project name.
+		type workshopRow struct {
+			ID         string `json:"id"`
+			Title      string `json:"title"`
+			CreateTime string `json:"create_time"`
+			UpdateTime string `json:"update_time"`
+			Source     string `json:"source,omitempty"`
+		}
+		out := make([]workshopRow, 0, len(summaries))
+		for _, sum := range summaries {
+			t := time.Unix(sum.UpdatedAt, 0).UTC().Format(time.RFC3339)
+			out = append(out, workshopRow{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
+		return
+	}
+	// The drawer's list: paged only when the request carries "page", the
+	// list contract every table endpoint follows; without it the answer
+	// keeps the shape it always gave, one window of the newest 100 rows.
+	q := readListQuery(r)
+	limit, page := 100, 1
+	if q.Paged {
+		limit, page = q.PageSize, q.Page
+	}
+	summaries, total, err := s.Sessions.ListConversationsPage(r.Context(), q.Q, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names, err := s.projectNamesFor(r.Context(), summaries)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	type row struct {
-		ID         string `json:"id"`
-		Title      string `json:"title"`
-		CreateTime string `json:"create_time"`
-		UpdateTime string `json:"update_time"`
-		Source     string `json:"source,omitempty"`
+		ID          string `json:"id"`
+		Title       string `json:"title"`
+		CreateTime  string `json:"create_time"`
+		UpdateTime  string `json:"update_time"`
+		Source      string `json:"source,omitempty"`
+		ProjectName string `json:"project_name"`
 	}
 	out := make([]row, 0, len(summaries))
 	for _, sum := range summaries {
 		t := time.Unix(sum.UpdatedAt, 0).UTC().Format(time.RFC3339)
-		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source})
+		out = append(out, row{ID: sum.ID, Title: sessionDisplayTitle(sum), CreateTime: t, UpdateTime: t, Source: sum.Source, ProjectName: names[sum.ProjectID]})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
+	if !q.Paged {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"records": out})
+		return
+	}
+	// The store read the last page when the request asked past it; the answer
+	// names the page it actually served.
+	servedPage := min(q.Page, max((total+q.PageSize-1)/q.PageSize, 1))
+	writeListPage(w, "records", out, total, servedPage, q, nil)
+}
+
+// projectNamesFor names the projects one page of drawer rows belongs to, one
+// lookup per distinct project on the page (at most the page size). The
+// project store draws the agent boundary the session store does, so a row
+// the agent cannot name — another tenant's project — shows no project line.
+func (s *Server) projectNamesFor(ctx context.Context, summaries []state.SessionSummary) (map[string]string, error) {
+	names := make(map[string]string, len(summaries))
+	store := s.projectStore()
+	if store == nil {
+		return names, nil
+	}
+	for _, sum := range summaries {
+		if sum.ProjectID == "" {
+			continue
+		}
+		if _, seen := names[sum.ProjectID]; seen {
+			continue
+		}
+		p, err := store.Get(ctx, sum.ProjectID)
+		if errors.Is(err, state.ErrProjectNotFound) {
+			names[sum.ProjectID] = ""
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		names[sum.ProjectID] = p.Name
+	}
+	return names, nil
 }
 
 // handleChatSession names one conversation for the page that has it open:
 // its title and the project it belongs to. The page reads this rather than
-// looking itself up in the drawer's list, which lists only the agent's own
-// conversations — a project's session, or a scheduled task's fire, is never
-// in it.
+// looking itself up in the drawer's list — a drawer row carries only id,
+// title, times and project name, and a scheduled task's fire, for one, is
+// never in it.
 func (s *Server) handleChatSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method", http.StatusMethodNotAllowed)

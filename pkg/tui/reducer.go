@@ -3367,10 +3367,11 @@ type composerBlock struct {
 // composerTextArea records where a composerBlock renders the composer buffer.
 // rows are consecutive block lines starting at firstLine, indexed in the
 // block's full (un-scrolled) line space so a scrolled composer resolves clicks
-// through the same table. runes is the text as displayed and trimmed is how
-// many runes the display dropped from the head of the buffer, which the
-// resolved offset adds back so the caret refers to the buffer the raw reader
-// owns rather than to the card's rendering of it.
+// through the same table. runes is the buffer as the card shows it, with the SGR
+// styling of its chips removed — the rune space of the buffer the raw reader
+// owns — and trimmed is how many runes the display dropped from the head of the
+// buffer, which the resolved offset adds back so the caret refers to the buffer
+// the raw reader owns rather than to the card's rendering of it.
 type composerTextArea struct {
 	runes     []rune
 	trimmed   int
@@ -3402,18 +3403,20 @@ func (a composerTextArea) caretAt(line, col int) (int, bool) {
 }
 
 // composerTextRowsFromSpans converts the wrap spans of the displayed composer
-// text into the per-row rune ranges a click is resolved through. Spans are byte
+// text into the per-row rune ranges a click is resolved through. text is the
+// string the spans index — the styled one the card lays out — but the offsets
+// are counted with that styling removed, because they become offsets in the
+// buffer the raw input reader owns, which carries no escapes. Spans are byte
 // offsets into the text as laid out, which includes the argument hint appended
 // after the buffer's own text; ranges are clamped to the buffer so a click on
 // the hint lands at the end of what the user actually typed.
 func composerTextRowsFromSpans(text string, spans []visualLineSpan) []composerTextRow {
 	rows := make([]composerTextRow, len(spans))
-	limit := utf8.RuneCountInString(text)
 	runeAt := func(byteOffset int) int {
 		if byteOffset > len(text) {
-			return limit
+			byteOffset = len(text)
 		}
-		return utf8.RuneCountInString(text[:byteOffset])
+		return utf8.RuneCountInString(composerPlainText(text[:byteOffset]))
 	}
 	for i, span := range spans {
 		start := runeAt(span.startByte)
@@ -3448,6 +3451,17 @@ func normalizeComposerText(text string) string {
 // with both the screen and the executor.
 func composerDisplayText(text string) string {
 	return strings.TrimLeft(normalizeComposerText(text), "\n")
+}
+
+// composerPlainText is the composer text as the buffer holds it: the display
+// string the card lays out, with the SGR styling the composer adds for its chips
+// ([Image #1], [Pasted Content N chars]) removed. Click-to-caret and the caret's
+// own visual position work in this rune space, because it is the rune space of
+// the buffer the raw input reader owns; a styled string used as a coordinate
+// space counts every escape byte as a phantom column and every escape rune as a
+// phantom caret position.
+func composerPlainText(displayText string) string {
+	return sgrPattern.ReplaceAllString(displayText, "")
 }
 
 // buildComposerBlock renders the composer + transient status + pending-input
@@ -3583,7 +3597,7 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	cursorRow := len(lines) + 1 // +1 for the leading border line below
 	cursorCol := layout.cursorCol
 	textArea := composerTextArea{
-		runes:     []rune(composerText),
+		runes:     []rune(composerPlainText(composerText)),
 		trimmed:   utf8.RuneCountInString(normalizeComposerText(cs.Text)) - utf8.RuneCountInString(composerText),
 		firstLine: cursorRow,
 		rows:      composerTextRowsFromSpans(composerText, layout.spans),
@@ -3657,7 +3671,7 @@ func (r *Renderer) buildSlashComposerBlock(cs ComposerRenderState, composerText,
 	}
 	firstLine := len(lines)
 	textArea := composerTextArea{
-		runes:     []rune(composerText),
+		runes:     []rune(composerPlainText(composerText)),
 		trimmed:   utf8.RuneCountInString(normalizeComposerText(cs.Text)) - utf8.RuneCountInString(composerText),
 		firstLine: firstLine,
 		rows:      composerTextRowsFromSpans(composerText, layout.spans),

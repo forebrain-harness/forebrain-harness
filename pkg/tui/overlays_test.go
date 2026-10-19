@@ -1803,10 +1803,10 @@ func TestPickerShowsTheArrowOrTheCaretNeverBoth(t *testing.T) {
 	}
 }
 
-// The filter is a bar the keyboard brightens: its glyph is a magnifier, never
-// the › or ❯ a row could be mistaken for, and the bar dims while the keyboard is
-// on the list.
-func TestFilterBarDimsWhileTheKeyboardIsOnTheList(t *testing.T) {
+// The filter is a bar with one background, the same whether or not the keyboard
+// is in it: its glyph is a magnifier, never the › or ❯ a row could be mistaken
+// for, and only the glyph and the text dim while the keyboard is on the list.
+func TestFilterBarKeepsOneBackgroundWhileItsGlyphDims(t *testing.T) {
 	focused := (&filterField{}).pickerField(true).row(40)
 	blurred := (&filterField{}).pickerField(false).row(40)
 	for name, row := range map[string]string{"focused": focused, "blurred": blurred} {
@@ -1817,9 +1817,12 @@ func TestFilterBarDimsWhileTheKeyboardIsOnTheList(t *testing.T) {
 		if displayLineWidth(row) != 40 {
 			t.Errorf("%s filter row is %d columns wide, want the 40 it was laid out at", name, displayLineWidth(row))
 		}
+		if strings.Count(row, "\x1b[48;5;") != 1 || !strings.Contains(row, panelFieldBg) {
+			t.Errorf("%s filter row must paint one background, the panel's bar: %q", name, row)
+		}
 	}
-	if focused == blurred || !strings.Contains(focused, panelFieldFocusedBg) || !strings.Contains(blurred, panelFieldBlurredBg) {
-		t.Errorf("the bar must change with the keyboard:\nfocused %q\nblurred %q", focused, blurred)
+	if focused == blurred {
+		t.Errorf("the glyph and text must dim while the keyboard is on the list:\nfocused %q\nblurred %q", focused, blurred)
 	}
 }
 

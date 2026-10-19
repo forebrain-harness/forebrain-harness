@@ -1,6 +1,6 @@
 ---
 name: run-forebrain
-description: Build, launch, drive and screenshot the forebrain TUI for real - send keys, read the rendered screen, and check the state DB; replay the viewport painter in macOS Terminal.app to screenshot pixel-level rendering (stray dots, residue after scrolling, glyphs drawing past their row); and run it live in a Terminal.app window with real key presses through an input method (pinyin marked text). Use when asked to run, start, or screenshot forebrain, to confirm an interactive change (Esc/Ctrl+C handling, composer, approvals, cancellation, viewport) works in the actual app rather than only in tests, or to reproduce/verify a visual rendering artifact in the TUI, including one that only appears while typing Chinese.
+description: Build, launch, drive and screenshot the forebrain TUI for real - send keys, click, read the rendered screen, read which cell the composer's text caret is actually on, and check the state DB; replay the viewport painter in macOS Terminal.app to screenshot pixel-level rendering (stray dots, residue after scrolling, glyphs drawing past their row); and run it live in a Terminal.app window with real key presses through an input method (pinyin marked text). Use when asked to run, start, or screenshot forebrain, to confirm an interactive change (Esc/Ctrl+C handling, composer, approvals, cancellation, viewport) works in the actual app rather than only in tests, to check where a mouse click or a chip like `[Image #1]` puts the caret, or to reproduce/verify a visual rendering artifact in the TUI, including one that only appears while typing Chinese.
 ---
 
 forebrain is a Go terminal UI. It takes over the terminal, so an agent drives it
@@ -10,10 +10,15 @@ are relative to the repo root.
 
 tmux works on cells, so a bug that lives in pixels — ink left on screen after a
 scroll, a glyph reaching into the next row — never shows in `driver.sh screen`.
-For those, `paint_dump.sh` records the painter's real bytes and `term_replay.py`
-plays them in a real Terminal.app window and screenshots every step (see
-[Run: pixel-level rendering](#run-pixel-level-rendering-in-terminalapp)).
-Neither ever sees an input method: pinyin being composed lives between the
+A caret drawn on the wrong *cell* is a cell-level bug, so tmux reads that fine:
+`driver.sh caret` prints the reverse-video glyph the composer actually paints
+(see [the caret example](#a-worked-example-where-a-click-puts-the-composer-caret)).
+
+For pixel artifacts, `paint_dump.sh` records the painter's real bytes and
+`term_replay.py` plays them in a real Terminal.app window and screenshots every
+step (see [Run: pixel-level rendering](#run-pixel-level-rendering-in-terminalapp)).
+
+None of that ever sees an input method: pinyin being composed lives between the
 keyboard and Terminal.app, and the program gets only the committed text, or
 nothing at all. For those, `term_live.py` runs forebrain in a Terminal.app
 window of its own and presses real keys in it (see
@@ -130,6 +135,75 @@ the title exactly as they were.
 Swap `start hang` for `start stream` and the same keystrokes produce ordinary
 cancellation instead — user card kept, `cancelling run`, `Worked for`, and the
 partial assistant text persisted as a `visible` row.
+
+### A worked example: where a click puts the composer caret
+
+The composer paints no hardware cursor: it draws its own caret as **reverse
+video over the glyph it sits on**. So the pane's escape stream answers "which
+character is the caret on", and `$D caret` reads it. This is the only honest
+check of a click-to-caret change — a unit test can pass while the app puts the
+caret five characters off.
+
+```bash
+D=.claude/skills/run-forebrain/driver.sh
+$D reset; $D start hang
+osascript -e 'set the clipboard to (read (POSIX file "/tmp/fb-chip.png") as «class PNGf»)'
+$D key C-v                                   # the chip: [Image #1]
+$D send "现在用浏览器打开打不开 妃"
+$D rows                                      # 38	› [Image #1]现在用浏览器打开打不开 妃
+$D col 妃                                    # row=38 col=36
+$D click 36 38; $D caret
+```
+
+Observed, after the coordinate-space fix:
+
+```
+caret='妃' x4  row=38  (4/6 samples)
+line='› [Image #1]现在用浏览器打开打不开 妃'
+```
+
+Before it the same gesture drew the caret on `打`, five characters to the left.
+Two more cases belong in the same run, because they fail independently:
+
+```bash
+$D col g; $D click 7 38; $D caret     # inside the chip: caret='g'  (was '[': chip's start)
+$D key C-c; $D send "hello world"
+$D col w; $D click 9 38; $D caret     # plain draft:  caret='w'  (unchanged behaviour)
+```
+
+An image for the clipboard, the fake PNG the example uses:
+
+```bash
+python3 - <<'PY'
+import zlib, struct
+w = h = 8
+raw = b''.join(b'\x00' + bytes([200, 30, 30]) * w for _ in range(h))
+def chunk(t, d):
+    return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
+open('/tmp/fb-chip.png', 'wb').write(
+    b'\x89PNG\r\n\x1a\n'
+    + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+    + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+PY
+```
+
+The right-aligned `Image in clipboard · ctrl+v to paste` hint above the card is
+the proof the clipboard holds an image before `C-v` is worth sending.
+
+**Why it needs the real app: two rune spaces.** The composer has the buffer the
+raw input reader owns (plain text) and the display string the card lays out —
+the same text with SGR styling around every chip
+(`renderComposerImagePlaceholder`, `renderComposerPastePlaceholder`). Counting
+must happen in the **plain** space: escape bytes are phantom *columns*
+(`lipgloss.Width` of each escape rune is 1) and escape runes are phantom *caret
+offsets* (`utf8.RuneCountInString`), so a click drifts by an amount that depends
+on how many chips there are and how much text surrounds them — never a clean
+"one character". `ComposerRenderState.Cursor` is the one offset that stays in
+display space, which is why a caret *inside* a chip needs the chip's opening
+escapes added back. When touching any of this, keep hit-test tables
+(`composerTextArea.runes`, the `composerTextRowsFromSpans` offsets) in the plain
+space, and feed tests `buildComposerDisplayText(draft, pastes, attachments)` —
+bare text is the input that let the original bug ship green.
 
 ## Run: pixel-level rendering in Terminal.app
 
@@ -297,7 +371,17 @@ sessions.
   coordinates (as the SGR press+release pair, forwarded literally like any
   other `-l` bytes). Mouse reporting is already on, so the TUI reads it as a
   real click — use it to hit a card row, a roster row or a footer control
-  without a keybinding. Find the coordinates in a `$D screen` capture.
+  without a keybinding. Find the coordinates in a `$D screen` capture, then
+  `$D col <substring>` for a display column — never count them by hand, a CJK
+  glyph takes two cells and a chip's styling offsets nothing here.
+- **The caret is reverse video, so it must be read with `-e`.** `$D screen` is
+  `capture-pane` without `-e`, which strips SGR and therefore *always* shows no
+  caret; `$D caret` captures with `-e` and prints the glyph painted in reverse
+  video. It samples six times over 1.5s because the caret blinks every 500ms —
+  a shorter look can land entirely in the off phase and read as a bug.
+- **Click coordinates are 1-based, and a wide glyph owns two of them.** Clicking
+  either cell of a CJK glyph puts the caret *before* that glyph; that is the
+  intended mapping, not an off-by-one.
 - **The binary is ~90MB and the build is not fast** (~30s warm). `$D start` reuses
   `$TMPDIR/forebrain-run/forebrain` if it exists — run `$D build` explicitly after
   changing Go code, or `$D reset` will not rebuild it for you.
@@ -377,6 +461,10 @@ sessions.
 | `$D messages` errors on a glob | The TUI has not created the state DB yet; it appears once the first turn is submitted. |
 | Turn never leaves `Working` in `reply` mode | Expected in `hang`/`stream` mode. In `reply` mode check `$D provider-log` for a `REQUEST` line — no line means the request never left forebrain. A `REQUEST` line followed by a Python traceback means the fake provider crashed on that request; the traceback names why. |
 | `$D messages` / `$D title` print nothing after Esc in `hang` mode | Not an error: a turn withdrawn before the first output writes nothing. |
+| `$D caret` always says `(none in 6 samples …)` | You are reading a capture without SGR: `$D screen` strips it. Only `$D caret` sees reverse video. |
+| `$D caret` shows a space | The click landed past the end of that line — a valid "caret at end of text", not a miss. |
+| `$D click` seems to do nothing | Screen coordinates are 1-based and the composer moves as the draft grows or wraps; re-read them with `$D rows` instead of reusing an old row. |
+| `$D key C-v` inserts no chip | The clipboard holds no image (macOS); check `osascript -e 'clipboard info'` and re-set it. Never change product code to get a pass. |
 | `no matches found: …/fb-paint/*` from zsh | zsh fails a glob that matches nothing. `paint_dump.sh` clears its out-dir itself; don't `rm` its contents with a glob. |
 | `term_live: nothing listens on port …` | Run `driver.sh serve <mode>` first, with the same `FOREBRAIN_RUN_WORK` and `FOREBRAIN_RUN_PORT`. |
 | `term_live: osascript timed out` | A permission dialog is waiting on screen; see the live gotchas. |

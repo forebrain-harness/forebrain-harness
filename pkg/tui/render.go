@@ -7276,8 +7276,9 @@ func (l panelLine) rows(width int) []string {
 // margin to its right edge, with its glyph in front: a bar rather than a
 // prompt marker, so the field never reads as one more row of the list under
 // it. It has no side rules — the composer card has none either. The bar
-// brightens while the keyboard is in it and sinks back while the keyboard is on
-// the list, which is the only place the ❯ then stands.
+// keeps one background whether or not the keyboard is in it — only its glyph
+// and its text dim while the keyboard is on the list, which is the only place
+// the ❯ then stands.
 type panelField struct {
 	text        []rune
 	cursor      int
@@ -7285,8 +7286,8 @@ type panelField struct {
 	// glyph stands in front of the text; empty means the answer glyph.
 	glyph string
 	// blurred is set while the keyboard is on the list under the field: the
-	// caret is hidden and the bar dims, so a picker shows its ❯ or its caret,
-	// never both.
+	// caret is hidden and the bar's glyph and text dim, so a picker shows its
+	// ❯ or its caret, never both. The bar's background stays put.
 	blurred bool
 }
 
@@ -7298,10 +7299,10 @@ const (
 	// to be confused with: the composer's own prompt marker.
 	panelAnswerGlyph = "›"
 
-	// The field's bar: the composer card's background while it holds the
-	// keyboard, the shade just above the terminal's own while it does not.
-	panelFieldFocusedBg = "\x1b[48;5;" + sharedBlockBackgroundColor + "m"
-	panelFieldBlurredBg = "\x1b[48;5;236m"
+	// The field's bar sits on the composer card's background, the same one
+	// whether or not it holds the keyboard: a bar that darkened under the list
+	// read as a hole in the panel rather than as a field.
+	panelFieldBg = "\x1b[48;5;" + sharedBlockBackgroundColor + "m"
 	// Foregrounds: the glyph in the accent colour while focused and grey while
 	// not, the text at the card's brightness (a notch dimmer while blurred), the
 	// placeholder dim in both.
@@ -7340,9 +7341,9 @@ func (f panelField) textCol() int {
 
 func (f panelField) colours() (bg, glyph, text string) {
 	if f.blurred {
-		return panelFieldBlurredBg, panelFieldGlyphBlurred, panelFieldTextBlurred
+		return panelFieldBg, panelFieldGlyphBlurred, panelFieldTextBlurred
 	}
-	return panelFieldFocusedBg, panelFieldGlyphFocused, panelFieldTextFocused
+	return panelFieldBg, panelFieldGlyphFocused, panelFieldTextFocused
 }
 
 // row draws the field's text row at width columns: the margin, then the bar

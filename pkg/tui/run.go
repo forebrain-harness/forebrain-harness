@@ -2182,7 +2182,7 @@ func (s *streamState) composerDisplayCursor() int {
 	prefix := composerTextRunesPrefix(s.composer.DraftText, cursor)
 	displayPrefix := renderInlineAttachmentPlaceholders(prefix, s.composer.Attachments, renderComposerImagePlaceholder)
 	displayPrefix = renderInlinePastePlaceholders(displayPrefix, s.composer.PendingPastes, renderComposerPastePlaceholder)
-	return len([]rune(displayPrefix))
+	return len([]rune(displayPrefix)) + composerSplitChipStylingRunes(s.composer.DraftText, cursor, s.composer.PendingPastes, s.composer.Attachments)
 }
 
 // composerDraft is one view's in-progress composer, kept aside while another

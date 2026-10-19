@@ -787,7 +787,11 @@ func (s *SessionStore) ListSessionsRecent(ctx context.Context, limit int) ([]Ses
 // project — that are for one purpose, newest first. The filter is in the
 // query, so sessions of another purpose never take a row of the limit. A
 // session with no message is not a conversation and is never listed: see
-// conversationHoldsAMessage.
+// conversationHoldsAMessage. The conversation drawer reads
+// ListConversationsPage instead: since plan 029 every ordinary conversation
+// is born bound to a project, so this list's project-less ordinary half can
+// only hold legacy rows. What it still serves is the workshop list — the
+// primary agent's own skill-workshop tasks.
 func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, limit int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
@@ -820,6 +824,86 @@ func (s *SessionStore) ListSessionsOfSource(ctx context.Context, source string, 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// conversationsMaxPageSize is the page ceiling the conversation drawer asks
+// for, the same magnitude as the gateway list contract's own maximum. The
+// drawer's "load more" walks the list a page at a time, so no request may
+// ask for the whole history.
+const conversationsMaxPageSize = 100
+
+// conversationsWhere is the predicate the conversation drawer's list
+// carries: this agent's conversations and skill-workshop tasks — every
+// ordinary one bound to a project, because since plan 029 a project is where
+// an ordinary conversation is born, and one without a project is legacy data
+// the drawer leaves out — that hold a message (see
+// conversationHoldsAMessage), optionally narrowed to the ones whose title
+// matches the drawer's search box. A scheduled task's fire is reached from
+// its task's run record and a subagent's conversation from its own view, so
+// neither is listed.
+func (s *SessionStore) conversationsWhere(q string) (string, []any) {
+	where := `agent_id = ? AND source IN (?, ?) AND (project_id IS NOT NULL OR source = ?) AND ` + conversationHoldsAMessage
+	args := []any{s.AgentID(), SessionSourceConversation, SessionSourceWorkshop, SessionSourceWorkshop}
+	if q = strings.TrimSpace(q); q != "" {
+		where += ` AND title LIKE ?`
+		args = append(args, "%"+q+"%")
+	}
+	return where, args
+}
+
+// ListConversationsPage returns one page of the conversation drawer's list
+// and how many rows the same search matches, so a page and its "load more"
+// come from one round trip. The rows are what conversationsWhere selects,
+// newest first with id as a deterministic tie-breaker so equal updated_at
+// values cannot shuffle rows between pages. An offset past the end reads the
+// last page rather than an empty one — the paging contract every list
+// endpoint follows. The near-twin without the legacy exclusion is
+// ListSessionsRecentPaged, the terminal /resume picker's list; whether the
+// terminal should drop the legacy rows too is undecided, so the two methods
+// stay separate.
+func (s *SessionStore) ListConversationsPage(ctx context.Context, q string, limit, offset int) ([]SessionSummary, int, error) {
+	if s == nil || s.db == nil {
+		return nil, 0, nil
+	}
+	if limit <= 0 {
+		limit = conversationsMaxPageSize
+	}
+	if limit > conversationsMaxPageSize {
+		limit = conversationsMaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	where, args := s.conversationsWhere(q)
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM fb_sessions WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	// An offset past the end reads the last page rather than an empty one: a
+	// delete that empties the last page lands on the page before it.
+	if offset >= total {
+		offset = max(total-1, 0) / limit * limit
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, title, updated_at, source, COALESCE(project_id, '')
+		 FROM fb_sessions
+		 WHERE `+where+`
+		 ORDER BY updated_at DESC, id ASC
+		 LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]SessionSummary, 0, limit)
+	for rows.Next() {
+		var r SessionSummary
+		if err := rows.Scan(&r.ID, &r.Title, &r.UpdatedAt, &r.Source, &r.ProjectID); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
 }
 
 // ListSessionsForProject returns one page of the conversations bound to one
@@ -1042,7 +1126,9 @@ func (s *SessionStore) ConversationCountsByProject(ctx context.Context, projectI
 // between pages. The list is what a person may want back, like
 // ListSessionsRecent: a scheduled task's fire is reached from its task's run
 // record instead (decision D3), and a session with no message is not a
-// conversation and is never listed: see conversationHoldsAMessage.
+// conversation and is never listed: see conversationHoldsAMessage. The
+// conversation drawer's paged list is ListConversationsPage, which also
+// drops the project-less legacy rows; this picker keeps them.
 func (s *SessionStore) ListSessionsRecentPaged(ctx context.Context, limit, offset int) ([]SessionSummary, error) {
 	if s == nil || s.db == nil {
 		return nil, nil

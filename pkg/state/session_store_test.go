@@ -588,6 +588,147 @@ func TestConversationListsHideSessionsWithoutAMessage(t *testing.T) {
 	})
 }
 
+// TestListConversationsPagePinsTheDrawerList pins the conversation drawer's
+// one list: this agent's conversations across every project plus the primary
+// agent's own skill-workshop tasks, while the project-less ordinary rows of
+// pre-project versions, a scheduled task's fire, a subagent's private
+// conversation, a row that never said anything and another tenant's session
+// stay out. Search matches titles, pages walk newest first without overlap,
+// and a page past the end reads the last page.
+func TestListConversationsPagePinsTheDrawerList(t *testing.T) {
+	ctx := context.Background()
+	db := openStateDB(t)
+	store := NewSessionStore(db, "main")
+	projects := NewProjectStore(db, "main")
+	p, err := projects.Create(ctx, CreateProjectInput{Name: "drawer", Root: "/tmp/drawer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ensure := func(id string) {
+		t.Helper()
+		if err := store.Ensure(ctx, id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	say := func(id string) {
+		t.Helper()
+		if _, err := store.Append(ctx, id, "user", "hello "+id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := func(id, value string) {
+		t.Helper()
+		if err := store.SetSessionSource(ctx, id, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Listed: a project's ordinary conversation, a project's workshop task
+	// and the primary agent's own project-less workshop task.
+	for _, id := range []string{"proj-talk", "proj-task", "own-task"} {
+		ensure(id)
+		say(id)
+	}
+	for _, id := range []string{"proj-talk", "proj-task"} {
+		if err := projects.BindSession(ctx, id, p.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source("proj-task", SessionSourceWorkshop)
+	source("own-task", SessionSourceWorkshop)
+	// Left out: a pre-project ordinary conversation, a scheduled task's
+	// fire, a subagent's conversation, a row that never said anything, and
+	// another tenant's conversation.
+	ensure("legacy")
+	say("legacy")
+	ensure("fire")
+	say("fire")
+	source("fire", SessionSourceCron)
+	if err := projects.BindSession(ctx, "fire", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	ensure("sub")
+	say("sub")
+	source("sub", SessionSourceSubagent)
+	ensure("quiet")
+	if err := projects.BindSession(ctx, "quiet", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewSessionStore(db, "other").Append(ctx, "theirs", "user", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	// The newest conversation comes first, and none of the left-out rows —
+	// however new — can take a row of a page.
+	for id, at := range map[string]int64{
+		"own-task": 30, "proj-task": 20, "proj-talk": 10,
+		"legacy": 90, "fire": 80, "sub": 70, "quiet": 60, "theirs": 50,
+	} {
+		if _, err := db.Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", at, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids := func(rows []SessionSummary) []string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return out
+	}
+
+	rows, total, err := store.ListConversationsPage(ctx, "", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || !slices.Equal(ids(rows), []string{"own-task", "proj-task", "proj-talk"}) {
+		t.Fatalf("drawer list = %v (total %d), want the three conversations newest first", ids(rows), total)
+	}
+	for _, row := range rows {
+		wantProject, wantSource := "", SessionSourceWorkshop
+		if row.ID == "proj-talk" {
+			wantProject, wantSource = p.ID, SessionSourceConversation
+		}
+		if row.ID == "proj-task" {
+			wantProject = p.ID
+		}
+		if row.ProjectID != wantProject || row.Source != wantSource {
+			t.Fatalf("%s = project %q source %q, want project %q source %q", row.ID, row.ProjectID, row.Source, wantProject, wantSource)
+		}
+	}
+
+	// Search narrows by title, on the server, before the page is cut.
+	rows, total, err = store.ListConversationsPage(ctx, "own-task", 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || !slices.Equal(ids(rows), []string{"own-task"}) {
+		t.Fatalf("searched list = %v (total %d), want only own-task", ids(rows), total)
+	}
+
+	// Pages walk the same order without overlap.
+	first, total, err := store.ListConversationsPage(ctx, "", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, total2, err := store.ListConversationsPage(ctx, "", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || total2 != 3 || !slices.Equal(ids(first), []string{"own-task", "proj-task"}) || !slices.Equal(ids(second), []string{"proj-talk"}) {
+		t.Fatalf("pages = %v %v (totals %d %d), want the list split newest-first", ids(first), ids(second), total, total2)
+	}
+
+	// A page past the end reads the last page rather than an empty one.
+	rows, total, err = store.ListConversationsPage(ctx, "", 2, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 3 || !slices.Equal(ids(rows), []string{"proj-talk"}) {
+		t.Fatalf("past-the-end page = %v (total %d), want the last page", ids(rows), total)
+	}
+}
+
 // TestConversationCountsByProjectCountsOnlyConversationsWithMessages pins the
 // count a project table draws per row: it is the same predicate
 // ListSessionsForProject lists by, so a row that never said anything and a

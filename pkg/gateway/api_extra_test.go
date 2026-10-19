@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1165,19 +1166,20 @@ func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
 	if len(list.Sessions) != 1 || list.Sessions[0]["id"] != session.ID {
 		t.Fatalf("project sessions: %+v", list)
 	}
-	// ...and the agent's own conversation list does not: a project's
-	// sessions live in its project space only.
+	// ...and so does the agent's conversation drawer: every conversation
+	// belongs to a project now, and the drawer lists it carrying the
+	// project's name.
 	rec = httptest.NewRecorder()
 	s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("chat sessions: %d %s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), session.ID) {
-		t.Fatalf("project session %s leaked into the conversation list: %s", session.ID, rec.Body.String())
+	if !strings.Contains(rec.Body.String(), session.ID) || !strings.Contains(rec.Body.String(), `"project_name":"withsessions"`) {
+		t.Fatalf("drawer list lost the project session %s or its project name: %s", session.ID, rec.Body.String())
 	}
 	// The chat page still names the opened session — its title and its
-	// project — by reading the session itself rather than by looking it up
-	// in the drawer's list, which never holds a project's sessions.
+	// project — by reading the session itself rather than the drawer's
+	// summary row.
 	rec = httptest.NewRecorder()
 	s.handleChatSession(rec, withID(httptest.NewRequest(http.MethodGet, "/api/chat/sessions/"+session.ID, nil), session.ID))
 	if rec.Code != http.StatusOK ||
@@ -1193,7 +1195,7 @@ func TestProjectSessionCreateBindsProjectAndCwd(t *testing.T) {
 // the purpose, anything else is refused, and no amount of scheduled-task
 // fires can crowd the agent's own conversations out of the drawer.
 func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
-	s, _, _ := newProjectsTestServer(t)
+	s, projects, _ := newProjectsTestServer(t)
 	ctx := context.Background()
 	ensure := func(id, title string) {
 		t.Helper()
@@ -1201,7 +1203,18 @@ func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The drawer lists conversations across projects, so the ordinary one
+	// belongs to a project — the create endpoint's rule since plan 029 —
+	// while the workshop task stays project-less: the one shape that
+	// endpoint still opens at the primary agent's own level.
+	p, err := projects.Create(ctx, state.CreateProjectInput{Name: "purpose", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ensure("talk", "a conversation")
+	if err := projects.BindSession(ctx, "talk", p.ID); err != nil {
+		t.Fatal(err)
+	}
 	ensure("task", "a workshop task")
 	if err := s.Sessions.SetSessionSource(ctx, "task", state.SessionSourceWorkshop); err != nil {
 		t.Fatal(err)
@@ -1233,7 +1246,10 @@ func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
 		return rec
 	}
 	rec := list("")
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"talk"`) || strings.Contains(rec.Body.String(), `"id":"task"`) {
+	// The drawer's default list holds the project's conversation and the
+	// primary agent's own workshop task alike: every conversation the agent
+	// may reopen.
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"talk"`) || !strings.Contains(rec.Body.String(), `"id":"task"`) {
 		t.Fatalf("default list: %d %s", rec.Code, rec.Body.String())
 	}
 	rec = list("?source=workshop")
@@ -1242,6 +1258,115 @@ func TestChatSessionsAreFilteredByPurpose(t *testing.T) {
 	}
 	if rec := list("?source=cron"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("source=cron: %d %s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatSessionsPagesTheDrawerList pins the drawer list's paged answer:
+// the list contract's shape — records, total, page and page_size — with the
+// project's name on each row that belongs to one, a search that filters on
+// the server before the page is cut, and a page past the end serving the
+// last page. The workshop list's answer stays the shape it always had.
+func TestChatSessionsPagesTheDrawerList(t *testing.T) {
+	s, projects, _ := newProjectsTestServer(t)
+	ctx := context.Background()
+	p, err := projects.Create(ctx, state.CreateProjectInput{Name: "paged", Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Three conversations in the project, each a step apart in time so the
+	// order is deterministic, plus a pre-project ordinary row that must not
+	// take a row of any page.
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("c-%d", i)
+		if err := s.Sessions.Ensure(ctx, id, "conversation "+id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sessions.Append(ctx, id, "user", "hello"); err != nil {
+			t.Fatal(err)
+		}
+		if err := projects.BindSession(ctx, id, p.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(30-i), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Sessions.Append(ctx, "legacy", "user", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Sessions.DB().Exec("UPDATE fb_sessions SET updated_at = ? WHERE id = ?", int64(99), "legacy"); err != nil {
+		t.Fatal(err)
+	}
+
+	get := func(query string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.handleChatSessions(rec, httptest.NewRequest(http.MethodGet, "/api/chat/sessions"+query, nil))
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return rec, body
+	}
+
+	rec, page1 := get("?source=&page=1&page_size=2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 1: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := page1["total"].(float64); got != 3 {
+		t.Fatalf("total = %v, want 3", page1["total"])
+	}
+	ids := func(body map[string]any) []string {
+		out := []string{}
+		for _, row := range body["records"].([]any) {
+			out = append(out, row.(map[string]any)["id"].(string))
+		}
+		return out
+	}
+	if want := []string{"c-0", "c-1"}; !slices.Equal(ids(page1), want) {
+		t.Fatalf("page 1 rows = %v, want %v", ids(page1), want)
+	}
+	for _, row := range page1["records"].([]any) {
+		if row.(map[string]any)["project_name"] != "paged" {
+			t.Fatalf("row without its project's name: %v", row)
+		}
+	}
+
+	rec, page2 := get("?source=&page=2&page_size=2")
+	if rec.Code != http.StatusOK || !slices.Equal(ids(page2), []string{"c-2"}) {
+		t.Fatalf("page 2: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := page2["total"].(float64); got != 3 {
+		t.Fatalf("page 2 total = %v, want 3", page2["total"])
+	}
+
+	// A page past the end serves the last page.
+	rec, last := get("?source=&page=99&page_size=2")
+	if rec.Code != http.StatusOK || !slices.Equal(ids(last), []string{"c-2"}) {
+		t.Fatalf("past-the-end page: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := last["page"].(float64); got != 2 {
+		t.Fatalf("served page = %v, want 2", last["page"])
+	}
+	if got := last["page_size"].(float64); got != 2 {
+		t.Fatalf("page_size = %v, want 2", last["page_size"])
+	}
+
+	// The search filters on the server before the page is cut.
+	rec, found := get("?source=&q=conversation+c-2&page=1&page_size=2")
+	if rec.Code != http.StatusOK || !slices.Equal(ids(found), []string{"c-2"}) || found["total"].(float64) != 1 {
+		t.Fatalf("searched page: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The workshop list keeps its legacy shape: records alone, no pager.
+	rec, workshop := get("?source=workshop")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("workshop list: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, field := range []string{"total", "page", "page_size"} {
+		if _, paged := workshop[field]; paged {
+			t.Fatalf("workshop answer grew a pager: %s", rec.Body.String())
+		}
 	}
 }
 

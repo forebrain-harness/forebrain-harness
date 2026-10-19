@@ -2923,6 +2923,105 @@ func TestComposerClickLeadingNewlinesAddsBackTheTrimmedPrefix(t *testing.T) {
 	}
 }
 
+// TestComposerClickAfterAnImageChipLandsOnTheClickedRune is the reported bug:
+// with a pasted image in the draft the composer lays out a styled chip, and the
+// click-to-caret mapping used that styled string as its rune space, so every
+// escape byte counted as a column and every escape rune as a caret offset.
+func TestComposerClickAfterAnImageChipLandsOnTheClickedRune(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	attachments := []InputAttachment{{Path: "/tmp/priv.png", Label: "priv.png"}}
+	draft := imageAttachmentPlaceholder(0) + " 现在用浏览器打开打不开 妃"
+	display := buildComposerDisplayText(draft, nil, attachments)
+	cursor := len([]rune(display))
+	r.RenderComposerState(ComposerRenderState{Text: display, Cursor: &cursor})
+
+	plain := []rune(draft)
+	want := -1
+	for i, ch := range plain {
+		if ch == '妃' {
+			want = i
+			break
+		}
+	}
+	if want < 0 {
+		t.Fatal("fixture: the draft lost its 妃")
+	}
+	rows := r.vpLastComposer.text.rows
+	if len(rows) != 1 {
+		t.Fatalf("expected one composer text row, got %d", len(rows))
+	}
+	col := rows[0].prefixWidth + displayLineWidth(string(plain[:want]))
+	drainCaretRequest()
+	clickAt(r, col, composerTextRowScreen(r, 0))
+	if got := drainCaretRequest(); got != want {
+		t.Fatalf("clicking 妃 (buffer rune %d) must request that caret, got %d", want, got)
+	}
+}
+
+// TestComposerClickOnAnImageChipLandsOnItsOwnRune pins the same mapping on the
+// chip's own cells: the chip is plain text in the buffer, so a click on it lands
+// on the rune under the pointer, exactly as the keyboard can reach it.
+func TestComposerClickOnAnImageChipLandsOnItsOwnRune(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	attachments := []InputAttachment{{Path: "/tmp/priv.png", Label: "priv.png"}}
+	draft := imageAttachmentPlaceholder(0) + " tail"
+	display := buildComposerDisplayText(draft, nil, attachments)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: display, Cursor: &cursor})
+
+	rows := r.vpLastComposer.text.rows
+	row := composerTextRowScreen(r, 0)
+	for _, want := range []int{2, 7, 9} { // the "m", the "#", the "]"
+		drainCaretRequest()
+		clickAt(r, rows[0].prefixWidth+want, row)
+		if got := drainCaretRequest(); got != want {
+			t.Fatalf("clicking chip cell %d must request caret %d, got %d", want, want, got)
+		}
+	}
+}
+
+// TestComposerCaretInsideAnImageChipPaintsOnItsOwnCell closes the other half of
+// the same mapping: the caret the buffer holds inside a chip must be drawn on the
+// cell of the rune it sits on, not at the chip's start.
+func TestComposerCaretInsideAnImageChipPaintsOnItsOwnCell(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	attachments := []InputAttachment{{Path: "/tmp/priv.png", Label: "priv.png"}}
+	draft := imageAttachmentPlaceholder(0) + " tail"
+	display := buildComposerDisplayText(draft, nil, attachments)
+	state := &streamState{composer: ComposerState{DraftText: draft, Cursor: 4, Attachments: attachments}}
+
+	cursor := state.composerDisplayCursor()
+	r.RenderComposerState(ComposerRenderState{Text: display, Cursor: &cursor})
+
+	want := r.vpLastComposer.text.rows[0].prefixWidth + 4 // the "g" of "[Image #1]"
+	if got := r.vpLastComposer.cursorCol; got != want {
+		t.Fatalf("a caret inside the chip must be drawn on cell %d, got %d", want, got)
+	}
+}
+
+// TestComposerCaretInsideARetypedChipPaintsOnItsOwnCell pins WHICH copy of the
+// literal the caret is in: the card styles every occurrence — including one the
+// user retyped by hand — so the copy holding the caret is the one whose opening
+// escapes the display offset has to add.
+func TestComposerCaretInsideARetypedChipPaintsOnItsOwnCell(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	attachments := []InputAttachment{{Path: "/tmp/priv.png", Label: "priv.png"}}
+	chip := imageAttachmentPlaceholder(0)
+	draft := chip + " then " + chip + " tail"
+	display := buildComposerDisplayText(draft, nil, attachments)
+	inside := len([]rune(chip+" then ")) + 4 // the "g" of the second copy
+	state := &streamState{composer: ComposerState{DraftText: draft, Cursor: inside, Attachments: attachments}}
+
+	cursor := state.composerDisplayCursor()
+	r.RenderComposerState(ComposerRenderState{Text: display, Cursor: &cursor})
+
+	// The draft is ASCII up to that rune, so its display column is its rune offset.
+	want := r.vpLastComposer.text.rows[0].prefixWidth + inside
+	if got := r.vpLastComposer.cursorCol; got != want {
+		t.Fatalf("a caret in the second copy of the chip must be drawn on cell %d, got %d", want, got)
+	}
+}
+
 // TestComposerClickOffTheTextRowsRequestsNothing keeps the gesture confined to
 // the text: the card's borders, footer and the transcript above stay
 // selection/toggle surfaces.

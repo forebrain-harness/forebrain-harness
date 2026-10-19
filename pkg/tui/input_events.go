@@ -2239,6 +2239,51 @@ func renderInlineAttachmentPlaceholders(text string, attachments []InputAttachme
 	return out
 }
 
+// composerSplitChipStylingRunes counts the styling the card draws for a chip the
+// caret sits inside. The card lays the whole chip out styled, but a prefix that
+// ends inside it holds only part of the literal, so the placeholder replacements
+// above skip it and the display offset is short by exactly that chip's opening
+// escapes. Only the opening styling is counted: the closing reset sits after the
+// caret on screen.
+//
+// The replacements above use strings.ReplaceAll, so every occurrence of a literal
+// is styled — including one the user retyped by hand. The chip that holds the
+// caret is therefore the one to count, not the first one in the draft.
+func composerSplitChipStylingRunes(draft string, cursor int, pastes []PendingPaste, attachments []InputAttachment) int {
+	total := 0
+	count := func(placeholder, styled string) {
+		if placeholder == "" {
+			return
+		}
+		width := utf8.RuneCountInString(placeholder)
+		open := strings.Index(styled, placeholder)
+		if open <= 0 {
+			return
+		}
+		for offset := 0; offset < len(draft); {
+			found := strings.Index(draft[offset:], placeholder)
+			if found < 0 {
+				return
+			}
+			byteStart := offset + found
+			start := utf8.RuneCountInString(draft[:byteStart])
+			if cursor > start && cursor < start+width {
+				total += utf8.RuneCountInString(styled[:open])
+				return
+			}
+			offset = byteStart + len(placeholder)
+		}
+	}
+	for i := range attachments {
+		count(imageAttachmentPlaceholder(i), renderComposerImagePlaceholder(i))
+	}
+	for _, paste := range pastes {
+		placeholder := strings.TrimSpace(paste.Placeholder)
+		count(placeholder, renderComposerPastePlaceholder(placeholder))
+	}
+	return total
+}
+
 func stripComposerAttachmentPlaceholders(text string, attachments []InputAttachment) string {
 	if text == "" || len(attachments) == 0 {
 		return text
