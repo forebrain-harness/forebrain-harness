@@ -43,7 +43,7 @@
             <th>{{ t('lsp.colScope') }}</th>
             <th>{{ t('lsp.colState') }}</th>
             <th>{{ t('lsp.colProgram') }}</th>
-            <th class="text-right">{{ t('lsp.colActions') }}</th>
+            <th class="text-center">{{ t('lsp.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

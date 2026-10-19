@@ -5,9 +5,11 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -404,5 +406,183 @@ agents:
 	}
 	if n := strings.Count(out, "mcp_servers"); n != 1 {
 		t.Fatalf("only the agent that has a list writes one, got %d:\n%s", n, out)
+	}
+}
+
+// A primary agent's subagent configuration is configuration: its own switch,
+// an override of a public built-in and a custom subagent all load, and each
+// field the subagent page edits reads back unchanged.
+func TestLoadReadsPrimaryAgentSubagents(t *testing.T) {
+	root, err := LoadPersisted(writeConfigFile(t, `
+agents:
+  defaults:
+    enable_subagent: true
+  definitions:
+    main:
+      primary: true
+      enable_subagent: false
+      subagents:
+        - name: explore
+          model: deepseek/deepseek-v4-flash
+          reasoning_effort: low
+          system_prompt: Search only the files the task names.
+          enabled: true
+        - name: repo-scout
+          description: Finds the files a task touches
+          system_prompt: You are repo-scout.
+          tools: pick
+          allowed_tools: [read_file, code_search]
+          continuable: false
+`))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	def := root.Agents.Definitions["main"]
+	if def.EnableSubagent == nil || *def.EnableSubagent {
+		t.Fatalf("enable_subagent = %v, want false", def.EnableSubagent)
+	}
+	if len(def.Subagents) != 2 {
+		t.Fatalf("subagents = %d entries, want 2: %+v", len(def.Subagents), def.Subagents)
+	}
+	override := def.Subagents[0]
+	if override.Name != "explore" || override.Model != "deepseek/deepseek-v4-flash" || override.ReasoningEffort != "low" {
+		t.Fatalf("built-in override read back wrong: %+v", override)
+	}
+	if override.SystemPrompt != "Search only the files the task names." {
+		t.Fatalf("override system_prompt = %q", override.SystemPrompt)
+	}
+	if override.Enabled == nil || !*override.Enabled {
+		t.Fatalf("override enabled = %v, want true", override.Enabled)
+	}
+	custom := def.Subagents[1]
+	if custom.Name != "repo-scout" || custom.Description != "Finds the files a task touches" || custom.SystemPrompt != "You are repo-scout." {
+		t.Fatalf("custom subagent read back wrong: %+v", custom)
+	}
+	if custom.Tools != SubagentToolsPick || !reflect.DeepEqual(custom.AllowedTools, []string{"read_file", "code_search"}) {
+		t.Fatalf("custom tool policy read back wrong: %+v", custom)
+	}
+	if custom.Continuable == nil || *custom.Continuable {
+		t.Fatalf("continuable = %v, want false", custom.Continuable)
+	}
+}
+
+// The switch is two-level: an agent that never set its own follows the global
+// one, and an agent that did set it is decided by its own value alone.
+func TestSubagentsEnabledForFollowsTheGlobalSwitchUntilTheAgentSetsItsOwn(t *testing.T) {
+	off, on := false, true
+	cfg := &Root{}
+	cfg.Agents.Defaults.EnableSubagent = &on
+	if !SubagentsEnabledFor(cfg, "main") {
+		t.Fatal("an agent with no switch of its own must follow the global switch")
+	}
+	if SubagentsEnabledFor(nil, "main") || SubagentsEnabled(nil) {
+		t.Fatal("no configuration means subagents are off")
+	}
+	cfg.Agents.Definitions = map[string]AgentDefinition{"main": {Primary: true, EnableSubagent: &off}}
+	if SubagentsEnabledFor(cfg, " MAIN ") {
+		t.Fatal("the agent's own false must win over the global true")
+	}
+	cfg.Agents.Defaults.EnableSubagent = &off
+	cfg.Agents.Definitions["main"] = AgentDefinition{Primary: true, EnableSubagent: &on}
+	if !SubagentsEnabledFor(cfg, "main") {
+		t.Fatal("the agent's own true must win over the global false")
+	}
+}
+
+// Each rule the subagent configuration enforces, one rejection each. The bug
+// this guards: an entry that names a built-in cannot carry a description or a
+// tool policy, because the built-in's tools are fixed and its description is
+// what the model already knows the name by.
+func TestLoadRejectsInvalidAgentSubagents(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+		want  string
+	}{
+		{
+			name:  "invalid name",
+			entry: "        - name: Repo_Scout\n          description: d\n          system_prompt: p\n",
+			want:  "invalid name",
+		},
+		{
+			name:  "duplicate name",
+			entry: "        - name: scout\n          description: d\n          system_prompt: p\n        - name: scout\n          description: d\n          system_prompt: p\n",
+			want:  "duplicate subagent name",
+		},
+		{
+			name:  "system subagent",
+			entry: "        - name: guardian\n          system_prompt: p\n",
+			want:  "cannot be configured",
+		},
+		{
+			name:  "built-in with a description",
+			entry: "        - name: explore\n          description: d\n",
+			want:  "is a built-in",
+		},
+		{
+			name:  "built-in with a tool policy",
+			entry: "        - name: explore\n          tools: read_only\n",
+			want:  "is a built-in",
+		},
+		{
+			name:  "custom without a description",
+			entry: "        - name: scout\n          system_prompt: p\n",
+			want:  "description required",
+		},
+		{
+			name:  "custom without a system prompt",
+			entry: "        - name: scout\n          description: d\n",
+			want:  "system_prompt required",
+		},
+		{
+			name:  "unknown tools mode",
+			entry: "        - name: scout\n          description: d\n          system_prompt: p\n          tools: everything\n",
+			want:  "must be read_only, edit or pick",
+		},
+		{
+			name:  "pick without tools",
+			entry: "        - name: scout\n          description: d\n          system_prompt: p\n          tools: pick\n",
+			want:  "allowed_tools requires",
+		},
+		{
+			name:  "pick with a subagent tool",
+			entry: "        - name: scout\n          description: d\n          system_prompt: p\n          tools: pick\n          allowed_tools: [read_file, subagent_run]\n",
+			want:  "cannot dispatch subagents",
+		},
+		{
+			name:  "model without a provider",
+			entry: "        - name: explore\n          model: deepseek-v4-flash\n",
+			want:  "must be provider/model",
+		},
+		{
+			name:  "reasoning effort without a model",
+			entry: "        - name: explore\n          reasoning_effort: low\n",
+			want:  "reasoning_effort requires model",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigFile(t, "agents:\n  definitions:\n    main:\n      primary: true\n      subagents:\n"+tc.entry)
+			_, err := LoadPersisted(path)
+			if err == nil {
+				t.Fatalf("LoadPersisted accepted an invalid subagent entry:\n%s", tc.entry)
+			}
+			if !strings.Contains(err.Error(), "agents.definitions.main.subagents") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not name the entry and %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The loader's name lists decide whether an entry overrides a built-in or
+// declares a custom subagent, so they must be the definitions' own lists. A
+// built-in missing from the copy would silently become a configurable custom
+// name; add a new built-in to both places.
+func TestBuiltInSubagentNameCopiesMatchAgentPackage(t *testing.T) {
+	if !reflect.DeepEqual(builtInPublicSubagentNames, agent.PublicSubagentNames) {
+		t.Fatalf("builtInPublicSubagentNames = %#v, agent.PublicSubagentNames = %#v", builtInPublicSubagentNames, agent.PublicSubagentNames)
+	}
+	if !reflect.DeepEqual(builtInSystemSubagentNames, agent.SystemSubagentNames) {
+		t.Fatalf("builtInSystemSubagentNames = %#v, agent.SystemSubagentNames = %#v", builtInSystemSubagentNames, agent.SystemSubagentNames)
 	}
 }

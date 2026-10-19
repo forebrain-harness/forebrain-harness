@@ -132,7 +132,6 @@
         :error="rosterError"
         :overlay="workbenchOverlay"
         :scope="workbenchScope"
-        :wide="true"
         :extra-tabs="extraTabs"
         @close="workbench.close()"
       >

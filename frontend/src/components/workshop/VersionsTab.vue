@@ -1,7 +1,7 @@
 <template>
   <div class="space-y-3" data-testid="workshop-versions">
-    <div class="flex items-center justify-between">
-      <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabVersions') }}</span>
+    <div class="flex flex-wrap items-center justify-between gap-y-1.5">
+      <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabVersions') }}</span>
       <button type="button" class="forebrain-btn forebrain-btn-ghost text-xs" :disabled="!skillName" data-testid="workshop-version-download" @click="downloadCurrent">
         <Download class="h-3.5 w-3.5" aria-hidden="true" /> {{ t('workshop.downloadZip') }}
       </button>

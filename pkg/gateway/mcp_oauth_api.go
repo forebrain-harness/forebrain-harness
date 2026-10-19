@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -409,6 +410,10 @@ func (s *Server) handleProjectMCPPreview(w http.ResponseWriter, r *http.Request)
 			}
 			row := mcpPreviewRow(srv)
 			row["allowed"] = true
+			// The allowed rows carry their fingerprint for the same reason the
+			// pending and declined ones do: a row-level allow/deny is only ever
+			// recorded against the entry the operator was shown.
+			row["fingerprint"] = mcp.ServerFingerprint(srv)
 			rows = append(rows, row)
 		}
 		rows = append(rows, mcpConsentPreviewRows(declined, launch, "declined")...)
@@ -473,18 +478,65 @@ func mcpConsentPreviewRows(items []mcp.PendingProjectConsent, launch safety.Proj
 		row[flag] = true
 		row["running"] = false
 		row["summary"] = item.Summary
+		// The fingerprint the row was rendered from travels with the row, so
+		// the per-entry decision the page sends back can be bound to exactly
+		// this entry (see handleProjectMCPConsent).
+		row["fingerprint"] = item.Fingerprint
 		rows = append(rows, row)
 	}
 	return rows
 }
 
+// consentFingerprint is one {name, fingerprint} pair a per-entry consent
+// request carries: the fingerprint of the entry exactly as the surface showed
+// it.
+type consentFingerprint struct {
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// consentFingerprintMap normalises the pairs into the map the per-entry
+// decide functions verify — keys lowercased and trimmed, the same
+// normalisation the decided names go through. Every decided name must arrive
+// with a non-empty fingerprint: a decision is only ever recorded for an entry
+// the operator was shown. When one is missing, ok is false and missing names
+// the first offender from decide. An empty decide needs no fingerprints.
+func consentFingerprintMap(decide []string, pairs []consentFingerprint) (fps map[string]string, missing string, ok bool) {
+	fps = make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		fps[strings.ToLower(strings.TrimSpace(pair.Name))] = strings.TrimSpace(pair.Fingerprint)
+	}
+	for _, name := range decide {
+		if fps[strings.ToLower(strings.TrimSpace(name))] == "" {
+			return nil, name, false
+		}
+	}
+	return fps, "", true
+}
+
+// writeStaleConsent answers a per-entry decision whose entry is no longer
+// what the operator was shown: nothing was recorded, and the surface is
+// expected to reload its rows and ask again.
+func writeStaleConsent(w http.ResponseWriter, stale interface{ StaleNames() []string }) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": "项目文件已变化，请核对后重新确认 / The project file changed; review and confirm again",
+		"code":  "consent_stale",
+		"stale": stale.StaleNames(),
+	})
+}
+
 // handleProjectMCPConsent is the web confirmation entry for project-level MCP
-// servers. Body: {"allow": [...], "decide": [...]}. decide names the entries
-// the request decides — allow the ones also in allow, deny the rest — and is
-// what the project page's per-row buttons send, so a row decides only itself
-// and a declined entry is allowed again by deciding it once more. Without
-// decide the call is the startup prompt's batch answer: every pending entry
-// not in allow is recorded as declined.
+// servers. Body: {"allow": [...], "decide": [...], "fingerprints": [{name,
+// fingerprint}]}. decide names the entries the request decides — allow the
+// ones also in allow, deny the rest — and is what the project page's per-row
+// buttons send, so a row decides only itself and a declined entry is allowed
+// again by deciding it once more. fingerprints carries what the page showed
+// for each decided entry; any entry that no longer matches it fails the whole
+// request with 409 and records nothing. Without decide the call is the
+// startup prompt's batch answer: every pending entry not in allow is
+// recorded as declined.
 func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method", http.StatusMethodNotAllowed)
@@ -507,6 +559,10 @@ func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request)
 		// prompt does: everything not allowed is recorded as declined. An
 		// empty list decides nothing.
 		Decide *[]string `json:"decide"`
+		// Fingerprints carries the per-entry fingerprints the page showed,
+		// and is required whenever decide is present: the decision is
+		// recorded only against entries that still match them.
+		Fingerprints []consentFingerprint `json:"fingerprints"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -525,11 +581,21 @@ func (s *Server) handleProjectMCPConsent(w http.ResponseWriter, r *http.Request)
 	// again by deciding it once more; the startup prompt's batch semantics
 	// stay behind the callers that send no decide.
 	if body.Decide != nil {
-		err = process.DecideProjectMCPConsentsFor(workspace, launch, *body.Decide, body.Allow)
+		fps, missing, ok := consentFingerprintMap(*body.Decide, body.Fingerprints)
+		if !ok {
+			http.Error(w, fmt.Sprintf("fingerprint required for %q", missing), http.StatusBadRequest)
+			return
+		}
+		err = process.DecideProjectMCPConsentsFor(workspace, launch, *body.Decide, body.Allow, fps)
 	} else {
 		err = process.DecideProjectMCPConsents(workspace, launch, body.Allow)
 	}
 	if err != nil {
+		var stale interface{ StaleNames() []string }
+		if errors.As(err, &stale) {
+			writeStaleConsent(w, stale)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

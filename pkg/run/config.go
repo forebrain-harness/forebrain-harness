@@ -1725,7 +1725,7 @@ func (r *Runner) agentModelFor(ctx context.Context) (provider, model string) {
 func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 	if !explicitMainThreadQuerySource(QuerySourceFromContext(ctx)) {
 		if override, ok := SubagentModelOverrideFromContext(ctx); ok {
-			client, err := ConfiguredModelClient(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model)
+			client, err := ConfiguredModelClientWithEffort(r.AppCfg, r.activeAgentNameForModel(), override.Provider, override.Model, override.Effort)
 			if err != nil {
 				slog.Warn("build subagent compaction client", "err", err)
 				return nil
@@ -1733,8 +1733,8 @@ func (r *Runner) agentCompactClientFor(ctx context.Context) llm.LLM {
 			return client
 		}
 		if subtype := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); subtype != "" {
-			if provider, model, _, ok := SubagentOwnModel(r, subtype); ok {
-				client, err := ConfiguredModelClient(r.AppCfg, subtype, provider, model)
+			if provider, model, effort, ok := SubagentOwnModel(r, subtype); ok {
+				client, err := ConfiguredModelClientWithEffort(r.AppCfg, subtype, provider, model, effort)
 				if err != nil {
 					slog.Warn("build typed subagent compaction client", "type", subtype, "err", err)
 					return nil
@@ -1799,9 +1799,12 @@ func AgentModel(r *Runner, conversationSessionID string, subagent *agent.History
 	if subagent != nil && strings.TrimSpace(subagent.Model) != "" {
 		provider = strings.TrimSpace(subagent.ModelProvider)
 		model = strings.TrimSpace(subagent.Model)
-		if r != nil {
-			// The override's effort comes from the provider entry that model
-			// resolves to — the same entry ConfiguredModelClient builds the
+		// An effort the record carries is what that run was pinned to, at
+		// dispatch time or by the primary agent's own subagent configuration.
+		effort = strings.TrimSpace(subagent.ReasoningEffort)
+		if r != nil && effort == "" {
+			// Otherwise it comes from the provider entry that model resolves
+			// to — the same entry ConfiguredModelClientWithEffort builds the
 			// client from, so the footer states what the run actually uses.
 			if entry, err := resolveAgentProvider(r.AppCfg, r.activeAgentNameForModel(), modelSelector{provider: provider, model: model}); err == nil {
 				effort = reasoningEffortFromParams(entry.Params)

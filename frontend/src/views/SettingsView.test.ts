@@ -41,6 +41,7 @@ describe('SettingsView', () => {
     expect(order).toEqual([
       'Appearance',
       'Approval default',
+      'Subagents',
       'MCP',
       'Language servers',
       'Hooks',

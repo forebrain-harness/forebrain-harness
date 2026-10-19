@@ -1,8 +1,10 @@
 package process
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -125,7 +127,7 @@ func TestDecideProjectMCPConsentsForLeavesOthersUndecided(t *testing.T) {
 	dir := t.TempDir()
 	launch := trustedVCSProject(t, home, dir)
 	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
-	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, nil); err != nil {
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if pending := PendingProjectMCPConsents(ws, launch); len(pending) != 1 || pending[0].Name != "two" {
@@ -153,7 +155,7 @@ func TestDecideProjectMCPConsentsForAllowsADeclinedEntry(t *testing.T) {
 	if declined := DeclinedProjectMCPConsents(ws, launch); len(declined) != 2 {
 		t.Fatalf("declined = %+v", declined)
 	}
-	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, []string{"one"}); err != nil {
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	res := resolveMCPGlobal(home, ws, globalList(), launch)
@@ -178,7 +180,7 @@ func TestDeclinedProjectMCPConsentsNeedTrust(t *testing.T) {
 	if declined := DeclinedProjectMCPConsents(ws, launch); len(declined) != 0 {
 		t.Fatalf("untrusted launch must have no declined entries: %+v", declined)
 	}
-	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"projtool"}, nil); err != nil {
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"projtool"}, nil, nil); err != nil {
 		t.Fatalf("decide on an untrusted launch: %v", err)
 	}
 	if _, err := os.Stat(mcp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
@@ -477,7 +479,7 @@ func TestDecideProjectLSPConsentsForAllowsADeniedEntry(t *testing.T) {
 	if _, _, allowed, denied, _ := InspectProjectLSP(ws, launch); len(allowed) != 0 || len(denied) != 2 {
 		t.Fatalf("allowed = %v denied = %v", allowed, denied)
 	}
-	if err := DecideProjectLSPConsentsFor(ws, launch, []string{"one"}, []string{"one"}); err != nil {
+	if err := DecideProjectLSPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, pending, allowed, denied, _ := InspectProjectLSP(ws, launch)
@@ -486,6 +488,206 @@ func TestDecideProjectLSPConsentsForAllowsADeniedEntry(t *testing.T) {
 	}
 	if len(denied) != 1 || denied[0] != "two" || len(pending) != 0 {
 		t.Fatalf("denied = %v pending = %+v", denied, pending)
+	}
+}
+
+// pendingMCPFingerprint reads the fingerprint of one pending entry the way a
+// surface does: from the list it is about to show.
+func pendingMCPFingerprint(t *testing.T, ws string, launch safety.ProjectContext, name string) string {
+	t.Helper()
+	for _, item := range PendingProjectMCPConsents(ws, launch) {
+		if strings.EqualFold(item.Name, name) {
+			return item.Fingerprint
+		}
+	}
+	t.Fatalf("no pending entry %q", name)
+	return ""
+}
+
+// pendingLSPFingerprint is pendingMCPFingerprint for language servers.
+func pendingLSPFingerprint(t *testing.T, ws string, launch safety.ProjectContext, id string) string {
+	t.Helper()
+	for _, item := range PendingProjectLSPConsents(ws, launch) {
+		if strings.EqualFold(item.ID, id) {
+			return item.Fingerprint
+		}
+	}
+	t.Fatalf("no pending entry %q", id)
+	return ""
+}
+
+// A per-entry decision is bound to the entry the operator was shown: the page
+// read the file when it listed the entry, and once the file moves the same
+// click records nothing and names what went stale. Retrying with the
+// fingerprint the file now has succeeds — that is the page reloading its rows
+// and the operator confirming again.
+func TestDecideProjectMCPConsentsForRefusesAChangedEntry(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n")
+	fp1 := pendingMCPFingerprint(t, ws, launch, "one")
+
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/changed\n")
+
+	err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, map[string]string{"one": fp1})
+	var stale *StaleConsentError
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want *StaleConsentError", err)
+	}
+	if !slices.Equal(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names = %v", stale.StaleNames())
+	}
+	if _, err := os.Stat(mcp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("a refused decision must not write a consent store: %v", err)
+	}
+
+	fp2 := pendingMCPFingerprint(t, ws, launch, "one")
+	if fp2 == fp1 {
+		t.Fatal("rewriting the command must change the fingerprint")
+	}
+	if err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, map[string]string{"one": fp2}); err != nil {
+		t.Fatal(err)
+	}
+	if names := serverNames(resolveMCPGlobal(home, ws, globalList(), launch).Servers); !containsFold(names, "one") {
+		t.Fatalf("the refreshed decision must allow the entry: %v", names)
+	}
+}
+
+// One stale name spoils the whole request: the entries that did not move are
+// not decided either, so a retry decides everything or nothing.
+func TestDecideProjectMCPConsentsForStaleRefusalRecordsNothing(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
+	fpOne := pendingMCPFingerprint(t, ws, launch, "one")
+	fpTwo := pendingMCPFingerprint(t, ws, launch, "two")
+
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/moved\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
+
+	err := DecideProjectMCPConsentsFor(ws, launch, []string{"one", "two"}, []string{"one", "two"}, map[string]string{"one": fpOne, "two": fpTwo})
+	var stale *StaleConsentError
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want *StaleConsentError", err)
+	}
+	if !slices.Equal(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names = %v", stale.StaleNames())
+	}
+	if pending := PendingProjectMCPConsents(ws, launch); len(pending) != 2 {
+		t.Fatalf("nothing may be recorded, so both entries stay pending: %+v", pending)
+	}
+	if _, err := os.Stat(mcp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("a refused decision must not write a consent store: %v", err)
+	}
+}
+
+// A name the file no longer carries is just as stale: the operator confirmed
+// an entry that is not there anymore, and the file's word decides.
+func TestDecideProjectMCPConsentsForMissingEntryIsStale(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	dir := t.TempDir()
+	launch := trustedVCSProject(t, home, dir)
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: one\n    transport: stdio\n    command: /bin/one\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
+	fpOne := pendingMCPFingerprint(t, ws, launch, "one")
+
+	writeProjectMCP(t, dir, "mcp_servers:\n  - name: two\n    transport: stdio\n    command: /bin/two\n")
+
+	err := DecideProjectMCPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, map[string]string{"one": fpOne})
+	var stale *StaleConsentError
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want *StaleConsentError", err)
+	}
+	if !slices.Equal(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names = %v", stale.StaleNames())
+	}
+	if _, err := os.Stat(mcp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("a refused decision must not write a consent store: %v", err)
+	}
+}
+
+// The language-server twin of TestDecideProjectMCPConsentsForRefusesAChangedEntry.
+func TestDecideProjectLSPConsentsForRefusesAChangedEntry(t *testing.T) {
+	ws := t.TempDir()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("servers:\n  one: {command: /bin/one}\n")
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}, TrustLevel: safety.LevelTrusted}
+	fp1 := pendingLSPFingerprint(t, ws, launch, "one")
+
+	write("servers:\n  one: {command: /bin/changed}\n")
+
+	err := DecideProjectLSPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, map[string]string{"one": fp1})
+	var stale *lsp.StaleConsentError
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want *lsp.StaleConsentError", err)
+	}
+	if !slices.Equal(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names = %v", stale.StaleNames())
+	}
+	if _, err := os.Stat(lsp.ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("a refused decision must not write a consent store: %v", err)
+	}
+
+	fp2 := pendingLSPFingerprint(t, ws, launch, "one")
+	if fp2 == fp1 {
+		t.Fatal("rewriting the command must change the fingerprint")
+	}
+	if err := DecideProjectLSPConsentsFor(ws, launch, []string{"one"}, []string{"one"}, map[string]string{"one": fp2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, allowed, _, _ := InspectProjectLSP(ws, launch); len(allowed) != 1 || allowed[0] != "one" {
+		t.Fatalf("the refreshed decision must allow the entry: %v", allowed)
+	}
+}
+
+// ProjectLSPFingerprints is what a surface shows beside each id: nothing for
+// a launch that is not trusted, and the lsp package's own fingerprint for
+// every entry when it is.
+func TestProjectLSPFingerprints(t *testing.T) {
+	ws := t.TempDir()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, ".forebrain", "lsp_servers.yaml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("servers:\n  one: {command: /bin/one}\n  two: {command: /bin/two}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	untrusted := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}}
+	if fps := ProjectLSPFingerprints(ws, untrusted); fps != nil {
+		t.Fatalf("untrusted launch fingerprints = %v, want nil", fps)
+	}
+
+	launch := safety.ProjectContext{Project: safety.Project{Root: dir, VersionControlled: true}, TrustLevel: safety.LevelTrusted}
+	fps := ProjectLSPFingerprints(ws, launch)
+	entries, _ := lsp.LoadProjectServers(dir)
+	if len(fps) != len(entries) {
+		t.Fatalf("fingerprints = %v, entries = %v", fps, entries)
+	}
+	for id, srv := range entries {
+		if fps[id] == "" || fps[id] != lsp.ProjectServerFingerprint(srv) {
+			t.Fatalf("fingerprint for %q = %q, want the entry's own", id, fps[id])
+		}
 	}
 }
 

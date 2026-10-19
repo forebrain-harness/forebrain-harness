@@ -677,7 +677,16 @@ func (s *Server) handleProjectMCPServersWrite(w http.ResponseWriter, r *http.Req
 
 // writeMCPServer is the one write path behind all three layers: POST creates
 // an entry, PUT replaces the one the route names, DELETE removes it.
+//
+// The whole body runs under configWriteMu: resolve snapshots layer.entries and
+// saveMCPLayer later replaces that entire layer, so any config write landing
+// in between would be silently overwritten. saveMCPLayer's rebind (which can
+// wait up to runnerPoolCloseDeadline on a stuck MCP subprocess) runs inside
+// the lock by the same token — a rebind of stale runners would race the layer
+// replacement it is part of.
 func (s *Server) writeMCPServer(w http.ResponseWriter, r *http.Request, resolve mcpLayerResolver) {
+	s.configWriteMu.Lock()
+	defer s.configWriteMu.Unlock()
 	layer, err := resolve(r)
 	if err != nil {
 		failMCPWrite(w, err)

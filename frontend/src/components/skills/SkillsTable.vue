@@ -26,7 +26,7 @@
           <th>{{ t('skills.colSkill') }}</th>
           <th>{{ t('skills.colSource') }}</th>
           <th class="text-right">{{ t('skills.colStatus') }}</th>
-          <th class="text-right">{{ t('skills.colActions') }}</th>
+          <th class="text-center">{{ t('skills.colActions') }}</th>
         </tr>
       </thead>
       <tbody>

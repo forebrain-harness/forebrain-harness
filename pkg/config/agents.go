@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -37,7 +38,50 @@ type AgentDefinition struct {
 	// same-named entry here replaces the shared one whole.
 	MCPServers   []MCPServerConfig        `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
 	LLMProviders []AgentLLMProviderConfig `yaml:"llm_providers,omitempty" json:"llm_providers,omitempty"`
+	// EnableSubagent is this primary agent's own subagent switch. Absent
+	// follows agents.defaults.enable_subagent; set, it decides on its own
+	// whether the model of this agent sees the subagent_* tools.
+	EnableSubagent *bool `yaml:"enable_subagent,omitempty" json:"enable_subagent,omitempty"`
+	// Subagents are the subagent types of this primary agent: entries naming a
+	// public built-in override it for this agent, any other name declares a
+	// custom subagent. See SubagentConfig.
+	Subagents []SubagentConfig `yaml:"subagents,omitempty" json:"subagents,omitempty"`
 }
+
+// SubagentConfig is one entry of a primary agent's subagent configuration.
+// Name a built-in the model may dispatch (general-purpose, explore, plan,
+// verification) and the entry overrides that built-in for this agent: only
+// Model, ReasoningEffort, SystemPrompt and Enabled apply. Any other name is a
+// custom subagent of this agent.
+type SubagentConfig struct {
+	Name string `yaml:"name" json:"name"`
+	// Description and SystemPrompt are a custom subagent's own text: the model
+	// reads the description when choosing a type, and the prompt replaces the
+	// built-in one whole.
+	Description  string `yaml:"description,omitempty" json:"description,omitempty"`
+	SystemPrompt string `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
+	// Model is "provider/model" from this agent's own model list; empty follows
+	// the conversation.
+	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+	// ReasoningEffort applies only with Model set.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	// Tools is read_only | edit | pick (custom only; empty means read_only).
+	Tools string `yaml:"tools,omitempty" json:"tools,omitempty"`
+	// AllowedTools is the chosen tool set for Tools: pick.
+	AllowedTools []string `yaml:"allowed_tools,omitempty" json:"allowed_tools,omitempty"`
+	// Continuable false makes a custom subagent one-shot; nil means continuable.
+	Continuable *bool `yaml:"continuable,omitempty" json:"continuable,omitempty"`
+	// Enabled false keeps the model from dispatching it; nil means enabled.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// SubagentConfig.Tools values. A built-in's tool set is fixed by its type, so
+// these apply to custom subagents only.
+const (
+	SubagentToolsReadOnly = "read_only"
+	SubagentToolsEdit     = "edit"
+	SubagentToolsPick     = "pick"
+)
 
 type AgentLLMProviderConfig struct {
 	Provider string           `yaml:"provider,omitempty" json:"provider,omitempty"`
@@ -74,6 +118,108 @@ type ExecutionConfig struct {
 // are not subject to it even though they run on the subagent machinery.
 func SubagentsEnabled(cfg *Root) bool {
 	return cfg != nil && cfg.Agents.Defaults.EnableSubagent != nil && *cfg.Agents.Defaults.EnableSubagent
+}
+
+// SubagentsEnabledFor reports whether one primary agent's model may spawn
+// subagents. The agent's own switch wins when it is set; an agent that never
+// touched it follows the global one.
+func SubagentsEnabledFor(cfg *Root, agentName string) bool {
+	if cfg != nil {
+		if def, ok := cfg.Agents.Definitions[strings.ToLower(strings.TrimSpace(agentName))]; ok && def.EnableSubagent != nil {
+			return *def.EnableSubagent
+		}
+	}
+	return SubagentsEnabled(cfg)
+}
+
+// subagentConfigNamePattern is the name a subagent entry may carry. Names are
+// what the model passes as subagent_type, so they are lower-case and never
+// collide with the built-in spelling.
+var subagentConfigNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}$`)
+
+// ValidateAgentSubagents checks one primary agent's subagent entries.
+// publicBuiltins are the built-in types an entry of that name overrides;
+// systemBuiltins are the types the system dispatches, which a configuration
+// must not touch. Names are passed in rather than imported so the loader can
+// report the rule without depending on the package that defines the
+// definitions.
+//
+// The model a subagent entry names is deliberately not checked against the
+// agent's model list: deleting a provider must not make an existing
+// configuration unloadable, and dispatch reports the unknown model when the
+// subagent is actually started.
+func ValidateAgentSubagents(agentID string, def AgentDefinition, publicBuiltins, systemBuiltins []string) error {
+	public := make(map[string]struct{}, len(publicBuiltins))
+	for _, name := range publicBuiltins {
+		public[name] = struct{}{}
+	}
+	system := make(map[string]struct{}, len(systemBuiltins))
+	for _, name := range systemBuiltins {
+		system[name] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(def.Subagents))
+	for i, entry := range def.Subagents {
+		where := fmt.Sprintf("agents.definitions.%s.subagents[%d]", agentID, i)
+		name := strings.ToLower(strings.TrimSpace(entry.Name))
+		if !subagentConfigNamePattern.MatchString(name) {
+			return fmt.Errorf("%s: invalid name %q: use lower-case letters, digits and dashes, starting with a letter", where, entry.Name)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("%s: duplicate subagent name %q", where, name)
+		}
+		seen[name] = struct{}{}
+		if _, ok := system[name]; ok {
+			return fmt.Errorf("%s: %q is dispatched by the system and cannot be configured", where, name)
+		}
+		if _, ok := public[name]; ok {
+			if strings.TrimSpace(entry.Description) != "" || strings.TrimSpace(entry.Tools) != "" || len(entry.AllowedTools) > 0 || entry.Continuable != nil {
+				return fmt.Errorf("%s: %q is a built-in: it takes a model, a reasoning effort, a system prompt and enabled, nothing else", where, name)
+			}
+		} else {
+			if strings.TrimSpace(entry.Description) == "" {
+				return fmt.Errorf("%s: description required", where)
+			}
+			if strings.TrimSpace(entry.SystemPrompt) == "" {
+				return fmt.Errorf("%s: system_prompt required", where)
+			}
+			switch tools := strings.TrimSpace(entry.Tools); tools {
+			case "", SubagentToolsReadOnly, SubagentToolsEdit, SubagentToolsPick:
+			default:
+				return fmt.Errorf("%s: tools %q must be %s, %s or %s", where, entry.Tools, SubagentToolsReadOnly, SubagentToolsEdit, SubagentToolsPick)
+			}
+			if strings.TrimSpace(entry.Tools) == SubagentToolsPick {
+				if len(entry.AllowedTools) == 0 {
+					return fmt.Errorf("%s: allowed_tools requires at least one tool with tools: %s", where, SubagentToolsPick)
+				}
+				for _, allowed := range entry.AllowedTools {
+					if strings.HasPrefix(strings.ToLower(strings.TrimSpace(allowed)), "subagent_") {
+						return fmt.Errorf("%s: allowed_tools cannot contain %q: a subagent cannot dispatch subagents", where, allowed)
+					}
+				}
+			}
+		}
+		if err := validateSubagentModel(where, entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSubagentModel enforces the "provider/model" shape and the rule that
+// a reasoning effort only means something next to an explicit model.
+func validateSubagentModel(where string, entry SubagentConfig) error {
+	model := strings.TrimSpace(entry.Model)
+	if model == "" {
+		if strings.TrimSpace(entry.ReasoningEffort) != "" {
+			return fmt.Errorf("%s: reasoning_effort requires model", where)
+		}
+		return nil
+	}
+	provider, name, found := strings.Cut(model, "/")
+	if !found || strings.TrimSpace(provider) == "" || strings.TrimSpace(name) == "" || strings.Contains(name, "/") {
+		return fmt.Errorf("%s: model %q must be provider/model", where, entry.Model)
+	}
+	return nil
 }
 
 func DefaultMaxParallelSubagents() int {

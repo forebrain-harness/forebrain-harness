@@ -43,7 +43,7 @@
               first="desc"
               @sort="sortBy"
             />
-            <th class="text-right">{{ t('memories.colActions') }}</th>
+            <th class="text-center">{{ t('memories.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

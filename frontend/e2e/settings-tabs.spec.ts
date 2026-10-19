@@ -93,6 +93,7 @@ test('the sub-navigation is three labelled groups in the design order', async ({
     'group:常规',
     'tab:外观',
     'tab:审批默认',
+    'tab:子代理',
     'group:全局服务',
     'tab:MCP',
     'tab:语言服务器',
@@ -347,12 +348,21 @@ test('no surface draws a heading, a table without a pager, or an untitled icon',
           const cells = tr.querySelectorAll('td')
           if (cells.length < 2) continue
           const last = cells[cells.length - 1]
+          // A subagent's cell opens with its own switch; every other cell is
+          // icon buttons from the start, so a switch after one is a mistake.
+          let afterAction = false
           for (const button of Array.from(last.querySelectorAll('button'))) {
-            actions += 1
             const text = (button.textContent ?? '').trim()
             const label = button.getAttribute('aria-label') ?? text
-            if (!button.classList.contains('forebrain-row-action')) badActions.push(`「${label}」is not a row action`)
-            else if (text !== '') badActions.push(`「${label}」carries text`)
+            if (button.classList.contains('forebrain-switch')) {
+              if (afterAction) badActions.push(`「${label}」is a switch after a row action`)
+            } else if (button.classList.contains('forebrain-row-action')) {
+              afterAction = true
+              actions += 1
+            } else {
+              badActions.push(`「${label}」is not a row action or a switch`)
+            }
+            if (text !== '') badActions.push(`「${label}」carries text`)
           }
         }
         return { withoutPager, badActions, tables: tables.length, actions }

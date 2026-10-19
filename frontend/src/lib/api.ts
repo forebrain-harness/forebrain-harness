@@ -588,6 +588,10 @@ export interface McpServerRow {
   shadowedByName?: string
   /** Project view: the one-line summary of an entry awaiting confirmation. */
   summary?: string
+  /** Project view: the fingerprint of the entry as this row was rendered
+   * from it. The per-row 允许 / 拒绝 sends it back so the server records the
+   * decision against exactly the entry the operator was shown. */
+  fingerprint?: string
 }
 
 /** What a create or an update answers: the entry as it now reads on disk. */
@@ -886,6 +890,10 @@ export interface ProjectLspRow {
    * server only knows by id. */
   summary: string
   status: 'pending' | 'allowed' | 'denied'
+  /** The fingerprint of the entry as this row was rendered from it. The
+   * per-row 允许 / 拒绝 sends it back so the server records the decision
+   * against exactly the entry the operator was shown. */
+  fingerprint: string
 }
 
 /** One row of a project's channel table. */
@@ -1704,6 +1712,85 @@ export type AgentRosterResponse = {
   records: AgentRosterRow[]
 }
 
+/** What kind of subagent a row is: a built-in the model may dispatch, one this
+ *  primary agent defines itself, or a built-in the system dispatches at its own
+ *  occasions and nobody configures. */
+export type SubagentKind = 'builtin' | 'custom' | 'system'
+
+/** A subagent's tool tier: reading only, everything an edit may do, the tools
+ *  it picks one by one, or none at all. */
+export type SubagentTools = 'read_only' | 'edit' | 'pick' | 'none'
+
+/** One row of the subagent page: a subagent as this primary agent configures
+ *  it, which is a configuration fact and not a runtime one. */
+export interface SubagentConfigRow {
+  name: string
+  kind: SubagentKind
+  description: string
+  /** The model the subagent runs on; both empty when it follows the
+   *  conversation's model. */
+  modelProvider: string
+  model: string
+  reasoningEffort: string
+  /** Where the model above came from: this agent's own subagent configuration,
+   *  the legacy per-type `agents.definitions.<type>.llm_providers` entry, or —
+   *  empty — the conversation's model. */
+  modelSource: 'agent' | 'global' | ''
+  tools: SubagentTools
+  allowedTools: string[]
+  continuable: boolean
+  /** This row's own switch; null for a system subagent, which has none. */
+  enabled: boolean | null
+  /** A built-in whose system prompt this primary agent rewrote. */
+  promptOverridden: boolean
+}
+
+/** One row as the drawer opens it: the row plus the prompt that will actually
+ *  be injected, and — for a built-in or a system subagent — the harness's own
+ *  text it restores to. */
+export interface SubagentConfigDetail extends SubagentConfigRow {
+  systemPrompt: string
+  defaultPrompt?: string
+}
+
+/** One page of the subagent page's table, with the two switches the toolbar
+ *  shows beside it: this agent's own, and the global default it follows until
+ *  the agent sets one. */
+export interface SubagentConfigPage {
+  rows: SubagentConfigRow[]
+  total: number
+  page: number
+  pageSize: number
+  switch: boolean
+  global: boolean
+}
+
+/**
+ * What a subagent write carries, in the page's own spelling. A custom subagent
+ * is written whole; a built-in takes only the model, the effort, the prompt and
+ * the switch, and `resetPrompt` is its "restore the default" — it clears the
+ * rewrite and leaves the pinned model alone.
+ */
+export interface SubagentConfigBody {
+  name?: string
+  description?: string
+  model?: string
+  reasoningEffort?: string
+  systemPrompt?: string
+  tools?: SubagentTools
+  allowedTools?: string[]
+  continuable?: boolean
+  enabled?: boolean
+  resetPrompt?: boolean
+}
+
+/** The route one primary agent's subagents live on; `tail` names the one entry
+ *  a write addresses, empty for the list itself. */
+function subagentScopedPath(agentId: string, tail: string): string {
+  const base = `/agents/primary/${encodeURIComponent(agentId)}/subagents`
+  return tail ? `${base}/${encodeURIComponent(tail)}` : base
+}
+
 const api = axios.create({
   baseURL: API_BASE,
   timeout: 600000,
@@ -1889,6 +1976,7 @@ function mcpRowFromWire(wire: Record<string, unknown>): McpServerRow {
   if ('shadowed_by' in wire) row.shadowedBy = text('shadowed_by')
   if ('shadowed_by_name' in wire) row.shadowedByName = text('shadowed_by_name')
   if ('summary' in wire) row.summary = text('summary')
+  if ('fingerprint' in wire) row.fingerprint = text('fingerprint')
   return row
 }
 
@@ -1978,6 +2066,89 @@ export const forebrainApi = {
       '/agents/cancel-all',
       {},
     )
+  },
+
+  /** One page of one primary agent's subagents: its custom ones first, then the
+   * built-ins the model may dispatch, then the ones the system dispatches. The
+   * search, the `kind` filter, the order and the slice are the server's, and the
+   * answer carries the agent's own subagent switch beside the global one. */
+  subagentConfigPage(
+    agentId: string,
+    query: ListQuery & { kind?: SubagentKind | '' },
+  ): Promise<SubagentConfigPage> {
+    return api
+      .get<{ rows?: SubagentConfigRow[]; switch?: boolean; global?: boolean } & ListPageMeta>(
+        subagentScopedPath(agentId, ''),
+        { params: listParams(query) },
+      )
+      .then((res) => ({
+        rows: Array.isArray(res.data?.rows) ? res.data.rows : [],
+        total: Number(res.data?.total ?? 0),
+        page: Number(res.data?.page ?? 1),
+        pageSize: Number(res.data?.pageSize ?? query.pageSize),
+        switch: res.data?.switch === true,
+        global: res.data?.global === true,
+      }))
+  },
+
+  /** One subagent with the prompt it will actually run on. */
+  subagentConfig(agentId: string, name: string) {
+    return api
+      .get<SubagentConfigDetail>(subagentScopedPath(agentId, name))
+      .then((res) => res.data)
+  },
+
+  /** Create a subagent of this primary agent's own; it goes to the front of the
+   * list. The answer names what was written — the page reloads to show it. */
+  createSubagentConfig(agentId: string, body: SubagentConfigBody) {
+    return postRaw<{ name: string }>(subagentScopedPath(agentId, ''), toSnakeCase(body))
+  },
+
+  /** Write one subagent: a custom one whole, or the settings a built-in takes.
+   * The name is the entry's identity and comes from the route, so an update
+   * never renames. The body is in the file's own spelling — `system_prompt`,
+   * `reasoning_effort`, `reset_prompt` — and its values, a prompt or a tool
+   * name among them, are never rewritten. */
+  updateSubagentConfig(agentId: string, name: string, body: SubagentConfigBody) {
+    return putRaw<{ name: string }>(subagentScopedPath(agentId, name), toSnakeCase(body))
+  },
+
+  deleteSubagentConfig(agentId: string, name: string) {
+    return api
+      .delete<{ name: string }>(subagentScopedPath(agentId, name))
+      .then((res) => res.data)
+  },
+
+  /** One row's switch. The answer is the agent's switch after the write: a row
+   * switched on turns the feature on here, and the last row switched off turns
+   * it off, so the toolbar reads the server's answer rather than predicting it. */
+  setSubagentEnabled(agentId: string, name: string, enabled: boolean) {
+    return putRaw<{ switch: boolean }>(`${subagentScopedPath(agentId, name)}/enabled`, { enabled })
+  },
+
+  /** This primary agent's own subagent switch, and every row with it. */
+  setAgentSubagentSwitch(agentId: string, enabled: boolean) {
+    return putRaw<{ switch: boolean }>(`/agents/primary/${encodeURIComponent(agentId)}/subagent-switch`, { enabled })
+  },
+
+  /** The global subagent switch (agents.defaults.enable_subagent), which every
+   * primary agent follows until it sets its own. */
+  subagentDefaults() {
+    return api
+      .get<{ enabled?: boolean }>('/agents/defaults/subagents')
+      .then((res) => ({ enabled: res.data?.enabled === true }))
+  },
+
+  setSubagentDefaults(enabled: boolean) {
+    return putRaw<{ enabled: boolean }>('/agents/defaults/subagents', { enabled })
+  },
+
+  /** The models this agent may pin a subagent to: the same list the
+   * conversation's own model menu offers. */
+  subagentModelOptions(agentId: string) {
+    return api
+      .get<{ options?: SessionModelOption[] }>(`/agents/primary/${encodeURIComponent(agentId)}/model-options`)
+      .then((res) => (Array.isArray(res.data?.options) ? res.data.options : []))
   },
 
   /** The agent's conversations of one purpose: '' the drawer lists,
@@ -3049,9 +3220,15 @@ export const forebrainApi = {
    * the name is also in `allow`, decline otherwise — and leave every other
    * entry as it was; this is also how a declined entry is allowed again. Without
    * `decide` the endpoint decides the whole undecided set, which is what the
-   * terminal's startup prompt does. */
-  projectMcpConsent(id: string, allow: string[], decide?: string[]) {
-    const body: { allow: string[]; decide?: string[] } = decide ? { allow, decide } : { allow }
+   * terminal's startup prompt does.
+   *
+   * `fingerprints` carries each decided entry's fingerprint as the page showed
+   * it; the server records nothing and answers 409 when any entry no longer
+   * matches. It travels as an array — postJson snake-cases object keys, which
+   * would corrupt an object keyed by entry name (`my-server` → `my_server`). */
+  projectMcpConsent(id: string, allow: string[], decide?: string[], fingerprints?: Array<{ name: string; fingerprint: string }>) {
+    const body: { allow: string[]; decide?: string[]; fingerprints?: Array<{ name: string; fingerprint: string }> } =
+      decide ? { allow, decide, fingerprints } : { allow }
     return postJson<{ ok: boolean }, typeof body>(`/v1/projects/${encodeURIComponent(id)}/mcp/consent`, body)
   },
 
@@ -3080,9 +3257,12 @@ export const forebrainApi = {
   },
 
   /** Same two shapes as the MCP consent above: `decide` names the one entry
-   * this click decides, and a declined entry has no other way back. */
-  projectLspConsent(id: string, allow: string[], decide?: string[]) {
-    const body: { allow: string[]; decide?: string[] } = decide ? { allow, decide } : { allow }
+   * this click decides, and a declined entry has no other way back.
+   * `fingerprints` (id in `name`) binds the decision to the entry the page
+   * showed; array for the same key-rewrite reason as above. */
+  projectLspConsent(id: string, allow: string[], decide?: string[], fingerprints?: Array<{ name: string; fingerprint: string }>) {
+    const body: { allow: string[]; decide?: string[]; fingerprints?: Array<{ name: string; fingerprint: string }> } =
+      decide ? { allow, decide, fingerprints } : { allow }
     return postJson<{ ok: boolean; allowed: string[] }, typeof body>(`/v1/projects/${encodeURIComponent(id)}/lsp/consent`, body)
   },
 

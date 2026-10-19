@@ -43,7 +43,7 @@
               <th>{{ t('providers.colModels') }}</th>
               <th>{{ t('providers.colBaseUrl') }}</th>
               <th>{{ t('providers.colKey') }}</th>
-              <th class="text-right">{{ t('providers.colActions') }}</th>
+              <th class="text-center">{{ t('providers.colActions') }}</th>
             </tr>
           </thead>
           <tbody>

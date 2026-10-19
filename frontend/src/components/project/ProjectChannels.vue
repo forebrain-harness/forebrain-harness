@@ -40,7 +40,7 @@
             <th>{{ t('channels.colIdentity') }}</th>
             <th>{{ t('channels.colConfig') }}</th>
             <th>{{ t('channels.enabled') }}</th>
-            <th class="text-right">{{ t('projects.colActions') }}</th>
+            <th class="text-center">{{ t('projects.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

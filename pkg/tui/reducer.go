@@ -3555,7 +3555,7 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 		// The cursor is the renderer's own state — keyed by agent, kept on
 		// the view by every view change — so it is resolved here, against
 		// the renderer that owns it, rather than tracked by the caller.
-		marked := agentRosterMarkedIndex(roster, cs.RosterFocused, r.rosterCursorIndex(roster), r.activeView)
+		marked := agentRosterMarkedIndex(roster, cs.RosterFocused, r.rosterCursorIndex(roster))
 		rosterLines = formatAgentRosterLines(roster, cs.RosterFocused, marked, termWidth)
 	}
 
@@ -3615,6 +3615,11 @@ func (r *Renderer) buildNormalComposerBlock(cs ComposerRenderState, composerText
 	}
 	for i := range lines {
 		lines[i] = stripTerminalBells(lines[i])
+	}
+	if rosterVisible && cs.RosterFocused {
+		// The keyboard is on the roster, whose ❯ marks it: the composer shows
+		// no caret, so there is one place the keyboard can be seen.
+		cursorRow = -1
 	}
 	return composerBlock{lines: lines, cursorRow: cursorRow, cursorCol: cursorCol, text: textArea}
 }

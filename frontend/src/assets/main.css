@@ -1164,8 +1164,13 @@ textarea.forebrain-field {
   font-size: 12.5px;
   color: var(--forebrain-text);
 }
-.forebrain-table th {
+/* The default alignment must not outrank a utility class on the cell: the
+   actions header is centred with `text-center`, and a table rule of higher
+   specificity would silently win over it. */
+:where(.forebrain-table) th {
   text-align: left;
+}
+.forebrain-table th {
   font-weight: 600;
   font-size: 12px;
   color: var(--forebrain-text-2);

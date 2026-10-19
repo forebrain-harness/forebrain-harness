@@ -57,7 +57,7 @@
               first="desc"
               @sort="sortBy"
             />
-            <th class="text-right">{{ t('projects.colActions') }}</th>
+            <th class="text-center">{{ t('projects.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

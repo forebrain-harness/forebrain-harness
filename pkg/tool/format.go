@@ -1523,6 +1523,24 @@ func FormatWebSearchResult(content string) (string, bool) {
 
 const maxWebSearchEnvelopeDepth = 5
 
+// webSearchItemKeys are the provider keys whose array holds the results, and
+// webSearchNestedItemKeys are the keys that wrap another object one level in
+// (Brave keeps its results under `web`). Both the display path and the payload
+// governor read the result list through them, so the two never disagree about
+// where the results are.
+var webSearchItemKeys = []string{"results", "references", "search_results", "items", "value"}
+
+var webSearchNestedItemKeys = []string{"web", "webPages", "data", "result", "search_result"}
+
+func isWebSearchItemKey(key string) bool {
+	for _, candidate := range webSearchItemKeys {
+		if key == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 func webSearchDisplayFromValue(value any, depth int) (webSearchDisplay, bool) {
 	if depth >= maxWebSearchEnvelopeDepth {
 		return webSearchDisplay{}, false
@@ -1531,7 +1549,16 @@ func webSearchDisplayFromValue(value any, depth int) (webSearchDisplay, bool) {
 	case string:
 		var nested any
 		if json.Unmarshal([]byte(strings.TrimSpace(typed)), &nested) != nil {
-			return webSearchDisplay{}, false
+			// A body that does not parse still holds every result object that
+			// was complete before its cut. Sessions recorded by builds that
+			// trimmed the provider response at a byte budget are replayed from
+			// history, and the model did read those results, so show them
+			// instead of reporting that the provider found nothing.
+			results := webSearchResultsFromItems(truncatedWebSearchItems(typed))
+			if len(results) == 0 {
+				return webSearchDisplay{}, false
+			}
+			return webSearchDisplay{Results: results, Truncated: true}, true
 		}
 		return webSearchDisplayFromValue(nested, depth+1)
 	case []any:
@@ -1539,20 +1566,29 @@ func webSearchDisplayFromValue(value any, depth int) (webSearchDisplay, bool) {
 	case map[string]any:
 		// Step events wrap a tool's textual return value in `output`.
 		if output, ok := typed["output"]; ok {
-			if display, nestedOK := webSearchDisplayFromValue(output, depth+1); nestedOK {
-				return display, true
+			display, nestedOK := webSearchDisplayFromValue(output, depth+1)
+			if !nestedOK {
+				return webSearchDisplay{}, false
 			}
-			return webSearchDisplay{}, true
+			return display, true
 		}
 
 		// The local web_search tool wraps the provider response in `body` and
 		// keeps transport-only fields alongside it.
 		if body, ok := typed["body"]; ok {
-			display, _ := webSearchDisplayFromValue(body, depth+1)
+			display, parsed := webSearchDisplayFromValue(body, depth+1)
 			display.Status = intFromAny(typed["status"])
-			display.Truncated, _ = typed["truncated"].(bool)
+			if truncated, _ := typed["truncated"].(bool); truncated {
+				display.Truncated = true
+			}
 			if display.Error == "" {
 				display.Error = webSearchErrorFromMap(typed)
+			}
+			if !parsed && display.Error == "" && display.Status < 400 {
+				// A body we could not read and a provider that reported no
+				// results are two different facts; only the latter may be called
+				// "No search results found."
+				return webSearchDisplay{}, false
 			}
 			return display, true
 		}
@@ -1572,7 +1608,7 @@ func webSearchDisplayFromValue(value any, depth int) (webSearchDisplay, bool) {
 }
 
 func webSearchResultItems(payload map[string]any, depth int) ([]any, bool) {
-	for _, key := range []string{"results", "references", "search_results", "items", "value"} {
+	for _, key := range webSearchItemKeys {
 		value, ok := payload[key]
 		if !ok {
 			continue
@@ -1586,7 +1622,7 @@ func webSearchResultItems(payload map[string]any, depth int) ([]any, bool) {
 	if depth+1 >= maxWebSearchEnvelopeDepth {
 		return nil, false
 	}
-	for _, key := range []string{"web", "webPages", "data", "result", "search_result"} {
+	for _, key := range webSearchNestedItemKeys {
 		nested, ok := payload[key].(map[string]any)
 		if !ok {
 			continue
@@ -1596,6 +1632,77 @@ func webSearchResultItems(payload map[string]any, depth int) ([]any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// truncatedWebSearchItems rescues the result objects that survive inside a
+// provider response that does not parse as one document: a body cut off
+// mid-token, which is what sessions recorded by older builds hold. The cut
+// damages only the last, unfinished token, so each complete element of the
+// result array can still be decoded on its own — the scan walks the tokens to
+// find that array, decodes its elements one at a time, and keeps whatever
+// decoded before the cut. Elements are returned as decoded values for
+// webSearchResultsFromItems.
+func truncatedWebSearchItems(body string) []any {
+	type frame struct {
+		object    bool
+		expectKey bool // an object's next token names the key of the value slot
+		key       string
+	}
+	var (
+		stack   []frame
+		items   []any
+		decoder = json.NewDecoder(strings.NewReader(body))
+	)
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return items
+		}
+		top := len(stack) - 1
+		switch typed := token.(type) {
+		case json.Delim:
+			switch typed {
+			case '{', '[':
+				// A container occupies the value slot of the object that holds
+				// it, so the parent's next token is a key again.
+				if top >= 0 && stack[top].object {
+					stack[top].expectKey = true
+				}
+				stack = append(stack, frame{object: typed == '{', expectKey: typed == '{'})
+				if typed != '[' || top < 0 || !stack[top].object || !isWebSearchItemKey(stack[top].key) || len(stack) > maxWebSearchEnvelopeDepth {
+					continue
+				}
+				for decoder.More() {
+					var item any
+					if err := decoder.Decode(&item); err != nil {
+						return items
+					}
+					items = append(items, item)
+				}
+			case '}', ']':
+				if top >= 0 {
+					stack = stack[:top]
+				}
+			}
+		case string:
+			// A string is a key exactly when it fills an object's key slot;
+			// every other token fills a value slot.
+			if top < 0 || !stack[top].object {
+				continue
+			}
+			if stack[top].expectKey {
+				stack[top].key = typed
+				stack[top].expectKey = false
+				continue
+			}
+			stack[top].expectKey = true
+		default:
+			// Scalars other than strings can only fill a value slot.
+			if top >= 0 && stack[top].object {
+				stack[top].expectKey = true
+			}
+		}
+	}
 }
 
 func webSearchResultsFromItems(items []any) []webSearchDisplayResult {

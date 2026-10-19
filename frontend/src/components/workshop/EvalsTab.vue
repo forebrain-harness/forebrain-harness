@@ -1,8 +1,8 @@
 <template>
   <div class="space-y-3" data-testid="workshop-evals">
-    <div class="flex items-center justify-between gap-2">
-      <span class="text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabEvals') }}</span>
-      <div v-if="!running" class="flex items-center gap-1.5">
+    <div class="flex flex-wrap items-center justify-between gap-2 gap-y-1.5">
+      <span class="whitespace-nowrap text-[13px] font-semibold text-[var(--forebrain-text)]">{{ t('workshop.tabEvals') }}</span>
+      <div v-if="!running" class="flex shrink-0 items-center gap-1.5">
         <select v-if="iterations.length" v-model="selected" class="forebrain-field h-7 w-[130px] text-[12px]" data-testid="workshop-eval-round">
           <option v-for="iter in iterations" :key="iter.name" :value="iter.name">{{ roundLabel(iter) }}</option>
         </select>

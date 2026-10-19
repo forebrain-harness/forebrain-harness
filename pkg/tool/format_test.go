@@ -260,11 +260,93 @@ func TestFormatToolStepResultWebSearchMalformedPayloadFailsReadably(t *testing.T
 		Output:   map[string]any{"output": `{"status":200,"body":"not-json"}`},
 	}
 	body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
-	if body != "No search results found." {
+	// A body we cannot read is not the same fact as a provider that returned no
+	// results, so it may not claim the search found nothing.
+	if body != "Web search completed, but its results could not be displayed." {
 		t.Fatalf("unexpected safe fallback: %q", body)
 	}
 	if strings.Contains(body, "not-json") || strings.Contains(body, "{") {
 		t.Fatalf("fallback exposed transport payload: %q", body)
+	}
+}
+
+func TestFormatToolStepResultWebSearchEmptyProviderResultsSaySo(t *testing.T) {
+	t.Parallel()
+	evt := StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "web_search",
+		Output:   map[string]any{"output": `{"status":200,"body":"{\"query\":\"nothing\",\"results\":[]}"}`},
+	}
+	body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if body != "No search results found." {
+		t.Fatalf("empty provider result list = %q", body)
+	}
+}
+
+// Sessions recorded by builds that trimmed the provider response at a byte
+// budget hold invalid JSON that still carries every result object completed
+// before the cut. The card must show those results: the model read them, so
+// claiming "No search results found." is a lie about the turn.
+func TestFormatToolStepResultWebSearchRescuesResultsFromTruncatedPayload(t *testing.T) {
+	t.Parallel()
+	complete := `{"query":"go release","results":[` +
+		`{"title":"Go 1.24 Release Notes","url":"https://go.dev/doc/go1.24","content":"Changes to the language."},` +
+		`{"title":"Go Blog","url":"https://go.dev/blog/","content":"Official Go news."},`
+	for _, test := range []struct {
+		name         string
+		providerBody string
+		want         []string
+		unreadable   bool
+	}{
+		{
+			name:         "cut inside the next result's content",
+			providerBody: complete + `{"title":"Cut Result","url":"https://go.dev/cut","content":"This snippet was cut`,
+			want:         []string{"**2 search results**", "1. [Go 1.24 Release Notes](https://go.dev/doc/go1.24)", "2. [Go Blog](https://go.dev/blog/)", "Some provider response data was omitted because it was too large."},
+		},
+		{
+			name:         "cut before the first result completed",
+			providerBody: `{"query":"go release","results":[{"title":"Cut Result","url":"https://go.d`,
+			unreadable:   true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transport := map[string]any{
+				"status":       200,
+				"content_type": "application/json",
+				"limit":        3,
+				"body":         test.providerBody,
+				"truncated":    true,
+				"rule_content": "query:go release",
+			}
+			rawTransport, err := json.Marshal(transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evt := StepEvent{
+				Kind:     StepKindToolCompleted,
+				ToolName: "web_search",
+				Input:    map[string]any{"query": "go release", "limit": 3},
+				Output:   map[string]any{"output": string(rawTransport)},
+			}
+			body, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+			if strings.Contains(body, "No search results found.") {
+				t.Fatalf("card claimed zero results for a non-empty provider response:\n%s", body)
+			}
+			if test.unreadable {
+				if body != "Web search completed, but its results could not be displayed." {
+					t.Fatalf("unreadable body = %q", body)
+				}
+				return
+			}
+			for _, want := range test.want {
+				if !strings.Contains(body, want) {
+					t.Fatalf("rescued card missing %q:\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, "Cut Result") || strings.Contains(body, `\"results\"`) {
+				t.Fatalf("card leaked an incomplete result or raw JSON:\n%s", body)
+			}
+		})
 	}
 }
 

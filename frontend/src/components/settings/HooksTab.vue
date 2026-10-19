@@ -45,7 +45,7 @@
             <th>{{ t('hooks.eventLabel') }}</th>
             <th>{{ t('hooks.matcherLabel') }}</th>
             <th>{{ t('hooks.commandLabel') }}</th>
-            <th class="text-right">{{ t('hooks.colActions') }}</th>
+            <th class="text-center">{{ t('hooks.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

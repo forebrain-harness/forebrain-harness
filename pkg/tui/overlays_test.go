@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -836,7 +837,7 @@ func TestSelectorInputClickInsertsAtTheClickedPosition(t *testing.T) {
 	// The panel is bottom-pinned in its fixed height: the rule, the
 	// question, then the field.
 	row := 24 - slashPanelHeight(24) + 2
-	col := displayLineWidth(panelFieldLead) + 2 // between "he" and "llo"
+	col := (&panelField{}).textCol() + 2 // between "he" and "llo"
 	writeMouseClick(t, pw, col, row)
 	time.Sleep(50 * time.Millisecond)
 	pw.Write([]byte("X\r"))
@@ -864,8 +865,8 @@ func TestSelectorFilterClickInsertsAtTheClickedPosition(t *testing.T) {
 	st.applyFilter()
 
 	sel := &rawSelector{}
-	filterCol := displayLineWidth(panelFieldLead)
-	if !sel.placeFieldCaret(st.panel(), &st.filter, st.panel().fieldRow(sel.panelWidth()), filterCol+1) {
+	filterCol := st.filter.panelField().textCol()
+	if !sel.placeFieldCaret(st.panel(), &st.filter, st.panel().fieldRow(sel.panelWidth(), sel.panelRows()), filterCol+1) {
 		t.Fatal("a click on the filter row did not reach the filter")
 	}
 	st.filter.insert("X")
@@ -881,14 +882,15 @@ func TestSelectorFilterClickInsertsAtTheClickedPosition(t *testing.T) {
 // software caret takes across a picker's filter row: panelField.row builds the
 // row, panelField.caretCol says which display column the caret occupies, and
 // cellAtDisplayCol hands the painter the one cell to repaint there. The row
-// opens with ›, an East Asian Ambiguous glyph, so a second width model anywhere
+// opens with its margin, the bar and a glyph, so a second width model anywhere
 // in that chain shifts the lookup one column and the caret repaints the
 // character in front of it: typing "a" painted "aa", and on an empty filter the
 // placeholder's leading "T" was replaced by a blank.
 func TestSelectorFilterCaretCellHoldsWhatIsUnderIt(t *testing.T) {
+	const width = 40
 	cell := func(f *filterField) string {
 		field := f.panelField()
-		_, glyph := cellAtDisplayCol([]string{field.row()}, 0, field.caretCol())
+		_, glyph := cellAtDisplayCol([]string{field.row(width)}, 0, field.caretCol())
 		return glyph
 	}
 
@@ -909,7 +911,7 @@ func TestSelectorFilterCaretCellHoldsWhatIsUnderIt(t *testing.T) {
 		runes := []rune(text)
 		lastRune := string(runes[len(runes)-1])
 		last := field.panelField().caretCol() - lipgloss.Width(lastRune)
-		if _, glyph := cellAtDisplayCol([]string{field.panelField().row()}, 0, last); glyph != lastRune {
+		if _, glyph := cellAtDisplayCol([]string{field.panelField().row(width)}, 0, last); glyph != lastRune {
 			t.Errorf("filter %q: cell before the caret = %q, want %q", text, glyph, lastRune)
 		}
 	}
@@ -1476,7 +1478,7 @@ func TestPickersShowEveryRowWhole(t *testing.T) {
 	pickerHead(b, "Migrate\nImport another agent's history, memories and skills")
 	long2.head = b.head
 	head := long2.layout(40, 0, 0, false)
-	if head.caretRow != long2.fieldRow(40) || head.caretRow < 2 || !strings.Contains(stripAnsi(head.lines[head.caretRow]), "Type to filter") {
+	if head.caretRow != long2.fieldRow(40, 0) || head.caretRow < 2 || !strings.Contains(stripAnsi(head.lines[head.caretRow]), "Type to filter") {
 		t.Fatalf("long label head = %q", head.lines)
 	}
 }
@@ -1511,16 +1513,15 @@ func TestRichPickerLaysRowsInTwoColumns(t *testing.T) {
 	}}
 	p.rebuildSelectable()
 	p.cursor = 0
-	requirePlainLines(t, richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80), []string{
+	requirePlainLines(t, richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80), withFilterBar(2, []string{
 		"  Permissions",
 		"  What may run without asking",
-		"› Type to filter",
 		"",
 		"❯ Default    Asks before edits and commands outside the workspace.",
 		"  Read only  Never writes.",
 		"",
 		"  ↑/↓ to navigate · Enter to confirm · Esc to cancel",
-	})
+	}, filterBarPlain(80, "⌕", "Type to filter")))
 	for _, line := range richPickerPanelLines(t, p, "Permissions\nWhat may run without asking", 80) {
 		if strings.Contains(stripANSI(line), " — ") {
 			t.Fatalf("a row still joins name and description with a dash: %q", stripANSI(line))
@@ -1536,9 +1537,8 @@ func TestRichPickerAlignsDescriptionsAcrossGroups(t *testing.T) {
 		{Label: "deepseek-chat", Description: "fast and cheap", Category: "DeepSeek"},
 	}}
 	p.rebuildSelectable()
-	requirePlainLines(t, richPickerPanelLines(t, p, "Model", 80), []string{
+	requirePlainLines(t, richPickerPanelLines(t, p, "Model", 80), withFilterBar(1, []string{
 		"  Model",
-		"› Type to filter",
 		"",
 		"  OpenAI",
 		"❯ gpt-5" + strings.Repeat(" ", 10) + "the default model",
@@ -1547,7 +1547,7 @@ func TestRichPickerAlignsDescriptionsAcrossGroups(t *testing.T) {
 		"  deepseek-chat  fast and cheap",
 		"",
 		"  ↑/↓ to navigate · Enter to confirm · Esc to cancel",
-	})
+	}, filterBarPlain(80, "⌕", "Type to filter")))
 }
 
 // containsRun reports whether needle appears in haystack as one unbroken run.
@@ -1633,6 +1633,313 @@ func TestRichPickerRowsFitAtEveryWidth(t *testing.T) {
 					t.Fatalf("width %d cut a row: %q", width, plain)
 				}
 			}
+		}
+	}
+}
+
+const (
+	keyUp    = "\x1b[A"
+	keyDown  = "\x1b[B"
+	keyEnter = "\r"
+)
+
+// pickerKeys is a selector reading the keys as if typed, the way the other
+// picker tests drive one through a pipe.
+func pickerKeys(t *testing.T, keys string) *rawSelector {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close(); w.Close() })
+	if _, err := w.WriteString(keys); err != nil {
+		t.Fatal(err)
+	}
+	return newRawSelector(r, nil)
+}
+
+// filterBarPlain is how a panel's field shows, as plain text, in its roomy form
+// laid out at width: a blank row above, the bar's padded row, the row with the
+// glyph and the text — the bar's margin and padding before the glyph, a gap
+// after it, the rest of the row filled — and the padded row below. Layout tests
+// use it to spell out a whole panel without repeating the bar's whitespace.
+func filterBarPlain(width int, glyph, text string) []string {
+	pad := strings.Repeat(" ", width)
+	row := "    " + glyph + "  " + text
+	row += strings.Repeat(" ", max(0, width-displayLineWidth(row)))
+	return []string{"", pad, row, pad}
+}
+
+// withFilterBar puts the filter bar's rows into a panel's expected lines after
+// the first head rows.
+func withFilterBar(head int, lines []string, bar []string) []string {
+	out := append([]string(nil), lines[:head]...)
+	out = append(out, bar...)
+	return append(out, lines[head:]...)
+}
+
+// manyOptions is enough options for a picker to show its filter: "alpha",
+// "banana", "cherry", then filler rows that match none of the letters the tests
+// type.
+func manyOptions() []string {
+	options := []string{"alpha", "banana", "cherry"}
+	for i := len(options); i < pickerFilterMinRows+2; i++ {
+		options = append(options, fmt.Sprintf("row-%d", i))
+	}
+	return options
+}
+
+func manyItems() []SelectItem {
+	items := make([]SelectItem, 0, pickerFilterMinRows+2)
+	for _, label := range manyOptions() {
+		items = append(items, SelectItem{Label: label})
+	}
+	return items
+}
+
+// A picker keeps its keyboard either on the rows or in the filter: ↓ from the
+// filter drops onto the first row, ↑ from the first row climbs back, and the
+// rows stop at their ends.
+func TestNavigatePickerMovesBetweenTheFilterAndTheRows(t *testing.T) {
+	type at struct {
+		inFilter bool
+		cursor   int
+	}
+	for _, tc := range []struct {
+		name         string
+		from         at
+		count, delta int
+		noFilter     bool
+		want         at
+	}{
+		{"down from the filter lands on the first row", at{true, 0}, 3, 1, false, at{false, 0}},
+		{"down from the filter with no rows stays", at{true, 0}, 0, 1, false, at{true, 0}},
+		{"up in the filter stays", at{true, 0}, 3, -1, false, at{true, 0}},
+		{"up from the first row climbs to the filter", at{false, 0}, 3, -1, false, at{true, 0}},
+		{"up from a lower row steps up", at{false, 2}, 3, -1, false, at{false, 1}},
+		{"up with no rows climbs to the filter", at{false, 0}, 0, -1, false, at{true, 0}},
+		{"down steps down", at{false, 0}, 3, 1, false, at{false, 1}},
+		{"down on the last row stays", at{false, 2}, 3, 1, false, at{false, 2}},
+		{"up from the first row without a filter stays", at{false, 0}, 3, -1, true, at{false, 0}},
+		{"up without a filter steps up", at{false, 2}, 3, -1, true, at{false, 1}},
+	} {
+		got := tc.from
+		navigatePicker(&got.inFilter, &got.cursor, tc.count, tc.delta, !tc.noFilter)
+		if got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A picker shows its filter only when it has rows enough to need one.
+func TestPickerShowsAFilterOnlyForALongList(t *testing.T) {
+	if pickerShowsFilter(pickerFilterMinRows-1) || !pickerShowsFilter(pickerFilterMinRows) {
+		t.Fatalf("the filter must appear at %d rows, not at %d", pickerFilterMinRows, pickerFilterMinRows-1)
+	}
+	short := []SelectItem{{Label: "Read Only"}, {Label: "Default"}, {Label: "Full Access"}}
+	for _, tc := range []struct {
+		name  string
+		panel slashPanel
+		long  slashPanel
+	}{
+		{"select", (&selectState{options: []string{"a", "b", "c"}, noFilter: true}).panel(), (&selectState{options: manyOptions()}).panel()},
+		{"rich", (&richPickerState{items: short, noFilter: true}).panel("pick"), (&richPickerState{items: manyItems()}).panel("pick")},
+		{"tabbed", newTabbedPickerState(short, TabbedSelectOptions{}, false, "").panel("pick"), newTabbedPickerState(manyItems(), TabbedSelectOptions{}, false, "").panel("pick")},
+	} {
+		if tc.panel.field != nil {
+			t.Errorf("%s: a short picker shows a filter", tc.name)
+		}
+		if tc.long.field == nil {
+			t.Errorf("%s: a long picker shows no filter", tc.name)
+		}
+	}
+}
+
+// A picker shows the ❯ on its focused row or the caret in its filter, never
+// both: it opens with the keyboard on the rows, and with it in the filter the
+// row loses its ❯ — keeping the focus, so the body does not scroll.
+func TestPickerShowsTheArrowOrTheCaretNeverBoth(t *testing.T) {
+	items := manyItems()
+	rich := &richPickerState{items: items}
+	rich.rebuildSelectable()
+	sel := &selectState{options: manyOptions(), label: "pick"}
+	sel.applyFilter()
+	tabbed := newTabbedPickerState(items, TabbedSelectOptions{}, false, "")
+
+	for _, tc := range []struct {
+		name   string
+		panel  func(inFilter bool) slashPanel
+		opened func() bool
+	}{
+		{"select", func(in bool) slashPanel { sel.inFilter = in; return sel.panel() }, func() bool { return sel.inFilter }},
+		{"rich", func(in bool) slashPanel { rich.inFilter = in; return rich.panel("pick") }, func() bool { return rich.inFilter }},
+		{"tabbed", func(in bool) slashPanel { tabbed.inFilter = in; return tabbed.panel("pick") }, func() bool { return tabbed.inFilter }},
+	} {
+		if tc.opened() {
+			t.Errorf("%s: opens with the keyboard in the filter, want it on the rows", tc.name)
+		}
+		for _, inFilter := range []bool{false, true} {
+			panel := tc.panel(inFilter)
+			layout := panel.layout(60, 0, 0, false)
+			arrows := 0
+			for _, line := range layout.lines {
+				arrows += strings.Count(stripANSI(line), selectorCursorGlyph)
+			}
+			wantArrows, wantCaret := 1, false
+			if inFilter {
+				wantArrows, wantCaret = 0, true
+			}
+			if arrows != wantArrows || (layout.caretRow >= 0) != wantCaret {
+				t.Errorf("%s, keyboard in filter=%v: %d arrows, caret row %d; want %d arrows, caret=%v",
+					tc.name, inFilter, arrows, layout.caretRow, wantArrows, wantCaret)
+			}
+			if !strings.Contains(stripANSI(strings.Join(layout.lines, "\n")), "Type to filter") {
+				t.Errorf("%s, keyboard in filter=%v: the filter row is gone", tc.name, inFilter)
+			}
+			if panel.focusEnd <= panel.focusStart {
+				t.Errorf("%s, keyboard in filter=%v: the cursor row lost its focus, so the body would not follow it", tc.name, inFilter)
+			}
+		}
+	}
+}
+
+// The filter is a bar the keyboard brightens: its glyph is a magnifier, never
+// the › or ❯ a row could be mistaken for, and the bar dims while the keyboard is
+// on the list.
+func TestFilterBarDimsWhileTheKeyboardIsOnTheList(t *testing.T) {
+	focused := (&filterField{}).pickerField(true).row(40)
+	blurred := (&filterField{}).pickerField(false).row(40)
+	for name, row := range map[string]string{"focused": focused, "blurred": blurred} {
+		plain := stripANSI(row)
+		if !strings.Contains(plain, panelFilterGlyph) || strings.ContainsAny(plain, "›❯") {
+			t.Errorf("%s filter row = %q, want the magnifier and no arrow", name, plain)
+		}
+		if displayLineWidth(row) != 40 {
+			t.Errorf("%s filter row is %d columns wide, want the 40 it was laid out at", name, displayLineWidth(row))
+		}
+	}
+	if focused == blurred || !strings.Contains(focused, panelFieldFocusedBg) || !strings.Contains(blurred, panelFieldBlurredBg) {
+		t.Errorf("the bar must change with the keyboard:\nfocused %q\nblurred %q", focused, blurred)
+	}
+}
+
+// ↑ from the first row reaches the filter, ↓ comes back down onto the first
+// row, and the cursor then walks the rows again.
+func TestSelectKeyboardMovesBetweenTheFilterAndTheRows(t *testing.T) {
+	// Opens on "cherry" (row 2): ↑ → banana, ↑ → alpha, ↑ → the filter, ↓ →
+	// alpha, ↓ → banana.
+	sel := pickerKeys(t, keyUp+keyUp+keyUp+keyDown+keyDown+keyEnter)
+	got, ok, err := sel.Select("pick", manyOptions(), "cherry")
+	if err != nil || !ok || got != "banana" {
+		t.Fatalf("Select = %q, %v, %v; want banana", got, ok, err)
+	}
+}
+
+// Typing while the keyboard is on the rows filters, as it did before the
+// keyboard could leave the filter.
+func TestSelectTypingOnTheRowsFiltersThem(t *testing.T) {
+	sel := pickerKeys(t, "an"+keyEnter)
+	got, ok, err := sel.Select("pick", manyOptions(), "cherry")
+	if err != nil || !ok || got != "banana" {
+		t.Fatalf("Select = %q, %v, %v; want banana", got, ok, err)
+	}
+}
+
+// A short picker has no filter to type into: letters and edits do nothing, and
+// ↑ stops at the first row instead of leaving the list.
+func TestShortSelectIgnoresTypingAndKeepsTheKeyboardOnTheRows(t *testing.T) {
+	// "x" matches nothing, yet the list is still whole; ↑ from "alpha" stays
+	// on it, so Enter takes alpha.
+	sel := pickerKeys(t, "xyz\x7f"+keyUp+keyUp+keyEnter)
+	got, ok, err := sel.Select("pick", []string{"alpha", "banana", "cherry"}, "banana")
+	if err != nil || !ok || got != "alpha" {
+		t.Fatalf("Select = %q, %v, %v; want alpha", got, ok, err)
+	}
+}
+
+func TestSelectRichKeyboardMovesBetweenTheFilterAndTheRows(t *testing.T) {
+	// ↓ → row 1, ↑ → row 0, ↑ → the filter, ↓ → row 0, ↓ → row 1.
+	sel := pickerKeys(t, keyDown+keyUp+keyUp+keyDown+keyDown+keyEnter)
+	idx, ok, err := sel.SelectRich("pick", manyItems(), -1)
+	if err != nil || !ok || idx != 1 {
+		t.Fatalf("SelectRich = %d, %v, %v; want 1", idx, ok, err)
+	}
+}
+
+// In a multi-select Space toggles the focused row while the keyboard is on the
+// rows, and is a character of the filter while it is in the filter.
+func TestMultiSelectSpaceFollowsTheKeyboard(t *testing.T) {
+	// Space checks alpha, ↓ Space checks banana, ↑ ↑ climbs to the filter, where
+	// Space is text and checks nothing.
+	sel := pickerKeys(t, " "+keyDown+" "+keyUp+keyUp+" "+keyEnter)
+	got, ok, err := sel.MultiSelect("pick", manyOptions(), nil)
+	if err != nil || !ok || !reflect.DeepEqual(got, []string{"alpha", "banana"}) {
+		t.Fatalf("MultiSelect = %q, %v, %v; want [alpha banana]", got, ok, err)
+	}
+}
+
+// A short multi-select has no filter, so Space always toggles.
+func TestShortMultiSelectSpaceAlwaysToggles(t *testing.T) {
+	sel := pickerKeys(t, " "+keyUp+" "+keyEnter)
+	got, ok, err := sel.MultiSelect("pick", []string{"a", "b", "c"}, nil)
+	if err != nil || !ok || len(got) != 0 {
+		t.Fatalf("MultiSelect = %q, %v, %v; want the toggle undone", got, ok, err)
+	}
+}
+
+// The filter bar takes its roomy form — air above it and a padded row on each
+// side of its text — only where the list under it keeps its room, so a short
+// terminal is not left with a bar and no list.
+func TestFilterBarIsRoomyOnlyWhereTheListKeepsItsRoom(t *testing.T) {
+	st := &selectState{options: manyOptions(), label: "pick", inFilter: true}
+	st.applyFilter()
+	panel := st.panel()
+	const width = 60
+	// One head row and one hint row; the plain frame also holds the bar's row,
+	// the blank under it and the scroll note, 3 rows, and the roomy form adds 3.
+	need := 1 + 3 + 1 + 3 + panelFieldRoomyBodyRows
+	for _, tc := range []struct {
+		rows  int
+		roomy bool
+	}{{need, true}, {need - 1, false}, {0, true}, {11, false}, {19, true}} {
+		if got := panel.fieldRoomy(width, tc.rows); got != tc.roomy {
+			t.Errorf("rows %d: roomy = %v, want %v", tc.rows, got, tc.roomy)
+		}
+		layout := panel.layout(width, tc.rows, 0, false)
+		if want := panel.fieldRow(width, tc.rows); layout.caretRow != want {
+			t.Errorf("rows %d: caret on row %d, fieldRow says %d", tc.rows, layout.caretRow, want)
+		}
+		if tc.rows > 0 && len(layout.lines) != tc.rows {
+			t.Errorf("rows %d: laid out %d rows, the panel must fill the height it is given", tc.rows, len(layout.lines))
+		}
+		first, last := panel.fieldBar(width, tc.rows)
+		if tc.roomy && (last-first != 2 || layout.caretRow != first+1) || !tc.roomy && first != last {
+			t.Errorf("rows %d (roomy %v): bar spans rows %d-%d, caret row %d", tc.rows, tc.roomy, first, last, layout.caretRow)
+		}
+	}
+	if (slashPanel{}).fieldRoomy(width, 0) {
+		t.Error("a panel with no field has no roomy form")
+	}
+}
+
+// A click on any row of the bar — the padded rows around the text included —
+// is a click on the field, and one beside it is not.
+func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
+	forcedTermWidth, forcedTermHeight = 100, 40
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	st := &selectState{options: manyOptions(), label: "pick", inFilter: true}
+	st.applyFilter()
+	st.filter = filterField{text: "abc", cursor: 3}
+	sel := &rawSelector{}
+	first, last := st.panel().fieldBar(sel.panelWidth(), sel.panelRows())
+	if last-first != 2 {
+		t.Fatalf("a 40-row terminal must give the roomy bar, spanning %d-%d", first, last)
+	}
+	col := st.filter.panelField().textCol() + 1
+	for line := first - 2; line <= last+2; line++ {
+		hit := sel.placeFieldCaret(st.panel(), &st.filter, line, col)
+		if want := line >= first && line <= last; hit != want {
+			t.Errorf("click on row %d: reached the filter = %v, want %v", line, hit, want)
 		}
 	}
 }

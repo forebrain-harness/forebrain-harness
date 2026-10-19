@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -268,7 +269,7 @@ func TestDecideProjectServersForOnlyTouchesNamed(t *testing.T) {
     command: /bin/two
 `)
 	ws := t.TempDir()
-	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, nil); err != nil {
+	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, nil, nil); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
 	state := ResolveProjectServers(ws, root, "proj", true)
@@ -301,7 +302,7 @@ func TestDecideProjectServersForAllowsADeniedEntry(t *testing.T) {
 	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Denied) != 2 {
 		t.Fatalf("denied=%v", state.Denied)
 	}
-	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}); err != nil {
+	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}, nil); err != nil {
 		t.Fatalf("decide: %v", err)
 	}
 	state := ResolveProjectServers(ws, root, "proj", true)
@@ -310,6 +311,58 @@ func TestDecideProjectServersForAllowsADeniedEntry(t *testing.T) {
 	}
 	if len(state.Denied) != 1 || state.Denied[0] != "two" {
 		t.Fatalf("denied=%v", state.Denied)
+	}
+}
+
+// A named decision is bound to the entry the surface showed: once the file
+// moves, the call records nothing and names what went stale, and the retry
+// with the fingerprint the file now has succeeds.
+func TestDecideProjectServersForRefusesAChangedEntry(t *testing.T) {
+	root := t.TempDir()
+	path := writeProjectLSP(t, root, "servers:\n  one: {command: /bin/one}\n  two: {command: /bin/two}\n")
+	ws := t.TempDir()
+	pendingFP := func(id string) string {
+		t.Helper()
+		for _, item := range ResolveProjectServers(ws, root, "proj", true).Pending {
+			if item.ID == id {
+				return item.Fingerprint
+			}
+		}
+		t.Fatalf("no pending entry %q", id)
+		return ""
+	}
+	fp1 := pendingFP("one")
+
+	if err := os.WriteFile(path, []byte("servers:\n  one: {command: /bin/changed}\n  two: {command: /bin/two}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}, map[string]string{"one": fp1})
+	var stale *StaleConsentError
+	if !errors.As(err, &stale) {
+		t.Fatalf("err = %v, want *StaleConsentError", err)
+	}
+	if !reflect.DeepEqual(stale.StaleNames(), []string{"one"}) {
+		t.Fatalf("stale names = %v", stale.StaleNames())
+	}
+	if _, err := os.Stat(ProjectConsentPath(ws)); !os.IsNotExist(err) {
+		t.Fatalf("a refused decision must not write a consent store: %v", err)
+	}
+	// two keeps awaiting its own decision as well: a stale name spoils the
+	// whole call, not just itself.
+	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Pending) != 2 {
+		t.Fatalf("nothing may be recorded, so both entries stay pending: %+v", state.Pending)
+	}
+
+	fp2 := pendingFP("one")
+	if fp2 == fp1 {
+		t.Fatal("rewriting the command must change the fingerprint")
+	}
+	if err := DecideProjectServersFor(ws, root, "proj", []string{"one"}, []string{"one"}, map[string]string{"one": fp2}); err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if state := ResolveProjectServers(ws, root, "proj", true); len(state.Allowed) != 1 || state.Allowed["one"].Command != "/bin/changed" {
+		t.Fatalf("allowed=%v", state.Allowed)
 	}
 }
 

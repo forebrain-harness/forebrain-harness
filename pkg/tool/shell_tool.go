@@ -1614,6 +1614,14 @@ func shellSandboxProfile(ctx context.Context) (safety.Profile, bool) {
 	case "explore", "plan", "cavecrew-investigator", "cavecrew-reviewer":
 		readOnlyWorker = true
 	}
+	// A custom subagent's tool policy is configuration rather than a type name,
+	// so the switch above cannot see it. Reading it here is what keeps "read
+	// only" true of the shell: GuardTool refuses write_file and edit_file, and
+	// without this the same run would still reach a workspace-write shell
+	// through `sed -i`.
+	if policy, ok := SubagentToolPolicyFromContext(ctx); ok && policy.Blocks("write_file") {
+		readOnlyWorker = true
+	}
 	// Plan mode is a read-only phase for the session's own agent, not only for
 	// typed workers. GuardWrite cannot carry that promise on its own: shell
 	// writes never pass through it, so without this the plan-mode reminder

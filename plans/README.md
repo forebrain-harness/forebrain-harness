@@ -4,6 +4,14 @@
 
 ## 最新审核信息
 
+- **2026-10-19 `/improve branch`（dev 相对 main，聚焦 `fa4af8a..HEAD` + 未提交的 079）→ 新增 080–082**：
+  - **范围**：dev 比 main 多 13 个提交、792 个文件（大头是 `pkg/gateway/dist` 构建产物与 `assets/tokenizers`）。`bd2b8b8..fa4af8a` 已被 2026-10-16 的分支审计覆盖（055–063），本轮只看其后 8 个提交（385 个非产物文件）与工作区 86 项改动（主要是 079）。**未审**：`pkg/channel`、`pkg/lsp` 其余部分、官网、npm 打包、e2e 用例内容；TUI 渲染 / 输入只扫了 diff（靠既有测试与真机验收）。
+  - **基线（评审方亲跑）**：`go vet ./pkg/... ./cmd/...` 无输出、`gofmt -l` 为空、`pkg/run` `pkg/tool` `pkg/config` `pkg/agent` `pkg/gateway` `pkg/tui` `pkg/migrate` `pkg/state` `pkg/llm` `pkg/architecture` 全 `ok`；`vue-tsc` exit 0；vitest 125 文件 827 例全过。未跑：全量 `go test ./...`、Playwright e2e、Terminal.app 真机视觉、`govulncheck` / `pnpm audit`、Windows / Linux CI。
+  - **080（P1，安全，S）**：自定义子代理被删除后，用户在网页抽屉 / TUI 里再给它发消息，运行时**没有任何工具限制**（评审方在 scratch 副本里复现：配置在时 `write_file` / `edit_file` / `subagent_run` 全拦，删除后全部放行，且丢了自定义系统提示词）。根因：工具策略是配置、续聊时按名字现查，条目没了就没有策略，而静态表对未知类型名放行；模型驱动的 `subagent_continue` 有“已被删除”检查，用户驱动的 `SendToSubagent` 没有，测试也只覆盖前者。修法：入口拒绝 + 兜底（来源 custom 却无策略 → `GuardTool` 全拒、过滤不给工具）。**owner 裁定（2026-10-19）**：已删除的自定义子代理**直接拒绝再发消息**；续聊的工具档位**保持现状取当前配置，不做快照**（评审方给出对照：收紧立即生效、放宽不产生新能力、快照要旁路文件 + 取交集规则，成本 M 而收益小；079 未提交，以后加快照不需要迁移）。
+  - **081（P2，安全，M）**：项目 MCP / LSP 的网页逐行“允许 / 拒绝”只传条目名字，服务端在收到请求时才读文件算指纹——页面开着期间项目文件被改，点“允许”绑定的是改后的新命令，而不是屏幕上的摘要。修法：行带指纹、请求回传、不一致整单 409 且一条都不记；`postJson` 会对请求体做 snake_case 键转换，所以指纹用 `[{name, fingerprint}]` 数组而不是以名字为键的对象。
+  - **082（P2，数据完整性，M）**：`config.Save` 用 `os.WriteFile` 原地截断写（崩溃 / 磁盘满会留下半截 `forebrain.yaml`），网关 16 处读改写无互斥（并发保存静默丢更新，079 的逐行开关把窗口放大了）。修法：同目录临时文件 + fsync + rename（解析符号链接、保留权限、改不了时退回原地写——容器里绑定挂载的单文件），并给子代理与 MCP 两条最频繁的写路径加进程内互斥；其余 12 处留作后续。已核实热重载监视器监视的是目录并按文件名过滤，与原子替换兼容。
+  - **顺序**：080 独立，最好赶在 079 提交前；081、082 都会碰 079 的文件（`frontend/src/lib/api.ts`、`pkg/gateway/subagents_api.go`），建议 079 落地后再做；081 与 082 互不依赖。三份都**不提交、不建 worktree**（依赖工作区里未提交的 079）。
+  - **未立计划的**见下方“已审核但未计划的发现”（INV-01 拆池疑似影响在途回合、三条方向建议）与“已考虑并拒绝的发现”。
 - **2026-10-18 owner 新需求 → 新增 079（子代理配置）**：
   - 菜单栏“子代理”页改为**当前主代理的子代理配置增删改查**，不再是运行中列表。列出内置 10 个：4 个可派发标“内置”、6 个标“系统”只读；再加上自定义的。原型 v67–v80。
   - 现状没有任何自定义能力：派发只认代码里写死的 4 个公开类型；模型只能经全局 `agents.definitions.<类型>.llm_providers` 指定；提示词与工具权限全部固定。
@@ -271,7 +279,10 @@
 | [076-web-settings-tabs](076-web-settings-tabs.md) | 设置页：分组子导航、表单标签打平（标准单选组、底部保存）、表格标签（LSP/钩子/共享技能）服务端分页、配置文件工具栏、运行状态平铺（新 `/api/runtime`）；全站图标按钮提示统一；删 `PageTopRow` | Direction | 已执行（工作区未提交）；2026-10-18 复核通过 | **P1** | M | LOW–MED |
 | [077-web-batch-review-fixes](077-web-batch-review-fixes.md) | 071–076 执行后复核补丁：项目 MCP/LSP 每行只决定这一条、“已拒绝”行可点“允许”撤回（同意接口加 `decide`，新增 `DecideProjectMCPConsentsFor`/`DeclinedProjectMCPConsents`/`DecideProjectServersFor`）；终端 N 的文案改成“已拒绝、去项目页撤回”；设置 · MCP“未运行 · 被覆盖”（`shadowed_by`）；连接状态六种取值；子代理“所在会话”指向父对话 | Correctness / Direction | 已执行（工作区未提交）；2026-10-18 评审复核 APPROVE：Go 五包 `ok`、`vet`/`gofmt` 空、`pnpm test` 116 文件 758 例、`vue-tsc` exit 0、e2e 单文件 8/8 与全套 155 passed；新测试逐条核过断言 | **P1** | M | MED |
 | [078-web-subagent-drawer](078-web-subagent-drawer.md) | 子代理会话（实时与回放）改到右侧抽屉，一个子代理一个标签：任务卡默认折叠、工作中 / 已工作；输入框底栏的“模型与上下文”胶囊（圆环 + 百分比、模型 · 思考强度，点开看窗口、已用、用量）；标签自带输入框（＋ 附件与技能、/ 命令、@ 引用文件、粘贴拖入附件、停止）；抽屉与工作台互斥；顶栏“子代理 N”；去掉对话顶部切换条；子代理页“所在会话”直接打开标签；主对话与子代理的运行状态行（工作中 · 待办进度 · 首 token）放在输入框正上方，与终端一致 | Direction | 已执行（工作区未提交）；2026-10-19 评审复核 APPROVE：`pnpm test` 123 文件 804 例、`vue-tsc` exit 0、`subagent-drawer.spec` 4/4 与全套 e2e 159 passed / 2 skipped；顺带根因修好“＋”菜单弹层（`ComposerPlusMenu` 不再自建定位上下文，`WorkshopView` 的输入区补 `relative`） | **P1** | L | MED |
-| [079-web-subagent-config](079-web-subagent-config.md) | 子代理配置：每个主代理可自定义子代理（forebrain.yaml）、改写内置子代理（模型 / 思考强度 / 停用 / 提示词，运行时真正生效），子代理页改为配置的增删改查（右侧抽屉、内置提示词显示原文、工具三档）；设置页子代理全局开关 + 主代理开关；MCP 开关进操作列、类型只写 stdio / http；全站操作列头居中；两个工作台统一 340px 宽、标签样式与交互一致（工坊 8 个标签一次显示 5 个、右侧按钮逐个滚动） | Direction | TODO | **P1** | L | MED–HIGH |
+| [079-web-subagent-config](079-web-subagent-config.md) | 子代理配置：每个主代理可自定义子代理（forebrain.yaml）、改写内置子代理（模型 / 思考强度 / 停用 / 提示词，运行时真正生效），子代理页改为配置的增删改查（右侧抽屉、内置提示词显示原文、工具三档）；设置页子代理全局开关 + 主代理开关；MCP 开关进操作列、类型只写 stdio / http；全站操作列头居中；两个工作台统一 340px 宽、标签样式与交互一致（工坊 8 个标签一次显示 5 个、右侧按钮逐个滚动） | Direction | 已执行（工作区未提交，未提交由 owner 审阅）；2026-10-19 评审复核 APPROVE：Go 全量套件（scratch home）与 `pkg/architecture` 绿、`vue-tsc` exit 0、`pnpm test` 125 文件 827 例、全套 e2e 169 passed / 2 skipped（`web e2e: PASS`）、driver 真机 dump 证明改写提示词覆盖内置（`FILE ACCESS SCOPE` 仍追加）；顺带根因修好三个计划外缺陷（自定义只读子代理的 shell 沙箱档位、`操作` 列头被 `.forebrain-table th` 特异性压过的居中失效、工作台标签窗按固定 5 个假设在英文下溢出） | **P1** | L | MED–HIGH |
+| [080-gone-custom-subagent-fails-closed](080-gone-custom-subagent-fails-closed.md) | 已删除的自定义子代理不再接受用户消息（与模型路径一致），且“来源 custom 却没有工具策略”的运行一律 fail-closed（`GuardTool` 全拒、过滤不给工具）；续聊档位仍取当前配置（owner 保持现状） | Security / Bug Fix | DONE（2026-10-19 执行+评审 APPROVE，未提交；红绿证据：删除用例修复前 `SendToSubagent = "started", nil` → 修复后 PASS；评审方亲跑 6 包 `ok`、vet/gofmt 干净、`"custom"` 字面量唯一（`pkg/tool/state.go`）） | **P1** | S | LOW |
+| [081-project-consent-binds-to-the-shown-entry](081-project-consent-binds-to-the-shown-entry.md) | 项目 MCP / LSP 逐行“允许 / 拒绝”绑定到用户看到的那一条：行带指纹、请求回传、不一致整单 409 且不记任何决定；批量 / 启动提示路径不变 | Security | DONE（2026-10-19 执行+评审 APPROVE，未提交；评审方亲跑 5 包 `ok`、vitest 829 例、`vue-tsc` exit 0、两份 e2e `web e2e: PASS`；执行期 e2e 暴露并根因修好 `mcpRowFromWire` 漏映射 `fingerprint`；有据偏差：409 后用 `reload()` 而非 `load()`（后者清错误文案）） | P2 | M | LOW |
+| [082-config-writes-are-atomic-and-serialised](082-config-writes-are-atomic-and-serialised.md) | `forebrain.yaml` 保存改为临时文件 + rename（符号链接 / 权限 / 容器绑定挂载回退），子代理与 MCP 写接口串行化读改写（`withConfigWrite`），热重载兼容用例钉住 | Bug Fix / 数据完整性 | DONE（2026-10-19 执行+评审 APPROVE，未提交；评审方亲跑 7 包 + run/tui 全 `ok`、race 合并命令 `ok`；互斥为 `Server` 字段；两处有据偏差：`subagentAgentID` 入锁（修了 `liveCfg` vs `reloadConfig` 的既有 data race）、**评审方授权的 Scope 扩展** `pkg/turn/model_test.go` 失败注入升级为“文件 0400＋目录 0500”（原子 rename 绕过目标只读位，正好走完回退链）；遗留：`liveCfg` 其余读者与 reload 的既有 race 留待后续） | P2 | M | MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -299,11 +310,15 @@
 推荐按以下顺序执行：
 
 ```
+--- 2026-10-19 分支审计（均在工作区里叠加，不提交、不建 worktree）---
+080-gone-custom-subagent-fails-closed (独立；改 pkg/run 与 pkg/tool；依赖工作区里未提交的 079；最好赶在 079 提交前)
+081-project-consent-binds-to-the-shown-entry (独立；079 落地后再做——同改 frontend/src/lib/api.ts；改 pkg/process、pkg/lsp、pkg/gateway 与两个前端组件)
+082-config-writes-are-atomic-and-serialised (独立；079 落地后再做——同改 pkg/gateway/subagents_api.go；与 081 同改 pkg/gateway，串行执行)
 --- 2026-10-18 web 设计稿 2026-10-17/18 迭代的实施（owner：原型没问题了）---
 071–076 (均已执行，工作区未提交；2026-10-18 复核)
 077-web-batch-review-fixes (已执行，工作区未提交；2026-10-18 评审复核 APPROVE)
 078-web-subagent-drawer (已执行，工作区未提交；2026-10-19 评审复核 APPROVE：pnpm test 123 文件 804 例、vue-tsc exit 0、e2e 单文件 4/4 与全套 159 passed / 2 skipped；顺带根因修好 ＋ 菜单弹层的包含块)
-079-web-subagent-config (078 之后串行：改 locales / lib/api.ts；Go 侧改子代理派发、提示词注入、工具权限与模型选择)
+079-web-subagent-config (已执行，工作区未提交；2026-10-19 评审复核 APPROVE：全套 e2e 169 passed / 2 skipped、Go 全量绿、driver 真机证明提示词改写生效；计划 Scope 外一并修好 shell 沙箱档位、表头居中特异性、工作台标签窗宽度假设)
 --- 2026-10-17 图片被拒消息保留（终端已在工作区修好，web 对齐）---
 070-web-keeps-image-refused-messages (独立；前置是工作区里未提交的终端侧修复；含真 gateway 浏览器验收 web_e2e.sh)
 003-recall-in-flight-steer (独立，无依赖，owner 报告的严重 bug，优先)
@@ -504,6 +519,19 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
 
 ## 已审核但未计划的发现
 
+### 2026-10-19 分支审计（`fa4af8a..HEAD` + 未提交 079）
+
+- **INV-01（待查，LOW 置信度）**：`rebindAgentRunners`（`pkg/gateway/mcp_write_api.go:642`）= `RunnerPool.RebindAgent` → `Close()`（`pkg/process/runner_pool.go:1006`）拆掉**所有**池内 runner，每个 runner 关闭有总期限 20 秒；它不检查是否有在途回合。MCP 写接口早就这样，079 的子代理开关又新增两处调用（`subagents_api.go:553`、`:671`），频率更高。而 `saveAndReload` 里的 `Env.ReloadConfig()` 已经会经 `PropagateConfig` 对每个池内 runner 原地热更。待验证两点：①在途回合在 runner 被 `Close` 后是否出错（`Runner.Close` 会清 `r.main`、关 MCP hub）；②子代理 / MCP 列表改动是否真的需要拆池，还是热更已足够（“一个 session 的子代理类型在 session 开始时冻结”是 079 的理由）。验证办法：网关夹具里起一个挂住的回合，再 PUT 一个子代理开关，看回合是否被打断。
+- **方向建议（不是问题，未立计划，owner 要时再写成设计 / spike 计划）**：
+  1. `/migrate` 导入 Claude Code 的自定义 agent（`~/.claude/agents/*.md`）成 `subagents:` 条目——依据：迁移的七类（history / lsp / mcp / memories / plans / sessions / skills）里没有定义，只迁了子代理对话；代价：`tools:` 白名单要映射成 `pick`、模型别名映射不了、导入的提示词默认只能给 read_only。粗估 M。
+  2. 项目级子代理（`<root>/.forebrain/` 下，走现有指纹同意）——依据：MCP / LSP 已是“全局 / 主代理 / 项目”三层加同意；代价：仓库可控的“提示词 + 工具”新入口，且 079 已裁定写进 `forebrain.yaml`，所以只是选项。粗估 L。
+  3. 子代理记录固定其运行时的定义（工具策略、提示词、模型）——owner 2026-10-19 评估后选择**保持现状**（续聊取当前配置）。若日后要做：策略与提示词存旁路文件，**不要**进 `subagent-history.jsonl`（它被整文件读取，见 002），工具取“快照与当前配置较窄者”以保住“收紧立即生效”。粗估 M。
+- **小问题（没单独立计划）**：
+  - `pkg/gateway/subagents_api.go:721` 的注释说 `subagentAllowedTools` 会滤掉 `subagent_*`，代码并没有，是校验器拒绝；注释写错。
+  - `pkg/run/subagent.go` 的 `subagentDispatchBlocksFileWrites`（选“指定工具”档且没勾写工具时返回 false）与 `pkg/tool/state.go` 的 `SubagentBlocksFileWrites`（同样情形返回 true）判断不一致；后果无害（一个让 worker 会话继承 plan 状态，一个让 worker 进程切 agent 模式）。
+  - `pkg/gateway/agents_api.go:296/317`：子代理页的 total 实际被 1 + 50 + 200 行上限截断，与 071 的“服务端分页含总数”约定有出入；单会话 200 个子代理以上才会看到。
+  - `fb_sessions.title LIKE ?` 的搜索框里用户输入的 `%` / `_` 当通配符用（项目会话表），不影响正确性。
+
 ### 2026-10-14 schema / 迁移性能审计（已逐条核实、本期不立计划）
 
 - **v11 真正的成本中心是 subagent 增量合并**（`pkg/state/schema_migrations.go:913-985`）：实测 93 分钟里几乎全部耗在此处——233 个执行体，按连续块 `UPDATE ... json_set(payload_json,'$.text',<合并文本>)` 加 `DELETE ... WHERE sequence IN (<成百上千个字面量>)`，合计删掉/折掉 7.5M 行，速率约 1,340 行/秒。若要再优化，方向是「按 sequence 区间分批删除代替逐块拼 IN 列表」与「减少 Go 侧全量物化」；但这是**每个库一辈子一次**的迁移（owner 的库已完成），收益仅是把别人的一次等待从 90 分钟压到几十分钟——除非用户量值得投入，否则不建议立计划。
@@ -538,6 +566,18 @@ TUI 真机：提交 → 等待 → Shift+← 撤回）。
     state 库在 home 级，导入旧 jsonl 只能在运行期做，不能放进纯 SQL 的 schema 迁移）。
 
 ## 已考虑并拒绝的发现
+
+### 2026-10-19 分支审计（看过、核实后不立计划，避免下次重复审）
+
+- **子代理页 `SessionTitle` 的 N+1**（`pkg/gateway/agents_api.go` 的 `handleAgentRoster`）：行数封顶 1 + 50 + 200，每次是 `fb_sessions` 主键点查，不值得改。
+- **tokenizer 下载完整性**（`pkg/llm/tokenizers.go`）：每个文件的 sha256 与大小编进二进制，下载内容被篡改装不进去；解压 / 转换另有测试。
+- **`withoutSupersededAbandonedErrors` 的空指针**：`RunStore.ListRunEventsOfTypes` 对 nil 接收者安全（返回 `nil db` 错误）。
+- **前端 XSS**：全仓没有 `v-html`；`FileEditor.vue` 里的 `innerHTML = ''` 只是清空。
+- **CI 里 `GITHUB_TOKEN` 随 `curl -L` 泄露到重定向目标**（`scripts/fetch-pdfium.sh`）：curl 在跨主机重定向时会剥掉 `Authorization`。
+- **`memoryFilePreview` 跟随符号链接读文件首行**：只在本机 owner 的界面里显示，不跨信任边界。
+- **v15 迁移触发框架 VACUUM**：框架行为，owner 2026-10 已定“迁移照框架自动 VACUUM”。
+- **子代理总开关关了再开会重置各行的“停用”**：079 里 owner 明确规定的联动规则。
+- **`PropagateConfig` 与 `RebindAgent` 看似重复**：见 INV-01，需要验证才能下结论，不当作已确认的缺陷。
 
 ### 2026-10-14 撤销备案：原「053 不做的两件事」已并入本期
 

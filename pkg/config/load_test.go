@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -328,4 +329,40 @@ func TestTokenEstimateDownloadAndEmptyHubsSurviveSave(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestSaveLeavesNoTempFileAndKeepsMode pins Save's on-disk behaviour now that
+// it writes via writeFileAtomic: saving twice leaves exactly the target file
+// in the directory (no temp-file residue) with 0600 permissions, for both the
+// YAML and the JSON path.
+func TestSaveLeavesNoTempFileAndKeepsMode(t *testing.T) {
+	for _, name := range []string{"forebrain.yaml", "forebrain.json"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("FOREBRAIN_HOME", dir)
+			path := filepath.Join(dir, name)
+			if err := Save(path, Root{}); err != nil {
+				t.Fatalf("first Save: %v", err)
+			}
+			if err := Save(path, Root{}); err != nil {
+				t.Fatalf("second Save: %v", err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("ReadDir: %v", err)
+			}
+			if len(entries) != 1 || entries[0].Name() != name {
+				t.Fatalf("directory must hold only %s, got %v", name, entries)
+			}
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatalf("Stat: %v", err)
+				}
+				if info.Mode().Perm() != 0o600 {
+					t.Fatalf("mode = %v, want 0600", info.Mode().Perm())
+				}
+			}
+		})
+	}
 }

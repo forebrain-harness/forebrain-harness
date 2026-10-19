@@ -31,9 +31,9 @@ function project(trusted = true): ProjectRecord {
 
 function lspRows(): ProjectLspRow[] {
   return [
-    { id: 'projectls', summary: 'projectls: runs `/bin/projectls`', status: 'pending' },
-    { id: 'gopls', summary: '', status: 'allowed' },
-    { id: 'rust-analyzer', summary: '', status: 'denied' },
+    { id: 'projectls', summary: 'projectls: runs `/bin/projectls`', status: 'pending', fingerprint: 'fp-projectls' },
+    { id: 'gopls', summary: '', status: 'allowed', fingerprint: 'fp-gopls' },
+    { id: 'rust-analyzer', summary: '', status: 'denied', fingerprint: 'fp-rust-analyzer' },
   ]
 }
 
@@ -108,9 +108,12 @@ describe('ProjectLsp', () => {
     await wrapper.find('[data-testid="lsp-allow-projectls"]').trigger('click')
     await flushPromises()
 
-    // The request names the one entry the click decides, so the project's other
-    // entries keep whatever decision they have.
-    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['projectls'], ['projectls'])
+    // The request names the one entry the click decides together with the
+    // fingerprint its row was rendered from, so the project's other entries
+    // keep whatever decision they have.
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['projectls'], ['projectls'], [
+      { name: 'projectls', fingerprint: 'fp-projectls' },
+    ])
     expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
   })
 
@@ -119,7 +122,9 @@ describe('ProjectLsp', () => {
     await wrapper.find('[data-testid="lsp-decline-projectls"]').trigger('click')
     await flushPromises()
 
-    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', [], ['projectls'])
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', [], ['projectls'], [
+      { name: 'projectls', fingerprint: 'fp-projectls' },
+    ])
   })
 
   it('allows a declined entry again, which is the only way back', async () => {
@@ -137,7 +142,36 @@ describe('ProjectLsp', () => {
     await undo.trigger('click')
     await flushPromises()
 
-    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['rust-analyzer'], ['rust-analyzer'])
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['rust-analyzer'], ['rust-analyzer'], [
+      { name: 'rust-analyzer', fingerprint: 'fp-rust-analyzer' },
+    ])
+    expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the server’s 409 text up and re-reads the table when the file changed under it', async () => {
+    const wrapper = await mountTab()
+    expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(1)
+    vi.mocked(forebrainApi.projectLspConsent).mockRejectedValueOnce({
+      response: {
+        status: 409,
+        data: {
+          error: '项目文件已变化，请核对后重新确认 / The project file changed; review and confirm again',
+          code: 'consent_stale',
+          stale: ['projectls'],
+        },
+      },
+    })
+
+    await wrapper.find('[data-testid="lsp-allow-projectls"]').trigger('click')
+    await flushPromises()
+
+    expect(forebrainApi.projectLspConsent).toHaveBeenCalledWith('p1', ['projectls'], ['projectls'], [
+      { name: 'projectls', fingerprint: 'fp-projectls' },
+    ])
+    // Nothing was recorded: the server's own text stays up, and the rows are
+    // asked for again so the entry reappears with its new summary and
+    // fingerprint.
+    expect(wrapper.text()).toContain('项目文件已变化，请核对后重新确认')
     expect(forebrainApi.projectLspPage).toHaveBeenCalledTimes(2)
   })
 

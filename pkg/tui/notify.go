@@ -1769,13 +1769,20 @@ type ComposerState struct {
 	// view. It is kept in step with the active view by syncComposerToView and
 	// makes the slash picker list only the commands available there (D4).
 	SubagentView bool
+	// HistoryBrowsing is true while the draft is an arrow-key recall of an
+	// earlier message, from the first Up until the user edits it or Down returns
+	// to their own draft. A recalled "/model" or "see @file" is not something
+	// the user is typing, so no picker opens over it: an open picker would claim
+	// Up and Down for its own rows and strand the user on the one history entry.
+	HistoryBrowsing bool
 }
 
 // HandleDraftUpdate is the single entry point for applying a new DraftText
 // value coming out of input_events. It owns the SlashOverlay invariants: the
 // overlay opens, updates and closes on SlashOverlay.UpdateFromDraft's reading
 // of the draft at the caret — a leading command, or a skill reference under
-// the caret — and is cleared once the draft holds neither.
+// the caret — and is cleared once the draft holds neither. While the draft is a
+// history recall (HistoryBrowsing) neither picker opens.
 //
 // The leading command is read through composerDisplayText, the same view the
 // composer card is drawn from, so the picker opens exactly when the user can
@@ -1788,6 +1795,11 @@ func (c *ComposerState) HandleDraftUpdate(draft string, session Session) {
 	}
 	c.DraftText = draft
 	c.Cursor = composerCursorClamp(draft, c.Cursor)
+	if c.HistoryBrowsing {
+		c.SlashOverlay = nil
+		c.MentionOverlay = nil
+		return
+	}
 	if c.SlashOverlay == nil {
 		// A draft the composer shows as a slash command opens the full command
 		// list (built-in commands and skills); a "/" anywhere else is a skill

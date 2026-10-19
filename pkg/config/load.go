@@ -28,6 +28,17 @@ var builtInSubagentDefinitionNames = map[string]struct{}{
 	"guardian":              {},
 }
 
+// builtInPublicSubagentNames and builtInSystemSubagentNames are this package's
+// copy of agent.PublicSubagentNames / agent.SystemSubagentNames, which decide
+// whether a subagent entry overrides a built-in or declares a custom one. They
+// are copies rather than a read of the agent package so the configuration layer
+// stays independent of the runtime it configures;
+// TestBuiltInSubagentNameCopiesMatchAgentPackage fails when the two disagree,
+// so add a new built-in to both places.
+var builtInPublicSubagentNames = []string{"general-purpose", "explore", "plan", "verification"}
+
+var builtInSystemSubagentNames = []string{"plan-reviewer", "goal-evaluator", "guardian", "cavecrew-investigator", "cavecrew-builder", "cavecrew-reviewer"}
+
 func Load(path string) (Root, error) {
 	r, err := loadPersisted(path)
 	if err != nil {
@@ -252,14 +263,14 @@ func Save(path string, r Root) error {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".json" {
 		b, _ := json.MarshalIndent(r, "", "  ")
-		return os.WriteFile(path, b, 0o600)
+		return writeFileAtomic(path, b, 0o600)
 	}
 
 	b, err := yaml.Marshal(r)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return writeFileAtomic(path, b, 0o600)
 }
 
 // dropPlaceholderLLMProviders removes provider entries that carry no settings.
@@ -718,9 +729,12 @@ func validatePrimaryAgents(r *Root) error {
 	if r == nil || r.Agents.Definitions == nil {
 		return nil
 	}
-	for id := range r.Agents.Definitions {
+	for id, def := range r.Agents.Definitions {
 		if !primaryAgentIDPattern.MatchString(id) {
 			return fmt.Errorf("agents.definitions.%s: invalid agent id", id)
+		}
+		if err := ValidateAgentSubagents(id, def, builtInPublicSubagentNames, builtInSystemSubagentNames); err != nil {
+			return err
 		}
 	}
 	return nil

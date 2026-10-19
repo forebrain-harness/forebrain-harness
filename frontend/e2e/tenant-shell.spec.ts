@@ -31,9 +31,9 @@ test('settings shows the merged tab bar with appearance as the default', async (
   await signIn(page)
   await page.goto('/settings', { waitUntil: 'networkidle' })
   const tabs = (await page.locator('[data-testid="settings-tabs"] button').allInnerTexts()).map((tab) => tab.trim())
-  const expectedEn = ['Appearance', 'Approval default', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory switches', 'Config file', 'Runtime status', 'Shared skills']
-  const expectedZh = ['外观', '审批默认', 'MCP', '语言服务器', '钩子', '定时任务', '记忆开关', '配置文件', '运行状态', '共享技能']
-  expect(tabs.length).toBe(10)
+  const expectedEn = ['Appearance', 'Approval default', 'Subagents', 'MCP', 'Language servers', 'Hooks', 'Scheduled tasks', 'Memory switches', 'Config file', 'Runtime status', 'Shared skills']
+  const expectedZh = ['外观', '审批默认', '子代理', 'MCP', '语言服务器', '钩子', '定时任务', '记忆开关', '配置文件', '运行状态', '共享技能']
+  expect(tabs.length).toBe(11)
   expect(expectedEn.every((tab) => tabs.includes(tab)) || expectedZh.every((tab) => tabs.includes(tab))).toBe(true)
   // The appearance card is visible without clicking (default tab) — the
   // brand radiogroup is its content.
@@ -132,11 +132,11 @@ test('the rail foot is one row: settings plus the collapse control', async ({ pa
   await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-rail-foot.png` })
 })
 
-test('subagents page shows its empty state without a title layer', async ({ page }) => {
+test('subagents page lists the harness subagents without a title layer', async ({ page }) => {
   await signIn(page)
-  // Real-model runs leave other specs' subagents genuinely mid-flight, and
-  // this page correctly lists them. The empty state is asserted on a fresh
-  // agent — no sessions, therefore no running subagents, deterministically.
+  // The page is the agent's subagent configuration (plan 079), not its running
+  // roster: a fresh agent defines none of its own and still inherits the
+  // harness's ten, so the list is never the empty state.
   const created = await page.request.post('/api/agents/primary', { data: { id: 'e2e-sub-empty' } })
   expect(created.ok(), await created.text()).toBeTruthy()
   try {
@@ -150,8 +150,8 @@ test('subagents page shows its empty state without a title layer', async ({ page
     await expect(page.locator('.forebrain-topbar-title')).toHaveText(/子代理|Subagents/)
     await expect(page.locator('main h1, main h2')).toHaveCount(0)
     await expect(page.locator('[data-testid="scope-badge"]')).toHaveCount(0)
-    const empty = await page.locator('main').innerText()
-    expect(empty).toMatch(/没有正在运行的子代理|No subagents running/)
+    await expect(page.locator('[data-subagent-row]')).toHaveCount(10, { timeout: 15_000 })
+    await expect(page.locator('[data-testid="subagents-empty"]')).toHaveCount(0)
     await page.screenshot({ path: `${process.env.E2E_SHOTS}/shell-subagents.png`, fullPage: true })
   } finally {
     await page.locator('.forebrain-tenant-trigger').click()

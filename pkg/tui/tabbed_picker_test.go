@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,7 +31,6 @@ func TestTabbedPickerPanelGolden(t *testing.T) {
 		"  Skills",
 		"  Run or manage skills",
 		"  Project 2   Shared 1   Manage",
-		"› Type to filter",
 		"",
 		"❯ alpha" + strings.Repeat(" ", 11) + "First skill.",
 		"  beta-long-name  A description long enough to wrap onto a second row at this",
@@ -185,6 +185,11 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 		{Label: "release-check", Description: "Verify a release.", Category: "Memory"},
 		{Label: "triage", Description: "Triage bugs.", Category: "Memory"},
 	}
+	// Enough rows for the picker to show its filter, which is what would
+	// follow the tab bar.
+	for i := 0; i < pickerFilterMinRows; i++ {
+		items = append(items, SelectItem{Label: fmt.Sprintf("skill-%d", i), Category: "Memory"})
+	}
 	p := newTabbedPickerState(items, TabbedSelectOptions{}, true, "")
 	lines := p.panel("Import from Memory\nSkills written by memory consolidation.").layout(80, 0, 0, false).lines
 	if got := stripANSI(lines[0]); got != "  Import from Memory" {
@@ -193,12 +198,61 @@ func TestTabbedPickerSingleTabHasNoTabBar(t *testing.T) {
 	if got := stripANSI(lines[1]); got != "  Skills written by memory consolidation." {
 		t.Fatalf("subtitle = %q", got)
 	}
-	if got := stripANSI(lines[2]); got != "› Type to filter" {
-		t.Fatalf("line 2 = %q, want the filter with no tab bar before it", got)
+	// The head is followed by the blank row above the filter bar — no tab bar
+	// between them.
+	if got := stripANSI(lines[2]); got != "" {
+		t.Fatalf("line 2 = %q, want the air above the filter with no tab bar before it", got)
+	}
+	if got := stripANSI(lines[4]); !strings.Contains(got, "Type to filter") {
+		t.Fatalf("line 4 = %q, want the filter's text row", got)
 	}
 	for _, line := range lines {
-		if strings.Contains(stripANSI(line), "Tab to switch") {
-			t.Fatalf("single tab advertises switching: %q", stripANSI(line))
+		if got := stripANSI(line); strings.Contains(got, "Tab to switch") || strings.Contains(got, "Memory "+fmt.Sprint(len(items))) {
+			t.Fatalf("single tab shows a tab bar or advertises switching: %q", got)
 		}
+	}
+}
+
+// The tabbed picker's filter shows under the tab bar once the list is long
+// enough to need one, its text row after the air and the bar's padded row.
+func TestTabbedPickerFilterBarGolden(t *testing.T) {
+	items := manyItems()
+	for i := range items {
+		items[i].Category = "All"
+	}
+	items[len(items)-1].Category = "More"
+	p := newTabbedPickerState(items, TabbedSelectOptions{}, false, "")
+	lines := p.panel("Skills").layout(40, 0, 0, false).lines
+	got := make([]string, 0, 8)
+	for _, line := range lines[:8] {
+		got = append(got, stripANSI(line))
+	}
+	got[7] = strings.TrimRight(got[7], " ") // a row's own trailing pad is not the point
+	want := append([]string{"  Skills", "  All 9   More 1"}, filterBarPlain(40, "⌕", "Type to filter")...)
+	want = append(want, "", "❯ alpha")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("panel head =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestTabbedPickerKeyboardFollowsTheSameRules(t *testing.T) {
+	items := manyItems()
+	for i := range items {
+		items[i].Category = "All"
+	}
+	items[2].Category = "Other"
+
+	// Space checks the first row; ↑ moves to the filter, where Space is text.
+	sel := pickerKeys(t, " "+keyUp+" "+keyEnter)
+	got, ok, err := sel.MultiSelectRichTabbed("pick", items, TabbedSelectOptions{})
+	if err != nil || !ok || !reflect.DeepEqual(got, []int{0}) {
+		t.Fatalf("MultiSelectRichTabbed = %v, %v, %v; want [0]", got, ok, err)
+	}
+
+	// Typing from the rows filters and finds the row in another tab.
+	sel = pickerKeys(t, "cher"+keyEnter)
+	idx, ok, err := sel.SelectRichTabbed("pick", items, TabbedSelectOptions{})
+	if err != nil || !ok || idx != 2 {
+		t.Fatalf("SelectRichTabbed = %d, %v, %v; want 2", idx, ok, err)
 	}
 }

@@ -50,7 +50,7 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	// Only typed workers whose own policy already forbids file writes are forced
 	// to agent mode; a write-capable type such as general-purpose keeps the
 	// inherited plan mode so it cannot be used to edit code mid-planning.
-	if st := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); st != "" && tool.TypedSubagentBlocksFileWrites(st) {
+	if tool.SubagentBlocksFileWrites(ctx) {
 		agBase = tool.WithMode(agBase, "agent")
 	}
 	if tool.IsForkChildFromContext(ctx) {
@@ -58,6 +58,12 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	}
 	if st := strings.TrimSpace(tool.SubagentTypeFromContext(ctx)); st != "" {
 		agBase = tool.WithSubagentType(agBase, st)
+		// A custom subagent's tool policy is configuration, not a type name, so
+		// the worker rebuilds it here or the child's GuardTool would fall back
+		// to the static table and hand a read-only worker every tool it excluded.
+		if policy, ok := tool.SubagentToolPolicyFromContext(ctx); ok {
+			agBase = tool.WithSubagentToolPolicy(agBase, policy)
+		}
 		if src := strings.TrimSpace(tool.SubagentDefinitionSourceFromContext(ctx)); src != "" {
 			agBase = tool.WithSubagentDefinitionSource(agBase, src)
 		}

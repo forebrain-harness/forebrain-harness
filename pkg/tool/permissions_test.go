@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/agent"
@@ -88,5 +89,65 @@ func TestPermissionProfilePathsAreAvailableToInProcessFileTools(t *testing.T) {
 	}
 	if got, err := resolveWriteFilePath(context.Background(), st, writePath); err != nil || got != writePath {
 		t.Fatalf("write path=%q err=%v", got, err)
+	}
+}
+
+// TestBuiltinSubagentToolsTier pins the tool tier each built-in type reports to
+// the surfaces that describe one without running it. The tier is the type's own
+// policy — that is the whole point of deriving it rather than writing a second
+// list — so this test names every built-in there is: a new one fails here
+// instead of quietly being described as fully tooled.
+func TestBuiltinSubagentToolsTier(t *testing.T) {
+	want := map[string]string{
+		"general-purpose":       appcfg.SubagentToolsEdit,
+		"explore":               appcfg.SubagentToolsReadOnly,
+		"plan":                  appcfg.SubagentToolsReadOnly,
+		"verification":          appcfg.SubagentToolsReadOnly,
+		"plan-reviewer":         appcfg.SubagentToolsReadOnly,
+		"goal-evaluator":        appcfg.SubagentToolsReadOnly,
+		"guardian":              SubagentToolsNone,
+		"cavecrew-investigator": appcfg.SubagentToolsReadOnly,
+		"cavecrew-builder":      appcfg.SubagentToolsEdit,
+		"cavecrew-reviewer":     appcfg.SubagentToolsReadOnly,
+	}
+	for name, tier := range want {
+		if got := BuiltinSubagentToolsTier(name); got != tier {
+			t.Errorf("BuiltinSubagentToolsTier(%q) = %q, want %q", name, got, tier)
+		}
+	}
+	for _, def := range agent.ActiveDefinitions() {
+		if _, ok := want[def.Name]; !ok {
+			t.Errorf("built-in %q has no expected tier in this test", def.Name)
+		}
+	}
+	if got := BuiltinSubagentToolsTier("  EXPLORE "); got != appcfg.SubagentToolsReadOnly {
+		t.Errorf("the tier must be read the way the policy is: got %q", got)
+	}
+	// The guardian is the one type with no tools at all, which is why its prompt
+	// tells it not to use any.
+	if guardian := BuiltinSubagentToolsTier("guardian"); guardian != SubagentToolsNone {
+		t.Fatalf("guardian = %q, want %q", guardian, SubagentToolsNone)
+	}
+}
+
+// A custom subagent that reaches GuardTool without its policy is refused
+// everything — not waved through because the static table has no entry for its
+// name.
+func TestGuardToolRefusesACustomSubagentWithoutAPolicy(t *testing.T) {
+	st := NewState(t.TempDir())
+	ctx := WithSubagentDefinitionSource(WithSubagentType(context.Background(), "repo-scout"), SubagentDefinitionSourceCustom)
+	for _, name := range []string{"read_file", "write_file", "edit_file", "shell", "subagent_run"} {
+		err := st.GuardTool(ctx, name)
+		if err == nil || !strings.Contains(err.Error(), "no tool policy") {
+			t.Errorf("GuardTool(%q) = %v, want a refusal naming the missing policy", name, err)
+		}
+	}
+	// With its policy the run is held to it, not refused wholesale.
+	withPolicy := WithSubagentToolPolicy(ctx, SubagentToolPolicy{Mode: appcfg.SubagentToolsReadOnly})
+	if err := st.GuardTool(withPolicy, "read_file"); err != nil {
+		t.Fatalf("read_file refused under a read-only policy: %v", err)
+	}
+	if err := st.GuardTool(withPolicy, "write_file"); err == nil || !strings.Contains(err.Error(), "blocked by policy") {
+		t.Fatalf("write_file under a read-only policy = %v", err)
 	}
 }

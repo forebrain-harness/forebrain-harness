@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 )
@@ -807,6 +808,31 @@ func TypedSubagentBlocksFileWrites(subagentType string) bool {
 	return write && edit
 }
 
+// SubagentToolsNone is the tool tier of a subagent type that has no tools at
+// all, which is a different claim from a read-only one.
+const SubagentToolsNone = "none"
+
+// guardianSubagentType is the one type with no tools: its prompt answers a
+// structured allow/deny decision from the evidence it is given, so it is
+// described as such rather than as a read-only agent that could have looked.
+const guardianSubagentType = "guardian"
+
+// BuiltinSubagentToolsTier names the tool tier a built-in subagent type carries,
+// for the surfaces that describe one without running it: read_only when its type
+// forbids the two file-writing tools, none for the guardian's tool-less
+// reviewer, and edit otherwise. The tier is a property of the type, not of a
+// configuration, because a built-in's tools are fixed.
+func BuiltinSubagentToolsTier(subagentType string) string {
+	name := strings.ToLower(strings.TrimSpace(subagentType))
+	if name == guardianSubagentType {
+		return SubagentToolsNone
+	}
+	if TypedSubagentBlocksFileWrites(name) {
+		return appcfg.SubagentToolsReadOnly
+	}
+	return appcfg.SubagentToolsEdit
+}
+
 func (s *State) GuardTool(ctx context.Context, toolName string) error {
 	if s == nil {
 		return nil
@@ -815,8 +841,19 @@ func (s *State) GuardTool(ctx context.Context, toolName string) error {
 	if name == "" {
 		return nil
 	}
+	// A custom subagent's policy comes from this primary agent's configuration
+	// and travels on its run's context; every other type's stays the static
+	// table. When a policy is present it is the whole answer for that run, so a
+	// custom type never falls through to a table entry of the same name.
 	st := strings.ToLower(strings.TrimSpace(SubagentTypeFromContext(ctx)))
-	if st != "" {
+	if CustomSubagentPolicyMissing(ctx) {
+		return fmt.Errorf("subagent_type %q: custom subagent has no tool policy, tool %q refused", st, name)
+	}
+	if policy, ok := SubagentToolPolicyFromContext(ctx); ok {
+		if policy.Blocks(name) {
+			return fmt.Errorf("subagent_type %q: tool %q blocked by policy", st, name)
+		}
+	} else if st != "" {
 		if blockedByType, ok := typedSubagentDisallowedTools[st]; ok {
 			if _, deny := blockedByType[name]; deny {
 				return fmt.Errorf("subagent_type %q: tool %q blocked by policy", st, name)

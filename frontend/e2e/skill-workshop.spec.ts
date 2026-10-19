@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 
-import { shot, signIn } from './support'
+import { revealTab, shot, signIn } from './support'
 
 /**
  * The skill workshop is the chat page plus skill tabs: the same composer and
@@ -12,6 +12,7 @@ import { shot, signIn } from './support'
 
 const fixtureZip = process.env.E2E_SKILL_ZIP ?? ''
 const realLLM = process.env.E2E_REAL_LLM === '1'
+
 
 // The suite shares one gateway, so demo-e2e survives between tests: install it
 // once and reuse the row.
@@ -53,9 +54,13 @@ test('the workshop opens as the chat page: greeting, composer, workbench', async
   await page.click('[data-testid="workshop-workbench-toggle"]')
   await expect(page.locator('[data-testid="chat-workbench"]')).toBeVisible()
   await expect(page.locator('[data-testid="bench-tab-overview"]')).toBeVisible()
+  await revealTab(page, 'cases')
   await expect(page.locator('[data-testid="bench-tab-cases"]')).toBeDisabled()
+  await revealTab(page, 'evals')
   await expect(page.locator('[data-testid="bench-tab-evals"]')).toBeDisabled()
+  await revealTab(page, 'trigger')
   await expect(page.locator('[data-testid="bench-tab-trigger"]')).toBeDisabled()
+  await revealTab(page, 'versions')
   await expect(page.locator('[data-testid="bench-tab-versions"]')).toBeDisabled()
   await shot(page, 'workshop-empty')
 })
@@ -91,7 +96,9 @@ test('an installed skill shows its version and the workshop publish button', asy
   // No draft yet: publish is disabled, the skill tabs are live.
   await expect(page.locator('[data-testid="workshop-publish"]')).toBeDisabled()
   await page.click('[data-testid="workshop-workbench-toggle"]')
+  await revealTab(page, 'cases')
   await expect(page.locator('[data-testid="bench-tab-cases"]')).toBeEnabled()
+  await revealTab(page, 'versions')
   await page.click('[data-testid="bench-tab-versions"]')
   await expect(page.locator('[data-testid="chat-workbench"]')).toContainText('v1')
   await shot(page, 'workshop-skill')
@@ -122,6 +129,7 @@ test('a draft shows unpublished changes and the versions tab compares', async ({
 
     // The versions tab lists the draft against v1 and offers a compare.
     await page.click('[data-testid="workshop-workbench-toggle"]')
+    await revealTab(page, 'versions')
     await page.click('[data-testid="bench-tab-versions"]')
     await expect(page.locator('[data-testid="workshop-version-draft"]')).toBeVisible()
     await page.click('[data-testid="workshop-draft-compare"]')

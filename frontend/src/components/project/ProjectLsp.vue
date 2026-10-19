@@ -49,7 +49,7 @@
               <th>{{ t('projects.lspColServer') }}</th>
               <th>{{ t('projects.lspColSummary') }}</th>
               <th>{{ t('projects.lspColStatus') }}</th>
-              <th class="text-right">{{ t('projects.colActions') }}</th>
+              <th class="text-center">{{ t('projects.colActions') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -77,7 +77,7 @@
                     tone="ok"
                     :disabled="consenting"
                     :data-testid="`lsp-allow-${row.id}`"
-                    @click="consent(row.id, true)"
+                    @click="consent(row, true)"
                   />
                   <RowAction
                     :icon="X"
@@ -86,7 +86,7 @@
                     tone="danger"
                     :disabled="consenting"
                     :data-testid="`lsp-decline-${row.id}`"
-                    @click="consent(row.id, false)"
+                    @click="consent(row, false)"
                   />
                 </RowActions>
                 <!-- A declined entry keeps its row and gets the way back: 允许
@@ -99,7 +99,7 @@
                     tone="ok"
                     :disabled="consenting"
                     :data-testid="`lsp-undecline-${row.id}`"
-                    @click="consent(row.id, true)"
+                    @click="consent(row, true)"
                   />
                   <RowActionSlot />
                 </RowActions>
@@ -122,6 +122,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Check, RotateCw, X } from 'lucide-vue-next'
+import type { AxiosError } from 'axios'
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
 import ListNote from '@/components/common/ListNote.vue'
 import ListToolbar from '@/components/common/ListToolbar.vue'
@@ -208,18 +209,24 @@ async function trust() {
   }
 }
 
-// One decision per click: the request names the entry it is about (`decide`),
-// and the endpoint changes that entry's decision and nothing else — which is
-// also how a declined entry is allowed again. The list always reloads.
-async function consent(id: string, allow: boolean) {
+// One decision per click: the request names the entry it is about (`decide`)
+// together with the fingerprint the row was rendered from, and the endpoint
+// changes that entry's decision and nothing else — which is also how a
+// declined entry is allowed again. A 409 means the file moved under the page:
+// nothing was recorded, the server text stays up, and the rows reload so the
+// entry reappears with its new summary and fingerprint.
+async function consent(row: ProjectLspRow, allow: boolean) {
   if (consenting.value) return
   consenting.value = true
   writeError.value = ''
   try {
-    await forebrainApi.projectLspConsent(props.projectId, allow ? [id] : [], [id])
+    await forebrainApi.projectLspConsent(props.projectId, allow ? [row.id] : [], [row.id], [
+      { name: row.id, fingerprint: row.fingerprint },
+    ])
     await reload()
   } catch (cause) {
     writeError.value = getErrorMessage(cause)
+    if ((cause as AxiosError)?.response?.status === 409) await reload()
   } finally {
     consenting.value = false
   }

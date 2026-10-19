@@ -45,7 +45,7 @@
             <th>{{ t('cron.colLast') }}</th>
             <th class="text-right">{{ t('cron.colRuns') }}</th>
             <th>{{ t('cron.colEnabled') }}</th>
-            <th class="text-right">{{ t('projects.colActions') }}</th>
+            <th class="text-center">{{ t('projects.colActions') }}</th>
           </tr>
         </thead>
         <tbody>

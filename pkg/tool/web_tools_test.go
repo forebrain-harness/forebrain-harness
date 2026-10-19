@@ -901,12 +901,156 @@ func TestNormalizeWebSearchLimit(t *testing.T) {
 	}
 }
 
-func TestTrimWebSearchOutputCapsAndPreservesUTF8(t *testing.T) {
-	got, truncated := trimWebSearchOutput(strings.Repeat("x", webSearchMaxOutputBytes-1) + "あ")
-	if !truncated {
-		t.Fatalf("expected truncation")
+// searchResultBody builds a provider response whose results each carry roughly
+// `contentBytes` of prose, so the envelope overflows the tool budget.
+func searchResultBody(t *testing.T, results, contentBytes int) string {
+	t.Helper()
+	var body strings.Builder
+	body.WriteString(`{"query":"go release","results":[`)
+	for i := 0; i < results; i++ {
+		if i > 0 {
+			body.WriteString(",")
+		}
+		fmt.Fprintf(&body, `{"title":"Result %d","url":"https://go.dev/doc/%d","score":%d.5,"content":%q}`,
+			i+1, i+1, i+1, strings.Repeat("x", contentBytes))
 	}
-	if !utf8.ValidString(got) {
-		t.Fatalf("trimmed output must stay valid UTF-8")
+	body.WriteString("]}")
+	return body.String()
+}
+
+func governSearchBody(t *testing.T, body string) (envelope string, decoded map[string]any) {
+	t.Helper()
+	envelope = governWebSearchBody([]byte(body), func(bodyText string, truncated bool) string {
+		return webSearchEnvelope(200, "application/json", 10, "query:go release", bodyText, truncated)
+	})
+	if len(envelope) > webSearchMaxEnvelopeBytes {
+		t.Fatalf("envelope=%d bytes exceeds the tool budget %d", len(envelope), webSearchMaxEnvelopeBytes)
+	}
+	// The governor trims head/tail past SpillThresholdBytes, which no caller can
+	// undo: the search envelope has to stay below it.
+	if len(envelope) > SpillThresholdBytes {
+		t.Fatalf("envelope=%d bytes reaches the governor spill threshold %d", len(envelope), SpillThresholdBytes)
+	}
+	if governed := NewOutputGovernor(t.TempDir()).GovernDetailed("web_search", "call-1", envelope); governed.Text != envelope {
+		t.Fatalf("governor rewrote a fitted search envelope (truncated=%v)", governed.Truncated)
+	}
+	if err := json.Unmarshal([]byte(envelope), &decoded); err != nil {
+		t.Fatalf("envelope is not parseable JSON: %v", err)
+	}
+	return envelope, decoded
+}
+
+// decodeSearchProviderBody parses the delivered provider body, keeping numbers
+// as their literal text so the test sees exactly what the model receives.
+func decodeSearchProviderBody(t *testing.T, decoded map[string]any) map[string]any {
+	t.Helper()
+	bodyText, _ := decoded["body"].(string)
+	decoder := json.NewDecoder(strings.NewReader(bodyText))
+	decoder.UseNumber()
+	var provider map[string]any
+	if err := decoder.Decode(&provider); err != nil {
+		t.Fatalf("provider body is not parseable JSON: %v\n%.600s", err, bodyText)
+	}
+	return provider
+}
+
+// An oversized provider response must be governed, not cut: the results at the
+// tail are dropped, everything kept stays byte-identical, and both the envelope
+// and the body remain parseable JSON.
+func TestWebSearchOverflowDropsTrailingResultsAndKeepsValidJSON(t *testing.T) {
+	t.Parallel()
+	const results = 10
+	_, decoded := governSearchBody(t, searchResultBody(t, results, 4000))
+	provider := decodeSearchProviderBody(t, decoded)
+
+	if decoded["truncated"] != true {
+		t.Fatalf("envelope must report that results were dropped: %#v", decoded["truncated"])
+	}
+	kept, _ := provider["results"].([]any)
+	if len(kept) == 0 || len(kept) >= results {
+		t.Fatalf("kept %d of %d results; the tail must be dropped, not the whole list", len(kept), results)
+	}
+	for i, raw := range kept {
+		item, _ := raw.(map[string]any)
+		if want := fmt.Sprintf("Result %d", i+1); item["title"] != want {
+			t.Fatalf("result %d title = %#v, want %q: the leading results must survive in order", i+1, item["title"], want)
+		}
+		if want := fmt.Sprintf("https://go.dev/doc/%d", i+1); item["url"] != want {
+			t.Fatalf("result %d url = %#v, want %q", i+1, item["url"], want)
+		}
+		if content, _ := item["content"].(string); content != strings.Repeat("x", 4000) {
+			t.Fatalf("result %d content was altered: %d bytes", i+1, len(content))
+		}
+		if score, _ := item["score"].(json.Number); score.String() != fmt.Sprintf("%d.5", i+1) {
+			t.Fatalf("result %d score = %#v, numbers must keep their literal form", i+1, item["score"])
+		}
+	}
+
+	// The card shows exactly what the model received.
+	evt := StepEvent{
+		Kind:     StepKindToolCompleted,
+		ToolName: "web_search",
+		Input:    map[string]any{"query": "go release", "limit": results},
+		Output:   map[string]any{"output": marshalWebToolValue(decoded)},
+	}
+	card, _ := FormatToolStepResult(evt, DefaultMaxFormattedBody)
+	if want := fmt.Sprintf("**%d search results**", len(kept)); !strings.Contains(card, want) {
+		t.Fatalf("card does not match the delivered results (%q):\n%.400s", want, card)
+	}
+	if !strings.Contains(card, "Some provider response data was omitted because it was too large.") {
+		t.Fatalf("card must say data was omitted:\n%.400s", card)
+	}
+}
+
+// A single result larger than the whole budget still reaches the model, with its
+// prose shortened instead of its JSON broken.
+func TestWebSearchSingleOversizedResultKeepsValidJSON(t *testing.T) {
+	t.Parallel()
+	_, decoded := governSearchBody(t, searchResultBody(t, 1, 200_000))
+	provider := decodeSearchProviderBody(t, decoded)
+
+	kept, _ := provider["results"].([]any)
+	if len(kept) != 1 {
+		t.Fatalf("kept %d results, want the single result", len(kept))
+	}
+	item, _ := kept[0].(map[string]any)
+	if item["title"] != "Result 1" || item["url"] != "https://go.dev/doc/1" {
+		t.Fatalf("result identity lost: %#v", item)
+	}
+	content, _ := item["content"].(string)
+	if len(content) < webSearchMaxEnvelopeBytes/2 || len(content) >= 200_000 {
+		t.Fatalf("oversized content = %d bytes, want it trimmed to what the budget allows", len(content))
+	}
+	if decoded["truncated"] != true {
+		t.Fatalf("envelope must report truncation: %#v", decoded["truncated"])
+	}
+}
+
+// A body that is not JSON at all (an HTML error page) is capped as text; the
+// envelope stays parseable either way.
+func TestWebSearchNonJSONBodyIsCappedNotBroken(t *testing.T) {
+	t.Parallel()
+	page := "<html><body>" + strings.Repeat("<p>service temporarily unavailable</p>", 4000) + "</body></html>"
+	_, decoded := governSearchBody(t, page)
+
+	bodyText, _ := decoded["body"].(string)
+	if bodyText == "" || len(bodyText) >= len(page) {
+		t.Fatalf("non-JSON body = %d of %d bytes, want it capped", len(bodyText), len(page))
+	}
+	if decoded["truncated"] != true || !utf8.ValidString(bodyText) {
+		t.Fatalf("capped body must stay valid UTF-8 and say it was truncated: %#v", decoded["truncated"])
+	}
+}
+
+// A response that already fits is passed through byte for byte.
+func TestWebSearchResponseUnderBudgetIsUnchanged(t *testing.T) {
+	t.Parallel()
+	body := searchResultBody(t, 3, 40)
+	envelope, decoded := governSearchBody(t, body)
+	if decoded["truncated"] != false {
+		t.Fatalf("small response reported truncation: %#v", decoded["truncated"])
+	}
+	if decoded["body"] != body {
+		t.Fatalf("small response body was rewritten:\n%s", envelope)
 	}
 }

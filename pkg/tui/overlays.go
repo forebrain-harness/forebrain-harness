@@ -3516,11 +3516,60 @@ func (f *filterField) placeCaretAt(prefixWidth, col int) {
 	f.cursor = caretIndexForClick(f.runes(), prefixWidth, col)
 }
 
+// pickerFilterMinRows is how many rows a picker must offer before it shows a
+// filter: a list this short is read at a glance, and a filter over it is a
+// field to ignore. The count is of the rows the picker opens with, so the
+// filter does not vanish as the user narrows the list.
+const pickerFilterMinRows = 8
+
+// pickerShowsFilter reports whether a picker of rows selectable rows shows its
+// filter.
+func pickerShowsFilter(rows int) bool { return rows >= pickerFilterMinRows }
+
+// editsFilter reports whether a key does nothing but edit a picker's filter,
+// which a picker without one ignores.
+func editsFilter(k rawKey) bool {
+	switch k {
+	case rawKeyBackspace, rawKeyLeft, rawKeyRight, rawKeyHome, rawKeyEnd, rawKeyPaste, rawKeyRune:
+		return true
+	}
+	return false
+}
+
+// navigatePicker moves the keyboard through a picker made of a filter field
+// above count rows, for ↑ (delta < 0) or ↓ (delta > 0). ↓ from the filter drops
+// onto the first row; ↑ from the first row climbs back to the filter; anywhere
+// else the cursor steps within the rows and stops at their ends. inFilter is
+// where the keyboard is, and a picker opens with it on the rows (false). A
+// picker with no filter (hasFilter false) keeps the keyboard on its rows.
+func navigatePicker(inFilter *bool, cursor *int, count, delta int, hasFilter bool) {
+	switch {
+	case *inFilter:
+		if delta > 0 && count > 0 {
+			*inFilter, *cursor = false, 0
+		}
+	case delta < 0 && *cursor <= 0 && hasFilter:
+		*inFilter, *cursor = true, 0
+	default:
+		*cursor = clampInt(*cursor+delta, 0, maxInt(0, count-1))
+	}
+}
+
+// pickerField is the filter as a panel's field, its caret shown only while the
+// keyboard is in it.
+func (f *filterField) pickerField(inFilter bool) *panelField {
+	field := f.panelField()
+	field.blurred = !inFilter
+	return field
+}
+
 type selectState struct {
 	options     []string
 	filtered    []int // indices into options
 	cursor      int   // index into filtered
 	filter      filterField
+	inFilter    bool // the keyboard is in the filter, not on the rows
+	noFilter    bool // too few rows to need a filter: none is shown
 	label       string
 	esc         string // what Esc does, for the key hint
 	multiSelect bool
@@ -3550,10 +3599,12 @@ func (s *rawSelector) renderSelect(st *selectState) {
 }
 
 // panel lays the picker out as a slash panel: the label and the filter in the
-// head, one row per matching option — the ❯ on the focused one, a check box
-// before each in a multi-select — and the keys.
+// head, one row per matching option — the ❯ on the focused one while the
+// keyboard is on the rows, the filter's caret while it is in the filter, a
+// check box before each in a multi-select — and the keys.
 func (st *selectState) panel() slashPanel {
 	b := newPanelBuilder()
+	b.unmarked = st.inFilter
 	pickerHead(b, st.label)
 	for vi, optIdx := range st.filtered {
 		lead := ""
@@ -3570,13 +3621,15 @@ func (st *selectState) panel() slashPanel {
 	}
 	b.hint(selectFooterHint(st.multiSelect, st.esc))
 	p := b.panel()
-	p.field = st.filter.panelField()
+	if !st.noFilter {
+		p.field = st.filter.pickerField(st.inFilter)
+	}
 	return p
 }
 
 // panelField is the filter as a panel's field.
 func (f *filterField) panelField() *panelField {
-	return &panelField{text: f.runes(), cursor: f.cursor, placeholder: "Type to filter"}
+	return &panelField{text: f.runes(), cursor: f.cursor, placeholder: "Type to filter", glyph: panelFilterGlyph}
 }
 
 // pickerHead puts a picker's label in its panel's head: the first line as the
@@ -3621,13 +3674,27 @@ func (s *rawSelector) panelWidth() int {
 	return maxInt(1, width-viewportRightPadding)
 }
 
+// panelRows is the height the overlay area lays a panel out at: the fixed
+// height every slash panel takes, less the rule above it.
+func (s *rawSelector) panelRows() int {
+	_, height := s.termSize()
+	return slashPanelHeight(height) - 1
+}
+
+// onFieldBar reports whether a click at line landed on the panel's field: any
+// row of its bar, the padded rows around the text included.
+func (s *rawSelector) onFieldBar(p slashPanel, line int) bool {
+	first, last := p.fieldBar(s.panelWidth(), s.panelRows())
+	return first >= 0 && line >= first && line <= last
+}
+
 // placeFieldCaret moves a panel field's caret onto the cell a click at line
-// and col landed on, reporting whether the click was on the field's row.
+// and col landed on, reporting whether the click was on the field's bar.
 func (s *rawSelector) placeFieldCaret(p slashPanel, f *filterField, line, col int) bool {
-	if line != p.fieldRow(s.panelWidth()) {
+	if !s.onFieldBar(p, line) {
 		return false
 	}
-	f.placeCaretAt(displayLineWidth(panelFieldLead), col)
+	f.placeCaretAt(p.field.textCol(), col)
 	return true
 }
 
@@ -3653,6 +3720,7 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 		filtered: make([]int, 0, len(menuOptions)),
 		label:    label,
 		esc:      s.escHint(),
+		noFilter: !pickerShowsFilter(len(menuOptions)),
 	}
 	st.applyFilter()
 	for i, optIdx := range st.filtered {
@@ -3669,6 +3737,7 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 	s.renderSelect(st)
 	defer s.withCaretPlacer(func(line, col int) {
 		if s.placeFieldCaret(st.panel(), &st.filter, line, col) {
+			st.inFilter = true
 			s.renderSelect(st)
 		}
 	})()
@@ -3677,6 +3746,9 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 		key, err := s.readKey()
 		if err != nil {
 			return "", false, err
+		}
+		if st.noFilter && editsFilter(key.kind) {
+			continue
 		}
 		switch key.kind {
 		case rawKeyNone:
@@ -3687,13 +3759,9 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 			s.dispatchMouse(key.mouse)
 			continue
 		case rawKeyUp:
-			if st.cursor > 0 {
-				st.cursor--
-			}
+			navigatePicker(&st.inFilter, &st.cursor, len(st.filtered), -1, !st.noFilter)
 		case rawKeyDown:
-			if st.cursor < len(st.filtered)-1 {
-				st.cursor++
-			}
+			navigatePicker(&st.inFilter, &st.cursor, len(st.filtered), 1, !st.noFilter)
 		case rawKeyEnter:
 			if len(st.filtered) == 0 {
 				return "", false, nil
@@ -3702,27 +3770,49 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 		case rawKeyEscape, rawKeyCtrlC:
 			return "", false, s.dismissed(key.kind)
 		case rawKeyBackspace:
+			if !st.inFilter && st.filter.text == "" {
+				continue
+			}
+			st.inFilter = true
 			if st.filter.backspace() {
 				st.applyFilter()
 			}
 		case rawKeyLeft:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.move(-1)
 		case rawKeyRight:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.move(1)
 		case rawKeyHome:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.moveTo(0)
 		case rawKeyEnd:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.moveTo(len(st.filter.runes()))
 		case rawKeyTab:
 			// Tab does nothing in select
 			continue
 		case rawKeyPaste:
+			st.inFilter = true
 			st.filter.insert(strings.ReplaceAll(key.text, "\n", " "))
 			st.applyFilter()
 		case rawKeyRune:
+			st.inFilter = true
 			st.filter.insert(string(key.r))
 			st.applyFilter()
 		case rawKeySpace:
+			if st.noFilter {
+				continue
+			}
+			st.inFilter = true
 			st.filter.insert(" ")
 			st.applyFilter()
 		}
@@ -3989,12 +4079,14 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 		esc:         s.escHint(),
 		multiSelect: true,
 		selected:    selected,
+		noFilter:    !pickerShowsFilter(len(menuOptions)),
 	}
 	st.applyFilter()
 
 	s.renderSelect(st)
 	defer s.withCaretPlacer(func(line, col int) {
 		if s.placeFieldCaret(st.panel(), &st.filter, line, col) {
+			st.inFilter = true
 			s.renderSelect(st)
 		}
 	})()
@@ -4004,6 +4096,9 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 		if err != nil {
 			return nil, false, err
 		}
+		if st.noFilter && editsFilter(key.kind) {
+			continue
+		}
 		switch key.kind {
 		case rawKeyNone:
 			continue
@@ -4011,13 +4106,9 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 			s.dispatchMouse(key.mouse)
 			continue
 		case rawKeyUp:
-			if st.cursor > 0 {
-				st.cursor--
-			}
+			navigatePicker(&st.inFilter, &st.cursor, len(st.filtered), -1, !st.noFilter)
 		case rawKeyDown:
-			if st.cursor < len(st.filtered)-1 {
-				st.cursor++
-			}
+			navigatePicker(&st.inFilter, &st.cursor, len(st.filtered), 1, !st.noFilter)
 		case rawKeyEnter:
 			out := make([]string, 0, len(selected))
 			// Preserve original order
@@ -4030,20 +4121,40 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 		case rawKeyEscape, rawKeyCtrlC:
 			return nil, false, s.dismissed(key.kind)
 		case rawKeyBackspace:
+			if !st.inFilter && st.filter.text == "" {
+				continue
+			}
+			st.inFilter = true
 			if st.filter.backspace() {
 				st.applyFilter()
 			}
 		case rawKeyLeft:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.move(-1)
 		case rawKeyRight:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.move(1)
 		case rawKeyHome:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.moveTo(0)
 		case rawKeyEnd:
+			if !st.inFilter {
+				continue
+			}
 			st.filter.moveTo(len(st.filter.runes()))
 		case rawKeySpace:
-			// Toggle selection
-			if len(st.filtered) > 0 {
+			// A space is text while the keyboard is in the filter, and the
+			// toggle of the focused row while it is on the rows.
+			if st.inFilter {
+				st.filter.insert(" ")
+				st.applyFilter()
+			} else if len(st.filtered) > 0 {
 				optIdx := st.filtered[st.cursor]
 				if selected[optIdx] {
 					delete(selected, optIdx)
@@ -4054,9 +4165,11 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 		case rawKeyTab:
 			continue
 		case rawKeyPaste:
+			st.inFilter = true
 			st.filter.insert(strings.ReplaceAll(key.text, "\n", " "))
 			st.applyFilter()
 		case rawKeyRune:
+			st.inFilter = true
 			st.filter.insert(string(key.r))
 			st.applyFilter()
 		}
@@ -4088,12 +4201,13 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 	panel := func() slashPanel { return inputPanel(label, value, cursor, secret, s.escHint()) }
 	s.showPanel(panel())
 	// Clicks on the field row move the caret; the field's text starts after
-	// its prompt marker.
+	// its bar's margin and glyph.
 	defer s.withCaretPlacer(func(line, col int) {
-		if line != panel().fieldRow(s.panelWidth()) {
+		p := panel()
+		if !s.onFieldBar(p, line) {
 			return
 		}
-		cursor = caretIndexForClick(value, displayLineWidth(panelFieldLead), col)
+		cursor = caretIndexForClick(value, p.field.textCol(), col)
 		s.showPanel(panel())
 	})()
 
@@ -4374,6 +4488,8 @@ type richPickerState struct {
 	selectable []int // indices into items where Disabled=false
 	cursor     int   // index into selectable
 	filter     filterField
+	inFilter   bool   // the keyboard is in the filter, not on the rows
+	noFilter   bool   // too few rows to need a filter: none is shown
 	esc        string // what Esc does, for the key hint
 }
 
@@ -4429,6 +4545,7 @@ func (s *rawSelector) renderRichPicker(p *richPickerState, label string) {
 // fixed gap apart — the ❯ on the focused one, and the keys.
 func (p *richPickerState) panel(label string) slashPanel {
 	b := newPanelBuilder()
+	b.unmarked = p.inFilter
 	pickerHead(b, label)
 	nameWidth := p.nameWidth()
 	category := ""
@@ -4445,7 +4562,9 @@ func (p *richPickerState) panel(label string) slashPanel {
 	}
 	b.hint(selectFooterHint(false, p.esc))
 	panel := b.panel()
-	panel.field = p.filter.panelField()
+	if !p.noFilter {
+		panel.field = p.filter.pickerField(p.inFilter)
+	}
 	return panel
 }
 
@@ -4496,6 +4615,9 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 		esc:        s.escHint(),
 	}
 	p.rebuildSelectable()
+	// A picker that loads more rows as the user walks down has no count to
+	// judge by, so it always shows its filter.
+	p.noFilter = fetchMore == nil && !pickerShowsFilter(len(p.selectable))
 	// The picker opens on the row the caller names — the setting in force,
 	// or the answer given before on a page shown again — and on the first
 	// row when it names none.
@@ -4509,6 +4631,7 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 	s.renderRichPicker(p, label)
 	defer s.withCaretPlacer(func(line, col int) {
 		if s.placeFieldCaret(p.panel(label), &p.filter, line, col) {
+			p.inFilter = true
 			s.renderRichPicker(p, label)
 		}
 	})()
@@ -4518,6 +4641,9 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 		if err != nil {
 			return -1, false, err
 		}
+		if p.noFilter && editsFilter(key.kind) {
+			continue
+		}
 		switch key.kind {
 		case rawKeyNone:
 			continue
@@ -4525,12 +4651,10 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 			s.dispatchMouse(key.mouse)
 			continue
 		case rawKeyUp:
-			if p.cursor > 0 {
-				p.cursor--
-			}
+			navigatePicker(&p.inFilter, &p.cursor, len(p.selectable), -1, !p.noFilter)
 		case rawKeyDown:
-			if p.cursor < len(p.selectable)-1 {
-				p.cursor++
+			if p.inFilter || p.cursor < len(p.selectable)-1 {
+				navigatePicker(&p.inFilter, &p.cursor, len(p.selectable), 1, !p.noFilter)
 			} else if fetchMore != nil {
 				more := fetchMore()
 				if len(more) > 0 {
@@ -4556,24 +4680,46 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 		case rawKeyEscape, rawKeyCtrlC:
 			return -1, false, s.dismissed(key.kind)
 		case rawKeyBackspace:
+			if !p.inFilter && p.filter.text == "" {
+				continue
+			}
+			p.inFilter = true
 			if p.filter.backspace() {
 				p.rebuildSelectable()
 			}
 		case rawKeyLeft:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.move(-1)
 		case rawKeyRight:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.move(1)
 		case rawKeyHome:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.moveTo(0)
 		case rawKeyEnd:
+			if !p.inFilter {
+				continue
+			}
 			p.filter.moveTo(len(p.filter.runes()))
 		case rawKeyPaste:
+			p.inFilter = true
 			p.filter.insert(strings.ReplaceAll(key.text, "\n", " "))
 			p.rebuildSelectable()
 		case rawKeyRune:
+			p.inFilter = true
 			p.filter.insert(string(key.r))
 			p.rebuildSelectable()
 		case rawKeySpace:
+			if p.noFilter {
+				continue
+			}
+			p.inFilter = true
 			p.filter.insert(" ")
 			p.rebuildSelectable()
 		}

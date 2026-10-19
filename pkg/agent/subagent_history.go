@@ -51,6 +51,9 @@ type HistoryEntry struct {
 	// conversation's model.
 	ModelProvider string `json:"model_provider,omitempty"`
 	Model         string `json:"model,omitempty"`
+	// ReasoningEffort is the effort that model runs at, when the configuration
+	// pinned one; empty lets the model's own configuration decide.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type Query struct {

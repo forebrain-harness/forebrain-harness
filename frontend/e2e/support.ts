@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { Page, Response } from '@playwright/test'
+import { expect, type Page, type Response } from '@playwright/test'
 
 /** Save a full-page screenshot into the run's shots directory. */
 export async function shot(page: Page, name: string): Promise<void> {
@@ -99,6 +99,26 @@ export function watch401(page: Page): () => Response[] {
     if (response.status() === 401 && response.url().includes('/api/')) seen.push(response)
   })
   return () => seen.filter((response) => !response.url().includes('/api/auth/session'))
+}
+
+/**
+ * Bring a workbench tab into the window before asserting or clicking it: the bar
+ * shows as many tabs as the column has room for — five of the workshop's eight
+ * in Chinese, three of them in English — and the ones past the window are behind
+ * the arrows. The window only moves forward here, so a case walks the tabs in
+ * the order they appear.
+ */
+export async function revealTab(page: Page, key: string): Promise<void> {
+  const tab = page.locator(`[data-testid="bench-tab-${key}"]`)
+  const next = page.locator('[data-testid="bench-tabs-next"]')
+  // The toggle has only been clicked, so wait for the bar it draws, which is
+  // where the window and its arrows live.
+  await expect(page.locator('.bench-tab-strip [role="tab"]').first()).toBeVisible()
+  for (let step = 0; step < 8 && !(await tab.isVisible()); step += 1) {
+    if (!(await next.isEnabled())) break
+    await next.click()
+  }
+  await expect(tab).toBeVisible()
 }
 
 /**

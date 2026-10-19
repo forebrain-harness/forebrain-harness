@@ -742,7 +742,7 @@ func Run(ctx context.Context, opts Options) error {
 				continue
 			}
 			if isMouseInputEvent(ev) && ev.kind != inputEventMouseWheel {
-				renderer.HandleMouse(ev)
+				state.handleMouse(renderer, ev)
 				continue
 			}
 			if ev.kind == inputEventMouseWheel {
@@ -813,7 +813,7 @@ func Run(ctx context.Context, opts Options) error {
 						state.composer.DraftText = newDraft
 						state.composer.Cursor = composerCursorClamp(newDraft, newCursor)
 						state.composer.HandleDraftUpdate(newDraft, opts.Session)
-						seedInteractiveInput(newDraft, newCursor)
+						state.seedReader(newDraft, newCursor)
 						renderComposerWithState(renderer, &state)
 						continue
 					}
@@ -841,6 +841,7 @@ func Run(ctx context.Context, opts Options) error {
 					if strings.TrimSpace(draft) != "" {
 						state.cancelAutoContinue(renderer)
 					}
+					state.releaseRosterFocusForEdit(draft, cursor)
 					state.prepareHistoryDraft(ev, draft)
 					state.syncPendingPastesWithDraft(draft)
 					state.syncAttachmentsWithDraft(draft)
@@ -1361,9 +1362,10 @@ func handleBlockingSlashInput(session Session, renderer *Renderer, state *stream
 	switch ev.kind {
 	case inputEventMouseClick, inputEventMousePress, inputEventMouseDrag,
 		inputEventMouseRelease, inputEventMouseMove, inputEventMouseWheel:
-		renderer.HandleMouse(ev)
+		state.handleMouse(renderer, ev)
 	case inputEventDraft:
 		draft, cursor := sanitizeTerminalDraft(ev.draft, ev.cursor)
+		state.releaseRosterFocusForEdit(draft, cursor)
 		state.prepareHistoryDraft(ev, draft)
 		state.syncPendingPastesWithDraft(draft)
 		state.syncAttachmentsWithDraft(draft)
@@ -1595,7 +1597,6 @@ type streamState struct {
 	composerView            string
 	viewDrafts              map[string]composerDraft
 	inputHistoryStore       rawInputHistoryStore
-	historyBrowseActive     bool
 	historyDraftAttachments []InputAttachment
 	historyDraftPastes      []PendingPaste
 	quitRequested           bool
@@ -1615,11 +1616,14 @@ type streamState struct {
 	agentControlPrefixArmed      bool
 	agentRoster                  AgentRosterSnapshot
 	// agentRosterFocused is true once the user has moved keyboard focus onto
-	// the roster panel via Down. While false, arrows control input history as
-	// usual and the roster shows no per-row hint; Enter/x on the roster are
-	// inert until focus is entered. The row the focused cursor points at is
-	// the renderer's (Renderer.RosterCursorRow), keyed by agent so it follows
-	// the view rather than a row position.
+	// the roster panel via Down. While false the keyboard is in the composer:
+	// arrows control input history as usual, the roster marks no row and shows
+	// no per-row hint, and Enter/x on the roster are inert until focus is
+	// entered. While true the roster's ❯ marks the keyboard and the composer
+	// shows no caret; editing the composer hands the keyboard back
+	// (releaseRosterFocusForEdit). The row the focused cursor points at is the
+	// renderer's (Renderer.RosterCursorRow), keyed by agent so it follows the
+	// view rather than a row position.
 	agentRosterFocused bool
 	// userInterrupted is set when the user interrupts an active run with esc.
 	// The run's cancellation error is swallowed downstream and surfaces as a nil
@@ -1887,6 +1891,38 @@ func (s *streamState) handleOverlayNav(hotkey inputHotkey, renderer *Renderer) b
 		return true
 	}
 	return false
+}
+
+// rosterOwnsLine reports whether a submitted line is the roster's rather than
+// the composer's. With the keyboard on the roster an empty Enter opens its row
+// and "x" stops it; anything else is a message for the view on screen — also
+// when the roster holds the keyboard, as it does on entering a subagent's view,
+// where the draft that view kept is seeded into the reader without a draft event
+// to hand the keyboard back.
+func (s *streamState) rosterOwnsLine(line string) bool {
+	if s == nil || !s.agentRosterFocused {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "x":
+		return true
+	}
+	return false
+}
+
+// releaseRosterFocusForEdit hands the keyboard back to the composer when a
+// draft changes what it holds — its text or its caret. The roster focus hides
+// the composer's caret, so an edit that kept it would type into a composer the
+// user cannot see, the way typing in a picker's list moves into its filter.
+// The empty draft the raw reader sends after every submitted line changes
+// nothing and leaves the focus where Enter put it.
+func (s *streamState) releaseRosterFocusForEdit(draft string, cursor int) {
+	if s == nil || !s.agentRosterFocused {
+		return
+	}
+	if draft != s.composer.DraftText || composerCursorClamp(draft, cursor) != s.composer.Cursor {
+		s.agentRosterFocused = false
+	}
 }
 
 func (s *streamState) handleAgentRosterLineInput(session Session, renderer *Renderer, tracker *Tracker, line string) bool {
@@ -2186,6 +2222,15 @@ func (s *streamState) syncComposerToView(renderer *Renderer) {
 	s.applyComposerDraft(s.viewDrafts[view])
 	s.composerView = view
 	s.composer.SubagentView = view != ""
+	if view != "" && agentRosterIndexForView(s.agentRoster, view) >= 0 {
+		// Entering a subagent's view, however the user got there — a click on
+		// its card, Enter on its roster row — the keyboard is on that agent's
+		// row of the roster: the renderer carried the roster's cursor onto the
+		// view, and the focus is what makes the cursor a ❯ with its hint and
+		// takes the caret off the composer. A view whose row has left the roster
+		// (a finished subagent, still opened from its card) has no row to hold it.
+		s.agentRosterFocused = true
+	}
 	if view != "" {
 		// A live per-response gauge may have arrived before the user opened
 		// this view; the persisted occupancy the seed reads stays empty until
@@ -2195,6 +2240,23 @@ func (s *streamState) syncComposerToView(renderer *Renderer) {
 		if !renderer.ComposerTokenStats(view).Active {
 			renderer.SetComposerTokenStats(view, s.session.SubagentComposerTokenStats(s.sessionID, view))
 		}
+	}
+}
+
+// handleMouse gives a mouse event to the renderer and, when it moved the screen
+// to another agent's view — a click on a subagent's card — brings the composer
+// along with it. The renderer carries the roster's cursor onto the view by
+// itself, but the keyboard focus, the composer's draft and its footer are this
+// state's, and nothing repaints the composer after a click, so they would stay
+// where the old view left them until the next key.
+func (s *streamState) handleMouse(renderer *Renderer, ev inputEvent) {
+	if renderer == nil {
+		return
+	}
+	before := renderer.ActiveView()
+	renderer.HandleMouse(ev)
+	if s != nil && renderer.ActiveView() != before {
+		renderComposerWithState(renderer, s)
 	}
 }
 
@@ -2237,7 +2299,7 @@ func (s *streamState) applyComposerDraft(d composerDraft) {
 	}
 	// The raw reader owns the line buffer, so switching views must reseed it or
 	// the previous view's text would follow the user into this one.
-	seedInteractiveInput(s.composer.DraftText, seedCursorEnd)
+	s.seedReader(s.composer.DraftText, seedCursorEnd)
 }
 
 func (s *streamState) composerPendingInputPreview() ComposerPendingInputPreview {
@@ -2301,7 +2363,7 @@ func subagentViewLine(ctx context.Context, sigCh <-chan os.Signal, events <-chan
 		renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "shell", Content: subagentViewMainOnlyReply, AgentID: view, Final: true})
 		state.composer.DraftText = line
 		state.composer.Cursor = len([]rune(line))
-		seedInteractiveInput(line, seedCursorEnd)
+		state.seedReader(line, seedCursorEnd)
 		renderComposerWithState(renderer, state)
 	default:
 		if submittable {
@@ -2458,7 +2520,7 @@ func dispatchSubagentCompactSlash(ctx context.Context, sigCh <-chan os.Signal, e
 // routing sits here rather than inside it; every other event, and every line in
 // the conversation's own view, is unchanged.
 func dispatchActiveRunInput(ctx context.Context, sigCh <-chan os.Signal, events <-chan inputEvent, notifyCh <-chan any, processNotify func(any), session Session, renderer *Renderer, tracker *Tracker, state *streamState, clipboard ClipboardImageReader, ev inputEvent, cmds *commandController) {
-	if ev.kind == inputEventLine && state != nil && !state.agentRosterFocused && renderer != nil {
+	if ev.kind == inputEventLine && state != nil && !state.rosterOwnsLine(ev.line) && renderer != nil {
 		if view := strings.TrimSpace(renderer.ActiveView()); view != "" {
 			subagentViewLine(ctx, sigCh, events, notifyCh, processNotify, session, renderer, tracker, state, cmds, view, ev.line)
 			return
@@ -2858,7 +2920,7 @@ func (s *streamState) restoreLatestQueuedEditableSubmission(session Session) boo
 func (s *streamState) restoreRecalledSubmission(submission ComposerSubmission) {
 	s.restoreQueuedSubmission(submission)
 	if strings.TrimSpace(s.composer.DraftText) != "" {
-		seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+		s.seedReader(s.composer.DraftText, s.composer.Cursor)
 	}
 }
 
@@ -2880,7 +2942,7 @@ func (s *streamState) restoreDraftSubmission(submission ComposerSubmission) {
 	s.rememberRestoredQueuedSubmission(submission)
 	s.holdComposer = true
 	if strings.TrimSpace(s.composer.DraftText) != "" {
-		seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+		s.seedReader(s.composer.DraftText, s.composer.Cursor)
 	}
 }
 
@@ -3239,6 +3301,7 @@ func (s *streamState) appendPaste(content string) {
 	if content == "" {
 		return
 	}
+	s.agentRosterFocused = false
 	// Paste invalidates slash overlay: text no longer starts with bare "/".
 	s.composer.SlashOverlay = nil
 	if shouldFoldLargePaste(content) {
@@ -3258,7 +3321,7 @@ func (s *streamState) appendPaste(content string) {
 		s.composer.DraftText = string(line)
 		s.composer.Cursor = cursor
 		s.holdComposer = true
-		seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+		s.seedReader(s.composer.DraftText, s.composer.Cursor)
 		return
 	}
 	if strings.TrimSpace(s.composer.DraftText) == "" {
@@ -3266,7 +3329,7 @@ func (s *streamState) appendPaste(content string) {
 		s.composer.Text = content
 		s.composer.Cursor = len([]rune(s.composer.DraftText))
 		s.holdComposer = true
-		seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+		s.seedReader(s.composer.DraftText, s.composer.Cursor)
 		return
 	}
 	line, cursor := insertRunesAtCursor([]rune(s.composer.DraftText), s.composer.Cursor, []rune(content))
@@ -3278,7 +3341,7 @@ func (s *streamState) appendPaste(content string) {
 		s.composer.Cursor = len([]rune(draft))
 	}
 	s.holdComposer = true
-	seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+	s.seedReader(s.composer.DraftText, s.composer.Cursor)
 }
 
 // prepareHistoryDraft restores the non-text composer state associated with an
@@ -3292,16 +3355,16 @@ func (s *streamState) prepareHistoryDraft(ev inputEvent, draft string) {
 	}
 	if ev.historyNavigation {
 		if ev.historyIndex >= 0 {
-			if !s.historyBrowseActive {
+			if !s.composer.HistoryBrowsing {
 				s.historyDraftAttachments = append([]InputAttachment(nil), s.composer.Attachments...)
 				s.historyDraftPastes = append([]PendingPaste(nil), s.composer.PendingPastes...)
 			}
-			s.historyBrowseActive = true
+			s.composer.HistoryBrowsing = true
 			s.composer.Attachments = append([]InputAttachment(nil), ev.historyEntry.Attachments...)
 			s.composer.PendingPastes = append([]PendingPaste(nil), ev.historyEntry.PendingPastes...)
 			return
 		}
-		if s.historyBrowseActive {
+		if s.composer.HistoryBrowsing {
 			s.composer.Attachments = append([]InputAttachment(nil), s.historyDraftAttachments...)
 			s.composer.PendingPastes = append([]PendingPaste(nil), s.historyDraftPastes...)
 		}
@@ -3311,7 +3374,7 @@ func (s *streamState) prepareHistoryDraft(ev inputEvent, draft string) {
 	// Cursor-only draft events do not leave history browsing. Actual editing
 	// does, and subsequent sync calls prune metadata whose placeholder was
 	// deleted by that edit.
-	if s.historyBrowseActive && draft != s.composer.DraftText {
+	if s.composer.HistoryBrowsing && draft != s.composer.DraftText {
 		s.clearHistoryBrowse()
 	}
 }
@@ -3327,11 +3390,22 @@ func (s *streamState) enrichSubmittedInputHistory(ev inputEvent) {
 	})
 }
 
+// seedReader replaces the raw reader's line buffer with the composer's draft.
+// The reader drops its history position whenever it is reseeded, so the
+// composer's history browse ends with it: left running, HistoryBrowsing would
+// keep the pickers shut over a draft that is no longer a recall until the next
+// edit, and the stashed metadata could never be restored — Down no longer
+// reaches the original draft. Every reseed from the composer goes through here.
+func (s *streamState) seedReader(text string, cursor int) {
+	s.clearHistoryBrowse()
+	seedInteractiveInput(text, cursor)
+}
+
 func (s *streamState) clearHistoryBrowse() {
 	if s == nil {
 		return
 	}
-	s.historyBrowseActive = false
+	s.composer.HistoryBrowsing = false
 	s.historyDraftAttachments = nil
 	s.historyDraftPastes = nil
 }
@@ -3395,13 +3469,14 @@ func (s *streamState) applyMentionAcceptance(acc MentionAcceptance) {
 		})
 		return
 	}
-	seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+	s.seedReader(s.composer.DraftText, s.composer.Cursor)
 }
 
 func (s *streamState) appendImageAttachment(att InputAttachment) string {
 	if s == nil {
 		return ""
 	}
+	s.agentRosterFocused = false
 	s.composer.SlashOverlay = nil
 	s.composer.Attachments = append(s.composer.Attachments, att)
 	placeholder := imageAttachmentPlaceholder(len(s.composer.Attachments) - 1)
@@ -3410,7 +3485,7 @@ func (s *streamState) appendImageAttachment(att InputAttachment) string {
 	s.composer.DraftText = string(line)
 	s.composer.Cursor = cursor
 	s.holdComposer = true
-	seedInteractiveInput(s.composer.DraftText, s.composer.Cursor)
+	s.seedReader(s.composer.DraftText, s.composer.Cursor)
 	return placeholder
 }
 
@@ -4144,10 +4219,11 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 	switch ev.kind {
 	case inputEventMouseClick, inputEventMousePress, inputEventMouseDrag,
 		inputEventMouseRelease, inputEventMouseMove, inputEventMouseWheel:
-		renderer.HandleMouse(ev)
+		state.handleMouse(renderer, ev)
 	case inputEventDraft:
 		state.resetActiveRunCtrlCSequence()
 		draft, cursor := sanitizeTerminalDraft(ev.draft, ev.cursor)
+		state.releaseRosterFocusForEdit(draft, cursor)
 		state.prepareHistoryDraft(ev, draft)
 		state.syncPendingPastesWithDraft(draft)
 		state.syncAttachmentsWithDraft(draft)
@@ -4245,7 +4321,7 @@ func handleActiveRunInput(ctx context.Context, session Session, renderer *Render
 				state.composer.DraftText = newDraft
 				state.composer.Cursor = composerCursorClamp(newDraft, newCursor)
 				state.composer.HandleDraftUpdate(newDraft, session)
-				seedInteractiveInput(newDraft, newCursor)
+				state.seedReader(newDraft, newCursor)
 				return
 			}
 			if acc, ok := state.composer.AcceptMentionSelection(); ok {

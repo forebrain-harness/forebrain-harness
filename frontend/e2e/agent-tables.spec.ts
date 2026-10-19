@@ -317,8 +317,9 @@ test('every table action is an icon button that names itself', async ({ page }) 
   test.info().setTimeout(180_000)
   await signIn(page)
 
-  // A row on every page that can be seeded. The subagents page lists what is
-  // in flight, and a run of this suite has nothing in flight here.
+  // A row on every page that can be seeded. The subagents page needs no seed:
+  // it lists the agent's configuration — the harness's own subagents plus the
+  // agent's — so it has rows on a fresh run.
   const seeded = await seedProjects(page, 3)
   await seedPermissionRule(page)
   seedMemoryFiles(1)
@@ -327,15 +328,12 @@ test('every table action is an icon button that names itself', async ({ page }) 
   try {
     for (const { path, name } of PAGES) {
       await page.goto(path, { waitUntil: 'networkidle' })
-      if (name === 'subagents') {
-        await expect(page.locator('[data-subagent-row]')).toHaveCount(0)
-        // The review's own copy of the page: the empty state is the honest one.
-        await pageShot(page, `073-${name}`)
-        continue
-      }
       await expect(page.locator('main tbody tr').first()).toBeVisible({ timeout: 15_000 })
 
       // The action column holds icon buttons only: no words, so no text button.
+      // A cell may open with a switch — a subagent's own on/off sits in front of
+      // its row actions — and the switches come first, so nothing else may
+      // follow them but row actions.
       const report = await page.evaluate(() => {
         const rows = Array.from(document.querySelectorAll('main tbody tr'))
         const bad: string[] = []
@@ -345,10 +343,16 @@ test('every table action is an icon button that names itself', async ({ page }) 
           // The tools page's inputs row is one full-width cell of its own.
           if (cells.length < 2) continue
           const last = cells[cells.length - 1]
+          let afterAction = false
           for (const button of Array.from(last.querySelectorAll('button'))) {
-            actions += 1
-            if (!button.classList.contains('forebrain-row-action')) {
-              bad.push(`${button.getAttribute('aria-label') ?? button.textContent}: not a row action`)
+            const name = button.getAttribute('aria-label') ?? button.textContent ?? ''
+            if (button.classList.contains('forebrain-switch')) {
+              if (afterAction) bad.push(`${name}: a switch after a row action`)
+            } else if (button.classList.contains('forebrain-row-action')) {
+              afterAction = true
+              actions += 1
+            } else {
+              bad.push(`${name}: not a row action or a switch`)
             }
             if ((button.textContent ?? '').trim() !== '') {
               bad.push(`${button.textContent}: carries text`)
@@ -359,7 +363,7 @@ test('every table action is an icon button that names itself', async ({ page }) 
       })
       expect(report.rows, `${path} has no rows to check`).toBeGreaterThan(0)
       expect(report.actions, `${path} has no row action`).toBeGreaterThan(0)
-      expect(report.bad, `${path} still draws a text button in its action column`).toEqual([])
+      expect(report.bad, `${path} still draws something other than a row action in its action column`).toEqual([])
 
       // The review's own copy of the page, taken before a tip is open.
       await pageShot(page, `073-${name}`)

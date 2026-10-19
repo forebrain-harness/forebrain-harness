@@ -40,7 +40,7 @@
               <th>{{ t('rules.colFile') }}</th>
               <th>{{ t('rules.colPurpose') }}</th>
               <th>{{ t('rules.colUpdated') }}</th>
-              <th class="text-right">{{ t('rules.colActions') }}</th>
+              <th class="text-center">{{ t('rules.colActions') }}</th>
             </tr>
           </thead>
           <tbody>
