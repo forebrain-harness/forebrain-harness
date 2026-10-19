@@ -109,6 +109,7 @@ test('project sessions live only in the project space', async ({ page }) => {
   // them all — carrying the project's name on its row.
   await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
   await expect(page.locator('[data-testid="chat-drawer"]')).toBeVisible()
+  await expect(page.locator('.chat-drawer-row', { hasText: 'project-space-e2e' })).toBeVisible({ timeout: 15_000 })
   const drawerText = await page.locator('[data-testid="chat-drawer"]').innerText()
   expect(drawerText).toContain('project-space-e2e')
   expect(drawerText).toContain('e2e-alpha')

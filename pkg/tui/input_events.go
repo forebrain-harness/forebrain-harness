@@ -111,6 +111,13 @@ var editableQueuedInputActive atomic.Bool
 // soft-wrapped lines. Atomic for race-free reader access.
 var composerContentWidth atomic.Int32
 
+// composerSelectionRange is the composer text a mouse selection covers, in the
+// rune space of the buffer the raw input reader owns. The reader owns that
+// buffer and the renderer owns the selection, so this is how a Delete reaches
+// the selected text: the renderer publishes the range whenever the selection
+// changes, and the reader consumes it (storing nil) exactly once.
+var composerSelectionRange atomic.Pointer[[2]int]
+
 type inputEvent struct {
 	kind       inputEventKind
 	line       string
@@ -600,6 +607,24 @@ func deleteRuneBeforeCursor(line []rune, cursor int) ([]rune, int, bool) {
 	out = append(out, line[:cursor-1]...)
 	out = append(out, line[cursor:]...)
 	return out, cursor - 1, true
+}
+
+// deleteRuneRange removes runes[start:end], returning the shortened slice. An
+// empty or out-of-range span is a no-op, so a caller may pass a range it
+// resolved against a slightly older buffer without checking every bound.
+func deleteRuneRange(runes []rune, start, end int) []rune {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if end <= start {
+		return runes
+	}
+	out := make([]rune, 0, len(runes)-(end-start))
+	out = append(out, runes[:start]...)
+	return append(out, runes[end:]...)
 }
 
 func readInputEvents(ctx context.Context, in io.Reader, out io.Writer, tty rawInputController, historyStore rawInputHistoryStore) <-chan inputEvent {

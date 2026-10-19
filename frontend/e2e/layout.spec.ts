@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 
-import { expectAssistantReply, seedProjectSession, signIn } from './support'
+import { expectAssistantReply, seedListedConversations, seedProjectSession, signIn } from './support'
 
 async function openDrawer(page: Page) {
   await page.locator('.forebrain-rail-group > button.forebrain-rail-link').first().click()
@@ -124,6 +124,25 @@ test('the drawer lists conversations when opened away from the chat page', async
   await openDrawer(page)
   expect((await listed).ok()).toBe(true)
   await expect(page.locator('[data-testid="chat-drawer"]')).toBeVisible()
+})
+
+test('the drawer pages its list with load more', async ({ page }) => {
+  // Seeding 101 listed conversations runs 101 fake-model turns; the case's
+  // own budget has to hold them all.
+  test.info().setTimeout(360_000)
+  await signIn(page)
+  await seedListedConversations(page, 101, 'layout-more')
+  await page.goto('/skills', { waitUntil: 'networkidle' })
+  await openDrawer(page)
+  // The first page carries the newest 100 of the 101 seeded — the last one
+  // seeded is on it, the first one is not — and the list offers the rest.
+  await expect(page.locator('.chat-drawer-row', { hasText: 'listed 100' })).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('.chat-drawer-row', { hasText: 'listed 0' })).toHaveCount(0)
+  await expect(page.locator('[data-testid="drawer-load-more"]')).toBeVisible()
+  await page.click('[data-testid="drawer-load-more"]')
+  // The appended page brings the oldest row and retires the button.
+  await expect(page.locator('.chat-drawer-row', { hasText: 'listed 0' })).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('[data-testid="drawer-load-more"]')).toHaveCount(0)
 })
 
 test('heartbeat lives in the conversation header, not the rail or the workbench', async ({ page }) => {

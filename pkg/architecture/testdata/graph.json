@@ -2,7 +2,7 @@
   "packages": [
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/agent",
-      "loc": 2077,
+      "loc": 2090,
       "fan_in": 6,
       "fan_out": 1
     },
@@ -26,7 +26,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/config",
-      "loc": 5921,
+      "loc": 6150,
       "fan_in": 15,
       "fan_out": 1
     },
@@ -38,7 +38,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/gateway",
-      "loc": 21587,
+      "loc": 22805,
       "fan_in": 0,
       "fan_out": 18
     },
@@ -80,7 +80,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/lsp",
-      "loc": 10372,
+      "loc": 10454,
       "fan_in": 1,
       "fan_out": 4
     },
@@ -110,13 +110,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/process",
-      "loc": 5006,
+      "loc": 5155,
       "fan_in": 2,
       "fan_out": 20
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/run",
-      "loc": 18779,
+      "loc": 19160,
       "fan_in": 3,
       "fan_out": 16
     },
@@ -140,7 +140,7 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/state",
-      "loc": 13975,
+      "loc": 14068,
       "fan_in": 12,
       "fan_out": 2
     },
@@ -158,13 +158,13 @@
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tool",
-      "loc": 21278,
+      "loc": 21689,
       "fan_in": 9,
       "fan_out": 9
     },
     {
       "path": "github.com/forebrain-harness/forebrain-harness/pkg/tui",
-      "loc": 47372,
+      "loc": 48125,
       "fan_in": 0,
       "fan_out": 20
     },

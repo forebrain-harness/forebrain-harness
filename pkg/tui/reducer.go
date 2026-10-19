@@ -3402,6 +3402,37 @@ func (a composerTextArea) caretAt(line, col int) (int, bool) {
 	return a.trimmed + row.startRune + caretIndexForClick(a.runes[row.startRune:row.endRune], row.prefixWidth, col), true
 }
 
+// selectionRunes maps a selection expressed as two cells of the block this
+// area belongs to onto the buffer the area describes. A selection that starts
+// above the text starts at its first rune, one that ends below it ends at its
+// last, and columns are clamped to the row they land on — the same clamping
+// caretAt does for a click. ok is false when the two cells do not cover any
+// rune.
+func (a composerTextArea) selectionRunes(startLine, startCol, endLine, endCol int) (start, end int, ok bool) {
+	if len(a.rows) == 0 {
+		return 0, 0, false
+	}
+	endOfText := a.trimmed + len(a.runes)
+	last := a.firstLine + len(a.rows) - 1
+	at := func(line, col int) int {
+		switch {
+		case line < a.firstLine:
+			return 0
+		case line > last:
+			return endOfText
+		}
+		if caret, ok := a.caretAt(line, col); ok {
+			return caret
+		}
+		return endOfText
+	}
+	start, end = at(startLine, startCol), at(endLine, endCol)
+	if start > end {
+		start, end = end, start
+	}
+	return start, end, end > start
+}
+
 // composerTextRowsFromSpans converts the wrap spans of the displayed composer
 // text into the per-row rune ranges a click is resolved through. text is the
 // string the spans index — the styled one the card lays out — but the offsets
@@ -6194,6 +6225,69 @@ func (s shownScreen) overlayPosition(col, row int) (line, column int, ok bool) {
 	return ref.line, column, true
 }
 
+// OverlaySelection returns the text selection as two cells of the modal overlay
+// on screen, in the coordinates overlayPosition reports: the logical line the
+// painted row came from, and the display column within that line. The pair is
+// ordered, so the first cell is the earlier one. ok is false when nothing is
+// selected, when no overlay owns the screen, or when both anchors sit in the
+// transcript — a transcript selection covers nothing a keyboard can edit.
+//
+// A selection that starts in the transcript or ends past the overlay is clamped
+// to the overlay's own first and last row, so a drag from the conversation into
+// a field still deletes the field's part of it.
+func (r *Renderer) OverlaySelection() (startLine, startCol, endLine, endCol int, ok bool) {
+	if r == nil {
+		return 0, 0, 0, 0, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.viewportMode || !r.overlayActive || !r.selectDidDrag {
+		return 0, 0, 0, 0, false
+	}
+	// Both anchors in the transcript: nothing a field can delete, and clamping
+	// them onto the overlay's first row would make a transcript-only selection
+	// delete the first field's text.
+	if r.selectStartRow < composerRowBase && r.selectEndRow < composerRowBase {
+		return 0, 0, 0, 0, false
+	}
+	s := r.liveScreenLocked()
+	if len(s.overlayRefs) == 0 {
+		return 0, 0, 0, 0, false
+	}
+	// The block is bottom-pinned and its first row is the pinned separator, so
+	// the row an anchor names is (abs - composerRowBase - 1) into the visible
+	// overlay rows, plus the rows scrolled off the top. Overlay blocks never
+	// scroll the block itself (composerBlock.scrollOffset stays 0), so the
+	// composer's own scroll offset plays no part here.
+	cell := func(abs, col int) (int, int) {
+		idx := abs - composerRowBase - 1 + s.overlayFirstRow
+		if idx < 0 {
+			idx = 0 // the selection started in the transcript above
+		}
+		if idx >= len(s.overlayRefs) {
+			// ...or ran on past the overlay's last row: clamp to its end. The
+			// column is further right than any text, so the field's own click
+			// mapping lands it at the end of the row it names.
+			last := s.overlayRefs[len(s.overlayRefs)-1]
+			return last.line, 1 << 30
+		}
+		// The body of overlayPosition, inline: this is the same row→line and
+		// column translation a click goes through.
+		ref := s.overlayRefs[idx]
+		column := ref.logicalCol + col - ref.rowCol
+		if column < ref.logicalCol {
+			column = ref.logicalCol
+		}
+		return ref.line, column
+	}
+	startLine, startCol = cell(r.selectStartRow, r.selectStartCol)
+	endLine, endCol = cell(r.selectEndRow, r.selectEndCol)
+	if startLine > endLine || (startLine == endLine && startCol > endCol) {
+		startLine, startCol, endLine, endCol = endLine, endCol, startLine, startCol
+	}
+	return startLine, startCol, endLine, endCol, true
+}
+
 // liveScreenLocked is the renderer's current hit-testing state as a screen:
 // what a call with no read time — a direct call from a test, say — and a
 // renderer that has not painted yet resolve against. Caller holds r.mu.
@@ -6740,6 +6834,61 @@ func (r *Renderer) selectClearLocked() {
 	r.selectEndRow = -1
 	r.selectStartCol = -1
 	r.selectEndCol = -1
+}
+
+// clearFieldSpaceSelectionLocked drops a selection made inside the bottom block
+// — the composer, or a modal overlay's field — without touching a transcript
+// selection above it. Both blocks share the anchor space but not their line
+// numbering, so an anchor outlives the block it was drawn in unless it is
+// dropped whenever that block's content or identity changes.
+func (r *Renderer) clearFieldSpaceSelectionLocked() {
+	if r.selectStartRow < composerRowBase && r.selectEndRow < composerRowBase {
+		return
+	}
+	r.selectClearLocked()
+}
+
+// composerSelectionRunesLocked resolves the composer text selection into the
+// rune range of the buffer the raw input reader owns. ok is false for a
+// transcript selection, for an overlay, and while the composer is hidden.
+//
+// Selection anchors are in the block's full (un-scrolled) row space: absRow
+// adds the composer's scrollOffset, and composerTextArea.rows is indexed in that
+// same space (see its doc comment and the painter's `unifiedRow`), so the row an
+// anchor names is `abs - composerRowBase` — the scroll offset must NOT be
+// subtracted again, or a tall scrolled composer deletes a span shifted by it.
+func (r *Renderer) composerSelectionRunesLocked() (start, end int, ok bool) {
+	if r.overlayActive || r.composerSuppressed || !r.selectDidDrag {
+		return 0, 0, false
+	}
+	if r.selectStartRow < composerRowBase && r.selectEndRow < composerRowBase {
+		return 0, 0, false
+	}
+	blockRow := func(abs int) int { return abs - composerRowBase }
+	return r.vpLastComposer.text.selectionRunes(
+		blockRow(r.selectStartRow), r.selectStartCol,
+		blockRow(r.selectEndRow), r.selectEndCol,
+	)
+}
+
+// publishComposerSelectionLocked hands the composer's current selection to the
+// raw input reader, and takes it back when there is none. A range the reader
+// already consumed is not re-published: only a change of range is news, which
+// is what makes a second Delete delete one rune instead of the same span again.
+func (r *Renderer) publishComposerSelectionLocked() {
+	start, end, ok := r.composerSelectionRunesLocked()
+	if !ok {
+		start, end = -1, -1
+	}
+	if start == r.publishedComposerSelection[0] && end == r.publishedComposerSelection[1] {
+		return
+	}
+	r.publishedComposerSelection = [2]int{start, end}
+	if !ok {
+		composerSelectionRange.Store(nil)
+		return
+	}
+	composerSelectionRange.Store(&[2]int{start, end})
 }
 
 // runeIndexAtVisualCol returns the index in runes of the rune whose display
