@@ -2293,3 +2293,243 @@ func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 		t.Fatalf("typing over a selection should replace it, got %q", got)
 	}
 }
+
+// TestMapEscapeSeqForwardDelete pins the sequence a terminal sends for an Apple
+// fn+Delete or a PC's Delete, and the modifier variants this key deliberately
+// does not claim.
+func TestMapEscapeSeqForwardDelete(t *testing.T) {
+	if got := mapEscapeSeq([]byte("[3~")).kind; got != rawKeyDelete {
+		t.Fatalf("ESC[3~ should parse as forward delete, got %v", got)
+	}
+	// Out of scope: shift+Delete and friends are another key-mapping job, and
+	// the bare sequence is what Terminal.app and tmux send.
+	for _, seq := range []string{"[3;2~", "[3;5~"} {
+		if got := mapEscapeSeq([]byte(seq)).kind; got != rawKeyNone {
+			t.Fatalf("ESC%s should stay unclaimed, got %v", seq, got)
+		}
+	}
+}
+
+// filterRowQuery returns the text a painted filter row shows after its glyph,
+// which is the query the picker is filtering by.
+func filterRowQuery(plain string) string {
+	idx := strings.Index(plain, panelFilterGlyph)
+	if idx < 0 {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimLeft(plain[idx+len(panelFilterGlyph):], " "), " ")
+}
+
+// waitForFilterQuery waits until the picker's painted filter shows exactly
+// want, so a test acts on what the user would see rather than racing a paint.
+func waitForFilterQuery(t *testing.T, r *Renderer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, plain := overlayRowContaining(t, r, panelFilterGlyph)
+		if got := filterRowQuery(plain); got == want {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the picker filter shows %q, want %q (row %q)", got, want, plain)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestSelectorFilterForwardDeleteDeletesAtTheCaret drives the picker filter
+// with the key that has no binding before this change: the caret stays put and
+// the character under it goes.
+func TestSelectorFilterForwardDeleteDeletesAtTheCaret(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "et")
+
+	if _, err := pw.Write([]byte{0x1b, '[', 'D'}); err != nil {
+		t.Fatalf("write Left: %v", err)
+	}
+	if _, err := pw.Write([]byte{0x1b, '[', '3', '~'}); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+
+	waitForFilterQuery(t, r, "e")
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorFilterForwardDeleteTakesTheSelection covers the selection path:
+// the drag is deleted whole, and the next press deletes one character.
+func TestSelectorFilterForwardDeleteTakesTheSelection(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte{0x1b, '[', '3', '~'}); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+	waitForFilterQuery(t, r, "ad")
+
+	if _, err := pw.Write([]byte{0x1b, '[', '3', '~'}); err != nil {
+		t.Fatalf("write second forward delete: %v", err)
+	}
+	waitForFilterQuery(t, r, "a")
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorInputForwardDeleteDeletesAtTheCaret covers Input()'s field, whose
+// caret starts at the end of its default value.
+func TestSelectorInputForwardDeleteDeletesAtTheCaret(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+
+	sel := newRawSelector(pr, r)
+	done := make(chan string, 1)
+	go func() {
+		value, _, err := sel.Input("Name", "hello")
+		if err != nil {
+			t.Errorf("Input: %v", err)
+		}
+		done <- value
+	}()
+	waitForPaintedRow(t, r, "hello")
+
+	if _, err := pw.Write([]byte{0x1b, '[', 'D', 0x1b, '[', '3', '~', '\r'}); err != nil {
+		t.Fatalf("write Left, forward delete and Enter: %v", err)
+	}
+	select {
+	case value := <-done:
+		if value != "hell" {
+			t.Fatalf("forward delete in Input should leave %q, got %q", "hell", value)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Input did not return")
+	}
+}
+
+// TestQuestionOtherForwardDeleteDeletesAtTheCaret covers user_interaction's
+// Other field, whose row carries a one-cell caret block the mapping has to
+// skip.
+func TestQuestionOtherForwardDeleteDeletesAtTheCaret(t *testing.T) {
+	forcedTermWidth, forcedTermHeight = 80, 30
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	out := newApprovalPaintWriter()
+	r := NewRenderer(out, out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	rs := newRawSelector(pr, r)
+
+	form := state.AskForm{
+		Title:     "Pick one",
+		Questions: []state.AskQuestion{{ID: "q1", Prompt: "Choose", Options: []state.AskOption{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}}},
+	}
+	payload, err := json.Marshal(form)
+	if err != nil {
+		t.Fatalf("marshal form: %v", err)
+	}
+	overlay, err := newQuestionOverlay(context.Background(), io.Discard, rs, turn.ToolApprovalRequest{AskFormJSON: string(payload)})
+	if err != nil {
+		t.Fatalf("newQuestionOverlay: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := overlay.Run()
+		done <- err
+	}()
+	waitForPaintedRow(t, r, "type to enter custom text")
+
+	if _, err := pw.Write([]byte("\x1b[B")); err != nil {
+		t.Fatalf("write Down: %v", err)
+	}
+	if _, err := pw.Write([]byte("\x1b[B")); err != nil {
+		t.Fatalf("write Down: %v", err)
+	}
+	waitForPaintedRow(t, r, "Other:")
+	if _, err := pw.Write([]byte("abcdef")); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	waitForPaintedRow(t, r, "abcdef")
+
+	// Three Lefts put the caret before "d", so forward delete removes it.
+	if _, err := pw.Write([]byte("\x1b[D\x1b[D\x1b[D")); err != nil {
+		t.Fatalf("write Left: %v", err)
+	}
+	if _, err := pw.Write([]byte{0x1b, '[', '3', '~'}); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, plain := overlayRowContaining(t, r, "Other:")
+		if !strings.Contains(plain, "abcdef") && strings.Contains(plain, "abc") && strings.Contains(plain, "ef") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("forward delete never landed in the Other field, row is %q", plain)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if _, err := pw.Write([]byte{'\r'}); err != nil {
+		t.Fatalf("write Enter: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("question overlay: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the question overlay did not return")
+	}
+	if got := overlay.otherText[0]; got != "abcef" {
+		t.Fatalf("forward delete in the Other field should leave %q, got %q", "abcef", got)
+	}
+}
+
+// TestApprovalFeedbackForwardDeleteDeletesAtTheCaret covers the plan-approval
+// feedback field, on both of its paths: the rune under the caret, and a
+// selection the key replaces.
+func TestApprovalFeedbackForwardDeleteDeletesAtTheCaret(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	o := &approvalOverlay{rs: newRawSelector(nil, r), planDenyEditing: true, out: io.Discard}
+	o.feedbackBuf = []rune("please fix")
+	o.feedbackCursor = 7
+	o.keepOptionsInView = true
+	o.renderViewport()
+
+	o.handlePlanDenyKey(parsedKey{kind: rawKeyDelete})
+	if got := string(o.feedbackBuf); got != "please ix" {
+		t.Fatalf("forward delete should remove the rune under the caret, got %q", got)
+	}
+	if o.feedbackCursor != 7 {
+		t.Fatalf("forward delete must leave the caret alone, got %d", o.feedbackCursor)
+	}
+
+	// The selection path: the drag is deleted whole by the same key.
+	o.renderViewport()
+	startCol, row := overlayCellOf(t, r, "please ix", 7)
+	endCol, _ := overlayCellOf(t, r, "please ix", 9)
+	r.ViewportSelectStart(startCol, row)
+	r.ViewportSelectDrag(endCol, row)
+	r.ViewportSelectEnd(endCol, row)
+
+	o.handlePlanDenyKey(parsedKey{kind: rawKeyDelete})
+	if got := string(o.feedbackBuf); got != "please " {
+		t.Fatalf("forward delete over a selection should remove it, got %q", got)
+	}
+	if o.feedbackCursor != 7 {
+		t.Fatalf("the caret must land at the start of the selection, got %d", o.feedbackCursor)
+	}
+}
+

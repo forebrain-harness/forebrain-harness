@@ -406,6 +406,14 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 			if p.filter.backspace() {
 				p.rebuild()
 			}
+		case rawKeyDelete:
+			if !p.inFilter && p.filter.text == "" {
+				continue
+			}
+			p.inFilter = true
+			if p.filter.deleteForward() {
+				p.rebuild()
+			}
 		case rawKeyLeft:
 			if !p.inFilter {
 				continue

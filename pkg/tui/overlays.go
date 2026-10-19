@@ -1068,6 +1068,10 @@ func (o *approvalOverlay) handlePlanDenyKey(key parsedKey) (turn.ToolApprovalDec
 			o.feedbackBuf = append(o.feedbackBuf[:o.feedbackCursor-1], o.feedbackBuf[o.feedbackCursor:]...)
 			o.feedbackCursor--
 		}
+	case rawKeyDelete:
+		if !o.cutFeedbackSelection() {
+			o.feedbackBuf, o.feedbackCursor, _ = deleteRuneAfterCursor(o.feedbackBuf, o.feedbackCursor)
+		}
 	case rawKeyLeft:
 		if o.feedbackCursor > 0 {
 			o.feedbackCursor--
@@ -2230,6 +2234,10 @@ func (o *questionOverlay) handleOtherEditKey(key parsedKey) (turn.ToolApprovalDe
 		if o.otherCursor > 0 {
 			o.otherBuf = append(o.otherBuf[:o.otherCursor-1], o.otherBuf[o.otherCursor:]...)
 			o.otherCursor--
+		}
+	case rawKeyDelete:
+		if !o.cutOtherSelection() {
+			o.otherBuf, o.otherCursor, _ = deleteRuneAfterCursor(o.otherBuf, o.otherCursor)
 		}
 	case rawKeyLeft:
 		if o.otherCursor > 0 {
@@ -3682,6 +3690,21 @@ func (f *filterField) backspace() bool {
 	return true
 }
 
+// deleteForward removes the rune under the caret, reporting whether anything
+// was deleted. A selection replaces the caret, so deleting it is this key's
+// whole edit — the mirror of backspace.
+func (f *filterField) deleteForward() bool {
+	if f.cutSelection() {
+		return true
+	}
+	runes, cursor, deleted := deleteRuneAfterCursor(f.runes(), f.cursor)
+	if !deleted {
+		return false
+	}
+	f.text, f.cursor = string(runes), cursor
+	return true
+}
+
 func (f *filterField) move(delta int) {
 	f.cursor = composerCursorClampRunes(f.runes(), f.cursor+delta)
 }
@@ -3710,7 +3733,7 @@ func pickerShowsFilter(rows int) bool { return rows >= pickerFilterMinRows }
 // which a picker without one ignores.
 func editsFilter(k rawKey) bool {
 	switch k {
-	case rawKeyBackspace, rawKeyLeft, rawKeyRight, rawKeyHome, rawKeyEnd, rawKeyPaste, rawKeyRune:
+	case rawKeyBackspace, rawKeyDelete, rawKeyLeft, rawKeyRight, rawKeyHome, rawKeyEnd, rawKeyPaste, rawKeyRune:
 		return true
 	}
 	return false
@@ -3956,6 +3979,14 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 			}
 			st.inFilter = true
 			if st.filter.backspace() {
+				st.applyFilter()
+			}
+		case rawKeyDelete:
+			if !st.inFilter && st.filter.text == "" {
+				continue
+			}
+			st.inFilter = true
+			if st.filter.deleteForward() {
 				st.applyFilter()
 			}
 		case rawKeyLeft:
@@ -4310,6 +4341,14 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 			if st.filter.backspace() {
 				st.applyFilter()
 			}
+		case rawKeyDelete:
+			if !st.inFilter && st.filter.text == "" {
+				continue
+			}
+			st.inFilter = true
+			if st.filter.deleteForward() {
+				st.applyFilter()
+			}
 		case rawKeyLeft:
 			if !st.inFilter {
 				continue
@@ -4428,6 +4467,10 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 		case rawKeyBackspace:
 			if !cut {
 				value, cursor, _ = deleteRuneBeforeCursor(value, cursor)
+			}
+		case rawKeyDelete:
+			if !cut {
+				value, cursor, _ = deleteRuneAfterCursor(value, cursor)
 			}
 		case rawKeyPaste:
 			value, cursor = insertRunesAtCursor(value, cursor, []rune(key.text))
@@ -4879,6 +4922,14 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 			}
 			p.inFilter = true
 			if p.filter.backspace() {
+				p.rebuildSelectable()
+			}
+		case rawKeyDelete:
+			if !p.inFilter && p.filter.text == "" {
+				continue
+			}
+			p.inFilter = true
+			if p.filter.deleteForward() {
 				p.rebuildSelectable()
 			}
 		case rawKeyLeft:
