@@ -3402,34 +3402,55 @@ func (a composerTextArea) caretAt(line, col int) (int, bool) {
 	return a.trimmed + row.startRune + caretIndexForClick(a.runes[row.startRune:row.endRune], row.prefixWidth, col), true
 }
 
+// selectionEndAt is caretAt's counterpart for a selection's end anchor: the same
+// row and prefix resolution, but the column is a cell boundary, so it resolves
+// past the rune its last cell covers (see runeIndexPastVisualCol). ok is false
+// for the same lines caretAt rejects.
+func (a composerTextArea) selectionEndAt(line, col int) (int, bool) {
+	idx := line - a.firstLine
+	if idx < 0 || idx >= len(a.rows) {
+		return 0, false
+	}
+	row := a.rows[idx]
+	return a.trimmed + row.startRune + selectionEndIndexForClick(a.runes[row.startRune:row.endRune], row.prefixWidth, col), true
+}
+
 // selectionRunes maps a selection expressed as two cells of the block this
 // area belongs to onto the buffer the area describes. A selection that starts
 // above the text starts at its first rune, one that ends below it ends at its
 // last, and columns are clamped to the row they land on — the same clamping
 // caretAt does for a click. ok is false when the two cells do not cover any
 // rune.
+//
+// The anchors arrive in drag order, so a reverse drag hands over its right end
+// first; they are ordered here the way the painter orders them before it reads
+// them (see applySelectionHighlight). Only then do the two halves keep their own
+// rules: the start anchor is a cell that belongs to a rune, the end anchor is
+// the boundary after the cells it covers — which is why a drag that stops inside
+// a wide rune still takes that rune whole, as the highlight shows it.
 func (a composerTextArea) selectionRunes(startLine, startCol, endLine, endCol int) (start, end int, ok bool) {
 	if len(a.rows) == 0 {
 		return 0, 0, false
 	}
+	if startLine > endLine || (startLine == endLine && startCol > endCol) {
+		startLine, startCol, endLine, endCol = endLine, endCol, startLine, startCol
+	}
 	endOfText := a.trimmed + len(a.runes)
 	last := a.firstLine + len(a.rows) - 1
-	at := func(line, col int) int {
+	at := func(line, col int, resolve func(int, int) (int, bool)) int {
 		switch {
 		case line < a.firstLine:
 			return 0
 		case line > last:
 			return endOfText
 		}
-		if caret, ok := a.caretAt(line, col); ok {
-			return caret
-		}
-		return endOfText
+		// A row inside the text always resolves; the lines outside it are the
+		// two cases above.
+		offset, _ := resolve(line, col)
+		return offset
 	}
-	start, end = at(startLine, startCol), at(endLine, endCol)
-	if start > end {
-		start, end = end, start
-	}
+	start = at(startLine, startCol, a.caretAt)
+	end = at(endLine, endCol, a.selectionEndAt)
 	return start, end, end > start
 }
 
@@ -6915,6 +6936,27 @@ func runeIndexAtVisualCol(runes []rune, col int) int {
 	return len(runes)
 }
 
+// runeIndexPastVisualCol is the end half of runeIndexAtVisualCol: a selection's
+// end anchor names a cell boundary, and a boundary that falls inside a wide
+// rune still selects that rune whole — the rule applySelectionHighlight and
+// extractColumnRange already use (a rune is selected when its cells overlap
+// [startCol, endCol)). So the offset just past the rune covering cell col-1 is
+// where a cell-exclusive end anchor ends.
+func runeIndexPastVisualCol(runes []rune, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	idx := runeIndexAtVisualCol(runes, col-1)
+	if idx >= len(runes) {
+		return len(runes)
+	}
+	idx++ // past the base rune the cell belongs to…
+	for idx < len(runes) && lipgloss.Width(string(runes[idx])) == 0 {
+		idx++ // …and its trailing zero-width marks, which share its cells
+	}
+	return idx
+}
+
 // visualColAtRuneIndex returns the display column at the start of runes[idx],
 // i.e. the summed cell width of runes[0:idx]. Used to convert rune-index word
 // boundaries back into the visual-column space selection anchors are stored in.
@@ -6956,6 +6998,16 @@ func caretIndexForClick(text []rune, prefixWidth, col int) int {
 	return runeIndexAtVisualCol(text, col-prefixWidth)
 }
 
+// selectionEndIndexForClick is caretIndexForClick's end-anchor counterpart: a
+// selection's end column is a cell boundary, so it resolves past the rune its
+// last cell belongs to rather than to that rune's start.
+func selectionEndIndexForClick(text []rune, prefixWidth, col int) int {
+	if col <= prefixWidth {
+		return 0
+	}
+	return runeIndexPastVisualCol(text, col-prefixWidth)
+}
+
 // caretIndexAroundBlock maps a click to a rune offset in a buffer that is
 // rendered as before + a one-cell caret block + after, which is how the modal
 // overlays draw a software caret inside their text fields. The caret cell is
@@ -6976,6 +7028,25 @@ func caretIndexAroundBlock(buf []rune, cursor, prefixWidth, caretWidth, col int)
 		return cursor
 	}
 	return cursor + runeIndexAtVisualCol(buf[cursor:], textCol-beforeWidth-caretWidth)
+}
+
+// selectionEndAroundBlock is caretIndexAroundBlock's end-anchor counterpart: the
+// same software-caret compensation, but the anchor resolves to the rune
+// boundary past the rune it lands in.
+func selectionEndAroundBlock(buf []rune, cursor, prefixWidth, caretWidth, col int) int {
+	cursor = composerCursorClampRunes(buf, cursor)
+	beforeWidth := visualColAtRuneIndex(buf, cursor)
+	textCol := col - prefixWidth
+	if textCol <= 0 {
+		return 0
+	}
+	if textCol < beforeWidth {
+		return runeIndexPastVisualCol(buf[:cursor], textCol)
+	}
+	if textCol < beforeWidth+caretWidth {
+		return cursor // the anchor is on the caret cell: nothing after it is selected
+	}
+	return cursor + runeIndexPastVisualCol(buf[cursor:], textCol-beforeWidth-caretWidth)
 }
 
 // plainWrapRowStarts returns, for each visual row that wrapping a plain

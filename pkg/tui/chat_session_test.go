@@ -3888,6 +3888,131 @@ func TestApprovalOverlayWebSearchUsesReadableQueryWithoutJSON(t *testing.T) {
 	}
 }
 
+func TestApprovalOverlayWebFetchShowsThePageAsTheSubject(t *testing.T) {
+	// The arguments carry the two keys older models still send (prompt,
+	// max_bytes): the panel must read the page and nothing else from them.
+	req := turn.ToolApprovalRequest{
+		ToolName:      "web_fetch",
+		ToolInputJSON: `{"url":"https://example.com/pricing","prompt":"Summarize the pricing tiers","max_bytes":1048576}`,
+		AvailableDecisions: []safety.ApprovalDecisionOption{
+			{Decision: safety.DecisionAccept},
+			{Decision: safety.DecisionCancel},
+		},
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	lines, _ := overlay.buildApprovalContent(100)
+	plain := stripANSI(strings.Join(lines, "\n"))
+
+	for _, want := range []string{
+		"Would you like me to fetch this page from the public web?",
+		"https://example.com/pricing",
+		"Yes, fetch the page",
+		"No, don't fetch",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("web fetch overlay missing %q:\n%s", want, plain)
+		}
+	}
+	for _, forbidden := range []string{
+		"Web fetch approval",
+		"Request details are unavailable",
+		"Host:",
+		`{"url"`,
+		`"prompt"`,
+		`"max_bytes"`,
+		"URL:",
+		"Instruction:",
+		"Maximum download:",
+		"Markdown",
+		"Tool: web_fetch",
+	} {
+		if strings.Contains(plain, forbidden) {
+			t.Fatalf("web fetch overlay must not show %q:\n%s", forbidden, plain)
+		}
+	}
+
+	overlay.showExplain = true
+	lines, _ = overlay.buildApprovalContent(100)
+	plain = stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{
+		"https://example.com/pricing",
+		"Access: Public web",
+		"Redirects:",
+		"Fails:",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("web fetch explain pane missing %q:\n%s", want, plain)
+		}
+	}
+	for _, forbidden := range []string{"Host:", `{"url"`} {
+		if strings.Contains(plain, forbidden) {
+			t.Fatalf("web fetch explain pane must not show %q:\n%s", forbidden, plain)
+		}
+	}
+}
+
+func TestApprovalOverlayWebFetchShowsALongURLEntirelyWithoutEllipsis(t *testing.T) {
+	url := "https://example.com/docs/2026/very-long-path-segment-without-spaces-that-exceeds-the-overlay-width/and-more/segments?query=1"
+	req := turn.ToolApprovalRequest{
+		ToolName:      "web_fetch",
+		ToolInputJSON: `{"url":"` + url + `"}`,
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	lines, _ := overlay.buildApprovalContent(48)
+	plain := stripANSI(strings.Join(lines, ""))
+
+	if !strings.Contains(plain, url) {
+		t.Fatalf("long URL must survive whole across the wrapped lines:\n%s", plain)
+	}
+	for _, ellipsis := range []string{"…", "..."} {
+		if strings.Contains(plain, ellipsis) {
+			t.Fatalf("long URL was shortened with %q:\n%s", ellipsis, plain)
+		}
+	}
+}
+
+func TestApprovalOverlayGenericToolInputReadsAsFieldsNotJSON(t *testing.T) {
+	req := turn.ToolApprovalRequest{
+		ToolName:      "mcp__demo__search",
+		ToolInputJSON: `{"query":"deploy","options":{"limit":10,"exact":true},"tags":["a","b"],"empty":"","items":[{"name":"x"}]}`,
+		AvailableDecisions: []safety.ApprovalDecisionOption{
+			{Decision: safety.DecisionAccept},
+			{Decision: safety.DecisionCancel},
+		},
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+	lines, _ := overlay.buildApprovalContent(100)
+	plain := stripANSI(strings.Join(lines, "\n"))
+
+	for _, want := range []string{
+		"Tool: mcp__demo__search",
+		"Query: deploy",
+		"Options:",
+		"Limit: 10",
+		"Exact: true",
+		"Tags: a, b",
+		"Empty: (empty)",
+		"Items:",
+		"- Name: x",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("generic tool overlay missing %q:\n%s", want, plain)
+		}
+	}
+	for _, forbidden := range []string{`{"`, `"query"`, `"options"`} {
+		if strings.Contains(plain, forbidden) {
+			t.Fatalf("generic tool overlay exposed raw JSON (%s):\n%s", forbidden, plain)
+		}
+	}
+
+	overlay.showExplain = true
+	lines, _ = overlay.buildApprovalContent(100)
+	plain = stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(plain, `{"query"`) {
+		t.Fatalf("generic tool explain pane exposed raw JSON:\n%s", plain)
+	}
+}
+
 // A write to a protected path is asked about rather than refused, so the overlay
 // has to say what makes the path special: without it the user sees a diff and a
 // path that look like any other write and cannot tell why they were stopped.

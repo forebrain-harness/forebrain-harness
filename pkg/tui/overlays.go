@@ -187,6 +187,8 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 			label := "Yes, proceed"
 			if isApprovalWebSearch(req) {
 				label = "Yes, search the web"
+			} else if isApprovalWebFetch(req) {
+				label = "Yes, fetch the page"
 			} else if req.NetworkApproval != nil {
 				label = "Yes, just this once"
 			}
@@ -254,6 +256,8 @@ func buildProposedOverlayChoices(req turn.ToolApprovalRequest) []overlayChoice {
 			label := "No, and tell Forebrain Harness what to do differently"
 			if isApprovalWebSearch(req) {
 				label = "No, don't search"
+			} else if isApprovalWebFetch(req) {
+				label = "No, don't fetch"
 			}
 			choices = append(choices, overlayChoice{label: label, cancel: true})
 		}
@@ -452,6 +456,10 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 	switch {
 	case isApprovalWebSearch(o.req):
 		writeLine("\x1b[1mWeb search approval\x1b[0m")
+	case isApprovalWebFetch(o.req):
+		// The first body line already names the action, so a title would only
+		// repeat it. An empty case keeps web_fetch out of the generic
+		// "Tool approval" header without inventing a second wording.
 	case isApprovalRetrieveOutput(o.req):
 		writeLine("\x1b[1mSaved output approval\x1b[0m")
 	case isApprovalMemoryNote(o.req):
@@ -469,7 +477,6 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		writeLine("Requesting subagent: %s", label)
 	}
 	toolName := approvalToolName(o.req)
-	input := approvalDisplayInput(o.req.ToolInputJSON)
 
 	if isApprovalEnterPlanMode(o.req) {
 		writeLine("Tool: %s", toolName)
@@ -526,6 +533,9 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		if limit := approvalWebSearchLimit(o.req); limit > 0 {
 			writeLine("Maximum results: %d", limit)
 		}
+	} else if isApprovalWebFetch(o.req) {
+		writeLine("Would you like me to fetch this page from the public web?")
+		writeLine("  %s", approvalWebFetchURL(o.req))
 	} else if isApprovalRetrieveOutput(o.req) {
 		for _, detail := range retrieveOutputApprovalDetails(o.req) {
 			writeLine("%s", detail)
@@ -602,13 +612,13 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 				writeLine("Sandbox profile: %s", profile)
 			}
 		}
-	} else if toolName != "" {
-		writeLine("Tool: %s", toolName)
-		if input != "" {
-			writeLine("Input: %s", input)
+	} else {
+		if toolName != "" {
+			writeLine("Tool: %s", toolName)
 		}
-	} else if input != "" {
-		writeLine("Input: %s", input)
+		for _, line := range approvalInputLines(o.req.ToolInputJSON) {
+			writeLine("%s", line)
+		}
 	}
 	if !approvalIsBash(o.req) && !isApprovalEnterPlanMode(o.req) && !isApprovalExitPlanMode(o.req) {
 		if o.req.Description != "" {
@@ -662,6 +672,11 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 				writeLine("Maximum results: %d", limit)
 			}
 			writeLine("Access: Public web")
+		} else if isApprovalWebFetch(o.req) {
+			writeLine("  %s", approvalWebFetchURL(o.req))
+			writeLine("Access: Public web")
+			writeLine("Redirects: only to the same host; another host stops the fetch and asks again")
+			writeLine("Fails: authenticated and private URLs")
 		} else if isApprovalRetrieveOutput(o.req) {
 			for _, detail := range retrieveOutputApprovalDetails(o.req) {
 				writeLine("%s", detail)
@@ -681,7 +696,9 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 			}
 			writeLine("Access: Your local memory store")
 		} else {
-			writeLine("Tool input: %s", truncate(o.req.ToolInputJSON, 800))
+			for _, line := range approvalInputLines(o.req.ToolInputJSON) {
+				writeLine("%s", line)
+			}
 		}
 		if o.req.Description != "" {
 			writeLine("Description: %s", o.req.Description)
@@ -1464,6 +1481,23 @@ func isApprovalWebSearch(req turn.ToolApprovalRequest) bool {
 	return strings.EqualFold(safety.CanonicalToolName(approvalToolName(req)), "WebSearch")
 }
 
+func isApprovalWebFetch(req turn.ToolApprovalRequest) bool {
+	return strings.EqualFold(safety.CanonicalToolName(approvalToolName(req)), "WebFetch")
+}
+
+// approvalWebFetchURL decodes the page a fetch approval is about. The
+// arguments always parse: the approval serializes the tool's own input
+// (pkg/turn approvalInputJSON over *WebFetchInput), whose only field is the
+// URL. There is no second source to fall back to, so a decode that fails
+// leaves the page empty and no branch dresses that up.
+func approvalWebFetchURL(req turn.ToolApprovalRequest) string {
+	var input struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal([]byte(strings.TrimSpace(req.ToolInputJSON)), &input)
+	return strings.TrimSpace(input.URL)
+}
+
 func isApprovalRetrieveOutput(req turn.ToolApprovalRequest) bool {
 	return strings.EqualFold(strings.TrimSpace(approvalToolName(req)), "retrieve_output")
 }
@@ -1625,12 +1659,132 @@ func approvalBashCommand(req turn.ToolApprovalRequest) string {
 	return raw
 }
 
-func approvalDisplayInput(raw string) string {
+// approvalInputLines renders a tool's JSON arguments as the lines the approval
+// overlay shows: one "Field: value" row per argument, nested objects indented,
+// arrays as comma lists (or "- " blocks when they hold objects). The overlay
+// must never print the call's JSON itself: braces, quoted keys and escaped
+// newlines are the model's wire format, not a description of what the tool is
+// about to do.
+func approvalInputLines(raw string) []string {
 	input := strings.TrimSpace(raw)
 	if input == "" || input == "{}" {
-		return ""
+		return nil
 	}
-	return input
+	decoder := json.NewDecoder(strings.NewReader(input))
+	decoder.UseNumber()
+	var payload any
+	if err := decoder.Decode(&payload); err != nil {
+		// ToolInputJSON is the tool call's arguments, serialized from a
+		// structured input (pkg/turn/approval.go approvalInputJSON), so it
+		// parses. A value that does not parse carries no readable argument, and
+		// printing it would put wire format back in front of the user.
+		return nil
+	}
+	return approvalValueLines(payload, "")
+}
+
+func approvalValueLines(value any, indent string) []string {
+	switch v := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		// Sorted so the same input renders identically on every frame of the
+		// overlay's repaint.
+		sort.Strings(keys)
+		lines := make([]string, 0, len(keys))
+		for _, key := range keys {
+			lines = append(lines, approvalFieldLines(approvalFieldLabel(key), v[key], indent)...)
+		}
+		return lines
+	case []any:
+		lines := make([]string, 0, len(v))
+		for _, item := range v {
+			block := approvalValueLines(item, indent)
+			if len(block) == 0 {
+				continue
+			}
+			block[0] = indent + "- " + strings.TrimPrefix(block[0], indent)
+			lines = append(lines, block...)
+		}
+		return lines
+	case string:
+		return approvalStringLines(v, indent)
+	default:
+		return []string{indent + approvalScalarText(v)}
+	}
+}
+
+func approvalFieldLines(label string, value any, indent string) []string {
+	switch v := value.(type) {
+	case map[string]any:
+		if len(v) == 0 {
+			return []string{indent + label + ": (none)"}
+		}
+		return append([]string{indent + label + ":"}, approvalValueLines(v, indent+"  ")...)
+	case []any:
+		if scalars, ok := approvalScalarList(v); ok {
+			return []string{indent + label + ": " + strings.Join(scalars, ", ")}
+		}
+		return append([]string{indent + label + ":"}, approvalValueLines(v, indent+"  ")...)
+	case string:
+		lines := approvalStringLines(v, indent)
+		lines[0] = indent + label + ": " + strings.TrimPrefix(lines[0], indent)
+		return lines
+	default:
+		return []string{indent + label + ": " + approvalScalarText(v)}
+	}
+}
+
+// approvalStringLines keeps a value's own line breaks, so a multi-line prompt
+// reads as prose instead of an escaped one-liner.
+func approvalStringLines(text, indent string) []string {
+	if strings.TrimSpace(text) == "" {
+		return []string{indent + "(empty)"}
+	}
+	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	lines := make([]string, 0, len(raw))
+	for i, line := range raw {
+		if i == 0 {
+			lines = append(lines, indent+line)
+			continue
+		}
+		lines = append(lines, indent+"  "+line)
+	}
+	return lines
+}
+
+func approvalScalarList(items []any) ([]string, bool) {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		switch item.(type) {
+		case map[string]any, []any:
+			return nil, false
+		}
+		parts = append(parts, approvalScalarText(item))
+	}
+	if len(parts) == 0 {
+		return nil, false
+	}
+	return parts, true
+}
+
+func approvalScalarText(value any) string {
+	if value == nil {
+		return "(none)"
+	}
+	return fmt.Sprint(value) // json.Number (UseNumber) keeps 1048576 as "1048576", never 1.048576e+06
+}
+
+func approvalFieldLabel(key string) string {
+	label := strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(key), "_", " ")), " ")
+	if label == "" {
+		return "Value"
+	}
+	runes := []rune(label)
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
 }
 
 func isApprovalEnterPlanMode(req turn.ToolApprovalRequest) bool {
@@ -2278,8 +2432,9 @@ func (o *questionOverlay) handleOtherEditKey(key parsedKey) (turn.ToolApprovalDe
 
 // cutOtherSelection deletes the part of the Other answer the mouse selection
 // covers, reporting whether it deleted anything. The row carries a one-cell
-// caret block inside the text, so the same mapping a click uses
-// (caretIndexAroundBlock) resolves both anchors.
+// caret block inside the text, so the anchors are resolved around that block
+// (caretIndexAroundBlock for the start cell, selectionEndAroundBlock for the
+// end boundary).
 func (o *questionOverlay) cutOtherSelection() bool {
 	if o.rs == nil || !o.rs.inViewportOverlay() {
 		return false
@@ -2293,7 +2448,7 @@ func (o *questionOverlay) cutOtherSelection() bool {
 		start = caretIndexAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, startCol)
 	}
 	if endLine == o.otherRow {
-		end = caretIndexAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, endCol)
+		end = selectionEndAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, endCol)
 	}
 	if end <= start {
 		return false
@@ -3609,7 +3764,7 @@ func (s *rawSelector) fieldSelection(k rawKey, p slashPanel, runes []rune) *[2]i
 		start = caretIndexForClick(runes, textCol, startCol)
 	}
 	if endLine == line {
-		end = caretIndexForClick(runes, textCol, endCol)
+		end = selectionEndIndexForClick(runes, textCol, endCol)
 	}
 	if end <= start {
 		// A selection that covers no rune (a drag inside one wide rune, say) is

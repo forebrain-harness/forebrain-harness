@@ -1940,6 +1940,26 @@ func TestComposerSelectionTypingReplacesTheSelection(t *testing.T) {
 	}
 }
 
+// TestComposerSelectionDeleteOnWideRunes pins the other half of the wide-rune
+// drag bug: once the range names whole runes, Delete removes exactly them. The
+// fix belongs to the mapping, never to a compensating off-by-one in the editor.
+func TestComposerSelectionDeleteOnWideRunes(t *testing.T) {
+	events, w := startSelectionReader(t, "你好世界")
+
+	composerSelectionRange.Store(&[2]int{1, 3}) // 好世
+	if _, err := w.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write backspace: %v", err)
+	}
+
+	ev := nextDraftEvent(t, events)
+	if ev.draft != "你界" {
+		t.Fatalf("Delete over a wide-rune selection should remove both runes, got %q", ev.draft)
+	}
+	if ev.cursor != 1 {
+		t.Fatalf("the caret must land at the start of the selection, got %d", ev.cursor)
+	}
+}
+
 // TestComposerSelectionIsConsumedOnce guards the "one key, one edit" rule: the
 // range is handed over exactly once, so a second Delete deletes one rune rather
 // than the same span again.

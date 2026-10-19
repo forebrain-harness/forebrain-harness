@@ -266,7 +266,7 @@ func TestWebFetchSkipsSpillWhenPageFits(t *testing.T) {
 	defer srv.Close()
 
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(fetchForTest(t, srv.URL, "")), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(fetchForTest(t, srv.URL)), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	for _, key := range []string{"full_path", "content_bytes", "omitted_bytes"} {
@@ -382,7 +382,7 @@ func TestWebFetchStopsAtCrossHostRedirect(t *testing.T) {
 	defer origin.Close()
 
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(fetchForTest(t, origin.URL, "")), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(fetchForTest(t, origin.URL)), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if decoded["redirect_blocked"] != true {
@@ -414,7 +414,7 @@ func TestWebFetchFollowsSameHostRedirect(t *testing.T) {
 	defer srv.Close()
 
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(fetchForTest(t, srv.URL+"/moved", "")), &decoded); err != nil {
+	if err := json.Unmarshal([]byte(fetchForTest(t, srv.URL+"/moved")), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if _, blocked := decoded["redirect_blocked"]; blocked {
@@ -466,7 +466,7 @@ func serveForTest(t *testing.T, contentType string, status int, payload []byte) 
 	}))
 	defer srv.Close()
 
-	raw := fetchForTest(t, srv.URL, "")
+	raw := fetchForTest(t, srv.URL)
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -673,7 +673,7 @@ func TestWebFetchOutputCarriesContentOnce(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	out := fetchForTest(t, srv.URL, "Summarize the API docs")
+	out := fetchForTest(t, srv.URL)
 	var decoded map[string]any
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("web_fetch output must be valid JSON: %v", err)
@@ -723,7 +723,7 @@ func TestWebFetchDecodesDeclaredCharset(t *testing.T) {
 			defer srv.Close()
 
 			var decoded map[string]any
-			if err := json.Unmarshal([]byte(fetchForTest(t, srv.URL, "")), &decoded); err != nil {
+			if err := json.Unmarshal([]byte(fetchForTest(t, srv.URL)), &decoded); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
 			body, _ := decoded["body"].(string)
@@ -742,13 +742,13 @@ func privateAccessRuntime() *AgentToolRuntime {
 	return &AgentToolRuntime{Cfg: cfg}
 }
 
-func fetchForTest(t *testing.T, rawURL string, prompt string) string {
+func fetchForTest(t *testing.T, rawURL string) string {
 	t.Helper()
 	tool, err := NewWebFetchTool(NewState(t.TempDir()), privateAccessRuntime())
 	if err != nil {
 		t.Fatalf("NewWebFetchTool: %v", err)
 	}
-	args, err := json.Marshal(WebFetchInput{URL: rawURL, Prompt: prompt})
+	args, err := json.Marshal(WebFetchInput{URL: rawURL})
 	if err != nil {
 		t.Fatalf("marshal web_fetch args: %v", err)
 	}
@@ -763,7 +763,7 @@ func fetchForTest(t *testing.T, rawURL string, prompt string) string {
 	return text
 }
 
-func TestWebFetchInputIncludesPrompt(t *testing.T) {
+func TestWebFetchInputIsJustTheURL(t *testing.T) {
 	schema := SchemaForInputType(reflect.TypeOf(WebFetchInput{}))
 	if len(schema) == 0 {
 		t.Fatalf("missing schema")
@@ -773,8 +773,15 @@ func TestWebFetchInputIncludesPrompt(t *testing.T) {
 		t.Fatalf("schema json: %v", err)
 	}
 	props, _ := decoded["properties"].(map[string]any)
-	if _, ok := props["prompt"]; !ok {
-		t.Fatalf("web_fetch schema missing prompt property: %s", string(schema))
+	if len(props) != 1 {
+		t.Fatalf("web_fetch must expose the URL alone, got %v: %s", props, string(schema))
+	}
+	if _, ok := props["url"]; !ok {
+		t.Fatalf("web_fetch schema missing url property: %s", string(schema))
+	}
+	required, _ := decoded["required"].([]any)
+	if len(required) != 1 || required[0] != "url" {
+		t.Fatalf("web_fetch required must be [url], got %v: %s", required, string(schema))
 	}
 	// Private network access is an operator decision. Exposing it in the schema
 	// would let a fetched page talk the model into reaching internal hosts.
@@ -800,7 +807,7 @@ func TestWebFetchPrivateAccessRequiresOperatorConfig(t *testing.T) {
 	}
 
 	// The operator setting is what opens it.
-	if body := fetchForTest(t, srv.URL, ""); !strings.Contains(body, "LOCAL DEV SERVER") {
+	if body := fetchForTest(t, srv.URL); !strings.Contains(body, "LOCAL DEV SERVER") {
 		t.Fatalf("operator opt-in should allow loopback: %q", body)
 	}
 }

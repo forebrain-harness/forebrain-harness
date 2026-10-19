@@ -29,10 +29,13 @@ import (
 	"golang.org/x/text/transform"
 )
 
+// WebFetchInput carries the one thing the model can actually decide: which page
+// to fetch. A processing instruction was never read by this tool, and a byte
+// bound could not be chosen before seeing the page — the body the model
+// receives is capped at webFetchMaxMarkdownBytes anyway, so a guessed bound
+// could only cut a page before its content.
 type WebFetchInput struct {
-	URL      string `json:"url" jsonschema:"description=HTTP or HTTPS URL to fetch."`
-	Prompt   string `json:"prompt" jsonschema:"description=Processing instruction for the fetched content. Required by the model contract; Forebrain Harness returns raw capped text when empty."`
-	MaxBytes int    `json:"max_bytes,omitempty" jsonschema_description:"Maximum response body bytes to download (default 2097152, max 8388608). Bounds how much of a long page is retrievable; the reply itself is always capped and the remainder is written to a file you can read_file."`
+	URL string `json:"url" jsonschema:"description=HTTP or HTTPS URL to fetch."`
 }
 
 // webFetchAllowPrivateIP reports whether the operator has opened private and
@@ -47,7 +50,6 @@ func webFetchAllowPrivateIP(rt *AgentToolRuntime) bool {
 
 const (
 	defaultWebFetchMaxBytes  = 2 << 20
-	absoluteWebFetchMaxBytes = 8 << 20
 	webFetchMaxRedirects     = 10
 	webFetchMaxMarkdownBytes = 28000
 	// webFetchMinMarkdownBytes floors the shrinking in marshalWebFetchResult, so
@@ -202,13 +204,7 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 					}
 				}
 			}
-			maxB := in.MaxBytes
-			if maxB <= 0 {
-				maxB = defaultWebFetchMaxBytes
-			}
-			if maxB > absoluteWebFetchMaxBytes {
-				maxB = absoluteWebFetchMaxBytes
-			}
+			maxB := defaultWebFetchMaxBytes
 			// The transport carries a dial guard bound to the resolved policy,
 			// so drop its pooled connections rather than leaving them idle
 			// behind a client that is about to go away.
@@ -264,7 +260,6 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				"content_type": ct,
 				"bytes":        len(body),
 				"truncated":    truncated,
-				"prompt":       strings.TrimSpace(in.Prompt),
 				"preapproved":  IsWebFetchPreapprovedURL(finalURL),
 				"rule_content": WebFetchPermissionRuleContent(finalURL),
 			}
