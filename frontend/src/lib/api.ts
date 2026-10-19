@@ -1187,8 +1187,24 @@ export interface SessionApprovalRequest {
   planReviewActive?: PlanReviewInFlight | null
 }
 
+export interface ChatSessionRecord {
+  id: string
+  title: string | null
+  createTime: string
+  updateTime: string
+  source?: string
+  /** The project the conversation belongs to; '' on a project-less
+   *  workshop task. The drawer's rows carry it. */
+  projectName?: string
+}
+
 export interface ChatSessionsResponse {
-  records: { id: string; title: string | null; createTime: string; updateTime: string; source?: string }[]
+  records: ChatSessionRecord[]
+  /** The pager fields a paged drawer request answers with; the workshop
+   *  list's legacy answer carries none of them. */
+  total?: number
+  page?: number
+  pageSize?: number
 }
 
 /** One conversation's own facts: its title, the project it belongs to when it
@@ -2151,12 +2167,18 @@ export const forebrainApi = {
       .then((res) => (Array.isArray(res.data?.options) ? res.data.options : []))
   },
 
-  /** The agent's conversations of one purpose: '' the drawer lists,
-   * 'workshop' the skill workshop lists. The filter is the server's. */
-  chatSessions(source: '' | 'workshop' = '') {
-    return api.get<ChatSessionsResponse>('/chat/sessions', {
-      params: { source },
-    }).then((res) => res.data)
+  /** The agent's conversations of one purpose: '' the drawer lists — every
+   *  conversation across every project, searched and paged on the server —
+   * 'workshop' the skill workshop lists whole, the way it always has. The
+   * filter is the server's. Omit page for the unpaged window. */
+  chatSessions(source: '' | 'workshop' = '', opts?: { page?: number; pageSize?: number; q?: string }) {
+    const params = listParams({
+      page: opts?.page ?? 0,
+      pageSize: opts?.pageSize ?? 0,
+      q: opts?.q,
+      source,
+    })
+    return api.get<ChatSessionsResponse>('/chat/sessions', { params }).then((res) => res.data)
   },
 
   chatMessages(sessionId: string, limit = 0) {

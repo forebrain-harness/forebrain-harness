@@ -142,6 +142,117 @@ cmd_click() {
 }
 cmd_screen() { tmux capture-pane -t "$SESSION" -p; }
 cmd_wait() { wait_for "${2:-20}" "$1"; }
+
+# The software caret is painted as reverse video over the glyph it sits on, so
+# the pane's own escape stream is a direct read of which cell it is really on.
+# capture-pane without -e strips the SGR and shows nothing at all, and the caret
+# blinks, so `caret` samples rather than trusting one frame.
+pane_probe() { # pane_probe <rows|col|caret> [args...]
+  PANE_SESSION="$SESSION" python3 - "$@" <<'PY'
+import os, re, subprocess, sys, time, unicodedata
+
+PROMPT = "\u203a"
+SGR = re.compile(r"\x1b\[([0-9;]*)m")
+ESC = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def capture():
+    r = subprocess.run(
+        ["tmux", "capture-pane", "-t", os.environ["PANE_SESSION"], "-e", "-p"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit("tmux capture-pane failed: " + r.stderr.strip())
+    return r.stdout.split("\n")
+
+
+def cells(raw):
+    """(printable char, reverse video?) for one captured row."""
+    out, reverse, i = [], False, 0
+    while i < len(raw):
+        if raw[i] == "\x1b":
+            m = SGR.match(raw, i)
+            if m:
+                for p in m.group(1).split(";"):
+                    if p == "7":
+                        reverse = True
+                    elif p in ("", "0", "27"):
+                        reverse = False
+                i = m.end()
+                continue
+            m = ESC.match(raw, i)
+            i = m.end() if m else i + 1
+            continue
+        out.append((raw[i], reverse))
+        i += 1
+    return out
+
+
+def plain(raw):
+    return "".join(ch for ch, _ in cells(raw))
+
+
+def width(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def composer_row(lines):
+    for idx in range(len(lines) - 1, -1, -1):
+        if PROMPT in plain(lines[idx]):
+            return idx + 1
+    return 0
+
+
+cmd, rest = sys.argv[1], sys.argv[2:]
+
+if cmd == "rows":
+    lines = capture()
+    found = [(i + 1, plain(l).rstrip()) for i, l in enumerate(lines) if PROMPT in plain(l)]
+    if not found:
+        sys.exit("no composer row: is the TUI running (start)?")
+    for row, text in found:
+        print("%d\t%s" % (row, text))
+elif cmd == "col":
+    if not rest:
+        sys.exit("usage: col <substring> [row]")
+    lines = capture()
+    row = int(rest[1]) if len(rest) > 1 else composer_row(lines)
+    if not row:
+        sys.exit("no composer row: is the TUI running (start)?")
+    text = plain(lines[row - 1]).rstrip()
+    at = text.find(rest[0])
+    if at < 0:
+        sys.exit("%r is not on row %d: %r" % (rest[0], row, text))
+    print("row=%d col=%d  line=%r" % (row, sum(width(c) for c in text[:at]) + 1, text))
+elif cmd == "caret":
+    want = int(rest[0]) if rest else 0
+    seen, text, row = [], "", 0
+    for n in range(6):  # 6 x 250ms crosses the 500ms blink, so on-phase is seen
+        if n:
+            time.sleep(0.25)
+        lines = capture()
+        row = want or composer_row(lines)
+        if not row:
+            sys.exit("no composer row: is the TUI running (start)?")
+        text = plain(lines[row - 1]).rstrip()
+        glyph = "".join(ch for ch, rev in cells(lines[row - 1]) if rev)
+        if glyph:
+            seen.append(glyph)
+    if not seen:
+        print("caret=(none in 6 samples over 1.5s)  row=%d" % row)
+    else:
+        counts = ", ".join("%r x%d" % (g, seen.count(g)) for g in dict.fromkeys(seen))
+        print("caret=%s  row=%d  (%d/6 samples)" % (counts, row, len(seen)))
+    print("line=%r" % text)
+else:
+    sys.exit("unknown pane probe: " + cmd)
+PY
+}
+cmd_rows() { pane_probe rows "$@"; }
+cmd_col() { pane_probe col "$@"; }
+cmd_caret() { pane_probe caret "$@"; }
+
 cmd_provider_log() { cat "$WORK/provider.log"; }
 
 # The state DB is the durable half of the contract: what the next model request
@@ -169,7 +280,7 @@ cmd_stop() {
 cmd_reset() { cmd_stop >/dev/null 2>&1 || true; rm -rf "$HOME_DIR" "$PROJ"; echo "reset $WORK"; }
 
 case "${1:-}" in
-  build|serve|start|send|key|submit|click|wheel|screen|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
+  build|serve|start|send|key|submit|click|wheel|screen|rows|col|caret|wait|db|messages|title|sid|stop|reset) c="$1"; shift; "cmd_$c" "$@" ;;
   provider-log) shift; cmd_provider_log ;;
   *) cat >&2 <<USAGE
 usage: driver.sh <command>
@@ -210,6 +321,12 @@ usage: driver.sh <command>
                          send one wheel notch at 1-based coordinates (default: down)
   wait <text> [secs]     poll the screen until <text> appears
   screen                 print the rendered screen
+  rows                   composer rows: 1-based pane row + its text
+  col <substring> [row] 1-based display column where <substring> starts
+                         (CJK takes two cells, so never count by hand)
+  caret [row]            the glyph painted in reverse video, i.e. where the
+                         text caret really is; 6 samples over 1.5s because the
+                         caret blinks every 500ms
   messages | title       read the state DB
   sid                    print the session id of the newest message
   db <sql>               run SQL against the state DB

@@ -146,9 +146,10 @@ test('heartbeat lives in the conversation header, not the rail or the workbench'
   await expect(popover.locator('[data-testid="heartbeat-schedule"]')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(popover).toHaveCount(0)
-  // The drawer's own heartbeat mark is for a conversation the drawer lists; a
-  // web conversation belongs to a project (plan 029) and is not one of them.
-  // Removing it from the conversation's header clears its status.
+  // The drawer's own heartbeat mark is for a conversation the drawer lists;
+  // the drawer spans every project's conversations now, but this one has
+  // none while it is open. Removing the mark from the conversation's header
+  // clears its status.
   await page.click('[data-testid="heartbeat-toggle"]')
   await page.click('[data-testid="heartbeat-clear"]')
   await expect(page.locator('[data-testid="heartbeat-status"]')).toHaveCount(0)

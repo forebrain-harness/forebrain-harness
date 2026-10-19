@@ -41,38 +41,51 @@
       <div class="chat-drawer-list">
         <p v-if="loading" class="chat-drawer-hint">{{ t('chatDrawer.loading') }}</p>
         <p v-else-if="error" class="chat-drawer-hint chat-drawer-error">{{ error }}</p>
-        <p v-else-if="!filtered.length" class="chat-drawer-hint">{{ t('chatDrawer.empty') }}</p>
-        <button
-          v-for="row in filtered"
-          v-else
-          :key="row.id"
-          type="button"
-          class="chat-drawer-row"
-          :class="{ 'chat-drawer-row--active': row.id === activeSessionId }"
-          @click="emit('select', row.id)"
-        >
-          <span class="chat-drawer-row-title">{{ row.title }}</span>
-          <span
-            v-if="beatOf(row.id)"
-            class="chat-drawer-heart"
-            :class="{ 'chat-drawer-heart--paused': beatOf(row.id)?.paused }"
-            v-tip:top="heartbeatLabel(row.id)"
-            :aria-label="heartbeatLabel(row.id)"
-            role="img"
-            data-testid="drawer-heartbeat-indicator"
+        <p v-else-if="!sessions.length && query.trim()" class="chat-drawer-hint">{{ t('chatDrawer.noMatch') }}</p>
+        <p v-else-if="!sessions.length" class="chat-drawer-hint">{{ t('chatDrawer.empty') }}</p>
+        <template v-else>
+          <button
+            v-for="row in sessions"
+            :key="row.id"
+            type="button"
+            class="chat-drawer-row"
+            :class="{ 'chat-drawer-row--active': row.id === activeSessionId }"
+            @click="emit('select', row.id)"
           >
-            <Activity class="size-[13px]" aria-hidden="true" />
-          </span>
-        </button>
+            <span class="chat-drawer-row-main">
+              <span class="chat-drawer-row-title">{{ row.title }}</span>
+              <span v-if="row.projectName" class="chat-drawer-row-project">{{ row.projectName }}</span>
+            </span>
+            <span
+              v-if="beatOf(row.id)"
+              class="chat-drawer-heart"
+              :class="{ 'chat-drawer-heart--paused': beatOf(row.id)?.paused }"
+              v-tip:top="heartbeatLabel(row.id)"
+              :aria-label="heartbeatLabel(row.id)"
+              role="img"
+              data-testid="drawer-heartbeat-indicator"
+            >
+              <Activity class="size-[13px]" aria-hidden="true" />
+            </span>
+          </button>
+          <button
+            v-if="hasMore"
+            type="button"
+            class="chat-drawer-more"
+            data-testid="drawer-load-more"
+            :disabled="loadingMore"
+            @click="loadMore()"
+          >
+            {{ t('chatDrawer.loadMore') }}
+          </button>
+        </template>
       </div>
-
-      <footer class="chat-drawer-foot">{{ t('chatDrawer.projectNote') }}</footer>
     </aside>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import { Activity, Plus, X } from 'lucide-vue-next'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { useHeartbeats } from '@/composables/useHeartbeats'
@@ -97,16 +110,23 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { sessions, loading, error, fetchSessions } = useChatSessions()
+const { sessions, loading, loadingMore, error, hasMore, fetchSessions, loadMore } = useChatSessions()
 const { forSession: beatOf, refresh: refreshHeartbeats } = useHeartbeats()
 
 const query = ref('')
 const drawerRef = ref<HTMLElement | null>(null)
+let searchTimer: ReturnType<typeof setTimeout> | null = null
 
-const filtered = computed(() => {
-  const q = query.value.trim().toLowerCase()
-  if (!q) return sessions.value
-  return sessions.value.filter((row) => (row.title ?? '').toLowerCase().includes(q))
+// The search is the server's — the drawer holds one loaded page of the
+// list, and a local filter could only search what it happens to show. So
+// typing asks the server for the first page of matches once the person
+// pauses, the same debounce every paged list's search box carries.
+watch(query, () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    void fetchSessions(query.value.trim())
+  }, 300)
 })
 
 /** Every conversation a heartbeat asks again is marked, the open one or not. */
@@ -254,9 +274,22 @@ watch(() => props.open, async (open) => {
   color: var(--forebrain-brand-1);
   font-weight: 500;
 }
-.chat-drawer-row-title {
+.chat-drawer-row-main {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chat-drawer-row-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-drawer-row-project {
+  font-size: 11px;
+  color: var(--forebrain-muted-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -269,11 +302,19 @@ watch(() => props.open, async (open) => {
 .chat-drawer-heart--paused {
   color: var(--forebrain-muted-text);
 }
-.chat-drawer-foot {
-  border-top: 1px solid var(--forebrain-divider);
-  padding-top: 8px;
-  font-size: 11px;
+.chat-drawer-more {
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
   color: var(--forebrain-muted-text);
+}
+.chat-drawer-more:hover:not(:disabled) {
+  background: var(--forebrain-button-alt-bg);
+  color: var(--forebrain-text);
+}
+.chat-drawer-more:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 @media (max-width: 900px) {
