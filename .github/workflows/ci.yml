@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -50,7 +50,7 @@ jobs:
           scripts/manifest-report.sh manifest-report.md
           cat manifest-report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload package manifest report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: manifest-report
           path: manifest-report.md
@@ -73,13 +73,13 @@ jobs:
     timeout-minutes: 40
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Cache the tokenizers static library
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: third_party/libtokenizers/windows_amd64
           key: libtokenizers-windows-amd64-${{ hashFiles('go.mod') }}
@@ -98,8 +98,8 @@ jobs:
     name: go install from a module proxy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -112,8 +112,8 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -121,7 +121,7 @@ jobs:
       # voice decoder and other cgo features are compiled into the binary.
       - run: go mod verify
       - name: Cache the tokenizers static library
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: third_party/libtokenizers/windows_amd64
           key: libtokenizers-windows-amd64-${{ hashFiles('go.mod') }}
@@ -146,8 +146,8 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -163,13 +163,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # Third-party actions are pinned to a full commit SHA; Dependabot
       # updates the pin together with the trailing version comment.
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.24.0
       - name: pnpm install, test and build
@@ -185,15 +185,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       # Third-party actions are pinned to a full commit SHA; Dependabot
       # updates the pin together with the trailing version comment.
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           version: 10.24.0
       # GITHUB_HEAD_REF tells the script whether this is a release-please
