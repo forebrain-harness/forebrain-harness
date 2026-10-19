@@ -2255,6 +2255,77 @@ func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
 	}
 }
 
+// TestQuestionOtherSelectionDeletesAWideRuneWhole is the CJK half of the drag
+// bug on the Other row: the row highlights a wide rune the drag only partly
+// covers, so Delete must take the characters the highlight showed and no less.
+func TestQuestionOtherSelectionDeletesAWideRuneWhole(t *testing.T) {
+	forcedTermWidth, forcedTermHeight = 80, 30
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	out := newApprovalPaintWriter()
+	r := NewRenderer(out, out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	rs := newRawSelector(pr, r)
+
+	form := state.AskForm{
+		Title:     "Pick one",
+		Questions: []state.AskQuestion{{ID: "q1", Prompt: "Choose", Options: []state.AskOption{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}}},
+	}
+	payload, err := json.Marshal(form)
+	if err != nil {
+		t.Fatalf("marshal form: %v", err)
+	}
+	overlay, err := newQuestionOverlay(context.Background(), io.Discard, rs, turn.ToolApprovalRequest{AskFormJSON: string(payload)})
+	if err != nil {
+		t.Fatalf("newQuestionOverlay: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := overlay.Run()
+		done <- err
+	}()
+	waitForPaintedRow(t, r, "type to enter custom text")
+
+	// Down twice reaches the Other row, which opens its edit session.
+	for range 2 {
+		if _, err := pw.Write([]byte("\x1b[B")); err != nil {
+			t.Fatalf("write Down: %v", err)
+		}
+	}
+	waitForPaintedRow(t, r, "Other:")
+	const typed = "原始数据 tail"
+	if _, err := pw.Write([]byte(typed)); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	waitForPaintedRow(t, r, typed)
+
+	startCol, row := overlayCellOf(t, r, typed, 0)
+	endCol, _ := overlayCellOf(t, r, typed, 3)
+	writeMouseDrag(t, pw, startCol, row, endCol+1, row) // stop on 据's trailing cell
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
+		t.Fatalf("write backspace and Enter: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("question overlay: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the question overlay did not return")
+	}
+	if got := overlay.otherText[0]; got != "tail" {
+		t.Fatalf("Delete over 原始数据 should leave %q, got %q", "tail", got)
+	}
+}
+
 // TestApprovalFeedbackSelectionIsDeleted covers the plan-approval feedback
 // field: a drag inside it, then Delete, and the rule's own row table resolves
 // the selection the way a click does.
@@ -2291,6 +2362,32 @@ func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 	o.insertEditText("X")
 	if got := string(o.feedbackBuf); got != "please  X plan" {
 		t.Fatalf("typing over a selection should replace it, got %q", got)
+	}
+}
+
+// TestApprovalFeedbackSelectionDeletesAWideRuneWhole is the same drag one row
+// type over: the feedback field wraps like the composer, so its drag has to take
+// a partly covered wide rune whole too.
+func TestApprovalFeedbackSelectionDeletesAWideRuneWhole(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	o := &approvalOverlay{rs: newRawSelector(nil, r), planDenyEditing: true, out: io.Discard}
+	o.feedbackBuf = []rune("原始数据")
+	o.feedbackCursor = len(o.feedbackBuf)
+	o.keepOptionsInView = true
+	o.renderViewport()
+
+	startCol, row := overlayCellOf(t, r, "原始数据", 0)
+	endCol, _ := overlayCellOf(t, r, "原始数据", 3)
+	r.ViewportSelectStart(startCol, row)
+	r.ViewportSelectDrag(endCol+1, row) // 据's trailing cell
+	r.ViewportSelectEnd(endCol+1, row)
+
+	o.handlePlanDenyKey(parsedKey{kind: rawKeyBackspace})
+	if got := string(o.feedbackBuf); got != "" {
+		t.Fatalf("Delete over 原始数据 should remove all four runes, got %q", got)
+	}
+	if o.feedbackCursor != 0 {
+		t.Fatalf("the caret must land at the start of the selection, got %d", o.feedbackCursor)
 	}
 }
 
@@ -2532,4 +2629,3 @@ func TestApprovalFeedbackForwardDeleteDeletesAtTheCaret(t *testing.T) {
 		t.Fatalf("the caret must land at the start of the selection, got %d", o.feedbackCursor)
 	}
 }
-

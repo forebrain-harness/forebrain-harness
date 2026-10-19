@@ -4764,6 +4764,126 @@ func TestComposerSelectionRunesOnWideRunes(t *testing.T) {
 	}
 }
 
+// TestComposerSelectionRunesEndOnAWideRuneTrailingCell is the reported bug: a
+// drag that stopped on the trailing cell of 世 highlighted that character, but
+// the range handed to the buffer stopped short of it, so one character outlived
+// the Delete that was supposed to take the whole selection.
+func TestComposerSelectionRunesEndOnAWideRuneTrailingCell(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "你好世界", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+2, row, prefix+5, row) // 好's first cell → 世's trailing cell
+
+	r.mu.Lock()
+	start, end, ok := r.composerSelectionRunesLocked()
+	r.mu.Unlock()
+	if !ok || start != 1 || end != 3 {
+		t.Fatalf("a drag over 好世 must select both whole, got [%d,%d) ok=%v", start, end, ok)
+	}
+}
+
+// TestComposerSelectionRunesOnAReverseWideRuneDrag covers the same drag made
+// from the other end: the anchors arrive right to left, and the same wide rune
+// must still come out whole.
+func TestComposerSelectionRunesOnAReverseWideRuneDrag(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "你好世界", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+5, row, prefix+2, row) // 世's trailing cell → back to 好
+
+	r.mu.Lock()
+	start, end, ok := r.composerSelectionRunesLocked()
+	r.mu.Unlock()
+	if !ok || start != 1 || end != 3 {
+		t.Fatalf("a reverse drag over 好世 must select both whole, got [%d,%d) ok=%v", start, end, ok)
+	}
+}
+
+// TestComposerDragOverWideRunesDeletesTheWholeSelection chains the gesture: the
+// drag publishes a range, and deleting that range leaves exactly the text
+// outside what the drag highlighted.
+func TestComposerDragOverWideRunesDeletesTheWholeSelection(t *testing.T) {
+	const text = "原始数据 tail"
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: text, Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix, row, prefix+7, row) // 原's first cell → 据's trailing cell
+
+	sel := publishedSelection()
+	if sel[0] != 0 || sel[1] != 4 {
+		t.Fatalf("dragging over 原始数据 should publish runes [0,4), got %v", sel)
+	}
+	if got := string(deleteRuneRange([]rune(text), sel[0], sel[1])); got != " tail" {
+		t.Fatalf("deleting the selection should leave %q, got %q", " tail", got)
+	}
+}
+
+// TestRuneIndexPastVisualColResolvesWideRuneCells pins the end half of the
+// cell→rune mapping: a boundary inside a wide rune ends past that rune, and a
+// zero-width mark travels with the base rune whose cells it shares.
+func TestRuneIndexPastVisualColResolvesWideRuneCells(t *testing.T) {
+	cases := []struct {
+		name  string
+		runes string
+		col   int
+		want  int
+	}{
+		{"before the text", "abc", 0, 0},
+		{"inside the first cell", "abc", 1, 1},
+		{"on a row boundary", "abc", 3, 3},
+		{"past the row", "abc", 9, 3},
+		{"wide rune's first cell", "原始", 1, 1},
+		{"wide rune's trailing cell", "原始", 2, 1},
+		{"just past a wide rune", "原始", 3, 2},
+		{"combining mark shares its base's cell", "e\u0301x", 1, 2},
+		{"past a base and its mark", "e\u0301x", 2, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runeIndexPastVisualCol([]rune(tc.runes), tc.col); got != tc.want {
+				t.Fatalf("runeIndexPastVisualCol(%q, %d) = %d, want %d", tc.runes, tc.col, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSelectionEndIndexForClickResolvesWideRuneCells pins the prefix arithmetic
+// on top of that mapping: a field's own decoration is not text, and a drag that
+// ends on it selects nothing after it.
+func TestSelectionEndIndexForClickResolvesWideRuneCells(t *testing.T) {
+	cases := []struct {
+		name string
+		col  int
+		want int
+	}{
+		{"on the decoration", 2, 0},
+		{"before the text", 0, 0},
+		{"first rune's first cell", 3, 1},
+		{"first rune's trailing cell", 4, 1},
+		{"third rune's trailing cell", 8, 3},
+		{"past the text", 12, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := selectionEndIndexForClick([]rune("你好世界"), 2, tc.col); got != tc.want {
+				t.Fatalf("selectionEndIndexForClick(col %d) = %d, want %d", tc.col, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestComposerSelectionRunesWithAChip keeps the chip case honest: the chip is
 // plain text in the buffer, so a selection over it deletes its runes.
 func TestComposerSelectionRunesWithAChip(t *testing.T) {
