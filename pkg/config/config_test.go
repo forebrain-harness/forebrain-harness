@@ -196,6 +196,15 @@ func TestApplyMergedEnvOverridesCoversGatewaySearchAndLLM(t *testing.T) {
 		root.Agents.Defaults.WebSearch.Baidu.APIKey != "baidu" {
 		t.Fatalf("web search env overrides not applied: %+v", root.Agents.Defaults.WebSearch)
 	}
+	// One DeepSeek key fills both the search and the fetch provider block.
+	if root.Agents.Defaults.WebSearch.DeepSeek == nil ||
+		root.Agents.Defaults.WebSearch.DeepSeek.APIKey != "deepseek" {
+		t.Fatalf("web search deepseek override not applied: %+v", root.Agents.Defaults.WebSearch.DeepSeek)
+	}
+	if root.Agents.Defaults.WebFetch.DeepSeek == nil ||
+		root.Agents.Defaults.WebFetch.DeepSeek.APIKey != "deepseek" {
+		t.Fatalf("web fetch deepseek override not applied: %+v", root.Agents.Defaults.WebFetch.DeepSeek)
+	}
 	def := root.Agents.Definitions["main"]
 	if def.LLMProviders[0].APIKey != "openai" {
 		t.Fatalf("llm provider env overrides not applied: %+v", def)
@@ -941,6 +950,46 @@ func TestWebSearchConfig_AllowsProviderAndNestedConfig(t *testing.T) {
 	}
 	if cfg.Tavily == nil || cfg.Tavily.SearchDepth != "advanced" {
 		t.Fatalf("Tavily config = %+v, want advanced depth", cfg.Tavily)
+	}
+	deep := WebSearchConfig{
+		Provider: "deepseek",
+		DeepSeek: &WebSearchDeepSeek{APIKey: "k"},
+	}
+	if deep.Provider != "deepseek" || deep.DeepSeek == nil || deep.DeepSeek.APIKey != "k" {
+		t.Fatalf("deepseek config = %+v", deep)
+	}
+}
+
+// The deepseek provider blocks must survive a YAML round trip through their
+// tags — that is how forebrain.yaml and saved configs reach them.
+func TestWebSearchWebFetchDeepSeekConfigYAMLRoundTrip(t *testing.T) {
+	search := WebSearchConfig{Provider: "deepseek", DeepSeek: &WebSearchDeepSeek{APIKey: "sk"}}
+	raw, err := yamlv2.Marshal(search)
+	if err != nil {
+		t.Fatalf("marshal web search: %v", err)
+	}
+	var loadedSearch WebSearchConfig
+	if err := yamlv2.Unmarshal(raw, &loadedSearch); err != nil {
+		t.Fatalf("unmarshal web search: %v", err)
+	}
+	if loadedSearch.Provider != "deepseek" || loadedSearch.DeepSeek == nil || loadedSearch.DeepSeek.APIKey != "sk" {
+		t.Fatalf("web search round trip = %+v", loadedSearch)
+	}
+
+	fetch := WebFetchConfig{Provider: "deepseek", DeepSeek: &WebFetchDeepSeek{APIKey: "sk"}, AllowPrivateIP: true}
+	rawFetch, err := yamlv2.Marshal(fetch)
+	if err != nil {
+		t.Fatalf("marshal web fetch: %v", err)
+	}
+	var loadedFetch WebFetchConfig
+	if err := yamlv2.Unmarshal(rawFetch, &loadedFetch); err != nil {
+		t.Fatalf("unmarshal web fetch: %v", err)
+	}
+	if loadedFetch.Provider != "deepseek" || loadedFetch.DeepSeek == nil || loadedFetch.DeepSeek.APIKey != "sk" {
+		t.Fatalf("web fetch round trip = %+v", loadedFetch)
+	}
+	if !loadedFetch.AllowPrivateIP {
+		t.Fatalf("AllowPrivateIP lost in round trip: %+v", loadedFetch)
 	}
 }
 
