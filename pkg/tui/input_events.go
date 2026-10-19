@@ -609,6 +609,18 @@ func deleteRuneBeforeCursor(line []rune, cursor int) ([]rune, int, bool) {
 	return out, cursor - 1, true
 }
 
+// deleteRuneAfterCursor removes the rune under the caret — what an Apple
+// fn+Delete or a PC Delete key sends (ESC[3~) — and reports whether anything was
+// removed. It is the mirror of deleteRuneBeforeCursor: on a hard newline it
+// joins the two lines, exactly as Backspace at the start of one does.
+func deleteRuneAfterCursor(line []rune, cursor int) ([]rune, int, bool) {
+	cursor = composerCursorClampRunes(line, cursor)
+	if cursor >= len(line) {
+		return line, cursor, false
+	}
+	return deleteRuneRange(line, cursor, cursor+1), cursor, true
+}
+
 // deleteRuneRange removes runes[start:end], returning the shortened slice. An
 // empty or out-of-range span is a no-op, so a caller may pass a range it
 // resolved against a slightly older buffer without checking every bound.
@@ -945,6 +957,27 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 				return
 			}
 		}()
+		// cutComposerSelection removes the text a mouse selection covers, if the
+		// reader has not consumed that selection yet. Every key that edits the
+		// buffer — Delete, but also a character or a paste, which replace the
+		// selection the way a native editor does — calls this first, so the edit
+		// that follows lands at the freed caret.
+		cutComposerSelection := func() bool {
+			pub := composerSelectionRange.Load()
+			if pub == nil {
+				return false
+			}
+			// Consumed exactly once: a second Delete deletes one rune, never the
+			// same span again.
+			composerSelectionRange.Store(nil)
+			start, end := pub[0], pub[1]
+			if start < 0 || end > len(line) || end <= start {
+				return false
+			}
+			line = deleteRuneRange(line, start, end)
+			cursor = start
+			return true
+		}
 		flushBurst := func(now time.Time) {
 			switch flush := pasteBurst.flushIfDue(now); flush.kind {
 			case pasteBurstResultPaste:
@@ -952,6 +985,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 				if content == "" {
 					return
 				}
+				cutComposerSelection()
 				ch <- inputEvent{kind: inputEventPaste, paste: content}
 				line, cursor = insertRunesAtCursor(line, cursor, []rune(content))
 			case pasteBurstResultTyped:
@@ -959,6 +993,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 				if content == "" {
 					return
 				}
+				cutComposerSelection()
 				previous := cloneRunes(line)
 				previousCursor := cursor
 				line, cursor = insertRunesAtCursor(line, cursor, []rune(content))
@@ -1013,6 +1048,9 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 			pendingEscape = pendingEscape[:0]
 			historyIndex = -1
 			historyDraft = nil
+			// The whole buffer is being replaced, so a published selection
+			// addresses text that no longer exists.
+			composerSelectionRange.Store(nil)
 			previous := cloneRunes(line)
 			previousCursor := cursor
 			text, c := sanitizeTerminalDraft(seed.text, seed.cursor)
@@ -1086,6 +1124,12 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							collectingPaste = false
 							pasteBurst.clearAfterExplicitPaste()
 							if content != "" {
+								// A paste replaces a selection: the selected text
+								// leaves first, and the main loop merges the
+								// pasted body at the caret this frees.
+								if cutComposerSelection() {
+									ch <- inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor}
+								}
 								ch <- inputEvent{kind: inputEventPaste, paste: content}
 							}
 						}
@@ -1149,6 +1193,9 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 							// literal newline into the draft instead of submitting,
 							// giving the composer a cross-terminal multi-line hotkey.
 							pendingEscape = pendingEscape[:0]
+							// Alt+Enter inserts a line break, so it replaces the
+							// selection the way any other inserted text does.
+							cutComposerSelection()
 							if pasted := pasteBurst.flushBeforeModifiedInput(); pasted != "" {
 								previous := cloneRunes(line)
 								previousCursor := cursor
@@ -1249,6 +1296,10 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 									redrawRawInputBuffer(out, line, cursor, nextLine, len(nextLine))
 									line = nextLine
 									cursor = len(line)
+									// The recalled draft is a different buffer:
+									// a range measured against the old one names
+									// characters this text never had.
+									composerSelectionRange.Store(nil)
 									historyDraft = nextDraft
 									historyIndex = nextIndex
 									ev := inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor, historyNavigation: true, historyIndex: nextIndex}
@@ -1299,6 +1350,45 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 								}
 								continue
 							}
+							// Forward delete (ESC [ 3 ~): the key an Apple
+							// fn+Delete and a PC's Delete send. It is
+							// Backspace's mirror — the caret stays put and the
+							// rune under it goes, which on a hard newline joins
+							// the two lines the way Backspace at the start of
+							// one does.
+							if bytes.Equal(pendingEscape, []byte{0x1b, '[', '3', '~'}) {
+								pendingEscape = pendingEscape[:0]
+								// A slash panel is the key target and has no
+								// field of its own: the composer must not change
+								// behind it, the same way the bytes above are
+								// dropped while one is open.
+								if uiPanelActive.Load() {
+									continue
+								}
+								// A mouse selection is this key's whole edit, as
+								// it is for Backspace: taken once, so a second
+								// Delete removes a single rune.
+								changed := cutComposerSelection()
+								if !changed {
+									previous := cloneRunes(line)
+									previousCursor := cursor
+									line, cursor, changed = deleteRuneAfterCursor(line, cursor)
+									if changed {
+										redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
+									}
+								}
+								// Nothing under the caret and nothing selected: the
+								// buffer is untouched, so this key posts no draft.
+								if !changed {
+									continue
+								}
+								pasteBurst.clearWindowAfterNonChar()
+								pendingUTF8 = pendingUTF8[:0]
+								historyIndex = -1
+								historyDraft = nil
+								ch <- inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor}
+								continue
+							}
 							pendingEscape = pendingEscape[:0]
 						}
 						continue
@@ -1332,6 +1422,8 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						if hasPendingInput {
 							line = line[:0]
 							cursor = 0
+							// The buffer is gone, so the published range with it.
+							composerSelectionRange.Store(nil)
 							pendingUTF8 = pendingUTF8[:0]
 							historyIndex = -1
 							historyDraft = nil
@@ -1435,6 +1527,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						// reader, so no ack is needed.
 						previous := cloneRunes(line)
 						previousCursor := cursor
+						cutComposerSelection()
 						line, cursor = insertRunesAtCursor(line, cursor, []rune{'/'})
 						redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
 						ch <- inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor}
@@ -1445,6 +1538,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						if pasteBurst.newlineShouldInsertInsteadOfSubmit(time.Now()) {
 							previous := cloneRunes(line)
 							previousCursor := cursor
+							cutComposerSelection()
 							line, cursor = insertRunesAtCursor(line, cursor, []rune{'\n'})
 							if out != nil {
 								redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
@@ -1462,6 +1556,7 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						if b == '\n' {
 							previous := cloneRunes(line)
 							previousCursor := cursor
+							cutComposerSelection()
 							line, cursor = insertRunesAtCursor(line, cursor, []rune{'\n'})
 							if out != nil {
 								redrawRawInputBuffer(out, previous, previousCursor, line, cursor)
@@ -1491,6 +1586,11 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						historyIndex = -1
 						historyDraft = nil
 					case 0x7f, 0x08:
+						// The selection is deleted first, so a burst the reader
+						// is still holding lands at the caret the deletion
+						// freed — the way a character typed over a selection
+						// replaces it — and this key deletes nothing more.
+						cut := cutComposerSelection()
 						if pasted := pasteBurst.flushBeforeModifiedInput(); pasted != "" {
 							previous := cloneRunes(line)
 							previousCursor := cursor
@@ -1503,6 +1603,10 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						pendingUTF8 = pendingUTF8[:0]
 						historyIndex = -1
 						historyDraft = nil
+						if cut {
+							ch <- inputEvent{kind: inputEventDraft, draft: string(line), cursor: cursor}
+							continue
+						}
 						if len(line) > 0 {
 							previous := cloneRunes(line)
 							previousCursor := cursor
@@ -1560,6 +1664,10 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 								continue
 							}
 						}
+						// A character typed over a selection replaces it: the
+						// selected text goes first, and what follows lands at the
+						// caret it freed.
+						cutComposerSelection()
 						now := time.Now()
 						if r >= 0 && r <= 0x7f {
 							switch pasteBurst.onASCIIChar(r, now) {

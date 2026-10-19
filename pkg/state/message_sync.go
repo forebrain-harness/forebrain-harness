@@ -167,23 +167,33 @@ type storedTranscriptMessage struct {
 	message llm.Message
 }
 
+// transcriptRowReachesModel reports whether a stored row is part of the
+// conversation a request actually carries. System rows (compact-boundary
+// markers and their detail log) are dropped because a run's message list
+// carries no system message either; rows ParseMessage cannot read (reasoning
+// blocks are the ones that show up here) never leave the transcript. Comparing
+// two sides on different alphabets is what an alignment must never do — and a
+// repair that judged one of these rows would be judging a message no provider
+// will ever see.
+func transcriptRowReachesModel(row storedMessage) bool {
+	if strings.TrimSpace(row.Role) == llm.RoleSystem {
+		return false
+	}
+	if _, isBoundary := ParseCompactBoundaryPart(row.PartsJSON); isBoundary {
+		return false
+	}
+	_, ok := ParseMessage(row.Role, row.Content, row.PartsJSON)
+	return ok
+}
+
 // storedTranscriptMessages parses the rows the model context is built from.
-// System rows (compact-boundary markers and their detail log) are dropped
-// because a run's message list carries no system message either; comparing the
-// two sides on different alphabets is what an alignment must never do.
 func storedTranscriptMessages(rows []storedMessage) []storedTranscriptMessage {
 	out := make([]storedTranscriptMessage, 0, len(rows))
 	for _, row := range rows {
-		if strings.TrimSpace(row.Role) == llm.RoleSystem {
+		if !transcriptRowReachesModel(row) {
 			continue
 		}
-		if _, isBoundary := ParseCompactBoundaryPart(row.PartsJSON); isBoundary {
-			continue
-		}
-		message, ok := ParseMessage(row.Role, row.Content, row.PartsJSON)
-		if !ok {
-			continue
-		}
+		message, _ := ParseMessage(row.Role, row.Content, row.PartsJSON)
 		out = append(out, storedTranscriptMessage{rowID: row.ID, message: message})
 	}
 	return out

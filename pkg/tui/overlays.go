@@ -380,6 +380,12 @@ func (o *approvalOverlay) Run() (turn.ToolApprovalDecision, error) {
 			o.rs.dispatchMouse(key.mouse)
 			continue
 		}
+		// A selection made in the feedback field belongs to this key: the edit
+		// keys consume it, anything else drops it, so the highlight never hangs
+		// over text a later key has already moved or replaced.
+		if !keyEditsTextField(key.kind) {
+			o.rs.clearViewportSelection()
+		}
 		decision, done := o.handleKey(key)
 		if done {
 			// Release the non-viewport mutex before the confirmation
@@ -894,7 +900,31 @@ func (o *approvalOverlay) insertEditText(text string) {
 	if len(insert) == 0 {
 		return
 	}
+	o.cutFeedbackSelection()
 	o.feedbackBuf, o.feedbackCursor = insertRunesAtCursor(o.feedbackBuf, o.feedbackCursor, insert)
+}
+
+// cutFeedbackSelection deletes the part of the feedback the mouse selection
+// covers, reporting whether it deleted anything. The field wraps like the
+// composer, so its layout's own row table (feedbackLayout.rows) resolves both
+// anchors, exactly as placeFeedbackCaret resolves a click.
+func (o *approvalOverlay) cutFeedbackSelection() bool {
+	if !o.planDenyEditing || o.rs == nil || !o.rs.inViewportOverlay() {
+		return false
+	}
+	startLine, startCol, endLine, endCol, ok := o.rs.renderer.OverlaySelection()
+	if !ok {
+		return false
+	}
+	area := composerTextArea{runes: o.feedbackBuf, firstLine: o.feedbackFirstRow, rows: o.feedbackLayout.rows}
+	start, end, ok := area.selectionRunes(startLine, startCol, endLine, endCol)
+	if !ok {
+		return false
+	}
+	o.feedbackBuf = deleteRuneRange(o.feedbackBuf, start, end)
+	o.feedbackCursor = start
+	o.rs.clearViewportSelection() // taken, not kept (see fieldSelection)
+	return true
 }
 
 // approvalFeedbackPrompt precedes the feedback text on its first row;
@@ -1034,7 +1064,7 @@ func (o *approvalOverlay) handlePlanDenyKey(key parsedKey) (turn.ToolApprovalDec
 		o.clearFeedback()
 		return turn.ToolApprovalDecision{Denied: true, DenyReason: feedback}, true
 	case rawKeyBackspace:
-		if o.feedbackCursor > 0 {
+		if !o.cutFeedbackSelection() && o.feedbackCursor > 0 {
 			o.feedbackBuf = append(o.feedbackBuf[:o.feedbackCursor-1], o.feedbackBuf[o.feedbackCursor:]...)
 			o.feedbackCursor--
 		}
@@ -1934,6 +1964,12 @@ func (o *questionOverlay) Run() (turn.ToolApprovalDecision, error) {
 			o.rs.dispatchMouse(key.mouse)
 			continue
 		}
+		// A selection made in the Other field belongs to this key: the edit keys
+		// consume it, anything else drops it, so the highlight never hangs over
+		// text a later key has already moved or replaced.
+		if !keyEditsTextField(key.kind) {
+			o.rs.clearViewportSelection()
+		}
 		decision, done := o.handleKey(key)
 		if done {
 			return decision, nil
@@ -2188,6 +2224,9 @@ func (o *questionOverlay) handleOtherEditKey(key parsedKey) (turn.ToolApprovalDe
 		o.otherCursor = len(o.otherBuf)
 		return turn.ToolApprovalDecision{}, false
 	case rawKeyBackspace:
+		if o.cutOtherSelection() {
+			break
+		}
 		if o.otherCursor > 0 {
 			o.otherBuf = append(o.otherBuf[:o.otherCursor-1], o.otherBuf[o.otherCursor:]...)
 			o.otherCursor--
@@ -2220,14 +2259,51 @@ func (o *questionOverlay) handleOtherEditKey(key parsedKey) (turn.ToolApprovalDe
 		// The Other answer is a single-line field: a pasted newline would split
 		// the row it is rendered on, so it folds to a space the way the picker
 		// filters do.
-		insert := []rune(strings.ReplaceAll(key.text, "\n", " "))
-		o.otherBuf, o.otherCursor = insertRunesAtCursor(o.otherBuf, o.otherCursor, insert)
+		o.insertOther(strings.ReplaceAll(key.text, "\n", " "))
 	case rawKeyRune:
-		o.otherBuf, o.otherCursor = insertRunesAtCursor(o.otherBuf, o.otherCursor, []rune{key.r})
+		o.insertOther(string(key.r))
 	case rawKeySpace:
-		o.otherBuf, o.otherCursor = insertRunesAtCursor(o.otherBuf, o.otherCursor, []rune{' '})
+		o.insertOther(" ")
 	}
 	return turn.ToolApprovalDecision{}, false
+}
+
+// cutOtherSelection deletes the part of the Other answer the mouse selection
+// covers, reporting whether it deleted anything. The row carries a one-cell
+// caret block inside the text, so the same mapping a click uses
+// (caretIndexAroundBlock) resolves both anchors.
+func (o *questionOverlay) cutOtherSelection() bool {
+	if o.rs == nil || !o.rs.inViewportOverlay() {
+		return false
+	}
+	startLine, startCol, endLine, endCol, ok := o.rs.renderer.OverlaySelection()
+	if !ok || o.otherRow < 0 || startLine > o.otherRow || endLine < o.otherRow {
+		return false
+	}
+	start, end := 0, len(o.otherBuf)
+	if startLine == o.otherRow {
+		start = caretIndexAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, startCol)
+	}
+	if endLine == o.otherRow {
+		end = caretIndexAroundBlock(o.otherBuf, o.otherCursor, o.otherPrefixWidth, 1, endCol)
+	}
+	if end <= start {
+		return false
+	}
+	o.otherBuf = deleteRuneRange(o.otherBuf, start, end)
+	o.otherCursor = start
+	o.rs.clearViewportSelection() // taken, not kept (see fieldSelection)
+	return true
+}
+
+// insertOther puts text into the Other answer, replacing a selection first the
+// way a native editor does.
+func (o *questionOverlay) insertOther(text string) {
+	if text == "" {
+		return
+	}
+	o.cutOtherSelection()
+	o.otherBuf, o.otherCursor = insertRunesAtCursor(o.otherBuf, o.otherCursor, []rune(text))
 }
 
 func (o *questionOverlay) handleSubmitViewKey(key parsedKey) (turn.ToolApprovalDecision, bool) {
@@ -3208,6 +3284,7 @@ const (
 	rawKeyCtrlC
 	rawKeyCtrlE
 	rawKeyBackspace
+	rawKeyDelete // forward delete: an Apple fn+Delete or a PC's Delete (ESC[3~)
 	rawKeyTab
 	rawKeySpace
 	rawKeyShiftTab
@@ -3422,6 +3499,8 @@ func mapEscapeSeq(seq []byte) parsedKey {
 			return parsedKey{kind: rawKeyPageUp}
 		case "[6~":
 			return parsedKey{kind: rawKeyPageDown}
+		case "[3~":
+			return parsedKey{kind: rawKeyDelete}
 		}
 	}
 	return parsedKey{kind: rawKeyNone}
@@ -3472,6 +3551,81 @@ const (
 	selectorUncheckedGlyph = "○"
 )
 
+// keyEditsTextField reports whether a key changes a text field's contents, and
+// so is one the field's selection must be applied to rather than dropped for.
+func keyEditsTextField(k rawKey) bool {
+	switch k {
+	case rawKeyBackspace, rawKeyDelete, rawKeyRune, rawKeyPaste, rawKeySpace:
+		return true
+	}
+	return false
+}
+
+// fieldSelection takes the part of a panel's single-row field the mouse
+// selection covers, for the edit key that is about to run, and consumes that
+// selection: the range is returned, the painted anchors are dropped. A key that
+// does not edit the field drops the selection without returning a range, because
+// the anchors are columns of the row as it was painted and any other edit makes
+// them address other characters.
+//
+// A selection that reaches past the field's row is clamped to it, so a drag that
+// started in the panel's head or ran on into the list still deletes the field's
+// part of it. runes is the field's own buffer — the same slice the field's click
+// mapping measures against, which for a secret field is the unmasked value (the
+// row paints dots, but the rune count and the caret math are the value's own).
+// The field's row is the panel's own row index, which for a panel overlay equals
+// the logical line OverlaySelection reports (the panel path's row refs are the
+// identity, reducer.go's vpOverlayRefs build in paintViewportLocked).
+func (s *rawSelector) fieldSelection(k rawKey, p slashPanel, runes []rune) *[2]int {
+	switch {
+	case k == rawKeyMouse || k == rawKeyNone:
+		return nil
+	case !keyEditsTextField(k):
+		s.clearViewportSelection()
+		return nil
+	}
+	if p.field == nil || !s.inViewportOverlay() {
+		return nil
+	}
+	startLine, startCol, endLine, endCol, ok := s.renderer.OverlaySelection()
+	if !ok {
+		return nil
+	}
+	line := p.fieldRow(s.panelWidth(), s.panelRows())
+	if line < 0 || startLine > line || endLine < line {
+		return nil
+	}
+	textCol := p.field.textCol()
+	start, end := 0, len(runes)
+	if startLine == line {
+		start = caretIndexForClick(runes, textCol, startCol)
+	}
+	if endLine == line {
+		end = caretIndexForClick(runes, textCol, endCol)
+	}
+	if end <= start {
+		// A selection that covers no rune (a drag inside one wide rune, say) is
+		// still this key's: drop the anchors, so the next edit cannot remap them
+		// onto text this one changed.
+		s.clearViewportSelection()
+		return nil
+	}
+	// Taken, not kept: the range now belongs to the field, and the painted
+	// anchors must not survive this keystroke — a second Backspace would map
+	// them onto the text this edit is about to shorten.
+	s.clearViewportSelection()
+	return &[2]int{start, end}
+}
+
+// clearViewportSelection drops the app-level text selection a modal is done
+// with, leaving the transcript's own selection alone: a modal only ever owns
+// the selection it can act on.
+func (s *rawSelector) clearViewportSelection() {
+	if s.inViewportOverlay() {
+		s.renderer.ViewportSelectClear()
+	}
+}
+
 // filterField is the editable filter a picker shows next to its label: the
 // text plus the caret position inside it. Typing, backspace, the arrow keys and
 // a mouse click all act at the caret, which is why the pickers keep one instead
@@ -3479,21 +3633,47 @@ const (
 type filterField struct {
 	text   string
 	cursor int // rune offset into text
+	// selection is the rune range a mouse selection covers in this filter, set
+	// by the picker's key loop before the key is handled (fieldSelection) and
+	// cleared by the edit that consumes it.
+	selection *[2]int
 }
 
 func (f *filterField) runes() []rune { return []rune(f.text) }
+
+// cutSelection deletes the selected part of the filter, reporting whether the
+// text changed so the caller re-filters.
+func (f *filterField) cutSelection() bool {
+	if f.selection == nil {
+		return false
+	}
+	start, end := f.selection[0], f.selection[1]
+	f.selection = nil
+	runes := f.runes()
+	if end <= start || start >= len(runes) {
+		return false
+	}
+	f.text = string(deleteRuneRange(runes, start, end))
+	f.cursor = start
+	return true
+}
 
 func (f *filterField) insert(text string) {
 	if text == "" {
 		return
 	}
+	f.cutSelection()
 	runes, cursor := insertRunesAtCursor(f.runes(), f.cursor, []rune(text))
 	f.text, f.cursor = string(runes), cursor
 }
 
 // backspace deletes the rune before the caret and reports whether anything was
-// deleted, so the caller re-filters only when the query actually changed.
+// deleted, so the caller re-filters only when the query actually changed. A
+// selection replaces the caret: deleting it is this key's whole edit.
 func (f *filterField) backspace() bool {
+	if f.cutSelection() {
+		return true
+	}
 	runes, cursor, deleted := deleteRuneBeforeCursor(f.runes(), f.cursor)
 	if !deleted {
 		return false
@@ -3747,6 +3927,7 @@ func (s *rawSelector) Select(label string, options []string, defaultOption strin
 		if err != nil {
 			return "", false, err
 		}
+		st.filter.selection = s.fieldSelection(key.kind, st.panel(), st.filter.runes())
 		if st.noFilter && editsFilter(key.kind) {
 			continue
 		}
@@ -4096,6 +4277,7 @@ func (s *rawSelector) MultiSelect(label string, options []string, defaultOptions
 		if err != nil {
 			return nil, false, err
 		}
+		st.filter.selection = s.fieldSelection(key.kind, st.panel(), st.filter.runes())
 		if st.noFilter && editsFilter(key.kind) {
 			continue
 		}
@@ -4216,6 +4398,15 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 		if err != nil {
 			return "", false, err
 		}
+		// A selection replaces the caret for this key: it is taken here, where
+		// the field's layout is the one the selection was drawn on, and every
+		// edit branch below then works on the shortened value.
+		sel := s.fieldSelection(key.kind, panel(), value)
+		cut := sel != nil
+		if cut {
+			value = deleteRuneRange(value, sel[0], sel[1])
+			cursor = sel[0]
+		}
 		switch key.kind {
 		case rawKeyNone:
 			continue
@@ -4235,7 +4426,9 @@ func (s *rawSelector) input(label string, defaultValue string, secret bool) (str
 				cursor++
 			}
 		case rawKeyBackspace:
-			value, cursor, _ = deleteRuneBeforeCursor(value, cursor)
+			if !cut {
+				value, cursor, _ = deleteRuneBeforeCursor(value, cursor)
+			}
 		case rawKeyPaste:
 			value, cursor = insertRunesAtCursor(value, cursor, []rune(key.text))
 		case rawKeyRune:
@@ -4641,6 +4834,7 @@ func (s *rawSelector) selectRichPaged(label string, items []SelectItem, defaultI
 		if err != nil {
 			return -1, false, err
 		}
+		p.filter.selection = s.fieldSelection(key.kind, p.panel(label), p.filter.runes())
 		if p.noFilter && editsFilter(key.kind) {
 			continue
 		}

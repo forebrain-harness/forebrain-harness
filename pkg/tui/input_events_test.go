@@ -1839,3 +1839,225 @@ func TestReadRawInputEventsSubmitsEveryCharacterWhateverTheTiming(t *testing.T) 
 		})
 	}
 }
+
+// startSelectionReader runs the raw input reader over a pipe and seeds its
+// buffer, so a test can publish a mouse selection and watch one key act on it.
+// The seed goes through the reader's own channel: the buffer belongs to the
+// reader, and that channel is the only way in.
+func startSelectionReader(t *testing.T, text string) (<-chan inputEvent, *os.File) {
+	t.Helper()
+	return startSelectionReaderAt(t, text, seedCursorEnd)
+}
+
+// startSelectionReaderAt runs the reader with the caret at a rune offset, so a
+// test can aim a key at a character in the middle of the buffer.
+func startSelectionReaderAt(t *testing.T, text string, at int) (<-chan inputEvent, *os.File) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	events := readRawInputEvents(ctx, r, io.Discard, stubRawInputController{}, nil)
+	t.Cleanup(func() {
+		cancel()
+		_ = w.Close()
+		_ = r.Close()
+		for range events {
+		}
+		composerSelectionRange.Store(nil)
+	})
+	drainInteractiveInputSeedQueue()
+	interactiveInputSeedCh <- interactiveInputSeed{text: text, cursor: at}
+	if ev := nextDraftEvent(t, events); ev.draft != text {
+		t.Fatalf("seed draft = %q, want %q", ev.draft, text)
+	}
+	return events, w
+}
+
+// nextDraftEvent returns the next draft the reader posts, skipping the other
+// events a burst can produce along the way.
+func nextDraftEvent(t *testing.T, events <-chan inputEvent) inputEvent {
+	t.Helper()
+	return nextDraftMatching(t, events, func(string) bool { return true })
+}
+
+// nextDraftMatching returns the next draft whose text satisfies want.
+func nextDraftMatching(t *testing.T, events <-chan inputEvent, want func(string) bool) inputEvent {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatal("channel closed while waiting for a draft")
+			}
+			if ev.kind == inputEventDraft && want(ev.draft) {
+				return ev
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a draft")
+		}
+	}
+}
+
+// TestComposerSelectionDeleteReplacesTheCaretDelete is the reported bug: a
+// mouse selection in the composer was ignored, so Delete removed the rune
+// before the caret — somewhere else entirely.
+func TestComposerSelectionDeleteReplacesTheCaretDelete(t *testing.T) {
+	events, w := startSelectionReader(t, "hello world foo")
+
+	composerSelectionRange.Store(&[2]int{6, 11}) // "world"
+	if _, err := w.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write backspace: %v", err)
+	}
+
+	ev := nextDraftEvent(t, events)
+	if ev.draft != "hello  foo" {
+		t.Fatalf("Delete over a selection should remove it, got %q", ev.draft)
+	}
+	if ev.cursor != 6 {
+		t.Fatalf("the caret must land at the start of the selection, got %d", ev.cursor)
+	}
+}
+
+// TestComposerSelectionTypingReplacesTheSelection covers the editor convention
+// the whole change exists for: typing over a selection replaces it.
+func TestComposerSelectionTypingReplacesTheSelection(t *testing.T) {
+	events, w := startSelectionReader(t, "hello world foo")
+
+	composerSelectionRange.Store(&[2]int{6, 11})
+	if _, err := w.Write([]byte{'Q'}); err != nil {
+		t.Fatalf("write rune: %v", err)
+	}
+
+	ev := nextDraftMatching(t, events, func(draft string) bool { return strings.Contains(draft, "Q") })
+	if ev.draft != "hello Q foo" {
+		t.Fatalf("typing over a selection should replace it, got %q", ev.draft)
+	}
+	if ev.cursor != 7 {
+		t.Fatalf("the caret must follow the typed rune, got %d", ev.cursor)
+	}
+}
+
+// TestComposerSelectionIsConsumedOnce guards the "one key, one edit" rule: the
+// range is handed over exactly once, so a second Delete deletes one rune rather
+// than the same span again.
+func TestComposerSelectionIsConsumedOnce(t *testing.T) {
+	events, w := startSelectionReader(t, "hello world foo")
+
+	composerSelectionRange.Store(&[2]int{6, 11})
+	if _, err := w.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write first backspace: %v", err)
+	}
+	if ev := nextDraftEvent(t, events); ev.draft != "hello  foo" {
+		t.Fatalf("first Delete should remove the selection, got %q", ev.draft)
+	}
+
+	if _, err := w.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write second backspace: %v", err)
+	}
+	ev := nextDraftEvent(t, events)
+	if ev.draft != "hello foo" || ev.cursor != 5 {
+		t.Fatalf("a second Delete should delete one rune, got %q at %d", ev.draft, ev.cursor)
+	}
+}
+
+// TestComposerSelectionIsDroppedWhenTheDraftIsReplaced keeps a published range
+// from outliving the buffer it was measured against: a seeded draft is a
+// different text, and the range now names characters it never had.
+func TestComposerSelectionIsDroppedWhenTheDraftIsReplaced(t *testing.T) {
+	events, w := startSelectionReader(t, "hello world foo")
+
+	composerSelectionRange.Store(&[2]int{6, 11})
+	interactiveInputSeedCh <- interactiveInputSeed{text: "fresh", cursor: seedCursorEnd}
+	if ev := nextDraftEvent(t, events); ev.draft != "fresh" {
+		t.Fatalf("seed draft = %q, want %q", ev.draft, "fresh")
+	}
+
+	if _, err := w.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write backspace: %v", err)
+	}
+	if ev := nextDraftEvent(t, events); ev.draft != "fres" {
+		t.Fatalf("a replaced draft must not be cut with the old range, got %q", ev.draft)
+	}
+}
+
+// forwardDelete is the key an Apple fn+Delete or a PC's Delete sends. The
+// composer had no binding for it, so it reached the reader and was dropped.
+var forwardDelete = []byte{0x1b, '[', '3', '~'}
+
+// TestComposerForwardDeleteRemovesTheRuneUnderTheCaret is the contract: the
+// caret stays where it is and the character under it goes.
+func TestComposerForwardDeleteRemovesTheRuneUnderTheCaret(t *testing.T) {
+	events, w := startSelectionReaderAt(t, "hello", 2)
+
+	if _, err := w.Write(forwardDelete); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+
+	ev := nextDraftEvent(t, events)
+	if ev.draft != "helo" {
+		t.Fatalf("forward delete should remove the rune under the caret, got %q", ev.draft)
+	}
+	if ev.cursor != 2 {
+		t.Fatalf("forward delete must leave the caret alone, got %d", ev.cursor)
+	}
+}
+
+// TestComposerForwardDeleteTakesTheSelection covers the editor convention the
+// key shares with Backspace: a selection is the key's whole edit, once.
+func TestComposerForwardDeleteTakesTheSelection(t *testing.T) {
+	events, w := startSelectionReaderAt(t, "hello world foo", 6)
+
+	composerSelectionRange.Store(&[2]int{6, 11}) // "world"
+	if _, err := w.Write(forwardDelete); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+	ev := nextDraftEvent(t, events)
+	if ev.draft != "hello  foo" || ev.cursor != 6 {
+		t.Fatalf("forward delete over a selection should remove it, got %q at %d", ev.draft, ev.cursor)
+	}
+
+	if _, err := w.Write(forwardDelete); err != nil {
+		t.Fatalf("write second forward delete: %v", err)
+	}
+	ev = nextDraftEvent(t, events)
+	if ev.draft != "hello foo" || ev.cursor != 6 {
+		t.Fatalf("a second forward delete should remove one rune, got %q at %d", ev.draft, ev.cursor)
+	}
+}
+
+// TestComposerForwardDeleteAtTheEndOfTheDraftIsANoOp keeps the key from
+// posting a draft — a redraw, and a history-browse reset — when there is
+// nothing after the caret to remove.
+func TestComposerForwardDeleteAtTheEndOfTheDraftIsANoOp(t *testing.T) {
+	events, w := startSelectionReader(t, "ab")
+
+	if _, err := w.Write(forwardDelete); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+	if _, err := w.Write([]byte{'X'}); err != nil {
+		t.Fatalf("write rune: %v", err)
+	}
+
+	ev := nextDraftMatching(t, events, func(draft string) bool { return strings.Contains(draft, "X") })
+	if ev.draft != "abX" || ev.cursor != 3 {
+		t.Fatalf("forward delete at the end must delete nothing, got %q at %d", ev.draft, ev.cursor)
+	}
+}
+
+// TestComposerForwardDeleteOnAHardNewlineJoinsTheLines is the mirror of
+// Backspace at the start of a line, which merges it with the one above.
+func TestComposerForwardDeleteOnAHardNewlineJoinsTheLines(t *testing.T) {
+	events, w := startSelectionReaderAt(t, "ab\ncd", 2)
+
+	if _, err := w.Write(forwardDelete); err != nil {
+		t.Fatalf("write forward delete: %v", err)
+	}
+
+	ev := nextDraftEvent(t, events)
+	if ev.draft != "abcd" || ev.cursor != 2 {
+		t.Fatalf("forward delete on a newline should join the lines, got %q at %d", ev.draft, ev.cursor)
+	}
+}

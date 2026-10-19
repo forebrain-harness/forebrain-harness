@@ -370,6 +370,7 @@ func (s *rawSelector) tabbedKeyLoop(label string, items []SelectItem, opts Tabbe
 		if err != nil {
 			return nil, false, err
 		}
+		p.filter.selection = s.fieldSelection(key.kind, p.panel(label), p.filter.runes())
 		if p.noFilter && editsFilter(key.kind) {
 			continue
 		}

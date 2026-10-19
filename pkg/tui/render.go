@@ -563,7 +563,7 @@ func NewRenderer(out io.Writer, err io.Writer) *Renderer {
 		err = out
 	}
 	cwd, _ := os.Getwd()
-	return &Renderer{out: out, err: err, cwd: cwd, vpHoverRow: -1, selectStartRow: -1, selectEndRow: -1, selectStartCol: -1, selectEndCol: -1, overlayFocusRow: -1}
+	return &Renderer{out: out, err: err, cwd: cwd, vpHoverRow: -1, selectStartRow: -1, selectEndRow: -1, selectStartCol: -1, selectEndCol: -1, publishedComposerSelection: [2]int{-1, -1}, overlayFocusRow: -1}
 }
 
 // OutputWriter returns a writer that puts status text on screen through the
@@ -4273,6 +4273,10 @@ func (r *Renderer) BeginComposerOverlay() {
 	defer r.mu.Unlock()
 	r.finishTransientLocked("")
 	r.overlayActive = true
+	// The composer's anchors are about to be renumbered by the overlay's rows:
+	// a selection made in the composer, or in the overlay that just closed,
+	// names cells of a block that is no longer on screen.
+	r.clearFieldSpaceSelectionLocked()
 	// cursorRow must be -1 (not the zero value 0) so that a racing
 	// paintViewportLocked (triggered by an agent frame arriving between
 	// BeginComposerOverlay and the first SetOverlayComposer) hides the
@@ -4427,6 +4431,9 @@ func (r *Renderer) EndOverlay() {
 	defer r.mu.Unlock()
 	r.composerSuppressed = false
 	r.overlayActive = false
+	// An overlay's field is gone: its anchors must not land on the composer
+	// text that takes the block back.
+	r.clearFieldSpaceSelectionLocked()
 	r.overlayComposer = composerBlock{cursorRow: -1}
 	r.overlayPanel = nil
 	r.overlaySoftWrap = false
@@ -4457,11 +4464,30 @@ func (r *Renderer) RenderComposerState(cs ComposerRenderState) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A selection is a range of the text as it was painted, so it cannot outlive
+	// an edit of that text or a caret move by keyboard: dropping it here is what
+	// a native editor does (arrow keys collapse a selection), and it is also what
+	// keeps a stale range from deleting characters the user never selected. A
+	// drag does not move the caret, so a selection made by dragging survives.
+	if cs.Text != r.composerState.Text ||
+		composerCursorValue(cs.Cursor) != composerCursorValue(r.composerState.Cursor) {
+		r.clearFieldSpaceSelectionLocked()
+	}
 	r.composerState = cs
 	if !r.transientActive {
 		r.finishTransientLocked("")
 	}
 	r.paintViewportLocked()
+}
+
+// composerCursorValue reads a render state's caret position, -1 when the state
+// carries none. The field is a pointer so "no caret" is expressible; only the
+// value is meaningful, because the pointer itself is fresh on every render.
+func composerCursorValue(cursor *int) int {
+	if cursor == nil {
+		return -1
+	}
+	return *cursor
 }
 
 type composerLayout struct {

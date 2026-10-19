@@ -2258,7 +2258,9 @@ func (s *SessionStore) excludeMessageFromTranscript(ctx context.Context, q dbtx,
 // tool_call ids it declares; a following tool-result row is valid only while its
 // id is still open in the current batch — an unopened id (orphan / answer to an
 // earlier or duplicate batch) or a second answer to the same id (duplicate) is
-// excluded from the transcript. Any non-tool message closes the current batch.
+// excluded from the transcript. Any non-tool message that reaches the provider
+// closes the current batch (rows the model never sees — reasoning blocks,
+// compact boundaries — are skipped, since they are not turn boundaries).
 // After the walk, each assistant row keeps only the tool_calls actually answered
 // by a surviving result; an assistant row left with neither text nor surviving
 // tool_calls is excluded. It returns the number of rows changed.
@@ -2314,6 +2316,12 @@ func (s *SessionStore) RepairDanglingToolResults(ctx context.Context, sessionID 
 	var invalidToolRows []int64
 
 	for _, row := range rows {
+		if !transcriptRowReachesModel(row) {
+			// Reasoning blocks and compact boundaries never reach the provider,
+			// so they do not close an assistant batch. Treating them as a
+			// boundary stripped a call whose answer landed right after them.
+			continue
+		}
 		switch strings.TrimSpace(strings.ToLower(row.Role)) {
 		case llm.RoleAssistant:
 			_, calls, _, _ := ParseMessageParts(row.PartsJSON, row.Content)
@@ -2336,8 +2344,8 @@ func (s *SessionStore) RepairDanglingToolResults(ctx context.Context, sessionID 
 			delete(open, id)
 			current.answered[id] = struct{}{}
 		default:
-			// A user/system message closes any open assistant batch: ids still
-			// open are dangling and their assistant tool_calls get stripped below.
+			// A user message closes any open assistant batch: ids still open
+			// are dangling and their assistant tool_calls get stripped below.
 			open = map[string]struct{}{}
 			current = nil
 		}
@@ -2353,17 +2361,23 @@ func (s *SessionStore) RepairDanglingToolResults(ctx context.Context, sessionID 
 		}
 		repaired++
 	}
-	empty := func(s string) bool { t := strings.TrimSpace(s); return t == "" || t == "[]" }
 	for _, batch := range batches {
-		stripped, changed := StripUnansweredToolCalls(batch.row.PartsJSON, batch.answered)
-		if !changed {
-			continue
-		}
-		if !empty(stripped) || strings.TrimSpace(batch.row.Content) != "" {
-			if err := s.UpdateMessageParts(ctx, tx, batch.row.ID, stripped); err != nil {
+		stripped, strippedCalls := StripUnansweredToolCalls(batch.row.PartsJSON, batch.answered)
+		if !assistantRowStillSendsSomething(batch.row.Content, stripped) {
+			// Nothing a provider would accept is left: drop the row. This also
+			// heals a row an earlier repair already stripped (strippedCalls is
+			// false there) — otherwise a damaged conversation could never be
+			// sent again.
+			if err := s.excludeMessageFromTranscript(ctx, tx, batch.row.ID); err != nil {
 				return repaired, err
 			}
-		} else if err := s.excludeMessageFromTranscript(ctx, tx, batch.row.ID); err != nil {
+			repaired++
+			continue
+		}
+		if !strippedCalls {
+			continue
+		}
+		if err := s.UpdateMessageParts(ctx, tx, batch.row.ID, stripped); err != nil {
 			return repaired, err
 		}
 		repaired++
@@ -2372,6 +2386,17 @@ func (s *SessionStore) RepairDanglingToolResults(ctx context.Context, sessionID 
 		return repaired, err
 	}
 	return repaired, nil
+}
+
+// assistantRowStillSendsSomething reports whether an assistant row's surviving
+// parts still carry what a provider accepts: text or tool calls. Structural
+// parts (the IsMeta marker, a memory citation) are bookkeeping that never
+// reaches the wire, so a row left with only those is exactly the message
+// providers reject ("Invalid assistant message: content or tool_calls must be
+// set").
+func assistantRowStillSendsSomething(content, partsJSON string) bool {
+	row, _ := ParseMessage(llm.RoleAssistant, content, partsJSON)
+	return strings.TrimSpace(llm.TextContent(row.Parts...)) != "" || len(row.ToolCalls) > 0
 }
 
 // SessionTitleFromContent exposes the session-title derivation rule (first
