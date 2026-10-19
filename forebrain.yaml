@@ -412,7 +412,7 @@ agents:
     # Example: web search provider settings.
     web_search:
       # Default: empty behaves like auto in current code.
-      # Example: auto, tavily, brave, or baidu.
+      # Example: auto, tavily, brave, baidu, or deepseek.
       provider: "auto"
       # Default: none.
       # Example: Tavily-specific settings.
@@ -435,6 +435,12 @@ agents:
         # Default: empty.
         # Example: Baidu web search API key from env.
         api_key: "${BAIDU_WEB_SEARCH_API_KEY}"
+      # Default: none.
+      # Example: DeepSeek-specific settings.
+      deepseek:
+        # Default: empty.
+        # Example: DeepSeek API key from env (Search/Fetch 与平台同一把 key).
+        api_key: "${DEEPSEEK_API_KEY}"
     # Default: none.
     # Example: web_fetch tool settings.
     web_fetch:
@@ -446,6 +452,17 @@ agents:
       # stay blocked either way, and every private fetch still asks for
       # approval.
       allow_private_ip: false
+      # Default: empty, the built-in direct HTTP fetcher. Set "deepseek" to route
+      # fetches through DeepSeek's Fetch API (server-side rendering to Markdown).
+      # Never auto-selected: only an explicit value here switches the path.
+      # Example: deepseek, or empty.
+      provider: ""
+      # Default: none.
+      # Example: DeepSeek-specific settings.
+      deepseek:
+        # Default: empty.
+        # Example: DeepSeek API key from env (same key as web_search.deepseek).
+        api_key: "${DEEPSEEK_API_KEY}"
   # Default: none.
   # Example: named agent definitions.
   definitions:

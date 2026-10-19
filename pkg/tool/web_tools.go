@@ -48,6 +48,31 @@ func webFetchAllowPrivateIP(rt *AgentToolRuntime) bool {
 	return rt.Cfg.Agents.Defaults.WebFetch.AllowPrivateIP
 }
 
+// resolveWebFetchDeepSeek reports the DeepSeek Fetch endpoint and key when the
+// operator explicitly routed web_fetch at DeepSeek (WebFetchConfig.Provider ==
+// "deepseek"). An empty provider keeps the built-in direct fetcher: routing is
+// never automatic.
+func resolveWebFetchDeepSeek(rt *AgentToolRuntime) (endpoint, key string, ok bool, err error) {
+	if rt == nil || rt.Cfg == nil {
+		return "", "", false, nil
+	}
+	cfg := rt.Cfg.Agents.Defaults.WebFetch
+	if strings.ToLower(strings.TrimSpace(cfg.Provider)) != "deepseek" {
+		return "", "", false, nil
+	}
+	k := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	if k == "" && cfg.DeepSeek != nil {
+		k = strings.TrimSpace(cfg.DeepSeek.APIKey)
+	}
+	if k == "" {
+		return "", "", false, fmt.Errorf("web_fetch: provider deepseek requires DEEPSEEK_API_KEY or agents.defaults.web_fetch.deepseek.api_key")
+	}
+	if _, uerr := fetchURLAllowed(deepSeekFetchURL, false); uerr != nil {
+		return "", "", false, fmt.Errorf("web_fetch deepseek endpoint: %w", uerr)
+	}
+	return deepSeekFetchURL, k, true, nil
+}
+
 const (
 	defaultWebFetchMaxBytes  = 2 << 20
 	webFetchMaxRedirects     = 10
@@ -205,6 +230,45 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				}
 			}
 			maxB := defaultWebFetchMaxBytes
+			if endpoint, dkey, dok, derr := resolveWebFetchDeepSeek(rt); derr != nil {
+				return "", derr
+			} else if dok {
+				// Explicit provider routing: the permission gate and the SSRF
+				// checks above have already run for the target URL, and
+				// resolveWebFetchDeepSeek validated the DeepSeek endpoint the
+				// same way, so this path only replaces the direct download.
+				client := &http.Client{Timeout: 30 * time.Second}
+				res, truncated, derr := webFetchDeepSeekPOST(ctx, client, endpoint, dkey, u.String(), maxB)
+				if derr != nil {
+					return "", derr
+				}
+				out := map[string]any{
+					"final_url":    u.String(),
+					"status":       res.status,
+					"content_type": "text/markdown",
+					"bytes":        len(res.content),
+					"truncated":    truncated,
+					"preapproved":  IsWebFetchPreapprovedURL(u.String()),
+					"rule_content": WebFetchPermissionRuleContent(u.String()),
+				}
+				if res.status != http.StatusOK {
+					// The body is the DeepSeek API's error JSON: content_type
+					// and bytes report that response, and the status note
+					// attributes the failure to the API endpoint — the API
+					// call is what failed, not the target site.
+					out["content_type"] = "application/json"
+					out["bytes"] = len(res.errBody)
+					text, cut := trimTextToUTF8Bytes(string(res.errBody), webFetchErrorBodyMaxBytes)
+					out["error"] = fmt.Sprintf("http_%d", res.status)
+					out["truncated"] = truncated || cut
+					out["body"] = webFetchStatusNote(res.status, endpoint) + text
+					return marshalWebToolOutput(out), nil
+				}
+				if res.title != "" {
+					out["title"] = res.title
+				}
+				return marshalWebFetchResult(ctx, st, out, res.content, truncated), nil
+			}
 			// The transport carries a dial guard bound to the resolved policy,
 			// so drop its pooled connections rather than leaving them idle
 			// behind a client that is about to go away.
@@ -282,6 +346,59 @@ func NewWebFetchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			return marshalWebFetchResult(ctx, st, out, rendered, truncated), nil
 		},
 	)
+}
+
+// deepSeekFetchResult carries a DeepSeek Fetch API response split by outcome:
+// content (with title) on HTTP 200, the raw error JSON otherwise.
+type deepSeekFetchResult struct {
+	status  int
+	title   string
+	content string // Markdown body at HTTP 200
+	errBody []byte // raw error JSON at any other status
+}
+
+// webFetchDeepSeekPOST calls DeepSeek's Fetch API (POST /v1/tools/fetch), which
+// renders the target page server-side and returns it as Markdown. The response
+// is read with a bounded reader — maxB plus JSON-escape headroom; anything that
+// fills it is oversized to the point where json.Unmarshal fails and surfaces as
+// an error instead.
+func webFetchDeepSeekPOST(ctx context.Context, client *http.Client, endpoint, key, targetURL string, maxB int) (deepSeekFetchResult, bool, error) {
+	raw, err := json.Marshal(map[string]any{"url": targetURL})
+	if err != nil {
+		return deepSeekFetchResult{}, false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return deepSeekFetchResult{}, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "forebrain-web_fetch/1")
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := client.Do(req)
+	if err != nil {
+		return deepSeekFetchResult{}, false, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(defaultWebFetchMaxBytes)+65536))
+	if err != nil {
+		return deepSeekFetchResult{}, false, err
+	}
+	res := deepSeekFetchResult{status: resp.StatusCode}
+	if resp.StatusCode != http.StatusOK {
+		res.errBody = body
+		return res, false, nil
+	}
+	var parsed struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return deepSeekFetchResult{}, false, err
+	}
+	content, truncated := trimTextToUTF8Bytes(parsed.Content, maxB)
+	res.title = parsed.Title
+	res.content = content
+	return res, truncated, nil
 }
 
 // storeWebFetchContent saves the full rendered page next to the other tool
@@ -855,7 +972,7 @@ func NewWebSearchTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 		// Provider selection and API keys are operator configuration the
 		// model cannot act on, so the description carries only the trigger
 		// and what the tool does.
-		"Use when you need current information from the public web: multi-provider search (Tavily, Brave, or Baidu Qianfan as configured at startup).",
+		"Use when you need current information from the public web: multi-provider search (Tavily, Brave, Baidu Qianfan, or DeepSeek as configured at startup).",
 		func(ctx context.Context, in *WebSearchInput) (string, error) {
 			if st == nil {
 				return "", fmt.Errorf("nil state")
@@ -903,12 +1020,15 @@ const (
 	tavilySearchPath     = "/search"
 	baiduWebSearchURL    = "https://qianfan.baidubce.com/v2/ai_search/web_search"
 	braveWebSearchAPIURL = "https://api.search.brave.com/res/v1/web/search"
+	deepSeekSearchURL    = "https://api.deepseek.com/v1/tools/search"
+	deepSeekFetchURL     = "https://api.deepseek.com/v1/tools/fetch"
 )
 
 const (
 	webSearchKindTavily = iota
 	webSearchKindBrave
 	webSearchKindBaidu
+	webSearchKindDeepSeek
 )
 
 type webSearchExec struct {
@@ -922,6 +1042,9 @@ type webSearchExec struct {
 
 	baiduURL string
 	baiduKey string
+
+	deepSeekURL string
+	deepSeekKey string
 }
 
 func webSearchDefaults(rt *AgentToolRuntime) appcfg.WebSearchConfig {
@@ -952,6 +1075,13 @@ func webSearchBaiduKey(cfg appcfg.WebSearchConfig) string {
 	return ""
 }
 
+func webSearchDeepSeekKey(cfg appcfg.WebSearchConfig) string {
+	if cfg.DeepSeek != nil {
+		return strings.TrimSpace(cfg.DeepSeek.APIKey)
+	}
+	return ""
+}
+
 func webSearchTavilyDepth(cfg appcfg.WebSearchConfig) string {
 	var d string
 	if cfg.Tavily != nil {
@@ -977,7 +1107,12 @@ func resolveWebSearchExec(rt *AgentToolRuntime) (webSearchExec, error) {
 		if k := firstNonEmpty(os.Getenv("BAIDU_WEB_SEARCH_API_KEY"), webSearchBaiduKey(cfg)); k != "" {
 			return buildBaiduExec(k)
 		}
-		return webSearchExec{}, fmt.Errorf("web_search: set TAVILY_API_KEY (default), BRAVE_SEARCH_API_KEY, BAIDU_WEB_SEARCH_API_KEY, or agents.defaults.web_search.{tavily,brave,baidu}.api_key with provider auto/tavily/brave/baidu")
+		// DeepSeek sits last in the auto chain so installs that configured one
+		// of the earlier providers keep their selection unchanged.
+		if k := firstNonEmpty(os.Getenv("DEEPSEEK_API_KEY"), webSearchDeepSeekKey(cfg)); k != "" {
+			return buildDeepSeekExec(k)
+		}
+		return webSearchExec{}, fmt.Errorf("web_search: set TAVILY_API_KEY (default), BRAVE_SEARCH_API_KEY, BAIDU_WEB_SEARCH_API_KEY, DEEPSEEK_API_KEY, or agents.defaults.web_search.{tavily,brave,baidu,deepseek}.api_key with provider auto/tavily/brave/baidu/deepseek")
 	}
 	switch prov {
 	case "tavily":
@@ -998,8 +1133,14 @@ func resolveWebSearchExec(rt *AgentToolRuntime) (webSearchExec, error) {
 			return webSearchExec{}, fmt.Errorf("web_search: provider baidu requires BAIDU_WEB_SEARCH_API_KEY or agents.defaults.web_search.baidu.api_key")
 		}
 		return buildBaiduExec(k)
+	case "deepseek":
+		k := firstNonEmpty(os.Getenv("DEEPSEEK_API_KEY"), webSearchDeepSeekKey(cfg))
+		if k == "" {
+			return webSearchExec{}, fmt.Errorf("web_search: provider deepseek requires DEEPSEEK_API_KEY or agents.defaults.web_search.deepseek.api_key")
+		}
+		return buildDeepSeekExec(k)
 	default:
-		return webSearchExec{}, fmt.Errorf("web_search: unknown provider %q (use tavily, brave, baidu, or auto)", prov)
+		return webSearchExec{}, fmt.Errorf("web_search: unknown provider %q (use tavily, brave, baidu, deepseek, or auto)", prov)
 	}
 }
 
@@ -1023,6 +1164,13 @@ func buildBaiduExec(key string) (webSearchExec, error) {
 	return webSearchExec{kind: webSearchKindBaidu, baiduURL: baiduWebSearchURL, baiduKey: key}, nil
 }
 
+func buildDeepSeekExec(key string) (webSearchExec, error) {
+	if _, err := fetchURLAllowed(deepSeekSearchURL, false); err != nil {
+		return webSearchExec{}, fmt.Errorf("web_search deepseek endpoint: %w", err)
+	}
+	return webSearchExec{kind: webSearchKindDeepSeek, deepSeekURL: deepSeekSearchURL, deepSeekKey: key}, nil
+}
+
 func firstNonEmpty(ss ...string) string {
 	for _, s := range ss {
 		if strings.TrimSpace(s) != "" {
@@ -1044,6 +1192,8 @@ func runWebSearchRequest(ctx context.Context, e webSearchExec, query string, lim
 		return webSearchBraveGET(ctx, client, e, query, limit)
 	case webSearchKindBaidu:
 		return webSearchBaiduPOST(ctx, client, e, query, limit)
+	case webSearchKindDeepSeek:
+		return webSearchDeepSeekPOST(ctx, client, e, query, limit)
 	default:
 		return 0, "", nil, fmt.Errorf("web_search: internal configuration error")
 	}
@@ -1155,6 +1305,41 @@ func webSearchBaiduPOST(ctx context.Context, client *http.Client, e webSearchExe
 	bearer := "Bearer " + e.baiduKey
 	req.Header.Set("Authorization", bearer)
 	req.Header.Set("X-Appbuilder-Authorization", bearer)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, "", nil, err
+	}
+	return resp.StatusCode, resp.Header.Get("Content-Type"), body, nil
+}
+
+// webSearchDeepSeekPOST calls DeepSeek's Search API (POST /v1/tools/search).
+// need_content stays false: summary already carries the 600–800 character
+// model-facing digest, and full content would only blow the token budget.
+// The response body is passed through verbatim — governWebSearchBody and
+// webSearchEnvelope handle shrinking the same way they do for the other
+// providers.
+func webSearchDeepSeekPOST(ctx context.Context, client *http.Client, e webSearchExec, query string, limit int) (int, string, []byte, error) {
+	payload := map[string]any{
+		"query":        query,
+		"count":        limit,
+		"need_content": false,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.deepSeekURL, bytes.NewReader(raw))
+	if err != nil {
+		return 0, "", nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "forebrain-web_search/1")
+	req.Header.Set("Authorization", "Bearer "+e.deepSeekKey)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, "", nil, err

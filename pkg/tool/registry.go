@@ -156,7 +156,7 @@ func RegisterDefaultTools(a ToolAdder, st *State, rt *AgentToolRuntime) error {
 		return err
 	}
 	t17.SetContainsExternalContext(true)
-	registerMeta(t17, "Use when you need current information from the public web (Tavily, Brave, or Baidu Qianfan)", "web", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
+	registerMeta(t17, "Use when you need current information from the public web (Tavily, Brave, Baidu Qianfan, or DeepSeek)", "web", event.ToolMeta{ReadOnly: true, ConcurrencySafe: true})
 	var t21 *llm.Tool
 	if requestPermissionsToolEnabled(rt) {
 		t21, err = NewRequestPermissionsTool(st, rt)

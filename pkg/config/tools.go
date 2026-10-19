@@ -14,11 +14,16 @@ type WebSearchBaidu struct {
 	APIKey string `yaml:"api_key,omitempty" json:"api_key"`
 }
 
+type WebSearchDeepSeek struct {
+	APIKey string `yaml:"api_key,omitempty" json:"api_key"`
+}
+
 type WebSearchConfig struct {
-	Provider string           `yaml:"provider,omitempty" json:"provider"`
-	Tavily   *WebSearchTavily `yaml:"tavily,omitempty" json:"tavily,omitempty"`
-	Brave    *WebSearchBrave  `yaml:"brave,omitempty" json:"brave,omitempty"`
-	Baidu    *WebSearchBaidu  `yaml:"baidu,omitempty" json:"baidu,omitempty"`
+	Provider string             `yaml:"provider,omitempty" json:"provider"`
+	Tavily   *WebSearchTavily   `yaml:"tavily,omitempty" json:"tavily,omitempty"`
+	Brave    *WebSearchBrave    `yaml:"brave,omitempty" json:"brave,omitempty"`
+	Baidu    *WebSearchBaidu    `yaml:"baidu,omitempty" json:"baidu,omitempty"`
+	DeepSeek *WebSearchDeepSeek `yaml:"deepseek,omitempty" json:"deepseek,omitempty"`
 }
 
 // WebFetchConfig holds operator-controlled settings for the web_fetch tool.
@@ -28,8 +33,18 @@ type WebSearchConfig struct {
 // carry instructions, so leaving it model-settable would let a fetched page ask
 // for internal network access. Only the operator can grant it. Cloud metadata
 // endpoints stay blocked either way.
+type WebFetchDeepSeek struct {
+	APIKey string `yaml:"api_key,omitempty" json:"api_key"`
+}
+
 type WebFetchConfig struct {
-	AllowPrivateIP bool `yaml:"allow_private_ip,omitempty" json:"allow_private_ip"`
+	// Provider selects the fetch path. Empty means the built-in direct HTTP
+	// fetcher and is never auto-routed away from: only an explicit "deepseek"
+	// switches fetches to DeepSeek's Fetch API (server-side rendering to
+	// Markdown), so an unchanged install keeps its default behavior.
+	Provider       string            `yaml:"provider,omitempty" json:"provider"`
+	DeepSeek       *WebFetchDeepSeek `yaml:"deepseek,omitempty" json:"deepseek,omitempty"`
+	AllowPrivateIP bool              `yaml:"allow_private_ip,omitempty" json:"allow_private_ip"`
 }
 
 // TokenEstimateConfig controls local token counting for context assembly and tools.

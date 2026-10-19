@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
@@ -1060,4 +1062,321 @@ func TestWebSearchResponseUnderBudgetIsUnchanged(t *testing.T) {
 	if decoded["body"] != body {
 		t.Fatalf("small response body was rewritten:\n%s", envelope)
 	}
+}
+
+// --- DeepSeek providers ---
+
+// clearSearchProviderEnv neutralizes ambient provider keys so the absence
+// cases below are real rather than inherited from the running shell.
+func clearSearchProviderEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"TAVILY_API_KEY", "BRAVE_SEARCH_API_KEY", "BAIDU_WEB_SEARCH_API_KEY", "DEEPSEEK_API_KEY",
+	} {
+		t.Setenv(k, "")
+	}
+}
+
+func searchRuntime(prov, deepSeekKey string) *AgentToolRuntime {
+	cfg := &appcfg.Root{}
+	cfg.Agents.Defaults.WebSearch.Provider = prov
+	if deepSeekKey != "" {
+		cfg.Agents.Defaults.WebSearch.DeepSeek = &appcfg.WebSearchDeepSeek{APIKey: deepSeekKey}
+	}
+	return &AgentToolRuntime{Cfg: cfg}
+}
+
+func TestResolveWebSearchExecDeepSeek(t *testing.T) {
+	t.Run("explicit provider with env key", func(t *testing.T) {
+		clearSearchProviderEnv(t)
+		t.Setenv("DEEPSEEK_API_KEY", "k")
+		e, err := resolveWebSearchExec(searchRuntime("deepseek", ""))
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if e.kind != webSearchKindDeepSeek {
+			t.Fatalf("kind=%d want %d", e.kind, webSearchKindDeepSeek)
+		}
+		if e.deepSeekURL != deepSeekSearchURL || e.deepSeekKey != "k" {
+			t.Fatalf("exec=%+v", e)
+		}
+	})
+	t.Run("explicit provider with config key", func(t *testing.T) {
+		clearSearchProviderEnv(t)
+		e, err := resolveWebSearchExec(searchRuntime("deepseek", "cfg-k"))
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if e.kind != webSearchKindDeepSeek || e.deepSeekKey != "cfg-k" {
+			t.Fatalf("exec=%+v", e)
+		}
+	})
+	t.Run("explicit provider without key", func(t *testing.T) {
+		clearSearchProviderEnv(t)
+		_, err := resolveWebSearchExec(searchRuntime("deepseek", ""))
+		if err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY") {
+			t.Fatalf("want missing-key error naming DEEPSEEK_API_KEY, got %v", err)
+		}
+	})
+	t.Run("auto falls through to deepseek", func(t *testing.T) {
+		clearSearchProviderEnv(t)
+		t.Setenv("DEEPSEEK_API_KEY", "k")
+		e, err := resolveWebSearchExec(searchRuntime("", ""))
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if e.kind != webSearchKindDeepSeek {
+			t.Fatalf("auto should reach deepseek at the chain tail, got kind=%d", e.kind)
+		}
+	})
+	t.Run("auto keeps tavily ahead of deepseek", func(t *testing.T) {
+		clearSearchProviderEnv(t)
+		t.Setenv("DEEPSEEK_API_KEY", "k")
+		t.Setenv("TAVILY_API_KEY", "tk")
+		e, err := resolveWebSearchExec(searchRuntime("auto", ""))
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if e.kind != webSearchKindTavily {
+			t.Fatalf("tavily must keep its place ahead of deepseek, got kind=%d", e.kind)
+		}
+	})
+	t.Run("auto without any key", func(t *testing.T) {
+		clearSearchProviderEnv(t)
+		_, err := resolveWebSearchExec(searchRuntime("auto", ""))
+		if err == nil || !strings.Contains(err.Error(), "DEEPSEEK_API_KEY") {
+			t.Fatalf("want error naming DEEPSEEK_API_KEY, got %v", err)
+		}
+	})
+}
+
+func TestWebSearchDeepSeekPOST(t *testing.T) {
+	var gotMethod, gotAuth, gotContentType string
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotContentType = r.Header.Get("Content-Type")
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &gotPayload); err != nil {
+			t.Errorf("request body is not JSON: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":[{"title":"t","url":"https://example.com/a","summary":"s"}]}`)
+	}))
+	defer srv.Close()
+
+	e := webSearchExec{kind: webSearchKindDeepSeek, deepSeekURL: srv.URL, deepSeekKey: "k"}
+	status, contentType, body, err := webSearchDeepSeekPOST(context.Background(), srv.Client(), e, "deepseek 测试", 5)
+	if err != nil {
+		t.Fatalf("webSearchDeepSeekPOST: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method=%q want POST", gotMethod)
+	}
+	if gotAuth != "Bearer k" {
+		t.Fatalf("Authorization=%q", gotAuth)
+	}
+	if !strings.HasPrefix(gotContentType, "application/json") {
+		t.Fatalf("Content-Type=%q", gotContentType)
+	}
+	// map[string]any payloads marshal with sorted keys, so assert the decoded
+	// fields rather than the raw bytes.
+	if gotPayload["query"] != "deepseek 测试" {
+		t.Fatalf("query=%v", gotPayload["query"])
+	}
+	if gotPayload["count"] != float64(5) {
+		t.Fatalf("count=%v want 5", gotPayload["count"])
+	}
+	if gotPayload["need_content"] != false {
+		t.Fatalf("need_content=%v want false", gotPayload["need_content"])
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	if !strings.Contains(string(body), "results") {
+		t.Fatalf("body missing results: %.200s", body)
+	}
+	if !strings.Contains(contentType, "application/json") {
+		t.Fatalf("contentType=%q", contentType)
+	}
+}
+
+func TestWebFetchDeepSeekPOST(t *testing.T) {
+	newServer := func(t *testing.T, status int, respond string, got *map[string]any, gotAuth *string) *httptest.Server {
+		t.Helper()
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if got != nil {
+				body, _ := io.ReadAll(r.Body)
+				if err := json.Unmarshal(body, got); err != nil {
+					t.Errorf("request body is not JSON: %v", err)
+				}
+			}
+			if gotAuth != nil {
+				*gotAuth = r.Header.Get("Authorization")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			fmt.Fprint(w, respond)
+		}))
+	}
+	t.Run("ok", func(t *testing.T) {
+		var got map[string]any
+		var gotAuth string
+		srv := newServer(t, http.StatusOK, `{"title":"Example","content":"# Example\n\n正文"}`, &got, &gotAuth)
+		defer srv.Close()
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		res, truncated, err := webFetchDeepSeekPOST(context.Background(), client, srv.URL, "k", "https://example.com/page", defaultWebFetchMaxBytes)
+		if err != nil {
+			t.Fatalf("webFetchDeepSeekPOST: %v", err)
+		}
+		if res.status != http.StatusOK {
+			t.Fatalf("status=%d", res.status)
+		}
+		if res.title != "Example" {
+			t.Fatalf("title=%q", res.title)
+		}
+		if res.content != "# Example\n\n正文" {
+			t.Fatalf("content=%q", res.content)
+		}
+		if truncated {
+			t.Fatalf("unexpected truncation")
+		}
+		if gotAuth != "Bearer k" {
+			t.Fatalf("Authorization=%q", gotAuth)
+		}
+		if got["url"] != "https://example.com/page" {
+			t.Fatalf("payload=%v", got)
+		}
+	})
+	t.Run("caps content to maxB", func(t *testing.T) {
+		// Pure ASCII so the rune-boundary trim lands exactly on the cap.
+		srv := newServer(t, http.StatusOK, `{"title":"x","content":"0123456789abcdefghij"}`, nil, nil)
+		defer srv.Close()
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		res, truncated, err := webFetchDeepSeekPOST(context.Background(), client, srv.URL, "k", "https://example.com/", 16)
+		if err != nil {
+			t.Fatalf("webFetchDeepSeekPOST: %v", err)
+		}
+		if res.status != http.StatusOK || len(res.errBody) != 0 {
+			t.Fatalf("res=%+v", res)
+		}
+		if !truncated {
+			t.Fatalf("expected truncation at maxB=16")
+		}
+		if len(res.content) != 16 || res.content != "0123456789abcdef" {
+			t.Fatalf("content=%q len=%d", res.content, len(res.content))
+		}
+	})
+	t.Run("error body passthrough", func(t *testing.T) {
+		srv := newServer(t, http.StatusNotFound,
+			`{"error":{"message":"fetch failed","type":"invalid_request_error","param":null,"code":"not_found"}}`, nil, nil)
+		defer srv.Close()
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		res, truncated, err := webFetchDeepSeekPOST(context.Background(), client, srv.URL, "k", "https://example.com/", defaultWebFetchMaxBytes)
+		if err != nil {
+			t.Fatalf("webFetchDeepSeekPOST: %v", err)
+		}
+		if res.status != http.StatusNotFound {
+			t.Fatalf("status=%d", res.status)
+		}
+		if len(res.errBody) == 0 || !strings.Contains(string(res.errBody), "not_found") {
+			t.Fatalf("errBody=%q", res.errBody)
+		}
+		if truncated {
+			t.Fatalf("error responses are not download-truncated")
+		}
+	})
+}
+
+func TestResolveWebFetchDeepSeek(t *testing.T) {
+	fetchRuntime := func(prov, key string) *AgentToolRuntime {
+		cfg := &appcfg.Root{}
+		cfg.Agents.Defaults.WebFetch.Provider = prov
+		if key != "" {
+			cfg.Agents.Defaults.WebFetch.DeepSeek = &appcfg.WebFetchDeepSeek{APIKey: key}
+		}
+		return &AgentToolRuntime{Cfg: cfg}
+	}
+	t.Run("empty provider stays direct", func(t *testing.T) {
+		t.Setenv("DEEPSEEK_API_KEY", "")
+		_, _, ok, err := resolveWebFetchDeepSeek(fetchRuntime("", "k"))
+		if ok || err != nil {
+			t.Fatalf("ok=%v err=%v, want the built-in direct fetcher", ok, err)
+		}
+	})
+	t.Run("other provider stays direct", func(t *testing.T) {
+		t.Setenv("DEEPSEEK_API_KEY", "")
+		_, _, ok, err := resolveWebFetchDeepSeek(fetchRuntime("builtin", "k"))
+		if ok || err != nil {
+			t.Fatalf("ok=%v err=%v, want the built-in direct fetcher", ok, err)
+		}
+	})
+	t.Run("deepseek without key", func(t *testing.T) {
+		t.Setenv("DEEPSEEK_API_KEY", "")
+		_, _, _, err := resolveWebFetchDeepSeek(fetchRuntime("deepseek", ""))
+		if err == nil || !strings.Contains(err.Error(), "agents.defaults.web_fetch.deepseek.api_key") {
+			t.Fatalf("want error naming agents.defaults.web_fetch.deepseek.api_key, got %v", err)
+		}
+	})
+	t.Run("deepseek with config key", func(t *testing.T) {
+		t.Setenv("DEEPSEEK_API_KEY", "")
+		endpoint, key, ok, err := resolveWebFetchDeepSeek(fetchRuntime("deepseek", "cfg-k"))
+		if err != nil || !ok {
+			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+		if endpoint != deepSeekFetchURL || key != "cfg-k" {
+			t.Fatalf("endpoint=%q key=%q", endpoint, key)
+		}
+	})
+	t.Run("deepseek with env key", func(t *testing.T) {
+		t.Setenv("DEEPSEEK_API_KEY", "env-k")
+		endpoint, key, ok, err := resolveWebFetchDeepSeek(fetchRuntime("deepseek", ""))
+		if err != nil || !ok {
+			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+		if endpoint != deepSeekFetchURL || key != "env-k" {
+			t.Fatalf("endpoint=%q key=%q", endpoint, key)
+		}
+	})
+}
+
+// TestDeepSeekSearchFetchIntegration hits the real DeepSeek Search and Fetch
+// endpoints once each. It self-skips without FOREBRAIN_DEEPSEEK_KEY so the
+// default suite never spends money; each successful call bills per request.
+func TestDeepSeekSearchFetchIntegration(t *testing.T) {
+	key := strings.TrimSpace(os.Getenv("FOREBRAIN_DEEPSEEK_KEY"))
+	if key == "" {
+		t.Skip("FOREBRAIN_DEEPSEEK_KEY not set; skipping DeepSeek Search/Fetch integration test")
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	t.Run("search", func(t *testing.T) {
+		e := webSearchExec{kind: webSearchKindDeepSeek, deepSeekURL: deepSeekSearchURL, deepSeekKey: key}
+		status, _, body, err := webSearchDeepSeekPOST(context.Background(), client, e, "DeepSeek", 5)
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if status != http.StatusOK {
+			t.Fatalf("search status=%d body=%.400s", status, body)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(body, &parsed); err != nil {
+			t.Fatalf("search body is not JSON: %v", err)
+		}
+		if _, ok := parsed["results"]; !ok {
+			t.Fatalf("search response missing results: %.400s", body)
+		}
+	})
+	t.Run("fetch", func(t *testing.T) {
+		res, _, err := webFetchDeepSeekPOST(context.Background(), client, deepSeekFetchURL, key, "https://example.com", defaultWebFetchMaxBytes)
+		if err != nil {
+			t.Fatalf("fetch: %v", err)
+		}
+		if res.status != http.StatusOK {
+			t.Fatalf("fetch status=%d body=%.400s", res.status, res.errBody)
+		}
+	})
 }

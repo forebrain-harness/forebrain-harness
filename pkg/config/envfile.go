@@ -149,6 +149,19 @@ func applyMergedEnvOverrides(r *Root, m map[string]string) {
 		}
 		r.Agents.Defaults.WebSearch.Baidu.APIKey = v
 	}
+	// DEEPSEEK_API_KEY is the same key the LLM provider chain reads (see
+	// applyLLMProvidersFromMap); it also authorizes the DeepSeek Search and
+	// Fetch tool APIs, so one variable fills both provider blocks.
+	if v := fromMergedMap(m, "DEEPSEEK_API_KEY"); v != "" {
+		if r.Agents.Defaults.WebSearch.DeepSeek == nil {
+			r.Agents.Defaults.WebSearch.DeepSeek = &WebSearchDeepSeek{}
+		}
+		r.Agents.Defaults.WebSearch.DeepSeek.APIKey = v
+		if r.Agents.Defaults.WebFetch.DeepSeek == nil {
+			r.Agents.Defaults.WebFetch.DeepSeek = &WebFetchDeepSeek{}
+		}
+		r.Agents.Defaults.WebFetch.DeepSeek.APIKey = v
+	}
 	for k, def := range r.Agents.Definitions {
 		def.LLMProviders = applyLLMProvidersFromMap(def.LLMProviders, m)
 		r.Agents.Definitions[k] = def

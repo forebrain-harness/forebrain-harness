@@ -773,7 +773,7 @@ func (c *openAIResponsesLLM) newResponseParams(ctx context.Context, messages []l
 			// The provider's built-in tool replaces Forebrain Harness's provider-backed web_search
 			// function. Advertising both makes the model choose unpredictably
 			// and can route a ChatGPT-authenticated search through an unconfigured
-			// Tavily/Brave/Baidu provider.
+			// Tavily/Brave/Baidu/DeepSeek provider.
 			if c.webSearch.enabled() && tool.Name() == "web_search" {
 				continue
 			}
