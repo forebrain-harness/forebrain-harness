@@ -635,6 +635,110 @@ func TestRepairDanglingToolResultsDropsEmptyAssistant(t *testing.T) {
 	}
 }
 
+// TestRepairKeepsCallAnsweredAcrossAReasoningBlock reproduces the cleared-context
+// resume that broke a session for good: the assistant's guarded tool_call is
+// persisted, the run then writes the reasoning block it just finished, and only
+// then the tool result. The reasoning row never reaches the provider, so it must
+// not close the assistant batch — treating it as a boundary stripped the call
+// and excluded the tool result that answered it, leaving the next request 400.
+func TestRepairKeepsCallAnsweredAcrossAReasoningBlock(t *testing.T) {
+	ctx := context.Background()
+	s := NewSessionStore(openSessionDB(t), "main")
+	if err := s.Ensure(ctx, "sess", "sess"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	appendMsg(t, s, "sess", llm.UserMessage(llm.Text("go")))
+	appendMsg(t, s, "sess", assistantToolCall("", "call_gated", "exit_plan_mode", "{}"))
+	appendMsg(t, s, "sess", llm.Message{Role: "reasoning", Parts: []llm.ContentPart{llm.Text("Let me read the plan file.")}})
+	appendMsg(t, s, "sess", llm.ToolResultMessage("call_gated", llm.Text("Exited plan mode.")))
+
+	repaired, err := s.RepairDanglingToolResults(ctx, "sess")
+	if err != nil {
+		t.Fatalf("RepairDanglingToolResults: %v", err)
+	}
+	if repaired != 0 {
+		t.Fatalf("repaired=%d, want 0: a reasoning block is not a turn boundary", repaired)
+	}
+	if calls, results := transcriptToolCallIDs(t, s, "sess"); calls != 1 || results != 1 {
+		t.Fatalf("assistantCalls=%d toolResults=%d, want 1/1", calls, results)
+	}
+	msgs, err := s.ListTranscriptMessages(ctx, "sess", 5000)
+	if err != nil {
+		t.Fatalf("ListTranscriptMessages: %v", err)
+	}
+	var assistantCalls int
+	for _, m := range msgs {
+		if m.Role == llm.RoleAssistant {
+			assistantCalls = len(m.ToolCalls)
+		}
+	}
+	if assistantCalls != 1 {
+		t.Fatalf("assistant tool_calls=%d, want the answered call kept", assistantCalls)
+	}
+	assertTranscriptToolPairing(t, s, "sess")
+}
+
+// TestRepairExcludesAssistantRowLeftWithOnlyItsMeta covers both halves of the
+// cleared-context bug: the cleared-resume transcript (meta anchor, guarded
+// tool_call, reasoning block, tool result) must survive repair untouched, and a
+// row an older repair already stripped down to its IsMeta marker must be
+// excluded from the model context — a row with neither text nor tool_calls is
+// exactly what providers reject ("Invalid assistant message: content or
+// tool_calls must be set"), and no second repair would ever revisit it because
+// there is no call left to strip.
+func TestRepairExcludesAssistantRowLeftWithOnlyItsMeta(t *testing.T) {
+	ctx := context.Background()
+	s := NewSessionStore(openSessionDB(t), "main")
+	if err := s.Ensure(ctx, "sess", "sess"); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	anchor := llm.UserMessage(llm.Text("Context cleared by user. Proceed with the approved action."))
+	anchor.IsMeta = true
+	appendMsg(t, s, "sess", anchor)
+	gated := assistantToolCall("", "call_cleared", "exit_plan_mode", "{}")
+	gated.IsMeta = true
+	appendMsg(t, s, "sess", gated)
+	appendMsg(t, s, "sess", llm.Message{Role: "reasoning", Parts: []llm.ContentPart{llm.Text("thinking")}})
+	appendMsg(t, s, "sess", llm.ToolResultMessage("call_cleared", llm.Text("Exited plan mode.")))
+
+	repaired, err := s.RepairDanglingToolResults(ctx, "sess")
+	if err != nil {
+		t.Fatalf("RepairDanglingToolResults: %v", err)
+	}
+	if repaired != 0 {
+		t.Fatalf("repaired=%d, want 0: the cleared-resume transcript is valid as written", repaired)
+	}
+	if calls, results := transcriptToolCallIDs(t, s, "sess"); calls != 1 || results != 1 {
+		t.Fatalf("assistantCalls=%d toolResults=%d, want 1/1", calls, results)
+	}
+	assertTranscriptToolPairing(t, s, "sess")
+
+	// The damage an earlier repair left behind: the same assistant row with its
+	// only tool_call stripped, i.e. nothing but the structural IsMeta marker.
+	if _, err := s.AppendStructuredMessage(ctx, "sess", llm.RoleAssistant, "", "", `[{"type":"is_meta"}]`, "", "", "", "", MessageExecTiming{}); err != nil {
+		t.Fatalf("AppendStructuredMessage: %v", err)
+	}
+	repaired, err = s.RepairDanglingToolResults(ctx, "sess")
+	if err != nil {
+		t.Fatalf("RepairDanglingToolResults: %v", err)
+	}
+	if repaired != 1 {
+		t.Fatalf("repaired=%d, want 1: the stripped row must be excluded", repaired)
+	}
+	msgs, err := s.ListTranscriptMessages(ctx, "sess", 5000)
+	if err != nil {
+		t.Fatalf("ListTranscriptMessages: %v", err)
+	}
+	for _, m := range msgs {
+		if m.Role == llm.RoleAssistant && strings.TrimSpace(m.TextContent()) == "" && len(m.ToolCalls) == 0 {
+			t.Fatalf("transcript still carries an assistant row with neither text nor tool_calls")
+		}
+	}
+	assertTranscriptToolPairing(t, s, "sess")
+}
+
 // assertTranscriptToolPairing fails if the transcript is not valid to re-send to
 // an OpenAI-compatible provider: every role:tool row must answer a tool_call
 // declared by the most recent preceding assistant batch (and only once), and

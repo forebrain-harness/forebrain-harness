@@ -4513,6 +4513,7 @@ func (r *Renderer) paintViewportLocked() {
 	r.vpLastRender = vr
 	r.vpScrollOffset = vr.firstRow
 	r.vpLastComposer = composer
+	r.publishComposerSelectionLocked()
 
 	const hoverBgColor = "236"
 	hoverBgSeq := "\x1b[48;5;" + hoverBgColor + "m"

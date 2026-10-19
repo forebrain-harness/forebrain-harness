@@ -1946,3 +1946,350 @@ func TestClickAnywhereOnTheFilterBarReachesTheFilter(t *testing.T) {
 		}
 	}
 }
+
+// writeMouseDrag performs the press, motion and release an SGR-reporting
+// terminal sends for a left-button drag, so tests take the real mouse path.
+func writeMouseDrag(t *testing.T, w *os.File, col1, row1, col2, row2 int) {
+	t.Helper()
+	seq := fmt.Sprintf("\x1b[<0;%d;%dM\x1b[<32;%d;%dM\x1b[<0;%d;%dm", col1+1, row1+1, col2+1, row2+1, col2+1, row2+1)
+	if _, err := w.Write([]byte(seq)); err != nil {
+		t.Fatalf("write mouse drag: %v", err)
+	}
+}
+
+// overlayRowContaining returns the screen row of the painted overlay row whose
+// plain text contains needle, together with that text.
+func overlayRowContaining(t *testing.T, r *Renderer, needle string) (int, string) {
+	t.Helper()
+	r.mu.Lock()
+	lines := append([]string(nil), r.vpLastComposer.lines...)
+	body := r.vpBodyHeight
+	r.mu.Unlock()
+	for i, line := range lines {
+		plain := stripAnsi(line)
+		if strings.Contains(plain, needle) {
+			return body + i, plain
+		}
+	}
+	t.Fatalf("no painted overlay row contains %q (rows: %q)", needle, lines)
+	return 0, ""
+}
+
+// overlayCellOf returns the screen cell of the offset-th rune of needle, in the
+// painted overlay row that shows it.
+func overlayCellOf(t *testing.T, r *Renderer, needle string, offset int) (col, row int) {
+	t.Helper()
+	row, plain := overlayRowContaining(t, r, needle)
+	idx := strings.Index(plain, needle)
+	head := []rune(needle)
+	if offset > len(head) {
+		offset = len(head)
+	}
+	col = displayLineWidth(plain[:idx]) + displayLineWidth(string(head[:offset]))
+	return col, row
+}
+
+// waitForPaintedRow waits until a painted overlay row contains needle, so a
+// test can act on what the user would actually see.
+func waitForPaintedRow(t *testing.T, r *Renderer, needle string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		lines := append([]string(nil), r.vpLastComposer.lines...)
+		r.mu.Unlock()
+		for _, line := range lines {
+			if strings.Contains(stripAnsi(line), needle) {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for a painted row containing %q", needle)
+}
+
+// startFilterPicker opens a picker that shows its filter and returns the pipe
+// its keys go into, its rendered rows' renderer, and the channel its answer
+// arrives on.
+func startFilterPicker(t *testing.T) (*Renderer, *os.File, <-chan string) {
+	t.Helper()
+	r := newComposerRenderer(t, 80, 24)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+
+	opts := []string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"}
+	sel := newRawSelector(pr, r)
+	done := make(chan string, 1)
+	go func() {
+		value, _, err := sel.Select("pick", opts, "")
+		if err != nil {
+			t.Errorf("Select: %v", err)
+		}
+		done <- value
+	}()
+	waitForPaintedRow(t, r, panelFilterGlyph)
+	return r, pw, done
+}
+
+// typeIntoPicker writes text to the picker and waits for it to be painted into
+// the filter, so the next step acts on a settled field.
+func typeIntoPicker(t *testing.T, r *Renderer, pw *os.File, text string) {
+	t.Helper()
+	if _, err := pw.Write([]byte(text)); err != nil {
+		t.Fatalf("write %q: %v", text, err)
+	}
+	waitForPaintedRow(t, r, text)
+}
+
+// finishPicker presses Enter, ending the picker, and reports its answer.
+func finishPicker(t *testing.T, pw *os.File, done <-chan string) string {
+	t.Helper()
+	if _, err := pw.Write([]byte{'\r'}); err != nil {
+		t.Fatalf("write Enter: %v", err)
+	}
+	select {
+	case value := <-done:
+		return value
+	case <-time.After(3 * time.Second):
+		t.Fatal("the picker did not return")
+		return ""
+	}
+}
+
+// TestSelectorFilterSelectionIsDeleted drives the picker filter end to end: a
+// mouse drag over two characters, then Delete, and the painted filter is two
+// characters shorter.
+func TestSelectorFilterSelectionIsDeleted(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write backspace: %v", err)
+	}
+	waitForPaintedRow(t, r, "ad")
+	row, plain := overlayRowContaining(t, r, "ad")
+	if strings.Contains(plain, "abcd") {
+		t.Fatalf("the selected characters should be gone, row is %q", plain)
+	}
+	_ = row
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorFilterSelectionIsReplacedByTyping covers the other half: typing
+// over a selection replaces it inside the picker's filter.
+func TestSelectorFilterSelectionIsReplacedByTyping(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte("Z")); err != nil {
+		t.Fatalf("write Z: %v", err)
+	}
+	waitForPaintedRow(t, r, "aZd")
+	if _, plain := overlayRowContaining(t, r, "aZd"); strings.Contains(plain, "abcd") {
+		t.Fatalf("typing over a selection should replace it, row is %q", plain)
+	}
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorFilterSelectionIsConsumedOnce proves the range is handed over
+// once: the second Delete removes one character, not the span again.
+func TestSelectorFilterSelectionIsConsumedOnce(t *testing.T) {
+	r, pw, done := startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write first backspace: %v", err)
+	}
+	waitForPaintedRow(t, r, "ad")
+	if _, err := pw.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write second backspace: %v", err)
+	}
+	// Wait for a row that contains "d" but not "ad": plain substring wait
+	// would match the stale "ad" paint and race the second backspace.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, plain := overlayRowContaining(t, r, "⌕")
+		if strings.Contains(plain, "d") && !strings.Contains(plain, "ad") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the second backspace never landed, row is %q", plain)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, plain := overlayRowContaining(t, r, "⌕"); strings.Contains(plain, "ad") {
+		t.Fatalf("the second Delete should remove one character, row is %q", plain)
+	}
+
+	finishPicker(t, pw, done)
+}
+
+// TestSelectorInputSelectionIsDeleted covers Input()'s field: a drag inside the
+// default value, then Delete.
+func TestSelectorInputSelectionIsDeleted(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+
+	sel := newRawSelector(pr, r)
+	done := make(chan string, 1)
+	go func() {
+		value, _, err := sel.Input("Name", "hello")
+		if err != nil {
+			t.Errorf("Input: %v", err)
+		}
+		done <- value
+	}()
+	waitForPaintedRow(t, r, "hello")
+
+	startCol, row := overlayCellOf(t, r, "hello", 1)
+	endCol, _ := overlayCellOf(t, r, "hello", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
+		t.Fatalf("write backspace and Enter: %v", err)
+	}
+	select {
+	case value := <-done:
+		if value != "hlo" {
+			t.Fatalf("Delete over a selection in Input should leave %q, got %q", "hlo", value)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Input did not return")
+	}
+}
+
+// TestQuestionOtherSelectionIsDeleted covers user_interaction's Other field,
+// whose row carries a one-cell caret block the mapping has to skip.
+func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
+	forcedTermWidth, forcedTermHeight = 80, 30
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	out := newApprovalPaintWriter()
+	r := NewRenderer(out, out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	rs := newRawSelector(pr, r)
+
+	form := state.AskForm{
+		Title:     "Pick one",
+		Questions: []state.AskQuestion{{ID: "q1", Prompt: "Choose", Options: []state.AskOption{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}}},
+	}
+	payload, err := json.Marshal(form)
+	if err != nil {
+		t.Fatalf("marshal form: %v", err)
+	}
+	overlay, err := newQuestionOverlay(context.Background(), io.Discard, rs, turn.ToolApprovalRequest{AskFormJSON: string(payload)})
+	if err != nil {
+		t.Fatalf("newQuestionOverlay: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := overlay.Run()
+		done <- err
+	}()
+	// Input must arrive once the overlay is on screen; earlier bytes are
+	// pre-open input that Run discards.
+	waitForPaintedRow(t, r, "type to enter custom text")
+
+	// Down twice reaches the Other row, which opens its edit session.
+	if _, err := pw.Write([]byte("\x1b[B")); err != nil {
+		t.Fatalf("write Down: %v", err)
+	}
+	if _, err := pw.Write([]byte("\x1b[B")); err != nil {
+		t.Fatalf("write Down: %v", err)
+	}
+	waitForPaintedRow(t, r, "Other:")
+	if _, err := pw.Write([]byte("abcdef")); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	waitForPaintedRow(t, r, "abcdef")
+
+	startCol, row := overlayCellOf(t, r, "abcdef", 2)
+	endCol, _ := overlayCellOf(t, r, "abcdef", 4)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
+		t.Fatalf("write backspace and Enter: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("question overlay: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the question overlay did not return")
+	}
+	if got := overlay.otherText[0]; got != "abef" {
+		t.Fatalf("Delete over a selection in the Other field should leave %q, got %q", "abef", got)
+	}
+}
+
+// TestApprovalFeedbackSelectionIsDeleted covers the plan-approval feedback
+// field: a drag inside it, then Delete, and the rule's own row table resolves
+// the selection the way a click does.
+func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	o := &approvalOverlay{rs: newRawSelector(nil, r), planDenyEditing: true, out: io.Discard}
+	o.feedbackBuf = []rune("please fix the plan")
+	o.feedbackCursor = len(o.feedbackBuf)
+	o.keepOptionsInView = true
+	o.renderViewport()
+
+	startCol, row := overlayCellOf(t, r, "please fix the plan", 7)
+	endCol, _ := overlayCellOf(t, r, "please fix the plan", 10)
+	r.ViewportSelectStart(startCol, row)
+	r.ViewportSelectDrag(endCol, row)
+	r.ViewportSelectEnd(endCol, row)
+
+	o.handlePlanDenyKey(parsedKey{kind: rawKeyBackspace})
+	if got := string(o.feedbackBuf); got != "please  the plan" {
+		t.Fatalf("Delete over a selection should remove it, got %q", got)
+	}
+	if o.feedbackCursor != 7 {
+		t.Fatalf("the caret must land at the start of the selection, got %d", o.feedbackCursor)
+	}
+
+	// Typing over a fresh selection replaces it, as it does everywhere else.
+	o.renderViewport()
+	startCol, row = overlayCellOf(t, r, "please  the plan", 8)
+	endCol, _ = overlayCellOf(t, r, "please  the plan", 11)
+	r.ViewportSelectStart(startCol, row)
+	r.ViewportSelectDrag(endCol, row)
+	r.ViewportSelectEnd(endCol, row)
+
+	o.insertEditText("X")
+	if got := string(o.feedbackBuf); got != "please  X plan" {
+		t.Fatalf("typing over a selection should replace it, got %q", got)
+	}
+}

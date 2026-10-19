@@ -4703,3 +4703,239 @@ func TestInterruptedWaitCardSettlesAsCanceled(t *testing.T) {
 		t.Fatalf("card state = %#v, want canceled", got)
 	}
 }
+
+// dragComposer selects from one cell of the composer to another with the real
+// press/drag/release path, so the anchors are the ones a mouse actually sets.
+func dragComposer(r *Renderer, startCol, startRow, endCol, endRow int) {
+	r.ViewportSelectStart(startCol, startRow)
+	r.ViewportSelectDrag(endCol, endRow)
+	r.ViewportSelectEnd(endCol, endRow)
+}
+
+// publishedSelection reads the composer range the renderer handed to the raw
+// input reader, or [-1,-1] when it published none.
+func publishedSelection() [2]int {
+	if pub := composerSelectionRange.Load(); pub != nil {
+		return *pub
+	}
+	return [2]int{-1, -1}
+}
+
+// TestComposerSelectionRunesCoverTheDraggedCells is the mapping behind the
+// reported bug: the cells a drag covers must become the rune range of the
+// buffer the raw input reader owns.
+func TestComposerSelectionRunesCoverTheDraggedCells(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+6, row, prefix+11, row)
+
+	r.mu.Lock()
+	start, end, ok := r.composerSelectionRunesLocked()
+	r.mu.Unlock()
+	if !ok || start != 6 || end != 11 {
+		t.Fatalf("dragging \"world\" should map to runes [6,11), got [%d,%d) ok=%v", start, end, ok)
+	}
+	if got := publishedSelection(); got != [2]int{6, 11} {
+		t.Fatalf("the paint should publish the composer selection, got %v", got)
+	}
+}
+
+// TestComposerSelectionRunesOnWideRunes guards the CJK case: a wide rune covers
+// two cells, so both cells of a character resolve to its own boundary.
+func TestComposerSelectionRunesOnWideRunes(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "你好世界", Cursor: &cursor})
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+2, row, prefix+6, row) // 好 and 世, two cells each
+
+	r.mu.Lock()
+	start, end, ok := r.composerSelectionRunesLocked()
+	r.mu.Unlock()
+	if !ok || start != 1 || end != 3 {
+		t.Fatalf("dragging 好世 should map to runes [1,3), got [%d,%d) ok=%v", start, end, ok)
+	}
+}
+
+// TestComposerSelectionRunesWithAChip keeps the chip case honest: the chip is
+// plain text in the buffer, so a selection over it deletes its runes.
+func TestComposerSelectionRunesWithAChip(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	attachments := []InputAttachment{{Path: "/tmp/priv.png", Label: "priv.png"}}
+	placeholder := imageAttachmentPlaceholder(0)
+	display := buildComposerDisplayText(placeholder+" tail", nil, attachments)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: display, Cursor: &cursor})
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix, row, prefix+displayLineWidth(placeholder), row)
+
+	r.mu.Lock()
+	start, end, ok := r.composerSelectionRunesLocked()
+	r.mu.Unlock()
+	want := len([]rune(placeholder))
+	if !ok || start != 0 || end != want {
+		t.Fatalf("dragging the chip should map to runes [0,%d), got [%d,%d) ok=%v", want, start, end, ok)
+	}
+}
+
+// TestComposerSelectionOnScrolledComposer pins the offset arithmetic for a tall
+// composer: anchors are stored in the full block's row space, which already
+// includes the scroll offset, so subtracting it again would shift every range.
+func TestComposerSelectionOnScrolledComposer(t *testing.T) {
+	r := newComposerRenderer(t, 40, 12)
+	text := strings.Repeat("word ", 60)
+	cursor := len([]rune(text))
+	r.RenderComposerState(ComposerRenderState{Text: text, Cursor: &cursor})
+
+	if r.vpLastComposer.scrollOffset == 0 {
+		t.Fatal("fixture: the composer should have scrolled")
+	}
+	// Drag across the first two visible text rows.
+	firstVisible := r.vpLastComposer.scrollOffset
+	if firstVisible < r.vpLastComposer.text.firstLine {
+		firstVisible = r.vpLastComposer.text.firstLine
+	}
+	row := firstVisible - r.vpLastComposer.text.firstLine
+	above := r.vpBodyHeight + firstVisible - r.vpLastComposer.scrollOffset
+	rows := r.vpLastComposer.text.rows
+	if len(rows) < row+2 {
+		t.Fatalf("fixture: expected two visible text rows below %d, got %d", row, len(rows))
+	}
+	dragComposer(r, rows[row].prefixWidth+1, above, rows[row+1].prefixWidth+2, above+1)
+
+	r.mu.Lock()
+	start, end, ok := r.composerSelectionRunesLocked()
+	r.mu.Unlock()
+	wantStart := rows[row].startRune + 1
+	wantEnd := rows[row+1].startRune + 2
+	if !ok || start != wantStart || end != wantEnd {
+		t.Fatalf("a scrolled composer should map to runes [%d,%d), got [%d,%d) ok=%v",
+			wantStart, wantEnd, start, end, ok)
+	}
+}
+
+// TestOverlaySelectionMapsToLogicalLines covers a modal's field: a drag over a
+// soft-wrapped overlay row must come back as a cell of the logical line, which
+// is the space the modal resolves its own field in.
+func TestOverlaySelectionMapsToLogicalLines(t *testing.T) {
+	r := newComposerRenderer(t, 40, 24)
+	long := strings.Repeat("word ", 12)
+	r.BeginComposerOverlay()
+	r.SetSoftWrappingOverlayComposer([]string{"header", long}, -1, 0)
+
+	// Find the second painted row of the wrapped logical line.
+	var rows []int
+	for i, ref := range r.vpOverlayRefs {
+		if ref.line == 1 {
+			rows = append(rows, i)
+		}
+	}
+	if len(rows) < 2 {
+		t.Fatalf("expected the long line to wrap, got %d rows", len(rows))
+	}
+	second := rows[1]
+	r.ViewportSelectStart(1, r.vpBodyHeight+1+second)
+	r.ViewportSelectDrag(5, r.vpBodyHeight+1+second)
+	r.ViewportSelectEnd(5, r.vpBodyHeight+1+second)
+
+	startLine, startCol, endLine, endCol, ok := r.OverlaySelection()
+	if !ok {
+		t.Fatal("a drag inside the overlay should report a selection")
+	}
+	if startLine != 1 || endLine != 1 {
+		t.Fatalf("both cells belong to logical line 1, got %d..%d", startLine, endLine)
+	}
+	if startCol < r.vpOverlayRefs[second].logicalCol || endCol <= startCol {
+		t.Fatalf("columns must be inside the logical line, got %d..%d", startCol, endCol)
+	}
+}
+
+// TestOverlaySelectionIgnoresATranscriptOnlySelection keeps a copied
+// conversation passage from deleting a field's text.
+func TestOverlaySelectionIgnoresATranscriptOnlySelection(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello", Cursor: &cursor})
+	r.BeginComposerOverlay()
+	r.SetOverlayComposer([]string{"pick one", "pick two"}, -1, 0)
+
+	// Both anchors well above the overlay block: a transcript selection.
+	r.ViewportSelectStart(0, 0)
+	r.ViewportSelectDrag(4, 1)
+	r.ViewportSelectEnd(4, 1)
+
+	if _, _, _, _, ok := r.OverlaySelection(); ok {
+		t.Fatal("a selection that never reached the overlay must not report one")
+	}
+}
+
+// TestComposerSelectionDroppedWhenTextOrCaretChanges covers the two triggers a
+// native editor also uses to collapse a selection: the text changed, or the
+// caret moved by keyboard.
+func TestComposerSelectionDroppedWhenTextOrCaretChanges(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello world", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	selected := func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.selectDidDrag
+	}
+
+	dragComposer(r, prefix, row, prefix+5, row)
+	if !selected() {
+		t.Fatal("fixture: the drag should have left a selection")
+	}
+	r.RenderComposerState(ComposerRenderState{Text: "hello world!", Cursor: &cursor})
+	if selected() {
+		t.Fatal("an edit of the draft must drop the selection")
+	}
+	if got := publishedSelection(); got != [2]int{-1, -1} {
+		t.Fatalf("the published range must be withdrawn, got %v", got)
+	}
+
+	dragComposer(r, prefix, row, prefix+5, row)
+	moved := 3
+	r.RenderComposerState(ComposerRenderState{Text: "hello world!", Cursor: &moved})
+	if selected() {
+		t.Fatal("moving the caret by keyboard must drop the selection")
+	}
+}
+
+// TestComposerSelectionDroppedAcrossOverlayOpenAndClose stops an overlay's
+// anchors from landing on the composer text that takes the block back.
+func TestComposerSelectionDroppedAcrossOverlayOpenAndClose(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello", Cursor: &cursor})
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix, row, prefix+3, row)
+	r.BeginComposerOverlay()
+	if r.selectDidDrag {
+		t.Fatal("opening an overlay must drop the composer's selection")
+	}
+
+	r.SetOverlayComposer([]string{"pick one", "pick two"}, -1, 0)
+	r.ViewportSelectStart(2, r.vpBodyHeight+1)
+	r.ViewportSelectDrag(6, r.vpBodyHeight+1)
+	r.ViewportSelectEnd(6, r.vpBodyHeight+1)
+	r.EndOverlay()
+	if r.selectDidDrag {
+		t.Fatal("closing an overlay must drop its selection")
+	}
+}
