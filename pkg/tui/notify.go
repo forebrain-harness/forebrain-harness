@@ -3,6 +3,8 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1118,7 +1120,7 @@ func mcpStartupErrorEvent(sessionID string, generation string, rec mcp.ServerRec
 		body = json.RawMessage(`{}`)
 	}
 	return event.RunEvent{
-		ID:        mcpFailureEventID(generation, rec.Name),
+		ID:        mcpFailureEventID(rec.Name, rec.Error),
 		SessionID: sessionID,
 		Type:      event.RunEventTurnError,
 		Payload:   body,
@@ -1127,10 +1129,16 @@ func mcpStartupErrorEvent(sessionID string, generation string, rec mcp.ServerRec
 }
 
 // mcpFailureEventID is the stable identity of one server's failure in one
-// generation. Two failures of the same server in different generations are two
-// events, which is what makes a retry visible.
-func mcpFailureEventID(generation, server string) string {
-	return "mcp:" + strings.TrimSpace(generation) + ":" + strings.TrimSpace(server) + ":error"
+// conversation: the server and what it said. The generation is deliberately not
+// part of it. Every launch (and every resume) starts MCP again under a new
+// generation, so a server that keeps failing the same way would otherwise add
+// one more identical block to the history per launch, and a resumed
+// conversation would show the stored block and a live copy of it right under
+// the replay. A server that fails differently, or recovers and fails anew with
+// other words, is a different fact and gets its own record.
+func mcpFailureEventID(server, text string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(text)))
+	return "mcp:" + strings.TrimSpace(server) + ":" + hex.EncodeToString(sum[:6]) + ":error"
 }
 
 // mcpFailureTitle names the failure in the heading the reader sees first.

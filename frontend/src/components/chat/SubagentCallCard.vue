@@ -18,6 +18,7 @@
         :type="row.agentId ? 'button' : undefined"
         :disabled="row.agentId ? undefined : true"
         data-testid="subagent-task-row"
+        :aria-current="row.agentId && row.agentId === activeAgentId ? 'true' : undefined"
         class="forebrain-subagent-row flex w-full items-start gap-2.5 border-0 border-t border-[var(--forebrain-divider)] bg-transparent px-3 py-2 text-left first:border-t-0"
         :class="row.agentId ? 'cursor-pointer' : 'cursor-default'"
         @click="row.agentId && emit('open', row.agentId)"
@@ -62,9 +63,12 @@ const props = withDefaults(defineProps<{
   live?: ReadonlyMap<number, SubagentCallTaskLive>
   /** The clock the caller already ticks; the card keeps its own otherwise. */
   now?: number
+  /** The subagent its drawer has in front: that task's row is marked as here. */
+  activeAgentId?: string
 }>(), {
   live: undefined,
   now: undefined,
+  activeAgentId: '',
 })
 
 const emit = defineEmits<{ (e: 'open', agentId: string): void }>()
@@ -147,6 +151,12 @@ function detailOf(row: SubagentCallRowView): string {
 <style scoped>
 .forebrain-subagent-row:hover {
   background: var(--forebrain-bg-alt);
+}
+/* The prototype's .sa-row[aria-current="true"]: the row whose tab the drawer
+   already has in front says so, in the row rather than only in the drawer. */
+.forebrain-subagent-row[aria-current='true'] {
+  background: var(--forebrain-brand-soft);
+  box-shadow: inset 2px 0 0 var(--forebrain-brand-1);
 }
 .forebrain-subagent-row:focus-visible {
   outline: 2px solid var(--forebrain-brand-1);

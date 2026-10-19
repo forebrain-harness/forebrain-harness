@@ -1991,8 +1991,46 @@ func (s *Server) handleChatSessionEvents(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	page.Events = s.withoutSupersededAbandonedErrors(r.Context(), page.Events)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(page)
+}
+
+// withoutSupersededAbandonedErrors drops the "process stopped" error of a run
+// that also has a real turn_error. A run reaped as abandoned while its process
+// was alive (a machine that slept past the lease) goes on to report how it
+// really ended; the page keys a run's error block by run id and keeps the first
+// one, so the reap's guess would hide the real error. The real one is looked up
+// in the store, not the page, because the two can land on different pages.
+func (s *Server) withoutSupersededAbandonedErrors(ctx context.Context, events []state.SessionEvent) []state.SessionEvent {
+	out := events[:0:0]
+	for _, evt := range events {
+		if evt.Type == event.RunEventTurnError && strings.TrimSpace(evt.RunID) != "" && isAbandonedTurnError(evt.Payload) {
+			if s.runHasRealTurnError(ctx, evt.RunID) {
+				continue
+			}
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+func isAbandonedTurnError(payload json.RawMessage) bool {
+	var p event.TurnErrorPayload
+	return json.Unmarshal(payload, &p) == nil && p.Detail != nil && p.Detail.Code == "run_abandoned"
+}
+
+func (s *Server) runHasRealTurnError(ctx context.Context, runID string) bool {
+	records, err := s.RunRT.ListRunEventsOfTypes(ctx, runID, event.RunEventTurnError)
+	if err != nil {
+		return false
+	}
+	for _, rec := range records {
+		if !isAbandonedTurnError(rec.Payload) {
+			return true
+		}
+	}
+	return false
 }
 
 // chatCompactionRow is one finished compaction as the web history shows it:

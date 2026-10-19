@@ -1081,7 +1081,7 @@ func (s *Server) HandleChatWS(w http.ResponseWriter, r *http.Request) {
 				runEvtSub.Unbind()
 				return false, false
 			}
-			for _, evt := range page.Events {
+			for _, evt := range s.withoutSupersededAbandonedErrors(context.Background(), page.Events) {
 				writeMsg(runEventToWSMessage(requestID, loadCurrentTraceID(), turn.RunEventFromRecord(evt)))
 			}
 			if page.NextCursor <= next || !page.HasMore {

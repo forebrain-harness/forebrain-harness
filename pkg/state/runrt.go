@@ -1198,6 +1198,12 @@ func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]Aban
 		return nil, fmt.Errorf("nil db")
 	}
 	staleBefore := now.UnixMilli() - RunOwnerLease.Milliseconds()
+	// A process that is executing this reap is alive, so none of its own runs
+	// is abandoned while it is registered (a stopped one has deregistered). Its heartbeat can still lapse - a laptop asleep stalls the
+	// renewal ticker for the whole sleep - and on waking the reap may tick
+	// before the renewal does; reaping then would end a live run as "stopped
+	// before it finished" while it goes on to report its own, real ending.
+	self := strings.TrimSpace(s.Owner)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -1207,11 +1213,12 @@ func (s *RunStore) ReapAbandonedRuns(ctx context.Context, now time.Time) ([]Aban
 SELECT id, session_id, parent_run_id, owner FROM fb_runs
 WHERE status=?
   AND NOT EXISTS (SELECT 1 FROM fb_run_waits w WHERE w.run_id=fb_runs.id)
+  AND (? = '' OR owner <> ? OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner))
   AND (owner=''
        OR NOT EXISTS (SELECT 1 FROM fb_run_owners o WHERE o.owner=fb_runs.owner)
        OR (SELECT o.heartbeat_at_ms FROM fb_run_owners o WHERE o.owner=fb_runs.owner) < ?)
 ORDER BY created_at ASC, id ASC`,
-		string(RunStatusRunning), staleBefore)
+		string(RunStatusRunning), self, self, staleBefore)
 	if err != nil {
 		return nil, err
 	}

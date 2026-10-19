@@ -996,3 +996,37 @@ func TestFirstPrimaryRunIDReturnsTheEarliestPrimaryRun(t *testing.T) {
 		t.Fatalf("a session with no primary run = %q (%v), want empty", got, err)
 	}
 }
+
+// TestReapAbandonedRunsLeavesTheReapersOwnRuns pins the sleeping-laptop case:
+// the process doing the reap is alive by definition, so a run it owns is not
+// abandoned even when its own heartbeat lapsed (the renewal ticker stalls while
+// the machine sleeps and the reap can tick first on waking). A process that
+// really died is still reaped by another one.
+func TestReapAbandonedRunsLeavesTheReapersOwnRuns(t *testing.T) {
+	ctx := context.Background()
+	a, b, db := newTwoOwnerStores(t, "s-own")
+	stop, err := a.HoldOwnerLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	run, err := a.CreateRun(ctx, "s-own", "slept through the lease")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageOwnerLease(t, db, "owner-a")
+
+	if reaped, err := a.ReapAbandonedRuns(ctx, time.Now()); err != nil || len(reaped) != 0 {
+		t.Fatalf("a process reaped its own live run: %+v, %v", reaped, err)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM fb_runs WHERE id=?`, run.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != string(RunStatusRunning) {
+		t.Fatalf("own run status = %q, want running", status)
+	}
+	if reaped, err := b.ReapAbandonedRuns(ctx, time.Now()); err != nil || len(reaped) != 1 || reaped[0].ID != run.ID {
+		t.Fatalf("another process must still reap the lapsed owner's run: %+v, %v", reaped, err)
+	}
+}

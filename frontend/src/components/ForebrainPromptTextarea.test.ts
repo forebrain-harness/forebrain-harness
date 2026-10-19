@@ -229,6 +229,29 @@ describe('ForebrainPromptTextarea', () => {
     }
   })
 
+  // A subagent's tab lists the commands that view may run, so the composer
+  // says which view it belongs to on every "/" request.
+  it('asks for a subagent view’s commands when it belongs to a subagent tab', async () => {
+    const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
+      records: [{
+        canonicalName: 'compact', name: 'compact', description: 'compact does its thing', category: 'subagent',
+        argumentHint: '', actionKind: 'local', allowedModes: [], supportsInlineArgs: false,
+        availableDuringRun: true, availableInSideConversation: true, visibility: 'public',
+      } as SlashCommandRecord],
+    } as Awaited<ReturnType<typeof forebrainApi.slashCommands>>)
+    try {
+      const { composer } = mountComposer({ subagentView: true })
+      const textarea = composer.find('textarea')
+      ;(textarea.element as HTMLTextAreaElement).value = '/'
+      ;(textarea.element as HTMLTextAreaElement).setSelectionRange(1, 1)
+      await textarea.trigger('input')
+      await vi.waitFor(() => expect(composer.findAll('[role="menuitem"]')).toHaveLength(1))
+      expect(list).toHaveBeenLastCalledWith('webchat', '', expect.objectContaining({ subagentView: true }))
+    } finally {
+      list.mockRestore()
+    }
+  })
+
   // A mid-word "@" (foo@bar) is not a mention: neither picker opens.
   it('ignores a mid-word @', async () => {
     const search = vi.spyOn(forebrainApi, 'mentionSearch').mockResolvedValue({ query: '', records: [] })

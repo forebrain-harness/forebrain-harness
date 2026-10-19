@@ -1029,3 +1029,32 @@ func TestRunEndingsCarryTheRunsChecklistFacts(t *testing.T) {
 	require.NoError(t, json.Unmarshal(failed[0].Payload, &failedPayload))
 	require.Equal(t, want, failedPayload.RunPlanFacts)
 }
+
+// A run reaped as abandoned while its process was alive goes on to report its
+// real ending. The web history keeps one error block per run and the first one
+// wins, so the reap's guess must not be served when the real error exists.
+func TestSupersededAbandonedErrorIsNotServed(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	runs := &state.RunStore{DB: db}
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "c1", "c1"))
+	mustGatewaySession(t, db, "c1")
+	withReal, err := runs.CreateRun(ctx, "c1", "a")
+	require.NoError(t, err)
+	onlyReap, err := runs.CreateRun(ctx, "c1", "b")
+	require.NoError(t, err)
+	s := &Server{RunRT: runs}
+	abandoned := event.TurnErrorPayload{Error: turn.AbandonedRunReason, Detail: &event.TurnErrorDetail{Code: "run_abandoned"}}
+	require.NoError(t, s.publishGatewayRunEvent(ctx, "c1", withReal.ID, event.RunEventTurnError, abandoned))
+	require.NoError(t, s.publishGatewayRunEvent(ctx, "c1", withReal.ID, event.RunEventTurnError, event.TurnErrorPayload{Error: "no such host"}))
+	require.NoError(t, s.publishGatewayRunEvent(ctx, "c1", onlyReap.ID, event.RunEventTurnError, abandoned))
+
+	page, err := runs.ListSessionEvents(ctx, "c1", 0, 0, 10)
+	require.NoError(t, err)
+	got := s.withoutSupersededAbandonedErrors(ctx, page.Events)
+	require.Len(t, got, 2)
+	require.Contains(t, string(got[0].Payload), "no such host")
+	require.Equal(t, onlyReap.ID, got[1].RunID)
+}

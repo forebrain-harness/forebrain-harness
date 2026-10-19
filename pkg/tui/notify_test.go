@@ -43,8 +43,8 @@ func TestMCPStartupErrorEventCarriesTheIdentityAndTheOriginalText(t *testing.T) 
 	if evt.RunID != "" {
 		t.Fatalf("run id = %q, want none: no run failed, a server did", evt.RunID)
 	}
-	if evt.ID != "mcp:"+generation+":docs:error" {
-		t.Fatalf("event id = %q, want the derived, stable identity", evt.ID)
+	if want := mcpFailureEventID("docs", "spawn npx: executable file not found in $PATH"); evt.ID != want {
+		t.Fatalf("event id = %q, want the derived, stable identity %q", evt.ID, want)
 	}
 	var payload event.TurnErrorPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
@@ -65,15 +65,16 @@ func TestMCPStartupErrorEventCarriesTheIdentityAndTheOriginalText(t *testing.T) 
 		t.Fatalf("error text = %q, want the server's own words", payload.Error)
 	}
 
-	// One failure per server per generation: the same one repeats its identity,
-	// a new generation does not.
-	again := mcpStartupErrorEvent("s1", generation, mcpFailureRecord("docs", "boom"), time.Now())
-	if again.ID != evt.ID {
-		t.Fatalf("the same failure in one generation must have one identity: %q vs %q", again.ID, evt.ID)
+	// One failure per server and text per conversation: the same words repeat
+	// their identity across generations (a relaunch or resume starts MCP again
+	// and fails the same way), different words are a new record.
+	same := mcpStartupErrorEvent("s1", "999999", mcpFailureRecord("docs", "spawn npx: executable file not found in $PATH"), time.Now())
+	if same.ID != evt.ID {
+		t.Fatalf("the same failure in a new generation must keep its identity: %q vs %q", same.ID, evt.ID)
 	}
-	nextGen := mcpStartupErrorEvent("s1", "999999", mcpFailureRecord("docs", "boom"), time.Now())
-	if nextGen.ID == evt.ID {
-		t.Fatal("a failure in a new generation must be a new record")
+	different := mcpStartupErrorEvent("s1", generation, mcpFailureRecord("docs", "boom"), time.Now())
+	if different.ID == evt.ID {
+		t.Fatal("a failure with other words must be a new record")
 	}
 }
 
@@ -145,12 +146,12 @@ func TestMCPStartupFailureIsStoredOnceAndShownOnce(t *testing.T) {
 		t.Fatalf("a repeated failure was shown %d times, want once", got)
 	}
 
-	// Two servers failing at once are two independent records, and a later
-	// generation adds its own — which is what makes a retry visible.
+	// Two servers failing at once are two independent records, and a retry that
+	// fails with other words adds its own.
 	if err := session.publishRunEvent(ctx, mcpStartupErrorEvent("s1", "gen-1", mcpFailureRecord("slow", "startup timed out after 30s: context deadline exceeded"), time.Now())); err != nil {
 		t.Fatalf("publish other server: %v", err)
 	}
-	if err := session.publishRunEvent(ctx, mcpStartupErrorEvent("s1", "gen-2", mcpFailureRecord("docs", "connection refused"), time.Now())); err != nil {
+	if err := session.publishRunEvent(ctx, mcpStartupErrorEvent("s1", "gen-2", mcpFailureRecord("docs", "connection reset"), time.Now())); err != nil {
 		t.Fatalf("publish next generation: %v", err)
 	}
 	waitForQueuedNotifications(t, session)
@@ -321,7 +322,7 @@ func TestMCPStartupFailureBeforeTheSessionExistsIsShownOnceAndItsRecordPaintsNoS
 	page, err := runs.ListSessionEvents(ctx, "ghost", 0, 0, 50)
 	require.NoError(t, err)
 	require.Len(t, page.Events, 1)
-	require.Equal(t, "mcp:gen-1:docs:error", page.Events[0].ID)
+	require.Equal(t, mcpFailureEventID("docs", "connection refused"), page.Events[0].ID)
 	require.Never(t, cardWaiting, 300*time.Millisecond, 10*time.Millisecond)
 }
 
@@ -946,5 +947,26 @@ func TestTUIFirstTokenStoreForwardsToStoreAndUI(t *testing.T) {
 	}
 	if gotRunID != "run-7" || gotWait != 1200*time.Millisecond {
 		t.Fatalf("notify = (%q, %v), want the same value the store kept", gotRunID, gotWait)
+	}
+}
+
+// TestSupersededAbandonedErrorIsNotReplayed pins the resume half of a run that
+// was reaped as abandoned while its process was alive and then reported its
+// own ending: the real error is drawn, the reap's guess is not; a run with only
+// the reap's error keeps it.
+func TestSupersededAbandonedErrorIsNotReplayed(t *testing.T) {
+	mk := func(runID string, p event.TurnErrorPayload) event.RunEvent {
+		body, _ := json.Marshal(p)
+		return event.RunEvent{RunID: runID, Type: event.RunEventTurnError, Payload: body}
+	}
+	abandoned := event.TurnErrorPayload{Error: turn.AbandonedRunReason, Detail: &event.TurnErrorDetail{Code: "run_abandoned"}}
+	events := []event.RunEvent{
+		mk("r1", abandoned),
+		mk("r1", event.TurnErrorPayload{Error: "dial tcp: no such host"}),
+		mk("r2", abandoned),
+	}
+	got := supersededAbandonedErrors(events)
+	if _, ok := got[0]; !ok || len(got) != 1 {
+		t.Fatalf("superseded = %v, want only the abandoned error of the run that also has a real one", got)
 	}
 }

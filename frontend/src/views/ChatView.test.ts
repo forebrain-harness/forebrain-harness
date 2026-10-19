@@ -34,12 +34,14 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
     cancelAutoContinue: unknown
     resetForNewChat: unknown
     send: unknown
+    runtimeStatus: unknown
   }
   f.sessionId = ref('s1')
   f.messages = ref([])
   f.subagents = ref([])
   f.subagentPendingInput = ref({})
   f.subagentReturnedDraft = ref({})
+  f.runtimeStatus = ref({ kind: 'idle', elapsedMs: 0 })
   f.withdrawSubagentInput = vi.fn()
   f.interruptSubagentToSend = vi.fn()
   f.sendToSubagent = vi.fn()
@@ -67,7 +69,7 @@ vi.mock('@/composables/useChatStream', async (importOriginal) => {
       subagents: f.subagents,
       subagentCallTasks: new Map(),
       subagentNow: ref(0),
-      runtimeStatus: ref({ kind: 'idle', elapsedMs: 0 }),
+      runtimeStatus: f.runtimeStatus,
       mcpStatus: ref(null),
       autoContinue: ref(null),
       subagentAutoContinue: ref({}),
@@ -144,7 +146,7 @@ async function mountView(extraStubs: Record<string, unknown> = {}, router = make
         ConversationContent: { template: '<div><slot /></div>' },
         ConversationScrollButton: true,
         ConversationEmptyState: true,
-        SubagentConversation: true,
+        SubagentTab: true,
         ChatWorkbench: true,
         PendingActionsPanel: true,
         ContextDebugPanel: true,
@@ -168,121 +170,332 @@ async function mountView(extraStubs: Record<string, unknown> = {}, router = make
   })
 }
 
-describe('ChatView subagent view', () => {
+describe('ChatView subagent drawer', () => {
   afterEach(() => {
     vi.clearAllMocks()
+    localStorage.clear()
     ;(fake as { subagents: { value: unknown } }).subagents.value = []
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+    useWorkbench().open.value = false
   })
 
-  function openSubagentView(wrapper: Awaited<ReturnType<typeof mountView>>, agentId: string) {
-    void wrapper.find(`[data-testid="agent-tab-${agentId}"]`).trigger('click')
-  }
+  const subagentsRef = () => (fake as { subagents: { value: unknown[] } }).subagents
+  const messagesRef = () => (fake as { messages: { value: unknown[] } }).messages
 
-  function seedSubagent() {
-    ;(fake as { subagents: { value: unknown[] } }).subagents.value = [
-      { agentId: 'task-1', agentType: 'general-purpose', task: 'answer', status: 'running', blocks: [], inputTokens: 0, outputTokens: 0, updatedSeq: 1 },
+  function seedSubagent(over: Record<string, unknown> = {}) {
+    subagentsRef().value = [
+      {
+        agentId: 'task-1',
+        agentType: 'general-purpose',
+        title: 'read the plan',
+        task: 'answer',
+        status: 'running',
+        blocks: [],
+        inputTokens: 0,
+        outputTokens: 0,
+        updatedSeq: 1,
+        ...over,
+      },
     ]
   }
 
-  it('takes a just-sent message back on Escape, staying in the view', async () => {
+  /** A thread holding the subagent_* card the drawer is opened from. */
+  function seedCard() {
+    messagesRef().value = [
+      { id: 'u1', role: 'user', content: 'dispatch it' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        blocks: [
+          { kind: 'subagent', step: { stepId: 'call-1', toolName: 'subagent_dispatch', summary: 'dispatch' } },
+        ],
+      },
+    ]
+  }
+
+  async function openDrawer(wrapper: Awaited<ReturnType<typeof mountView>>, agentId = 'task-1') {
+    await wrapper.findComponent({ name: 'SubagentCallCard' }).vm.$emit('open', agentId)
+    await nextTick()
+    await nextTick()
+  }
+
+  const drawer = (wrapper: Awaited<ReturnType<typeof mountView>>) => wrapper.find('[data-testid="subagent-drawer"]')
+  const tabs = (wrapper: Awaited<ReturnType<typeof mountView>>) => wrapper.findAllComponents({ name: 'SubagentTab' })
+
+  type TopbarNode = { props?: Record<string, unknown> | null; children?: unknown }
+
+  /** A top-bar button's children, as the render functions build them. */
+  function childrenOf(node?: TopbarNode): TopbarNode[] {
+    return Array.isArray(node?.children) ? (node.children as TopbarNode[]) : []
+  }
+
+  it('opens the subagent beside the conversation, and gives up the column to the workbench', async () => {
     seedSubagent()
-    ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
-      .mockResolvedValue([{ text: 'continue', attachments: [], mentionImages: [] }])
+    seedCard()
+    const workbench = useWorkbench()
+    const wrapper = await mountView()
+    await nextTick()
+    expect(drawer(wrapper).exists()).toBe(false)
+
+    // The workbench holds the column first; opening the subagent takes it.
+    workbench.open.value = true
+    await nextTick()
+    await openDrawer(wrapper)
+    expect(drawer(wrapper).exists()).toBe(true)
+    expect(tabs(wrapper).length).toBe(1)
+    expect(tabs(wrapper)[0].props('record')).toMatchObject({ agentId: 'task-1' })
+    expect(workbench.open.value).toBe(false)
+
+    // …and opening the workbench puts the drawer away.
+    workbench.open.value = true
+    await nextTick()
+    expect(drawer(wrapper).exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('takes a just-sent message back into the tab’s composer on Escape, keeping the drawer', async () => {
+    seedSubagent()
+    seedCard()
+    const restore = vi.fn()
+    const withdraw = (fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
+    withdraw.mockResolvedValue([{ text: 'continue', attachments: [], mentionImages: [] }])
     ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
       .mockResolvedValue(false)
-    const wrapper = await mountView()
-    openSubagentView(wrapper, 'task-1')
+    const wrapper = await mountView({
+      SubagentTab: { name: 'SubagentTab', template: '<div class="subagent-tab-stub" />', methods: { restoreSubmission: restore } },
+    })
     await nextTick()
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await openDrawer(wrapper)
+
+    await tabs(wrapper)[0].vm.$emit('escape-key')
     await nextTick()
     await nextTick()
     expect(fake.withdrawSubagentInput).toHaveBeenCalledWith('task-1')
+    // Nothing was left to interrupt: the withdrawn message is the draft again.
     expect(fake.interruptSubagentToSend).not.toHaveBeenCalled()
-    // Still in the view: the subagent's conversation is the one drawn.
-    expect(wrapper.find('subagent-conversation-stub').exists()).toBe(true)
+    expect(restore).toHaveBeenCalledWith({ text: 'continue', attachments: [], mentionImages: [] })
+    expect(drawer(wrapper).exists()).toBe(true)
     wrapper.unmount()
   })
 
-  it('interrupts to send on Escape when nothing can be withdrawn', async () => {
+  it('collapses the drawer on Escape when there is nothing to take back or interrupt', async () => {
     seedSubagent()
+    seedCard()
     ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
       .mockResolvedValue([])
     ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
-      .mockResolvedValue(true)
+      .mockResolvedValue(false)
     const wrapper = await mountView()
-    openSubagentView(wrapper, 'task-1')
     await nextTick()
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-    await nextTick()
-    await nextTick()
-    expect(fake.interruptSubagentToSend).toHaveBeenCalledWith('task-1')
+    await openDrawer(wrapper)
+    expect(drawer(wrapper).exists()).toBe(true)
+
+    await tabs(wrapper)[0].vm.$emit('escape-key')
+    await vi.waitFor(() => expect(drawer(wrapper).exists()).toBe(false))
+    // The subagent is still running: a shut drawer is not a stop.
+    expect(subagentsRef().value[0]).toMatchObject({ status: 'running' })
     wrapper.unmount()
   })
 
-  it('shows the active view’s own auto-continue banner and cancels it by that agent', async () => {
+  it('gives a tab its own continuation and cancels it by that agent', async () => {
     seedSubagent()
+    seedCard()
     ;(fake as { autoContinueForView: { mockImplementation: (fn: (v: string) => unknown) => void } }).autoContinueForView
       .mockImplementation((view: string) => (view === 'task-1' ? { continueAt: '2026-09-30T02:10:05Z', code: 'rate_limit_quota' } : null))
     const wrapper = await mountView()
-    const banner = () => wrapper.findComponent({ name: 'AutoContinueBanner' })
-    expect(banner().props('state')).toBeNull()
-    openSubagentView(wrapper, 'task-1')
     await nextTick()
-    expect(banner().props('state')).toMatchObject({ code: 'rate_limit_quota' })
-    banner().vm.$emit('cancel')
+    await openDrawer(wrapper)
+
+    const tab = tabs(wrapper)[0]
+    expect(tab.props('autoContinue')).toMatchObject({ code: 'rate_limit_quota' })
+    await tab.vm.$emit('cancel-auto-continue')
     await nextTick()
     expect(fake.cancelAutoContinue).toHaveBeenCalledWith('task-1')
     wrapper.unmount()
   })
 
-  it('leaves for the conversation on Escape when nothing is in flight', async () => {
+  it('sends the conversation’s own messages to the conversation, never to a subagent', async () => {
     seedSubagent()
-    ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
-      .mockResolvedValue([])
-    ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
-      .mockResolvedValue(false)
+    seedCard()
     const wrapper = await mountView()
-    openSubagentView(wrapper, 'task-1')
     await nextTick()
-    expect(wrapper.find('subagent-conversation-stub').exists()).toBe(true)
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
-    // Back on the conversation: the subagent's view is gone.
-    await vi.waitFor(() => {
-      expect(wrapper.find('subagent-conversation-stub').exists()).toBe(false)
-    })
+    await openDrawer(wrapper)
+
+    await wrapper.find('textarea').setValue('a note for the conversation')
+    await wrapper.find('textarea').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(fake.sendToSubagent).not.toHaveBeenCalled()
+    expect(fake.send).toHaveBeenCalled()
     wrapper.unmount()
   })
 
-  it('keeps each view’s composer draft to that view', async () => {
+  it('carries the drawer toggle with the running count, and no count on the workbench', async () => {
     seedSubagent()
-    ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput.mockResolvedValue([])
-    ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend.mockResolvedValue(false)
-    const slash = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({ surface: 'webchat', query: '', options: { duringRun: false, sideConversation: false }, records: [] })
+    seedSubagent2()
+    const wrapper = await mountView()
+    await nextTick()
+    const trailing = () => useTopbarContent().value?.trailing?.() ?? []
+    const byTestId = (id: string) => trailing().find((node) => node.props?.['data-testid'] === id)
+    const toggle = byTestId('subagent-drawer-toggle')
+    expect(toggle).toBeTruthy()
+    expect(toggle?.props?.['aria-pressed']).toBe('false')
+    // Two dispatched, one still running.
+    const counts = childrenOf(toggle).filter((child) => child.props?.class === 'forebrain-chip-count')
+    expect(counts.length).toBe(1)
+    expect(counts[0].children).toBe('1')
+    // The workbench button no longer carries a number of its own.
+    expect(childrenOf(byTestId('workbench-toggle')).some((child) => child.props?.class === 'forebrain-chip-count')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('draws the real tab: its own composer, its working line and its stop', async () => {
+    // Nothing about the tab is stubbed here: the drawer hands the record to
+    // SubagentTab as it really is, and that component owns the rest.
+    setLocale('en')
+    seedSubagent()
+    seedCard()
+    const slash = vi.spyOn(forebrainApi, 'slashCommands')
+      .mockResolvedValue({ surface: 'webchat', query: '', options: { duringRun: false, sideConversation: false }, records: [] })
     try {
-      const wrapper = await mountView()
-      const composer = wrapper.find('textarea')
-      await composer.setValue('a note for the conversation')
+      const wrapper = await mountView({ SubagentTab: false })
+      await nextTick()
+      await openDrawer(wrapper)
 
-      // The subagent's view opens with its own (empty) draft.
-      wrapper.findAll('.forebrain-agent-tab')[1].trigger('click')
-      await nextTick()
-      await nextTick()
-      expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('')
-      await wrapper.find('textarea').setValue('a note for the subagent')
-
-      // Back on the conversation: its draft is there, the subagent's is kept.
-      wrapper.findAll('.forebrain-agent-tab')[0].trigger('click')
-      await nextTick()
-      await nextTick()
-      expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('a note for the conversation')
-      wrapper.findAll('.forebrain-agent-tab')[1].trigger('click')
-      await nextTick()
-      await nextTick()
-      expect((wrapper.find('textarea').element as HTMLTextAreaElement).value).toBe('a note for the subagent')
-      wrapper.unmount()
+      // The tab's own composer, not the conversation's: the drawer holds the
+      // textarea this subagent's messages are typed in.
+      const drawer = wrapper.find('[data-testid="subagent-drawer"]')
+      const textarea = drawer.find('textarea')
+      expect(textarea.exists()).toBe(true)
+      expect((textarea.element as HTMLTextAreaElement).placeholder)
+        .toBe('Message this subagent — / for commands, @ to reference files')
+      // Running: the terminal's working line sits above that composer, and the
+      // tab offers its own stop.
+      const working = drawer.find('[data-testid="subagent-working"]')
+      expect(working.exists()).toBe(true)
+      expect(working.text()).toContain('Working (')
+      expect(drawer.find('[data-testid="subagent-stop"]').exists()).toBe(true)
+      // The conversation's composer is still there, outside the drawer.
+      expect(wrapper.findAll('textarea').length).toBe(2)
     } finally {
       slash.mockRestore()
     }
+  })
+
+  it('acts on one Escape once, though the tab and the drawer both hear it', async () => {
+    setLocale('en')
+    seedSubagent()
+    seedCard()
+    const slash = vi.spyOn(forebrainApi, 'slashCommands')
+      .mockResolvedValue({ surface: 'webchat', query: '', options: { duringRun: false, sideConversation: false }, records: [] })
+    ;(fake as { withdrawSubagentInput: { mockResolvedValue: (v: unknown) => void } }).withdrawSubagentInput
+      .mockResolvedValue([{ text: 'continue', attachments: [], mentionImages: [] }])
+    ;(fake as { interruptSubagentToSend: { mockResolvedValue: (v: unknown) => void } }).interruptSubagentToSend
+      .mockResolvedValue(false)
+    try {
+      const wrapper = await mountView({ SubagentTab: false })
+      await nextTick()
+      await openDrawer(wrapper)
+
+      // The keydown rises from the tab's own textarea through the tab (which
+      // spends it) to the drawer (which must then stand down): one take-back,
+      // and the drawer stays where it is.
+      await wrapper.find('[data-testid="subagent-drawer"] textarea').trigger('keydown', { key: 'Escape' })
+      await nextTick()
+      await nextTick()
+      expect(fake.withdrawSubagentInput).toHaveBeenCalledTimes(1)
+      expect(fake.withdrawSubagentInput).toHaveBeenCalledWith('task-1')
+      expect(drawer(wrapper).exists()).toBe(true)
+    } finally {
+      slash.mockRestore()
+    }
+  })
+
+  it('opens the subagent a jump names in the address bar, then spends the parameter', async () => {
+    seedSubagent()
+    ;(fake as { sessionId: { value: string | null } }).sessionId.value = 's1'
+    const router = makeRouter()
+    const replace = vi.spyOn(router, 'replace')
+    const wrapper = await mountView({}, router, '/?session=s1&agent=task-1')
+    await flushPromises()
+    expect(drawer(wrapper).exists()).toBe(true)
+    expect(tabs(wrapper).length).toBe(1)
+    expect(tabs(wrapper)[0].props('record')).toMatchObject({ agentId: 'task-1' })
+    expect(replace).toHaveBeenCalled()
+    const calls = replace.mock.calls
+    const lastQuery = calls[calls.length - 1]?.[0] as { query: Record<string, string> }
+    expect(lastQuery.query.agent).toBeUndefined()
+    expect(lastQuery.query.session).toBe('s1')
+    wrapper.unmount()
+  })
+
+  function seedSubagent2() {
+    subagentsRef().value = [
+      ...subagentsRef().value,
+      { agentId: 'task-2', agentType: 'plan-reviewer', task: 'review', status: 'done', blocks: [], inputTokens: 0, outputTokens: 0, updatedSeq: 2 },
+    ]
+  }
+})
+
+/**
+ * The run's own line above the composer (plan 078, step 7b): the terminal's
+ * order — the state, then the checklist, then the first-token wait — and no
+ * line at all while nothing runs.
+ */
+describe('ChatView run status line', () => {
+  const runtimeStatus = () => (fake as { runtimeStatus: { value: unknown } }).runtimeStatus
+
+  afterEach(() => {
+    runtimeStatus().value = { kind: 'idle', elapsedMs: 0 }
+    ;(fake as { sessionId: { value: string | null } }).sessionId.value = 's1'
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+  })
+
+  it('reads the state, the checklist, then the first-token wait', async () => {
+    setLocale('en')
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: 'fix it' },
+    ]
+    runtimeStatus().value = {
+      kind: 'working',
+      elapsedMs: 72_000,
+      planCompleted: 3,
+      planTotal: 5,
+      planActive: 'fix the middleware',
+      firstTokenMs: 1200,
+    }
+    const wrapper = await mountView()
+    await flushPromises()
+    const line = wrapper.find('[data-testid="run-status-line"]')
+    expect(line.exists()).toBe(true)
+    const text = line.text().replace(/\s+/g, ' ')
+    expect(text).toContain('Working (1m 12s • esc to interrupt)')
+    expect(text).toContain('3/5')
+    expect(text).toContain('fix the middleware')
+    expect(text).toContain('first token 1.2s')
+    // The terminal puts the first-token wait last, after the checklist.
+    expect(text.indexOf('3/5')).toBeLessThan(text.indexOf('first token 1.2s'))
+    wrapper.unmount()
+  })
+
+  it('draws nothing while no run is under way', async () => {
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: 'fix it' },
+    ]
+    const wrapper = await mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="run-status-line"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('draws nothing on the new-conversation page', async () => {
+    ;(fake as { sessionId: { value: string | null } }).sessionId.value = null
+    runtimeStatus().value = { kind: 'working', elapsedMs: 3_000 }
+    const wrapper = await mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="chat-greeting"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="run-status-line"]').exists()).toBe(false)
+    wrapper.unmount()
   })
 })
 

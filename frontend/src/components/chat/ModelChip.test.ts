@@ -71,4 +71,14 @@ describe('ModelChip', () => {
 
     expect(wrapper.find('[data-testid="model-option-deepseek-v4-flash"]').exists()).toBe(false)
   })
+
+  // With the subagent drawer open the composer keeps every control but drops
+  // the leading glyph: the name alone still says which model is in force.
+  it('drops its icon when the composer is squeezed', () => {
+    const full = mountChip()
+    const compact = mountChip({ compact: true })
+    expect(full.get('[data-testid="model-chip"]').findAll('svg')).toHaveLength(2)
+    expect(compact.get('[data-testid="model-chip"]').findAll('svg')).toHaveLength(1)
+    expect(compact.get('[data-testid="model-chip"]').text()).toContain('deepseek-v4-pro')
+  })
 })

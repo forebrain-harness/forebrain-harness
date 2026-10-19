@@ -156,16 +156,17 @@ test('a review in flight is an event away: the card says so and the reviewer has
   await expect(page.locator('[data-testid="exit-plan-stop-review"]')).toBeVisible()
   await shot(page, 'exit-plan-approval-reviewing')
 
-  // The timeline's plan-reviewer card is the way into the reviewer's own
-  // view, where its tool cards live — nothing about the review leaks into
-  // the conversation as text.
+  // The timeline's plan-reviewer card is the way into the reviewer's own tab
+  // in the drawer beside the conversation, where its tool cards live — nothing
+  // about the review leaks into the conversation as text.
   const reviewCard = page.locator('[data-testid="subagent-call-card"]')
   await expect(reviewCard.first()).toContainText('1 个 plan-reviewer 任务')
   const rows = page.locator('[data-testid="subagent-task-row"]')
   await rows.nth(0).click()
-  await expect(page.getByRole('button', { name: '返回' })).toBeVisible()
-  await expect(page.locator('.chat-shell main')).toContainText('review the plan against the README')
-  await expect(page.locator('.chat-shell main')).toContainText('read README.md')
+  const drawer = page.locator('[data-testid="subagent-drawer"]')
+  await expect(drawer).toBeVisible()
+  await expect(drawer).toContainText('review the plan against the README')
+  await expect(drawer).toContainText('reading the README')
   await shot(page, 'exit-plan-reviewer-view')
 })
 

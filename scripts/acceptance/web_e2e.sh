@@ -5,6 +5,18 @@
 # drive the real Chrome through Playwright. Later plans append their cases to
 # frontend/e2e/; they all pass here as part of their done criteria.
 #
+# FOREBRAIN_E2E_SPEC narrows the run to the specs a task actually touched, and
+# that is how a change is verified: the full suite is a release gate, not a
+# per-change loop. It takes one or more spec files, directories or globs:
+#
+#   FOREBRAIN_E2E_SPEC=e2e/subagent-drawer.spec.ts scripts/acceptance/web_e2e.sh
+#   FOREBRAIN_E2E_SPEC="e2e/subagent-drawer.spec.ts e2e/chat-composer.spec.ts" …
+#   FOREBRAIN_E2E_SPEC="e2e/subagent-*.spec.ts" …
+#
+# With it unset, the whole suite runs once against one gateway and one state
+# database — Playwright's worker is serial, so that is the slow path by design
+# (roughly nine minutes on this machine) and belongs to a release gate.
+#
 # Real-model mode (FOREBRAIN_E2E_REAL_LLM=1) swaps the fake provider for the
 # owner's Zhipu credentials in ~/.forebrain/e2e-zhipu.env (chmod 600, never
 # committed); assertions on reply text relax to "a non-empty assistant reply".
@@ -24,6 +36,8 @@ WEBUI="$WORK/webui"
 SHOTS="$WORK/shots"
 BIN="$WORK/forebrain"
 TOKEN=""
+SPEC="${FOREBRAIN_E2E_SPEC:-}"
+REAL_LLM="${FOREBRAIN_E2E_REAL_LLM:-0}"
 # The proxy's control file. It is handed to the spec (via E2E_FLAKY_CONTROL)
 # only when a real run routes the provider through the proxy; empty otherwise,
 # so the disconnect case skips in fake mode.
@@ -32,8 +46,40 @@ E2E_FLAKY_CONTROL=""
 
 die() { echo "web e2e: $*" >&2; exit 1; }
 
+# FOREBRAIN_E2E_SPEC is checked before anything is built: a typo must cost a
+# second, and a run that matches no spec must never look like a passing suite.
+if [ -n "$SPEC" ]; then
+  for pattern in $SPEC; do
+    case "$pattern" in
+      /*) target="$pattern" ;;
+      *) target="$REPO/frontend/$pattern" ;;
+    esac
+    # shellcheck disable=SC2086
+    compgen -G "$target" > /dev/null || die "FOREBRAIN_E2E_SPEC names no spec: $pattern"
+  done
+fi
+
+# The gateway links PDFium through `// #cgo pkg-config: pdfium`, and this run
+# sets that environment itself rather than inheriting the caller's: what a
+# machine exports for its own `make` builds is not this harness's input. The
+# fetched pdfium.pc carries `-L` and the `-Wl,-rpath` that lets the loader find
+# libpdfium.dylib, so pointing pkg-config at it is the whole wiring. Forcing
+# `-lpdfium` through CGO_LDFLAGS instead links PDFium into binaries that never
+# call it (cmd/installdict, run by install-dictionary.sh below) with no rpath,
+# and dyld then refuses to load them.
+PDFIUM_DIR="$REPO/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)"
+[ -f "$PDFIUM_DIR/pdfium.pc" ] || die "no pdfium.pc under $PDFIUM_DIR (run scripts/fetch-pdfium.sh)"
+# A trailing empty entry would be read by pkg-config as the current directory.
+if [ -n "${PKG_CONFIG_PATH:-}" ]; then
+  export PKG_CONFIG_PATH="$PDFIUM_DIR:$PKG_CONFIG_PATH"
+else
+  export PKG_CONFIG_PATH="$PDFIUM_DIR"
+fi
+export CGO_CFLAGS="-I$PDFIUM_DIR/include"
+unset CGO_LDFLAGS
+
 # Kill anything a previous (crashed or cancelled) run left bound to our ports.
-# Scoped to this script's own work tree: the binary path is unique to $WORK.
+# Scoped to this run's own work tree: the binary path is unique to $WORK.
 kill_stale() {
   pkill -f "$BIN gateway start" 2>/dev/null || true
   pkill -f "fake_provider.py reply $LLM_PORT" 2>/dev/null || true
@@ -88,7 +134,7 @@ printf 'FOREBRAIN_GATEWAY_TOKEN=%s\n' "$TOKEN" > "$HOME_DIR/.env"
 umask 022
 
 # 4. Gateway + agent config.
-if [ "${FOREBRAIN_E2E_REAL_LLM:-0}" = "1" ]; then
+if [ "$REAL_LLM" = "1" ]; then
   [ -f "$HOME/.forebrain/e2e-zhipu.env" ] || die "real-LLM mode needs ~/.forebrain/e2e-zhipu.env"
   set -a; . "$HOME/.forebrain/e2e-zhipu.env"; set +a
   cat > "$HOME_DIR/forebrain.yaml" <<YAML
@@ -182,7 +228,7 @@ PYZIP
 
 # 6. Fake provider (skipped in real-LLM mode). `exec` makes $! the python
 #    process itself, so the exit trap kills the real server, not a wrapper.
-if [ "${FOREBRAIN_E2E_REAL_LLM:-0}" != "1" ]; then
+if [ "$REAL_LLM" != "1" ]; then
   ( exec python3 "$REPO/scripts/acceptance/fake_provider.py" reply "$LLM_PORT" E2E_REPLY_OK \
     > "$WORK/provider.log" 2>&1 ) &
   LLM_PID=$!
@@ -225,21 +271,24 @@ for _ in $(seq 1 150); do
 done
 curl -fsS "http://127.0.0.1:$GW_PORT/healthz" > /dev/null || die "gateway never answered /healthz"
 
-# 9. Browser suite. FOREBRAIN_E2E_SPEC narrows the run to one spec file
-# (e.g. FOREBRAIN_E2E_SPEC=e2e/subagent-conversation.spec.ts) for targeted
-# re-verification; the full suite remains the gate.
+# 9. Browser suite: the specs this change touched (FOREBRAIN_E2E_SPEC, one or
+#    more files/globs, checked above), or the whole suite at a release gate.
+#    FOREBRAIN_E2E_SPEC is deliberately unquoted so several specs reach
+#    Playwright as several arguments.
+SPEC_ARGS="$SPEC"
+SUITE_STARTED=$SECONDS
 # shellcheck disable=SC2086
 ( cd "$REPO/frontend" && \
   E2E_BASE_URL="http://127.0.0.1:$GW_PORT" \
   E2E_TOKEN="$TOKEN" \
   E2E_GATEWAY_OUT="$WORK/gateway.out" \
   E2E_SHOTS="$SHOTS" \
-  E2E_REAL_LLM="${FOREBRAIN_E2E_REAL_LLM:-0}" \
+  E2E_REAL_LLM="$REAL_LLM" \
   E2E_FLAKY_CONTROL="$E2E_FLAKY_CONTROL" \
   E2E_PROJECT_PARENT="$PROJ" \
   E2E_HOME="$HOME_DIR" \
   E2E_SKILL_ZIP="$WORK/fixtures/demo-skill.zip" \
-  corepack pnpm e2e ${FOREBRAIN_E2E_SPEC:-} )
+  corepack pnpm e2e $SPEC_ARGS )
 
 # 10. The CLI still authenticates with the header token. The probe's success
 #     line is the one pkg/gateway/http_server_test.go pins — `gateway status`
@@ -248,4 +297,5 @@ FOREBRAIN_HOME="$HOME_DIR" "$BIN" gateway status | grep -q 'ok (HTTP 200)' \
   || die "gateway status no longer reports a healthy probe"
 
 echo "screenshots: $SHOTS"
+echo "web e2e: browser $((SECONDS - SUITE_STARTED))s${SPEC:+ (specs: $SPEC)}"
 echo "web e2e: PASS"

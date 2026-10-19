@@ -46,6 +46,7 @@
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Brain, Check, ChevronDown } from 'lucide-vue-next'
+import { effortLevelLabel } from '@/lib/effortLabel'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{
@@ -62,14 +63,6 @@ const { t } = useI18n()
 const open = ref(false)
 const rootRef = ref<HTMLElement | null>(null)
 
-function levelLabel(id: string): string {
-  if (id === 'low') return t('chat.effortLow')
-  if (id === 'medium') return t('chat.effortMedium')
-  if (id === 'high') return t('chat.effortHigh')
-  if (id === 'xhigh') return t('chat.effortXhigh')
-  return id
-}
-
 function levelDescription(id: string): string {
   if (id === 'low') return t('chat.effortLowHint')
   if (id === 'medium') return t('chat.effortMediumHint')
@@ -80,10 +73,10 @@ function levelDescription(id: string): string {
 
 const optionsList = computed(() => [
   { id: '', label: t('chat.effortDefault'), description: t('chat.effortDefaultHint') },
-  ...props.efforts.map((id) => ({ id, label: levelLabel(id), description: levelDescription(id) })),
+  ...props.efforts.map((id) => ({ id, label: effortLevelLabel(id), description: levelDescription(id) })),
 ])
 
-const currentLabel = computed(() => (props.effort ? levelLabel(props.effort) : t('chat.effortDefault')))
+const currentLabel = computed(() => (props.effort ? effortLevelLabel(props.effort) : t('chat.effortDefault')))
 
 async function choose(next: string) {
   open.value = false

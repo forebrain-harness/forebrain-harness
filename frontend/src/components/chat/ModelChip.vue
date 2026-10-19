@@ -10,7 +10,7 @@
       data-testid="model-chip"
       @click="open = !open"
     >
-      <Cpu class="size-3.5" aria-hidden="true" />
+      <Cpu v-if="!compact" class="size-3.5" aria-hidden="true" />
       <span class="max-w-44 truncate">{{ label }}</span>
       <ChevronDown class="forebrain-chip-caret" aria-hidden="true" />
     </button>
@@ -57,6 +57,8 @@ const props = defineProps<{
   selection: SessionModelSelection | null
   options: SessionModelOption[]
   disabled?: boolean
+  /** The composer is narrow (the subagent drawer is open): the name alone. */
+  compact?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'saved'): void }>()

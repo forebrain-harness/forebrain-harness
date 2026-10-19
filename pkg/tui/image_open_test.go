@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/event"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
+	"github.com/mattn/go-runewidth"
 )
 
 // stubImageOpener swaps the system viewer for the duration of one test and
@@ -23,7 +25,7 @@ func stubImageOpener(t *testing.T) *[]string {
 	t.Helper()
 	prev := imagePreviewOpener
 	var opened []string
-	imagePreviewOpener = func(path string) error {
+	imagePreviewOpener = func(path string, _ func(error)) error {
 		opened = append(opened, path)
 		return nil
 	}
@@ -216,12 +218,16 @@ func TestImageMarkerRowPredicateSkipsEveryHintRow(t *testing.T) {
 	}
 }
 
-// clickRow drives one mouse release through the production handler and reports
-// what the row resolved to.
+// clickRow drives one plain click — a press and its release on the same cell,
+// as the terminal reports them — through the production handlers and reports
+// what the row resolved to. Each call is a fresh single click: the multi-click
+// clock is reset so two calls in a row never read as a double-click.
 func clickRow(t *testing.T, r *Renderer, row int) (path string, isMarker bool) {
 	t.Helper()
-	path, _, isMarker = r.ImagePreviewAtScreenRow(row)
-	clickImagePreviewRow(r, 0, row)
+	path, _, isMarker = r.activeVMLocked().imageMarkerAtScreenRow(r.vpLastRender, row)
+	r.lastClickTime = time.Time{}
+	r.ViewportSelectStart(0, row)
+	r.ViewportSelectEnd(0, row)
 	return path, isMarker
 }
 
@@ -360,6 +366,194 @@ func TestImageCardIsNeverCollapsibleAndItsMarkerOpensTheFile(t *testing.T) {
 	if r.vm.blocks[0].expanded {
 		t.Fatal("no click on the image card may change its fold state")
 	}
+}
+
+// streamingRenderer is a following viewport whose transcript is a filler card,
+// then the given blocks, then an answer still streaming below them; stream adds
+// one more paragraph to that answer, as a delta would, and repaints.
+func streamingRenderer(t *testing.T, blocks ...Frame) (r *Renderer, stream func()) {
+	t.Helper()
+	forcedTermWidth, forcedTermHeight = 80, 24
+	t.Cleanup(func() { forcedTermWidth, forcedTermHeight = 0, 0 })
+	r = NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.vpFollow = true
+	r.RenderFrame(Frame{Kind: FrameTool, Title: "read_file", Content: "1|package main", Summary: "read lines.txt", Final: true})
+	for _, f := range blocks {
+		r.RenderFrame(f)
+	}
+	var paragraphs []string
+	stream = func() {
+		paragraphs = append(paragraphs, fmt.Sprintf("paragraph %d", len(paragraphs)))
+		r.RenderFrame(Frame{Kind: FrameAssistant, Title: "assistant", Content: strings.Join(paragraphs, "\n\n")})
+	}
+	// Stream until the answer overflows the screen: from here on every new
+	// row scrolls the transcript up under a stationary pointer.
+	for r.vpLastRender.firstRow == 0 {
+		stream()
+	}
+	return r, stream
+}
+
+// TestImageMarkerClickSurvivesRowsStreamedBetweenPressAndRelease pins the
+// "click to open does nothing while a turn streams" fix. In follow mode each
+// streamed row scrolls the screen up, so between the press and the release the
+// marker slides off the pointer's row. The click must still open the file the
+// press landed on — resolving at release read the row that slid under the
+// pointer instead and opened nothing.
+func TestImageMarkerClickSurvivesRowsStreamedBetweenPressAndRelease(t *testing.T) {
+	opened := stubImageOpener(t)
+	r, stream := streamingRenderer(t, imageStepFrame("/tmp/shot.png"))
+
+	row := markerRowOf(r.vpLastRender.lines, "shot.png")
+	if row < 1 {
+		t.Fatalf("marker must sit below the top row before the press, got %d:\n%s", row, stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	}
+	r.ViewportSelectStart(6, row)
+	stream()
+	moved := markerRowOf(r.vpLastRender.lines, "shot.png")
+	if moved == row {
+		t.Fatalf("the streamed row did not scroll the marker (still at %d); the fixture proves nothing", row)
+	}
+	if _, _, ok := r.activeVMLocked().imageMarkerAtScreenRow(r.vpLastRender, row); ok {
+		t.Fatalf("row %d is still a marker on the latest paint; the fixture proves nothing", row)
+	}
+	if !r.ViewportSelectEnd(6, row) {
+		t.Fatal("a press and release on one cell must end as a plain click")
+	}
+	if len(*opened) != 1 || (*opened)[0] != "/tmp/shot.png" {
+		t.Fatalf("opened = %v, want [/tmp/shot.png]", *opened)
+	}
+}
+
+// TestPressCellReportAfterStreamedRowsIsNotADrag pins the other half: a motion
+// report naming the press cell is no motion, even when streamed rows scrolled
+// the transcript under the pointer since the press. The selection's end anchor
+// is an absolute row, so taking that report read the scroll as a one-row drag:
+// the click became a selection and the marker opened nothing. Moving to another
+// cell is still a drag, and a drag still opens nothing.
+func TestPressCellReportAfterStreamedRowsIsNotADrag(t *testing.T) {
+	opened := stubImageOpener(t)
+	r, stream := streamingRenderer(t, imageStepFrame("/tmp/shot.png"))
+
+	row := markerRowOf(r.vpLastRender.lines, "shot.png")
+	if row < 1 {
+		t.Fatalf("marker must sit below the top row before the press, got %d", row)
+	}
+	r.ViewportSelectStart(6, row)
+	stream()
+	r.ViewportSelectDrag(6, row)
+	if r.selectDidDrag {
+		t.Fatal("a report of the press cell must not start a selection")
+	}
+	if !r.ViewportSelectEnd(6, row) {
+		t.Fatal("the gesture must still end as a plain click")
+	}
+	if len(*opened) != 1 || (*opened)[0] != "/tmp/shot.png" {
+		t.Fatalf("opened = %v, want [/tmp/shot.png]", *opened)
+	}
+
+	row = markerRowOf(r.vpLastRender.lines, "shot.png")
+	r.lastClickTime = time.Time{}
+	r.ViewportSelectStart(6, row)
+	r.ViewportSelectDrag(7, row)
+	if r.ViewportSelectEnd(7, row) {
+		t.Fatal("leaving the press cell is a drag, not a click")
+	}
+	if len(*opened) != 1 {
+		t.Fatalf("a drag across the marker opened %v", *opened)
+	}
+}
+
+// TestFoldClickSurvivesRowsStreamedBetweenPressAndRelease pins that the fold
+// toggle follows the press the same way: the card pressed is the card that
+// expands, even after streamed rows moved it off the pointer's row.
+func TestFoldClickSurvivesRowsStreamedBetweenPressAndRelease(t *testing.T) {
+	var long []string
+	for i := 0; i < 3*toolOutputMaxLines; i++ {
+		long = append(long, fmt.Sprintf("%d|line %d", i+1, i))
+	}
+	r, stream := streamingRenderer(t, Frame{Kind: FrameTool, Title: "read_file", Content: strings.Join(long, "\n"), Summary: "read long.txt", Final: true})
+	card := r.vm.blocks[1]
+	if !card.collapsible || card.expanded {
+		t.Fatalf("fixture card must be a folded collapsible card (collapsible=%v expanded=%v)", card.collapsible, card.expanded)
+	}
+	span, ok := r.vpLastRender.spanForBlock(card.id)
+	if !ok {
+		t.Fatal("the long card is not painted")
+	}
+	row := span.startRow + span.rowCount - 1 - r.vpLastRender.firstRow
+	if row < 1 || row >= len(r.vpLastRender.lines) {
+		t.Fatalf("the card's last row (%d) must be on screen below the top row", row)
+	}
+	r.ViewportSelectStart(4, row)
+	stream()
+	if id, _ := r.vpLastRender.blockAtRow(row); id == card.id {
+		t.Fatalf("row %d still shows the card on the latest paint; the fixture proves nothing", row)
+	}
+	r.ViewportSelectEnd(4, row)
+	if !card.expanded {
+		t.Fatal("the click must expand the card its press landed on")
+	}
+}
+
+// TestPressReadAfterAnUnseenPaintActsOnTheScreenShown pins the busy-loop case:
+// the loop finishes painting a streamed delta before it reads a press that was
+// made on the screen before it, so the press reaches the renderer after the
+// marker already slid off the pointer's row. The event carries when it was
+// read, and is resolved against the screen on the terminal at that moment.
+func TestPressReadAfterAnUnseenPaintActsOnTheScreenShown(t *testing.T) {
+	opened := stubImageOpener(t)
+	r, stream := streamingRenderer(t, imageStepFrame("/tmp/shot.png"))
+
+	row := markerRowOf(r.vpLastRender.lines, "shot.png")
+	if row < 1 {
+		t.Fatalf("marker must sit below the top row, got %d", row)
+	}
+	pressed := time.Now()
+	time.Sleep(time.Millisecond)
+	stream() // painted after the press, before the loop read it
+	if markerRowOf(r.vpLastRender.lines, "shot.png") == row {
+		t.Fatal("the streamed row did not scroll the marker; the fixture proves nothing")
+	}
+	r.HandleMouse(inputEvent{kind: inputEventMousePress, mouseCol: 6, mouseRow: row, at: pressed})
+	if click := r.HandleMouse(inputEvent{kind: inputEventMouseRelease, mouseCol: 6, mouseRow: row, at: time.Now()}); !click.plain {
+		t.Fatal("a press and release on one cell must end as a plain click")
+	}
+	if len(*opened) != 1 || (*opened)[0] != "/tmp/shot.png" {
+		t.Fatalf("opened = %v, want [/tmp/shot.png]", *opened)
+	}
+}
+
+// TestDoubleClickSelectsTheWordItsFirstPressPointedAt pins the multi-click
+// half: a double-click is two presses on one cell, and when a streamed row
+// scrolls the transcript between them the second press lands on whatever slid
+// under the pointer. The word selected is the one the sequence began on.
+func TestDoubleClickSelectsTheWordItsFirstPressPointedAt(t *testing.T) {
+	stubImageOpener(t)
+	r, stream := streamingRenderer(t, imageStepFrame("/tmp/shot.png"))
+
+	row := markerRowOf(r.vpLastRender.lines, "shot.png")
+	if row < 1 {
+		t.Fatalf("marker must sit below the top row, got %d", row)
+	}
+	plain := stripANSI(r.vpLastRender.lines[row])
+	col := runewidth.StringWidth(plain[:strings.Index(plain, "shot.png")]) + 1 // the "h" of "shot"
+	r.lastClickTime = time.Time{}
+	r.ViewportSelectStart(col, row)
+	r.ViewportSelectEnd(col, row)
+	stream()
+	if markerRowOf(r.vpLastRender.lines, "shot.png") == row {
+		t.Fatal("the streamed row did not scroll the marker; the fixture proves nothing")
+	}
+	r.ViewportSelectStart(col, row)
+	if r.clickCount != 2 {
+		t.Fatalf("the second press must continue the sequence, click count %d", r.clickCount)
+	}
+	if got := r.extractSelectedTextLocked(); got != "shot" {
+		t.Fatalf("double-click selected %q, want the word the first press pointed at (shot)", got)
+	}
+	r.ViewportSelectEnd(col, row)
 }
 
 // TestCtrlOIsUnboundAndNeverEntersTheComposer pins the retirement of the
@@ -548,7 +742,11 @@ func TestOpenWithSystemViewerLetsTheViewerOutliveTheHandler(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FB_VIEWER_MARKER", marker)
 
-	if err := openWithSystemViewer(filepath.Join(dir, "shot.webp")); err != nil {
+	shot := filepath.Join(dir, "shot.webp")
+	if err := os.WriteFile(shot, []byte("RIFF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := openWithSystemViewer(shot, nil); err != nil {
 		t.Fatalf("launch: %v", err)
 	}
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
@@ -558,4 +756,83 @@ func TestOpenWithSystemViewerLetsTheViewerOutliveTheHandler(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatal("the viewer process did not survive the handler: nothing was opened")
+}
+
+// fakeViewer puts a program named like the platform's launcher first on PATH,
+// running body as a shell script, and returns the directory it lives in.
+func fakeViewer(t *testing.T, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the viewer program is cmd.exe on Windows")
+	}
+	dir := t.TempDir()
+	program, _ := imageViewerCommand("x.png")
+	if program == "" || program != filepath.Base(program) {
+		t.Skipf("imageViewerCommand resolved %q; this test needs a bare program name", program)
+	}
+	if err := os.WriteFile(filepath.Join(dir, program), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir
+}
+
+// lastErrorFrame returns the content of the newest error block in the main
+// transcript, or "".
+func lastErrorFrame(r *Renderer) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.vm.blocks) - 1; i >= 0; i-- {
+		if f := r.vm.blocks[i].frame; f.Kind == FrameError {
+			return f.Content
+		}
+	}
+	return ""
+}
+
+// TestClickingTheMarkerOfAFileSinceDeletedSaysSo pins the "click to open does
+// nothing while a shell command runs" report: the command was rebuilding the
+// directory the image had been read from, so the file was gone, and the only
+// thing that noticed — the launcher's exit status — was thrown away. A missing
+// file is now caught before anything is launched, and the click says so.
+func TestClickingTheMarkerOfAFileSinceDeletedSaysSo(t *testing.T) {
+	viewerDir := fakeViewer(t, ": > \"$0.ran\"\n")
+	gone := filepath.Join(t.TempDir(), "shot.png")
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.composerSuppressed = true
+
+	openImagePreview(r, gone, "shot.png")
+	if got := lastErrorFrame(r); got != "open shot.png: file no longer exists" {
+		t.Fatalf("error frame = %q, want the missing file named", got)
+	}
+	program, _ := imageViewerCommand(gone)
+	if _, err := os.Stat(filepath.Join(viewerDir, program+".ran")); err == nil {
+		t.Fatal("nothing may be launched for a file that is gone")
+	}
+}
+
+// TestALauncherThatRefusesTheFileIsReported pins the other half: a launcher
+// checks what it was handed only once it runs, so a refusal arrives as its exit
+// status after the click returned. It must reach the transcript with what the
+// launcher said, instead of the click silently doing nothing.
+func TestALauncherThatRefusesTheFileIsReported(t *testing.T) {
+	fakeViewer(t, "echo 'No application knows how to open it.' >&2\nexit 1\n")
+	shot := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(shot, []byte("\x89PNG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRenderer(io.Discard, io.Discard)
+	r.viewportMode = true
+	r.composerSuppressed = true
+
+	openImagePreview(r, shot, "shot.png")
+	want := "open shot.png: No application knows how to open it."
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if got := lastErrorFrame(r); got == want {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("error frame = %q, want %q", lastErrorFrame(r), want)
 }

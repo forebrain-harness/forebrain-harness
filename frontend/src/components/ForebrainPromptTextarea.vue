@@ -48,6 +48,12 @@ const props = defineProps<{
    */
   queueVisible?: boolean
   sideConversation?: boolean
+  /**
+   * This composer belongs to a subagent's tab: its "/" menu lists the commands
+   * that view may run, as the server classifies them, rather than the
+   * conversation's.
+   */
+  subagentView?: boolean
   /** A conversation whose directory is gone cannot continue: the composer
    *  takes no input until the directory is back. */
   disabled?: boolean
@@ -282,7 +288,7 @@ watch(slashQuery, () => {
   slashHighlightIndex.value = 0
 })
 
-watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation, slashAtStart], async ([open, query]) => {
+watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation, () => props.subagentView, slashAtStart], async ([open, query]) => {
   if (!open) {
     slashCommands.value = []
     slashLoading.value = false
@@ -294,6 +300,7 @@ watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversatio
     const res = await forebrainApi.slashCommands('webchat', String(query), {
       duringRun: props.duringRun === true,
       sideConversation: props.sideConversation === true,
+      subagentView: props.subagentView === true,
     })
     if (req !== slashRequestSeq) return
     const records = Array.isArray(res.records) ? res.records : []

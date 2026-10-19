@@ -22879,7 +22879,7 @@ func TestClickingAFinishedSubagentCardOpensItsView(t *testing.T) {
 	}
 	// Clicking inside the agent's own view is inert rather than re-entering it.
 	for row := range r.vpLastRender.lines {
-		if r.openAgentViewAtRowLocked(row) {
+		if r.openAgentViewAtRowLocked(r.vpLastRender, row) {
 			t.Fatalf("row %d re-opened the view the user is already in", row)
 		}
 	}
@@ -25672,7 +25672,7 @@ func TestViewportMouseClickOnJumpToBottomControl(t *testing.T) {
 	col := (startCol + endCol) / 2
 
 	r.ViewportSelectStart(col, row)
-	if !r.vpJumpToBottomPressed {
+	if !r.vpPress.onJumpButton {
 		t.Fatal("press inside control should arm jump action")
 	}
 	if r.selectStartRow != -1 {
@@ -25978,7 +25978,7 @@ func TestSelectWordAtLockedWideRuneClickMapsToVisualCol(t *testing.T) {
 	r.vpLastRender = renderViewport(&r.vm, 80, 5, 0, DiffThemeDark)
 
 	// Double-click at visual column 0 on the first body line: "你好" is a word.
-	r.selectWordAtLocked(0, 0)
+	r.selectWordAtLocked(r.liveScreenLocked(), 0, 0)
 	if r.selectStartCol != 0 {
 		t.Fatalf("expected selectStartCol=0 (visual), got %d", r.selectStartCol)
 	}
@@ -26007,7 +26007,7 @@ func TestSelectWordAtLockedWideRuneSecondWord(t *testing.T) {
 
 	// "你好 世界": '世' starts at visual column 5 (after 你好 + space = 4+1).
 	// Double-click on column 5 selects "世界".
-	r.selectWordAtLocked(5, 0)
+	r.selectWordAtLocked(r.liveScreenLocked(), 5, 0)
 	got := r.extractSelectedTextLocked()
 	if got != "世界" {
 		t.Fatalf("expected double-click on second word to select '世界', got %q", got)
@@ -26026,13 +26026,13 @@ func TestSelectWordAtLockedAsciiStillCorrect(t *testing.T) {
 	r.vpHeight = 5
 	r.vpLastRender = renderViewport(&r.vm, 80, 5, 0, DiffThemeDark)
 
-	r.selectWordAtLocked(0, 0)
+	r.selectWordAtLocked(r.liveScreenLocked(), 0, 0)
 	got := r.extractSelectedTextLocked()
 	if got != "hello" {
 		t.Fatalf("expected 'hello', got %q", got)
 	}
 	// 'w' is at column 6 (after "hello " = 6 chars).
-	r.selectWordAtLocked(6, 0)
+	r.selectWordAtLocked(r.liveScreenLocked(), 6, 0)
 	got = r.extractSelectedTextLocked()
 	if got != "world" {
 		t.Fatalf("expected 'world', got %q", got)
