@@ -53,6 +53,36 @@ export async function seedProjectSession(page: Page, name = 'e2e-seed'): Promise
 }
 
 /**
+ * Seed n conversations the drawer's list carries: one project, n sessions in
+ * it, each titled "listed <i>" and holding one message. A message is what
+ * lists a conversation — the create endpoint alone leaves a row the lists
+ * hide — and the composer turn is the one public way to add one, so this
+ * walks n quick turns against the fake provider (n real turns under
+ * E2E_REAL_LLM=1; keep n small there).
+ */
+export async function seedListedConversations(page: Page, n: number, name = 'e2e-seed-list'): Promise<void> {
+  const parent = process.env.E2E_PROJECT_PARENT
+  if (!parent) throw new Error('E2E_PROJECT_PARENT must point outside the forebrain home')
+  const root = join(parent, 'e2e-seed', `${name}-${uniqueSuffix()}`)
+  mkdirSync(root, { recursive: true })
+  const res = await page.request.post('/api/v1/projects', { data: { name, root, trust: true } })
+  if (!res.ok()) throw new Error(`seed project at ${root} failed: ${res.status()} ${await res.text()}`)
+  const projectId = String(((await res.json()) as { id: string }).id)
+  for (let i = 0; i < n; i++) {
+    const session = await page.request.post('/api/chat/sessions', {
+      data: { project_id: projectId, title: `listed ${i}` },
+    })
+    if (!session.ok()) throw new Error(`seed session ${i} failed: ${session.status()} ${await session.text()}`)
+    const id = String(((await session.json()) as { id: string }).id)
+    await page.goto(`/?session=${id}`, { waitUntil: 'networkidle' })
+    await page.waitForSelector('textarea')
+    await page.fill('textarea', `listed-e2e ${i}`)
+    await page.press('textarea', 'Enter')
+    await expectAssistantReply(page)
+  }
+}
+
+/**
  * Register (or reuse) a project bound to a fresh scratch directory and return
  * its id. Scheduled tasks and channels belong to a project, so a spec that
  * drives their project tab calls this before navigating to it.

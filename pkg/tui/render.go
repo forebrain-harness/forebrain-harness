@@ -448,6 +448,12 @@ type Renderer struct {
 	// background while the composer cursor stays visible, matching a native
 	// terminal. Reset to false on release and in selectClearLocked.
 	selectDragging bool
+	// publishedComposerSelection is the rune range of the composer buffer this
+	// renderer last handed to the raw input reader (-1,-1 for none). The reader
+	// owns that buffer, so a change of selection is the only news it gets; this
+	// is what keeps a consumed range from being published again on the next
+	// paint. See publishComposerSelectionLocked.
+	publishedComposerSelection [2]int
 	// vpScreens keeps the screens the last paints wrote (a ring; vpScreensNext
 	// is the slot the next paint fills), so a mouse event is resolved against
 	// the screen the user acted on rather than one painted while the event
