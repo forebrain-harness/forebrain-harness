@@ -17,6 +17,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/tool"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -419,8 +420,10 @@ func TestToolImageRowPersistsAsReferenceAndRehydratesIdentically(t *testing.T) {
 	require.Equal(t, "call-1", rehydrated.ToolCallID)
 	require.Equal(t, []llm.ContentPart{llm.Text("saved"), live}, rehydrated.Parts)
 
-	// (c) With the file gone, rehydration is best-effort: the placeholder
-	// stays, nothing errors.
+	// (c) With the file gone, rehydration is best-effort: nothing errors, and
+	// the model still learns which attachment it is missing and why. The note
+	// is the same sentence a live turn writes (llm.UnsendableImageNote), so a
+	// conversation that hit this reads the same however it was sent.
 	require.NoError(t, os.Remove(imgPath))
 	entries, err = sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
 	require.NoError(t, err)
@@ -430,8 +433,109 @@ func TestToolImageRowPersistsAsReferenceAndRehydratesIdentically(t *testing.T) {
 			continue
 		}
 		require.Len(t, msgs[i].Parts, 2)
-		require.Equal(t, "[attachment] shot.png (image/png)", msgs[i].Parts[1].Text)
+		require.True(t,
+			strings.HasPrefix(msgs[i].Parts[1].Text, "[attachment] shot.png (image/png) — not sent: "),
+			"degraded part = %q", msgs[i].Parts[1].Text)
 	}
+}
+
+// solidPNG returns an incompressible-free w×h PNG of one colour: small on
+// disk, arbitrary in pixels — the shape of a screenshot that is far under the
+// byte budget and still past the provider's per-side ceiling.
+func solidPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 210, G: 220, B: 230, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestToolImageRowRehydratesWithinProviderSideLimit pins that a tool row's
+// re-derivation obeys the provider's per-side ceiling. A 2640x11576 screenshot
+// is under the byte budget and was sent verbatim before this fix, so every
+// later request of the session answered 400; the ladder now shrinks it, and
+// the reload produces exactly what the live turn sent.
+func TestToolImageRowRehydratesWithinProviderSideLimit(t *testing.T) {
+	t.Setenv(llm.ImageMaxBytesEnv, "")
+	db, err := state.OpenStateForTest(context.Background(), filepath.Join(t.TempDir(), "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sess := state.NewSessionStore(db, "main")
+	ctx := context.Background()
+	require.NoError(t, sess.Ensure(ctx, "s1", "s1"))
+
+	imgPath := filepath.Join(t.TempDir(), "shot.png")
+	raw := solidPNG(t, 100, 9000)
+	require.Less(t, len(raw), llm.DefaultMaxImageBytes, "the test image must be under the byte budget")
+	require.NoError(t, os.WriteFile(imgPath, raw, 0o600))
+
+	live, res, err := llm.ImagePartWithin(imgPath, "image/png", raw, 0)
+	require.NoError(t, err)
+	require.True(t, res.Scaled, "a 9000px side must go through the ladder")
+	require.LessOrEqual(t, res.Height, llm.MaxImageSidePixels)
+
+	require.NoError(t, sess.AppendMessageSequence(ctx, "s1", []llm.Message{
+		llm.ToolResultMessage("call-1", llm.Text("saved"), live),
+	}, "", ""))
+
+	entries, err := sess.ListTranscriptMessagesWithRefs(ctx, "s1", 100)
+	require.NoError(t, err)
+	msgs := rehydrateImageReferences(ctx, PathResolver{}, entries)
+	var rehydrated *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleTool {
+			rehydrated = &msgs[i]
+		}
+	}
+	require.NotNil(t, rehydrated, "tool message missing after reload")
+	require.Len(t, rehydrated.Parts, 2)
+	require.Equal(t, live, rehydrated.Parts[1], "replay must re-derive the part the live turn sent")
+
+	decoded, err := base64.StdEncoding.DecodeString(rehydrated.Parts[1].ImageBase64)
+	require.NoError(t, err)
+	w, h := llm.DecodeImageConfig(decoded)
+	require.LessOrEqual(t, w, llm.MaxImageSidePixels, "replayed image is %dpx wide", w)
+	require.LessOrEqual(t, h, llm.MaxImageSidePixels, "replayed image is %dpx tall", h)
+}
+
+// TestSurfaceTurnContentPartsNoteMatchesPersistedReference pins the live/replay
+// identity of the degraded sentence: what the terminal's live turn puts in the
+// request is byte-for-byte what the stored row replays as. A note that differed
+// per path would fork the cached prefix at the message it was written, which is
+// exactly what this feature is meant to end.
+func TestSurfaceTurnContentPartsNoteMatchesPersistedReference(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "fake.png")
+	require.NoError(t, os.WriteFile(bad, []byte("not an image"), 0o600))
+	attachments := []turn.InputAttachment{{Path: bad, Label: "fake.png"}}
+
+	parts, _, warnings, err := turn.SurfaceTurnContentParts("look", "look", attachments)
+	require.NoError(t, err)
+	require.Len(t, warnings, 1)
+	var live string
+	for _, part := range parts {
+		if part.Type == llm.ContentTypeText && strings.HasPrefix(part.Text, "[attachment]") {
+			live = part.Text
+		}
+	}
+	require.NotEmpty(t, live, "the live turn wrote no note: %+v", parts)
+
+	partsJSON := turn.BuildSurfaceUserPartsJSON("look", attachments)
+	replayed := UserInputParts(context.Background(), PathResolver{}, partsJSON)
+	var note string
+	for _, part := range replayed {
+		if part.Type == llm.ContentTypeText && strings.HasPrefix(part.Text, "[attachment]") {
+			note = part.Text
+		}
+	}
+	require.Equal(t, live, note, "live and replay disagree about why the image is missing")
+	require.Equal(t, warnings[0], note)
 }
 
 // TestUserImageAttachmentRehydratesIdenticallyToLiveImageFile pins the user

@@ -31,6 +31,15 @@ const (
 	// crafted header from allocating gigabytes. ~64 megapixels (256 MiB of
 	// RGBA) is far above any real photo, and far below the bombs.
 	MaxImageDecodePixels = 64 << 20
+	// MaxImageSidePixels is the per-side pixel ceiling of an image part we put
+	// on the wire. A provider rejects the whole request when it is exceeded,
+	// and its error names only image formats, so oversize pixels look like a
+	// corrupt file: a 2640x11576 screenshot answers
+	// 400 ".messages[N].image[0]: You have uploaded an unsupported image…"
+	// (measured 2026-10-20: 2640x8192 accepted, 2640x8193 refused, regardless
+	// of byte size and content). 8000 is the ceiling every provider in the
+	// catalog accepts — Anthropic documents the same hard limit.
+	MaxImageSidePixels = 8000
 	// ImageMaxBytesEnv overrides the per-image budget with a decimal byte
 	// count. An unset, non-numeric or non-positive value falls back to
 	// DefaultMaxImageBytes.
@@ -50,6 +59,13 @@ type ImageReadResult struct {
 	Scale                     int
 }
 
+// withinSideLimit reports whether encoded dimensions are ones a provider
+// accepts. A header that does not parse (w or h 0) is not judged here: the
+// decode that follows reports it.
+func withinSideLimit(w, h int) bool {
+	return w <= MaxImageSidePixels && h <= MaxImageSidePixels
+}
+
 // ImagePartWithin encodes data as an image ContentPart no larger than maxBytes.
 // A maxBytes <= 0 falls back to ImageMaxBytesEnv, then DefaultMaxImageBytes.
 //
@@ -61,6 +77,13 @@ type ImageReadResult struct {
 // re-tried as JPEG q75. A source format the standard library cannot decode
 // (webp) or an image larger than MaxImageDecodeBytes is refused with an
 // actionable error rather than silently truncated.
+//
+// Every step of that ladder has to satisfy two criteria at once: the encoded
+// size stays within the byte budget AND both sides stay within
+// MaxImageSidePixels. The pixel ceiling is not a decode guard like
+// MaxImageDecodePixels — it is what the provider will accept, so a screenshot
+// far under the byte budget is still downscaled (or refused) when one side is
+// too long.
 func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart, ImageReadResult, error) {
 	budget := resolveImageBudget(maxBytes)
 	res := ImageReadResult{MIMEType: mime, SourceBytes: len(data)}
@@ -75,19 +98,27 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 		return ContentPart{}, res, fmt.Errorf("image type %q cannot be sent to a provider; convert it to png or jpeg first", mime)
 	}
 
-	if len(data) <= budget {
-		w, h := DecodeImageConfig(data)
-		res.SourceWidth, res.SourceHeight = w, h
-		res.Width, res.Height = w, h
+	// The header is read before the verbatim decision: a screenshot can sit far
+	// under the byte budget and still be refused for one long side, so
+	// dimensions are a sendability criterion, not only a decode guard.
+	srcW, srcH := DecodeImageConfig(data)
+	res.SourceWidth, res.SourceHeight = srcW, srcH
+
+	if len(data) <= budget && withinSideLimit(srcW, srcH) {
+		res.Width, res.Height = srcW, srcH
 		res.Scale = 1
 		res.SentBytes = len(data)
 		return withSourcePath(ImageBase64(mime, base64.StdEncoding.EncodeToString(data)), path), res, nil
 	}
 
-	// Standard-library Go has no webp decoder, so a webp over budget cannot be
-	// downscaled here; say so instead of failing to decode it later.
+	// Standard-library Go has no webp decoder, so a webp that cannot go verbatim
+	// cannot be shrunk here either; name the limit it broke instead of handing
+	// the provider an image it will reject.
 	if mime == "image/webp" {
-		return ContentPart{}, res, fmt.Errorf("image is %d MiB and webp cannot be downscaled here; convert it to png first", len(data)>>20)
+		if len(data) > budget {
+			return ContentPart{}, res, fmt.Errorf("image is %d MiB and webp cannot be downscaled here; convert it to png first", len(data)>>20)
+		}
+		return ContentPart{}, res, fmt.Errorf("image is %dx%d and webp cannot be downscaled here; convert it to png first", srcW, srcH)
 	}
 
 	// The decode below allocates from the header's dimensions before it
@@ -96,14 +127,19 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 	// otherwise allocate gigabytes before the decoder ever fails. A header
 	// that does not parse (w or h 0) falls through and fails at decode with
 	// the decoder's own reason.
-	if w, h := DecodeImageConfig(data); w > 0 && h > 0 && w*h > MaxImageDecodePixels {
+	if srcW > 0 && srcH > 0 && srcW*srcH > MaxImageDecodePixels {
 		return ContentPart{}, res, fmt.Errorf(
 			"image is %dx%d (%d MP); the decode limit is %d MP — crop or resize it first",
-			w, h, w*h>>20, MaxImageDecodePixels>>20)
+			srcW, srcH, srcW*srcH>>20, MaxImageDecodePixels>>20)
 	}
 
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
+		if srcW > 0 && srcH > 0 && !withinSideLimit(srcW, srcH) {
+			return ContentPart{}, res, fmt.Errorf(
+				"image is %dx%d, past the %d-pixel per-side limit, and could not be decoded to downscale it; crop or resize it first: %w",
+				srcW, srcH, MaxImageSidePixels, err)
+		}
 		return ContentPart{}, res, fmt.Errorf("image could not be decoded to downscale it; crop or resize it first: %w", err)
 	}
 	srcBounds := src.Bounds()
@@ -118,6 +154,9 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 	var lastImg image.Image
 	for _, s := range []int{2, 3, 4, 6, 8} {
 		dst := downscaleBlockAverage(src, s)
+		if !withinSideLimit(dst.Bounds().Dx(), dst.Bounds().Dy()) {
+			continue
+		}
 		lastImg = dst
 		encoded, err := encodeImage(dst, scaleMime, 85)
 		if err != nil {
@@ -148,6 +187,13 @@ func ImagePartWithin(path, mime string, data []byte, maxBytes int) (ContentPart,
 				return withSourcePath(ImageBase64("image/jpeg", base64.StdEncoding.EncodeToString(encoded)), path), candidate, nil
 			}
 		}
+	}
+	if lastImg == nil {
+		// The source is wider or taller than any provider accepts and the ladder
+		// never produced a candidate under the ceiling.
+		return ContentPart{}, res, fmt.Errorf(
+			"image is %dx%d and cannot be reduced below the %d-pixel per-side limit; crop or resize it first",
+			srcBounds.Dx(), srcBounds.Dy(), MaxImageSidePixels)
 	}
 	return ContentPart{}, res, fmt.Errorf("image is %d MiB and cannot be reduced below %d MiB; crop or resize it first", len(data)>>20, budget>>20)
 }

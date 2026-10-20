@@ -5,6 +5,7 @@
     color-scheme: light;
     --pg-bg: #f4f5f7; --pg-card: #ffffff; --pg-text: #101828; --pg-text-2: #475467; --pg-muted: #667085; --pg-line: #e4e7ec;
     --pg-chip: #eef0f3; --pg-chip-on: #101828; --pg-chip-on-text: #ffffff;
+    --pg-fresh: #e8f0fd; --pg-fresh-text: #1f4a9e; --pg-fresh-line: #b8cdf3; --pg-fresh-on: #1f4a9e;
     --ui: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", "Noto Sans SC", Roboto, "Helvetica Neue", Arial, sans-serif;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
@@ -19,6 +20,11 @@
   .seg button { font: inherit; font-size: 13px; border: 0; background: transparent; color: var(--pg-text-2); padding: 5px 11px; border-radius: 6px; cursor: pointer; }
   .seg button[aria-pressed="true"] { background: var(--pg-chip-on); color: var(--pg-chip-on-text); }
   .seg button:focus-visible { outline: 2px solid var(--pg-text); outline-offset: 1px; }
+  /* 2026-10-20: the demos added today are marked, so a reviewer opening this
+     file goes straight to what changed instead of hunting the list. */
+  .seg button.fresh { background: var(--pg-fresh); color: var(--pg-fresh-text); box-shadow: inset 0 0 0 1px var(--pg-fresh-line); font-weight: 600; }
+  .seg button.fresh[aria-pressed="true"] { background: var(--pg-fresh-on); color: #ffffff; box-shadow: none; }
+  .seg button.fresh::before { content: "\25CF"; font-size: 8px; vertical-align: 1px; margin-right: 5px; }
   .stage { overflow-x: auto; border: 1px solid var(--pg-line); border-radius: 12px; background: var(--pg-card); }
   .caption { background: var(--pg-card); border: 1px solid var(--pg-line); border-radius: 12px; padding: 14px 18px; display: grid; gap: 6px; }
   .caption h2 { margin: 0; font-size: 15px; font-weight: 600; }
@@ -228,11 +234,79 @@
   .a { display: grid; gap: 10px; } .a p { margin: 0; }
   .a code.inl { background: var(--subtle); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
   .tool { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .tool-h { display: flex; align-items: center; gap: 8px; padding: 7px 11px; background: var(--subtle); border-bottom: 1px solid var(--line); font-size: 12px; }
-  .tool-h b { font-weight: 600; } .tool-h code { color: var(--text-2); } .tool-h .ok { margin-left: auto; color: var(--success); font-size: 11.5px; }
+  /* 2026-10-20: the head is always one line. A call's summary can be a whole
+     2 KB command; the head states which call it was and nothing else, and the
+     invocation it could not fit moves into the body whole (.cmd-full). */
+  .tool-h { display: flex; align-items: center; gap: 8px; padding: 8px 11px; background: var(--subtle); border-bottom: 1px solid var(--line); font-size: 12px; }
+  .tool-h > svg.lucide { width: 14px; height: 14px; color: var(--muted); }
+  .tool-h .cmd { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tool-h .ok, .tool-h .bad, .tool-h .ask, .tool-h .run, .tool-h .chev { flex: none; white-space: nowrap; }
+  .tool-h .ok { color: var(--success); font-size: 11.5px; }
+  .tool-h .bad { color: var(--danger); font-size: 11.5px; }
+  .tool-h .ask { color: var(--brand); font-size: 11.5px; }
+  .tool-h .run { color: var(--brand); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+  .tool-h .run svg.lucide { width: 12px; height: 12px; }
+  .tool-h .chev { color: var(--muted); }
   .tool pre { margin: 0; background: var(--code); padding: 9px 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; }
   .tool pre div { display: grid; grid-template-columns: 38px 1fr; white-space: pre; }
   .tool pre .ln { color: #9ca3af; text-align: right; padding-right: 12px; }
+  /* The whole invocation, for the calls whose head had to shorten it: wrapped,
+     bounded, scrollable. A command is read here, never truncated here. */
+  /* A soft fade at the bottom edge says "there is more" instead of cutting a
+     line in half — the same mask the subagent task card already uses. */
+  .tool pre.cmd-full { padding: 8px 11px; background: var(--subtle); border-bottom: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 208px; overflow: auto; mask-image: linear-gradient(#000 calc(100% - 22px), transparent); }
+  /* The call's own body: prose, a result block, a checklist, a question — one
+     column, the card's own padding, never a second frame around the content. */
+  .tool-b { padding: 9px 11px; display: grid; gap: 8px; font-size: 13px; line-height: 1.6; color: var(--text); }
+  .tool-b > :first-child { margin-top: 0; } .tool-b > :last-child { margin-bottom: 0; }
+  .tool-b p { margin: 0; }
+  .tool-b .hint { font-size: 12px; }
+  .tool-b .diff { border: 0; border-radius: 0; }
+  .tool-b pre { border-radius: 6px; max-height: 208px; overflow: auto; }
+  .tool-b .tlist { display: grid; gap: 2px; }
+  .tool-b .trow { display: flex; align-items: flex-start; gap: 7px; font-size: 12.5px; color: var(--text-2); }
+  .tool-b .trow svg.lucide { width: 14px; height: 14px; margin-top: 3px; color: var(--muted); }
+  .tool-b .trow.done span { color: var(--muted); text-decoration: line-through; }
+  .tool-b .trow.done svg.lucide { color: var(--success); }
+  .tool-b .trow.now { color: var(--text); }
+  .tool-b .trow.now svg.lucide { color: var(--brand); }
+  .tool-b .opts { display: grid; gap: 4px; }
+  .tool-b .opt { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12.5px; color: var(--text-2); }
+  .tool-b .opt svg.lucide { width: 13px; height: 13px; }
+  .tool-b .opt.on { border-color: var(--brand); background: var(--brand-soft); color: var(--text); }
+  .tool-b .srs { display: grid; gap: 8px; }
+  .tool-b .sr { display: grid; gap: 1px; font-size: 12.5px; }
+  .tool-b .sr .t { color: var(--brand); font-weight: 500; }
+  .tool-b .sr .u { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .tool-b .sr p { color: var(--text-2); }
+  .tool-b .hits { display: grid; gap: 7px; }
+  .tool-b .hit { display: grid; gap: 1px; }
+  .tool-b .hit .p { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .tool-b .hit p { font-size: 12.5px; color: var(--text-2); }
+  .tool-b .dgn { display: flex; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+  .tool-b .dgn .p { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); flex: none; }
+  .tool-b .facts { font-size: 12.5px; color: var(--text-2); }
+  .tool-b .facts .lit { font-family: var(--mono); font-size: 12px; color: var(--text); }
+  .tool.min .tool-h { border-bottom: 0; }
+  /* A run parked on a question: the question is the whole card head, the page
+     it is about is the body, and the three ways out sit on the head's right. */
+  .approval { border: 1px solid var(--line); border-radius: 8px; background: var(--page); padding: 10px 12px; display: grid; gap: 7px; }
+  .approval-h { display: flex; align-items: center; gap: 12px; }
+  .approval-h .q { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text); }
+  .approval-h .acts { display: flex; align-items: center; gap: 6px; flex: none; }
+  .approval .page { font-family: var(--mono); font-size: 12px; color: var(--text-2); padding-left: 16px; overflow-wrap: anywhere; }
+  /* The fact the decision turns on. One line, as long as it needs to be: a long
+     identifier breaks instead of being cut, because a truncated URL or path is
+     no longer the thing it names. */
+  .approval .facts { font-size: 12px; color: var(--text-2); padding-left: 16px; overflow-wrap: anywhere; }
+  .approval .facts.mono, .approval .facts .lit { font-family: var(--mono); }
+  .approval .facts .sep { color: var(--line-2); padding: 0 4px; }
+  /* A note being written to memory is a document, not a label: it gets prose
+     size and a scroll box of its own so long notes stay whole. */
+  .approval .memo { margin-left: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--subtle); padding: 8px 10px; max-height: 132px; overflow: auto; font-size: 13px; line-height: 1.6; color: var(--text); }
+  .approval .memo b { display: block; font-weight: 600; }
+  .approval .memo p { margin: 2px 0 0; }
+  .approval .memo p + p { margin-top: 6px; }
   .worked { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
   .worked::before { content: ""; width: 12px; height: 1px; background: var(--line-2); flex: none; }
   .worked::after { content: ""; flex: 1; height: 1px; background: var(--line-2); }
@@ -430,6 +504,21 @@
   .preset-opt span { font-size: 12px; color: var(--text-2); }
   .preset-opt.on b { color: var(--brand); }
   .preset-cap { font-size: 11px; color: var(--muted); padding: 4px 10px 2px; }
+  /* The view-mode menu: two rows, the axis named on each one, the current
+     setting ticked. It opens upward like the approval menu it sits beside. */
+  .chip-wrap { position: relative; display: inline-flex; }
+  .view-menu { position: absolute; bottom: calc(100% + 6px); left: 0; width: 280px; background: var(--page); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--pop); padding: 6px; z-index: 6; display: grid; gap: 2px; }
+  .view-opt { display: grid; gap: 2px; text-align: left; border: 0; background: transparent; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+  .view-opt:hover { background: var(--subtle); }
+  .view-opt b { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .view-opt b svg.lucide { width: 13px; height: 13px; }
+  .view-opt span { font-size: 12px; color: var(--text-2); }
+  .view-opt.on b { color: var(--brand); }
+  .sa-comp .view-menu { width: 260px; }
+  /* 简洁 mode: the answers stay, the run's cards step out of the way. Nothing
+     is deleted — the mode only decides what this view draws. */
+  .chat.brief .tool, .chat.brief .think, .chat.brief .sa-card { display: none; }
+  .sad.brief .tool, .sad.brief .think { display: none; }
   .composer { position: relative; }
   /* stacked radio card (title over text); not `.col`, which is the chat column's class */
   .rc.stack { flex-direction: column; align-items: flex-start; gap: 6px; }
@@ -475,9 +564,15 @@
   .app .att svg.lucide { width: 13px; height: 13px; }
   .send-hint { margin-left: auto; font-size: 12px; color: var(--muted); }
   .send-hint + .send { margin-left: 8px; }
-  .think { display: grid; gap: 3px; }
-  .think-l { font-size: 11px; color: var(--muted); }
-  .think p { font-size: 12.5px; color: var(--muted); white-space: pre-wrap; }
+  /* A thinking block is a card you can fold — the same card the subagent tab
+     draws: the caption is the whole ticket, the prose opens only when asked. */
+  .think { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  .think-l { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); cursor: pointer; }
+  .think-l::before { content: "▸"; }
+  .think.open .think-l::before { content: "▾"; }
+  .think p { margin: 6px 0 0; font-size: 12px; line-height: 1.65; color: var(--muted); white-space: pre-wrap; }
+  .think:not(.open) p { display: none; }
+  .think:not(.open) { padding: 5px 10px; }
   .err-block { display: flex; align-items: flex-start; gap: 8px; border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 6px; padding: 8px 12px; font-size: 12.5px; color: var(--text); background: var(--page); }
   .app .err-block svg.lucide { color: var(--danger); margin-top: 3px; width: 14px; height: 14px; }
   .err-block .s { color: var(--muted); font-size: 12px; display: block; margin-top: 2px; }
@@ -888,12 +983,9 @@
   .sa-run .pp::before, .sa-run .pa::before { content: "·"; margin-right: 6px; color: var(--muted); font-family: var(--ui); }
   .app .sa-run svg.pc { width: 12px; height: 12px; color: var(--success); stroke-width: 2.25; }
   .sa-run .pa { font-family: var(--ui); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .sad-b .tool.min .tool-h { border-bottom: 0; }
-  .sad-b .tool-h .run { margin-left: auto; color: var(--brand); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
-  .sad-b .tool-h .run svg { width: 12px; height: 12px; }
+  /* The drawer's column is narrower; the card inside it is the same card the
+     conversation draws, so there is no per-surface header rule here. */
   .sad-b .a { gap: 10px; }
-  .sad-b .tool-h code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sad-b .tool-h b, .sad-b .tool-h svg, .sad-b .tool-h .ok, .sad-b .tool-h .run { flex: none; white-space: nowrap; }
   /* with the drawer open the conversation is narrower: the composer keeps every control, the model chip drops its icon */
   .chat.narrow .composer { width: calc(100% - 32px); }
   .chat.narrow .composer [data-act="modelmenu"] > svg:first-child { display: none; }
@@ -957,7 +1049,34 @@
   </header>
 
   <section class="iter" aria-label="本轮迭代">
-    <h2>本轮迭代（2026-10-17）：模型不支持图片时，消息不丢（与终端一致）；MCP 页面范围与抽屉；表格分页</h2>
+    <h2>本轮迭代（2026-10-20）：对话里的每一种消息卡重画——卡头永远一行，长命令进正文，思考卡可折叠</h2>
+    <ul>
+      <li>“本轮新增”里高亮的<b>对话 · 全部消息卡</b>是这次的总览：一次真实的排障里，把主代理会话能出现的每一种卡片都画出来，开合与状态各给一张——思考卡、内置工具调用卡、session 类（清单 / 计划模式 / 中间笔记）、提问、权限申请、记忆类、八种 subagent_* 调用、外部 MCP 工具，以及失败 / 被拒 / 运行中三种状态。</li>
+      <li>卡头永远一行：图标 + 调用摘要（与终端同一句话）+ 状态 + 折叠箭头。摘要用省略号收尾，<b>不再换行</b>——2 KB 的多行命令也不会把卡头撑高，状态徽标不再悬在右侧半空；悬停看完整那一行。</li>
+      <li>完整调用搬进正文顶部（等宽、折行、限高 208px 滚动、可复制）：引擎认为一行放得下的（不超过 120 字符且没有换行）不重复画，短调用的卡与现在一模一样。</li>
+      <li>正文就是这条调用的结果，一列，不再套第二层框：代码结果带行号，改动带 +/− 着色，搜索是标题 / 地址 / 摘要，记忆命中是“文件 · 行 + 引用行”，清单是勾选行，提问是题目 + 已选的一项，权限是原因 + 允许的范围。</li>
+      <li>思考卡在主视图、子代理标签页、技能工坊是同一张：折叠成一行“思考了 N 秒”，点开才看正文，默认折叠。</li>
+      <li>主代理会话与子代理会话用同一张卡（图标、摘要、状态、折叠、正文一字不差），只有列的宽度不同——宽度不够时由省略号负责，抽屉里不再另画一套。</li>
+      <li>两个视图的输入框里都新增“视图 · 默认 / 简洁”下拉（同一套：审批模式旁边那一枚，子代理输入框里也有一枚）：<b>默认</b>画全量消息卡，<b>简洁</b>只留助手回答——工具调用卡与思考卡不画（新增“对话 · 简洁模式”“子代理 · 视图模式下拉”）。这是阅读方式，不是删消息：什么都没丢，等你回答的东西仍在输入框上方的面板里。</li>
+      <li>八种 subagent_* 调用（run / fanout / send / status / wait / continue / close / list）沿用子代理调用卡（一句概要 + 每个任务一行），这次一并放进总览逐张核对。</li>
+      <li>稿面按引擎实际下发的调用摘要绘制（<span class="mono">ran read … · lines 15-20</span>、<span class="mono">failed: exit status 1</span>、<span class="mono">approved request permissions</span>、<span class="mono">asked user</span>、<span class="mono">saved intermediate notes</span> …），稿面与真机是同一套话。</li>
+      <li>已知要一起修的引擎文案（本稿已按修正后的样子画）：<span class="mono">ran session_todo</span> 与 <span class="mono">ran exit_plan_mode</span> 有多余空格，<span class="mono">ran fetch … · 1 items</span> 的单复数，以及 shell 的展示正文会把调用参数（input JSON）再打印一遍——卡头已经是那句话，正文只该给结果。</li>
+      <li>抓取要审批时，对话里是这样一张卡（新增“对话 · 抓取审批”）：一句问句“要我向公开网络取这个页面吗？”、地址独占一行且长串折行不省略、右侧三档“取这个页面 / 不再询问 example.com / 不要取”（与终端同一顺序）——与终端同一组事实、同一套说法。“不再询问”自带作用范围（主机），卡片里不再另说一遍会记住什么。</li>
+      <li>另外两族要审批时是同一张卡（新增“对话 · 搜索审批”“对话 · 记忆写入审批”）：问句即标题、右侧两档、第二行只放这次决定要用的那一两个事实，长串折行不省略——搜索写搜索词（加引号，它是模型自己说的话）和结果上限（工具默认 5 条、最多 10 条，与终端同一行说法），记忆写入写文件名 + 记忆作用域，其下是可滚动的笔记正文（13px 正文、长内容滚动不截断）。第二档的动词跟着这一族实际发生的事：搜索是“不要搜”（中断本轮），记忆写入是“不要记”（跳过这一条，本轮继续）。</li>
+      <li>这两族没有“权限记忆”框：web_search 的决定只有“做 / 不做”，记忆写入只有“记住 / 不要记”，都没有“要不要记住这个批准”这一项；所以卡片里不解释一件不会发生的事。抓取卡的“不再询问主机”把记住的东西写在自己的按钮上，也不需要第二个框。</li>
+      <li>免审批的操作不画审批卡（owner 2026-10-20）：retrieve_output 与 memories_read / search / list 在默认放行集合里（只读、且读不到记忆库以外的路径），默认根本不问，也就不会有卡；它们只有用户自己写了“询问”规则时才会被问到，那时走通用卡。</li>
+    </ul>
+  </section>
+
+  <section class="iter" aria-label="上一轮迭代">
+    <h2>上一轮迭代（2026-10-19）：web_fetch 只剩一个参数</h2>
+    <ul>
+      <li>web_fetch 只剩“地址”一个参数，说明改为它现在做的事：抓取指定公开 URL 的内容，HTML 转成正文 Markdown。原来的“按要求提炼”和“处理要求”“最多下载字节”两个参数都不存在了。</li>
+    </ul>
+  </section>
+
+  <section class="iter" aria-label="更早的迭代">
+    <h2>更早的迭代（2026-10-17）：模型不支持图片时，消息不丢（与终端一致）；MCP 页面范围与抽屉；表格分页</h2>
     <ul>
       <li>当前模型不支持图片时，带图消息照常留在对话里，不再退回输入框；消息下方提示“消息已保留，未发送”，没有请求发给模型。</li>
       <li>对话里还有图片时，换模型之前每条新消息都一样：保留、不发送、同样的提示。不会为了让模型能回答而丢掉图片。</li>
@@ -997,8 +1116,8 @@
     </ul>
   </section>
 
-  <section class="iter" aria-label="上一轮迭代">
-    <h2>上一轮迭代（2026-10-14）：MCP 三层作用域与全字段弹窗</h2>
+  <section class="iter" aria-label="更早的迭代">
+    <h2>更早的迭代（2026-10-14）：MCP 三层作用域与全字段弹窗</h2>
     <ul>
       <li>菜单栏新增「MCP」页：列出全局与本主代理的 MCP（不含项目级），与技能页同一套界面（标题行 + 搜索行 + 表格）。多出「来源」一列（全局 / 主代理），主代理的行可启停、编辑、删除，全局行只读并直接跳到能改的地方。</li>
       <li>三层，各页只增删改自己那一层：设置 · MCP 只看、只改全局；菜单栏 MCP 看全局 + 主代理，只改主代理；项目空间 · MCP 看全局 + 主代理 + 项目，只改项目（需信任 + 逐条同意）。不同名叠加，同名整条覆盖，不做字段级混合。</li>
@@ -2483,7 +2602,7 @@
   };
   var S = {
     tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', drawer: false, tmenu: false,
-    bench: false, hb: false, preset: 'default', presetMenu: false, settingsTab: 'appearance', projTab: 'overview',
+    bench: false, hb: false, preset: 'default', presetMenu: false, view: 'default', viewMenu: false, saView: 'default', savMenu: false, settingsTab: 'appearance', projTab: 'overview',
     tree: {}, treeLoading: {}, ref: '', toolOpen: '', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false,
     sa: { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false },
     pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
@@ -2599,7 +2718,7 @@
     var last = projects.filter(function (p) { return p.last; })[0];
     S.pick = { mode: 'project', proj: last ? last.n : '', folder: '' };
   }
-  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.mcpUndecline = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.img = null; S.model = ''; S.modelMenu = false; S.mdw = null; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
+  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.mcpUndecline = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.view = 'default'; S.viewMenu = false; S.saView = 'default'; S.savMenu = false; S.img = null; S.model = ''; S.modelMenu = false; S.mdw = null; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
 
   var starters = [['file-text', '生成 FOREBRAIN.md', '/init'], ['map', '先出计划再动手', '@plan'], ['hammer', '做一个技能', '@workshop'], ['clock', '设一个定时任务', '@cron']];
   function pjPop() {
@@ -2695,13 +2814,44 @@
     S.img.turns.push(seesImages(m) ? { t: t, answered: true } : { t: t, refused: true, model: m });
     S.draft = '';
   }
+  // ---------- 2026-10-20: how much of the run the conversation shows ----------
+  // 默认 draws every card the run produced; 简洁 keeps only the answers, hiding
+  // the tool-call cards and the thinking cards. It is a reading mode, not a
+  // filter on the run: nothing is deleted, and the panel above the composer
+  // still carries anything waiting for the person's answer.
+  var VIEW_MODES = [
+    ['default', '默认', '全部消息卡', '工具调用、思考、子代理调用都画出来'],
+    ['concise', '简洁', '只看回答', '隐藏工具调用卡与思考卡']
+  ];
+  function viewLabel() { return VIEW_MODES.filter(function (x) { return x[0] === S.view; })[0]; }
+  function saViewLabel() { return VIEW_MODES.filter(function (x) { return x[0] === S.saView; })[0]; }
+  function viewChip() {
+    var v = viewLabel();
+    return '<span class="chip-wrap">' +
+      '<button type="button" class="chip-btn" data-act="view" aria-haspopup="listbox" aria-expanded="' + !!S.viewMenu + '"' + (S.viewMenu ? '' : ' data-tip="消息卡显示范围" data-tip-pos="top"') + '>' +
+      ic(v[0] === 'concise' ? 'eye-off' : 'eye') + '视图 · ' + v[1] + ic('chevron-down') + '</button>' +
+      (S.viewMenu ? viewMenu(S.view, 'viewmode') : '') + '</span>';
+  }
+  function saViewChip() {
+    var v = saViewLabel();
+    return '<span class="chip-wrap">' +
+      '<button type="button" class="chip-btn" data-act="saview" aria-haspopup="listbox" aria-expanded="' + !!S.savMenu + '"' + (S.savMenu ? '' : ' data-tip="消息卡显示范围" data-tip-pos="top"') + '>' +
+      ic(v[0] === 'concise' ? 'eye-off' : 'eye') + v[1] + ic('chevron-down') + '</button>' +
+      (S.savMenu ? viewMenu(S.saView, 'saviewmode') : '') + '</span>';
+  }
+  function viewMenu(setting, attr) {
+    return '<div class="view-menu" role="listbox">' + VIEW_MODES.map(function (x) {
+      var on = x[0] === setting;
+      return '<button type="button" class="view-opt' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-' + attr + '="' + x[0] + '"><b>' + (on ? ic('check') : '') + x[2] + '</b><span>' + x[3] + '</span></button>';
+    }).join('') + '</div>';
+  }
   function composerHtml(o) {
     var p = presets.filter(function (x) { return x[0] === S.preset; })[0], off = o.missing || !o.ready, typed = o.typed || S.draft;
     var h = '<div class="composer' + (o.missing ? ' locked' : '') + '">' + (o.fresh && !o.ws ? pjPill() : '') + (S.plusPop ? plusPop() : '') +
       (S.atts.length ? '<div class="atts">' + S.atts.map(function (a, i) { return '<span class="att">' + ic(/\.png$/.test(a) ? 'image' : 'file') + a + '<button type="button" data-rmatt="' + i + '" aria-label="移除 ' + a + '">' + ic('x') + '</button></span>'; }).join('') + '</div>' : '') +
       '<div class="ph-t' + (typed ? ' typed' : '') + '">' + (S.ref ? '<span class="ref">@' + S.ref + '</span>' : '') + (o.missing ? '目录不存在，不能继续' : (typed || '输入消息，/ 调出命令，@ 引用文件')) + '</div>' +
       '<div class="bar"><button type="button" class="icon-btn" data-act="plus" title="添加" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.plusPop + '"' + (off ? ' disabled' : '') + '>' + ic('plus') + '</button>' + modeChip() +
-      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '" data-tip="本会话的审批模式" data-tip-pos="top">' + ic('shield') + p[2] + ic('chevron-down') + '</button><span class="grow"></span>' +
+      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '" data-tip="本会话的审批模式" data-tip-pos="top">' + ic('shield') + p[2] + ic('chevron-down') + '</button>' + viewChip() + '<span class="grow"></span>' +
       (o.fresh ? '' : ring(ctxPct())) + modelChip() + effortChip() +
       '<button type="button" class="send" aria-label="发送" data-act="send"' + (off ? ' disabled' : '') + '>' + ic('arrow-up') + '</button></div>';
     if (S.presetMenu) {
@@ -2715,8 +2865,282 @@
     return '<div class="err-block warn">' + ic('plug-zap') + '<div>MCP 服务 <b>playwright</b> 启动超时（30 秒），本对话不能用它的工具。<span class="s">修好后新开对话即可。<button type="button" class="btn link" data-act="mcpdetail" style="font-size:12px">' + (S.mcpDetail ? '收起详情' : '查看详情') + '</button></span>' +
       (S.mcpDetail ? '<code style="display:block;margin-top:6px;color:var(--text-2)">startup timed out after 30s: context deadline exceeded</code>' : '') + '</div></div>';
   }
+  // A run parked on a question. Four families share this anatomy - fetch a page,
+  // search the public web, pull a compressed output back, and the two faces of
+  // memory - because they are the same moment: a tool call is waiting for yes or
+  // no. What differs is the fact the answer turns on, and that is all the body
+  // carries: no column labels ("Query:", "Filename:"), no second box around it.
+  // Only web_fetch has anything to remember (the host, which its own button
+  // names). The other three decide [accept, cancel] or [accept, decline] - there
+  // is no "remember this" option, so no card here explains one.
+  function gateCard(question, acts, facts) {
+    return '<div class="approval"><div class="approval-h"><div class="q">' + question + '</div><div class="acts">' + acts + '</div></div>' + facts + '</div>';
+  }
+  function toolRow(icon, name, arg) {
+    return '<div class="tool min"><div class="tool-h">' + ic(icon) + '<span class="cmd">' + esc(name + ' ' + arg) + '</span>' + ic('chevron-down', 'chev') + '</div></div>';
+  }
+
+  // ---------- 2026-10-20: a card is one line of facts plus a body ----------
+  // The head never wraps: the tool's icon, the engine's own summary (the words
+  // the terminal uses for the same call), the status, the fold. A summary too
+  // long for one line — a 2 KB shell command — is drawn whole at the top of the
+  // body instead of growing the head, so the invocation is always readable and
+  // never truncated. The body is the call's own result, one column, no frame.
+  var TOOL_ICON = {
+    read_file: 'file-text', write_file: 'file-plus', edit_file: 'file-pen', shell: 'terminal',
+    retrieve_output: 'scroll-text', web_fetch: 'globe', web_search: 'search', lsp: 'file-code',
+    session_todo: 'list-checks', enter_plan_mode: 'map', exit_plan_mode: 'clipboard-check',
+    intermediate_tool: 'notebook-pen', user_interaction: 'message-square-text',
+    request_permissions: 'shield', memories_list: 'folder-open', memories_read: 'book-open',
+    memories_search: 'brain', memories_add_ad_hoc_note: 'notebook-text'
+  };
+  function tcard(o) {
+    var st = o.st || 'ok';
+    var act = st === 'run'
+      ? '<span class="run">' + ic('loader-circle', 'spin') + '运行中</span>'
+      : '<span class="' + (st === 'ok' ? 'ok' : st === 'ask' ? 'ask' : 'bad') + '">' +
+        (st === 'ok' ? '完成' : st === 'ask' ? '等待批准' : st === 'deny' ? '已拒绝' : '失败') + '</span>';
+    var h = '<div class="tool' + (o.open ? '' : ' min') + '"><div class="tool-h">' +
+      ic(o.i || TOOL_ICON[o.n] || 'wrench') +
+      '<span class="cmd"' + (o.long ? ' title="' + esc(o.s) + '"' : '') + '>' + esc(o.s) + '</span>' + act +
+      ic(o.open ? 'chevron-up' : 'chevron-down', 'chev') + '</div>';
+    if (o.open && (o.long || o.full)) h += '<pre class="cmd-full">' + esc(o.full || o.s) + '</pre>';
+    if (o.open && o.b) h += '<div class="tool-b">' + o.b + '</div>';
+    return h + '</div>';
+  }
+  // A result block: the line-numbered gutter every code result already uses.
+  function tlines(lines, from) {
+    var n = from || 1;
+    return '<pre>' + lines.map(function (l, i) {
+      return '<div><span class="ln">' + (n + i) + '</span><span>' + esc(l) + '</span></div>';
+    }).join('') + '</pre>';
+  }
+  function tdiff(rows) {
+    return '<div class="diff">' + rows.map(function (r) {
+      var c = r[0] === '+' ? ' class="add"' : r[0] === '-' ? ' class="del"' : '';
+      return '<div' + c + '>' + esc(r[0] + ' ' + r[1]) + '</div>';
+    }).join('') + '</div>';
+  }
+  function ttodo(rows) {
+    return '<div class="tlist">' + rows.map(function (r) {
+      var k = r[0], cls = k === 'done' ? ' done' : k === 'now' ? ' now' : '';
+      return '<div class="trow' + cls + '">' + ic(k === 'done' ? 'square-check' : 'square') + '<span>' + esc(r[1]) + '</span></div>';
+    }).join('') + '</div>';
+  }
+  function topts(opts, pick) {
+    return '<div class="opts">' + opts.map(function (o) {
+      return '<span class="opt' + (o === pick ? ' on' : '') + '">' + ic(o === pick ? 'check' : 'circle') + esc(o) + '</span>';
+    }).join('') + '</div>';
+  }
+  function tsrs(rows) {
+    return '<div class="srs">' + rows.map(function (r) {
+      return '<div class="sr"><span class="t">' + esc(r[0]) + '</span><span class="u">' + esc(r[1]) + '</span><p>' + esc(r[2]) + '</p></div>';
+    }).join('') + '</div>';
+  }
+  function thits(rows) {
+    return '<div class="hits">' + rows.map(function (r) {
+      return '<div class="hit"><span class="p">' + esc(r[0]) + '</span><p>' + esc(r[1]) + '</p></div>';
+    }).join('') + '</div>';
+  }
+  function tdiags(rows) {
+    return rows.map(function (r) {
+      return '<div class="dgn"><span class="p">' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
+    }).join('');
+  }
+  function tthink(label, text, open) {
+    return '<div class="think' + (open ? ' open' : '') + '"><span class="think-l">' + esc(label) + '</span><p>' + esc(text) + '</p></div>';
+  }
+  function webFetchGate(url, host) {
+    return toolRow('globe', 'web_fetch', url) + gateCard('要我向公开网络取这个页面吗？',
+      '<button type="button" class="btn sm pri">取这个页面</button>' +
+      '<button type="button" class="btn sm">不再询问 ' + esc(host) + '</button>' +
+      '<button type="button" class="btn sm">不要取</button>',
+      '<div class="page">' + esc(url) + '</div>');
+  }
+  // A search promises a size: the tool normalizes an absent limit to 5 and caps
+  // it at 10 (NormalizeWebSearchLimit), and the terminal prints the same number
+  // on the same prompt. The words are the model's, so they sit in quotes; the
+  // count is the engine's, so it sits beside them.
+  function webSearchGate(query, limit) {
+    var n = !limit || limit <= 0 ? 5 : Math.min(limit, 10);
+    return toolRow('search', 'web_search', query) + gateCard('要我搜一下公开网络吗？',
+      '<button type="button" class="btn sm pri">搜索</button><button type="button" class="btn sm">不要搜</button>',
+      '<div class="facts">“' + esc(query) + '”<span class="sep">·</span>最多 ' + n + ' 条</div>');
+  }
+  function memoryNoteGate(file, scope, memoHtml) {
+    return toolRow('file-text', 'memories_add_ad_hoc_note', file) + gateCard('要我把这条记进长期记忆吗？',
+      '<button type="button" class="btn sm pri">记住这条</button><button type="button" class="btn sm">不要记</button>',
+      '<div class="facts"><span class="lit">' + esc(file) + '</span><span class="sep">·</span>' + esc(scope) + '</div>' +
+      '<div class="memo">' + memoHtml + '</div>');
+  }
+  // read / search / list are not here on purpose: they are approval-exempt
+  // (safety.IsSafeReadOnlyTool - engine.go's default allow), so they never park
+  // a run on a question and have no card to design.
+  function webFetchThread() {
+    return '<div class="u-wrap"><div class="u">读一下 example.com/pricing，看他们的套餐怎么定价。</div></div>' +
+      '<div class="a"><p>先把这个页面取下来，正文转成 Markdown 再读。</p>' + webFetchGate('https://example.com/pricing', 'example.com') + '</div>';
+  }
+  function webSearchThread() {
+    return '<div class="u-wrap"><div class="u">gateway 的会话 Cookie 到 /api 一直是 401。</div></div>' +
+      '<div class="a"><p>先搜一下公开网络，看有没有人踩过同一个坑。</p>' + webSearchGate('gateway 会话 Cookie 401 排查') + '</div>';
+  }
+  function memoryNoteThread() {
+    return '<div class="u-wrap"><div class="u">把刚才这条结论记进项目记忆。</div></div>' +
+      '<div class="a"><p>记成一条项目记忆笔记，下次固化流程时按它做。</p>' +
+      memoryNoteGate('2026-10-19T10-05-00-extend-existing-skill.md', '项目记忆',
+        '<b>固化工作流时改现有技能，不要新建技能</b>' +
+        '<p>owner 原话：直接改 run-forebrain 技能，不要另外生成新技能。</p>' +
+        '<p>规则：一次会话跑通的验证流程要“固化”时，先找已经拥有该领域的现有技能，把命令与踩坑并进它（SKILL.md 的段落 / Gotchas / Troubleshooting 表，复用它的 driver.sh），而不是新建一个平行的技能目录。</p>' +
+        '<p>为什么：新建技能会让同一领域出现两个入口，触发词互相干扰、文档重复、脚本各写一份；技能清单是手工维护的，平行技能是维护负担。</p>' +
+        '<p>范围：任何“把这套步骤存下来”的请求，默认做扩写而非新写；只有在确实没有归属技能时才考虑新建，并在动手前说明为什么现有技能装不下。</p>') + '</div>';
+  }
+  // ---------- 对话 · 全部消息卡（2026-10-20） ----------
+  // Every card the primary agent's conversation can draw, in one run: the
+  // thinking card, each built-in tool's call card, the session family, the
+  // question and permission calls, the memory family, the eight subagent_*
+  // calls, one external MCP tool, and the states a call can end in.
+  var LONGCMD = [
+    "echo '=== gateway: session cookie anchors ==='",
+    "grep -n \"func (s *Server) handleChatSessions\" pkg/gateway/api_extra.go | head -5",
+    "grep -n \"func (s *Server) handleProjectsList\" pkg/gateway/api_extra.go",
+    "grep -n \"sessionCookie\\|clearSession\\|setSessionCookie\" pkg/gateway/*.go",
+    "echo '=== control plane: where the token is read ==='",
+    "grep -n \"Authorization\" pkg/gateway/controlplane.go pkg/gateway/http_server.go pkg/gateway/ws.go",
+    "grep -n \"func ControlPlaneTokenFromRequest\" -A 12 pkg/gateway/controlplane.go",
+    "echo '=== state: how a session is stored and listed ==='",
+    "grep -n \"func (s *SessionStore) ListSessionsOfSource\" pkg/state/session_store.go",
+    "grep -n \"project_id IS NULL\" pkg/state/session_store.go | head -5",
+    "grep -n \"func (s *SessionStore) ListSessionsRecentPaged\" pkg/state/session_store.go",
+    "echo '=== frontend: where the browser used to type a token ==='",
+    "grep -rn \"Authorization\\|access_token\\|token=\" frontend/src --include=*.ts --include=*.vue | head -20",
+    "grep -n \"chatSessions\\|sessionsOf\" frontend/src/composables/useChatSessions.ts | head -10",
+    "grep -n \"projectNote\\|chat-drawer-footer\" frontend/src/components/chat/Drawer.vue | head -5",
+    "echo '=== every place that reads a credential, with its line ==='",
+    "rg -n --no-heading \"Bearer |Cookie\\(|Get\\(\\\"Authorization\\\"\\)\" pkg cmd | sort | head -40",
+    "echo '=== 完 ==='"
+  ].join('\n');
+  function cardsThread() {
+    var d = 'frontend/src/lib/';
+    return '<div class="u-wrap"><div class="u">网页端访问 /api 全部 401。查一下 gateway 的鉴权链路，把会话 Cookie 的签发与读取改好，跑测试；再派个子代理看看前端有没有漏改，最后把结论记进项目记忆。</div></div>' +
+      '<div class="a">' +
+      tthink('思考了 12 秒', '401 说明请求到了鉴权中间件却没有带凭据。先看清工作区改了哪些文件，再读控制面里读 token 的那段，然后决定 Cookie 从哪里签发、在哪儿读。', false) +
+      '<p>先看工作区状态，再读控制面的中间件。</p>' +
+      // shell：短命令
+      tcard({ n: 'shell', s: 'ran git status --short', open: true,
+        b: tlines([' M frontend/src/lib/api.ts', ' M pkg/gateway/http_server.go', '?? frontend/src/lib/gatewaySession.ts']) }) +
+      // shell：2 KB 多行命令——折叠态就是本次要修的那张卡（卡头一行）
+      tcard({ n: 'shell', s: 'ran ' + LONGCMD, long: true }) +
+      // 同一个调用展开：先给完整命令（限高滚动），再给输出
+      tcard({ n: 'shell', s: 'ran ' + LONGCMD, long: true, open: true,
+        b: tlines(['=== session cookie anchors ===', '412: func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {', '=== control plane: where the token is read ===', '19:  auth := strings.TrimSpace(r.Header.Get("Authorization"))', '20:  // 浏览器页面从未拿到 token，这里永远是空串']) }) +
+      tcard({ n: 'read_file', s: 'ran read pkg/gateway/controlplane.go · lines 15-20', open: true,
+        b: tlines([
+          'func ControlPlaneTokenFromRequest(r *http.Request, q string) string {',
+          '\tauth := strings.TrimSpace(r.Header.Get("Authorization"))',
+          '\t// 浏览器页面从未拿到 token，这里永远是空串',
+          '\treturn auth',
+          '}'
+        ], 15) }) +
+      tcard({ n: 'lsp', s: 'looked up diagnostics · 2 results', open: true,
+        b: tdiags([['' + d + 'api.ts:42', '属性 readSessionCookie 在类型 typeof api 上不存在。'],
+          ['' + d + 'api.ts:88', '参数 token 已不再需要。']]) }) +
+      tcard({ n: 'edit_file', s: 'ran edit pkg/gateway/controlplane.go · 240 bytes', open: true,
+        b: tdiff([[' ', 'func ControlPlaneTokenFromRequest(r *http.Request, q string) string {'],
+          ['-', '\tauth := strings.TrimSpace(r.Header.Get("Authorization"))'],
+          ['+', '\tif c, err := r.Cookie("fb_session"); err == nil {'],
+          ['+', '\t\treturn c.Value'],
+          ['+', '\t}'],
+          ['+', '\tauth := strings.TrimSpace(r.Header.Get("Authorization"))'],
+          [' ', '\treturn auth']]) }) +
+      tcard({ n: 'write_file', s: 'ran write frontend/src/lib/gatewaySession.ts · 812 bytes', open: true,
+        b: tdiff([['+', '// 登录换来的 HttpOnly 会话 Cookie 由浏览器自己携带，前端不再保存 token。'],
+          ['+', 'export function sessionHeaders(): HeadersInit {'],
+          ['+', '\treturn {}'],
+          ['+', '}']]) }) +
+      tcard({ n: 'retrieve_output', s: 'ran retrieve saved output · 120 lines', open: true,
+        b: tlines(['=== every place that reads a credential ===', 'pkg/gateway/controlplane.go:19  header Authorization', 'pkg/gateway/ws.go:74           query ?token=', 'cmd/forebrain/gateway.go:210  env FOREBRAIN_GATEWAY_TOKEN']) +
+          '<span class="hint mono">完整输出：state/tool-output/run_8f2c/7.txt</span>' }) +
+      '<div class="worked"><span>已工作 1m 04s · 首 token 1.2s · 10:12</span></div></div>' +
+      '<div class="u-wrap"><div class="u">改吧，改完跑测试。</div></div>' +
+      '<div class="a">' +
+      tthink('思考了 3 秒', '中间件同时认 Cookie 与 Bearer，Cookie 优先；前端删掉手填 token 的入口。', false) +
+      '<p>改完了，跑一遍 gateway 的测试。</p>' +
+      tcard({ n: 'shell', s: 'failed: exit status 1', st: 'bad', open: true,
+        b: tlines(['--- FAIL: TestControlPlaneTokenFromRequest (0.00s)', '    controlplane_test.go:88: want cookie value, got ""']) }) +
+      tcard({ n: 'shell', s: 'ran go test ./pkg/gateway/... · 4 lines', open: true,
+        b: tlines(['ok  \tgithub.com/forebrain-harness/forebrain-harness/pkg/gateway\t4.212s', 'ok  \tgithub.com/forebrain-harness/forebrain-harness/pkg/gateway/ws\t0.084s']) }) +
+      tcard({ n: 'shell', s: 'ran rm -rf pkg/gateway/dist', st: 'deny',
+        b: '<p>你没有批准这条命令，它没有执行。</p>' }) +
+      '<div class="worked"><span>已工作 41s · 首 token 0.9s · 10:14</span></div></div>' +
+      '<div class="u-wrap"><div class="u">清单也更新一下。</div></div>' +
+      '<div class="a">' +
+      // session 类：清单、计划模式、中间笔记
+      tcard({ n: 'session_todo', s: 'ran session_todo · 5 items', open: true,
+        b: ttodo([['done', '定位 401 的根因'], ['done', '控制面同时接受 Cookie 与 Bearer'], ['done', '登录换取 HttpOnly 会话 Cookie'],
+          ['now', '前端去掉手填 token 的入口'], ['todo', '跑全量 gateway 测试并补回归']]) }) +
+      tcard({ n: 'enter_plan_mode', s: 'ran enter_plan_mode reason=修复跨三个包，先写计划', open: true,
+        b: '<p>修复跨三个包，先写计划再动手。</p><p class="facts">计划文件：<span class="lit">plans/session-cookie.md</span></p>' }) +
+      tcard({ n: 'intermediate_tool', s: 'saved intermediate notes', open: true,
+        b: '<p>已记下 3 条：根因、要改的位置、验证方式。</p><p class="facts mono">state/intermediate.md · 1.8 KB</p>' }) +
+      '<div class="worked"><span>已工作 18s · 首 token 1.1s · 10:15</span></div></div>' +
+      '<div class="a"><p>计划批准了，按这三步做。</p>' +
+      tcard({ n: 'exit_plan_mode', s: 'ran exit_plan_mode', open: true,
+        b: '<p class="facts">计划文件：<span class="lit">plans/session-cookie.md</span></p><p>已批准，开始实施。</p>' }) +
+      '<p>要读客户的日志导出，先申请权限。</p>' +
+      tcard({ n: 'request_permissions', s: 'approved request permissions', open: true,
+        b: '<p>读客户的日志导出需要 workspace 之外的路径。</p><div class="facts">已允许：<span class="lit">~/Downloads/客户日志/2026-10</span> · 只读</div>' }) +
+      tcard({ n: 'request_permissions', s: 'awaiting approval · request permissions', st: 'ask',
+        b: '<p>这条命令要访问外网，需要你的同意。</p><div class="facts">申请：<span class="lit">network · https://example.com</span></div>' }) +
+      '<p>先确认按哪一面改。</p>' +
+      tcard({ n: 'user_interaction', s: 'asked user', open: true,
+        b: '<p>两个面都要改，先做哪一个？</p>' + topts(['网页端（当前会话）', '终端 TUI'], '网页端（当前会话）') }) +
+      '</div>' +
+      '<div class="a"><p>查一下公开资料，再扫一遍记忆里有没有相关约定。</p>' +
+      tcard({ n: 'web_search', s: 'ran search "gateway session cookie 401"', open: true,
+        b: tsrs([['Session cookies and the HttpOnly flag', 'https://developer.mozilla.org/…/Set-Cookie', 'HttpOnly 让脚本读不到 Cookie，浏览器仍会自动携带。'],
+          ['SameSite=Strict 会不会影响登录回调', 'https://example.com/samesite', '同站请求带上，跨站导航不带——登录回调要走一次顶层导航。'],
+          ['Browser WebSocket cannot set headers', 'https://example.com/ws-cookie', '浏览器的 WebSocket 不支持自定义请求头，握手只能靠 Cookie。']]) }) +
+      tcard({ n: 'web_fetch', s: 'ran fetch https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie', long: true, open: true,
+        full: 'ran fetch https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie',
+        b: '<p><b>Set-Cookie</b></p><p>响应头，服务端用它把一段键值对交给浏览器保存，并在之后的同站请求里自动带上。</p><p class="facts">HttpOnly：脚本读不到。Secure：只在 HTTPS 上发送。SameSite：跨站时带不带。</p>' }) +
+      tcard({ n: 'memories_search', s: 'searched memories "session cookie", "401"', open: true,
+        b: thits([['MEMORY.md · line 412', '会话模型隔离：同一个浏览器的两个标签页共用一个 HttpOnly 会话 Cookie。'],
+          ['MEMORY.md · line 903', '401 → 先看请求有没有带凭据，再看凭据有没有被中间件读到。']]) }) +
+      tcard({ n: 'memories_read', s: 'read memory MEMORY.md · lines 411-414', open: true,
+        b: '<p class="facts"><span class="lit">MEMORY.md</span> · starting at line 411</p>' +
+          tlines(['- 会话凭据只在服务端签发，浏览器端不落库。', '- 两个标签页共用一个 HttpOnly 会话 Cookie。', '- CLI 仍用 Bearer，网页不再手填 token。']) }) +
+      tcard({ n: 'memories_list', s: 'listed memories extensions/ad_hoc/notes · 12 entries', open: true,
+        b: '<p><b>Memories in</b> <span class="lit">extensions/ad_hoc/notes</span></p>' +
+          thits([['2026-10-20T00-53-57-session-cookie.md', 'file'], ['2026-10-18T00-53-57-web-ui-structure-rules.md', 'file'], ['2026-10-19T10-05-00-extend-existing-skill.md', 'file']]) +
+          '<span class="hint">另有 9 条</span>' }) +
+      tcard({ n: 'memories_add_ad_hoc_note', s: 'ran save memory note 2026-10-20T10-31-00-session-cookie-http-only.md', open: true,
+        b: '<p><b>网页端的凭据只走 HttpOnly 会话 Cookie</b></p><p>登录换一次 Cookie，之后浏览器自己携带；前端不再保存任何 token。</p>' }) +
+      '</div>' +
+      '<div class="a"><p>派子代理并行看一眼前端与测试。</p>' +
+      saCallCard(['plan'], '已运行 1 个 plan 任务', '38.2s') +
+      saCallCard(['explore', 'review'], '已运行 2 个任务', '41.0s') +
+      saCallCard(['explore'], '已派出 1 个任务，后台运行中', '', true) +
+      saCallCard(['explore'], '1 个任务仍在运行', '2m 10s', true) +
+      saCallCard(['explore'], '等到 1 个任务结束', '52.4s') +
+      saCallCard(['plan'], '给 1 个任务补了指令', '') +
+      saCallCard(['review'], '停掉 1 个任务', '') +
+      saCallCard(['plan', 'explore', 'review'], '本对话 3 个子代理', '') +
+      '</div>' +
+      '<div class="a"><p>外部 MCP 的工具、还在跑的调用，都是同一个卡。</p>' +
+      tcard({ i: 'workflow', s: 'ran codegraph.codegraph_explore · query: ToolCallCard', open: true,
+        b: '<p class="facts">frontend/src/components/chat/ToolCallCard.vue · 43 lines</p>' +
+          tlines(['const title = computed(() => {', '  const skill = skillCardTitle(props.step)', '  return skill ?? props.step.summary', '})']) }) +
+      tcard({ n: 'shell', s: 'running go test ./pkg/gateway/... -run Session', st: 'run' }) +
+      '<div class="worked"><span>已工作 2m 18s · 首 token 1.0s · 10:31</span></div></div>' +
+      '</div>';
+  }
+
   function threadHtml(missing) {
     var h = '<div class="thread"><div class="col">';
+    // Every gate demo is one run, park and all: a user turn, the sentence the
+    // agent says before it asks, then the call and the question.
+    var gates = { webfetch: webFetchThread, wsearch: webSearchThread, wnote: memoryNoteThread, cards: cardsThread };
+    if (gates[S.demo]) return h + gates[S.demo]() + '</div></div>';
     if (missing) {
       h += '<div class="u">把 README 的安装章节改成中英双语。</div><div class="a"><p>已改好安装章节，中英文各一段，命令保持一致。</p><div class="worked"><span>已工作 41s · 首 token 1.4s · 9月18日 23:12</span></div></div>' +
         '<div class="err-block">' + ic('circle-alert') + '<div>目录已不存在：<span class="mono">~/workspace/unionj-cloud/tulkun</span>，无法继续。<span class="s">目录恢复后可继续。</span></div></div>';
@@ -2726,10 +3150,9 @@
     var rw = S.rewound;
     if (rw && rw !== 'code') return h + '<div class="sys-line" style="color:var(--text-2)">' + ic('history') + '已回到这条消息之前' + (rw === 'both' ? ' · 恢复 3 个文件' : '') + '<button type="button" class="btn link" data-act="rwundo">撤销</button></div></div></div>';
     h += '<div class="u-wrap"><div class="u">浏览器访问 /api 全部 401，帮我看一下 gateway 的鉴权链路。</div><div class="u-acts"><button type="button" class="icon-btn" data-act="rewind" title="回到这里" aria-label="回到这条消息之前">' + ic('history') + '</button><button type="button" class="icon-btn" title="复制" aria-label="复制">' + ic('copy') + '</button></div></div>' +
-      '<div class="a"><div class="think"><span class="think-l">思考了 8 秒</span><p>401 说明请求到了鉴权中间件却没有带凭据。先看控制面中间件从哪里取 token，再看浏览器端有没有途径拿到它。</p></div>' +
+      '<div class="a"><div class="think open"><span class="think-l">思考了 8 秒</span><p>401 说明请求到了鉴权中间件却没有带凭据。先看控制面中间件从哪里取 token，再看浏览器端有没有途径拿到它。</p></div>' +
       '<p>先读控制面鉴权中间件，确认浏览器请求缺的是哪一种凭据。</p>' +
-      '<div class="tool"><div class="tool-h">' + ic('file-text') + '<b>read_file</b><code>pkg/gateway/controlplane.go</code><span class="ok">完成</span></div>' +
-      '<pre><div><span class="ln">15</span><span>func ControlPlaneTokenFromRequest(r *http.Request, q string) string {</span></div><div><span class="ln">19</span><span>  auth := strings.TrimSpace(r.Header.Get("Authorization"))</span></div><div><span class="ln">20</span><span>  // 浏览器页面从未拿到 token，这里永远是空串</span></div></pre></div>' +
+      tcard({ n: 'read_file', s: 'ran read pkg/gateway/controlplane.go · lines 15-20', open: true, b: tlines(['func ControlPlaneTokenFromRequest(r *http.Request, q string) string {', '\tauth := strings.TrimSpace(r.Header.Get("Authorization"))', '\t// 浏览器页面从未拿到 token，这里永远是空串'], 15) }) +
       '<p>根因是网页端没有任何途径取得 gateway token：请求头里的 <code class="inl">Authorization</code> 始终为空。修复方向是用一次性登录换取 HttpOnly 会话 Cookie。</p><div class="worked"><span>已工作 1m 12s · 首 token 1.2s · <span class="plan-prog" aria-label="任务清单完成 3/5">' + ic('square-check', 'pc') + '3/5</span> · 09:41</span></div></div>';
     if (rw === 'code') h += '<div class="sys-line" style="color:var(--text-2)">' + ic('history') + '已把 3 个文件恢复到“浏览器访问 /api 全部 401…”之前<button type="button" class="btn link" data-act="rwundo">撤销</button></div>';
     if (hasSubs()) h += saTurn();
@@ -2743,7 +3166,7 @@
     return '<div class="thread"><div class="col">' + (S.newCreated ? '<div class="sys-line">' + ic('folder-plus') + '已创建项目 ' + p.n + '</div>' : '') +
       '<div class="u">先看一下这个目录里有什么。</div>' +
       '<div class="a"><div class="think"><span class="think-l">思考过程</span><p>先列出项目根目录的内容。</p></div><p>好的，下面是 <code class="inl">' + p.p + '</code> 里的内容。</p>' +
-      '<div class="tool"><div class="tool-h">' + ic('terminal') + '<b>shell</b><code>ls -1</code><span class="ok">完成</span></div><pre>' + items.slice(0, 6).map(function (x, i) { return '<div><span class="ln">' + (i + 1) + '</span><span>' + x + '</span></div>'; }).join('') + '</pre></div>' +
+      tcard({ n: 'shell', s: 'ran ls -1 · ' + Math.min(items.length, 6) + ' lines', open: true, b: tlines(items.slice(0, 6)) }) +
       '<div class="worked"><span>已工作 6s · 首 token 0.9s · 10:24</span></div></div></div></div>';
   }
   function rewindModal() {
@@ -2875,7 +3298,7 @@
     return h;
   }
   var iterJumps = [['home', '登录后首页（新对话）'], ['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
-    ['thread', '思考耗时 · 首 token'], ['mainrun', '对话 · 运行中（状态行）'], ['subcfg', '子代理 · 配置列表'], ['subcfgoff', '子代理 · 功能关闭'], ['setsub', '设置 · 子代理（全局开关）'], ['subcfgnew', '子代理 · 新建'], ['subcfgpick', '子代理 · 指定工具'], ['subcfgbuiltin', '子代理 · 编辑内置'], ['subcfgsys', '子代理 · 查看系统'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
+    ['thread', '思考耗时 · 首 token'], ['cards', '对话 · 全部消息卡（工具 / 思考 / 子代理）', 1], ['cardsbrief', '对话 · 简洁模式（只看回答）', 1], ['subview', '子代理 · 视图模式下拉', 1], ['mainrun', '对话 · 运行中（状态行）'], ['wfetch', '对话 · 抓取审批'], ['wsearch', '对话 · 搜索审批', 1], ['wnote', '对话 · 记忆写入审批', 1], ['subcfg', '子代理 · 配置列表'], ['subcfgoff', '子代理 · 功能关闭'], ['setsub', '设置 · 子代理（全局开关）'], ['subcfgnew', '子代理 · 新建'], ['subcfgpick', '子代理 · 指定工具'], ['subcfgbuiltin', '子代理 · 编辑内置'], ['subcfgsys', '子代理 · 查看系统'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
     ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'], ['sublive', '子代理 · 实时（右侧抽屉）'], ['subreplay', '子代理 · 回放'], ['submenu', '子代理 · 打开其他子代理'], ['subat', '子代理 · @ 引用文件'], ['subplus', '子代理 · 加号菜单'], ['subinfo', '子代理 · 模型与上下文'], ['subinfowarn', '子代理 · 上下文快满'],
     ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpdecline', '项目 · MCP 已拒绝可撤回'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
   function iterJump(k) {
@@ -2888,9 +3311,15 @@
     else if (k === 'trust') { freshNew(); S.pick.mode = 'folder'; S.pick.folder = '~/photo'; S.trust = true; S.trustFor = { name: 'photo', path: '~/photo', isNew: true, trust: 'unknown' }; }
     else if (k === 'attach' || k === 'paste') { chat0(); S.attach = true; S.attachShot = k === 'paste'; S.attachDir = S.lastAttachDir; }
     else if (k === 'thread') chat0();
+    else if (k === 'cards') { chat0(); S.demo = 'cards'; }
+    else if (k === 'cardsbrief') { chat0(); S.demo = 'cards'; S.view = 'concise'; }
+    else if (k === 'subview') { chat0(); S.demo = 'cards'; S.sa = { open: true, tabs: ['explore', 'plan'], active: 'explore', menu: false, task: {}, seen: { explore: true }, at: false, ref: '', plus: false, draft: '', info: false }; S.savMenu = true; }
     else if (k === 'longtitle') { chat0(); S.projectSession = '排查 gateway 在高并发下偶发 502：上游连接池耗尽、重试风暴与超时配置不一致的根因'; }
     else if (k === 'busy') { chat0(); S.demo = 'busy'; }
     else if (k === 'mainrun') { chat0(); S.demo = 'mainrun'; }
+    else if (k === 'wfetch') { chat0(); S.demo = 'webfetch'; }
+    else if (k === 'wsearch') { chat0(); S.demo = 'wsearch'; }
+    else if (k === 'wnote') { chat0(); S.demo = 'wnote'; }
     else if (k === 'setsub') { S.page = 'settings'; S.settingsTab = 'subagents'; S.subGlobal = true; }
     else if (k === 'subcfg' || k === 'subcfgoff' || k === 'subcfgnew' || k === 'subcfgpick' || k === 'subcfgbuiltin' || k === 'subcfgsys') {
       S.page = 'subagents'; S.subGlobal = true; S.subOver = k === 'subcfgoff' ? false : null; S.subKind = ''; S.fmTools = ''; subDefs = JSON.parse(subDefsInit);
@@ -3390,29 +3819,32 @@
       '<div class="a">' + saCallCard(['plan'], '已运行 1 个 plan 任务', '38.2s') + '<p>步骤拆好了，共 3 步（见工作台“计划”）。下面两件事并行查，回来后一起改：</p>' +
       saCallCard(['explore', 'review'], '正在运行 2 个任务…', '', true) + '</div>';
   }
-  function saTool(icon, name, arg, run) {
-    return '<div class="tool min"><div class="tool-h">' + ic(icon) + '<b>' + name + '</b><code>' + esc(arg) + '</code>' + (run ? '<span class="run">' + ic('loader-circle', 'spin') + '运行中</span>' : '<span class="ok">完成</span>') + '</div></div>';
+  // A subagent's own tool calls draw the same card the primary agent's do —
+  // same head, same body, same truncation, same states. Only the column the
+  // card sits in is narrower, and the head answers that by ellipsizing.
+  function saTool(name, summary, run) {
+    return tcard({ n: name, s: (run ? 'running ' : 'ran ') + summary, st: run ? 'run' : 'ok' });
   }
   function saBody(id) {
     var s = subs[id], open = !!S.sa.task[id];
     var h = '<div class="sa-task' + (open ? ' open' : '') + '"><div class="cap">交给它的任务</div><p>' + esc(s.task) + '</p><button type="button" class="more" data-satask="' + id + '" aria-label="' + (open ? '收起任务' : '展开任务') + '" aria-expanded="' + open + '">' + ic(open ? 'chevron-up' : 'chevron-down') + '</button></div>';
     if (id === 'plan') {
       return h + '<div class="a"><div class="think"><span class="think-l">思考了 4 秒</span><p>先确认中间件现在只认 Bearer，再决定 Cookie 从哪里签发。</p></div>' +
-        saTool('file-text', 'read_file', 'pkg/gateway/controlplane.go') + saTool('file-text', 'read_file', 'pkg/gateway/http_server.go') +
+        saTool('read_file', 'read pkg/gateway/controlplane.go') + saTool('read_file', 'read pkg/gateway/http_server.go') +
         '<p>修复分 3 步：</p><ol style="margin:0;padding-left:20px;display:grid;gap:4px"><li>gateway 增加一次性登录，签发 HttpOnly 会话 Cookie（<code class="inl">http_server.go</code>）；验证：登录后响应带 <code class="inl">Set-Cookie</code>。</li><li>控制面中间件同时接受 Cookie 与 Bearer（<code class="inl">controlplane.go</code>）；验证：只带 Cookie 的请求不再 401。</li><li>前端去掉手填 token 的入口；验证：浏览器直接打开页面即可调用 /api。</li></ol>' +
         '<div class="worked"><span>已工作 38.2s · 首 token 1.1s · 09:43</span></div></div>';
     }
     if (id === 'explore') {
       return h + '<div class="a">' +
         '<div class="think"><span class="think-l">思考了 3 秒</span><p>先全局搜请求头与查询参数里读 token 的地方，再逐个看调用链。</p></div>' +
-        saTool('terminal', 'shell', 'rg -n "Authorization|access_token|token=" pkg cmd') +
+        saTool('shell', 'rg -n "Authorization|access_token|token=" pkg cmd') +
         '<p>找到 6 处：控制面中间件与 WebSocket 握手各读一次 Authorization 头，WebSocket 另外接受 <code class="inl">?token=</code> 查询参数，其余 3 处在 CLI 的远程连接。</p>' +
         '<div class="think"><span class="think-l">思考了 2 秒</span><p>浏览器的 WebSocket 不能自定义请求头，?token= 是它唯一的入口；要确认握手时是否也认 Cookie。</p></div>' +
-        saTool('file-text', 'read_file', 'pkg/gateway/ws.go', true) + '</div>';
+        saTool('read_file', 'read pkg/gateway/ws.go', true) + '</div>';
     }
     return h + '<div class="a">' +
       '<div class="think"><span class="think-l">思考了 2 秒</span><p>先看 Cookie 的属性与过期，再看中间件里两种凭据的先后。</p></div>' +
-      saTool('file-text', 'read_file', 'pkg/gateway/session_cookie.go', true) + '</div>';
+      saTool('read_file', 'read pkg/gateway/session_cookie.go', true) + '</div>';
   }
   // The subagent's run facts, read-only (its spawn fixed the model and the effort): one quiet pill in the composer's bar — its own context
   // ring with the percentage always written, then model · effort — and a card above it with the whole reading.
@@ -3442,7 +3874,7 @@
   }
   function saDrawer() {
     var a = S.sa.active, s = subs[a];
-    var h = '<aside class="sad" aria-label="子代理"><div class="sad-h"><div class="sad-tabs" role="tablist" aria-label="打开的子代理">' +
+    var h = '<aside class="sad' + (S.saView === 'concise' ? ' brief' : '') + '" aria-label="子代理"><div class="sad-h"><div class="sad-tabs" role="tablist" aria-label="打开的子代理">' +
       S.sa.tabs.map(function (id) {
         var x = subs[id], on = id === a, unseen = !on && x.st !== 'run' && !S.sa.seen[id];
         return '<div class="sad-tab' + (on ? ' on' : '') + '"><button type="button" class="t" role="tab" aria-selected="' + on + '" data-satab="' + id + '">' + saIcon(x) +
@@ -3466,7 +3898,7 @@
       '<div class="pp-foot"><span><kbd>@</kbd>引用文件</span><span><kbd>/</kbd>命令与技能</span><span>' + ic('info') + '输入以搜索</span></div></div>' : '';
     return h + '<div class="sa-comp">' + at + plus + (S.sa.info ? saInfoCard(s) : '') +
       '<button type="button" class="ph' + (S.sa.at || S.sa.draft ? ' typed' : '') + '" data-act="saat" aria-label="给这个子代理发消息">' + (S.sa.ref ? '<span class="ref">@' + S.sa.ref + '</span>' : '') + ph + '</button>' +
-      '<div class="bar"><button type="button" class="sa-plus" data-act="saplus" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.sa.plus + '" data-tip="添加">' + ic('plus') + '</button><span class="grow"></span>' + saInfoPill(s) +
+      '<div class="bar"><button type="button" class="sa-plus" data-act="saplus" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.sa.plus + '" data-tip="添加">' + ic('plus') + '</button>' + saViewChip() + '<span class="grow"></span>' + saInfoPill(s) +
       (s.st === 'run' ? '<button type="button" class="stop" aria-label="停止这个子代理" data-tip="停止这个子代理">' + ic('square') + '</button>' : '') +
       '<button type="button" class="send" aria-label="发送">' + ic('arrow-up') + '</button></div></div></aside>';
   }
@@ -3480,7 +3912,7 @@
     var body = title === '未命名对话' ? newThread() : threadHtml(missing);
     var typed = !missing && S.demo === 'busy' && title !== '未命名对话' ? '再跑一遍 go test ./pkg/gateway/...' : '';
     var run = S.demo === 'mainrun' ? '<div class="run-line" role="status">' + ic('loader-circle', 'spin') + '<span class="w">工作中（1m 12s · Esc 中断）</span><span class="pp">' + ic('square-check', 'pc') + '3/5</span><span class="pa">改中间件并补测试</span><span class="ft">首 token 1.2s</span></div>' : '';
-    return '<div class="chat' + (S.sa.open && hasSubs() ? ' narrow' : '') + '">' + body + run + composerHtml({ missing: missing, typed: typed, ready: true }) + '</div>';
+    return '<div class="chat' + (S.sa.open && hasSubs() ? ' narrow' : '') + (S.view === 'concise' ? ' brief' : '') + '">' + body + run + composerHtml({ missing: missing, typed: typed, ready: true }) + '</div>';
   }
 
   // The workshop's eight tabs show five at a time (owner 2026-10-18): at the shared 340px width with the chat's tab style, any five neighbours plus both arrows fit; › on the right moves the strip one tab to the right,
@@ -4118,7 +4550,7 @@
   }
   function wsThread(st, n) {
     function um(t) { return '<div class="u-wrap"><div class="u">' + t + '</div><div class="u-acts"><button type="button" class="icon-btn" data-act="rewind" title="回到这里" aria-label="回到这条消息之前">' + ic('history') + '</button><button type="button" class="icon-btn" title="复制" aria-label="复制">' + ic('copy') + '</button></div></div>'; }
-    function tool(icn, name, arg, lines) { return '<div class="tool"><div class="tool-h">' + ic(icn) + '<b>' + name + '</b><code>' + arg + '</code><span class="ok">完成</span></div>' + (lines ? '<pre>' + lines.map(function (l, i) { return '<div><span class="ln">' + (i + 1) + '</span><span>' + l + '</span></div>'; }).join('') + '</pre>' : '') + '</div>'; }
+    function tool(icn, name, arg, lines) { return tcard({ i: icn, s: 'ran ' + name + ' ' + arg, open: !!lines, b: lines ? tlines(lines) : '' }); }
     function worked(t) { return '<div class="worked"><span>' + t + '</span></div>'; }
     var dd = n ? wsDraftDir(n) : '', h = '<div class="thread"><div class="col">';
     if (S.rewound && S.rewound !== 'code') return h + '<div class="sys-line" style="color:var(--text-2)">' + ic('history') + '已回到这条消息之前' + (S.rewound === 'both' && wsRwFiles().length ? ' · 恢复 ' + wsRwFiles().length + ' 个文件' : '') + '<button type="button" class="btn link" data-act="rwundo">撤销</button></div></div></div>';
@@ -4436,7 +4868,7 @@
         ['retrieve_output', '取回被压缩的命令输出原文', '命令', 1, [['id', 'integer', 1, '压缩标记里的取回编号'], ['query', 'string', 0, '在原文里检索'], ['reason', 'string', 0, '为什么需要原文']]],
         ['lsp', '代码导航：定义、引用、符号', '代码', 1, [['operation', 'string', 1, 'definition / references / workspace_symbols 等'], ['file_path', 'string', 0, '文件路径'], ['line', 'integer', 0, '行号，从 1 开始'], ['symbol', 'string', 0, '该行上要定位的名字'], ['query', 'string', 0, 'workspace_symbols 的查询词']]],
         ['web_search', '联网搜索', '网络', 1, [['query', 'string', 1, '搜索词'], ['limit', 'integer', 0, '结果数，默认 5，最多 10']]],
-        ['web_fetch', '抓取网页并按要求提炼', '网络', 1, [['url', 'string', 1, 'HTTP 或 HTTPS 地址'], ['prompt', 'string', 1, '对抓取内容的处理要求'], ['max_bytes', 'integer', 0, '最多下载多少字节']]],
+        ['web_fetch', '抓取指定公开 URL 的内容，HTML 转成正文 Markdown', '网络', 1, [['url', 'string', 1, 'HTTP 或 HTTPS 地址']]],
         ['memories_list', '列出记忆文件', '记忆', 1, [['path', 'string', 0, '相对记忆根目录的路径'], ['cursor', 'string', 0, '上一页返回的 next_cursor'], ['max_results', 'integer', 0, '最多返回条数']]],
         ['memories_read', '读取一个记忆文件', '记忆', 1, [['path', 'string', 1, '相对记忆根目录的文件路径'], ['line_offset', 'integer', 0, '从第几行开始'], ['max_lines', 'integer', 0, '最多读多少行']]],
         ['memories_search', '检索记忆', '记忆', 1, [['queries', 'string[]', 1, '要搜索的词'], ['path', 'string', 0, '限定搜索的目录或文件']]],
@@ -4576,7 +5008,7 @@
   appEl.addEventListener('focusin', function (ev) { var el = tipTarget(ev.target); if (el) showTip(el); });
   appEl.addEventListener('focusout', hideTip);
 
-  document.getElementById('iter-jump').innerHTML = iterJumps.map(function (j) { return '<button type="button" id="ij-' + j[0] + '" data-ij="' + j[0] + '" aria-pressed="false">' + j[1] + '</button>'; }).join('');
+  document.getElementById('iter-jump').innerHTML = iterJumps.map(function (j) { return '<button type="button" id="ij-' + j[0] + '" data-ij="' + j[0] + '" aria-pressed="false"' + (j[2] ? ' class="fresh" title="当日新增" aria-label="' + j[1] + '（当日新增）"' : '') + '>' + j[1] + '</button>'; }).join('');
   document.getElementById('iter-jump').addEventListener('click', function (ev) {
     var b = ev.target.closest('button'); if (!b) return;
     iterJump(b.getAttribute('data-ij'));
@@ -4595,7 +5027,7 @@
   });
 
   function closeTopModal() { if (S.fbNew || S.attNew) { S.fbNew = false; S.attNew = false; S.newDirErr = false; return; } if (S.fb) { S.fb = false; S.fbNew = false; S.fbMenu = false; } else if (S.trust) S.trust = false; else if (S.attach) S.attach = false; else if (S.rw) S.rw = false; else if (S.projDel) S.projDel = ''; else if (S.memEdit) S.memEdit = ''; else if (S.cronModal) S.cronModal = false; else if (S.inst) S.inst = null; else if (S.fm) { S.fm = null; S.mcpTest = ''; S.mcpErr = ''; S.mcpTools = false; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; } else if (S.vcM) S.vcM = null; else if (S.cmpM) S.cmpM = ''; else if (S.pubM) S.pubM = ''; else if (S.projectForm) S.projectForm = false; else if (S.mdw) S.mdw = null; }
-  function closePops() { if (S.sa) S.sa.menu = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.pjPop = false; S.plusPop = false; S.effortMenu = false; S.modeMenu = false; S.modelMenu = false; }
+  function closePops() { if (S.sa) S.sa.menu = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.viewMenu = false; S.savMenu = false; S.pjPop = false; S.plusPop = false; S.effortMenu = false; S.modeMenu = false; S.modelMenu = false; }
   document.getElementById('app').addEventListener('change', function (ev) {
     var el = ev.target;
     if (el.dataset.cronsel) { S.cronCustom = el.value === '自定义…'; render(); }
@@ -4637,7 +5069,7 @@
     if (d.nav === 'chat') { closePops(); S.drawer = !S.drawer; }
     else if (d.nav) { closePops(); S.drawer = false; S.page = d.nav; }
     else if (d.go) { closePops(); S.drawer = false; S.projectForm = false; S.page = d.go; }
-    else if (d.session !== undefined) { closePops(); S.page = 'chat'; S.projectSession = ''; S.session = Number(d.session); S.drawer = false; S.ref = ''; if (isFreshChat()) S.bench = false; }
+    else if (d.session !== undefined) { closePops(); S.page = 'chat'; S.projectSession = ''; S.session = Number(d.session); S.drawer = false; S.ref = ''; S.demo = 'normal'; if (isFreshChat()) S.bench = false; }
     else if (d.psession) { closePops(); S.page = 'chat'; S.projectSession = d.psession; S.ref = ''; }
     else if (d.tenant) { S.tenant = d.tenant; S.tmenu = false; S.session = 0; S.projectSession = ''; }
     else if (d.act === 'tmenu') { var o = !S.tmenu; closePops(); S.tmenu = o; }
@@ -4680,6 +5112,10 @@
     else if (d.hbopen) { var si = sessionsOf().indexOf(d.hbopen); if (si >= 0) { S.session = si; S.projectSession = ''; } else { S.projectSession = d.hbopen; } S.ref = ''; }
     else if (d.act === 'preset') { var pm = !S.presetMenu; closePops(); S.presetMenu = pm; }
     else if (d.preset) { S.preset = d.preset; S.presetMenu = false; }
+    else if (d.act === 'view') { var vm = !S.viewMenu; closePops(); S.viewMenu = vm; }
+    else if (d.viewmode) { S.view = d.viewmode; S.viewMenu = false; }
+    else if (d.act === 'saview') { var sm = !S.savMenu; closePops(); S.savMenu = sm; }
+    else if (d.saviewmode) { S.saView = d.saviewmode; S.savMenu = false; }
     else if (d.act === 'railtheme') { S.rail = S.rail === 'dark' ? 'light' : 'dark'; }
     else if (d.act === 'newchat') { var list = sessionsOf(); S.page = 'chat'; S.projectSession = ''; S.session = list.length - 1; S.drawer = false; S.ref = ''; }
     else if (d.act === 'projform') { S.projectForm = !S.projectForm; }

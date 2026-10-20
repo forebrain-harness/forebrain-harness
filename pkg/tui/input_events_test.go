@@ -2081,3 +2081,140 @@ func TestComposerForwardDeleteOnAHardNewlineJoinsTheLines(t *testing.T) {
 		t.Fatalf("forward delete on a newline should join the lines, got %q at %d", ev.draft, ev.cursor)
 	}
 }
+
+// nextLineEvent returns the next submitted line the reader posts.
+func nextLineEvent(t *testing.T, events <-chan inputEvent) inputEvent {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				t.Fatal("channel closed while waiting for a submitted line")
+			}
+			if ev.kind == inputEventLine {
+				return ev
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for a submitted line")
+		}
+	}
+}
+
+// TestReaderDoesNotEchoEmptyDraftAfterOverlayAccept pins the reader half of the
+// lost-attachment bug: an Enter that answers an open @ picker is the surface
+// choosing a row, not the user clearing the draft. Publishing the now-empty
+// buffer anyway told the surface "the user deleted everything", and its
+// attachment bookkeeping (syncAttachmentsWithDraft) pruned the chip the accept
+// had just added — so the composer showed an image the turn never carried.
+func TestReaderDoesNotEchoEmptyDraftAfterOverlayAccept(t *testing.T) {
+	mentionOverlayActive.Store(true)
+	t.Cleanup(func() {
+		mentionOverlayActive.Store(false)
+		drainInteractiveInputSeedQueue()
+	})
+	events, w := startSelectionReader(t, "")
+
+	if _, err := w.Write([]byte("@x")); err != nil {
+		t.Fatalf("write mention token: %v", err)
+	}
+	// Enter has to arrive as its own key: pressed while the burst is still held
+	// it is the multi-line gesture, not a submit.
+	time.Sleep(40 * time.Millisecond)
+	if _, err := w.Write([]byte("\r")); err != nil {
+		t.Fatalf("write mention accept: %v", err)
+	}
+	if line := nextLineEvent(t, events); line.line != "@x" {
+		t.Fatalf("submitted line = %q, want %q", line.line, "@x")
+	}
+	select {
+	case ev := <-events:
+		if ev.kind == inputEventDraft && ev.draft == "" {
+			t.Fatal("reader published an empty draft after an overlay accept: " +
+				"the surface reads that as the user clearing the draft and drops " +
+				"the attachment the accept just added")
+		}
+		t.Fatalf("unexpected event after an overlay accept: %#v", ev)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// The surface adopts the selection and re-seeds the reader; the echo is the
+	// accepted draft, and it is what keeps the attachment alive.
+	seedInteractiveInput("[Image #1]", seedCursorEnd)
+	if ev := nextDraftEvent(t, events); ev.draft != "[Image #1]" {
+		t.Fatalf("seed echo = %q, want %q", ev.draft, "[Image #1]")
+	}
+}
+
+// TestReaderEchoesEmptyDraftAfterPlainSubmit is the control: with no picker
+// open, Enter really is a submission of this buffer, so the empty draft that
+// follows is authoritative and must keep being published — the composer
+// clearing itself after a send rides on it.
+func TestReaderEchoesEmptyDraftAfterPlainSubmit(t *testing.T) {
+	events, w := startSelectionReader(t, "")
+
+	if _, err := w.Write([]byte("hello")); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+	if _, err := w.Write([]byte("\r")); err != nil {
+		t.Fatalf("write submit: %v", err)
+	}
+	if line := nextLineEvent(t, events); line.line != "hello" {
+		t.Fatalf("submitted line = %q, want %q", line.line, "hello")
+	}
+	if ev := nextDraftEvent(t, events); ev.draft != "" {
+		t.Fatalf("a plain submit must still echo an empty draft, got %q", ev.draft)
+	}
+}
+
+// TestOverlayAcceptKeepsComposerAttachmentThroughSeedEcho is the surface-side
+// twin of TestReaderDoesNotEchoEmptyDraftAfterOverlayAccept: accept an @ image,
+// then apply the draft the reader echoes back. A reader that also published the
+// stale empty buffer would clear the attachment here instead.
+func TestOverlayAcceptKeepsComposerAttachmentThroughSeedEcho(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "small.png"), []byte("\x89PNG\r\n\x1a\nimage-data"), 0o600); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	setMentionRoot(root)
+	t.Cleanup(func() {
+		setMentionRoot("")
+		drainInteractiveInputSeedQueue()
+	})
+
+	state := &streamState{}
+	state.composer.DraftText = "@small"
+	state.composer.Cursor = len([]rune("@small"))
+	state.composer.MentionOverlay = &MentionOverlay{
+		Active:     true,
+		TokenStart: 0,
+		TokenEnd:   len([]rune("@small")),
+		Visible:    []MentionCandidate{{Path: "small.png"}},
+	}
+
+	acc, ok := state.composer.AcceptMentionSelection()
+	if !ok {
+		t.Fatal("accept failed")
+	}
+	state.applyMentionAcceptance(acc)
+	if got := len(state.composer.Attachments); got != 1 {
+		t.Fatalf("attachments after accept = %d, want 1", got)
+	}
+	if want := imageAttachmentPlaceholder(0); state.composer.DraftText != want {
+		t.Fatalf("draft after accept = %q, want the chip %q", state.composer.DraftText, want)
+	}
+
+	// The seed echo the reader sends back after the surface re-seeded it.
+	state.syncAttachmentsWithDraft(state.composer.DraftText)
+	if got := len(state.composer.Attachments); got != 1 {
+		t.Fatalf("the seed echo pruned the accepted image: %d attachments left", got)
+	}
+
+	// And this is what the stale empty draft used to do: the reason the reader
+	// must not publish one for an accept.
+	state.syncAttachmentsWithDraft("")
+	if got := len(state.composer.Attachments); got != 0 {
+		t.Fatalf("an empty draft clears attachments, got %d left", got)
+	}
+}

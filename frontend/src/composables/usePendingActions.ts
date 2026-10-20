@@ -363,11 +363,40 @@ export function usePendingActions(options: {
     }
   }
 
-  function approvalDecisionLabel(option: ApprovalDecisionOption): string {
+  // A fetch gate is about one page on the public web, and the engine already
+  // says which: the facts below are the same ones the terminal's block reads,
+  // so the two surfaces cannot disagree about what is being asked.
+  function isWebFetchAction(a: ActionRow): boolean {
+    const name = permissionSuggestionFromAction(a)?.permissionToolName ?? ''
+    return name.trim().toLowerCase() === 'webfetch'
+  }
+
+  // The page a fetch is about - permission_input is the URL itself.
+  function webFetchPage(a: ActionRow): string {
+    return String(permissionSuggestionFromAction(a)?.permissionInput ?? '').trim()
+  }
+
+  // What remembering this approval covers: prefix_rule_content is "domain:<host>"
+  // for a fetch, which is why the button that remembers it can state its scope.
+  function webFetchHost(a: ActionRow): string {
+    const rule = String(permissionSuggestionFromAction(a)?.prefixRuleContent ?? '').trim()
+    return rule.toLowerCase().startsWith('domain:') ? rule.slice('domain:'.length) : ''
+  }
+
+  function approvalDecisionLabel(option: ApprovalDecisionOption, action?: ActionRow): string {
     switch (option.decision) {
-      case 'accept': return t('chat.approveOnce')
+      case 'accept':
+        return action && isWebFetchAction(action) ? t('chat.webFetchAccept') : t('chat.approveOnce')
       case 'accept_for_session': return t('chat.approveSession')
-      case 'accept_and_remember': return commandScopeLabel(option.commandScope, 'chat.approveRemember')
+      case 'accept_and_remember':
+        // A fetch remembers the host, and the engine says which one in
+        // prefix_rule_content, so the button names its own scope instead of
+        // leaving the card to explain it a second time.
+        if (action && isWebFetchAction(action)) {
+          const host = webFetchHost(action)
+          if (host) return t('chat.webFetchRemember', { host })
+        }
+        return commandScopeLabel(option.commandScope, 'chat.approveRemember')
       case 'accept_with_execpolicy_amendment': return commandScopeLabel(option.commandScope, 'chat.approveCommandRule')
       case 'apply_network_policy_amendment': return option.networkPolicyAmendment?.action === 'deny'
         ? t('chat.denyHostRemember')
@@ -376,7 +405,8 @@ export function usePendingActions(options: {
       case 'grant_for_turn_with_strict_auto_review': return t('chat.grantTurnStrict')
       case 'grant_for_session': return t('chat.grantSession')
       case 'decline': return t('chat.deny')
-      case 'cancel': return t('chat.cancelRun')
+      case 'cancel':
+        return action && isWebFetchAction(action) ? t('chat.webFetchDecline') : t('chat.cancelRun')
     }
   }
 
@@ -458,6 +488,8 @@ export function usePendingActions(options: {
     approvalSuggestion,
     approvalDecisionOptions,
     approvalDecisionLabel,
+    isWebFetchAction,
+    webFetchPage,
     approvalSuggestionLabel,
     approvalKindLabel,
     requesterLabel,

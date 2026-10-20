@@ -139,9 +139,20 @@ func (s *ChatSession) DispatchSurfaceTurn(ctx context.Context, submission turn.T
 	displayText := strings.TrimSpace(submission.DisplayText)
 	if len(submission.Attachments) > 0 {
 		var err error
-		parts, displayText, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments)
+		var warnings []string
+		parts, displayText, warnings, err = turn.SurfaceTurnContentParts(userText, displayText, submission.Attachments)
 		if err != nil {
 			return err
+		}
+		// An attachment the image ladder could not send is not a failed turn:
+		// it was degraded to a note in the prompt, and the user is told the
+		// same sentence here, so nobody waits for a picture that never left.
+		if len(warnings) > 0 {
+			s.notifyUI(NewMessageMsg{Msg: Message{
+				Kind:      MsgKindSystem,
+				Content:   strings.Join(warnings, "\n"),
+				Timestamp: time.Now(),
+			}})
 		}
 		userPartsJSON = turn.BuildSurfaceUserPartsJSON(userText, submission.Attachments)
 	}

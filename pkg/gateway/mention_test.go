@@ -207,8 +207,11 @@ func TestHandleMentionAcceptRejectsEscape(t *testing.T) {
 }
 
 // Paths arrive from the browser, so a turn re-resolves and reads each image
-// rather than trusting the picker's earlier answer, and a path it cannot
-// show the model fails the message instead of being dropped from it.
+// rather than trusting the picker's earlier answer. A path outside the
+// conversation's workspace fails the message instead of being silently
+// dropped from it; a path that resolves but cannot be read or shown to the
+// model is a different case — it degrades to a note and the turn still runs
+// (TestPrepareWebTurnInputDegradesUnsendableImage).
 func TestWebTurnInputValidatesClientImagePaths(t *testing.T) {
 	home, workspace := newMentionWorkspace(t)
 	s, sid := scopedMentionServer(t, home, workspace)
@@ -221,9 +224,45 @@ func TestWebTurnInputValidatesClientImagePaths(t *testing.T) {
 	if refs := state.MessageAttachments(in.partsJSON); len(refs) != 1 || refs[0].Label != "docs/shot.png" || refs[0].MIMEType != "image/png" {
 		t.Fatalf("an image picked twice is attached once: %+v", refs)
 	}
-	for _, bad := range []string{"../secret.png", "docs/note.txt", "docs/missing.png"} {
+	for _, bad := range []string{"../secret.png", "/etc/passwd"} {
 		if _, err := s.prepareWebTurnInput(ctx, sid, "compare", nil, []string{"docs/shot.png", bad}); err == nil {
 			t.Errorf("%s was accepted", bad)
+		}
+	}
+}
+
+// TestPrepareWebTurnInputDegradesUnsendableImage pins the web half of the
+// self-heal: a file the image ladder cannot send does not fail the message.
+// It gets no file_reference — the model is sent this row through
+// run.UserInputParts, i.e. the replay path, so the one note it must see comes
+// from rehydrateMessageImages — and the sentence rides in the message text,
+// where the user reads it. Writing it here as well would say it twice.
+func TestPrepareWebTurnInputDegradesUnsendableImage(t *testing.T) {
+	home, workspace := newMentionWorkspace(t)
+	s, sid := scopedMentionServer(t, home, workspace)
+	ctx := context.Background()
+
+	in, err := s.prepareWebTurnInput(ctx, sid, "read this", nil, []string{"docs/note.txt"})
+	if err != nil {
+		t.Fatalf("an unsendable image must not fail the message: %v", err)
+	}
+	if !strings.Contains(in.text, "[attachment] docs/note.txt") || !strings.Contains(in.text, "not sent:") {
+		t.Fatalf("text = %q want the unsendable-image note", in.text)
+	}
+	if !strings.Contains(in.text, "read this") {
+		t.Fatalf("text = %q want the typed message kept", in.text)
+	}
+	if refs := state.MessageAttachments(in.partsJSON); len(refs) != 0 {
+		t.Fatalf("parts_json holds %+v, want no file_reference for a file that was not sent", refs)
+	}
+	// The note is in the text part, so the model is told exactly once.
+	if got := strings.Count(in.text, "not sent:"); got != 1 {
+		t.Fatalf("note appears %d times, want once", got)
+	}
+	sent := run.UserInputParts(ctx, run.PathResolver{}, in.partsJSON)
+	for _, part := range sent {
+		if part.Type != llm.ContentTypeText {
+			t.Fatalf("sent a %s part for a file that could not be sent", part.Type)
 		}
 	}
 }

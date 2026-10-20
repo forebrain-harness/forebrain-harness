@@ -239,26 +239,109 @@ func TestImagePartWithinRejectsPixelBomb(t *testing.T) {
 	}
 }
 
-// TestImagePartWithinVerbatimPathHasNoPixelCap pins that the direct-send path
-// (data already within budget, sent verbatim without decoding) has no pixel
-// ceiling: a tiny file claiming 60000×60000 is sent as-is, because those
-// bytes cost the process nothing locally.
-func TestImagePartWithinVerbatimPathHasNoPixelCap(t *testing.T) {
+// TestImagePartWithinRefusesOversizeSideItCannotDecode pins the pixel ceiling
+// on the verbatim decision. The old contract here was the opposite — a file
+// under the byte budget was sent as-is whatever its header claimed — and the
+// provider refuted it: 2640x8192 is accepted and 2640x8193 answered
+// 400 ".messages[N].image[0]: You have uploaded an unsupported image…" for any
+// byte size or content (measured 2026-10-20). A header-only file that names
+// such a size cannot be decoded to shrink it, so it is refused with a reason
+// the caller can act on rather than poisoning every later request.
+func TestImagePartWithinRefusesOversizeSideItCannotDecode(t *testing.T) {
 	t.Parallel()
-	data := headerOnlyPNG(60000, 60000, 4<<10)
-	part, res, err := ImagePartWithin("claimed.png", "image/png", data, DefaultMaxImageBytes)
+	data := headerOnlyPNG(9000, 5000, 4<<10) // 45 MP: under the decode ceiling, one side over the provider's
+	_, res, err := ImagePartWithin("claimed.png", "image/png", data, DefaultMaxImageBytes)
+	if err == nil {
+		t.Fatalf("a 9000x5000 header was accepted: res=%+v", res)
+	}
+	for _, want := range []string{"per-side", "8000"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q want it to name %q", err, want)
+		}
+	}
+	if res.SourceWidth != 9000 || res.SourceHeight != 5000 {
+		t.Fatalf("reported %dx%d want the claimed 9000x5000", res.SourceWidth, res.SourceHeight)
+	}
+}
+
+// TestImagePartWithinDownscalesToProviderSideLimit pins the case the provider
+// actually rejected in the field: a screenshot far under the byte budget whose
+// height is past the per-side ceiling. It must go through the same fixed
+// ladder a byte overflow uses, and what leaves must be within the ceiling.
+func TestImagePartWithinDownscalesToProviderSideLimit(t *testing.T) {
+	t.Parallel()
+	data := pngBytes(t, 100, 9000)
+	if len(data) > DefaultMaxImageBytes {
+		t.Fatalf("test image is %d bytes; it must be under the byte budget for this case", len(data))
+	}
+	part, res, err := ImagePartWithin("tall.png", "image/png", data, DefaultMaxImageBytes)
 	if err != nil {
-		t.Fatalf("a within-budget file must be sent verbatim regardless of its header claim: %v", err)
+		t.Fatalf("ImagePartWithin: %v", err)
 	}
-	if res.Scaled || res.SentBytes != len(data) {
-		t.Fatalf("res=%+v want verbatim send", res)
+	if !res.Scaled || res.Scale < 2 {
+		t.Fatalf("res=%+v want a scaled send (the old verbatim path is the bug)", res)
 	}
-	if res.SourceWidth != 60000 || res.SourceHeight != 60000 {
-		t.Fatalf("reported %dx%d want the claimed 60000x60000", res.SourceWidth, res.SourceHeight)
+	if res.Height > MaxImageSidePixels || res.Width > MaxImageSidePixels {
+		t.Fatalf("res=%dx%d want both sides within %d", res.Width, res.Height, MaxImageSidePixels)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(part.ImageBase64)
-	if err != nil || !bytes.Equal(decoded, data) {
-		t.Fatal("verbatim image bytes changed")
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	w, h := DecodeImageConfig(decoded)
+	if w > MaxImageSidePixels || h > MaxImageSidePixels {
+		t.Fatalf("sent image is %dx%d, past the %d-pixel per-side limit", w, h, MaxImageSidePixels)
+	}
+	if w != res.Width || h != res.Height {
+		t.Fatalf("sent %dx%d but reported %dx%d", w, h, res.Width, res.Height)
+	}
+}
+
+// webpVP8X builds a minimal VP8X container whose canvas is w×h: RIFF header,
+// then a VP8X chunk carrying flags, three reserved bytes and the two 24-bit
+// dimensions (stored minus one). The chunk's own size field is part of the
+// container — leaving it out makes the walk in webpDimensions stop before the
+// body and report (0, 0).
+func webpVP8X(w, h int) []byte {
+	body := make([]byte, 10)
+	body[0] = 0 // flags: no animation, no alpha, no ICC
+	le := func(b []byte, v uint32) {
+		b[0] = byte(v)
+		b[1] = byte(v >> 8)
+		b[2] = byte(v >> 16)
+	}
+	le(body[4:7], uint32(w-1))
+	le(body[7:10], uint32(h-1))
+
+	var buf bytes.Buffer
+	buf.WriteString("RIFF")
+	var b4 [4]byte
+	binary.LittleEndian.PutUint32(b4[:], uint32(4+8+len(body))) // "WEBP" + chunk header + body
+	buf.Write(b4[:])
+	buf.WriteString("WEBP")
+	buf.WriteString("VP8X")
+	binary.LittleEndian.PutUint32(b4[:], uint32(len(body)))
+	buf.Write(b4[:])
+	buf.Write(body)
+	return buf.Bytes()
+}
+
+// TestImagePartWithinRefusesOversizeSideWebP pins the one format the ladder
+// cannot shrink: the standard library has no webp decoder, so a webp past the
+// per-side ceiling must be named as unsendable instead of being handed to a
+// provider that will refuse the whole request for it.
+func TestImagePartWithinRefusesOversizeSideWebP(t *testing.T) {
+	t.Parallel()
+	data := webpVP8X(9000, 100)
+	if w, h := DecodeImageConfig(data); w != 9000 || h != 100 {
+		t.Fatalf("test container reads as %dx%d, want 9000x100", w, h)
+	}
+	_, _, err := ImagePartWithin("tall.webp", "image/webp", data, DefaultMaxImageBytes)
+	if err == nil {
+		t.Fatal("a 9000x100 webp was accepted")
+	}
+	if !strings.Contains(err.Error(), "webp cannot be downscaled here") {
+		t.Fatalf("err=%q want it to name the webp limit", err)
 	}
 }
 
@@ -331,6 +414,26 @@ func TestImageFileAppliesTheImageBudget(t *testing.T) {
 	}
 	if len(decoded) > tight || len(decoded) >= defaultSend {
 		t.Fatalf("tightened budget sent %d bytes, want ≤%d and below the default-budget %d", len(decoded), tight, defaultSend)
+	}
+}
+
+// TestImageFileDownscalesOversizeSideAttachment pins the attachment path
+// end-to-end: a screenshot under the byte budget whose long side is past the
+// provider ceiling is downscaled by the same ladder before it is sent.
+func TestImageFileDownscalesOversizeSideAttachment(t *testing.T) {
+	t.Setenv(ImageMaxBytesEnv, "")
+	path := writeTempFile(t, "tall.png", pngBytes(t, 100, 9000))
+	part, err := ImageFile(path)
+	if err != nil {
+		t.Fatalf("ImageFile: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(part.ImageBase64)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	w, h := DecodeImageConfig(decoded)
+	if w > MaxImageSidePixels || h > MaxImageSidePixels {
+		t.Fatalf("sent image is %dx%d, past the %d-pixel per-side limit", w, h, MaxImageSidePixels)
 	}
 }
 

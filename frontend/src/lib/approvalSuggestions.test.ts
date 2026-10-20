@@ -197,6 +197,34 @@ describe('command approval scope', () => {
   })
 })
 
+describe('fetch approval facts', () => {
+  it('reads the rule a remembered fetch writes, which is what names its host', () => {
+    const suggestion = permissionSuggestionFromAction({
+      id: 'act-fetch',
+      kind: 'web_fetch',
+      status: 'pending',
+      payloadJson: JSON.stringify({
+        url: 'https://example.com/pricing',
+        rule_content: 'domain:example.com',
+        permission_suggestion: {
+          permission_tool_name: 'WebFetch',
+          permission_input: 'https://example.com/pricing',
+          prefix_rule_content: 'domain:example.com',
+          available_decisions: ['accept', 'accept_and_remember', 'cancel'],
+        },
+      }),
+    })
+
+    expect(suggestion?.permissionInput).toBe('https://example.com/pricing')
+    expect(suggestion?.prefixRuleContent).toBe('domain:example.com')
+    expect(approvalDecisions(suggestion).map((item) => item.decision)).toEqual([
+      'accept',
+      'accept_and_remember',
+      'cancel',
+    ])
+  })
+})
+
 describe('command approval scope copy', () => {
   it('names what the row grants in both languages', () => {
     for (const locale of ['zh', 'en'] as const) {
