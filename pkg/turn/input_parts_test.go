@@ -67,15 +67,52 @@ func TestSurfaceTurnContentPartsIncludesImageAttachment(t *testing.T) {
 		t.Fatalf("write png: %v", err)
 	}
 
-	parts, display, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
+	parts, display, warnings, err := SurfaceTurnContentParts("explain", "explain", []InputAttachment{{Path: img, MIMEType: "image/png", Label: "clip.png"}})
 	if err != nil {
 		t.Fatalf("SurfaceTurnContentParts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for a sendable image", warnings)
 	}
 	if len(parts) != 2 || parts[0].Type != llm.ContentTypeText || parts[1].Type != llm.ContentTypeImageBase64 {
 		t.Fatalf("unexpected parts: %#v", parts)
 	}
 	if !strings.Contains(display, "[Image #1]") {
 		t.Fatalf("display text missing attachment marker: %q", display)
+	}
+}
+
+// TestSurfaceTurnContentPartsDegradesUnsendableAttachment pins the self-heal:
+// an attachment whose bytes cannot be sent does not fail the turn. It becomes
+// a text part the model can act on ("this picture is missing, here's why") and
+// is reported back so the user learns the same thing. The marker counts only
+// images that actually left, so "[Image #N]" still names one picture per image
+// in the request.
+func TestSurfaceTurnContentPartsDegradesUnsendableAttachment(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "fake.png")
+	if err := os.WriteFile(bad, []byte("not an image"), 0o600); err != nil {
+		t.Fatalf("write fake.png: %v", err)
+	}
+
+	parts, display, warnings, err := SurfaceTurnContentParts(
+		"explain", "explain",
+		[]InputAttachment{{Path: bad, Label: "fake.png"}},
+	)
+	if err != nil {
+		t.Fatalf("an unsendable attachment must not fail the turn: %v", err)
+	}
+	if len(parts) != 2 || parts[1].Type != llm.ContentTypeText {
+		t.Fatalf("parts = %#v, want text + one degraded text part", parts)
+	}
+	if !strings.HasPrefix(parts[1].Text, "[attachment] fake.png") ||
+		!strings.Contains(parts[1].Text, "not sent:") {
+		t.Fatalf("degraded part = %q, want the [attachment] … not sent: note", parts[1].Text)
+	}
+	if len(warnings) != 1 || warnings[0] != parts[1].Text {
+		t.Fatalf("warnings = %#v, want exactly the note the model was given", warnings)
+	}
+	if strings.Contains(display, "[Image #") {
+		t.Fatalf("display = %q, want no image marker for an image that never left", display)
 	}
 }
 

@@ -365,6 +365,28 @@ func rehydrateMessageImages(ctx context.Context, resolver FileReferenceResolver,
 		}
 		if err != nil {
 			slog.Debug("rehydrate: image file read failed", "path", absPath, "err", err)
+			// Live turns degrade an unsendable attachment to this exact sentence
+			// (llm.UnsendableImageNote), so the replayed message — and the web
+			// turn, whose live input IS this function — says what the terminal
+			// said. The handler is told why the picture is missing and the
+			// cached prefix does not fork at that message.
+			label := strings.TrimSpace(ref.Label)
+			if label == "" {
+				label = ref.FileID
+			}
+			note := llm.UnsendableImageNote(label, mime, err.Error())
+			placeholder := fileReferencePlaceholder(ref)
+			replaced := false
+			for j := range parts {
+				if parts[j].Type == llm.ContentTypeText && strings.TrimSpace(parts[j].Text) == placeholder {
+					parts[j] = llm.Text(note)
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				slog.Debug("rehydrate: placeholder not found for unsendable image", "placeholder", placeholder)
+			}
 			continue
 		}
 		// Find and replace the text placeholder that ParseMessageParts

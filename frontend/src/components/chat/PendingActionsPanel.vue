@@ -156,7 +156,7 @@
               :data-testid="`pending-decision-${option.decision}`"
               @click="submitApprovalDecision(a, option)"
             >
-              {{ approvalDecisionLabel(option) }}
+              {{ approvalDecisionLabel(option, a) }}
             </button>
           </div>
         </div>

@@ -1582,7 +1582,19 @@ func readRawInputEvents(ctx context.Context, in *os.File, out io.Writer, tty raw
 						ch <- inputEvent{kind: inputEventLine, line: submitted, historyEntryRecorded: submittedHistoryIndex >= 0, historyIndex: submittedHistoryIndex}
 						line = line[:0]
 						cursor = 0
-						ch <- inputEvent{kind: inputEventDraft, draft: "", cursor: 0}
+						// An Enter that answers an open picker is a selection, not a
+						// submission of this buffer: the surface adopts the highlighted
+						// row and re-seeds us with the accepted draft (a chip for a
+						// mention, the picked command for the slash picker). The empty
+						// buffer here is therefore a state nobody asked for — publishing
+						// it tells the surface the draft was cleared, and its
+						// attachment/paste bookkeeping prunes the chip the accept just
+						// added (syncAttachmentsWithDraft), so the composer ends up
+						// showing an image it never sends. Same gate the Tab path above
+						// uses for the same reason.
+						if !slashOverlayActive.Load() && !mentionOverlayActive.Load() {
+							ch <- inputEvent{kind: inputEventDraft, draft: "", cursor: 0}
+						}
 						historyIndex = -1
 						historyDraft = nil
 					case 0x7f, 0x08:

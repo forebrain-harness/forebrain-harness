@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"unicode/utf8"
 )
@@ -253,6 +254,62 @@ func UsageFromErrorForSupervisor(err error) *Usage {
 
 func WrapErrorWithUsageForTest(err error, usage *Usage) error {
 	return WithUsageError(err, usage)
+}
+
+// IsImageRejection reports whether err is a provider refusing an image in the
+// request (an image it cannot decode, a format or a size it does not accept).
+// Providers word this differently and none of them name a machine-readable
+// code, so the match is on prose — deliberately narrow: a false positive costs
+// one retry with the images replaced by text, a false negative costs the whole
+// conversation (the offending image is replayed on every later request).
+//
+// The phrases are the ones seen in the field:
+//   - "You have uploaded an unsupported image. Please make sure your image is
+//     valid and has one of the following formats: webp, png, jpeg, and gif."
+//     (this provider's answer to a 2640x11576 png, status 400)
+//   - "Invalid image format" / "invalid_image" (wire field name in the body)
+//   - "Could not process image" (an image the request pipeline refuses)
+//   - "image_url" (the rejected parameter's name in the error path)
+//
+// An APIError whose status is a server error is never an image complaint: a
+// 5xx is the provider failing, not the picture, and retrying it without the
+// image would hide a real outage behind a degraded request.
+func IsImageRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr != nil {
+		if apiErr.StatusCode != 0 &&
+			apiErr.StatusCode != http.StatusBadRequest &&
+			apiErr.StatusCode != http.StatusRequestEntityTooLarge {
+			return false
+		}
+		// Error() renders Err when the SDK set one; the parsed body text can
+		// carry the phrase even then.
+		if strings.TrimSpace(apiErr.Message) != "" {
+			text += " " + apiErr.Message
+		}
+	}
+	lowered := strings.ToLower(text)
+	for _, phrase := range imageRejectionPhrases {
+		if strings.Contains(lowered, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// imageRejectionPhrases are the prose a provider uses to refuse an image part.
+var imageRejectionPhrases = []string{
+	"unsupported image",
+	"image format",
+	"invalid image",
+	"image is not valid",
+	"could not process image",
+	"image_url",
+	"invalid_image",
 }
 
 func APIErrorIsBlankModelOutput(err error) bool {

@@ -43,6 +43,9 @@ export interface ApprovalDecisionOption {
 export interface PermissionSuggestionRecord {
   permissionToolName?: string
   permissionInput?: string
+  /** The rule remembering this approval writes. For a fetch it is
+   *  `domain:<host>`, which is what lets a button name its own scope. */
+  prefixRuleContent?: string
   permissionMode?: string
   permissionReason?: string
   bypassSandbox?: boolean
@@ -128,9 +131,11 @@ function normalizeSuggestion(input: PermissionSuggestionRecord | null | undefine
   const networkContextRaw = readField(record, 'networkApprovalContext', 'network_approval_context')
   const networkApprovalContext = normalizeNetworkContext(networkContextRaw)
   const networkPort = Number(readField(record, 'networkPort', 'network_port'))
+  const prefixRuleContent = optionalString(readField(record, 'prefixRuleContent', 'prefix_rule_content'))
   return {
     permissionToolName: toolName,
     permissionInput: String(readField(record, 'permissionInput', 'permission_input') ?? '').trim(),
+    ...(prefixRuleContent ? { prefixRuleContent } : {}),
     permissionMode: optionalString(readField(record, 'permissionMode', 'permission_mode')),
     permissionReason: optionalString(readField(record, 'permissionReason', 'permission_reason')),
     bypassSandbox: readField(record, 'bypassSandbox', 'bypass_sandbox') === true,

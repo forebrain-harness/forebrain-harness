@@ -133,6 +133,40 @@
           <div v-if="errors[a.id]" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
         </div>
       </template>
+      <template v-else-if="isWebFetchAction(a)">
+        <!-- A fetch gate asks one thing about one page, so the card is the
+             question, the page, and the three ways out - no title layer, no
+             second line falling back to an id, no permission-memory box: the
+             button that remembers this approval already names the host it
+             remembers. -->
+        <div data-testid="web-fetch-approval">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0 text-sm font-medium text-[var(--forebrain-text)]">{{ t('chat.webFetchQuestion') }}</div>
+            <div class="flex shrink-0 items-center gap-2">
+              <button
+                v-for="(option, index) in approvalDecisionOptions(a)"
+                :key="`${a.id}-${option.decision}-${index}`"
+                :class="option.decision === 'accept' ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
+                type="button"
+                :disabled="submitting[a.id]"
+                :data-testid="`pending-decision-${option.decision}`"
+                @click="submitApprovalDecision(a, option)"
+              >
+                {{ approvalDecisionLabel(option, a) }}
+              </button>
+            </div>
+          </div>
+          <button
+            v-if="requesterLabel(a) && canOpenAgent"
+            type="button"
+            class="mt-1 block max-w-full truncate text-left text-xs text-[var(--forebrain-text-2)] hover:text-[var(--forebrain-brand-1)] disabled:pointer-events-none"
+            :disabled="!a.agentId"
+            @click="a.agentId && emit('open-agent', a.agentId)"
+          >{{ requesterLabel(a) }}</button>
+          <div v-else-if="requesterLabel(a)" class="mt-1 truncate text-xs text-[var(--forebrain-text-2)]">{{ requesterLabel(a) }}</div>
+          <div class="mt-2 break-all pl-4 font-mono text-[12px] text-[var(--forebrain-text-2)]" data-testid="web-fetch-page">{{ webFetchPage(a) }}</div>
+        </div>
+      </template>
       <template v-else>
         <div class="flex items-center justify-between gap-3">
           <div class="min-w-0">
@@ -160,7 +194,7 @@
           :placeholder="t('chat.otherOptional')"
         />
       </template>
-      <div v-if="!isExitPlan(a) && approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
+      <div v-if="!isExitPlan(a) && !isWebFetchAction(a) && approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
         <div class="flex flex-wrap items-center gap-2">
           <span class="font-medium text-[var(--forebrain-text)]">{{ t('chat.permissionMemory') }}</span>
           <span class="font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ approvalSuggestionLabel(a) }}</span>
@@ -311,6 +345,8 @@ const {
   approvalSuggestion,
   approvalDecisionOptions,
   approvalDecisionLabel,
+  isWebFetchAction,
+  webFetchPage,
   approvalSuggestionLabel,
   approvalKindLabel,
   requesterLabel,

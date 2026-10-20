@@ -585,11 +585,16 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 			continue
 		}
 		seen[abs] = true
-		// Read now, so an image the model cannot be shown stops the message
-		// here rather than reaching the model as a bare name.
+		// Read now, so the reference records the MIME the file's own bytes name.
+		// A file the ladder cannot send is no longer fatal and gets no
+		// file_reference at all: the model is sent this row through
+		// run.UserInputParts (server.go), so the one note it must see comes from
+		// rehydrateMessageImages. Writing a second one here would say it twice —
+		// and the note rides in the message text below, where the user reads it.
 		image, err := llm.ImageFile(abs)
 		if err != nil {
-			return webTurnInput{}, err
+			blocks = append(blocks, llm.UnsendableImageNote(picked, "", err.Error()))
+			continue
 		}
 		imageMarkers = append(imageMarkers, fmt.Sprintf("[Image #%d]", len(imageMarkers)+1))
 		parts = append(parts, state.FileReferencePartJSON(abs, picked, image.MIMEType))

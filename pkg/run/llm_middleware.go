@@ -262,6 +262,11 @@ func WrapRecoverableLLM(
 	if inner == nil {
 		return nil
 	}
+	// Below the blank-output retry and the orchestration wrapper (which is what
+	// builds Result.Session): a provider that refuses an image gets one retry
+	// with that image degraded to text, and the degraded request is this call
+	// only — the transcript keeps its images.
+	inner = llm.Use(inner, llm.NewImageHeal())
 	inner = wrapBlankOutputRetryLLM(inner)
 	return recoverableLLM{
 		inner:       inner,
