@@ -5113,6 +5113,103 @@ func TestSessionPlanMarkdownReturnsOnlyThatSessionsPlan(t *testing.T) {
 	require.Equal(t, "# Mine", body.Markdown)
 }
 
+// A conversation that replans writes a new plan file each time, so its plan
+// history is its directory. plans hands that history to the workbench newest
+// first, with each document's text, and with paths relative to the state root
+// so the user's home directory never reaches the browser.
+func TestSessionPlansListsAConversationsHistory(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	projects := state.NewProjectStore(db, "main")
+	project, err := projects.Create(ctx, state.CreateProjectInput{Name: "plans", Root: t.TempDir()})
+	require.NoError(t, err)
+	require.NoError(t, state.NewSessionStore(db, "main").Ensure(ctx, "s1", "s1"))
+	require.NoError(t, projects.BindSession(ctx, "s1", project.ID))
+
+	s := &Server{Home: home, Projects: projects, Sessions: state.NewSessionStore(db, "main")}
+	key := s.sessionProjectKey(ctx, "s1")
+	require.Equal(t, state.ProjectKeyForRoot(project.Root), key)
+
+	dir := state.PlanDirForSession(s.stateRoot(), key, "s1")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	for name, content := range map[string]string{"older.md": "# Older", "newer.md": "# Newer"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content+"\n"), 0o600))
+		mt := t0
+		if name == "newer.md" {
+			mt = t0.Add(time.Minute)
+		}
+		require.NoError(t, os.Chtimes(filepath.Join(dir, name), mt, mt))
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/chat/sessions/s1/plans", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+		{Key: "id", Value: "s1"},
+	}))
+	rr := httptest.NewRecorder()
+	s.handleSessionPlans(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var body struct {
+		Plans []struct {
+			Name      string `json:"name"`
+			Path      string `json:"path"`
+			UpdatedAt int64  `json:"updated_at"`
+			Markdown  string `json:"markdown"`
+		} `json:"plans"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	require.Len(t, body.Plans, 2)
+
+	newest, older := body.Plans[0], body.Plans[1]
+	require.Equal(t, "newer.md", newest.Name)
+	require.Equal(t, "# Newer", newest.Markdown)
+	require.Equal(t, t0.Add(time.Minute).Unix(), newest.UpdatedAt)
+	require.False(t, filepath.IsAbs(newest.Path), "path must not be absolute: %q", newest.Path)
+	require.Equal(t, "plans/"+key+"/s1/newer.md", newest.Path)
+
+	require.Equal(t, "older.md", older.Name)
+	require.Equal(t, "# Older", older.Markdown)
+	require.Equal(t, "plans/"+key+"/s1/older.md", older.Path)
+}
+
+// A conversation's plans are its own: an id this agent has no session for is
+// 404 on both plan reads. plan-md used to answer 200 with an empty document,
+// which is indistinguishable from "this conversation never planned".
+func TestSessionPlanEndpointsRejectUnknownSession(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s := &Server{
+		Home:     home,
+		Projects: state.NewProjectStore(db, "main"),
+		Sessions: state.NewSessionStore(db, "main"),
+	}
+
+	for _, tc := range []struct {
+		path    string
+		handler http.HandlerFunc
+	}{
+		{"/api/chat/sessions/does-not-exist/plans", s.handleSessionPlans},
+		{"/api/chat/sessions/does-not-exist/plan-md", s.handleSessionPlanMarkdown},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req = req.WithContext(context.WithValue(req.Context(), ParamsKey, Params{
+				{Key: "id", Value: "does-not-exist"},
+			}))
+			rr := httptest.NewRecorder()
+			tc.handler(rr, req)
+			require.Equal(t, http.StatusNotFound, rr.Code)
+		})
+	}
+}
+
 // The session-model endpoints serve one conversation's own choice and the
 // options it may be switched to: the options are the agent's configured chain
 // with their catalog-reported reasoning levels, a pair or an effort the

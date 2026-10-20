@@ -139,7 +139,12 @@ describe('McpNotice', () => {
 describe('ApprovalCard hosting the pending set', () => {
   it('answers a parked approval from the thread, with the panel\'s own control', async () => {
     vi.spyOn(forebrainApi, 'actionsList')
-      .mockResolvedValueOnce([{ id: 'a1', kind: 'shell', status: 'pending', payloadJson: JSON.stringify({ justification: 'run the tests' }), createdAt: 1, updatedAt: 1 }])
+      .mockResolvedValueOnce([{
+        id: 'a1', kind: 'shell', status: 'pending',
+        payloadJson: JSON.stringify({ command: 'go test ./...', justification: 'run the tests' }),
+        createdAt: 1, updatedAt: 1,
+        permissionSuggestion: { permissionToolName: 'Bash', availableDecisions: ['accept', 'cancel'] },
+      }])
       .mockResolvedValue([])
     const approve = vi.spyOn(forebrainApi, 'actionsApprove').mockResolvedValue({} as never)
     const wrapper = mount(ApprovalCard, { props: { sessionId: 's1', version: 0 } })
@@ -147,11 +152,11 @@ describe('ApprovalCard hosting the pending set', () => {
 
     const card = wrapper.find('[data-testid="pending-approval"]')
     expect(card.exists()).toBe(true)
-    expect(card.text()).toContain('run the tests')
-    await card.find('[data-testid="pending-approve"]').trigger('click')
+    expect(card.text()).toContain('要运行这条命令吗？')
+    await card.find('[data-testid="pending-decision-accept"]').trigger('click')
     await flushPromises()
 
-    expect(approve).toHaveBeenCalledWith('a1', {})
+    expect(approve).toHaveBeenCalledWith('a1', { reason: 'web:accept', decision: 'accept' })
     expect(wrapper.find('[data-testid="pending-approval"]').exists()).toBe(false)
     wrapper.unmount()
   })

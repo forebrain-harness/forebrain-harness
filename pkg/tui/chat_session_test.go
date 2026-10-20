@@ -1858,6 +1858,67 @@ func TestCurrentModelReasoningEffortReadsPrimaryProviderParams(t *testing.T) {
 	require.Equal(t, "high", s.CurrentModelReasoningEffort())
 }
 
+// Every answer this surface gives to "what does this conversation run on" is
+// the conversation's own stored choice resolved against the live config —
+// footer, /model's current marker, the rows it writes, effort included. The
+// runner's published selection answers only for a conversation with no row of
+// its own, so a web /model switch on the same conversation is reflected here
+// immediately instead of the footer naming a model the requests never use.
+func TestConversationModelAnswersFollowTheSessionsOwnRow(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(home, "state.sqlite"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sessStore := state.NewSessionStore(db, "main")
+
+	cfg := appcfg.Root{Agents: appcfg.AgentsSection{Definitions: map[string]appcfg.AgentDefinition{
+		"main": {Primary: true, LLMProviders: []appcfg.AgentLLMProviderConfig{
+			{Provider: "openai", Model: "gpt-a", APIKey: "test-key", BaseURL: "https://a.example.invalid"},
+			{Provider: "openai", Model: "gpt-b", APIKey: "test-key", BaseURL: "https://b.example.invalid"},
+		}},
+	}}}
+	require.NoError(t, appcfg.Save(filepath.Join(home, "forebrain.yaml"), cfg))
+	runner := &run.Runner{Deps: &run.Deps{Home: home, AgentName: "main", AppCfg: &cfg, SessionStore: sessStore}}
+	s := sessionEnv{Home: home, SQL: db, SessStore: sessStore, Config: cfg, Runner: runner}.session()
+	restore := run.SetLLMOverrideForTest(&sequencedLLM{})
+	t.Cleanup(restore)
+	require.NoError(t, s.runner().Load())
+
+	save := func(sid, provider, model, effort string) {
+		t.Helper()
+		require.NoError(t, sessStore.Ensure(ctx, sid, sid))
+		_, err := sessStore.SaveSessionModelSelection(ctx, sid, state.SessionModelSelection{
+			Provider: provider, Model: model, Effort: effort,
+		})
+		require.NoError(t, err)
+	}
+	save("s1", "openai", "gpt-b", "high")
+	save("other-session", "openai", "gpt-a", "")
+
+	s.SetViewingSession("s1")
+	require.Equal(t, "openai / gpt-b", s.CurrentModelOption(), "the footer names the conversation's model")
+	require.Equal(t, "high", s.CurrentModelReasoningEffort(), "and the effort its requests carry")
+	require.Equal(t, "gpt-b", cliResultModel(s, "s1"), "the rows it writes record the conversation's model")
+	settings, err := s.ModelSettings("s1")
+	require.NoError(t, err)
+	require.Equal(t, turn.ModelSelectionState{Provider: "openai", Model: "gpt-b", Effort: "high", Set: true}, settings.Selection,
+		"/model marks the conversation's model current")
+
+	// The id asked about is the one answered: another conversation's row is
+	// not this surface's, even while this surface is looking at s1.
+	other, err := s.ModelSettings("other-session")
+	require.NoError(t, err)
+	require.Equal(t, "gpt-a", other.Selection.Model, "/model answers for the session it was asked about")
+
+	// A row the config no longer offers resolves to the published selection,
+	// which is also what a conversation with no row at all answers.
+	save("s1", "openai", "gpt-gone", "")
+	require.Equal(t, "openai / gpt-a", s.CurrentModelOption())
+	require.Equal(t, "", s.CurrentModelReasoningEffort())
+	require.Equal(t, "gpt-a", cliResultModel(s, "s1"))
+}
+
 func TestApplyModelReasoningSelectionPreservesExistingParams(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "test-key")
 	home := t.TempDir()
@@ -8219,7 +8280,7 @@ func TestCharacterizationModelSwitchAppliesWithinSession(t *testing.T) {
 	if reply := chooseInSession(t, s, "model", "openai / gpt-main-v2").Reply; reply != "Switched to openai / gpt-main-v2." {
 		t.Fatalf("/model choice replied %q", reply)
 	}
-	if got := cliResultModel(s); got != "gpt-main-v2" {
+	if got := cliResultModel(s, sessionID); got != "gpt-main-v2" {
 		t.Fatalf("cliResultModel after switch = %q, want gpt-main-v2 (applied within the session, not deferred)", got)
 	}
 
@@ -20399,21 +20460,22 @@ func TestRendererUserInteractionShowsFriendlyAnswers(t *testing.T) {
 			ToolName: "user_interaction",
 			Status:   "completed",
 			Input: map[string]any{"questions": []any{
-				map[string]any{"header": "交付方式"},
-				map[string]any{"header": "修改范围"},
-				map[string]any{"header": "补充说明"},
+				map[string]any{"header": "交付方式", "question": "这次改动怎么交付？"},
+				map[string]any{"header": "修改范围", "question": "要动哪些范围？"},
+				map[string]any{"header": "补充说明", "question": "还有要补充的吗？"},
 			}},
 		},
 	}, "tool", "214")
 
 	plain := stripANSI(out.String())
-	// The header names what was asked; the body pairs each question with its
-	// answer, in the order asked.
+	// The header says only that the user was asked; the questions themselves —
+	// in their own words, never their headers — are the body's business, paired
+	// with their answers in the order asked.
 	header, body, _ := strings.Cut(plain, "\n")
-	if !strings.Contains(header, "Asked user") || !strings.Contains(header, "交付方式 · 修改范围 · 补充说明") {
-		t.Fatalf("header = %q, want every question named", header)
+	if header != "● Asked user" {
+		t.Fatalf("header = %q, want %q", header, "● Asked user")
 	}
-	wantOrder := []string{"交付方式", "→ 设计方案并开发实施", "修改范围", "→ TUI", "→ 回放兼容", "补充说明", "→ 保留旧会话展示能力"}
+	wantOrder := []string{"这次改动怎么交付？", "→ 设计方案并开发实施", "要动哪些范围？", "→ TUI", "→ 回放兼容", "还有要补充的吗？", "→ 保留旧会话展示能力"}
 	previous := -1
 	for _, needle := range wantOrder {
 		idx := strings.Index(body, needle)
@@ -20425,9 +20487,11 @@ func TestRendererUserInteractionShowsFriendlyAnswers(t *testing.T) {
 		}
 		previous = idx
 	}
-	for _, needle := range []string{"output:", "```json", `\"answers\"`, `\"selections\"`, `\"other\"`} {
+	// A question's header is a lookup key, not display copy, and neither is
+	// the transport that carried the answers.
+	for _, needle := range []string{"交付方式", "修改范围", "补充说明", "output:", "```json", `\"answers\"`, `\"selections\"`, `\"other\"`} {
 		if strings.Contains(plain, needle) {
-			t.Fatalf("rendered card must not contain transport detail %q: %q", needle, plain)
+			t.Fatalf("rendered card must not contain %q: %q", needle, plain)
 		}
 	}
 }

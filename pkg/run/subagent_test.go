@@ -88,7 +88,7 @@ func TestDispatchSubagentAnnouncesAndFinishes(t *testing.T) {
 		resolve: agent.ResolvePublicSubtype,
 		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
 			// The run is tagged for its own view before the executor is called.
-			if got := toolpkg.HookAgentIDFromContext(typedSubagentExecContext(prep)); got != prep.entry.TaskID {
+			if got := toolpkg.HookAgentIDFromContext(subagentExecContext(prep)); got != prep.entry.TaskID {
 				t.Errorf("roster key = %q, want %q", got, prep.entry.TaskID)
 			}
 			return "findings", nil
@@ -1605,6 +1605,8 @@ type fixedSubagentExecutor struct {
 	sessionID       string
 	workerSessionID string
 	subagentType    string
+	model           string
+	pinnedModel     string
 	forkChild       bool
 	hookAgentID     string
 }
@@ -1650,9 +1652,13 @@ func (h *concurrencyRecordingSubagentExecutor) RunSubagentExec(ctx context.Conte
 
 type forkCaptureLLMForTest struct {
 	messages []llm.Message
+	// ctx is the context the fork's own request went out on: what the run was
+	// tagged with at dispatch is only real if it survives to here.
+	ctx context.Context
 }
 
-func (f *forkCaptureLLMForTest) Execute(_ context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+func (f *forkCaptureLLMForTest) Execute(ctx context.Context, messages []llm.Message, _ []*llm.Tool) (*llm.Result, error) {
+	f.ctx = ctx
 	f.messages = deepCloneMessages(messages)
 	return &llm.Result{
 		Message: &llm.Message{
@@ -1672,6 +1678,10 @@ func (h *fixedSubagentExecutor) RunSubagentExec(ctx context.Context, req Subagen
 	h.sessionID = req.SessionID
 	h.workerSessionID = req.WorkerSessionID
 	h.subagentType = req.SubagentType
+	h.model = req.Model
+	if pin, ok := SubagentModelOverrideFromContext(ctx); ok {
+		h.pinnedModel = pin.Model
+	}
 	h.forkChild = toolpkg.IsForkChildFromContext(ctx)
 	h.hookAgentID = toolpkg.HookAgentIDFromContext(ctx)
 	return h.output, nil
@@ -2475,6 +2485,90 @@ func TestExecGeneralForkSubagentUsesParentSnapshotAndStableForkMessages(t *testi
 	last := forkLLM.messages[len(forkLLM.messages)-1].TextContent()
 	if !strings.Contains(last, "Assigned directive:\ninspect auth flow") {
 		t.Fatalf("fork child directive missing %q in %q", "Assigned directive:\ninspect auth flow", last)
+	}
+}
+
+// What a subagent run is — fork or typed — is decided at dispatch and given to
+// the execution together with its model, by the one constructor every path
+// uses. The front fork goes through the executor rather than the detached
+// spawn, and it must arrive carrying the same identity: the marker is what
+// refuses a nested dispatch from inside it, what keeps plan mode's reminder
+// addressed to a child, and what tags its tool cards. A typed run carries the
+// opposite answer, so the marker cannot be satisfied by tagging everything.
+func TestFrontForkChildCarriesItsOwnIdentity(t *testing.T) {
+	ctx := context.Background()
+	db, err := state.OpenStateForTest(ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenStateForTest: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	runSvc := &state.RunStore{DB: db}
+	ensureRunSessions(t, db, "session-1")
+	parent, err := runSvc.CreateRun(ctx, "session-1", "parent")
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	forkLLM := &forkCaptureLLMForTest{}
+	owner := &Runner{Deps: &Deps{RunRT: runSvc}, forkLLM: forkLLM, mainCfg: AgentConfigYAML{Description: "main system"}, Control: NewController()}
+	parentSnapshot := []llm.Message{
+		llm.SystemMessage("rendered system"),
+		llm.UserMessage(llm.Text("original user request")),
+		llm.AssistantMessage(
+			[]llm.ContentPart{llm.Text("assistant planning")},
+			llm.ToolCall{ID: "call-1", Type: llm.ToolTypeFunction, Function: llm.FunctionCall{Name: "read_file", Arguments: `{"path":"a.go"}`}},
+		),
+	}
+
+	if _, err := execGeneralSubagent(
+		withForkRuntimeSnapshot(toolpkg.WithRunID(llm.WithAgentSessionID(ctx, "session-1"), parent.ID), parentSnapshot),
+		Factory{AgentName: "main", Owner: owner, Home: t.TempDir()},
+		"task-front-fork",
+		"short title",
+		"inspect auth flow",
+		"",
+	); err != nil {
+		t.Fatalf("execGeneralSubagent fork: %v", err)
+	}
+	forkCtx := forkLLM.ctx
+	if forkCtx == nil {
+		t.Fatal("the fork's own request went out on no context")
+	}
+	if !toolpkg.IsForkChildFromContext(forkCtx) {
+		t.Fatal("the front fork's execution was not marked as a fork child")
+	}
+	if err := guardForkChildNoSubagentTools(forkCtx); err == nil || !strings.Contains(err.Error(), "subagent tools are not available inside a forked worker") {
+		t.Fatalf("a nested dispatch from the front fork child = %v, want the forked-worker refusal", err)
+	}
+	meta := toolpkg.EnrichToolMeta(forkCtx, toolpkg.ToolMeta{ToolName: "read_file"})
+	if meta.AgentKind != "fork" || meta.AgentType != "fork" {
+		t.Fatalf("the front fork child's tool cards are attributed %q/%q, want fork/fork", meta.AgentKind, meta.AgentType)
+	}
+
+	// The same constructor on a typed dispatch answers the other way and still
+	// tags the subtype, so the fork marker is a fact about the run, not a
+	// blanket tag.
+	cfg := subagentCustomConfig()
+	typedOwner := &Runner{Deps: &Deps{Home: t.TempDir(), AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	typedFac := Factory{AgentName: "main", Home: typedOwner.Deps.Home, AppCfg: cfg, Owner: typedOwner}
+	var typedCtx context.Context
+	if _, _, err := dispatchSubagent(dispatchTestCtx(), typedFac, subagentDispatch{
+		taskID:  "task-typed-identity",
+		task:    "scout the repo",
+		subtype: "repo-scout",
+		resolve: SubagentCatalogFor(cfg, "main").ResolvePublic,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			typedCtx = subagentExecContext(prep)
+			return "done", nil
+		},
+	}); err != nil {
+		t.Fatalf("dispatchSubagent typed: %v", err)
+	}
+	if toolpkg.IsForkChildFromContext(typedCtx) {
+		t.Fatal("a typed dispatch's execution was marked as a fork child")
+	}
+	if got := toolpkg.SubagentTypeFromContext(typedCtx); got != "repo-scout" {
+		t.Fatalf("typed exec context subtype = %q, want repo-scout", got)
 	}
 }
 
@@ -5586,6 +5680,228 @@ func TestDispatchOverrideOutranksAgentSubagentModel(t *testing.T) {
 	}
 	if len(probe.spawned) != 1 || probe.spawned[0].Model != "gpt-4o" {
 		t.Fatalf("spawn notifications = %#v", probe.spawned)
+	}
+}
+
+// The model a dispatch decides on is one fact, recorded and pinned: what the
+// spawned event announces is what the record carries and what the execution's
+// context routes its requests to. Three surfaces reading one value is the
+// contract; a surface that resolved its own is free to disagree with the other
+// two, which is how a run gets announced on one model and served by another.
+func TestDispatchPinsTheSameModelItRecords(t *testing.T) {
+	cfg := subagentCustomConfig()
+	probe := &dispatchProbe{}
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, Events: probe, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
+
+	var pinned SubagentModelOverride
+	var execCtx context.Context
+	prep, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+		taskID:  "task-same-model",
+		task:    "scout the repo",
+		subtype: "repo-scout",
+		resolve: SubagentCatalogFor(cfg, "main").ResolvePublic,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			pinned, _ = SubagentModelOverrideFromContext(prep.ctx)
+			execCtx = subagentExecContext(prep)
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	want := SubagentModelOverride{
+		Provider: prep.entry.ModelProvider,
+		Model:    prep.entry.Model,
+		Effort:   prep.entry.ReasoningEffort,
+	}
+	if !want.valid() {
+		t.Fatalf("the dispatch recorded no model: %#v", prep.entry)
+	}
+	if pinned != want {
+		t.Fatalf("the prepared context pinned %#v, want the record's model %#v", pinned, want)
+	}
+	if got, ok := SubagentModelOverrideFromContext(execCtx); !ok || got != want {
+		t.Fatalf("the exec context pinned %#v (set=%v), want the record's model %#v", got, ok, want)
+	}
+	if len(probe.spawned) != 1 {
+		t.Fatalf("spawn notifications = %#v", probe.spawned)
+	}
+	if got := probe.spawned[0]; got.Provider != want.Provider || got.Model != want.Model || got.Effort != want.Effort {
+		t.Fatalf("the spawn announced %q/%q effort %q, want the record's model %#v", got.Provider, got.Model, got.Effort, want)
+	}
+}
+
+// The context a dispatch's execution runs under keeps the model it was
+// announced with on every path: what a request is routed to on that context is
+// the record's model, the typed tagging still applies, and a fork's execution
+// is built from the same prepared context — so the dispatching runtime's
+// snapshot, the reason that path once started from the dispatching context
+// instead, is still there next to the pin.
+func TestSubagentExecContextKeepsThePinnedModel(t *testing.T) {
+	cfg := subagentCustomConfig()
+	home := t.TempDir()
+	owner := &Runner{Deps: &Deps{Home: home, AppCfg: cfg}, SubagentExecutor: &fixedSubagentExecutor{output: "done"}}
+	fac := Factory{AgentName: "main", Home: home, AppCfg: cfg, Owner: owner}
+
+	var execCtx context.Context
+	prep, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+		taskID:  "task-exec-ctx",
+		task:    "scout the repo",
+		subtype: "repo-scout",
+		resolve: SubagentCatalogFor(cfg, "main").ResolvePublic,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			execCtx = subagentExecContext(prep)
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent: %v", err)
+	}
+	if _, model := owner.agentModelFor(execCtx); model != prep.entry.Model {
+		t.Fatalf("routed model = %q, want the recorded %q", model, prep.entry.Model)
+	}
+	if got := toolpkg.SubagentTypeFromContext(execCtx); got != "repo-scout" {
+		t.Fatalf("subtype on the exec context = %q, want the typed tagging kept", got)
+	}
+	if want := subagentRosterKey(prep.entry); toolpkg.HookAgentIDFromContext(execCtx) != want {
+		t.Fatalf("roster key = %q, want %q", toolpkg.HookAgentIDFromContext(execCtx), want)
+	}
+
+	// A fork takes the conversation's model and runs on the parent's snapshot.
+	runner, store := newSessionRoutingRunner(t, nil)
+	runner.SubagentExecutor = &fixedSubagentExecutor{output: "done"}
+	if err := store.Ensure(context.Background(), "session-1", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(context.Background(), "session-1", state.SessionModelSelection{
+		Provider: "openai", Model: "gpt-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	forkFac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+	forkCtx := withForkRuntimeSnapshot(dispatchTestCtx(), []llm.Message{llm.UserMessage(llm.Text("earlier work"))})
+	prepFork, _, err := dispatchSubagent(forkCtx, forkFac, subagentDispatch{
+		taskID:  "task-fork-exec-ctx",
+		task:    "fork it",
+		resolve: agent.ResolvePublicSubtype,
+		run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+			execCtx = subagentExecContext(prep)
+			return "done", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("dispatchSubagent (fork): %v", err)
+	}
+	if prepFork.entry.Model != "gpt-b" {
+		t.Fatalf("the fork's record model = %q, want the conversation's", prepFork.entry.Model)
+	}
+	if _, ok := forkRuntimeSnapshotFromContext(execCtx); !ok {
+		t.Fatal("the fork's exec context lost the dispatching runtime's snapshot")
+	}
+	if pin, ok := SubagentModelOverrideFromContext(execCtx); !ok || pin.Model != "gpt-b" {
+		t.Fatalf("the fork's exec context pinned %#v (set=%v), want the record's model", pin, ok)
+	}
+	if _, model := runner.agentModelFor(execCtx); model != "gpt-b" {
+		t.Fatalf("the fork's routed model = %q, want the record's", model)
+	}
+}
+
+// A subagent type with no model of its own follows the conversation, and which
+// model that is gets decided once, at dispatch: the run is announced with the
+// conversation's model of that moment and keeps it for its whole life, so a
+// conversation that switches models mid-run cannot leave this execution
+// announced as one model and served by another.
+func TestSubagentFollowsTheConversationModelAtDispatchOnly(t *testing.T) {
+	runner, store := newSessionRoutingRunner(t, nil)
+	runner.SubagentExecutor = &fixedSubagentExecutor{output: "done"}
+	ctx := context.Background()
+	if err := store.Ensure(ctx, "session-1", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "session-1", state.SessionModelSelection{
+		Provider: "openai", Model: "gpt-b", Effort: "high",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+
+	dispatch := func(taskID string) (preparedSubagent, context.Context) {
+		t.Helper()
+		var execCtx context.Context
+		prep, _, err := dispatchSubagent(dispatchTestCtx(), fac, subagentDispatch{
+			taskID:  taskID,
+			task:    "look around",
+			subtype: "general-purpose",
+			resolve: agent.ResolvePublicSubtype,
+			run: func(_ context.Context, _ Factory, prep preparedSubagent) (string, error) {
+				execCtx = subagentExecContext(prep)
+				return "done", nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("dispatchSubagent(%s): %v", taskID, err)
+		}
+		return prep, execCtx
+	}
+
+	prep, execCtx := dispatch("task-follow")
+	if prep.entry.Model != "gpt-b" || prep.entry.ModelProvider != "openai" {
+		t.Fatalf("record = %q/%q, want the conversation's model at dispatch", prep.entry.ModelProvider, prep.entry.Model)
+	}
+	if _, model := runner.agentModelFor(execCtx); model != "gpt-b" {
+		t.Fatalf("routed model = %q, want the conversation's model at dispatch", model)
+	}
+
+	// The conversation moves on while this execution is running: it keeps the
+	// model it was announced with, and the next dispatch takes the new one.
+	if _, err := store.SaveSessionModelSelection(ctx, "session-1", state.SessionModelSelection{
+		Provider: "openai", Model: "gpt-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, model := runner.agentModelFor(execCtx); model != "gpt-b" {
+		t.Fatalf("running execution routed to %q after the conversation switched; it was announced as gpt-b", model)
+	}
+	if pin, ok := SubagentModelOverrideFromContext(execCtx); !ok || pin.Model != "gpt-b" {
+		t.Fatalf("running execution pinned %#v (set=%v), want the model it was announced with", pin, ok)
+	}
+	if next, _ := dispatch("task-follow-next"); next.entry.Model != "gpt-a" {
+		t.Fatalf("the next dispatch recorded %q, want the conversation's new model", next.entry.Model)
+	}
+}
+
+// The model a dispatch decided reaches the worker in the request that writes the
+// execution's transcript, and the context the executor runs under is pinned to
+// it: the worker records what the run was announced with instead of resolving a
+// model of its own, which is how rows came to be written under a model the run
+// never called.
+func TestExecSubagentHandsTheRecordedModelToTheWorker(t *testing.T) {
+	runner, store := newSessionRoutingRunner(t, nil)
+	exec := &fixedSubagentExecutor{output: "done"}
+	runner.SubagentExecutor = exec
+	ctx := context.Background()
+	if err := store.Ensure(ctx, "session-1", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionModelSelection(ctx, "session-1", state.SessionModelSelection{
+		Provider: "openai", Model: "gpt-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fac := Factory{AgentName: "main", Home: runner.Deps.Home, AppCfg: runner.Deps.AppCfg, Owner: runner}
+
+	if _, err := execGeneralSubagent(dispatchTestCtx(), fac, "task-worker-model", "short title", "do work", "general-purpose"); err != nil {
+		t.Fatalf("execGeneralSubagent: %v", err)
+	}
+	exec.mu.Lock()
+	defer exec.mu.Unlock()
+	if exec.model != "gpt-b" {
+		t.Fatalf("the worker's request carried model %q, want the dispatch's", exec.model)
+	}
+	if exec.pinnedModel != "gpt-b" {
+		t.Fatalf("the worker ran pinned to %q, want the dispatch's", exec.pinnedModel)
 	}
 }
 

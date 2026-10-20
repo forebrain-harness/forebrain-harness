@@ -20,6 +20,7 @@
           :now="now"
           :scope="scope"
           :active-agent-id="activeAgentId"
+          :view-mode="viewMode"
           @fold-change="(value) => emit('fold-change', value)"
           @open-agent="(agentId) => emit('open-agent', agentId)"
         />
@@ -77,6 +78,7 @@
             </PromptInputBody>
             <PromptInputFooter>
               <ComposerPlusMenu subagent-view @insert="insertCommand" />
+              <ViewModeChip v-model="viewMode" />
               <div class="flex items-center gap-1">
                 <SubagentRunPill :record="record" />
                 <button
@@ -127,6 +129,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import ForebrainPromptTextarea from '@/components/ForebrainPromptTextarea.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
+import ViewModeChip from '@/components/chat/ViewModeChip.vue'
 import ContextDebugPanel from '@/components/ContextDebugPanel.vue'
 import SubagentConversation from '@/components/chat/SubagentConversation.vue'
 import SubagentRunPill from '@/components/chat/SubagentRunPill.vue'
@@ -143,6 +146,7 @@ import type { AutoContinueState } from '@/lib/autoContinue'
 import type { SessionContextDebug, WorkspaceScope } from '@/lib/api'
 import type { PickedFile, ComposerSubmission, SubmittedAttachment } from '@/lib/composerSubmission'
 import { subagentPhase } from '@/lib/subagentStatus'
+import { useViewMode } from '@/composables/useViewMode'
 import { useI18n } from '@/locales'
 
 const props = withDefaults(defineProps<{
@@ -194,6 +198,16 @@ const { t } = useI18n()
 const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
 
 const active = computed(() => subagentPhase(props.record.status) === 'active')
+
+/**
+ * How much of this subagent's run its tab draws — its own reading mode, kept
+ * under this conversation and this agent, so one tab's choice never changes
+ * another tab's, nor the conversation's.
+ */
+const { viewMode } = useViewMode(
+  () => String(props.scope?.sessionId ?? ''),
+  () => props.record.agentId,
+)
 
 // The queue preview is shown exactly as long as one of its lines has content.
 const queueVisible = computed(() => {

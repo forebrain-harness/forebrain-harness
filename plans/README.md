@@ -4,6 +4,60 @@
 
 ## 最新审核信息
 
+- **2026-10-20 083–085 执行完毕（DONE，评审 APPROVE，未提交）；086 当日撤回（REJECTED）**：三份有效计划在当前
+  工作区按序实施（083 → 084 → 085），不建分支/工作树、不 commit，改动全部留在工作区等 owner 审阅。评审侧独立复跑
+  每份的完成条件：083 `ok pkg/tool` + `ok pkg/gateway`、`vue-tsc` 0、131 文件 / 883 用例、
+  `approval-families.spec.ts` PASS；084 `ok pkg/tool` + `ok pkg/tui`、全量 `pnpm test` 全绿、
+  `message-cards.spec.ts` 5 例 PASS、真机 `● Asked user` + 「问题原文 → 回答原文」；085 `ok pkg/state` +
+  `ok pkg/gateway`、`TestSessionPlanEndpointsRejectUnknownSession` 两个子测试 PASS（`plan-md` 与 `plans`
+  对未知 sid 均 404，owner 裁决的既有缺口已补）、`workbench-history.spec.ts` PASS。
+  - **086 撤回**：owner 2026-10-20「创建项目时默认自动生成 FOREBRAIN.md 文件的语义和代码都删掉，不需要了」。
+    种子写入、`fb_projects.kind` 与 v16 迁移、创建弹窗下拉、概览只读行、六个文案键、相关单测与 e2e 已整体删除，
+    schema 回到 v15（实测新库 `user_version = 15`、无 `kind` 列）。复验：`ok pkg/state` + `ok pkg/gateway`、
+    `vue-tsc` 0、134 文件 / 909 用例、`projects-modals` + `project-space` 9 例 e2e PASS。
+  - **执行期偏离（均已处置，逐条见各计划执行记录）**：083 复用同包 `CountLinesBytes` 而非新建
+    `countTextLines`；`apply_patch` 事实行只写「N 个文件 · +a −b」（原型 `gatePatch()` 无文件名列）；
+    shell 记住档统一「这类命令不再问」（原型原文 + 逐字替换旧键的裁决），`commandScopeLabel` 随之删除。
+    084 简洁模式额外隐藏清单卡（原型 `:1262` 与 `:712` 的 `.plan-card{display:none}`）。
+    085 `PlansForSession` 读失败的文件保留行、正文给空串（计划原文「跳过」与「给空串」自相矛盾，取后者）。
+  - **owner 2026-10-20 裁决：简洁模式连清单卡一起隐藏**（已确认与实现一致，并补了一条钉住它的用例）：
+    `lib/viewMode.ts` 的 `plan` 分支、`ChatView.vue` 的两处 `viewMode === 'default'`（清单卡 `PlanUpdateCard`
+    与 plan 块）、`SubagentConversation.vue` 的 `blockVisibleIn` 过滤共同生效；`ChatView.test.ts` 新增
+    「默认画清单、简洁不画」用例（做过去掉 gate 会失败的变异验证）。清单的进度与记录仍在工作台「待办」卡与终端。
+  - **既有缺陷（非本轮引入，已复现于 `cd11539`，未修）**：`pkg/gateway` 的
+    `TestGatewayIdempotentApproveStillCancelsAnInFlightPlanReview` 会偶发
+    `TempDir RemoveAll cleanup: directory not empty`——它自己起的 resume goroutine 与 `t.TempDir()` 清理竞争；
+    在干净 `HEAD` 上并行加压可复现，与本轮改动无关。
+- **2026-10-20 `/improve plan`（owner 已审批的原型 → 实施计划）→ 新增 083–086**：
+  - **来源**：owner 2026-10-20 逐张审批了 `docs/plan/WEB_REDESIGN_AND_GATEWAY_ACCESS/app-preview.html`
+    里本轮新画的卡片（工具调用卡、思考卡、`session_todo` 清单卡、`user_interaction` 提问卡、
+    `exit_plan_mode` 审批、十二种工具审批卡、工作台的问答/计划历史、抽屉里的计划原文标签页、
+    工作台按抽屉收起、视图模式下拉、新建项目的项目类型）。本批计划把这套已批准的稿子落到真机。
+  - **基线**：`cd11539`（dev）。工作区里已有的引擎改动（沙箱禁网识别、回答总结印问题原文）属本轮之前的工作，
+    不在 083–086 的 Scope 内；`pkg/tool/zz_list_tools_test.go` 的删除是既有状态，不要恢复也不要提交。
+  - **083（P1，L）审批卡按族渲染**：今天 web 只有「退出计划模式 / 抓取 / 一张通用卡」三种；引擎其实有
+    12 种会停住等人工具（评估顺序与决定集合见 `pkg/safety/engine.go:93-168`、
+    `pkg/safety/permission_types.go:1000-1067`），通用卡把工具内部名与 action id 直接印给用户。
+    083 新增纯函数层 `lib/approvalGates.ts` + 一张共用 `ApprovalGateCard`，按族说人话（含 web 上**尚未**
+存在的 `web_search` 与 `memories_add_ad_hoc_note` 两张，以及把已有的抓取卡接进同一分派器）；
+    并按 owner 裁决给引擎补 `write_file` 的「覆盖前旧文件行数」（`+96 −41 行`）。
+  - **084（P1，L）对话消息卡**：工具卡头永远一行、放不下的调用搬到正文（今天的头会被 2 KB 命令撑高，
+    `ai-elements-vue/…/ToolHeader.vue` 的 `break-words`）；待办卡在中文界面说 `更新待办`；
+    web 提问卡改成终端的标签页形状（`pkg/tui/overlays.go:2918-2972`）；新增「默认 / 简洁」视图模式。
+    **含一处 owner 明确要求的 TUI 改动**：`Asked user` 之后不再跟问题名（`pkg/tui/render.go:2795-2803`
+    与 `pkg/tool/format.go:2102-2107`），正文保持「问题原文 → 回答原文」。
+  - **085（P1，M–L）工作台与抽屉**：问答与计划都变成「一张卡 + 一串历史」（今天工作台连问答卡都没有），
+    计划原文从弹窗里的裸 `<pre>` 改成抽屉标签页里渲染的 Markdown；工作台头栏换成抽屉的
+    `PanelRightClose` 并共用一段入场动画。需要一个新的 gateway 读接口 `GET /chat/sessions/:id/plans`
+    （一个会话的计划目录本来就有多份 `.md`，`pkg/state/plan.go:49-80`），但**不需要**迁移。
+  - **086（P2，M）项目类型**：`fb_projects` 加 `kind`（schema v15→v16，ADD COLUMN），新建项目弹窗加下拉
+    （办公创作 / 创意编程）。owner 裁决是**一次性种子、只写项目根的 `FOREBRAIN.md`**：
+    不动审批画像、不动工具集、不写 `.forebrain/`，且已存在同名文件时一个字都不覆盖。
+  - **顺序**：083 → 084 → 085（三份都改 `locales/index.ts` 与对话页，串行省冲突）；086 独立，
+    但因为它也改 `locales/index.ts`，建议排在 084 之后。四份都**不提交**，由 owner 审阅。
+  - **本轮未审**：除上面点到的文件外没有重新审计代码库（这是一次「按已批准原型写实施计划」，不是审计）。
+    已知但未立计划的相邻问题：审批卡在子代理视图里的排版（原型未覆盖，缺 owner 裁决）。
+
 - **2026-10-19 `/improve branch`（dev 相对 main，聚焦 `fa4af8a..HEAD` + 未提交的 079）→ 新增 080–082**：
   - **范围**：dev 比 main 多 13 个提交、792 个文件（大头是 `pkg/gateway/dist` 构建产物与 `assets/tokenizers`）。`bd2b8b8..fa4af8a` 已被 2026-10-16 的分支审计覆盖（055–063），本轮只看其后 8 个提交（385 个非产物文件）与工作区 86 项改动（主要是 079）。**未审**：`pkg/channel`、`pkg/lsp` 其余部分、官网、npm 打包、e2e 用例内容；TUI 渲染 / 输入只扫了 diff（靠既有测试与真机验收）。
   - **基线（评审方亲跑）**：`go vet ./pkg/... ./cmd/...` 无输出、`gofmt -l` 为空、`pkg/run` `pkg/tool` `pkg/config` `pkg/agent` `pkg/gateway` `pkg/tui` `pkg/migrate` `pkg/state` `pkg/llm` `pkg/architecture` 全 `ok`；`vue-tsc` exit 0；vitest 125 文件 827 例全过。未跑：全量 `go test ./...`、Playwright e2e、Terminal.app 真机视觉、`govulncheck` / `pnpm audit`、Windows / Linux CI。
@@ -283,6 +337,10 @@
 | [080-gone-custom-subagent-fails-closed](080-gone-custom-subagent-fails-closed.md) | 已删除的自定义子代理不再接受用户消息（与模型路径一致），且“来源 custom 却没有工具策略”的运行一律 fail-closed（`GuardTool` 全拒、过滤不给工具）；续聊档位仍取当前配置（owner 保持现状） | Security / Bug Fix | DONE（2026-10-19 执行+评审 APPROVE，未提交；红绿证据：删除用例修复前 `SendToSubagent = "started", nil` → 修复后 PASS；评审方亲跑 6 包 `ok`、vet/gofmt 干净、`"custom"` 字面量唯一（`pkg/tool/state.go`）） | **P1** | S | LOW |
 | [081-project-consent-binds-to-the-shown-entry](081-project-consent-binds-to-the-shown-entry.md) | 项目 MCP / LSP 逐行“允许 / 拒绝”绑定到用户看到的那一条：行带指纹、请求回传、不一致整单 409 且不记任何决定；批量 / 启动提示路径不变 | Security | DONE（2026-10-19 执行+评审 APPROVE，未提交；评审方亲跑 5 包 `ok`、vitest 829 例、`vue-tsc` exit 0、两份 e2e `web e2e: PASS`；执行期 e2e 暴露并根因修好 `mcpRowFromWire` 漏映射 `fingerprint`；有据偏差：409 后用 `reload()` 而非 `load()`（后者清错误文案）） | P2 | M | LOW |
 | [082-config-writes-are-atomic-and-serialised](082-config-writes-are-atomic-and-serialised.md) | `forebrain.yaml` 保存改为临时文件 + rename（符号链接 / 权限 / 容器绑定挂载回退），子代理与 MCP 写接口串行化读改写（`withConfigWrite`），热重载兼容用例钉住 | Bug Fix / 数据完整性 | DONE（2026-10-19 执行+评审 APPROVE，未提交；评审方亲跑 7 包 + run/tui 全 `ok`、race 合并命令 `ok`；互斥为 `Server` 字段；两处有据偏差：`subagentAgentID` 入锁（修了 `liveCfg` vs `reloadConfig` 的既有 data race）、**评审方授权的 Scope 扩展** `pkg/turn/model_test.go` 失败注入升级为“文件 0400＋目录 0500”（原子 rename 绕过目标只读位，正好走完回退链）；遗留：`liveCfg` 其余读者与 reload 的既有 race 留待后续） | P2 | M | MED |
+| [083-approval-cards-by-family](083-approval-cards-by-family.md) | 审批卡按「族」渲染：12 张新卡（`web_search` / 记忆写入此刻还是通用卡，属新建）+ 抓取/退出计划模式接进同一分派器 + 兜底（文件写/改/补丁、命令、沙箱外运行、外网主机、申请权限、进计划模式、MCP、受保护读、兜底），按钮档数照引擎的决定集合，文案语义化（问句一句、按钮动词开头只说范围、事实行只放这次决定要看的）；引擎补两个载荷字段（`write_file` 覆盖前的旧行数、`web_search` 的条数）；退出计划模式的反馈框只在点「继续规划」后出现 | Direction / UX | DONE | **P1** | L | MED |
+| [084-message-cards-tool-head-and-ask-tabs](084-message-cards-tool-head-and-ask-tabs.md) | 对话消息卡：工具卡头永远一行、放不下的调用原样搬进正文；`session_todo` 卡在中文界面说「更新待办」；web 提问卡改成终端的标签页形状（☐/✔/提交、一题一屏、编号选项 + 推荐 + 预览 + 其他、多选复核）；新增「默认 / 简洁」视图模式（两个输入框各一枚，简洁只留助手回答）；**TUI 的 `Asked user` 之后不再跟问题名**，正文保持「问题原文 → 回答原文」 | Direction / UX | DONE | **P1** | L | MED |
+| [085-workbench-history-and-plan-tab](085-workbench-history-and-plan-tab.md) | 工作台与抽屉：问答与计划都变成「一张卡 + 一串历史」（工作台今天连问答卡都没有）；计划原文从弹窗里的裸 `<pre>` 改成抽屉标签页里渲染的 Markdown（新增 `GET /chat/sessions/:id/plans`，无需迁移）；工作台头栏换成抽屉的 `PanelRightClose` 并共用一段入场动画 | Direction / UX | DONE | **P1** | M–L | MED |
+| [086-project-kind-seeds-forebrain-md](086-project-kind-seeds-forebrain-md.md) | ~~新建项目的「项目类型」（办公创作 / 创意编程）：`fb_projects.kind`（schema v15→v16，ADD COLUMN）+ 弹窗下拉 + 只读展示；owner 裁决是**一次性种子、只写项目根的 `FOREBRAIN.md`**，不动审批画像与工具集，已存在同名文件时一字不覆盖~~ **owner 2026-10-20 撤回**：「创建项目时默认自动生成 FOREBRAIN.md 文件的语义和代码都删掉，不需要了」。实现已整体删除（含 `kind` 与 v16 迁移，schema 回到 v15） | Feature | REJECTED | P2 | M | MED |
 
 ## web 实现与设计稿的偏差（owner 2026-10-11：必须修，实施须 1:1 还原设计稿）
 
@@ -314,6 +372,11 @@
 080-gone-custom-subagent-fails-closed (独立；改 pkg/run 与 pkg/tool；依赖工作区里未提交的 079；最好赶在 079 提交前)
 081-project-consent-binds-to-the-shown-entry (独立；079 落地后再做——同改 frontend/src/lib/api.ts；改 pkg/process、pkg/lsp、pkg/gateway 与两个前端组件)
 082-config-writes-are-atomic-and-serialised (独立；079 落地后再做——同改 pkg/gateway/subagents_api.go；与 081 同改 pkg/gateway，串行执行)
+--- 2026-10-20 已审批原型的实施（四份都不提交；三份改 locales/index.ts，串行）---
+083-approval-cards-by-family (先做：它定义 ApprovalGateCard 与全部审批文案，084/085 会复用其中的卡片壳)
+084-message-cards-tool-head-and-ask-tabs (依赖 083 的 locales 增量；含一处 owner 要求的 TUI 改动，改 pkg/tool 与 pkg/tui)
+085-workbench-history-and-plan-tab (依赖 084 的抽屉/输入框改动；新增 gateway 读接口，无迁移)
+086-project-kind-seeds-forebrain-md (独立于 083–085 的引擎部分；但同改 locales/index.ts 与 views/ProjectsView.vue，排在 084/085 之后最省冲突)
 --- 2026-10-18 web 设计稿 2026-10-17/18 迭代的实施（owner：原型没问题了）---
 071–076 (均已执行，工作区未提交；2026-10-18 复核)
 077-web-batch-review-fixes (已执行，工作区未提交；2026-10-18 评审复核 APPROVE)

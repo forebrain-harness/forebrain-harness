@@ -241,22 +241,15 @@ func (s *Server) ModelSettings(sessionID string) (turn.ModelSettings, error) {
 }
 
 // sessionModelSelection resolves one web session's effective model: its
-// stored row validated against the runner's live config, falling back to the
-// runner's published selection. It is the marker every surface draws and the
-// same resolution a turn's context carries.
+// stored row validated against the runner's live config — effort included,
+// with a row that pins none running at none — falling back to the runner's
+// published selection. It is the marker every surface draws and the same
+// resolution a turn's context carries.
 func (s *Server) sessionModelSelection(r *run.Runner, sessionID string) run.PrimaryModelState {
 	if s.Sessions == nil {
 		return run.PrimaryModelSelection(r)
 	}
-	provider, model := run.PrimaryModelForSession(r, s.Sessions, sessionID)
-	if strings.TrimSpace(provider) == "" && strings.TrimSpace(model) == "" {
-		return run.PrimaryModelSelection(r)
-	}
-	effort := ""
-	if row, ok, err := s.Sessions.SessionModelSelection(context.Background(), strings.TrimSpace(sessionID)); err == nil && ok {
-		effort = row.Effort
-	}
-	return run.PrimaryModelState{Provider: provider, Model: model, Effort: effort, Set: true}
+	return run.PrimaryModelStateForSession(r, s.Sessions, sessionID)
 }
 
 // SelectModel records choice as sessionID's own model choice. The runner's

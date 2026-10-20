@@ -238,3 +238,48 @@ func TestDarwinSeatbeltIntegrationReleaseGate(t *testing.T) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+// A live seatbelt proves the network classification end to end: with
+// network_access off, a real curl reports a name it cannot resolve, and the run
+// is classified as sandbox-denied — so the shell tool can offer to run the same
+// command outside the sandbox instead of handing the model a bare network error.
+func TestDarwinSeatbeltIntegrationNetworkDenialIsClassified(t *testing.T) {
+	if os.Getenv("FOREBRAIN_SANDBOXRT_INTEGRATION") != "1" {
+		t.Skip("set FOREBRAIN_SANDBOXRT_INTEGRATION=1 to run live sandbox-exec checks")
+	}
+	if _, err := exec.LookPath("sandbox-exec"); err != nil {
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+	cfg := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
+	cfg.SandboxWorkspaceWrite.NetworkAccess = appcfg.BoolPtr(false)
+	res, decision, err := NewManager().RunCommand(context.Background(), cfg, CommandRequest{
+		ToolKind: ToolKindShell,
+		// The shell chain the model usually writes: it absorbs the failure, so
+		// the exit status alone says nothing about what happened.
+		Command: "curl -sS -m 4 -o /dev/null https://example.com || echo NETFAIL",
+		WorkDir: t.TempDir(),
+		Timeout: 30 * time.Second,
+	})
+	if !decision.UseSandbox || !decision.NetworkBlocked {
+		t.Fatalf("expected a sandboxed run with no network: decision=%+v", decision)
+	}
+	if !IsLikelySandboxDenied(decision, res) {
+		t.Fatalf("network failure was not classified as a denial: exit=%d out=%q err=%v", res.ExitCode, res.AggregatedOutput, err)
+	}
+	if got := SandboxDenialDetail(decision, res); !strings.Contains(got, "Could not resolve host") {
+		t.Fatalf("denial detail = %q, want the resolver failure line", got)
+	}
+
+	// The same command with the network allowed is a plain failure, not a denial.
+	allowed := &appcfg.Root{SandboxMode: appcfg.SandboxModeWorkspaceWrite}
+	allowed.SandboxWorkspaceWrite.NetworkAccess = appcfg.BoolPtr(true)
+	okRes, okDecision, _ := NewManager().RunCommand(context.Background(), allowed, CommandRequest{
+		ToolKind: ToolKindShell,
+		Command:  "curl -sS -m 10 -o /dev/null -w '%{http_code}' https://example.com",
+		WorkDir:  t.TempDir(),
+		Timeout:  30 * time.Second,
+	})
+	if okDecision.NetworkBlocked || IsLikelySandboxDenied(okDecision, okRes) {
+		t.Fatalf("an allowed network was reported as blocked: decision=%+v out=%q", okDecision, okRes.AggregatedOutput)
+	}
+}

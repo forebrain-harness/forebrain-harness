@@ -12,14 +12,14 @@
           v-for="tab in tabs"
           :key="tab.agentId"
           class="subagent-drawer-tab"
-          :class="{ 'is-on': tab.agentId === active }"
+          :class="{ 'is-on': !activePlan && tab.agentId === active }"
           :data-testid="`subagent-tab-${tab.agentId}`"
         >
           <button
             type="button"
             role="tab"
             class="subagent-drawer-tab-main"
-            :aria-selected="tab.agentId === active"
+            :aria-selected="!activePlan && tab.agentId === active"
             @click="emit('select', tab.agentId)"
           >
             <Loader2 v-if="phaseOf(tab) === 'active'" class="is-run" aria-hidden="true" />
@@ -39,6 +39,36 @@
             v-tip:bottom="t('chat.subagentTabClose')"
             :data-testid="`subagent-tab-close-${tab.agentId}`"
             @click="emit('close-tab', tab.agentId)"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </div>
+        <!-- The plan documents open as tabs, after the subagents: a plan tab
+             has no unread state — a document does not say anything new. -->
+        <div
+          v-for="tab in planTabs"
+          :key="tab.id"
+          class="subagent-drawer-tab"
+          :class="{ 'is-on': tab.id === activePlan }"
+          :data-testid="`plan-tab-${tab.id}`"
+        >
+          <button
+            type="button"
+            role="tab"
+            class="subagent-drawer-tab-main"
+            :aria-selected="tab.id === activePlan"
+            @click="emit('select-plan', tab.id)"
+          >
+            <Map class="is-plan" aria-hidden="true" />
+            <span class="subagent-drawer-tab-label" v-tip:bottom.trunc="tab.label">{{ tab.label }}</span>
+          </button>
+          <button
+            type="button"
+            class="subagent-drawer-tab-close"
+            :aria-label="t('chat.subagentTabCloseAria', { name: tab.label })"
+            v-tip:bottom="t('chat.subagentTabClose')"
+            :data-testid="`plan-tab-close-${tab.id}`"
+            @click="emit('close-plan', tab.id)"
           >
             <X aria-hidden="true" />
           </button>
@@ -98,15 +128,17 @@
 <script setup lang="ts">
 /**
  * The conversation's right-hand drawer: one tab per subagent the user has
- * opened, the "+" that opens another, and the way back out. It is a shell
- * only — every tab's content is handed in by the page that owns the stream.
+ * opened, one per plan document opened from the workbench, the "+" that opens
+ * another subagent, and the way back out. It is a shell only — every tab's
+ * content is handed in by the page that owns the stream.
  *
  * It shares the right-hand column with the workbench, so it draws itself the
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { CheckCircle2, Loader2, PanelRightClose, Plus, X, XCircle } from 'lucide-vue-next'
+import { CheckCircle2, Loader2, Map, PanelRightClose, Plus, X, XCircle } from 'lucide-vue-next'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
+import type { PlanTab } from '@/composables/useSessionPlans'
 import { subagentPhase, subagentStatusLabel, subagentTabLabel } from '@/lib/subagentStatus'
 import { useI18n } from '@/locales'
 
@@ -122,8 +154,14 @@ const props = withDefaults(defineProps<{
   overlay: boolean
   /** The stream's shared clock, for a running row's elapsed. */
   now?: number
+  /** The plan documents open as tabs, drawn after the subagents'. */
+  planTabs?: PlanTab[]
+  /** The plan tab in front; empty while a subagent tab is. */
+  activePlan?: string
 }>(), {
   now: undefined,
+  planTabs: () => [],
+  activePlan: '',
 })
 
 const emit = defineEmits<{
@@ -132,6 +170,8 @@ const emit = defineEmits<{
   (e: 'open', agentId: string): void
   (e: 'collapse'): void
   (e: 'escape-key'): void
+  (e: 'select-plan', id: string): void
+  (e: 'close-plan', id: string): void
 }>()
 
 const { t } = useI18n()
@@ -215,6 +255,24 @@ onUnmounted(() => {
   min-height: 0;
   border-left: 1px solid var(--forebrain-divider);
   background: var(--forebrain-surface);
+  /* The workbench's gesture, on the same edge: whichever panel takes the
+     right-hand column slides in from it, and only mounting plays it. */
+  animation: forebrain-drawer-in 160ms ease-out;
+}
+@keyframes forebrain-drawer-in {
+  from {
+    transform: translateX(32px);
+    opacity: 0.6;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .subagent-drawer {
+    animation: none;
+  }
 }
 
 .subagent-drawer--overlay {
@@ -292,6 +350,10 @@ onUnmounted(() => {
 
 .subagent-drawer-tab-main svg.is-bad {
   color: var(--forebrain-danger);
+}
+
+.subagent-drawer-tab-main svg.is-plan {
+  color: var(--forebrain-brand-1);
 }
 
 .subagent-drawer-tab-label {

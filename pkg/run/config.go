@@ -1770,22 +1770,37 @@ func (r *Runner) sessionClientFor(ctx context.Context) llm.LLM {
 	return r.effectivePrimaryClient()
 }
 
-// PrimaryModelForSession names the model one conversation runs on, resolving
-// its stored choice against the runner's live config before falling back to
-// the runner's published selection. It is the exported resolution for
-// surface-held closures that know a session id but hold no context.
-func PrimaryModelForSession(r *Runner, store *state.SessionStore, sessionID string) (string, string) {
+// PrimaryModelStateForSession is the full answer to "what does this
+// conversation run on": the model and the reasoning effort. A stored choice
+// resolves against the runner's live config exactly as a turn's context
+// resolves it at entry, so an effort the row pins is the effort the requests
+// carry, and a row that pins none runs at none. A session with no row, or a
+// row the config no longer offers, runs on the runner's published selection.
+// Every surface that names a conversation's model reads this, because a
+// surface that resolved its own could name a model the conversation's
+// requests never go to.
+func PrimaryModelStateForSession(r *Runner, store *state.SessionStore, sessionID string) PrimaryModelState {
 	if r != nil && store != nil {
 		if sid := strings.TrimSpace(sessionID); sid != "" {
 			if row, hasRow, err := store.SessionModelSelection(context.Background(), sid); err == nil && hasRow {
 				effort := row.Effort
 				if resolved, err := ResolveSessionModelChoice(r, row.Provider, row.Model, &effort); err == nil {
-					return resolved.Provider, resolved.Model
+					return resolved
 				}
 			}
 		}
 	}
-	return PrimaryModel(r)
+	return PrimaryModelSelection(r)
+}
+
+// PrimaryModelForSession names the model one conversation runs on, resolving
+// its stored choice against the runner's live config before falling back to
+// the runner's published selection. It is the exported resolution for
+// surface-held closures that know a session id but hold no context; callers
+// that also draw the effort read PrimaryModelStateForSession.
+func PrimaryModelForSession(r *Runner, store *state.SessionStore, sessionID string) (string, string) {
+	sel := PrimaryModelStateForSession(r, store, sessionID)
+	return sel.Provider, sel.Model
 }
 
 // AgentModel names the model one agent of a conversation runs on, and the

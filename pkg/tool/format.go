@@ -1950,7 +1950,7 @@ func FormatUserInteractionResult(content string, input map[string]any) (string, 
 		return "", false
 	}
 
-	orderedHeaders := userInteractionQuestionHeaders(input)
+	ordered := userInteractionQuestions(input)
 	normalizedAnswers := make(map[string]userInteractionAnswer, len(answers))
 	answerHeaders := make(map[string]string, len(answers))
 	for header, answer := range answers {
@@ -1966,17 +1966,18 @@ func FormatUserInteractionResult(content string, input map[string]any) (string, 
 		answerHeaders[key] = header
 	}
 
-	seen := make(map[string]struct{}, len(orderedHeaders))
-	entries := make([]userInteractionDisplayEntry, 0, len(orderedHeaders)+len(normalizedAnswers))
-	for _, header := range orderedHeaders {
-		key := strings.ToLower(header)
+	seen := make(map[string]struct{}, len(ordered))
+	entries := make([]userInteractionDisplayEntry, 0, len(ordered)+len(normalizedAnswers))
+	for _, q := range ordered {
+		key := strings.ToLower(q.Header)
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
 		entries = append(entries, userInteractionDisplayEntry{
-			Header: header,
-			Answer: normalizedAnswers[key],
+			Header:   q.Header,
+			Question: q.Question,
+			Answer:   normalizedAnswers[key],
 		})
 	}
 
@@ -2004,7 +2005,7 @@ func FormatUserInteractionResult(content string, input map[string]any) (string, 
 		if i > 0 {
 			sb.WriteByte('\n')
 		}
-		sb.WriteString(entry.Header)
+		sb.WriteString(entry.Label())
 		answerCount := 0
 		for _, selection := range entry.Answer.Selections {
 			if text := strings.TrimSpace(selection); text != "" {
@@ -2029,8 +2030,24 @@ type userInteractionAnswer struct {
 }
 
 type userInteractionDisplayEntry struct {
+	// Header keys the answer: the result map is keyed by the question's own
+	// header, so the lookup can never go by anything else.
 	Header string
-	Answer userInteractionAnswer
+	// Question is what the card prints. The header is a tab label of at most
+	// twelve characters ("修法"), which says nothing to whoever reads the
+	// transcript later; the question is the only line that does. A payload
+	// that predates this (or an answer whose question is gone) falls back to
+	// the header.
+	Question string
+	Answer   userInteractionAnswer
+}
+
+// Label is the line a surface prints for this question.
+func (e userInteractionDisplayEntry) Label() string {
+	if question := strings.TrimSpace(e.Question); question != "" {
+		return question
+	}
+	return e.Header
 }
 
 func parseUserInteractionAnswers(content string, depth int) (map[string]userInteractionAnswer, bool) {
@@ -2081,67 +2098,43 @@ func userInteractionAnswersFromValue(value any, depth int) (map[string]userInter
 }
 
 // userInteractionLabel is a user_interaction call's header: the verb for its
-// state, then what it asks.
+// state, alone. What it asked belongs to the body (FormatUserInteractionResult
+// pairs each question with its answer); naming it here let a long question list
+// stretch the header into a paragraph.
 func userInteractionLabel(verb string, evt StepEvent) string {
-	if questions := UserInteractionQuestionsLabel(evt.Input); questions != "" {
-		return verb + " · " + questions
-	}
 	return verb
 }
 
-// UserInteractionQuestionsLabel names what a user_interaction call asks, in
-// the order it asks it: each question's short header, or the question itself
-// when it has none. It is the call's parameters in words — the card header both
-// surfaces show — and every question is named in full.
-func UserInteractionQuestionsLabel(input map[string]any) string {
+// userInteractionQuestions projects the questions a call asked, in order: the
+// header that keys the answer, and the question itself, which is what a reader
+// is shown.
+func userInteractionQuestions(input map[string]any) []userInteractionQuestion {
 	if len(input) == 0 {
-		return ""
+		return nil
 	}
 	encoded, err := json.Marshal(input["questions"])
 	if err != nil {
-		return ""
+		return nil
 	}
-	var questions []struct {
-		Header   string `json:"header"`
-		Question string `json:"question"`
-	}
+	var questions []userInteractionQuestion
 	if err := json.Unmarshal(encoded, &questions); err != nil {
-		return ""
+		return nil
 	}
-	names := make([]string, 0, len(questions))
-	for _, question := range questions {
-		name := strings.TrimSpace(question.Header)
-		if name == "" {
-			name = strings.Join(strings.Fields(question.Question), " ")
+	out := make([]userInteractionQuestion, 0, len(questions))
+	for _, q := range questions {
+		q.Header = strings.TrimSpace(q.Header)
+		q.Question = strings.TrimSpace(q.Question)
+		if q.Header == "" {
+			continue
 		}
-		if name != "" {
-			names = append(names, name)
-		}
+		out = append(out, q)
 	}
-	return strings.Join(names, " · ")
+	return out
 }
 
-func userInteractionQuestionHeaders(input map[string]any) []string {
-	if len(input) == 0 {
-		return nil
-	}
-	encoded, err := json.Marshal(input["questions"])
-	if err != nil {
-		return nil
-	}
-	var questions []struct {
-		Header string `json:"header"`
-	}
-	if err := json.Unmarshal(encoded, &questions); err != nil {
-		return nil
-	}
-	headers := make([]string, 0, len(questions))
-	for _, question := range questions {
-		if header := strings.TrimSpace(question.Header); header != "" {
-			headers = append(headers, header)
-		}
-	}
-	return headers
+type userInteractionQuestion struct {
+	Header   string `json:"header"`
+	Question string `json:"question"`
 }
 
 func appendUserInteractionAnswer(sb *strings.Builder, answer string) {

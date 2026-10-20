@@ -2615,6 +2615,109 @@ func TestActiveRunTabQueuesBangShellAsShellAction(t *testing.T) {
 	}
 }
 
+// The queue key hands the composer's text to the queue, so the composer must be
+// empty afterwards on both of its owners: the surface state and the raw reader's
+// line buffer. Only the surface used to be cleared, so the reader kept the
+// queued text and republished it as a draft on the next caret request or edit.
+func TestActiveRunTabQueueEmptiesTheReaderBuffer(t *testing.T) {
+	drainInteractiveInputSeedQueue()
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	state.composer.Text = "queued once"
+	state.composer.DraftText = "queued once"
+	state.composer.Cursor = len("queued once")
+
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
+
+	select {
+	case seed := <-interactiveInputSeedCh:
+		if seed.text != "" || seed.cursor != 0 {
+			t.Fatalf("reader reseeded with %q/%d, want the empty draft", seed.text, seed.cursor)
+		}
+	default:
+		t.Fatal("Tab queued the message but left the reader's line buffer holding it")
+	}
+	if state.composer.DraftText != "" {
+		t.Fatalf("composer = %q, want empty after queueing", state.composer.DraftText)
+	}
+	if preview := session.SurfaceInputQueue("s1").Preview(); len(preview.FollowUp) != 1 {
+		t.Fatalf("expected the message queued once, got %#v", preview.FollowUp)
+	}
+}
+
+// The reported action end to end: tab a message into the queue, then click the
+// composer. The click is a caret request, and against a stale reader buffer it
+// republished the queued text as a draft while the message was still queued.
+func TestTabQueueLeavesNoDraftForAClick(t *testing.T) {
+	drainInteractiveInputSeedQueue()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe error: %v", err)
+	}
+	defer r.Close()
+	events := readRawInputEvents(ctx, r, io.Discard, stubRawInputController{}, testRawInputHistoryStore{})
+
+	// One word with no spaces, so the reader's paste-burst heuristic reads it as
+	// typing and publishes it as a draft; the buffer contents are what matters
+	// here, not how the text was entered.
+	const queued = "queuedonce"
+
+	// The reader's buffer and the surface's draft both hold the message.
+	if _, err := w.Write([]byte(queued)); err != nil {
+		t.Fatalf("write draft: %v", err)
+	}
+	waitForDraft(t, events, queued, len(queued))
+
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1", session: session}
+	state.composer.Text = queued
+	state.composer.DraftText = queued
+	state.composer.Cursor = len(queued)
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+
+	// Tab: the queue key that keeps its buffer in the reader.
+	if _, err := w.Write([]byte("\t")); err != nil {
+		t.Fatalf("write tab: %v", err)
+	}
+	if ev := nextNonDraftEvent(t, events); ev.kind != inputEventHotkey || ev.hotkey != hotkeyQueueFollowUp {
+		t.Fatalf("expected the queue hotkey, got %#v", ev)
+	}
+	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
+		inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
+
+	// The surface reseeds the reader asynchronously; wait for the empty draft it
+	// publishes before the click, or the caret request races the reseed. This
+	// wait timing out is the bug itself: the queue path never emptied the
+	// reader, so the queued text stayed live behind an empty composer.
+	waitForDraft(t, events, "", 0)
+
+	// The click: a caret request at 0, which is what an empty composer resolves to.
+	requestComposerCaret(0)
+	deadline := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case ev := <-events:
+			if ev.kind == inputEventDraft && strings.TrimSpace(ev.draft) != "" {
+				t.Fatalf("a click republished the queued text as a draft: %q", ev.draft)
+			}
+		case <-deadline:
+			if got := session.SurfaceInputQueue("s1").Preview(); len(got.FollowUp) != 1 {
+				t.Fatalf("expected the message still queued once, got %#v", got.FollowUp)
+			}
+			if state.composer.DraftText != "" {
+				t.Fatalf("composer = %q, want empty", state.composer.DraftText)
+			}
+			return
+		}
+	}
+}
+
 func TestNextAutomaticSubmissionDrainsQueuedShellBeforeQueuedTurn(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{sessionID: "s1", session: session}
@@ -5695,13 +5798,26 @@ func TestSubagentViewQueueAndRecallHotkeys(t *testing.T) {
 	renderer.NoteSubagentSpawned("task-b", "explore", ComposerFooter{})
 	renderer.SetActiveView("task-b")
 	state := &streamState{sessionID: "conv", session: session, composerView: "task-b"}
+	state.composer.Text = "one more"
 	state.composer.DraftText = "one more"
 	state.composer.Cursor = len("one more")
 
+	drainInteractiveInputSeedQueue()
 	handleActiveRunInput(context.Background(), session, renderer, nil, state, nil,
 		inputEvent{kind: inputEventHotkey, hotkey: hotkeyQueueFollowUp}, nil)
 	if len(session.subagentSent) != 1 || !session.subagentSent[0].FollowUp || session.subagentSent[0].Submission.Text != "one more" {
 		t.Fatalf("queue key sent %#v, want a follow-up of one more", session.subagentSent)
+	}
+	// The subagent's queue takes the text the same way the conversation's does,
+	// so it must empty the raw reader's buffer too — otherwise the queued
+	// message is republished into this subagent's composer on the next click.
+	select {
+	case seed := <-interactiveInputSeedCh:
+		if seed.text != "" || seed.cursor != 0 {
+			t.Fatalf("subagent queue left the reader holding %q", seed.text)
+		}
+	default:
+		t.Fatal("subagent queue left the reader's line buffer holding the message")
 	}
 
 	session.recallSubagentOK = true

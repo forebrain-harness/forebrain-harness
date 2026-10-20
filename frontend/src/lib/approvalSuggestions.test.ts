@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { setLocale, t } from '@/locales'
-import { approvalDecisions, approvalJustification, permissionSuggestionFromAction } from './approvalSuggestions'
+import { approvalDecisions, permissionSuggestionFromAction } from './approvalSuggestions'
 
 describe('approval suggestions', () => {
   it('reads server-owned decisions and command amendments from action rows', () => {
@@ -229,34 +229,9 @@ describe('command approval scope copy', () => {
   it('names what the row grants in both languages', () => {
     for (const locale of ['zh', 'en'] as const) {
       setLocale(locale)
-      expect(t('chat.approveCommandPrefix', { prefix: 'go test' })).toContain('go test')
-      expect(t('chat.approveCommandVariants', { prefixes: 'mvn clean' })).toContain('mvn clean')
-      for (const key of ['chat.approveCommandOnly', 'chat.approveCommandAnyVariant'] as const) {
-        expect(t(key)).not.toBe(key)
-        expect(t(key).length).toBeGreaterThan(0)
-      }
+      expect(t('chat.approvalScopeThisCommand')).not.toBe('chat.approvalScopeThisCommand')
+      expect(t('chat.approvalScopeThisCommand').length).toBeGreaterThan(0)
     }
     setLocale('en')
-  })
-})
-
-describe('approval justification', () => {
-  it('renders the reason for any approval that carries one, not only a protected path', () => {
-    const protectedPath = {
-      approvalReason: 'protected_path',
-      justification: 'Writing /home/u/.forebrain/skills/release/SKILL.md changes the "release" skill.',
-    }
-    const planMode = {
-      approvalReason: 'plan_mode_unproven_command',
-      justification: 'Plan mode is active: this command could not be proven read-only, so it will run only if you allow it.',
-    }
-    expect(approvalJustification(protectedPath)).toBe(protectedPath.justification)
-    expect(approvalJustification(planMode)).toBe(planMode.justification)
-  })
-
-  it('shows nothing when the payload carries no reason', () => {
-    expect(approvalJustification(null)).toBe('')
-    expect(approvalJustification({ approvalReason: 'dangerous_shell_syntax' })).toBe('')
-    expect(approvalJustification({ justification: '   ' })).toBe('')
   })
 })

@@ -20,7 +20,8 @@ async function flush() {
 
 function stubApi() {
   vi.spyOn(forebrainApi, 'sessionTodos').mockResolvedValue({ items: [] })
-  vi.spyOn(forebrainApi, 'sessionPlanMd').mockResolvedValue({ markdown: '' })
+  vi.spyOn(forebrainApi, 'sessionPlans').mockResolvedValue([])
+  vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([])
   vi.spyOn(forebrainApi, 'mcpServersWithStatus').mockResolvedValue({
     servers: [],
     project: {},
@@ -272,5 +273,20 @@ describe('ChatWorkbench', () => {
     const wrapper = mountWorkshopBench()
     await flush()
     expect(wrapper.classes()).not.toContain('chat-workbench--wide')
+  })
+
+  // The workbench shares the right-hand column with the subagent drawer, so it
+  // collapses the way the drawer does: the same icon, the same word, the same
+  // place (owner 2026-10-20). It used to be an × — the shape of closing a
+  // dialog, which is not what happens to a column.
+  it('collapses with the drawer’s icon and word, and still asks to close', async () => {
+    const wrapper = mountBench()
+    await flush()
+    const button = wrapper.get('[data-testid="chat-workbench-close"]')
+    expect(button.attributes('aria-label')).toBe('收起工作台')
+    expect(button.get('svg').classes()).toContain('lucide-panel-right-close-icon')
+
+    await button.trigger('click')
+    expect(wrapper.emitted('close')).toHaveLength(1)
   })
 })

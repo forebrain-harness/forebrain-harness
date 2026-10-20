@@ -1243,38 +1243,6 @@ func TestFormatToolStepResult_exitPlanModeFallsBackOnBadPayload(t *testing.T) {
 	}
 }
 
-// A user_interaction card is named by what it asks — every question, in
-// order — never by its argument JSON, and reads as a question being asked.
-func TestUserInteractionCardNamesItsQuestions(t *testing.T) {
-	t.Parallel()
-	input := map[string]any{"questions": []any{
-		map[string]any{"header": "Triggers", "question": "When should it fire?", "options": []any{map[string]any{"label": "Just hi"}}},
-		map[string]any{"question": "  What should the\ngreeting look like?  "},
-	}}
-	if got := UserInteractionQuestionsLabel(input); got != "Triggers · What should the greeting look like?" {
-		t.Fatalf("label = %q", got)
-	}
-	meta := BuildToolMeta(StepEvent{Kind: StepKindToolStarted, ToolName: "user_interaction", Input: input})
-	if meta.Invocation != "ask user · Triggers · What should the greeting look like?" {
-		t.Fatalf("invocation = %q", meta.Invocation)
-	}
-	for kind, want := range map[string]string{
-		StepKindToolStarted:   "asking user · Triggers · What should the greeting look like?",
-		StepKindToolCompleted: "asked user · Triggers · What should the greeting look like?",
-	} {
-		got := SummarizeToolStep(StepEvent{Kind: kind, ToolName: "user_interaction", Input: input, Output: map[string]any{"answers": map[string]any{}}})
-		if got != want {
-			t.Fatalf("%s summary = %q, want %q", kind, got, want)
-		}
-		if strings.Contains(got, "{") || strings.Contains(got, `"`) {
-			t.Fatalf("summary exposes JSON: %q", got)
-		}
-	}
-	if got := SummarizeToolStep(StepEvent{Kind: StepKindToolStarted, ToolName: "user_interaction"}); got != "asking user" {
-		t.Fatalf("summary without questions = %q", got)
-	}
-}
-
 func TestFormatToolStepResult_userInteractionRendersAnswersInQuestionOrder(t *testing.T) {
 	t.Parallel()
 	payload := `{"answers":{"补充说明":{"other":"保留旧会话展示能力\n并维持缩进"},"修改范围":{"selections":["TUI","回放兼容"]},"交付方式":{"selections":["设计方案并开发实施"]}}}`
@@ -2761,5 +2729,47 @@ func TestFormatToolStepResultImageBodyHasNoJSONDump(t *testing.T) {
 	}
 	if strings.Contains(got, "preview_kind") {
 		t.Fatalf("body=%q must be a one-liner, not a JSON dump", got)
+	}
+}
+
+// The transcript keeps the question, not the twelve-character tab label. The
+// answer is still found by header — that is what the result map is keyed by —
+// so a payload whose question was never recorded still reads correctly.
+func TestFormatUserInteractionResultPrintsTheQuestionNotTheHeader(t *testing.T) {
+	t.Parallel()
+	content := `{"answers":{"修法":{"selections":["一次性登录换 Cookie"]},"测试范围":{"selections":["只跑网关"]}}}`
+	got, ok := FormatUserInteractionResult(content, map[string]any{
+		"questions": []any{
+			map[string]any{"header": "修法", "question": "401 的修法选哪一种？"},
+			map[string]any{"header": "测试范围", "question": "这次要跑哪些测试？"},
+		},
+	})
+	if !ok {
+		t.Fatal("expected the answers to be recognized")
+	}
+	want := "401 的修法选哪一种？\n  → 一次性登录换 Cookie\n这次要跑哪些测试？\n  → 只跑网关"
+	if got != want {
+		t.Fatalf("body = %q, want %q", got, want)
+	}
+	for _, header := range []string{"修法", "测试范围"} {
+		if strings.Contains(got, "\n"+header+"\n") || strings.HasPrefix(got, header+"\n") {
+			t.Fatalf("body printed the tab label %q instead of the question: %q", header, got)
+		}
+	}
+}
+
+// A free-text answer is part of the answer, printed under the question that
+// asked for it.
+func TestFormatUserInteractionResultPrintsOtherUnderTheQuestion(t *testing.T) {
+	t.Parallel()
+	content := `{"answers":{"修法":{"other":"先加一行日志"}}}`
+	got, ok := FormatUserInteractionResult(content, map[string]any{
+		"questions": []any{map[string]any{"header": "修法", "question": "401 的修法选哪一种？"}},
+	})
+	if !ok {
+		t.Fatal("expected the answer to be recognized")
+	}
+	if want := "401 的修法选哪一种？\n  → 先加一行日志"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
 	}
 }

@@ -132,7 +132,7 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	env.PersistSubagentTurn(ctx, run.SubagentTurn{
 		WorkerSessionID: sid,
 		RunID:           runID,
-		Model:           subagentTurnModel(ctx, env, sessionID, subagentType),
+		Model:           subagentTurnModel(ctx, env, req),
 		Result:          res,
 		Partial:         capture.Snapshot(),
 		Err:             runErr,
@@ -141,19 +141,23 @@ func RunSubagentSupervised(ctx context.Context, env *Environment, req run.Subage
 	return res, pre, runErr
 }
 
-// subagentTurnModel names the model this execution ran on, the way the
-// primary session's rows do: a dispatch-time override wins — the plan
-// reviewer's chosen model — then a typed subagent's own provider chain, then
-// the conversation's model. subagentType is empty for a fork, whose chain
-// resolves through the same function to the conversation's model.
-func subagentTurnModel(ctx context.Context, env *Environment, sessionID, subagentType string) string {
+// subagentTurnModel names the model this execution ran on: the model its record
+// carries, which is the one dispatch decided and the one its requests were
+// routed to. A record persisted before dispatches carried their model — a
+// continued subagent from an older runtime — has none, and resolves here the
+// way its own surfaces did: a dispatch-time override, then a typed subagent's
+// own provider chain, then the conversation's model.
+func subagentTurnModel(ctx context.Context, env *Environment, req run.SubagentExecRequest) string {
+	if model := strings.TrimSpace(req.Model); model != "" {
+		return model
+	}
 	if override, ok := run.SubagentModelOverrideFromContext(ctx); ok {
 		return override.Model
 	}
 	if env == nil || env.Runner == nil {
 		return ""
 	}
-	_, model, _ := run.AgentModel(env.Runner, sessionID, &agent.HistoryEntry{AgentType: subagentType})
+	_, model, _ := run.AgentModel(env.Runner, req.SessionID, &agent.HistoryEntry{AgentType: req.SubagentType})
 	return model
 }
 

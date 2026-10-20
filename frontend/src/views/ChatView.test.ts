@@ -429,6 +429,109 @@ describe('ChatView subagent drawer', () => {
     wrapper.unmount()
   })
 
+  /**
+   * A plan document opened from the workbench (plan 085) is a tab in the same
+   * drawer the subagents use: 查看全文 takes the column, the document is drawn
+   * rendered, and the subagents stay mounted underneath — coming back finds
+   * them as they were.
+   */
+  function seedWorkbenchPlanApi() {
+    vi.spyOn(forebrainApi, 'sessionTodos').mockResolvedValue({ items: [] })
+    vi.spyOn(forebrainApi, 'actionsList').mockResolvedValue([])
+    vi.spyOn(forebrainApi, 'sessionPlans').mockResolvedValue([{
+      name: 'add-auth.md',
+      path: 'plans/proj/s1/add-auth.md',
+      updatedAt: Math.floor(new Date(2026, 0, 5, 9, 7).getTime() / 1000),
+      markdown: '# Plan: add auth\n\n- [x] read the middleware\n- [ ] write the guard',
+    }])
+    vi.spyOn(forebrainApi, 'mcpServersWithStatus').mockResolvedValue({
+      servers: [], project: {}, runtimeScope: undefined, runtimeAvailable: false, generation: undefined, pending: false,
+    })
+    vi.spyOn(forebrainApi, 'sessionCostSummary').mockResolvedValue({
+      sessionId: 's1', inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWritten: 0,
+      uncached: 0, requests: 0, cacheHitPercent: 0, toolCalls: 0, byTool: {},
+    })
+  }
+
+  /** 查看全文 in the workbench's plan row, with the panel really mounted. */
+  async function clickPlanViewFull(wrapper: Awaited<ReturnType<typeof mountView>>) {
+    useWorkbench().open.value = true
+    await nextTick()
+    await flushPromises()
+    await wrapper.get('[data-testid="bench-plan-body"] .bench-link').trigger('click')
+    await nextTick()
+    await nextTick()
+  }
+
+  it('opens a plan document as a drawer tab, with no composer under it', async () => {
+    setLocale('en')
+    seedSubagent()
+    seedCard()
+    seedWorkbenchPlanApi()
+    const slash = vi.spyOn(forebrainApi, 'slashCommands')
+      .mockResolvedValue({ surface: 'webchat', query: '', options: { duringRun: false, sideConversation: false }, records: [] })
+    try {
+      const wrapper = await mountView({ SubagentTab: false, ChatWorkbench: false })
+      await nextTick()
+      await openDrawer(wrapper)
+      expect(wrapper.find('[data-testid="subagent-drawer"] textarea').exists()).toBe(true)
+
+      await clickPlanViewFull(wrapper)
+
+      // The workbench gives up the column to the drawer, which now holds the plan.
+      expect(useWorkbench().open.value).toBe(false)
+      expect(drawer(wrapper).exists()).toBe(true)
+      const planTab = wrapper.get('[data-testid="plan-tab-plan:add-auth.md"]')
+      expect(planTab.text()).toContain('Plan · Plan: add auth')
+      expect(planTab.get('[role="tab"]').attributes('aria-selected')).toBe('true')
+
+      // The document, rendered: its heading, its meta strip, its progress.
+      const doc = wrapper.get('[data-testid="plan-doc"]')
+      await vi.waitFor(() => expect(doc.html()).toContain('<h1'), { timeout: 3000 })
+      expect(doc.text()).toContain('plans/proj/s1/add-auth.md')
+      expect(doc.text()).toContain('09:07')
+      expect(doc.text()).toContain('1/2')
+
+      // No composer: nothing under a plan document is typed into. The tab
+      // stays mounted — a draft typed into it survives the detour — so what
+      // changes is that it is off screen, which is what v-show's own mark
+      // says. jsdom caches a detached element's computed style, so the mark is
+      // read from the tab rather than from getComputedStyle.
+      const subagentTabRoot = () => wrapper.findAllComponents({ name: 'SubagentTab' })[0].attributes('style') ?? ''
+      expect(subagentTabRoot()).toContain('display: none')
+
+      // Coming back to the subagent's tab brings its composer with it.
+      await wrapper.get('[data-testid="subagent-tab-task-1"] [role="tab"]').trigger('click')
+      await flushPromises()
+      await nextTick()
+      expect(subagentTabRoot()).not.toContain('display: none')
+      expect(wrapper.get('[data-testid="plan-doc"]').attributes('style') ?? '').toContain('display: none')
+      wrapper.unmount()
+    } finally {
+      slash.mockRestore()
+    }
+  })
+
+  it('closes a plan tab without touching the subagent tabs', async () => {
+    seedSubagent()
+    seedCard()
+    seedWorkbenchPlanApi()
+    const wrapper = await mountView({ ChatWorkbench: false })
+    await nextTick()
+    await openDrawer(wrapper)
+
+    await clickPlanViewFull(wrapper)
+    expect(wrapper.findAllComponents({ name: 'PlanDoc' })).toHaveLength(1)
+
+    await wrapper.get('[data-testid="plan-tab-close-plan:add-auth.md"]').trigger('click')
+    await nextTick()
+    // The document is put away and the subagent's tab is where it was.
+    expect(wrapper.findAllComponents({ name: 'PlanDoc' })).toHaveLength(0)
+    expect(drawer(wrapper).exists()).toBe(true)
+    expect(tabs(wrapper).length).toBe(1)
+    wrapper.unmount()
+  })
+
   function seedSubagent2() {
     subagentsRef().value = [
       ...subagentsRef().value,
@@ -987,5 +1090,143 @@ describe('ChatView saves attachments into the project', () => {
     expect(upload).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('shot.png')
     wrapper.unmount()
+  })
+})
+
+/**
+ * The reading mode (plan 084): the conversation draws the whole run, or only
+ * the answers. It is a reading mode, not a delete — the record is untouched,
+ * an approval card still draws wherever it sits (a gate is never hidden), and
+ * the choice outlives the page under the conversation's session.
+ */
+describe('ChatView view mode', () => {
+  afterEach(() => {
+    ;(fake as { messages: { value: unknown[] } }).messages.value = []
+    localStorage.clear()
+  })
+
+  function seedRun() {
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: 'look at the directory' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        blocks: [
+          { kind: 'thinking', text: 'weighing the options', open: false, startedAt: 0, durationMs: 12000 },
+          { kind: 'tool', step: { stepId: 'call-1', toolName: 'shell', summary: 'ran ls' } },
+          { kind: 'assistant', text: 'the listing is empty', open: false },
+          {
+            kind: 'approval', id: 'ap-1', actionId: 'act-1', actionKind: 'shell',
+            status: 'approved', confirmation: 'Allowed',
+          },
+        ],
+      },
+    ]
+  }
+
+  /**
+   * The gate cards the timeline drew: the live card at the end of the thread
+   * (which carries no block) is a different thing, and stays out of the count.
+   */
+  function decidedGates(wrapper: Awaited<ReturnType<typeof mountView>>) {
+    return wrapper.findAllComponents({ name: 'ApprovalCard' }).filter((card) => Boolean(card.props('block')))
+  }
+
+  it('draws the run’s cards, its thinking and its answers by default', async () => {
+    setLocale('en')
+    seedRun()
+    const wrapper = await mountView()
+    await vi.waitFor(() => {
+      expect(wrapper.findAllComponents({ name: 'ToolCallCard' }).length).toBe(1)
+      expect(wrapper.text()).toContain('the listing is empty')
+    })
+    expect(decidedGates(wrapper).length).toBe(1)
+    expect(wrapper.text()).toContain('weighing the options')
+    expect(wrapper.find('[data-testid="view-mode-chip"]').text()).toContain('Default')
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('keeps only the answers and the gates once the conversation was left concise', async () => {
+    setLocale('en')
+    localStorage.setItem('forebrain.viewMode.s1', 'concise')
+    seedRun()
+    const wrapper = await mountView()
+    await vi.waitFor(() => expect(wrapper.text()).toContain('the listing is empty'))
+
+    // The tool call and the thinking step out of the way…
+    expect(wrapper.findAllComponents({ name: 'ToolCallCard' }).length).toBe(0)
+    expect(wrapper.text()).not.toContain('weighing the options')
+    // …while the answer the reader came for, and the gate they decided on, stay.
+    expect(decidedGates(wrapper).length).toBe(1)
+    expect(wrapper.find('[data-testid="view-mode-chip"]').text()).toContain('Concise')
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('draws the run’s checklist by default and withholds it in concise (owner 2026-10-20)', async () => {
+    setLocale('en')
+    // A turn that produced a checklist, in both shapes the timeline carries:
+    // the update card the engine pushes and the plan block a plan-mode run leaves.
+    ;(fake as { messages: { value: unknown[] } }).messages.value = [
+      { id: 'u1', role: 'user', content: 'read the directory' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        blocks: [{ kind: 'assistant', text: 'the listing is empty', open: false }],
+        planUpdates: [{
+          title: 'Updated Plan',
+          completed: 1,
+          total: 2,
+          items: [
+            { id: 't1', content: 'read the directory', status: 'completed' },
+            { id: 't2', content: 'summarise it', status: 'pending' },
+          ],
+        }],
+        planBlocks: [{ plan: { planId: 'p1', question: 'how should I read it?', steps: [{ stepId: 's1', description: 'list then read' }] } }],
+      },
+    ]
+
+    const drawn = await mountView()
+    await vi.waitFor(() => expect(drawn.text()).toContain('the listing is empty'))
+    expect(drawn.findAllComponents({ name: 'PlanUpdateCard' }).length).toBe(1)
+    expect(drawn.find('[data-plan-block]').exists()).toBe(true)
+    await flushPromises()
+    drawn.unmount()
+
+    localStorage.setItem('forebrain.viewMode.s1', 'concise')
+    const concise = await mountView()
+    await vi.waitFor(() => expect(concise.text()).toContain('the listing is empty'))
+    // The checklist is the run's own record: concise leaves it to the workbench
+    // and the terminal, exactly as it leaves the tool and thinking cards.
+    expect(concise.findAllComponents({ name: 'PlanUpdateCard' }).length).toBe(0)
+    expect(concise.find('[data-plan-block]').exists()).toBe(false)
+    await flushPromises()
+    concise.unmount()
+  })
+
+  it('switches from the composer’s chip and remembers the choice for this conversation', async () => {
+    setLocale('en')
+    seedRun()
+    const wrapper = await mountView()
+    await vi.waitFor(() => expect(wrapper.findAllComponents({ name: 'ToolCallCard' }).length).toBe(1))
+
+    await wrapper.find('[data-testid="view-mode-chip"]').trigger('click')
+    await wrapper.find('[data-testid="view-mode-option-concise"]').trigger('click')
+    await nextTick()
+    await vi.waitFor(() => expect(wrapper.findAllComponents({ name: 'ToolCallCard' }).length).toBe(0))
+    expect(localStorage.getItem('forebrain.viewMode.s1')).toBe('concise')
+    expect(wrapper.text()).toContain('the listing is empty')
+    await flushPromises()
+    wrapper.unmount()
+
+    // A reload reads the mode back: the choice is the conversation's, not the page's.
+    const reopened = await mountView()
+    await vi.waitFor(() => expect(reopened.text()).toContain('the listing is empty'))
+    expect(reopened.findAllComponents({ name: 'ToolCallCard' }).length).toBe(0)
+    await flushPromises()
+    reopened.unmount()
   })
 })

@@ -149,7 +149,10 @@
   .ph h1 { margin: 0; font-size: 20px; line-height: 1.3; font-weight: 650; }
   .ph p { margin: 4px 0 0; color: var(--text-2); max-width: 64ch; }
   .ph .acts { display: flex; gap: 8px; flex: none; }
-  .card { border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 12px; align-content: start; background: var(--page); }
+  /* Border-box: the page has no global reset, so a content-box card inside the
+     340px workbench column was 24px wider than its column and its right-hand
+     text (the 全部停止 button, a card's count) was clipped by the column edge. */
+  .card { box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; padding: 16px; display: grid; gap: 12px; align-content: start; background: var(--page); }
   .card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .card-h h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
   .flat { display: grid; gap: 12px; }
@@ -170,6 +173,9 @@
   .btn.pri:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
   .btn.dgr { color: var(--danger); border-color: var(--danger); }
   .btn.sm { height: 26px; padding: 0 9px; font-size: 12px; }
+  /* A verdict that has been chosen: tinted like the brand, but still not a
+     second primary button — only the recommended action wears --brand. */
+  .btn.on { background: var(--brand-soft); border-color: var(--brand-border); color: var(--brand); }
   .btn.link { border: 0; height: auto; padding: 0; color: var(--brand); background: transparent; }
   .field { height: 34px; border: 1px solid var(--line-2); border-radius: 6px; padding: 0 10px; font: inherit; font-size: 13px; color: var(--text); background: var(--page); width: 100%; box-sizing: border-box; }
   textarea.field { height: auto; padding: 8px 10px; line-height: 1.55; resize: vertical; }
@@ -270,10 +276,113 @@
   .tool-b .trow.done svg.lucide { color: var(--success); }
   .tool-b .trow.now { color: var(--text); }
   .tool-b .trow.now svg.lucide { color: var(--brand); }
-  .tool-b .opts { display: grid; gap: 4px; }
-  .tool-b .opt { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font-size: 12.5px; color: var(--text-2); }
-  .tool-b .opt svg.lucide { width: 13px; height: 13px; }
-  .tool-b .opt.on { border-color: var(--brand); background: var(--brand-soft); color: var(--text); }
+  /* ---------- exit_plan_mode: the plan approval ---------- */
+  /* The terminal's anatomy (pkg/tui/overlays.go:486-525, 271-291): the plan
+     itself, then any reviews, then "would you like to proceed?", then the four
+     verdicts in their fixed order — clear-context, proceed, keep planning, ask
+     another model (last one only when the session offers reviewers). The plan
+     and each review are documents, so they get a scroll box and their own
+     rules; the verdicts are one row above the feedback field that "keep
+     planning" uses. */
+  .xp { display: grid; gap: 10px; }
+  /* A plan is long and is read in place, so it scrolls inside its own box; the
+     bottom edge fades to say there is more, the same mask the long invocation
+     and the subagent task card use. What the box holds is the plan file itself,
+     rendered — the same document the drawer's plan tab shows (owner 2026-10-20). */
+  .xp-doc { border: 1px solid var(--line); border-radius: 8px; background: var(--subtle); padding: 9px 12px; max-height: 216px; overflow: auto;
+            mask-image: linear-gradient(#000 calc(100% - 20px), transparent); }
+  .xp-doc .plan-doc { gap: 5px; }
+  .xp-doc .plan-doc .md-h1 { font-size: 14px; }
+  .xp-doc .plan-doc .md-h2 { margin-top: 3px; }
+  .xp-q { font-size: 13px; color: var(--text); }
+  .xp-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .xp-acts .btn { flex: none; }
+  .xp-fb { display: flex; align-items: center; gap: 6px; }
+  .xp-fb input { flex: 1; min-width: 0; border: 1px solid var(--line-2); border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12.5px; color: var(--text); }
+  .xp-fb input::placeholder { color: var(--muted); }
+  .xp-fb-acts { display: flex; align-items: center; gap: 6px; }
+  .xp-pick { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .xp-pick .cap { font-size: 11.5px; color: var(--muted); padding: 6px 11px; border-bottom: 1px solid var(--line); background: var(--subtle); }
+  .xp-pick button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; border-top: 1px solid var(--line); background: transparent; padding: 6px 11px; font: inherit; font-size: 12.5px; color: var(--text); text-align: left; cursor: pointer; }
+  .xp-pick button:first-of-type { border-top: 0; }
+  .xp-pick button:hover { background: var(--subtle); }
+  .xp-pick .m { font-family: var(--mono); font-size: 12px; }
+  .xp-pick .lb { color: var(--muted); font-size: 12px; }
+  .xp-pick .cur { margin-left: auto; font-size: 11px; color: var(--brand); flex: none; }
+  .xp-run { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text); }
+  .xp-run svg.lucide { width: 13px; height: 13px; color: var(--brand); }
+  .xp-run .grow { flex: 1; }
+
+  /* ---------- user_interaction: the question form ---------- */
+  /* Same anatomy as the terminal's question overlay (pkg/tui/overlays.go,
+     renderNavBar + renderQuestionView + renderSubmitView): one tab per
+     question, the current one shown in full, the person moves between tabs
+     rather than scrolling a stack of questions. The chips carry the terminal's
+     own vocabulary — ☐ unanswered, ✔ answered — and a Submit tab exists only
+     when some question allows several answers. */
+  .ask { display: grid; gap: 10px; }
+  .ask-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 12px; }
+  .ask-tabs .arr { color: var(--muted); font-family: var(--mono); }
+  .ask-tab { display: inline-flex; align-items: center; gap: 5px; border: 1px solid transparent; border-radius: 6px; padding: 2px 8px; color: var(--muted); white-space: nowrap; }
+  .ask-tab .ck { font-family: var(--mono); font-size: 11px; }
+  .ask-tab.done { color: var(--success); }
+  .ask-tab.on { background: var(--brand); border-color: var(--brand); color: var(--on-brand); font-weight: 500; }
+  .ask-tab.on .ck { color: var(--on-brand); }
+  .ask-q { display: grid; gap: 6px; }
+  .ask-p { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
+  .ask-opts { display: grid; gap: 3px; }
+  .ask-opt { display: flex; align-items: flex-start; gap: 7px; width: 100%; text-align: left; font: inherit; border: 1px solid transparent; border-radius: 6px; background: transparent; padding: 4px 7px; cursor: pointer; }
+  .ask-opt:hover { background: var(--subtle); }
+  .ask-opt .num { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; min-width: 16px; }
+  .ask-opt .body { min-width: 0; display: grid; gap: 1px; }
+  .ask-opt .lb { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+  .ask-opt .lb .rec { font-size: 11px; color: var(--brand); font-weight: 400; }
+  .ask-opt .ds { font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+  .ask-opt .tick { color: var(--success); font-size: 12px; flex: none; }
+  .ask-opt .box { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; }
+  .ask-opt.on { background: var(--brand-soft); }
+  .ask-opt.on .num, .ask-opt.on .lb { color: var(--text); }
+  .ask-opt.multi .box { color: var(--text-2); }
+  .ask-other { display: flex; align-items: flex-start; gap: 7px; border: 1px solid transparent; border-radius: 6px; padding: 4px 7px; }
+  .ask-other .num { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; min-width: 16px; }
+  .ask-other .fld { border: 0; background: transparent; padding: 0; font: inherit; font-size: 13px; color: var(--text); width: 100%; }
+  .ask-other .fld.empty { color: var(--muted); }
+  .ask-other.on { background: var(--brand-soft); border-color: var(--brand-border); }
+  .ask-other .hintline { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  /* The focused option's preview, drawn where the terminal draws it: under the
+     option list, labelled, before the divider. */
+  .ask-pv { margin-left: 23px; display: grid; gap: 3px; }
+  .ask-pv .cap { font-size: 11px; color: var(--muted); }
+  .ask-pv pre { margin: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--code); padding: 7px 9px; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 148px; overflow: auto; color: var(--text); }
+  /* The next-step row: the terminal's Next/Submit button under a multi-select
+     question, and its "Review your answers" screen's two choices. */
+  .ask-next { display: flex; align-items: center; gap: 8px; padding: 2px 7px 2px 23px; }
+  .ask-next .btn { flex: none; }
+  .ask-rv { display: grid; gap: 7px; }
+  .ask-rv .warn { font-size: 12.5px; color: var(--warning); }
+  .ask-rv .qa { display: grid; gap: 1px; padding-left: 12px; }
+  .ask-rv .qa .q { font-size: 12.5px; color: var(--text); }
+  .ask-rv .qa .ans { font-size: 12.5px; color: var(--success); padding-left: 12px; }
+  .ask-rv .qa .ans::before { content: "→ "; }
+  .ask-rv .qa .none { font-size: 12.5px; color: var(--muted); padding-left: 12px; }
+  .ask-rv .ask-q2 { font-size: 12.5px; color: var(--text-2); padding-left: 12px; }
+  .ask-picks { display: grid; gap: 2px; padding-left: 23px; }
+  .ask-pick { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text); }
+  .ask-pick .pt { font-family: var(--mono); font-size: 12px; color: var(--brand); flex: none; width: 10px; }
+  .ask-pick.on { font-weight: 500; }
+  /* Divider + the way out: the terminal's "N. Chat about this" — it cancels the
+     question and gives the composer back, which is actionsDeny on the wire. */
+  .ask-foot { display: flex; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--text-2); }
+  .ask-foot .num { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .ask-foot .grow { flex: 1; }
+  .ask-cap { font-size: 11.5px; color: var(--muted); }
+  /* The settled card: what was asked, and what was answered — content, with no
+     hover state and no caret, because nothing here is a control. */
+  .ask-done { display: grid; gap: 6px; }
+  .ask-done .qa { display: grid; gap: 1px; }
+  .ask-done .qa .h { font-size: 12px; color: var(--text-2); }
+  .ask-done .qa .ans { display: flex; gap: 5px; font-size: 13px; color: var(--text); }
+  .ask-done .qa .ans::before { content: "→"; color: var(--muted); }
   .tool-b .srs { display: grid; gap: 8px; }
   .tool-b .sr { display: grid; gap: 1px; font-size: 12.5px; }
   .tool-b .sr .t { color: var(--brand); font-weight: 500; }
@@ -288,6 +397,75 @@
   .tool-b .facts { font-size: 12.5px; color: var(--text-2); }
   .tool-b .facts .lit { font-family: var(--mono); font-size: 12px; color: var(--text); }
   .tool.min .tool-h { border-bottom: 0; }
+  /* session_todo is a plan, not a call: the card names the plan (the engine's
+     own default title — "Updated Plan" in English, 更新待办 in Chinese) and
+     lists the items with the terminal's own status glyphs. */
+  /* The card is a button: it opens the workbench on 概览, so it says so on
+     hover and carries a real focus ring. Its rows are spans (a button cannot
+     hold a list) styled exactly like the thread's other lists. */
+  /* ---------- a plan document, rendered in the drawer ---------- */
+  .plan-doc { display: grid; gap: 10px; font-size: 13px; line-height: 1.7; color: var(--text); }
+  .plan-doc .doc-meta { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--muted); padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .plan-doc .doc-meta .mono { font-family: var(--mono); color: var(--text-2); }
+  .plan-doc .doc-meta .prog { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
+  .plan-doc .doc-meta .prog svg.lucide { width: 12px; height: 12px; }
+  .plan-doc .md-h1 { margin: 2px 0 0; font-size: 16px; font-weight: 650; letter-spacing: -0.01em; }
+  .plan-doc .md-h2 { margin: 12px 0 0; font-size: 13.5px; font-weight: 600; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .plan-doc .md-h3 { margin: 8px 0 0; font-size: 13px; font-weight: 600; }
+  .plan-doc .md-h4 { margin: 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+  .plan-doc .md-p { margin: 0; }
+  .plan-doc .md-l { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+  .plan-doc .md-l li { min-width: 0; overflow-wrap: anywhere; }
+  .plan-doc ol.md-l { list-style: decimal; }
+  .plan-doc ul.md-l { list-style: disc; }
+  .plan-doc ul.md-l.md-task-list, .plan-doc .md-task { list-style: none; }
+  .plan-doc .md-task { margin-left: -18px; }
+  .plan-doc .md-task.done { color: var(--text-2); }
+  .plan-doc .md-code { margin: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--code); padding: 9px 11px; font-family: var(--mono); font-size: 11.5px; line-height: 1.65; overflow: auto; max-height: 260px; }
+  .plan-doc .md-code code { font-family: inherit; white-space: pre; }
+  .plan-doc .md-q { margin: 0; border-left: 2px solid var(--brand-border); padding: 2px 0 2px 10px; color: var(--text-2); }
+  .plan-doc .md-hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+  .plan-doc .md-t { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  .plan-doc .md-t th, .plan-doc .md-t td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+  .plan-doc .md-t th { background: var(--subtle); font-weight: 600; color: var(--text-2); }
+  .plan-doc code.inl { background: var(--subtle); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-family: var(--mono); font-size: 12px; }
+  .plan-doc a { color: var(--brand); }
+
+  /* ---------- a family that happens more than once in a long conversation ----------
+     问答 and 计划 are not one-off: a long run asks many times and re-plans as it
+     learns. The card therefore holds a list of occurrences, newest first, each
+     one line until it is open — the same accordion the 上下文 tab already uses
+     (acc()) and the same roster row shape the subagent cards use. One open at a
+     time keeps the column bounded however long the session got. */
+  .hist { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
+  .hist-row { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+  .hist-h { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; border-radius: 6px; padding: 4px 6px; font: inherit; text-align: left; cursor: pointer; color: var(--text); }
+  .hist-h:hover { background: var(--subtle); }
+  .hist-h[aria-expanded="true"] { background: var(--subtle); }
+  .hist-h .chev { width: 13px; height: 13px; color: var(--muted); flex: none; transition: transform 0.12s; }
+  .hist-h[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .hist-h .tm { font-family: var(--mono); font-size: 11.5px; color: var(--muted); flex: none; }
+  .hist-h .tl { min-width: 0; flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-h .ct { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted); flex: none; }
+  .hist-h .ct svg.lucide { width: 12px; height: 12px; color: var(--muted); }
+  .hist-b { padding: 5px 6px 9px 27px; display: grid; gap: 6px; min-width: 0; }
+  .qas { display: grid; gap: 7px; min-width: 0; }
+  .qas .qa { display: grid; gap: 1px; min-width: 0; }
+  .qas .qa .q { font-size: 12.5px; color: var(--text-2); overflow-wrap: anywhere; }
+  .qas .qa .ans { font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
+  .qas .qa .ans::before { content: "→ "; color: var(--muted); }
+  .plan-card { border: 1px solid var(--brand-border); border-radius: 10px; background: var(--page); padding: 10px 14px; display: grid; gap: 8px; font-size: 13px; }
+  .plan-card .hd { display: flex; align-items: center; gap: 7px; font-weight: 600; color: var(--brand); }
+  .plan-card .hd::before { content: "•"; font-size: 15px; line-height: 1; }
+  .plan-card .meta { display: grid; gap: 3px; }
+  .plan-card .why { font-size: 13px; line-height: 1.6; color: var(--text-2); }
+  .plan-card .pitems { display: grid; gap: 5px; }
+  .plan-card .pitem { display: flex; align-items: flex-start; gap: 8px; color: var(--brand); }
+  .plan-card .pitem .g { font-family: var(--mono); font-size: 13px; line-height: 1.35; flex: none; width: 14px; }
+  .plan-card .pitem .t { font-size: 13px; line-height: 1.5; }
+  .plan-card .pitem.now .t { font-weight: 500; }
+  .plan-card .pitem.done .t { color: var(--brand); }
+  .plan-card .pitem.kill .g { color: var(--danger); }
   /* A run parked on a question: the question is the whole card head, the page
      it is about is the body, and the three ways out sit on the head's right. */
   .approval { border: 1px solid var(--line); border-radius: 8px; background: var(--page); padding: 10px 12px; display: grid; gap: 7px; }
@@ -301,6 +479,12 @@
   .approval .facts { font-size: 12px; color: var(--text-2); padding-left: 16px; overflow-wrap: anywhere; }
   .approval .facts.mono, .approval .facts .lit { font-family: var(--mono); }
   .approval .facts .sep { color: var(--line-2); padding: 0 4px; }
+  /* Several facts, one per line, when the decision turns on a set rather than on
+     one value (the permissions being asked for, an MCP call's arguments). */
+  .approval .facts.rows { display: grid; gap: 2px; }
+  /* The change itself, for the file decisions: what will be written is the fact
+     the decision turns on, so it is shown, not described. */
+  .approval .diff { margin-left: 16px; }
   /* A note being written to memory is a document, not a label: it gets prose
      size and a scroll box of its own so long notes stay whole. */
   .approval .memo { margin-left: 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--subtle); padding: 8px 10px; max-height: 132px; overflow: auto; font-size: 13px; line-height: 1.6; color: var(--text); }
@@ -323,11 +507,21 @@
 
   /* workbench */
   .bench { width: 340px; flex: none; /* chat and workshop alike (owner 2026-10-18) */ border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
-  .bench-h { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 10px 16px; border-bottom: 1px solid var(--line); }
+  /* 2026-10-20 (owner): the workbench opens and collapses as the drawer does. It is
+     the same object in the same slot (one of the two open at a time), so it borrows
+     the drawer's geometry: a 44px header whose collapse control sits 8px from the
+     panel edge, exactly where the subagent drawer's sits. */
+  .bench-h { display: flex; align-items: center; justify-content: space-between; height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line); flex: none; }
   .bench-h b { font-size: 13px; font-weight: 600; }
+  /* The drawer's own motion (`.dw`), reused: the panel slides out of the right edge
+     instead of blinking into place. One shot — render() rebuilds the panel on every
+     interaction, so the class alone would replay the slide on each tab switch; the
+     render that draws an open panel consumes the flag that put it there. */
+  .bench.in, .sad.in { animation: dw-in 160ms ease-out; }
+  @media (prefers-reduced-motion: reduce) { .bench.in, .sad.in { animation: none; } }
   .icon-btn { width: 28px; height: 28px; display: grid; place-items: center; border: 0; background: transparent; border-radius: 6px; color: var(--muted); cursor: pointer; }
   .icon-btn:hover { background: var(--soft); color: var(--text); }
-  .bench-b { flex: 1; overflow: auto; padding: 12px; display: grid; gap: 12px; align-content: start; }
+  .bench-b { flex: 1; overflow: auto; padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-content: start; }
   .agent-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
   .agent-row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); flex: none; }
   .agent-row .d { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 11px; }
@@ -517,8 +711,8 @@
   .sa-comp .view-menu { width: 260px; }
   /* 简洁 mode: the answers stay, the run's cards step out of the way. Nothing
      is deleted — the mode only decides what this view draws. */
-  .chat.brief .tool, .chat.brief .think, .chat.brief .sa-card { display: none; }
-  .sad.brief .tool, .sad.brief .think { display: none; }
+  .chat.brief .tool, .chat.brief .think, .chat.brief .sa-card, .chat.brief .plan-card { display: none; }
+  .sad.brief .tool, .sad.brief .think, .sad.brief .plan-card { display: none; }
   .composer { position: relative; }
   /* stacked radio card (title over text); not `.col`, which is the chat column's class */
   .rc.stack { flex-direction: column; align-items: flex-start; gap: 6px; }
@@ -567,7 +761,8 @@
   /* A thinking block is a card you can fold — the same card the subagent tab
      draws: the caption is the whole ticket, the prose opens only when asked. */
   .think { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
-  .think-l { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); cursor: pointer; }
+  .think-l { display: flex; align-items: center; gap: 4px; width: 100%; border: 0; background: transparent; padding: 0; font: inherit; font-size: 11px; color: var(--muted); text-align: left; cursor: pointer; }
+  .think-l:hover { color: var(--text-2); }
   .think-l::before { content: "▸"; }
   .think.open .think-l::before { content: "▾"; }
   .think p { margin: 6px 0 0; font-size: 12px; line-height: 1.65; color: var(--muted); white-space: pre-wrap; }
@@ -642,6 +837,7 @@
   .plan-md { font-size: 12.5px; display: grid; gap: 4px; }
   .plan-md b { font-weight: 600; }
   .plan-md ol { margin: 0; padding-left: 18px; color: var(--text-2); display: grid; gap: 2px; }
+  .plan-md b, .plan-md li { overflow-wrap: anywhere; }
   .meter { height: 8px; border-radius: 999px; background: var(--soft); display: flex; overflow: hidden; }
   .meter i { display: block; height: 100%; }
   .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11.5px; color: var(--text-2); }
@@ -1055,16 +1251,32 @@
       <li>卡头永远一行：图标 + 调用摘要（与终端同一句话）+ 状态 + 折叠箭头。摘要用省略号收尾，<b>不再换行</b>——2 KB 的多行命令也不会把卡头撑高，状态徽标不再悬在右侧半空；悬停看完整那一行。</li>
       <li>完整调用搬进正文顶部（等宽、折行、限高 208px 滚动、可复制）：引擎认为一行放得下的（不超过 120 字符且没有换行）不重复画，短调用的卡与现在一模一样。</li>
       <li>正文就是这条调用的结果，一列，不再套第二层框：代码结果带行号，改动带 +/− 着色，搜索是标题 / 地址 / 摘要，记忆命中是“文件 · 行 + 引用行”，清单是勾选行，提问是题目 + 已选的一项，权限是原因 + 允许的范围。</li>
-      <li>思考卡在主视图、子代理标签页、技能工坊是同一张：折叠成一行“思考了 N 秒”，点开才看正文，默认折叠。</li>
+      <li>思考卡在主视图、子代理标签页、技能工坊是同一张：折叠成一行“思考了 N 秒”，点开才看正文，默认折叠——稿子里这一行也可以点，▸ 折叠 / ▾ 展开（总览里第一张展开、第二张折叠，两种状态并排）。</li>
       <li>主代理会话与子代理会话用同一张卡（图标、摘要、状态、折叠、正文一字不差），只有列的宽度不同——宽度不够时由省略号负责，抽屉里不再另画一套。</li>
-      <li>两个视图的输入框里都新增“视图 · 默认 / 简洁”下拉（同一套：审批模式旁边那一枚，子代理输入框里也有一枚）：<b>默认</b>画全量消息卡，<b>简洁</b>只留助手回答——工具调用卡与思考卡不画（新增“对话 · 简洁模式”“子代理 · 视图模式下拉”）。这是阅读方式，不是删消息：什么都没丢，等你回答的东西仍在输入框上方的面板里。</li>
+      <li><b>工作台概览的「问答」与「计划」是历史，不是最后一张</b>：长会话里可以问很多次、重写很多份。两类都是一张卡 + 一串「次数」（按时间倒序、默认展开最上面那一条，其余压成一行，点开一条就收起同类的其它条），卡头右侧写总次数（3 次 / 3 份），每条自带时间与该次的规模；计划的进度前面带一枚清单图标（☑ 3/5），因为同一个位置在问答卡里是问题数，图标是区分这两件事的东西。列宽 340px 不变、卡片高度不随会话变长而失控——这条也是把「一次一张卡」换成「一张卡一列历史」的原因。</li>
+      <li><b>计划原文在工作台里点开，落在子代理抽屉的同一个抽屉里，是一页渲染好的文档，不是一段代码块</b>：计划文件（<span class="mono">plans/*.md</span>）由引擎写在会话目录里，模型写的是 Markdown——标题、清单、围栏示例、表格都在里面。抽屉标签页顶部一行写它来自哪个文件、第几次、进度（<span class="mono">plans/session-cookie.md 10:30 ☑ 3/5</span>），下面按文档渲染：标题分层、清单逐条带 ☑/☐、代码块限高可横向滚动、表格有线、引用有竖线、行内代码成小片。它是只读的一页：这个标签页<b>没有输入框</b>（没有子代理在等你的消息），切回子代理标签页输入框照旧；同一抽屉里计划标签与子代理标签共存，关掉计划标签不影响后面的子代理。</li>
+      <li><b>工作台是抽屉（owner 2026-10-20）</b>：它和右侧抽屉共用同一个位置、同一时刻只开一个，所以打开与收起也照抽屉来——打开时走抽屉自己那条滑入（160ms，从右边缘推进来，不是凭空出现），收起用抽屉右上角那枚「收起侧栏」图标（离面板右边缘 8px、44px 头栏、与子代理抽屉逐像素同位置），而不是一个「×」。它是「收起」不是「关闭」：再从顶栏点一次就回来，里面的标签与滚动位置都还在。滑入只在打开的那一次发生，切换工作台的标签不会重播。</li>
+      <li>清单（「更新待办」）与问答（「询问用户」答完之后）这两张卡是<b>纯内容</b>：没有悬停效果、没有可点的区域、没有任何“去别处看”的暗示。同一份清单与同一份问答也画在工作台「概览」里（数据是同一份，不是两份拷贝），但两处各自独立——看记录就是看记录，看工作台就是看工作台。</li>
+      <li>新建项目弹窗新增“项目类型”下拉：办公创作 / 创意编程。它决定这个项目从哪一套默认开始（提示词与工具、审批画像），所以只在这里问一次，紧挨着项目名；两种类型都不是新界面，项目里的一切页面与卡片照旧。</li>
+      <li>审批模式与视图模式两枚下拉，选项与回显<b>用同一个名字</b>（原先视图下拉里写“全部消息卡 / 只看回答”、收起后却显示“默认 / 简洁”，是同一件事的两个名字）。界面语言也统一了：中文界面只出中文（只读 / 默认 / 完全访问、默认 / 简洁），英文界面只出英文（Read Only / Default / Full Access、Default / Concise），不再是“只读 · Read Only”这种中英并排。</li>
+      <li>简洁模式同时隐藏清单卡（它是这次运行的产物，进度仍写在输入框正上方的“3/5”里）。</li>
+      <li>两个视图的输入框里都新增“默认 / 简洁”下拉（下拉里的名字与收起后回显的名字是同一个词）（同一套：审批模式旁边那一枚，子代理输入框里也有一枚）：<b>默认</b>画全量消息卡，<b>简洁</b>只留助手回答——工具调用卡与思考卡不画（新增“对话 · 简洁模式”“子代理 · 视图模式下拉”）。这是阅读方式，不是删消息：什么都没丢，等你回答的东西仍在输入框上方的面板里。</li>
       <li>八种 subagent_* 调用（run / fanout / send / status / wait / continue / close / list）沿用子代理调用卡（一句概要 + 每个任务一行），这次一并放进总览逐张核对。</li>
       <li>稿面按引擎实际下发的调用摘要绘制（<span class="mono">ran read … · lines 15-20</span>、<span class="mono">failed: exit status 1</span>、<span class="mono">approved request permissions</span>、<span class="mono">asked user</span>、<span class="mono">saved intermediate notes</span> …），稿面与真机是同一套话。</li>
-      <li>已知要一起修的引擎文案（本稿已按修正后的样子画）：<span class="mono">ran session_todo</span> 与 <span class="mono">ran exit_plan_mode</span> 有多余空格，<span class="mono">ran fetch … · 1 items</span> 的单复数，以及 shell 的展示正文会把调用参数（input JSON）再打印一遍——卡头已经是那句话，正文只该给结果。</li>
+      <li>「询问用户」这一族的卡头只说这一件事：中文<b>询问用户</b>、英文 <span class="mono">asked user</span>——问的是哪几个问题，卡里第一行的标签页已经逐条写着，卡头不再重复。动词按界面语言说，问题名（模型自己写的原文）留在标签页上不翻译。其余工具卡头沿用引擎下发的调用摘要（<span class="mono">ran read …</span> 这类，是命令与动词的组合），本稿不动。</li>
+      <li><b>退出计划模式的审批单独画了一页</b>（新增“对话 · 退出计划模式审批”，六种状态；页里的 ①②③ 是给评审人看的状态说明，不是界面文案）：① 只有计划、三个选择；② 附一份评审；③「请其他模型评审」展开模型列表（当前那台标「当前」）；④ 评审进行中（进度 + 停止 + 那条时间线提示）；⑤ 继续规划时填反馈；⑥ 批准后收成一行。形态照终端来：计划是一份带边框、限高滚动的文档（底部渐隐）——盒子里放的就是那份计划文件本身（plans/*.md，整篇、按 Markdown 渲染：标题分层、清单逐条带 ☑/☐、代码块可横向滚动、表格有线、引用有竖线），与右侧抽屉里计划标签页渲染的是同一份文本，不再另写一套缩写；盒子不写“计划如下”这类前言（卡头已经写着“退出计划模式”，盒子下面就是要开始执行吗）。评审各占一块并标明作者与用时，然后才是“要开始执行吗？”，四个选择顺序固定——批准并清空上下文（已用 N%）/ 批准 / 继续规划 / 请其他模型评审（最后一档只在会话里有别的模型时出现）。卡头只写这道闸的名字“退出计划模式”（产品自己的 <span class="mono">chat.exitPlanMode</span>），不再拼任何附加语；“在等答复”这件事由右侧状态徽标说。</li>
+      <li>反馈框与终端同规则：只有点了「继续规划」之后才出现，选别的选择立即收起，再选回来内容还在。</li>
+      <li><b>plan-reviewer 的评审是它自己的子代理卡片</b>，不再是闸门里的一段正文：卡片在闸门之上，形态与其它子代理卡一致（一句概要 + 「评审这份计划 · 用时」一行 + 最近一次工具调用），点「查看」打开右侧抽屉的对应标签页（交给它的任务、思考与工具调用、它的结论）。闸门里只剩计划与四个选择；评审进行中时闸门只有一行「谁在评审 + 停止」，因为它此刻不能回答。</li>
+      <li><b>提问卡（asked user）的全部表单类型单独画了一页</b>（新增“对话 · 提问卡（全部表单类型）”，按 schema 穷举）：① 单选——选中一项即提交；② 单选 + 推荐项，后缀“（推荐）”落在标签上；③ 多选——勾选多项后在卡片底部“提交”；④ 选项带预览——聚焦那一项下方显示 mockup / 代码；⑤ 一次问 1–4 个问题，每个问题一个 header（≤12 字）与右上角 1/3 进度；⑥ “其他”被选中后这一行变成输入框（每道题都有这一项）；⑦ 答完之后线程里留下的卡——问题 + 每条 `→ 答案`，与终端同一套文本。</li>
+      <li>提问卡的每一项都必须是“标签 + 说明”两行：说明是 schema 的必填字段，也是能做出选择的原因；四枚只有标签的 chip 等于不给人选的理由。</li>
+      <li><b>session_todo 是一张清单卡，不是工具调用卡</b>：标题是这张卡的名字，按界面语言说：中文 <span class="mono">更新待办</span>、英文 <span class="mono">Updated Plan</span>（引擎下发的就是这个默认名，它是词不是标题，跟着界面语言走；真机落地只改网页，终端保持现状），下面是当前在做的那一项、以及每条勾选行的 <span class="mono">✓ / ▣ / ✕ / □</span>（不放 <span class="mono">Tasks 3/5</span> 这类计数：进度已经写在输入框正上方）——与终端同一套字、与网页已上线的清单卡同一种形态（进行中 / 全部完成 / 有一项被取消三种状态并列）。原先稿面画的“ran session_todo · 5 items”是错的。</li>
+      <li>已知要一起修的引擎文案（本稿已按修正后的样子画）：<span class="mono">ran exit_plan_mode</span> 有多余空格，<span class="mono">ran fetch … · 1 items</span> 的单复数，以及 shell 的展示正文会把调用参数（input JSON）再打印一遍——卡头已经是那句话，正文只该给结果。</li>
       <li>抓取要审批时，对话里是这样一张卡（新增“对话 · 抓取审批”）：一句问句“要我向公开网络取这个页面吗？”、地址独占一行且长串折行不省略、右侧三档“取这个页面 / 不再询问 example.com / 不要取”（与终端同一顺序）——与终端同一组事实、同一套说法。“不再询问”自带作用范围（主机），卡片里不再另说一遍会记住什么。</li>
       <li>另外两族要审批时是同一张卡（新增“对话 · 搜索审批”“对话 · 记忆写入审批”）：问句即标题、右侧两档、第二行只放这次决定要用的那一两个事实，长串折行不省略——搜索写搜索词（加引号，它是模型自己说的话）和结果上限（工具默认 5 条、最多 10 条，与终端同一行说法），记忆写入写文件名 + 记忆作用域，其下是可滚动的笔记正文（13px 正文、长内容滚动不截断）。第二档的动词跟着这一族实际发生的事：搜索是“不要搜”（中断本轮），记忆写入是“不要记”（跳过这一条，本轮继续）。</li>
       <li>这两族没有“权限记忆”框：web_search 的决定只有“做 / 不做”，记忆写入只有“记住 / 不要记”，都没有“要不要记住这个批准”这一项；所以卡片里不解释一件不会发生的事。抓取卡的“不再询问主机”把记住的东西写在自己的按钮上，也不需要第二个框。</li>
       <li>免审批的操作不画审批卡（owner 2026-10-20）：retrieve_output 与 memories_read / search / list 在默认放行集合里（只读、且读不到记忆库以外的路径），默认根本不问，也就不会有卡；它们只有用户自己写了“询问”规则时才会被问到，那时走通用卡。</li>
+      <li><b>要问的每一类都单独画了一张（新增“对话 · 审批卡（全部工具）”）</b>，按引擎的评估顺序穷举，不再用一张通用卡遮住十二种不同的问题：写入新文件 / 覆盖已有文件 / 修改文件 / 应用补丁 / 运行命令 / 沙箱外运行 / 访问外网主机 / 申请权限 / 进入计划模式 / 调用 MCP 工具 / 读 Forebrain 自己的文件 / 兜底。每张卡的选择档数与引擎给出的决定一一对应（文件三档、命令三档、主机四档、权限四档、MCP 四档、兜底两档），不合并、不省略。已画过的抓取、搜索、记忆写入、退出计划模式不在这页重复。</li>
+      <li><b>这十二张卡的文案只有一个规则（owner 2026-10-20：语义化、简洁、对用户友好）</b>：问句说这一次要发生什么，一行；按钮以动词开头，只说“允许到什么程度”（<span class="mono">写入 / 覆盖 / 修改 / 应用 / 运行 / 在沙箱外运行 / 允许 / 本轮允许 / 进入 / 调用 / 读取</span>，范围档）<span class="mono">本会话不再问 / 这类命令不再问 / 以后都不再问 / 本会话都允许 / 以后都允许 / 不授予 / 不要写 / 不要改 / 不要应用 / 不要运行 / 不要访问 / 不要调用 / 不要读 / 不要进入 / 不要</span>；事实行只放这次决定真正要看的东西（行数、改动量、会被替换的那几行、命令做了什么、主机与协议、权限条目、MCP 的关键入参），不出现工具内部名、action id、JSON、“批准一次 / 拒绝并中断本轮”这类法律词。问句里已经说过的对象，事实行不再重复写一遍。</li>
     </ul>
   </section>
 
@@ -2601,13 +2813,13 @@
     ops: { path: '~/.forebrain/workspaces/ops', sessions: ['排查 gateway 集群 502', '整理告警阈值', '未命名对话'], provider: ['deepseek', 'deepseek-v4'], beats: {} }
   };
   var S = {
-    tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', drawer: false, tmenu: false,
-    bench: false, hb: false, preset: 'default', presetMenu: false, view: 'default', viewMenu: false, saView: 'default', savMenu: false, settingsTab: 'appearance', projTab: 'overview',
+    tenant: 'main', page: 'chat', session: 0, projectSession: '', brand: 'navy', rail: 'dark', lang: 'zh', drawer: false, tmenu: false,
+    bench: false, hb: false, preset: 'default', presetMenu: false, view: 'default', viewMenu: false, saView: 'default', savMenu: false, settingsTab: 'appearance', projTab: 'overview', projKind: '办公创作',
     tree: {}, treeLoading: {}, ref: '', toolOpen: '', projectForm: false, rc: false, sel: {}, cronCustom: false, cronMode: 'weekly', wdays: { 1: true }, memEdit: '', models: [['deepseek-v4', 'deepseek-v4-flash'], ['gpt-5.4']], wsTask: 0, evalRun: false, trigApplied: false, mdeMode: {}, mdeDoc: {}, mdePath: {}, keyEdit: false,
     sa: { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false },
-    pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
+    thinks: {}, pick: { mode: 'project', proj: 'forebrain-harness', folder: '' }, newProj: '', newCreated: false, fb: false, fbFor: 'chat', fbPath: '~/workspace', fbNew: false, trust: false, trustFor: null,
     attach: false, attachShot: false, attachDir: 'attachments', lastAttachDir: 'attachments', attNew: false, atree: {}, atts: [], demo: 'normal', dproj: '全部项目', projRoot: '',
-    benchTab: 'overview', ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, mcpUndecline: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, model: '', modelMenu: false, img: null, mdw: null, pg: {}, pgSize: {}, memSort: {}, pinned: { 'forebrain-harness': true }, chanOn: { 0: true, 1: true }, cronOff: { 2: true }, memScope: 'shared', approvalDef: 'default', mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
+    benchTab: 'overview', benchIn: false, saIn: false, xpFeedbackOpen: {}, xpFeedbackText: {}, ctxOpen: { items: true }, auditOpen: 0, ctxWarn: false, projDel: '', projDelBusy: false, fm: null, fmResult: false, fmType: 'stdio', mcpAdv: false, mcpTest: '', mcpTools: false, mcpErr: '', mcpSaving: false, mcpTestName: '', mcpSaveName: '', mcpAllow: false, mcpDeny: false, mcpUndecline: false, pubM: '', cmpM: '', cmpFile: '', vcM: null, effort: 'high', effortMenu: false, model: '', modelMenu: false, img: null, mdw: null, pg: {}, pgSize: {}, memSort: {}, pinned: { 'forebrain-harness': true }, chanOn: { 0: true, 1: true }, cronOff: { 2: true }, memScope: 'shared', approvalDef: 'default', mode: 'agent', modeMenu: false, plusPop: false, draft: '', rw: false, rwMode: 'both', rewound: '', fbHist: ['~/workspace'], fbIdx: 0, fbSel: '', fbMenu: false
   };
   var nav = [
     ['chat', '对话', 'message-square'], ['projects', '项目', 'folder-git-2'], ['rules', '规则指令', 'scroll-text'], ['skills', '技能', 'sparkles'],
@@ -2616,11 +2828,26 @@
   ];
   var titles = { chat: '对话', projects: '项目', project: '项目空间', rules: '规则指令', skills: '技能', workshop: '技能工坊', mcp: 'MCP', subagents: '子代理', cron: '定时任务', channels: '通道', providers: '模型服务', tools: '工具', permissions: '权限', memories: '记忆', settings: '设置' };
   var jump = [['chat', '对话'], ['projects', '项目'], ['project', '项目空间'], ['rules', '规则指令'], ['skills', '技能'], ['mcp', 'MCP'], ['subagents', '子代理'], ['providers', '模型服务'], ['tools', '工具'], ['permissions', '权限'], ['memories', '记忆'], ['settings', '设置']];
+  // Every label exists once per language and the surface picks one: a control
+  // never prints both halves of a bilingual label, it prints the half the
+  // interface is speaking (the app's own approval picker reads `t()` the same
+  // way; only this prototype used to staple the two together).
+  function L(zh, en) { return S.lang === 'en' ? en : zh; }
+  // The descriptions are the product's own words, verbatim from
+  // frontend/src/locales (approval.*Description). They must stay that way: an
+  // earlier draft of this file invented a "sandboxed commands cannot reach the
+  // network" clause, which the product never says and the engine does not do
+  // (network_access defaults to true — pkg/config/config.go).
   var presets = [
-    ['readonly', 'Read Only', '只读', '可以读取当前工作区的文件；编辑文件前需要你审批。沙箱中的命令不能访问网络。'],
-    ['default', 'Default', '默认', '可以读写当前工作区的文件并运行命令；编辑工作区以外的文件前需要你审批。沙箱中的命令不能访问网络。'],
-    ['full', 'Full Access', '完全访问', '无需审批即可编辑工作区以外的文件、访问网络，命令在沙箱外运行。请谨慎使用。']
+    ['readonly', 'Read Only', '只读', '可以读取当前工作区的文件；修改文件需要审批。',
+      'Reads files in the current workspace; approval is required to edit.'],
+    ['default', 'Default', '默认', '可以读写当前工作区的文件并运行命令；修改工作区外的文件需要审批。',
+      'Reads and edits files in the workspace and runs commands; approval is required outside it.'],
+    ['full', 'Full Access', '完全访问', '可以修改工作区外的文件并访问互联网，无需审批。谨慎使用。',
+      'Edits files outside the workspace and reaches the internet without approval. Use with care.']
   ];
+  function presetName(x) { return L(x[2], x[1]); }
+  function presetDesc(x) { return L(x[3], x[4]); }
   var toolNames = ['shell', 'read_file', 'write_file', 'edit_file', 'apply_patch', 'grep', 'web_search', 'web_fetch', 'memories_search', 'mcp__github__create_pull_request'];
   var fsTree = {
     '': [['.forebrain', 1], ['attachments', 1], ['cmd', 1], ['docs', 1], ['frontend', 1], ['pkg', 1], ['scripts', 1], ['FOREBRAIN.md', 0], ['go.mod', 0], ['Makefile', 0], ['README.md', 0]],
@@ -2718,7 +2945,7 @@
     var last = projects.filter(function (p) { return p.last; })[0];
     S.pick = { mode: 'project', proj: last ? last.n : '', folder: '' };
   }
-  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.mcpUndecline = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.view = 'default'; S.viewMenu = false; S.saView = 'default'; S.savMenu = false; S.img = null; S.model = ''; S.modelMenu = false; S.mdw = null; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
+  function resetModal() { S.mdeMode = {}; S.mdeDoc = {}; S.mdePath = {}; S.evalRun = false; S.trigApplied = false; S.fm = null; S.fmType = 'stdio'; S.mcpAdv = false; S.mcpTest = ''; S.mcpTools = false; S.mcpErr = ''; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; S.mcpAllow = false; S.mcpDeny = false; S.mcpUndecline = false; S.pubM = ''; S.cmpM = ''; S.vcM = null; S.inst = null; S.ws = null; S.cronModal = false; S.memEdit = ''; S.projectForm = false; S.modeMenu = false; S.plusPop = false; S.effortMenu = false; S.rw = false; S.rewound = ''; S.draft = ''; S.fbMenu = false; S.pjPop = false; S.typedNew = ''; S.projDel = ''; S.fb = false; S.fbNew = false; S.trust = false; S.attach = false; S.attachShot = false; S.attNew = false; S.drawer = false; S.demo = 'normal'; S.thinks = {}; S.view = 'default'; S.viewMenu = false; S.saView = 'default'; S.savMenu = false; S.img = null; S.model = ''; S.modelMenu = false; S.mdw = null; S.ctxWarn = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.ref = ''; }
 
   var starters = [['file-text', '生成 FOREBRAIN.md', '/init'], ['map', '先出计划再动手', '@plan'], ['hammer', '做一个技能', '@workshop'], ['clock', '设一个定时任务', '@cron']];
   function pjPop() {
@@ -2820,29 +3047,31 @@
   // filter on the run: nothing is deleted, and the panel above the composer
   // still carries anything waiting for the person's answer.
   var VIEW_MODES = [
-    ['default', '默认', '全部消息卡', '工具调用、思考、子代理调用都画出来'],
-    ['concise', '简洁', '只看回答', '隐藏工具调用卡与思考卡']
+    ['default', '默认', 'Default', '工具调用、思考、子代理调用都画出来', 'Tool calls, thinking and subagent calls are all drawn'],
+    ['concise', '简洁', 'Concise', '隐藏工具调用卡与思考卡', 'Tool-call cards and thinking cards are hidden']
   ];
+  function viewName(x) { return L(x[1], x[2]); }
+  function viewDesc(x) { return L(x[3], x[4]); }
   function viewLabel() { return VIEW_MODES.filter(function (x) { return x[0] === S.view; })[0]; }
   function saViewLabel() { return VIEW_MODES.filter(function (x) { return x[0] === S.saView; })[0]; }
   function viewChip() {
     var v = viewLabel();
     return '<span class="chip-wrap">' +
-      '<button type="button" class="chip-btn" data-act="view" aria-haspopup="listbox" aria-expanded="' + !!S.viewMenu + '"' + (S.viewMenu ? '' : ' data-tip="消息卡显示范围" data-tip-pos="top"') + '>' +
-      ic(v[0] === 'concise' ? 'eye-off' : 'eye') + '视图 · ' + v[1] + ic('chevron-down') + '</button>' +
+      '<button type="button" class="chip-btn" data-act="view" aria-haspopup="listbox" aria-expanded="' + !!S.viewMenu + '"' + (S.viewMenu ? '' : ' data-tip="' + L('消息卡显示范围', 'Which message cards are drawn') + '" data-tip-pos="top"') + '>' +
+      ic(v[0] === 'concise' ? 'eye-off' : 'eye') + viewName(v) + ic('chevron-down') + '</button>' +
       (S.viewMenu ? viewMenu(S.view, 'viewmode') : '') + '</span>';
   }
   function saViewChip() {
     var v = saViewLabel();
     return '<span class="chip-wrap">' +
-      '<button type="button" class="chip-btn" data-act="saview" aria-haspopup="listbox" aria-expanded="' + !!S.savMenu + '"' + (S.savMenu ? '' : ' data-tip="消息卡显示范围" data-tip-pos="top"') + '>' +
-      ic(v[0] === 'concise' ? 'eye-off' : 'eye') + v[1] + ic('chevron-down') + '</button>' +
+      '<button type="button" class="chip-btn" data-act="saview" aria-haspopup="listbox" aria-expanded="' + !!S.savMenu + '"' + (S.savMenu ? '' : ' data-tip="' + L('消息卡显示范围', 'Which message cards are drawn') + '" data-tip-pos="top"') + '>' +
+      ic(v[0] === 'concise' ? 'eye-off' : 'eye') + viewName(v) + ic('chevron-down') + '</button>' +
       (S.savMenu ? viewMenu(S.saView, 'saviewmode') : '') + '</span>';
   }
   function viewMenu(setting, attr) {
     return '<div class="view-menu" role="listbox">' + VIEW_MODES.map(function (x) {
       var on = x[0] === setting;
-      return '<button type="button" class="view-opt' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-' + attr + '="' + x[0] + '"><b>' + (on ? ic('check') : '') + x[2] + '</b><span>' + x[3] + '</span></button>';
+      return '<button type="button" class="view-opt' + (on ? ' on' : '') + '" role="option" aria-selected="' + on + '" data-' + attr + '="' + x[0] + '"><b>' + (on ? ic('check') : '') + viewName(x) + '</b><span>' + viewDesc(x) + '</span></button>';
     }).join('') + '</div>';
   }
   function composerHtml(o) {
@@ -2851,12 +3080,12 @@
       (S.atts.length ? '<div class="atts">' + S.atts.map(function (a, i) { return '<span class="att">' + ic(/\.png$/.test(a) ? 'image' : 'file') + a + '<button type="button" data-rmatt="' + i + '" aria-label="移除 ' + a + '">' + ic('x') + '</button></span>'; }).join('') + '</div>' : '') +
       '<div class="ph-t' + (typed ? ' typed' : '') + '">' + (S.ref ? '<span class="ref">@' + S.ref + '</span>' : '') + (o.missing ? '目录不存在，不能继续' : (typed || '输入消息，/ 调出命令，@ 引用文件')) + '</div>' +
       '<div class="bar"><button type="button" class="icon-btn" data-act="plus" title="添加" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.plusPop + '"' + (off ? ' disabled' : '') + '>' + ic('plus') + '</button>' + modeChip() +
-      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '" data-tip="本会话的审批模式" data-tip-pos="top">' + ic('shield') + p[2] + ic('chevron-down') + '</button>' + viewChip() + '<span class="grow"></span>' +
+      '<button type="button" class="chip-btn" data-act="preset" aria-haspopup="listbox" aria-expanded="' + S.presetMenu + '" data-tip="' + L('本会话的审批模式', 'This conversation\u2019s approval mode') + '" data-tip-pos="top">' + ic('shield') + presetName(p) + ic('chevron-down') + '</button>' + viewChip() + '<span class="grow"></span>' +
       (o.fresh ? '' : ring(ctxPct())) + modelChip() + effortChip() +
       '<button type="button" class="send" aria-label="发送" data-act="send"' + (off ? ' disabled' : '') + '>' + ic('arrow-up') + '</button></div>';
     if (S.presetMenu) {
-      h += '<div class="preset-menu" role="listbox"><div class="preset-cap">本会话的审批模式（不影响其他会话）</div>';
-      presets.forEach(function (x) { h += '<button type="button" class="preset-opt' + (x[0] === S.preset ? ' on' : '') + '" data-preset="' + x[0] + '"><b>' + (x[0] === S.preset ? ic('check') : '') + x[2] + ' · ' + x[1] + '</b><span>' + x[3] + '</span></button>'; });
+      h += '<div class="preset-menu" role="listbox"><div class="preset-cap">' + L('本会话的审批模式（不影响其他会话）', 'This conversation\u2019s approval mode (other conversations keep theirs)') + '</div>';
+      presets.forEach(function (x) { h += '<button type="button" class="preset-opt' + (x[0] === S.preset ? ' on' : '') + '" data-preset="' + x[0] + '"><b>' + (x[0] === S.preset ? ic('check') : '') + presetName(x) + '</b><span>' + presetDesc(x) + '</span></button>'; });
       h += '</div>';
     }
     return h + '</div>';
@@ -2927,9 +3156,189 @@
       return '<div class="trow' + cls + '">' + ic(k === 'done' ? 'square-check' : 'square') + '<span>' + esc(r[1]) + '</span></div>';
     }).join('') + '</div>';
   }
-  function topts(opts, pick) {
-    return '<div class="opts">' + opts.map(function (o) {
-      return '<span class="opt' + (o === pick ? ' on' : '') + '">' + ic(o === pick ? 'check' : 'circle') + esc(o) + '</span>';
+  // ---------- exit_plan_mode: the plan approval ----------
+  // Drawn from pkg/tui/overlays.go so both surfaces ask the same four questions
+  // in the same order. The plan is a document, not a line of facts: it keeps its
+  // own box and scrolls. Each review is a second document with the model that
+  // wrote it. The verdicts are the terminal's, in the terminal's order, and the
+  // fourth exists only when the session has another model to offer.
+  //
+  // What the box holds is the plan file itself — the whole of it, rendered the way
+  // the drawer's plan tab renders it, from the same Markdown (owner 2026-10-20).
+  // A hand-written summary of the plan would be a second document that has to be
+  // kept in step with the real one; this is the real one. It carries no caption:
+  // a box of Markdown under "exit plan mode", above "would you like to proceed?",
+  // is the plan, and saying so would be saying it twice.
+  function xpPlanDoc() {
+    return '<div class="xp-doc"><div class="plan-doc">' + mdToHtml(PLAN_HISTORY[0].md) + '</div></div>';
+  }
+  // opts: { id, reviewers, picking, running, feedback, feedbackOpen }
+  //
+  // The card holds the plan and the verdicts, and nothing else. The review is a
+  // subagent's work, so it is drawn by the subagent card (saCallCard) directly
+  // above this gate — carrying the reviewer's identity, its clock, its tools and
+  // a 查看 that opens its own drawer tab, exactly like every other subagent. A
+  // copy of its text inside the gate would be a second, unclickable rendering of
+  // the same run.
+  //
+  // The feedback field belongs to one verdict and appears only after that
+  // verdict has been chosen — the same rule the terminal follows
+  // (pkg/tui/overlays.go:631-644, o.planDenyEditing): asking "what should
+  // change?" before anybody said anything should change is asking a question
+  // nobody is answering. Choosing any other verdict takes the field away again.
+  function xpCard(o) {
+    o = o || {};
+    var h = '<div class="xp">' + xpPlanDoc();
+    if (o.running) {
+      h += '<div class="xp-run">' + ic('loader-circle', 'spin') + '<span>' +
+        L(esc(o.running) + ' 正在评审这份计划…', esc(o.running) + ' is reviewing this plan…') + '</span><span class="grow"></span>' +
+        '<button type="button" class="btn sm">' + L('停止', 'Stop') + '</button></div>';
+    } else if (o.picking) {
+      h += '<div class="xp-pick"><span class="cap">' + L('用哪个模型评审这份计划？（Esc 返回）', 'Which model should review this plan? (Esc to go back)') + '</span>' +
+        (o.reviewers || []).map(function (m) {
+          return '<button type="button"><span class="m">' + esc(m[0]) + '</span>' +
+            (m[1] ? '<span class="lb">— ' + esc(m[1]) + '</span>' : '') +
+            (m[2] ? '<span class="cur">' + L('当前', 'current') + '</span>' : '') + '</button>';
+        }).join('') + '</div>';
+    } else {
+      h += '<span class="xp-q">' + L('要开始执行吗？', 'Would you like to proceed?') + '</span>' +
+        '<div class="xp-acts"><button type="button" class="btn sm pri" data-xp="approve-clear" data-xpid="' + esc(o.id || '') + '">' +
+        (o.percent ? L('批准并清空上下文（已用 ' + o.percent + '%）', 'Approve and clear context (' + o.percent + '% used)')
+          : L('批准并清空上下文', 'Approve and clear context')) + '</button>' +
+        '<button type="button" class="btn sm" data-xp="approve" data-xpid="' + esc(o.id || '') + '">' + L('批准', 'Approve') + '</button>' +
+        '<button type="button" class="btn sm' + (o.feedbackOpen ? ' on' : '') + '" data-xp="keep-planning" data-xpid="' + esc(o.id || '') + '" aria-expanded="' + !!o.feedbackOpen + '">' +
+        L('继续规划', 'Keep planning') + '</button>' +
+        ((o.reviewers || []).length ? '<button type="button" class="btn sm" data-xp="ask-review" data-xpid="' + esc(o.id || '') + '">' + L('请其他模型评审', 'Ask another model to review') + '</button>' : '') +
+        '</div>';
+      if (o.feedbackOpen) {
+        h += '<div class="xp-fb"><input id="xp-feedback" value="' + esc(o.feedback || '') + '" autocomplete="off" placeholder="' +
+          L('告诉规划模型要改什么', 'What should the plan change?') + '"></div>' +
+          '<div class="xp-fb-acts"><button type="button" class="btn sm pri" data-xp="send-feedback" data-xpid="' + esc(o.id || '') + '">' +
+          L('发送给规划模型', 'Send to the planning model') + '</button>' +
+          '<button type="button" class="btn sm" data-xp="cancel-feedback" data-xpid="' + esc(o.id || '') + '">' + L('取消', 'Cancel') + '</button></div>';
+      }
+    }
+    return h + '</div>';
+  }
+  // ---------- user_interaction, drawn the way the terminal draws it ----------
+  // pkg/tui/overlays.go is the shape: a tab per question (☐ unanswered, ✔
+  // answered, the current one filled in), the current question shown whole with
+  // numbered options, an Other row last, a Next/Submit button under a
+  // multi-select question, the focused option's preview below the list, then a
+  // divider and the way out. One question at a time — the web page has the
+  // height the terminal does not, but a stack of four questions is not what the
+  // terminal asks and not what a person reads either.
+  function askTabs(qs, o) {
+    var anyMulti = qs.some(function (q) { return q.multi });
+    var h = '<div class="ask-tabs">';
+    if (qs.length > 1) h += '<span class="arr">←</span>';
+    qs.forEach(function (q, i) {
+      var on = !o.submit && i === o.active;
+      h += '<span class="ask-tab' + (on ? ' on' : '') + (q.done ? ' done' : '') + '">' +
+        '<span class="ck">' + (q.done ? '✔' : '☐') + '</span>' + esc(q.header) + '</span>';
+    });
+    if (anyMulti) h += '<span class="ask-tab' + (o.submit ? ' on done' : ' done') + '"><span class="ck">✔</span>' + L('提交', 'Submit') + '</span>';
+    if (qs.length > 1) h += '<span class="arr">→</span>';
+    return h + '</div>';
+  }
+  function askOptRow(o, i) {
+    var h = '<button type="button" class="ask-opt' + (o.on ? ' on' : '') + (o.multi ? ' multi' : '') + '">';
+    if (o.multi) h += '<span class="box">' + (o.on ? '[x]' : '[ ]') + '</span>';
+    else h += '<span class="num">' + (i + 1) + '.</span>';
+    h += '<span class="body"><span class="lb">' + esc(o.label) +
+      (o.rec ? ' <span class="rec">' + L('（推荐）', '(recommended)') + '</span>' : '') +
+      (o.on && !o.multi ? ' <span class="tick">✓</span>' : '') + '</span>' +
+      (o.desc ? '<span class="ds">' + esc(o.desc) + '</span>' : '') + '</span></button>';
+    return h;
+  }
+  function askOtherRow(q, index) {
+    var editing = q.editing, text = q.otherText || '';
+    var h = '<div class="ask-other' + (editing ? ' on' : '') + '">';
+    h += q.multi ? '<span class="box">' + (text ? '[x]' : '[ ]') + '</span>' : '<span class="num">' + index + '.</span>';
+    h += '<span class="fld' + (text ? '' : ' empty') + '">' + esc(text || L('其他（自己输入）', 'Other (type your own)')) + '</span></div>';
+    if (editing) h += '<span class="ask-cap" style="padding-left:23px">' + L('Enter 确认 · Esc 放弃 · ←/→ 移动光标', 'Enter to confirm · ←/→ to move the cursor · Esc to discard') + '</span>';
+    return h;
+  }
+  // One question's body. opts: { header, prompt, options:[{label,desc,on,rec}], multi,
+  // otherText, editing, preview, done }
+  function askQuestion(q, o) {
+    var idx = o.active;
+    var num = q.options.length + 1;
+    var h = '<div class="ask-q"><p class="ask-p">' + esc(q.prompt) + '</p><div class="ask-opts">' +
+      q.options.map(function (x) { x.multi = q.multi; return askOptRow(x, q.options.indexOf(x)); }).join('') +
+      askOtherRow(q, num) + '</div>';
+    if (q.preview) h += '<div class="ask-pv"><span class="cap">' + L('预览', 'Preview') + '</span><pre>' + esc(q.preview) + '</pre></div>';
+    if (q.multi) {
+      h += '<div class="ask-next"><button type="button" class="btn sm pri">' +
+        (idx === o.questions.length - 1 ? L('提交', 'Submit') : L('下一题', 'Next')) + '</button></div>';
+    }
+    return h + '</div>';
+  }
+  // The submit-review screen (renderSubmitView): every question with the answer
+  // it carries, a warning when some question is unanswered, then the two ways
+  // forward.
+  function askReview(qs) {
+    var missing = qs.some(function (q) { return !q.done });
+    var h = '<div class="ask-q"><p class="ask-p">' + L('复核答案', 'Review your answers') + '</p>' +
+      (missing ? '<span class="warn" style="font-size:12.5px;color:var(--warning)">' + L('还有问题没有回答', 'You have not answered all questions') + '</span>' : '') +
+      '<div class="ask-rv">' + qs.map(function (q) {
+        return '<div class="qa"><span class="q">• ' + esc(q.prompt) + '</span>' +
+          (q.answer ? '<span class="ans">' + esc(q.answer) + '</span>' : '<span class="none">' + L('（未回答）', '(no answer)') + '</span>') + '</div>';
+      }).join('') + '</div>' +
+      '<p class="ask-q2">' + L('确认后提交答案？', 'Ready to submit your answers?') + '</p>' +
+      '<div class="ask-picks"><span class="ask-pick on"><span class="pt">❯</span>' + L('提交答案', 'Submit answers') + '</span>' +
+      '<span class="ask-pick"><span class="pt"></span>' + L('取消', 'Cancel') + '</span></div></div>';
+    return h;
+  }
+  // The whole card: tabs, the current question (or the review screen), divider,
+  // and the terminal's "Chat about this" way out.
+  // The card head for a question call, and nothing more: which questions it asks
+  // is what the card's own tab row says, one line below. Spelling the headers
+  // here a second time was the redundancy this card exists to avoid. Only the
+  // verb is localized — "asked user" is a word, not a title.
+  function askHead(running) {
+    return running ? L('正在询问用户', 'asking user') : L('询问用户', 'asked user');
+  }
+  // The tool card for a question call: the head says, in the interface's
+  // language, that the agent asked (and names the questions); the body is the
+  // form, or the settled answers once they are in.
+  function askTool(questions, o) {
+    o = o || {};
+    return tcard({ n: 'user_interaction', s: askHead(o.running),
+      st: o.done ? 'ok' : 'ask', open: true,
+      b: o.done ? askDone() : askCard({ questions: questions, active: o.active || 0, submit: o.submit }) });
+  }
+  function askCard(o) {
+    var qs = o.questions;
+    var h = '<div class="ask">' + askTabs(qs, o);
+    h += o.submit ? askReview(qs) : askQuestion(qs[o.active], o);
+    h += '<div class="ask-foot"><span class="num">' + (o.submit ? '' : (qs[o.active].options.length + 2) + '. ') + '</span>' +
+      '<span>' + L('和它聊聊', 'Chat about this') + '</span><span class="grow"></span>' +
+      '<span class="ask-cap">' + (qs.length > 1 ? L('点标签或 ←/→ 切题 · Esc 取消', 'Click a tab or ←/→ · Esc to cancel') : L('Esc 取消', 'Esc to cancel')) + '</span></div>';
+    return h + '</div>';
+  }
+  // The settled card: what the thread keeps once the person answered. The line
+  // is the question itself — a 12-character tab label (「修法」) says nothing to
+  // whoever reads the transcript later, which is the only audience this card
+  // has. The engine's own body (tool.FormatUserInteractionResult) prints the
+  // header today and has to print the question for both surfaces; see the plan.
+  // The answers this conversation got. One list, because the settled card in
+  // the thread and the 问答 card in the workbench overview are two views of the
+  // same answers: a reader who opens the workbench must find what the thread
+  // just showed, question for question.
+  var CHAT_ANSWERS = [
+    { header: '修法', question: '401 的修法选哪一种？', answers: ['一次性登录换 Cookie'] },
+    { header: '测试范围', question: '这次要跑哪些测试？', answers: ['只跑网关'] },
+    { header: '文档', question: '要同步改文档吗？', answers: ['两边都别动，先加一行日志看看线上到底缺哪个头'] }
+  ];
+  // The settled call's card: what was asked, and what was answered. It is
+  // content, not a control — the conversation says what happened here, and
+  // nothing about it is a way into another panel.
+  function askDone(rows) {
+    rows = rows || CHAT_ANSWERS.map(function (x) { return [x.question, x.answers] });
+    return '<div class="ask-done">' + rows.map(function (r) {
+      return '<div class="qa"><div class="h">' + esc(r[0]) + '</div>' +
+        r[1].map(function (a) { return '<div class="ans">' + esc(a) + '</div>'; }).join('') + '</div>';
     }).join('') + '</div>';
   }
   function tsrs(rows) {
@@ -2947,8 +3356,52 @@
       return '<div class="dgn"><span class="p">' + esc(r[0]) + '</span><span>' + esc(r[1]) + '</span></div>';
     }).join('');
   }
-  function tthink(label, text, open) {
-    return '<div class="think' + (open ? ' open' : '') + '"><span class="think-l">' + esc(label) + '</span><p>' + esc(text) + '</p></div>';
+  // A thinking card is folded until you open it — the shipped component's
+  // default, drawn here as the same one-line caption with a ▸/▾ marker.
+  // The conversation's checklist. It is one list because it is one fact: the
+  // card in the thread and the 待办 card in the workbench overview are two
+  // views of the same run, so they must not disagree row by row.
+  var CHAT_TODOS = [
+    ['定位 401 的根因', 'done'],
+    ['控制面同时接受 Cookie 与 Bearer', 'done'],
+    ['登录换取 HttpOnly 会话 Cookie', 'done'],
+    ['前端去掉手填 token 的入口', 'doing'],
+    ['跑全量 gateway 测试并补回归', 'wait']
+  ];
+  // session_todo's card. The engine sets the payload's own title ("Updated
+  // Plan") and the terminal prints exactly that; the web's PlanUpdateCard
+  // already draws this shape, so the prototype draws the shipped card rather
+  // than inventing a "ran session_todo · N items" tool card for the same call.
+  // The card's name is not a title somebody chose: the engine ships its own
+  // default ("Updated Plan"), so it is a word, and a word is spoken in the
+  // interface's language — 更新待办 in Chinese, Updated Plan in English. Any
+  // other title is the engine's own text and is printed as it came.
+  function planTitleText(title) {
+    var s = String(title || '').trim()
+    if (!s || s.toLowerCase() === 'updated plan') return L('更新待办', 'Updated Plan')
+    return s
+  }
+  function planCard(o) {
+    var items = o.items || CHAT_TODOS;
+    // The checklist the run keeps. Content, not a control: what the workbench
+    // shows is the workbench's business, and this card is not a way into it.
+    var h = '<div class="plan-card"><div class="hd">' + esc(planTitleText(o.title)) + '</div>';
+    // No task tally on the card: the progress it would repeat is already
+    // printed by the composer's own 3/5, and a count above the list says
+    // nothing the list itself does not.
+    if (o.why) h += '<div class="meta"><div class="why">' + esc(o.why) + '</div></div>';
+    h += '<div class="pitems">' + items.map(function (it) {
+      var st = it[1], cls = st === 'done' ? ' done' : st === 'doing' ? ' now' : st === 'kill' ? ' kill' : '';
+      var g = st === 'done' ? '✓' : st === 'doing' ? '▣' : st === 'kill' ? '✕' : '□';
+      return '<div class="pitem' + cls + '"><span class="g">' + g + '</span><span class="t">' + esc(it[0]) + '</span></div>';
+    }).join('') + '</div>';
+    return h + '</div>';
+  }
+  function tthink(id, label, text) {
+    var open = !!S.thinks[id];
+    return '<div class="think' + (open ? ' open' : '') + '">' +
+      '<button type="button" class="think-l" data-think="' + id + '" aria-expanded="' + open + '">' + esc(label) + '</button>' +
+      '<p>' + esc(text) + '</p></div>';
   }
   function webFetchGate(url, host) {
     return toolRow('globe', 'web_fetch', url) + gateCard('要我向公开网络取这个页面吗？',
@@ -2994,6 +3447,146 @@
         '<p>为什么：新建技能会让同一领域出现两个入口，触发词互相干扰、文档重复、脚本各写一份；技能清单是手工维护的，平行技能是维护负担。</p>' +
         '<p>范围：任何“把这套步骤存下来”的请求，默认做扩写而非新写；只有在确实没有归属技能时才考虑新建，并在动手前说明为什么现有技能装不下。</p>') + '</div>';
   }
+  // ---------- 对话 · 审批卡（非免审批的内置工具，逐张） ----------
+  // Which built-in tools can park a run on a question is not a matter of taste.
+  // pkg/safety/engine.go evaluates deny → ask rule → allow rule → safe-read-only
+  // (allow) → safe-internal (allow) → shell (allow by default) → default_ask, so
+  // the families below are exactly the ones that can reach a question, and each
+  // is drawn with the decisions pkg/safety/permission_types.go gives it. A tool
+  // that never asks gets no card: drawing one would teach the reader to expect a
+  // prompt that never comes.
+  //
+  // The words follow one rule (owner 2026-10-20: 语义化、简洁、对用户友好). The
+  // question is one sentence about this call; each button starts with the verb
+  // and says only how far the yes reaches; the facts are what the decision turns
+  // on, and nothing else — never a tool's internal name, an action id, or JSON.
+  function gateActs(list) {
+    return list.map(function (x) {
+      return '<button type="button" class="btn sm' + (x[1] ? ' pri' : '') + '">' + x[0] + '</button>';
+    }).join('');
+  }
+  function factRows(rows) {
+    return '<div class="facts rows">' + rows.map(function (r) { return '<div>' + r + '</div>'; }).join('') + '</div>';
+  }
+  function gateWriteNew() {
+    return toolRow('file-plus', 'write_file', 'pkg/gateway/session_cookie.go') +
+      gateCard('要新建这个文件吗？', gateActs([['写入', 1], ['本会话不再问'], ['不要写']]),
+        '<div class="facts">96 行</div>');
+  }
+  function gateWriteOver() {
+    return toolRow('file-plus', 'write_file', 'frontend/src/lib/api.ts') +
+      gateCard('要覆盖这个文件吗？', gateActs([['覆盖', 1], ['本会话不再问'], ['不要写']]),
+        '<div class="facts">+12 −3 行</div>' +
+        tdiff([
+          [' ', 'export function apiToken(): string | null {'],
+          ['-', '  return localStorage.getItem("token")'],
+          ['+', '  const c = document.cookie.match(/(?:^|; )fb_session=([^;]*)/)'],
+          ['+', '  return c ? decodeURIComponent(c[1]) : null'],
+          [' ', '}']
+        ]));
+  }
+  function gateEdit() {
+    return toolRow('file-pen', 'edit_file', 'pkg/gateway/controlplane.go') +
+      gateCard('要改这个文件吗？', gateActs([['修改', 1], ['本会话不再问'], ['不要改']]),
+        tdiff([
+          [' ', 'func ControlPlaneTokenFromRequest(r *http.Request, q string) string {'],
+          ['+', '  if c, err := r.Cookie("fb_session"); err == nil {'],
+          ['+', '    return c.Value'],
+          ['+', '  }'],
+          [' ', '  return strings.TrimSpace(r.Header.Get("Authorization"))'],
+          [' ', '}']
+        ]));
+  }
+  function gatePatch() {
+    return toolRow('file-diff', 'apply_patch', 'pkg/gateway, frontend/src/lib') +
+      gateCard('要应用这个补丁吗？', gateActs([['应用', 1], ['本会话不再问'], ['不要应用']]),
+        '<div class="facts">3 个文件<span class="sep">·</span>+40 −12</div>' +
+        tdiff([
+          [' ', '@@ pkg/gateway/ws.go @@'],
+          ['-', '  token := r.URL.Query().Get("token")'],
+          ['+', '  token := controlPlaneToken(r)']
+        ]));
+  }
+  function gateShell() {
+    return toolRow('terminal', 'shell', 'rm -rf build/ && go build -o ./build/bin/forebrain ./cmd/forebrain') +
+      gateCard('要运行这条命令吗？', gateActs([['运行', 1], ['这类命令不再问'], ['不要运行']]),
+        '<div class="facts">会强制删掉整个 <span class="lit">build/</span> 目录，删完要重新编译</div>');
+  }
+  function gateShellOutside() {
+    return toolRow('terminal', 'shell', 'cp ./build/bin/forebrain ~/.local/bin/forebrain') +
+      gateCard('沙箱拦下了这条命令，要在沙箱外运行吗？', gateActs([['在沙箱外运行', 1], ['这类命令不再问'], ['不要运行']]),
+        '<div class="facts">沙箱只允许改这个项目里的文件</div>');
+  }
+  function gateNetwork() {
+    return toolRow('globe', 'shell', 'gh issue list --repo unionj-cloud/forebrain-harness') +
+      gateCard('要让它访问外网吗？', gateActs([['允许', 1], ['本会话都允许'], ['以后都允许'], ['不要访问']]),
+        '<div class="facts"><span class="lit">api.github.com</span><span class="sep">·</span>HTTPS<span class="sep">·</span>443</div>');
+  }
+  function gatePermissions() {
+    return toolRow('shield-check', 'request_permissions', '3 项') +
+      gateCard('要给它这些权限吗？', gateActs([['本轮允许', 1], ['本轮允许，自动审查'], ['本会话允许'], ['不授予']]),
+        factRows([
+          '可读 <span class="lit">~/notes</span>',
+          '可写 <span class="lit">/tmp/out</span>',
+          '可连 <span class="lit">api.example.com</span>'
+        ]));
+  }
+  function gateEnterPlan() {
+    return toolRow('map', 'enter_plan_mode', '') +
+      gateCard('要进入计划模式吗？', gateActs([['进入', 1], ['不要进入']]),
+        '<div class="facts">改动跨三个包，先写计划再动手</div>');
+  }
+  function gateMCP() {
+    return toolRow('plug', 'mcp__github__create_issue', '') +
+      gateCard('要调用 github 的 create_issue 吗？', gateActs([['调用', 1], ['本会话不再问'], ['以后都不再问'], ['不要调用']]),
+        factRows([
+          'repo <span class="lit">unionj-cloud/forebrain-harness</span>',
+          'title <span class="lit">cookie login still 401</span>'
+        ]));
+  }
+  function gateProtectedRead() {
+    return toolRow('file-text', 'read_file', '~/.forebrain/forebrain.yaml') +
+      gateCard('这是 Forebrain 自己的配置文件，要读吗？', gateActs([['读取', 1], ['本会话不再问'], ['不要读']]),
+        '<div class="facts"><span class="lit">~/.forebrain/forebrain.yaml</span></div>');
+  }
+  function gateFallback() {
+    return toolRow('file-code', 'lsp', 'workspace_symbols Gateway') +
+      gateCard('要允许这次调用吗？', gateActs([['允许', 1], ['不要']]),
+        '<div class="facts">你给这个工具写了「询问」规则，默认它不问</div>');
+  }
+  function approvalCardsThread() {
+    var cap = function (zh, en) { return '<p class="ask-cap">' + L(zh, en) + '</p>'; };
+    return '<div class="u-wrap"><div class="u">' + L('按这个方向改，逐项落下来。', 'Implement it this way, step by step.') + '</div></div>' +
+      '<div class="a">' +
+      '<p>' + L('下面每一张都是「这次要做什么 + 允许到什么程度」。免审批的工具没有卡，列在最后。',
+        'Each card says what will happen and how far a yes reaches. Tools that never ask have no card; they are listed at the end.') + '</p>' +
+      cap('① 写入新文件（write_file 新建）', '① New file (write_file)') + gateWriteNew() +
+      cap('② 覆盖已有文件（write_file 改已存在的文件）：改动量写在事实行，正文是会被替换掉的那段',
+        '② Overwrite (write_file on an existing file): the size of the change, then the lines being replaced') + gateWriteOver() +
+      cap('③ 修改文件（edit_file）：目标文件已经在上面那行调用里，正文只画改哪几行',
+        '③ Edit (edit_file): the file is in the call line above; the body is only the lines that change') + gateEdit() +
+      cap('④ 应用补丁（apply_patch，多文件一次）：几个文件 + 总量，再给一处代表',
+        '④ Patch (apply_patch, several files at once): the count, then one hunk') + gatePatch() +
+      cap('⑤ 运行命令（shell）：只有危险命令才问（引擎规则 forced_rm），所以问句说的是这条命令做了什么',
+        '⑤ Run a command (shell): only a dangerous command asks, so the line says what the command does') + gateShell() +
+      cap('⑥ 沙箱外运行：命令被沙箱拦下时换一个问题——不是「允许调用工具」，而是「要不要脱离沙箱」',
+        '⑥ Outside the sandbox: a denied command asks a different question — not "allow the tool" but "leave the sandbox"') + gateShellOutside() +
+      cap('⑦ 访问外网主机：命令本身已允许，卡只问这一台主机，允许的粒度按主机算',
+        '⑦ A host on the public network: the command is already allowed; the card asks about one host') + gateNetwork() +
+      cap('⑧ 申请权限（request_permissions）：一轮 / 一轮且自动审查 / 整个会话 / 不授予；事实行逐条列出要什么',
+        '⑧ Asking for permissions: this turn / this turn reviewed / this session / no') + gatePermissions() +
+      cap('⑨ 进入计划模式：卡里只有理由和两个选择，进来之后才是写计划',
+        '⑨ Enter plan mode: the reason and two choices; the plan comes after') + gateEnterPlan() +
+      cap('⑩ 调用 MCP 工具：服务器与工具在调用行，正文是要传进去的关键参数',
+        '⑩ An MCP tool call: the server and tool are in the call line; the body is what is being sent') + gateMCP() +
+      cap('⑪ 读 Forebrain 自己的文件：工程文件不问，数据目录里的文件要问一次',
+        '⑪ Reading Forebrain own files: project files do not ask; the data directory does') + gateProtectedRead() +
+      cap('⑫ 兜底：任何没在上面成族的工具（例如你在权限页给它写了「询问」规则）走这张两档卡',
+        '⑫ Everything else — a tool you gave an ask rule to — takes this two-choice card') + gateFallback() +
+      '<p class="ask-cap">' + L('以下工具不会停在这里问，所以没有卡：read_file / list_directory / list_files / lsp / skill / retrieve_output / session_todo / intermediate_tool / memories_list / memories_read / memories_search / subagent_run / subagent_fanout / subagent_send / subagent_continue / subagent_close / subagent_wait / subagent_status / subagent_list，以及常规 shell 命令。',
+        'No card exists for these, because they never park the run: read_file, list_directory, list_files, lsp, skill, retrieve_output, session_todo, intermediate_tool, memories_list, memories_read, memories_search, the eight subagent_* calls, and ordinary shell commands.') + '</p>' +
+      '</div>';
+  }
   // ---------- 对话 · 全部消息卡（2026-10-20） ----------
   // Every card the primary agent's conversation can draw, in one run: the
   // thinking card, each built-in tool's call card, the session family, the
@@ -3019,11 +3612,111 @@
     "rg -n --no-heading \"Bearer |Cookie\\(|Get\\(\\\"Authorization\\\"\\)\" pkg cmd | sort | head -40",
     "echo '=== 完 ==='"
   ].join('\n');
+  // ---------- exit_plan_mode: the six states the panel can be in ----------
+  function exitPlanThread() {
+    var reviewers = [['deepseek/deepseek-v4', 'DeepSeek V4', true], ['zhipuai/glm-5.3-flash', 'GLM-5.3 Flash', false], ['deepseek/deepseek-v4-pro', 'DeepSeek V4 Pro', false]];
+    return '<div class="u-wrap"><div class="u">按这个方向做，做完给我看。</div></div>' +
+      '<div class="a">' +
+      tthink('x1', '思考了 9 秒', '先把要改的位置列清楚，再写成别人能照着执行的步骤。', true) +
+      '<p>计划写好了，在下面这个审批里。</p>' +
+      '<p class="ask-cap">' + L('① 只有计划（这个会话没有配置可评审的模型）：三个选择，顺序与终端一致',
+        '① Plan only (no reviewer configured): the three verdicts, in the terminal order') + '</p>' +
+      tcard({ n: 'exit_plan_mode', s: L('退出计划模式', 'exit plan mode'), st: 'ask', open: true,
+        b: xpCard({ id: 'x1', percent: 72 }) }) +
+      '<p class="ask-cap">' + L('② 请了评审：评审是它自己的子代理卡片，排在闸门之前（卡片里不再重复评审正文）',
+        '② With a review: the reviewer is its own subagent card, above the gate') + '</p>' +
+      saCallCard(['planreview'], L('已运行 1 个 plan-reviewer 任务', 'Ran 1 plan-reviewer task'), '12.4s') +
+      tcard({ n: 'exit_plan_mode', s: L('退出计划模式', 'exit plan mode'), st: 'ask', open: true,
+        b: xpCard({ id: 'x2', percent: 72, reviewers: reviewers }) }) +
+      '</div>' +
+      '<div class="a">' +
+      '<p class="ask-cap">' + L('③ 请其他模型评审：模型列表展开（当前那台标「当前」，插在第四个选择里）',
+        '③ Ask another model: the picker opens, the current model is marked') + '</p>' +
+      tcard({ n: 'exit_plan_mode', s: L('退出计划模式', 'exit plan mode'), st: 'ask', open: true,
+        b: xpCard({ id: 'x3', percent: 72, reviewers: reviewers, picking: true }) }) +
+      '<p class="ask-cap">' + L('④ 评审进行中：评审的正文与进度都在那张子代理卡上；闸门这边只留一行「谁在评审 + 停止」，因为它此刻不能回答',
+        '④ A review running: the reviewer card carries the work; the gate keeps one line and its stop') + '</p>' +
+      saCallCard(['planreview'], L('正在运行 1 个 plan-reviewer 任务…', 'Running 1 plan-reviewer task…'), '', true) +
+      tcard({ n: 'exit_plan_mode', s: L('退出计划模式', 'exit plan mode'), st: 'ask', open: true,
+        b: xpCard({ id: 'x4', percent: 72, running: 'deepseek/deepseek-v4' }) }) +
+      '</div>' +
+      '<div class="a">' +
+      '<p class="ask-cap">' + L('⑤ 继续规划：反馈框在点「继续规划」之前不出现；选别的选择会收起，再选回来还能接着写（这张可点）',
+        '⑤ Keep planning: the field appears only after that verdict is chosen') + '</p>' +
+      tcard({ n: 'exit_plan_mode', s: L('退出计划模式', 'exit plan mode'), st: 'ask', open: true,
+        b: xpCard({ id: 'x5', percent: 72, reviewers: reviewers,
+          feedbackOpen: !!S.xpFeedbackOpen.x5, feedback: S.xpFeedbackText.x5 || '' }) }) +
+      '<p class="ask-cap">' + L('⑥ 批准之后：这张卡收成一行，计划仍在记录里可回看',
+        '⑥ After approval: the card settles to one line, the plan stays in the record') + '</p>' +
+      tcard({ n: 'exit_plan_mode', s: L('退出计划模式', 'exit plan mode'), open: true,
+        b: '<p class="facts">' + L('按计划开始执行。清空上下文后从第一步继续。', 'Proceeding per the plan, continuing from the first step after the clear.') + '</p>' }) +
+      '</div>';
+  }
+
+  // ---------- user_interaction: every form the schema allows ----------
+  // Drawn the way the terminal draws it — one tab per question, one question at
+  // a time — so the states worth confirming are the terminal's states: a single
+  // question, a question among several, a partly answered form, a multi-select
+  // with its Submit tab, the review screen, the Other row being typed into, and
+  // an option carrying a preview.
+  function asksThread() {
+    var three = [
+      { header: '修法', prompt: '401 的修法选哪一种？', done: true, answer: '一次性登录换 Cookie',
+        options: [{ label: '一次性登录换 Cookie', desc: '浏览器不再持有 token，之后每次请求自带 HttpOnly Cookie。', on: true },
+          { label: '前端保存 token', desc: '继续手填，改成存 localStorage。刷新后仍可能丢。' },
+          { label: '只在 WebSocket 上带 token', desc: '只修握手，页面内的 /api 调用仍然 401。' }] },
+      { header: '测试范围', prompt: '这次要跑哪些测试？', done: true, answer: '只跑网关',
+        options: [{ label: '只跑网关', desc: 'pkg/gateway 与 ws 的单元测试，约 40 秒。', rec: true },
+          { label: '网关 + 前端', desc: '加上 vitest 的组件测试，约 3 分钟。' },
+          { label: '全量', desc: '全部 Go 测试加浏览器套件，约 12 分钟，留给发布门禁。' }] },
+      { header: '文档', prompt: '要同步改文档吗？', done: true, answer: '要改',
+        options: [{ label: '要改', desc: '在 docs/config 里补一段会话 Cookie 的说明。' },
+          { label: '不用', desc: '这次只修代码。' }] }
+    ];
+    var fresh = three.map(function (q) { var c = JSON.parse(JSON.stringify(q)); c.done = false; c.answer = ''; c.options.forEach(function (o) { o.on = false; }); return c; });
+    return '<div class="u-wrap"><div class="u">把这个缺陷的修法定下来。</div></div>' +
+      '<div class="a">' +
+      '<p class="ask-cap">' + L('① 单题：标签只有一个（终端同样会画这一个 chip），选一项即提交', '① One question: a single tab, one click answers it') + '</p>' +
+      askTool([fresh[0]]) +
+      '<p class="ask-cap">' + L('② 多题：每题一个标签，未答 ☐ / 已答 ✔，当前题填色；下方只画当前这一题', '② Several questions: one tab each, ☐ unanswered / ✔ answered') + '</p>' +
+      askTool(fresh) +
+      askTool(fresh, { active: 1 }) +
+      '</div>' +
+      '<div class="a">' +
+      '<p class="ask-cap">' + L('③ 多选：选项是可勾的 [x]/[ ]，卡片底部有「下一题 / 提交」，并多出「提交」标签', '③ Multi-select: [x] boxes, a Next/Submit button, and a Submit tab') + '</p>' +
+      askTool([{ header: '一起改', prompt: '这几件事哪些要现在做？', multi: true, options: [
+        { label: '补回归测试', desc: '把这次的 401 写成一个用例。', on: true },
+        { label: '改文档', desc: 'docs/config 里补一段会话 Cookie 的说明。', on: true },
+        { label: '改 TUI', desc: '终端登录流程同步改，这一期已约定不做。' },
+        { label: '加日志', desc: 'Cookie 缺失时打一行 debug 日志。' }] }]) +
+      '<p class="ask-cap">' + L('④ 提交复核页（多选才有）：每题连同答案列出，缺答会警告，下面是提交 / 取消', '④ The review screen (multi-select only)') + '</p>' +
+      askTool(three, { submit: true }) +
+      '</div>' +
+      '<div class="a">' +
+      '<p class="ask-cap">' + L('⑤「其他」被选中：这一行变成输入框，并给出确认 / 放弃的按键提示', '⑤ The Other row, being typed into') + '</p>' +
+      askTool([{ header: '修法', prompt: '401 的修法选哪一种？', editing: true,
+        otherText: '两边都别动，先加一行日志看看线上到底缺哪个头',
+        options: [{ label: '一次性登录换 Cookie', desc: '浏览器不再持有 token。' },
+          { label: '前端保存 token', desc: '改成存 localStorage。' }] }]) +
+      '<p class="ask-cap">' + L('⑥ 选项带预览：聚焦那一项的预览画在选项下方、分隔线之前（终端同一位置）', '⑥ An option with a preview, drawn under the list') + '</p>' +
+      askTool([{ header: 'Cookie 属性', prompt: '会话 Cookie 用哪一组属性？',
+        options: [{ label: 'Strict + HttpOnly', desc: '同站请求带，跨站导航不带；脚本读不到。', on: true, rec: true },
+          { label: 'Lax + HttpOnly', desc: '顶层导航也带，登录回跳更宽松。' },
+          { label: '不设 SameSite', desc: '老浏览器兼容，但 CSRF 面更大。' }],
+        preview: 'Set-Cookie: fb_session=…\n  HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800' }]) +
+      '</div>' +
+      '<div class="a">' +
+      '<p class="ask-cap">' + L('⑦ 答完之后（线程里留下的卡）：问题 + 每条 →  答案，与终端同一套文本', '⑦ Settled: the questions with their answers') + '</p>' +
+      askTool(CHAT_ANSWERS, { done: true }) +
+      '</div>';
+  }
+
   function cardsThread() {
     var d = 'frontend/src/lib/';
     return '<div class="u-wrap"><div class="u">网页端访问 /api 全部 401。查一下 gateway 的鉴权链路，把会话 Cookie 的签发与读取改好，跑测试；再派个子代理看看前端有没有漏改，最后把结论记进项目记忆。</div></div>' +
       '<div class="a">' +
-      tthink('思考了 12 秒', '401 说明请求到了鉴权中间件却没有带凭据。先看清工作区改了哪些文件，再读控制面里读 token 的那段，然后决定 Cookie 从哪里签发、在哪儿读。', false) +
+      tthink('c1', '思考了 12 秒', '401 说明请求到了鉴权中间件却没有带凭据。先看清工作区改了哪些文件，再读控制面里读 token 的那段，然后决定 Cookie 从哪里签发、在哪儿读。') +
+      tthink('c0', '思考了 4 秒', '先确认这条命令要查的范围：gateway 的鉴权链路，加上前端所有读凭据的地方。') +
       '<p>先看工作区状态，再读控制面的中间件。</p>' +
       // shell：短命令
       tcard({ n: 'shell', s: 'ran git status --short', open: true,
@@ -3063,7 +3756,7 @@
       '<div class="worked"><span>已工作 1m 04s · 首 token 1.2s · 10:12</span></div></div>' +
       '<div class="u-wrap"><div class="u">改吧，改完跑测试。</div></div>' +
       '<div class="a">' +
-      tthink('思考了 3 秒', '中间件同时认 Cookie 与 Bearer，Cookie 优先；前端删掉手填 token 的入口。', false) +
+      tthink('c2', '思考了 3 秒', '中间件同时认 Cookie 与 Bearer，Cookie 优先；前端删掉手填 token 的入口。') +
       '<p>改完了，跑一遍 gateway 的测试。</p>' +
       tcard({ n: 'shell', s: 'failed: exit status 1', st: 'bad', open: true,
         b: tlines(['--- FAIL: TestControlPlaneTokenFromRequest (0.00s)', '    controlplane_test.go:88: want cookie value, got ""']) }) +
@@ -3075,9 +3768,10 @@
       '<div class="u-wrap"><div class="u">清单也更新一下。</div></div>' +
       '<div class="a">' +
       // session 类：清单、计划模式、中间笔记
-      tcard({ n: 'session_todo', s: 'ran session_todo · 5 items', open: true,
-        b: ttodo([['done', '定位 401 的根因'], ['done', '控制面同时接受 Cookie 与 Bearer'], ['done', '登录换取 HttpOnly 会话 Cookie'],
-          ['now', '前端去掉手填 token 的入口'], ['todo', '跑全量 gateway 测试并补回归']]) }) +
+      planCard({ why: '前端去掉手填 token 的入口' }) +
+      planCard({ items: [['定位 401 的根因', 'done'], ['控制面同时接受 Cookie 与 Bearer', 'done'], ['登录换取 HttpOnly 会话 Cookie', 'done'],
+        ['前端去掉手填 token 的入口', 'done'], ['跑全量 gateway 测试并补回归', 'done']] }) +
+      planCard({ why: '审阅中间件改动', items: [['定位 401 的根因', 'done'], ['审阅中间件改动', 'doing'], ['改 TUI 的登录流程（不在本次范围）', 'kill']] }) +
       tcard({ n: 'enter_plan_mode', s: 'ran enter_plan_mode reason=修复跨三个包，先写计划', open: true,
         b: '<p>修复跨三个包，先写计划再动手。</p><p class="facts">计划文件：<span class="lit">plans/session-cookie.md</span></p>' }) +
       tcard({ n: 'intermediate_tool', s: 'saved intermediate notes', open: true,
@@ -3092,8 +3786,9 @@
       tcard({ n: 'request_permissions', s: 'awaiting approval · request permissions', st: 'ask',
         b: '<p>这条命令要访问外网，需要你的同意。</p><div class="facts">申请：<span class="lit">network · https://example.com</span></div>' }) +
       '<p>先确认按哪一面改。</p>' +
-      tcard({ n: 'user_interaction', s: 'asked user', open: true,
-        b: '<p>两个面都要改，先做哪一个？</p>' + topts(['网页端（当前会话）', '终端 TUI'], '网页端（当前会话）') }) +
+      askTool([{ header: '先改哪面', prompt: '两个面都要改，先做哪一个？',
+        options: [{ label: '网页端', desc: '当前会话所在的面，改完立刻能验。', on: true, rec: true },
+          { label: '终端 TUI', desc: '同一个缺陷在终端也存在，但这一期约定不动 TUI。' }] }]) +
       '</div>' +
       '<div class="a"><p>查一下公开资料，再扫一遍记忆里有没有相关约定。</p>' +
       tcard({ n: 'web_search', s: 'ran search "gateway session cookie 401"', open: true,
@@ -3131,15 +3826,14 @@
         b: '<p class="facts">frontend/src/components/chat/ToolCallCard.vue · 43 lines</p>' +
           tlines(['const title = computed(() => {', '  const skill = skillCardTitle(props.step)', '  return skill ?? props.step.summary', '})']) }) +
       tcard({ n: 'shell', s: 'running go test ./pkg/gateway/... -run Session', st: 'run' }) +
-      '<div class="worked"><span>已工作 2m 18s · 首 token 1.0s · 10:31</span></div></div>' +
-      '</div>';
+      '<div class="worked"><span>已工作 2m 18s · 首 token 1.0s · 10:31</span></div></div>';
   }
 
   function threadHtml(missing) {
     var h = '<div class="thread"><div class="col">';
     // Every gate demo is one run, park and all: a user turn, the sentence the
     // agent says before it asks, then the call and the question.
-    var gates = { webfetch: webFetchThread, wsearch: webSearchThread, wnote: memoryNoteThread, cards: cardsThread };
+    var gates = { webfetch: webFetchThread, wsearch: webSearchThread, wnote: memoryNoteThread, gates: approvalCardsThread, cards: cardsThread, asks: asksThread, exitplan: exitPlanThread };
     if (gates[S.demo]) return h + gates[S.demo]() + '</div></div>';
     if (missing) {
       h += '<div class="u">把 README 的安装章节改成中英双语。</div><div class="a"><p>已改好安装章节，中英文各一段，命令保持一致。</p><div class="worked"><span>已工作 41s · 首 token 1.4s · 9月18日 23:12</span></div></div>' +
@@ -3150,7 +3844,7 @@
     var rw = S.rewound;
     if (rw && rw !== 'code') return h + '<div class="sys-line" style="color:var(--text-2)">' + ic('history') + '已回到这条消息之前' + (rw === 'both' ? ' · 恢复 3 个文件' : '') + '<button type="button" class="btn link" data-act="rwundo">撤销</button></div></div></div>';
     h += '<div class="u-wrap"><div class="u">浏览器访问 /api 全部 401，帮我看一下 gateway 的鉴权链路。</div><div class="u-acts"><button type="button" class="icon-btn" data-act="rewind" title="回到这里" aria-label="回到这条消息之前">' + ic('history') + '</button><button type="button" class="icon-btn" title="复制" aria-label="复制">' + ic('copy') + '</button></div></div>' +
-      '<div class="a"><div class="think open"><span class="think-l">思考了 8 秒</span><p>401 说明请求到了鉴权中间件却没有带凭据。先看控制面中间件从哪里取 token，再看浏览器端有没有途径拿到它。</p></div>' +
+      '<div class="a">' + tthink('m1', '思考了 8 秒', '401 说明请求到了鉴权中间件却没有带凭据。先看控制面中间件从哪里取 token，再看浏览器端有没有途径拿到它。') +
       '<p>先读控制面鉴权中间件，确认浏览器请求缺的是哪一种凭据。</p>' +
       tcard({ n: 'read_file', s: 'ran read pkg/gateway/controlplane.go · lines 15-20', open: true, b: tlines(['func ControlPlaneTokenFromRequest(r *http.Request, q string) string {', '\tauth := strings.TrimSpace(r.Header.Get("Authorization"))', '\t// 浏览器页面从未拿到 token，这里永远是空串'], 15) }) +
       '<p>根因是网页端没有任何途径取得 gateway token：请求头里的 <code class="inl">Authorization</code> 始终为空。修复方向是用一次性登录换取 HttpOnly 会话 Cookie。</p><div class="worked"><span>已工作 1m 12s · 首 token 1.2s · <span class="plan-prog" aria-label="任务清单完成 3/5">' + ic('square-check', 'pc') + '3/5</span> · 09:41</span></div></div>';
@@ -3165,7 +3859,7 @@
     var items = p.n === 'forebrain-harness' ? fsTree[''].map(function (k) { return k[0] + (k[1] ? '/' : ''); }) : (hostFs[p.p] || []).map(function (k) { return k[0] + '/'; }).concat(['IMG_2031.jpg', 'IMG_2032.jpg']);
     return '<div class="thread"><div class="col">' + (S.newCreated ? '<div class="sys-line">' + ic('folder-plus') + '已创建项目 ' + p.n + '</div>' : '') +
       '<div class="u">先看一下这个目录里有什么。</div>' +
-      '<div class="a"><div class="think"><span class="think-l">思考过程</span><p>先列出项目根目录的内容。</p></div><p>好的，下面是 <code class="inl">' + p.p + '</code> 里的内容。</p>' +
+      '<div class="a">' + tthink('n1', '思考过程', '先列出项目根目录的内容。') + '<p>好的，下面是 <code class="inl">' + p.p + '</code> 里的内容。</p>' +
       tcard({ n: 'shell', s: 'ran ls -1 · ' + Math.min(items.length, 6) + ' lines', open: true, b: tlines(items.slice(0, 6)) }) +
       '<div class="worked"><span>已工作 6s · 首 token 0.9s · 10:24</span></div></div></div></div>';
   }
@@ -3226,6 +3920,13 @@
     return '<div class="mask"><div class="modal sm" role="dialog" aria-label="新建项目"><div class="modal-h"><b>新建项目</b><button type="button" class="icon-btn" data-act="projform" aria-label="关闭">' + ic('x') + '</button></div><div class="modal-b">' +
       '<div class="lb">目录<div class="fpath"><input class="field mono" id="proj-root" value="' + root + '" aria-label="目录"><button type="button" class="btn" data-act="browseproj">' + ic('folder-open') + '浏览…</button></div></div>' +
       '<label class="lb">项目名<input class="field" id="proj-name" value="' + baseName(root) + '"></label>' +
+      // 2026-10-20: a project is either a writing workspace or a coding one;
+      // the kind decides the default prompt and the tool/approval profile the
+      // project starts with, so it is asked once, here, next to the name.
+      '<label class="lb">项目类型<select class="field" id="proj-kind" data-projkind="1">' +
+        ['办公创作', '创意编程'].map(function (k) {
+          return '<option' + (k === S.projKind ? ' selected' : '') + '>' + k + '</option>';
+        }).join('') + '</select></label>' +
       (taken ? '<div class="note">已是项目 ' + taken + '。<button type="button" class="btn link" data-go="project">打开它</button></div>' : '<span class="hint">目录必须已存在，不能在 ~/.forebrain 内。</span>') + '</div>' +
       '<div class="modal-f"><span style="flex:1"></span><button type="button" class="btn" data-act="projform">取消</button><button type="button" class="btn pri"' + (taken ? ' disabled' : '') + '>创建</button></div></div></div>';
   }
@@ -3265,15 +3966,239 @@
     return '<div class="card" style="padding:12px;gap:8px"><div class="card-h"><h3 style="font-size:13px">' + ic(icon) + title + '</h3>' + right + '</div>' + body + '</div>';
   }
   function kvs(k, v) { return '<div class="kvs"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'; }
+  // Every question call this conversation made, newest first. One occurrence is
+  // one exchange: the time it was answered, how many questions it asked, and the
+  // first answer as the one line a collapsed row can carry.
+  var ASK_HISTORY = [
+    { at: '10:31', answers: CHAT_ANSWERS },
+    { at: '10:12', answers: [
+      { header: '先改哪面', question: '两个面都要改，先做哪一个？', answers: ['网页端'] },
+      { header: '跑测试', question: '改完先跑哪一组？', answers: ['pkg/gateway'] }
+    ] },
+    { at: '09:58', answers: [
+      { header: '范围', question: '这次只修 401，还是连 WebSocket 一起？', answers: ['两边都别动，先加一行日志看看线上到底缺哪个头'] }
+    ] }
+  ];
+  // Every plan the run wrote, newest first: a re-plan is a new plan, not an edit
+  // of the last one, so each keeps its own time and its own outline.
+  var PLAN_HISTORY = [
+    { at: '10:30', title: '修复网页端 /api 全部 401', done: 3, total: 5, file: 'plans/session-cookie.md',
+      items: ['gateway 增加一次性登录，签发 HttpOnly Cookie', '控制面中间件同时接受 Cookie 与 Bearer', '前端去掉手填 token 的入口', '补 WebSocket 握手的 Cookie 路径', '跑全量 gateway 测试'],
+      md: [
+        '# Plan: 修复网页端 /api 全部 401',
+        '',
+        '## Status',
+        '',
+        '- **Priority**: P0（页面一条 /api 都调不通）',
+        '- **Effort**: M（gateway 两处 + 前端一处 + 测试）',
+        '- **Planned at**: `dev` + 工作区未提交改动',
+        '',
+        '## 根因',
+        '',
+        '控制面只认 `Authorization` 请求头，而浏览器页面从来没有途径拿到 token：',
+        '',
+        '```go',
+        'func ControlPlaneTokenFromRequest(r *http.Request, q string) string {',
+        '\tauth := strings.TrimSpace(r.Header.Get("Authorization"))',
+        '\t// 浏览器页面从未拿到 token，这里永远是空串',
+        '\treturn auth',
+        '}',
+        '```',
+        '',
+        '## Steps',
+        '',
+        '- [x] gateway 增加一次性登录，签发 HttpOnly 会话 Cookie（`http_server.go`）',
+        '- [x] 控制面中间件同时接受 Cookie 与 Bearer，Cookie 优先（`controlplane.go`）',
+        '- [x] 前端去掉手填 token 的入口（`frontend/src/lib/api.ts`）',
+        '- [ ] 补 WebSocket 握手的 Cookie 路径（`ws.go` 现在只认 `?token=`）',
+        '- [ ] 跑全量 gateway 测试',
+        '',
+        '## 验证',
+        '',
+        '| 目标 | 怎么验 |',
+        '| --- | --- |',
+        '| 登录后拿到会话 | 响应带 `Set-Cookie: fb_session=…`，且 `HttpOnly`、`SameSite=Strict` |',
+        '| 只带 Cookie 不再 401 | 清掉 `Authorization` 头，只带 Cookie 请求 `/api/sessions` |',
+        '| 前端不再手填 | 浏览器直接打开页面即可调用 /api |',
+        '',
+        '> Cookie 与 Bearer 同时存在时以 Cookie 为准：Bearer 是 CLI 的凭据，Cookie 是这个浏览器的。'
+      ].join('\n') },
+    { at: '10:08', title: '修复网页端 /api 全部 401', done: 1, total: 3, file: 'plans/session-cookie.md',
+      items: ['gateway 增加一次性登录，签发 HttpOnly Cookie', '控制面中间件同时接受 Cookie 与 Bearer', '前端去掉手填 token 的入口'],
+      md: [
+        '# Plan: 修复网页端 /api 全部 401',
+        '',
+        '## Steps',
+        '',
+        '- [x] gateway 增加一次性登录，签发 HttpOnly 会话 Cookie',
+        '- [ ] 控制面中间件同时接受 Cookie 与 Bearer',
+        '- [ ] 前端去掉手填 token 的入口',
+        '',
+        '## 验证',
+        '',
+        '登录后响应带 `Set-Cookie`；只带 Cookie 的请求不再 401。'
+      ].join('\n') },
+    { at: '09:55', title: '先定位 401 的根因', done: 3, total: 3, file: 'plans/locate-401.md',
+      items: ['读控制面鉴权中间件', '找出浏览器发出的请求缺哪种凭据', '确认 WebSocket 握手是否认 Cookie'],
+      md: [
+        '# Plan: 先定位 401 的根因',
+        '',
+        '## Steps',
+        '',
+        '- [x] 读控制面鉴权中间件（`controlplane.go`）',
+        '- [x] 找出浏览器发出的请求缺哪种凭据',
+        '- [x] 确认 WebSocket 握手是否认 Cookie',
+        '',
+        '## 结论',
+        '',
+        '缺的是凭据本身，不是中间件判断错误：页面从未拿到 token。'
+      ].join('\n') }
+  ];
+  // A plan opens in the same drawer the subagents use, as its own tab. Its id
+  // carries which plan it is; `plan:` can never collide with a subagent id.
+  function planTabId(index) { return 'plan:' + index; }
+  function planTabIndex(id) { return String(id).indexOf('plan:') === 0 ? Number(String(id).slice(5)) : -1; }
+  function planTabLabel(id) { var p = PLAN_HISTORY[planTabIndex(id)]; return p ? L('计划', 'Plan') + ' · ' + p.title : ''; }
+  // The newest occurrence of a family is the one a reader is most likely to
+  // want, so it starts open; the rest stay one line until asked for.
+  function histOpen(key, index) {
+    if (S.hist === undefined) S.hist = {};
+    if (!(key in S.hist)) S.hist[key] = 0;
+    return S.hist[key] === index;
+  }
+  // The accordion body of one family: rows newest first, one open at a time.
+  function histCard(icon, title, unit, key, rows) {
+    var total = rows.length;
+    var head = '<span class="sub">' + total + ' ' + unit + '</span>';
+    var body = '<div class="hist">' + rows.map(function (r, i) {
+      var open = histOpen(key, i);
+      return '<div class="hist-row">' +
+        '<button type="button" class="hist-h" data-hist="' + key + ':' + i + '" aria-expanded="' + open + '">' +
+        ic('chevron-right', 'chev') +
+        '<span class="tm">' + esc(r.at) + '</span>' +
+        '<span class="tl">' + esc(r.summary) + '</span>' +
+
+        '<span class="ct">' + (r.countIcon ? ic(r.countIcon) : '') + esc(r.count) + '</span></button>' +
+        (open ? '<div class="hist-b">' + r.body + '</div>' : '') + '</div>';
+    }).join('') + '</div>';
+    return benchCard(icon, title, head, body);
+  }
+  function benchAnswersCard() {
+    return histCard('message-square-text', L('问答', 'Answers'), L('次', 'x'), 'ask',
+      ASK_HISTORY.map(function (h) {
+        return {
+          at: h.at, summary: h.answers[0].question, count: h.answers.length + ' ' + L('个问题', 'questions'),
+          body: '<div class="qas">' + h.answers.map(function (r) {
+            return '<div class="qa"><span class="q">' + esc(r.question) + '</span>' +
+              r.answers.map(function (a) { return '<span class="ans">' + esc(a) + '</span>'; }).join('') + '</div>';
+          }).join('') + '</div>'
+        };
+      }));
+  }
+  function benchPlansCard() {
+    return histCard('map', L('计划', 'Plans'), L('份', 'plans'), 'plan',
+      PLAN_HISTORY.map(function (p) {
+        return {
+          at: p.at, summary: p.title, count: p.done + '/' + p.total, countIcon: 'square-check',
+          body: '<div class="plan-md"><b>' + esc(p.title) + '</b><ol>' +
+            p.items.map(function (it) { return '<li>' + esc(it) + '</li>'; }).join('') + '</ol></div>' +
+            '<button type="button" class="btn link" style="font-size:12px;justify-self:start" data-planopen="' + planTabId(PLAN_HISTORY.indexOf(p)) + '">' +
+            L('查看全文', 'Read the whole plan') + '</button>'
+        };
+      }));
+  }
+  // ---------- a plan is a markdown file, so it is rendered, not printed ----------
+  // The file the terminal opens when it says "Here is the plan:" is Markdown
+  // (plans are written with headings, fenced examples, tables and checklists).
+  // A drawer tab that showed it as one run of preformatted text would be a
+  // text dump of a document. This is a deliberately small renderer: the subset
+  // these plans actually use, with everything escaped first.
+  function mdInline(t) {
+    var out = esc(t);
+    out = out.replace(/`([^`]+)`/g, '<code class="inl">$1</code>');
+    out = out.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    out = out.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return out;
+  }
+  function mdTable(rows) {
+    var head = rows[0].split('|').slice(1, -1).map(function (c) { return mdInline(c.trim()); });
+    var body = rows.slice(2).map(function (r) { return r.split('|').slice(1, -1).map(function (c) { return mdInline(c.trim()); }); });
+    return '<table class="md-t"><thead><tr>' + head.map(function (c) { return '<th>' + c + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      body.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + c + '</td>'; }).join('') + '</tr>'; }).join('') +
+      '</tbody></table>';
+  }
+  function mdToHtml(src) {
+    var lines = String(src || '').replace(/\r\n/g, '\n').split('\n');
+    var out = [], i = 0;
+    function closeList() { if (list) { out.push('</' + list + '>'); list = null; } }
+    var list = null;
+    while (i < lines.length) {
+      var line = lines[i];
+      // fenced code
+      if (/^```/.test(line)) {
+        closeList();
+        var lang = line.slice(3).trim(), buf = [];
+        i++;
+        while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++; }
+        i++;
+        out.push('<pre class="md-code"' + (lang ? ' data-lang="' + esc(lang) + '"' : '') + '><code>' + esc(buf.join('\n')) + '</code></pre>');
+        continue;
+      }
+      // table
+      if (/^\s*\|/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) {
+        closeList();
+        var rows = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { rows.push(lines[i].trim()); i++; }
+        out.push(mdTable(rows));
+        continue;
+      }
+      if (/^\s*$/.test(line)) { closeList(); i++; continue; }
+      if (/^---+\s*$/.test(line)) { closeList(); out.push('<hr class="md-hr">'); i++; continue; }
+      var h = /^(#{1,4})\s+(.*)$/.exec(line);
+      if (h) { closeList(); out.push('<h' + h[1].length + ' class="md-h' + h[1].length + '">' + mdInline(h[2]) + '</h' + h[1].length + '>'); i++; continue; }
+      if (/^\s*>\s?/.test(line)) {
+        closeList();
+        var q = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        out.push('<blockquote class="md-q">' + mdInline(q.join(' ')) + '</blockquote>');
+        continue;
+      }
+      // task item / list item
+      var task = /^\s*-\s+\[([ xX])\]\s+(.*)$/.exec(line);
+      var ul = /^\s*[-*]\s+(.*)$/.exec(line);
+      var ol = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+      if (task || ul || ol) {
+        var want = ol ? 'ol' : 'ul';
+        if (list !== want) { closeList(); out.push('<' + want + ' class="md-l">'); list = want; }
+        if (task) {
+          out.push('<li class="md-task' + (task[1].toLowerCase() === 'x' ? ' done' : '') + '">' + (task[1].toLowerCase() === 'x' ? '☑' : '☐') + ' ' + mdInline(task[2]) + '</li>');
+        } else {
+          out.push('<li>' + mdInline((ul || ol)[1]) + '</li>');
+        }
+        i++; continue;
+      }
+      // paragraph
+      closeList();
+      var para = [];
+      while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(#{1,4})\s/.test(lines[i]) && !/^```/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) && !/^\s*\d+[.)]\s+/.test(lines[i]) && !/^\s*\|/.test(lines[i])) {
+        para.push(lines[i]); i++;
+      }
+      out.push('<p class="md-p">' + mdInline(para.join(' ')) + '</p>');
+    }
+    if (list) out.push('</' + list + '>');
+    return out.join('');
+  }
   function benchOverview(ws) {
-    var todos = ws ? [['确认使用场景与权限', 'done'], ['写 SKILL.md 初稿', 'done'], ['写测试用例', 'done'], ['跑评测', S.evalRun ? 'doing' : 'done'], ['收紧触发描述', S.evalRun ? 'wait' : 'doing']] : [['读控制面鉴权中间件', 'done'], ['确认浏览器缺的是哪种凭据', 'done'], ['设计一次性登录换 Cookie', 'done'], ['改中间件并补测试', 'doing'], ['真机验证 /api 不再 401', 'wait']];
+    var todos = ws ? [['确认使用场景与权限', 'done'], ['写 SKILL.md 初稿', 'done'], ['写测试用例', 'done'], ['跑评测', S.evalRun ? 'doing' : 'done'], ['收紧触发描述', S.evalRun ? 'wait' : 'doing']] : CHAT_TODOS;
     var mcpBad = S.demo === 'mcp';
     var agents = ws ? (S.evalRun ? '<div class="agent-row"><span class="dot"></span>eval · 用例 2 · 使用技能<span class="d">00:32</span></div><div class="agent-row"><span class="dot"></span>eval · 用例 2 · 不用技能<span class="d">00:29</span></div>' : '<div class="hint">没有运行中的代理</div>')
       : hasSubs() ? saRunning().map(function (id) { return '<button type="button" class="agent-row btn-row" data-saopen="' + id + '" data-tip="在右侧打开" data-tip-pos="top"><span class="dot"></span>' + saLabel(id) + '<span class="d">' + subs[id].el + '</span></button>'; }).join('') : '<div class="hint">没有运行中的代理</div>';
     if (ws && !wsName()) todos = [];
     return benchCard('users', '运行中的代理', ws && !S.evalRun ? '' : '<button type="button" class="btn sm">全部停止</button>', agents) +
       (todos.length ? benchCard('list-checks', '待办', '<span class="sub">' + todos.filter(function (x) { return x[1] === 'done'; }).length + '/' + todos.length + '</span>', todos.map(function (t) { return '<div class="todo ' + t[1] + '">' + ic(t[1] === 'done' ? 'square-check' : t[1] === 'doing' ? 'circle-dot' : 'square') + '<span>' + t[0] + '</span></div>'; }).join('')) : '') +
-      (ws ? '' : benchCard('map', '计划', '<button type="button" class="btn link" style="font-size:12px">查看全文</button>', '<div class="plan-md"><b>修复网页端 /api 401</b><ol><li>gateway 增加一次性登录，签发 HttpOnly Cookie</li><li>控制面中间件同时接受 Cookie 与 Bearer</li><li>前端去掉手填 token 的入口</li></ol></div>')) +
+      (ws ? '' : benchAnswersCard()) +
+      (ws ? '' : benchPlansCard()) +
       benchCard('plug', 'MCP 服务', '<span class="sub">开对话时启动</span>', '<div class="kvs"><span class="k">github</span><span class="badge ok">已连接 · 38 个工具</span></div><div class="kvs"><span class="k">playwright</span>' + (mcpBad ? '<span class="badge warn">启动超时</span>' : '<span class="badge ok">已连接 · 21 个工具</span>') + '</div>') +
       benchCard('receipt', '用量', '<span class="sub">本对话累计</span>', kvs('输入 / 输出', '48.2k / 6.1k tokens') + kvs('模型请求', '9 次') + kvs('缓存命中', '72%') + '<div class="meter" aria-label="缓存命中 72%"><i style="width:72%;background:var(--success)"></i></div>');
   }
@@ -3298,9 +4223,9 @@
     return h;
   }
   var iterJumps = [['home', '登录后首页（新对话）'], ['newproj', '新对话 · 选项目弹层'], ['newfolder', '新对话 · 选了新文件夹'], ['browser', '浏览文件夹'], ['trust', '信任提示'], ['attach', '附件 · 保存到'], ['paste', '粘贴截图'],
-    ['thread', '思考耗时 · 首 token'], ['cards', '对话 · 全部消息卡（工具 / 思考 / 子代理）', 1], ['cardsbrief', '对话 · 简洁模式（只看回答）', 1], ['subview', '子代理 · 视图模式下拉', 1], ['mainrun', '对话 · 运行中（状态行）'], ['wfetch', '对话 · 抓取审批'], ['wsearch', '对话 · 搜索审批', 1], ['wnote', '对话 · 记忆写入审批', 1], ['subcfg', '子代理 · 配置列表'], ['subcfgoff', '子代理 · 功能关闭'], ['setsub', '设置 · 子代理（全局开关）'], ['subcfgnew', '子代理 · 新建'], ['subcfgpick', '子代理 · 指定工具'], ['subcfgbuiltin', '子代理 · 编辑内置'], ['subcfgsys', '子代理 · 查看系统'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
+    ['thread', '思考耗时 · 首 token'], ['cards', '对话 · 全部消息卡（工具 / 思考 / 子代理）', 1], ['cardsbrief', '对话 · 简洁模式（只看回答）', 1], ['asks', '对话 · 提问卡（全部表单类型）', 1], ['exitplan', '对话 · 退出计划模式审批', 1], ['subview', '子代理 · 视图模式下拉', 1], ['mainrun', '对话 · 运行中（状态行）'], ['wfetch', '对话 · 抓取审批'], ['wsearch', '对话 · 搜索审批', 1], ['wnote', '对话 · 记忆写入审批', 1], ['gates', '对话 · 审批卡（全部工具）', 1], ['subcfg', '子代理 · 配置列表'], ['subcfgoff', '子代理 · 功能关闭'], ['setsub', '设置 · 子代理（全局开关）'], ['subcfgnew', '子代理 · 新建'], ['subcfgpick', '子代理 · 指定工具'], ['subcfgbuiltin', '子代理 · 编辑内置'], ['subcfgsys', '子代理 · 查看系统'], ['longtitle', '对话 · 超长标题'], ['busy', '另一端运行中'], ['missing', '目录已不存在'], ['mcp', 'MCP 启动失败'], ['imgno', '图片 · 模型不支持'], ['imgagain', '图片 · 没换模型再发'], ['imgmodel', '图片 · 换模型'], ['imgok', '图片 · 换模型后继续'], ['drawer', '对话抽屉 · 按项目'],
     ['plus', '加号菜单'], ['mode', 'Agent / 计划'], ['effort', '推理强度'], ['rewind', '回到这里'], ['rewound', '恢复之后'], ['bench', '工作台 · 概览'], ['benchctx', '工作台 · 上下文'], ['benchtree', '工作台 · 工作目录'], ['benchchg', '工作台 · 变更文件'], ['treeedit', '工作目录 · 编辑文件'], ['treedeldir', '工作目录 · 删除目录'], ['chgrevert', '变更文件 · 撤销变更'], ['benchwarn', '上下文接近上限'], ['sublive', '子代理 · 实时（右侧抽屉）'], ['subreplay', '子代理 · 回放'], ['submenu', '子代理 · 打开其他子代理'], ['subat', '子代理 · @ 引用文件'], ['subplus', '子代理 · 加号菜单'], ['subinfo', '子代理 · 模型与上下文'], ['subinfowarn', '子代理 · 上下文快满'],
-    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗）'], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpdecline', '项目 · MCP 已拒绝可撤回'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
+    ['skillsp', '技能页'], ['offline', '离线安装（弹窗）'], ['online', '在线安装（弹窗）'], ['wsfresh', '工坊 · 新建（空白）'], ['wsnew', '工坊 · 新建进行中'], ['wsdetail', '工坊 · 改进已有技能'], ['wstree', '工坊 · 工作目录'], ['wschg', '工坊 · 变更文件'], ['wsfile', '工坊 · 编辑 SKILL.md（属性 + 富文本）'], ['wsscript', '工坊 · 编辑脚本（代码）'], ['wscases', '工坊 · 测试用例'], ['wsevals', '工坊 · 评测'], ['wsevalrun', '工坊 · 评测运行中'], ['wsevalcase', '工坊 · 评测详情（弹窗）'], ['wstrigger', '工坊 · 触发描述'], ['wsvers', '工坊 · 版本'], ['wspub', '发布（弹窗）'], ['wscmp', '版本对比'], ['wsupd', '上游有更新'], ['wsdisc', '工坊 · 发现并安装'], ['wsproj', '工坊 · 项目入口'], ['pskills', '项目 · 技能'], ['pcron', '项目 · 定时任务'], ['pcronnew', '项目 · 新建定时任务'], ['pchannels', '项目 · 通道'], ['pchanedit', '项目 · 编辑通道（弹窗）'], ['psessions', '项目 · 会话'], ['poverview', '项目 · 项目设置'], ['projectsp', '项目页'], ['projform', '新建项目（弹窗 · 项目类型）', 1], ['memedit', '记忆 · 编辑（弹窗）'], ['rulesp', '规则指令'], ['ruleedit', '编辑规则文件 · 所见即所得'], ['rulesrc', '编辑规则文件 · 源码'], ['projrule', '编辑 FOREBRAIN.md（代码块、表格、任务）'], ['provp', '模型服务'], ['provedit', '编辑模型服务（弹窗）'], ['toolsp', '工具页'], ['toolargs', '工具 · 查看入参'], ['permp', '权限'], ['verifym', '判定验证（弹窗）'], ['agentnew', '新建主代理（顶栏）'], ['agentdel', '删除主代理（菜单栏下拉）'], ['mcpp', '设置 · MCP'], ['mcpagent', 'MCP 页 · 全局 + 主代理'], ['mcpproj', '项目 · MCP 三层'], ['mcpdecline', '项目 · MCP 已拒绝可撤回'], ['mcpview', 'MCP 抽屉 · 查看（只读）'], ['mcpnew', 'MCP 抽屉 · 添加'], ['mcpstdio', 'MCP 抽屉 · 编辑（环境变量）'], ['mcpadv', 'MCP 抽屉 · 编辑（请求头与 OAuth）'], ['mcptest', 'MCP 抽屉 · 测试连接'], ['mcpfail', 'MCP 抽屉 · 连接失败'], ['mcp409', 'MCP 抽屉 · 名称重复'], ['pager', '分页 · 多页（记忆）'], ['memsort', '记忆 · 表头排序'], ['hooksp', '设置 · 钩子'], ['cfgedit', '设置 · 配置文件（代码）'], ['focus', '表单聚焦'], ['projdel', '删除项目 · 连同对话']];
   function iterJump(k) {
     resetModal(); S.tenant = 'main'; S.bench = false; S.sa = { open: false, tabs: [], active: '', menu: false, task: {}, seen: {}, at: false, ref: '', plus: false, draft: '', info: false };
     var chat0 = function () { S.page = 'chat'; S.projectSession = ''; S.session = 0; };
@@ -3311,8 +4236,10 @@
     else if (k === 'trust') { freshNew(); S.pick.mode = 'folder'; S.pick.folder = '~/photo'; S.trust = true; S.trustFor = { name: 'photo', path: '~/photo', isNew: true, trust: 'unknown' }; }
     else if (k === 'attach' || k === 'paste') { chat0(); S.attach = true; S.attachShot = k === 'paste'; S.attachDir = S.lastAttachDir; }
     else if (k === 'thread') chat0();
-    else if (k === 'cards') { chat0(); S.demo = 'cards'; }
+    else if (k === 'cards') { chat0(); S.demo = 'cards'; S.thinks = { c1: true }; }
     else if (k === 'cardsbrief') { chat0(); S.demo = 'cards'; S.view = 'concise'; }
+    else if (k === 'asks') { chat0(); S.demo = 'asks'; }
+    else if (k === 'exitplan') { chat0(); S.demo = 'exitplan'; }
     else if (k === 'subview') { chat0(); S.demo = 'cards'; S.sa = { open: true, tabs: ['explore', 'plan'], active: 'explore', menu: false, task: {}, seen: { explore: true }, at: false, ref: '', plus: false, draft: '', info: false }; S.savMenu = true; }
     else if (k === 'longtitle') { chat0(); S.projectSession = '排查 gateway 在高并发下偶发 502：上游连接池耗尽、重试风暴与超时配置不一致的根因'; }
     else if (k === 'busy') { chat0(); S.demo = 'busy'; }
@@ -3320,6 +4247,7 @@
     else if (k === 'wfetch') { chat0(); S.demo = 'webfetch'; }
     else if (k === 'wsearch') { chat0(); S.demo = 'wsearch'; }
     else if (k === 'wnote') { chat0(); S.demo = 'wnote'; }
+    else if (k === 'gates') { chat0(); S.demo = 'gates'; }
     else if (k === 'setsub') { S.page = 'settings'; S.settingsTab = 'subagents'; S.subGlobal = true; }
     else if (k === 'subcfg' || k === 'subcfgoff' || k === 'subcfgnew' || k === 'subcfgpick' || k === 'subcfgbuiltin' || k === 'subcfgsys') {
       S.page = 'subagents'; S.subGlobal = true; S.subOver = k === 'subcfgoff' ? false : null; S.subKind = ''; S.fmTools = ''; subDefs = JSON.parse(subDefsInit);
@@ -3415,7 +4343,7 @@
     if (d.pickproj) { S.pick = { mode: 'project', proj: d.pickproj, folder: '' }; S.pjPop = false; return true; }
     if (d.starter) { if (d.starter === '@plan') { S.mode = 'plan'; } else if (d.starter === '@workshop') { wsEnter({ mode: 'create', scope: 'project', skill: '', fresh: true }); } else if (d.starter === '@cron') { S.page = 'project'; S.projTab = 'cron'; S.cronModal = true; S.cronCustom = false; } else { S.draft = d.starter; } return true; }
     if (d.act === 'benchnav') { S.benchOff = (S.benchOff || 0) + Number(d.dir); return true; }
-    if (d.act === 'ctxring') { S.bench = true; S.benchTab = 'context'; S.sa.open = false; return true; }
+    if (d.act === 'ctxring') { S.bench = true; S.benchIn = true; S.benchTab = 'context'; S.sa.open = false; return true; }
     if (d.act === 'browse') { S.pjPop = false; fbOpen(S.pick.folder || '~/workspace', 'chat'); return true; }
     if (d.act === 'browseproj') { fbOpen('~/workspace', 'projform'); return true; }
     if (d.fbgo) { fbGo(d.fbgo); return true; }
@@ -3548,7 +4476,7 @@
     if (d.btab) { S.benchTab = d.btab; return true; }
     if (d.acc) { S.ctxOpen[d.acc] = !S.ctxOpen[d.acc]; return true; }
     if (d.audit !== undefined) { S.auditOpen = S.auditOpen === Number(d.audit) ? -1 : Number(d.audit); return true; }
-    if (d.act === 'ctxwarn') { S.bench = true; S.benchTab = 'context'; S.sa.open = false; return true; }
+    if (d.act === 'ctxwarn') { S.bench = true; S.benchIn = true; S.benchTab = 'context'; S.sa.open = false; return true; }
     if (d.act === 'mcpdetail') { S.mcpDetail = !S.mcpDetail; return true; }
     if (d.projdel) { S.projDel = d.projdel; S.projDelBusy = false; return true; }
     if (d.projpin) { S.pinned[d.projpin] = !S.pinned[d.projpin]; return true; }
@@ -3562,7 +4490,7 @@
   function ic(name, cls) { return '<i data-lucide="' + name + '"' + (cls ? ' class="' + cls + '"' : '') + '></i>'; }
   function mark(size) { return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 32 32" aria-hidden="true"><rect class="mk-fill" width="32" height="32" rx="7"/><path class="mk-glyph" d="M9.5 7.5h13v4h-9v3.75h7.5v4h-7.5V24.5h-4z"/><rect class="mk-glyph" x="18.5" y="20.5" width="4" height="4" rx="0.6"/></svg>'; }
   function scope(kind) { return kind === 'agent' ? '<span class="scope agent">' + ic('user-round') + '主代理</span>' : kind === 'project' ? '<span class="scope project">' + ic('folder-git-2') + '项目</span>' : '<span class="scope global">' + ic('globe') + '全局</span>'; }
-  function sel(opts, val, style) { return '<select class="field"' + (style ? ' style="' + style + '"' : '') + '>' + opts.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>'; }
+  function sel(opts, val, style, data) { return '<select class="field"' + (style ? ' style="' + style + '"' : '') + (data ? ' data-' + data + '="1"' : '') + '>' + opts.map(function (o) { return '<option' + (o === val ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>'; }
   function sessionsOf() { return tenants[S.tenant].sessions; }
 
   function railW() { return S.rc ? 64 : 264; }
@@ -3654,7 +4582,7 @@
   // the top bar's right end on every page; the rail's light/dark switch sits last (owner 2026-10-18, moved from the rail foot)
   function topRight() {
     var to = S.rail === 'dark' ? '浅色' : '深色';
-    return '<button type="button" class="chip-btn" data-fm="agentnew">' + ic('plus') + '新建主代理</button><button type="button" class="chip-btn">' + ic('languages') + '中文</button>' +
+    return '<button type="button" class="chip-btn" data-fm="agentnew">' + ic('plus') + L('新建主代理', 'New agent') + '</button><button type="button" class="chip-btn" data-act="lang">' + ic('languages') + L('中文', 'English') + '</button>' +
       '<button type="button" class="chip-btn sq" data-act="railtheme" data-tip="菜单栏切换为' + to + '" data-tip-pos="bottom" aria-label="菜单栏切换为' + to + '">' + ic(S.rail === 'dark' ? 'sun' : 'moon') + '</button>';
   }
   function topbar() {
@@ -3786,18 +4714,31 @@
       task: '根因：网页端拿不到 gateway token，请求头里的 Authorization 始终为空。\n按这个根因拆出修复网页端 /api 全部 401 的步骤，每步写清改哪里、怎么验证。只读，不要改代码。' },
     explore: { ty: 'explore', ti: '扫描鉴权调用点', st: 'run', el: '41s', plan: [1, 3, '确认握手是否认 Cookie'], prov: 'deepseek', model: 'deepseek-v4', eff: '中', pct: 12, used: '15.4K', win: '128K', tin: '14.8K', tout: '410', last: 'read_file pkg/gateway/ws.go',
       task: '在 pkg/ 与 cmd/ 下找出所有读取鉴权凭据的位置（Authorization 请求头、?token= 查询参数、Cookie），按文件列出调用点与用途。只读，不要改代码。\n完成后给出：\n1）每个调用点的文件与行号；\n2）它读的是哪种凭据；\n3）浏览器发出的请求能不能走到它。' },
+    planreview: { ty: 'plan-reviewer', ti: '评审这份计划', st: 'done', el: '12.4s', prov: 'deepseek', model: 'deepseek-v4', eff: '高', pct: 4, used: '6.2K', win: '128K', tin: '5.9K', tout: '318', last: 'read_file plans/session-cookie.md',
+      task: '评审这份计划：修复网页端 /api 全部 401。指出遗漏、顺序问题与验证方式的缺口，只读，不要改代码。',
+      verdict: ['方向对，但漏了 WebSocket 握手：浏览器的 WebSocket 不能自定义请求头，它现在靠 ?token= 查询参数，改成 Cookie 后这条路径要单独确认能走通。',
+        '另外建议给 Cookie 加 SameSite=Strict 的同时保留一次顶层导航的回跳，否则从邮件点进来的链接会丢登录态。'] },
     review: { ty: 'review', ti: '审阅中间件改动', st: 'run', el: '12s', prov: 'zhipuai', model: 'glm-5.3-flash', eff: '高', pct: 84, used: '840K', win: '1M', tin: '836K', tout: '2.1K', last: 'read_file pkg/gateway/session_cookie.go',
       task: '审阅 pkg/gateway/session_cookie.go 与 controlplane.go 的改动：Cookie 是否 HttpOnly + SameSite=Strict，过期与轮换是否正确，Cookie 与 Bearer 同时存在时以谁为准。只读，给出需要改的地方。' }
   };
-  var subOrder = ['plan', 'explore', 'review'];
+  var subOrder = ['plan', 'planreview', 'explore', 'review'];
   // the thread that dispatched them: 重构 gateway 鉴权中间件 (session 0), unless it was rewound past that turn
   function hasSubs() { return S.page === 'chat' && S.tenant === 'main' && !S.projectSession && S.session === 0 && !S.newProj && (!S.rewound || S.rewound === 'code'); }
-  function saLabel(id) { return subs[id].ty + ' · ' + subs[id].ti; }
+  function saLabel(id) {
+    if (planTabIndex(id) >= 0) return planTabLabel(id);
+    return subs[id].ty + ' · ' + subs[id].ti;
+  }
   function saIcon(s) { return s.st === 'run' ? ic('loader-circle', 'spin run') : s.st === 'fail' ? ic('circle-x', 'bad') : ic('circle-check', 'ok'); }
+  // The tab's own glyph: a subagent tab shows its state, a document tab shows
+  // that it is a document.
+  function tabIcon(id) {
+    if (planTabIndex(id) >= 0) return ic('map');
+    return saIcon(subs[id]);
+  }
   function saRunning() { return subOrder.filter(function (id) { return subs[id].st === 'run'; }); }
   function saOpen(id) {
     if (S.sa.tabs.indexOf(id) < 0) S.sa.tabs.push(id);
-    S.sa.active = id; S.sa.open = true; S.sa.menu = false; S.sa.at = false; S.sa.plus = false; S.sa.info = false; S.sa.seen[id] = true; S.bench = false;
+    S.sa.active = id; S.sa.open = true; S.saIn = true; S.sa.menu = false; S.sa.at = false; S.sa.plus = false; S.sa.info = false; S.sa.seen[id] = true; S.bench = false;
   }
   function saClose(id) {
     var i = S.sa.tabs.indexOf(id);
@@ -3806,13 +4747,14 @@
     if (!S.sa.tabs.length) { S.sa.open = false; S.sa.active = ''; return; }
     if (S.sa.active === id) { S.sa.active = S.sa.tabs[Math.min(i, S.sa.tabs.length - 1)]; S.sa.seen[S.sa.active] = true; }
   }
-  function saRow(id) {
+  function saRow(id, forceRun) {
     var s = subs[id], on = S.sa.open && S.sa.active === id;
-    return '<button type="button" class="sa-row" data-saopen="' + id + '" aria-current="' + on + '">' + (s.st === 'run' ? ic('loader-circle', 'spin run') : ic('circle-check', 'ok')) +
+    var running = forceRun || s.st === 'run';
+    return '<button type="button" class="sa-row" data-saopen="' + id + '" aria-current="' + on + '">' + (running ? ic('loader-circle', 'spin run') : ic('circle-check', 'ok')) +
       '<span class="sa-rt"><span class="sa-l1"><span class="sa-ti">' + s.ti + '</span><span class="sa-ck"> · ' + s.el + '</span></span><span class="sa-l2">最近：' + s.last + '</span></span><span class="sa-open">查看</span></button>';
   }
   function saCallCard(ids, head, dur, run) {
-    return '<div class="sa-card"><div class="sa-hd">' + (run ? ic('loader-circle', 'spin run') : ic('bot')) + '<b>' + head + '</b>' + (dur ? '<span class="d">' + dur + '</span>' : '') + '</div>' + ids.map(saRow).join('') + '</div>';
+    return '<div class="sa-card"><div class="sa-hd">' + (run ? ic('loader-circle', 'spin run') : ic('bot')) + '<b>' + head + '</b>' + (dur ? '<span class="d">' + dur + '</span>' : '') + '</div>' + ids.map(function (id) { return saRow(id, run); }).join('') + '</div>';
   }
   function saTurn() {
     return '<div class="u-wrap"><div class="u">按这个方向修。先派个子代理拆一下步骤，再并行查调用点、审阅改动。</div></div>' +
@@ -3825,25 +4767,47 @@
   function saTool(name, summary, run) {
     return tcard({ n: name, s: (run ? 'running ' : 'ran ') + summary, st: run ? 'run' : 'ok' });
   }
+  // The plan tab's body: the file, rendered. The strip at the top names the file,
+  // when that version was written and how far its list got — the three facts the
+  // collapsed workbench row carries, so opening the tab never loses context.
+  function planDocBody(id) {
+    var i = planTabIndex(id), p = PLAN_HISTORY[i];
+    if (!p) return '';
+    return '<div class="plan-doc">' +
+      '<div class="doc-meta"><span class="mono">' + esc(p.file) + '</span>' +
+      '<span>' + esc(p.at) + '</span>' +
+      '<span class="prog">' + ic('square-check') + p.done + '/' + p.total + '</span></div>' +
+      mdToHtml(p.md) + '</div>';
+  }
   function saBody(id) {
+    if (planTabIndex(id) >= 0) return planDocBody(id);
     var s = subs[id], open = !!S.sa.task[id];
     var h = '<div class="sa-task' + (open ? ' open' : '') + '"><div class="cap">交给它的任务</div><p>' + esc(s.task) + '</p><button type="button" class="more" data-satask="' + id + '" aria-label="' + (open ? '收起任务' : '展开任务') + '" aria-expanded="' + open + '">' + ic(open ? 'chevron-up' : 'chevron-down') + '</button></div>';
     if (id === 'plan') {
-      return h + '<div class="a"><div class="think"><span class="think-l">思考了 4 秒</span><p>先确认中间件现在只认 Bearer，再决定 Cookie 从哪里签发。</p></div>' +
+      return h + '<div class="a">' + tthink('p1', '思考了 4 秒', '先确认中间件现在只认 Bearer，再决定 Cookie 从哪里签发。') +
         saTool('read_file', 'read pkg/gateway/controlplane.go') + saTool('read_file', 'read pkg/gateway/http_server.go') +
         '<p>修复分 3 步：</p><ol style="margin:0;padding-left:20px;display:grid;gap:4px"><li>gateway 增加一次性登录，签发 HttpOnly 会话 Cookie（<code class="inl">http_server.go</code>）；验证：登录后响应带 <code class="inl">Set-Cookie</code>。</li><li>控制面中间件同时接受 Cookie 与 Bearer（<code class="inl">controlplane.go</code>）；验证：只带 Cookie 的请求不再 401。</li><li>前端去掉手填 token 的入口；验证：浏览器直接打开页面即可调用 /api。</li></ol>' +
         '<div class="worked"><span>已工作 38.2s · 首 token 1.1s · 09:43</span></div></div>';
     }
+    if (id === 'planreview') {
+      return h + '<div class="a">' +
+        tthink('pr1', '思考了 3 秒', '先按计划里写的三步走一遍，再看有没有哪一步验证不到。') +
+        saTool('read_file', 'read plans/session-cookie.md') +
+        '<p>' + esc(s.verdict[0]) + '</p>' +
+        tthink('pr2', '思考了 1 秒', '再看 Cookie 的属性组合会不会挡住正常的回跳。') +
+        '<p>' + esc(s.verdict[1]) + '</p>' +
+        '<div class="worked"><span>已工作 12.4s · 首 token 1.2s · 09:44</span></div></div>';
+    }
     if (id === 'explore') {
       return h + '<div class="a">' +
-        '<div class="think"><span class="think-l">思考了 3 秒</span><p>先全局搜请求头与查询参数里读 token 的地方，再逐个看调用链。</p></div>' +
+        tthink('e1', '思考了 3 秒', '先全局搜请求头与查询参数里读 token 的地方，再逐个看调用链。') +
         saTool('shell', 'rg -n "Authorization|access_token|token=" pkg cmd') +
         '<p>找到 6 处：控制面中间件与 WebSocket 握手各读一次 Authorization 头，WebSocket 另外接受 <code class="inl">?token=</code> 查询参数，其余 3 处在 CLI 的远程连接。</p>' +
-        '<div class="think"><span class="think-l">思考了 2 秒</span><p>浏览器的 WebSocket 不能自定义请求头，?token= 是它唯一的入口；要确认握手时是否也认 Cookie。</p></div>' +
+        tthink('e2', '思考了 2 秒', '浏览器的 WebSocket 不能自定义请求头，?token= 是它唯一的入口；要确认握手时是否也认 Cookie。') +
         saTool('read_file', 'read pkg/gateway/ws.go', true) + '</div>';
     }
     return h + '<div class="a">' +
-      '<div class="think"><span class="think-l">思考了 2 秒</span><p>先看 Cookie 的属性与过期，再看中间件里两种凭据的先后。</p></div>' +
+      tthink('r1', '思考了 2 秒', '先看 Cookie 的属性与过期，再看中间件里两种凭据的先后。') +
       saTool('read_file', 'read pkg/gateway/session_cookie.go', true) + '</div>';
   }
   // The subagent's run facts, read-only (its spawn fixed the model and the effort): one quiet pill in the composer's bar — its own context
@@ -3874,10 +4838,12 @@
   }
   function saDrawer() {
     var a = S.sa.active, s = subs[a];
-    var h = '<aside class="sad' + (S.saView === 'concise' ? ' brief' : '') + '" aria-label="子代理"><div class="sad-h"><div class="sad-tabs" role="tablist" aria-label="打开的子代理">' +
+    var anim = S.saIn; S.saIn = false;
+    var h = '<aside class="sad' + (S.saView === 'concise' ? ' brief' : '') + (anim ? ' in' : '') + '" aria-label="子代理"><div class="sad-h"><div class="sad-tabs" role="tablist" aria-label="打开的子代理">' +
       S.sa.tabs.map(function (id) {
-        var x = subs[id], on = id === a, unseen = !on && x.st !== 'run' && !S.sa.seen[id];
-        return '<div class="sad-tab' + (on ? ' on' : '') + '"><button type="button" class="t" role="tab" aria-selected="' + on + '" data-satab="' + id + '">' + saIcon(x) +
+        var x = subs[id], isPlan = planTabIndex(id) >= 0, on = id === a;
+        var unseen = !on && !isPlan && x.st !== 'run' && !S.sa.seen[id];
+        return '<div class="sad-tab' + (on ? ' on' : '') + '"><button type="button" class="t" role="tab" aria-selected="' + on + '" data-satab="' + id + '">' + tabIcon(id) +
           '<span class="lb" data-tip="' + esc(saLabel(id)) + '" data-tip-pos="bottom" data-tip-trunc="1">' + saLabel(id) + '</span>' + (unseen ? '<span class="new" aria-label="有新内容"></span>' : '') + '</button>' +
           '<button type="button" class="icon-btn x" data-saclose="' + id + '" aria-label="关闭 ' + saLabel(id) + '" data-tip="关闭" data-tip-pos="bottom">' + ic('x') + '</button></div>';
       }).join('') + '</div>' +
@@ -3885,6 +4851,7 @@
       '<button type="button" class="icon-btn" data-act="sadrawer" aria-label="收起" data-tip="收起" data-tip-pos="bottom">' + ic('panel-right-close') + '</button>' +
       (S.sa.menu ? saMenu() : '') + '</div>' +
       '<div class="sad-b" role="tabpanel" aria-label="' + esc(saLabel(a)) + '">' + saBody(a) + '</div>';
+    if (!s) return h + '</aside>';
     if (s.st === 'run') h += '<button type="button" class="sa-down" aria-label="回到底部" data-tip="回到底部">' + ic('arrow-down') + '</button>' +
       '<div class="sa-run" role="status">' + ic('loader-circle', 'spin') + '<span>工作中（' + s.el + '）</span>' + (s.plan ? '<span class="pp">' + ic('square-check', 'pc') + s.plan[0] + '/' + s.plan[1] + '</span><span class="pa">' + s.plan[2] + '</span>' : '') + '</div>';
     var atRows = [['file', 'pkg/gateway/', 'ws', '.go'], ['file', 'pkg/gateway/', 'ws', '_test.go'], ['file', 'frontend/src/lib/', 'ws', 'Client.ts'], ['folder', 'pkg/gateway/', 'ws', 'proxy/']];
@@ -3896,6 +4863,7 @@
     var plus = S.sa.plus ? '<div class="plus-pop" role="menu" aria-label="添加"><div class="pp-cap">添加</div><button type="button" class="pp-opt" role="menuitem" data-saplus="attach">' + ic('paperclip') + '<b>附件</b></button>' +
       '<div class="pp-cap">技能</div><div class="pp-skills">' + projectSkills.map(function (k) { return '<button type="button" class="pp-opt" role="menuitem" data-saplus="/' + k.n + ' ">' + ic('sparkles') + '<b class="mono">' + k.n + '</b><span>' + k.d + '</span></button>'; }).join('') + '</div>' +
       '<div class="pp-foot"><span><kbd>@</kbd>引用文件</span><span><kbd>/</kbd>命令与技能</span><span>' + ic('info') + '输入以搜索</span></div></div>' : '';
+    if (planTabIndex(a) >= 0) return h + '</aside>';
     return h + '<div class="sa-comp">' + at + plus + (S.sa.info ? saInfoCard(s) : '') +
       '<button type="button" class="ph' + (S.sa.at || S.sa.draft ? ' typed' : '') + '" data-act="saat" aria-label="给这个子代理发消息">' + (S.sa.ref ? '<span class="ref">@' + S.sa.ref + '</span>' : '') + ph + '</button>' +
       '<div class="bar"><button type="button" class="sa-plus" data-act="saplus" aria-label="添加" aria-haspopup="menu" aria-expanded="' + !!S.sa.plus + '" data-tip="添加">' + ic('plus') + '</button>' + saViewChip() + '<span class="grow"></span>' + saInfoPill(s) +
@@ -3939,7 +4907,11 @@
     var tabs = [['overview', '概览'], ['context', '上下文'], ['tree', '工作目录'], ['changes', '变更文件']].concat(ws ? [['cases', '测试用例'], ['evals', '评测'], ['trigger', '触发描述'], ['versions', '版本']] : []);
     var skillOnly = ['cases', 'evals', 'trigger', 'versions'], t = S.benchTab;
     if (ws && !n && skillOnly.indexOf(t) >= 0) t = 'overview';
-    var h = '<aside class="bench' + (ws ? ' ws' : '') + '" aria-label="工作台"><div class="bench-h"><b>工作台</b><button type="button" class="icon-btn" data-act="bench" aria-label="收起工作台">' + ic('x') + '</button></div>' +
+    // One-shot: the panel slides in on the render that opens it, not on every
+    // later render that happens to redraw it.
+    var anim = S.benchIn; S.benchIn = false;
+    var h = '<aside class="bench' + (ws ? ' ws' : '') + (anim ? ' in' : '') + '" aria-label="工作台"><div class="bench-h"><b>工作台</b>' +
+      '<button type="button" class="icon-btn" data-act="bench" aria-label="收起工作台" data-tip="收起工作台" data-tip-pos="bottom">' + ic('panel-right-close') + '</button></div>' +
       benchTabsHtml(tabs, t, ws, n, skillOnly) + '<div class="bench-b">';
     if (t === 'overview') h += benchOverview(ws);
     else if (t === 'context') h += benchContext();
@@ -4504,7 +5476,7 @@
     return '<label class="lb">模型<div class="tagbox">' + chips + '<input class="tag-in mono" data-models="' + idx + '" placeholder="输入模型 ID，多个用英文逗号分隔"></div></label>' + (sugg ? '<div class="row" style="gap:6px"><span class="hint">该服务商的模型：</span>' + sugg + '</div>' : '');
   }
   // ---------- skill workshop: the chat page plus skill tabs in the workbench ----------
-  function wsEnter(ws) { S.page = 'workshop'; S.ws = ws; S.bench = true; S.benchTab = wsName() ? 'changes' : 'overview'; S.draft = ''; S.rewound = ''; }
+  function wsEnter(ws) { S.page = 'workshop'; S.ws = ws; S.bench = true; S.benchIn = true; S.benchTab = wsName() ? 'changes' : 'overview'; S.draft = ''; S.rewound = ''; }
   function wsName() {
     var w = S.ws; if (!w) return '';
     if (w.mode === 'discover') return w.installed || '';
@@ -4556,25 +5528,25 @@
     if (S.rewound && S.rewound !== 'code') return h + '<div class="sys-line" style="color:var(--text-2)">' + ic('history') + '已回到这条消息之前' + (S.rewound === 'both' && wsRwFiles().length ? ' · 恢复 ' + wsRwFiles().length + ' 个文件' : '') + '<button type="button" class="btn link" data-act="rwundo">撤销</button></div></div></div>';
     if (st === 'create') {
       h += um('把我们网关 5xx 的排障步骤做成技能。') +
-        '<div class="a"><div class="think"><span class="think-l">思考了 3 秒</span><p>先弄清适用范围、需要的命令和完成标准，再动笔。</p></div><p>好的。先确认三件事：</p><p>1. 只在 502 时用，还是所有 5xx 都用？<br>2. 需要哪些命令权限（kubectl、curl、查看日志）？<br>3. 怎样算处理完成？</p>' + worked('已工作 9s · 首 token 1.1s · 10:12') + '</div>' +
+        '<div class="a">' + tthink('w1', '思考了 3 秒', '先弄清适用范围、需要的命令和完成标准，再动笔。') + '<p>好的。先确认三件事：</p><p>1. 只在 502 时用，还是所有 5xx 都用？<br>2. 需要哪些命令权限（kubectl、curl、查看日志）？<br>3. 怎样算处理完成？</p>' + worked('已工作 9s · 首 token 1.1s · 10:12') + '</div>' +
         um(wsLastAsk()) +
         '<div class="a"><p>先写初稿和测试用例。</p>' + tool('file-plus', 'write_file', dd + 'SKILL.md', ['---', 'name: gateway-5xx', 'description: 网关返回 5xx 时的排障与恢复…', '---']) + tool('file-plus', 'write_file', dd + 'evals/evals.json') +
         '<p>初稿和 3 个测试用例写好了，在右侧“变更文件”和“测试用例”里。要跑一轮评测吗？</p>' + worked('已工作 48s · 首 token 1.3s · 10:14') + '</div>' +
         '<div class="sys-line">' + ic('file-check') + '已保存草稿 ' + n + '</div>';
     } else if (st === 'createp') {
       h += um(wsLastAsk()) +
-        '<div class="a"><div class="think"><span class="think-l">思考了 2 秒</span><p>项目里有 make test 和 CHANGELOG.md，直接按它们写。</p></div>' + tool('file-plus', 'write_file', dd + 'SKILL.md', ['---', 'name: release-check', 'description: 发布前的检查清单…', '---']) + tool('file-plus', 'write_file', dd + 'evals/evals.json') +
+        '<div class="a">' + tthink('w2', '思考了 2 秒', '项目里有 make test 和 CHANGELOG.md，直接按它们写。') + tool('file-plus', 'write_file', dd + 'SKILL.md', ['---', 'name: release-check', 'description: 发布前的检查清单…', '---']) + tool('file-plus', 'write_file', dd + 'evals/evals.json') +
         '<p>写好了初稿和 2 个测试用例，在右侧工作台里。</p>' + worked('已工作 31s · 首 token 0.9s · 11:02') + '</div>' +
         '<div class="sys-line">' + ic('file-check') + '已保存草稿 ' + n + '</div>';
     } else if (st === 'improve') {
       h += um(wsLastAsk()) +
-        '<div class="a"><div class="think"><span class="think-l">思考了 6 秒</span><p>先补几条和网关无关的报错提问，再跑触发测试看误触发。</p></div>' +
+        '<div class="a">' + tthink('w3', '思考了 6 秒', '先补几条和网关无关的报错提问，再跑触发测试看误触发。') +
         tool('file-pen', 'edit_file', dd + 'evals/trigger_queries.json', ['+ { "q": "前端构建报 500", "trigger": false }', '+ { "q": "数据库连接超时", "trigger": false }']) +
         '<p>补了 4 条不应触发的提问。触发测试：现在的描述 70%，建议描述 92%。建议描述在右侧“触发描述”里，确认后应用到草稿。</p>' + worked('已工作 1m 05s · 首 token 1.2s · 10:31') + '</div>';
     } else {
       var cands = [['go-style-review', 'samber/cc-skills-golang', '按 Effective Go 审查风格与命名，不改代码', false], ['golang-testing', 'samber/cc-skills-golang', 'Go 测试规范与最佳实践', true], ['code-review', 'skills.sh/anthropic/code-review', '通用代码审查清单', false]];
       h += um(wsLastAsk()) +
-        '<div class="a"><div class="think"><span class="think-l">思考了 2 秒</span><p>先查技能目录和常用仓库。</p></div>' + tool('globe', 'web_search', 'skill effective go style review') +
+        '<div class="a">' + tthink('w4', '思考了 2 秒', '先查技能目录和常用仓库。') + tool('globe', 'web_search', 'skill effective go style review') +
         '<p>找到 3 个候选，第一个最贴合：</p><div class="cand-list">' + cands.map(function (c) {
           var done = c[3] || S.ws.installed === c[0];
           return '<div class="cand"><b>' + c[0] + '</b><span class="s">' + c[2] + '</span><span class="p">' + c[1] + '</span>' + (done ? '<span class="badge ok">已安装</span>' : '<button type="button" class="btn sm pri" data-wsinstall="' + c[0] + '">安装</button>') + '</div>';
@@ -4915,9 +5887,9 @@
         h += '<div class="flat">' +
           radioField('主题色', 'brand', [['navy', '海军蓝（默认）', '#1f4a9e'], ['teal', '松石青', '#0e6e7e'], ['graphite', '石墨黑', '#1c1c1f']], S.brand, '只保存在当前浏览器。') +
           radioField('菜单栏', 'rail', [['dark', '深色'], ['light', '浅色']], S.rail, '内容区始终白底，深浅只作用于菜单栏。') +
-          '<label class="lb">语言' + sel(['中文', 'English'], '中文', 'width:160px') + '</label></div>';
+          '<label class="lb">' + L('语言', 'Language') + sel(['中文', 'English'], L('中文', 'English'), 'width:160px', 'lang') + '</label></div>';
       } else if (t === 'approval') {
-        h += '<div class="flat">' + radioField('默认审批模式', 'approval', presets.map(function (x) { return [x[0], x[2] + ' · ' + x[1], '', x[3]]; }), S.approvalDef,
+        h += '<div class="flat">' + radioField('默认审批模式', 'approval', presets.map(function (x) { return [x[0], presetName(x), '', presetDesc(x)]; }), S.approvalDef,
           '对所有主代理的新会话生效；单个会话可在输入框旁临时切换。写在 <span class="mono">forebrain.yaml · approval_policy + sandbox_mode</span>。', true) +
           '<div class="row"><button type="button" class="btn pri">保存</button></div></div>';
       } else if (t === 'subagents') {
@@ -5028,6 +6000,14 @@
 
   function closeTopModal() { if (S.fbNew || S.attNew) { S.fbNew = false; S.attNew = false; S.newDirErr = false; return; } if (S.fb) { S.fb = false; S.fbNew = false; S.fbMenu = false; } else if (S.trust) S.trust = false; else if (S.attach) S.attach = false; else if (S.rw) S.rw = false; else if (S.projDel) S.projDel = ''; else if (S.memEdit) S.memEdit = ''; else if (S.cronModal) S.cronModal = false; else if (S.inst) S.inst = null; else if (S.fm) { S.fm = null; S.mcpTest = ''; S.mcpErr = ''; S.mcpTools = false; S.mcpSaving = false; S.mcpTestName = ''; S.mcpSaveName = ''; } else if (S.vcM) S.vcM = null; else if (S.cmpM) S.cmpM = ''; else if (S.pubM) S.pubM = ''; else if (S.projectForm) S.projectForm = false; else if (S.mdw) S.mdw = null; }
   function closePops() { if (S.sa) S.sa.menu = false; S.hb = false; S.tmenu = false; S.presetMenu = false; S.viewMenu = false; S.savMenu = false; S.pjPop = false; S.plusPop = false; S.effortMenu = false; S.modeMenu = false; S.modelMenu = false; }
+  // What the person typed belongs to the card, not to the paint: closing the
+  // field (another verdict, or Cancel) and opening it again must show the same
+  // text back, exactly like the shipped card's bound field.
+  document.getElementById('app').addEventListener('input', function (ev) {
+    if (ev.target && ev.target.id === 'xp-feedback') {
+      S.xpFeedbackText.x5 = ev.target.value;
+    }
+  });
   document.getElementById('app').addEventListener('change', function (ev) {
     var el = ev.target;
     if (el.dataset.cronsel) { S.cronCustom = el.value === '自定义…'; render(); }
@@ -5035,6 +6015,8 @@
     else if (el.name === 'sa-tools') { S.fmTools = el.value; render(); }
     else if (el.closest && el.closest('.pg') && S.page === 'subagents' && el.tagName === 'SELECT') { S.subKind = el.value; render(); }
     else if (el.dataset.dproj) { S.dproj = el.value; render(); }
+    else if (el.dataset.projkind) { S.projKind = el.value; render(); }
+    else if (el.dataset.lang) { S.lang = el.value === 'English' ? 'en' : 'zh'; render(); }
     else if (el.name === 'memscope') { S.memScope = el.value; render(); }
     else if (el.name === 'brand') { S.brand = el.value; render(); }
     else if (el.name === 'rail') { S.rail = el.value; render(); }
@@ -5083,8 +6065,9 @@
     else if (d.rmmodel) { var mm = d.rmmodel.split(':'); S.models[+mm[0]].splice(+mm[1], 1); }
     else if (d.addmodel) { var am = d.addmodel.split(':'); S.models[+am[0]].push(am[1]); }
     else if (d.wstask !== undefined) { S.wsTask = Number(d.wstask); }
-    else if (d.act === 'bench') { S.bench = !S.bench; if (S.bench) { S.sa.open = false; S.sa.menu = false; } }
+    else if (d.act === 'bench') { S.bench = !S.bench; if (S.bench) { S.sa.open = false; S.sa.menu = false; S.benchIn = true; } }
     else if (d.saopen) { closePops(); saOpen(d.saopen); }
+    else if (d.planopen) { closePops(); saOpen(d.planopen); }
     else if (d.satab) { S.sa.active = d.satab; S.sa.seen[d.satab] = true; S.sa.menu = false; S.sa.info = false; }
     else if (d.saclose) { saClose(d.saclose); }
     else if (d.satask) { S.sa.task[d.satask] = !S.sa.task[d.satask]; }
@@ -5097,7 +6080,7 @@
     else if (d.saref) { S.sa.ref = d.saref; S.sa.at = false; }
     else if (d.act === 'sadrawer') {
       if (S.sa.open) { S.sa.open = false; S.sa.menu = false; }
-      else if (S.sa.tabs.length) { S.sa.open = true; S.bench = false; }
+      else if (S.sa.tabs.length) { S.sa.open = true; S.saIn = true; S.bench = false; }
       else saOpen(saRunning()[0] || subOrder[0]);
     }
     else if (d.act === 'hb') { var hb = !S.hb; closePops(); S.hb = hb; }
@@ -5112,6 +6095,21 @@
     else if (d.hbopen) { var si = sessionsOf().indexOf(d.hbopen); if (si >= 0) { S.session = si; S.projectSession = ''; } else { S.projectSession = d.hbopen; } S.ref = ''; }
     else if (d.act === 'preset') { var pm = !S.presetMenu; closePops(); S.presetMenu = pm; }
     else if (d.preset) { S.preset = d.preset; S.presetMenu = false; }
+    else if (d.act === 'lang') { S.lang = S.lang === 'en' ? 'zh' : 'en'; render(); }
+    else if (d.think) { S.thinks[d.think] = !S.thinks[d.think]; render(); }
+    else if (d.hist) {
+      // Opening one occurrence closes the rest of its family: the column keeps
+      // the same height whatever the session's length.
+      var hp = d.hist.split(':'), hk = hp[0], hi = Number(hp[1]);
+      if (S.hist === undefined) S.hist = {};
+      S.hist[hk] = S.hist[hk] === hi ? -1 : hi;
+    }
+    // The exit-plan verdicts behave as the shipped card does: the feedback
+    // field belongs to "keep planning" and to nothing else, so choosing it
+    // opens the field and choosing any other verdict closes it again.
+    else if (d.xp === 'keep-planning') { S.xpFeedbackOpen[d.xpid] = !S.xpFeedbackOpen[d.xpid]; }
+    else if (d.xp === 'cancel-feedback') { S.xpFeedbackOpen[d.xpid] = false; }
+    else if (d.xp === 'approve' || d.xp === 'approve-clear' || d.xp === 'ask-review') { S.xpFeedbackOpen[d.xpid] = false; }
     else if (d.act === 'view') { var vm = !S.viewMenu; closePops(); S.viewMenu = vm; }
     else if (d.viewmode) { S.view = d.viewmode; S.viewMenu = false; }
     else if (d.act === 'saview') { var sm = !S.savMenu; closePops(); S.savMenu = sm; }

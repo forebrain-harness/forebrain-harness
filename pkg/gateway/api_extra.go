@@ -169,6 +169,7 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	chatSessions.Get("/:id/subagent-history", s.handleSessionSubagentHistory)
 	chatSessions.Get("/:id/todos", s.handleSessionTodos)
 	chatSessions.Get("/:id/plan-md", s.handleSessionPlanMarkdown)
+	chatSessions.Get("/:id/plans", s.handleSessionPlans)
 	chatSessions.Get("/:id/approval-request", s.handleSessionApprovalRequest)
 	chatSessions.Get("/:id/mode", s.handleSessionMode)
 	// The conversation's own model choice, session-scoped like /model's live
@@ -2279,6 +2280,20 @@ func (s *Server) handleSessionPlanMarkdown(w http.ResponseWriter, r *http.Reques
 		http.NotFound(w, r)
 		return
 	}
+	// A conversation's plans are only its owner's to read: an unknown or
+	// foreign id is 404, like every other per-session read here, never an
+	// empty answer that looks like "this session planned nothing".
+	if s.Sessions != nil {
+		owned, err := s.Sessions.HasSession(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	// Project- and session-scoped, like every other plan resolution: plans
 	// live per conversation, so plan-md returns the plan of exactly the
 	// session in the URL — never another conversation's newer file.
@@ -2289,6 +2304,62 @@ func (s *Server) handleSessionPlanMarkdown(w http.ResponseWriter, r *http.Reques
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"markdown": p})
+}
+
+// handleSessionPlans serves a conversation's plan history: every plan file it
+// ever wrote, newest first, each with its text. plan-md names only the newest
+// file, which leaves the previous versions of a replanned conversation
+// unreachable from the web; the directory itself is that history.
+func (s *Server) handleSessionPlans(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sid := strings.TrimSpace(ParamsFromContext(r.Context()).ByName("id"))
+	if sid == "" {
+		http.NotFound(w, r)
+		return
+	}
+	// Whole plans go out here, so the ownership guard is not optional: an
+	// unknown or foreign id is 404, never another conversation's documents.
+	if s.Sessions != nil {
+		owned, err := s.Sessions.HasSession(r.Context(), sid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !owned {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	root := s.stateRoot()
+	plans, err := state.PlansForSession(root, s.sessionProjectKey(r.Context(), sid), sid)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type planListRow struct {
+		Name string `json:"name"`
+		// Path is relative to the state root — "plans/<projectKey>/<session>/…",
+		// the same shape the workbench shows — so the user's home directory
+		// never reaches the browser.
+		Path      string `json:"path"`
+		UpdatedAt int64  `json:"updated_at"`
+		Markdown  string `json:"markdown"`
+	}
+	rows := make([]planListRow, 0, len(plans))
+	for _, p := range plans {
+		rel, _ := filepath.Rel(root, p.Path)
+		rows = append(rows, planListRow{
+			Name:      p.Name,
+			Path:      filepath.ToSlash(rel),
+			UpdatedAt: p.UpdatedAt.Unix(),
+			Markdown:  p.Markdown,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"plans": rows})
 }
 
 func (s *Server) handleSessionMode(w http.ResponseWriter, r *http.Request) {
@@ -3676,7 +3747,7 @@ func (s *Server) handleActionPlanReview(w http.ResponseWriter, r *http.Request) 
 	// run on credentials the session already has.
 	model := turn.Model{Provider: strings.TrimSpace(body.Provider), Model: strings.TrimSpace(body.Model)}
 	allowed := false
-	for _, option := range s.approvalGate().ReviewModels() {
+	for _, option := range s.approvalGate().ReviewModels(sid) {
 		if option.MatchesSelection(model.Provider, model.Model) {
 			allowed = true
 			model.Label = option.Label

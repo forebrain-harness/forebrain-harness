@@ -230,6 +230,39 @@ var sandboxDeniedKeywords = []string{
 	"failed to write file",
 }
 
+// networkDeniedKeywords are the ways a program reports that it could not reach
+// a host: name resolution, routing, and connection setup failures. They are a
+// second table, not more entries in sandboxDeniedKeywords, because they say
+// something weaker — a host with no network produces them too. They only
+// classify a command as denied together with the sandbox's own fact that it
+// blocked the network (SandboxDecision.NetworkBlocked).
+//
+// The wording matters: a kernel denial here is EPERM ("Operation not
+// permitted"), but curl, git and the Go toolchain each rewrite it into their
+// own sentence, so the errno keyword never appears. These are the sentences
+// those tools actually print (measured against a real seatbelt sandbox).
+var networkDeniedKeywords = []string{
+	"could not resolve host",
+	"no such host",
+	"nodename nor servname provided",
+	"name or service not known",
+	"temporary failure in name resolution",
+	"failed to connect",
+	"couldn't connect to server",
+	"network is unreachable",
+	"no route to host",
+}
+
+// networkDeniedVetoes are the connect failures that mean the opposite: the
+// stack reached the peer and was refused, or nothing answered in time. Both
+// happen on a host whose network is perfectly fine, so a line carrying one says
+// nothing about the sandbox — even though curl prefixes it with "Failed to
+// connect", a phrase the markers above do look for.
+var networkDeniedVetoes = []string{
+	"connection refused",
+	"timed out",
+}
+
 // benignNoiseSubstrings lists substrings that identify lines emitted by macOS
 // host tooling (xcrun, confstr) that happen to contain denial-like phrases but
 // are unrelated to the sandbox policy.  These lines must be stripped before the
@@ -291,10 +324,19 @@ func IsLikelySandboxDenied(decision SandboxDecision, result CommandResult) bool 
 	if result.NetworkDenial != nil {
 		return true
 	}
+	// A command that ran in a sandbox with no network path and reported a
+	// network failure was denied by the sandbox, whatever its exit status: a
+	// shell chain the model wrote itself (`curl … || echo failed`) hands back 0
+	// after the failure it just absorbed, and that is exactly the shape this
+	// check exists for. Without the decision's own fact this would be a guess,
+	// so a host that is simply offline never takes this branch.
+	if decision.NetworkBlocked && networkDenialDetail(result) != "" {
+		return true
+	}
 	if result.ExitCode == 0 {
 		return false
 	}
-	if SandboxDenialDetail(result) != "" {
+	if SandboxDenialDetail(decision, result) != "" {
 		return true
 	}
 
@@ -313,20 +355,51 @@ func IsLikelySandboxDenied(decision SandboxDecision, result CommandResult) bool 
 // the sandbox classified an execution as denied. It is suitable for an
 // approval prompt: unlike the full stderr stream, it keeps the reason concise
 // while preserving the OS error the user needs to make a decision.
-func SandboxDenialDetail(result CommandResult) string {
+//
+// The decision is part of the answer because a network failure is only a
+// sandbox denial when the sandbox is what removed the network.
+func SandboxDenialDetail(decision SandboxDecision, result CommandResult) string {
+	if detail := denialDetailIn(result, sandboxDeniedKeywords, nil); detail != "" {
+		return detail
+	}
+	if decision.NetworkBlocked {
+		return networkDenialDetail(result)
+	}
+	return ""
+}
+
+// networkDenialDetail is the output line that says the command could not reach
+// a host, or "" when the output does not say that.
+func networkDenialDetail(result CommandResult) string {
+	return denialDetailIn(result, networkDeniedKeywords, networkDeniedVetoes)
+}
+
+// denialDetailIn scans every output section for the first line carrying one of
+// the markers, in the order the sections are most likely to explain a failure.
+func denialDetailIn(result CommandResult, markers, vetoes []string) string {
 	for _, section := range []string{result.Stderr, result.Stdout, result.AggregatedOutput} {
 		// Strip known-benign macOS host-tool noise before scanning for denial
 		// keywords. Real denial messages never share those lines.
 		for _, line := range strings.Split(stripBenignNoise(section), "\n") {
 			lower := strings.ToLower(line)
-			for _, keyword := range sandboxDeniedKeywords {
-				if strings.Contains(lower, keyword) {
-					return strings.TrimSpace(line)
-				}
+			if containsAny(lower, vetoes) {
+				continue
+			}
+			if containsAny(lower, markers) {
+				return strings.TrimSpace(line)
 			}
 		}
 	}
 	return ""
+}
+
+func containsAny(line string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(line, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // SandboxModeLabel is the sandbox mode the configuration selects: a named

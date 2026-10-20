@@ -1,7 +1,7 @@
 <template>
   <section class="space-y-4" :aria-label="t('chat.subagentViewAria')">
     <div class="space-y-4">
-	  <template v-for="(block, idx) in record.blocks" :key="block.id || (block.kind === 'tool' ? block.step.stepId : `${record.agentId}-block-${idx}`)">
+	  <template v-for="(block, idx) in drawnBlocks" :key="block.id || (block.kind === 'tool' ? block.step.stepId : `${record.agentId}-block-${idx}`)">
         <!-- The prompt the dispatching agent gave it, collapsed to a card the
              reader can open — it is the frame around everything below, not a
              message someone typed here. -->
@@ -165,6 +165,8 @@ import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import { formatWorkedDurationLabel, thinkingBlockLabel, type SubagentCallTaskLive, type TimelineBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { subagentPhase } from '@/lib/subagentStatus'
+import { blockVisibleIn } from '@/lib/viewMode'
+import type { ViewMode } from '@/composables/useViewMode'
 import type { WorkspaceScope } from '@/lib/api'
 import { t } from '@/locales'
 
@@ -179,12 +181,15 @@ const props = withDefaults(defineProps<{
   scope?: WorkspaceScope
   /** The tab the drawer has in front, so a nested dispatch opens there marked. */
   activeAgentId?: string
+  /** How much of this run the tab draws — its own reading mode. */
+  viewMode?: ViewMode
 }>(), {
   foldState: () => ({}),
   callTasks: undefined,
   now: undefined,
   scope: undefined,
   activeAgentId: '',
+  viewMode: 'default',
 })
 const emit = defineEmits<{
   (e: 'fold-change', value: { id: string; open: boolean }): void
@@ -192,6 +197,13 @@ const emit = defineEmits<{
 }>()
 
 const hasAnswer = computed(() => props.record.blocks.some((block) => block.kind === 'assistant'))
+
+/**
+ * drawnBlocks is what this tab draws under its reading mode: the transcript
+ * minus the cards concise withholds. The record itself is untouched — the
+ * drawer, the workbench and the terminal still hold the whole run.
+ */
+const drawnBlocks = computed(() => props.record.blocks.filter((block) => blockVisibleIn(props.viewMode, block.kind)))
 
 const isRunning = computed(() => subagentPhase(props.record.status) === 'active')
 

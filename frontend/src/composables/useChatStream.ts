@@ -1569,6 +1569,16 @@ function releasedInputs(payload: Record<string, unknown>): ReleasedInput[] {
   })
 }
 
+/**
+ * Canonical titles the engine sends with a plan update, mapped to the localized
+ * name the card shows. The engine speaks English ("Updated Plan"); a Chinese
+ * interface says 更新待办. A title not in the map renders as itself, so an
+ * engine that invents a new one never shows a blank.
+ */
+const ENGINE_TITLES: Record<string, I18nKey> = {
+  'Updated Plan': 'chat.updatedPlan',
+}
+
 function parsePlanUpdatePayload(raw: unknown): PlanUpdateData | null {
   const payload = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : null
   if (!payload) return null
@@ -1597,8 +1607,10 @@ function parsePlanUpdatePayload(raw: unknown): PlanUpdateData | null {
       ? Number.parseInt(data.total, 10)
       : undefined
   const explanation = String(data.explanation ?? '').trim()
+  const rawTitle = String(data.title ?? '').trim()
+  const engineTitle = ENGINE_TITLES[rawTitle]
   return {
-    title: String(data.title ?? translate('chat.updatedPlan')).trim() || translate('chat.updatedPlan'),
+    title: (engineTitle ? translate(engineTitle) : rawTitle) || translate('chat.updatedPlan'),
     explanation: explanation || undefined,
     completed: Number.isFinite(completed) ? completed : undefined,
     total: Number.isFinite(total) ? total : undefined,

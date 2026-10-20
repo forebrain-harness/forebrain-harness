@@ -23,6 +23,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -135,6 +136,66 @@ func newestMarkdown(dir string) string {
 		}
 	}
 	return newest
+}
+
+// PlanFile is one plan document a conversation wrote, as a list needs it: where
+// it lives, when it was written, and its text. A conversation that replans
+// writes a new file each time (PlanPathForSession only ever names the newest),
+// so the record of earlier plans is the directory, not the newest file.
+type PlanFile struct {
+	Path      string // absolute
+	Name      string // base name, e.g. "add-auth-validation.md"
+	UpdatedAt time.Time
+	Markdown  string
+}
+
+// maxListedPlanBytes caps how much of one plan is carried in a list response.
+// A plan is prose; a megabyte of it is not a plan but a mistake, and the whole
+// history of a long conversation would otherwise sit in one JSON body.
+const maxListedPlanBytes = 1 << 20
+
+// PlansForSession lists a conversation's plan files, newest first. A missing
+// directory is an empty list, not an error: most conversations never plan.
+func PlansForSession(workspaceRoot, projectKey, sessionID string) ([]PlanFile, error) {
+	dir := PlanDirForSession(workspaceRoot, projectKey, sessionID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var plans []PlanFile
+	for _, e := range entries {
+		if !isPlanMarkdown(e) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		p := PlanFile{
+			Path:      filepath.Join(dir, e.Name()),
+			Name:      e.Name(),
+			UpdatedAt: info.ModTime(),
+		}
+		// A file that cannot be read, or one too large to belong in a list,
+		// still counts as a plan of this conversation; it simply arrives
+		// without text rather than blanking the whole list.
+		if info.Size() <= maxListedPlanBytes {
+			if b, readErr := os.ReadFile(p.Path); readErr == nil {
+				p.Markdown = strings.TrimSpace(string(b))
+			}
+		}
+		plans = append(plans, p)
+	}
+	sort.SliceStable(plans, func(i, j int) bool {
+		if plans[i].UpdatedAt.Equal(plans[j].UpdatedAt) {
+			return plans[i].Name < plans[j].Name
+		}
+		return plans[i].UpdatedAt.After(plans[j].UpdatedAt)
+	})
+	return plans, nil
 }
 
 // GetPlanForSession reads a conversation's current plan. A missing file yields

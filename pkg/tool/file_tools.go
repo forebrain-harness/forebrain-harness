@@ -848,6 +848,16 @@ func NewFileWriteTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			if hook := st.ActionHook(); hook != nil && !planWrite {
 				if ApprovedActionIDFromContext(ctx) == "" && (protected != "" || (!PolicyApprovedFromContext(ctx) && !st.PathGranted(abs, safety.FileSystemAccessWrite, ConversationSessionIDFromContext(ctx), RunIDFromContext(ctx), grantCWD))) {
 					payload := map[string]any{"file_path": in.FilePath, "resolved_file_path": abs, "content": in.Content}
+					// What the overwrite replaces. The approval card asks "may I write this file?",
+					// and the answer differs a lot between creating a file and replacing four
+					// hundred lines of one; the payload carried only the new content, so the card
+					// could not say which it was asking. Only the line count crosses the boundary —
+					// never the old content.
+					if before, err := os.ReadFile(abs); err == nil {
+						payload["existing_lines"] = CountLinesBytes(before)
+					} else {
+						payload["existing_lines"] = 0
+					}
 					markProtectedApproval(payload, protected)
 					id, ok, err := hook(ctx, "write_file", payload)
 					if err != nil {

@@ -341,3 +341,121 @@ func TestCopySessionPlansWithoutSourceIsNoop(t *testing.T) {
 // The helpers below were production functions that only the tests in this
 // package ever called. They live here so the production files carry no
 // unused code while the tests keep exercising the live code underneath.
+
+// PlansForSession is the history a conversation's plan directory already
+// holds: every .md it ever wrote, newest first, so the web can show previous
+// versions that PlanPathForSession (newest only) can never name.
+func TestPlansForSessionListsHistoryNewestFirst(t *testing.T) {
+	root := t.TempDir()
+	t0 := time.Now().Add(-time.Hour)
+	dir := PlanDirForSession(root, "proj", "s1")
+
+	writePlanFile(t, dir, "first-version.md", "# First\n", t0)
+	writePlanFile(t, dir, "second-version.md", "# Second\n", t0.Add(time.Minute))
+	writePlanFile(t, dir, "third-version.md", "# Third\n", t0.Add(2*time.Minute))
+
+	plans, err := PlansForSession(root, "proj", "s1")
+	if err != nil {
+		t.Fatalf("PlansForSession: %v", err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("got %d plans, want 3: %+v", len(plans), plans)
+	}
+	wantNames := []string{"third-version.md", "second-version.md", "first-version.md"}
+	for i, want := range wantNames {
+		if plans[i].Name != want {
+			t.Errorf("plans[%d].Name=%q want %q", i, plans[i].Name, want)
+		}
+		if got, wantPath := plans[i].Path, filepath.Join(dir, want); got != wantPath {
+			t.Errorf("plans[%d].Path=%q want %q", i, got, wantPath)
+		}
+		if plans[i].UpdatedAt.IsZero() {
+			t.Errorf("plans[%d].UpdatedAt is zero", i)
+		}
+	}
+	if plans[0].Markdown != "# Third" {
+		t.Errorf("plans[0].Markdown=%q want %q", plans[0].Markdown, "# Third")
+	}
+}
+
+// Ties on modification time order by name so a list never reorders itself
+// between two reads of the same directory.
+func TestPlansForSessionSameMtimeOrdersByName(t *testing.T) {
+	root := t.TempDir()
+	mt := time.Now().Add(-time.Hour)
+	dir := PlanDirForSession(root, "proj", "s1")
+
+	writePlanFile(t, dir, "b-plan.md", "# B\n", mt)
+	writePlanFile(t, dir, "a-plan.md", "# A\n", mt)
+
+	plans, err := PlansForSession(root, "proj", "s1")
+	if err != nil {
+		t.Fatalf("PlansForSession: %v", err)
+	}
+	if len(plans) != 2 || plans[0].Name != "a-plan.md" || plans[1].Name != "b-plan.md" {
+		t.Fatalf("plans=%+v want [a-plan.md b-plan.md]", plans)
+	}
+}
+
+// A plan list is the .md files and nothing else: the same isPlanMarkdown
+// definition newestMarkdown uses, so the two can never disagree about what
+// counts.
+func TestPlansForSessionSkipsHiddenAndNonMarkdown(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().Add(-time.Hour)
+	dir := PlanDirForSession(root, "proj", "s1")
+
+	writePlanFile(t, dir, "real-plan.md", "# Real\n", now)
+	writePlanFile(t, dir, ".draft.md", "# Draft\n", now.Add(time.Minute))
+	writePlanFile(t, dir, "notes.txt", "not a plan", now.Add(2*time.Minute))
+	if err := os.MkdirAll(filepath.Join(dir, "archive.md"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	plans, err := PlansForSession(root, "proj", "s1")
+	if err != nil {
+		t.Fatalf("PlansForSession: %v", err)
+	}
+	if len(plans) != 1 || plans[0].Name != "real-plan.md" {
+		t.Fatalf("plans=%+v want exactly real-plan.md", plans)
+	}
+}
+
+// Most conversations never plan; that is an empty list, not an error.
+func TestPlansForSessionMissingDirIsEmpty(t *testing.T) {
+	root := t.TempDir()
+	plans, err := PlansForSession(root, "proj", "never-planned")
+	if err != nil {
+		t.Fatalf("PlansForSession: %v", err)
+	}
+	if len(plans) != 0 {
+		t.Fatalf("plans=%+v want empty", plans)
+	}
+}
+
+// A plan too large to belong in a list still appears, without text: dropping
+// it would hide that the conversation planned, and carrying it would put a
+// huge body in one JSON response.
+func TestPlansForSessionOversizedPlanArrivesWithoutText(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().Add(-time.Hour)
+	dir := PlanDirForSession(root, "proj", "s1")
+
+	writePlanFile(t, dir, "small.md", "# Small\n", now)
+	huge := strings.Repeat("x", maxListedPlanBytes+1)
+	writePlanFile(t, dir, "huge.md", huge, now.Add(time.Minute))
+
+	plans, err := PlansForSession(root, "proj", "s1")
+	if err != nil {
+		t.Fatalf("PlansForSession: %v", err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("got %d plans, want 2", len(plans))
+	}
+	if plans[0].Name != "huge.md" || plans[0].Markdown != "" {
+		t.Errorf("oversized plan=%q markdown len=%d, want huge.md with empty text", plans[0].Name, len(plans[0].Markdown))
+	}
+	if plans[1].Markdown != "# Small" {
+		t.Errorf("small plan markdown=%q want %q", plans[1].Markdown, "# Small")
+	}
+}

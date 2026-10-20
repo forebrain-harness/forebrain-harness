@@ -2,8 +2,15 @@
   <aside class="chat-workbench" :class="{ 'chat-workbench--overlay': overlay }" data-testid="chat-workbench">
     <header class="chat-workbench-head">
       <span class="chat-workbench-title">{{ t('chat.workbench') }}</span>
-      <button type="button" class="chat-workbench-close" :aria-label="t('chat.workbenchClose')" @click="emit('close')">
-        <X class="size-4" aria-hidden="true" />
+      <button
+        type="button"
+        class="chat-workbench-close"
+        :aria-label="t('chat.workbenchClose')"
+        v-tip:bottom="t('chat.workbenchClose')"
+        data-testid="chat-workbench-close"
+        @click="emit('close')"
+      >
+        <PanelRightClose aria-hidden="true" />
       </button>
     </header>
 
@@ -71,6 +78,7 @@
         @view="(row) => emit('view', row)"
         @cancel="(row) => emit('cancel', row)"
         @cancel-all="() => emit('cancel-all')"
+        @open-plan="(plan) => emit('open-plan', plan)"
       />
       <ContextTab v-else-if="active === 'context'" :scope="scope" />
       <WorkingDirTab v-else-if="active === 'tree'" :scope="scope" :root-path="rootPath" @insert-ref="emit('insert-ref', $event)" />
@@ -102,12 +110,13 @@
  * selection itself always drags the window to itself.
  */
 import { computed, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue'
-import { ChevronLeft, ChevronRight, X } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight, PanelRightClose } from 'lucide-vue-next'
 
 import ContextTab from '@/components/workbench/ContextTab.vue'
 import ChangedFilesTab from '@/components/workbench/ChangedFilesTab.vue'
 import OverviewTab from '@/components/workbench/OverviewTab.vue'
 import WorkingDirTab from '@/components/workbench/WorkingDirTab.vue'
+import type { SessionPlan } from '@/composables/useSessionPlans'
 import type { AgentRosterRow, WorkspaceScope } from '@/lib/api'
 import { useI18n, type I18nKey } from '@/locales'
 
@@ -134,6 +143,7 @@ const emit = defineEmits<{
   (e: 'cancel', row: AgentRosterRow): void
   (e: 'cancel-all'): void
   (e: 'insert-ref', path: string): void
+  (e: 'open-plan', plan: SessionPlan): void
 }>()
 
 const { t } = useI18n()
@@ -324,6 +334,25 @@ watch(active, (tab) => {
   flex: none;
   border-left: 1px solid var(--forebrain-divider);
   background: var(--forebrain-surface);
+  /* Opening either right-hand panel is the same gesture (owner 2026-10-20): it
+     slides in from the edge it lives on. Only mounting plays it — the workbench
+     switching tabs is internal state and does not remount. */
+  animation: forebrain-drawer-in 160ms ease-out;
+}
+@keyframes forebrain-drawer-in {
+  from {
+    transform: translateX(32px);
+    opacity: 0.6;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-workbench {
+    animation: none;
+  }
 }
 .chat-workbench--overlay {
   position: fixed;
@@ -334,11 +363,16 @@ watch(active, (tab) => {
   border-left: 1px solid var(--forebrain-divider);
   box-shadow: var(--forebrain-shadow-pop);
 }
+/* The head is the same strip as the drawer's: one height, one set of
+   paddings, so the two panels' titles and collapse icons sit in the same place
+   and switching between them does not move anything. */
 .chat-workbench-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px 10px 16px;
+  height: 44px;
+  flex: none;
+  padding: 0 8px 0 16px;
 }
 .chat-workbench-title {
   font-size: 13px;
@@ -346,13 +380,16 @@ watch(active, (tab) => {
   color: var(--forebrain-text);
 }
 .chat-workbench-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: inline-grid;
+  place-items: center;
   width: 26px;
   height: 26px;
   border-radius: 7px;
   color: var(--forebrain-muted-text);
+}
+.chat-workbench-close svg {
+  width: 15px;
+  height: 15px;
 }
 .chat-workbench-close:hover {
   background: var(--forebrain-button-alt-bg);

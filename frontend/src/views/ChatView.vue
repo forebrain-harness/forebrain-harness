@@ -109,10 +109,12 @@
                       :picked="msg.picked"
                       @choose="(value) => pickFromNotice(msg, value)"
                     /></div>
-                  <!-- v-if outside the loop: the role does not change per plan
-                       block, and Vue gives v-if priority over v-for on the same
-                       element, which reads as if it did. -->
-                  <template v-if="msg.role === 'assistant'">
+                  <!-- v-if outside the loop: neither the role nor the reading
+                       mode changes per plan block, and Vue gives v-if priority
+                       over v-for on the same element, which reads as if it
+                       did. Concise hides the run's checklist: its progress
+                       still shows in the status line above the composer. -->
+                  <template v-if="msg.role === 'assistant' && viewMode === 'default'">
                   <template v-for="(block, planIdx) in getPlanBlocks(msg)" :key="planIdx">
                     <div class="space-y-2" :data-plan-block="`${msg.id ?? idx}-${planIdx}`">
                       <div class="flex items-center gap-2 text-sm font-medium text-[var(--forebrain-text)]">
@@ -157,7 +159,7 @@
                     </Avatar>
                     <MessageContent :class="messageContentClass(msg.role)">
                       <div
-                        v-if="msg.role === 'assistant' && msg.planUpdates?.length"
+                        v-if="msg.role === 'assistant' && msg.planUpdates?.length && viewMode === 'default'"
                         class="mb-3 space-y-3"
                       >
                         <PlanUpdateCard
@@ -180,8 +182,8 @@
                            stopped at. A live turn and a reloaded one build this
                            same list, so a refresh shows the conversation the user
                            was just watching. -->
-                      <template v-else-if="hasVisibleBlocks(msg.blocks)">
-                        <template v-for="(block, blockIdx) in msg.blocks" :key="`${msg.id ?? idx}-block-${blockIdx}`">
+                      <template v-else-if="hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length">
+                        <template v-for="(block, blockIdx) in drawnBlocks(msg.blocks)" :key="`${msg.id ?? idx}-block-${blockIdx}`">
                           <!-- A thinking block reads as the prototype's .think:
                                small, muted, no border of its own. The label
                                above the text names the block and how long the
@@ -444,6 +446,7 @@
                     <ComposerPlusMenu :disabled="composerLocked" @insert="insertPlusCommand" />
                     <ModeChip :mode="mode" :disabled="isStreaming || composerLocked" @select="selectMode" />
                     <ApprovalPresetPicker :session-id="sessionId" />
+                    <ViewModeChip v-model="viewMode" />
                   </div>
                   <div class="flex items-center gap-1">
                     <ContextRing
@@ -502,15 +505,32 @@
         :seen="seenAgentActivity"
         :overlay="workbenchOverlay"
         :now="subagentNow"
+        :plan-tabs="planTabs"
+        :active-plan="planActive"
         @select="selectSubagentTab"
         @close-tab="closeSubagentTab"
         @open="openSubagentTab"
         @collapse="collapseSubagentDrawer"
-        @escape-key="handleSubagentEscape(shownActive)"
+        @escape-key="planActive ? collapseSubagentDrawer() : handleSubagentEscape(shownActive)"
+        @select-plan="selectPlanTab"
+        @close-plan="closePlanTab"
       >
+        <!-- The open plan documents: their own tabs beside the subagents', and
+             the subagents stay mounted underneath so a draft, an attachment or
+             a scroll position survives a look at the plan. -->
+        <PlanDoc
+          v-for="tab in planTabs"
+          v-show="tab.id === planActive"
+          :key="tab.id"
+          :path="tab.path"
+          :at="tab.at"
+          :done="tab.done"
+          :total="tab.total"
+          :markdown="tab.markdown"
+        />
         <SubagentTab
           v-for="record in drawerRecords"
-          v-show="record.agentId === shownActive"
+          v-show="!planActive && record.agentId === shownActive"
           :key="record.agentId"
           :ref="(el) => setSubagentTabRef(record.agentId, el)"
           :record="record"
@@ -551,6 +571,7 @@
         @cancel="cancelRoster"
         @cancel-all="cancelAll"
         @insert-ref="insertWorkspaceRef"
+        @open-plan="openPlanTab"
       />
       <FolderDialog
         v-if="folderOpen"
@@ -645,6 +666,7 @@ import {
 import ForebrainPromptTextarea, { type BotOption } from '@/components/ForebrainPromptTextarea.vue'
 import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
 import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
+import ViewModeChip from '@/components/chat/ViewModeChip.vue'
 import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import PendingInputQueuePopover from '@/components/PendingInputQueuePopover.vue'
@@ -657,6 +679,12 @@ import { FOREBRAIN_GOAL_CHECK_AGENT_TYPE } from '@/lib/forebrainGatewayRuntime'
 import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
 import { useChatStream, workedLineOf, emptyPendingInputPreview, hasVisibleBlocks, thinkingBlockLabel, formatFirstTokenDuration, formatRuntimeStatusLabel, type ChatMessage, type PlanBlock, type SubagentTranscript } from '@/composables/useChatStream'
 import { subagentPhase } from '@/lib/subagentStatus'
+import { blockVisibleIn } from '@/lib/viewMode'
+import { useViewMode } from '@/composables/useViewMode'
+import { type PlanTab, type SessionPlan } from '@/composables/useSessionPlans'
+import { planProgress, planTitle } from '@/lib/planProgress'
+import { formatClock } from '@/lib/time'
+import PlanDoc from '@/components/chat/PlanDoc.vue'
 import { useLastSession } from '@/composables/useLastSession'
 import { useTopbar } from '@/composables/useTopbar'
 import { useWorkbench } from '@/composables/useWorkbench'
@@ -1300,6 +1328,23 @@ const workbenchScope = computed<WorkspaceScope>(() => {
 const { refresh: workspaceTreeRefresh } = useWorkspaceTree(workbenchScope)
 
 /**
+ * How much of the run this conversation draws. It is a reading mode, kept per
+ * conversation: nothing is deleted, the workbench and the terminal still hold
+ * the whole record, and anything waiting for an answer stays in the panel above
+ * the composer.
+ */
+const { viewMode } = useViewMode(() => String(sessionId.value ?? ''))
+
+/**
+ * drawnBlocks is what the timeline draws under the mode in force: the same
+ * blocks, minus the ones concise withholds. In the default mode it is the list
+ * itself, so nothing about a stored message changes.
+ */
+function drawnBlocks(blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> {
+  return (blocks ?? []).filter((block) => blockVisibleIn(viewMode.value, block.kind))
+}
+
+/**
  * The conversation's own model choice — what runs this session and what it
  * may be switched to. The chip writes it, the top bar names it, and the
  * effort chip reads the levels the catalog offers for the model in force.
@@ -1376,7 +1421,15 @@ const conversationSubagents = computed(() => subagents.value.filter((record) => 
 const drawerRecords = computed(() => drawerTabs.value
   .map((id) => subagents.value.find((record) => record.agentId === id))
   .filter((record): record is SubagentTranscript => Boolean(record)))
-const drawerVisible = computed(() => drawerOpen.value && drawerRecords.value.length > 0 && !isFreshChat.value)
+// The plan documents open in the same drawer as their own tabs (plan 085): a
+// plan's row in the workbench opens its text here, rendered, rather than in a
+// dialog over the conversation. planActive is the plan tab in front, empty
+// while a subagent's tab is.
+const planTabs = ref<PlanTab[]>([])
+const planActive = ref('')
+const drawerVisible = computed(() => drawerOpen.value
+  && (drawerRecords.value.length > 0 || planTabs.value.length > 0)
+  && !isFreshChat.value)
 /** The tab in front; a closed or unknown id falls back to the first one open. */
 const shownActive = computed(() => (
   drawerRecords.value.some((record) => record.agentId === drawerActive.value)
@@ -1623,6 +1676,7 @@ async function openSubagentTab(agentId: string) {
   if (!id) return
   if (!drawerTabs.value.includes(id)) drawerTabs.value = [...drawerTabs.value, id]
   drawerActive.value = id
+  planActive.value = ''
   drawerOpen.value = true
   workbench.close()
   markAgentSeen(id)
@@ -1644,8 +1698,59 @@ function selectSubagentTab(agentId: string) {
   if (!id) return
   drawerOpen.value = true
   drawerActive.value = id
+  planActive.value = ''
   markAgentSeen(id)
   void loadSubagentBudget(id)
+  scheduleBrowsePersist()
+}
+
+/**
+ * Opens one of the conversation's plan documents as a drawer tab (plan 085):
+ * 查看全文 in the workbench's plan row lands here. A plan that is already open
+ * is only brought to the front, and the workbench gives up the column the way
+ * it does for a subagent.
+ */
+function openPlanTab(plan: SessionPlan) {
+  const id = `plan:${plan.name}`
+  if (!planTabs.value.some((tab) => tab.id === id)) {
+    const { done, total } = planProgress(plan.markdown)
+    planTabs.value = [...planTabs.value, {
+      id,
+      label: `${t('chat.benchPlan')} · ${planTitle(plan.markdown) || plan.name}`,
+      path: plan.path,
+      at: formatClock(plan.updatedAt),
+      done,
+      total,
+      markdown: plan.markdown,
+    }]
+  }
+  planActive.value = id
+  drawerOpen.value = true
+  workbench.close()
+  scheduleBrowsePersist()
+}
+
+/** Brings an already open plan tab to the front. */
+function selectPlanTab(id: string) {
+  if (!planTabs.value.some((tab) => tab.id === id)) return
+  drawerOpen.value = true
+  planActive.value = id
+  scheduleBrowsePersist()
+}
+
+/**
+ * Closes a plan tab. The document is only being put away — the file stays in
+ * the conversation's history — and the tab to its left takes the front. The
+ * last tab out of an otherwise empty drawer closes the drawer.
+ */
+function closePlanTab(id: string) {
+  const open = planTabs.value
+  const index = open.findIndex((tab) => tab.id === id)
+  if (index < 0) return
+  const rest = open.filter((tab) => tab.id !== id)
+  planTabs.value = rest
+  if (planActive.value === id) planActive.value = rest[rest.length - 1]?.id ?? ''
+  if (!rest.length && !drawerRecords.value.length) drawerOpen.value = false
   scheduleBrowsePersist()
 }
 
@@ -1673,7 +1778,7 @@ function toggleSubagentDrawer() {
     collapseSubagentDrawer()
     return
   }
-  if (drawerTabs.value.length) {
+  if (drawerTabs.value.length || planTabs.value.length) {
     drawerOpen.value = true
     workbench.close()
     scheduleBrowsePersist()
@@ -1717,6 +1822,10 @@ watch(sessionId, (sid, previousSid) => {
   drawerTabs.value = drawer.tabs
   drawerActive.value = drawer.active
   drawerOpen.value = drawer.open
+  // A plan document belongs to the conversation whose plans it came from, so
+  // the tabs close with it rather than showing another conversation's file.
+  planTabs.value = []
+  planActive.value = ''
   // One conversation's notices, steer/queue choices and /context report are
   // not the next one's.
   subagentNotices.value = {}
@@ -1894,19 +2003,16 @@ function messageBubbleRole(role: string): 'user' | 'assistant' {
  * the row means, and an empty bubble beside that card is just noise. The same
  * goes for a row whose only content is a card the timeline already draws, and
  * for a row whose only block is a card-less gate's anchor, which draws
- * nothing.
+ * nothing — and for a row whose cards the reading mode takes away, which would
+ * otherwise leave an empty bubble behind.
  */
 function messageHasBubble(msg: ChatMessage): boolean {
   if (String(msg.content ?? '').trim()) return true
   if (msg.attachments?.length) return true
   if (msg.role !== 'assistant') return false
-  return Boolean(
-    hasVisibleBlocks(msg.blocks) ||
-    msg.planUpdates?.length ||
-    msg.planBlocks?.length ||
-    msg.turnDiffs?.length ||
-    workedLineOf(msg, t).label,
-  )
+  if (hasVisibleBlocks(msg.blocks) && drawnBlocks(msg.blocks).length) return true
+  if (viewMode.value === 'default' && (msg.planUpdates?.length || msg.planBlocks?.length)) return true
+  return Boolean(msg.turnDiffs?.length || workedLineOf(msg, t).label)
 }
 
 function messageClass(role: string): string | undefined {

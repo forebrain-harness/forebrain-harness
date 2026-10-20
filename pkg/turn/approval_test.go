@@ -674,7 +674,7 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 	gate := &PendingApprovalGate{
 		Runs: runs, Actions: actions,
 		PlanScope: func(context.Context, string) (string, string) { return stateRoot, "proj" },
-		ReviewModels: func() []PlanReviewModelOption {
+		ReviewModels: func(string) []PlanReviewModelOption {
 			return []PlanReviewModelOption{
 				{Provider: "openai", Model: "gpt-5.1", Current: true},
 				{Provider: "zhipuai", Model: "glm-5.3-flash"},

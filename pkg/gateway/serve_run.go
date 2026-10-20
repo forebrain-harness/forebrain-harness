@@ -84,7 +84,7 @@ func RunServeBlocking(ctx context.Context, opts ServeOptions) error {
 		// supplied one, so a channel message arriving while a gate was open
 		// started a second run against that session. submitChannelTurn already
 		// knows how to report the wait to the user.
-		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc, state.NewProjectStore(h.SQL, runner.AgentName))),
+		turn.WithApprovalGate(approvalGateOn(root, h.Deps.AppCfg, runner, runSvc, actionSvc, state.NewProjectStore(h.SQL, runner.AgentName), sessStore)),
 	)
 	// The pool is built before the first request so project sessions are
 	// served by per-project runners from the start.

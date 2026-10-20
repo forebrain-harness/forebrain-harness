@@ -881,12 +881,23 @@ func TestTrimTextToUTF8BytesKeepsIllFormedInput(t *testing.T) {
 }
 
 func TestWebSearchPermissionPayloadIncludesQueryRule(t *testing.T) {
-	got := WebSearchPermissionPayload(" golang testing ")
+	got := WebSearchPermissionPayload(" golang testing ", 0)
 	if got["query"] != "golang testing" {
 		t.Fatalf("payload query mismatch: %#v", got)
 	}
 	if got["rule_content"] != "query:golang testing" {
 		t.Fatalf("payload rule mismatch: %#v", got)
+	}
+	if got["results_limit"] != 5 {
+		t.Fatalf("payload results_limit mismatch: %#v", got)
+	}
+	got = WebSearchPermissionPayload("golang testing", 7)
+	if got["results_limit"] != 7 {
+		t.Fatalf("payload results_limit mismatch: %#v", got)
+	}
+	got = WebSearchPermissionPayload("golang testing", 50)
+	if got["results_limit"] != 10 {
+		t.Fatalf("payload results_limit mismatch: %#v", got)
 	}
 }
 

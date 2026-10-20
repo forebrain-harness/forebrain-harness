@@ -4,8 +4,16 @@
     :default-open="open == null ? defaultOpen : undefined"
     @update:open="emit('update:open', Boolean($event))"
   >
-    <ToolHeader type="tool-function_call" :state="toolState" :title="title" />
+    <ToolHeader type="tool-function_call" :state="toolState" :title="title" single-line />
     <ToolContent>
+      <!-- A summary long enough to wrap is truncated out of the header, so the
+           full call moves to the top of the body: the header stays a one-line
+           glance, the command itself stays readable. Short summaries live in
+           the header alone and are not repeated here. -->
+      <pre
+        v-if="fullCommand"
+        class="cmd-full mb-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 p-2 font-mono text-xs"
+      >{{ fullCommand }}</pre>
       <!-- An image step's pixels live behind a URL, never in the step payload:
            the thumbnail fetches them from the workspace raw endpoint, and a
            click opens the full image in a new tab. -->
@@ -82,6 +90,18 @@ const emit = defineEmits<{
  * separate error line would repeat what the body already says.
  */
 const isSkill = computed(() => String(props.step.category ?? '').trim().toLowerCase() === 'skill')
+
+/**
+ * The piece of the call the one-line header could not show: a summary longer
+ * than 120 characters (or one the engine wrapped itself) is ellipsised out of
+ * the header, so it renders verbatim at the top of the body instead. Empty for
+ * short summaries — every card does not grow an extra block.
+ */
+const fullCommand = computed(() => {
+  const summary = props.step.summary
+  if (summary.length > 120 || summary.includes('\n')) return summary
+  return ''
+})
 
 /**
  * previewUrl is the image step's pixel URL, built from the same file view every

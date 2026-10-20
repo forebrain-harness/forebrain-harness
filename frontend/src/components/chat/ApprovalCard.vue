@@ -94,7 +94,8 @@
                   type="button"
                   :disabled="submitting[a.id]"
                   data-testid="exit-plan-keep-planning"
-                  @click="keepPlanning(a)"
+                  :aria-expanded="!!planFeedbackOpen[a.id]"
+                  @click="keepPlanningChosen(a)"
                 >{{ t('chat.exitPlanKeepPlanning') }}</button>
                 <button
                   v-if="(exitPlanRequest(a)?.planReviewModels ?? []).length"
@@ -102,15 +103,35 @@
                   type="button"
                   :disabled="submitting[a.id]"
                   data-testid="exit-plan-ask-review"
-                  @click="toggleModelPicker(a)"
+                  @click="askReviewChosen(a)"
                 >{{ t('chat.exitPlanAskReview') }}</button>
               </div>
-              <input
-                v-model="denyFeedback[a.id]"
-                class="w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
-                :disabled="submitting[a.id]"
-                :placeholder="t('chat.exitPlanFeedbackPlaceholder')"
-              />
+              <!-- The feedback field appears only after「继续规划」is chosen —
+                   the verdict comes first, the words for the planner after —
+                   and folds away with its draft on any other decision. -->
+              <div v-if="planFeedbackOpen[a.id]" class="flex flex-wrap items-center gap-2" data-testid="exit-plan-feedback">
+                <input
+                  :ref="(el) => setFeedbackInput(a.id, el)"
+                  v-model="denyFeedback[a.id]"
+                  class="min-w-[12rem] flex-1 rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
+                  :disabled="submitting[a.id]"
+                  :placeholder="t('chat.exitPlanFeedbackPlaceholder')"
+                  @keydown.enter.prevent="keepPlanning(a)"
+                  @keydown.esc.prevent="closePlanFeedback(a)"
+                />
+                <button
+                  class="forebrain-btn forebrain-btn-primary text-xs"
+                  type="button"
+                  :disabled="submitting[a.id]"
+                  @click="keepPlanning(a)"
+                >{{ t('chat.exitPlanKeepPlanning') }}</button>
+                <button
+                  class="forebrain-btn forebrain-btn-ghost text-xs"
+                  type="button"
+                  :disabled="submitting[a.id]"
+                  @click="closePlanFeedback(a)"
+                >{{ t('common.cancel') }}</button>
+              </div>
               <div
                 v-if="modelPicking[a.id]"
                 class="overflow-hidden rounded-lg border border-[var(--forebrain-divider)]"
@@ -168,52 +189,24 @@
         </div>
       </template>
       <template v-else>
-        <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0">
-            <div class="text-sm font-medium text-[var(--forebrain-text)] truncate">{{ approvalKindLabel(a.kind) }}</div>
-            <button
-              v-if="requesterLabel(a) && canOpenAgent"
-              type="button"
-              class="block max-w-full truncate text-left text-xs text-[var(--forebrain-text-2)] hover:text-[var(--forebrain-brand-1)] disabled:pointer-events-none"
-              :disabled="!a.agentId"
-              @click="a.agentId && emit('open-agent', a.agentId)"
-            >{{ requesterLabel(a) }}</button>
-            <div v-else-if="requesterLabel(a)" class="truncate text-xs text-[var(--forebrain-text-2)]">{{ requesterLabel(a) }}</div>
-            <div class="text-xs text-muted-foreground truncate">{{ approvalHint(a) }}</div>
-          </div>
-          <div v-if="!approvalSuggestion(a)" class="flex shrink-0 items-center gap-2">
-            <button class="forebrain-btn forebrain-btn-ghost" type="button" :disabled="submitting[a.id]" @click="denyAction(a.id)">{{ t('chat.deny') }}</button>
-            <button class="forebrain-btn forebrain-btn-primary" type="button" :disabled="submitting[a.id]" data-testid="pending-approve" @click="approveAction(a.id)">{{ t('chat.approveOnce') }}</button>
-          </div>
-        </div>
-        <input
-          v-if="!approvalSuggestion(a)"
-          v-model="denyFeedback[a.id]"
-          class="mt-2 w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
-          :disabled="submitting[a.id]"
-          :placeholder="t('chat.otherOptional')"
+        <!-- Every family that asks — files, commands, the sandbox, hosts,
+             permissions, plan mode, MCP, protected reads, search, memory,
+             and the fallback no other family claimed — is the one shared
+             gate card: its own question, its own facts, the engine's own
+             decision options. -->
+        <ApprovalGateCard
+          :action="a"
+          :options="approvalDecisionOptions(a)"
+          :decision-label="(option) => approvalDecisionLabel(option, a, approvalGate(a).facts)"
+          :submit="(option) => submitApprovalDecision(a, option)"
+          :submitting="!!submitting[a.id]"
+          :error="errors[a.id] ?? ''"
+          :requester="requesterLabel(a)"
+          :can-open-agent="canOpenAgent"
+          @open-agent="(agentId) => emit('open-agent', agentId)"
         />
       </template>
-      <div v-if="!isExitPlan(a) && !isWebFetchAction(a) && approvalSuggestion(a)" class="mt-2 space-y-2 rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-bg-alt)] p-2 text-xs text-[var(--forebrain-text-2)]">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="font-medium text-[var(--forebrain-text)]">{{ t('chat.permissionMemory') }}</span>
-          <span class="font-mono text-[11px] text-[var(--forebrain-muted-text)]">{{ approvalSuggestionLabel(a) }}</span>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <button
-            v-for="(option, index) in approvalDecisionOptions(a)"
-            :key="`${a.id}-${option.decision}-${index}`"
-            :class="option.decision === 'accept' ? 'forebrain-btn forebrain-btn-primary text-xs' : 'forebrain-btn forebrain-btn-ghost text-xs'"
-            type="button"
-            :disabled="submitting[a.id]"
-            :data-testid="`pending-decision-${option.decision}`"
-            @click="submitApprovalDecision(a, option)"
-          >
-            {{ approvalDecisionLabel(option) }}
-          </button>
-        </div>
-      </div>
-      <div v-if="errors[a.id]" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
+      <div v-if="errors[a.id] && isWebFetchAction(a)" class="mt-2 text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[a.id] }}</div>
     </div>
     <div v-for="qa in pendingAsk" :key="qa.id" class="rounded-lg border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-3 py-2 space-y-2" data-testid="pending-question" :data-action-id="qa.id">
       <button
@@ -224,30 +217,18 @@
         @click="qa.agentId && emit('open-agent', qa.agentId)"
       >{{ requesterLabel(qa) }}</button>
       <div v-else-if="requesterLabel(qa)" class="truncate text-xs text-[var(--forebrain-text-2)]">{{ requesterLabel(qa) }}</div>
-      <div v-for="q in qa.form.questions" :key="q.id" class="space-y-1">
-        <div class="text-sm font-medium text-[var(--forebrain-text)]">{{ q.prompt }}</div>
-        <div class="flex flex-wrap gap-2">
-          <label v-for="opt in q.options" :key="opt.id" class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs">
-            <input
-              :type="q.allowMultiple ? 'checkbox' : 'radio'"
-              :name="`ask-${qa.id}-${q.id}`"
-              :value="opt.id"
-              v-model="answers[qa.id][q.id]"
-            />
-            <span>{{ opt.label }}</span>
-          </label>
-        </div>
-        <div v-if="q.allowOther" class="mt-1">
-          <input
-            class="w-full rounded-md border border-[var(--forebrain-divider)] bg-[var(--forebrain-surface)] px-2 py-1 text-xs text-[var(--forebrain-text-2)]"
-            :placeholder="t('chat.otherOptional')"
-            v-model="others[qa.id][q.id]"
-          />
-        </div>
-      </div>
-      <div class="flex justify-end">
-        <button class="forebrain-btn forebrain-btn-primary" type="button" :disabled="submitting[qa.id]" @click="submitAsk(qa.id)">{{ t('common.submit') }}</button>
-      </div>
+      <!-- The questions, one per screen behind the tab bar the terminal's
+           overlay asks with; the answers live in the shared store below, so
+           the workshop's panel shows the same ones answered. -->
+      <AskTabs
+        :questions="qa.form.questions"
+        :answers="answers[qa.id] ?? {}"
+        :others="others[qa.id] ?? {}"
+        :submitting="!!submitting[qa.id]"
+        @set-answer="(questionId, value) => setAskAnswer(qa.id, questionId, value)"
+        @set-other="(questionId, value) => setAskOther(qa.id, questionId, value)"
+        @submit="submitAsk(qa.id)"
+      />
       <div v-if="errors[qa.id]" class="text-xs text-[var(--forebrain-danger)]" role="alert">{{ errors[qa.id] }}</div>
     </div>
   </div>
@@ -266,13 +247,15 @@
  *   submitted through the same pending-actions composable the workshop's
  *   panel uses.
  */
-import { computed } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import { CircleAlert } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { MessageResponse } from '@repo/elements/message'
 import { normalizeApprovalDecision, formatToolDuration } from '@/composables/useChatStream'
-import { usePendingActions } from '@/composables/usePendingActions'
+import { usePendingActions, type ActionRow } from '@/composables/usePendingActions'
 import { useI18n } from '@/locales'
+import ApprovalGateCard from './ApprovalGateCard.vue'
+import AskTabs from './AskTabs.vue'
 
 const props = withDefaults(defineProps<{
   /** A decided approval record from the timeline; a card holding one renders
@@ -324,6 +307,7 @@ const {
   errors,
   denyFeedback,
   modelPicking,
+  planFeedbackOpen,
   loading,
   loadError,
   load,
@@ -334,26 +318,49 @@ const {
   activeReviewLabel,
   clearContextLabel,
   submitAsk,
-  approveAction,
+  setAskAnswer,
+  setAskOther,
   submitApprovalDecision,
-  denyAction,
   approveExitPlan,
   keepPlanning,
+  openPlanFeedback,
+  closePlanFeedback,
   toggleModelPicker,
   requestReview,
   stopReview,
-  approvalSuggestion,
   approvalDecisionOptions,
   approvalDecisionLabel,
+  approvalGate,
   isWebFetchAction,
   webFetchPage,
-  approvalSuggestionLabel,
-  approvalKindLabel,
   requesterLabel,
-  approvalHint,
 } = usePendingActions({
   sessionId: computed(() => props.sessionId ?? null),
   version: computed(() => props.version ?? 0),
   contextUsedPercent: computed(() => props.contextUsedPercent ?? null),
 })
+
+/** The feedback inputs, by action id, so the field can take focus the moment
+ *  the verdict that opens it lands. */
+const feedbackInputs = ref<Record<string, HTMLInputElement | null>>({})
+
+function setFeedbackInput(actionId: string, el: unknown) {
+  feedbackInputs.value[actionId] = (el as HTMLInputElement | null) ?? null
+}
+
+/** 「继续规划」first opens the field for the planner's words; the same verdict
+ *  again sends them. Any other decision folds it away (in the composable). */
+function keepPlanningChosen(a: ActionRow) {
+  if (planFeedbackOpen.value[a.id]) {
+    void keepPlanning(a)
+    return
+  }
+  openPlanFeedback(a)
+  void nextTick(() => feedbackInputs.value[a.id]?.focus())
+}
+
+function askReviewChosen(a: ActionRow) {
+  closePlanFeedback(a)
+  toggleModelPicker(a)
+}
 </script>

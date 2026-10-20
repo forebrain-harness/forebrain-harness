@@ -113,12 +113,15 @@ test('a parked exit-plan approval shows its plan and choices, not raw ids', asyn
   const text = await main.innerText()
   expect(text).not.toContain('exit_plan_mode')
   expect(text).not.toContain('act-e2e-exitplan-idle')
-  // The four choices, in the overlay's order, and the feedback row.
+  // The four choices, in the overlay's order. The feedback field waits for
+  // its own verdict: it appears only after「继续规划」is chosen.
   await expect(page.locator('[data-testid="exit-plan-approve-clear"]')).toBeVisible()
   await expect(page.locator('[data-testid="exit-plan-approve"]')).toBeVisible()
   await expect(page.locator('[data-testid="exit-plan-keep-planning"]')).toBeVisible()
   await expect(page.locator('[data-testid="exit-plan-ask-review"]')).toBeVisible()
-  await expect(card.locator('input')).toHaveAttribute('placeholder', '继续规划时告诉规划模型要改什么（可选）')
+  await expect(card.locator('[data-testid="exit-plan-feedback"]')).toHaveCount(0)
+  await page.locator('[data-testid="exit-plan-keep-planning"]').click()
+  await expect(card.locator('[data-testid="exit-plan-feedback"] input')).toHaveAttribute('placeholder', '继续规划时告诉规划模型要改什么（可选）')
   await shot(page, 'exit-plan-approval-card')
 })
 

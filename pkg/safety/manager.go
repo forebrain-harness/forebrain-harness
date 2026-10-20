@@ -339,6 +339,12 @@ func (m *Manager) RunCommand(ctx context.Context, cfg *appcfg.Root, req CommandR
 		return CommandResult{}, decision, err
 	}
 	req = constrainRequestToFilesystemProfile(req, workDirAbs)
+	// The network decision is final at this point: the runtime config has been
+	// merged in and the filesystem profile cannot widen it. Recording it here
+	// is what lets a later network failure be blamed on the sandbox instead of
+	// on the host — a command that could not resolve a name inside a sandbox
+	// that has no network has no other explanation.
+	decision.NetworkBlocked = !req.AllowNetwork
 	networkToken := ""
 	runCtx := ctx
 	var networkProxy *managedNetworkProxy

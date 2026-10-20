@@ -2244,8 +2244,10 @@ export const forebrainApi = {
       .then((res) => res.data)
   },
 
-  sessionPlanMd(sessionId: string) {
-    return api.get<{ markdown: string }>(`/chat/sessions/${sessionId}/plan-md`).then((res) => res.data)
+  sessionPlans(sessionId: string) {
+    return api.get<{ plans: { name: string; path: string; updatedAt: number; markdown: string }[] }>(
+      `/chat/sessions/${sessionId}/plans`,
+    ).then((res) => res.data.plans ?? [])
   },
 
   sessionContext(sessionId: string, opts?: { scope?: 'summary' | 'full'; runId?: string }) {

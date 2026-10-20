@@ -767,3 +767,32 @@ func TestTypedSubagentContinuationCompactsFirstWhenItNoLongerFits(t *testing.T) 
 		t.Fatalf("continuation request carries the boundary after the new turn: summary at %d, new turn at %d", summaryAt, turnAt)
 	}
 }
+
+// The model a subagent execution's transcript is written under is the one its
+// record carries — dispatch decided it once, and its requests were routed to
+// it — not a model resolved again at write time. Resolving one here is how a run
+// announced on one model came to be recorded under another.
+func TestSubagentTurnModelPrefersTheRecord(t *testing.T) {
+	env, _ := envWithScriptedLLM(t, nil)
+	ctx := context.Background()
+	if err := env.Deps.SessionStore.Ensure(ctx, "s-turn", "conversation"); err != nil {
+		t.Fatal(err)
+	}
+	pinned := run.WithSubagentModelOverride(ctx, run.SubagentModelOverride{
+		Provider: "openai", Model: "override-model",
+	})
+
+	// The record outranks both the execution's pin and the agent's own model.
+	if got := subagentTurnModel(pinned, env, run.SubagentExecRequest{SessionID: "s-turn", Model: "recorded-model"}); got != "recorded-model" {
+		t.Fatalf("model = %q, want the record's model", got)
+	}
+	// A record with no model of its own — one persisted before dispatches
+	// carried theirs — resolves the way its surfaces always did: the pin first.
+	if got := subagentTurnModel(pinned, env, run.SubagentExecRequest{SessionID: "s-turn"}); got != "override-model" {
+		t.Fatalf("model = %q, want the execution's pin", got)
+	}
+	// Then the model the runtime names for the conversation.
+	if got := subagentTurnModel(ctx, env, run.SubagentExecRequest{SessionID: "s-turn"}); got != "gpt-test" {
+		t.Fatalf("model = %q, want the conversation's model", got)
+	}
+}

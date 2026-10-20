@@ -29,7 +29,7 @@ import (
 // no launch project of its own, so the base runner's key is empty while the
 // session runs on a project runner whose key is set. The plan the gate advertises
 // must be the plan under the same key the session writes to.
-func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *state.RunStore, actions *state.ActionService, projects *state.ProjectStore) *turn.PendingApprovalGate {
+func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *state.RunStore, actions *state.ActionService, projects *state.ProjectStore, sessions *state.SessionStore) *turn.PendingApprovalGate {
 	gate := &turn.PendingApprovalGate{Runs: runs}
 	if actions != nil {
 		gate.Actions = actions
@@ -40,16 +40,19 @@ func approvalGateOn(home string, cfg *config.Root, runner *run.Runner, runs *sta
 	gate.PlanScope = func(ctx context.Context, sessionID string) (string, string) {
 		return config.ActiveStateRoot(home, cfg), projectKeyForSession(ctx, projects, sessionID)
 	}
-	gate.ReviewModels = func() []turn.PlanReviewModelOption {
+	// The model marked current is the one the conversation under approval runs
+	// on — its own stored choice against the live config, not the base
+	// runner's default, which is what the web /model switch leaves behind.
+	gate.ReviewModels = func(sessionID string) []turn.PlanReviewModelOption {
 		if runner == nil {
 			return nil
 		}
-		provider, model := run.PrimaryModel(runner)
+		sel := run.PrimaryModelStateForSession(runner, sessions, sessionID)
 		agentName := strings.TrimSpace(runner.AgentName)
 		if agentName == "" {
 			agentName = "main"
 		}
-		return turn.PlanReviewModelOptions(cfg, agentName, provider, model)
+		return turn.PlanReviewModelOptions(cfg, agentName, sel.Provider, sel.Model)
 	}
 	return gate
 }
@@ -59,7 +62,7 @@ func (s *Server) approvalGate() *turn.PendingApprovalGate {
 	if s == nil {
 		return nil
 	}
-	return approvalGateOn(s.Home, s.modelConfig(), s.Runner, s.RunRT, s.Actions, s.Projects)
+	return approvalGateOn(s.Home, s.modelConfig(), s.Runner, s.RunRT, s.Actions, s.Projects, s.Sessions)
 }
 
 // modelConfig is the configuration the active agent's models resolve against:

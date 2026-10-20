@@ -178,6 +178,57 @@ func TestWriteFileAllowedProjectRootIncludesResolvedPath(t *testing.T) {
 	}
 }
 
+func TestWriteApprovalPayloadCarriesTheLineCountItReplaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		exists   bool
+		existing string
+		want     int
+	}{
+		{name: "absent file", exists: false, want: 0},
+		{name: "trailing newline is not a line", exists: true, existing: "a\nb\n", want: 2},
+		{name: "empty file", exists: true, existing: "", want: 0},
+		{name: "single line without newline", exists: true, existing: "a", want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			p := filepath.Join(workspace, "note.txt")
+			if tt.exists {
+				if err := os.WriteFile(p, []byte(tt.existing), 0o644); err != nil {
+					t.Fatalf("write fixture: %v", err)
+				}
+			}
+			st := NewState(workspace)
+			st.SetPrimaryWorkspaceBoundary("", workspace, nil)
+			var payload map[string]any
+			st.SetActionHook(func(ctx context.Context, kind string, body any) (string, bool, error) {
+				if kind != "write_file" {
+					t.Fatalf("unexpected action kind %q", kind)
+				}
+				payload, _ = body.(map[string]any)
+				return "act-1", true, nil
+			})
+			tool, err := NewFileWriteTool(st, nil)
+			if err != nil {
+				t.Fatalf("NewFileWriteTool: %v", err)
+			}
+			if _, err := tool.Handle(context.Background(), `{"file_path":"`+escapeJSONPath(p)+`","content":"new"}`); err == nil {
+				t.Fatal("expected requires-action error from approval hook")
+			}
+			if payload == nil {
+				t.Fatal("approval payload not captured")
+			}
+			if got := payload["existing_lines"]; got != tt.want {
+				t.Fatalf("existing_lines=%#v want %d", got, tt.want)
+			}
+			if payload["content"] != "new" {
+				t.Fatalf("payload content mismatch: %#v", payload)
+			}
+		})
+	}
+}
+
 func TestWriteFileMarksReadStateAsWrite(t *testing.T) {
 	tmp := t.TempDir()
 	p := filepath.Join(tmp, "note.txt")

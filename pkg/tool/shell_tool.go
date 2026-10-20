@@ -493,7 +493,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 			// Not an error yet: the denial is about to become an approval
 			// request or an authorized retry. Only a denial nothing can answer
 			// is logged as one, below.
-			denialReason := sandboxDenialReason(res, runErr)
+			denialReason := sandboxDenialReason(decision, res, runErr)
 			slog.Warn("sandbox denied shell command; asking whether it may run outside the sandbox",
 				"command", req.command, "reason", denialReason, "err", runErr)
 			authorized, approvalErr := requestSandboxRetryApproval(ctx, st, rt, req, res, decision, runErr, denialReason)
@@ -636,7 +636,7 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 		// The retry approval was already requested above, before the escalated
 		// attempt this denial may have come from; asking again here would show
 		// the same prompt twice for one command.
-		denialReason := sandboxDenialReason(res, runErr)
+		denialReason := sandboxDenialReason(decision, res, runErr)
 		slog.Error("sandbox denied shell command", "command", req.command, "reason", denialReason, "err", runErr)
 		captureCompletion()
 		return "", sandboxDeniedCommandError(res, denialReason)
@@ -908,14 +908,18 @@ func sandboxRetryApprovalAllowed(policy safety.ApprovalPolicy) bool {
 	}
 }
 
-func sandboxDenialReason(res safety.CommandResult, runErr error) string {
+// sandboxDenialReason is what an approval prompt and a denial body tell the
+// reader about why the sandbox stopped the command. The decision is part of the
+// input because a network failure counts as a denial only when the sandbox is
+// what removed the network (decision.NetworkBlocked).
+func sandboxDenialReason(decision safety.SandboxDecision, res safety.CommandResult, runErr error) string {
 	const maxReasonLen = 512
 	parts := make([]string, 0, 1)
 	if denial := res.NetworkDenial; denial != nil {
 		detail := fmt.Sprintf("network access to %q was blocked: %s", denial.Host, denial.Reason)
 		parts = append(parts, detail)
 	}
-	if detail := safety.SandboxDenialDetail(res); detail != "" {
+	if detail := safety.SandboxDenialDetail(decision, res); detail != "" {
 		parts = append(parts, detail)
 	}
 	if runErr != nil && len(parts) == 0 {

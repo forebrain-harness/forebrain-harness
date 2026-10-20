@@ -126,4 +126,42 @@ describe('ToolCallCard', () => {
     expect(alt).toContain('shot.webp')
     expect(alt).not.toContain('0×0')
   })
+
+  it('keeps a short summary out of the body: no cmd-full block', () => {
+    const wrapper = mount(ToolCallCard, {
+      props: { open: true, scope: { sessionId: 's1' }, step: stepOf() },
+    })
+    expect(wrapper.find('.cmd-full').exists()).toBe(false)
+  })
+
+  it('moves a long command verbatim into a cmd-full block', () => {
+    const summary = `ran echo ${'x'.repeat(200)}`
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        scope: { sessionId: 's1' },
+        step: stepOf({ toolName: 'shell', summary }),
+      },
+    })
+    const block = wrapper.find('.cmd-full')
+    expect(block.exists()).toBe(true)
+    expect(block.text()).toBe(summary)
+  })
+
+  it('carries the full summary in the header tooltip', () => {
+    const summary = `ran echo ${'x'.repeat(200)}`
+    const wrapper = mount(ToolCallCard, {
+      props: {
+        open: true,
+        scope: { sessionId: 's1' },
+        step: stepOf({ toolName: 'shell', summary }),
+      },
+    })
+    // The one-line header truncates; the native title attribute holds the text
+    // the ellipsis took away.
+    const head = wrapper.find('.truncate')
+    expect(head.exists()).toBe(true)
+    expect(head.attributes('title')).toBe(summary)
+    expect(head.text()).toBe(summary)
+  })
 })
